@@ -86,11 +86,36 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].path).toContain("index.js");
 	});
 
-	it("prefers index.ts over index.js", async () => {
+	it("prefers index.js when its mtime is >= the index.ts sibling", async () => {
+		// New contract (PiTuned): when both index.ts and index.js exist, prefer the
+		// freshest one. This lets `scripts/precompile-pi-packages.mjs` skip jiti
+		// transpilation by emitting .js next to shipped .ts sources. If the .ts
+		// is touched later (live edit), it takes precedence again.
 		const subdir = path.join(extensionsDir, "my-extension");
 		fs.mkdirSync(subdir);
 		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCode);
 		fs.writeFileSync(path.join(subdir, "index.js"), extensionCode);
+		// Ensure JS mtime >= TS mtime (writeFileSync ordering is not enough on
+		// some filesystems with low timestamp resolution).
+		const jsPath = path.join(subdir, "index.js");
+		const future = new Date(Date.now() + 1000);
+		fs.utimesSync(jsPath, future, future);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].path).toContain("index.js");
+	});
+
+	it("prefers index.ts when it is newer than index.js (live edit)", async () => {
+		const subdir = path.join(extensionsDir, "live-edit");
+		fs.mkdirSync(subdir);
+		fs.writeFileSync(path.join(subdir, "index.js"), extensionCode);
+		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCode);
+		const tsPath = path.join(subdir, "index.ts");
+		const future = new Date(Date.now() + 1000);
+		fs.utimesSync(tsPath, future, future);
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 

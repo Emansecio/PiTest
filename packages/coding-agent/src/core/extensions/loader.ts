@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import * as _bundledPiAgentCore from "@earendil-works/pi-agent-core";
 import * as _bundledPiAi from "@earendil-works/pi-ai";
 import * as _bundledPiAiOauth from "@earendil-works/pi-ai/oauth";
@@ -353,14 +353,43 @@ function createExtensionAPI(
 	return api;
 }
 
-async function loadExtensionModule(extensionPath: string) {
-	const jiti = createJiti(import.meta.url, {
-		moduleCache: false,
-		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
-		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
-		// In Node.js/dev: use aliases to resolve to node_modules paths
+let _sharedJiti: ReturnType<typeof createJiti> | null = null;
+function getSharedJiti(): ReturnType<typeof createJiti> {
+	if (_sharedJiti) return _sharedJiti;
+	_sharedJiti = createJiti(import.meta.url, {
+		moduleCache: true,
 		...(isBunBinary ? { virtualModules: VIRTUAL_MODULES, tryNative: false } : { alias: getAliases() }),
 	});
+	return _sharedJiti;
+}
+
+async function loadExtensionModule(extensionPath: string) {
+	// Fast path: plain JS extension with no .ts sibling can be loaded via
+	// Node's native dynamic import, skipping jiti's transpile + resolution
+	// overhead entirely. Pre-compiled package extensions land here.
+	if (!isBunBinary && extensionPath.endsWith(".js") && !fs.existsSync(extensionPath.slice(0, -3) + ".ts")) {
+		try {
+			const moduleUrl = pathToFileURL(extensionPath).href;
+			const module = await import(moduleUrl);
+			const factory = (module?.default ?? module) as ExtensionFactory;
+			if (typeof factory === "function") {
+				return factory;
+			}
+			// Fall through to jiti if native import returned a non-function default
+			// (e.g. CJS interop quirks).
+		} catch {
+			// Native import failed (likely unresolved dependency); fall back to jiti.
+		}
+	}
+
+	// Share one jiti instance across all extension loads in the process.
+	// With moduleCache: true, the heavy core libs (@earendil-works/pi-coding-agent,
+	// pi-ai, pi-tui) are loaded once instead of re-transpiled per extension.
+	// Hot reload (`/reload`) creates fresh extension instances anyway by re-running
+	// the factory through a fresh API binding, so module-level state from the
+	// extension itself is rebuilt; core libs stay cached, which is the desired
+	// behavior.
+	const jiti = getSharedJiti();
 
 	const module = await jiti.import(extensionPath, { default: true });
 	const factory = module as ExtensionFactory;
@@ -399,14 +428,21 @@ async function loadExtension(
 	const resolvedPath = resolvePath(extensionPath, cwd);
 
 	try {
+		const tLoad = Date.now();
 		const factory = await loadExtensionModule(resolvedPath);
+		const loadMs = Date.now() - tLoad;
 		if (!factory) {
 			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
 		}
 
 		const extension = createExtension(extensionPath, resolvedPath);
 		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
+		const tFactory = Date.now();
 		await factory(api);
+		const factoryMs = Date.now() - tFactory;
+		if (process.env.PI_TIMING === "1") {
+			console.error(`  [perf]   ${path.basename(resolvedPath)}: import=${loadMs}ms factory=${factoryMs}ms`);
+		}
 
 		return { extension, error: null };
 	} catch (err) {
@@ -440,20 +476,22 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const runtime = createExtensionRuntime();
 
+	// Sequential load: paralelizing here triggers jiti cache contention
+	// (multiple concurrent imports compete on the same transpile/resolve
+	// pipeline and end up slower than serial). The win comes from sharing
+	// one jiti instance with moduleCache: true across loads (see
+	// getSharedJiti) so heavy core libs (pi-coding-agent, pi-ai, pi-tui)
+	// are transpiled only on the first import.
 	for (const extPath of paths) {
 		const start = Date.now();
 		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
 		const duration = Date.now() - start;
 		console.error(`  [perf] Loaded extension ${extPath} in ${duration}ms`);
-
 		if (error) {
 			errors.push({ path: extPath, error });
 			continue;
 		}
-
-		if (extension) {
-			extensions.push(extension);
-		}
+		if (extension) extensions.push(extension);
 	}
 
 	return {
@@ -515,15 +553,27 @@ function resolveExtensionEntries(dir: string): string[] | null {
 		}
 	}
 
-	// Check for index.ts or index.js
+	// Check for index.js or index.ts.
+	// Prefer .js when its mtime is >= the .ts sibling: this lets users
+	// pre-compile shipped TypeScript packages once (e.g. via
+	// scripts/precompile-pi-packages.mjs) so jiti can skip transpilation
+	// on every startup. If the .ts was edited more recently than the .js,
+	// we fall back to .ts so live edits still take effect.
 	const indexTs = path.join(dir, "index.ts");
 	const indexJs = path.join(dir, "index.js");
-	if (fs.existsSync(indexTs)) {
-		return [indexTs];
+	const tsExists = fs.existsSync(indexTs);
+	const jsExists = fs.existsSync(indexJs);
+	if (tsExists && jsExists) {
+		try {
+			const tsStat = fs.statSync(indexTs);
+			const jsStat = fs.statSync(indexJs);
+			return [jsStat.mtimeMs >= tsStat.mtimeMs ? indexJs : indexTs];
+		} catch {
+			return [indexTs];
+		}
 	}
-	if (fs.existsSync(indexJs)) {
-		return [indexJs];
-	}
+	if (jsExists) return [indexJs];
+	if (tsExists) return [indexTs];
 
 	return null;
 }

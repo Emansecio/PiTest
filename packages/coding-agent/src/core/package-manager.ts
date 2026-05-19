@@ -542,14 +542,25 @@ function resolveExtensionEntries(dir: string): string[] | null {
 		}
 	}
 
+	// Prefer index.js when its mtime is >= the .ts sibling: this lets users
+	// pre-compile shipped TypeScript packages once (see
+	// scripts/precompile-pi-packages.mjs) so jiti can skip transpilation
+	// on every startup. If the .ts was edited more recently, fall back to .ts.
 	const indexTs = join(dir, "index.ts");
 	const indexJs = join(dir, "index.js");
-	if (existsSync(indexTs)) {
-		return [indexTs];
+	const tsExists = existsSync(indexTs);
+	const jsExists = existsSync(indexJs);
+	if (tsExists && jsExists) {
+		try {
+			const tsStat = statSync(indexTs);
+			const jsStat = statSync(indexJs);
+			return [jsStat.mtimeMs >= tsStat.mtimeMs ? indexJs : indexTs];
+		} catch {
+			return [indexTs];
+		}
 	}
-	if (existsSync(indexJs)) {
-		return [indexJs];
-	}
+	if (jsExists) return [indexJs];
+	if (tsExists) return [indexTs];
 
 	return null;
 }
@@ -593,6 +604,31 @@ function collectAutoExtensionEntries(dir: string): string[] {
 			if (ig.ignores(ignorePath)) continue;
 
 			if (isFile && (entry.name.endsWith(".ts") || entry.name.endsWith(".js"))) {
+				// Dedupe TS/JS siblings: when `foo.ts` and `foo.js` both exist,
+				// keep only the freshest one. This prevents loading the same
+				// extension twice after `scripts/precompile-pi-packages.mjs` runs.
+				const base = fullPath.slice(0, -3);
+				const tsPath = `${base}.ts`;
+				const jsPath = `${base}.js`;
+				if (entry.name.endsWith(".ts") && existsSync(jsPath)) {
+					try {
+						const tsStat = statSync(tsPath);
+						const jsStat = statSync(jsPath);
+						if (jsStat.mtimeMs >= tsStat.mtimeMs) {
+							// JS sibling will be picked up in its own iteration.
+							continue;
+						}
+					} catch {}
+				} else if (entry.name.endsWith(".js") && existsSync(tsPath)) {
+					try {
+						const tsStat = statSync(tsPath);
+						const jsStat = statSync(jsPath);
+						if (jsStat.mtimeMs < tsStat.mtimeMs) {
+							// TS sibling is newer; it will win in its iteration.
+							continue;
+						}
+					} catch {}
+				}
 				entries.push(fullPath);
 			} else if (isDir) {
 				const resolvedEntries = resolveExtensionEntries(fullPath);
