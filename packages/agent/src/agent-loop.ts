@@ -310,24 +310,73 @@ async function streamAssistantResponse(
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 
+	// Delta coalescing: accumulate consecutive *_delta events of the same kind
+	// and contentIndex, emitting at most once per 16ms (60fps frame budget).
+	// Listeners that reconstruct text via `deltas.map(e => e.delta).join('')`
+	// still see every character — just batched.
+	type DeltaEvent = Extract<
+		Awaited<ReturnType<typeof response.result>> extends infer _ ? Parameters<typeof emit>[0] : never,
+		{ type: "message_update" }
+	>["assistantMessageEvent"] & { delta: string; contentIndex: number };
+	let pendingDelta: DeltaEvent | undefined;
+	let lastEmitTime = 0;
+	const DELTA_THROTTLE_MS = 16;
+
+	const flushPendingDelta = async () => {
+		if (!pendingDelta || !partialMessage) return;
+		const e = pendingDelta;
+		pendingDelta = undefined;
+		await emit({
+			type: "message_update",
+			assistantMessageEvent: e as any,
+			message: { ...partialMessage },
+		});
+		lastEmitTime = performance.now();
+	};
+
 	for await (const event of response) {
 		switch (event.type) {
 			case "start":
 				partialMessage = event.partial;
 				context.messages.push(partialMessage);
 				addedPartial = true;
+				lastEmitTime = performance.now();
 				await emit({ type: "message_start", message: { ...partialMessage } });
 				break;
 
-			case "text_start":
 			case "text_delta":
+			case "thinking_delta":
+			case "toolcall_delta":
+				if (partialMessage) {
+					partialMessage = event.partial;
+					context.messages[context.messages.length - 1] = partialMessage;
+					// Accumulate into pending delta if same kind+index, else flush and start anew.
+					if (
+						pendingDelta &&
+						pendingDelta.type === event.type &&
+						pendingDelta.contentIndex === event.contentIndex
+					) {
+						pendingDelta = {
+							...event,
+							delta: pendingDelta.delta + event.delta,
+						} as DeltaEvent;
+					} else {
+						await flushPendingDelta();
+						pendingDelta = { ...event } as DeltaEvent;
+					}
+					if (performance.now() - lastEmitTime >= DELTA_THROTTLE_MS) {
+						await flushPendingDelta();
+					}
+				}
+				break;
+
+			case "text_start":
 			case "text_end":
 			case "thinking_start":
-			case "thinking_delta":
 			case "thinking_end":
 			case "toolcall_start":
-			case "toolcall_delta":
 			case "toolcall_end":
+				await flushPendingDelta();
 				if (partialMessage) {
 					partialMessage = event.partial;
 					context.messages[context.messages.length - 1] = partialMessage;
@@ -341,6 +390,7 @@ async function streamAssistantResponse(
 
 			case "done":
 			case "error": {
+				await flushPendingDelta();
 				const finalMessage = await response.result();
 				if (addedPartial) {
 					context.messages[context.messages.length - 1] = finalMessage;
@@ -355,6 +405,7 @@ async function streamAssistantResponse(
 			}
 		}
 	}
+	await flushPendingDelta();
 
 	const finalMessage = await response.result();
 	if (addedPartial) {
@@ -370,6 +421,15 @@ async function streamAssistantResponse(
 /**
  * Execute tool calls from an assistant message.
  */
+function buildToolMap(tools: AgentTool<any>[] | undefined): Map<string, AgentTool<any>> {
+	const map = new Map<string, AgentTool<any>>();
+	if (!tools) return map;
+	for (const tool of tools) {
+		map.set(tool.name, tool);
+	}
+	return map;
+}
+
 async function executeToolCalls(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -378,13 +438,12 @@ async function executeToolCalls(
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
 	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
-	const hasSequentialToolCall = toolCalls.some(
-		(tc) => currentContext.tools?.find((t) => t.name === tc.name)?.executionMode === "sequential",
-	);
+	const toolMap = buildToolMap(currentContext.tools);
+	const hasSequentialToolCall = toolCalls.some((tc) => toolMap.get(tc.name)?.executionMode === "sequential");
 	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
-		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, config, signal, emit);
+		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
 	}
-	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, config, signal, emit);
+	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
 }
 
 type ExecutedToolCallBatch = {
@@ -396,6 +455,7 @@ async function executeToolCallsSequential(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	toolCalls: AgentToolCall[],
+	toolMap: Map<string, AgentTool<any>>,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
@@ -411,7 +471,7 @@ async function executeToolCallsSequential(
 			args: toolCall.arguments,
 		});
 
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
+		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, toolMap, config, signal);
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
 			finalized = {
@@ -452,36 +512,37 @@ async function executeToolCallsParallel(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	toolCalls: AgentToolCall[],
+	toolMap: Map<string, AgentTool<any>>,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
-	const finalizedCalls: FinalizedToolCallEntry[] = [];
+	// Run preparation in parallel: emit start + prepare per tool concurrently.
+	// beforeToolCall hook (potentially IO) no longer serializes the batch.
+	const preparations = await Promise.all(
+		toolCalls.map(async (toolCall) => {
+			await emit({
+				type: "tool_execution_start",
+				toolCallId: toolCall.id,
+				toolName: toolCall.name,
+				args: toolCall.arguments,
+			});
+			const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, toolMap, config, signal);
+			return { toolCall, preparation };
+		}),
+	);
 
-	for (const toolCall of toolCalls) {
-		await emit({
-			type: "tool_execution_start",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			args: toolCall.arguments,
-		});
-
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
-		if (preparation.kind === "immediate") {
-			const finalized = {
-				toolCall,
-				result: preparation.result,
-				isError: preparation.isError,
-			} satisfies FinalizedToolCallOutcome;
-			await emitToolExecutionEnd(finalized, emit);
-			finalizedCalls.push(finalized);
-			if (signal?.aborted) {
-				break;
+	const orderedFinalizedCalls = await Promise.all(
+		preparations.map(async ({ toolCall, preparation }) => {
+			if (preparation.kind === "immediate") {
+				const finalized = {
+					toolCall,
+					result: preparation.result,
+					isError: preparation.isError,
+				} satisfies FinalizedToolCallOutcome;
+				await emitToolExecutionEnd(finalized, emit);
+				return finalized;
 			}
-			continue;
-		}
-
-		finalizedCalls.push(async () => {
 			const executed = await executePreparedToolCall(preparation, signal, emit);
 			const finalized = await finalizeExecutedToolCall(
 				currentContext,
@@ -493,14 +554,7 @@ async function executeToolCallsParallel(
 			);
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
-		});
-		if (signal?.aborted) {
-			break;
-		}
-	}
-
-	const orderedFinalizedCalls = await Promise.all(
-		finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
+		}),
 	);
 	const messages: ToolResultMessage[] = [];
 	for (const finalized of orderedFinalizedCalls) {
@@ -539,8 +593,6 @@ type FinalizedToolCallOutcome = {
 	isError: boolean;
 };
 
-type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
-
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
 }
@@ -563,10 +615,11 @@ async function prepareToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
 	toolCall: AgentToolCall,
+	toolMap: Map<string, AgentTool<any>>,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
-	const tool = currentContext.tools?.find((t) => t.name === toolCall.name);
+	const tool = toolMap.get(toolCall.name);
 	if (!tool) {
 		return {
 			kind: "immediate",

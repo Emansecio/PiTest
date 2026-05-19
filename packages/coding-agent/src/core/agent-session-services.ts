@@ -126,21 +126,29 @@ function applyExtensionFlagValues(
  *
  * Returns services plus diagnostics. It does not create an AgentSession.
  */
+import { time } from "./timings.js";
+
 export async function createAgentSessionServices(
 	options: CreateAgentSessionServicesOptions,
 ): Promise<AgentSessionServices> {
 	const cwd = options.cwd;
 	const agentDir = options.agentDir ?? getAgentDir();
+	time("services-init-start");
 	const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));
+	time("services-init-authStorage");
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	time("services-init-settingsManager");
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+	time("services-init-modelRegistry");
 	const resourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
 		cwd,
 		agentDir,
 		settingsManager,
 	});
+	time("services-init-resourceLoader-create");
 	await resourceLoader.reload();
+	time("services-init-resourceLoader-reload");
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	const extensionsResult = resourceLoader.getExtensions();

@@ -530,6 +530,7 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionManager,
 		sessionStartEvent,
 	}) => {
+		time("createRuntime-start");
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
@@ -550,6 +551,7 @@ export async function main(args: string[], options?: MainOptions) {
 				extensionFactories: options?.extensionFactories,
 			},
 		});
+		time("createRuntime-services");
 		const { settingsManager, modelRegistry, resourceLoader } = services;
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
 			...services.diagnostics,
@@ -563,6 +565,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
 			modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
+		time("createRuntime-resolveModelScope");
 		const {
 			options: sessionOptions,
 			cliThinkingFromModel,
@@ -587,6 +590,7 @@ export async function main(args: string[], options?: MainOptions) {
 			}
 		}
 
+		time("createRuntime-buildSessionOptions");
 		const created = await createAgentSessionFromServices({
 			services,
 			sessionManager,
@@ -598,6 +602,7 @@ export async function main(args: string[], options?: MainOptions) {
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 		});
+		time("createRuntime-createAgentSessionFromServices");
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);

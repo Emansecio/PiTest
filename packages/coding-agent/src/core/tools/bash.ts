@@ -272,8 +272,20 @@ export function createBashToolDefinition(
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
-		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
+		description: `Execute a bash command in the current working directory.
+
+Use bash ONLY for tasks no dedicated tool covers: build/test scripts, install, git operations, network requests, process management, shell pipelines/redirects, or one-off commands.
+
+Do NOT use bash to replace dedicated tools (the dedicated tool is always preferred when both are available):
+- read a file → use \`read\` (not cat/head/tail/sed)
+- search file contents → use \`grep\` (not grep/rg/egrep)
+- locate files by name/glob → use \`find\` (not find/ls -R)
+- list directory entries → use \`ls\` (not bash ls)
+- create/overwrite a file → use \`write\`
+- edit a file → use \`edit\`
+
+Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		promptSnippet: "Execute bash commands (build/test/git/network only; prefer read/grep/find/ls for files)",
 		parameters: bashSchema,
 		async execute(
 			_toolCallId,

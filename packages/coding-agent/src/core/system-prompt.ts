@@ -123,6 +123,30 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		}
 	}
 
+	// Tool selection + batching guidelines.
+	// These steer model away from common failure modes:
+	// 1) reaching for bash when a dedicated tool exists
+	// 2) serializing independent tool calls that could run in parallel
+	const hasMultipleReadOnlyTools = [hasRead, hasGrep, hasFind, hasLs].filter(Boolean).length >= 2;
+	if (hasMultipleReadOnlyTools) {
+		addGuideline(
+			"Tool batching: when you can predict multiple independent tool calls before seeing any result, emit them ALL in the same turn so the runtime runs them in parallel. Examples: reading several files you already know the paths of; greping for multiple distinct patterns; listing several directories. Each turn is a full network round-trip, so 5 reads in 1 turn is ~5x faster than 5 reads in 5 turns.",
+		);
+		addGuideline(
+			"Do not batch when a call's arguments depend on a previous result (e.g., reading a file at a path you just discovered via grep). Sequence those normally.",
+		);
+	}
+	if (hasRead && hasGrep) {
+		addGuideline(
+			"Use grep first to locate code by pattern; use read only to examine specific files you already identified.",
+		);
+	}
+	if (tools.includes("edit") && tools.includes("write")) {
+		addGuideline(
+			"Use edit for surgical changes to an existing file (multiple edits[] entries in one call). Use write only for new files or full rewrites.",
+		);
+	}
+
 	// Always include these
 	addGuideline("Be concise in your responses");
 	addGuideline("Show file paths clearly when working with files");

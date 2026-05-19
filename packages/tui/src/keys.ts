@@ -817,6 +817,18 @@ function parseKeyId(
  * @param data - Raw input data from terminal
  * @param keyId - Key identifier (e.g., "ctrl+c", "escape", Key.ctrl("c"))
  */
+function matchesFunctionalKey(
+	data: string,
+	legacyKey: LegacyModifierKey,
+	codepoint: number,
+	modifier: number,
+): boolean {
+	if (modifier === 0) {
+		return matchesLegacySequence(data, LEGACY_KEY_SEQUENCES[legacyKey]) || matchesKittySequence(data, codepoint, 0);
+	}
+	return matchesLegacyModifierSequence(data, legacyKey, modifier) || matchesKittySequence(data, codepoint, modifier);
+}
+
 export function matchesKey(data: string, keyId: KeyId): boolean {
 	const parsed = parseKeyId(keyId);
 	if (!parsed) return false;
@@ -964,28 +976,10 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
 			);
 
 		case "insert":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.insert) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.insert, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "insert", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.insert, modifier);
+			return matchesFunctionalKey(data, "insert", FUNCTIONAL_CODEPOINTS.insert, modifier);
 
 		case "delete":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.delete) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.delete, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "delete", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.delete, modifier);
+			return matchesFunctionalKey(data, "delete", FUNCTIONAL_CODEPOINTS.delete, modifier);
 
 		case "clear":
 			if (modifier === 0) {
@@ -994,52 +988,16 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
 			return matchesLegacyModifierSequence(data, "clear", modifier);
 
 		case "home":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.home) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.home, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "home", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.home, modifier);
+			return matchesFunctionalKey(data, "home", FUNCTIONAL_CODEPOINTS.home, modifier);
 
 		case "end":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.end) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.end, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "end", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.end, modifier);
+			return matchesFunctionalKey(data, "end", FUNCTIONAL_CODEPOINTS.end, modifier);
 
 		case "pageup":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.pageUp) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.pageUp, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "pageUp", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.pageUp, modifier);
+			return matchesFunctionalKey(data, "pageUp", FUNCTIONAL_CODEPOINTS.pageUp, modifier);
 
 		case "pagedown":
-			if (modifier === 0) {
-				return (
-					matchesLegacySequence(data, LEGACY_KEY_SEQUENCES.pageDown) ||
-					matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.pageDown, 0)
-				);
-			}
-			if (matchesLegacyModifierSequence(data, "pageDown", modifier)) {
-				return true;
-			}
-			return matchesKittySequence(data, FUNCTIONAL_CODEPOINTS.pageDown, modifier);
+			return matchesFunctionalKey(data, "pageDown", FUNCTIONAL_CODEPOINTS.pageDown, modifier);
 
 		case "up":
 			if (modifier === MODIFIERS.alt) {

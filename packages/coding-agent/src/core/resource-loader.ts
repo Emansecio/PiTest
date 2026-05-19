@@ -2,9 +2,10 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import chalk from "chalk";
-import { CONFIG_DIR_NAME } from "../config.ts";
-import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
-import type { ResourceDiagnostic } from "./diagnostics.ts";
+import { CONFIG_DIR_NAME } from "../config.js";
+import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.js";
+import type { ResourceDiagnostic } from "./diagnostics.js";
+import { time } from "./timings.js";
 
 export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 
@@ -320,11 +321,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	async reload(): Promise<void> {
+		time("reload-start");
 		await this.settingsManager.reload();
+		time("reload-settings-reload");
 		const resolvedPaths = await this.packageManager.resolve();
+		time("reload-package-resolve");
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
 		});
+		time("reload-cli-extension-resolve");
 		const metadataByPath = new Map<string, PathMetadata>();
 
 		this.extensionSkillSourceInfos = new Map();
@@ -400,6 +405,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
 		extensionsResult.extensions.push(...inlineExtensions.extensions);
 		extensionsResult.errors.push(...inlineExtensions.errors);
+		time("reload-load-extensions");
 
 		// Detect extension conflicts (tools, commands, flags with same names from different extensions)
 		// Keep all extensions loaded. Conflicts are reported as diagnostics, and precedence is handled by load order.
@@ -422,6 +428,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		this.lastSkillPaths = skillPaths;
 		this.updateSkillsFromPaths(skillPaths, metadataByPath);
+		time("reload-update-skills");
 		for (const p of this.additionalSkillPaths) {
 			if (isLocalPath(p) && !existsSync(p) && !this.skillDiagnostics.some((d) => d.path === p)) {
 				this.skillDiagnostics.push({ type: "error", message: "Skill path does not exist", path: p });
@@ -434,6 +441,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		this.lastPromptPaths = promptPaths;
 		this.updatePromptsFromPaths(promptPaths, metadataByPath);
+		time("reload-update-prompts");
 		for (const p of this.additionalPromptTemplatePaths) {
 			if (isLocalPath(p) && !existsSync(p) && !this.promptDiagnostics.some((d) => d.path === p)) {
 				this.promptDiagnostics.push({ type: "error", message: "Prompt template path does not exist", path: p });
@@ -446,6 +454,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		this.lastThemePaths = themePaths;
 		this.updateThemesFromPaths(themePaths, metadataByPath);
+		time("reload-update-themes");
 		for (const p of this.additionalThemePaths) {
 			if (!existsSync(p) && !this.themeDiagnostics.some((d) => d.path === p)) {
 				this.themeDiagnostics.push({ type: "error", message: "Theme path does not exist", path: p });
@@ -455,6 +464,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const agentsFiles = {
 			agentsFiles: this.noContextFiles ? [] : loadProjectContextFiles({ cwd: this.cwd, agentDir: this.agentDir }),
 		};
+		time("reload-load-context-files");
 		const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
 		this.agentsFiles = resolvedAgentsFiles.agentsFiles;
 

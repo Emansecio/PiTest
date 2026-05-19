@@ -441,7 +441,10 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const runtime = createExtensionRuntime();
 
 	for (const extPath of paths) {
+		const start = Date.now();
 		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
+		const duration = Date.now() - start;
+		console.error(`  [perf] Loaded extension ${extPath} in ${duration}ms`);
 
 		if (error) {
 			errors.push({ path: extPath, error });

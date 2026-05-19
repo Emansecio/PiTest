@@ -550,8 +550,18 @@ export class Agent {
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
-		for (const listener of this.listeners) {
-			await listener(event, signal);
+		// Listeners run in parallel via Promise.all. Subscription order is no longer
+		// observable between listeners, but all settle before the next event.
+		if (this.listeners.size === 1) {
+			for (const listener of this.listeners) {
+				await listener(event, signal);
+			}
+		} else if (this.listeners.size > 1) {
+			const pending: Array<Promise<void> | void> = [];
+			for (const listener of this.listeners) {
+				pending.push(listener(event, signal));
+			}
+			await Promise.all(pending);
 		}
 	}
 }

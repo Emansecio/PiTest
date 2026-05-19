@@ -332,12 +332,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
 			const attributionHeaders = getAttributionHeaders(model, settingsManager);
+			// Default to long cache retention (Anthropic 1h, OpenAI 24h) for local
+			// interactive use: sessions span minutes-to-hours and benefit from
+			// keeping system prompt + tools cached across pauses. Providers that do
+			// not support long retention fall back to short automatically.
+			// Override via PI_CACHE_RETENTION=short or explicit options.cacheRetention.
+			const defaultCacheRetention = process.env.PI_CACHE_RETENTION === "short" ? "short" : "long";
 			return streamSimple(model, context, {
 				...options,
 				apiKey: auth.apiKey,
 				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
+				cacheRetention: options?.cacheRetention ?? defaultCacheRetention,
 				headers:
 					attributionHeaders || auth.headers || options?.headers
 						? { ...attributionHeaders, ...auth.headers, ...options?.headers }
