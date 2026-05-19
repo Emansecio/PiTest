@@ -59,6 +59,27 @@ node scripts/bootstrap.mjs
 After setup, add `<repo>/bin` to your PATH so `pit` is callable from
 anywhere. Or invoke it directly: `./bin/pit ...`.
 
+**Windows (PowerShell, persistent user PATH):**
+```powershell
+$pitPath = "$PWD\bin"
+$current = [Environment]::GetEnvironmentVariable("Path", "User")
+if (-not ($current -split ";" | Where-Object { $_ -eq $pitPath })) {
+    [Environment]::SetEnvironmentVariable("Path", "$current;$pitPath", "User")
+    Write-Host "Added $pitPath. Open a new terminal to use 'pit'."
+}
+```
+
+**macOS / Linux / WSL (zsh/bash):**
+```bash
+echo 'export PATH="'"$PWD"'/bin:$PATH"' >> ~/.zshrc   # or ~/.bashrc
+exec $SHELL
+```
+
+Verify in a fresh terminal:
+```
+pit --help
+```
+
 ### Running
 
 ```bash
