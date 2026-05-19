@@ -9,7 +9,8 @@ export {
 	discoverAndLoadExtensions,
 	loadExtensionFromFactory,
 	loadExtensions,
-} from "./loader.ts";
+	prewarmExtensionLoader,
+} from "./loader.js";
 export type {
 	ExtensionErrorListener,
 	ForkHandler,

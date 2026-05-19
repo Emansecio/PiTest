@@ -423,6 +423,12 @@ export interface MainOptions {
 
 export async function main(args: string[], options?: MainOptions) {
 	resetTimings();
+	// Note: prewarmExtensionLoader exists in core/extensions/loader.ts but is
+	// not called here. Measured cost of the pre-warm equals the cost of the
+	// first extension load (both compete for the same single-threaded jiti
+	// transpile), so awaiting it before extensions provides no net speedup.
+	// Kept exported for callers that overlap heavy non-CPU work with startup
+	// (e.g. embedded SDK use). See scripts/bench-extension-load.mjs.
 	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";

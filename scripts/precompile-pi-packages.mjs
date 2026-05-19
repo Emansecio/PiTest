@@ -24,7 +24,12 @@ const FORCE = process.argv.includes("--force");
 const CLEAN = process.argv.includes("--clean");
 const VERBOSE = process.argv.includes("--verbose");
 
-const NPM_DIR = process.env.PI_NPM_DIR ?? join(homedir(), ".pi", "agent", "npm", "node_modules");
+// Respect PI_CODING_AGENT_DIR (and PI_NPM_DIR override) so this script
+// works regardless of where the user's pi agent dir lives.
+const AGENT_DIR = process.env.PI_CODING_AGENT_DIR
+	? process.env.PI_CODING_AGENT_DIR.replace(/^~(?=$|\/|\\)/, homedir())
+	: join(homedir(), ".pi", "agent");
+const NPM_DIR = process.env.PI_NPM_DIR ?? join(AGENT_DIR, "npm", "node_modules");
 
 if (!existsSync(NPM_DIR)) {
 	console.error(`Pi npm dir not found: ${NPM_DIR}`);

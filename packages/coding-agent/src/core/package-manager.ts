@@ -524,6 +524,31 @@ function readPiManifestFile(packageJsonPath: string): PiManifest | null {
 	}
 }
 
+/**
+ * When a package manifest declares an extension at `foo.ts`, prefer the
+ * compiled `foo.js` sibling if its mtime is >= the .ts source. This lets
+ * scripts/precompile-pi-packages.mjs make every shipped TS extension fast
+ * without each package rewriting its manifest.
+ */
+function preferJsSibling(filePath: string): string {
+	if (!filePath.endsWith(".ts") && !filePath.endsWith(".tsx")) return filePath;
+	const jsPath = filePath.replace(/\.tsx?$/, ".js");
+	if (!existsSync(jsPath)) return filePath;
+	try {
+		const tsStat = statSync(filePath);
+		const jsStat = statSync(jsPath);
+		const pick = jsStat.mtimeMs >= tsStat.mtimeMs ? jsPath : filePath;
+		if (process.env.PI_TIMING === "1") {
+			console.error(
+				`  [perf]   preferJsSibling: ${filePath} ts.mtime=${tsStat.mtimeMs} js.mtime=${jsStat.mtimeMs} -> ${pick.endsWith(".js") ? "js" : "ts"}`,
+			);
+		}
+		return pick;
+	} catch {
+		return filePath;
+	}
+}
+
 function resolveExtensionEntries(dir: string): string[] | null {
 	const packageJsonPath = join(dir, "package.json");
 	if (existsSync(packageJsonPath)) {
@@ -533,7 +558,7 @@ function resolveExtensionEntries(dir: string): string[] | null {
 			for (const extPath of manifest.extensions) {
 				const resolvedExtPath = resolve(dir, extPath);
 				if (existsSync(resolvedExtPath)) {
-					entries.push(resolvedExtPath);
+					entries.push(preferJsSibling(resolvedExtPath));
 				}
 			}
 			if (entries.length > 0) {

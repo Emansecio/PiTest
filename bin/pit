@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# PiTuned launcher (bash / Git Bash / WSL).
+# Runs the local PiTest source via tsx, isolated from the global `pi` install
+# by pointing the agent dir at ~/.pit/agent/.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Isolate PiTuned state (settings, sessions, installed packages) from stock pi.
+# Honor any explicit override the user set before invoking pit.
+: "${PI_CODING_AGENT_DIR:=$HOME/.pit/agent}"
+export PI_CODING_AGENT_DIR
+
+TSX_BIN="$REPO_ROOT/node_modules/.bin/tsx"
+if [[ ! -x "$TSX_BIN" ]]; then
+  echo "pit: tsx not found at $TSX_BIN. Run \`npm install\` in $REPO_ROOT first." >&2
+  exit 1
+fi
+
+CLI="$REPO_ROOT/packages/coding-agent/src/cli.ts"
+exec "$TSX_BIN" "$CLI" "$@"

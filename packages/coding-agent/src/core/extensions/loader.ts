@@ -354,6 +354,7 @@ function createExtensionAPI(
 }
 
 let _sharedJiti: ReturnType<typeof createJiti> | null = null;
+let _prewarmPromise: Promise<unknown> | null = null;
 function getSharedJiti(): ReturnType<typeof createJiti> {
 	if (_sharedJiti) return _sharedJiti;
 	_sharedJiti = createJiti(import.meta.url, {
@@ -363,22 +364,65 @@ function getSharedJiti(): ReturnType<typeof createJiti> {
 	return _sharedJiti;
 }
 
+/**
+ * Eagerly load the heavy core libraries every extension imports
+ * (`@earendil-works/pi-coding-agent`, `pi-ai`, `pi-tui`, `typebox`) so the
+ * first extension load doesn't pay their transpile cost. Safe to call
+ * multiple times — the work happens exactly once.
+ *
+ * Call this early in app startup, in parallel with other setup work. The
+ * extension loader awaits the pre-warm promise before its first jiti.import
+ * so we never start two transpiles for the same module.
+ */
+export function prewarmExtensionLoader(): void {
+	if (_prewarmPromise || isBunBinary) return;
+	const jiti = getSharedJiti();
+	const t0 = Date.now();
+	_prewarmPromise = Promise.allSettled([
+		jiti.import("@earendil-works/pi-coding-agent"),
+		jiti.import("@earendil-works/pi-agent-core"),
+		jiti.import("@earendil-works/pi-ai"),
+		jiti.import("@earendil-works/pi-tui"),
+		jiti.import("typebox"),
+	])
+		.then(() => {
+			if (process.env.PI_TIMING === "1") {
+				console.error(`  [perf] prewarm jiti done in ${Date.now() - t0}ms`);
+			}
+		})
+		.catch(() => undefined);
+}
+
+async function awaitPrewarm(): Promise<void> {
+	if (_prewarmPromise) {
+		try {
+			await _prewarmPromise;
+		} catch {
+			/* pre-warm failures are non-fatal */
+		}
+	}
+}
+
 async function loadExtensionModule(extensionPath: string) {
 	// Fast path: plain JS extension with no .ts sibling can be loaded via
 	// Node's native dynamic import, skipping jiti's transpile + resolution
 	// overhead entirely. Pre-compiled package extensions land here.
-	if (!isBunBinary && extensionPath.endsWith(".js") && !fs.existsSync(extensionPath.slice(0, -3) + ".ts")) {
+	if (!isBunBinary && extensionPath.endsWith(".js")) {
 		try {
 			const moduleUrl = pathToFileURL(extensionPath).href;
 			const module = await import(moduleUrl);
 			const factory = (module?.default ?? module) as ExtensionFactory;
 			if (typeof factory === "function") {
+				if (process.env.PI_TIMING === "1") {
+					console.error(`  [perf]     native import OK: ${extensionPath}`);
+				}
 				return factory;
 			}
-			// Fall through to jiti if native import returned a non-function default
-			// (e.g. CJS interop quirks).
-		} catch {
-			// Native import failed (likely unresolved dependency); fall back to jiti.
+		} catch (e) {
+			if (process.env.PI_TIMING === "1") {
+				const msg = e instanceof Error ? e.message : String(e);
+				console.error(`  [perf]     native import FAIL: ${extensionPath} (${msg.slice(0, 100)})`);
+			}
 		}
 	}
 
@@ -390,6 +434,9 @@ async function loadExtensionModule(extensionPath: string) {
 	// extension itself is rebuilt; core libs stay cached, which is the desired
 	// behavior.
 	const jiti = getSharedJiti();
+	// Await any prewarm in flight so we don't dispatch a duplicate transpile
+	// for the same modules. No-op when prewarm wasn't called.
+	await awaitPrewarm();
 
 	const module = await jiti.import(extensionPath, { default: true });
 	const factory = module as ExtensionFactory;
@@ -486,7 +533,9 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 		const start = Date.now();
 		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
 		const duration = Date.now() - start;
-		console.error(`  [perf] Loaded extension ${extPath} in ${duration}ms`);
+		if (process.env.PI_TIMING === "1") {
+			console.error(`  [perf] Loaded extension ${extPath} in ${duration}ms`);
+		}
 		if (error) {
 			errors.push({ path: extPath, error });
 			continue;
