@@ -1,0 +1,2 @@
+{"type":"config","name":"PiTuned startup + agent-loop optimizations","metricName":"total_extension_load_ms","metricUnit":"ms","bestDirection":"lower"}
+{"run":1,"commit":"5e2b60f","metric":3869,"metrics":{"avg_wall_ms":5687,"extension_count":21},"status":"keep","description":"baseline: pit --help, sum of per-extension load ms, best of 3","timestamp":1779252905000,"segment":0,"confidence":null,"asi":{"hypothesis":"baseline pre-optimization","ext_count":21,"wall_avg_ms":5687}}
