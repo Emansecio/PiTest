@@ -521,19 +521,17 @@ export class Agent {
 				this._state.messages.push(event.message);
 				break;
 
-			case "tool_execution_start": {
-				const pendingToolCalls = new Set(this._state.pendingToolCalls);
-				pendingToolCalls.add(event.toolCallId);
-				this._state.pendingToolCalls = pendingToolCalls;
+			case "tool_execution_start":
+				// Mutate in place: pendingToolCalls is internal mutable state, not
+				// a public immutable snapshot. Re-cloning the Set on every tool
+				// start/end allocated 2N Sets per parallel batch of N tools for
+				// no observable benefit.
+				this._state.pendingToolCalls.add(event.toolCallId);
 				break;
-			}
 
-			case "tool_execution_end": {
-				const pendingToolCalls = new Set(this._state.pendingToolCalls);
-				pendingToolCalls.delete(event.toolCallId);
-				this._state.pendingToolCalls = pendingToolCalls;
+			case "tool_execution_end":
+				this._state.pendingToolCalls.delete(event.toolCallId);
 				break;
-			}
 
 			case "turn_end":
 				if (event.message.role === "assistant" && event.message.errorMessage) {

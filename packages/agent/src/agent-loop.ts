@@ -199,13 +199,14 @@ async function runLoop(
 				return;
 			}
 
-			// Check for tool calls
-			const toolCalls = message.content.filter((c) => c.type === "toolCall");
+			// Check for tool calls (single filter pass; passed into executeToolCalls
+			// to avoid re-filtering the same content array there).
+			const toolCalls = message.content.filter((c): c is AgentToolCall => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
-				const executedToolBatch = await executeToolCalls(currentContext, message, config, signal, emit);
+				const executedToolBatch = await executeToolCalls(currentContext, message, toolCalls, config, signal, emit);
 				toolResults.push(...executedToolBatch.messages);
 				hasMoreToolCalls = !executedToolBatch.terminate;
 
@@ -433,14 +434,18 @@ function buildToolMap(tools: AgentTool<any>[] | undefined): Map<string, AgentToo
 async function executeToolCalls(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
+	toolCalls: AgentToolCall[],
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
-	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
 	const toolMap = buildToolMap(currentContext.tools);
-	const hasSequentialToolCall = toolCalls.some((tc) => toolMap.get(tc.name)?.executionMode === "sequential");
-	if (config.toolExecution === "sequential" || hasSequentialToolCall) {
+	// Short-circuit when execution mode is already forced sequential — avoids
+	// the per-call toolMap.get() probe on every tool in the batch.
+	const forceSequential = config.toolExecution === "sequential";
+	const hasSequentialToolCall =
+		forceSequential || toolCalls.some((tc) => toolMap.get(tc.name)?.executionMode === "sequential");
+	if (hasSequentialToolCall) {
 		return executeToolCallsSequential(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
 	}
 	return executeToolCallsParallel(currentContext, assistantMessage, toolCalls, toolMap, config, signal, emit);
