@@ -516,6 +516,16 @@ export async function loadExtensionFromFactory(
 
 /**
  * Load extensions from paths.
+ *
+ * Sequential: paralelizing triggers jiti cache contention for `.ts`
+ * extensions (multiple concurrent imports compete on the same
+ * transpile/resolve pipeline and end up slower than serial). Native
+ * `.js` import paths look async but the heavy parsing still serializes
+ * on Node's single event-loop thread, so parallel Promise.all didn't
+ * improve wall time in measurements. The win comes from sharing one
+ * jiti instance with `moduleCache: true` (see getSharedJiti) so heavy
+ * core libs are transpiled only on the first import, and from routing
+ * pre-compiled `.js` siblings through native import to skip jiti.
  */
 export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
@@ -523,12 +533,6 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const runtime = createExtensionRuntime();
 
-	// Sequential load: paralelizing here triggers jiti cache contention
-	// (multiple concurrent imports compete on the same transpile/resolve
-	// pipeline and end up slower than serial). The win comes from sharing
-	// one jiti instance with moduleCache: true across loads (see
-	// getSharedJiti) so heavy core libs (pi-coding-agent, pi-ai, pi-tui)
-	// are transpiled only on the first import.
 	for (const extPath of paths) {
 		const start = Date.now();
 		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
@@ -592,9 +596,8 @@ function resolveExtensionEntries(dir: string): string[] | null {
 			const entries: string[] = [];
 			for (const extPath of manifest.extensions) {
 				const resolvedExtPath = path.resolve(dir, extPath);
-				if (fs.existsSync(resolvedExtPath)) {
-					entries.push(resolvedExtPath);
-				}
+				if (!fs.existsSync(resolvedExtPath)) continue;
+				entries.push(preferPrecompiledSibling(resolvedExtPath));
 			}
 			if (entries.length > 0) {
 				return entries;
@@ -625,6 +628,27 @@ function resolveExtensionEntries(dir: string): string[] | null {
 	if (tsExists) return [indexTs];
 
 	return null;
+}
+
+/**
+ * If a `.ts` extension entry has a precompiled `.js` sibling whose mtime is
+ * >= the `.ts` mtime, prefer the `.js`. Lets the precompile script
+ * (scripts/precompile-pi-packages.mjs) bypass jiti for manifest-declared
+ * entries the same way it already does for `index.ts` -> `index.js`.
+ *
+ * Directories and non-.ts files pass through unchanged.
+ */
+function preferPrecompiledSibling(entryPath: string): string {
+	if (!entryPath.endsWith(".ts") || entryPath.endsWith(".d.ts")) return entryPath;
+	const jsPath = entryPath.slice(0, -3) + ".js";
+	if (!fs.existsSync(jsPath)) return entryPath;
+	try {
+		const tsStat = fs.statSync(entryPath);
+		const jsStat = fs.statSync(jsPath);
+		return jsStat.mtimeMs >= tsStat.mtimeMs ? jsPath : entryPath;
+	} catch {
+		return entryPath;
+	}
 }
 
 /**

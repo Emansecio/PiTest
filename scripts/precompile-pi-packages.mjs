@@ -68,28 +68,48 @@ function readPkg(dir) {
 	}
 }
 
-/** Collect all .ts files under a path (relative to package root). */
+const SKIP_DIRS = new Set(["node_modules", "dist", "test", "tests", "__tests__", ".git", "coverage"]);
+
+function walkTsFiles(rootDir, out = []) {
+	if (!existsSync(rootDir)) return out;
+	for (const e of readdirSync(rootDir, { withFileTypes: true })) {
+		const p = join(rootDir, e.name);
+		if (e.isDirectory()) {
+			if (SKIP_DIRS.has(e.name)) continue;
+			walkTsFiles(p, out);
+		} else if (e.isFile() && p.endsWith(".ts") && !p.endsWith(".d.ts") && !p.endsWith(".test.ts")) {
+			out.push(p);
+		}
+	}
+	return out;
+}
+
+/**
+ * Collect all .ts files that may be needed at runtime by the declared
+ * extension entries.
+ *
+ * For directory entries, walk that directory recursively.
+ *
+ * For file entries (e.g. `./index.ts`), walking just that file misses
+ * sibling deps the file imports (e.g. `./extract.ts`), leaving the
+ * precompiled .js with dangling `./extract.js` imports. To handle this we
+ * walk the closest meaningful root: if the entry sits directly under the
+ * package root, walk the whole package; otherwise walk the entry's parent
+ * directory.
+ */
 function collectTsFiles(packageDir, relativePath) {
 	const target = resolve(packageDir, relativePath);
 	if (!existsSync(target)) return [];
 	const stat = statSync(target);
 	if (stat.isFile()) {
-		return target.endsWith(".ts") && !target.endsWith(".d.ts") ? [target] : [];
+		if (!target.endsWith(".ts") || target.endsWith(".d.ts")) return [];
+		const parent = dirname(target);
+		// If entry lives directly in package root, walk the whole package to
+		// catch sibling deps (e.g. ./extract.ts referenced from ./index.ts).
+		const walkRoot = parent === packageDir ? packageDir : parent;
+		return walkTsFiles(walkRoot);
 	}
-	const out = [];
-	const walk = (dir) => {
-		for (const e of readdirSync(dir, { withFileTypes: true })) {
-			const p = join(dir, e.name);
-			if (e.isDirectory()) {
-				if (e.name === "node_modules" || e.name === "dist") continue;
-				walk(p);
-			} else if (e.isFile() && p.endsWith(".ts") && !p.endsWith(".d.ts")) {
-				out.push(p);
-			}
-		}
-	};
-	walk(target);
-	return out;
+	return walkTsFiles(target);
 }
 
 /** Map .ts file path to its .js sibling path. */

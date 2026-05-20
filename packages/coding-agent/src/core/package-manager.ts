@@ -2390,7 +2390,13 @@ export class DefaultPackageManager implements PackageManager {
 			try {
 				const stats = statSync(p);
 				if (stats.isFile()) {
-					files.push(p);
+					// Manifest-declared extension file entries get the same
+					// `.ts` -> `.js` swap that directory entries already get via
+					// collectAutoExtensionEntries -> resolveExtensionEntries.
+					// Without this, packages whose `pi.extensions` declares a
+					// single file (e.g. `./index.ts`) never use the precompiled
+					// sibling, costing ~200-500ms per package via jiti.
+					files.push(resourceType === "extensions" ? preferJsSibling(p) : p);
 				} else if (stats.isDirectory()) {
 					files.push(...collectResourceFiles(p, resourceType));
 				}
