@@ -70,6 +70,20 @@ export interface FuzzyMatchResult {
 	contentForReplacement: string;
 }
 
+/**
+ * Result of an indent-tolerant match. The match is anchored in the ORIGINAL
+ * (un-stripped) content so we never lose indentation on surrounding lines.
+ * `fromIndent`/`toIndent` describe the indentation delta the caller must apply
+ * to the model's newText via `reindentText` to keep indentation consistent
+ * with the surrounding block.
+ */
+export interface IndentMatchResult {
+	index: number;
+	matchLength: number;
+	fromIndent: string;
+	toIndent: string;
+}
+
 export interface Edit {
 	oldText: string;
 	newText: string;
@@ -138,20 +152,239 @@ export function stripBom(content: string): { bom: string; text: string } {
 	return content.startsWith("\uFEFF") ? { bom: "\uFEFF", text: content.slice(1) } : { bom: "", text: content };
 }
 
+// --- Indent-tolerant matching --------------------------------------------------
+//
+// When exact and unicode-fuzzy match both fail, LLM mistakes almost always
+// boil down to indentation drift: the oldText copy-pasted from `read` output
+// (which may have line-number prefixes stripped imperfectly) is correct except
+// for leading whitespace per line. We try to match by stripping leading
+// whitespace from each line and walking the file by line windows. The match
+// is anchored to original-content offsets, so unrelated lines keep their
+// original indentation. The newText is re-indented by the same delta that
+// turned oldText's first non-blank line into the matched first non-blank line.
+
+/** Return leading-whitespace prefix of a line (tabs+spaces only). */
+function leadingWhitespace(line: string): string {
+	const match = /^[\t ]*/.exec(line);
+	return match ? match[0] : "";
+}
+
+/** Index of the first line in lines[] whose trimStart() is non-empty. -1 if none. */
+function firstNonBlankLine(lines: string[]): number {
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].trimStart() !== "") return i;
+	}
+	return -1;
+}
+
+/**
+ * Re-indent every line of `text` by replacing the indentation delta computed
+ * from `fromIndent -> toIndent` on the first non-blank line. Lines that are
+ * fully blank are preserved as-is. Lines that share the `fromIndent` prefix get
+ * the delta applied; lines with shorter indentation are left untouched.
+ */
+export function reindentText(text: string, fromIndent: string, toIndent: string): string {
+	if (fromIndent === toIndent) return text;
+	const lines = text.split("\n");
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (line.trimStart() === "") continue;
+		if (line.startsWith(fromIndent)) {
+			lines[i] = toIndent + line.slice(fromIndent.length);
+			continue;
+		}
+		// fromIndent is empty but line has indent, or vice versa: prepend/strip toIndent.
+		if (fromIndent === "") {
+			lines[i] = toIndent + line;
+		}
+	}
+	return lines.join("\n");
+}
+
+/**
+ * Try to locate `oldText` inside `content` while ignoring leading whitespace
+ * differences per line. Returns null when no unique match exists or when the
+ * texts disagree on anything other than leading whitespace.
+ *
+ * The fromIndent/toIndent pair returned is the FIRST non-blank line in the
+ * matched window where the two indentations actually disagree. That's the
+ * transform the caller applies to the model's newText so it gets re-indented
+ * in line with the surrounding block. If indentation already agrees on every
+ * non-blank line we fall back to ("", "") (no rewrite).
+ *
+ * Complexity is O(L_content * L_oldText) in the worst case but bounded by
+ * the size of the oldText line set.
+ */
+export function indentTolerantFind(content: string, oldText: string): IndentMatchResult | null {
+	const contentLines = content.split("\n");
+	const oldLines = oldText.split("\n");
+
+	const oldAnchor = firstNonBlankLine(oldLines);
+	if (oldAnchor === -1) return null;
+	const oldAnchorTrimmed = oldLines[oldAnchor].trimStart();
+
+	let match: { startLine: number; endLine: number; fromIndent: string; toIndent: string } | null = null;
+
+	for (let start = 0; start + oldLines.length <= contentLines.length; start++) {
+		const anchorLine = contentLines[start + oldAnchor];
+		if (anchorLine.trimStart() !== oldAnchorTrimmed) continue;
+
+		let ok = true;
+		let fromIndent = "";
+		let toIndent = "";
+		let transformFound = false;
+		for (let j = 0; j < oldLines.length; j++) {
+			const candidate = contentLines[start + j];
+			const expected = oldLines[j];
+			if (expected.trimStart() === "") {
+				if (candidate.trimStart() !== "") {
+					ok = false;
+					break;
+				}
+				continue;
+			}
+			if (candidate.trimStart() !== expected.trimStart()) {
+				ok = false;
+				break;
+			}
+			if (!transformFound) {
+				const expectedIndent = leadingWhitespace(expected);
+				const candidateIndent = leadingWhitespace(candidate);
+				if (expectedIndent !== candidateIndent) {
+					fromIndent = expectedIndent;
+					toIndent = candidateIndent;
+					transformFound = true;
+				}
+			}
+		}
+		if (!ok) continue;
+		if (!transformFound) {
+			// Indents agree on every non-blank line. An exact match should already
+			// have handled this case, so skip and let other tiers report.
+			continue;
+		}
+
+		if (match !== null) {
+			// Ambiguous — bail out so the caller falls through to the duplicate error
+			// path with full context, instead of guessing.
+			return null;
+		}
+		match = {
+			startLine: start,
+			endLine: start + oldLines.length - 1,
+			fromIndent,
+			toIndent,
+		};
+	}
+
+	if (!match) return null;
+
+	// Compute byte offsets in original content for the matched line window.
+	let index = 0;
+	for (let i = 0; i < match.startLine; i++) {
+		index += contentLines[i].length + 1; // +1 for the trailing \n
+	}
+	let matchLength = 0;
+	for (let i = match.startLine; i <= match.endLine; i++) {
+		matchLength += contentLines[i].length;
+		if (i < match.endLine) matchLength += 1; // inter-line \n
+	}
+
+	return {
+		index,
+		matchLength,
+		fromIndent: match.fromIndent,
+		toIndent: match.toIndent,
+	};
+}
+
+// --- Near-miss diagnostics ----------------------------------------------------
+//
+// When a match cannot be found, we want the error to point the model at the
+// nearest plausible location so the retry does not blindly resend the same
+// oldText. We score candidate windows by anchor-line match count and report
+// the first divergent line.
+
+const NEAR_MISS_MAX_BODY_CHARS = 200;
+const NEAR_MISS_MAX_CANDIDATE_WINDOWS = 4000;
+
+function truncateForDiagnostic(text: string): string {
+	const single = text.replace(/\n/g, "\\n");
+	if (single.length <= NEAR_MISS_MAX_BODY_CHARS) return single;
+	return `${single.slice(0, NEAR_MISS_MAX_BODY_CHARS)}…`;
+}
+
+/**
+ * Best-effort "did you mean line N?" hint for the not-found error path. Walks
+ * the file looking for the line-window with the highest count of matching
+ * trimmed lines against oldText; if any meaningful overlap exists, reports the
+ * first divergence so the model can fix its oldText surgically.
+ *
+ * Returns null when no candidate has any matching lines.
+ */
+export function buildNearMissHint(content: string, oldText: string): string | null {
+	const contentLines = content.split("\n");
+	const oldLines = oldText.split("\n");
+	if (oldLines.length === 0 || contentLines.length === 0) return null;
+
+	const windowSize = oldLines.length;
+	const maxStart = Math.min(contentLines.length - windowSize + 1, NEAR_MISS_MAX_CANDIDATE_WINDOWS);
+	if (maxStart <= 0) return null;
+
+	let bestStart = -1;
+	let bestScore = 0;
+	for (let start = 0; start < maxStart; start++) {
+		let score = 0;
+		for (let j = 0; j < windowSize; j++) {
+			const expected = oldLines[j].trimStart();
+			// Only count non-blank line agreements so blank-line pile-up doesn't
+			// fabricate near-miss hints out of unrelated files.
+			if (expected !== "" && contentLines[start + j].trimStart() === expected) {
+				score++;
+			}
+		}
+		if (score > bestScore) {
+			bestScore = score;
+			bestStart = start;
+			if (score === windowSize) break; // can't beat a perfect line-trim match
+		}
+	}
+
+	const nonBlankOldLines = oldLines.filter((line) => line.trimStart() !== "").length;
+	// Need at least 2 non-blank lines matching (single-line coincidence is
+	// usually noise) and at least one divergence; otherwise drop the hint.
+	if (bestStart === -1 || bestScore < 2 || bestScore === nonBlankOldLines) return null;
+
+	let divergenceOffset = -1;
+	for (let j = 0; j < windowSize; j++) {
+		if (contentLines[bestStart + j].trimStart() !== oldLines[j].trimStart()) {
+			divergenceOffset = j;
+			break;
+		}
+	}
+	if (divergenceOffset === -1) return null;
+
+	const lineNumber = bestStart + divergenceOffset + 1; // 1-indexed for humans
+	const expected = truncateForDiagnostic(oldLines[divergenceOffset]);
+	const found = truncateForDiagnostic(contentLines[bestStart + divergenceOffset]);
+	return `Closest candidate starts at line ${bestStart + 1} (${bestScore}/${windowSize} lines match). First divergence at line ${lineNumber}:\n  expected: ${expected}\n  found:    ${found}`;
+}
+
 function countOccurrences(content: string, oldText: string): number {
 	const fuzzyContent = normalizeForFuzzyMatch(content);
 	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
 	return fuzzyContent.split(fuzzyOldText).length - 1;
 }
 
-function getNotFoundError(path: string, editIndex: number, totalEdits: number): Error {
+function getNotFoundError(path: string, editIndex: number, totalEdits: number, hint?: string | null): Error {
+	const suffix = hint ? `\n${hint}` : "";
 	if (totalEdits === 1) {
 		return new Error(
-			`Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.`,
+			`Could not find the exact text in ${path}. The old text must match exactly including all whitespace and newlines.${suffix}`,
 		);
 	}
 	return new Error(
-		`Could not find edits[${editIndex}] in ${path}. The oldText must match exactly including all whitespace and newlines.`,
+		`Could not find edits[${editIndex}] in ${path}. The oldText must match exactly including all whitespace and newlines.${suffix}`,
 	);
 }
 
@@ -216,7 +449,20 @@ export function applyEditsToNormalizedContent(
 		const edit = normalizedEdits[i];
 		const matchResult = fuzzyFindText(baseContent, edit.oldText);
 		if (!matchResult.found) {
-			throw getNotFoundError(path, i, normalizedEdits.length);
+			// Tier-3: indent-tolerant. Anchored in baseContent so multi-edit offsets
+			// stay consistent. Re-indent the newText to match the surrounding block.
+			const indentMatch = indentTolerantFind(baseContent, edit.oldText);
+			if (indentMatch) {
+				matchedEdits.push({
+					editIndex: i,
+					matchIndex: indentMatch.index,
+					matchLength: indentMatch.matchLength,
+					newText: reindentText(edit.newText, indentMatch.fromIndent, indentMatch.toIndent),
+				});
+				continue;
+			}
+			const hint = buildNearMissHint(baseContent, edit.oldText);
+			throw getNotFoundError(path, i, normalizedEdits.length, hint);
 		}
 
 		const occurrences = countOccurrences(baseContent, edit.oldText);

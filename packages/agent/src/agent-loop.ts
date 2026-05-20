@@ -597,6 +597,77 @@ function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): b
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
 }
 
+// --- Unknown-tool error formatting --------------------------------------------
+//
+// When the LLM emits a tool name we don't recognize, returning the bare
+// "Tool X not found" string leaves the model with no hint about what to do
+// next, so it typically retries the same wrong name. Including the list of
+// available tools and a Levenshtein-based "did you mean" suggestion gives the
+// model the recovery signal it needs in a single round-trip.
+
+const UNKNOWN_TOOL_MAX_LISTED = 16;
+const UNKNOWN_TOOL_SUGGEST_MAX_DISTANCE = 3;
+// Reject suggestions where the candidate name is wildly shorter than the
+// queried name. "edit_file" should still find "edit", but "x" should not
+// silently suggest "longest_tool_name".
+const UNKNOWN_TOOL_PREFIX_MIN_OVERLAP = 3;
+
+function levenshtein(a: string, b: string): number {
+	if (a === b) return 0;
+	if (a.length === 0) return b.length;
+	if (b.length === 0) return a.length;
+	let prev = new Array<number>(b.length + 1);
+	let curr = new Array<number>(b.length + 1);
+	for (let j = 0; j <= b.length; j++) prev[j] = j;
+	for (let i = 1; i <= a.length; i++) {
+		curr[0] = i;
+		for (let j = 1; j <= b.length; j++) {
+			const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+			curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+		}
+		[prev, curr] = [curr, prev];
+	}
+	return prev[b.length];
+}
+
+function suggestToolName(name: string, available: string[]): string | undefined {
+	const lower = name.toLowerCase();
+	let best: { name: string; score: number } | undefined;
+	for (const candidate of available) {
+		const candidateLower = candidate.toLowerCase();
+		const distance = levenshtein(lower, candidateLower);
+		// Score is the Levenshtein distance, but we also accept candidates that
+		// are a prefix/suffix of the query (or vice versa) with a small overlap,
+		// which catches "edit_file" -> "edit" or "file_read" -> "read".
+		let score = distance;
+		if (distance > UNKNOWN_TOOL_SUGGEST_MAX_DISTANCE) {
+			const longer = lower.length >= candidateLower.length ? lower : candidateLower;
+			const shorter = lower.length >= candidateLower.length ? candidateLower : lower;
+			if (shorter.length < UNKNOWN_TOOL_PREFIX_MIN_OVERLAP) continue;
+			if (!longer.startsWith(shorter) && !longer.endsWith(shorter) && !longer.includes(shorter)) {
+				continue;
+			}
+			// Affix match: cost is the number of extra characters the model added.
+			score = longer.length - shorter.length;
+		}
+		if (!best || score < best.score) {
+			best = { name: candidate, score };
+		}
+	}
+	return best?.name;
+}
+
+export function formatUnknownToolError(name: string, toolMap: Map<string, AgentTool<any>>): string {
+	const available = Array.from(toolMap.keys()).sort();
+	const suggestion = suggestToolName(name, available);
+	const listed = available.slice(0, UNKNOWN_TOOL_MAX_LISTED).join(", ");
+	const more =
+		available.length > UNKNOWN_TOOL_MAX_LISTED ? `, … (${available.length - UNKNOWN_TOOL_MAX_LISTED} more)` : "";
+	const availableSection = available.length > 0 ? `\nAvailable tools: ${listed}${more}.` : "";
+	const suggestionSection = suggestion ? `\nDid you mean "${suggestion}"?` : "";
+	return `Tool "${name}" not found.${availableSection}${suggestionSection}`;
+}
+
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
 	if (!tool.prepareArguments) {
 		return toolCall;
@@ -623,7 +694,7 @@ async function prepareToolCall(
 	if (!tool) {
 		return {
 			kind: "immediate",
-			result: createErrorToolResult(`Tool ${toolCall.name} not found`),
+			result: createErrorToolResult(formatUnknownToolError(toolCall.name, toolMap)),
 			isError: true,
 		};
 	}

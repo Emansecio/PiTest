@@ -3,8 +3,9 @@ import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
-import { renderDiff } from "../../modes/interactive/components/diff.ts";
-import type { ToolDefinition } from "../extensions/types.ts";
+import { renderDiff } from "../../modes/interactive/components/diff.js";
+import type { ToolDefinition } from "../extensions/types.js";
+import { applyKeyAliases, coerceJsonArrayField, PATH_KEY_ALIASES } from "./argument-prep.js";
 import {
 	applyEditsToNormalizedContent,
 	computeEditsDiff,
@@ -92,15 +93,12 @@ function prepareEditArguments(input: unknown): EditToolInput {
 		return input as EditToolInput;
 	}
 
-	const args = input as Record<string, unknown>;
+	// Normalize path aliases (file_path/filepath/filename/file -> path) before any
+	// further shape-fixing. Returns same reference when nothing changed.
+	let args = applyKeyAliases(input as Record<string, unknown>, PATH_KEY_ALIASES);
 
-	// Some models (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array
-	if (typeof args.edits === "string") {
-		try {
-			const parsed = JSON.parse(args.edits);
-			if (Array.isArray(parsed)) args.edits = parsed;
-		} catch {}
-	}
+	// Some models (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array.
+	args = coerceJsonArrayField(args, "edits");
 
 	const legacy = args as LegacyEditToolInput;
 	if (typeof legacy.oldText !== "string" || typeof legacy.newText !== "string") {

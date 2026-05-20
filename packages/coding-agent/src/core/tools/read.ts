@@ -5,23 +5,27 @@ import { Text } from "@earendil-works/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile } from "fs/promises";
 import { type Static, Type } from "typebox";
-import { getReadmePath } from "../../config.ts";
-import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
-import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
-import { formatDimensionNote, resizeImage } from "../../utils/image-resize.ts";
-import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
-import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { resolveReadPath } from "./path-utils.ts";
-import { getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.ts";
-import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
+import { getReadmePath } from "../../config.js";
+import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.js";
+import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.js";
+import { formatDimensionNote, resizeImage } from "../../utils/image-resize.js";
+import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";
+import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.js";
+import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { prepareWithPathAliases } from "./argument-prep.js";
+import { resolveReadPath } from "./path-utils.js";
+import { getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.js";
+import { wrapToolDefinition } from "./tool-definition-wrapper.js";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
-const readSchema = Type.Object({
-	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
-	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
-});
+const readSchema = Type.Object(
+	{
+		path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
+		offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
+		limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+	},
+	{ additionalProperties: false },
+);
 
 export type ReadToolInput = Static<typeof readSchema>;
 
@@ -212,10 +216,17 @@ export function createReadToolDefinition(
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.`,
+		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.
+
+Common mistakes to avoid:
+- Passing a range like "1-50" — use { offset: 1, limit: 50 } instead.
+- Using "file_path" or "filename" — the canonical key is "path".
+- Calling read for a directory — use "ls" instead.
+- Calling read repeatedly with the same offset — increment offset by the previous limit.`,
 		promptSnippet: "Read file contents",
 		promptGuidelines: ["Use read to examine files instead of cat or sed."],
 		parameters: readSchema,
+		prepareArguments: prepareWithPathAliases,
 		async execute(
 			_toolCallId,
 			{ path, offset, limit }: { path: string; offset?: number; limit?: number },

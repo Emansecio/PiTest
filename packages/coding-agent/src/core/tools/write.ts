@@ -3,18 +3,37 @@ import { Container, Text } from "@earendil-works/pi-tui";
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
 import { dirname } from "path";
 import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
-import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { withFileMutationQueue } from "./file-mutation-queue.ts";
-import { resolveToCwd } from "./path-utils.ts";
-import { invalidArgText, normalizeDisplayText, replaceTabs, shortenPath, str } from "./render-utils.ts";
-import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
+import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
+import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { applyKeyAliases, PATH_KEY_ALIASES } from "./argument-prep.js";
+import { withFileMutationQueue } from "./file-mutation-queue.js";
+import { resolveToCwd } from "./path-utils.js";
+import { invalidArgText, normalizeDisplayText, replaceTabs, shortenPath, str } from "./render-utils.js";
+import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
-const writeSchema = Type.Object({
-	path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
-	content: Type.String({ description: "Content to write to the file" }),
-});
+const writeSchema = Type.Object(
+	{
+		path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
+		content: Type.String({ description: "Content to write to the file" }),
+	},
+	{ additionalProperties: false },
+);
+
+// `text`/`body` aliases are common when LLMs confuse write with the create-file
+// shape from other harnesses. They are write-specific, so we keep them out of
+// PATH_KEY_ALIASES and merge them only here.
+const WRITE_KEY_ALIASES = {
+	...PATH_KEY_ALIASES,
+	text: "content",
+	body: "content",
+	data: "content",
+} as const;
+
+function prepareWriteArguments(input: unknown): WriteToolInput {
+	if (!input || typeof input !== "object" || Array.isArray(input)) return input as WriteToolInput;
+	return applyKeyAliases(input as Record<string, unknown>, WRITE_KEY_ALIASES) as WriteToolInput;
+}
 
 export type WriteToolInput = Static<typeof writeSchema>;
 
@@ -187,10 +206,11 @@ export function createWriteToolDefinition(
 		name: "write",
 		label: "write",
 		description:
-			"Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
+			'Write content to a file. Creates the file if it doesn\'t exist, overwrites if it does. Automatically creates parent directories.\n\nCommon mistakes to avoid:\n- Using write to make small edits to an existing file — use "edit" instead (write overwrites the entire file).\n- Passing the content under "text"/"body"/"data" — the canonical key is "content".\n- Passing the path under "file_path"/"filename" — the canonical key is "path".\n- Forgetting trailing newline for files that conventionally end with one.',
 		promptSnippet: "Create or overwrite files",
 		promptGuidelines: ["Use write only for new files or complete rewrites."],
 		parameters: writeSchema,
+		prepareArguments: prepareWriteArguments,
 		async execute(
 			_toolCallId,
 			{ path, content }: { path: string; content: string },

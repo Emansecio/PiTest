@@ -1,0 +1,90 @@
+import { describe, expect, it } from "vitest";
+import {
+	applyKeyAliases,
+	coerceJsonArrayField,
+	composePreparers,
+	PATH_KEY_ALIASES,
+	prepareWithPathAliases,
+} from "../src/core/tools/argument-prep.js";
+
+describe("applyKeyAliases", () => {
+	it("renames aliases to canonical keys", () => {
+		const input = { file_path: "/a/b", offset: 0 };
+		const out = applyKeyAliases(input, PATH_KEY_ALIASES);
+		expect(out).toEqual({ path: "/a/b", offset: 0 });
+		expect(out).not.toBe(input);
+	});
+
+	it("returns same reference when nothing changes", () => {
+		const input = { path: "/a/b", offset: 0 };
+		const out = applyKeyAliases(input, PATH_KEY_ALIASES);
+		expect(out).toBe(input);
+	});
+
+	it("canonical key wins over alias when both are present", () => {
+		const input = { path: "/canon", file_path: "/alias" };
+		const out = applyKeyAliases(input, PATH_KEY_ALIASES);
+		expect(out).toEqual({ path: "/canon" });
+	});
+
+	it("normalizes every supported alias", () => {
+		const aliases = ["file_path", "filepath", "filename", "file"] as const;
+		for (const alias of aliases) {
+			const out = applyKeyAliases({ [alias]: "/x" }, PATH_KEY_ALIASES);
+			expect(out).toEqual({ path: "/x" });
+		}
+	});
+});
+
+describe("coerceJsonArrayField", () => {
+	it("parses JSON-encoded arrays", () => {
+		const input = { edits: JSON.stringify([{ oldText: "a", newText: "b" }]) };
+		const out = coerceJsonArrayField(input, "edits");
+		expect(out.edits).toEqual([{ oldText: "a", newText: "b" }]);
+	});
+
+	it("leaves non-array JSON untouched", () => {
+		const input = { edits: JSON.stringify({ oldText: "a" }) };
+		const out = coerceJsonArrayField(input, "edits");
+		expect(out).toBe(input);
+	});
+
+	it("leaves invalid JSON untouched", () => {
+		const input = { edits: "not json" };
+		const out = coerceJsonArrayField(input, "edits");
+		expect(out).toBe(input);
+	});
+
+	it("ignores non-string values", () => {
+		const input = { edits: [{ oldText: "a", newText: "b" }] };
+		const out = coerceJsonArrayField(input, "edits");
+		expect(out).toBe(input);
+	});
+});
+
+describe("prepareWithPathAliases", () => {
+	it("normalizes a plain object", () => {
+		expect(prepareWithPathAliases({ file_path: "/x" })).toEqual({ path: "/x" });
+	});
+
+	it("passes through non-objects", () => {
+		expect(prepareWithPathAliases(null)).toBeNull();
+		expect(prepareWithPathAliases(undefined)).toBeUndefined();
+		expect(prepareWithPathAliases("str")).toBe("str");
+		expect(prepareWithPathAliases([1, 2])).toEqual([1, 2]);
+	});
+});
+
+describe("composePreparers", () => {
+	it("runs preparers in order", () => {
+		const trace: string[] = [];
+		const step = (label: string) => (input: Record<string, unknown>) => {
+			trace.push(label);
+			return { ...input, [label]: true };
+		};
+		const prep = composePreparers<Record<string, unknown>>(step("a"), step("b"));
+		const out = prep({});
+		expect(trace).toEqual(["a", "b"]);
+		expect(out).toEqual({ a: true, b: true });
+	});
+});

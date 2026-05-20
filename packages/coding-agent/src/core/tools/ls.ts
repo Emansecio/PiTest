@@ -3,17 +3,21 @@ import { Text } from "@earendil-works/pi-tui";
 import { existsSync, readdirSync, statSync } from "fs";
 import nodePath from "path";
 import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { resolveToCwd } from "./path-utils.ts";
-import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
-import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
+import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
+import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { prepareWithPathAliases } from "./argument-prep.js";
+import { resolveToCwd } from "./path-utils.js";
+import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.js";
+import { wrapToolDefinition } from "./tool-definition-wrapper.js";
+import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
-const lsSchema = Type.Object({
-	path: Type.Optional(Type.String({ description: "Directory to list (default: current directory)" })),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of entries to return (default: 500)" })),
-});
+const lsSchema = Type.Object(
+	{
+		path: Type.Optional(Type.String({ description: "Directory to list (default: current directory)" })),
+		limit: Type.Optional(Type.Number({ description: "Maximum number of entries to return (default: 500)" })),
+	},
+	{ additionalProperties: false },
+);
 
 export type LsToolInput = Static<typeof lsSchema>;
 
@@ -107,6 +111,7 @@ export function createLsToolDefinition(
 		description: `List directory contents. Returns entries sorted alphabetically, with '/' suffix for directories. Includes dotfiles. Output is truncated to ${DEFAULT_LIMIT} entries or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first).`,
 		promptSnippet: "List directory contents",
 		parameters: lsSchema,
+		prepareArguments: prepareWithPathAliases,
 		async execute(
 			_toolCallId,
 			{ path, limit }: { path?: string; limit?: number },

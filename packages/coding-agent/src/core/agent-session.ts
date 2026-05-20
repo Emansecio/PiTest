@@ -75,21 +75,22 @@ import {
 	type TurnEndEvent,
 	type TurnStartEvent,
 	wrapRegisteredTools,
-} from "./extensions/index.ts";
-import { emitSessionShutdownEvent } from "./extensions/runner.ts";
-import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
-import type { ModelRegistry } from "./model-registry.ts";
-import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
-import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.ts";
-import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
-import type { SettingsManager } from "./settings-manager.ts";
-import type { SlashCommandInfo } from "./slash-commands.ts";
-import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
-import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
-import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
-import { createAllToolDefinitions } from "./tools/index.ts";
-import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
+} from "./extensions/index.js";
+import { emitSessionShutdownEvent } from "./extensions/runner.js";
+import type { BashExecutionMessage, CustomMessage } from "./messages.js";
+import type { ModelRegistry } from "./model-registry.js";
+import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
+import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
+import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.js";
+import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.js";
+import type { SettingsManager } from "./settings-manager.js";
+import type { SlashCommandInfo } from "./slash-commands.js";
+import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
+import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import { extractErrorMessage, ToolCallStats, type ToolStat } from "./tool-call-stats.js";
+import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
+import { createAllToolDefinitions } from "./tools/index.js";
+import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 
 // ============================================================================
 // Skill Block Parsing
@@ -310,6 +311,9 @@ export class AgentSession {
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
+
+	// Per-session tool-call telemetry. Fed from tool_execution_end events.
+	private readonly _toolCallStats = new ToolCallStats();
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
@@ -653,6 +657,11 @@ export class AgentSession {
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		} else if (event.type === "tool_execution_end") {
+			this._toolCallStats.record(
+				event.toolName,
+				event.isError,
+				event.isError ? extractErrorMessage(event.result?.content) : undefined,
+			);
 			const extensionEvent: ToolExecutionEndEvent = {
 				type: "tool_execution_end",
 				toolCallId: event.toolCallId,
@@ -662,6 +671,14 @@ export class AgentSession {
 			};
 			await this._extensionRunner.emit(extensionEvent);
 		}
+	}
+
+	/**
+	 * Snapshot of per-tool call counts and top error fingerprints for this
+	 * session. Sorted by descending error count, then by call count.
+	 */
+	getToolCallStats(): ToolStat[] {
+		return this._toolCallStats.snapshot();
 	}
 
 	/**

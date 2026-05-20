@@ -5,25 +5,29 @@ import { spawn } from "child_process";
 import { existsSync } from "fs";
 import path from "path";
 import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
-import { ensureTool } from "../../utils/tools-manager.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { resolveToCwd } from "./path-utils.ts";
-import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
-import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
+import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
+import { ensureTool } from "../../utils/tools-manager.js";
+import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { prepareWithPathAliases } from "./argument-prep.js";
+import { resolveToCwd } from "./path-utils.js";
+import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.js";
+import { wrapToolDefinition } from "./tool-definition-wrapper.js";
+import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
 function toPosixPath(value: string): string {
 	return value.split(path.sep).join("/");
 }
 
-const findSchema = Type.Object({
-	pattern: Type.String({
-		description: "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'",
-	}),
-	path: Type.Optional(Type.String({ description: "Directory to search in (default: current directory)" })),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of results (default: 1000)" })),
-});
+const findSchema = Type.Object(
+	{
+		pattern: Type.String({
+			description: "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'",
+		}),
+		path: Type.Optional(Type.String({ description: "Directory to search in (default: current directory)" })),
+		limit: Type.Optional(Type.Number({ description: "Maximum number of results (default: 1000)" })),
+	},
+	{ additionalProperties: false },
+);
 
 export type FindToolInput = Static<typeof findSchema>;
 
@@ -120,6 +124,7 @@ export function createFindToolDefinition(
 		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first).`,
 		promptSnippet: "Find files by glob pattern (respects .gitignore)",
 		parameters: findSchema,
+		prepareArguments: prepareWithPathAliases,
 		async execute(
 			_toolCallId,
 			{ pattern, path: searchDir, limit }: { pattern: string; path?: string; limit?: number },

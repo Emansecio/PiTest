@@ -13,17 +13,48 @@ import {
 	killProcessTree,
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
-} from "../../utils/shell.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import { OutputAccumulator } from "./output-accumulator.ts";
-import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
-import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
+} from "../../utils/shell.js";
+import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { applyKeyAliases } from "./argument-prep.js";
+import { OutputAccumulator } from "./output-accumulator.js";
+import { getTextOutput, invalidArgText, str } from "./render-utils.js";
+import { wrapToolDefinition } from "./tool-definition-wrapper.js";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.js";
 
-const bashSchema = Type.Object({
-	command: Type.String({ description: "Bash command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
-});
+const bashSchema = Type.Object(
+	{
+		command: Type.String({ description: "Bash command to execute" }),
+		timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	},
+	{ additionalProperties: false },
+);
+
+// Aliases for common LLM mistakes. `cmd` and `script` are the two most-seen
+// variants in production traces; `commands` (array form) is normalized by
+// joining with ' && ' so we still hit a single shell invocation.
+const BASH_KEY_ALIASES = {
+	cmd: "command",
+	script: "command",
+	shell: "command",
+	run: "command",
+} as const;
+
+function prepareBashArguments(input: unknown): BashToolInput {
+	if (!input || typeof input !== "object" || Array.isArray(input)) return input as BashToolInput;
+	let args = applyKeyAliases(input as Record<string, unknown>, BASH_KEY_ALIASES);
+	// `commands: ["a", "b"]` -> `command: "a && b"`. Only triggers when canonical
+	// `command` is absent so we never overwrite a string argument.
+	if (Array.isArray((args as Record<string, unknown>).commands) && typeof args.command !== "string") {
+		const commands = (args as Record<string, unknown>).commands as unknown[];
+		if (commands.every((item) => typeof item === "string")) {
+			const next = { ...args } as Record<string, unknown>;
+			next.command = (commands as string[]).join(" && ");
+			delete next.commands;
+			args = next;
+		}
+	}
+	return args as BashToolInput;
+}
 
 export type BashToolInput = Static<typeof bashSchema>;
 
@@ -284,9 +315,17 @@ Do NOT use bash to replace dedicated tools (the dedicated tool is always preferr
 - create/overwrite a file → use \`write\`
 - edit a file → use \`edit\`
 
-Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.
+
+Common mistakes to avoid:
+- Passing the command under "cmd"/"script"/"run" — the canonical key is "command".
+- Passing multiple commands as an array — join with " && " into a single "command" string, or call bash once per logical group.
+- Using bash to read/grep/find files when those dedicated tools are available.
+- Forgetting that each invocation runs in a fresh shell (no carried env, no carried cwd — use "cd /path && command" inline).
+- Embedding multi-line scripts — write to a temp file with "write", then invoke it.`,
 		promptSnippet: "Execute bash commands (build/test/git/network only; prefer read/grep/find/ls for files)",
 		parameters: bashSchema,
+		prepareArguments: prepareBashArguments,
 		async execute(
 			_toolCallId,
 			{ command, timeout }: { command: string; timeout?: number },
