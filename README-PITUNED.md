@@ -135,15 +135,36 @@ Pass `--force` to recompile everything, or `--clean` to remove the generated
   Heavy core libs are transpiled once instead of once-per-extension.
 - Native dynamic `import()` fast-path for `.js` extensions with no `.ts`
   sibling. Bypasses jiti entirely.
-- Pre-compile script emits `.js` next to shipped `.ts` package sources,
-  rewriting `.ts` import specifiers to `.js` and `@mariozechner/pi-*`
-  aliases to `@earendil-works/pi-*`. Loader prefers `.js` when its mtime
-  is ≥ the `.ts` sibling.
+- Pre-compile script walks the **entire** package (not just declared entry
+  points), emits `.js` next to every `.ts` dep, rewrites `.ts` import
+  specifiers to `.js` and `@mariozechner/pi-*` aliases to
+  `@earendil-works/pi-*`. Without the full walk, packages whose
+  `pi.extensions` declares a single file (e.g. `"./index.ts"`) would still
+  fall back to jiti because their sibling deps were never compiled.
+- Manifest-declared `.ts` extension entries get the same `.ts` → `.js`
+  sibling swap as `index.ts` / `index.js` directory entries (when the
+  `.js` mtime is ≥ the `.ts` source). Previously the swap only fired for
+  directory-style manifest entries, costing ~200–500ms per single-file
+  package via jiti.
 
-Measured on a Windows 11 box with 17 installed packages:
-- Total extension load: **~37s → ~6s** (≈6x).
-- Streaming with TUI listener: **~53x**.
-- Multi-listener fanout (5 subscribers): **~5x**.
+Measured on a Windows 11 box with 17 installed packages, 21 extension
+entry points (best of 5 runs, `node scripts/bench-startup.mjs`):
+
+| stage | total extension load | wall (`pit --help`) |
+|---|---|---|
+| upstream pi (pre-PiTuned) | ~37s | ~38s |
+| PiTuned baseline (shared jiti + .js fast path) | 3.87s | 5.69s |
+| + full precompile walk + manifest .ts→.js swap | 2.81s | 4.56s |
+| + agent-loop micro-opts | 2.89s | 4.56s |
+
+Relative gains vs PiTuned baseline: **-25% extension load**, **-20% wall**.
+
+### Agent loop (incremental updates)
+- Streaming with TUI listener: **~53x** (delta coalescing on 16ms budget).
+- Multi-listener fanout (5 subscribers): **~5x** (Promise.all).
+- Tool batches now single-pass filter + tool map; sequential mode
+  short-circuits the per-tool executionMode probe; `pendingToolCalls`
+  Set is mutated in place instead of cloned on every start/end event.
 
 ## Benchmarks
 
