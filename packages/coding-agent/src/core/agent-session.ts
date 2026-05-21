@@ -48,7 +48,9 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import { extractToolFileOp } from "./compaction/utils.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+import { getEngineeringStyleGuidelines } from "./engineering-styles.js";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
@@ -77,6 +79,8 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
+import { FrequentFilesTracker, formatFrequentFilesForPrompt } from "./frequent-files.js";
+import { formatMemoryForPrompt } from "./memory/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
@@ -87,7 +91,8 @@ import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
-import { extractErrorMessage, ToolCallStats, type ToolStat } from "./tool-call-stats.js";
+import { buildDoomLoopReminder, buildToolErrorReflection, decideErrorReflection } from "./tool-call-feedback.js";
+import { extractErrorMessage, fingerprintToolArgs, ToolCallStats, type ToolStat } from "./tool-call-stats.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
@@ -315,6 +320,19 @@ export class AgentSession {
 	// Per-session tool-call telemetry. Fed from tool_execution_end events.
 	private readonly _toolCallStats = new ToolCallStats();
 
+	// Per-session frequent-files tracker. Recorded on successful file-tool calls
+	// and surfaced in the system prompt when settings.frequentFiles.enabled.
+	private _frequentFiles: FrequentFilesTracker = new FrequentFilesTracker();
+
+	// Args captured at tool_execution_start so the tool_execution_end handler can
+	// reference them (the end event only carries result/isError). Bounded by the
+	// number of in-flight tool calls and aggressively pruned on completion.
+	private readonly _toolCallArgsByCallId = new Map<string, unknown>();
+
+	// Throttle for doom-loop reminders; in epoch ms. Resets to 0 on every agent_end
+	// so a long-lived session can still surface reminders later.
+	private _lastDoomLoopReminderAt = 0;
+
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
@@ -333,6 +351,12 @@ export class AgentSession {
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+
+		// Size the frequent-files tracker from settings so an opt-in user with a
+		// very large session does not silently lose hot files to the default cap.
+		this._frequentFiles = new FrequentFilesTracker({
+			maxFiles: this.settingsManager.getFrequentFilesSettings().maxFiles,
+		});
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -600,6 +624,8 @@ export class AgentSession {
 			this._turnIndex = 0;
 			await this._extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
+			// Drop any in-flight tool-call args (they would leak otherwise on aborted turns).
+			this._toolCallArgsByCallId.clear();
 			await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
 		} else if (event.type === "turn_start") {
 			const extensionEvent: TurnStartEvent = {
@@ -640,6 +666,9 @@ export class AgentSession {
 				this._replaceMessageInPlace(event.message, replacement);
 			}
 		} else if (event.type === "tool_execution_start") {
+			this._toolCallStats.recordInvocation(event.toolName, fingerprintToolArgs(event.args));
+			this._toolCallArgsByCallId.set(event.toolCallId, event.args);
+			this._maybeInjectDoomLoopReminder(event.toolName, event.args);
 			const extensionEvent: ToolExecutionStartEvent = {
 				type: "tool_execution_start",
 				toolCallId: event.toolCallId,
@@ -662,6 +691,16 @@ export class AgentSession {
 				event.isError,
 				event.isError ? extractErrorMessage(event.result?.content) : undefined,
 			);
+			const args = this._toolCallArgsByCallId.get(event.toolCallId);
+			this._toolCallArgsByCallId.delete(event.toolCallId);
+			if (event.isError) {
+				this._maybeInjectToolErrorReflection(event.toolName, args, event.result);
+			} else {
+				const fileOp = extractToolFileOp(event.toolName, args);
+				if (fileOp) {
+					this._frequentFiles.record(fileOp.path, fileOp.op);
+				}
+			}
 			const extensionEvent: ToolExecutionEndEvent = {
 				type: "tool_execution_end",
 				toolCallId: event.toolCallId,
@@ -679,6 +718,108 @@ export class AgentSession {
 	 */
 	getToolCallStats(): ToolStat[] {
 		return this._toolCallStats.snapshot();
+	}
+
+	/**
+	 * Number of consecutive identical (toolName,argsFingerprint) calls at the tail
+	 * of the recent-invocation window. Useful for diagnostics overlays and for
+	 * deciding when to inject a doom-loop reminder.
+	 */
+	getConsecutiveSimilarToolCalls(): number {
+		return this._toolCallStats.getConsecutiveSimilarCount();
+	}
+
+	/** True when the recent-invocation tail has hit the doom-loop threshold. */
+	isInToolCallDoomLoop(threshold?: number): boolean {
+		return this._toolCallStats.isInDoomLoop(threshold);
+	}
+
+	/**
+	 * Snapshot of the hottest files touched in this session, sorted by
+	 * descending hits. Respects the configured `topN`/`minHits` floors when no
+	 * options are passed.
+	 */
+	getFrequentFiles(options?: { topN?: number; minHits?: number }) {
+		const cfg = this.settingsManager.getFrequentFilesSettings();
+		return this._frequentFiles.getTop({
+			topN: options?.topN ?? cfg.topN,
+			minHits: options?.minHits ?? cfg.minHits,
+		});
+	}
+
+	/**
+	 * Conditionally inject a doom-loop reminder when consecutive identical tool
+	 * calls reach the configured threshold. Settings-gated (off by default) and
+	 * cooldown-throttled. After firing, the sequence window is reset so the next
+	 * identical call starts a fresh streak.
+	 */
+	private _maybeInjectDoomLoopReminder(toolName: string, args: unknown): void {
+		const cfg = this.settingsManager.getToolFeedbackSettings().doomLoopReminder;
+		if (!cfg.enabled) return;
+		const consecutiveCount = this._toolCallStats.getConsecutiveSimilarCount();
+
+		// Escalation tiers: 3x → reminder, 5x → pause, 8x → abort
+		const TIER1_THRESHOLD = cfg.threshold ?? 3;
+		const TIER2_THRESHOLD = 5;
+		const TIER3_THRESHOLD = 8;
+
+		if (consecutiveCount < TIER1_THRESHOLD) return;
+
+		// Tier 3: abort the turn
+		if (consecutiveCount >= TIER3_THRESHOLD) {
+			this._toolCallStats.resetSequence();
+			const error = new Error(
+				`Doom loop abort: ${consecutiveCount} consecutive identical calls to "${toolName}". ` +
+					`The model cannot make progress on this task. Aborting turn.`,
+			);
+			(error as any).isDoomLoopAbort = true;
+			throw error;
+		}
+
+		// Tier 2: pause and ask user (if UI available)
+		if (consecutiveCount >= TIER2_THRESHOLD) {
+			const content = buildDoomLoopReminder({ toolName, args, consecutiveCount });
+			const pauseContent =
+				content +
+				"\n\n**The harness has paused execution.** The model has made " +
+				`${consecutiveCount} identical calls without progress. Please provide guidance or type "continue" to resume.`;
+			this._toolCallStats.resetSequence();
+			this.sendCustomMessage(
+				{ customType: "pi.doom-loop-pause", content: pauseContent, display: true },
+				{ deliverAs: "followUp" },
+			).catch(() => {});
+			return;
+		}
+
+		// Tier 1: soft reminder (original behavior)
+		const now = Date.now();
+		if (now - this._lastDoomLoopReminderAt < (cfg.cooldownMs ?? 10000)) return;
+		this._lastDoomLoopReminderAt = now;
+		this._toolCallStats.resetSequence();
+		const content = buildDoomLoopReminder({ toolName, args, consecutiveCount });
+		this.sendCustomMessage(
+			{ customType: "pi.doom-loop-reminder", content, display: false },
+			{ deliverAs: "followUp" },
+		).catch(() => {});
+	}
+
+	/**
+	 * Conditionally inject a structured reflection prompt after a failing tool
+	 * call. Settings-gated (off by default). Uses the args captured at
+	 * tool_execution_start so the prompt names the exact failing invocation.
+	 */
+	private _maybeInjectToolErrorReflection(toolName: string, args: unknown, result: unknown): void {
+		const cfg = this.settingsManager.getToolFeedbackSettings().errorReflection;
+		if (!decideErrorReflection({ enabled: cfg.enabled, isError: true })) return;
+		const resultContent = (result as { content?: Array<{ type: string; text?: string }> } | undefined)?.content;
+		const errorMessage = extractErrorMessage(resultContent);
+		const content = buildToolErrorReflection({ toolName, args, errorMessage });
+		this.sendCustomMessage(
+			{ customType: "pi.tool-error-reflection", content, display: false },
+			{ deliverAs: "followUp" },
+		).catch(() => {
+			// Failure to inject a reflection must not break tool execution.
+		});
 	}
 
 	/**
@@ -907,10 +1048,32 @@ export class AgentSession {
 			}
 		}
 
+		// Append engineering-style guideline pack (opt-in via settings). Pushed
+		// before downstream caller-supplied guidelines so they remain authoritative
+		// on conflict; buildSystemPrompt deduplicates verbatim repeats.
+		promptGuidelines.push(...getEngineeringStyleGuidelines(this.settingsManager.getEngineeringStyle()));
+
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const memoryFiles = this._resourceLoader.getMemoryFiles();
+		const appendSections = [...loaderAppendSystemPrompt];
+		if (memoryFiles.length > 0) {
+			const memoryBlock = formatMemoryForPrompt(memoryFiles).trim();
+			if (memoryBlock.length > 0) {
+				appendSections.push(memoryBlock);
+			}
+		}
+		// Frequent-files section is opt-in and only rendered when there are
+		// entries clearing the configured min-hits floor. Surfaces hot files so
+		// the agent prefers reading known-relevant paths before broad search.
+		const ffCfg = this.settingsManager.getFrequentFilesSettings();
+		if (ffCfg.enabled) {
+			const top = this._frequentFiles.getTop({ topN: ffCfg.topN, minHits: ffCfg.minHits });
+			if (top.length > 0) {
+				appendSections.push(formatFrequentFilesForPrompt(top));
+			}
+		}
+		const appendSystemPrompt = appendSections.length > 0 ? appendSections.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
@@ -1168,7 +1331,7 @@ export class AgentSession {
 		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
 
-		const skill = this.resourceLoader.getSkills().skills.find((s) => s.name === skillName);
+		const skill = this.resourceLoader.getSkillByName(skillName);
 		if (!skill) return text; // Unknown skill, pass through
 
 		try {
@@ -1641,6 +1804,7 @@ export class AgentSession {
 			const settings = this.settingsManager.getCompactionSettings();
 
 			const preparation = prepareCompaction(pathEntries, settings);
+			if (preparation) preparation.cwd = this._cwd;
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -1905,6 +2069,7 @@ export class AgentSession {
 			const pathEntries = this.sessionManager.getBranch();
 
 			const preparation = prepareCompaction(pathEntries, settings);
+			if (preparation) preparation.cwd = this._cwd;
 			if (!preparation) {
 				this._emit({
 					type: "compaction_end",
@@ -2773,10 +2938,20 @@ export class AgentSession {
 					throw new Error(result.error);
 				}
 				summaryText = result.summary;
-				summaryDetails = {
+				const branchDetails: {
+					readFiles: string[];
+					modifiedFiles: string[];
+					searches?: string[];
+					shellCmds?: string[];
+					mcpCalls?: string[];
+				} = {
 					readFiles: result.readFiles || [],
 					modifiedFiles: result.modifiedFiles || [],
 				};
+				if (result.searches && result.searches.length > 0) branchDetails.searches = result.searches;
+				if (result.shellCmds && result.shellCmds.length > 0) branchDetails.shellCmds = result.shellCmds;
+				if (result.mcpCalls && result.mcpCalls.length > 0) branchDetails.mcpCalls = result.mcpCalls;
+				summaryDetails = branchDetails;
 			} else if (extensionSummary) {
 				summaryText = extensionSummary.summary;
 				summaryDetails = extensionSummary.details;
@@ -2892,10 +3067,9 @@ export class AgentSession {
 	 */
 	getSessionStats(): SessionStats {
 		const state = this.state;
-		const userMessages = state.messages.filter((m) => m.role === "user").length;
-		const assistantMessages = state.messages.filter((m) => m.role === "assistant").length;
-		const toolResults = state.messages.filter((m) => m.role === "toolResult").length;
-
+		let userMessages = 0;
+		let assistantMessages = 0;
+		let toolResults = 0;
 		let toolCalls = 0;
 		let totalInput = 0;
 		let totalOutput = 0;
@@ -2904,14 +3078,26 @@ export class AgentSession {
 		let totalCost = 0;
 
 		for (const message of state.messages) {
-			if (message.role === "assistant") {
-				const assistantMsg = message as AssistantMessage;
-				toolCalls += assistantMsg.content.filter((c) => c.type === "toolCall").length;
-				totalInput += assistantMsg.usage.input;
-				totalOutput += assistantMsg.usage.output;
-				totalCacheRead += assistantMsg.usage.cacheRead;
-				totalCacheWrite += assistantMsg.usage.cacheWrite;
-				totalCost += assistantMsg.usage.cost.total;
+			switch (message.role) {
+				case "user":
+					userMessages++;
+					break;
+				case "assistant": {
+					assistantMessages++;
+					const assistantMsg = message as AssistantMessage;
+					for (const c of assistantMsg.content) {
+						if (c.type === "toolCall") toolCalls++;
+					}
+					totalInput += assistantMsg.usage.input;
+					totalOutput += assistantMsg.usage.output;
+					totalCacheRead += assistantMsg.usage.cacheRead;
+					totalCacheWrite += assistantMsg.usage.cacheWrite;
+					totalCost += assistantMsg.usage.cost.total;
+					break;
+				}
+				case "toolResult":
+					toolResults++;
+					break;
 			}
 		}
 

@@ -174,9 +174,11 @@ function createMinimalResourceLoader(systemPrompt: string): ResourceLoader {
 	return {
 		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 		getSkills: () => ({ skills: [], diagnostics: [] }),
+		getSkillByName: () => undefined,
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
+		getMemoryFiles: () => [],
 		getSystemPrompt: () => systemPrompt,
 		getAppendSystemPrompt: () => [],
 		extendResources: () => {},

@@ -228,6 +228,54 @@ Object form filters which resources to load:
 
 See [packages.md](packages.md) for package management details.
 
+### Permissions
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `permissions.mode` | string | `"default"` | `"default"`, `"auto"`, or `"plan"`. Override per-run with `--permission-mode`. |
+| `permissions.allowPaths` | array | `[]` | Paths always allowed (each entry: `{ glob, tools?, reason? }`). |
+| `permissions.denyPaths` | array | `[]` | Paths always blocked. Built-in defaults (`.env`, `~/.ssh/**`, …) are appended unless disabled. |
+| `permissions.askPaths` | array | `[]` | Paths that prompt for confirmation in `default` mode. |
+| `permissions.denyCommands` | array | `[]` | Bash command regex denylist (each entry: `{ pattern, flags?, reason? }`). |
+| `permissions.askCommands` | array | `[]` | Bash command regex asklist. |
+| `permissions.allowTools` | string[] | `[]` | Tool names that bypass checks. |
+| `permissions.denyTools` | string[] | `[]` | Tool names that are always blocked. |
+| `permissions.disableBuiltinDefaults` | boolean | `false` | Skip the built-in sensitive-paths and dangerous-commands lists. |
+
+See [permissions.md](permissions.md) for the full rule format and precedence.
+
+### Hooks
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `hooks.PreToolUse` | array | `[]` | Hooks fired before each tool call. May block or rewrite args. |
+| `hooks.PostToolUse` | array | `[]` | Hooks fired after each tool call. May transform output. |
+| `hooks.UserPromptSubmit` | array | `[]` | Hooks fired when the user submits a prompt. May block or add context. |
+| `hooks.Stop` | array | `[]` | Hooks fired when the agent finishes a turn. |
+
+Each entry: `{ command, matcher?, shell?, timeoutMs?, cwd?, name? }`. See [hooks.md](hooks.md) for the JSON stdin/stdout contract.
+
+### MCP servers
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `mcp.servers.<name>.url` | string | required | JSON-RPC 2.0 HTTP endpoint. |
+| `mcp.servers.<name>.headers` | object | – | Static request headers. |
+| `mcp.servers.<name>.timeoutMs` | number | `30000` | Per-request timeout. |
+| `mcp.servers.<name>.disabled` | boolean | `false` | Skip without removing. |
+| `mcp.servers.<name>.allowTools` / `denyTools` | string[] | – | Per-server tool filter. |
+| `mcp.servers.<name>.toolPrefix` | string | `"<name>__"` | Prefix used when registering tools with Pi. |
+
+See [mcp.md](mcp.md) for protocol details and reconnect behavior.
+
+### Memory
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `memory.disableInjection` | boolean | `false` | Don't inject `MEMORY.md` into the system prompt. The `memory_append` tool still works. |
+
+See [memory.md](memory.md) for the file format and discovery order.
+
 ## Example
 
 ```json

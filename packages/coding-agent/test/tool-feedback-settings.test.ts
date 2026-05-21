@@ -1,0 +1,72 @@
+import { describe, expect, it } from "vitest";
+import { SettingsManager } from "../src/core/settings-manager.js";
+
+describe("SettingsManager.getToolFeedbackSettings", () => {
+	it("returns enabled defaults when no toolFeedback key is set", () => {
+		const sm = SettingsManager.inMemory();
+		const cfg = sm.getToolFeedbackSettings();
+		// Default ON: errorReflection cuts blind retries, doomLoopReminder caps
+		// wasted tokens in identical-call loops. Opt out per-feature via settings.
+		expect(cfg.errorReflection.enabled).toBe(true);
+		expect(cfg.doomLoopReminder.enabled).toBe(true);
+		expect(cfg.doomLoopReminder.threshold).toBe(4);
+		expect(cfg.doomLoopReminder.cooldownMs).toBe(30000);
+	});
+
+	it("honors explicit opt-out for both features", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: {
+				errorReflection: { enabled: false },
+				doomLoopReminder: { enabled: false },
+			},
+		});
+		const cfg = sm.getToolFeedbackSettings();
+		expect(cfg.errorReflection.enabled).toBe(false);
+		expect(cfg.doomLoopReminder.enabled).toBe(false);
+	});
+
+	it("respects opt-in error reflection", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: { errorReflection: { enabled: true } },
+		});
+		expect(sm.getToolFeedbackSettings().errorReflection.enabled).toBe(true);
+	});
+
+	it("respects opt-in doom-loop reminder with custom threshold and cooldown", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: { doomLoopReminder: { enabled: true, threshold: 6, cooldownMs: 5000 } },
+		});
+		const cfg = sm.getToolFeedbackSettings();
+		expect(cfg.doomLoopReminder.enabled).toBe(true);
+		expect(cfg.doomLoopReminder.threshold).toBe(6);
+		expect(cfg.doomLoopReminder.cooldownMs).toBe(5000);
+	});
+
+	it("clamps invalid threshold to default", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: { doomLoopReminder: { enabled: true, threshold: 0 } },
+		});
+		expect(sm.getToolFeedbackSettings().doomLoopReminder.threshold).toBe(4);
+	});
+
+	it("clamps invalid cooldown to default", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: { doomLoopReminder: { enabled: true, cooldownMs: -100 } },
+		});
+		expect(sm.getToolFeedbackSettings().doomLoopReminder.cooldownMs).toBe(30000);
+	});
+
+	it("floors fractional threshold", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: { doomLoopReminder: { enabled: true, threshold: 5.9 } },
+		});
+		expect(sm.getToolFeedbackSettings().doomLoopReminder.threshold).toBe(5);
+	});
+
+	it("treats undefined enabled as default (enabled)", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: { errorReflection: { enabled: undefined as unknown as boolean } },
+		});
+		expect(sm.getToolFeedbackSettings().errorReflection.enabled).toBe(true);
+	});
+});

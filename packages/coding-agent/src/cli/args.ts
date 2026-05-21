@@ -43,6 +43,9 @@ export interface Args {
 	listModels?: string | true;
 	offline?: boolean;
 	verbose?: boolean;
+	permissionMode?: "default" | "auto" | "plan";
+	dryRun?: boolean;
+	dryRunFormat?: "text" | "json";
 	messages: string[];
 	fileArgs: string[];
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
@@ -162,6 +165,25 @@ export function parseArgs(args: string[]): Args {
 			result.verbose = true;
 		} else if (arg === "--offline") {
 			result.offline = true;
+		} else if (arg === "--permission-mode" && i + 1 < args.length) {
+			const mode = args[++i];
+			if (mode === "default" || mode === "auto" || mode === "plan") {
+				result.permissionMode = mode;
+			} else {
+				result.diagnostics.push({
+					type: "warning",
+					message: `Invalid permission mode "${mode}". Valid values: default, auto, plan.`,
+				});
+			}
+		} else if (arg === "--dry-run") {
+			result.dryRun = true;
+			const next = args[i + 1];
+			if (next === "json" || next === "text") {
+				result.dryRunFormat = next;
+				i++;
+			} else {
+				result.dryRunFormat = "text";
+			}
 		} else if (arg.startsWith("@")) {
 			result.fileArgs.push(arg.slice(1)); // Remove @ prefix
 		} else if (arg.startsWith("--")) {
@@ -247,6 +269,8 @@ ${chalk.bold("Options:")}
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --offline                      Disable startup network operations (same as PI_OFFLINE=1)
+  --permission-mode <mode>       Permission mode: default | auto | plan (default = interactive prompts)
+  --dry-run [text|json]          Inspect resolved config/auth/tools/MCP and exit without running the agent
   --help, -h                     Show this help
   --version, -v                  Show version number
 

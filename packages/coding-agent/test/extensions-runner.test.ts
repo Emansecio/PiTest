@@ -802,4 +802,253 @@ describe("ExtensionRunner", () => {
 			expect(runner.hasHandlers("agent_end")).toBe(false);
 		});
 	});
+
+	describe("before_agent_start timeout", () => {
+		it("skips handler that exceeds timeout and emits error", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_agent_start", async () => {
+						// Hangs longer than the 5s timeout
+						await new Promise((r) => setTimeout(r, 15_000));
+						return { systemPrompt: "should not apply" };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "slow-start.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ error: string }> = [];
+			runner.onError((err) => errors.push(err));
+			runner.bindCore(extensionActions, extensionContextActions);
+
+			const t0 = performance.now();
+			const out = await runner.emitBeforeAgentStart("hello", undefined, "base", { cwd: tempDir });
+			const elapsed = performance.now() - t0;
+
+			// Should resolve around the 5s timeout, not 15s
+			expect(elapsed).toBeLessThan(8_000);
+			expect(elapsed).toBeGreaterThanOrEqual(4_000);
+			// Timed-out handler's systemPrompt not applied
+			expect(out?.systemPrompt).toBeUndefined();
+			// Error reported
+			expect(errors.length).toBe(1);
+			expect(errors[0].error).toContain("timed out");
+		}, 15_000);
+
+		it("allows fast handlers through without delay", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_agent_start", async (_event, ctx) => {
+						return { systemPrompt: ctx.getSystemPrompt() + "\\nfast" };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "fast-start.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+
+			const t0 = performance.now();
+			const out = await runner.emitBeforeAgentStart("hello", undefined, "base", { cwd: tempDir });
+			const elapsed = performance.now() - t0;
+
+			expect(elapsed).toBeLessThan(1_000);
+			expect(out?.systemPrompt).toBe("base\nfast");
+		});
+	});
+
+	describe("emitBeforeProviderRequest snapshot", () => {
+		it("restores payload when mutating handler throws after prior mutation", async () => {
+			const code = `
+				export default function(pi) {
+					pi.on("before_provider_request", async (event) => {
+						return { ...event.payload, first: true };
+					});
+					pi.on("before_provider_request", async (event) => {
+						// Mutate in-place then throw
+						event.payload.corrupted = true;
+						throw new Error("boom");
+					});
+					pi.on("before_provider_request", async (event) => {
+						return { ...event.payload, third: true };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "bpr-snapshot.ts"), code);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: string[] = [];
+			runner.onError((err) => errors.push(err.error));
+
+			const out = (await runner.emitBeforeProviderRequest({})) as Record<string, unknown>;
+
+			// First handler applied
+			expect(out.first).toBe(true);
+			// Third handler ran on restored snapshot (not corrupted state)
+			expect(out.third).toBe(true);
+			// In-place corruption from second handler was rolled back
+			expect(out.corrupted).toBeUndefined();
+			// Error from second handler was reported
+			expect(errors.length).toBe(1);
+			expect(errors[0]).toContain("boom");
+		});
+	});
+
+	describe("emitBeforeProviderRequest split", () => {
+		it("runs side-effect handlers in parallel and mutating serial", async () => {
+			// Two side-effect handlers each sleep 50ms — if serial total ~100ms,
+			// parallel total ~50ms. One mutating handler appends to payload.
+			const code = `
+				export default function(pi) {
+					pi.on("before_provider_request", pi.markSideEffect(async () => {
+						await new Promise((r) => setTimeout(r, 50));
+					}));
+					pi.on("before_provider_request", pi.markSideEffect(async () => {
+						await new Promise((r) => setTimeout(r, 50));
+					}));
+					pi.on("before_provider_request", async (event) => {
+						return { ...event.payload, mutated: true };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "bpr-split.ts"), code);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const t0 = performance.now();
+			const out = (await runner.emitBeforeProviderRequest({ original: true })) as Record<string, unknown>;
+			const elapsed = performance.now() - t0;
+
+			expect(out.original).toBe(true);
+			expect(out.mutated).toBe(true);
+			// Parallel side-effects + serial mutating: well under 200ms (serial
+			// would be ~100ms side-effect alone + mutating).
+			expect(elapsed).toBeLessThan(150);
+			expect(elapsed).toBeGreaterThanOrEqual(40);
+		});
+
+		it("PI_SIDE_EFFECT_EXTENSIONS env-tags untagged handlers", async () => {
+			// Handler does NOT call pi.markSideEffect — env list promotes it.
+			const code = `
+				export default function(pi) {
+					pi.on("before_provider_request", async () => {
+						await new Promise((r) => setTimeout(r, 50));
+					});
+					pi.on("before_provider_request", async () => {
+						await new Promise((r) => setTimeout(r, 50));
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "env-marked.ts"), code);
+
+			// Cache busts internally — but our module-level matcher cache
+			// memoizes once per process. To exercise the path inside this test
+			// we set the env var and re-import is impossible mid-suite, so we
+			// rely on PI_SIDE_EFFECT_EXTENSIONS being unset for other tests and
+			// the matcher being computed lazily on first matching load.
+			const original = process.env.PI_SIDE_EFFECT_EXTENSIONS;
+			process.env.PI_SIDE_EFFECT_EXTENSIONS = "env-marked";
+
+			try {
+				const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+				const ext = result.extensions[0];
+				expect(ext).toBeDefined();
+				const handlers = ext!.handlers.get("before_provider_request") ?? [];
+				expect(handlers).toHaveLength(2);
+				for (const h of handlers) {
+					expect((h as { __piSideEffect?: boolean }).__piSideEffect).toBe(true);
+				}
+			} finally {
+				if (original === undefined) {
+					delete process.env.PI_SIDE_EFFECT_EXTENSIONS;
+				} else {
+					process.env.PI_SIDE_EFFECT_EXTENSIONS = original;
+				}
+			}
+		});
+
+		it("emit() runs side-effect events in parallel", async () => {
+			// Three extensions each register a turn_start handler sleeping 60ms.
+			// Serial would be ~180ms; parallel ~60ms.
+			const code = (ms: number) => `
+				export default function(pi) {
+					pi.on("turn_start", async () => {
+						await new Promise((r) => setTimeout(r, ${ms}));
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "turn-a.ts"), code(60));
+			fs.writeFileSync(path.join(extensionsDir, "turn-b.ts"), code(60));
+			fs.writeFileSync(path.join(extensionsDir, "turn-c.ts"), code(60));
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const t0 = performance.now();
+			await runner.emit({ type: "turn_start", turnIndex: 0, timestamp: Date.now() });
+			const elapsed = performance.now() - t0;
+
+			expect(elapsed).toBeLessThan(150);
+			expect(elapsed).toBeGreaterThanOrEqual(50);
+		});
+
+		it("emit() session_before_* stays serial and short-circuits on cancel", async () => {
+			let secondCalled = false;
+			const codeA = `
+				export default function(pi) {
+					pi.on("session_before_switch", async () => {
+						return { cancel: true };
+					});
+				}
+			`;
+			const codeB = `
+				globalThis.__secondCalled = false;
+				export default function(pi) {
+					pi.on("session_before_switch", async () => {
+						globalThis.__secondCalled = true;
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "a-cancel.ts"), codeA);
+			fs.writeFileSync(path.join(extensionsDir, "b-after.ts"), codeB);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const out = await runner.emit({
+				type: "session_before_switch",
+				currentSessionPath: "/cur",
+				targetSessionPath: "/next",
+				reason: "switch",
+			} as never);
+
+			expect((out as { cancel?: boolean })?.cancel).toBe(true);
+			secondCalled = (globalThis as { __secondCalled?: boolean }).__secondCalled === true;
+			expect(secondCalled).toBe(false);
+		});
+
+		it("preserves mutating order when all handlers are untagged (default)", async () => {
+			const code = `
+				export default function(pi) {
+					pi.on("before_provider_request", async (event) => {
+						return { ...event.payload, order: [...(event.payload.order ?? []), "a"] };
+					});
+					pi.on("before_provider_request", async (event) => {
+						return { ...event.payload, order: [...(event.payload.order ?? []), "b"] };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "bpr-order.ts"), code);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const out = (await runner.emitBeforeProviderRequest({})) as { order: string[] };
+			expect(out.order).toEqual(["a", "b"]);
+		});
+	});
 });

@@ -22,6 +22,18 @@
 - Never hardcode key checks with, eg. `matchesKey(keyData, "ctrl+x")`. All keybindings must be configurable. Add default to matching object (`DEFAULT_EDITOR_KEYBINDINGS` or `DEFAULT_APP_KEYBINDINGS`)
 - NEVER modify `packages/ai/src/models.generated.ts` directly. Update `packages/ai/scripts/generate-models.ts` instead.
 
+## Browser & Web Automation
+
+- **Always prefer `chrome_*` tools (from `pi-chrome`)** over `playwright`, `chrome-devtools-mcp`, or generic `agent_browser` whenever the task involves browsing, scraping, screenshotting, filling forms, or driving a web UI.
+- Rationale: `chrome_*` uses the user's real, signed-in Chrome profile via the companion browser extension. Sessions, cookies, MFA, SSO, org filters — all already there. Faster, more reliable, and no separate login dance.
+- Decision order for any browser task:
+  1. `chrome_*` (preferred — try first)
+  2. `agent_browser` / `playwright` / `chrome-devtools-mcp` (fallback when Chrome bridge is unavailable, when you need an isolated profile, or when the user explicitly asks)
+- If a `chrome_*` call returns "Chrome control locked", ask the user to run `/chrome authorize` (or `/chrome authorize indefinite` for the session) and retry.
+- If the companion extension is missing, ask the user to run `/chrome onboard` once, then `/chrome doctor` to verify, then `/chrome authorize`.
+- Common tools: `chrome_tab`, `chrome_snapshot`, `chrome_navigate`, `chrome_click`, `chrome_type`, `chrome_fill`, `chrome_evaluate`, `chrome_screenshot`, `chrome_list_network_requests`, `chrome_get_network_request`, `chrome_wait_for`, `chrome_upload_file`.
+- Use `background=true` on individual calls (or `/chrome background on` for the session) when you don't need Chrome to steal focus.
+
 ## Commands
 
 - After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.

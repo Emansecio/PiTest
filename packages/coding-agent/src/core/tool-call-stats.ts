@@ -9,10 +9,27 @@
 
 const DEFAULT_MAX_ERROR_FINGERPRINTS_PER_TOOL = 20;
 const DEFAULT_ERROR_FINGERPRINT_LENGTH = 120;
+const DEFAULT_SEQUENCE_WINDOW = 16;
+const DEFAULT_ARGS_FINGERPRINT_LENGTH = 200;
+const DEFAULT_DOOM_LOOP_THRESHOLD = 4;
+
+const RE_WHITESPACE = /\s+/g;
+const RE_DIGITS = /\d+/g;
 
 export interface ToolCallStatsOptions {
 	maxErrorFingerprintsPerTool?: number;
 	errorFingerprintLength?: number;
+	/** How many recent calls to retain for doom-loop detection. */
+	sequenceWindow?: number;
+	/** Max characters of args fingerprint after JSON stable-serialize. */
+	argsFingerprintLength?: number;
+	/** Consecutive identical (toolName,argsFingerprint) calls that count as a loop. */
+	doomLoopThreshold?: number;
+}
+
+export interface ToolCallSequenceEntry {
+	toolName: string;
+	argsFingerprint: string;
 }
 
 export interface ToolErrorFingerprint {
@@ -39,10 +56,25 @@ export class ToolCallStats {
 	private readonly buckets = new Map<string, ToolBucket>();
 	private readonly maxFingerprints: number;
 	private readonly fingerprintLength: number;
+	private readonly sequenceWindow: number;
+	private readonly argsFingerprintLength: number;
+	private readonly doomLoopThreshold: number;
+	private readonly ringBuffer: (ToolCallSequenceEntry | undefined)[];
+	private ringHead = 0;
+	private ringSize = 0;
 
 	constructor(options?: ToolCallStatsOptions) {
 		this.maxFingerprints = options?.maxErrorFingerprintsPerTool ?? DEFAULT_MAX_ERROR_FINGERPRINTS_PER_TOOL;
 		this.fingerprintLength = options?.errorFingerprintLength ?? DEFAULT_ERROR_FINGERPRINT_LENGTH;
+		this.sequenceWindow = options?.sequenceWindow ?? DEFAULT_SEQUENCE_WINDOW;
+		this.argsFingerprintLength = options?.argsFingerprintLength ?? DEFAULT_ARGS_FINGERPRINT_LENGTH;
+		this.doomLoopThreshold = options?.doomLoopThreshold ?? DEFAULT_DOOM_LOOP_THRESHOLD;
+		this.ringBuffer = new Array(this.sequenceWindow);
+	}
+
+	/** Threshold at which `isInDoomLoop()` returns true. Exposed for callers building reminders. */
+	get loopThreshold(): number {
+		return this.doomLoopThreshold;
 	}
 
 	/**
@@ -95,6 +127,65 @@ export class ToolCallStats {
 	/** Reset all counters. Used by tests and on session reset flows. */
 	reset(): void {
 		this.buckets.clear();
+		this.ringBuffer.fill(undefined);
+		this.ringHead = 0;
+		this.ringSize = 0;
+	}
+
+	/**
+	 * Record a tool invocation in the sequence window. Independent of `record()` so
+	 * callers can capture invocations even when outcomes are not yet known (e.g. on
+	 * `tool_execution_start`). Args fingerprint should be produced via {@link fingerprintToolArgs}.
+	 */
+	recordInvocation(toolName: string, argsFingerprint: string): void {
+		this.ringBuffer[this.ringHead] = { toolName, argsFingerprint };
+		this.ringHead = (this.ringHead + 1) % this.sequenceWindow;
+		if (this.ringSize < this.sequenceWindow) this.ringSize++;
+	}
+
+	/**
+	 * Count of trailing entries in the sequence window with the same (toolName,argsFingerprint)
+	 * as the most recent invocation. Returns 0 when the window is empty.
+	 */
+	getConsecutiveSimilarCount(): number {
+		if (this.ringSize === 0) return 0;
+		const lastIdx = (this.ringHead - 1 + this.sequenceWindow) % this.sequenceWindow;
+		const last = this.ringBuffer[lastIdx]!;
+		let count = 0;
+		for (let i = 0; i < this.ringSize; i++) {
+			const idx = (this.ringHead - 1 - i + this.sequenceWindow * 2) % this.sequenceWindow;
+			const entry = this.ringBuffer[idx]!;
+			if (entry.toolName !== last.toolName || entry.argsFingerprint !== last.argsFingerprint) break;
+			count++;
+		}
+		return count;
+	}
+
+	/** True when consecutive identical invocations reach the configured threshold. */
+	isInDoomLoop(threshold?: number): boolean {
+		const limit = threshold ?? this.doomLoopThreshold;
+		return this.getConsecutiveSimilarCount() >= limit;
+	}
+
+	/** Read-only view of the sequence window. Mainly for diagnostics and tests. */
+	getSequence(): readonly ToolCallSequenceEntry[] {
+		const result: ToolCallSequenceEntry[] = [];
+		for (let i = 0; i < this.ringSize; i++) {
+			const idx = (this.ringHead - this.ringSize + i + this.sequenceWindow * 2) % this.sequenceWindow;
+			result.push(this.ringBuffer[idx]!);
+		}
+		return result;
+	}
+
+	/**
+	 * Clear only the sequence window (preserve call counts and error fingerprints).
+	 * Use after firing a doom-loop reminder so the next identical call starts a
+	 * fresh streak instead of re-triggering immediately.
+	 */
+	resetSequence(): void {
+		this.ringBuffer.fill(undefined);
+		this.ringHead = 0;
+		this.ringSize = 0;
 	}
 
 	private getOrCreateBucket(toolName: string): ToolBucket {
@@ -114,11 +205,54 @@ export class ToolCallStats {
 		if (!message) return undefined;
 		// Collapse whitespace, strip path/line numerics, cap length so distinct
 		// runs of the same error fold into one bucket.
-		const collapsed = message.replace(/\s+/g, " ").replace(/\d+/g, "N").trim();
+		RE_WHITESPACE.lastIndex = 0;
+		RE_DIGITS.lastIndex = 0;
+		const collapsed = message.replace(RE_WHITESPACE, " ").replace(RE_DIGITS, "N").trim();
 		if (collapsed.length === 0) return undefined;
 		if (collapsed.length <= this.fingerprintLength) return collapsed;
 		return `${collapsed.slice(0, this.fingerprintLength)}\u2026`;
 	}
+}
+
+/**
+ * Stable, length-capped fingerprint for tool arguments. Sorts object keys so
+ * semantically identical calls collapse to the same bucket regardless of input
+ * key order. Falls back to `String(args)` when JSON serialization throws
+ * (cyclic, BigInt, etc.).
+ */
+export function fingerprintToolArgs(args: unknown, maxChars = 200): string {
+	let serialized: string;
+	try {
+		serialized = stableStringify(args);
+	} catch {
+		serialized = String(args);
+	}
+	if (serialized.length <= maxChars) return serialized;
+	return `${serialized.slice(0, maxChars)}…`;
+}
+
+const STRING_VALUE_CAP = 100;
+
+function stableStringify(value: unknown): string {
+	const seen = new WeakSet<object>();
+	const visit = (input: unknown): unknown => {
+		if (input === null || typeof input !== "object") {
+			if (typeof input === "string" && input.length > STRING_VALUE_CAP) {
+				return `${input.slice(0, STRING_VALUE_CAP)}…`;
+			}
+			return input;
+		}
+		if (seen.has(input as object)) return "[Circular]";
+		seen.add(input as object);
+		if (Array.isArray(input)) return input.map(visit);
+		const obj = input as Record<string, unknown>;
+		const out: Record<string, unknown> = {};
+		for (const key of Object.keys(obj).sort()) {
+			out[key] = visit(obj[key]);
+		}
+		return out;
+	};
+	return JSON.stringify(visit(value));
 }
 
 /**

@@ -11,6 +11,7 @@ import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
+import { buildDryRunReport, formatReportJson, formatReportText } from "./cli/dry-run/index.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
@@ -29,7 +30,7 @@ import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
-import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
+import { flushRawStdout, restoreStdout, takeOverStdout, writeRawStdout } from "./core/output-guard.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
 	formatMissingSessionCwdPrompt,
@@ -457,6 +458,11 @@ export async function main(args: string[], options?: MainOptions) {
 			process.exit(1);
 		}
 	}
+	// Built-in extensions read PI_DRY_RUN to skip any network side-effects
+	// (currently: MCP connect). Set it before services/extensions are built.
+	if (parsed.dryRun) {
+		process.env.PI_DRY_RUN = "1";
+	}
 	time("parseArgs");
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY);
 	const shouldTakeOverStdout = appMode !== "interactive";
@@ -542,6 +548,7 @@ export async function main(args: string[], options?: MainOptions) {
 			agentDir,
 			authStorage,
 			extensionFlagValues: parsed.unknownFlags,
+			permissionModeOverride: parsed.permissionMode,
 			resourceLoaderOptions: {
 				additionalExtensionPaths: resolvedExtensionPaths,
 				additionalSkillPaths: resolvedSkillPaths,
@@ -641,6 +648,24 @@ export async function main(args: string[], options?: MainOptions) {
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
 		await listModels(modelRegistry, searchPattern);
 		process.exit(0);
+	}
+
+	if (parsed.dryRun) {
+		const activeToolNames = session.getActiveToolNames();
+		const report = buildDryRunReport({
+			services,
+			resolvedModel: session.model,
+			resolvedToolNames: activeToolNames,
+		});
+		const out = parsed.dryRunFormat === "json" ? formatReportJson(report) : formatReportText(report);
+		// Use writeRawStdout so the takeover (which redirects stdout to stderr
+		// in non-interactive mode) doesn't redirect the dry-run payload —
+		// callers parsing stdout JSON depend on this.
+		writeRawStdout(`${out}\n`);
+		await flushRawStdout();
+		await runtime.dispose();
+		restoreStdout();
+		process.exit(report.overallStatus === "blocked" ? 1 : 0);
 	}
 
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC

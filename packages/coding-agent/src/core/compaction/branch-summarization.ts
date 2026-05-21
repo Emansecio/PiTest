@@ -17,7 +17,7 @@ import {
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import { estimateTokens } from "./compaction.ts";
 import {
-	computeFileLists,
+	computeOperationLists,
 	createFileOps,
 	extractFileOpsFromMessage,
 	type FileOperations,
@@ -34,14 +34,20 @@ export interface BranchSummaryResult {
 	summary?: string;
 	readFiles?: string[];
 	modifiedFiles?: string[];
+	searches?: string[];
+	shellCmds?: string[];
+	mcpCalls?: string[];
 	aborted?: boolean;
 	error?: string;
 }
 
-/** Details stored in BranchSummaryEntry.details for file tracking */
+/** Details stored in BranchSummaryEntry.details for the structured summary frame. */
 export interface BranchSummaryDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	searches?: string[];
+	shellCmds?: string[];
+	mcpCalls?: string[];
 }
 
 export type { FileOperations } from "./utils.ts";
@@ -77,6 +83,8 @@ export interface GenerateBranchSummaryOptions {
 	replaceInstructions?: boolean;
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
+	/** Working directory — used to strip path prefixes in summaries, saving tokens. */
+	cwd?: string;
 }
 
 // ============================================================================
@@ -201,6 +209,15 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 				for (const f of details.modifiedFiles) {
 					fileOps.edited.add(f);
 				}
+			}
+			if (Array.isArray(details.searches)) {
+				for (const s of details.searches) fileOps.searches.add(s);
+			}
+			if (Array.isArray(details.shellCmds)) {
+				for (const c of details.shellCmds) fileOps.shellCmds.add(c);
+			}
+			if (Array.isArray(details.mcpCalls)) {
+				for (const c of details.mcpCalls) fileOps.mcpCalls.add(c);
 			}
 		}
 	}
@@ -343,13 +360,17 @@ export async function generateBranchSummary(
 	// Prepend preamble to provide context about the branch summary
 	summary = BRANCH_SUMMARY_PREAMBLE + summary;
 
-	// Compute file lists and append to summary
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary += formatFileOperations(readFiles, modifiedFiles);
+	// Compute structured operation lists and append to summary (paths stripped of cwd)
+	const lists = computeOperationLists(fileOps, options.cwd);
+	summary += formatFileOperations(lists);
 
-	return {
+	const result: BranchSummaryResult = {
 		summary: summary || "No summary generated",
-		readFiles,
-		modifiedFiles,
+		readFiles: lists.readFiles,
+		modifiedFiles: lists.modifiedFiles,
 	};
+	if (lists.searches.length > 0) result.searches = lists.searches;
+	if (lists.shellCmds.length > 0) result.shellCmds = lists.shellCmds;
+	if (lists.mcpCalls.length > 0) result.mcpCalls = lists.mcpCalls;
+	return result;
 }

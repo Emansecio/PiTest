@@ -27,6 +27,10 @@ export {
 } from "./agent-session-services.ts";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 export type { CompactionResult } from "./compaction/index.ts";
+export {
+	type EngineeringStyle,
+	getEngineeringStyleGuidelines,
+} from "./engineering-styles.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
 // Extensions system
 export {
@@ -74,4 +78,31 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
+export {
+	type FrequentFileStat,
+	FrequentFilesTracker,
+	type FrequentFilesTrackerOptions,
+	formatFrequentFilesForPrompt,
+	type GetTopOptions,
+} from "./frequent-files.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";
+export {
+	buildDoomLoopReminder,
+	buildToolErrorReflection,
+	type DoomLoopDecisionInput,
+	type DoomLoopDecisionOutput,
+	type DoomLoopReminderInput,
+	decideDoomLoopReminder,
+	decideErrorReflection,
+	type ErrorReflectionDecisionInput,
+	type ToolErrorReflectionInput,
+} from "./tool-call-feedback.ts";
+export {
+	extractErrorMessage,
+	fingerprintToolArgs,
+	type ToolCallSequenceEntry,
+	ToolCallStats,
+	type ToolCallStatsOptions,
+	type ToolErrorFingerprint,
+	type ToolStat,
+} from "./tool-call-stats.ts";

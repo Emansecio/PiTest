@@ -220,9 +220,11 @@ export function createReadToolDefinition(
 
 Common mistakes to avoid:
 - Passing a range like "1-50" — use { offset: 1, limit: 50 } instead.
+- Using "start_line"/"end_line" — the canonical fields are "offset" (1-indexed start line) and "limit" (line count).
 - Using "file_path" or "filename" — the canonical key is "path".
 - Calling read for a directory — use "ls" instead.
-- Calling read repeatedly with the same offset — increment offset by the previous limit.`,
+- Calling read repeatedly with the same offset — increment offset by the previous limit.
+- Re-reading a file you have already read in this session unless it was modified — the previous result is still in context.`,
 		promptSnippet: "Read file contents",
 		promptGuidelines: ["Use read to examine files instead of cat or sed."],
 		parameters: readSchema,

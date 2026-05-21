@@ -4,6 +4,10 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import type { EngineeringStyle } from "./engineering-styles.ts";
+import type { HooksSettings } from "./hooks/types.ts";
+import type { McpSettings } from "./mcp/types.ts";
+import type { PermissionSettings } from "./permissions/types.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -52,8 +56,46 @@ export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
 }
 
+export interface ErrorReflectionSettings {
+	enabled?: boolean; // default: false (opt-in)
+}
+
+export interface DoomLoopReminderSettings {
+	enabled?: boolean; // default: false (opt-in)
+	threshold?: number; // default: 4 consecutive identical tool calls trigger a reminder
+	cooldownMs?: number; // default: 30000 — minimum gap between reminders to prevent spam
+}
+
+export interface ToolFeedbackSettings {
+	errorReflection?: ErrorReflectionSettings;
+	doomLoopReminder?: DoomLoopReminderSettings;
+}
+
+export interface FrequentFilesSettings {
+	enabled?: boolean; // default: false (opt-in)
+	topN?: number; // default: 10 (entries surfaced in the prompt)
+	minHits?: number; // default: 2 (filter out one-touch noise)
+	maxFiles?: number; // default: 256 (in-memory tracker cap)
+}
+
+export interface ResolvedFrequentFilesSettings {
+	enabled: boolean;
+	topN: number;
+	minHits: number;
+	maxFiles: number;
+}
+
+export interface ResolvedToolFeedbackSettings {
+	errorReflection: { enabled: boolean };
+	doomLoopReminder: { enabled: boolean; threshold: number; cooldownMs: number };
+}
+
 export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
+	/** Show "new pi version available" banner at startup. Default: true. */
+	newVersion?: boolean;
+	/** Show "package updates available" banner at startup. Default: true. */
+	packageUpdates?: boolean;
 }
 
 export type TransportSetting = Transport;
@@ -110,6 +152,24 @@ export interface Settings {
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
+	permissions?: PermissionSettings;
+	hooks?: HooksSettings;
+	mcp?: McpSettings;
+	memory?: MemorySettings;
+	toolFeedback?: ToolFeedbackSettings;
+	/**
+	 * Engineering style pack appended to the system prompt's `Guidelines:`
+	 * section. "default" is a no-op; "karpathy" applies the Karpathy LLM-coding
+	 * guideline bullets (assumptions, simplicity, surgical edits, goal-driven
+	 * execution). Default: "default".
+	 */
+	engineeringStyle?: EngineeringStyle;
+	frequentFiles?: FrequentFilesSettings;
+}
+
+export interface MemorySettings {
+	/** Disable injecting MEMORY.md into the system prompt (the memory_append tool still works). */
+	disableInjection?: boolean;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -701,6 +761,68 @@ export class SettingsManager {
 		};
 	}
 
+	/**
+	 * Resolve frequent-files settings with sensible defaults. Disabled by default;
+	 * opt-in via settings.json.
+	 */
+	getFrequentFilesSettings(): ResolvedFrequentFilesSettings {
+		const ff = this.settings.frequentFiles;
+		const positive = (raw: unknown, fallback: number): number => {
+			if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return fallback;
+			return Math.floor(raw);
+		};
+		const nonNegative = (raw: unknown, fallback: number): number => {
+			if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return fallback;
+			return Math.floor(raw);
+		};
+		return {
+			// Default ON: anchors the model to recently-touched files, cutting redundant
+			// searches/reads. Section is only emitted when there are entries clearing
+			// `minHits`, so the prompt cost stays zero in fresh sessions. Opt out by
+			// setting `frequentFiles.enabled: false` in settings.json.
+			enabled: ff?.enabled !== false,
+			topN: positive(ff?.topN, 10),
+			minHits: nonNegative(ff?.minHits, 2),
+			maxFiles: positive(ff?.maxFiles, 256),
+		};
+	}
+
+	/**
+	 * Resolve the configured engineering style pack. Unknown values fall back to
+	 * "default" so user typos never silently disable known styles.
+	 */
+	getEngineeringStyle(): EngineeringStyle {
+		const raw = this.settings.engineeringStyle;
+		if (raw === "default") return "default";
+		return "karpathy";
+	}
+
+	/**
+	 * Resolve tool-feedback settings. Default ON for both features:
+	 * - errorReflection: injects a hidden reflection prompt after a tool error so
+	 *   the model articulates root cause before retrying. Cuts blind retries =
+	 *   direct token savings. Opt out with `toolFeedback.errorReflection.enabled: false`.
+	 * - doomLoopReminder: injects a reminder (and at higher tiers pauses/aborts)
+	 *   when consecutive identical tool calls reach the threshold. Bounded by
+	 *   `cooldownMs` so it never spams. Opt out with
+	 *   `toolFeedback.doomLoopReminder.enabled: false`.
+	 */
+	getToolFeedbackSettings(): ResolvedToolFeedbackSettings {
+		const tf = this.settings.toolFeedback;
+		const rawThreshold = tf?.doomLoopReminder?.threshold;
+		const threshold = typeof rawThreshold === "number" && rawThreshold > 0 ? Math.floor(rawThreshold) : 4;
+		const rawCooldown = tf?.doomLoopReminder?.cooldownMs;
+		const cooldownMs = typeof rawCooldown === "number" && rawCooldown >= 0 ? Math.floor(rawCooldown) : 30000;
+		return {
+			errorReflection: { enabled: tf?.errorReflection?.enabled !== false },
+			doomLoopReminder: {
+				enabled: tf?.doomLoopReminder?.enabled !== false,
+				threshold,
+				cooldownMs,
+			},
+		};
+	}
+
 	getBranchSummarySkipPrompt(): boolean {
 		return this.settings.branchSummary?.skipPrompt ?? false;
 	}
@@ -1063,5 +1185,21 @@ export class SettingsManager {
 		this.globalSettings.warnings = { ...warnings };
 		this.markModified("warnings");
 		this.save();
+	}
+
+	getPermissionSettings(): PermissionSettings {
+		return { ...(this.settings.permissions ?? {}) };
+	}
+
+	getHooksSettings(): HooksSettings {
+		return { ...(this.settings.hooks ?? {}) };
+	}
+
+	getMcpSettings(): McpSettings {
+		return { ...(this.settings.mcp ?? {}) };
+	}
+
+	getMemorySettings(): MemorySettings {
+		return { ...(this.settings.memory ?? {}) };
 	}
 }

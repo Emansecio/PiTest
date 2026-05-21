@@ -13,6 +13,7 @@ import { canonicalizePath, isLocalPath } from "../utils/paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.ts";
 import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.ts";
+import { discoverMemoryFiles, type MemoryFile } from "./memory/index.ts";
 import { DefaultPackageManager, type PathMetadata } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
@@ -30,9 +31,11 @@ export interface ResourceExtensionPaths {
 export interface ResourceLoader {
 	getExtensions(): LoadExtensionsResult;
 	getSkills(): { skills: Skill[]; diagnostics: ResourceDiagnostic[] };
+	getSkillByName(name: string): Skill | undefined;
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] };
 	getThemes(): { themes: Theme[]; diagnostics: ResourceDiagnostic[] };
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> };
+	getMemoryFiles(): MemoryFile[];
 	getSystemPrompt(): string | undefined;
 	getAppendSystemPrompt(): string[];
 	extendResources(paths: ResourceExtensionPaths): void;
@@ -196,8 +199,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private themes: Theme[];
 	private themeDiagnostics: ResourceDiagnostic[];
 	private agentsFiles: Array<{ path: string; content: string }>;
+	private memoryFiles: MemoryFile[];
 	private systemPrompt?: string;
 	private appendSystemPrompt: string[];
+	private skillsByName: Map<string, Skill>;
 	private lastSkillPaths: string[];
 	private extensionSkillSourceInfos: Map<string, SourceInfo>;
 	private extensionPromptSourceInfos: Map<string, SourceInfo>;
@@ -243,7 +248,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.themes = [];
 		this.themeDiagnostics = [];
 		this.agentsFiles = [];
+		this.memoryFiles = [];
 		this.appendSystemPrompt = [];
+		this.skillsByName = new Map();
 		this.lastSkillPaths = [];
 		this.extensionSkillSourceInfos = new Map();
 		this.extensionPromptSourceInfos = new Map();
@@ -260,6 +267,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return { skills: this.skills, diagnostics: this.skillDiagnostics };
 	}
 
+	getSkillByName(name: string): Skill | undefined {
+		return this.skillsByName.get(name);
+	}
+
 	getPrompts(): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] } {
 		return { prompts: this.prompts, diagnostics: this.promptDiagnostics };
 	}
@@ -270,6 +281,10 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content: string }> } {
 		return { agentsFiles: this.agentsFiles };
+	}
+
+	getMemoryFiles(): MemoryFile[] {
+		return this.memoryFiles;
 	}
 
 	getSystemPrompt(): string | undefined {
@@ -324,12 +339,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		time("reload-start");
 		await this.settingsManager.reload();
 		time("reload-settings-reload");
-		const resolvedPaths = await this.packageManager.resolve();
+		const [resolvedPaths, cliExtensionPaths] = await Promise.all([
+			this.packageManager.resolve(),
+			this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
+				temporary: true,
+			}),
+		]);
 		time("reload-package-resolve");
-		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
-			temporary: true,
-		});
-		time("reload-cli-extension-resolve");
 		const metadataByPath = new Map<string, PathMetadata>();
 
 		this.extensionSkillSourceInfos = new Map();
@@ -468,6 +484,19 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
 		this.agentsFiles = resolvedAgentsFiles.agentsFiles;
 
+		// MEMORY.md discovery — separate from AGENTS.md to keep its <persistent_memory> framing distinct.
+		const memorySettings = this.settingsManager.getMemorySettings();
+		if (this.noContextFiles || memorySettings.disableInjection) {
+			this.memoryFiles = [];
+		} else {
+			this.memoryFiles = discoverMemoryFiles({
+				cwd: this.cwd,
+				agentDir: this.agentDir,
+				configDirName: CONFIG_DIR_NAME,
+			});
+		}
+		time("reload-load-memory");
+
 		const baseSystemPrompt = resolvePromptInput(
 			this.systemPromptSource ?? this.discoverSystemPromptFile(),
 			"system prompt",
@@ -514,6 +543,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				skill.sourceInfo ??
 				this.getDefaultSourceInfoForPath(skill.filePath),
 		}));
+		this.skillsByName = new Map(this.skills.map((s) => [s.name, s]));
 		this.skillDiagnostics = resolvedSkills.diagnostics;
 	}
 

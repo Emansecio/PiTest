@@ -41,7 +41,8 @@ describe("createAgentSession session manager defaults", () => {
 		const sessionFile = session.sessionManager.getSessionFile();
 
 		expect(sessionDir).toBe(expectedSessionDir);
-		expect(sessionFile?.startsWith(`${expectedSessionDir}/`)).toBe(true);
+		const sep = process.platform === "win32" ? "\\" : "/";
+		expect(sessionFile?.startsWith(`${expectedSessionDir}${sep}`)).toBe(true);
 
 		session.dispose();
 	});
@@ -78,7 +79,8 @@ describe("createAgentSession session manager defaults", () => {
 		});
 
 		expect(session.sessionManager).toBe(sessionManager);
-		expect(session.systemPrompt).toContain(`Current working directory: ${sessionCwd}`);
+		const normalizedCwd = sessionCwd.replace(/\\/g, "/");
+		expect(session.systemPrompt).toContain(`Current working directory: ${normalizedCwd}`);
 
 		const bashTool = session.agent.state.tools.find((tool) => tool.name === "bash");
 		expect(bashTool).toBeTruthy();

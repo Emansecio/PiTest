@@ -67,6 +67,30 @@
         {
           "title": "Custom Providers",
           "path": "custom-provider.md"
+        },
+        {
+          "title": "Permissions",
+          "path": "permissions.md"
+        },
+        {
+          "title": "Hooks",
+          "path": "hooks.md"
+        },
+        {
+          "title": "MCP servers",
+          "path": "mcp.md"
+        },
+        {
+          "title": "Persistent memory",
+          "path": "memory.md"
+        },
+        {
+          "title": "Dry-run preview",
+          "path": "dry-run.md"
+        },
+        {
+          "title": "Subagents",
+          "path": "subagents.md"
         }
       ]
     },

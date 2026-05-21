@@ -1125,6 +1125,21 @@ export interface ExtensionAPI {
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 
+	/**
+	 * Tag a handler as side-effect-only — declares it will NOT mutate the event
+	 * payload nor return a non-undefined value to influence subsequent handlers.
+	 * Currently the runner uses this for `before_provider_request`: tagged
+	 * handlers run in parallel via Promise.all; untagged handlers stay serial
+	 * (their return value can replace the payload, so order matters).
+	 *
+	 * Returns the same handler reference for ergonomic chaining:
+	 *
+	 *   pi.on("before_provider_request", pi.markSideEffect((event, ctx) => {
+	 *     logRequest(event.payload);
+	 *   }));
+	 */
+	markSideEffect<F extends (...args: any[]) => any>(handler: F): F;
+
 	// =========================================================================
 	// Tool Registration
 	// =========================================================================

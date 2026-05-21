@@ -123,7 +123,14 @@ describe("generateSummary reasoning options", () => {
 			turnPrefixMessages: messages,
 			isSplitTurn: true,
 			tokensBefore: 600000,
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			fileOps: {
+				read: new Set(),
+				written: new Set(),
+				edited: new Set(),
+				searches: new Set(),
+				shellCmds: new Set(),
+				mcpCalls: new Set(),
+			},
 			settings: { enabled: true, reserveTokens: 500000, keepRecentTokens: 20000 },
 		};
 

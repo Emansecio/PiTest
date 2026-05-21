@@ -40,9 +40,11 @@ const cwd = process.cwd();
 const resourceLoader: ResourceLoader = {
 	getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 	getSkills: () => ({ skills: [], diagnostics: [] }),
+	getSkillByName: () => undefined,
 	getPrompts: () => ({ prompts: [], diagnostics: [] }),
 	getThemes: () => ({ themes: [], diagnostics: [] }),
 	getAgentsFiles: () => ({ agentsFiles: [] }),
+	getMemoryFiles: () => [],
 	getSystemPrompt: () => `You are a minimal assistant.
 Available: read, bash. Be concise.`,
 	getAppendSystemPrompt: () => [],

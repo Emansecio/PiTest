@@ -3,8 +3,10 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { AuthStorage } from "./auth-storage.ts";
+import { bundleBuiltInExtensions } from "./built-ins/index.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
+import type { PermissionMode } from "./permissions/index.ts";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.ts";
 import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
@@ -37,6 +39,10 @@ export interface CreateAgentSessionServicesOptions {
 	modelRegistry?: ModelRegistry;
 	extensionFlagValues?: Map<string, boolean | string>;
 	resourceLoaderOptions?: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager">;
+	/** Override permission mode for this session (CLI --permission-mode). */
+	permissionModeOverride?: PermissionMode;
+	/** Disable bundling of built-in extensions (permissions/hooks/mcp/memory/coordinator). */
+	disableBuiltInExtensions?: boolean;
 }
 
 /**
@@ -140,8 +146,37 @@ export async function createAgentSessionServices(
 	time("services-init-settingsManager");
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));
 	time("services-init-modelRegistry");
-	const resourceLoader = new DefaultResourceLoader({
+
+	// Refs filled in after the AgentSession is created. The coordinator extension
+	// reads through these to keep its tool catalog in sync with the parent's
+	// active tools without re-loading.
+	const parentModelRef: { current?: import("@earendil-works/pi-ai").Model<any> } = {};
+	const availableToolsRef: { current?: import("@earendil-works/pi-agent-core").AgentTool[] } = {};
+
+	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
+	if (!options.disableBuiltInExtensions) {
+		const bundle = bundleBuiltInExtensions({
+			cwd,
+			agentDir,
+			modelRegistry,
+			permissions: settingsManager.getPermissionSettings(),
+			permissionModeOverride: options.permissionModeOverride,
+			hooks: settingsManager.getHooksSettings(),
+			mcp: settingsManager.getMcpSettings(),
+			getParentModel: () => parentModelRef.current,
+			getAvailableTools: () => availableToolsRef.current ?? [],
+		});
+		builtInFactories = bundle.factories;
+	}
+
+	const userFactories = options.resourceLoaderOptions?.extensionFactories ?? [];
+	const resourceLoaderOptions: Omit<DefaultResourceLoaderOptions, "cwd" | "agentDir" | "settingsManager"> = {
 		...(options.resourceLoaderOptions ?? {}),
+		extensionFactories: [...builtInFactories, ...userFactories],
+	};
+
+	const resourceLoader = new DefaultResourceLoader({
+		...resourceLoaderOptions,
 		cwd,
 		agentDir,
 		settingsManager,
@@ -149,6 +184,22 @@ export async function createAgentSessionServices(
 	time("services-init-resourceLoader-create");
 	await resourceLoader.reload();
 	time("services-init-resourceLoader-reload");
+
+	// Wire up refs once the session is created. The session-services layer does
+	// not know about AgentSession directly, so we expose helpers via the
+	// returned services object that the caller (createAgentSessionFromServices)
+	// flushes after Session construction.
+	(
+		resourceLoader as DefaultResourceLoader & {
+			__bindBuiltInRefs?: (
+				model: import("@earendil-works/pi-ai").Model<any> | undefined,
+				tools: import("@earendil-works/pi-agent-core").AgentTool[],
+			) => void;
+		}
+	).__bindBuiltInRefs = (model, tools) => {
+		parentModelRef.current = model;
+		availableToolsRef.current = tools;
+	};
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	const extensionsResult = resourceLoader.getExtensions();
@@ -187,7 +238,7 @@ export async function createAgentSessionServices(
 export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
 ): Promise<CreateAgentSessionResult> {
-	return createAgentSession({
+	const result = await createAgentSession({
 		cwd: options.services.cwd,
 		agentDir: options.services.agentDir,
 		authStorage: options.services.authStorage,
@@ -203,4 +254,21 @@ export async function createAgentSessionFromServices(
 		customTools: options.customTools,
 		sessionStartEvent: options.sessionStartEvent,
 	});
+
+	const bind = (
+		options.services.resourceLoader as DefaultResourceLoader & {
+			__bindBuiltInRefs?: (
+				model: import("@earendil-works/pi-ai").Model<any> | undefined,
+				tools: import("@earendil-works/pi-agent-core").AgentTool[],
+			) => void;
+		}
+	).__bindBuiltInRefs;
+	if (bind) {
+		bind(
+			result.session.model,
+			result.session.agent.state.tools as import("@earendil-works/pi-agent-core").AgentTool[],
+		);
+	}
+
+	return result;
 }

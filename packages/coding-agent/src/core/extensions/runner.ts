@@ -79,6 +79,17 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 	"tui.editor.deleteToLineEnd",
 ] as const;
 
+/**
+ * Property key marking a handler as side-effect-only (return value ignored,
+ * payload never mutated). Read by emitBeforeProviderRequest to dispatch
+ * matching handlers in parallel; written by `pi.markSideEffect()` and by
+ * loader's PI_SIDE_EFFECT_EXTENSIONS env-driven tagger.
+ */
+export const HANDLER_SIDE_EFFECT_TAG = "__piSideEffect" as const;
+
+// Max time a before_agent_start handler may block TTFT before being skipped.
+const BEFORE_AGENT_START_TIMEOUT_MS = 5_000;
+
 type BuiltInKeyBindings = Partial<Record<KeyId, { keybinding: string; restrictOverride: boolean }>>;
 
 const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltInKeyBindings => {
@@ -247,6 +258,20 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
+	// Caches for hot getters. Invalidated by invalidateCaches() which fires
+	// whenever runtime.refreshTools() is called (loader -> bindCore wraps it).
+	// Commands/flags/shortcuts that change post-load via extension event handlers
+	// require an explicit invalidateCaches() call.
+	private _cachedTools: RegisteredTool[] | undefined;
+	private _cachedFlags: Map<string, ExtensionFlag> | undefined;
+	private _cachedCommands: ResolvedCommand[] | undefined;
+	private _cachedCommandLookup: Map<string, ResolvedCommand> | undefined;
+	private _cachedBprPartition:
+		| {
+				sideEffect: Array<{ ext: Extension; handler: (...args: unknown[]) => Promise<unknown> }>;
+				mutating: Array<{ ext: Extension; handler: (...args: unknown[]) => Promise<unknown> }>;
+		  }
+		| undefined;
 
 	constructor(
 		extensions: Extension[],
@@ -281,7 +306,16 @@ export class ExtensionRunner {
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
 		this.runtime.setActiveTools = actions.setActiveTools;
-		this.runtime.refreshTools = actions.refreshTools;
+		// Wrap refreshTools so hot-getter caches invalidate whenever tools are
+		// (re-)registered. Loader calls runtime.refreshTools() from
+		// api.registerTool() and any extension that registers post-load also
+		// triggers it. Commands/flags do not go through this path — callers must
+		// invoke runner.invalidateCaches() manually if they mutate those.
+		const originalRefreshTools = actions.refreshTools;
+		this.runtime.refreshTools = () => {
+			this.invalidateCaches();
+			originalRefreshTools();
+		};
 		this.runtime.getCommands = actions.getCommands;
 		this.runtime.setModel = actions.setModel;
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
@@ -370,8 +404,14 @@ export class ExtensionRunner {
 		return this.extensions.map((e) => e.path);
 	}
 
-	/** Get all registered tools from all extensions (first registration per name wins). */
+	/**
+	 * Get all registered tools from all extensions (first registration per name wins).
+	 *
+	 * Returns a cached array — treat as read-only. Cache invalidates via
+	 * runtime.refreshTools() (wired in bindCore) whenever a tool is registered.
+	 */
 	getAllRegisteredTools(): RegisteredTool[] {
+		if (this._cachedTools !== undefined) return this._cachedTools;
 		const toolsByName = new Map<string, RegisteredTool>();
 		for (const ext of this.extensions) {
 			for (const tool of ext.tools.values()) {
@@ -380,7 +420,17 @@ export class ExtensionRunner {
 				}
 			}
 		}
-		return Array.from(toolsByName.values());
+		this._cachedTools = Array.from(toolsByName.values());
+		return this._cachedTools;
+	}
+
+	/** Drop all hot-path caches. Called from refreshTools and manually after registerCommand/Flag. */
+	invalidateCaches(): void {
+		this._cachedTools = undefined;
+		this._cachedFlags = undefined;
+		this._cachedCommands = undefined;
+		this._cachedCommandLookup = undefined;
+		this._cachedBprPartition = undefined;
 	}
 
 	/** Get a tool definition by name. Returns undefined if not found. */
@@ -394,7 +444,12 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
+	/**
+	 * Returns the merged flag definitions Map. Treat as read-only — the same
+	 * Map instance is shared across callers between invalidations.
+	 */
 	getFlags(): Map<string, ExtensionFlag> {
+		if (this._cachedFlags !== undefined) return this._cachedFlags;
 		const allFlags = new Map<string, ExtensionFlag>();
 		for (const ext of this.extensions) {
 			for (const [name, flag] of ext.flags) {
@@ -403,7 +458,8 @@ export class ExtensionRunner {
 				}
 			}
 		}
-		return allFlags;
+		this._cachedFlags = allFlags;
+		return this._cachedFlags;
 	}
 
 	setFlagValue(name: string, value: boolean | string): void {
@@ -547,15 +603,25 @@ export class ExtensionRunner {
 
 	getRegisteredCommands(): ResolvedCommand[] {
 		this.commandDiagnostics = [];
-		return this.resolveRegisteredCommands();
+		if (this._cachedCommands !== undefined) return this._cachedCommands;
+		this._cachedCommands = this.resolveRegisteredCommands();
+		return this._cachedCommands;
 	}
 
 	getCommandDiagnostics(): ResourceDiagnostic[] {
 		return this.commandDiagnostics;
 	}
 
+	/** O(1) lookup by invocation name; builds a Map on first call after invalidation. */
 	getCommand(name: string): ResolvedCommand | undefined {
-		return this.resolveRegisteredCommands().find((command) => command.invocationName === name);
+		if (this._cachedCommandLookup === undefined) {
+			const lookup = new Map<string, ResolvedCommand>();
+			for (const command of this.getRegisteredCommands()) {
+				lookup.set(command.invocationName, command);
+			}
+			this._cachedCommandLookup = lookup;
+		}
+		return this._cachedCommandLookup.get(name);
 	}
 
 	/**
@@ -677,38 +743,80 @@ export class ExtensionRunner {
 		);
 	}
 
+	/**
+	 * Emit an event to all registered handlers.
+	 *
+	 * session_before_* runs serial because a handler can short-circuit via
+	 * `result.cancel`. Every other event is side-effect; handlers run via
+	 * Promise.all so fan-out latencies overlap. One handler's throw is
+	 * isolated via emitError — siblings still run.
+	 */
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
+		if (!this.hasHandlers(event.type)) return undefined as RunnerEmitResult<TEvent>;
 		const ctx = this.createContext();
-		let result: SessionBeforeEventResult | undefined;
+		const piTiming = process.env.PI_TIMING === "1";
+		const t0 = piTiming ? performance.now() : 0;
 
+		if (this.isSessionBeforeEvent(event)) {
+			let result: SessionBeforeEventResult | undefined;
+			for (const ext of this.extensions) {
+				const handlers = ext.handlers.get(event.type);
+				if (!handlers || handlers.length === 0) continue;
+
+				for (const handler of handlers) {
+					try {
+						const handlerResult = await handler(event, ctx);
+						if (handlerResult) {
+							result = handlerResult as SessionBeforeEventResult;
+							if (result.cancel) {
+								return result as RunnerEmitResult<TEvent>;
+							}
+						}
+					} catch (err) {
+						this.emitError({
+							extensionPath: ext.path,
+							event: event.type,
+							error: err instanceof Error ? err.message : String(err),
+							stack: err instanceof Error ? err.stack : undefined,
+						});
+					}
+				}
+			}
+			return result as RunnerEmitResult<TEvent>;
+		}
+
+		const dispatches: Array<Promise<void>> = [];
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(event.type);
 			if (!handlers || handlers.length === 0) continue;
-
 			for (const handler of handlers) {
-				try {
-					const handlerResult = await handler(event, ctx);
-
-					if (this.isSessionBeforeEvent(event) && handlerResult) {
-						result = handlerResult as SessionBeforeEventResult;
-						if (result.cancel) {
-							return result as RunnerEmitResult<TEvent>;
+				dispatches.push(
+					(async () => {
+						try {
+							await handler(event, ctx);
+						} catch (err) {
+							this.emitError({
+								extensionPath: ext.path,
+								event: event.type,
+								error: err instanceof Error ? err.message : String(err),
+								stack: err instanceof Error ? err.stack : undefined,
+							});
 						}
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: event.type,
-						error: message,
-						stack,
-					});
-				}
+					})(),
+				);
 			}
 		}
 
-		return result as RunnerEmitResult<TEvent>;
+		if (dispatches.length === 1) {
+			await dispatches[0];
+		} else if (dispatches.length > 1) {
+			await Promise.all(dispatches);
+		}
+		if (piTiming && dispatches.length > 0) {
+			const total = performance.now() - t0;
+			console.error(`  [perf] METRIC emit_${event.type}_ms=${total.toFixed(1)} handlers=${dispatches.length}`);
+		}
+		return undefined as RunnerEmitResult<TEvent>;
 	}
 
 	async emitMessageEnd(event: MessageEndEvent): Promise<AgentMessage | undefined> {
@@ -855,21 +963,36 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
+	/**
+	 * Run `context` handlers and return the (possibly transformed) messages.
+	 * Returns input unchanged when no handler is registered (sdk's
+	 * transformContext fires per turn).
+	 *
+	 * Handler contract: do not mutate `event.messages` in place; return
+	 * `{ messages: newArray }` to modify.
+	 */
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
+		if (!this.hasHandlers("context")) return messages;
+		const piTiming = process.env.PI_TIMING === "1";
+		const t0 = piTiming ? performance.now() : 0;
 		const ctx = this.createContext();
-		let currentMessages = structuredClone(messages);
+		let currentMessages = messages;
+		let handlerCount = 0;
+		let mutated = false;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("context");
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
+				handlerCount++;
 				try {
 					const event: ContextEvent = { type: "context", messages: currentMessages };
 					const handlerResult = await handler(event, ctx);
 
 					if (handlerResult && (handlerResult as ContextEventResult).messages) {
 						currentMessages = (handlerResult as ContextEventResult).messages!;
+						mutated = true;
 					}
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
@@ -884,41 +1007,104 @@ export class ExtensionRunner {
 			}
 		}
 
+		if (piTiming) {
+			const total = performance.now() - t0;
+			console.error(
+				`  [perf] METRIC emit_context_ms=${total.toFixed(1)} handlers=${handlerCount} mutated=${mutated ? 1 : 0} msgs=${messages.length}`,
+			);
+		}
+
 		return currentMessages;
 	}
 
+	/**
+	 * Run `before_provider_request` handlers and return the (possibly
+	 * transformed) payload. Side-effect handlers (tagged via
+	 * `pi.markSideEffect()`) run in parallel; untagged handlers run serially
+	 * because their return value can replace the payload.
+	 */
 	async emitBeforeProviderRequest(payload: unknown): Promise<unknown> {
+		const partition = this.getBprPartition();
+		if (partition.sideEffect.length === 0 && partition.mutating.length === 0) {
+			return payload;
+		}
+
 		const ctx = this.createContext();
 		let currentPayload = payload;
+		const piTiming = process.env.PI_TIMING === "1";
+		const t0 = piTiming ? performance.now() : 0;
 
-		for (const ext of this.extensions) {
-			const handlers = ext.handlers.get("before_provider_request");
-			if (!handlers || handlers.length === 0) continue;
+		const runHandler = async (
+			ext: Extension,
+			handler: (...args: unknown[]) => Promise<unknown>,
+		): Promise<unknown> => {
+			try {
+				const event: BeforeProviderRequestEvent = {
+					type: "before_provider_request",
+					payload: currentPayload,
+				};
+				return await handler(event, ctx);
+			} catch (err) {
+				this.emitError({
+					extensionPath: ext.path,
+					event: "before_provider_request",
+					error: err instanceof Error ? err.message : String(err),
+					stack: err instanceof Error ? err.stack : undefined,
+				});
+				return undefined;
+			}
+		};
 
-			for (const handler of handlers) {
-				try {
-					const event: BeforeProviderRequestEvent = {
-						type: "before_provider_request",
-						payload: currentPayload,
-					};
-					const handlerResult = await handler(event, ctx);
-					if (handlerResult !== undefined) {
-						currentPayload = handlerResult;
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "before_provider_request",
-						error: message,
-						stack,
-					});
-				}
+		if (partition.sideEffect.length > 0) {
+			await Promise.all(partition.sideEffect.map(({ ext, handler }) => runHandler(ext, handler)));
+		}
+
+		const tSideEffect = piTiming ? performance.now() : 0;
+
+		const needsSnapshot = partition.mutating.length > 1;
+		for (const { ext, handler } of partition.mutating) {
+			// Snapshot protects against handlers that mutate payload in-place
+			// then throw — without it, subsequent handlers see corrupted state.
+			const snapshot = needsSnapshot ? structuredClone(currentPayload) : currentPayload;
+			const result = await runHandler(ext, handler);
+			if (result !== undefined) {
+				currentPayload = result;
+			} else if (needsSnapshot) {
+				currentPayload = snapshot;
 			}
 		}
 
+		if (piTiming) {
+			const total = performance.now() - t0;
+			const sideEffectMs = tSideEffect - t0;
+			const mutatingMs = performance.now() - tSideEffect;
+			console.error(
+				`  [perf] METRIC emit_bpr_ms=${total.toFixed(1)} side_effect_ms=${sideEffectMs.toFixed(1)} mutating_ms=${mutatingMs.toFixed(1)} se_n=${partition.sideEffect.length} mut_n=${partition.mutating.length}`,
+			);
+		}
+
 		return currentPayload;
+	}
+
+	private getBprPartition(): NonNullable<ExtensionRunner["_cachedBprPartition"]> {
+		if (this._cachedBprPartition !== undefined) return this._cachedBprPartition;
+		type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+		const sideEffect: Array<{ ext: Extension; handler: HandlerFn }> = [];
+		const mutating: Array<{ ext: Extension; handler: HandlerFn }> = [];
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("before_provider_request");
+			if (!handlers || handlers.length === 0) continue;
+			for (const handler of handlers) {
+				const entry = { ext, handler: handler as HandlerFn };
+				if ((handler as unknown as Record<string, unknown>)[HANDLER_SIDE_EFFECT_TAG] === true) {
+					sideEffect.push(entry);
+				} else {
+					mutating.push(entry);
+				}
+			}
+		}
+		this._cachedBprPartition = { sideEffect, mutating };
+		return this._cachedBprPartition;
 	}
 
 	async emitBeforeAgentStart(
@@ -938,6 +1124,8 @@ export class ExtensionRunner {
 		};
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
 		let systemPromptModified = false;
+		const piTiming = process.env.PI_TIMING === "1";
+		const t0 = piTiming ? performance.now() : 0;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_agent_start");
@@ -952,7 +1140,24 @@ export class ExtensionRunner {
 						systemPrompt: currentSystemPrompt,
 						systemPromptOptions,
 					};
-					const handlerResult = await handler(event, ctx);
+					const TIMED_OUT = Symbol();
+					let timer: ReturnType<typeof setTimeout> | undefined;
+					const handlerResult = await Promise.race([
+						handler(event, ctx),
+						new Promise<typeof TIMED_OUT>((resolve) => {
+							timer = setTimeout(() => resolve(TIMED_OUT), BEFORE_AGENT_START_TIMEOUT_MS);
+						}),
+					]);
+					if (timer !== undefined) clearTimeout(timer);
+
+					if (handlerResult === TIMED_OUT) {
+						this.emitError({
+							extensionPath: ext.path,
+							event: "before_agent_start",
+							error: `Handler timed out after ${BEFORE_AGENT_START_TIMEOUT_MS}ms`,
+						});
+						continue;
+					}
 
 					if (handlerResult) {
 						const result = handlerResult as BeforeAgentStartEventResult;
@@ -975,6 +1180,12 @@ export class ExtensionRunner {
 					});
 				}
 			}
+		}
+
+		if (piTiming) {
+			console.error(
+				`  [perf] METRIC emit_before_agent_start_ms=${(performance.now() - t0).toFixed(1)} extensions=${this.extensions.length}`,
+			);
 		}
 
 		if (messages.length > 0 || systemPromptModified) {

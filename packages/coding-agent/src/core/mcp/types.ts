@@ -1,0 +1,60 @@
+/**
+ * MCP (Model Context Protocol) settings and types.
+ *
+ * Pi supports MCP-over-HTTP transport: each server is reachable at a JSON-RPC
+ * 2.0 endpoint accepting POST requests with `Content-Type: application/json`.
+ *
+ * Note: the official MCP spec also defines stdio and SSE transports. Pi
+ * currently ships only the HTTP transport. The wire format is identical to
+ * the spec's JSON-RPC envelope so users with HTTP-compatible MCP servers can
+ * point Pi at them without modification.
+ */
+
+export interface McpServerConfig {
+	/** Endpoint URL. Required. */
+	url: string;
+	/** Optional request headers (e.g. `{ Authorization: "Bearer ${MY_TOKEN}" }`). */
+	headers?: Record<string, string>;
+	/** Per-request timeout in ms. Default: 30000. */
+	timeoutMs?: number;
+	/** Disable this server without removing it from settings. */
+	disabled?: boolean;
+	/** Optional allowlist of tool names to expose (defaults to all). */
+	allowTools?: string[];
+	/** Optional denylist of tool names to hide. */
+	denyTools?: string[];
+	/** Optional prefix added to tool names to avoid conflicts. Default: server name + "__". */
+	toolPrefix?: string;
+}
+
+export interface McpSettings {
+	servers?: Record<string, McpServerConfig>;
+}
+
+export interface McpToolSchema {
+	name: string;
+	description?: string;
+	inputSchema: Record<string, unknown>;
+}
+
+export interface McpListToolsResult {
+	tools: McpToolSchema[];
+}
+
+export interface McpCallToolResult {
+	content: Array<
+		| { type: "text"; text: string }
+		| { type: "image"; data: string; mimeType: string }
+		| { type: "resource"; resource: { uri: string; mimeType?: string; text?: string } }
+	>;
+	isError?: boolean;
+}
+
+export interface McpConnectionState {
+	name: string;
+	url: string;
+	connected: boolean;
+	lastError?: string;
+	tools: McpToolSchema[];
+	reconnectAttempts: number;
+}

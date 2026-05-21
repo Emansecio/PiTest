@@ -28,6 +28,7 @@ import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
+import { HANDLER_SIDE_EFFECT_TAG } from "./runner.ts";
 import type {
 	Extension,
 	ExtensionAPI,
@@ -212,6 +213,11 @@ function createExtensionAPI(
 			const list = extension.handlers.get(event) ?? [];
 			list.push(handler);
 			extension.handlers.set(event, list);
+		},
+
+		markSideEffect<F extends (...args: any[]) => any>(handler: F): F {
+			(handler as unknown as Record<string, unknown>)[HANDLER_SIDE_EFFECT_TAG] = true;
+			return handler;
 		},
 
 		registerTool(tool: ToolDefinition): void {
@@ -466,6 +472,45 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 	};
 }
 
+/**
+ * Parse PI_SIDE_EFFECT_EXTENSIONS into a substring matcher list. Read on
+ * every extension load so tests / dynamic reconfigurations can toggle the
+ * env var without relaunching the process; cost is one string split per
+ * loaded extension at startup.
+ */
+function getSideEffectMatchers(): string[] | null {
+	const raw = process.env.PI_SIDE_EFFECT_EXTENSIONS;
+	if (!raw) return null;
+	const matchers = raw
+		.split(",")
+		.map((s) => s.trim())
+		.filter((s) => s.length > 0);
+	return matchers.length === 0 ? null : matchers;
+}
+
+/**
+ * Tag a loaded extension's `before_provider_request` handlers as side-effect
+ * when the user listed it in PI_SIDE_EFFECT_EXTENSIONS. Match by substring
+ * against the resolved path so users can write either bare package names
+ * (`pi-autoresearch`) or scoped names (`@tintinweb/pi-tasks`).
+ */
+function applyExternalSideEffectMarkers(extension: Extension, resolvedPath: string): void {
+	const matchers = getSideEffectMatchers();
+	if (!matchers) return;
+	const matched = matchers.some((m) => resolvedPath.includes(m) || extension.path.includes(m));
+	if (!matched) return;
+	const handlers = extension.handlers.get("before_provider_request");
+	if (!handlers || handlers.length === 0) return;
+	for (const handler of handlers) {
+		(handler as unknown as Record<string, unknown>)[HANDLER_SIDE_EFFECT_TAG] = true;
+	}
+	if (process.env.PI_TIMING === "1") {
+		console.error(
+			`  [perf]   ${path.basename(resolvedPath)}: marked ${handlers.length} before_provider_request handler(s) as side-effect`,
+		);
+	}
+}
+
 async function loadExtension(
 	extensionPath: string,
 	cwd: string,
@@ -490,6 +535,16 @@ async function loadExtension(
 		if (process.env.PI_TIMING === "1") {
 			console.error(`  [perf]   ${path.basename(resolvedPath)}: import=${loadMs}ms factory=${factoryMs}ms`);
 		}
+
+		// External opt-in for parallel `before_provider_request` execution.
+		// User sets PI_SIDE_EFFECT_EXTENSIONS as a comma-separated list of
+		// substrings; any extension whose path matches gets all its
+		// `before_provider_request` handlers tagged side-effect. Lets users
+		// parallelize hooks of third-party extensions they trust without
+		// patching the extension source. Mutating extensions (e.g. the
+		// Anthropic OAuth adapter) stay off this list — their return value
+		// must thread through.
+		applyExternalSideEffectMarkers(extension, resolvedPath);
 
 		return { extension, error: null };
 	} catch (err) {
@@ -532,16 +587,57 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const runtime = createExtensionRuntime();
+	const piTiming = process.env.PI_TIMING === "1";
 
-	for (const extPath of paths) {
-		const start = Date.now();
-		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
-		const duration = Date.now() - start;
-		if (process.env.PI_TIMING === "1") {
-			console.error(`  [perf] Loaded extension ${extPath} in ${duration}ms`);
+	// Split: pre-compiled .js can load in parallel (I/O-bound native import);
+	// .ts must stay serial to avoid jiti cache contention.
+	const jsEntries: Array<{ index: number; path: string }> = [];
+	const tsEntries: Array<{ index: number; path: string }> = [];
+	for (let i = 0; i < paths.length; i++) {
+		const resolved = resolvePath(paths[i], cwd);
+		if (!isBunBinary && resolved.endsWith(".js")) {
+			jsEntries.push({ index: i, path: paths[i] });
+		} else {
+			tsEntries.push({ index: i, path: paths[i] });
 		}
+	}
+
+	// Parallel batch for .js extensions
+	const results = new Array<{ extension: Extension | null; error: string | null }>(paths.length);
+	if (jsEntries.length > 0) {
+		const t0 = piTiming ? Date.now() : 0;
+		const jsResults = await Promise.all(
+			jsEntries.map(async ({ index, path: extPath }) => {
+				const start = Date.now();
+				const result = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
+				if (piTiming) {
+					console.error(`  [perf] Loaded extension ${extPath} in ${Date.now() - start}ms (parallel-js)`);
+				}
+				return { index, result };
+			}),
+		);
+		for (const { index, result } of jsResults) {
+			results[index] = result;
+		}
+		if (piTiming) {
+			console.error(`  [perf] Parallel .js batch: ${jsEntries.length} extensions in ${Date.now() - t0}ms`);
+		}
+	}
+
+	// Serial for .ts extensions (jiti contention)
+	for (const { index, path: extPath } of tsEntries) {
+		const start = Date.now();
+		results[index] = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
+		if (piTiming) {
+			console.error(`  [perf] Loaded extension ${extPath} in ${Date.now() - start}ms (serial-ts)`);
+		}
+	}
+
+	// Collect in original order to preserve registration priority
+	for (let i = 0; i < paths.length; i++) {
+		const { extension, error } = results[i];
 		if (error) {
-			errors.push({ path: extPath, error });
+			errors.push({ path: paths[i], error });
 			continue;
 		}
 		if (extension) extensions.push(extension);
@@ -640,7 +736,7 @@ function resolveExtensionEntries(dir: string): string[] | null {
  */
 function preferPrecompiledSibling(entryPath: string): string {
 	if (!entryPath.endsWith(".ts") || entryPath.endsWith(".d.ts")) return entryPath;
-	const jsPath = entryPath.slice(0, -3) + ".js";
+	const jsPath = `${entryPath.slice(0, -3)}.js`;
 	if (!fs.existsSync(jsPath)) return entryPath;
 	try {
 		const tsStat = fs.statSync(entryPath);

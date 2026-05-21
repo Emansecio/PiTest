@@ -16,7 +16,7 @@ import {
 } from "../messages.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
 import {
-	computeFileLists,
+	computeOperationLists,
 	createFileOps,
 	extractFileOpsFromMessage,
 	type FileOperations,
@@ -29,10 +29,18 @@ import {
 // File Operation Tracking
 // ============================================================================
 
-/** Details stored in CompactionEntry.details for file tracking */
+/** Details stored in CompactionEntry.details for structured summary frame.
+ *
+ * Older sessions only carry `readFiles` and `modifiedFiles`. The remaining
+ * fields are populated by the structured summary frame and are loaded
+ * defensively when present.
+ */
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+	searches?: string[];
+	shellCmds?: string[];
+	mcpCalls?: string[];
 }
 
 /**
@@ -56,6 +64,15 @@ function extractFileOperations(
 			}
 			if (Array.isArray(details.modifiedFiles)) {
 				for (const f of details.modifiedFiles) fileOps.edited.add(f);
+			}
+			if (Array.isArray(details.searches)) {
+				for (const s of details.searches) fileOps.searches.add(s);
+			}
+			if (Array.isArray(details.shellCmds)) {
+				for (const c of details.shellCmds) fileOps.shellCmds.add(c);
+			}
+			if (Array.isArray(details.mcpCalls)) {
+				for (const c of details.mcpCalls) fileOps.mcpCalls.add(c);
 			}
 		}
 	}
@@ -225,12 +242,19 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
 // Cut point detection
 // ============================================================================
 
+const tokenEstimateCache = new WeakMap<AgentMessage, number>();
+
 /**
  * Estimate token count for a message using chars/4 heuristic.
  * This is conservative (overestimates tokens).
+ * Results are cached per message object (messages are immutable once created).
  */
 export function estimateTokens(message: AgentMessage): number {
+	const cached = tokenEstimateCache.get(message);
+	if (cached !== undefined) return cached;
+
 	let chars = 0;
+	let result: number;
 
 	switch (message.role) {
 		case "user": {
@@ -244,7 +268,8 @@ export function estimateTokens(message: AgentMessage): number {
 					}
 				}
 			}
-			return Math.ceil(chars / 4);
+			result = Math.ceil(chars / 4);
+			break;
 		}
 		case "assistant": {
 			const assistant = message as AssistantMessage;
@@ -257,7 +282,8 @@ export function estimateTokens(message: AgentMessage): number {
 					chars += block.name.length + JSON.stringify(block.arguments).length;
 				}
 			}
-			return Math.ceil(chars / 4);
+			result = Math.ceil(chars / 4);
+			break;
 		}
 		case "custom":
 		case "toolResult": {
@@ -273,20 +299,26 @@ export function estimateTokens(message: AgentMessage): number {
 					}
 				}
 			}
-			return Math.ceil(chars / 4);
+			result = Math.ceil(chars / 4);
+			break;
 		}
 		case "bashExecution": {
 			chars = message.command.length + message.output.length;
-			return Math.ceil(chars / 4);
+			result = Math.ceil(chars / 4);
+			break;
 		}
 		case "branchSummary":
 		case "compactionSummary": {
 			chars = message.summary.length;
-			return Math.ceil(chars / 4);
+			result = Math.ceil(chars / 4);
+			break;
 		}
+		default:
+			result = 0;
 	}
 
-	return 0;
+	tokenEstimateCache.set(message, result);
+	return result;
 }
 
 /**
@@ -639,6 +671,8 @@ export interface CompactionPreparation {
 	fileOps: FileOperations;
 	/** Compaction settions from settings.jsonl	*/
 	settings: CompactionSettings;
+	/** Working directory — used to strip path prefixes in summaries, saving tokens. */
+	cwd?: string;
 }
 
 export function prepareCompaction(
@@ -763,6 +797,7 @@ export async function compact(
 		previousSummary,
 		fileOps,
 		settings,
+		cwd,
 	} = preparation;
 
 	// Generate summaries (can be parallel if both needed) and merge into one
@@ -814,19 +849,27 @@ export async function compact(
 		);
 	}
 
-	// Compute file lists and append to summary
-	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
-	summary += formatFileOperations(readFiles, modifiedFiles);
+	// Compute structured operation lists and append to summary (paths stripped of cwd)
+	const lists = computeOperationLists(fileOps, cwd);
+	summary += formatFileOperations(lists);
 
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no UUID - session may need migration");
 	}
 
+	const details: CompactionDetails = {
+		readFiles: lists.readFiles,
+		modifiedFiles: lists.modifiedFiles,
+	};
+	if (lists.searches.length > 0) details.searches = lists.searches;
+	if (lists.shellCmds.length > 0) details.shellCmds = lists.shellCmds;
+	if (lists.mcpCalls.length > 0) details.mcpCalls = lists.mcpCalls;
+
 	return {
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
-		details: { readFiles, modifiedFiles } as CompactionDetails,
+		details,
 	};
 }
 

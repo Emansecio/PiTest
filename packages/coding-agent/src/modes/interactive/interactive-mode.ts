@@ -715,19 +715,25 @@ export class InteractiveMode {
 	async run(): Promise<void> {
 		await this.init();
 
-		// Start version check asynchronously
-		checkForNewPiVersion(this.version).then((newRelease) => {
-			if (newRelease) {
-				this.showNewVersionNotification(newRelease);
-			}
-		});
+		const warningSettings = this.session.settingsManager.getWarnings();
 
-		// Start package update check asynchronously
-		this.checkForPackageUpdates().then((updates) => {
-			if (updates.length > 0) {
-				this.showPackageUpdateNotification(updates);
-			}
-		});
+		// Start version check asynchronously (suppressed when warnings.newVersion === false).
+		if (warningSettings.newVersion !== false) {
+			checkForNewPiVersion(this.version).then((newRelease) => {
+				if (newRelease) {
+					this.showNewVersionNotification(newRelease);
+				}
+			});
+		}
+
+		// Start package update check asynchronously (suppressed when warnings.packageUpdates === false).
+		if (warningSettings.packageUpdates !== false) {
+			this.checkForPackageUpdates().then((updates) => {
+				if (updates.length > 0) {
+					this.showPackageUpdateNotification(updates);
+				}
+			});
+		}
 
 		// Check tmux keyboard setup asynchronously
 		this.checkTmuxKeyboardSetup().then((warning) => {
