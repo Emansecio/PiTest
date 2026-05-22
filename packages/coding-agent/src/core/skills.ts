@@ -333,12 +333,15 @@ function loadSkillFromFile(
  * Skills with disableModelInvocation=true are excluded from the prompt
  * (they can only be invoked explicitly via /skill:name commands).
  */
-export function formatSkillsForPrompt(skills: Skill[]): string {
+export function formatSkillsForPrompt(skills: Skill[], maxSkills = 20): string {
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
 
 	if (visibleSkills.length === 0) {
 		return "";
 	}
+
+	const shown = visibleSkills.slice(0, maxSkills);
+	const omitted = visibleSkills.length - shown.length;
 
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
@@ -348,12 +351,16 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
 		"<available_skills>",
 	];
 
-	for (const skill of visibleSkills) {
+	for (const skill of shown) {
 		lines.push("  <skill>");
 		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
 		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
 		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
 		lines.push("  </skill>");
+	}
+
+	if (omitted > 0) {
+		lines.push(`  <!-- ${omitted} more skills available. Use /skill list to see all. -->`);
 	}
 
 	lines.push("</available_skills>");

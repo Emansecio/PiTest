@@ -1,9 +1,10 @@
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { type AutocompleteProvider, CombinedAutocompleteProvider, Container } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.js";
 import type { SourceInfo } from "../src/core/source-info.js";
+import * as displayUtils from "../src/modes/interactive/display-utils.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
@@ -222,6 +223,10 @@ describe("InteractiveMode.showLoadedResources", () => {
 		initTheme("dark");
 	});
 
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	function createShowLoadedResourcesThis(options: {
 		quietStartup: boolean;
 		verbose?: boolean;
@@ -287,18 +292,14 @@ describe("InteractiveMode.showLoadedResources", () => {
 			) => (InteractiveMode as any).prototype.getCompactNonPackageExtensionLabel.call(fakeThis, p, index, allPaths),
 			getCompactExtensionLabels: (extensions: ExtensionFixture[]) =>
 				(InteractiveMode as any).prototype.getCompactExtensionLabels.call(fakeThis, extensions),
-			formatDiagnostics: () => "diagnostics",
 			getBuiltInCommandConflictDiagnostics: () => [],
 		};
 
-		if (options.useRealScopeGroups) {
-			fakeThis.getScopeGroup = (sourceInfo?: SourceInfo) =>
-				(InteractiveMode as any).prototype.getScopeGroup.call(fakeThis, sourceInfo);
-			fakeThis.buildScopeGroups = (items: Array<{ path: string; sourceInfo?: SourceInfo }>) =>
-				(InteractiveMode as any).prototype.buildScopeGroups.call(fakeThis, items);
-			fakeThis.formatScopeGroups = (groups: unknown, formatOptions: unknown) =>
-				(InteractiveMode as any).prototype.formatScopeGroups.call(fakeThis, groups, formatOptions);
+		if (!options.useRealScopeGroups) {
+			vi.spyOn(displayUtils, "buildScopeGroups").mockReturnValue([]);
+			vi.spyOn(displayUtils, "formatScopeGroups").mockReturnValue("resource-list");
 		}
+		vi.spyOn(displayUtils, "formatDiagnostics").mockReturnValue("diagnostics");
 
 		return fakeThis;
 	}

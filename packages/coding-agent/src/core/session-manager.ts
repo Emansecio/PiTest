@@ -481,12 +481,16 @@ export function findMostRecentSession(sessionDir: string): string | null {
 	try {
 		const files = readdirSync(sessionDir)
 			.filter((f) => f.endsWith(".jsonl"))
-			.map((f) => join(sessionDir, f))
-			.filter(isValidSessionFile)
-			.map((path) => ({ path, mtime: statSync(path).mtime }))
-			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+			.map((f) => {
+				const path = join(sessionDir, f);
+				return { path, mtime: statSync(path).mtimeMs };
+			})
+			.sort((a, b) => b.mtime - a.mtime);
 
-		return files[0]?.path || null;
+		for (const { path } of files) {
+			if (isValidSessionFile(path)) return path;
+		}
+		return null;
 	} catch {
 		return null;
 	}
@@ -757,6 +761,9 @@ export class SessionManager {
 
 			this._buildIndex();
 			this.flushed = true;
+			this._hasAssistantMessage = this.fileEntries.some(
+				(e) => e.type === "message" && e.message.role === "assistant",
+			);
 		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
@@ -780,6 +787,7 @@ export class SessionManager {
 		this.labelsById.clear();
 		this.leafId = null;
 		this.flushed = false;
+		this._hasAssistantMessage = false;
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -835,20 +843,23 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
+	private _hasAssistantMessage = false;
+
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
-		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-		if (!hasAssistant) {
-			// Mark as not flushed so when assistant arrives, all entries get written
-			this.flushed = false;
-			return;
+		if (!this._hasAssistantMessage) {
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				this._hasAssistantMessage = true;
+			} else {
+				this.flushed = false;
+				return;
+			}
 		}
 
 		if (!this.flushed) {
-			for (const e of this.fileEntries) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(e)}\n`);
-			}
+			const batch = this.fileEntries.map((e) => `${JSON.stringify(e)}\n`).join("");
+			appendFileSync(this.sessionFile, batch);
 			this.flushed = true;
 		} else {
 			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
@@ -1261,13 +1272,10 @@ export class SessionManager {
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
 
-			// Only write the file now if it contains an assistant message.
-			// Otherwise defer to _persist(), which creates the file on the
-			// first assistant response, matching the newSession() contract
-			// and avoiding the duplicate-header bug when _persist()'s
-			// no-assistant guard later resets flushed to false.
-			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
-			if (hasAssistant) {
+			this._hasAssistantMessage = this.fileEntries.some(
+				(e) => e.type === "message" && e.message.role === "assistant",
+			);
+			if (this._hasAssistantMessage) {
 				this._rewriteFile();
 				this.flushed = true;
 			} else {

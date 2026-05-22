@@ -545,14 +545,21 @@ export class ExtensionRunner {
 		}
 	}
 
+	private _handlerExistsCache = new Map<string, boolean>();
+
 	hasHandlers(eventType: string): boolean {
+		const cached = this._handlerExistsCache.get(eventType);
+		if (cached !== undefined) return cached;
+		let found = false;
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get(eventType);
 			if (handlers && handlers.length > 0) {
-				return true;
+				found = true;
+				break;
 			}
 		}
-		return false;
+		this._handlerExistsCache.set(eventType, found);
+		return found;
 	}
 
 	getMessageRenderer(customType: string): MessageRenderer | undefined {

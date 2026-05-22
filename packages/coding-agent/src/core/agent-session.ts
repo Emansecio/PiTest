@@ -39,6 +39,7 @@ import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
+	type CompactionPreparation,
 	type CompactionResult,
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
@@ -60,7 +61,6 @@ import {
 	ExtensionRunner,
 	type ExtensionUIContext,
 	type InputSource,
-	type MessageEndEvent,
 	type MessageStartEvent,
 	type MessageUpdateEvent,
 	type ReplacedSessionContext,
@@ -85,7 +85,7 @@ import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
-import type { BranchSummaryEntry, CompactionEntry, SessionManager } from "./session-manager.js";
+import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.js";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
@@ -97,32 +97,8 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.js"
 import { createAllToolDefinitions } from "./tools/index.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 
-// ============================================================================
-// Skill Block Parsing
-// ============================================================================
-
-/** Parsed skill block from a user message */
-export interface ParsedSkillBlock {
-	name: string;
-	location: string;
-	content: string;
-	userMessage: string | undefined;
-}
-
-/**
- * Parse a skill block from message text.
- * Returns null if the text doesn't contain a skill block.
- */
-export function parseSkillBlock(text: string): ParsedSkillBlock | null {
-	const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
-	if (!match) return null;
-	return {
-		name: match[1],
-		location: match[2],
-		content: match[3],
-		userMessage: match[4]?.trim() || undefined,
-	};
-}
+// Re-export skill-parser utilities (moved to dedicated module)
+export { type ParsedSkillBlock, parseSkillBlock } from "./skill-parser.ts";
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
@@ -420,53 +396,54 @@ export class AgentSession {
 	 * registered tool execution to the extension context. Tool call and tool result interception now
 	 * happens here instead of in wrappers.
 	 */
+	private static readonly _resolvedUndefined = Promise.resolve(undefined);
+
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+		this.agent.beforeToolCall = ({ toolCall, args }) => {
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
-				return undefined;
+				return AgentSession._resolvedUndefined;
 			}
 
-			try {
-				return await runner.emitToolCall({
+			return runner
+				.emitToolCall({
 					type: "tool_call",
 					toolName: toolCall.name,
 					toolCallId: toolCall.id,
 					input: args as Record<string, unknown>,
+				})
+				.catch((err) => {
+					if (err instanceof Error) {
+						throw err;
+					}
+					throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 				});
-			} catch (err) {
-				if (err instanceof Error) {
-					throw err;
-				}
-				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
-			}
 		};
 
-		this.agent.afterToolCall = async ({ toolCall, args, result, isError }) => {
+		this.agent.afterToolCall = ({ toolCall, args, result, isError }) => {
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_result")) {
-				return undefined;
+				return AgentSession._resolvedUndefined;
 			}
 
-			const hookResult = await runner.emitToolResult({
-				type: "tool_result",
-				toolName: toolCall.name,
-				toolCallId: toolCall.id,
-				input: args as Record<string, unknown>,
-				content: result.content,
-				details: result.details,
-				isError,
-			});
-
-			if (!hookResult) {
-				return undefined;
-			}
-
-			return {
-				content: hookResult.content,
-				details: hookResult.details,
-				isError: hookResult.isError ?? isError,
-			};
+			return runner
+				.emitToolResult({
+					type: "tool_result",
+					toolName: toolCall.name,
+					toolCallId: toolCall.id,
+					input: args as Record<string, unknown>,
+					content: result.content,
+					details: result.details,
+					isError,
+				})
+				.then((hookResult) => {
+					if (!hookResult) return undefined;
+					return {
+						content: hookResult.content,
+						details: hookResult.details,
+						isError: hookResult.isError ?? isError,
+					};
+				});
 		};
 	}
 
@@ -484,8 +461,8 @@ export class AgentSession {
 	private _emitQueueUpdate(): void {
 		this._emit({
 			type: "queue_update",
-			steering: [...this._steeringMessages],
-			followUp: [...this._followUpMessages],
+			steering: this._steeringMessages,
+			followUp: this._followUpMessages,
 		});
 	}
 
@@ -620,95 +597,124 @@ export class AgentSession {
 
 	/** Emit extension events based on agent events */
 	private async _emitExtensionEvent(event: AgentEvent): Promise<void> {
-		if (event.type === "agent_start") {
-			this._turnIndex = 0;
-			await this._extensionRunner.emit({ type: "agent_start" });
-		} else if (event.type === "agent_end") {
-			// Drop any in-flight tool-call args (they would leak otherwise on aborted turns).
-			this._toolCallArgsByCallId.clear();
-			await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
-		} else if (event.type === "turn_start") {
-			const extensionEvent: TurnStartEvent = {
-				type: "turn_start",
-				turnIndex: this._turnIndex,
-				timestamp: Date.now(),
-			};
-			await this._extensionRunner.emit(extensionEvent);
-		} else if (event.type === "turn_end") {
-			const extensionEvent: TurnEndEvent = {
-				type: "turn_end",
-				turnIndex: this._turnIndex,
-				message: event.message,
-				toolResults: event.toolResults,
-			};
-			await this._extensionRunner.emit(extensionEvent);
-			this._turnIndex++;
-		} else if (event.type === "message_start") {
-			const extensionEvent: MessageStartEvent = {
-				type: "message_start",
-				message: event.message,
-			};
-			await this._extensionRunner.emit(extensionEvent);
-		} else if (event.type === "message_update") {
-			const extensionEvent: MessageUpdateEvent = {
-				type: "message_update",
-				message: event.message,
-				assistantMessageEvent: event.assistantMessageEvent,
-			};
-			await this._extensionRunner.emit(extensionEvent);
-		} else if (event.type === "message_end") {
-			const extensionEvent: MessageEndEvent = {
-				type: "message_end",
-				message: event.message,
-			};
-			const replacement = await this._extensionRunner.emitMessageEnd(extensionEvent);
-			if (replacement) {
-				this._replaceMessageInPlace(event.message, replacement);
-			}
-		} else if (event.type === "tool_execution_start") {
-			this._toolCallStats.recordInvocation(event.toolName, fingerprintToolArgs(event.args));
-			this._toolCallArgsByCallId.set(event.toolCallId, event.args);
-			this._maybeInjectDoomLoopReminder(event.toolName, event.args);
-			const extensionEvent: ToolExecutionStartEvent = {
-				type: "tool_execution_start",
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				args: event.args,
-			};
-			await this._extensionRunner.emit(extensionEvent);
-		} else if (event.type === "tool_execution_update") {
-			const extensionEvent: ToolExecutionUpdateEvent = {
-				type: "tool_execution_update",
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				args: event.args,
-				partialResult: event.partialResult,
-			};
-			await this._extensionRunner.emit(extensionEvent);
-		} else if (event.type === "tool_execution_end") {
-			this._toolCallStats.record(
-				event.toolName,
-				event.isError,
-				event.isError ? extractErrorMessage(event.result?.content) : undefined,
-			);
-			const args = this._toolCallArgsByCallId.get(event.toolCallId);
-			this._toolCallArgsByCallId.delete(event.toolCallId);
-			if (event.isError) {
-				this._maybeInjectToolErrorReflection(event.toolName, args, event.result);
-			} else {
-				const fileOp = extractToolFileOp(event.toolName, args);
-				if (fileOp) {
-					this._frequentFiles.record(fileOp.path, fileOp.op);
+		switch (event.type) {
+			case "agent_start":
+				this._turnIndex = 0;
+				if (this._extensionRunner.hasHandlers("agent_start")) {
+					await this._extensionRunner.emit({ type: "agent_start" });
 				}
+				break;
+			case "agent_end":
+				this._toolCallArgsByCallId.clear();
+				if (this._extensionRunner.hasHandlers("agent_end")) {
+					await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
+				}
+				break;
+			case "turn_start":
+				if (this._extensionRunner.hasHandlers("turn_start")) {
+					await this._extensionRunner.emit({
+						type: "turn_start",
+						turnIndex: this._turnIndex,
+						timestamp: Date.now(),
+					} satisfies TurnStartEvent);
+				}
+				break;
+			case "turn_end":
+				if (this._extensionRunner.hasHandlers("turn_end")) {
+					await this._extensionRunner.emit({
+						type: "turn_end",
+						turnIndex: this._turnIndex,
+						message: event.message,
+						toolResults: event.toolResults,
+					} satisfies TurnEndEvent);
+				}
+				this._turnIndex++;
+				break;
+			case "message_start":
+				if (this._extensionRunner.hasHandlers("message_start")) {
+					await this._extensionRunner.emit({
+						type: "message_start",
+						message: event.message,
+					} satisfies MessageStartEvent);
+				}
+				break;
+			case "message_update":
+				if (this._extensionRunner.hasHandlers("message_update")) {
+					await this._extensionRunner.emit({
+						type: "message_update",
+						message: event.message,
+						assistantMessageEvent: event.assistantMessageEvent,
+					} satisfies MessageUpdateEvent);
+				}
+				break;
+			case "message_end": {
+				const replacement = await this._extensionRunner.emitMessageEnd({
+					type: "message_end",
+					message: event.message,
+				});
+				if (replacement) {
+					this._replaceMessageInPlace(event.message, replacement);
+				}
+				break;
 			}
-			const extensionEvent: ToolExecutionEndEvent = {
-				type: "tool_execution_end",
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				result: event.result,
-				isError: event.isError,
-			};
-			await this._extensionRunner.emit(extensionEvent);
+			case "tool_execution_start":
+				this._handleToolExecutionStart(event);
+				if (this._extensionRunner.hasHandlers("tool_execution_start")) {
+					await this._extensionRunner.emit({
+						type: "tool_execution_start",
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						args: event.args,
+					} satisfies ToolExecutionStartEvent);
+				}
+				break;
+			case "tool_execution_update":
+				if (this._extensionRunner.hasHandlers("tool_execution_update")) {
+					await this._extensionRunner.emit({
+						type: "tool_execution_update",
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						args: event.args,
+						partialResult: event.partialResult,
+					} satisfies ToolExecutionUpdateEvent);
+				}
+				break;
+			case "tool_execution_end":
+				this._handleToolExecutionEnd(event);
+				if (this._extensionRunner.hasHandlers("tool_execution_end")) {
+					await this._extensionRunner.emit({
+						type: "tool_execution_end",
+						toolCallId: event.toolCallId,
+						toolName: event.toolName,
+						result: event.result,
+						isError: event.isError,
+					} satisfies ToolExecutionEndEvent);
+				}
+				break;
+		}
+	}
+
+	private _handleToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
+		this._toolCallStats.recordInvocation(event.toolName, fingerprintToolArgs(event.args));
+		this._toolCallArgsByCallId.set(event.toolCallId, event.args);
+		this._maybeInjectDoomLoopReminder(event.toolName, event.args);
+	}
+
+	private _handleToolExecutionEnd(event: Extract<AgentEvent, { type: "tool_execution_end" }>): void {
+		this._toolCallStats.record(
+			event.toolName,
+			event.isError,
+			event.isError ? extractErrorMessage(event.result?.content) : undefined,
+		);
+		const args = this._toolCallArgsByCallId.get(event.toolCallId);
+		this._toolCallArgsByCallId.delete(event.toolCallId);
+		if (event.isError) {
+			this._maybeInjectToolErrorReflection(event.toolName, args, event.result);
+		} else {
+			const fileOp = extractToolFileOp(event.toolName, args);
+			if (fileOp) {
+				this._frequentFiles.record(fileOp.path, fileOp.op);
+			}
 		}
 	}
 
@@ -1783,6 +1789,90 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
+	 * Shared compaction pipeline: extension negotiation → LLM compact → persist → rebuild.
+	 * Both manual compact() and auto _runAutoCompaction() delegate here.
+	 * Throws on cancellation or LLM failure; callers handle error semantics.
+	 */
+	private async _executeCompactionPipeline(options: {
+		preparation: CompactionPreparation;
+		pathEntries: SessionEntry[];
+		model: Model<any>;
+		apiKey: string | undefined;
+		headers: Record<string, string> | undefined;
+		abortSignal: AbortSignal;
+		customInstructions?: string;
+	}): Promise<CompactionResult> {
+		const { preparation, pathEntries, model, apiKey, headers, abortSignal, customInstructions } = options;
+		let extensionCompaction: CompactionResult | undefined;
+		let fromExtension = false;
+
+		if (this._extensionRunner.hasHandlers("session_before_compact")) {
+			const result = (await this._extensionRunner.emit({
+				type: "session_before_compact",
+				preparation,
+				branchEntries: pathEntries,
+				customInstructions,
+				signal: abortSignal,
+			})) as SessionBeforeCompactResult | undefined;
+
+			if (result?.cancel) {
+				throw new Error("Compaction cancelled");
+			}
+
+			if (result?.compaction) {
+				extensionCompaction = result.compaction;
+				fromExtension = true;
+			}
+		}
+
+		let summary: string;
+		let firstKeptEntryId: string;
+		let tokensBefore: number;
+		let details: unknown;
+
+		if (extensionCompaction) {
+			({ summary, firstKeptEntryId, tokensBefore, details } = extensionCompaction);
+		} else {
+			const result = await compact(
+				preparation,
+				model,
+				apiKey,
+				headers,
+				customInstructions,
+				abortSignal,
+				this.thinkingLevel,
+				this.agent.streamFn,
+			);
+			({ summary, firstKeptEntryId, tokensBefore, details } = result);
+		}
+
+		if (abortSignal.aborted) {
+			throw new Error("Compaction cancelled");
+		}
+
+		const compactionId = this.sessionManager.appendCompaction(
+			summary,
+			firstKeptEntryId,
+			tokensBefore,
+			details,
+			fromExtension,
+		);
+		const sessionContext = this.sessionManager.buildSessionContext();
+		this.agent.state.messages = sessionContext.messages;
+
+		const savedCompactionEntry = this.sessionManager.getEntry(compactionId) as CompactionEntry | undefined;
+		if (this._extensionRunner && savedCompactionEntry) {
+			await this._extensionRunner.emit({
+				type: "session_compact",
+				compactionEntry: savedCompactionEntry,
+				fromExtension,
+			});
+		}
+
+		return { summary, firstKeptEntryId, tokensBefore, details };
+	}
+
+	/**
 	 * Manually compact the session context.
 	 * Aborts current agent operation first.
 	 * @param customInstructions Optional instructions for the compaction summary
@@ -1806,7 +1896,6 @@ export class AgentSession {
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (preparation) preparation.cwd = this._cwd;
 			if (!preparation) {
-				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
 				if (lastEntry?.type === "compaction") {
 					throw new Error("Already compacted");
@@ -1814,85 +1903,16 @@ export class AgentSession {
 				throw new Error("Nothing to compact (session too small)");
 			}
 
-			let extensionCompaction: CompactionResult | undefined;
-			let fromExtension = false;
+			const compactionResult = await this._executeCompactionPipeline({
+				preparation,
+				pathEntries,
+				model: this.model,
+				apiKey,
+				headers,
+				abortSignal: this._compactionAbortController.signal,
+				customInstructions,
+			});
 
-			if (this._extensionRunner.hasHandlers("session_before_compact")) {
-				const result = (await this._extensionRunner.emit({
-					type: "session_before_compact",
-					preparation,
-					branchEntries: pathEntries,
-					customInstructions,
-					signal: this._compactionAbortController.signal,
-				})) as SessionBeforeCompactResult | undefined;
-
-				if (result?.cancel) {
-					throw new Error("Compaction cancelled");
-				}
-
-				if (result?.compaction) {
-					extensionCompaction = result.compaction;
-					fromExtension = true;
-				}
-			}
-
-			let summary: string;
-			let firstKeptEntryId: string;
-			let tokensBefore: number;
-			let details: unknown;
-
-			if (extensionCompaction) {
-				// Extension provided compaction content
-				summary = extensionCompaction.summary;
-				firstKeptEntryId = extensionCompaction.firstKeptEntryId;
-				tokensBefore = extensionCompaction.tokensBefore;
-				details = extensionCompaction.details;
-			} else {
-				// Generate compaction result
-				const result = await compact(
-					preparation,
-					this.model,
-					apiKey,
-					headers,
-					customInstructions,
-					this._compactionAbortController.signal,
-					this.thinkingLevel,
-					this.agent.streamFn,
-				);
-				summary = result.summary;
-				firstKeptEntryId = result.firstKeptEntryId;
-				tokensBefore = result.tokensBefore;
-				details = result.details;
-			}
-
-			if (this._compactionAbortController.signal.aborted) {
-				throw new Error("Compaction cancelled");
-			}
-
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension);
-			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
-
-			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
-			if (this._extensionRunner && savedCompactionEntry) {
-				await this._extensionRunner.emit({
-					type: "session_compact",
-					compactionEntry: savedCompactionEntry,
-					fromExtension,
-				});
-			}
-
-			const compactionResult = {
-				summary,
-				firstKeptEntryId,
-				tokensBefore,
-				details,
-			};
 			this._emit({
 				type: "compaction_end",
 				reason: "manual",
@@ -2027,22 +2047,20 @@ export class AgentSession {
 
 	/**
 	 * Internal: Run auto-compaction with events.
+	 * Validates model/auth/preparation locally (silent failure → return false),
+	 * then delegates to shared _executeCompactionPipeline.
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
+		const emitSilentEnd = () =>
+			this._emit({ type: "compaction_end", reason, result: undefined, aborted: false, willRetry: false });
 
 		this._emit({ type: "compaction_start", reason });
 		this._autoCompactionAbortController = new AbortController();
 
 		try {
 			if (!this.model) {
-				this._emit({
-					type: "compaction_end",
-					reason,
-					result: undefined,
-					aborted: false,
-					willRetry: false,
-				});
+				emitSilentEnd();
 				return false;
 			}
 
@@ -2051,13 +2069,7 @@ export class AgentSession {
 			if (this.agent.streamFn === streamSimple) {
 				const authResult = await this._modelRegistry.getApiKeyAndHeaders(this.model);
 				if (!authResult.ok || !authResult.apiKey) {
-					this._emit({
-						type: "compaction_end",
-						reason,
-						result: undefined,
-						aborted: false,
-						willRetry: false,
-					});
+					emitSilentEnd();
 					return false;
 				}
 				apiKey = authResult.apiKey;
@@ -2067,113 +2079,22 @@ export class AgentSession {
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
-
 			const preparation = prepareCompaction(pathEntries, settings);
 			if (preparation) preparation.cwd = this._cwd;
 			if (!preparation) {
-				this._emit({
-					type: "compaction_end",
-					reason,
-					result: undefined,
-					aborted: false,
-					willRetry: false,
-				});
+				emitSilentEnd();
 				return false;
 			}
 
-			let extensionCompaction: CompactionResult | undefined;
-			let fromExtension = false;
+			const result = await this._executeCompactionPipeline({
+				preparation,
+				pathEntries,
+				model: this.model,
+				apiKey,
+				headers,
+				abortSignal: this._autoCompactionAbortController.signal,
+			});
 
-			if (this._extensionRunner.hasHandlers("session_before_compact")) {
-				const extensionResult = (await this._extensionRunner.emit({
-					type: "session_before_compact",
-					preparation,
-					branchEntries: pathEntries,
-					customInstructions: undefined,
-					signal: this._autoCompactionAbortController.signal,
-				})) as SessionBeforeCompactResult | undefined;
-
-				if (extensionResult?.cancel) {
-					this._emit({
-						type: "compaction_end",
-						reason,
-						result: undefined,
-						aborted: true,
-						willRetry: false,
-					});
-					return false;
-				}
-
-				if (extensionResult?.compaction) {
-					extensionCompaction = extensionResult.compaction;
-					fromExtension = true;
-				}
-			}
-
-			let summary: string;
-			let firstKeptEntryId: string;
-			let tokensBefore: number;
-			let details: unknown;
-
-			if (extensionCompaction) {
-				// Extension provided compaction content
-				summary = extensionCompaction.summary;
-				firstKeptEntryId = extensionCompaction.firstKeptEntryId;
-				tokensBefore = extensionCompaction.tokensBefore;
-				details = extensionCompaction.details;
-			} else {
-				// Generate compaction result
-				const compactResult = await compact(
-					preparation,
-					this.model,
-					apiKey,
-					headers,
-					undefined,
-					this._autoCompactionAbortController.signal,
-					this.thinkingLevel,
-					this.agent.streamFn,
-				);
-				summary = compactResult.summary;
-				firstKeptEntryId = compactResult.firstKeptEntryId;
-				tokensBefore = compactResult.tokensBefore;
-				details = compactResult.details;
-			}
-
-			if (this._autoCompactionAbortController.signal.aborted) {
-				this._emit({
-					type: "compaction_end",
-					reason,
-					result: undefined,
-					aborted: true,
-					willRetry: false,
-				});
-				return false;
-			}
-
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension);
-			const newEntries = this.sessionManager.getEntries();
-			const sessionContext = this.sessionManager.buildSessionContext();
-			this.agent.state.messages = sessionContext.messages;
-
-			// Get the saved compaction entry for the extension event
-			const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-				| CompactionEntry
-				| undefined;
-
-			if (this._extensionRunner && savedCompactionEntry) {
-				await this._extensionRunner.emit({
-					type: "session_compact",
-					compactionEntry: savedCompactionEntry,
-					fromExtension,
-				});
-			}
-
-			const result: CompactionResult = {
-				summary,
-				firstKeptEntryId,
-				tokensBefore,
-				details,
-			};
 			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 
 			if (willRetry) {
@@ -2185,21 +2106,21 @@ export class AgentSession {
 				return true;
 			}
 
-			// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
-			// Continue once so queued messages are delivered.
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
-			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			const message = error instanceof Error ? error.message : "compaction failed";
+			const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
 			this._emit({
 				type: "compaction_end",
 				reason,
 				result: undefined,
-				aborted: false,
+				aborted,
 				willRetry: false,
-				errorMessage:
-					reason === "overflow"
-						? `Context overflow recovery failed: ${errorMessage}`
-						: `Auto-compaction failed: ${errorMessage}`,
+				errorMessage: aborted
+					? undefined
+					: reason === "overflow"
+						? `Context overflow recovery failed: ${message}`
+						: `Auto-compaction failed: ${message}`,
 			});
 			return false;
 		} finally {
