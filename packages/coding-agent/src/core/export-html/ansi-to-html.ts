@@ -60,13 +60,17 @@ function color256ToHex(index: number): string {
 /**
  * Escape HTML special characters.
  */
+const HTML_ESCAPE_MAP: Record<string, string> = {
+	"&": "&amp;",
+	"<": "&lt;",
+	">": "&gt;",
+	'"': "&quot;",
+	"'": "&#039;",
+};
+const HTML_ESCAPE_RE = /[&<>"']/g;
+
 function escapeHtml(text: string): string {
-	return text
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&#039;");
+	return text.replace(HTML_ESCAPE_RE, (ch) => HTML_ESCAPE_MAP[ch]);
 }
 
 interface TextStyle {

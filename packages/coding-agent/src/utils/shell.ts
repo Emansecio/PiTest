@@ -54,8 +54,18 @@ function findBashOnPath(): string | null {
  * 2. On Windows: Git Bash in known locations, then bash on PATH
  * 3. On Unix: /bin/bash, then bash on PATH, then fallback to sh
  */
+const shellConfigCache = new Map<string, ShellConfig>();
+
 export function getShellConfig(customShellPath?: string): ShellConfig {
-	// 1. Check user-specified shell path
+	const cacheKey = customShellPath ?? "";
+	const cached = shellConfigCache.get(cacheKey);
+	if (cached) return cached;
+	const config = resolveShellConfig(customShellPath);
+	shellConfigCache.set(cacheKey, config);
+	return config;
+}
+
+function resolveShellConfig(customShellPath?: string): ShellConfig {
 	if (customShellPath) {
 		if (existsSync(customShellPath)) {
 			return { shell: customShellPath, args: ["-c"] };
@@ -64,7 +74,6 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	}
 
 	if (process.platform === "win32") {
-		// 2. Try Git Bash in known locations
 		const paths: string[] = [];
 		const programFiles = process.env.ProgramFiles;
 		if (programFiles) {
@@ -81,7 +90,6 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 			}
 		}
 
-		// 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
 		const bashOnPath = findBashOnPath();
 		if (bashOnPath) {
 			return { shell: bashOnPath, args: ["-c"] };
@@ -96,7 +104,6 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 		);
 	}
 
-	// Unix: try /bin/bash, then bash on PATH, then fallback to sh
 	if (existsSync("/bin/bash")) {
 		return { shell: "/bin/bash", args: ["-c"] };
 	}
@@ -109,7 +116,11 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	return { shell: "sh", args: ["-c"] };
 }
 
+let _cachedShellEnv: NodeJS.ProcessEnv | undefined;
+
 export function getShellEnv(): NodeJS.ProcessEnv {
+	if (_cachedShellEnv) return _cachedShellEnv;
+
 	const binDir = getBinDir();
 	const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";
 	const currentPath = process.env[pathKey] ?? "";
@@ -117,10 +128,11 @@ export function getShellEnv(): NodeJS.ProcessEnv {
 	const hasBinDir = pathEntries.includes(binDir);
 	const updatedPath = hasBinDir ? currentPath : [binDir, currentPath].filter(Boolean).join(delimiter);
 
-	return {
+	_cachedShellEnv = {
 		...process.env,
 		[pathKey]: updatedPath,
 	};
+	return _cachedShellEnv;
 }
 
 /**
@@ -131,36 +143,10 @@ export function getShellEnv(): NodeJS.ProcessEnv {
  * - Unicode Format characters (crash string-width due to a bug)
  * - Characters with undefined code points
  */
+const SANITIZE_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f￹-￻]/g;
+
 export function sanitizeBinaryOutput(str: string): string {
-	// Use Array.from to properly iterate over code points (not code units)
-	// This handles surrogate pairs correctly and catches edge cases where
-	// codePointAt() might return undefined
-	return Array.from(str)
-		.filter((char) => {
-			// Filter out characters that cause string-width to crash
-			// This includes:
-			// - Unicode format characters
-			// - Lone surrogates (already filtered by Array.from)
-			// - Control chars except \t \n \r
-			// - Characters with undefined code points
-
-			const code = char.codePointAt(0);
-
-			// Skip if code point is undefined (edge case with invalid strings)
-			if (code === undefined) return false;
-
-			// Allow tab, newline, carriage return
-			if (code === 0x09 || code === 0x0a || code === 0x0d) return true;
-
-			// Filter out control characters (0x00-0x1F, except 0x09, 0x0a, 0x0x0d)
-			if (code <= 0x1f) return false;
-
-			// Filter out Unicode format characters
-			if (code >= 0xfff9 && code <= 0xfffb) return false;
-
-			return true;
-		})
-		.join("");
+	return str.replace(SANITIZE_RE, "");
 }
 
 /**

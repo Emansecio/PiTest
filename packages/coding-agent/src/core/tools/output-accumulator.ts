@@ -171,12 +171,11 @@ export class OutputAccumulator {
 	}
 
 	private trimTail(): void {
-		const buffer = Buffer.from(this.tailText, "utf-8");
-		if (buffer.length <= this.maxRollingBytes) {
-			this.tailBytes = buffer.length;
+		if (this.tailBytes <= this.maxRollingBytes) {
 			return;
 		}
 
+		const buffer = Buffer.from(this.tailText, "utf-8");
 		let start = buffer.length - this.maxRollingBytes;
 		while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) {
 			start++;
@@ -184,7 +183,7 @@ export class OutputAccumulator {
 
 		this.tailStartsAtLineBoundary = start === 0 ? this.tailStartsAtLineBoundary : buffer[start - 1] === 0x0a;
 		this.tailText = buffer.subarray(start).toString("utf-8");
-		this.tailBytes = byteLength(this.tailText);
+		this.tailBytes = buffer.length - start;
 	}
 
 	private getSnapshotText(): string {

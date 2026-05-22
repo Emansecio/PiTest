@@ -9,6 +9,8 @@ export interface FuzzyMatch {
 	score: number;
 }
 
+const BOUNDARY_CHARS = new Set([" ", "\t", "\n", "\r", "-", "_", ".", "/", ":"]);
+
 export function fuzzyMatch(query: string, text: string): FuzzyMatch {
 	const queryLower = query.toLowerCase();
 	const textLower = text.toLowerCase();
@@ -29,7 +31,7 @@ export function fuzzyMatch(query: string, text: string): FuzzyMatch {
 
 		for (let i = 0; i < textLower.length && queryIndex < normalizedQuery.length; i++) {
 			if (textLower[i] === normalizedQuery[queryIndex]) {
-				const isWordBoundary = i === 0 || /[\s\-_./:]/.test(textLower[i - 1]!);
+				const isWordBoundary = i === 0 || BOUNDARY_CHARS.has(textLower[i - 1]!);
 
 				// Reward consecutive matches
 				if (lastMatchIndex === i - 1) {

@@ -30,14 +30,14 @@ function escapeControlCharacter(char: string): string {
  * - doubling backslashes before invalid escape characters
  */
 export function repairJson(json: string): string {
-	let repaired = "";
+	const parts: string[] = [];
 	let inString = false;
 
 	for (let index = 0; index < json.length; index++) {
 		const char = json[index];
 
 		if (!inString) {
-			repaired += char;
+			parts.push(char!);
 			if (char === '"') {
 				inString = true;
 			}
@@ -45,7 +45,7 @@ export function repairJson(json: string): string {
 		}
 
 		if (char === '"') {
-			repaired += char;
+			parts.push(char);
 			inString = false;
 			continue;
 		}
@@ -53,33 +53,33 @@ export function repairJson(json: string): string {
 		if (char === "\\") {
 			const nextChar = json[index + 1];
 			if (nextChar === undefined) {
-				repaired += "\\\\";
+				parts.push("\\\\");
 				continue;
 			}
 
 			if (nextChar === "u") {
 				const unicodeDigits = json.slice(index + 2, index + 6);
 				if (/^[0-9a-fA-F]{4}$/.test(unicodeDigits)) {
-					repaired += `\\u${unicodeDigits}`;
+					parts.push(`\\u${unicodeDigits}`);
 					index += 5;
 					continue;
 				}
 			}
 
 			if (VALID_JSON_ESCAPES.has(nextChar)) {
-				repaired += `\\${nextChar}`;
+				parts.push(`\\${nextChar}`);
 				index += 1;
 				continue;
 			}
 
-			repaired += "\\\\";
+			parts.push("\\\\");
 			continue;
 		}
 
-		repaired += isControlCharacter(char) ? escapeControlCharacter(char) : char;
+		parts.push(isControlCharacter(char!) ? escapeControlCharacter(char!) : char!);
 	}
 
-	return repaired;
+	return parts.join("");
 }
 
 export function parseJsonWithRepair<T>(json: string): T {
@@ -101,6 +101,35 @@ export function parseJsonWithRepair<T>(json: string): T {
  * @param partialJson The partial JSON string from streaming
  * @returns Parsed object or empty object if parsing fails
  */
+/**
+ * Finalizes streaming JSON into parsed arguments at content_block_stop.
+ * Unlike parseStreamingJson, returns a parseError flag when all parsers
+ * fail on non-empty input so callers can detect corruption.
+ */
+export function finalizeStreamingJson<T = Record<string, unknown>>(
+	partialJson: string | undefined,
+): { value: T; parseError: boolean } {
+	if (!partialJson || partialJson.trim() === "") {
+		return { value: {} as T, parseError: false };
+	}
+
+	try {
+		return { value: parseJsonWithRepair<T>(partialJson), parseError: false };
+	} catch {
+		try {
+			const result = partialParse(partialJson);
+			return { value: (result ?? {}) as T, parseError: result == null };
+		} catch {
+			try {
+				const result = partialParse(repairJson(partialJson));
+				return { value: (result ?? {}) as T, parseError: result == null };
+			} catch {
+				return { value: {} as T, parseError: true };
+			}
+		}
+	}
+}
+
 export function parseStreamingJson<T = Record<string, unknown>>(partialJson: string | undefined): T {
 	if (!partialJson || partialJson.trim() === "") {
 		return {} as T;

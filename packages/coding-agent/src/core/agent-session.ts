@@ -764,10 +764,10 @@ export class AgentSession {
 		if (!cfg.enabled) return;
 		const consecutiveCount = this._toolCallStats.getConsecutiveSimilarCount();
 
-		// Escalation tiers: 3x → reminder, 5x → pause, 8x → abort
-		const TIER1_THRESHOLD = cfg.threshold ?? 3;
-		const TIER2_THRESHOLD = 5;
-		const TIER3_THRESHOLD = 8;
+		// Escalation tiers: 2x → reminder, 4x → pause, 6x → abort
+		const TIER1_THRESHOLD = cfg.threshold ?? 2;
+		const TIER2_THRESHOLD = 4;
+		const TIER3_THRESHOLD = 6;
 
 		if (consecutiveCount < TIER1_THRESHOLD) return;
 

@@ -368,13 +368,17 @@ export function formatSkillsForPrompt(skills: Skill[], maxSkills = 20): string {
 	return lines.join("\n");
 }
 
+const XML_ESCAPE_MAP: Record<string, string> = {
+	"&": "&amp;",
+	"<": "&lt;",
+	">": "&gt;",
+	'"': "&quot;",
+	"'": "&apos;",
+};
+const XML_ESCAPE_RE = /[&<>"']/g;
+
 function escapeXml(str: string): string {
-	return str
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&apos;");
+	return str.replace(XML_ESCAPE_RE, (ch) => XML_ESCAPE_MAP[ch]);
 }
 
 export interface LoadSkillsOptions {

@@ -36,8 +36,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
 	} = options;
-	const resolvedCwd = cwd;
-	const promptCwd = resolvedCwd.replace(/\\/g, "/");
+	const promptCwd = cwd.replace(/\\/g, "/");
 
 	const now = new Date();
 	const year = now.getFullYear();
@@ -49,38 +48,32 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	const contextFiles = providedContextFiles ?? [];
 	const skills = providedSkills ?? [];
+	const hasRead = !selectedTools || selectedTools.includes("read");
+
+	const appendTrailingSections = (parts: string[]): void => {
+		if (appendSection) {
+			parts.push(appendSection);
+		}
+		if (contextFiles.length > 0) {
+			parts.push("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n");
+			for (const { path: filePath, content } of contextFiles) {
+				parts.push(`<project_instructions path="${filePath}">\n${content}\n</project_instructions>\n`);
+			}
+			parts.push("</project_context>\n");
+		}
+		if (hasRead && skills.length > 0) {
+			parts.push(formatSkillsForPrompt(skills));
+		}
+		parts.push(`\nCurrent date: ${date}`);
+		parts.push(`\nCurrent working directory: ${promptCwd}`);
+	};
 
 	if (customPrompt) {
-		let prompt = customPrompt;
-
-		if (appendSection) {
-			prompt += appendSection;
-		}
-
-		// Append project context files
-		if (contextFiles.length > 0) {
-			prompt += "\n\n<project_context>\n\n";
-			prompt += "Project-specific instructions and guidelines:\n\n";
-			for (const { path: filePath, content } of contextFiles) {
-				prompt += `<project_instructions path="${filePath}">\n${content}\n</project_instructions>\n\n`;
-			}
-			prompt += "</project_context>\n";
-		}
-
-		// Append skills section (only if read tool is available)
-		const customPromptHasRead = !selectedTools || selectedTools.includes("read");
-		if (customPromptHasRead && skills.length > 0) {
-			prompt += formatSkillsForPrompt(skills);
-		}
-
-		// Add date and working directory last
-		prompt += `\nCurrent date: ${date}`;
-		prompt += `\nCurrent working directory: ${promptCwd}`;
-
-		return prompt;
+		const parts: string[] = [customPrompt];
+		appendTrailingSections(parts);
+		return parts.join("");
 	}
 
-	// Get absolute paths to documentation and examples
 	const readmePath = getReadmePath();
 	const docsPath = getDocsPath();
 	const examplesPath = getExamplesPath();
@@ -107,7 +100,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasGrep = tools.includes("grep");
 	const hasFind = tools.includes("find");
 	const hasLs = tools.includes("ls");
-	const hasRead = tools.includes("read");
 
 	// File exploration guidelines
 	if (hasBash && !hasGrep && !hasFind && !hasLs) {
@@ -167,24 +159,7 @@ ${guidelines}
 When asked about pi itself, its SDK, extensions, themes, skills, or TUI, consult pi documentation at: ${readmePath} (main), ${docsPath} (docs), ${examplesPath} (examples). Resolve docs/... and examples/... relative to those roots, not cwd.`,
 	];
 
-	if (appendSection) {
-		parts.push(appendSection);
-	}
-
-	if (contextFiles.length > 0) {
-		parts.push("\n\n<project_context>\n\nProject-specific instructions and guidelines:\n");
-		for (const { path: filePath, content } of contextFiles) {
-			parts.push(`<project_instructions path="${filePath}">\n${content}\n</project_instructions>\n`);
-		}
-		parts.push("</project_context>\n");
-	}
-
-	if (hasRead && skills.length > 0) {
-		parts.push(formatSkillsForPrompt(skills));
-	}
-
-	parts.push(`\nCurrent date: ${date}`);
-	parts.push(`\nCurrent working directory: ${promptCwd}`);
+	appendTrailingSections(parts);
 
 	return parts.join("");
 }

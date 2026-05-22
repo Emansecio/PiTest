@@ -22,8 +22,10 @@ export function buildSessionContext(pathEntries: SessionTreeEntry[]): SessionCon
 	let thinkingLevel = "off";
 	let model: { provider: string; modelId: string } | null = null;
 	let compaction: CompactionEntry | null = null;
+	let compactionIdx = -1;
 
-	for (const entry of pathEntries) {
+	for (let i = 0; i < pathEntries.length; i++) {
+		const entry = pathEntries[i]!;
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel;
 		} else if (entry.type === "model_change") {
@@ -32,6 +34,7 @@ export function buildSessionContext(pathEntries: SessionTreeEntry[]): SessionCon
 			model = { provider: entry.message.provider, modelId: entry.message.model };
 		} else if (entry.type === "compaction") {
 			compaction = entry;
+			compactionIdx = i;
 		}
 	}
 
@@ -56,7 +59,6 @@ export function buildSessionContext(pathEntries: SessionTreeEntry[]): SessionCon
 
 	if (compaction) {
 		messages.push(createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp));
-		const compactionIdx = pathEntries.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
 		let foundFirstKept = false;
 		for (let i = 0; i < compactionIdx; i++) {
 			const entry = pathEntries[i]!;

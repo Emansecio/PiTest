@@ -422,12 +422,17 @@ async function streamAssistantResponse(
 /**
  * Execute tool calls from an assistant message.
  */
+const toolMapCache = new WeakMap<AgentTool<any>[], Map<string, AgentTool<any>>>();
+
 function buildToolMap(tools: AgentTool<any>[] | undefined): Map<string, AgentTool<any>> {
+	if (!tools) return new Map();
+	const cached = toolMapCache.get(tools);
+	if (cached) return cached;
 	const map = new Map<string, AgentTool<any>>();
-	if (!tools) return map;
 	for (const tool of tools) {
 		map.set(tool.name, tool);
 	}
+	toolMapCache.set(tools, map);
 	return map;
 }
 

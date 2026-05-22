@@ -178,6 +178,7 @@ export class AgentHarness<
 	private streamOptions: AgentHarnessStreamOptions;
 	private getApiKeyAndHeaders?: AgentHarnessOptions["getApiKeyAndHeaders"];
 	private resources: AgentHarnessResources<TSkill, TPromptTemplate>;
+	private resourcesSnapshot: AgentHarnessResources<TSkill, TPromptTemplate> | null = null;
 	private tools = new Map<string, TTool>();
 	private activeToolNames: string[];
 	private steerQueue: UserMessage[] = [];
@@ -898,10 +899,13 @@ export class AgentHarness<
 	}
 
 	getResources(): AgentHarnessResources<TSkill, TPromptTemplate> {
-		return {
-			skills: this.resources.skills?.slice(),
-			promptTemplates: this.resources.promptTemplates?.slice(),
-		};
+		if (!this.resourcesSnapshot) {
+			this.resourcesSnapshot = {
+				skills: this.resources.skills?.slice(),
+				promptTemplates: this.resources.promptTemplates?.slice(),
+			};
+		}
+		return this.resourcesSnapshot;
 	}
 
 	async setResources(resources: AgentHarnessResources<TSkill, TPromptTemplate>): Promise<void> {
@@ -910,6 +914,7 @@ export class AgentHarness<
 			skills: resources.skills?.slice(),
 			promptTemplates: resources.promptTemplates?.slice(),
 		};
+		this.resourcesSnapshot = null;
 		await this.emitOwn({ type: "resources_update", resources: this.getResources(), previousResources });
 	}
 

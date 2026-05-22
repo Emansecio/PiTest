@@ -62,7 +62,7 @@ export interface ErrorReflectionSettings {
 
 export interface DoomLoopReminderSettings {
 	enabled?: boolean; // default: false (opt-in)
-	threshold?: number; // default: 4 consecutive identical tool calls trigger a reminder
+	threshold?: number; // default: 2 consecutive identical tool calls trigger a reminder
 	cooldownMs?: number; // default: 30000 — minimum gap between reminders to prevent spam
 }
 
@@ -810,7 +810,7 @@ export class SettingsManager {
 	getToolFeedbackSettings(): ResolvedToolFeedbackSettings {
 		const tf = this.settings.toolFeedback;
 		const rawThreshold = tf?.doomLoopReminder?.threshold;
-		const threshold = typeof rawThreshold === "number" && rawThreshold > 0 ? Math.floor(rawThreshold) : 4;
+		const threshold = typeof rawThreshold === "number" && rawThreshold > 0 ? Math.floor(rawThreshold) : 2;
 		const rawCooldown = tf?.doomLoopReminder?.cooldownMs;
 		const cooldownMs = typeof rawCooldown === "number" && rawCooldown >= 0 ? Math.floor(rawCooldown) : 30000;
 		return {

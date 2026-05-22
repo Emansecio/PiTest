@@ -143,7 +143,7 @@ export function getCompactNonPackageExtensionLabel(
 	return segments.join("/");
 }
 
-export function getCompactExtensionLabels(extensions: Array<{ path: string; sourceInfo?: SourceInfo }>): string[] {
+export function getCompactExtensionLabels(extensions: PathItem[]): string[] {
 	const nonPackageExtensions = extensions
 		.map((extension) => {
 			const segments = getCompactDisplayPathSegments(extension.path);
@@ -159,13 +159,18 @@ export function getCompactExtensionLabels(extensions: Array<{ path: string; sour
 		})
 		.filter((extension) => !isPackageSource(extension.sourceInfo));
 
+	const pathToNonPackageIndex = new Map<string, number>();
+	for (let i = 0; i < nonPackageExtensions.length; i++) {
+		pathToNonPackageIndex.set(nonPackageExtensions[i]!.path, i);
+	}
+
 	return extensions.map((extension) => {
 		if (isPackageSource(extension.sourceInfo)) {
 			return getCompactExtensionLabel(extension.path, extension.sourceInfo);
 		}
 
-		const nonPackageIndex = nonPackageExtensions.findIndex((item) => item.path === extension.path);
-		if (nonPackageIndex === -1) {
+		const nonPackageIndex = pathToNonPackageIndex.get(extension.path);
+		if (nonPackageIndex === undefined) {
 			return getCompactPathLabel(extension.path, extension.sourceInfo);
 		}
 
@@ -202,7 +207,7 @@ export function getDisplaySourceInfo(sourceInfo?: SourceInfo): {
 	return { label: source, scopeLabel, color: "accent" };
 }
 
-export function getScopeGroup(sourceInfo?: SourceInfo): "user" | "project" | "path" {
+export function getScopeGroup(sourceInfo?: SourceInfo): ScopeName {
 	const source = sourceInfo?.source ?? "local";
 	const scope = sourceInfo?.scope ?? "project";
 	if (source === "cli" || scope === "temporary") return "path";
@@ -211,19 +216,19 @@ export function getScopeGroup(sourceInfo?: SourceInfo): "user" | "project" | "pa
 	return "path";
 }
 
-export function buildScopeGroups(items: Array<{ path: string; sourceInfo?: SourceInfo }>): Array<{
-	scope: "user" | "project" | "path";
-	paths: Array<{ path: string; sourceInfo?: SourceInfo }>;
-	packages: Map<string, Array<{ path: string; sourceInfo?: SourceInfo }>>;
-}> {
-	const groups: Record<
-		"user" | "project" | "path",
-		{
-			scope: "user" | "project" | "path";
-			paths: Array<{ path: string; sourceInfo?: SourceInfo }>;
-			packages: Map<string, Array<{ path: string; sourceInfo?: SourceInfo }>>;
-		}
-	> = {
+export type ScopeName = "user" | "project" | "path";
+export interface PathItem {
+	path: string;
+	sourceInfo?: SourceInfo;
+}
+export interface ScopeGroup {
+	scope: ScopeName;
+	paths: PathItem[];
+	packages: Map<string, PathItem[]>;
+}
+
+export function buildScopeGroups(items: PathItem[]): ScopeGroup[] {
+	const groups: Record<ScopeName, ScopeGroup> = {
 		user: { scope: "user", paths: [], packages: new Map() },
 		project: { scope: "project", paths: [], packages: new Map() },
 		path: { scope: "path", paths: [], packages: new Map() },
@@ -249,14 +254,10 @@ export function buildScopeGroups(items: Array<{ path: string; sourceInfo?: Sourc
 }
 
 export function formatScopeGroups(
-	groups: Array<{
-		scope: "user" | "project" | "path";
-		paths: Array<{ path: string; sourceInfo?: SourceInfo }>;
-		packages: Map<string, Array<{ path: string; sourceInfo?: SourceInfo }>>;
-	}>,
+	groups: ScopeGroup[],
 	options: {
-		formatPath: (item: { path: string; sourceInfo?: SourceInfo }) => string;
-		formatPackagePath: (item: { path: string; sourceInfo?: SourceInfo }, source: string) => string;
+		formatPath: (item: PathItem) => string;
+		formatPackagePath: (item: PathItem, source: string) => string;
 	},
 ): string {
 	const lines: string[] = [];
@@ -311,6 +312,13 @@ export function formatDiagnostics(
 	sourceInfos: Map<string, SourceInfo>,
 ): string {
 	const lines: string[] = [];
+	const sourceCache = new Map<string, SourceInfo | undefined>();
+	const cachedFindSource = (p: string): SourceInfo | undefined => {
+		if (sourceCache.has(p)) return sourceCache.get(p);
+		const result = findSourceInfoForPath(p, sourceInfos);
+		sourceCache.set(p, result);
+		return result;
+	};
 
 	const collisions = new Map<string, ResourceDiagnostic[]>();
 	const otherDiagnostics: ResourceDiagnostic[] = [];
@@ -332,7 +340,7 @@ export function formatDiagnostics(
 		lines.push(
 			theme.fg(
 				"dim",
-				`    ${theme.fg("success", "✓")} ${formatPathWithSource(first.winnerPath, findSourceInfoForPath(first.winnerPath, sourceInfos))}`,
+				`    ${theme.fg("success", "✓")} ${formatPathWithSource(first.winnerPath, cachedFindSource(first.winnerPath))}`,
 			),
 		);
 		for (const d of collisionList) {
@@ -340,7 +348,7 @@ export function formatDiagnostics(
 				lines.push(
 					theme.fg(
 						"dim",
-						`    ${theme.fg("warning", "✗")} ${formatPathWithSource(d.collision.loserPath, findSourceInfoForPath(d.collision.loserPath, sourceInfos))} (skipped)`,
+						`    ${theme.fg("warning", "✗")} ${formatPathWithSource(d.collision.loserPath, cachedFindSource(d.collision.loserPath))} (skipped)`,
 					),
 				);
 			}
@@ -349,7 +357,7 @@ export function formatDiagnostics(
 
 	for (const d of otherDiagnostics) {
 		if (d.path) {
-			const formattedPath = formatPathWithSource(d.path, findSourceInfoForPath(d.path, sourceInfos));
+			const formattedPath = formatPathWithSource(d.path, cachedFindSource(d.path));
 			lines.push(theme.fg(d.type === "error" ? "error" : "warning", `  ${formattedPath}`));
 			lines.push(theme.fg(d.type === "error" ? "error" : "warning", `    ${d.message}`));
 		} else {

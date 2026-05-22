@@ -220,21 +220,21 @@ export function visibleWidth(str: string): number {
 		clean = clean.replace(/\t/g, "   ");
 	}
 	if (clean.includes("\x1b")) {
-		// Strip supported ANSI/OSC/APC escape sequences in one pass.
-		// This covers CSI styling/cursor codes, OSC hyperlinks and prompt markers,
-		// and APC sequences like CURSOR_MARKER.
-		let stripped = "";
+		const parts: string[] = [];
 		let i = 0;
 		while (i < clean.length) {
-			const ansi = extractAnsiCode(clean, i);
-			if (ansi) {
-				i += ansi.length;
-				continue;
+			const nextEsc = clean.indexOf("\x1b", i);
+			if (nextEsc === -1) {
+				parts.push(clean.slice(i));
+				break;
 			}
-			stripped += clean[i];
-			i++;
+			if (nextEsc > i) {
+				parts.push(clean.slice(i, nextEsc));
+			}
+			const ansi = extractAnsiCode(clean, nextEsc);
+			i = ansi ? nextEsc + ansi.length : nextEsc + 1;
 		}
-		clean = stripped;
+		clean = parts.join("");
 	}
 
 	// Calculate width
@@ -1034,8 +1034,8 @@ export function sliceWithWidth(
 			continue;
 		}
 
-		let textEnd = i;
-		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		const nextEscIdx = line.indexOf("\x1b", i);
+		const textEnd = nextEscIdx === -1 ? line.length : nextEscIdx;
 
 		for (const { segment } of segmenter.segment(line.slice(i, textEnd))) {
 			const w = graphemeWidth(segment);
@@ -1102,8 +1102,8 @@ export function extractSegments(
 			continue;
 		}
 
-		let textEnd = i;
-		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		const nextEscIdx = line.indexOf("\x1b", i);
+		const textEnd = nextEscIdx === -1 ? line.length : nextEscIdx;
 
 		for (const { segment } of segmenter.segment(line.slice(i, textEnd))) {
 			const w = graphemeWidth(segment);

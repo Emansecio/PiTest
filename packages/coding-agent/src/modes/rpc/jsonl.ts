@@ -29,14 +29,18 @@ export function attachJsonlLineReader(stream: Readable, onLine: (line: string) =
 	const onData = (chunk: string | Buffer) => {
 		buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
 
+		let offset = 0;
 		while (true) {
-			const newlineIndex = buffer.indexOf("\n");
+			const newlineIndex = buffer.indexOf("\n", offset);
 			if (newlineIndex === -1) {
-				return;
+				break;
 			}
 
-			emitLine(buffer.slice(0, newlineIndex));
-			buffer = buffer.slice(newlineIndex + 1);
+			emitLine(buffer.slice(offset, newlineIndex));
+			offset = newlineIndex + 1;
+		}
+		if (offset > 0) {
+			buffer = buffer.slice(offset);
 		}
 	};
 

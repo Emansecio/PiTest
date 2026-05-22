@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
-import { readFileSync, statSync } from "fs";
+import { readFile, stat } from "fs/promises";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
@@ -59,8 +59,8 @@ export interface GrepOperations {
 }
 
 const defaultGrepOperations: GrepOperations = {
-	isDirectory: (p) => statSync(p).isDirectory(),
-	readFile: (p) => readFileSync(p, "utf-8"),
+	isDirectory: async (p) => (await stat(p)).isDirectory(),
+	readFile: (p) => readFile(p, "utf-8"),
 };
 
 export interface GrepToolOptions {

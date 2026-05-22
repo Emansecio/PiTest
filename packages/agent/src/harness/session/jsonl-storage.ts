@@ -141,8 +141,8 @@ async function loadJsonlStorage(
 	entries: SessionTreeEntry[];
 	leafId: string | null;
 }> {
-	const content = getFileSystemResultOrThrow(await fs.readTextFile(filePath), `Failed to read session ${filePath}`);
-	const lines = content.split("\n").filter((line) => line.trim());
+	const allLines = getFileSystemResultOrThrow(await fs.readTextLines(filePath), `Failed to read session ${filePath}`);
+	const lines = allLines.filter((line) => line.trim());
 	if (lines.length === 0) {
 		throw invalidSession(filePath, "missing session header");
 	}

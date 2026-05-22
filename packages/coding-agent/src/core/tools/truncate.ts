@@ -69,25 +69,35 @@ export function truncateHead(content: string, options: TruncationOptions = {}): 
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 
 	const totalBytes = Buffer.byteLength(content, "utf-8");
+
+	if (totalBytes <= maxBytes) {
+		let lineCount = 1;
+		let exceedsLines = false;
+		for (let i = 0; i < content.length; i++) {
+			if (content.charCodeAt(i) === 10 && ++lineCount > maxLines) {
+				exceedsLines = true;
+				break;
+			}
+		}
+		if (!exceedsLines) {
+			return {
+				content,
+				truncated: false,
+				truncatedBy: null,
+				totalLines: lineCount,
+				totalBytes,
+				outputLines: lineCount,
+				outputBytes: totalBytes,
+				lastLinePartial: false,
+				firstLineExceedsLimit: false,
+				maxLines,
+				maxBytes,
+			};
+		}
+	}
+
 	const lines = content.split("\n");
 	const totalLines = lines.length;
-
-	// Check if no truncation needed
-	if (totalLines <= maxLines && totalBytes <= maxBytes) {
-		return {
-			content,
-			truncated: false,
-			truncatedBy: null,
-			totalLines,
-			totalBytes,
-			outputLines: totalLines,
-			outputBytes: totalBytes,
-			lastLinePartial: false,
-			firstLineExceedsLimit: false,
-			maxLines,
-			maxBytes,
-		};
-	}
 
 	// Check if first line alone exceeds byte limit
 	const firstLineBytes = Buffer.byteLength(lines[0], "utf-8");
@@ -159,25 +169,35 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 
 	const totalBytes = Buffer.byteLength(content, "utf-8");
+
+	if (totalBytes <= maxBytes) {
+		let lineCount = 1;
+		let exceedsLines = false;
+		for (let i = 0; i < content.length; i++) {
+			if (content.charCodeAt(i) === 10 && ++lineCount > maxLines) {
+				exceedsLines = true;
+				break;
+			}
+		}
+		if (!exceedsLines) {
+			return {
+				content,
+				truncated: false,
+				truncatedBy: null,
+				totalLines: lineCount,
+				totalBytes,
+				outputLines: lineCount,
+				outputBytes: totalBytes,
+				lastLinePartial: false,
+				firstLineExceedsLimit: false,
+				maxLines,
+				maxBytes,
+			};
+		}
+	}
+
 	const lines = content.split("\n");
 	const totalLines = lines.length;
-
-	// Check if no truncation needed
-	if (totalLines <= maxLines && totalBytes <= maxBytes) {
-		return {
-			content,
-			truncated: false,
-			truncatedBy: null,
-			totalLines,
-			totalBytes,
-			outputLines: totalLines,
-			outputBytes: totalBytes,
-			lastLinePartial: false,
-			firstLineExceedsLimit: false,
-			maxLines,
-			maxBytes,
-		};
-	}
 
 	// Work backwards from the end
 	const outputLinesArr: string[] = [];

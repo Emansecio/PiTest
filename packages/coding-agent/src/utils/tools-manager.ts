@@ -321,11 +321,17 @@ const TERMUX_PACKAGES: Record<string, string> = {
 	rg: "ripgrep",
 };
 
+const ensureToolCache = new Map<string, string>();
+
 // Ensure a tool is available, downloading if necessary
 // Returns the path to the tool, or null if unavailable
 export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Promise<string | undefined> {
+	const cached = ensureToolCache.get(tool);
+	if (cached) return cached;
+
 	const existingPath = getToolPath(tool);
 	if (existingPath) {
+		ensureToolCache.set(tool, existingPath);
 		return existingPath;
 	}
 
@@ -359,6 +365,7 @@ export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Pr
 		if (!silent) {
 			console.log(chalk.dim(`${config.name} installed to ${path}`));
 		}
+		ensureToolCache.set(tool, path);
 		return path;
 	} catch (e) {
 		if (!silent) {

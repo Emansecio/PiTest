@@ -272,7 +272,9 @@ export function getPngDimensions(base64Data: string): ImageDimensions | null {
 
 export function getJpegDimensions(base64Data: string): ImageDimensions | null {
 	try {
-		const buffer = Buffer.from(base64Data, "base64");
+		const maxBase64Chars = 131072;
+		const truncated = base64Data.length > maxBase64Chars ? base64Data.slice(0, maxBase64Chars) : base64Data;
+		const buffer = Buffer.from(truncated, "base64");
 
 		if (buffer.length < 2) {
 			return null;

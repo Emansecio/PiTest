@@ -29,7 +29,7 @@ import type {
 } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
+import { finalizeStreamingJson, parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
@@ -501,6 +501,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
 			const blocks = output.content as Block[];
+			const blockIndexMap = new Map<number, number>();
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				if (event.type === "message_start") {
@@ -523,6 +524,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							index: event.index,
 						};
 						output.content.push(block);
+						blockIndexMap.set(event.index, blocks.length - 1);
 						stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "thinking") {
 						const block: Block = {
@@ -532,6 +534,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							index: event.index,
 						};
 						output.content.push(block);
+						blockIndexMap.set(event.index, blocks.length - 1);
 						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "redacted_thinking") {
 						const block: Block = {
@@ -542,6 +545,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							index: event.index,
 						};
 						output.content.push(block);
+						blockIndexMap.set(event.index, blocks.length - 1);
 						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "tool_use") {
 						const block: Block = {
@@ -555,11 +559,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							index: event.index,
 						};
 						output.content.push(block);
+						blockIndexMap.set(event.index, blocks.length - 1);
 						stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 					}
 				} else if (event.type === "content_block_delta") {
 					if (event.delta.type === "text_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
+						const index = blockIndexMap.get(event.index) ?? -1;
 						const block = blocks[index];
 						if (block && block.type === "text") {
 							block.text += event.delta.text;
@@ -571,7 +576,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							});
 						}
 					} else if (event.delta.type === "thinking_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
+						const index = blockIndexMap.get(event.index) ?? -1;
 						const block = blocks[index];
 						if (block && block.type === "thinking") {
 							block.thinking += event.delta.thinking;
@@ -583,11 +588,16 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							});
 						}
 					} else if (event.delta.type === "input_json_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
+						const index = blockIndexMap.get(event.index) ?? -1;
 						const block = blocks[index];
 						if (block && block.type === "toolCall") {
+							const prevKeyCount = Object.keys(block.arguments).length;
 							block.partialJson += event.delta.partial_json;
 							block.arguments = parseStreamingJson(block.partialJson);
+							const newKeyCount = Object.keys(block.arguments).length;
+							if (prevKeyCount > 0 && newKeyCount === 0 && block.partialJson.length > 10) {
+								(block as any)._streamingParseError = true;
+							}
 							stream.push({
 								type: "toolcall_delta",
 								contentIndex: index,
@@ -596,7 +606,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							});
 						}
 					} else if (event.delta.type === "signature_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
+						const index = blockIndexMap.get(event.index) ?? -1;
 						const block = blocks[index];
 						if (block && block.type === "thinking") {
 							block.thinkingSignature = block.thinkingSignature || "";
@@ -604,7 +614,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						}
 					}
 				} else if (event.type === "content_block_stop") {
-					const index = blocks.findIndex((b) => b.index === event.index);
+					const index = blockIndexMap.get(event.index) ?? -1;
 					const block = blocks[index];
 					if (block) {
 						delete (block as any).index;
@@ -623,9 +633,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 								partial: output,
 							});
 						} else if (block.type === "toolCall") {
-							block.arguments = parseStreamingJson(block.partialJson);
-							// Finalize in-place and strip the scratch buffer so replay only
-							// carries parsed arguments.
+							const finalized = finalizeStreamingJson(block.partialJson);
+							block.arguments = finalized.value;
+							if (finalized.parseError && block.partialJson && block.partialJson.length > 2) {
+								(block as any)._streamingParseError = true;
+							}
 							delete (block as { partialJson?: string }).partialJson;
 							stream.push({
 								type: "toolcall_end",

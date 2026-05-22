@@ -1,6 +1,6 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
-import { existsSync, readdirSync, statSync } from "fs";
+import { access, readdir, stat } from "fs/promises";
 import nodePath from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
@@ -42,9 +42,16 @@ export interface LsOperations {
 }
 
 const defaultLsOperations: LsOperations = {
-	exists: existsSync,
-	stat: statSync,
-	readdir: readdirSync,
+	exists: async (p) => {
+		try {
+			await access(p);
+			return true;
+		} catch {
+			return false;
+		}
+	},
+	stat: (p) => stat(p),
+	readdir: (p) => readdir(p),
 };
 
 export interface LsToolOptions {

@@ -192,6 +192,12 @@ function applySchemaArrayCoercion(value: unknown[], schema: JsonSchemaObject): v
 
 function coerceWithUnionSchema(value: unknown, schemas: JsonSchemaObject[]): unknown {
 	for (const schema of schemas) {
+		const validator = getSubSchemaValidator(schema);
+		if (validator?.Check(value)) {
+			return value;
+		}
+	}
+	for (const schema of schemas) {
 		const candidate = structuredClone(value);
 		const coerced = coerceWithJsonSchema(candidate, schema);
 		const validator = getSubSchemaValidator(schema);
@@ -254,6 +260,34 @@ function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
 	return validator;
 }
 
+function summarizeSchemaParams(schema: Tool["parameters"]): string {
+	if (!isJsonSchemaObject(schema) || !schema.properties) return "";
+	const required = new Set<string>((schema as any).required ?? []);
+	const lines: string[] = [];
+	for (const [key, prop] of Object.entries(schema.properties)) {
+		const parts: string[] = [key];
+		if (prop.type) {
+			parts.push(`[${Array.isArray(prop.type) ? prop.type.join("|") : prop.type}]`);
+		}
+		if ((prop as any).enum) {
+			parts.push(`enum: ${JSON.stringify((prop as any).enum)}`);
+		}
+		if (prop.anyOf) {
+			const types = prop.anyOf.map((s) => (s.type as string) || "object");
+			parts.push(`anyOf: [${types.join(", ")}]`);
+		}
+		if (prop.oneOf) {
+			const types = prop.oneOf.map((s) => (s.type as string) || "object");
+			parts.push(`oneOf: [${types.join(", ")}]`);
+		}
+		if (required.has(key)) {
+			parts.push("(required)");
+		}
+		lines.push(`    ${parts.join(" ")}`);
+	}
+	return lines.length > 0 ? `\n  Expected parameters:\n${lines.join("\n")}` : "";
+}
+
 function formatValidationPath(error: TLocalizedValidationError): string {
 	if (error.keyword === "required") {
 		const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
@@ -302,8 +336,8 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 					delete args[key];
 				}
 				Object.assign(args, coerced);
-			} else {
-				return validator.Check(coerced) ? coerced : args;
+			} else if (validator.Check(coerced)) {
+				return coerced;
 			}
 		}
 	}
@@ -318,7 +352,17 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 			.map((error) => `  - ${formatValidationPath(error)}: ${error.message}`)
 			.join("\n") || "Unknown validation error";
 
-	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
+	const schemaSummary = summarizeSchemaParams(tool.parameters);
+	const streamCorrupted = (toolCall as any)._streamingParseError === true;
+	const isEmptyArgs = isRecord(toolCall.arguments) && Object.keys(toolCall.arguments).length === 0;
+	const hasRequired = ((tool.parameters as any)?.required as string[] | undefined)?.length;
+	const emptyHint = streamCorrupted
+		? "\n\nWarning: Tool arguments were corrupted during streaming — some data was lost. Re-send the complete tool call."
+		: isEmptyArgs && hasRequired
+			? "\n\nNote: Arguments object was empty. Re-send the tool call with all required arguments."
+			: "";
+
+	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}${schemaSummary}${emptyHint}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
 
 	throw new Error(errorMessage);
 }
