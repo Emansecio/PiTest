@@ -16,7 +16,6 @@ import type { McpSettings } from "../mcp/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { PermissionChecker, type PermissionMode, type PermissionSettings } from "../permissions/index.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
-import { createDiffLimitExtension } from "./diff-limit-extension.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
 import { createMemoryExtension } from "./memory-extension.ts";
@@ -66,7 +65,6 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 	const factories: ExtensionFactory[] = [
 		createPermissionsExtension({ checker: permissionChecker, onDecision: options.onPermissionDecision }),
 		createReadGuardExtension({ cwd: options.cwd }),
-		createDiffLimitExtension(),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp }),

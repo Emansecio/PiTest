@@ -252,6 +252,7 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	private _lastCompactionDeficit = 0;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -793,7 +794,9 @@ export class AgentSession {
 			this.sendCustomMessage(
 				{ customType: "pi.doom-loop-pause", content: pauseContent, display: true },
 				{ deliverAs: "followUp" },
-			).catch(() => {});
+			).catch((err: unknown) => {
+				process.stderr.write(`[pi] doom-loop pause delivery failed: ${err}\n`);
+			});
 			return;
 		}
 
@@ -806,7 +809,9 @@ export class AgentSession {
 		this.sendCustomMessage(
 			{ customType: "pi.doom-loop-reminder", content, display: false },
 			{ deliverAs: "followUp" },
-		).catch(() => {});
+		).catch((err: unknown) => {
+			process.stderr.write(`[pi] doom-loop reminder delivery failed: ${err}\n`);
+		});
 	}
 
 	/**
@@ -870,7 +875,8 @@ export class AgentSession {
 	 * Remove all listeners and disconnect from agent.
 	 * Call this when completely done with the session.
 	 */
-	dispose(): void {
+	async dispose(): Promise<void> {
+		await this.sessionManager.flushWrites();
 		this._extensionRunner.invalidate(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
@@ -2039,7 +2045,12 @@ export class AgentSession {
 		} else {
 			contextTokens = calculateContextTokens(assistantMessage.usage);
 		}
-		if (shouldCompact(contextTokens, contextWindow, settings)) {
+		if (shouldCompact(contextTokens, contextWindow, settings, this._lastCompactionDeficit)) {
+			const reserve =
+				contextWindow > 200_000
+					? Math.max(settings.reserveTokens, 20_000)
+					: Math.max(settings.reserveTokens, Math.floor(contextWindow * 0.1));
+			this._lastCompactionDeficit = contextTokens - (contextWindow - reserve);
 			return await this._runAutoCompaction("threshold", false);
 		}
 		return false;
@@ -2096,6 +2107,7 @@ export class AgentSession {
 			});
 
 			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
+			this._lastCompactionDeficit = 0;
 
 			if (willRetry) {
 				const messages = this.agent.state.messages;

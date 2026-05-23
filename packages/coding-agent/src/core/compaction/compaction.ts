@@ -133,12 +133,15 @@ export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	/** Enable self-correction verification pass after summarization. Default: true */
+	selfCorrection?: boolean;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
+	selfCorrection: true,
 };
 
 // ============================================================================
@@ -231,11 +234,40 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 }
 
 /**
- * Check if compaction should trigger based on context usage.
+ * Compute a dynamic reserve that scales with context window size.
+ * Small windows (≤200k): 10% of window or configured reserve, whichever is larger.
+ * Large windows (>200k): configured reserve or 20k, whichever is larger.
  */
-export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
+function computeDynamicReserve(contextWindow: number, configuredReserve: number): number {
+	if (contextWindow > 200_000) {
+		return Math.max(configuredReserve, 20_000);
+	}
+	return Math.max(configuredReserve, Math.floor(contextWindow * 0.1));
+}
+
+/** Hysteresis threshold: only re-compact if deficit grew by this many tokens since last compaction. */
+const COALESCING_THRESHOLD_TOKENS = 8192;
+
+/**
+ * Check if compaction should trigger based on context usage.
+ * Uses adaptive reserve scaling and hysteresis to avoid compaction churn.
+ *
+ * @param lastCompactionDeficit - deficit at last compaction trigger (0 if none). Callers
+ *   should persist this value and pass it back on subsequent checks.
+ */
+export function shouldCompact(
+	contextTokens: number,
+	contextWindow: number,
+	settings: CompactionSettings,
+	lastCompactionDeficit = 0,
+): boolean {
 	if (!settings.enabled) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
+	const threshold = contextWindow - reserve;
+	if (contextTokens <= threshold) return false;
+	const deficit = contextTokens - threshold;
+	if (lastCompactionDeficit === 0) return true;
+	return deficit > lastCompactionDeficit + COALESCING_THRESHOLD_TOKENS;
 }
 
 // ============================================================================
@@ -243,6 +275,18 @@ export function shouldCompact(contextTokens: number, contextWindow: number, sett
 // ============================================================================
 
 const tokenEstimateCache = new WeakMap<AgentMessage, number>();
+const argsLengthCache = new WeakMap<object, number>();
+
+function cachedArgsLength(args: unknown): number {
+	if (typeof args === "object" && args !== null) {
+		const cached = argsLengthCache.get(args);
+		if (cached !== undefined) return cached;
+		const len = JSON.stringify(args).length;
+		argsLengthCache.set(args, len);
+		return len;
+	}
+	return JSON.stringify(args).length;
+}
 
 /**
  * Estimate token count for a message using chars/4 heuristic.
@@ -279,7 +323,7 @@ export function estimateTokens(message: AgentMessage): number {
 				} else if (block.type === "thinking") {
 					chars += block.thinking.length;
 				} else if (block.type === "toolCall") {
-					chars += block.name.length + JSON.stringify(block.arguments).length;
+					chars += block.name.length + cachedArgsLength(block.arguments);
 				}
 			}
 			result = Math.ceil(chars / 4);
@@ -480,6 +524,66 @@ export function findCutPoint(
 }
 
 // ============================================================================
+// Pre-pruning of old tool outputs
+// ============================================================================
+
+/** Token threshold above which old tool outputs are pruned before summarization. */
+const PRUNE_TOKEN_THRESHOLD = 20_000;
+/** Number of recent turns (user→assistant pairs) protected from pruning. */
+const PRUNE_PROTECT_TURNS = 2;
+
+/**
+ * Prune large tool result content from old messages before sending to the
+ * summarizer. This reduces the input to the summarization LLM and produces
+ * more focused summaries.
+ *
+ * Only tool results older than the last `protectTurns` user messages are
+ * eligible. Tool results above `tokenThreshold` (estimated) are replaced
+ * with a compact placeholder preserving the tool name.
+ *
+ * Mutates messages in place (they are already clones from entry extraction).
+ */
+export function pruneOldToolOutputs(
+	messages: AgentMessage[],
+	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
+	protectTurns = PRUNE_PROTECT_TURNS,
+): number {
+	// Find the index of the Nth-from-last user message to establish the protection boundary
+	let userCount = 0;
+	let protectFromIndex = messages.length;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i].role === "user") {
+			userCount++;
+			if (userCount >= protectTurns) {
+				protectFromIndex = i;
+				break;
+			}
+		}
+	}
+
+	let prunedTokens = 0;
+
+	for (let i = 0; i < protectFromIndex; i++) {
+		const msg = messages[i];
+		if (msg.role !== "toolResult") continue;
+		if (!Array.isArray(msg.content)) continue;
+
+		for (let b = 0; b < msg.content.length; b++) {
+			const block = msg.content[b];
+			if (block.type === "text" && block.text) {
+				const est = Math.ceil(block.text.length / 4);
+				if (est > tokenThreshold) {
+					prunedTokens += est;
+					(msg.content[b] as any).text = `[Tool output pruned — original ~${est} tokens]`;
+				}
+			}
+		}
+	}
+
+	return prunedTokens;
+}
+
+// ============================================================================
 // Summarization
 // ============================================================================
 
@@ -643,12 +747,83 @@ export async function generateSummary(
 		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}
 
-	const textContent = response.content
+	return extractTextFromResponse(response);
+}
+
+function extractTextFromResponse(response: AssistantMessage): string {
+	return response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map((c) => c.text)
 		.join("\n");
+}
 
-	return textContent;
+// ============================================================================
+// Self-correction verification
+// ============================================================================
+
+const VERIFICATION_PROMPT = `Critically evaluate the context summary below. Did you omit any of the following from the original conversation?
+- Exact file paths or line numbers
+- Error messages or exception types
+- Function/variable names
+- User constraints or preferences
+- Key decisions and their rationale
+
+If anything is missing or could be more precise, produce a FINAL improved summary using the same format. Otherwise, repeat the summary exactly as-is.
+
+<summary>
+{SUMMARY}
+</summary>`;
+
+/**
+ * Run a self-correction pass on a generated summary. A second LLM call
+ * evaluates the summary for omissions and produces a corrected version.
+ * Falls back to the original if the corrected version inflates token count
+ * by more than 10%.
+ */
+async function verifySummary(
+	summary: string,
+	model: Model<any>,
+	maxTokens: number,
+	apiKey: string | undefined,
+	headers: Record<string, string> | undefined,
+	signal: AbortSignal | undefined,
+	thinkingLevel: ThinkingLevel | undefined,
+	streamFn?: StreamFn,
+): Promise<string> {
+	const promptText = VERIFICATION_PROMPT.replace("{SUMMARY}", summary);
+	const messages = [
+		{
+			role: "user" as const,
+			content: [{ type: "text" as const, text: promptText }],
+			timestamp: Date.now(),
+		},
+	];
+
+	try {
+		const response = await completeSummarization(
+			model,
+			{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages },
+			createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
+			streamFn,
+		);
+
+		if (response.stopReason === "error") {
+			return summary;
+		}
+
+		const corrected = extractTextFromResponse(response);
+		if (!corrected.trim()) return summary;
+
+		const originalTokens = Math.ceil(summary.length / 4);
+		const correctedTokens = Math.ceil(corrected.length / 4);
+		if (correctedTokens > originalTokens * 1.1) {
+			return summary;
+		}
+
+		return corrected;
+	} catch {
+		return summary;
+	}
 }
 
 // ============================================================================
@@ -800,11 +975,16 @@ export async function compact(
 		cwd,
 	} = preparation;
 
+	// Pre-prune large tool outputs before sending to summarizer
+	pruneOldToolOutputs(messagesToSummarize);
+	if (isSplitTurn) {
+		pruneOldToolOutputs(turnPrefixMessages);
+	}
+
 	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
 
 	if (isSplitTurn && turnPrefixMessages.length > 0) {
-		// Generate both summaries in parallel
 		const [historyResult, turnPrefixResult] = await Promise.all([
 			messagesToSummarize.length > 0
 				? generateSummary(
@@ -831,10 +1011,8 @@ export async function compact(
 				streamFn,
 			),
 		]);
-		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
 	} else {
-		// Just generate history summary
 		summary = await generateSummary(
 			messagesToSummarize,
 			model,
@@ -847,6 +1025,15 @@ export async function compact(
 			thinkingLevel,
 			streamFn,
 		);
+	}
+
+	// Self-correction: verify summary for omitted details
+	if (settings.selfCorrection !== false) {
+		const maxTokens = Math.min(
+			Math.floor(0.8 * settings.reserveTokens),
+			model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
+		);
+		summary = await verifySummary(summary, model, maxTokens, apiKey, headers, signal, thinkingLevel, streamFn);
 	}
 
 	// Compute structured operation lists and append to summary (paths stripped of cwd)

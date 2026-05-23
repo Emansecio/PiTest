@@ -10,10 +10,9 @@ import {
 	readdirSync,
 	readFileSync,
 	readSync,
-	statSync,
 	writeFileSync,
 } from "fs";
-import { readdir, readFile, stat } from "fs/promises";
+import { appendFile, readdir, readFile, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import {
@@ -439,16 +438,23 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 
 	const content = readFileSync(filePath, "utf8");
 	const entries: FileEntry[] = [];
-	const lines = content.trim().split("\n");
 
-	for (const line of lines) {
-		if (!line.trim()) continue;
-		try {
-			const entry = JSON.parse(line) as FileEntry;
-			entries.push(entry);
-		} catch {
-			// Skip malformed lines
+	let pos = 0;
+	const len = content.length;
+	while (pos < len) {
+		let eol = content.indexOf("\n", pos);
+		if (eol === -1) eol = len;
+		if (eol > pos) {
+			const start = content.charCodeAt(pos) <= 32 ? content.indexOf("{", pos) : pos;
+			if (start >= pos && start < eol) {
+				try {
+					entries.push(JSON.parse(content.slice(start, eol)) as FileEntry);
+				} catch {
+					// Skip malformed lines
+				}
+			}
 		}
+		pos = eol + 1;
 	}
 
 	// Validate session header
@@ -481,13 +487,10 @@ export function findMostRecentSession(sessionDir: string): string | null {
 	try {
 		const files = readdirSync(sessionDir)
 			.filter((f) => f.endsWith(".jsonl"))
-			.map((f) => {
-				const path = join(sessionDir, f);
-				return { path, mtime: statSync(path).mtimeMs };
-			})
-			.sort((a, b) => b.mtime - a.mtime);
+			.sort((a, b) => b.localeCompare(a));
 
-		for (const { path } of files) {
+		for (const f of files) {
+			const path = join(sessionDir, f);
 			if (isValidSessionFile(path)) return path;
 		}
 		return null;
@@ -844,6 +847,8 @@ export class SessionManager {
 	}
 
 	private _hasAssistantMessage = false;
+	private _writeQueue: string[] = [];
+	private _flushTimer: ReturnType<typeof setTimeout> | null = null;
 
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
@@ -858,12 +863,37 @@ export class SessionManager {
 		}
 
 		if (!this.flushed) {
-			const batch = this.fileEntries.map((e) => `${JSON.stringify(e)}\n`).join("");
-			appendFileSync(this.sessionFile, batch);
+			for (const e of this.fileEntries) {
+				this._writeQueue.push(`${JSON.stringify(e)}\n`);
+			}
 			this.flushed = true;
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			this._writeQueue.push(`${JSON.stringify(entry)}\n`);
 		}
+		this._scheduleFlush();
+	}
+
+	private _scheduleFlush(): void {
+		if (this._flushTimer !== null) return;
+		this._flushTimer = setTimeout(() => {
+			this._flushTimer = null;
+			void this._drainQueue();
+		}, 50);
+	}
+
+	private async _drainQueue(): Promise<void> {
+		while (this._writeQueue.length > 0 && this.sessionFile) {
+			const batch = this._writeQueue.splice(0).join("");
+			await appendFile(this.sessionFile, batch);
+		}
+	}
+
+	async flushWrites(): Promise<void> {
+		if (this._flushTimer !== null) {
+			clearTimeout(this._flushTimer);
+			this._flushTimer = null;
+		}
+		await this._drainQueue();
 	}
 
 	private _appendEntry(entry: SessionEntry): void {

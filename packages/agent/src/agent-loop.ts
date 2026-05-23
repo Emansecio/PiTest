@@ -566,12 +566,8 @@ async function executeToolCallsParallel(
 			return finalized;
 		}),
 	);
-	const messages: ToolResultMessage[] = [];
-	for (const finalized of orderedFinalizedCalls) {
-		const toolResultMessage = createToolResultMessage(finalized);
-		await emitToolResultMessage(toolResultMessage, emit);
-		messages.push(toolResultMessage);
-	}
+	const messages = orderedFinalizedCalls.map(createToolResultMessage);
+	await Promise.all(messages.map((msg) => emitToolResultMessage(msg, emit)));
 
 	return {
 		messages,
