@@ -234,6 +234,13 @@ export class Editor implements Component, Focusable {
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
 
+	// Word-wrap memo: logical line text -> wrapped chunks. Keyed by content so a
+	// single-line edit only misses the changed line (others stay hit). Reset on
+	// width change (resize) and paste-validity change, since both alter wrapping.
+	// Eliminates per-keystroke Intl.Segmenter + re-wrap of the whole buffer.
+	private wrapCache: Map<string, TextChunk[]> = new Map();
+	private wrapCacheWidth: number = -1;
+
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
 
@@ -305,6 +312,31 @@ export class Editor implements Component, Focusable {
 		return segmentWithMarkers(text, this.validPasteIds());
 	}
 
+	/**
+	 * Word-wrap a logical line, memoized by (width, content). The cache key is the
+	 * line text, so unchanged lines are served without re-segmenting/re-wrapping.
+	 * Returned arrays are read-only to callers (layoutText / buildVisualLineMap).
+	 */
+	private wrapLineCached(line: string, contentWidth: number): TextChunk[] {
+		if (contentWidth !== this.wrapCacheWidth) {
+			this.wrapCache.clear();
+			this.wrapCacheWidth = contentWidth;
+		}
+		const cached = this.wrapCache.get(line);
+		if (cached) return cached;
+		const chunks = wordWrapLine(line, contentWidth, [...this.segment(line)]);
+		// Bound memory; drafts are small so this rarely trips.
+		if (this.wrapCache.size >= 4096) this.wrapCache.clear();
+		this.wrapCache.set(line, chunks);
+		return chunks;
+	}
+
+	/** Drop the word-wrap memo (paste-validity changes alter segmentation). */
+	private invalidateWrapCache(): void {
+		this.wrapCache.clear();
+		this.wrapCacheWidth = -1;
+	}
+
 	getPaddingX(): number {
 		return this.paddingX;
 	}
@@ -354,14 +386,20 @@ export class Editor implements Component, Focusable {
 		return this.state.lines.length === 1 && this.state.lines[0] === "";
 	}
 
-	private isOnFirstVisualLine(): boolean {
-		const visualLines = this.buildVisualLineMap(this.lastWidth);
+	private isOnFirstVisualLine(
+		visualLines: Array<{ logicalLine: number; startCol: number; length: number }> = this.buildVisualLineMap(
+			this.lastWidth,
+		),
+	): boolean {
 		const currentVisualLine = this.findCurrentVisualLine(visualLines);
 		return currentVisualLine === 0;
 	}
 
-	private isOnLastVisualLine(): boolean {
-		const visualLines = this.buildVisualLineMap(this.lastWidth);
+	private isOnLastVisualLine(
+		visualLines: Array<{ logicalLine: number; startCol: number; length: number }> = this.buildVisualLineMap(
+			this.lastWidth,
+		),
+	): boolean {
 		const currentVisualLine = this.findCurrentVisualLine(visualLines);
 		return currentVisualLine === visualLines.length - 1;
 	}
@@ -403,7 +441,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		this.invalidateWrapCache();
 	}
 
 	render(width: number): string[] {
@@ -420,8 +458,20 @@ export class Editor implements Component, Focusable {
 
 		const horizontal = this.borderColor("─");
 
-		// Layout the text
-		const layoutLines = this.layoutText(layoutWidth);
+		// Layout the text. Optional perf probe: set PI_EDITOR_PERF=1 to log layout
+		// cost per render (use with a realistic multi-line / CJK draft to measure
+		// the word-wrap cache win). Zero overhead when the env var is unset.
+		let layoutLines: LayoutLine[];
+		if (process.env.PI_EDITOR_PERF) {
+			const t0 = performance.now();
+			layoutLines = this.layoutText(layoutWidth);
+			const dt = performance.now() - t0;
+			process.stderr.write(
+				`[editor-perf] layout ${dt.toFixed(3)}ms lines=${this.state.lines.length} w=${layoutWidth} cache=${this.wrapCache.size}\n`,
+			);
+		} else {
+			layoutLines = this.layoutText(layoutWidth);
+		}
 
 		// Calculate max visible lines: 30% of terminal height, minimum 5 lines
 		const terminalRows = this.tui.terminal.rows;
@@ -752,24 +802,30 @@ export class Editor implements Component, Focusable {
 		if (kb.matches(data, "tui.editor.cursorUp")) {
 			if (this.isEditorEmpty()) {
 				this.navigateHistory(-1);
-			} else if (this.historyIndex > -1 && this.isOnFirstVisualLine()) {
-				this.navigateHistory(-1);
-			} else if (this.isOnFirstVisualLine()) {
-				// Already at top - jump to start of line
-				this.moveToLineStart();
 			} else {
-				this.moveCursor(-1, 0);
+				// Build the visual-line map once and reuse it for the
+				// first-line checks and the cursor move (avoids 2-3 rebuilds/key).
+				const visualLines = this.buildVisualLineMap(this.lastWidth);
+				if (this.historyIndex > -1 && this.isOnFirstVisualLine(visualLines)) {
+					this.navigateHistory(-1);
+				} else if (this.isOnFirstVisualLine(visualLines)) {
+					// Already at top - jump to start of line
+					this.moveToLineStart();
+				} else {
+					this.moveCursor(-1, 0, visualLines);
+				}
 			}
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorDown")) {
-			if (this.historyIndex > -1 && this.isOnLastVisualLine()) {
+			const visualLines = this.buildVisualLineMap(this.lastWidth);
+			if (this.historyIndex > -1 && this.isOnLastVisualLine(visualLines)) {
 				this.navigateHistory(1);
-			} else if (this.isOnLastVisualLine()) {
+			} else if (this.isOnLastVisualLine(visualLines)) {
 				// Already at bottom - jump to end of line
 				this.moveToLineEnd();
 			} else {
-				this.moveCursor(1, 0);
+				this.moveCursor(1, 0, visualLines);
 			}
 			return;
 		}
@@ -855,7 +911,7 @@ export class Editor implements Component, Focusable {
 				}
 			} else {
 				// Line needs wrapping - use word-aware wrapping
-				const chunks = wordWrapLine(line, contentWidth, [...this.segment(line)]);
+				const chunks = this.wrapLineCached(line, contentWidth);
 
 				for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
 					const chunk = chunks[chunkIndex];
@@ -1129,6 +1185,7 @@ export class Editor implements Component, Focusable {
 			this.pasteCounter++;
 			const pasteId = this.pasteCounter;
 			this.pastes.set(pasteId, filteredText);
+			this.invalidateWrapCache();
 
 			// Insert marker like "[paste #1 +123 lines]" or "[paste #1 1234 chars]"
 			const marker =
@@ -1191,6 +1248,7 @@ export class Editor implements Component, Focusable {
 
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
+		this.invalidateWrapCache();
 		this.pasteCounter = 0;
 		this.historyIndex = -1;
 		this.scrollOffset = 0;
@@ -1642,7 +1700,7 @@ export class Editor implements Component, Focusable {
 				visualLines.push({ logicalLine: i, startCol: 0, length: line.length });
 			} else {
 				// Line needs wrapping - use word-aware wrapping
-				const chunks = wordWrapLine(line, width, [...this.segment(line)]);
+				const chunks = this.wrapLineCached(line, width);
 				for (const chunk of chunks) {
 					visualLines.push({
 						logicalLine: i,
@@ -1687,9 +1745,13 @@ export class Editor implements Component, Focusable {
 		return this.findVisualLineAt(visualLines, this.state.cursorLine, this.state.cursorCol);
 	}
 
-	private moveCursor(deltaLine: number, deltaCol: number): void {
+	private moveCursor(
+		deltaLine: number,
+		deltaCol: number,
+		precomputedVisualLines?: Array<{ logicalLine: number; startCol: number; length: number }>,
+	): void {
 		this.lastAction = null;
-		const visualLines = this.buildVisualLineMap(this.lastWidth);
+		const visualLines = precomputedVisualLines ?? this.buildVisualLineMap(this.lastWidth);
 		const currentVisualLine = this.findCurrentVisualLine(visualLines);
 
 		if (deltaLine !== 0) {
