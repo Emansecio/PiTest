@@ -79,11 +79,15 @@ export {
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
 export {
+	defaultFrequentFilesPath,
 	type FrequentFileStat,
+	type FrequentFilesSnapshot,
 	FrequentFilesTracker,
 	type FrequentFilesTrackerOptions,
 	formatFrequentFilesForPrompt,
 	type GetTopOptions,
+	loadFrequentFilesSnapshot,
+	saveFrequentFilesSnapshot,
 } from "./frequent-files.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";
 export {

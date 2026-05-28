@@ -1,8 +1,14 @@
 import { homedir } from "os";
 import { join, resolve } from "path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { ResourceDiagnostic } from "../src/core/diagnostics.js";
-import { formatSkillsForPrompt, loadSkills, loadSkillsFromDir, type Skill } from "../src/core/skills.js";
+import {
+	formatSkillsForPrompt,
+	getClaudeCodeSkillsDir,
+	loadSkills,
+	loadSkillsFromDir,
+	type Skill,
+} from "../src/core/skills.js";
 import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 
 const fixturesDir = resolve(__dirname, "fixtures/skills");
@@ -428,5 +434,41 @@ describe("skills", () => {
 			expect(collisionWarnings).toHaveLength(1);
 			expect(collisionWarnings[0].message).toContain("name collision");
 		});
+	});
+});
+
+describe("getClaudeCodeSkillsDir", () => {
+	// Lives outside the main `describe("skills")` block so it can mutate the
+	// PI_DISABLE_CLAUDE_CODE_SKILLS env var without interfering with the
+	// fixture-driven tests above.
+	const original = process.env.PI_DISABLE_CLAUDE_CODE_SKILLS;
+	afterEach(() => {
+		if (original === undefined) {
+			delete process.env.PI_DISABLE_CLAUDE_CODE_SKILLS;
+		} else {
+			process.env.PI_DISABLE_CLAUDE_CODE_SKILLS = original;
+		}
+	});
+
+	it("returns null when PI_DISABLE_CLAUDE_CODE_SKILLS=1", () => {
+		process.env.PI_DISABLE_CLAUDE_CODE_SKILLS = "1";
+		expect(getClaudeCodeSkillsDir()).toBeNull();
+	});
+
+	it("returns <home>/.claude/skills when opt-out is unset", () => {
+		delete process.env.PI_DISABLE_CLAUDE_CODE_SKILLS;
+		const result = getClaudeCodeSkillsDir();
+		expect(result).not.toBeNull();
+		expect(result?.endsWith(join(".claude", "skills"))).toBe(true);
+		expect(result?.startsWith(homedir())).toBe(true);
+	});
+
+	it("respects PI_DISABLE_CLAUDE_CODE_SKILLS values other than '1' as not-opting-out", () => {
+		// Only the literal "1" disables — guards against accidental opt-out
+		// from envs like "0", "false", "no".
+		for (const value of ["0", "false", "no", ""]) {
+			process.env.PI_DISABLE_CLAUDE_CODE_SKILLS = value;
+			expect(getClaudeCodeSkillsDir()).not.toBeNull();
+		}
 	});
 });

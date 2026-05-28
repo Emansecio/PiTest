@@ -113,4 +113,72 @@ describe("validateToolArguments", () => {
 			expect(() => validateToolArguments(tool, toolCall)).toThrow("Validation failed");
 		}
 	});
+
+	it("appends a did-you-mean hint when args carry a misspelled key", () => {
+		// DYM targets lexical typos (offse→offset, pat→path). Semantic aliases
+		// like start_line→offset are handled by the rewrite registry's Tier 1
+		// rules, not by Levenshtein, and intentionally fall through here.
+		const tool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: {
+					path: { type: "string" },
+					offset: { type: "number" },
+					limit: { type: "number" },
+				},
+				required: ["path"],
+				additionalProperties: false,
+			} as Tool["parameters"],
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "t1",
+			name: "read",
+			arguments: { pat: "foo", offse: 5 },
+		};
+		const error = (() => {
+			try {
+				validateToolArguments(tool, toolCall);
+				return undefined;
+			} catch (e) {
+				return e instanceof Error ? e.message : String(e);
+			}
+		})();
+		expect(error).toBeDefined();
+		expect(error).toContain('Did you mean "path" instead of "pat"');
+		expect(error).toContain('Did you mean "offset" instead of "offse"');
+	});
+
+	it("omits did-you-mean when no valid key is close enough", () => {
+		const tool: Tool = {
+			name: "read",
+			description: "Read a file",
+			parameters: {
+				type: "object",
+				properties: {
+					path: { type: "string" },
+				},
+				required: ["path"],
+				additionalProperties: false,
+			} as Tool["parameters"],
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "t1",
+			name: "read",
+			arguments: { path: "x", completely_unrelated_field_zzz: 1 },
+		};
+		const error = (() => {
+			try {
+				validateToolArguments(tool, toolCall);
+				return undefined;
+			} catch (e) {
+				return e instanceof Error ? e.message : String(e);
+			}
+		})();
+		expect(error).toBeDefined();
+		expect(error).not.toContain("Did you mean");
+	});
 });

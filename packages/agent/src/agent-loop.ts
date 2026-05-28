@@ -8,9 +8,11 @@ import {
 	type Context,
 	EventStream,
 	streamSimple,
+	suggestClosest,
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
+import { appendHintsToContent } from "./tool-error-hint-registry.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -20,7 +22,14 @@ import type {
 	AgentToolCall,
 	AgentToolResult,
 	StreamFn,
+	TTSRMatchInfo,
 } from "./types.ts";
+
+/** Max TTSR injections allowed within a single turn before bailing out. */
+const MAX_TTSR_RETRIES_PER_TURN = 3;
+
+/** Sentinel returned by `streamAssistantResponse` when a TTSR rule fires. */
+type TTSRInterrupt = { ttsr: TTSRMatchInfo };
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
@@ -100,10 +109,10 @@ export async function runAgentLoop(
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
 ): Promise<AgentMessage[]> {
-	const newMessages: AgentMessage[] = [...prompts];
+	const newMessages: AgentMessage[] = prompts.slice();
 	const currentContext: AgentContext = {
 		...context,
-		messages: [...context.messages, ...prompts],
+		messages: context.messages.concat(prompts),
 	};
 
 	await emit({ type: "agent_start" });
@@ -189,8 +198,50 @@ async function runLoop(
 				pendingMessages = [];
 			}
 
-			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			// Stream assistant response. May return a TTSR interrupt; in that case
+			// we inject a system-reminder and replay the same turn (capped by
+			// MAX_TTSR_RETRIES_PER_TURN).
+			let message: AssistantMessage;
+			let ttsrRetries = 0;
+			config.ttsrMatcher?.reset();
+			while (true) {
+				const response = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+				if (!("ttsr" in response)) {
+					message = response;
+					break;
+				}
+				if (ttsrRetries >= MAX_TTSR_RETRIES_PER_TURN) {
+					// Bail: surface an aborted assistant message so the caller stops the turn.
+					message = {
+						role: "assistant",
+						content: [{ type: "text", text: "" }],
+						api: config.model.api,
+						provider: config.model.provider,
+						model: config.model.id,
+						stopReason: "error",
+						errorMessage: `TTSR: exceeded ${MAX_TTSR_RETRIES_PER_TURN} retries (rule "${response.ttsr.name}")`,
+						timestamp: Date.now(),
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+					} as AssistantMessage;
+					await emit({ type: "message_start", message });
+					await emit({ type: "message_end", message });
+					break;
+				}
+				ttsrRetries++;
+				const reminder = buildTTSRReminderMessage(response.ttsr);
+				currentContext.messages.push(reminder);
+				newMessages.push(reminder);
+				await emit({ type: "message_start", message: reminder });
+				await emit({ type: "message_end", message: reminder });
+				config.ttsrMatcher?.reset();
+			}
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -227,15 +278,14 @@ async function runLoop(
 			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
 			if (nextTurnSnapshot) {
 				currentContext = nextTurnSnapshot.context ?? currentContext;
+				let nextReasoning = config.reasoning;
+				if (nextTurnSnapshot.thinkingLevel !== undefined) {
+					nextReasoning = nextTurnSnapshot.thinkingLevel === "off" ? undefined : nextTurnSnapshot.thinkingLevel;
+				}
 				config = {
 					...config,
 					model: nextTurnSnapshot.model ?? config.model,
-					reasoning:
-						nextTurnSnapshot.thinkingLevel === undefined
-							? config.reasoning
-							: nextTurnSnapshot.thinkingLevel === "off"
-								? undefined
-								: nextTurnSnapshot.thinkingLevel,
+					reasoning: nextReasoning,
 				};
 			}
 
@@ -270,8 +320,42 @@ async function runLoop(
 }
 
 /**
+ * Build a synthetic user message carrying a TTSR reminder. The
+ * `_ttsr_injected` flag is read by the compaction pipeline to preserve the
+ * reminder verbatim instead of summarizing it.
+ */
+function buildTTSRReminderMessage(info: TTSRMatchInfo): AgentMessage {
+	const text = `<system-reminder>[TTSR:${info.name}] ${info.message}</system-reminder>`;
+	const message = {
+		role: "user" as const,
+		content: [{ type: "text" as const, text }],
+		timestamp: Date.now(),
+	};
+	// Attach a non-enumerable marker without breaking strict typing; downstream
+	// consumers introspect this via a runtime cast.
+	Object.defineProperty(message, "_ttsr_injected", {
+		value: true,
+		enumerable: true,
+		writable: false,
+		configurable: false,
+	});
+	Object.defineProperty(message, "_ttsr_rule", {
+		value: info.name,
+		enumerable: true,
+		writable: false,
+		configurable: false,
+	});
+	return message as unknown as AgentMessage;
+}
+
+/**
  * Stream an assistant response from the LLM.
  * This is where AgentMessage[] gets transformed to Message[] for the LLM.
+ *
+ * When a TTSR matcher is configured and one of its rules matches mid-stream,
+ * this returns a `{ ttsr }` interrupt sentinel and removes any partial
+ * assistant message it had pushed onto the context. The caller is responsible
+ * for injecting a reminder and replaying the turn.
  */
 async function streamAssistantResponse(
 	context: AgentContext,
@@ -279,7 +363,7 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
-): Promise<AssistantMessage> {
+): Promise<AssistantMessage | TTSRInterrupt> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
 	if (config.transformContext) {
@@ -302,10 +386,21 @@ async function streamAssistantResponse(
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
 
+	// Child abort controller so TTSR can cancel just this stream without
+	// poisoning the outer agent signal. We forward outer abort into it but
+	// never the reverse.
+	const ttsrAbort = new AbortController();
+	const forwardAbort = () => ttsrAbort.abort();
+	if (signal) {
+		if (signal.aborted) ttsrAbort.abort();
+		else signal.addEventListener("abort", forwardAbort, { once: true });
+	}
+	let ttsrInterrupt: TTSRInterrupt | undefined;
+
 	const response = await streamFunction(config.model, llmContext, {
 		...config,
 		apiKey: resolvedApiKey,
-		signal,
+		signal: ttsrAbort.signal,
 	});
 
 	let partialMessage: AssistantMessage | null = null;
@@ -351,6 +446,23 @@ async function streamAssistantResponse(
 				if (partialMessage) {
 					partialMessage = event.partial;
 					context.messages[context.messages.length - 1] = partialMessage;
+					// TTSR: feed text_delta into "assistant_text" scope, toolcall_delta
+					// into "tool_args". thinking_delta is intentionally skipped — model
+					// internal reasoning is not user-visible and should not trigger
+					// hindsight rules.
+					if (config.ttsrMatcher && !ttsrInterrupt) {
+						const delta = (event as { delta?: string }).delta ?? "";
+						let scope: "assistant_text" | "tool_args" | undefined;
+						if (event.type === "text_delta") scope = "assistant_text";
+						else if (event.type === "toolcall_delta") scope = "tool_args";
+						if (scope) {
+							const hit = config.ttsrMatcher.feed(delta, scope);
+							if (hit) {
+								ttsrInterrupt = { ttsr: { name: hit.name, message: hit.message } };
+								ttsrAbort.abort();
+							}
+						}
+					}
 					// Accumulate into pending delta if same kind+index, else flush and start anew.
 					if (
 						pendingDelta &&
@@ -367,6 +479,15 @@ async function streamAssistantResponse(
 					}
 					if (performance.now() - lastEmitTime >= DELTA_THROTTLE_MS) {
 						await flushPendingDelta();
+					}
+					if (ttsrInterrupt) {
+						// Drop partial assistant message we pushed at "start".
+						if (addedPartial) {
+							context.messages.pop();
+							addedPartial = false;
+						}
+						if (signal) signal.removeEventListener("abort", forwardAbort);
+						return ttsrInterrupt;
 					}
 				}
 				break;
@@ -392,6 +513,13 @@ async function streamAssistantResponse(
 			case "done":
 			case "error": {
 				await flushPendingDelta();
+				if (ttsrInterrupt) {
+					if (addedPartial) {
+						context.messages.pop();
+					}
+					if (signal) signal.removeEventListener("abort", forwardAbort);
+					return ttsrInterrupt;
+				}
 				const finalMessage = await response.result();
 				if (addedPartial) {
 					context.messages[context.messages.length - 1] = finalMessage;
@@ -402,11 +530,20 @@ async function streamAssistantResponse(
 					await emit({ type: "message_start", message: { ...finalMessage } });
 				}
 				await emit({ type: "message_end", message: finalMessage });
+				if (signal) signal.removeEventListener("abort", forwardAbort);
 				return finalMessage;
 			}
 		}
 	}
 	await flushPendingDelta();
+
+	if (ttsrInterrupt) {
+		if (addedPartial) {
+			context.messages.pop();
+		}
+		if (signal) signal.removeEventListener("abort", forwardAbort);
+		return ttsrInterrupt;
+	}
 
 	const finalMessage = await response.result();
 	if (addedPartial) {
@@ -416,6 +553,7 @@ async function streamAssistantResponse(
 		await emit({ type: "message_start", message: { ...finalMessage } });
 	}
 	await emit({ type: "message_end", message: finalMessage });
+	if (signal) signal.removeEventListener("abort", forwardAbort);
 	return finalMessage;
 }
 
@@ -481,7 +619,15 @@ async function executeToolCallsSequential(
 			args: toolCall.arguments,
 		});
 
-		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, toolMap, config, signal);
+		const preparation = await prepareToolCall(
+			currentContext,
+			assistantMessage,
+			toolCall,
+			toolMap,
+			config,
+			signal,
+			emit,
+		);
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
 			finalized = {
@@ -490,7 +636,7 @@ async function executeToolCallsSequential(
 				isError: preparation.isError,
 			};
 		} else {
-			const executed = await executePreparedToolCall(preparation, signal, emit);
+			const executed = await executePreparedToolCall(preparation, signal, emit, config);
 			finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -498,6 +644,7 @@ async function executeToolCallsSequential(
 				executed,
 				config,
 				signal,
+				emit,
 			);
 		}
 
@@ -537,7 +684,15 @@ async function executeToolCallsParallel(
 				toolName: toolCall.name,
 				args: toolCall.arguments,
 			});
-			const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, toolMap, config, signal);
+			const preparation = await prepareToolCall(
+				currentContext,
+				assistantMessage,
+				toolCall,
+				toolMap,
+				config,
+				signal,
+				emit,
+			);
 			return { toolCall, preparation };
 		}),
 	);
@@ -553,7 +708,7 @@ async function executeToolCallsParallel(
 				await emitToolExecutionEnd(finalized, emit);
 				return finalized;
 			}
-			const executed = await executePreparedToolCall(preparation, signal, emit);
+			const executed = await executePreparedToolCall(preparation, signal, emit, config);
 			const finalized = await finalizeExecutedToolCall(
 				currentContext,
 				assistantMessage,
@@ -561,13 +716,20 @@ async function executeToolCallsParallel(
 				executed,
 				config,
 				signal,
+				emit,
 			);
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
 		}),
 	);
 	const messages = orderedFinalizedCalls.map(createToolResultMessage);
-	await Promise.all(messages.map((msg) => emitToolResultMessage(msg, emit)));
+	// Serial emit (not Promise.all): listeners persist messages by mutating the
+	// session leaf pointer, so concurrent emits can interleave message_end events
+	// and reorder tool results in the JSONL tree. Tool execution itself stays
+	// parallel via the Promise.all above — only the result fan-out is ordered.
+	for (const msg of messages) {
+		await emitToolResultMessage(msg, emit);
+	}
 
 	return {
 		messages,
@@ -618,49 +780,14 @@ const UNKNOWN_TOOL_SUGGEST_MAX_DISTANCE = 3;
 // silently suggest "longest_tool_name".
 const UNKNOWN_TOOL_PREFIX_MIN_OVERLAP = 3;
 
-function levenshtein(a: string, b: string): number {
-	if (a === b) return 0;
-	if (a.length === 0) return b.length;
-	if (b.length === 0) return a.length;
-	let prev = new Array<number>(b.length + 1);
-	let curr = new Array<number>(b.length + 1);
-	for (let j = 0; j <= b.length; j++) prev[j] = j;
-	for (let i = 1; i <= a.length; i++) {
-		curr[0] = i;
-		for (let j = 1; j <= b.length; j++) {
-			const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
-			curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
-		}
-		[prev, curr] = [curr, prev];
-	}
-	return prev[b.length];
-}
-
 function suggestToolName(name: string, available: string[]): string | undefined {
-	const lower = name.toLowerCase();
-	let best: { name: string; score: number } | undefined;
-	for (const candidate of available) {
-		const candidateLower = candidate.toLowerCase();
-		const distance = levenshtein(lower, candidateLower);
-		// Score is the Levenshtein distance, but we also accept candidates that
-		// are a prefix/suffix of the query (or vice versa) with a small overlap,
-		// which catches "edit_file" -> "edit" or "file_read" -> "read".
-		let score = distance;
-		if (distance > UNKNOWN_TOOL_SUGGEST_MAX_DISTANCE) {
-			const longer = lower.length >= candidateLower.length ? lower : candidateLower;
-			const shorter = lower.length >= candidateLower.length ? candidateLower : lower;
-			if (shorter.length < UNKNOWN_TOOL_PREFIX_MIN_OVERLAP) continue;
-			if (!longer.startsWith(shorter) && !longer.endsWith(shorter) && !longer.includes(shorter)) {
-				continue;
-			}
-			// Affix match: cost is the number of extra characters the model added.
-			score = longer.length - shorter.length;
-		}
-		if (!best || score < best.score) {
-			best = { name: candidate, score };
-		}
-	}
-	return best?.name;
+	// Shared matcher in pi-ai. Note the affix condition there is `!includes`,
+	// which is equivalent to the old `!startsWith && !endsWith && !includes`
+	// (includes subsumes prefix/suffix), so behavior is preserved.
+	return suggestClosest(name, available, {
+		maxDistance: UNKNOWN_TOOL_SUGGEST_MAX_DISTANCE,
+		prefixMinOverlap: UNKNOWN_TOOL_PREFIX_MIN_OVERLAP,
+	});
 }
 
 export function formatUnknownToolError(name: string, toolMap: Map<string, AgentTool<any>>): string {
@@ -695,6 +822,7 @@ async function prepareToolCall(
 	toolMap: Map<string, AgentTool<any>>,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
 	const tool = toolMap.get(toolCall.name);
 	if (!tool) {
@@ -707,12 +835,47 @@ async function prepareToolCall(
 
 	try {
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
-		const validatedArgs = validateToolArguments(tool, preparedToolCall);
+
+		// Programmatic rewrite layer: apply the registry between
+		// `prepareArguments` (per-tool alias absorption) and TypeBox validation.
+		// Auto rules silently rewrite args; suggest/block rules short-circuit
+		// the call with an actionable error result so the model recovers in
+		// one round-trip without ever executing the wrong call.
+		let activeToolCall = preparedToolCall;
+		if (config.toolRewriteRegistry) {
+			const outcome = config.toolRewriteRegistry.apply(activeToolCall);
+			if (outcome.kind === "rejected") {
+				await emit({
+					type: "tool_call_rejected",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					ruleId: outcome.ruleId,
+					error: outcome.error,
+				});
+				return {
+					kind: "immediate",
+					result: createErrorToolResult(outcome.error),
+					isError: true,
+				};
+			}
+			if (outcome.kind === "rewritten") {
+				activeToolCall = outcome.call;
+				await emit({
+					type: "tool_call_rewritten",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					ruleIds: outcome.ruleIds,
+					args: activeToolCall.arguments,
+				});
+			}
+		}
+
+		const validatedArgs = validateToolArguments(tool, activeToolCall);
 		if (config.beforeToolCall) {
 			const beforeResult = await config.beforeToolCall(
 				{
 					assistantMessage,
-					toolCall,
+					toolCall: activeToolCall,
 					args: validatedArgs,
 					context: currentContext,
 				},
@@ -742,7 +905,7 @@ async function prepareToolCall(
 		}
 		return {
 			kind: "prepared",
-			toolCall,
+			toolCall: activeToolCall,
 			tool,
 			args: validatedArgs,
 		};
@@ -759,8 +922,18 @@ async function executePreparedToolCall(
 	prepared: PreparedToolCall,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
+	config: AgentLoopConfig,
 ): Promise<ExecutedToolCallOutcome> {
 	const updateEvents: Promise<void>[] = [];
+
+	let executeCtx: import("./types.ts").AgentToolExecuteContext | undefined;
+	if (config.getToolExecuteContext) {
+		try {
+			executeCtx = config.getToolExecuteContext(prepared.toolCall);
+		} catch {
+			executeCtx = undefined;
+		}
+	}
 
 	try {
 		const result = await prepared.tool.execute(
@@ -780,6 +953,7 @@ async function executePreparedToolCall(
 					),
 				);
 			},
+			executeCtx,
 		);
 		await Promise.all(updateEvents);
 		return { result, isError: false };
@@ -799,9 +973,27 @@ async function finalizeExecutedToolCall(
 	executed: ExecutedToolCallOutcome,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
 ): Promise<FinalizedToolCallOutcome> {
 	let result = executed.result;
 	let isError = executed.isError;
+
+	// Tier 4: post-hoc error hint enrichment. Runs BEFORE `afterToolCall` so a
+	// host that overrides the result via afterToolCall sees (and can mutate)
+	// the hint-enriched content if desired. Skipped when the call succeeded;
+	// the registry has nothing to add to a non-error result.
+	if (isError && config.toolErrorHintRegistry) {
+		const outcome = config.toolErrorHintRegistry.apply(prepared.toolCall, result);
+		if (outcome.hints.length > 0) {
+			result = { ...result, content: appendHintsToContent(result.content, outcome.hints) };
+			await emit({
+				type: "tool_error_hint_applied",
+				toolCallId: prepared.toolCall.id,
+				toolName: prepared.toolCall.name,
+				hints: outcome.hints,
+			});
+		}
+	}
 
 	if (config.afterToolCall) {
 		try {

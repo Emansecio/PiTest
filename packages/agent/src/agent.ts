@@ -9,6 +9,8 @@ import {
 	type Transport,
 } from "@earendil-works/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+import type { ToolErrorHintRegistry } from "./tool-error-hint-registry.ts";
+import type { ToolRewriteRegistry } from "./tool-rewrite-registry.ts";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -24,6 +26,7 @@ import type {
 	QueueMode,
 	StreamFn,
 	ToolExecutionMode,
+	TTSRMatcher,
 } from "./types.ts";
 
 export type { QueueMode } from "./types.ts";
@@ -113,6 +116,16 @@ export interface AgentOptions {
 	transport?: Transport;
 	maxRetryDelayMs?: number;
 	toolExecution?: ToolExecutionMode;
+	/** Time-Traveling Stream Rules matcher. Passed through to the loop config. */
+	ttsrMatcher?: TTSRMatcher;
+	/**
+	 * Optional tool rewrite registry. Forwarded into the loop config so every
+	 * incoming tool call is run through it between argument preparation and
+	 * schema validation.
+	 */
+	toolRewriteRegistry?: ToolRewriteRegistry;
+	/** Optional Tier 4 error-hint registry — see {@link AgentLoopConfig.toolErrorHintRegistry}. */
+	toolErrorHintRegistry?: ToolErrorHintRegistry;
 }
 
 class PendingMessageQueue {
@@ -133,16 +146,15 @@ class PendingMessageQueue {
 
 	drain(): AgentMessage[] {
 		if (this.mode === "all") {
-			const drained = this.messages.slice();
+			const drained = this.messages;
 			this.messages = [];
 			return drained;
 		}
 
-		const first = this.messages[0];
+		const first = this.messages.shift();
 		if (!first) {
 			return [];
 		}
-		this.messages = this.messages.slice(1);
 		return [first];
 	}
 
@@ -197,6 +209,12 @@ export class Agent {
 	public maxRetryDelayMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
+	/** Optional Time-Traveling Stream Rules matcher. */
+	public ttsrMatcher?: TTSRMatcher;
+	/** Optional tool rewrite registry — see {@link AgentOptions.toolRewriteRegistry}. */
+	public toolRewriteRegistry?: ToolRewriteRegistry;
+	/** Optional Tier 4 error-hint registry — see {@link AgentOptions.toolErrorHintRegistry}. */
+	public toolErrorHintRegistry?: ToolErrorHintRegistry;
 
 	constructor(options: AgentOptions = {}) {
 		this._state = createMutableAgentState(options.initialState);
@@ -216,6 +234,9 @@ export class Agent {
 		this.transport = options.transport ?? "auto";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
 		this.toolExecution = options.toolExecution ?? "parallel";
+		this.ttsrMatcher = options.ttsrMatcher;
+		this.toolRewriteRegistry = options.toolRewriteRegistry;
+		this.toolErrorHintRegistry = options.toolErrorHintRegistry;
 	}
 
 	/**
@@ -415,7 +436,11 @@ export class Agent {
 		return {
 			systemPrompt: this._state.systemPrompt,
 			messages: this._state.messages.slice(),
-			tools: this._state.tools.slice(),
+			// Pass tools by reference: runLoop never mutates context.tools, and
+			// state.tools is always a fresh array (the setter clones on assign),
+			// so toolMapCache's WeakMap key stays stable across turns until tools
+			// change. Slicing here broke the cache by minting a new array per turn.
+			tools: this._state.tools,
 		};
 	}
 
@@ -445,6 +470,9 @@ export class Agent {
 				return this.steeringQueue.drain();
 			},
 			getFollowUpMessages: async () => this.followUpQueue.drain(),
+			ttsrMatcher: this.ttsrMatcher,
+			toolRewriteRegistry: this.toolRewriteRegistry,
+			toolErrorHintRegistry: this.toolErrorHintRegistry,
 		};
 	}
 

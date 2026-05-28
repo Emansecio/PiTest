@@ -89,6 +89,16 @@ const ThemeJsonSchema = Type.Object({
 		thinkingXhigh: ColorValueSchema,
 		// Bash Mode (1 color)
 		bashMode: ColorValueSchema,
+		// Message Shell Gutters (5 colors) — see message-shell.ts. Assistant +
+		// user have no key here: assistant uses the default fg, user reuses
+		// `border` until it gains a dedicated key in a later batch.
+		gutterToolPending: ColorValueSchema,
+		gutterToolSuccess: ColorValueSchema,
+		gutterToolError: ColorValueSchema,
+		gutterBash: ColorValueSchema,
+		gutterDiagnostics: ColorValueSchema,
+		gutterUser: ColorValueSchema,
+		gutterCustom: ColorValueSchema,
 	}),
 	export: Type.Optional(
 		Type.Object({
@@ -148,7 +158,14 @@ export type ThemeColor =
 	| "thinkingMedium"
 	| "thinkingHigh"
 	| "thinkingXhigh"
-	| "bashMode";
+	| "bashMode"
+	| "gutterToolPending"
+	| "gutterToolSuccess"
+	| "gutterToolError"
+	| "gutterBash"
+	| "gutterDiagnostics"
+	| "gutterUser"
+	| "gutterCustom";
 
 export type ThemeBg =
 	| "selectedBg"

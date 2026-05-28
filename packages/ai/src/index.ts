@@ -2,6 +2,13 @@ export type { Static, TSchema } from "typebox";
 export { Type } from "typebox";
 
 export * from "./api-registry.ts";
+export {
+	type CredentialEntry,
+	type CredentialFailureReason,
+	type CredentialPool,
+	type CredentialSource,
+	getCredentialPool,
+} from "./credential-pool.ts";
 export * from "./env-api-keys.ts";
 export * from "./image-models.ts";
 export * from "./images.ts";
@@ -23,6 +30,7 @@ export type {
 export type { OpenAICompletionsOptions } from "./providers/openai-completions.ts";
 export type { OpenAIResponsesOptions } from "./providers/openai-responses.ts";
 export * from "./providers/register-builtins.ts";
+export * from "./retry-with-fallback.ts";
 export * from "./session-resources.ts";
 export * from "./stream.ts";
 export * from "./types.ts";

@@ -6,9 +6,9 @@ import { createHarness, type Harness } from "../harness.js";
 describe("unknown tool: did-you-mean error (e2e)", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

@@ -22,6 +22,7 @@ import type {
 	Tool,
 	ToolCall,
 } from "../types.ts";
+import { systemPromptWithoutDynamicMarker } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
@@ -260,7 +261,7 @@ function buildChatPayload(
 	if (context.systemPrompt) {
 		payload.messages.unshift({
 			role: "system",
-			content: sanitizeSurrogates(context.systemPrompt),
+			content: sanitizeSurrogates(systemPromptWithoutDynamicMarker(context.systemPrompt)),
 		});
 	}
 
@@ -423,8 +424,9 @@ async function consumeChatStream(
 				typeof toolCall.function.arguments === "string"
 					? toolCall.function.arguments
 					: JSON.stringify(toolCall.function.arguments || {});
+			// Accumulate only — finalized once below after stream end.
+			// Per-chunk parseStreamingJson over growing string is O(N²).
 			block.partialArgs = (block.partialArgs || "") + argsDelta;
-			block.arguments = parseStreamingJson<Record<string, unknown>>(block.partialArgs);
 			stream.push({
 				type: "toolcall_delta",
 				contentIndex: toolBlocksByKey.get(key)!,

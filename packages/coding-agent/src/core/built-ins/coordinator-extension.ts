@@ -6,16 +6,42 @@
  * (filtered) but runs in an in-memory session.
  *
  * Example tool call from the LLM:
- *   task({ prompt: "find all unused imports in src/", allowed_tools: ["read","grep","find"] })
+ *   task({
+ *     name: "find-dead-code",
+ *     prompt: "Find unused exports in src/",
+ *     allowed_tools: ["read","grep","find"],
+ *     result_schema: { type: "object", properties: { findings: { type: "array" } }, required: ["findings"] },
+ *     worktree: true,
+ *   })
  */
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { type Static, Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
 import { SubagentRegistry, spawnSubagent } from "../coordinator/index.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 
+const worktreeSchema = Type.Union(
+	[
+		Type.Boolean(),
+		Type.Object({
+			branch: Type.Optional(Type.String()),
+			cleanup: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("keep")])),
+		}),
+	],
+	{
+		description:
+			"Set to `true` to run the subagent in an isolated git worktree (auto-cleaned). Or pass an object with optional `branch` and `cleanup: 'auto'|'keep'`.",
+	},
+);
+
 const taskSchema = Type.Object({
+	name: Type.Optional(
+		Type.String({
+			description:
+				"Stable task identifier. Used for the agent:// scheme lookup and worktree path. Defaults to the auto-generated subagent id.",
+		}),
+	),
 	prompt: Type.String({ description: "The task description for the subagent." }),
 	system_prompt: Type.Optional(Type.String({ description: "Override the subagent's system prompt." })),
 	allowed_tools: Type.Optional(
@@ -24,6 +50,14 @@ const taskSchema = Type.Object({
 		}),
 	),
 	max_turns: Type.Optional(Type.Number({ description: "Hard limit on subagent turns. Default: 25." })),
+	result_schema: Type.Optional(
+		Type.Unknown({
+			description:
+				"Optional typebox/JSON-Schema describing the expected structured output. May be passed as an object or as a JSON string. When set, the subagent's final message is parsed + validated against this schema.",
+		}),
+	),
+	worktree: Type.Optional(worktreeSchema),
+	timeout_ms: Type.Optional(Type.Number({ description: "Hard wall-clock timeout for the subagent in ms." })),
 });
 
 type TaskInput = Static<typeof taskSchema>;
@@ -38,6 +72,27 @@ export interface CoordinatorExtensionOptions {
 	convertToLlm?: (
 		messages: import("@earendil-works/pi-agent-core").AgentMessage[],
 	) => import("@earendil-works/pi-ai").Message[];
+	/** Working directory for git worktree creation. Defaults to process.cwd(). */
+	getCwd?: () => string;
+}
+
+function coerceResultSchema(raw: unknown): TSchema | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw === "string") {
+		const trimmed = raw.trim();
+		if (!trimmed) return undefined;
+		try {
+			return JSON.parse(trimmed) as TSchema;
+		} catch {
+			return undefined;
+		}
+	}
+	if (typeof raw === "object") {
+		// Typebox schemas are JSON-Schema-compatible; we accept any object that
+		// looks like one and let Value.Check do the structural work at runtime.
+		return raw as TSchema;
+	}
+	return undefined;
 }
 
 export function createCoordinatorExtension(options: CoordinatorExtensionOptions) {
@@ -49,10 +104,16 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			label: "task",
 			description:
 				"Spawn a focused subagent to complete an isolated sub-task and return its final answer. " +
-				"Use this to delegate research, file exploration, or repetitive checks without polluting the main conversation.",
-			promptSnippet: "Spawn a subagent to handle an isolated sub-task and return its summary as a string.",
+				"Use this to delegate research, file exploration, or repetitive checks without polluting the main conversation. " +
+				"Pass `result_schema` for structured output, or `worktree: true` to run in an isolated git worktree.",
+			promptSnippet:
+				"Spawn a subagent to handle an isolated sub-task. Supports structured output via result_schema and isolated git worktrees via worktree.",
 			parameters: taskSchema,
-			async execute(_id, { prompt, system_prompt, allowed_tools, max_turns }: TaskInput, signal) {
+			async execute(
+				_id,
+				{ name, prompt, system_prompt, allowed_tools, max_turns, result_schema, worktree, timeout_ms }: TaskInput,
+				signal,
+			) {
 				const model = options.getParentModel();
 				if (!model) {
 					return {
@@ -61,6 +122,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						details: undefined,
 					};
 				}
+				const resultSchema = coerceResultSchema(result_schema);
+				const cwd = options.getCwd ? options.getCwd() : process.cwd();
 				try {
 					const result = await spawnSubagent(
 						{
@@ -76,12 +139,25 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							allowedTools: allowed_tools,
 							maxTurns: max_turns,
 							signal,
+							resultSchema,
+							worktree: worktree as boolean | { branch?: string; cleanup?: "auto" | "keep" } | undefined,
+							timeoutMs: timeout_ms,
+							taskName: name ?? undefined,
+							cwd,
 						},
 					);
+					const text =
+						resultSchema && result.value !== undefined ? JSON.stringify(result.value, null, 2) : result.output;
 					return {
-						content: [{ type: "text" as const, text: result.output }],
+						content: [{ type: "text" as const, text }],
 						isError: false,
-						details: { subagentId: result.record.id, turns: result.record.turnCount },
+						details: {
+							subagentId: result.record.id,
+							taskName: name ?? result.record.id,
+							turns: result.record.turnCount,
+							worktreePath: result.worktreePath,
+							hasStructuredValue: result.value !== undefined,
+						},
 					};
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);

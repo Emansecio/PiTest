@@ -27,6 +27,7 @@ import type {
 	ToolCall,
 	Usage,
 } from "../types.ts";
+import { systemPromptWithoutDynamicMarker } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
@@ -36,6 +37,28 @@ import { transformMessages } from "./transform-messages.ts";
 // =============================================================================
 // Utilities
 // =============================================================================
+
+// Memoize parsed reasoning items per thinking block. The signature JSON is
+// immutable once produced, so we can reuse the parsed object across requests
+// instead of re-parsing every reasoning block on every turn. Keyed by the block
+// object (WeakMap) so it never mutates the block shape / wire output and is
+// reclaimed automatically when the block is GC'd.
+const parsedReasoningCache = new WeakMap<ThinkingContent, ResponseReasoningItem>();
+
+// Cache the serialized arguments string per tool-call block. Args are finalized
+// during replay, so the JSON text is stable and need only be produced once.
+// WeakMap (keyed by the block object) avoids adding fields to the block, so it
+// can never leak into the wire payload.
+const serializedToolArgsCache = new WeakMap<ToolCall, string>();
+
+function serializeToolArgs(toolCall: ToolCall): string {
+	let serialized = serializedToolArgsCache.get(toolCall);
+	if (serialized === undefined) {
+		serialized = JSON.stringify(toolCall.arguments);
+		serializedToolArgsCache.set(toolCall, serialized);
+	}
+	return serialized;
+}
 
 function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): string {
 	const payload: TextSignatureV1 = { v: 1, id };
@@ -127,7 +150,7 @@ export function convertResponsesMessages<TApi extends Api>(
 		const role = model.reasoning ? "developer" : "system";
 		messages.push({
 			role,
-			content: sanitizeSurrogates(context.systemPrompt),
+			content: sanitizeSurrogates(systemPromptWithoutDynamicMarker(context.systemPrompt)),
 		});
 	}
 
@@ -170,7 +193,12 @@ export function convertResponsesMessages<TApi extends Api>(
 			for (const block of msg.content) {
 				if (block.type === "thinking") {
 					if (block.thinkingSignature) {
-						const reasoningItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
+						const thinkingBlock = block as ThinkingContent;
+						let reasoningItem = parsedReasoningCache.get(thinkingBlock);
+						if (reasoningItem === undefined) {
+							reasoningItem = JSON.parse(block.thinkingSignature) as ResponseReasoningItem;
+							parsedReasoningCache.set(thinkingBlock, reasoningItem);
+						}
 						output.push(reasoningItem);
 					}
 				} else if (block.type === "text") {
@@ -208,7 +236,7 @@ export function convertResponsesMessages<TApi extends Api>(
 						id: itemId,
 						call_id: callId,
 						name: toolCall.name,
-						arguments: JSON.stringify(toolCall.arguments),
+						arguments: serializeToolArgs(toolCall),
 					});
 				}
 			}
@@ -408,8 +436,9 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (event.type === "response.function_call_arguments.delta") {
 			if (currentItem?.type === "function_call" && currentBlock?.type === "toolCall") {
+				// Accumulate only — finalize once on response.function_call_arguments.done.
+				// Per-delta parseStreamingJson over growing string is O(N²).
 				currentBlock.partialJson += event.delta;
-				currentBlock.arguments = parseStreamingJson(currentBlock.partialJson);
 				stream.push({
 					type: "toolcall_delta",
 					contentIndex: blockIndex(),

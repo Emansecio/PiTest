@@ -30,6 +30,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { systemPromptWithoutDynamicMarker } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
@@ -39,6 +40,22 @@ import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copi
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
+
+// Cache the serialized arguments string per tool-call block. During history
+// replay the args object is finalized/immutable, so its JSON text is stable and
+// need only be produced once. WeakMap (keyed by the block object) keeps the
+// cache external to the block shape so it can never leak into the wire payload,
+// and entries are reclaimed automatically when the block is GC'd.
+const serializedToolArgsCache = new WeakMap<ToolCall, string>();
+
+function serializeToolArgs(toolCall: ToolCall): string {
+	let serialized = serializedToolArgsCache.get(toolCall);
+	if (serialized === undefined) {
+		serialized = JSON.stringify(toolCall.arguments);
+		serializedToolArgsCache.set(toolCall, serialized);
+	}
+	return serialized;
+}
 
 /**
  * Check if conversation messages contain tool calls or tool results.
@@ -170,7 +187,16 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
 			const toolCallBlocksById = new Map<string, StreamingToolCallBlock>();
 			const blocks = output.content as StreamingBlock[];
-			const getContentIndex = (block: StreamingBlock) => blocks.indexOf(block);
+			// Index blocks by identity so contentIndex lookups are O(1). The old
+			// `blocks.indexOf(block)` ran on every text/thinking/toolcall delta
+			// (per-token) → O(N·blocks), quadratic on tool-heavy streams.
+			const blockIndexMap = new Map<StreamingBlock, number>();
+			const registerBlock = (block: StreamingBlock): number => {
+				const idx = blocks.push(block) - 1;
+				blockIndexMap.set(block, idx);
+				return idx;
+			};
+			const getContentIndex = (block: StreamingBlock) => blockIndexMap.get(block) ?? -1;
 			const finishBlock = (block: StreamingBlock) => {
 				const contentIndex = getContentIndex(block);
 				if (contentIndex === -1) {
@@ -207,7 +233,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const ensureTextBlock = () => {
 				if (!textBlock) {
 					textBlock = { type: "text", text: "" };
-					blocks.push(textBlock);
+					registerBlock(textBlock);
 					stream.push({ type: "text_start", contentIndex: getContentIndex(textBlock), partial: output });
 				}
 				return textBlock;
@@ -219,7 +245,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						thinking: "",
 						thinkingSignature,
 					};
-					blocks.push(thinkingBlock);
+					registerBlock(thinkingBlock);
 					stream.push({ type: "thinking_start", contentIndex: getContentIndex(thinkingBlock), partial: output });
 				}
 				return thinkingBlock;
@@ -245,7 +271,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (toolCall.id) {
 						toolCallBlocksById.set(toolCall.id, block);
 					}
-					blocks.push(block);
+					registerBlock(block);
 					stream.push({
 						type: "toolcall_start",
 						contentIndex: getContentIndex(block),
@@ -356,8 +382,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 							let delta = "";
 							if (toolCall.function?.arguments) {
 								delta = toolCall.function.arguments;
+								// Accumulate only — finalized once on block end via parseStreamingJson.
+								// Per-delta parse over growing string is O(N²).
 								block.partialArgs = (block.partialArgs ?? "") + toolCall.function.arguments;
-								block.arguments = parseStreamingJson(block.partialArgs);
 							}
 							stream.push({
 								type: "toolcall_delta",
@@ -765,7 +792,7 @@ export function convertMessages(
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
 		const role = useDeveloperRole ? "developer" : "system";
-		params.push({ role: role, content: sanitizeSurrogates(context.systemPrompt) });
+		params.push({ role: role, content: sanitizeSurrogates(systemPromptWithoutDynamicMarker(context.systemPrompt)) });
 	}
 
 	let lastRole: string | null = null;
@@ -873,7 +900,7 @@ export function convertMessages(
 					type: "function" as const,
 					function: {
 						name: tc.name,
-						arguments: JSON.stringify(tc.arguments),
+						arguments: serializeToolArgs(tc),
 					},
 				}));
 				const reasoningDetails = toolCalls

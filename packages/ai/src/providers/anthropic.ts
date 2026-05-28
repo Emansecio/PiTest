@@ -27,9 +27,10 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { splitSystemPromptOnDynamic } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { finalizeStreamingJson, parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.ts";
+import { finalizeStreamingJson, parseJsonWithRepair } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
@@ -39,16 +40,21 @@ import { transformMessages } from "./transform-messages.ts";
 
 /**
  * Resolve cache retention preference.
- * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
+ * Default: "long" (1h) when provider supports it — saves input tokens for
+ * interactive sessions with >5min think gaps. PI_CACHE_RETENTION=short opts out;
+ * "none" disables caching entirely.
  */
 function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
 	if (cacheRetention) {
 		return cacheRetention;
 	}
-	if (typeof process !== "undefined" && process.env.PI_CACHE_RETENTION === "long") {
-		return "long";
+	if (typeof process !== "undefined") {
+		const env = process.env.PI_CACHE_RETENTION;
+		if (env === "short" || env === "none" || env === "long") {
+			return env;
+		}
 	}
-	return "short";
+	return "long";
 }
 
 function getCacheControl(
@@ -296,9 +302,9 @@ function decodeSseLine(line: string, state: SseDecoderState): ServerSentEvent | 
 	return null;
 }
 
-function nextLineBreakIndex(text: string): number {
-	const carriageReturnIndex = text.indexOf("\r");
-	const newlineIndex = text.indexOf("\n");
+function nextLineBreakIndexFrom(text: string, from: number): number {
+	const carriageReturnIndex = text.indexOf("\r", from);
+	const newlineIndex = text.indexOf("\n", from);
 	if (carriageReturnIndex === -1) {
 		return newlineIndex;
 	}
@@ -308,8 +314,11 @@ function nextLineBreakIndex(text: string): number {
 	return Math.min(carriageReturnIndex, newlineIndex);
 }
 
-function consumeLine(text: string): { line: string; rest: string } | null {
-	const lineBreakIndex = nextLineBreakIndex(text);
+// Cursor-based scan avoids the O(N²) buffer rewrite from `buffer = buffer.slice(rest)`
+// on every line. We advance a cursor through the accumulating buffer and only
+// compact the string when the prefix grows past COMPACT_THRESHOLD.
+function consumeLineAt(text: string, cursor: number): { line: string; nextCursor: number } | null {
+	const lineBreakIndex = nextLineBreakIndexFrom(text, cursor);
 	if (lineBreakIndex === -1) {
 		return null;
 	}
@@ -320,8 +329,8 @@ function consumeLine(text: string): { line: string; rest: string } | null {
 	}
 
 	return {
-		line: text.slice(0, lineBreakIndex),
-		rest: text.slice(nextIndex),
+		line: text.slice(cursor, lineBreakIndex),
+		nextCursor: nextIndex,
 	};
 }
 
@@ -333,6 +342,8 @@ async function* iterateSseMessages(
 	const decoder = new TextDecoder();
 	const state: SseDecoderState = { event: null, data: [], raw: [] };
 	let buffer = "";
+	let cursor = 0;
+	const COMPACT_THRESHOLD = 65536;
 
 	try {
 		while (true) {
@@ -346,30 +357,35 @@ async function* iterateSseMessages(
 			}
 
 			buffer += decoder.decode(value, { stream: true });
-			let consumed = consumeLine(buffer);
+			let consumed = consumeLineAt(buffer, cursor);
 			while (consumed) {
-				buffer = consumed.rest;
+				cursor = consumed.nextCursor;
 				const event = decodeSseLine(consumed.line, state);
 				if (event) {
 					yield event;
 				}
-				consumed = consumeLine(buffer);
+				consumed = consumeLineAt(buffer, cursor);
+			}
+
+			if (cursor > COMPACT_THRESHOLD) {
+				buffer = buffer.slice(cursor);
+				cursor = 0;
 			}
 		}
 
 		buffer += decoder.decode();
-		let consumed = consumeLine(buffer);
+		let consumed = consumeLineAt(buffer, cursor);
 		while (consumed) {
-			buffer = consumed.rest;
+			cursor = consumed.nextCursor;
 			const event = decodeSseLine(consumed.line, state);
 			if (event) {
 				yield event;
 			}
-			consumed = consumeLine(buffer);
+			consumed = consumeLineAt(buffer, cursor);
 		}
 
-		if (buffer.length > 0) {
-			const event = decodeSseLine(buffer, state);
+		if (cursor < buffer.length) {
+			const event = decodeSseLine(buffer.slice(cursor), state);
 			if (event) {
 				yield event;
 			}
@@ -591,13 +607,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						const index = blockIndexMap.get(event.index) ?? -1;
 						const block = blocks[index];
 						if (block && block.type === "toolCall") {
-							const prevKeyCount = Object.keys(block.arguments).length;
+							// Accumulate partial JSON without parsing per-delta.
+							// Cumulative parse-per-delta is O(N²) for large args.
+							// block.arguments is finalized once in content_block_stop
+							// via finalizeStreamingJson. Streaming consumers receive
+							// the raw delta via the toolcall_delta event below.
 							block.partialJson += event.delta.partial_json;
-							block.arguments = parseStreamingJson(block.partialJson);
-							const newKeyCount = Object.keys(block.arguments).length;
-							if (prevKeyCount > 0 && newKeyCount === 0 && block.partialJson.length > 10) {
-								(block as any)._streamingParseError = true;
-							}
 							stream.push({
 								type: "toolcall_delta",
 								contentIndex: index,
@@ -919,21 +934,29 @@ function buildParams(
 			},
 		];
 		if (context.systemPrompt) {
+			const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(context.systemPrompt);
 			params.system.push({
 				type: "text",
-				text: sanitizeSurrogates(context.systemPrompt),
+				text: sanitizeSurrogates(staticPart),
 				...(cacheControl ? { cache_control: cacheControl } : {}),
 			});
+			if (dynamicPart) {
+				params.system.push({ type: "text", text: sanitizeSurrogates(dynamicPart) });
+			}
 		}
 	} else if (context.systemPrompt) {
-		// Add cache control to system prompt for non-OAuth tokens
+		// Split static (cacheable) from dynamic (per-turn) so cache_control hits stay valid.
+		const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(context.systemPrompt);
 		params.system = [
 			{
 				type: "text",
-				text: sanitizeSurrogates(context.systemPrompt),
+				text: sanitizeSurrogates(staticPart),
 				...(cacheControl ? { cache_control: cacheControl } : {}),
 			},
 		];
+		if (dynamicPart) {
+			params.system.push({ type: "text", text: sanitizeSurrogates(dynamicPart) });
+		}
 	}
 
 	// Temperature is incompatible with extended thinking (adaptive or budget-based).
@@ -1006,6 +1029,12 @@ function normalizeToolCallId(id: string): string {
 	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 }
 
+// Prefix produced by harness for compaction summary user messages.
+// Kept in sync with packages/agent/src/harness/messages.ts COMPACTION_SUMMARY_PREFIX.
+// Used to attach an extra cache breakpoint on the summary so it survives across turns.
+const COMPACTION_SUMMARY_PREFIX_MARKER =
+	"The conversation history before this point was compacted into the following summary:";
+
 function convertMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
@@ -1013,6 +1042,9 @@ function convertMessages(
 	cacheControl?: CacheControlEphemeral,
 ): MessageParam[] {
 	const params: MessageParam[] = [];
+	// Track the last user message containing a compaction-summary text block,
+	// so we can apply a dedicated cache breakpoint on it after the loop.
+	let lastCompactionParamIndex = -1;
 
 	// Transform messages for cross-provider compatibility
 	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
@@ -1053,10 +1085,16 @@ function convertMessages(
 					return true;
 				});
 				if (filteredBlocks.length === 0) continue;
+				const hasCompactionSummary = filteredBlocks.some(
+					(b) => b.type === "text" && b.text.startsWith(COMPACTION_SUMMARY_PREFIX_MARKER),
+				);
 				params.push({
 					role: "user",
 					content: filteredBlocks,
 				});
+				if (hasCompactionSummary) {
+					lastCompactionParamIndex = params.length - 1;
+				}
 			}
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
@@ -1163,6 +1201,24 @@ function convertMessages(
 						cache_control: cacheControl,
 					},
 				] as any;
+			}
+		}
+	}
+
+	// Pin a 4th breakpoint on the most recent compaction summary so the summary
+	// block stays cached across turns (otherwise it sits between cached prefix
+	// and the new "last user" breakpoint and gets re-billed each turn).
+	// Skip when the summary IS already the last user message (would double-pin
+	// the same block, wasting a breakpoint).
+	if (cacheControl && lastCompactionParamIndex >= 0 && lastCompactionParamIndex !== params.length - 1) {
+		const compactionMessage = params[lastCompactionParamIndex];
+		if (compactionMessage.role === "user" && Array.isArray(compactionMessage.content)) {
+			for (let k = compactionMessage.content.length - 1; k >= 0; k--) {
+				const block = compactionMessage.content[k];
+				if (block && (block.type === "text" || block.type === "image" || block.type === "tool_result")) {
+					(block as any).cache_control = cacheControl;
+					break;
+				}
 			}
 		}
 	}

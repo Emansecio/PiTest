@@ -116,6 +116,22 @@ export function getCompactDisplayPathSegments(resourcePath: string): string[] {
 		.filter((segment) => segment.length > 0 && segment !== "~");
 }
 
+const suffixCountsCache = new WeakMap<Array<{ path: string; segments: string[] }>, Map<string, number>>();
+
+function buildSuffixCounts(allPaths: Array<{ path: string; segments: string[] }>): Map<string, number> {
+	const cached = suffixCountsCache.get(allPaths);
+	if (cached) return cached;
+	const counts = new Map<string, number>();
+	for (const { segments } of allPaths) {
+		for (let c = 1; c <= segments.length; c += 1) {
+			const suf = segments.slice(-c).join("/");
+			counts.set(suf, (counts.get(suf) ?? 0) + 1);
+		}
+	}
+	suffixCountsCache.set(allPaths, counts);
+	return counts;
+}
+
 export function getCompactNonPackageExtensionLabel(
 	resourcePath: string,
 	index: number,
@@ -126,16 +142,10 @@ export function getCompactNonPackageExtensionLabel(
 		return getCompactPathLabel(resourcePath);
 	}
 
+	const suffixCounts = buildSuffixCounts(allPaths);
 	for (let segmentCount = 1; segmentCount <= segments.length; segmentCount += 1) {
 		const candidate = segments.slice(-segmentCount).join("/");
-		const isUnique = allPaths.every((item, itemIndex) => {
-			if (itemIndex === index) {
-				return true;
-			}
-			return item.segments.slice(-segmentCount).join("/") !== candidate;
-		});
-
-		if (isUnique) {
+		if (suffixCounts.get(candidate) === 1) {
 			return candidate;
 		}
 	}
@@ -202,8 +212,10 @@ export function getDisplaySourceInfo(sourceInfo?: SourceInfo): {
 		return { label: "path", scopeLabel: scope === "temporary" ? "temp" : undefined, color: "muted" };
 	}
 
-	const scopeLabel =
-		scope === "user" ? "user" : scope === "project" ? "project" : scope === "temporary" ? "temp" : undefined;
+	let scopeLabel: string | undefined;
+	if (scope === "user") scopeLabel = "user";
+	else if (scope === "project") scopeLabel = "project";
+	else if (scope === "temporary") scopeLabel = "temp";
 	return { label: source, scopeLabel, color: "accent" };
 }
 

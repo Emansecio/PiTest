@@ -154,6 +154,7 @@ describe("ToolExecutionComponent parity", () => {
 			process.cwd(),
 		);
 		component.updateResult({ content: [{ type: "text", text: "hello" }], details: undefined, isError: false }, false);
+		component.setExpanded(true);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("override call");
 		expect(rendered).toContain("hello");
@@ -325,6 +326,7 @@ describe("ToolExecutionComponent parity", () => {
 			{ content: [{ type: "text", text: "one\ntwo\n" }], details: undefined, isError: false },
 			false,
 		);
+		component.setExpanded(true);
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("one");
 		expect(rendered).toContain("two");
@@ -413,4 +415,167 @@ describe("ToolExecutionComponent parity", () => {
 			expect(collapsed.indexOf(":120-329")).toBeLessThan(collapsed.indexOf("to expand"));
 		});
 	}
+
+	test("renders generic file read results compactly until expanded", () => {
+		const component = new ToolExecutionComponent(
+			"read",
+			"tool-compact-generic-file",
+			{ path: "notes.txt" },
+			{},
+			createReadToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{ content: [{ type: "text", text: "hidden body" }], details: undefined, isError: false },
+			false,
+		);
+
+		const collapsed = stripAnsi(component.render(120).join("\n"));
+		expect(collapsed).toContain("read notes.txt");
+		expect(collapsed).toContain("to expand");
+		expect(collapsed).not.toContain("hidden body");
+		// "file" is an internal kind, never surface it.
+		expect(collapsed).not.toContain("read file");
+
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(120).join("\n"));
+		expect(expanded).toContain("hidden body");
+	});
+
+	test("keeps generic file read errors visible while collapsed", () => {
+		const component = new ToolExecutionComponent(
+			"read",
+			"tool-compact-generic-error",
+			{ path: "missing.txt" },
+			{},
+			createReadToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{ content: [{ type: "text", text: "ENOENT: no such file" }], details: undefined, isError: true },
+			false,
+		);
+
+		const collapsed = stripAnsi(component.render(120).join("\n"));
+		expect(collapsed).toContain("ENOENT: no such file");
+	});
+
+	test("folds bash failure with empty output into a single muted footer line", () => {
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-fold-empty",
+			{ command: "dir missing\\path" },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "(no output)\n\nCommand exited with code 2" }],
+				details: undefined,
+				isError: true,
+			},
+			false,
+		);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		// Verbatim "Command exited with code 2" must be peeled off the body;
+		// the chip surfaces it instead.
+		expect(rendered).not.toContain("Command exited with code 2");
+		expect(rendered).toContain("(no output)");
+		expect(rendered).toContain("exit 2");
+		expect(rendered).toMatch(/\(no output\) · exit 2 · Took \d+\.\ds/);
+	});
+
+	test("keeps preview body but appends exit chip to Took line on bash failure", () => {
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-fold-output",
+			{ command: "node missing.js" },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "Error: Cannot find module 'missing.js'\n\nCommand exited with code 1" }],
+				details: undefined,
+				isError: true,
+			},
+			false,
+		);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("Error: Cannot find module 'missing.js'");
+		expect(rendered).not.toContain("Command exited with code 1");
+		expect(rendered).toMatch(/Took \d+\.\ds · exit 1|exit 1 · Took/);
+	});
+
+	test("surfaces aborted and timed-out bash status as muted chip", () => {
+		const aborted = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-fold-aborted",
+			{ command: "sleep 10" },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		aborted.markExecutionStarted();
+		aborted.updateResult(
+			{ content: [{ type: "text", text: "(no output)\n\nCommand aborted" }], details: undefined, isError: true },
+			false,
+		);
+		const abortedOut = stripAnsi(aborted.render(120).join("\n"));
+		expect(abortedOut).not.toContain("Command aborted");
+		expect(abortedOut).toContain("aborted");
+
+		const timedOut = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-fold-timeout",
+			{ command: "sleep 60", timeout: 5 },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		timedOut.markExecutionStarted();
+		timedOut.updateResult(
+			{
+				content: [{ type: "text", text: "(no output)\n\nCommand timed out after 5 seconds" }],
+				details: undefined,
+				isError: true,
+			},
+			false,
+		);
+		const timedOutTxt = stripAnsi(timedOut.render(120).join("\n"));
+		expect(timedOutTxt).not.toContain("Command timed out after 5 seconds");
+		expect(timedOutTxt).toContain("timed out 5s");
+	});
+
+	test("keeps successful bash footer unchanged (no exit chip, no leading no-output)", () => {
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-success",
+			{ command: "echo hi" },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		component.updateResult({ content: [{ type: "text", text: "hi" }], details: undefined, isError: false }, false);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("hi");
+		expect(rendered).toMatch(/Took \d+\.\ds/);
+		expect(rendered).not.toContain("exit ");
+		expect(rendered).not.toContain("·");
+	});
 });

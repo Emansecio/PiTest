@@ -38,7 +38,11 @@ export * from "./harness/system-prompt.ts";
 export * from "./harness/types.ts";
 export * from "./harness/utils/shell-output.ts";
 export * from "./harness/utils/truncate.ts";
-// Proxy utilities
 export * from "./proxy.ts";
+// Proxy utilities
+// Tier 4 — post-hoc error hint registry
+export * from "./tool-error-hint-registry.ts";
+// Tool rewrite registry
+export * from "./tool-rewrite-registry.ts";
 // Types
 export * from "./types.ts";

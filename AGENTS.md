@@ -1,5 +1,9 @@
 # Development Rules
 
+Per-turn rules live in this file. Reference material that only matters for
+specific tasks lives in `docs/agents/` and is loaded on demand. See the
+"Project docs" pointers at the bottom.
+
 ## Conversational Style
 
 - Keep answers short and concise
@@ -24,191 +28,32 @@
 
 ## Browser & Web Automation
 
-- **Always prefer `chrome_*` tools (from `pi-chrome`)** over `playwright`, `chrome-devtools-mcp`, or generic `agent_browser` whenever the task involves browsing, scraping, screenshotting, filling forms, or driving a web UI.
-- Rationale: `chrome_*` uses the user's real, signed-in Chrome profile via the companion browser extension. Sessions, cookies, MFA, SSO, org filters — all already there. Faster, more reliable, and no separate login dance.
-- Decision order for any browser task:
-  1. `chrome_*` (preferred — try first)
-  2. `agent_browser` / `playwright` / `chrome-devtools-mcp` (fallback when Chrome bridge is unavailable, when you need an isolated profile, or when the user explicitly asks)
-- If a `chrome_*` call returns "Chrome control locked", ask the user to run `/chrome authorize` (or `/chrome authorize indefinite` for the session) and retry.
-- If the companion extension is missing, ask the user to run `/chrome onboard` once, then `/chrome doctor` to verify, then `/chrome authorize`.
-- Common tools: `chrome_tab`, `chrome_snapshot`, `chrome_navigate`, `chrome_click`, `chrome_type`, `chrome_fill`, `chrome_evaluate`, `chrome_screenshot`, `chrome_list_network_requests`, `chrome_get_network_request`, `chrome_wait_for`, `chrome_upload_file`.
-- Use `background=true` on individual calls (or `/chrome background on` for the session) when you don't need Chrome to steal focus.
+- **Always prefer `chrome_*` tools (from `pi-chrome`)** over `playwright`, `chrome-devtools-mcp`, or generic `agent_browser` whenever the task involves browsing, scraping, screenshotting, filling forms, or driving a web UI. `chrome_*` uses the user's real signed-in Chrome profile via the companion extension — sessions, cookies, MFA, SSO already there.
+- Decision order: (1) `chrome_*` first, (2) `agent_browser`/`playwright`/`chrome-devtools-mcp` only when Chrome is unavailable, the user wants isolation, or explicitly asks.
+- Recovery: `chrome_*` returns "Chrome control locked" → ask the user to run `/chrome authorize` (or `/chrome authorize indefinite` for the session) and retry. Extension missing → `/chrome onboard`, then `/chrome doctor`, then `/chrome authorize`.
+- Common tools: `chrome_tab`, `chrome_snapshot`, `chrome_navigate`, `chrome_click`, `chrome_type`, `chrome_fill`, `chrome_evaluate`, `chrome_screenshot`, `chrome_list_network_requests`, `chrome_get_network_request`, `chrome_wait_for`, `chrome_upload_file`. Pass `background=true` (or `/chrome background on`) when you don't want Chrome to steal focus.
 
 ## Commands
 
-- After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.
-- Note: `npm run check` does not run tests.
-- NEVER run: `npm run build`, `npm test`
-- Only run specific tests if user instructs: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`
-- Run tests from the package root, not the repo root.
+- After code changes (not doc changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing. It does NOT run tests.
+- NEVER run: `npm run build`, `npm test`, `npm run release:*`.
+- Run specific tests only when the user asks: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`, from the package root.
 - If you create or modify a test file, you MUST run that test file and iterate until it passes.
-- When writing tests, run them, identify issues in either the test or implementation, and iterate until fixed.
-- For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` plus the faux provider. Do not use real provider APIs, real API keys, or paid tokens.
+- For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` plus the faux provider. Never real provider APIs, real API keys, or paid tokens.
 - Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` and name them `<issue-number>-<short-slug>.test.ts`.
-- For ad-hoc scripts, write the script to a temporary file (for example under `/tmp`) using `write`, run that file, edit it if needed, and remove it when it is no longer needed. Do not embed multi-line scripts directly in `bash` commands.
-- NEVER commit unless user asks
+- For ad-hoc scripts: write to a temp file with `write`, run it, edit if needed, remove when done. Do not embed multi-line scripts directly in `bash` calls.
+- NEVER commit unless the user asks.
 
-## Contribution Gate
+## Project tool config
 
-- New issues from new contributors are auto-closed by `.github/workflows/issue-gate.yml`
-- New PRs from new contributors without PR rights are auto-closed by `.github/workflows/pr-gate.yml`
-- Maintainer approval comments are handled by `.github/workflows/approve-contributor.yml`
-- Maintainers review auto-closed issues daily
-- Issues that do not meet the quality bar in `CONTRIBUTING.md` are not reopened and do not receive a reply
-- `lgtmi` approves future issues
-- `lgtm` approves future issues and rights to submit PRs
+This repo ships `.pi/settings.json` (project-local settings, merged over the
+global file). Notable knobs:
 
-When creating issues:
+- `frequentFiles.enabled: true` — the agent tracks per-file read/edit/write counts and persists the result to `.pi/frequent-files.json` so the next session boots warm.
+- `toolDiscovery.enabled: true` — tools outside the coding bundle are hidden behind `search_tool_bm25` to keep the per-turn tool snippet block short.
 
-- Add `pkg:*` labels to indicate which package(s) the issue affects
-  - Available labels: `pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:tui`
-- If an issue spans multiple packages, add all relevant labels
-
-When posting issue/PR comments:
-
-- Write the full comment to a temp file and use `gh issue comment --body-file` or `gh pr comment --body-file`
-- Never pass multi-line markdown directly via `--body` in shell commands
-- Preview the exact comment text before posting
-- Post exactly one final comment unless the user explicitly asks for multiple comments
-- If a comment is malformed, delete it immediately, then post one corrected comment
-- Keep comments concise, technical, and in the user's tone
-
-When closing issues via commit:
-
-- Include `fixes #<number>` or `closes #<number>` in the commit message
-- This automatically closes the issue when the commit is merged
-
-## PR Workflow
-
-- Analyze PRs without pulling locally first
-- If the user approves: create a feature branch, pull PR, rebase on main, apply adjustments, commit, merge into main, push, close PR, and leave a comment in the user's tone
-- You never open PRs yourself. We work in feature branches until everything is according to the user's requirements, then merge into main, and push.
-
-## Testing pi Interactive Mode with tmux
-
-To test pi's TUI in a controlled terminal environment:
-
-```bash
-# Create tmux session with specific dimensions
-tmux new-session -d -s pi-test -x 80 -y 24
-
-# Start pi from source
-tmux send-keys -t pi-test "cd /Users/badlogic/workspaces/pi-mono && ./pi-test.sh" Enter
-
-# Wait for startup, then capture output
-sleep 3 && tmux capture-pane -t pi-test -p
-
-# Send input
-tmux send-keys -t pi-test "your prompt here" Enter
-
-# Send special keys
-tmux send-keys -t pi-test Escape
-tmux send-keys -t pi-test C-o  # ctrl+o
-
-# Cleanup
-tmux kill-session -t pi-test
-```
-
-## Changelog
-
-Location: `packages/*/CHANGELOG.md` (each package has its own)
-
-### Format
-
-Use these sections under `## [Unreleased]`:
-
-- `### Breaking Changes` - API changes requiring migration
-- `### Added` - New features
-- `### Changed` - Changes to existing functionality
-- `### Fixed` - Bug fixes
-- `### Removed` - Removed features
-
-### Rules
-
-- Before adding entries, read the full `[Unreleased]` section to see which subsections already exist
-- New entries ALWAYS go under `## [Unreleased]` section
-- Append to existing subsections (e.g., `### Fixed`), do not create duplicates
-- NEVER modify already-released version sections (e.g., `## [0.12.2]`)
-- Each version section is immutable once released
-
-### Attribution
-
-- **Internal changes (from issues)**: `Fixed foo bar ([#123](https://github.com/earendil-works/pi-mono/issues/123))`
-- **External contributions**: `Added feature X ([#456](https://github.com/earendil-works/pi-mono/pull/456) by [@username](https://github.com/username))`
-
-## Adding a New LLM Provider (packages/ai)
-
-Adding a new provider requires changes across multiple files:
-
-### 1. Core Types (`packages/ai/src/types.ts`)
-
-- Add API identifier to `Api` type union (e.g., `"bedrock-converse-stream"`)
-- Create options interface extending `StreamOptions`
-- Add mapping to `ApiOptionsMap`
-- Add provider name to `KnownProvider` type union
-
-### 2. Provider Implementation (`packages/ai/src/providers/`)
-
-Create provider file exporting:
-
-- `stream<Provider>()` function returning `AssistantMessageEventStream`
-- `streamSimple<Provider>()` for `SimpleStreamOptions` mapping
-- Provider-specific options interface
-- Message/tool conversion functions
-- Response parsing emitting standardized events (`text`, `tool_call`, `thinking`, `usage`, `stop`)
-
-### 3. Provider Exports and Lazy Registration
-
-- Add a package subpath export in `packages/ai/package.json` pointing at `./dist/providers/<provider>.js`
-- Add `export type` re-exports in `packages/ai/src/index.ts` for provider option types that should remain available from the root entry
-- Register the provider in `packages/ai/src/providers/register-builtins.ts` via lazy loader wrappers, do not statically import provider implementation modules there
-- Add credential detection in `packages/ai/src/env-api-keys.ts`
-
-### 4. Model Generation (`packages/ai/scripts/generate-models.ts`)
-
-- Add logic to fetch/parse models from provider source
-- Map to standardized `Model` interface
-
-### 5. Tests (`packages/ai/test/`)
-
-- Always add the provider to `stream.test.ts` with at least one representative model, even if it reuses an existing API implementation such as `openai-completions`.
-- Add the provider to the broader provider matrix where applicable: `tokens.test.ts`, `abort.test.ts`, `empty.test.ts`, `context-overflow.test.ts`, `unicode-surrogate.test.ts`, `tool-call-without-result.test.ts`, `image-tool-result.test.ts`, `total-tokens.test.ts`, `cross-provider-handoff.test.ts`.
-- For `cross-provider-handoff.test.ts`, add at least one provider/model pair. If the provider exposes multiple model families (for example GPT and Claude), add at least one pair per family.
-- For non-standard auth, create utility (e.g., `bedrock-utils.ts`) with credential detection.
-
-### 6. Coding Agent (`packages/coding-agent/`)
-
-- `src/core/model-resolver.ts`: Add default model ID to `defaultModelPerProvider`
-- `src/core/provider-display-names.ts`: Add API-key login display name so `/login` and related UI show the provider for built-in API-key auth.
-- `src/cli/args.ts`: Add env var documentation
-- `README.md`: Add provider setup instructions
-- `docs/providers.md`: Add setup instructions, env var, and `auth.json` key
-
-### 7. Documentation
-
-- `packages/ai/README.md`: Add to providers table, document options/auth, add env vars
-- `packages/ai/CHANGELOG.md`: Add entry under `## [Unreleased]`
-
-## Releasing
-
-**Lockstep versioning**: All packages always share the same version number. Every release updates all packages together.
-
-**Version semantics** (no major releases):
-
-- `patch`: Bug fixes and new features
-- `minor`: API breaking changes
-
-### Steps
-
-1. **Update CHANGELOGs**: Ensure all changes since last release are documented in the `[Unreleased]` section of each affected package's CHANGELOG.md
-
-2. **Run release script**:
-   ```bash
-   npm run release:patch    # Fixes and additions
-   npm run release:minor    # API breaking changes
-   ```
-
-The script handles: version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+See `docs/agents/tools-and-config.md` for the full surface and the tool quirks
+that live in this repo (vitest paths, strip-only TS, generated files, etc.).
 
 ## **CRITICAL** Git Rules for Parallel Agents **CRITICAL**
 
@@ -261,3 +106,15 @@ git pull --rebase && git push
 ### User override
 
 If the user instructions conflict with rules set out here, ask for confirmation that they want to override the rules. Only then execute their instructions.
+
+## Project docs
+
+Load these only when the active task touches the topic — they are not part of
+the per-turn behavior contract.
+
+- `docs/RELEASING.md` — releasing process, CHANGELOG format/attribution, "Adding a New LLM Provider" full recipe.
+- `docs/agents/pr-workflow.md` — PR review/merge flow and issue/PR comment hygiene.
+- `docs/agents/contribution-gate.md` — auto-gate workflows, `lgtm`/`lgtmi`, `pkg:*` labels.
+- `docs/agents/tui-testing.md` — tmux recipe for driving pi's TUI from headless agents.
+- `docs/agents/tools-and-config.md` — `.pi/settings.json` shape and project tool quirks.
+- `docs/adr/` — architectural decision records (read-guard, diff limit, doom-loop, engineering style).

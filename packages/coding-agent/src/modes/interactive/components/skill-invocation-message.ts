@@ -14,7 +14,7 @@ export class SkillInvocationMessageComponent extends Box {
 	private markdownTheme: MarkdownTheme;
 
 	constructor(skillBlock: ParsedSkillBlock, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
-		super(1, 1, (t) => theme.bg("customMessageBg", t));
+		super(1, 0, (t) => theme.bg("customMessageBg", t));
 		this.skillBlock = skillBlock;
 		this.markdownTheme = markdownTheme;
 		this.updateDisplay();
@@ -32,6 +32,9 @@ export class SkillInvocationMessageComponent extends Box {
 
 	private updateDisplay(): void {
 		this.clear();
+		// Collapsed blocks pack tight; expanded ones get vertical breathing room
+		// so the markdown header and body don't fight the background.
+		this.setPadding(1, this.expanded ? 1 : 0);
 
 		if (this.expanded) {
 			// Expanded: label + skill name header + full content

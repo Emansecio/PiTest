@@ -123,6 +123,89 @@ function transformToolResultMessage(msg: Message, toolCallIdMap: Map<string, str
 }
 
 /**
+ * Quick scan: return true if any first/second pass transformation would change
+ * the input. When this returns false the caller can return `messages` verbatim,
+ * skipping the per-message array/object spreads in the common same-model case.
+ */
+function needsTransformation<TApi extends Api>(
+	messages: Message[],
+	model: Model<TApi>,
+	normalizeToolCallId: ((id: string, model: Model<TApi>, source: AssistantMessage) => string) | undefined,
+): boolean {
+	const supportsImages = model.input.includes("image");
+	let pendingTcIds: Set<string> | undefined;
+	let resolvedIds: Set<string> | undefined;
+
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+
+		if (!supportsImages) {
+			if (msg.role === "user" && Array.isArray(msg.content)) {
+				for (const block of msg.content) {
+					if (block.type === "image") return true;
+				}
+			} else if (msg.role === "toolResult") {
+				for (const block of msg.content) {
+					if (block.type === "image") return true;
+				}
+			}
+		}
+
+		if (msg.role === "assistant") {
+			const a = msg as AssistantMessage;
+			if (a.stopReason === "error" || a.stopReason === "aborted") return true;
+
+			const isSameModel = a.provider === model.provider && a.api === model.api && a.model === model.id;
+
+			if (pendingTcIds && resolvedIds) {
+				for (const tid of pendingTcIds) {
+					if (!resolvedIds.has(tid)) return true;
+				}
+			}
+
+			let nextPending: Set<string> | undefined;
+			for (const block of a.content) {
+				if (block.type === "toolCall") {
+					const tc = block as ToolCall;
+					if (!isSameModel) {
+						if (tc.thoughtSignature) return true;
+						if (normalizeToolCallId) return true;
+					}
+					if (!nextPending) nextPending = new Set();
+					nextPending.add(tc.id);
+				} else if (block.type === "thinking") {
+					if (!isSameModel) return true;
+					if (!block.redacted && !block.thinkingSignature && (!block.thinking || block.thinking.trim() === "")) {
+						return true;
+					}
+				}
+			}
+
+			pendingTcIds = nextPending;
+			resolvedIds = nextPending ? new Set() : undefined;
+		} else if (msg.role === "toolResult") {
+			resolvedIds?.add(msg.toolCallId);
+		} else if (msg.role === "user") {
+			if (pendingTcIds && resolvedIds) {
+				for (const tid of pendingTcIds) {
+					if (!resolvedIds.has(tid)) return true;
+				}
+				pendingTcIds = undefined;
+				resolvedIds = undefined;
+			}
+		}
+	}
+
+	if (pendingTcIds && resolvedIds) {
+		for (const tid of pendingTcIds) {
+			if (!resolvedIds.has(tid)) return true;
+		}
+	}
+
+	return false;
+}
+
+/**
  * Normalize tool call ID for cross-provider compatibility.
  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
  * Anthropic APIs require IDs matching ^[a-zA-Z0-9_-]+$ (max 64 chars).
@@ -132,6 +215,13 @@ export function transformMessages<TApi extends Api>(
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
 ): Message[] {
+	// Fast path: same-model sessions with no orphans, errors, or images to downgrade
+	// run for nearly every provider request. Skipping the two-pass allocation here
+	// avoids O(N + sum(content blocks)) array/object spreads per request.
+	if (!needsTransformation(messages, model, normalizeToolCallId)) {
+		return messages;
+	}
+
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
 	const imageAwareMessages = downgradeUnsupportedImages(messages, model);

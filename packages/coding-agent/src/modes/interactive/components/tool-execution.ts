@@ -1,17 +1,18 @@
-import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
+import { MessageShell } from "./message-shell.ts";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
 }
 
-export class ToolExecutionComponent extends Container {
-	private contentBox: Box;
+export class ToolExecutionComponent extends MessageShell {
+	private contentBox: Container;
 	private contentText: Text;
 	private selfRenderContainer: Container;
 	private callRendererComponent?: Component;
@@ -49,7 +50,9 @@ export class ToolExecutionComponent extends Container {
 		ui: TUI,
 		cwd: string,
 	) {
-		super();
+		super({
+			gutterColor: (text: string) => theme.fg("gutterToolPending", text),
+		});
 		this.toolName = toolName;
 		this.toolCallId = toolCallId;
 		this.args = args;
@@ -60,17 +63,23 @@ export class ToolExecutionComponent extends Container {
 		this.ui = ui;
 		this.cwd = cwd;
 
-		this.addChild(new Spacer(1));
-
-		// Always create all shell variants. contentBox is used for default renderer-based composition.
-		// selfRenderContainer is used when the tool renders its own framing.
-		// contentText is reserved for generic fallback rendering when no tool definition exists.
-		this.contentBox = new Box(1, 1, (text: string) => theme.bg("toolPendingBg", text));
-		this.contentText = new Text("", 1, 1, (text: string) => theme.bg("toolPendingBg", text));
+		// Per Leva 2 (D1=B): the inner content has NO background fill. The
+		// MessageShell handles all framing via the left gutter; the inner
+		// containers are plain `Container`s that just stack components.
+		this.contentBox = new Container();
+		this.contentText = new Text("", 0, 0);
 		this.selfRenderContainer = new Container();
 
+		// `renderShell:"self"` opts the tool entirely out of the shell — used
+		// by built-in `edit` / `edit-hashline` and any extension tool that
+		// owns its full visual. The shell then becomes a passthrough.
+		const usesSelfShell = this.hasRendererDefinition() && this.getRenderShell() === "self";
+		if (usesSelfShell) {
+			this.setShellDisabled(true);
+		}
+
 		if (this.hasRendererDefinition()) {
-			this.addChild(this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox);
+			this.addChild(usesSelfShell ? this.selfRenderContainer : this.contentBox);
 		} else {
 			this.addChild(this.contentText);
 		}
@@ -226,19 +235,19 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
-		const bgFn = this.isPartial
-			? (text: string) => theme.bg("toolPendingBg", text)
+		// Per Leva 2: state is reflected in the gutter color, not in a bg fill.
+		// pending → muted gray, success → green, error → red.
+		const gutterFn = this.isPartial
+			? (text: string) => theme.fg("gutterToolPending", text)
 			: this.result?.isError
-				? (text: string) => theme.bg("toolErrorBg", text)
-				: (text: string) => theme.bg("toolSuccessBg", text);
+				? (text: string) => theme.fg("gutterToolError", text)
+				: (text: string) => theme.fg("gutterToolSuccess", text);
+		this.setGutterColor(gutterFn);
 
 		let hasContent = false;
 		this.hideComponent = false;
 		if (this.hasRendererDefinition()) {
 			const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox;
-			if (renderContainer instanceof Box) {
-				renderContainer.setBgFn(bgFn);
-			}
 			renderContainer.clear();
 
 			const callRenderer = this.getCallRenderer();
@@ -288,7 +297,6 @@ export class ToolExecutionComponent extends Container {
 				}
 			}
 		} else {
-			this.contentText.setCustomBgFn(bgFn);
 			this.contentText.setText(this.formatToolExecution());
 			hasContent = true;
 		}

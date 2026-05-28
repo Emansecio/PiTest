@@ -14,9 +14,9 @@ describe("AgentSession prompt characterization", () => {
 	const harnesses: Harness[] = [];
 	const tempDirs: string[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 		while (tempDirs.length > 0) {
 			const tempDir = tempDirs.pop();
@@ -150,26 +150,26 @@ describe("AgentSession prompt characterization", () => {
 		const skillPath = join(tempDir, "test-skill.md");
 		writeFileSync(skillPath, "# Test Skill\n\nUse the skill body.");
 
+		const testSkill = {
+			name: "test",
+			description: "Test skill",
+			filePath: skillPath,
+			disableModelInvocation: false,
+			baseDir: tempDir,
+			sourceInfo: createSyntheticSourceInfo(skillPath, {
+				source: "local",
+				scope: "project",
+				origin: "top-level",
+				baseDir: tempDir,
+			}),
+		};
 		const resourceLoader = {
 			...createTestResourceLoader(),
 			getSkills: () => ({
-				skills: [
-					{
-						name: "test",
-						description: "Test skill",
-						filePath: skillPath,
-						disableModelInvocation: false,
-						baseDir: tempDir,
-						sourceInfo: createSyntheticSourceInfo(skillPath, {
-							source: "local",
-							scope: "project",
-							origin: "top-level",
-							baseDir: tempDir,
-						}),
-					},
-				],
+				skills: [testSkill],
 				diagnostics: [],
 			}),
+			getSkillByName: (name: string) => (name === testSkill.name ? testSkill : undefined),
 		};
 		const harness = await createHarness({ resourceLoader });
 		harnesses.push(harness);

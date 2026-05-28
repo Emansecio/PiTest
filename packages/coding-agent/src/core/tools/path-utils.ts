@@ -2,6 +2,11 @@ import { accessSync, constants } from "node:fs";
 import * as os from "node:os";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 
+// Matches a URL-like prefix (e.g. `pr://`, `conflict://`). Kept local so we
+// don't pull in the url-schemes module \u2014 these helpers are called from many
+// places that must stay independent of the scheme registry.
+const URL_SCHEME_RE = /^[a-z][a-z0-9+-]*:\/\//;
+
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 const NARROW_NO_BREAK_SPACE = "\u202F";
 function normalizeUnicodeSpaces(str: string): string {
@@ -52,6 +57,8 @@ export function expandPath(filePath: string): string {
  * Handles ~ expansion and absolute paths.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
+	// URL-scheme paths (e.g. `pr://1428`) are virtual — never touch the FS for them.
+	if (URL_SCHEME_RE.test(filePath)) return filePath;
 	const expanded = expandPath(filePath);
 	if (isAbsolute(expanded)) {
 		return expanded;
@@ -60,6 +67,7 @@ export function resolveToCwd(filePath: string, cwd: string): string {
 }
 
 export function resolveReadPath(filePath: string, cwd: string): string {
+	if (URL_SCHEME_RE.test(filePath)) return filePath;
 	const resolved = resolveToCwd(filePath, cwd);
 
 	if (fileExists(resolved)) {

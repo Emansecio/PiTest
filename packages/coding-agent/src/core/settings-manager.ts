@@ -9,6 +9,8 @@ import type { HooksSettings } from "./hooks/types.ts";
 import type { McpSettings } from "./mcp/types.ts";
 import type { PermissionSettings } from "./permissions/types.ts";
 
+const SETTINGS_LOCK_SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
+
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
@@ -78,11 +80,102 @@ export interface FrequentFilesSettings {
 	maxFiles?: number; // default: 256 (in-memory tracker cap)
 }
 
+/**
+ * Time-Traveling Stream Rules (TTSR) configuration.
+ *
+ * Each rule defines a regex that is matched against the model's streaming
+ * output. On the first match the current turn is aborted and a
+ * `<system-reminder>` carrying `message` is injected before the model retries
+ * the same turn. Off by default; activate by adding rules to settings.json.
+ */
+export interface TTSRRuleSettings {
+	name: string;
+	/** Serialized regex source compiled at load time. */
+	regex: string;
+	message: string;
+	/** Stream scope. Defaults to "assistant_text". */
+	scope?: "assistant_text" | "tool_args" | "any";
+	disabled?: boolean;
+}
+
 export interface ResolvedFrequentFilesSettings {
 	enabled: boolean;
 	topN: number;
 	minHits: number;
 	maxFiles: number;
+}
+
+/**
+ * Hindsight memory configuration. When `enabled`, the retain/recall/reflect
+ * tools are registered for coding bundles and a per-project bank is opened
+ * at session start. The bank lives at `<cwd>/.pi/hindsight/bank.jsonl` by
+ * default; override via `bankPath`.
+ */
+export interface HindsightSettings {
+	enabled?: boolean;
+	bankPath?: string;
+	/** Optional hard ceiling on entry count. Oldest entries evicted on open. */
+	maxEntries?: number;
+	/** Optional age cap: drop entries older than this many days on open. */
+	pruneOlderThanDays?: number;
+}
+
+export interface ResolvedHindsightSettings {
+	enabled: boolean;
+	bankPath?: string;
+	maxEntries?: number;
+	pruneOlderThanDays?: number;
+}
+
+/**
+ * Hidden tool discovery configuration. When `enabled`, the agent boot path may
+ * seed the hidden tool index so the `search_tool_bm25` tool can BM25-search
+ * specialized tools that are NOT in the default active surface. The
+ * `search_tool_bm25` tool itself is always registered; these settings only
+ * gate seeding + which tools live where.
+ */
+export interface ToolDiscoverySettings {
+	enabled?: boolean;
+	alwaysActive?: string[];
+	hiddenByDefault?: string[];
+}
+
+export interface ResolvedToolDiscoverySettings {
+	enabled: boolean;
+	alwaysActive: string[];
+	hiddenByDefault: string[];
+}
+
+/**
+ * Web search tool configuration. Off by default; opt-in via
+ * `webSearch.enabled: true`. `defaultProvider` controls the chain entry point
+ * ("auto" walks the configured chain). `providers.<name>.apiKey` is an
+ * optional per-provider key override surfaced to the tool via env mirroring.
+ */
+export interface WebSearchSettings {
+	enabled?: boolean;
+	defaultProvider?: string;
+	providers?: Record<string, { apiKey?: string }>;
+}
+
+export interface ResolvedWebSearchSettings {
+	enabled: boolean;
+	defaultProvider: string;
+	providers: Record<string, { apiKey?: string }>;
+}
+
+/**
+ * Eval tool configuration. Off by default; opt-in via `eval.enabled: true`.
+ * When enabled, the `eval` tool is registered for coding bundles and the
+ * session boots a persistent Python + JS kernel manager (one of each kernel
+ * spawned lazily on first use).
+ */
+export interface EvalSettings {
+	enabled?: boolean;
+}
+
+export interface ResolvedEvalSettings {
+	enabled: boolean;
 }
 
 export interface ResolvedToolFeedbackSettings {
@@ -165,11 +258,68 @@ export interface Settings {
 	 */
 	engineeringStyle?: EngineeringStyle;
 	frequentFiles?: FrequentFilesSettings;
+	/**
+	 * Model role configuration (default/smol/slow/plan/commit). See
+	 * ModelRoleSettings for shape — kept as a separate interface so the role
+	 * resolver in model-resolver.ts can consume the settings slice without
+	 * importing the whole Settings surface.
+	 */
+	modelRoles?: ModelRoleSettings["modelRoles"];
+	/** Time-Traveling Stream Rules. Off by default; populate to activate. */
+	ttsrRules?: TTSRRuleSettings[];
+	/** Per-project hindsight memory bank. Off by default. */
+	hindsight?: HindsightSettings;
+	/**
+	 * Hidden tool discovery index. Off by default; when enabled, hidden tools
+	 * can be surfaced on-demand via the `search_tool_bm25` tool.
+	 */
+	toolDiscovery?: ToolDiscoverySettings;
+	/**
+	 * Web search tool. Off by default; when enabled, the `web_search` tool is
+	 * registered for coding bundles and routes through the configured provider
+	 * chain (env-key gated).
+	 */
+	webSearch?: WebSearchSettings;
+	/**
+	 * Eval tool. Off by default; when enabled, registers the `eval` tool and
+	 * starts a per-session persistent Python + JS kernel manager.
+	 */
+	eval?: EvalSettings;
 }
 
 export interface MemorySettings {
 	/** Disable injecting MEMORY.md into the system prompt (the memory_append tool still works). */
 	disableInjection?: boolean;
+}
+
+/**
+ * Model-role configuration. A role maps an intent ("smol fan-out", "deep
+ * reasoning") to a concrete model pattern plus optional fallback chain and
+ * path-scoped overrides. Resolved by `resolveRole()` in model-resolver.ts.
+ */
+export interface ModelRoleConfig {
+	/** Primary model pattern, e.g. "anthropic/claude-opus-4-7" or "sonnet:high". */
+	model: string;
+	/** Optional default thinking level for this role. */
+	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	/** Per-path overrides — glob keys matched against cwd; closest match wins. */
+	paths?: Record<string, string>;
+	/** Inline fallback chain (used when `retry.fallbackChains[role]` is absent). */
+	fallbackChain?: string[];
+}
+
+export interface ModelRoleSettings {
+	modelRoles?: {
+		default?: ModelRoleConfig;
+		smol?: ModelRoleConfig;
+		slow?: ModelRoleConfig;
+		plan?: ModelRoleConfig;
+		commit?: ModelRoleConfig;
+	};
+	retry?: {
+		fallbackChains?: Record<string, string[]>;
+		cooldownMs?: number;
+	};
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -240,10 +390,8 @@ export class FileSettingsStorage implements SettingsStorage {
 					throw error;
 				}
 				lastError = error;
-				const start = Date.now();
-				while (Date.now() - start < delayMs) {
-					// Sleep synchronously to avoid changing callers to async.
-				}
+				// Sleep synchronously without burning CPU; Atomics.wait yields the thread.
+				Atomics.wait(SETTINGS_LOCK_SLEEP_BUF, 0, 0, delayMs);
 			}
 		}
 
@@ -1201,5 +1349,127 @@ export class SettingsManager {
 
 	getMemorySettings(): MemorySettings {
 		return { ...(this.settings.memory ?? {}) };
+	}
+
+	/**
+	 * Return configured Time-Traveling Stream Rules. Returns a defensive copy so
+	 * callers cannot mutate the in-memory settings. Off by default — when no
+	 * rules are configured, an empty array is returned and the TTSR matcher is
+	 * skipped entirely by the loop wiring.
+	 */
+	getTTSRRules(): TTSRRuleSettings[] {
+		const rules = this.settings.ttsrRules;
+		if (!Array.isArray(rules)) return [];
+		return rules.map((rule) => ({ ...rule }));
+	}
+
+	/**
+	 * Persist a full TTSR rule list to the global scope. Used by interactive
+	 * mode's `/ttsr enable|disable` commands to toggle the `disabled` flag.
+	 */
+	setTTSRRules(rules: TTSRRuleSettings[]): void {
+		this.globalSettings.ttsrRules = rules.map((rule) => ({ ...rule }));
+		this.markModified("ttsrRules");
+		this.save();
+	}
+
+	/**
+	 * Return the model-role settings slice (roles + retry config). Used by
+	 * resolveRole() to pick a primary model and assemble a fallback chain.
+	 * Surgical getter — kept separate from other sections so parallel agents
+	 * adding `hindsight`/`ttsr` blocks can merge cleanly.
+	 */
+	getModelRoleSettings(): ModelRoleSettings {
+		return {
+			modelRoles: this.settings.modelRoles ? structuredClone(this.settings.modelRoles) : undefined,
+			retry: this.settings.retry
+				? {
+						fallbackChains: (this.settings.retry as { fallbackChains?: Record<string, string[]> }).fallbackChains,
+						cooldownMs: (this.settings.retry as { cooldownMs?: number }).cooldownMs,
+					}
+				: undefined,
+		};
+	}
+
+	/**
+	 * Resolve hindsight memory settings. Disabled by default; opt-in via
+	 * `hindsight.enabled: true` in settings.json (project or global). When
+	 * disabled, the retain/recall/reflect tools are not registered and no
+	 * bank is opened.
+	 */
+	getHindsightSettings(): ResolvedHindsightSettings {
+		const raw = this.settings.hindsight;
+		const maxEntries =
+			typeof raw?.maxEntries === "number" && Number.isFinite(raw.maxEntries) && raw.maxEntries > 0
+				? Math.floor(raw.maxEntries)
+				: undefined;
+		const pruneOlderThanDays =
+			typeof raw?.pruneOlderThanDays === "number" &&
+			Number.isFinite(raw.pruneOlderThanDays) &&
+			raw.pruneOlderThanDays > 0
+				? raw.pruneOlderThanDays
+				: undefined;
+		// Default ON: retain/recall/reflect ride out-of-the-box with a per-project
+		// bank under `<cwd>/.pi/hindsight/bank.jsonl`. Opt out via
+		// `hindsight.enabled: false` in settings.json.
+		return {
+			enabled: raw?.enabled !== false,
+			bankPath: typeof raw?.bankPath === "string" && raw.bankPath.length > 0 ? raw.bankPath : undefined,
+			maxEntries,
+			pruneOlderThanDays,
+		};
+	}
+
+	/**
+	 * Resolve hidden tool discovery settings. The `search_tool_bm25` tool is
+	 * always registered; these settings only gate auto-seeding of the hidden
+	 * index at session boot and let callers declare which tools should be in
+	 * the active surface vs. hidden by default.
+	 */
+	getToolDiscoverySettings(): ResolvedToolDiscoverySettings {
+		const raw = this.settings.toolDiscovery;
+		return {
+			enabled: raw?.enabled !== false,
+			alwaysActive: Array.isArray(raw?.alwaysActive) ? [...raw.alwaysActive] : [],
+			hiddenByDefault: Array.isArray(raw?.hiddenByDefault) ? [...raw.hiddenByDefault] : [],
+		};
+	}
+
+	/**
+	 * Resolve web_search settings. Disabled by default; opt-in via
+	 * `webSearch.enabled: true`. Returns a defensive copy of any per-provider
+	 * api-key overrides so callers cannot mutate the in-memory settings.
+	 */
+	/**
+	 * Resolve eval settings. Disabled by default; opt-in via `eval.enabled: true`.
+	 */
+	getEvalSettings(): ResolvedEvalSettings {
+		const raw = this.settings.eval;
+		// Default ON: the eval tool is registered and a persistent Python + JS
+		// kernel manager is spawned lazily on first use. Opt out via
+		// `eval.enabled: false` in settings.json.
+		return { enabled: raw?.enabled !== false };
+	}
+
+	getWebSearchSettings(): ResolvedWebSearchSettings {
+		const raw = this.settings.webSearch;
+		const providers: Record<string, { apiKey?: string }> = {};
+		if (raw?.providers && typeof raw.providers === "object") {
+			for (const [name, value] of Object.entries(raw.providers)) {
+				if (value && typeof value === "object") {
+					providers[name] = { apiKey: typeof value.apiKey === "string" ? value.apiKey : undefined };
+				}
+			}
+		}
+		// Default ON: the `web_search` tool is registered and routes through the
+		// configured provider chain. Providers without env keys simply fall through
+		// the chain, so being enabled with no keys is a no-op. Opt out via
+		// `webSearch.enabled: false` in settings.json.
+		return {
+			enabled: raw?.enabled !== false,
+			defaultProvider:
+				typeof raw?.defaultProvider === "string" && raw.defaultProvider.length > 0 ? raw.defaultProvider : "auto",
+			providers,
+		};
 	}
 }

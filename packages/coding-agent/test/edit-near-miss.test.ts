@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEditToolDefinition } from "../src/core/tools/edit.js";
 import {
 	applyEditsToNormalizedContent,
+	buildCandidateMatches,
 	buildNearMissHint,
+	formatCandidateMatchesForError,
 	indentTolerantFind,
 	reindentText,
 } from "../src/core/tools/edit-diff.js";
@@ -48,6 +50,37 @@ describe("buildNearMissHint", () => {
 		expect(hint).not.toBeNull();
 		expect(hint).toMatch(/Closest candidate starts at line 2/);
 		expect(hint).toMatch(/First divergence at line 4/);
+	});
+});
+
+describe("buildCandidateMatches", () => {
+	it("returns empty when nothing in content lines up with oldText", () => {
+		const candidates = buildCandidateMatches("alpha\nbeta\ngamma\n", "totally\nunrelated\nblock\n");
+		expect(candidates).toEqual([]);
+	});
+
+	it("ships a copy-pasteable verbatim snippet covering the match window", () => {
+		const content = ["function foo() {", "  return 1;", "  return 2;", "}"].join("\n");
+		const oldText = ["function foo() {", "  return 999;", "  return 2;", "}"].join("\n");
+		const candidates = buildCandidateMatches(content, oldText);
+		expect(candidates.length).toBeGreaterThan(0);
+		const top = candidates[0];
+		expect(top.startLine).toBe(1);
+		expect(top.endLine).toBe(4);
+		expect(top.verbatimSnippet).toBe(content);
+		expect(top.score).toBe(3);
+		expect(top.windowSize).toBe(4);
+		expect(top.divergenceLine).toBe(2);
+	});
+
+	it("formatCandidateMatchesForError renders each candidate block", () => {
+		const content = ["function foo() {", "  return 1;", "  return 2;", "}"].join("\n");
+		const oldText = ["function foo() {", "  return 999;", "  return 2;", "}"].join("\n");
+		const formatted = formatCandidateMatchesForError(buildCandidateMatches(content, oldText));
+		expect(formatted).not.toBeNull();
+		expect(formatted ?? "").toContain("Candidate 1");
+		expect(formatted ?? "").toContain("Paste this verbatim as oldText");
+		expect(formatted ?? "").toContain("─────");
 	});
 });
 
@@ -145,7 +178,7 @@ describe("applyEditsToNormalizedContent: indent-tolerant tier", () => {
 				undefined,
 				ctx,
 			),
-		).rejects.toThrow(/First divergence at line 2/);
+		).rejects.toThrow(/first divergence at line 2/i);
 	});
 });
 

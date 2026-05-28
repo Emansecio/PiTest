@@ -1,6 +1,16 @@
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { extractToolFileOp } from "../src/core/compaction/utils.js";
-import { FrequentFilesTracker, formatFrequentFilesForPrompt } from "../src/core/frequent-files.js";
+import {
+	defaultFrequentFilesPath,
+	type FrequentFilesSnapshot,
+	FrequentFilesTracker,
+	formatFrequentFilesForPrompt,
+	loadFrequentFilesSnapshot,
+	saveFrequentFilesSnapshot,
+} from "../src/core/frequent-files.js";
 
 describe("FrequentFilesTracker.record", () => {
 	it("counts read/edit/write per file independently", () => {
@@ -159,5 +169,149 @@ describe("extractToolFileOp", () => {
 		expect(extractToolFileOp("read", { path: 42 })).toBeUndefined();
 		expect(extractToolFileOp("read", null)).toBeUndefined();
 		expect(extractToolFileOp("read", undefined)).toBeUndefined();
+	});
+});
+
+describe("FrequentFilesTracker snapshot round-trip", () => {
+	it("toSnapshot + loadSnapshot preserves counts and ordering", () => {
+		const a = new FrequentFilesTracker();
+		a.record("src/a.ts", "read", 100);
+		a.record("src/a.ts", "edit", 200);
+		a.record("src/b.ts", "write", 300);
+		const snapshot = a.toSnapshot();
+		expect(snapshot.version).toBe(1);
+		expect(snapshot.entries).toHaveLength(2);
+
+		const b = new FrequentFilesTracker();
+		b.loadSnapshot(snapshot);
+		const top = b.getTop({ minHits: 1 });
+		const aStat = top.find((s) => s.path === "src/a.ts");
+		const bStat = top.find((s) => s.path === "src/b.ts");
+		expect(aStat).toMatchObject({ readCount: 1, editCount: 1, hits: 2, lastTouchedAt: 200 });
+		expect(bStat).toMatchObject({ writeCount: 1, hits: 1, lastTouchedAt: 300 });
+	});
+
+	it("loadSnapshot is additive — pre-existing entries accumulate", () => {
+		const a = new FrequentFilesTracker();
+		a.record("x.ts", "read", 1);
+		a.record("x.ts", "read", 2);
+		const snapshot = a.toSnapshot();
+
+		const b = new FrequentFilesTracker();
+		b.record("x.ts", "edit", 10);
+		b.loadSnapshot(snapshot);
+		const top = b.getTop({ minHits: 1 });
+		expect(top[0]).toMatchObject({ path: "x.ts", readCount: 2, editCount: 1, hits: 3 });
+	});
+
+	it("loadSnapshot ignores unsupported versions", () => {
+		const t = new FrequentFilesTracker();
+		t.loadSnapshot({
+			version: 99 as 1,
+			savedAt: 0,
+			entries: [{ path: "a.ts", readCount: 1, writeCount: 0, editCount: 0, hits: 1, lastTouchedAt: 0 }],
+		});
+		expect(t.size()).toBe(0);
+	});
+
+	it("loadSnapshot drops malformed entries silently", () => {
+		const t = new FrequentFilesTracker();
+		t.loadSnapshot({
+			version: 1,
+			savedAt: 0,
+			entries: [
+				{ path: "", readCount: 1, writeCount: 0, editCount: 0, hits: 1, lastTouchedAt: 0 },
+				{ path: "ok.ts", readCount: 1, writeCount: 0, editCount: 0, hits: 1, lastTouchedAt: 0 },
+				// `path` missing — the surrounding `as` cast widens the type so we
+				// can feed this malformed shape through `loadSnapshot`.
+				{ readCount: 1, writeCount: 0, editCount: 0, hits: 1, lastTouchedAt: 0 },
+			] as FrequentFilesSnapshot["entries"],
+		});
+		expect(t.size()).toBe(1);
+		expect(t.getTop({ minHits: 1 })[0].path).toBe("ok.ts");
+	});
+});
+
+describe("FrequentFiles persistence helpers", () => {
+	it("saveFrequentFilesSnapshot writes valid JSON that loadFrequentFilesSnapshot can read back", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-freq-"));
+		try {
+			const path = join(dir, "frequent-files.json");
+			const t = new FrequentFilesTracker();
+			t.record("src/a.ts", "read", 100);
+			t.record("src/b.ts", "edit", 200);
+			saveFrequentFilesSnapshot(path, t.toSnapshot());
+
+			const loaded = loadFrequentFilesSnapshot(path);
+			expect(loaded?.version).toBe(1);
+			expect(loaded?.entries).toHaveLength(2);
+
+			const t2 = new FrequentFilesTracker();
+			t2.loadSnapshot(loaded);
+			expect(t2.size()).toBe(2);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("saveFrequentFilesSnapshot creates parent dirs", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-freq-"));
+		try {
+			const path = join(dir, "nested", "deep", "freq.json");
+			const t = new FrequentFilesTracker();
+			t.record("a.ts", "read");
+			saveFrequentFilesSnapshot(path, t.toSnapshot());
+			expect(loadFrequentFilesSnapshot(path)?.entries).toHaveLength(1);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("loadFrequentFilesSnapshot returns undefined for missing file", () => {
+		expect(loadFrequentFilesSnapshot(join(tmpdir(), "definitely-missing-pi-freq.json"))).toBeUndefined();
+	});
+
+	it("loadFrequentFilesSnapshot returns undefined for malformed JSON", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-freq-"));
+		try {
+			const path = join(dir, "bad.json");
+			writeFileSync(path, "not json at all", "utf8");
+			expect(loadFrequentFilesSnapshot(path)).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("loadFrequentFilesSnapshot returns undefined for wrong version", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-freq-"));
+		try {
+			const path = join(dir, "v99.json");
+			writeFileSync(path, JSON.stringify({ version: 99, savedAt: 0, entries: [] }), "utf8");
+			expect(loadFrequentFilesSnapshot(path)).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("write is atomic — does not leave the .tmp suffix in the final path", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-freq-"));
+		try {
+			const path = join(dir, "freq.json");
+			const t = new FrequentFilesTracker();
+			t.record("a.ts", "read");
+			saveFrequentFilesSnapshot(path, t.toSnapshot());
+			// File exists; .tmp sibling was renamed away.
+			expect(() => readFileSync(path, "utf8")).not.toThrow();
+			expect(() => readFileSync(`${path}.tmp`, "utf8")).toThrow();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("defaultFrequentFilesPath", () => {
+	it("anchors under <cwd>/.pi/frequent-files.json", () => {
+		const out = defaultFrequentFilesPath("/project/root");
+		expect(out.replace(/\\/g, "/")).toBe("/project/root/.pi/frequent-files.json");
 	});
 });

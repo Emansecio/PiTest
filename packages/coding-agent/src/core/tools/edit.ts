@@ -5,6 +5,7 @@ import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } 
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import type { ToolDefinition } from "../extensions/types.js";
+import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, PATH_KEY_ALIASES } from "./argument-prep.js";
 import {
 	applyEditsToNormalizedContent,
@@ -47,6 +48,11 @@ const editSchema = Type.Object(
 			description:
 				"One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead.",
 		}),
+		preview: Type.Optional(
+			Type.Boolean({
+				description: "When true, stage as a preview rather than applying. Use the resolve tool to commit.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -189,10 +195,11 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 function formatEditCall(
 	args: RenderableEditArgs | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	cwd?: string,
 ): string {
 	const invalidArg = invalidArgText(theme);
 	const rawPath = str(args?.file_path ?? args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath) : null;
+	const path = rawPath !== null ? shortenPath(rawPath, cwd) : null;
 	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
 	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
 }
@@ -247,10 +254,11 @@ function buildEditCallComponent(
 	component: EditCallRenderComponent,
 	args: RenderableEditArgs | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	cwd?: string,
 ): EditCallRenderComponent {
 	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
 	component.clear();
-	component.addChild(new Text(formatEditCall(args, theme), 0, 0));
+	component.addChild(new Text(formatEditCall(args, theme, cwd), 0, 0));
 
 	if (!component.preview) {
 		return component;
@@ -292,7 +300,7 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			'Edit a single file using exact text replacement.\n\nRules:\n- Every edits[].oldText must match EXACTLY one region. Include enough surrounding context to make it unique.\n- edits[].oldText is matched against the ORIGINAL file content (not after earlier edits in the same call apply). Do not chain edits that depend on previous oldText becoming newText.\n- Do not emit overlapping or nested edits. If two changes touch the same block or adjacent lines, merge them into one edit.\n- Keep oldText as small as possible while remaining unique. Do not pad with large unchanged regions to bridge distant changes — use separate edits[] entries instead.\n- Prefer one edit call with multiple edits[] entries over multiple edit calls on the same file.\n- Read the file first if you have not already in this session — the read-guard blocks edits on unread files to prevent diffs against hallucinated content.\n\nExample (single change):\n  { path: "src/config.ts", edits: [{ oldText: \'const VERSION = "1.0.0";\', newText: \'const VERSION = "1.1.0";\' }] }\n\nExample (multiple disjoint changes in one call):\n  { path: "src/main.ts", edits: [\n    { oldText: \'import { old } from "./old.js";\', newText: \'import { next } from "./next.js";\' },\n    { oldText: "old.run()", newText: "next.run()" }\n  ] }\n\nCommon mistakes to avoid:\n- oldText missing trailing whitespace/newlines present in the file\n- oldText not unique (matches multiple regions) → include more surrounding context\n- Two edits whose oldText overlaps → merge into one larger edit\n- Retrying the same edit unchanged after success — the change is already applied; verify with read instead\n- Padding oldText with unchanged lines just to bridge two real changes — emit two edits[] entries instead',
+			'Edit one file by exact text replacement. Pass edits[] of {oldText,newText}; each oldText must match exactly one region in the ORIGINAL file. Multiple disjoint changes in same file → one call with multiple edits[]. File must be read first this session.\n\nWRONG: { "edits": [{ "oldText": "foo", "newText": "foo" }] }   // no-op, refused\nWRONG: { "edits": [{ "oldText": "x", "newText": "y" }] }       // ambiguous if multiple "x"\nRIGHT: { "edits": [{ "oldText": "function foo()", "newText": "function foo(x)" }] }   // unique anchor',
 		promptSnippet:
 			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
 		promptGuidelines: [
@@ -379,6 +387,39 @@ export function createEditToolDefinition(
 								}
 
 								const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+								const diffResult = generateDiffString(baseContent, newContent);
+
+								// Preview mode: stage instead of writing to disk.
+								const queue = getCurrentPreviewQueue();
+								if (input.preview === true && queue) {
+									const item = queue.add({
+										kind: "edit",
+										path,
+										apply: async () => {
+											await ops.writeFile(absolutePath, finalContent);
+										},
+										summary: {
+											description: `edit ${path}: ${edits.length} block(s)`,
+											replacementCount: edits.length,
+											diff: diffResult.diff,
+										},
+									});
+									if (signal) signal.removeEventListener("abort", onAbort);
+									resolve({
+										content: [
+											{
+												type: "text",
+												text: `Preview staged. id=${item.id}. Use resolve to commit.`,
+											},
+										],
+										details: {
+											diff: diffResult.diff,
+											firstChangedLine: diffResult.firstChangedLine,
+										},
+									});
+									return;
+								}
+
 								await ops.writeFile(absolutePath, finalContent);
 
 								// Check if aborted after writing.
@@ -391,7 +432,6 @@ export function createEditToolDefinition(
 									signal.removeEventListener("abort", onAbort);
 								}
 
-								const diffResult = generateDiffString(baseContent, newContent);
 								resolve({
 									content: [
 										{
@@ -440,7 +480,7 @@ export function createEditToolDefinition(
 				});
 			}
 
-			return buildEditCallComponent(component, args, theme);
+			return buildEditCallComponent(component, args, theme, context.cwd);
 		},
 		renderResult(result, _options, theme, context) {
 			const callComponent = context.state.callComponent;
@@ -465,7 +505,12 @@ export function createEditToolDefinition(
 					changed = true;
 				}
 				if (changed) {
-					buildEditCallComponent(callComponent, context.args as RenderableEditArgs | undefined, theme);
+					buildEditCallComponent(
+						callComponent,
+						context.args as RenderableEditArgs | undefined,
+						theme,
+						context.cwd,
+					);
 				}
 			}
 

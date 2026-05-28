@@ -259,6 +259,11 @@ export class TUI extends Container {
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
 	private stopped = false;
+	// Per-line memoization of normalizeTerminalOutput(line) + SEGMENT_RESET. Markdown
+	// caches its rendered lines, so unchanged content keeps stable string identity
+	// across renders; this cache turns the per-frame O(N) reset concatenation into
+	// O(1) hits on those lines. FIFO-evicted once cache exceeds RESET_CACHE_MAX.
+	private readonly resetCache = new Map<string, string>();
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
@@ -817,14 +822,27 @@ export class TUI extends Container {
 	}
 
 	private static readonly SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
+	private static readonly RESET_CACHE_MAX = 4096;
 
 	private applyLineResets(lines: string[]): string[] {
 		const reset = TUI.SEGMENT_RESET;
+		const cache = this.resetCache;
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
-			if (!isImageLine(line)) {
-				lines[i] = normalizeTerminalOutput(line) + reset;
+			if (isImageLine(line)) continue;
+			const cached = cache.get(line);
+			if (cached !== undefined) {
+				lines[i] = cached;
+				continue;
 			}
+			const normalized = normalizeTerminalOutput(line) + reset;
+			if (cache.size >= TUI.RESET_CACHE_MAX) {
+				// FIFO eviction: drop the oldest insertion. Map iteration is insertion-ordered.
+				const oldest = cache.keys().next().value;
+				if (oldest !== undefined) cache.delete(oldest);
+			}
+			cache.set(line, normalized);
+			lines[i] = normalized;
 		}
 		return lines;
 	}

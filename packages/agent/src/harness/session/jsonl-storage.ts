@@ -142,16 +142,24 @@ async function loadJsonlStorage(
 	leafId: string | null;
 }> {
 	const allLines = getFileSystemResultOrThrow(await fs.readTextLines(filePath), `Failed to read session ${filePath}`);
-	const lines = allLines.filter((line) => line.trim());
-	if (lines.length === 0) {
+	let headerIndex = -1;
+	for (let i = 0; i < allLines.length; i++) {
+		if (allLines[i]!.trim()) {
+			headerIndex = i;
+			break;
+		}
+	}
+	if (headerIndex === -1) {
 		throw invalidSession(filePath, "missing session header");
 	}
 
-	const header = parseHeaderLine(lines[0]!, filePath);
+	const header = parseHeaderLine(allLines[headerIndex]!, filePath);
 	const entries: SessionTreeEntry[] = [];
 	let leafId: string | null = null;
-	for (let i = 1; i < lines.length; i++) {
-		const entry = parseEntryLine(lines[i]!, filePath, i + 1);
+	for (let i = headerIndex + 1; i < allLines.length; i++) {
+		const raw = allLines[i]!;
+		if (!raw.trim()) continue;
+		const entry = parseEntryLine(raw, filePath, i + 1);
 		entries.push(entry);
 		leafId = leafIdAfterEntry(entry);
 	}
@@ -278,12 +286,13 @@ export class JsonlSessionStorage implements SessionStorage<JsonlSessionMetadata>
 		let current = this.byId.get(leafId);
 		if (!current) throw new SessionError("not_found", `Entry ${leafId} not found`);
 		while (current) {
-			path.unshift(current);
+			path.push(current);
 			if (!current.parentId) break;
 			const parent = this.byId.get(current.parentId);
 			if (!parent) throw new SessionError("invalid_session", `Entry ${current.parentId} not found`);
 			current = parent;
 		}
+		path.reverse();
 		return path;
 	}
 

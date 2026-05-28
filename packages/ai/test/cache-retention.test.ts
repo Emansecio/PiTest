@@ -192,7 +192,9 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			const lastMessage = capturedPayload.messages[capturedPayload.messages.length - 1];
 			expect(Array.isArray(lastMessage.content)).toBe(true);
 			const lastBlock = lastMessage.content[lastMessage.content.length - 1];
-			expect(lastBlock.cache_control).toEqual({ type: "ephemeral" });
+			// PiTuned defaults Anthropic cacheRetention to "long" on compatible models,
+			// so cache_control now includes a 1h ttl by default.
+			expect(lastBlock.cache_control.type).toBe("ephemeral");
 		});
 
 		it("should set 1h cache TTL when cacheRetention is long", async () => {

@@ -3,6 +3,41 @@ import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream.ts";
 
+/**
+ * Marker inserted by callers into `context.systemPrompt` to separate the
+ * cacheable static prefix from the dynamic suffix (date, cwd, etc.).
+ * Providers that support prompt caching split on this marker and attach
+ * `cache_control` only to the prefix.
+ */
+export const SYSTEM_PROMPT_DYNAMIC_MARKER = "\u0000<<<PI_SYSTEM_PROMPT_DYNAMIC>>>\u0000";
+
+/** Split a system prompt on the dynamic marker. */
+export function splitSystemPromptOnDynamic(systemPrompt: string): {
+	staticPart: string;
+	dynamicPart: string;
+} {
+	const idx = systemPrompt.indexOf(SYSTEM_PROMPT_DYNAMIC_MARKER);
+	if (idx === -1) {
+		return { staticPart: systemPrompt, dynamicPart: "" };
+	}
+	return {
+		staticPart: systemPrompt.slice(0, idx),
+		dynamicPart: systemPrompt.slice(idx + SYSTEM_PROMPT_DYNAMIC_MARKER.length),
+	};
+}
+
+/**
+ * Strip the dynamic marker, returning the prompt as one contiguous string.
+ * Providers that do NOT split for cache_control (openai-completions, the
+ * responses APIs, mistral) MUST send this — otherwise the literal NUL-wrapped
+ * marker leaks into the model's system prompt.
+ */
+export function systemPromptWithoutDynamicMarker(systemPrompt: string): string {
+	const idx = systemPrompt.indexOf(SYSTEM_PROMPT_DYNAMIC_MARKER);
+	if (idx === -1) return systemPrompt;
+	return systemPrompt.slice(0, idx) + systemPrompt.slice(idx + SYSTEM_PROMPT_DYNAMIC_MARKER.length);
+}
+
 export type KnownApi =
 	| "openai-completions"
 	| "mistral-conversations"

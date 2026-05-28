@@ -36,5 +36,8 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "compact", description: "Manually compact the session context" },
 	{ name: "resume", description: "Resume a different session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },
+	{ name: "ttsr", description: "Manage TTSR rules: list | enable <name> | disable <name>" },
+	{ name: "hindsight", description: "Inspect hindsight bank: list | clear | export <path>" },
+	{ name: "preview", description: "Manage preview queue: list | accept <id> | discard <id>" },
 	{ name: "quit", description: `Quit ${APP_NAME}` },
 ];

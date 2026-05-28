@@ -28,6 +28,11 @@ export interface PrintModeOptions {
 /**
  * Run in print (single-shot) mode.
  * Sends prompts to the agent and outputs the result.
+ *
+ * Note: print mode intentionally does NOT bind a listener to the
+ * `UserInputBus`. The bus auto-resolves `askOptions` requests with the
+ * recommended (or first) option so tools like `ask` stay deterministic
+ * in non-interactive runs.
  */
 export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: PrintModeOptions): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages } = options;

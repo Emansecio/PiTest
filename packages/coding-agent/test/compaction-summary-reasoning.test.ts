@@ -136,6 +136,12 @@ describe("generateSummary reasoning options", () => {
 
 		await compact(preparation, createModel(false, 128000), "test-key");
 
-		expect(completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([128000, 128000]);
+		// Compaction performs: history summary + turn-prefix summary + self-correction verify.
+		// All three must respect the model output cap.
+		const maxTokensSeen = completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens);
+		expect(maxTokensSeen.length).toBeGreaterThanOrEqual(2);
+		for (const t of maxTokensSeen) {
+			expect(t).toBe(128000);
+		}
 	});
 });

@@ -275,6 +275,10 @@ export class AgentSessionRuntime {
 			if (!currentSessionFile) {
 				throw new Error("Persisted session is missing a session file");
 			}
+			// _persist is debounced/async — flush pending writes before re-opening
+			// the session from disk, otherwise newer entries (incl. the user message
+			// we are forking from) may be missing from the on-disk snapshot.
+			await this.session.sessionManager.flushWrites();
 			const sessionDir = this.session.sessionManager.getSessionDir();
 			if (!targetLeafId) {
 				const sessionManager = SessionManager.create(this.cwd, sessionDir);

@@ -1,3 +1,5 @@
+import { type CredentialEntry, type CredentialPool, getCredentialPool } from "./credential-pool.ts";
+import { getEnvApiKeys } from "./env-api-keys.ts";
 import type {
 	Api,
 	AssistantMessageEventStream,
@@ -95,4 +97,45 @@ export function unregisterApiProviders(sourceId: string): void {
 
 export function clearApiProviders(): void {
 	apiProviderRegistry.clear();
+}
+
+/**
+ * Seed the credential pool for a provider from env vars (primary +
+ * round-robin extensions). Settings-sourced keys can be passed in via
+ * `extra` and are appended after env entries. Idempotent — replaces all
+ * entries for that provider while preserving cooldown state of known keys.
+ */
+export function registerProviderCredentials(
+	provider: string,
+	extra: CredentialEntry[] = [],
+	pool: CredentialPool = getCredentialPool(),
+): void {
+	const envKeys = getEnvApiKeys(provider);
+	const entries: CredentialEntry[] = [];
+	const seen = new Set<string>();
+	for (const key of envKeys) {
+		if (!seen.has(key)) {
+			seen.add(key);
+			entries.push({ key, source: "env" });
+		}
+	}
+	for (const e of extra) {
+		if (!seen.has(e.key)) {
+			seen.add(e.key);
+			entries.push(e);
+		}
+	}
+	pool.register(provider, entries);
+}
+
+/**
+ * Resolve which API key to use for a provider on this call. Falls back to
+ * `getEnvApiKeys()[0]` when the pool is empty (e.g. registry not seeded).
+ */
+export function getApiKeyFor(provider: string, sessionId?: string): string | undefined {
+	const pool = getCredentialPool();
+	const picked = pool.pick(provider, sessionId);
+	if (picked) return picked.entry.key;
+	const envKeys = getEnvApiKeys(provider);
+	return envKeys[0];
 }

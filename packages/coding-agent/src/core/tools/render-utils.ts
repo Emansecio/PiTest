@@ -4,13 +4,60 @@ import { getCapabilities, getImageDimensions, imageFallback } from "@earendil-wo
 import { stripAnsi } from "../../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 
-export function shortenPath(path: unknown): string {
-	if (typeof path !== "string") return "";
+const IS_WINDOWS = process.platform === "win32";
+
+/**
+ * Normalize a path string for prefix comparison. On Windows the filesystem is
+ * case-insensitive and forward slashes are interchangeable with backslashes,
+ * so we collapse both axes before string-comparing. On POSIX we leave the
+ * value untouched.
+ */
+function normalizeForCompare(p: string): string {
+	if (!IS_WINDOWS) return p;
+	return p.replace(/\//g, "\\").toLowerCase();
+}
+
+/**
+ * True iff `p` is `prefix` itself or starts with `prefix` followed by a path
+ * separator. Avoids the classic `C:\Users\User` vs `C:\Users\Userino` false
+ * positive that bare `startsWith` produces.
+ */
+function hasPathPrefix(p: string, prefix: string): boolean {
+	if (prefix.length === 0 || p.length < prefix.length) return false;
+	const pNorm = normalizeForCompare(p);
+	const prefixNorm = normalizeForCompare(prefix);
+	if (!pNorm.startsWith(prefixNorm)) return false;
+	if (pNorm.length === prefixNorm.length) return true;
+	const next = pNorm[prefixNorm.length];
+	return next === "/" || next === "\\";
+}
+
+/**
+ * Tilde- or cwd-relative-render an absolute filesystem path for tool titles.
+ *
+ * Home prefix wins over `cwd` because `~` is recognizable anywhere on the
+ * screen while `./` is contextual to wherever pit happens to be running.
+ * Comparison is Windows-aware (separator-agnostic and case-insensitive)
+ * because LLM tool-callers routinely emit forward slashes and lowercase
+ * drive letters on Windows, which the previous implementation silently
+ * failed to shorten.
+ *
+ * The output preserves whatever separator style the caller passed in — we
+ * only slice, never rewrite, so a Unix-flavored Windows path stays
+ * Unix-flavored.
+ */
+export function shortenPath(rawPath: unknown, cwd?: string): string {
+	if (typeof rawPath !== "string") return "";
 	const home = os.homedir();
-	if (path.startsWith(home)) {
-		return `~${path.slice(home.length)}`;
+	if (hasPathPrefix(rawPath, home)) {
+		const rest = rawPath.slice(home.length);
+		return rest ? `~${rest}` : "~";
 	}
-	return path;
+	if (cwd && hasPathPrefix(rawPath, cwd)) {
+		const rest = rawPath.slice(cwd.length).replace(/^[/\\]+/, "");
+		return rest || ".";
+	}
+	return rawPath;
 }
 
 export function str(value: unknown): string | null {

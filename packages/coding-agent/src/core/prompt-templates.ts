@@ -1,8 +1,9 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "path";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
+import { createMtimeParseCache } from "./mtime-cache.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /**
@@ -101,10 +102,15 @@ export function substituteArgs(content: string, args: string[]): string {
 	return result;
 }
 
+// mtime-keyed cache of the expensive read+parse step. The PromptTemplate is
+// rebuilt fresh per call (cheap) so sourceInfo stays caller-controlled.
+const templateParseCache = createMtimeParseCache<{ frontmatter: Record<string, string>; body: string }>((rawContent) =>
+	parseFrontmatter<Record<string, string>>(rawContent),
+);
+
 function loadTemplateFromFile(filePath: string, sourceInfo: SourceInfo): PromptTemplate | null {
 	try {
-		const rawContent = readFileSync(filePath, "utf-8");
-		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(rawContent);
+		const { frontmatter, body } = templateParseCache(filePath);
 
 		const name = basename(filePath).replace(/\.md$/, "");
 

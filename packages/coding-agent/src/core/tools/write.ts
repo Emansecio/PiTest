@@ -6,6 +6,8 @@ import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { getCurrentPreviewQueue } from "../preview-queue.ts";
+import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { applyKeyAliases, PATH_KEY_ALIASES } from "./argument-prep.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { resolveToCwd } from "./path-utils.js";
@@ -16,6 +18,11 @@ const writeSchema = Type.Object(
 	{
 		path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
 		content: Type.String({ description: "Content to write to the file" }),
+		preview: Type.Optional(
+			Type.Boolean({
+				description: "When true, stage as a preview rather than applying. Use the resolve tool to commit.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -152,10 +159,11 @@ function formatWriteCall(
 	options: ToolRenderResultOptions,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
 	cache: WriteHighlightCache | undefined,
+	cwd?: string,
 ): string {
 	const rawPath = str(args?.file_path ?? args?.path);
 	const fileContent = str(args?.content);
-	const path = rawPath !== null ? shortenPath(rawPath) : null;
+	const path = rawPath !== null ? shortenPath(rawPath, cwd) : null;
 	const invalidArg = invalidArgText(theme);
 	let text = `${theme.fg("toolTitle", theme.bold("write"))} ${path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...")}`;
 
@@ -206,20 +214,56 @@ export function createWriteToolDefinition(
 		name: "write",
 		label: "write",
 		description:
-			'Write content to a file. Creates the file if it doesn\'t exist, overwrites if it does. Automatically creates parent directories.\n\nCommon mistakes to avoid:\n- Using write to make small edits to an existing file — use "edit" instead (write overwrites the entire file).\n- Passing the content under "text"/"body"/"data" — the canonical key is "content".\n- Passing the path under "file_path"/"filename" — the canonical key is "path".\n- Forgetting trailing newline for files that conventionally end with one.',
+			'Write content to a file. Creates the file if it doesn\'t exist, overwrites if it does. Automatically creates parent directories.\n\nWRONG: { "file_path": "foo.ts", "text": "..." }       // wrong key names\nRIGHT: { "path": "foo.ts", "content": "..." }\n\nCommon mistakes to avoid:\n- Using write to make small edits to an existing file — use "edit" instead (write overwrites the entire file).\n- Passing the content under "text"/"body"/"data" — the canonical key is "content".\n- Passing the path under "file_path"/"filename" — the canonical key is "path".\n- Forgetting trailing newline for files that conventionally end with one.',
 		promptSnippet: "Create or overwrite files",
 		promptGuidelines: ["Use write only for new files or complete rewrites."],
 		parameters: writeSchema,
 		prepareArguments: prepareWriteArguments,
 		async execute(
 			_toolCallId,
-			{ path, content }: { path: string; content: string },
+			{ path, content, preview }: { path: string; content: string; preview?: boolean },
 			signal?: AbortSignal,
 			_onUpdate?,
 			_ctx?,
 		) {
+			// URL-scheme dispatch: virtual paths route through the scheme registry.
+			const schemeMatch = getUrlSchemeRegistry().parse(path);
+			if (schemeMatch) {
+				if (signal?.aborted) throw new Error("Operation aborted");
+				const { resolver, url } = schemeMatch;
+				if (!resolver.canWrite?.(url) || !resolver.write) {
+					throw new Error(`Scheme '${resolver.scheme}' does not support write.`);
+				}
+				await resolver.write(url, content, { cwd, signal });
+				return {
+					content: [{ type: "text" as const, text: `Successfully applied ${content.length} bytes to ${path}` }],
+					details: undefined,
+				};
+			}
 			const absolutePath = resolveToCwd(path, cwd);
 			const dir = dirname(absolutePath);
+
+			// Preview mode: stage instead of writing to disk.
+			const queue = getCurrentPreviewQueue();
+			if (preview === true && queue) {
+				if (signal?.aborted) throw new Error("Operation aborted");
+				const item = queue.add({
+					kind: "write",
+					path,
+					apply: async () => {
+						await ops.mkdir(dir);
+						await ops.writeFile(absolutePath, content);
+					},
+					summary: {
+						description: `write ${path}: ${content.length} bytes`,
+					},
+				});
+				return {
+					content: [{ type: "text" as const, text: `Preview staged. id=${item.id}. Use resolve to commit.` }],
+					details: undefined,
+				};
+			}
+
 			return withFileMutationQueue(
 				absolutePath,
 				() =>
@@ -278,6 +322,7 @@ export function createWriteToolDefinition(
 					{ expanded: context.expanded, isPartial: context.isPartial },
 					theme,
 					component.cache,
+					context.cwd,
 				),
 			);
 			return component;

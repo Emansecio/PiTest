@@ -9,6 +9,28 @@ import { minimatch } from "minimatch";
 import { isValidThinkingLevel } from "../cli/args.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import type { ModelRoleConfig, ModelRoleSettings } from "./settings-manager.ts";
+
+/** Roles that map intent ("smol fan-out", "deep reasoning") to a concrete model + chain. */
+export const MODEL_ROLES = ["default", "smol", "slow", "plan", "commit"] as const;
+export type ModelRole = (typeof MODEL_ROLES)[number];
+
+export interface RoleResolution {
+	model: Model<Api>;
+	thinkingLevel: ThinkingLevel;
+	/** Ordered fallback chain. chain[0] is always the primary resolved model. */
+	chain: Array<{ model: Model<Api>; thinkingLevel: ThinkingLevel }>;
+}
+
+export interface ResolveRoleOptions {
+	role: ModelRole;
+	/** Raw pattern from CLI (e.g. "anthropic/opus", or value supplied to --smol). */
+	cliOverride?: string;
+	availableModels: Model<Api>[];
+	settings: ModelRoleSettings;
+	/** Used to match path-scoped role overrides via minimatch globs. */
+	cwd?: string;
+}
 
 /** Default model IDs for each known provider */
 export const defaultModelPerProvider: Record<KnownProvider, string> = {
@@ -239,6 +261,112 @@ export function parseModelPattern(
 		}
 		return result;
 	}
+}
+
+/**
+ * Score how specifically a glob matches a path. Closest match (most-specific
+ * segment, deepest matching prefix) wins. We approximate "specificity" by the
+ * length of the literal (non-glob) prefix of the glob — `src/foo/**` beats
+ * `**` even though both match `src/foo/bar.ts`.
+ */
+function globSpecificity(glob: string): number {
+	const star = glob.indexOf("*");
+	const question = glob.indexOf("?");
+	const bracket = glob.indexOf("[");
+	const candidates = [star, question, bracket].filter((i) => i !== -1);
+	const firstGlob = candidates.length === 0 ? glob.length : Math.min(...candidates);
+	return firstGlob + glob.length / 1000; // tiebreak with raw length
+}
+
+/**
+ * Pick the model pattern for a role given a cwd, applying path-scoped overrides
+ * when configured. The closest-matching path glob wins.
+ */
+function pickRoleModelPattern(roleConfig: ModelRoleConfig, cwd: string | undefined): string {
+	if (!cwd || !roleConfig.paths) return roleConfig.model;
+	let bestMatch: { score: number; pattern: string } | undefined;
+	for (const [glob, modelPattern] of Object.entries(roleConfig.paths)) {
+		if (minimatch(cwd, glob, { nocase: true, dot: true })) {
+			const score = globSpecificity(glob);
+			if (!bestMatch || score > bestMatch.score) {
+				bestMatch = { score, pattern: modelPattern };
+			}
+		}
+	}
+	return bestMatch ? bestMatch.pattern : roleConfig.model;
+}
+
+function resolvePatternToEntry(
+	pattern: string,
+	availableModels: Model<Api>[],
+	fallbackThinking: ThinkingLevel,
+): { model: Model<Api>; thinkingLevel: ThinkingLevel } | undefined {
+	const { model, thinkingLevel } = parseModelPattern(pattern, availableModels, {
+		allowInvalidThinkingLevelFallback: false,
+	});
+	if (!model) return undefined;
+	return { model, thinkingLevel: thinkingLevel ?? fallbackThinking };
+}
+
+/**
+ * Resolve a role to a concrete model + thinking level + fallback chain.
+ *
+ * Resolution order:
+ * 1. cliOverride (parsed via parseModelPattern) — used as the primary.
+ * 2. settings.modelRoles[role].model, with path-scoped override if any glob in
+ *    `paths` matches `cwd`. Closest match wins.
+ * 3. settings.retry.fallbackChains[role] || settings.modelRoles[role].fallbackChain
+ *    contribute additional chain entries after the primary.
+ *
+ * Returns `undefined` when nothing is configured for the role and no CLI
+ * override was supplied — the caller can then fall back to its own logic
+ * (typically the "default" role or saved defaults).
+ */
+export function resolveRole(opts: ResolveRoleOptions): RoleResolution | undefined {
+	const { role, cliOverride, availableModels, settings, cwd } = opts;
+	const roleConfig = settings.modelRoles?.[role];
+	const defaultThinking: ThinkingLevel = DEFAULT_THINKING_LEVEL;
+
+	let primaryEntry: { model: Model<Api>; thinkingLevel: ThinkingLevel } | undefined;
+	let roleThinkingDefault: ThinkingLevel = defaultThinking;
+
+	if (cliOverride) {
+		primaryEntry = resolvePatternToEntry(cliOverride, availableModels, defaultThinking);
+		if (!primaryEntry) return undefined;
+	} else if (roleConfig) {
+		const pattern = pickRoleModelPattern(roleConfig, cwd);
+		if (roleConfig.thinkingLevel && isValidThinkingLevel(roleConfig.thinkingLevel)) {
+			roleThinkingDefault = roleConfig.thinkingLevel;
+		}
+		primaryEntry = resolvePatternToEntry(pattern, availableModels, roleThinkingDefault);
+		if (!primaryEntry) return undefined;
+	} else {
+		return undefined;
+	}
+
+	const chain: Array<{ model: Model<Api>; thinkingLevel: ThinkingLevel }> = [primaryEntry];
+
+	const chainPatterns: string[] = [];
+	const retryChain = settings.retry?.fallbackChains?.[role];
+	if (retryChain && retryChain.length > 0) {
+		chainPatterns.push(...retryChain);
+	} else if (roleConfig?.fallbackChain && roleConfig.fallbackChain.length > 0) {
+		chainPatterns.push(...roleConfig.fallbackChain);
+	}
+
+	for (const pattern of chainPatterns) {
+		const entry = resolvePatternToEntry(pattern, availableModels, roleThinkingDefault);
+		if (!entry) continue;
+		// Dedupe by provider+id
+		if (chain.find((e) => modelsAreEqual(e.model, entry.model))) continue;
+		chain.push(entry);
+	}
+
+	return {
+		model: primaryEntry.model,
+		thinkingLevel: primaryEntry.thinkingLevel,
+		chain,
+	};
 }
 
 /**

@@ -50,8 +50,8 @@ const defaultLsOperations: LsOperations = {
 			return false;
 		}
 	},
-	stat: (p) => stat(p),
-	readdir: (p) => readdir(p),
+	stat,
+	readdir,
 };
 
 export interface LsToolOptions {
@@ -62,9 +62,10 @@ export interface LsToolOptions {
 function formatLsCall(
 	args: { path?: string; limit?: number } | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	cwd?: string,
 ): string {
 	const rawPath = str(args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath || ".") : null;
+	const path = rawPath !== null ? shortenPath(rawPath || ".", cwd) : null;
 	const limit = args?.limit;
 	const invalidArg = invalidArgText(theme);
 	let text = `${theme.fg("toolTitle", theme.bold("ls"))} ${path === null ? invalidArg : theme.fg("accent", path)}`;
@@ -165,25 +166,30 @@ export function createLsToolDefinition(
 						// Sort alphabetically, case-insensitive.
 						entries.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
 
-						// Format entries with directory indicators.
-						const results: string[] = [];
+						// Cap to limit before stat to avoid unnecessary syscalls.
 						let entryLimitReached = false;
-						for (const entry of entries) {
-							if (results.length >= effectiveLimit) {
-								entryLimitReached = true;
-								break;
-							}
+						if (entries.length > effectiveLimit) {
+							entries = entries.slice(0, effectiveLimit);
+							entryLimitReached = true;
+						}
 
-							const fullPath = nodePath.join(dirPath, entry);
-							let suffix = "";
-							try {
-								const entryStat = await ops.stat(fullPath);
-								if (entryStat.isDirectory()) suffix = "/";
-							} catch {
-								// Skip entries we cannot stat.
-								continue;
+						// Stat entries in parallel for directory indicators.
+						const BATCH_SIZE = 64;
+						const results: string[] = [];
+						for (let batchStart = 0; batchStart < entries.length; batchStart += BATCH_SIZE) {
+							const batch = entries.slice(batchStart, batchStart + BATCH_SIZE);
+							const settled = await Promise.allSettled(
+								batch.map(async (entry) => {
+									const fullPath = nodePath.join(dirPath, entry);
+									const entryStat = await ops.stat(fullPath);
+									return entry + (entryStat.isDirectory() ? "/" : "");
+								}),
+							);
+							for (const result of settled) {
+								if (result.status === "fulfilled") {
+									results.push(result.value);
+								}
 							}
-							results.push(entry + suffix);
 						}
 
 						signal?.removeEventListener("abort", onAbort);
@@ -225,7 +231,7 @@ export function createLsToolDefinition(
 		},
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatLsCall(args, theme));
+			text.setText(formatLsCall(args, theme, context.cwd));
 			return text;
 		},
 		renderResult(result, options, theme, context) {

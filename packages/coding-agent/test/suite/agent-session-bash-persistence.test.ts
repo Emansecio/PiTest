@@ -13,9 +13,9 @@ function getEntryTypes(harness: Harness): string[] {
 describe("AgentSession bash and persistence characterization", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

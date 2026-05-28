@@ -31,26 +31,29 @@ export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string 
  * - Normalize Unicode dashes/hyphens to ASCII hyphen
  * - Normalize special Unicode spaces to regular space
  */
+const TRAILING_WS_RE = /[ \t\v\f]+(?=\n|$)/g;
+
+function foldUnicodeChar(ch: string): string {
+	const code = ch.charCodeAt(0);
+	if (code >= 0x2018 && code <= 0x201b) return "'";
+	if (code >= 0x201c && code <= 0x201f) return '"';
+	if ((code >= 0x2010 && code <= 0x2015) || code === 0x2212) return "-";
+	return " ";
+}
+
 export function normalizeForFuzzyMatch(text: string): string {
 	return (
 		text
 			.normalize("NFKC")
 			// Strip trailing whitespace per line
-			.split("\n")
-			.map((line) => line.trimEnd())
-			.join("\n")
-			// Smart single quotes → '
-			.replace(/[\u2018\u2019\u201A\u201B]/g, "'")
-			// Smart double quotes → "
-			.replace(/[\u201C\u201D\u201E\u201F]/g, '"')
-			// Various dashes/hyphens → -
-			// U+2010 hyphen, U+2011 non-breaking hyphen, U+2012 figure dash,
-			// U+2013 en-dash, U+2014 em-dash, U+2015 horizontal bar, U+2212 minus
-			.replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, "-")
-			// Special spaces → regular space
-			// U+00A0 NBSP, U+2002-U+200A various spaces, U+202F narrow NBSP,
-			// U+205F medium math space, U+3000 ideographic space
-			.replace(/[\u00A0\u2002-\u200A\u202F\u205F\u3000]/g, " ")
+			.replace(TRAILING_WS_RE, "")
+			// Single-pass Unicode fold: smart quotes (U+2018-U+201F),
+			// dashes/hyphens (U+2010-U+2015, U+2212), special spaces
+			// (U+00A0, U+2002-U+200A, U+202F, U+205F, U+3000)
+			.replace(
+				/[\u2018-\u201B\u201C-\u201F\u2010-\u2015\u2212\u00A0\u2002-\u200A\u202F\u205F\u3000]/g,
+				foldUnicodeChar,
+			)
 	);
 }
 
@@ -323,16 +326,58 @@ function truncateForDiagnostic(text: string): string {
  * Returns null when no candidate has any matching lines.
  */
 export function buildNearMissHint(content: string, oldText: string): string | null {
+	const candidates = buildCandidateMatches(content, oldText, { maxCandidates: 1 });
+	if (candidates.length === 0) return null;
+	const top = candidates[0];
+	return `Closest candidate starts at line ${top.startLine} (${top.score}/${top.windowSize} lines match). First divergence at line ${top.divergenceLine}:\n  expected: ${top.expectedSnippet}\n  found:    ${top.foundSnippet}`;
+}
+
+export interface CandidateMatch {
+	/** 1-indexed start line of the candidate window in the file. */
+	startLine: number;
+	/** 1-indexed end line of the candidate window (inclusive). */
+	endLine: number;
+	/** Number of `oldText` lines whose trimStart() matches the corresponding window line. */
+	score: number;
+	/** Window length in lines (== oldText line count). */
+	windowSize: number;
+	/** 1-indexed line where window first diverges from oldText. */
+	divergenceLine: number;
+	/** Truncated display of `oldText[divergenceLine - startLine]`. */
+	expectedSnippet: string;
+	/** Truncated display of the file's line at `divergenceLine`. */
+	foundSnippet: string;
+	/** Verbatim slice of the file covering the window, suitable as a copy-pasteable `oldText`. */
+	verbatimSnippet: string;
+}
+
+/**
+ * Top-K ranked candidate windows for a failed exact-match `edit` call. Each
+ * candidate carries the verbatim snippet the model can paste back as
+ * `oldText` to get an exact match on the next try — turning a "guess what
+ * went wrong" recovery into a copy-paste.
+ */
+export function buildCandidateMatches(
+	content: string,
+	oldText: string,
+	options?: { maxCandidates?: number; minScore?: number },
+): CandidateMatch[] {
+	const maxCandidates = Math.max(1, options?.maxCandidates ?? 3);
+	const minScore = Math.max(1, options?.minScore ?? 2);
+
 	const contentLines = content.split("\n");
 	const oldLines = oldText.split("\n");
-	if (oldLines.length === 0 || contentLines.length === 0) return null;
+	if (oldLines.length === 0 || contentLines.length === 0) return [];
 
 	const windowSize = oldLines.length;
 	const maxStart = Math.min(contentLines.length - windowSize + 1, NEAR_MISS_MAX_CANDIDATE_WINDOWS);
-	if (maxStart <= 0) return null;
+	if (maxStart <= 0) return [];
 
-	let bestStart = -1;
-	let bestScore = 0;
+	const nonBlankOldLines = oldLines.filter((line) => line.trimStart() !== "").length;
+
+	// Pass 1 — score every window position. Cheap O(n × windowSize) scan.
+	type ScoredWindow = { start: number; score: number };
+	const scored: ScoredWindow[] = [];
 	for (let start = 0; start < maxStart; start++) {
 		let score = 0;
 		for (let j = 0; j < windowSize; j++) {
@@ -343,31 +388,71 @@ export function buildNearMissHint(content: string, oldText: string): string | nu
 				score++;
 			}
 		}
-		if (score > bestScore) {
-			bestScore = score;
-			bestStart = start;
-			if (score === windowSize) break; // can't beat a perfect line-trim match
+		if (score >= minScore && score < nonBlankOldLines) {
+			scored.push({ start, score });
 		}
 	}
+	if (scored.length === 0) return [];
 
-	const nonBlankOldLines = oldLines.filter((line) => line.trimStart() !== "").length;
-	// Need at least 2 non-blank lines matching (single-line coincidence is
-	// usually noise) and at least one divergence; otherwise drop the hint.
-	if (bestStart === -1 || bestScore < 2 || bestScore === nonBlankOldLines) return null;
+	// Pass 2 — pick top-K by score, then by earliest position to break ties.
+	scored.sort((a, b) => b.score - a.score || a.start - b.start);
 
-	let divergenceOffset = -1;
-	for (let j = 0; j < windowSize; j++) {
-		if (contentLines[bestStart + j].trimStart() !== oldLines[j].trimStart()) {
-			divergenceOffset = j;
-			break;
-		}
+	const selected: ScoredWindow[] = [];
+	const seenStarts = new Set<number>();
+	for (const candidate of scored) {
+		// Suppress overlapping windows that share a start vicinity — they
+		// usually describe the same divergence twice.
+		const nearby = [...seenStarts].some(
+			(s) => Math.abs(s - candidate.start) < Math.max(2, Math.floor(windowSize / 2)),
+		);
+		if (nearby) continue;
+		selected.push(candidate);
+		seenStarts.add(candidate.start);
+		if (selected.length >= maxCandidates) break;
 	}
-	if (divergenceOffset === -1) return null;
 
-	const lineNumber = bestStart + divergenceOffset + 1; // 1-indexed for humans
-	const expected = truncateForDiagnostic(oldLines[divergenceOffset]);
-	const found = truncateForDiagnostic(contentLines[bestStart + divergenceOffset]);
-	return `Closest candidate starts at line ${bestStart + 1} (${bestScore}/${windowSize} lines match). First divergence at line ${lineNumber}:\n  expected: ${expected}\n  found:    ${found}`;
+	return selected.map((candidate) => {
+		let divergenceOffset = 0;
+		for (let j = 0; j < windowSize; j++) {
+			if (contentLines[candidate.start + j].trimStart() !== oldLines[j].trimStart()) {
+				divergenceOffset = j;
+				break;
+			}
+		}
+		const divergenceLine = candidate.start + divergenceOffset + 1;
+		const verbatimSnippet = contentLines.slice(candidate.start, candidate.start + windowSize).join("\n");
+		return {
+			startLine: candidate.start + 1,
+			endLine: candidate.start + windowSize,
+			score: candidate.score,
+			windowSize,
+			divergenceLine,
+			expectedSnippet: truncateForDiagnostic(oldLines[divergenceOffset]),
+			foundSnippet: truncateForDiagnostic(contentLines[candidate.start + divergenceOffset]),
+			verbatimSnippet,
+		};
+	});
+}
+
+/** Format the top-K candidates as a copy-pasteable error suffix. */
+export function formatCandidateMatchesForError(candidates: CandidateMatch[]): string | null {
+	if (candidates.length === 0) return null;
+	const parts: string[] = [];
+	for (let i = 0; i < candidates.length; i++) {
+		const c = candidates[i];
+		const header = `Candidate ${i + 1}: lines ${c.startLine}-${c.endLine} (${c.score}/${c.windowSize} lines match, first divergence at line ${c.divergenceLine}):`;
+		const diff = `  expected: ${c.expectedSnippet}\n  found:    ${c.foundSnippet}`;
+		const block = `  Paste this verbatim as oldText for an exact match:\n  ─────\n${indentBlock(c.verbatimSnippet, "  ")}\n  ─────`;
+		parts.push(`${header}\n${diff}\n${block}`);
+	}
+	return parts.join("\n\n");
+}
+
+function indentBlock(text: string, prefix: string): string {
+	return text
+		.split("\n")
+		.map((line) => `${prefix}${line}`)
+		.join("\n");
 }
 
 function countOccurrences(content: string, oldText: string): number {
@@ -461,7 +546,8 @@ export function applyEditsToNormalizedContent(
 				});
 				continue;
 			}
-			const hint = buildNearMissHint(baseContent, edit.oldText);
+			const candidates = buildCandidateMatches(baseContent, edit.oldText, { maxCandidates: 2 });
+			const hint = formatCandidateMatchesForError(candidates);
 			throw getNotFoundError(path, i, normalizedEdits.length, hint);
 		}
 

@@ -8,9 +8,9 @@ import { createHarness, type Harness } from "../harness.js";
 describe("edit tool: near-miss + indent-tolerant tiers (e2e)", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
@@ -54,7 +54,13 @@ describe("edit tool: near-miss + indent-tolerant tiers (e2e)", () => {
 		]);
 
 		await harness.session.prompt("rewrite");
-		expect(getEditEndError(harness)).toMatch(/First divergence at line 2/);
+		const errorText = getEditEndError(harness);
+		expect(errorText).toMatch(/first divergence at line 2/i);
+		// Candidate now ships a copy-pasteable verbatim oldText so the model
+		// can recover without guessing whitespace or surrounding context.
+		expect(errorText).toContain("Paste this verbatim as oldText");
+		expect(errorText).toContain("return 1;");
+		expect(errorText).toContain("return 2;");
 	});
 
 	it("recovers via indent-tolerant tier when only leading whitespace differs", async () => {

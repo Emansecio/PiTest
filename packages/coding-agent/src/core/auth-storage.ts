@@ -9,6 +9,7 @@
 import {
 	findEnvKeys,
 	getEnvApiKey,
+	getEnvApiKeys,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
@@ -19,6 +20,10 @@ import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.ts";
 import { resolveConfigValue } from "./resolve-config-value.ts";
+
+// Shared buffer backing Atomics.wait() for lock-retry sleeps. Yields the thread
+// instead of busy-spinning (mirrors SettingsManager's lock-retry strategy).
+const AUTH_LOCK_SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
 
 export type ApiKeyCredential = {
 	type: "api_key";
@@ -87,10 +92,8 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 					throw error;
 				}
 				lastError = error;
-				const start = Date.now();
-				while (Date.now() - start < delayMs) {
-					// Sleep synchronously to avoid changing callers to async.
-				}
+				// Sleep synchronously without burning CPU; Atomics.wait yields the thread.
+				Atomics.wait(AUTH_LOCK_SLEEP_BUF, 0, 0, delayMs);
 			}
 		}
 
@@ -526,5 +529,39 @@ export class AuthStorage {
 	 */
 	getOAuthProviders() {
 		return getOAuthProviders();
+	}
+
+	/**
+	 * Collect every static API key configured for a provider, in priority
+	 * order (runtime override → stored api_key → env primary + round-robin
+	 * extensions → fallback resolver). Does NOT include OAuth tokens since
+	 * those need async refresh; OAuth flows continue to use `getApiKey`.
+	 *
+	 * Used to seed the credential pool with round-robin keys.
+	 */
+	getAllApiKeysForProvider(providerId: string): string[] {
+		const out: string[] = [];
+		const seen = new Set<string>();
+		const push = (k: string | undefined) => {
+			if (!k) return;
+			if (seen.has(k)) return;
+			seen.add(k);
+			out.push(k);
+		};
+
+		const runtimeKey = this.runtimeOverrides.get(providerId);
+		push(runtimeKey);
+
+		const cred = this.data[providerId];
+		if (cred?.type === "api_key") {
+			push(resolveConfigValue(cred.key));
+		}
+
+		for (const k of getEnvApiKeys(providerId)) push(k);
+
+		const fb = this.fallbackResolver?.(providerId);
+		push(fb);
+
+		return out;
 	}
 }

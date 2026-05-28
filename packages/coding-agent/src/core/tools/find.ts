@@ -3,6 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
 import { existsSync } from "fs";
+import { minimatch } from "minimatch";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
@@ -63,10 +64,11 @@ export interface FindToolOptions {
 function formatFindCall(
 	args: { pattern: string; path?: string; limit?: number } | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	cwd?: string,
 ): string {
 	const pattern = str(args?.pattern);
 	const rawPath = str(args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath || ".") : null;
+	const path = rawPath !== null ? shortenPath(rawPath || ".", cwd) : null;
 	const limit = args?.limit;
 	const invalidArg = invalidArgText(theme);
 	let text =
@@ -241,15 +243,18 @@ export function createFindToolDefinition(
 							String(effectiveLimit),
 						];
 
-						// fd --glob matches against the basename unless --full-path is set; in --full-path
-						// mode it matches against the absolute candidate path, so a path-containing
-						// pattern like 'src/**/*.spec.ts' needs a leading '**/' to match anything.
+						// fd --glob matches against the basename by default. For path-containing
+						// patterns (e.g. `src/**/*.spec.ts`), fd's `--full-path` glob mode has
+						// inconsistent behavior across platforms (fd 10.x on Windows fails to
+						// match `**/`-style patterns reliably). We instead enumerate all files
+						// from fd and post-filter with minimatch, which gives consistent
+						// glob semantics on every OS.
+						const usePostFilter = pattern.includes("/");
 						let effectivePattern = pattern;
-						if (pattern.includes("/")) {
-							args.push("--full-path");
-							if (!pattern.startsWith("/") && !pattern.startsWith("**/") && pattern !== "**") {
-								effectivePattern = `**/${pattern}`;
-							}
+						if (usePostFilter) {
+							// Replace the fd-side pattern with a wildcard so fd just enumerates,
+							// then post-filter results against the original pattern.
+							effectivePattern = "*";
 						}
 						args.push("--", effectivePattern, searchPath);
 
@@ -306,6 +311,7 @@ export function createFindToolDefinition(
 							}
 
 							const relativized: string[] = [];
+							const postFilterPattern = usePostFilter ? pattern : null;
 							for (const rawLine of lines) {
 								const line = rawLine.replace(/\r$/, "").trim();
 								if (!line) continue;
@@ -317,7 +323,18 @@ export function createFindToolDefinition(
 									relativePath = path.relative(searchPath, line);
 								}
 								if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
-								relativized.push(toPosixPath(relativePath));
+								const posixPath = toPosixPath(relativePath);
+								if (postFilterPattern) {
+									// Match the relative posix path against the user pattern.
+									// `matchBase: false`, `dot: true` so hidden segments aren't rejected.
+									if (
+										!minimatch(posixPath, postFilterPattern, { dot: true }) &&
+										!minimatch(posixPath.replace(/\/$/, ""), postFilterPattern, { dot: true })
+									) {
+										continue;
+									}
+								}
+								relativized.push(posixPath);
 							}
 
 							const resultLimitReached = relativized.length >= effectiveLimit;
@@ -359,7 +376,7 @@ export function createFindToolDefinition(
 		},
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatFindCall(args, theme));
+			text.setText(formatFindCall(args, theme, context.cwd));
 			return text;
 		},
 		renderResult(result, options, theme, context) {

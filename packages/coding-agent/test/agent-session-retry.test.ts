@@ -59,12 +59,16 @@ describe("AgentSession retry", () => {
 		mkdirSync(tempDir, { recursive: true });
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		if (session) {
-			session.dispose();
+			await session.dispose();
 		}
 		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true });
+			try {
+				rmSync(tempDir, { recursive: true });
+			} catch {
+				/* ignore Windows handle race */
+			}
 		}
 	});
 
@@ -193,7 +197,7 @@ describe("AgentSession retry", () => {
 			});
 			return stream;
 		};
-		created.session.dispose();
+		await created.session.dispose();
 
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({

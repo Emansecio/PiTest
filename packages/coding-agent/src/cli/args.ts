@@ -40,6 +40,8 @@ export interface Args {
 	themes?: string[];
 	noThemes?: boolean;
 	noContextFiles?: boolean;
+	noHashlineAnchors?: boolean;
+	noLegacyDiscovery?: boolean;
 	listModels?: string | true;
 	offline?: boolean;
 	verbose?: boolean;
@@ -51,6 +53,17 @@ export interface Args {
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
 	unknownFlags: Map<string, boolean | string>;
 	diagnostics: Array<{ type: "warning" | "error"; message: string }>;
+	/** Run the turn under this role. Set by --role, or by the role-flag shortcuts --smol/--slow/--plan. */
+	role?: "default" | "smol" | "slow" | "plan" | "commit";
+	/**
+	 * `--smol` flag value. `true` when given as a bare flag, or a string when
+	 * given as `--smol <model>` / `--smol=<model>`. When a string is set, it is
+	 * passed to `resolveRole()` as `cliOverride` to override the role's primary
+	 * model for this turn.
+	 */
+	smol?: boolean | string;
+	slow?: boolean | string;
+	plan?: boolean | string;
 }
 
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
@@ -154,6 +167,10 @@ export function parseArgs(args: string[]): Args {
 			result.noThemes = true;
 		} else if (arg === "--no-context-files" || arg === "-nc") {
 			result.noContextFiles = true;
+		} else if (arg === "--no-hashline-anchors") {
+			result.noHashlineAnchors = true;
+		} else if (arg === "--no-legacy-discovery") {
+			result.noLegacyDiscovery = true;
 		} else if (arg === "--list-models") {
 			// Check if next arg is a search pattern (not a flag or file arg)
 			if (i + 1 < args.length && !args[i + 1].startsWith("-") && !args[i + 1].startsWith("@")) {
@@ -183,6 +200,70 @@ export function parseArgs(args: string[]): Args {
 				i++;
 			} else {
 				result.dryRunFormat = "text";
+			}
+		} else if (arg === "--smol" || arg.startsWith("--smol=")) {
+			const eq = arg.indexOf("=");
+			let value: boolean | string = true;
+			if (eq !== -1) {
+				value = arg.slice(eq + 1);
+			} else {
+				const next = args[i + 1];
+				if (next !== undefined && !next.startsWith("-") && !next.startsWith("@")) {
+					value = next;
+					i++;
+				}
+			}
+			result.smol = value;
+			result.slow = false;
+			result.plan = false;
+			result.role = "smol";
+		} else if (arg === "--slow" || arg.startsWith("--slow=")) {
+			const eq = arg.indexOf("=");
+			let value: boolean | string = true;
+			if (eq !== -1) {
+				value = arg.slice(eq + 1);
+			} else {
+				const next = args[i + 1];
+				if (next !== undefined && !next.startsWith("-") && !next.startsWith("@")) {
+					value = next;
+					i++;
+				}
+			}
+			result.slow = value;
+			result.smol = false;
+			result.plan = false;
+			result.role = "slow";
+		} else if (arg === "--plan" || arg.startsWith("--plan=")) {
+			const eq = arg.indexOf("=");
+			let value: boolean | string = true;
+			if (eq !== -1) {
+				value = arg.slice(eq + 1);
+			} else {
+				const next = args[i + 1];
+				if (next !== undefined && !next.startsWith("-") && !next.startsWith("@")) {
+					value = next;
+					i++;
+				}
+			}
+			result.plan = value;
+			result.smol = false;
+			result.slow = false;
+			result.role = "plan";
+		} else if (arg === "--role" && i + 1 < args.length) {
+			const roleArg = args[++i];
+			if (
+				roleArg === "default" ||
+				roleArg === "smol" ||
+				roleArg === "slow" ||
+				roleArg === "plan" ||
+				roleArg === "commit"
+			) {
+				result.role = roleArg;
+			} else {
+				result.diagnostics.push({
+					type: "warning",
+					message: `Invalid role "${roleArg}". Valid values: default, smol, slow, plan, commit`,
+				});
 			}
 		} else if (arg.startsWith("@")) {
 			result.fileArgs.push(arg.slice(1)); // Remove @ prefix
@@ -256,6 +337,13 @@ ${chalk.bold("Options:")}
   --tools, -t <tools>            Comma-separated allowlist of tool names to enable
                                  Applies to built-in, extension, and custom tools
   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
+  --role <name>                  Run under a model role: default | smol | slow | plan | commit
+  --smol [model]                 Shortcut for --role smol (cheap subagent fan-out)
+                                 Optional [model] overrides the role's primary model for this turn
+                                 (e.g. --smol claude-sonnet-4-7 or --smol=claude-sonnet-4-7)
+  --slow [model]                 Shortcut for --role slow (deep reasoning); optional [model] override
+  --plan [model]                 Shortcut for --role plan (plan-mode model); optional [model] override
+                                 --smol/--slow/--plan are mutually exclusive; rightmost wins
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
   --skill <path>                 Load a skill file or directory (can be used multiple times)
@@ -265,6 +353,9 @@ ${chalk.bold("Options:")}
   --theme <path>                 Load a theme file or directory (can be used multiple times)
   --no-themes                    Disable theme discovery and loading
   --no-context-files, -nc        Disable AGENTS.md and CLAUDE.md discovery and loading
+  --no-hashline-anchors          Disable hashline edit anchor block on full-file reads
+  --no-legacy-discovery          Disable discovery of legacy rule/skill files from other agents
+                                 (Cursor, Cline, Windsurf, Gemini, Copilot, VS Code, .claude/CLAUDE.md)
   --export <file>                Export session file to HTML and exit
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)

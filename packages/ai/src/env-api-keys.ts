@@ -151,6 +151,62 @@ export function findEnvKeys(provider: string): string[] | undefined {
 }
 
 /**
+ * Read a single env var, falling back to the proc-env recovery path.
+ */
+function readEnv(name: string): string | undefined {
+	return process.env[name] || getProcEnv(name);
+}
+
+/**
+ * Collect every configured API key for a provider, including round-robin
+ * extensions of the form `<VAR>_1`, `<VAR>_2`, ..., `<VAR>_N`.
+ *
+ * Order: the primary env var (first listed) comes first, followed by its
+ * numbered extensions in numeric order. Subsequent base env vars (and their
+ * own numbered extensions) follow. Duplicate values are de-duplicated while
+ * preserving first occurrence.
+ *
+ * Will not include ambient credentials (AWS profiles, Vertex ADC) — for
+ * those use `getEnvApiKey()` which still returns the `<authenticated>`
+ * sentinel.
+ */
+export function getEnvApiKeys(provider: KnownProvider): string[];
+export function getEnvApiKeys(provider: string): string[];
+export function getEnvApiKeys(provider: string): string[] {
+	const envVars = getApiKeyEnvVars(provider);
+	if (!envVars) return [];
+
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const base of envVars) {
+		const primary = readEnv(base);
+		if (primary && !seen.has(primary)) {
+			seen.add(primary);
+			out.push(primary);
+		}
+		// Numbered extensions: BASE_1, BASE_2, ... in order until first gap.
+		// We allow gaps up to a small bound so misnumbered configs still work.
+		const MAX_GAP = 4;
+		let gap = 0;
+		for (let i = 1; gap <= MAX_GAP; i++) {
+			const extra = readEnv(`${base}_${i}`);
+			if (extra) {
+				gap = 0;
+				if (!seen.has(extra)) {
+					seen.add(extra);
+					out.push(extra);
+				}
+			} else {
+				gap++;
+			}
+			// Hard upper bound to avoid scanning forever on hostile env.
+			if (i > 64) break;
+		}
+	}
+	return out;
+}
+
+/**
  * Get API key for provider from known environment variables, e.g. OPENAI_API_KEY.
  *
  * Will not return API keys for providers that require OAuth tokens.
@@ -158,9 +214,13 @@ export function findEnvKeys(provider: string): string[] | undefined {
 export function getEnvApiKey(provider: KnownProvider): string | undefined;
 export function getEnvApiKey(provider: string): string | undefined;
 export function getEnvApiKey(provider: string): string | undefined {
+	const keys = getEnvApiKeys(provider);
+	if (keys[0]) {
+		return keys[0];
+	}
 	const envKeys = findEnvKeys(provider);
 	if (envKeys?.[0]) {
-		return process.env[envKeys[0]] || getProcEnv(envKeys[0]);
+		return readEnv(envKeys[0]);
 	}
 
 	// Vertex AI supports either an explicit API key or Application Default Credentials.

@@ -33,6 +33,7 @@ import type {
 	StreamOptions,
 	Usage,
 } from "../types.ts";
+import { systemPromptWithoutDynamicMarker } from "../types.ts";
 import {
 	appendAssistantMessageDiagnostic,
 	createAssistantMessageDiagnostic,
@@ -362,6 +363,24 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 // Request Building
 // ============================================================================
 
+/**
+ * Codex backend rejects "minimal" effort on the gpt-5.2+ series and the
+ * gpt-5.1-codex-mini variant. Clamp to a safe, model-appropriate value before
+ * sending so we don't return server-side errors for valid client requests.
+ */
+function clampReasoningEffort(modelId: string, effort: string): string {
+	const id = modelId.includes("/") ? modelId.split("/").pop()! : modelId;
+	if (
+		(id.startsWith("gpt-5.2") || id.startsWith("gpt-5.3") || id.startsWith("gpt-5.4") || id.startsWith("gpt-5.5")) &&
+		effort === "minimal"
+	) {
+		return "low";
+	}
+	if (id === "gpt-5.1" && effort === "xhigh") return "high";
+	if (id === "gpt-5.1-codex-mini") return effort === "high" || effort === "xhigh" ? "high" : "medium";
+	return effort;
+}
+
 function buildRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
@@ -375,7 +394,9 @@ function buildRequestBody(
 		model: model.id,
 		store: false,
 		stream: true,
-		instructions: context.systemPrompt || "You are a helpful assistant.",
+		instructions: context.systemPrompt
+			? systemPromptWithoutDynamicMarker(context.systemPrompt)
+			: "You are a helpful assistant.",
 		input: messages,
 		text: { verbosity: options?.textVerbosity || "low" },
 		include: ["reasoning.encrypted_content"],
@@ -397,10 +418,11 @@ function buildRequestBody(
 	}
 
 	if (options?.reasoningEffort !== undefined) {
-		const effort =
+		const mapped =
 			options.reasoningEffort === "none"
 				? (model.thinkingLevelMap?.off ?? "none")
 				: (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort);
+		const effort = mapped !== null ? clampReasoningEffort(model.id, String(mapped)) : null;
 		if (effort !== null) {
 			body.reasoning = {
 				effort,
@@ -561,6 +583,8 @@ async function* parseSSE(response: Response): AsyncGenerator<Record<string, unkn
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
+	let cursor = 0;
+	const COMPACT_THRESHOLD = 65536;
 
 	try {
 		while (true) {
@@ -568,10 +592,12 @@ async function* parseSSE(response: Response): AsyncGenerator<Record<string, unkn
 			if (done) break;
 			buffer += decoder.decode(value, { stream: true });
 
-			let idx = buffer.indexOf("\n\n");
+			// Cursor-based scan: advance through buffer without rewriting it on each
+			// chunk boundary. Compact only when prefix grows past the threshold.
+			let idx = buffer.indexOf("\n\n", cursor);
 			while (idx !== -1) {
-				const chunk = buffer.slice(0, idx);
-				buffer = buffer.slice(idx + 2);
+				const chunk = buffer.slice(cursor, idx);
+				cursor = idx + 2;
 
 				const dataLines = chunk
 					.split("\n")
@@ -590,7 +616,12 @@ async function* parseSSE(response: Response): AsyncGenerator<Record<string, unkn
 						}
 					}
 				}
-				idx = buffer.indexOf("\n\n");
+				idx = buffer.indexOf("\n\n", cursor);
+			}
+
+			if (cursor > COMPACT_THRESHOLD) {
+				buffer = buffer.slice(cursor);
+				cursor = 0;
 			}
 		}
 	} finally {
@@ -1121,7 +1152,11 @@ function requestBodyWithoutInput(body: RequestBody): RequestBody {
 }
 
 function responseInputsEqual(a: ResponseInput | undefined, b: ResponseInput | undefined): boolean {
-	return JSON.stringify(a ?? []) === JSON.stringify(b ?? []);
+	const aVal = a ?? [];
+	const bVal = b ?? [];
+	if (aVal.length !== bVal.length) return false;
+	if (aVal.length === 0) return true;
+	return JSON.stringify(aVal) === JSON.stringify(bVal);
 }
 
 function requestBodiesMatchExceptInput(a: RequestBody, b: RequestBody): boolean {

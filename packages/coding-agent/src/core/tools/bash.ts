@@ -209,12 +209,55 @@ function formatDuration(ms: number): string {
 	return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function formatBashCall(args: { command?: string; timeout?: number } | undefined): string {
+/**
+ * Trailing failure status appended by `appendStatus` in `execute`. Lifted out
+ * of the displayed output so the TUI can fold it into the muted footer line
+ * instead of paying for a separate paragraph. The LLM-facing text is left
+ * untouched — the caller still sees the verbatim status in its tool result.
+ */
+function extractFailureSuffix(text: string): { body: string; label: string } | undefined {
+	const patterns: Array<[RegExp, (match: RegExpMatchArray) => string]> = [
+		[/^([\s\S]*?)(?:\n\n)?Command exited with code (-?\d+)$/, (m) => `exit ${m[2]}`],
+		[/^([\s\S]*?)(?:\n\n)?Command aborted$/, () => "aborted"],
+		[/^([\s\S]*?)(?:\n\n)?Command timed out after ([\d.]+) seconds$/, (m) => `timed out ${m[2]}s`],
+	];
+	for (const [re, label] of patterns) {
+		const match = text.match(re);
+		if (match) {
+			return { body: match[1].trimEnd(), label: label(match) };
+		}
+	}
+	return undefined;
+}
+
+const BASH_TITLE_HEAD_LINES = 3;
+
+function formatBashCall(args: { command?: string; timeout?: number } | undefined, expanded: boolean): string {
 	const command = str(args?.command);
 	const timeout = args?.timeout as number | undefined;
 	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
-	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
-	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
+
+	if (command === null) {
+		return theme.fg("toolTitle", theme.bold(`$ ${invalidArgText(theme)}`)) + timeoutSuffix;
+	}
+	if (!command) {
+		return theme.fg("toolTitle", theme.bold(`$ ${theme.fg("toolOutput", "...")}`)) + timeoutSuffix;
+	}
+
+	// Multiline heredocs and inline scripts otherwise dominate the title block;
+	// keep the first few lines and defer the rest to the expand affordance.
+	if (!expanded && command.includes("\n")) {
+		const lines = command.split("\n");
+		if (lines.length > BASH_TITLE_HEAD_LINES) {
+			const head = lines.slice(0, BASH_TITLE_HEAD_LINES).join("\n");
+			const remaining = lines.length - BASH_TITLE_HEAD_LINES;
+			const titlePart = theme.fg("toolTitle", theme.bold(`$ ${head}`));
+			const hint = `\n${theme.fg("muted", `... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
+			return titlePart + hint + timeoutSuffix;
+		}
+	}
+
+	return theme.fg("toolTitle", theme.bold(`$ ${command}`)) + timeoutSuffix;
 }
 
 function rebuildBashResultRenderComponent(
@@ -227,13 +270,19 @@ function rebuildBashResultRenderComponent(
 	showImages: boolean,
 	startedAt: number | undefined,
 	endedAt: number | undefined,
+	isError: boolean,
 ): void {
 	const state = component.state;
 	component.clear();
 
-	const output = getTextOutput(result as any, showImages).trim();
+	const rawOutput = getTextOutput(result as any, showImages).trim();
+	// Peel the trailing `Command (exited|aborted|timed out…)` line off so it
+	// becomes a chip on the muted footer instead of a standalone paragraph.
+	const failure = isError ? extractFailureSuffix(rawOutput) : undefined;
+	const output = failure ? failure.body : rawOutput;
+	const emptyOutput = output.length === 0 || output === "(no output)";
 
-	if (output) {
+	if (!emptyOutput) {
 		const styledOutput = output
 			.split("\n")
 			.map((line) => theme.fg("toolOutput", line))
@@ -269,7 +318,8 @@ function rebuildBashResultRenderComponent(
 
 	const truncation = result.details?.truncation;
 	const fullOutputPath = result.details?.fullOutputPath;
-	if (truncation?.truncated || fullOutputPath) {
+	const hasWarnings = !!truncation?.truncated || !!fullOutputPath;
+	if (hasWarnings) {
 		const warnings: string[] = [];
 		if (fullOutputPath) {
 			warnings.push(`Full output: ${fullOutputPath}`);
@@ -286,11 +336,27 @@ function rebuildBashResultRenderComponent(
 		component.addChild(new Text(`\n${theme.fg("warning", `[${warnings.join(". ")}]`)}`, 0, 0));
 	}
 
+	// Footer fold: `(no output) · exit 2 · 0.1s`-style single muted line. When
+	// there is a preview body or warning above, we keep the existing paragraph
+	// separation (leading `\n`); when there is not, the footer hugs the
+	// command header so trivial failures stop costing 5 lines apiece.
+	const footerParts: string[] = [];
+	if (emptyOutput && (failure || isError)) {
+		footerParts.push("(no output)");
+	}
+	if (failure) {
+		footerParts.push(failure.label);
+	}
 	if (startedAt !== undefined) {
 		const label = options.isPartial ? "Elapsed" : "Took";
 		const endTime = endedAt ?? Date.now();
-		component.addChild(new Text(`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}`, 0, 0));
+		footerParts.push(`${label} ${formatDuration(endTime - startedAt)}`);
 	}
+	if (footerParts.length === 0) {
+		return;
+	}
+	const prefix = emptyOutput && !hasWarnings ? "" : "\n";
+	component.addChild(new Text(`${prefix}${theme.fg("muted", footerParts.join(" · "))}`, 0, 0));
 }
 
 export function createBashToolDefinition(
@@ -456,7 +522,7 @@ Common mistakes to avoid:
 				state.endedAt = undefined;
 			}
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatBashCall(args));
+			text.setText(formatBashCall(args, context.expanded));
 			return text;
 		},
 		renderResult(result, options, _theme, context) {
@@ -480,6 +546,7 @@ Common mistakes to avoid:
 				context.showImages,
 				state.startedAt,
 				state.endedAt,
+				context.isError,
 			);
 			component.invalidate();
 			return component;

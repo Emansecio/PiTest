@@ -39,11 +39,15 @@ export interface SelectListLayoutOptions {
 
 export class SelectList implements Component {
 	private items: SelectItem[] = [];
+	// Lowercased item values, parallel to `items`. Precomputed once so setFilter
+	// (per keystroke) doesn't re-lowercase every value on every keystroke.
+	private itemsValueLower: string[] = [];
 	private filteredItems: SelectItem[] = [];
 	private selectedIndex: number = 0;
 	private maxVisible: number = 5;
 	private theme: SelectListTheme;
 	private layout: SelectListLayoutOptions;
+	private cachedColumnWidth?: { length: number; firstValue: string; width: number };
 
 	public onSelect?: (item: SelectItem) => void;
 	public onCancel?: () => void;
@@ -51,6 +55,7 @@ export class SelectList implements Component {
 
 	constructor(items: SelectItem[], maxVisible: number, theme: SelectListTheme, layout: SelectListLayoutOptions = {}) {
 		this.items = items;
+		this.itemsValueLower = items.map((item) => item.value.toLowerCase());
 		this.filteredItems = items;
 		this.maxVisible = maxVisible;
 		this.theme = theme;
@@ -58,8 +63,15 @@ export class SelectList implements Component {
 	}
 
 	setFilter(filter: string): void {
-		this.filteredItems = this.items.filter((item) => item.value.toLowerCase().startsWith(filter.toLowerCase()));
-		// Reset selection when filter changes
+		const filterLower = filter.toLowerCase();
+		const items = this.items;
+		const lower = this.itemsValueLower;
+		const filtered: SelectItem[] = [];
+		for (let i = 0; i < items.length; i++) {
+			if (lower[i]!.startsWith(filterLower)) filtered.push(items[i]!);
+		}
+		this.filteredItems = filtered;
+		this.cachedColumnWidth = undefined;
 		this.selectedIndex = 0;
 	}
 
@@ -68,7 +80,7 @@ export class SelectList implements Component {
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		this.cachedColumnWidth = undefined;
 	}
 
 	render(width: number): string[] {
@@ -177,11 +189,18 @@ export class SelectList implements Component {
 
 	private getPrimaryColumnWidth(): number {
 		const { min, max } = this.getPrimaryColumnBounds();
+		const length = this.filteredItems.length;
+		const firstValue = length > 0 ? this.filteredItems[0]!.value : "";
+		const cached = this.cachedColumnWidth;
+		if (cached && cached.length === length && cached.firstValue === firstValue) {
+			return cached.width;
+		}
 		const widestPrimary = this.filteredItems.reduce((widest, item) => {
 			return Math.max(widest, visibleWidth(this.getDisplayValue(item)) + PRIMARY_COLUMN_GAP);
 		}, 0);
-
-		return clamp(widestPrimary, min, max);
+		const width = clamp(widestPrimary, min, max);
+		this.cachedColumnWidth = { length, firstValue, width };
+		return width;
 	}
 
 	private getPrimaryColumnBounds(): { min: number; max: number } {

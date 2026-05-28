@@ -7,7 +7,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	getProviders,
@@ -71,10 +71,18 @@ import type {
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import { getCurrentHindsightBank } from "../../core/hindsight/index.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
-import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
+import {
+	defaultModelPerProvider,
+	findExactModelReferenceMatch,
+	type ModelRole,
+	resolveModelScope,
+	resolveRole,
+} from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
+import { getCurrentPreviewQueue } from "../../core/preview-queue.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -83,15 +91,22 @@ import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
+import {
+	type AskOptionsRequest,
+	createUserInputBus,
+	setCurrentUserInputBus,
+	type UserInputBus,
+} from "../../core/user-input-bus.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
-import { parseGitUrl } from "../../utils/git.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
+import { prefixAutocompleteDescription } from "./autocomplete-source.ts";
 import { ArminComponent } from "./components/armin.ts";
+import { createAskPicker } from "./components/ask-picker.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
@@ -101,6 +116,7 @@ import { CountdownTimer } from "./components/countdown-timer.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
 import { DaxnutsComponent } from "./components/daxnuts.ts";
+import { DiagnosticsBlockComponent } from "./components/diagnostics-block.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
@@ -119,10 +135,10 @@ import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
+import { workingPulsePalette } from "./components/working-palette.ts";
 import {
 	buildScopeGroups,
 	formatContextPath,
-	formatDiagnostics,
 	formatDisplayPath,
 	formatExtensionDisplayPath,
 	formatScopeGroups,
@@ -294,12 +310,22 @@ export class InteractiveMode {
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
 
+	// Active model role (default | smol | slow | plan | commit). Switched via
+	// `/model <role>`. Influences which fallback chain is consulted on
+	// Ctrl+P cycling and which model is restored on `/model role`.
+	private activeRole: ModelRole = "default";
+
 	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
 
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
+
+	// User-input bus: tools (e.g. `ask`) request structured option picks via this.
+	private userInputBus: UserInputBus = createUserInputBus();
+	private userInputBusUnsubscribe?: () => void;
+	private pendingAskRequest: AskOptionsRequest | undefined;
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
@@ -428,39 +454,6 @@ export class InteractiveMode {
 		initTheme(this.settingsManager.getTheme(), true);
 	}
 
-	private getAutocompleteSourceTag(sourceInfo?: SourceInfo): string | undefined {
-		if (!sourceInfo) {
-			return undefined;
-		}
-
-		const scopePrefix = sourceInfo.scope === "user" ? "u" : sourceInfo.scope === "project" ? "p" : "t";
-		const source = sourceInfo.source.trim();
-
-		if (source === "auto" || source === "local" || source === "cli") {
-			return scopePrefix;
-		}
-
-		if (source.startsWith("npm:")) {
-			return `${scopePrefix}:${source}`;
-		}
-
-		const gitSource = parseGitUrl(source);
-		if (gitSource) {
-			const ref = gitSource.ref ? `@${gitSource.ref}` : "";
-			return `${scopePrefix}:git:${gitSource.host}/${gitSource.path}${ref}`;
-		}
-
-		return scopePrefix;
-	}
-
-	private prefixAutocompleteDescription(description: string | undefined, sourceInfo?: SourceInfo): string | undefined {
-		const sourceTag = this.getAutocompleteSourceTag(sourceInfo);
-		if (!sourceTag) {
-			return description;
-		}
-		return description ? `[${sourceTag}] ${description}` : `[${sourceTag}]`;
-	}
-
 	private getBuiltInCommandConflictDiagnostics(extensionRunner: ExtensionRunner): ResourceDiagnostic[] {
 		const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
 		return extensionRunner
@@ -517,7 +510,7 @@ export class InteractiveMode {
 		// Convert prompt templates to SlashCommand format for autocomplete
 		const templateCommands: SlashCommand[] = this.session.promptTemplates.map((cmd) => ({
 			name: cmd.name,
-			description: this.prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
+			description: prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
 			...(cmd.argumentHint && { argumentHint: cmd.argumentHint }),
 		}));
 
@@ -528,7 +521,7 @@ export class InteractiveMode {
 			.filter((cmd) => !builtinCommandNames.has(cmd.name))
 			.map((cmd) => ({
 				name: cmd.invocationName,
-				description: this.prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
+				description: prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
 				getArgumentCompletions: cmd.getArgumentCompletions,
 			}));
 
@@ -541,7 +534,7 @@ export class InteractiveMode {
 				this.skillCommands.set(commandName, skill.filePath);
 				skillCommandList.push({
 					name: commandName,
-					description: this.prefixAutocompleteDescription(skill.description, skill.sourceInfo),
+					description: prefixAutocompleteDescription(skill.description, skill.sourceInfo),
 				});
 			}
 		}
@@ -700,6 +693,11 @@ export class InteractiveMode {
 
 		this.setupKeyHandlers();
 		this.setupEditorSubmitHandler();
+
+		// Bind the user-input bus so tools (e.g. `ask`) can request a structured
+		// option pick mid-turn. Print mode intentionally does NOT bind a listener
+		// — the bus auto-resolves with the recommended/first option in that case.
+		this.bindUserInputBus();
 
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
@@ -1104,18 +1102,16 @@ export class InteractiveMode {
 		if (showDiagnostics) {
 			const skillDiagnostics = skillsResult.diagnostics;
 			if (skillDiagnostics.length > 0) {
-				const warningLines = formatDiagnostics(skillDiagnostics, sourceInfos);
-				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Skill conflicts]")}\n${warningLines}`, 0, 0));
-				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(
+					new DiagnosticsBlockComponent("[Skill conflicts]", skillDiagnostics, sourceInfos),
+				);
 			}
 
 			const promptDiagnostics = promptsResult.diagnostics;
 			if (promptDiagnostics.length > 0) {
-				const warningLines = formatDiagnostics(promptDiagnostics, sourceInfos);
 				this.chatContainer.addChild(
-					new Text(`${theme.fg("warning", "[Prompt conflicts]")}\n${warningLines}`, 0, 0),
+					new DiagnosticsBlockComponent("[Prompt conflicts]", promptDiagnostics, sourceInfos),
 				);
-				this.chatContainer.addChild(new Spacer(1));
 			}
 
 			const extensionDiagnostics: ResourceDiagnostic[] = [];
@@ -1134,18 +1130,16 @@ export class InteractiveMode {
 			extensionDiagnostics.push(...shortcutDiagnostics);
 
 			if (extensionDiagnostics.length > 0) {
-				const warningLines = formatDiagnostics(extensionDiagnostics, sourceInfos);
 				this.chatContainer.addChild(
-					new Text(`${theme.fg("warning", "[Extension issues]")}\n${warningLines}`, 0, 0),
+					new DiagnosticsBlockComponent("[Extension issues]", extensionDiagnostics, sourceInfos),
 				);
-				this.chatContainer.addChild(new Spacer(1));
 			}
 
 			const themeDiagnostics = themesResult.diagnostics;
 			if (themeDiagnostics.length > 0) {
-				const warningLines = formatDiagnostics(themeDiagnostics, sourceInfos);
-				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Theme conflicts]")}\n${warningLines}`, 0, 0));
-				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(
+					new DiagnosticsBlockComponent("[Theme conflicts]", themeDiagnostics, sourceInfos),
+				);
 			}
 		}
 	}
@@ -1362,7 +1356,7 @@ export class InteractiveMode {
 	private createWorkingLoader(): Loader {
 		return new Loader(
 			this.ui,
-			(spinner) => theme.fg("accent", spinner),
+			workingPulsePalette(),
 			(text) => theme.fg("muted", text),
 			this.getWorkingLoaderMessage(),
 			this.workingIndicatorOptions,
@@ -2226,6 +2220,21 @@ export class InteractiveMode {
 			await this.handleCompactCommand(text.startsWith("/compact ") ? text.slice(9).trim() : undefined);
 			return true;
 		}
+		if (text === "/ttsr" || text.startsWith("/ttsr ")) {
+			this.editor.setText("");
+			this.handleTTSRCommand(text === "/ttsr" ? "" : text.slice(6).trim());
+			return true;
+		}
+		if (text === "/hindsight" || text.startsWith("/hindsight ")) {
+			this.editor.setText("");
+			await this.handleHindsightCommand(text === "/hindsight" ? "" : text.slice(11).trim());
+			return true;
+		}
+		if (text === "/preview" || text.startsWith("/preview ")) {
+			this.editor.setText("");
+			await this.handlePreviewCommand(text === "/preview" ? "" : text.slice(9).trim());
+			return true;
+		}
 
 		// Exact-match commands — dispatch via static table to avoid per-call closure allocation
 		const cmd = InteractiveMode._exactSlashCommands.get(text);
@@ -2248,8 +2257,12 @@ export class InteractiveMode {
 		if (!this.isInitialized) {
 			await this.init();
 		}
-
-		this.footer.invalidate();
+		// NOTE: do NOT invalidate the footer here — cumulative-usage totals are
+		// derived from session entries and only need a refresh when entries
+		// actually change (message_end with role=assistant, compaction_end,
+		// session swap). Identity fields (model, thinking level, branch, name)
+		// are read fresh from state on every render and don't need an explicit
+		// cache reset; relevant call sites already invalidate where needed.
 
 		switch (event.type) {
 			case "agent_start":
@@ -2425,7 +2438,7 @@ export class InteractiveMode {
 						: `${event.reason === "overflow" ? "Context overflow detected, " : ""}Auto-compacting... ${cancelHint}`;
 				this.autoCompactionLoader = new Loader(
 					this.ui,
-					(spinner) => theme.fg("accent", spinner),
+					workingPulsePalette(),
 					(text) => theme.fg("muted", text),
 					label,
 				);
@@ -2514,6 +2527,15 @@ export class InteractiveMode {
 				if (!event.success) {
 					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
 				}
+				this.ui.requestRender();
+				break;
+			}
+
+			case "fallback_warning": {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(
+					new Text(theme.fg("warning", `[fallback] ${event.from} -> ${event.to}: ${event.reason}`), 1, 0),
+				);
 				this.ui.requestRender();
 				break;
 			}
@@ -2620,14 +2642,21 @@ export class InteractiveMode {
 				break;
 			}
 			case "compactionSummary": {
-				this.chatContainer.addChild(new Spacer(1));
+				// External `Spacer(1)` removed (Leva 2 Spacer cleanup). The
+				// CompactionSummaryMessageComponent currently still uses a
+				// `Box(1,1, customMsgBg)` shell with its own `paddingY=1`, so
+				// the bg row at the top of the box keeps a visual separator
+				// from the preceding block. When this component migrates to
+				// `MessageShell` the shell's leading blank will replace that.
 				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
 				break;
 			}
 			case "branchSummary": {
-				this.chatContainer.addChild(new Spacer(1));
+				// External `Spacer(1)` removed (same rationale as
+				// compactionSummary above — the underlying Box's paddingY=1
+				// keeps a 1-row bg gap until migration to MessageShell.)
 				const component = new BranchSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
@@ -2636,9 +2665,12 @@ export class InteractiveMode {
 			case "user": {
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
-					if (this.chatContainer.children.length > 0) {
-						this.chatContainer.addChild(new Spacer(1));
-					}
+					// External `Spacer(1)` removed (Leva 2 Spacer cleanup).
+					// `UserMessageComponent` still wraps content in
+					// `Box(1,1, userMsgBg)` whose `paddingY=1` keeps a 1-row
+					// bg gap at the top, providing visual separation from the
+					// preceding block until the component itself migrates to
+					// `MessageShell`.
 					const skillBlock = parseSkillBlock(textContent);
 					if (skillBlock) {
 						// Render skill block (collapsible)
@@ -3026,8 +3058,39 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Ctrl+P model cycling.
+	 *
+	 * If the active role has a configured chain (settings.modelRoles[role] with a
+	 * fallback list, or settings.retry.fallbackChains[role]), cycle through that
+	 * chain instead of the global scoped-models list. Falls back to the original
+	 * `session.cycleModel(direction)` when no role chain is configured.
+	 */
 	private async cycleModel(direction: "forward" | "backward"): Promise<void> {
 		try {
+			const roleChain = this.resolveActiveRoleChain();
+			if (roleChain && roleChain.length > 1) {
+				const currentModel = this.session.model;
+				let idx = currentModel
+					? roleChain.findIndex(
+							(e) => e.model.provider === currentModel.provider && e.model.id === currentModel.id,
+						)
+					: -1;
+				if (idx === -1) idx = 0;
+				const len = roleChain.length;
+				const nextIdx = direction === "forward" ? (idx + 1) % len : (idx - 1 + len) % len;
+				const next = roleChain[nextIdx];
+				await this.session.setModel(next.model);
+				this.session.setThinkingLevel(next.thinkingLevel);
+				this.footer.invalidate();
+				this.updateEditorBorderColor();
+				const thinkingStr =
+					next.model.reasoning && next.thinkingLevel !== "off" ? ` (thinking: ${next.thinkingLevel})` : "";
+				this.showStatus(`Role ${this.activeRole}: ${next.model.name || next.model.id}${thinkingStr}`);
+				void this.maybeWarnAboutAnthropicSubscriptionAuth(next.model);
+				return;
+			}
+
 			const result = await this.session.cycleModel(direction);
 			if (result === undefined) {
 				const msg = this.session.scopedModels.length > 0 ? "Only one model in scope" : "Only one model available";
@@ -3043,6 +3106,21 @@ export class InteractiveMode {
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
+	}
+
+	private resolveActiveRoleChain(): Array<{ model: Model<any>; thinkingLevel: ThinkingLevel }> | undefined {
+		const settings = this.settingsManager.getModelRoleSettings();
+		const roleCfg = settings.modelRoles?.[this.activeRole];
+		const retryChain = settings.retry?.fallbackChains?.[this.activeRole];
+		if (!roleCfg && (!retryChain || retryChain.length === 0)) return undefined;
+		const availableModels = this.session.modelRegistry.getAll();
+		const resolution = resolveRole({
+			role: this.activeRole,
+			availableModels,
+			settings,
+			cwd: this.sessionManager.getCwd(),
+		});
+		return resolution?.chain;
 	}
 
 	private toggleToolOutputExpansion(): void {
@@ -3387,6 +3465,47 @@ export class InteractiveMode {
 	}
 
 	// =========================================================================
+	// User-input bus (ask tool)
+	// =========================================================================
+
+	private bindUserInputBus(): void {
+		// Publish the active bus to the module-level registry so tools can
+		// reach it without per-call ctx plumbing across every wrapper.
+		setCurrentUserInputBus(this.userInputBus);
+		this.userInputBusUnsubscribe = this.userInputBus.onRequest((req) => {
+			this.handleAskRequest(req);
+		});
+		this.signalCleanupHandlers.push(() => {
+			this.userInputBusUnsubscribe?.();
+			this.userInputBusUnsubscribe = undefined;
+			this.userInputBus.cancelAll("shutdown");
+			setCurrentUserInputBus(undefined);
+		});
+	}
+
+	private handleAskRequest(req: AskOptionsRequest): void {
+		// Queue if another picker is already up; resolve immediately with
+		// the recommended/first option to avoid stacking overlays.
+		if (this.pendingAskRequest) {
+			const fallback = req.options.find((o) => o.recommended) ?? req.options[0];
+			this.userInputBus.resolve(req.requestId, {
+				picked: fallback ? [fallback.label] : [],
+				cancelled: false,
+			});
+			return;
+		}
+		this.pendingAskRequest = req;
+		this.showSelector((done) => {
+			const { component, focus } = createAskPicker(req, (answer) => {
+				this.userInputBus.resolve(req.requestId, answer);
+				this.pendingAskRequest = undefined;
+				done();
+			});
+			return { component, focus };
+		});
+	}
+
+	// =========================================================================
 	// Selectors
 	// =========================================================================
 
@@ -3565,6 +3684,54 @@ export class InteractiveMode {
 	private async handleModelCommand(searchTerm?: string): Promise<void> {
 		if (!searchTerm) {
 			this.showModelSelector();
+			return;
+		}
+
+		// `/model role` (no extra arg) prints the current active role config.
+		if (searchTerm === "role") {
+			const current = this.activeRole;
+			const cfg = this.settingsManager.getModelRoleSettings().modelRoles?.[current];
+			if (cfg) {
+				const chainStr =
+					cfg.fallbackChain && cfg.fallbackChain.length > 0 ? ` chain=[${cfg.fallbackChain.join(", ")}]` : "";
+				const thinkStr = cfg.thinkingLevel ? ` thinking=${cfg.thinkingLevel}` : "";
+				this.showStatus(`Role: ${current} -> ${cfg.model}${thinkStr}${chainStr}`);
+			} else {
+				this.showStatus(`Role: ${current} (no configuration in settings.modelRoles)`);
+			}
+			return;
+		}
+
+		// `/model <role>` switches the active role for subsequent turns.
+		if (
+			searchTerm === "default" ||
+			searchTerm === "smol" ||
+			searchTerm === "slow" ||
+			searchTerm === "plan" ||
+			searchTerm === "commit"
+		) {
+			this.activeRole = searchTerm;
+			const roleSettings = this.settingsManager.getModelRoleSettings();
+			const availableModels = this.session.modelRegistry.getAll();
+			const resolution = resolveRole({
+				role: searchTerm,
+				availableModels,
+				settings: roleSettings,
+				cwd: this.sessionManager.getCwd(),
+			});
+			if (resolution) {
+				try {
+					await this.session.setModel(resolution.model);
+					this.session.setThinkingLevel(resolution.thinkingLevel);
+					this.footer.invalidate();
+					this.updateEditorBorderColor();
+					this.showStatus(`Role: ${searchTerm} -> ${resolution.model.provider}/${resolution.model.id}`);
+				} catch (error) {
+					this.showError(error instanceof Error ? error.message : String(error));
+				}
+			} else {
+				this.showStatus(`Role: ${searchTerm} active (no model configured; using current)`);
+			}
 			return;
 		}
 
@@ -3886,7 +4053,7 @@ export class InteractiveMode {
 						this.chatContainer.addChild(new Spacer(1));
 						summaryLoader = new Loader(
 							this.ui,
-							(spinner) => theme.fg("accent", spinner),
+							workingPulsePalette(),
 							(text) => theme.fg("muted", text),
 							`Summarizing branch... (${keyText("app.interrupt")} to cancel)`,
 						);
@@ -4766,6 +4933,211 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();
+	}
+
+	private handleTTSRCommand(rest: string): void {
+		const parts = rest.split(/\s+/).filter((p) => p.length > 0);
+		const sub = parts[0];
+		const rules = this.settingsManager.getTTSRRules();
+
+		if (!sub || sub === "list") {
+			if (rules.length === 0) {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(theme.fg("muted", "No TTSR rules configured."), 1, 0));
+				this.ui.requestRender();
+				return;
+			}
+			let info = `${theme.bold("TTSR Rules")}\n\n`;
+			info += `${theme.fg("dim", "name | enabled | regex | message")}\n`;
+			for (const rule of rules) {
+				const enabled = rule.disabled ? "no" : "yes";
+				info += `${rule.name} | ${enabled} | ${rule.regex} | ${rule.message}\n`;
+			}
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(info, 1, 0));
+			this.ui.requestRender();
+			return;
+		}
+
+		if (sub === "enable" || sub === "disable") {
+			const name = parts.slice(1).join(" ").trim();
+			if (!name) {
+				this.showWarning(`Usage: /ttsr ${sub} <name>`);
+				return;
+			}
+			const idx = rules.findIndex((r) => r.name === name);
+			if (idx < 0) {
+				this.showWarning(`No TTSR rule named "${name}".`);
+				return;
+			}
+			const updated = rules.map((r, i) => (i === idx ? { ...r, disabled: sub === "disable" } : r));
+			this.settingsManager.setTTSRRules(updated);
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(
+				new Text(
+					theme.fg(
+						"muted",
+						`TTSR rule "${name}" ${sub === "disable" ? "disabled" : "enabled"}. Run /reload or restart to rebuild the matcher.`,
+					),
+					1,
+					0,
+				),
+			);
+			this.ui.requestRender();
+			return;
+		}
+
+		this.showWarning("Usage: /ttsr list | enable <name> | disable <name>");
+	}
+
+	private async handleHindsightCommand(rest: string): Promise<void> {
+		const parts = rest.split(/\s+/).filter((p) => p.length > 0);
+		const sub = parts[0];
+		const bank = getCurrentHindsightBank();
+
+		if (!sub || sub === "list") {
+			if (!bank) {
+				this.showWarning("Hindsight bank is not enabled. Set `hindsight.enabled: true` in settings.json.");
+				return;
+			}
+			const all = bank.all();
+			if (all.length === 0) {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(theme.fg("muted", "Hindsight bank is empty."), 1, 0));
+				this.ui.requestRender();
+				return;
+			}
+			const sorted = [...all].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20);
+			let info = `${theme.bold("Hindsight (last 20 by updatedAt)")}\n\n`;
+			info += `${theme.fg("dim", "id | kind | subject | body")}\n`;
+			for (const entry of sorted) {
+				const subject = entry.subject ?? "-";
+				const body = entry.body.replace(/\s+/g, " ");
+				const snippet = body.length > 60 ? `${body.slice(0, 60)}…` : body;
+				info += `${entry.id} | ${entry.kind} | ${subject} | ${snippet}\n`;
+			}
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(info, 1, 0));
+			this.ui.requestRender();
+			return;
+		}
+
+		if (sub === "clear") {
+			if (!bank) {
+				this.showWarning("Hindsight bank is not enabled.");
+				return;
+			}
+			const confirmText = parts[1];
+			if (confirmText !== "--yes") {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(
+					new Text(
+						theme.fg(
+							"warning",
+							`This will clear ${bank.all().length} hindsight entries. Re-run as: /hindsight clear --yes`,
+						),
+						1,
+						0,
+					),
+				);
+				this.ui.requestRender();
+				return;
+			}
+			bank.clear();
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("muted", "Hindsight bank cleared."), 1, 0));
+			this.ui.requestRender();
+			return;
+		}
+
+		if (sub === "export") {
+			if (!bank) {
+				this.showWarning("Hindsight bank is not enabled.");
+				return;
+			}
+			const exportPath = parts.slice(1).join(" ").trim();
+			if (!exportPath) {
+				this.showWarning("Usage: /hindsight export <path>");
+				return;
+			}
+			try {
+				fs.writeFileSync(exportPath, JSON.stringify(bank.all(), null, 2));
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(
+					new Text(theme.fg("muted", `Exported ${bank.all().length} entries to ${exportPath}`), 1, 0),
+				);
+				this.ui.requestRender();
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				this.showError(`Failed to export hindsight: ${message}`);
+			}
+			return;
+		}
+
+		this.showWarning("Usage: /hindsight list | clear [--yes] | export <path>");
+	}
+
+	private async handlePreviewCommand(rest: string): Promise<void> {
+		const parts = rest.split(/\s+/).filter((p) => p.length > 0);
+		const sub = parts[0];
+		const queue = getCurrentPreviewQueue();
+
+		if (!sub || sub === "list") {
+			if (!queue) {
+				this.showWarning("Preview queue is not available.");
+				return;
+			}
+			const items = queue.list();
+			if (items.length === 0) {
+				this.chatContainer.addChild(new Spacer(1));
+				this.chatContainer.addChild(new Text(theme.fg("muted", "Preview queue is empty."), 1, 0));
+				this.ui.requestRender();
+				return;
+			}
+			let info = `${theme.bold("Preview Queue")}\n\n`;
+			info += `${theme.fg("dim", "id | kind | path | description")}\n`;
+			for (const item of items) {
+				info += `${item.id} | ${item.kind} | ${item.path} | ${item.summary.description}\n`;
+			}
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(info, 1, 0));
+			this.ui.requestRender();
+			return;
+		}
+
+		if (sub === "accept" || sub === "discard") {
+			if (!queue) {
+				this.showWarning("Preview queue is not available.");
+				return;
+			}
+			const id = parts[1];
+			if (!id) {
+				this.showWarning(`Usage: /preview ${sub} <id>`);
+				return;
+			}
+			if (sub === "accept") {
+				const result = await queue.accept(id);
+				if (result.ok) {
+					this.chatContainer.addChild(new Spacer(1));
+					this.chatContainer.addChild(new Text(theme.fg("muted", `Accepted preview ${id}.`), 1, 0));
+					this.ui.requestRender();
+				} else {
+					this.showError(`Accept failed: ${result.error}`);
+				}
+			} else {
+				const ok = await queue.discard(id);
+				if (ok) {
+					this.chatContainer.addChild(new Spacer(1));
+					this.chatContainer.addChild(new Text(theme.fg("muted", `Discarded preview ${id}.`), 1, 0));
+					this.ui.requestRender();
+				} else {
+					this.showWarning(`No preview found for id ${id}.`);
+				}
+			}
+			return;
+		}
+
+		this.showWarning("Usage: /preview list | accept <id> | discard <id>");
 	}
 
 	private handleChangelogCommand(): void {

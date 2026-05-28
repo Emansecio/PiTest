@@ -192,10 +192,29 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 	};
 }
 
+function computeDynamicReserve(contextWindow: number, configuredReserve: number): number {
+	if (contextWindow > 200_000) {
+		return Math.max(configuredReserve, 20_000);
+	}
+	return Math.max(configuredReserve, Math.floor(contextWindow * 0.1));
+}
+
+const COALESCING_THRESHOLD_TOKENS = 8192;
+
 /** Return whether context usage exceeds the configured compaction threshold. */
-export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
+export function shouldCompact(
+	contextTokens: number,
+	contextWindow: number,
+	settings: CompactionSettings,
+	lastCompactionDeficit = 0,
+): boolean {
 	if (!settings.enabled) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
+	const threshold = contextWindow - reserve;
+	if (contextTokens <= threshold) return false;
+	const deficit = contextTokens - threshold;
+	if (lastCompactionDeficit === 0) return true;
+	return deficit > lastCompactionDeficit + COALESCING_THRESHOLD_TOKENS;
 }
 
 /** Estimate token count for one message using a conservative character heuristic. */
@@ -345,11 +364,16 @@ export function findCutPoint(
 		const messageTokens = estimateTokens(entry.message as AgentMessage);
 		accumulatedTokens += messageTokens;
 		if (accumulatedTokens >= keepRecentTokens) {
-			for (let c = 0; c < cutPoints.length; c++) {
-				if (cutPoints[c] >= i) {
-					cutIndex = cutPoints[c];
-					break;
-				}
+			// cutPoints is sorted ascending; find smallest cutPoint >= i via binary search.
+			let lo = 0;
+			let hi = cutPoints.length;
+			while (lo < hi) {
+				const mid = (lo + hi) >>> 1;
+				if (cutPoints[mid] < i) lo = mid + 1;
+				else hi = mid;
+			}
+			if (lo < cutPoints.length) {
+				cutIndex = cutPoints[lo];
 			}
 			break;
 		}
@@ -379,16 +403,11 @@ export const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assi
 
 Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.`;
 
-const SUMMARIZATION_PROMPT = `The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
-
-Use this EXACT format:
-
-## Goal
-[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+const SUMMARY_FORMAT = `## Goal
+[What is the user trying to accomplish? Multiple items allowed.]
 
 ## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "(none)" if none were mentioned]
+- [User-stated constraints/preferences, or "(none)"]
 
 ## Progress
 ### Done
@@ -398,7 +417,7 @@ Use this EXACT format:
 - [ ] [Current work]
 
 ### Blocked
-- [Issues preventing progress, if any]
+- [Blockers, if any]
 
 ## Key Decisions
 - **[Decision]**: [Brief rationale]
@@ -407,49 +426,73 @@ Use this EXACT format:
 1. [Ordered list of what should happen next]
 
 ## Critical Context
-- [Any data, examples, or references needed to continue]
-- [Or "(none)" if not applicable]
+- [Data/examples/references needed to continue, or "(none)"]`;
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
-
-const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
-
-Update the existing structured summary with new information. RULES:
-- PRESERVE all existing information from the previous summary
-- ADD new progress, decisions, and context from the new messages
-- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
-- UPDATE "Next Steps" based on what was accomplished
-- PRESERVE exact file paths, function names, and error messages
-- If something is no longer relevant, you may remove it
+const SUMMARIZATION_PROMPT = `The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
 Use this EXACT format:
 
-## Goal
-[Preserve existing goals, add new ones if the task expanded]
-
-## Constraints & Preferences
-- [Preserve existing, add new ones discovered]
-
-## Progress
-### Done
-- [x] [Include previously done items AND newly completed items]
-
-### In Progress
-- [ ] [Current work - update based on progress]
-
-### Blocked
-- [Current blockers - remove if resolved]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
-
-## Next Steps
-1. [Update based on current state]
-
-## Critical Context
-- [Preserve important context, add new if needed]
+${SUMMARY_FORMAT}
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+
+const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary in <previous-summary> tags.
+
+Rules:
+- PRESERVE all existing information from the previous summary
+- ADD new progress, decisions, and context from the new messages
+- MOVE items from "In Progress" to "Done" when completed; UPDATE "Next Steps"
+- PRESERVE exact file paths, function names, and error messages
+- Remove items only if no longer relevant
+
+Use this EXACT format (preserve previous content, add new where applicable):
+
+${SUMMARY_FORMAT}
+
+Keep each section concise.`;
+
+/**
+ * Detect messages that were injected by Time-Traveling Stream Rules. These
+ * carry a `_ttsr_injected` flag and must survive compaction verbatim so the
+ * model keeps seeing the rule that fired even after history is summarized.
+ */
+function isTTSRInjected(message: AgentMessage): boolean {
+	return (message as unknown as { _ttsr_injected?: boolean })._ttsr_injected === true;
+}
+
+function extractTTSRText(message: AgentMessage): string | undefined {
+	const content = (message as { content?: unknown }).content;
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		const parts: string[] = [];
+		for (const block of content) {
+			if (block && typeof block === "object" && (block as { type?: string }).type === "text") {
+				const text = (block as { text?: string }).text;
+				if (text) parts.push(text);
+			}
+		}
+		return parts.length > 0 ? parts.join("\n") : undefined;
+	}
+	return undefined;
+}
+
+/** Pull TTSR reminders out of the to-be-summarized batch so they survive verbatim. */
+function partitionTTSRMessages(messages: AgentMessage[]): {
+	withoutTTSR: AgentMessage[];
+	ttsrReminders: string[];
+} {
+	const withoutTTSR: AgentMessage[] = [];
+	const ttsrReminders: string[] = [];
+	for (const msg of messages) {
+		if (isTTSRInjected(msg)) {
+			const text = extractTTSRText(msg);
+			if (text) ttsrReminders.push(text);
+			continue;
+		}
+		withoutTTSR.push(msg);
+	}
+	return { withoutTTSR, ttsrReminders };
+}
 
 /** Generate or update a conversation summary for compaction. */
 export async function generateSummary(
@@ -651,11 +694,18 @@ export async function compact(
 
 	let summary: string;
 
-	if (isSplitTurn && turnPrefixMessages.length > 0) {
+	// Pull TTSR-injected reminders out before summarization so they survive
+	// verbatim. The summarizer never sees them — they are appended back to the
+	// final summary text under a dedicated section that the model can parse.
+	const { withoutTTSR: historyForSummary, ttsrReminders: historyTTSR } = partitionTTSRMessages(messagesToSummarize);
+	const { withoutTTSR: prefixForSummary, ttsrReminders: prefixTTSR } = partitionTTSRMessages(turnPrefixMessages);
+	const allTTSR = [...historyTTSR, ...prefixTTSR];
+
+	if (isSplitTurn && prefixForSummary.length > 0) {
 		const [historyResult, turnPrefixResult] = await Promise.all([
-			messagesToSummarize.length > 0
+			historyForSummary.length > 0
 				? generateSummary(
-						messagesToSummarize,
+						historyForSummary,
 						model,
 						settings.reserveTokens,
 						apiKey,
@@ -667,7 +717,7 @@ export async function compact(
 					)
 				: Promise.resolve(ok<string, CompactionError>("No prior history.")),
 			generateTurnPrefixSummary(
-				turnPrefixMessages,
+				prefixForSummary,
 				model,
 				settings.reserveTokens,
 				apiKey,
@@ -681,7 +731,7 @@ export async function compact(
 		summary = `${historyResult.value}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.value}`;
 	} else {
 		const summaryResult = await generateSummary(
-			messagesToSummarize,
+			historyForSummary,
 			model,
 			settings.reserveTokens,
 			apiKey,
@@ -693,6 +743,10 @@ export async function compact(
 		);
 		if (!summaryResult.ok) return err(summaryResult.error);
 		summary = summaryResult.value;
+	}
+
+	if (allTTSR.length > 0) {
+		summary += `\n\n---\n\n**TTSR Reminders (preserved verbatim across compaction):**\n\n${allTTSR.join("\n\n")}`;
 	}
 
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);

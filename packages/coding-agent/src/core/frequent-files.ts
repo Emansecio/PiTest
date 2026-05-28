@@ -12,6 +12,10 @@
  * "least recent + lowest hits" (a tiny LRU+LFU hybrid).
  */
 
+import { execFile } from "node:child_process";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
+import { dirname, join, relative, sep } from "node:path";
 import type { FileToolOp } from "./compaction/utils.ts";
 
 export interface FrequentFileStat {
@@ -79,6 +83,24 @@ export class FrequentFilesTracker {
 		};
 		this.bump(stat, op, timestamp);
 		this.entries.set(path, stat);
+		// A fresh entry has low hits and may become the coldest. If the cached
+		// coldest is still valid (not dirty), update it incrementally in O(1):
+		// adopt the new entry only when it is colder (fewer hits, or equal hits +
+		// older lastTouchedAt) or when there is no cached coldest yet. Otherwise
+		// the cached coldest is unchanged and still correct, so leave dirty alone.
+		// When already dirty, the cached values are stale — defer to the lazy
+		// recompute in evictColdest() rather than comparing against stale state.
+		if (!this._coldestDirty) {
+			if (
+				this._coldestPath === undefined ||
+				stat.hits < this._coldestHits ||
+				(stat.hits === this._coldestHits && stat.lastTouchedAt < this._coldestTs)
+			) {
+				this._coldestPath = path;
+				this._coldestHits = stat.hits;
+				this._coldestTs = stat.lastTouchedAt;
+			}
+		}
 	}
 
 	/**
@@ -138,13 +160,59 @@ export class FrequentFilesTracker {
 		}
 	}
 
+	/** Serialize the current entries to a versioned snapshot, safe to JSON-encode. */
+	toSnapshot(): FrequentFilesSnapshot {
+		return {
+			version: FREQ_SNAPSHOT_VERSION,
+			savedAt: Date.now(),
+			entries: Array.from(this.entries.values(), (s) => ({ ...s })),
+		};
+	}
+
+	/**
+	 * Hydrate from a snapshot using merge semantics so callers can compose with
+	 * an existing in-memory tracker. Silently ignores entries with the wrong
+	 * shape — the snapshot file is best-effort, not load-bearing.
+	 */
+	loadSnapshot(snapshot: FrequentFilesSnapshot | undefined): void {
+		if (!snapshot || snapshot.version !== FREQ_SNAPSHOT_VERSION) return;
+		if (!Array.isArray(snapshot.entries)) return;
+		for (const raw of snapshot.entries) {
+			if (!raw || typeof raw.path !== "string" || raw.path.length === 0) continue;
+			const readCount = toNonNegInt(raw.readCount);
+			const writeCount = toNonNegInt(raw.writeCount);
+			const editCount = toNonNegInt(raw.editCount);
+			const hits = toNonNegInt(raw.hits);
+			if (hits === 0) continue;
+			const lastTouchedAt =
+				typeof raw.lastTouchedAt === "number" && Number.isFinite(raw.lastTouchedAt) ? raw.lastTouchedAt : 0;
+			const existing = this.entries.get(raw.path);
+			if (existing) {
+				existing.readCount += readCount;
+				existing.writeCount += writeCount;
+				existing.editCount += editCount;
+				existing.hits += hits;
+				if (lastTouchedAt > existing.lastTouchedAt) existing.lastTouchedAt = lastTouchedAt;
+				this._coldestDirty = true;
+				continue;
+			}
+			if (this.entries.size >= this.maxFiles) this.evictColdest();
+			this.entries.set(raw.path, { path: raw.path, readCount, writeCount, editCount, hits, lastTouchedAt });
+			this._coldestDirty = true;
+		}
+	}
+
 	private bump(stat: FrequentFileStat, op: FileToolOp, timestamp: number): void {
 		if (op === "read") stat.readCount++;
 		else if (op === "write") stat.writeCount++;
 		else stat.editCount++;
 		stat.hits++;
 		if (timestamp > stat.lastTouchedAt) stat.lastTouchedAt = timestamp;
-		this._coldestDirty = true;
+		// A bump only INCREASES hits (and never decreases lastTouchedAt), so the
+		// entry can only move AWAY from being coldest. The cached coldest stays
+		// valid unless the entry we just bumped IS the current coldest — then its
+		// hits rose and another entry may now be colder, so force a recompute.
+		if (stat.path === this._coldestPath) this._coldestDirty = true;
 	}
 
 	private evictColdest(): void {
@@ -171,6 +239,82 @@ export class FrequentFilesTracker {
 		}
 		this._coldestDirty = false;
 	}
+}
+
+// --- Cross-session persistence ----------------------------------------------
+
+const FREQ_SNAPSHOT_VERSION = 1 as const;
+
+export interface FrequentFilesSnapshot {
+	version: typeof FREQ_SNAPSHOT_VERSION;
+	/** Epoch ms of the producing serialization. Used for staleness/debug. */
+	savedAt: number;
+	entries: FrequentFileStat[];
+}
+
+function toNonNegInt(raw: unknown): number {
+	if (typeof raw !== "number" || !Number.isFinite(raw)) return 0;
+	const n = Math.floor(raw);
+	return n > 0 ? n : 0;
+}
+
+/**
+ * Best-effort read of a snapshot from disk. Returns `undefined` on any failure
+ * (missing file, parse error, version mismatch) — callers MUST treat the
+ * snapshot as advisory, not load-bearing.
+ */
+export function loadFrequentFilesSnapshot(filePath: string): FrequentFilesSnapshot | undefined {
+	let raw: string;
+	try {
+		raw = readFileSync(filePath, "utf8");
+	} catch {
+		return undefined;
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return undefined;
+	}
+	if (!parsed || typeof parsed !== "object") return undefined;
+	const candidate = parsed as Partial<FrequentFilesSnapshot>;
+	if (candidate.version !== FREQ_SNAPSHOT_VERSION) return undefined;
+	if (!Array.isArray(candidate.entries)) return undefined;
+	const savedAt = typeof candidate.savedAt === "number" && Number.isFinite(candidate.savedAt) ? candidate.savedAt : 0;
+	return { version: FREQ_SNAPSHOT_VERSION, savedAt, entries: candidate.entries as FrequentFileStat[] };
+}
+
+/**
+ * Atomic snapshot write: writes to `<filePath>.tmp` + fsync + rename, so a
+ * crash mid-write leaves the prior snapshot intact. Creates parent dirs.
+ * Throws — caller decides whether to swallow (boot/dispose path: yes).
+ */
+export function saveFrequentFilesSnapshot(filePath: string, snapshot: FrequentFilesSnapshot): void {
+	mkdirSync(dirname(filePath), { recursive: true });
+	const tmpPath = `${filePath}.tmp`;
+	const payload = JSON.stringify(snapshot);
+	const fd = openSync(tmpPath, "w");
+	try {
+		writeSync(fd, payload);
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	try {
+		renameSync(tmpPath, filePath);
+	} catch (err) {
+		try {
+			unlinkSync(tmpPath);
+		} catch {
+			// best effort
+		}
+		throw err;
+	}
+}
+
+/** Default project-local snapshot file. Mirrors `defaultBankPath` from hindsight. */
+export function defaultFrequentFilesPath(cwd: string): string {
+	return join(cwd, ".pi", "frequent-files.json");
 }
 
 // --- Min-heap helpers for bounded top-N selection ---
@@ -229,6 +373,226 @@ export function formatFrequentFilesForPrompt(top: FrequentFileStat[]): string {
 		if (stat.editCount > 0) ops.push(`edit×${stat.editCount}`);
 		if (stat.writeCount > 0) ops.push(`write×${stat.writeCount}`);
 		lines.push(`- ${stat.path} (${ops.join(", ")})`);
+	}
+	lines.push("</frequent_files>");
+	return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Repo-wide "frequent files" computation (git log + mtime fallback).
+// Separate from the session tracker above: the tracker counts what THIS session
+// has touched, this function answers "what does the project itself touch most
+// often" — used at session boot to seed the system prompt with recent hot files.
+// ---------------------------------------------------------------------------
+
+export interface FrequentFile {
+	path: string;
+	count: number;
+	source: "git" | "mtime";
+}
+
+export interface FrequentFilesOptions {
+	cwd: string;
+	/** Max results to return. Default: 10. */
+	limit?: number;
+	/** Time window for git log scan. Default: 30. */
+	sinceDays?: number;
+	/** Caller-supplied abort signal. Aborts the git subprocess and walks. */
+	signal?: AbortSignal;
+	/** Hard cap on the git subprocess wall clock. Default: 2000ms. */
+	gitTimeoutMs?: number;
+}
+
+const FREQ_DEFAULT_LIMIT = 10;
+const FREQ_DEFAULT_SINCE_DAYS = 30;
+const FREQ_DEFAULT_GIT_TIMEOUT_MS = 2000;
+const FREQ_FS_FALLBACK_MAX_ENTRIES = 5000;
+const FREQ_FS_SKIP_DIRS = new Set([
+	".git",
+	"node_modules",
+	"dist",
+	"build",
+	"out",
+	".next",
+	".turbo",
+	".cache",
+	".pi",
+	"coverage",
+	"target",
+	".venv",
+	"venv",
+	"__pycache__",
+]);
+
+/**
+ * Compute the project's hottest files in the recent past.
+ *
+ * Strategy:
+ *  1. `git log --name-only --since=<N>.days.ago` → count per file → filter to
+ *     paths that still exist → top-N by count.
+ *  2. On git failure / timeout / zero results, fall back to walking the cwd
+ *     (skipping vendor + build dirs) and sorting by mtime desc.
+ *
+ * The git call is wrapped in a hard wall-clock timeout because monorepos with
+ * deep histories can stall here; the mtime walk is bounded by both an entry
+ * cap and the same abort signal.
+ */
+export async function computeFrequentFiles(opts: FrequentFilesOptions): Promise<FrequentFile[]> {
+	const limit = opts.limit ?? FREQ_DEFAULT_LIMIT;
+	const sinceDays = opts.sinceDays ?? FREQ_DEFAULT_SINCE_DAYS;
+	const gitTimeoutMs = opts.gitTimeoutMs ?? FREQ_DEFAULT_GIT_TIMEOUT_MS;
+	if (limit <= 0) return [];
+
+	const gitResult = await runGitLog(opts.cwd, sinceDays, gitTimeoutMs, opts.signal).catch(() => undefined);
+	if (gitResult && gitResult.length > 0) {
+		const filtered = await filterExisting(opts.cwd, gitResult, limit);
+		if (filtered.length > 0) return filtered;
+	}
+
+	return walkMtimeFallback(opts.cwd, limit, opts.signal);
+}
+
+async function runGitLog(
+	cwd: string,
+	sinceDays: number,
+	timeoutMs: number,
+	signal: AbortSignal | undefined,
+): Promise<Array<{ path: string; count: number }> | undefined> {
+	const counts = new Map<string, number>();
+	// `execFile`'s callback only fires after the child has fully exited, so
+	// resolving/rejecting from inside it (and ONLY from inside it) guarantees
+	// the child no longer holds `cwd`. On abort/timeout we kill the child but
+	// wait for the callback before settling — otherwise on Windows the cwd
+	// stays locked just long enough for `rmSync(tempDir)` in tests to EBUSY.
+	let aborted = false;
+	let timedOut = false;
+	await new Promise<void>((resolve, reject) => {
+		const child = execFile(
+			"git",
+			["log", "--pretty=format:", "--name-only", `--since=${sinceDays}.days.ago`],
+			{ cwd, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+			(error, stdout) => {
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+				if (aborted) {
+					reject(new Error("aborted"));
+					return;
+				}
+				if (timedOut) {
+					reject(new Error("git log timed out"));
+					return;
+				}
+				if (error) {
+					// `git log` on a non-repo or with no commits exits non-zero; treat as
+					// "no data" and let the caller fall back to mtime.
+					resolve();
+					return;
+				}
+				for (const rawLine of stdout.split("\n")) {
+					const line = rawLine.trim();
+					if (!line) continue;
+					counts.set(line, (counts.get(line) ?? 0) + 1);
+				}
+				resolve();
+			},
+		);
+		const timer = setTimeout(() => {
+			timedOut = true;
+			child.kill();
+		}, timeoutMs);
+		const onAbort = () => {
+			aborted = true;
+			child.kill();
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+	if (counts.size === 0) return undefined;
+	return Array.from(counts.entries())
+		.map(([path, count]) => ({ path, count }))
+		.sort((a, b) => b.count - a.count || a.path.localeCompare(b.path));
+}
+
+async function filterExisting(
+	cwd: string,
+	ranked: Array<{ path: string; count: number }>,
+	limit: number,
+): Promise<FrequentFile[]> {
+	const out: FrequentFile[] = [];
+	// Iterate in descending order; stop as soon as we have `limit` survivors. This
+	// keeps the existence check bounded — a 10k-file history won't trigger 10k stats.
+	for (const entry of ranked) {
+		if (out.length >= limit) break;
+		const abs = join(cwd, entry.path);
+		const exists = await stat(abs).then(
+			(s) => s.isFile(),
+			() => false,
+		);
+		if (exists) {
+			out.push({ path: entry.path, count: entry.count, source: "git" });
+		}
+	}
+	return out;
+}
+
+async function walkMtimeFallback(cwd: string, limit: number, signal: AbortSignal | undefined): Promise<FrequentFile[]> {
+	const collected: Array<{ path: string; mtimeMs: number }> = [];
+	const queue: string[] = [cwd];
+	let visited = 0;
+	while (queue.length > 0 && visited < FREQ_FS_FALLBACK_MAX_ENTRIES) {
+		if (signal?.aborted) break;
+		const dir = queue.shift()!;
+		let entries: import("node:fs").Dirent[];
+		try {
+			entries = await readdir(dir, { withFileTypes: true });
+		} catch {
+			continue;
+		}
+		for (const entry of entries) {
+			if (visited >= FREQ_FS_FALLBACK_MAX_ENTRIES) break;
+			visited++;
+			const full = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				if (FREQ_FS_SKIP_DIRS.has(entry.name)) continue;
+				if (entry.name.startsWith(".") && entry.name !== ".pi") continue;
+				queue.push(full);
+				continue;
+			}
+			if (!entry.isFile()) continue;
+			try {
+				const s = await stat(full);
+				collected.push({ path: full, mtimeMs: s.mtimeMs });
+			} catch {
+				// Permission or vanish — skip silently.
+			}
+		}
+	}
+	collected.sort((a, b) => b.mtimeMs - a.mtimeMs);
+	const top = collected.slice(0, limit);
+	return top.map((entry) => {
+		const rel = relative(cwd, entry.path);
+		// Normalize Windows backslashes so prompt output is consistent across platforms.
+		const normalized = rel.split(sep).join("/");
+		return { path: normalized.length > 0 ? normalized : entry.path, count: 1, source: "mtime" as const };
+	});
+}
+
+/**
+ * Render the boot-time frequent-files list for the system prompt. Distinct
+ * from `formatFrequentFilesForPrompt` (session tracker) — this surfaces repo-
+ * level recency from git history, not per-session tool usage. Returns empty
+ * string when the list is empty so callers can concat unconditionally.
+ */
+export function formatFrequentFilesIndexForPrompt(files: FrequentFile[]): string {
+	if (files.length === 0) return "";
+	const source = files[0]?.source ?? "git";
+	const headline =
+		source === "git"
+			? `Files most edited recently (top ${files.length}):`
+			: `Files most recently modified on disk (top ${files.length}):`;
+	const lines: string[] = ["<frequent_files>", headline];
+	for (const f of files) {
+		const suffix = f.source === "git" ? ` (${f.count} commit${f.count === 1 ? "" : "s"})` : "";
+		lines.push(`${f.path}${suffix}`);
 	}
 	lines.push("</frequent_files>");
 	return lines.join("\n");

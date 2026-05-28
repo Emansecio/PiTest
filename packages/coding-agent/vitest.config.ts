@@ -10,6 +10,12 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
+		// Test isolation: skip the developer's `~/.claude/skills/` so test
+		// fixtures stay deterministic regardless of which Claude Code skills
+		// the contributor has on their machine. Real usage opts in by default.
+		env: {
+			PI_DISABLE_CLAUDE_CODE_SKILLS: "1",
+		},
 		server: {
 			deps: {
 				external: [/@silvia-odwyer\/photon-node/],

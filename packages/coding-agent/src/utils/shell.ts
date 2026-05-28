@@ -131,6 +131,8 @@ export function getShellEnv(): NodeJS.ProcessEnv {
 	_cachedShellEnv = {
 		...process.env,
 		[pathKey]: updatedPath,
+		PYTHONUTF8: process.env.PYTHONUTF8 ?? "1",
+		PYTHONIOENCODING: process.env.PYTHONIOENCODING ?? "utf-8",
 	};
 	return _cachedShellEnv;
 }

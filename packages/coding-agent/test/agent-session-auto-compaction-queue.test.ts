@@ -88,12 +88,16 @@ describe("AgentSession auto-compaction queue resume", () => {
 		});
 	});
 
-	afterEach(() => {
-		session.dispose();
+	afterEach(async () => {
+		await session.dispose();
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true });
+			try {
+				rmSync(tempDir, { recursive: true });
+			} catch {
+				/* ignore Windows handle race */
+			}
 		}
 	});
 

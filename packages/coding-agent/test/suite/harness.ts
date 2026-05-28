@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentTool, ToolRewriteRegistry } from "@earendil-works/pi-agent-core";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, Model } from "@earendil-works/pi-ai";
 import { registerFauxProvider } from "@earendil-works/pi-ai";
@@ -63,6 +63,8 @@ export interface HarnessOptions {
 	resourceLoader?: ResourceLoader;
 	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
+	/** Optional tool rewrite registry to plug into the Agent under test. */
+	toolRewriteRegistry?: ToolRewriteRegistry;
 }
 
 export interface Harness {
@@ -80,7 +82,7 @@ export interface Harness {
 	events: AgentSessionEvent[];
 	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
 	tempDir: string;
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 }
 
 function createTempDir(): string {
@@ -158,6 +160,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			if (!runner) return messages;
 			return runner.emitContext(messages);
 		},
+		toolRewriteRegistry: options.toolRewriteRegistry,
 	});
 	const extensionsResult = options.extensionFactories
 		? await createTestExtensionsResult(options.extensionFactories, tempDir)
@@ -197,11 +200,20 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			return events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type);
 		},
 		tempDir,
-		cleanup() {
-			session.dispose();
+		async cleanup() {
+			// Await dispose so background workers (frequent-files git child, eval
+			// kernels) drop their handles on tempDir before we rmSync it. Without
+			// the await, Windows fails the rmSync with EBUSY because the git child
+			// still holds cwd === tempDir.
+			await session.dispose();
 			fauxProvider.unregister();
 			if (existsSync(tempDir)) {
-				rmSync(tempDir, { recursive: true });
+				try {
+					rmSync(tempDir, { recursive: true });
+				} catch {
+					// Best-effort: a slow Windows handle release can still race. The
+					// OS will reclaim the temp dir on its own.
+				}
 			}
 		},
 	};

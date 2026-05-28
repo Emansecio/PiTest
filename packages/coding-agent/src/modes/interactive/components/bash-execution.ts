@@ -2,7 +2,7 @@
  * Component for displaying bash command execution with streaming output.
  */
 
-import { Container, Loader, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, Loader, Text, type TUI } from "@earendil-works/pi-tui";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -11,14 +11,15 @@ import {
 } from "../../../core/tools/truncate.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
+import { MessageShell } from "./message-shell.ts";
+
 import { truncateToVisualLines } from "./visual-truncate.ts";
 
 // Preview line limit when not expanded (matches tool execution behavior)
 const PREVIEW_LINES = 20;
 
-export class BashExecutionComponent extends Container {
+export class BashExecutionComponent extends MessageShell {
 	private command: string;
 	private outputLines: string[] = [];
 	private status: "running" | "complete" | "cancelled" | "error" = "running";
@@ -30,38 +31,31 @@ export class BashExecutionComponent extends Container {
 	private contentContainer: Container;
 
 	constructor(command: string, ui: TUI, excludeFromContext = false) {
-		super();
+		// Per Leva 2 (D3=yes): bash uses the unified shell instead of the
+		// previous DynamicBorder pair (top + bottom `─`). The role-specific
+		// color moves to the gutter; `excludeFromContext` (`!!` prefix) drops
+		// to dim so it's clear the command was not added to the LLM history.
+		const colorKey = excludeFromContext ? "dim" : "gutterBash";
+		super({ gutterColor: (text: string) => theme.fg(colorKey, text) });
 		this.command = command;
 
-		// Use dim border for excluded-from-context commands (!! prefix)
-		const colorKey = excludeFromContext ? "dim" : "bashMode";
-		const borderColor = (str: string) => theme.fg(colorKey, str);
-
-		// Add spacer
-		this.addChild(new Spacer(1));
-
-		// Top border
-		this.addChild(new DynamicBorder(borderColor));
-
-		// Content container (holds dynamic content between borders)
+		// Content container holds dynamic content (command header + output + loader).
 		this.contentContainer = new Container();
 		this.addChild(this.contentContainer);
 
 		// Command header
-		const header = new Text(theme.fg(colorKey, theme.bold(`$ ${command}`)), 1, 0);
+		const headerColor = excludeFromContext ? "dim" : "bashMode";
+		const header = new Text(theme.fg(headerColor, theme.bold(`$ ${command}`)), 0, 0);
 		this.contentContainer.addChild(header);
 
 		// Loader
 		this.loader = new Loader(
 			ui,
-			(spinner) => theme.fg(colorKey, spinner),
+			(spinner) => theme.fg(headerColor, spinner),
 			(text) => theme.fg("muted", text),
-			`Running... (${keyText("tui.select.cancel")} to cancel)`, // Plain text for loader
+			`Running... (${keyText("tui.select.cancel")} to cancel)`,
 		);
 		this.contentContainer.addChild(this.loader);
-
-		// Bottom border
-		this.addChild(new DynamicBorder(borderColor));
 	}
 
 	/**
@@ -134,8 +128,9 @@ export class BashExecutionComponent extends Container {
 		// Rebuild content container
 		this.contentContainer.clear();
 
-		// Command header
-		const header = new Text(theme.fg("bashMode", theme.bold(`$ ${this.command}`)), 1, 0);
+		// Command header — shell already provides the 1-col left inset via the
+		// gutter; no internal paddingX needed.
+		const header = new Text(theme.fg("bashMode", theme.bold(`$ ${this.command}`)), 0, 0);
 		this.contentContainer.addChild(header);
 
 		// Output
@@ -143,7 +138,7 @@ export class BashExecutionComponent extends Container {
 			if (this.expanded) {
 				// Show all lines
 				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
-				this.contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
+				this.contentContainer.addChild(new Text(`\n${displayText}`, 0, 0));
 			} else {
 				// Use shared visual truncation utility with width-aware caching
 				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
@@ -153,7 +148,7 @@ export class BashExecutionComponent extends Container {
 				this.contentContainer.addChild({
 					render: (width: number) => {
 						if (cachedLines === undefined || cachedWidth !== width) {
-							const result = truncateToVisualLines(styledInput, PREVIEW_LINES, width, 1);
+							const result = truncateToVisualLines(styledInput, PREVIEW_LINES, width, 0);
 							cachedLines = result.visualLines;
 							cachedWidth = width;
 						}
@@ -197,7 +192,7 @@ export class BashExecutionComponent extends Container {
 			}
 
 			if (statusParts.length > 0) {
-				this.contentContainer.addChild(new Text(`\n${statusParts.join("\n")}`, 1, 0));
+				this.contentContainer.addChild(new Text(`\n${statusParts.join("\n")}`, 0, 0));
 			}
 		}
 	}

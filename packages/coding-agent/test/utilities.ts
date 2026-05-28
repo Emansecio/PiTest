@@ -173,7 +173,7 @@ export interface TestSessionContext {
 	session: AgentSession;
 	sessionManager: SessionManager;
 	tempDir: string;
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 }
 
 export interface CreateTestExtensionsResultInput {
@@ -269,10 +269,16 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 	// Must subscribe to enable session persistence
 	session.subscribe(() => {});
 
-	const cleanup = () => {
-		session.dispose();
+	const cleanup = async () => {
+		// Await dispose so background workers drop handles on tempDir before rmSync.
+		await session.dispose();
 		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true });
+			try {
+				rmSync(tempDir, { recursive: true });
+			} catch {
+				// Best-effort: slow Windows handle release can still race; the OS
+				// will reclaim the temp dir eventually.
+			}
 		}
 	};
 

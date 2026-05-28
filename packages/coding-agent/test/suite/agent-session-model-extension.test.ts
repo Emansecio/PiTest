@@ -8,9 +8,9 @@ import { createHarness, getAssistantTexts, type Harness } from "./harness.js";
 describe("AgentSession model and extension characterization", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 

@@ -2,13 +2,30 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added cross-session persistence to the per-session frequent-files tracker. When `frequentFiles.enabled` is true, the top entries are written to `<cwd>/.pi/frequent-files.json` on session dispose (atomic tmp + rename) and hydrated on next session boot. Lets new sessions re-use the previous session's hot-file ranking instead of re-discovering it through repeated reads.
+- Added stat-snapshot survival to the built-in read-guard across compaction boundaries. On `session_before_compact` the guard now captures `(mtimeMs, size)` for each file the session has already read instead of dropping the read set wholesale. Post-compaction edits are allowed when the on-disk stat still matches the snapshot, and blocked with a "re-read it" reason when it drifted — eliminates forced re-reads of unchanged files while staying conservative against external mutations.
+- Added a unified `MessageShell` base class for chat-area blocks. Each block now renders with a single 1-column colored gutter at the left edge instead of mixing full-row backgrounds, border pairs, and bare text. Per-role gutter color comes from new theme keys: `gutterToolPending`/`gutterToolSuccess`/`gutterToolError`/`gutterBash`/`gutterDiagnostics`/`gutterUser`/`gutterCustom`. Tool definitions opting out via `renderShell:"self"` (built-in `edit` / `edit-hashline` plus extension tools) keep their custom framing untouched — the shell becomes a passthrough.
+
 ### Changed
+
+- Changed `BashExecutionComponent` from a top + bottom `DynamicBorder` pair to the unified shell. Excluded-from-context commands (`!!` prefix) still drop their gutter to `dim` so it stays visible that the command was not added to the LLM history.
+- Changed `ToolExecutionComponent` from a state-coloured `Box` background to a state-coloured gutter (no background fill anywhere in the block). Pending / success / error states transition by swapping the gutter color via `setGutterColor` — the inner content containers no longer carry a `bg` function. `renderShell:"self"` is honored as before.
+- Changed `DiagnosticsBlockComponent` to render through the shell with a yellow gutter and the bracketed name (`[Skill conflicts]`, `[Prompt conflicts]`, `[Extension issues]`, `[Theme conflicts]`) carried by the shell label. Removed the four trailing `Spacer(1)` calls that followed each diagnostics block — the shell adds its own leading blank.
+- Changed the per-component leading `Spacer(1)` policy: `ToolExecutionComponent` and `BashExecutionComponent` no longer add their own opening spacer, and the external `Spacer(1)` calls in `addMessageToChat` for `compactionSummary`, `branchSummary`, and `user` were removed. The unified `MessageShell` emits a single leading blank per block, centralising the inter-block vertical gap.
+- Changed `UserMessageComponent` from a `Box(1,1, userMsgBg)` background fill to the unified shell with a blue (`gutterUser`) gutter and no label — the role is unambiguous from the gutter color. The OSC 133;A / 133;B / 133;C zone markers terminals use for "jump between prompts" navigation still wrap the rendered output (now on the shell's first and last lines).
+- Changed `CompactionSummaryMessageComponent` and `BranchSummaryMessageComponent` from a `Box(1,1, customMsgBg)` background fill to the unified shell with a purple (`gutterCustom`) gutter and the bracketed `[compaction]` / `[branch]` label carried by `MessageShell.label`. The collapsed-state expand hint is still dim; the expanded view renders the model's summary as plain markdown with no per-block tint.
+
+- Changed the interactive footer to a two-tier layout: line 1 carries the session identity (cwd + branch + session-name on the left in `muted`, model + thinking-level on the right with the thinking-level token tinted by the matching `thinking*` theme color), line 2 carries the volatile metrics (tokens / cost / context% — still dim, with the existing yellow/red ramp on context%). Identity info no longer fades into the same dim wash as the metrics.
+- Changed `FooterComponent` cumulative-usage stats to use a tail-incremental cache instead of rescanning every session entry on each render. Cache is reset on `invalidate()`, on `setSession()` to a different session reference, and when entries shrink (fork / clear / compaction replace). Removed the blanket `footer.invalidate()` at the top of `handleEvent` so renders during assistant streaming reuse the cache; remaining explicit invalidates at `message_end`, `compaction_end`, and model/thinking/session swaps cover the cases that actually move totals.
 
 - Changed source syntax to avoid TypeScript constructs that require JavaScript emit, keeping core sources compatible with Node.js strip-only TypeScript checks.
 - Removed web UI workspace references from the CLI package and dropped the package-level development watch script.
 
 ### Fixed
 
+- Fixed extension status footer line leaking raw ANSI parameter strings (e.g. `[38;5;196m⠠` displayed as literal text) because `sanitizeStatusText` was stripping the ESC byte (`0x1B`) while leaving the rest of the SGR sequence intact. The sanitizer now preserves ESC so coloured spinners and progress glyphs published by extensions render as actual colour in the footer.
 - Fixed the system prompt to tell models to resolve pi docs and examples under the absolute package paths before reading topic-specific relative references ([#4752](https://github.com/earendil-works/pi/issues/4752)).
 - Fixed extension `ctx.abort()` during tool-call preflight to stop later confirmations and restore queued interactive input like Escape ([#4276](https://github.com/earendil-works/pi/issues/4276)).
 - Fixed AgentSession retry, compaction, and event settlement to use the awaited agent lifecycle instead of a separate event queue, and added `willRetry` to `agent_end` session events.

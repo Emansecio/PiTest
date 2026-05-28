@@ -1,21 +1,34 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, type ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai";
+import {
+	clampThinkingLevel,
+	getApiKeyFor,
+	getCredentialPool,
+	type Message,
+	type Model,
+	registerProviderCredentials,
+	reportCredentialFailure,
+	reportCredentialSuccess,
+	streamSimple,
+} from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import { aggregateLearnedErrors, defaultLearnedErrorsDir } from "./learned-error-store.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
-import { findInitialModel } from "./model-resolver.ts";
+import { defaultModelPerProvider, findInitialModel } from "./model-resolver.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { time } from "./timings.ts";
+import { createDefaultToolErrorHintRegistry } from "./tool-error-hint-rules.ts";
+import { createDefaultToolRewriteRegistry } from "./tool-rewrite-rules.ts";
 import {
 	createBashTool,
 	createCodingTools,
@@ -77,6 +90,15 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
+	/** When true, suppress the hashline-anchor block normally appended to full-file reads. */
+	disableHashlineAnchors?: boolean;
+	/**
+	 * Optional Time-Traveling Stream Rules matcher. When provided, the agent
+	 * loop aborts the current request and injects a `<system-reminder>` on the
+	 * first matched rule, then replays the same turn. Compiled from
+	 * `settingsManager.getTTSRRules()` in `main.ts` and passed in here.
+	 */
+	ttsrMatcher?: import("@earendil-works/pi-agent-core").TTSRMatcher;
 }
 
 /** Result from createAgentSession */
@@ -123,6 +145,20 @@ export {
 
 function getDefaultAgentDir(): string {
 	return getAgentDir();
+}
+
+/**
+ * Boot-time load of cross-session learned error fingerprints. Wrapped in
+ * try/catch because the store is observability infrastructure — a corrupt
+ * disk file must not block agent startup. Returns an empty array on any
+ * failure, which makes the Tier 4 registry behave as if no warm data exists.
+ */
+function loadLearnedErrorsSafe(): ReturnType<typeof aggregateLearnedErrors> {
+	try {
+		return aggregateLearnedErrors(defaultLearnedErrorsDir());
+	} catch {
+		return [];
+	}
 }
 
 function getAttributionHeaders(
@@ -200,6 +236,28 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelsPath = options.agentDir ? join(agentDir, "models.json") : undefined;
 	const authStorage = options.authStorage ?? AuthStorage.create(authPath);
 	const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, modelsPath);
+
+	// Seed the credential pool with every known provider's static keys
+	// (settings + env round-robin extensions). This enables multi-key sticky
+	// rotation in the streamFn below. Providers with a single key behave
+	// identically to the legacy single-key path; providers with multiple keys
+	// get sessionId-sticky picks plus cooldown on rate-limit / auth failures.
+	{
+		const pool = getCredentialPool();
+		for (const provider of Object.keys(defaultModelPerProvider)) {
+			try {
+				const keys = authStorage.getAllApiKeysForProvider(provider);
+				if (keys.length === 0) continue;
+				registerProviderCredentials(
+					provider,
+					keys.map((key) => ({ key, source: "settings" as const })),
+					pool,
+				);
+			} catch {
+				// Non-fatal: a single misconfigured provider must not block boot.
+			}
+		}
+	}
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
@@ -338,9 +396,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// not support long retention fall back to short automatically.
 			// Override via PI_CACHE_RETENTION=short or explicit options.cacheRetention.
 			const defaultCacheRetention = process.env.PI_CACHE_RETENTION === "short" ? "short" : "long";
-			return streamSimple(model, context, {
+
+			// Multi-key round-robin: if the credential pool has more than one
+			// entry for this provider, use a sessionId-sticky pick so prompt-cache
+			// continuity survives within a session while still rotating across
+			// sessions and cooling-down rate-limited keys. Single-key providers
+			// fall through to the legacy auth.apiKey path unchanged.
+			let apiKey = auth.apiKey;
+			const sessionId = sessionManager.getSessionId();
+			const pool = getCredentialPool();
+			if (pool.count(model.provider) > 1) {
+				const picked = getApiKeyFor(model.provider, sessionId);
+				if (picked) apiKey = picked;
+			}
+
+			const stream = streamSimple(model, context, {
 				...options,
-				apiKey: auth.apiKey,
+				apiKey,
 				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
@@ -350,6 +422,27 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						? { ...attributionHeaders, ...auth.headers, ...options?.headers }
 						: undefined,
 			});
+
+			// Side-tap the result promise so credential-pool cooldown / success
+			// tracking happens regardless of how the loop consumes the stream.
+			// Failures surface either as a rejected promise (sync throw) or as
+			// an `error`-typed event whose payload contains errorMessage.
+			if (apiKey && pool.count(model.provider) > 0) {
+				stream.result().then(
+					(msg) => {
+						if (msg.stopReason === "error" && msg.errorMessage) {
+							reportCredentialFailure(model.provider, apiKey, { message: msg.errorMessage });
+						} else {
+							reportCredentialSuccess(model.provider, apiKey);
+						}
+					},
+					(err) => {
+						reportCredentialFailure(model.provider, apiKey, err);
+					},
+				);
+			}
+
+			return stream;
 		},
 		onPayload: async (payload, _model) => {
 			const runner = extensionRunnerRef.current;
@@ -380,6 +473,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		transport: settingsManager.getTransport(),
 		thinkingBudgets: settingsManager.getThinkingBudgets(),
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
+		ttsrMatcher: options.ttsrMatcher,
+		toolRewriteRegistry: createDefaultToolRewriteRegistry(),
+		toolErrorHintRegistry: createDefaultToolErrorHintRegistry({
+			learnedErrors: loadLearnedErrorsSafe(),
+		}),
 	});
 
 	// Restore messages if session has existing data
@@ -409,6 +507,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		allowedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		disableHashlineAnchors: options.disableHashlineAnchors,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

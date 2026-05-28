@@ -112,11 +112,10 @@ export function serializeConversation(messages: Message[]): string {
 				} else if (block.type === "thinking") {
 					thinkingParts.push(block.thinking);
 				} else if (block.type === "toolCall") {
-					const args = block.arguments as Record<string, unknown>;
-					const argsStr = Object.entries(args)
-						.map(([k, v]) => `${k}=${safeJsonStringify(v)}`)
-						.join(", ");
-					toolCalls.push(`${block.name}(${argsStr})`);
+					// Single stringify of full args object — previous per-property loop
+					// invoked JSON.stringify N times for tools with many properties
+					// (e.g. edit with multi-KB old_string/new_string).
+					toolCalls.push(`${block.name}(${safeJsonStringify(block.arguments)})`);
 				}
 			}
 

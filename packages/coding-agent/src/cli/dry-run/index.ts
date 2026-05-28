@@ -15,6 +15,7 @@ import { existsSync, statSync } from "node:fs";
 import chalk from "chalk";
 import { CONFIG_DIR_NAME } from "../../config.ts";
 import type { AgentSessionServices } from "../../core/agent-session-services.ts";
+import { discoverLegacyResources } from "../../core/legacy-discovery.ts";
 import { discoverMemoryFiles } from "../../core/memory/index.ts";
 
 export type DryRunStatus = "ready" | "warning" | "blocked";
@@ -189,6 +190,31 @@ export function buildDryRunReport(options: BuildDryRunReportOptions): DryRunRepo
 		status: "ready",
 		detail: agentsFiles.length === 0 ? "no AGENTS.md/CLAUDE.md found" : `${agentsFiles.length} file(s)`,
 		items: agentsFiles.map((f) => ({ label: "ctx", value: f.path })),
+	});
+
+	// --- Legacy resources (Claude/Codex/Cursor/Cline/Windsurf/Gemini/Copilot/VSCode)
+	const seenContextPaths = new Set(agentsFiles.map((f) => f.path));
+	const legacy = discoverLegacyResources({ cwd, agentDir, seenPaths: seenContextPaths });
+	const originCounts = new Map<string, number>();
+	for (const r of legacy.ruleFiles) {
+		originCounts.set(r.origin, (originCounts.get(r.origin) ?? 0) + 1);
+	}
+	const originSummary = [...originCounts.entries()]
+		.sort((a, b) => a[0].localeCompare(b[0]))
+		.map(([o, n]) => `${o}=${n}`)
+		.join(" ");
+	const totalLegacy = legacy.ruleFiles.length + legacy.skillDirs.length;
+	checks.push({
+		name: "Legacy resources",
+		status: "ready",
+		detail:
+			totalLegacy === 0
+				? "none found"
+				: `${legacy.ruleFiles.length} rule file(s), ${legacy.skillDirs.length} skill dir(s)${originSummary ? ` (${originSummary})` : ""}`,
+		items: [
+			...legacy.ruleFiles.map((r) => ({ label: r.origin, value: r.path })),
+			...legacy.skillDirs.map((d) => ({ label: "skills", value: d })),
+		],
 	});
 
 	const overall = checks.reduce<DryRunStatus>((acc, check) => worst(acc, check.status), "ready");

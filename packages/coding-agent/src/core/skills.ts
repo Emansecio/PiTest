@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from "fs";
 import ignore from "ignore";
 import { homedir } from "os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
@@ -6,6 +6,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath } from "../utils/paths.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
+import { createMtimeParseCache } from "./mtime-cache.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /** Max name length per spec */
@@ -45,6 +46,39 @@ function prefixIgnorePattern(line: string, prefix: string): string | null {
 	return negated ? `!${prefixed}` : prefixed;
 }
 
+// Cache directory listings keyed by dir mtime. A directory's mtime changes
+// whenever an entry is added, removed, or renamed — exactly the cases that
+// alter readdirSync's output — so a same-mtime hit can safely reuse the prior
+// listing. Per-file content changes do NOT bump dir mtime, but they are picked
+// up independently by the file-level mtime cache in loadSkillFromFile, so the
+// walk still re-parses changed skill files. Returns null on stat/read failure
+// so callers fall through to their existing try/catch behavior.
+const dirEntriesCache = new Map<string, { mtimeMs: number; entries: Dirent<string>[] }>();
+
+function readDirEntriesCached(dir: string): Dirent<string>[] {
+	const stat = statSync(dir);
+	const cached = dirEntriesCache.get(dir);
+	if (cached && cached.mtimeMs === stat.mtimeMs) return cached.entries;
+	const entries = readdirSync(dir, { withFileTypes: true });
+	dirEntriesCache.set(dir, { mtimeMs: stat.mtimeMs, entries });
+	return entries;
+}
+
+const ignoreFileLinesCache = new Map<string, { mtimeMs: number; lines: string[] }>();
+
+function readIgnoreFileLines(ignorePath: string): string[] | null {
+	try {
+		const stat = statSync(ignorePath);
+		const cached = ignoreFileLinesCache.get(ignorePath);
+		if (cached && cached.mtimeMs === stat.mtimeMs) return cached.lines;
+		const lines = readFileSync(ignorePath, "utf-8").split(/\r?\n/);
+		ignoreFileLinesCache.set(ignorePath, { mtimeMs: stat.mtimeMs, lines });
+		return lines;
+	} catch {
+		return null;
+	}
+}
+
 function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
 	const relativeDir = relative(rootDir, dir);
 	const prefix = relativeDir ? `${toPosixPath(relativeDir)}/` : "";
@@ -52,16 +86,14 @@ function addIgnoreRules(ig: IgnoreMatcher, dir: string, rootDir: string): void {
 	for (const filename of IGNORE_FILE_NAMES) {
 		const ignorePath = join(dir, filename);
 		if (!existsSync(ignorePath)) continue;
-		try {
-			const content = readFileSync(ignorePath, "utf-8");
-			const patterns = content
-				.split(/\r?\n/)
-				.map((line) => prefixIgnorePattern(line, prefix))
-				.filter((line): line is string => Boolean(line));
-			if (patterns.length > 0) {
-				ig.add(patterns);
-			}
-		} catch {}
+		const lines = readIgnoreFileLines(ignorePath);
+		if (!lines) continue;
+		const patterns = lines
+			.map((line) => prefixIgnorePattern(line, prefix))
+			.filter((line): line is string => Boolean(line));
+		if (patterns.length > 0) {
+			ig.add(patterns);
+		}
 	}
 }
 
@@ -135,27 +167,13 @@ export interface LoadSkillsFromDirOptions {
 }
 
 function createSkillSourceInfo(filePath: string, baseDir: string, source: string): SourceInfo {
-	switch (source) {
-		case "user":
-			return createSyntheticSourceInfo(filePath, {
-				source: "local",
-				scope: "user",
-				baseDir,
-			});
-		case "project":
-			return createSyntheticSourceInfo(filePath, {
-				source: "local",
-				scope: "project",
-				baseDir,
-			});
-		case "path":
-			return createSyntheticSourceInfo(filePath, {
-				source: "local",
-				baseDir,
-			});
-		default:
-			return createSyntheticSourceInfo(filePath, { source, baseDir });
+	if (source === "user" || source === "project") {
+		return createSyntheticSourceInfo(filePath, { source: "local", scope: source, baseDir });
 	}
+	if (source === "path") {
+		return createSyntheticSourceInfo(filePath, { source: "local", baseDir });
+	}
+	return createSyntheticSourceInfo(filePath, { source, baseDir });
 }
 
 /**
@@ -190,7 +208,7 @@ function loadSkillsFromDirInternal(
 	addIgnoreRules(ig, dir, root);
 
 	try {
-		const entries = readdirSync(dir, { withFileTypes: true });
+		const entries = readDirEntriesCached(dir);
 
 		for (const entry of entries) {
 			if (entry.name !== "SKILL.md") {
@@ -275,6 +293,12 @@ function loadSkillsFromDirInternal(
 	return { skills, diagnostics };
 }
 
+// mtime-keyed cache of the expensive read+parse step. The Skill object itself
+// is rebuilt fresh per call (cheap) so source-dependent fields stay correct.
+const skillFrontmatterCache = createMtimeParseCache<{ frontmatter: SkillFrontmatter }>((rawContent) => ({
+	frontmatter: parseFrontmatter<SkillFrontmatter>(rawContent).frontmatter,
+}));
+
 function loadSkillFromFile(
 	filePath: string,
 	source: string,
@@ -282,8 +306,7 @@ function loadSkillFromFile(
 	const diagnostics: ResourceDiagnostic[] = [];
 
 	try {
-		const rawContent = readFileSync(filePath, "utf-8");
-		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
+		const { frontmatter } = skillFrontmatterCache(filePath);
 		const skillDir = dirname(filePath);
 		const parentDirName = basename(skillDir);
 
@@ -333,7 +356,7 @@ function loadSkillFromFile(
  * Skills with disableModelInvocation=true are excluded from the prompt
  * (they can only be invoked explicitly via /skill:name commands).
  */
-export function formatSkillsForPrompt(skills: Skill[], maxSkills = 20): string {
+export function formatSkillsForPrompt(skills: Skill[], maxSkills = 20, cwd?: string): string {
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
 
 	if (visibleSkills.length === 0) {
@@ -342,6 +365,30 @@ export function formatSkillsForPrompt(skills: Skill[], maxSkills = 20): string {
 
 	const shown = visibleSkills.slice(0, maxSkills);
 	const omitted = visibleSkills.length - shown.length;
+
+	// Roots to relativize against. Most skill paths live under cwd or the
+	// agent dir (e.g. ~/.pi/skills). Shortest representation wins, falling
+	// back to absolute when not under either root.
+	const agentDir = getAgentDir();
+	const roots: string[] = [];
+	if (cwd) roots.push(resolve(cwd));
+	if (agentDir) roots.push(resolve(agentDir));
+	const home = homedir();
+	if (home) roots.push(resolve(home));
+
+	const shortenPath = (absPath: string): string => {
+		let best = absPath;
+		for (const root of roots) {
+			if (!absPath.startsWith(root)) continue;
+			const rel = relative(root, absPath);
+			if (rel && !rel.startsWith("..") && rel.length + 2 < best.length) {
+				// Tag home-relative with ~ so it stays unambiguous; cwd/agentDir
+				// resolve via the read tool's path aliases.
+				best = root === home ? `~/${toPosixPath(rel)}` : toPosixPath(rel);
+			}
+		}
+		return best;
+	};
 
 	const lines = [
 		"\n\nThe following skills provide specialized instructions for specific tasks.",
@@ -355,7 +402,7 @@ export function formatSkillsForPrompt(skills: Skill[], maxSkills = 20): string {
 		lines.push("  <skill>");
 		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
 		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
+		lines.push(`    <location>${escapeXml(shortenPath(skill.filePath))}</location>`);
 		lines.push("  </skill>");
 	}
 
@@ -398,6 +445,20 @@ function normalizePath(input: string): string {
 	if (trimmed.startsWith("~/")) return join(homedir(), trimmed.slice(2));
 	if (trimmed.startsWith("~")) return join(homedir(), trimmed.slice(1));
 	return trimmed;
+}
+
+/**
+ * Resolve the Claude Code skills directory (`~/.claude/skills/`), or null when
+ * the user opted out via `PI_DISABLE_CLAUDE_CODE_SKILLS=1`. The path is not
+ * checked for existence here — the caller decides whether to load.
+ *
+ * Lives here rather than `config.ts` because it is loader-internal: only the
+ * skill discovery path consumes it, and folding it into the config surface
+ * would suggest a generality that does not exist.
+ */
+export function getClaudeCodeSkillsDir(): string | null {
+	if (process.env.PI_DISABLE_CLAUDE_CODE_SKILLS === "1") return null;
+	return join(homedir(), ".claude", "skills");
 }
 
 function resolveSkillPath(p: string, cwd: string): string {
@@ -454,6 +515,16 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	if (includeDefaults) {
 		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true));
 		addSkills(loadSkillsFromDirInternal(resolve(cwd, CONFIG_DIR_NAME, "skills"), "project", true));
+		// Claude Code skills (~/.claude/skills/) are loaded as a tertiary user
+		// source — they only fill gaps left by the agent's own skills dir and
+		// project skills, so pit-curated and project-scoped skills always win
+		// on a name collision. The Skill format is byte-compatible with our
+		// own (same SKILL.md + YAML frontmatter), so they slot in without
+		// translation. Opt-out: PI_DISABLE_CLAUDE_CODE_SKILLS=1.
+		const claudeSkillsDir = getClaudeCodeSkillsDir();
+		if (claudeSkillsDir && existsSync(claudeSkillsDir)) {
+			addSkills(loadSkillsFromDirInternal(claudeSkillsDir, "claude-code", true));
+		}
 	}
 
 	const userSkillsDir = join(resolvedAgentDir, "skills");

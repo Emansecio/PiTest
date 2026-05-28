@@ -85,7 +85,14 @@
 				"thinkingMedium",
 				"thinkingHigh",
 				"thinkingXhigh",
-				"bashMode"
+				"bashMode",
+				"gutterToolPending",
+				"gutterToolSuccess",
+				"gutterToolError",
+				"gutterBash",
+				"gutterDiagnostics",
+				"gutterUser",
+				"gutterCustom"
 			],
 			"properties": {
 				"accent": {
@@ -291,6 +298,34 @@
 				"bashMode": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Editor border color in bash mode"
+				},
+				"gutterToolPending": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Left-edge gutter color for tool execution blocks while pending"
+				},
+				"gutterToolSuccess": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Left-edge gutter color for tool execution blocks on success"
+				},
+				"gutterToolError": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Left-edge gutter color for tool execution blocks on error"
+				},
+				"gutterBash": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Left-edge gutter color for bash execution blocks"
+				},
+				"gutterDiagnostics": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Left-edge gutter color for diagnostics blocks"
+				},
+				"gutterUser": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Left-edge gutter color for user messages"
+				},
+				"gutterCustom": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Left-edge gutter color for compaction / branch / skill / custom messages"
 				}
 			},
 			"additionalProperties": false

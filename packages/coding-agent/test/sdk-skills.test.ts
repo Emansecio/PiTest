@@ -11,6 +11,7 @@ import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 describe("createAgentSession skills option", () => {
 	let tempDir: string;
 	let skillsDir: string;
+	const sessionsToDispose: Array<{ dispose: () => Promise<void> }> = [];
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-sdk-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -32,9 +33,23 @@ This is a test skill.
 		);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		// Dispose any sessions opened during the test so their background workers
+		// (frequent-files git child, etc.) drop the cwd handle before rmSync.
+		while (sessionsToDispose.length > 0) {
+			try {
+				await sessionsToDispose.pop()?.dispose();
+			} catch {
+				// ignore
+			}
+		}
 		if (tempDir) {
-			rmSync(tempDir, { recursive: true, force: true });
+			try {
+				rmSync(tempDir, { recursive: true, force: true });
+			} catch {
+				// Best-effort: slow Windows handle release can still race; the OS
+				// will reclaim the temp dir eventually.
+			}
 		}
 	});
 
@@ -44,6 +59,7 @@ This is a test skill.
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(),
 		});
+		sessionsToDispose.push(session);
 
 		// Skills should be discovered and exposed on the session
 		expect(session.resourceLoader.getSkills().skills.length).toBeGreaterThan(0);
@@ -71,6 +87,7 @@ This is a test skill.
 			sessionManager: SessionManager.inMemory(),
 			resourceLoader,
 		});
+		sessionsToDispose.push(session);
 
 		expect(session.resourceLoader.getSkills().skills).toEqual([]);
 		expect(session.resourceLoader.getSkills().diagnostics).toEqual([]);
@@ -106,6 +123,7 @@ This is a test skill.
 			sessionManager: SessionManager.inMemory(),
 			resourceLoader,
 		});
+		sessionsToDispose.push(session);
 
 		expect(session.resourceLoader.getSkills().skills).toEqual([customSkill]);
 		expect(session.resourceLoader.getSkills().diagnostics).toEqual([]);

@@ -41,6 +41,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { splitSystemPromptOnDynamic } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.ts";
@@ -113,6 +114,10 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		};
 
 		const blocks = output.content as Block[];
+		// Map Bedrock contentBlockIndex -> array index so per-delta lookups are
+		// O(1). The old `blocks.findIndex(b => b.index === idx)` scanned all
+		// blocks on every contentBlockDelta (per-token) → O(N·blocks).
+		const blockIndexByContentIndex = new Map<number, number>();
 
 		const config: BedrockRuntimeClientConfig = {
 			profile: options.profile,
@@ -217,11 +222,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 					}
 					stream.push({ type: "start", partial: output });
 				} else if (item.contentBlockStart) {
-					handleContentBlockStart(item.contentBlockStart, blocks, output, stream);
+					handleContentBlockStart(item.contentBlockStart, blocks, blockIndexByContentIndex, output, stream);
 				} else if (item.contentBlockDelta) {
-					handleContentBlockDelta(item.contentBlockDelta, blocks, output, stream);
+					handleContentBlockDelta(item.contentBlockDelta, blocks, blockIndexByContentIndex, output, stream);
 				} else if (item.contentBlockStop) {
-					handleContentBlockStop(item.contentBlockStop, blocks, output, stream);
+					handleContentBlockStop(item.contentBlockStop, blocks, blockIndexByContentIndex, output, stream);
 				} else if (item.messageStop) {
 					output.stopReason = mapStopReason(item.messageStop.stopReason);
 				} else if (item.metadata) {
@@ -344,6 +349,7 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 function handleContentBlockStart(
 	event: ContentBlockStartEvent,
 	blocks: Block[],
+	blockIndexByContentIndex: Map<number, number>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 ): void {
@@ -360,19 +366,22 @@ function handleContentBlockStart(
 			index,
 		};
 		output.content.push(block);
-		stream.push({ type: "toolcall_start", contentIndex: blocks.length - 1, partial: output });
+		const arrayIndex = blocks.length - 1;
+		blockIndexByContentIndex.set(index, arrayIndex);
+		stream.push({ type: "toolcall_start", contentIndex: arrayIndex, partial: output });
 	}
 }
 
 function handleContentBlockDelta(
 	event: ContentBlockDeltaEvent,
 	blocks: Block[],
+	blockIndexByContentIndex: Map<number, number>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 ): void {
 	const contentBlockIndex = event.contentBlockIndex!;
 	const delta = event.delta;
-	let index = blocks.findIndex((b) => b.index === contentBlockIndex);
+	let index = blockIndexByContentIndex.get(contentBlockIndex) ?? -1;
 	let block = blocks[index];
 
 	if (delta?.text !== undefined) {
@@ -382,6 +391,7 @@ function handleContentBlockDelta(
 			output.content.push(newBlock);
 			index = blocks.length - 1;
 			block = blocks[index];
+			blockIndexByContentIndex.set(contentBlockIndex, index);
 			stream.push({ type: "text_start", contentIndex: index, partial: output });
 		}
 		if (block.type === "text") {
@@ -389,8 +399,12 @@ function handleContentBlockDelta(
 			stream.push({ type: "text_delta", contentIndex: index, delta: delta.text, partial: output });
 		}
 	} else if (delta?.toolUse && block?.type === "toolCall") {
+		// Accumulate partial JSON without parsing per-delta.
+		// Cumulative parse-per-delta is O(N²) for large args.
+		// block.arguments is finalized once in handleContentBlockStop
+		// via parseStreamingJson. Streaming consumers receive the raw
+		// delta via the toolcall_delta event below.
 		block.partialJson = (block.partialJson || "") + (delta.toolUse.input || "");
-		block.arguments = parseStreamingJson(block.partialJson);
 		stream.push({ type: "toolcall_delta", contentIndex: index, delta: delta.toolUse.input || "", partial: output });
 	} else if (delta?.reasoningContent) {
 		let thinkingBlock = block;
@@ -401,6 +415,7 @@ function handleContentBlockDelta(
 			output.content.push(newBlock);
 			thinkingIndex = blocks.length - 1;
 			thinkingBlock = blocks[thinkingIndex];
+			blockIndexByContentIndex.set(contentBlockIndex, thinkingIndex);
 			stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
 		}
 
@@ -440,10 +455,11 @@ function handleMetadata(
 function handleContentBlockStop(
 	event: ContentBlockStopEvent,
 	blocks: Block[],
+	blockIndexByContentIndex: Map<number, number>,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 ): void {
-	const index = blocks.findIndex((b) => b.index === event.contentBlockIndex);
+	const index = blockIndexByContentIndex.get(event.contentBlockIndex!) ?? -1;
 	const block = blocks[index];
 	if (!block) return;
 	delete (block as Block).index;
@@ -591,13 +607,20 @@ function buildSystemPrompt(
 ): SystemContentBlock[] | undefined {
 	if (!systemPrompt) return undefined;
 
-	const blocks: SystemContentBlock[] = [{ text: sanitizeSurrogates(systemPrompt) }];
+	// Split static (cacheable) from dynamic (per-turn) so the cache point stays valid.
+	const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(systemPrompt);
+	const blocks: SystemContentBlock[] = [{ text: sanitizeSurrogates(staticPart) }];
 
-	// Add cache point for supported Claude models when caching is enabled
+	// Add cache point for supported Claude models when caching is enabled.
+	// Cache point must come BEFORE dynamic suffix so cached prefix is reused.
 	if (cacheRetention !== "none" && supportsPromptCaching(model)) {
 		blocks.push({
 			cachePoint: { type: CachePointType.DEFAULT, ...(cacheRetention === "long" ? { ttl: CacheTTL.ONE_HOUR } : {}) },
 		});
+	}
+
+	if (dynamicPart) {
+		blocks.push({ text: sanitizeSurrogates(dynamicPart) });
 	}
 
 	return blocks;

@@ -75,7 +75,15 @@
 		"thinkingHigh": "#875f87",
 		"thinkingXhigh": "#8b008b",
 
-		"bashMode": "green"
+		"bashMode": "green",
+
+		"gutterToolPending": "mediumGray",
+		"gutterToolSuccess": "green",
+		"gutterToolError": "red",
+		"gutterBash": "green",
+		"gutterDiagnostics": "yellow",
+		"gutterUser": "blue",
+		"gutterCustom": "#7e57c2"
 	},
 	"export": {
 		"pageBg": "#f8f8f8",

@@ -11,6 +11,8 @@ import type {
 	ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "typebox";
+import type { ToolErrorHintRegistry } from "./tool-error-hint-registry.ts";
+import type { ToolRewriteRegistry } from "./tool-rewrite-registry.ts";
 
 /**
  * Stream function used by the agent loop.
@@ -274,6 +276,66 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * The hook receives the agent abort signal and is responsible for honoring it.
 	 */
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
+
+	/**
+	 * Optional factory that builds the per-call execute context passed to
+	 * `AgentTool.execute` as its 5th argument.
+	 *
+	 * Use this to plumb host-provided runtime services (e.g. a user-input bus)
+	 * to tool implementations without changing tool signatures. Returning
+	 * undefined skips passing a context.
+	 *
+	 * Contract: must not throw or reject. Return undefined on error.
+	 */
+	getToolExecuteContext?: (toolCall: AgentToolCall) => AgentToolExecuteContext | undefined;
+
+	/**
+	 * Optional Time-Traveling Stream Rules matcher.
+	 *
+	 * Fed with assistant text and tool-call argument deltas during streaming.
+	 * On the first match the current stream is aborted and a synthetic
+	 * `<system-reminder>` message is injected before the next request, so the
+	 * model retries the same turn with a hindsight signal.
+	 *
+	 * Matcher state survives across retries within a turn; the agent loop caps
+	 * the number of retries per turn to avoid pathological loops.
+	 */
+	ttsrMatcher?: TTSRMatcher;
+
+	/**
+	 * Optional registry of programmatic tool-call corrections applied between
+	 * argument preparation and schema validation.
+	 *
+	 * See {@link ToolRewriteRegistry} for the rule shape. Auto-tier rules
+	 * silently rewrite args; suggest/block-tier rules short-circuit the call
+	 * with an actionable error result instead of executing the tool.
+	 */
+	toolRewriteRegistry?: ToolRewriteRegistry;
+
+	/**
+	 * Optional Tier 4 registry: post-hoc error hints appended to failing tool
+	 * results before the LLM sees them. Never changes `isError`; only adds
+	 * `[hint]` lines to the trailing text content so recovery is one
+	 * round-trip away.
+	 *
+	 * See {@link ToolErrorHintRegistry}.
+	 */
+	toolErrorHintRegistry?: ToolErrorHintRegistry;
+}
+
+/**
+ * Minimal matcher contract expected by the agent loop. The concrete
+ * implementation lives in the coding-agent package; this interface keeps the
+ * harness side decoupled from rule storage.
+ */
+export interface TTSRMatcher {
+	feed(chunk: string, scope: "assistant_text" | "tool_args"): TTSRMatchInfo | undefined;
+	reset(): void;
+}
+
+export interface TTSRMatchInfo {
+	name: string;
+	message: string;
 }
 
 /**
@@ -357,6 +419,25 @@ export interface AgentToolResult<T> {
 /** Callback used by tools to stream partial execution updates. */
 export type AgentToolUpdateCallback<T = any> = (partialResult: AgentToolResult<T>) => void;
 
+/**
+ * Optional context passed to `AgentTool.execute`.
+ *
+ * Fields are intentionally open and optional so existing tools that ignore the
+ * context continue to compile. The agent loop populates whatever is wired in
+ * by the host (e.g. a user-input bus for tools that need to ask the user a
+ * structured question mid-turn).
+ */
+export interface AgentToolExecuteContext {
+	/**
+	 * Bus for tools that need to request structured input from the user
+	 * during execution (e.g. the `ask` tool).
+	 *
+	 * Typed as `unknown` here to avoid a circular dep on the coding-agent
+	 * package; consumers can narrow it via declaration merging or a cast.
+	 */
+	userInputBus?: unknown;
+}
+
 /** Tool definition used by the agent runtime. */
 export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any> extends Tool<TParameters> {
 	/** Human-readable label for UI display. */
@@ -372,6 +453,7 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 		params: Static<TParameters>,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
+		ctx?: AgentToolExecuteContext,
 	) => Promise<AgentToolResult<TDetails>>;
 	/**
 	 * Per-tool execution mode override.
@@ -415,4 +497,20 @@ export type AgentEvent =
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
-	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean };
+	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError: boolean }
+	// Tool rewrite registry lifecycle. Emitted only when the registry actually
+	// fires on a call — `auto` rules produce `tool_call_rewritten` after the
+	// args have been rewritten (the call still proceeds to execute); `suggest`
+	// and `block` rules produce `tool_call_rejected` instead of executing.
+	| { type: "tool_call_rewritten"; toolCallId: string; toolName: string; ruleIds: string[]; args: any }
+	| { type: "tool_call_rejected"; toolCallId: string; toolName: string; ruleId: string; error: string }
+	// Tier 4: a post-hoc error hint registry rule fired and attached actionable
+	// recovery text to a failed tool result. Fires only when isError === true
+	// AND at least one hint rule matched. The `hints` array carries each
+	// (ruleId, hint) pair that contributed.
+	| {
+			type: "tool_error_hint_applied";
+			toolCallId: string;
+			toolName: string;
+			hints: Array<{ ruleId: string; hint: string }>;
+	  };

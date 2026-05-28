@@ -23,9 +23,13 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 		mkdirSync(agentDir, { recursive: true });
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true, force: true });
+			try {
+				rmSync(tempDir, { recursive: true, force: true });
+			} catch {
+				/* ignore Windows handle race */
+			}
 		}
 	});
 
@@ -73,17 +77,22 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 	it("keeps extension tools active when built-in defaults are disabled", async () => {
 		const session = await createSession({ noTools: "builtin" });
 
-		expect(
-			session
-				.getAllTools()
-				.map((tool) => tool.name)
-				.sort(),
-		).toEqual(["bash", "dynamic_tool", "edit", "find", "grep", "ls", "read", "write"]);
+		// Wave 1+2+3 introduced new built-in tools (ask, ast_edit, ast_grep, edit_v2,
+		// recall, reflect, resolve, retain, search_tool_bm25, symbol). The exact set
+		// may continue to grow; assert the original 8 are all present plus the new
+		// extension tool, and that the legacy core 7 are still available.
+		const toolNames = session
+			.getAllTools()
+			.map((tool) => tool.name)
+			.sort();
+		for (const expected of ["bash", "dynamic_tool", "edit", "find", "grep", "ls", "read", "write"]) {
+			expect(toolNames).toContain(expected);
+		}
 		expect(session.getActiveToolNames()).toEqual(["dynamic_tool"]);
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		expect(session.systemPrompt).not.toContain("- read:");
 		expect(session.systemPrompt).not.toContain("- bash:");
-		session.dispose();
+		await session.dispose();
 	});
 
 	it("still disables all tools when noTools is all", async () => {
@@ -92,7 +101,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 		expect(session.getAllTools()).toEqual([]);
 		expect(session.getActiveToolNames()).toEqual([]);
 		expect(session.systemPrompt).toContain("Available tools:\n(none)");
-		session.dispose();
+		await session.dispose();
 	});
 
 	it("propagates noTools through service-based session creation", async () => {
@@ -111,9 +120,15 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			noTools: "builtin",
 		});
 
-		expect(session.getActiveToolNames()).toEqual([]);
-		expect(session.systemPrompt).toContain("Available tools:\n(none)");
+		// PiTuned brought up built-in extensions (memory, task, ...) which register
+		// their own tools at session_start; noTools="builtin" disables core tools
+		// (read/write/edit/bash/...) but does not disable built-in extension tools.
+		const activeAfterNoBuiltins = session.getActiveToolNames();
+		expect(activeAfterNoBuiltins).not.toContain("read");
+		expect(activeAfterNoBuiltins).not.toContain("write");
+		expect(activeAfterNoBuiltins).not.toContain("edit");
+		expect(activeAfterNoBuiltins).not.toContain("bash");
 		expect(session.systemPrompt).not.toContain("- read:");
-		session.dispose();
+		await session.dispose();
 	});
 });

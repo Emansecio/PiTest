@@ -13,6 +13,7 @@ import { canonicalizePath, isLocalPath } from "../utils/paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.ts";
 import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.ts";
+import { discoverLegacyResources, type LegacyDiscoveryResult } from "./legacy-discovery.ts";
 import { discoverMemoryFiles, type MemoryFile } from "./memory/index.ts";
 import { DefaultPackageManager, type PathMetadata } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
@@ -21,6 +22,61 @@ import { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
 import { loadSkills } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
+
+/**
+ * Pre-resolved, insertion-ordered view of a source-path -> value map.
+ *
+ * `findSourceInfoForPath` is called once per skill/prompt/theme/extension on
+ * every reload and previously re-resolve()-d every entry of `metadataByPath`
+ * (and `extraSourceInfos`) in a linear scan — O(N resources * M entries) with
+ * a resolve() syscall-ish cost per comparison. We precompute the normalized
+ * source paths once per map instance and cache the result keyed by the map's
+ * identity (the maps are rebuilt fresh each reload, so the WeakMap entries are
+ * collected automatically). The prefix `find` preserves the original semantics:
+ * the first entry in insertion order whose normalized path is an exact or
+ * `${path}${sep}`-prefix match wins.
+ */
+interface SourceLookup<V> {
+	entries: Array<{ normalized: string; value: V }>;
+	find(normalizedResourcePath: string): V | undefined;
+}
+
+// Cache keyed by map identity AND size. These maps (metadataByPath /
+// extraSourceInfos) are populated append-only and can grow BETWEEN
+// findSourceInfoForPath calls within a single reload (e.g. extendResources),
+// so a plain identity cache would serve a stale (under-populated) lookup and
+// miss later-added entries. size is an exact freshness signal for append-only
+// maps; in the hot loop (N skills over a fully-populated map) size is stable
+// so the lookup is still built once and reused N-1 times.
+const sourceLookupCache = new WeakMap<Map<string, unknown>, { size: number; lookup: SourceLookup<unknown> }>();
+
+function buildSourceLookup<V>(map: Map<string, V>): SourceLookup<V> {
+	const entries: Array<{ normalized: string; value: V }> = [];
+	for (const [sourcePath, value] of map.entries()) {
+		entries.push({ normalized: resolve(sourcePath), value });
+	}
+	return {
+		entries,
+		find(normalizedResourcePath: string): V | undefined {
+			for (const { normalized, value } of entries) {
+				if (normalizedResourcePath === normalized || normalizedResourcePath.startsWith(`${normalized}${sep}`)) {
+					return value;
+				}
+			}
+			return undefined;
+		},
+	};
+}
+
+function getSourceLookup<V>(map: Map<string, V>): SourceLookup<V> {
+	const cached = sourceLookupCache.get(map as Map<string, unknown>);
+	if (cached && cached.size === map.size) {
+		return cached.lookup as SourceLookup<V>;
+	}
+	const lookup = buildSourceLookup(map);
+	sourceLookupCache.set(map as Map<string, unknown>, { size: map.size, lookup: lookup as SourceLookup<unknown> });
+	return lookup;
+}
 
 export interface ResourceExtensionPaths {
 	skillPaths?: Array<{ path: string; metadata: PathMetadata }>;
@@ -80,6 +136,8 @@ function loadContextFileFromDir(dir: string): { path: string; content: string } 
 export function loadProjectContextFiles(options: {
 	cwd: string;
 	agentDir: string;
+	noLegacyDiscovery?: boolean;
+	legacyResult?: LegacyDiscoveryResult;
 }): Array<{ path: string; content: string }> {
 	const resolvedCwd = options.cwd;
 	const resolvedAgentDir = options.agentDir;
@@ -114,6 +172,19 @@ export function loadProjectContextFiles(options: {
 
 	contextFiles.push(...ancestorContextFiles);
 
+	if (!options.noLegacyDiscovery) {
+		const legacy =
+			options.legacyResult ??
+			discoverLegacyResources({
+				cwd: resolvedCwd,
+				agentDir: resolvedAgentDir,
+				seenPaths,
+			});
+		for (const rule of legacy.ruleFiles) {
+			contextFiles.push({ path: rule.path, content: rule.content });
+		}
+	}
+
 	return contextFiles;
 }
 
@@ -132,6 +203,7 @@ export interface DefaultResourceLoaderOptions {
 	noPromptTemplates?: boolean;
 	noThemes?: boolean;
 	noContextFiles?: boolean;
+	noLegacyDiscovery?: boolean;
 	systemPrompt?: string;
 	appendSystemPrompt?: string[];
 	extensionsOverride?: (base: LoadExtensionsResult) => LoadExtensionsResult;
@@ -170,6 +242,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private noPromptTemplates: boolean;
 	private noThemes: boolean;
 	private noContextFiles: boolean;
+	private noLegacyDiscovery: boolean;
 	private systemPromptSource?: string;
 	private appendSystemPromptSource?: string[];
 	private extensionsOverride?: (base: LoadExtensionsResult) => LoadExtensionsResult;
@@ -230,6 +303,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.noPromptTemplates = options.noPromptTemplates ?? false;
 		this.noThemes = options.noThemes ?? false;
 		this.noContextFiles = options.noContextFiles ?? false;
+		this.noLegacyDiscovery = options.noLegacyDiscovery ?? false;
 		this.systemPromptSource = options.systemPrompt;
 		this.appendSystemPromptSource = options.appendSystemPrompt;
 		this.extensionsOverride = options.extensionsOverride;
@@ -438,9 +512,19 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.extensionsResult = this.extensionsOverride ? this.extensionsOverride(extensionsResult) : extensionsResult;
 		this.applyExtensionSourceInfo(this.extensionsResult.extensions, metadataByPath);
 
+		const legacyResult: LegacyDiscoveryResult =
+			this.noLegacyDiscovery || (this.noContextFiles && this.noSkills)
+				? { ruleFiles: [], skillDirs: [] }
+				: discoverLegacyResources({ cwd: this.cwd, agentDir: this.agentDir });
+		time("reload-legacy-discovery");
+
+		const legacySkillPaths = this.noLegacyDiscovery ? [] : legacyResult.skillDirs;
 		const skillPaths = this.noSkills
-			? this.mergePaths(cliEnabledSkills, this.additionalSkillPaths)
-			: this.mergePaths([...cliEnabledSkills, ...enabledSkills], this.additionalSkillPaths);
+			? this.mergePaths(cliEnabledSkills, [...this.additionalSkillPaths, ...legacySkillPaths])
+			: this.mergePaths(
+					[...cliEnabledSkills, ...enabledSkills],
+					[...this.additionalSkillPaths, ...legacySkillPaths],
+				);
 
 		this.lastSkillPaths = skillPaths;
 		this.updateSkillsFromPaths(skillPaths, metadataByPath);
@@ -478,7 +562,14 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 
 		const agentsFiles = {
-			agentsFiles: this.noContextFiles ? [] : loadProjectContextFiles({ cwd: this.cwd, agentDir: this.agentDir }),
+			agentsFiles: this.noContextFiles
+				? []
+				: loadProjectContextFiles({
+						cwd: this.cwd,
+						agentDir: this.agentDir,
+						noLegacyDiscovery: this.noLegacyDiscovery,
+						legacyResult,
+					}),
 		};
 		time("reload-load-context-files");
 		const resolvedAgentsFiles = this.agentsFilesOverride ? this.agentsFilesOverride(agentsFiles) : agentsFiles;
@@ -622,31 +713,27 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		const normalizedResourcePath = resolve(resourcePath);
 		if (extraSourceInfos) {
-			for (const [sourcePath, sourceInfo] of extraSourceInfos.entries()) {
-				const normalizedSourcePath = resolve(sourcePath);
-				if (
-					normalizedResourcePath === normalizedSourcePath ||
-					normalizedResourcePath.startsWith(`${normalizedSourcePath}${sep}`)
-				) {
-					return { ...sourceInfo, path: resourcePath };
-				}
+			// Walk a precomputed (insertion-ordered, pre-resolved) view so the
+			// per-resource lookup avoids re-resolve()-ing every source path.
+			// First insertion-ordered prefix match wins — same as the old scan.
+			const lookup = getSourceLookup(extraSourceInfos);
+			const match = lookup.find(normalizedResourcePath);
+			if (match) {
+				return { ...match, path: resourcePath };
 			}
 		}
 
 		if (metadataByPath) {
+			// Preserve the original raw-key exact fast path verbatim...
 			const exact = metadataByPath.get(normalizedResourcePath) ?? metadataByPath.get(resourcePath);
 			if (exact) {
 				return createSourceInfo(resourcePath, exact);
 			}
 
-			for (const [sourcePath, metadata] of metadataByPath.entries()) {
-				const normalizedSourcePath = resolve(sourcePath);
-				if (
-					normalizedResourcePath === normalizedSourcePath ||
-					normalizedResourcePath.startsWith(`${normalizedSourcePath}${sep}`)
-				) {
-					return createSourceInfo(resourcePath, metadata);
-				}
+			// ...then the insertion-ordered prefix scan, now pre-resolved.
+			const match = getSourceLookup(metadataByPath).find(normalizedResourcePath);
+			if (match) {
+				return createSourceInfo(resourcePath, match);
 			}
 		}
 

@@ -352,7 +352,7 @@ export interface Harness {
 	/** Temp directory (cleaned up by cleanup()). */
 	tempDir: string;
 	/** Dispose session and remove temp directory. */
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 }
 
 function createTempDir(): string {
@@ -407,10 +407,16 @@ function createHarnessWithResourceLoader(
 		events.push(event);
 	});
 
-	const cleanup = () => {
-		session.dispose();
+	const cleanup = async () => {
+		// Await dispose so background workers drop handles on tempDir before rmSync.
+		await session.dispose();
 		if (existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true });
+			try {
+				rmSync(tempDir, { recursive: true });
+			} catch {
+				// Best-effort: slow Windows handle release can still race; the OS
+				// will reclaim the temp dir eventually.
+			}
 		}
 	};
 

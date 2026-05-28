@@ -13,11 +13,11 @@ import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 
 describe("issue #2753 reload stale resource settings", () => {
-	const cleanups: Array<() => void> = [];
+	const cleanups: Array<() => void | Promise<void>> = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (cleanups.length > 0) {
-			cleanups.pop()?.();
+			await cleanups.pop()?.();
 		}
 	});
 
@@ -80,11 +80,15 @@ describe("issue #2753 reload stale resource settings", () => {
 			sessionManager: SessionManager.create(tempDir),
 		});
 
-		cleanups.push(() => {
-			runtime.session.dispose();
+		cleanups.push(async () => {
+			await runtime.session.dispose();
 			faux.unregister();
 			if (existsSync(tempDir)) {
-				rmSync(tempDir, { recursive: true, force: true });
+				try {
+					rmSync(tempDir, { recursive: true, force: true });
+				} catch {
+					/* ignore Windows handle race */
+				}
 			}
 		});
 

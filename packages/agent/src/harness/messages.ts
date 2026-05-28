@@ -69,7 +69,7 @@ export function bashExecutionToText(msg: BashExecutionMessage): string {
 	}
 	if (msg.cancelled) {
 		text += "\n\n(command cancelled)";
-	} else if (msg.exitCode !== null && msg.exitCode !== undefined && msg.exitCode !== 0) {
+	} else if (msg.exitCode !== undefined && msg.exitCode !== 0) {
 		text += `\n\nCommand exited with code ${msg.exitCode}`;
 	}
 	if (msg.truncated && msg.fullOutputPath) {
@@ -117,49 +117,70 @@ export function createCustomMessage(
 	};
 }
 
+// Cache LLM conversion per source AgentMessage. For passthrough roles
+// (user/assistant/toolResult) the cache stores `m` itself, so in-place
+// mutation via _replaceMessageInPlace is reflected automatically. For
+// derived roles (bashExecution/custom/branchSummary/compactionSummary)
+// the cached Message is built from `m`'s fields at first conversion —
+// callers that mutate a derived AgentMessage in place MUST call
+// invalidateMessageCache(m) to avoid stale conversions.
+const convertCache = new WeakMap<AgentMessage, Message>();
+
+export function invalidateMessageCache(m: AgentMessage): void {
+	convertCache.delete(m);
+}
+
+function convertOne(m: AgentMessage): Message | undefined {
+	switch (m.role) {
+		case "bashExecution":
+			if (m.excludeFromContext) return undefined;
+			return {
+				role: "user",
+				content: [{ type: "text", text: bashExecutionToText(m) }],
+				timestamp: m.timestamp,
+			};
+		case "custom": {
+			const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
+			return {
+				role: "user",
+				content,
+				timestamp: m.timestamp,
+			};
+		}
+		case "branchSummary":
+			return {
+				role: "user",
+				content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
+				timestamp: m.timestamp,
+			};
+		case "compactionSummary":
+			return {
+				role: "user",
+				content: [
+					{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
+				],
+				timestamp: m.timestamp,
+			};
+		case "user":
+		case "assistant":
+		case "toolResult":
+			return m;
+	}
+	return undefined;
+}
+
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	const result: Message[] = [];
 	for (const m of messages) {
-		switch (m.role) {
-			case "bashExecution":
-				if (!m.excludeFromContext) {
-					result.push({
-						role: "user",
-						content: [{ type: "text", text: bashExecutionToText(m) }],
-						timestamp: m.timestamp,
-					});
-				}
-				break;
-			case "custom": {
-				const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
-				result.push({
-					role: "user",
-					content,
-					timestamp: m.timestamp,
-				});
-				break;
-			}
-			case "branchSummary":
-				result.push({
-					role: "user",
-					content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
-					timestamp: m.timestamp,
-				});
-				break;
-			case "compactionSummary":
-				result.push({
-					role: "user",
-					content: [
-						{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
-					],
-					timestamp: m.timestamp,
-				});
-				break;
-			case "user":
-			case "assistant":
-			case "toolResult":
-				result.push(m);
-				break;
+		const cached = convertCache.get(m);
+		if (cached !== undefined) {
+			result.push(cached);
+			continue;
+		}
+		const converted = convertOne(m);
+		if (converted !== undefined) {
+			convertCache.set(m, converted);
+			result.push(converted);
 		}
 	}
 	return result;

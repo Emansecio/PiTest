@@ -8,35 +8,49 @@ export interface LoaderIndicatorOptions {
 	intervalMs?: number;
 }
 
-const DEFAULT_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const DEFAULT_INTERVAL_MS = 80;
+const DEFAULT_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+const DEFAULT_INTERVAL_MS = 100;
 
 /**
  * Loader component that updates with an optional spinning animation.
  */
+export type LoaderColorFn = (str: string) => string;
+
 export class Loader extends Text {
+	// Shared across every Loader so consecutive instances resume mid-cycle
+	// instead of snapping back to frame 0. Updated on each visible tick.
+	private static lastFrame = 0;
+
 	private frames = [...DEFAULT_FRAMES];
 	private intervalMs = DEFAULT_INTERVAL_MS;
-	private currentFrame = 0;
+	private currentFrame = Loader.lastFrame;
 	private intervalId: NodeJS.Timeout | null = null;
 	private ui: TUI | null = null;
 	private renderIndicatorVerbatim = false;
-	private spinnerColorFn: (str: string) => string;
-	private messageColorFn: (str: string) => string;
-	private message: string = "Loading...";
+	private spinnerPalette: LoaderColorFn[];
+	private messageColorFn: LoaderColorFn;
+
+	// Pre-computed once per setIndicator()/setMessage() so the hot interval
+	// callback never calls into the color functions or re-allocates strings
+	// beyond the final concatenation.
+	private coloredFrames: string[][] = [[]];
+	private coloredMessage: string = "";
+	private paletteIndex = 0;
 
 	constructor(
 		ui: TUI,
-		spinnerColorFn: (str: string) => string,
-		messageColorFn: (str: string) => string,
+		spinnerColor: LoaderColorFn | LoaderColorFn[],
+		messageColorFn: LoaderColorFn,
 		message: string = "Loading...",
 		indicator?: LoaderIndicatorOptions,
 	) {
 		super("", 1, 0);
 		this.ui = ui;
-		this.spinnerColorFn = spinnerColorFn;
+		const palette = Array.isArray(spinnerColor) ? spinnerColor.slice() : [spinnerColor];
+		this.spinnerPalette = palette.length > 0 ? palette : [(s) => s];
 		this.messageColorFn = messageColorFn;
-		this.message = message;
+
+		this.coloredMessage = messageColorFn(message);
 		this.setIndicator(indicator);
 	}
 
@@ -57,7 +71,7 @@ export class Loader extends Text {
 	}
 
 	setMessage(message: string): void {
-		this.message = message;
+		this.coloredMessage = this.messageColorFn(message);
 		this.updateDisplay();
 	}
 
@@ -65,8 +79,19 @@ export class Loader extends Text {
 		this.renderIndicatorVerbatim = indicator !== undefined;
 		this.frames = indicator?.frames !== undefined ? [...indicator.frames] : [...DEFAULT_FRAMES];
 		this.intervalMs = indicator?.intervalMs && indicator.intervalMs > 0 ? indicator.intervalMs : DEFAULT_INTERVAL_MS;
-		this.currentFrame = 0;
+		this.currentFrame = Loader.lastFrame % Math.max(1, this.frames.length);
+		this.paletteIndex = 0;
+		this.recolorFrames();
 		this.start();
+	}
+
+	private recolorFrames(): void {
+		if (this.renderIndicatorVerbatim) {
+			// Custom indicator frames already carry their own ANSI; render verbatim.
+			this.coloredFrames = [this.frames.slice()];
+			return;
+		}
+		this.coloredFrames = this.spinnerPalette.map((fn) => this.frames.map((f) => fn(f)));
 	}
 
 	private restartAnimation(): void {
@@ -76,15 +101,21 @@ export class Loader extends Text {
 		}
 		this.intervalId = setInterval(() => {
 			this.currentFrame = (this.currentFrame + 1) % this.frames.length;
+			// Advance palette phase once per full frame cycle for a gentle pulse.
+			if (this.currentFrame === 0 && this.coloredFrames.length > 1) {
+				this.paletteIndex = (this.paletteIndex + 1) % this.coloredFrames.length;
+			}
 			this.updateDisplay();
 		}, this.intervalMs);
 	}
 
 	private updateDisplay(): void {
-		const frame = this.frames[this.currentFrame] ?? "";
-		const renderedFrame = this.renderIndicatorVerbatim ? frame : this.spinnerColorFn(frame);
-		const indicator = frame.length > 0 ? `${renderedFrame} ` : "";
-		this.setText(`${indicator}${this.messageColorFn(this.message)}`);
+		const rawFrame = this.frames[this.currentFrame] ?? "";
+		const paletteRow = this.coloredFrames[this.paletteIndex] ?? this.coloredFrames[0] ?? [];
+		const renderedFrame = paletteRow[this.currentFrame] ?? rawFrame;
+		const indicator = rawFrame.length > 0 ? `${renderedFrame} ` : "";
+		this.setText(`${indicator}${this.coloredMessage}`);
+		Loader.lastFrame = this.currentFrame;
 		if (this.ui) {
 			this.ui.requestRender();
 		}

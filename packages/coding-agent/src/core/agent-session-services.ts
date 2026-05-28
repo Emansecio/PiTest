@@ -61,6 +61,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	tools?: string[];
 	noTools?: CreateAgentSessionOptions["noTools"];
 	customTools?: ToolDefinition[];
+	disableHashlineAnchors?: boolean;
 }
 
 /**
@@ -238,6 +239,27 @@ export async function createAgentSessionServices(
 export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
 ): Promise<CreateAgentSessionResult> {
+	// Build the TTSR matcher from settings here so the session/loop wiring stays
+	// declarative. Off by default — only allocated when at least one rule is
+	// configured. Bad regex patterns surface as warnings, not crashes, so a
+	// typo in settings.json cannot brick the session.
+	let ttsrMatcher: import("@earendil-works/pi-agent-core").TTSRMatcher | undefined;
+	try {
+		const rawRules = options.services.settingsManager.getTTSRRules();
+		if (rawRules.length > 0) {
+			const ttsrModule = await import("./ttsr.ts");
+			const compiled = ttsrModule.compileRules(rawRules);
+			if (compiled.length > 0) {
+				ttsrMatcher = ttsrModule.createMatcher(compiled);
+			}
+		}
+	} catch (error) {
+		options.services.diagnostics.push({
+			type: "warning",
+			message: `TTSR: ${error instanceof Error ? error.message : String(error)}`,
+		});
+	}
+
 	const result = await createAgentSession({
 		cwd: options.services.cwd,
 		agentDir: options.services.agentDir,
@@ -253,6 +275,8 @@ export async function createAgentSessionFromServices(
 		noTools: options.noTools,
 		customTools: options.customTools,
 		sessionStartEvent: options.sessionStartEvent,
+		disableHashlineAnchors: options.disableHashlineAnchors,
+		ttsrMatcher,
 	});
 
 	const bind = (

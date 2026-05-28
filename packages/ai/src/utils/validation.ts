@@ -197,8 +197,10 @@ function coerceWithUnionSchema(value: unknown, schemas: JsonSchemaObject[]): unk
 			return value;
 		}
 	}
+	// Try coercion — clone once via structuredClone (faster than JSON round-trip).
+	const cloneSource = isPrimitive(value) ? null : value;
 	for (const schema of schemas) {
-		const candidate = structuredClone(value);
+		const candidate = cloneSource === null ? value : structuredClone(cloneSource);
 		const coerced = coerceWithJsonSchema(candidate, schema);
 		const validator = getSubSchemaValidator(schema);
 		if (validator?.Check(coerced)) {
@@ -206,6 +208,10 @@ function coerceWithUnionSchema(value: unknown, schemas: JsonSchemaObject[]): unk
 		}
 	}
 	return value;
+}
+
+function isPrimitive(value: unknown): boolean {
+	return value === null || typeof value !== "object";
 }
 
 function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown {
@@ -288,6 +294,95 @@ function summarizeSchemaParams(schema: Tool["parameters"]): string {
 	return lines.length > 0 ? `\n  Expected parameters:\n${lines.join("\n")}` : "";
 }
 
+// --- Levenshtein-based "did you mean" for invalid argument keys --------------
+//
+// When the LLM passes a key not in the schema (e.g. `start_line` instead of
+// `offset`), TypeBox surfaces an `additionalProperties` error but does not
+// suggest the correct key. Without that suggestion the model typically re-
+// sends the same wrong key. We compute the closest valid key and append a
+// "Did you mean X?" line so the model corrects in one round-trip.
+
+const KEY_DYM_MAX_DISTANCE = 4;
+const KEY_DYM_PREFIX_MIN_OVERLAP = 3;
+
+function levenshteinKey(a: string, b: string): number {
+	if (a === b) return 0;
+	if (a.length === 0) return b.length;
+	if (b.length === 0) return a.length;
+	let prev = new Array<number>(b.length + 1);
+	let curr = new Array<number>(b.length + 1);
+	for (let j = 0; j <= b.length; j++) prev[j] = j;
+	for (let i = 1; i <= a.length; i++) {
+		curr[0] = i;
+		for (let j = 1; j <= b.length; j++) {
+			const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+			curr[j] = Math.min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+		}
+		[prev, curr] = [curr, prev];
+	}
+	return prev[b.length];
+}
+
+/**
+ * "Did you mean X?" matcher shared across packages (key hints here, unknown-tool
+ * hints in the agent loop). Scores candidates by Levenshtein distance, with an
+ * affix fallback (substring overlap) for queries beyond `maxDistance`. Returns
+ * the closest candidate name, or undefined when none qualifies.
+ */
+export function suggestClosest(
+	name: string,
+	candidates: string[],
+	options: { maxDistance: number; prefixMinOverlap: number },
+): string | undefined {
+	const lower = name.toLowerCase();
+	let best: { name: string; score: number } | undefined;
+	for (const candidate of candidates) {
+		const candidateLower = candidate.toLowerCase();
+		const distance = levenshteinKey(lower, candidateLower);
+		let score = distance;
+		if (distance > options.maxDistance) {
+			const longer = lower.length >= candidateLower.length ? lower : candidateLower;
+			const shorter = lower.length >= candidateLower.length ? candidateLower : lower;
+			if (shorter.length < options.prefixMinOverlap) continue;
+			if (!longer.includes(shorter)) continue;
+			score = longer.length - shorter.length;
+		}
+		if (!best || score < best.score) {
+			best = { name: candidate, score };
+		}
+	}
+	return best?.name;
+}
+
+function suggestKeyName(name: string, validKeys: string[]): string | undefined {
+	return suggestClosest(name, validKeys, {
+		maxDistance: KEY_DYM_MAX_DISTANCE,
+		prefixMinOverlap: KEY_DYM_PREFIX_MIN_OVERLAP,
+	});
+}
+
+/**
+ * Inspect `args` for keys not present in `schema.properties` and return a
+ * "Did you mean X?" hint line for each. Returns "" when no extra keys are
+ * present or no valid candidates exist.
+ */
+function formatExtraKeyHints(args: unknown, schema: Tool["parameters"]): string {
+	if (!isRecord(args)) return "";
+	if (!isJsonSchemaObject(schema)) return "";
+	const validKeys = schema.properties ? Object.keys(schema.properties) : [];
+	if (validKeys.length === 0) return "";
+	const extras = Object.keys(args).filter((key) => !validKeys.includes(key));
+	if (extras.length === 0) return "";
+	const lines: string[] = [];
+	for (const extra of extras) {
+		const suggestion = suggestKeyName(extra, validKeys);
+		if (suggestion) {
+			lines.push(`Did you mean "${suggestion}" instead of "${extra}"?`);
+		}
+	}
+	return lines.length > 0 ? `\n\n${lines.join("\n")}` : "";
+}
+
 function formatValidationPath(error: TLocalizedValidationError): string {
 	if (error.keyword === "required") {
 		const requiredProperties = (error.params as { requiredProperties?: string[] }).requiredProperties;
@@ -324,10 +419,19 @@ export function validateToolCall(tools: Tool[], toolCall: ToolCall): any {
  * @throws Error with formatted message if validation fails
  */
 export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
+	const validator = getValidator(tool.parameters);
+
+	// Fast path: well-formed args from the LLM usually validate without
+	// coercion. structuredClone of a multi-KB edit payload is wasted work on
+	// the hot path. If Check passes the raw arguments, skip clone + Convert
+	// + coerceWithJsonSchema entirely.
+	if (validator.Check(toolCall.arguments)) {
+		return toolCall.arguments;
+	}
+
 	const args = structuredClone(toolCall.arguments);
 	Value.Convert(tool.parameters, args);
 
-	const validator = getValidator(tool.parameters);
 	if (!hasTypeBoxMetadata(tool.parameters) && isJsonSchemaObject(tool.parameters)) {
 		const coerced = coerceWithJsonSchema(args, tool.parameters);
 		if (coerced !== args) {
@@ -356,13 +460,16 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 	const streamCorrupted = (toolCall as any)._streamingParseError === true;
 	const isEmptyArgs = isRecord(toolCall.arguments) && Object.keys(toolCall.arguments).length === 0;
 	const hasRequired = ((tool.parameters as any)?.required as string[] | undefined)?.length;
-	const emptyHint = streamCorrupted
-		? "\n\nWarning: Tool arguments were corrupted during streaming — some data was lost. Re-send the complete tool call."
-		: isEmptyArgs && hasRequired
-			? "\n\nNote: Arguments object was empty. Re-send the tool call with all required arguments."
-			: "";
+	let emptyHint = "";
+	if (streamCorrupted) {
+		emptyHint =
+			"\n\nWarning: Tool arguments were corrupted during streaming — some data was lost. Re-send the complete tool call.";
+	} else if (isEmptyArgs && hasRequired) {
+		emptyHint = "\n\nNote: Arguments object was empty. Re-send the tool call with all required arguments.";
+	}
 
-	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}${schemaSummary}${emptyHint}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
+	const extraKeyHint = formatExtraKeyHints(toolCall.arguments, tool.parameters);
+	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}${schemaSummary}${extraKeyHint}${emptyHint}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
 
 	throw new Error(errorMessage);
 }

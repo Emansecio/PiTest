@@ -9,7 +9,9 @@ describe("SettingsManager.getToolFeedbackSettings", () => {
 		// wasted tokens in identical-call loops. Opt out per-feature via settings.
 		expect(cfg.errorReflection.enabled).toBe(true);
 		expect(cfg.doomLoopReminder.enabled).toBe(true);
-		expect(cfg.doomLoopReminder.threshold).toBe(4);
+		// PiTuned tightened the default threshold to 2 (catches identical-call
+		// loops sooner). cooldownMs unchanged.
+		expect(cfg.doomLoopReminder.threshold).toBe(2);
 		expect(cfg.doomLoopReminder.cooldownMs).toBe(30000);
 	});
 
@@ -46,7 +48,7 @@ describe("SettingsManager.getToolFeedbackSettings", () => {
 		const sm = SettingsManager.inMemory({
 			toolFeedback: { doomLoopReminder: { enabled: true, threshold: 0 } },
 		});
-		expect(sm.getToolFeedbackSettings().doomLoopReminder.threshold).toBe(4);
+		expect(sm.getToolFeedbackSettings().doomLoopReminder.threshold).toBe(2);
 	});
 
 	it("clamps invalid cooldown to default", () => {

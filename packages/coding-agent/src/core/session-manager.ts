@@ -10,6 +10,7 @@ import {
 	readdirSync,
 	readFileSync,
 	readSync,
+	statSync,
 	writeFileSync,
 } from "fs";
 import { appendFile, readdir, readFile, stat } from "fs/promises";
@@ -305,6 +306,23 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
+// Derived LLM messages (custom / branch-summary / compaction-summary) are
+// rebuilt from immutable entry fields on every buildSessionContext call.
+// Memoize per source entry so the SAME object is returned across turns —
+// otherwise convertToLlm's identity-keyed WeakMap (agent harness) misses on
+// these every turn and re-serializes every summary text. Keyed by entry
+// identity, so it GCs with the entries (rebuilt on session reload).
+const derivedMessageCache = new WeakMap<SessionEntry, AgentMessage>();
+
+function deriveCachedMessage(entry: SessionEntry, make: () => AgentMessage): AgentMessage {
+	let cached = derivedMessageCache.get(entry);
+	if (cached === undefined) {
+		cached = make();
+		derivedMessageCache.set(entry, cached);
+	}
+	return cached;
+}
+
 /**
  * Build the session context from entries using tree traversal.
  * If leafId is provided, walks from that entry to root.
@@ -341,20 +359,25 @@ export function buildSessionContext(
 		return { messages: [], thinkingLevel: "off", model: null };
 	}
 
-	// Walk from leaf to root, collecting path
+	// Walk from leaf to root, collecting path. Push+reverse avoids the O(n²)
+	// cost of unshift on long sessions.
 	const path: SessionEntry[] = [];
 	let current: SessionEntry | undefined = leaf;
 	while (current) {
-		path.unshift(current);
+		path.push(current);
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
+	path.reverse();
 
-	// Extract settings and find compaction
+	// Extract settings and find compaction. Record the compaction index here so
+	// the later message build can skip a second O(n) findIndex scan.
 	let thinkingLevel = "off";
 	let model: { provider: string; modelId: string } | null = null;
 	let compaction: CompactionEntry | null = null;
+	let compactionIdx = -1;
 
-	for (const entry of path) {
+	for (let i = 0; i < path.length; i++) {
+		const entry = path[i];
 		if (entry.type === "thinking_level_change") {
 			thinkingLevel = entry.thinkingLevel;
 		} else if (entry.type === "model_change") {
@@ -363,6 +386,7 @@ export function buildSessionContext(
 			model = { provider: entry.message.provider, modelId: entry.message.model };
 		} else if (entry.type === "compaction") {
 			compaction = entry;
+			compactionIdx = i;
 		}
 	}
 
@@ -378,19 +402,24 @@ export function buildSessionContext(
 			messages.push(entry.message);
 		} else if (entry.type === "custom_message") {
 			messages.push(
-				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+				deriveCachedMessage(entry, () =>
+					createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
+				),
 			);
 		} else if (entry.type === "branch_summary" && entry.summary) {
-			messages.push(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
+			messages.push(
+				deriveCachedMessage(entry, () => createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)),
+			);
 		}
 	};
 
 	if (compaction) {
 		// Emit summary first
-		messages.push(createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp));
-
-		// Find compaction index in path
-		const compactionIdx = path.findIndex((e) => e.type === "compaction" && e.id === compaction.id);
+		messages.push(
+			deriveCachedMessage(compaction, () =>
+				createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp),
+			),
+		);
 
 		// Emit kept messages (before compaction, starting from firstKeptEntryId)
 		let foundFirstKept = false;
@@ -485,11 +514,33 @@ function isValidSessionFile(filePath: string): boolean {
 /** Exported for testing */
 export function findMostRecentSession(sessionDir: string): string | null {
 	try {
-		const files = readdirSync(sessionDir)
-			.filter((f) => f.endsWith(".jsonl"))
-			.sort((a, b) => b.localeCompare(a));
+		const files = readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
+		if (files.length === 0) return null;
+		// Real session filenames begin with an ISO-like timestamp prefix (4-digit
+		// year), which means lexicographic descending order matches chronological
+		// order without a stat() per file. If any file doesn't match that shape,
+		// fall back to mtime-based sorting so arbitrary filenames still resolve
+		// to the most recently modified file.
+		const isoPrefix = /^\d{4}[-T]/;
+		const allIso = files.every((f) => isoPrefix.test(f));
+		let ordered: string[];
+		if (allIso) {
+			ordered = files.slice().sort((a, b) => b.localeCompare(a));
+		} else {
+			ordered = files
+				.map((f) => {
+					const path = join(sessionDir, f);
+					try {
+						return { f, mtime: statSync(path).mtimeMs };
+					} catch {
+						return { f, mtime: 0 };
+					}
+				})
+				.sort((a, b) => b.mtime - a.mtime)
+				.map((x) => x.f);
+		}
 
-		for (const f of files) {
+		for (const f of ordered) {
 			const path = join(sessionDir, f);
 			if (isValidSessionFile(path)) return path;
 		}
@@ -791,6 +842,9 @@ export class SessionManager {
 		this.leafId = null;
 		this.flushed = false;
 		this._hasAssistantMessage = false;
+		this._entriesOnlyCache = null;
+		this._ctxCache = null;
+		this.latestSessionName = undefined;
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -804,6 +858,9 @@ export class SessionManager {
 		this.labelsById.clear();
 		this.labelTimestampsById.clear();
 		this.leafId = null;
+		this._entriesOnlyCache = null;
+		this._ctxCache = null;
+		this.latestSessionName = undefined;
 		for (const entry of this.fileEntries) {
 			if (entry.type === "session") continue;
 			this.byId.set(entry.id, entry);
@@ -816,6 +873,8 @@ export class SessionManager {
 					this.labelsById.delete(entry.targetId);
 					this.labelTimestampsById.delete(entry.targetId);
 				}
+			} else if (entry.type === "session_info") {
+				this.latestSessionName = entry.name?.trim() || undefined;
 			}
 		}
 	}
@@ -849,6 +908,19 @@ export class SessionManager {
 	private _hasAssistantMessage = false;
 	private _writeQueue: string[] = [];
 	private _flushTimer: ReturnType<typeof setTimeout> | null = null;
+	private _draining: Promise<void> | null = null;
+	private _entriesOnlyCache: SessionEntry[] | null = null;
+	// Cache the built context per leaf. buildSessionContext() is called from
+	// ~7 sites per turn (runtime, agent-session, interactive, sdk, main); the
+	// session is append-only so leafId fully keys the path. Invalidated only
+	// when fileEntries is replaced (newSession / _buildIndex). Returned arrays
+	// are sliced so callers that mutate state.messages can't poison the cache.
+	private _ctxCache: { leafId: string | null; ctx: SessionContext } | null = null;
+	// Latest session_info display name (trimmed; undefined when none or cleared).
+	// Tracked incrementally so getSessionName() is O(1) instead of a reverse
+	// scan over all entries on every UI refresh. Mirrors getEntries() ordering:
+	// updated on append, rebuilt in _buildIndex, reset in newSession.
+	private latestSessionName: string | undefined = undefined;
 
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
@@ -862,29 +934,46 @@ export class SessionManager {
 			}
 		}
 
+		// Build the batch up front, but write synchronously. Callers that list
+		// or re-open the session immediately after appendMessage rely on the
+		// new entry being durable on disk. The previous async-debounced write
+		// optimization broke that invariant; keep the batching but flush sync.
+		let batch: string;
 		if (!this.flushed) {
-			for (const e of this.fileEntries) {
-				this._writeQueue.push(`${JSON.stringify(e)}\n`);
-			}
+			batch = this.fileEntries.map((e) => `${JSON.stringify(e)}\n`).join("");
 			this.flushed = true;
 		} else {
-			this._writeQueue.push(`${JSON.stringify(entry)}\n`);
+			batch = `${JSON.stringify(entry)}\n`;
 		}
-		this._scheduleFlush();
-	}
-
-	private _scheduleFlush(): void {
-		if (this._flushTimer !== null) return;
-		this._flushTimer = setTimeout(() => {
-			this._flushTimer = null;
-			void this._drainQueue();
-		}, 50);
+		// If there are still queued async writes from older code paths, drain them
+		// in order by appending them first.
+		if (this._writeQueue.length > 0) {
+			batch = this._writeQueue.splice(0).join("") + batch;
+		}
+		appendFileSync(this.sessionFile, batch);
 	}
 
 	private async _drainQueue(): Promise<void> {
-		while (this._writeQueue.length > 0 && this.sessionFile) {
-			const batch = this._writeQueue.splice(0).join("");
-			await appendFile(this.sessionFile, batch);
+		// Serialize concurrent drains: appendFile on the same path is not atomic
+		// across overlapping handles. Without this, a manual flushWrites racing a
+		// timer-triggered drain can interleave bytes mid-JSONL line.
+		if (this._draining) {
+			await this._draining;
+			if (this._writeQueue.length === 0) return;
+		}
+		const drainPromise = (async () => {
+			while (this._writeQueue.length > 0 && this.sessionFile) {
+				const batch = this._writeQueue.splice(0).join("");
+				await appendFile(this.sessionFile, batch);
+			}
+		})();
+		this._draining = drainPromise;
+		try {
+			await drainPromise;
+		} finally {
+			if (this._draining === drainPromise) {
+				this._draining = null;
+			}
 		}
 	}
 
@@ -900,6 +989,12 @@ export class SessionManager {
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
+		if (entry.type === "session_info") {
+			this.latestSessionName = entry.name?.trim() || undefined;
+		}
+		if (this._entriesOnlyCache) {
+			this._entriesOnlyCache.push(entry);
+		}
 		this._persist(entry);
 	}
 
@@ -1000,16 +1095,10 @@ export class SessionManager {
 
 	/** Get the current session name from the latest session_info entry, if any. */
 	getSessionName(): string | undefined {
-		// Walk entries in reverse to find the latest session_info entry.
-		// Empty names explicitly clear the session title.
-		const entries = this.getEntries();
-		for (let i = entries.length - 1; i >= 0; i--) {
-			const entry = entries[i];
-			if (entry.type === "session_info") {
-				return entry.name?.trim() || undefined;
-			}
-		}
-		return undefined;
+		// O(1): maintained incrementally in _appendEntry/_buildIndex (mirrors the
+		// old reverse scan over getEntries() — latest session_info wins, empty
+		// name clears the title).
+		return this.latestSessionName;
 	}
 
 	/**
@@ -1125,24 +1214,45 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildSessionContext(): SessionContext {
-		return buildSessionContext(this.getEntries(), this.leafId, this.byId);
+		const cached = this._ctxCache;
+		if (cached && cached.leafId === this.leafId) {
+			const ctx = cached.ctx;
+			// Defensive copy: callers assign this to agent.state.messages and the
+			// agent loop push()es into it. Element identity is preserved, so
+			// convertToLlm's per-message cache still hits.
+			return { messages: ctx.messages.slice(), thinkingLevel: ctx.thinkingLevel, model: ctx.model };
+		}
+		const ctx = buildSessionContext(this.getEntries(), this.leafId, this.byId);
+		this._ctxCache = { leafId: this.leafId, ctx };
+		return { messages: ctx.messages.slice(), thinkingLevel: ctx.thinkingLevel, model: ctx.model };
 	}
 
 	/**
 	 * Get session header.
 	 */
 	getHeader(): SessionHeader | null {
+		// The header is always the first entry; index directly (O(1)) and fall
+		// back to a scan only for malformed/legacy ordering.
+		const first = this.fileEntries[0];
+		if (first?.type === "session") return first as SessionHeader;
 		const h = this.fileEntries.find((e) => e.type === "session");
 		return h ? (h as SessionHeader) : null;
 	}
 
 	/**
-	 * Get all session entries (excludes header). Returns a shallow copy.
-	 * The session is append-only: use appendXXX() to add entries, branch() to
+	 * Get all session entries (excludes header). Returns a cached reference —
+	 * do NOT mutate; treat as read-only. The session is append-only: use
+	 * appendXXX() to add entries (cache is extended in place), branch() to
 	 * change the leaf pointer. Entries cannot be modified or deleted.
+	 *
+	 * Cache is invalidated on fileEntries replacement (newSession,
+	 * setSessionFile, _buildIndex).
 	 */
 	getEntries(): SessionEntry[] {
-		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		if (this._entriesOnlyCache) return this._entriesOnlyCache;
+		const filtered = this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");
+		this._entriesOnlyCache = filtered;
+		return filtered;
 	}
 
 	/**

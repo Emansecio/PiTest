@@ -31,7 +31,7 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 		delete process.env.PI_TELEMETRY;
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		if (originalTelemetryEnv === undefined) {
 			delete process.env.PI_TELEMETRY;
 		} else {
@@ -130,7 +130,7 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 			);
 			return capturedOptions?.headers;
 		} finally {
-			session.dispose();
+			await session.dispose();
 			for (const provider of registeredProviders.reverse()) {
 				modelRegistry.unregisterProvider(provider);
 			}

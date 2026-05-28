@@ -1,0 +1,11 @@
+{
+  "_comment": "Project-local pi settings for pi-mono. Merged OVER global settings (deep merge in settings-manager.ts). See docs/agents/tools-and-config.md for the live shape and rationale.",
+  "frequentFiles": {
+    "enabled": true,
+    "topN": 10,
+    "minHits": 2
+  },
+  "toolDiscovery": {
+    "enabled": true
+  }
+}

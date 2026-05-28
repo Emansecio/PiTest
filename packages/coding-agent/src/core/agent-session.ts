@@ -14,7 +14,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type {
 	Agent,
 	AgentEvent,
@@ -29,6 +29,8 @@ import {
 	cleanupSessionResources,
 	getSupportedThinkingLevels,
 	isContextOverflow,
+	isEntryCooledDown,
+	markEntryCooldown,
 	modelsAreEqual,
 	resetApiProviders,
 	streamSimple,
@@ -52,6 +54,12 @@ import {
 import { extractToolFileOp } from "./compaction/utils.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { getEngineeringStyleGuidelines } from "./engineering-styles.js";
+import {
+	createEvalKernelManager,
+	type EvalKernelManager,
+	getCurrentEvalKernelManager,
+	setCurrentEvalKernelManager,
+} from "./eval-kernel/index.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
@@ -79,10 +87,41 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
-import { FrequentFilesTracker, formatFrequentFilesForPrompt } from "./frequent-files.js";
+import {
+	computeFrequentFiles,
+	defaultFrequentFilesPath,
+	type FrequentFile,
+	FrequentFilesTracker,
+	formatFrequentFilesForPrompt,
+	loadFrequentFilesSnapshot,
+	saveFrequentFilesSnapshot,
+} from "./frequent-files.js";
+import {
+	defaultBankPath,
+	ensureBankDir,
+	formatSessionSummariesForPrompt,
+	getCurrentHindsightBank,
+	type HindsightBank,
+	openBank,
+	setCurrentHindsightBank,
+} from "./hindsight/index.js";
+import {
+	defaultLearnedErrorsDir,
+	type LearnedErrorEntry,
+	normalizeErrorFingerprint,
+	persistSessionLearnedErrors,
+	truncateErrorSample,
+} from "./learned-error-store.js";
 import { formatMemoryForPrompt } from "./memory/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import type { ModelRegistry } from "./model-registry.js";
+import { type RoleResolution, resolveRole } from "./model-resolver.js";
+import {
+	createPreviewQueue,
+	getCurrentPreviewQueue,
+	type PreviewQueue,
+	setCurrentPreviewQueue,
+} from "./preview-queue.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.js";
@@ -93,9 +132,16 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { buildDoomLoopReminder, buildToolErrorReflection, decideErrorReflection } from "./tool-call-feedback.js";
 import { extractErrorMessage, fingerprintToolArgs, ToolCallStats, type ToolStat } from "./tool-call-stats.js";
+import {
+	createToolDiscoveryIndex,
+	getCurrentToolDiscoveryIndex,
+	setCurrentToolDiscoveryIndex,
+	type ToolDiscoveryIndex,
+} from "./tool-discovery.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
+import { registerBuiltinSchemes } from "./url-schemes/index.ts";
 
 // Re-export skill-parser utilities (moved to dedicated module)
 export { type ParsedSkillBlock, parseSkillBlock } from "./skill-parser.ts";
@@ -125,7 +171,8 @@ export type AgentSessionEvent =
 			errorMessage?: string;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
+	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| { type: "fallback_warning"; from: string; to: string; reason: string };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -162,6 +209,8 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/** When true, suppress the hashline-anchor block normally appended to full-file reads. */
+	disableHashlineAnchors?: boolean;
 }
 
 export interface ExtensionBindings {
@@ -260,6 +309,12 @@ export class AgentSession {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	// Models in the active fallback chain that have already been tried this turn.
+	// Reset on successful assistant response or when the user starts a new turn.
+	private _triedFallbackEntries: Set<string> = new Set();
+	// Original (primary) model + thinking level captured when the chain begins,
+	// so we can revert if every chain entry fails and the agent retries.
+	private _fallbackOriginal?: { model: Model<any>; thinkingLevel: ThinkingLevel };
 
 	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
@@ -277,6 +332,7 @@ export class AgentSession {
 	private _initialActiveToolNames?: string[];
 	private _allowedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
+	private _disableHashlineAnchors: boolean;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -297,9 +353,33 @@ export class AgentSession {
 	// Per-session tool-call telemetry. Fed from tool_execution_end events.
 	private readonly _toolCallStats = new ToolCallStats();
 
+	// Per-session counters for the tool-rewrite registry. Maps tool name -> rule id -> count.
+	// Drives the optional stats export on dispose so we can measure how often
+	// each rule fires across real sessions.
+	private readonly _registryRewrites = new Map<string, Map<string, number>>();
+	private readonly _registryRejects = new Map<string, Map<string, number>>();
+
+	// Cross-session learned errors. Built during the session from
+	// tool_error_hint_applied + tool_execution_end events; persisted on dispose
+	// so the next session boots warm with knowledge of recurring patterns.
+	private readonly _learnedErrors = new Map<string, LearnedErrorEntry>();
+	// Transient: which Tier 4 rules fired per in-flight toolCallId. Read once
+	// in _handleToolExecutionEnd and dropped to keep memory bounded.
+	private readonly _hintsByToolCallId = new Map<string, string[]>();
+
 	// Per-session frequent-files tracker. Recorded on successful file-tool calls
 	// and surfaced in the system prompt when settings.frequentFiles.enabled.
 	private _frequentFiles: FrequentFilesTracker = new FrequentFilesTracker();
+
+	// Repo-level frequent-files index (git log → mtime fallback). Computed at
+	// session boot and cached for the lifetime of the session. A future
+	// `_recomputeFrequentFiles` slash command may invalidate this.
+	private _frequentFilesIndex: FrequentFile[] = [];
+	private _frequentFilesAbort: AbortController | undefined;
+	// Promise returned by the in-flight `computeFrequentFiles` call. Tracked so
+	// `dispose()` can await it before returning, otherwise the spawned `git`
+	// child still holds the cwd and `rmSync(tempDir)` in tests fails with EBUSY.
+	private _frequentFilesPromise: Promise<unknown> | undefined;
 
 	// Args captured at tool_execution_start so the tool_execution_end handler can
 	// reference them (the end event only carries result/isError). Bounded by the
@@ -314,7 +394,27 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
 
+	// Hindsight memory bank, opened in the constructor when settings enable it.
+	private _hindsightBank: HindsightBank | undefined;
+
+	// Preview queue for staged mutations (edit/write/edit_v2 with preview:true).
+	// Published via the module-level registry so tools can pull it on demand.
+	private _previewQueue: PreviewQueue | undefined;
+
+	// Hidden tool discovery index. Published at session boot so the
+	// `search_tool_bm25` tool can BM25-search specialized tools that are NOT
+	// in the active surface and (on request) pull them in on demand.
+	private _toolDiscoveryIndex: ToolDiscoveryIndex | undefined;
+
+	// Per-session eval kernel manager. Holds the persistent Python + JS kernels
+	// for the `eval` tool. Spawned in the constructor when settings enable it;
+	// kernels themselves are spawned lazily on first use by the manager.
+	private _evalKernelManager: EvalKernelManager | undefined;
+
 	constructor(config: AgentSessionConfig) {
+		// Idempotent: registers built-in URL schemes (pr://, issue://, conflict://)
+		// on the singleton registry so read/write tools can dispatch virtual paths.
+		registerBuiltinSchemes();
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
@@ -327,13 +427,27 @@ export class AgentSession {
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
+		this._disableHashlineAnchors = config.disableHashlineAnchors ?? false;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Size the frequent-files tracker from settings so an opt-in user with a
 		// very large session does not silently lose hot files to the default cap.
+		const freqCfg = this.settingsManager.getFrequentFilesSettings();
 		this._frequentFiles = new FrequentFilesTracker({
-			maxFiles: this.settingsManager.getFrequentFilesSettings().maxFiles,
+			maxFiles: freqCfg.maxFiles,
 		});
+
+		// Hydrate the tracker from <cwd>/.pi/frequent-files.json so a fresh
+		// session re-uses the previous session's hot-file ranking instead of
+		// the model re-discovering it via repeated reads. Best-effort — a
+		// missing/corrupt file just leaves the tracker empty.
+		if (freqCfg.enabled) {
+			try {
+				this._frequentFiles.loadSnapshot(loadFrequentFilesSnapshot(defaultFrequentFilesPath(this._cwd)));
+			} catch {
+				// best-effort hydrate; never block boot
+			}
+		}
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -344,6 +458,157 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+
+		this._openHindsightBank();
+
+		// Compute the repo-level "frequent files" index in the background. First
+		// turn may miss it; subsequent turns get the cached list in the system
+		// prompt. Cheap: bounded by a 2s git timeout + a fallback fs walk.
+		this._kickoffFrequentFilesIndex();
+
+		// Publish a fresh preview queue for this session so mutation tools can
+		// stage previews and the `resolve` tool can commit/discard them.
+		this._previewQueue = createPreviewQueue();
+		setCurrentPreviewQueue(this._previewQueue);
+
+		// Publish a fresh tool discovery index so the `search_tool_bm25` tool
+		// can BM25-search hidden tools. Auto-seeding of hidden entries is gated
+		// by `toolDiscovery.enabled` in settings (default off): callers / SDK
+		// extensions populate the index via setCurrentToolDiscoveryIndex().
+		this._toolDiscoveryIndex = createToolDiscoveryIndex();
+		this._seedToolDiscovery();
+		setCurrentToolDiscoveryIndex(this._toolDiscoveryIndex);
+
+		// Spin up the eval kernel manager when enabled. Kernels themselves are
+		// only spawned on first `get(lang)` so an unused setting costs nothing.
+		if (this.settingsManager.getEvalSettings().enabled) {
+			this._evalKernelManager = createEvalKernelManager(this._cwd);
+			setCurrentEvalKernelManager(this._evalKernelManager);
+		}
+	}
+
+	/**
+	 * Seed the hidden tool discovery index from settings. Registers two
+	 * disjoint sets of built-ins as hidden:
+	 *
+	 * 1. Tools the user explicitly listed in `toolDiscovery.hiddenByDefault`.
+	 * 2. Tools that exist in `createAllToolDefinitions` but NOT in the
+	 *    `createCodingToolDefinitions` set — the runtime knows about them but
+	 *    they are off the active surface. The `alwaysActive` setting can
+	 *    override this so callers can keep a tool on the active surface.
+	 *
+	 * No-op when toolDiscovery is disabled or the index has not been created.
+	 */
+	private _seedToolDiscovery(): void {
+		const index = this._toolDiscoveryIndex;
+		if (!index) return;
+		const cfg = this.settingsManager.getToolDiscoverySettings();
+		if (!cfg.enabled) return;
+		const autoResizeImages = this.settingsManager.getImageAutoResize();
+		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
+		const shellPath = this.settingsManager.getShellPath();
+		let allDefs: Record<string, ToolDefinition>;
+		try {
+			allDefs = createAllToolDefinitions(this._cwd, {
+				read: { autoResizeImages, embedHashlineAnchors: !this._disableHashlineAnchors },
+				bash: { commandPrefix: shellCommandPrefix, shellPath },
+			}) as Record<string, ToolDefinition>;
+		} catch {
+			return;
+		}
+		// 1. Explicit hiddenByDefault entries.
+		const explicit = new Set(cfg.hiddenByDefault);
+		// 2. Delta = allTools − codingTools, minus alwaysActive.
+		const codingNames = new Set([
+			"read",
+			"bash",
+			"edit",
+			"edit_v2",
+			"write",
+			"symbol",
+			"ask",
+			"resolve",
+			"search_tool_bm25",
+			"retain",
+			"recall",
+			"reflect",
+		]);
+		const alwaysActive = new Set(cfg.alwaysActive);
+		const candidates = new Set<string>(explicit);
+		for (const name of Object.keys(allDefs)) {
+			if (codingNames.has(name)) continue;
+			if (alwaysActive.has(name)) continue;
+			candidates.add(name);
+		}
+		for (const name of candidates) {
+			if (alwaysActive.has(name)) continue;
+			const def = allDefs[name];
+			if (!def) continue;
+			const description = typeof def.description === "string" ? def.description : "";
+			index.register({ name, description, definition: def });
+		}
+	}
+
+	/**
+	 * Open the project's hindsight bank (if enabled) and publish it via the
+	 * module-level registry so retain/recall/reflect tool calls pick it up.
+	 * No-op when `hindsight.enabled` is false.
+	 */
+	private _openHindsightBank(): void {
+		const cfg = this.settingsManager.getHindsightSettings();
+		if (!cfg.enabled) return;
+		try {
+			const path = cfg.bankPath ?? defaultBankPath(this._cwd);
+			ensureBankDir(path);
+			const bank = openBank(path, {
+				maxEntries: cfg.maxEntries,
+				pruneOlderThanDays: cfg.pruneOlderThanDays,
+			});
+			this._hindsightBank = bank;
+			setCurrentHindsightBank(bank);
+		} catch {
+			// Silent: missing or unreadable banks should not crash the session.
+		}
+	}
+
+	/**
+	 * Kick off the repo-level frequent-files compute in the background. Resolves
+	 * silently when the index is ready (or on failure). Subsequent system-prompt
+	 * rebuilds pick up the cached value via `_frequentFilesIndex`. Re-runs are
+	 * idempotent — an in-flight compute is aborted and replaced. No-op when the
+	 * `frequentFiles` setting is disabled.
+	 */
+	private _kickoffFrequentFilesIndex(): void {
+		const cfg = this.settingsManager.getFrequentFilesSettings();
+		if (!cfg.enabled) return;
+		// Abort any previous in-flight compute so a rapid `_recomputeFrequentFiles`
+		// hook doesn't leak subprocesses.
+		this._frequentFilesAbort?.abort();
+		const controller = new AbortController();
+		this._frequentFilesAbort = controller;
+		const promise = computeFrequentFiles({ cwd: this._cwd, limit: cfg.topN, signal: controller.signal })
+			.then((files) => {
+				if (controller.signal.aborted) return;
+				this._frequentFilesIndex = files;
+				// Rebuild prompt so the next turn sees the index. Active tool list is
+				// unchanged so this is a cheap rerun.
+				try {
+					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+				} catch {
+					// A rebuild failure must not break the session — surface on next turn.
+				}
+			})
+			.catch(() => {
+				// Compute failures are non-fatal; the prompt simply omits the block.
+			})
+			.finally(() => {
+				// Clear the slot once settled so dispose's await is a no-op when the
+				// compute has already finished naturally.
+				if (this._frequentFilesPromise === promise) {
+					this._frequentFilesPromise = undefined;
+				}
+			});
+		this._frequentFilesPromise = promise;
 	}
 
 	/** Model registry for API key resolution and model discovery */
@@ -540,6 +805,12 @@ export class AgentSession {
 					});
 					this._retryAttempt = 0;
 				}
+				// Reset fallback-chain state on any successful response so the next
+				// failure starts the chain fresh from the (current) primary.
+				if (assistantMsg.stopReason !== "error") {
+					this._triedFallbackEntries.clear();
+					this._fallbackOriginal = undefined;
+				}
 			}
 		}
 	};
@@ -692,6 +963,15 @@ export class AgentSession {
 					} satisfies ToolExecutionEndEvent);
 				}
 				break;
+			case "tool_call_rewritten":
+				this._handleToolCallRewritten(event);
+				break;
+			case "tool_call_rejected":
+				this._handleToolCallRejected(event);
+				break;
+			case "tool_error_hint_applied":
+				this._handleToolErrorHintApplied(event);
+				break;
 		}
 	}
 
@@ -709,13 +989,136 @@ export class AgentSession {
 		);
 		const args = this._toolCallArgsByCallId.get(event.toolCallId);
 		this._toolCallArgsByCallId.delete(event.toolCallId);
+		// Capture the learned-error fingerprint so the next session boots warm
+		// with knowledge of recurring patterns. Looked up via the matching
+		// hint event recorded earlier in finalize.
+		const matchedHintRules = this._hintsByToolCallId.get(event.toolCallId);
+		this._hintsByToolCallId.delete(event.toolCallId);
 		if (event.isError) {
+			const rawError = extractErrorMessage(event.result?.content);
+			const fingerprint = normalizeErrorFingerprint(rawError);
+			if (fingerprint) {
+				const key = `${event.toolName}:${fingerprint}`;
+				const existing = this._learnedErrors.get(key);
+				if (existing) {
+					existing.count += 1;
+					if (matchedHintRules && matchedHintRules.length > 0 && !existing.matchedRuleId) {
+						existing.matchedRuleId = matchedHintRules[0];
+					}
+				} else {
+					this._learnedErrors.set(key, {
+						tool: event.toolName,
+						fingerprint,
+						count: 1,
+						matchedRuleId: matchedHintRules?.[0],
+						sampleErrorText: truncateErrorSample(rawError ?? ""),
+						sampleArgs: args !== undefined ? fingerprintToolArgs(args, 160) : undefined,
+					});
+				}
+			}
 			this._maybeInjectToolErrorReflection(event.toolName, args, event.result);
 		} else {
 			const fileOp = extractToolFileOp(event.toolName, args);
 			if (fileOp) {
 				this._frequentFiles.record(fileOp.path, fileOp.op);
 			}
+		}
+	}
+
+	private _handleToolCallRewritten(event: Extract<AgentEvent, { type: "tool_call_rewritten" }>): void {
+		const perTool = this._registryRewrites.get(event.toolName) ?? new Map<string, number>();
+		for (const ruleId of event.ruleIds) {
+			perTool.set(ruleId, (perTool.get(ruleId) ?? 0) + 1);
+		}
+		this._registryRewrites.set(event.toolName, perTool);
+	}
+
+	private _handleToolCallRejected(event: Extract<AgentEvent, { type: "tool_call_rejected" }>): void {
+		const perTool = this._registryRejects.get(event.toolName) ?? new Map<string, number>();
+		perTool.set(event.ruleId, (perTool.get(event.ruleId) ?? 0) + 1);
+		this._registryRejects.set(event.toolName, perTool);
+	}
+
+	private _handleToolErrorHintApplied(event: Extract<AgentEvent, { type: "tool_error_hint_applied" }>): void {
+		const existing = this._hintsByToolCallId.get(event.toolCallId) ?? [];
+		for (const h of event.hints) {
+			if (!existing.includes(h.ruleId)) existing.push(h.ruleId);
+		}
+		this._hintsByToolCallId.set(event.toolCallId, existing);
+	}
+
+	/**
+	 * Snapshot of every tool-rewrite registry rule that fired this session,
+	 * grouped by tool name and tier. Used by the optional stats export to
+	 * compare error-rate deltas across before/after measurement windows.
+	 */
+	getRegistryStats(): {
+		rewrites: Array<{ tool: string; rule: string; count: number }>;
+		rejects: Array<{ tool: string; rule: string; count: number }>;
+	} {
+		const flatten = (source: Map<string, Map<string, number>>) => {
+			const out: Array<{ tool: string; rule: string; count: number }> = [];
+			for (const [tool, perRule] of source) {
+				for (const [rule, count] of perRule) {
+					out.push({ tool, rule, count });
+				}
+			}
+			return out.sort((a, b) => b.count - a.count);
+		};
+		return { rewrites: flatten(this._registryRewrites), rejects: flatten(this._registryRejects) };
+	}
+
+	/**
+	 * Write a single-session stats snapshot to `$PI_STATS_EXPORT_DIR/<sessionId>.json`
+	 * when that env var is set. Best-effort: failures are swallowed because the
+	 * stats export is observability infrastructure, not load-bearing for the
+	 * session lifecycle.
+	 */
+	private _maybeExportStats(): void {
+		const dir = process.env.PI_STATS_EXPORT_DIR;
+		if (!dir) return;
+		const toolStats = this.getToolCallStats();
+		const registry = this.getRegistryStats();
+		// Skip empty snapshots: keeps the export dir noise-free on quick
+		// sessions that never invoked a tool.
+		if (toolStats.length === 0 && registry.rewrites.length === 0 && registry.rejects.length === 0) {
+			return;
+		}
+		try {
+			mkdirSync(dir, { recursive: true });
+			const payload = {
+				sessionId: this.sessionId,
+				timestamp: new Date().toISOString(),
+				cwd: this._cwd,
+				toolStats,
+				registry,
+			};
+			writeFileSync(join(dir, `${this.sessionId}.json`), `${JSON.stringify(payload, null, 2)}\n`);
+		} catch {
+			// Best-effort: never block dispose on a telemetry write.
+		}
+	}
+
+	/**
+	 * Append this session's learned-error fingerprints to a per-session JSONL
+	 * file under `~/.pi/agent/learned-errors/`. Best-effort: failures are
+	 * swallowed because the learned-error store is observability, not load-
+	 * bearing for the session lifecycle.
+	 */
+	private _persistLearnedErrors(): void {
+		if (this._learnedErrors.size === 0) return;
+		try {
+			persistSessionLearnedErrors(
+				defaultLearnedErrorsDir(),
+				{
+					sessionId: this.sessionId,
+					timestamp: new Date().toISOString(),
+					cwd: this._cwd,
+				},
+				Array.from(this._learnedErrors.values()),
+			);
+		} catch {
+			// Best-effort: never block dispose on telemetry.
 		}
 	}
 
@@ -876,6 +1279,13 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	async dispose(): Promise<void> {
+		// Opt-in stats export for baseline measurement. Set PI_STATS_EXPORT_DIR
+		// to a writable directory to get one JSON file per session containing
+		// tool-call totals + per-rule rewrite/reject counts. Used to measure
+		// the before/after delta of the rewrite registry on real workloads.
+		this._maybeExportStats();
+		this._persistLearnedErrors();
+
 		await this.sessionManager.flushWrites();
 		this._extensionRunner.invalidate(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
@@ -883,6 +1293,59 @@ export class AgentSession {
 		this._disconnectFromAgent();
 		this._eventListeners = [];
 		cleanupSessionResources(this.sessionId);
+		// Abort the background frequent-files compute and wait for it to settle.
+		// The compute spawns a `git` child whose cwd is the session cwd; without
+		// this await, tests that `rmSync(tempDir)` immediately after dispose hit
+		// EBUSY on Windows because the child still holds the directory.
+		if (this._frequentFilesAbort) {
+			this._frequentFilesAbort.abort();
+			this._frequentFilesAbort = undefined;
+		}
+		if (this._frequentFilesPromise) {
+			try {
+				await this._frequentFilesPromise;
+			} catch {
+				// ignore
+			}
+			this._frequentFilesPromise = undefined;
+		}
+		// Persist the session tracker so the next session boots warm. Same
+		// gate as hydrate; failures are swallowed (the next session just
+		// starts cold).
+		if (this.settingsManager.getFrequentFilesSettings().enabled && this._frequentFiles.size() > 0) {
+			try {
+				saveFrequentFilesSnapshot(defaultFrequentFilesPath(this._cwd), this._frequentFiles.toSnapshot());
+			} catch {
+				// best-effort persist; never block dispose
+			}
+		}
+		// Clear hindsight bank registry only if this session owns the current bank.
+		if (this._hindsightBank && getCurrentHindsightBank() === this._hindsightBank) {
+			setCurrentHindsightBank(undefined);
+		}
+		this._hindsightBank = undefined;
+		// Clear preview queue registry only if this session owns the current queue.
+		if (this._previewQueue && getCurrentPreviewQueue() === this._previewQueue) {
+			setCurrentPreviewQueue(undefined);
+		}
+		this._previewQueue = undefined;
+		// Clear tool discovery index registry only if this session owns it.
+		if (this._toolDiscoveryIndex && getCurrentToolDiscoveryIndex() === this._toolDiscoveryIndex) {
+			setCurrentToolDiscoveryIndex(undefined);
+		}
+		this._toolDiscoveryIndex = undefined;
+		// Tear down eval kernels owned by this session.
+		if (this._evalKernelManager) {
+			if (getCurrentEvalKernelManager() === this._evalKernelManager) {
+				setCurrentEvalKernelManager(undefined);
+			}
+			try {
+				await this._evalKernelManager.closeAll();
+			} catch {
+				// ignore
+			}
+			this._evalKernelManager = undefined;
+		}
 	}
 
 	// =========================================================================
@@ -1085,6 +1548,16 @@ export class AgentSession {
 				appendSections.push(formatFrequentFilesForPrompt(top));
 			}
 		}
+		// Hindsight session-summary prefix: surfaces the most recent N
+		// "session-summary" entries from the bank so the next turn starts with
+		// a compact mental model of prior sessions. Section is only emitted
+		// when the bank holds at least one session summary.
+		if (this._hindsightBank) {
+			const summaryBlock = formatSessionSummariesForPrompt();
+			if (summaryBlock) {
+				appendSections.push(summaryBlock);
+			}
+		}
 		const appendSystemPrompt = appendSections.length > 0 ? appendSections.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
@@ -1098,6 +1571,9 @@ export class AgentSession {
 			selectedTools: validToolNames,
 			toolSnippets,
 			promptGuidelines,
+			// Repo-level frequent-files index — populated asynchronously after boot.
+			// Empty until the first compute resolves; harmless to pass either way.
+			frequentFiles: this._frequentFilesIndex.length > 0 ? this._frequentFilesIndex : undefined,
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}
@@ -1875,6 +2351,22 @@ export class AgentSession {
 			});
 		}
 
+		// Hindsight: persist the compaction summary as a durable session
+		// memory so the next session boot prefixes it back into the prompt.
+		// No-op when hindsight is disabled (the bank registry is empty).
+		if (this._hindsightBank && typeof summary === "string" && summary.length > 0) {
+			try {
+				this._hindsightBank.add({
+					kind: "session-summary",
+					body: summary,
+					subject: this.sessionId,
+					source: { sessionId: this.sessionId },
+				});
+			} catch {
+				// Bank persistence failure should not abort the compaction.
+			}
+		}
+
 		return { summary, firstKeptEntryId, tokensBefore, details };
 	}
 
@@ -2471,7 +2963,7 @@ export class AgentSession {
 					]),
 				)
 			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages },
+					read: { autoResizeImages, embedHashlineAnchors: !this._disableHashlineAnchors },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 				});
 
@@ -2499,9 +2991,18 @@ export class AgentSession {
 		this._bindExtensionCore(this._extensionRunner);
 		this._applyExtensionBindings(this._extensionRunner);
 
+		const hindsightActive = this.settingsManager.getHindsightSettings().enabled
+			? ["retain", "recall", "reflect"]
+			: [];
+		// Default-on gates: web_search and eval are registered as built-in tool
+		// definitions unconditionally (via createAllToolDefinitions above), but
+		// only join the *active* tool surface when their setting resolves enabled.
+		// Both default to true in settings-manager so they ride out-of-the-box.
+		const webSearchActive = this.settingsManager.getWebSearchSettings().enabled ? ["web_search"] : [];
+		const evalActive = this.settingsManager.getEvalSettings().enabled ? ["eval"] : [];
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write", ...hindsightActive, ...webSearchActive, ...evalActive];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -2555,13 +3056,147 @@ export class AgentSession {
 	}
 
 	/**
+	 * Resolve the active fallback chain for the current turn. Returns
+	 * `undefined` if no chain is configured. The chain is computed from
+	 * `resolveRole({role: "default"})` lazily so that path-scoped overrides
+	 * stay live (a cwd change between turns updates the chain).
+	 */
+	private _resolveFallbackChain(): RoleResolution | undefined {
+		try {
+			const roleSettings = this.settingsManager.getModelRoleSettings();
+			if (!roleSettings.modelRoles?.default && !roleSettings.retry?.fallbackChains) {
+				return undefined;
+			}
+			const availableModels = this._modelRegistry.getAll();
+			return resolveRole({
+				role: "default",
+				availableModels,
+				settings: roleSettings,
+				cwd: this._cwd,
+			});
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Pick the next untried entry in the fallback chain. Skips the current
+	 * model (it just failed) and entries already tried this turn.
+	 */
+	private _pickNextFallbackEntry(
+		resolution: RoleResolution,
+	): { model: Model<any>; thinkingLevel: ThinkingLevel } | undefined {
+		const current = this.model;
+		const currentKey = current ? `${current.provider}/${current.id}` : "";
+		// Mark the current entry as tried so we never re-pick it.
+		if (currentKey) this._triedFallbackEntries.add(currentKey);
+		for (const entry of resolution.chain) {
+			const key = `${entry.model.provider}/${entry.model.id}`;
+			if (this._triedFallbackEntries.has(key)) continue;
+			// Skip entries lacking configured auth — they would error immediately.
+			if (!this._modelRegistry.hasConfiguredAuth(entry.model)) {
+				this._triedFallbackEntries.add(key);
+				continue;
+			}
+			// Cross-turn cooldown: if this entry recently ate a retryable failure
+			// (typically a 429), keep skipping it until its cooldown expires.
+			if (isEntryCooledDown(entry.model.provider, entry.model.id)) continue;
+			return entry;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Swap the active model to a fallback chain entry. Mirrors `setModel`
+	 * minus the validation / persistence side-effects (no settings write,
+	 * no model_select event source="set"). The original model is captured
+	 * so a future caller could revert; for now the chain is one-way per
+	 * turn — restoration happens automatically on the next successful turn
+	 * when the user/runtime re-resolves the role.
+	 */
+	private async _activateFallbackEntry(
+		entry: { model: Model<any>; thinkingLevel: ThinkingLevel },
+		reason?: string,
+	): Promise<void> {
+		const previousModel = this.model;
+		if (!this._fallbackOriginal && previousModel) {
+			this._fallbackOriginal = { model: previousModel, thinkingLevel: this.thinkingLevel };
+		}
+		if (previousModel) {
+			this._emit({
+				type: "fallback_warning",
+				from: `${previousModel.provider}/${previousModel.id}`,
+				to: `${entry.model.provider}/${entry.model.id}`,
+				reason: reason ?? "retryable error",
+			});
+		}
+		this.agent.state.model = entry.model;
+		// Clamp thinking level to the new model's capabilities — same logic as
+		// `setModel`. We avoid `setThinkingLevel` because that calls into the
+		// settings manager; a transient fallback should not rewrite defaults.
+		const supported = getSupportedThinkingLevels(entry.model);
+		const desired = entry.thinkingLevel;
+		const clamped = supported.includes(desired) ? desired : clampThinkingLevel(entry.model, desired);
+		this.agent.state.thinkingLevel = clamped as ThinkingLevel;
+		this.sessionManager.appendModelChange(entry.model.provider, entry.model.id);
+		await this._emitModelSelect(entry.model, previousModel, "set");
+	}
+
+	/**
 	 * Prepare a retryable error for continuation with exponential backoff.
+	 *
+	 * When a fallback chain is configured for the active role, the chain is
+	 * walked first: each retryable error swaps the active model to the next
+	 * untried chain entry with NO backoff sleep (rate-limit cooldowns belong
+	 * to the failed entry, not the chain switch). Once the chain is
+	 * exhausted, falls through to legacy exponential-backoff retry on the
+	 * (now last-tried) model.
+	 *
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
 	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled) {
 			return false;
+		}
+
+		// Attempt fallback-chain transition first. Successful transitions
+		// still count as a retry attempt so a misconfigured chain cannot
+		// loop forever.
+		const resolution = this._resolveFallbackChain();
+		const nextEntry = resolution ? this._pickNextFallbackEntry(resolution) : undefined;
+		if (nextEntry) {
+			this._retryAttempt++;
+			if (this._retryAttempt > settings.maxRetries) {
+				this._retryAttempt--;
+				return false;
+			}
+			const previous = this.model;
+			const reason = (message.errorMessage ?? "").slice(0, 80);
+			this._emit({
+				type: "auto_retry_start",
+				attempt: this._retryAttempt,
+				maxAttempts: settings.maxRetries,
+				delayMs: 0,
+				errorMessage: message.errorMessage || "Unknown error",
+			});
+			// Mark the failing entry on the cross-turn cooldown so a future turn
+			// won't immediately re-pick it. Tuned to the role's configured
+			// cooldown (defaults to 5 min in withFallbackChain).
+			if (previous) {
+				const retryCfg = (this.settingsManager.getModelRoleSettings().retry ?? {}) as {
+					cooldownMs?: number;
+				};
+				const cooldownMs = typeof retryCfg.cooldownMs === "number" ? retryCfg.cooldownMs : 300_000;
+				markEntryCooldown(previous.provider, previous.id, cooldownMs);
+			}
+			// Drop the error message before swap so the next turn isn't poisoned.
+			const messages = this.agent.state.messages;
+			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+				this.agent.state.messages = messages.slice(0, -1);
+			}
+			await this._activateFallbackEntry(nextEntry, reason);
+			return true;
 		}
 
 		this._retryAttempt++;

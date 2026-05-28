@@ -12,7 +12,10 @@ import { formatDimensionNote, resizeImage } from "../../utils/image-resize.js";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { prepareWithPathAliases } from "./argument-prep.js";
+import { formatAnchorsForRead, interleaveAnchorsIntoLines } from "./edit-hashline-diff.ts";
+import { formatNotebookSource } from "./notebook-formatter.ts";
 import { resolveReadPath } from "./path-utils.js";
 import { getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -34,7 +37,7 @@ export interface ReadToolDetails {
 }
 
 interface CompactReadClassification {
-	kind: "docs" | "resource" | "skill";
+	kind: "docs" | "resource" | "skill" | "file";
 	label: string;
 }
 
@@ -64,6 +67,14 @@ export interface ReadToolOptions {
 	autoResizeImages?: boolean;
 	/** Custom operations for file reading. Default: local filesystem */
 	operations?: ReadOperations;
+	/** When true, embed compact hashline-edit anchors with full-file text reads. Default: true. */
+	embedHashlineAnchors?: boolean;
+	/**
+	 * How to embed anchors. "block" appends a trailing `<anchors>` block (default,
+	 * lowest disruption to existing rendering). "interleave" prefixes anchored
+	 * lines inline with `L<n> <hash> │ <code>`.
+	 */
+	embedHashlineAnchorsMode?: "block" | "interleave";
 }
 
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
@@ -75,9 +86,9 @@ function formatReadLineRange(args: ReadRenderArgs | undefined, theme: Theme): st
 	return theme.fg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
 }
 
-function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme): string {
+function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme, cwd?: string): string {
 	const rawPath = str(args?.file_path ?? args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath) : null;
+	const path = rawPath !== null ? shortenPath(rawPath, cwd) : null;
 	const invalidArg = invalidArgText(theme);
 	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
 	return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}${formatReadLineRange(args, theme)}`;
@@ -141,7 +152,11 @@ function getCompactReadClassification(
 		return { kind: "resource", label: formatPathRelativeToCwdOrAbsolute(absolutePath, cwd) };
 	}
 
-	return undefined;
+	// Generic file: compact-by-default so the chat reads as a log of which
+	// files were touched, not a wall of file previews. Press ctrl+o to expand
+	// any individual call when you want to see the bytes.
+	const shortened = shortenPath(rawPath, cwd);
+	return { kind: "file", label: shortened || rawPath };
 }
 
 function formatCompactReadCall(
@@ -159,8 +174,9 @@ function formatCompactReadCall(
 		);
 	}
 
+	const title = classification.kind === "file" ? "read" : `read ${classification.kind}`;
 	return (
-		theme.fg("toolTitle", theme.bold(`read ${classification.kind}`)) +
+		theme.fg("toolTitle", theme.bold(title)) +
 		" " +
 		theme.fg("accent", classification.label) +
 		formatReadLineRange(args, theme) +
@@ -189,7 +205,14 @@ function formatReadResult(
 	const maxLines = options.expanded ? lines.length : 10;
 	const displayLines = lines.slice(0, maxLines);
 	const remaining = lines.length - maxLines;
-	let text = `\n${displayLines.map((line) => (lang ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line)))).join("\n")}`;
+	// Body sits on its own paragraph for multi-line output (preserves the
+	// breathing room around code previews); for single-line bodies — most
+	// commonly an ENOENT / EACCES error — we hug the title instead of paying
+	// for a blank line.
+	const body = displayLines
+		.map((line) => (lang ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line))))
+		.join("\n");
+	let text = displayLines.length > 1 ? `\n${body}` : body;
 	if (remaining > 0) {
 		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
 	}
@@ -213,6 +236,8 @@ export function createReadToolDefinition(
 ): ToolDefinition<typeof readSchema, ReadToolDetails | undefined> {
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	const ops = options?.operations ?? defaultReadOperations;
+	const embedHashlineAnchors = options?.embedHashlineAnchors ?? true;
+	const embedHashlineAnchorsMode = options?.embedHashlineAnchorsMode ?? "block";
 	return {
 		name: "read",
 		label: "read",
@@ -236,6 +261,34 @@ Common mistakes to avoid:
 			_onUpdate?,
 			ctx?,
 		) {
+			// URL-scheme dispatch: virtual paths like `pr://1428` are resolved by
+			// registered scheme handlers, not the local filesystem.
+			const schemeMatch = getUrlSchemeRegistry().parse(path);
+			if (schemeMatch) {
+				if (signal?.aborted) throw new Error("Operation aborted");
+				const result = await schemeMatch.resolver.read(schemeMatch.url, { cwd, signal });
+				if (result.kind === "error") {
+					throw new Error(result.error ?? `scheme '${schemeMatch.resolver.scheme}' returned an error`);
+				}
+				let text: string;
+				if (result.kind === "directory") {
+					const entries = result.entries ?? [];
+					text = entries.map((e) => (e.isDir ? `${e.name}/` : e.name)).join("\n");
+				} else {
+					text = result.content ?? "";
+				}
+				// Apply line-wise offset/limit slicing.
+				if (offset !== undefined || limit !== undefined) {
+					const allLines = text.split("\n");
+					const startLine = offset ? Math.max(0, offset - 1) : 0;
+					if (startLine >= allLines.length) {
+						throw new Error(`Offset ${offset} is beyond end of resource (${allLines.length} lines total)`);
+					}
+					const endLine = limit !== undefined ? Math.min(startLine + limit, allLines.length) : allLines.length;
+					text = allLines.slice(startLine, endLine).join("\n");
+				}
+				return { content: [{ type: "text", text } as TextContent], details: undefined };
+			}
 			const absolutePath = resolveReadPath(path, cwd);
 			return new Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }>(
 				(resolve, reject) => {
@@ -292,6 +345,34 @@ Common mistakes to avoid:
 								// Read text content.
 								const buffer = await ops.readFile(absolutePath);
 								const textContent = buffer.toString("utf-8");
+
+								// Jupyter notebooks: parse cells[] and render as flat text. Offset/limit
+								// address CELLS (not lines) so a 200-cell notebook pages like a file.
+								// Falls back to plain-text rendering on parse failure rather than blowing
+								// up — many .ipynb files in the wild have stray trailing content.
+								if (absolutePath.toLowerCase().endsWith(".ipynb")) {
+									try {
+										const formatted = formatNotebookSource(textContent, {
+											offset,
+											limit,
+											name: basename(absolutePath),
+										});
+										let outputText = formatted.text;
+										const startIndex = Math.max(0, (offset ?? 1) - 1);
+										const renderedEnd = startIndex + formatted.renderedCells;
+										if (renderedEnd < formatted.totalCells) {
+											outputText += `\n\n[Showing cells ${startIndex + 1}-${renderedEnd} of ${formatted.totalCells}. Use offset=${renderedEnd + 1} to continue.]`;
+										}
+										content = [{ type: "text", text: outputText }];
+										if (aborted) return;
+										signal?.removeEventListener("abort", onAbort);
+										resolve({ content, details: undefined });
+										return;
+									} catch {
+										// Fall through to the generic text path — better degraded than broken.
+									}
+								}
+
 								const allLines = textContent.split("\n");
 								const totalFileLines = allLines.length;
 								// Apply offset if specified. Convert from 1-indexed input to 0-indexed array access.
@@ -339,6 +420,19 @@ Common mistakes to avoid:
 									// No truncation and no remaining user-limited content.
 									outputText = truncation.content;
 								}
+								// Anchors: on by default, only when caller did not slice the file.
+								if (
+									embedHashlineAnchors &&
+									offset === undefined &&
+									limit === undefined &&
+									!truncation.truncated
+								) {
+									if (embedHashlineAnchorsMode === "interleave") {
+										outputText = interleaveAnchorsIntoLines(outputText);
+									} else {
+										outputText += `\n\n<anchors>\n${formatAnchorsForRead(textContent)}\n</anchors>`;
+									}
+								}
 								content = [{ type: "text", text: outputText }];
 							}
 
@@ -357,7 +451,9 @@ Common mistakes to avoid:
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const classification = !context.expanded ? getCompactReadClassification(args, context.cwd) : undefined;
 			text.setText(
-				classification ? formatCompactReadCall(classification, args, theme) : formatReadCall(args, theme),
+				classification
+					? formatCompactReadCall(classification, args, theme)
+					: formatReadCall(args, theme, context.cwd),
 			);
 			return text;
 		},

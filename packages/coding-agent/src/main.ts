@@ -5,6 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
+import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
@@ -29,7 +30,13 @@ import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
-import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
+import {
+	type ModelRole,
+	resolveCliModel,
+	resolveModelScope,
+	resolveRole,
+	type ScopedModel,
+} from "./core/model-resolver.ts";
 import { flushRawStdout, restoreStdout, takeOverStdout, writeRawStdout } from "./core/output-guard.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
@@ -286,20 +293,30 @@ async function createSessionManager(
 	return SessionManager.create(cwd, sessionDir);
 }
 
+function resolveActiveRole(parsed: Args): ModelRole {
+	// Precedence: explicit --role > flag (--smol/--slow/--plan, rightmost wins
+	// because the parser overrides the others when it sees a flag) > "default".
+	if (parsed.role) return parsed.role;
+	return "default";
+}
+
 function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
 	hasExistingSession: boolean,
 	modelRegistry: ModelRegistry,
 	settingsManager: SettingsManager,
+	cwd: string,
 ): {
 	options: CreateAgentSessionOptions;
 	cliThinkingFromModel: boolean;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
+	role: ModelRole;
 } {
 	const options: CreateAgentSessionOptions = {};
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	let cliThinkingFromModel = false;
+	const role = resolveActiveRole(parsed);
 
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
@@ -323,6 +340,46 @@ function buildSessionOptions(
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
 				cliThinkingFromModel = true;
+			}
+		}
+	}
+
+	// Try role resolution when no --model was given. A configured role's primary
+	// model takes precedence over scopedModels/saved-default fallbacks so that
+	// `--smol` etc. predictably switch the active model.
+	if (!options.model && !hasExistingSession) {
+		const roleSettings = settingsManager.getModelRoleSettings();
+		const isRoleConfigured = role !== "default" || roleSettings.modelRoles?.default !== undefined;
+		if (role !== "default" || isRoleConfigured) {
+			const availableModels = modelRegistry.getAll();
+			// When `--smol`/`--slow`/`--plan` are given a value (e.g.
+			// `--smol claude-sonnet-4-7`), pass it as `cliOverride` so the role's
+			// primary model is overridden for this turn only.
+			const flagOverride =
+				role === "smol" && typeof parsed.smol === "string"
+					? parsed.smol
+					: role === "slow" && typeof parsed.slow === "string"
+						? parsed.slow
+						: role === "plan" && typeof parsed.plan === "string"
+							? parsed.plan
+							: undefined;
+			const resolution = resolveRole({
+				role,
+				cliOverride: flagOverride,
+				availableModels,
+				settings: roleSettings,
+				cwd,
+			});
+			if (resolution) {
+				options.model = resolution.model;
+				if (!parsed.thinking) {
+					options.thinkingLevel = resolution.thinkingLevel;
+				}
+			} else if (role !== "default") {
+				diagnostics.push({
+					type: "warning",
+					message: `Role "${role}" is not configured in settings.modelRoles. Falling back to default model selection.`,
+				});
 			}
 		}
 	}
@@ -377,7 +434,7 @@ function buildSessionOptions(
 		options.tools = [...parsed.tools];
 	}
 
-	return { options, cliThinkingFromModel, diagnostics };
+	return { options, cliThinkingFromModel, diagnostics, role };
 }
 
 function resolveCliPaths(cwd: string, paths: string[] | undefined): string[] | undefined {
@@ -438,6 +495,10 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (process.platform === "win32") {
 		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
+		// Force UTF-8 console output — cp1252 (Windows pt-BR default) crashes on Unicode > 0xFF
+		try {
+			execSync("chcp 65001", { stdio: "ignore" });
+		} catch {}
 	}
 
 	if (await handlePackageCommand(args)) {
@@ -547,6 +608,9 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			authStorage,
+			// Reuse the SettingsManager already built at startup (same cwd/agentDir)
+			// instead of re-reading global+project settings.json a second time.
+			settingsManager: startupSettingsManager,
 			extensionFlagValues: parsed.unknownFlags,
 			permissionModeOverride: parsed.permissionMode,
 			resourceLoaderOptions: {
@@ -559,6 +623,7 @@ export async function main(args: string[], options?: MainOptions) {
 				noPromptTemplates: parsed.noPromptTemplates,
 				noThemes: parsed.noThemes,
 				noContextFiles: parsed.noContextFiles,
+				noLegacyDiscovery: parsed.noLegacyDiscovery,
 				systemPrompt: parsed.systemPrompt,
 				appendSystemPrompt: parsed.appendSystemPrompt,
 				extensionFactories: options?.extensionFactories,
@@ -589,6 +654,7 @@ export async function main(args: string[], options?: MainOptions) {
 			sessionManager.buildSessionContext().messages.length > 0,
 			modelRegistry,
 			settingsManager,
+			cwd,
 		);
 		diagnostics.push(...sessionOptionDiagnostics);
 
@@ -614,6 +680,7 @@ export async function main(args: string[], options?: MainOptions) {
 			tools: sessionOptions.tools,
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
+			disableHashlineAnchors: parsed.noHashlineAnchors,
 		});
 		time("createRuntime-createAgentSessionFromServices");
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;

@@ -15,7 +15,7 @@ import {
 } from "../src/index.js";
 import * as shellModule from "../src/utils/shell.js";
 
-const readTool = createReadTool(process.cwd());
+const readTool = createReadTool(process.cwd(), { embedHashlineAnchors: false });
 const writeTool = createWriteTool(process.cwd());
 const editTool = createEditTool(process.cwd());
 const bashTool = createBashTool(process.cwd());

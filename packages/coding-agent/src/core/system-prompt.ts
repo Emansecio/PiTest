@@ -2,8 +2,11 @@
  * System prompt construction and project context loading
  */
 
+import { SYSTEM_PROMPT_DYNAMIC_MARKER } from "@earendil-works/pi-ai";
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
+import { type FrequentFile, formatFrequentFilesIndexForPrompt } from "./frequent-files.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
+import { getCurrentToolDiscoveryIndex } from "./tool-discovery.ts";
 
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
@@ -22,6 +25,20 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
 	skills?: Skill[];
+	/**
+	 * Optional override for the number of hidden tools discoverable via
+	 * `search_tool_bm25`. When omitted, falls back to
+	 * `getCurrentToolDiscoveryIndex()?.listHidden().length`. When greater than 0,
+	 * a small nudge block is rendered to teach the model about discovery.
+	 */
+	hiddenToolCount?: number;
+	/**
+	 * Repo-level "frequent files" computed at session boot from git history (or
+	 * mtime fallback). Surfaces hot files in the system prompt so the model
+	 * anchors to known-relevant paths before broad search. Rendered AFTER the
+	 * skills block and BEFORE the cache marker.
+	 */
+	frequentFiles?: FrequentFile[];
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -35,8 +52,15 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		cwd,
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
+		hiddenToolCount,
+		frequentFiles,
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
+	const resolvedHiddenToolCount = hiddenToolCount ?? getCurrentToolDiscoveryIndex()?.listHidden().length ?? 0;
+	const hiddenToolsNudge =
+		resolvedHiddenToolCount > 0
+			? '\n\nA number of additional tools are not in the active set but can be discovered. Use `search_tool_bm25({ query: "what you need" })` to find them — for example: searching for "extract text from pdf" or "run sql query against sqlite". The top result will be activated automatically when score is high.'
+			: "";
 
 	const now = new Date();
 	const year = now.getFullYear();
@@ -62,8 +86,19 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			parts.push("</project_context>\n");
 		}
 		if (hasRead && skills.length > 0) {
-			parts.push(formatSkillsForPrompt(skills));
+			parts.push(formatSkillsForPrompt(skills, undefined, cwd));
 		}
+		// Frequent-files block: rendered after skills, before the dynamic marker so
+		// it lives in the cache-stable prefix (session boot value rarely changes).
+		if (frequentFiles && frequentFiles.length > 0) {
+			const block = formatFrequentFilesIndexForPrompt(frequentFiles);
+			if (block.length > 0) {
+				parts.push(`\n\n${block}\n`);
+			}
+		}
+		// Marker separates cache-stable prefix from per-turn dynamic suffix.
+		// Providers (anthropic, bedrock) split here and attach cache_control to prefix only.
+		parts.push(SYSTEM_PROMPT_DYNAMIC_MARKER);
 		parts.push(`\nCurrent date: ${date}`);
 		parts.push(`\nCurrent working directory: ${promptCwd}`);
 	};
@@ -139,8 +174,17 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		);
 	}
 
-	// Always include these
-	addGuideline("Be concise in your responses");
+	// Always include these.
+	// Concise default trims output tokens (5× cost of input). Set PI_NARRATION=1
+	// to re-enable per-step narration between tool calls.
+	const narrationEnabled = typeof process !== "undefined" && process.env.PI_NARRATION === "1";
+	if (narrationEnabled) {
+		addGuideline("Be concise in your responses");
+	} else {
+		addGuideline(
+			"Respond only when the task is done or a question is asked. No preamble, no narration between tool calls, no end-of-turn summary unless requested.",
+		);
+	}
 	addGuideline("Show file paths clearly when working with files");
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
@@ -151,7 +195,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 Available tools:
 ${toolsList}
 
-In addition to the tools above, you may have access to other custom tools depending on the project.
+In addition to the tools above, you may have access to other custom tools depending on the project.${hiddenToolsNudge}
 
 Guidelines:
 ${guidelines}

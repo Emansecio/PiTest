@@ -5,13 +5,20 @@ import { theme } from "../theme/theme.ts";
 
 /**
  * Sanitize text for display in a single-line status.
- * Removes newlines, tabs, carriage returns, and other control characters.
+ *
+ * Replaces line-break-ish whitespace with spaces, strips control characters
+ * that would corrupt the single-line layout, and collapses runs of whitespace.
+ *
+ * Preserves ESC (0x1B) so ANSI colour / style sequences (`\x1b[…m`) survive
+ * intact — extensions surface coloured spinners and progress glyphs through
+ * this channel, and earlier sanitisers were stripping just the ESC byte and
+ * leaving the `[…m` parameter strings as visible literal text in the footer.
  */
 function sanitizeStatusText(text: string): string {
-	// Replace newlines, tabs, carriage returns with space, then collapse multiple spaces
 	return text
-		.replace(/[\r\n\t]/g, " ")
-		.replace(/ +/g, " ")
+		.replace(/[\r\n\t]+/g, " ")
+		.replace(/[\u0000-\u001a\u001c-\u001f\u007f]/g, "")
+		.replace(/\s+/g, " ")
 		.trim();
 }
 
@@ -26,14 +33,49 @@ function formatTokens(count: number): string {
 	return `${Math.round(count / 1000000)}M`;
 }
 
+type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+const KNOWN_THINKING_LEVELS: ReadonlySet<ThinkingLevel> = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+
+function asKnownThinkingLevel(value: unknown): ThinkingLevel {
+	return typeof value === "string" && KNOWN_THINKING_LEVELS.has(value as ThinkingLevel)
+		? (value as ThinkingLevel)
+		: "off";
+}
+
+interface CumulativeTotals {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+}
+
 /**
  * Footer component that shows pwd, token stats, and context usage.
- * Computes token/context stats from session, gets git branch and extension statuses from provider.
+ *
+ * Layout (top to bottom; line 1 is the line closest to the editor):
+ *   1. Identity: `cwd (branch) • session` (left, muted)  |  `model • thinking-level` (right, foreground + thinking color)
+ *   2. Metrics: `↑in ↓out R W $cost ctx%/window (auto)` (dim; ctx% colored)
+ *   3. Optional: extension statuses, single line
+ *
+ * Cumulative usage stats are cached and updated incrementally (tail-only scan)
+ * to keep render O(diff) instead of O(N) per keystroke. Reset on
+ * `invalidate()`, on session swap, or when `entries.length` shrinks (fork,
+ * compaction, /clear).
  */
 export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
+	private statsCacheLen = 0;
+	private statsCacheTotals: CumulativeTotals = {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		cost: 0,
+	};
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -41,6 +83,9 @@ export class FooterComponent implements Component {
 	}
 
 	setSession(session: AgentSession): void {
+		if (this.session !== session) {
+			this.resetStatsCache();
+		}
 		this.session = session;
 	}
 
@@ -49,11 +94,12 @@ export class FooterComponent implements Component {
 	}
 
 	/**
-	 * No-op: git branch caching now handled by provider.
-	 * Kept for compatibility with existing call sites in interactive-mode.
+	 * Drops the cumulative-usage cache. Called by the interactive mode on
+	 * session-info change; safe to call any time. Git branch is handled by the
+	 * data provider (no-op here).
 	 */
 	invalidate(): void {
-		// No-op: git branch is cached/invalidated by provider
+		this.resetStatsCache();
 	}
 
 	/**
@@ -64,159 +110,169 @@ export class FooterComponent implements Component {
 		// Git watcher cleanup handled by provider
 	}
 
-	render(width: number): string[] {
-		const state = this.session.state;
+	private resetStatsCache(): void {
+		this.statsCacheLen = 0;
+		this.statsCacheTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	}
 
-		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
-
-		for (const entry of this.session.sessionManager.getEntries()) {
+	private getCumulativeTotals(): CumulativeTotals {
+		const entries = this.session.sessionManager.getEntries();
+		// Tail-incremental cache: only walk entries beyond the cached length.
+		// If entries shrunk (fork/clear/compaction replace), reset and rescan.
+		if (entries.length < this.statsCacheLen) {
+			this.resetStatsCache();
+		}
+		for (let i = this.statsCacheLen; i < entries.length; i++) {
+			const entry = entries[i];
 			if (entry.type === "message" && entry.message.role === "assistant") {
-				totalInput += entry.message.usage.input;
-				totalOutput += entry.message.usage.output;
-				totalCacheRead += entry.message.usage.cacheRead;
-				totalCacheWrite += entry.message.usage.cacheWrite;
-				totalCost += entry.message.usage.cost.total;
+				this.statsCacheTotals.input += entry.message.usage.input;
+				this.statsCacheTotals.output += entry.message.usage.output;
+				this.statsCacheTotals.cacheRead += entry.message.usage.cacheRead;
+				this.statsCacheTotals.cacheWrite += entry.message.usage.cacheWrite;
+				this.statsCacheTotals.cost += entry.message.usage.cost.total;
 			}
 		}
+		this.statsCacheLen = entries.length;
+		return this.statsCacheTotals;
+	}
 
-		// Calculate context usage from session (handles compaction correctly).
-		// After compaction, tokens are unknown until the next LLM response.
+	render(width: number): string[] {
+		const state = this.session.state;
+		const totals = this.getCumulativeTotals();
+
+		// Context usage from session (handles compaction correctly).
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
 
-		// Replace home directory with ~
+		// --- Identity (line 1) -----------------------------------------------
+		// Left: cwd (branch) • session — `muted` (not dim) so it stays legible
+		// without competing with the model name.
 		let pwd = this.session.sessionManager.getCwd();
 		const home = process.env.HOME || process.env.USERPROFILE;
 		if (home && pwd.startsWith(home)) {
 			pwd = `~${pwd.slice(home.length)}`;
 		}
-
-		// Add git branch if available
 		const branch = this.footerData.getGitBranch();
-		if (branch) {
-			pwd = `${pwd} (${branch})`;
-		}
-
-		// Add session name if set
+		if (branch) pwd = `${pwd} (${branch})`;
 		const sessionName = this.session.sessionManager.getSessionName();
-		if (sessionName) {
-			pwd = `${pwd} • ${sessionName}`;
+		if (sessionName) pwd = `${pwd} • ${sessionName}`;
+
+		// Right: model • thinking-level — foreground + thinking-colored level
+		// so a glance at the bottom of the screen surfaces "what model am I on
+		// and at which budget".
+		const modelName = state.model?.id || "no-model";
+		const showProvider = this.footerData.getAvailableProviderCount() > 1 && state.model;
+		const providerPrefix = showProvider ? `(${state.model!.provider}) ` : "";
+
+		let identityRight: string;
+		if (state.model?.reasoning) {
+			const level = asKnownThinkingLevel(state.thinkingLevel);
+			const levelLabel = level === "off" ? "thinking off" : level;
+			const colorize = theme.getThinkingBorderColor(level);
+			identityRight = `${providerPrefix}${modelName} • ${colorize(levelLabel)}`;
+		} else {
+			identityRight = `${providerPrefix}${modelName}`;
 		}
 
-		// Build stats line
-		const statsParts = [];
-		if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
-		if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
-		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
-		if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
+		const identityLine = composeLeftRight(pwd, identityRight, width, {
+			leftColor: (text) => theme.fg("muted", text),
+			// identityRight is already partly colored (the level token); apply
+			// foreground to the rest by leaving it as-is — it's the brightest
+			// row in the footer block on purpose.
+			rightColor: (text) => text,
+			ellipsis: theme.fg("muted", "..."),
+		});
 
-		// Show cost with "(sub)" indicator if using OAuth subscription
+		// --- Metrics (line 2) ------------------------------------------------
+		const statsParts: string[] = [];
+		if (totals.input) statsParts.push(`↑${formatTokens(totals.input)}`);
+		if (totals.output) statsParts.push(`↓${formatTokens(totals.output)}`);
+		if (totals.cacheRead) statsParts.push(`R${formatTokens(totals.cacheRead)}`);
+		if (totals.cacheWrite) statsParts.push(`W${formatTokens(totals.cacheWrite)}`);
+
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
-		if (totalCost || usingSubscription) {
-			const costStr = `$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-			statsParts.push(costStr);
+		if (totals.cost || usingSubscription) {
+			statsParts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
 		}
 
-		// Colorize context percentage based on usage
-		let contextPercentStr: string;
 		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
-		const contextPercentDisplay =
+		const contextDisplay =
 			contextPercent === "?"
 				? `?/${formatTokens(contextWindow)}${autoIndicator}`
 				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
-		if (contextPercentValue > 90) {
-			contextPercentStr = theme.fg("error", contextPercentDisplay);
-		} else if (contextPercentValue > 70) {
-			contextPercentStr = theme.fg("warning", contextPercentDisplay);
-		} else {
-			contextPercentStr = contextPercentDisplay;
-		}
-		statsParts.push(contextPercentStr);
+		// Inline color on the context-percent token only. Wrap with explicit
+		// reset so the outer dim of the metrics line resumes correctly.
+		const ctxColored =
+			contextPercentValue > 90
+				? theme.fg("error", contextDisplay)
+				: contextPercentValue > 70
+					? theme.fg("warning", contextDisplay)
+					: contextDisplay;
+		statsParts.push(ctxColored);
 
-		let statsLeft = statsParts.join(" ");
+		const metricsLine = composeLeftRight(statsParts.join(" "), "", width, {
+			leftColor: (text) => theme.fg("dim", text),
+			rightColor: (text) => text,
+			ellipsis: theme.fg("dim", "..."),
+		});
 
-		// Add model name on the right side, plus thinking level if model supports it
-		const modelName = state.model?.id || "no-model";
+		const lines = [identityLine, metricsLine];
 
-		let statsLeftWidth = visibleWidth(statsLeft);
-
-		// If statsLeft is too wide, truncate it
-		if (statsLeftWidth > width) {
-			statsLeft = truncateToWidth(statsLeft, width, "...");
-			statsLeftWidth = visibleWidth(statsLeft);
-		}
-
-		// Calculate available space for padding (minimum 2 spaces between stats and model)
-		const minPadding = 2;
-
-		// Add thinking level indicator if model supports reasoning
-		let rightSideWithoutProvider = modelName;
-		if (state.model?.reasoning) {
-			const thinkingLevel = state.thinkingLevel || "off";
-			rightSideWithoutProvider =
-				thinkingLevel === "off" ? `${modelName} • thinking off` : `${modelName} • ${thinkingLevel}`;
-		}
-
-		// Prepend the provider in parentheses if there are multiple providers and there's enough room
-		let rightSide = rightSideWithoutProvider;
-		if (this.footerData.getAvailableProviderCount() > 1 && state.model) {
-			rightSide = `(${state.model!.provider}) ${rightSideWithoutProvider}`;
-			if (statsLeftWidth + minPadding + visibleWidth(rightSide) > width) {
-				// Too wide, fall back
-				rightSide = rightSideWithoutProvider;
-			}
-		}
-
-		const rightSideWidth = visibleWidth(rightSide);
-		const totalNeeded = statsLeftWidth + minPadding + rightSideWidth;
-
-		let statsLine: string;
-		if (totalNeeded <= width) {
-			// Both fit - add padding to right-align model
-			const padding = " ".repeat(width - statsLeftWidth - rightSideWidth);
-			statsLine = statsLeft + padding + rightSide;
-		} else {
-			// Need to truncate right side
-			const availableForRight = width - statsLeftWidth - minPadding;
-			if (availableForRight > 0) {
-				const truncatedRight = truncateToWidth(rightSide, availableForRight, "");
-				const truncatedRightWidth = visibleWidth(truncatedRight);
-				const padding = " ".repeat(Math.max(0, width - statsLeftWidth - truncatedRightWidth));
-				statsLine = statsLeft + padding + truncatedRight;
-			} else {
-				// Not enough space for right side at all
-				statsLine = statsLeft;
-			}
-		}
-
-		// Apply dim to each part separately. statsLeft may contain color codes (for context %)
-		// that end with a reset, which would clear an outer dim wrapper. So we dim the parts
-		// before and after the colored section independently.
-		const dimStatsLeft = theme.fg("dim", statsLeft);
-		const remainder = statsLine.slice(statsLeft.length); // padding + rightSide
-		const dimRemainder = theme.fg("dim", remainder);
-
-		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-		const lines = [pwdLine, dimStatsLeft + dimRemainder];
-
-		// Add extension statuses on a single line, sorted by key alphabetically
+		// --- Extension statuses (line 3, optional) ---------------------------
 		const extensionStatuses = this.footerData.getExtensionStatuses();
 		if (extensionStatuses.size > 0) {
 			const sortedStatuses = Array.from(extensionStatuses.entries())
 				.sort(([a], [b]) => a.localeCompare(b))
 				.map(([, text]) => sanitizeStatusText(text));
 			const statusLine = sortedStatuses.join(" ");
-			// Truncate to terminal width with dim ellipsis for consistency with footer style
 			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
 		}
 
 		return lines;
 	}
+}
+
+interface ComposeOptions {
+	leftColor: (text: string) => string;
+	rightColor: (text: string) => string;
+	ellipsis: string;
+}
+
+/**
+ * Render a single line with `left` flushed left and `right` flushed right,
+ * padded with spaces in between, never exceeding `width`. Truncates the right
+ * side first; if the left is itself too wide, truncate it as well.
+ *
+ * Color wrappers receive the truncated raw text (no width math inside the
+ * wrappers) so callers don't need to worry about ANSI-escape-aware truncation.
+ */
+function composeLeftRight(rawLeft: string, rawRight: string, width: number, options: ComposeOptions): string {
+	const minPadding = rawLeft.length > 0 && rawRight.length > 0 ? 2 : 0;
+	let left = rawLeft;
+	let right = rawRight;
+	let leftWidth = visibleWidth(left);
+	let rightWidth = visibleWidth(right);
+
+	if (leftWidth > width) {
+		left = truncateToWidth(left, width, "...");
+		leftWidth = visibleWidth(left);
+		right = "";
+		rightWidth = 0;
+	} else if (leftWidth + minPadding + rightWidth > width) {
+		const available = width - leftWidth - minPadding;
+		if (available > 0) {
+			right = truncateToWidth(right, available, "");
+			rightWidth = visibleWidth(right);
+		} else {
+			right = "";
+			rightWidth = 0;
+		}
+	}
+
+	const padding = " ".repeat(Math.max(0, width - leftWidth - rightWidth));
+	const styledLeft = options.leftColor(left);
+	const styledRight = options.rightColor(right);
+	return rightWidth > 0 ? styledLeft + padding + styledRight : styledLeft + padding;
 }

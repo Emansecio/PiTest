@@ -2,6 +2,10 @@ import { parse as partialParse } from "partial-json";
 
 const VALID_JSON_ESCAPES = new Set(['"', "\\", "/", "b", "f", "n", "r", "t", "u"]);
 
+function isHexDigit(c: number): boolean {
+	return (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102);
+}
+
 function isControlCharacter(char: string): boolean {
 	const codePoint = char.codePointAt(0);
 	return codePoint !== undefined && codePoint >= 0x00 && codePoint <= 0x1f;
@@ -32,12 +36,12 @@ function escapeControlCharacter(char: string): string {
 export function repairJson(json: string): string {
 	const parts: string[] = [];
 	let inString = false;
+	let rangeStart = 0;
 
 	for (let index = 0; index < json.length; index++) {
 		const char = json[index];
 
 		if (!inString) {
-			parts.push(char!);
 			if (char === '"') {
 				inString = true;
 			}
@@ -45,7 +49,6 @@ export function repairJson(json: string): string {
 		}
 
 		if (char === '"') {
-			parts.push(char);
 			inString = false;
 			continue;
 		}
@@ -53,32 +56,42 @@ export function repairJson(json: string): string {
 		if (char === "\\") {
 			const nextChar = json[index + 1];
 			if (nextChar === undefined) {
-				parts.push("\\\\");
+				parts.push(json.substring(rangeStart, index), "\\\\");
+				rangeStart = index + 1;
 				continue;
 			}
 
 			if (nextChar === "u") {
-				const unicodeDigits = json.slice(index + 2, index + 6);
-				if (/^[0-9a-fA-F]{4}$/.test(unicodeDigits)) {
-					parts.push(`\\u${unicodeDigits}`);
+				if (
+					index + 5 < json.length &&
+					isHexDigit(json.charCodeAt(index + 2)) &&
+					isHexDigit(json.charCodeAt(index + 3)) &&
+					isHexDigit(json.charCodeAt(index + 4)) &&
+					isHexDigit(json.charCodeAt(index + 5))
+				) {
 					index += 5;
 					continue;
 				}
 			}
 
 			if (VALID_JSON_ESCAPES.has(nextChar)) {
-				parts.push(`\\${nextChar}`);
 				index += 1;
 				continue;
 			}
 
-			parts.push("\\\\");
+			parts.push(json.substring(rangeStart, index), "\\\\");
+			rangeStart = index + 1;
 			continue;
 		}
 
-		parts.push(isControlCharacter(char!) ? escapeControlCharacter(char!) : char!);
+		if (isControlCharacter(char!)) {
+			parts.push(json.substring(rangeStart, index), escapeControlCharacter(char!));
+			rangeStart = index + 1;
+		}
 	}
 
+	if (parts.length === 0) return json;
+	parts.push(json.substring(rangeStart));
 	return parts.join("");
 }
 
@@ -94,13 +107,6 @@ export function parseJsonWithRepair<T>(json: string): T {
 	}
 }
 
-/**
- * Attempts to parse potentially incomplete JSON during streaming.
- * Always returns a valid object, even if the JSON is incomplete.
- *
- * @param partialJson The partial JSON string from streaming
- * @returns Parsed object or empty object if parsing fails
- */
 /**
  * Finalizes streaming JSON into parsed arguments at content_block_stop.
  * Unlike parseStreamingJson, returns a parseError flag when all parsers
@@ -130,6 +136,13 @@ export function finalizeStreamingJson<T = Record<string, unknown>>(
 	}
 }
 
+/**
+ * Attempts to parse potentially incomplete JSON during streaming.
+ * Always returns a valid object, even if the JSON is incomplete.
+ *
+ * @param partialJson The partial JSON string from streaming
+ * @returns Parsed object or empty object if parsing fails
+ */
 export function parseStreamingJson<T = Record<string, unknown>>(partialJson: string | undefined): T {
 	if (!partialJson || partialJson.trim() === "") {
 		return {} as T;

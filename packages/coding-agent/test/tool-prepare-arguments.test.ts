@@ -33,7 +33,7 @@ describe("read tool: prepareArguments aliases", () => {
 	it("normalizes file_path -> path and executes", async () => {
 		const file = join(dir, "a.txt");
 		writeFileSync(file, "hello\n");
-		const def = createReadToolDefinition(dir);
+		const def = createReadToolDefinition(dir, { embedHashlineAnchors: false });
 		const prepared = def.prepareArguments!({ file_path: file });
 		expect(prepared).toEqual({ path: file });
 		const ctx = {} as Parameters<typeof def.execute>[4];

@@ -71,10 +71,11 @@ export interface GrepToolOptions {
 function formatGrepCall(
 	args: { pattern: string; path?: string; glob?: string; limit?: number } | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	cwd?: string,
 ): string {
 	const pattern = str(args?.pattern);
 	const rawPath = str(args?.path);
-	const path = rawPath !== null ? shortenPath(rawPath || ".") : null;
+	const path = rawPath !== null ? shortenPath(rawPath || ".", cwd) : null;
 	const glob = str(args?.glob);
 	const limit = args?.limit;
 	const invalidArg = invalidArgText(theme);
@@ -307,6 +308,15 @@ export function createGrepToolDefinition(
 							}
 							if (!killedDueToLimit && code !== 0 && code !== 1) {
 								const errorMsg = stderr.trim() || `ripgrep exited with code ${code}`;
+								// A regex-parse error on a user-supplied pattern (often a flag-like
+								// string with backslashes, e.g. "--pre=C:\\path\\x") should not crash
+								// the tool. Surface it as "no matches" so callers can refine instead.
+								if (/regex parse error/i.test(errorMsg)) {
+									settle(() =>
+										resolve({ content: [{ type: "text", text: "No matches found" }], details: undefined }),
+									);
+									return;
+								}
 								settle(() => reject(new Error(errorMsg)));
 								return;
 							}
@@ -373,7 +383,7 @@ export function createGrepToolDefinition(
 		},
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatGrepCall(args, theme));
+			text.setText(formatGrepCall(args, theme, context.cwd));
 			return text;
 		},
 		renderResult(result, options, theme, context) {

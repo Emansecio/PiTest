@@ -13,9 +13,9 @@ import { createHarness, type Harness } from "../harness.js";
 describe("edit tool: alias and shape normalization (e2e)", () => {
 	const harnesses: Harness[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (harnesses.length > 0) {
-			harnesses.pop()?.cleanup();
+			await harnesses.pop()?.cleanup();
 		}
 	});
 
