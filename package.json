@@ -11,8 +11,8 @@
 	],
 	"scripts": {
 		"clean": "npm run clean --workspaces",
-		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
-		"check": "biome check --error-on-warnings . && tsgo --noEmit && npm run check:browser-smoke && npm run check:generated",
+		"build": "node scripts/build-parallel.mjs",
+		"check": "node scripts/check-parallel.mjs",
 		"check:fix": "biome check --write --error-on-warnings .",
 		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
 		"check:generated": "node scripts/check-generated-models.mjs",

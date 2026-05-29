@@ -4,7 +4,6 @@ import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
-import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
 import { theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import {
@@ -182,27 +181,57 @@ export interface BashToolOptions {
 	spawnHook?: BashSpawnHook;
 }
 
-const BASH_PREVIEW_LINES = 5;
+const BASH_PREVIEW_LINES = 0;
 const BASH_UPDATE_THROTTLE_MS = 100;
+// Below this, a successful command's `Took Xs` footer is pure noise — the
+// duration carries no signal, so we drop it (kept on error/truncation/slow).
+const BASH_SLOW_FOOTER_MS = 2000;
 
 type BashRenderState = {
 	startedAt: number | undefined;
 	endedAt: number | undefined;
 	interval: NodeJS.Timeout | undefined;
+	// Count of collapsed (hidden) output lines, set by the result body and read
+	// by the call/title component so the `(N earlier lines, …)` hint rides on the
+	// command line instead of costing its own row. Logical-line based (not visual)
+	// so it's width-independent — no cross-component render-order race.
+	skippedHint: number | undefined;
 };
 
-type BashResultRenderState = {
-	cachedWidth: number | undefined;
-	cachedLines: string[] | undefined;
-	cachedSkipped: number | undefined;
-};
+class BashResultRenderComponent extends Container {}
 
-class BashResultRenderComponent extends Container {
-	state: BashResultRenderState = {
-		cachedWidth: undefined,
-		cachedLines: undefined,
-		cachedSkipped: undefined,
-	};
+/**
+ * Title component for a bash call. Renders the `$ command` line and, when the
+ * result body has collapsed output, appends the `(N earlier lines, …to expand)`
+ * hint to that same line so it costs no extra row. The skipped count is read
+ * from the shared call state at render(width) time — after the result renderer
+ * set it during the same rebuild — so the hint is always current with no extra
+ * render pass.
+ */
+class BashCallRenderComponent {
+	args: { command?: string; timeout?: number } | undefined;
+	expanded = false;
+	callState: BashRenderState | undefined;
+	private cacheKey: string | undefined;
+	private cacheLines: string[] | undefined;
+
+	render(width: number): string[] {
+		const skipped = this.expanded ? 0 : (this.callState?.skippedHint ?? 0);
+		const key = `${width} ${skipped} ${this.expanded ? 1 : 0} ${str(this.args?.command) ?? ""} ${this.args?.timeout ?? ""}`;
+		if (this.cacheLines !== undefined && this.cacheKey === key) return this.cacheLines;
+		let title = formatBashCall(this.args, this.expanded);
+		if (skipped > 0) {
+			title += ` ${theme.fg("muted", `(${skipped} earlier lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
+		}
+		this.cacheLines = new Text(title, 0, 0).render(width);
+		this.cacheKey = key;
+		return this.cacheLines;
+	}
+
+	invalidate(): void {
+		this.cacheKey = undefined;
+		this.cacheLines = undefined;
+	}
 }
 
 function formatDuration(ms: number): string {
@@ -271,8 +300,8 @@ function rebuildBashResultRenderComponent(
 	startedAt: number | undefined,
 	endedAt: number | undefined,
 	isError: boolean,
+	callState: BashRenderState,
 ): void {
-	const state = component.state;
 	component.clear();
 
 	const rawOutput = getTextOutput(result as any, showImages).trim();
@@ -282,36 +311,28 @@ function rebuildBashResultRenderComponent(
 	const output = failure ? failure.body : rawOutput;
 	const emptyOutput = output.length === 0 || output === "(no output)";
 
+	// Default: nothing hidden. The collapsed branch below overrides this; the
+	// title component reads it to decide whether to show the inline hint.
+	callState.skippedHint = 0;
+
 	if (!emptyOutput) {
-		const styledOutput = output
-			.split("\n")
-			.map((line) => theme.fg("toolOutput", line))
-			.join("\n");
+		const logicalLines = output.split("\n");
 
 		if (options.expanded) {
+			const styledOutput = logicalLines.map((line) => theme.fg("toolOutput", line)).join("\n");
 			component.addChild(new Text(`\n${styledOutput}`, 0, 0));
 		} else {
+			// Show only the last N logical lines, each clipped to one visual row,
+			// so the body footprint is a fixed N rows. The count of hidden lines
+			// is handed to the title component to render on the command line.
+			// `slice(-0)` returns the whole array, so guard the "command-only" case
+			// (BASH_PREVIEW_LINES === 0) explicitly.
+			const previewLines = BASH_PREVIEW_LINES > 0 ? logicalLines.slice(-BASH_PREVIEW_LINES) : [];
+			callState.skippedHint = logicalLines.length - previewLines.length;
 			component.addChild({
-				render: (width: number) => {
-					if (state.cachedLines === undefined || state.cachedWidth !== width) {
-						const preview = truncateToVisualLines(styledOutput, BASH_PREVIEW_LINES, width);
-						state.cachedLines = preview.visualLines;
-						state.cachedSkipped = preview.skippedCount;
-						state.cachedWidth = width;
-					}
-					if (state.cachedSkipped && state.cachedSkipped > 0) {
-						const hint =
-							theme.fg("muted", `... (${state.cachedSkipped} earlier lines,`) +
-							` ${keyHint("app.tools.expand", "to expand")})`;
-						return ["", truncateToWidth(hint, width, "..."), ...(state.cachedLines ?? [])];
-					}
-					return ["", ...(state.cachedLines ?? [])];
-				},
-				invalidate: () => {
-					state.cachedWidth = undefined;
-					state.cachedLines = undefined;
-					state.cachedSkipped = undefined;
-				},
+				render: (width: number) =>
+					previewLines.map((line) => theme.fg("toolOutput", truncateToWidth(line, width, "…"))),
+				invalidate: () => {},
 			});
 		}
 	}
@@ -348,9 +369,16 @@ function rebuildBashResultRenderComponent(
 		footerParts.push(failure.label);
 	}
 	if (startedAt !== undefined) {
-		const label = options.isPartial ? "Elapsed" : "Took";
 		const endTime = endedAt ?? Date.now();
-		footerParts.push(`${label} ${formatDuration(endTime - startedAt)}`);
+		const elapsed = endTime - startedAt;
+		// Surface duration only when it carries signal: live (streaming),
+		// errored, truncated, or genuinely slow. A fast successful command's
+		// `Took 0.1s` is noise, so it's dropped to save the footer line.
+		const showDuration = options.isPartial || isError || hasWarnings || elapsed >= BASH_SLOW_FOOTER_MS;
+		if (showDuration) {
+			const label = options.isPartial ? "Elapsed" : "Took";
+			footerParts.push(`${label} ${formatDuration(elapsed)}`);
+		}
 	}
 	if (footerParts.length === 0) {
 		return;
@@ -521,9 +549,15 @@ Common mistakes to avoid:
 				state.startedAt = Date.now();
 				state.endedAt = undefined;
 			}
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatBashCall(args, context.expanded));
-			return text;
+			const comp =
+				context.lastComponent instanceof BashCallRenderComponent
+					? context.lastComponent
+					: new BashCallRenderComponent();
+			comp.args = args;
+			comp.expanded = context.expanded;
+			comp.callState = state;
+			comp.invalidate();
+			return comp;
 		},
 		renderResult(result, options, _theme, context) {
 			const state = context.state;
@@ -547,6 +581,7 @@ Common mistakes to avoid:
 				state.startedAt,
 				state.endedAt,
 				context.isError,
+				state,
 			);
 			component.invalidate();
 			return component;

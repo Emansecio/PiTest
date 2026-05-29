@@ -491,7 +491,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toMatch(/\(no output\) · exit 2 · Took \d+\.\ds/);
 	});
 
-	test("keeps preview body but appends exit chip to Took line on bash failure", () => {
+	test("collapses output but appends exit chip to Took line on bash failure", () => {
 		const component = new ToolExecutionComponent(
 			"bash",
 			"tool-bash-fold-output",
@@ -512,7 +512,9 @@ describe("ToolExecutionComponent parity", () => {
 		);
 
 		const rendered = stripAnsi(component.render(120).join("\n"));
-		expect(rendered).toContain("Error: Cannot find module 'missing.js'");
+		// Body is collapsed behind the inline hint; raw error text only surfaces on expand.
+		expect(rendered).not.toContain("Error: Cannot find module 'missing.js'");
+		expect(rendered).toContain("earlier lines");
 		expect(rendered).not.toContain("Command exited with code 1");
 		expect(rendered).toMatch(/Took \d+\.\ds · exit 1|exit 1 · Took/);
 	});
@@ -559,7 +561,7 @@ describe("ToolExecutionComponent parity", () => {
 		expect(timedOutTxt).toContain("timed out 5s");
 	});
 
-	test("keeps successful bash footer unchanged (no exit chip, no leading no-output)", () => {
+	test("drops the duration footer for a fast successful bash command", () => {
 		const component = new ToolExecutionComponent(
 			"bash",
 			"tool-bash-success",
@@ -574,8 +576,38 @@ describe("ToolExecutionComponent parity", () => {
 
 		const rendered = stripAnsi(component.render(120).join("\n"));
 		expect(rendered).toContain("hi");
-		expect(rendered).toMatch(/Took \d+\.\ds/);
+		// Fast + successful + no warnings → `Took Xs` is noise and is suppressed.
+		expect(rendered).not.toMatch(/Took \d+\.\ds/);
 		expect(rendered).not.toContain("exit ");
 		expect(rendered).not.toContain("·");
+	});
+
+	test("rides the collapsed-output hint on the command line and previews only the tail", () => {
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-collapsed",
+			{ command: "seq 8" },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		component.updateResult(
+			{ content: [{ type: "text", text: "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8" }], details: undefined, isError: false },
+			false,
+		);
+
+		const lines = stripAnsi(component.render(120).join("\n")).split("\n");
+		// Hint shares the command line (8 lines, preview keeps 0 → all 8 hidden).
+		const commandLine = lines.find((l) => l.includes("$ seq 8"));
+		expect(commandLine).toBeDefined();
+		expect(commandLine).toContain("8 earlier lines");
+		expect(commandLine).toContain("to expand");
+		// No tail preview; output lines are not rendered inline.
+		// (Each rendered line carries the message-shell gutter prefix, so match the tail.)
+		expect(lines.some((l) => l.trimEnd().endsWith("l8"))).toBe(false);
+		expect(lines.some((l) => l.trimEnd().endsWith("l7"))).toBe(false);
+		expect(lines.some((l) => l.trimEnd().endsWith("l1"))).toBe(false);
 	});
 });

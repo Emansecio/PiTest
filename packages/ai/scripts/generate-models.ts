@@ -222,6 +222,9 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.id.includes("opus-4-7") || model.id.includes("opus-4.7")) {
 		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
 	}
+	if (model.id.includes("opus-4-8") || model.id.includes("opus-4.8")) {
+		mergeThinkingLevelMap(model, { xhigh: "xhigh" });
+	}
 	if (model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
 		mergeThinkingLevelMap(model, DEEPSEEK_V4_THINKING_LEVEL_MAP);
 	}
@@ -1841,6 +1844,22 @@ async function generateModels() {
 			baseUrl: "",
 		}));
 	allModels.push(...azureOpenAiModels);
+
+	// Replicate Claude Opus 4.7 profiles as 4.8 across every provider until
+	// upstream ships dedicated entries. Inherits pricing, context, headers, and
+	// base URL; applyThinkingLevelMetadata below stamps the 4.8 xhigh map.
+	for (const m of [...allModels]) {
+		if (!/opus-4[-.]7/.test(m.id)) continue;
+		const id48 = m.id.replace(/opus-4-7/g, "opus-4-8").replace(/opus-4\.7/g, "opus-4.8");
+		if (allModels.some((x) => x.provider === m.provider && x.id === id48)) continue;
+		allModels.push({
+			...m,
+			id: id48,
+			name: m.name.replace(/4\.7/g, "4.8").replace(/4-7/g, "4-8"),
+			cost: { ...m.cost },
+			...(m.thinkingLevelMap ? { thinkingLevelMap: { ...m.thinkingLevelMap } } : {}),
+		});
+	}
 
 	for (const model of allModels) {
 		applyThinkingLevelMetadata(model);

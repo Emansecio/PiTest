@@ -1354,13 +1354,18 @@ export class InteractiveMode {
 	}
 
 	private createWorkingLoader(): Loader {
-		return new Loader(
+		const loader = new Loader(
 			this.ui,
 			workingPulsePalette(),
 			(text) => theme.fg("muted", text),
 			this.getWorkingLoaderMessage(),
 			this.workingIndicatorOptions,
 		);
+		// Show a per-turn elapsed counter. A fresh loader is built at each
+		// agent_start (turn start) and lives until agent_end, so the clock
+		// measures the whole turn rather than any single agent step.
+		loader.setElapsedEnabled(true);
+		return loader;
 	}
 
 	private stopWorkingLoader(): void {

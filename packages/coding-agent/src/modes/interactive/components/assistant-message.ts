@@ -1,6 +1,16 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { ReadingColumn } from "./reading-column.ts";
+
+/**
+ * Max width (in columns) for assistant prose. On wide terminals the body text
+ * is capped to this so lines stay a comfortable reading length instead of
+ * running edge to edge; the gutter and full-width rules are unaffected. Only
+ * assistant text/thinking is capped — tool output, bash, and code blocks keep
+ * full width. Tune here (a settings-backed value is a possible follow-up).
+ */
+const ASSISTANT_READING_COLUMNS = 100;
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -90,7 +100,12 @@ export class AssistantMessageComponent extends Container {
 			if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
-				this.contentContainer.addChild(new Markdown(content.text.trim(), 1, 0, this.markdownTheme));
+				this.contentContainer.addChild(
+					new ReadingColumn(
+						new Markdown(content.text.trim(), 1, 0, this.markdownTheme),
+						ASSISTANT_READING_COLUMNS,
+					),
+				);
 			} else if (content.type === "thinking" && content.thinking.trim()) {
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
@@ -109,10 +124,13 @@ export class AssistantMessageComponent extends Container {
 				} else {
 					// Thinking traces in thinkingText color, italic
 					this.contentContainer.addChild(
-						new Markdown(content.thinking.trim(), 1, 0, this.markdownTheme, {
-							color: (text: string) => theme.fg("thinkingText", text),
-							italic: true,
-						}),
+						new ReadingColumn(
+							new Markdown(content.thinking.trim(), 1, 0, this.markdownTheme, {
+								color: (text: string) => theme.fg("thinkingText", text),
+								italic: true,
+							}),
+							ASSISTANT_READING_COLUMNS,
+						),
 					);
 					if (hasVisibleContentAfter) {
 						this.contentContainer.addChild(new Spacer(1));
