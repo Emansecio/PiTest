@@ -150,6 +150,35 @@ describe("parseArgs", () => {
 			const result = parseArgs(["--models", "gpt-4o,claude-sonnet,gemini-pro"]);
 			expect(result.models).toEqual(["gpt-4o", "claude-sonnet", "gemini-pro"]);
 		});
+
+		test("parses --permission-mode auto", () => {
+			const result = parseArgs(["--permission-mode", "auto"]);
+			expect(result.permissionMode).toBe("auto");
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("parses --permission-mode yolo as auto", () => {
+			const result = parseArgs(["--permission-mode", "yolo"]);
+			expect(result.permissionMode).toBe("auto");
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("parses --permission-mode plan", () => {
+			const result = parseArgs(["--permission-mode", "plan"]);
+			expect(result.permissionMode).toBe("plan");
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("warns on invalid --permission-mode", () => {
+			const result = parseArgs(["--permission-mode", "default"]);
+			expect(result.permissionMode).toBeUndefined();
+			expect(result.diagnostics).toEqual([
+				{
+					type: "warning",
+					message: 'Invalid permission mode "default". Valid values: auto/yolo, plan.',
+				},
+			]);
+		});
 	});
 
 	describe("--no-session flag", () => {

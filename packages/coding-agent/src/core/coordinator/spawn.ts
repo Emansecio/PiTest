@@ -19,9 +19,9 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
-import { type Message, modelsAreEqual, streamSimple } from "@earendil-works/pi-ai";
+import { Agent, type AgentMessage, type AgentTool } from "@pit/agent-core";
+import type { Model } from "@pit/ai";
+import { type Message, modelsAreEqual, streamSimple } from "@pit/ai";
 import { Value } from "typebox/value";
 import type { ModelRegistry } from "../model-registry.ts";
 import { recordSubagentResult } from "./agent-url.ts";
@@ -96,10 +96,10 @@ interface WorktreeHandle {
 }
 
 async function createWorktree(parentCwd: string, taskName: string, spec: WorktreeSpec): Promise<WorktreeHandle> {
-	const root = resolve(parentCwd, ".pi", "worktreesParent");
+	const root = resolve(parentCwd, ".pit", "worktreesParent");
 	const safeName = taskName.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 40) || "task";
-	const dir = join(parentCwd, ".pi", "worktrees", `${safeName}-${randomUUID().slice(0, 8)}`);
-	await mkdir(join(parentCwd, ".pi", "worktrees"), { recursive: true });
+	const dir = join(parentCwd, ".pit", "worktrees", `${safeName}-${randomUUID().slice(0, 8)}`);
+	await mkdir(join(parentCwd, ".pit", "worktrees"), { recursive: true });
 	// Use --detach so the worktree is on a detached HEAD copy of current HEAD;
 	// this avoids branch conflicts and keeps the parent branch untouched.
 	const args = ["worktree", "add", "--detach", dir, spec.branch ?? "HEAD"];

@@ -1,5 +1,5 @@
 {
-	"name": "@earendil-works/pi-tui",
+	"name": "@pit/tui",
 	"version": "0.75.3",
 	"description": "Terminal User Interface library with differential rendering for efficient text-based applications",
 	"type": "module",
@@ -23,7 +23,7 @@
 		"typescript",
 		"cli"
 	],
-	"author": "Mario Zechner",
+	"author": "PiTuned",
 	"license": "MIT",
 	"repository": {
 		"type": "git",

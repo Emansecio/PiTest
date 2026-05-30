@@ -1,5 +1,5 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Text } from "@earendil-works/pi-tui";
+import type { AgentTool } from "@pit/agent-core";
+import { Text } from "@pit/tui";
 import { access, readdir, stat } from "fs/promises";
 import nodePath from "path";
 import { type Static, Type } from "typebox";

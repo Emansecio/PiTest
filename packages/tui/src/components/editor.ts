@@ -458,11 +458,11 @@ export class Editor implements Component, Focusable {
 
 		const horizontal = this.borderColor("─");
 
-		// Layout the text. Optional perf probe: set PI_EDITOR_PERF=1 to log layout
+		// Layout the text. Optional perf probe: set PIT_EDITOR_PERF=1 to log layout
 		// cost per render (use with a realistic multi-line / CJK draft to measure
 		// the word-wrap cache win). Zero overhead when the env var is unset.
 		let layoutLines: LayoutLine[];
-		if (process.env.PI_EDITOR_PERF) {
+		if (process.env.PIT_EDITOR_PERF) {
 			const t0 = performance.now();
 			layoutLines = this.layoutText(layoutWidth);
 			const dt = performance.now() - t0;

@@ -6,7 +6,7 @@ import {
 	getCredentialPool,
 } from "../src/credential-pool.js";
 
-const originalCooldownMs = process.env.PI_KEY_COOLDOWN_MS;
+const originalCooldownMs = process.env.PIT_KEY_COOLDOWN_MS;
 
 describe("CredentialPool", () => {
 	let pool: CredentialPool;
@@ -18,9 +18,9 @@ describe("CredentialPool", () => {
 
 	afterEach(() => {
 		if (originalCooldownMs === undefined) {
-			delete process.env.PI_KEY_COOLDOWN_MS;
+			delete process.env.PIT_KEY_COOLDOWN_MS;
 		} else {
-			process.env.PI_KEY_COOLDOWN_MS = originalCooldownMs;
+			process.env.PIT_KEY_COOLDOWN_MS = originalCooldownMs;
 		}
 		_resetCredentialPool();
 	});
@@ -94,7 +94,7 @@ describe("CredentialPool", () => {
 
 	test("awaitFreeSlot rejects/skips when timeout < cooldown", async () => {
 		// Force a long cooldown so timeout always loses.
-		process.env.PI_KEY_COOLDOWN_MS = "60000";
+		process.env.PIT_KEY_COOLDOWN_MS = "60000";
 		_resetCredentialPool();
 		pool = getCredentialPool();
 		pool.register("anthropic", entries("a"));

@@ -11,7 +11,7 @@ import {
 	suggestClosest,
 	type ToolResultMessage,
 	validateToolArguments,
-} from "@earendil-works/pi-ai";
+} from "@pit/ai";
 import { appendHintsToContent } from "./tool-error-hint-registry.ts";
 import type {
 	AgentContext,

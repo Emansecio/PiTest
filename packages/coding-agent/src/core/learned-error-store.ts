@@ -11,7 +11,7 @@
  *     `scripts/learned-errors-report.mts` CLI.
  *
  * Storage layout — one JSONL file per session under
- * `~/.pi/agent/learned-errors/<sessionId>.jsonl`. Per-session files avoid
+ * `~/.pit/agent/learned-errors/<sessionId>.jsonl`. Per-session files avoid
  * concurrent-write races between parallel pi sessions and let the aggregator
  * skip individual corrupt files without losing the rest.
  *
@@ -55,16 +55,16 @@ const MAX_SESSION_FILES = 200;
 const SAMPLE_TEXT_MAX_CHARS = 240;
 
 /**
- * Default location: `<agentDir>/learned-errors/`. Respects `PI_CODING_AGENT_DIR`
+ * Default location: `<agentDir>/learned-errors/`. Respects `PIT_CODING_AGENT_DIR`
  * so pi and PiTuned installs that isolate state via env vars get their own
- * learned-error stores instead of fighting over the upstream `~/.pi/` path.
+ * learned-error stores instead of fighting over the upstream `~/.pit/` path.
  */
 export function defaultLearnedErrorsDir(): string {
 	try {
 		return join(getAgentDir(), LEARNED_ERRORS_DIRNAME);
 	} catch {
 		// Fallback for sandboxes where homedir() is unset (CI workers, harnesses).
-		return join(homedir(), ".pi", "agent", LEARNED_ERRORS_DIRNAME);
+		return join(homedir(), ".pit", "agent", LEARNED_ERRORS_DIRNAME);
 	}
 }
 

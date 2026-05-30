@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@pit/ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEditTool } from "../../../src/core/tools/index.js";
 import { createHarness, type Harness } from "../harness.js";

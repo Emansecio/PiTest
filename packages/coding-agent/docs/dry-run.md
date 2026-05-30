@@ -1,6 +1,6 @@
 # Dry-run preview
 
-`pi --dry-run` resolves settings, auth, resources, MCP servers, hooks, and
+`pit --dry-run` resolves settings, auth, resources, MCP servers, hooks, and
 permissions, prints a readiness report, and exits without running the agent
 loop. It never calls the model provider, never spawns hook processes, and
 never opens a network connection to MCP servers.
@@ -8,22 +8,22 @@ never opens a network connection to MCP servers.
 Useful as:
 
 - A pre-flight check before kicking off a long agentic loop.
-- A CI diagnostic when "pi works on my machine but not on the runner".
+- A CI diagnostic when "pit works on my machine but not on the runner".
 - A bug report attachment.
 
 ## Usage
 
 ```bash
-pi --dry-run            # text format (default)
-pi --dry-run text       # explicit text
-pi --dry-run json       # machine-readable JSON
+pit --dry-run            # text format (default)
+pit --dry-run text       # explicit text
+pit --dry-run json       # machine-readable JSON
 ```
 
 Combine with the usual flags to inspect a specific configuration:
 
 ```bash
-pi --dry-run --provider openai --model gpt-4o --tools read,bash
-pi --dry-run --permission-mode plan
+pit --dry-run --provider openai --model gpt-4o --tools read,bash
+pit --dry-run --permission-mode plan
 ```
 
 ## Exit codes
@@ -72,14 +72,14 @@ interface DryRunReport {
 Useful in CI:
 
 ```bash
-status=$(pi --dry-run json | jq -r '.overallStatus')
+status=$(pit --dry-run json | jq -r '.overallStatus')
 [ "$status" = "ready" ] || exit 1
 ```
 
 ## Notes
 
-- `PI_DRY_RUN=1` is exported automatically when `--dry-run` is set, so
+- `PIT_DRY_RUN=1` is exported automatically when `--dry-run` is set, so
   built-in extensions (notably MCP) can short-circuit any side effects.
   Custom extensions can read the same env var to behave the same way.
 - Dry-run still loads every extension (factory functions run). Extensions
-  that do network I/O at load time should check `process.env.PI_DRY_RUN`.
+  that do network I/O at load time should check `process.env.PIT_DRY_RUN`.

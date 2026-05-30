@@ -31,7 +31,7 @@
  *   BENCH_VERBOSE=1 npx tsx scripts/bench-tool-rewrites.mts
  *
  * --replay accepts one or more glob patterns to pi session JSONL files. The
- * canonical location is `~/.pi/agent/sessions/**\/*.jsonl`. The benchmark
+ * canonical location is `~/.pit/agent/sessions/**\/*.jsonl`. The benchmark
  * extracts every (toolCall, toolResult) pair from the matched files and
  * reports — against the ACTUAL outcomes recorded in those sessions:
  *   - true positives:  registry would have caught an error before execution
@@ -44,7 +44,7 @@ import { createReadStream } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { createInterface } from "node:readline";
 import { glob } from "glob";
-import type { AgentToolCall } from "@earendil-works/pi-agent-core";
+import type { AgentToolCall } from "@pit/agent-core";
 import { createDefaultToolErrorHintRegistry } from "../packages/coding-agent/src/core/tool-error-hint-rules.ts";
 import { createDefaultToolRewriteRegistry } from "../packages/coding-agent/src/core/tool-rewrite-rules.ts";
 

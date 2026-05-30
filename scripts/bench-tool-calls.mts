@@ -9,13 +9,13 @@
  */
 
 import { performance } from "node:perf_hooks";
-import { Agent, type AgentMessage, type AgentTool } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@pit/agent-core";
 import {
 	fauxAssistantMessage,
 	fauxToolCall,
 	type FauxResponseStep,
 	registerFauxProvider,
-} from "@earendil-works/pi-ai";
+} from "@pit/ai";
 
 const FANOUT_CALLS = Number(process.env.BENCH_FANOUT ?? 20);
 const TURN_COUNT = Number(process.env.BENCH_TURNS ?? 30);

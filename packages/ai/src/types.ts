@@ -9,7 +9,7 @@ export type { AssistantMessageEventStream } from "./utils/event-stream.ts";
  * Providers that support prompt caching split on this marker and attach
  * `cache_control` only to the prefix.
  */
-export const SYSTEM_PROMPT_DYNAMIC_MARKER = "\u0000<<<PI_SYSTEM_PROMPT_DYNAMIC>>>\u0000";
+export const SYSTEM_PROMPT_DYNAMIC_MARKER = "\u0000<<<PIT_SYSTEM_PROMPT_DYNAMIC>>>\u0000";
 
 /** Split a system prompt on the dynamic marker. */
 export function splitSystemPromptOnDynamic(systemPrompt: string): {
@@ -40,12 +40,9 @@ export function systemPromptWithoutDynamicMarker(systemPrompt: string): string {
 
 export type KnownApi =
 	| "openai-completions"
-	| "mistral-conversations"
 	| "openai-responses"
-	| "azure-openai-responses"
 	| "openai-codex-responses"
 	| "anthropic-messages"
-	| "bedrock-converse-stream"
 	| "google-generative-ai"
 	| "google-vertex";
 
@@ -56,12 +53,10 @@ export type KnownImagesApi = "openrouter-images";
 export type ImagesApi = KnownImagesApi | (string & {});
 
 export type KnownProvider =
-	| "amazon-bedrock"
 	| "anthropic"
 	| "google"
 	| "google-vertex"
 	| "openai"
-	| "azure-openai-responses"
 	| "openai-codex"
 	| "deepseek"
 	| "github-copilot"
@@ -71,7 +66,6 @@ export type KnownProvider =
 	| "openrouter"
 	| "vercel-ai-gateway"
 	| "zai"
-	| "mistral"
 	| "minimax"
 	| "minimax-cn"
 	| "moonshotai"

@@ -21,7 +21,7 @@
  * rules MUST register before more general ones.
  */
 
-import { ToolRewriteRegistry, type ToolRewriteRule } from "@earendil-works/pi-agent-core";
+import { ToolRewriteRegistry, type ToolRewriteRule } from "@pit/agent-core";
 
 // ---------------------------------------------------------------------------
 // Helpers

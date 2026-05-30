@@ -2,9 +2,9 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Model } from "@earendil-works/pi-ai";
-import type { KeyId } from "@earendil-works/pi-tui";
+import type { AgentMessage } from "@pit/agent-core";
+import type { ImageContent, Model } from "@pit/ai";
+import type { KeyId } from "@pit/tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
@@ -83,7 +83,7 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
  * Property key marking a handler as side-effect-only (return value ignored,
  * payload never mutated). Read by emitBeforeProviderRequest to dispatch
  * matching handlers in parallel; written by `pi.markSideEffect()` and by
- * loader's PI_SIDE_EFFECT_EXTENSIONS env-driven tagger.
+ * loader's PIT_SIDE_EFFECT_EXTENSIONS env-driven tagger.
  */
 export const HANDLER_SIDE_EFFECT_TAG = "__piSideEffect" as const;
 
@@ -761,7 +761,7 @@ export class ExtensionRunner {
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {
 		if (!this.hasHandlers(event.type)) return undefined as RunnerEmitResult<TEvent>;
 		const ctx = this.createContext();
-		const piTiming = process.env.PI_TIMING === "1";
+		const piTiming = process.env.PIT_TIMING === "1";
 		const t0 = piTiming ? performance.now() : 0;
 
 		if (this.isSessionBeforeEvent(event)) {
@@ -980,7 +980,7 @@ export class ExtensionRunner {
 	 */
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
 		if (!this.hasHandlers("context")) return messages;
-		const piTiming = process.env.PI_TIMING === "1";
+		const piTiming = process.env.PIT_TIMING === "1";
 		const t0 = piTiming ? performance.now() : 0;
 		const ctx = this.createContext();
 		let currentMessages = messages;
@@ -1038,7 +1038,7 @@ export class ExtensionRunner {
 
 		const ctx = this.createContext();
 		let currentPayload = payload;
-		const piTiming = process.env.PI_TIMING === "1";
+		const piTiming = process.env.PIT_TIMING === "1";
 		const t0 = piTiming ? performance.now() : 0;
 
 		const runHandler = async (
@@ -1131,7 +1131,7 @@ export class ExtensionRunner {
 		};
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
 		let systemPromptModified = false;
-		const piTiming = process.env.PI_TIMING === "1";
+		const piTiming = process.env.PIT_TIMING === "1";
 		const t0 = piTiming ? performance.now() : 0;
 
 		for (const ext of this.extensions) {

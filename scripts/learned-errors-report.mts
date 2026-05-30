@@ -1,7 +1,7 @@
 /**
  * Cross-session learned-error report.
  *
- * Reads `~/.pi/agent/learned-errors/*.jsonl` (one per session, written by the
+ * Reads `~/.pit/agent/learned-errors/*.jsonl` (one per session, written by the
  * agent on dispose) and prints:
  *
  *   1. Top recurring fingerprints already covered by a built-in Tier 4 rule
@@ -15,12 +15,12 @@
  *
  * Run:
  *   npx tsx scripts/learned-errors-report.mts
- *   PI_LEARNED_ERRORS_DIR=/custom/path npx tsx scripts/learned-errors-report.mts
+ *   PIT_LEARNED_ERRORS_DIR=/custom/path npx tsx scripts/learned-errors-report.mts
  */
 
 import { aggregateLearnedErrors, defaultLearnedErrorsDir } from "../packages/coding-agent/src/core/learned-error-store.ts";
 
-const dir = process.env.PI_LEARNED_ERRORS_DIR ?? defaultLearnedErrorsDir();
+const dir = process.env.PIT_LEARNED_ERRORS_DIR ?? defaultLearnedErrorsDir();
 const aggregated = aggregateLearnedErrors(dir);
 
 if (aggregated.length === 0) {

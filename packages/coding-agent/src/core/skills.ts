@@ -367,7 +367,7 @@ export function formatSkillsForPrompt(skills: Skill[], maxSkills = 20, cwd?: str
 	const omitted = visibleSkills.length - shown.length;
 
 	// Roots to relativize against. Most skill paths live under cwd or the
-	// agent dir (e.g. ~/.pi/skills). Shortest representation wins, falling
+	// agent dir (e.g. ~/.pit/skills). Shortest representation wins, falling
 	// back to absolute when not under either root.
 	const agentDir = getAgentDir();
 	const roots: string[] = [];
@@ -449,7 +449,7 @@ function normalizePath(input: string): string {
 
 /**
  * Resolve the Claude Code skills directory (`~/.claude/skills/`), or null when
- * the user opted out via `PI_DISABLE_CLAUDE_CODE_SKILLS=1`. The path is not
+ * the user opted out via `PIT_DISABLE_CLAUDE_CODE_SKILLS=1`. The path is not
  * checked for existence here — the caller decides whether to load.
  *
  * Lives here rather than `config.ts` because it is loader-internal: only the
@@ -457,7 +457,7 @@ function normalizePath(input: string): string {
  * would suggest a generality that does not exist.
  */
 export function getClaudeCodeSkillsDir(): string | null {
-	if (process.env.PI_DISABLE_CLAUDE_CODE_SKILLS === "1") return null;
+	if (process.env.PIT_DISABLE_CLAUDE_CODE_SKILLS === "1") return null;
 	return join(homedir(), ".claude", "skills");
 }
 
@@ -520,7 +520,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		// project skills, so pit-curated and project-scoped skills always win
 		// on a name collision. The Skill format is byte-compatible with our
 		// own (same SKILL.md + YAML frontmatter), so they slot in without
-		// translation. Opt-out: PI_DISABLE_CLAUDE_CODE_SKILLS=1.
+		// translation. Opt-out: PIT_DISABLE_CLAUDE_CODE_SKILLS=1.
 		const claudeSkillsDir = getClaudeCodeSkillsDir();
 		if (claudeSkillsDir && existsSync(claudeSkillsDir)) {
 			addSkills(loadSkillsFromDirInternal(claudeSkillsDir, "claude-code", true));

@@ -13,7 +13,7 @@ const hasDisplay = process.platform !== "linux" || Boolean(process.env.DISPLAY |
 
 if (!process.env.TERMUX_VERSION && hasDisplay) {
 	try {
-		clipboard = require("@mariozechner/clipboard") as ClipboardModule;
+		clipboard = require("@pituned/clipboard") as ClipboardModule;
 	} catch {
 		clipboard = null;
 	}

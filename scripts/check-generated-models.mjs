@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 
 const generatedFiles = ["packages/ai/src/models.generated.ts", "packages/ai/src/image-models.generated.ts"];
 
-if (process.env.CI !== "true" && process.env.PI_CHECK_GENERATED !== "1") {
+if (process.env.CI !== "true" && process.env.PIT_CHECK_GENERATED !== "1") {
 	process.exit(0);
 }
 
@@ -32,6 +32,6 @@ const changed = execFileSync("git", ["diff", "--name-only", "--", ...generatedFi
 
 process.stderr.write(`Generated model files are not fresh:\n${changed.map((file) => `  - ${file}`).join("\n")}\n\n`);
 process.stderr.write(
-	"Run `npm --prefix packages/ai run generate-models` and `npm --prefix packages/ai run generate-image-models`, then commit the generated output. Do not edit generated files by hand. Set PI_CHECK_GENERATED=1 to run this check locally.\n",
+	"Run `npm --prefix packages/ai run generate-models` and `npm --prefix packages/ai run generate-image-models`, then commit the generated output. Do not edit generated files by hand. Set PIT_CHECK_GENERATED=1 to run this check locally.\n",
 );
 process.exit(1);

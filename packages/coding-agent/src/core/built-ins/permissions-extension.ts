@@ -2,12 +2,11 @@
  * Built-in permissions extension.
  *
  * Subscribes to `tool_call` and gates execution through `PermissionChecker`.
- * In default mode an interactive UI confirm is shown for "ask" decisions; in
- * print/RPC mode there is no UI so "ask" auto-resolves to deny (fail-closed).
+ * Auto/yolo mode allows everything. Plan mode is read-only.
  *
  * Settings layout (Settings.permissions):
  *   {
- *     "mode": "default" | "auto" | "plan",
+ *     "mode": "auto" | "yolo" | "plan",
  *     "allowPaths": [{ "glob": "src/**", ... }],
  *     "denyPaths":  [{ "glob": "**\/.env*" }],
  *     "askPaths":   [{ "glob": "**\/build/**" }],
@@ -21,7 +20,12 @@
  */
 
 import type { ExtensionAPI } from "../extensions/types.ts";
-import { describeToolAction, type PermissionChecker, type PermissionSettings } from "../permissions/index.ts";
+import {
+	describeToolAction,
+	normalizePermissionMode,
+	type PermissionChecker,
+	type PermissionSettings,
+} from "../permissions/index.ts";
 
 const STATUS_KEY = "permissions";
 
@@ -71,26 +75,27 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 
 		// Re-evaluate when the user changes mode mid-session via /permission-mode
 		pi.registerCommand("permission-mode", {
-			description: "Switch permission mode (default | auto | plan)",
+			description: "Switch permission mode (auto/yolo | plan)",
 			async handler(args, ctx) {
 				const trimmed = args.trim();
 				if (trimmed.length === 0) {
 					ctx.ui.notify(`Current mode: ${checker.mode}`, "info");
 					return;
 				}
-				if (trimmed !== "default" && trimmed !== "auto" && trimmed !== "plan") {
-					ctx.ui.notify(`Invalid mode "${trimmed}". Use default | auto | plan.`, "warning");
+				const mode = normalizePermissionMode(trimmed);
+				if (!mode) {
+					ctx.ui.notify(`Invalid mode "${trimmed}". Use auto/yolo | plan.`, "warning");
 					return;
 				}
-				checker.updateMode(trimmed);
-				ctx.ui.setStatus(STATUS_KEY, `permissions: ${trimmed}`);
-				ctx.ui.notify(`Permission mode → ${trimmed}`, "info");
+				checker.updateMode(mode);
+				ctx.ui.setStatus(STATUS_KEY, `permissions: ${mode}`);
+				ctx.ui.notify(`Permission mode → ${mode}`, "info");
 			},
 		});
 	};
 }
 
-/** Default permission settings: standard mode, no extra rules. */
+/** Default permission settings: yolo/auto mode, no checks. */
 export const DEFAULT_PERMISSION_SETTINGS: PermissionSettings = {
-	mode: "default",
+	mode: "auto",
 };

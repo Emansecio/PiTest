@@ -2,10 +2,11 @@
  * CLI argument parsing and help display
  */
 
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ThinkingLevel } from "@pit/agent-core";
 import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
+import { normalizePermissionMode, type PermissionMode } from "../core/permissions/index.ts";
 
 export type Mode = "text" | "json" | "rpc";
 
@@ -45,7 +46,7 @@ export interface Args {
 	listModels?: string | true;
 	offline?: boolean;
 	verbose?: boolean;
-	permissionMode?: "default" | "auto" | "plan";
+	permissionMode?: PermissionMode;
 	dryRun?: boolean;
 	dryRunFormat?: "text" | "json";
 	messages: string[];
@@ -183,13 +184,14 @@ export function parseArgs(args: string[]): Args {
 		} else if (arg === "--offline") {
 			result.offline = true;
 		} else if (arg === "--permission-mode" && i + 1 < args.length) {
-			const mode = args[++i];
-			if (mode === "default" || mode === "auto" || mode === "plan") {
+			const rawMode = args[++i];
+			const mode = normalizePermissionMode(rawMode);
+			if (mode) {
 				result.permissionMode = mode;
 			} else {
 				result.diagnostics.push({
 					type: "warning",
-					message: `Invalid permission mode "${mode}". Valid values: default, auto, plan.`,
+					message: `Invalid permission mode "${rawMode}". Valid values: auto/yolo, plan.`,
 				});
 			}
 		} else if (arg === "--dry-run") {
@@ -359,8 +361,8 @@ ${chalk.bold("Options:")}
   --export <file>                Export session file to HTML and exit
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
-  --offline                      Disable startup network operations (same as PI_OFFLINE=1)
-  --permission-mode <mode>       Permission mode: default | auto | plan (default = interactive prompts)
+  --offline                      Disable startup network operations (same as PIT_OFFLINE=1)
+  --permission-mode <mode>       Permission mode: auto/yolo | plan (default = auto/yolo)
   --dry-run [text|json]          Inspect resolved config/auth/tools/MCP and exit without running the agent
   --help, -h                     Show this help
   --version, -v                  Show version number
@@ -418,11 +420,6 @@ ${chalk.bold("Environment Variables:")}
   ANTHROPIC_API_KEY                - Anthropic Claude API key
   ANTHROPIC_OAUTH_TOKEN            - Anthropic OAuth token (alternative to API key)
   OPENAI_API_KEY                   - OpenAI GPT API key
-  AZURE_OPENAI_API_KEY             - Azure OpenAI API key
-  AZURE_OPENAI_BASE_URL            - Azure OpenAI/Cognitive Services base URL (e.g. https://{resource}.openai.azure.com)
-  AZURE_OPENAI_RESOURCE_NAME       - Azure OpenAI resource name (alternative to base URL)
-  AZURE_OPENAI_API_VERSION         - Azure OpenAI API version (default: v1)
-  AZURE_OPENAI_DEPLOYMENT_NAME_MAP - Azure OpenAI model=deployment map (comma-separated)
   DEEPSEEK_API_KEY                 - DeepSeek API key
   GEMINI_API_KEY                   - Google Gemini API key
   GROQ_API_KEY                     - Groq API key
@@ -433,7 +430,6 @@ ${chalk.bold("Environment Variables:")}
   OPENROUTER_API_KEY               - OpenRouter API key
   AI_GATEWAY_API_KEY               - Vercel AI Gateway API key
   ZAI_API_KEY                      - ZAI API key
-  MISTRAL_API_KEY                  - Mistral API key
   MINIMAX_API_KEY                  - MiniMax API key
   MOONSHOT_API_KEY                 - Moonshot AI API key
   OPENCODE_API_KEY                 - OpenCode Zen/OpenCode Go API key
@@ -445,17 +441,12 @@ ${chalk.bold("Environment Variables:")}
   XIAOMI_TOKEN_PLAN_CN_API_KEY     - Xiaomi MiMo Token Plan API key (China region)
   XIAOMI_TOKEN_PLAN_AMS_API_KEY    - Xiaomi MiMo Token Plan API key (Amsterdam region)
   XIAOMI_TOKEN_PLAN_SGP_API_KEY    - Xiaomi MiMo Token Plan API key (Singapore region)
-  AWS_PROFILE                      - AWS profile for Amazon Bedrock
-  AWS_ACCESS_KEY_ID                - AWS access key for Amazon Bedrock
-  AWS_SECRET_ACCESS_KEY            - AWS secret key for Amazon Bedrock
-  AWS_BEARER_TOKEN_BEDROCK         - Bedrock API key (bearer token)
-  AWS_REGION                       - AWS region for Amazon Bedrock (e.g., us-east-1)
   ${ENV_AGENT_DIR.padEnd(32)} - Config directory (default: ~/${CONFIG_DIR_NAME}/agent)
   ${ENV_SESSION_DIR.padEnd(32)} - Session storage directory (overridden by --session-dir)
-  PI_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
-  PI_OFFLINE                       - Disable startup network operations when set to 1/true/yes
-  PI_TELEMETRY                     - Override install telemetry when set to 1/true/yes or 0/false/no
-  PI_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pi.dev/session/)
+  PIT_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
+  PIT_OFFLINE                       - Disable startup network operations when set to 1/true/yes
+  PIT_TELEMETRY                     - Override install telemetry when set to 1/true/yes or 0/false/no
+  PIT_SHARE_VIEWER_URL              - Base URL for /share command (default: https://pit.dev/session/)
 
 ${chalk.bold("Built-in Tool Names:")}
   read   - Read file contents

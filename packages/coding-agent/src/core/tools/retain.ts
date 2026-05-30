@@ -1,11 +1,11 @@
 /**
  * `retain` tool — adds a durable fact / decision / pattern to the project-local
  * hindsight bank. Use this for things worth remembering across sessions, not
- * session-only state. The bank lives at `<cwd>/.pi/hindsight/bank.jsonl`.
+ * session-only state. The bank lives at `<cwd>/.pit/hindsight/bank.jsonl`.
  */
 
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Text } from "@earendil-works/pi-tui";
+import type { AgentTool } from "@pit/agent-core";
+import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentHindsightBank, type HindsightBank, type HindsightKind } from "../hindsight/index.ts";

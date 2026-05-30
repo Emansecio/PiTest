@@ -379,11 +379,11 @@ describe("skills", () => {
 		});
 
 		it("should expand ~ in skillPaths", () => {
-			const homeSkillsDir = join(homedir(), ".pi/agent/skills");
+			const homeSkillsDir = join(homedir(), ".pit/agent/skills");
 			const { skills: withTilde } = loadSkills({
 				agentDir: emptyAgentDir,
 				cwd: emptyCwd,
-				skillPaths: ["~/.pi/agent/skills"],
+				skillPaths: ["~/.pit/agent/skills"],
 				includeDefaults: true,
 			});
 			const { skills: withoutTilde } = loadSkills({
@@ -439,35 +439,35 @@ describe("skills", () => {
 
 describe("getClaudeCodeSkillsDir", () => {
 	// Lives outside the main `describe("skills")` block so it can mutate the
-	// PI_DISABLE_CLAUDE_CODE_SKILLS env var without interfering with the
+	// PIT_DISABLE_CLAUDE_CODE_SKILLS env var without interfering with the
 	// fixture-driven tests above.
-	const original = process.env.PI_DISABLE_CLAUDE_CODE_SKILLS;
+	const original = process.env.PIT_DISABLE_CLAUDE_CODE_SKILLS;
 	afterEach(() => {
 		if (original === undefined) {
-			delete process.env.PI_DISABLE_CLAUDE_CODE_SKILLS;
+			delete process.env.PIT_DISABLE_CLAUDE_CODE_SKILLS;
 		} else {
-			process.env.PI_DISABLE_CLAUDE_CODE_SKILLS = original;
+			process.env.PIT_DISABLE_CLAUDE_CODE_SKILLS = original;
 		}
 	});
 
-	it("returns null when PI_DISABLE_CLAUDE_CODE_SKILLS=1", () => {
-		process.env.PI_DISABLE_CLAUDE_CODE_SKILLS = "1";
+	it("returns null when PIT_DISABLE_CLAUDE_CODE_SKILLS=1", () => {
+		process.env.PIT_DISABLE_CLAUDE_CODE_SKILLS = "1";
 		expect(getClaudeCodeSkillsDir()).toBeNull();
 	});
 
 	it("returns <home>/.claude/skills when opt-out is unset", () => {
-		delete process.env.PI_DISABLE_CLAUDE_CODE_SKILLS;
+		delete process.env.PIT_DISABLE_CLAUDE_CODE_SKILLS;
 		const result = getClaudeCodeSkillsDir();
 		expect(result).not.toBeNull();
 		expect(result?.endsWith(join(".claude", "skills"))).toBe(true);
 		expect(result?.startsWith(homedir())).toBe(true);
 	});
 
-	it("respects PI_DISABLE_CLAUDE_CODE_SKILLS values other than '1' as not-opting-out", () => {
+	it("respects PIT_DISABLE_CLAUDE_CODE_SKILLS values other than '1' as not-opting-out", () => {
 		// Only the literal "1" disables — guards against accidental opt-out
 		// from envs like "0", "false", "no".
 		for (const value of ["0", "false", "no", ""]) {
-			process.env.PI_DISABLE_CLAUDE_CODE_SKILLS = value;
+			process.env.PIT_DISABLE_CLAUDE_CODE_SKILLS = value;
 			expect(getClaudeCodeSkillsDir()).not.toBeNull();
 		}
 	});

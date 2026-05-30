@@ -16,7 +16,7 @@ export * from "./bank.ts";
 export * from "./types.ts";
 
 export function defaultBankPath(cwd: string): string {
-	return resolve(cwd, ".pi", "hindsight", "bank.jsonl");
+	return resolve(cwd, ".pit", "hindsight", "bank.jsonl");
 }
 
 export function ensureBankDir(filePath: string): void {

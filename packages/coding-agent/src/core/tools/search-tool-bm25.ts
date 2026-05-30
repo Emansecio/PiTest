@@ -6,8 +6,8 @@
  * Saves prompt tokens by keeping specialized tools off the default catalog.
  */
 
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Text } from "@earendil-works/pi-tui";
+import type { AgentTool } from "@pit/agent-core";
+import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentToolDiscoveryIndex, type ToolDiscoveryIndex } from "../tool-discovery.ts";

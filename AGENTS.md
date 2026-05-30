@@ -46,10 +46,10 @@ specific tasks lives in `docs/agents/` and is loaded on demand. See the
 
 ## Project tool config
 
-This repo ships `.pi/settings.json` (project-local settings, merged over the
+This repo ships `.pit/settings.json` (project-local settings, merged over the
 global file). Notable knobs:
 
-- `frequentFiles.enabled: true` — the agent tracks per-file read/edit/write counts and persists the result to `.pi/frequent-files.json` so the next session boots warm.
+- `frequentFiles.enabled: true` — the agent tracks per-file read/edit/write counts and persists the result to `.pit/frequent-files.json` so the next session boots warm.
 - `toolDiscovery.enabled: true` — tools outside the coding bundle are hidden behind `search_tool_bm25` to keep the per-turn tool snippet block short.
 
 See `docs/agents/tools-and-config.md` for the full surface and the tool quirks
@@ -115,6 +115,6 @@ the per-turn behavior contract.
 - `docs/RELEASING.md` — releasing process, CHANGELOG format/attribution, "Adding a New LLM Provider" full recipe.
 - `docs/agents/pr-workflow.md` — PR review/merge flow and issue/PR comment hygiene.
 - `docs/agents/contribution-gate.md` — auto-gate workflows, `lgtm`/`lgtmi`, `pkg:*` labels.
-- `docs/agents/tui-testing.md` — tmux recipe for driving pi's TUI from headless agents.
-- `docs/agents/tools-and-config.md` — `.pi/settings.json` shape and project tool quirks.
+- `docs/agents/tui-testing.md` — tmux recipe for driving pit's TUI from headless agents.
+- `docs/agents/tools-and-config.md` — `.pit/settings.json` shape and project tool quirks.
 - `docs/adr/` — architectural decision records (read-guard, diff limit, doom-loop, engineering style).

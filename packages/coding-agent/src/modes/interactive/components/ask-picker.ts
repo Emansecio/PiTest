@@ -7,7 +7,7 @@
  * and resolves the bus with the picked labels (or cancelled=true on ESC).
  */
 
-import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Text } from "@earendil-works/pi-tui";
+import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Text } from "@pit/tui";
 import type { AskOptionsRequest } from "../../../core/user-input-bus.ts";
 import { theme as defaultTheme, getSelectListTheme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";

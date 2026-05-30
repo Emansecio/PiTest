@@ -41,7 +41,7 @@ import { transformMessages } from "./transform-messages.ts";
 /**
  * Resolve cache retention preference.
  * Default: "long" (1h) when provider supports it — saves input tokens for
- * interactive sessions with >5min think gaps. PI_CACHE_RETENTION=short opts out;
+ * interactive sessions with >5min think gaps. PIT_CACHE_RETENTION=short opts out;
  * "none" disables caching entirely.
  */
 function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
@@ -49,7 +49,7 @@ function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention 
 		return cacheRetention;
 	}
 	if (typeof process !== "undefined") {
-		const env = process.env.PI_CACHE_RETENTION;
+		const env = process.env.PIT_CACHE_RETENTION;
 		if (env === "short" || env === "none" || env === "long") {
 			return env;
 		}
@@ -76,8 +76,8 @@ function getCacheControl(
 const claudeCodeVersion = "2.1.75";
 
 // Claude Code 2.x tool names (canonical casing)
-// Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
-// To update: https://github.com/badlogic/cchistory
+// Source: https://cchistory.pituned.at/data/prompts-2.1.11.md
+// To update: https://github.com/pituned/cchistory
 const claudeCodeTools = [
 	"Read",
 	"Write",

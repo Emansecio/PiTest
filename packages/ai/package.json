@@ -1,5 +1,5 @@
 {
-	"name": "@earendil-works/pi-ai",
+	"name": "@pit/ai",
 	"version": "0.75.3",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"type": "module",
@@ -14,10 +14,6 @@
 			"types": "./dist/providers/anthropic.d.ts",
 			"import": "./dist/providers/anthropic.js"
 		},
-		"./azure-openai-responses": {
-			"types": "./dist/providers/azure-openai-responses.d.ts",
-			"import": "./dist/providers/azure-openai-responses.js"
-		},
 		"./google": {
 			"types": "./dist/providers/google.d.ts",
 			"import": "./dist/providers/google.js"
@@ -25,10 +21,6 @@
 		"./google-vertex": {
 			"types": "./dist/providers/google-vertex.d.ts",
 			"import": "./dist/providers/google-vertex.js"
-		},
-		"./mistral": {
-			"types": "./dist/providers/mistral.d.ts",
-			"import": "./dist/providers/mistral.js"
 		},
 		"./openai-codex-responses": {
 			"types": "./dist/providers/openai-codex-responses.d.ts",
@@ -45,10 +37,6 @@
 		"./oauth": {
 			"types": "./dist/oauth.d.ts",
 			"import": "./dist/oauth.js"
-		},
-		"./bedrock-provider": {
-			"types": "./dist/bedrock-provider.d.ts",
-			"import": "./dist/bedrock-provider.js"
 		}
 	},
 	"bin": {
@@ -68,9 +56,7 @@
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "^0.91.1",
-		"@aws-sdk/client-bedrock-runtime": "^3.1030.0",
 		"@google/genai": "^1.40.0",
-		"@mistralai/mistralai": "^2.2.0",
 		"http-proxy-agent": "^7.0.2",
 		"https-proxy-agent": "^7.0.6",
 		"openai": "6.26.0",
@@ -83,11 +69,10 @@
 		"openai",
 		"anthropic",
 		"gemini",
-		"bedrock",
 		"unified",
 		"api"
 	],
-	"author": "Mario Zechner",
+	"author": "PiTuned",
 	"license": "MIT",
 	"repository": {
 		"type": "git",

@@ -9,7 +9,7 @@ import { buildDryRunReport, formatReportJson, formatReportText } from "../src/cl
 function makeFakeServices(overrides?: Partial<Record<string, unknown>>) {
 	const settings = {
 		drainErrors: () => [],
-		getPermissionSettings: () => ({ mode: "default" }),
+		getPermissionSettings: () => ({ mode: "auto" }),
 		getHooksSettings: () => ({}),
 		getMcpSettings: () => ({}),
 		getMemorySettings: () => ({}),
@@ -41,7 +41,7 @@ function makeFakeServices(overrides?: Partial<Record<string, unknown>>) {
 describe("dry-run builder", () => {
 	it("returns 'ready' when everything is configured", () => {
 		const services = makeFakeServices();
-		const model = { provider: "openai", id: "gpt-x" } as unknown as import("@earendil-works/pi-ai").Model<any>;
+		const model = { provider: "openai", id: "gpt-x" } as unknown as import("@pit/ai").Model<any>;
 		const report = buildDryRunReport({
 			services,
 			resolvedModel: model,
@@ -67,7 +67,7 @@ describe("dry-run builder", () => {
 		const services = makeFakeServices({
 			modelRegistry: { hasConfiguredAuth: () => false },
 		});
-		const model = { provider: "openai", id: "gpt-x" } as unknown as import("@earendil-works/pi-ai").Model<any>;
+		const model = { provider: "openai", id: "gpt-x" } as unknown as import("@pit/ai").Model<any>;
 		const report = buildDryRunReport({
 			services,
 			resolvedModel: model,
@@ -78,7 +78,7 @@ describe("dry-run builder", () => {
 
 	it("text format includes overall status header", () => {
 		const services = makeFakeServices();
-		const model = { provider: "openai", id: "gpt-x" } as unknown as import("@earendil-works/pi-ai").Model<any>;
+		const model = { provider: "openai", id: "gpt-x" } as unknown as import("@pit/ai").Model<any>;
 		const report = buildDryRunReport({
 			services,
 			resolvedModel: model,
@@ -91,7 +91,7 @@ describe("dry-run builder", () => {
 
 	it("json format round-trips structure", () => {
 		const services = makeFakeServices();
-		const model = { provider: "openai", id: "gpt-x" } as unknown as import("@earendil-works/pi-ai").Model<any>;
+		const model = { provider: "openai", id: "gpt-x" } as unknown as import("@pit/ai").Model<any>;
 		const report = buildDryRunReport({
 			services,
 			resolvedModel: model,

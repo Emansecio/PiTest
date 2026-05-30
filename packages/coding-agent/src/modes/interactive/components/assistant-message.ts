@@ -1,5 +1,5 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
+import type { AssistantMessage } from "@pit/ai";
+import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@pit/tui";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { ReadingColumn } from "./reading-column.ts";
 

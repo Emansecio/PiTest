@@ -5,7 +5,7 @@ import { createJiti } from "jiti/static";
 import { performance } from "node:perf_hooks";
 
 import { pathToFileURL } from "node:url";
-const rawTarget = process.argv[2] ?? "C:/Users/User/.pi/agent/npm/node_modules/pi-autoresearch/extensions/pi-autoresearch/index.js";
+const rawTarget = process.argv[2] ?? "C:/Users/User/.pit/agent/npm/node_modules/pi-autoresearch/extensions/pi-autoresearch/index.js";
 const target = pathToFileURL(rawTarget).href;
 
 console.log(`target: ${target}\n`);

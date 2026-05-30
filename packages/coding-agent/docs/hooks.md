@@ -1,6 +1,6 @@
 # Hooks
 
-Hooks are external commands Pi runs in response to specific lifecycle events.
+Hooks are external commands Pit runs in response to specific lifecycle events.
 They're configured in `settings.json` and run as separate processes, so any
 language with stdio access works — shell, Python, Go, anything.
 

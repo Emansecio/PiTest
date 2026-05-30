@@ -60,10 +60,10 @@ function runCli(args: string[], cwd: string, agentDir: string): RunResult {
 		cwd,
 		env: {
 			...cleanProviderEnv(process.env),
-			PI_CODING_AGENT_DIR: agentDir,
-			PI_OFFLINE: "1",
-			PI_SKIP_VERSION_CHECK: "1",
-			PI_DRY_RUN: "1",
+			PIT_CODING_AGENT_DIR: agentDir,
+			PIT_OFFLINE: "1",
+			PIT_SKIP_VERSION_CHECK: "1",
+			PIT_DRY_RUN: "1",
 			// Force a deterministic terminal width so wrapped output doesn't break
 			// substring assertions.
 			COLUMNS: "120",
@@ -176,7 +176,7 @@ describe("pi --dry-run (E2E)", () => {
 			const t0 = Date.now();
 			const result = runCli(["--dry-run", "json", "--no-extensions", "--no-skills"], cwd, agentDir);
 			const elapsedMs = Date.now() - t0;
-			// PI_DRY_RUN=1 guards MCP connectAll so we should finish well under
+			// PIT_DRY_RUN=1 guards MCP connectAll so we should finish well under
 			// the 1s timeout that would otherwise apply.
 			expect(elapsedMs).toBeLessThan(15_000);
 			const stdout = result.stdout.trim();

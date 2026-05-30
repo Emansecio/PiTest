@@ -8,13 +8,18 @@
  * lookup at startup.
  */
 
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import type { AgentTool } from "@pit/agent-core";
+import type { Model } from "@pit/ai";
 import type { ExtensionFactory } from "../extensions/types.ts";
 import type { HooksSettings } from "../hooks/index.ts";
 import type { McpSettings } from "../mcp/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { PermissionChecker, type PermissionMode, type PermissionSettings } from "../permissions/index.ts";
+import {
+	normalizePermissionMode,
+	PermissionChecker,
+	type PermissionMode,
+	type PermissionSettings,
+} from "../permissions/index.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
@@ -55,7 +60,8 @@ export interface BuiltInExtensionsResult {
  * runtime via /permission-mode without re-loading.
  */
 export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): BuiltInExtensionsResult {
-	const effectiveMode: PermissionMode = options.permissionModeOverride ?? options.permissions.mode ?? "default";
+	const effectiveMode: PermissionMode =
+		options.permissionModeOverride ?? normalizePermissionMode(options.permissions.mode) ?? "auto";
 	const permissionChecker = new PermissionChecker({
 		cwd: options.cwd,
 		mode: effectiveMode,

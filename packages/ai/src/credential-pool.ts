@@ -40,7 +40,7 @@ interface ProviderState {
 const DEFAULT_COOLDOWN_MS = 300_000;
 
 function readEnvCooldownMs(): number {
-	const raw = typeof process !== "undefined" ? process.env?.PI_KEY_COOLDOWN_MS : undefined;
+	const raw = typeof process !== "undefined" ? process.env?.PIT_KEY_COOLDOWN_MS : undefined;
 	if (!raw) return DEFAULT_COOLDOWN_MS;
 	const n = Number(raw);
 	return Number.isFinite(n) && n > 0 ? n : DEFAULT_COOLDOWN_MS;

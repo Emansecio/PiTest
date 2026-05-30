@@ -2,17 +2,25 @@
  * Permission system types.
  *
  * Modes:
- * - default: tools allowed by default; deny rules + sensitive-command checks gate writes/bash.
- *   Interactive UI prompts when a tool hits an "ask" rule.
- * - auto: skip all interactive prompts; deny rules still block, everything else passes.
+ * - auto: yolo mode; permissions are fully open and all checks are skipped.
  * - plan: read-only mode; any tool that mutates filesystem or runs shell is blocked.
+ *
+ * "yolo" is accepted as an alias for "auto" at CLI/settings/command boundaries.
  */
-export type PermissionMode = "default" | "auto" | "plan";
+export type PermissionMode = "auto" | "plan";
+export type PermissionModeInput = PermissionMode | "yolo";
 
-export const PERMISSION_MODES: readonly PermissionMode[] = ["default", "auto", "plan"] as const;
+export const PERMISSION_MODES: readonly PermissionMode[] = ["auto", "plan"] as const;
+export const PERMISSION_MODE_INPUTS: readonly PermissionModeInput[] = ["auto", "yolo", "plan"] as const;
+
+export function normalizePermissionMode(value: unknown): PermissionMode | undefined {
+	if (value === "auto" || value === "yolo") return "auto";
+	if (value === "plan") return "plan";
+	return undefined;
+}
 
 export function isPermissionMode(value: unknown): value is PermissionMode {
-	return typeof value === "string" && (PERMISSION_MODES as readonly string[]).includes(value);
+	return normalizePermissionMode(value) === value;
 }
 
 /**
@@ -42,17 +50,17 @@ export interface CommandRule {
 }
 
 export interface PermissionSettings {
-	/** Default mode when no CLI override is set. */
-	mode?: PermissionMode;
+	/** Default mode when no CLI override is set. "yolo" is accepted as an alias for "auto". */
+	mode?: PermissionModeInput;
 	/** Paths always allowed without prompt. */
 	allowPaths?: PathRule[];
 	/** Paths always blocked (highest priority). */
 	denyPaths?: PathRule[];
-	/** Paths that require an interactive confirm (default mode only). */
+	/** Deprecated: ask rules are ignored now that auto/yolo is the default. */
 	askPaths?: PathRule[];
 	/** Commands always blocked. */
 	denyCommands?: CommandRule[];
-	/** Commands that require an interactive confirm (default mode only). */
+	/** Deprecated: ask rules are ignored now that auto/yolo is the default. */
 	askCommands?: CommandRule[];
 	/** Tool names always allowed (skips checks entirely). */
 	allowTools?: string[];

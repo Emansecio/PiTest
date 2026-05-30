@@ -1,6 +1,6 @@
 # Permissions
 
-Pi gates tool calls and bash commands through a permission system with three
+Pit gates tool calls and bash commands through a permission system with three
 modes and a deny/allow/ask rule set. Permissions are enforced regardless of
 which provider or model you use; the rules live in your settings and the
 checker runs before every tool execution.
@@ -77,7 +77,7 @@ Within a single check the order is:
 
 ### Built-in defaults
 
-Unless `disableBuiltinDefaults: true`, Pi adds:
+Unless `disableBuiltinDefaults: true`, Pit adds:
 
 - Deny paths: `**/.env`, `**/.env.*`, `**/.git/config`, `**/.ssh/**`,
   `**/.aws/credentials`, `**/.npmrc`, `**/id_rsa`, `**/id_ed25519`.

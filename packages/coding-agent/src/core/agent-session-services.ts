@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import type { ThinkingLevel } from "@pit/agent-core";
+import type { Model } from "@pit/ai";
 import { getAgentDir } from "../config.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { bundleBuiltInExtensions } from "./built-ins/index.ts";
@@ -151,8 +151,8 @@ export async function createAgentSessionServices(
 	// Refs filled in after the AgentSession is created. The coordinator extension
 	// reads through these to keep its tool catalog in sync with the parent's
 	// active tools without re-loading.
-	const parentModelRef: { current?: import("@earendil-works/pi-ai").Model<any> } = {};
-	const availableToolsRef: { current?: import("@earendil-works/pi-agent-core").AgentTool[] } = {};
+	const parentModelRef: { current?: import("@pit/ai").Model<any> } = {};
+	const availableToolsRef: { current?: import("@pit/agent-core").AgentTool[] } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
 	if (!options.disableBuiltInExtensions) {
@@ -193,8 +193,8 @@ export async function createAgentSessionServices(
 	(
 		resourceLoader as DefaultResourceLoader & {
 			__bindBuiltInRefs?: (
-				model: import("@earendil-works/pi-ai").Model<any> | undefined,
-				tools: import("@earendil-works/pi-agent-core").AgentTool[],
+				model: import("@pit/ai").Model<any> | undefined,
+				tools: import("@pit/agent-core").AgentTool[],
 			) => void;
 		}
 	).__bindBuiltInRefs = (model, tools) => {
@@ -243,7 +243,7 @@ export async function createAgentSessionFromServices(
 	// declarative. Off by default — only allocated when at least one rule is
 	// configured. Bad regex patterns surface as warnings, not crashes, so a
 	// typo in settings.json cannot brick the session.
-	let ttsrMatcher: import("@earendil-works/pi-agent-core").TTSRMatcher | undefined;
+	let ttsrMatcher: import("@pit/agent-core").TTSRMatcher | undefined;
 	try {
 		const rawRules = options.services.settingsManager.getTTSRRules();
 		if (rawRules.length > 0) {
@@ -282,16 +282,13 @@ export async function createAgentSessionFromServices(
 	const bind = (
 		options.services.resourceLoader as DefaultResourceLoader & {
 			__bindBuiltInRefs?: (
-				model: import("@earendil-works/pi-ai").Model<any> | undefined,
-				tools: import("@earendil-works/pi-agent-core").AgentTool[],
+				model: import("@pit/ai").Model<any> | undefined,
+				tools: import("@pit/agent-core").AgentTool[],
 			) => void;
 		}
 	).__bindBuiltInRefs;
 	if (bind) {
-		bind(
-			result.session.model,
-			result.session.agent.state.tools as import("@earendil-works/pi-agent-core").AgentTool[],
-		);
+		bind(result.session.model, result.session.agent.state.tools as import("@pit/agent-core").AgentTool[]);
 	}
 
 	return result;

@@ -1,4 +1,4 @@
-# Releasing pi packages
+# Releasing pit packages
 
 > Moved out of `AGENTS.md` to keep the model's per-turn project context lean.
 > Loaded on demand only when a release task is in progress.

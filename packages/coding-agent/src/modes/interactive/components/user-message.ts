@@ -1,4 +1,4 @@
-import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { Markdown, type MarkdownTheme } from "@pit/tui";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { MessageShell } from "./message-shell.ts";
 

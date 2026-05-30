@@ -1,4 +1,4 @@
-import type { Transport } from "@earendil-works/pi-ai";
+import type { Transport } from "@pit/ai";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -106,9 +106,9 @@ export interface ResolvedFrequentFilesSettings {
 }
 
 /**
- * Hindsight memory configuration. When `enabled`, the retain/recall/reflect
+ * Hindsight memory configuration. When `enabled`, the retain/recall/reflect/forget
  * tools are registered for coding bundles and a per-project bank is opened
- * at session start. The bank lives at `<cwd>/.pi/hindsight/bank.jsonl` by
+ * at session start. The bank lives at `<cwd>/.pit/hindsight/bank.jsonl` by
  * default; override via `bankPath`.
  */
 export interface HindsightSettings {
@@ -1208,7 +1208,7 @@ export class SettingsManager {
 		if (this.settings.terminal?.clearOnShrink !== undefined) {
 			return this.settings.terminal.clearOnShrink;
 		}
-		return process.env.PI_CLEAR_ON_SHRINK === "1";
+		return process.env.PIT_CLEAR_ON_SHRINK === "1";
 	}
 
 	setClearOnShrink(enabled: boolean): void {
@@ -1292,7 +1292,7 @@ export class SettingsManager {
 	}
 
 	getShowHardwareCursor(): boolean {
-		return this.settings.showHardwareCursor ?? process.env.PI_HARDWARE_CURSOR === "1";
+		return this.settings.showHardwareCursor ?? process.env.PIT_HARDWARE_CURSOR === "1";
 	}
 
 	setShowHardwareCursor(enabled: boolean): void {
@@ -1394,7 +1394,7 @@ export class SettingsManager {
 	/**
 	 * Resolve hindsight memory settings. Disabled by default; opt-in via
 	 * `hindsight.enabled: true` in settings.json (project or global). When
-	 * disabled, the retain/recall/reflect tools are not registered and no
+	 * disabled, the retain/recall/reflect/forget tools are not registered and no
 	 * bank is opened.
 	 */
 	getHindsightSettings(): ResolvedHindsightSettings {
@@ -1409,8 +1409,8 @@ export class SettingsManager {
 			raw.pruneOlderThanDays > 0
 				? raw.pruneOlderThanDays
 				: undefined;
-		// Default ON: retain/recall/reflect ride out-of-the-box with a per-project
-		// bank under `<cwd>/.pi/hindsight/bank.jsonl`. Opt out via
+		// Default ON: retain/recall/reflect/forget ride out-of-the-box with a per-project
+		// bank under `<cwd>/.pit/hindsight/bank.jsonl`. Opt out via
 		// `hindsight.enabled: false` in settings.json.
 		return {
 			enabled: raw?.enabled !== false,

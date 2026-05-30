@@ -1,13 +1,14 @@
 {
-	"name": "@earendil-works/pi-coding-agent",
+	"name": "@pit/coding-agent",
 	"version": "0.75.3",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"type": "module",
 	"piConfig": {
-		"configDir": ".pi"
+		"name": "pit",
+		"configDir": ".pit"
 	},
 	"bin": {
-		"pi": "dist/cli.js"
+		"pit": "dist/cli.js"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -37,9 +38,9 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
-		"@earendil-works/pi-agent-core": "^0.75.3",
-		"@earendil-works/pi-ai": "^0.75.3",
-		"@earendil-works/pi-tui": "^0.75.3",
+		"@pit/agent-core": "^0.75.3",
+		"@pit/ai": "^0.75.3",
+		"@pit/tui": "^0.75.3",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"chalk": "^5.5.0",
 		"cross-spawn": "^7.0.6",
@@ -62,7 +63,7 @@
 		}
 	},
 	"optionalDependencies": {
-		"@mariozechner/clipboard": "^0.3.6"
+		"@pituned/clipboard": "^0.3.6"
 	},
 	"devDependencies": {
 		"@types/cross-spawn": "^6.0.6",
@@ -83,7 +84,7 @@
 		"tui",
 		"agent"
 	],
-	"author": "Mario Zechner",
+	"author": "PiTuned",
 	"license": "MIT",
 	"repository": {
 		"type": "git",

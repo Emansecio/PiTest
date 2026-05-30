@@ -1,7 +1,7 @@
 # Persistent memory (MEMORY.md)
 
 Some facts should outlive a single session: user preferences, project
-conventions, gotchas discovered while debugging. Pi loads these from a
+conventions, gotchas discovered while debugging. Pit loads these from a
 `MEMORY.md` file and injects them into the system prompt under a
 `<persistent_memory>` block on every turn.
 
@@ -14,18 +14,18 @@ conventions, gotchas discovered while debugging. Pi loads these from a
 
 ## Discovery
 
-Pi looks in two scopes; both can coexist.
+Pit looks in two scopes; both can coexist.
 
 | Scope | Path (first match wins per scope) |
 |-------|-----------------------------------|
-| Global | `~/.pi/agent/memory/MEMORY.md`, then `~/.pi/agent/MEMORY.md` |
-| Project | `.pi/memory/MEMORY.md`, then `MEMORY.md` at the project root |
+| Global | `~/.pit/agent/memory/MEMORY.md`, then `~/.pit/agent/MEMORY.md` |
+| Project | `.pit/memory/MEMORY.md`, then `MEMORY.md` at the project root |
 
 Both files, when present, are injected — global first, project second.
 
 ## Format
 
-`MEMORY.md` is plain Markdown. Pi doesn't enforce a structure, but the
+`MEMORY.md` is plain Markdown. Pit doesn't enforce a structure, but the
 `memory_append` tool adds entries in one of two formats:
 
 - Bullet (no heading): `- (YYYY-MM-DD) entry text`

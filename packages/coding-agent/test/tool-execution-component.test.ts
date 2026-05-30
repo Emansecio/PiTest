@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { Text, type TUI } from "@earendil-works/pi-tui";
+import { Text, type TUI } from "@pit/tui";
 import { Type } from "typebox";
 import { beforeAll, describe, expect, test } from "vitest";
 import { getReadmePath } from "../src/config.js";
@@ -296,20 +296,32 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("done");
 	});
 
-	test("trims trailing blank display lines from write previews", () => {
+	test("renders write calls compactly until expanded", () => {
+		const content = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\n";
 		const component = new ToolExecutionComponent(
 			"write",
 			"tool-7",
-			{ path: "README.md", content: "one\ntwo\n" },
+			{ path: "README.md", content },
 			{},
 			createWriteToolDefinition(process.cwd()),
 			createFakeTui(),
 			process.cwd(),
 		);
-		const rendered = stripAnsi(component.render(120).join("\n"));
-		expect(rendered).toContain("one");
-		expect(rendered).toContain("two");
-		expect(rendered).not.toContain("two\n\n");
+
+		const collapsed = stripAnsi(component.render(120).join("\n"));
+		expect(collapsed).toContain("write");
+		expect(collapsed).toContain("README.md");
+		expect(collapsed).not.toContain("one");
+		expect(collapsed).not.toContain("eleven");
+		expect(collapsed).not.toContain("more lines");
+		expect(collapsed).not.toContain("to expand");
+
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(120).join("\n"));
+		expect(expanded).toContain("one");
+		expect(expanded).toContain("eleven");
+		expect(expanded).not.toContain("eleven\n\n");
+		expect(expanded).not.toContain("more lines");
 	});
 
 	test("trims trailing blank display lines from read results", () => {
@@ -344,9 +356,9 @@ describe("ToolExecutionComponent parity", () => {
 		},
 		{
 			title: "AGENTS.md",
-			path: join(process.cwd(), ".pi", "AGENTS.md"),
+			path: join(process.cwd(), ".pit", "AGENTS.md"),
 			content: "Hidden resource instructions",
-			compact: "read resource .pi/AGENTS.md",
+			compact: "read resource .pit/AGENTS.md",
 			hidden: "Hidden resource instructions",
 			absent: undefined,
 		},

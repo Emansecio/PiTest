@@ -310,8 +310,8 @@ describe("FrequentFiles persistence helpers", () => {
 });
 
 describe("defaultFrequentFilesPath", () => {
-	it("anchors under <cwd>/.pi/frequent-files.json", () => {
+	it("anchors under <cwd>/.pit/frequent-files.json", () => {
 		const out = defaultFrequentFilesPath("/project/root");
-		expect(out.replace(/\\/g, "/")).toBe("/project/root/.pi/frequent-files.json");
+		expect(out.replace(/\\/g, "/")).toBe("/project/root/.pit/frequent-files.json");
 	});
 });

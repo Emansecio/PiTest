@@ -4,7 +4,7 @@
  * so the loader can skip jiti transpilation on every startup.
  *
  * What it does:
- *   1. Walks ~/.pi/agent/npm/node_modules for pi packages
+ *   1. Walks ~/.pit/agent/npm/node_modules for pi packages
  *      (those with "pi" or "pi-extension" keyword, OR a `pi` field in package.json)
  *   2. Reads package.json#pi.extensions (list of dirs/files relative to package root)
  *   3. For each .ts file in those paths, emits a sibling .js via esbuild
@@ -24,12 +24,12 @@ const FORCE = process.argv.includes("--force");
 const CLEAN = process.argv.includes("--clean");
 const VERBOSE = process.argv.includes("--verbose");
 
-// Respect PI_CODING_AGENT_DIR (and PI_NPM_DIR override) so this script
+// Respect PIT_CODING_AGENT_DIR (and PIT_NPM_DIR override) so this script
 // works regardless of where the user's pi agent dir lives.
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR
-	? process.env.PI_CODING_AGENT_DIR.replace(/^~(?=$|\/|\\)/, homedir())
-	: join(homedir(), ".pi", "agent");
-const NPM_DIR = process.env.PI_NPM_DIR ?? join(AGENT_DIR, "npm", "node_modules");
+const AGENT_DIR = process.env.PIT_CODING_AGENT_DIR
+	? process.env.PIT_CODING_AGENT_DIR.replace(/^~(?=$|\/|\\)/, homedir())
+	: join(homedir(), ".pit", "agent");
+const NPM_DIR = process.env.PIT_NPM_DIR ?? join(AGENT_DIR, "npm", "node_modules");
 
 if (!existsSync(NPM_DIR)) {
 	console.error(`Pi npm dir not found: ${NPM_DIR}`);
@@ -48,11 +48,11 @@ function findPiPackages(root) {
 				if (!inner.isDirectory()) continue;
 				const innerDir = join(dir, inner.name);
 				const pkg = readPkg(innerDir);
-				if (pkg?.pi) found.push({ dir: innerDir, pkg });
+				if (pkg?.pit) found.push({ dir: innerDir, pkg });
 			}
 		} else {
 			const pkg = readPkg(dir);
-			if (pkg?.pi) found.push({ dir, pkg });
+			if (pkg?.pit) found.push({ dir, pkg });
 		}
 	}
 	return found;
@@ -159,10 +159,10 @@ function rewriteTsImportSpecifiers(jsPath) {
 		.replace(/(import\(\s*["'])(\.{1,2}\/[^"']+?)\.tsx?(["']\s*\))/g, '$1$2.js$3')
 		// export ... from "./x.ts"
 		.replace(/(export\s*(?:\*|\{[^}]*\})\s*from\s*["'])(\.{1,2}\/[^"']+?)\.tsx?(["'])/g, '$1$2.js$3');
-	// Rewrite legacy @mariozechner/* aliases to the canonical @earendil-works/*
+	// Rewrite legacy @pituned/* aliases to the canonical @pit/*
 	// scope so Node ESM resolves them via node_modules without needing the
-	// pi-coding-agent jiti alias map.
-	rewritten = rewritten.replace(/@mariozechner\/pi-/g, "@earendil-works/pi-");
+	// coding-agent jiti alias map.
+	rewritten = rewritten.replace(/@pituned\/pi-/g, "@pit/");
 	if (rewritten !== src) {
 		writeFileSync(jsPath, rewritten);
 	}

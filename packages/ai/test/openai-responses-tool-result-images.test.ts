@@ -6,7 +6,6 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { Api, Context, Model, StreamOptions, Tool, ToolResultMessage } from "../src/index.js";
 import { complete, getModel } from "../src/index.js";
-import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
 import { resolveApiKey } from "./oauth.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
@@ -155,16 +154,6 @@ describe("Responses API tool result images", () => {
 
 		it("should send tool result images in function_call_output", { retry: 3, timeout: 30000 }, async () => {
 			await verifyToolResultImagesStayInFunctionCallOutput(model, { reasoningEffort: "low" });
-		});
-	});
-
-	describe.skipIf(!hasAzureOpenAICredentials())("Azure OpenAI Responses Provider (gpt-4o-mini)", () => {
-		const model = getModel("azure-openai-responses", "gpt-4o-mini");
-		const azureDeploymentName = resolveAzureDeploymentName(model.id);
-		const azureOptions = azureDeploymentName ? { azureDeploymentName } : {};
-
-		it("should send tool result images in function_call_output", { retry: 3, timeout: 30000 }, async () => {
-			await verifyToolResultImagesStayInFunctionCallOutput(model, azureOptions);
 		});
 	});
 

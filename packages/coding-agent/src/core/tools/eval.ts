@@ -4,8 +4,8 @@
  * defined functions) survives between calls of the same `lang`.
  */
 
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Text } from "@earendil-works/pi-tui";
+import type { AgentTool } from "@pit/agent-core";
+import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import { getCurrentEvalKernelManager } from "../eval-kernel/index.ts";
 import type { EvalLang, EvalResult } from "../eval-kernel/types.ts";

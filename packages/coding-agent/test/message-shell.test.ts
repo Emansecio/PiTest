@@ -1,5 +1,5 @@
-import type { Component } from "@earendil-works/pi-tui";
-import { Text } from "@earendil-works/pi-tui";
+import type { Component } from "@pit/tui";
+import { Text } from "@pit/tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
 	MessageShell,

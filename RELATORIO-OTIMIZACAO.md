@@ -111,7 +111,7 @@ Ação: testar `incremental: true` + `tsBuildInfoFile` e medir; se tsgo ignorar,
 | **`agent-session.ts:1045` `.includes()` em loop** | ❌ Real, mas `event.hints` tem punhado de itens. O(n·m) com n,m minúsculos. "10-100×" é enganoso (n é ~3). |
 | **`learned-error-store.ts:174` `.includes()` em loop** | ❌ Arrays minúsculos (rule IDs) + caminho **frio** (geração de report `learn:report`), não runtime. |
 | **`theme.ts:561-580` tema re-parseado "por load/render"** | ❌ `loadThemeJson` roda via `initTheme`/troca de tema/watcher — **não por render**. O objeto `Theme` é construído 1× e reusado. Builtins já cacheados. |
-| **`list-models.ts:80-86` 6 `.map()`** | ❌ Comando one-shot frio (`pi --list-models`). 600 vs 100 iters = microssegundos. Cosmético. |
+| **`list-models.ts:80-86` 6 `.map()`** | ❌ Comando one-shot frio (`pit --list-models`). 600 vs 100 iters = microssegundos. Cosmético. |
 
 ---
 

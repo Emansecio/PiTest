@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { Agent, type AgentMessage, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage, type ThinkingLevel } from "@pit/agent-core";
 import {
 	clampThinkingLevel,
 	getApiKeyFor,
@@ -10,7 +10,7 @@ import {
 	reportCredentialFailure,
 	reportCredentialSuccess,
 	streamSimple,
-} from "@earendil-works/pi-ai";
+} from "@pit/ai";
 import { getAgentDir } from "../config.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
@@ -46,7 +46,7 @@ import {
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
-	/** Global config directory. Default: ~/.pi/agent */
+	/** Global config directory. Default: ~/.pit/agent */
 	agentDir?: string;
 
 	/** Auth storage for credentials. Default: AuthStorage.create(agentDir/auth.json) */
@@ -98,7 +98,7 @@ export interface CreateAgentSessionOptions {
 	 * first matched rule, then replays the same turn. Compiled from
 	 * `settingsManager.getTTSRRules()` in `main.ts` and passed in here.
 	 */
-	ttsrMatcher?: import("@earendil-works/pi-agent-core").TTSRMatcher;
+	ttsrMatcher?: import("@pit/agent-core").TTSRMatcher;
 }
 
 /** Result from createAgentSession */
@@ -171,8 +171,8 @@ function getAttributionHeaders(
 
 	if (model.provider === "openrouter" || model.baseUrl.includes("openrouter.ai")) {
 		return {
-			"HTTP-Referer": "https://pi.dev",
-			"X-OpenRouter-Title": "pi",
+			"HTTP-Referer": "https://pit.dev",
+			"X-OpenRouter-Title": "pit",
 			"X-OpenRouter-Categories": "cli-agent",
 		};
 	}
@@ -184,7 +184,7 @@ function getAttributionHeaders(
 		model.baseUrl.includes("gateway.ai.cloudflare.com")
 	) {
 		return {
-			"User-Agent": "pi-coding-agent",
+			"User-Agent": "pit-coding-agent",
 		};
 	}
 
@@ -200,7 +200,7 @@ function getAttributionHeaders(
  * const { session } = await createAgentSession();
  *
  * // With explicit model
- * import { getModel } from '@earendil-works/pi-ai';
+ * import { getModel } from '@pit/ai';
  * const { session } = await createAgentSession({
  *   model: getModel('anthropic', 'claude-opus-4-5'),
  *   thinkingLevel: 'high',
@@ -394,8 +394,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// interactive use: sessions span minutes-to-hours and benefit from
 			// keeping system prompt + tools cached across pauses. Providers that do
 			// not support long retention fall back to short automatically.
-			// Override via PI_CACHE_RETENTION=short or explicit options.cacheRetention.
-			const defaultCacheRetention = process.env.PI_CACHE_RETENTION === "short" ? "short" : "long";
+			// Override via PIT_CACHE_RETENTION=short or explicit options.cacheRetention.
+			const defaultCacheRetention = process.env.PIT_CACHE_RETENTION === "short" ? "short" : "long";
 
 			// Multi-key round-robin: if the credential pool has more than one
 			// entry for this provider, use a sessionId-sticky pick so prompt-cache

@@ -10,9 +10,9 @@
 import { constants } from "node:fs";
 import { access as fsAccess, readFile as fsReadFile } from "node:fs/promises";
 import { basename, isAbsolute, resolve as resolvePath } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { ImageContent, Model, TextContent } from "@earendil-works/pi-ai";
-import { Text } from "@earendil-works/pi-tui";
+import type { AgentTool } from "@pit/agent-core";
+import type { ImageContent, Model, TextContent } from "@pit/ai";
+import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";

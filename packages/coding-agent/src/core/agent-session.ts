@@ -15,15 +15,8 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import type {
-	Agent,
-	AgentEvent,
-	AgentMessage,
-	AgentState,
-	AgentTool,
-	ThinkingLevel,
-} from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@earendil-works/pi-ai";
+import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
+import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@pit/ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -34,7 +27,7 @@ import {
 	modelsAreEqual,
 	resetApiProviders,
 	streamSimple,
-} from "@earendil-works/pi-ai";
+} from "@pit/ai";
 import { theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
@@ -437,7 +430,7 @@ export class AgentSession {
 			maxFiles: freqCfg.maxFiles,
 		});
 
-		// Hydrate the tracker from <cwd>/.pi/frequent-files.json so a fresh
+		// Hydrate the tracker from <cwd>/.pit/frequent-files.json so a fresh
 		// session re-uses the previous session's hot-file ranking instead of
 		// the model re-discovering it via repeated reads. Best-effort — a
 		// missing/corrupt file just leaves the tracker empty.
@@ -532,6 +525,7 @@ export class AgentSession {
 			"retain",
 			"recall",
 			"reflect",
+			"forget",
 		]);
 		const alwaysActive = new Set(cfg.alwaysActive);
 		const candidates = new Set<string>(explicit);
@@ -551,7 +545,7 @@ export class AgentSession {
 
 	/**
 	 * Open the project's hindsight bank (if enabled) and publish it via the
-	 * module-level registry so retain/recall/reflect tool calls pick it up.
+	 * module-level registry so retain/recall/reflect/forget tool calls pick it up.
 	 * No-op when `hindsight.enabled` is false.
 	 */
 	private _openHindsightBank(): void {
@@ -1069,13 +1063,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Write a single-session stats snapshot to `$PI_STATS_EXPORT_DIR/<sessionId>.json`
+	 * Write a single-session stats snapshot to `$PIT_STATS_EXPORT_DIR/<sessionId>.json`
 	 * when that env var is set. Best-effort: failures are swallowed because the
 	 * stats export is observability infrastructure, not load-bearing for the
 	 * session lifecycle.
 	 */
 	private _maybeExportStats(): void {
-		const dir = process.env.PI_STATS_EXPORT_DIR;
+		const dir = process.env.PIT_STATS_EXPORT_DIR;
 		if (!dir) return;
 		const toolStats = this.getToolCallStats();
 		const registry = this.getRegistryStats();
@@ -1101,7 +1095,7 @@ export class AgentSession {
 
 	/**
 	 * Append this session's learned-error fingerprints to a per-session JSONL
-	 * file under `~/.pi/agent/learned-errors/`. Best-effort: failures are
+	 * file under `~/.pit/agent/learned-errors/`. Best-effort: failures are
 	 * swallowed because the learned-error store is observability, not load-
 	 * bearing for the session lifecycle.
 	 */
@@ -1279,7 +1273,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	async dispose(): Promise<void> {
-		// Opt-in stats export for baseline measurement. Set PI_STATS_EXPORT_DIR
+		// Opt-in stats export for baseline measurement. Set PIT_STATS_EXPORT_DIR
 		// to a writable directory to get one JSON file per session containing
 		// tool-call totals + per-rule rewrite/reject counts. Used to measure
 		// the before/after delta of the rewrite registry on real workloads.
@@ -2992,7 +2986,7 @@ export class AgentSession {
 		this._applyExtensionBindings(this._extensionRunner);
 
 		const hindsightActive = this.settingsManager.getHindsightSettings().enabled
-			? ["retain", "recall", "reflect"]
+			? ["retain", "recall", "reflect", "forget"]
 			: [];
 		// Default-on gates: web_search and eval are registered as built-in tool
 		// definitions unconditionally (via createAllToolDefinitions above), but

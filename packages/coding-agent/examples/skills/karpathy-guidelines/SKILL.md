@@ -10,7 +10,7 @@ Behavioral guidelines to reduce common LLM coding mistakes, derived from [Andrej
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
-> Tip: pi ships a condensed version of these bullets as an always-on system-prompt
+> Tip: pit ships a condensed version of these bullets as an always-on system-prompt
 > pack. Enable it once via `settings.json`:
 >
 > ```json

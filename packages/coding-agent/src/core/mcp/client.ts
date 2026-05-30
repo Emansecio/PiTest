@@ -57,11 +57,18 @@ export class McpHttpClient {
 		return this.serverInfo;
 	}
 
-	private async rpc<T>(method: string, params?: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+	private async rpc<T>(
+		method: string,
+		params?: Record<string, unknown>,
+		signal?: AbortSignal,
+		timeoutOverrideMs?: number,
+	): Promise<T> {
 		const id = this.nextId++;
 		const body: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
 		const controller = new AbortController();
-		const timeoutMs = this.config.timeoutMs ?? 30_000;
+		// Connect handshake uses a shorter 15s budget (passed via timeoutOverrideMs);
+		// tool calls keep the default 30s so slow MCP tools don't get cut off.
+		const timeoutMs = timeoutOverrideMs ?? this.config.timeoutMs ?? 30_000;
 		const timer = setTimeout(() => controller.abort(), timeoutMs);
 		const onAbort = () => controller.abort();
 		signal?.addEventListener("abort", onAbort, { once: true });
@@ -117,6 +124,7 @@ export class McpHttpClient {
 				clientInfo: CLIENT_INFO,
 			},
 			signal,
+			15_000,
 		);
 		this.serverInfo = result.serverInfo;
 

@@ -8,7 +8,7 @@ describe("memory discovery + format + append", () => {
 	let tempDir: string;
 	let cwd: string;
 	let agentDir: string;
-	const configDirName = ".pi";
+	const configDirName = ".pit";
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-mem-"));

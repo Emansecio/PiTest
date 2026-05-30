@@ -1,4 +1,4 @@
-import type { LoaderColorFn } from "@earendil-works/pi-tui";
+import type { LoaderColorFn } from "@pit/tui";
 import { theme as globalTheme, type Theme } from "../theme/theme.ts";
 
 /**

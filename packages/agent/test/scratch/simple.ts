@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@earendil-works/pi-ai";
+import { getModel } from "@pit/ai";
 import { NodeExecutionEnv } from "../../src/harness/env/nodejs.js";
 import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.js";
 import {
@@ -22,15 +22,15 @@ const source = (type: Source["type"], dir: string) => ({ path: dir, source: { ty
 const { skills: sourcedSkills } = await loadSourcedSkills<Source, SourcedSkill>(
 	env,
 	[
-		source("project", join(env.cwd, ".pi/skills")),
-		source("user", join(homedir(), ".pi/agent/skills")),
+		source("project", join(env.cwd, ".pit/skills")),
+		source("user", join(homedir(), ".pit/agent/skills")),
 		source("path", join(env.cwd, "../../../pi-skills")),
 	],
 	(skill, source) => ({ ...skill, source }),
 );
 const { promptTemplates: sourcedPromptTemplates } = await loadSourcedPromptTemplates<Source, SourcedPromptTemplate>(
 	env,
-	[source("project", join(env.cwd, ".pi/prompts")), source("user", join(homedir(), ".pi/agent/prompts"))],
+	[source("project", join(env.cwd, ".pit/prompts")), source("user", join(homedir(), ".pit/agent/prompts"))],
 	(promptTemplate, source) => ({ ...promptTemplate, source }),
 );
 

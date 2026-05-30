@@ -1,12 +1,12 @@
 # MCP servers
 
-Pi can register tools from external Model Context Protocol (MCP) servers over
+Pit can register tools from external Model Context Protocol (MCP) servers over
 HTTP. Each configured server is reachable at a JSON-RPC 2.0 endpoint; on
-session start Pi initializes every server in parallel, fetches its tool
+session start Pit initializes every server in parallel, fetches its tool
 catalog, and registers each tool with a name prefix so multiple servers don't
 collide.
 
-> The MCP spec also defines stdio and SSE transports. Pi currently ships only
+> The MCP spec also defines stdio and SSE transports. Pit currently ships only
 > HTTP. SSE responses are rejected with a clear error message so you don't
 > silently hang.
 
@@ -41,17 +41,17 @@ collide.
 | `disabled` | boolean | `false` | Skip this server without removing the entry. |
 | `allowTools` | string[] | – | Allowlist of tool names from this server. When set, tools not in the list are hidden. |
 | `denyTools` | string[] | – | Denylist of tool names from this server. |
-| `toolPrefix` | string | `"<name>__"` | Prefix applied to every tool name from this server when registering with Pi. Avoids collisions across servers. |
+| `toolPrefix` | string | `"<name>__"` | Prefix applied to every tool name from this server when registering with Pit. Avoids collisions across servers. |
 
 ## Tool name resolution
 
-Given a server registered as `github` advertising a `search_issues` tool, Pi
+Given a server registered as `github` advertising a `search_issues` tool, Pit
 registers it with the LLM as `github__search_issues`. Override the prefix via
 `toolPrefix`.
 
 ## Reconnect behavior
 
-When `tools/call` fails with a network-class error, Pi marks the connection
+When `tools/call` fails with a network-class error, Pit marks the connection
 broken, re-runs `initialize`+`tools/list` once, then retries the original
 call. If reconnect succeeds the call retries; if not, the original error
 propagates. There is no background reconnect loop — failures surface
@@ -60,7 +60,7 @@ immediately on the next call.
 ## Inspection
 
 `/mcp` lists every configured server, its connection state, and the tools it
-advertises. The dry-run report (`pi --dry-run`) also includes MCP servers and
+advertises. The dry-run report (`pit --dry-run`) also includes MCP servers and
 flags disabled entries.
 
 ## Authentication
@@ -68,4 +68,4 @@ flags disabled entries.
 MCP itself doesn't standardize auth. Most public servers accept an
 `Authorization` header — set it in `headers`. For provider-issued tokens
 that rotate, run a wrapper command that refreshes the token and edits
-`settings.json` before launching Pi.
+`settings.json` before launching Pit.

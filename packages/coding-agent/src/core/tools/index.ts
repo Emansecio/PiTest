@@ -68,6 +68,13 @@ export {
 	type FindToolOptions,
 } from "./find.ts";
 export {
+	createForgetTool,
+	createForgetToolDefinition,
+	type ForgetToolDetails,
+	type ForgetToolInput,
+	type ForgetToolOptions,
+} from "./forget.ts";
+export {
 	createGrepTool,
 	createGrepToolDefinition,
 	type GrepOperations,
@@ -180,7 +187,7 @@ export {
 	type WriteToolOptions,
 } from "./write.ts";
 
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool } from "@pit/agent-core";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { type AskToolOptions, createAskTool, createAskToolDefinition } from "./ask.ts";
 import { type AstEditToolOptions, createAstEditTool, createAstEditToolDefinition } from "./ast-edit.ts";
@@ -195,6 +202,7 @@ import {
 } from "./edit-hashline.ts";
 import { createEvalTool, createEvalToolDefinition, type EvalToolOptions } from "./eval.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
+import { createForgetTool, createForgetToolDefinition, type ForgetToolOptions } from "./forget.ts";
 import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import {
 	createInspectImageTool,
@@ -244,6 +252,7 @@ export type ToolName =
 	| "retain"
 	| "recall"
 	| "reflect"
+	| "forget"
 	| "calc"
 	| "recipe"
 	| "inspect_image"
@@ -268,6 +277,7 @@ export const allToolNames: Set<ToolName> = new Set([
 	"retain",
 	"recall",
 	"reflect",
+	"forget",
 	"calc",
 	"recipe",
 	"inspect_image",
@@ -295,6 +305,7 @@ export interface ToolsOptions {
 	retain?: RetainToolOptions;
 	recall?: RecallToolOptions;
 	reflect?: ReflectToolOptions;
+	forget?: ForgetToolOptions;
 	calc?: CalcToolOptions;
 	recipe?: RecipeToolOptions;
 	inspect_image?: InspectImageToolOptions;
@@ -342,6 +353,8 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			return createRecallToolDefinition(cwd, options?.recall);
 		case "reflect":
 			return createReflectToolDefinition(cwd, options?.reflect);
+		case "forget":
+			return createForgetToolDefinition(cwd, options?.forget);
 		case "calc":
 			return createCalcToolDefinition(cwd, options?.calc);
 		case "recipe":
@@ -395,6 +408,8 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createRecallTool(cwd, options?.recall);
 		case "reflect":
 			return createReflectTool(cwd, options?.reflect);
+		case "forget":
+			return createForgetTool(cwd, options?.forget);
 		case "calc":
 			return createCalcTool(cwd, options?.calc);
 		case "recipe":
@@ -438,6 +453,7 @@ export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions)
 			createRetainToolDefinition(cwd, options?.retain),
 			createRecallToolDefinition(cwd, options?.recall),
 			createReflectToolDefinition(cwd, options?.reflect),
+			createForgetToolDefinition(cwd, options?.forget),
 		);
 	}
 	// Default-on native tools (no settings.json flag required).
@@ -481,6 +497,7 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		retain: createRetainToolDefinition(cwd, options?.retain),
 		recall: createRecallToolDefinition(cwd, options?.recall),
 		reflect: createReflectToolDefinition(cwd, options?.reflect),
+		forget: createForgetToolDefinition(cwd, options?.forget),
 		calc: createCalcToolDefinition(cwd, options?.calc),
 		recipe: createRecipeToolDefinition(cwd, options?.recipe),
 		inspect_image: createInspectImageToolDefinition(cwd, options?.inspect_image),
@@ -518,6 +535,7 @@ export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
 			createRetainTool(cwd, options?.retain),
 			createRecallTool(cwd, options?.recall),
 			createReflectTool(cwd, options?.reflect),
+			createForgetTool(cwd, options?.forget),
 		);
 	}
 	// Default-on native tools (no settings.json flag required).
@@ -561,6 +579,7 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		retain: createRetainTool(cwd, options?.retain),
 		recall: createRecallTool(cwd, options?.recall),
 		reflect: createReflectTool(cwd, options?.reflect),
+		forget: createForgetTool(cwd, options?.forget),
 		calc: createCalcTool(cwd, options?.calc),
 		recipe: createRecipeTool(cwd, options?.recipe),
 		inspect_image: createInspectImageTool(cwd, options?.inspect_image),

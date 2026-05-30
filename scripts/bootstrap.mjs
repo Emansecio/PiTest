@@ -6,8 +6,8 @@
  *
  * What it does:
  *   1. Verifies node_modules exists at repo root; runs `npm install` if not.
- *   2. Reads the canonical package list from .pi/packages.json and runs
- *      `pi install npm:<name>` for any package missing in ~/.pi/agent/npm/.
+ *   2. Reads the canonical package list from .pit/packages.json and runs
+ *      `pi install npm:<name>` for any package missing in ~/.pit/agent/npm/.
  *   3. Runs scripts/precompile-pi-packages.mjs so the loader can skip jiti
  *      transpilation on every startup.
  *
@@ -17,7 +17,7 @@
  *   --no-precompile     Skip the precompile step.
  *   --force-precompile  Pass --force to the precompile script.
  *
- * Respects PI_CODING_AGENT_DIR / PI_NPM_DIR overrides.
+ * Respects PIT_CODING_AGENT_DIR / PIT_NPM_DIR overrides.
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
-const PACKAGES_MANIFEST = join(REPO_ROOT, ".pi", "packages.json");
+const PACKAGES_MANIFEST = join(REPO_ROOT, ".pit", "packages.json");
 
 const flags = new Set(process.argv.slice(2));
 const SKIP_NPM = flags.has("--no-install");
@@ -38,12 +38,12 @@ const FORCE_PRECOMPILE = flags.has("--force-precompile");
 const SKIP_CLONE = flags.has("--no-clone");
 
 // PiTuned isolates its state from stock pi by defaulting the agent dir to
-// ~/.pit/agent/. Honor an explicit PI_CODING_AGENT_DIR override.
-const AGENT_DIR = process.env.PI_CODING_AGENT_DIR
-	? process.env.PI_CODING_AGENT_DIR.replace(/^~(?=$|\/|\\)/, homedir())
+// ~/.pit/agent/. Honor an explicit PIT_CODING_AGENT_DIR override.
+const AGENT_DIR = process.env.PIT_CODING_AGENT_DIR
+	? process.env.PIT_CODING_AGENT_DIR.replace(/^~(?=$|\/|\\)/, homedir())
 	: join(homedir(), ".pit", "agent");
-const STOCK_AGENT_DIR = join(homedir(), ".pi", "agent");
-const NPM_DIR = process.env.PI_NPM_DIR ?? join(AGENT_DIR, "npm", "node_modules");
+const STOCK_AGENT_DIR = join(homedir(), ".pit", "agent");
+const NPM_DIR = process.env.PIT_NPM_DIR ?? join(AGENT_DIR, "npm", "node_modules");
 
 function log(msg) {
 	console.log(`[bootstrap] ${msg}`);
@@ -109,7 +109,7 @@ if (!SKIP_CLONE && !exists(AGENT_DIR) && exists(STOCK_AGENT_DIR) && AGENT_DIR !=
 /**
  * Rewrite absolute path references inside the cloned settings.json so they
  * point at the new agent dir instead of the source one. Without this, the
- * settings still reference paths under ~/.pi/agent/ and PiTuned silently
+ * settings still reference paths under ~/.pit/agent/ and PiTuned silently
  * mixes state from both dirs.
  */
 function rewriteClonedSettings(settingsFile, fromDir, toDir) {
@@ -159,7 +159,7 @@ function isPackageInstalled(spec) {
 if (!SKIP_PI_INSTALL) {
 	const packages = readPackageList();
 	if (packages.length === 0) {
-		log(`no .pi/packages.json found — skipping pi install`);
+		log(`no .pit/packages.json found — skipping pi install`);
 	} else {
 		const missing = packages.filter((spec) => !isPackageInstalled(spec));
 		if (missing.length === 0) {
@@ -169,7 +169,7 @@ if (!SKIP_PI_INSTALL) {
 			const tsxBin = join(REPO_ROOT, "node_modules", ".bin", platform() === "win32" ? "tsx.cmd" : "tsx");
 			const cliPath = join(REPO_ROOT, "packages", "coding-agent", "src", "cli.ts");
 			// Ensure pi runs against PiTuned's isolated dir.
-			const env = { ...process.env, PI_CODING_AGENT_DIR: AGENT_DIR };
+			const env = { ...process.env, PIT_CODING_AGENT_DIR: AGENT_DIR };
 			for (const spec of missing) {
 				log(`  pit install ${spec}`);
 				try {
@@ -187,7 +187,7 @@ if (!SKIP_PRECOMPILE) {
 	log("pre-compiling pi packages");
 	const args = ["scripts/precompile-pi-packages.mjs"];
 	if (FORCE_PRECOMPILE) args.push("--force");
-	run("node", args, { env: { ...process.env, PI_CODING_AGENT_DIR: AGENT_DIR } });
+	run("node", args, { env: { ...process.env, PIT_CODING_AGENT_DIR: AGENT_DIR } });
 }
 
 log("done");

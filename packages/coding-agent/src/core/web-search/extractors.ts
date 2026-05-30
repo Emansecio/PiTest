@@ -102,7 +102,7 @@ async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
 		const res = await fetch(url, {
 			signal: combined,
 			headers: {
-				"User-Agent": "pi-coding-agent/1.0 (+web_search)",
+				"User-Agent": "pit-coding-agent/1.0 (+web_search)",
 				Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.5",
 			},
 		});
@@ -121,7 +121,7 @@ async function fetchJsonRaw(url: string, signal?: AbortSignal): Promise<unknown>
 		const res = await fetch(url, {
 			signal: combined,
 			headers: {
-				"User-Agent": "pi-coding-agent/1.0 (+web_search)",
+				"User-Agent": "pit-coding-agent/1.0 (+web_search)",
 				Accept: "application/json",
 			},
 		});

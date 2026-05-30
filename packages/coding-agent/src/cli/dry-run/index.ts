@@ -17,6 +17,7 @@ import { CONFIG_DIR_NAME } from "../../config.ts";
 import type { AgentSessionServices } from "../../core/agent-session-services.ts";
 import { discoverLegacyResources } from "../../core/legacy-discovery.ts";
 import { discoverMemoryFiles } from "../../core/memory/index.ts";
+import { normalizePermissionMode } from "../../core/permissions/index.ts";
 
 export type DryRunStatus = "ready" | "warning" | "blocked";
 
@@ -53,7 +54,7 @@ function statusGlyph(status: DryRunStatus): string {
 
 export interface BuildDryRunReportOptions {
 	services: AgentSessionServices;
-	resolvedModel?: import("@earendil-works/pi-ai").Model<any>;
+	resolvedModel?: import("@pit/ai").Model<any>;
 	resolvedToolNames: string[];
 }
 
@@ -177,10 +178,11 @@ export function buildDryRunReport(options: BuildDryRunReportOptions): DryRunRepo
 
 	// --- Permissions
 	const perm = settingsManager.getPermissionSettings();
+	const permissionMode = normalizePermissionMode(perm.mode) ?? "auto";
 	checks.push({
 		name: "Permissions",
 		status: "ready",
-		detail: `mode=${perm.mode ?? "default"}; allow=${perm.allowPaths?.length ?? 0}; deny=${perm.denyPaths?.length ?? 0}; ask=${perm.askPaths?.length ?? 0}`,
+		detail: `mode=${permissionMode}; allow=${perm.allowPaths?.length ?? 0}; deny=${perm.denyPaths?.length ?? 0}; ask=${perm.askPaths?.length ?? 0}`,
 	});
 
 	// --- Project context files

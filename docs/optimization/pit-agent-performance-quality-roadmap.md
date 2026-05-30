@@ -1,14 +1,14 @@
-# Roadmap de desempenho e qualidade do agente Pit/Pi
+# Roadmap de desempenho e qualidade do agente Pit/Pit
 
 ## Leitor e objetivo
 
-**Leitor-alvo:** mantenedor futuro do Pit/Pi que precisa priorizar e implementar melhorias sem reler esta conversa.
+**Leitor-alvo:** mantenedor futuro do Pit/Pit que precisa priorizar e implementar melhorias sem reler esta conversa.
 
 **Ação após leitura:** escolher a próxima melhoria, editar os arquivos certos, rodar o benchmark correto e saber quais achados não devem ser retrabalhados.
 
 ## Escopo
 
-Este documento consolida achados revisados sobre desempenho, velocidade e qualidade do agente Pit/Pi. Ele deduplica os resultados dos subagentes e remove conclusões que ficaram obsoletas após leitura direta do código atual.
+Este documento consolida achados revisados sobre desempenho, velocidade e qualidade do agente Pit/Pit. Ele deduplica os resultados dos subagentes e remove conclusões que ficaram obsoletas após leitura direta do código atual.
 
 Foco principal:
 
@@ -247,9 +247,9 @@ Melhora confiabilidade dos guards e reduz drift entre módulos.
 
 ### Evidência
 
-Execução com `PI_TIMING=1` mostrou custos relevantes:
+Execução com `PIT_TIMING=1` mostrou custos relevantes:
 
-- `.pi/extensions/prompt-url-widget.ts`: `759ms`;
+- `.pit/extensions/prompt-url-widget.ts`: `759ms`;
 - `pi-autoresearch`: `689ms`;
 - `pi-subagents`: `606ms`;
 - `@tintinweb/pi-tasks`: `530ms`.
@@ -263,7 +263,7 @@ Também foram observadas falhas de native import com fallback para jiti em algun
 
 ### Melhorias
 
-1. Aplicar preferência por `.js` precompilado também para extensões locais diretas em `.pi/extensions/*.ts`.
+1. Aplicar preferência por `.js` precompilado também para extensões locais diretas em `.pit/extensions/*.ts`.
 2. Precompilar extensões locais do projeto, não só pacotes npm.
 3. Corrigir imports/exports que fazem native import falhar e cair para jiti.
 4. Melhorar `precompile-pi-packages.mjs` para não andar pacote inteiro quando um entry root importa só poucos arquivos.
@@ -278,7 +278,7 @@ Também foram observadas falhas de native import com fallback para jiti em algun
 Rodar antes/depois:
 
 ```bash
-PI_TIMING=1 npx tsx packages/coding-agent/src/cli.ts --help
+PIT_TIMING=1 npx tsx packages/coding-agent/src/cli.ts --help
 node scripts/bench-startup.mjs --n=5
 ```
 
@@ -300,7 +300,7 @@ Provável redução de **0.7s a 1.5s** no startup se native import fallback e pr
 
 ### Arquivos
 
-- `C:/Users/User/.pi/agent/extensions/agentmemory/index.ts`
+- `C:/Users/User/.pit/agent/extensions/agentmemory/index.ts`
 - `packages/coding-agent/src/core/extensions/runner.ts`
 
 ### Melhorias
@@ -308,7 +308,7 @@ Provável redução de **0.7s a 1.5s** no startup se native import fallback e pr
 1. Timeout curto por hook, inicialmente entre `100ms` e `300ms` para modo rápido.
 2. Cache por prompt/session para smart-search.
 3. Modo speed: lookup de memory em background ou desligado.
-4. Métricas por hook com `PI_TIMING`.
+4. Métricas por hook com `PIT_TIMING`.
 5. Fallback silencioso quando memory server estiver lento.
 
 ### Validação
@@ -487,7 +487,7 @@ Rodar sempre antes e depois de cada mudança de performance:
 cd C:/PiTest
 node scripts/bench-startup.mjs --n=5
 npx tsx scripts/bench-prompt-size.mts
-PI_TIMING=1 npx tsx packages/coding-agent/src/cli.ts --help
+PIT_TIMING=1 npx tsx packages/coding-agent/src/cli.ts --help
 ```
 
 Para mudanças em hooks, adicionar cenário com turno real e medir:
@@ -508,7 +508,7 @@ Para mudanças em guards, rodar testes focados do pacote `packages/coding-agent`
    Alto impacto em segurança/qualidade do harness.
 
 3. **Precompile/local extension fast path e native import fallback**  
-   Reduz startup com evidência direta em `PI_TIMING`.
+   Reduz startup com evidência direta em `PIT_TIMING`.
 
 4. **Hook budgets para `before_agent_start`**  
    Reduz TTFT e travas antes do primeiro token.

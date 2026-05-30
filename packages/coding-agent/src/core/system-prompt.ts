@@ -2,7 +2,7 @@
  * System prompt construction and project context loading
  */
 
-import { SYSTEM_PROMPT_DYNAMIC_MARKER } from "@earendil-works/pi-ai";
+import { SYSTEM_PROMPT_DYNAMIC_MARKER } from "@pit/ai";
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
 import { type FrequentFile, formatFrequentFilesIndexForPrompt } from "./frequent-files.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
@@ -175,9 +175,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 
 	// Always include these.
-	// Concise default trims output tokens (5× cost of input). Set PI_NARRATION=1
+	// Concise default trims output tokens (5× cost of input). Set PIT_NARRATION=1
 	// to re-enable per-step narration between tool calls.
-	const narrationEnabled = typeof process !== "undefined" && process.env.PI_NARRATION === "1";
+	const narrationEnabled = typeof process !== "undefined" && process.env.PIT_NARRATION === "1";
 	if (narrationEnabled) {
 		addGuideline("Be concise in your responses");
 	} else {
@@ -190,7 +190,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
 	const parts: string[] = [
-		`You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
+		`You are an expert coding assistant operating inside pit, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.
 
 Available tools:
 ${toolsList}

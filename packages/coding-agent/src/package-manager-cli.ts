@@ -1,4 +1,4 @@
-import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { Markdown, type MarkdownTheme } from "@pit/tui";
 import chalk from "chalk";
 import { selectConfig } from "./cli/config-selector.ts";
 import {
@@ -87,7 +87,7 @@ function printPackageCommandHelp(command: PackageCommand): void {
 Install a package and add it to settings.
 
 Options:
-  -l, --local    Install project-locally (.pi/settings.json)
+  -l, --local    Install project-locally (.pit/settings.json)
 
 Examples:
   ${APP_NAME} install npm:@foo/bar
@@ -107,7 +107,7 @@ Remove a package and its source from settings.
 Alias: ${APP_NAME} uninstall <source> [-l]
 
 Options:
-  -l, --local    Remove from project settings (.pi/settings.json)
+  -l, --local    Remove from project settings (.pit/settings.json)
 
 Examples:
   ${APP_NAME} remove npm:@foo/bar
@@ -253,7 +253,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 			}
 			updateTarget = { type: "extensions", source: extensionFlagSource };
 		} else if (source) {
-			const sourceIsSelf = source === "self" || source === "pi";
+			const sourceIsSelf = source === "self" || source === "pi" || source === "pit" || source === "pit";
 			if (sourceIsSelf) {
 				updateTarget = extensionsFlag ? { type: "all" } : { type: "self" };
 			} else {
@@ -458,6 +458,21 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 		return true;
 	}
 
+	// Local-only mode: external pi-package management (npm:/git:) has been removed.
+	// `install`/`remove` of remote packages are disabled; resources are discovered
+	// locally under .pit/ and ~/.pit/agent/. `list`, `config`, and `update self`
+	// (the agent's own self-update) remain available.
+	if (options.command === "install" || options.command === "remove") {
+		console.error(chalk.yellow("Package management is disabled (local-only mode)."));
+		console.error(
+			chalk.dim(
+				"External npm:/git: pi-packages are no longer installed. Place extensions, skills, prompts, or themes under .pit/ (project) or ~/.pit/agent/ (user).",
+			),
+		);
+		process.exitCode = 1;
+		return true;
+	}
+
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
 	const settingsManager = SettingsManager.create(cwd, agentDir);
@@ -474,22 +489,8 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 
 	try {
 		switch (options.command) {
-			case "install":
-				await packageManager.installAndPersist(source!, { local: options.local });
-				console.log(chalk.green(`Installed ${source}`));
-				return true;
-
-			case "remove": {
-				const removed = await packageManager.removeAndPersist(source!, { local: options.local });
-				if (!removed) {
-					console.error(chalk.red(`No matching package found for ${source}`));
-					process.exitCode = 1;
-					return true;
-				}
-				console.log(chalk.green(`Removed ${source}`));
-				return true;
-			}
-
+			// Local-only mode: `install`/`remove` are intercepted earlier and never
+			// reach this switch. Only `list` and `update` (self-update) remain.
 			case "list": {
 				const configuredPackages = packageManager.listConfiguredPackages();
 				const userPackages = configuredPackages.filter((pkg) => pkg.scope === "user");
@@ -529,12 +530,12 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 			case "update": {
 				const target = options.updateTarget ?? { type: "all" };
 				if (updateTargetIncludesExtensions(target)) {
-					const updateSource = target.type === "extensions" ? target.source : undefined;
-					await packageManager.update(updateSource);
-					if (updateSource) {
-						console.log(chalk.green(`Updated ${updateSource}`));
-					} else {
-						console.log(chalk.green("Updated packages"));
+					// Local-only mode: external pi-package updates are disabled. Only
+					// note this when the user explicitly targeted extensions; for the
+					// default `update` (all) we silently skip to the self-update below.
+					if (target.type === "extensions") {
+						console.error(chalk.yellow("Package updates are disabled (local-only mode)."));
+						console.error(chalk.dim("External npm:/git: pi-packages are no longer installed or updated."));
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {

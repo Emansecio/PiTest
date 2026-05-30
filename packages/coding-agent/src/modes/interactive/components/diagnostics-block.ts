@@ -1,4 +1,4 @@
-import { Text } from "@earendil-works/pi-tui";
+import { Text } from "@pit/tui";
 import type { ResourceDiagnostic } from "../../../core/diagnostics.ts";
 import type { SourceInfo } from "../../../core/source-info.ts";
 import { formatDiagnostics } from "../display-utils.ts";

@@ -14,7 +14,7 @@ export default defineConfig({
 		// fixtures stay deterministic regardless of which Claude Code skills
 		// the contributor has on their machine. Real usage opts in by default.
 		env: {
-			PI_DISABLE_CLAUDE_CODE_SKILLS: "1",
+			PIT_DISABLE_CLAUDE_CODE_SKILLS: "1",
 		},
 		server: {
 			deps: {
@@ -27,9 +27,9 @@ export default defineConfig({
 			{ find: /^@earendil-works\/pi-ai$/, replacement: aiSrcIndex },
 			{ find: /^@earendil-works\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
 			{ find: /^@earendil-works\/pi-agent-core$/, replacement: agentSrcIndex },
-			{ find: /^@mariozechner\/pi-ai$/, replacement: aiSrcIndex },
-			{ find: /^@mariozechner\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
-			{ find: /^@mariozechner\/pi-agent-core$/, replacement: agentSrcIndex },
+			{ find: /^@pituned\/pi-ai$/, replacement: aiSrcIndex },
+			{ find: /^@pituned\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
+			{ find: /^@pituned\/pi-agent-core$/, replacement: agentSrcIndex },
 		],
 	},
 });

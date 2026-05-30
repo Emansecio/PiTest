@@ -1,5 +1,5 @@
 # PiTuned launcher (PowerShell).
-# Runs the local PiTest source via tsx, isolated from the global `pi` install
+# Runs the local PiTest source via tsx, isolated from the global `pit` install
 # by pointing the agent dir at $HOME\.pit\agent.
 $ErrorActionPreference = "Stop"
 
@@ -8,19 +8,19 @@ $repoRoot = Resolve-Path (Join-Path $scriptDir "..")
 $tsxBin = Join-Path $repoRoot "node_modules\.bin\tsx.cmd"
 
 # Honor any explicit override the user set before invoking pit.
-if (-not $env:PI_CODING_AGENT_DIR) {
-    $env:PI_CODING_AGENT_DIR = Join-Path $HOME ".pit\agent"
+if (-not $env:PIT_CODING_AGENT_DIR) {
+    $env:PIT_CODING_AGENT_DIR = Join-Path $HOME ".pit\agent"
 }
 
 # Isolate temp dir (see pit.cmd for rationale).
-if (-not $env:PI_TMP_DIR) {
-    $env:PI_TMP_DIR = Join-Path $HOME ".pit\tmp"
+if (-not $env:PIT_TMP_DIR) {
+    $env:PIT_TMP_DIR = Join-Path $HOME ".pit\tmp"
 }
-if (-not (Test-Path $env:PI_TMP_DIR)) {
-    New-Item -ItemType Directory -Path $env:PI_TMP_DIR -Force | Out-Null
+if (-not (Test-Path $env:PIT_TMP_DIR)) {
+    New-Item -ItemType Directory -Path $env:PIT_TMP_DIR -Force | Out-Null
 }
-$env:TMP = $env:PI_TMP_DIR
-$env:TEMP = $env:PI_TMP_DIR
+$env:TMP = $env:PIT_TMP_DIR
+$env:TEMP = $env:PIT_TMP_DIR
 
 if (-not (Test-Path $tsxBin)) {
     Write-Error "pit: tsx not found at $tsxBin. Run 'npm install' in $repoRoot first."

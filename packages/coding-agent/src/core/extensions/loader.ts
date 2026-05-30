@@ -8,11 +8,11 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import * as _bundledPiAgentCore from "@earendil-works/pi-agent-core";
-import * as _bundledPiAi from "@earendil-works/pi-ai";
-import * as _bundledPiAiOauth from "@earendil-works/pi-ai/oauth";
-import type { KeyId } from "@earendil-works/pi-tui";
-import * as _bundledPiTui from "@earendil-works/pi-tui";
+import * as _bundledPiAgentCore from "@pit/agent-core";
+import * as _bundledPiAi from "@pit/ai";
+import * as _bundledPiAiOauth from "@pit/ai/oauth";
+import type { KeyId } from "@pit/tui";
+import * as _bundledPiTui from "@pit/tui";
 import { createJiti } from "jiti/static";
 // Static imports of packages that extensions may use.
 // These MUST be static so Bun bundles them into the compiled binary.
@@ -22,7 +22,7 @@ import * as _bundledTypeboxCompile from "typebox/compile";
 import * as _bundledTypeboxValue from "typebox/value";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
 // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
-// avoiding a circular dependency. Extensions can import from @earendil-works/pi-coding-agent.
+// avoiding a circular dependency. Extensions can import from @pit/coding-agent.
 import * as _bundledPiCodingAgent from "../../index.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
@@ -49,16 +49,16 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@sinclair/typebox": _bundledTypebox,
 	"@sinclair/typebox/compile": _bundledTypeboxCompile,
 	"@sinclair/typebox/value": _bundledTypeboxValue,
-	"@earendil-works/pi-agent-core": _bundledPiAgentCore,
-	"@earendil-works/pi-tui": _bundledPiTui,
-	"@earendil-works/pi-ai": _bundledPiAi,
-	"@earendil-works/pi-ai/oauth": _bundledPiAiOauth,
-	"@earendil-works/pi-coding-agent": _bundledPiCodingAgent,
-	"@mariozechner/pi-agent-core": _bundledPiAgentCore,
-	"@mariozechner/pi-tui": _bundledPiTui,
-	"@mariozechner/pi-ai": _bundledPiAi,
-	"@mariozechner/pi-ai/oauth": _bundledPiAiOauth,
-	"@mariozechner/pi-coding-agent": _bundledPiCodingAgent,
+	"@pit/agent-core": _bundledPiAgentCore,
+	"@pit/tui": _bundledPiTui,
+	"@pit/ai": _bundledPiAi,
+	"@pit/ai/oauth": _bundledPiAiOauth,
+	"@pit/coding-agent": _bundledPiCodingAgent,
+	"@pituned/pi-agent-core": _bundledPiAgentCore,
+	"@pituned/pi-tui": _bundledPiTui,
+	"@pituned/pi-ai": _bundledPiAi,
+	"@pituned/pi-ai/oauth": _bundledPiAiOauth,
+	"@pituned/pi-coding-agent": _bundledPiCodingAgent,
 };
 
 const require = createRequire(import.meta.url);
@@ -89,22 +89,22 @@ function getAliases(): Record<string, string> {
 	};
 
 	const piCodingAgentEntry = packageIndex;
-	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/dist/index.js", "@earendil-works/pi-agent-core");
-	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@earendil-works/pi-tui");
-	const piAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "@earendil-works/pi-ai");
-	const piAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "@earendil-works/pi-ai/oauth");
+	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/dist/index.js", "@pit/agent-core");
+	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@pit/tui");
+	const piAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "@pit/ai");
+	const piAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "@pit/ai/oauth");
 
 	_aliases = {
-		"@earendil-works/pi-coding-agent": piCodingAgentEntry,
-		"@earendil-works/pi-agent-core": piAgentCoreEntry,
-		"@earendil-works/pi-tui": piTuiEntry,
-		"@earendil-works/pi-ai": piAiEntry,
-		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
-		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
-		"@mariozechner/pi-agent-core": piAgentCoreEntry,
-		"@mariozechner/pi-tui": piTuiEntry,
-		"@mariozechner/pi-ai": piAiEntry,
-		"@mariozechner/pi-ai/oauth": piAiOauthEntry,
+		"@pit/coding-agent": piCodingAgentEntry,
+		"@pit/agent-core": piAgentCoreEntry,
+		"@pit/tui": piTuiEntry,
+		"@pit/ai": piAiEntry,
+		"@pit/ai/oauth": piAiOauthEntry,
+		"@pituned/pi-coding-agent": piCodingAgentEntry,
+		"@pituned/pi-agent-core": piAgentCoreEntry,
+		"@pituned/pi-tui": piTuiEntry,
+		"@pituned/pi-ai": piAiEntry,
+		"@pituned/pi-ai/oauth": piAiOauthEntry,
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,
 		"typebox/value": typeboxValueEntry,
@@ -372,7 +372,7 @@ function getSharedJiti(): ReturnType<typeof createJiti> {
 
 /**
  * Eagerly load the heavy core libraries every extension imports
- * (`@earendil-works/pi-coding-agent`, `pi-ai`, `pi-tui`, `typebox`) so the
+ * (`@pit/coding-agent`, `pi-ai`, `pi-tui`, `typebox`) so the
  * first extension load doesn't pay their transpile cost. Safe to call
  * multiple times — the work happens exactly once.
  *
@@ -385,14 +385,14 @@ export function prewarmExtensionLoader(): void {
 	const jiti = getSharedJiti();
 	const t0 = Date.now();
 	_prewarmPromise = Promise.allSettled([
-		jiti.import("@earendil-works/pi-coding-agent"),
-		jiti.import("@earendil-works/pi-agent-core"),
-		jiti.import("@earendil-works/pi-ai"),
-		jiti.import("@earendil-works/pi-tui"),
+		jiti.import("@pit/coding-agent"),
+		jiti.import("@pit/agent-core"),
+		jiti.import("@pit/ai"),
+		jiti.import("@pit/tui"),
 		jiti.import("typebox"),
 	])
 		.then(() => {
-			if (process.env.PI_TIMING === "1") {
+			if (process.env.PIT_TIMING === "1") {
 				console.error(`  [perf] prewarm jiti done in ${Date.now() - t0}ms`);
 			}
 		})
@@ -419,13 +419,13 @@ async function loadExtensionModule(extensionPath: string) {
 			const module = await import(moduleUrl);
 			const factory = (module?.default ?? module) as ExtensionFactory;
 			if (typeof factory === "function") {
-				if (process.env.PI_TIMING === "1") {
+				if (process.env.PIT_TIMING === "1") {
 					console.error(`  [perf]     native import OK: ${extensionPath}`);
 				}
 				return factory;
 			}
 		} catch (e) {
-			if (process.env.PI_TIMING === "1") {
+			if (process.env.PIT_TIMING === "1") {
 				const msg = e instanceof Error ? e.message : String(e);
 				console.error(`  [perf]     native import FAIL: ${extensionPath} (${msg.slice(0, 100)})`);
 			}
@@ -433,7 +433,7 @@ async function loadExtensionModule(extensionPath: string) {
 	}
 
 	// Share one jiti instance across all extension loads in the process.
-	// With moduleCache: true, the heavy core libs (@earendil-works/pi-coding-agent,
+	// With moduleCache: true, the heavy core libs (@pit/coding-agent,
 	// pi-ai, pi-tui) are loaded once instead of re-transpiled per extension.
 	// Hot reload (`/reload`) creates fresh extension instances anyway by re-running
 	// the factory through a fresh API binding, so module-level state from the
@@ -473,13 +473,13 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 }
 
 /**
- * Parse PI_SIDE_EFFECT_EXTENSIONS into a substring matcher list. Read on
+ * Parse PIT_SIDE_EFFECT_EXTENSIONS into a substring matcher list. Read on
  * every extension load so tests / dynamic reconfigurations can toggle the
  * env var without relaunching the process; cost is one string split per
  * loaded extension at startup.
  */
 function getSideEffectMatchers(): string[] | null {
-	const raw = process.env.PI_SIDE_EFFECT_EXTENSIONS;
+	const raw = process.env.PIT_SIDE_EFFECT_EXTENSIONS;
 	if (!raw) return null;
 	const matchers = raw
 		.split(",")
@@ -490,7 +490,7 @@ function getSideEffectMatchers(): string[] | null {
 
 /**
  * Tag a loaded extension's `before_provider_request` handlers as side-effect
- * when the user listed it in PI_SIDE_EFFECT_EXTENSIONS. Match by substring
+ * when the user listed it in PIT_SIDE_EFFECT_EXTENSIONS. Match by substring
  * against the resolved path so users can write either bare package names
  * (`pi-autoresearch`) or scoped names (`@tintinweb/pi-tasks`).
  */
@@ -504,7 +504,7 @@ function applyExternalSideEffectMarkers(extension: Extension, resolvedPath: stri
 	for (const handler of handlers) {
 		(handler as unknown as Record<string, unknown>)[HANDLER_SIDE_EFFECT_TAG] = true;
 	}
-	if (process.env.PI_TIMING === "1") {
+	if (process.env.PIT_TIMING === "1") {
 		console.error(
 			`  [perf]   ${path.basename(resolvedPath)}: marked ${handlers.length} before_provider_request handler(s) as side-effect`,
 		);
@@ -532,12 +532,12 @@ async function loadExtension(
 		const tFactory = Date.now();
 		await factory(api);
 		const factoryMs = Date.now() - tFactory;
-		if (process.env.PI_TIMING === "1") {
+		if (process.env.PIT_TIMING === "1") {
 			console.error(`  [perf]   ${path.basename(resolvedPath)}: import=${loadMs}ms factory=${factoryMs}ms`);
 		}
 
 		// External opt-in for parallel `before_provider_request` execution.
-		// User sets PI_SIDE_EFFECT_EXTENSIONS as a comma-separated list of
+		// User sets PIT_SIDE_EFFECT_EXTENSIONS as a comma-separated list of
 		// substrings; any extension whose path matches gets all its
 		// `before_provider_request` handlers tagged side-effect. Lets users
 		// parallelize hooks of third-party extensions they trust without
@@ -587,7 +587,7 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const runtime = createExtensionRuntime();
-	const piTiming = process.env.PI_TIMING === "1";
+	const piTiming = process.env.PIT_TIMING === "1";
 
 	// Split: pre-compiled .js can load in parallel (I/O-bound native import);
 	// .ts must stay serial to avoid jiti cache contention.

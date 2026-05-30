@@ -13,7 +13,7 @@ import { APP_NAME } from "./config.ts";
 import { main } from "./main.ts";
 
 process.title = APP_NAME;
-process.env.PI_CODING_AGENT = "true";
+process.env.PIT_CODING_AGENT = "true";
 process.emitWarning = (() => {}) as typeof process.emitWarning;
 
 // TEMP DIAGNOSTIC — write env state to a file so user can verify which agent dir was used.
@@ -25,7 +25,7 @@ try {
 	const diag = [
 		`pid=${process.pid}`,
 		`argv0=${process.argv0}`,
-		`PI_CODING_AGENT_DIR=${process.env.PI_CODING_AGENT_DIR ?? "<unset>"}`,
+		`PIT_CODING_AGENT_DIR=${process.env.PIT_CODING_AGENT_DIR ?? "<unset>"}`,
 		`APP_NAME=${APP_NAME}`,
 		`cwd=${process.cwd()}`,
 		`time=${new Date().toISOString()}`,

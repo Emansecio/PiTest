@@ -7,7 +7,7 @@
  *   npx tsx test/prototype-to-html.mts
  *
  * Writes to: packages/coding-agent/prototype-message-shell.html (gitignored
- * via the repo's existing .pi/ and build-output ignores; if you don't want it
+ * via the repo's existing .pit/ and build-output ignores; if you don't want it
  * tracked, delete after viewing).
  */
 

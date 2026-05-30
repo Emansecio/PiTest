@@ -33,7 +33,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 		// sees what is configured without paying the connect-timeout cost when
 		// a server is unreachable.
 		pi.on("session_start", async () => {
-			if (process.env.PI_DRY_RUN === "1") {
+			if (process.env.PIT_DRY_RUN === "1") {
 				return;
 			}
 			await manager.connectAll();

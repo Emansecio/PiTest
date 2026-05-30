@@ -4,10 +4,10 @@
 > load-bearing behavior; this doc explains the optional knobs and the few
 > idiosyncrasies of working inside `pi-mono`.
 
-## `.pi/settings.json`
+## `.pit/settings.json`
 
-`SettingsManager` reads `<cwd>/.pi/settings.json` and merges it OVER the global
-settings file in the agent dir (typically `~/.pi/settings.json`). Anything you
+`SettingsManager` reads `<cwd>/.pit/settings.json` and merges it OVER the global
+settings file in the agent dir (typically `~/.pit/settings.json`). Anything you
 put here is project-local and only active when an agent runs inside this repo.
 
 Live shape: see `Settings` in
@@ -16,7 +16,7 @@ knowing for token-efficient operation:
 
 | Field | Effect |
 |-|-|
-| `frequentFiles.enabled` | Tracks per-file read/edit/write counts and surfaces the hottest paths in the system prompt. Persisted across sessions in `<cwd>/.pi/frequent-files.json` so a new session boots warm (no re-discovery via repeated reads). |
+| `frequentFiles.enabled` | Tracks per-file read/edit/write counts and surfaces the hottest paths in the system prompt. Persisted across sessions in `<cwd>/.pit/frequent-files.json` so a new session boots warm (no re-discovery via repeated reads). |
 | `frequentFiles.topN` / `minHits` | How many entries to surface, and the floor that filters one-touch noise. |
 | `toolDiscovery.enabled` | When `true` (default), tools NOT in the coding bundle are hidden behind `search_tool_bm25`. Keeps the per-turn tool snippet block short while leaving everything discoverable on demand. |
 | `toolDiscovery.alwaysActive` | Force-includes tools by name on the active surface even if they would otherwise be hidden. |
@@ -24,7 +24,7 @@ knowing for token-efficient operation:
 | `engineeringStyle` | `"default"` (no-op) or `"karpathy"` (assumptions, simplicity, surgical edits, goal-driven execution). See `docs/adr/0004-karpathy-engineering-style.md`. |
 | `compaction.keepRecentTokens` | Floor for "recent context" preserved verbatim through compaction. |
 
-This repo ships a minimal template at `.pi/settings.json`. Override anything
+This repo ships a minimal template at `.pit/settings.json`. Override anything
 there by editing that file; nothing here is load-bearing.
 
 ## Tool quirks in this repo

@@ -931,7 +931,7 @@ describe("ExtensionRunner", () => {
 			expect(elapsed).toBeGreaterThanOrEqual(40);
 		});
 
-		it("PI_SIDE_EFFECT_EXTENSIONS env-tags untagged handlers", async () => {
+		it("PIT_SIDE_EFFECT_EXTENSIONS env-tags untagged handlers", async () => {
 			// Handler does NOT call pi.markSideEffect — env list promotes it.
 			const code = `
 				export default function(pi) {
@@ -948,10 +948,10 @@ describe("ExtensionRunner", () => {
 			// Cache busts internally — but our module-level matcher cache
 			// memoizes once per process. To exercise the path inside this test
 			// we set the env var and re-import is impossible mid-suite, so we
-			// rely on PI_SIDE_EFFECT_EXTENSIONS being unset for other tests and
+			// rely on PIT_SIDE_EFFECT_EXTENSIONS being unset for other tests and
 			// the matcher being computed lazily on first matching load.
-			const original = process.env.PI_SIDE_EFFECT_EXTENSIONS;
-			process.env.PI_SIDE_EFFECT_EXTENSIONS = "env-marked";
+			const original = process.env.PIT_SIDE_EFFECT_EXTENSIONS;
+			process.env.PIT_SIDE_EFFECT_EXTENSIONS = "env-marked";
 
 			try {
 				const result = await discoverAndLoadExtensions([], tempDir, tempDir);
@@ -964,9 +964,9 @@ describe("ExtensionRunner", () => {
 				}
 			} finally {
 				if (original === undefined) {
-					delete process.env.PI_SIDE_EFFECT_EXTENSIONS;
+					delete process.env.PIT_SIDE_EFFECT_EXTENSIONS;
 				} else {
-					process.env.PI_SIDE_EFFECT_EXTENSIONS = original;
+					process.env.PIT_SIDE_EFFECT_EXTENSIONS = original;
 				}
 			}
 		});

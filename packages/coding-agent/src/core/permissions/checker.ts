@@ -2,15 +2,13 @@
  * PermissionChecker — evaluates whether a tool/command is allowed under the
  * configured permission mode and rule set.
  *
- * The checker is pure / synchronous. Interactive prompting is wired by the
- * built-in permissions extension that consumes its decisions.
+ * The checker is pure / synchronous. Auto/yolo mode skips all checks; plan mode
+ * blocks mutating tools and still applies configured read restrictions.
  */
 
-import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath } from "./matcher.ts";
+import { findMatchingGlob, normalizeTargetPath } from "./matcher.ts";
 import {
-	BUILTIN_DANGEROUS_COMMANDS,
 	BUILTIN_SENSITIVE_PATHS,
-	type CommandRule,
 	type PathRule,
 	type PermissionAction,
 	type PermissionDecision,
@@ -30,7 +28,6 @@ export interface PermissionContext {
 export class PermissionChecker {
 	private ctx: PermissionContext;
 	private _cachedDenyPaths: readonly PathRule[] | undefined;
-	private _cachedDenyCommands: readonly CommandRule[] | undefined;
 	private _settingsRef: PermissionSettings | undefined;
 
 	constructor(ctx: PermissionContext) {
@@ -57,7 +54,6 @@ export class PermissionChecker {
 	private invalidateCacheIfNeeded(): void {
 		if (this._settingsRef !== this.ctx.settings) {
 			this._cachedDenyPaths = undefined;
-			this._cachedDenyCommands = undefined;
 			this._settingsRef = this.ctx.settings;
 		}
 	}
@@ -75,53 +71,39 @@ export class PermissionChecker {
 		return this._cachedDenyPaths;
 	}
 
-	private askPaths(): readonly PathRule[] {
-		return this.ctx.settings.askPaths ?? [];
-	}
-
-	private denyCommands(): readonly CommandRule[] {
-		this.invalidateCacheIfNeeded();
-		if (!this._cachedDenyCommands) {
-			const builtins = this.ctx.settings.disableBuiltinDefaults ? [] : BUILTIN_DANGEROUS_COMMANDS;
-			this._cachedDenyCommands = [...(this.ctx.settings.denyCommands ?? []), ...builtins];
-		}
-		return this._cachedDenyCommands;
-	}
-
-	private askCommands(): readonly CommandRule[] {
-		return this.ctx.settings.askCommands ?? [];
-	}
-
 	/** Public entry point. */
 	check(action: PermissionAction): PermissionDecision {
+		if (this.ctx.mode === "auto") {
+			return { decision: "allow" };
+		}
+
 		const { settings } = this.ctx;
 
-		// Tool-level allow / deny short-circuits.
+		// Tool-level deny still applies in plan mode for read-only tools.
 		if (settings.denyTools?.includes(action.toolName)) {
 			return { decision: "deny", reason: `Tool "${action.toolName}" is in denyTools.` };
 		}
+
+		// Plan mode: block any mutating action before allow rules can bypass read-only mode.
+		if (action.type === "write" || action.type === "exec") {
+			return {
+				decision: "deny",
+				reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.`,
+			};
+		}
+		if (action.type === "tool" && MUTATING_TOOLS.has(action.toolName)) {
+			return {
+				decision: "deny",
+				reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.`,
+			};
+		}
+
 		if (settings.allowTools?.includes(action.toolName)) {
 			return { decision: "allow" };
 		}
 
-		// Plan mode: block any mutating action.
-		if (this.ctx.mode === "plan") {
-			if (action.type === "write" || action.type === "exec") {
-				return {
-					decision: "deny",
-					reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.`,
-				};
-			}
-			if (action.type === "tool" && MUTATING_TOOLS.has(action.toolName)) {
-				return {
-					decision: "deny",
-					reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.`,
-				};
-			}
-		}
-
-		// Path-based checks.
-		if (action.type === "read" || action.type === "write") {
+		// Path-based checks for read tools that remain available in plan mode.
+		if (action.type === "read") {
 			const denyTarget = this.firstMatchingPath(this.denyPaths(), action.paths, action.toolName);
 			if (denyTarget) {
 				return {
@@ -132,46 +114,9 @@ export class PermissionChecker {
 				};
 			}
 
-			// Writes are higher risk than reads — block sensitive paths even when matched only by the read-rule set
-			// is not needed (deny applies to both). Allowed paths skip ask.
 			const allowMatch = this.firstMatchingPath(this.allowPaths(), action.paths, action.toolName);
 			if (allowMatch) {
 				return { decision: "allow" };
-			}
-
-			// Ask only in default mode for path matches; auto mode skips prompts.
-			if (this.ctx.mode === "default") {
-				const askMatch = this.firstMatchingPath(this.askPaths(), action.paths, action.toolName);
-				if (askMatch) {
-					return {
-						decision: "ask",
-						reason: askMatch.rule.reason
-							? `${askMatch.rule.reason} (${askMatch.matchedPath})`
-							: `Path "${askMatch.matchedPath}" matches ask rule "${askMatch.rule.glob}".`,
-					};
-				}
-			}
-		}
-
-		// Command-based checks.
-		if (action.type === "exec") {
-			const denyMatch = findMatchingCommandRule(this.denyCommands(), action.command);
-			if (denyMatch) {
-				return {
-					decision: "deny",
-					reason: denyMatch.reason
-						? `${denyMatch.reason}`
-						: `Command matches deny pattern /${denyMatch.pattern}/.`,
-				};
-			}
-			if (this.ctx.mode === "default") {
-				const askMatch = findMatchingCommandRule(this.askCommands(), action.command);
-				if (askMatch) {
-					return {
-						decision: "ask",
-						reason: askMatch.reason ?? `Command matches ask pattern /${askMatch.pattern}/.`,
-					};
-				}
 			}
 		}
 

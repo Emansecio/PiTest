@@ -1,0 +1,28 @@
+{
+  "_comment": "Canonical pi package list for PiTuned. Consumed by scripts/bootstrap.mjs. Edit here, then run `node scripts/bootstrap.mjs` to install missing entries.",
+  "_archived": {
+    "reason": "Removidos para tornar o Pit autossuficiente/nativo (mcp, subagents, etc.). Restaurar: mover de volta para packages e rodar node scripts/bootstrap.mjs",
+    "date": "2026-05-30T20:07:16.603Z",
+    "packages": [
+      "npm:pi-autoresearch",
+      "npm:pi-subagents",
+      "npm:pi-ask-user",
+      "npm:pi-web-access",
+      "npm:pi-rtk-optimizer",
+      "npm:@juicesharp/rpiv-advisor",
+      "npm:@juicesharp/rpiv-ask-user-question",
+      "npm:@juicesharp/rpiv-todo",
+      "npm:pi-caveman",
+      "npm:pi-simplify",
+      "npm:pi-mcp-adapter",
+      "npm:@tintinweb/pi-tasks",
+      "npm:@tintinweb/pi-subagents",
+      "npm:@capyup/pi-goal",
+      "npm:pi-agent-browser-native",
+      "npm:pi-chrome"
+    ]
+  },
+  "packages": [
+    "npm:pi-claude-oauth-adapter"
+  ]
+}

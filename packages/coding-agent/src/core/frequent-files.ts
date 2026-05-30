@@ -314,7 +314,7 @@ export function saveFrequentFilesSnapshot(filePath: string, snapshot: FrequentFi
 
 /** Default project-local snapshot file. Mirrors `defaultBankPath` from hindsight. */
 export function defaultFrequentFilesPath(cwd: string): string {
-	return join(cwd, ".pi", "frequent-files.json");
+	return join(cwd, ".pit", "frequent-files.json");
 }
 
 // --- Min-heap helpers for bounded top-N selection ---
@@ -416,7 +416,7 @@ const FREQ_FS_SKIP_DIRS = new Set([
 	".next",
 	".turbo",
 	".cache",
-	".pi",
+	".pit",
 	"coverage",
 	"target",
 	".venv",
@@ -553,7 +553,7 @@ async function walkMtimeFallback(cwd: string, limit: number, signal: AbortSignal
 			const full = join(dir, entry.name);
 			if (entry.isDirectory()) {
 				if (FREQ_FS_SKIP_DIRS.has(entry.name)) continue;
-				if (entry.name.startsWith(".") && entry.name !== ".pi") continue;
+				if (entry.name.startsWith(".") && entry.name !== ".pit") continue;
 				queue.push(full);
 				continue;
 			}

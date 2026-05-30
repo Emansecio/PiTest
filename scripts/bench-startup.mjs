@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Bench: run `pit --help` with PI_TIMING=1 N times, sum extension load
+ * Bench: run `pit --help` with PIT_TIMING=1 N times, sum extension load
  * times from stderr, print metric for autoresearch.
  *
  * Output: METRIC total_extension_load_ms=<best of N>
@@ -31,7 +31,7 @@ for (let i = 0; i < N; i++) {
 	const t0 = performance.now();
 	const r = spawnSync(tsxBin, [cli, "--help"], {
 		cwd: REPO_ROOT,
-		env: { ...process.env, PI_TIMING: "1" },
+		env: { ...process.env, PIT_TIMING: "1" },
 		encoding: "utf8",
 		shell: platform() === "win32",
 	});

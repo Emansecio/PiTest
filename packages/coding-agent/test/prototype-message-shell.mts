@@ -24,7 +24,7 @@
  * so the inner content rendering matches production.
  */
 
-import { Box, Markdown, type Component, visibleWidth } from "@earendil-works/pi-tui";
+import { Box, Markdown, type Component, visibleWidth } from "@pit/tui";
 import { getMarkdownTheme, initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 // Force truecolor so the prototype looks the same in CI / piped runs as in a

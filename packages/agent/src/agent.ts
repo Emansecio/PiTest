@@ -7,7 +7,7 @@ import {
 	type TextContent,
 	type ThinkingBudgets,
 	type Transport,
-} from "@earendil-works/pi-ai";
+} from "@pit/ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import type { ToolErrorHintRegistry } from "./tool-error-hint-registry.ts";
 import type { ToolRewriteRegistry } from "./tool-rewrite-registry.ts";

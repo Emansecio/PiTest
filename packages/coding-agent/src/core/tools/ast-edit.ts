@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import * as nodePath from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Text } from "@earendil-works/pi-tui";
+import type { AgentTool } from "@pit/agent-core";
+import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";

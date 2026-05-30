@@ -46,7 +46,7 @@ export interface SpawnSubagentOptions {
 	resultSchema?: TSchema;
 	/**
 	 * If truthy, the subagent runs inside an isolated git worktree rooted at
-	 * `<cwd>/.pi/worktrees/<taskName>-<uuid>` checked out at the parent's HEAD.
+	 * `<cwd>/.pit/worktrees/<taskName>-<uuid>` checked out at the parent's HEAD.
 	 *
 	 * - `true` or `{ cleanup: "auto" }` — worktree is removed when the task
 	 *   settles (success, failure, or cancellation).
@@ -58,7 +58,7 @@ export interface SpawnSubagentOptions {
 	timeoutMs?: number;
 	/** Optional task name used for the worktree path + agent:// scheme lookup. */
 	taskName?: string;
-	/** Working directory used as the parent for `.pi/worktrees` and the default cwd. */
+	/** Working directory used as the parent for `.pit/worktrees` and the default cwd. */
 	cwd?: string;
 }
 

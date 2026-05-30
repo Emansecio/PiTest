@@ -3,38 +3,38 @@
 Personal fork of [pi-mono](https://github.com/earendil-works/pi-mono) tuned for
 local interactive use. Focus: faster startup, faster agent loop, better
 prompt/tool-call quality. No public API changes — runs as a drop-in replacement
-for stock `pi`.
+for stock `pit`.
 
 This is a development checkout, not an installable npm package. You run it from
 source via `pi-test.sh` / `pi-test.bat`.
 
-## `pi` vs `pit`
+## `pit` vs `pit`
 
-Stock pi is invoked as `pi` and untouched. PiTuned is invoked as `pit` and
+Stock pit is invoked as `pit` and untouched. PiTuned is invoked as `pit` and
 lives entirely in this repo. They run **side-by-side, isolated**:
 
-| Aspect | `pi` (stock) | `pit` (PiTuned) |
+| Aspect | `pit` (stock) | `pit` (PiTuned) |
 |--------|--------------|-----------------|
-| Binary | `npm i -g @earendil-works/pi-coding-agent` | `bin/pit*` in this repo |
+| Binary | `npm i -g @pit/coding-agent` | `bin/pit*` in this repo |
 | Source | wherever npm put it | `packages/coding-agent/src/` (this repo) |
-| Agent dir | `~/.pi/agent/` | `~/.pit/agent/` |
-| Settings | `~/.pi/agent/settings.json` | `~/.pit/agent/settings.json` |
-| Auth, sessions, packages | `~/.pi/agent/...` | `~/.pit/agent/...` |
+| Agent dir | `~/.pit/agent/` | `~/.pit/agent/` |
+| Settings | `~/.pit/agent/settings.json` | `~/.pit/agent/settings.json` |
+| Auth, sessions, packages | `~/.pit/agent/...` | `~/.pit/agent/...` |
 
-The two never share state. Use `pi` for baseline, `pit` for your tuned
+The two never share state. Use `pit` for baseline, `pit` for your tuned
 version. Compare freely.
 
-Override: set `PI_CODING_AGENT_DIR` before invoking `pit` to point at a
+Override: set `PIT_CODING_AGENT_DIR` before invoking `pit` to point at a
 different dir.
 
 ### Self-sufficiency
 
-PiTuned does **not** depend on a separately-installed `pi` binary. The
+PiTuned does **not** depend on a separately-installed `pit` binary. The
 `@earendil-works/*` packages are workspace symlinks inside `node_modules/`
 that point at `packages/*` in this repo, so all source code is local. The
-stock `pi` binary is optional — if you have it installed, `bootstrap.mjs`
+stock `pit` binary is optional — if you have it installed, `bootstrap.mjs`
 will clone its config into `~/.pit/agent/` on first run so you don't have to
-re-login or re-install packages. If you don't have stock pi installed,
+re-login or re-install packages. If you don't have stock pit installed,
 `bootstrap.mjs` just starts with an empty `~/.pit/agent/` and you set things
 up via `pit login`, `pit install ...`.
 
@@ -48,10 +48,10 @@ node scripts/bootstrap.mjs
 
 `bootstrap.mjs` is idempotent. It:
 1. Runs `npm install` at the repo root if `node_modules/` is missing.
-2. **First time only:** clones `~/.pi/agent/` to `~/.pit/agent/` so you keep
+2. **First time only:** clones `~/.pit/agent/` to `~/.pit/agent/` so you keep
    your existing auth, settings, and installed packages. Skips backup files
    and the jiti cache (rebuilt on first run). Pass `--no-clone` to opt out.
-3. Installs every pi package listed in `.pi/packages.json` that is missing
+3. Installs every pit package listed in `.pit/packages.json` that is missing
    from `~/.pit/agent/npm/node_modules/`.
 4. Runs `scripts/precompile-pi-packages.mjs` against the PiTuned agent dir
    so the loader can skip jiti transpilation on every startup.
@@ -85,12 +85,12 @@ pit --help
 ```bash
 pit                     # interactive PiTuned
 pit --help              # help
-pit install npm:foo     # installs into ~/.pit/agent/, not ~/.pi/agent/
-pi                      # still works, runs stock pi unchanged
+pit install npm:foo     # installs into ~/.pit/agent/, not ~/.pit/agent/
+pit                      # still works, runs stock pit unchanged
 ```
 
 The legacy `./pi-test.sh` / `.bat` / `.ps1` scripts still work, but they
-use the shared `~/.pi/agent/` dir (no isolation). Prefer `pit` for proper
+use the shared `~/.pit/agent/` dir (no isolation). Prefer `pit` for proper
 separation.
 
 ## After installing or updating extensions
@@ -100,7 +100,7 @@ precompile step so the new package gets a `.js` sibling next to its `.ts`
 source:
 
 ```bash
-PI_CODING_AGENT_DIR=$HOME/.pit/agent node scripts/precompile-pi-packages.mjs
+PIT_CODING_AGENT_DIR=$HOME/.pit/agent node scripts/precompile-pi-packages.mjs
 ```
 
 Or just `node scripts/bootstrap.mjs` again — it picks up missing packages
@@ -128,7 +128,7 @@ Pass `--force` to recompile everything, or `--clean` to remove the generated
 - `edit` tool description includes JSON examples and a common-mistakes list.
 - `bash` description lists 6 substitutions to avoid (`cat` → `read`, etc.).
 - Default cache retention is `long` (Anthropic 1h, OpenAI 24h). Override
-  with `PI_CACHE_RETENTION=short`.
+  with `PIT_CACHE_RETENTION=short`.
 
 ### Startup
 - Single shared jiti instance with `moduleCache: true` across all extensions.
@@ -137,9 +137,9 @@ Pass `--force` to recompile everything, or `--clean` to remove the generated
   sibling. Bypasses jiti entirely.
 - Pre-compile script walks the **entire** package (not just declared entry
   points), emits `.js` next to every `.ts` dep, rewrites `.ts` import
-  specifiers to `.js` and `@mariozechner/pi-*` aliases to
-  `@earendil-works/pi-*`. Without the full walk, packages whose
-  `pi.extensions` declares a single file (e.g. `"./index.ts"`) would still
+  specifiers to `.js` and `@pituned/pi-*` aliases to
+  `@pit/*`. Without the full walk, packages whose
+  `pit.extensions` declares a single file (e.g. `"./index.ts"`) would still
   fall back to jiti because their sibling deps were never compiled.
 - Manifest-declared `.ts` extension entries get the same `.ts` → `.js`
   sibling swap as `index.ts` / `index.js` directory entries (when the
@@ -152,7 +152,7 @@ entry points (best of 5 runs, `node scripts/bench-startup.mjs`):
 
 | stage | total extension load | wall (`pit --help`) |
 |---|---|---|
-| upstream pi (pre-PiTuned) | ~37s | ~38s |
+| upstream pit (pre-PiTuned) | ~37s | ~38s |
 | PiTuned baseline (shared jiti + .js fast path) | 3.87s | 5.69s |
 | + full precompile walk + manifest .ts→.js swap | 2.81s | 4.56s |
 | + agent-loop micro-opts | 2.89s | 4.56s |
@@ -173,7 +173,7 @@ node scripts/precompile-pi-packages.mjs   # one-time, after install
 ./node_modules/.bin/tsx scripts/bench-tool-calls-real.mts
 ./node_modules/.bin/tsx scripts/bench-extension-load.mjs
 node scripts/bench-persistence.mjs
-PI_TIMING=1 ./pi-test.sh --help           # per-extension load timings
+PIT_TIMING=1 ./pi-test.sh --help           # per-extension load timings
 ```
 
 ## Syncing upstream
@@ -184,7 +184,7 @@ git rebase origin/main      # never force push
 git push pituned main
 ```
 
-`origin` is upstream `earendil-works/pi`; `pituned` is this fork.
+`origin` is upstream `earendil-works/pit`; `pituned` is this fork.
 
 ## License
 

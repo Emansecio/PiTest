@@ -1,4 +1,4 @@
-import { Markdown, type MarkdownTheme, Text } from "@earendil-works/pi-tui";
+import { Markdown, type MarkdownTheme, Text } from "@pit/tui";
 import type { CompactionSummaryMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";

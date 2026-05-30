@@ -1,21 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const tsxLoader = require.resolve("tsx/esm");
+const tsxLoader = pathToFileURL(require.resolve("tsx/esm")).href;
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const aiEntryUrl = new URL("../src/index.ts", import.meta.url).href;
 
-const SDK_SPECIFIERS = [
-	"@anthropic-ai/sdk",
-	"openai",
-	"@google/genai",
-	"@mistralai/mistralai",
-	"@aws-sdk/client-bedrock-runtime",
-] as const;
+const SDK_SPECIFIERS = ["@anthropic-ai/sdk", "openai", "@google/genai"] as const;
 
 type ProbeResult = {
 	loadedSpecifiers: string[];

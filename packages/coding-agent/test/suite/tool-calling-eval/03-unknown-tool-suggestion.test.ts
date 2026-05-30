@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@pit/ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEditTool, createReadTool } from "../../../src/core/tools/index.js";
 import { createHarness, type Harness } from "../harness.js";

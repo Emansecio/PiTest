@@ -33,7 +33,7 @@
  * `setShowImages` / `setImageWidthCells`).
  */
 
-import { Container } from "@earendil-works/pi-tui";
+import { Container } from "@pit/tui";
 
 /** Single character used for the left gutter. Thin vertical (`│`) per P3. */
 export const SHELL_GUTTER_CHAR = "│";

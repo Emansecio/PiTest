@@ -8,8 +8,8 @@
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
-import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
+import { type ImageContent, modelsAreEqual } from "@pit/ai";
+import { ProcessTerminal, setKeybindings, TUI } from "@pit/tui";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
 import { buildDryRunReport, formatReportJson, formatReportText } from "./cli/dry-run/index.ts";
@@ -487,10 +487,10 @@ export async function main(args: string[], options?: MainOptions) {
 	// transpile), so awaiting it before extensions provides no net speedup.
 	// Kept exported for callers that overlap heavy non-CPU work with startup
 	// (e.g. embedded SDK use). See scripts/bench-extension-load.mjs.
-	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PI_OFFLINE);
+	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(process.env.PIT_OFFLINE);
 	if (offlineMode) {
-		process.env.PI_OFFLINE = "1";
-		process.env.PI_SKIP_VERSION_CHECK = "1";
+		process.env.PIT_OFFLINE = "1";
+		process.env.PIT_SKIP_VERSION_CHECK = "1";
 	}
 
 	if (process.platform === "win32") {
@@ -519,10 +519,10 @@ export async function main(args: string[], options?: MainOptions) {
 			process.exit(1);
 		}
 	}
-	// Built-in extensions read PI_DRY_RUN to skip any network side-effects
+	// Built-in extensions read PIT_DRY_RUN to skip any network side-effects
 	// (currently: MCP connect). Set it before services/extensions are built.
 	if (parsed.dryRun) {
-		process.env.PI_DRY_RUN = "1";
+		process.env.PIT_DRY_RUN = "1";
 	}
 	time("parseArgs");
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY);
@@ -771,9 +771,9 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	const startupBenchmark = isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK);
+	const startupBenchmark = isTruthyEnvFlag(process.env.PIT_STARTUP_BENCHMARK);
 	if (startupBenchmark && appMode !== "interactive") {
-		console.error(chalk.red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
+		console.error(chalk.red("Error: PIT_STARTUP_BENCHMARK only supports interactive mode"));
 		process.exit(1);
 	}
 

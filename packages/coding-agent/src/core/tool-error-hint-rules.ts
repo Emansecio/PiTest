@@ -21,11 +21,7 @@
  * a paragraph of advice.
  */
 
-import {
-	ToolErrorHintRegistry as Registry,
-	type ToolErrorHintRegistry,
-	type ToolErrorHintRule,
-} from "@earendil-works/pi-agent-core";
+import { ToolErrorHintRegistry as Registry, type ToolErrorHintRegistry, type ToolErrorHintRule } from "@pit/agent-core";
 import type { AggregatedLearnedError } from "./learned-error-store.ts";
 
 // ---------------------------------------------------------------------------
@@ -297,7 +293,7 @@ export interface ToolErrorHintRulesOptions {
 	/** Extra rules to append. */
 	extraRules?: ToolErrorHintRule[];
 	/**
-	 * Cross-session learned errors loaded from disk (`~/.pi/agent/learned-errors/`).
+	 * Cross-session learned errors loaded from disk (`~/.pit/agent/learned-errors/`).
 	 * Recurring fingerprints that are not already covered by a built-in rule
 	 * get a dynamically-generated Tier 4 rule that surfaces frequency context
 	 * so the model knows "you've made this same mistake N times in M sessions

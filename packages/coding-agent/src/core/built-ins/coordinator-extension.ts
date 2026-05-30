@@ -15,7 +15,7 @@
  *   })
  */
 
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool } from "@pit/agent-core";
 import { type Static, type TSchema, Type } from "typebox";
 import { SubagentRegistry, spawnSubagent } from "../coordinator/index.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
@@ -65,13 +65,11 @@ type TaskInput = Static<typeof taskSchema>;
 export interface CoordinatorExtensionOptions {
 	modelRegistry: ModelRegistry;
 	/** Provider that returns the parent's currently active model. */
-	getParentModel: () => import("@earendil-works/pi-ai").Model<any> | undefined;
+	getParentModel: () => import("@pit/ai").Model<any> | undefined;
 	/** Provider that returns the parent's full AgentTool catalog at call time. */
 	getAvailableTools: () => AgentTool[];
 	/** Converts messages — defaults to identity. */
-	convertToLlm?: (
-		messages: import("@earendil-works/pi-agent-core").AgentMessage[],
-	) => import("@earendil-works/pi-ai").Message[];
+	convertToLlm?: (messages: import("@pit/agent-core").AgentMessage[]) => import("@pit/ai").Message[];
 	/** Working directory for git worktree creation. Defaults to process.cwd(). */
 	getCwd?: () => string;
 }
