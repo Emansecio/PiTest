@@ -5,16 +5,11 @@ import type { Api, AssistantMessage, Context, Model, StreamOptions, UserMessage 
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
-import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
-const oauthTokens = await Promise.all([
-	resolveApiKey("anthropic"),
-	resolveApiKey("github-copilot"),
-	resolveApiKey("openai-codex"),
-]);
-const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
+const oauthTokens = await Promise.all([resolveApiKey("anthropic"), resolveApiKey("openai-codex")]);
+const [anthropicOAuthToken, openaiCodexToken] = oauthTokens;
 
 async function testEmptyMessage<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	// Test with completely empty content array
@@ -243,126 +238,6 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.GROQ_API_KEY)("Groq Provider Empty Messages", () => {
-		const llm = getModel("groq", "openai/gpt-oss-20b");
-
-		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyMessage(llm);
-		});
-
-		it("should handle empty string content", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyStringMessage(llm);
-		});
-
-		it("should handle whitespace-only content", { retry: 3, timeout: 30000 }, async () => {
-			await testWhitespaceOnlyMessage(llm);
-		});
-
-		it("should handle empty assistant message in conversation", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyAssistantMessage(llm);
-		});
-	});
-
-	describe.skipIf(!process.env.CEREBRAS_API_KEY)("Cerebras Provider Empty Messages", () => {
-		const llm = getModel("cerebras", "gpt-oss-120b");
-
-		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyMessage(llm);
-		});
-
-		it("should handle empty string content", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyStringMessage(llm);
-		});
-
-		it("should handle whitespace-only content", { retry: 3, timeout: 30000 }, async () => {
-			await testWhitespaceOnlyMessage(llm);
-		});
-
-		it("should handle empty assistant message in conversation", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyAssistantMessage(llm);
-		});
-	});
-
-	describe.skipIf(!hasCloudflareWorkersAICredentials())("Cloudflare Workers AI Provider Empty Messages", () => {
-		const llm = getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6");
-
-		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyMessage(llm);
-		});
-
-		it("should handle empty string content", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyStringMessage(llm);
-		});
-
-		it("should handle whitespace-only content", { retry: 3, timeout: 30000 }, async () => {
-			await testWhitespaceOnlyMessage(llm);
-		});
-
-		it("should handle empty assistant message in conversation", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyAssistantMessage(llm);
-		});
-	});
-
-	describe.skipIf(!hasCloudflareAiGatewayCredentials())("Cloudflare AI Gateway Provider Empty Messages", () => {
-		const llm = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6");
-
-		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyMessage(llm);
-		});
-
-		it("should handle empty string content", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyStringMessage(llm);
-		});
-
-		it("should handle whitespace-only content", { retry: 3, timeout: 30000 }, async () => {
-			await testWhitespaceOnlyMessage(llm);
-		});
-
-		it("should handle empty assistant message in conversation", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyAssistantMessage(llm);
-		});
-	});
-
-	describe.skipIf(!process.env.HF_TOKEN)("Hugging Face Provider Empty Messages", () => {
-		const llm = getModel("huggingface", "moonshotai/Kimi-K2.5");
-
-		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyMessage(llm);
-		});
-
-		it("should handle empty string content", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyStringMessage(llm);
-		});
-
-		it("should handle whitespace-only content", { retry: 3, timeout: 30000 }, async () => {
-			await testWhitespaceOnlyMessage(llm);
-		});
-
-		it("should handle empty assistant message in conversation", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyAssistantMessage(llm);
-		});
-	});
-
-	describe.skipIf(!process.env.TOGETHER_API_KEY)("Together AI Provider Empty Messages", () => {
-		const llm = getModel("together", "moonshotai/Kimi-K2.6");
-
-		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyMessage(llm);
-		});
-
-		it("should handle empty string content", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyStringMessage(llm);
-		});
-
-		it("should handle whitespace-only content", { retry: 3, timeout: 30000 }, async () => {
-			await testWhitespaceOnlyMessage(llm);
-		});
-
-		it("should handle empty assistant message in conversation", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyAssistantMessage(llm);
-		});
-	});
-
 	describe.skipIf(!process.env.ZAI_API_KEY)("zAI Provider Empty Messages", () => {
 		const llm = getModel("zai", "glm-4.5-air");
 
@@ -560,80 +435,6 @@ describe("AI Providers Empty Message Tests", () => {
 			{ retry: 3, timeout: 30000 },
 			async () => {
 				await testEmptyAssistantMessage(llm, { apiKey: anthropicOAuthToken });
-			},
-		);
-	});
-
-	describe("GitHub Copilot Provider Empty Messages", () => {
-		it.skipIf(!githubCopilotToken)(
-			"gpt-4o - should handle empty content array",
-			{ retry: 3, timeout: 30000 },
-			async () => {
-				const llm = getModel("github-copilot", "gpt-4o");
-				await testEmptyMessage(llm, { apiKey: githubCopilotToken });
-			},
-		);
-
-		it.skipIf(!githubCopilotToken)(
-			"gpt-4o - should handle empty string content",
-			{ retry: 3, timeout: 30000 },
-			async () => {
-				const llm = getModel("github-copilot", "gpt-4o");
-				await testEmptyStringMessage(llm, { apiKey: githubCopilotToken });
-			},
-		);
-
-		it.skipIf(!githubCopilotToken)(
-			"gpt-4o - should handle whitespace-only content",
-			{ retry: 3, timeout: 30000 },
-			async () => {
-				const llm = getModel("github-copilot", "gpt-4o");
-				await testWhitespaceOnlyMessage(llm, { apiKey: githubCopilotToken });
-			},
-		);
-
-		it.skipIf(!githubCopilotToken)(
-			"gpt-4o - should handle empty assistant message in conversation",
-			{ retry: 3, timeout: 30000 },
-			async () => {
-				const llm = getModel("github-copilot", "gpt-4o");
-				await testEmptyAssistantMessage(llm, { apiKey: githubCopilotToken });
-			},
-		);
-
-		it.skipIf(!githubCopilotToken)(
-			"claude-sonnet-4 - should handle empty content array",
-			{ retry: 3, timeout: 30000 },
-			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4.6");
-				await testEmptyMessage(llm, { apiKey: githubCopilotToken });
-			},
-		);
-
-		it.skipIf(!githubCopilotToken)(
-			"claude-sonnet-4 - should handle empty string content",
-			{ retry: 3, timeout: 30000 },
-			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4.6");
-				await testEmptyStringMessage(llm, { apiKey: githubCopilotToken });
-			},
-		);
-
-		it.skipIf(!githubCopilotToken)(
-			"claude-sonnet-4 - should handle whitespace-only content",
-			{ retry: 3, timeout: 30000 },
-			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4.6");
-				await testWhitespaceOnlyMessage(llm, { apiKey: githubCopilotToken });
-			},
-		);
-
-		it.skipIf(!githubCopilotToken)(
-			"claude-sonnet-4 - should handle empty assistant message in conversation",
-			{ retry: 3, timeout: 30000 },
-			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4.6");
-				await testEmptyAssistantMessage(llm, { apiKey: githubCopilotToken });
 			},
 		);
 	});

@@ -58,26 +58,14 @@ export type KnownProvider =
 	| "google-vertex"
 	| "openai"
 	| "openai-codex"
-	| "deepseek"
-	| "github-copilot"
 	| "xai"
-	| "groq"
-	| "cerebras"
 	| "openrouter"
 	| "vercel-ai-gateway"
 	| "zai"
 	| "minimax"
-	| "minimax-cn"
-	| "moonshotai"
-	| "moonshotai-cn"
-	| "huggingface"
-	| "fireworks"
-	| "together"
 	| "opencode"
 	| "opencode-go"
 	| "kimi-coding"
-	| "cloudflare-workers-ai"
-	| "cloudflare-ai-gateway"
 	| "xiaomi"
 	| "xiaomi-token-plan-cn"
 	| "xiaomi-token-plan-ams"
@@ -464,6 +452,13 @@ export interface AnthropicMessagesCompat {
 	 * Default: true.
 	 */
 	supportsCacheControlOnTools?: boolean;
+	/**
+	 * Whether the model uses the adaptive "effort" thinking API (Opus 4.6+,
+	 * Sonnet 4.6+) instead of the legacy `budget_tokens` shape. When omitted, the
+	 * provider derives it from the model id by version (4.6+), so a future model
+	 * bump works without code changes; set explicitly to override the heuristic.
+	 */
+	supportsAdaptiveThinking?: boolean;
 }
 
 /**

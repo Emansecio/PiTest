@@ -29,6 +29,12 @@ export class BashExecutionComponent extends MessageShell {
 	private fullOutputPath?: string;
 	private expanded = false;
 	private contentContainer: Container;
+	// Bumped whenever outputLines changes so context truncation can be cached
+	// across re-renders that don't actually alter the output (avoids re-joining
+	// and re-truncating the entire buffer on every stdout chunk → O(n²)).
+	private outputVersion = 0;
+	private cachedContextVersion = -1;
+	private cachedContextTruncation?: TruncationResult;
 
 	constructor(command: string, ui: TUI, excludeFromContext = false) {
 		// Per Leva 2 (D3=yes): bash uses the unified shell instead of the
@@ -43,10 +49,9 @@ export class BashExecutionComponent extends MessageShell {
 		this.contentContainer = new Container();
 		this.addChild(this.contentContainer);
 
-		// Command header
+		// NOTE: the command header is created in updateDisplay() (which clears the
+		// container on every render), so we do not build a duplicate one here.
 		const headerColor = excludeFromContext ? "dim" : "bashMode";
-		const header = new Text(theme.fg(headerColor, theme.bold(`$ ${command}`)), 0, 0);
-		this.contentContainer.addChild(header);
 
 		// Loader
 		this.loader = new Loader(
@@ -86,6 +91,7 @@ export class BashExecutionComponent extends MessageShell {
 			this.outputLines.push(...newLines);
 		}
 
+		this.outputVersion++;
 		this.updateDisplay();
 	}
 
@@ -111,12 +117,31 @@ export class BashExecutionComponent extends MessageShell {
 	}
 
 	private updateDisplay(): void {
-		// Apply truncation for LLM context limits (same limits as bash tool)
-		const fullOutput = this.outputLines.join("\n");
-		const contextTruncation = truncateTail(fullOutput, {
-			maxLines: DEFAULT_MAX_LINES,
-			maxBytes: DEFAULT_MAX_BYTES,
-		});
+		// Apply truncation for LLM context limits (same limits as bash tool).
+		// Cache by outputVersion: re-renders triggered by invalidate()/setExpanded
+		// (width changes, focus, expand toggle) don't change the buffer, so we
+		// avoid re-joining + re-truncating the entire output on every render.
+		// This is what turns the per-chunk cost from O(n²) into O(n) overall.
+		let contextTruncation = this.cachedContextTruncation;
+		if (contextTruncation === undefined || this.cachedContextVersion !== this.outputVersion) {
+			// truncateTail keeps only the trailing DEFAULT_MAX_LINES/DEFAULT_MAX_BYTES,
+			// so joining the whole (unbounded) buffer each chunk is O(n) waste that
+			// makes streaming O(n²). The kept suffix is always within the last
+			// DEFAULT_MAX_LINES lines, so feeding only the last DEFAULT_MAX_LINES+1
+			// lines is byte-identical for both .content AND the .truncated flag
+			// (the +1 preserves the "exceeds line limit" boundary) while bounding cost.
+			const tailLines =
+				this.outputLines.length > DEFAULT_MAX_LINES + 1
+					? this.outputLines.slice(-(DEFAULT_MAX_LINES + 1))
+					: this.outputLines;
+			const fullOutput = tailLines.join("\n");
+			contextTruncation = truncateTail(fullOutput, {
+				maxLines: DEFAULT_MAX_LINES,
+				maxBytes: DEFAULT_MAX_BYTES,
+			});
+			this.cachedContextTruncation = contextTruncation;
+			this.cachedContextVersion = this.outputVersion;
+		}
 
 		// Get the lines to potentially display (after context truncation)
 		const availableLines = contextTruncation.content ? contextTruncation.content.split("\n") : [];

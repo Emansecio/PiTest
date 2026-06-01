@@ -20,6 +20,7 @@ import type {
 	ThinkingLevel,
 	ToolCall,
 } from "../types.ts";
+import { createClientCache } from "../utils/client-cache.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import type { GoogleThinkingLevel } from "./google-shared.ts";
@@ -313,6 +314,10 @@ export const streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleSt
 	} satisfies GoogleOptions);
 };
 
+// Reuse GoogleGenAI SDK clients across turns to keep the HTTP connection pool alive.
+// Keyed by full config (apiKey + httpOptions) so credentials/headers are never stale.
+const clientCache = createClientCache<GoogleGenAI>();
+
 function createClient(
 	model: Model<"google-generative-ai">,
 	apiKey?: string,
@@ -327,10 +332,11 @@ function createClient(
 		httpOptions.headers = { ...model.headers, ...optionsHeaders };
 	}
 
-	return new GoogleGenAI({
+	const config = {
 		apiKey,
 		httpOptions: Object.keys(httpOptions).length > 0 ? httpOptions : undefined,
-	});
+	};
+	return clientCache.getOrCreate(config, () => new GoogleGenAI(config));
 }
 
 function buildParams(

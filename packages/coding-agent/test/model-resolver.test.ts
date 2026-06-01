@@ -210,6 +210,7 @@ describe("resolveCliModel", () => {
 	test("resolves --model provider/id without --provider", () => {
 		const registry = {
 			getAll: () => allModels,
+			hasConfiguredAuth: () => false,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -225,6 +226,7 @@ describe("resolveCliModel", () => {
 	test("resolves fuzzy patterns within an explicit provider", () => {
 		const registry = {
 			getAll: () => allModels,
+			hasConfiguredAuth: () => false,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -241,6 +243,7 @@ describe("resolveCliModel", () => {
 	test("supports --model <pattern>:<thinking> (without explicit --thinking)", () => {
 		const registry = {
 			getAll: () => allModels,
+			hasConfiguredAuth: () => false,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -256,6 +259,7 @@ describe("resolveCliModel", () => {
 	test("prefers exact model id match over provider inference (OpenRouter-style ids)", () => {
 		const registry = {
 			getAll: () => allModels,
+			hasConfiguredAuth: () => false,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -271,6 +275,7 @@ describe("resolveCliModel", () => {
 	test("does not strip invalid :suffix as thinking level in --model (treat as raw id)", () => {
 		const registry = {
 			getAll: () => allModels,
+			hasConfiguredAuth: () => false,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -287,6 +292,7 @@ describe("resolveCliModel", () => {
 	test("allows custom model ids for explicit providers without double prefixing", () => {
 		const registry = {
 			getAll: () => allModels,
+			hasConfiguredAuth: () => false,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -359,6 +365,7 @@ describe("resolveCliModel", () => {
 	test("resolves provider-prefixed fuzzy patterns (openrouter/qwen -> openrouter model)", () => {
 		const registry = {
 			getAll: () => allModels,
+			hasConfiguredAuth: () => false,
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
@@ -378,11 +385,9 @@ describe("default model selection", () => {
 		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.5");
 	});
 
-	test("zai, minimax, and cerebras defaults track current models", () => {
+	test("zai and minimax defaults track current models", () => {
 		expect(defaultModelPerProvider.zai).toBe("glm-5.1");
 		expect(defaultModelPerProvider.minimax).toBe("MiniMax-M2.7");
-		expect(defaultModelPerProvider["minimax-cn"]).toBe("MiniMax-M2.7");
-		expect(defaultModelPerProvider.cerebras).toBe("zai-glm-4.7");
 	});
 
 	test("ai-gateway default tracks current model", () => {
@@ -392,6 +397,7 @@ describe("default model selection", () => {
 	test("findInitialModel accepts explicit provider custom model ids", async () => {
 		const registry = {
 			getAll: () => allModels,
+			hasConfiguredAuth: () => false,
 		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
 
 		const result = await findInitialModel({

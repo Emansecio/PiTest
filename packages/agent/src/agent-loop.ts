@@ -28,6 +28,14 @@ import type {
 /** Max TTSR injections allowed within a single turn before bailing out. */
 const MAX_TTSR_RETRIES_PER_TURN = 3;
 
+/**
+ * Default hard backstop on model turns per `runAgentLoop` invocation when a
+ * caller does not set `config.maxTurns`. High enough to never bite a legitimate
+ * task, finite enough to bound cost on a runaway loop the doom-loop detector
+ * misses (it only catches identical consecutive calls, not A,B,A,B churn).
+ */
+const DEFAULT_MAX_TURNS = 250;
+
 /** Sentinel returned by `streamAssistantResponse` when a TTSR rule fires. */
 type TTSRInterrupt = { ttsr: TTSRMatchInfo };
 
@@ -172,6 +180,9 @@ async function runLoop(
 	let currentContext = initialContext;
 	let config = initialConfig;
 	let firstTurn = true;
+	// Hard backstop against unbounded tool-call loops (see DEFAULT_MAX_TURNS).
+	const maxTurns = initialConfig.maxTurns ?? DEFAULT_MAX_TURNS;
+	let turnCount = 0;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -181,6 +192,18 @@ async function runLoop(
 
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
+			// Turn budget exhausted: surface a terminal notice (never stop silently)
+			// and end the run before issuing another model request.
+			if (turnCount >= maxTurns) {
+				const notice = buildTurnBudgetMessage(config, maxTurns);
+				newMessages.push(notice);
+				await emit({ type: "message_start", message: notice });
+				await emit({ type: "message_end", message: notice });
+				await emit({ type: "turn_end", message: notice, toolResults: [] });
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
+			turnCount++;
 			if (!firstTurn) {
 				await emit({ type: "turn_start" });
 			} else {
@@ -317,6 +340,32 @@ async function runLoop(
 	}
 
 	await emit({ type: "agent_end", messages: newMessages });
+}
+
+/**
+ * Build the terminal assistant message emitted when the per-run turn budget is
+ * exhausted. Mirrors the TTSR-bail shape: a zero-usage error turn that stops the
+ * loop with a clear, model- and user-visible reason instead of failing silently.
+ */
+function buildTurnBudgetMessage(config: AgentLoopConfig, maxTurns: number): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		api: config.model.api,
+		provider: config.model.provider,
+		model: config.model.id,
+		stopReason: "error",
+		errorMessage: `Reached the turn budget of ${maxTurns} turns in a single run; stopping to avoid an unbounded tool-call loop.`,
+		timestamp: Date.now(),
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+	} as AssistantMessage;
 }
 
 /**
@@ -959,8 +1008,13 @@ async function executePreparedToolCall(
 		return { result, isError: false };
 	} catch (error) {
 		await Promise.all(updateEvents);
+		// Generic convention: an error may attach a structured `detail` field
+		// (HashlineEditError does); carry it through to the result so hint rules
+		// get the structured data, not just the flattened message string.
+		const detail =
+			error && typeof error === "object" && "detail" in error ? (error as { detail?: unknown }).detail : undefined;
 		return {
-			result: createErrorToolResult(error instanceof Error ? error.message : String(error)),
+			result: createErrorToolResult(error instanceof Error ? error.message : String(error), detail),
 			isError: true,
 		};
 	}
@@ -1029,10 +1083,13 @@ async function finalizeExecutedToolCall(
 	};
 }
 
-function createErrorToolResult(message: string): AgentToolResult<any> {
+function createErrorToolResult(message: string, detail?: unknown): AgentToolResult<any> {
 	return {
 		content: [{ type: "text", text: message }],
-		details: {},
+		// A thrown error may carry a structured `detail` (e.g. HashlineEditError);
+		// preserve it under `details.detail` so Tier-4 hint rules can read the
+		// structured payload instead of regex-scraping the rendered message.
+		details: detail === undefined ? {} : { detail },
 	};
 }
 

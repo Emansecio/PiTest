@@ -31,31 +31,16 @@ import type {
 	ToolResultMessage,
 } from "../types.ts";
 import { systemPromptWithoutDynamicMarker } from "../types.ts";
+import { createClientCache } from "../utils/client-cache.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
-import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
+import { imageDataUrl, serializeToolArgs } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
-
-// Cache the serialized arguments string per tool-call block. During history
-// replay the args object is finalized/immutable, so its JSON text is stable and
-// need only be produced once. WeakMap (keyed by the block object) keeps the
-// cache external to the block shape so it can never leak into the wire payload,
-// and entries are reclaimed automatically when the block is GC'd.
-const serializedToolArgsCache = new WeakMap<ToolCall, string>();
-
-function serializeToolArgs(toolCall: ToolCall): string {
-	let serialized = serializedToolArgsCache.get(toolCall);
-	if (serialized === undefined) {
-		serialized = JSON.stringify(toolCall.arguments);
-		serializedToolArgsCache.set(toolCall, serialized);
-	}
-	return serialized;
-}
 
 /**
  * Check if conversation messages contain tool calls or tool results.
@@ -157,7 +142,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const compat = getCompat(model);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat);
+			const client = createClient(model, apiKey, options?.headers, cacheSessionId, compat);
 			let params = buildParams(model, context, options, compat, cacheRetention);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -472,9 +457,12 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 	} satisfies OpenAICompletionsOptions);
 };
 
+// Reuse OpenAI SDK clients across turns to keep the HTTP connection pool alive.
+// Keyed by full config (apiKey + baseURL + headers) so credentials/headers are never stale.
+const clientCache = createClientCache<OpenAI>();
+
 function createClient(
 	model: Model<"openai-completions">,
-	context: Context,
 	apiKey?: string,
 	optionsHeaders?: Record<string, string>,
 	sessionId?: string,
@@ -490,14 +478,6 @@ function createClient(
 	}
 
 	const headers = { ...model.headers };
-	if (model.provider === "github-copilot") {
-		const hasImages = hasCopilotVisionInput(context.messages);
-		const copilotHeaders = buildCopilotDynamicHeaders({
-			messages: context.messages,
-			hasImages,
-		});
-		Object.assign(headers, copilotHeaders);
-	}
 
 	if (sessionId && compat.sendSessionAffinityHeaders) {
 		headers.session_id = sessionId;
@@ -519,12 +499,13 @@ function createClient(
 				}
 			: headers;
 
-	return new OpenAI({
+	const config = {
 		apiKey,
 		baseURL: isCloudflareProvider(model.provider) ? resolveCloudflareBaseUrl(model) : model.baseUrl,
 		dangerouslyAllowBrowser: true,
 		defaultHeaders,
-	});
+	};
+	return clientCache.getOrCreate(config, () => new OpenAI(config));
 }
 
 function buildParams(
@@ -775,7 +756,7 @@ export function convertMessages(
 	const normalizeToolCallId = (id: string): string => {
 		// Handle pipe-separated IDs from OpenAI Responses API
 		// Format: {call_id}|{id} where {id} can be 400+ chars with special chars (+, /, =)
-		// These come from providers like github-copilot, openai-codex, opencode
+		// These come from providers like openai-codex, opencode
 		// Extract just the call_id part and normalize it
 		if (id.includes("|")) {
 			const [callId] = id.split("|");
@@ -825,7 +806,7 @@ export function convertMessages(
 						return {
 							type: "image_url",
 							image_url: {
-								url: `data:${item.mimeType};base64,${item.data}`,
+								url: imageDataUrl(item),
 							},
 						} satisfies ChatCompletionContentPartImage;
 					}
@@ -970,7 +951,7 @@ export function convertMessages(
 							imageBlocks.push({
 								type: "image_url",
 								image_url: {
-									url: `data:${block.mimeType};base64,${block.data}`,
+									url: imageDataUrl(block),
 								},
 							});
 						}

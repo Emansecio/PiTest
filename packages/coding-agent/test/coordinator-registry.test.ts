@@ -37,4 +37,36 @@ describe("SubagentRegistry", () => {
 		reg.remove(rec.id);
 		expect(reg.get(rec.id)).toBeUndefined();
 	});
+
+	it("defaults taskName to the record id when none is supplied", () => {
+		const reg = new SubagentRegistry();
+		const rec = reg.create({ prompt: "a" });
+		expect(rec.taskName).toBe(rec.id);
+	});
+
+	it("keeps a unique supplied taskName as-is", () => {
+		const reg = new SubagentRegistry();
+		const rec = reg.create({ prompt: "a", taskName: "build" });
+		expect(rec.taskName).toBe("build");
+	});
+
+	it("disambiguates a colliding taskName so parallel spawns never clash", () => {
+		const reg = new SubagentRegistry();
+		const first = reg.create({ prompt: "a", taskName: "build" });
+		const second = reg.create({ prompt: "b", taskName: "build" });
+		expect(first.taskName).toBe("build");
+		expect(second.taskName).not.toBe("build");
+		expect(second.taskName.startsWith("build-")).toBe(true);
+		expect(second.taskName).not.toBe(first.taskName);
+	});
+
+	it("defaults depth to 0 when none is supplied", () => {
+		const reg = new SubagentRegistry();
+		expect(reg.create({ prompt: "a" }).depth).toBe(0);
+	});
+
+	it("records the supplied nesting depth", () => {
+		const reg = new SubagentRegistry();
+		expect(reg.create({ prompt: "a", depth: 2 }).depth).toBe(2);
+	});
 });

@@ -7,9 +7,26 @@
 export class UndoStack<S> {
 	private stack: S[] = [];
 
-	/** Push a deep clone of the given state onto the stack. */
+	/** Push a clone of the given state onto the stack. */
 	push(state: S): void {
-		this.stack.push(structuredClone(state));
+		this.stack.push(this.clone(state));
+	}
+
+	/**
+	 * Shallow-clone a state snapshot. The top-level spread detaches all primitive
+	 * fields (strings/numbers are immutable). The only nested mutable field across
+	 * callers is the editor's `lines` array, so when present it gets a fresh array
+	 * with copied (immutable) string references — fully detached, no aliasing that
+	 * could let a later mutation leak into the snapshot. Other state shapes (e.g.
+	 * the Input component's `{ value, cursor }`) carry no nested mutable fields and
+	 * are detached by the spread alone. Avoids the deep-copy cost of structuredClone
+	 * on every keystroke.
+	 */
+	private clone(state: S): S {
+		const s = state as { lines?: string[] };
+		const copy = { ...s };
+		if (Array.isArray(s.lines)) copy.lines = [...s.lines];
+		return copy as S;
 	}
 
 	/** Pop and return the most recent snapshot, or undefined if empty. */

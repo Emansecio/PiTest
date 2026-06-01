@@ -6,7 +6,7 @@ import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import type { ToolDefinition } from "../extensions/types.js";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
-import { applyKeyAliases, coerceJsonArrayField, PATH_KEY_ALIASES } from "./argument-prep.js";
+import { applyKeyAliases, coerceJsonArrayField, EDIT_KEY_ALIASES, PATH_KEY_ALIASES } from "./argument-prep.js";
 import {
 	applyEditsToNormalizedContent,
 	computeEditsDiff,
@@ -103,8 +103,30 @@ function prepareEditArguments(input: unknown): EditToolInput {
 	// further shape-fixing. Returns same reference when nothing changed.
 	let args = applyKeyAliases(input as Record<string, unknown>, PATH_KEY_ALIASES);
 
+	// Normalize edit-key aliases other harnesses send (old_string/new_string,
+	// oldString/newString, old_str/new_str -> oldText/newText) at the top level,
+	// so a flat single-edit call from a cross-harness model still canonicalizes.
+	args = applyKeyAliases(args, EDIT_KEY_ALIASES);
+
 	// Some models (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array.
 	args = coerceJsonArrayField(args, "edits");
+
+	// Normalize the same edit-key aliases inside each edits[] element — the most
+	// common cross-harness mistake (e.g. edits:[{old_string,new_string}]), which
+	// would otherwise fail schema validation with no actionable suggestion.
+	const editsField = (args as { edits?: unknown }).edits;
+	if (Array.isArray(editsField)) {
+		let changed = false;
+		const normalized = editsField.map((element) => {
+			if (element && typeof element === "object" && !Array.isArray(element)) {
+				const fixed = applyKeyAliases(element as Record<string, unknown>, EDIT_KEY_ALIASES);
+				if (fixed !== element) changed = true;
+				return fixed;
+			}
+			return element;
+		});
+		if (changed) args = { ...args, edits: normalized };
+	}
 
 	const legacy = args as LegacyEditToolInput;
 	if (typeof legacy.oldText !== "string" || typeof legacy.newText !== "string") {
@@ -142,6 +164,12 @@ type EditCallRenderComponent = Box & {
 	previewArgsKey?: string;
 	previewPending?: boolean;
 	settledError?: boolean;
+	// Memoized `renderDiff` output keyed by the source diff string. `renderDiff`
+	// runs `Diff.diffWords` per changed line pair (O(n²) on large edits); since
+	// `buildEditCallComponent` re-runs on every args delta we cache the rendered
+	// body and only recompute when the underlying diff string changes.
+	renderedDiffKey?: string;
+	renderedDiffBody?: string;
 };
 
 function createEditCallRenderComponent(): EditCallRenderComponent {
@@ -150,6 +178,8 @@ function createEditCallRenderComponent(): EditCallRenderComponent {
 		previewArgsKey: undefined as string | undefined,
 		previewPending: false,
 		settledError: false,
+		renderedDiffKey: undefined as string | undefined,
+		renderedDiffBody: undefined as string | undefined,
 	});
 }
 
@@ -264,8 +294,16 @@ function buildEditCallComponent(
 		return component;
 	}
 
-	const body =
-		"error" in component.preview ? theme.fg("error", component.preview.error) : renderDiff(component.preview.diff);
+	let body: string;
+	if ("error" in component.preview) {
+		body = theme.fg("error", component.preview.error);
+	} else if (component.renderedDiffKey === component.preview.diff && component.renderedDiffBody !== undefined) {
+		body = component.renderedDiffBody;
+	} else {
+		body = renderDiff(component.preview.diff);
+		component.renderedDiffKey = component.preview.diff;
+		component.renderedDiffBody = body;
+	}
 	component.addChild(new Spacer(1));
 	component.addChild(new Text(body, 0, 0));
 	return component;
@@ -300,7 +338,7 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			'Edit one file by exact text replacement. Pass edits[] of {oldText,newText}; each oldText must match exactly one region in the ORIGINAL file. Multiple disjoint changes in same file → one call with multiple edits[]. File must be read first this session.\n\nWRONG: { "edits": [{ "oldText": "foo", "newText": "foo" }] }   // no-op, refused\nWRONG: { "edits": [{ "oldText": "x", "newText": "y" }] }       // ambiguous if multiple "x"\nRIGHT: { "edits": [{ "oldText": "function foo()", "newText": "function foo(x)" }] }   // unique anchor',
+			'Edit one file by exact text replacement. Pass edits[] of {oldText,newText}; each oldText must match exactly one region in the ORIGINAL file. Multiple disjoint changes in same file → one call with multiple edits[]. File must be read first this session.\n\nWRONG: { "edits": [{ "oldText": "foo", "newText": "foo" }] }   // no-op, refused\nWRONG: { "edits": [{ "oldText": "x", "newText": "y" }] }       // ambiguous if multiple "x"\nRIGHT: { "edits": [{ "oldText": "function foo()", "newText": "function foo(x)" }] }   // unique anchor\n\nWHICH TOOL: Default tool for text edits. For very large files where output tokens matter, prefer `edit_v2` (content-hash anchors). For structural rewrites across multiple files, use `ast_edit`. To create a new file or fully replace one, use `write`.',
 		promptSnippet:
 			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
 		promptGuidelines: [
@@ -308,6 +346,7 @@ export function createEditToolDefinition(
 			"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
 			"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
 			"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
+			"Prefer edit for ordinary text changes. For very large files where output tokens matter, prefer edit_v2 (content-hash anchors); for structural rewrites across multiple files use ast_edit; to create or fully replace a file use write.",
 		],
 		parameters: editSchema,
 		renderShell: "self",

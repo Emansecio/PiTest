@@ -22,6 +22,7 @@ import type {
 	ThinkingContent,
 	ToolCall,
 } from "../types.ts";
+import { createClientCache } from "../utils/client-cache.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import type { GoogleThinkingLevel } from "./google-shared.ts";
@@ -328,19 +329,25 @@ export const streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStr
 	} satisfies GoogleVertexOptions);
 };
 
+// Reuse GoogleGenAI (Vertex) SDK clients across turns to keep the HTTP connection
+// pool alive. Keyed by full config (project/location or apiKey + httpOptions) so
+// credentials/headers are never stale. Shared by both factories below.
+const clientCache = createClientCache<GoogleGenAI>();
+
 function createClient(
 	model: Model<"google-vertex">,
 	project: string,
 	location: string,
 	optionsHeaders?: Record<string, string>,
 ): GoogleGenAI {
-	return new GoogleGenAI({
+	const config = {
 		vertexai: true,
 		project,
 		location,
 		apiVersion: API_VERSION,
 		httpOptions: buildHttpOptions(model, optionsHeaders),
-	});
+	};
+	return clientCache.getOrCreate(config, () => new GoogleGenAI(config));
 }
 
 function createClientWithApiKey(
@@ -348,12 +355,13 @@ function createClientWithApiKey(
 	apiKey: string,
 	optionsHeaders?: Record<string, string>,
 ): GoogleGenAI {
-	return new GoogleGenAI({
+	const config = {
 		vertexai: true,
 		apiKey,
 		apiVersion: API_VERSION,
 		httpOptions: buildHttpOptions(model, optionsHeaders),
-	});
+	};
+	return clientCache.getOrCreate(config, () => new GoogleGenAI(config));
 }
 
 function buildHttpOptions(

@@ -139,7 +139,7 @@ export class McpHttpClient {
 					...(this.config.headers ?? {}),
 				},
 				body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
-				signal,
+				signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
 			});
 		} catch {
 			/* Notification failures are non-fatal */

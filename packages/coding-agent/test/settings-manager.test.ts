@@ -316,4 +316,31 @@ describe("SettingsManager", () => {
 			expect(manager.getSessionDir()).toBe(join(homedir(), "sessions"));
 		});
 	});
+
+	describe("getCompactionSettings selfCorrection wiring", () => {
+		// Regression: getCompactionSettings() previously dropped selfCorrection, so the
+		// compaction.selfCorrection knob in settings.json was a silent no-op (the extra
+		// verification LLM pass always ran). These lock the field through the getter.
+		it("should default selfCorrection to true when unset", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getCompactionSettings().selfCorrection).toBe(true);
+		});
+
+		it("should read selfCorrection: false from settings.json", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { selfCorrection: false } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getCompactionSettings().selfCorrection).toBe(false);
+		});
+
+		it("should let project settings override global selfCorrection", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ compaction: { selfCorrection: true } }));
+			writeFileSync(
+				join(projectDir, ".pit", "settings.json"),
+				JSON.stringify({ compaction: { selfCorrection: false } }),
+			);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getCompactionSettings().selfCorrection).toBe(false);
+		});
+	});
 });

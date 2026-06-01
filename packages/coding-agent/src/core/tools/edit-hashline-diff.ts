@@ -65,10 +65,15 @@ export const ANCHOR_DEFAULT_MAX_BYTES = 2048;
  * doubled until the body fits or no anchors remain. The surrounding
  * `<anchors>` tags are added by the caller and not counted toward maxBytes.
  */
-export function formatAnchorsForRead(content: string, opts?: { stride?: number; maxBytes?: number }): string {
+export function formatAnchorsForRead(
+	content: string,
+	opts?: { stride?: number; maxBytes?: number; lines?: string[] },
+): string {
 	const initialStride = Math.max(1, opts?.stride ?? ANCHOR_STRIDE);
 	const maxBytes = Math.max(0, opts?.maxBytes ?? ANCHOR_DEFAULT_MAX_BYTES);
-	const lines = content.split("\n");
+	// Reuse a pre-split line array when the caller already has one (read.ts splits
+	// the full content for line slicing). Falls back to splitting when absent.
+	const lines = opts?.lines ?? content.split("\n");
 	const last = lines.length - HASHLINE_WINDOW;
 	if (last < 0) {
 		return `# anchors (${HASHLINE_WINDOW}-line windows, sha256[0:${HASHLINE_HASH_LEN}], stride=${initialStride})`;

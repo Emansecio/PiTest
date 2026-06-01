@@ -88,7 +88,14 @@ describe("createAgentSession session manager defaults", () => {
 
 		const bashTool = session.agent.state.tools.find((tool) => tool.name === "bash");
 		expect(bashTool).toBeTruthy();
-		const result = await bashTool!.execute("test", { command: "pwd" });
+		// On Windows the bash tool runs Git Bash, whose `pwd` emits an MSYS/POSIX
+		// path (e.g. `/tmp/...` when the temp dir is mounted as `/tmp`). Node's
+		// realpathSync resolves a leading `/` against the current drive root, so
+		// `/tmp/...` becomes `C:\tmp\...` and lstat fails. `pwd -W` prints the
+		// native Windows path, which realpathSync can resolve. Plain `pwd` is
+		// already a real filesystem path on POSIX.
+		const pwdCommand = process.platform === "win32" ? "pwd -W" : "pwd";
+		const result = await bashTool!.execute("test", { command: pwdCommand });
 		const output = result.content
 			.filter((item): item is { type: "text"; text: string } => item.type === "text")
 			.map((item) => item.text)

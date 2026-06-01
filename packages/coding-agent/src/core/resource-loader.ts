@@ -594,9 +594,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 		);
 		this.systemPrompt = this.systemPromptOverride ? this.systemPromptOverride(baseSystemPrompt) : baseSystemPrompt;
 
-		const appendSources =
-			this.appendSystemPromptSource ??
-			(this.discoverAppendSystemPromptFile() ? [this.discoverAppendSystemPromptFile()!] : []);
+		const discoveredAppend =
+			this.appendSystemPromptSource === undefined ? this.discoverAppendSystemPromptFile() : undefined;
+		const appendSources = this.appendSystemPromptSource ?? (discoveredAppend ? [discoveredAppend] : []);
 		const baseAppend = appendSources
 			.map((s) => resolvePromptInput(s, "append system prompt"))
 			.filter((s): s is string => s !== undefined);

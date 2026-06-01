@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -58,31 +58,45 @@ describe("package commands", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("should persist global relative local package paths relative to settings.json", async () => {
+	it("rejects installing a relative local package path in local-only mode", async () => {
+		// Local-only mode: external pi-package management was removed. `install`
+		// no longer persists package paths to settings.json; it reports the
+		// disabled message and exits 1 without writing settings.
 		const relativePkgDir = join(projectDir, "packages", "local-package");
 		mkdirSync(relativePkgDir, { recursive: true });
 
-		await main(["install", "./packages/local-package"]);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await expect(main(["install", "./packages/local-package"])).resolves.toBeUndefined();
 
-		const settingsPath = join(agentDir, "settings.json");
-		const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: string[] };
-		expect(settings.packages?.length).toBe(1);
-		const stored = settings.packages?.[0] ?? "";
-		const resolvedFromSettings = realpathSync(join(agentDir, stored));
-		expect(resolvedFromSettings).toBe(realpathSync(relativePkgDir));
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toContain("Package management is disabled (local-only mode).");
+			expect(stderr).toContain("External npm:/git: pi-packages are no longer installed.");
+			expect(process.exitCode).toBe(1);
+
+			const settingsPath = join(agentDir, "settings.json");
+			expect(existsSync(settingsPath)).toBe(false);
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 
-	it("should remove local packages using a path with a trailing slash", async () => {
-		await main(["install", `${packageDir}/`]);
+	it("rejects removing a local package path with a trailing slash in local-only mode", async () => {
+		// Local-only mode: `remove` of external pi-packages is disabled. It
+		// reports the disabled message, exits 1, and writes no settings.json.
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await expect(main(["remove", `${packageDir}/`])).resolves.toBeUndefined();
 
-		const settingsPath = join(agentDir, "settings.json");
-		const installedSettings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: string[] };
-		expect(installedSettings.packages?.length).toBe(1);
+			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stderr).toContain("Package management is disabled (local-only mode).");
+			expect(process.exitCode).toBe(1);
 
-		await main(["remove", `${packageDir}/`]);
-
-		const removedSettings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: string[] };
-		expect(removedSettings.packages ?? []).toHaveLength(0);
+			const settingsPath = join(agentDir, "settings.json");
+			expect(existsSync(settingsPath)).toBe(false);
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 
 	it("shows install subcommand help", async () => {
@@ -333,7 +347,10 @@ if(args.includes("install")) process.exit(23);
 		}
 	});
 
-	it("suggests the configured source when update input omits the npm prefix", async () => {
+	it("reports updates are disabled for an external package source in local-only mode", async () => {
+		// Local-only mode: `update <external-source>` no longer suggests an
+		// npm: prefix or updates the package. It reports the disabled message
+		// and leaves configured packages untouched.
 		const settingsPath = join(agentDir, "settings.json");
 		writeFileSync(settingsPath, JSON.stringify({ packages: ["npm:pi-formatter"] }, null, 2));
 
@@ -345,9 +362,9 @@ if(args.includes("install")) process.exit(23);
 
 			const stderr = errorSpy.mock.calls.map(([message]) => String(message)).join("\n");
 			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stderr).toContain("Did you mean npm:pi-formatter?");
+			expect(stderr).toContain("Package updates are disabled (local-only mode).");
+			expect(stderr).toContain("External npm:/git: pi-packages are no longer installed or updated.");
 			expect(stdout).not.toContain("Updated pi-formatter");
-			expect(process.exitCode).toBe(1);
 
 			const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: string[] };
 			expect(settings.packages).toContain("npm:pi-formatter");

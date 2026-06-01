@@ -17,16 +17,17 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
-import { Agent, type AgentMessage, type AgentTool } from "@pit/agent-core";
+import { Agent, type AgentMessage, type AgentTool, type BeforeToolCallResult } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
-import { type Message, modelsAreEqual, streamSimple } from "@pit/ai";
+import { type Message, streamSimple } from "@pit/ai";
 import { Value } from "typebox/value";
 import type { ModelRegistry } from "../model-registry.ts";
-import { recordSubagentResult } from "./agent-url.ts";
+import { describeToolAction, type PermissionChecker } from "../permissions/index.ts";
+import { formatSkillsForPrompt, type Skill } from "../skills.ts";
 import type { SubagentRegistry } from "./registry.ts";
-import type { SpawnSubagentOptions, SpawnSubagentResult, SubagentTaskResult, WorktreeSpec } from "./types.ts";
+import type { SpawnSubagentOptions, SpawnSubagentResult, WorktreeSpec } from "./types.ts";
 
 const execFileP = promisify(execFile);
 
@@ -43,6 +44,42 @@ export interface SpawnSubagentDependencies {
 	modelRegistry: ModelRegistry;
 	availableTools: AgentTool[];
 	convertToLlm: (messages: AgentMessage[]) => Message[];
+	/**
+	 * Parent's permission checker. When provided, every tool call the subagent
+	 * attempts is gated through the same policy as the parent (denyTools,
+	 * denyPaths, plan-mode mutation blocks, etc.). The subagent runs headless,
+	 * so an "ask" decision is treated as a denial — there is no UI to confirm.
+	 * When omitted, the subagent runs ungated (legacy behavior, e.g. tests).
+	 */
+	permissionChecker?: PermissionChecker;
+	/**
+	 * Parent's model-invocable skills. Appended to the subagent's system prompt
+	 * only when the spawn opts in via `inheritSkills`. Omitted = subagent runs
+	 * skill-blind (legacy behavior).
+	 */
+	skills?: Skill[];
+}
+
+/**
+ * Maps a subagent tool call to a permission decision. Returns a
+ * `BeforeToolCallResult` with `block: true` when the parent's policy denies the
+ * call (or would prompt — subagents have no UI), or `undefined` to allow it.
+ *
+ * Exported for unit testing the gating logic in isolation.
+ */
+export function evaluateSubagentToolPermission(
+	checker: PermissionChecker,
+	toolName: string,
+	args: Record<string, unknown>,
+): BeforeToolCallResult | undefined {
+	const decision = checker.check(describeToolAction(toolName, args));
+	if (decision.decision === "allow") return undefined;
+	if (decision.decision === "deny") {
+		return { block: true, reason: decision.reason ?? `Tool "${toolName}" is denied by permission policy.` };
+	}
+	// decision === "ask": the subagent is headless, so we cannot prompt. Deny.
+	const base = decision.reason ?? `Tool "${toolName}" requires confirmation.`;
+	return { block: true, reason: `${base} (subagent runs headless — denied)` };
 }
 
 function filterTools(tools: readonly AgentTool[], allowed: readonly string[] | undefined): AgentTool[] {
@@ -96,7 +133,6 @@ interface WorktreeHandle {
 }
 
 async function createWorktree(parentCwd: string, taskName: string, spec: WorktreeSpec): Promise<WorktreeHandle> {
-	const root = resolve(parentCwd, ".pit", "worktreesParent");
 	const safeName = taskName.replace(/[^a-zA-Z0-9_-]+/g, "_").slice(0, 40) || "task";
 	const dir = join(parentCwd, ".pit", "worktrees", `${safeName}-${randomUUID().slice(0, 8)}`);
 	await mkdir(join(parentCwd, ".pit", "worktrees"), { recursive: true });
@@ -104,8 +140,6 @@ async function createWorktree(parentCwd: string, taskName: string, spec: Worktre
 	// this avoids branch conflicts and keeps the parent branch untouched.
 	const args = ["worktree", "add", "--detach", dir, spec.branch ?? "HEAD"];
 	await execFileP("git", args, { cwd: parentCwd });
-	// Silence "unused" lint for `root` — kept for clarity if path layout changes.
-	void root;
 	return { path: dir, cleanup: spec.cleanup ?? "auto" };
 }
 
@@ -126,12 +160,16 @@ export async function spawnSubagent(
 		prompt: options.prompt,
 		systemPrompt: options.systemPrompt,
 		allowedTools: options.allowedTools,
+		taskName: options.taskName,
+		depth: options.depth,
 	});
 	deps.registry.update(record.id, { status: "running", startedAt: Date.now() });
 
 	const parentCwd = options.cwd ?? process.cwd();
 	const worktreeSpec = normalizeWorktree(options.worktree);
-	const taskName = options.taskName ?? record.id;
+	// The registry guarantees a unique taskName even when callers reuse `name`
+	// across parallel spawns, so worktree paths and result identity never clash.
+	const taskName = record.taskName;
 
 	let worktree: WorktreeHandle | undefined;
 	if (worktreeSpec) {
@@ -163,11 +201,24 @@ export async function spawnSubagent(
 	}
 
 	const systemPromptBase = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-	const systemPrompt = options.resultSchema ? `${systemPromptBase}${SCHEMA_PROMPT_SUFFIX}` : systemPromptBase;
+	// Opt-in skill inheritance: append the parent's model-invocable skills so the
+	// subagent knows they exist and how to invoke them. Placed before the schema
+	// suffix, which must stay last (it constrains the final-message format).
+	const skillsSection =
+		options.inheritSkills && deps.skills && deps.skills.length > 0
+			? formatSkillsForPrompt(deps.skills, undefined, parentCwd)
+			: "";
+	const withSkills = skillsSection ? `${systemPromptBase}\n\n${skillsSection}` : systemPromptBase;
+	const systemPrompt = options.resultSchema ? `${withSkills}${SCHEMA_PROMPT_SUFFIX}` : withSkills;
 	const tools = filterTools(deps.availableTools, options.allowedTools);
 	const maxTurns = options.maxTurns ?? 25;
 	let turnCount = 0;
 
+	const checker = deps.permissionChecker;
+	// Tool calls denied by the parent's policy (including headless ask→deny).
+	// Recorded on the registry so the denial is visible in `/tasks` instead of
+	// vanishing silently inside the subagent loop.
+	const deniedToolCalls: string[] = [];
 	const agent = new Agent({
 		initialState: {
 			systemPrompt,
@@ -176,6 +227,23 @@ export async function spawnSubagent(
 			tools,
 		},
 		convertToLlm: deps.convertToLlm,
+		// Gate every subagent tool call through the parent's permission policy.
+		// Without this, the subagent's raw Agent loop would bypass the parent's
+		// permissions extension entirely (deny rules, plan-mode mutation blocks).
+		beforeToolCall: checker
+			? async ({ toolCall, args }) => {
+					const decision = evaluateSubagentToolPermission(
+						checker,
+						toolCall.name,
+						(args ?? {}) as Record<string, unknown>,
+					);
+					if (decision?.block) {
+						deniedToolCalls.push(toolCall.name);
+						deps.registry.update(record.id, { deniedToolCalls: [...deniedToolCalls] });
+					}
+					return decision;
+				}
+			: undefined,
 		streamFn: async (model, context, streamOptions) => {
 			const auth = await deps.modelRegistry.getApiKeyAndHeaders(model);
 			if (!auth.ok) {
@@ -232,14 +300,6 @@ export async function spawnSubagent(
 					error: errMsg,
 					turnCount,
 				});
-				const settled: SubagentTaskResult = {
-					taskName,
-					ok: false,
-					output,
-					error: errMsg,
-					worktreePath: worktree && worktree.cleanup === "keep" ? worktree.path : undefined,
-				};
-				recordSubagentResult(taskName, settled);
 				await cleanup();
 				throw new Error(errMsg);
 			}
@@ -256,14 +316,6 @@ export async function spawnSubagent(
 					error: errMsg,
 					turnCount,
 				});
-				const settled: SubagentTaskResult = {
-					taskName,
-					ok: false,
-					output,
-					error: errMsg,
-					worktreePath: worktree && worktree.cleanup === "keep" ? worktree.path : undefined,
-				};
-				recordSubagentResult(taskName, settled);
 				await cleanup();
 				throw new Error(errMsg);
 			}
@@ -276,16 +328,6 @@ export async function spawnSubagent(
 			output,
 			turnCount,
 		});
-
-		const settled: SubagentTaskResult = {
-			taskName,
-			ok: true,
-			output,
-			value,
-			worktreePath: worktree && worktree.cleanup === "keep" ? worktree.path : undefined,
-			cost: { durationMs: Date.now() - (record.startedAt ?? Date.now()) },
-		};
-		recordSubagentResult(taskName, settled);
 
 		await cleanup();
 		return {
@@ -303,31 +345,7 @@ export async function spawnSubagent(
 			error: message,
 			turnCount,
 		});
-		const settled: SubagentTaskResult = {
-			taskName,
-			ok: false,
-			error: message,
-			worktreePath: worktree && worktree.cleanup === "keep" ? worktree.path : undefined,
-		};
-		recordSubagentResult(taskName, settled);
 		await cleanup();
 		throw err;
 	}
-}
-
-/** Resolves the parent's effective model (used by the task tool). */
-export function resolveSubagentModel(
-	parentModel: Model<any> | undefined,
-	fallbacks: readonly Model<any>[],
-): Model<any> | undefined {
-	if (parentModel) return parentModel;
-	for (const candidate of fallbacks) {
-		if (candidate) return candidate;
-	}
-	return undefined;
-}
-
-export function modelsMatch(a: Model<any> | undefined, b: Model<any> | undefined): boolean {
-	if (!a || !b) return false;
-	return modelsAreEqual(a, b);
 }

@@ -9,10 +9,18 @@ import type { SubagentRecord, SubagentStatus } from "./types.ts";
 export class SubagentRegistry {
 	private records = new Map<string, SubagentRecord>();
 
-	create(input: { prompt: string; systemPrompt?: string; allowedTools?: string[] }): SubagentRecord {
+	create(input: {
+		prompt: string;
+		systemPrompt?: string;
+		allowedTools?: string[];
+		taskName?: string;
+		depth?: number;
+	}): SubagentRecord {
 		const id = `sub_${randomBytes(8).toString("hex")}`;
 		const record: SubagentRecord = {
 			id,
+			taskName: this.uniqueTaskName(input.taskName, id),
+			depth: input.depth ?? 0,
 			prompt: input.prompt,
 			systemPrompt: input.systemPrompt,
 			allowedTools: input.allowedTools,
@@ -21,6 +29,19 @@ export class SubagentRegistry {
 		};
 		this.records.set(id, record);
 		return record;
+	}
+
+	/**
+	 * Resolves a unique task name. With no name supplied, the subagent id is used
+	 * (already unique). When a supplied name collides with another tracked
+	 * subagent, the unique id suffix is appended — so parallel spawns that reuse
+	 * the same `name` never clash on worktree paths or result identity.
+	 */
+	private uniqueTaskName(desired: string | undefined, id: string): string {
+		if (!desired) return id;
+		const taken = new Set([...this.records.values()].map((r) => r.taskName));
+		if (!taken.has(desired)) return desired;
+		return `${desired}-${id.slice(4)}`;
 	}
 
 	update(id: string, patch: Partial<SubagentRecord>): SubagentRecord | undefined {

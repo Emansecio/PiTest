@@ -30,7 +30,7 @@ describe("OpenAI Responses foreign tool call ID normalization", () => {
 				},
 			],
 			api: "openai-responses",
-			provider: "github-copilot",
+			provider: "opencode",
 			model: "gpt-5.5",
 			usage,
 			stopReason: "toolUse",

@@ -128,6 +128,49 @@ describe("agentLoop with AgentMessage", () => {
 		expect(eventTypes).toContain("agent_end");
 	});
 
+	it("stops at config.maxTurns with a terminal turn-budget message (unbounded-loop backstop)", async () => {
+		let streamCalls = 0;
+		const pingTool: AgentTool = {
+			name: "ping",
+			label: "ping",
+			description: "",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text" as const, text: "pong" }], details: {} }),
+		};
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [pingTool] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			maxTurns: 3,
+		};
+		// Always respond with a tool call → hasMoreToolCalls never clears, so the
+		// loop would run forever without the maxTurns backstop.
+		const streamFn = () => {
+			streamCalls++;
+			const stream = new MockAssistantStream();
+			const n = streamCalls;
+			queueMicrotask(() => {
+				const message = createAssistantMessage([{ type: "toolCall", id: `c${n}`, name: "ping", arguments: {} }]);
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+		for await (const event of stream) events.push(event);
+		const messages = await stream.result();
+
+		// The model was asked exactly maxTurns times, not infinitely.
+		expect(streamCalls).toBe(3);
+		// Terminal message surfaces the budget reason (never a silent stop).
+		const last = messages[messages.length - 1] as AssistantMessage;
+		expect(last.role).toBe("assistant");
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toMatch(/turn budget of 3 turns/i);
+		expect(events.map((e) => e.type)).toContain("agent_end");
+	});
+
 	it("should handle custom message types via convertToLlm", async () => {
 		// Create a custom message type
 		interface CustomNotification {

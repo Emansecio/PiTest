@@ -1202,10 +1202,14 @@ export class SessionManager {
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.leafId;
 		let current = startId ? this.byId.get(startId) : undefined;
+		// Collect leaf→root with push() then reverse() once: O(n). The previous
+		// unshift()-in-loop was O(n²) (each unshift shifts all prior elements),
+		// and this runs per TUI frame via footer → getContextUsage on long sessions.
 		while (current) {
-			path.unshift(current);
+			path.push(current);
 			current = current.parentId ? this.byId.get(current.parentId) : undefined;
 		}
+		path.reverse();
 		return path;
 	}
 

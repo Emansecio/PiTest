@@ -14,6 +14,7 @@
 
 import assert from "node:assert";
 import { describe, it } from "node:test";
+import { isImageLine } from "../src/terminal-image.js";
 
 describe("Bug regression: isImageLine() crash with image escape sequences", () => {
 	describe("Bug scenario: Terminal without image support", () => {
@@ -55,9 +56,7 @@ describe("Bug regression: isImageLine() crash with image escape sequences", () =
 			);
 		});
 
-		it("new implementation returns true correctly", async () => {
-			const { isImageLine } = await import("../src/terminal-image.js");
-
+		it("new implementation returns true correctly", () => {
 			// Line containing image escape sequence with text before it
 			const lineWithImageSequence =
 				"Read image file [image/jpeg]\x1b]1337;File=size=800,600;inline=1:base64data...\x07";
@@ -67,9 +66,7 @@ describe("Bug regression: isImageLine() crash with image escape sequences", () =
 			assert.strictEqual(newResult, true, "Fix: new implementation returns true for line containing image sequence");
 		});
 
-		it("new implementation detects Kitty sequences in any position", async () => {
-			const { isImageLine } = await import("../src/terminal-image.js");
-
+		it("new implementation detects Kitty sequences in any position", () => {
 			const scenarios = [
 				"At start: \x1b_Ga=T,f=100,data...\x1b\\",
 				"Prefix \x1b_Ga=T,data...\x1b\\",
@@ -84,9 +81,7 @@ describe("Bug regression: isImageLine() crash with image escape sequences", () =
 			}
 		});
 
-		it("new implementation detects iTerm2 sequences in any position", async () => {
-			const { isImageLine } = await import("../src/terminal-image.js");
-
+		it("new implementation detects iTerm2 sequences in any position", () => {
 			const scenarios = [
 				"At start: \x1b]1337;File=size=100,100:base64...\x07",
 				"Prefix \x1b]1337;File=inline=1:data==\x07",
@@ -120,9 +115,7 @@ describe("Bug regression: isImageLine() crash with image escape sequences", () =
 		 * If isImageLine() doesn't detect them, TUI crashes.
 		 */
 
-		it("detects image sequences in read tool output", async () => {
-			const { isImageLine } = await import("../src/terminal-image.js");
-
+		it("detects image sequences in read tool output", () => {
 			// Simulate output when read tool processes an image
 			// The line might have text from the read result plus the image escape sequence
 			const toolOutputLine = "Read image file [image/jpeg]\x1b]1337;File=size=800,600;inline=1:base64image...\x07";
@@ -130,18 +123,14 @@ describe("Bug regression: isImageLine() crash with image escape sequences", () =
 			assert.strictEqual(isImageLine(toolOutputLine), true, "Should detect image sequence in tool output line");
 		});
 
-		it("detects Kitty sequences from Image component", async () => {
-			const { isImageLine } = await import("../src/terminal-image.js");
-
+		it("detects Kitty sequences from Image component", () => {
 			// Kitty image component creates multi-line output with escape sequences
 			const kittyLine = "\x1b_Ga=T,f=100,t=f,d=base64data...\x1b\\\x1b_Gm=i=1;\x1b\\";
 
 			assert.strictEqual(isImageLine(kittyLine), true, "Should detect Kitty image component output");
 		});
 
-		it("handles ANSI codes before image sequences", async () => {
-			const { isImageLine } = await import("../src/terminal-image.js");
-
+		it("handles ANSI codes before image sequences", () => {
 			// Line might have styling (error, warning, etc.) before image data
 			const lines = [
 				"\x1b[31mError\x1b[0m: \x1b]1337;File=inline=1:base64==\x07",
@@ -160,9 +149,7 @@ describe("Bug regression: isImageLine() crash with image escape sequences", () =
 	});
 
 	describe("Crash scenario simulation", () => {
-		it("does NOT crash on very long lines with image sequences", async () => {
-			const { isImageLine } = await import("../src/terminal-image.js");
-
+		it("does NOT crash on very long lines with image sequences", () => {
 			/**
 			 * Simulate the exact crash scenario:
 			 * - Line is 304,401 characters (the crash log showed 58649 > 115)
@@ -189,9 +176,7 @@ describe("Bug regression: isImageLine() crash with image escape sequences", () =
 			assert.strictEqual(detected, true, "Should detect image sequence in very long line, preventing TUI crash");
 		});
 
-		it("handles lines exactly matching crash log dimensions", async () => {
-			const { isImageLine } = await import("../src/terminal-image.js");
-
+		it("handles lines exactly matching crash log dimensions", () => {
 			/**
 			 * Crash log showed: line 58649 chars wide, terminal width 115
 			 * Let's create a line with similar characteristics
@@ -210,18 +195,14 @@ describe("Bug regression: isImageLine() crash with image escape sequences", () =
 	});
 
 	describe("Negative cases: Don't false positive", () => {
-		it("does not detect images in regular long text", async () => {
-			const { isImageLine } = await import("../src/terminal-image.js");
-
+		it("does not detect images in regular long text", () => {
 			// Very long line WITHOUT image sequences
 			const longText = "A".repeat(100000);
 
 			assert.strictEqual(isImageLine(longText), false, "Should not detect images in plain long text");
 		});
 
-		it("does not detect images in lines with file paths", async () => {
-			const { isImageLine } = await import("../src/terminal-image.js");
-
+		it("does not detect images in lines with file paths", () => {
 			const filePaths = [
 				"/path/to/1337/image.jpg",
 				"/usr/local/bin/File_converter",

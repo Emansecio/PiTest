@@ -89,6 +89,53 @@ describe("edit tool prepareArguments", () => {
 	});
 });
 
+describe("edit tool cross-harness key aliases", () => {
+	it("folds flat old_string/new_string into edits as oldText/newText", () => {
+		const definition = createEditToolDefinition(process.cwd());
+		const prepared = definition.prepareArguments!({ path: "f.txt", old_string: "a", new_string: "b" });
+		expect(prepared).toEqual({ path: "f.txt", edits: [{ oldText: "a", newText: "b" }] });
+	});
+
+	it("normalizes old_string/new_string inside edits[]", () => {
+		const definition = createEditToolDefinition(process.cwd());
+		const prepared = definition.prepareArguments!({
+			path: "f.txt",
+			edits: [{ old_string: "a", new_string: "b" }],
+		});
+		expect(prepared).toEqual({ path: "f.txt", edits: [{ oldText: "a", newText: "b" }] });
+	});
+
+	it("normalizes oldString/newString (Cursor) and old_str/new_str (str_replace) inside edits[]", () => {
+		const definition = createEditToolDefinition(process.cwd());
+		expect(definition.prepareArguments!({ path: "f.txt", edits: [{ oldString: "a", newString: "b" }] })).toEqual({
+			path: "f.txt",
+			edits: [{ oldText: "a", newText: "b" }],
+		});
+		expect(definition.prepareArguments!({ path: "f.txt", edits: [{ old_str: "a", new_str: "b" }] })).toEqual({
+			path: "f.txt",
+			edits: [{ oldText: "a", newText: "b" }],
+		});
+	});
+
+	it("normalizes a mix of canonical and aliased edits[] elements", () => {
+		const definition = createEditToolDefinition(process.cwd());
+		const prepared = definition.prepareArguments!({
+			path: "f.txt",
+			edits: [
+				{ oldText: "a", newText: "b" },
+				{ new_string: "d", old_string: "c" },
+			],
+		});
+		expect(prepared).toEqual({
+			path: "f.txt",
+			edits: [
+				{ oldText: "a", newText: "b" },
+				{ oldText: "c", newText: "d" },
+			],
+		});
+	});
+});
+
 describe("edit tool stringified edits", () => {
 	it("parses edits from a JSON string", () => {
 		const definition = createEditToolDefinition(process.cwd());

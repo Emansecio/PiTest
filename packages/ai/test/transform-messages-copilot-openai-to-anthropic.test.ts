@@ -16,7 +16,7 @@ function makeCopilotClaudeModel(): Model<"anthropic-messages"> {
 		id: "claude-sonnet-4.6",
 		name: "Claude Sonnet 4.6",
 		api: "anthropic-messages",
-		provider: "github-copilot",
+		provider: "opencode",
 		baseUrl: "https://api.individual.githubcopilot.com",
 		reasoning: true,
 		input: ["text", "image"],
@@ -31,7 +31,7 @@ function makeAssistantMessage(content: AssistantMessage["content"]): AssistantMe
 		role: "assistant",
 		content,
 		api: "openai-responses",
-		provider: "github-copilot",
+		provider: "opencode",
 		model: "gpt-5",
 		usage: {
 			input: 0,
@@ -62,7 +62,7 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 					{ type: "text", text: "Hi there!" },
 				],
 				api: "openai-completions",
-				provider: "github-copilot",
+				provider: "opencode",
 				model: "gpt-4o",
 				usage: {
 					input: 0,
@@ -103,7 +103,7 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 					},
 				],
 				api: "openai-responses",
-				provider: "github-copilot",
+				provider: "opencode",
 				model: "gpt-5",
 				usage: {
 					input: 0,

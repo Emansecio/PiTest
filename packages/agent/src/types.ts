@@ -210,6 +210,19 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	shouldStopAfterTurn?: (context: ShouldStopAfterTurnContext) => boolean | Promise<boolean>;
 
 	/**
+	 * Hard backstop on the number of model turns (assistant response + its tool
+	 * batch) within a single `runAgentLoop` invocation. When reached, the loop
+	 * stops and surfaces a terminal notice instead of continuing — a safety net
+	 * against unbounded tool-call loops the doom-loop detector misses (it only
+	 * catches *identical* consecutive calls, not alternating A,B,A,B churn).
+	 *
+	 * Defaults to `DEFAULT_MAX_TURNS` when unset. Callers that enforce their own
+	 * per-turn cap (e.g. subagents via `shouldStopAfterTurn`) still get this as a
+	 * second line of defense.
+	 */
+	maxTurns?: number;
+
+	/**
 	 * Called after `turn_end` and before the loop decides whether another provider request should start.
 	 * Return replacement context/model/thinking state to affect the next turn in this run.
 	 * Return undefined to keep using the current context/config.

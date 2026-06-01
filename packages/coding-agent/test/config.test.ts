@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { accessSync, chmodSync, constants, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { delimiter, join } from "path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -20,6 +20,15 @@ function setExecPath(value: string): void {
 		value,
 		configurable: true,
 	});
+}
+
+function isWritable(path: string): boolean {
+	try {
+		accessSync(path, constants.W_OK);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 afterEach(() => {
@@ -123,7 +132,9 @@ function createBunGlobalInstall(): { packageDir: string } {
 
 function createFakePnpmScript(root: string): string {
 	if (process.platform === "win32") {
-		return `@echo off\r\nif "%1"=="root" if "%2"=="-g" echo ${root}\r\n`;
+		// cross-spawn passes args to cmd.exe wrapped in quotes (e.g. `"root"`), so
+		// `%1` would be `"root"` and never match. `%~N` strips the surrounding quotes.
+		return `@echo off\r\nif "%~1"=="root" if "%~2"=="-g" echo ${root}\r\n`;
 	}
 	const escapedRoot = root.replaceAll("'", "'\\''");
 	return `#!/bin/sh\nif [ "$1" = "root" ] && [ "$2" = "-g" ]; then\n\tprintf '%s\\n' '${escapedRoot}'\n\texit 0\nfi\nexit 1\n`;
@@ -131,7 +142,8 @@ function createFakePnpmScript(root: string): string {
 
 function createFakeYarnScript(globalDir: string): string {
 	if (process.platform === "win32") {
-		return `@echo off\r\nif "%1"=="global" if "%2"=="dir" echo ${globalDir}\r\n`;
+		// `%~N` strips the surrounding quotes cross-spawn adds around each arg.
+		return `@echo off\r\nif "%~1"=="global" if "%~2"=="dir" echo ${globalDir}\r\n`;
 	}
 	const escapedGlobalDir = globalDir.replaceAll("'", "'\\''");
 	return `#!/bin/sh\nif [ "$1" = "global" ] && [ "$2" = "dir" ]; then\n\tprintf '%s\\n' '${escapedGlobalDir}'\n\texit 0\nfi\nexit 1\n`;
@@ -139,7 +151,8 @@ function createFakeYarnScript(globalDir: string): string {
 
 function createFakeBunScript(bunBin: string): string {
 	if (process.platform === "win32") {
-		return `@echo off\r\nif "%1"=="pm" if "%2"=="bin" if "%3"=="-g" echo ${bunBin}\r\n`;
+		// `%~N` strips the surrounding quotes cross-spawn adds around each arg.
+		return `@echo off\r\nif "%~1"=="pm" if "%~2"=="bin" if "%~3"=="-g" echo ${bunBin}\r\n`;
 	}
 	const escapedBunBin = bunBin.replaceAll("'", "'\\''");
 	return `#!/bin/sh\nif [ "$1" = "pm" ] && [ "$2" = "bin" ] && [ "$3" = "-g" ]; then\n\tprintf '%s\\n' '${escapedBunBin}'\n\texit 0\nfi\nexit 1\n`;
@@ -204,6 +217,15 @@ describe("detectInstallMethod", () => {
 
 	test("self-update respects configured npmCommand", () => {
 		const { prefix } = createNpmPrefixInstall();
+		// A configured npmCommand runs the real `npm --prefix <prefix> root -g` to
+		// confirm the install is managed. POSIX npm reports `<prefix>/lib/node_modules`
+		// (matched by the helper's PIT_PACKAGE_DIR), but Windows npm reports
+		// `<prefix>/node_modules`. Provide an entrypoint package under the Windows
+		// layout so getEntrypointPackageDir() also matches there.
+		const winRootPackageDir = join(prefix, "node_modules", "@earendil-works", "pi-coding-agent");
+		mkdirSync(winRootPackageDir, { recursive: true });
+		writeFileSync(join(winRootPackageDir, "package.json"), "{}");
+		process.argv[1] = join(winRootPackageDir, "dist", "cli.js");
 
 		const command = getSelfUpdateCommand("@pit/coding-agent", ["npm", "--prefix", prefix]);
 
@@ -370,9 +392,18 @@ describe("detectInstallMethod", () => {
 		});
 	});
 
-	test("does not self-update when npm install path is not writable", () => {
+	test("does not self-update when npm install path is not writable", (ctx) => {
 		const { packageDir } = createNpmPrefixInstall();
 		chmodSync(packageDir, 0o500);
+
+		// Guard: on Windows (and any unprivileged context where chmod can't strip a
+		// directory's write access) the install dir stays writable after chmod, so
+		// the precondition this test needs cannot be created. Skip only then; the
+		// test still runs wherever chmod actually removes write access (POSIX).
+		if (isWritable(packageDir)) {
+			ctx.skip();
+			return;
+		}
 
 		expect(getSelfUpdateCommand("@pit/coding-agent")).toBeUndefined();
 		expect(getSelfUpdateUnavailableInstruction("@pit/coding-agent")).toContain("the install path is not writable");

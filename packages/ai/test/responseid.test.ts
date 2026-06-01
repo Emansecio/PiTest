@@ -6,8 +6,8 @@ import { resolveApiKey } from "./oauth.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
-const oauthTokens = await Promise.all([resolveApiKey("github-copilot"), resolveApiKey("openai-codex")]);
-const [githubCopilotToken, openaiCodexToken] = oauthTokens;
+const oauthTokens = await Promise.all([resolveApiKey("openai-codex")]);
+const [openaiCodexToken] = oauthTokens;
 
 async function expectResponseId<TApi extends Api>(model: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	const context: Context = {
@@ -75,22 +75,6 @@ describe("responseId E2E Tests", () => {
 		it("should expose responseId", { retry: 3, timeout: 30000 }, async () => {
 			await expectResponseId(llm);
 		});
-	});
-
-	describe("GitHub Copilot Provider", () => {
-		it.skipIf(!githubCopilotToken)("OpenAI path should expose responseId", { retry: 3, timeout: 30000 }, async () => {
-			const llm = getModel("github-copilot", "gpt-5.3-codex");
-			await expectResponseId(llm, { apiKey: githubCopilotToken });
-		});
-
-		it.skipIf(!githubCopilotToken)(
-			"Anthropic path should expose responseId",
-			{ retry: 3, timeout: 30000 },
-			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4.6");
-				await expectResponseId(llm, { apiKey: githubCopilotToken });
-			},
-		);
 	});
 
 	describe("OpenAI Codex Provider", () => {

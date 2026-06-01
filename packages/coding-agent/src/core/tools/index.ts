@@ -232,57 +232,257 @@ import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } fro
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName =
-	| "read"
-	| "bash"
-	| "edit"
-	| "edit_v2"
-	| "write"
-	| "grep"
-	| "find"
-	| "ls"
-	| "symbol"
-	| "ask"
-	| "resolve"
-	| "search_tool_bm25"
-	| "ast_grep"
-	| "ast_edit"
-	| "web_search"
-	| "eval"
-	| "retain"
-	| "recall"
-	| "reflect"
-	| "forget"
-	| "calc"
-	| "recipe"
-	| "inspect_image"
-	| "render_mermaid";
-export const allToolNames: Set<ToolName> = new Set([
-	"read",
-	"bash",
-	"edit",
-	"edit_v2",
-	"write",
-	"grep",
-	"find",
-	"ls",
-	"symbol",
-	"ask",
-	"resolve",
-	"search_tool_bm25",
-	"ast_grep",
-	"ast_edit",
-	"web_search",
-	"eval",
-	"retain",
-	"recall",
-	"reflect",
-	"forget",
-	"calc",
-	"recipe",
-	"inspect_image",
-	"render_mermaid",
-]);
+/** A coding tool's membership/gate in the default coding surface. */
+type CodingGate = "always" | "native" | "webSearch" | "eval" | "hindsight";
+
+interface ToolRegistryEntry {
+	/** Builds the executable tool. */
+	factory: (cwd: string, options?: any) => Tool;
+	/** Builds the lazy tool definition. */
+	definitionFactory: (cwd: string, options?: any) => ToolDef;
+	/**
+	 * Key into `ToolsOptions` for this tool's per-tool options. Centralizes the
+	 * snake_case tool-name vs camelCase options-key mismatch (e.g. tool
+	 * `search_tool_bm25` -> options key `searchToolBm25`) in one place.
+	 */
+	optionsKey: keyof ToolsOptions;
+	/** Member of the read-only tool surface (createReadOnly*). */
+	readOnly: boolean;
+	/**
+	 * Membership + gate in the default coding surface (createCoding*).
+	 * `false` = not a coding tool; a gate name = included only when enabled.
+	 */
+	coding: CodingGate | false;
+}
+
+/**
+ * Single source of truth for every built-in tool. Insertion order IS the
+ * canonical tool order: every derived artifact — the `ToolName` union,
+ * `allToolNames`, the read-only/coding/all lists, and the name->factory
+ * lookups — iterates this table, so adding a tool is a one-row change here
+ * instead of edits across nine sites. Renaming a tool (e.g. `search_tool_bm25`)
+ * is now a single key rename too; left as-is to avoid changing the
+ * model-facing tool name and any settings that reference it.
+ */
+const TOOL_REGISTRY = {
+	read: {
+		factory: createReadTool,
+		definitionFactory: createReadToolDefinition,
+		optionsKey: "read",
+		readOnly: true,
+		coding: "always",
+	},
+	bash: {
+		factory: createBashTool,
+		definitionFactory: createBashToolDefinition,
+		optionsKey: "bash",
+		readOnly: false,
+		coding: "always",
+	},
+	edit: {
+		factory: createEditTool,
+		definitionFactory: createEditToolDefinition,
+		optionsKey: "edit",
+		readOnly: false,
+		coding: "always",
+	},
+	edit_v2: {
+		factory: createEditHashlineTool,
+		definitionFactory: createEditHashlineToolDefinition,
+		optionsKey: "edit_v2",
+		readOnly: false,
+		coding: "always",
+	},
+	write: {
+		factory: createWriteTool,
+		definitionFactory: createWriteToolDefinition,
+		optionsKey: "write",
+		readOnly: false,
+		coding: "always",
+	},
+	grep: {
+		factory: createGrepTool,
+		definitionFactory: createGrepToolDefinition,
+		optionsKey: "grep",
+		readOnly: true,
+		coding: false,
+	},
+	find: {
+		factory: createFindTool,
+		definitionFactory: createFindToolDefinition,
+		optionsKey: "find",
+		readOnly: true,
+		coding: false,
+	},
+	ls: {
+		factory: createLsTool,
+		definitionFactory: createLsToolDefinition,
+		optionsKey: "ls",
+		readOnly: true,
+		coding: false,
+	},
+	symbol: {
+		factory: createSymbolTool,
+		definitionFactory: createSymbolToolDefinition,
+		optionsKey: "symbol",
+		readOnly: true,
+		coding: "always",
+	},
+	ask: {
+		factory: createAskTool,
+		definitionFactory: createAskToolDefinition,
+		optionsKey: "ask",
+		readOnly: false,
+		coding: "always",
+	},
+	resolve: {
+		factory: createResolveTool,
+		definitionFactory: createResolveToolDefinition,
+		optionsKey: "resolve",
+		readOnly: false,
+		coding: "always",
+	},
+	search_tool_bm25: {
+		factory: createSearchToolBm25Tool,
+		definitionFactory: createSearchToolBm25Definition,
+		optionsKey: "searchToolBm25",
+		readOnly: false,
+		coding: "always",
+	},
+	ast_grep: {
+		factory: createAstGrepTool,
+		definitionFactory: createAstGrepToolDefinition,
+		optionsKey: "ast_grep",
+		readOnly: false,
+		coding: "always",
+	},
+	ast_edit: {
+		factory: createAstEditTool,
+		definitionFactory: createAstEditToolDefinition,
+		optionsKey: "ast_edit",
+		readOnly: false,
+		coding: "always",
+	},
+	web_search: {
+		factory: createWebSearchTool,
+		definitionFactory: createWebSearchToolDefinition,
+		optionsKey: "web_search",
+		readOnly: false,
+		coding: "webSearch",
+	},
+	eval: {
+		factory: createEvalTool,
+		definitionFactory: createEvalToolDefinition,
+		optionsKey: "eval",
+		readOnly: false,
+		coding: "eval",
+	},
+	retain: {
+		factory: createRetainTool,
+		definitionFactory: createRetainToolDefinition,
+		optionsKey: "retain",
+		readOnly: false,
+		coding: "hindsight",
+	},
+	recall: {
+		factory: createRecallTool,
+		definitionFactory: createRecallToolDefinition,
+		optionsKey: "recall",
+		readOnly: false,
+		coding: "hindsight",
+	},
+	reflect: {
+		factory: createReflectTool,
+		definitionFactory: createReflectToolDefinition,
+		optionsKey: "reflect",
+		readOnly: false,
+		coding: "hindsight",
+	},
+	forget: {
+		factory: createForgetTool,
+		definitionFactory: createForgetToolDefinition,
+		optionsKey: "forget",
+		readOnly: false,
+		coding: "hindsight",
+	},
+	calc: {
+		factory: createCalcTool,
+		definitionFactory: createCalcToolDefinition,
+		optionsKey: "calc",
+		readOnly: false,
+		coding: "native",
+	},
+	recipe: {
+		factory: createRecipeTool,
+		definitionFactory: createRecipeToolDefinition,
+		optionsKey: "recipe",
+		readOnly: false,
+		coding: "native",
+	},
+	inspect_image: {
+		factory: createInspectImageTool,
+		definitionFactory: createInspectImageToolDefinition,
+		optionsKey: "inspect_image",
+		readOnly: false,
+		coding: "native",
+	},
+	render_mermaid: {
+		factory: createRenderMermaidTool,
+		definitionFactory: createRenderMermaidToolDefinition,
+		optionsKey: "render_mermaid",
+		readOnly: false,
+		coding: "native",
+	},
+} satisfies Record<string, ToolRegistryEntry>;
+
+export type ToolName = keyof typeof TOOL_REGISTRY;
+
+export const allToolNames: Set<ToolName> = new Set(Object.keys(TOOL_REGISTRY) as ToolName[]);
+
+/**
+ * Uniformly-typed view of the registry. `satisfies` above preserves each
+ * entry's precise factory types (great for inference), but that makes
+ * `registry[name].factory` a union of 24 distinct signatures — calling it
+ * would demand the intersection of every options type. Reading through this
+ * widened `Record` view gives every entry the uniform `(cwd, options?) => Tool`
+ * signature the generic builders below rely on.
+ */
+const registry: Record<ToolName, ToolRegistryEntry> = TOOL_REGISTRY;
+
+/** Every tool name in canonical (registry insertion) order. */
+function toolNamesInOrder(): ToolName[] {
+	return Object.keys(TOOL_REGISTRY) as ToolName[];
+}
+
+/** Whether a coding-surface gate is open given the supplied options. */
+function codingGateOpen(gate: CodingGate, options?: ToolsOptions): boolean {
+	switch (gate) {
+		case "always":
+		case "native":
+			return true;
+		case "webSearch":
+			return !!options?.webSearch?.enabled;
+		case "eval":
+			return !!options?.eval?.enabled;
+		case "hindsight":
+			return !!options?.hindsight?.enabled;
+	}
+}
+
+/**
+ * Resolves the per-tool options object for a coding-surface build. `web_search`
+ * merges its default provider from the gate config, matching legacy behavior;
+ * every other tool just reads its `optionsKey` slot.
+ */
+function codingToolOptions(name: ToolName, options?: ToolsOptions): unknown {
+	if (name === "web_search") {
+		return {
+			...(options?.web_search ?? {}),
+			defaultProvider: options?.web_search?.defaultProvider ?? options?.webSearch?.defaultProvider,
+		};
+	}
+	return options?.[registry[name].optionsKey];
+}
 
 export interface ToolsOptions {
 	read?: ReadToolOptions;
@@ -314,275 +514,58 @@ export interface ToolsOptions {
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
-	switch (toolName) {
-		case "read":
-			return createReadToolDefinition(cwd, options?.read);
-		case "bash":
-			return createBashToolDefinition(cwd, options?.bash);
-		case "edit":
-			return createEditToolDefinition(cwd, options?.edit);
-		case "edit_v2":
-			return createEditHashlineToolDefinition(cwd, options?.edit_v2);
-		case "write":
-			return createWriteToolDefinition(cwd, options?.write);
-		case "grep":
-			return createGrepToolDefinition(cwd, options?.grep);
-		case "find":
-			return createFindToolDefinition(cwd, options?.find);
-		case "ls":
-			return createLsToolDefinition(cwd, options?.ls);
-		case "symbol":
-			return createSymbolToolDefinition(cwd, options?.symbol);
-		case "ask":
-			return createAskToolDefinition(cwd, options?.ask);
-		case "resolve":
-			return createResolveToolDefinition(cwd, options?.resolve);
-		case "search_tool_bm25":
-			return createSearchToolBm25Definition(cwd, options?.searchToolBm25);
-		case "ast_grep":
-			return createAstGrepToolDefinition(cwd, options?.ast_grep);
-		case "ast_edit":
-			return createAstEditToolDefinition(cwd, options?.ast_edit);
-		case "web_search":
-			return createWebSearchToolDefinition(cwd, options?.web_search);
-		case "eval":
-			return createEvalToolDefinition(cwd, options?.eval);
-		case "retain":
-			return createRetainToolDefinition(cwd, options?.retain);
-		case "recall":
-			return createRecallToolDefinition(cwd, options?.recall);
-		case "reflect":
-			return createReflectToolDefinition(cwd, options?.reflect);
-		case "forget":
-			return createForgetToolDefinition(cwd, options?.forget);
-		case "calc":
-			return createCalcToolDefinition(cwd, options?.calc);
-		case "recipe":
-			return createRecipeToolDefinition(cwd, options?.recipe);
-		case "inspect_image":
-			return createInspectImageToolDefinition(cwd, options?.inspect_image);
-		case "render_mermaid":
-			return createRenderMermaidToolDefinition(cwd, options?.render_mermaid);
-		default:
-			throw new Error(`Unknown tool name: ${toolName}`);
-	}
+	const entry = registry[toolName];
+	if (!entry) throw new Error(`Unknown tool name: ${toolName}`);
+	return entry.definitionFactory(cwd, options?.[entry.optionsKey]);
 }
 
 export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptions): Tool {
-	switch (toolName) {
-		case "read":
-			return createReadTool(cwd, options?.read);
-		case "bash":
-			return createBashTool(cwd, options?.bash);
-		case "edit":
-			return createEditTool(cwd, options?.edit);
-		case "edit_v2":
-			return createEditHashlineTool(cwd, options?.edit_v2);
-		case "write":
-			return createWriteTool(cwd, options?.write);
-		case "grep":
-			return createGrepTool(cwd, options?.grep);
-		case "find":
-			return createFindTool(cwd, options?.find);
-		case "ls":
-			return createLsTool(cwd, options?.ls);
-		case "symbol":
-			return createSymbolTool(cwd, options?.symbol);
-		case "ask":
-			return createAskTool(cwd, options?.ask);
-		case "resolve":
-			return createResolveTool(cwd, options?.resolve);
-		case "search_tool_bm25":
-			return createSearchToolBm25Tool(cwd, options?.searchToolBm25);
-		case "ast_grep":
-			return createAstGrepTool(cwd, options?.ast_grep);
-		case "ast_edit":
-			return createAstEditTool(cwd, options?.ast_edit);
-		case "web_search":
-			return createWebSearchTool(cwd, options?.web_search);
-		case "eval":
-			return createEvalTool(cwd, options?.eval);
-		case "retain":
-			return createRetainTool(cwd, options?.retain);
-		case "recall":
-			return createRecallTool(cwd, options?.recall);
-		case "reflect":
-			return createReflectTool(cwd, options?.reflect);
-		case "forget":
-			return createForgetTool(cwd, options?.forget);
-		case "calc":
-			return createCalcTool(cwd, options?.calc);
-		case "recipe":
-			return createRecipeTool(cwd, options?.recipe);
-		case "inspect_image":
-			return createInspectImageTool(cwd, options?.inspect_image);
-		case "render_mermaid":
-			return createRenderMermaidTool(cwd, options?.render_mermaid);
-		default:
-			throw new Error(`Unknown tool name: ${toolName}`);
-	}
+	const entry = registry[toolName];
+	if (!entry) throw new Error(`Unknown tool name: ${toolName}`);
+	return entry.factory(cwd, options?.[entry.optionsKey]);
 }
 
 export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
-	const tools: ToolDef[] = [
-		createReadToolDefinition(cwd, options?.read),
-		createBashToolDefinition(cwd, options?.bash),
-		createEditToolDefinition(cwd, options?.edit),
-		createEditHashlineToolDefinition(cwd, options?.edit_v2),
-		createWriteToolDefinition(cwd, options?.write),
-		createSymbolToolDefinition(cwd, options?.symbol),
-		createAskToolDefinition(cwd, options?.ask),
-		createResolveToolDefinition(cwd, options?.resolve),
-		createSearchToolBm25Definition(cwd, options?.searchToolBm25),
-		createAstGrepToolDefinition(cwd, options?.ast_grep),
-		createAstEditToolDefinition(cwd, options?.ast_edit),
-	];
-	if (options?.webSearch?.enabled) {
-		tools.push(
-			createWebSearchToolDefinition(cwd, {
-				...(options?.web_search ?? {}),
-				defaultProvider: options?.web_search?.defaultProvider ?? options?.webSearch?.defaultProvider,
-			}),
-		);
+	const tools: ToolDef[] = [];
+	for (const name of toolNamesInOrder()) {
+		const entry = registry[name];
+		if (entry.coding === false || !codingGateOpen(entry.coding, options)) continue;
+		tools.push(entry.definitionFactory(cwd, codingToolOptions(name, options)));
 	}
-	if (options?.eval?.enabled) {
-		tools.push(createEvalToolDefinition(cwd, options?.eval));
-	}
-	if (options?.hindsight?.enabled) {
-		tools.push(
-			createRetainToolDefinition(cwd, options?.retain),
-			createRecallToolDefinition(cwd, options?.recall),
-			createReflectToolDefinition(cwd, options?.reflect),
-			createForgetToolDefinition(cwd, options?.forget),
-		);
-	}
-	// Default-on native tools (no settings.json flag required).
-	tools.push(
-		createCalcToolDefinition(cwd, options?.calc),
-		createRecipeToolDefinition(cwd, options?.recipe),
-		createInspectImageToolDefinition(cwd, options?.inspect_image),
-		createRenderMermaidToolDefinition(cwd, options?.render_mermaid),
-	);
 	return tools;
 }
 
 export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
-	return [
-		createReadToolDefinition(cwd, options?.read),
-		createGrepToolDefinition(cwd, options?.grep),
-		createFindToolDefinition(cwd, options?.find),
-		createLsToolDefinition(cwd, options?.ls),
-		createSymbolToolDefinition(cwd, options?.symbol),
-	];
+	return toolNamesInOrder()
+		.filter((name) => registry[name].readOnly)
+		.map((name) => createToolDefinition(name, cwd, options));
 }
 
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
-	return {
-		read: createReadToolDefinition(cwd, options?.read),
-		bash: createBashToolDefinition(cwd, options?.bash),
-		edit: createEditToolDefinition(cwd, options?.edit),
-		edit_v2: createEditHashlineToolDefinition(cwd, options?.edit_v2),
-		write: createWriteToolDefinition(cwd, options?.write),
-		grep: createGrepToolDefinition(cwd, options?.grep),
-		find: createFindToolDefinition(cwd, options?.find),
-		ls: createLsToolDefinition(cwd, options?.ls),
-		symbol: createSymbolToolDefinition(cwd, options?.symbol),
-		ask: createAskToolDefinition(cwd, options?.ask),
-		resolve: createResolveToolDefinition(cwd, options?.resolve),
-		search_tool_bm25: createSearchToolBm25Definition(cwd, options?.searchToolBm25),
-		ast_grep: createAstGrepToolDefinition(cwd, options?.ast_grep),
-		ast_edit: createAstEditToolDefinition(cwd, options?.ast_edit),
-		web_search: createWebSearchToolDefinition(cwd, options?.web_search),
-		eval: createEvalToolDefinition(cwd, options?.eval),
-		retain: createRetainToolDefinition(cwd, options?.retain),
-		recall: createRecallToolDefinition(cwd, options?.recall),
-		reflect: createReflectToolDefinition(cwd, options?.reflect),
-		forget: createForgetToolDefinition(cwd, options?.forget),
-		calc: createCalcToolDefinition(cwd, options?.calc),
-		recipe: createRecipeToolDefinition(cwd, options?.recipe),
-		inspect_image: createInspectImageToolDefinition(cwd, options?.inspect_image),
-		render_mermaid: createRenderMermaidToolDefinition(cwd, options?.render_mermaid),
-	};
+	return Object.fromEntries(
+		toolNamesInOrder().map((name) => [name, createToolDefinition(name, cwd, options)]),
+	) as Record<ToolName, ToolDef>;
 }
 
 export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
-	const tools: Tool[] = [
-		createReadTool(cwd, options?.read),
-		createBashTool(cwd, options?.bash),
-		createEditTool(cwd, options?.edit),
-		createEditHashlineTool(cwd, options?.edit_v2),
-		createWriteTool(cwd, options?.write),
-		createSymbolTool(cwd, options?.symbol),
-		createAskTool(cwd, options?.ask),
-		createResolveTool(cwd, options?.resolve),
-		createSearchToolBm25Tool(cwd, options?.searchToolBm25),
-		createAstGrepTool(cwd, options?.ast_grep),
-		createAstEditTool(cwd, options?.ast_edit),
-	];
-	if (options?.webSearch?.enabled) {
-		tools.push(
-			createWebSearchTool(cwd, {
-				...(options?.web_search ?? {}),
-				defaultProvider: options?.web_search?.defaultProvider ?? options?.webSearch?.defaultProvider,
-			}),
-		);
+	const tools: Tool[] = [];
+	for (const name of toolNamesInOrder()) {
+		const entry = registry[name];
+		if (entry.coding === false || !codingGateOpen(entry.coding, options)) continue;
+		tools.push(entry.factory(cwd, codingToolOptions(name, options)));
 	}
-	if (options?.eval?.enabled) {
-		tools.push(createEvalTool(cwd, options?.eval));
-	}
-	if (options?.hindsight?.enabled) {
-		tools.push(
-			createRetainTool(cwd, options?.retain),
-			createRecallTool(cwd, options?.recall),
-			createReflectTool(cwd, options?.reflect),
-			createForgetTool(cwd, options?.forget),
-		);
-	}
-	// Default-on native tools (no settings.json flag required).
-	tools.push(
-		createCalcTool(cwd, options?.calc),
-		createRecipeTool(cwd, options?.recipe),
-		createInspectImageTool(cwd, options?.inspect_image),
-		createRenderMermaidTool(cwd, options?.render_mermaid),
-	);
 	return tools;
 }
 
 export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[] {
-	return [
-		createReadTool(cwd, options?.read),
-		createGrepTool(cwd, options?.grep),
-		createFindTool(cwd, options?.find),
-		createLsTool(cwd, options?.ls),
-		createSymbolTool(cwd, options?.symbol),
-	];
+	return toolNamesInOrder()
+		.filter((name) => registry[name].readOnly)
+		.map((name) => createTool(name, cwd, options));
 }
 
 export function createAllTools(cwd: string, options?: ToolsOptions): Record<ToolName, Tool> {
-	return {
-		read: createReadTool(cwd, options?.read),
-		bash: createBashTool(cwd, options?.bash),
-		edit: createEditTool(cwd, options?.edit),
-		edit_v2: createEditHashlineTool(cwd, options?.edit_v2),
-		write: createWriteTool(cwd, options?.write),
-		grep: createGrepTool(cwd, options?.grep),
-		find: createFindTool(cwd, options?.find),
-		ls: createLsTool(cwd, options?.ls),
-		symbol: createSymbolTool(cwd, options?.symbol),
-		ask: createAskTool(cwd, options?.ask),
-		resolve: createResolveTool(cwd, options?.resolve),
-		search_tool_bm25: createSearchToolBm25Tool(cwd, options?.searchToolBm25),
-		ast_grep: createAstGrepTool(cwd, options?.ast_grep),
-		ast_edit: createAstEditTool(cwd, options?.ast_edit),
-		web_search: createWebSearchTool(cwd, options?.web_search),
-		eval: createEvalTool(cwd, options?.eval),
-		retain: createRetainTool(cwd, options?.retain),
-		recall: createRecallTool(cwd, options?.recall),
-		reflect: createReflectTool(cwd, options?.reflect),
-		forget: createForgetTool(cwd, options?.forget),
-		calc: createCalcTool(cwd, options?.calc),
-		recipe: createRecipeTool(cwd, options?.recipe),
-		inspect_image: createInspectImageTool(cwd, options?.inspect_image),
-		render_mermaid: createRenderMermaidTool(cwd, options?.render_mermaid),
-	};
+	return Object.fromEntries(toolNamesInOrder().map((name) => [name, createTool(name, cwd, options)])) as Record<
+		ToolName,
+		Tool
+	>;
 }

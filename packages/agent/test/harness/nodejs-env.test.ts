@@ -193,12 +193,18 @@ describe("NodeExecutionEnv", () => {
 	it("executes commands in cwd with env overrides", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
+		// The shell may report $PWD in its own canonical form (e.g. Git Bash on
+		// Windows maps C:\...\Temp to a POSIX mount like /tmp), so derive the
+		// expected cwd from the same shell rather than assuming realpath(root)
+		// matches the shell's path form. This still asserts the command runs in
+		// the env cwd and that the env override is applied.
+		const shellCwd = getOrThrow(await env.exec("printf '%s' \"$PWD\"")).stdout;
 		const result = getOrThrow(
 			await env.exec('printf \'%s:%s\' "$PWD" "$NODE_ENV_TEST"', {
 				env: { NODE_ENV_TEST: "ok" },
 			}),
 		);
-		expect(result).toEqual({ stdout: `${await realpath(root)}:ok`, stderr: "", exitCode: 0 });
+		expect(result).toEqual({ stdout: `${shellCwd}:ok`, stderr: "", exitCode: 0 });
 	});
 
 	it("streams stdout and stderr chunks", async () => {

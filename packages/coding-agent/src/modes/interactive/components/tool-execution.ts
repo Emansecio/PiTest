@@ -4,7 +4,48 @@ import { createAllToolDefinitions, type ToolName } from "../../../core/tools/ind
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
+import { keyHint } from "./keybinding-hints.js";
 import { MessageShell } from "./message-shell.ts";
+
+// Cap for the no-custom-renderer result fallback. Tools without their own
+// renderResult (MCP tools, the coordinator/Task tool, extension tools) would
+// otherwise dump their entire — often large — output into the CLI. Collapse to
+// a preview; the full output stays reachable via the expand toggle. Mirrors the
+// find/ls cap pattern.
+const FALLBACK_RESULT_PREVIEW_LINES = 15;
+
+// Max width of the one-line arg summary shown next to the tool name for tools
+// without a custom renderCall.
+const FALLBACK_CALL_SUMMARY_MAX = 80;
+
+/**
+ * Compact, single-line preview of a tool call's args for the collapsed row.
+ * Scalars render as `key: value`; arrays/objects collapse to `[n]` / `{…}` so
+ * a large payload (typical of MCP tools) never expands the row. The whole line
+ * is clamped to FALLBACK_CALL_SUMMARY_MAX.
+ */
+function summarizeArgsOneLine(args: unknown, maxLen = FALLBACK_CALL_SUMMARY_MAX): string {
+	const clamp = (s: string): string => (s.length > maxLen ? `${s.slice(0, maxLen - 1)}…` : s);
+	if (typeof args === "string") {
+		return clamp(args.replace(/\s+/g, " ").trim());
+	}
+	if (args === null || typeof args !== "object") {
+		return "";
+	}
+	const parts: string[] = [];
+	for (const [k, v] of Object.entries(args as Record<string, unknown>)) {
+		if (v === null || v === undefined) continue;
+		let val: string;
+		if (typeof v === "string") val = v;
+		else if (typeof v === "number" || typeof v === "boolean") val = String(v);
+		else if (Array.isArray(v)) val = `[${v.length}]`;
+		else val = "{…}";
+		parts.push(`${k}: ${val.replace(/\s+/g, " ").trim()}`);
+		// Stop once we already overflow — no point formatting the tail.
+		if (parts.join("  ").length >= maxLen) break;
+	}
+	return clamp(parts.join("  "));
+}
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -20,6 +61,7 @@ export class ToolExecutionComponent extends MessageShell {
 	private rendererState: any = {};
 	private imageComponents: Image[] = [];
 	private imageSpacers: Spacer[] = [];
+	private imageKeys: string[] = [];
 	private toolName: string;
 	private toolCallId: string;
 	private args: any;
@@ -142,15 +184,42 @@ export class ToolExecutionComponent extends MessageShell {
 	}
 
 	private createCallFallback(): Component {
-		return new Text(theme.fg("toolTitle", theme.bold(this.toolName)), 0, 0);
+		// Tools without a custom renderCall (MCP tools, the coordinator/Task
+		// tool, extension tools) would otherwise show only the bare tool name,
+		// hiding the args that say what the call is actually doing. Append a
+		// compact one-line arg summary so the collapsed row stays informative
+		// without flooding the CLI.
+		const title = theme.fg("toolTitle", theme.bold(this.toolName));
+		const summary = summarizeArgsOneLine(this.args);
+		const text = summary ? `${title} ${theme.fg("toolOutput", summary)}` : title;
+		return new Text(text, 0, 0);
 	}
 
 	private createResultFallback(): Component | undefined {
-		const output = this.getTextOutput();
-		if (!output) {
+		const text = this.buildCappedOutput(this.getTextOutput());
+		if (text === null) {
 			return undefined;
 		}
-		return new Text(theme.fg("toolOutput", output), 0, 0);
+		return new Text(text, 0, 0);
+	}
+
+	// Collapse raw tool output to a preview unless expanded. Shared by the
+	// no-renderer result fallback and formatToolExecution. Returns null when
+	// there is nothing to show.
+	private buildCappedOutput(rawOutput: string): string | null {
+		const output = rawOutput.trim();
+		if (!output) {
+			return null;
+		}
+		const lines = output.split("\n");
+		const maxLines = this.expanded ? lines.length : FALLBACK_RESULT_PREVIEW_LINES;
+		const displayLines = lines.slice(0, maxLines);
+		const remaining = lines.length - maxLines;
+		let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
+		if (remaining > 0) {
+			text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
+		}
+		return text;
 	}
 
 	updateArgs(args: any): void {
@@ -301,15 +370,11 @@ export class ToolExecutionComponent extends MessageShell {
 			hasContent = true;
 		}
 
-		for (const img of this.imageComponents) {
-			this.removeChild(img);
-		}
-		this.imageComponents = [];
-		for (const spacer of this.imageSpacers) {
-			this.removeChild(spacer);
-		}
-		this.imageSpacers = [];
-
+		// Build the list of desired images (data + mimeType + width). `Image` has no
+		// setter to mutate its source, so reuse is keyed on identity: only tear down
+		// and recreate when the desired set differs from what is mounted. This avoids
+		// re-decoding identical images on every args delta / updateDisplay() call.
+		const desired: Array<{ key: string; data: string; mimeType: string }> = [];
 		if (this.result) {
 			const imageBlocks = this.result.content.filter((c) => c.type === "image");
 			const caps = getCapabilities();
@@ -320,20 +385,42 @@ export class ToolExecutionComponent extends MessageShell {
 					const imageData = converted?.data ?? img.data;
 					const imageMimeType = converted?.mimeType ?? img.mimeType;
 					if (caps.images === "kitty" && imageMimeType !== "image/png") continue;
-
-					const spacer = new Spacer(1);
-					this.addChild(spacer);
-					this.imageSpacers.push(spacer);
-					const imageComponent = new Image(
-						imageData,
-						imageMimeType,
-						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{ maxWidthCells: this.imageWidthCells },
-					);
-					this.imageComponents.push(imageComponent);
-					this.addChild(imageComponent);
+					desired.push({
+						key: `${imageMimeType}|${this.imageWidthCells}|${imageData}`,
+						data: imageData,
+						mimeType: imageMimeType,
+					});
 				}
 			}
+		}
+
+		const keysUnchanged =
+			desired.length === this.imageKeys.length && desired.every((d, idx) => d.key === this.imageKeys[idx]);
+
+		if (!keysUnchanged) {
+			for (const img of this.imageComponents) {
+				this.removeChild(img);
+			}
+			this.imageComponents = [];
+			for (const spacer of this.imageSpacers) {
+				this.removeChild(spacer);
+			}
+			this.imageSpacers = [];
+
+			for (const d of desired) {
+				const spacer = new Spacer(1);
+				this.addChild(spacer);
+				this.imageSpacers.push(spacer);
+				const imageComponent = new Image(
+					d.data,
+					d.mimeType,
+					{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
+					{ maxWidthCells: this.imageWidthCells },
+				);
+				this.imageComponents.push(imageComponent);
+				this.addChild(imageComponent);
+			}
+			this.imageKeys = desired.map((d) => d.key);
 		}
 
 		if (this.hasRendererDefinition() && !hasContent && this.imageComponents.length === 0) {
@@ -347,11 +434,19 @@ export class ToolExecutionComponent extends MessageShell {
 
 	private formatToolExecution(): string {
 		let text = theme.fg("toolTitle", theme.bold(this.toolName));
-		const content = JSON.stringify(this.args, null, 2);
-		if (content) {
-			text += `\n\n${content}`;
+		// Collapsed: a one-line arg summary. Expanded: the full pretty JSON.
+		if (this.expanded) {
+			const content = JSON.stringify(this.args, null, 2);
+			if (content && content !== "{}" && content !== "null") {
+				text += `\n\n${content}`;
+			}
+		} else {
+			const summary = summarizeArgsOneLine(this.args);
+			if (summary) {
+				text += ` ${theme.fg("toolOutput", summary)}`;
+			}
 		}
-		const output = this.getTextOutput();
+		const output = this.buildCappedOutput(this.getTextOutput());
 		if (output) {
 			text += `\n${output}`;
 		}

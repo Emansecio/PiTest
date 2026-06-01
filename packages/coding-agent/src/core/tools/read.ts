@@ -94,6 +94,34 @@ function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme, cwd?: st
 	return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}${formatReadLineRange(args, theme)}`;
 }
 
+/**
+ * Sniff a buffer to decide whether it is binary (and thus should not be dumped
+ * as mojibake). Heuristic mirrors what `git` and `file(1)` do:
+ *  - A NUL byte (0x00) in the first 8KB is a strong binary signal — no valid
+ *    UTF-8 text file contains lone NULs.
+ *  - Otherwise, decode and check the ratio of U+FFFD replacement chars; a high
+ *    ratio means the bytes are not valid UTF-8 (e.g. a latin-1 or compressed
+ *    blob the decode mangled).
+ */
+const BINARY_SNIFF_BYTES = 8 * 1024;
+const REPLACEMENT_CHAR_RATIO_THRESHOLD = 0.1;
+
+function looksBinary(buffer: Buffer, decoded: string): boolean {
+	const sniffLen = Math.min(buffer.length, BINARY_SNIFF_BYTES);
+	for (let i = 0; i < sniffLen; i++) {
+		if (buffer[i] === 0) return true;
+	}
+	if (decoded.length === 0) return false;
+	let replacements = 0;
+	// U+FFFD is the decode's "this byte was not valid UTF-8" marker. Counting
+	// only the prefix keeps this O(sniff) for huge files.
+	const scanLen = Math.min(decoded.length, BINARY_SNIFF_BYTES);
+	for (let i = 0; i < scanLen; i++) {
+		if (decoded.charCodeAt(i) === 0xfffd) replacements++;
+	}
+	return replacements / scanLen > REPLACEMENT_CHAR_RATIO_THRESHOLD;
+}
+
 function trimTrailingEmptyLines(lines: string[]): string[] {
 	let end = lines.length;
 	while (end > 0 && lines[end - 1] === "") {
@@ -220,7 +248,12 @@ function formatReadResult(
 	const truncation = result.details?.truncation;
 	if (truncation?.truncated) {
 		if (truncation.firstLineExceedsLimit) {
-			text += `\n${theme.fg("warning", `[First line exceeds ${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit]`)}`;
+			// Mirror the read-path recovery hint (line ~401): tell the model how to
+			// fetch the oversized line via bash instead of dead-ending it.
+			const startLine = args?.offset ?? 1;
+			const limitLabel = formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES);
+			const hintPath = rawPath ? ` ${rawPath}` : "";
+			text += `\n${theme.fg("warning", `[Line ${startLine} exceeds ${limitLabel} limit. Use bash: sed -n '${startLine}p'${hintPath} | head -c ${truncation.maxBytes ?? DEFAULT_MAX_BYTES}]`)}`;
 		} else if (truncation.truncatedBy === "lines") {
 			text += `\n${theme.fg("warning", `[Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines (${truncation.maxLines ?? DEFAULT_MAX_LINES} line limit)]`)}`;
 		} else {
@@ -346,6 +379,18 @@ Common mistakes to avoid:
 								const buffer = await ops.readFile(absolutePath);
 								const textContent = buffer.toString("utf-8");
 
+								// Binary sniff: a non-image file with NUL bytes or mostly-invalid
+								// UTF-8 is not displayable as text. Returning the mojibake wastes
+								// context and tells the model nothing; instead point it at bash.
+								if (looksBinary(buffer, textContent)) {
+									const note = `[Binary file: ${basename(absolutePath)}, ${formatSize(buffer.length)} (${buffer.length} bytes). Not displayable as text. Use \`bash\` for hex/metadata (e.g. xxd, file).]`;
+									content = [{ type: "text", text: note }];
+									if (aborted) return;
+									signal?.removeEventListener("abort", onAbort);
+									resolve({ content, details: undefined });
+									return;
+								}
+
 								// Jupyter notebooks: parse cells[] and render as flat text. Offset/limit
 								// address CELLS (not lines) so a 200-cell notebook pages like a file.
 								// Falls back to plain-text rendering on parse failure rather than blowing
@@ -430,7 +475,7 @@ Common mistakes to avoid:
 									if (embedHashlineAnchorsMode === "interleave") {
 										outputText = interleaveAnchorsIntoLines(outputText);
 									} else {
-										outputText += `\n\n<anchors>\n${formatAnchorsForRead(textContent)}\n</anchors>`;
+										outputText += `\n\n<anchors>\n${formatAnchorsForRead(textContent, { lines: allLines })}\n</anchors>`;
 									}
 								}
 								content = [{ type: "text", text: outputText }];

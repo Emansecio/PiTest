@@ -30,23 +30,16 @@ async function runCli(args: string[]): Promise<{ stdout: string; stderr: string;
 	mkdirSync(agentDir, { recursive: true });
 	mkdirSync(projectConfigDir, { recursive: true });
 
-	const fakeNpmPath = join(tempRoot, "fake-npm.mjs");
-	writeFileSync(
-		fakeNpmPath,
-		[
-			'console.log("changed 1 package in 471ms");',
-			'console.log("found 0 vulnerabilities");',
-			"process.exit(0);",
-		].join("\n"),
-		"utf-8",
-	);
-
+	// Configure a package source so the startup resource-resolution path runs.
+	// In local-only mode npm: sources are never installed (no network/npm spawn),
+	// but the resolve() path still executes — this guards that it produces no
+	// stray stdout writes. Any startup chatter (help text, diagnostics) must land
+	// on stderr via the output guard, leaving stdout pristine.
 	writeFileSync(
 		join(projectConfigDir, "settings.json"),
 		JSON.stringify(
 			{
 				packages: ["npm:fake-package"],
-				npmCommand: [process.execPath, fakeNpmPath],
 			},
 			null,
 			2,
@@ -81,23 +74,23 @@ async function runCli(args: string[]): Promise<{ stdout: string; stderr: string;
 }
 
 describe("stdout cleanliness in non-interactive modes", () => {
-	it("keeps stdout empty for --mode json --help while routing startup chatter to stderr", async () => {
+	it("keeps stdout empty for --mode json --help while routing help to stderr", async () => {
 		const result = await runCli(["--mode", "json", "--help"]);
 
 		expect(result.code).toBe(0);
 		expect(result.stdout).toBe("");
-		expect(result.stderr).toContain("changed 1 package in 471ms");
-		expect(result.stderr).toContain("found 0 vulnerabilities");
+		// Help text is emitted via console.log, which the output guard redirects to
+		// stderr in non-interactive modes. stdout must stay clean for JSON consumers.
 		expect(result.stderr).toContain("Usage:");
 	});
 
-	it("keeps stdout empty for -p --help while routing startup chatter to stderr", async () => {
+	it("keeps stdout empty for -p --help while routing help to stderr", async () => {
 		const result = await runCli(["-p", "--help"]);
 
 		expect(result.code).toBe(0);
 		expect(result.stdout).toBe("");
-		expect(result.stderr).toContain("changed 1 package in 471ms");
-		expect(result.stderr).toContain("found 0 vulnerabilities");
+		// Help text is emitted via console.log, which the output guard redirects to
+		// stderr in print mode. stdout must stay clean for parsers piping output.
 		expect(result.stderr).toContain("Usage:");
 	});
 });

@@ -99,6 +99,7 @@ import {
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
+import { isOfflineMode } from "../../utils/env-flags.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
@@ -744,8 +745,8 @@ export class InteractiveMode {
 
 		const warningSettings = this.session.settingsManager.getWarnings();
 
-		// Start version check asynchronously (suppressed when warnings.newVersion === false).
-		if (warningSettings.newVersion !== false) {
+		// Start version check asynchronously (off by default; opt in with warnings.newVersion === true).
+		if (warningSettings.newVersion === true) {
 			checkForNewPiVersion(this.version).then((newRelease) => {
 				if (newRelease) {
 					this.showNewVersionNotification(newRelease);
@@ -753,8 +754,8 @@ export class InteractiveMode {
 			});
 		}
 
-		// Start package update check asynchronously (suppressed when warnings.packageUpdates === false).
-		if (warningSettings.packageUpdates !== false) {
+		// Start package update check asynchronously (off by default; opt in with warnings.packageUpdates === true).
+		if (warningSettings.packageUpdates === true) {
 			this.checkForPackageUpdates().then((updates) => {
 				if (updates.length > 0) {
 					this.showPackageUpdateNotification(updates);
@@ -821,7 +822,7 @@ export class InteractiveMode {
 	}
 
 	private async checkForPackageUpdates(): Promise<string[]> {
-		if (process.env.PIT_OFFLINE) {
+		if (isOfflineMode()) {
 			return [];
 		}
 
@@ -917,7 +918,7 @@ export class InteractiveMode {
 	}
 
 	private reportInstallTelemetry(version: string): void {
-		if (process.env.PIT_OFFLINE) {
+		if (isOfflineMode()) {
 			return;
 		}
 
@@ -2095,7 +2096,7 @@ export class InteractiveMode {
 
 		this.defaultEditor.onChange = (text: string) => {
 			const wasBashMode = this.isBashMode;
-			this.isBashMode = text.trimStart().startsWith("!");
+			this.isBashMode = /^\s*!/.test(text);
 			if (wasBashMode !== this.isBashMode) {
 				this.updateEditorBorderColor();
 			}
@@ -4528,9 +4529,6 @@ export class InteractiveMode {
 									manualCodeReject = undefined;
 								}
 							});
-					} else if (providerId === "github-copilot") {
-						// GitHub Copilot polls after onAuth
-						dialog.showWaiting("Waiting for browser authentication...");
 					}
 					// For Anthropic: onPrompt is called immediately after
 				},

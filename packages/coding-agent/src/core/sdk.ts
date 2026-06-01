@@ -476,7 +476,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		ttsrMatcher: options.ttsrMatcher,
 		toolRewriteRegistry: createDefaultToolRewriteRegistry(),
 		toolErrorHintRegistry: createDefaultToolErrorHintRegistry({
-			learnedErrors: loadLearnedErrorsSafe(),
+			// Lazy: defer the synchronous learned-error disk scan until the
+			// registry is first applied on a tool error, not at session
+			// creation. Static hint rules remain available from turn 1.
+			learnedErrorsProvider: loadLearnedErrorsSafe,
 		}),
 	});
 

@@ -1,8 +1,6 @@
-import { EventEmitter } from "node:events";
-import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultPackageManager, type ProgressEvent, type ResolvedResource } from "../src/core/package-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -13,16 +11,6 @@ function normalizeForMatch(value: string): string {
 
 function pathEndsWith(actualPath: string, suffix: string): boolean {
 	return normalizeForMatch(actualPath).endsWith(normalizeForMatch(suffix));
-}
-
-class MockSpawnedProcess extends EventEmitter {
-	stdout = new PassThrough();
-	stderr = new PassThrough();
-
-	kill(): boolean {
-		this.emit("close", null, "SIGTERM");
-		return true;
-	}
 }
 
 // Helper to check if a resource is enabled
@@ -633,7 +621,10 @@ Content`,
 	});
 
 	describe("npmCommand", () => {
-		it("should use npmCommand argv for npm installs", async () => {
+		// Local-only mode: external npm:/git: package management was removed. install()
+		// for remote sources now rejects with the "package management disabled" error and
+		// never spawns a package-manager command, regardless of npmCommand configuration.
+		it("should reject npm installs in local-only mode without spawning a command", async () => {
 			settingsManager = SettingsManager.inMemory({
 				npmCommand: ["mise", "exec", "node@20", "--", "npm"],
 			});
@@ -643,18 +634,16 @@ Content`,
 				settingsManager,
 			});
 
-			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
-			await packageManager.install("npm:@scope/pkg");
-
-			expect(runCommandSpy).toHaveBeenCalledWith(
-				"mise",
-				["exec", "node@20", "--", "npm", "install", "@scope/pkg", "--prefix", join(agentDir, "npm")],
-				undefined,
+			await expect(packageManager.install("npm:@scope/pkg")).rejects.toThrow(
+				/Package management is disabled \(local-only mode\)/,
 			);
+
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
-		it("should use bun --cwd for npm package installs", async () => {
+		it("should reject bun-configured npm installs in local-only mode without spawning a command", async () => {
 			settingsManager = SettingsManager.inMemory({
 				npmCommand: ["mise", "exec", "bun@1", "--", "bun"],
 			});
@@ -664,36 +653,31 @@ Content`,
 				settingsManager,
 			});
 
-			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
-			await packageManager.install("npm:@scope/pkg");
-
-			expect(runCommandSpy).toHaveBeenCalledWith(
-				"mise",
-				["exec", "bun@1", "--", "bun", "install", "@scope/pkg", "--cwd", join(agentDir, "npm")],
-				undefined,
+			await expect(packageManager.install("npm:@scope/pkg")).rejects.toThrow(
+				/Package management is disabled \(local-only mode\)/,
 			);
+
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
-		it("should install git package dependencies with --omit=dev", async () => {
+		it("should reject git package installs in local-only mode without spawning a command", async () => {
 			const source = "git:github.com/user/repo";
 			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
-			const runCommandSpy = vi
-				.spyOn(packageManager as any, "runCommand")
-				.mockImplementation(async (...callArgs: unknown[]) => {
-					const [command, args] = callArgs as [string, string[]];
-					if (command === "git" && args[0] === "clone") {
-						mkdirSync(targetDir, { recursive: true });
-						writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
-					}
-				});
 
-			await packageManager.install(source);
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			await expect(packageManager.install(source)).rejects.toThrow(
+				/Package management is disabled \(local-only mode\)/,
+			);
+
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
+			// Nothing should have been cloned to the install target.
+			expect(existsSync(targetDir)).toBe(false);
 		});
 
-		it("should use plain install for git package dependencies when npmCommand is configured", async () => {
+		it("should reject git package installs even when npmCommand is configured", async () => {
 			settingsManager = SettingsManager.inMemory({
 				npmCommand: ["pnpm"],
 			});
@@ -705,49 +689,33 @@ Content`,
 
 			const source = "git:github.com/user/repo";
 			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
-			const runCommandSpy = vi
-				.spyOn(packageManager as any, "runCommand")
-				.mockImplementation(async (...callArgs: unknown[]) => {
-					const [command, args] = callArgs as [string, string[]];
-					if (command === "git" && args[0] === "clone") {
-						mkdirSync(targetDir, { recursive: true });
-						writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
-					}
-				});
 
-			await packageManager.install(source);
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
-			expect(runCommandSpy).toHaveBeenCalledWith("pnpm", ["install"], { cwd: targetDir });
+			await expect(packageManager.install(source)).rejects.toThrow(
+				/Package management is disabled \(local-only mode\)/,
+			);
+
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
+			expect(existsSync(targetDir)).toBe(false);
 		});
 
-		it("should update git package dependencies with --omit=dev", async () => {
+		it("should treat update of a configured git package as a no-op in local-only mode", async () => {
 			const source = "git:github.com/user/repo";
 			const targetDir = join(tempDir, ".pit", "git", "github.com", "user", "repo");
 			mkdirSync(targetDir, { recursive: true });
 			writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
 			settingsManager.setProjectPackages([source]);
 
-			vi.spyOn(packageManager as any, "runCommandCapture").mockImplementation(async (...callArgs: unknown[]) => {
-				const [_command, args] = callArgs as [string, string[]];
-				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "@{upstream}") {
-					return "origin/main";
-				}
-				if (args[0] === "rev-parse" && args[1] === "@{upstream}") {
-					return "remote-head";
-				}
-				if (args[0] === "rev-parse" && args[1] === "HEAD") {
-					return "local-head";
-				}
-				throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
-			});
-			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
-			await packageManager.update(source);
+			await expect(packageManager.update(source)).resolves.toBeUndefined();
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev"], { cwd: targetDir });
+			// Local-only mode never re-clones, fetches, or runs install for git packages.
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
-		it("should use plain install through npmCommand argv when updating git package dependencies", async () => {
+		it("should treat update of a git package as a no-op even when npmCommand argv is configured", async () => {
 			settingsManager = SettingsManager.inMemory({
 				npmCommand: ["mise", "exec", "node@20", "--", "pnpm"],
 			});
@@ -763,26 +731,11 @@ Content`,
 			writeFileSync(join(targetDir, "package.json"), JSON.stringify({ name: "repo", version: "1.0.0" }));
 			settingsManager.setProjectPackages([source]);
 
-			vi.spyOn(packageManager as any, "runCommandCapture").mockImplementation(async (...callArgs: unknown[]) => {
-				const [_command, args] = callArgs as [string, string[]];
-				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "@{upstream}") {
-					return "origin/main";
-				}
-				if (args[0] === "rev-parse" && args[1] === "@{upstream}") {
-					return "remote-head";
-				}
-				if (args[0] === "rev-parse" && args[1] === "HEAD") {
-					return "local-head";
-				}
-				throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
-			});
-			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
-			await packageManager.update(source);
+			await expect(packageManager.update(source)).resolves.toBeUndefined();
 
-			expect(runCommandSpy).toHaveBeenCalledWith("mise", ["exec", "node@20", "--", "pnpm", "install"], {
-				cwd: targetDir,
-			});
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
 		it("should use npmCommand argv for npm root lookup and invalidate cached root when npmCommand changes", () => {
@@ -824,7 +777,7 @@ Content`,
 			expect(runCommandSyncSpy).toHaveBeenNthCalledWith(2, "mise", ["exec", "node@22", "--", "npm", "root", "-g"]);
 		});
 
-		it("should install user npm packages into the pi-managed npm root", async () => {
+		it("should load already-installed user npm packages from the pi-managed npm root without installing", async () => {
 			settingsManager = SettingsManager.inMemory({
 				npmCommand: ["pnpm"],
 				packages: ["npm:pnpm-pkg"],
@@ -835,26 +788,15 @@ Content`,
 				settingsManager,
 			});
 
+			// Local-only mode never installs. Pre-create the package on disk in the
+			// managed root so resolve() should load its resources directly.
 			const packagePath = join(agentDir, "npm", "node_modules", "pnpm-pkg");
-			vi.spyOn(packageManager as any, "runCommandSync").mockImplementation(() => {
-				throw new Error("legacy lookup unavailable");
-			});
-			const runCommandSpy = vi
-				.spyOn(packageManager as any, "runCommand")
-				.mockImplementation(async (...callArgs: unknown[]) => {
-					const [command, args] = callArgs as [string, string[]];
-					expect(command).toBe("pnpm");
-					expect(args).toEqual([
-						"install",
-						"pnpm-pkg",
-						"--prefix",
-						join(agentDir, "npm"),
-						"--config.strict-dep-builds=false",
-					]);
-					mkdirSync(join(packagePath, "extensions"), { recursive: true });
-					writeFileSync(join(packagePath, "package.json"), JSON.stringify({ name: "pnpm-pkg", version: "1.0.0" }));
-					writeFileSync(join(packagePath, "extensions", "index.ts"), "export default function() {};");
-				});
+			mkdirSync(join(packagePath, "extensions"), { recursive: true });
+			writeFileSync(join(packagePath, "package.json"), JSON.stringify({ name: "pnpm-pkg", version: "1.0.0" }));
+			writeFileSync(join(packagePath, "extensions", "index.ts"), "export default function() {};");
+
+			// No command (sync or otherwise) should ever be spawned to install.
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
 			const first = await packageManager.resolve();
 			const second = await packageManager.resolve();
@@ -865,7 +807,7 @@ Content`,
 			expect(
 				second.extensions.some((r) => r.path === join(packagePath, "extensions", "index.ts") && r.enabled),
 			).toBe(true);
-			expect(runCommandSpy).toHaveBeenCalledTimes(1);
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 			expect(packageManager.getInstalledPath("npm:pnpm-pkg", "user")).toBe(packagePath);
 		});
 
@@ -901,14 +843,12 @@ Content`,
 				}
 				throw new Error(`unexpected args ${args.join(" ")}`);
 			});
-			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
 
 			const result = await packageManager.resolve();
 
 			expect(
 				result.extensions.some((r) => r.path === join(packagePath, "extensions", "index.ts") && r.enabled),
 			).toBe(true);
-			expect(runCommandSpy).not.toHaveBeenCalled();
 			expect(packageManager.getInstalledPath("npm:pnpm-pkg", "user")).toBe(packagePath);
 		});
 
@@ -955,46 +895,30 @@ Content`,
 	});
 
 	describe("source parsing", () => {
-		it("should emit progress events on install attempt", async () => {
+		it("should reject npm install attempts in local-only mode without emitting progress", async () => {
 			const events: ProgressEvent[] = [];
 			packageManager.setProgressCallback((event) => events.push(event));
 
-			// Use public install method which emits progress events
-			try {
-				await packageManager.install("npm:nonexistent-package@1.0.0");
-			} catch {
-				// Expected to fail - package doesn't exist
-			}
+			// Local-only mode: npm installs are disabled and reject immediately.
+			await expect(packageManager.install("npm:nonexistent-package@1.0.0")).rejects.toThrow(
+				/Package management is disabled \(local-only mode\)/,
+			);
 
-			// Should have emitted start event before failure
-			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
-			// Should have emitted error event
-			expect(events.some((e) => e.type === "error")).toBe(true);
+			// Progress events are no longer emitted by the (disabled) install path.
+			expect(events).toEqual([]);
 		});
 
-		it("should recognize github URLs without git: prefix", async () => {
-			const events: ProgressEvent[] = [];
-			packageManager.setProgressCallback((event) => events.push(event));
-			const previousGitTerminalPrompt = process.env.GIT_TERMINAL_PROMPT;
-			process.env.GIT_TERMINAL_PROMPT = "0";
+		it("should recognize github URLs without git: prefix as git sources", async () => {
+			// A bare https GitHub URL must be parsed as a git source (so install routes
+			// to the disabled-package-management path), not fall through to "local" or
+			// some unsupported-source error.
+			expect((packageManager as any).parseSource("https://github.com/nonexistent/repo").type).toBe("git");
 
-			try {
-				// This should be parsed as a git source, not throw "unsupported"
-				try {
-					await packageManager.install("https://github.com/nonexistent/repo");
-				} catch {
-					// Expected to fail - repo doesn't exist
-				}
-			} finally {
-				if (previousGitTerminalPrompt === undefined) {
-					delete process.env.GIT_TERMINAL_PROMPT;
-				} else {
-					process.env.GIT_TERMINAL_PROMPT = previousGitTerminalPrompt;
-				}
-			}
-
-			// Should have attempted clone, not thrown unsupported error
-			expect(events.some((e) => e.type === "start" && e.action === "install")).toBe(true);
+			// And since git package management is disabled in local-only mode, attempting
+			// to install it rejects with the disabled error rather than "unsupported".
+			await expect(packageManager.install("https://github.com/nonexistent/repo")).rejects.toThrow(
+				/Package management is disabled \(local-only mode\)/,
+			);
 		});
 
 		it("should parse package source types from docs examples", () => {
@@ -1842,217 +1766,111 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 	});
 
 	describe("offline mode and network timeouts", () => {
-		it("should update project npm packages using @latest when newer version is available", async () => {
+		// Local-only mode: external package management was removed. update() is an
+		// unconditional no-op (no version lookups, no installs) regardless of arguments,
+		// and checkForAvailableUpdates() always reports an empty list. The tests below
+		// assert these contracts and that no command is ever spawned.
+		it("should treat project npm package update as a no-op without spawning a command", async () => {
 			const installedPath = join(tempDir, ".pit", "npm", "node_modules", "example");
 			mkdirSync(installedPath, { recursive: true });
 			writeFileSync(join(installedPath, "package.json"), JSON.stringify({ name: "example", version: "1.0.0" }));
 			settingsManager.setProjectPackages(["npm:example"]);
 
-			const runCommandCaptureSpy = vi.spyOn(packageManager as any, "runCommandCapture").mockResolvedValue('"1.2.3"');
-			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
-			await packageManager.update("npm:example");
+			await expect(packageManager.update("npm:example")).resolves.toBeUndefined();
 
-			expect(runCommandCaptureSpy).toHaveBeenCalledWith(
-				"npm",
-				["view", "example", "version", "--json"],
-				expect.objectContaining({ cwd: tempDir, timeoutMs: expect.any(Number) }),
-			);
-			expect(runCommandSpy).toHaveBeenCalledWith(
-				"npm",
-				["install", "example@latest", "--prefix", join(tempDir, ".pit", "npm")],
-				undefined,
-			);
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
+			// The installed package version on disk is left untouched.
+			expect(packageManager.getInstalledPath("npm:example", "project")).toBe(installedPath);
 		});
 
-		it("should skip project npm update when installed version matches latest", async () => {
+		it("should not install during update even when an unknown source string is given", async () => {
 			const installedPath = join(tempDir, ".pit", "npm", "node_modules", "example");
 			mkdirSync(installedPath, { recursive: true });
 			writeFileSync(join(installedPath, "package.json"), JSON.stringify({ name: "example", version: "1.2.3" }));
 			settingsManager.setProjectPackages(["npm:example"]);
 
-			const runCommandCaptureSpy = vi.spyOn(packageManager as any, "runCommandCapture").mockResolvedValue('"1.2.3"');
-			const runCommandSpy = vi.spyOn(packageManager as any, "runCommand").mockResolvedValue(undefined);
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
-			await packageManager.update("npm:example");
+			// Even a bare (prefix-less) source no longer triggers a "did you mean" error
+			// because update() short-circuits before any source matching.
+			await expect(packageManager.update("example")).resolves.toBeUndefined();
 
-			expect(runCommandCaptureSpy).toHaveBeenCalledWith(
-				"npm",
-				["view", "example", "version", "--json"],
-				expect.objectContaining({ cwd: tempDir, timeoutMs: expect.any(Number) }),
-			);
-			expect(runCommandSpy).not.toHaveBeenCalled();
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
-		it("should migrate legacy user npm installs into the managed npm root during update", async () => {
+		it("should not migrate legacy user npm installs during update (no-op)", async () => {
 			const legacyRoot = join(tempDir, "legacy-global", "node_modules");
 			const legacyPath = join(legacyRoot, "legacy-pkg");
-			const managedPath = join(agentDir, "npm", "node_modules", "legacy-pkg");
 			mkdirSync(legacyPath, { recursive: true });
 			writeFileSync(join(legacyPath, "package.json"), JSON.stringify({ name: "legacy-pkg", version: "1.0.0" }));
 			settingsManager.setPackages(["npm:legacy-pkg"]);
 
 			vi.spyOn(packageManager as any, "getGlobalNpmRoot").mockReturnValue(legacyRoot);
-			const runCommandCaptureSpy = vi.spyOn(packageManager as any, "runCommandCapture").mockResolvedValue('"1.0.0"');
-			const runCommandSpy = vi
-				.spyOn(packageManager as any, "runCommand")
-				.mockImplementation(async (...callArgs: unknown[]) => {
-					const [command, args] = callArgs as [string, string[]];
-					expect(command).toBe("npm");
-					expect(args).toEqual(["install", "legacy-pkg@latest", "--prefix", join(agentDir, "npm")]);
-					mkdirSync(managedPath, { recursive: true });
-					writeFileSync(
-						join(managedPath, "package.json"),
-						JSON.stringify({ name: "legacy-pkg", version: "1.0.0" }),
-					);
-				});
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
 			expect(packageManager.getInstalledPath("npm:legacy-pkg", "user")).toBe(legacyPath);
 
-			await packageManager.update("npm:legacy-pkg");
+			await expect(packageManager.update("npm:legacy-pkg")).resolves.toBeUndefined();
 
-			expect(runCommandCaptureSpy).not.toHaveBeenCalled();
-			expect(runCommandSpy).toHaveBeenCalledTimes(1);
-			expect(packageManager.getInstalledPath("npm:legacy-pkg", "user")).toBe(managedPath);
+			// Local-only mode never installs into the managed root, so the legacy path stays.
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
+			expect(packageManager.getInstalledPath("npm:legacy-pkg", "user")).toBe(legacyPath);
 		});
 
-		it("should batch npm updates per scope and run git updates in parallel while skipping pinned and current packages", async () => {
+		it("should treat update() with no source as a no-op across all configured packages", async () => {
 			const userOldPath = join(agentDir, "npm", "node_modules", "user-old");
-			const userCurrentPath = join(agentDir, "npm", "node_modules", "user-current");
-			const userUnknownPath = join(agentDir, "npm", "node_modules", "user-unknown");
 			const projectOldPath = join(tempDir, ".pit", "npm", "node_modules", "project-old");
-			const projectCurrentPath = join(tempDir, ".pit", "npm", "node_modules", "project-current");
-			const installPaths = [userOldPath, userCurrentPath, userUnknownPath, projectOldPath, projectCurrentPath];
-			for (const installPath of installPaths) {
+			for (const installPath of [userOldPath, projectOldPath]) {
 				mkdirSync(installPath, { recursive: true });
 			}
 			writeFileSync(join(userOldPath, "package.json"), JSON.stringify({ name: "user-old", version: "1.0.0" }));
-			writeFileSync(
-				join(userCurrentPath, "package.json"),
-				JSON.stringify({ name: "user-current", version: "1.0.0" }),
-			);
-			writeFileSync(
-				join(userUnknownPath, "package.json"),
-				JSON.stringify({ name: "user-unknown", version: "1.0.0" }),
-			);
 			writeFileSync(join(projectOldPath, "package.json"), JSON.stringify({ name: "project-old", version: "1.0.0" }));
-			writeFileSync(
-				join(projectCurrentPath, "package.json"),
-				JSON.stringify({ name: "project-current", version: "1.0.0" }),
-			);
 
 			settingsManager.setPackages([
 				"npm:user-old",
-				"npm:user-current",
-				"npm:user-unknown",
 				"npm:user-pinned@1.0.0",
 				"git:github.com/example/user-repo-a",
-				"git:github.com/example/user-repo-b",
 				"git:github.com/example/user-repo-pinned@v1",
 			]);
 			settingsManager.setProjectPackages([
 				"npm:project-old",
-				"npm:project-current",
 				"npm:project-missing",
 				"git:github.com/example/project-repo-a",
 			]);
 
-			const runCommandCaptureSpy = vi
-				.spyOn(packageManager as any, "runCommandCapture")
-				.mockImplementation(async (...callArgs: unknown[]) => {
-					const [_command, args] = callArgs as [string, string[]];
-					if (args[0] !== "view") {
-						throw new Error(`Unexpected runCommandCapture args: ${args.join(" ")}`);
-					}
-					switch (args[1]) {
-						case "user-old":
-						case "project-old":
-							return '"2.0.0"';
-						case "user-current":
-						case "project-current":
-							return '"1.0.0"';
-						case "user-unknown":
-							throw new Error("registry unavailable");
-						default:
-							throw new Error(`Unexpected package lookup: ${args[1]}`);
-					}
-				});
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
-			let activeNpmUpdates = 0;
-			let maxConcurrentNpmUpdates = 0;
-			const runCommandSpy = vi
-				.spyOn(packageManager as any, "runCommand")
-				.mockImplementation(async (...callArgs: unknown[]) => {
-					const [command, args] = callArgs as [string, string[]];
-					if (command !== "npm") {
-						throw new Error(`Unexpected runCommand call: ${command} ${args.join(" ")}`);
-					}
-					activeNpmUpdates += 1;
-					maxConcurrentNpmUpdates = Math.max(maxConcurrentNpmUpdates, activeNpmUpdates);
-					await new Promise((resolve) => setTimeout(resolve, 20));
-					activeNpmUpdates -= 1;
-				});
+			await expect(packageManager.update()).resolves.toBeUndefined();
 
-			let activeGitUpdates = 0;
-			let maxConcurrentGitUpdates = 0;
-			const updateGitSpy = vi.spyOn(packageManager as any, "updateGit").mockImplementation(async () => {
-				activeGitUpdates += 1;
-				maxConcurrentGitUpdates = Math.max(maxConcurrentGitUpdates, activeGitUpdates);
-				await new Promise((resolve) => setTimeout(resolve, 20));
-				activeGitUpdates -= 1;
-			});
-
-			await packageManager.update();
-
-			expect(runCommandCaptureSpy).toHaveBeenCalledTimes(5);
-			expect(runCommandSpy).toHaveBeenCalledTimes(2);
-			expect(runCommandSpy).toHaveBeenNthCalledWith(
-				1,
-				"npm",
-				["install", "user-old@latest", "user-unknown@latest", "--prefix", join(agentDir, "npm")],
-				undefined,
-			);
-			expect(runCommandSpy).toHaveBeenNthCalledWith(
-				2,
-				"npm",
-				["install", "project-old@latest", "project-missing@latest", "--prefix", join(tempDir, ".pit", "npm")],
-				undefined,
-			);
-			expect(updateGitSpy).toHaveBeenCalledTimes(3);
-			expect(maxConcurrentNpmUpdates).toBeGreaterThan(1);
-			expect(maxConcurrentGitUpdates).toBeGreaterThan(1);
+			// No version checks, no npm installs, no git updates: a pure no-op.
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
-		it("should suggest npm source prefixes for update lookups", async () => {
-			settingsManager.setProjectPackages(["npm:example"]);
-
-			await expect(packageManager.update("example")).rejects.toThrow(
-				"No matching package found for example. Did you mean npm:example?",
-			);
-		});
-
-		it("should suggest git source prefixes for update lookups", async () => {
+		it("should treat update of a git source as a no-op without a 'did you mean' error", async () => {
 			settingsManager.setProjectPackages(["git:github.com/example/repo"]);
 
-			await expect(packageManager.update("github.com/example/repo")).rejects.toThrow(
-				"No matching package found for github.com/example/repo. Did you mean git:github.com/example/repo?",
-			);
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
+
+			await expect(packageManager.update("github.com/example/repo")).resolves.toBeUndefined();
+
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
-		it("should skip installing missing package sources when offline", async () => {
-			process.env.PIT_OFFLINE = "1";
+		it("should not install missing package sources during resolve", async () => {
 			settingsManager.setProjectPackages(["npm:missing-package", "git:github.com/example/missing-repo"]);
 
-			const installParsedSourceSpy = vi.spyOn(packageManager as any, "installParsedSource");
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
 			const result = await packageManager.resolve();
 			const allResources = [...result.extensions, ...result.skills, ...result.prompts, ...result.themes];
+			// Missing remote packages are skipped, never installed, and contribute no resources.
 			expect(allResources.some((r) => r.metadata.origin === "package")).toBe(false);
-			expect(installParsedSourceSpy).not.toHaveBeenCalled();
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
-		it("should skip refreshing temporary git sources when offline", async () => {
-			process.env.PIT_OFFLINE = "1";
+		it("should load already-installed temporary git sources without refreshing them", async () => {
 			const gitSource = "git:github.com/example/repo";
 			const parsedGitSource = (packageManager as any).parseSource(gitSource);
 			const installedPath = (packageManager as any).getGitInstallPath(parsedGitSource, "temporary") as string;
@@ -2060,11 +1878,12 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			mkdirSync(join(installedPath, "extensions"), { recursive: true });
 			writeFileSync(join(installedPath, "extensions", "index.ts"), "export default function() {};");
 
-			const refreshTemporaryGitSourceSpy = vi.spyOn(packageManager as any, "refreshTemporaryGitSource");
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
 			const result = await packageManager.resolveExtensionSources([gitSource], { temporary: true });
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "extensions/index.ts") && r.enabled)).toBe(true);
-			expect(refreshTemporaryGitSourceSpy).not.toHaveBeenCalled();
+			// Local-only mode never re-clones or fetches the temporary git source.
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
 		it("should not run npm view during resolve for installed unpinned packages", async () => {
@@ -2074,56 +1893,43 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			writeFileSync(join(installedPath, "extensions", "index.ts"), "export default function() {};");
 			settingsManager.setProjectPackages(["npm:example"]);
 
-			const runCommandCaptureSpy = vi.spyOn(packageManager as any, "runCommandCapture");
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
 			const result = await packageManager.resolve();
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "extensions/index.ts") && r.enabled)).toBe(true);
-			expect(runCommandCaptureSpy).not.toHaveBeenCalled();
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
-		it("should reinstall pinned npm packages when installed version does not match", async () => {
+		it("should not reinstall pinned npm packages whose installed version does not match", async () => {
 			const installedPath = join(tempDir, ".pit", "npm", "node_modules", "example");
-			mkdirSync(installedPath, { recursive: true });
+			mkdirSync(join(installedPath, "extensions"), { recursive: true });
 			writeFileSync(join(installedPath, "package.json"), JSON.stringify({ name: "example", version: "1.0.0" }));
+			writeFileSync(join(installedPath, "extensions", "index.ts"), "export default function() {};");
 			settingsManager.setProjectPackages(["npm:example@2.0.0"]);
 
-			const installParsedSourceSpy = vi
-				.spyOn(packageManager as any, "installParsedSource")
-				.mockResolvedValue(undefined);
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
-			await packageManager.resolve();
-			expect(installParsedSourceSpy).toHaveBeenCalledTimes(1);
+			// Local-only mode loads whatever is already on disk and never reinstalls,
+			// even for a pinned version mismatch.
+			const result = await packageManager.resolve();
+			expect(result.extensions.some((r) => pathEndsWith(r.path, "extensions/index.ts") && r.enabled)).toBe(true);
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
-		it("should not check package updates when offline", async () => {
-			process.env.PIT_OFFLINE = "1";
-			const runCommandCaptureSpy = vi.spyOn(packageManager as any, "runCommandCapture");
-
-			const updates = await packageManager.checkForAvailableUpdates();
-			expect(updates).toEqual([]);
-			expect(runCommandCaptureSpy).not.toHaveBeenCalled();
-		});
-
-		it("should report updates for installed unpinned npm packages", async () => {
+		it("should report no available updates (external package management disabled)", async () => {
 			const installedPath = join(tempDir, ".pit", "npm", "node_modules", "example");
 			mkdirSync(installedPath, { recursive: true });
 			writeFileSync(join(installedPath, "package.json"), JSON.stringify({ name: "example", version: "1.0.0" }));
 			settingsManager.setProjectPackages(["npm:example"]);
 
-			vi.spyOn(packageManager as any, "runCommandCapture").mockResolvedValue('"1.2.3"');
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
 			const updates = await packageManager.checkForAvailableUpdates();
-			expect(updates).toEqual([
-				{
-					source: "npm:example",
-					displayName: "example",
-					type: "npm",
-					scope: "project",
-				},
-			]);
+			expect(updates).toEqual([]);
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 
-		it("should skip pinned packages when checking for updates", async () => {
+		it("should report no updates and never spawn a command when checking pinned and unpinned packages", async () => {
 			const installedNpmPath = join(tempDir, ".pit", "npm", "node_modules", "example");
 			mkdirSync(installedNpmPath, { recursive: true });
 			writeFileSync(join(installedNpmPath, "package.json"), JSON.stringify({ name: "example", version: "1.0.0" }));
@@ -2133,80 +1939,11 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 
 			settingsManager.setProjectPackages(["npm:example@1.0.0", "git:github.com/example/repo@v1"]);
 
-			const runCommandCaptureSpy = vi.spyOn(packageManager as any, "runCommandCapture");
-			const gitUpdateSpy = vi.spyOn(packageManager as any, "gitHasAvailableUpdate");
+			const runCommandSyncSpy = vi.spyOn(packageManager as any, "runCommandSync");
 
 			const updates = await packageManager.checkForAvailableUpdates();
 			expect(updates).toEqual([]);
-			expect(runCommandCaptureSpy).not.toHaveBeenCalled();
-			expect(gitUpdateSpy).not.toHaveBeenCalled();
-		});
-
-		it("should use npm view to fetch latest version", async () => {
-			const runCommandCaptureSpy = vi.spyOn(packageManager as any, "runCommandCapture").mockResolvedValue('"1.2.3"');
-
-			const latest = await (packageManager as any).getLatestNpmVersion("example");
-			expect(latest).toBe("1.2.3");
-			expect(runCommandCaptureSpy).toHaveBeenCalledTimes(1);
-			expect(runCommandCaptureSpy).toHaveBeenCalledWith(
-				"npm",
-				["view", "example", "version", "--json"],
-				expect.objectContaining({ cwd: tempDir, timeoutMs: expect.any(Number) }),
-			);
-		});
-
-		it("should use npmCommand argv for npm update checks", async () => {
-			settingsManager = SettingsManager.inMemory({
-				npmCommand: ["mise", "exec", "node@20", "--", "npm"],
-			});
-			packageManager = new DefaultPackageManager({
-				cwd: tempDir,
-				agentDir,
-				settingsManager,
-			});
-
-			const runCommandCaptureSpy = vi.spyOn(packageManager as any, "runCommandCapture").mockResolvedValue('"1.2.3"');
-
-			const latest = await (packageManager as any).getLatestNpmVersion("@scope/pkg");
-			expect(latest).toBe("1.2.3");
-			expect(runCommandCaptureSpy).toHaveBeenCalledWith(
-				"mise",
-				["exec", "node@20", "--", "npm", "view", "@scope/pkg", "version", "--json"],
-				expect.objectContaining({ cwd: tempDir }),
-			);
-		});
-
-		it("should wait for close before resolving captured stdout", async () => {
-			const managerWithInternals = packageManager as unknown as {
-				spawnCaptureCommand(
-					command: string,
-					args: string[],
-					options?: { cwd?: string; env?: Record<string, string> },
-				): MockSpawnedProcess;
-				runCommandCapture(
-					command: string,
-					args: string[],
-					options?: { cwd?: string; timeoutMs?: number; env?: Record<string, string> },
-				): Promise<string>;
-			};
-			const child = new MockSpawnedProcess();
-			vi.spyOn(managerWithInternals, "spawnCaptureCommand").mockReturnValue(child);
-
-			let settled = false;
-			const capturePromise = managerWithInternals.runCommandCapture("git", ["rev-parse", "HEAD"]).then((value) => {
-				settled = true;
-				return value;
-			});
-
-			child.emit("exit", 0, null);
-			await Promise.resolve();
-			expect(settled).toBe(false);
-
-			child.stdout.write("abc123\n");
-			child.stdout.end();
-			child.emit("close", 0, null);
-
-			await expect(capturePromise).resolves.toBe("abc123");
+			expect(runCommandSyncSpy).not.toHaveBeenCalled();
 		});
 	});
 });

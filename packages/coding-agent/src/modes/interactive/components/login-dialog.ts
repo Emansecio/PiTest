@@ -1,6 +1,6 @@
 import { getOAuthProviders } from "@pit/ai/oauth";
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@pit/tui";
-import { exec } from "child_process";
+import { spawn } from "child_process";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -101,9 +101,25 @@ export class LoginDialogComponent extends Container implements Focusable {
 			this.contentContainer.addChild(new Text(theme.fg("warning", instructions), 1, 0));
 		}
 
-		// Try to open browser
-		const openCmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-		exec(`${openCmd} "${url}"`);
+		// Try to open browser. Validate the URL and spawn without a shell so a
+		// malicious OAuth URL cannot inject shell commands (esp. via cmd.exe on Win32).
+		try {
+			const parsed = new URL(url);
+			if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+				const child =
+					process.platform === "darwin"
+						? spawn("open", [url], { stdio: "ignore", detached: true })
+						: process.platform === "win32"
+							? // `start` is a cmd builtin; empty "" is the window title. URL is a
+								// single argv element (no shell interpolation) and already validated.
+								spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true })
+							: spawn("xdg-open", [url], { stdio: "ignore", detached: true });
+				child.on("error", () => {});
+				child.unref();
+			}
+		} catch {
+			// Invalid URL or spawn failure — user can still Ctrl+click the printed link.
+		}
 
 		this.tui.requestRender();
 	}

@@ -1,3 +1,4 @@
+import { isOfflineMode } from "./env-flags.ts";
 import { getPiUserAgent } from "./pi-user-agent.ts";
 
 const LATEST_VERSION_URL = "https://pit.dev/api/latest-version";
@@ -57,7 +58,7 @@ export async function getLatestPiRelease(
 	currentVersion: string,
 	options: { timeoutMs?: number } = {},
 ): Promise<LatestPiRelease | undefined> {
-	if (process.env.PIT_SKIP_VERSION_CHECK || process.env.PIT_OFFLINE) return undefined;
+	if (process.env.PIT_SKIP_VERSION_CHECK || isOfflineMode()) return undefined;
 
 	const response = await fetch(LATEST_VERSION_URL, {
 		headers: {

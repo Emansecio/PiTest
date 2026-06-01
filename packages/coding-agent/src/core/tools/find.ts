@@ -3,7 +3,7 @@ import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { spawn } from "child_process";
 import { existsSync } from "fs";
-import { minimatch } from "minimatch";
+import { Minimatch } from "minimatch";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
@@ -123,7 +123,7 @@ export function createFindToolDefinition(
 	return {
 		name: "find",
 		label: "find",
-		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first).`,
+		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Finds files by name/glob. Do NOT use \`grep\` to locate files by name; grep searches contents.`,
 		promptSnippet: "Find files by glob pattern (respects .gitignore)",
 		parameters: findSchema,
 		prepareArguments: prepareWithPathAliases,
@@ -312,6 +312,10 @@ export function createFindToolDefinition(
 
 							const relativized: string[] = [];
 							const postFilterPattern = usePostFilter ? pattern : null;
+							// Compile the glob ONCE, not once per result line. The convenience
+							// `minimatch()` fn rebuilds a Minimatch (glob → AST → regex) on every
+							// call, so post-filtering N≈1000 results meant up to ~2000 compiles.
+							const postMatcher = postFilterPattern ? new Minimatch(postFilterPattern, { dot: true }) : null;
 							for (const rawLine of lines) {
 								const line = rawLine.replace(/\r$/, "").trim();
 								if (!line) continue;
@@ -324,13 +328,10 @@ export function createFindToolDefinition(
 								}
 								if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
 								const posixPath = toPosixPath(relativePath);
-								if (postFilterPattern) {
+								if (postMatcher) {
 									// Match the relative posix path against the user pattern.
 									// `matchBase: false`, `dot: true` so hidden segments aren't rejected.
-									if (
-										!minimatch(posixPath, postFilterPattern, { dot: true }) &&
-										!minimatch(posixPath.replace(/\/$/, ""), postFilterPattern, { dot: true })
-									) {
+									if (!postMatcher.match(posixPath) && !postMatcher.match(posixPath.replace(/\/$/, ""))) {
 										continue;
 									}
 								}

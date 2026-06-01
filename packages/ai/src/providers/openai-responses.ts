@@ -14,15 +14,19 @@ import type {
 	StreamOptions,
 	Usage,
 } from "../types.ts";
+import { createClientCache } from "../utils/client-cache.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
-import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	getServiceTierCostMultiplier,
+	processResponsesStream,
+	RESPONSES_TOOL_CALL_PROVIDERS,
+} from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
-
-const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 
 /**
  * Resolve cache retention preference.
@@ -110,7 +114,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
+			const client = createClient(model, apiKey, options?.headers, cacheSessionId);
 			let params = buildParams(model, context, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -176,9 +180,12 @@ export const streamSimpleOpenAIResponses: StreamFunction<"openai-responses", Sim
 	} satisfies OpenAIResponsesOptions);
 };
 
+// Reuse OpenAI SDK clients across turns to keep the HTTP connection pool alive.
+// Keyed by full config (apiKey + baseURL + headers) so credentials/headers are never stale.
+const clientCache = createClientCache<OpenAI>();
+
 function createClient(
 	model: Model<"openai-responses">,
-	context: Context,
 	apiKey?: string,
 	optionsHeaders?: Record<string, string>,
 	sessionId?: string,
@@ -194,14 +201,6 @@ function createClient(
 
 	const compat = getCompat(model);
 	const headers = { ...model.headers };
-	if (model.provider === "github-copilot") {
-		const hasImages = hasCopilotVisionInput(context.messages);
-		const copilotHeaders = buildCopilotDynamicHeaders({
-			messages: context.messages,
-			hasImages,
-		});
-		Object.assign(headers, copilotHeaders);
-	}
 
 	if (sessionId) {
 		if (compat.sendSessionIdHeader) {
@@ -224,16 +223,17 @@ function createClient(
 				}
 			: headers;
 
-	return new OpenAI({
+	const config = {
 		apiKey,
 		baseURL: isCloudflareProvider(model.provider) ? resolveCloudflareBaseUrl(model) : model.baseUrl,
 		dangerouslyAllowBrowser: true,
 		defaultHeaders,
-	});
+	};
+	return clientCache.getOrCreate(config, () => new OpenAI(config));
 }
 
 function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
-	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS);
+	const messages = convertResponsesMessages(model, context, RESPONSES_TOOL_CALL_PROVIDERS);
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const compat = getCompat(model);
@@ -272,7 +272,7 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 				summary: options?.reasoningSummary || "auto",
 			};
 			params.include = ["reasoning.encrypted_content"];
-		} else if (model.provider !== "github-copilot" && model.thinkingLevelMap?.off !== null) {
+		} else if (model.thinkingLevelMap?.off !== null) {
 			params.reasoning = {
 				effort: (model.thinkingLevelMap?.off ?? "none") as NonNullable<typeof params.reasoning>["effort"],
 			};
@@ -280,20 +280,6 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 	}
 
 	return params;
-}
-
-function getServiceTierCostMultiplier(
-	model: Pick<Model<"openai-responses">, "id">,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-): number {
-	switch (serviceTier) {
-		case "flex":
-			return 0.5;
-		case "priority":
-			return model.id === "gpt-5.5" ? 2.5 : 2;
-		default:
-			return 1;
-	}
 }
 
 function applyServiceTierPricing(

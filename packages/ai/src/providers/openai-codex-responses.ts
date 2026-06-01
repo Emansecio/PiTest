@@ -42,7 +42,13 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	getServiceTierCostMultiplier,
+	processResponsesStream,
+	RESPONSES_TOOL_CALL_PROVIDERS,
+} from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 // ============================================================================
@@ -53,7 +59,6 @@ const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
 const MAX_RETRIES = 3;
 const BASE_DELAY_MS = 1000;
-const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 
 const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
@@ -152,6 +157,15 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			timestamp: Date.now(),
 		};
 
+		// Connect-phase timeout shared across retries: aborts if response headers
+		// don't arrive in time. Cleared once each fetch resolves so the SSE body
+		// stream (a long generation) is never killed mid-flight. Declared outside the
+		// try so the listener is removed in finally (no AbortSignal listener leak).
+		const connectController = new AbortController();
+		const onUserAbort = () => connectController.abort();
+		options?.signal?.addEventListener("abort", onUserAbort);
+		let connectTimer: ReturnType<typeof setTimeout> | undefined;
+
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			if (!apiKey) {
@@ -239,12 +253,16 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				}
 
 				try {
+					connectTimer = setTimeout(() => {
+						connectController.abort(new Error("Codex connect timeout after 60s"));
+					}, 60_000);
 					response = await fetch(resolveCodexUrl(model.baseUrl), {
 						method: "POST",
 						headers: sseHeaders,
 						body: bodyJson,
-						signal: options?.signal,
+						signal: connectController.signal,
 					});
+					clearTimeout(connectTimer);
 					await options?.onResponse?.(
 						{ status: response.status, headers: headersToRecord(response.headers) },
 						model,
@@ -256,7 +274,10 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 					const errorText = await response.text();
 					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
-						let delayMs = BASE_DELAY_MS * 2 ** attempt;
+						// Jitter the exponential backoff to avoid a thundering-herd retry
+						// storm against the provider. Server-specified retry-after below
+						// overrides this and is honored verbatim.
+						let delayMs = BASE_DELAY_MS * 2 ** attempt * (0.5 + Math.random());
 
 						const retryAfterMs = response.headers.get("retry-after-ms");
 						if (retryAfterMs !== null) {
@@ -291,6 +312,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					const info = await parseErrorResponse(fakeResponse);
 					throw new Error(info.friendlyMessage || info.message);
 				} catch (error) {
+					clearTimeout(connectTimer);
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
@@ -299,7 +321,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					lastError = error instanceof Error ? error : new Error(String(error));
 					// Network errors are retryable
 					if (attempt < MAX_RETRIES && !lastError.message.includes("usage limit")) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
+						const delayMs = BASE_DELAY_MS * 2 ** attempt * (0.5 + Math.random());
 						await sleep(delayMs, options?.signal);
 						continue;
 					}
@@ -333,6 +355,9 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			output.errorMessage = error instanceof Error ? error.message : String(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
+		} finally {
+			clearTimeout(connectTimer);
+			options?.signal?.removeEventListener("abort", onUserAbort);
 		}
 	})();
 
@@ -386,7 +411,7 @@ function buildRequestBody(
 	context: Context,
 	options?: OpenAICodexResponsesOptions,
 ): RequestBody {
-	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
+	const messages = convertResponsesMessages(model, context, RESPONSES_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
 	});
 
@@ -432,20 +457,6 @@ function buildRequestBody(
 	}
 
 	return body;
-}
-
-function getServiceTierCostMultiplier(
-	model: Pick<Model<"openai-codex-responses">, "id">,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-): number {
-	switch (serviceTier) {
-		case "flex":
-			return 0.5;
-		case "priority":
-			return model.id === "gpt-5.5" ? 2.5 : 2;
-		default:
-			return 1;
-	}
 }
 
 function applyServiceTierPricing(
@@ -1277,7 +1288,7 @@ async function processWebSocketStream(
 		if (options?.signal?.aborted) {
 			keepConnection = false;
 		} else if (useCachedContext && entry && output.responseId) {
-			const responseItems = convertResponsesMessages(model, { messages: [output] }, CODEX_TOOL_CALL_PROVIDERS, {
+			const responseItems = convertResponsesMessages(model, { messages: [output] }, RESPONSES_TOOL_CALL_PROVIDERS, {
 				includeSystemPrompt: false,
 			}).filter((item) => item.type !== "function_call_output");
 			entry.continuation = {

@@ -23,6 +23,12 @@ const grepTool = createGrepTool(process.cwd());
 const findTool = createFindTool(process.cwd());
 const lsTool = createLsTool(process.cwd());
 
+// Escape a literal string (e.g. an absolute path with backslashes/drive colons)
+// for safe embedding inside a RegExp.
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
 	return (
@@ -198,6 +204,33 @@ describe("Coding Agent Tools", () => {
 
 			expect(output).toContain("definitely not a png");
 			expect(result.content.some((c: any) => c.type === "image")).toBe(false);
+		});
+
+		it("should not dump mojibake for binary files (NUL byte sniff)", async () => {
+			const testFile = join(testDir, "blob.bin");
+			// Non-image binary content with embedded NUL bytes.
+			const buffer = Buffer.from([0x01, 0x02, 0x00, 0x03, 0xff, 0xfe, 0x00, 0x42]);
+			writeFileSync(testFile, buffer);
+
+			const result = await readTool.execute("test-call-binary-1", { path: testFile });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("[Binary file: blob.bin");
+			expect(output).toContain("Not displayable as text");
+			expect(output).toContain("xxd");
+			expect(result.content.some((c: any) => c.type === "image")).toBe(false);
+			expect(result.details).toBeUndefined();
+		});
+
+		it("should still read plain text files (no false-positive binary detection)", async () => {
+			const testFile = join(testDir, "plain.txt");
+			writeFileSync(testFile, "héllo wörld — açaí\nsecond line");
+
+			const result = await readTool.execute("test-call-binary-2", { path: testFile });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("héllo wörld");
+			expect(output).not.toContain("[Binary file:");
 		});
 	});
 
@@ -384,12 +417,17 @@ describe("Coding Agent Tools", () => {
 			writeFileSync(testFile, "hello\n");
 			chmodSync(testFile, 0o444);
 
+			// POSIX surfaces EACCES for an unwritable file; Windows maps the same
+			// permission failure to EPERM. Production reports the raw OS error code,
+			// so accept either while still asserting the path + a permission code.
 			await expect(
 				editTool.execute("test-call-14", {
 					path: testFile,
 					edits: [{ oldText: "hello", newText: "world" }],
 				}),
-			).rejects.toThrow(`Could not edit file: ${testFile}. Error code: EACCES.`);
+			).rejects.toThrow(
+				new RegExp(`Could not edit file: ${escapeRegExp(testFile)}\\. Error code: E(ACCES|PERM)\\.`),
+			);
 		});
 
 		it("should include the original error message for unknown edit access errors", async () => {
@@ -418,14 +456,29 @@ describe("Coding Agent Tools", () => {
 			expect(result).toEqual({ error: `Could not edit file: ${missingFile}. Error code: ENOENT.` });
 		});
 
-		it("should include EACCES in diff preview for unreadable files", async () => {
+		it("should include EACCES in diff preview for unreadable files", async (ctx) => {
 			const unreadableFile = join(testDir, "unreadable-preview.txt");
 			writeFileSync(unreadableFile, "hello\n");
 			chmodSync(unreadableFile, 0o222);
 
+			// Windows ignores the read bit in chmod, so the file stays readable and
+			// computeEditsDiff never hits an access error. Skip there; this asserts
+			// the POSIX-EACCES / Windows-EPERM unreadable-file path.
+			let stillReadable = false;
+			try {
+				readFileSync(unreadableFile);
+				stillReadable = true;
+			} catch {}
+			if (stillReadable) ctx.skip();
+
 			const result = await computeEditsDiff(unreadableFile, [{ oldText: "hello", newText: "world" }], testDir);
 
-			expect(result).toEqual({ error: `Could not edit file: ${unreadableFile}. Error code: EACCES.` });
+			// access(R_OK) on a write-only file rejects with EACCES on POSIX and
+			// EPERM on Windows; production passes the raw OS code straight through.
+			expect(result).toHaveProperty("error");
+			expect((result as { error: string }).error).toMatch(
+				new RegExp(`^Could not edit file: ${escapeRegExp(unreadableFile)}\\. Error code: E(ACCES|PERM)\\.$`),
+			);
 		});
 	});
 

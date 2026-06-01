@@ -5,6 +5,11 @@
  * sub-question. The subagent reuses the parent's model and tool catalog
  * (filtered) but runs in an in-memory session.
  *
+ * Recursion is bounded: a spawned subagent never inherits the parent's `task`
+ * tool verbatim (that would let it recurse forever through the shared
+ * registry). Instead it receives a depth-incremented copy, withheld entirely
+ * once the nesting budget runs out. See `buildSubagentToolCatalog`.
+ *
  * Example tool call from the LLM:
  *   task({
  *     name: "find-dead-code",
@@ -20,6 +25,7 @@ import { type Static, type TSchema, Type } from "typebox";
 import { SubagentRegistry, spawnSubagent } from "../coordinator/index.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import type { Skill } from "../skills.ts";
 
 const worktreeSchema = Type.Union(
 	[
@@ -39,7 +45,7 @@ const taskSchema = Type.Object({
 	name: Type.Optional(
 		Type.String({
 			description:
-				"Stable task identifier. Used for the agent:// scheme lookup and worktree path. Defaults to the auto-generated subagent id.",
+				"Stable task identifier used for the worktree path. Defaults to the auto-generated subagent id; collisions are auto-resolved.",
 		}),
 	),
 	prompt: Type.String({ description: "The task description for the subagent." }),
@@ -50,6 +56,12 @@ const taskSchema = Type.Object({
 		}),
 	),
 	max_turns: Type.Optional(Type.Number({ description: "Hard limit on subagent turns. Default: 25." })),
+	inherit_skills: Type.Optional(
+		Type.Boolean({
+			description:
+				"When true, the parent's model-invocable skills are appended to the subagent's system prompt so it can discover and use them. Default false (subagent runs skill-blind).",
+		}),
+	),
 	result_schema: Type.Optional(
 		Type.Unknown({
 			description:
@@ -62,16 +74,63 @@ const taskSchema = Type.Object({
 
 type TaskInput = Static<typeof taskSchema>;
 
-export interface CoordinatorExtensionOptions {
-	modelRegistry: ModelRegistry;
-	/** Provider that returns the parent's currently active model. */
-	getParentModel: () => import("@pit/ai").Model<any> | undefined;
-	/** Provider that returns the parent's full AgentTool catalog at call time. */
-	getAvailableTools: () => AgentTool[];
-	/** Converts messages — defaults to identity. */
-	convertToLlm?: (messages: import("@pit/agent-core").AgentMessage[]) => import("@pit/ai").Message[];
-	/** Working directory for git worktree creation. Defaults to process.cwd(). */
-	getCwd?: () => string;
+/** Name of the coordinator-spawned tool. Stripped/rebuilt per nesting level. */
+const TASK_TOOL_NAME = "task";
+
+/**
+ * Brand stamped on every coordinator-spawned tool. The recursion guard strips
+ * tools by this brand rather than by name, so a rename of `TASK_TOOL_NAME` — or
+ * a user tool that happens to also be named `"task"` — can never break the
+ * guard or strip the wrong tool.
+ */
+export const COORDINATOR_TOOL_BRAND: unique symbol = Symbol("pit.coordinatorTool");
+
+/** True when `tool` is a coordinator-spawned `task` tool (carries the brand). */
+function isCoordinatorTool(tool: AgentTool): boolean {
+	return (tool as { [COORDINATOR_TOOL_BRAND]?: boolean })[COORDINATOR_TOOL_BRAND] === true;
+}
+
+/**
+ * Default maximum subagent nesting depth. The parent (depth 0) can always spawn
+ * subagents; this caps how deep that nesting may go before the `task` tool is
+ * withheld from a subagent's catalog.
+ *
+ * Default 1: subagents are allowed, but they cannot spawn their own subagents —
+ * which prevents the unbounded recursion that a shared, self-including tool
+ * catalog would otherwise permit.
+ */
+const DEFAULT_MAX_SUBAGENT_DEPTH = 1;
+
+/** Resolves the nesting budget, honoring the `PIT_SUBAGENT_MAX_DEPTH` override. */
+export function resolveMaxSubagentDepth(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.PIT_SUBAGENT_MAX_DEPTH;
+	if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_SUBAGENT_DEPTH;
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MAX_SUBAGENT_DEPTH;
+	return parsed;
+}
+
+/**
+ * Builds the tool catalog handed to a freshly spawned subagent.
+ *
+ * The parent's coordinator (`task`) tool is always stripped — a subagent must
+ * never inherit the parent's depth-0 tool, which closes over the shared
+ * registry and would let it recurse forever. A fresh, depth-incremented
+ * coordinator tool is re-added only while the child is still within the nesting
+ * budget; deeper subagents simply never see a `task` tool, so they cannot spawn
+ * further. Coordinator tools are identified by their brand, not their name.
+ */
+export function buildSubagentToolCatalog(
+	parentTools: readonly AgentTool[],
+	childDepth: number,
+	maxDepth: number,
+	makeCoordinatorTool: (depth: number) => AgentTool,
+): AgentTool[] {
+	const base = parentTools.filter((tool) => !isCoordinatorTool(tool));
+	if (childDepth < maxDepth) {
+		return [...base, makeCoordinatorTool(childDepth)];
+	}
+	return base;
 }
 
 function coerceResultSchema(raw: unknown): TSchema | undefined {
@@ -93,13 +152,36 @@ function coerceResultSchema(raw: unknown): TSchema | undefined {
 	return undefined;
 }
 
+export interface CoordinatorExtensionOptions {
+	modelRegistry: ModelRegistry;
+	/** Parent's permission checker — gates every subagent tool call (headless = ask→deny). */
+	permissionChecker?: import("../permissions/index.ts").PermissionChecker;
+	/** Provider that returns the parent's currently active model. */
+	getParentModel: () => import("@pit/ai").Model<any> | undefined;
+	/** Provider that returns the parent's full AgentTool catalog at call time. */
+	getAvailableTools: () => AgentTool[];
+	/** Provider that returns the parent's loaded skills — used for `inherit_skills`. */
+	getSkills?: () => Skill[];
+	/** Converts messages — defaults to identity. */
+	convertToLlm?: (messages: import("@pit/agent-core").AgentMessage[]) => import("@pit/ai").Message[];
+	/** Working directory for git worktree creation. Defaults to process.cwd(). */
+	getCwd?: () => string;
+}
+
 export function createCoordinatorExtension(options: CoordinatorExtensionOptions) {
 	const registry = new SubagentRegistry();
+	const maxDepth = resolveMaxSubagentDepth();
 
-	return (pi: ExtensionAPI) => {
-		pi.registerTool({
-			name: "task",
-			label: "task",
+	/**
+	 * Builds the `task` tool for an agent living at `depth`. The parent gets
+	 * depth 0; each spawned subagent that is still within the nesting budget
+	 * receives a depth-incremented copy.
+	 */
+	function makeTaskTool(depth: number) {
+		return {
+			name: TASK_TOOL_NAME,
+			label: TASK_TOOL_NAME,
+			[COORDINATOR_TOOL_BRAND]: true,
 			description:
 				"Spawn a focused subagent to complete an isolated sub-task and return its final answer. " +
 				"Use this to delegate research, file exploration, or repetitive checks without polluting the main conversation. " +
@@ -107,11 +189,21 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			promptSnippet:
 				"Spawn a subagent to handle an isolated sub-task. Supports structured output via result_schema and isolated git worktrees via worktree.",
 			parameters: taskSchema,
-			async execute(
-				_id,
-				{ name, prompt, system_prompt, allowed_tools, max_turns, result_schema, worktree, timeout_ms }: TaskInput,
-				signal,
-			) {
+			// `params` is typed `unknown`, not `TaskInput`: this tool flows through the
+			// shared `(depth) => AgentTool` factory, whose `execute` is contravariantly
+			// typed against the erased base schema. A narrower param breaks assignability.
+			async execute(_id: string, params: unknown, signal?: AbortSignal) {
+				const {
+					name,
+					prompt,
+					system_prompt,
+					allowed_tools,
+					max_turns,
+					result_schema,
+					worktree,
+					timeout_ms,
+					inherit_skills,
+				} = params as TaskInput;
 				const model = options.getParentModel();
 				if (!model) {
 					return {
@@ -122,14 +214,26 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				}
 				const resultSchema = coerceResultSchema(result_schema);
 				const cwd = options.getCwd ? options.getCwd() : process.cwd();
+				// The child runs one level deeper than the tool that spawned it. Strip
+				// our own tool from its catalog and re-add a depth-incremented copy
+				// only if the nesting budget still allows it.
+				const childDepth = depth + 1;
+				const childTools = buildSubagentToolCatalog(
+					options.getAvailableTools(),
+					childDepth,
+					maxDepth,
+					makeTaskTool,
+				);
 				try {
 					const result = await spawnSubagent(
 						{
 							registry,
 							model,
 							modelRegistry: options.modelRegistry,
-							availableTools: options.getAvailableTools(),
+							availableTools: childTools,
 							convertToLlm: options.convertToLlm ?? ((messages) => messages as never),
+							permissionChecker: options.permissionChecker,
+							skills: options.getSkills?.(),
 						},
 						{
 							prompt,
@@ -142,6 +246,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							timeoutMs: timeout_ms,
 							taskName: name ?? undefined,
 							cwd,
+							depth: childDepth,
+							inheritSkills: inherit_skills,
 						},
 					);
 					const text =
@@ -151,10 +257,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						isError: false,
 						details: {
 							subagentId: result.record.id,
-							taskName: name ?? result.record.id,
+							taskName: result.record.taskName,
 							turns: result.record.turnCount,
+							depth: childDepth,
 							worktreePath: result.worktreePath,
 							hasStructuredValue: result.value !== undefined,
+							deniedToolCalls: result.record.deniedToolCalls,
 						},
 					};
 				} catch (err) {
@@ -166,7 +274,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					};
 				}
 			},
-		});
+		};
+	}
+
+	return (pi: ExtensionAPI) => {
+		pi.registerTool(makeTaskTool(0));
 
 		pi.registerCommand("tasks", {
 			description: "List recently spawned subagents and their status.",
@@ -179,7 +291,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					return;
 				}
 				const lines = records.map(
-					(r) => `${r.id} [${r.status}] turns=${r.turnCount}${r.error ? ` err=${r.error.slice(0, 60)}` : ""}`,
+					(r) =>
+						`${r.id} [${r.status}] depth=${r.depth} turns=${r.turnCount}${r.deniedToolCalls?.length ? ` denied=${r.deniedToolCalls.length}(${[...new Set(r.deniedToolCalls)].join(",")})` : ""}${r.error ? ` err=${r.error.slice(0, 60)}` : ""}`,
 				);
 				const out = lines.join("\n");
 				if (ctx.hasUI) ctx.ui.notify(out, "info");

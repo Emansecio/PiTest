@@ -212,6 +212,26 @@ const readRules: ToolErrorHintRule[] = [
 // edit rules
 // ---------------------------------------------------------------------------
 
+/** Structured `HashlineEditError.detail` shape, as carried on `result.details.detail`. */
+type HashlineHintDetail =
+	| { kind: "not_found"; which: string; hash: string; nearby?: number[] }
+	| { kind: "ambiguous"; which: string; hash: string; matches?: number[] }
+	| { kind: "overlap"; editIndex: number };
+
+/**
+ * Reads the structured hashline error detail the agent loop now preserves on
+ * `result.details.detail` (see agent-loop `createErrorToolResult`). Returns
+ * undefined for non-hashline errors so callers fall back to text scraping.
+ */
+function getHashlineDetail(result: { details?: unknown }): HashlineHintDetail | undefined {
+	const detail = (result.details as { detail?: unknown } | undefined)?.detail;
+	if (detail && typeof detail === "object" && "kind" in detail) {
+		const kind = (detail as { kind?: unknown }).kind;
+		if (kind === "not_found" || kind === "ambiguous" || kind === "overlap") return detail as HashlineHintDetail;
+	}
+	return undefined;
+}
+
 const editRules: ToolErrorHintRule[] = [
 	{
 		// `edits[N] and edits[M] overlap` is a clean signal the model batched
@@ -226,11 +246,14 @@ const editRules: ToolErrorHintRule[] = [
 		// "Could not find the exact text" — edit-diff already injects the
 		// candidate-match block, but for older error paths or when the
 		// candidate block is absent, this hint nudges the model to expand the
-		// oldText window.
+		// oldText window. Also covers hashline anchor failures (before/after_hash
+		// not found or ambiguous), which are the same class of "the anchor you
+		// gave does not match the live file" miss.
 		id: "edit-old-text-not-found",
 		appliesTo: "edit",
 		matcher: ({ errorText }) =>
-			/could not find the exact text|could not find edits\[/i.test(errorText) &&
+			(/could not find the exact text|could not find edits\[/i.test(errorText) ||
+				/\.(before|after)_hash .* not found|is ambiguous \(matches lines/i.test(errorText)) &&
 			!/Paste this verbatim as oldText/i.test(errorText),
 		hint: () =>
 			"oldText not matched. Re-`read` a few lines around the target, then paste an exact slice (including whitespace) as `oldText`. Avoid trimming or summarising.",
@@ -244,6 +267,79 @@ const editRules: ToolErrorHintRule[] = [
 			/validation failed for tool "edit"/i.test(errorText) && !/did you mean/i.test(errorText),
 		hint: () =>
 			"Edit schema is `{ path, edits: [{ oldText, newText }] }`. Drop unknown keys (e.g. `range`, `oldString`).",
+	},
+	{
+		// ENOENT from the edit pre-flight `access` check. edit.ts/edit-diff.ts
+		// both emit the literal `Could not edit file: <path>. Error code: ENOENT.`
+		// The existing read/bash ENOENT rules are filtered out for `edit` (wrong
+		// appliesTo), so without this rule an edit ENOENT gets no recovery hint
+		// and the model retries the same dead path.
+		id: "edit-enoent-verify-path",
+		appliesTo: "edit",
+		matcher: ({ errorText }) =>
+			/could not edit file:.*error code:\s*ENOENT/i.test(errorText) ||
+			(/could not edit file:/i.test(errorText) && /\bENOENT\b/.test(errorText)),
+		hint: ({ call }) => {
+			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");
+			const base = path ? basenameOf(path) : "<basename>";
+			return `File not found for edit. Verify the path with \`find({paths:["**/${base}"]})\` or \`ls({path:<parent>})\` before retrying — it may be relative to a different cwd, or the file may not exist yet (use \`write\` to create it).`;
+		},
+	},
+	{
+		// Read-guard block: editing a file that was never read this session.
+		// read-guard-extension.ts emits `Read guard: file "<p>" has not been
+		// read in this session. ...`. The model must read first; this rule makes
+		// that explicit instead of letting it retry the blocked edit.
+		id: "edit-read-guard-not-read",
+		appliesTo: "edit",
+		matcher: ({ errorText }) =>
+			/read guard:.*has not been read in this session/i.test(errorText) ||
+			/has not been read in this session/i.test(errorText) ||
+			/changed since it was last read/i.test(errorText),
+		hint: ({ call }) => {
+			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");
+			const target = path ? `\`read({path:"${path}"})\`` : "the file";
+			return `Edit blocked: read ${target} first this session, then re-issue the edit. The guard requires fresh, verified content before mutating a file.`;
+		},
+	},
+	{
+		// Hashline anchor miss: before/after_hash not found or ambiguous. The
+		// content-hash anchors were computed from a stale view of the file, so
+		// the fix is always to re-read for fresh anchors. We surface the
+		// nearby/matches line numbers so the model knows where to look.
+		//
+		// Prefers the structured `HashlineEditError.detail` the agent loop now
+		// preserves on `result.details.detail`; falls back to scraping the
+		// rendered message for older paths or when detail is absent.
+		id: "edit-hashline-anchor-stale",
+		appliesTo: "edit",
+		matcher: ({ result, errorText }) => {
+			const detail = getHashlineDetail(result);
+			if (detail && (detail.kind === "not_found" || detail.kind === "ambiguous")) return true;
+			return (
+				/\.(before|after)_hash .* not found/i.test(errorText) ||
+				/\.(before|after)_hash .* is ambiguous \(matches lines/i.test(errorText)
+			);
+		},
+		hint: ({ result, errorText }) => {
+			let where = "";
+			const detail = getHashlineDetail(result);
+			if (detail?.kind === "ambiguous" && detail.matches?.length) {
+				where = ` The anchor matches multiple windows (lines ${detail.matches.join(", ")}) — pick a unique anchor from the fresh read.`;
+			} else if (detail?.kind === "not_found" && detail.nearby?.length) {
+				where = ` Closest candidates are near lines ${detail.nearby.join(", ")}.`;
+			} else {
+				// Fallback: scrape the rendered message (structured detail dropped).
+				const ambiguous = /is ambiguous \(matches lines ([\d,\s]+)/i.exec(errorText);
+				const nearby = /nearby lines:\s*([\d,\s]+)/i.exec(errorText);
+				if (ambiguous?.[1]) {
+					where = ` The anchor matches multiple windows (lines ${ambiguous[1].trim()}) — pick a unique anchor from the fresh read.`;
+				} else if (nearby?.[1]) {
+					where = ` Closest candidates are near lines ${nearby[1].trim()}.`;
+				}
+			}
+			return `Hashline anchor stale: the before/after_hash no longer matches the live file. Re-\`read\` the file to get fresh content-hash anchors, then re-issue the edit with the new hashes.${where}`;
+		},
 	},
 ];
 
@@ -282,6 +378,18 @@ const genericRules: ToolErrorHintRule[] = [
 // ---------------------------------------------------------------------------
 
 export interface ToolErrorHintRulesOptions {
+	/**
+	 * Lazy provider for cross-session learned errors. Used instead of
+	 * {@link ToolErrorHintRulesOptions.learnedErrors} when the load is expensive
+	 * (synchronous disk scan of every per-session JSONL file) and should be kept
+	 * off the startup critical path. The provider is invoked at most once — the
+	 * first time the registry is read (i.e. when a tool errors and the registry
+	 * is applied), never during session creation or turn-1 prompt build. The
+	 * resulting learned-error rules are identical to passing the same array via
+	 * `learnedErrors`; only the load timing differs. Ignored if `learnedErrors`
+	 * is also provided.
+	 */
+	learnedErrorsProvider?: () => AggregatedLearnedError[];
 	/** Disable bash hint rules. Default: enabled. */
 	disableBashRules?: boolean;
 	/** Disable read hint rules. Default: enabled. */
@@ -316,22 +424,84 @@ export interface ToolErrorHintRulesOptions {
  * downside risk is low and the upside is well-targeted recovery.
  */
 export function createDefaultToolErrorHintRegistry(options?: ToolErrorHintRulesOptions): ToolErrorHintRegistry {
-	const registry = new Registry();
+	// A lazy provider (and no eager array) defers the expensive learned-error
+	// disk scan off the startup path until the registry is first read on a tool
+	// error. The static rules below are still added eagerly so they are present
+	// for the very first tool error even if it precedes any learned-error read.
+	const useLazy = !options?.learnedErrors && typeof options?.learnedErrorsProvider === "function";
+	const registry = useLazy
+		? new LazyLearnedToolErrorHintRegistry(
+				options as ToolErrorHintRulesOptions & { learnedErrorsProvider: () => AggregatedLearnedError[] },
+			)
+		: new Registry();
 	if (!options?.disableBashRules) registry.addMany(bashRules);
 	if (!options?.disableReadRules) registry.addMany(readRules);
 	if (!options?.disableEditRules) registry.addMany(editRules);
 	if (!options?.disableGenericRules) registry.addMany(genericRules);
 	if (options?.extraRules) registry.addMany(options.extraRules);
 	if (options?.learnedErrors && options.learnedErrors.length > 0) {
-		registry.addMany(
-			createLearnedErrorRules(options.learnedErrors, {
-				minOccurrences: options.learnedErrorMinOccurrences,
-				minSessions: options.learnedErrorMinSessions,
-				maxRules: options.learnedErrorMaxRules,
-			}),
-		);
+		registry.addMany(learnedRulesFor(options.learnedErrors, options));
 	}
 	return registry;
+}
+
+/** Build learned-error rules from an aggregated array using the option thresholds. */
+function learnedRulesFor(
+	learnedErrors: AggregatedLearnedError[],
+	options: ToolErrorHintRulesOptions,
+): ToolErrorHintRule[] {
+	return createLearnedErrorRules(learnedErrors, {
+		minOccurrences: options.learnedErrorMinOccurrences,
+		minSessions: options.learnedErrorMinSessions,
+		maxRules: options.learnedErrorMaxRules,
+	});
+}
+
+/**
+ * Registry that materialises its learned-error rules on first read instead of
+ * at construction. The learned-error load is a synchronous scan of every
+ * per-session JSONL file under `~/.pit/agent/learned-errors/`; doing it lazily
+ * keeps it off the session-creation/turn-1 path. The static rules are added by
+ * the caller at construction, so the only thing deferred is the disk read and
+ * the learned-rule build. Because the learned rules are appended after all
+ * static rules (exactly as the eager path does), registration order — and thus
+ * `apply`'s ordering and dedup behaviour — is identical to the eager registry.
+ */
+class LazyLearnedToolErrorHintRegistry extends Registry {
+	private learnedMaterialised = false;
+	private readonly provideLearnedErrors: () => AggregatedLearnedError[];
+	private readonly learnedOptions: ToolErrorHintRulesOptions;
+
+	constructor(options: ToolErrorHintRulesOptions & { learnedErrorsProvider: () => AggregatedLearnedError[] }) {
+		super();
+		this.provideLearnedErrors = options.learnedErrorsProvider;
+		this.learnedOptions = options;
+	}
+
+	private materialiseLearned(): void {
+		if (this.learnedMaterialised) return;
+		// Mark first so a throwing/recursive read does not retry on every call.
+		this.learnedMaterialised = true;
+		const learned = this.provideLearnedErrors();
+		if (learned.length > 0) {
+			this.addMany(learnedRulesFor(learned, this.learnedOptions));
+		}
+	}
+
+	override apply(...args: Parameters<Registry["apply"]>): ReturnType<Registry["apply"]> {
+		this.materialiseLearned();
+		return super.apply(...args);
+	}
+
+	override list(): ReturnType<Registry["list"]> {
+		this.materialiseLearned();
+		return super.list();
+	}
+
+	override size(): number {
+		this.materialiseLearned();
+		return super.size();
+	}
 }
 
 // ---------------------------------------------------------------------------

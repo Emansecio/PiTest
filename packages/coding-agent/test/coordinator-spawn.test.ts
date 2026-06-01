@@ -18,17 +18,34 @@ import {
 	type Context,
 	type FauxProviderRegistration,
 	fauxAssistantMessage,
+	fauxToolCall,
 	type Model,
 	registerFauxProvider,
 } from "@pit/ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { _clearResultsForTesting } from "../src/core/coordinator/agent-url.js";
 import { SubagentRegistry } from "../src/core/coordinator/registry.js";
-import { type SpawnSubagentDependencies, spawnSubagent } from "../src/core/coordinator/spawn.js";
+import {
+	evaluateSubagentToolPermission,
+	type SpawnSubagentDependencies,
+	spawnSubagent,
+} from "../src/core/coordinator/spawn.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
+import { PermissionChecker, type PermissionSettings } from "../src/core/permissions/index.js";
+import type { Skill } from "../src/core/skills.js";
+
+// Minimal Skill object — formatSkillsForPrompt only reads name/description/
+// filePath/disableModelInvocation.
+function makeSkill(name: string, description: string): Skill {
+	return {
+		name,
+		description,
+		filePath: `/skills/${name}/SKILL.md`,
+		disableModelInvocation: false,
+	} as unknown as Skill;
+}
 
 // ---------------------------------------------------------------------------
 // Test rig: a registered faux provider + the dependency bundle spawnSubagent
@@ -92,7 +109,6 @@ describe("spawnSubagent (faux model)", () => {
 		while (rigs.length > 0) {
 			rigs.pop()?.dispose();
 		}
-		_clearResultsForTesting();
 	});
 
 	function newRig(options?: { tools?: AgentTool[] }): Rig {
@@ -117,6 +133,13 @@ describe("spawnSubagent (faux model)", () => {
 		expect(rig.registry.get(result.record.id)?.status).toBe("completed");
 		expect(result.record.output).toBe("the answer is 42");
 		expect(result.record.turnCount).toBeGreaterThanOrEqual(1);
+	});
+
+	it("records the spawn depth on the registry record", async () => {
+		const rig = newRig();
+		rig.faux.setResponses([fauxAssistantMessage("done")]);
+		const result = await spawnSubagent(rig.deps, { prompt: "p", taskName: "deep", depth: 3 });
+		expect(result.record.depth).toBe(3);
 	});
 
 	it("resultSchema valid: parses the fenced JSON block into result.value", async () => {
@@ -281,5 +304,88 @@ describe("spawnSubagent (faux model)", () => {
 
 		const record = rig.registry.list().find((r) => r.prompt === "slow");
 		expect(record?.status).toBe("cancelled");
+	});
+
+	it("inheritSkills: appends the parent's skills to the subagent system prompt", async () => {
+		const rig = newRig();
+		rig.deps.skills = [makeSkill("emansec-pentest", "web bug bounty engagement work")];
+
+		let seenPrompt: string | undefined;
+		rig.faux.setResponses([
+			(context: Context) => {
+				seenPrompt = context.systemPrompt;
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		await spawnSubagent(rig.deps, { prompt: "p", taskName: "skills-on", inheritSkills: true });
+
+		expect(seenPrompt).toContain("<available_skills>");
+		expect(seenPrompt).toContain("emansec-pentest");
+	});
+
+	it("inheritSkills off (default): the subagent prompt carries no skills section", async () => {
+		const rig = newRig();
+		rig.deps.skills = [makeSkill("emansec-pentest", "web bug bounty engagement work")];
+
+		let seenPrompt: string | undefined;
+		rig.faux.setResponses([
+			(context: Context) => {
+				seenPrompt = context.systemPrompt;
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		await spawnSubagent(rig.deps, { prompt: "p", taskName: "skills-off" });
+
+		expect(seenPrompt).not.toContain("<available_skills>");
+	});
+
+	it("records denied tool calls on the registry record (headless ask/deny visibility)", async () => {
+		const rig = newRig({ tools: [makeTool("edit")] });
+		// plan mode denies the mutating `edit` tool (see evaluateSubagentToolPermission).
+		rig.deps.permissionChecker = new PermissionChecker({
+			cwd: process.cwd(),
+			mode: "plan",
+			settings: { mode: "plan" },
+		});
+		// First turn calls the denied tool; second ends the loop.
+		rig.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("edit", { value: "x" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		const result = await spawnSubagent(rig.deps, { prompt: "edit something", taskName: "denied" });
+
+		expect(result.record.deniedToolCalls).toContain("edit");
+		expect(rig.registry.get(result.record.id)?.deniedToolCalls).toContain("edit");
+	});
+});
+
+describe("evaluateSubagentToolPermission (subagent permission gate)", () => {
+	const checker = (settings: PermissionSettings, mode: "auto" | "plan") =>
+		new PermissionChecker({ cwd: process.cwd(), mode, settings });
+
+	it("blocks a mutating tool under plan mode", () => {
+		const result = evaluateSubagentToolPermission(checker({ mode: "plan" }, "plan"), "edit", { file: "a.ts" });
+		expect(result?.block).toBe(true);
+	});
+
+	it("allows a read-only tool under plan mode", () => {
+		const result = evaluateSubagentToolPermission(checker({ mode: "plan" }, "plan"), "read", { file: "a.ts" });
+		expect(result).toBeUndefined();
+	});
+
+	it("allows everything under auto mode", () => {
+		const result = evaluateSubagentToolPermission(checker({ mode: "auto" }, "auto"), "bash", { command: "rm -rf /" });
+		expect(result).toBeUndefined();
+	});
+
+	it("blocks a denyTools entry and surfaces a reason", () => {
+		const result = evaluateSubagentToolPermission(checker({ mode: "plan", denyTools: ["read"] }, "plan"), "read", {
+			file: "a.ts",
+		});
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toMatch(/denyTools|denied/i);
 	});
 });

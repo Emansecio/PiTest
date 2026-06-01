@@ -1133,6 +1133,8 @@ describe("openai-codex streaming", () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date("2026-05-13T00:00:00Z"));
 		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+		// Jitter is stubbed deterministic (0.5 → multiplier 1.0) so backoff stays exactly exponential.
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
 		const token = mockToken();
 		const encoder = new TextEncoder();
 		const sse = buildSSEPayload({ status: "completed" });
@@ -1183,17 +1185,17 @@ describe("openai-codex streaming", () => {
 
 		const resultPromise = streamOpenAICodexResponses(model, context, { apiKey: token, transport: "sse" }).result();
 		await vi.advanceTimersByTimeAsync(0);
-		expect(setTimeoutSpy).toHaveBeenNthCalledWith(1, expect.any(Function), 1000);
-
 		await vi.advanceTimersToNextTimerAsync();
-		expect(setTimeoutSpy).toHaveBeenNthCalledWith(2, expect.any(Function), 2000);
-
 		await vi.advanceTimersToNextTimerAsync();
-		expect(setTimeoutSpy).toHaveBeenNthCalledWith(3, expect.any(Function), 4000);
-
 		await vi.advanceTimersToNextTimerAsync();
 		const result = await resultPromise;
 		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 		expect(codexRequests).toBe(4);
+
+		// Backoff stays exponential (1s, 2s, 4s) with jitter stubbed to 1.0x. The
+		// per-attempt 60s connect-phase watchdog timers are filtered out — they're
+		// cleared once response headers arrive and never fire here.
+		const backoffDelays = setTimeoutSpy.mock.calls.map((call) => call[1]).filter((delay) => delay !== 60_000);
+		expect(backoffDelays).toEqual([1000, 2000, 4000]);
 	});
 });

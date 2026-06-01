@@ -148,6 +148,15 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 			options.signal.addEventListener("abort", abortHandler);
 		}
 
+		// Connect-phase timeout only: abort if headers don't arrive in time, but
+		// clear once the response resolves so a long generation stream isn't killed.
+		const connectController = new AbortController();
+		const onUserAbort = () => connectController.abort();
+		options.signal?.addEventListener("abort", onUserAbort);
+		const connectTimer = setTimeout(() => {
+			connectController.abort(new Error("Proxy connect timeout after 60s"));
+		}, 60_000);
+
 		try {
 			const response = await fetch(`${options.proxyUrl}/api/stream`, {
 				method: "POST",
@@ -160,8 +169,9 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 					context,
 					options: buildProxyRequestOptions(options),
 				}),
-				signal: options.signal,
+				signal: connectController.signal,
 			});
+			clearTimeout(connectTimer);
 
 			if (!response.ok) {
 				let errorMessage = `Proxy error: ${response.status} ${response.statusText}`;
@@ -223,8 +233,10 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 			});
 			stream.end();
 		} finally {
+			clearTimeout(connectTimer);
 			if (options.signal) {
 				options.signal.removeEventListener("abort", abortHandler);
+				options.signal.removeEventListener("abort", onUserAbort);
 			}
 		}
 	})();

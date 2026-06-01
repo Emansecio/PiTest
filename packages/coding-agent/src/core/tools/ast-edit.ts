@@ -6,11 +6,10 @@ import { type Static, Type } from "typebox";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { prepareWithPathAliases } from "./argument-prep.ts";
+import { AST_GREP_INSTALL_HINT } from "./ast-grep-shared.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-
-const AST_GREP_INSTALL_HINT = "ast-grep CLI not installed. Install: https://ast-grep.github.io/guide/quick-start.html";
 
 const astEditSchema = Type.Object(
 	{
@@ -210,8 +209,7 @@ export function createAstEditToolDefinition(
 	return {
 		name: "ast_edit",
 		label: "ast_edit",
-		description:
-			"Structural code rewrite via ast-grep CLI. `pattern` captures with $METAVAR; `rewrite` references them. Modes: dry_run returns proposed changes only; preview stages a preview that the resolve tool commits; default applies in-place with --update-all.",
+		description: `Structural code rewrite via ast-grep CLI. \`pattern\` captures with $METAVAR; \`rewrite\` references them. Modes: dry_run returns proposed changes only; preview stages a preview that the resolve tool commits; default applies in-place with --update-all. Requires the ast-grep CLI to be installed and on PATH — the tool errors with "${AST_GREP_INSTALL_HINT}" if it is absent. For single-file text edits use \`edit\`/\`edit_v2\` instead.`,
 		promptSnippet:
 			"Structural AST rewrite (ast-grep). pattern + rewrite use $METAVAR. Supports dry_run and preview modes.",
 		parameters: astEditSchema,

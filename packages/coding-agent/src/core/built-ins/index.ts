@@ -45,6 +45,8 @@ export interface BuiltInExtensionsOptions {
 	getParentModel: () => Model<any> | undefined;
 	/** Returns the parent's tool catalog — used by the coordinator. */
 	getAvailableTools: () => AgentTool[];
+	/** Returns the parent's loaded skills — used by the coordinator for `inherit_skills`. */
+	getSkills?: () => import("../skills.ts").Skill[];
 	/** Audit hook for permission decisions (telemetry / logs). */
 	onPermissionDecision?: (info: { toolName: string; decision: "allow" | "ask" | "deny"; reason?: string }) => void;
 }
@@ -76,8 +78,10 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		createMcpExtension({ settings: options.mcp }),
 		createCoordinatorExtension({
 			modelRegistry: options.modelRegistry,
+			permissionChecker,
 			getParentModel: options.getParentModel,
 			getAvailableTools: options.getAvailableTools,
+			getSkills: options.getSkills,
 		}),
 	];
 

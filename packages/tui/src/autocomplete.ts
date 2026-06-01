@@ -1,10 +1,18 @@
 import { spawn } from "child_process";
-import { readdirSync, statSync } from "fs";
+import { type Dirent, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
 import { fuzzyFilter } from "./fuzzy.ts";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
+
+// Bounded TTL cache for readdirSync results so consecutive keystrokes
+// completing within the same directory reuse the listing instead of
+// re-reading it on every keystroke.
+const DIR_CACHE_MAX_ENTRIES = 32;
+const DIR_CACHE_TTL_MS = 1000;
+
+type DirCacheEntry = { entries: Dirent[]; expires: number };
 
 function toDisplayPath(value: string): string {
 	return value.replace(/\\/g, "/");
@@ -271,6 +279,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 	private commands: (SlashCommand | AutocompleteItem)[];
 	private basePath: string;
 	private fdPath: string | null;
+	// Keyed by the resolved searchDir absolute path. Insertion order is used
+	// for oldest-first eviction once DIR_CACHE_MAX_ENTRIES is exceeded.
+	private dirCache = new Map<string, DirCacheEntry>();
 
 	constructor(commands: (SlashCommand | AutocompleteItem)[] = [], basePath: string, fdPath: string | null = null) {
 		this.commands = commands;
@@ -403,45 +414,29 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 
 		// Check if we're completing a file attachment (prefix starts with "@")
 		if (prefix.startsWith("@")) {
-			// This is a file attachment completion
-			// Don't add space after directories so user can continue autocompleting
-			const isDirectory = item.label.endsWith("/");
-			const suffix = isDirectory ? "" : " ";
-			const newLine = `${beforePrefix + item.value}${suffix}${adjustedAfterCursor}`;
-			const newLines = [...lines];
-			newLines[cursorLine] = newLine;
-
-			const hasTrailingQuote = item.value.endsWith('"');
-			const cursorOffset = isDirectory && hasTrailingQuote ? item.value.length - 1 : item.value.length;
-
-			return {
-				lines: newLines,
-				cursorLine,
-				cursorCol: beforePrefix.length + cursorOffset + suffix.length,
-			};
+			const suffix = item.label.endsWith("/") ? "" : " ";
+			return this.applyPathCompletion(lines, cursorLine, beforePrefix, adjustedAfterCursor, item, suffix);
 		}
 
 		// Check if we're in a slash command context (beforePrefix contains "/command ")
 		const textBeforeCursor = currentLine.slice(0, cursorCol);
 		if (textBeforeCursor.includes("/") && textBeforeCursor.includes(" ")) {
-			// This is likely a command argument completion
-			const newLine = beforePrefix + item.value + adjustedAfterCursor;
-			const newLines = [...lines];
-			newLines[cursorLine] = newLine;
-
-			const isDirectory = item.label.endsWith("/");
-			const hasTrailingQuote = item.value.endsWith('"');
-			const cursorOffset = isDirectory && hasTrailingQuote ? item.value.length - 1 : item.value.length;
-
-			return {
-				lines: newLines,
-				cursorLine,
-				cursorCol: beforePrefix.length + cursorOffset,
-			};
+			return this.applyPathCompletion(lines, cursorLine, beforePrefix, adjustedAfterCursor, item);
 		}
 
 		// For file paths, complete the path
-		const newLine = beforePrefix + item.value + adjustedAfterCursor;
+		return this.applyPathCompletion(lines, cursorLine, beforePrefix, adjustedAfterCursor, item);
+	}
+
+	private applyPathCompletion(
+		lines: string[],
+		cursorLine: number,
+		beforePrefix: string,
+		adjustedAfterCursor: string,
+		item: AutocompleteItem,
+		suffix = "",
+	): { lines: string[]; cursorLine: number; cursorCol: number } {
+		const newLine = beforePrefix + item.value + suffix + adjustedAfterCursor;
 		const newLines = [...lines];
 		newLines[cursorLine] = newLine;
 
@@ -452,7 +447,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		return {
 			lines: newLines,
 			cursorLine,
-			cursorCol: beforePrefix.length + cursorOffset,
+			cursorCol: beforePrefix.length + cursorOffset + suffix.length,
 		};
 	}
 
@@ -553,6 +548,32 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		return `${toDisplayPath(displayBase)}${normalizedRelativePath}`;
 	}
 
+	// Read a directory's entries with a small bounded TTL cache so consecutive
+	// keystrokes completing within the same directory don't re-read it each time.
+	private readDirCached(searchDir: string): Dirent[] {
+		const now = Date.now();
+		const cached = this.dirCache.get(searchDir);
+		if (cached && cached.expires > now) {
+			return cached.entries;
+		}
+
+		const entries = readdirSync(searchDir, { withFileTypes: true });
+
+		// Stale entry (if any) is removed before re-inserting so it moves to the
+		// most-recently-used position in insertion order.
+		this.dirCache.delete(searchDir);
+		this.dirCache.set(searchDir, { entries, expires: now + DIR_CACHE_TTL_MS });
+
+		// Evict oldest entries to keep the cache bounded.
+		while (this.dirCache.size > DIR_CACHE_MAX_ENTRIES) {
+			const oldest = this.dirCache.keys().next().value;
+			if (oldest === undefined) break;
+			this.dirCache.delete(oldest);
+		}
+
+		return entries;
+	}
+
 	// Get file/directory suggestions for a given path prefix
 	private getFileSuggestions(prefix: string): AutocompleteItem[] {
 		try {
@@ -575,16 +596,8 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				rawPrefix === "/" ||
 				(isAtPrefix && rawPrefix === "");
 
-			if (isRootPrefix) {
+			if (isRootPrefix || rawPrefix.endsWith("/")) {
 				// Complete from specified position
-				if (rawPrefix.startsWith("~") || expandedPrefix.startsWith("/")) {
-					searchDir = expandedPrefix;
-				} else {
-					searchDir = join(this.basePath, expandedPrefix);
-				}
-				searchPrefix = "";
-			} else if (rawPrefix.endsWith("/")) {
-				// If prefix ends with /, show contents of that directory
 				if (rawPrefix.startsWith("~") || expandedPrefix.startsWith("/")) {
 					searchDir = expandedPrefix;
 				} else {
@@ -603,7 +616,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				searchPrefix = file;
 			}
 
-			const entries = readdirSync(searchDir, { withFileTypes: true });
+			const entries = this.readDirCached(searchDir);
 			const suggestions: AutocompleteItem[] = [];
 
 			for (const entry of entries) {

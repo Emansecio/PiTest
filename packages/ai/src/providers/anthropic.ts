@@ -28,13 +28,13 @@ import type {
 	ToolResultMessage,
 } from "../types.ts";
 import { splitSystemPromptOnDynamic } from "../types.ts";
+import { createClientCache } from "../utils/client-cache.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { finalizeStreamingJson, parseJsonWithRepair } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
-import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -127,37 +127,55 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 					};
 			  }
 	  > {
+	// Single pass: collect text while detecting images (early-exits on the
+	// first image). Text-only is the common case (tool results, plain user
+	// turns) — this avoids the separate some()+map() scans.
+	const textParts: string[] = [];
+	let hasImages = false;
+	for (const c of content) {
+		if (c.type === "image") {
+			hasImages = true;
+			break;
+		}
+		textParts.push((c as TextContent).text);
+	}
 	// If only text blocks, return as concatenated string for simplicity
-	const hasImages = content.some((c) => c.type === "image");
 	if (!hasImages) {
-		return sanitizeSurrogates(content.map((c) => (c as TextContent).text).join("\n"));
+		return sanitizeSurrogates(textParts.join("\n"));
 	}
 
-	// If we have images, convert to content block array
-	const blocks = content.map((block) => {
+	// Mixed/image content: build blocks in one pass, tracking whether any text
+	// block exists so we can add a placeholder when there is none.
+	const blocks: Array<
+		| { type: "text"; text: string }
+		| {
+				type: "image";
+				source: {
+					type: "base64";
+					media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+					data: string;
+				};
+		  }
+	> = [];
+	let hasText = false;
+	for (const block of content) {
 		if (block.type === "text") {
-			return {
-				type: "text" as const,
-				text: sanitizeSurrogates(block.text),
-			};
+			hasText = true;
+			blocks.push({ type: "text", text: sanitizeSurrogates(block.text) });
+		} else {
+			blocks.push({
+				type: "image",
+				source: {
+					type: "base64",
+					media_type: block.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+					data: block.data,
+				},
+			});
 		}
-		return {
-			type: "image" as const,
-			source: {
-				type: "base64" as const,
-				media_type: block.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
-				data: block.data,
-			},
-		};
-	});
-
+	}
 	// If only images (no text), add placeholder text block
-	const hasText = blocks.some((b) => b.type === "text");
 	if (!hasText) {
-		blocks.unshift({
-			type: "text" as const,
-			text: "(see attached image)",
-		});
+		blocks.unshift({ type: "text", text: "(see attached image)" });
 	}
 
 	return blocks;
@@ -181,6 +199,7 @@ function getAnthropicCompat(model: Model<"anthropic-messages">): Required<Anthro
 		sendSessionAffinityHeaders:
 			model.compat?.sendSessionAffinityHeaders ?? !!(isFireworks || isCloudflareAiGatewayAnthropic),
 		supportsCacheControlOnTools: model.compat?.supportsCacheControlOnTools ?? !isFireworks,
+		supportsAdaptiveThinking: model.compat?.supportsAdaptiveThinking ?? defaultSupportsAdaptiveThinking(model.id),
 	};
 }
 
@@ -477,15 +496,6 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			} else {
 				const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 
-				let copilotDynamicHeaders: Record<string, string> | undefined;
-				if (model.provider === "github-copilot") {
-					const hasImages = hasCopilotVisionInput(context.messages);
-					copilotDynamicHeaders = buildCopilotDynamicHeaders({
-						messages: context.messages,
-						hasImages,
-					});
-				}
-
 				const cacheRetention = options?.cacheRetention ?? resolveCacheRetention();
 				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 
@@ -495,7 +505,6 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					options?.interleavedThinking ?? true,
 					shouldUseFineGrainedToolStreamingBeta(model, context),
 					options?.headers,
-					copilotDynamicHeaders,
 					cacheSessionId,
 				);
 				client = created.client;
@@ -714,20 +723,20 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 };
 
 /**
- * Check if a model supports adaptive thinking (Opus 4.6+, Sonnet 4.6)
+ * Heuristic default for {@link AnthropicMessagesCompat.supportsAdaptiveThinking}:
+ * Opus and Sonnet at version 4.6 or newer use the adaptive "effort" thinking API;
+ * earlier models use `budget_tokens`. Parses the `<family>-<major>.<minor>`
+ * version from the id so a future bump (4.7/4.9/5.x) works without a code edit.
+ *
+ * The minor is bounded to 1-2 digits so a date suffix (e.g. `opus-4-20250514`,
+ * the non-adaptive Opus 4.0 release id) is NOT misread as a huge minor version.
+ * A model can always override this via `compat.supportsAdaptiveThinking`.
  */
-function supportsAdaptiveThinking(modelId: string): boolean {
-	// Adaptive-thinking model IDs (with or without date suffix)
-	return (
-		modelId.includes("opus-4-6") ||
-		modelId.includes("opus-4.6") ||
-		modelId.includes("opus-4-7") ||
-		modelId.includes("opus-4.7") ||
-		modelId.includes("opus-4-8") ||
-		modelId.includes("opus-4.8") ||
-		modelId.includes("sonnet-4-6") ||
-		modelId.includes("sonnet-4.6")
-	);
+export function defaultSupportsAdaptiveThinking(modelId: string): boolean {
+	const match = /(opus|sonnet)-(\d+)[._-](\d{1,2})(?!\d)/.exec(modelId);
+	if (!match) return false;
+	const version = Number(match[2]) + Number(match[3]) / 10;
+	return version >= 4.6;
 }
 
 /**
@@ -771,7 +780,7 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 
 	// For Opus 4.6 and Sonnet 4.6: use adaptive thinking with effort level
 	// For older models: use budget-based thinking
-	if (supportsAdaptiveThinking(model.id)) {
+	if (getAnthropicCompat(model).supportsAdaptiveThinking) {
 		const effort = mapThinkingLevelToEffort(model, options.reasoning);
 		return streamAnthropic(model, context, {
 			...base,
@@ -801,18 +810,31 @@ function isOAuthToken(apiKey: string): boolean {
 	return apiKey.includes("sk-ant-oat");
 }
 
+// Reuse constructed Anthropic SDK clients across turns so the HTTP connection
+// pool / keep-alive survives instead of being recreated per request. See
+// client-cache.ts for the correctness invariant (key = full config, no stale creds).
+const clientCache = createClientCache<Anthropic>();
+
+/** Test-only: clear the client cache so LRU/identity assertions start from empty. */
+export function __resetAnthropicClientCacheForTests(): void {
+	clientCache.clear();
+}
+
+export function getOrCreateAnthropicClient(config: ConstructorParameters<typeof Anthropic>[0]): Anthropic {
+	return clientCache.getOrCreate(config, () => new Anthropic(config));
+}
+
 function createClient(
 	model: Model<"anthropic-messages">,
 	apiKey: string,
 	interleavedThinking: boolean,
 	useFineGrainedToolStreamingBeta: boolean,
 	optionsHeaders?: Record<string, string>,
-	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
 ): { client: Anthropic; isOAuthToken: boolean } {
 	// Adaptive thinking models (Opus 4.6, Sonnet 4.6) have interleaved thinking built-in.
 	// The beta header is deprecated on Opus 4.6 and redundant on Sonnet 4.6, so skip it.
-	const needsInterleavedBeta = interleavedThinking && !supportsAdaptiveThinking(model.id);
+	const needsInterleavedBeta = interleavedThinking && !getAnthropicCompat(model).supportsAdaptiveThinking;
 	const betaFeatures: string[] = [];
 	if (useFineGrainedToolStreamingBeta) {
 		betaFeatures.push(FINE_GRAINED_TOOL_STREAMING_BETA);
@@ -822,7 +844,7 @@ function createClient(
 	}
 
 	if (model.provider === "cloudflare-ai-gateway") {
-		const client = new Anthropic({
+		const client = getOrCreateAnthropicClient({
 			apiKey: null,
 			authToken: null,
 			baseURL: resolveCloudflareBaseUrl(model),
@@ -844,31 +866,9 @@ function createClient(
 		return { client, isOAuthToken: false };
 	}
 
-	// Copilot: Bearer auth, selective betas.
-	if (model.provider === "github-copilot") {
-		const client = new Anthropic({
-			apiKey: null,
-			authToken: apiKey,
-			baseURL: model.baseUrl,
-			dangerouslyAllowBrowser: true,
-			defaultHeaders: mergeHeaders(
-				{
-					accept: "application/json",
-					"anthropic-dangerous-direct-browser-access": "true",
-					...(betaFeatures.length > 0 ? { "anthropic-beta": betaFeatures.join(",") } : {}),
-				},
-				model.headers,
-				dynamicHeaders,
-				optionsHeaders,
-			),
-		});
-
-		return { client, isOAuthToken: false };
-	}
-
 	// OAuth: Bearer auth, Claude Code identity headers
 	if (isOAuthToken(apiKey)) {
-		const client = new Anthropic({
+		const client = getOrCreateAnthropicClient({
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: model.baseUrl,
@@ -892,7 +892,7 @@ function createClient(
 	// API key auth
 	const sessionAffinityHeaders: Record<string, string | null> =
 		sessionId && getAnthropicCompat(model).sendSessionAffinityHeaders ? { "x-session-affinity": sessionId } : {};
-	const client = new Anthropic({
+	const client = getOrCreateAnthropicClient({
 		apiKey,
 		authToken: null,
 		baseURL: model.baseUrl,
@@ -912,7 +912,7 @@ function createClient(
 	return { client, isOAuthToken: false };
 }
 
-function buildParams(
+export function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
 	isOAuthToken: boolean,
@@ -928,11 +928,17 @@ function buildParams(
 
 	// For OAuth tokens, we MUST include Claude Code identity
 	if (isOAuthToken) {
+		// Anthropic allows at most 4 cache_control breakpoints per request. The
+		// system prompt must claim only ONE of them: when a static system block
+		// follows, IT carries the breakpoint (prefix caching covers the identity
+		// block above it for free), so the identity block must NOT also pin one —
+		// otherwise OAuth + a compaction summary (which pins a 4th breakpoint on
+		// the conversation) would emit 5 and the API rejects the request.
 		params.system = [
 			{
 				type: "text",
 				text: "You are Claude Code, Anthropic's official CLI for Claude.",
-				...(cacheControl ? { cache_control: cacheControl } : {}),
+				...(cacheControl && !context.systemPrompt ? { cache_control: cacheControl } : {}),
 			},
 		];
 		if (context.systemPrompt) {
@@ -983,7 +989,7 @@ function buildParams(
 			// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
 			// older Claude 4 models (whose API default is also "summarized").
 			const display: AnthropicThinkingDisplay = options.thinkingDisplay ?? "summarized";
-			if (supportsAdaptiveThinking(model.id)) {
+			if (getAnthropicCompat(model).supportsAdaptiveThinking) {
 				// Adaptive thinking: Claude decides when and how much to think.
 				params.thinking = { type: "adaptive", display };
 				if (options.effort) {
@@ -1063,29 +1069,26 @@ function convertMessages(
 					});
 				}
 			} else {
-				const blocks: ContentBlockParam[] = msg.content.map((item) => {
+				// Single pass: build + filter blocks together to avoid allocating
+				// an intermediate array (and a second O(N) scan) on every
+				// array-content user message per request.
+				const filteredBlocks: ContentBlockParam[] = [];
+				for (const item of msg.content) {
 					if (item.type === "text") {
-						return {
-							type: "text",
-							text: sanitizeSurrogates(item.text),
-						};
+						const text = sanitizeSurrogates(item.text);
+						if (text.trim().length === 0) continue;
+						filteredBlocks.push({ type: "text", text });
 					} else {
-						return {
+						filteredBlocks.push({
 							type: "image",
 							source: {
 								type: "base64",
 								media_type: item.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
 								data: item.data,
 							},
-						};
+						});
 					}
-				});
-				const filteredBlocks = blocks.filter((b) => {
-					if (b.type === "text") {
-						return b.text.trim().length > 0;
-					}
-					return true;
-				});
+				}
 				if (filteredBlocks.length === 0) continue;
 				const hasCompactionSummary = filteredBlocks.some(
 					(b) => b.type === "text" && b.text.startsWith(COMPACTION_SUMMARY_PREFIX_MARKER),

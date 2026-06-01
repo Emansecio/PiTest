@@ -47,7 +47,7 @@
 	"engines": {
 		"node": ">=22.19.0"
 	},
-	"version": "0.0.3",
+	"version": "0.0.4",
 	"dependencies": {
 		"@pit/coding-agent": "^0.30.2"
 	},

@@ -12,12 +12,16 @@
  *   - Running the same prompt against multiple personas
  */
 
-import type { Static, TSchema } from "typebox";
+import type { TSchema } from "typebox";
 
 export type SubagentStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export interface SubagentRecord {
 	id: string;
+	/** Unique, collision-resolved task name (see SubagentRegistry.create). */
+	taskName: string;
+	/** Nesting depth: 0 for a top-level spawn, incremented for each nested subagent. */
+	depth: number;
 	prompt: string;
 	systemPrompt?: string;
 	allowedTools?: string[];
@@ -27,6 +31,8 @@ export interface SubagentRecord {
 	output?: string;
 	error?: string;
 	turnCount: number;
+	/** Tool calls the subagent attempted that the parent's policy denied (headless ask→deny included). */
+	deniedToolCalls?: string[];
 }
 
 export interface SpawnSubagentOptions {
@@ -56,10 +62,19 @@ export interface SpawnSubagentOptions {
 	worktree?: boolean | WorktreeSpec;
 	/** Hard wall-clock timeout for the subagent. */
 	timeoutMs?: number;
-	/** Optional task name used for the worktree path + agent:// scheme lookup. */
+	/** Optional task name used for the worktree path. Collisions are auto-resolved to stay unique. */
 	taskName?: string;
 	/** Working directory used as the parent for `.pit/worktrees` and the default cwd. */
 	cwd?: string;
+	/** Nesting depth of the subagent being spawned (0 = top-level). Recorded for `/tasks` visibility. */
+	depth?: number;
+	/**
+	 * When true, the parent's model-invocable skills are appended to the
+	 * subagent's system prompt (via formatSkillsForPrompt). Without this the
+	 * subagent runs skill-blind: skills are prompt-injected, not tools, and the
+	 * subagent uses its own minimal system prompt.
+	 */
+	inheritSkills?: boolean;
 }
 
 export interface WorktreeSpec {
@@ -75,33 +90,3 @@ export interface SpawnSubagentResult {
 	/** Absolute path of the git worktree, if one was created. */
 	worktreePath?: string;
 }
-
-/**
- * Higher-level task spec used by the `task` tool surface. Mirrors
- * `SpawnSubagentOptions` but with the user-facing field names from the API.
- */
-export interface SubagentTaskSpec<Schema extends TSchema = TSchema> {
-	name: string;
-	prompt: string;
-	resultSchema?: Schema;
-	worktree?: boolean | WorktreeSpec;
-	timeoutMs?: number;
-	model?: string;
-}
-
-/**
- * Final result of a `SubagentTaskSpec`. When `ok` and `resultSchema` was
- * provided, `value` is the parsed-and-validated `Static<Schema>`. The raw
- * assistant text is always in `output` (when produced).
- */
-export interface SubagentTaskResult<T = unknown> {
-	taskName: string;
-	ok: boolean;
-	value?: T;
-	output?: string;
-	error?: string;
-	cost?: { tokens?: number; durationMs?: number };
-	worktreePath?: string;
-}
-
-export type StaticOf<S extends TSchema> = Static<S>;

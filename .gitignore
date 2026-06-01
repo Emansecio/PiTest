@@ -39,3 +39,8 @@ plans/
 .pi/hf-sessions/
 .pi/hf-sessions-backup/
 collect.sh
+
+# Scratch analysis artifacts (local-only, not part of the project)
+RELATORIO-*.md
+pkglist.txt
+*.pre-cleanup.bak

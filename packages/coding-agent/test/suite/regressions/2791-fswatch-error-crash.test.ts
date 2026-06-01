@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
@@ -39,7 +40,11 @@ describe("issue #2791 fs.watch error event crashes process", () => {
 	});
 
 	it("process should survive an error event on the theme FSWatcher", () => {
-		const themeModulePath = join(__dirname, "../../../src/modes/interactive/theme/theme.js").replace(/\\/g, "/");
+		// Use a file:// URL for the import specifier: on Windows a bare absolute
+		// path (e.g. "C:/...") is treated by Node's ESM loader as a URL with an
+		// unsupported "c:" scheme (ERR_UNSUPPORTED_ESM_URL_SCHEME). Point at the
+		// .ts source (no .js build artifact exists in the source tree).
+		const themeModulePath = pathToFileURL(join(__dirname, "../../../src/modes/interactive/theme/theme.ts")).href;
 		const agentDir = join(tempRoot, "agent").replace(/\\/g, "/");
 
 		// Script that sets up the watcher and emits a synthetic error on it.
@@ -87,7 +92,7 @@ process.exit(0);
 		let stderr = "";
 		let exitCode: number;
 		try {
-			_stdout = execFileSync("npx", ["tsx", scriptPath], {
+			_stdout = execFileSync(process.execPath, ["--import", "tsx", scriptPath], {
 				timeout: 10000,
 				encoding: "utf-8",
 				env: { ...process.env, PIT_CODING_AGENT_DIR: agentDir },

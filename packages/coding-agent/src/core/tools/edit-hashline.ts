@@ -226,15 +226,16 @@ export function createEditHashlineToolDefinition(
 	const ops = options?.operations ?? defaultEditOperations;
 	return {
 		name: "edit_v2",
-		label: "edit",
+		label: "edit_v2",
 		description:
-			"Edit one file using content-hash anchors. Each edit gives a before_hash and after_hash (8-char sha256 prefix of a 3-line window from the most recent read) and the new_text to place between them; anchor lines are preserved. If an anchor is not found or ambiguous, re-read the file to get fresh anchors before retrying.",
+			"Edit one file using content-hash anchors. Each edit gives a before_hash and after_hash (8-char sha256 prefix of a 3-line window from the most recent read) and the new_text to place between them; anchor lines are preserved. If an anchor is not found or ambiguous, re-read the file to get fresh anchors before retrying.\n\nWHICH TOOL: Anchors edits by content hash to lower output tokens on large files. For ordinary edits prefer `edit`; for structural multi-file rewrites use `ast_edit`.",
 		promptSnippet: "Edit a file via content-hash anchors (lower output tokens than full string replace)",
 		promptGuidelines: [
 			"Each before_hash/after_hash is sha256[0:8] of a 3-line window from your most recent read of the file",
 			"new_text replaces only the lines strictly between the two anchor windows; the anchor windows themselves stay",
 			"Edits are applied sequentially — pick anchors that exist in the buffer AFTER prior edits in this call",
 			"On not_found/ambiguous error, re-read the file to refresh anchors instead of guessing",
+			"Use edit_v2 to lower output tokens on large files. For ordinary edits prefer edit; for structural multi-file rewrites use ast_edit.",
 		],
 		parameters: editHashlineSchema,
 		renderShell: "self",

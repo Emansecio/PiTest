@@ -1,9 +1,17 @@
 /**
- * Tests for git-based extension updates, specifically handling force-push scenarios.
+ * Tests for git-based extension sources under local-only mode.
  *
- * These tests verify that DefaultPackageManager.update() handles:
- * - Normal git updates (no force-push)
- * - Force-pushed remotes gracefully (currently fails, fix needed)
+ * Background: package management was deliberately moved to a local-only model
+ * (see DefaultPackageManager: `update()` is a no-op and git: sources are never
+ * fetched/cloned/reset). External npm:/git: packages are no longer installed or
+ * updated over the network. The package manager only *resolves* resources from
+ * any pre-existing on-disk checkout.
+ *
+ * These tests verify that current contract:
+ * - `update()` never reaches out to git: it does not fetch, does not modify an
+ *   existing installed checkout, and does not create scope directories.
+ * - `resolveExtensionSources()` for a git: source runs no git command and only
+ *   reads resources already present on disk.
  */
 
 import { spawnSync } from "node:child_process";
@@ -51,7 +59,7 @@ function getFileContent(repoDir: string, filename: string): string {
 	return readFileSync(join(repoDir, filename), "utf-8");
 }
 
-describe("DefaultPackageManager git update", () => {
+describe("DefaultPackageManager git sources (local-only mode)", () => {
 	let tempDir: string;
 	let remoteDir: string; // Simulates the "remote" repository
 	let agentDir: string; // The agent directory where extensions are installed
@@ -91,7 +99,7 @@ describe("DefaultPackageManager git update", () => {
 
 	/**
 	 * Sets up a "remote" repository and clones it to the installed directory.
-	 * This simulates what packageManager.install() would do.
+	 * This simulates a checkout that exists on disk from a previous install.
 	 * @param sourceOverride Optional source string to use instead of gitSource (e.g., with @ref for pinned tests)
 	 */
 	function setupRemoteAndInstall(sourceOverride?: string): void {
@@ -100,7 +108,7 @@ describe("DefaultPackageManager git update", () => {
 		initGitRepo(remoteDir);
 		createCommit(remoteDir, "extension.ts", "// v1", "Initial commit");
 
-		// Clone to installed directory (simulating what install() does)
+		// Clone to installed directory (simulating a prior install)
 		mkdirSync(join(agentDir, "git", "github.com", "test"), { recursive: true });
 		git(["clone", remoteDir, installedDir], tempDir);
 		git(["config", "--local", "user.email", "test@test.com"], installedDir);
@@ -110,179 +118,145 @@ describe("DefaultPackageManager git update", () => {
 		settingsManager.setPackages([sourceOverride ?? gitSource]);
 	}
 
-	describe("normal updates (no force-push)", () => {
-		it("should skip reset, clean, and install when already up to date", async () => {
-			mkdirSync(remoteDir, { recursive: true });
-			initGitRepo(remoteDir);
-			writeFileSync(join(remoteDir, "package.json"), JSON.stringify({ name: "test-extension", version: "1.0.0" }));
-			createCommit(remoteDir, "extension.ts", "// v1", "Initial commit");
+	describe("update() is a no-op for git sources", () => {
+		it("does not run git or modify the checkout when already up to date", async () => {
+			setupRemoteAndInstall();
+			const before = getCurrentCommit(installedDir);
 
-			mkdirSync(join(agentDir, "git", "github.com", "test"), { recursive: true });
-			git(["clone", remoteDir, installedDir], tempDir);
-			settingsManager.setPackages([gitSource]);
-
+			// Spy on any internal command runners so we can assert none are invoked.
+			// In local-only mode the seams may not even exist, so we install them
+			// defensively and verify they are never called.
 			const executedCommands: string[] = [];
 			const managerWithInternals = packageManager as unknown as {
-				runCommand: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommand?: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommandCapture?: (command: string, args: string[], options?: { cwd?: string }) => Promise<string>;
 			};
-			managerWithInternals.runCommand = async (command, args, options) => {
+			managerWithInternals.runCommand = async (command, args) => {
 				executedCommands.push(`${command} ${args.join(" ")}`);
-				if (command === "npm") {
-					return;
-				}
-				const result = spawnSync(command, args, {
-					cwd: options?.cwd,
-					encoding: "utf-8",
-				});
-				if (result.status !== 0) {
-					throw new Error(`Command failed: ${command} ${args.join(" ")}\n${result.stderr}`);
-				}
+			};
+			managerWithInternals.runCommandCapture = async (command, args) => {
+				executedCommands.push(`${command} ${args.join(" ")}`);
+				return "";
 			};
 
 			await packageManager.update();
 
-			expect(executedCommands).toContain(
-				"git fetch --prune --no-tags origin +refs/heads/main:refs/remotes/origin/main",
-			);
-			expect(executedCommands).not.toContain("git fetch --prune origin");
-			expect(executedCommands).not.toContain("git reset --hard @{upstream}");
-			expect(executedCommands).not.toContain("git reset --hard origin/HEAD");
-			expect(executedCommands).not.toContain("git clean -fdx");
-			expect(executedCommands).not.toContain("npm install");
+			// No git command ran, and the checkout is untouched.
+			expect(executedCommands.filter((c) => c.startsWith("git "))).toEqual([]);
+			expect(getCurrentCommit(installedDir)).toBe(before);
+			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 		});
 
-		it("should update to latest commit when remote has new commits", async () => {
+		it("does not pull new remote commits into the installed checkout", async () => {
 			setupRemoteAndInstall();
+			const installedCommit = getCurrentCommit(installedDir);
 			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 
-			// Add a new commit to remote
-			const newCommit = createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
+			// Remote advances, but local-only update must not pull it.
+			createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
 
-			// Update via package manager (no args = uses settings)
 			await packageManager.update();
 
-			// Verify update succeeded
-			expect(getCurrentCommit(installedDir)).toBe(newCommit);
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v2");
+			// Checkout stays exactly where it was installed.
+			expect(getCurrentCommit(installedDir)).toBe(installedCommit);
+			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 		});
 
-		it("should handle multiple commits ahead", async () => {
+		it("does not advance past multiple remote commits", async () => {
 			setupRemoteAndInstall();
+			const installedCommit = getCurrentCommit(installedDir);
 
-			// Add multiple commits to remote
 			createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
 			createCommit(remoteDir, "extension.ts", "// v3", "Third commit");
-			const latestCommit = createCommit(remoteDir, "extension.ts", "// v4", "Fourth commit");
+			createCommit(remoteDir, "extension.ts", "// v4", "Fourth commit");
 
 			await packageManager.update();
 
-			expect(getCurrentCommit(installedDir)).toBe(latestCommit);
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v4");
+			expect(getCurrentCommit(installedDir)).toBe(installedCommit);
+			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 		});
 
-		it("should update even when local checkout has no upstream", async () => {
+		it("leaves a detached checkout (no upstream) untouched", async () => {
 			setupRemoteAndInstall();
 			createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
-			const latestCommit = createCommit(remoteDir, "extension.ts", "// v3", "Third commit");
+			createCommit(remoteDir, "extension.ts", "// v3", "Third commit");
 
 			const detachedCommit = getCurrentCommit(installedDir);
 			git(["checkout", detachedCommit], installedDir);
 
 			const executedCommands: string[] = [];
 			const managerWithInternals = packageManager as unknown as {
-				runCommand: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommand?: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommandCapture?: (command: string, args: string[], options?: { cwd?: string }) => Promise<string>;
 			};
-			managerWithInternals.runCommand = async (command, args, options) => {
+			managerWithInternals.runCommand = async (command, args) => {
 				executedCommands.push(`${command} ${args.join(" ")}`);
-				const result = spawnSync(command, args, {
-					cwd: options?.cwd,
-					encoding: "utf-8",
-				});
-				if (result.status !== 0) {
-					throw new Error(`Command failed: ${command} ${args.join(" ")}\n${result.stderr}`);
-				}
+			};
+			managerWithInternals.runCommandCapture = async (command, args) => {
+				executedCommands.push(`${command} ${args.join(" ")}`);
+				return "";
 			};
 
 			await packageManager.update();
 
-			expect(executedCommands).toContain(
-				"git fetch --prune --no-tags origin +refs/heads/main:refs/remotes/origin/main",
-			);
-			expect(getCurrentCommit(installedDir)).toBe(latestCommit);
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v3");
+			expect(executedCommands.filter((c) => c.startsWith("git "))).toEqual([]);
+			expect(getCurrentCommit(installedDir)).toBe(detachedCommit);
+			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 		});
 	});
 
-	describe("force-push scenarios", () => {
-		it("should recover when remote history is rewritten", async () => {
+	describe("update() ignores force-pushed remotes", () => {
+		it("does not react when remote history is rewritten", async () => {
 			setupRemoteAndInstall();
 			const initialCommit = getCurrentCommit(remoteDir);
+			const installedCommit = getCurrentCommit(installedDir);
 
-			// Add commit to remote
+			// Remote advances then is force-pushed to a rewritten history.
 			createCommit(remoteDir, "extension.ts", "// v2", "Commit to keep");
-
-			// Update to get the new commit
-			await packageManager.update();
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v2");
-
-			// Now force-push to rewrite history on remote
 			git(["reset", "--hard", initialCommit], remoteDir);
-			const rewrittenCommit = createCommit(remoteDir, "extension.ts", "// v2-rewritten", "Rewritten commit");
+			createCommit(remoteDir, "extension.ts", "// v2-rewritten", "Rewritten commit");
 
-			// Update should succeed despite force-push
 			await packageManager.update();
 
-			expect(getCurrentCommit(installedDir)).toBe(rewrittenCommit);
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v2-rewritten");
+			// Installed checkout is unaffected by any remote rewrite.
+			expect(getCurrentCommit(installedDir)).toBe(installedCommit);
+			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 		});
 
-		it("should recover when local commit no longer exists in remote", async () => {
+		it("does not react when remote drops the installed commit", async () => {
 			setupRemoteAndInstall();
+			const installedCommit = getCurrentCommit(installedDir);
 
-			// Add commits to remote
 			createCommit(remoteDir, "extension.ts", "// v2", "Commit A");
 			createCommit(remoteDir, "extension.ts", "// v3", "Commit B");
-
-			// Update to get all commits
-			await packageManager.update();
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v3");
-
-			// Force-push remote to remove commits A and B
 			git(["reset", "--hard", "HEAD~2"], remoteDir);
-			const newCommit = createCommit(remoteDir, "extension.ts", "// v2-new", "New commit replacing A and B");
+			createCommit(remoteDir, "extension.ts", "// v2-new", "New commit replacing A and B");
 
-			// Update should succeed - the commits we had locally no longer exist
 			await packageManager.update();
 
-			expect(getCurrentCommit(installedDir)).toBe(newCommit);
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v2-new");
+			expect(getCurrentCommit(installedDir)).toBe(installedCommit);
+			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 		});
 
-		it("should handle complete history rewrite", async () => {
+		it("does not react to a complete history rewrite", async () => {
 			setupRemoteAndInstall();
+			const installedCommit = getCurrentCommit(installedDir);
 
-			// Remote gets several commits
 			createCommit(remoteDir, "extension.ts", "// v2", "v2");
 			createCommit(remoteDir, "extension.ts", "// v3", "v3");
-
-			await packageManager.update();
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v3");
-
-			// Maintainer force-pushes completely different history
 			git(["reset", "--hard", "HEAD~2"], remoteDir);
 			createCommit(remoteDir, "extension.ts", "// rewrite-a", "Rewrite A");
-			const finalCommit = createCommit(remoteDir, "extension.ts", "// rewrite-b", "Rewrite B");
+			createCommit(remoteDir, "extension.ts", "// rewrite-b", "Rewrite B");
 
-			// Should handle this gracefully
 			await packageManager.update();
 
-			expect(getCurrentCommit(installedDir)).toBe(finalCommit);
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// rewrite-b");
+			expect(getCurrentCommit(installedDir)).toBe(installedCommit);
+			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 		});
 	});
 
 	describe("pinned sources", () => {
-		it("should not update pinned git sources (with @ref)", async () => {
+		it("never updates a pinned git source (with @ref)", async () => {
 			// Create remote repo first to get the initial commit
 			mkdirSync(remoteDir, { recursive: true });
 			initGitRepo(remoteDir);
@@ -311,7 +285,7 @@ describe("DefaultPackageManager git update", () => {
 	});
 
 	describe("temporary git sources", () => {
-		it("should refresh cached temporary git sources when resolving", async () => {
+		it("does not fetch or rewrite a cached temporary git source when resolving", async () => {
 			const gitHost = "github.com";
 			const gitPath = "test/extension";
 			const hash = createHash("sha256").update(`git-${gitHost}-${gitPath}`).digest("hex").slice(0, 8);
@@ -324,41 +298,35 @@ describe("DefaultPackageManager git update", () => {
 				join(cachedDir, "package.json"),
 				JSON.stringify({ pi: { extensions: ["./pi-extensions"] } }, null, 2),
 			);
-			writeFileSync(extensionFile, "// stale");
+			writeFileSync(extensionFile, "// cached");
 
+			// Defensive spies on any command runner seam: none should be invoked.
 			const executedCommands: string[] = [];
 			const managerWithInternals = packageManager as unknown as {
-				runCommand: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
-				runCommandCapture: (command: string, args: string[], options?: { cwd?: string }) => Promise<string>;
+				runCommand?: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommandCapture?: (command: string, args: string[], options?: { cwd?: string }) => Promise<string>;
 			};
 			managerWithInternals.runCommand = async (command, args) => {
 				executedCommands.push(`${command} ${args.join(" ")}`);
-				if (command === "git" && args[0] === "reset") {
-					writeFileSync(extensionFile, "// fresh");
-				}
 			};
-			managerWithInternals.runCommandCapture = async (_command, args) => {
-				if (args[0] === "rev-parse" && args[1] === "HEAD") {
-					return "local-head";
-				}
-				if (args[0] === "rev-parse" && args[1] === "@{upstream}") {
-					return "remote-head";
-				}
-				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref") {
-					return "origin/main";
-				}
+			managerWithInternals.runCommandCapture = async (command, args) => {
+				executedCommands.push(`${command} ${args.join(" ")}`);
 				return "";
 			};
 
-			await packageManager.resolveExtensionSources([gitSource], { temporary: true });
+			const resolved = await packageManager.resolveExtensionSources([gitSource], { temporary: true });
 
-			expect(executedCommands).toContain(
-				"git fetch --prune --no-tags origin +refs/heads/main:refs/remotes/origin/main",
-			);
-			expect(getFileContent(cachedDir, "pi-extensions/session-breakdown.ts")).toBe("// fresh");
+			// No git command ran and the cached content is preserved verbatim.
+			expect(executedCommands.filter((c) => c.startsWith("git "))).toEqual([]);
+			expect(getFileContent(cachedDir, "pi-extensions/session-breakdown.ts")).toBe("// cached");
+
+			// The existing on-disk extension is still resolved from cache.
+			expect(resolved.extensions.some((r) => r.path.endsWith("session-breakdown.ts"))).toBe(true);
+
+			rmSync(cachedDir, { recursive: true, force: true });
 		});
 
-		it("should not refresh pinned temporary git sources", async () => {
+		it("does not refresh pinned temporary git sources", async () => {
 			const gitHost = "github.com";
 			const gitPath = "test/extension";
 			const hash = createHash("sha256").update(`git-${gitHost}-${gitPath}`).digest("hex").slice(0, 8);
@@ -375,7 +343,7 @@ describe("DefaultPackageManager git update", () => {
 
 			const executedCommands: string[] = [];
 			const managerWithInternals = packageManager as unknown as {
-				runCommand: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
+				runCommand?: (command: string, args: string[], options?: { cwd?: string }) => Promise<void>;
 			};
 			managerWithInternals.runCommand = async (command, args) => {
 				executedCommands.push(`${command} ${args.join(" ")}`);
@@ -385,14 +353,17 @@ describe("DefaultPackageManager git update", () => {
 
 			expect(executedCommands).toEqual([]);
 			expect(getFileContent(cachedDir, "pi-extensions/session-breakdown.ts")).toBe("// pinned");
+
+			rmSync(cachedDir, { recursive: true, force: true });
 		});
 	});
 
 	describe("scope-aware update", () => {
-		it("should not install locally when source is only registered globally", async () => {
+		it("does not create a project-scope install when source is only registered globally", async () => {
 			setupRemoteAndInstall();
+			const installedCommit = getCurrentCommit(installedDir);
 
-			// Add a new commit to remote
+			// Remote advances; local-only update must not pull it.
 			createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
 
 			// The project-scope install path should not exist before or after update
@@ -401,8 +372,9 @@ describe("DefaultPackageManager git update", () => {
 
 			await packageManager.update(gitSource);
 
-			// Global install should be updated
-			expect(getFileContent(installedDir, "extension.ts")).toBe("// v2");
+			// Global install is untouched (no network update).
+			expect(getCurrentCommit(installedDir)).toBe(installedCommit);
+			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 
 			// Project-scope directory should NOT have been created
 			expect(existsSync(projectGitDir)).toBe(false);

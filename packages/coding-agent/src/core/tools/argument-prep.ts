@@ -98,6 +98,22 @@ export const PATH_KEY_ALIASES: KeyAliasMap = {
 };
 
 /**
+ * Edit-block key aliases sent by other harnesses for the find/replace fields:
+ * Anthropic-native `old_string`/`new_string` and `old_str`/`new_str`,
+ * Cursor-style `oldString`/`newString`, all map to this tool's canonical
+ * `oldText`/`newText`. Applied both to a flat top-level edit and inside each
+ * `edits[]` element so cross-harness models self-correct without a failed call.
+ */
+export const EDIT_KEY_ALIASES: KeyAliasMap = {
+	old_string: "oldText",
+	oldString: "oldText",
+	old_str: "oldText",
+	new_string: "newText",
+	newString: "newText",
+	new_str: "newText",
+};
+
+/**
  * Generic envelope: if a tool only needs path aliasing, this is the function
  * to assign to `prepareArguments`. Returns input untouched for non-objects.
  *

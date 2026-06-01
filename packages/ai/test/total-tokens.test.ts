@@ -19,16 +19,11 @@ import type { Api, Context, Model, StreamOptions, Usage } from "../src/types.js"
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
-import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
-const oauthTokens = await Promise.all([
-	resolveApiKey("anthropic"),
-	resolveApiKey("github-copilot"),
-	resolveApiKey("openai-codex"),
-]);
-const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
+const oauthTokens = await Promise.all([resolveApiKey("anthropic"), resolveApiKey("openai-codex")]);
+const [anthropicOAuthToken, openaiCodexToken] = oauthTokens;
 
 // Generate a long system prompt to trigger caching (>2k bytes for most providers)
 const LONG_SYSTEM_PROMPT = `You are a helpful assistant. Be concise in your responses.
@@ -237,143 +232,6 @@ describe("totalTokens field", () => {
 	});
 
 	// =========================================================================
-	// Groq
-	// =========================================================================
-
-	describe.skipIf(!process.env.GROQ_API_KEY)("Groq", () => {
-		it(
-			"openai/gpt-oss-120b - should return totalTokens equal to sum of components",
-			{ retry: 3, timeout: 60000 },
-			async () => {
-				const llm = getModel("groq", "openai/gpt-oss-120b");
-
-				console.log(`\nGroq / ${llm.id}:`);
-				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: process.env.GROQ_API_KEY });
-
-				logUsage("First request", first);
-				logUsage("Second request", second);
-
-				assertTotalTokensEqualsComponents(first);
-				assertTotalTokensEqualsComponents(second);
-			},
-		);
-	});
-
-	// =========================================================================
-	// Cerebras
-	// =========================================================================
-
-	describe.skipIf(!process.env.CEREBRAS_API_KEY)("Cerebras", () => {
-		it(
-			"gpt-oss-120b - should return totalTokens equal to sum of components",
-			{ retry: 3, timeout: 60000 },
-			async () => {
-				const llm = getModel("cerebras", "gpt-oss-120b");
-
-				console.log(`\nCerebras / ${llm.id}:`);
-				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: process.env.CEREBRAS_API_KEY });
-
-				logUsage("First request", first);
-				logUsage("Second request", second);
-
-				assertTotalTokensEqualsComponents(first);
-				assertTotalTokensEqualsComponents(second);
-			},
-		);
-	});
-
-	// =========================================================================
-	// Cloudflare Workers AI
-	// =========================================================================
-
-	describe.skipIf(!hasCloudflareWorkersAICredentials())("Cloudflare Workers AI", () => {
-		it(
-			"@cf/moonshotai/kimi-k2.6 - should return totalTokens equal to sum of components",
-			{ retry: 3, timeout: 60000 },
-			async () => {
-				const llm = getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6");
-
-				console.log(`\nCloudflare Workers AI / ${llm.id}:`);
-				const { first, second } = await testTotalTokensWithCache(llm, {
-					apiKey: process.env.CLOUDFLARE_API_KEY,
-				});
-
-				logUsage("First request", first);
-				logUsage("Second request", second);
-
-				assertTotalTokensEqualsComponents(first);
-				assertTotalTokensEqualsComponents(second);
-			},
-		);
-	});
-
-	// =========================================================================
-	// Cloudflare AI Gateway
-	// =========================================================================
-
-	describe.skipIf(!hasCloudflareAiGatewayCredentials())("Cloudflare AI Gateway", () => {
-		it(
-			"workers-ai/@cf/moonshotai/kimi-k2.6 - should return totalTokens equal to sum of components",
-			{ retry: 3, timeout: 60000 },
-			async () => {
-				const llm = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6");
-
-				console.log(`\nCloudflare AI Gateway / ${llm.id}:`);
-				const { first, second } = await testTotalTokensWithCache(llm, {
-					apiKey: process.env.CLOUDFLARE_API_KEY,
-				});
-
-				logUsage("First request", first);
-				logUsage("Second request", second);
-
-				assertTotalTokensEqualsComponents(first);
-				assertTotalTokensEqualsComponents(second);
-			},
-		);
-	});
-
-	// =========================================================================
-	// Hugging Face
-	// =========================================================================
-
-	describe.skipIf(!process.env.HF_TOKEN)("Hugging Face", () => {
-		it("Kimi-K2.5 - should return totalTokens equal to sum of components", { retry: 3, timeout: 60000 }, async () => {
-			const llm = getModel("huggingface", "moonshotai/Kimi-K2.5");
-
-			console.log(`\nHugging Face / ${llm.id}:`);
-			const { first, second } = await testTotalTokensWithCache(llm, { apiKey: process.env.HF_TOKEN });
-
-			logUsage("First request", first);
-			logUsage("Second request", second);
-
-			assertTotalTokensEqualsComponents(first);
-			assertTotalTokensEqualsComponents(second);
-		});
-	});
-
-	// =========================================================================
-	// Together AI
-	// =========================================================================
-
-	describe.skipIf(!process.env.TOGETHER_API_KEY)("Together AI", () => {
-		it("Kimi-K2.6 - should return totalTokens equal to sum of components", { retry: 3, timeout: 60000 }, async () => {
-			const llm = getModel("together", "moonshotai/Kimi-K2.6");
-
-			console.log(`\nTogether AI / ${llm.id}:`);
-			const { first, second } = await testTotalTokensWithCache(llm, {
-				apiKey: process.env.TOGETHER_API_KEY,
-				reasoningEffort: "high",
-			});
-
-			logUsage("First request", first);
-			logUsage("Second request", second);
-
-			assertTotalTokensEqualsComponents(first);
-			assertTotalTokensEqualsComponents(second);
-		});
-	});
-
-	// =========================================================================
 	// z.ai
 	// =========================================================================
 
@@ -569,10 +427,10 @@ describe("totalTokens field", () => {
 
 	describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter", () => {
 		it(
-			"anthropic/claude-sonnet-4 - should return totalTokens equal to sum of components",
+			"anthropic/claude-sonnet-4.5 - should return totalTokens equal to sum of components",
 			{ retry: 3, timeout: 60000 },
 			async () => {
-				const llm = getModel("openrouter", "anthropic/claude-sonnet-4");
+				const llm = getModel("openrouter", "anthropic/claude-sonnet-4.5");
 
 				console.log(`\nOpenRouter / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: process.env.OPENROUTER_API_KEY });
@@ -644,46 +502,6 @@ describe("totalTokens field", () => {
 
 				console.log(`\nOpenRouter / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: process.env.OPENROUTER_API_KEY });
-
-				logUsage("First request", first);
-				logUsage("Second request", second);
-
-				assertTotalTokensEqualsComponents(first);
-				assertTotalTokensEqualsComponents(second);
-			},
-		);
-	});
-
-	// =========================================================================
-	// GitHub Copilot (OAuth)
-	// =========================================================================
-
-	describe("GitHub Copilot (OAuth)", () => {
-		it.skipIf(!githubCopilotToken)(
-			"gpt-4o - should return totalTokens equal to sum of components",
-			{ retry: 3, timeout: 60000 },
-			async () => {
-				const llm = getModel("github-copilot", "gpt-4o");
-
-				console.log(`\nGitHub Copilot / ${llm.id}:`);
-				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: githubCopilotToken });
-
-				logUsage("First request", first);
-				logUsage("Second request", second);
-
-				assertTotalTokensEqualsComponents(first);
-				assertTotalTokensEqualsComponents(second);
-			},
-		);
-
-		it.skipIf(!githubCopilotToken)(
-			"claude-sonnet-4 - should return totalTokens equal to sum of components",
-			{ retry: 3, timeout: 60000 },
-			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4.6");
-
-				console.log(`\nGitHub Copilot / ${llm.id}:`);
-				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: githubCopilotToken });
 
 				logUsage("First request", first);
 				logUsage("Second request", second);

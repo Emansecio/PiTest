@@ -166,6 +166,8 @@ export async function createAgentSessionServices(
 			mcp: settingsManager.getMcpSettings(),
 			getParentModel: () => parentModelRef.current,
 			getAvailableTools: () => availableToolsRef.current ?? [],
+			// Resolved lazily at subagent-spawn time, well after resourceLoader init.
+			getSkills: () => resourceLoader.getSkills().skills,
 		});
 		builtInFactories = bundle.factories;
 	}

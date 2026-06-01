@@ -137,6 +137,65 @@ export function createCustomMessage(
 	};
 }
 
+// Cache LLM conversion per source AgentMessage. The session preserves element
+// identity across turns (session-manager.ts buildSessionContext slices but keeps
+// the same message objects), so without this the full history is re-mapped every
+// turn. For passthrough roles (user/assistant/toolResult) the cache stores `m`
+// itself, so in-place mutation by the agent loop stays reflected. For derived
+// roles (bashExecution/custom/branchSummary/compactionSummary) the cached Message
+// is built once from `m`'s fields — callers that mutate a derived AgentMessage in
+// place MUST call invalidateMessageCache(m) to avoid stale conversions.
+const convertCache = new WeakMap<AgentMessage, Message>();
+
+export function invalidateMessageCache(m: AgentMessage): void {
+	convertCache.delete(m);
+}
+
+function convertOne(m: AgentMessage): Message | undefined {
+	switch (m.role) {
+		case "bashExecution":
+			// Skip messages excluded from context (!! prefix)
+			if (m.excludeFromContext) {
+				return undefined;
+			}
+			return {
+				role: "user",
+				content: [{ type: "text", text: bashExecutionToText(m) }],
+				timestamp: m.timestamp,
+			};
+		case "custom": {
+			const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
+			return {
+				role: "user",
+				content,
+				timestamp: m.timestamp,
+			};
+		}
+		case "branchSummary":
+			return {
+				role: "user",
+				content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
+				timestamp: m.timestamp,
+			};
+		case "compactionSummary":
+			return {
+				role: "user",
+				content: [
+					{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
+				],
+				timestamp: m.timestamp,
+			};
+		case "user":
+		case "assistant":
+		case "toolResult":
+			return m;
+		default:
+			// biome-ignore lint/correctness/noSwitchDeclarations: fine
+			const _exhaustiveCheck: never = m;
+			return undefined;
+	}
+}
+
 /**
  * Transform AgentMessages (including custom types) to LLM-compatible Messages.
  *
@@ -146,50 +205,18 @@ export function createCustomMessage(
  * - Custom extensions and tools
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
-	return messages
-		.map((m): Message | undefined => {
-			switch (m.role) {
-				case "bashExecution":
-					// Skip messages excluded from context (!! prefix)
-					if (m.excludeFromContext) {
-						return undefined;
-					}
-					return {
-						role: "user",
-						content: [{ type: "text", text: bashExecutionToText(m) }],
-						timestamp: m.timestamp,
-					};
-				case "custom": {
-					const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
-					return {
-						role: "user",
-						content,
-						timestamp: m.timestamp,
-					};
-				}
-				case "branchSummary":
-					return {
-						role: "user",
-						content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
-						timestamp: m.timestamp,
-					};
-				case "compactionSummary":
-					return {
-						role: "user",
-						content: [
-							{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
-						],
-						timestamp: m.timestamp,
-					};
-				case "user":
-				case "assistant":
-				case "toolResult":
-					return m;
-				default:
-					// biome-ignore lint/correctness/noSwitchDeclarations: fine
-					const _exhaustiveCheck: never = m;
-					return undefined;
-			}
-		})
-		.filter((m) => m !== undefined);
+	const result: Message[] = [];
+	for (const m of messages) {
+		const cached = convertCache.get(m);
+		if (cached !== undefined) {
+			result.push(cached);
+			continue;
+		}
+		const converted = convertOne(m);
+		if (converted !== undefined) {
+			convertCache.set(m, converted);
+			result.push(converted);
+		}
+	}
+	return result;
 }

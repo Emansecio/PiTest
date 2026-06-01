@@ -9,6 +9,9 @@ import { SelectList, type SelectListLayoutOptions, type SelectListTheme } from "
 
 const baseSegmenter = getSegmenter();
 
+/** Shared empty paste-id set, returned when no pastes are active (never mutated). */
+const EMPTY_PASTE_IDS: Set<number> = new Set<number>();
+
 /** Regex matching paste markers like `[paste #1 +123 lines]` or `[paste #2 1234 chars]`. */
 const PASTE_MARKER_REGEX = /\[paste #(\d+)( (\+\d+ lines|\d+ chars))?\]/g;
 
@@ -304,6 +307,9 @@ export class Editor implements Component, Focusable {
 
 	/** Set of currently valid paste IDs, for marker-aware segmentation. */
 	private validPasteIds(): Set<number> {
+		// Common case: no active pastes. Reuse a shared empty set so the hot path
+		// (segment() runs on every backspace/delete/arrow/word-move) allocates nothing.
+		if (this.pastes.size === 0) return EMPTY_PASTE_IDS;
 		return new Set(this.pastes.keys());
 	}
 
@@ -1722,9 +1728,29 @@ export class Editor implements Component, Focusable {
 		line: number,
 		col: number,
 	): number {
-		for (let i = 0; i < visualLines.length; i++) {
-			const vl = visualLines[i];
-			if (!vl || vl.logicalLine !== line) continue;
+		// visualLines is built in logical-line order (buildVisualLineMap loops
+		// over state.lines ascending), so it is sorted by logicalLine. Binary
+		// search to the first segment of `line` instead of scanning the whole
+		// map on every cursor move: O(log V + k) vs O(V), where k = wrapped
+		// segments of the current logical line.
+		let lo = 0;
+		let hi = visualLines.length - 1;
+		let start = -1;
+		while (lo <= hi) {
+			const mid = (lo + hi) >>> 1;
+			const ll = visualLines[mid]!.logicalLine;
+			if (ll < line) {
+				lo = mid + 1;
+			} else if (ll > line) {
+				hi = mid - 1;
+			} else {
+				start = mid;
+				hi = mid - 1;
+			}
+		}
+		if (start === -1) return visualLines.length - 1;
+		for (let i = start; i < visualLines.length && visualLines[i]!.logicalLine === line; i++) {
+			const vl = visualLines[i]!;
 			const offset = col - vl.startCol;
 			// Cursor is in this segment if it's within range. For the last
 			// segment of a logical line, cursor can be at length (end position)
@@ -1751,10 +1777,13 @@ export class Editor implements Component, Focusable {
 		precomputedVisualLines?: Array<{ logicalLine: number; startCol: number; length: number }>,
 	): void {
 		this.lastAction = null;
-		const visualLines = precomputedVisualLines ?? this.buildVisualLineMap(this.lastWidth);
-		const currentVisualLine = this.findCurrentVisualLine(visualLines);
 
+		// Up/down navigation needs the full visual-line map. Left/right only needs
+		// it for the rare "at end of last line" preferred-column update, so build it
+		// lazily there to avoid re-wrapping every logical line on each ←/→ keystroke.
 		if (deltaLine !== 0) {
+			const visualLines = precomputedVisualLines ?? this.buildVisualLineMap(this.lastWidth);
+			const currentVisualLine = this.findCurrentVisualLine(visualLines);
 			const targetVisualLine = currentVisualLine + deltaLine;
 
 			if (targetVisualLine >= 0 && targetVisualLine < visualLines.length) {
@@ -1778,7 +1807,8 @@ export class Editor implements Component, Focusable {
 					this.setCursorCol(0);
 				} else {
 					// At end of last line - can't move, but set preferredVisualCol for up/down navigation
-					const currentVL = visualLines[currentVisualLine];
+					const visualLines = precomputedVisualLines ?? this.buildVisualLineMap(this.lastWidth);
+					const currentVL = visualLines[this.findCurrentVisualLine(visualLines)];
 					if (currentVL) {
 						this.preferredVisualCol = this.state.cursorCol - currentVL.startCol;
 					}

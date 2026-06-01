@@ -1,8 +1,3 @@
-import type { Agent as HttpAgent } from "node:http";
-import type { Agent as HttpsAgent } from "node:https";
-import { HttpProxyAgent } from "http-proxy-agent";
-import { HttpsProxyAgent } from "https-proxy-agent";
-
 const DEFAULT_PROXY_PORTS: Record<string, number> = {
 	ftp: 21,
 	gopher: 70,
@@ -11,11 +6,6 @@ const DEFAULT_PROXY_PORTS: Record<string, number> = {
 	ws: 80,
 	wss: 443,
 };
-
-export interface NodeHttpProxyAgents {
-	httpAgent: HttpAgent;
-	httpsAgent: HttpsAgent;
-}
 
 export const UNSUPPORTED_PROXY_PROTOCOL_MESSAGE =
 	"Unsupported proxy protocol. SOCKS and PAC proxy URLs are not supported; use an HTTP or HTTPS proxy URL.";
@@ -108,16 +98,4 @@ export function resolveHttpProxyUrlForTarget(targetUrl: string | URL): URL | und
 	}
 
 	return proxyUrl;
-}
-
-export function createHttpProxyAgentsForTarget(targetUrl: string | URL): NodeHttpProxyAgents | undefined {
-	const proxyUrl = resolveHttpProxyUrlForTarget(targetUrl);
-	if (!proxyUrl) {
-		return undefined;
-	}
-
-	return {
-		httpAgent: new HttpProxyAgent(proxyUrl),
-		httpsAgent: new HttpsProxyAgent(proxyUrl) as unknown as HttpsAgent,
-	};
 }

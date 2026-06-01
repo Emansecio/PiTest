@@ -17,6 +17,25 @@ const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
 
 /**
+ * A cached, persistent renderer for a single visible content block (text or
+ * thinking), keyed by its position in `message.content`.
+ *
+ * Keeping the `Markdown` instance alive across `updateContent()` calls is what
+ * makes streaming cheap: `Markdown.setText()` invalidates only the flat render
+ * cache while preserving the per-token `tokenLineCache`, so appending a chunk
+ * re-renders only the trailing (mutated) token instead of re-lexing and
+ * re-highlighting the whole buffer on every delta (the old `clear()` + `new
+ * Markdown(...)` path was O(n²) per message). The `ReadingColumn` wrapper is
+ * reused too — its child is fixed at construction, but the child here never
+ * changes, so the wrapper stays valid.
+ */
+interface BlockComponentCacheEntry {
+	kind: "text" | "thinking";
+	markdown: Markdown;
+	component: ReadingColumn;
+}
+
+/**
  * Component that renders a complete assistant message
  */
 export class AssistantMessageComponent extends Container {
@@ -26,6 +45,10 @@ export class AssistantMessageComponent extends Container {
 	private hiddenThinkingLabel: string;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
+	// Persistent Markdown/ReadingColumn instances keyed by content-block index.
+	// Reused across streaming deltas so the trailing block's tokenLineCache
+	// survives; only recreated when the block at that index changes kind.
+	private blockComponents: (BlockComponentCacheEntry | undefined)[] = [];
 
 	constructor(
 		message?: AssistantMessage,
@@ -94,18 +117,29 @@ export class AssistantMessageComponent extends Container {
 			this.contentContainer.addChild(new Spacer(1));
 		}
 
-		// Render content in order
+		// Render content in order. Reuse the persistent Markdown/ReadingColumn for
+		// block index `i` when it is still the same kind ("text"/"thinking"); call
+		// setText() to preserve its tokenLineCache instead of re-allocating. Only
+		// recreate the slot when the kind at that index changed (structural change).
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
-				this.contentContainer.addChild(
-					new ReadingColumn(
-						new Markdown(content.text.trim(), 1, 0, this.markdownTheme),
-						ASSISTANT_READING_COLUMNS,
-					),
-				);
+				const text = content.text.trim();
+				let entry = this.blockComponents[i];
+				if (entry?.kind === "text") {
+					entry.markdown.setText(text);
+				} else {
+					const markdown = new Markdown(text, 1, 0, this.markdownTheme);
+					entry = {
+						kind: "text",
+						markdown,
+						component: new ReadingColumn(markdown, ASSISTANT_READING_COLUMNS),
+					};
+					this.blockComponents[i] = entry;
+				}
+				this.contentContainer.addChild(entry.component);
 			} else if (content.type === "thinking" && content.thinking.trim()) {
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
@@ -114,7 +148,9 @@ export class AssistantMessageComponent extends Container {
 					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
 				if (this.hideThinkingBlock) {
-					// Show static thinking label when hidden
+					// Show static thinking label when hidden. Drop any cached Markdown at
+					// this slot so a later un-hide rebuilds it fresh.
+					this.blockComponents[i] = undefined;
 					this.contentContainer.addChild(
 						new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), 1, 0),
 					);
@@ -123,20 +159,38 @@ export class AssistantMessageComponent extends Container {
 					}
 				} else {
 					// Thinking traces in thinkingText color, italic
-					this.contentContainer.addChild(
-						new ReadingColumn(
-							new Markdown(content.thinking.trim(), 1, 0, this.markdownTheme, {
-								color: (text: string) => theme.fg("thinkingText", text),
-								italic: true,
-							}),
-							ASSISTANT_READING_COLUMNS,
-						),
-					);
+					const thinking = content.thinking.trim();
+					let entry = this.blockComponents[i];
+					if (entry?.kind === "thinking") {
+						entry.markdown.setText(thinking);
+					} else {
+						const markdown = new Markdown(thinking, 1, 0, this.markdownTheme, {
+							color: (text: string) => theme.fg("thinkingText", text),
+							italic: true,
+						});
+						entry = {
+							kind: "thinking",
+							markdown,
+							component: new ReadingColumn(markdown, ASSISTANT_READING_COLUMNS),
+						};
+						this.blockComponents[i] = entry;
+					}
+					this.contentContainer.addChild(entry.component);
 					if (hasVisibleContentAfter) {
 						this.contentContainer.addChild(new Spacer(1));
 					}
 				}
+			} else {
+				// Non-visible / non-text block at this index (e.g. toolCall, image,
+				// empty text). Invalidate any cached renderer here so a future text or
+				// thinking block at the same index doesn't reuse a stale instance.
+				this.blockComponents[i] = undefined;
 			}
+		}
+
+		// Trim cache entries past the current block count (message shrank / blocks removed).
+		if (this.blockComponents.length > message.content.length) {
+			this.blockComponents.length = message.content.length;
 		}
 
 		// Check if aborted - show after partial content

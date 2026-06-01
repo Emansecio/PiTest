@@ -9,13 +9,7 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.js";
-import {
-	Api,
-	type AnthropicMessagesCompat,
-	KnownProvider,
-	Model,
-	type OpenAICompletionsCompat,
-} from "../src/types.js";
+import { Api, KnownProvider, Model, type OpenAICompletionsCompat } from "../src/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -57,13 +51,6 @@ interface AiGatewayModel {
 		input_cache_write?: string | number;
 	};
 }
-
-const COPILOT_STATIC_HEADERS = {
-	"User-Agent": "GitHubCopilotChat/0.35.0",
-	"Editor-Version": "vscode/1.107.0",
-	"Editor-Plugin-Version": "copilot-chat/0.35.0",
-	"Copilot-Integration-Id": "vscode-chat",
-} as const;
 
 const KIMI_STATIC_HEADERS = {
 	"User-Agent": "KimiCLI/1.5",
@@ -124,12 +111,6 @@ const TOGETHER_TOGGLE_REASONING_LEVEL_MAP = {
 const AI_GATEWAY_MODELS_URL = "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
 const ZAI_TOOL_STREAM_UNSUPPORTED_MODELS = new Set(["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"]);
-const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
-	"github-copilot:claude-haiku-4.5",
-	"github-copilot:claude-sonnet-4",
-	"github-copilot:claude-sonnet-4.5",
-]);
-
 const DEEPSEEK_V4_THINKING_LEVEL_MAP = {
 	minimal: null,
 	low: null,
@@ -200,9 +181,6 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.api === "openai-responses" && model.id.startsWith("gpt-5")) {
 		mergeThinkingLevelMap(model, { off: null });
 	}
-	if (model.provider === "github-copilot" && model.id.startsWith("gpt-5")) {
-		mergeThinkingLevelMap(model, { minimal: "low" });
-	}
 	if (
 		model.api === "openai-responses" &&
 		model.provider === "openai" &&
@@ -247,12 +225,6 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		// Pi's low/medium/high pass through verbatim; OpenRouter normalizes to Mercury's vocabulary.
 		mergeThinkingLevelMap(model, { off: null });
 	}
-}
-
-function getAnthropicMessagesCompat(provider: string, modelId: string): AnthropicMessagesCompat | undefined {
-	return EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS.has(`${provider}:${modelId}`)
-		? { supportsEagerToolInputStreaming: false }
-		: undefined;
 }
 
 async function fetchOpenRouterModels(): Promise<Model<any>[]> {
@@ -799,7 +771,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				// Switch them to openai-completions so requests use Bearer auth
 				// and the standard /v1/chat/completions endpoint.
 				if (variant.provider === "opencode-go") {
-					if (modelId === "minimax-m2.7") {
+					if (modelId === "minimax-m2.7" || modelId === "minimax-m3") {
 						api = "openai-completions";
 						baseUrl = `${variant.basePath}/v1`;
 					}
@@ -829,59 +801,6 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					contextWindow: m.limit?.context || 4096,
 					maxTokens: m.limit?.output || 4096,
 				});
-			}
-		}
-
-		// Process GitHub Copilot models
-		if (data["github-copilot"]?.models) {
-			for (const [modelId, model] of Object.entries(data["github-copilot"].models)) {
-				const m = model as ModelsDevModel & { status?: string };
-				if (m.tool_call !== true) continue;
-				if (m.status === "deprecated") continue;
-
-				// Claude 4.x models route to Anthropic Messages API
-				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.\-]|$)/.test(modelId);
-				// gpt-5 models require responses API, others use completions
-				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
-
-				const api: Api = isCopilotClaude4
-					? "anthropic-messages"
-					: needsResponsesApi
-						? "openai-responses"
-						: "openai-completions";
-
-				const anthropicCompat =
-					api === "anthropic-messages" ? getAnthropicMessagesCompat("github-copilot", modelId) : undefined;
-
-				const copilotModel: Model<any> = {
-					id: modelId,
-					name: m.name || modelId,
-					api,
-					provider: "github-copilot",
-					baseUrl: "https://api.individual.githubcopilot.com",
-					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 128000,
-					maxTokens: m.limit?.output || 8192,
-					headers: { ...COPILOT_STATIC_HEADERS },
-					...(anthropicCompat ? { compat: anthropicCompat } : {}),
-					// compat only applies to openai-completions
-					...(api === "openai-completions" ? {
-						compat: {
-							supportsStore: false,
-							supportsDeveloperRole: false,
-							supportsReasoningEffort: false,
-						},
-					} : {}),
-				};
-
-				models.push(copilotModel);
 			}
 		}
 
@@ -1078,8 +997,7 @@ async function generateModels() {
 		if (
 			(candidate.provider === "anthropic" ||
 				candidate.provider === "opencode" ||
-				candidate.provider === "opencode-go" ||
-				candidate.provider === "github-copilot") &&
+				candidate.provider === "opencode-go") &&
 			(candidate.id === "claude-opus-4-6" ||
 				candidate.id === "claude-sonnet-4-6" ||
 				candidate.id === "claude-opus-4.6" ||
@@ -1098,6 +1016,11 @@ async function generateModels() {
 		if ((candidate.provider === "opencode" || candidate.provider === "opencode-go") && candidate.id === "gpt-5.4") {
 			candidate.contextWindow = 272000;
 			candidate.maxTokens = 128000;
+		}
+		// OpenCode Go reports MiniMax M3 at 512K, but the official context window
+		// is 1M — surface the full window.
+		if (candidate.provider === "opencode-go" && candidate.id === "minimax-m3") {
+			candidate.contextWindow = 1000000;
 		}
 		if (candidate.provider === "openai" && (candidate.id === "gpt-5.4" || candidate.id === "gpt-5.5")) {
 			candidate.contextWindow = 272000;
@@ -1282,20 +1205,6 @@ async function generateModels() {
 			contextWindow: 128000,
 			maxTokens: 16384,
 		});
-	}
-
-	// Add missing GitHub Copilot GPT-5.3 models until models.dev includes them.
-	const copilotBaseModel = allModels.find(
-		(m) => m.provider === "github-copilot" && m.id === "gpt-5.2-codex",
-	);
-	if (copilotBaseModel) {
-		if (!allModels.some((m) => m.provider === "github-copilot" && m.id === "gpt-5.3-codex")) {
-			allModels.push({
-				...copilotBaseModel,
-				id: "gpt-5.3-codex",
-				name: "GPT-5.3 Codex",
-			});
-		}
 	}
 
 	if (!allModels.some((m) => m.provider === "openai" && m.id === "gpt-5.4")) {
@@ -1730,6 +1639,47 @@ async function generateModels() {
 			cost: { ...m.cost },
 			...(m.thinkingLevelMap ? { thinkingLevelMap: { ...m.thinkingLevelMap } } : {}),
 		});
+	}
+
+	// Trim the Claude line-up: drop any Anthropic-style model older than 4.5
+	// (claude-3-*, claude-*-4-0/4-1, bare claude-*-4) across every provider so
+	// the model picker isn't flooded with legacy versions. 4.5+ (incl. 4.6/4.7/
+	// 4.8) are kept. Runs after all derivations/pushes, before grouping + stats.
+	// Handles dash/dot version separators and `provider/claude-...` prefixes.
+	const isPreClaude45 = (rawId: string): boolean => {
+		const cid = rawId.includes("/") ? rawId.slice(rawId.lastIndexOf("/") + 1) : rawId;
+		// old scheme: claude-<major>-<minor?>-<family> (e.g. claude-3-5-sonnet)
+		let m = /^claude-(\d+)(?:[-.](\d+))?[-.](?:opus|sonnet|haiku)\b/.exec(cid);
+		// new scheme: claude-<family>-<major>[-<minor>][-<date>] (e.g. claude-opus-4-5)
+		if (!m) m = /^claude-(?:opus|sonnet|haiku)[-.](\d+)(?:[-.](\d{1,2})(?=$|[-.]))?/.exec(cid);
+		if (!m) return false;
+		const major = Number(m[1]);
+		const minor = m[2] ? Number(m[2]) : 0;
+		return major < 4 || (major === 4 && minor < 5);
+	};
+	for (let i = allModels.length - 1; i >= 0; i--) {
+		if (isPreClaude45(allModels[i].id)) allModels.splice(i, 1);
+	}
+
+	// Providers intentionally cut from this build (personal/local use). Their fetch
+	// blocks above still run but every model is filtered out here, so they never
+	// reach models.generated.ts. To re-enable one, drop it from this set AND restore
+	// it in KnownProvider (types.ts), env-api-keys.ts, and provider-display-names.ts.
+	const REMOVED_PROVIDERS = new Set([
+		"deepseek",
+		"groq",
+		"cerebras",
+		"fireworks",
+		"together",
+		"huggingface",
+		"minimax-cn",
+		"moonshotai",
+		"moonshotai-cn",
+		"cloudflare-workers-ai",
+		"cloudflare-ai-gateway",
+	]);
+	for (let i = allModels.length - 1; i >= 0; i--) {
+		if (REMOVED_PROVIDERS.has(allModels[i].provider)) allModels.splice(i, 1);
 	}
 
 	for (const model of allModels) {

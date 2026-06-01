@@ -37,28 +37,16 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	anthropic: "claude-opus-4-7",
 	openai: "gpt-5.4",
 	"openai-codex": "gpt-5.5",
-	deepseek: "deepseek-v4-pro",
 	google: "gemini-3.1-pro-preview",
 	"google-vertex": "gemini-3.1-pro-preview",
-	"github-copilot": "gpt-5.4",
 	openrouter: "moonshotai/kimi-k2.6",
 	"vercel-ai-gateway": "zai/glm-5.1",
 	xai: "grok-4.20-0309-reasoning",
-	groq: "openai/gpt-oss-120b",
-	cerebras: "zai-glm-4.7",
 	zai: "glm-5.1",
 	minimax: "MiniMax-M2.7",
-	"minimax-cn": "MiniMax-M2.7",
-	moonshotai: "kimi-k2.6",
-	"moonshotai-cn": "kimi-k2.6",
-	huggingface: "moonshotai/Kimi-K2.6",
-	fireworks: "accounts/fireworks/models/kimi-k2p6",
-	together: "moonshotai/Kimi-K2.6",
 	opencode: "kimi-k2.6",
 	"opencode-go": "kimi-k2.6",
 	"kimi-coding": "kimi-for-coding",
-	"cloudflare-workers-ai": "@cf/moonshotai/kimi-k2.6",
-	"cloudflare-ai-gateway": "workers-ai/@cf/moonshotai/kimi-k2.6",
 	xiaomi: "mimo-v2.5-pro",
 	"xiaomi-token-plan-cn": "mimo-v2.5-pro",
 	"xiaomi-token-plan-ams": "mimo-v2.5-pro",
@@ -538,6 +526,29 @@ export function resolveCliModel(options: {
 	}
 
 	const candidates = provider ? availableModels.filter((m) => m.provider === provider) : availableModels;
+
+	// When no provider was specified, prefer a model whose provider already has
+	// configured auth. Otherwise a bare pattern like "haiku" can resolve to a
+	// provider with no credentials while an authed provider (anthropic) offers the
+	// same model. Falling back to the full candidate list afterwards preserves
+	// first-time `--api-key` setup.
+	if (!provider) {
+		const authedModels = availableModels.filter((m) => modelRegistry.hasConfiguredAuth(m));
+		if (authedModels.length > 0) {
+			const authed = parseModelPattern(pattern, authedModels, {
+				allowInvalidThinkingLevelFallback: false,
+			});
+			if (authed.model) {
+				return {
+					model: authed.model,
+					thinkingLevel: authed.thinkingLevel,
+					warning: authed.warning,
+					error: undefined,
+				};
+			}
+		}
+	}
+
 	const { model, thinkingLevel, warning } = parseModelPattern(pattern, candidates, {
 		allowInvalidThinkingLevelFallback: false,
 	});
@@ -670,21 +681,22 @@ export async function findInitialModel(options: {
 	const availableModels = await modelRegistry.getAvailable();
 
 	if (availableModels.length > 0) {
-		// Try to find a default model from known providers
-		for (const provider of Object.keys(defaultModelPerProvider) as KnownProvider[]) {
-			const defaultId = defaultModelPerProvider[provider];
-			const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
-			if (match) {
-				return { model: match, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
-			}
-		}
-
-		// If no default found, use first available
-		return { model: availableModels[0], thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+		const model = findDefaultModel(availableModels) ?? availableModels[0];
+		return { model, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
 	}
 
 	// 5. No model found
 	return { model: undefined, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
+}
+
+/** Find a default model from a known provider among the available models. */
+function findDefaultModel(availableModels: Model<Api>[]): Model<Api> | undefined {
+	for (const provider of Object.keys(defaultModelPerProvider) as KnownProvider[]) {
+		const defaultId = defaultModelPerProvider[provider];
+		const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
+		if (match) return match;
+	}
+	return undefined;
 }
 
 /**
@@ -731,21 +743,7 @@ export async function restoreModelFromSession(
 	const availableModels = await modelRegistry.getAvailable();
 
 	if (availableModels.length > 0) {
-		// Try to find a default model from known providers
-		let fallbackModel: Model<Api> | undefined;
-		for (const provider of Object.keys(defaultModelPerProvider) as KnownProvider[]) {
-			const defaultId = defaultModelPerProvider[provider];
-			const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
-			if (match) {
-				fallbackModel = match;
-				break;
-			}
-		}
-
-		// If no default found, use first available
-		if (!fallbackModel) {
-			fallbackModel = availableModels[0];
-		}
+		const fallbackModel = findDefaultModel(availableModels) ?? availableModels[0];
 
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Falling back to: ${fallbackModel.provider}/${fallbackModel.id}`));

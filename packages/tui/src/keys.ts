@@ -297,6 +297,8 @@ const MODIFIERS = {
 } as const;
 
 const LOCK_MASK = 64 + 128; // Caps Lock + Num Lock
+const KITTY_CSI_U_REGEX = /^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$/;
+const KITTY_EVENT_SUFFIXES = ["u", "~", "A", "B", "C", "D", "H", "F"] as const;
 
 const CODEPOINTS = {
 	escape: 27,
@@ -482,9 +484,11 @@ const LEGACY_SEQUENCE_KEY_IDS: Record<string, KeyId> = {
 
 type LegacyModifierKey = keyof typeof LEGACY_SHIFT_SEQUENCES;
 
-const matchesLegacySequence = (data: string, sequences: readonly string[]): boolean => sequences.includes(data);
+function matchesLegacySequence(data: string, sequences: readonly string[]): boolean {
+	return sequences.includes(data);
+}
 
-const matchesLegacyModifierSequence = (data: string, key: LegacyModifierKey, modifier: number): boolean => {
+function matchesLegacyModifierSequence(data: string, key: LegacyModifierKey, modifier: number): boolean {
 	if (modifier === MODIFIERS.shift) {
 		return matchesLegacySequence(data, LEGACY_SHIFT_SEQUENCES[key]);
 	}
@@ -492,7 +496,7 @@ const matchesLegacyModifierSequence = (data: string, key: LegacyModifierKey, mod
 		return matchesLegacySequence(data, LEGACY_CTRL_SEQUENCES[key]);
 	}
 	return false;
-};
+}
 
 // =============================================================================
 // Kitty Protocol Parsing
@@ -520,6 +524,19 @@ interface ParsedModifyOtherKeysSequence {
 // Store the last parsed event type for isKeyRelease() to query
 let _lastEventType: KeyEventType = "press";
 
+function hasKittyEventType(data: string, eventType: 2 | 3): boolean {
+	if (data.includes("\x1b[200~")) {
+		return false;
+	}
+
+	for (const suffix of KITTY_EVENT_SUFFIXES) {
+		if (data.includes(`:${eventType}${suffix}`)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Check if the last parsed key event was a key release.
  * Only meaningful when Kitty keyboard protocol with flag 2 is active.
@@ -529,25 +546,9 @@ export function isKeyRelease(data: string): boolean {
 	// patterns like ":3F" (e.g., bluetooth MAC addresses like "90:62:3F:A5").
 	// Terminal.ts re-wraps paste content with bracketed paste markers before
 	// passing to TUI, so pasted data will always contain \x1b[200~.
-	if (data.includes("\x1b[200~")) {
-		return false;
-	}
-
 	// Quick check: release events with flag 2 contain ":3"
 	// Format: \x1b[<codepoint>;<modifier>:3u
-	if (
-		data.includes(":3u") ||
-		data.includes(":3~") ||
-		data.includes(":3A") ||
-		data.includes(":3B") ||
-		data.includes(":3C") ||
-		data.includes(":3D") ||
-		data.includes(":3H") ||
-		data.includes(":3F")
-	) {
-		return true;
-	}
-	return false;
+	return hasKittyEventType(data, 3);
 }
 
 /**
@@ -557,23 +558,7 @@ export function isKeyRelease(data: string): boolean {
 export function isKeyRepeat(data: string): boolean {
 	// Don't treat bracketed paste content as key repeat, even if it contains
 	// patterns like ":2F". See isKeyRelease() for details.
-	if (data.includes("\x1b[200~")) {
-		return false;
-	}
-
-	if (
-		data.includes(":2u") ||
-		data.includes(":2~") ||
-		data.includes(":2A") ||
-		data.includes(":2B") ||
-		data.includes(":2C") ||
-		data.includes(":2D") ||
-		data.includes(":2H") ||
-		data.includes(":2F")
-	) {
-		return true;
-	}
-	return false;
+	return hasKittyEventType(data, 2);
 }
 
 function parseEventType(eventTypeStr: string | undefined): KeyEventType {
@@ -595,7 +580,7 @@ function parseKittySequence(data: string): ParsedKittySequence | null {
 	//
 	// With flag 2, event type is appended after modifier colon: 1=press, 2=repeat, 3=release
 	// With flag 4, alternate keys are appended after codepoint with colons
-	const csiUMatch = data.match(/^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$/);
+	const csiUMatch = data.match(KITTY_CSI_U_REGEX);
 	if (csiUMatch) {
 		const codepoint = parseInt(csiUMatch[1]!, 10);
 		const shiftedKey = csiUMatch[2] && csiUMatch[2].length > 0 ? parseInt(csiUMatch[2], 10) : undefined;
@@ -785,19 +770,29 @@ function formatKeyNameWithModifiers(keyName: string, modifier: number): string |
 	return mods.length > 0 ? `${mods.join("+")}+${keyName}` : keyName;
 }
 
-function parseKeyId(
-	keyId: string,
-): { key: string; ctrl: boolean; shift: boolean; alt: boolean; super: boolean } | null {
+type ParsedKeyId = { key: string; ctrl: boolean; shift: boolean; alt: boolean; super: boolean } | null;
+
+// keyId strings are constant binding literals ("ctrl+b", "alt+left", ...) matched
+// dozens of times per keystroke. Cache the parse so toLowerCase()/split() runs
+// once per distinct keyId instead of on every comparison.
+const parsedKeyIdCache = new Map<string, ParsedKeyId>();
+
+function parseKeyId(keyId: string): ParsedKeyId {
+	const cached = parsedKeyIdCache.get(keyId);
+	if (cached !== undefined) return cached;
 	const parts = keyId.toLowerCase().split("+");
 	const key = parts[parts.length - 1];
-	if (!key) return null;
-	return {
-		key,
-		ctrl: parts.includes("ctrl"),
-		shift: parts.includes("shift"),
-		alt: parts.includes("alt"),
-		super: parts.includes("super"),
-	};
+	const parsed: ParsedKeyId = key
+		? {
+				key,
+				ctrl: parts.includes("ctrl"),
+				shift: parts.includes("shift"),
+				alt: parts.includes("alt"),
+				super: parts.includes("super"),
+			}
+		: null;
+	parsedKeyIdCache.set(keyId, parsed);
+	return parsed;
 }
 
 /**
@@ -1287,7 +1282,6 @@ export function parseKey(data: string): string | undefined {
 // Kitty CSI-u Printable Decoding
 // =============================================================================
 
-const KITTY_CSI_U_REGEX = /^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$/;
 const KITTY_PRINTABLE_ALLOWED_MODIFIERS = MODIFIERS.shift | LOCK_MASK;
 
 /**

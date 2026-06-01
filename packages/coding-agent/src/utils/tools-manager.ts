@@ -6,16 +6,11 @@ import { join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import { APP_NAME, getBinDir } from "../config.ts";
+import { isOfflineMode } from "./env-flags.ts";
 
 const TOOLS_DIR = getBinDir();
 const NETWORK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
-
-function isOfflineModeEnabled(): boolean {
-	const value = process.env.PIT_OFFLINE;
-	if (!value) return false;
-	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
-}
 
 interface ToolConfig {
 	name: string;
@@ -338,7 +333,7 @@ export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Pr
 	const config = TOOLS[tool];
 	if (!config) return undefined;
 
-	if (isOfflineModeEnabled()) {
+	if (isOfflineMode()) {
 		if (!silent) {
 			console.log(chalk.yellow(`${config.name} not found. Offline mode enabled, skipping download.`));
 		}

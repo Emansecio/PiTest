@@ -329,7 +329,16 @@ export const clearApiKeyCache = clearConfigValueCache;
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
 export class ModelRegistry {
-	private models: Model<Api>[] = [];
+	/**
+	 * Lazily-materialized model list. `undefined` means "not built yet".
+	 * Access via the `modelsList` getter; never read this field directly.
+	 * Built-in models (~720) are only materialized on first access, so
+	 * non-interactive modes that just resolve one model via `find` never pay
+	 * the cost of building the full array.
+	 */
+	private _models: Model<Api>[] | undefined = undefined;
+	/** Lazy O(1) lookup index ("provider/id" -> Model), derived from modelsList. */
+	private _findIndex: Map<string, Model<Api>> | undefined = undefined;
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
@@ -340,7 +349,52 @@ export class ModelRegistry {
 	private constructor(authStorage: AuthStorage, modelsJsonPath: string | undefined) {
 		this.authStorage = authStorage;
 		this.modelsJsonPath = modelsJsonPath;
-		this.loadModels();
+		// Models are materialized lazily on first access (see modelsList getter).
+	}
+
+	/**
+	 * Materialized model list, built on first access and cached. Building it
+	 * also populates `providerRequestConfigs`, `modelRequestHeaders` and
+	 * `loadError` as side effects (via loadCustomModels), exactly as the old
+	 * eager constructor did.
+	 */
+	private get modelsList(): Model<Api>[] {
+		if (this._models === undefined) {
+			this._models = this.buildModels();
+		}
+		return this._models;
+	}
+
+	/**
+	 * Ensure the model list has been materialized at least once. Methods that
+	 * read the auth/header/error side-effect state without otherwise touching
+	 * the list must call this first to preserve the eager constructor's behavior.
+	 */
+	private ensureLoaded(): void {
+		void this.modelsList;
+	}
+
+	/**
+	 * Replace the materialized model list and invalidate the find index.
+	 * Used by code paths that mutate models (loadModels, applyProviderConfig).
+	 */
+	private setModels(models: Model<Api>[]): void {
+		this._models = models;
+		this._findIndex = undefined;
+	}
+
+	/** Lazy O(1) lookup index keyed by "provider/id". */
+	private get findIndex(): Map<string, Model<Api>> {
+		if (this._findIndex === undefined) {
+			const index = new Map<string, Model<Api>>();
+			for (const model of this.modelsList) {
+				// First-wins, matching the prior `this.models.find(...)` semantics.
+				const key = `${model.provider}/${model.id}`;
+				if (!index.has(key)) index.set(key, model);
+			}
+			this._findIndex = index;
+		}
+		return this._findIndex;
 	}
 
 	static create(authStorage: AuthStorage, modelsJsonPath: string = join(getAgentDir(), "models.json")): ModelRegistry {
@@ -374,10 +428,28 @@ export class ModelRegistry {
 	 * Get any error from loading models.json (undefined if no error).
 	 */
 	getError(): string | undefined {
+		// loadError is computed during model materialization; ensure it has run.
+		this.ensureLoaded();
 		return this.loadError;
 	}
 
+	/**
+	 * Eagerly rebuild and store the model list. Used by refresh() so that
+	 * subsequent applyProviderConfig() calls mutate a freshly-built list.
+	 */
 	private loadModels(): void {
+		this.setModels(this.buildModels());
+	}
+
+	/**
+	 * Build the combined model list (built-in + custom + OAuth modifications)
+	 * and recompute loadError as a side effect. Does not store the result;
+	 * callers decide whether/where to cache it.
+	 */
+	private buildModels(): Model<Api>[] {
+		// loadError is derived from loading custom models; reset before each build.
+		this.loadError = undefined;
+
 		// Load custom models and overrides from models.json
 		const {
 			models: customModels,
@@ -402,7 +474,7 @@ export class ModelRegistry {
 			}
 		}
 
-		this.models = combined;
+		return combined;
 	}
 
 	/** Load built-in models and apply provider/model overrides */
@@ -615,7 +687,7 @@ export class ModelRegistry {
 	 * If models.json had errors, returns only built-in models.
 	 */
 	getAll(): Model<Api>[] {
-		return this.models;
+		return this.modelsList;
 	}
 
 	/**
@@ -623,20 +695,24 @@ export class ModelRegistry {
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
-		return this.models.filter((m) => this.hasConfiguredAuth(m));
+		return this.modelsList.filter((m) => this.hasConfiguredAuth(m));
 	}
 
 	/**
 	 * Find a model by provider and ID.
+	 *
+	 * Uses a lazily-built O(1) lookup index instead of a linear scan over the
+	 * full model list. First-wins semantics match the previous `.find()`.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
-		return this.models.find((m) => m.provider === provider && m.id === modelId);
+		return this.findIndex.get(`${provider}/${modelId}`);
 	}
 
 	/**
 	 * Get API key for a model.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
+		this.ensureLoaded();
 		return (
 			this.authStorage.hasAuth(model.provider) ||
 			this.providerRequestConfigs.get(model.provider)?.apiKey !== undefined
@@ -680,6 +756,7 @@ export class ModelRegistry {
 	 */
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
+			this.ensureLoaded();
 			const providerConfig = this.providerRequestConfigs.get(model.provider);
 			const apiKeyFromAuthStorage = await this.authStorage.getApiKey(model.provider, { includeFallback: false });
 			const apiKey =
@@ -724,6 +801,7 @@ export class ModelRegistry {
 	 * This intentionally does not execute command-backed config values.
 	 */
 	getProviderAuthStatus(provider: string): AuthStatus {
+		this.ensureLoaded();
 		const authStatus = this.authStorage.getAuthStatus(provider);
 		if (authStatus.source) {
 			return authStatus;
@@ -770,6 +848,7 @@ export class ModelRegistry {
 			return apiKey;
 		}
 
+		this.ensureLoaded();
 		const providerApiKey = this.providerRequestConfigs.get(provider)?.apiKey;
 		return providerApiKey ? resolveConfigValueUncached(providerApiKey) : undefined;
 	}
@@ -880,14 +959,14 @@ export class ModelRegistry {
 
 		if (config.models && config.models.length > 0) {
 			// Full replacement: remove existing models for this provider
-			this.models = this.models.filter((m) => m.provider !== providerName);
+			const nextModels = this.modelsList.filter((m) => m.provider !== providerName);
 
 			// Parse and add new models
 			for (const modelDef of config.models) {
 				const api = modelDef.api || config.api;
 				this.storeModelHeaders(providerName, modelDef.id, modelDef.headers);
 
-				this.models.push({
+				nextModels.push({
 					id: modelDef.id,
 					name: modelDef.name,
 					api: api as Api,
@@ -905,21 +984,25 @@ export class ModelRegistry {
 			}
 
 			// Apply OAuth modifyModels if credentials exist (e.g., to update baseUrl)
+			let finalModels = nextModels;
 			if (config.oauth?.modifyModels) {
 				const cred = this.authStorage.get(providerName);
 				if (cred?.type === "oauth") {
-					this.models = config.oauth.modifyModels(this.models, cred);
+					finalModels = config.oauth.modifyModels(nextModels, cred);
 				}
 			}
+			this.setModels(finalModels);
 		} else if (config.baseUrl || config.headers) {
 			// Override-only: update baseUrl for existing models. Request headers are resolved per request.
-			this.models = this.models.map((m) => {
-				if (m.provider !== providerName) return m;
-				return {
-					...m,
-					baseUrl: config.baseUrl ?? m.baseUrl,
-				};
-			});
+			this.setModels(
+				this.modelsList.map((m) => {
+					if (m.provider !== providerName) return m;
+					return {
+						...m,
+						baseUrl: config.baseUrl ?? m.baseUrl,
+					};
+				}),
+			);
 		}
 	}
 }

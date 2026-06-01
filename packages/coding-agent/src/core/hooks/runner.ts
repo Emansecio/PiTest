@@ -86,11 +86,13 @@ export async function runHook(
 		let stderr = "";
 		let killed = false;
 		let resolved = false;
+		let killTimer: ReturnType<typeof setTimeout> | null = null;
 
-		const finish = (exitCode: number, timedOut: boolean) => {
+		const finish = (exitCode: number, timedOut: boolean, rawError?: string) => {
 			if (resolved) return;
 			resolved = true;
 			if (timer) clearTimeout(timer);
+			if (killTimer) clearTimeout(killTimer);
 			if (options.signal) {
 				options.signal.removeEventListener("abort", abort);
 			}
@@ -101,6 +103,7 @@ export async function runHook(
 				exitCode,
 				timedOut,
 				parsed: parseHookOutput(stdout),
+				...(rawError !== undefined ? { rawError } : {}),
 			});
 		};
 
@@ -109,7 +112,7 @@ export async function runHook(
 			killed = true;
 			try {
 				proc.kill("SIGTERM");
-				setTimeout(() => {
+				killTimer = setTimeout(() => {
 					if (!proc.killed) {
 						try {
 							proc.kill("SIGKILL");
@@ -118,6 +121,9 @@ export async function runHook(
 						}
 					}
 				}, 2000);
+				// Don't let the SIGKILL escalation timer keep the event loop alive after
+				// the process already exited; finish() also clears it on the happy path.
+				killTimer.unref();
 			} catch {
 				/* ignore */
 			}
@@ -150,8 +156,11 @@ export async function runHook(
 		});
 
 		proc.on("error", (err) => {
-			finish(-1, false);
+			// Capture the spawn-error text BEFORE resolving: finish() snapshots the
+			// stderr closure at resolve time, so the previous order silently dropped
+			// the ENOENT/EACCES message. Also surface it as rawError for logErrors().
 			stderr += err.message;
+			finish(-1, false, err.message);
 		});
 
 		proc.on("close", (code) => {

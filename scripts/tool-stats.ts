@@ -14,6 +14,8 @@ interface Entry { type?: string; message?: Message }
 interface ToolStats { calls: number; results: number; estimatedTokens: number; samples: number[]; errors: number }
 interface BashCommandStats { calls: number; estimatedTokens: number; samples: number[] }
 interface ToolCallInfo { toolName: string; bashCommand?: string }
+interface ToolRow extends ToolStats { name: string; avg: number; histogram: number[] }
+interface BashCommandRow extends BashCommandStats { name: string; avg: number; histogram: number[] }
 
 const BUCKETS = [0, 50, 100, 250, 500, 1000, 2000, 4000, 8000, 16000, 32000, Number.POSITIVE_INFINITY];
 
@@ -104,6 +106,55 @@ function bucketLabels(): string[] {
 	});
 }
 
+function average(total: number, count: number): number {
+	return count > 0 ? total / count : 0;
+}
+
+function buildToolRows(stats: Map<string, ToolStats>): ToolRow[] {
+	return [...stats.entries()]
+		.map(([name, s]) => ({
+			name,
+			...s,
+			avg: average(s.estimatedTokens, s.results),
+			histogram: bucketCounts(s.samples),
+		}))
+		.sort((a, b) => b.estimatedTokens - a.estimatedTokens);
+}
+
+function buildBashRows(stats: Map<string, BashCommandStats>): BashCommandRow[] {
+	return [...stats.entries()]
+		.map(([name, s]) => ({
+			name,
+			...s,
+			avg: average(s.estimatedTokens, s.samples.length),
+			histogram: bucketCounts(s.samples),
+		}))
+		.sort((a, b) => b.estimatedTokens - a.estimatedTokens)
+		.slice(0, 50);
+}
+
+function openOutputFile(outputPath: string): void {
+	let command: string;
+	let args: string[];
+
+	switch (process.platform) {
+		case "darwin":
+			command = "open";
+			args = [outputPath];
+			break;
+		case "win32":
+			command = "cmd";
+			args = ["/c", "start", outputPath];
+			break;
+		default:
+			command = "xdg-open";
+			args = [outputPath];
+			break;
+	}
+
+	spawn(command, args, { detached: true, stdio: "ignore" }).unref();
+}
+
 const { sessionsDir, output } = parseArgs();
 if (!existsSync(sessionsDir)) throw new Error(`Sessions directory not found: ${sessionsDir}`);
 
@@ -148,8 +199,8 @@ for (const file of files) {
 	}
 }
 
-const toolRows = [...tools.entries()].map(([name, s]) => ({ name, ...s, avg: s.results ? s.estimatedTokens / s.results : 0, histogram: bucketCounts(s.samples) })).sort((a, b) => b.estimatedTokens - a.estimatedTokens);
-const bashRows = [...bashCommands.entries()].map(([name, s]) => ({ name, ...s, avg: s.samples.length ? s.estimatedTokens / s.samples.length : 0, histogram: bucketCounts(s.samples) })).sort((a, b) => b.estimatedTokens - a.estimatedTokens).slice(0, 50);
+const toolRows = buildToolRows(tools);
+const bashRows = buildBashRows(bashCommands);
 const data = { generatedAt: new Date().toISOString(), sessionsDir, files: files.length, parseErrors, bucketLabels: bucketLabels(), tools: toolRows, bashCommands: bashRows };
 
 const html = `<!doctype html>
@@ -229,4 +280,4 @@ const html = `<!doctype html>
 mkdirSync(resolve(output, ".."), { recursive: true });
 writeFileSync(output, html);
 console.log(`Wrote ${output}`);
-spawn(process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open", process.platform === "win32" ? ["/c", "start", output] : [output], { detached: true, stdio: "ignore" }).unref();
+openOutputFile(output);

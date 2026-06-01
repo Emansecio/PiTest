@@ -51,13 +51,46 @@ const parsedReasoningCache = new WeakMap<ThinkingContent, ResponseReasoningItem>
 // can never leak into the wire payload.
 const serializedToolArgsCache = new WeakMap<ToolCall, string>();
 
-function serializeToolArgs(toolCall: ToolCall): string {
+// Cache the data: URL per image block (see openai-completions.ts). base64 image
+// payloads are large, immutable, and persist across turns, so build the
+// concatenated data-URL once. WeakMap keyed by the block object keeps it off the
+// wire shape and GC-reclaimable.
+const imageDataUrlCache = new WeakMap<object, string>();
+
+export function imageDataUrl(block: { mimeType: string; data: string }): string {
+	let url = imageDataUrlCache.get(block);
+	if (url === undefined) {
+		url = `data:${block.mimeType};base64,${block.data}`;
+		imageDataUrlCache.set(block, url);
+	}
+	return url;
+}
+
+export function serializeToolArgs(toolCall: ToolCall): string {
 	let serialized = serializedToolArgsCache.get(toolCall);
 	if (serialized === undefined) {
 		serialized = JSON.stringify(toolCall.arguments);
 		serializedToolArgsCache.set(toolCall, serialized);
 	}
 	return serialized;
+}
+
+/** Providers whose tool-call ids follow the OpenAI Responses convention. */
+export const RESPONSES_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+
+/** Cost multiplier applied to a response's usage based on its service tier. */
+export function getServiceTierCostMultiplier(
+	model: Pick<Model<any>, "id">,
+	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+): number {
+	switch (serviceTier) {
+		case "flex":
+			return 0.5;
+		case "priority":
+			return model.id === "gpt-5.5" ? 2.5 : 2;
+		default:
+			return 1;
+	}
 }
 
 function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): string {
@@ -173,7 +206,7 @@ export function convertResponsesMessages<TApi extends Api>(
 					return {
 						type: "input_image",
 						detail: "auto",
-						image_url: `data:${item.mimeType};base64,${item.data}`,
+						image_url: imageDataUrl(item),
 					} satisfies ResponseInputImage;
 				});
 				if (content.length === 0) continue;
@@ -267,7 +300,7 @@ export function convertResponsesMessages<TApi extends Api>(
 						contentParts.push({
 							type: "input_image",
 							detail: "auto",
-							image_url: `data:${block.mimeType};base64,${block.data}`,
+							image_url: imageDataUrl(block),
 						});
 					}
 				}
