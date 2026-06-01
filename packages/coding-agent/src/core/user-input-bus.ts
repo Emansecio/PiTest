@@ -2,7 +2,8 @@
  * UserInputBus
  *
  * In-process request/response bus that lets tool `execute()` implementations
- * ask the active mode for a structured option pick mid-turn.
+ * ask the active mode for a structured answer mid-turn. The answer is either a
+ * set of picked option labels (single- or multi-select) or a freeform string.
  *
  * Pattern:
  *   - Tool calls `bus.askOptions(req)` and awaits the answer.
@@ -10,24 +11,53 @@
  *     overlay/picker, and resolves with `bus.resolve(requestId, answer)`.
  *
  * Print / non-interactive mode does NOT subscribe; in that case `askOptions`
- * auto-resolves with the recommended option (or the first option) so tools
- * remain deterministic without a UI binding.
+ * auto-resolves with the recommended option (or the first option, or an empty
+ * freeform answer for option-less prompts) so tools remain deterministic
+ * without a UI binding.
  */
 
 import { randomUUID } from "node:crypto";
 
+export interface AskOption {
+	label: string;
+	description?: string;
+	recommended?: boolean;
+	value?: string;
+}
+
 export interface AskOptionsRequest {
 	requestId: string;
 	question: string;
+	/** Optional background shown above the question. */
+	context?: string;
+	/** Short chip label rendered above the question. */
 	header?: string;
-	options: Array<{ label: string; description?: string; recommended?: boolean; value?: string }>;
-	multiSelect?: boolean;
+	options: AskOption[];
+	/** Allow toggling more than one option (checkbox-style). */
+	allowMultiple?: boolean;
+	/** Offer a "type a custom answer" path that returns freeform text. */
+	allowFreeform?: boolean;
+	/** Offer a toggleable comment field attached to the selection. */
+	allowComment?: boolean;
+	/** Render as a centered overlay (default) or inline above the prompt. */
+	displayMode?: "overlay" | "inline";
+	/** Key to temporarily hide/show the overlay. Default 'alt+o'. */
+	overlayToggleKey?: string;
+	/** Key to toggle the comment field. Default 'ctrl+g'. */
+	commentToggleKey?: string;
+	/** Auto-dismiss after N milliseconds, falling back to the recommended option. */
+	timeout?: number;
 	source: { toolCallId?: string; toolName?: string };
 }
 
 export interface AskOptionsAnswer {
 	requestId: string;
-	picked: string[]; // option labels (length 1 unless multiSelect)
+	/** Option labels the user picked (length 1 unless allowMultiple). Empty for a freeform answer. */
+	picked: string[];
+	/** Present when the user typed a custom answer instead of picking an option. */
+	freeformText?: string;
+	/** Optional comment the user attached to a selection. */
+	comment?: string;
 	cancelled?: boolean;
 }
 
@@ -51,6 +81,24 @@ function pickDefaultLabel(req: Pick<AskOptionsRequest, "options">): string {
 	return req.options[0]?.label ?? "";
 }
 
+/**
+ * Deterministic auto-answer used when no interactive listener is bound (print
+ * mode, headless subagents) or when an interactive prompt times out. Picks the
+ * recommended/first option when options exist; otherwise yields an empty
+ * freeform answer.
+ */
+export function computeAutoAnswer(req: Pick<AskOptionsRequest, "options">): Omit<AskOptionsAnswer, "requestId"> {
+	if (req.options.length > 0) {
+		const label = pickDefaultLabel(req);
+		return { picked: label ? [label] : [], cancelled: false };
+	}
+	return { picked: [], freeformText: "", cancelled: false };
+}
+
+function autoAnswer(req: AskOptionsRequest): AskOptionsAnswer {
+	return { requestId: req.requestId, ...computeAutoAnswer(req) };
+}
+
 export function createUserInputBus(): UserInputBus {
 	const listeners: Array<(req: AskOptionsRequest) => void> = [];
 	const pending = new Map<string, PendingEntry>();
@@ -60,15 +108,9 @@ export function createUserInputBus(): UserInputBus {
 			const requestId = randomUUID();
 			const req: AskOptionsRequest = { ...reqInput, requestId };
 
-			// No listener bound: deterministic auto-answer using recommended/first.
+			// No listener bound: deterministic auto-answer.
 			if (listeners.length === 0) {
-				const label = pickDefaultLabel(req);
-				const answer: AskOptionsAnswer = {
-					requestId,
-					picked: label ? [label] : [],
-					cancelled: false,
-				};
-				return Promise.resolve(answer);
+				return Promise.resolve(autoAnswer(req));
 			}
 
 			return new Promise<AskOptionsAnswer>((resolve, reject) => {

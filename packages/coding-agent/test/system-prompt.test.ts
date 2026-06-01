@@ -109,4 +109,39 @@ describe("buildSystemPrompt", () => {
 			expect(prompt.match(/- Use dynamic_tool for summaries\./g)).toHaveLength(1);
 		});
 	});
+
+	describe("verify-after-change nudge", () => {
+		test("included when both an edit/write tool and bash are available", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "bash", "edit", "write"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("After a non-trivial code change, verify it");
+		});
+
+		test("omitted when there is no way to run a check (no bash)", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "edit", "write"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).not.toContain("After a non-trivial code change, verify it");
+		});
+
+		test("omitted in a read-only session (no edit/write)", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "bash"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).not.toContain("After a non-trivial code change, verify it");
+		});
+	});
 });

@@ -136,12 +136,81 @@ describe("generateSummary reasoning options", () => {
 
 		await compact(preparation, createModel(false, 128000), "test-key");
 
-		// Compaction performs: history summary + turn-prefix summary + self-correction verify.
-		// All three must respect the model output cap.
+		// Compaction performs: history summary + turn-prefix summary (+ verify only
+		// for large inputs). All calls must respect the model output cap.
 		const maxTokensSeen = completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens);
 		expect(maxTokensSeen.length).toBeGreaterThanOrEqual(2);
 		for (const t of maxTokensSeen) {
 			expect(t).toBe(128000);
 		}
+	});
+});
+
+describe("self-correction gating by input size (#3)", () => {
+	beforeEach(() => {
+		completeSimpleMock.mockReset();
+		completeSimpleMock.mockResolvedValue(mockSummaryResponse);
+	});
+
+	const baseFileOps = () => ({
+		read: new Set<string>(),
+		written: new Set<string>(),
+		edited: new Set<string>(),
+		searches: new Set<string>(),
+		shellCmds: new Set<string>(),
+		mcpCalls: new Set<string>(),
+	});
+
+	it("skips the verification pass for small inputs (one summary call only)", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: [{ role: "user", content: "short", timestamp: Date.now() }],
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 1000,
+			fileOps: baseFileOps(),
+			settings: { enabled: true, reserveTokens: 20000, keepRecentTokens: 20000, selfCorrection: true },
+		};
+
+		await compact(preparation, createModel(false), "test-key");
+
+		// Summary only — no second (verification) call.
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("runs the verification pass for large inputs (summary + verify)", async () => {
+		// ~120k chars of prose ≈ 30k tokens > VERIFY_MIN_INPUT_TOKENS (25k).
+		const bigText = "word ".repeat(24000);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: [{ role: "user", content: bigText, timestamp: Date.now() }],
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 200000,
+			fileOps: baseFileOps(),
+			settings: { enabled: true, reserveTokens: 20000, keepRecentTokens: 20000, selfCorrection: true },
+		};
+
+		await compact(preparation, createModel(false), "test-key");
+
+		// Summary + verification.
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+	});
+
+	it("never verifies when selfCorrection is disabled, regardless of size", async () => {
+		const bigText = "word ".repeat(24000);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: [{ role: "user", content: bigText, timestamp: Date.now() }],
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 200000,
+			fileOps: baseFileOps(),
+			settings: { enabled: true, reserveTokens: 20000, keepRecentTokens: 20000, selfCorrection: false },
+		};
+
+		await compact(preparation, createModel(false), "test-key");
+
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
 	});
 });

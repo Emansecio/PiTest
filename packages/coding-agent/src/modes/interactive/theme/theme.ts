@@ -333,6 +333,21 @@ function resolveThemeColors<T extends Record<string, ColorValue>>(
 }
 
 // ============================================================================
+// Context-usage severity thresholds
+// ============================================================================
+
+/** Above this % of the context window filled, usage is shown in `warning`. */
+export const CONTEXT_USAGE_WARN_PERCENT = 70;
+/** Above this % of the context window filled, usage is shown in `error`. */
+export const CONTEXT_USAGE_ERROR_PERCENT = 90;
+/**
+ * Above this % the context is about to force compaction — usage gets the
+ * strongest non-annoying treatment (bold `error`, no blink). Distinct from
+ * plain `error` so the last few points before the limit stand out.
+ */
+export const CONTEXT_USAGE_CRITICAL_PERCENT = 97;
+
+// ============================================================================
 // Theme Class
 // ============================================================================
 
@@ -430,6 +445,24 @@ export class Theme {
 			default:
 				return (str: string) => this.fg("thinkingOff", str);
 		}
+	}
+
+	/**
+	 * Pick a palette colorizer by how full the context window is: `muted` under
+	 * {@link CONTEXT_USAGE_WARN_PERCENT}, `warning` past it, `error` past
+	 * {@link CONTEXT_USAGE_ERROR_PERCENT}, and bold `error` past
+	 * {@link CONTEXT_USAGE_CRITICAL_PERCENT} (about to force compaction).
+	 * Thresholds are strict `>` (the lower band owns its boundary). Shared by the
+	 * footer and any other context-fill indicator so they escalate identically.
+	 */
+	getContextUsageColor(percent: number): (str: string) => string {
+		// Emit the bold SGR directly (like `bg`) rather than via chalk, so the
+		// critical band is always distinct from plain `error` regardless of
+		// chalk's color level — `fg` already emits raw ANSI unconditionally.
+		if (percent > CONTEXT_USAGE_CRITICAL_PERCENT) return (str: string) => `\x1b[1m${this.fg("error", str)}\x1b[22m`;
+		if (percent > CONTEXT_USAGE_ERROR_PERCENT) return (str: string) => this.fg("error", str);
+		if (percent > CONTEXT_USAGE_WARN_PERCENT) return (str: string) => this.fg("warning", str);
+		return (str: string) => this.fg("muted", str);
 	}
 
 	getBashModeBorderColor(): (str: string) => string {

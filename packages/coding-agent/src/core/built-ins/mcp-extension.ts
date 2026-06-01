@@ -8,6 +8,22 @@
 
 import type { ExtensionAPI } from "../extensions/types.ts";
 import { McpManager, type McpSettings, wrapMcpToolAsDefinition } from "../mcp/index.ts";
+import { getCurrentToolDiscoveryIndex } from "../tool-discovery.ts";
+
+/**
+ * Spike flag (env `PIT_DEFER_MCP=1`): defer MCP tool schemas off the default
+ * tool surface. Instead of registering every advertised MCP tool as an active
+ * `ToolDefinition` (whose full JSON Schema is sent to the model every turn),
+ * register it into the hidden tool-discovery index. The model pulls a tool in
+ * on demand via `search_tool_bm25`; activation is reconciled into the active
+ * surface by the session. Mirrors Factory's "deferred context engine":
+ * discovery (compact index) is separated from execution (full schema on use).
+ *
+ * Default off — when unset the original eager registration is unchanged.
+ */
+function deferMcpEnabled(): boolean {
+	return process.env.PIT_DEFER_MCP === "1";
+}
 
 export interface McpExtensionOptions {
 	settings: McpSettings;
@@ -37,12 +53,37 @@ export function createMcpExtension(options: McpExtensionOptions) {
 				return;
 			}
 			await manager.connectAll();
+			const defer = deferMcpEnabled();
+			const index = defer ? getCurrentToolDiscoveryIndex() : undefined;
+			let deferredCount = 0;
 			for (const { prefixedName, schema } of manager.listTools()) {
 				try {
-					pi.registerTool(wrapMcpToolAsDefinition(manager, prefixedName, schema));
+					const definition = wrapMcpToolAsDefinition(manager, prefixedName, schema);
+					if (index) {
+						// Deferred: keep the full schema OFF the active surface; the model
+						// finds it via search_tool_bm25 and the session activates it.
+						index.register({
+							name: definition.name,
+							description: typeof definition.description === "string" ? definition.description : "",
+							promptSnippet: typeof definition.promptSnippet === "string" ? definition.promptSnippet : undefined,
+							definition,
+						});
+						deferredCount++;
+					} else {
+						pi.registerTool(definition);
+					}
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					console.error(`[mcp] failed to register ${prefixedName}: ${message}`);
+				}
+			}
+			// With tools deferred, the discovery tool must be on the active surface
+			// so the model can actually find them. (It is registered but inactive by
+			// default.) No-op when nothing was deferred.
+			if (index && deferredCount > 0) {
+				const active = pi.getActiveTools();
+				if (!active.includes("search_tool_bm25")) {
+					pi.setActiveTools([...active, "search_tool_bm25"]);
 				}
 			}
 		});

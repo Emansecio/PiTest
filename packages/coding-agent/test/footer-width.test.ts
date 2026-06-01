@@ -54,6 +54,7 @@ function createSession(options: {
 		modelRegistry: {
 			isUsingOAuth: () => false,
 		},
+		goalStatusLine: () => "",
 	};
 
 	return session as unknown as AgentSession;

@@ -70,6 +70,11 @@ import type {
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import { parseTokenBudget } from "../../core/goal/goal-manager.ts";
+
+/** Footer goal-spinner re-render cadence (~12fps), matching the spinner frame rate. */
+const GOAL_SPINNER_TICK_MS = 80;
+
 import { getCurrentHindsightBank } from "../../core/hindsight/index.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
@@ -91,7 +96,9 @@ import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import {
+	type AskOptionsAnswer,
 	type AskOptionsRequest,
+	computeAutoAnswer,
 	createUserInputBus,
 	setCurrentUserInputBus,
 	type UserInputBus,
@@ -319,6 +326,10 @@ export class InteractiveMode {
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
+
+	// Periodic re-render that keeps the footer's goal spinner animating even in
+	// the brief gaps between autonomous turns (no streaming to drive renders).
+	private _goalSpinnerTimer: ReturnType<typeof setInterval> | undefined;
 
 	// User-input bus: tools (e.g. `ask`) request structured option picks via this.
 	private userInputBus: UserInputBus = createUserInputBus();
@@ -696,6 +707,11 @@ export class InteractiveMode {
 		// option pick mid-turn. Print mode intentionally does NOT bind a listener
 		// — the bus auto-resolves with the recommended/first option in that case.
 		this.bindUserInputBus();
+
+		// Animate the footer goal spinner; resume it for a goal restored from the
+		// session file, and tear it down on shutdown.
+		this.signalCleanupHandlers.push(() => this._stopGoalSpinner());
+		this._startGoalSpinner();
 
 		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
 		this.ui.start();
@@ -2238,6 +2254,11 @@ export class InteractiveMode {
 			await this.handlePreviewCommand(text === "/preview" ? "" : text.slice(9).trim());
 			return true;
 		}
+		if (text === "/goal" || text.startsWith("/goal ")) {
+			this.editor.setText("");
+			await this.handleGoalCommand(text === "/goal" ? "" : text.slice(6).trim());
+			return true;
+		}
 
 		// Exact-match commands — dispatch via static table to avoid per-call closure allocation
 		const cmd = InteractiveMode._exactSlashCommands.get(text);
@@ -2248,6 +2269,116 @@ export class InteractiveMode {
 		}
 
 		return false;
+	}
+
+	/**
+	 * `/goal` — autonomous goal mode. Subcommands: (none)=status, pause, resume,
+	 * clear, edit <obj>, --tokens <budget> <obj>, or a bare <objective> to start.
+	 */
+	private async handleGoalCommand(args: string): Promise<void> {
+		const trimmed = args.trim();
+		if (trimmed === "") {
+			this.showStatus(this.session.goalSummaryText());
+			return;
+		}
+		const parts = trimmed.split(/\s+/);
+		const sub = parts[0] ?? "";
+		switch (sub) {
+			case "pause":
+				this.session.pauseGoal();
+				this.showStatus(this.session.goalSummaryText());
+				return;
+			case "resume":
+				this.session.resumeGoal();
+				this.showStatus(this.session.goalSummaryText());
+				if (this.session.goalShouldAutoContinue()) {
+					this._startGoalSpinner();
+					await this.session.prompt("Resume working toward the goal.", { expandPromptTemplates: false });
+				}
+				return;
+			case "clear":
+				this.session.clearGoal();
+				this.showStatus("🎯 Goal cleared.");
+				return;
+			case "edit": {
+				const objective = parts.slice(1).join(" ").trim();
+				if (!objective) {
+					this.showWarning("Usage: /goal edit <new objective>");
+					return;
+				}
+				this.session.editGoal(objective);
+				this.showStatus(this.session.goalSummaryText());
+				return;
+			}
+		}
+
+		// Start a new goal, optionally with a token budget.
+		let objective = trimmed;
+		let tokenBudget: number | undefined;
+		let budgetLabel = "";
+		if (sub === "--tokens") {
+			const budgetStr = parts[1] ?? "";
+			const parsed = parseTokenBudget(budgetStr);
+			if (parsed === undefined) {
+				this.showWarning(`Invalid token budget: "${budgetStr}". Use e.g. 100k or 1.5m.`);
+				return;
+			}
+			tokenBudget = parsed;
+			budgetLabel = ` (budget ${budgetStr})`;
+			objective = parts.slice(2).join(" ").trim();
+		}
+		if (!objective) {
+			this.showWarning("Usage: /goal <objective> | edit <obj> | pause | resume | clear | --tokens <budget> <obj>");
+			return;
+		}
+
+		// Confirm before discarding an in-progress goal (reuses the ask picker).
+		const existing = this.session.goalSnapshot();
+		if (existing && existing.status !== "complete") {
+			const answer = await this.userInputBus.askOptions({
+				question: `Replace the current goal? (${existing.objective})`,
+				header: "goal",
+				options: [
+					{ label: "Replace", description: "Discard the current goal and start this one", recommended: true },
+					{ label: "Keep current", description: "Cancel and keep the existing goal" },
+				],
+				source: { toolName: "goal" },
+			});
+			if (answer.cancelled || answer.picked[0] !== "Replace") {
+				this.showStatus("Kept the current goal.");
+				return;
+			}
+		}
+
+		this.session.startGoal(objective, { tokenBudget });
+		this.showStatus(`🎯 Goal started${budgetLabel}: ${objective}`);
+		this._startGoalSpinner();
+		await this.session.prompt(objective);
+	}
+
+	/**
+	 * Drive a periodic re-render (~12fps) while a goal is active so the footer
+	 * spinner animates smoothly even between autonomous turns. Idempotent; the
+	 * tick auto-stops once the goal is no longer active.
+	 */
+	private _startGoalSpinner(): void {
+		if (this._goalSpinnerTimer) return;
+		if (this.session.goalSnapshot()?.status !== "active") return;
+		this._goalSpinnerTimer = setInterval(() => {
+			if (this.session.goalSnapshot()?.status !== "active") {
+				this._stopGoalSpinner();
+			}
+			this.ui.requestRender();
+		}, GOAL_SPINNER_TICK_MS);
+		// Don't keep the event loop alive just for the spinner.
+		(this._goalSpinnerTimer as { unref?: () => void }).unref?.();
+	}
+
+	private _stopGoalSpinner(): void {
+		if (this._goalSpinnerTimer) {
+			clearInterval(this._goalSpinnerTimer);
+			this._goalSpinnerTimer = undefined;
+		}
 	}
 
 	private subscribeToAgent(): void {
@@ -3490,22 +3621,55 @@ export class InteractiveMode {
 		// Queue if another picker is already up; resolve immediately with
 		// the recommended/first option to avoid stacking overlays.
 		if (this.pendingAskRequest) {
-			const fallback = req.options.find((o) => o.recommended) ?? req.options[0];
-			this.userInputBus.resolve(req.requestId, {
-				picked: fallback ? [fallback.label] : [],
-				cancelled: false,
-			});
+			this.userInputBus.resolve(req.requestId, computeAutoAnswer(req));
 			return;
 		}
 		this.pendingAskRequest = req;
-		this.showSelector((done) => {
-			const { component, focus } = createAskPicker(req, (answer) => {
-				this.userInputBus.resolve(req.requestId, answer);
-				this.pendingAskRequest = undefined;
-				done();
+
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let close: (() => void) | undefined;
+		// Single funnel for every resolution path (user answer, timeout, cancel)
+		// so the bus is resolved once and the UI is always torn down.
+		const resolveOnce = (answer: Omit<AskOptionsAnswer, "requestId">) => {
+			if (this.pendingAskRequest !== req) return;
+			if (timer) {
+				clearTimeout(timer);
+				timer = undefined;
+			}
+			this.pendingAskRequest = undefined;
+			this.userInputBus.resolve(req.requestId, answer);
+			close?.();
+		};
+
+		const displayMode = req.displayMode ?? "overlay";
+		if (displayMode === "overlay") {
+			let handle: OverlayHandle | undefined;
+			const hooks = { onToggleVisibility: () => handle?.setHidden(!handle.isHidden()) };
+			void this.showExtensionCustom<void>(
+				(_tui, _theme, _kb, done) => {
+					close = () => done(undefined);
+					const { component } = createAskPicker(req, resolveOnce, hooks);
+					return component;
+				},
+				{
+					overlay: true,
+					overlayOptions: { width: "60%", anchor: "center" },
+					onHandle: (h) => {
+						handle = h;
+					},
+				},
+			);
+		} else {
+			this.showSelector((done) => {
+				close = done;
+				const { component, focus } = createAskPicker(req, resolveOnce);
+				return { component, focus };
 			});
-			return { component, focus };
-		});
+		}
+
+		if (typeof req.timeout === "number" && req.timeout > 0) {
+			timer = setTimeout(() => resolveOnce(computeAutoAnswer(req)), req.timeout);
+		}
 	}
 
 	// =========================================================================

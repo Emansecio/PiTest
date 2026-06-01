@@ -11,6 +11,7 @@ import {
 } from "../../../core/tools/truncate.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
+import { clampBashCommandRow } from "./bash-command-row.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 import { MessageShell } from "./message-shell.ts";
 
@@ -154,9 +155,21 @@ export class BashExecutionComponent extends MessageShell {
 		this.contentContainer.clear();
 
 		// Command header — shell already provides the 1-col left inset via the
-		// gutter; no internal paddingX needed.
-		const header = new Text(theme.fg("bashMode", theme.bold(`$ ${this.command}`)), 0, 0);
-		this.contentContainer.addChild(header);
+		// gutter; no internal paddingX needed. Collapsed, a long command is clamped
+		// to a single visual row (horizontal clip via `…`, multi-line scripts folded
+		// into `(N earlier lines, …)`); ctrl+o expands to the full command. Mirrors
+		// the agent-issued bash tool's title clamp so user `!` commands don't wrap.
+		const command = this.command;
+		const expanded = this.expanded;
+		this.contentContainer.addChild({
+			render: (width: number): string[] => {
+				if (expanded) {
+					return new Text(theme.fg("bashMode", theme.bold(`$ ${command}`)), 0, 0).render(width);
+				}
+				return [clampBashCommandRow({ command, width, colorKey: "bashMode" })];
+			},
+			invalidate: () => {},
+		});
 
 		// Output
 		if (availableLines.length > 0) {

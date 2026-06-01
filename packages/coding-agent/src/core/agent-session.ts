@@ -39,13 +39,20 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	compact,
+	computeDynamicReserve,
 	estimateContextTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	shouldCompact,
+	shouldCompactSoft,
 } from "./compaction/index.ts";
 import { extractToolFileOp } from "./compaction/utils.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+import {
+	createDeferredOutputStore,
+	getCurrentDeferredOutputStore,
+	setCurrentDeferredOutputStore,
+} from "./deferred-output-store.ts";
 import { getEngineeringStyleGuidelines } from "./engineering-styles.js";
 import {
 	createEvalKernelManager,
@@ -89,6 +96,7 @@ import {
 	loadFrequentFilesSnapshot,
 	saveFrequentFilesSnapshot,
 } from "./frequent-files.js";
+import { GoalManager, type GoalSnapshot, type GoalState, setCurrentGoalManager } from "./goal/goal-manager.ts";
 import {
 	defaultBankPath,
 	ensureBankDir,
@@ -215,6 +223,20 @@ export interface ExtensionBindings {
 }
 
 /** Options for AgentSession.prompt() */
+/**
+ * Safety cap on autonomous goal continuations spawned from a single user
+ * prompt. Hitting it pauses the goal so the user can decide whether to resume —
+ * a backstop against a goal that never calls goal_complete and has no budget.
+ */
+const GOAL_MAX_AUTO_ITERATIONS = 50;
+
+/**
+ * Minimum interval between turn-driven goal persistence writes. Status changes
+ * always persist immediately; token/iteration progress is throttled so a long
+ * goal doesn't append a custom entry on every single turn.
+ */
+const GOAL_PERSIST_THROTTLE_MS = 10_000;
+
 export interface PromptOptions {
 	/** Whether to expand file-based prompt templates (default: true) */
 	expandPromptTemplates?: boolean;
@@ -293,6 +315,10 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	// In-flight predictive (soft-threshold) background compaction, started at the
+	// end of a turn. The next prompt awaits this so it never sends mid-mutation;
+	// if it already finished, the await is instant (the whole point — no wait).
+	private _backgroundCompactionPromise: Promise<unknown> | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
 	private _lastCompactionDeficit = 0;
 
@@ -390,9 +416,23 @@ export class AgentSession {
 	// Hindsight memory bank, opened in the constructor when settings enable it.
 	private _hindsightBank: HindsightBank | undefined;
 
+	// Deferred-output store for PIT_DEFER_HISTORY=1. Session-scoped temp dir;
+	// disposed on session close.
+	private _deferredOutputStore: import("./deferred-output-store.ts").DeferredOutputStore | undefined;
+
 	// Preview queue for staged mutations (edit/write/edit_v2 with preview:true).
 	// Published via the module-level registry so tools can pull it on demand.
 	private _previewQueue: PreviewQueue | undefined;
+
+	// Autonomous goal state (the /goal command + goal_complete tool). Published
+	// via the module-level registry so the tool can reach it on demand.
+	private readonly _goal = new GoalManager();
+	// Guards against re-entering the goal auto-continuation loop from within a
+	// continuation prompt.
+	private _inGoalContinuation = false;
+	// Throttle state for turn-driven goal persistence.
+	private _lastGoalStatus: string | undefined;
+	private _lastGoalPersistMs = 0;
 
 	// Hidden tool discovery index. Published at session boot so the
 	// `search_tool_bm25` tool can BM25-search specialized tools that are NOT
@@ -453,6 +493,7 @@ export class AgentSession {
 		});
 
 		this._openHindsightBank();
+		this._openDeferredOutputStore();
 
 		// Compute the repo-level "frequent files" index in the background. First
 		// turn may miss it; subsequent turns get the cached list in the system
@@ -463,6 +504,11 @@ export class AgentSession {
 		// stage previews and the `resolve` tool can commit/discard them.
 		this._previewQueue = createPreviewQueue();
 		setCurrentPreviewQueue(this._previewQueue);
+
+		// Publish the goal manager and restore any persisted goal from the
+		// session file so `/reload` and reopening keep an unfinished goal.
+		setCurrentGoalManager(this._goal);
+		this._restoreGoalFromSession();
 
 		// Publish a fresh tool discovery index so the `search_tool_bm25` tool
 		// can BM25-search hidden tools. Auto-seeding of hidden entries is gated
@@ -526,6 +572,7 @@ export class AgentSession {
 			"recall",
 			"reflect",
 			"forget",
+			"goal_complete",
 		]);
 		const alwaysActive = new Set(cfg.alwaysActive);
 		const candidates = new Set<string>(explicit);
@@ -562,6 +609,22 @@ export class AgentSession {
 			setCurrentHindsightBank(bank);
 		} catch {
 			// Silent: missing or unreadable banks should not crash the session.
+		}
+	}
+
+	/**
+	 * Open a session-scoped deferred-output store when PIT_DEFER_HISTORY=1.
+	 * Publishes it via the module-level registry so pruneOldToolOutputs and the
+	 * recall_tool_output tool can access it. No-op when the env var is unset.
+	 */
+	private _openDeferredOutputStore(): void {
+		if (process.env.PIT_DEFER_HISTORY !== "1") return;
+		try {
+			const store = createDeferredOutputStore();
+			this._deferredOutputStore = store;
+			setCurrentDeferredOutputStore(store);
+		} catch {
+			// Silent: a failure here should not crash the session.
 		}
 	}
 
@@ -894,6 +957,7 @@ export class AgentSession {
 						toolResults: event.toolResults,
 					} satisfies TurnEndEvent);
 				}
+				this._recordGoalTurn(event.message);
 				this._turnIndex++;
 				break;
 			case "message_start":
@@ -1016,6 +1080,50 @@ export class AgentSession {
 			if (fileOp) {
 				this._frequentFiles.record(fileOp.path, fileOp.op);
 			}
+		}
+		// A tool may have pulled a hidden tool into the active surface this turn
+		// (search_tool_bm25 with activate_top). Reconcile so it is callable next
+		// turn. Cheap no-op when nothing was activated.
+		this._reconcileDiscoveryActivations();
+	}
+
+	/**
+	 * Bring any tools activated in the discovery index onto the active surface.
+	 * Two cases: a hidden built-in already lives in the registry (just mark it
+	 * active), or a deferred tool (e.g. an MCP tool registered into the index but
+	 * not the registry) must first be registered as a custom tool. Idempotent and
+	 * a no-op when the index has no activations, so it is safe to call after every
+	 * tool execution regardless of whether deferral is enabled.
+	 */
+	private _reconcileDiscoveryActivations(): void {
+		const index = this._toolDiscoveryIndex;
+		if (!index) return;
+		const activated = index.activatedNames();
+		if (activated.length === 0) return;
+
+		const activeNow = new Set(this.getActiveToolNames());
+		const toActivate: string[] = [];
+		let registeredNew = false;
+		for (const name of activated) {
+			if (activeNow.has(name)) continue;
+			if (this._toolRegistry.has(name)) {
+				toActivate.push(name);
+			} else if (!this._customTools.some((t) => t.name === name)) {
+				const def = index.activate(name);
+				if (def) {
+					this._customTools.push(def as ToolDefinition);
+					registeredNew = true;
+				}
+			}
+		}
+		if (!registeredNew && toActivate.length === 0) return;
+		// Refresh registers any new custom tools (and auto-activates them); then
+		// fold in the already-registered hidden tools we want live.
+		if (registeredNew) {
+			this._refreshToolRegistry();
+		}
+		if (toActivate.length > 0) {
+			this.setActiveToolsByName([...new Set([...this.getActiveToolNames(), ...toActivate])]);
 		}
 	}
 
@@ -1318,6 +1426,12 @@ export class AgentSession {
 			setCurrentHindsightBank(undefined);
 		}
 		this._hindsightBank = undefined;
+		// Dispose deferred-output store and clear registry if this session owns it.
+		if (this._deferredOutputStore && getCurrentDeferredOutputStore() === this._deferredOutputStore) {
+			this._deferredOutputStore.dispose();
+			setCurrentDeferredOutputStore(undefined);
+		}
+		this._deferredOutputStore = undefined;
 		// Clear preview queue registry only if this session owns the current queue.
 		if (this._previewQueue && getCurrentPreviewQueue() === this._previewQueue) {
 			setCurrentPreviewQueue(undefined);
@@ -1398,6 +1512,115 @@ export class AgentSession {
 
 	getToolDefinition(name: string): ToolDefinition | undefined {
 		return this._toolDefinitions.get(name)?.definition;
+	}
+
+	// =========================================================================
+	// Autonomous goal mode (/goal command + goal_complete tool)
+	// =========================================================================
+
+	/** Snapshot of the current goal, or undefined when none is active. */
+	goalSnapshot(): GoalSnapshot | undefined {
+		return this._goal.snapshot();
+	}
+
+	/** Compact statusline string for the footer (empty when no goal). */
+	goalStatusLine(): string {
+		// ⟳ marker when the agent is actively driving the goal (streaming a turn
+		// or inside the auto-continuation loop) vs. an idle active goal.
+		return this._goal.statusLine(this._inGoalContinuation || this.isStreaming);
+	}
+
+	/** Multi-line human summary for `/goal` with no args. */
+	goalSummaryText(): string {
+		return this._goal.summaryText();
+	}
+
+	/** Whether the agent should auto-continue after the current prompt. */
+	goalShouldAutoContinue(): boolean {
+		return this._goal.shouldAutoContinue();
+	}
+
+	/** Start (or replace) the autonomous goal and surface the goal_complete tool. */
+	startGoal(objective: string, opts: { tokenBudget?: number } = {}): GoalSnapshot {
+		const snap = this._goal.start(objective, opts);
+		this._activateGoalTool(true);
+		this._persistGoal();
+		return snap;
+	}
+
+	editGoal(objective: string): void {
+		this._goal.edit(objective);
+		this._persistGoal();
+	}
+
+	pauseGoal(): void {
+		this._goal.pause();
+		this._persistGoal();
+	}
+
+	resumeGoal(): void {
+		this._goal.resume();
+		this._persistGoal();
+	}
+
+	clearGoal(): void {
+		this._goal.clear();
+		this._activateGoalTool(false);
+		this._persistGoal();
+	}
+
+	private _activateGoalTool(active: boolean): void {
+		const names = new Set(this.getActiveToolNames());
+		if (active) names.add("goal_complete");
+		else names.delete("goal_complete");
+		this.setActiveToolsByName([...names]);
+	}
+
+	/** Record a finished turn into the goal (token usage + interruption status). */
+	private _recordGoalTurn(message: unknown): void {
+		if (!this._goal.get()) return;
+		const m = message as { usage?: { input?: number; output?: number }; stopReason?: string } | undefined;
+		const usage = m?.usage;
+		const tokens = usage ? (usage.input ?? 0) + (usage.output ?? 0) : 0;
+		this._goal.recordTurn(tokens);
+		if (typeof m?.stopReason === "string") this._goal.onInterrupted(m.stopReason);
+		// Persist progress so token/iteration counts survive /reload. Status
+		// changes flush immediately; otherwise writes are throttled.
+		const after = this._goal.get();
+		if (!after) return;
+		const statusChanged = after.status !== this._lastGoalStatus;
+		if (statusChanged || Date.now() - this._lastGoalPersistMs > GOAL_PERSIST_THROTTLE_MS) {
+			this._persistGoal();
+		}
+	}
+
+	private _persistGoal(): void {
+		try {
+			const snapshot = this._goal.serialize() ?? null;
+			this.sessionManager.appendCustomEntry("goal", snapshot);
+			this._lastGoalStatus = snapshot?.status;
+			this._lastGoalPersistMs = Date.now();
+		} catch {
+			// Persistence is best-effort; a write failure must not break the session.
+		}
+	}
+
+	private _restoreGoalFromSession(): void {
+		try {
+			let latest: GoalState | undefined;
+			for (const e of this.sessionManager.getEntries()) {
+				const entry = e as { type?: string; customType?: string; data?: GoalState | null };
+				if (entry.type === "custom" && entry.customType === "goal") {
+					latest = entry.data ?? undefined;
+				}
+			}
+			if (latest && latest.status !== "complete") {
+				this._goal.restore(latest);
+				this._activateGoalTool(true);
+			}
+		} catch {
+			// Best-effort restore; ignore malformed/legacy entries.
+		}
 	}
 
 	/**
@@ -1608,11 +1831,42 @@ export class AgentSession {
 			this._retryAttempt = 0;
 		}
 
-		return await this._checkCompaction(msg);
+		// End-of-turn: allow predictive background compaction (overlaps the user's
+		// read time so the next prompt rarely waits).
+		return await this._checkCompaction(msg, true, true);
 	}
 
 	/**
-	 * Send a prompt to the agent.
+	 * Send a prompt to the agent, then (in autonomous goal mode) keep driving
+	 * continuation turns until the goal is complete, paused, budget-limited, or
+	 * interrupted. A safety cap bounds runaway loops; hitting it pauses the goal.
+	 */
+	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		await this._promptOnce(text, options);
+
+		// Goal auto-continuation. Guarded so a continuation prompt (or a steer
+		// arriving mid-loop) never spawns a nested loop.
+		if (this._inGoalContinuation || !this._goal.shouldAutoContinue()) return;
+		this._inGoalContinuation = true;
+		try {
+			let iterations = 0;
+			while (this._goal.shouldAutoContinue()) {
+				if (iterations++ >= GOAL_MAX_AUTO_ITERATIONS) {
+					this.pauseGoal();
+					break;
+				}
+				await this._promptOnce(this._goal.continuationPrompt(), {
+					expandPromptTemplates: false,
+					source: options?.source,
+				});
+			}
+		} finally {
+			this._inGoalContinuation = false;
+		}
+	}
+
+	/**
+	 * Send a single prompt to the agent.
 	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
 	 * - Expands file-based prompt templates by default
 	 * - During streaming, queues via steer() or followUp() based on streamingBehavior option
@@ -1620,7 +1874,7 @@ export class AgentSession {
 	 * @throws Error if streaming and no streamingBehavior specified
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
-	async prompt(text: string, options?: PromptOptions): Promise<void> {
+	private async _promptOnce(text: string, options?: PromptOptions): Promise<void> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
@@ -1699,6 +1953,11 @@ export class AgentSession {
 				throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 			}
 
+			// Join any predictive background compaction started at the end of the
+			// previous turn before we read/mutate session state. Instant if it
+			// already finished during the user's read time.
+			await this._awaitBackgroundCompaction();
+
 			// Check if we need to compact before sending (catches aborted responses)
 			const lastAssistant = this._findLastAssistantMessage();
 			if (lastAssistant && (await this._checkCompaction(lastAssistant, false))) {
@@ -1758,6 +2017,12 @@ export class AgentSession {
 			} else {
 				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
+			}
+			// Inject the autonomous-goal persistence section (per-turn, dynamic so
+			// it tracks pause/clear/complete without a full system-prompt rebuild).
+			const goalSection = this._goal.systemPromptSection();
+			if (goalSection) {
+				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${goalSection}`;
 			}
 		} catch (error) {
 			preflightResult?.(false);
@@ -2457,7 +2722,11 @@ export class AgentSession {
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 */
-	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+	private async _checkCompaction(
+		assistantMessage: AssistantMessage,
+		skipAbortedCheck = true,
+		allowBackground = false,
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
@@ -2532,14 +2801,49 @@ export class AgentSession {
 			contextTokens = calculateContextTokens(assistantMessage.usage);
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings, this._lastCompactionDeficit)) {
-			const reserve =
-				contextWindow > 200_000
-					? Math.max(settings.reserveTokens, 20_000)
-					: Math.max(settings.reserveTokens, Math.floor(contextWindow * 0.1));
+			// Same reserve `shouldCompact` uses, via the shared helper (was a
+			// hand-inlined copy that drifted from computeDynamicReserve).
+			const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
 			this._lastCompactionDeficit = contextTokens - (contextWindow - reserve);
 			return await this._runAutoCompaction("threshold", false);
 		}
+
+		// Predictive (soft) compaction: when allowed (end-of-turn path) and we are
+		// approaching — but not yet at — the hard threshold, compact in the
+		// BACKGROUND so it finishes while the user reads the turn. The next prompt
+		// joins on `_backgroundCompactionPromise`. Fire-and-forget here; returning
+		// false keeps the turn from blocking. Guarded so only one runs at a time
+		// and never while streaming or another compaction is in flight.
+		if (
+			allowBackground &&
+			!this._backgroundCompactionPromise &&
+			!this.isCompacting &&
+			!this.isStreaming &&
+			shouldCompactSoft(contextTokens, contextWindow, settings)
+		) {
+			this._backgroundCompactionPromise = this._runAutoCompaction("threshold", false)
+				.catch(() => false)
+				.finally(() => {
+					this._backgroundCompactionPromise = undefined;
+				});
+		}
 		return false;
+	}
+
+	/**
+	 * Wait for an in-flight predictive background compaction to settle before
+	 * touching session state for a new prompt. Instant when none is running (the
+	 * common case once it has finished during the user's read time).
+	 */
+	private async _awaitBackgroundCompaction(): Promise<void> {
+		const inFlight = this._backgroundCompactionPromise;
+		if (!inFlight) return;
+		try {
+			await inFlight;
+		} catch {
+			// Failures are already surfaced via compaction_end; the hard threshold
+			// check remains as the synchronous fallback on the next turn.
+		}
 	}
 
 	/**
@@ -2994,9 +3298,20 @@ export class AgentSession {
 		// Both default to true in settings-manager so they ride out-of-the-box.
 		const webSearchActive = this.settingsManager.getWebSearchSettings().enabled ? ["web_search"] : [];
 		const evalActive = this.settingsManager.getEvalSettings().enabled ? ["eval"] : [];
+		const deferHistoryActive = process.env.PIT_DEFER_HISTORY === "1" ? ["recall_tool_output"] : [];
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write", ...hindsightActive, ...webSearchActive, ...evalActive];
+			: [
+					"read",
+					"bash",
+					"edit",
+					"write",
+					"ask",
+					...hindsightActive,
+					...webSearchActive,
+					...evalActive,
+					...deferHistoryActive,
+				];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

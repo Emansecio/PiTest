@@ -8,6 +8,7 @@
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@pit/ai";
 import { completeSimple } from "@pit/ai";
+import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -235,12 +236,16 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 
 /**
  * Compute a dynamic reserve that scales with context window size.
- * Small windows (≤200k): 10% of window or configured reserve, whichever is larger.
- * Large windows (>200k): configured reserve or 20k, whichever is larger.
+ * - Small windows (≤200k): 10% of window, or the configured reserve.
+ * - Large windows (>200k): the configured reserve, a 20k floor, AND a 2.5%
+ *   floor. The percentage floor matters for very large windows: a flat 20k on a
+ *   1M window is only 2% (trigger at ~98%, dangerously close to the hard limit
+ *   if the token estimate runs low); 2.5% keeps ~25k headroom (~97.5%), leaving
+ *   slack for estimation error before the model rejects on overflow.
  */
-function computeDynamicReserve(contextWindow: number, configuredReserve: number): number {
+export function computeDynamicReserve(contextWindow: number, configuredReserve: number): number {
 	if (contextWindow > 200_000) {
-		return Math.max(configuredReserve, 20_000);
+		return Math.max(configuredReserve, 20_000, Math.ceil(contextWindow * 0.025));
 	}
 	return Math.max(configuredReserve, Math.floor(contextWindow * 0.1));
 }
@@ -270,11 +275,43 @@ export function shouldCompact(
 	return deficit > lastCompactionDeficit + COALESCING_THRESHOLD_TOKENS;
 }
 
+/**
+ * Soft (predictive) trigger: fire compaction ~one `keepRecentTokens` window
+ * BEFORE the hard threshold. Run in the background while the user reads the
+ * just-finished turn, so the summary is ready before they send the next prompt
+ * (no visible compaction wait). The hard `shouldCompact` stays as the
+ * synchronous fallback for turns that jump straight past it.
+ *
+ * Returns false once at/over the hard threshold — there the caller must compact
+ * synchronously, not defer.
+ */
+export function shouldCompactSoft(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
+	if (!settings.enabled) return false;
+	const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
+	const hardThreshold = contextWindow - reserve;
+	if (contextTokens > hardThreshold) return false; // hard path owns this
+	const softThreshold = hardThreshold - settings.keepRecentTokens;
+	return softThreshold > 0 && contextTokens > softThreshold;
+}
+
 // ============================================================================
 // Cut point detection
 // ============================================================================
 
-const tokenEstimateCache = new WeakMap<AgentMessage, number>();
+/** Chars-per-token ratios for content classification. */
+const CHARS_PER_TOKEN_PROSE = 4;
+const CHARS_PER_TOKEN_DENSE = 3.3;
+/** Token cost for an image block (kept as constant). */
+const IMAGE_TOKENS = 1200;
+
+/** Classified char counts for a message — imutável, logo cacheável. */
+interface MessageCharCounts {
+	dense: number;
+	prose: number;
+	images: number; // already in tokens (IMAGE_TOKENS per image)
+}
+
+const charCountCache = new WeakMap<AgentMessage, MessageCharCounts>();
 const argsLengthCache = new WeakMap<object, number>();
 
 function cachedArgsLength(args: unknown): number {
@@ -289,80 +326,120 @@ function cachedArgsLength(args: unknown): number {
 }
 
 /**
- * Estimate token count for a message using chars/4 heuristic.
- * This is conservative (overestimates tokens).
- * Results are cached per message object (messages are immutable once created).
+ * Classify text as dense (code/JSON/tool-output) or prose.
+ * Dense: non-alphanumeric non-space char fraction > 0.20,
+ * OR structural symbol density > 0.05.
  */
-export function estimateTokens(message: AgentMessage): number {
-	const cached = tokenEstimateCache.get(message);
+function isDenseText(text: string): boolean {
+	if (text.length === 0) return false;
+	let nonAlphaNum = 0;
+	let structural = 0;
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i];
+		if (c !== " " && c !== "\t" && c !== "\n" && c !== "\r") {
+			if (!/[a-zA-Z0-9]/.test(c)) nonAlphaNum++;
+		}
+		if ('{}[]()<>;:,="'.includes(c)) structural++;
+	}
+	return nonAlphaNum / text.length > 0.2 || structural / text.length > 0.05;
+}
+
+/**
+ * Estimate tokens for a raw text string, classifying it as dense or prose.
+ * Exported for use in pruneOldToolOutputs and tests.
+ */
+export function estimateTextTokens(text: string, forceDense = false): number {
+	if (text.length === 0) return 0;
+	const dense = forceDense || isDenseText(text);
+	return Math.ceil(text.length / (dense ? CHARS_PER_TOKEN_DENSE : CHARS_PER_TOKEN_PROSE));
+}
+
+/** Count chars in a message, separated by density. Images stored as token count. */
+function countMessageChars(message: AgentMessage): MessageCharCounts {
+	const cached = charCountCache.get(message);
 	if (cached !== undefined) return cached;
 
-	let chars = 0;
-	let result: number;
+	const counts: MessageCharCounts = { dense: 0, prose: 0, images: 0 };
 
 	switch (message.role) {
 		case "user": {
 			const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
 			if (typeof content === "string") {
-				chars = content.length;
+				if (isDenseText(content)) counts.dense += content.length;
+				else counts.prose += content.length;
 			} else if (Array.isArray(content)) {
 				for (const block of content) {
 					if (block.type === "text" && block.text) {
-						chars += block.text.length;
+						if (isDenseText(block.text)) counts.dense += block.text.length;
+						else counts.prose += block.text.length;
 					}
 				}
 			}
-			result = Math.ceil(chars / 4);
 			break;
 		}
 		case "assistant": {
 			const assistant = message as AssistantMessage;
 			for (const block of assistant.content) {
 				if (block.type === "text") {
-					chars += block.text.length;
+					if (isDenseText(block.text)) counts.dense += block.text.length;
+					else counts.prose += block.text.length;
 				} else if (block.type === "thinking") {
-					chars += block.thinking.length;
+					// thinking is usually prose
+					if (isDenseText(block.thinking)) counts.dense += block.thinking.length;
+					else counts.prose += block.thinking.length;
 				} else if (block.type === "toolCall") {
-					chars += block.name.length + cachedArgsLength(block.arguments);
+					// tool name + JSON args — always dense
+					counts.dense += block.name.length + cachedArgsLength(block.arguments);
 				}
 			}
-			result = Math.ceil(chars / 4);
 			break;
 		}
 		case "custom":
 		case "toolResult": {
 			if (typeof message.content === "string") {
-				chars = message.content.length;
+				// tool result text — always dense
+				counts.dense += message.content.length;
 			} else {
 				for (const block of message.content) {
 					if (block.type === "text" && block.text) {
-						chars += block.text.length;
+						// tool result text — always dense
+						counts.dense += block.text.length;
 					}
 					if (block.type === "image") {
-						chars += 4800; // Estimate images as 4000 chars, or 1200 tokens
+						counts.images += IMAGE_TOKENS;
 					}
 				}
 			}
-			result = Math.ceil(chars / 4);
 			break;
 		}
 		case "bashExecution": {
-			chars = message.command.length + message.output.length;
-			result = Math.ceil(chars / 4);
+			// command + output — always dense
+			counts.dense += message.command.length + message.output.length;
 			break;
 		}
 		case "branchSummary":
 		case "compactionSummary": {
-			chars = message.summary.length;
-			result = Math.ceil(chars / 4);
+			if (isDenseText(message.summary)) counts.dense += message.summary.length;
+			else counts.prose += message.summary.length;
 			break;
 		}
-		default:
-			result = 0;
 	}
 
-	tokenEstimateCache.set(message, result);
-	return result;
+	charCountCache.set(message, counts);
+	return counts;
+}
+
+/**
+ * Estimate token count for a message using content-sensitive heuristics.
+ * Dense content (code/JSON/tool output) uses ~3.3 chars/token;
+ * prose uses ~4 chars/token. Images count as IMAGE_TOKENS each.
+ * Results are cached per message object (messages are immutable once created).
+ */
+export function estimateTokens(message: AgentMessage): number {
+	const counts = countMessageChars(message);
+	return (
+		Math.ceil(counts.prose / CHARS_PER_TOKEN_PROSE) + Math.ceil(counts.dense / CHARS_PER_TOKEN_DENSE) + counts.images
+	);
 }
 
 /**
@@ -531,6 +608,29 @@ export function findCutPoint(
 const PRUNE_TOKEN_THRESHOLD = 20_000;
 /** Number of recent turns (user→assistant pairs) protected from pruning. */
 const PRUNE_PROTECT_TURNS = 2;
+/** Chars of the head/tail kept when shrinking a large tool output (see headTailExcerpt). */
+const PRUNE_HEAD_CHARS = 1500;
+const PRUNE_TAIL_CHARS = 800;
+
+/**
+ * Shrink a large tool output to its head + tail, eliding the middle. Keeps the
+ * output's *shape* for the summarizer — first/last grep matches, a file's header
+ * + footer, an error message + the tail of its stack — instead of a bare
+ * "[pruned]" marker that tells the summarizer nothing. Cuts snap to line breaks
+ * so excerpts stay readable.
+ */
+function headTailExcerpt(text: string): string {
+	if (text.length <= PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS) return text;
+	let head = text.slice(0, PRUNE_HEAD_CHARS);
+	const headNl = head.lastIndexOf("\n");
+	if (headNl > PRUNE_HEAD_CHARS - 400) head = head.slice(0, headNl);
+	let tail = text.slice(text.length - PRUNE_TAIL_CHARS);
+	const tailNl = tail.indexOf("\n");
+	if (tailNl >= 0 && tailNl < 400) tail = tail.slice(tailNl + 1);
+	const middle = text.slice(head.length, text.length - tail.length);
+	const elided = estimateTextTokens(middle, true);
+	return `${head}\n\n[… ~${elided} tokens elided …]\n\n${tail}`;
+}
 
 /**
  * Prune large tool result content from old messages before sending to the
@@ -538,8 +638,9 @@ const PRUNE_PROTECT_TURNS = 2;
  * more focused summaries.
  *
  * Only tool results older than the last `protectTurns` user messages are
- * eligible. Tool results above `tokenThreshold` (estimated) are replaced
- * with a compact placeholder preserving the tool name.
+ * eligible. Tool results above `tokenThreshold` (estimated) are shrunk to a
+ * head+tail excerpt (so the summarizer still sees the output's shape) — or,
+ * when history deferral is enabled, persisted to disk with a recall placeholder.
  *
  * Mutates messages in place (they are already clones from entry extraction).
  */
@@ -563,6 +664,8 @@ export function pruneOldToolOutputs(
 
 	let prunedTokens = 0;
 
+	const store = process.env.PIT_DEFER_HISTORY === "1" ? getCurrentDeferredOutputStore() : undefined;
+
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];
 		if (msg.role !== "toolResult") continue;
@@ -571,10 +674,18 @@ export function pruneOldToolOutputs(
 		for (let b = 0; b < msg.content.length; b++) {
 			const block = msg.content[b];
 			if (block.type === "text" && block.text) {
-				const est = Math.ceil(block.text.length / 4);
+				// Tool outputs are dense (JSON/code), use dense divisor
+				const est = estimateTextTokens(block.text, true);
 				if (est > tokenThreshold) {
 					prunedTokens += est;
-					(msg.content[b] as any).text = `[Tool output pruned — original ~${est} tokens]`;
+					if (store) {
+						const id = store.put(block.text);
+						(msg.content[b] as any).text =
+							`[Tool output deferred (~${est} tokens) — id=${id}. Retrieve with recall_tool_output({ id: "${id}" }) if needed.]`;
+					} else {
+						// Keep the output's shape (head + tail) instead of discarding it.
+						(msg.content[b] as any).text = headTailExcerpt(block.text);
+					}
 				}
 			}
 		}
@@ -773,6 +884,22 @@ If anything is missing or could be more precise, produce a FINAL improved summar
 <summary>
 {SUMMARY}
 </summary>`;
+
+/**
+ * Below this many summarized-input tokens, skip the self-correction pass. The
+ * verification is a SECOND full LLM call per compaction; on small or incremental
+ * compactions there is little content to omit, so the omission risk it guards
+ * against is low and the cost is not justified. Large first-time compactions
+ * (where dropping a file path / error / decision is likely) still verify.
+ */
+const VERIFY_MIN_INPUT_TOKENS = 25_000;
+
+/** Sum content-aware token estimates across a message list. */
+function sumMessageTokens(messages: AgentMessage[]): number {
+	let total = 0;
+	for (const message of messages) total += estimateTokens(message);
+	return total;
+}
 
 /**
  * Run a self-correction pass on a generated summary. A second LLM call
@@ -975,10 +1102,16 @@ export async function compact(
 		cwd,
 	} = preparation;
 
-	// Pre-prune large tool outputs before sending to summarizer
-	pruneOldToolOutputs(messagesToSummarize);
+	// Pre-prune large tool outputs before sending to summarizer. Scale the
+	// threshold to the window: tighter windows prune more aggressively (capped at
+	// the default so large windows are unchanged).
+	const pruneThreshold = Math.min(
+		PRUNE_TOKEN_THRESHOLD,
+		Math.max(4_000, Math.floor((model.contextWindow || 200_000) * 0.1)),
+	);
+	pruneOldToolOutputs(messagesToSummarize, pruneThreshold);
 	if (isSplitTurn) {
-		pruneOldToolOutputs(turnPrefixMessages);
+		pruneOldToolOutputs(turnPrefixMessages, pruneThreshold);
 	}
 
 	// Generate summaries (can be parallel if both needed) and merge into one
@@ -1027,8 +1160,11 @@ export async function compact(
 		);
 	}
 
-	// Self-correction: verify summary for omitted details
-	if (settings.selfCorrection !== false) {
+	// Self-correction: verify summary for omitted details. Gated by input size —
+	// small/incremental compactions skip the second LLM call (low omission risk).
+	const verifyInputTokens =
+		sumMessageTokens(messagesToSummarize) + (isSplitTurn ? sumMessageTokens(turnPrefixMessages) : 0);
+	if (settings.selfCorrection !== false && verifyInputTokens >= VERIFY_MIN_INPUT_TOKENS) {
 		const maxTokens = Math.min(
 			Math.floor(0.8 * settings.reserveTokens),
 			model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,

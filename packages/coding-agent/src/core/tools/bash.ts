@@ -3,6 +3,7 @@ import type { AgentTool } from "@pit/agent-core";
 import { Container, Text, truncateToWidth } from "@pit/tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
+import { clampBashCommandRow } from "../../modes/interactive/components/bash-command-row.ts";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcess } from "../../utils/child-process.ts";
@@ -18,7 +19,13 @@ import { applyKeyAliases } from "./argument-prep.js";
 import { OutputAccumulator } from "./output-accumulator.js";
 import { getTextOutput, invalidArgText, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.js";
+import {
+	collapseRepeatedLines,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type TruncationResult,
+} from "./truncate.js";
 
 const bashSchema = Type.Object(
 	{
@@ -217,13 +224,34 @@ class BashCallRenderComponent {
 
 	render(width: number): string[] {
 		const skipped = this.expanded ? 0 : (this.callState?.skippedHint ?? 0);
-		const key = `${width} ${skipped} ${this.expanded ? 1 : 0} ${str(this.args?.command) ?? ""} ${this.args?.timeout ?? ""}`;
+		const command = str(this.args?.command);
+		const key = `${width} ${skipped} ${this.expanded ? 1 : 0} ${command ?? ""} ${this.args?.timeout ?? ""}`;
 		if (this.cacheLines !== undefined && this.cacheKey === key) return this.cacheLines;
-		let title = formatBashCall(this.args, this.expanded);
-		if (skipped > 0) {
-			title += ` ${theme.fg("muted", `(${skipped} earlier lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
+
+		// Expanded, or no/invalid command: defer to the full multi-row formatter.
+		if (this.expanded || command === null || command === "") {
+			let title = formatBashCall(this.args, this.expanded);
+			if (skipped > 0) {
+				title += ` ${theme.fg("muted", `(${skipped} earlier lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
+			}
+			this.cacheLines = new Text(title, 0, 0).render(width);
+			this.cacheKey = key;
+			return this.cacheLines;
 		}
-		this.cacheLines = new Text(title, 0, 0).render(width);
+
+		// Collapsed: clamp the command to a single visual row (shared with the
+		// user `!` bash header). Skipped output lines fold into the hint count.
+		const timeout = this.args?.timeout as number | undefined;
+		const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
+		this.cacheLines = [
+			clampBashCommandRow({
+				command,
+				width,
+				colorKey: "toolTitle",
+				extraHidden: skipped,
+				suffix: timeoutSuffix,
+			}),
+		];
 		this.cacheKey = key;
 		return this.cacheLines;
 	}
@@ -490,7 +518,10 @@ Common mistakes to avoid:
 
 			const formatOutput = (snapshot: Awaited<ReturnType<typeof finishOutput>>, emptyText = "(no output)") => {
 				const truncation = snapshot.truncation;
-				let text = snapshot.content || emptyText;
+				// Collapse runs of identical consecutive lines (repeated log/test/warning
+				// lines) to cut LLM tokens at the source. Lossless of meaning; the full
+				// output is preserved on disk when truncated (fullOutputPath below).
+				let text = snapshot.content ? collapseRepeatedLines(snapshot.content) : emptyText;
 				let details: BashToolDetails | undefined;
 				if (truncation.truncated) {
 					details = { truncation, fullOutputPath: snapshot.fullOutputPath };

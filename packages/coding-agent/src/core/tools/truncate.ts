@@ -57,6 +57,36 @@ export function formatSize(bytes: number): string {
 	}
 }
 
+/** Default: collapse a run of this many identical consecutive lines or more. */
+export const DEFAULT_COLLAPSE_MIN_RUN = 3;
+
+/**
+ * Collapse runs of identical consecutive lines to shrink verbose command output
+ * before it reaches the LLM (repeated log/test/progress/warning lines). A run of
+ * `minRun` or more identical lines becomes one line + a `… (×N)` count marker;
+ * runs of blank lines collapse to a single blank line. Only CONSECUTIVE
+ * identical lines are merged, so order and distinct content are preserved.
+ * Command-agnostic and lossless-of-meaning (identical lines carry no extra info).
+ */
+export function collapseRepeatedLines(text: string, minRun = DEFAULT_COLLAPSE_MIN_RUN): string {
+	if (!text || minRun < 2) return text;
+	const lines = text.split("\n");
+	const out: string[] = [];
+	let i = 0;
+	while (i < lines.length) {
+		let j = i + 1;
+		while (j < lines.length && lines[j] === lines[i]) j++;
+		const run = j - i;
+		if (run >= minRun) {
+			out.push(lines[i].trim() === "" ? "" : `${lines[i]} … (×${run})`);
+		} else {
+			for (let k = i; k < j; k++) out.push(lines[k]);
+		}
+		i = j;
+	}
+	return out.join("\n");
+}
+
 /**
  * Fast-path check: if content fits within both limits, return a no-truncation
  * result without splitting the string. Returns null when truncation is needed.

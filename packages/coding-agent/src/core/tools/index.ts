@@ -113,6 +113,12 @@ export {
 	type RecallToolOptions,
 } from "./recall.ts";
 export {
+	createRecallToolOutputDefinition,
+	createRecallToolOutputTool,
+	type RecallToolOutputDetails,
+	type RecallToolOutputInput,
+} from "./recall-tool-output.ts";
+export {
 	createRecipeTool,
 	createRecipeToolDefinition,
 	type RecipeToolDetails,
@@ -203,6 +209,11 @@ import {
 import { createEvalTool, createEvalToolDefinition, type EvalToolOptions } from "./eval.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
 import { createForgetTool, createForgetToolDefinition, type ForgetToolOptions } from "./forget.ts";
+import {
+	createGoalCompleteTool,
+	createGoalCompleteToolDefinition,
+	type GoalCompleteToolOptions,
+} from "./goal-complete.ts";
 import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import {
 	createInspectImageTool,
@@ -212,6 +223,7 @@ import {
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createRecallTool, createRecallToolDefinition, type RecallToolOptions } from "./recall.ts";
+import { createRecallToolOutputDefinition, createRecallToolOutputTool } from "./recall-tool-output.ts";
 import { createRecipeTool, createRecipeToolDefinition, type RecipeToolOptions } from "./recipe.ts";
 import { createReflectTool, createReflectToolDefinition, type ReflectToolOptions } from "./reflect.ts";
 import {
@@ -433,6 +445,21 @@ const TOOL_REGISTRY = {
 		readOnly: false,
 		coding: "native",
 	},
+	goal_complete: {
+		factory: createGoalCompleteTool,
+		definitionFactory: createGoalCompleteToolDefinition,
+		optionsKey: "goal_complete",
+		readOnly: false,
+		// Off the default surface; activated dynamically while a goal is active.
+		coding: false,
+	},
+	recall_tool_output: {
+		factory: createRecallToolOutputTool,
+		definitionFactory: createRecallToolOutputDefinition,
+		optionsKey: "recallToolOutput",
+		readOnly: true,
+		coding: false,
+	},
 } satisfies Record<string, ToolRegistryEntry>;
 
 export type ToolName = keyof typeof TOOL_REGISTRY;
@@ -510,7 +537,9 @@ export interface ToolsOptions {
 	recipe?: RecipeToolOptions;
 	inspect_image?: InspectImageToolOptions;
 	render_mermaid?: RenderMermaidToolOptions;
+	goal_complete?: GoalCompleteToolOptions;
 	hindsight?: { enabled?: boolean };
+	recallToolOutput?: Record<string, never>;
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {

@@ -622,4 +622,58 @@ describe("ToolExecutionComponent parity", () => {
 		expect(lines.some((l) => l.trimEnd().endsWith("l7"))).toBe(false);
 		expect(lines.some((l) => l.trimEnd().endsWith("l1"))).toBe(false);
 	});
+
+	test("clamps a long single-line command to one visual row with an expand hint", () => {
+		const longCommand = `grep -rIn "github" --exclude-dir=.git --exclude-dir=.claude . | grep -v "CHANGELOG.md" | grep -v "/tests/" | grep -v "/docs/" | wc -l`;
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-longcmd",
+			{ command: longCommand },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+
+		const width = 80;
+		const lines = stripAnsi(component.render(width).join("\n")).split("\n");
+		// Collapsed: the command occupies exactly one visual row (no word-wrap).
+		const commandRows = lines.filter((l) => l.includes("$ grep"));
+		expect(commandRows.length).toBe(1);
+		expect(commandRows[0].length).toBeLessThanOrEqual(width);
+		// Truncated horizontally → ellipsis + bare expand affordance, no line count.
+		expect(commandRows[0]).toContain("…");
+		expect(commandRows[0]).toContain("to expand");
+		expect(commandRows[0]).not.toContain("earlier lines");
+		// The tail of the command (clipped off) is not visible anywhere.
+		expect(lines.some((l) => l.includes("wc -l"))).toBe(false);
+
+		// Expanded shows the full command (may wrap across rows).
+		component.setExpanded(true);
+		const full = stripAnsi(component.render(width).join("\n"));
+		expect(full).toContain("wc -l");
+	});
+
+	test("clamps a multi-line command to one row and folds extra lines into the hint", () => {
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-multiline",
+			{ command: "line1\nline2\nline3\nline4" },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+
+		const lines = stripAnsi(component.render(120).join("\n")).split("\n");
+		// Only the first command line is shown, on a single visual row.
+		const commandRows = lines.filter((l) => l.includes("$ line1"));
+		expect(commandRows.length).toBe(1);
+		// 3 extra command lines hidden → "3 earlier lines".
+		expect(commandRows[0]).toContain("3 earlier lines");
+		expect(commandRows[0]).toContain("to expand");
+		expect(lines.some((l) => l.includes("line2"))).toBe(false);
+	});
 });

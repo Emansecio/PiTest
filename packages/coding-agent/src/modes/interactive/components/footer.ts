@@ -56,7 +56,7 @@ interface CumulativeTotals {
  *
  * Layout (top to bottom; line 1 is the line closest to the editor):
  *   1. Identity: `cwd (branch) • session` (left, muted)  |  `model • thinking-level` (right, foreground + thinking color)
- *   2. Metrics: `↑in ↓out R W $cost ctx%/window (auto)` (dim; ctx% colored)
+ *   2. Metrics: `ctx %·used/window` (left, colored) | `↑in ↓out $cost (sub) auto` (right, dim)
  *   3. Optional: extension statuses, single line
  *
  * Cumulative usage stats are cached and updated incrementally (tail-only scan)
@@ -186,35 +186,34 @@ export class FooterComponent implements Component {
 		});
 
 		// --- Metrics (line 2) ------------------------------------------------
-		const statsParts: string[] = [];
-		if (totals.input) statsParts.push(`↑${formatTokens(totals.input)}`);
-		if (totals.output) statsParts.push(`↓${formatTokens(totals.output)}`);
-		if (totals.cacheRead) statsParts.push(`R${formatTokens(totals.cacheRead)}`);
-		if (totals.cacheWrite) statsParts.push(`W${formatTokens(totals.cacheWrite)}`);
+		// Context is the headline: flushed left, brighter (`muted`, or warning/
+		// error when filling up) so the most actionable number reads at a glance.
+		// `ctx 4.9% · 49k/1.0M` = percent used · absolute tokens / window. Usage
+		// (input/output, cost, auto-compact) trails dim on the right.
+		const ctxText =
+			contextPercent === "?"
+				? `ctx ?/${formatTokens(contextWindow)}`
+				: `ctx ${contextPercent}% · ${formatTokens(contextUsage?.tokens ?? 0)}/${formatTokens(contextWindow)}`;
+		const ctxColorize = theme.getContextUsageColor(contextPercentValue);
+
+		const rightParts: string[] = [];
+		const io: string[] = [];
+		if (totals.input) io.push(`↑${formatTokens(totals.input)}`);
+		if (totals.output) io.push(`↓${formatTokens(totals.output)}`);
+		if (io.length) rightParts.push(io.join(" "));
+
+		const goalStatus = this.session.goalStatusLine();
+		if (goalStatus) rightParts.push(goalStatus);
 
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
 		if (totals.cost || usingSubscription) {
-			statsParts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+			rightParts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
 		}
+		if (this.autoCompactEnabled) rightParts.push("auto");
 
-		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
-		const contextDisplay =
-			contextPercent === "?"
-				? `?/${formatTokens(contextWindow)}${autoIndicator}`
-				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
-		// Inline color on the context-percent token only. Wrap with explicit
-		// reset so the outer dim of the metrics line resumes correctly.
-		const ctxColored =
-			contextPercentValue > 90
-				? theme.fg("error", contextDisplay)
-				: contextPercentValue > 70
-					? theme.fg("warning", contextDisplay)
-					: contextDisplay;
-		statsParts.push(ctxColored);
-
-		const metricsLine = composeLeftRight(statsParts.join(" "), "", width, {
-			leftColor: (text) => theme.fg("dim", text),
-			rightColor: (text) => text,
+		const metricsLine = composeLeftRight(ctxText, rightParts.join(" · "), width, {
+			leftColor: ctxColorize,
+			rightColor: (text) => theme.fg("dim", text),
 			ellipsis: theme.fg("dim", "..."),
 		});
 

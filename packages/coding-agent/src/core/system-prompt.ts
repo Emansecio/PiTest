@@ -173,6 +173,13 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			"Use edit for surgical changes to an existing file (multiple edits[] entries in one call). Use write only for new files or full rewrites.",
 		);
 	}
+	// Light verify-after-change nudge: only when the model can both edit and run a
+	// check. Kept soft ("when cheap", "non-trivial") to avoid over-verifying.
+	if ((tools.includes("edit") || tools.includes("write")) && hasBash) {
+		addGuideline(
+			"After a non-trivial code change, verify it when a cheap check is available (run the affected test/build/lint, or the file itself) before reporting done — prefer evidence over assuming the edit worked.",
+		);
+	}
 
 	// Always include these.
 	// Concise default trims output tokens (5× cost of input). Set PIT_NARRATION=1

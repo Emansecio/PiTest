@@ -22,6 +22,7 @@ function makeSession(): AgentSession {
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 0 }),
 		modelRegistry: { isUsingOAuth: () => false },
+		goalStatusLine: () => "",
 	};
 	return session as unknown as AgentSession;
 }

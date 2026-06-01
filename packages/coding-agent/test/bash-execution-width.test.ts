@@ -6,6 +6,7 @@ import { visibleWidth } from "@pit/tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { stripAnsi } from "../src/utils/ansi.js";
 
 /** Minimal TUI stub that only exposes terminal.columns */
 function createTuiStub(columns: number): { columns: number; stub: any } {
@@ -76,5 +77,28 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 			const w = visibleWidth(lines60[i]);
 			expect(w, `Line ${i} visibleWidth=${w} > 60`).toBeLessThanOrEqual(60);
 		}
+	});
+
+	it("clamps a long command header to a single visual row when collapsed", () => {
+		const { stub } = createTuiStub(80);
+		const longCommand = `cd /d/hermes-webui && grep -rIn "github" --exclude-dir=.git --exclude-dir=.claude . | grep -v "CHANGELOG.md" | wc -l`;
+		const component = new BashExecutionComponent(longCommand, stub);
+		component.setComplete(0, false);
+
+		const width = 80;
+		const lines = stripAnsi(component.render(width).join("\n")).split("\n");
+		const headerRows = lines.filter((l) => l.includes("$ cd /d/hermes-webui"));
+		// Header occupies exactly one row and fits the width, with an expand hint.
+		expect(headerRows.length).toBe(1);
+		expect(visibleWidth(headerRows[0])).toBeLessThanOrEqual(width);
+		expect(headerRows[0]).toContain("…");
+		expect(headerRows[0]).toContain("to expand");
+		// The clipped tail of the command is not visible anywhere collapsed.
+		expect(lines.some((l) => l.includes("wc -l"))).toBe(false);
+
+		// Expanding reveals the full command.
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(width).join("\n"));
+		expect(expanded).toContain("wc -l");
 	});
 });

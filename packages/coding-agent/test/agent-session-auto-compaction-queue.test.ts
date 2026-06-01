@@ -51,6 +51,11 @@ vi.mock("../src/core/compaction/index.js", () => ({
 		contextWindow: number,
 		settings: { enabled: boolean; reserveTokens: number },
 	) => settings.enabled && contextTokens > contextWindow - settings.reserveTokens,
+	// Reserve mirrors the simplified shouldCompact mock above (window - reserveTokens).
+	computeDynamicReserve: (_contextWindow: number, configuredReserve: number) => configuredReserve,
+	// These tests exercise the hard (synchronous) threshold path; keep the
+	// predictive background path disabled so behaviour is unchanged.
+	shouldCompactSoft: () => false,
 }));
 
 describe("AgentSession auto-compaction queue resume", () => {

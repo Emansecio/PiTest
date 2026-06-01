@@ -3,18 +3,22 @@ import type { AssistantMessage, Usage } from "@pit/ai";
 import { getModel } from "@pit/ai";
 import { readFileSync } from "fs";
 import { join } from "path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	type CompactionSettings,
 	calculateContextTokens,
 	compact,
+	computeDynamicReserve,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
+	pruneOldToolOutputs,
 	shouldCompact,
+	shouldCompactSoft,
 } from "../src/core/compaction/index.js";
+import { createDeferredOutputStore, setCurrentDeferredOutputStore } from "../src/core/deferred-output-store.js";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -244,6 +248,64 @@ describe("shouldCompact", () => {
 		};
 
 		expect(shouldCompact(95000, 100000, settings)).toBe(false);
+	});
+});
+
+describe("computeDynamicReserve", () => {
+	it("uses 10% of the window for small windows (≤200k)", () => {
+		// configured reserve below the 10% floor → floor wins
+		expect(computeDynamicReserve(100_000, 5_000)).toBe(10_000);
+		expect(computeDynamicReserve(200_000, 16_384)).toBe(20_000);
+		// configured reserve above the 10% floor → configured wins
+		expect(computeDynamicReserve(100_000, 30_000)).toBe(30_000);
+	});
+
+	it("keeps a 20k floor just above 200k where 2.5% is still small", () => {
+		// 2.5% of 200_001 ≈ 5000 < 20k → 20k floor. Continuous with the ≤200k branch.
+		expect(computeDynamicReserve(200_001, 16_384)).toBe(20_000);
+		expect(computeDynamicReserve(400_000, 16_384)).toBe(20_000); // 2.5% = 10k < 20k
+	});
+
+	it("applies the 2.5% floor for very large windows (regression: was a flat 20k)", () => {
+		// 1M window: flat 20k would be 2% (trigger ~98%); 2.5% = 25k (~97.5%).
+		expect(computeDynamicReserve(1_000_000, 16_384)).toBe(25_000);
+		// configured reserve still wins when larger than both floors
+		expect(computeDynamicReserve(1_000_000, 40_000)).toBe(40_000);
+	});
+});
+
+describe("shouldCompactSoft", () => {
+	// window 100k, reserve 10k → hard threshold 90k; keepRecent 20k → soft 70k.
+	const settings: CompactionSettings = { enabled: true, reserveTokens: 10_000, keepRecentTokens: 20_000 };
+
+	it("fires between the soft and hard thresholds", () => {
+		expect(shouldCompactSoft(75_000, 100_000, settings)).toBe(true); // 70k < 75k < 90k
+		expect(shouldCompactSoft(71_000, 100_000, settings)).toBe(true);
+	});
+
+	it("does not fire below the soft threshold", () => {
+		expect(shouldCompactSoft(65_000, 100_000, settings)).toBe(false);
+		expect(shouldCompactSoft(70_000, 100_000, settings)).toBe(false); // strict >
+	});
+
+	it("hands off above the hard threshold (synchronous path owns it)", () => {
+		// At exactly the hard threshold the hard check (strict >) has NOT fired yet,
+		// so soft legitimately covers it — no gap, no overlap.
+		expect(shouldCompactSoft(90_000, 100_000, settings)).toBe(true);
+		expect(shouldCompact(90_000, 100_000, settings)).toBe(false);
+		// Strictly above the hard threshold → soft yields to the synchronous path.
+		expect(shouldCompactSoft(90_001, 100_000, settings)).toBe(false);
+		expect(shouldCompactSoft(95_000, 100_000, settings)).toBe(false);
+	});
+
+	it("returns false when disabled", () => {
+		expect(shouldCompactSoft(75_000, 100_000, { ...settings, enabled: false })).toBe(false);
+	});
+
+	it("fires before the hard trigger on the same usage (predictive lead)", () => {
+		// 80k: soft fires (background) while hard does NOT yet — the whole point.
+		expect(shouldCompactSoft(80_000, 100_000, settings)).toBe(true);
+		expect(shouldCompact(80_000, 100_000, settings)).toBe(false);
 	});
 });
 
@@ -547,4 +609,129 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 		console.log("Original messages:", loaded.messages.length);
 		console.log("After compaction:", reloaded.messages.length);
 	}, 60000);
+});
+
+// ============================================================================
+// pruneOldToolOutputs — deferred-history flag tests
+// ============================================================================
+
+describe("pruneOldToolOutputs deferred-history mode", () => {
+	afterEach(() => {
+		delete process.env.PIT_DEFER_HISTORY;
+		setCurrentDeferredOutputStore(undefined);
+	});
+
+	function makeToolResultMessage(text: string): AgentMessage {
+		return {
+			role: "toolResult" as const,
+			content: [{ type: "text" as const, text }],
+			timestamp: Date.now(),
+			toolCallId: "tc-test",
+		} as any;
+	}
+
+	it("with PIT_DEFER_HISTORY=1 and a store, large output becomes a deferred placeholder with a valid id", () => {
+		process.env.PIT_DEFER_HISTORY = "1";
+		const store = createDeferredOutputStore();
+		setCurrentDeferredOutputStore(store);
+
+		const bigText = "x".repeat(90_000); // ~27k tokens (dense) >> 20k threshold
+		const userMsg: AgentMessage = { role: "user" as const, content: "q", timestamp: Date.now() };
+		const assistantMsg: AgentMessage = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "a" }],
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+		} as any;
+
+		// Two old tool-result messages before protected turns
+		const toolResult = makeToolResultMessage(bigText);
+		const messages: AgentMessage[] = [toolResult, userMsg, assistantMsg, userMsg, assistantMsg];
+
+		pruneOldToolOutputs(messages);
+
+		const replaced = (messages[0] as any).content[0].text as string;
+		expect(replaced).toContain("recall_tool_output");
+		expect(replaced).not.toContain("pruned");
+
+		// Extract id from placeholder
+		const match = replaced.match(/id=(\w+)/);
+		expect(match).toBeTruthy();
+		const id = match![1];
+		expect(store.get(id)).toBe(bigText);
+
+		store.dispose();
+	});
+
+	it("without PIT_DEFER_HISTORY, large output is shrunk to a head+tail excerpt", () => {
+		delete process.env.PIT_DEFER_HISTORY;
+
+		const bigText = "y".repeat(90_000);
+		const userMsg: AgentMessage = { role: "user" as const, content: "q", timestamp: Date.now() };
+		const assistantMsg: AgentMessage = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "a" }],
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+		} as any;
+
+		const toolResult = makeToolResultMessage(bigText);
+		const messages: AgentMessage[] = [toolResult, userMsg, assistantMsg, userMsg, assistantMsg];
+
+		pruneOldToolOutputs(messages);
+
+		const replaced = (messages[0] as any).content[0].text as string;
+		// Head/tail excerpt: much shorter than the original, marks the elision,
+		// keeps actual content, and is NOT the deferred placeholder.
+		expect(replaced).toContain("tokens elided");
+		expect(replaced).not.toContain("recall_tool_output");
+		expect(replaced.length).toBeLessThan(bigText.length / 10);
+		expect(replaced.startsWith("yyy")).toBe(true);
+	});
+
+	it("head+tail excerpt preserves the first and last lines of a structured output", () => {
+		delete process.env.PIT_DEFER_HISTORY;
+
+		// A grep-like output: distinctive first and last lines, bulky middle.
+		const lines = ["FIRST match: src/a.ts:1"];
+		for (let i = 0; i < 4000; i++) lines.push(`mid match: src/file${i}.ts:${i} ${"x".repeat(20)}`);
+		lines.push("LAST match: src/z.ts:9999");
+		const bigText = lines.join("\n");
+
+		const userMsg: AgentMessage = { role: "user" as const, content: "q", timestamp: Date.now() };
+		const assistantMsg = createAssistantMessage("a");
+		const toolResult = makeToolResultMessage(bigText);
+		const messages: AgentMessage[] = [toolResult, userMsg, assistantMsg, userMsg, assistantMsg];
+
+		pruneOldToolOutputs(messages);
+
+		const replaced = (messages[0] as any).content[0].text as string;
+		expect(replaced).toContain("FIRST match: src/a.ts:1");
+		expect(replaced).toContain("LAST match: src/z.ts:9999");
+		expect(replaced).toContain("tokens elided");
+		expect(replaced).not.toContain("src/file2000.ts"); // middle elided
+		expect(replaced.length).toBeLessThan(bigText.length);
+	});
 });

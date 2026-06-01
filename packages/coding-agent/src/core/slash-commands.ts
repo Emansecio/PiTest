@@ -39,5 +39,9 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "ttsr", description: "Manage TTSR rules: list | enable <name> | disable <name>" },
 	{ name: "hindsight", description: "Inspect hindsight bank: list | clear | export <path>" },
 	{ name: "preview", description: "Manage preview queue: list | accept <id> | discard <id>" },
+	{
+		name: "goal",
+		description: "Autonomous goal mode: <objective> | edit <obj> | pause | resume | clear | --tokens <budget> <obj>",
+	},
 	{ name: "quit", description: `Quit ${APP_NAME}` },
 ];

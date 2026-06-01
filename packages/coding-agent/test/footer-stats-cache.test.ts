@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.js";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
 import { FooterComponent } from "../src/modes/interactive/components/footer.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 interface MutableEntries {
 	push: (input: number, output: number, cost: number) => void;
@@ -23,7 +23,13 @@ function makeAssistantEntry(input: number, output: number, cost: number) {
  * The session's `getEntries` returns the live array reference so mutations
  * between renders are visible to the footer.
  */
-function createMutableSession(opts?: { thinkingLevel?: string; reasoning?: boolean; modelId?: string; cwd?: string }) {
+function createMutableSession(opts?: {
+	thinkingLevel?: string;
+	reasoning?: boolean;
+	modelId?: string;
+	cwd?: string;
+	contextPercent?: number;
+}) {
 	const entries: ReturnType<typeof makeAssistantEntry>[] = [];
 	const session = {
 		state: {
@@ -40,8 +46,9 @@ function createMutableSession(opts?: { thinkingLevel?: string; reasoning?: boole
 			getSessionName: () => "",
 			getCwd: () => opts?.cwd ?? "/tmp/project",
 		},
-		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
+		getContextUsage: () => ({ contextWindow: 200_000, percent: opts?.contextPercent ?? 12.3, tokens: 24_600 }),
 		modelRegistry: { isUsingOAuth: () => false },
+		goalStatusLine: () => "",
 	};
 	const ctrl: MutableEntries = {
 		push: (input, output, cost) => {
@@ -177,10 +184,55 @@ describe("FooterComponent stats cache", () => {
 
 		ctrl.push(0, 0, 0);
 		const line = getMetricsLine(footer);
-		// With everything zero the metric arrows drop out; only the ctx token remains.
+		// With everything zero the metric arrows drop out; only the ctx headline remains.
 		expect(line).not.toContain("↑");
 		expect(line).not.toContain("↓");
-		expect(line).toContain("%/200k");
+		expect(line).toContain("ctx 12.3% · 25k/200k");
+	});
+});
+
+describe("FooterComponent context color thresholds", () => {
+	beforeAll(() => {
+		initTheme(undefined, false);
+	});
+
+	// The ANSI opening escape `theme.fg(color, …)` emits before the wrapped text.
+	const escapeOf = (color: "muted" | "warning" | "error"): string => {
+		const wrapped = theme.fg(color, "_");
+		return wrapped.slice(0, wrapped.indexOf("_"));
+	};
+
+	// Returns the raw (ANSI-bearing) prefix of the metrics line up to the `ctx`
+	// token — i.e. the color escape the context headline was wrapped in.
+	const ctxPrefix = (contextPercent: number): string => {
+		const { session, ctrl } = createMutableSession({ contextPercent });
+		const footer = new FooterComponent(session, createFooterData());
+		ctrl.push(100, 50, 0.001);
+		const line = footer.render(200)[1];
+		return line.slice(0, line.indexOf("ctx"));
+	};
+
+	it("uses muted below 70%, warning above 70%, error above 90%", () => {
+		const low = ctxPrefix(50);
+		const warn = ctxPrefix(80);
+		const err = ctxPrefix(95);
+
+		// Each is wrapped in some SGR escape...
+		const sgr = /\x1b\[[0-9;]+m/;
+		expect(sgr.test(low)).toBe(true);
+		expect(sgr.test(warn)).toBe(true);
+		expect(sgr.test(err)).toBe(true);
+
+		// ...and the three thresholds pick distinct, correct palette colors.
+		expect(low.endsWith(escapeOf("muted"))).toBe(true);
+		expect(warn.endsWith(escapeOf("warning"))).toBe(true);
+		expect(err.endsWith(escapeOf("error"))).toBe(true);
+	});
+
+	it("treats the 70 and 90 boundaries as inclusive of the lower band (strict >)", () => {
+		// 70.0 is NOT > 70 → still muted; 90.0 is NOT > 90 → still warning.
+		expect(ctxPrefix(70).endsWith(escapeOf("muted"))).toBe(true);
+		expect(ctxPrefix(90).endsWith(escapeOf("warning"))).toBe(true);
 	});
 });
 
