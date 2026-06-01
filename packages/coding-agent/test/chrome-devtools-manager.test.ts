@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CdpTarget } from "../src/core/chrome/cdp-client.js";
 import { type CdpConnectionLike, ChromeDevtoolsManager } from "../src/core/chrome/chrome-devtools-manager.js";
 
@@ -130,5 +130,79 @@ describe("ChromeDevtoolsManager", () => {
 		mgr.dispose();
 		expect(conns.get("p1")?.closed).toBe(true);
 		expect(mgr.selectedPageId()).toBeUndefined();
+	});
+});
+
+describe("ChromeDevtoolsManager.ensureBrowser", () => {
+	it("reconnects without launching when Chrome is already up", async () => {
+		const launch = vi.fn();
+		const mgr = new ChromeDevtoolsManager({
+			host: "h",
+			port: 9222,
+			launchBrowser: true,
+			userDataDir: "/d",
+			list: async () => [],
+			launch,
+			findBinary: () => "/bin/chrome",
+			waitReady: async () => true,
+		});
+		const res = await mgr.ensureBrowser();
+		expect(res.launched).toBe(false);
+		expect(launch).not.toHaveBeenCalled();
+	});
+
+	it("launches Chrome when the port is unreachable", async () => {
+		const launch = vi.fn();
+		let up = false;
+		const mgr = new ChromeDevtoolsManager({
+			host: "h",
+			port: 9222,
+			launchBrowser: true,
+			userDataDir: "/profile",
+			list: async () => {
+				if (!up) throw new Error("unreachable");
+				return [];
+			},
+			launch: (o) => {
+				up = true;
+				launch(o);
+			},
+			findBinary: () => "/bin/chrome",
+			waitReady: async () => true,
+		});
+		const res = await mgr.ensureBrowser();
+		expect(res.launched).toBe(true);
+		expect(launch).toHaveBeenCalledWith({ binary: "/bin/chrome", port: 9222, userDataDir: "/profile" });
+		expect(mgr.wasLaunchedHere()).toBe(true);
+	});
+
+	it("errors with a hint when no Chrome binary is found", async () => {
+		const mgr = new ChromeDevtoolsManager({
+			host: "h",
+			port: 9222,
+			launchBrowser: true,
+			userDataDir: "/d",
+			list: async () => {
+				throw new Error("unreachable");
+			},
+			findBinary: () => undefined,
+		});
+		await expect(mgr.ensureBrowser()).rejects.toThrow(/Chrome was not found/);
+	});
+
+	it("does not launch when launchBrowser is off (surfaces the unreachable error)", async () => {
+		const launch = vi.fn();
+		const mgr = new ChromeDevtoolsManager({
+			host: "h",
+			port: 9222,
+			launchBrowser: false,
+			list: async () => {
+				throw new Error("Could not reach Chrome DevTools");
+			},
+			launch,
+			findBinary: () => "/bin/chrome",
+		});
+		await expect(mgr.ensureBrowser()).rejects.toThrow(/Could not reach/);
+		expect(launch).not.toHaveBeenCalled();
 	});
 });

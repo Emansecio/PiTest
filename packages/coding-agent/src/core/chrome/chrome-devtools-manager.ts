@@ -15,6 +15,7 @@ import {
 	createTarget as defaultCreateTarget,
 	listTargets as defaultListTargets,
 } from "./cdp-client.ts";
+import { findChromeBinary, launchChrome, waitForEndpoint } from "./chrome-launcher.ts";
 
 export interface CdpConnectionLike {
 	send(
@@ -41,9 +42,19 @@ export interface NetworkEntry {
 export interface ChromeDevtoolsDeps {
 	host: string;
 	port: number;
+	/** Auto-launch Chrome when the debug port is not reachable. */
+	launchBrowser?: boolean;
+	/** Dedicated, persistent profile dir for the launched Chrome. */
+	userDataDir?: string;
+	/** Explicit Chrome binary path (else auto-discovered). */
+	binaryPath?: string;
 	list?: (signal?: AbortSignal) => Promise<CdpTarget[]>;
 	create?: (url: string, signal?: AbortSignal) => Promise<CdpTarget>;
 	connect?: (target: CdpTarget) => CdpConnectionLike;
+	// Injectable launcher pieces (tests).
+	findBinary?: () => string | undefined;
+	launch?: (opts: { binary: string; port: number; userDataDir: string }) => void;
+	waitReady?: (host: string, port: number) => Promise<boolean>;
 }
 
 interface ConnState {
@@ -73,16 +84,78 @@ export class ChromeDevtoolsManager {
 	private readonly list: (signal?: AbortSignal) => Promise<CdpTarget[]>;
 	private readonly create: (url: string, signal?: AbortSignal) => Promise<CdpTarget>;
 	private readonly connectFactory: (target: CdpTarget) => CdpConnectionLike;
+	private readonly launchBrowser: boolean;
+	private readonly userDataDir: string;
+	private readonly binaryPath: string | undefined;
+	private readonly findBinary: () => string | undefined;
+	private readonly launch: (opts: { binary: string; port: number; userDataDir: string }) => void;
+	private readonly waitReady: (host: string, port: number) => Promise<boolean>;
 
 	private selectedTarget: CdpTarget | undefined;
 	private readonly conns = new Map<string, ConnState>();
+	private ensurePromise: Promise<{ launched: boolean }> | undefined;
+	private launchedHere = false;
 
 	constructor(deps: ChromeDevtoolsDeps) {
 		this.host = deps.host;
 		this.port = deps.port;
+		this.launchBrowser = deps.launchBrowser ?? false;
+		this.userDataDir = deps.userDataDir ?? "";
+		this.binaryPath = deps.binaryPath;
 		this.list = deps.list ?? ((signal) => defaultListTargets(this.host, this.port, signal));
 		this.create = deps.create ?? ((url, signal) => defaultCreateTarget(this.host, this.port, url, signal));
 		this.connectFactory = deps.connect ?? ((target) => new CdpConnection(target.webSocketDebuggerUrl ?? ""));
+		this.findBinary = deps.findBinary ?? (() => findChromeBinary());
+		this.launch = deps.launch ?? ((opts) => void launchChrome(opts));
+		this.waitReady = deps.waitReady ?? ((host, port) => waitForEndpoint(host, port));
+	}
+
+	/**
+	 * Make sure a Chrome with the debug port is reachable: reconnect if one is
+	 * already up, otherwise auto-launch (when enabled). Idempotent — concurrent
+	 * callers share one ensure. Returns whether a browser was launched.
+	 */
+	async ensureBrowser(signal?: AbortSignal): Promise<{ launched: boolean }> {
+		if (this.ensurePromise) return this.ensurePromise;
+		this.ensurePromise = this.doEnsure(signal).finally(() => {
+			this.ensurePromise = undefined;
+		});
+		return this.ensurePromise;
+	}
+
+	private async doEnsure(signal?: AbortSignal): Promise<{ launched: boolean }> {
+		if (await this.reachable(signal)) return { launched: false };
+		if (!this.launchBrowser) {
+			// Surface the standard "start Chrome / unreachable" error.
+			await this.list(signal);
+			return { launched: false };
+		}
+		const binary = this.binaryPath || this.findBinary();
+		if (!binary) {
+			throw new Error(
+				"Chrome was not found. Install Chrome, or set chromeDevtools.binaryPath / PI_CHROME_DEVTOOLS_BINARY.",
+			);
+		}
+		this.launch({ binary, port: this.port, userDataDir: this.userDataDir });
+		const ready = await this.waitReady(this.host, this.port);
+		if (!ready) {
+			throw new Error(`Launched Chrome but the debug port ${this.port} did not open in time.`);
+		}
+		this.launchedHere = true;
+		return { launched: true };
+	}
+
+	private async reachable(signal?: AbortSignal): Promise<boolean> {
+		try {
+			await this.list(signal);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
+	wasLaunchedHere(): boolean {
+		return this.launchedHere;
 	}
 
 	endpoint(): string {
@@ -94,10 +167,12 @@ export class ChromeDevtoolsManager {
 	}
 
 	async listPages(signal?: AbortSignal): Promise<CdpTarget[]> {
+		await this.ensureBrowser(signal);
 		return (await this.list(signal)).filter((t) => t.type === "page");
 	}
 
 	async selectPage(targetId: string, signal?: AbortSignal): Promise<CdpTarget> {
+		await this.ensureBrowser(signal);
 		const target = (await this.list(signal)).find((t) => t.id === targetId);
 		if (!target) throw new Error(`No page with id ${targetId}. Use chrome_devtools_list_pages.`);
 		this.selectedTarget = target;
@@ -109,6 +184,7 @@ export class ChromeDevtoolsManager {
 		input: { url: string; newTab?: boolean },
 		signal?: AbortSignal,
 	): Promise<{ created: boolean; target: CdpTarget }> {
+		await this.ensureBrowser(signal);
 		if (input.newTab || !this.selectedTarget) {
 			const target = await this.create(input.url, signal);
 			this.selectedTarget = target;

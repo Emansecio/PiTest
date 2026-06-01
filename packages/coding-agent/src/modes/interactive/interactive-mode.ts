@@ -2272,7 +2272,8 @@ export class InteractiveMode {
 		}
 		if (text === "/chrome") {
 			this.editor.setText("");
-			this.showStatus(this.session.chromeDevtoolsStatus());
+			this.showStatus("🌐 Starting Chrome…");
+			this.showStatus(await this.session.ensureChrome());
 			return true;
 		}
 

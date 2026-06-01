@@ -183,12 +183,17 @@ export interface ChromeDevtoolsSettings {
 	enabled?: boolean;
 	debugPort?: number;
 	host?: string;
+	launchBrowser?: boolean;
+	binaryPath?: string;
 }
 
 export interface ResolvedChromeDevtoolsSettings {
 	enabled: boolean;
 	debugPort: number;
 	host: string;
+	launchBrowser: boolean;
+	binaryPath?: string;
+	userDataDir: string;
 }
 
 export interface ResolvedToolFeedbackSettings {
@@ -1486,6 +1491,10 @@ export class SettingsManager {
 			enabled: raw?.enabled !== false,
 			debugPort: port,
 			host: envHost || raw?.host || "127.0.0.1",
+			// Auto-launch Chrome (default ON) into a dedicated persistent profile.
+			launchBrowser: raw?.launchBrowser !== false,
+			binaryPath: process.env.PI_CHROME_DEVTOOLS_BINARY || raw?.binaryPath,
+			userDataDir: join(getAgentDir(), "chrome-data"),
 		};
 	}
 

@@ -539,7 +539,13 @@ export class AgentSession {
 		// regardless of enabled (cheap; connects lazily); tools only join the
 		// surface when chromeDevtools.enabled. Published for the tools to reach.
 		const cdpCfg = this.settingsManager.getChromeDevtoolsSettings();
-		this._chromeDevtools = new ChromeDevtoolsManager({ host: cdpCfg.host, port: cdpCfg.debugPort });
+		this._chromeDevtools = new ChromeDevtoolsManager({
+			host: cdpCfg.host,
+			port: cdpCfg.debugPort,
+			launchBrowser: cdpCfg.launchBrowser,
+			userDataDir: cdpCfg.userDataDir,
+			binaryPath: cdpCfg.binaryPath,
+		});
 		setCurrentChromeDevtoolsManager(this._chromeDevtools);
 
 		// Publish a fresh tool discovery index so the `search_tool_bm25` tool
@@ -1686,17 +1692,28 @@ export class AgentSession {
 		return this._todo.hasInProgress();
 	}
 
-	/** Status line for the `/chrome` command (endpoint + selected page). */
-	chromeDevtoolsStatus(): string {
+	/**
+	 * `/chrome` command: ensure a Chrome with the debug port is up (reconnect or
+	 * auto-launch), then return a human status string.
+	 */
+	async ensureChrome(): Promise<string> {
 		const cfg = this.settingsManager.getChromeDevtoolsSettings();
 		if (!cfg.enabled) return "Chrome DevTools is disabled (set chromeDevtools.enabled to use it).";
-		const selected = this._chromeDevtools?.selectedPageId();
-		const lines = [
-			`🌐 Chrome DevTools — endpoint ${cfg.host}:${cfg.debugPort}`,
-			selected ? `   selected page: ${selected}` : "   no page selected",
-			"   Start Chrome with: chrome --remote-debugging-port=" + cfg.debugPort + " --user-data-dir=<dir>",
-		];
-		return lines.join("\n");
+		const mgr = this._chromeDevtools;
+		if (!mgr) return "Chrome DevTools is unavailable in this session.";
+		try {
+			const { launched } = await mgr.ensureBrowser();
+			const selected = mgr.selectedPageId();
+			return [
+				`🌐 Chrome DevTools — ${launched ? "launched" : "connected"} at ${cfg.host}:${cfg.debugPort}`,
+				launched ? `   profile: ${cfg.userDataDir}` : "",
+				selected ? `   selected page: ${selected}` : "   no page selected (ask me to open a URL)",
+			]
+				.filter(Boolean)
+				.join("\n");
+		} catch (err) {
+			return `🌐 Chrome DevTools — could not start: ${(err as Error).message}`;
+		}
 	}
 
 	private _persistTodo(): void {

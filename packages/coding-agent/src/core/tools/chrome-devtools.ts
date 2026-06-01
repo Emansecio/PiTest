@@ -146,9 +146,13 @@ export function createChromeSelectPageDefinition(): ToolDefinition<typeof select
 export function createChromeNavigateDefinition(): ToolDefinition<typeof navigateSchema, ChromeToolDetails> {
 	return buildChromeTool({
 		name: "chrome_devtools_navigate",
-		description: "Navigate to a URL. Opens a new tab when newTab is set or no page is selected.",
+		description:
+			"Navigate to a URL. Auto-starts Chrome if needed (no manual setup) and opens a new tab when newTab is set or no page is selected.",
 		snippet: "Open a URL in Chrome (new tab)",
-		guidelines: ["Set newTab to open a fresh tab instead of reusing the selected page."],
+		guidelines: [
+			"Just call this to use the browser — Chrome is launched automatically if it isn't already running.",
+			"Set newTab to open a fresh tab instead of reusing the selected page.",
+		],
 		schema: navigateSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.navigate({ url: input.url, newTab: input.newTab }, signal);
