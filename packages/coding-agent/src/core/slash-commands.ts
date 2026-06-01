@@ -44,6 +44,6 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		description: "Autonomous goal mode: <objective> | edit <obj> | pause | resume | clear | --tokens <budget> <obj>",
 	},
 	{ name: "todos", description: "Show the current todo list" },
-	{ name: "chrome", description: "Show Chrome DevTools status (endpoint, selected page)" },
+	{ name: "chrome", description: "Start/connect Chrome; add text before or after to run it in the browser" },
 	{ name: "quit", description: `Quit ${APP_NAME}` },
 ];

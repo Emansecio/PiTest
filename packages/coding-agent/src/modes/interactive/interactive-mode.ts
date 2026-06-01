@@ -75,6 +75,20 @@ import { parseTokenBudget } from "../../core/goal/goal-manager.ts";
 /** Footer goal-spinner re-render cadence (~12fps), matching the spinner frame rate. */
 const GOAL_SPINNER_TICK_MS = 80;
 
+/**
+ * Detect an inline `/chrome` token anywhere in the message (start, middle, or
+ * end) and strip it, returning the remaining text. `/chrome` must be a
+ * standalone token (not part of a larger word like `/chromecast`).
+ */
+export function extractChromeCommand(text: string): { matched: boolean; rest: string } {
+	if (!/(^|\s)\/chrome(?=\s|$)/i.test(text)) return { matched: false, rest: text };
+	const rest = text
+		.replace(/(^|\s)\/chrome(?=\s|$)/gi, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return { matched: true, rest };
+}
+
 import { getCurrentHindsightBank } from "../../core/hindsight/index.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
@@ -2157,6 +2171,14 @@ export class InteractiveMode {
 			text = text.trim();
 			if (!text) return;
 
+			// Inline `/chrome` modifier: works anywhere in the message (text before
+			// and/or after it). Ensures Chrome is up, then runs the rest as a prompt.
+			const chrome = extractChromeCommand(text);
+			if (chrome.matched) {
+				await this._handleChromeCommand(chrome.rest);
+				return;
+			}
+
 			// Slash command dispatch
 			if (text.startsWith("/")) {
 				const handled = await this._dispatchSlashCommand(text);
@@ -2268,12 +2290,6 @@ export class InteractiveMode {
 		if (text === "/todos") {
 			this.editor.setText("");
 			this.showStatus(this.session.todoSummaryText());
-			return true;
-		}
-		if (text === "/chrome") {
-			this.editor.setText("");
-			this.showStatus("🌐 Starting Chrome…");
-			this.showStatus(await this.session.ensureChrome());
 			return true;
 		}
 
@@ -2397,6 +2413,20 @@ export class InteractiveMode {
 		if (this._goalSpinnerTimer) {
 			clearInterval(this._goalSpinnerTimer);
 			this._goalSpinnerTimer = undefined;
+		}
+	}
+
+	/**
+	 * `/chrome` (anywhere in the message): ensure Chrome is up, then run the rest
+	 * of the message (if any) as a normal prompt so the agent uses the browser.
+	 */
+	private async _handleChromeCommand(rest: string): Promise<void> {
+		this.editor.setText("");
+		this.showStatus("🌐 Starting Chrome…");
+		const status = await this.session.ensureChrome();
+		this.showStatus(status);
+		if (rest) {
+			await this.session.prompt(rest);
 		}
 	}
 
