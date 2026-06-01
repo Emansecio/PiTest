@@ -34,6 +34,11 @@ import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import {
+	ChromeDevtoolsManager,
+	getCurrentChromeDevtoolsManager,
+	setCurrentChromeDevtoolsManager,
+} from "./chrome/chrome-devtools-manager.ts";
+import {
 	type CompactionPreparation,
 	type CompactionResult,
 	calculateContextTokens,
@@ -131,6 +136,7 @@ import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import { setCurrentTodoManager, type TodoItem, TodoManager, type TodoState } from "./todo/todo-manager.ts";
 import { buildDoomLoopReminder, buildToolErrorReflection, decideErrorReflection } from "./tool-call-feedback.js";
 import { extractErrorMessage, fingerprintToolArgs, ToolCallStats, type ToolStat } from "./tool-call-stats.js";
 import {
@@ -236,6 +242,17 @@ const GOAL_MAX_AUTO_ITERATIONS = 50;
  * goal doesn't append a custom entry on every single turn.
  */
 const GOAL_PERSIST_THROTTLE_MS = 10_000;
+
+/** The chrome_devtools_* tools, activated together when the feature is enabled. */
+const CHROME_DEVTOOLS_TOOL_NAMES = [
+	"chrome_devtools_list_pages",
+	"chrome_devtools_select_page",
+	"chrome_devtools_navigate",
+	"chrome_devtools_evaluate",
+	"chrome_devtools_screenshot",
+	"chrome_devtools_read_console",
+	"chrome_devtools_read_network",
+];
 
 export interface PromptOptions {
 	/** Whether to expand file-based prompt templates (default: true) */
@@ -427,6 +444,10 @@ export class AgentSession {
 	// Autonomous goal state (the /goal command + goal_complete tool). Published
 	// via the module-level registry so the tool can reach it on demand.
 	private readonly _goal = new GoalManager();
+	// Native todo list (the `todo` tool + /todos command + live overlay).
+	private readonly _todo = new TodoManager();
+	// Chrome DevTools controller (the chrome_devtools_* tools + /chrome command).
+	private _chromeDevtools: ChromeDevtoolsManager | undefined;
 	// Guards against re-entering the goal auto-continuation loop from within a
 	// continuation prompt.
 	private _inGoalContinuation = false;
@@ -510,6 +531,17 @@ export class AgentSession {
 		setCurrentGoalManager(this._goal);
 		this._restoreGoalFromSession();
 
+		// Same for the todo list: publish + restore from the session file.
+		setCurrentTodoManager(this._todo);
+		this._restoreTodoFromSession();
+
+		// Chrome DevTools controller (endpoint from settings + env). Created
+		// regardless of enabled (cheap; connects lazily); tools only join the
+		// surface when chromeDevtools.enabled. Published for the tools to reach.
+		const cdpCfg = this.settingsManager.getChromeDevtoolsSettings();
+		this._chromeDevtools = new ChromeDevtoolsManager({ host: cdpCfg.host, port: cdpCfg.debugPort });
+		setCurrentChromeDevtoolsManager(this._chromeDevtools);
+
 		// Publish a fresh tool discovery index so the `search_tool_bm25` tool
 		// can BM25-search hidden tools. Auto-seeding of hidden entries is gated
 		// by `toolDiscovery.enabled` in settings (default off): callers / SDK
@@ -573,6 +605,8 @@ export class AgentSession {
 			"reflect",
 			"forget",
 			"goal_complete",
+			"todo",
+			...CHROME_DEVTOOLS_TOOL_NAMES,
 		]);
 		const alwaysActive = new Set(cfg.alwaysActive);
 		const candidates = new Set<string>(explicit);
@@ -958,6 +992,7 @@ export class AgentSession {
 					} satisfies TurnEndEvent);
 				}
 				this._recordGoalTurn(event.message);
+				if (this._todo.takeDirty()) this._persistTodo();
 				this._turnIndex++;
 				break;
 			case "message_start":
@@ -1437,6 +1472,14 @@ export class AgentSession {
 			setCurrentPreviewQueue(undefined);
 		}
 		this._previewQueue = undefined;
+		// Tear down Chrome DevTools connections.
+		if (this._chromeDevtools) {
+			this._chromeDevtools.dispose();
+			if (getCurrentChromeDevtoolsManager() === this._chromeDevtools) {
+				setCurrentChromeDevtoolsManager(undefined);
+			}
+			this._chromeDevtools = undefined;
+		}
 		// Clear tool discovery index registry only if this session owns it.
 		if (this._toolDiscoveryIndex && getCurrentToolDiscoveryIndex() === this._toolDiscoveryIndex) {
 			setCurrentToolDiscoveryIndex(undefined);
@@ -1618,6 +1661,62 @@ export class AgentSession {
 				this._goal.restore(latest);
 				this._activateGoalTool(true);
 			}
+		} catch {
+			// Best-effort restore; ignore malformed/legacy entries.
+		}
+	}
+
+	// =========================================================================
+	// Native todo list (the `todo` tool + /todos command + live overlay)
+	// =========================================================================
+
+	/** Todos + counts for the live overlay (interactive mode). */
+	todoForOverlay(): { items: TodoItem[]; done: number; total: number } {
+		const { done, total } = this._todo.counts();
+		return { items: this._todo.list(), done, total };
+	}
+
+	/** Multi-line human summary for the `/todos` command. */
+	todoSummaryText(): string {
+		return this._todo.summaryText();
+	}
+
+	/** True while any todo is in_progress (drives the overlay spinner). */
+	todoHasInProgress(): boolean {
+		return this._todo.hasInProgress();
+	}
+
+	/** Status line for the `/chrome` command (endpoint + selected page). */
+	chromeDevtoolsStatus(): string {
+		const cfg = this.settingsManager.getChromeDevtoolsSettings();
+		if (!cfg.enabled) return "Chrome DevTools is disabled (set chromeDevtools.enabled to use it).";
+		const selected = this._chromeDevtools?.selectedPageId();
+		const lines = [
+			`🌐 Chrome DevTools — endpoint ${cfg.host}:${cfg.debugPort}`,
+			selected ? `   selected page: ${selected}` : "   no page selected",
+			"   Start Chrome with: chrome --remote-debugging-port=" + cfg.debugPort + " --user-data-dir=<dir>",
+		];
+		return lines.join("\n");
+	}
+
+	private _persistTodo(): void {
+		try {
+			this.sessionManager.appendCustomEntry("todo", this._todo.serialize());
+		} catch {
+			// Best-effort; a write failure must not break the session.
+		}
+	}
+
+	private _restoreTodoFromSession(): void {
+		try {
+			let latest: TodoState | undefined;
+			for (const e of this.sessionManager.getEntries()) {
+				const entry = e as { type?: string; customType?: string; data?: TodoState | null };
+				if (entry.type === "custom" && entry.customType === "todo") {
+					latest = entry.data ?? undefined;
+				}
+			}
+			if (latest) this._todo.restore(latest);
 		} catch {
 			// Best-effort restore; ignore malformed/legacy entries.
 		}
@@ -2023,6 +2122,10 @@ export class AgentSession {
 			const goalSection = this._goal.systemPromptSection();
 			if (goalSection) {
 				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${goalSection}`;
+			}
+			const todoSection = this._todo.systemPromptSection();
+			if (todoSection) {
+				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${todoSection}`;
 			}
 		} catch (error) {
 			preflightResult?.(false);
@@ -3299,6 +3402,7 @@ export class AgentSession {
 		const webSearchActive = this.settingsManager.getWebSearchSettings().enabled ? ["web_search"] : [];
 		const evalActive = this.settingsManager.getEvalSettings().enabled ? ["eval"] : [];
 		const deferHistoryActive = process.env.PIT_DEFER_HISTORY === "1" ? ["recall_tool_output"] : [];
+		const cdpActive = this.settingsManager.getChromeDevtoolsSettings().enabled ? CHROME_DEVTOOLS_TOOL_NAMES : [];
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
 			: [
@@ -3307,10 +3411,12 @@ export class AgentSession {
 					"edit",
 					"write",
 					"ask",
+					"todo",
 					...hindsightActive,
 					...webSearchActive,
 					...evalActive,
 					...deferHistoryActive,
+					...cdpActive,
 				];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({

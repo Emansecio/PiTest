@@ -200,6 +200,23 @@ import { type AstEditToolOptions, createAstEditTool, createAstEditToolDefinition
 import { type AstGrepToolOptions, createAstGrepTool, createAstGrepToolDefinition } from "./ast-grep.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
 import { type CalcToolOptions, createCalcTool, createCalcToolDefinition } from "./calc.ts";
+import {
+	type ChromeDevtoolsToolOptions,
+	createChromeEvaluateTool,
+	createChromeEvaluateToolDefinition,
+	createChromeListPagesTool,
+	createChromeListPagesToolDefinition,
+	createChromeNavigateTool,
+	createChromeNavigateToolDefinition,
+	createChromeReadConsoleTool,
+	createChromeReadConsoleToolDefinition,
+	createChromeReadNetworkTool,
+	createChromeReadNetworkToolDefinition,
+	createChromeScreenshotTool,
+	createChromeScreenshotToolDefinition,
+	createChromeSelectPageTool,
+	createChromeSelectPageToolDefinition,
+} from "./chrome-devtools.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import {
 	createEditHashlineTool,
@@ -239,13 +256,14 @@ import {
 	type SearchToolBm25Options,
 } from "./search-tool-bm25.ts";
 import { createSymbolTool, createSymbolToolDefinition, type SymbolToolOptions } from "./symbol.ts";
+import { createTodoTool, createTodoToolDefinition, type TodoToolOptions } from "./todo.ts";
 import { createWebSearchTool, createWebSearchToolDefinition, type WebSearchToolOptions } from "./web-search.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
 /** A coding tool's membership/gate in the default coding surface. */
-type CodingGate = "always" | "native" | "webSearch" | "eval" | "hindsight";
+type CodingGate = "always" | "native" | "webSearch" | "eval" | "hindsight" | "chromeDevtools";
 
 interface ToolRegistryEntry {
 	/** Builds the executable tool. */
@@ -453,6 +471,62 @@ const TOOL_REGISTRY = {
 		// Off the default surface; activated dynamically while a goal is active.
 		coding: false,
 	},
+	todo: {
+		factory: createTodoTool,
+		definitionFactory: createTodoToolDefinition,
+		optionsKey: "todo",
+		readOnly: false,
+		coding: "always",
+	},
+	chrome_devtools_list_pages: {
+		factory: createChromeListPagesTool,
+		definitionFactory: createChromeListPagesToolDefinition,
+		optionsKey: "chromeDevtools",
+		readOnly: true,
+		coding: "chromeDevtools",
+	},
+	chrome_devtools_select_page: {
+		factory: createChromeSelectPageTool,
+		definitionFactory: createChromeSelectPageToolDefinition,
+		optionsKey: "chromeDevtools",
+		readOnly: false,
+		coding: "chromeDevtools",
+	},
+	chrome_devtools_navigate: {
+		factory: createChromeNavigateTool,
+		definitionFactory: createChromeNavigateToolDefinition,
+		optionsKey: "chromeDevtools",
+		readOnly: false,
+		coding: "chromeDevtools",
+	},
+	chrome_devtools_evaluate: {
+		factory: createChromeEvaluateTool,
+		definitionFactory: createChromeEvaluateToolDefinition,
+		optionsKey: "chromeDevtools",
+		readOnly: false,
+		coding: "chromeDevtools",
+	},
+	chrome_devtools_screenshot: {
+		factory: createChromeScreenshotTool,
+		definitionFactory: createChromeScreenshotToolDefinition,
+		optionsKey: "chromeDevtools",
+		readOnly: true,
+		coding: "chromeDevtools",
+	},
+	chrome_devtools_read_console: {
+		factory: createChromeReadConsoleTool,
+		definitionFactory: createChromeReadConsoleToolDefinition,
+		optionsKey: "chromeDevtools",
+		readOnly: true,
+		coding: "chromeDevtools",
+	},
+	chrome_devtools_read_network: {
+		factory: createChromeReadNetworkTool,
+		definitionFactory: createChromeReadNetworkToolDefinition,
+		optionsKey: "chromeDevtools",
+		readOnly: true,
+		coding: "chromeDevtools",
+	},
 	recall_tool_output: {
 		factory: createRecallToolOutputTool,
 		definitionFactory: createRecallToolOutputDefinition,
@@ -493,6 +567,8 @@ function codingGateOpen(gate: CodingGate, options?: ToolsOptions): boolean {
 			return !!options?.eval?.enabled;
 		case "hindsight":
 			return !!options?.hindsight?.enabled;
+		case "chromeDevtools":
+			return !!options?.chromeDevtools?.enabled;
 	}
 }
 
@@ -538,6 +614,8 @@ export interface ToolsOptions {
 	inspect_image?: InspectImageToolOptions;
 	render_mermaid?: RenderMermaidToolOptions;
 	goal_complete?: GoalCompleteToolOptions;
+	todo?: TodoToolOptions;
+	chromeDevtools?: ChromeDevtoolsToolOptions & { enabled?: boolean };
 	hindsight?: { enabled?: boolean };
 	recallToolOutput?: Record<string, never>;
 }

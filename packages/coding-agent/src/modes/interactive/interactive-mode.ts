@@ -138,6 +138,7 @@ import { ScopedModelsSelectorComponent } from "./components/scoped-models-select
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
+import { createTodoOverlay } from "./components/todo-overlay.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -327,9 +328,12 @@ export class InteractiveMode {
 	private unsubscribe?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
 
-	// Periodic re-render that keeps the footer's goal spinner animating even in
-	// the brief gaps between autonomous turns (no streaming to drive renders).
+	// Periodic re-render that keeps the goal spinner + todo overlay spinner
+	// animating even in the brief gaps between turns (no streaming to drive renders).
 	private _goalSpinnerTimer: ReturnType<typeof setInterval> | undefined;
+
+	// Live "above editor" todo overlay (auto-hides when there are no todos).
+	private todoOverlay: Component | undefined;
 
 	// User-input bus: tools (e.g. `ask`) request structured option picks via this.
 	private userInputBus: UserInputBus = createUserInputBus();
@@ -693,6 +697,8 @@ export class InteractiveMode {
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
+		this.todoOverlay = createTodoOverlay(this.session);
+		this.ui.addChild(this.todoOverlay);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
@@ -2259,6 +2265,16 @@ export class InteractiveMode {
 			await this.handleGoalCommand(text === "/goal" ? "" : text.slice(6).trim());
 			return true;
 		}
+		if (text === "/todos") {
+			this.editor.setText("");
+			this.showStatus(this.session.todoSummaryText());
+			return true;
+		}
+		if (text === "/chrome") {
+			this.editor.setText("");
+			this.showStatus(this.session.chromeDevtoolsStatus());
+			return true;
+		}
 
 		// Exact-match commands — dispatch via static table to avoid per-call closure allocation
 		const cmd = InteractiveMode._exactSlashCommands.get(text);
@@ -2358,8 +2374,10 @@ export class InteractiveMode {
 
 	/**
 	 * Drive a periodic re-render (~12fps) while a goal is active so the footer
-	 * spinner animates smoothly even between autonomous turns. Idempotent; the
-	 * tick auto-stops once the goal is no longer active.
+	 * spinner animates smoothly even between autonomous turns. (The todo overlay
+	 * spinner animates via the natural renders that happen while the agent is
+	 * actually working, and stays static when idle — which is the honest signal.)
+	 * Idempotent; the tick auto-stops once the goal is no longer active.
 	 */
 	private _startGoalSpinner(): void {
 		if (this._goalSpinnerTimer) return;

@@ -179,6 +179,18 @@ export interface ResolvedEvalSettings {
 	enabled: boolean;
 }
 
+export interface ChromeDevtoolsSettings {
+	enabled?: boolean;
+	debugPort?: number;
+	host?: string;
+}
+
+export interface ResolvedChromeDevtoolsSettings {
+	enabled: boolean;
+	debugPort: number;
+	host: string;
+}
+
 export interface ResolvedToolFeedbackSettings {
 	errorReflection: { enabled: boolean };
 	doomLoopReminder: { enabled: boolean; threshold: number; cooldownMs: number };
@@ -286,6 +298,7 @@ export interface Settings {
 	 * starts a per-session persistent Python + JS kernel manager.
 	 */
 	eval?: EvalSettings;
+	chromeDevtools?: ChromeDevtoolsSettings;
 }
 
 export interface MemorySettings {
@@ -1458,6 +1471,22 @@ export class SettingsManager {
 		// kernel manager is spawned lazily on first use. Opt out via
 		// `eval.enabled: false` in settings.json.
 		return { enabled: raw?.enabled !== false };
+	}
+
+	getChromeDevtoolsSettings(): ResolvedChromeDevtoolsSettings {
+		const raw = this.settings.chromeDevtools;
+		// Default ON: the chrome_devtools_* tools are registered. They connect to a
+		// Chrome started with --remote-debugging-port and fail with a clear hint
+		// when it is not reachable. Opt out via `chromeDevtools.enabled: false`.
+		// Env overrides (PI_CHROME_DEVTOOLS_HOST/PORT) win over settings.
+		const envHost = process.env.PI_CHROME_DEVTOOLS_HOST;
+		const envPort = process.env.PI_CHROME_DEVTOOLS_PORT;
+		const port = envPort && Number.isFinite(Number(envPort)) ? Number(envPort) : (raw?.debugPort ?? 9222);
+		return {
+			enabled: raw?.enabled !== false,
+			debugPort: port,
+			host: envHost || raw?.host || "127.0.0.1",
+		};
 	}
 
 	getWebSearchSettings(): ResolvedWebSearchSettings {
