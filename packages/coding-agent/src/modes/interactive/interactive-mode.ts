@@ -2480,25 +2480,27 @@ export class InteractiveMode {
 				break;
 
 			case "message_start":
-				if (event.message.role === "custom") {
-					this.addMessageToChat(event.message);
-					this.ui.requestRender();
-				} else if (event.message.role === "user") {
-					this.addMessageToChat(event.message);
-					this.updatePendingMessagesDisplay();
-					this.ui.requestRender();
-				} else if (event.message.role === "assistant") {
-					this.streamingComponent = new AssistantMessageComponent(
-						undefined,
-						this.hideThinkingBlock,
-						this.getMarkdownThemeWithSettings(),
-						this.hiddenThinkingLabel,
-					);
-					this.streamingMessage = event.message;
-					this.chatContainer.addChild(this.streamingComponent);
-					this.streamingComponent.updateContent(this.streamingMessage);
-					this.ui.requestRender();
+				switch (event.message.role) {
+					case "custom":
+						this.addMessageToChat(event.message);
+						break;
+					case "user":
+						this.addMessageToChat(event.message);
+						this.updatePendingMessagesDisplay();
+						break;
+					case "assistant":
+						this.streamingComponent = new AssistantMessageComponent(
+							undefined,
+							this.hideThinkingBlock,
+							this.getMarkdownThemeWithSettings(),
+							this.hiddenThinkingLabel,
+						);
+						this.streamingMessage = event.message;
+						this.chatContainer.addChild(this.streamingComponent);
+						this.streamingComponent.updateContent(this.streamingMessage);
+						break;
 				}
+				this.ui.requestRender();
 				break;
 
 			case "message_update":
@@ -2525,11 +2527,7 @@ export class InteractiveMode {
 					this.streamingMessage = event.message;
 					let errorMessage: string | undefined;
 					if (this.streamingMessage.stopReason === "aborted") {
-						const retryAttempt = this.session.retryAttempt;
-						errorMessage =
-							retryAttempt > 0
-								? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-								: "Operation aborted";
+						errorMessage = this._abortedErrorMessage(this.session.retryAttempt);
 						this.streamingMessage.errorMessage = errorMessage;
 					}
 					this.streamingComponent.updateContent(this.streamingMessage);
@@ -2538,7 +2536,7 @@ export class InteractiveMode {
 						if (!errorMessage) {
 							errorMessage = this.streamingMessage.errorMessage || "Error";
 						}
-						for (const [, component] of this.pendingTools.entries()) {
+						for (const component of this.pendingTools.values()) {
 							component.updateResult({
 								content: [{ type: "text", text: errorMessage }],
 								isError: true,
@@ -2547,7 +2545,7 @@ export class InteractiveMode {
 						this.pendingTools.clear();
 					} else {
 						// Args are now complete - trigger diff computation for edit tools
-						for (const [, component] of this.pendingTools.entries()) {
+						for (const component of this.pendingTools.values()) {
 							component.setArgsComplete();
 						}
 					}
@@ -2753,6 +2751,12 @@ export class InteractiveMode {
 				break;
 			}
 		}
+	}
+
+	private _abortedErrorMessage(retryAttempt: number): string {
+		return retryAttempt > 0
+			? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
+			: "Operation aborted";
 	}
 
 	private _ensureToolComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent {
@@ -2974,11 +2978,7 @@ export class InteractiveMode {
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
 							let errorMessage: string;
 							if (message.stopReason === "aborted") {
-								const retryAttempt = this.session.retryAttempt;
-								errorMessage =
-									retryAttempt > 0
-										? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-										: "Operation aborted";
+								errorMessage = this._abortedErrorMessage(this.session.retryAttempt);
 							} else {
 								errorMessage = message.errorMessage || "Error";
 							}
@@ -3502,15 +3502,12 @@ export class InteractiveMode {
 	 * Combines session queue and compaction queue.
 	 */
 	private getAllQueuedMessages(): { steering: string[]; followUp: string[] } {
+		const steer: string[] = [];
+		const followUp: string[] = [];
+		for (const m of this.compactionQueuedMessages) (m.mode === "steer" ? steer : followUp).push(m.text);
 		return {
-			steering: [
-				...this.session.getSteeringMessages(),
-				...this.compactionQueuedMessages.filter((msg) => msg.mode === "steer").map((msg) => msg.text),
-			],
-			followUp: [
-				...this.session.getFollowUpMessages(),
-				...this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp").map((msg) => msg.text),
-			],
+			steering: [...this.session.getSteeringMessages(), ...steer],
+			followUp: [...this.session.getFollowUpMessages(), ...followUp],
 		};
 	}
 
@@ -3520,16 +3517,13 @@ export class InteractiveMode {
 	 */
 	private clearAllQueues(): { steering: string[]; followUp: string[] } {
 		const { steering, followUp } = this.session.clearQueue();
-		const compactionSteering = this.compactionQueuedMessages
-			.filter((msg) => msg.mode === "steer")
-			.map((msg) => msg.text);
-		const compactionFollowUp = this.compactionQueuedMessages
-			.filter((msg) => msg.mode === "followUp")
-			.map((msg) => msg.text);
+		const steer: string[] = [];
+		const followUpCompaction: string[] = [];
+		for (const m of this.compactionQueuedMessages) (m.mode === "steer" ? steer : followUpCompaction).push(m.text);
 		this.compactionQueuedMessages = [];
 		return {
-			steering: [...steering, ...compactionSteering],
-			followUp: [...followUp, ...compactionFollowUp],
+			steering: [...steering, ...steer],
+			followUp: [...followUp, ...followUpCompaction],
 		};
 	}
 

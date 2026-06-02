@@ -207,17 +207,7 @@ export class AgentHarness<
 		return this.handlers.get(type);
 	}
 
-	private async emitOwn(event: AgentHarnessOwnEvent<TSkill, TPromptTemplate>, signal?: AbortSignal): Promise<void> {
-		for (const listener of this.getHandlers(SUBSCRIBER_EVENT_TYPE) ?? []) {
-			try {
-				await listener(event, signal);
-			} catch (error) {
-				throw normalizeHookError(error);
-			}
-		}
-	}
-
-	private async emitAny(event: AgentHarnessEvent<TSkill, TPromptTemplate>, signal?: AbortSignal): Promise<void> {
+	private async emitOwn(event: AgentHarnessEvent<TSkill, TPromptTemplate>, signal?: AbortSignal): Promise<void> {
 		for (const listener of this.getHandlers(SUBSCRIBER_EVENT_TYPE) ?? []) {
 			try {
 				await listener(event, signal);
@@ -462,22 +452,36 @@ export class AgentHarness<
 	private async flushPendingSessionWrites(): Promise<void> {
 		while (this.pendingSessionWrites.length > 0) {
 			const write = this.pendingSessionWrites[0]!;
-			if (write.type === "message") {
-				await this.session.appendMessage(write.message);
-			} else if (write.type === "model_change") {
-				await this.session.appendModelChange(write.provider, write.modelId);
-			} else if (write.type === "thinking_level_change") {
-				await this.session.appendThinkingLevelChange(write.thinkingLevel);
-			} else if (write.type === "custom") {
-				await this.session.appendCustomEntry(write.customType, write.data);
-			} else if (write.type === "custom_message") {
-				await this.session.appendCustomMessageEntry(write.customType, write.content, write.display, write.details);
-			} else if (write.type === "label") {
-				await this.session.appendLabel(write.targetId, write.label);
-			} else if (write.type === "session_info") {
-				await this.session.appendSessionName(write.name ?? "");
-			} else if (write.type === "leaf") {
-				await this.session.getStorage().setLeafId(write.targetId);
+			switch (write.type) {
+				case "message":
+					await this.session.appendMessage(write.message);
+					break;
+				case "model_change":
+					await this.session.appendModelChange(write.provider, write.modelId);
+					break;
+				case "thinking_level_change":
+					await this.session.appendThinkingLevelChange(write.thinkingLevel);
+					break;
+				case "custom":
+					await this.session.appendCustomEntry(write.customType, write.data);
+					break;
+				case "custom_message":
+					await this.session.appendCustomMessageEntry(
+						write.customType,
+						write.content,
+						write.display,
+						write.details,
+					);
+					break;
+				case "label":
+					await this.session.appendLabel(write.targetId, write.label);
+					break;
+				case "session_info":
+					await this.session.appendSessionName(write.name ?? "");
+					break;
+				case "leaf":
+					await this.session.getStorage().setLeafId(write.targetId);
+					break;
 			}
 			this.pendingSessionWrites.shift();
 		}
@@ -486,13 +490,13 @@ export class AgentHarness<
 	private async handleAgentEvent(event: AgentEvent, signal?: AbortSignal): Promise<void> {
 		if (event.type === "message_end") {
 			await this.session.appendMessage(event.message);
-			await this.emitAny(event, signal);
+			await this.emitOwn(event, signal);
 			return;
 		}
 		if (event.type === "turn_end") {
 			let eventError: unknown;
 			try {
-				await this.emitAny(event, signal);
+				await this.emitOwn(event, signal);
 			} catch (error) {
 				eventError = error;
 			}
@@ -505,11 +509,11 @@ export class AgentHarness<
 		if (event.type === "agent_end") {
 			await this.flushPendingSessionWrites();
 			this.phase = "idle";
-			await this.emitAny(event, signal);
+			await this.emitOwn(event, signal);
 			await this.emitOwn({ type: "settled", nextTurnCount: this.nextTurnQueue.length }, signal);
 			return;
 		}
-		await this.emitAny(event, signal);
+		await this.emitOwn(event, signal);
 	}
 
 	private async emitRunFailure(

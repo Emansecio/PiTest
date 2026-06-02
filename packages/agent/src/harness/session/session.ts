@@ -77,6 +77,10 @@ export function buildSessionContext(pathEntries: SessionTreeEntry[]): SessionCon
 	return { messages, thinkingLevel, model };
 }
 
+function copyContext(ctx: SessionContext): SessionContext {
+	return { messages: ctx.messages.slice(), thinkingLevel: ctx.thinkingLevel, model: ctx.model };
+}
+
 export class Session<TMetadata extends SessionMetadata = SessionMetadata> {
 	private storage: SessionStorage<TMetadata>;
 	// Memoize the resolved context per leaf; rebuilt when the leaf changes
@@ -118,12 +122,11 @@ export class Session<TMetadata extends SessionMetadata = SessionMetadata> {
 		if (cached && cached.leafId === leafId) {
 			// Defensive copy: callers store messages in turnState and the agent loop
 			// push()es into it. Element identity is preserved so per-message caches hit.
-			const ctx = cached.context;
-			return { messages: ctx.messages.slice(), thinkingLevel: ctx.thinkingLevel, model: ctx.model };
+			return copyContext(cached.context);
 		}
 		const context = buildSessionContext(await this.storage.getPathToRoot(leafId));
 		this._ctxCache = { leafId, context };
-		return { messages: context.messages.slice(), thinkingLevel: context.thinkingLevel, model: context.model };
+		return copyContext(context);
 	}
 
 	getLabel(id: string): Promise<string | undefined> {
