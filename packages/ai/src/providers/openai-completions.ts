@@ -821,17 +821,14 @@ export function convertMessages(
 				content: compat.requiresAssistantAfterToolResult ? "" : null,
 			};
 
-			const assistantTextParts = msg.content
-				.filter(isTextContentBlock)
-				.filter((block) => block.text.trim().length > 0)
-				.map(
-					(block) =>
-						({
-							type: "text",
-							text: sanitizeSurrogates(block.text),
-						}) satisfies ChatCompletionContentPartText,
-				);
-			const assistantText = assistantTextParts.map((part) => part.text).join("");
+			const assistantTextParts: ChatCompletionContentPartText[] = [];
+			let assistantText = "";
+			for (const block of msg.content) {
+				if (!isTextContentBlock(block) || block.text.trim().length === 0) continue;
+				const sanitized = sanitizeSurrogates(block.text);
+				assistantTextParts.push({ type: "text", text: sanitized } satisfies ChatCompletionContentPartText);
+				assistantText += sanitized;
+			}
 
 			const nonEmptyThinkingBlocks = msg.content
 				.filter(isThinkingContentBlock)

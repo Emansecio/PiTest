@@ -527,6 +527,10 @@ export class AgentSession {
 	// in the active surface and (on request) pull them in on demand.
 	private _toolDiscoveryIndex: ToolDiscoveryIndex | undefined;
 
+	// Cache for getActiveToolNames() — keyed by array identity so it stays
+	// fresh whenever setActiveToolsByName() reatribui agent.state.tools.
+	private _activeToolNamesCache?: { tools: unknown; names: string[] };
+
 	// Per-session eval kernel manager. Holds the persistent Python + JS kernels
 	// for the `eval` tool. Spawned in the constructor when settings enable it;
 	// kernels themselves are spawned lazily on first use by the manager.
@@ -1620,9 +1624,17 @@ export class AgentSession {
 	/**
 	 * Get the names of currently active tools.
 	 * Returns the names of tools currently set on the agent.
+	 * Result is cached by array identity: recomputed only when setActiveToolsByName()
+	 * reassigns agent.state.tools to a new array.
 	 */
 	getActiveToolNames(): string[] {
-		return this.agent.state.tools.map((t) => t.name);
+		if (this._activeToolNamesCache?.tools !== this.agent.state.tools) {
+			this._activeToolNamesCache = {
+				tools: this.agent.state.tools,
+				names: this.agent.state.tools.map((t) => t.name),
+			};
+		}
+		return this._activeToolNamesCache.names;
 	}
 
 	/**
@@ -1733,21 +1745,7 @@ export class AgentSession {
 	}
 
 	private _restoreGoalFromSession(): void {
-		try {
-			let latest: GoalState | undefined;
-			for (const e of this.sessionManager.getEntries()) {
-				const entry = e as { type?: string; customType?: string; data?: GoalState | null };
-				if (entry.type === "custom" && entry.customType === "goal") {
-					latest = entry.data ?? undefined;
-				}
-			}
-			if (latest && latest.status !== "complete") {
-				this._goal.restore(latest);
-				this._activateGoalTool(true);
-			}
-		} catch {
-			// Best-effort restore; ignore malformed/legacy entries.
-		}
+		this._restoreStateFromSession();
 	}
 
 	// =========================================================================
@@ -1803,15 +1801,33 @@ export class AgentSession {
 	}
 
 	private _restoreTodoFromSession(): void {
+		// No-op: restoration is handled by _restoreStateFromSession(), which is
+		// called by _restoreGoalFromSession() during construction.
+	}
+
+	/**
+	 * Single-pass restore of both goal and todo state from the session file.
+	 * Called once in the constructor (via _restoreGoalFromSession) so that
+	 * getEntries() is iterated only once instead of twice.
+	 */
+	private _restoreStateFromSession(): void {
 		try {
-			let latest: TodoState | undefined;
+			let latestGoal: GoalState | undefined;
+			let latestTodo: TodoState | undefined;
 			for (const e of this.sessionManager.getEntries()) {
-				const entry = e as { type?: string; customType?: string; data?: TodoState | null };
-				if (entry.type === "custom" && entry.customType === "todo") {
-					latest = entry.data ?? undefined;
+				const entry = e as { type?: string; customType?: string; data?: GoalState | TodoState | null };
+				if (entry.type !== "custom") continue;
+				if (entry.customType === "goal") {
+					latestGoal = (entry.data as GoalState | null) ?? undefined;
+				} else if (entry.customType === "todo") {
+					latestTodo = (entry.data as TodoState | null) ?? undefined;
 				}
 			}
-			if (latest) this._todo.restore(latest);
+			if (latestGoal && latestGoal.status !== "complete") {
+				this._goal.restore(latestGoal);
+				this._activateGoalTool(true);
+			}
+			if (latestTodo) this._todo.restore(latestTodo);
 		} catch {
 			// Best-effort restore; ignore malformed/legacy entries.
 		}
@@ -3492,22 +3508,16 @@ export class AgentSession {
 			});
 		}
 		this._toolDefinitions = definitionRegistry;
-		this._toolPromptSnippets = new Map(
-			Array.from(definitionRegistry.values())
-				.map(({ definition }) => {
-					const snippet = this._normalizePromptSnippet(definition.promptSnippet);
-					return snippet ? ([definition.name, snippet] as const) : undefined;
-				})
-				.filter((entry): entry is readonly [string, string] => entry !== undefined),
-		);
-		this._toolPromptGuidelines = new Map(
-			Array.from(definitionRegistry.values())
-				.map(({ definition }) => {
-					const guidelines = this._normalizePromptGuidelines(definition.promptGuidelines);
-					return guidelines.length > 0 ? ([definition.name, guidelines] as const) : undefined;
-				})
-				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
-		);
+		const nextSnippets = new Map<string, string>();
+		const nextGuidelines = new Map<string, string[]>();
+		for (const { definition } of definitionRegistry.values()) {
+			const snippet = this._normalizePromptSnippet(definition.promptSnippet);
+			if (snippet) nextSnippets.set(definition.name, snippet);
+			const guidelines = this._normalizePromptGuidelines(definition.promptGuidelines);
+			if (guidelines.length > 0) nextGuidelines.set(definition.name, guidelines);
+		}
+		this._toolPromptSnippets = nextSnippets;
+		this._toolPromptGuidelines = nextGuidelines;
 		const runner = this._extensionRunner;
 		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
 		const wrappedBuiltInTools = wrapRegisteredTools(
@@ -4423,16 +4433,16 @@ export class AgentSession {
 	 * @returns Text content, or undefined if no assistant message exists
 	 */
 	getLastAssistantText(): string | undefined {
-		const lastAssistant = this.messages
-			.slice()
-			.reverse()
-			.find((m) => {
-				if (m.role !== "assistant") return false;
-				const msg = m as AssistantMessage;
-				// Skip aborted messages with no content
-				if (msg.stopReason === "aborted" && msg.content.length === 0) return false;
-				return true;
-			});
+		let lastAssistant: AgentMessage | undefined;
+		for (let i = this.messages.length - 1; i >= 0; i--) {
+			const m = this.messages[i];
+			if (m.role !== "assistant") continue;
+			const msg = m as AssistantMessage;
+			// Skip aborted messages with no content
+			if (msg.stopReason === "aborted" && msg.content.length === 0) continue;
+			lastAssistant = m;
+			break;
+		}
 
 		if (!lastAssistant) return undefined;
 

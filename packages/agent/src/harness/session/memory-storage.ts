@@ -116,12 +116,13 @@ export class InMemorySessionStorage<TMetadata extends SessionMetadata = SessionM
 		let current = this.byId.get(leafId);
 		if (!current) throw new SessionError("not_found", `Entry ${leafId} not found`);
 		while (current) {
-			path.unshift(current);
+			path.push(current);
 			if (!current.parentId) break;
 			const parent = this.byId.get(current.parentId);
 			if (!parent) throw new SessionError("invalid_session", `Entry ${current.parentId} not found`);
 			current = parent;
 		}
+		path.reverse();
 		return path;
 	}
 

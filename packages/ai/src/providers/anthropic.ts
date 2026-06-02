@@ -83,14 +83,15 @@ const ccToolLookup = new Map(claudeCodeTools.map((t) => [t.toLowerCase(), t]));
 
 // Convert tool name to CC canonical casing if it matches (case-insensitive)
 const toClaudeCodeName = (name: string) => ccToolLookup.get(name.toLowerCase()) ?? name;
-const fromClaudeCodeName = (name: string, tools?: Tool[]) => {
-	if (tools && tools.length > 0) {
-		const lowerName = name.toLowerCase();
-		const matchedTool = tools.find((tool) => tool.name.toLowerCase() === lowerName);
-		if (matchedTool) return matchedTool.name;
-	}
-	return name;
-};
+
+// Build a O(1) reverse lookup from context.tools once before the stream loop.
+// Mirrors the ccToolLookup pattern: lowercase name → original name.
+function buildToolNameLookup(tools: Tool[] | undefined): Map<string, string> {
+	if (!tools || tools.length === 0) return new Map();
+	return new Map(tools.map((t) => [t.name.toLowerCase(), t.name]));
+}
+
+const fromClaudeCodeName = (name: string, lookup: Map<string, string>) => lookup.get(name.toLowerCase()) ?? name;
 
 /**
  * Convert content blocks to Anthropic API format
@@ -508,6 +509,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
 			const blocks = output.content as Block[];
 			const blockIndexMap = new Map<number, number>();
+			// Build O(1) reverse lookup for fromClaudeCodeName once before the loop.
+			const toolNameLookup = buildToolNameLookup(context.tools);
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				if (event.type === "message_start") {
@@ -558,7 +561,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 							type: "toolCall",
 							id: event.content_block.id,
 							name: isOAuth
-								? fromClaudeCodeName(event.content_block.name, context.tools)
+								? fromClaudeCodeName(event.content_block.name, toolNameLookup)
 								: event.content_block.name,
 							arguments: (event.content_block.input as Record<string, any>) ?? {},
 							partialJson: "",
