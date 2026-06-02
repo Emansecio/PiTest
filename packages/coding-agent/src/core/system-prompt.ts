@@ -135,6 +135,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasGrep = tools.includes("grep");
 	const hasFind = tools.includes("find");
 	const hasLs = tools.includes("ls");
+	const hasPreviewTool = tools.includes("preview") || tools.some((name) => name.startsWith("chrome_devtools"));
 
 	// File exploration guidelines
 	if (hasBash && !hasGrep && !hasFind && !hasLs) {
@@ -157,7 +158,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasMultipleReadOnlyTools = [hasRead, hasGrep, hasFind, hasLs].filter(Boolean).length >= 2;
 	if (hasMultipleReadOnlyTools) {
 		addGuideline(
-			"Tool batching: when you can predict multiple independent tool calls before seeing any result, emit them ALL in the same turn so the runtime runs them in parallel. Examples: reading several files you already know the paths of; greping for multiple distinct patterns; listing several directories. Each turn is a full network round-trip, so 5 reads in 1 turn is ~5x faster than 5 reads in 5 turns.",
+			"Tool batching: emit independent tool calls in the same turn so the runtime runs them in parallel (e.g. several known-path reads, multiple distinct grep patterns, listing several directories). Each turn is a full network round-trip.",
 		);
 		addGuideline(
 			"Do not batch when a call's arguments depend on a previous result (e.g., reading a file at a path you just discovered via grep). Sequence those normally.",
@@ -179,15 +180,15 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// in a condensed "check per step" (the strong form lives in the karpathy pack).
 	if ((tools.includes("edit") || tools.includes("write")) && hasBash) {
 		addGuideline(
-			"After a non-trivial code change, verify before reporting done: run the affected test/build/lint (or read the file itself), then either cite the check you ran or state plainly that you did not verify — never report a code change as done on a silent, unverified assumption. For multi-step work, attach a check to each step and keep iterating until every check passes.",
+			"After a non-trivial code change, verify before reporting done: run the affected test/build/lint (or re-read the file), then cite the check or state plainly it was not verified — never report done on a silent, unverified assumption. For multi-step work, attach a check to each step.",
 		);
 	}
-	// Visual Definition-of-Done (F1): valid code is not a verified visual. Self-gates
-	// in-text on the model actually having changed a rendered artifact and a browser
-	// tool being reachable, so it stays inert for backend-only work.
-	if (tools.includes("edit") || tools.includes("write")) {
+	// Visual Definition-of-Done (F1): valid code is not a verified visual. Gated on a
+	// preview/browser tool actually being present — without one the guidance is dead
+	// weight, so it stays out of the prompt entirely for backend-only sessions.
+	if ((tools.includes("edit") || tools.includes("write")) && hasPreviewTool) {
 		addGuideline(
-			"If you changed a rendered visual artifact (HTML/CSS, canvas, SVG, a UI component, a chart) and a browser or preview tool is available, it is not done until you render it, screenshot it, and check the console/network for errors — valid code is not a verified visual. If no browser tool is reachable, report it as visually unverified rather than implying it was checked.",
+			"If you changed a rendered visual (UI component, HTML/CSS, canvas, SVG, chart), it is not done until you render it, screenshot it, and check the console/network for errors — valid code is not a verified visual.",
 		);
 	}
 

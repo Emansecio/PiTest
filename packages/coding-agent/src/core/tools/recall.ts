@@ -78,7 +78,8 @@ export function createRecallToolDefinition(
 			"Search the project's hindsight memory bank for relevant entries. Use this before doing redundant investigation — past sessions may have already established the answer.",
 		promptSnippet: "Search project hindsight memory",
 		promptGuidelines: [
-			"Use recall before grepping the codebase if the question is about prior decisions, conventions, or gotchas — hindsight is faster.",
+			"At the start of any non-trivial task, recall first — prior sessions have likely already established the relevant conventions, decisions, or gotchas. Make recall a habit, not an exception.",
+			"Recall before grepping or reading widely whenever the question touches prior decisions, conventions, or recurring issues — hindsight is faster than re-investigating.",
 		],
 		parameters: recallSchema,
 		async execute(_toolCallId: string, input: RecallToolInput) {

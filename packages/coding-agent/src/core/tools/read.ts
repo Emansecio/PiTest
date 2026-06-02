@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@pit/ai";
@@ -20,6 +21,41 @@ import { resolveReadPath } from "./path-utils.js";
 import { getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
+
+const READ_DEDUPE_WINDOW = 16;
+
+/**
+ * Per-session de-dup of repeat reads. A read whose (path, range) was already
+ * delivered THIS session with identical content has its body replaced by a short
+ * marker instead of being re-sent verbatim. LRU-bounded to the most recent reads:
+ * an older read may have scrolled out of context (compaction), so re-sending it is
+ * the safe default. Keyed by content hash, so a file edited between reads — whose
+ * hash changes — is always re-sent in full.
+ */
+export class ReadDedupeStore {
+	private readonly seen = new Map<string, string>();
+	private readonly max: number;
+	constructor(max: number = READ_DEDUPE_WINDOW) {
+		this.max = Math.max(1, max);
+	}
+	/** Record this read; report whether it duplicates a recent identical one. */
+	isDuplicate(key: string, contentHash: string): boolean {
+		const prev = this.seen.get(key);
+		// Refresh recency: re-inserting moves the key to the most-recent end.
+		this.seen.delete(key);
+		this.seen.set(key, contentHash);
+		while (this.seen.size > this.max) {
+			const oldest = this.seen.keys().next().value;
+			if (oldest === undefined) break;
+			this.seen.delete(oldest);
+		}
+		return prev === contentHash;
+	}
+}
+
+function hashReadContent(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
+}
 
 const readSchema = Type.Object(
 	{
@@ -75,6 +111,11 @@ export interface ReadToolOptions {
 	 * lines inline with `L<n> <hash> │ <code>`.
 	 */
 	embedHashlineAnchorsMode?: "block" | "interleave";
+	/**
+	 * Optional per-session store that suppresses the body of identical, recent
+	 * repeat reads (replacing it with a short marker). When omitted, no de-dup.
+	 */
+	readDedupeStore?: ReadDedupeStore;
 }
 
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
@@ -270,6 +311,7 @@ export function createReadToolDefinition(
 	const ops = options?.operations ?? defaultReadOperations;
 	const embedHashlineAnchors = options?.embedHashlineAnchors ?? true;
 	const embedHashlineAnchorsMode = options?.embedHashlineAnchorsMode ?? "block";
+	const dedupeStore = options?.readDedupeStore;
 	return {
 		name: "read",
 		label: "read",
@@ -464,8 +506,26 @@ Common mistakes to avoid:
 									// No truncation and no remaining user-limited content.
 									outputText = truncation.content;
 								}
+								// De-dup: if this exact (path, range) was already read this session with
+								// identical pre-anchor content, replace the body with a short marker instead
+								// of re-sending it. LRU-bounded so only recent reads de-dup; an older one may
+								// have scrolled out of context, where re-sending is correct. Skips anchors.
+								let dedupeSuppressed = false;
+								if (dedupeStore) {
+									const dedupeKey = `${absolutePath} ${offset ?? ""} ${limit ?? ""}`;
+									if (dedupeStore.isDuplicate(dedupeKey, hashReadContent(outputText))) {
+										const shownLines = outputText.length === 0 ? 0 : outputText.split("\n").length;
+										const rangeLabel =
+											offset !== undefined || limit !== undefined
+												? ` (offset ${offset ?? 1}${limit !== undefined ? `, limit ${limit}` : ""})`
+												: "";
+										outputText = `[read ${path}${rangeLabel}: identical to an earlier read this session — ${shownLines} line(s), unchanged and already shown above. Re-run read to re-expand if it has scrolled out of context.]`;
+										dedupeSuppressed = true;
+									}
+								}
 								// Anchors: on by default, only when caller did not slice the file.
 								if (
+									!dedupeSuppressed &&
 									embedHashlineAnchors &&
 									offset === undefined &&
 									limit === undefined &&

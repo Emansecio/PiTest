@@ -12,6 +12,19 @@ export const DEFAULT_MAX_LINES = 2000;
 export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
 export const GREP_MAX_LINE_LENGTH = 500; // Max chars per grep match line
 
+// Bash gets a tighter budget than file reads: command output (build/test logs,
+// dumps) is rarely worth 50KB of context, whereas a source file read often is.
+// Bash truncates from the tail (errors land at the end), so the cap mostly trims
+// verbose middles. Full output is always persisted to a temp file when truncated.
+export const BASH_MAX_LINES = 1000;
+export const BASH_MAX_BYTES = 24 * 1024; // 24KB
+
+// Head budget for bash head+tail truncation: retain the first lines (the command and
+// early context) alongside the tail (where errors and summaries land), eliding only
+// the middle. Kept well under the total budget so the tail still dominates.
+export const BASH_HEAD_MAX_LINES = 120;
+export const BASH_HEAD_MAX_BYTES = 4 * 1024; // 4KB
+
 export interface TruncationResult {
 	/** The truncated content */
 	content: string;

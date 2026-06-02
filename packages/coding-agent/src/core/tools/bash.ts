@@ -20,9 +20,11 @@ import { OutputAccumulator } from "./output-accumulator.js";
 import { getTextOutput, invalidArgText, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import {
+	BASH_HEAD_MAX_BYTES,
+	BASH_HEAD_MAX_LINES,
+	BASH_MAX_BYTES,
+	BASH_MAX_LINES,
 	collapseRepeatedLines,
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
 	formatSize,
 	type TruncationResult,
 } from "./truncate.js";
@@ -385,7 +387,7 @@ function rebuildBashResultRenderComponent(
 				warnings.push(`Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines`);
 			} else {
 				warnings.push(
-					`Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? DEFAULT_MAX_BYTES)} limit)`,
+					`Truncated: ${truncation.outputLines} lines shown (${formatSize(truncation.maxBytes ?? BASH_MAX_BYTES)} limit)`,
 				);
 			}
 		}
@@ -434,26 +436,9 @@ export function createBashToolDefinition(
 	return {
 		name: "bash",
 		label: "bash",
-		description: `Execute a bash command in the current working directory.
+		description: `Execute a bash command in the current working directory. Use bash only for what no dedicated tool covers: build/test/install scripts, git, network requests, process management, shell pipelines/redirects. Prefer read/grep/find/ls/write/edit for file operations.
 
-Use bash ONLY for tasks no dedicated tool covers: build/test scripts, install, git operations, network requests, process management, shell pipelines/redirects, or one-off commands.
-
-Do NOT use bash to replace dedicated tools (the dedicated tool is always preferred when both are available):
-- read a file → use \`read\` (not cat/head/tail/sed)
-- search file contents → use \`grep\` (not grep/rg/egrep)
-- locate files by name/glob → use \`find\` (not find/ls -R)
-- list directory entries → use \`ls\` (not bash ls)
-- create/overwrite a file → use \`write\`
-- edit a file → use \`edit\`
-
-Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.
-
-Common mistakes to avoid:
-- Passing the command under "cmd"/"script"/"run" — the canonical key is "command".
-- Passing multiple commands as an array — join with " && " into a single "command" string, or call bash once per logical group.
-- Using bash to read/grep/find files when those dedicated tools are available.
-- Forgetting that each invocation runs in a fresh shell (no carried env, no carried cwd — use "cd /path && command" inline).
-- Embedding multi-line scripts — write to a temp file with "write", then invoke it.`,
+Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BASH_MAX_BYTES / 1024}KB (whichever is hit first); full output is saved to a temp file when truncated. Pass one "command" string (join steps with " && "); each call runs in a fresh shell — no carried cwd or env, so use "cd /path && command" inline. Optional timeout in seconds.`,
 		promptSnippet: "Execute bash commands (build/test/git/network only; prefer read/grep/find/ls for files)",
 		parameters: bashSchema,
 		prepareArguments: prepareBashArguments,
@@ -466,7 +451,13 @@ Common mistakes to avoid:
 		) {
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
 			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
-			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
+			const output = new OutputAccumulator({
+				tempFilePrefix: "pi-bash",
+				maxLines: BASH_MAX_LINES,
+				maxBytes: BASH_MAX_BYTES,
+				headLines: BASH_HEAD_MAX_LINES,
+				headBytes: BASH_HEAD_MAX_BYTES,
+			});
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
 			let lastUpdateAt = 0;
@@ -536,13 +527,16 @@ Common mistakes to avoid:
 					details = { truncation, fullOutputPath: snapshot.fullOutputPath };
 					const startLine = truncation.totalLines - truncation.outputLines + 1;
 					const endLine = truncation.totalLines;
-					if (truncation.lastLinePartial) {
+					if (snapshot.composed) {
+						const { headLines, tailLines, elidedLines } = snapshot.composed;
+						text += `\n\n[Showing first ${headLines} + last ${tailLines} of ${truncation.totalLines} lines (${elidedLines} elided). Full output: ${snapshot.fullOutputPath}]`;
+					} else if (truncation.lastLinePartial) {
 						const lastLineSize = formatSize(output.getLastLineBytes());
 						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${snapshot.fullOutputPath}]`;
 					} else if (truncation.truncatedBy === "lines") {
 						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${snapshot.fullOutputPath}]`;
 					} else {
-						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}]`;
+						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(BASH_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}]`;
 					}
 				}
 				return { text, details };

@@ -5,7 +5,6 @@
  * - Defines the default per-project bank location.
  * - Hosts a module-level "current bank" registry so tools can pull it on
  *   demand (same pattern as `user-input-bus.ts`).
- * - Provides a tiny helper used by compaction to record session summaries.
  */
 
 import { existsSync, mkdirSync } from "node:fs";
@@ -36,28 +35,6 @@ export function setCurrentHindsightBank(bank: HindsightBank | undefined): void {
 
 export function getCurrentHindsightBank(): HindsightBank | undefined {
 	return currentBank;
-}
-
-/**
- * Append a session-summary entry to the active bank, if hindsight is enabled.
- * No-op when no bank is registered. Safe to call from compaction or any
- * session-teardown path.
- */
-export function recordSessionSummary(input: {
-	body: string;
-	subject?: string;
-	sessionId?: string;
-	tags?: string[];
-}): void {
-	const bank = currentBank;
-	if (!bank) return;
-	bank.add({
-		kind: "session-summary",
-		body: input.body,
-		subject: input.subject,
-		tags: input.tags,
-		source: input.sessionId ? { sessionId: input.sessionId } : undefined,
-	});
 }
 
 /**

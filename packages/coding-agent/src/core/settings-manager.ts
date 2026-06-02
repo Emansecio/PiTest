@@ -294,7 +294,7 @@ export interface Settings {
 	modelRoles?: ModelRoleSettings["modelRoles"];
 	/** Time-Traveling Stream Rules. Off by default; populate to activate. */
 	ttsrRules?: TTSRRuleSettings[];
-	/** Per-project hindsight memory bank. Off by default. */
+	/** Per-project hindsight memory bank. On by default; opt out with `hindsight.enabled: false`. */
 	hindsight?: HindsightSettings;
 	/**
 	 * Hidden tool discovery index. Off by default; when enabled, hidden tools
@@ -1445,8 +1445,8 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Resolve hindsight memory settings. Disabled by default; opt-in via
-	 * `hindsight.enabled: true` in settings.json (project or global). When
+	 * Resolve hindsight memory settings. Enabled by default; opt out via
+	 * `hindsight.enabled: false` in settings.json (project or global). When
 	 * disabled, the retain/recall/reflect/forget tools are not registered and no
 	 * bank is opened.
 	 */

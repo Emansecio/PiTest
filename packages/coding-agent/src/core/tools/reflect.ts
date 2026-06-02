@@ -94,6 +94,7 @@ export function createReflectToolDefinition(
 			"Give me everything I know about X. Returns up to 20 hindsight entries relevant to the question as a single Markdown block for you to synthesize. Use when you want broad context, not a targeted lookup (for that, use `recall`).",
 		promptSnippet: "Dump all hindsight entries relevant to a question",
 		promptGuidelines: [
+			"When starting broad or unfamiliar work, reflect on the topic up front to load all relevant memory at once before diving in.",
 			"Use reflect when you want every relevant memory at once and will synthesize the answer yourself. For pinpoint lookups, prefer recall.",
 		],
 		parameters: reflectSchema,

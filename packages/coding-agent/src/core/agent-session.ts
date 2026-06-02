@@ -33,6 +33,7 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { type CacheStats, computeCacheStats } from "./cache-stats.js";
 import {
 	ChromeDevtoolsManager,
 	getCurrentChromeDevtoolsManager,
@@ -147,6 +148,7 @@ import {
 } from "./tool-discovery.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
+import { ReadDedupeStore } from "./tools/read.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
 import {
@@ -425,6 +427,7 @@ export class AgentSession {
 	private _allowedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _disableHashlineAnchors: boolean;
+	private readonly _readDedupeStore: ReadDedupeStore | undefined;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -553,6 +556,10 @@ export class AgentSession {
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._disableHashlineAnchors = config.disableHashlineAnchors ?? false;
+		// Per-session de-dup of identical repeat reads. On by default; PIT_READ_DEDUPE=0
+		// disables. Content-hashed + LRU-bounded, so edited or long-ago reads re-send.
+		this._readDedupeStore =
+			typeof process !== "undefined" && process.env.PIT_READ_DEDUPE === "0" ? undefined : new ReadDedupeStore();
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Size the frequent-files tracker from settings so an opt-in user with a
@@ -661,7 +668,11 @@ export class AgentSession {
 		let allDefs: Record<string, ToolDefinition>;
 		try {
 			allDefs = createAllToolDefinitions(this._cwd, {
-				read: { autoResizeImages, embedHashlineAnchors: !this._disableHashlineAnchors },
+				read: {
+					autoResizeImages,
+					embedHashlineAnchors: !this._disableHashlineAnchors,
+					readDedupeStore: this._readDedupeStore,
+				},
 				bash: { commandPrefix: shellCommandPrefix, shellPath },
 			}) as Record<string, ToolDefinition>;
 		} catch {
@@ -3577,7 +3588,11 @@ export class AgentSession {
 					]),
 				)
 			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages, embedHashlineAnchors: !this._disableHashlineAnchors },
+					read: {
+						autoResizeImages,
+						embedHashlineAnchors: !this._disableHashlineAnchors,
+						readDedupeStore: this._readDedupeStore,
+					},
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 				});
 
@@ -4317,6 +4332,14 @@ export class AgentSession {
 			cost: totalCost,
 			contextUsage: this.getContextUsage(),
 		};
+	}
+
+	/**
+	 * Prompt-cache statistics derived from per-message usage (hit-rate per turn plus
+	 * a prefix-stability diagnosis). Provider-agnostic; see {@link computeCacheStats}.
+	 */
+	getCacheStats(): CacheStats {
+		return computeCacheStats(this.state.messages);
 	}
 
 	getContextUsage(): ContextUsage | undefined {

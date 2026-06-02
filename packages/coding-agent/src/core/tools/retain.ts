@@ -60,8 +60,9 @@ export function createRetainToolDefinition(
 			"Save a durable fact, decision, or pattern to the project's hindsight memory bank. Use for things worth remembering across sessions (NOT session-only state). Searchable later via `recall` and `reflect`.",
 		promptSnippet: "Save a durable fact to project hindsight memory",
 		promptGuidelines: [
-			"Use retain only for project-durable facts — architecture, decisions, gotchas, conventions. Not for temporary state.",
-			"Keep `body` focused: one short paragraph; specifics > generalities.",
+			"Proactively retain durable facts the moment you confirm them — architecture, key decisions, gotchas, conventions, file locations, API shapes, and fixes. Do not wait to be asked.",
+			"Make retaining a default reflex after any non-trivial investigation or task: capture what a future session would otherwise have to rediscover.",
+			"Keep each entry focused — one short paragraph, specifics over generalities. Prefer several small precise facts over one vague dump. Skip only truly transient state.",
 		],
 		parameters: retainSchema,
 		async execute(toolCallId: string, input: RetainToolInput) {

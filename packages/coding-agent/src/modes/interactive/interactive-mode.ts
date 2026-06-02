@@ -47,18 +47,10 @@ import {
 	TUI,
 	visibleWidth,
 } from "@pit/tui";
-import { spawn, spawnSync } from "child_process";
-import {
-	APP_NAME,
-	APP_TITLE,
-	getAgentDir,
-	getAuthPath,
-	getDebugLogPath,
-	getShareViewerUrl,
-	VERSION,
-} from "../../config.ts";
+import { spawn } from "child_process";
+import { APP_NAME, APP_TITLE, getAgentDir, getAuthPath, getDebugLogPath, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
-import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -100,7 +92,6 @@ import {
 	resolveRole,
 } from "../../core/model-resolver.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
-import { getCurrentPreviewQueue } from "../../core/preview-queue.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -130,7 +121,6 @@ import { ArminComponent } from "./components/armin.ts";
 import { createAskPicker } from "./components/ask-picker.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
-import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CountdownTimer } from "./components/countdown-timer.ts";
@@ -407,14 +397,10 @@ export class InteractiveMode {
 	private static readonly _exactSlashCommands = new Map<string, (self: InteractiveMode) => void | Promise<void>>([
 		["/settings", (s) => s.showSettingsSelector()],
 		["/scoped-models", (s) => s.showModelsSelector()],
-		["/share", (s) => s.handleShareCommand()],
 		["/copy", (s) => s.handleCopyCommand()],
 		["/session", (s) => s.handleSessionCommand()],
-		["/changelog", (s) => s.handleChangelogCommand()],
+		["/cache-status", (s) => s.handleCacheStatusCommand()],
 		["/hotkeys", (s) => s.handleHotkeysCommand()],
-		["/fork", (s) => s.showUserMessageSelector()],
-		["/clone", (s) => s.handleCloneCommand()],
-		["/tree", (s) => s.showTreeSelector()],
 		["/login", (s) => s.showOAuthSelector("login")],
 		["/logout", (s) => s.showOAuthSelector("logout")],
 		["/new", (s) => s.handleClearCommand()],
@@ -2263,16 +2249,6 @@ export class InteractiveMode {
 			await this.handleModelCommand(text.startsWith("/model ") ? text.slice(7).trim() : undefined);
 			return true;
 		}
-		if (text === "/export" || text.startsWith("/export ")) {
-			await this.handleExportCommand(text);
-			this.editor.setText("");
-			return true;
-		}
-		if (text === "/import" || text.startsWith("/import ")) {
-			await this.handleImportCommand(text);
-			this.editor.setText("");
-			return true;
-		}
 		if (text === "/name" || text.startsWith("/name ")) {
 			this.handleNameCommand(text);
 			this.editor.setText("");
@@ -2291,11 +2267,6 @@ export class InteractiveMode {
 		if (text === "/hindsight" || text.startsWith("/hindsight ")) {
 			this.editor.setText("");
 			await this.handleHindsightCommand(text === "/hindsight" ? "" : text.slice(11).trim());
-			return true;
-		}
-		if (text === "/preview" || text.startsWith("/preview ")) {
-			this.editor.setText("");
-			await this.handlePreviewCommand(text === "/preview" ? "" : text.slice(9).trim());
 			return true;
 		}
 		if (text === "/goal" || text.startsWith("/goal ")) {
@@ -4215,28 +4186,6 @@ export class InteractiveMode {
 		});
 	}
 
-	private async handleCloneCommand(): Promise<void> {
-		const leafId = this.sessionManager.getLeafId();
-		if (!leafId) {
-			this.showStatus("Nothing to clone yet");
-			return;
-		}
-
-		try {
-			const result = await this.runtimeHost.fork(leafId, { position: "at" });
-			if (result.cancelled) {
-				this.ui.requestRender();
-				return;
-			}
-
-			this.renderCurrentSessionState();
-			this.editor.setText("");
-			this.showStatus("Cloned to new session");
-		} catch (error: unknown) {
-			this.showError(error instanceof Error ? error.message : String(error));
-		}
-	}
-
 	private showTreeSelector(initialSelectedId?: string): void {
 		const tree = this.sessionManager.getTree();
 		const realLeafId = this.sessionManager.getLeafId();
@@ -4896,195 +4845,6 @@ export class InteractiveMode {
 		}
 	}
 
-	private async handleExportCommand(text: string): Promise<void> {
-		const outputPath = this.getPathCommandArgument(text, "/export");
-
-		try {
-			if (outputPath?.endsWith(".jsonl")) {
-				const filePath = this.session.exportToJsonl(outputPath);
-				this.showStatus(`Session exported to: ${filePath}`);
-			} else {
-				const filePath = await this.session.exportToHtml(outputPath);
-				this.showStatus(`Session exported to: ${filePath}`);
-			}
-		} catch (error: unknown) {
-			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
-		}
-	}
-
-	private getPathCommandArgument(text: string, command: "/export" | "/import"): string | undefined {
-		if (text === command) {
-			return undefined;
-		}
-		if (!text.startsWith(`${command} `)) {
-			return undefined;
-		}
-
-		const argsString = text.slice(command.length + 1).trimStart();
-		if (!argsString) {
-			return undefined;
-		}
-
-		const firstChar = argsString[0];
-		if (firstChar === '"' || firstChar === "'") {
-			const closingQuoteIndex = argsString.indexOf(firstChar, 1);
-			if (closingQuoteIndex < 0) {
-				return undefined;
-			}
-			return argsString.slice(1, closingQuoteIndex);
-		}
-
-		const firstWhitespaceIndex = argsString.search(/\s/);
-		if (firstWhitespaceIndex < 0) {
-			return argsString;
-		}
-		return argsString.slice(0, firstWhitespaceIndex);
-	}
-
-	private async handleImportCommand(text: string): Promise<void> {
-		const inputPath = this.getPathCommandArgument(text, "/import");
-		if (!inputPath) {
-			this.showError("Usage: /import <path.jsonl>");
-			return;
-		}
-
-		const confirmed = await this.showExtensionConfirm("Import session", `Replace current session with ${inputPath}?`);
-		if (!confirmed) {
-			this.showStatus("Import cancelled");
-			return;
-		}
-
-		try {
-			if (this.loadingAnimation) {
-				this.loadingAnimation.stop();
-				this.loadingAnimation = undefined;
-			}
-			this.statusContainer.clear();
-			const result = await this.runtimeHost.importFromJsonl(inputPath);
-			if (result.cancelled) {
-				this.showStatus("Import cancelled");
-				return;
-			}
-			this.renderCurrentSessionState();
-			this.showStatus(`Session imported from: ${inputPath}`);
-		} catch (error: unknown) {
-			if (error instanceof MissingSessionCwdError) {
-				const selectedCwd = await this.promptForMissingSessionCwd(error);
-				if (!selectedCwd) {
-					this.showStatus("Import cancelled");
-					return;
-				}
-				const result = await this.runtimeHost.importFromJsonl(inputPath, selectedCwd);
-				if (result.cancelled) {
-					this.showStatus("Import cancelled");
-					return;
-				}
-				this.renderCurrentSessionState();
-				this.showStatus(`Session imported from: ${inputPath}`);
-				return;
-			}
-			if (error instanceof SessionImportFileNotFoundError) {
-				this.showError(`Failed to import session: ${error.message}`);
-				return;
-			}
-			await this.handleFatalRuntimeError("Failed to import session", error);
-		}
-	}
-
-	private async handleShareCommand(): Promise<void> {
-		// Check if gh is available and logged in
-		try {
-			const authResult = spawnSync("gh", ["auth", "status"], { encoding: "utf-8" });
-			if (authResult.status !== 0) {
-				this.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
-				return;
-			}
-		} catch {
-			this.showError("GitHub CLI (gh) is not installed. Install it from https://cli.github.com/");
-			return;
-		}
-
-		// Export to a temp file
-		const tmpFile = path.join(os.tmpdir(), "session.html");
-		try {
-			await this.session.exportToHtml(tmpFile);
-		} catch (error: unknown) {
-			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
-			return;
-		}
-
-		// Show cancellable loader, replacing the editor
-		const loader = new BorderedLoader(this.ui, theme, "Creating gist...");
-		this.editorContainer.clear();
-		this.editorContainer.addChild(loader);
-		this.ui.setFocus(loader);
-		this.ui.requestRender();
-
-		const restoreEditor = () => {
-			loader.dispose();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
-			try {
-				fs.unlinkSync(tmpFile);
-			} catch {
-				// Ignore cleanup errors
-			}
-		};
-
-		// Create a secret gist asynchronously
-		let proc: ReturnType<typeof spawn> | null = null;
-
-		loader.onAbort = () => {
-			proc?.kill();
-			restoreEditor();
-			this.showStatus("Share cancelled");
-		};
-
-		try {
-			const result = await new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve) => {
-				proc = spawn("gh", ["gist", "create", "--public=false", tmpFile]);
-				let stdout = "";
-				let stderr = "";
-				proc.stdout?.on("data", (data) => {
-					stdout += data.toString();
-				});
-				proc.stderr?.on("data", (data) => {
-					stderr += data.toString();
-				});
-				proc.on("close", (code) => resolve({ stdout, stderr, code }));
-			});
-
-			if (loader.signal.aborted) return;
-
-			restoreEditor();
-
-			if (result.code !== 0) {
-				const errorMsg = result.stderr?.trim() || "Unknown error";
-				this.showError(`Failed to create gist: ${errorMsg}`);
-				return;
-			}
-
-			// Extract gist ID from the URL returned by gh
-			// gh returns something like: https://gist.github.com/username/GIST_ID
-			const gistUrl = result.stdout?.trim();
-			const gistId = gistUrl?.split("/").pop();
-			if (!gistId) {
-				this.showError("Failed to parse gist ID from gh output");
-				return;
-			}
-
-			// Create the preview URL
-			const previewUrl = getShareViewerUrl(gistId);
-			this.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
-		} catch (error: unknown) {
-			if (!loader.signal.aborted) {
-				restoreEditor();
-				this.showError(`Failed to create gist: ${error instanceof Error ? error.message : "Unknown error"}`);
-			}
-		}
-	}
-
 	private async handleCopyCommand(): Promise<void> {
 		const text = this.session.getLastAssistantText();
 		if (!text) {
@@ -5150,6 +4910,54 @@ export class InteractiveMode {
 		if (stats.cost > 0) {
 			info += `\n${theme.bold("Cost")}\n`;
 			info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}`;
+		}
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(info, 1, 0));
+		this.ui.requestRender();
+	}
+
+	private handleCacheStatusCommand(): void {
+		const stats = this.session.getCacheStats();
+
+		if (stats.turns.length === 0) {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("muted", "No assistant turns yet — nothing to report."), 1, 0));
+			this.ui.requestRender();
+			return;
+		}
+
+		const k = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+		const pct = (r: number): string => `${Math.round(r * 100)}%`;
+
+		let info = `${theme.bold("Cache Status")}\n\n`;
+		if (!stats.cacheObserved) {
+			info += `${theme.fg("muted", "No cache activity observed — this provider/model may not report prompt caching.")}\n\n`;
+		}
+		info += `${theme.bold("Session")}\n`;
+		info += `${theme.fg("dim", "Hit rate:")}     ${pct(stats.hitRate)}\n`;
+		info += `${theme.fg("dim", "Cache reads:")}  ${stats.totalCacheRead.toLocaleString()} tok\n`;
+		info += `${theme.fg("dim", "Cache writes:")} ${stats.totalCacheWrite.toLocaleString()} tok\n`;
+		info += `${theme.fg("dim", "Uncached in:")}  ${stats.totalInput.toLocaleString()} tok\n`;
+		info += `${theme.fg("dim", "Est. saved:")}   ~${stats.estReadSavingsTokens.toLocaleString()} tok-equiv (reads billed ~10%)\n`;
+
+		const recent = stats.turns.slice(-12);
+		info += `\n${theme.bold(`Per turn (last ${recent.length})`)}\n`;
+		for (const t of recent) {
+			const hit = theme.fg(t.hitRate >= 0.5 ? "success" : "warning", `hit ${pct(t.hitRate)}`);
+			info += `${theme.fg("dim", `#${t.index}`)}  in ${k(t.input)}  read ${k(t.cacheRead)}  write ${k(t.cacheWrite)}  ${hit}\n`;
+		}
+
+		info += "\n";
+		if (stats.instabilityTurn !== null) {
+			info += theme.fg(
+				"warning",
+				`⚠ Hit-rate collapsed at turn #${stats.instabilityTurn} — something volatile may be in the cached prefix.`,
+			);
+		} else if (stats.cacheObserved && stats.hitRate >= 0.5) {
+			info += theme.fg("success", "✓ Prefix stable — cache hit-rate ramped and held.");
+		} else if (stats.cacheObserved) {
+			info += theme.fg("muted", "Cache warming up — hit-rate should rise over the next few turns.");
 		}
 
 		this.chatContainer.addChild(new Spacer(1));
@@ -5297,90 +5105,6 @@ export class InteractiveMode {
 		}
 
 		this.showWarning("Usage: /hindsight list | clear [--yes] | export <path>");
-	}
-
-	private async handlePreviewCommand(rest: string): Promise<void> {
-		const parts = rest.split(/\s+/).filter((p) => p.length > 0);
-		const sub = parts[0];
-		const queue = getCurrentPreviewQueue();
-
-		if (!sub || sub === "list") {
-			if (!queue) {
-				this.showWarning("Preview queue is not available.");
-				return;
-			}
-			const items = queue.list();
-			if (items.length === 0) {
-				this.chatContainer.addChild(new Spacer(1));
-				this.chatContainer.addChild(new Text(theme.fg("muted", "Preview queue is empty."), 1, 0));
-				this.ui.requestRender();
-				return;
-			}
-			let info = `${theme.bold("Preview Queue")}\n\n`;
-			info += `${theme.fg("dim", "id | kind | path | description")}\n`;
-			for (const item of items) {
-				info += `${item.id} | ${item.kind} | ${item.path} | ${item.summary.description}\n`;
-			}
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(info, 1, 0));
-			this.ui.requestRender();
-			return;
-		}
-
-		if (sub === "accept" || sub === "discard") {
-			if (!queue) {
-				this.showWarning("Preview queue is not available.");
-				return;
-			}
-			const id = parts[1];
-			if (!id) {
-				this.showWarning(`Usage: /preview ${sub} <id>`);
-				return;
-			}
-			if (sub === "accept") {
-				const result = await queue.accept(id);
-				if (result.ok) {
-					this.chatContainer.addChild(new Spacer(1));
-					this.chatContainer.addChild(new Text(theme.fg("muted", `Accepted preview ${id}.`), 1, 0));
-					this.ui.requestRender();
-				} else {
-					this.showError(`Accept failed: ${result.error}`);
-				}
-			} else {
-				const ok = await queue.discard(id);
-				if (ok) {
-					this.chatContainer.addChild(new Spacer(1));
-					this.chatContainer.addChild(new Text(theme.fg("muted", `Discarded preview ${id}.`), 1, 0));
-					this.ui.requestRender();
-				} else {
-					this.showWarning(`No preview found for id ${id}.`);
-				}
-			}
-			return;
-		}
-
-		this.showWarning("Usage: /preview list | accept <id> | discard <id>");
-	}
-
-	private handleChangelogCommand(): void {
-		const changelogPath = getChangelogPath();
-		const allEntries = parseChangelog(changelogPath);
-
-		const changelogMarkdown =
-			allEntries.length > 0
-				? allEntries
-						.reverse()
-						.map((e) => e.content)
-						.join("\n\n")
-				: "No changelog entries found.";
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(changelogMarkdown, 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.ui.requestRender();
 	}
 
 	/**

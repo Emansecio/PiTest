@@ -2,18 +2,34 @@ import { randomBytes } from "node:crypto";
 import { createWriteStream, type WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "./truncate.ts";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	type TruncationResult,
+	truncateHead,
+	truncateTail,
+} from "./truncate.ts";
 
 export interface OutputAccumulatorOptions {
 	maxLines?: number;
 	maxBytes?: number;
 	tempFilePrefix?: string;
+	/**
+	 * When both are > 0, retain the first `headLines`/`headBytes` of output so a
+	 * truncated snapshot shows head + elided-middle + tail (command at the top,
+	 * error at the bottom) instead of tail only. Default 0 = tail-only (legacy).
+	 */
+	headLines?: number;
+	headBytes?: number;
 }
 
 export interface OutputSnapshot {
 	content: string;
 	truncation: TruncationResult;
 	fullOutputPath?: string;
+	/** Set when `content` is a head+tail composition (the middle was elided). */
+	composed?: { headLines: number; tailLines: number; elidedLines: number };
 }
 
 function defaultTempFilePath(prefix: string): string {
@@ -23,6 +39,13 @@ function defaultTempFilePath(prefix: string): string {
 
 function byteLength(text: string): number {
 	return Buffer.byteLength(text, "utf-8");
+}
+
+function countLines(text: string): number {
+	if (text.length === 0) return 0;
+	let n = 1;
+	for (let i = text.indexOf("\n"); i !== -1; i = text.indexOf("\n", i + 1)) n++;
+	return n;
 }
 
 /**
@@ -37,6 +60,8 @@ export class OutputAccumulator {
 	private readonly maxBytes: number;
 	private readonly maxRollingBytes: number;
 	private readonly tempFilePrefix: string;
+	private readonly headLineLimit: number;
+	private readonly headByteLimit: number;
 	private readonly decoder = new TextDecoder();
 
 	private rawChunks: Buffer[] = [];
@@ -48,6 +73,8 @@ export class OutputAccumulator {
 	private totalLines = 1;
 	private currentLineBytes = 0;
 	private finished = false;
+	private headText = "";
+	private headSealed = false;
 
 	private tempFilePath: string | undefined;
 	private tempFileStream: WriteStream | undefined;
@@ -57,6 +84,10 @@ export class OutputAccumulator {
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 		this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
+		this.headLineLimit = Math.max(0, options.headLines ?? 0);
+		this.headByteLimit = Math.max(0, options.headBytes ?? 0);
+		// Nothing to collect when head retention is disabled (both limits must be > 0).
+		this.headSealed = !(this.headLineLimit > 0 && this.headByteLimit > 0);
 	}
 
 	append(data: Buffer): void {
@@ -95,8 +126,27 @@ export class OutputAccumulator {
 		const truncatedBy = truncated
 			? (tailTruncation.truncatedBy ?? (this.totalDecodedBytes > this.maxBytes ? "bytes" : "lines"))
 			: null;
+
+		// When head retention is on and we actually truncated, show head + elided
+		// middle + tail instead of tail only. Falls back to tail-only when the head
+		// already fills the budget or there is no genuine middle to elide.
+		let content = tailTruncation.content;
+		let composed: OutputSnapshot["composed"];
+		if (truncated && this.headEnabled() && this.headText.length > 0) {
+			const headTail = this.composeHeadTail();
+			if (headTail) {
+				content = headTail.content;
+				composed = {
+					headLines: headTail.headLines,
+					tailLines: headTail.tailLines,
+					elidedLines: headTail.elidedLines,
+				};
+			}
+		}
+
 		const truncation: TruncationResult = {
 			...tailTruncation,
+			content,
 			truncated,
 			truncatedBy,
 			totalLines: this.totalLines,
@@ -110,10 +160,41 @@ export class OutputAccumulator {
 		}
 
 		return {
-			content: truncation.content,
+			content,
 			truncation,
 			fullOutputPath: this.tempFilePath,
+			composed,
 		};
+	}
+
+	private headEnabled(): boolean {
+		return this.headLineLimit > 0 && this.headByteLimit > 0;
+	}
+
+	/**
+	 * Compose a head+tail view: the retained head, an elision marker, then the tail
+	 * fitted into the remaining budget. Returns undefined (caller falls back to
+	 * tail-only) when the head already consumes the budget or head and tail would
+	 * cover the whole output (no genuine middle) — that guard also guarantees the
+	 * head and tail segments are disjoint, so no line is duplicated.
+	 */
+	private composeHeadTail():
+		| { content: string; headLines: number; tailLines: number; elidedLines: number }
+		| undefined {
+		const head = this.headText;
+		const headLines = countLines(head);
+		const headBytes = byteLength(head);
+		const markerReserve = 96;
+		const tailLineBudget = this.maxLines - headLines - 1;
+		const tailByteBudget = this.maxBytes - headBytes - markerReserve;
+		if (tailLineBudget < 1 || tailByteBudget < 1) return undefined;
+		const tail = truncateTail(this.getSnapshotText(), { maxLines: tailLineBudget, maxBytes: tailByteBudget });
+		const tailLines = countLines(tail.content);
+		const elidedLines = this.totalLines - headLines - tailLines;
+		if (elidedLines <= 0) return undefined;
+		const elidedBytes = Math.max(0, this.totalDecodedBytes - headBytes - byteLength(tail.content));
+		const marker = `\n\n[... ${elidedLines} lines (${formatSize(elidedBytes)}) elided ...]\n\n`;
+		return { content: head + marker + tail.content, headLines, tailLines, elidedLines };
 	}
 
 	async closeTempFile(): Promise<void> {
@@ -146,6 +227,18 @@ export class OutputAccumulator {
 	private appendDecodedText(text: string): void {
 		if (text.length === 0) {
 			return;
+		}
+
+		// Retain the head (first lines) until its budget fills, then seal it. The
+		// rolling tail buffer below discards the start of large output, so the head
+		// must be captured separately for head+tail snapshots.
+		if (!this.headSealed) {
+			this.headText += text;
+			const clamped = truncateHead(this.headText, { maxLines: this.headLineLimit, maxBytes: this.headByteLimit });
+			if (clamped.truncated) {
+				this.headText = clamped.content;
+				this.headSealed = true;
+			}
 		}
 
 		const bytes = byteLength(text);

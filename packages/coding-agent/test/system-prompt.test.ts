@@ -146,9 +146,9 @@ describe("buildSystemPrompt", () => {
 	});
 
 	describe("visual definition-of-done", () => {
-		test("included when an edit/write tool is available", () => {
+		test("included when an edit/write tool and a preview tool are available", () => {
 			const prompt = buildSystemPrompt({
-				selectedTools: ["read", "bash", "edit", "write"],
+				selectedTools: ["read", "bash", "edit", "write", "preview"],
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
@@ -157,15 +157,51 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("valid code is not a verified visual");
 		});
 
-		test("omitted in a read-only session (no edit/write)", () => {
+		test("included with a chrome_devtools tool as the visual surface", () => {
 			const prompt = buildSystemPrompt({
-				selectedTools: ["read", "bash"],
+				selectedTools: ["edit", "chrome_devtools_screenshot"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("valid code is not a verified visual");
+		});
+
+		test("omitted when edit/write exist but no preview/browser tool is reachable", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "bash", "edit", "write"],
 				contextFiles: [],
 				skills: [],
 				cwd: process.cwd(),
 			});
 
 			expect(prompt).not.toContain("valid code is not a verified visual");
+		});
+
+		test("omitted in a read-only session even when a preview tool is present", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "bash", "preview"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).not.toContain("valid code is not a verified visual");
+		});
+	});
+
+	describe("tool batching guideline", () => {
+		test("uses the compressed batching guidance and drops the verbose form", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "grep", "find"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("emit independent tool calls in the same turn");
+			expect(prompt).not.toContain("5 reads in 1 turn is ~5x faster");
 		});
 	});
 });

@@ -14,6 +14,11 @@ import { MessageShell } from "./message-shell.ts";
 // find/ls cap pattern.
 const FALLBACK_RESULT_PREVIEW_LINES = 15;
 
+// Tools whose collapsed result should show only the first line. The Task/subagent
+// tool streams large, noisy transcripts that otherwise flood the CLI; the full
+// output stays reachable via the expand toggle (ctrl+o).
+const SINGLE_LINE_PREVIEW_TOOLS = new Set<string>(["task"]);
+
 // Max width of the one-line arg summary shown next to the tool name for tools
 // without a custom renderCall.
 const FALLBACK_CALL_SUMMARY_MAX = 80;
@@ -219,7 +224,8 @@ export class ToolExecutionComponent extends MessageShell {
 			return null;
 		}
 		const lines = output.split("\n");
-		const maxLines = this.expanded ? lines.length : FALLBACK_RESULT_PREVIEW_LINES;
+		const previewLines = SINGLE_LINE_PREVIEW_TOOLS.has(this.toolName) ? 1 : FALLBACK_RESULT_PREVIEW_LINES;
+		const maxLines = this.expanded ? lines.length : previewLines;
 		const displayLines = lines.slice(0, maxLines);
 		const remaining = lines.length - maxLines;
 		let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");

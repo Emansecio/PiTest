@@ -527,7 +527,7 @@ describe("Coding Agent Tools", () => {
 				expect(error).toBeInstanceOf(Error);
 				const message = (error as Error).message;
 				expect(message).toContain(testCase.expected);
-				expect(message).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
+				expect(message).toMatch(/\[Showing first \d+ \+ last \d+ of \d+ lines \(\d+ elided\)\. Full output: /);
 				expect(message).not.toContain("Full output: undefined");
 				const fullOutputPath = message.match(/Full output: ([^\]\n]+)/)?.[1];
 				expect(fullOutputPath).toBeDefined();
@@ -675,7 +675,7 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.truncation?.truncated).toBe(true);
 			expect(result.details?.truncation?.truncatedBy).toBe("lines");
 			expect(fullOutputPath).toBeDefined();
-			expect(output).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
+			expect(output).toMatch(/\[Showing first \d+ \+ last \d+ of \d+ lines \(\d+ elided\)\. Full output: /);
 			expect(output).not.toContain("Full output: undefined");
 
 			for (let i = 0; i < 20 && (!fullOutputPath || !existsSync(fullOutputPath)); i++) {

@@ -6,6 +6,7 @@ import { getReadmePath } from "../src/config.js";
 import type { ToolDefinition } from "../src/core/extensions/types.js";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.js";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.js";
+import { createTodoToolDefinition } from "../src/core/tools/todo.js";
 import { createWriteToolDefinition } from "../src/core/tools/write.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -322,6 +323,84 @@ describe("ToolExecutionComponent parity", () => {
 		expect(expanded).toContain("eleven");
 		expect(expanded).not.toContain("eleven\n\n");
 		expect(expanded).not.toContain("more lines");
+	});
+
+	test("collapses task subagent result to a single preview line", () => {
+		const component = new ToolExecutionComponent(
+			"task",
+			"tool-task-1",
+			{ name: "finder", prompt: "find things" },
+			{},
+			createBaseToolDefinition("task"),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "first line\nsecond line\nthird line\nfourth line" }],
+				details: {},
+				isError: false,
+			},
+			false,
+		);
+
+		const collapsed = stripAnsi(component.render(120).join("\n"));
+		expect(collapsed).toContain("first line");
+		expect(collapsed).not.toContain("second line");
+		expect(collapsed).toContain("3 more lines");
+		expect(collapsed).toContain("to expand");
+
+		component.setExpanded(true);
+		const expanded = stripAnsi(component.render(120).join("\n"));
+		expect(expanded).toContain("first line");
+		expect(expanded).toContain("fourth line");
+		expect(expanded).not.toContain("more lines");
+	});
+
+	test("non-task fallback tools keep the multi-line preview", () => {
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-fallback-multi",
+			{ foo: "bar" },
+			{},
+			createBaseToolDefinition("custom_tool"),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{ content: [{ type: "text", text: "alpha\nbeta\ngamma" }], details: {}, isError: false },
+			false,
+		);
+		const collapsed = stripAnsi(component.render(120).join("\n"));
+		expect(collapsed).toContain("alpha");
+		expect(collapsed).toContain("beta");
+		expect(collapsed).toContain("gamma");
+		expect(collapsed).not.toContain("more lines");
+	});
+
+	test("todo result sits directly under the call with no blank line", () => {
+		const component = new ToolExecutionComponent(
+			"todo",
+			"tool-todo-1",
+			{ action: "create", subject: "do the thing" },
+			{},
+			createTodoToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "Created #1: do the thing" }],
+				details: { action: "create", tasks: [] },
+				isError: false,
+			},
+			false,
+		);
+		const renderedLines = stripAnsi(component.render(120).join("\n")).split("\n");
+		const headerIdx = renderedLines.findIndex((l) => l.includes("todo") && l.includes("create"));
+		const resultIdx = renderedLines.findIndex((l) => l.includes("Created #1"));
+		expect(headerIdx).toBeGreaterThanOrEqual(0);
+		expect(resultIdx).toBe(headerIdx + 1);
 	});
 
 	test("trims trailing blank display lines from read results", () => {
