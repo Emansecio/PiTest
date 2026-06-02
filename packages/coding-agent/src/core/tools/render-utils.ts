@@ -109,3 +109,7 @@ export type ToolRenderResultLike<TDetails> = {
 export function invalidArgText(theme: { fg: (name: any, text: string) => string }): string {
 	return theme.fg("error", "[invalid arg]");
 }
+
+export function nonEmptyDetails<T extends object>(d: T): T | undefined {
+	return Object.keys(d).length > 0 ? d : undefined;
+}

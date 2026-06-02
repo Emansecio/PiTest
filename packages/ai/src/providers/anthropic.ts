@@ -35,33 +35,14 @@ import { finalizeStreamingJson, parseJsonWithRepair } from "../utils/json-parse.
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
-import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.ts";
+import { adjustMaxTokensForThinking, buildBaseOptions, resolveCacheRetention } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
-
-/**
- * Resolve cache retention preference.
- * Default: "long" (1h) when provider supports it — saves input tokens for
- * interactive sessions with >5min think gaps. PIT_CACHE_RETENTION=short opts out;
- * "none" disables caching entirely.
- */
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if (typeof process !== "undefined") {
-		const env = process.env.PIT_CACHE_RETENTION;
-		if (env === "short" || env === "none" || env === "long") {
-			return env;
-		}
-	}
-	return "long";
-}
 
 function getCacheControl(
 	model: Model<"anthropic-messages">,
 	cacheRetention?: CacheRetention,
 ): { retention: CacheRetention; cacheControl?: CacheControlEphemeral } {
-	const retention = resolveCacheRetention(cacheRetention);
+	const retention = resolveCacheRetention(cacheRetention, "long");
 	if (retention === "none") {
 		return { retention };
 	}
@@ -496,7 +477,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			} else {
 				const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 
-				const cacheRetention = options?.cacheRetention ?? resolveCacheRetention();
+				const cacheRetention = options?.cacheRetention ?? resolveCacheRetention(undefined, "long");
 				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 
 				const created = createClient(

@@ -6,7 +6,7 @@ import { type Static, Type } from "typebox";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { prepareWithPathAliases } from "./argument-prep.ts";
-import { AST_GREP_INSTALL_HINT } from "./ast-grep-shared.ts";
+import { AST_GREP_INSTALL_HINT, isMissingBinaryError, parseJsonStream } from "./ast-grep-shared.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -62,13 +62,6 @@ interface AstGrepRewriteMatch {
 	replacement_offsets?: unknown;
 }
 
-function isMissingBinaryError(err: NodeJS.ErrnoException | Error): boolean {
-	const code = (err as NodeJS.ErrnoException).code;
-	if (code === "ENOENT") return true;
-	const message = (err.message || "").toLowerCase();
-	return message.includes("command not found") || message.includes("not recognized") || message.includes("enoent");
-}
-
 function execAstGrep(
 	binary: string,
 	args: string[],
@@ -93,32 +86,6 @@ function execAstGrep(
 			resolve({ code: 0, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? "" });
 		});
 	});
-}
-
-function parseJsonStream(stdout: string): AstGrepRewriteMatch[] {
-	const out: AstGrepRewriteMatch[] = [];
-	const trimmed = stdout.trim();
-	if (!trimmed) return out;
-	if (trimmed.startsWith("[")) {
-		try {
-			const arr = JSON.parse(trimmed);
-			if (Array.isArray(arr)) for (const m of arr) if (m && typeof m === "object") out.push(m);
-		} catch {
-			// fall through
-		}
-		if (out.length > 0) return out;
-	}
-	for (const line of trimmed.split("\n")) {
-		const t = line.trim();
-		if (!t) continue;
-		try {
-			const parsed = JSON.parse(t);
-			if (parsed && typeof parsed === "object") out.push(parsed);
-		} catch {
-			// skip
-		}
-	}
-	return out;
 }
 
 function relFile(file: string, cwd: string): string {
@@ -241,7 +208,7 @@ export function createAstEditToolDefinition(
 						details: undefined,
 					};
 				}
-				const matches = parseJsonStream(res.stdout);
+				const matches = parseJsonStream<AstGrepRewriteMatch>(res.stdout);
 				const text = formatRewritePreview(matches, cwd);
 				return {
 					content: [
@@ -275,7 +242,7 @@ export function createAstEditToolDefinition(
 						details: undefined,
 					};
 				}
-				const matches = parseJsonStream(res.stdout);
+				const matches = parseJsonStream<AstGrepRewriteMatch>(res.stdout);
 				if (matches.length === 0) {
 					return {
 						content: [{ type: "text" as const, text: "No matches found" }],

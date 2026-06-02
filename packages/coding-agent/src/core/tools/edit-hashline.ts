@@ -1,13 +1,11 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Box, Container, Spacer, Text } from "@pit/tui";
-import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import type { ToolDefinition } from "../extensions/types.js";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, PATH_KEY_ALIASES } from "./argument-prep.js";
-import type { EditOperations, EditToolDetails } from "./edit.ts";
+import { defaultEditOperations, type EditOperations, type EditToolDetails } from "./edit.ts";
 import {
 	detectLineEnding,
 	type EditDiffError,
@@ -66,12 +64,6 @@ export type EditHashlineToolInput = Static<typeof editHashlineSchema>;
 export interface EditHashlineToolOptions {
 	operations?: EditOperations;
 }
-
-const defaultEditOperations: EditOperations = {
-	readFile: (path) => fsReadFile(path),
-	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
-	access: (path) => fsAccess(path, constants.R_OK | constants.W_OK),
-};
 
 type RenderableArgs = {
 	path?: string;

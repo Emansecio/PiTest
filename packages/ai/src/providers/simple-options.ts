@@ -1,4 +1,28 @@
-import type { Api, Model, SimpleStreamOptions, StreamOptions, ThinkingBudgets, ThinkingLevel } from "../types.ts";
+import type {
+	Api,
+	CacheRetention,
+	Model,
+	SimpleStreamOptions,
+	StreamOptions,
+	ThinkingBudgets,
+	ThinkingLevel,
+} from "../types.ts";
+
+export function resolveCacheRetention(
+	cacheRetention: CacheRetention | undefined,
+	defaultValue: CacheRetention = "short",
+): CacheRetention {
+	if (cacheRetention) {
+		return cacheRetention;
+	}
+	if (typeof process !== "undefined") {
+		const env = process.env.PIT_CACHE_RETENTION;
+		if (env === "short" || env === "none" || env === "long") {
+			return env;
+		}
+	}
+	return defaultValue;
+}
 
 export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptions, apiKey?: string): StreamOptions {
 	return {

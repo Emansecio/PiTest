@@ -26,21 +26,7 @@ import {
 	processResponsesStream,
 	RESPONSES_TOOL_CALL_PROVIDERS,
 } from "./openai-responses-shared.ts";
-import { buildBaseOptions } from "./simple-options.ts";
-
-/**
- * Resolve cache retention preference.
- * Defaults to "short" and uses PIT_CACHE_RETENTION for backward compatibility.
- */
-function resolveCacheRetention(cacheRetention?: CacheRetention): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if (typeof process !== "undefined" && process.env.PIT_CACHE_RETENTION === "long") {
-		return "long";
-	}
-	return "short";
-}
+import { buildBaseOptions, resolveCacheRetention } from "./simple-options.ts";
 
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
 	return {

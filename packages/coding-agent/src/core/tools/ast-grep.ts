@@ -5,7 +5,7 @@ import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { prepareWithPathAliases } from "./argument-prep.ts";
-import { AST_GREP_INSTALL_HINT } from "./ast-grep-shared.ts";
+import { AST_GREP_INSTALL_HINT, isMissingBinaryError, parseJsonStream } from "./ast-grep-shared.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -50,43 +50,6 @@ interface AstGrepMatch {
 	};
 	text?: string;
 	lines?: string;
-}
-
-function isMissingBinaryError(err: NodeJS.ErrnoException | Error): boolean {
-	const code = (err as NodeJS.ErrnoException).code;
-	if (code === "ENOENT") return true;
-	const message = (err.message || "").toLowerCase();
-	return message.includes("command not found") || message.includes("not recognized") || message.includes("enoent");
-}
-
-function parseJsonStream(stdout: string): AstGrepMatch[] {
-	const matches: AstGrepMatch[] = [];
-	const trimmed = stdout.trim();
-	if (!trimmed) return matches;
-	// ast-grep --json=stream emits one JSON object per line. Some versions emit a single array.
-	// Handle both.
-	if (trimmed.startsWith("[")) {
-		try {
-			const arr = JSON.parse(trimmed);
-			if (Array.isArray(arr)) {
-				for (const m of arr) if (m && typeof m === "object") matches.push(m as AstGrepMatch);
-			}
-		} catch {
-			// fall through to line parser
-		}
-		if (matches.length > 0) return matches;
-	}
-	for (const line of trimmed.split("\n")) {
-		const t = line.trim();
-		if (!t) continue;
-		try {
-			const parsed = JSON.parse(t);
-			if (parsed && typeof parsed === "object") matches.push(parsed as AstGrepMatch);
-		} catch {
-			// skip malformed lines
-		}
-	}
-	return matches;
 }
 
 function formatMatches(matches: AstGrepMatch[], cwd: string): string {
@@ -230,7 +193,7 @@ export function createAstGrepToolDefinition(
 				return { content: [{ type: "text" as const, text: msg }], isError: true, details: undefined };
 			}
 
-			const all = parseJsonStream(res.stdout);
+			const all = parseJsonStream<AstGrepMatch>(res.stdout);
 			const matchLimitReached = all.length > effectiveLimit;
 			const capped = matchLimitReached ? all.slice(0, effectiveLimit) : all;
 
