@@ -20,6 +20,11 @@ describe("renderTodoOverlay", () => {
 		expect(renderTodoOverlay({ items: [], done: 0, total: 0 }, 80, "◐")).toEqual([]);
 	});
 
+	it("returns [] when every todo is completed (auto-hide on done)", () => {
+		const items = [item(1, "a", "completed"), item(2, "b", "completed")];
+		expect(renderTodoOverlay({ items, done: 2, total: 2 }, 80, "◐")).toEqual([]);
+	});
+
 	it("renders header, statuses, activeForm and connectors", () => {
 		const out = overlay([
 			item(1, "Create DemoTodo domain entity", "completed"),

@@ -343,12 +343,18 @@ function rebuildBashResultRenderComponent(
 	// title component reads it to decide whether to show the inline hint.
 	callState.skippedHint = 0;
 
+	// Tracks whether any body/warning line is actually rendered above the footer.
+	// With BASH_PREVIEW_LINES === 0 the body is fully collapsed (just the inline
+	// hint on the command line), so the footer/warning must hug the header instead
+	// of leaving an orphan blank line.
+	let hasContentAbove = false;
 	if (!emptyOutput) {
 		const logicalLines = output.split("\n");
 
 		if (options.expanded) {
 			const styledOutput = logicalLines.map((line) => theme.fg("toolOutput", line)).join("\n");
-			component.addChild(new Text(`\n${styledOutput}`, 0, 0));
+			component.addChild(new Text(styledOutput, 0, 0));
+			hasContentAbove = true;
 		} else {
 			// Show only the last N logical lines, each clipped to one visual row,
 			// so the body footprint is a fixed N rows. The count of hidden lines
@@ -357,6 +363,7 @@ function rebuildBashResultRenderComponent(
 			// (BASH_PREVIEW_LINES === 0) explicitly.
 			const previewLines = BASH_PREVIEW_LINES > 0 ? logicalLines.slice(-BASH_PREVIEW_LINES) : [];
 			callState.skippedHint = logicalLines.length - previewLines.length;
+			hasContentAbove = previewLines.length > 0;
 			component.addChild({
 				render: (width: number) =>
 					previewLines.map((line) => theme.fg("toolOutput", truncateToWidth(line, width, "…"))),
@@ -382,13 +389,15 @@ function rebuildBashResultRenderComponent(
 				);
 			}
 		}
-		component.addChild(new Text(`\n${theme.fg("warning", `[${warnings.join(". ")}]`)}`, 0, 0));
+		const warningPrefix = hasContentAbove ? "\n" : "";
+		component.addChild(new Text(`${warningPrefix}${theme.fg("warning", `[${warnings.join(". ")}]`)}`, 0, 0));
+		hasContentAbove = true;
 	}
 
-	// Footer fold: `(no output) · exit 2 · 0.1s`-style single muted line. When
-	// there is a preview body or warning above, we keep the existing paragraph
-	// separation (leading `\n`); when there is not, the footer hugs the
-	// command header so trivial failures stop costing 5 lines apiece.
+	// Footer fold: `(no output) · exit 2 · 0.1s`-style single muted line. It hugs
+	// whatever is directly above — the command header when the body is fully
+	// collapsed (no preview lines / no warning), or the last rendered line
+	// otherwise — so no orphan blank line sits between the command and the footer.
 	const footerParts: string[] = [];
 	if (emptyOutput && (failure || isError)) {
 		footerParts.push("(no output)");
@@ -411,7 +420,7 @@ function rebuildBashResultRenderComponent(
 	if (footerParts.length === 0) {
 		return;
 	}
-	const prefix = emptyOutput && !hasWarnings ? "" : "\n";
+	const prefix = hasContentAbove ? "\n" : "";
 	component.addChild(new Text(`${prefix}${theme.fg("muted", footerParts.join(" · "))}`, 0, 0));
 }
 

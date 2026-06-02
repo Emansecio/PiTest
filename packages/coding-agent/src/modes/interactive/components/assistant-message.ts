@@ -109,9 +109,18 @@ export class AssistantMessageComponent extends Container {
 		// Clear content container
 		this.contentContainer.clear();
 
-		const hasVisibleContent = message.content.some(
-			(c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
-		);
+		// Index of the last visible (non-empty text/thinking) block. Computed once
+		// here so the per-block "is there a visible block after me?" check below is
+		// an O(1) index compare instead of an O(n) slice().some() per iteration
+		// (which made updateContent O(n²) in block count on every stream delta).
+		let lastVisibleIndex = -1;
+		for (let i = 0; i < message.content.length; i++) {
+			const c = message.content[i];
+			if ((c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim())) {
+				lastVisibleIndex = i;
+			}
+		}
+		const hasVisibleContent = lastVisibleIndex !== -1;
 
 		if (hasVisibleContent) {
 			this.contentContainer.addChild(new Spacer(1));
@@ -143,9 +152,7 @@ export class AssistantMessageComponent extends Container {
 			} else if (content.type === "thinking" && content.thinking.trim()) {
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
+				const hasVisibleContentAfter = i < lastVisibleIndex;
 
 				if (this.hideThinkingBlock) {
 					// Show static thinking label when hidden. Drop any cached Markdown at
@@ -203,15 +210,17 @@ export class AssistantMessageComponent extends Container {
 					message.errorMessage && message.errorMessage !== "Request was aborted"
 						? message.errorMessage
 						: "Operation aborted";
+				// Separate the abort notice from real content only when some exists;
+				// with nothing visible above, skip the orphan blank line.
 				if (hasVisibleContent) {
-					this.contentContainer.addChild(new Spacer(1));
-				} else {
 					this.contentContainer.addChild(new Spacer(1));
 				}
 				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), 1, 0));
 			} else if (message.stopReason === "error") {
 				const errorMsg = message.errorMessage || "Unknown error";
-				this.contentContainer.addChild(new Spacer(1));
+				if (hasVisibleContent) {
+					this.contentContainer.addChild(new Spacer(1));
+				}
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
 			}
 		}

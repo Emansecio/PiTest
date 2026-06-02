@@ -79,6 +79,9 @@ export function buildSessionContext(pathEntries: SessionTreeEntry[]): SessionCon
 
 export class Session<TMetadata extends SessionMetadata = SessionMetadata> {
 	private storage: SessionStorage<TMetadata>;
+	// Memoize the resolved context per leaf; rebuilt when the leaf changes
+	// (append/navigate move the leaf id). Mirrors SessionManager._ctxCache.
+	private _ctxCache: { leafId: string | null; context: SessionContext } | null = null;
 
 	constructor(storage: SessionStorage<TMetadata>) {
 		this.storage = storage;
@@ -110,7 +113,17 @@ export class Session<TMetadata extends SessionMetadata = SessionMetadata> {
 	}
 
 	async buildContext(): Promise<SessionContext> {
-		return buildSessionContext(await this.getBranch());
+		const leafId = await this.storage.getLeafId();
+		const cached = this._ctxCache;
+		if (cached && cached.leafId === leafId) {
+			// Defensive copy: callers store messages in turnState and the agent loop
+			// push()es into it. Element identity is preserved so per-message caches hit.
+			const ctx = cached.context;
+			return { messages: ctx.messages.slice(), thinkingLevel: ctx.thinkingLevel, model: ctx.model };
+		}
+		const context = buildSessionContext(await this.storage.getPathToRoot(leafId));
+		this._ctxCache = { leafId, context };
+		return { messages: context.messages.slice(), thinkingLevel: context.thinkingLevel, model: context.model };
 	}
 
 	getLabel(id: string): Promise<string | undefined> {

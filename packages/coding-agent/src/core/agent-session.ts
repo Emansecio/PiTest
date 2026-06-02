@@ -14,7 +14,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@pit/ai";
 import {
@@ -149,6 +149,12 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.js"
 import { createAllToolDefinitions } from "./tools/index.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
+import {
+	type CheckResult,
+	detectCheckCommand,
+	runCheckCommand,
+	setCurrentVerificationProbe,
+} from "./verification/verification.ts";
 
 // Re-export skill-parser utilities (moved to dedicated module)
 export { type ParsedSkillBlock, parseSkillBlock } from "./skill-parser.ts";
@@ -179,7 +185,17 @@ export type AgentSessionEvent =
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| { type: "fallback_warning"; from: string; to: string; reason: string };
+	| { type: "fallback_warning"; from: string; to: string; reason: string }
+	| {
+			type: "verification";
+			phase: "running" | "passed" | "failed";
+			command: string;
+			attempt: number;
+			maxAttempts: number;
+			exitCode?: number;
+			willRetry?: boolean;
+	  }
+	| { type: "visual_review"; file: string };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -235,6 +251,46 @@ export interface ExtensionBindings {
  * a backstop against a goal that never calls goal_complete and has no budget.
  */
 const GOAL_MAX_AUTO_ITERATIONS = 50;
+
+/** Build the continuation prompt that re-injects a failed verification check. */
+function verificationFixPrompt(
+	command: string,
+	result: { exitCode: number; output: string; timedOut: boolean },
+): string {
+	const tail = result.output.length > 4000 ? `…\n${result.output.slice(-4000)}` : result.output;
+	const status = result.timedOut ? "timed out" : `exited ${result.exitCode}`;
+	return [
+		`The change isn't verified yet — I ran the project check and it ${status}:`,
+		"",
+		`$ ${command}`,
+		tail || "(no output)",
+		"",
+		"Fix the underlying cause and keep going; don't report the work done until this check passes. If the failure is pre-existing and unrelated to this change, say so explicitly instead of forcing a fix.",
+	].join("\n");
+}
+
+/** Extensions whose change triggers the visual definition-of-done nudge. */
+const VISUAL_FILE_EXTENSIONS = new Set([
+	".html",
+	".htm",
+	".svg",
+	".tsx",
+	".jsx",
+	".vue",
+	".svelte",
+	".css",
+	".scss",
+	".sass",
+	".less",
+]);
+
+/** Nudge the agent to actually look at a rendered artifact it changed but never previewed. */
+function visualNudgePrompt(file: string): string {
+	return [
+		`You changed a rendered visual artifact (${file}) but didn't look at it this turn.`,
+		"Before reporting done, render it with the `preview` tool (pass the file, a served directory, or your dev-server URL), then review the screenshot and the console/network for defects. If it can't be rendered (no browser, or it isn't independently viewable), say so explicitly instead of assuming it looks right.",
+	].join("\n");
+}
 
 /**
  * Minimum interval between turn-driven goal persistence writes. Status changes
@@ -451,6 +507,17 @@ export class AgentSession {
 	// Guards against re-entering the goal auto-continuation loop from within a
 	// continuation prompt.
 	private _inGoalContinuation = false;
+	// Native verification gate: `_turnTouchedFiles` arms it (set when a file tool
+	// writes/edits this prompt cycle), `_inVerification` guards re-entry, and
+	// `_verificationAbort` cancels an in-flight check on interrupt/dispose.
+	private _turnTouchedFiles = false;
+	private _inVerification = false;
+	private _verificationAbort: AbortController | undefined;
+	// Visual definition-of-done tracking: did this prompt cycle change a rendered
+	// artifact, did the agent actually `preview` it, and the last such file.
+	private _turnTouchedVisual = false;
+	private _turnUsedPreview = false;
+	private _lastVisualFile: string | undefined;
 	// Throttle state for turn-driven goal persistence.
 	private _lastGoalStatus: string | undefined;
 	private _lastGoalPersistMs = 0;
@@ -534,6 +601,9 @@ export class AgentSession {
 		// Same for the todo list: publish + restore from the session file.
 		setCurrentTodoManager(this._todo);
 		this._restoreTodoFromSession();
+
+		// Publish a one-shot project-check runner so goal_complete can refuse while red.
+		setCurrentVerificationProbe(() => this.runConfiguredCheck());
 
 		// Chrome DevTools controller (endpoint from settings + env). Created
 		// regardless of enabled (cheap; connects lazily); tools only join the
@@ -1086,6 +1156,8 @@ export class AgentSession {
 			event.isError,
 			event.isError ? extractErrorMessage(event.result?.content) : undefined,
 		);
+		// The agent looked at rendered output this turn — satisfies the visual DoD.
+		if (event.toolName === "preview" && !event.isError) this._turnUsedPreview = true;
 		const args = this._toolCallArgsByCallId.get(event.toolCallId);
 		this._toolCallArgsByCallId.delete(event.toolCallId);
 		// Capture the learned-error fingerprint so the next session boots warm
@@ -1120,6 +1192,14 @@ export class AgentSession {
 			const fileOp = extractToolFileOp(event.toolName, args);
 			if (fileOp) {
 				this._frequentFiles.record(fileOp.path, fileOp.op);
+				// Arm the verification gate when this turn actually changed a file.
+				if (fileOp.op !== "read") {
+					this._turnTouchedFiles = true;
+					if (VISUAL_FILE_EXTENSIONS.has(extname(fileOp.path).toLowerCase())) {
+						this._turnTouchedVisual = true;
+						this._lastVisualFile = fileOp.path;
+					}
+				}
 			}
 		}
 		// A tool may have pulled a hidden tool into the active surface this turn
@@ -1422,6 +1502,9 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	async dispose(): Promise<void> {
+		// Cancel any in-flight verification check so its child process does not keep
+		// holding the session cwd (Windows rmSync EBUSY in tests).
+		this._verificationAbort?.abort();
 		// Opt-in stats export for baseline measurement. Set PIT_STATS_EXPORT_DIR
 		// to a writable directory to get one JSON file per session containing
 		// tool-call totals + per-rule rewrite/reject counts. Used to measure
@@ -1958,27 +2041,136 @@ export class AgentSession {
 	 * interrupted. A safety cap bounds runaway loops; hitting it pauses the goal.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		// Reset the per-prompt-cycle flag that arms the verification gate.
+		this._turnTouchedFiles = false;
+		this._turnTouchedVisual = false;
+		this._turnUsedPreview = false;
 		await this._promptOnce(text, options);
+
+		// Re-entrant call from within a continuation: the outer prompt() owns the
+		// continuation loop and the verification gate.
+		if (this._inGoalContinuation) return;
 
 		// Goal auto-continuation. Guarded so a continuation prompt (or a steer
 		// arriving mid-loop) never spawns a nested loop.
-		if (this._inGoalContinuation || !this._goal.shouldAutoContinue()) return;
-		this._inGoalContinuation = true;
-		try {
-			let iterations = 0;
-			while (this._goal.shouldAutoContinue()) {
-				if (iterations++ >= GOAL_MAX_AUTO_ITERATIONS) {
-					this.pauseGoal();
-					break;
+		if (this._goal.shouldAutoContinue()) {
+			this._inGoalContinuation = true;
+			try {
+				let iterations = 0;
+				while (this._goal.shouldAutoContinue()) {
+					if (iterations++ >= GOAL_MAX_AUTO_ITERATIONS) {
+						this.pauseGoal();
+						break;
+					}
+					await this._promptOnce(this._goal.continuationPrompt(), {
+						expandPromptTemplates: false,
+						source: options?.source,
+					});
 				}
-				await this._promptOnce(this._goal.continuationPrompt(), {
+			} finally {
+				this._inGoalContinuation = false;
+			}
+		}
+
+		// Native verification gate: after a code-modifying turn, run the project
+		// check and re-inject failures so the agent self-corrects before "done".
+		await this._runVerificationGate(options);
+	}
+
+	/**
+	 * Verification gate — the "test what you built, then fix it" loop. After a
+	 * turn that modified files, run the project's check command; on failure,
+	 * re-inject the output as a continuation prompt so the agent fixes it, bounded
+	 * by `maxAttempts`. No-op when disabled, when nothing changed, when the turn
+	 * was aborted, or when no check command can be detected (gate stays inert).
+	 */
+	private async _runVerificationGate(options?: PromptOptions): Promise<void> {
+		if (this._inVerification || !this._turnTouchedFiles) return;
+		if (this._lastTurnAborted()) return;
+		const settings = this.settingsManager.getVerificationSettings();
+		if (!settings.enabled) return;
+
+		this._inVerification = true;
+		const abort = new AbortController();
+		this._verificationAbort = abort;
+		try {
+			// Visual definition-of-done: a rendered artifact changed but was never
+			// viewed this turn — nudge the agent to render and review it (once).
+			if (settings.visual && this._turnTouchedVisual && !this._turnUsedPreview && this._lastVisualFile) {
+				this._emit({ type: "visual_review", file: this._lastVisualFile });
+				await this._promptOnce(visualNudgePrompt(this._lastVisualFile), {
 					expandPromptTemplates: false,
 					source: options?.source,
 				});
+				if (abort.signal.aborted) return;
+			}
+
+			// Code check: run the project's check and re-inject failures to fix.
+			const command = settings.command ?? detectCheckCommand(this._cwd);
+			if (!command) return;
+			let fixes = 0;
+			for (let attempt = 1; ; attempt++) {
+				this._emit({ type: "verification", phase: "running", command, attempt, maxAttempts: settings.maxAttempts });
+				const result = await runCheckCommand(command, this._cwd, {
+					signal: abort.signal,
+					timeoutMs: settings.timeoutMs,
+				});
+				if (abort.signal.aborted) return;
+				if (result.ok) {
+					this._emit({
+						type: "verification",
+						phase: "passed",
+						command,
+						attempt,
+						maxAttempts: settings.maxAttempts,
+					});
+					return;
+				}
+				const willRetry = fixes < settings.maxAttempts;
+				this._emit({
+					type: "verification",
+					phase: "failed",
+					command,
+					attempt,
+					maxAttempts: settings.maxAttempts,
+					exitCode: result.exitCode,
+					willRetry,
+				});
+				if (!willRetry) return;
+				fixes++;
+				await this._promptOnce(verificationFixPrompt(command, result), {
+					expandPromptTemplates: false,
+					source: options?.source,
+				});
+				if (abort.signal.aborted) return;
 			}
 		} finally {
-			this._inGoalContinuation = false;
+			this._inVerification = false;
+			this._verificationAbort = undefined;
 		}
+	}
+
+	/**
+	 * Run the configured project check once (no fix loop, no events). Backs the
+	 * verification probe so `goal_complete` can refuse while the check is red.
+	 * Returns null when verification is disabled or no command can be detected.
+	 */
+	async runConfiguredCheck(signal?: AbortSignal): Promise<CheckResult | null> {
+		const settings = this.settingsManager.getVerificationSettings();
+		if (!settings.enabled) return null;
+		const command = settings.command ?? detectCheckCommand(this._cwd);
+		if (!command) return null;
+		return runCheckCommand(command, this._cwd, { signal, timeoutMs: settings.timeoutMs });
+	}
+
+	/** True when the most recent assistant message ended because the user aborted. */
+	private _lastTurnAborted(): boolean {
+		const messages = this.agent.state.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const m = messages[i] as { role?: string; stopReason?: string };
+			if (m.role === "assistant") return m.stopReason === "aborted";
+		}
+		return false;
 	}
 
 	/**

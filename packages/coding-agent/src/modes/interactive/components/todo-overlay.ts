@@ -42,7 +42,9 @@ function renderRow(item: TodoItem, spinner: string, width: number): string {
 
 /** Pure renderer (testable): returns [] when there are no todos. */
 export function renderTodoOverlay(data: TodoOverlayData, width: number, spinner: string): string[] {
-	if (data.items.length === 0) return [];
+	// Auto-hide when there are no todos OR every todo is done — the list vanishes
+	// once the work is complete instead of lingering as struck-through items.
+	if (data.items.length === 0 || data.done === data.total) return [];
 
 	// Truncation: keep all non-completed; drop oldest completed first.
 	let rows = data.items;
@@ -69,12 +71,17 @@ export function renderTodoOverlay(data: TodoOverlayData, width: number, spinner:
 }
 
 class TodoOverlayComponent implements Component {
-	private readonly session: AgentSession;
+	private session: AgentSession;
 	private readonly clock: () => number;
 
 	constructor(session: AgentSession, clock: () => number = () => Date.now()) {
 		this.session = session;
 		this.clock = clock;
+	}
+
+	/** Rebind to the current session after a /new, fork, or session switch. */
+	setSession(session: AgentSession): void {
+		this.session = session;
 	}
 
 	invalidate(): void {
@@ -83,7 +90,7 @@ class TodoOverlayComponent implements Component {
 
 	render(width: number): string[] {
 		const data = this.session.todoForOverlay();
-		if (data.items.length === 0) return [];
+		if (data.items.length === 0 || data.done === data.total) return [];
 		const frame = TODO_SPINNER_FRAMES[Math.floor(this.clock() / SPINNER_INTERVAL_MS) % TODO_SPINNER_FRAMES.length];
 		const lines = renderTodoOverlay(data, width, frame ?? TODO_SPINNER_FRAMES[0]);
 		// A leading blank line separates the overlay from the chat above it.
@@ -91,6 +98,8 @@ class TodoOverlayComponent implements Component {
 	}
 }
 
-export function createTodoOverlay(session: AgentSession, clock?: () => number): Component {
+export type TodoOverlay = Component & { setSession(session: AgentSession): void };
+
+export function createTodoOverlay(session: AgentSession, clock?: () => number): TodoOverlay {
 	return new TodoOverlayComponent(session, clock);
 }

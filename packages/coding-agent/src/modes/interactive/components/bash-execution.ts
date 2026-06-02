@@ -176,11 +176,11 @@ export class BashExecutionComponent extends MessageShell {
 			if (this.expanded) {
 				// Show all lines
 				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
-				this.contentContainer.addChild(new Text(`\n${displayText}`, 0, 0));
+				this.contentContainer.addChild(new Text(displayText, 0, 0));
 			} else {
 				// Use shared visual truncation utility with width-aware caching
 				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
-				const styledInput = `\n${styledOutput}`;
+				const styledInput = styledOutput;
 				let cachedWidth: number | undefined;
 				let cachedLines: string[] | undefined;
 				this.contentContainer.addChild({
@@ -230,7 +230,10 @@ export class BashExecutionComponent extends MessageShell {
 			}
 
 			if (statusParts.length > 0) {
-				this.contentContainer.addChild(new Text(`\n${statusParts.join("\n")}`, 0, 0));
+				// Hug the command line when there's no output above (avoids an orphan
+				// blank line); separate from the output only when it's present.
+				const statusPrefix = availableLines.length > 0 ? "\n" : "";
+				this.contentContainer.addChild(new Text(`${statusPrefix}${statusParts.join("\n")}`, 0, 0));
 			}
 		}
 	}

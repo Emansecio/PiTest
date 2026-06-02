@@ -623,6 +623,37 @@ describe("ToolExecutionComponent parity", () => {
 		expect(lines.some((l) => l.trimEnd().endsWith("l1"))).toBe(false);
 	});
 
+	test("footer hugs the command header with no orphan blank line when output is collapsed", () => {
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-footer-hug",
+			{ command: "node missing.js" },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "l1\nl2\nl3\nl4\nl5\nl6\n\nCommand exited with code 1" }],
+				details: undefined,
+				isError: true,
+			},
+			false,
+		);
+
+		const lines = stripAnsi(component.render(120).join("\n")).split("\n");
+		const commandIdx = lines.findIndex((l) => l.includes("$ node missing.js"));
+		const footerIdx = lines.findIndex((l) => /Took \d+\.\ds/.test(l));
+		expect(commandIdx).toBeGreaterThanOrEqual(0);
+		expect(footerIdx).toBeGreaterThan(commandIdx);
+		// Output is fully collapsed (BASH_PREVIEW_LINES === 0); the muted footer must
+		// hug the command line — no orphan blank line between command and footer.
+		const blankBetween = lines.slice(commandIdx + 1, footerIdx).filter((l) => l.trim() === "");
+		expect(blankBetween).toHaveLength(0);
+	});
+
 	test("clamps a long single-line command to one visual row with an expand hint", () => {
 		const longCommand = `grep -rIn "github" --exclude-dir=.git --exclude-dir=.claude . | grep -v "CHANGELOG.md" | grep -v "/tests/" | grep -v "/docs/" | wc -l`;
 		const component = new ToolExecutionComponent(

@@ -1,6 +1,6 @@
 import { type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@pit/tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
-import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
+import { allToolNames, createToolDefinition, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
@@ -99,7 +99,14 @@ export class ToolExecutionComponent extends MessageShell {
 		this.toolCallId = toolCallId;
 		this.args = args;
 		this.toolDefinition = toolDefinition;
-		this.builtInToolDefinition = createAllToolDefinitions(cwd)[toolName as ToolName];
+		// Build only this tool's definition (when it is a known built-in) instead
+		// of constructing the entire definition map and discarding all but one
+		// entry — this runs once per tool-call row mounted. MCP/extension tools
+		// aren't in the registry, so they fall through to `undefined` exactly as
+		// the previous map-index miss did.
+		this.builtInToolDefinition = allToolNames.has(toolName as ToolName)
+			? createToolDefinition(toolName as ToolName, cwd)
+			: undefined;
 		this.showImages = options.showImages ?? true;
 		this.imageWidthCells = options.imageWidthCells ?? 60;
 		this.ui = ui;

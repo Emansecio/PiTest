@@ -175,6 +175,10 @@ export class AgentHarness<
 	private resourcesSnapshot: AgentHarnessResources<TSkill, TPromptTemplate> | null = null;
 	private tools = new Map<string, TTool>();
 	private activeToolNames: string[];
+	// Memoized tool arrays for createTurnState; invalidated in setTools/setActiveTools
+	// (the only mutators of tools/activeToolNames after construction).
+	private _toolsArr?: TTool[];
+	private _activeToolsArr?: TTool[];
 	private steerQueue: UserMessage[] = [];
 	private steeringQueueMode: QueueMode;
 	private followUpQueue: UserMessage[] = [];
@@ -309,10 +313,14 @@ export class AgentHarness<
 		const context = await this.session.buildContext();
 		const resources = this.getResources();
 		const sessionMetadata = await this.session.getMetadata();
-		const tools = [...this.tools.values()];
-		const activeTools = this.activeToolNames
-			.map((name) => this.tools.get(name))
-			.filter((tool): tool is TTool => tool !== undefined);
+		if (this._toolsArr === undefined) this._toolsArr = [...this.tools.values()];
+		const tools = this._toolsArr;
+		if (this._activeToolsArr === undefined) {
+			this._activeToolsArr = this.activeToolNames
+				.map((name) => this.tools.get(name))
+				.filter((tool): tool is TTool => tool !== undefined);
+		}
+		const activeTools = this._activeToolsArr;
 		let systemPrompt = "You are a helpful assistant.";
 		if (typeof this.systemPrompt === "string") {
 			systemPrompt = this.systemPrompt;
@@ -871,6 +879,7 @@ export class AgentHarness<
 		try {
 			this.validateToolNames(toolNames);
 			this.activeToolNames = [...toolNames];
+			this._activeToolsArr = undefined;
 		} catch (error) {
 			throw normalizeHarnessError(error, "invalid_argument");
 		}
@@ -927,6 +936,8 @@ export class AgentHarness<
 			this.validateToolNames(nextActiveToolNames, nextTools);
 			this.tools = nextTools;
 			this.activeToolNames = [...nextActiveToolNames];
+			this._toolsArr = undefined;
+			this._activeToolsArr = undefined;
 		} catch (error) {
 			throw normalizeHarnessError(error, "invalid_argument");
 		}

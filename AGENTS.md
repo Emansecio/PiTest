@@ -33,6 +33,18 @@ specific tasks lives in `docs/agents/` and is loaded on demand. See the
 - Recovery: `chrome_*` returns "Chrome control locked" → ask the user to run `/chrome authorize` (or `/chrome authorize indefinite` for the session) and retry. Extension missing → `/chrome onboard`, then `/chrome doctor`, then `/chrome authorize`.
 - Common tools: `chrome_tab`, `chrome_snapshot`, `chrome_navigate`, `chrome_click`, `chrome_type`, `chrome_fill`, `chrome_evaluate`, `chrome_screenshot`, `chrome_list_network_requests`, `chrome_get_network_request`, `chrome_wait_for`, `chrome_upload_file`. Pass `background=true` (or `/chrome background on`) when you don't want Chrome to steal focus.
 
+## Visual Output Verification
+
+Whenever you create or change any rendered visual artifact (HTML, CSS, `<canvas>`, SVG, a UI component such as `.tsx/.jsx`, or a chart/graph) — or whenever a dev server is available to serve one — you MUST verify it visually BEFORE reporting "done". Type/lint checks (`npm run check`) prove the code compiles, not that the output looks right — valid code is not a finished visual task. Required loop:
+
+1. Prefer the native `preview` tool — one call renders a URL, a local HTML file, or a directory (served on an ephemeral port, so `file://` blocking does not apply) and returns a screenshot plus console errors and failed requests together. Fall back to `chrome_*` (then `agent_browser`) when you need finer control; for a framework dev server, start it (bash) and pass its URL to `preview`.
+2. Wait for load + settle, then capture screenshot(s). For animations or any time-varying output, capture multiple frames at different moments, not a single still (`preview` settles before capturing; raise `waitMs` for slow/async render).
+3. Inspect the console and network for errors (`preview` returns these; otherwise `chrome_devtools_read_console` + `chrome_devtools_read_network`). A `console.error` or a failed/500 request invalidates "done" even if the pixels look right.
+4. Critically review each screenshot against what was asked — list concrete defects and improvement opportunities. Do not just confirm the page loaded.
+5. Iterate the fixes and re-capture, capped at 2–3 cycles. Stop when the result matches the intent or the gain goes marginal; if a defect remains, ship with an explicit note of the residual rather than looping indefinitely. Attach the visual evidence.
+
+If no browser tool is reachable (`chrome_*` locked and `agent_browser` unavailable), say so explicitly and report the work as unverified — never imply a visual artifact was checked when it was not.
+
 ## Commands
 
 - After code changes (not doc changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing. It does NOT run tests.

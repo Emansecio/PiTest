@@ -119,7 +119,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("After a non-trivial code change, verify it");
+			expect(prompt).toContain("After a non-trivial code change, verify before reporting done");
 		});
 
 		test("omitted when there is no way to run a check (no bash)", () => {
@@ -130,7 +130,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).not.toContain("After a non-trivial code change, verify it");
+			expect(prompt).not.toContain("After a non-trivial code change, verify before reporting done");
 		});
 
 		test("omitted in a read-only session (no edit/write)", () => {
@@ -141,7 +141,31 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).not.toContain("After a non-trivial code change, verify it");
+			expect(prompt).not.toContain("After a non-trivial code change, verify before reporting done");
+		});
+	});
+
+	describe("visual definition-of-done", () => {
+		test("included when an edit/write tool is available", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "bash", "edit", "write"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("valid code is not a verified visual");
+		});
+
+		test("omitted in a read-only session (no edit/write)", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read", "bash"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).not.toContain("valid code is not a verified visual");
 		});
 	});
 });

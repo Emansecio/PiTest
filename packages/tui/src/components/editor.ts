@@ -538,8 +538,9 @@ export class Editor implements Component, Focusable {
 				if (after.length > 0) {
 					// Cursor is on a character (grapheme) - replace it with highlighted version
 					// Get the first grapheme from 'after'
-					const afterGraphemes = [...this.segment(after)];
-					const firstGrapheme = afterGraphemes[0]?.segment || "";
+					// Iterator avoids materializing the full grapheme array per-frame;
+					// only the first cluster is read.
+					const firstGrapheme = this.segment(after)[Symbol.iterator]().next().value?.segment || "";
 					const restAfter = after.slice(firstGrapheme.length);
 					const cursor = `\x1b[7m${firstGrapheme}\x1b[0m`;
 					displayText = before + marker + cursor + restAfter;
@@ -1649,8 +1650,9 @@ export class Editor implements Component, Focusable {
 			const afterCursor = currentLine.slice(this.state.cursorCol);
 
 			// Find the first grapheme at cursor
-			const graphemes = [...this.segment(afterCursor)];
-			const firstGrapheme = graphemes[0];
+			// Iterator avoids materializing every grapheme to the right of the
+			// cursor; only the first cluster is needed.
+			const firstGrapheme = this.segment(afterCursor)[Symbol.iterator]().next().value;
 			const graphemeLength = firstGrapheme ? firstGrapheme.segment.length : 1;
 
 			const before = currentLine.slice(0, this.state.cursorCol);
@@ -1798,8 +1800,9 @@ export class Editor implements Component, Focusable {
 				// Moving right - move by one grapheme (handles emojis, combining characters, etc.)
 				if (this.state.cursorCol < currentLine.length) {
 					const afterCursor = currentLine.slice(this.state.cursorCol);
-					const graphemes = [...this.segment(afterCursor)];
-					const firstGrapheme = graphemes[0];
+					// Iterator avoids materializing every grapheme to the right of the
+					// cursor; only the first cluster is needed to advance one grapheme.
+					const firstGrapheme = this.segment(afterCursor)[Symbol.iterator]().next().value;
 					this.setCursorCol(this.state.cursorCol + (firstGrapheme ? firstGrapheme.segment.length : 1));
 				} else if (this.state.cursorLine < this.state.lines.length - 1) {
 					// Wrap to start of next logical line

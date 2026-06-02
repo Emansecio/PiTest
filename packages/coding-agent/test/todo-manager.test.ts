@@ -91,4 +91,17 @@ describe("TodoManager CRUD", () => {
 		// still rendered (history present) but reports 0 open
 		expect(mgr.systemPromptSection()).toContain("0 open");
 	});
+
+	it("starts a fresh batch when creating after every todo is completed", () => {
+		const mgr = new TodoManager();
+		const a = mgr.create({ subject: "old1" });
+		const b = mgr.create({ subject: "old2" });
+		mgr.update({ id: a.id, status: "completed" });
+		mgr.update({ id: b.id, status: "completed" });
+		// New work after the batch is fully done → completed items dropped, ids reset
+		// so new todos don't pile up as "next steps" under the old checked-off list.
+		const fresh = mgr.create({ subject: "new work" });
+		expect(mgr.list().map((t) => t.subject)).toEqual(["new work"]);
+		expect(fresh.id).toBe(1);
+	});
 });

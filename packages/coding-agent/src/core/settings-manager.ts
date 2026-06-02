@@ -36,6 +36,14 @@ export interface RetrySettings {
 	provider?: ProviderRetrySettings;
 }
 
+export interface VerificationSettings {
+	enabled?: boolean; // default: true — after a code-modifying turn, run the project check and self-correct on failure
+	command?: string | null; // default: null → auto-detect from package.json scripts (check/typecheck/lint/test)
+	maxAttempts?: number; // default: 2 — fix attempts before giving up and reporting the failure to the user
+	timeoutMs?: number; // default: 180000
+	visual?: boolean; // default: true — nudge to `preview` when a rendered artifact changed but was never viewed
+}
+
 export interface TerminalSettings {
 	showImages?: boolean; // default: true (only relevant if terminal supports images)
 	imageWidthCells?: number; // default: 60 (preferred inline image width in terminal cells)
@@ -238,6 +246,7 @@ export interface Settings {
 	compaction?: CompactionSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
+	verification?: VerificationSettings;
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
@@ -1020,6 +1029,23 @@ export class SettingsManager {
 			enabled: this.getRetryEnabled(),
 			maxRetries: this.settings.retry?.maxRetries ?? 3,
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
+		};
+	}
+
+	getVerificationSettings(): {
+		enabled: boolean;
+		command: string | null;
+		maxAttempts: number;
+		timeoutMs: number;
+		visual: boolean;
+	} {
+		const v = this.settings.verification;
+		return {
+			enabled: v?.enabled ?? true,
+			command: v?.command ?? null,
+			maxAttempts: Math.max(1, v?.maxAttempts ?? 2),
+			timeoutMs: Math.max(1000, v?.timeoutMs ?? 180_000),
+			visual: v?.visual ?? true,
 		};
 	}
 

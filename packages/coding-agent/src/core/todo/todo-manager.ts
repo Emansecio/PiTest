@@ -68,6 +68,13 @@ export class TodoManager {
 	}
 
 	create(input: CreateTodoInput): TodoItem {
+		// Starting fresh work after the previous batch is fully done: drop the
+		// completed list so new todos don't pile up as "next steps" under stale
+		// checked-off items.
+		if (this.items.length > 0 && this.items.every((t) => t.status === "completed")) {
+			this.items = [];
+			this.nextId = 1;
+		}
 		const item: TodoItem = {
 			id: this.nextId++,
 			subject: clampSubject(input.subject),

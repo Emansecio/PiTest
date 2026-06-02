@@ -64,7 +64,8 @@ const askSchema = Type.Object(
 		),
 		displayMode: Type.Optional(
 			Type.Union([Type.Literal("overlay"), Type.Literal("inline")], {
-				description: "Render as a centered overlay (default) or inline above the prompt.",
+				description:
+					"Render inline above the prompt (default: full-width, in flow, never overlaps the transcript) or as a centered floating overlay.",
 			}),
 		),
 		overlayToggleKey: Type.Optional(
@@ -170,7 +171,7 @@ export function createAskToolDefinition(
 			const allowFreeform = input.allowFreeform ?? true;
 			const allowMultiple = input.allowMultiple === true && normalizedOptions.length > 0;
 			const allowComment = input.allowComment === true && normalizedOptions.length > 0;
-			const displayMode = input.displayMode ?? "overlay";
+			const displayMode = input.displayMode ?? "inline";
 			const overlayToggleKey = input.overlayToggleKey?.trim() || "alt+o";
 			const commentToggleKey = input.commentToggleKey?.trim() || "ctrl+g";
 			const timeout =
@@ -284,7 +285,7 @@ export function createAskToolDefinition(
 		renderResult(result, _options, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const output = getTextOutput(result as any, context.showImages).trim();
-			text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
+			text.setText(output ? `${theme.fg("toolOutput", output)}` : "");
 			return text;
 		},
 	};

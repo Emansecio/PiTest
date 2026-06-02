@@ -238,6 +238,7 @@ import {
 	type InspectImageToolOptions,
 } from "./inspect-image.ts";
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
+import { createPreviewTool, createPreviewToolDefinition } from "./preview.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createRecallTool, createRecallToolDefinition, type RecallToolOptions } from "./recall.ts";
 import { createRecallToolOutputDefinition, createRecallToolOutputTool } from "./recall-tool-output.ts";
@@ -523,6 +524,13 @@ const TOOL_REGISTRY = {
 	chrome_devtools_read_network: {
 		factory: createChromeReadNetworkTool,
 		definitionFactory: createChromeReadNetworkToolDefinition,
+		optionsKey: "chromeDevtools",
+		readOnly: true,
+		coding: "chromeDevtools",
+	},
+	preview: {
+		factory: createPreviewTool,
+		definitionFactory: createPreviewToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",

@@ -152,7 +152,7 @@ import { ScopedModelsSelectorComponent } from "./components/scoped-models-select
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
-import { createTodoOverlay } from "./components/todo-overlay.ts";
+import { createTodoOverlay, type TodoOverlay } from "./components/todo-overlay.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -347,7 +347,7 @@ export class InteractiveMode {
 	private _goalSpinnerTimer: ReturnType<typeof setInterval> | undefined;
 
 	// Live "above editor" todo overlay (auto-hides when there are no todos).
-	private todoOverlay: Component | undefined;
+	private todoOverlay: TodoOverlay | undefined;
 
 	// User-input bus: tools (e.g. `ask`) request structured option picks via this.
 	private userInputBus: UserInputBus = createUserInputBus();
@@ -1269,6 +1269,7 @@ export class InteractiveMode {
 
 	private applyRuntimeSettings(): void {
 		this.footer.setSession(this.session);
+		this.todoOverlay?.setSession(this.session);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -2673,6 +2674,35 @@ export class InteractiveMode {
 				break;
 			}
 
+			case "visual_review": {
+				this.showStatus(`Changed ${event.file} — verify it visually with the preview tool.`);
+				this.ui.requestRender();
+				break;
+			}
+
+			case "verification": {
+				if (this.settingsManager.getShowTerminalProgress()) {
+					this.ui.terminal.setProgress(event.phase === "running");
+				}
+				if (event.phase === "running") {
+					this.showStatus(
+						event.attempt > 1
+							? `Verifying (${event.command}) — attempt ${event.attempt}…`
+							: `Verifying (${event.command})…`,
+					);
+				} else if (event.phase === "passed") {
+					this.showStatus(`✓ Verified — ${event.command} passed`);
+				} else if (event.willRetry) {
+					this.showStatus(`✗ ${event.command} failed (exit ${event.exitCode ?? "?"}) — fixing…`);
+				} else {
+					this.showError(
+						`✗ ${event.command} still failing after ${event.maxAttempts} fix attempt(s) — reported unverified.`,
+					);
+				}
+				this.ui.requestRender();
+				break;
+			}
+
 			case "auto_retry_start": {
 				// Set up escape to abort retry
 				this.retryEscapeHandler = this.defaultEditor.onEscape;
@@ -3690,7 +3720,7 @@ export class InteractiveMode {
 			close?.();
 		};
 
-		const displayMode = req.displayMode ?? "overlay";
+		const displayMode = req.displayMode ?? "inline";
 		if (displayMode === "overlay") {
 			let handle: OverlayHandle | undefined;
 			const hooks = { onToggleVisibility: () => handle?.setHidden(!handle.isHidden()) };

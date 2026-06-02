@@ -233,14 +233,13 @@ function formatReadResult(
 	const maxLines = options.expanded ? lines.length : 10;
 	const displayLines = lines.slice(0, maxLines);
 	const remaining = lines.length - maxLines;
-	// Body sits on its own paragraph for multi-line output (preserves the
-	// breathing room around code previews); for single-line bodies — most
-	// commonly an ENOENT / EACCES error — we hug the title instead of paying
-	// for a blank line.
+	// Body always hugs the title (no leading blank line), matching Claude Code's
+	// compact tool-result layout — output starts on the row directly below the
+	// title for both single- and multi-line bodies.
 	const body = displayLines
 		.map((line) => (lang ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line))))
 		.join("\n");
-	let text = displayLines.length > 1 ? `\n${body}` : body;
+	let text = body;
 	if (remaining > 0) {
 		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
 	}

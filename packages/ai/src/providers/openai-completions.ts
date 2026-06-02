@@ -42,6 +42,12 @@ import { imageDataUrl, serializeToolArgs } from "./openai-responses-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
+// Reasoning can arrive under any of these delta keys depending on the provider
+// (reasoning_content: llama.cpp; reasoning: other openai-compatible; reasoning_text).
+// Hoisted to module scope so the per-chunk stream loop does not re-allocate this
+// 3-element array on every streamed delta.
+const REASONING_DELTA_FIELDS = ["reasoning_content", "reasoning", "reasoning_text"] as const;
+
 /**
  * Check if conversation messages contain tool calls or tool results.
  * This is needed because Anthropic (via proxy) requires the tools param
@@ -324,10 +330,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					// or reasoning (other openai compatible endpoints)
 					// Use the first non-empty reasoning field to avoid duplication
 					// (e.g., chutes.ai returns both reasoning_content and reasoning with same content)
-					const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
 					const deltaFields = choice.delta as Record<string, unknown>;
 					let foundReasoningField: string | null = null;
-					for (const field of reasoningFields) {
+					for (const field of REASONING_DELTA_FIELDS) {
 						const value = deltaFields[field];
 						if (typeof value === "string" && value.length > 0) {
 							foundReasoningField = field;
@@ -384,9 +389,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (reasoningDetails && Array.isArray(reasoningDetails)) {
 						for (const detail of reasoningDetails) {
 							if (detail.type === "reasoning.encrypted" && detail.id && detail.data) {
-								const matchingToolCall = output.content.find(
-									(b) => b.type === "toolCall" && b.id === detail.id,
-								) as ToolCall | undefined;
+								const matchingToolCall = toolCallBlocksById.get(detail.id);
 								if (matchingToolCall) {
 									matchingToolCall.thoughtSignature = JSON.stringify(detail);
 								}

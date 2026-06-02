@@ -173,11 +173,21 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			"Use edit for surgical changes to an existing file (multiple edits[] entries in one call). Use write only for new files or full rewrites.",
 		);
 	}
-	// Light verify-after-change nudge: only when the model can both edit and run a
-	// check. Kept soft ("when cheap", "non-trivial") to avoid over-verifying.
+	// Verify-after-change contract: when the model can both edit and run a check,
+	// reporting "done" on a code change requires either citing the check that ran
+	// or stating plainly it was not verified — no silent, unverified "done". Folds
+	// in a condensed "check per step" (the strong form lives in the karpathy pack).
 	if ((tools.includes("edit") || tools.includes("write")) && hasBash) {
 		addGuideline(
-			"After a non-trivial code change, verify it when a cheap check is available (run the affected test/build/lint, or the file itself) before reporting done — prefer evidence over assuming the edit worked.",
+			"After a non-trivial code change, verify before reporting done: run the affected test/build/lint (or read the file itself), then either cite the check you ran or state plainly that you did not verify — never report a code change as done on a silent, unverified assumption. For multi-step work, attach a check to each step and keep iterating until every check passes.",
+		);
+	}
+	// Visual Definition-of-Done (F1): valid code is not a verified visual. Self-gates
+	// in-text on the model actually having changed a rendered artifact and a browser
+	// tool being reachable, so it stays inert for backend-only work.
+	if (tools.includes("edit") || tools.includes("write")) {
+		addGuideline(
+			"If you changed a rendered visual artifact (HTML/CSS, canvas, SVG, a UI component, a chart) and a browser or preview tool is available, it is not done until you render it, screenshot it, and check the console/network for errors — valid code is not a verified visual. If no browser tool is reachable, report it as visually unverified rather than implying it was checked.",
 		);
 	}
 

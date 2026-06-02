@@ -157,7 +157,7 @@ function formatAstGrepResult(
 	const maxLines = options.expanded ? lines.length : 15;
 	const displayLines = lines.slice(0, maxLines);
 	const remaining = lines.length - maxLines;
-	let text = `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
+	let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
 	if (remaining > 0) text += `\n${theme.fg("muted", `... (${remaining} more lines)`)}`;
 	return text;
 }

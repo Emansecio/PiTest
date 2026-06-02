@@ -330,16 +330,22 @@ function cachedArgsLength(args: unknown): number {
  * Dense: non-alphanumeric non-space char fraction > 0.20,
  * OR structural symbol density > 0.05.
  */
+// Structural symbols counted by isDenseText, as char codes (precomputed once
+// instead of an indexOf-scan over the 14-char string per character).
+const STRUCTURAL_CODES = new Set<number>('{}[]()<>;:,="'.split("").map((c) => c.charCodeAt(0)));
+
 function isDenseText(text: string): boolean {
 	if (text.length === 0) return false;
 	let nonAlphaNum = 0;
 	let structural = 0;
 	for (let i = 0; i < text.length; i++) {
-		const c = text[i];
-		if (c !== " " && c !== "\t" && c !== "\n" && c !== "\r") {
-			if (!/[a-zA-Z0-9]/.test(c)) nonAlphaNum++;
+		const cc = text.charCodeAt(i);
+		// not whitespace: space(32) tab(9) lf(10) cr(13)
+		if (cc !== 32 && cc !== 9 && cc !== 10 && cc !== 13) {
+			const isAlnum = (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122);
+			if (!isAlnum) nonAlphaNum++;
 		}
-		if ('{}[]()<>;:,="'.includes(c)) structural++;
+		if (STRUCTURAL_CODES.has(cc)) structural++;
 	}
 	return nonAlphaNum / text.length > 0.2 || structural / text.length > 0.05;
 }

@@ -244,7 +244,9 @@ function formatSymbolResult(
 	const maxLines = options.expanded ? renderedLines.length : 15;
 	const displayLines = renderedLines.slice(0, maxLines);
 	const remaining = renderedLines.length - maxLines;
-	let text = `\n${displayLines.map((line) => (lang ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line)))).join("\n")}`;
+	let text = displayLines
+		.map((line) => (lang ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line))))
+		.join("\n");
 	if (remaining > 0) {
 		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
 	}

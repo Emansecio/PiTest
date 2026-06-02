@@ -11,6 +11,7 @@ import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentGoalManager } from "../goal/goal-manager.ts";
+import { getCurrentVerificationProbe } from "../verification/verification.ts";
 import { getTextOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -57,6 +58,25 @@ export function createGoalCompleteToolDefinition(
 					content: [{ type: "text" as const, text: "No active goal to complete." }],
 					details: { completed: false },
 				};
+			}
+			// R7: don't let the agent declare the goal done while the project check
+			// is red. Run the configured check once; refuse on failure with the output.
+			const probe = getCurrentVerificationProbe();
+			if (probe) {
+				const result = await probe();
+				if (result && !result.ok) {
+					const tail = result.output.length > 2000 ? `…\n${result.output.slice(-2000)}` : result.output;
+					const status = result.timedOut ? "timed out" : `exited ${result.exitCode}`;
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Not completing the goal — the project check ${status}. Fix the cause, then call goal_complete again:\n\n${tail || "(no output)"}`,
+							},
+						],
+						details: { completed: false, objective: goal.objective },
+					};
+				}
 			}
 			const summary = input.summary?.trim();
 			mgr.complete(summary);
