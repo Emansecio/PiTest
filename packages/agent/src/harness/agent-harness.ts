@@ -343,8 +343,12 @@ export class AgentHarness<
 	): AgentContext {
 		return {
 			systemPrompt: systemPrompt ?? turnState.systemPrompt,
+			// messages is appended to during the loop (push), so it must be copied.
 			messages: turnState.messages.slice(),
-			tools: turnState.activeTools.slice(),
+			// activeTools is never mutated downstream — buildToolMap only reads it
+			// (and caches by array identity, so sharing the memoized array improves
+			// the cache hit) and before_provider_request doesn't expose tools.
+			tools: turnState.activeTools,
 		};
 	}
 
