@@ -745,6 +745,7 @@ export class InteractiveMode {
 
 		// Set up theme file watcher
 		onThemeChange(() => {
+			this._cachedMarkdownTheme = undefined;
 			this.ui.invalidate();
 			this.updateEditorBorderColor();
 			this.ui.requestRender();
@@ -972,11 +973,25 @@ export class InteractiveMode {
 			.catch(() => undefined);
 	}
 
+	private _cachedMarkdownTheme?: MarkdownTheme;
+	private _cachedCodeBlockIndent?: string;
+
 	private getMarkdownThemeWithSettings(): MarkdownTheme {
-		return {
+		// The base markdown theme is "live": every entry is a closure over the
+		// `theme` Proxy, so color changes are reflected without rebuilding. The
+		// only static input is `codeBlockIndent` (a string), so we rebuild only
+		// when it changes. The theme-change handler also clears this defensively.
+		const codeBlockIndent = this.settingsManager.getCodeBlockIndent();
+		if (this._cachedMarkdownTheme && this._cachedCodeBlockIndent === codeBlockIndent) {
+			return this._cachedMarkdownTheme;
+		}
+		const markdownTheme: MarkdownTheme = {
 			...getMarkdownTheme(),
-			codeBlockIndent: this.settingsManager.getCodeBlockIndent(),
+			codeBlockIndent,
 		};
+		this._cachedMarkdownTheme = markdownTheme;
+		this._cachedCodeBlockIndent = codeBlockIndent;
+		return markdownTheme;
 	}
 
 	// =========================================================================
