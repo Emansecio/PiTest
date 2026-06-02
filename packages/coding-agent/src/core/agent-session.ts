@@ -692,7 +692,6 @@ export class AgentSession {
 			candidates.add(name);
 		}
 		for (const name of candidates) {
-			if (alwaysActive.has(name)) continue;
 			const def = allDefs[name];
 			if (!def) continue;
 			const description = typeof def.description === "string" ? def.description : "";
@@ -960,21 +959,17 @@ export class AgentSession {
 				const assistantMsg = event.message as AssistantMessage;
 				if (assistantMsg.stopReason !== "error") {
 					this._overflowRecoveryAttempted = false;
-				}
-
-				// Reset retry counter immediately on successful assistant response
-				// This prevents accumulation across multiple LLM calls within a turn
-				if (assistantMsg.stopReason !== "error" && this._retryAttempt > 0) {
-					this._emit({
-						type: "auto_retry_end",
-						success: true,
-						attempt: this._retryAttempt,
-					});
-					this._retryAttempt = 0;
-				}
-				// Reset fallback-chain state on any successful response so the next
-				// failure starts the chain fresh from the (current) primary.
-				if (assistantMsg.stopReason !== "error") {
+					// Reset the retry counter immediately on a successful response so it
+					// doesn't accumulate across multiple LLM calls within a turn.
+					if (this._retryAttempt > 0) {
+						this._emit({
+							type: "auto_retry_end",
+							success: true,
+							attempt: this._retryAttempt,
+						});
+						this._retryAttempt = 0;
+					}
+					// Reset fallback-chain state so the next failure restarts from the primary.
 					this._triedFallbackEntries.clear();
 					this._fallbackOriginal = undefined;
 				}
@@ -2963,14 +2958,13 @@ export class AgentSession {
 			const settings = this.settingsManager.getCompactionSettings();
 
 			const preparation = prepareCompaction(pathEntries, settings);
-			if (preparation) preparation.cwd = this._cwd;
 			if (!preparation) {
 				const lastEntry = pathEntries[pathEntries.length - 1];
-				if (lastEntry?.type === "compaction") {
-					throw new Error("Already compacted");
-				}
-				throw new Error("Nothing to compact (session too small)");
+				throw new Error(
+					lastEntry?.type === "compaction" ? "Already compacted" : "Nothing to compact (session too small)",
+				);
 			}
+			preparation.cwd = this._cwd;
 
 			const compactionResult = await this._executeCompactionPipeline({
 				preparation,

@@ -571,47 +571,51 @@ function buildParams(
 		params.tool_choice = options.toolChoice;
 	}
 
-	if (compat.thinkingFormat === "zai" && model.reasoning) {
-		(params as any).enable_thinking = !!options?.reasoningEffort;
-	} else if (compat.thinkingFormat === "qwen" && model.reasoning) {
-		(params as any).enable_thinking = !!options?.reasoningEffort;
-	} else if (compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
-		(params as any).chat_template_kwargs = {
-			enable_thinking: !!options?.reasoningEffort,
-			preserve_thinking: true,
-		};
-	} else if (compat.thinkingFormat === "deepseek" && model.reasoning) {
-		(params as any).thinking = { type: options?.reasoningEffort ? "enabled" : "disabled" };
-		if (options?.reasoningEffort) {
+	if (model.reasoning) {
+		if (compat.thinkingFormat === "zai") {
+			(params as any).enable_thinking = !!options?.reasoningEffort;
+		} else if (compat.thinkingFormat === "qwen") {
+			(params as any).enable_thinking = !!options?.reasoningEffort;
+		} else if (compat.thinkingFormat === "qwen-chat-template") {
+			(params as any).chat_template_kwargs = {
+				enable_thinking: !!options?.reasoningEffort,
+				preserve_thinking: true,
+			};
+		} else if (compat.thinkingFormat === "deepseek") {
+			(params as any).thinking = { type: options?.reasoningEffort ? "enabled" : "disabled" };
+			if (options?.reasoningEffort) {
+				(params as any).reasoning_effort =
+					model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
+			}
+		} else if (compat.thinkingFormat === "openrouter") {
+			// OpenRouter normalizes reasoning across providers via a nested reasoning object.
+			const openRouterParams = params as typeof params & { reasoning?: { effort?: string } };
+			if (options?.reasoningEffort) {
+				openRouterParams.reasoning = {
+					effort: model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort,
+				};
+			} else if (model.thinkingLevelMap?.off !== null) {
+				openRouterParams.reasoning = { effort: model.thinkingLevelMap?.off ?? "none" };
+			}
+		} else if (compat.thinkingFormat === "together") {
+			const togetherParams = params as Omit<typeof params, "reasoning_effort"> & {
+				reasoning?: { enabled: boolean };
+				reasoning_effort?: string;
+			};
+			togetherParams.reasoning = { enabled: !!options?.reasoningEffort };
+			if (options?.reasoningEffort && compat.supportsReasoningEffort) {
+				togetherParams.reasoning_effort =
+					model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
+			}
+		} else if (options?.reasoningEffort && compat.supportsReasoningEffort) {
+			// OpenAI-style reasoning_effort
 			(params as any).reasoning_effort =
 				model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-		}
-	} else if (compat.thinkingFormat === "openrouter" && model.reasoning) {
-		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
-		const openRouterParams = params as typeof params & { reasoning?: { effort?: string } };
-		if (options?.reasoningEffort) {
-			openRouterParams.reasoning = {
-				effort: model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort,
-			};
-		} else if (model.thinkingLevelMap?.off !== null) {
-			openRouterParams.reasoning = { effort: model.thinkingLevelMap?.off ?? "none" };
-		}
-	} else if (compat.thinkingFormat === "together" && model.reasoning) {
-		const togetherParams = params as Omit<typeof params, "reasoning_effort"> & {
-			reasoning?: { enabled: boolean };
-			reasoning_effort?: string;
-		};
-		togetherParams.reasoning = { enabled: !!options?.reasoningEffort };
-		if (options?.reasoningEffort && compat.supportsReasoningEffort) {
-			togetherParams.reasoning_effort = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-		}
-	} else if (options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
-		// OpenAI-style reasoning_effort
-		(params as any).reasoning_effort = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-	} else if (!options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
-		const offValue = model.thinkingLevelMap?.off;
-		if (typeof offValue === "string") {
-			(params as any).reasoning_effort = offValue;
+		} else if (!options?.reasoningEffort && compat.supportsReasoningEffort) {
+			const offValue = model.thinkingLevelMap?.off;
+			if (typeof offValue === "string") {
+				(params as any).reasoning_effort = offValue;
+			}
 		}
 	}
 
@@ -913,10 +917,7 @@ export function convertMessages(
 			// Other providers also don't accept empty assistant messages.
 			// This handles aborted assistant responses that got no content.
 			const content = assistantMsg.content;
-			const hasContent =
-				content !== null &&
-				content !== undefined &&
-				(typeof content === "string" ? content.length > 0 : content.length > 0);
+			const hasContent = content != null && content.length > 0;
 			if (!hasContent && !assistantMsg.tool_calls) {
 				continue;
 			}

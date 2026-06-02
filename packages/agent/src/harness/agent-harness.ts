@@ -889,7 +889,7 @@ export class AgentHarness<
 		return this.steeringQueueMode;
 	}
 
-	async setSteeringMode(mode: QueueMode): Promise<void> {
+	setSteeringMode(mode: QueueMode): void {
 		this.steeringQueueMode = mode;
 	}
 
@@ -897,7 +897,7 @@ export class AgentHarness<
 		return this.followUpQueueMode;
 	}
 
-	async setFollowUpMode(mode: QueueMode): Promise<void> {
+	setFollowUpMode(mode: QueueMode): void {
 		this.followUpQueueMode = mode;
 	}
 
