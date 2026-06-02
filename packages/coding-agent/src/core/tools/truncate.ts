@@ -84,6 +84,33 @@ export function collapseRepeatedLines(text: string, minRun = DEFAULT_COLLAPSE_MI
 }
 
 /**
+ * Count UTF-8 bytes for a string without allocating a Buffer.
+ * Surrogate pairs (U+10000–U+10FFFF) count as 4 bytes; the low surrogate is
+ * consumed so it is never counted separately.
+ * A lone high surrogate at end-of-string (no following low surrogate) is treated
+ * as a 3-byte sequence, matching V8's WTF-8 behaviour for unpaired surrogates.
+ */
+function utf8ByteLength(s: string): number {
+	let bytes = 0;
+	const len = s.length;
+	for (let i = 0; i < len; i++) {
+		const code = s.charCodeAt(i);
+		if (code < 0x80) {
+			bytes += 1;
+		} else if (code < 0x800) {
+			bytes += 2;
+		} else if (code >= 0xd800 && code <= 0xdbff) {
+			// Surrogate pair → 4 bytes; skip the trailing low surrogate.
+			bytes += 4;
+			i++;
+		} else {
+			bytes += 3;
+		}
+	}
+	return bytes;
+}
+
+/**
  * Fast-path check: if content fits within both limits, return a no-truncation
  * result without splitting the string. Returns null when truncation is needed.
  *
@@ -144,12 +171,12 @@ export function truncateHead(content: string, options: TruncationOptions = {}): 
 	const fastPath = tryNoTruncation(content, maxLines, maxBytes);
 	if (fastPath) return fastPath;
 
-	const totalBytes = Buffer.byteLength(content, "utf-8");
+	const totalBytes = utf8ByteLength(content);
 	const lines = content.split("\n");
 	const totalLines = lines.length;
 
 	// Check if first line alone exceeds byte limit
-	const firstLineBytes = Buffer.byteLength(lines[0], "utf-8");
+	const firstLineBytes = utf8ByteLength(lines[0]);
 	if (firstLineBytes > maxBytes) {
 		return {
 			content: "",
@@ -173,7 +200,7 @@ export function truncateHead(content: string, options: TruncationOptions = {}): 
 
 	for (let i = 0; i < lines.length && i < maxLines; i++) {
 		const line = lines[i];
-		const lineBytes = Buffer.byteLength(line, "utf-8") + (i > 0 ? 1 : 0); // +1 for newline
+		const lineBytes = utf8ByteLength(line) + (i > 0 ? 1 : 0); // +1 for newline
 
 		if (outputBytesCount + lineBytes > maxBytes) {
 			truncatedBy = "bytes";
@@ -219,7 +246,7 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 	const fastPath = tryNoTruncation(content, maxLines, maxBytes);
 	if (fastPath) return fastPath;
 
-	const totalBytes = Buffer.byteLength(content, "utf-8");
+	const totalBytes = utf8ByteLength(content);
 	const lines = content.split("\n");
 	const totalLines = lines.length;
 
@@ -231,7 +258,7 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 
 	for (let i = lines.length - 1; i >= 0 && outputLinesArr.length < maxLines; i--) {
 		const line = lines[i];
-		const lineBytes = Buffer.byteLength(line, "utf-8") + (outputLinesArr.length > 0 ? 1 : 0); // +1 for newline
+		const lineBytes = utf8ByteLength(line) + (outputLinesArr.length > 0 ? 1 : 0); // +1 for newline
 
 		if (outputBytesCount + lineBytes > maxBytes) {
 			truncatedBy = "bytes";
@@ -240,7 +267,7 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 			if (outputLinesArr.length === 0) {
 				const truncatedLine = truncateStringToBytesFromEnd(line, maxBytes);
 				outputLinesArr.unshift(truncatedLine);
-				outputBytesCount = Buffer.byteLength(truncatedLine, "utf-8");
+				outputBytesCount = utf8ByteLength(truncatedLine);
 				lastLinePartial = true;
 			}
 			break;

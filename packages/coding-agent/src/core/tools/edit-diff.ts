@@ -399,12 +399,17 @@ export function buildCandidateMatches(
 
 	const selected: ScoredWindow[] = [];
 	const seenStarts = new Set<number>();
+	const halfWindow = Math.max(2, Math.floor(windowSize / 2));
 	for (const candidate of scored) {
 		// Suppress overlapping windows that share a start vicinity — they
 		// usually describe the same divergence twice.
-		const nearby = [...seenStarts].some(
-			(s) => Math.abs(s - candidate.start) < Math.max(2, Math.floor(windowSize / 2)),
-		);
+		let nearby = false;
+		for (const s of seenStarts) {
+			if (Math.abs(s - candidate.start) < halfWindow) {
+				nearby = true;
+				break;
+			}
+		}
 		if (nearby) continue;
 		selected.push(candidate);
 		seenStarts.add(candidate.start);

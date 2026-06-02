@@ -141,7 +141,12 @@ function computeLineHashes(lines: string[]): string[] {
 	return lines.map((line) => createHash("sha256").update(line).digest("hex").slice(0, HASHLINE_HASH_LEN));
 }
 
-function nearbyLineNumbers(lines: string[], hash: string, limit = 3): number[] {
+function nearbyLineNumbers(
+	lines: string[],
+	hash: string,
+	limit = 3,
+	precomputedIndex?: Map<string, number[]>,
+): number[] {
 	// Walk windows and score 2-of-3 line-hash agreement against the union of
 	// line-hashes from windows that fully matched `hash`. If no window matches
 	// fully, fall back to windows whose hash shares a 2-hex prefix with `hash`.
@@ -152,18 +157,39 @@ function nearbyLineNumbers(lines: string[], hash: string, limit = 3): number[] {
 	const fullMatchLineHashes = new Set<string>();
 	const prefixMatchLineHashes = new Set<string>();
 	const prefix = hash.slice(0, 2);
-	for (let i = 0; i <= last; i++) {
-		const wh = hashWindow(lines, i);
-		if (wh === hash) {
-			fullMatchLineHashes.add(lineHashes[i]);
-			fullMatchLineHashes.add(lineHashes[i + 1]);
-			fullMatchLineHashes.add(lineHashes[i + 2]);
-		} else if (wh.startsWith(prefix)) {
-			prefixMatchLineHashes.add(lineHashes[i]);
-			prefixMatchLineHashes.add(lineHashes[i + 1]);
-			prefixMatchLineHashes.add(lineHashes[i + 2]);
+
+	if (precomputedIndex) {
+		// Reuse precomputed window hashes instead of re-hashing every window.
+		for (const [wh, positions] of precomputedIndex) {
+			if (wh === hash) {
+				for (const i of positions) {
+					fullMatchLineHashes.add(lineHashes[i]);
+					if (i + 1 < lineHashes.length) fullMatchLineHashes.add(lineHashes[i + 1]);
+					if (i + 2 < lineHashes.length) fullMatchLineHashes.add(lineHashes[i + 2]);
+				}
+			} else if (wh.startsWith(prefix)) {
+				for (const i of positions) {
+					prefixMatchLineHashes.add(lineHashes[i]);
+					if (i + 1 < lineHashes.length) prefixMatchLineHashes.add(lineHashes[i + 1]);
+					if (i + 2 < lineHashes.length) prefixMatchLineHashes.add(lineHashes[i + 2]);
+				}
+			}
+		}
+	} else {
+		for (let i = 0; i <= last; i++) {
+			const wh = hashWindow(lines, i);
+			if (wh === hash) {
+				fullMatchLineHashes.add(lineHashes[i]);
+				fullMatchLineHashes.add(lineHashes[i + 1]);
+				fullMatchLineHashes.add(lineHashes[i + 2]);
+			} else if (wh.startsWith(prefix)) {
+				prefixMatchLineHashes.add(lineHashes[i]);
+				prefixMatchLineHashes.add(lineHashes[i + 1]);
+				prefixMatchLineHashes.add(lineHashes[i + 2]);
+			}
 		}
 	}
+
 	const refSet = fullMatchLineHashes.size > 0 ? fullMatchLineHashes : prefixMatchLineHashes;
 	if (refSet.size === 0) return [];
 
@@ -184,13 +210,13 @@ function findAnchor(
 	hash: string,
 	editIndex: number,
 	which: "before_hash" | "after_hash",
-	minStart = 0,
+	minStart: number,
+	index: Map<string, number[]>,
 ): number {
-	const index = computeAnchorIndex(lines.join("\n"));
 	const all = index.get(hash) ?? [];
 	const filtered = all.filter((i) => i >= minStart);
 	if (filtered.length === 0) {
-		const nearby = nearbyLineNumbers(lines, hash);
+		const nearby = nearbyLineNumbers(lines, hash, 3, index);
 		const nearbyStr = nearby.length > 0 ? ` Nearby lines: ${nearby.join(", ")}.` : "";
 		throw new HashlineEditError(
 			{ kind: "not_found", which, editIndex, hash, nearby },
@@ -248,9 +274,17 @@ export function applyHashlineEdits(
 
 	for (let i = 0; i < edits.length; i++) {
 		const edit = edits[i];
-		const beforeStart = findAnchor(lines, edit.before_hash, i, "before_hash", 0);
+		const anchorIndex = computeAnchorIndex(lines.join("\n"));
+		const beforeStart = findAnchor(lines, edit.before_hash, i, "before_hash", 0, anchorIndex);
 		// after window must start strictly after the before window ends
-		const afterStart = findAnchor(lines, edit.after_hash, i, "after_hash", beforeStart + HASHLINE_WINDOW);
+		const afterStart = findAnchor(
+			lines,
+			edit.after_hash,
+			i,
+			"after_hash",
+			beforeStart + HASHLINE_WINDOW,
+			anchorIndex,
+		);
 		const replaceStart = beforeStart + HASHLINE_WINDOW;
 		const replaceEnd = afterStart; // exclusive
 		if (replaceEnd < replaceStart) {
