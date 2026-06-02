@@ -71,6 +71,7 @@ function createFooterData(providerCount = 1): ReadonlyFooterDataProvider {
 	return {
 		getGitBranch: () => null,
 		getExtensionStatuses: () => new Map<string, string>(),
+		getStatusVersion: () => 0,
 		getAvailableProviderCount: () => providerCount,
 		onBranchChange: () => () => {},
 	};

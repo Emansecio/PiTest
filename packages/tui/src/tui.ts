@@ -274,6 +274,8 @@ export class TUI extends Container {
 		hidden: boolean;
 		focusOrder: number;
 	}[] = [];
+	/** Cached overlay entry whose component === focusedComponent. Kept in sync by setFocus(). */
+	private focusedOverlay: (typeof this.overlayStack)[number] | null = null;
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean) {
 		super();
@@ -320,6 +322,8 @@ export class TUI extends Container {
 		}
 
 		this.focusedComponent = component;
+		this.focusedOverlay =
+			component === null ? null : (this.overlayStack.find((o) => o.component === component) ?? null);
 
 		// Set focused flag on new component
 		if (isFocusable(component)) {
@@ -577,7 +581,7 @@ export class TUI extends Container {
 
 		// If focused component is an overlay, verify it's still visible
 		// (visibility can change due to terminal resize or visible() callback)
-		const focusedOverlay = this.overlayStack.find((o) => o.component === this.focusedComponent);
+		const focusedOverlay = this.focusedOverlay;
 		if (focusedOverlay && !this.isOverlayVisible(focusedOverlay)) {
 			// Focused overlay is no longer visible, redirect to topmost visible overlay
 			const topVisible = this.getTopmostVisibleOverlay();

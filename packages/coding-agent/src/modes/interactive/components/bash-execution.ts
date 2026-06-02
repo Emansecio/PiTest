@@ -36,6 +36,22 @@ export class BashExecutionComponent extends MessageShell {
 	private outputVersion = 0;
 	private cachedContextVersion = -1;
 	private cachedContextTruncation?: TruncationResult;
+	// Derived from contextTruncation; cached alongside it so invalidate()-only
+	// re-renders (width change, focus, etc.) don't redo split/map on every call.
+	private cachedAvailableLines: string[] = [];
+	private cachedStyledPreview = "";
+	private cachedStyledExpanded = "";
+	// Persistent header renderer — hoisted so it is not re-allocated on every
+	// updateDisplay() call. Reads this.command and this.expanded at render time.
+	private readonly headerRenderer = {
+		render: (width: number): string[] => {
+			if (this.expanded) {
+				return new Text(theme.fg("bashMode", theme.bold(`$ ${this.command}`)), 0, 0).render(width);
+			}
+			return [clampBashCommandRow({ command: this.command, width, colorKey: "bashMode" })];
+		},
+		invalidate: () => {},
+	};
 
 	constructor(command: string, ui: TUI, excludeFromContext = false) {
 		// Per Leva 2 (D3=yes): bash uses the unified shell instead of the
@@ -123,8 +139,8 @@ export class BashExecutionComponent extends MessageShell {
 		// (width changes, focus, expand toggle) don't change the buffer, so we
 		// avoid re-joining + re-truncating the entire output on every render.
 		// This is what turns the per-chunk cost from O(n²) into O(n) overall.
-		let contextTruncation = this.cachedContextTruncation;
-		if (contextTruncation === undefined || this.cachedContextVersion !== this.outputVersion) {
+		// Check before updating whether this outputVersion is already cached.
+		if (this.cachedContextTruncation === undefined || this.cachedContextVersion !== this.outputVersion) {
 			// truncateTail keeps only the trailing DEFAULT_MAX_LINES/DEFAULT_MAX_BYTES,
 			// so joining the whole (unbounded) buffer each chunk is O(n) waste that
 			// makes streaming O(n²). The kept suffix is always within the last
@@ -135,17 +151,24 @@ export class BashExecutionComponent extends MessageShell {
 				this.outputLines.length > DEFAULT_MAX_LINES + 1
 					? this.outputLines.slice(-(DEFAULT_MAX_LINES + 1))
 					: this.outputLines;
-			const fullOutput = tailLines.join("\n");
-			contextTruncation = truncateTail(fullOutput, {
+			const freshTruncation = truncateTail(tailLines.join("\n"), {
 				maxLines: DEFAULT_MAX_LINES,
 				maxBytes: DEFAULT_MAX_BYTES,
 			});
-			this.cachedContextTruncation = contextTruncation;
+			this.cachedContextTruncation = freshTruncation;
 			this.cachedContextVersion = this.outputVersion;
+
+			// Rebuild derived caches (split + styled maps) in the same epoch.
+			// invalidate()-only re-renders skip this entire branch, reading the
+			// already-cached fields below — that is what eliminates the O(n²) work.
+			this.cachedAvailableLines = freshTruncation.content ? freshTruncation.content.split("\n") : [];
+			const previewSlice = this.cachedAvailableLines.slice(-PREVIEW_LINES);
+			this.cachedStyledPreview = previewSlice.map((line) => theme.fg("muted", line)).join("\n");
+			this.cachedStyledExpanded = this.cachedAvailableLines.map((line) => theme.fg("muted", line)).join("\n");
 		}
 
-		// Get the lines to potentially display (after context truncation)
-		const availableLines = contextTruncation.content ? contextTruncation.content.split("\n") : [];
+		// Use cached derived data for the rest of the render
+		const availableLines = this.cachedAvailableLines;
 
 		// Apply preview truncation based on expanded state
 		const previewLogicalLines = availableLines.slice(-PREVIEW_LINES);
@@ -159,28 +182,20 @@ export class BashExecutionComponent extends MessageShell {
 		// to a single visual row (horizontal clip via `…`, multi-line scripts folded
 		// into `(N earlier lines, …)`); ctrl+o expands to the full command. Mirrors
 		// the agent-issued bash tool's title clamp so user `!` commands don't wrap.
-		const command = this.command;
-		const expanded = this.expanded;
-		this.contentContainer.addChild({
-			render: (width: number): string[] => {
-				if (expanded) {
-					return new Text(theme.fg("bashMode", theme.bold(`$ ${command}`)), 0, 0).render(width);
-				}
-				return [clampBashCommandRow({ command, width, colorKey: "bashMode" })];
-			},
-			invalidate: () => {},
-		});
+		// headerRenderer is a persistent field — not re-allocated every call.
+		this.contentContainer.addChild(this.headerRenderer);
 
 		// Output
 		if (availableLines.length > 0) {
 			if (this.expanded) {
-				// Show all lines
-				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
-				this.contentContainer.addChild(new Text(displayText, 0, 0));
+				// Show all lines — use cached styled text (recomputed only when
+				// outputVersion changes, not on every invalidate()-triggered re-render).
+				this.contentContainer.addChild(new Text(this.cachedStyledExpanded, 0, 0));
 			} else {
-				// Use shared visual truncation utility with width-aware caching
-				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
-				const styledInput = styledOutput;
+				// Use shared visual truncation utility with width-aware caching.
+				// cachedStyledPreview is stable across invalidate()-only re-renders so
+				// the closure captures a reference that doesn't change between them.
+				const styledInput = this.cachedStyledPreview;
 				let cachedWidth: number | undefined;
 				let cachedLines: string[] | undefined;
 				this.contentContainer.addChild({
@@ -223,8 +238,10 @@ export class BashExecutionComponent extends MessageShell {
 				statusParts.push(theme.fg("error", `(exit ${this.exitCode})`));
 			}
 
-			// Add truncation warning (context truncation, not preview truncation)
-			const wasTruncated = this.truncationResult?.truncated || contextTruncation.truncated;
+			// Add truncation warning (context truncation, not preview truncation).
+			// cachedContextTruncation is always defined here: outputNeedsRefresh
+			// sets it on first call; subsequent calls leave it set from before.
+			const wasTruncated = this.truncationResult?.truncated || this.cachedContextTruncation?.truncated;
 			if (wasTruncated && this.fullOutputPath) {
 				statusParts.push(theme.fg("warning", `Output truncated. Full output: ${this.fullOutputPath}`));
 			}

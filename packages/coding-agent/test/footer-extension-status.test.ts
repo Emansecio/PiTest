@@ -31,6 +31,7 @@ function makeFooterData(statuses: Map<string, string>): ReadonlyFooterDataProvid
 	return {
 		getGitBranch: () => null,
 		getExtensionStatuses: () => statuses,
+		getStatusVersion: () => 0,
 		getAvailableProviderCount: () => 1,
 		onBranchChange: () => () => {},
 	};

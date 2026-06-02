@@ -76,6 +76,8 @@ export class FooterComponent implements Component {
 		cacheWrite: 0,
 		cost: 0,
 	};
+	private cachedStatusVersion = -1;
+	private cachedStatusLine: string | null = null;
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -222,11 +224,15 @@ export class FooterComponent implements Component {
 		// --- Extension statuses (line 3, optional) ---------------------------
 		const extensionStatuses = this.footerData.getExtensionStatuses();
 		if (extensionStatuses.size > 0) {
-			const sortedStatuses = Array.from(extensionStatuses.entries())
-				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([, text]) => sanitizeStatusText(text));
-			const statusLine = sortedStatuses.join(" ");
-			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+			const currentVersion = this.footerData.getStatusVersion();
+			if (currentVersion !== this.cachedStatusVersion) {
+				this.cachedStatusLine = Array.from(extensionStatuses.entries())
+					.sort(([a], [b]) => a.localeCompare(b))
+					.map(([, text]) => sanitizeStatusText(text))
+					.join(" ");
+				this.cachedStatusVersion = currentVersion;
+			}
+			lines.push(truncateToWidth(this.cachedStatusLine!, width, theme.fg("dim", "...")));
 		}
 
 		return lines;

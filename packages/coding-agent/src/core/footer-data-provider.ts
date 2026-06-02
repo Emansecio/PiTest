@@ -89,6 +89,7 @@ export class FooterDataProvider {
 	private static readonly WATCH_DEBOUNCE_MS = 500;
 
 	private extensionStatuses = new Map<string, string>();
+	private statusVersion = 0;
 	private cachedBranch: string | null | undefined = undefined;
 	private gitPaths: GitPaths | null | undefined = undefined;
 	private headWatcher: FSWatcher | null = null;
@@ -122,6 +123,11 @@ export class FooterDataProvider {
 		return this.extensionStatuses;
 	}
 
+	/** Monotonically increasing counter; bumped on every status mutation. */
+	getStatusVersion(): number {
+		return this.statusVersion;
+	}
+
 	/** Subscribe to git branch changes. Returns unsubscribe function. */
 	onBranchChange(callback: () => void): () => void {
 		this.branchChangeCallbacks.add(callback);
@@ -135,11 +141,13 @@ export class FooterDataProvider {
 		} else {
 			this.extensionStatuses.set(key, text);
 		}
+		this.statusVersion++;
 	}
 
 	/** Internal: clear extension statuses */
 	clearExtensionStatuses(): void {
 		this.extensionStatuses.clear();
+		this.statusVersion++;
 	}
 
 	/** Number of unique providers with available models (for footer display) */
@@ -350,5 +358,5 @@ export class FooterDataProvider {
 /** Read-only view for extensions - excludes setExtensionStatus, setAvailableProviderCount and dispose */
 export type ReadonlyFooterDataProvider = Pick<
 	FooterDataProvider,
-	"getGitBranch" | "getExtensionStatuses" | "getAvailableProviderCount" | "onBranchChange"
+	"getGitBranch" | "getExtensionStatuses" | "getStatusVersion" | "getAvailableProviderCount" | "onBranchChange"
 >;
