@@ -860,16 +860,11 @@ export function applyBackgroundToLine(line: string, width: number, bgFn: (text: 
  *
  * @param text - Text to truncate (may contain ANSI codes)
  * @param maxWidth - Maximum visible width
- * @param ellipsis - Ellipsis string to append when truncating (default: "...")
+ * @param ellipsis - Ellipsis string to append when truncating (default: "…", one column)
  * @param pad - If true, pad result with spaces to exactly maxWidth (default: false)
  * @returns Truncated text, optionally padded to exactly maxWidth
  */
-export function truncateToWidth(
-	text: string,
-	maxWidth: number,
-	ellipsis: string = "...",
-	pad: boolean = false,
-): string {
+export function truncateToWidth(text: string, maxWidth: number, ellipsis: string = "…", pad: boolean = false): string {
 	if (maxWidth <= 0) {
 		return "";
 	}

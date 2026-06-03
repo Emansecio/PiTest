@@ -181,7 +181,7 @@ export class FooterComponent implements Component {
 			// foreground to the rest by leaving it as-is — it's the brightest
 			// row in the footer block on purpose.
 			rightColor: (text) => text,
-			ellipsis: theme.fg("muted", "..."),
+			ellipsis: theme.fg("muted", "…"),
 		});
 
 		// --- Metrics (line 2) ------------------------------------------------
@@ -213,7 +213,7 @@ export class FooterComponent implements Component {
 		const metricsLine = composeLeftRight(ctxText, rightParts.join(" · "), width, {
 			leftColor: ctxColorize,
 			rightColor: (text) => theme.fg("dim", text),
-			ellipsis: theme.fg("dim", "..."),
+			ellipsis: theme.fg("dim", "…"),
 		});
 
 		const lines = [identityLine, metricsLine];
@@ -229,7 +229,7 @@ export class FooterComponent implements Component {
 					.join(" ");
 				this.cachedStatusVersion = currentVersion;
 			}
-			lines.push(truncateToWidth(this.cachedStatusLine!, width, theme.fg("dim", "...")));
+			lines.push(truncateToWidth(this.cachedStatusLine!, width, theme.fg("dim", "…")));
 		}
 
 		return lines;
@@ -258,7 +258,7 @@ function composeLeftRight(rawLeft: string, rawRight: string, width: number, opti
 	let rightWidth = visibleWidth(right);
 
 	if (leftWidth > width) {
-		left = truncateToWidth(left, width, "...");
+		left = truncateToWidth(left, width, "…");
 		leftWidth = visibleWidth(left);
 		right = "";
 		rightWidth = 0;
