@@ -7,7 +7,7 @@
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"build": "tsgo -p tsconfig.build.json",
-		"test": "node --test --import tsx test/*.test.ts",
+		"test": "node --test --import tsx --import ./test/_render-assert-setup.ts test/*.test.ts",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"files": [

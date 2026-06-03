@@ -34,6 +34,11 @@ export function setRenderAssertEnabled(enabled: boolean): void {
 	renderAssertEnabled = enabled;
 }
 
+/** Current state of the per-component render width guard. Lets tests capture and restore it. */
+export function isRenderAssertEnabled(): boolean {
+	return renderAssertEnabled;
+}
+
 /**
  * Throw if any line a component produced is wider than `width`, naming the
  * component and quoting the offending line. Pure and side-effect free except

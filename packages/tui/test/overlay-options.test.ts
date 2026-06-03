@@ -1,7 +1,7 @@
 import assert from "node:assert";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import type { Component } from "../src/tui.js";
-import { TUI } from "../src/tui.js";
+import { isRenderAssertEnabled, setRenderAssertEnabled, TUI } from "../src/tui.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
 class StaticOverlay implements Component {
@@ -37,6 +37,19 @@ async function renderAndFlush(tui: TUI, terminal: VirtualTerminal): Promise<void
 
 describe("TUI overlay options", () => {
 	describe("width overflow protection", () => {
+		// These tests intentionally feed lines wider than the declared width to
+		// exercise downstream truncation/recovery, so the per-component width assert
+		// (ON for the suite via _render-assert-setup.ts) is opted out here and
+		// restored afterward.
+		let prevAssert = false;
+		beforeEach(() => {
+			prevAssert = isRenderAssertEnabled();
+			setRenderAssertEnabled(false);
+		});
+		afterEach(() => {
+			setRenderAssertEnabled(prevAssert);
+		});
+
 		it("should truncate overlay lines that exceed declared width", async () => {
 			const terminal = new VirtualTerminal(80, 24);
 			const tui = new TUI(terminal);
