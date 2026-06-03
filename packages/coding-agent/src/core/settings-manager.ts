@@ -993,13 +993,19 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Resolve tool-feedback settings. Default ON for both features:
-	 * - errorReflection: injects a hidden reflection prompt after a tool error so
-	 *   the model articulates root cause before retrying. Cuts blind retries =
-	 *   direct token savings. Opt out with `toolFeedback.errorReflection.enabled: false`.
-	 * - doomLoopReminder: injects a reminder (and at higher tiers pauses/aborts)
-	 *   when consecutive identical tool calls reach the threshold. Bounded by
-	 *   `cooldownMs` so it never spams. Opt out with
+	 * Resolve tool-feedback settings.
+	 * - errorReflection: OFF by default. It injected a hidden reflection prompt
+	 *   after a tool error, but delivered it as a `followUp` — a separate turn
+	 *   that runs *after* the current one. Modern models already read the error
+	 *   tool-result inline and self-correct within the same turn, so the
+	 *   follow-up lands stale and burns a phantom turn ("this is a stale
+	 *   reflection for a call I already fixed") that leaks into the user-facing
+	 *   reply. The useful inline feedback is already delivered behind the scenes
+	 *   by the raw tool-result and the Tier-4 hint rules (tool-error-hint-rules).
+	 *   Opt in with `toolFeedback.errorReflection.enabled: true`.
+	 * - doomLoopReminder: ON by default. Injects a reminder (and at higher tiers
+	 *   pauses/aborts) when consecutive identical tool calls reach the threshold.
+	 *   Bounded by `cooldownMs` so it never spams. Opt out with
 	 *   `toolFeedback.doomLoopReminder.enabled: false`.
 	 */
 	getToolFeedbackSettings(): ResolvedToolFeedbackSettings {
@@ -1020,7 +1026,7 @@ export class SettingsManager {
 		const stagnationCooldownMs =
 			typeof rawStagCooldown === "number" && rawStagCooldown >= 0 ? Math.floor(rawStagCooldown) : 30000;
 		return {
-			errorReflection: { enabled: tf?.errorReflection?.enabled !== false },
+			errorReflection: { enabled: tf?.errorReflection?.enabled === true },
 			doomLoopReminder: {
 				enabled: tf?.doomLoopReminder?.enabled !== false,
 				threshold,

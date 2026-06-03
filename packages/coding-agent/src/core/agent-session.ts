@@ -1499,8 +1499,13 @@ export class AgentSession {
 
 	/**
 	 * Conditionally inject a structured reflection prompt after a failing tool
-	 * call. Settings-gated (off by default). Uses the args captured at
-	 * tool_execution_start so the prompt names the exact failing invocation.
+	 * call. Settings-gated, OFF by default: delivered as a `followUp`, it fires a
+	 * separate turn that runs after the model has already read the error inline
+	 * and self-corrected, so it lands stale and leaks a phantom "stale reflection"
+	 * reply to the user. Inline feedback (raw tool-result + Tier-4 hint rules)
+	 * already covers this behind the scenes. Opt in via
+	 * toolFeedback.errorReflection.enabled. Args captured at tool_execution_start
+	 * name the exact failing invocation.
 	 */
 	private _maybeInjectToolErrorReflection(toolName: string, args: unknown, result: unknown): void {
 		const cfg = this.settingsManager.getToolFeedbackSettings().errorReflection;

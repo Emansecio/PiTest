@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { SettingsManager } from "../src/core/settings-manager.js";
 
 describe("SettingsManager.getToolFeedbackSettings", () => {
-	it("returns enabled defaults when no toolFeedback key is set", () => {
+	it("returns sensible defaults when no toolFeedback key is set", () => {
 		const sm = SettingsManager.inMemory();
 		const cfg = sm.getToolFeedbackSettings();
-		// Default ON: errorReflection cuts blind retries, doomLoopReminder caps
-		// wasted tokens in identical-call loops. Opt out per-feature via settings.
-		expect(cfg.errorReflection.enabled).toBe(true);
+		// errorReflection defaults OFF: its followUp delivery fires a stale phantom
+		// turn (the model self-corrects inline before it lands) and the useful
+		// inline feedback is already covered by tool-results + Tier-4 hints.
+		// doomLoopReminder stays ON: caps wasted tokens in identical-call loops.
+		expect(cfg.errorReflection.enabled).toBe(false);
 		expect(cfg.doomLoopReminder.enabled).toBe(true);
 		// PiTuned tightened the default threshold to 2 (catches identical-call
 		// loops sooner). cooldownMs unchanged.
@@ -65,11 +67,11 @@ describe("SettingsManager.getToolFeedbackSettings", () => {
 		expect(sm.getToolFeedbackSettings().doomLoopReminder.threshold).toBe(5);
 	});
 
-	it("treats undefined enabled as default (enabled)", () => {
+	it("treats undefined errorReflection.enabled as the default (off, opt-in)", () => {
 		const sm = SettingsManager.inMemory({
 			toolFeedback: { errorReflection: { enabled: undefined as unknown as boolean } },
 		});
-		expect(sm.getToolFeedbackSettings().errorReflection.enabled).toBe(true);
+		expect(sm.getToolFeedbackSettings().errorReflection.enabled).toBe(false);
 	});
 
 	it("defaults stagnationReminder to ON with 12/25/30000", () => {
