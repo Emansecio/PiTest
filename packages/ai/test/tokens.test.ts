@@ -42,7 +42,7 @@ async function testTokensOnAbort<TApi extends Api>(llm: Model<TApi>, options: St
 
 	expect(msg.stopReason).toBe("aborted");
 
-	// OpenAI providers, OpenAI Codex, zai, and Amazon Bedrock only send usage in the final chunk,
+	// OpenAI providers, OpenAI Codex, and Amazon Bedrock only send usage in the final chunk,
 	// so when aborted they have no token stats. Anthropic and Google send usage information early in the stream.
 	// MiniMax and Kimi report input tokens but not output tokens differently on aborted requests.
 	if (
@@ -51,9 +51,7 @@ async function testTokensOnAbort<TApi extends Api>(llm: Model<TApi>, options: St
 		llm.api === "openai-responses" ||
 		llm.api === "azure-openai-responses" ||
 		llm.api === "openai-codex-responses" ||
-		llm.provider === "zai" ||
-		llm.provider === "amazon-bedrock" ||
-		llm.provider === "vercel-ai-gateway"
+		llm.provider === "amazon-bedrock"
 	) {
 		expect(msg.usage.input).toBe(0);
 		expect(msg.usage.output).toBe(0);
@@ -115,22 +113,6 @@ describe("Token Statistics on Abort", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.XAI_API_KEY)("xAI Provider", () => {
-		const llm = getModel("xai", "grok-3-fast");
-
-		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
-	});
-
-	describe.skipIf(!process.env.ZAI_API_KEY)("zAI Provider", () => {
-		const llm = getModel("zai", "glm-4.5-air");
-
-		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
-	});
-
 	describe.skipIf(!process.env.MINIMAX_API_KEY)("MiniMax Provider", () => {
 		const llm = getModel("minimax", "MiniMax-M2.7");
 
@@ -147,14 +129,6 @@ describe("Token Statistics on Abort", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.AI_GATEWAY_API_KEY)("Vercel AI Gateway Provider", () => {
-		const llm = getModel("vercel-ai-gateway", "google/gemini-2.5-flash");
-
-		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
-	});
-
 	describe.skipIf(!process.env.XIAOMI_API_KEY)("Xiaomi MiMo (API billing) Provider", () => {
 		const llm = getModel("xiaomi", "mimo-v2.5-pro");
 
@@ -163,36 +137,6 @@ describe("Token Statistics on Abort", () => {
 		// arrives at message_stop. Aborting mid-stream therefore loses input/output
 		// token counts. Non-streaming usage works (see total-tokens.test.ts).
 		// Re-enable once upstream sends usage in message_start.
-		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
-	});
-
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY)("Xiaomi MiMo Token Plan (CN) Provider", () => {
-		const llm = getModel("xiaomi-token-plan-cn", "mimo-v2.5-pro");
-
-		// FIXME(xiaomi): see the API-billing block above — same upstream streaming
-		// usage limitation applies to Token Plan endpoints.
-		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
-	});
-
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY)("Xiaomi MiMo Token Plan (AMS) Provider", () => {
-		const llm = getModel("xiaomi-token-plan-ams", "mimo-v2.5-pro");
-
-		// FIXME(xiaomi): see the API-billing block above — same upstream streaming
-		// usage limitation applies to Token Plan endpoints.
-		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
-	});
-
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY)("Xiaomi MiMo Token Plan (SGP) Provider", () => {
-		const llm = getModel("xiaomi-token-plan-sgp", "mimo-v2.5-pro");
-
-		// FIXME(xiaomi): see the API-billing block above — same upstream streaming
-		// usage limitation applies to Token Plan endpoints.
 		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
 			await testTokensOnAbort(llm);
 		});

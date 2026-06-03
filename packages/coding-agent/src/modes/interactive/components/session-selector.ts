@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { unlink } from "node:fs/promises";
-import * as os from "node:os";
 import {
 	type Component,
 	Container,
@@ -16,21 +15,13 @@ import {
 import { KeybindingsManager } from "../../../core/keybindings.ts";
 import type { SessionInfo, SessionListProgress } from "../../../core/session-manager.ts";
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
+import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
-
-function shortenPath(path: string): string {
-	const home = os.homedir();
-	if (!path) return path;
-	if (path.startsWith(home)) {
-		return `~${path.slice(home.length)}`;
-	}
-	return path;
-}
 
 function formatSessionDate(date: Date): string {
 	const now = new Date();
@@ -452,10 +443,10 @@ class SessionList implements Component, Focusable {
 			const msgCount = String(session.messageCount);
 			let rightPart = `${msgCount} ${age}`;
 			if (this.showCwd && session.cwd) {
-				rightPart = `${shortenPath(session.cwd)} ${rightPart}`;
+				rightPart = `${formatDisplayPath(session.cwd)} ${rightPart}`;
 			}
 			if (this.showPath) {
-				rightPart = `${shortenPath(session.path)} ${rightPart}`;
+				rightPart = `${formatDisplayPath(session.path)} ${rightPart}`;
 			}
 
 			// Cursor

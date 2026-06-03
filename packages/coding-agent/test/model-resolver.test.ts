@@ -322,26 +322,26 @@ describe("resolveCliModel", () => {
 	});
 
 	test("prefers provider/model split over gateway model with matching id", () => {
-		// When a user writes "zai/glm-5", and both a zai provider model (id: "glm-5")
-		// and a gateway model (id: "zai/glm-5") exist, prefer the zai provider model.
-		const zaiModel: Model<"anthropic-messages"> = {
-			id: "glm-5",
-			name: "GLM-5",
-			api: "anthropic-messages",
-			provider: "zai",
-			baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+		// When a user writes "minimax/m2", and both a minimax provider model (id: "m2")
+		// and another model whose literal id is "minimax/m2" exist, prefer the provider model.
+		const providerModel: Model<"openai-completions"> = {
+			id: "m2",
+			name: "M2",
+			api: "openai-completions",
+			provider: "minimax",
+			baseUrl: "https://api.minimax.io/v1",
 			reasoning: true,
 			input: ["text"],
 			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
 			contextWindow: 128000,
 			maxTokens: 8192,
 		};
-		const gatewayModel: Model<"anthropic-messages"> = {
-			id: "zai/glm-5",
-			name: "GLM-5",
-			api: "anthropic-messages",
-			provider: "vercel-ai-gateway",
-			baseUrl: "https://ai-gateway.vercel.sh",
+		const collidingModel: Model<"openai-completions"> = {
+			id: "minimax/m2",
+			name: "M2",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
 			reasoning: true,
 			input: ["text"],
 			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
@@ -349,17 +349,17 @@ describe("resolveCliModel", () => {
 			maxTokens: 8192,
 		};
 		const registry = {
-			getAll: () => [...allModels, zaiModel, gatewayModel],
+			getAll: () => [...allModels, providerModel, collidingModel],
 		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
-			cliModel: "zai/glm-5",
+			cliModel: "minimax/m2",
 			modelRegistry: registry,
 		});
 
 		expect(result.error).toBeUndefined();
-		expect(result.model?.provider).toBe("zai");
-		expect(result.model?.id).toBe("glm-5");
+		expect(result.model?.provider).toBe("minimax");
+		expect(result.model?.id).toBe("m2");
 	});
 
 	test("resolves provider-prefixed fuzzy patterns (openrouter/qwen -> openrouter model)", () => {
@@ -385,13 +385,8 @@ describe("default model selection", () => {
 		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.5");
 	});
 
-	test("zai and minimax defaults track current models", () => {
-		expect(defaultModelPerProvider.zai).toBe("glm-5.1");
+	test("minimax defaults track current models", () => {
 		expect(defaultModelPerProvider.minimax).toBe("MiniMax-M2.7");
-	});
-
-	test("ai-gateway default tracks current model", () => {
-		expect(defaultModelPerProvider["vercel-ai-gateway"]).toBe("zai/glm-5.1");
 	});
 
 	test("findInitialModel accepts explicit provider custom model ids", async () => {

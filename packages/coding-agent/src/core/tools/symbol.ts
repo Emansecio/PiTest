@@ -9,7 +9,7 @@ import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/inte
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { prepareWithPathAliases } from "./argument-prep.js";
 import { resolveReadPath } from "./path-utils.js";
-import { getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.js";
+import { getFilePathArg, getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const symbolSchema = Type.Object(
@@ -221,7 +221,7 @@ function findIndentBlockEnd(lines: string[], startLine: number): number {
 type SymbolRenderArgs = { path?: string; file_path?: string; name?: string };
 
 function formatSymbolCall(args: SymbolRenderArgs | undefined, theme: Theme, cwd?: string): string {
-	const rawPath = str(args?.file_path ?? args?.path);
+	const rawPath = getFilePathArg(args);
 	const path = rawPath !== null ? shortenPath(rawPath, cwd) : null;
 	const name = str(args?.name);
 	const invalidArg = invalidArgText(theme);
@@ -237,7 +237,7 @@ function formatSymbolResult(
 	theme: Theme,
 	showImages: boolean,
 ): string {
-	const rawPath = str(args?.file_path ?? args?.path);
+	const rawPath = getFilePathArg(args);
 	const output = getTextOutput(result, showImages);
 	const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
 	const renderedLines = lang ? highlightCode(replaceTabs(output), lang) : output.split("\n");

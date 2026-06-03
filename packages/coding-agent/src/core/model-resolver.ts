@@ -38,19 +38,12 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	openai: "gpt-5.4",
 	"openai-codex": "gpt-5.5",
 	google: "gemini-3.1-pro-preview",
-	"google-vertex": "gemini-3.1-pro-preview",
 	openrouter: "moonshotai/kimi-k2.6",
-	"vercel-ai-gateway": "zai/glm-5.1",
-	xai: "grok-4.20-0309-reasoning",
-	zai: "glm-5.1",
 	minimax: "MiniMax-M2.7",
 	opencode: "kimi-k2.6",
 	"opencode-go": "kimi-k2.6",
 	"kimi-coding": "kimi-for-coding",
 	xiaomi: "mimo-v2.5-pro",
-	"xiaomi-token-plan-cn": "mimo-v2.5-pro",
-	"xiaomi-token-plan-ams": "mimo-v2.5-pro",
-	"xiaomi-token-plan-sgp": "mimo-v2.5-pro",
 };
 
 export interface ScopedModel {
@@ -487,8 +480,8 @@ export function resolveCliModel(options: {
 	// If no explicit --provider, try to interpret "provider/model" format first.
 	// When the prefix before the first slash matches a known provider, prefer that
 	// interpretation over matching models whose IDs literally contain slashes
-	// (e.g. "zai/glm-5" should resolve to provider=zai, model=glm-5, not to a
-	// vercel-ai-gateway model with id "zai/glm-5").
+	// (e.g. "openai/gpt-5.4" should resolve to provider=openai, model=gpt-5.4, not
+	// to an openrouter model whose id literally contains a slash).
 	let pattern = cliModel;
 	let inferredProvider = false;
 

@@ -85,21 +85,36 @@ interface DocStats {
 	termFreq: Map<string, number>;
 }
 
+// Per-entry tokenization is the dominant cost of search() and only changes when
+// an entry is added/removed. Entries are immutable objects (created once, never
+// mutated; deleted entries leave the array and are GC'd from this WeakMap), so
+// caching DocStats keyed by the entry object stays correct across queries.
+const docStatsCache = new WeakMap<HindsightEntry, DocStats>();
+
+function docStatsFor(entry: HindsightEntry): DocStats {
+	const cached = docStatsCache.get(entry);
+	if (cached) return cached;
+	const tokens = tokenize(entryHaystack(entry));
+	const termFreq = new Map<string, number>();
+	for (const tok of tokens) {
+		termFreq.set(tok, (termFreq.get(tok) ?? 0) + 1);
+	}
+	const stats: DocStats = { id: entry.id, length: tokens.length, termFreq };
+	docStatsCache.set(entry, stats);
+	return stats;
+}
+
 function buildDocStats(entries: HindsightEntry[]): { docs: DocStats[]; avgLen: number; df: Map<string, number> } {
 	const docs: DocStats[] = [];
 	const df = new Map<string, number>();
 	let total = 0;
 	for (const entry of entries) {
-		const tokens = tokenize(entryHaystack(entry));
-		const tf = new Map<string, number>();
-		for (const tok of tokens) {
-			tf.set(tok, (tf.get(tok) ?? 0) + 1);
-		}
-		for (const tok of tf.keys()) {
+		const doc = docStatsFor(entry);
+		for (const tok of doc.termFreq.keys()) {
 			df.set(tok, (df.get(tok) ?? 0) + 1);
 		}
-		docs.push({ id: entry.id, length: tokens.length, termFreq: tf });
-		total += tokens.length;
+		docs.push(doc);
+		total += doc.length;
 	}
 	const avgLen = docs.length > 0 ? total / docs.length : 0;
 	return { docs, avgLen, df };

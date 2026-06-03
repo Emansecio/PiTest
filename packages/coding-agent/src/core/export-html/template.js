@@ -929,7 +929,7 @@
             break;
           }
           case 'read': {
-            const filePath = str(args.file_path ?? args.path);
+            const filePath = str(args.path ?? args.file_path);
             const offset = args.offset;
             const limit = args.limit;
 
@@ -950,7 +950,7 @@
             break;
           }
           case 'write': {
-            const filePath = str(args.file_path ?? args.path);
+            const filePath = str(args.path ?? args.file_path);
             const content = str(args.content);
 
             html += `<div class="tool-header"><span class="tool-name">write</span> <span class="tool-path">${filePath === null ? invalidArg : escapeHtml(shortenPath(filePath || ''))}</span>`;
@@ -973,7 +973,7 @@
             break;
           }
           case 'edit': {
-            const filePath = str(args.file_path ?? args.path);
+            const filePath = str(args.path ?? args.file_path);
             html += `<div class="tool-header"><span class="tool-name">edit</span> <span class="tool-path">${filePath === null ? invalidArg : escapeHtml(shortenPath(filePath || ''))}</span></div>`;
 
             if (result?.details?.diff) {

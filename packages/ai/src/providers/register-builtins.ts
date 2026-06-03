@@ -12,7 +12,6 @@ import type {
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import type { AnthropicOptions } from "./anthropic.ts";
 import type { GoogleOptions } from "./google.ts";
-import type { GoogleVertexOptions } from "./google-vertex.ts";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses.ts";
 import type { OpenAICompletionsOptions } from "./openai-completions.ts";
 import type { OpenAIResponsesOptions } from "./openai-responses.ts";
@@ -40,11 +39,6 @@ interface GoogleProviderModule {
 	streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleStreamOptions>;
 }
 
-interface GoogleVertexProviderModule {
-	streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOptions>;
-	streamSimpleGoogleVertex: StreamFunction<"google-vertex", SimpleStreamOptions>;
-}
-
 interface OpenAICodexResponsesProviderModule {
 	streamOpenAICodexResponses: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions>;
 	streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-responses", SimpleStreamOptions>;
@@ -65,9 +59,6 @@ let anthropicProviderModulePromise:
 	| undefined;
 let googleProviderModulePromise:
 	| Promise<LazyProviderModule<"google-generative-ai", GoogleOptions, SimpleStreamOptions>>
-	| undefined;
-let googleVertexProviderModulePromise:
-	| Promise<LazyProviderModule<"google-vertex", GoogleVertexOptions, SimpleStreamOptions>>
 	| undefined;
 let openAICodexResponsesProviderModulePromise:
 	| Promise<LazyProviderModule<"openai-codex-responses", OpenAICodexResponsesOptions, SimpleStreamOptions>>
@@ -179,19 +170,6 @@ function loadGoogleProviderModule(): Promise<
 	return googleProviderModulePromise;
 }
 
-function loadGoogleVertexProviderModule(): Promise<
-	LazyProviderModule<"google-vertex", GoogleVertexOptions, SimpleStreamOptions>
-> {
-	googleVertexProviderModulePromise ||= import("./google-vertex.ts").then((module) => {
-		const provider = module as GoogleVertexProviderModule;
-		return {
-			stream: provider.streamGoogleVertex,
-			streamSimple: provider.streamSimpleGoogleVertex,
-		};
-	});
-	return googleVertexProviderModulePromise;
-}
-
 function loadOpenAICodexResponsesProviderModule(): Promise<
 	LazyProviderModule<"openai-codex-responses", OpenAICodexResponsesOptions, SimpleStreamOptions>
 > {
@@ -235,8 +213,6 @@ export const streamAnthropic = createLazyStream(loadAnthropicProviderModule);
 export const streamSimpleAnthropic = createLazySimpleStream(loadAnthropicProviderModule);
 export const streamGoogle = createLazyStream(loadGoogleProviderModule);
 export const streamSimpleGoogle = createLazySimpleStream(loadGoogleProviderModule);
-export const streamGoogleVertex = createLazyStream(loadGoogleVertexProviderModule);
-export const streamSimpleGoogleVertex = createLazySimpleStream(loadGoogleVertexProviderModule);
 export const streamOpenAICodexResponses = createLazyStream(loadOpenAICodexResponsesProviderModule);
 export const streamSimpleOpenAICodexResponses = createLazySimpleStream(loadOpenAICodexResponsesProviderModule);
 export const streamOpenAICompletions = createLazyStream(loadOpenAICompletionsProviderModule);
@@ -273,12 +249,6 @@ export function registerBuiltInApiProviders(): void {
 		api: "google-generative-ai",
 		stream: streamGoogle,
 		streamSimple: streamSimpleGoogle,
-	});
-
-	registerApiProvider({
-		api: "google-vertex",
-		stream: streamGoogleVertex,
-		streamSimple: streamSimpleGoogleVertex,
 	});
 }
 

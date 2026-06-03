@@ -1,6 +1,7 @@
 import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
 
 /**
@@ -151,11 +152,7 @@ export class FooterComponent implements Component {
 		// --- Identity (line 1) -----------------------------------------------
 		// Left: cwd (branch) • session — `muted` (not dim) so it stays legible
 		// without competing with the model name.
-		let pwd = this.session.sessionManager.getCwd();
-		const home = process.env.HOME || process.env.USERPROFILE;
-		if (home && pwd.startsWith(home)) {
-			pwd = `~${pwd.slice(home.length)}`;
-		}
+		let pwd = formatDisplayPath(this.session.sessionManager.getCwd());
 		const branch = this.footerData.getGitBranch();
 		if (branch) pwd = `${pwd} (${branch})`;
 		const sessionName = this.session.sessionManager.getSessionName();

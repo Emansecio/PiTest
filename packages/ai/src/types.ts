@@ -43,8 +43,7 @@ export type KnownApi =
 	| "openai-responses"
 	| "openai-codex-responses"
 	| "anthropic-messages"
-	| "google-generative-ai"
-	| "google-vertex";
+	| "google-generative-ai";
 
 export type Api = KnownApi | (string & {});
 
@@ -55,21 +54,14 @@ export type ImagesApi = KnownImagesApi | (string & {});
 export type KnownProvider =
 	| "anthropic"
 	| "google"
-	| "google-vertex"
 	| "openai"
 	| "openai-codex"
-	| "xai"
 	| "openrouter"
-	| "vercel-ai-gateway"
-	| "zai"
 	| "minimax"
 	| "opencode"
 	| "opencode-go"
 	| "kimi-coding"
-	| "xiaomi"
-	| "xiaomi-token-plan-cn"
-	| "xiaomi-token-plan-ams"
-	| "xiaomi-token-plan-sgp";
+	| "xiaomi";
 export type Provider = KnownProvider | string;
 
 export type KnownImagesProvider = "openrouter";
@@ -398,14 +390,12 @@ export interface OpenAICompletionsCompat {
 	requiresThinkingAsText?: boolean;
 	/** Whether all replayed assistant messages must include an empty reasoning_content field when reasoning is enabled. Default: auto-detected from URL. */
 	requiresReasoningContentOnAssistantMessages?: boolean;
-	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "deepseek" uses thinking: { type } plus reasoning_effort, "together" uses reasoning: { enabled } plus reasoning_effort when supported, "zai" uses top-level enable_thinking: boolean, "qwen" uses top-level enable_thinking: boolean, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
-	thinkingFormat?: "openai" | "openrouter" | "deepseek" | "together" | "zai" | "qwen" | "qwen-chat-template";
+	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "deepseek" uses thinking: { type } plus reasoning_effort, "together" uses reasoning: { enabled } plus reasoning_effort when supported, "qwen" uses top-level enable_thinking: boolean, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
+	thinkingFormat?: "openai" | "openrouter" | "deepseek" | "together" | "qwen" | "qwen-chat-template";
 	/** OpenRouter-specific routing preferences. Only used when baseUrl points to OpenRouter. */
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
 	vercelGatewayRouting?: VercelGatewayRouting;
-	/** Whether z.ai supports top-level `tool_stream: true` for streaming tool call deltas. Default: false. */
-	zaiToolStream?: boolean;
 	/** Whether the provider supports the `strict` field in tool definitions. Default: true. */
 	supportsStrictMode?: boolean;
 	/** Cache control convention for prompt caching. "anthropic" applies Anthropic-style `cache_control` markers to the system prompt, last tool definition, and last user/assistant text content. */

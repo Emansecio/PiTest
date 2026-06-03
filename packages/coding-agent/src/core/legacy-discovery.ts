@@ -64,19 +64,14 @@ function safeReaddir(dir: string): string[] {
 	}
 }
 
-function isFile(filePath: string): boolean {
+// One stat per candidate instead of existsSync()+statSync() (two syscalls on the
+// same inode). Returns null when the path is missing or is neither file nor dir.
+function statKind(p: string): "file" | "dir" | null {
 	try {
-		return statSync(filePath).isFile();
+		const s = statSync(p);
+		return s.isFile() ? "file" : s.isDirectory() ? "dir" : null;
 	} catch {
-		return false;
-	}
-}
-
-function isDir(dirPath: string): boolean {
-	try {
-		return statSync(dirPath).isDirectory();
-	} catch {
-		return false;
+		return null;
 	}
 }
 
@@ -161,7 +156,7 @@ function collectFromRoot(
 		if (seenRulePaths.has(canon)) {
 			continue;
 		}
-		if (!existsSync(filePath) || !isFile(filePath)) {
+		if (statKind(filePath) !== "file") {
 			continue;
 		}
 		const content = safeReadFile(filePath);
@@ -175,7 +170,7 @@ function collectFromRoot(
 
 	for (const src of DIR_RULE_SOURCES) {
 		const dirPath = join(root, src.rel);
-		if (!existsSync(dirPath) || !isDir(dirPath)) {
+		if (statKind(dirPath) !== "dir") {
 			continue;
 		}
 		const entries = safeReaddir(dirPath);
@@ -195,7 +190,7 @@ function collectFromRoot(
 				}
 			}
 			const filePath = join(dirPath, name);
-			if (!isFile(filePath)) {
+			if (statKind(filePath) !== "file") {
 				continue;
 			}
 			const canon = canonical(filePath);
@@ -218,7 +213,7 @@ function collectFromRoot(
 		if (seenSkillDirs.has(canon)) {
 			continue;
 		}
-		if (!existsSync(dirPath) || !isDir(dirPath)) {
+		if (statKind(dirPath) !== "dir") {
 			continue;
 		}
 		seenSkillDirs.add(canon);

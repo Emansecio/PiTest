@@ -66,6 +66,31 @@ export function str(value: unknown): string | null {
 	return null;
 }
 
+type PathArgs = {
+	path?: unknown;
+	file_path?: unknown;
+	filepath?: unknown;
+	filename?: unknown;
+	file?: unknown;
+};
+
+/**
+ * Resolve the path argument for a tool-call DISPLAY using the same precedence
+ * the path-bearing tools apply at EXECUTION time: the canonical `path` wins over
+ * the aliases (`file_path`/`filepath`/`filename`/`file`) — see PATH_KEY_ALIASES
+ * in argument-prep.ts and the read-guard's extractPathArg, both path-first.
+ *
+ * Renderers run on the RAW tool_call args (before prepareArguments normalizes
+ * aliases), so each one must reproduce that precedence itself. Routing every
+ * renderer through this keeps the rendered file in sync with the file the tool
+ * actually operates on: a call carrying both `path` and `file_path` is never
+ * labeled with the one execution discards. Returns "" for missing args and null
+ * for a present-but-non-string value (rendered as "[invalid arg]"), matching str.
+ */
+export function getFilePathArg(args: PathArgs | undefined): string | null {
+	return str(args?.path ?? args?.file_path ?? args?.filepath ?? args?.filename ?? args?.file);
+}
+
 export function replaceTabs(text: string): string {
 	return text.replace(/\t/g, "   ");
 }

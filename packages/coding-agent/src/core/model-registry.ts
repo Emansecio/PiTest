@@ -107,7 +107,6 @@ const OpenAICompletionsCompatSchema = Type.Object({
 			Type.Literal("openrouter"),
 			Type.Literal("together"),
 			Type.Literal("deepseek"),
-			Type.Literal("zai"),
 			Type.Literal("qwen"),
 			Type.Literal("qwen-chat-template"),
 		]),

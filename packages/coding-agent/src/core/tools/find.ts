@@ -382,7 +382,7 @@ export function createFindToolDefinition(
 		},
 		renderResult(result, options, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatFindResult(result as any, options, theme, context.showImages));
+			text.setText(formatFindResult(result, options, theme, context.showImages));
 			return text;
 		},
 	};

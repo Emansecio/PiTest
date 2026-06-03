@@ -220,7 +220,7 @@ export function createAstGrepToolDefinition(
 		},
 		renderResult(result, opts, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatAstGrepResult(result as any, opts, theme, context.showImages));
+			text.setText(formatAstGrepResult(result, opts, theme, context.showImages));
 			return text;
 		},
 	};

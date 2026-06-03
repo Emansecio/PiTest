@@ -10,7 +10,7 @@ import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { applyKeyAliases, PATH_KEY_ALIASES } from "./argument-prep.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { resolveToCwd } from "./path-utils.js";
-import { invalidArgText, normalizeDisplayText, replaceTabs, shortenPath, str } from "./render-utils.js";
+import { getFilePathArg, invalidArgText, normalizeDisplayText, replaceTabs, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const writeSchema = Type.Object(
@@ -160,7 +160,7 @@ function formatWriteCall(
 	cache: WriteHighlightCache | undefined,
 	cwd?: string,
 ): string {
-	const rawPath = str(args?.file_path ?? args?.path);
+	const rawPath = getFilePathArg(args);
 	const fileContent = str(args?.content);
 	const path = rawPath !== null ? shortenPath(rawPath, cwd) : null;
 	const invalidArg = invalidArgText(theme);
@@ -297,7 +297,7 @@ export function createWriteToolDefinition(
 		},
 		renderCall(args, theme, context) {
 			const renderArgs = args as { path?: string; file_path?: string; content?: string } | undefined;
-			const rawPath = str(renderArgs?.file_path ?? renderArgs?.path);
+			const rawPath = getFilePathArg(renderArgs);
 			const fileContent = str(renderArgs?.content);
 			const component =
 				(context.lastComponent as WriteCallRenderComponent | undefined) ?? new WriteCallRenderComponent();

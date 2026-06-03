@@ -323,7 +323,7 @@ export function createAstEditToolDefinition(
 		},
 		renderResult(result, opts, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatAstEditResult(result as any, opts, theme, context.showImages));
+			text.setText(formatAstEditResult(result, opts, theme, context.showImages));
 			return text;
 		},
 	};

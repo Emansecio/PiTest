@@ -18,7 +18,7 @@ import { prepareWithPathAliases } from "./argument-prep.js";
 import { formatAnchorsForRead, interleaveAnchorsIntoLines } from "./edit-hashline-diff.ts";
 import { formatNotebookSource } from "./notebook-formatter.ts";
 import { resolveReadPath } from "./path-utils.js";
-import { getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.js";
+import { getFilePathArg, getTextOutput, invalidArgText, replaceTabs, shortenPath } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
@@ -128,7 +128,7 @@ function formatReadLineRange(args: ReadRenderArgs | undefined, theme: Theme): st
 }
 
 function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme, cwd?: string): string {
-	const rawPath = str(args?.file_path ?? args?.path);
+	const rawPath = getFilePathArg(args);
 	const path = rawPath !== null ? shortenPath(rawPath, cwd) : null;
 	const invalidArg = invalidArgText(theme);
 	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
@@ -205,7 +205,7 @@ function getCompactReadClassification(
 	args: ReadRenderArgs | undefined,
 	cwd: string,
 ): CompactReadClassification | undefined {
-	const rawPath = str(args?.file_path ?? args?.path);
+	const rawPath = getFilePathArg(args);
 	if (!rawPath) return undefined;
 
 	const absolutePath = resolveReadPath(rawPath, cwd);
@@ -266,7 +266,7 @@ function formatReadResult(
 		return "";
 	}
 
-	const rawPath = str(args?.file_path ?? args?.path);
+	const rawPath = getFilePathArg(args);
 	const output = getTextOutput(result, showImages);
 	const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
 	const renderedLines = lang ? highlightCode(replaceTabs(output), lang) : output.split("\n");

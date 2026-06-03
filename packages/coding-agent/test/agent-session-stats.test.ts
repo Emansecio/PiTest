@@ -118,6 +118,33 @@ describe("AgentSession.getSessionStats", () => {
 		}
 	});
 
+	it("memoizes context usage and invalidates it when messages change", () => {
+		const { session, sessionManager } = createSession();
+
+		try {
+			sessionManager.appendMessage(createUserMessage("hello", 1));
+			sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
+			syncAgentMessages(session, sessionManager);
+
+			const first = session.getContextUsage();
+			expect(first?.tokens).toBe(200);
+			// A second call without any mutation returns the same memoized result.
+			expect(session.getContextUsage()).toEqual(first);
+
+			// Appending a newer assistant turn must invalidate the cache (leaf id +
+			// message count change), not return the stale 200-token value.
+			sessionManager.appendMessage(createUserMessage("again", 3));
+			sessionManager.appendMessage(createAssistantMessage("hi2", 350, 4));
+			syncAgentMessages(session, sessionManager);
+
+			const second = session.getContextUsage();
+			expect(second?.tokens).toBe(350);
+			expect(second?.percent).toBe((350 / model.contextWindow) * 100);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("uses post-compaction usage for current context instead of stale kept usage", () => {
 		const { session, sessionManager } = createSession();
 

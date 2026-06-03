@@ -159,7 +159,7 @@ export function createForgetToolDefinition(
 		},
 		renderResult(result, _options, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const output = getTextOutput(result as any, context.showImages).trim();
+			const output = getTextOutput(result, context.showImages).trim();
 			text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
 			return text;
 		},

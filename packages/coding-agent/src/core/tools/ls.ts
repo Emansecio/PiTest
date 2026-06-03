@@ -236,7 +236,7 @@ export function createLsToolDefinition(
 		},
 		renderResult(result, options, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatLsResult(result as any, options, theme, context.showImages));
+			text.setText(formatLsResult(result, options, theme, context.showImages));
 			return text;
 		},
 	};

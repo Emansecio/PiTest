@@ -191,55 +191,6 @@ describe("Context overflow error handling", () => {
 	});
 
 	// =============================================================================
-	// xAI
-	// Expected pattern: "maximum prompt length is X but the request contains Y"
-	// =============================================================================
-
-	describe.skipIf(!process.env.XAI_API_KEY)("xAI", () => {
-		it("grok-3-fast - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("xai", "grok-3-fast");
-			const result = await testContextOverflow(model, process.env.XAI_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toMatch(/maximum prompt length is \d+/i);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
-
-	// =============================================================================
-	// z.ai
-	// Special case: may return explicit overflow error text, may accept overflow silently,
-	// or may rate limit instead
-	// =============================================================================
-
-	describe.skipIf(!process.env.ZAI_API_KEY)("z.ai", () => {
-		it("glm-4.5-air - should detect overflow via isContextOverflow when z.ai reports it", async () => {
-			const model = getModel("zai", "glm-4.5-air");
-			const result = await testContextOverflow(model, process.env.ZAI_API_KEY!);
-			logResult(result);
-
-			// z.ai behavior is inconsistent:
-			// - Sometimes returns explicit overflow error text via non-standard finish_reason handling
-			// - Sometimes accepts overflow and returns successfully with usage.input > contextWindow
-			// - Sometimes returns rate limit error
-			if (result.stopReason === "error") {
-				if (result.errorMessage?.match(/model_context_window_exceeded/i)) {
-					expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-				} else {
-					console.log("  z.ai returned non-overflow error (possibly rate limited), skipping overflow detection");
-				}
-			} else if (result.stopReason === "stop") {
-				if (result.hasUsageData && result.usage.input > model.contextWindow) {
-					expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-				} else {
-					console.log("  z.ai returned stop without overflow usage data, skipping overflow detection");
-				}
-			}
-		}, 120000);
-	});
-
-	// =============================================================================
 	// MiniMax
 	// Expected pattern: TBD - need to test actual error message
 	// =============================================================================
@@ -274,42 +225,6 @@ describe("Context overflow error handling", () => {
 		}, 120000);
 	});
 
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY)("Xiaomi MiMo Token Plan (CN)", () => {
-		it("mimo-v2.5-pro - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("xiaomi-token-plan-cn", "mimo-v2.5-pro");
-			const result = await testContextOverflow(model, process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("length");
-			expect(result.usage.output).toBe(0);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
-
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY)("Xiaomi MiMo Token Plan (AMS)", () => {
-		it("mimo-v2.5-pro - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("xiaomi-token-plan-ams", "mimo-v2.5-pro");
-			const result = await testContextOverflow(model, process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("length");
-			expect(result.usage.output).toBe(0);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
-
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY)("Xiaomi MiMo Token Plan (SGP)", () => {
-		it("mimo-v2.5-pro - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("xiaomi-token-plan-sgp", "mimo-v2.5-pro");
-			const result = await testContextOverflow(model, process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("length");
-			expect(result.usage.output).toBe(0);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
-
 	// =============================================================================
 	// Kimi For Coding
 	// =============================================================================
@@ -318,21 +233,6 @@ describe("Context overflow error handling", () => {
 		it("kimi-k2-thinking - should detect overflow via isContextOverflow", async () => {
 			const model = getModel("kimi-coding", "kimi-k2-thinking");
 			const result = await testContextOverflow(model, process.env.KIMI_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
-
-	// =============================================================================
-	// Vercel AI Gateway - Unified API for multiple providers
-	// =============================================================================
-
-	describe.skipIf(!process.env.AI_GATEWAY_API_KEY)("Vercel AI Gateway", () => {
-		it("google/gemini-2.5-flash via AI Gateway - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("vercel-ai-gateway", "google/gemini-2.5-flash");
-			const result = await testContextOverflow(model, process.env.AI_GATEWAY_API_KEY!);
 			logResult(result);
 
 			expect(result.stopReason).toBe("error");

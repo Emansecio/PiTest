@@ -158,7 +158,7 @@ export function createTodoToolDefinition(
 		},
 		renderResult(result, _options, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const output = getTextOutput(result as any, context.showImages).trim();
+			const output = getTextOutput(result, context.showImages).trim();
 			// No leading newline: the call and result are separate children of the
 			// shell container, which stacks them directly — a `\n` here would insert a
 			// blank line between "todo <action>" and its result.

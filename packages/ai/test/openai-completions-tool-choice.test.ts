@@ -156,159 +156,6 @@ describe("openai-completions tool_choice", () => {
 		expect("strict" in (tool ?? {})).toBe(false);
 	});
 
-	it("enables tool_stream for supported z.ai models with tools", async () => {
-		const model = getModel("zai", "glm-5.1")!;
-		const tools: Tool[] = [
-			{
-				name: "ping",
-				description: "Ping tool",
-				parameters: Type.Object({
-					ok: Type.Boolean(),
-				}),
-			},
-		];
-		let payload: unknown;
-
-		await streamSimple(
-			model,
-			{
-				messages: [
-					{
-						role: "user",
-						content: "Call ping with ok=true",
-						timestamp: Date.now(),
-					},
-				],
-				tools,
-			},
-			{
-				apiKey: "test",
-				onPayload: (params: unknown) => {
-					payload = params;
-				},
-			},
-		).result();
-
-		const params = (payload ?? mockState.lastParams) as { tool_stream?: boolean };
-		expect(params.tool_stream).toBe(true);
-	});
-
-	it("stores z.ai tool_stream support in model compat metadata", () => {
-		expect(getModel("zai", "glm-5.1")?.compat?.zaiToolStream).toBe(true);
-		expect(getModel("zai", "glm-4.7")?.compat?.zaiToolStream).toBe(true);
-		expect(getModel("zai", "glm-4.7")?.compat?.zaiToolStream).toBe(true);
-		expect(getModel("zai", "glm-5-turbo")?.compat?.zaiToolStream).toBe(true);
-		expect(getModel("zai", "glm-4.5-air")?.compat?.zaiToolStream).toBeUndefined();
-	});
-
-	it("omits tool_stream for unsupported z.ai models", async () => {
-		const model = getModel("zai", "glm-4.5-air")!;
-		const tools: Tool[] = [
-			{
-				name: "ping",
-				description: "Ping tool",
-				parameters: Type.Object({
-					ok: Type.Boolean(),
-				}),
-			},
-		];
-		let payload: unknown;
-
-		await streamSimple(
-			model,
-			{
-				messages: [
-					{
-						role: "user",
-						content: "Call ping with ok=true",
-						timestamp: Date.now(),
-					},
-				],
-				tools,
-			},
-			{
-				apiKey: "test",
-				onPayload: (params: unknown) => {
-					payload = params;
-				},
-			},
-		).result();
-
-		const params = (payload ?? mockState.lastParams) as { tool_stream?: boolean };
-		expect(params.tool_stream).toBeUndefined();
-	});
-
-	it("respects explicit z.ai tool_stream compat override", async () => {
-		const baseModel = getModel("zai", "glm-4.5-air")!;
-		const model = {
-			...baseModel,
-			compat: {
-				...baseModel.compat,
-				zaiToolStream: true,
-			},
-		} as const;
-		const tools: Tool[] = [
-			{
-				name: "ping",
-				description: "Ping tool",
-				parameters: Type.Object({
-					ok: Type.Boolean(),
-				}),
-			},
-		];
-		let payload: unknown;
-
-		await streamSimple(
-			model,
-			{
-				messages: [
-					{
-						role: "user",
-						content: "Call ping with ok=true",
-						timestamp: Date.now(),
-					},
-				],
-				tools,
-			},
-			{
-				apiKey: "test",
-				onPayload: (params: unknown) => {
-					payload = params;
-				},
-			},
-		).result();
-
-		const params = (payload ?? mockState.lastParams) as { tool_stream?: boolean };
-		expect(params.tool_stream).toBe(true);
-	});
-
-	it("omits tool_stream when no tools are provided", async () => {
-		const model = getModel("zai", "glm-5.1")!;
-		let payload: unknown;
-
-		await streamSimple(
-			model,
-			{
-				messages: [
-					{
-						role: "user",
-						content: "Hi",
-						timestamp: Date.now(),
-					},
-				],
-			},
-			{
-				apiKey: "test",
-				onPayload: (params: unknown) => {
-					payload = params;
-				},
-			},
-		).result();
-
-		const params = (payload ?? mockState.lastParams) as { tool_stream?: boolean };
-		expect(params.tool_stream).toBeUndefined();
-	});
-
 	it("maps non-standard provider finish_reason values to stopReason error", async () => {
 		mockState.chunks = [
 			{
@@ -325,7 +172,8 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const model = getModel("zai", "glm-5.1")!;
+		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
 		const response = await streamSimple(
 			model,
 			{
@@ -762,7 +610,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("stores Xiaomi MiMo reasoning replay compat in built-in metadata", () => {
-		const providers = ["xiaomi", "xiaomi-token-plan-cn", "xiaomi-token-plan-ams", "xiaomi-token-plan-sgp"] as const;
+		const providers = ["xiaomi"] as const;
 
 		for (const provider of providers) {
 			const model = getModel(provider, "mimo-v2.5-pro")!;
@@ -928,7 +776,6 @@ describe("openai-completions tool_choice", () => {
 				thinkingFormat: "openai",
 				openRouterRouting: {},
 				vercelGatewayRouting: {},
-				zaiToolStream: false,
 				supportsStrictMode: true,
 				sendSessionAffinityHeaders: false,
 				supportsLongCacheRetention: true,

@@ -381,7 +381,7 @@ For providers with partial OpenAI compatibility, use the `compat` field.
 | `requiresAssistantAfterToolResult` | Insert an assistant message before a user message after tool results |
 | `requiresThinkingAsText` | Convert thinking blocks to plain text |
 | `requiresReasoningContentOnAssistantMessages` | Include empty `reasoning_content` on all replayed assistant messages when reasoning is enabled |
-| `thinkingFormat` | Use `reasoning_effort`, `openrouter`, `deepseek`, `together`, `zai`, `qwen`, or `qwen-chat-template` thinking parameters |
+| `thinkingFormat` | Use `reasoning_effort`, `openrouter`, `deepseek`, `together`, `qwen`, or `qwen-chat-template` thinking parameters |
 | `cacheControlFormat` | Use Anthropic-style `cache_control` markers on the system prompt, last tool definition, and last user/assistant text content. Currently only `anthropic` is supported. |
 | `supportsStrictMode` | Include the `strict` field in tool definitions |
 | `supportsLongCacheRetention` | Whether the provider accepts long cache retention when cache retention is `long`: `prompt_cache_retention: "24h"` for OpenAI prompt caching, or `cache_control.ttl: "1h"` when `cacheControlFormat` is `anthropic`. Default: `true`. |
@@ -412,7 +412,7 @@ Example:
               "data_collection": "deny",
               "zdr": true,
               "enforce_distillable_text": false,
-              "order": ["anthropic", "amazon-bedrock", "google-vertex"],
+              "order": ["anthropic", "amazon-bedrock"],
               "only": ["anthropic", "amazon-bedrock"],
               "ignore": ["gmicloud", "friendli"],
               "quantizations": ["fp16", "bf16"],
@@ -433,37 +433,6 @@ Example:
                 "p90": 3,
                 "p99": 5
               }
-            }
-          }
-        }
-      ]
-    }
-  }
-}
-```
-
-Vercel AI Gateway example:
-
-```json
-{
-  "providers": {
-    "vercel-ai-gateway": {
-      "baseUrl": "https://ai-gateway.vercel.sh/v1",
-      "apiKey": "AI_GATEWAY_API_KEY",
-      "api": "openai-completions",
-      "models": [
-        {
-          "id": "moonshotai/kimi-k2.5",
-          "name": "Kimi K2.5 (Fireworks via Vercel)",
-          "reasoning": true,
-          "input": ["text", "image"],
-          "cost": { "input": 0.6, "output": 3, "cacheRead": 0, "cacheWrite": 0 },
-          "contextWindow": 262144,
-          "maxTokens": 262144,
-          "compat": {
-            "vercelGatewayRouting": {
-              "only": ["fireworks", "novita"],
-              "order": ["fireworks", "novita"]
             }
           }
         }

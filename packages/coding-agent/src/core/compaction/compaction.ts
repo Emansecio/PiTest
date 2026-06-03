@@ -476,20 +476,18 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 				}
 				break;
 			}
+			// branch_summary and custom_message are user-role messages, valid cut points
+			case "branch_summary":
+			case "custom_message":
+				cutPoints.push(i);
+				break;
 			case "thinking_level_change":
 			case "model_change":
 			case "compaction":
-			case "branch_summary":
 			case "custom":
-			case "custom_message":
 			case "label":
 			case "session_info":
 				break;
-		}
-
-		// branch_summary and custom_message are user-role messages, valid cut points
-		if (entry.type === "branch_summary" || entry.type === "custom_message") {
-			cutPoints.push(i);
 		}
 	}
 	return cutPoints;
@@ -843,6 +841,41 @@ export async function generateSummary(
 	}
 	promptText += basePrompt;
 
+	return runSummarization(
+		model,
+		promptText,
+		maxTokens,
+		apiKey,
+		headers,
+		signal,
+		thinkingLevel,
+		streamFn,
+		"Summarization failed",
+	);
+}
+
+function extractTextFromResponse(response: AssistantMessage): string {
+	return response.content
+		.filter((c): c is { type: "text"; text: string } => c.type === "text")
+		.map((c) => c.text)
+		.join("\n");
+}
+
+/**
+ * Run an LLM summarization pass: wrap the prompt in a single user message,
+ * complete it, surface errors with the given label, and return the text.
+ */
+async function runSummarization(
+	model: Model<any>,
+	promptText: string,
+	maxTokens: number,
+	apiKey: string | undefined,
+	headers: Record<string, string> | undefined,
+	signal: AbortSignal | undefined,
+	thinkingLevel: ThinkingLevel | undefined,
+	streamFn: StreamFn | undefined,
+	errorLabel: string,
+): Promise<string> {
 	const summarizationMessages = [
 		{
 			role: "user" as const,
@@ -851,27 +884,18 @@ export async function generateSummary(
 		},
 	];
 
-	const completionOptions = createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel);
-
 	const response = await completeSummarization(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		completionOptions,
+		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
 		streamFn,
 	);
 
 	if (response.stopReason === "error") {
-		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
+		throw new Error(`${errorLabel}: ${response.errorMessage || "Unknown error"}`);
 	}
 
 	return extractTextFromResponse(response);
-}
-
-function extractTextFromResponse(response: AssistantMessage): string {
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
 }
 
 // ============================================================================
@@ -1222,27 +1246,16 @@ async function generateTurnPrefixSummary(
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
-	const summarizationMessages = [
-		{
-			role: "user" as const,
-			content: [{ type: "text" as const, text: promptText }],
-			timestamp: Date.now(),
-		},
-	];
 
-	const response = await completeSummarization(
+	return runSummarization(
 		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		createSummarizationOptions(model, maxTokens, apiKey, headers, signal, thinkingLevel),
+		promptText,
+		maxTokens,
+		apiKey,
+		headers,
+		signal,
+		thinkingLevel,
 		streamFn,
+		"Turn prefix summarization failed",
 	);
-
-	if (response.stopReason === "error") {
-		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
-	}
-
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
 }

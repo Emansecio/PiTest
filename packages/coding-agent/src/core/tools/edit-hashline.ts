@@ -23,7 +23,7 @@ import {
 } from "./edit-hashline-diff.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
-import { invalidArgText, shortenPath, str } from "./render-utils.ts";
+import { getFilePathArg, invalidArgText, shortenPath } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const HEX8 = /^[0-9a-f]{8}$/;
@@ -174,7 +174,7 @@ function formatCall(
 	cwd?: string,
 ): string {
 	const invalidArg = invalidArgText(theme);
-	const rawPath = str(args?.file_path ?? args?.path);
+	const rawPath = getFilePathArg(args);
 	const path = rawPath !== null ? shortenPath(rawPath, cwd) : null;
 	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
 	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;

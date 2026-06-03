@@ -334,7 +334,7 @@ function rebuildBashResultRenderComponent(
 ): void {
 	component.clear();
 
-	const rawOutput = getTextOutput(result as any, showImages).trim();
+	const rawOutput = getTextOutput(result, showImages).trim();
 	// Peel the trailing `Command (exited|aborted|timed out…)` line off so it
 	// becomes a chip on the muted footer instead of a standalone paragraph.
 	const failure = isError ? extractFailureSuffix(rawOutput) : undefined;
@@ -609,7 +609,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 				(context.lastComponent as BashResultRenderComponent | undefined) ?? new BashResultRenderComponent();
 			rebuildBashResultRenderComponent(
 				component,
-				result as any,
+				result,
 				options,
 				context.showImages,
 				state.startedAt,

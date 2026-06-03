@@ -545,9 +545,6 @@ function buildParams(
 
 	if (context.tools && context.tools.length > 0) {
 		params.tools = convertTools(context.tools, compat);
-		if (compat.zaiToolStream) {
-			(params as any).tool_stream = true;
-		}
 	} else if (hasToolHistory(context.messages)) {
 		// Anthropic (via LiteLLM/proxy) requires tools param when conversation has tool_calls/tool_results
 		params.tools = [];
@@ -562,9 +559,7 @@ function buildParams(
 	}
 
 	if (model.reasoning) {
-		if (compat.thinkingFormat === "zai") {
-			(params as any).enable_thinking = !!options?.reasoningEffort;
-		} else if (compat.thinkingFormat === "qwen") {
+		if (compat.thinkingFormat === "qwen") {
 			(params as any).enable_thinking = !!options?.reasoningEffort;
 		} else if (compat.thinkingFormat === "qwen-chat-template") {
 			(params as any).chat_template_kwargs = {
@@ -1070,7 +1065,6 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const provider = model.provider;
 	const baseUrl = model.baseUrl;
 
-	const isZai = provider === "zai" || baseUrl.includes("api.z.ai");
 	const isTogether =
 		provider === "together" || baseUrl.includes("api.together.ai") || baseUrl.includes("api.together.xyz");
 	const isMoonshot = provider === "moonshotai" || provider === "moonshotai-cn" || baseUrl.includes("api.moonshot.");
@@ -1080,12 +1074,9 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const isNonStandard =
 		provider === "cerebras" ||
 		baseUrl.includes("cerebras.ai") ||
-		provider === "xai" ||
-		baseUrl.includes("api.x.ai") ||
 		isTogether ||
 		baseUrl.includes("chutes.ai") ||
 		baseUrl.includes("deepseek.com") ||
-		isZai ||
 		isMoonshot ||
 		provider === "opencode" ||
 		baseUrl.includes("opencode.ai") ||
@@ -1094,14 +1085,13 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 
 	const useMaxTokens = baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isTogether;
 
-	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
 	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
 	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
 
 	return {
 		supportsStore: !isNonStandard,
 		supportsDeveloperRole: !isNonStandard,
-		supportsReasoningEffort: !isGrok && !isZai && !isMoonshot && !isTogether && !isCloudflareAiGateway,
+		supportsReasoningEffort: !isMoonshot && !isTogether && !isCloudflareAiGateway,
 		supportsUsageInStreaming: true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: false,
@@ -1110,16 +1100,13 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		requiresReasoningContentOnAssistantMessages: isDeepSeek,
 		thinkingFormat: isDeepSeek
 			? "deepseek"
-			: isZai
-				? "zai"
-				: isTogether
-					? "together"
-					: provider === "openrouter" || baseUrl.includes("openrouter.ai")
-						? "openrouter"
-						: "openai",
+			: isTogether
+				? "together"
+				: provider === "openrouter" || baseUrl.includes("openrouter.ai")
+					? "openrouter"
+					: "openai",
 		openRouterRouting: {},
 		vercelGatewayRouting: {},
-		zaiToolStream: false,
 		supportsStrictMode: !isMoonshot && !isTogether && !isCloudflareAiGateway,
 		cacheControlFormat,
 		sendSessionAffinityHeaders: false,
@@ -1151,7 +1138,6 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 		thinkingFormat: model.compat.thinkingFormat ?? detected.thinkingFormat,
 		openRouterRouting: model.compat.openRouterRouting ?? {},
 		vercelGatewayRouting: model.compat.vercelGatewayRouting ?? detected.vercelGatewayRouting,
-		zaiToolStream: model.compat.zaiToolStream ?? detected.zaiToolStream,
 		supportsStrictMode: model.compat.supportsStrictMode ?? detected.supportsStrictMode,
 		cacheControlFormat: model.compat.cacheControlFormat ?? detected.cacheControlFormat,
 		sendSessionAffinityHeaders: model.compat.sendSessionAffinityHeaders ?? detected.sendSessionAffinityHeaders,
