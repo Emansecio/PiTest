@@ -77,9 +77,17 @@ export interface DoomLoopReminderSettings {
 	cooldownMs?: number; // default: 30000 — minimum gap between reminders to prevent spam
 }
 
+export interface StagnationReminderSettings {
+	enabled?: boolean; // default: true (opt out with enabled: false)
+	softThreshold?: number; // default: 12 non-productive turns trigger a reminder
+	hardThreshold?: number; // default: 25 non-productive turns pause for user guidance
+	cooldownMs?: number; // default: 30000 — minimum gap between soft reminders
+}
+
 export interface ToolFeedbackSettings {
 	errorReflection?: ErrorReflectionSettings;
 	doomLoopReminder?: DoomLoopReminderSettings;
+	stagnationReminder?: StagnationReminderSettings;
 }
 
 export interface FrequentFilesSettings {
@@ -207,6 +215,7 @@ export interface ResolvedChromeDevtoolsSettings {
 export interface ResolvedToolFeedbackSettings {
 	errorReflection: { enabled: boolean };
 	doomLoopReminder: { enabled: boolean; threshold: number; cooldownMs: number };
+	stagnationReminder: { enabled: boolean; softThreshold: number; hardThreshold: number; cooldownMs: number };
 }
 
 export interface WarningSettings {
@@ -999,12 +1008,29 @@ export class SettingsManager {
 		const threshold = typeof rawThreshold === "number" && rawThreshold > 0 ? Math.floor(rawThreshold) : 2;
 		const rawCooldown = tf?.doomLoopReminder?.cooldownMs;
 		const cooldownMs = typeof rawCooldown === "number" && rawCooldown >= 0 ? Math.floor(rawCooldown) : 30000;
+		const sr = tf?.stagnationReminder;
+		const rawSoft = sr?.softThreshold;
+		const softThreshold = typeof rawSoft === "number" && rawSoft > 0 ? Math.floor(rawSoft) : 12;
+		const rawHard = sr?.hardThreshold;
+		const hardCandidate = typeof rawHard === "number" && rawHard > 0 ? Math.floor(rawHard) : 25;
+		// Hard ceiling must sit at or above the soft floor; otherwise the pause
+		// would pre-empt the reminder and the soft tier could never fire.
+		const hardThreshold = Math.max(hardCandidate, softThreshold);
+		const rawStagCooldown = sr?.cooldownMs;
+		const stagnationCooldownMs =
+			typeof rawStagCooldown === "number" && rawStagCooldown >= 0 ? Math.floor(rawStagCooldown) : 30000;
 		return {
 			errorReflection: { enabled: tf?.errorReflection?.enabled !== false },
 			doomLoopReminder: {
 				enabled: tf?.doomLoopReminder?.enabled !== false,
 				threshold,
 				cooldownMs,
+			},
+			stagnationReminder: {
+				enabled: sr?.enabled !== false,
+				softThreshold,
+				hardThreshold,
+				cooldownMs: stagnationCooldownMs,
 			},
 		};
 	}

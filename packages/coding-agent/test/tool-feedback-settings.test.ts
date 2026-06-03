@@ -71,4 +71,46 @@ describe("SettingsManager.getToolFeedbackSettings", () => {
 		});
 		expect(sm.getToolFeedbackSettings().errorReflection.enabled).toBe(true);
 	});
+
+	it("defaults stagnationReminder to ON with 12/25/30000", () => {
+		const cfg = SettingsManager.inMemory().getToolFeedbackSettings();
+		expect(cfg.stagnationReminder.enabled).toBe(true);
+		expect(cfg.stagnationReminder.softThreshold).toBe(12);
+		expect(cfg.stagnationReminder.hardThreshold).toBe(25);
+		expect(cfg.stagnationReminder.cooldownMs).toBe(30000);
+	});
+
+	it("honors explicit opt-out for stagnationReminder", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: { stagnationReminder: { enabled: false } },
+		});
+		expect(sm.getToolFeedbackSettings().stagnationReminder.enabled).toBe(false);
+	});
+
+	it("respects custom stagnationReminder thresholds", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: { stagnationReminder: { enabled: true, softThreshold: 6, hardThreshold: 15, cooldownMs: 5000 } },
+		});
+		const cfg = sm.getToolFeedbackSettings();
+		expect(cfg.stagnationReminder).toEqual({ enabled: true, softThreshold: 6, hardThreshold: 15, cooldownMs: 5000 });
+	});
+
+	it("clamps a hard threshold below the soft threshold up to the soft floor", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: { stagnationReminder: { enabled: true, softThreshold: 12, hardThreshold: 3 } },
+		});
+		const cfg = sm.getToolFeedbackSettings();
+		expect(cfg.stagnationReminder.softThreshold).toBe(12);
+		expect(cfg.stagnationReminder.hardThreshold).toBe(12);
+	});
+
+	it("clamps invalid stagnation thresholds to defaults", () => {
+		const sm = SettingsManager.inMemory({
+			toolFeedback: { stagnationReminder: { enabled: true, softThreshold: 0, hardThreshold: -5, cooldownMs: -1 } },
+		});
+		const cfg = sm.getToolFeedbackSettings();
+		expect(cfg.stagnationReminder.softThreshold).toBe(12);
+		expect(cfg.stagnationReminder.hardThreshold).toBe(25);
+		expect(cfg.stagnationReminder.cooldownMs).toBe(30000);
+	});
 });

@@ -16,7 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@pit/ai";
+import type { AssistantMessage, ImageContent, Message, Model, TextContent, ToolResultMessage } from "@pit/ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -136,6 +136,7 @@ import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader }
 import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
+import { buildStagnationReminder, classifyTurn, decideStagnationReminder, StagnationTracker } from "./stagnation.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { setCurrentTodoManager, type TodoItem, TodoManager, type TodoState } from "./todo/todo-manager.ts";
 import { buildDoomLoopReminder, buildToolErrorReflection, decideErrorReflection } from "./tool-call-feedback.js";
@@ -484,6 +485,8 @@ export class AgentSession {
 	// Throttle for doom-loop reminders; in epoch ms. Resets to 0 on every agent_end
 	// so a long-lived session can still surface reminders later.
 	private _lastDoomLoopReminderAt = 0;
+	private readonly _stagnation = new StagnationTracker();
+	private _lastStagnationReminderAt = 0;
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
@@ -1078,6 +1081,7 @@ export class AgentSession {
 					} satisfies TurnEndEvent);
 				}
 				this._recordGoalTurn(event.message);
+				this._maybeInjectStagnationReminder(event.message, event.toolResults);
 				if (this._todo.takeDirty()) this._persistTodo();
 				this._turnIndex++;
 				break;
@@ -1447,6 +1451,49 @@ export class AgentSession {
 			{ deliverAs: "followUp" },
 		).catch((err: unknown) => {
 			process.stderr.write(`[pi] doom-loop reminder delivery failed: ${err}\n`);
+		});
+	}
+
+	/**
+	 * Conditionally nudge (soft) — then pause (hard) — when the agent runs many
+	 * consecutive turns that call tools but never edit a file. Settings-gated
+	 * (on by default; opt out via toolFeedback.stagnationReminder.enabled: false)
+	 * and cooldown-throttled for the soft tier; the hard tier
+	 * always escalates and resets the streak. Complements the identical-call
+	 * doom-loop detector, which this does not duplicate.
+	 */
+	private _maybeInjectStagnationReminder(message: AgentMessage, toolResults: ToolResultMessage[]): void {
+		const cfg = this.settingsManager.getToolFeedbackSettings().stagnationReminder;
+		if (!cfg.enabled) return;
+		const count = this._stagnation.observe(classifyTurn(message, toolResults));
+		const decision = decideStagnationReminder({
+			enabled: cfg.enabled,
+			softThreshold: cfg.softThreshold,
+			hardThreshold: cfg.hardThreshold,
+			count,
+			lastFiredAt: this._lastStagnationReminderAt,
+			now: Date.now(),
+			cooldownMs: cfg.cooldownMs,
+		});
+		if (decision.action === "none") return;
+		this._lastStagnationReminderAt = decision.nextLastFiredAt;
+		if (decision.action === "pause") {
+			this._stagnation.reset();
+			const content = buildStagnationReminder({ count, paused: true });
+			this.sendCustomMessage(
+				{ customType: "pi.stagnation-pause", content, display: true },
+				{ deliverAs: "followUp" },
+			).catch((err: unknown) => {
+				process.stderr.write(`[pi] stagnation pause delivery failed: ${err}\n`);
+			});
+			return;
+		}
+		const content = buildStagnationReminder({ count, paused: false });
+		this.sendCustomMessage(
+			{ customType: "pi.stagnation-reminder", content, display: false },
+			{ deliverAs: "followUp" },
+		).catch((err: unknown) => {
+			process.stderr.write(`[pi] stagnation reminder delivery failed: ${err}\n`);
 		});
 	}
 
@@ -4342,6 +4389,8 @@ export class AgentSession {
 		return computeCacheStats(this.state.messages);
 	}
 
+	private _ctxUsageCache?: { key: string; value: ContextUsage | undefined };
+
 	getContextUsage(): ContextUsage | undefined {
 		const model = this.model;
 		if (!model) return undefined;
@@ -4349,6 +4398,18 @@ export class AgentSession {
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return undefined;
 
+		// Footer.render() calls this every TUI frame; getBranch()/estimateContextTokens below
+		// are O(n) walks. Memoize on a key that changes exactly when context can change: leaf
+		// id (append/compaction/branch switch), message count, and the active context window.
+		const key = `${this.sessionManager.getLeafId()}:${this.messages.length}:${contextWindow}`;
+		const cached = this._ctxUsageCache;
+		if (cached && cached.key === key) return cached.value;
+		const value = this.computeContextUsage(contextWindow);
+		this._ctxUsageCache = { key, value };
+		return value;
+	}
+
+	private computeContextUsage(contextWindow: number): ContextUsage | undefined {
 		// After compaction, the last assistant usage reflects pre-compaction context size.
 		// We can only trust usage from an assistant that responded after the latest compaction.
 		// If no such assistant exists, context token count is unknown until the next LLM response.
