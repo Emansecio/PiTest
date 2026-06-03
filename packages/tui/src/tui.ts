@@ -9,7 +9,14 @@ import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
 import type { Terminal } from "./terminal.ts";
 import { deleteKittyImage, getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
-import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
+import {
+	extractSegments,
+	normalizeTerminalOutput,
+	sliceByColumn,
+	sliceWithWidth,
+	truncateToWidth,
+	visibleWidth,
+} from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 
@@ -1075,6 +1082,65 @@ export class TUI extends Container {
 		return null;
 	}
 
+	/** Absolute path of the render-overflow diagnostic file. */
+	private overflowLogPath(): string {
+		return path.join(os.homedir(), ".pit", "agent", "pi-crash.log");
+	}
+
+	/**
+	 * Snapshot the whole rendered frame as a crash dump just before throwing in
+	 * assert mode (PIT_RENDER_ASSERT=1). Production never reaches this — it
+	 * truncates and continues — so this stays a dev/CI-only diagnostic and never
+	 * touches disk during a normal session. Best-effort: a logging failure must
+	 * never escalate into the crash we're trying to make legible.
+	 */
+	private logRenderOverflow(lineIndex: number, line: string, width: number, allLines: string[]): void {
+		const data = [
+			`Crash at ${new Date().toISOString()}`,
+			`Terminal width: ${width}`,
+			`Line ${lineIndex} visible width: ${visibleWidth(line)}`,
+			"",
+			"=== All rendered lines ===",
+			...allLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
+			"",
+		].join("\n");
+		try {
+			fs.mkdirSync(path.dirname(this.overflowLogPath()), { recursive: true });
+			fs.writeFileSync(this.overflowLogPath(), data);
+		} catch {
+			// Diagnostics are best-effort; never let a logging failure escalate.
+		}
+	}
+
+	/**
+	 * Last-resort width guard applied to every line just before it reaches the
+	 * terminal, on BOTH the differential and full-redraw paths, so neither can
+	 * leak an over-wide line. In assert mode (PIT_RENDER_ASSERT=1) it dumps the
+	 * frame and throws, so dev/CI catches the offending component (named more
+	 * precisely by assertComponentWidth at the component boundary). In production
+	 * it truncates and returns: a clipped line for one frame beats crashing the
+	 * session mid-task. Image lines pass through (their byte length is not their
+	 * visible width).
+	 */
+	private clampLineToWidth(line: string, lineIndex: number, width: number, allLines: string[]): string {
+		if (isImageLine(line) || visibleWidth(line) <= width) return line;
+		if (renderAssertEnabled) {
+			this.logRenderOverflow(lineIndex, line, width, allLines);
+			this.stop(); // Clean up terminal state before throwing.
+			throw new Error(
+				[
+					`Rendered line ${lineIndex} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
+					"",
+					"This is likely caused by a custom TUI component not truncating its output.",
+					"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
+					"",
+					`Debug log written to: ${this.overflowLogPath()}`,
+				].join("\n"),
+			);
+		}
+		return truncateToWidth(line, width, "…");
+	}
+
 	private doRender(): void {
 		if (this.stopped) return;
 		const width = this.terminal.columns;
@@ -1114,7 +1180,7 @@ export class TUI extends Container {
 			}
 			for (let i = 0; i < newLines.length; i++) {
 				if (i > 0) buffer += "\r\n";
-				buffer += newLines[i];
+				buffer += this.clampLineToWidth(newLines[i], i, width, newLines);
 			}
 			buffer += "\x1b[?2026l"; // End synchronized output
 			this.terminal.write(buffer);
@@ -1300,37 +1366,7 @@ export class TUI extends Container {
 		for (let i = firstChanged; i <= renderEnd; i++) {
 			if (i > firstChanged) buffer += "\r\n";
 			buffer += "\x1b[2K"; // Clear current line
-			const line = newLines[i];
-			const isImage = isImageLine(line);
-			if (!isImage && visibleWidth(line) > width) {
-				// Log all lines to crash file for debugging
-				const crashLogPath = path.join(os.homedir(), ".pit", "agent", "pi-crash.log");
-				const crashData = [
-					`Crash at ${new Date().toISOString()}`,
-					`Terminal width: ${width}`,
-					`Line ${i} visible width: ${visibleWidth(line)}`,
-					"",
-					"=== All rendered lines ===",
-					...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
-					"",
-				].join("\n");
-				fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
-				fs.writeFileSync(crashLogPath, crashData);
-
-				// Clean up terminal state before throwing
-				this.stop();
-
-				const errorMsg = [
-					`Rendered line ${i} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
-					"",
-					"This is likely caused by a custom TUI component not truncating its output.",
-					"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
-					"",
-					`Debug log written to: ${crashLogPath}`,
-				].join("\n");
-				throw new Error(errorMsg);
-			}
-			buffer += line;
+			buffer += this.clampLineToWidth(newLines[i], i, width, newLines);
 		}
 
 		// Track where cursor ended up after rendering
