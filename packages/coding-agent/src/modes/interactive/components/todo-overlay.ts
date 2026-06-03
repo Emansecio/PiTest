@@ -4,14 +4,12 @@
  * state from the AgentSession on every render (FooterComponent pattern).
  */
 
-import type { Component } from "@pit/tui";
+import { performance } from "node:perf_hooks";
+import { type Component, SPINNER_FRAME_MS, SPINNER_FRAMES } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { TodoItem } from "../../../core/todo/todo-manager.ts";
 import { theme } from "../theme/theme.ts";
 
-/** Half-moon spinner frames for in_progress todos (matches the package look). */
-export const TODO_SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
-const SPINNER_INTERVAL_MS = 120;
 /** Cap on overlay rows; completed todos are hidden first when exceeded. */
 const OVERLAY_MAX_ROWS = 12;
 
@@ -74,7 +72,11 @@ class TodoOverlayComponent implements Component {
 	private session: AgentSession;
 	private readonly clock: () => number;
 
-	constructor(session: AgentSession, clock: () => number = () => Date.now()) {
+	// Default clock is the same monotonic source the animation ticker feeds every
+	// other spinner (`performance.now()`), so when the overlay repaints during
+	// active work its half-moon frame is phase-locked with the loader/tool/goal
+	// spinners instead of running on a separate `Date.now()` epoch (P7).
+	constructor(session: AgentSession, clock: () => number = () => performance.now()) {
 		this.session = session;
 		this.clock = clock;
 	}
@@ -91,8 +93,8 @@ class TodoOverlayComponent implements Component {
 	render(width: number): string[] {
 		const data = this.session.todoForOverlay();
 		if (data.items.length === 0 || data.done === data.total) return [];
-		const frame = TODO_SPINNER_FRAMES[Math.floor(this.clock() / SPINNER_INTERVAL_MS) % TODO_SPINNER_FRAMES.length];
-		const lines = renderTodoOverlay(data, width, frame ?? TODO_SPINNER_FRAMES[0]);
+		const frame = SPINNER_FRAMES[Math.floor(this.clock() / SPINNER_FRAME_MS) % SPINNER_FRAMES.length];
+		const lines = renderTodoOverlay(data, width, frame ?? SPINNER_FRAMES[0]);
 		// A leading blank line separates the overlay from the chat above it.
 		return lines.length > 0 ? ["", ...lines] : [];
 	}

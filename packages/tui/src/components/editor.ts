@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
@@ -217,6 +218,10 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 
 const ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS = 20;
 
+/** Default half-period of the cursor blink: cursor on for this long, then off
+ * for this long (~530ms each, the classic terminal cadence). */
+const CURSOR_BLINK_HALF_MS = 530;
+
 export class Editor implements Component, Focusable {
 	private state: EditorState = {
 		lines: [""],
@@ -224,8 +229,33 @@ export class Editor implements Component, Focusable {
 		cursorCol: 0,
 	};
 
-	/** Focusable interface - set by TUI when focus changes */
-	focused: boolean = false;
+	/** Focusable interface - set by TUI when focus changes. Backed by an accessor
+	 * so cursor blink runs exactly while the editor holds focus (a blurred editor
+	 * never keeps the animation ticker awake). */
+	private _focused = false;
+	get focused(): boolean {
+		return this._focused;
+	}
+	set focused(value: boolean) {
+		if (this._focused === value) return;
+		this._focused = value;
+		if (value) {
+			this.resetCursorBlink();
+			this.subscribeCursorBlink();
+		} else {
+			this.unsubscribeCursorBlink();
+			this.cursorBlinkVisible = true;
+		}
+	}
+
+	// Cursor blink, opt-in via setCursorBlink(). The phase derives from the shared
+	// monotonic clock and the subscription is bound to focus, so an unfocused or
+	// blink-disabled editor holds no timer and renders a steady block cursor.
+	private cursorBlinkEnabled = false;
+	private cursorBlinkHalfMs = CURSOR_BLINK_HALF_MS;
+	private cursorBlinkVisible = true;
+	private cursorBlinkEpoch = 0;
+	private cursorBlinkUnsub: (() => void) | null = null;
 
 	protected tui: TUI;
 	private theme: EditorTheme;
@@ -534,6 +564,9 @@ export class Editor implements Component, Focusable {
 
 				// Hardware cursor marker (zero-width, emitted before fake cursor for IME positioning)
 				const marker = emitCursorMarker ? CURSOR_MARKER : "";
+				// During the blink "off" half, draw the glyph plainly (no reverse video)
+				// so the cursor visually disappears; the hardware marker stays for IME.
+				const blinkOff = this.cursorBlinkEnabled && !this.cursorBlinkVisible;
 
 				if (after.length > 0) {
 					// Cursor is on a character (grapheme) - replace it with highlighted version
@@ -542,12 +575,12 @@ export class Editor implements Component, Focusable {
 					// only the first cluster is read.
 					const firstGrapheme = this.segment(after)[Symbol.iterator]().next().value?.segment || "";
 					const restAfter = after.slice(firstGrapheme.length);
-					const cursor = `\x1b[7m${firstGrapheme}\x1b[0m`;
+					const cursor = blinkOff ? firstGrapheme : `\x1b[7m${firstGrapheme}\x1b[0m`;
 					displayText = before + marker + cursor + restAfter;
 					// lineVisibleWidth stays the same - we're replacing, not adding
 				} else {
 					// Cursor is at the end - add highlighted space
-					const cursor = "\x1b[7m \x1b[0m";
+					const cursor = blinkOff ? " " : "\x1b[7m \x1b[0m";
 					displayText = before + marker + cursor;
 					lineVisibleWidth = lineVisibleWidth + 1;
 					// If cursor overflows content width into the padding, flag it
@@ -588,8 +621,67 @@ export class Editor implements Component, Focusable {
 		return result;
 	}
 
+	/**
+	 * Enable or disable cursor blink. When enabled and focused, the block cursor
+	 * toggles every `halfPeriodMs` (default 530ms) off the shared animation ticker;
+	 * the subscription is bound to focus so a blurred editor holds no timer.
+	 * Disabling leaves the cursor steady.
+	 */
+	setCursorBlink(enabled: boolean, halfPeriodMs?: number): void {
+		this.cursorBlinkEnabled = enabled;
+		if (halfPeriodMs !== undefined && halfPeriodMs > 0) {
+			this.cursorBlinkHalfMs = halfPeriodMs;
+		}
+		if (enabled && this._focused) {
+			this.resetCursorBlink();
+			this.subscribeCursorBlink();
+		} else {
+			this.unsubscribeCursorBlink();
+			this.cursorBlinkVisible = true;
+		}
+		this.tui.requestRender();
+	}
+
+	private subscribeCursorBlink(): void {
+		if (this.cursorBlinkUnsub || !this.cursorBlinkEnabled) return;
+		this.cursorBlinkUnsub = this.tui.addAnimationCallback((now) => this.blinkTick(now));
+	}
+
+	private unsubscribeCursorBlink(): void {
+		if (this.cursorBlinkUnsub) {
+			this.cursorBlinkUnsub();
+			this.cursorBlinkUnsub = null;
+		}
+	}
+
+	/** Restart the blink cycle solid-on — called on focus and on input so the
+	 * cursor is steady right after activity, like a conventional editor. */
+	private resetCursorBlink(): void {
+		this.cursorBlinkEpoch = performance.now();
+		this.cursorBlinkVisible = true;
+	}
+
+	/** Ticker callback: flip the blink phase from the shared clock; returns true
+	 * only when the visible state changed so the ticker coalesces one render. */
+	private blinkTick(now: number): boolean {
+		if (!this.cursorBlinkEnabled || !this._focused) {
+			if (!this.cursorBlinkVisible) {
+				this.cursorBlinkVisible = true;
+				return true;
+			}
+			return false;
+		}
+		const visible = Math.floor((now - this.cursorBlinkEpoch) / this.cursorBlinkHalfMs) % 2 === 0;
+		if (visible === this.cursorBlinkVisible) return false;
+		this.cursorBlinkVisible = visible;
+		return true;
+	}
+
 	handleInput(data: string): void {
 		const kb = getKeybindings();
+
+		// Keep the cursor solid immediately after any keystroke.
+		if (this.cursorBlinkEnabled && this._focused) this.resetCursorBlink();
 
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.jumpMode !== null) {

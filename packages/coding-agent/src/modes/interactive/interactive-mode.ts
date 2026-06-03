@@ -40,6 +40,7 @@ import {
 	Markdown,
 	matchesKey,
 	ProcessTerminal,
+	SPINNER_FRAME_MS,
 	Spacer,
 	setKeybindings,
 	Text,
@@ -63,9 +64,6 @@ import type {
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { parseTokenBudget } from "../../core/goal/goal-manager.ts";
-
-/** Footer goal-spinner re-render cadence (~12fps), matching the spinner frame rate. */
-const GOAL_SPINNER_TICK_MS = 80;
 
 /**
  * Detect an inline `/chrome` token anywhere in the message (start, middle, or
@@ -332,9 +330,14 @@ export class InteractiveMode {
 	private unsubscribe?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
 
-	// Periodic re-render that keeps the goal spinner + todo overlay spinner
-	// animating even in the brief gaps between turns (no streaming to drive renders).
-	private _goalSpinnerTimer: ReturnType<typeof setInterval> | undefined;
+	// Shared-ticker subscription that keeps the goal spinner (and, by extension,
+	// the todo overlay) animating in the brief gaps between turns where no
+	// streaming drives renders. It rides the same monotonic clock as every other
+	// animation so their phases stay locked.
+	private _goalSpinnerUnsub: (() => void) | undefined;
+	// Last animation-phase bucket the goal spinner requested a render for; gates
+	// out the ~60fps ticks that would not change the (80ms) spinner frame.
+	private _goalSpinnerBucket = -1;
 
 	// Live "above editor" todo overlay (auto-hides when there are no todos).
 	private todoOverlay: TodoOverlay | undefined;
@@ -1275,6 +1278,7 @@ export class InteractiveMode {
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
+		this.defaultEditor.setCursorBlink(this.settingsManager.getCursorBlink());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
@@ -2377,30 +2381,33 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Drive a periodic re-render (~12fps) while a goal is active so the footer
-	 * spinner animates smoothly even between autonomous turns. (The todo overlay
-	 * spinner animates via the natural renders that happen while the agent is
-	 * actually working, and stays static when idle — which is the honest signal.)
-	 * Idempotent; the tick auto-stops once the goal is no longer active.
+	 * Request a render via the shared animation ticker (~12fps) while a goal is
+	 * active so the footer spinner animates smoothly even between autonomous turns.
+	 * (The todo overlay spinner animates via the natural renders that happen while
+	 * the agent is actually working, and stays static when idle — which is the
+	 * honest signal.) Idempotent; auto-stops once the goal is no longer active.
 	 */
 	private _startGoalSpinner(): void {
-		if (this._goalSpinnerTimer) return;
+		if (this._goalSpinnerUnsub) return;
 		if (this.session.goalSnapshot()?.status !== "active") return;
-		this._goalSpinnerTimer = setInterval(() => {
+		this._goalSpinnerBucket = -1;
+		this._goalSpinnerUnsub = this.ui.addAnimationCallback((now) => {
 			if (this.session.goalSnapshot()?.status !== "active") {
 				this._stopGoalSpinner();
+				return false;
 			}
-			this.ui.requestRender();
-		}, GOAL_SPINNER_TICK_MS);
-		// Don't keep the event loop alive just for the spinner.
-		(this._goalSpinnerTimer as { unref?: () => void }).unref?.();
+			// Only ask for a render when the 80ms spinner frame would actually
+			// change, not on every animation frame.
+			const bucket = Math.floor(now / SPINNER_FRAME_MS);
+			if (bucket === this._goalSpinnerBucket) return false;
+			this._goalSpinnerBucket = bucket;
+			return true;
+		});
 	}
 
 	private _stopGoalSpinner(): void {
-		if (this._goalSpinnerTimer) {
-			clearInterval(this._goalSpinnerTimer);
-			this._goalSpinnerTimer = undefined;
-		}
+		this._goalSpinnerUnsub?.();
+		this._goalSpinnerUnsub = undefined;
 	}
 
 	/**
@@ -2480,6 +2487,8 @@ export class InteractiveMode {
 							this.hideThinkingBlock,
 							this.getMarkdownThemeWithSettings(),
 							this.hiddenThinkingLabel,
+							this.ui,
+							this.settingsManager.getStreamingSmoothing(),
 						);
 						this.streamingMessage = event.message;
 						this.chatContainer.addChild(this.streamingComponent);

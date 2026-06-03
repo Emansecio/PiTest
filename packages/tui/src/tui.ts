@@ -13,6 +13,42 @@ import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 
+// Dev-only render guard. When enabled, each component's rendered lines are
+// checked against `width` *at the component boundary*, throwing an error that
+// names the culprit. Without it, an overflow only surfaces later in
+// TUI.doRender as a generic "Rendered line N exceeds terminal width" against
+// the merged line buffer — by then the offending component is anonymous.
+// Opt-in (PIT_RENDER_ASSERT=1) so production renders pay no extra cost; the
+// flag is mutable so tests can toggle it without import-time env ordering.
+let renderAssertEnabled = process.env.PIT_RENDER_ASSERT === "1";
+
+/** Enable/disable the per-component render width guard (see {@link assertComponentWidth}). */
+export function setRenderAssertEnabled(enabled: boolean): void {
+	renderAssertEnabled = enabled;
+}
+
+/**
+ * Throw if any line a component produced is wider than `width`, naming the
+ * component and quoting the offending line. Pure and side-effect free except
+ * the throw — safe to unit test directly.
+ */
+export function assertComponentWidth(component: Component, lines: string[], width: number): void {
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		if (isImageLine(line)) continue;
+		const w = visibleWidth(line);
+		if (w > width) {
+			const name = component?.constructor?.name ?? "Component";
+			const preview = JSON.stringify(line.slice(0, 160));
+			throw new Error(
+				`TUI render assert: ${name}.render(${width}) emitted line ${i} with visible width ${w} (> ${width}). ` +
+					`A custom component must truncate its own output with truncateToWidth(). ` +
+					`Offending line (first 160 chars, escaped): ${preview}`,
+			);
+		}
+	}
+}
+
 function extractKittyImageIds(line: string): number[] {
 	const sequenceStart = line.indexOf(KITTY_SEQUENCE_PREFIX);
 	if (sequenceStart === -1) return [];
@@ -64,6 +100,15 @@ export interface Component {
 
 type InputListenerResult = { consume?: boolean; data?: string } | undefined;
 type InputListener = (data: string) => InputListenerResult;
+
+/**
+ * Animation tick callback. Invoked once per animation frame with a shared
+ * monotonic clock (ms, from performance.now()). Derive any spinner/pulse frame
+ * from `now` so every animated component stays phase-locked, and return `true`
+ * only when the visible output changed this frame — the ticker coalesces a
+ * single render for all animations and skips frames that change nothing.
+ */
+export type AnimationFrameCallback = (now: number) => boolean;
 
 /**
  * Interface for components that can receive focus and display a hardware cursor.
@@ -225,6 +270,7 @@ export class Container implements Component {
 		const lines: string[] = [];
 		for (const child of this.children) {
 			const childLines = child.render(width);
+			if (renderAssertEnabled) assertComponentWidth(child, childLines, width);
 			for (const line of childLines) {
 				lines.push(line);
 			}
@@ -251,6 +297,12 @@ export class TUI extends Container {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
+	// Shared animation ticker: a single timer drives every animated component
+	// (spinners, pulses) off one monotonic clock so their phases stay locked and a
+	// frame that changes nothing never schedules a render. See addAnimationCallback().
+	private animationCallbacks = new Set<AnimationFrameCallback>();
+	private animationTimer: NodeJS.Timeout | undefined;
+	private static readonly ANIMATION_FRAME_MS = 16;
 	private cursorRow = 0; // Logical cursor row (end of rendered content)
 	private hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	private showHardwareCursor = process.env.PIT_HARDWARE_CURSOR === "1";
@@ -455,6 +507,8 @@ export class TUI extends Container {
 		);
 		this.terminal.hideCursor();
 		this.queryCellSize();
+		// Resume the ticker for any animation registered before start().
+		this.startAnimationLoop();
 		this.requestRender();
 	}
 
@@ -481,6 +535,7 @@ export class TUI extends Container {
 
 	stop(): void {
 		this.stopped = true;
+		this.stopAnimationLoop();
 		if (this.renderTimer) {
 			clearTimeout(this.renderTimer);
 			this.renderTimer = undefined;
@@ -548,6 +603,53 @@ export class TUI extends Container {
 				this.scheduleRender();
 			}
 		}, delay);
+	}
+
+	/**
+	 * Subscribe to the shared animation ticker. Every animated component derives
+	 * its frame from the single monotonic clock passed to the callback, so
+	 * spinners and pulses stay phase-locked instead of drifting against one
+	 * another's independent timers. The ticker requests at most one render per
+	 * frame, and only when some callback reports a visible change. Returns an
+	 * unsubscribe function; the underlying timer stops once the last callback is
+	 * removed. Safe to call before start() — the loop resumes there.
+	 */
+	addAnimationCallback(callback: AnimationFrameCallback): () => void {
+		this.animationCallbacks.add(callback);
+		this.startAnimationLoop();
+		return () => {
+			this.animationCallbacks.delete(callback);
+			if (this.animationCallbacks.size === 0) this.stopAnimationLoop();
+		};
+	}
+
+	private startAnimationLoop(): void {
+		if (this.animationTimer || this.stopped || this.animationCallbacks.size === 0) return;
+		this.animationTimer = setInterval(() => this.tickAnimations(), TUI.ANIMATION_FRAME_MS);
+		// Don't keep the event loop alive just for animations.
+		(this.animationTimer as { unref?: () => void }).unref?.();
+	}
+
+	private stopAnimationLoop(): void {
+		if (this.animationTimer) {
+			clearInterval(this.animationTimer);
+			this.animationTimer = undefined;
+		}
+	}
+
+	private tickAnimations(): void {
+		if (this.stopped || this.animationCallbacks.size === 0) {
+			this.stopAnimationLoop();
+			return;
+		}
+		const now = performance.now();
+		let dirty = false;
+		// Snapshot so a callback that unsubscribes (or subscribes) mid-tick can't
+		// disturb this frame's iteration.
+		for (const callback of [...this.animationCallbacks]) {
+			if (callback(now)) dirty = true;
+		}
+		if (dirty) this.requestRender();
 	}
 
 	private handleInput(data: string): void {
@@ -783,6 +885,7 @@ export class TUI extends Container {
 
 			// Render component at calculated width
 			let overlayLines = component.render(width);
+			if (renderAssertEnabled) assertComponentWidth(component, overlayLines, width);
 
 			// Apply maxHeight if specified
 			if (maxHeight !== undefined && overlayLines.length > maxHeight) {

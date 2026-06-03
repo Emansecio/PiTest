@@ -83,6 +83,9 @@ export class MessageShell extends Container {
 	private label: string | undefined;
 	private shellDisabled: boolean;
 	private noLeadingGap: boolean;
+	// One-column glyph shown in the gutter of the FIRST line instead of the static
+	// bar (e.g. a running spinner). Undefined keeps the steady `│`.
+	private gutterSpinner: string | undefined;
 
 	constructor(options: MessageShellOptions = {}) {
 		super();
@@ -107,6 +110,15 @@ export class MessageShell extends Container {
 	/** Update the label. No invalidate — same rationale as `setGutterColor`. */
 	setLabel(label: string | undefined): void {
 		this.label = label;
+	}
+
+	/**
+	 * Set a one-column glyph for the first line's gutter (a running spinner);
+	 * pass `undefined` to restore the static bar. No invalidate — same rationale
+	 * as `setGutterColor` (the shell reads it fresh on every render).
+	 */
+	setGutterSpinner(glyph: string | undefined): void {
+		this.gutterSpinner = glyph;
 	}
 
 	/** Toggle passthrough mode. No invalidate — same rationale as `setGutterColor`. */
@@ -135,7 +147,9 @@ export class MessageShell extends Container {
 			return [];
 		}
 
-		const gutter = this.gutterColor(SHELL_GUTTER_CHAR);
+		const barGutter = this.gutterColor(SHELL_GUTTER_CHAR);
+		// The first line may show a running spinner glyph in place of the bar.
+		const headGutter = this.gutterSpinner !== undefined ? this.gutterColor(this.gutterSpinner) : barGutter;
 		const result: string[] = [];
 
 		if (!this.noLeadingGap) {
@@ -148,7 +162,7 @@ export class MessageShell extends Container {
 				const labelText = `${BOLD_OPEN}${this.label}${BOLD_CLOSE}`;
 				line = `${this.gutterColor(labelText)}  ${line}`;
 			}
-			result.push(`${gutter} ${line}`);
+			result.push(`${i === 0 ? headGutter : barGutter} ${line}`);
 		}
 
 		return result;

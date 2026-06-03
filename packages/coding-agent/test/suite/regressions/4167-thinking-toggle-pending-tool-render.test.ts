@@ -59,7 +59,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
 		chatContainer,
 		footer: { invalidate: vi.fn() },
-		ui: { requestRender: vi.fn() } as unknown as TUI,
+		ui: { requestRender: vi.fn(), addAnimationCallback: () => () => {} } as unknown as TUI,
 		settingsManager: {
 			getShowImages: () => false,
 			getImageWidthCells: () => 60,

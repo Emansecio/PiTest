@@ -1,9 +1,21 @@
-import { type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@pit/tui";
+import { performance } from "node:perf_hooks";
+import {
+	type Component,
+	Container,
+	getCapabilities,
+	Image,
+	SPINNER_FRAME_MS,
+	SPINNER_FRAMES,
+	Spacer,
+	Text,
+	type TUI,
+} from "@pit/tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { allToolNames, createToolDefinition, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
-import { theme } from "../theme/theme.ts";
+import { interpolateFg } from "../theme/color-interpolation.ts";
+import { type ThemeColor, theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.js";
 import { MessageShell } from "./message-shell.ts";
 
@@ -22,6 +34,11 @@ const SINGLE_LINE_PREVIEW_TOOLS = new Set<string>(["task"]);
 // Max width of the one-line arg summary shown next to the tool name for tools
 // without a custom renderCall.
 const FALLBACK_CALL_SUMMARY_MAX = 80;
+
+/** Duration of the gutter color fade when a tool settles pending → success/error (P5). */
+const GUTTER_EASE_MS = 220;
+
+type GutterState = "pending" | "success" | "error";
 
 /**
  * Compact, single-line preview of a tool call's args for the collapsed row.
@@ -87,6 +104,14 @@ export class ToolExecutionComponent extends MessageShell {
 	};
 	private convertedImages: Map<number, { data: string; mimeType: string }> = new Map();
 	private hideComponent = false;
+	// Gutter animation state: the running spinner (P4) spins while the tool is
+	// executing; the settle fade (P5) plays once on the pending → final switch.
+	private gutterState: GutterState = "pending";
+	private gutterEaseUnsub: (() => void) | null = null;
+	private gutterEaseStart = 0;
+	private gutterEaseTo: "success" | "error" = "success";
+	private runningSpinnerUnsub: (() => void) | null = null;
+	private runningSpinnerFrame = -1;
 
 	constructor(
 		toolName: string,
@@ -318,13 +343,9 @@ export class ToolExecutionComponent extends MessageShell {
 
 	private updateDisplay(): void {
 		// Per Leva 2: state is reflected in the gutter color, not in a bg fill.
-		// pending → muted gray, success → green, error → red.
-		const gutterFn = this.isPartial
-			? (text: string) => theme.fg("gutterToolPending", text)
-			: this.result?.isError
-				? (text: string) => theme.fg("gutterToolError", text)
-				: (text: string) => theme.fg("gutterToolSuccess", text);
-		this.setGutterColor(gutterFn);
+		// pending → muted gray, success → green, error → red. The pending → final
+		// switch eases the color (P5) rather than snapping; see refreshGutterState.
+		this.refreshGutterState();
 
 		let hasContent = false;
 		this.hideComponent = false;
@@ -439,6 +460,107 @@ export class ToolExecutionComponent extends MessageShell {
 		if (this.hasRendererDefinition() && !hasContent && this.imageComponents.length === 0) {
 			this.hideComponent = true;
 		}
+
+		this.syncRunningSpinner();
+	}
+
+	private toolGutterColor(state: GutterState): (text: string) => string {
+		switch (state) {
+			case "error":
+				return (text: string) => theme.fg("gutterToolError", text);
+			case "success":
+				return (text: string) => theme.fg("gutterToolSuccess", text);
+			default:
+				return (text: string) => theme.fg("gutterToolPending", text);
+		}
+	}
+
+	/** Decide the gutter color for the current state: ease once when settling
+	 * pending → success/error (P5), otherwise set it steadily. */
+	private refreshGutterState(): void {
+		const target: GutterState = this.isPartial ? "pending" : this.result?.isError ? "error" : "success";
+		if (target === this.gutterState) {
+			// No state change: leave an in-flight ease alone; otherwise keep the
+			// steady color (the content around it may have rebuilt).
+			if (!this.gutterEaseUnsub) this.setGutterColor(this.toolGutterColor(target));
+			return;
+		}
+		const settling = this.gutterState === "pending" && target !== "pending";
+		this.gutterState = target;
+		if (settling) {
+			this.beginGutterEase(target);
+		} else {
+			this.stopGutterEase();
+			this.setGutterColor(this.toolGutterColor(target));
+		}
+	}
+
+	private beginGutterEase(target: "success" | "error"): void {
+		// Hand the gutter back from the running spinner to the static bar first.
+		this.stopRunningSpinner();
+		const to: ThemeColor = target === "error" ? "gutterToolError" : "gutterToolSuccess";
+		// No truecolor easing available (256-color / unparseable): snap.
+		if (!interpolateFg("gutterToolPending", to, 0)) {
+			this.stopGutterEase();
+			this.setGutterColor(this.toolGutterColor(target));
+			return;
+		}
+		this.stopGutterEase();
+		this.gutterEaseTo = target;
+		this.gutterEaseStart = performance.now();
+		this.gutterEaseUnsub = this.ui.addAnimationCallback((now) => this.gutterEaseTick(now));
+	}
+
+	private gutterEaseTick(now: number): boolean {
+		const target = this.gutterEaseTo;
+		const to: ThemeColor = target === "error" ? "gutterToolError" : "gutterToolSuccess";
+		const raw = (now - this.gutterEaseStart) / GUTTER_EASE_MS;
+		const t = raw < 0 ? 0 : raw > 1 ? 1 : raw;
+		const eased = t * t * (3 - 2 * t); // smoothstep
+		this.setGutterColor(interpolateFg("gutterToolPending", to, eased) ?? this.toolGutterColor(target));
+		if (t >= 1) {
+			this.setGutterColor(this.toolGutterColor(target));
+			this.stopGutterEase();
+		}
+		return true;
+	}
+
+	private stopGutterEase(): void {
+		if (this.gutterEaseUnsub) {
+			this.gutterEaseUnsub();
+			this.gutterEaseUnsub = null;
+		}
+	}
+
+	/** Subscribe/unsubscribe the gutter running spinner based on whether the tool
+	 * is actively executing (started, not yet settled, and not mid-ease). */
+	private syncRunningSpinner(): void {
+		const running = this.executionStarted && this.isPartial && !this.hideComponent && this.gutterEaseUnsub === null;
+		if (running) {
+			if (!this.runningSpinnerUnsub) {
+				this.runningSpinnerFrame = -1;
+				this.runningSpinnerUnsub = this.ui.addAnimationCallback((now) => this.runningSpinnerTick(now));
+			}
+		} else {
+			this.stopRunningSpinner();
+		}
+	}
+
+	private runningSpinnerTick(now: number): boolean {
+		const frame = Math.floor(now / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
+		if (frame === this.runningSpinnerFrame) return false;
+		this.runningSpinnerFrame = frame;
+		this.setGutterSpinner(SPINNER_FRAMES[frame]);
+		return true;
+	}
+
+	private stopRunningSpinner(): void {
+		if (this.runningSpinnerUnsub) {
+			this.runningSpinnerUnsub();
+			this.runningSpinnerUnsub = null;
+		}
+		this.runningSpinnerFrame = -1;
+		this.setGutterSpinner(undefined);
 	}
 
 	private getTextOutput(): string {

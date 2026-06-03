@@ -236,9 +236,13 @@ class AskPicker implements Component, Focusable {
 
 	private renderHeader(width: number, lines: string[]): void {
 		if (this.req.header) {
-			lines.push(defaultTheme.fg("accent", `[${this.req.header}]`));
+			lines.push(defaultTheme.fg("accent", truncateToWidth(`[${this.req.header}]`, width, "…")));
 		}
-		lines.push(defaultTheme.bold(this.req.question));
+		// Wrap the question instead of pushing it raw — a long single-line
+		// question would otherwise overflow `width` and crash TUI.doRender.
+		for (const line of wrapPlain(this.req.question, width)) {
+			lines.push(defaultTheme.bold(line));
+		}
 		if (this.req.context) {
 			for (const line of wrapPlain(this.req.context, width)) {
 				lines.push(defaultTheme.fg("dim", line));
@@ -254,10 +258,15 @@ class AskPicker implements Component, Focusable {
 			const cursor = i === this.index && this.mode === "list" ? "→ " : "  ";
 			const box = this.allowMultiple ? (this.checked.has(i) ? "[x] " : "[ ] ") : "";
 			const badge = opt.recommended ? RECOMMENDED_BADGE : "";
-			const head = `${cursor}${box}${opt.label}${badge}`;
+			// Clamp the head (cursor + box + label + badge) to the terminal width first;
+			// a long label must never push the rendered line past `width`.
+			const head = truncateToWidth(`${cursor}${box}${opt.label}${badge}`, width, "…");
 			const row = i === this.index && this.mode === "list" ? defaultTheme.fg("accent", head) : head;
-			if (opt.description) {
-				const desc = truncateToWidth(opt.description.replace(/\s+/g, " ").trim(), Math.max(10, width - 6), "");
+			// Budget the description against what is left after the head (+2 for the gap),
+			// so `head  desc` stays within `width`. Drop it if there is no room.
+			const descBudget = width - visibleWidth(head) - 2;
+			if (opt.description && descBudget >= 10) {
+				const desc = truncateToWidth(opt.description.replace(/\s+/g, " ").trim(), descBudget, "");
 				lines.push(`${row}  ${defaultTheme.fg("muted", desc)}`);
 			} else {
 				lines.push(row);
@@ -280,26 +289,30 @@ class AskPicker implements Component, Focusable {
 			lines.push(...this.input.render(width));
 			lines.push(...new DynamicBorder().render(width));
 			lines.push(defaultTheme.fg("dim", "  enter to submit · esc to go back"));
-			return lines;
-		}
+		} else {
+			this.renderList(width, lines);
 
-		this.renderList(width, lines);
+			if (this.allowComment && this.commentText.trim() && this.mode === "list") {
+				const preview = truncateToWidth(this.commentText.trim(), Math.max(10, width - 14), "");
+				lines.push(defaultTheme.fg("muted", `  ✎ comment: ${preview}`));
+			}
 
-		if (this.allowComment && this.commentText.trim() && this.mode === "list") {
-			const preview = truncateToWidth(this.commentText.trim(), Math.max(10, width - 14), "");
-			lines.push(defaultTheme.fg("muted", `  ✎ comment: ${preview}`));
-		}
+			if (this.mode === "comment" && this.commentInput) {
+				lines.push(...new DynamicBorder().render(width));
+				lines.push(defaultTheme.fg("dim", "  Comment:"));
+				this.commentInput.focused = this.focused;
+				lines.push(...this.commentInput.render(width));
+			}
 
-		if (this.mode === "comment" && this.commentInput) {
 			lines.push(...new DynamicBorder().render(width));
-			lines.push(defaultTheme.fg("dim", "  Comment:"));
-			this.commentInput.focused = this.focused;
-			lines.push(...this.commentInput.render(width));
+			lines.push(defaultTheme.fg("dim", `  ${this.hint()}`));
 		}
 
-		lines.push(...new DynamicBorder().render(width));
-		lines.push(defaultTheme.fg("dim", `  ${this.hint()}`));
-		return lines;
+		// Defensive final clamp: no rendered line may exceed `width`, or
+		// TUI.doRender throws and crashes the process. Inputs/borders already
+		// respect `width`; this is the safety net for the header/question and
+		// any word too long for wrapPlain to break (e.g. a long URL token).
+		return lines.map((line) => (visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line));
 	}
 
 	private hint(): string {

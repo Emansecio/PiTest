@@ -28,6 +28,9 @@ function createBaseToolDefinition(name = "custom_tool"): ToolDefinition {
 function createFakeTui(): TUI {
 	return {
 		requestRender: () => {},
+		// No-op ticker: tool-gutter animation (P4 spinner / P5 fade) is not exercised
+		// by these parity tests, but the component subscribes via this on the TUI.
+		addAnimationCallback: () => () => {},
 	} as unknown as TUI;
 }
 

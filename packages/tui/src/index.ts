@@ -14,7 +14,13 @@ export { CancellableLoader } from "./components/cancellable-loader.ts";
 export { Editor, type EditorOptions, type EditorTheme } from "./components/editor.ts";
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.ts";
 export { Input } from "./components/input.ts";
-export { Loader, type LoaderColorFn, type LoaderIndicatorOptions } from "./components/loader.ts";
+export {
+	Loader,
+	type LoaderColorFn,
+	type LoaderIndicatorOptions,
+	SPINNER_FRAME_MS,
+	SPINNER_FRAMES,
+} from "./components/loader.ts";
 export { type DefaultTextStyle, Markdown, type MarkdownTheme } from "./components/markdown.ts";
 export {
 	type SelectItem,
@@ -90,6 +96,7 @@ export {
 	type TerminalCapabilities,
 } from "./terminal-image.ts";
 export {
+	type AnimationFrameCallback,
 	type Component,
 	Container,
 	CURSOR_MARKER,

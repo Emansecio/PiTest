@@ -1,3 +1,4 @@
+import { visibleWidth } from "@pit/tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { AskOptionsRequest } from "../src/core/user-input-bus.js";
 import { type AskPickerResolveResult, createAskPicker } from "../src/modes/interactive/components/ask-picker.js";
@@ -95,6 +96,46 @@ describe("ask picker", () => {
 		const { component } = createAskPicker(makeReq({}), () => {}, { onToggleVisibility: () => toggles++ });
 		component.handleInput?.(ALT_O);
 		expect(toggles).toBe(1);
+	});
+
+	it("never renders an option line wider than the terminal", () => {
+		// Regression: a long label + long description must not overflow `width`
+		// (previously crashed TUI.doRender with "Rendered line exceeds terminal width").
+		const width = 60;
+		const { component } = createAskPicker(
+			makeReq({
+				options: [
+					{
+						label: "Yes, rebuild the tui and coding-agent dist then run the test",
+						description:
+							"tsgo -p tsconfig.build.json in both packages, then run edit-tool-no-full-redraw plus the affected suite",
+						recommended: true,
+					},
+					{ label: "x".repeat(200) },
+				],
+			}),
+			() => {},
+		);
+		for (const line of component.render(width)) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
+	});
+
+	it("never renders a header or question line wider than the terminal", () => {
+		// Regression: a long single-line question (or header) used to be pushed
+		// raw by renderHeader and overflow `width`, crashing TUI.doRender.
+		const width = 60;
+		const { component } = createAskPicker(
+			makeReq({
+				header: "h".repeat(120),
+				question: `Como tratar o ${"fade-in ".repeat(40)}de blocos do P5?`,
+				options: [{ label: "Sim" }, { label: "Não" }],
+			}),
+			() => {},
+		);
+		for (const line of component.render(width)) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
 	});
 
 	it("renders question, options, multi checkboxes and a freeform row", () => {

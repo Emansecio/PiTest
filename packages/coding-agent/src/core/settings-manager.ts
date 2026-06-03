@@ -269,6 +269,8 @@ export interface Settings {
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
+	cursorBlink?: boolean; // Blink the input editor's block cursor while focused (default: true)
+	streamingSmoothing?: boolean; // Reveal streamed assistant text at a steady rate instead of in provider-sized bursts (default: false)
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
@@ -1351,6 +1353,26 @@ export class SettingsManager {
 	setShowHardwareCursor(enabled: boolean): void {
 		this.globalSettings.showHardwareCursor = enabled;
 		this.markModified("showHardwareCursor");
+		this.save();
+	}
+
+	getCursorBlink(): boolean {
+		return this.settings.cursorBlink ?? true;
+	}
+
+	setCursorBlink(enabled: boolean): void {
+		this.globalSettings.cursorBlink = enabled;
+		this.markModified("cursorBlink");
+		this.save();
+	}
+
+	getStreamingSmoothing(): boolean {
+		return this.settings.streamingSmoothing ?? false;
+	}
+
+	setStreamingSmoothing(enabled: boolean): void {
+		this.globalSettings.streamingSmoothing = enabled;
+		this.markModified("streamingSmoothing");
 		this.save();
 	}
 
