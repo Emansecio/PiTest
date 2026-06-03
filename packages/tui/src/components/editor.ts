@@ -492,7 +492,10 @@ export class Editor implements Component, Focusable {
 		// Store for cursor navigation (must match wrapping width)
 		this.lastWidth = layoutWidth;
 
-		const horizontal = this.borderColor("─");
+		// Pre-color the full-width rule with a single SGR pair instead of coloring
+		// each "─" and repeating the colored unit: the border color is uniform, so
+		// per-glyph coloring just bloats every repaint (~one escape pair per column).
+		const horizontalRule = this.borderColor("─".repeat(width));
 
 		// Layout the text. Optional perf probe: set PIT_EDITOR_PERF=1 to log layout
 		// cost per render (use with a realistic multi-line / CJK draft to measure
@@ -545,7 +548,7 @@ export class Editor implements Component, Focusable {
 				result.push(this.borderColor(truncateToWidth(indicator, width)));
 			}
 		} else {
-			result.push(horizontal.repeat(width));
+			result.push(horizontalRule);
 		}
 
 		// Render each visible layout line
@@ -605,7 +608,7 @@ export class Editor implements Component, Focusable {
 			const remaining = width - visibleWidth(indicator);
 			result.push(this.borderColor(indicator + "─".repeat(Math.max(0, remaining))));
 		} else {
-			result.push(horizontal.repeat(width));
+			result.push(horizontalRule);
 		}
 
 		// Add autocomplete list if active

@@ -38,6 +38,21 @@ async function flushAutocomplete(): Promise<void> {
 	await new Promise((resolve) => setImmediate(resolve));
 }
 
+describe("Editor border rule", () => {
+	it("colors the full-width rule with a single SGR pair, not one per column", () => {
+		const editor = new Editor(createTestTUI(80, 24), defaultEditorTheme);
+		// Marker-based colorizer so we can count how many times the border color is
+		// applied across the rule. The fix colors the whole rule once; the old code
+		// colored a single "─" and repeated the colored unit (~one span per column).
+		editor.borderColor = (s: string) => `<C>${s}</C>`;
+		const top = editor.render(80)[0];
+		const spans = (top.match(/<C>/g) ?? []).length;
+		assert.strictEqual(spans, 1, `border rule should be colored once, got ${spans} color spans`);
+		// And it is still a full-width run of "─".
+		assert.strictEqual(visibleWidth(top.replace(/<\/?C>/g, "")), 80);
+	});
+});
+
 describe("Editor component", () => {
 	describe("Prompt history navigation", () => {
 		it("does nothing on Up arrow when history is empty", () => {
