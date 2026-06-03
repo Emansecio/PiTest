@@ -5,7 +5,7 @@
  */
 
 import { performance } from "node:perf_hooks";
-import { type Component, SPINNER_FRAME_MS, SPINNER_FRAMES } from "@pit/tui";
+import { type Component, SPINNER_FRAME_MS, SPINNER_FRAMES, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { TodoItem } from "../../../core/todo/todo-manager.ts";
 import { theme } from "../theme/theme.ts";
@@ -23,18 +23,51 @@ export interface TodoOverlayData {
 	total: number;
 }
 
+// CONNECTOR_WIDTH: "├─ " or "└─ " = 3 visible chars added by renderTodoOverlay.
+const CONNECTOR_WIDTH = 3;
+// PREFIX_WIDTH: glyph + space inside the row ("⠏ " or "✓ " or "○ ") = 2 visible chars.
+const ROW_PREFIX_WIDTH = 2;
+
 function renderRow(item: TodoItem, spinner: string, width: number): string {
-	const max = Math.max(10, width - 30);
-	const subject = item.subject.length > max ? `${item.subject.slice(0, max - 1)}…` : item.subject;
+	// Budget for text inside the row, after accounting for the connector prefix.
+	const rowBudget = Math.max(4, width - CONNECTOR_WIDTH);
+
 	switch (item.status) {
-		case "completed":
+		case "completed": {
+			const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH);
+			const subject =
+				visibleWidth(item.subject) > subjectBudget
+					? truncateToWidth(item.subject, subjectBudget, "…")
+					: item.subject;
 			return `${theme.fg("success", "✓")} ${theme.fg("dim", strike(subject))}`;
-		case "in_progress": {
-			const head = `${theme.fg("warning", spinner)} ${subject}`;
-			return item.activeForm ? `${head}  ${theme.fg("dim", `(${item.activeForm})`)}` : head;
 		}
-		default:
+		case "in_progress": {
+			if (item.activeForm) {
+				// Reserve space for "  (activeForm)" suffix.
+				const suffixText = `  (${item.activeForm})`;
+				const suffixWidth = visibleWidth(suffixText);
+				const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH - suffixWidth);
+				const subject =
+					visibleWidth(item.subject) > subjectBudget
+						? truncateToWidth(item.subject, subjectBudget, "…")
+						: item.subject;
+				return `${theme.fg("warning", spinner)} ${subject}  ${theme.fg("dim", `(${item.activeForm})`)}`;
+			}
+			const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH);
+			const subject =
+				visibleWidth(item.subject) > subjectBudget
+					? truncateToWidth(item.subject, subjectBudget, "…")
+					: item.subject;
+			return `${theme.fg("warning", spinner)} ${subject}`;
+		}
+		default: {
+			const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH);
+			const subject =
+				visibleWidth(item.subject) > subjectBudget
+					? truncateToWidth(item.subject, subjectBudget, "…")
+					: item.subject;
 			return `${theme.fg("muted", "○")} ${subject}`;
+		}
 	}
 }
 
@@ -60,7 +93,8 @@ export function renderTodoOverlay(data: TodoOverlayData, width: number, spinner:
 	rows.forEach((item, idx) => {
 		const isLast = idx === rows.length - 1 && hiddenCompleted === 0;
 		const connector = theme.fg("dim", isLast ? "└─ " : "├─ ");
-		lines.push(connector + renderRow(item, spinner, width));
+		const row = connector + renderRow(item, spinner, width);
+		lines.push(visibleWidth(row) > width ? truncateToWidth(row, width, "…") : row);
 	});
 	if (hiddenCompleted > 0) {
 		lines.push(theme.fg("dim", `└─ … ${hiddenCompleted} completed hidden`));
