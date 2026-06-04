@@ -344,3 +344,10 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 }
+
+/** True when the assistant message carries at least one non-empty text block.
+ * Thinking-only / tool-call-only messages return false — used by the activity
+ * stacker to decide when agent speech should divide a tool-activity burst. */
+export function messageHasVisibleText(message: AssistantMessage): boolean {
+	return message.content.some((c) => c.type === "text" && typeof c.text === "string" && c.text.trim().length > 0);
+}
