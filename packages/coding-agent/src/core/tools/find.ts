@@ -122,6 +122,7 @@ export function createFindToolDefinition(
 	const customOps = options?.operations;
 	return {
 		name: "find",
+		activity: "navigation",
 		label: "find",
 		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Finds files by name/glob. Do NOT use \`grep\` to locate files by name; grep searches contents.`,
 		promptSnippet: "Find files by glob pattern (respects .gitignore)",

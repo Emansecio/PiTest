@@ -66,6 +66,7 @@ export function createSearchToolBm25Definition(
 ): ToolDefinition<typeof searchToolBm25Schema, SearchToolBm25Details> {
 	return {
 		name: "search_tool_bm25",
+		activity: "navigation",
 		label: "search_tool_bm25",
 		description:
 			"Retrieve specialized tools that are NOT in the default tool surface. BM25-search a hidden tool index and (optionally) activate the top match so it becomes callable. Use when you need a capability that does not appear in the active tool list. This retrieves specialized/hidden TOOLS by capability — it is NOT code search (use `grep`) nor memory search (use `recall`).",

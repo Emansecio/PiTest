@@ -264,6 +264,7 @@ export function createSymbolToolDefinition(
 	const ops = options?.operations ?? defaultSymbolOperations;
 	return {
 		name: "symbol",
+		activity: "navigation",
 		label: "symbol",
 		description:
 			"Extract one named symbol (function/class/type/const/def) from a source file — cheaper than read for one declaration. Supports brace (JS/TS, Java, C/C++, Go, Rust, etc.) and indent (Python, Ruby) languages. Heuristic regex, not AST. Use read with offset/limit for line ranges. If the symbol is not found or not unique, fall back to `grep` on the name.",

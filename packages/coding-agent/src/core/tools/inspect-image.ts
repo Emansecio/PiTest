@@ -63,6 +63,7 @@ export function createInspectImageToolDefinition(
 	const autoResize = options?.autoResizeImages ?? true;
 	return {
 		name: "inspect_image",
+		activity: "navigation",
 		label: "inspect_image",
 		description:
 			"Attach a local image to the next assistant turn so the model can describe or answer questions about it. Use when you need the vision model to look at a screenshot, chart, photo, or diagram on disk.",

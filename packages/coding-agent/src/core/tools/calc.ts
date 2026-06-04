@@ -345,6 +345,7 @@ export function createCalcToolDefinition(
 ): ToolDefinition<typeof calcSchema, CalcToolDetails> {
 	return {
 		name: "calc",
+		activity: "navigation",
 		label: "calc",
 		description:
 			"Deterministic arithmetic evaluator. Supports + - * / % ^, parentheses, unary minus, the constants pi/e, and functions abs, sqrt, exp, log, log2, log10, sin, cos, tan, asin, acos, atan, floor, ceil, round, min, max, pow, mod. No variables, no statements.",

@@ -89,6 +89,7 @@ export function createReflectToolDefinition(
 ): ToolDefinition<typeof reflectSchema, ReflectToolDetails> {
 	return {
 		name: "reflect",
+		activity: "navigation",
 		label: "reflect",
 		description:
 			"Give me everything I know about X. Returns up to 20 hindsight entries relevant to the question as a single Markdown block for you to synthesize. Use when you want broad context, not a targeted lookup (for that, use `recall`).",

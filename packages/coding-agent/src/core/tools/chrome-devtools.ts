@@ -38,6 +38,7 @@ type Manager = NonNullable<ReturnType<typeof getCurrentChromeDevtoolsManager>>;
 
 interface ChromeToolSpec<S extends TSchema> {
 	name: string;
+	activity?: "navigation" | "action";
 	description: string;
 	snippet: string;
 	guidelines: string[];
@@ -48,6 +49,7 @@ interface ChromeToolSpec<S extends TSchema> {
 function buildChromeTool<S extends TSchema>(spec: ChromeToolSpec<S>): ToolDefinition<S, ChromeToolDetails> {
 	return {
 		name: spec.name,
+		...(spec.activity !== undefined ? { activity: spec.activity } : {}),
 		label: spec.name,
 		description: spec.description,
 		promptSnippet: spec.snippet,
@@ -117,6 +119,7 @@ const networkSchema = Type.Object(
 export function createChromeListPagesDefinition(): ToolDefinition<typeof emptySchema, ChromeToolDetails> {
 	return buildChromeTool({
 		name: "chrome_devtools_list_pages",
+		activity: "navigation",
 		description: "List the inspectable Chrome tabs/pages (id, title, url).",
 		snippet: "List open Chrome tabs",
 		guidelines: ["Use to find a page id before chrome_devtools_select_page."],
@@ -180,6 +183,7 @@ export function createChromeEvaluateDefinition(): ToolDefinition<typeof evaluate
 export function createChromeScreenshotDefinition(): ToolDefinition<typeof screenshotSchema, ChromeToolDetails> {
 	return buildChromeTool({
 		name: "chrome_devtools_screenshot",
+		activity: "navigation",
 		description: "Capture a PNG screenshot of the selected page (optionally the full page).",
 		snippet: "Screenshot the page",
 		guidelines: ["Select or navigate to a page first."],
@@ -197,6 +201,7 @@ export function createChromeScreenshotDefinition(): ToolDefinition<typeof screen
 export function createChromeReadConsoleDefinition(): ToolDefinition<typeof consoleSchema, ChromeToolDetails> {
 	return buildChromeTool({
 		name: "chrome_devtools_read_console",
+		activity: "navigation",
 		description: "Read buffered console messages from the selected page.",
 		snippet: "Read the page console",
 		guidelines: ["Filter by level (e.g. 'error') to focus on problems."],
@@ -212,6 +217,7 @@ export function createChromeReadConsoleDefinition(): ToolDefinition<typeof conso
 export function createChromeReadNetworkDefinition(): ToolDefinition<typeof networkSchema, ChromeToolDetails> {
 	return buildChromeTool({
 		name: "chrome_devtools_read_network",
+		activity: "navigation",
 		description: "Read buffered network requests from the selected page.",
 		snippet: "Read network requests",
 		guidelines: ["Shows recent requests with method, url and status."],

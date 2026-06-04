@@ -158,6 +158,7 @@ export function createAstGrepToolDefinition(
 	const binary = options?.binaryPath ?? "ast-grep";
 	return {
 		name: "ast_grep",
+		activity: "navigation",
 		label: "ast_grep",
 		description: `Structural code search via ast-grep CLI. \`pattern\` is an ast-grep pattern (not regex), e.g. "console.log($X)". Use $METAVAR to capture nodes. Optionally pin language with \`lang\` (ts, tsx, js, py, rs, ...). Returns matches grouped by file with line:col locations. Use only for structural/AST patterns; for literal text or regex, \`grep\` is faster. Requires the ast-grep CLI to be installed and on PATH — the tool errors with "${AST_GREP_INSTALL_HINT}" if it is absent.`,
 		promptSnippet: "Structural AST search (ast-grep). Patterns like console.log($X). Capture with $METAVAR.",

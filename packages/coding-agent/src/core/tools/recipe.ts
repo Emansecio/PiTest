@@ -225,6 +225,7 @@ export function createRecipeToolDefinition(
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	return {
 		name: "recipe",
+		activity: "navigation",
 		label: "recipe",
 		description:
 			"Invoke a build/test/lint target from the detected task runner — no need to remember which (npm/bun/pnpm/yarn/just/make/cargo/poe). Auto-detects from manifest files in cwd.",

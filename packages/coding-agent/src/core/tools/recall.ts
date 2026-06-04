@@ -73,6 +73,7 @@ export function createRecallToolDefinition(
 ): ToolDefinition<typeof recallSchema, RecallToolDetails> {
 	return {
 		name: "recall",
+		activity: "navigation",
 		label: "recall",
 		description:
 			"Search the project's hindsight memory bank for relevant entries. Use this before doing redundant investigation — past sessions may have already established the answer.",
