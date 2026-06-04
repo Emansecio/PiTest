@@ -67,7 +67,7 @@ export class ActivityLineComponent extends Container {
 		}
 		const lines = [this.header()];
 		if (this.expanded || state === "error") {
-			for (const l of this.exec.render(width - 2)) lines.push(`\t${l}`);
+			for (const l of this.exec.render(width - 2)) lines.push(`  ${l}`);
 		}
 		return lines;
 	}
