@@ -451,6 +451,16 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 */
 	executionMode?: ToolExecutionMode;
 
+	/**
+	 * UI activity family for the interactive TUI's grouped tool rendering.
+	 * - "navigation": passive read-only orientation (read/grep/ls/…); collapses
+	 *   into an aggregated NavGroup line.
+	 * - "action": has an observable effect (edit/write/bash/…); gets its own line.
+	 * Defaults to "action" when omitted, so unknown/extension/MCP tools are
+	 * surfaced individually (the safe default).
+	 */
+	activity?: "navigation" | "action";
+
 	/** Execute the tool. */
 	execute(
 		toolCallId: string,
