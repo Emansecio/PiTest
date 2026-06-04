@@ -2968,10 +2968,16 @@ export class InteractiveMode {
 			this.updateEditorBorderColor();
 		}
 
+		const grouped = this.settingsManager.getToolActivity() === "grouped";
+		if (grouped) this.activityStacker.reset();
+
 		for (const message of sessionContext.messages) {
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
 				this.addMessageToChat(message);
+				if (grouped && messageHasVisibleText(message)) {
+					this.activityStacker.divide();
+				}
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
@@ -2988,7 +2994,15 @@ export class InteractiveMode {
 							this.sessionManager.getCwd(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
+						if (grouped) {
+							if (component.getActivityFamily() === "navigation") {
+								this.activityStacker.placeNavigation(component);
+							} else {
+								this.activityStacker.placeAction(component);
+							}
+						} else {
+							this.chatContainer.addChild(component);
+						}
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
 							let errorMessage: string;

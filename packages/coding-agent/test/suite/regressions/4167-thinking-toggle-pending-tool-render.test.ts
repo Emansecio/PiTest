@@ -35,7 +35,9 @@ type RenderSessionContextThis = {
 	settingsManager: {
 		getShowImages(): boolean;
 		getImageWidthCells(): number;
+		getToolActivity(): string;
 	};
+	activityStacker: { reset(): void; divide(): void; placeNavigation(c: unknown): void; placeAction(c: unknown): void };
 	sessionManager: { getCwd(): string };
 	session: { retryAttempt: number };
 	toolOutputExpanded: boolean;
@@ -63,6 +65,13 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		settingsManager: {
 			getShowImages: () => false,
 			getImageWidthCells: () => 60,
+			getToolActivity: () => "legacy",
+		},
+		activityStacker: {
+			reset: vi.fn(),
+			divide: vi.fn(),
+			placeNavigation: vi.fn(),
+			placeAction: vi.fn(),
 		},
 		sessionManager: { getCwd: () => process.cwd() },
 		session: { retryAttempt: 0 },
