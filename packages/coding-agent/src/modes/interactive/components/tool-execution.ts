@@ -89,6 +89,11 @@ export class ToolExecutionComponent extends MessageShell {
 	// hidden and its animations are owned by the parent line — skip the local
 	// gutter spinner/ease entirely.
 	private gutterAnimationsEnabled = true;
+	// Memoized derived values read on the activity-group render hot path. Each is
+	// invalidated when its input changes (args / result), so a steady component
+	// costs O(1) per frame instead of re-scanning/re-classifying.
+	private activityFamilyCache: ToolActivity | null = null;
+	private abortedCache: boolean | null = null;
 
 	constructor(
 		toolName: string,
@@ -239,6 +244,7 @@ export class ToolExecutionComponent extends MessageShell {
 
 	updateArgs(args: any): void {
 		this.args = args;
+		this.activityFamilyCache = null;
 		this.updateDisplay();
 	}
 
@@ -264,6 +270,7 @@ export class ToolExecutionComponent extends MessageShell {
 	): void {
 		this.result = result;
 		this.isPartial = isPartial;
+		this.abortedCache = null;
 		this.updateDisplay();
 		this.maybeConvertImagesForKitty();
 	}
@@ -316,20 +323,28 @@ export class ToolExecutionComponent extends MessageShell {
 	/** True when the errored result is actually an abort/interruption rather than
 	 * a genuine failure — used to suppress the error auto-expand. */
 	isAborted(): boolean {
-		if (!this.result?.isError) return false;
-		return this.result.content.some((c) => typeof c.text === "string" && ABORT_RESULT_RE.test(c.text));
+		if (this.abortedCache !== null) return this.abortedCache;
+		this.abortedCache =
+			this.result?.isError === true &&
+			this.result.content.some((c) => typeof c.text === "string" && ABORT_RESULT_RE.test(c.text));
+		return this.abortedCache;
 	}
 
 	getActivityFamily(): ToolActivity {
+		if (this.activityFamilyCache !== null) return this.activityFamilyCache;
 		const activity = this.toolDefinition?.activity ?? this.builtInToolDefinition?.activity;
+		let family: ToolActivity;
 		if (typeof activity === "function") {
 			try {
-				return activity(this.args);
+				family = activity(this.args);
 			} catch {
-				return "action";
+				family = "action";
 			}
+		} else {
+			family = activity ?? "action";
 		}
-		return activity ?? "action";
+		this.activityFamilyCache = family;
+		return family;
 	}
 
 	/** Run as a child of an activity line/group: drop the gutter and let the

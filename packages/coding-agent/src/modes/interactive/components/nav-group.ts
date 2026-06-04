@@ -17,6 +17,9 @@ export class NavGroupComponent extends Container {
 	private execs: ToolExecutionComponent[] = [];
 	private expanded = false;
 	private spinnerGlyph: string | null = null;
+	// Counters depend only on the group's composition (tool names), so cache the
+	// rendered string and rebuild it lazily on addCall instead of every frame.
+	private countsCache: string | null = null;
 
 	constructor(ui: TUI) {
 		super();
@@ -34,6 +37,7 @@ export class NavGroupComponent extends Container {
 	addCall(exec: ToolExecutionComponent): void {
 		exec.setActivityChild(true);
 		this.execs.push(exec);
+		this.countsCache = null;
 		this.ui.requestRender();
 	}
 
@@ -61,6 +65,7 @@ export class NavGroupComponent extends Container {
 	}
 
 	private counts(): string {
+		if (this.countsCache !== null) return this.countsCache;
 		const byNoun = new Map<string, number>();
 		for (const e of this.execs) {
 			const noun = navNounFor(e.getToolName());
@@ -68,7 +73,8 @@ export class NavGroupComponent extends Container {
 		}
 		const parts: string[] = [];
 		for (const [noun, n] of byNoun) parts.push(`${n} ${pluralizeNoun(noun, n)}`);
-		return parts.join(" · ");
+		this.countsCache = parts.join(" · ");
+		return this.countsCache;
 	}
 
 	private header(state: GroupState): string {
