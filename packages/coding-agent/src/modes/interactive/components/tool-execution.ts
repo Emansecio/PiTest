@@ -19,6 +19,7 @@ import { type ThemeColor, theme } from "../theme/theme.ts";
 import { summarizeArgsOneLine } from "./arg-summary.ts";
 import { keyHint } from "./keybinding-hints.js";
 import { MessageShell } from "./message-shell.ts";
+import type { ToolActivity } from "./tool-activity.ts";
 
 // Cap for the no-custom-renderer result fallback. Tools without their own
 // renderResult (MCP tools, the coordinator/Task tool, extension tools) would
@@ -80,6 +81,10 @@ export class ToolExecutionComponent extends MessageShell {
 	private gutterEaseTo: "success" | "error" = "success";
 	private runningSpinnerUnsub: (() => void) | null = null;
 	private runningSpinnerFrame = -1;
+	// When true (component is a child of a NavGroup/ActivityLine), the gutter is
+	// hidden and its animations are owned by the parent line — skip the local
+	// gutter spinner/ease entirely.
+	private gutterAnimationsEnabled = true;
 
 	constructor(
 		toolName: string,
@@ -287,6 +292,39 @@ export class ToolExecutionComponent extends MessageShell {
 		this.updateDisplay();
 	}
 
+	getToolName(): string {
+		return this.toolName;
+	}
+
+	getArgs(): any {
+		return this.args;
+	}
+
+	getResultDetails(): any {
+		return this.result?.details;
+	}
+
+	getActivityState(): "pending" | "success" | "error" {
+		if (this.isPartial) return "pending";
+		return this.result?.isError ? "error" : "success";
+	}
+
+	getActivityFamily(): ToolActivity {
+		return this.toolDefinition?.activity ?? this.builtInToolDefinition?.activity ?? "action";
+	}
+
+	/** Run as a child of an activity line/group: drop the gutter and let the
+	 * parent own the state icon + spinner. Idempotent. */
+	setActivityChild(on: boolean): void {
+		this.gutterAnimationsEnabled = !on;
+		this.setShellDisabled(on);
+		if (on) {
+			this.stopRunningSpinner();
+			this.stopGutterEase();
+		}
+		this.updateDisplay();
+	}
+
 	setShowImages(show: boolean): void {
 		this.showImages = show;
 		this.updateDisplay();
@@ -446,6 +484,7 @@ export class ToolExecutionComponent extends MessageShell {
 	/** Decide the gutter color for the current state: ease once when settling
 	 * pending → success/error (P5), otherwise set it steadily. */
 	private refreshGutterState(): void {
+		if (!this.gutterAnimationsEnabled) return;
 		const target: GutterState = this.isPartial ? "pending" : this.result?.isError ? "error" : "success";
 		if (target === this.gutterState) {
 			// No state change: leave an in-flight ease alone; otherwise keep the
@@ -503,6 +542,10 @@ export class ToolExecutionComponent extends MessageShell {
 	/** Subscribe/unsubscribe the gutter running spinner based on whether the tool
 	 * is actively executing (started, not yet settled, and not mid-ease). */
 	private syncRunningSpinner(): void {
+		if (!this.gutterAnimationsEnabled) {
+			this.stopRunningSpinner();
+			return;
+		}
 		const running = this.executionStarted && this.isPartial && !this.hideComponent && this.gutterEaseUnsub === null;
 		if (running) {
 			if (!this.runningSpinnerUnsub) {
