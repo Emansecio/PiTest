@@ -89,17 +89,25 @@ const GIT_READONLY = new Set([
 	"show-ref",
 ]);
 
+// Hoisted so they are not re-created on every classification call.
+const DEV_NULL_REDIRECT_RE = /\d*>>?&?\s*\/dev\/null/g;
+const FD_DUP_RE = /\d*>&\d+/g;
+const FILE_REDIRECT_RE = />>?\s*[^\s&|;>]/;
+const SEGMENT_SEP_RE = /&&|\|\||\||;/;
+const WHITESPACE_RE = /\s+/;
+const ENV_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
 export function classifyBashCommand(command: string): "navigation" | "action" {
 	// A write redirection to a real file is an effect. Strip /dev/null discards
 	// and fd dups (2>/dev/null, 2>&1) first so they are not mistaken for writes.
-	const cleaned = command.replace(/\d*>>?&?\s*\/dev\/null/g, " ").replace(/\d*>&\d+/g, " ");
-	if (/>>?\s*[^\s&|;>]/.test(cleaned)) return "action";
+	const cleaned = command.replace(DEV_NULL_REDIRECT_RE, " ").replace(FD_DUP_RE, " ");
+	if (FILE_REDIRECT_RE.test(cleaned)) return "action";
 
-	for (const raw of command.split(/&&|\|\||\||;/)) {
+	for (const raw of command.split(SEGMENT_SEP_RE)) {
 		const seg = raw.trim();
 		if (!seg) continue;
 		// Drop leading VAR=value assignments (e.g. `FOO=bar cmd`).
-		const tokens = seg.split(/\s+/).filter((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t));
+		const tokens = seg.split(WHITESPACE_RE).filter((t) => !ENV_ASSIGN_RE.test(t));
 		const cmd = tokens[0];
 		if (!cmd || NEUTRAL.has(cmd)) continue;
 		if (cmd === "git") {

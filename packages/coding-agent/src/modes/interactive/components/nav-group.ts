@@ -1,7 +1,7 @@
 import { Container, SPINNER_FRAMES, type TUI } from "@pit/tui";
 import { theme } from "../theme/theme.ts";
-import { createSpinnerTicker } from "./spinner-ticker.ts";
-import { navNounFor, pluralizeNoun } from "./tool-activity.ts";
+import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
+import { nounFor, pluralizeNoun } from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 type GroupState = "pending" | "success" | "error";
@@ -9,9 +9,10 @@ type GroupState = "pending" | "success" | "error";
 const ICON_SUCCESS = "✓";
 const ICON_ERROR = "✗";
 
-/** Aggregates a contiguous burst of navigation tool calls into one summary line
- * (`✓ Explored 3 files · 1 search`). Children render only when expanded; a child
- * that errors auto-expands. No gutter — the state icon carries the framing. */
+/** Aggregates a contiguous burst of tool calls — navigation and action alike —
+ * into one summary line (`✓ Did 4 files · 2 edits · 1 command`). Children render
+ * only when expanded; a child that errors auto-expands. No gutter — the state
+ * icon carries the framing. (Named NavGroup historically; now group-agnostic.) */
 export class NavGroupComponent extends Container {
 	private ui: TUI;
 	private execs: ToolExecutionComponent[] = [];
@@ -20,15 +21,27 @@ export class NavGroupComponent extends Container {
 	// Counters depend only on the group's composition (tool names), so cache the
 	// rendered string and rebuild it lazily on addCall instead of every frame.
 	private countsCache: string | null = null;
+	private ticker: SpinnerTicker | null = null;
 
 	constructor(ui: TUI) {
 		super();
 		this.ui = ui;
-		createSpinnerTicker(
-			ui,
+	}
+
+	/** Run the spinner ticker only while there is pending work. It self-stops on
+	 * resolve (onFrame null), so a finished group in history costs no per-frame
+	 * aggregateState scan; addCall re-arms it when a new pending call arrives. */
+	private ensureTicker(): void {
+		if (this.ticker) return;
+		this.ticker = createSpinnerTicker(
+			this.ui,
 			() => this.aggregateState() === "pending",
 			(g) => {
 				this.spinnerGlyph = g;
+				if (g === null) {
+					this.ticker?.stop();
+					this.ticker = null;
+				}
 				this.ui.requestRender();
 			},
 		);
@@ -38,6 +51,7 @@ export class NavGroupComponent extends Container {
 		exec.setActivityChild(true);
 		this.execs.push(exec);
 		this.countsCache = null;
+		if (this.aggregateState() === "pending") this.ensureTicker();
 		this.ui.requestRender();
 	}
 
@@ -68,7 +82,7 @@ export class NavGroupComponent extends Container {
 		if (this.countsCache !== null) return this.countsCache;
 		const byNoun = new Map<string, number>();
 		for (const e of this.execs) {
-			const noun = navNounFor(e.getToolName());
+			const noun = nounFor(e.getToolName());
 			byNoun.set(noun, (byNoun.get(noun) ?? 0) + 1);
 		}
 		const parts: string[] = [];
