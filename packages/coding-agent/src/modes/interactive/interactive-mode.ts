@@ -112,10 +112,11 @@ import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
+import { ActivityStacker } from "./activity-stacker.ts";
 import { prefixAutocompleteDescription } from "./autocomplete-source.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { createAskPicker } from "./components/ask-picker.ts";
-import { AssistantMessageComponent } from "./components/assistant-message.ts";
+import { AssistantMessageComponent, messageHasVisibleText } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
@@ -309,6 +310,10 @@ export class InteractiveMode {
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 
+	// Grouped activity stacker (initialized in start())
+	private activityStacker!: ActivityStacker;
+	private lastDividedMessage: unknown = null;
+
 	// Tool output expansion state
 	private toolOutputExpanded = false;
 
@@ -438,6 +443,7 @@ export class InteractiveMode {
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.chatContainer = new Container();
+		this.activityStacker = new ActivityStacker(this.ui, (component) => this.chatContainer.addChild(component));
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
 		this.widgetContainerAbove = new Container();
@@ -2439,6 +2445,8 @@ export class InteractiveMode {
 		switch (event.type) {
 			case "agent_start":
 				this.pendingTools.clear();
+				this.activityStacker.reset();
+				this.lastDividedMessage = null;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -2497,6 +2505,15 @@ export class InteractiveMode {
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					this.streamingComponent.updateContent(this.streamingMessage);
+
+					if (
+						this.settingsManager.getToolActivity() === "grouped" &&
+						this.lastDividedMessage !== this.streamingMessage &&
+						messageHasVisibleText(this.streamingMessage)
+					) {
+						this.activityStacker.divide();
+						this.lastDividedMessage = this.streamingMessage;
+					}
 
 					for (const content of this.streamingMessage.content) {
 						if (content.type === "toolCall") {
@@ -2766,7 +2783,15 @@ export class InteractiveMode {
 			this.sessionManager.getCwd(),
 		);
 		component.setExpanded(this.toolOutputExpanded);
-		this.chatContainer.addChild(component);
+		if (this.settingsManager.getToolActivity() === "grouped") {
+			if (component.getActivityFamily() === "navigation") {
+				this.activityStacker.placeNavigation(component);
+			} else {
+				this.activityStacker.placeAction(component);
+			}
+		} else {
+			this.chatContainer.addChild(component);
+		}
 		this.pendingTools.set(toolCallId, component);
 		return component;
 	}
