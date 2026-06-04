@@ -72,7 +72,10 @@ export class NavGroupComponent extends Container {
 	}
 
 	private header(state: GroupState): string {
-		const verb = state === "pending" ? "Exploring" : "Explored";
+		// Pure-navigation bursts read as "Explored …"; mixed bursts (with edits,
+		// commands, …) use a neutral verb since "Explored 2 edits" reads wrong.
+		const allNav = this.execs.every((e) => e.getActivityFamily() === "navigation");
+		const verb = allNav ? (state === "pending" ? "Exploring" : "Explored") : state === "pending" ? "Working" : "Did";
 		return `${this.icon(state)} ${theme.bold(verb)} ${theme.fg("toolOutput", this.counts())}`;
 	}
 

@@ -20,7 +20,7 @@ const NAVIGATION = [
 	"chrome_devtools_read_network",
 ] as const;
 
-const ACTION = ["edit", "write", "bash", "ast_edit", "web_search", "todo"] as const;
+const ACTION = ["edit", "write", "ast_edit", "web_search", "todo"] as const;
 
 describe("tool activity family on built-in definitions", () => {
 	test.each(NAVIGATION)("%s is navigation", (name) => {
@@ -29,5 +29,9 @@ describe("tool activity family on built-in definitions", () => {
 
 	test.each(ACTION)("%s defaults to action (undefined)", (name) => {
 		expect(createToolDefinition(name as any, process.cwd()).activity).toBeUndefined();
+	});
+
+	test("bash uses a dynamic activity classifier (function of the command)", () => {
+		expect(typeof createToolDefinition("bash" as any, process.cwd()).activity).toBe("function");
 	});
 });

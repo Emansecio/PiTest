@@ -50,9 +50,22 @@ const NAV_NOUNS: Record<string, string> = {
 	chrome_devtools_screenshot: "screenshot",
 	chrome_devtools_read_console: "console read",
 	chrome_devtools_read_network: "network read",
+	// Action tools — folded into the same aggregated group ("all" grouping).
+	edit: "edit",
+	edit_v2: "edit",
+	ast_edit: "edit",
+	write: "file written",
+	bash: "command",
+	web_search: "search",
+	eval: "eval",
+	render_mermaid: "diagram",
+	todo: "todo",
+	ask: "question",
+	resolve: "answer",
+	preview: "preview",
 };
 
-/** Singular noun for a navigation tool's aggregated counter. */
+/** Singular noun for a tool's aggregated counter (navigation or action). */
 export function navNounFor(toolName: string): string {
 	return NAV_NOUNS[toolName] ?? "step";
 }

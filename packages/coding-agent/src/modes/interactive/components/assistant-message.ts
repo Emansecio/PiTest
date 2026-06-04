@@ -351,3 +351,17 @@ export class AssistantMessageComponent extends Container {
 export function messageHasVisibleText(message: AssistantMessage): boolean {
 	return message.content.some((c) => c.type === "text" && typeof c.text === "string" && c.text.trim().length > 0);
 }
+
+/** True when the message has content that should appear as its own block:
+ * non-empty text always, and non-empty thinking only when thinking is shown
+ * (hideThinkingBlock off). A thinking-only message under hidden-thinking returns
+ * false, so the activity stacker can suppress it and keep folding tool calls. */
+export function messageHasVisibleContent(message: AssistantMessage, includeThinking: boolean): boolean {
+	return message.content.some((c) => {
+		if (c.type === "text") return typeof c.text === "string" && c.text.trim().length > 0;
+		if (includeThinking && c.type === "thinking") {
+			return typeof c.thinking === "string" && c.thinking.trim().length > 0;
+		}
+		return false;
+	});
+}

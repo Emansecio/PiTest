@@ -116,7 +116,7 @@ import { ActivityStacker } from "./activity-stacker.ts";
 import { prefixAutocompleteDescription } from "./autocomplete-source.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { createAskPicker } from "./components/ask-picker.ts";
-import { AssistantMessageComponent, messageHasVisibleText } from "./components/assistant-message.ts";
+import { AssistantMessageComponent, messageHasVisibleContent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
@@ -312,7 +312,7 @@ export class InteractiveMode {
 
 	// Grouped activity stacker (initialized in start())
 	private activityStacker!: ActivityStacker;
-	private lastDividedMessage: unknown = null;
+	private streamingAttached = false;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -2446,7 +2446,7 @@ export class InteractiveMode {
 			case "agent_start":
 				this.pendingTools.clear();
 				this.activityStacker.reset();
-				this.lastDividedMessage = null;
+				this.streamingAttached = false;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -2476,12 +2476,6 @@ export class InteractiveMode {
 				break;
 
 			case "message_start":
-				// A new message means a new chat-area component is inserted; close any
-				// open NavGroup so the next tools open a fresh group in stream order
-				// (prevents tools landing in a group that now sits above newer content).
-				if (this.settingsManager.getToolActivity() === "grouped") {
-					this.activityStacker.divide();
-				}
 				switch (event.message.role) {
 					case "custom":
 						this.addMessageToChat(event.message);
@@ -2500,8 +2494,18 @@ export class InteractiveMode {
 							this.settingsManager.getStreamingSmoothing(),
 						);
 						this.streamingMessage = event.message;
-						this.chatContainer.addChild(this.streamingComponent);
 						this.streamingComponent.updateContent(this.streamingMessage);
+						// Grouped mode: defer attaching the message block until it has
+						// visible content. A thinking-only message that only runs tools
+						// never attaches, so its tools keep folding into one group and no
+						// "Thinking…" block splits the run. Legacy attaches immediately.
+						if (this.settingsManager.getToolActivity() === "grouped") {
+							this.streamingAttached = false;
+							this.maybeAttachStreamingComponent();
+						} else {
+							this.chatContainer.addChild(this.streamingComponent);
+							this.streamingAttached = true;
+						}
 						break;
 				}
 				this.ui.requestRender();
@@ -2512,13 +2516,8 @@ export class InteractiveMode {
 					this.streamingMessage = event.message;
 					this.streamingComponent.updateContent(this.streamingMessage);
 
-					if (
-						this.settingsManager.getToolActivity() === "grouped" &&
-						this.lastDividedMessage !== this.streamingMessage &&
-						messageHasVisibleText(this.streamingMessage)
-					) {
-						this.activityStacker.divide();
-						this.lastDividedMessage = this.streamingMessage;
+					if (this.settingsManager.getToolActivity() === "grouped") {
+						this.maybeAttachStreamingComponent();
 					}
 
 					for (const content of this.streamingMessage.content) {
@@ -2766,6 +2765,18 @@ export class InteractiveMode {
 		}
 	}
 
+	/** Grouped mode: attach the streaming assistant block the first time it has
+	 * visible content, dividing the activity group so the text appears after it.
+	 * A thinking-only message under hidden-thinking never attaches, so its tools
+	 * keep folding into one group. No-op once attached or in legacy mode. */
+	private maybeAttachStreamingComponent(): void {
+		if (this.streamingAttached || !this.streamingComponent || !this.streamingMessage) return;
+		if (!messageHasVisibleContent(this.streamingMessage, !this.hideThinkingBlock)) return;
+		this.activityStacker.divide();
+		this.chatContainer.addChild(this.streamingComponent);
+		this.streamingAttached = true;
+	}
+
 	private _abortedErrorMessage(retryAttempt: number): string {
 		return retryAttempt > 0
 			? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
@@ -2790,11 +2801,7 @@ export class InteractiveMode {
 		);
 		component.setExpanded(this.toolOutputExpanded);
 		if (this.settingsManager.getToolActivity() === "grouped") {
-			if (component.getActivityFamily() === "navigation") {
-				this.activityStacker.placeNavigation(component);
-			} else {
-				this.activityStacker.placeAction(component);
-			}
+			this.activityStacker.placeCall(component);
 		} else {
 			this.chatContainer.addChild(component);
 		}
@@ -2980,9 +2987,16 @@ export class InteractiveMode {
 		for (const message of sessionContext.messages) {
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
-				this.addMessageToChat(message);
-				if (grouped && messageHasVisibleText(message)) {
-					this.activityStacker.divide();
+				if (grouped) {
+					// Attach the message block (and divide the group) only when it has
+					// visible content; a thinking-only / tool-only message is suppressed
+					// so its tools keep folding into the running group.
+					if (messageHasVisibleContent(message, !this.hideThinkingBlock)) {
+						this.activityStacker.divide();
+						this.addMessageToChat(message);
+					}
+				} else {
+					this.addMessageToChat(message);
 				}
 				// Render tool call components
 				for (const content of message.content) {
@@ -3001,11 +3015,7 @@ export class InteractiveMode {
 						);
 						component.setExpanded(this.toolOutputExpanded);
 						if (grouped) {
-							if (component.getActivityFamily() === "navigation") {
-								this.activityStacker.placeNavigation(component);
-							} else {
-								this.activityStacker.placeAction(component);
-							}
+							this.activityStacker.placeCall(component);
 						} else {
 							this.chatContainer.addChild(component);
 						}
