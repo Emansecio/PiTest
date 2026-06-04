@@ -264,6 +264,8 @@ export class ExtensionRunner {
 	// require an explicit invalidateCaches() call.
 	private _cachedTools: RegisteredTool[] | undefined;
 	private _cachedFlags: Map<string, ExtensionFlag> | undefined;
+	private _cachedShortcuts: Map<KeyId, ExtensionShortcut> | undefined;
+	private _cachedShortcutsKeybindings: KeybindingsConfig | undefined;
 	private _cachedCommands: ResolvedCommand[] | undefined;
 	private _cachedCommandLookup: Map<string, ResolvedCommand> | undefined;
 	private _cachedBprPartition:
@@ -428,6 +430,8 @@ export class ExtensionRunner {
 	invalidateCaches(): void {
 		this._cachedTools = undefined;
 		this._cachedFlags = undefined;
+		this._cachedShortcuts = undefined;
+		this._cachedShortcutsKeybindings = undefined;
 		this._cachedCommands = undefined;
 		this._cachedCommandLookup = undefined;
 		this._cachedBprPartition = undefined;
@@ -471,6 +475,13 @@ export class ExtensionRunner {
 	}
 
 	getShortcuts(resolvedKeybindings: KeybindingsConfig): Map<KeyId, ExtensionShortcut> {
+		// Cached by extension set (cleared in invalidateCaches) + keybindings
+		// identity. The resolved config is memoized upstream, so its identity is
+		// stable until keybindings actually change — avoiding a rescan of every
+		// extension's shortcuts on each keypress.
+		if (this._cachedShortcuts !== undefined && this._cachedShortcutsKeybindings === resolvedKeybindings) {
+			return this._cachedShortcuts;
+		}
 		this.shortcutDiagnostics = [];
 		const builtinKeybindings = buildBuiltinKeybindings(resolvedKeybindings);
 		const extensionShortcuts = new Map<KeyId, ExtensionShortcut>();
@@ -512,6 +523,8 @@ export class ExtensionRunner {
 				extensionShortcuts.set(normalizedKey, shortcut);
 			}
 		}
+		this._cachedShortcuts = extensionShortcuts;
+		this._cachedShortcutsKeybindings = resolvedKeybindings;
 		return extensionShortcuts;
 	}
 

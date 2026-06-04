@@ -512,11 +512,21 @@ export class ModelRegistry {
 	/** Merge custom models into built-in list by provider+id (custom wins on conflicts). */
 	private mergeCustomModels(builtInModels: Model<Api>[], customModels: Model<Api>[]): Model<Api>[] {
 		const merged = [...builtInModels];
+		if (customModels.length === 0) return merged;
+		// Index by provider/id so each custom model is an O(1) lookup instead of a
+		// findIndex scan over the whole built-in list (was O(N*M) per reload).
+		const indexByKey = new Map<string, number>();
+		for (let i = 0; i < merged.length; i++) {
+			const key = `${merged[i]!.provider}/${merged[i]!.id}`;
+			if (!indexByKey.has(key)) indexByKey.set(key, i);
+		}
 		for (const customModel of customModels) {
-			const existingIndex = merged.findIndex((m) => m.provider === customModel.provider && m.id === customModel.id);
-			if (existingIndex >= 0) {
+			const key = `${customModel.provider}/${customModel.id}`;
+			const existingIndex = indexByKey.get(key);
+			if (existingIndex !== undefined) {
 				merged[existingIndex] = customModel;
 			} else {
+				indexByKey.set(key, merged.length);
 				merged.push(customModel);
 			}
 		}

@@ -157,6 +157,10 @@ export class KeybindingsManager {
 	private userBindings: KeybindingsConfig;
 	private keysById = new Map<Keybinding, KeyId[]>();
 	private conflicts: KeybindingConflict[] = [];
+	// Cached resolved view, invalidated on rebuild(). Callers (getShortcuts) rely
+	// on stable identity to memoize, so the returned object must be treated as
+	// read-only — same contract as the other getters that expose internal state.
+	private resolvedCache: KeybindingsConfig | undefined;
 
 	constructor(definitions: KeybindingDefinitions, userBindings: KeybindingsConfig = {}) {
 		this.definitions = definitions;
@@ -167,6 +171,7 @@ export class KeybindingsManager {
 	private rebuild(): void {
 		this.keysById.clear();
 		this.conflicts = [];
+		this.resolvedCache = undefined;
 
 		const userClaims = new Map<KeyId, Set<Keybinding>>();
 		for (const [keybinding, keys] of Object.entries(this.userBindings)) {
@@ -221,11 +226,13 @@ export class KeybindingsManager {
 	}
 
 	getResolvedBindings(): KeybindingsConfig {
+		if (this.resolvedCache !== undefined) return this.resolvedCache;
 		const resolved: KeybindingsConfig = {};
 		for (const id of Object.keys(this.definitions)) {
 			const keys = this.keysById.get(id as Keybinding) ?? [];
 			resolved[id] = keys.length === 1 ? keys[0]! : [...keys];
 		}
+		this.resolvedCache = resolved;
 		return resolved;
 	}
 }

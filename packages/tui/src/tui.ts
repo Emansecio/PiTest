@@ -313,6 +313,9 @@ export class TUI extends Container {
 	// (spinners, pulses) off one monotonic clock so their phases stay locked and a
 	// frame that changes nothing never schedules a render. See addAnimationCallback().
 	private animationCallbacks = new Set<AnimationFrameCallback>();
+	// Reused each tick to snapshot callbacks without allocating an array per
+	// frame; preserves the snapshot semantics (mutation mid-tick is deferred).
+	private animationTickBuffer: AnimationFrameCallback[] = [];
 	private animationTimer: NodeJS.Timeout | undefined;
 	private static readonly ANIMATION_FRAME_MS = 16;
 	private cursorRow = 0; // Logical cursor row (end of rendered content)
@@ -656,11 +659,16 @@ export class TUI extends Container {
 		}
 		const now = performance.now();
 		let dirty = false;
-		// Snapshot so a callback that unsubscribes (or subscribes) mid-tick can't
-		// disturb this frame's iteration.
-		for (const callback of [...this.animationCallbacks]) {
-			if (callback(now)) dirty = true;
+		// Snapshot into a reused buffer so a callback that unsubscribes (or
+		// subscribes) mid-tick can't disturb this frame's iteration, without
+		// allocating a new array every frame.
+		const buf = this.animationTickBuffer;
+		buf.length = 0;
+		for (const callback of this.animationCallbacks) buf.push(callback);
+		for (let i = 0; i < buf.length; i++) {
+			if (buf[i]!(now)) dirty = true;
 		}
+		buf.length = 0;
 		if (dirty) this.requestRender();
 	}
 

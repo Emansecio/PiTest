@@ -89,6 +89,8 @@ export interface TextChunk {
 	text: string;
 	startIndex: number;
 	endIndex: number;
+	/** Visible width of `text`, computed once at wrap time and cached with the chunk. */
+	width: number;
 }
 
 /**
@@ -104,12 +106,12 @@ export interface TextChunk {
  */
 export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl.SegmentData[]): TextChunk[] {
 	if (!line || maxWidth <= 0) {
-		return [{ text: "", startIndex: 0, endIndex: 0 }];
+		return [{ text: "", startIndex: 0, endIndex: 0, width: 0 }];
 	}
 
 	const lineWidth = visibleWidth(line);
 	if (lineWidth <= maxWidth) {
-		return [{ text: line, startIndex: 0, endIndex: line.length }];
+		return [{ text: line, startIndex: 0, endIndex: line.length, width: lineWidth }];
 	}
 
 	const chunks: TextChunk[] = [];
@@ -135,7 +137,12 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 			if (wrapOppIndex >= 0 && currentWidth - wrapOppWidth + gWidth <= maxWidth) {
 				// Backtrack to last wrap opportunity (the remaining content
 				// plus the current grapheme still fits within maxWidth).
-				chunks.push({ text: line.slice(chunkStart, wrapOppIndex), startIndex: chunkStart, endIndex: wrapOppIndex });
+				chunks.push({
+					text: line.slice(chunkStart, wrapOppIndex),
+					startIndex: chunkStart,
+					endIndex: wrapOppIndex,
+					width: wrapOppWidth,
+				});
 				chunkStart = wrapOppIndex;
 				currentWidth -= wrapOppWidth;
 			} else if (chunkStart < charIndex) {
@@ -144,7 +151,12 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 				// boundary wouldn't help because the remaining content plus
 				// the current grapheme (e.g. a wide character) still exceeds
 				// maxWidth.
-				chunks.push({ text: line.slice(chunkStart, charIndex), startIndex: chunkStart, endIndex: charIndex });
+				chunks.push({
+					text: line.slice(chunkStart, charIndex),
+					startIndex: chunkStart,
+					endIndex: charIndex,
+					width: currentWidth,
+				});
 				chunkStart = charIndex;
 				currentWidth = 0;
 			}
@@ -160,7 +172,12 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 			const subChunks = wordWrapLine(grapheme, maxWidth);
 			for (let j = 0; j < subChunks.length - 1; j++) {
 				const sc = subChunks[j]!;
-				chunks.push({ text: sc.text, startIndex: charIndex + sc.startIndex, endIndex: charIndex + sc.endIndex });
+				chunks.push({
+					text: sc.text,
+					startIndex: charIndex + sc.startIndex,
+					endIndex: charIndex + sc.endIndex,
+					width: sc.width,
+				});
 			}
 			const last = subChunks[subChunks.length - 1]!;
 			chunkStart = charIndex + last.startIndex;
@@ -183,7 +200,7 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 	}
 
 	// Push final chunk.
-	chunks.push({ text: line.slice(chunkStart), startIndex: chunkStart, endIndex: line.length });
+	chunks.push({ text: line.slice(chunkStart), startIndex: chunkStart, endIndex: line.length, width: currentWidth });
 
 	return chunks;
 }
@@ -197,6 +214,8 @@ interface EditorState {
 
 interface LayoutLine {
 	text: string;
+	/** Visible width of `text`; precomputed so render() doesn't rescan per frame. */
+	visibleWidth: number;
 	hasCursor: boolean;
 	cursorPos?: number;
 }
@@ -221,6 +240,10 @@ const ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS = 20;
 /** Default half-period of the cursor blink: cursor on for this long, then off
  * for this long (~530ms each, the classic terminal cadence). */
 const CURSOR_BLINK_HALF_MS = 530;
+
+// Hoisted: recompiling these per keystroke in insertCharacter is wasteful.
+const AUTOCOMPLETE_TRIGGER_CHAR_RE = /[a-zA-Z0-9.\-_]/;
+const SYMBOL_COMPLETION_CONTEXT_RE = /(?:^|[\s])[@#][^\s]*$/;
 
 export class Editor implements Component, Focusable {
 	private state: EditorState = {
@@ -557,7 +580,7 @@ export class Editor implements Component, Focusable {
 
 		for (const layoutLine of visibleLines) {
 			let displayText = layoutLine.text;
-			let lineVisibleWidth = visibleWidth(layoutLine.text);
+			let lineVisibleWidth = layoutLine.visibleWidth;
 			let cursorInPadding = false;
 
 			// Add cursor if this line has it
@@ -985,6 +1008,7 @@ export class Editor implements Component, Focusable {
 			// Empty editor
 			layoutLines.push({
 				text: "",
+				visibleWidth: 0,
 				hasCursor: true,
 				cursorPos: 0,
 			});
@@ -1002,12 +1026,14 @@ export class Editor implements Component, Focusable {
 				if (isCurrentLine) {
 					layoutLines.push({
 						text: line,
+						visibleWidth: lineVisibleWidth,
 						hasCursor: true,
 						cursorPos: this.state.cursorCol,
 					});
 				} else {
 					layoutLines.push({
 						text: line,
+						visibleWidth: lineVisibleWidth,
 						hasCursor: false,
 					});
 				}
@@ -1050,12 +1076,14 @@ export class Editor implements Component, Focusable {
 					if (hasCursorInChunk) {
 						layoutLines.push({
 							text: chunk.text,
+							visibleWidth: chunk.width,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
 						});
 					} else {
 						layoutLines.push({
 							text: chunk.text,
+							visibleWidth: chunk.width,
 							hasCursor: false,
 						});
 					}
@@ -1222,7 +1250,7 @@ export class Editor implements Component, Focusable {
 				}
 			}
 			// Also auto-trigger when typing letters in a slash command or symbol completion context
-			else if (/[a-zA-Z0-9.\-_]/.test(char)) {
+			else if (AUTOCOMPLETE_TRIGGER_CHAR_RE.test(char)) {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 				// Check if we're in a slash command (with or without space for arguments)
@@ -1230,7 +1258,7 @@ export class Editor implements Component, Focusable {
 					this.tryTriggerAutocomplete();
 				}
 				// Check if we're in a symbol-based completion context like @ or #
-				else if (textBeforeCursor.match(/(?:^|[\s])[@#][^\s]*$/)) {
+				else if (SYMBOL_COMPLETION_CONTEXT_RE.test(textBeforeCursor)) {
 					this.tryTriggerAutocomplete();
 				}
 			}
@@ -1372,10 +1400,14 @@ export class Editor implements Component, Focusable {
 			const line = this.state.lines[this.state.cursorLine] || "";
 			const beforeCursor = line.slice(0, this.state.cursorCol);
 
-			// Find the last grapheme in the text before cursor
-			const graphemes = [...this.segment(beforeCursor)];
-			const lastGrapheme = graphemes[graphemes.length - 1];
-			const graphemeLength = lastGrapheme ? lastGrapheme.segment.length : 1;
+			// Find the last grapheme in the text before cursor. Iterating keeps only
+			// the final cluster instead of materializing every grapheme before the
+			// cursor into an array on each backspace.
+			let lastSegment: string | undefined;
+			for (const grapheme of this.segment(beforeCursor)) {
+				lastSegment = grapheme.segment;
+			}
+			const graphemeLength = lastSegment ? lastSegment.length : 1;
 
 			const before = line.slice(0, this.state.cursorCol - graphemeLength);
 			const after = line.slice(this.state.cursorCol);
@@ -1915,9 +1947,11 @@ export class Editor implements Component, Focusable {
 				// Moving left - move by one grapheme (handles emojis, combining characters, etc.)
 				if (this.state.cursorCol > 0) {
 					const beforeCursor = currentLine.slice(0, this.state.cursorCol);
-					const graphemes = [...this.segment(beforeCursor)];
-					const lastGrapheme = graphemes[graphemes.length - 1];
-					this.setCursorCol(this.state.cursorCol - (lastGrapheme ? lastGrapheme.segment.length : 1));
+					// Iterate to the last grapheme instead of materializing every
+					// grapheme before the cursor into an array on each left move.
+					let lastSegment: string | undefined;
+					for (const g of this.segment(beforeCursor)) lastSegment = g.segment;
+					this.setCursorCol(this.state.cursorCol - (lastSegment ? lastSegment.length : 1));
 				} else if (this.state.cursorLine > 0) {
 					// Wrap to end of previous logical line
 					this.state.cursorLine--;

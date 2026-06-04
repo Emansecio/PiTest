@@ -1533,14 +1533,17 @@ export class SessionManager {
 			cwd: targetCwd,
 			parentSession: sourcePath,
 		};
-		appendFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`);
-
-		// Copy all non-header entries from source
+		// Serialize the header and all non-header entries into a single buffer and
+		// write once, instead of N+1 synchronous appendFileSync syscalls (one per
+		// entry) that block the event loop and could leave a partial file on a
+		// crash mid-loop.
+		const lines = [`${JSON.stringify(newHeader)}\n`];
 		for (const entry of sourceEntries) {
 			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+				lines.push(`${JSON.stringify(entry)}\n`);
 			}
 		}
+		writeFileSync(newSessionFile, lines.join(""));
 
 		return new SessionManager(targetCwd, dir, newSessionFile, true);
 	}

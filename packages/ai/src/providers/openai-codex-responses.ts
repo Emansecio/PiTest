@@ -1041,19 +1041,23 @@ function extractWebSocketCloseError(event: unknown): Error {
 	return new Error("WebSocket closed");
 }
 
+// Reused for non-streaming WebSocket frame decodes (separate from the stateful
+// streaming decoder in parseSSE).
+const wsTextDecoder = new TextDecoder();
+
 async function decodeWebSocketData(data: unknown): Promise<string | null> {
 	if (typeof data === "string") return data;
 	if (data instanceof ArrayBuffer) {
-		return new TextDecoder().decode(new Uint8Array(data));
+		return wsTextDecoder.decode(new Uint8Array(data));
 	}
 	if (ArrayBuffer.isView(data)) {
 		const view = data as ArrayBufferView;
-		return new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+		return wsTextDecoder.decode(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
 	}
 	if (data && typeof data === "object" && "arrayBuffer" in data) {
 		const blobLike = data as { arrayBuffer: () => Promise<ArrayBuffer> };
 		const arrayBuffer = await blobLike.arrayBuffer();
-		return new TextDecoder().decode(new Uint8Array(arrayBuffer));
+		return wsTextDecoder.decode(new Uint8Array(arrayBuffer));
 	}
 	return null;
 }
@@ -1129,12 +1133,20 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 	signal?.addEventListener("abort", onAbort);
 
 	try {
+		// Cursor over the queue instead of shift() (O(n) per dequeue); compact
+		// periodically so consumed entries don't pin memory. Mirrors parseSSE.
+		let head = 0;
 		while (true) {
 			if (signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
-			if (queue.length > 0) {
-				yield queue.shift()!;
+			if (head < queue.length) {
+				const item = queue[head++]!;
+				if (head > 1024) {
+					queue.splice(0, head);
+					head = 0;
+				}
+				yield item;
 				continue;
 			}
 			if (done) break;

@@ -348,6 +348,9 @@ function formatOsc8Close(terminator: Osc8Terminator): string {
 	return `\x1b]8;;${terminator}`;
 }
 
+// Hoisted: SGR parameter extraction runs for every ANSI code processed.
+const SGR_PARAMS_RE = /\x1b\[([\d;]*)m/;
+
 /**
  * Track active ANSI SGR codes to preserve styling across line breaks.
  */
@@ -381,7 +384,7 @@ class AnsiCodeTracker {
 		}
 
 		// Extract the parameters between \x1b[ and m
-		const match = ansiCode.match(/\x1b\[([\d;]*)m/);
+		const match = ansiCode.match(SGR_PARAMS_RE);
 		if (!match) return;
 
 		const params = match[1];
@@ -670,6 +673,11 @@ export function wrapTextWithAnsi(text: string, width: number): string[] {
 	return result.length > 0 ? result : [""];
 }
 
+// Reused across wrapSingleLine calls to avoid allocating a tracker per wrapped
+// segment (mirrors pooledStyleTracker in extractSegments). wrapSingleLine is
+// synchronous and non-reentrant, so one shared instance is safe.
+const pooledWrapTracker = new AnsiCodeTracker();
+
 function wrapSingleLine(line: string, width: number): string[] {
 	if (!line) {
 		return [""];
@@ -681,7 +689,8 @@ function wrapSingleLine(line: string, width: number): string[] {
 	}
 
 	const wrapped: string[] = [];
-	const tracker = new AnsiCodeTracker();
+	const tracker = pooledWrapTracker;
+	tracker.clear();
 	const tokens = splitIntoTokensWithAnsi(line);
 
 	let currentLine = "";
@@ -750,11 +759,17 @@ function wrapSingleLine(line: string, width: number): string[] {
 }
 
 const PUNCTUATION_REGEX = /[(){}[\]<>.,;:'"!?+\-=*/\\|&%^$#@~`]/;
+const PUNCTUATION_CHARS = new Set("(){}[]<>.,;:'\"!?+-=*/\\|&%^$#@~`");
 
 /**
  * Check if a character is whitespace.
  */
 export function isWhitespaceChar(char: string): boolean {
+	// Fast path for the common ASCII cases; fall back to the regex for the rarer
+	// Unicode whitespace code points so behavior stays identical to /\s/.
+	const code = char.charCodeAt(0);
+	if (code === 32 || code === 9 || code === 10 || code === 13 || code === 12 || code === 11) return true;
+	if (code < 128) return false;
 	return /\s/.test(char);
 }
 
@@ -762,7 +777,8 @@ export function isWhitespaceChar(char: string): boolean {
  * Check if a character is punctuation.
  */
 export function isPunctuationChar(char: string): boolean {
-	return PUNCTUATION_REGEX.test(char);
+	// Single-char grapheme: O(1) Set lookup. Multi-char: fall back to the regex.
+	return char.length === 1 ? PUNCTUATION_CHARS.has(char) : PUNCTUATION_REGEX.test(char);
 }
 
 function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): string[] {

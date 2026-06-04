@@ -454,8 +454,12 @@ export class AgentHarness<
 	}
 
 	private async flushPendingSessionWrites(): Promise<void> {
-		while (this.pendingSessionWrites.length > 0) {
-			const write = this.pendingSessionWrites[0]!;
+		// Cursor instead of shift() (O(n) per entry). Pushes that arrive during an
+		// await grow the array and are still drained (length is re-read); the
+		// function isn't reentrant with itself, so clearing at the end is safe.
+		let i = 0;
+		while (i < this.pendingSessionWrites.length) {
+			const write = this.pendingSessionWrites[i]!;
 			switch (write.type) {
 				case "message":
 					await this.session.appendMessage(write.message);
@@ -487,8 +491,9 @@ export class AgentHarness<
 					await this.session.getStorage().setLeafId(write.targetId);
 					break;
 			}
-			this.pendingSessionWrites.shift();
+			i++;
 		}
+		this.pendingSessionWrites.length = 0;
 	}
 
 	private async handleAgentEvent(event: AgentEvent, signal?: AbortSignal): Promise<void> {

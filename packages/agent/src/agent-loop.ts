@@ -518,10 +518,9 @@ async function streamAssistantResponse(
 						pendingDelta.type === event.type &&
 						pendingDelta.contentIndex === event.contentIndex
 					) {
-						pendingDelta = {
-							...event,
-							delta: pendingDelta.delta + event.delta,
-						} as DeltaEvent;
+						// Mutate the existing copy instead of re-spreading event on
+						// every coalesced chunk (type+contentIndex already match).
+						pendingDelta.delta += event.delta;
 					} else {
 						await flushPendingDelta();
 						pendingDelta = { ...event } as DeltaEvent;

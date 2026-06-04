@@ -13,7 +13,8 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent, ToolResultMessage } from "@pit/ai";
@@ -366,6 +367,10 @@ interface ToolDefinitionEntry {
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 
+// Hoisted so it isn't recompiled on every error message checked for retry.
+const RETRYABLE_ERROR_RE =
+	/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -612,9 +617,9 @@ export class AgentSession {
 		setCurrentGoalManager(this._goal);
 		this._restoreGoalFromSession();
 
-		// Same for the todo list: publish + restore from the session file.
+		// Same for the todo list: publish it. Restore already happened above via
+		// _restoreGoalFromSession → _restoreStateFromSession (restores both).
 		setCurrentTodoManager(this._todo);
-		this._restoreTodoFromSession();
 
 		// Publish a one-shot project-check runner so goal_complete can refuse while red.
 		setCurrentVerificationProbe(() => this.runConfiguredCheck());
@@ -1863,11 +1868,6 @@ export class AgentSession {
 		}
 	}
 
-	private _restoreTodoFromSession(): void {
-		// No-op: restoration is handled by _restoreStateFromSession(), which is
-		// called by _restoreGoalFromSession() during construction.
-	}
-
 	/**
 	 * Single-pass restore of both goal and todo state from the session file.
 	 * Called once in the constructor (via _restoreGoalFromSession) so that
@@ -2295,7 +2295,7 @@ export class AgentSession {
 			// Expand skill commands (/skill:name args) and prompt templates (/template args)
 			let expandedText = currentText;
 			if (expandPromptTemplates) {
-				expandedText = this._expandSkillCommand(expandedText);
+				expandedText = await this._expandSkillCommand(expandedText);
 				expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 			}
 
@@ -2457,7 +2457,7 @@ export class AgentSession {
 	 * Returns the expanded text, or the original text if not a skill command or skill not found.
 	 * Emits errors via extension runner if file read fails.
 	 */
-	private _expandSkillCommand(text: string): string {
+	private async _expandSkillCommand(text: string): Promise<string> {
 		if (!text.startsWith("/skill:")) return text;
 
 		const spaceIndex = text.indexOf(" ");
@@ -2468,7 +2468,7 @@ export class AgentSession {
 		if (!skill) return text; // Unknown skill, pass through
 
 		try {
-			const content = readFileSync(skill.filePath, "utf-8");
+			const content = await readFile(skill.filePath, "utf-8");
 			const body = stripFrontmatter(content).trim();
 			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
 			return args ? `${skillBlock}\n\n${args}` : skillBlock;
@@ -2498,7 +2498,7 @@ export class AgentSession {
 		}
 
 		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
+		let expandedText = await this._expandSkillCommand(text);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		await this._queueSteer(expandedText, images);
@@ -2518,7 +2518,7 @@ export class AgentSession {
 		}
 
 		// Expand skill commands and prompt templates
-		let expandedText = this._expandSkillCommand(text);
+		let expandedText = await this._expandSkillCommand(text);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		await this._queueFollowUp(expandedText, images);
@@ -3745,9 +3745,7 @@ export class AgentSession {
 
 		const err = message.errorMessage;
 		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504, service unavailable, network/connection errors (including connection lost), WebSocket transport closes/errors, fetch failed, premature stream endings, HTTP/2 closed before response, terminated, retry delay exceeded
-		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(
-			err,
-		);
+		return RETRYABLE_ERROR_RE.test(err);
 	}
 
 	/**

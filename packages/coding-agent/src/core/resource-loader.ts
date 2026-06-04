@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { access, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import chalk from "chalk";
@@ -446,12 +447,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const enabledPrompts = getEnabledPaths(resolvedPaths.prompts);
 		const enabledThemes = getEnabledPaths(resolvedPaths.themes);
 
-		const mapSkillPath = (resource: { path: string; metadata: PathMetadata }): string => {
+		const mapSkillPath = async (resource: { path: string; metadata: PathMetadata }): Promise<string> => {
 			if (resource.metadata.source !== "auto" && resource.metadata.origin !== "package") {
 				return resource.path;
 			}
 			try {
-				const stats = statSync(resource.path);
+				const stats = await stat(resource.path);
 				if (!stats.isDirectory()) {
 					return resource.path;
 				}
@@ -459,16 +460,20 @@ export class DefaultResourceLoader implements ResourceLoader {
 				return resource.path;
 			}
 			const skillFile = join(resource.path, "SKILL.md");
-			if (existsSync(skillFile)) {
-				if (!metadataByPath.has(skillFile)) {
-					metadataByPath.set(skillFile, resource.metadata);
-				}
-				return skillFile;
+			try {
+				await access(skillFile);
+			} catch {
+				return resource.path;
 			}
-			return resource.path;
+			if (!metadataByPath.has(skillFile)) {
+				metadataByPath.set(skillFile, resource.metadata);
+			}
+			return skillFile;
 		};
 
-		const enabledSkills = enabledSkillResources.map(mapSkillPath);
+		// Resolve skill paths concurrently; reload() is async, so the previously
+		// synchronous stat/exists per skill no longer blocks the event loop.
+		const enabledSkills = await Promise.all(enabledSkillResources.map(mapSkillPath));
 
 		// Add CLI paths metadata
 		for (const r of cliExtensionPaths.extensions) {

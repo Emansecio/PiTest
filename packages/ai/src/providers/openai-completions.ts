@@ -1118,7 +1118,19 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
  * Get resolved compatibility settings for a model.
  * Uses explicit model.compat if provided, otherwise auto-detects from provider/URL.
  */
+const compatCache = new WeakMap<Model<"openai-completions">, ResolvedOpenAICompletionsCompat>();
+
+// Memoized by model identity: getCompat runs up to 3x per turn (createClient,
+// buildParams, convertMessages) and detectCompat does ~15 string compares.
 function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletionsCompat {
+	const cached = compatCache.get(model);
+	if (cached) return cached;
+	const result = computeCompat(model);
+	compatCache.set(model, result);
+	return result;
+}
+
+function computeCompat(model: Model<"openai-completions">): ResolvedOpenAICompletionsCompat {
 	const detected = detectCompat(model);
 	if (!model.compat) return detected;
 
