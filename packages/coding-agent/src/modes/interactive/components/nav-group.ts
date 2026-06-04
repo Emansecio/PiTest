@@ -49,7 +49,7 @@ export class NavGroupComponent extends Container {
 		for (const e of this.execs) {
 			const s = e.getActivityState();
 			if (s === "pending") anyPending = true;
-			else if (s === "error") anyError = true;
+			else if (s === "error" && !e.isAborted()) anyError = true;
 		}
 		return anyPending ? "pending" : anyError ? "error" : "success";
 	}
@@ -85,9 +85,10 @@ export class NavGroupComponent extends Container {
 				for (const l of e.render(width - 2)) lines.push(`  ${l}`);
 			}
 		} else if (state === "error") {
-			// Auto-expand only the failed child(ren); others stay in the counter.
+			// Auto-expand only genuinely failed child(ren); aborts and successes
+			// stay collapsed in the counter.
 			for (const e of this.execs) {
-				if (e.getActivityState() !== "error") continue;
+				if (e.getActivityState() !== "error" || e.isAborted()) continue;
 				e.setExpanded(true);
 				for (const l of e.render(width - 2)) lines.push(`  ${l}`);
 			}

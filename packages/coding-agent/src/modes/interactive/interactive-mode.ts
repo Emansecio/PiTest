@@ -2476,6 +2476,12 @@ export class InteractiveMode {
 				break;
 
 			case "message_start":
+				// A new message means a new chat-area component is inserted; close any
+				// open NavGroup so the next tools open a fresh group in stream order
+				// (prevents tools landing in a group that now sits above newer content).
+				if (this.settingsManager.getToolActivity() === "grouped") {
+					this.activityStacker.divide();
+				}
 				switch (event.message.role) {
 					case "custom":
 						this.addMessageToChat(event.message);

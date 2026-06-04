@@ -16,6 +16,7 @@ import {
 } from "../../utils/shell.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { applyKeyAliases } from "./argument-prep.js";
+import { classifyBashCommand } from "./bash-activity.js";
 import { OutputAccumulator } from "./output-accumulator.js";
 import { getTextOutput, invalidArgText, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -436,6 +437,7 @@ export function createBashToolDefinition(
 	return {
 		name: "bash",
 		label: "bash",
+		activity: (args) => classifyBashCommand(args.command),
 		description: `Execute a bash command in the current working directory. Use bash only for what no dedicated tool covers: build/test/install scripts, git, network requests, process management, shell pipelines/redirects. Prefer read/grep/find/ls/write/edit for file operations.
 
 Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BASH_MAX_BYTES / 1024}KB (whichever is hit first); full output is saved to a temp file when truncated. Pass one "command" string (join steps with " && "); each call runs in a fresh shell — no carried cwd or env, so use "cd /path && command" inline. Optional timeout in seconds.`,

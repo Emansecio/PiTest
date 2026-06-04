@@ -22,8 +22,27 @@ describe("ToolExecutionComponent activity API", () => {
 			process.cwd(),
 		);
 		expect(read.getActivityFamily()).toBe("navigation");
-		const bash = new ToolExecutionComponent("bash", "t2", { command: "ls" }, {}, undefined, fakeTui(), process.cwd());
-		expect(bash.getActivityFamily()).toBe("action");
+		// bash is dynamic: classified by its command (read-only -> navigation).
+		const bashRead = new ToolExecutionComponent(
+			"bash",
+			"t2",
+			{ command: "ls -la" },
+			{},
+			undefined,
+			fakeTui(),
+			process.cwd(),
+		);
+		expect(bashRead.getActivityFamily()).toBe("navigation");
+		const bashAction = new ToolExecutionComponent(
+			"bash",
+			"t2b",
+			{ command: "npm test" },
+			{},
+			undefined,
+			fakeTui(),
+			process.cwd(),
+		);
+		expect(bashAction.getActivityFamily()).toBe("action");
 	});
 
 	test("getActivityState tracks partial → success/error", () => {

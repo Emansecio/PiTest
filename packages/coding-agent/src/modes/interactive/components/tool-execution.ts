@@ -36,6 +36,10 @@ const SINGLE_LINE_PREVIEW_TOOLS = new Set<string>(["task"]);
 /** Duration of the gutter color fade when a tool settles pending → success/error (P5). */
 const GUTTER_EASE_MS = 220;
 
+/** Result text marking an aborted/interrupted tool (vs a real failure). Such
+ * results must not auto-expand their captured output — the user chose to stop. */
+const ABORT_RESULT_RE = /\b(?:command|operation|request was|stream) aborted\b|\binterrupted\b/i;
+
 type GutterState = "pending" | "success" | "error";
 
 export interface ToolExecutionOptions {
@@ -309,8 +313,23 @@ export class ToolExecutionComponent extends MessageShell {
 		return this.result?.isError ? "error" : "success";
 	}
 
+	/** True when the errored result is actually an abort/interruption rather than
+	 * a genuine failure — used to suppress the error auto-expand. */
+	isAborted(): boolean {
+		if (!this.result?.isError) return false;
+		return this.result.content.some((c) => typeof c.text === "string" && ABORT_RESULT_RE.test(c.text));
+	}
+
 	getActivityFamily(): ToolActivity {
-		return this.toolDefinition?.activity ?? this.builtInToolDefinition?.activity ?? "action";
+		const activity = this.toolDefinition?.activity ?? this.builtInToolDefinition?.activity;
+		if (typeof activity === "function") {
+			try {
+				return activity(this.args);
+			} catch {
+				return "action";
+			}
+		}
+		return activity ?? "action";
 	}
 
 	/** Run as a child of an activity line/group: drop the gutter and let the

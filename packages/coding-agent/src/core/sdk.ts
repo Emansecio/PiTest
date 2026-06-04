@@ -326,7 +326,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write", "ask", "todo"];
+	const defaultActiveToolNames: ToolName[] = [
+		"read",
+		"grep",
+		"find",
+		"ls",
+		"symbol",
+		"bash",
+		"edit",
+		"write",
+		"ask",
+		"todo",
+	];
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const initialActiveToolNames: string[] = options.tools
 		? [...options.tools]

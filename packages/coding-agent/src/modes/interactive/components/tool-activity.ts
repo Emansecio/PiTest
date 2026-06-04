@@ -3,9 +3,19 @@ import { summarizeArgsOneLine } from "./arg-summary.ts";
 
 export type ToolActivity = "navigation" | "action";
 
-/** Resolve a tool's activity family. Defaults to "action" (safe: own line). */
-export function toolActivityFamily(def: ToolDefinition<any, any> | undefined): ToolActivity {
-	return def?.activity ?? "action";
+/** Resolve a tool's activity family. The `activity` field may be a static value
+ * or a function of the call args (e.g. bash classifies by command); pass `args`
+ * to resolve the dynamic case. Defaults to "action" (safe: own line). */
+export function toolActivityFamily(def: ToolDefinition<any, any> | undefined, args?: unknown): ToolActivity {
+	const activity = def?.activity;
+	if (typeof activity === "function") {
+		try {
+			return activity(args);
+		} catch {
+			return "action";
+		}
+	}
+	return activity ?? "action";
 }
 
 /** Count added/removed lines in the custom edit diff. The prefix (+/-/space) is

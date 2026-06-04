@@ -459,7 +459,7 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 * Defaults to "action" when omitted, so unknown/extension/MCP tools are
 	 * surfaced individually (the safe default).
 	 */
-	activity?: "navigation" | "action";
+	activity?: "navigation" | "action" | ((args: any) => "navigation" | "action");
 
 	/** Execute the tool. */
 	execute(

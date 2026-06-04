@@ -41,7 +41,9 @@ export class ActivityLineComponent extends Container {
 	private icon(): string {
 		const state = this.exec.getActivityState();
 		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
-		if (state === "error") return theme.fg("gutterToolError", ICON_ERROR);
+		if (state === "error") {
+			return this.exec.isAborted() ? theme.fg("muted", ICON_ERROR) : theme.fg("gutterToolError", ICON_ERROR);
+		}
 		return theme.fg("gutterToolSuccess", ICON_SUCCESS);
 	}
 
@@ -61,12 +63,15 @@ export class ActivityLineComponent extends Container {
 
 	override render(width: number): string[] {
 		const state = this.exec.getActivityState();
-		if (state === "error" && !this.errorAutoExpanded) {
+		// Real errors auto-expand their detail; an abort/interruption does not —
+		// the user already chose to stop, so don't dump the captured output.
+		const isRealError = state === "error" && !this.exec.isAborted();
+		if (isRealError && !this.errorAutoExpanded) {
 			this.exec.setExpanded(true);
 			this.errorAutoExpanded = true;
 		}
 		const lines = [this.header()];
-		if (this.expanded || state === "error") {
+		if (this.expanded || isRealError) {
 			for (const l of this.exec.render(width - 2)) lines.push(`  ${l}`);
 		}
 		return lines;

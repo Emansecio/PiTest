@@ -55,4 +55,27 @@ describe("ActivityLineComponent", () => {
 		expect(text).not.toContain("✓");
 		expect(text).not.toContain("✗");
 	});
+
+	test("an aborted command does NOT auto-expand its captured output", () => {
+		const e = exec("bash", { command: "cd x && ls -la && du -sh ." });
+		// Abort result: captured stdout + the "Command aborted" status suffix, isError=true.
+		e.updateResult({
+			content: [{ type: "text", text: "tons of ls -la output\n\nCommand aborted" }],
+			isError: true,
+		});
+		const text = stripAnsi(new ActivityLineComponent(e, fakeTui()).render(120).join("\n"));
+		expect(e.isAborted()).toBe(true);
+		expect(text).not.toContain("tons of ls -la output");
+	});
+
+	test("a real error still auto-expands its detail", () => {
+		const e = exec("bash", { command: "npm run build" });
+		e.updateResult({
+			content: [{ type: "text", text: "TypeError boom\n\nCommand exited with code 1" }],
+			isError: true,
+		});
+		const text = stripAnsi(new ActivityLineComponent(e, fakeTui()).render(120).join("\n"));
+		expect(e.isAborted()).toBe(false);
+		expect(text).toContain("TypeError boom");
+	});
 });
