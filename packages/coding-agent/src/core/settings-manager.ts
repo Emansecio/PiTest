@@ -324,6 +324,9 @@ export interface Settings {
 	 */
 	eval?: EvalSettings;
 	chromeDevtools?: ChromeDevtoolsSettings;
+	/** Interactive TUI tool rendering: "grouped" (default) groups consecutive
+	 * tool calls into activity lines; "legacy" keeps one stacked block per call. */
+	toolActivity?: "grouped" | "legacy";
 }
 
 export interface MemorySettings {
@@ -1358,6 +1361,10 @@ export class SettingsManager {
 
 	getDoubleEscapeAction(): "fork" | "tree" | "none" {
 		return this.settings.doubleEscapeAction ?? "tree";
+	}
+
+	getToolActivity(): "grouped" | "legacy" {
+		return this.settings.toolActivity ?? "grouped";
 	}
 
 	setDoubleEscapeAction(action: "fork" | "tree" | "none"): void {
