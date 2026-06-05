@@ -15,6 +15,8 @@ describe("package commands", () => {
 	let originalPiPackageDir: string | undefined;
 	let originalExitCode: typeof process.exitCode;
 	let originalExecPath: string;
+	let originalOffline: string | undefined;
+	let originalSkipVersionCheck: string | undefined;
 
 	function getNewerPatchVersion(): string {
 		const [major = "0", minor = "0", patch = "0"] = VERSION.split(".");
@@ -37,6 +39,13 @@ describe("package commands", () => {
 		originalExecPath = process.execPath;
 		process.exitCode = undefined;
 		process.env[ENV_AGENT_DIR] = agentDir;
+		// Self-update tests exercise the ONLINE update-check path (fetch is stubbed).
+		// Clear the ambient offline lockdown so getLatestPiRelease() doesn't
+		// short-circuit before fetch; afterEach restores the ambient values.
+		originalOffline = process.env.PIT_OFFLINE;
+		originalSkipVersionCheck = process.env.PIT_SKIP_VERSION_CHECK;
+		delete process.env.PIT_OFFLINE;
+		delete process.env.PIT_SKIP_VERSION_CHECK;
 		process.chdir(projectDir);
 	});
 
@@ -55,6 +64,16 @@ describe("package commands", () => {
 			process.env.PIT_PACKAGE_DIR = originalPiPackageDir;
 		}
 		Object.defineProperty(process, "execPath", { value: originalExecPath, configurable: true });
+		if (originalOffline === undefined) {
+			delete process.env.PIT_OFFLINE;
+		} else {
+			process.env.PIT_OFFLINE = originalOffline;
+		}
+		if (originalSkipVersionCheck === undefined) {
+			delete process.env.PIT_SKIP_VERSION_CHECK;
+		} else {
+			process.env.PIT_SKIP_VERSION_CHECK = originalSkipVersionCheck;
+		}
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 

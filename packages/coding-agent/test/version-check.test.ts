@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	checkForNewPiVersion,
 	comparePackageVersions,
@@ -9,6 +9,16 @@ import {
 
 const originalSkipVersionCheck = process.env.PIT_SKIP_VERSION_CHECK;
 const originalOffline = process.env.PIT_OFFLINE;
+
+beforeEach(() => {
+	// These tests exercise the ONLINE version-check path (fetch is stubbed). The
+	// ambient environment may have the offline lockdown set (PIT_OFFLINE /
+	// PIT_SKIP_VERSION_CHECK), which would make getLatestPiRelease() short-circuit
+	// to undefined before fetch is ever called. Clear them so each test controls
+	// the gate explicitly; afterEach restores the ambient values.
+	delete process.env.PIT_SKIP_VERSION_CHECK;
+	delete process.env.PIT_OFFLINE;
+});
 
 afterEach(() => {
 	vi.unstubAllGlobals();
