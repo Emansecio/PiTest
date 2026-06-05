@@ -195,6 +195,39 @@ export interface ResolvedEvalSettings {
 	enabled: boolean;
 }
 
+export interface LspSettings {
+	enabled?: boolean;
+	/** Attach LSP diagnostics to write/edit results (writethrough). Default ON. */
+	diagnosticsOnWrite?: boolean;
+	/** Format files via LSP before writing them. Default OFF. */
+	formatOnWrite?: boolean;
+}
+
+export interface ResolvedLspSettings {
+	enabled: boolean;
+	diagnosticsOnWrite: boolean;
+	formatOnWrite: boolean;
+}
+
+export interface DebugSettings {
+	enabled?: boolean;
+}
+
+export interface ResolvedDebugSettings {
+	enabled: boolean;
+}
+
+export interface AgentMessagingSettings {
+	enabled?: boolean;
+	/** Per-message reply timeout in ms. Default 120000. 0 disables the timeout. */
+	timeoutMs?: number;
+}
+
+export interface ResolvedAgentMessagingSettings {
+	enabled: boolean;
+	timeoutMs: number;
+}
+
 export interface ChromeDevtoolsSettings {
 	enabled?: boolean;
 	debugPort?: number;
@@ -323,6 +356,9 @@ export interface Settings {
 	 * starts a per-session persistent Python + JS kernel manager.
 	 */
 	eval?: EvalSettings;
+	lsp?: LspSettings;
+	debug?: DebugSettings;
+	agentMessaging?: AgentMessagingSettings;
 	chromeDevtools?: ChromeDevtoolsSettings;
 	/** Interactive TUI tool rendering: "grouped" (default) groups consecutive
 	 * tool calls into activity lines; "legacy" keeps one stacked block per call. */
@@ -1563,6 +1599,45 @@ export class SettingsManager {
 		// kernel manager is spawned lazily on first use. Opt out via
 		// `eval.enabled: false` in settings.json.
 		return { enabled: raw?.enabled !== false };
+	}
+
+	/**
+	 * Resolve LSP settings. Default ON: the `lsp` tool joins the active surface
+	 * and language servers cold-start on first use (or warm up at session start).
+	 * Opt out via `lsp.enabled: false` in settings.json.
+	 */
+	getLspSettings(): ResolvedLspSettings {
+		const raw = this.settings.lsp;
+		return {
+			enabled: raw?.enabled !== false,
+			// Default ON: post-write diagnostics are attached to write/edit results.
+			diagnosticsOnWrite: raw?.diagnosticsOnWrite !== false,
+			// Default OFF: opt in to rewrite files through the language server's formatter.
+			formatOnWrite: raw?.formatOnWrite === true,
+		};
+	}
+
+	/**
+	 * Resolve debug settings. Default ON: the `debug` tool joins the active
+	 * surface so the agent can drive a DAP debugger when it needs live program
+	 * state. Adapters cold-start on first use. Opt out via `debug.enabled: false`.
+	 */
+	getDebugSettings(): ResolvedDebugSettings {
+		const raw = this.settings.debug;
+		return { enabled: raw?.enabled !== false };
+	}
+
+	/**
+	 * Resolve agent messaging settings. Default ON: the `message` tool joins the
+	 * active surface so sub-agents can send typed messages to their parent.
+	 * Opt out via `agentMessaging.enabled: false` in settings.json.
+	 */
+	getAgentMessagingSettings(): ResolvedAgentMessagingSettings {
+		const raw = this.settings.agentMessaging;
+		return {
+			enabled: raw?.enabled !== false,
+			timeoutMs: typeof raw?.timeoutMs === "number" ? raw.timeoutMs : 120_000,
+		};
 	}
 
 	getChromeDevtoolsSettings(): ResolvedChromeDevtoolsSettings {
