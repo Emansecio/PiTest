@@ -6,7 +6,7 @@ import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 type GroupState = "pending" | "success" | "error";
 
-const ICON_SUCCESS = "✓";
+const ICON_SUCCESS = "✔︎"; // heavy check, text presentation
 const ICON_ERROR = "✗";
 
 /** Aggregates a contiguous burst of tool calls — navigation and action alike —
@@ -92,10 +92,7 @@ export class NavGroupComponent extends Container {
 	}
 
 	private header(state: GroupState): string {
-		// Pure-navigation bursts read as "Explored …"; mixed bursts (with edits,
-		// commands, …) use a neutral verb since "Explored 2 edits" reads wrong.
-		const allNav = this.execs.every((e) => e.getActivityFamily() === "navigation");
-		const verb = allNav ? (state === "pending" ? "Exploring" : "Explored") : state === "pending" ? "Working" : "Did";
+		const verb = state === "pending" ? "Exploring" : "Explored";
 		return `${this.icon(state)} ${theme.bold(verb)} ${theme.fg("toolOutput", this.counts())}`;
 	}
 

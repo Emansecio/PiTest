@@ -78,4 +78,20 @@ describe("NavGroupComponent", () => {
 		expect(lines.length).toBeGreaterThan(1);
 		expect(stripAnsi(lines.join("\n"))).toContain("ENOENT");
 	});
+
+	// Task 4 tests
+	test("always uses Explored/Exploring (never Did/Working)", () => {
+		const g = new NavGroupComponent(fakeTui());
+		g.addCall(resolved(navExec("read", "1", { file_path: "a" })));
+		g.addCall(resolved(navExec("grep", "2", { pattern: "x" })));
+		const out = g.render(120).map(stripAnsi);
+		expect(out[0]).toContain("Explored");
+		expect(out[0]).not.toContain("Did");
+	});
+
+	test("uses a heavy check glyph", () => {
+		const g = new NavGroupComponent(fakeTui());
+		g.addCall(resolved(navExec("read", "1", { file_path: "a" })));
+		expect(g.render(120)[0]).toContain("✔");
+	});
 });
