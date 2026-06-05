@@ -88,8 +88,10 @@ export interface SpawnSubagentOptions {
 	onAgentReady?: (agent: import("@pit/agent-core").Agent) => void;
 	/**
 	 * Called exactly once when the subagent settles (success, failure, or
-	 * cancellation) — `spawnSubagent` guards it with a once-flag. Used to
-	 * unregister the agent from the message bus.
+	 * cancellation) — `spawnSubagent` guards it with a once-flag. General-purpose
+	 * teardown hook for external callers. Note: it does NOT fire when worktree
+	 * setup throws before the agent is built, so the built-in coordinator unregisters
+	 * its bus id with its own `finally` rather than relying on this hook.
 	 */
 	onSettle?: () => void;
 }

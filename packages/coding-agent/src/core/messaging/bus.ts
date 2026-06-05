@@ -64,6 +64,11 @@ export class AgentMessageBus {
 		}
 	}
 
+	// Transition a participant's status. The built-in lifecycle is reserve →
+	// unregister (entries simply disappear when an agent ends), so in practice a
+	// live entry is always "running". This exists for forward-compatible graceful
+	// shutdown (mark "completed"/"aborted" while keeping the entry briefly), which
+	// is why send()/listVisibleTo() defensively filter on status === "running".
 	setStatus(id: string, status: ParticipantStatus): void {
 		const p = this.#participants.get(id);
 		if (p) {
