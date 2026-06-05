@@ -306,6 +306,8 @@ export class InteractiveMode {
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
 	private streamingMessage: AssistantMessage | undefined = undefined;
+	// The last AssistantMessageComponent attached in the current turn; cleared at agent_start.
+	private lastAssistantComponent: AssistantMessageComponent | null = null;
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -2446,6 +2448,7 @@ export class InteractiveMode {
 			case "agent_start":
 				this.pendingTools.clear();
 				this.activityStacker.reset();
+				this.lastAssistantComponent = null;
 				this.streamingAttached = false;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
@@ -2493,6 +2496,7 @@ export class InteractiveMode {
 							this.ui,
 							this.settingsManager.getStreamingSmoothing(),
 						);
+						this.lastAssistantComponent = this.streamingComponent;
 						this.streamingMessage = event.message;
 						this.streamingComponent.updateContent(this.streamingMessage);
 						// Grouped mode: defer attaching the message block until it has
@@ -2609,6 +2613,10 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.pendingTools.clear();
+
+				if (this.settingsManager.getToolActivity() === "grouped") {
+					this.lastAssistantComponent?.markAsDeliverable();
+				}
 
 				await this.checkShutdownRequested();
 
@@ -2952,6 +2960,7 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 				);
 				this.chatContainer.addChild(assistantComponent);
+				this.lastAssistantComponent = assistantComponent;
 				break;
 			}
 			case "toolResult": {

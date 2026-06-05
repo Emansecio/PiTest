@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@pit/ai";
-import { Container, Markdown, type MarkdownTheme, Spacer, Text, type TUI } from "@pit/tui";
+import { Container, Markdown, type MarkdownTheme, Spacer, Text, type TUI, visibleWidth } from "@pit/tui";
+import { stripAnsi } from "../../../utils/ansi.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { ReadingColumn } from "./reading-column.ts";
 
@@ -66,6 +67,9 @@ export class AssistantMessageComponent extends Container {
 	private revealIndex = -1;
 	private revealedChars = Number.POSITIVE_INFINITY;
 	private revealUnsub: (() => void) | null = null;
+	// Deliverable-marker state
+	private isDeliverable = false;
+	private pulseBright = false;
 
 	constructor(
 		message?: AssistantMessage,
@@ -117,6 +121,16 @@ export class AssistantMessageComponent extends Container {
 		const lines = super.render(width);
 		if (this.hasToolCalls || lines.length === 0) {
 			return lines;
+		}
+
+		if (this.isDeliverable) {
+			const glyph = theme.fg("accent", this.pulseBright ? "◉" : "●");
+			for (let i = 0; i < lines.length; i++) {
+				if (visibleWidth(stripAnsi(lines[i])) > 0) {
+					lines[i] = `${glyph} ${lines[i]}`;
+					break;
+				}
+			}
 		}
 
 		lines[0] = OSC133_ZONE_START + lines[0];
@@ -342,6 +356,36 @@ export class AssistantMessageComponent extends Container {
 			this.revealUnsub();
 			this.revealUnsub = null;
 		}
+	}
+
+	/** Mark this message as the turn's final deliverable: a pulsing accent ●
+	 * is drawn before the first line of its last text block. Idempotent. */
+	markAsDeliverable(): void {
+		if (this.isDeliverable) return;
+		this.isDeliverable = true;
+		this.startDeliverablePulse();
+		this.ui?.requestRender();
+	}
+
+	private startDeliverablePulse(): void {
+		if (!this.ui) {
+			this.pulseBright = true;
+			return;
+		}
+		this.pulseBright = true;
+		let frames = 0;
+		const stop = this.ui.addAnimationCallback((_now: number): boolean => {
+			frames++;
+			if (frames >= 6) {
+				this.pulseBright = false;
+				stop();
+				this.ui?.requestRender();
+				return true;
+			}
+			this.pulseBright = frames % 2 === 0;
+			this.ui?.requestRender();
+			return true;
+		});
 	}
 }
 
