@@ -1,6 +1,7 @@
 import { Container, SPINNER_FRAMES, type TUI } from "@pit/tui";
-import { theme } from "../theme/theme.ts";
+import { type ThemeColor, theme } from "../theme/theme.ts";
 import { clampBashCommandRow } from "./bash-command-row.ts";
+import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
 import { diffStat, verbFor } from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
@@ -19,10 +20,15 @@ export class ActivityLineComponent extends Container {
 	private expanded = false;
 	private spinnerGlyph: string | null = null;
 	private ticker: SpinnerTicker | null = null;
+	private prevState: LineState | null = null;
+	private readonly iconEase: ColorEase;
+	private targetCache: string | null = null;
+	private targetCacheKey = "";
 
 	constructor(ui: TUI) {
 		super();
 		this.ui = ui;
+		this.iconEase = new ColorEase(ui, () => this.ui.requestRender());
 	}
 
 	setExec(exec: ToolExecutionComponent): void {
@@ -62,11 +68,24 @@ export class ActivityLineComponent extends Container {
 
 	private icon(state: LineState): string {
 		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
-		if (state === "error") return theme.fg("gutterToolError", ICON_ERROR);
-		return theme.fg("gutterToolSuccess", ICON_SUCCESS);
+		const glyph = state === "error" ? ICON_ERROR : ICON_SUCCESS;
+		const steady: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
+		return this.iconEase.colorize(steady, glyph);
 	}
 
 	private target(width: number): string {
+		// The spinner re-renders ~12×/s while pending; cache the computed target so
+		// clampBashCommandRow/diffStat don't rerun every frame. State is part of the
+		// key so the diffstat (only known on completion) refreshes on settle.
+		const key = `${width}|${this.state()}`;
+		if (this.targetCache !== null && this.targetCacheKey === key) return this.targetCache;
+		const computed = this.computeTarget(width);
+		this.targetCache = computed;
+		this.targetCacheKey = key;
+		return computed;
+	}
+
+	private computeTarget(width: number): string {
 		const name = this.exec.getToolName();
 		const args = this.exec.getArgs() ?? {};
 		if (name === "bash") {
@@ -92,6 +111,17 @@ export class ActivityLineComponent extends Container {
 	override render(width: number): string[] {
 		if (!this.exec) return [];
 		const state = this.state();
+		// Ease the state icon's color on settle: pending → ✔/✗ hands off from the
+		// spinner gray; a line that appears already resolved (history, instant tool)
+		// fades in from dim. Snaps without truecolor (see ColorEase).
+		if (state !== this.prevState) {
+			if (state !== "pending") {
+				const from: ThemeColor = this.prevState === "pending" ? "gutterToolPending" : "dim";
+				const to: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
+				this.iconEase.begin(from, to);
+			}
+			this.prevState = state;
+		}
 		const pending = state === "pending";
 		const verb = verbFor(this.exec.getToolName(), pending);
 		const header = `${this.icon(state)} ${theme.bold(verb)} ${this.target(width)}`;

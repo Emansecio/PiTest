@@ -1,5 +1,6 @@
 import { Container, SPINNER_FRAMES, type TUI } from "@pit/tui";
-import { theme } from "../theme/theme.ts";
+import { type ThemeColor, theme } from "../theme/theme.ts";
+import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
 import { nounFor, pluralizeNoun } from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
@@ -22,10 +23,16 @@ export class NavGroupComponent extends Container {
 	// rendered string and rebuild it lazily on addCall instead of every frame.
 	private countsCache: string | null = null;
 	private ticker: SpinnerTicker | null = null;
+	private prevState: GroupState | null = null;
+	private readonly iconEase: ColorEase;
+	// Brief brighten of the counter each time a call is folded in (live increment).
+	private readonly countEase: ColorEase;
 
 	constructor(ui: TUI) {
 		super();
 		this.ui = ui;
+		this.iconEase = new ColorEase(ui, () => this.ui.requestRender());
+		this.countEase = new ColorEase(ui, () => this.ui.requestRender());
 	}
 
 	/** Run the spinner ticker only while there is pending work. It self-stops on
@@ -51,6 +58,9 @@ export class NavGroupComponent extends Container {
 		exec.setActivityChild(true);
 		this.execs.push(exec);
 		this.countsCache = null;
+		// Brighten the counter from full-bright back to its steady muted tone so a
+		// freshly-folded call reads as motion without a layout shift.
+		this.countEase.begin("text", "toolOutput");
 		if (this.aggregateState() === "pending") this.ensureTicker();
 		this.ui.requestRender();
 	}
@@ -74,8 +84,9 @@ export class NavGroupComponent extends Container {
 
 	private icon(state: GroupState): string {
 		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
-		if (state === "error") return theme.fg("gutterToolError", ICON_ERROR);
-		return theme.fg("gutterToolSuccess", ICON_SUCCESS);
+		const glyph = state === "error" ? ICON_ERROR : ICON_SUCCESS;
+		const steady: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
+		return this.iconEase.colorize(steady, glyph);
 	}
 
 	private counts(): string {
@@ -93,12 +104,21 @@ export class NavGroupComponent extends Container {
 
 	private header(state: GroupState): string {
 		const verb = state === "pending" ? "Exploring" : "Explored";
-		return `${this.icon(state)} ${theme.bold(verb)} ${theme.fg("toolOutput", this.counts())}`;
+		return `${this.icon(state)} ${theme.bold(verb)} ${this.countEase.colorize("toolOutput", this.counts())}`;
 	}
 
 	override render(width: number): string[] {
 		if (this.execs.length === 0) return [];
 		const state = this.aggregateState();
+		// Ease the state icon on settle (pending → ✔/✗), mirroring ActivityLine.
+		if (state !== this.prevState) {
+			if (state !== "pending") {
+				const from: ThemeColor = this.prevState === "pending" ? "gutterToolPending" : "dim";
+				const to: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
+				this.iconEase.begin(from, to);
+			}
+			this.prevState = state;
+		}
 		const lines = [this.header(state)];
 		if (this.expanded) {
 			for (const e of this.execs) {
