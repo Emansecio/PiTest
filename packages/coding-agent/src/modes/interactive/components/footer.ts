@@ -137,6 +137,8 @@ export class FooterComponent implements Component {
 	}
 
 	private getPermissionMode(): string | null {
+		// Coupled to the "permissions: <mode>" status string set by
+		// permissions-extension.ts; a format change there silently drops the mode.
 		const raw = this.footerData.getExtensionStatuses().get("permissions");
 		if (!raw) return null;
 		const m = /permissions:\s*(\S+)/.exec(raw);
