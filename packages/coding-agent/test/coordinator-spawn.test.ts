@@ -13,7 +13,7 @@
  * harness (`test/suite/harness.ts`) uses.
  */
 
-import type { AgentMessage, AgentTool } from "@pit/agent-core";
+import type { Agent, AgentMessage, AgentTool } from "@pit/agent-core";
 import {
 	type Context,
 	type FauxProviderRegistration,
@@ -339,6 +339,58 @@ describe("spawnSubagent (faux model)", () => {
 		await spawnSubagent(rig.deps, { prompt: "p", taskName: "skills-off" });
 
 		expect(seenPrompt).not.toContain("<available_skills>");
+	});
+
+	it("systemPromptSuffix is appended to the subagent system prompt", async () => {
+		const rig = newRig();
+		let seenPrompt: string | undefined;
+		rig.faux.setResponses([
+			(context) => {
+				seenPrompt = context.systemPrompt;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await spawnSubagent(rig.deps, { prompt: "p", taskName: "suffix", systemPromptSuffix: "MSG-PREAMBLE-XYZ" });
+		expect(seenPrompt).toContain("MSG-PREAMBLE-XYZ");
+	});
+
+	it("onAgentReady receives the live Agent before the run; onSettle fires on success", async () => {
+		const rig = newRig();
+		rig.faux.setResponses([fauxAssistantMessage("ok")]);
+		let readyCalls = 0;
+		let settleCalls = 0;
+		await spawnSubagent(rig.deps, {
+			prompt: "p",
+			taskName: "hooks-ok",
+			onAgentReady: (agent: Agent) => {
+				readyCalls++;
+				expect(agent.state.model).toBeDefined();
+			},
+			onSettle: () => {
+				settleCalls++;
+			},
+		});
+		expect(readyCalls).toBe(1);
+		expect(settleCalls).toBeGreaterThanOrEqual(1);
+	});
+
+	it("onSettle fires even when the subagent is cancelled", async () => {
+		const rig = newRig();
+		rig.faux.setResponses([fauxAssistantMessage("should not matter")]);
+		const controller = new AbortController();
+		controller.abort();
+		let settleCalls = 0;
+		await expect(
+			spawnSubagent(rig.deps, {
+				prompt: "p",
+				taskName: "hooks-cancel",
+				signal: controller.signal,
+				onSettle: () => {
+					settleCalls++;
+				},
+			}),
+		).rejects.toThrow(/aborted/);
+		expect(settleCalls).toBeGreaterThanOrEqual(1);
 	});
 
 	it("records denied tool calls on the registry record (headless ask/deny visibility)", async () => {

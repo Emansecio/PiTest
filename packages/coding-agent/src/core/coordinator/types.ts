@@ -75,6 +75,23 @@ export interface SpawnSubagentOptions {
 	 * subagent uses its own minimal system prompt.
 	 */
 	inheritSkills?: boolean;
+	/**
+	 * Appended to the subagent's system prompt (after skills, before the
+	 * result-schema suffix). Used to inject coordination instructions without
+	 * the coordinator needing to know the default system prompt.
+	 */
+	systemPromptSuffix?: string;
+	/**
+	 * Called once with the live `Agent` immediately after construction and
+	 * before its first turn. Used to attach the agent to the message bus.
+	 */
+	onAgentReady?: (agent: import("@pit/agent-core").Agent) => void;
+	/**
+	 * Called when the subagent settles (success, failure, or cancellation).
+	 * Idempotent: may be invoked more than once on some error paths. Used to
+	 * unregister the agent from the message bus.
+	 */
+	onSettle?: () => void;
 }
 
 export interface WorktreeSpec {

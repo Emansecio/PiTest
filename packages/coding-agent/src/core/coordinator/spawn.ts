@@ -206,7 +206,8 @@ export async function spawnSubagent(
 			? formatSkillsForPrompt(deps.skills, undefined, parentCwd)
 			: "";
 	const withSkills = skillsSection ? `${systemPromptBase}\n\n${skillsSection}` : systemPromptBase;
-	const systemPrompt = options.resultSchema ? `${withSkills}${SCHEMA_PROMPT_SUFFIX}` : withSkills;
+	const withSuffix = options.systemPromptSuffix ? `${withSkills}\n\n${options.systemPromptSuffix}` : withSkills;
+	const systemPrompt = options.resultSchema ? `${withSuffix}${SCHEMA_PROMPT_SUFFIX}` : withSuffix;
 	const tools = filterTools(deps.availableTools, options.allowedTools);
 	const maxTurns = options.maxTurns ?? 25;
 	let turnCount = 0;
@@ -264,7 +265,18 @@ export async function spawnSubagent(
 		}
 	});
 
+	options.onAgentReady?.(agent);
+
+	let settled = false;
 	const cleanup = async () => {
+		if (!settled) {
+			settled = true;
+			try {
+				options.onSettle?.();
+			} catch {
+				// onSettle is best-effort teardown; never mask the task result.
+			}
+		}
 		if (timeoutHandle) clearTimeout(timeoutHandle);
 		if (options.signal) options.signal.removeEventListener("abort", onParentAbort);
 		if (worktree && worktree.cleanup === "auto") {
