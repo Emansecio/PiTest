@@ -227,7 +227,7 @@ describe("Markdown component", () => {
 
 			const lines = markdown.render(24).map((line) => stripAnsi(line).trimEnd());
 
-			assert.deepStrictEqual(lines, ["- ```ts", "    alpha beta gamma", "  delta epsilon zeta", "  ```"]);
+			assert.deepStrictEqual(lines, ["- │ ts", "  │ alpha beta gamma", "  delta epsilon zeta"]);
 		});
 	});
 
@@ -462,7 +462,7 @@ describe("Markdown component", () => {
 			}
 		});
 
-		it("should handle extremely narrow width gracefully", () => {
+		it("should handle extremely narrow width gracefully with stacked fallback", () => {
 			const markdown = new Markdown(
 				`| A | B | C |
 | --- | --- | --- |
@@ -472,8 +472,9 @@ describe("Markdown component", () => {
 				defaultMarkdownTheme,
 			);
 
-			// Very narrow width
-			const lines = markdown.render(15);
+			// Width too narrow for a stable table → stacked "Header: cell" fallback.
+			const width = 12;
+			const lines = markdown.render(width);
 			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
 
 			// Should not crash and should produce output
@@ -481,8 +482,16 @@ describe("Markdown component", () => {
 
 			// Lines should not exceed width
 			for (const line of plainLines) {
-				assert.ok(line.length <= 15, `Line exceeds width 15: "${line}" (length: ${line.length})`);
+				assert.ok(line.length <= width, `Line exceeds width ${width}: "${line}" (length: ${line.length})`);
 			}
+
+			// No box-drawing borders or raw pipes — stacked "Header: cell" rendering instead.
+			assert.ok(
+				!plainLines.some((line) => line.includes("│") || line.includes("┌") || line.includes("─")),
+				`Stacked fallback should not contain table borders: ${JSON.stringify(plainLines)}`,
+			);
+			const content = plainLines.filter((line) => line.length > 0);
+			assert.deepStrictEqual(content, ["A: 1", "B: 2", "C: 3"]);
 		});
 
 		it("should render table correctly when it fits naturally", () => {
@@ -699,16 +708,20 @@ again, hello world`,
 			const lines = markdown.render(80);
 			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
 
-			const closingBackticksIndex = plainLines.indexOf("```");
-			assert.ok(closingBackticksIndex !== -1, "Should have closing backticks");
+			// No literal ``` fences are emitted; the code block renders with a "│ " gutter.
+			assert.ok(!plainLines.some((line) => line.includes("```")), "Should not emit literal ``` fences");
 
-			const afterBackticks = plainLines.slice(closingBackticksIndex + 1);
-			const emptyLineCount = afterBackticks.findIndex((line) => line !== "");
+			// Find the last gutter (code) line, then assert exactly one blank line before the next content.
+			const lastGutterIndex = plainLines.map((line) => line.startsWith("│ ")).lastIndexOf(true);
+			assert.ok(lastGutterIndex !== -1, "Should have a code gutter line");
+
+			const afterCode = plainLines.slice(lastGutterIndex + 1);
+			const emptyLineCount = afterCode.findIndex((line) => line !== "");
 
 			assert.strictEqual(
 				emptyLineCount,
 				1,
-				`Expected 1 empty line after code block, but found ${emptyLineCount}. Lines after backticks: ${JSON.stringify(afterBackticks.slice(0, 5))}`,
+				`Expected 1 empty line after code block, but found ${emptyLineCount}. Lines after code: ${JSON.stringify(afterCode.slice(0, 5))}`,
 			);
 		});
 
@@ -727,7 +740,7 @@ code block
 
 more text`,
 			];
-			const expectedLines = ["hello this is text", "", "```", "  code block", "```", "", "more text"];
+			const expectedLines = ["hello this is text", "", "│ code block", "", "more text"];
 
 			for (const text of cases) {
 				const markdown = new Markdown(text, 0, 0, defaultMarkdownTheme);
@@ -756,6 +769,54 @@ more text`,
 					`Expected code block to end without a blank line: ${JSON.stringify(plainLines)}`,
 				);
 			}
+		});
+	});
+
+	describe("Code block gutter rendering", () => {
+		it("should render code blocks with a '│ ' gutter, no ``` fences, and a language label", () => {
+			const markdown = new Markdown("```python\nprint('hi')\nx = 1\n```", 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(40);
+			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+
+			// No literal fences anywhere.
+			assert.ok(
+				!plainLines.some((line) => line.includes("```")),
+				`Should not emit fences: ${JSON.stringify(plainLines)}`,
+			);
+
+			// Language label line first, then each code line, all prefixed with the gutter.
+			const gutterLines = plainLines.filter((line) => line.startsWith("│ "));
+			assert.deepStrictEqual(gutterLines, ["│ python", "│ print('hi')", "│ x = 1"]);
+		});
+
+		it("should omit the language label line when no language is given", () => {
+			const markdown = new Markdown("```\nplain code\n```", 0, 0, defaultMarkdownTheme);
+
+			const lines = markdown.render(40);
+			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+
+			const gutterLines = plainLines.filter((line) => line.startsWith("│ "));
+			assert.deepStrictEqual(gutterLines, ["│ plain code"]);
+		});
+	});
+
+	describe("blockSpacing knob", () => {
+		// Two adjacent text blocks (heading → paragraph) are emitted without an
+		// intervening markdown blank-line ("space") token, so inter-block spacing
+		// is driven entirely by the blockSpacing knob.
+		const source = "# Heading\nbody text";
+
+		it("default (undefined) inserts exactly one blank line between blocks", () => {
+			const markdown = new Markdown(source, 0, 0, defaultMarkdownTheme);
+			const plainLines = markdown.render(80).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+			assert.deepStrictEqual(plainLines, ["Heading", "", "body text"]);
+		});
+
+		it("blockSpacing: 0 inserts no blank line between blocks", () => {
+			const markdown = new Markdown(source, 0, 0, { ...defaultMarkdownTheme, blockSpacing: 0 });
+			const plainLines = markdown.render(80).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
+			assert.deepStrictEqual(plainLines, ["Heading", "body text"]);
 		});
 	});
 
