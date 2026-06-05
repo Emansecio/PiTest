@@ -70,6 +70,7 @@ export class AssistantMessageComponent extends Container {
 	// Deliverable-marker state
 	private isDeliverable = false;
 	private pulseBright = false;
+	private pulseUnsub: (() => void) | null = null;
 
 	constructor(
 		message?: AssistantMessage,
@@ -376,17 +377,15 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	private startDeliverablePulse(): void {
-		if (!this.ui) {
-			this.pulseBright = true;
-			return;
-		}
 		this.pulseBright = true;
+		if (!this.ui || this.pulseUnsub) return; // no ui (history) → static; never double-register
 		let frames = 0;
-		const stop = this.ui.addAnimationCallback((_now: number): boolean => {
+		this.pulseUnsub = this.ui.addAnimationCallback((_now: number): boolean => {
 			frames++;
 			if (frames >= 6) {
 				this.pulseBright = false;
-				stop();
+				this.pulseUnsub?.();
+				this.pulseUnsub = null;
 				this.ui?.requestRender();
 				return true;
 			}
