@@ -492,3 +492,91 @@ describe("Agent", () => {
 		expect(receivedSessionId).toBe("session-def");
 	});
 });
+
+describe("Agent.injectPassive", () => {
+	// An assistant message that calls a (deliberately unknown) tool, so the loop
+	// produces a tool-result and runs another turn — without needing a real tool.
+	function createToolCallMessage(id: string, name: string): AssistantMessage {
+		return {
+			...createAssistantMessage(""),
+			content: [{ type: "toolCall", id, name, arguments: {} }],
+			stopReason: "toolUse",
+		} as AssistantMessage;
+	}
+
+	it("delivers a passive message on a continuation turn without corrupting the result", async () => {
+		let call = 0;
+		const agent = new Agent({
+			streamFn: () => {
+				call++;
+				if (call === 1) {
+					// Queue a passive notice mid-run. It must land on the next turn
+					// (which runs because this turn makes a tool call), never force a
+					// turn of its own.
+					agent.injectPassive({
+						role: "user",
+						content: [{ type: "text", text: "PASSIVE-NOTE" }],
+						timestamp: Date.now(),
+					});
+				}
+				const stream = new MockAssistantStream();
+				const message =
+					call === 1 ? createToolCallMessage("tc-1", "nonexistent_tool") : createAssistantMessage("DONE");
+				queueMicrotask(() => stream.push({ type: "done", reason: "stop", message }));
+				return stream;
+			},
+		});
+
+		await agent.prompt("go");
+
+		const delivered = agent.state.messages.some(
+			(m) => m.role === "user" && JSON.stringify(m.content).includes("PASSIVE-NOTE"),
+		);
+		expect(delivered).toBe(true);
+		const assistants = agent.state.messages.filter((m) => m.role === "assistant");
+		expect(assistants.at(-1)?.content).toEqual([{ type: "text", text: "DONE" }]);
+	});
+
+	it("does not force an extra turn or alter the result when the agent is about to stop", async () => {
+		const agent = new Agent({
+			streamFn: () => {
+				// Queue mid-run on the only turn. With no later turn to drain it, the
+				// note must never appear and must never spawn a turn of its own.
+				agent.injectPassive({
+					role: "user",
+					content: [{ type: "text", text: "LATE-NOTE" }],
+					timestamp: Date.now(),
+				});
+				const stream = new MockAssistantStream();
+				queueMicrotask(() =>
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("FINAL") }),
+				);
+				return stream;
+			},
+		});
+
+		await agent.prompt("go");
+
+		expect(JSON.stringify(agent.state.messages)).not.toContain("LATE-NOTE");
+		const assistants = agent.state.messages.filter((m) => m.role === "assistant");
+		expect(assistants).toHaveLength(1);
+		expect(assistants[0]?.content).toEqual([{ type: "text", text: "FINAL" }]);
+	});
+
+	it("reset() clears a queued passive message", async () => {
+		let calls = 0;
+		const agent = new Agent({
+			streamFn: () => {
+				calls++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => stream.push({ type: "done", reason: "stop", message: createAssistantMessage("ok") }));
+				return stream;
+			},
+		});
+		agent.injectPassive({ role: "user", content: [{ type: "text", text: "DROPPED" }], timestamp: Date.now() });
+		agent.reset();
+		await agent.prompt("go");
+		expect(JSON.stringify(agent.state.messages)).not.toContain("DROPPED");
+		expect(calls).toBe(1);
+	});
+});

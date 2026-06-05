@@ -210,9 +210,18 @@ async function runLoop(
 				firstTurn = false;
 			}
 
-			// Process pending messages (inject before next assistant response)
-			if (pendingMessages.length > 0) {
-				for (const message of pendingMessages) {
+			// Process pending messages (inject before next assistant response).
+			// Passive messages ride along here too, but unlike steering they are
+			// drained OUTSIDE the `while` condition, so they never keep the loop
+			// alive on their own — they only land on a turn that is already going
+			// to run (the assistant still had tool calls). That makes it safe to
+			// deliver out-of-band notices into a busy agent without forcing an
+			// extra turn or corrupting the final assistant message it returns.
+			const passiveMessages = (await config.getPassiveMessages?.()) || [];
+			const injectedMessages =
+				passiveMessages.length > 0 ? pendingMessages.concat(passiveMessages) : pendingMessages;
+			if (injectedMessages.length > 0) {
+				for (const message of injectedMessages) {
 					await emit({ type: "message_start", message });
 					await emit({ type: "message_end", message });
 					currentContext.messages.push(message);

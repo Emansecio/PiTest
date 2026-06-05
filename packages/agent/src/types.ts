@@ -258,6 +258,22 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getFollowUpMessages?: () => Promise<AgentMessage[]>;
 
 	/**
+	 * Returns passive messages to splice into the transcript at the next turn
+	 * boundary WITHOUT forcing a turn.
+	 *
+	 * Unlike steering/follow-up messages, passive messages never keep the loop
+	 * alive on their own: they are injected only when a turn is already going to
+	 * run (the assistant still has tool calls), so the agent sees them as context
+	 * but is never made to produce an extra turn for them. If the agent is about
+	 * to stop, pending passive messages are simply left undrained. This makes it
+	 * safe to deliver out-of-band notices (e.g. an inter-agent message) into a
+	 * busy agent without corrupting the final assistant message it returns.
+	 *
+	 * Contract: must not throw or reject. Return [] when none are available.
+	 */
+	getPassiveMessages?: () => Promise<AgentMessage[]>;
+
+	/**
 	 * Tool execution mode.
 	 * - "sequential": execute tool calls one by one
 	 * - "parallel": preflight tool calls sequentially, then execute allowed tools concurrently;

@@ -180,6 +180,7 @@ export class Agent {
 	private readonly listeners = new Set<(event: AgentEvent, signal: AbortSignal) => Promise<void> | void>();
 	private readonly steeringQueue: PendingMessageQueue;
 	private readonly followUpQueue: PendingMessageQueue;
+	private readonly passiveQueue: PendingMessageQueue;
 
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
@@ -229,6 +230,9 @@ export class Agent {
 		this.prepareNextTurn = options.prepareNextTurn;
 		this.steeringQueue = new PendingMessageQueue(options.steeringMode ?? "one-at-a-time");
 		this.followUpQueue = new PendingMessageQueue(options.followUpMode ?? "one-at-a-time");
+		// Passive queue always drains all-at-once: every pending notice is spliced
+		// into the next turn that runs, never one-per-turn.
+		this.passiveQueue = new PendingMessageQueue("all");
 		this.sessionId = options.sessionId;
 		this.thinkingBudgets = options.thinkingBudgets;
 		this.transport = options.transport ?? "auto";
@@ -291,6 +295,21 @@ export class Agent {
 		this.followUpQueue.enqueue(message);
 	}
 
+	/**
+	 * Queue a passive message to be spliced into the transcript at the next turn
+	 * that already runs, WITHOUT forcing a turn of its own.
+	 *
+	 * Unlike {@link steer}/{@link followUp}, a passive message never keeps the
+	 * loop alive: it is only drained on a turn the agent was already going to
+	 * take (it still had tool calls). Use this to deliver out-of-band context
+	 * (e.g. an inter-agent notice) to a busy agent without making it produce an
+	 * extra reply turn or changing the final value it returns. If the agent is
+	 * about to stop, the message stays queued and is simply never delivered.
+	 */
+	injectPassive(message: AgentMessage): void {
+		this.passiveQueue.enqueue(message);
+	}
+
 	/** Remove all queued steering messages. */
 	clearSteeringQueue(): void {
 		this.steeringQueue.clear();
@@ -340,6 +359,7 @@ export class Agent {
 		this._state.errorMessage = undefined;
 		this.clearFollowUpQueue();
 		this.clearSteeringQueue();
+		this.passiveQueue.clear();
 	}
 
 	/** Start a new prompt from text, a single message, or a batch of messages. */
@@ -470,6 +490,7 @@ export class Agent {
 				return this.steeringQueue.drain();
 			},
 			getFollowUpMessages: async () => this.followUpQueue.drain(),
+			getPassiveMessages: async () => this.passiveQueue.drain(),
 			ttsrMatcher: this.ttsrMatcher,
 			toolRewriteRegistry: this.toolRewriteRegistry,
 			toolErrorHintRegistry: this.toolErrorHintRegistry,
