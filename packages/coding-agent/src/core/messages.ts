@@ -7,6 +7,7 @@
 
 import type { AgentMessage } from "@pit/agent-core";
 import type { ImageContent, Message, TextContent } from "@pit/ai";
+import { MESSAGE_RELAY_CUSTOM_TYPE } from "./messaging/types.ts";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -164,6 +165,8 @@ function convertOne(m: AgentMessage): Message | undefined {
 				timestamp: m.timestamp,
 			};
 		case "custom": {
+			// Inter-agent relay lines are display-only — never shown to the model.
+			if (m.customType === MESSAGE_RELAY_CUSTOM_TYPE) return undefined;
 			const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
 			return {
 				role: "user",

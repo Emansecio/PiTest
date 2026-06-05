@@ -74,10 +74,19 @@ export interface SendResult {
 	notFound: string[];
 }
 
-/** One recorded inter-agent send, for observability (`/messages`). */
+/**
+ * customType for the display-only inter-agent relay line shown in the parent's
+ * transcript. It is dropped from the LLM context (see `convertToLlm`), so it is
+ * never visible to the model — purely an observability surface for the user.
+ */
+export const MESSAGE_RELAY_CUSTOM_TYPE = "pi.message-relay";
+
+/** One recorded inter-agent send, for observability (`/messages` + live relay). */
 export interface MessageActivity {
 	from: string;
 	to: string;
+	/** Message body, clipped for the log/relay. */
+	message: string;
 	/** "reply" = request/reply round-trip; "notify" = fire-and-forget. */
 	mode: "reply" | "notify";
 	delivered: string[];

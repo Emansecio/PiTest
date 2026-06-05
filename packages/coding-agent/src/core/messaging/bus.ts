@@ -30,6 +30,7 @@ function toPeerInfo(p: AgentParticipant): PeerInfo {
 export class AgentMessageBus {
 	#participants = new Map<string, AgentParticipant>();
 	#activity: MessageActivity[] = [];
+	#activityListeners = new Set<(activity: MessageActivity) => void>();
 	#now: () => number;
 
 	// `now` is injectable so tests can pin timestamps (Date.now is fine in prod).
@@ -163,17 +164,26 @@ export class AgentMessageBus {
 			}),
 		);
 
-		this.#activity.push({
+		const activity: MessageActivity = {
 			from,
 			to,
+			message: message.length > 200 ? `${message.slice(0, 199)}…` : message,
 			mode: awaitReply ? "reply" : "notify",
 			delivered: result.delivered,
 			replies: result.replies.length,
 			failed: result.failed.length,
 			notFound: result.notFound.length,
 			at: this.#now(),
-		});
+		};
+		this.#activity.push(activity);
 		if (this.#activity.length > MAX_ACTIVITY) this.#activity.shift();
+		for (const listener of this.#activityListeners) {
+			try {
+				listener(activity);
+			} catch {
+				// A relay/observer failure must never break message delivery.
+			}
+		}
 
 		return result;
 	}
@@ -181,6 +191,17 @@ export class AgentMessageBus {
 	/** Most recent inter-agent sends (newest last), for `/messages`. */
 	recentActivity(limit = 20): MessageActivity[] {
 		return this.#activity.slice(-limit);
+	}
+
+	/**
+	 * Subscribe to inter-agent send activity (for a live transcript relay or
+	 * other observability). Returns an unsubscribe function.
+	 */
+	onActivity(listener: (activity: MessageActivity) => void): () => void {
+		this.#activityListeners.add(listener);
+		return () => {
+			this.#activityListeners.delete(listener);
+		};
 	}
 
 	// Race the responder against a timeout/parent-abort. Owns its own controller

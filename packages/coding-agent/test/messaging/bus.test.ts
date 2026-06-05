@@ -188,4 +188,26 @@ describe("AgentMessageBus — activity log", () => {
 		expect(bus.recentActivity(2)).toHaveLength(2);
 		expect(bus.recentActivity()).toHaveLength(5);
 	});
+
+	it("records the (clipped) message body in the activity", async () => {
+		const bus = new AgentMessageBus(() => 1000);
+		bus.reserve("A", { kind: "sub" });
+		const b = bus.reserve("B", { kind: "sub" });
+		bus.attachResponder(b, async () => "ok");
+		await bus.send({ from: "A", to: "B", message: "where is auth?" });
+		expect(bus.recentActivity()[0]?.message).toBe("where is auth?");
+	});
+
+	it("onActivity notifies listeners on each send; unsubscribe stops it", async () => {
+		const bus = new AgentMessageBus(() => 1000);
+		bus.reserve("A", { kind: "sub" });
+		const b = bus.reserve("B", { kind: "sub" });
+		bus.attachResponder(b, async () => "ok");
+		const seen: string[] = [];
+		const unsub = bus.onActivity((a) => seen.push(`${a.from}->${a.to}:${a.message}`));
+		await bus.send({ from: "A", to: "B", message: "one" });
+		unsub();
+		await bus.send({ from: "A", to: "B", message: "two" });
+		expect(seen).toEqual(["A->B:one"]);
+	});
 });

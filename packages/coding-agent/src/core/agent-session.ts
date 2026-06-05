@@ -124,7 +124,13 @@ import { createLspManager, getCurrentLspManager, type LspManager, setCurrentLspM
 import { setDiagnosticsOnWrite, setFormatOnWrite } from "./lsp/writethrough.ts";
 import { formatMemoryForPrompt } from "./memory/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
-import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "./messaging/index.ts";
+import {
+	agentMessageBus,
+	MESSAGE_RELAY_CUSTOM_TYPE,
+	type MessageActivity,
+	makeAgentDelivery,
+	makeAgentResponder,
+} from "./messaging/index.ts";
 import type { ModelRegistry } from "./model-registry.js";
 import { type RoleResolution, resolveRole } from "./model-resolver.js";
 import {
@@ -551,6 +557,7 @@ export class AgentSession {
 	private _evalKernelManager: EvalKernelManager | undefined;
 	private _lspManager: LspManager | undefined;
 	private _messagingId?: string;
+	private _unsubMessagingActivity?: () => void;
 
 	constructor(config: AgentSessionConfig) {
 		// Idempotent: registers built-in URL schemes (pr://, issue://, conflict://)
@@ -681,6 +688,38 @@ export class AgentSession {
 			});
 			agentMessageBus.attachResponder(this._messagingId, makeAgentResponder(this.agent));
 			agentMessageBus.attachDelivery(this._messagingId, makeAgentDelivery(this.agent));
+			// Live relay: surface inter-agent sends in this session's transcript as
+			// display-only lines (the model never sees them — convertToLlm drops the
+			// relay customType). Lets the user watch coordination happen.
+			this._unsubMessagingActivity = agentMessageBus.onActivity((activity) => {
+				this._relayMessageActivity(activity);
+			});
+		}
+	}
+
+	/** Emit a display-only relay line for one inter-agent send (model-invisible). */
+	private _relayMessageActivity(activity: MessageActivity): void {
+		const icon = activity.mode === "notify" ? "📨" : "🗨";
+		const outcome =
+			activity.delivered.length > 0
+				? ""
+				: activity.notFound > 0
+					? " (offline)"
+					: activity.failed > 0
+						? " (failed)"
+						: "";
+		const relay = {
+			role: "custom" as const,
+			customType: MESSAGE_RELAY_CUSTOM_TYPE,
+			content: `${icon} \`${activity.from}\` → \`${activity.to}\`${outcome}: ${activity.message}`,
+			display: true,
+			timestamp: Date.now(),
+		};
+		try {
+			this._emit({ type: "message_start", message: relay });
+			this._emit({ type: "message_end", message: relay });
+		} catch {
+			// A relay render failure must never affect messaging or the run.
 		}
 	}
 
@@ -1699,6 +1738,8 @@ export class AgentSession {
 		setDiagnosticsOnWrite(false);
 		setFormatOnWrite(false);
 		// Leave the message bus so a stale Main can't receive routed messages.
+		this._unsubMessagingActivity?.();
+		this._unsubMessagingActivity = undefined;
 		if (this._messagingId) {
 			agentMessageBus.unregister(this._messagingId);
 			this._messagingId = undefined;

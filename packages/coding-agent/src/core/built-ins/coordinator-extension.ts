@@ -369,7 +369,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					]
 						.filter(Boolean)
 						.join(" ");
-					return `${a.from} → ${a.to} [${a.mode}] delivered=${a.delivered.length}${extra ? ` ${extra}` : ""}`;
+					return `${a.from} → ${a.to} [${a.mode}] "${a.message}" delivered=${a.delivered.length}${extra ? ` ${extra}` : ""}`;
 				});
 				const out = lines.join("\n");
 				if (ctx.hasUI) ctx.ui.notify(out, "info");
