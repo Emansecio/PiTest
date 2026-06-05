@@ -1,8 +1,14 @@
 import type { AssistantMessage } from "@pit/ai";
 import { Container, Markdown, type MarkdownTheme, Spacer, Text, type TUI, visibleWidth } from "@pit/tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
+import { interpolateFg } from "../theme/color-interpolation.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { ColorEase } from "./color-ease.ts";
 import { ReadingColumn } from "./reading-column.ts";
+
+// Period of the "Thinking…" breathing oscillation (dim ⇄ normal) while the model
+// is mid-thought with no answer yet.
+const THINKING_BREATH_MS = 1800;
 
 // Streaming smoothing (opt-in): instead of painting each provider burst whole,
 // the trailing block's text is revealed at a steady rate off the shared
@@ -69,8 +75,13 @@ export class AssistantMessageComponent extends Container {
 	private revealUnsub: (() => void) | null = null;
 	// Deliverable-marker state
 	private isDeliverable = false;
-	private pulseBright = false;
-	private pulseUnsub: (() => void) | null = null;
+	// Eased brighten→settle of the deliverable ● (null until marked / no ui).
+	private deliverableEase: ColorEase | null = null;
+	// Continuous breathing of the hidden "Thinking…" label while it is the latest
+	// content (model still thinking, no answer yet).
+	private breathUnsub: (() => void) | null = null;
+	private breathStart = 0;
+	private breathT = 0;
 
 	constructor(
 		message?: AssistantMessage,
@@ -125,7 +136,7 @@ export class AssistantMessageComponent extends Container {
 		}
 
 		if (this.isDeliverable && this.hasVisibleTextBlock()) {
-			const glyph = theme.fg("accent", this.pulseBright ? "◉" : "●");
+			const glyph = this.deliverableEase ? this.deliverableEase.colorize("accent", "●") : theme.fg("accent", "●");
 			for (let i = 0; i < lines.length; i++) {
 				if (visibleWidth(stripAnsi(lines[i])) > 0) {
 					lines[i] = `${glyph} ${lines[i]}`;
@@ -172,6 +183,7 @@ export class AssistantMessageComponent extends Container {
 			}
 		}
 		const hasVisibleContent = lastVisibleIndex !== -1;
+		let sawLiveThinking = false;
 
 		if (hasVisibleContent) {
 			this.contentContainer.addChild(new Spacer(1));
@@ -209,9 +221,28 @@ export class AssistantMessageComponent extends Container {
 					// Show static thinking label when hidden. Drop any cached Markdown at
 					// this slot so a later un-hide rebuilds it fresh.
 					this.blockComponents[i] = undefined;
-					this.contentContainer.addChild(
-						new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), 1, 0),
-					);
+					// "Live" = this hidden-thinking block is the latest content (no answer
+					// after it yet) and we have a ui to animate on → breathe the label.
+					// Otherwise render it static (history, or once the answer arrives).
+					const live = i === lastVisibleIndex && !!this.ui && !this.isDeliverable;
+					if (live) {
+						sawLiveThinking = true;
+						this.startThinkingBreath();
+						const label = this.hiddenThinkingLabel;
+						this.contentContainer.addChild({
+							render: () => {
+								const c =
+									interpolateFg("thinkingOff", "thinkingText", this.breathT) ??
+									((t: string) => theme.fg("thinkingText", t));
+								return [` ${theme.italic(c(label))}`];
+							},
+							invalidate: () => {},
+						});
+					} else {
+						this.contentContainer.addChild(
+							new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), 1, 0),
+						);
+					}
 					if (hasVisibleContentAfter) {
 						this.contentContainer.addChild(new Spacer(1));
 					}
@@ -245,6 +276,11 @@ export class AssistantMessageComponent extends Container {
 				this.blockComponents[i] = undefined;
 			}
 		}
+
+		// No live thinking label this rebuild (answer arrived, or no hidden thinking)
+		// → stop the breathing ticker. Kept running across rebuilds while still live
+		// (startThinkingBreath is a no-op when already running, so the phase is stable).
+		if (!sawLiveThinking) this.stopThinkingBreath();
 
 		// Trim cache entries past the current block count (message shrank / blocks removed).
 		if (this.blockComponents.length > message.content.length) {
@@ -367,32 +403,37 @@ export class AssistantMessageComponent extends Container {
 		);
 	}
 
-	/** Mark this message as the turn's final deliverable: a pulsing accent ●
-	 * is drawn before the first line of its last text block. Idempotent. */
+	/** Mark this message as the turn's final deliverable: an accent ● is drawn
+	 * before its first text line, brightening from full-bright and settling to the
+	 * accent color. Static (no ease) in history instances without a ui. Idempotent. */
 	markAsDeliverable(): void {
 		if (this.isDeliverable) return;
 		this.isDeliverable = true;
-		this.startDeliverablePulse();
+		if (this.ui) {
+			this.deliverableEase ??= new ColorEase(this.ui, () => this.ui?.requestRender());
+			this.deliverableEase.begin("text", "accent");
+		}
 		this.ui?.requestRender();
 	}
 
-	private startDeliverablePulse(): void {
-		this.pulseBright = true;
-		if (!this.ui || this.pulseUnsub) return; // no ui (history) → static; never double-register
-		let frames = 0;
-		this.pulseUnsub = this.ui.addAnimationCallback((_now: number): boolean => {
-			frames++;
-			if (frames >= 6) {
-				this.pulseBright = false;
-				this.pulseUnsub?.();
-				this.pulseUnsub = null;
-				this.ui?.requestRender();
-				return true;
-			}
-			this.pulseBright = frames % 2 === 0;
+	/** Drive the hidden "Thinking…" label's dim⇄normal oscillation. No-op if
+	 * already running (keeps the phase stable across content rebuilds) or no ui. */
+	private startThinkingBreath(): void {
+		if (this.breathUnsub || !this.ui) return;
+		this.breathStart = performance.now();
+		this.breathUnsub = this.ui.addAnimationCallback((now: number): boolean => {
+			const phase = ((now - this.breathStart) % THINKING_BREATH_MS) / THINKING_BREATH_MS;
+			this.breathT = (1 - Math.cos(phase * 2 * Math.PI)) / 2; // smooth 0→1→0
 			this.ui?.requestRender();
 			return true;
 		});
+	}
+
+	private stopThinkingBreath(): void {
+		if (this.breathUnsub) {
+			this.breathUnsub();
+			this.breathUnsub = null;
+		}
 	}
 }
 
