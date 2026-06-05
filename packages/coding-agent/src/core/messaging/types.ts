@@ -74,6 +74,19 @@ export interface SendResult {
 	notFound: string[];
 }
 
+/** One recorded inter-agent send, for observability (`/messages`). */
+export interface MessageActivity {
+	from: string;
+	to: string;
+	/** "reply" = request/reply round-trip; "notify" = fire-and-forget. */
+	mode: "reply" | "notify";
+	delivered: string[];
+	replies: number;
+	failed: number;
+	notFound: number;
+	at: number;
+}
+
 export interface SendArgs {
 	from: string;
 	/** A participant id, or "all" to broadcast to every running peer. */

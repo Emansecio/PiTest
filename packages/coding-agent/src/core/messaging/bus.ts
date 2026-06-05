@@ -2,6 +2,7 @@ import type {
 	AgentDelivery,
 	AgentParticipant,
 	AgentResponder,
+	MessageActivity,
 	ParticipantStatus,
 	PeerInfo,
 	ReserveOptions,
@@ -11,6 +12,9 @@ import type {
 
 /** Default per-dispatch reply timeout (matches omp's `irc.timeoutMs`). */
 export const DEFAULT_MESSAGE_TIMEOUT_MS = 120_000;
+
+/** Cap on the in-memory activity log surfaced by `/messages`. */
+const MAX_ACTIVITY = 200;
 
 function toPeerInfo(p: AgentParticipant): PeerInfo {
 	return { id: p.id, displayName: p.displayName, kind: p.kind, parentId: p.parentId, status: p.status };
@@ -25,6 +29,7 @@ function toPeerInfo(p: AgentParticipant): PeerInfo {
  */
 export class AgentMessageBus {
 	#participants = new Map<string, AgentParticipant>();
+	#activity: MessageActivity[] = [];
 	#now: () => number;
 
 	// `now` is injectable so tests can pin timestamps (Date.now is fine in prod).
@@ -157,7 +162,25 @@ export class AgentMessageBus {
 				}
 			}),
 		);
+
+		this.#activity.push({
+			from,
+			to,
+			mode: awaitReply ? "reply" : "notify",
+			delivered: result.delivered,
+			replies: result.replies.length,
+			failed: result.failed.length,
+			notFound: result.notFound.length,
+			at: this.#now(),
+		});
+		if (this.#activity.length > MAX_ACTIVITY) this.#activity.shift();
+
 		return result;
+	}
+
+	/** Most recent inter-agent sends (newest last), for `/messages`. */
+	recentActivity(limit = 20): MessageActivity[] {
+		return this.#activity.slice(-limit);
 	}
 
 	// Race the responder against a timeout/parent-abort. Owns its own controller

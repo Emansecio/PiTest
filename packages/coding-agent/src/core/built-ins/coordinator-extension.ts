@@ -350,5 +350,31 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				else console.log(out);
 			},
 		});
+
+		pi.registerCommand("messages", {
+			description: "List recent inter-agent messages (who coordinated with whom).",
+			async handler(_args, ctx) {
+				const log = agentMessageBus.recentActivity(20);
+				if (log.length === 0) {
+					const msg = "No inter-agent messages yet.";
+					if (ctx.hasUI) ctx.ui.notify(msg, "info");
+					else console.log(msg);
+					return;
+				}
+				const lines = log.map((a) => {
+					const extra = [
+						a.replies > 0 ? `replies=${a.replies}` : "",
+						a.failed > 0 ? `failed=${a.failed}` : "",
+						a.notFound > 0 ? `notFound=${a.notFound}` : "",
+					]
+						.filter(Boolean)
+						.join(" ");
+					return `${a.from} → ${a.to} [${a.mode}] delivered=${a.delivered.length}${extra ? ` ${extra}` : ""}`;
+				});
+				const out = lines.join("\n");
+				if (ctx.hasUI) ctx.ui.notify(out, "info");
+				else console.log(out);
+			},
+		});
 	};
 }

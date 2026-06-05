@@ -161,3 +161,31 @@ describe("AgentMessageBus — fire-and-forget (awaitReply:false)", () => {
 		expect(got.sort()).toEqual(["B<-A", "C<-A"]);
 	});
 });
+
+describe("AgentMessageBus — activity log", () => {
+	it("records each send; recentActivity returns them oldest-first", async () => {
+		const bus = new AgentMessageBus(() => 1000);
+		bus.reserve("A", { kind: "sub" });
+		const b = bus.reserve("B", { kind: "sub" });
+		bus.attachResponder(b, async () => "ok");
+		bus.attachDelivery(b, () => {});
+		await bus.send({ from: "A", to: "B", message: "q" });
+		await bus.send({ from: "A", to: "B", message: "fyi", awaitReply: false });
+		await bus.send({ from: "A", to: "Ghost", message: "?" });
+		const log = bus.recentActivity();
+		expect(log).toHaveLength(3);
+		expect(log[0]).toMatchObject({ from: "A", to: "B", mode: "reply", delivered: ["B"], replies: 1 });
+		expect(log[1]).toMatchObject({ to: "B", mode: "notify", delivered: ["B"] });
+		expect(log[2]).toMatchObject({ to: "Ghost", notFound: 1, delivered: [] });
+	});
+
+	it("recentActivity respects the limit (newest kept)", async () => {
+		const bus = new AgentMessageBus(() => 1000);
+		bus.reserve("A", { kind: "sub" });
+		const b = bus.reserve("B", { kind: "sub" });
+		bus.attachResponder(b, async () => "ok");
+		for (let i = 0; i < 5; i++) await bus.send({ from: "A", to: "B", message: `m${i}` });
+		expect(bus.recentActivity(2)).toHaveLength(2);
+		expect(bus.recentActivity()).toHaveLength(5);
+	});
+});
