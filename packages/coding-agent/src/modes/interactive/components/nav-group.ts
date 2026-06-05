@@ -9,10 +9,10 @@ type GroupState = "pending" | "success" | "error";
 const ICON_SUCCESS = "✔︎"; // heavy check, text presentation
 const ICON_ERROR = "✗";
 
-/** Aggregates a contiguous burst of tool calls — navigation and action alike —
- * into one summary line (`✓ Did 4 files · 2 edits · 1 command`). Children render
- * only when expanded; a child that errors auto-expands. No gutter — the state
- * icon carries the framing. (Named NavGroup historically; now group-agnostic.) */
+/** Aggregates a contiguous burst of NAVIGATION tool calls into one summary line
+ * (`✔ Explored 3 files · 1 search`). Actions get their own ActivityLine instead.
+ * Children render only when expanded; a child that errors auto-expands. No
+ * gutter — the state icon carries the framing. */
 export class NavGroupComponent extends Container {
 	private ui: TUI;
 	private execs: ToolExecutionComponent[] = [];
