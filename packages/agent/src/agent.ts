@@ -544,6 +544,10 @@ export class Agent {
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();
+		// Passive messages are run-scoped: any that the loop never drained (the
+		// agent stopped before a continuation turn) expire here so they can never
+		// leak into a later, unrelated prompt's transcript.
+		this.passiveQueue.clear();
 		this.activeRun?.resolve();
 		this.activeRun = undefined;
 	}

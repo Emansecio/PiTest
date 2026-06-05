@@ -563,6 +563,35 @@ describe("Agent.injectPassive", () => {
 		expect(assistants[0]?.content).toEqual([{ type: "text", text: "FINAL" }]);
 	});
 
+	it("does not leak an undelivered passive message into a later prompt", async () => {
+		let run = 0;
+		const agent = new Agent({
+			streamFn: () => {
+				run++;
+				if (run === 1) {
+					// Queue during run A's only turn (after that turn's drain point), so
+					// the agent stops with it still in the queue. Without run-scoped
+					// expiry it would surface on turn 1 of run B — the wrong transcript.
+					agent.injectPassive({
+						role: "user",
+						content: [{ type: "text", text: "STALE-NOTE" }],
+						timestamp: Date.now(),
+					});
+				}
+				const stream = new MockAssistantStream();
+				queueMicrotask(() =>
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage(`run-${run}`) }),
+				);
+				return stream;
+			},
+		});
+
+		await agent.prompt("A");
+		await agent.prompt("B");
+
+		expect(JSON.stringify(agent.state.messages)).not.toContain("STALE-NOTE");
+	});
+
 	it("reset() clears a queued passive message", async () => {
 		let calls = 0;
 		const agent = new Agent({
