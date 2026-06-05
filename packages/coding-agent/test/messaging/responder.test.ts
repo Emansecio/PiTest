@@ -54,4 +54,41 @@ describe("makeAgentResponder", () => {
 		await makeAgentResponder(agent)("Main", "hello");
 		expect(agent.state.messages).toHaveLength(1); // snapshot was read-only
 	});
+
+	it("remembers prior exchanges within the side-channel thread", async () => {
+		const { faux, agent } = fauxAgent("You are Worker.", []);
+		const seen: Context[] = [];
+		faux.setResponses([
+			(ctx: Context) => {
+				seen.push(ctx);
+				return fauxAssistantMessage("auth lives in src/auth.ts");
+			},
+			(ctx: Context) => {
+				seen.push(ctx);
+				return fauxAssistantMessage("line 42");
+			},
+		]);
+		const respond = makeAgentResponder(agent);
+		await respond("Main", "where is auth?");
+		await respond("Main", "which line?");
+
+		// The first turn carried no prior thread; the second recaps exchange #1.
+		expect(JSON.stringify(seen[0]?.messages)).not.toContain("Earlier in this side-channel thread");
+		const second = JSON.stringify(seen[1]?.messages);
+		expect(second).toContain("Earlier in this side-channel thread");
+		expect(second).toContain("where is auth?");
+		expect(second).toContain("auth lives in src/auth.ts");
+		expect(second).toContain("which line?");
+	});
+
+	it("thread memory stays in the side-channel — never touches task history", async () => {
+		const { faux, agent } = fauxAgent("You are Worker.", [
+			{ role: "user", content: [{ type: "text", text: "task" }], timestamp: 1 },
+		]);
+		faux.setResponses([fauxAssistantMessage("r1"), fauxAssistantMessage("r2")]);
+		const respond = makeAgentResponder(agent);
+		await respond("Main", "q1");
+		await respond("Main", "q2");
+		expect(agent.state.messages).toHaveLength(1); // still just the original task message
+	});
 });

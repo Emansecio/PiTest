@@ -19,6 +19,12 @@ const messageSchema = Type.Object(
 			Type.String({ description: 'Recipient agent id, or "all" to broadcast. Required for op:"send".' }),
 		),
 		message: Type.Optional(Type.String({ description: 'Message body (plain prose). Required for op:"send".' })),
+		timeout_ms: Type.Optional(
+			Type.Number({
+				description:
+					'Optional per-message reply timeout in ms (op:"send"). Overrides the global default; use a larger value when asking a peer an expensive question, or a small one for a quick check. 0 disables the timeout.',
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -81,7 +87,8 @@ export function createMessageToolDefinition(
 				to,
 				message,
 				signal,
-				timeoutMs: options.timeoutMs,
+				// Per-call override (params.timeout_ms) wins over the session default.
+				timeoutMs: params.timeout_ms ?? options.timeoutMs,
 			});
 			const details: MessageDetails = {
 				op: "send",

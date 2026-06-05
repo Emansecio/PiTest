@@ -2,6 +2,33 @@ import type { Agent, AgentMessage } from "@pit/agent-core";
 import type { AssistantMessage, Context } from "@pit/ai";
 import type { AgentResponder } from "./types.ts";
 
+/** One completed side-channel exchange, kept so a thread stays coherent. */
+interface IrcExchange {
+	from: string;
+	message: string;
+	reply: string;
+}
+
+/** How many prior exchanges to carry as side-channel memory (oldest dropped). */
+const MAX_THREAD = 12;
+/** Per-line clip so a long message can't bloat the side-channel context. */
+const CLIP = 400;
+
+function clip(text: string, max = CLIP): string {
+	const t = text.replace(/\s+/g, " ").trim();
+	return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/** Renders prior exchanges as a compact recap the recipient can read back. */
+function renderThread(thread: readonly IrcExchange[]): string {
+	if (thread.length === 0) return "";
+	const lines = thread.map((e) => `- \`${e.from}\` asked: "${clip(e.message)}" — you replied: "${clip(e.reply)}"`);
+	return (
+		"Earlier in this side-channel thread (coordination with other agents — not part of your task):\n" +
+		`${lines.join("\n")}\n\n`
+	);
+}
+
 /** Wraps an incoming message in a reply-focused user prompt. */
 export function renderIncomingMessage(from: string, message: string): string {
 	return (
@@ -29,13 +56,20 @@ function extractReplyText(content: AssistantMessage["content"]): string {
  * own `streamFn` (so it inherits auth/retries) but starts a separate provider
  * request that never touches the agent's main run or its persisted history.
  * This is what makes it safe to message an agent that is mid-tool-call.
+ *
+ * The responder is stateful across calls: it remembers prior exchanges in a
+ * closure-local, capped thread and replays them into each side-channel turn, so
+ * a multi-message conversation with a peer stays coherent. This memory lives
+ * ONLY in the side-channel — it never enters the recipient's task transcript or
+ * affects the value the agent ultimately returns to its parent.
  */
 export function makeAgentResponder(agent: Agent): AgentResponder {
+	const thread: IrcExchange[] = [];
 	return async (from, message, signal) => {
 		const snapshot = agent.state.messages.slice();
 		const incoming: AgentMessage = {
 			role: "user",
-			content: [{ type: "text", text: renderIncomingMessage(from, message) }],
+			content: [{ type: "text", text: renderThread(thread) + renderIncomingMessage(from, message) }],
 			timestamp: Date.now(),
 		};
 		const llmMessages = await agent.convertToLlm([...snapshot, incoming]);
@@ -46,6 +80,9 @@ export function makeAgentResponder(agent: Agent): AgentResponder {
 		};
 		const stream = await agent.streamFn(agent.state.model, context, { signal });
 		const result = await stream.result();
-		return extractReplyText(result.content);
+		const reply = extractReplyText(result.content);
+		thread.push({ from, message, reply });
+		if (thread.length > MAX_THREAD) thread.shift();
+		return reply;
 	};
 }

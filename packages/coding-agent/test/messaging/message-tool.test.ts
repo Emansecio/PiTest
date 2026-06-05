@@ -73,4 +73,28 @@ describe("message tool", () => {
 		);
 		expect(out).toMatch(/not found|offline/i);
 	});
+
+	it("send honors a per-message timeout_ms override (hung peer fails fast)", async () => {
+		const stuck = agentMessageBus.reserve("Slow", { kind: "sub" });
+		reserved.push(stuck);
+		agentMessageBus.attachResponder(
+			stuck,
+			(_from, _msg, signal) =>
+				new Promise<string>((_resolve, reject) => {
+					signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		);
+		const selfId = reserve("Worker");
+		const def = createMessageToolDefinition(process.cwd(), { selfId });
+		const out = text(
+			await def.execute(
+				"c",
+				{ op: "send", to: "Slow", message: "expensive?", timeout_ms: 10 } as never,
+				undefined,
+				undefined,
+				{} as never,
+			),
+		);
+		expect(out).toMatch(/failed/i);
+	}, 5000);
 });
