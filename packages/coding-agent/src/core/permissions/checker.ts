@@ -2,13 +2,18 @@
  * PermissionChecker — evaluates whether a tool/command is allowed under the
  * configured permission mode and rule set.
  *
- * The checker is pure / synchronous. Auto/yolo mode skips all checks; plan mode
- * blocks mutating tools and still applies configured read restrictions.
+ * The checker is pure / synchronous.
+ * - plan:   read-only — mutating tools are blocked; reads still honor deny rules.
+ * - auto:   guarded — writes/commands run, but built-in + user deny rules apply.
+ * - unsafe: no-rails — the built-in floor is dropped; user-authored deny rules
+ *           still apply. (`auto` + `disableBuiltinDefaults` is equivalent.)
  */
 
-import { findMatchingGlob, normalizeTargetPath } from "./matcher.ts";
+import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath } from "./matcher.ts";
 import {
+	BUILTIN_DANGEROUS_COMMANDS,
 	BUILTIN_SENSITIVE_PATHS,
+	type CommandRule,
 	type PathRule,
 	type PermissionAction,
 	type PermissionDecision,
@@ -27,8 +32,6 @@ export interface PermissionContext {
 
 export class PermissionChecker {
 	private ctx: PermissionContext;
-	private _cachedDenyPaths: readonly PathRule[] | undefined;
-	private _settingsRef: PermissionSettings | undefined;
 
 	constructor(ctx: PermissionContext) {
 		this.ctx = ctx;
@@ -48,76 +51,95 @@ export class PermissionChecker {
 
 	updateSettings(settings: PermissionSettings): void {
 		this.ctx = { ...this.ctx, settings };
-		this._settingsRef = undefined;
 	}
 
-	private invalidateCacheIfNeeded(): void {
-		if (this._settingsRef !== this.ctx.settings) {
-			this._cachedDenyPaths = undefined;
-			this._settingsRef = this.ctx.settings;
-		}
+	/**
+	 * Whether the built-in deny floor (sensitive paths, dangerous commands) is
+	 * active. Off in `unsafe`, or in any mode with `disableBuiltinDefaults`.
+	 */
+	get builtinsActive(): boolean {
+		return this.ctx.mode !== "unsafe" && !this.ctx.settings.disableBuiltinDefaults;
+	}
+
+	private resolvedDenyPaths(includeBuiltins: boolean): readonly PathRule[] {
+		const explicit = this.ctx.settings.denyPaths ?? [];
+		return includeBuiltins ? [...explicit, ...BUILTIN_SENSITIVE_PATHS] : explicit;
+	}
+
+	private resolvedDenyCommands(includeBuiltins: boolean): readonly CommandRule[] {
+		const explicit = this.ctx.settings.denyCommands ?? [];
+		return includeBuiltins ? [...explicit, ...BUILTIN_DANGEROUS_COMMANDS] : explicit;
 	}
 
 	private allowPaths(): readonly PathRule[] {
 		return this.ctx.settings.allowPaths ?? [];
 	}
 
-	private denyPaths(): readonly PathRule[] {
-		this.invalidateCacheIfNeeded();
-		if (!this._cachedDenyPaths) {
-			const builtins = this.ctx.settings.disableBuiltinDefaults ? [] : BUILTIN_SENSITIVE_PATHS;
-			this._cachedDenyPaths = [...(this.ctx.settings.denyPaths ?? []), ...builtins];
-		}
-		return this._cachedDenyPaths;
-	}
-
 	/** Public entry point. */
 	check(action: PermissionAction): PermissionDecision {
-		if (this.ctx.mode === "auto") {
-			return { decision: "allow" };
-		}
+		const { settings, mode } = this.ctx;
 
-		const { settings } = this.ctx;
-
-		// Tool-level deny still applies in plan mode for read-only tools.
+		// Explicit tool-level deny always wins, in every mode.
 		if (settings.denyTools?.includes(action.toolName)) {
 			return { decision: "deny", reason: `Tool "${action.toolName}" is in denyTools.` };
 		}
 
-		// Plan mode: block any mutating action before allow rules can bypass read-only mode.
-		if (action.type === "write" || action.type === "exec") {
-			return {
-				decision: "deny",
-				reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.`,
-			};
-		}
-		if (action.type === "tool" && MUTATING_TOOLS.has(action.toolName)) {
-			return {
-				decision: "deny",
-				reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.`,
-			};
+		if (mode === "plan") {
+			return this.checkPlan(action);
 		}
 
+		// auto / unsafe — writes and commands run; deny rules gate them.
+		// allowTools is an explicit, deliberate bypass: skip all further checks.
 		if (settings.allowTools?.includes(action.toolName)) {
 			return { decision: "allow" };
 		}
 
-		// Path-based checks for read tools that remain available in plan mode.
-		if (action.type === "read") {
-			const denyTarget = this.firstMatchingPath(this.denyPaths(), action.paths, action.toolName);
-			if (denyTarget) {
+		const builtins = this.builtinsActive;
+
+		if (action.type === "write" || action.type === "read") {
+			const denyTarget = this.firstMatchingPath(this.resolvedDenyPaths(builtins), action.paths, action.toolName);
+			if (denyTarget) return denyReasonForPath(denyTarget);
+		}
+		if (action.type === "exec") {
+			const denyCmd = findMatchingCommandRule(this.resolvedDenyCommands(builtins), action.command);
+			if (denyCmd) {
 				return {
 					decision: "deny",
-					reason: denyTarget.rule.reason
-						? `${denyTarget.rule.reason} (${denyTarget.matchedPath})`
-						: `Path "${denyTarget.matchedPath}" matches deny rule "${denyTarget.rule.glob}".`,
+					reason: denyCmd.reason ?? `Command matches deny rule "${denyCmd.pattern}".`,
 				};
 			}
+		}
+		if (action.type === "write" || action.type === "read") {
+			const allowMatch = this.firstMatchingPath(this.allowPaths(), action.paths, action.toolName);
+			if (allowMatch) return { decision: "allow" };
+		}
+
+		return { decision: "allow" };
+	}
+
+	/** Read-only mode: block mutations, still apply read deny/allow rules. */
+	private checkPlan(action: PermissionAction): PermissionDecision {
+		if (action.type === "write" || action.type === "exec") {
+			return { decision: "deny", reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.` };
+		}
+		if (action.type === "tool" && MUTATING_TOOLS.has(action.toolName)) {
+			return { decision: "deny", reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.` };
+		}
+
+		if (this.ctx.settings.allowTools?.includes(action.toolName)) {
+			return { decision: "allow" };
+		}
+
+		if (action.type === "read") {
+			const denyTarget = this.firstMatchingPath(
+				this.resolvedDenyPaths(this.builtinsActive),
+				action.paths,
+				action.toolName,
+			);
+			if (denyTarget) return denyReasonForPath(denyTarget);
 
 			const allowMatch = this.firstMatchingPath(this.allowPaths(), action.paths, action.toolName);
-			if (allowMatch) {
-				return { decision: "allow" };
-			}
+			if (allowMatch) return { decision: "allow" };
 		}
 
 		return { decision: "allow" };
@@ -137,6 +159,15 @@ export class PermissionChecker {
 		}
 		return undefined;
 	}
+}
+
+function denyReasonForPath(denyTarget: { rule: PathRule; matchedPath: string }): PermissionDecision {
+	return {
+		decision: "deny",
+		reason: denyTarget.rule.reason
+			? `${denyTarget.rule.reason} (${denyTarget.matchedPath})`
+			: `Path "${denyTarget.matchedPath}" matches deny rule "${denyTarget.rule.glob}".`,
+	};
 }
 
 /** Map a tool name + input to a PermissionAction. */

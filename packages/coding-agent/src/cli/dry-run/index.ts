@@ -182,7 +182,7 @@ export function buildDryRunReport(options: BuildDryRunReportOptions): DryRunRepo
 	checks.push({
 		name: "Permissions",
 		status: "ready",
-		detail: `mode=${permissionMode}; allow=${perm.allowPaths?.length ?? 0}; deny=${perm.denyPaths?.length ?? 0}; ask=${perm.askPaths?.length ?? 0}`,
+		detail: `mode=${permissionMode}; allow=${perm.allowPaths?.length ?? 0}; deny=${perm.denyPaths?.length ?? 0}; denyCmd=${perm.denyCommands?.length ?? 0}`,
 	});
 
 	// --- Project context files

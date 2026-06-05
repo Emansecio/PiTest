@@ -63,7 +63,7 @@ export interface SpawnSubagentDependencies {
 /**
  * Maps a subagent tool call to a permission decision. Returns a
  * `BeforeToolCallResult` with `block: true` when the parent's policy denies the
- * call (or would prompt — subagents have no UI), or `undefined` to allow it.
+ * call, or `undefined` to allow it.
  *
  * Exported for unit testing the gating logic in isolation.
  */
@@ -73,13 +73,10 @@ export function evaluateSubagentToolPermission(
 	args: Record<string, unknown>,
 ): BeforeToolCallResult | undefined {
 	const decision = checker.check(describeToolAction(toolName, args));
-	if (decision.decision === "allow") return undefined;
 	if (decision.decision === "deny") {
 		return { block: true, reason: decision.reason ?? `Tool "${toolName}" is denied by permission policy.` };
 	}
-	// decision === "ask": the subagent is headless, so we cannot prompt. Deny.
-	const base = decision.reason ?? `Tool "${toolName}" requires confirmation.`;
-	return { block: true, reason: `${base} (subagent runs headless — denied)` };
+	return undefined;
 }
 
 function filterTools(tools: readonly AgentTool[], allowed: readonly string[] | undefined): AgentTool[] {

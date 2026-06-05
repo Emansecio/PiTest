@@ -1,20 +1,23 @@
 # Permissions
 
-Pit gates tool calls and bash commands through a permission system with three
-modes and a deny/allow/ask rule set. Permissions are enforced regardless of
-which provider or model you use; the rules live in your settings and the
-checker runs before every tool execution.
+Pit gates every tool call and bash command through a permission system with
+three modes on a single axis of permissiveness, plus a deny/allow rule set.
+Permissions are enforced regardless of which provider or model you use; the
+rules live in your settings and the checker runs before every tool execution.
 
 ## Modes
 
 | Mode | Behavior |
 |------|----------|
-| `default` | Allow by default. Built-in sensitive defaults (`.env`, `~/.ssh/**`, `rm -rf /`, …) deny. `askPaths`/`askCommands` prompt the user via the interactive UI; in non-interactive modes "ask" falls back to **deny** (fail-closed). |
-| `auto` | Skip every prompt. Deny rules still apply. Use in CI / agentic loops where you trust the agent's tool catalog. |
-| `plan` | Read-only mode. Any tool that mutates the filesystem or runs a shell (`bash`, `edit`, `write`) is blocked. Useful for exploration / planning passes. |
+| `plan` | Read-only. Any tool that mutates the filesystem or runs a shell (`bash`, `edit`, `write`) is blocked. Reads still honor deny rules. Useful for exploration / planning passes. |
+| `auto` | **Default.** Writes and commands run without prompts, but the built-in deny floor is enforced as **hard blocks**: sensitive paths (`.env`, `~/.ssh/**`, …) and dangerous commands (`rm -rf /`, fork bomb, …) are denied. A *guarded* default. |
+| `unsafe` | No-rails. The built-in floor is dropped — `.env`, `rm -rf /`, etc. are allowed. **User-authored** `denyPaths`/`denyCommands`/`denyTools` still apply. For authorized targets only; surfaced loudly in the footer so it is never on by accident. |
 
-Override the configured mode for a single run with `--permission-mode <mode>`.
-Switch mid-session with the `/permission-mode <mode>` slash command.
+`unsafe` is exactly `auto` with `disableBuiltinDefaults: true`.
+
+Override the configured mode for a single run with `--permission-mode <mode>`,
+or jump straight to no-rails with `--unsafe`. Switch mid-session with the
+`/permission-mode <mode>` or `/unsafe` slash commands.
 
 ## Configuration
 
@@ -23,7 +26,7 @@ Switch mid-session with the `/permission-mode <mode>` slash command.
 ```json
 {
   "permissions": {
-    "mode": "default",
+    "mode": "auto",
     "allowPaths": [
       { "glob": "src/**", "reason": "trusted source tree" }
     ],
@@ -31,14 +34,8 @@ Switch mid-session with the `/permission-mode <mode>` slash command.
       { "glob": "**/.env*" },
       { "glob": "node_modules/**", "tools": ["write", "edit"] }
     ],
-    "askPaths": [
-      { "glob": "**/build/**", "reason": "generated artifacts — confirm before editing" }
-    ],
     "denyCommands": [
       { "pattern": "git\\s+push\\s+--force", "reason": "no force push" }
-    ],
-    "askCommands": [
-      { "pattern": "git\\s+push", "reason": "confirm before pushing" }
     ],
     "allowTools": ["read"],
     "denyTools": [],
@@ -54,7 +51,7 @@ Switch mid-session with the `/permission-mode <mode>` slash command.
 - Tool inputs are resolved to absolute paths before matching, so
   `**/.env*` matches both `./project/.env` and `/etc/.env.prod`.
 - `tools` (optional) restricts the rule to specific tool names.
-- `reason` is shown in deny errors and ask dialogs.
+- `reason` is shown in deny errors.
 
 ### Command rules
 
@@ -67,28 +64,33 @@ Switch mid-session with the `/permission-mode <mode>` slash command.
 
 Within a single check the order is:
 
-1. `denyTools[name]` → **deny**
-2. `allowTools[name]` → **allow**
-3. Plan mode block on write/exec → **deny**
-4. `denyPaths` / `denyCommands` (incl. built-in defaults) → **deny**
+1. `denyTools[name]` → **deny** (every mode)
+2. **plan** only: write / exec / mutating tool → **deny** (read-only)
+3. `allowTools[name]` → **allow** (skips remaining checks)
+4. `denyPaths` (reads in `plan`; reads + writes in `auto`/`unsafe`) and
+   `denyCommands` (exec in `auto`/`unsafe`), including the built-in defaults
+   unless the floor is off → **deny**
 5. `allowPaths` → **allow**
-6. `askPaths` / `askCommands` (default mode only) → **ask**
-7. Otherwise → **allow**
+6. Otherwise → **allow**
+
+The built-in floor (the defaults in step 4) is active in `plan`/`auto` and off
+in `unsafe` — or in any mode with `disableBuiltinDefaults: true`.
 
 ### Built-in defaults
 
-Unless `disableBuiltinDefaults: true`, Pit adds:
+Unless `disableBuiltinDefaults: true` (or mode `unsafe`), Pit adds:
 
 - Deny paths: `**/.env`, `**/.env.*`, `**/.git/config`, `**/.ssh/**`,
   `**/.aws/credentials`, `**/.npmrc`, `**/id_rsa`, `**/id_ed25519`.
 - Deny commands: recursive `rm -rf /` and `rm -rf ~`, classic fork-bomb,
   `mkfs` / `dd if=… of=/dev/`, `chmod -R 777 /`.
 
-Disable when you're testing the system itself or when your project's checked-in
-fixtures intentionally include `.env.example` files you need to write.
+Disable when you're testing the system itself, or when working an authorized
+target where the floor gets in the way (prefer `--unsafe` for that — it's
+session-scoped and surfaced in the footer).
 
 ## Audit
 
-Permissions emit a decision per tool call. To stream them, register an
-extension and pass an `onPermissionDecision` callback when bundling built-ins
-through the SDK (see `core/built-ins/permissions-extension.ts`).
+Permissions emit a decision (`allow` / `deny`) per tool call. To stream them,
+register an extension and pass an `onPermissionDecision` callback when bundling
+built-ins through the SDK (see `core/built-ins/permissions-extension.ts`).

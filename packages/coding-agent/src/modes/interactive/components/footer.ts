@@ -216,7 +216,7 @@ export class FooterComponent implements Component {
 		}
 		const mode = this.getPermissionMode();
 		const modeBits: string[] = [];
-		if (mode) modeBits.push(mode);
+		if (mode && mode !== "unsafe") modeBits.push(mode);
 		if (this.autoCompactEnabled) modeBits.push("⟳");
 		if (modeBits.length) rightParts.push(modeBits.join(" "));
 
@@ -227,6 +227,14 @@ export class FooterComponent implements Component {
 		});
 
 		const lines = [identityLine, metricsLine];
+
+		// --- Unsafe alert ----------------------------------------------------
+		// The no-rails permission state must never be silent: bold red, on its
+		// own line. Fires whenever the built-in floor is off (unsafe mode, or
+		// auto + disableBuiltinDefaults — both surface as "unsafe" in the status).
+		if (mode === "unsafe") {
+			lines.push(`\x1b[1m${theme.fg("error", "⚠ UNSAFE — built-in guard-rails off")}\x1b[22m`);
+		}
 
 		// --- Extension statuses (line 3, optional) ---------------------------
 		// Exclude "permissions" — its mode is already surfaced on the metrics line.

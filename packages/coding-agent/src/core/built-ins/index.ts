@@ -48,7 +48,7 @@ export interface BuiltInExtensionsOptions {
 	/** Returns the parent's loaded skills — used by the coordinator for `inherit_skills`. */
 	getSkills?: () => import("../skills.ts").Skill[];
 	/** Audit hook for permission decisions (telemetry / logs). */
-	onPermissionDecision?: (info: { toolName: string; decision: "allow" | "ask" | "deny"; reason?: string }) => void;
+	onPermissionDecision?: (info: { toolName: string; decision: "allow" | "deny"; reason?: string }) => void;
 }
 
 export interface BuiltInExtensionsResult {

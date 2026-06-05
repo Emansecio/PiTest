@@ -363,7 +363,7 @@ describe("spawnSubagent (faux model)", () => {
 });
 
 describe("evaluateSubagentToolPermission (subagent permission gate)", () => {
-	const checker = (settings: PermissionSettings, mode: "auto" | "plan") =>
+	const checker = (settings: PermissionSettings, mode: "auto" | "plan" | "unsafe") =>
 		new PermissionChecker({ cwd: process.cwd(), mode, settings });
 
 	it("blocks a mutating tool under plan mode", () => {
@@ -376,8 +376,20 @@ describe("evaluateSubagentToolPermission (subagent permission gate)", () => {
 		expect(result).toBeUndefined();
 	});
 
-	it("allows everything under auto mode", () => {
+	it("blocks builtin dangerous commands under auto mode", () => {
 		const result = evaluateSubagentToolPermission(checker({ mode: "auto" }, "auto"), "bash", { command: "rm -rf /" });
+		expect(result?.block).toBe(true);
+	});
+
+	it("allows ordinary commands under auto mode", () => {
+		const result = evaluateSubagentToolPermission(checker({ mode: "auto" }, "auto"), "bash", { command: "npm test" });
+		expect(result).toBeUndefined();
+	});
+
+	it("allows everything under unsafe mode (no-rails)", () => {
+		const result = evaluateSubagentToolPermission(checker({ mode: "unsafe" }, "unsafe"), "bash", {
+			command: "rm -rf /",
+		});
 		expect(result).toBeUndefined();
 	});
 

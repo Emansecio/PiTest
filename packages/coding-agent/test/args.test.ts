@@ -157,9 +157,15 @@ describe("parseArgs", () => {
 			expect(result.diagnostics).toEqual([]);
 		});
 
-		test("parses --permission-mode yolo as auto", () => {
-			const result = parseArgs(["--permission-mode", "yolo"]);
-			expect(result.permissionMode).toBe("auto");
+		test("parses --permission-mode unsafe", () => {
+			const result = parseArgs(["--permission-mode", "unsafe"]);
+			expect(result.permissionMode).toBe("unsafe");
+			expect(result.diagnostics).toEqual([]);
+		});
+
+		test("parses --unsafe shorthand", () => {
+			const result = parseArgs(["--unsafe"]);
+			expect(result.permissionMode).toBe("unsafe");
 			expect(result.diagnostics).toEqual([]);
 		});
 
@@ -169,13 +175,13 @@ describe("parseArgs", () => {
 			expect(result.diagnostics).toEqual([]);
 		});
 
-		test("warns on invalid --permission-mode", () => {
-			const result = parseArgs(["--permission-mode", "default"]);
+		test("warns on invalid --permission-mode (yolo removed)", () => {
+			const result = parseArgs(["--permission-mode", "yolo"]);
 			expect(result.permissionMode).toBeUndefined();
 			expect(result.diagnostics).toEqual([
 				{
 					type: "warning",
-					message: 'Invalid permission mode "default". Valid values: auto/yolo, plan.',
+					message: 'Invalid permission mode "yolo". Valid values: plan, auto, unsafe.',
 				},
 			]);
 		});

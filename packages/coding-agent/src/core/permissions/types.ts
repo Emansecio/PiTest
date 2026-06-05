@@ -1,21 +1,20 @@
 /**
  * Permission system types.
  *
- * Modes:
- * - auto: yolo mode; permissions are fully open and all checks are skipped.
- * - plan: read-only mode; any tool that mutates filesystem or runs shell is blocked.
- *
- * "yolo" is accepted as an alias for "auto" at CLI/settings/command boundaries.
+ * Modes — a single axis of increasing permissiveness:
+ * - plan:   read-only; any tool that mutates the filesystem or runs a shell is blocked.
+ * - auto:   guarded default; writes/commands run without prompts, but built-in deny
+ *           rules (sensitive paths, dangerous commands) are enforced as hard blocks.
+ * - unsafe: no-rails; the built-in floor is dropped. User-authored deny rules still
+ *           apply. Equivalent to `auto` + `disableBuiltinDefaults`. For authorized
+ *           targets only; surfaced loudly in the UI so it is never on by accident.
  */
-export type PermissionMode = "auto" | "plan";
-export type PermissionModeInput = PermissionMode | "yolo";
+export type PermissionMode = "auto" | "plan" | "unsafe";
 
-export const PERMISSION_MODES: readonly PermissionMode[] = ["auto", "plan"] as const;
-export const PERMISSION_MODE_INPUTS: readonly PermissionModeInput[] = ["auto", "yolo", "plan"] as const;
+export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "auto", "unsafe"] as const;
 
 export function normalizePermissionMode(value: unknown): PermissionMode | undefined {
-	if (value === "auto" || value === "yolo") return "auto";
-	if (value === "plan") return "plan";
+	if (value === "auto" || value === "plan" || value === "unsafe") return value;
 	return undefined;
 }
 
@@ -50,18 +49,14 @@ export interface CommandRule {
 }
 
 export interface PermissionSettings {
-	/** Default mode when no CLI override is set. "yolo" is accepted as an alias for "auto". */
-	mode?: PermissionModeInput;
+	/** Default mode when no CLI override is set. */
+	mode?: PermissionMode;
 	/** Paths always allowed without prompt. */
 	allowPaths?: PathRule[];
-	/** Paths always blocked (highest priority). */
+	/** Paths always blocked (highest priority). Combined with built-in defaults unless disabled. */
 	denyPaths?: PathRule[];
-	/** Deprecated: ask rules are ignored now that auto/yolo is the default. */
-	askPaths?: PathRule[];
-	/** Commands always blocked. */
+	/** Commands always blocked. Combined with built-in dangerous-command defaults unless disabled. */
 	denyCommands?: CommandRule[];
-	/** Deprecated: ask rules are ignored now that auto/yolo is the default. */
-	askCommands?: CommandRule[];
 	/** Tool names always allowed (skips checks entirely). */
 	allowTools?: string[];
 	/** Tool names always blocked. */
@@ -71,10 +66,7 @@ export interface PermissionSettings {
 }
 
 /** Result of a permission decision. */
-export type PermissionDecision =
-	| { decision: "allow" }
-	| { decision: "ask"; reason: string }
-	| { decision: "deny"; reason: string };
+export type PermissionDecision = { decision: "allow" } | { decision: "deny"; reason: string };
 
 /** What kind of action the checker is evaluating. */
 export type PermissionAction =

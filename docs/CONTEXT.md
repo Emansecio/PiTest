@@ -17,6 +17,10 @@ A modular behavioral feature implemented as an extension factory (like `permissi
 ### Read Guard
 A built-in extension that blocks `edit` and `write` tool calls on files not previously read in the current session. Prevents the model from generating diffs against hallucinated file content. Read tracking resets after compaction.
 
+### Permission Mode
+The session-wide capability tier for tool execution, on a single axis of increasing permissiveness. Three modes: **plan** (read-only — `bash`/`edit`/`write` blocked); **auto** (default — writes enabled, but built-in deny rules are hard-blocked: sensitive paths like `.env`/`~/.ssh`, dangerous commands like `rm -rf /`/fork bomb — never prompted); **unsafe** (writes enabled, builtin floor OFF — a no-rails run for authorized targets). `auto` is a *guarded* default; `unsafe` is the explicit opt-out, surfaced loudly (footer alert) so it is never on by accident. `unsafe` only drops the *builtin* defaults — user-authored `denyPaths`/`denyTools`/`denyCommands` are intentional and apply in every mode (so `unsafe` ≡ `auto` + `disableBuiltinDefaults`). There is no separate sandbox axis — containment is deny rules, not a cwd jail. Switched via `--permission-mode`/`--unsafe` flags or `/permission-mode`/`/unsafe` commands.
+_Avoid_: yolo (removed — `unsafe` is the honest name for the no-rails tier), default (removed mode), approval-policy/sandbox-policy (codex's two axes — deliberately collapsed to one).
+
 ### Diff Limit
 A built-in extension that pauses execution and requests user confirmation when a single turn produces more than a configured number of changed lines (default: 300). Prevents over-engineering and unintended large-scale changes.
 
@@ -31,6 +35,12 @@ An in-session data structure that counts per-file read/write/edit operations. Us
 
 ### Tool Call Stats
 Per-session telemetry that counts calls/errors per tool and maintains a ring buffer of recent invocations for doom-loop detection. Bounded by design to prevent memory leaks in pathological loops.
+
+## Flagged ambiguities
+
+- **"plan"** is overloaded: a **Permission Mode** (read-only enforcement) *and* a **model role** (`--plan` / `--role plan` — which model answers a planning turn). Unrelated axes — keep distinct: "plan mode" = permissions, "plan role" = model selection.
+- **"yolo"** was used as an alias for `auto`, but connoted *no safety net* while `auto` keeps a builtin deny floor. Resolved: yolo removed; the no-rails tier is the explicit **unsafe** mode (honest name), not a misnamed alias.
+- **"auto"** ≠ codex's `danger-full-access`. Pit's `auto` is guarded (builtins enforced); the codex-equivalent full-access is the **unsafe** mode.
 
 ## Interactive TUI Rendering
 

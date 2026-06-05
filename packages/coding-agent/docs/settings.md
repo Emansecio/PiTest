@@ -232,15 +232,13 @@ See [packages.md](packages.md) for package management details.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `permissions.mode` | string | `"default"` | `"default"`, `"auto"`, or `"plan"`. Override per-run with `--permission-mode`. |
+| `permissions.mode` | string | `"auto"` | `"plan"`, `"auto"`, or `"unsafe"`. Override per-run with `--permission-mode` / `--unsafe`. |
 | `permissions.allowPaths` | array | `[]` | Paths always allowed (each entry: `{ glob, tools?, reason? }`). |
 | `permissions.denyPaths` | array | `[]` | Paths always blocked. Built-in defaults (`.env`, `~/.ssh/**`, …) are appended unless disabled. |
-| `permissions.askPaths` | array | `[]` | Paths that prompt for confirmation in `default` mode. |
-| `permissions.denyCommands` | array | `[]` | Bash command regex denylist (each entry: `{ pattern, flags?, reason? }`). |
-| `permissions.askCommands` | array | `[]` | Bash command regex asklist. |
+| `permissions.denyCommands` | array | `[]` | Bash command regex denylist (each entry: `{ pattern, flags?, reason? }`). Built-in dangerous-command defaults appended unless disabled. |
 | `permissions.allowTools` | string[] | `[]` | Tool names that bypass checks. |
 | `permissions.denyTools` | string[] | `[]` | Tool names that are always blocked. |
-| `permissions.disableBuiltinDefaults` | boolean | `false` | Skip the built-in sensitive-paths and dangerous-commands lists. |
+| `permissions.disableBuiltinDefaults` | boolean | `false` | Skip the built-in sensitive-paths and dangerous-commands lists (equivalent to running an `auto` session as `unsafe`). |
 
 See [permissions.md](permissions.md) for the full rule format and precedence.
 

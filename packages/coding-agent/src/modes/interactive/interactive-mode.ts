@@ -2133,6 +2133,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.thinking.cycle", () => this.cycleThinkingLevel());
 		this.defaultEditor.onAction("app.model.cycleForward", () => this.cycleModel("forward"));
 		this.defaultEditor.onAction("app.model.cycleBackward", () => this.cycleModel("backward"));
+		this.defaultEditor.onAction("app.permission.cycle", () => this.cyclePermissionMode());
 
 		// Global debug handler on TUI (works regardless of focus)
 		this.ui.onDebug = () => this.handleDebugCommand();
@@ -3431,6 +3432,23 @@ export class InteractiveMode {
 				this.showStatus(`Switched to ${result.model.name || result.model.id}${thinkingStr}`);
 				void this.maybeWarnAboutAnthropicSubscriptionAuth(result.model);
 			}
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	/**
+	 * Cycle the permission mode between plan and auto by invoking the permissions
+	 * extension's `permission-cycle` command (which owns the shared
+	 * PermissionChecker and updates the footer status). `unsafe` stays out of the
+	 * cycle — entering no-rails must be deliberate (/unsafe).
+	 */
+	private async cyclePermissionMode(): Promise<void> {
+		const runner = this.session.extensionRunner;
+		const command = runner.getCommand("permission-cycle");
+		if (!command) return;
+		try {
+			await command.handler("", runner.createCommandContext());
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -5200,6 +5218,7 @@ export class InteractiveMode {
 		const followUp = this.getAppKeyDisplay("app.message.followUp");
 		const dequeue = this.getAppKeyDisplay("app.message.dequeue");
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
+		const cyclePermission = this.getAppKeyDisplay("app.permission.cycle");
 
 		let hotkeys = `
 **Navigation**
@@ -5237,6 +5256,7 @@ export class InteractiveMode {
 | \`${cycleThinkingLevel}\` | Cycle thinking level |
 | \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
 | \`${selectModel}\` | Open model selector |
+| \`${cyclePermission}\` | Cycle permission mode (plan/auto) |
 | \`${expandTools}\` | Toggle tool output expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${externalEditor}\` | Edit message in external editor |
