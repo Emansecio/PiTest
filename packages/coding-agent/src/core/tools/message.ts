@@ -10,15 +10,18 @@ export interface MessageToolOptions {
 	timeoutMs?: number;
 }
 
-const messageSchema = Type.Object({
-	op: Type.Union([Type.Literal("send"), Type.Literal("list")], {
-		description: 'Operation: "send" a message to a peer, or "list" the agents currently online.',
-	}),
-	to: Type.Optional(
-		Type.String({ description: 'Recipient agent id, or "all" to broadcast. Required for op:"send".' }),
-	),
-	message: Type.Optional(Type.String({ description: 'Message body (plain prose). Required for op:"send".' })),
-});
+const messageSchema = Type.Object(
+	{
+		op: Type.Union([Type.Literal("send"), Type.Literal("list")], {
+			description: 'Operation: "send" a message to a peer, or "list" the agents currently online.',
+		}),
+		to: Type.Optional(
+			Type.String({ description: 'Recipient agent id, or "all" to broadcast. Required for op:"send".' }),
+		),
+		message: Type.Optional(Type.String({ description: 'Message body (plain prose). Required for op:"send".' })),
+	},
+	{ additionalProperties: false },
+);
 
 type MessageParams = Static<typeof messageSchema>;
 
@@ -96,7 +99,9 @@ export function createMessageToolDefinition(
 				lines.push(`Failed: ${sent.failed.map((f) => `${f.id} (${f.error})`).join(", ")}`);
 			}
 			if (lines.length === 0) {
-				lines.push(`Delivered to ${sent.delivered.join(", ") || "(no recipients)"}.`);
+				lines.push(
+					sent.delivered.length > 0 ? `Delivered to ${sent.delivered.join(", ")}.` : "No recipients online.",
+				);
 			}
 			return { content: [{ type: "text" as const, text: lines.join("\n") }], details };
 		},
