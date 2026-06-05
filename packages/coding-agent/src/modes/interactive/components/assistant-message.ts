@@ -227,7 +227,10 @@ export class AssistantMessageComponent extends Container {
 					// "Live" = this hidden-thinking block is the latest content (no answer
 					// after it yet) and we have a ui to animate on → breathe the label.
 					// Otherwise render it static (history, or once the answer arrives).
-					const live = i === lastVisibleIndex && !!this.ui && !this.isDeliverable;
+					// `!message.stopReason` keeps the breath from re-arming once the turn
+					// settles/aborts (otherwise an aborted thinking-only turn leaks a
+					// forever-running ticker that pins the component).
+					const live = i === lastVisibleIndex && !!this.ui && !this.isDeliverable && !message.stopReason;
 					if (live) {
 						sawLiveThinking = true;
 						this.startThinkingBreath();

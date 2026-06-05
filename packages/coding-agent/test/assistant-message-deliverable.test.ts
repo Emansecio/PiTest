@@ -27,6 +27,20 @@ function thinkingOnlyMsg(thinking: string): AssistantMessage {
 	} as unknown as AssistantMessage;
 }
 
+function countingTui(counter: { n: number }): TUI {
+	return {
+		requestRender() {},
+		addAnimationCallback() {
+			counter.n++;
+			return () => {};
+		},
+	} as unknown as TUI;
+}
+
+function thinkingMsg(thinking: string, stopReason?: string): AssistantMessage {
+	return { role: "assistant", content: [{ type: "thinking", thinking }], stopReason } as unknown as AssistantMessage;
+}
+
 describe("deliverable marker", () => {
 	it("prepends a marker glyph to the first text line once marked", () => {
 		const c = new AssistantMessageComponent(undefined, false, undefined, undefined, fakeTui(), false);
@@ -91,5 +105,22 @@ describe("narration dimming", () => {
 		const afterRaw = c.render(80).join("\n");
 		expect(afterRaw).toBe(beforeRaw);
 		expect(stripAnsi(afterRaw)).toMatch(/[●◉]/);
+	});
+});
+
+describe("thinking breath lifecycle", () => {
+	it("breathes a live hidden-thinking label (no stopReason)", () => {
+		const counter = { n: 0 };
+		// hideThinkingBlock = true → shows the collapsible "Thinking…" label.
+		const c = new AssistantMessageComponent(undefined, true, undefined, undefined, countingTui(counter), false);
+		c.updateContent(thinkingMsg("pensando"));
+		expect(counter.n).toBeGreaterThan(0); // breath ticker armed
+	});
+
+	it("does not breathe once the turn has settled/aborted (stopReason set)", () => {
+		const counter = { n: 0 };
+		const c = new AssistantMessageComponent(undefined, true, undefined, undefined, countingTui(counter), false);
+		c.updateContent(thinkingMsg("pensando", "aborted"));
+		expect(counter.n).toBe(0); // no forever-running ticker on a settled turn
 	});
 });
