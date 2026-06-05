@@ -49,7 +49,7 @@
 		"mdLinkUrl": "dimGray",
 		"mdCode": "accent",
 		"mdCodeBlock": "green",
-		"mdCodeBlockBorder": "gray",
+		"mdCodeBlockBorder": "darkGray",
 		"mdQuote": "gray",
 		"mdQuoteBorder": "gray",
 		"mdHr": "gray",
