@@ -308,6 +308,9 @@ export class InteractiveMode {
 	private streamingMessage: AssistantMessage | undefined = undefined;
 	// The last AssistantMessageComponent attached in the current turn; cleared at agent_start.
 	private lastAssistantComponent: AssistantMessageComponent | null = null;
+	// All text-bearing assistant components of the current turn, in order. At
+	// agent_end the last is the deliverable; the rest are dimmed as narration.
+	private turnAssistantComponents: AssistantMessageComponent[] = [];
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
@@ -2449,6 +2452,7 @@ export class InteractiveMode {
 				this.pendingTools.clear();
 				this.activityStacker.reset();
 				this.lastAssistantComponent = null;
+				this.turnAssistantComponents = [];
 				this.streamingAttached = false;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
@@ -2569,6 +2573,9 @@ export class InteractiveMode {
 					// thinking-only or tool-only message must not displace it).
 					if (messageHasVisibleContent(this.streamingMessage, false)) {
 						this.lastAssistantComponent = this.streamingComponent;
+						if (this.turnAssistantComponents.at(-1) !== this.streamingComponent) {
+							this.turnAssistantComponents.push(this.streamingComponent);
+						}
 					}
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
@@ -2620,7 +2627,13 @@ export class InteractiveMode {
 				this.pendingTools.clear();
 
 				if (this.settingsManager.getToolActivity() === "grouped") {
-					this.lastAssistantComponent?.markAsDeliverable();
+					const deliverable = this.lastAssistantComponent;
+					deliverable?.markAsDeliverable();
+					// Dim the turn's earlier (non-deliverable) prose so the final answer
+					// stands out — the 3-tier hierarchy: thinking < narration < deliverable.
+					for (const component of this.turnAssistantComponents) {
+						if (component !== deliverable) component.markAsNarration();
+					}
 				}
 
 				await this.checkShutdownRequested();

@@ -75,6 +75,9 @@ export class AssistantMessageComponent extends Container {
 	private revealUnsub: (() => void) | null = null;
 	// Deliverable-marker state
 	private isDeliverable = false;
+	// Dim the prose: set on intermediate (non-deliverable) turn messages so step
+	// narration recedes behind the marked final answer.
+	private isNarration = false;
 	// Eased brighten→settle of the deliverable ● (null until marked / no ui).
 	private deliverableEase: ColorEase | null = null;
 	// Continuous breathing of the hidden "Thinking…" label while it is the latest
@@ -200,10 +203,10 @@ export class AssistantMessageComponent extends Container {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const text = this.clampReveal(i, content.text.trim());
 				let entry = this.blockComponents[i];
-				if (entry?.kind === "text") {
+				if (entry?.kind === "text" && !this.isNarration) {
 					entry.markdown.setText(text);
 				} else {
-					const markdown = new Markdown(text, 1, 0, this.markdownTheme);
+					const markdown = this.makeProseMarkdown(text);
 					entry = {
 						kind: "text",
 						markdown,
@@ -414,6 +417,21 @@ export class AssistantMessageComponent extends Container {
 			this.deliverableEase.begin("text", "accent");
 		}
 		this.ui?.requestRender();
+	}
+
+	/** Mark this message as intermediate step narration: its prose renders dim so
+	 * the marked deliverable stands out. No-op on the deliverable itself. */
+	markAsNarration(): void {
+		if (this.isNarration || this.isDeliverable) return;
+		this.isNarration = true;
+		this.rebuildContent();
+		this.ui?.requestRender();
+	}
+
+	private makeProseMarkdown(text: string): Markdown {
+		return this.isNarration
+			? new Markdown(text, 1, 0, this.markdownTheme, { color: (t: string) => theme.fg("dim", t) })
+			: new Markdown(text, 1, 0, this.markdownTheme);
 	}
 
 	/** Drive the hidden "Thinking…" label's dim⇄normal oscillation. No-op if

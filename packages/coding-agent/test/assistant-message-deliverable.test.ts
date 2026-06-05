@@ -64,3 +64,32 @@ describe("deliverable marker", () => {
 		expect(before).not.toMatch(/[●◉]/);
 	});
 });
+
+describe("narration dimming", () => {
+	it("dims prose without altering the text or adding a marker", () => {
+		const plain = new AssistantMessageComponent(undefined, false, undefined, undefined, fakeTui(), false);
+		plain.updateContent(textMsg("Vou verificar o arquivo."));
+		const plainRaw = plain.render(80).join("\n");
+
+		const narr = new AssistantMessageComponent(undefined, false, undefined, undefined, fakeTui(), false);
+		narr.updateContent(textMsg("Vou verificar o arquivo."));
+		narr.markAsNarration();
+		const narrRaw = narr.render(80).join("\n");
+
+		// Same visible text, different styling (dim color applied), no marker.
+		expect(stripAnsi(narrRaw)).toBe(stripAnsi(plainRaw));
+		expect(narrRaw).not.toBe(plainRaw);
+		expect(stripAnsi(narrRaw)).not.toMatch(/[●◉]/);
+	});
+
+	it("does not dim the deliverable (markAsNarration is a no-op once deliverable)", () => {
+		const c = new AssistantMessageComponent(undefined, false, undefined, undefined, fakeTui(), false);
+		c.updateContent(textMsg("Pronto."));
+		c.markAsDeliverable();
+		const beforeRaw = c.render(80).join("\n");
+		c.markAsNarration();
+		const afterRaw = c.render(80).join("\n");
+		expect(afterRaw).toBe(beforeRaw);
+		expect(stripAnsi(afterRaw)).toMatch(/[●◉]/);
+	});
+});
