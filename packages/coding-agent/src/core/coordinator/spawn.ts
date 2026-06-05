@@ -265,7 +265,13 @@ export async function spawnSubagent(
 		}
 	});
 
-	options.onAgentReady?.(agent);
+	// Best-effort: a throwing onAgentReady must not abort the spawn (and leak the
+	// timeout/abort wiring set up below). The only caller attaches a bus responder.
+	try {
+		options.onAgentReady?.(agent);
+	} catch {
+		// ignore — readiness notification is not load-bearing for the task.
+	}
 
 	let settled = false;
 	const cleanup = async () => {
