@@ -123,7 +123,7 @@ export class AssistantMessageComponent extends Container {
 			return lines;
 		}
 
-		if (this.isDeliverable) {
+		if (this.isDeliverable && this.hasVisibleTextBlock()) {
 			const glyph = theme.fg("accent", this.pulseBright ? "◉" : "●");
 			for (let i = 0; i < lines.length; i++) {
 				if (visibleWidth(stripAnsi(lines[i])) > 0) {
@@ -356,6 +356,14 @@ export class AssistantMessageComponent extends Container {
 			this.revealUnsub();
 			this.revealUnsub = null;
 		}
+	}
+
+	/** A deliverable is the final TEXT block; thinking-only / empty messages are
+	 * never marked. */
+	private hasVisibleTextBlock(): boolean {
+		return (this.lastMessage?.content ?? []).some(
+			(c) => c.type === "text" && typeof c.text === "string" && c.text.trim().length > 0,
+		);
 	}
 
 	/** Mark this message as the turn's final deliverable: a pulsing accent ●

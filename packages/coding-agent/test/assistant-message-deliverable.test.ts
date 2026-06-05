@@ -49,17 +49,12 @@ describe("deliverable marker", () => {
 		expect(matches?.length).toBe(1);
 	});
 
-	it("does nothing visible when the message has no text content", () => {
+	it("does nothing when the message has no visible text", () => {
 		const c = new AssistantMessageComponent(undefined, false, undefined, undefined, fakeTui(), false);
 		c.updateContent(thinkingOnlyMsg("hmm"));
 		c.markAsDeliverable();
-		// thinking-only with hidden-thinking=false renders thinking text, but no ●/◉ glyph
-		// (the glyph is only injected when render() finds a non-empty line; it still applies
-		// but for this test we verify it doesn't crash — the thinking block IS visible so
-		// the glyph WILL appear. Adjust: use a message with truly no visible output.)
-		const rendered = stripAnsi(c.render(80).join("\n"));
-		// We accept that thinking text produces the glyph; the key thing is no crash.
-		expect(rendered).toBeDefined();
+		const out = c.render(80).map(stripAnsi).join("\n");
+		expect(out).not.toMatch(/[●◉]/);
 	});
 
 	it("glyph does not appear before markAsDeliverable is called", () => {
