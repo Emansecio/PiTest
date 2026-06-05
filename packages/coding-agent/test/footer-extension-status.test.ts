@@ -101,3 +101,37 @@ describe("FooterComponent extension status line", () => {
 		expect(plain).not.toMatch(/\s{2,}/);
 	});
 });
+
+describe("FooterComponent unsafe alert", () => {
+	test("renders a loud UNSAFE alert line when the permission floor is off", () => {
+		const statuses = new Map([["permissions", "permissions: unsafe"]]);
+		const footer = new FooterComponent(makeSession(), makeFooterData(statuses));
+		const lines = footer.render(200);
+
+		const alertLine = lines.find((line) => stripAnsi(line).includes("UNSAFE"));
+		expect(alertLine).toBeDefined();
+		// The alert text survives and names the no-rails state explicitly.
+		expect(stripAnsi(alertLine!)).toContain("UNSAFE — built-in guard-rails off");
+		// It is the visual "shout": a hard-coded bold sequence wraps the line.
+		expect(alertLine).toContain("\x1b[1m");
+	});
+
+	test("does not render the UNSAFE alert in guarded auto mode", () => {
+		const statuses = new Map([["permissions", "permissions: auto"]]);
+		const footer = new FooterComponent(makeSession(), makeFooterData(statuses));
+		const plain = footer.render(200).map(stripAnsi).join("\n");
+
+		expect(plain).not.toContain("UNSAFE");
+		// auto is still surfaced (dim) on the metrics line.
+		expect(plain).toContain("auto");
+	});
+
+	test("does not render the UNSAFE alert in plan mode", () => {
+		const statuses = new Map([["permissions", "permissions: plan"]]);
+		const footer = new FooterComponent(makeSession(), makeFooterData(statuses));
+		const plain = footer.render(200).map(stripAnsi).join("\n");
+
+		expect(plain).not.toContain("UNSAFE");
+		expect(plain).toContain("plan");
+	});
+});

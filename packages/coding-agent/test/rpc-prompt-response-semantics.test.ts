@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@pit/agent-core";
@@ -155,8 +155,13 @@ function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number
 				// ignore test cleanup failures
 			}
 			session.dispose();
-			if (existsSync(tempDir)) {
-				rmSync(tempDir, { recursive: true });
+			// On Windows the session's file handles can linger briefly after
+			// dispose; under suite load the rmSync races the OS releasing them
+			// (EBUSY/EPERM). Retry + force, and never let teardown fail the test.
+			try {
+				rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+			} catch {
+				// best-effort temp cleanup
 			}
 		},
 	};
