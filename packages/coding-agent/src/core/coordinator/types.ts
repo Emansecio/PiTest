@@ -87,8 +87,8 @@ export interface SpawnSubagentOptions {
 	 */
 	onAgentReady?: (agent: import("@pit/agent-core").Agent) => void;
 	/**
-	 * Called when the subagent settles (success, failure, or cancellation).
-	 * Idempotent: may be invoked more than once on some error paths. Used to
+	 * Called exactly once when the subagent settles (success, failure, or
+	 * cancellation) — `spawnSubagent` guards it with a once-flag. Used to
 	 * unregister the agent from the message bus.
 	 */
 	onSettle?: () => void;
