@@ -1,3 +1,4 @@
+import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings } from "../keybindings.ts";
 import type { Component } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
@@ -39,9 +40,6 @@ export interface SelectListLayoutOptions {
 
 export class SelectList implements Component {
 	private items: SelectItem[] = [];
-	// Lowercased item values, parallel to `items`. Precomputed once so setFilter
-	// (per keystroke) doesn't re-lowercase every value on every keystroke.
-	private itemsValueLower: string[] = [];
 	private filteredItems: SelectItem[] = [];
 	private selectedIndex: number = 0;
 	private maxVisible: number = 5;
@@ -55,7 +53,6 @@ export class SelectList implements Component {
 
 	constructor(items: SelectItem[], maxVisible: number, theme: SelectListTheme, layout: SelectListLayoutOptions = {}) {
 		this.items = items;
-		this.itemsValueLower = items.map((item) => item.value.toLowerCase());
 		this.filteredItems = items;
 		this.maxVisible = maxVisible;
 		this.theme = theme;
@@ -63,14 +60,10 @@ export class SelectList implements Component {
 	}
 
 	setFilter(filter: string): void {
-		const filterLower = filter.toLowerCase();
-		const items = this.items;
-		const lower = this.itemsValueLower;
-		const filtered: SelectItem[] = [];
-		for (let i = 0; i < items.length; i++) {
-			if (lower[i]!.startsWith(filterLower)) filtered.push(items[i]!);
-		}
-		this.filteredItems = filtered;
+		// Empty filter keeps the original order; otherwise rank by fuzzy match
+		// quality (best first) and drop non-matches. fuzzyFilter lowercases and
+		// caches per-item text internally, so no precomputed lowercase array is needed.
+		this.filteredItems = filter.trim() ? fuzzyFilter(this.items, filter, (item) => item.value) : this.items;
 		this.cachedColumnWidth = undefined;
 		this.selectedIndex = 0;
 	}
@@ -111,9 +104,12 @@ export class SelectList implements Component {
 			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth));
 		}
 
-		// Add scroll indicators if needed
+		// Add scroll indicators if needed. ↑ shows items exist above the visible
+		// window, ↓ shows items exist below — both on the same themed count line.
 		if (startIndex > 0 || endIndex < this.filteredItems.length) {
-			const scrollText = `  (${this.selectedIndex + 1}/${this.filteredItems.length})`;
+			const up = startIndex > 0 ? "↑" : " ";
+			const down = endIndex < this.filteredItems.length ? "↓" : " ";
+			const scrollText = `  ${up}${down} (${this.selectedIndex + 1}/${this.filteredItems.length})`;
 			// Truncate if too long for terminal
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));
 		}

@@ -87,6 +87,80 @@ describe("SelectList", () => {
 		assert.equal(visibleIndexOf(rendered[1], "second"), 22);
 	});
 
+	it("fuzzy-filters items (non-contiguous characters match)", () => {
+		const items = [
+			{ value: "aXbXc", label: "aXbXc" },
+			{ value: "zzz", label: "zzz" },
+			{ value: "abc", label: "abc" },
+		];
+
+		const list = new SelectList(items, 10, testTheme);
+		list.setFilter("abc");
+
+		// Both "abc" (exact) and "aXbXc" (subsequence) match; "zzz" does not.
+		// Exact match ranks first.
+		assert.strictEqual(list.getSelectedItem()?.value, "abc");
+
+		const rendered = list.render(80).map((l) => l.trim());
+		assert.ok(
+			rendered.some((l) => l.includes("abc")),
+			"abc should be visible",
+		);
+		assert.ok(
+			rendered.some((l) => l.includes("aXbXc")),
+			"aXbXc should be visible (fuzzy subsequence match)",
+		);
+		assert.ok(!rendered.some((l) => l.includes("zzz")), "zzz should be filtered out");
+	});
+
+	it("restores original order for an empty filter", () => {
+		const items = [
+			{ value: "one", label: "one" },
+			{ value: "two", label: "two" },
+			{ value: "three", label: "three" },
+		];
+
+		const list = new SelectList(items, 10, testTheme);
+		list.setFilter("t");
+		list.setFilter("");
+
+		// First item is the original first item, in original order.
+		assert.strictEqual(list.getSelectedItem()?.value, "one");
+		const rendered = list.render(80).map((l) => l.trim());
+		assert.ok(rendered.some((l) => l.includes("one")));
+		assert.ok(rendered.some((l) => l.includes("two")));
+		assert.ok(rendered.some((l) => l.includes("three")));
+	});
+
+	it("shows ↑ and ↓ scroll arrows alongside the count when items overflow", () => {
+		const items = Array.from({ length: 10 }, (_, i) => ({ value: `item-${i}`, label: `item-${i}` }));
+
+		const list = new SelectList(items, 3, testTheme);
+
+		// At the top: only a down arrow (nothing above the window).
+		let rendered = list.render(80);
+		let scrollLine = rendered.find((l) => l.includes("(1/10)"));
+		assert.ok(scrollLine, "scroll info line should be present");
+		assert.ok(scrollLine.includes("↓"), "down arrow expected at top");
+		assert.ok(!scrollLine.includes("↑"), "no up arrow at top");
+
+		// Move to the middle: both arrows present.
+		list.setSelectedIndex(5);
+		rendered = list.render(80);
+		scrollLine = rendered.find((l) => l.includes("(6/10)"));
+		assert.ok(scrollLine, "scroll info line should be present in the middle");
+		assert.ok(scrollLine.includes("↑"), "up arrow expected in the middle");
+		assert.ok(scrollLine.includes("↓"), "down arrow expected in the middle");
+
+		// Move to the bottom: only an up arrow.
+		list.setSelectedIndex(9);
+		rendered = list.render(80);
+		scrollLine = rendered.find((l) => l.includes("(10/10)"));
+		assert.ok(scrollLine, "scroll info line should be present at bottom");
+		assert.ok(scrollLine.includes("↑"), "up arrow expected at bottom");
+		assert.ok(!scrollLine.includes("↓"), "no down arrow at bottom");
+	});
+
 	it("allows overriding primary truncation while preserving description alignment", () => {
 		const items = [
 			{

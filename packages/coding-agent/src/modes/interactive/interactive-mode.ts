@@ -29,11 +29,13 @@ import type {
 	SlashCommand,
 } from "@pit/tui";
 import {
+	Cheatsheet,
 	CombinedAutocompleteProvider,
 	type Component,
 	Container,
 	fuzzyFilter,
 	getCapabilities,
+	getKeybindings,
 	hyperlink,
 	Loader,
 	type LoaderIndicatorOptions,
@@ -348,6 +350,9 @@ export class InteractiveMode {
 
 	// Live "above editor" todo overlay (auto-hides when there are no todos).
 	private todoOverlay: TodoOverlay | undefined;
+
+	// Guard so the cheatsheet hotkey toggles a single overlay (no stacking).
+	private cheatsheetOpen = false;
 
 	// User-input bus: tools (e.g. `ask`) request structured option picks via this.
 	private userInputBus: UserInputBus = createUserInputBus();
@@ -2154,6 +2159,40 @@ export class InteractiveMode {
 		this.defaultEditor.onPasteImage = () => {
 			this.handleClipboardImagePaste();
 		};
+
+		// Global cheatsheet trigger (Ctrl+/ by default). A bare `?` types a literal
+		// char while the prompt is focused, so the cheatsheet uses a dedicated
+		// non-conflicting keybinding handled before any focused component sees it.
+		const cheatsheetUnsub = this.ui.addInputListener((data) => {
+			if (this.cheatsheetOpen) return undefined;
+			if (getKeybindings().matches(data, "tui.help.cheatsheet")) {
+				this.showCheatsheet();
+				return { consume: true };
+			}
+			return undefined;
+		});
+		this.signalCleanupHandlers.push(cheatsheetUnsub);
+	}
+
+	/** Open the keybinding cheatsheet as a centered overlay. */
+	private showCheatsheet(): void {
+		if (this.cheatsheetOpen) return;
+		this.cheatsheetOpen = true;
+		const cheatsheetTheme = {
+			title: (text: string) => theme.bold(theme.fg("accent", text)),
+			keys: (text: string) => theme.fg("accent", text),
+			description: (text: string) => theme.fg("text", text),
+			hint: (text: string) => theme.fg("dim", text),
+		};
+		void this.showExtensionCustom<void>(
+			(_tui, _theme, _kb, done) => new Cheatsheet(cheatsheetTheme, () => done(undefined)),
+			{
+				overlay: true,
+				overlayOptions: { width: "60%", maxHeight: "80%", anchor: "center" },
+			},
+		).finally(() => {
+			this.cheatsheetOpen = false;
+		});
 	}
 
 	private async handleClipboardImagePaste(): Promise<void> {

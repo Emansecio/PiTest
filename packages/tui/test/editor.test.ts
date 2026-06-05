@@ -1998,6 +1998,96 @@ describe("Editor component", () => {
 		});
 	});
 
+	describe("Redo", () => {
+		it("does nothing when redo stack is empty", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			editor.handleInput("\x1b[45;6u"); // Ctrl+Shift+- (redo)
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("redo restores state after undo", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			editor.handleInput("h");
+			editor.handleInput("i");
+			assert.strictEqual(editor.getText(), "hi");
+
+			editor.handleInput("\x1b[45;5u"); // Ctrl+- (undo) - removes "hi"
+			assert.strictEqual(editor.getText(), "");
+
+			editor.handleInput("\x1b[45;6u"); // Ctrl+Shift+- (redo) - restores "hi"
+			assert.strictEqual(editor.getText(), "hi");
+		});
+
+		it("redoes multiple undo steps in order", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			// Spaces are each separately undoable (each whitespace captures state
+			// before itself), so "a", " ", " " yields three distinct undo units.
+			editor.handleInput("a");
+			editor.handleInput(" ");
+			editor.handleInput(" ");
+			assert.strictEqual(editor.getText(), "a  ");
+
+			editor.handleInput("\x1b[45;5u"); // undo -> "a "
+			assert.strictEqual(editor.getText(), "a ");
+			editor.handleInput("\x1b[45;5u"); // undo -> "a"
+			assert.strictEqual(editor.getText(), "a");
+
+			editor.handleInput("\x1b[45;6u"); // redo -> "a "
+			assert.strictEqual(editor.getText(), "a ");
+			editor.handleInput("\x1b[45;6u"); // redo -> "a  "
+			assert.strictEqual(editor.getText(), "a  ");
+		});
+
+		it("a new edit clears the redo stack", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			editor.handleInput("h");
+			editor.handleInput("i");
+			assert.strictEqual(editor.getText(), "hi");
+
+			editor.handleInput("\x1b[45;5u"); // undo -> ""
+			assert.strictEqual(editor.getText(), "");
+
+			// New edit clears the redo future
+			editor.handleInput("x");
+			assert.strictEqual(editor.getText(), "x");
+
+			// Redo should now be a no-op
+			editor.handleInput("\x1b[45;6u"); // redo
+			assert.strictEqual(editor.getText(), "x");
+		});
+
+		it("redo is itself undoable", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+			editor.handleInput("h");
+			editor.handleInput("i");
+			editor.handleInput("\x1b[45;5u"); // undo -> ""
+			editor.handleInput("\x1b[45;6u"); // redo -> "hi"
+			assert.strictEqual(editor.getText(), "hi");
+
+			editor.handleInput("\x1b[45;5u"); // undo again -> ""
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("clears redo stack on submit", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.onSubmit = () => {};
+
+			editor.handleInput("h");
+			editor.handleInput("i");
+			editor.handleInput("\x1b[45;5u"); // undo -> ""
+			editor.handleInput("o"); // type something so submit has content
+			editor.handleInput("\r"); // submit - clears both stacks
+
+			editor.handleInput("\x1b[45;6u"); // redo - no-op
+			assert.strictEqual(editor.getText(), "");
+		});
+	});
+
 	describe("Autocomplete", () => {
 		it("auto-applies single force-file suggestion without showing menu", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);

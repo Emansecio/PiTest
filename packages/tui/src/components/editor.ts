@@ -341,8 +341,15 @@ export class Editor implements Component, Focusable {
 	// to.
 	private snappedFromCursorCol: number | null = null;
 
-	// Undo support
+	// Undo support. The redo stack mirrors the undo stack: undo pushes the current
+	// state here before applying a popped snapshot; redo pops from here. Any NEW
+	// edit (via pushUndoSnapshot) clears the redo stack, since the future being
+	// redone no longer applies once history diverges.
 	private undoStack = new UndoStack<EditorState>();
+	private redoStack = new UndoStack<EditorState>();
+	// Set while undo()/redo() apply a snapshot so pushUndoSnapshot — which they do
+	// NOT call — stays the single place that clears the redo stack on real edits.
+	private applyingHistory = false;
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
@@ -758,6 +765,12 @@ export class Editor implements Component, Focusable {
 
 		// Ctrl+C - let parent handle (exit/clear)
 		if (kb.matches(data, "tui.input.copy")) {
+			return;
+		}
+
+		// Redo (checked before undo: ctrl+shift+- is a superset of ctrl+-'s modifiers)
+		if (kb.matches(data, "tui.editor.redo")) {
+			this.redo();
 			return;
 		}
 
@@ -1383,6 +1396,7 @@ export class Editor implements Component, Focusable {
 		this.historyIndex = -1;
 		this.scrollOffset = 0;
 		this.undoStack.clear();
+		this.redoStack.clear();
 		this.lastAction = null;
 
 		if (this.onChange) this.onChange("");
@@ -2158,12 +2172,38 @@ export class Editor implements Component, Focusable {
 
 	private pushUndoSnapshot(): void {
 		this.undoStack.push(this.state);
+		// A new edit invalidates the redo future. undo()/redo() set this flag so
+		// their own snapshot bookkeeping doesn't trip the clear.
+		if (!this.applyingHistory) {
+			this.redoStack.clear();
+		}
 	}
 
 	private undo(): void {
 		this.historyIndex = -1; // Exit history browsing mode
 		const snapshot = this.undoStack.pop();
 		if (!snapshot) return;
+		// Push the current (pre-undo) state onto the redo stack before applying.
+		this.applyingHistory = true;
+		this.redoStack.push(this.state);
+		this.applyingHistory = false;
+		Object.assign(this.state, snapshot);
+		this.lastAction = null;
+		this.preferredVisualCol = null;
+		if (this.onChange) {
+			this.onChange(this.getText());
+		}
+	}
+
+	private redo(): void {
+		this.historyIndex = -1; // Exit history browsing mode
+		const snapshot = this.redoStack.pop();
+		if (!snapshot) return;
+		// Push the current state onto the undo stack so redo is itself undoable,
+		// without clearing the redo stack (applyingHistory guards pushUndoSnapshot).
+		this.applyingHistory = true;
+		this.pushUndoSnapshot();
+		this.applyingHistory = false;
 		Object.assign(this.state, snapshot);
 		this.lastAction = null;
 		this.preferredVisualCol = null;
