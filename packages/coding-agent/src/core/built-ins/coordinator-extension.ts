@@ -246,21 +246,23 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				);
 
 				// Inter-agent messaging wiring. Reserve a bus id up front so the
-				// `message` tool can be bound to it; attach the live responder once
-				// the Agent exists; unregister when the subagent settles.
+				// `message` tool can be bound to it, and attach the live responder
+				// once the Agent exists. The id is unregistered in the `finally`
+				// below — guaranteed even if spawnSubagent throws before its own
+				// teardown runs (e.g. a worktree-setup failure).
 				const messagingOn = options.isMessagingEnabled?.() ?? false;
 				let childTools = baseChildTools;
 				let systemPromptSuffix: string | undefined;
 				let onAgentReady: ((agent: Agent) => void) | undefined;
-				let onSettle: (() => void) | undefined;
+				let messagingId: string | undefined;
 				if (messagingOn) {
 					const parentId = options.getParentMessagingId?.();
 					const selfId = agentMessageBus.reserve(name ?? "Agent", { kind: "sub", parentId });
+					messagingId = selfId;
 					const timeoutMs = options.getMessagingTimeoutMs?.();
 					childTools = [...baseChildTools, createMessageTool(cwd, { selfId, timeoutMs })];
 					systemPromptSuffix = messagingPreamble(selfId, parentId);
 					onAgentReady = (agent) => agentMessageBus.attachResponder(selfId, makeAgentResponder(agent));
-					onSettle = () => agentMessageBus.unregister(selfId);
 				}
 
 				try {
@@ -289,7 +291,6 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							inheritSkills: inherit_skills,
 							systemPromptSuffix,
 							onAgentReady,
-							onSettle,
 						},
 					);
 					const text =
@@ -314,6 +315,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						isError: true,
 						details: undefined,
 					};
+				} finally {
+					// Single, guaranteed teardown for the reserved bus id — covers every
+					// spawnSubagent outcome (success, caught failure, or a throw before
+					// the agent's own teardown ran). delete is idempotent.
+					if (messagingId) agentMessageBus.unregister(messagingId);
 				}
 			},
 		};
