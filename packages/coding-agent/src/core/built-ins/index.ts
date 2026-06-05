@@ -49,6 +49,9 @@ export interface BuiltInExtensionsOptions {
 	getSkills?: () => import("../skills.ts").Skill[];
 	/** Audit hook for permission decisions (telemetry / logs). */
 	onPermissionDecision?: (info: { toolName: string; decision: "allow" | "deny"; reason?: string }) => void;
+	isMessagingEnabled?: () => boolean;
+	getParentMessagingId?: () => string | undefined;
+	getMessagingTimeoutMs?: () => number | undefined;
 }
 
 export interface BuiltInExtensionsResult {
@@ -82,6 +85,9 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			getParentModel: options.getParentModel,
 			getAvailableTools: options.getAvailableTools,
 			getSkills: options.getSkills,
+			isMessagingEnabled: options.isMessagingEnabled,
+			getParentMessagingId: options.getParentMessagingId,
+			getMessagingTimeoutMs: options.getMessagingTimeoutMs,
 		}),
 	];
 

@@ -153,6 +153,7 @@ export async function createAgentSessionServices(
 	// active tools without re-loading.
 	const parentModelRef: { current?: import("@pit/ai").Model<any> } = {};
 	const availableToolsRef: { current?: import("@pit/agent-core").AgentTool[] } = {};
+	const parentMessagingIdRef: { current?: string } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
 	if (!options.disableBuiltInExtensions) {
@@ -168,6 +169,9 @@ export async function createAgentSessionServices(
 			getAvailableTools: () => availableToolsRef.current ?? [],
 			// Resolved lazily at subagent-spawn time, well after resourceLoader init.
 			getSkills: () => resourceLoader.getSkills().skills,
+			isMessagingEnabled: () => settingsManager.getAgentMessagingSettings().enabled,
+			getParentMessagingId: () => parentMessagingIdRef.current,
+			getMessagingTimeoutMs: () => settingsManager.getAgentMessagingSettings().timeoutMs,
 		});
 		builtInFactories = bundle.factories;
 	}
@@ -197,11 +201,13 @@ export async function createAgentSessionServices(
 			__bindBuiltInRefs?: (
 				model: import("@pit/ai").Model<any> | undefined,
 				tools: import("@pit/agent-core").AgentTool[],
+				messagingId: string | undefined,
 			) => void;
 		}
-	).__bindBuiltInRefs = (model, tools) => {
+	).__bindBuiltInRefs = (model, tools, messagingId) => {
 		parentModelRef.current = model;
 		availableToolsRef.current = tools;
+		parentMessagingIdRef.current = messagingId;
 	};
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
@@ -286,11 +292,16 @@ export async function createAgentSessionFromServices(
 			__bindBuiltInRefs?: (
 				model: import("@pit/ai").Model<any> | undefined,
 				tools: import("@pit/agent-core").AgentTool[],
+				messagingId: string | undefined,
 			) => void;
 		}
 	).__bindBuiltInRefs;
 	if (bind) {
-		bind(result.session.model, result.session.agent.state.tools as import("@pit/agent-core").AgentTool[]);
+		bind(
+			result.session.model,
+			result.session.agent.state.tools as import("@pit/agent-core").AgentTool[],
+			result.session.messagingId,
+		);
 	}
 
 	return result;

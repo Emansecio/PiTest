@@ -20,12 +20,14 @@
  *   })
  */
 
-import type { AgentTool } from "@pit/agent-core";
+import type { Agent, AgentTool } from "@pit/agent-core";
 import { type Static, type TSchema, Type } from "typebox";
 import { SubagentRegistry, spawnSubagent } from "../coordinator/index.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
+import { agentMessageBus, makeAgentResponder } from "../messaging/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { Skill } from "../skills.ts";
+import { createMessageTool } from "../tools/message.ts";
 
 const worktreeSchema = Type.Union(
 	[
@@ -166,6 +168,24 @@ export interface CoordinatorExtensionOptions {
 	convertToLlm?: (messages: import("@pit/agent-core").AgentMessage[]) => import("@pit/ai").Message[];
 	/** Working directory for git worktree creation. Defaults to process.cwd(). */
 	getCwd?: () => string;
+	/** True when inter-agent messaging is enabled (default-on setting). */
+	isMessagingEnabled?: () => boolean;
+	/** The parent/session's own bus id, so subagents can address it. */
+	getParentMessagingId?: () => string | undefined;
+	/** Per-message reply timeout (ms) from settings. */
+	getMessagingTimeoutMs?: () => number | undefined;
+}
+
+function messagingPreamble(selfId: string, parentId: string | undefined): string {
+	const parent = parentId ? `Your spawning agent is \`${parentId}\`. ` : "";
+	return (
+		"## Coordination\n" +
+		`You are agent \`${selfId}\`. Other agents may be running in parallel. ${parent}` +
+		'Use the `message` tool to coordinate: `op:"list"` shows who is online; `op:"send"` with `to` ' +
+		'(an agent id or "all") and `message` asks a question and returns their reply synchronously. ' +
+		"If you are blocked on something another agent owns (a path, a decision, a file you both touch), " +
+		"ask them instead of guessing. Keep messages short and prose-only."
+	);
 }
 
 export function createCoordinatorExtension(options: CoordinatorExtensionOptions) {
@@ -218,12 +238,31 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				// our own tool from its catalog and re-add a depth-incremented copy
 				// only if the nesting budget still allows it.
 				const childDepth = depth + 1;
-				const childTools = buildSubagentToolCatalog(
+				const baseChildTools = buildSubagentToolCatalog(
 					options.getAvailableTools(),
 					childDepth,
 					maxDepth,
 					makeTaskTool,
 				);
+
+				// Inter-agent messaging wiring. Reserve a bus id up front so the
+				// `message` tool can be bound to it; attach the live responder once
+				// the Agent exists; unregister when the subagent settles.
+				const messagingOn = options.isMessagingEnabled?.() ?? false;
+				let childTools = baseChildTools;
+				let systemPromptSuffix: string | undefined;
+				let onAgentReady: ((agent: Agent) => void) | undefined;
+				let onSettle: (() => void) | undefined;
+				if (messagingOn) {
+					const parentId = options.getParentMessagingId?.();
+					const selfId = agentMessageBus.reserve(name ?? "Agent", { kind: "sub", parentId });
+					const timeoutMs = options.getMessagingTimeoutMs?.();
+					childTools = [...baseChildTools, createMessageTool(cwd, { selfId, timeoutMs })];
+					systemPromptSuffix = messagingPreamble(selfId, parentId);
+					onAgentReady = (agent) => agentMessageBus.attachResponder(selfId, makeAgentResponder(agent));
+					onSettle = () => agentMessageBus.unregister(selfId);
+				}
+
 				try {
 					const result = await spawnSubagent(
 						{
@@ -248,6 +287,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							cwd,
 							depth: childDepth,
 							inheritSkills: inherit_skills,
+							systemPromptSuffix,
+							onAgentReady,
+							onSettle,
 						},
 					);
 					const text =
