@@ -32,6 +32,20 @@ An in-session data structure that counts per-file read/write/edit operations. Us
 ### Tool Call Stats
 Per-session telemetry that counts calls/errors per tool and maintains a ring buffer of recent invocations for doom-loop detection. Bounded by design to prevent memory leaks in pathological loops.
 
+## Interactive TUI Rendering
+
+### Activity Group
+A summary line that folds a contiguous burst of **navigation** tool calls into one aggregated counter (`✓ Explored 3 files · 1 search`). Read-only orientation noise; collapses by design. Children render only when expanded (`ctrl+o`). Style is Amp-inspired: state icon, no gutter, light-weight counter, clickable paths.
+
+### Tool Family
+Every tool declares an `activity` family: **navigation** (read/grep/ls/find/symbol — read-only orientation) or **action** (edit/write/bash/web/eval — observable effect). Navigation folds into an Activity Group; action breaks the group and gets its own line. Default for unknown/extension/MCP tools is **action** (safer: shows rather than hides). An action emitted mid-burst closes the open group.
+
+### Action Line
+A single tool call with observable effect, rendered on its own line with a category-specific verb + target (`✓ Edited foo.ts +12 -3`, `✓ Ran $ npm test`, `✓ Wrote bar.ts`, `✓ Fetched example.com`). Actions are signal, not noise — they are never folded into a counter. (Decision 2026-06-04: reverts commit 58366b8c which had folded actions into the group under a generic `Did` verb.)
+
+### Narration vs Deliverable
+The agent emits multiple visible `text` blocks across a turn: intermediate **narration** ("I'll update the manual…") interleaved with tool calls, and a final **deliverable** (the answer/summary). The deliverable is detected by heuristic: **the last text block of the turn** (no tool call or further text after it). The deliverable is marked with a single pulsing `●` glyph (brightens then settles to an accent color) before its first line; narration stays normal-weight (dimming deferred). Three-tier hierarchy: thinking (dim, italic) < narration (normal) < deliverable (normal + `●`).
+
 ## Architectural Invariants
 
 1. **Agent session is the orchestrator, not the implementor.** Behavioral features live in built-in extensions, not inline in agent-session.ts.

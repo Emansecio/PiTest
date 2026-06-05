@@ -43,3 +43,35 @@ export function pluralizeNoun(noun: string, n: number): string {
 	if (noun.endsWith("h") || noun.endsWith("s")) return `${noun}es`;
 	return `${noun}s`;
 }
+
+/** Past/present verb for an action line. `pending` selects the present
+ * participle shown while the call runs (spinner state). Unknown action tools
+ * fall back to the neutral Ran/Running pair. */
+const ACTION_VERBS: Record<string, { done: string; pending: string }> = {
+	edit: { done: "Edited", pending: "Editing" },
+	edit_v2: { done: "Edited", pending: "Editing" },
+	ast_edit: { done: "Edited", pending: "Editing" },
+	write: { done: "Wrote", pending: "Writing" },
+	bash: { done: "Ran", pending: "Running" },
+	web_search: { done: "Searched", pending: "Searching" },
+	eval: { done: "Evaluated", pending: "Evaluating" },
+	render_mermaid: { done: "Rendered", pending: "Rendering" },
+	preview: { done: "Previewed", pending: "Previewing" },
+	todo: { done: "Updated todos", pending: "Updating todos" },
+};
+
+export function verbFor(toolName: string, pending: boolean): string {
+	const v = ACTION_VERBS[toolName] ?? { done: "Ran", pending: "Running" };
+	return pending ? v.pending : v.done;
+}
+
+export function diffStat(diff: string | undefined): { added: number; removed: number } {
+	let added = 0;
+	let removed = 0;
+	if (!diff) return { added, removed };
+	for (const line of diff.split("\n")) {
+		if (line[0] === "+") added++;
+		else if (line[0] === "-") removed++;
+	}
+	return { added, removed };
+}
