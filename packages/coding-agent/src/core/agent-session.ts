@@ -53,6 +53,7 @@ import {
 	shouldCompactSoft,
 } from "./compaction/index.ts";
 import { extractToolFileOp } from "./compaction/utils.js";
+import { dapSessionManager } from "./dap/index.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import {
 	createDeferredOutputStore,
@@ -119,8 +120,11 @@ import {
 	persistSessionLearnedErrors,
 	truncateErrorSample,
 } from "./learned-error-store.js";
+import { createLspManager, getCurrentLspManager, type LspManager, setCurrentLspManager } from "./lsp/manager.ts";
+import { setDiagnosticsOnWrite, setFormatOnWrite } from "./lsp/writethrough.ts";
 import { formatMemoryForPrompt } from "./memory/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
+import { agentMessageBus, makeAgentResponder } from "./messaging/index.ts";
 import type { ModelRegistry } from "./model-registry.js";
 import { type RoleResolution, resolveRole } from "./model-resolver.js";
 import {
@@ -545,6 +549,8 @@ export class AgentSession {
 	// for the `eval` tool. Spawned in the constructor when settings enable it;
 	// kernels themselves are spawned lazily on first use by the manager.
 	private _evalKernelManager: EvalKernelManager | undefined;
+	private _lspManager: LspManager | undefined;
+	private _messagingId?: string;
 
 	constructor(config: AgentSessionConfig) {
 		// Idempotent: registers built-in URL schemes (pr://, issue://, conflict://)
@@ -649,6 +655,31 @@ export class AgentSession {
 		if (this.settingsManager.getEvalSettings().enabled) {
 			this._evalKernelManager = createEvalKernelManager(this._cwd);
 			setCurrentEvalKernelManager(this._evalKernelManager);
+		}
+
+		// Publish the LSP manager when enabled. Language servers cold-start on the
+		// first `lsp` call (or via manager.warmup()); the manager owns teardown so
+		// servers don't outlive the session.
+		const lspSettings = this.settingsManager.getLspSettings();
+		if (lspSettings.enabled) {
+			this._lspManager = createLspManager(this._cwd);
+			setCurrentLspManager(this._lspManager);
+		}
+		// Gate post-write LSP diagnostics (writethrough) for this session: errors
+		// from a write/edit are attached to the tool result, IDE-style.
+		setDiagnosticsOnWrite(lspSettings.enabled && lspSettings.diagnosticsOnWrite);
+		setFormatOnWrite(lspSettings.enabled && lspSettings.formatOnWrite);
+
+		// Register this session on the inter-agent message bus as the addressable
+		// parent ("Main") so subagents can message it mid-execution. Replies are
+		// computed via an ephemeral side-channel against this session's own
+		// history, so messaging Main works even while it's blocked in a `task` call.
+		if (this.settingsManager.getAgentMessagingSettings().enabled) {
+			this._messagingId = agentMessageBus.reserve("Main", {
+				kind: "main",
+				displayName: this.sessionName ?? "Main",
+			});
+			agentMessageBus.attachResponder(this._messagingId, makeAgentResponder(this.agent));
 		}
 	}
 
@@ -1652,6 +1683,29 @@ export class AgentSession {
 			}
 			this._evalKernelManager = undefined;
 		}
+		// Tear down LSP servers owned by this session.
+		if (this._lspManager) {
+			if (getCurrentLspManager() === this._lspManager) {
+				setCurrentLspManager(undefined);
+			}
+			try {
+				await this._lspManager.dispose();
+			} catch {
+				// ignore
+			}
+			this._lspManager = undefined;
+		}
+		setDiagnosticsOnWrite(false);
+		setFormatOnWrite(false);
+		// Leave the message bus so a stale Main can't receive routed messages.
+		if (this._messagingId) {
+			agentMessageBus.unregister(this._messagingId);
+			this._messagingId = undefined;
+		}
+		// Tear down any active debug session so adapters don't outlive the session.
+		if (this.settingsManager.getDebugSettings().enabled) {
+			void dapSessionManager.disposeAll().catch(() => {});
+		}
 	}
 
 	// =========================================================================
@@ -1666,6 +1720,11 @@ export class AgentSession {
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model<any> | undefined {
 		return this.agent.state.model;
+	}
+
+	/** The id under which this session is registered on the inter-agent message bus, if any. */
+	get messagingId(): string | undefined {
+		return this._messagingId;
 	}
 
 	/** Current thinking level */
@@ -3680,6 +3739,8 @@ export class AgentSession {
 		// Both default to true in settings-manager so they ride out-of-the-box.
 		const webSearchActive = this.settingsManager.getWebSearchSettings().enabled ? ["web_search"] : [];
 		const evalActive = this.settingsManager.getEvalSettings().enabled ? ["eval"] : [];
+		const lspActive = this.settingsManager.getLspSettings().enabled ? ["lsp"] : [];
+		const debugActive = this.settingsManager.getDebugSettings().enabled ? ["debug"] : [];
 		const deferHistoryActive = process.env.PIT_DEFER_HISTORY === "1" ? ["recall_tool_output"] : [];
 		const cdpActive = this.settingsManager.getChromeDevtoolsSettings().enabled ? CHROME_DEVTOOLS_TOOL_NAMES : [];
 		const defaultActiveToolNames = this._baseToolsOverride
@@ -3694,6 +3755,8 @@ export class AgentSession {
 					...hindsightActive,
 					...webSearchActive,
 					...evalActive,
+					...lspActive,
+					...debugActive,
 					...deferHistoryActive,
 					...cdpActive,
 				];
