@@ -91,9 +91,75 @@ export class AgentMessageBus {
 			.map(toPeerInfo);
 	}
 
-	// send() is implemented in Task 2.
-	async send(_args: SendArgs): Promise<SendResult> {
-		throw new Error("not implemented");
+	async send(args: SendArgs): Promise<SendResult> {
+		const { from, to, message } = args;
+		const timeoutMs = args.timeoutMs ?? DEFAULT_MESSAGE_TIMEOUT_MS;
+		const result: SendResult = { from, to, delivered: [], replies: [], failed: [], notFound: [] };
+
+		const targets: AgentParticipant[] = [];
+		if (to === "all") {
+			for (const p of this.list()) {
+				if (p.id !== from && p.status === "running") targets.push(p);
+			}
+		} else {
+			const t = this.#participants.get(to);
+			if (!t || t.id === from || t.status !== "running") {
+				result.notFound.push(to);
+			} else {
+				targets.push(t);
+			}
+		}
+
+		await Promise.all(
+			targets.map(async (target) => {
+				if (!target.respond) {
+					result.failed.push({ id: target.id, error: "not reachable (no responder attached)" });
+					return;
+				}
+				target.lastActivity = this.#now();
+				try {
+					const text = await this.#dispatch(target.respond, from, message, timeoutMs, args.signal);
+					result.delivered.push(target.id);
+					result.replies.push({ from: target.id, text });
+				} catch (err) {
+					result.failed.push({ id: target.id, error: err instanceof Error ? err.message : String(err) });
+				}
+			}),
+		);
+		return result;
+	}
+
+	// Race the responder against a timeout/parent-abort. Owns its own controller
+	// so a slow recipient cannot stall the caller or its sibling dispatches.
+	async #dispatch(
+		respond: AgentResponder,
+		from: string,
+		message: string,
+		timeoutMs: number,
+		parentSignal: AbortSignal | undefined,
+	): Promise<string> {
+		const controller = new AbortController();
+		const onParentAbort = () => controller.abort();
+		if (parentSignal) {
+			if (parentSignal.aborted) controller.abort();
+			else parentSignal.addEventListener("abort", onParentAbort, { once: true });
+		}
+		const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+		const timedOut = new Promise<never>((_resolve, reject) => {
+			if (controller.signal.aborted) {
+				reject(new Error("message dispatch aborted"));
+				return;
+			}
+			controller.signal.addEventListener("abort", () => reject(new Error("message dispatch aborted")), {
+				once: true,
+			});
+		});
+		try {
+			return await Promise.race([respond(from, message, controller.signal), timedOut]);
+		} finally {
+			if (timer) clearTimeout(timer);
+			if (parentSignal) parentSignal.removeEventListener("abort", onParentAbort);
+		}
 	}
 }
 

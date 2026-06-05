@@ -47,3 +47,78 @@ describe("AgentMessageBus — registry", () => {
 		expect(visible).not.toContain("B"); // completed excluded
 	});
 });
+
+describe("AgentMessageBus — send routing", () => {
+	function busWith(...specs: Array<{ id: string; reply?: (from: string, msg: string) => string }>) {
+		const bus = new AgentMessageBus(() => 1000);
+		for (const s of specs) {
+			const id = bus.reserve(s.id, { kind: s.id === "Main" ? "main" : "sub" });
+			if (s.reply) bus.attachResponder(id, async (from, msg) => s.reply!(from, msg));
+		}
+		return bus;
+	}
+
+	it("DM round-trip: delivers and returns the peer's reply", async () => {
+		const bus = busWith({ id: "A" }, { id: "Main", reply: (from, msg) => `pong:${from}:${msg}` });
+		const r = await bus.send({ from: "A", to: "Main", message: "hi" });
+		expect(r.delivered).toEqual(["Main"]);
+		expect(r.replies).toEqual([{ from: "Main", text: "pong:A:hi" }]);
+		expect(r.failed).toEqual([]);
+		expect(r.notFound).toEqual([]);
+	});
+
+	it("broadcast: messages every running peer except self and gathers replies", async () => {
+		const bus = busWith({ id: "A" }, { id: "B", reply: () => "from-B" }, { id: "C", reply: () => "from-C" });
+		const r = await bus.send({ from: "A", to: "all", message: "anyone?" });
+		expect(r.delivered.sort()).toEqual(["B", "C"]);
+		expect(r.replies.map((x) => x.text).sort()).toEqual(["from-B", "from-C"]);
+	});
+
+	it("unknown / self / non-running recipients land in notFound", async () => {
+		const bus = busWith({ id: "A", reply: () => "self?" }, { id: "Main", reply: () => "x" });
+		bus.setStatus("Main", "completed");
+		expect((await bus.send({ from: "A", to: "ghost", message: "?" })).notFound).toEqual(["ghost"]);
+		expect((await bus.send({ from: "A", to: "A", message: "?" })).notFound).toEqual(["A"]);
+		expect((await bus.send({ from: "A", to: "Main", message: "?" })).notFound).toEqual(["Main"]);
+	});
+
+	it("a placeholder participant (no responder) is reported as failed, not delivered", async () => {
+		const bus = busWith({ id: "A" }, { id: "Main" }); // Main has no responder
+		const r = await bus.send({ from: "A", to: "Main", message: "hi" });
+		expect(r.delivered).toEqual([]);
+		expect(r.failed[0]?.id).toBe("Main");
+		expect(r.failed[0]?.error).toMatch(/not reachable/i);
+	});
+
+	it("a responder error is captured as a failure (other recipients unaffected)", async () => {
+		const bus = busWith(
+			{ id: "A" },
+			{
+				id: "B",
+				reply: () => {
+					throw new Error("boom");
+				},
+			},
+			{ id: "C", reply: () => "ok" },
+		);
+		const r = await bus.send({ from: "A", to: "all", message: "x" });
+		expect(r.replies).toEqual([{ from: "C", text: "ok" }]);
+		expect(r.failed).toEqual([{ id: "B", error: "boom" }]);
+	});
+
+	it("a hung responder is aborted by the timeout and reported as failed", async () => {
+		const bus = new AgentMessageBus(() => 1000);
+		bus.reserve("A", { kind: "sub" });
+		const stuck = bus.reserve("Slow", { kind: "sub" });
+		bus.attachResponder(
+			stuck,
+			(_from, _msg, signal) =>
+				new Promise<string>((_resolve, reject) => {
+					signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		);
+		const r = await bus.send({ from: "A", to: "Slow", message: "x", timeoutMs: 10 });
+		expect(r.delivered).toEqual([]);
+		expect(r.failed[0]?.id).toBe("Slow");
+	}, 5000);
+});
