@@ -2801,7 +2801,8 @@ export class InteractiveMode {
 		);
 		component.setExpanded(this.toolOutputExpanded);
 		if (this.settingsManager.getToolActivity() === "grouped") {
-			this.activityStacker.placeCall(component);
+			const placed = this.activityStacker.placeCall(component);
+			if (!placed) this.chatContainer.addChild(component);
 		} else {
 			this.chatContainer.addChild(component);
 		}
@@ -3015,7 +3016,8 @@ export class InteractiveMode {
 						);
 						component.setExpanded(this.toolOutputExpanded);
 						if (grouped) {
-							this.activityStacker.placeCall(component);
+							const placed = this.activityStacker.placeCall(component);
+							if (!placed) this.chatContainer.addChild(component);
 						} else {
 							this.chatContainer.addChild(component);
 						}
