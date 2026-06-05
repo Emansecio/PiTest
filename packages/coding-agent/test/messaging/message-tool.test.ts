@@ -97,4 +97,26 @@ describe("message tool", () => {
 		);
 		expect(out).toMatch(/failed/i);
 	}, 5000);
+
+	it("send await_reply:false delivers fire-and-forget (no reply awaited)", async () => {
+		const target = agentMessageBus.reserve("Peer", { kind: "sub" });
+		reserved.push(target);
+		let got: string | undefined;
+		agentMessageBus.attachDelivery(target, (_from, msg) => {
+			got = msg;
+		});
+		const selfId = reserve("Worker");
+		const def = createMessageToolDefinition(process.cwd(), { selfId });
+		const out = text(
+			await def.execute(
+				"c",
+				{ op: "send", to: "Peer", message: "done with auth", await_reply: false } as never,
+				undefined,
+				undefined,
+				{} as never,
+			),
+		);
+		expect(got).toBe("done with auth");
+		expect(out).toMatch(/delivered to peer/i);
+	});
 });

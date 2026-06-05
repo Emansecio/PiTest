@@ -122,3 +122,42 @@ describe("AgentMessageBus — send routing", () => {
 		expect(r.failed[0]?.id).toBe("Slow");
 	}, 5000);
 });
+
+describe("AgentMessageBus — fire-and-forget (awaitReply:false)", () => {
+	it("delivers via the deliver channel and returns no reply", async () => {
+		const bus = new AgentMessageBus(() => 1000);
+		bus.reserve("A", { kind: "sub" });
+		const b = bus.reserve("B", { kind: "sub" });
+		let received: { from: string; message: string } | undefined;
+		bus.attachDelivery(b, (from, message) => {
+			received = { from, message };
+		});
+		const r = await bus.send({ from: "A", to: "B", message: "fyi", awaitReply: false });
+		expect(r.delivered).toEqual(["B"]);
+		expect(r.replies).toEqual([]);
+		expect(received).toEqual({ from: "A", message: "fyi" });
+	});
+
+	it("a peer without a delivery channel is reported as failed", async () => {
+		const bus = new AgentMessageBus(() => 1000);
+		bus.reserve("A", { kind: "sub" });
+		bus.reserve("B", { kind: "sub" }); // responder maybe, but no delivery channel
+		const r = await bus.send({ from: "A", to: "B", message: "fyi", awaitReply: false });
+		expect(r.delivered).toEqual([]);
+		expect(r.failed[0]?.id).toBe("B");
+		expect(r.failed[0]?.error).toMatch(/delivery channel/i);
+	});
+
+	it("broadcast fire-and-forget reaches every running peer with a channel", async () => {
+		const bus = new AgentMessageBus(() => 1000);
+		bus.reserve("A", { kind: "sub" });
+		const got: string[] = [];
+		for (const id of ["B", "C"]) {
+			const r = bus.reserve(id, { kind: "sub" });
+			bus.attachDelivery(r, (from) => got.push(`${id}<-${from}`));
+		}
+		const r = await bus.send({ from: "A", to: "all", message: "shipped", awaitReply: false });
+		expect(r.delivered.sort()).toEqual(["B", "C"]);
+		expect(got.sort()).toEqual(["B<-A", "C<-A"]);
+	});
+});

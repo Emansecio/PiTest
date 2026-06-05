@@ -1,6 +1,6 @@
 import type { Agent, AgentMessage } from "@pit/agent-core";
 import type { AssistantMessage, Context } from "@pit/ai";
-import type { AgentResponder } from "./types.ts";
+import type { AgentDelivery, AgentResponder } from "./types.ts";
 
 /** One completed side-channel exchange, kept so a thread stays coherent. */
 interface IrcExchange {
@@ -84,5 +84,31 @@ export function makeAgentResponder(agent: Agent): AgentResponder {
 		thread.push({ from, message, reply });
 		if (thread.length > MAX_THREAD) thread.shift();
 		return reply;
+	};
+}
+
+/** Frames a fire-and-forget notice for passive injection (no reply expected). */
+export function renderPassiveNotice(from: string, message: string): string {
+	return (
+		`[message from \`${from}\`]\n\n${message}\n\n` +
+		"(Another agent sent you this while you work in parallel. Take it into account if relevant; " +
+		"you don't need to reply or change course unless it matters to your task.)"
+	);
+}
+
+/**
+ * Builds an {@link AgentDelivery} backed by a live `Agent`.
+ *
+ * Splices a fire-and-forget notice into the agent's run via `injectPassive`, so
+ * the recipient sees it on a turn it was already going to take — never forcing
+ * an extra turn or altering the value the agent ultimately returns.
+ */
+export function makeAgentDelivery(agent: Agent): AgentDelivery {
+	return (from, message) => {
+		agent.injectPassive({
+			role: "user",
+			content: [{ type: "text", text: renderPassiveNotice(from, message) }],
+			timestamp: Date.now(),
+		});
 	};
 }

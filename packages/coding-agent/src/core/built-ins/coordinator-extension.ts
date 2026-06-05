@@ -24,7 +24,7 @@ import type { Agent, AgentTool } from "@pit/agent-core";
 import { type Static, type TSchema, Type } from "typebox";
 import { SubagentRegistry, spawnSubagent } from "../coordinator/index.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
-import { agentMessageBus, makeAgentResponder } from "../messaging/index.ts";
+import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "../messaging/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { Skill } from "../skills.ts";
 import { createMessageTool } from "../tools/message.ts";
@@ -262,7 +262,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					const timeoutMs = options.getMessagingTimeoutMs?.();
 					childTools = [...baseChildTools, createMessageTool(cwd, { selfId, timeoutMs })];
 					systemPromptSuffix = messagingPreamble(selfId, parentId);
-					onAgentReady = (agent) => agentMessageBus.attachResponder(selfId, makeAgentResponder(agent));
+					onAgentReady = (agent) => {
+						agentMessageBus.attachResponder(selfId, makeAgentResponder(agent));
+						agentMessageBus.attachDelivery(selfId, makeAgentDelivery(agent));
+					};
 				}
 
 				try {

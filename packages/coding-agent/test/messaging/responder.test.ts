@@ -1,8 +1,8 @@
 import { Agent, type AgentMessage } from "@pit/agent-core";
-import { type Context, fauxAssistantMessage, registerFauxProvider } from "@pit/ai";
+import { type Context, fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@pit/ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { convertToLlm } from "../../src/core/messages.ts";
-import { makeAgentResponder } from "../../src/core/messaging/responder.ts";
+import { makeAgentDelivery, makeAgentResponder, renderPassiveNotice } from "../../src/core/messaging/responder.ts";
 
 describe("makeAgentResponder", () => {
 	const cleanups: Array<() => void> = [];
@@ -90,5 +90,40 @@ describe("makeAgentResponder", () => {
 		await respond("Main", "q1");
 		await respond("Main", "q2");
 		expect(agent.state.messages).toHaveLength(1); // still just the original task message
+	});
+});
+
+describe("makeAgentDelivery (fire-and-forget)", () => {
+	const cleanups: Array<() => void> = [];
+	afterEach(() => {
+		while (cleanups.length) cleanups.pop()?.();
+	});
+
+	it("renderPassiveNotice frames a no-reply notice with sender and body", () => {
+		const out = renderPassiveNotice("Main", "schema changed");
+		expect(out).toContain("Main");
+		expect(out).toContain("schema changed");
+		expect(out).toMatch(/don't need to reply|do not need to reply/i);
+	});
+
+	it("delivers a passive notice into a running agent without awaiting a reply", async () => {
+		const faux = registerFauxProvider();
+		cleanups.push(() => faux.unregister());
+		const agent = new Agent({
+			initialState: { systemPrompt: "You are Worker.", model: faux.getModel(), messages: [], tools: [] },
+			convertToLlm: (m) => convertToLlm(m),
+		});
+		// Turn 1 makes a tool call (loop continues); turn 2 finishes. The notice,
+		// queued before the run, lands as a passive message and the final answer
+		// is still the agent's "done".
+		faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("nonexistent_tool", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		makeAgentDelivery(agent)("Main", "FYI-DELIVERED");
+		await agent.prompt("work");
+		expect(JSON.stringify(agent.state.messages)).toContain("FYI-DELIVERED");
+		const assistants = agent.state.messages.filter((m) => m.role === "assistant");
+		expect(assistants.at(-1)?.content).toEqual([{ type: "text", text: "done" }]);
 	});
 });

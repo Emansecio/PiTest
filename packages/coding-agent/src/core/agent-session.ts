@@ -124,7 +124,7 @@ import { createLspManager, getCurrentLspManager, type LspManager, setCurrentLspM
 import { setDiagnosticsOnWrite, setFormatOnWrite } from "./lsp/writethrough.ts";
 import { formatMemoryForPrompt } from "./memory/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
-import { agentMessageBus, makeAgentResponder } from "./messaging/index.ts";
+import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "./messaging/index.ts";
 import type { ModelRegistry } from "./model-registry.js";
 import { type RoleResolution, resolveRole } from "./model-resolver.js";
 import {
@@ -680,6 +680,7 @@ export class AgentSession {
 				displayName: this.sessionName ?? "Main",
 			});
 			agentMessageBus.attachResponder(this._messagingId, makeAgentResponder(this.agent));
+			agentMessageBus.attachDelivery(this._messagingId, makeAgentDelivery(this.agent));
 		}
 	}
 

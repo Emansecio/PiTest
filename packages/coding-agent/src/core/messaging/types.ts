@@ -19,6 +19,13 @@ export type ParticipantStatus = "running" | "completed" | "aborted";
  */
 export type AgentResponder = (from: string, message: string, signal?: AbortSignal) => Promise<string>;
 
+/**
+ * Delivers a fire-and-forget notice into the recipient's run (no reply awaited).
+ * Splices the message into the recipient's transcript at its next turn WITHOUT
+ * forcing a turn — see `Agent.injectPassive`. Safe to call mid-run.
+ */
+export type AgentDelivery = (from: string, message: string) => void;
+
 export interface AgentParticipant {
 	id: string;
 	displayName: string;
@@ -27,6 +34,8 @@ export interface AgentParticipant {
 	status: ParticipantStatus;
 	/** Null between `reserve` and `attachResponder` (placeholder window). */
 	respond: AgentResponder | null;
+	/** Fire-and-forget delivery channel; null until attached. */
+	deliver: AgentDelivery | null;
 	createdAt: number;
 	lastActivity: number;
 }
@@ -73,4 +82,10 @@ export interface SendArgs {
 	signal?: AbortSignal;
 	/** Per-dispatch reply timeout in ms. 0 disables. Defaults to the bus default. */
 	timeoutMs?: number;
+	/**
+	 * When true (default), blocks for the recipient's reply. When false, delivers
+	 * the message fire-and-forget via the recipient's `deliver` channel and
+	 * returns immediately with no reply.
+	 */
+	awaitReply?: boolean;
 }

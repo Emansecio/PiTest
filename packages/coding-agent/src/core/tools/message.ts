@@ -19,6 +19,12 @@ const messageSchema = Type.Object(
 			Type.String({ description: 'Recipient agent id, or "all" to broadcast. Required for op:"send".' }),
 		),
 		message: Type.Optional(Type.String({ description: 'Message body (plain prose). Required for op:"send".' })),
+		await_reply: Type.Optional(
+			Type.Boolean({
+				description:
+					'For op:"send": when true (default) you block for the peer\'s reply. Set false to fire-and-forget — the message is spliced into the peer\'s context for them to notice as they work, and you continue immediately with no reply. Use false to broadcast info ("I finished auth.ts") without waiting on N round-trips.',
+			}),
+		),
 		timeout_ms: Type.Optional(
 			Type.Number({
 				description:
@@ -47,7 +53,8 @@ const DESCRIPTION =
 	'op:"list" shows who is online. op:"send" delivers `message` to `to` (an agent id, or "all" to broadcast) ' +
 	"and returns their reply synchronously — use it to ask a question you are blocked on instead of guessing " +
 	"(e.g. confirm a path, deconflict a file). The reply is computed from the peer's current context; it does " +
-	"not interrupt their work. Keep messages short and prose-only.";
+	"not interrupt their work. Set await_reply:false to fire-and-forget instead — deliver info to a peer (or " +
+	'"all") without waiting on a reply. Keep messages short and prose-only.';
 
 export function createMessageToolDefinition(
 	_cwd: string,
@@ -89,6 +96,7 @@ export function createMessageToolDefinition(
 				signal,
 				// Per-call override (params.timeout_ms) wins over the session default.
 				timeoutMs: params.timeout_ms ?? options.timeoutMs,
+				awaitReply: params.await_reply,
 			});
 			const details: MessageDetails = {
 				op: "send",

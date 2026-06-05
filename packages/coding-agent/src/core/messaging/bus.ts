@@ -1,4 +1,5 @@
 import type {
+	AgentDelivery,
 	AgentParticipant,
 	AgentResponder,
 	ParticipantStatus,
@@ -42,6 +43,7 @@ export class AgentMessageBus {
 			parentId: options.parentId,
 			status: "running",
 			respond: null,
+			deliver: null,
 			createdAt: ts,
 			lastActivity: ts,
 		});
@@ -60,6 +62,15 @@ export class AgentMessageBus {
 		const p = this.#participants.get(id);
 		if (p) {
 			p.respond = respond;
+			p.lastActivity = this.#now();
+		}
+	}
+
+	/** Attach the fire-and-forget delivery channel (see `AgentDelivery`). */
+	attachDelivery(id: string, deliver: AgentDelivery): void {
+		const p = this.#participants.get(id);
+		if (p) {
+			p.deliver = deliver;
 			p.lastActivity = this.#now();
 		}
 	}
@@ -115,13 +126,28 @@ export class AgentMessageBus {
 			}
 		}
 
+		const awaitReply = args.awaitReply !== false;
 		await Promise.all(
 			targets.map(async (target) => {
+				target.lastActivity = this.#now();
+				if (!awaitReply) {
+					// Fire-and-forget: deliver into the recipient's run, no reply.
+					if (!target.deliver) {
+						result.failed.push({ id: target.id, error: "not reachable (no delivery channel attached)" });
+						return;
+					}
+					try {
+						target.deliver(from, message);
+						result.delivered.push(target.id);
+					} catch (err) {
+						result.failed.push({ id: target.id, error: err instanceof Error ? err.message : String(err) });
+					}
+					return;
+				}
 				if (!target.respond) {
 					result.failed.push({ id: target.id, error: "not reachable (no responder attached)" });
 					return;
 				}
-				target.lastActivity = this.#now();
 				try {
 					const text = await this.#dispatch(target.respond, from, message, timeoutMs, args.signal);
 					result.delivered.push(target.id);
