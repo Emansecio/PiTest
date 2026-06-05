@@ -1,3 +1,4 @@
+export { createLspTool, createLspToolDefinition, type LspToolInput, type LspToolOptions } from "../lsp/tool.ts";
 export {
 	type AskToolDetails,
 	type AskToolInput,
@@ -37,6 +38,7 @@ export {
 	createCalcTool,
 	createCalcToolDefinition,
 } from "./calc.ts";
+export { createDebugTool, createDebugToolDefinition, type DebugToolInput, type DebugToolOptions } from "./debug.ts";
 export {
 	createEditTool,
 	createEditToolDefinition,
@@ -195,6 +197,7 @@ export {
 
 import type { AgentTool } from "@pit/agent-core";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { createLspTool, createLspToolDefinition, type LspToolOptions } from "../lsp/tool.ts";
 import { type AskToolOptions, createAskTool, createAskToolDefinition } from "./ask.ts";
 import { type AstEditToolOptions, createAstEditTool, createAstEditToolDefinition } from "./ast-edit.ts";
 import { type AstGrepToolOptions, createAstGrepTool, createAstGrepToolDefinition } from "./ast-grep.ts";
@@ -217,6 +220,7 @@ import {
 	createChromeSelectPageTool,
 	createChromeSelectPageToolDefinition,
 } from "./chrome-devtools.ts";
+import { createDebugTool, createDebugToolDefinition, type DebugToolOptions } from "./debug.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import {
 	createEditHashlineTool,
@@ -264,7 +268,7 @@ import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } fro
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
 /** A coding tool's membership/gate in the default coding surface. */
-type CodingGate = "always" | "native" | "webSearch" | "eval" | "hindsight" | "chromeDevtools";
+type CodingGate = "always" | "native" | "webSearch" | "eval" | "hindsight" | "chromeDevtools" | "lsp" | "debug";
 
 interface ToolRegistryEntry {
 	/** Builds the executable tool. */
@@ -479,6 +483,22 @@ const TOOL_REGISTRY = {
 		readOnly: false,
 		coding: "always",
 	},
+	lsp: {
+		factory: createLspTool,
+		definitionFactory: createLspToolDefinition,
+		optionsKey: "lsp",
+		// Has write-tier actions (rename, code_actions apply, rename_file).
+		readOnly: false,
+		coding: "lsp",
+	},
+	debug: {
+		factory: createDebugTool,
+		definitionFactory: createDebugToolDefinition,
+		optionsKey: "debug",
+		// Exec-tier actions (launch/attach/continue/step/breakpoints).
+		readOnly: false,
+		coding: "debug",
+	},
 	chrome_devtools_list_pages: {
 		factory: createChromeListPagesTool,
 		definitionFactory: createChromeListPagesToolDefinition,
@@ -577,6 +597,12 @@ function codingGateOpen(gate: CodingGate, options?: ToolsOptions): boolean {
 			return !!options?.hindsight?.enabled;
 		case "chromeDevtools":
 			return !!options?.chromeDevtools?.enabled;
+		case "lsp":
+			// Default ON: opt out via `lsp.enabled: false`.
+			return options?.lsp?.enabled !== false;
+		case "debug":
+			// Default ON: opt out via `debug.enabled: false`.
+			return options?.debug?.enabled !== false;
 	}
 }
 
@@ -626,6 +652,8 @@ export interface ToolsOptions {
 	chromeDevtools?: ChromeDevtoolsToolOptions & { enabled?: boolean };
 	hindsight?: { enabled?: boolean };
 	recallToolOutput?: Record<string, never>;
+	lsp?: LspToolOptions & { enabled?: boolean };
+	debug?: DebugToolOptions & { enabled?: boolean };
 }
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {

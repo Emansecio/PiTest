@@ -5,6 +5,7 @@ import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { attachPostWriteDiagnostics, maybeFormat } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { applyKeyAliases, PATH_KEY_ALIASES } from "./argument-prep.js";
@@ -256,7 +257,8 @@ export function createWriteToolDefinition(
 				};
 			}
 
-			return withFileMutationQueue(
+			let __written: string | undefined;
+			const writeResult = await withFileMutationQueue(
 				absolutePath,
 				() =>
 					new Promise<{ content: Array<{ type: "text"; text: string }>; details: undefined }>(
@@ -277,12 +279,17 @@ export function createWriteToolDefinition(
 									await ops.mkdir(dir);
 									if (aborted) return;
 									// Write the file contents.
-									await ops.writeFile(absolutePath, content);
+									const formatted = await maybeFormat(absolutePath, content, cwd, signal);
+									await ops.writeFile(absolutePath, formatted.content);
 									if (aborted) return;
+									__written = formatted.content;
 									signal?.removeEventListener("abort", onAbort);
 									resolve({
 										content: [
-											{ type: "text", text: `Successfully wrote ${content.length} bytes to ${path}` },
+											{
+												type: "text",
+												text: `Successfully wrote ${formatted.content.length} bytes to ${path}${formatted.formatted ? " (formatted)" : ""}`,
+											},
 										],
 										details: undefined,
 									});
@@ -294,6 +301,7 @@ export function createWriteToolDefinition(
 						},
 					),
 			);
+			return attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal);
 		},
 		renderCall(args, theme, context) {
 			const renderArgs = args as { path?: string; file_path?: string; content?: string } | undefined;

@@ -1,0 +1,234 @@
+/**
+ * Post-write diagnostics ("writethrough"): after a write/edit lands on disk,
+ * sync the new content to the relevant language servers and collect fresh
+ * diagnostics so the model sees type/lint errors the way an IDE would — without
+ * a separate `lsp diagnostics` call.
+ *
+ * Best-effort by construction: gated behind a session flag, short timeout, and
+ * fully swallowed on any failure so it can never break a write.
+ */
+
+import { getOrCreateClient, notifySaved, sendRequest, syncContent, waitForProjectLoaded } from "./client.ts";
+import { getServersForFile } from "./config.ts";
+import { applyTextEditsToString } from "./edits.ts";
+import { getConfig, isProjectAwareLspServer } from "./manager.ts";
+import type { Diagnostic, ServerConfig, TextEdit } from "./types.ts";
+import {
+	dedupeDiagnostics,
+	fileToUri,
+	formatDiagnostic,
+	formatDiagnosticsSummary,
+	formatPathRelativeToCwd,
+	sortDiagnostics,
+	waitForDiagnostics,
+} from "./utils.ts";
+
+// =============================================================================
+// Session gate
+// =============================================================================
+
+let diagnosticsOnWrite = false;
+
+/** Enable/disable post-write diagnostics for the current session. */
+export function setDiagnosticsOnWrite(enabled: boolean): void {
+	diagnosticsOnWrite = enabled;
+}
+
+let formatOnWrite = false;
+
+/** Enable/disable LSP format-on-write for the current session. */
+export function setFormatOnWrite(enabled: boolean): void {
+	formatOnWrite = enabled;
+}
+
+// =============================================================================
+// Format-on-write
+// =============================================================================
+
+const FORMAT_TIMEOUT_MS = 4000;
+const DEFAULT_FORMAT_OPTIONS = {
+	tabSize: 4,
+	insertSpaces: true,
+	trimTrailingWhitespace: true,
+	insertFinalNewline: true,
+	trimFinalNewlines: true,
+};
+
+/**
+ * Format `content` for `absolutePath` via the first language server that
+ * advertises a document formatting provider. Returns the original content when
+ * disabled, no formatter is available, or anything fails. Never throws.
+ */
+export async function maybeFormat(
+	absolutePath: string,
+	content: string,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<{ content: string; formatted: boolean }> {
+	if (!formatOnWrite) return { content, formatted: false };
+
+	let servers: Array<[string, ServerConfig]>;
+	try {
+		servers = getServersForFile(getConfig(cwd), absolutePath);
+	} catch {
+		return { content, formatted: false };
+	}
+	if (servers.length === 0) return { content, formatted: false };
+
+	const uri = fileToUri(absolutePath);
+	const deadline = AbortSignal.timeout(FORMAT_TIMEOUT_MS);
+	const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
+
+	for (const [, serverConfig] of servers) {
+		try {
+			const client = await getOrCreateClient(serverConfig, cwd);
+			if (!client.serverCapabilities?.documentFormattingProvider) continue;
+			await syncContent(client, absolutePath, content, combined);
+			const edits = (await sendRequest(
+				client,
+				"textDocument/formatting",
+				{ textDocument: { uri }, options: DEFAULT_FORMAT_OPTIONS },
+				combined,
+			)) as TextEdit[] | null;
+			if (!edits || edits.length === 0) return { content, formatted: false };
+			const formatted = applyTextEditsToString(content, edits);
+			return { content: formatted, formatted: formatted !== content };
+		} catch {
+			// Try the next server.
+		}
+	}
+	return { content, formatted: false };
+}
+
+const DEFAULT_WAIT_MS = 4000;
+const DIAGNOSTIC_MESSAGE_LIMIT = 50;
+
+// =============================================================================
+// Public API
+// =============================================================================
+
+export interface PostWriteDiagnostics {
+	server: string;
+	summary: string;
+	errored: boolean;
+	messages: string[];
+}
+
+export interface PostWriteOptions {
+	timeoutMs?: number;
+}
+
+/**
+ * Collect post-write diagnostics for `absolutePath` after its content changed.
+ * Returns undefined when disabled, no server handles the file, or anything goes
+ * wrong. Never throws.
+ */
+export async function getPostWriteDiagnostics(
+	absolutePath: string,
+	content: string,
+	cwd: string,
+	signal?: AbortSignal,
+	options?: PostWriteOptions,
+): Promise<PostWriteDiagnostics | undefined> {
+	if (!diagnosticsOnWrite) return undefined;
+
+	let servers: Array<[string, ServerConfig]>;
+	try {
+		const config = getConfig(cwd);
+		servers = getServersForFile(config, absolutePath);
+	} catch {
+		return undefined;
+	}
+	if (servers.length === 0) return undefined;
+
+	const uri = fileToUri(absolutePath);
+	const relPath = formatPathRelativeToCwd(absolutePath, cwd);
+	const timeoutMs = options?.timeoutMs ?? DEFAULT_WAIT_MS;
+	const deadline = AbortSignal.timeout(timeoutMs);
+	const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
+
+	const all: Diagnostic[] = [];
+	const serverNames: string[] = [];
+
+	await Promise.allSettled(
+		servers.map(async ([name, serverConfig]) => {
+			const client = await getOrCreateClient(serverConfig, cwd);
+			if (isProjectAwareLspServer(serverConfig)) {
+				await waitForProjectLoaded(client, combined);
+			}
+			const minVersion = client.diagnosticsVersion;
+			await syncContent(client, absolutePath, content, combined);
+			const expectedDocumentVersion = client.openFiles.get(uri)?.version;
+			await notifySaved(client, absolutePath, combined);
+			const diagnostics = await waitForDiagnostics(client, uri, {
+				timeoutMs,
+				signal: combined,
+				minVersion,
+				expectedDocumentVersion,
+			});
+			serverNames.push(name);
+			all.push(...diagnostics);
+		}),
+	);
+
+	if (serverNames.length === 0) return undefined;
+
+	// Deduplicate by range + message (different servers may report the same issue).
+	const unique = dedupeDiagnostics(all);
+
+	if (unique.length === 0) {
+		return { server: serverNames.join(", "), summary: "no issues", errored: false, messages: [] };
+	}
+
+	sortDiagnostics(unique);
+	const messages = unique.map((d) => formatDiagnostic(d, relPath)).slice(0, DIAGNOSTIC_MESSAGE_LIMIT);
+	return {
+		server: serverNames.join(", "),
+		summary: formatDiagnosticsSummary(unique),
+		errored: unique.some((d) => d.severity === 1),
+		messages,
+	};
+}
+
+/**
+ * Splice post-write diagnostics onto an already-built write/edit result. Call
+ * this AFTER the file-mutation lock is released (i.e. after withFileMutationQueue
+ * resolves) so collecting diagnostics never holds the per-path write lock.
+ * `written` is the exact content that landed on disk, or undefined to skip
+ * (preview / URL-scheme / abort paths).
+ */
+export async function attachPostWriteDiagnostics<R extends { content: Array<{ type: string; text?: string }> }>(
+	result: R,
+	absolutePath: string,
+	written: string | undefined,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<R> {
+	if (written === undefined) return result;
+	const appendix = await getPostWriteDiagnosticsText(absolutePath, written, cwd, signal);
+	if (appendix && result.content[0]?.type === "text") {
+		result.content[0].text = (result.content[0].text ?? "") + appendix;
+	}
+	return result;
+}
+
+/**
+ * Convenience wrapper for tools: returns a text appendix ("\n<summary>:\n<...>")
+ * to splice onto a successful write/edit result, or "" when there's nothing to
+ * add. Swallows all errors.
+ */
+export async function getPostWriteDiagnosticsText(
+	absolutePath: string,
+	content: string,
+	cwd: string,
+	signal?: AbortSignal,
+	options?: PostWriteOptions,
+): Promise<string> {
+	try {
+		const diag = await getPostWriteDiagnostics(absolutePath, content, cwd, signal, options);
+		if (!diag || diag.messages.length === 0) return "";
+		return `\nLSP diagnostics (${diag.summary}):\n${diag.messages.join("\n")}`;
+	} catch {
+		return "";
+	}
+}

@@ -3,6 +3,7 @@ import { Box, Container, Spacer, Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import type { ToolDefinition } from "../extensions/types.js";
+import { attachPostWriteDiagnostics } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, PATH_KEY_ALIASES } from "./argument-prep.js";
 import { defaultEditOperations, type EditOperations, type EditToolDetails } from "./edit.ts";
@@ -236,7 +237,8 @@ export function createEditHashlineToolDefinition(
 			const { path, edits } = validateInput(input);
 			const absolutePath = resolveToCwd(path, cwd);
 
-			return withFileMutationQueue(
+			let __written: string | undefined;
+			const writeResult = await withFileMutationQueue(
 				absolutePath,
 				() =>
 					new Promise<{
@@ -334,6 +336,7 @@ export function createEditHashlineToolDefinition(
 
 								await ops.writeFile(absolutePath, finalContent);
 								if (aborted) return;
+								__written = finalContent;
 								if (signal) signal.removeEventListener("abort", onAbort);
 
 								resolve({
@@ -352,6 +355,7 @@ export function createEditHashlineToolDefinition(
 						})();
 					}),
 			);
+			return attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal);
 		},
 		renderCall(args, theme, context) {
 			const component = getCallComponent(context.state, context.lastComponent);

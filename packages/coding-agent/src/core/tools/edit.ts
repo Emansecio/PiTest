@@ -5,6 +5,7 @@ import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } 
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import type { ToolDefinition } from "../extensions/types.js";
+import { attachPostWriteDiagnostics } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, EDIT_KEY_ALIASES, PATH_KEY_ALIASES } from "./argument-prep.js";
 import {
@@ -355,7 +356,8 @@ export function createEditToolDefinition(
 			const { path, edits } = validateEditInput(input);
 			const absolutePath = resolveToCwd(path, cwd);
 
-			return withFileMutationQueue(
+			let __written: string | undefined;
+			const writeResult = await withFileMutationQueue(
 				absolutePath,
 				() =>
 					new Promise<{
@@ -466,6 +468,8 @@ export function createEditToolDefinition(
 									return;
 								}
 
+								__written = finalContent;
+
 								// Clean up abort handler.
 								if (signal) {
 									signal.removeEventListener("abort", onAbort);
@@ -493,6 +497,7 @@ export function createEditToolDefinition(
 						})();
 					}),
 			);
+			return attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal);
 		},
 		renderCall(args, theme, context) {
 			const component = getEditCallRenderComponent(context.state, context.lastComponent);
