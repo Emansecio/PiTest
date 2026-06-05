@@ -1,10 +1,14 @@
 import { Container, SPINNER_FRAMES, type TUI } from "@pit/tui";
+import { stripAnsi } from "../../../utils/ansi.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { clampBashCommandRow } from "./bash-command-row.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
 import { diffStat, verbFor } from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
+
+/** Max width of a derived agent label (from the task prompt). */
+const TASK_LABEL_MAX = 40;
 
 type LineState = "pending" | "success" | "error";
 
@@ -24,6 +28,9 @@ export class ActivityLineComponent extends Container {
 	private readonly iconEase: ColorEase;
 	private targetCache: string | null = null;
 	private targetCacheKey = "";
+	// Sequence number for an unnamed `task` agent (assigned by ActivityStacker,
+	// per turn). 0 = not a task / unassigned.
+	private taskOrdinal = 0;
 
 	constructor(ui: TUI) {
 		super();
@@ -31,8 +38,9 @@ export class ActivityLineComponent extends Container {
 		this.iconEase = new ColorEase(ui, () => this.ui.requestRender());
 	}
 
-	setExec(exec: ToolExecutionComponent): void {
+	setExec(exec: ToolExecutionComponent, taskOrdinal = 0): void {
 		this.exec = exec;
+		this.taskOrdinal = taskOrdinal;
 		exec.setActivityChild(true);
 		if (exec.getActivityState() === "pending") this.ensureTicker();
 		this.ui.requestRender();
@@ -108,6 +116,17 @@ export class ActivityLineComponent extends Container {
 		return line;
 	}
 
+	/** Display label for a `task` agent: the delegated `name`, else a short prompt
+	 * snippet, else a per-turn "Agente N". */
+	private taskLabel(): string {
+		const args = this.exec.getArgs() ?? {};
+		const name = typeof args.name === "string" ? args.name.trim() : "";
+		if (name) return name;
+		const prompt = typeof args.prompt === "string" ? args.prompt.trim().replace(/\s+/g, " ") : "";
+		if (prompt) return prompt.length > TASK_LABEL_MAX ? `${prompt.slice(0, TASK_LABEL_MAX - 1)}…` : prompt;
+		return `Agente ${this.taskOrdinal || 1}`;
+	}
+
 	override render(width: number): string[] {
 		if (!this.exec) return [];
 		const state = this.state();
@@ -123,8 +142,25 @@ export class ActivityLineComponent extends Container {
 			this.prevState = state;
 		}
 		const pending = state === "pending";
-		const verb = verbFor(this.exec.getToolName(), pending);
-		const header = `${this.icon(state)} ${theme.bold(verb)} ${this.target(width)}`;
+		const name = this.exec.getToolName();
+		let label: string;
+		let target: string;
+		if (name === "task") {
+			label = this.taskLabel();
+			target = "";
+		} else {
+			label = verbFor(name, pending);
+			target = this.target(width);
+			// Unknown/MCP action with no extractable target → use the tool name as
+			// the label instead of a bare fallback verb ("Ran") with nothing after it.
+			if (label === verbFor("", pending) && name !== "bash" && !stripAnsi(target).trim()) {
+				label = name;
+				target = "";
+			}
+		}
+		const header = stripAnsi(target).trim()
+			? `${this.icon(state)} ${theme.bold(label)} ${target}`
+			: `${this.icon(state)} ${theme.bold(label)}`;
 		const lines = [header];
 		const showBody = this.expanded || (state === "error" && !this.exec.isAborted());
 		if (showBody) {

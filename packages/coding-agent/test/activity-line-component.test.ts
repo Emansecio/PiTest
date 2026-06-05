@@ -60,3 +60,46 @@ describe("ActivityLineComponent", () => {
 		expect(out.some((l) => l.includes("<exec body>"))).toBe(true);
 	});
 });
+
+describe("ActivityLineComponent — agent labels", () => {
+	const taskExec = (args: Record<string, unknown>) =>
+		execStub({ getToolName: () => "task", getArgs: () => args, getResultDetails: () => undefined });
+
+	it("labels a task agent with its delegated name", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(taskExec({ name: "find-dead-code", prompt: "Find unused exports" }), 1);
+		const head = c.render(120).map(stripAnsi)[0];
+		expect(head).toContain("find-dead-code");
+		expect(head).not.toContain("Ran");
+	});
+
+	it("derives a label from the prompt when no name is given", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(taskExec({ prompt: "Refactor the auth module" }), 1);
+		expect(c.render(120).map(stripAnsi)[0]).toContain("Refactor the auth module");
+	});
+
+	it("truncates a long derived prompt label", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(taskExec({ prompt: "x".repeat(120) }), 1);
+		const head = c.render(120).map(stripAnsi)[0];
+		expect(head).toContain("…");
+		expect(head.length).toBeLessThan(60);
+	});
+
+	it("falls back to a per-turn 'Agente N' when neither name nor prompt help", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(taskExec({}), 3);
+		expect(c.render(120).map(stripAnsi)[0]).toContain("Agente 3");
+	});
+
+	it("labels an unknown/MCP action with the tool name, not a bare 'Ran'", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({ getToolName: () => "some_mcp_tool", getArgs: () => ({}), getResultDetails: () => undefined }),
+		);
+		const head = c.render(120).map(stripAnsi)[0];
+		expect(head).toContain("some_mcp_tool");
+		expect(head).not.toContain("Ran");
+	});
+});

@@ -17,6 +17,8 @@ export class ActivityStacker {
 	private ui: TUI;
 	private addToChat: (component: Component) => void;
 	private current: NavGroupComponent | null = null;
+	// Per-turn sequence for unnamed `task` agents (reset on reset()).
+	private taskOrdinal = 0;
 
 	constructor(ui: TUI, addToChat: (component: Component) => void) {
 		this.ui = ui;
@@ -35,7 +37,9 @@ export class ActivityStacker {
 			this.current = null;
 			const line = new ActivityLineComponent(this.ui);
 			this.addToChat(line);
-			line.setExec(exec);
+			// Number unnamed task agents per turn so they get a stable "Agente N".
+			const ordinal = exec.getToolName() === "task" ? ++this.taskOrdinal : 0;
+			line.setExec(exec, ordinal);
 			return true;
 		}
 		if (!this.current) {
@@ -51,8 +55,9 @@ export class ActivityStacker {
 		this.current = null;
 	}
 
-	/** New turn / history rebuild: forget the open group. */
+	/** New turn / history rebuild: forget the open group and restart agent numbering. */
 	reset(): void {
 		this.current = null;
+		this.taskOrdinal = 0;
 	}
 }
