@@ -27,9 +27,12 @@ const REVEAL_MIN_STEP = 1;
  */
 const ASSISTANT_READING_COLUMNS = 100;
 
-const OSC133_ZONE_START = "\x1b]133;A\x07";
-const OSC133_ZONE_END = "\x1b]133;B\x07";
-const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
+// FTCS / OSC 133 semantic output zone. The assistant response is the "command
+// output": C (output start) … D;<exit> (finished). The user message carries the
+// prompt zone (A … B) — see user-message.ts, which also documents why prompt
+// and output were split and the first + last line survival invariant. The
+// exit status lets a terminal color the prompt mark by turn outcome.
+const OSC133_OUTPUT_START = "\x1b]133;C\x07"; // FTCS C: command output start
 
 /**
  * A cached, persistent renderer for a single visible content block (text or
@@ -148,8 +151,13 @@ export class AssistantMessageComponent extends Container {
 			}
 		}
 
-		lines[0] = OSC133_ZONE_START + lines[0];
-		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
+		// Exit status on D: aborted turns report 130 (SIGINT), errored turns 1,
+		// everything else 0. Recomputed each frame; the final settled render
+		// carries the true code.
+		const stop = this.lastMessage?.stopReason;
+		const exitCode = stop === "aborted" ? 130 : stop === "error" ? 1 : 0;
+		lines[0] = OSC133_OUTPUT_START + lines[0];
+		lines[lines.length - 1] = `${lines[lines.length - 1]}\x1b]133;D;${exitCode}\x07`;
 		return lines;
 	}
 

@@ -2,9 +2,22 @@ import { Markdown, type MarkdownTheme } from "@pit/tui";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { MessageShell } from "./message-shell.ts";
 
-const OSC133_ZONE_START = "\x1b]133;A\x07";
-const OSC133_ZONE_END = "\x1b]133;B\x07";
-const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
+// FTCS / OSC 133 semantic prompt zone. A user message is the "command" the
+// user issued, so it carries the PROMPT zone: A (prompt start) … B (command
+// entered). The assistant response carries the OUTPUT zone (C … D) — see
+// assistant-message.ts. The old code emitted A/B/C on *both* blocks, which
+// told terminals that assistant output was itself a prompt: "jump to previous
+// prompt" then landed inside answers, and "select command output" had no
+// distinct output zone. Splitting prompt (A/B here) from output (C/D there)
+// restores FTCS-faithful navigation.
+//
+// INVARIANT: the markers ride the FIRST and LAST rendered lines of the block
+// and are NOT re-emitted per line (unlike OSC 8 hyperlinks, which reopen on
+// each wrapped line). A downstream pass that clips the first or last line in
+// isolation would open a zone without closing it — first + last must survive
+// together.
+const OSC133_PROMPT_START = "\x1b]133;A\x07"; // FTCS A: prompt start (jump target)
+const OSC133_PROMPT_END = "\x1b]133;B\x07"; // FTCS B: command entered / end of prompt
 
 /**
  * Component that renders a user message.
@@ -14,11 +27,11 @@ const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
  * fill (D1=B), no internal padding: the shell's 1-col gutter is the sole
  * decoration.
  *
- * OSC 133 zone markers wrap the rendered output so terminal integrations
- * (iTerm, WezTerm, Windows Terminal, etc.) treat the block as an input
- * zone — required for "jump between prompts" navigation. They sit on the
- * first and last rendered lines of the shell-decorated output, including
- * the leading blank that the shell emits.
+ * OSC 133 prompt-zone markers (A … B) wrap the rendered output so terminal
+ * integrations (iTerm, WezTerm, Ghostty, Windows Terminal, etc.) treat the
+ * block as a prompt zone — the jump target for "jump between prompts". They
+ * sit on the first and last rendered lines of the shell-decorated output,
+ * including the leading blank that the shell emits.
  */
 export class UserMessageComponent extends MessageShell {
 	constructor(text: string, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
@@ -38,8 +51,8 @@ export class UserMessageComponent extends MessageShell {
 			return lines;
 		}
 
-		lines[0] = OSC133_ZONE_START + lines[0];
-		lines[lines.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + lines[lines.length - 1];
+		lines[0] = OSC133_PROMPT_START + lines[0];
+		lines[lines.length - 1] = lines[lines.length - 1] + OSC133_PROMPT_END;
 		return lines;
 	}
 }
