@@ -77,9 +77,6 @@ export class FooterComponent implements Component {
 		cacheWrite: 0,
 		cost: 0,
 	};
-	private cachedStatusVersion = -1;
-	private cachedStatusLine: string | null = null;
-
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
 		this.footerData = footerData;
@@ -137,6 +134,13 @@ export class FooterComponent implements Component {
 		}
 		this.statsCacheLen = entries.length;
 		return this.statsCacheTotals;
+	}
+
+	private getPermissionMode(): string | null {
+		const raw = this.footerData.getExtensionStatuses().get("permissions");
+		if (!raw) return null;
+		const m = /permissions:\s*(\S+)/.exec(raw);
+		return m ? m[1] : null;
 	}
 
 	render(width: number): string[] {
@@ -208,7 +212,11 @@ export class FooterComponent implements Component {
 		if (totals.cost || usingSubscription) {
 			rightParts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
 		}
-		if (this.autoCompactEnabled) rightParts.push("auto");
+		const mode = this.getPermissionMode();
+		const modeBits: string[] = [];
+		if (mode) modeBits.push(mode);
+		if (this.autoCompactEnabled) modeBits.push("⟳");
+		if (modeBits.length) rightParts.push(modeBits.join(" "));
 
 		const metricsLine = composeLeftRight(ctxText, rightParts.join(" · "), width, {
 			leftColor: ctxColorize,
@@ -219,17 +227,14 @@ export class FooterComponent implements Component {
 		const lines = [identityLine, metricsLine];
 
 		// --- Extension statuses (line 3, optional) ---------------------------
+		// Exclude "permissions" — its mode is already surfaced on the metrics line.
 		const extensionStatuses = this.footerData.getExtensionStatuses();
-		if (extensionStatuses.size > 0) {
-			const currentVersion = this.footerData.getStatusVersion();
-			if (currentVersion !== this.cachedStatusVersion) {
-				this.cachedStatusLine = Array.from(extensionStatuses.entries())
-					.sort(([a], [b]) => a.localeCompare(b))
-					.map(([, text]) => sanitizeStatusText(text))
-					.join(" ");
-				this.cachedStatusVersion = currentVersion;
-			}
-			lines.push(truncateToWidth(this.cachedStatusLine!, width, theme.fg("dim", "…")));
+		const otherStatuses = Array.from(extensionStatuses.entries())
+			.filter(([k]) => k !== "permissions")
+			.sort(([a], [b]) => a.localeCompare(b));
+		if (otherStatuses.length > 0) {
+			const statusLine = otherStatuses.map(([, text]) => sanitizeStatusText(text)).join(" ");
+			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "…")));
 		}
 
 		return lines;
