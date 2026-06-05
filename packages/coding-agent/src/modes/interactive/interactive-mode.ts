@@ -2496,7 +2496,6 @@ export class InteractiveMode {
 							this.ui,
 							this.settingsManager.getStreamingSmoothing(),
 						);
-						this.lastAssistantComponent = this.streamingComponent;
 						this.streamingMessage = event.message;
 						this.streamingComponent.updateContent(this.streamingMessage);
 						// Grouped mode: defer attaching the message block until it has
@@ -2564,6 +2563,12 @@ export class InteractiveMode {
 						for (const component of this.pendingTools.values()) {
 							component.setArgsComplete();
 						}
+					}
+					// Track the last assistant component that has visible text so that
+					// agent_end can mark the right one as deliverable (a trailing
+					// thinking-only or tool-only message must not displace it).
+					if (messageHasVisibleContent(this.streamingMessage, false)) {
+						this.lastAssistantComponent = this.streamingComponent;
 					}
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
@@ -2960,7 +2965,9 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 				);
 				this.chatContainer.addChild(assistantComponent);
-				this.lastAssistantComponent = assistantComponent;
+				if (messageHasVisibleContent(message, false)) {
+					this.lastAssistantComponent = assistantComponent;
+				}
 				break;
 			}
 			case "toolResult": {
