@@ -154,8 +154,13 @@ export class AgentMessageBus {
 				once: true,
 			});
 		});
+		// Keep a handle to the responder promise so we can absorb a *late*
+		// rejection: when `timedOut` wins the race, `respond` is still running and
+		// may reject afterwards with no observer → UnhandledPromiseRejection.
+		const respondP = respond(from, message, controller.signal);
+		respondP.catch(() => {});
 		try {
-			return await Promise.race([respond(from, message, controller.signal), timedOut]);
+			return await Promise.race([respondP, timedOut]);
 		} finally {
 			if (timer) clearTimeout(timer);
 			if (parentSignal) parentSignal.removeEventListener("abort", onParentAbort);
