@@ -20,7 +20,8 @@ function createTuiStub(columns: number): { columns: number; stub: any } {
 				return 24;
 			},
 		},
-		// Loader calls ui.addInterval / ui.removeInterval
+		// Loader drives its spinner off the shared animation ticker.
+		addAnimationCallback: (_cb: (now: number) => boolean) => () => {},
 		addInterval: (_cb: () => void, _ms: number) => ({ dispose: () => {} }),
 		removeInterval: () => {},
 		requestRender: () => {},
