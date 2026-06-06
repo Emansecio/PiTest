@@ -309,9 +309,9 @@ export class AssistantMessageComponent extends Container {
 							new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), 1, 0),
 						);
 					}
-					if (hasVisibleContentAfter) {
-						this.contentContainer.addChild(new Spacer(1));
-					}
+					// No spacer after the "Thinking…" label: keep the following content
+					// (the assistant's text/answer) flush with the label so they read as
+					// one block instead of being split by a blank line.
 				} else {
 					// Thinking traces in thinkingText color, italic
 					const thinking = this.clampReveal(i, content.thinking.trim());

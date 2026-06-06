@@ -83,10 +83,18 @@ export class NavGroupComponent extends Container {
 	}
 
 	private icon(state: GroupState): string {
-		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
+		// Uniform 2-cell icon slot. ICON_SUCCESS (✔︎) renders 2 cells in emoji-
+		// presentation terminals, while the spinner and ✗ render 1 — pad the narrow
+		// glyphs with a trailing space so the icon slot is a consistent width. This
+		// keeps a visible gap before the label and stops the label from shifting a
+		// column when the spinner settles into ✔/✗.
+		if (state === "pending") return `${theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0])} `;
 		const glyph = state === "error" ? ICON_ERROR : ICON_SUCCESS;
 		const steady: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
-		return this.iconEase.colorize(steady, glyph);
+		// Trailing space on every state. With the header's own space that yields two
+		// columns after the glyph, so the wide ✔︎ (drawn 2 cells while the width model
+		// counts 1) still leaves one visible space before the label.
+		return `${this.iconEase.colorize(steady, glyph)} `;
 	}
 
 	private counts(): string {
