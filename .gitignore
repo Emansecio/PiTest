@@ -47,3 +47,6 @@ pkglist.txt
 
 # Generated thumbnail cache (hyperframes presentation)
 hyperframes-pit-presentation/.thumbnails/
+
+# Nested reference clone (its own git repo — not part of this monorepo)
+everything-claude-code/
