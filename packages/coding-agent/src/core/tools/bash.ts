@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import { Container, Text, truncateToWidth } from "@pit/tui";
@@ -18,7 +19,8 @@ import {
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { applyKeyAliases } from "./argument-prep.js";
 import { classifyBashCommand } from "./bash-activity.js";
-import { OutputAccumulator } from "./output-accumulator.js";
+import { crushJson, JSON_CRUSH_TARGET_BYTES } from "./json-crush.js";
+import { OutputAccumulator, type OutputSnapshot } from "./output-accumulator.js";
 import { getTextOutput, invalidArgText, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import {
@@ -448,6 +450,30 @@ function rebuildBashResultRenderComponent(
 	component.addChild(new Text(`${prefix}${theme.fg("muted", footerParts.join(" · "))}`, 0, 0));
 }
 
+/**
+ * When PIT_JSON_CRUSH is on and a bash command produced large JSON/NDJSON that
+ * was truncated, replace the blind head/tail line-cut with a structural crush
+ * (schema + head/tail samples + omitted counts). Reads the full output back from
+ * the temp file the accumulator already persisted on truncation, so nothing is
+ * lost — the file stays the source of truth for any elided detail. Returns
+ * undefined (caller keeps the normal formatted output) when not enabled, not
+ * truncated, the temp file is unavailable, or the output is not JSON.
+ */
+async function crushBashJsonOutput(snapshot: OutputSnapshot): Promise<string | undefined> {
+	if (process.env.PIT_JSON_CRUSH !== "1") return undefined;
+	if (!snapshot.truncation.truncated || !snapshot.fullOutputPath) return undefined;
+	let full: string;
+	try {
+		full = await readFile(snapshot.fullOutputPath, "utf-8");
+	} catch {
+		return undefined;
+	}
+	const crushed = crushJson(full, { targetChars: JSON_CRUSH_TARGET_BYTES });
+	if (crushed === undefined) return undefined;
+	const originalSize = formatSize(snapshot.truncation.totalBytes);
+	return `${crushed}\n\n[Large JSON crushed to schema + samples (${originalSize} original). Full output: ${snapshot.fullOutputPath} — read it or use \`bash jq\` for any elided detail.]`;
+}
+
 export function createBashToolDefinition(
 	cwd: string,
 	options?: BashToolOptions,
@@ -591,7 +617,8 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 				}
 
 				const snapshot = await finishOutput();
-				const { text: outputText, details } = formatOutput(snapshot);
+				const { text: formattedText, details } = formatOutput(snapshot);
+				const outputText = (await crushBashJsonOutput(snapshot)) ?? formattedText;
 				if (exitCode !== 0 && exitCode !== null) {
 					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
 				}
