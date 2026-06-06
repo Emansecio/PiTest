@@ -16,6 +16,7 @@ import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/type
 import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { prepareWithPathAliases } from "./argument-prep.js";
 import { formatAnchorsForRead, interleaveAnchorsIntoLines } from "./edit-hashline-diff.ts";
+import { crushJson, JSON_CRUSH_TARGET_BYTES } from "./json-crush.js";
 import { formatNotebookSource } from "./notebook-formatter.ts";
 import { resolveReadPath } from "./path-utils.js";
 import { getFilePathArg, getTextOutput, invalidArgText, replaceTabs, shortenPath } from "./render-utils.js";
@@ -482,7 +483,25 @@ Common mistakes to avoid:
 								// Apply truncation, respecting both line and byte limits.
 								const truncation = truncateHead(selectedContent);
 								let outputText: string;
-								if (truncation.firstLineExceedsLimit) {
+								// Structural JSON crush (behind PIT_JSON_CRUSH): a whole-file read of a
+								// large JSON/NDJSON file would otherwise be blindly head-cut — tail lost,
+								// structure broken, and often the whole thing dropped when it is a single
+								// minified line. Emit a schema + head/tail-samples crush instead. Only when
+								// it would already truncate; the file on disk stays the source of truth
+								// (offset/limit or `bash jq` recover any elided detail). crushJson self-gates
+								// to real JSON, so non-JSON falls through to the normal truncation below.
+								const crushed =
+									process.env.PIT_JSON_CRUSH === "1" &&
+									offset === undefined &&
+									limit === undefined &&
+									truncation.truncated
+										? crushJson(selectedContent, { targetChars: JSON_CRUSH_TARGET_BYTES })
+										: undefined;
+								if (crushed !== undefined) {
+									const originalSize = formatSize(Buffer.byteLength(selectedContent, "utf-8"));
+									outputText = `${crushed}\n\n[Large JSON crushed to schema + samples (${originalSize} original). Re-read with offset/limit or use \`bash jq\` for any elided detail.]`;
+									details = { truncation };
+								} else if (truncation.firstLineExceedsLimit) {
 									// First line alone exceeds the byte limit. Point the model at a bash fallback.
 									const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine], "utf-8"));
 									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;

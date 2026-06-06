@@ -16,6 +16,7 @@ import {
 	createCustomMessage,
 } from "../messages.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
+import { crushJson } from "../tools/json-crush.ts";
 import {
 	computeOperationLists,
 	createFileOps,
@@ -625,6 +626,12 @@ const PRUNE_TAIL_CHARS = 800;
  */
 function headTailExcerpt(text: string): string {
 	if (text.length <= PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS) return text;
+	// Prefer a structural crush when the output is JSON/NDJSON: it keeps the
+	// schema + head/tail samples + omitted counts at far fewer tokens than a
+	// blind byte cut. Falls back to the head+tail excerpt below when not
+	// applicable (not JSON, or won't fit even when fully collapsed).
+	const crushed = crushJson(text, { targetChars: PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS });
+	if (crushed !== undefined) return crushed;
 	let head = text.slice(0, PRUNE_HEAD_CHARS);
 	const headNl = head.lastIndexOf("\n");
 	if (headNl > PRUNE_HEAD_CHARS - 400) head = head.slice(0, headNl);
