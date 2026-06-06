@@ -356,7 +356,7 @@ function loadSkillFromFile(
  * Skills with disableModelInvocation=true are excluded from the prompt
  * (they can only be invoked explicitly via /name commands).
  */
-export function formatSkillsForPrompt(skills: Skill[], maxSkills = 20, cwd?: string): string {
+export function formatSkillsForPrompt(skills: Skill[], maxSkills = 100, cwd?: string): string {
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
 
 	if (visibleSkills.length === 0) {
