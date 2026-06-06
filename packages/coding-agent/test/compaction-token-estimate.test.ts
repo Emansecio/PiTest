@@ -42,6 +42,18 @@ describe("estimateTextTokens", () => {
 	test("empty string returns 0", () => {
 		expect(estimateTextTokens("")).toBe(0);
 	});
+
+	test("dense CJK text estimates ≥ ~0.5 token/char (not underestimated by ASCII divisors)", () => {
+		// A block of CJK that has no latin alnum chars — the ASCII-only isDenseText
+		// would treat each ideograph as non-alnum, but the divisor (3.3/4.0) still
+		// undercounts vs real BPE (~0.5–2 tok/char). The non-latin path uses /2.0.
+		const cjk = "这是一段中文文本用来测试令牌估算的密度处理逻辑是否正确".repeat(10);
+		const tokens = estimateTextTokens(cjk);
+		// at least ~0.5 token per char
+		expect(tokens).toBeGreaterThanOrEqual(Math.floor(cjk.length * 0.5));
+		// clearly above the ASCII prose/dense estimate (length / 3.3)
+		expect(tokens).toBeGreaterThan(Math.ceil(cjk.length / 3.3));
+	});
 });
 
 // ---------------------------------------------------------------------------

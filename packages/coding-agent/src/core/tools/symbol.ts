@@ -11,6 +11,7 @@ import { prepareWithPathAliases } from "./argument-prep.js";
 import { resolveReadPath } from "./path-utils.js";
 import { getFilePathArg, getTextOutput, invalidArgText, replaceTabs, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
+import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "./truncate.js";
 
 const symbolSchema = Type.Object(
 	{
@@ -295,8 +296,27 @@ export function createSymbolToolDefinition(
 			const startDisplay = declLine + 1;
 			const endDisplay = endLine + 1;
 			const body = lines.slice(declLine, endLine + 1).join("\n");
+			// The symbol body can be arbitrarily large (the TUI only clips its preview to
+			// 15 lines; the model would otherwise receive the whole declaration). Cap it the
+			// same way read does, pointing at `read` with an offset/limit range for the rest.
+			const truncation = truncateHead(body);
+			let outputText: string;
+			if (truncation.firstLineExceedsLimit) {
+				// Single minified line bigger than the byte limit — empty content otherwise.
+				const firstLineSize = formatSize(Buffer.byteLength(lines[declLine], "utf-8"));
+				outputText = `[Symbol declaration line ${startDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use read path="${path}" offset=${startDisplay} limit=1 then a bash fallback for the rest.]`;
+			} else if (truncation.truncated) {
+				// Truncation occurred. Point at read with a range covering the remainder.
+				const shownLines = truncation.outputLines;
+				const lastShownDisplay = startDisplay + shownLines - 1;
+				const nextOffset = lastShownDisplay + 1;
+				const remainingLimit = endDisplay - nextOffset + 1;
+				outputText = `${truncation.content}\n\n[symbol truncated at line ${lastShownDisplay} of ${endDisplay}; use read path="${path}" offset=${nextOffset} limit=${remainingLimit} for the rest]`;
+			} else {
+				outputText = truncation.content;
+			}
 			return {
-				content: [{ type: "text", text: body }] as (TextContent | ImageContent)[],
+				content: [{ type: "text", text: outputText }] as (TextContent | ImageContent)[],
 				details: { startLine: startDisplay, endLine: endDisplay, totalLines: lines.length },
 			};
 		},

@@ -302,6 +302,14 @@ export function shouldCompactSoft(contextTokens: number, contextWindow: number, 
 /** Chars-per-token ratios for content classification. */
 const CHARS_PER_TOKEN_PROSE = 4;
 const CHARS_PER_TOKEN_DENSE = 3.3;
+/**
+ * Non-latin scripts (CJK, Cyrillic, emoji, …) cost far more BPE tokens per
+ * char than ASCII — roughly 0.5–2 tok/char. When the non-ASCII code-point
+ * fraction exceeds this threshold, fall back to a denser divisor so the
+ * estimate isn't wildly low (which would mislead findCutPoint / pruning).
+ */
+const CHARS_PER_TOKEN_NONLATIN = 2;
+const NONLATIN_FRACTION_THRESHOLD = 0.3;
 /** Token cost for an image block (kept as constant). */
 const IMAGE_TOKENS = 1200;
 
@@ -357,6 +365,19 @@ function isDenseText(text: string): boolean {
  */
 export function estimateTextTokens(text: string, forceDense = false): number {
 	if (text.length === 0) return 0;
+	// Count non-ASCII code points (surrogate pairs counted once, so emoji = 1).
+	let nonAscii = 0;
+	let codePoints = 0;
+	for (const ch of text) {
+		codePoints++;
+		const cp = ch.codePointAt(0);
+		if (cp !== undefined && cp > 127) nonAscii++;
+	}
+	// Non-latin heavy text underestimates badly with the ASCII divisors; use a
+	// denser ratio so the estimate stays close to real BPE token cost.
+	if (codePoints > 0 && nonAscii / codePoints > NONLATIN_FRACTION_THRESHOLD) {
+		return Math.ceil(text.length / CHARS_PER_TOKEN_NONLATIN);
+	}
 	const dense = forceDense || isDenseText(text);
 	return Math.ceil(text.length / (dense ? CHARS_PER_TOKEN_DENSE : CHARS_PER_TOKEN_PROSE));
 }

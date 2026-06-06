@@ -10,6 +10,13 @@ const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 
+// Trailing-debounce window for terminal resize (SIGWINCH) events. During a
+// continuous drag-resize the terminal emits many "resize" events per second;
+// each one would otherwise trigger a full clear+scrollback redraw of the whole
+// transcript. Coalescing the burst into a single redraw at rest keeps drags
+// smooth without changing what the eventual render does.
+const TERMINAL_RESIZE_DEBOUNCE_MS = 70;
+
 /**
  * Minimal terminal interface for TUI
  */
@@ -64,6 +71,10 @@ export class ProcessTerminal implements Terminal {
 	private wasRaw = false;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
+	// Listener actually attached to process.stdout "resize"; debounces bursts of
+	// SIGWINCH events down to a single resizeHandler() call once the drag stops.
+	private resizeListener?: () => void;
+	private resizeDebounceTimer?: ReturnType<typeof setTimeout>;
 	private _kittyProtocolActive = false;
 	private _modifyOtherKeysActive = false;
 	private stdinBuffer?: StdinBuffer;
@@ -103,8 +114,19 @@ export class ProcessTerminal implements Terminal {
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		process.stdout.write("\x1b[?2004h");
 
-		// Set up resize handler immediately
-		process.stdout.on("resize", this.resizeHandler);
+		// Set up resize handler immediately. Wrap it in a trailing debounce so a
+		// continuous drag-resize coalesces into a single redraw at rest instead
+		// of ~60 full clear+scrollback redraws per second.
+		this.resizeListener = () => {
+			if (this.resizeDebounceTimer) {
+				clearTimeout(this.resizeDebounceTimer);
+			}
+			this.resizeDebounceTimer = setTimeout(() => {
+				this.resizeDebounceTimer = undefined;
+				this.resizeHandler?.();
+			}, TERMINAL_RESIZE_DEBOUNCE_MS);
+		};
+		process.stdout.on("resize", this.resizeListener);
 
 		// Refresh terminal dimensions - they may be stale after suspend/resume
 		// (SIGWINCH is lost while process is stopped). Unix only.
@@ -299,10 +321,16 @@ export class ProcessTerminal implements Terminal {
 			this.stdinDataHandler = undefined;
 		}
 		this.inputHandler = undefined;
-		if (this.resizeHandler) {
-			process.stdout.removeListener("resize", this.resizeHandler);
-			this.resizeHandler = undefined;
+		// Cancel any pending debounced resize and detach the listener.
+		if (this.resizeDebounceTimer) {
+			clearTimeout(this.resizeDebounceTimer);
+			this.resizeDebounceTimer = undefined;
 		}
+		if (this.resizeListener) {
+			process.stdout.removeListener("resize", this.resizeListener);
+			this.resizeListener = undefined;
+		}
+		this.resizeHandler = undefined;
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
 		// re-interpreted after raw mode is disabled. This fixes a race condition

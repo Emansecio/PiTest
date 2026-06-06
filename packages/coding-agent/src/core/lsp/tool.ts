@@ -298,10 +298,7 @@ export function createLspToolDefinition(
 			const isWorkspace = file === "*";
 			const requiresFile = !file && action !== "reload";
 			if (requiresFile) {
-				return textResult("Error: file parameter required. Use `*` for workspace scope where supported.", {
-					action,
-					success: false,
-				});
+				throw new Error("file parameter required. Use `*` for workspace scope where supported.");
 			}
 			const resolvedFile = file && !isWorkspace ? resolveToCwd(file, cwd) : null;
 
@@ -312,7 +309,7 @@ export function createLspToolDefinition(
 			if (action === "reload" && (isWorkspace || !resolvedFile)) {
 				const servers = getLspServers(config);
 				if (servers.length === 0) {
-					return textResult("No language server found for this action", { action, success: false, request: req });
+					throw new Error("No language server found for this action");
 				}
 				const outputs: string[] = [];
 				for (const [serverName, serverConfig] of servers) {
@@ -336,7 +333,7 @@ export function createLspToolDefinition(
 			// ---- single-file actions -----------------------------------------
 			const serverInfo = resolvedFile ? getServerForFile(config, resolvedFile) : null;
 			if (!serverInfo) {
-				return textResult("No language server found for this action", { action, success: false });
+				throw new Error("No language server found for this action");
 			}
 			const [serverName, serverConfig] = serverInfo;
 
@@ -552,11 +549,7 @@ export function createLspToolDefinition(
 
 					case "rename": {
 						if (!new_name) {
-							return textResult("Error: new_name parameter required for rename", {
-								action,
-								serverName,
-								success: false,
-							});
+							throw new Error("new_name parameter required for rename");
 						}
 						const result = (await sendRequest(
 							client,
@@ -595,12 +588,7 @@ export function createLspToolDefinition(
 					}
 					throw new Error("aborted");
 				}
-				return textResult(`LSP error: ${err instanceof Error ? err.message : String(err)}`, {
-					serverName,
-					action,
-					success: false,
-					request: req,
-				});
+				throw new Error(`LSP error on ${serverName}: ${err instanceof Error ? err.message : String(err)}`);
 			}
 		},
 	};

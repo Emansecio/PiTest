@@ -42,7 +42,12 @@ const bashSchema = Type.Object(
 					"Working directory for this command — absolute, or relative to the session root. Defaults to the session root. Prefer this over a leading `cd …` so the command line stays clean.",
 			}),
 		),
-		timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+		timeout: Type.Optional(
+			Type.Number({
+				description:
+					"Timeout em segundos. Sem timeout (ou 0) o comando roda até terminar. Para servidores e processos longos, rode em segundo plano (`cmd &`, `nohup cmd &`, `disown`) em vez de deixá-los segurando o shell. Nunca deixe sem timeout um comando que possa bloquear esperando input interativo.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -76,6 +81,18 @@ function prepareBashArguments(input: unknown): BashToolInput {
 		}
 	}
 	return args as BashToolInput;
+}
+
+// Sanitize the model-supplied timeout without imposing a low ceiling: legitimate
+// long-running commands (builds, test suites) are expected to run without a limit.
+// `undefined` / `<= 0` / non-finite => no limit (returns undefined). Otherwise
+// round to a whole second and clamp the upper bound only to reject absurd values
+// (24h), never to cut real workloads.
+function normalizeBashTimeout(timeout: number | undefined): number | undefined {
+	if (typeof timeout !== "number" || !Number.isFinite(timeout)) return undefined;
+	const seconds = Math.round(timeout);
+	if (seconds <= 0) return undefined;
+	return Math.min(86400, seconds);
 }
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -599,7 +616,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
-						timeout,
+						timeout: normalizeBashTimeout(timeout),
 						env: spawnContext.env,
 					});
 					exitCode = result.exitCode;

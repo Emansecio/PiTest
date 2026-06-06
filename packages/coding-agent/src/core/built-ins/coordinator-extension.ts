@@ -28,6 +28,7 @@ import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "../messa
 import type { ModelRegistry } from "../model-registry.ts";
 import type { Skill } from "../skills.ts";
 import { createMessageTool } from "../tools/message.ts";
+import { formatSize, truncateTail } from "../tools/truncate.ts";
 
 const worktreeSchema = Type.Union(
 	[
@@ -54,7 +55,10 @@ const taskSchema = Type.Object({
 	system_prompt: Type.Optional(Type.String({ description: "Override the subagent's system prompt." })),
 	allowed_tools: Type.Optional(
 		Type.Array(Type.String(), {
-			description: "Subset of parent tools the subagent can use. Defaults to parent's full tool set.",
+			description:
+				"Subset of parent tools the subagent can use. Omitting this inherits the parent's FULL tool catalog, " +
+				"which inflates the subagent's system prompt with every tool definition — costly and distracting. " +
+				"Always pass a minimal subset scoped to the task — e.g. ['read','grep','find','ls'] for exploration.",
 		}),
 	),
 	max_turns: Type.Optional(Type.Number({ description: "Hard limit on subagent turns. Default: 25." })),
@@ -109,6 +113,24 @@ export function resolveMaxSubagentDepth(env: NodeJS.ProcessEnv = process.env): n
 	if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_SUBAGENT_DEPTH;
 	const parsed = Number.parseInt(raw, 10);
 	if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MAX_SUBAGENT_DEPTH;
+	return parsed;
+}
+
+/**
+ * Default byte cap on a subagent's final output as it lands in the parent's
+ * context. Without it, a verbose subagent (or a giant structured result) floods
+ * the parent conversation. The tail is kept — the subagent's summary/conclusion
+ * usually lands at the end — and the full output stays retrievable via `/tasks`.
+ */
+const DEFAULT_SUBAGENT_MAX_BYTES = 24 * 1024; // 24KB
+const SUBAGENT_MAX_LINES = 1000;
+
+/** Resolves the subagent output cap, honoring the `PIT_SUBAGENT_MAX_BYTES` override. */
+export function resolveSubagentMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.PIT_SUBAGENT_MAX_BYTES;
+	if (raw === undefined || raw.trim() === "") return DEFAULT_SUBAGENT_MAX_BYTES;
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_SUBAGENT_MAX_BYTES;
 	return parsed;
 }
 
@@ -191,6 +213,7 @@ function messagingPreamble(selfId: string, parentId: string | undefined): string
 export function createCoordinatorExtension(options: CoordinatorExtensionOptions) {
 	const registry = new SubagentRegistry();
 	const maxDepth = resolveMaxSubagentDepth();
+	const maxOutputBytes = resolveSubagentMaxBytes();
 
 	/**
 	 * Builds the `task` tool for an agent living at `depth`. The parent gets
@@ -296,8 +319,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							onAgentReady,
 						},
 					);
-					const text =
+					const rawText =
 						resultSchema && result.value !== undefined ? JSON.stringify(result.value, null, 2) : result.output;
+					// Cap the output before it lands in the parent's context. Keep the
+					// tail (the subagent's summary/conclusion usually lands at the end);
+					// the full output stays retrievable via `/tasks id=…`.
+					const capped = truncateTail(rawText, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
+					const text = capped.truncated
+						? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}; full output via /tasks id=${result.record.id}]`
+						: capped.content;
 					return {
 						content: [{ type: "text" as const, text }],
 						isError: false,
@@ -332,13 +362,33 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		pi.registerTool(makeTaskTool(0));
 
 		pi.registerCommand("tasks", {
-			description: "List recently spawned subagents and their status.",
-			async handler(_args, ctx) {
+			description:
+				"List recently spawned subagents and their status. `/tasks <id>` dumps that subagent's full output.",
+			async handler(args, ctx) {
 				const records = registry.list();
 				if (records.length === 0) {
 					const msg = "No subagents spawned yet.";
 					if (ctx.hasUI) ctx.ui.notify(msg, "info");
 					else console.log(msg);
+					return;
+				}
+				// `/tasks <id>` (or `/tasks id=<id>`, as cited in the truncation note)
+				// dumps the full stored output of one subagent — the part elided by the
+				// per-result byte cap.
+				const wanted = args.trim().replace(/^id=/, "").trim();
+				if (wanted) {
+					const record = registry.get(wanted);
+					if (!record) {
+						const msg = `No subagent with id "${wanted}". Run /tasks to list ids.`;
+						if (ctx.hasUI) ctx.ui.notify(msg, "info");
+						else console.log(msg);
+						return;
+					}
+					const header = `${record.id} [${record.status}] depth=${record.depth} turns=${record.turnCount}`;
+					const body = record.output && record.output.length > 0 ? record.output : "(no output recorded)";
+					const dump = `${header}\n\n${body}`;
+					if (ctx.hasUI) ctx.ui.notify(dump, "info");
+					else console.log(dump);
 					return;
 				}
 				const lines = records.map(

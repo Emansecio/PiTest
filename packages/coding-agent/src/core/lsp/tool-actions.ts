@@ -203,9 +203,8 @@ export async function runDiagnostics(
 		});
 	}
 	if (!file) {
-		return textResult(
-			"Error: file parameter required. Use `*` for workspace-wide diagnostics or a path/glob for specific files.",
-			{ action, success: false, request: req },
+		throw new Error(
+			"file parameter required. Use `*` for workspace-wide diagnostics or a path/glob for specific files.",
 		);
 	}
 
@@ -310,13 +309,13 @@ export async function runCapabilities(
 	if (file && file !== "*") {
 		serverList = getServersForFile(config, resolveToCwd(file, cwd));
 		if (serverList.length === 0) {
-			return textResult("No language server found for this file", { action, success: false, request: req });
+			throw new Error("No language server found for this file");
 		}
 	} else {
 		serverList = getLspServers(config);
 	}
 	if (serverList.length === 0) {
-		return textResult("No language servers configured", { action, success: false, request: req });
+		throw new Error("No language servers configured");
 	}
 	const sections: string[] = [];
 	const responding = new Set<string>();
@@ -351,15 +350,11 @@ export async function workspaceSymbols(
 	const action = "symbols";
 	const normalizedQuery = query?.trim();
 	if (!normalizedQuery) {
-		return textResult("Error: query parameter required for workspace symbol search", {
-			action,
-			success: false,
-			request: req,
-		});
+		throw new Error("query parameter required for workspace symbol search");
 	}
 	const servers = getLspServers(config);
 	if (servers.length === 0) {
-		return textResult("No language server found for this action", { action, success: false, request: req });
+		throw new Error("No language server found for this action");
 	}
 	const aggregated: SymbolInformation[] = [];
 	const responding = new Set<string>();
@@ -409,9 +404,8 @@ export async function rawRequest(
 	const { file, line, symbol, query, payload } = params;
 	const method = query?.trim();
 	if (!method) {
-		return textResult(
-			"Error: action=request requires `query` to specify the LSP method name (e.g. 'rust-analyzer/expandMacro')",
-			{ action, success: false, request: req },
+		throw new Error(
+			"action=request requires `query` to specify the LSP method name (e.g. 'rust-analyzer/expandMacro')",
 		);
 	}
 	let chosenServer: [string, ServerConfig] | null = null;
@@ -420,12 +414,12 @@ export async function rawRequest(
 		resolvedTarget = resolveToCwd(file, cwd);
 		chosenServer = getServerForFile(config, resolvedTarget);
 		if (!chosenServer) {
-			return textResult("No language server found for this file", { action, success: false, request: req });
+			throw new Error("No language server found for this file");
 		}
 	} else {
 		const all = getLspServers(config);
 		if (all.length === 0) {
-			return textResult("No language servers configured", { action, success: false, request: req });
+			throw new Error("No language servers configured");
 		}
 		chosenServer = all[0];
 	}
@@ -436,12 +430,7 @@ export async function rawRequest(
 		try {
 			requestParams = JSON.parse(payload);
 		} catch (err) {
-			return textResult(`Error: invalid JSON in payload: ${err instanceof Error ? err.message : String(err)}`, {
-				action,
-				serverName: chosenName,
-				success: false,
-				request: req,
-			});
+			throw new Error(`invalid JSON in payload: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	} else if (resolvedTarget) {
 		const uri = fileToUri(resolvedTarget);
@@ -473,15 +462,7 @@ export async function rawRequest(
 		});
 	} catch (err) {
 		if (signal?.aborted) throw new Error("aborted");
-		return textResult(
-			`LSP error from ${chosenName} on ${method}: ${err instanceof Error ? err.message : String(err)}`,
-			{
-				action,
-				serverName: chosenName,
-				success: false,
-				request: req,
-			},
-		);
+		throw new Error(`LSP error from ${chosenName} on ${method}: ${err instanceof Error ? err.message : String(err)}`);
 	}
 }
 
@@ -495,27 +476,19 @@ export async function renameFile(
 	const action = "rename_file";
 	const { file, new_name, apply } = params;
 	if (!file || !new_name) {
-		return textResult("Error: rename_file requires both `file` (source path) and `new_name` (destination path)", {
-			action,
-			success: false,
-			request: req,
-		});
+		throw new Error("rename_file requires both `file` (source path) and `new_name` (destination path)");
 	}
 	const source = resolveToCwd(file, cwd);
 	const dest = resolveToCwd(new_name, cwd);
 	if (source === dest) {
-		return textResult("Error: source and destination paths are identical", { action, success: false, request: req });
+		throw new Error("source and destination paths are identical");
 	}
 
 	let sourceStat: Awaited<ReturnType<typeof fs.stat>>;
 	try {
 		sourceStat = await fs.stat(source);
 	} catch {
-		return textResult(`Error: source path does not exist: ${formatPathRelativeToCwd(source, cwd)}`, {
-			action,
-			success: false,
-			request: req,
-		});
+		throw new Error(`source path does not exist: ${formatPathRelativeToCwd(source, cwd)}`);
 	}
 	let destExists = false;
 	try {
@@ -525,23 +498,18 @@ export async function renameFile(
 		// expected
 	}
 	if (destExists) {
-		return textResult(`Error: destination already exists: ${formatPathRelativeToCwd(dest, cwd)}`, {
-			action,
-			success: false,
-			request: req,
-		});
+		throw new Error(`destination already exists: ${formatPathRelativeToCwd(dest, cwd)}`);
 	}
 
 	const enumerated = await enumerateRenamePairs(source, dest);
 	if (enumerated.exceeded) {
-		return textResult(
-			`Error: directory contains more than ${MAX_RENAME_PAIRS} files; rename in smaller batches to keep LSP edits accurate`,
-			{ action, success: false, request: req },
+		throw new Error(
+			`directory contains more than ${MAX_RENAME_PAIRS} files; rename in smaller batches to keep LSP edits accurate`,
 		);
 	}
 	const { pairs } = enumerated;
 	if (pairs.length === 0) {
-		return textResult("Error: no files to rename", { action, success: false, request: req });
+		throw new Error("no files to rename");
 	}
 
 	const lspParams = { files: pairs };
