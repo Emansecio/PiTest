@@ -560,15 +560,21 @@ export class InteractiveMode {
 				getArgumentCompletions: cmd.getArgumentCompletions,
 			}));
 
-		// Build skill commands from session.skills (if enabled)
+		// Build skill commands from session.skills (if enabled). Skills register as
+		// plain `/name` (Claude Code parity). Skip any whose name collides with a
+		// built-in / template / extension command: those take precedence in dispatch,
+		// so a same-named skill would be an unreachable, duplicate menu entry.
 		this.skillCommands.clear();
 		const skillCommandList: SlashCommand[] = [];
 		if (this.settingsManager.getEnableSkillCommands()) {
+			const takenNames = new Set<string>(
+				[...slashCommands, ...templateCommands, ...extensionCommands].map((c) => c.name),
+			);
 			for (const skill of this.session.resourceLoader.getSkills().skills) {
-				const commandName = `skill:${skill.name}`;
-				this.skillCommands.set(commandName, skill.filePath);
+				if (takenNames.has(skill.name)) continue;
+				this.skillCommands.set(skill.name, skill.filePath);
 				skillCommandList.push({
-					name: commandName,
+					name: skill.name,
 					description: prefixAutocompleteDescription(skill.description, skill.sourceInfo),
 				});
 			}
@@ -696,7 +702,7 @@ export class InteractiveMode {
 			);
 			const onboarding = theme.fg(
 				"dim",
-				`Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
+				`${APP_NAME} can explain its own features and look up its docs. Ask it how to use or extend ${APP_NAME}.`,
 			);
 			this.builtInHeader = new ExpandableText(
 				() => `${logo}\n${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
@@ -925,7 +931,7 @@ export class InteractiveMode {
 		}
 
 		if (extendedKeysFormat === "xterm") {
-			return "tmux extended-keys-format is xterm. Pi works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
+			return `tmux extended-keys-format is xterm. ${APP_NAME} works best with csi-u. Add \`set -g extended-keys-format csi-u\` to ~/.tmux.conf and restart tmux.`;
 		}
 
 		return undefined;
@@ -3584,7 +3590,9 @@ export class InteractiveMode {
 			// Split by space to support editor arguments (e.g., "code --wait")
 			const [editor, ...editorArgs] = editorCmd.split(" ");
 
-			process.stdout.write(`Launching external editor: ${editorCmd}\nPi will resume when the editor exits.\n`);
+			process.stdout.write(
+				`Launching external editor: ${editorCmd}\n${APP_NAME} will resume when the editor exits.\n`,
+			);
 
 			// Do not use spawnSync here. On Windows, synchronous child_process calls can keep
 			// Node/libuv's console input read active after ui.stop() pauses stdin, racing

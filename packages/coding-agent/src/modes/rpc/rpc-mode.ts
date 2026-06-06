@@ -642,7 +642,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 				for (const skill of session.resourceLoader.getSkills().skills) {
 					commands.push({
-						name: `skill:${skill.name}`,
+						name: skill.name,
 						description: skill.description,
 						source: "skill",
 						sourceInfo: skill.sourceInfo,

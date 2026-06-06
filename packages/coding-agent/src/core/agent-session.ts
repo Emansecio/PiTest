@@ -2392,7 +2392,7 @@ export class AgentSession {
 				}
 			}
 
-			// Expand skill commands (/skill:name args) and prompt templates (/template args)
+			// Expand skill commands (/name args) and prompt templates (/template args)
 			let expandedText = currentText;
 			if (expandPromptTemplates) {
 				expandedText = this._expandSkillCommand(expandedText);
@@ -2553,19 +2553,22 @@ export class AgentSession {
 	}
 
 	/**
-	 * Expand skill commands (/skill:name args) to their full content.
+	 * Expand skill commands to their full content. Skills are invoked as `/name`
+	 * (Claude Code parity); the legacy `/skill:name` form is still accepted.
 	 * Returns the expanded text, or the original text if not a skill command or skill not found.
 	 * Emits errors via extension runner if file read fails.
 	 */
 	private _expandSkillCommand(text: string): string {
-		if (!text.startsWith("/skill:")) return text;
+		if (!text.startsWith("/")) return text;
 
 		const spaceIndex = text.indexOf(" ");
-		const skillName = spaceIndex === -1 ? text.slice(7) : text.slice(7, spaceIndex);
+		const rawName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+		// Accept both the bare `/name` form and the legacy `/skill:name` prefix.
+		const skillName = rawName.startsWith("skill:") ? rawName.slice(6) : rawName;
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
 
 		const skill = this.resourceLoader.getSkillByName(skillName);
-		if (!skill) return text; // Unknown skill, pass through
+		if (!skill) return text; // Not a skill — pass through (template / plain prompt)
 
 		try {
 			const content = readFileSync(skill.filePath, "utf-8");
@@ -3543,7 +3546,7 @@ export class AgentSession {
 			}));
 
 			const skills: SlashCommandInfo[] = this._resourceLoader.getSkills().skills.map((skill) => ({
-				name: `skill:${skill.name}`,
+				name: skill.name,
 				description: skill.description,
 				source: "skill",
 				sourceInfo: skill.sourceInfo,
