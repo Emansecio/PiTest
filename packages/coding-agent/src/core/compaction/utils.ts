@@ -242,14 +242,36 @@ export function formatFileOperations(arg1: string[] | OperationLists, modifiedFi
 /** Maximum characters for a tool result in serialized summaries. */
 const TOOL_RESULT_MAX_CHARS = 2000;
 
+/** Fraction of the truncation budget kept from the head; the remainder is kept from the tail. */
+const TRUNCATE_HEAD_FRACTION = 0.65;
+
 /**
- * Truncate text to a maximum character length for summarization.
- * Keeps the beginning and appends a truncation marker.
+ * Truncate text to ~maxChars while preserving BOTH its head and its tail.
+ *
+ * Tool outputs frequently carry their most decisive signal at the end — a stack
+ * trace's exception line, the last matches of a grep, a command's final status.
+ * A head-only cut discards exactly that. Keeping a head+tail excerpt lets the
+ * summarizer see the output's shape. This also mirrors `headTailExcerpt` in
+ * compaction.ts (the pre-prune path): a large tool result the prune step already
+ * shrank to head+tail is no longer re-truncated back to head-only here. Cuts snap
+ * to line breaks for readability.
  */
 function truncateForSummary(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
-	const truncatedChars = text.length - maxChars;
-	return `${text.slice(0, maxChars)}\n\n[... ${truncatedChars} more characters truncated]`;
+
+	const headBudget = Math.floor(maxChars * TRUNCATE_HEAD_FRACTION);
+	const tailBudget = maxChars - headBudget;
+
+	let head = text.slice(0, headBudget);
+	const headNl = head.lastIndexOf("\n");
+	if (headNl > headBudget - 200) head = head.slice(0, headNl);
+
+	let tail = text.slice(text.length - tailBudget);
+	const tailNl = tail.indexOf("\n");
+	if (tailNl >= 0 && tailNl < 200) tail = tail.slice(tailNl + 1);
+
+	const elided = text.length - head.length - tail.length;
+	return `${head}\n\n[... ${elided} characters truncated ...]\n\n${tail}`;
 }
 
 /**

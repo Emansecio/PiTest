@@ -3,8 +3,12 @@ import { describe, expect, it } from "vitest";
 import { serializeConversation } from "../src/core/compaction/utils.js";
 
 describe("serializeConversation", () => {
-	it("should truncate long tool results", () => {
-		const longContent = "x".repeat(5000);
+	it("should truncate long tool results, preserving head AND tail", () => {
+		// Distinct markers at both ends so the assertions actually prove the
+		// tail survived — a head-only cut would have dropped TAIL_END.
+		const head = "HEAD_START";
+		const tail = "TAIL_END";
+		const longContent = head + "a".repeat(4000) + "b".repeat(4000) + tail;
 		const messages: Message[] = [
 			{
 				role: "toolResult",
@@ -19,10 +23,14 @@ describe("serializeConversation", () => {
 		const result = serializeConversation(messages);
 
 		expect(result).toContain("[Tool result]:");
-		expect(result).toContain("[... 3000 more characters truncated]");
-		expect(result).not.toContain("x".repeat(3000));
-		// First 2000 chars should be present
-		expect(result).toContain("x".repeat(2000));
+		expect(result).toContain("characters truncated");
+		// Head preserved (was the only part kept before the fix)...
+		expect(result).toContain(head);
+		// ...and the tail too — the point of the fix.
+		expect(result).toContain(tail);
+		// The middle is elided and the output is bounded.
+		expect(result).not.toContain(longContent);
+		expect(result.length).toBeLessThan(longContent.length);
 	});
 
 	it("should not truncate short tool results", () => {
