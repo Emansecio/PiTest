@@ -292,6 +292,14 @@ export class InteractiveMode {
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
+	private readonly awaitingUserInputMessage = "Waiting for your answer…";
+	private readonly userWaitMessage = "Waiting for you…";
+	// Reference count of open user-input prompts (ask picker, permission/extension
+	// confirm, custom overlay). While > 0 the working clock is frozen and relabeled
+	// — the agent is blocked on the user, not working. The first holder's message
+	// wins; the clock resumes when the last prompt closes.
+	private userInputPauseDepth = 0;
+	private userInputPauseMessage: string | null = null;
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
 
@@ -1416,6 +1424,12 @@ export class InteractiveMode {
 		// agent_start (turn start) and lives until agent_end, so the clock
 		// measures the whole turn rather than any single agent step.
 		loader.setElapsedEnabled(true);
+		// If a prompt is open while the loader is (re)built, carry the paused/relabeled
+		// state onto the new instance so the clock stays frozen.
+		if (this.userInputPauseDepth > 0) {
+			loader.setMessage(this.userInputPauseMessage ?? this.awaitingUserInputMessage);
+			loader.setElapsedPaused(true);
+		}
 		return loader;
 	}
 
@@ -1445,6 +1459,44 @@ export class InteractiveMode {
 	private setWorkingIndicator(options?: LoaderIndicatorOptions): void {
 		this.workingIndicatorOptions = options;
 		this.loadingAnimation?.setIndicator(options);
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Mark the turn as blocked on the user (a picker, permission/extension confirm,
+	 * or custom overlay is up): freeze the working clock and relabel the loader, so
+	 * the running timer + cost don't pressure the user mid-decision. Reference-
+	 * counted — overlapping prompts (e.g. an `ask` that opens via a selector) hold
+	 * the pause until the last one closes; the first holder's message wins. Returns
+	 * an idempotent release fn; call it when the prompt resolves.
+	 */
+	private beginUserInputWait(message: string): () => void {
+		this.userInputPauseDepth++;
+		if (this.userInputPauseDepth === 1) {
+			this.userInputPauseMessage = message;
+			this.applyUserInputPause(true);
+		}
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.userInputPauseDepth = Math.max(0, this.userInputPauseDepth - 1);
+			if (this.userInputPauseDepth === 0) {
+				this.userInputPauseMessage = null;
+				this.applyUserInputPause(false);
+			}
+		};
+	}
+
+	private applyUserInputPause(paused: boolean): void {
+		if (!this.loadingAnimation) return;
+		if (paused) {
+			this.loadingAnimation.setElapsedPaused(true);
+			this.loadingAnimation.setMessage(this.userInputPauseMessage ?? this.awaitingUserInputMessage);
+		} else {
+			this.loadingAnimation.setMessage(this.getWorkingLoaderMessage());
+			this.loadingAnimation.setElapsedPaused(false);
+		}
 		this.ui.requestRender();
 	}
 
@@ -1748,7 +1800,9 @@ export class InteractiveMode {
 		options: string[],
 		opts?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
-		return new Promise((resolve) => {
+		// Blocks the turn on the user (permission/extension confirm) → freeze the clock.
+		const releaseWait = this.beginUserInputWait(this.userWaitMessage);
+		return new Promise<string | undefined>((resolve) => {
 			if (opts?.signal?.aborted) {
 				resolve(undefined);
 				return;
@@ -1780,7 +1834,7 @@ export class InteractiveMode {
 			this.editorContainer.addChild(this.extensionSelector);
 			this.ui.setFocus(this.extensionSelector);
 			this.ui.requestRender();
-		});
+		}).finally(releaseWait);
 	}
 
 	/**
@@ -1823,7 +1877,9 @@ export class InteractiveMode {
 		placeholder?: string,
 		opts?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
-		return new Promise((resolve) => {
+		// Blocks the turn on the user (extension text prompt) → freeze the clock.
+		const releaseWait = this.beginUserInputWait(this.userWaitMessage);
+		return new Promise<string | undefined>((resolve) => {
 			if (opts?.signal?.aborted) {
 				resolve(undefined);
 				return;
@@ -1855,7 +1911,7 @@ export class InteractiveMode {
 			this.editorContainer.addChild(this.extensionInput);
 			this.ui.setFocus(this.extensionInput);
 			this.ui.requestRender();
-		});
+		}).finally(releaseWait);
 	}
 
 	/**
@@ -2016,7 +2072,9 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		};
 
-		return new Promise((resolve, reject) => {
+		// Blocks the turn on the user (custom overlay / dialog) → freeze the clock.
+		const releaseWait = this.beginUserInputWait(this.userWaitMessage);
+		return new Promise<T>((resolve, reject) => {
 			let component: Component & { dispose?(): void };
 			let closed = false;
 
@@ -2067,7 +2125,7 @@ export class InteractiveMode {
 					if (!isOverlay) restoreEditor();
 					reject(err);
 				});
-		});
+		}).finally(releaseWait);
 	}
 
 	/**
@@ -3831,6 +3889,7 @@ export class InteractiveMode {
 			return;
 		}
 		this.pendingAskRequest = req;
+		const releaseAskWait = this.beginUserInputWait(this.awaitingUserInputMessage);
 
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let close: (() => void) | undefined;
@@ -3843,6 +3902,7 @@ export class InteractiveMode {
 				timer = undefined;
 			}
 			this.pendingAskRequest = undefined;
+			releaseAskWait();
 			this.userInputBus.resolve(req.requestId, answer);
 			close?.();
 		};
@@ -3887,7 +3947,10 @@ export class InteractiveMode {
 	 * @param create Factory that receives a `done` callback and returns the component and focus target
 	 */
 	private showSelector(create: (done: () => void) => { component: Component; focus: Component }): void {
+		// Blocks the turn on the user (selector in place of the editor) → freeze the clock.
+		const releaseWait = this.beginUserInputWait(this.userWaitMessage);
 		const done = () => {
+			releaseWait();
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
 			this.ui.setFocus(this.editor);

@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import { Container, Text, truncateToWidth } from "@pit/tui";
 import { spawn } from "child_process";
@@ -33,6 +34,12 @@ import {
 const bashSchema = Type.Object(
 	{
 		command: Type.String({ description: "Bash command to execute" }),
+		cwd: Type.Optional(
+			Type.String({
+				description:
+					"Working directory for this command — absolute, or relative to the session root. Defaults to the session root. Prefer this over a leading `cd …` so the command line stays clean.",
+			}),
+		),
 		timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
 	},
 	{ additionalProperties: false },
@@ -46,6 +53,10 @@ const BASH_KEY_ALIASES = {
 	script: "command",
 	shell: "command",
 	run: "command",
+	dir: "cwd",
+	directory: "cwd",
+	workdir: "cwd",
+	working_directory: "cwd",
 } as const;
 
 function prepareBashArguments(input: unknown): BashToolInput {
@@ -178,6 +189,16 @@ export type BashSpawnHook = (context: BashSpawnContext) => BashSpawnContext;
 function resolveSpawnContext(command: string, cwd: string, spawnHook?: BashSpawnHook): BashSpawnContext {
 	const baseContext: BashSpawnContext = { command, cwd, env: { ...getShellEnv() } };
 	return spawnHook ? spawnHook(baseContext) : baseContext;
+}
+
+/** Resolve the optional per-call `cwd` arg against the session root. Absolute
+ * paths are used verbatim; relative ones resolve against `baseCwd`; empty/missing
+ * falls back to `baseCwd`. Existence is validated downstream by the executor,
+ * which rejects with a clear "Working directory does not exist" error. */
+function resolveBashCwd(baseCwd: string, cwdArg?: string): string {
+	const trimmed = cwdArg?.trim();
+	if (!trimmed) return baseCwd;
+	return isAbsolute(trimmed) ? trimmed : resolvePath(baseCwd, trimmed);
 }
 
 export interface BashToolOptions {
@@ -440,19 +461,19 @@ export function createBashToolDefinition(
 		activity: (args) => classifyBashCommand(args.command),
 		description: `Execute a bash command in the current working directory. Use bash only for what no dedicated tool covers: build/test/install scripts, git, network requests, process management, shell pipelines/redirects. Prefer read/grep/find/ls/write/edit for file operations.
 
-Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BASH_MAX_BYTES / 1024}KB (whichever is hit first); full output is saved to a temp file when truncated. Pass one "command" string (join steps with " && "); each call runs in a fresh shell — no carried cwd or env, so use "cd /path && command" inline. Optional timeout in seconds.`,
+Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BASH_MAX_BYTES / 1024}KB (whichever is hit first); full output is saved to a temp file when truncated. Pass one "command" string (join steps with " && "); each call runs in a fresh shell with no carried state. To run somewhere other than the session root, set the "cwd" parameter instead of prefixing "cd /path &&" — it keeps the command line clean. Optional timeout in seconds.`,
 		promptSnippet: "Execute bash commands (build/test/git/network only; prefer read/grep/find/ls for files)",
 		parameters: bashSchema,
 		prepareArguments: prepareBashArguments,
 		async execute(
 			_toolCallId,
-			{ command, timeout }: { command: string; timeout?: number },
+			{ command, timeout, cwd: cwdArg }: { command: string; timeout?: number; cwd?: string },
 			signal?: AbortSignal,
 			onUpdate?,
 			_ctx?,
 		) {
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
-			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
+			const spawnContext = resolveSpawnContext(resolvedCommand, resolveBashCwd(cwd, cwdArg), spawnHook);
 			const output = new OutputAccumulator({
 				tempFilePrefix: "pi-bash",
 				maxLines: BASH_MAX_LINES,

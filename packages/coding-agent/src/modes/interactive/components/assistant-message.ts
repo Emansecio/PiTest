@@ -1,5 +1,14 @@
 import type { AssistantMessage } from "@pit/ai";
-import { Container, Markdown, type MarkdownTheme, Spacer, Text, type TUI, visibleWidth } from "@pit/tui";
+import {
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	Spacer,
+	Text,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "@pit/tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
@@ -10,13 +19,18 @@ import { ReadingColumn } from "./reading-column.ts";
 // is mid-thought with no answer yet.
 const THINKING_BREATH_MS = 1800;
 
-// Streaming smoothing (opt-in): instead of painting each provider burst whole,
-// the trailing block's text is revealed at a steady rate off the shared
+// Streaming smoothing (on by default): instead of painting each provider burst
+// whole, the trailing block's text is revealed at a steady rate off the shared
 // animation ticker. The cursor catches up to the streamed backlog in
 // ~REVEAL_CATCHUP_FRAMES frames so it never lags far behind on long bursts,
-// while a slow drip still advances at least REVEAL_MIN_STEP chars/frame.
+// while a slow drip still advances at least REVEAL_MIN_STEP chars/frame and a big
+// burst is capped to REVEAL_MAX_STEP so it eases in instead of snapping.
 const REVEAL_CATCHUP_FRAMES = 8; // ~130ms to absorb a burst at 60fps
 const REVEAL_MIN_STEP = 1;
+const REVEAL_MAX_STEP = 24; // ~1500 cps at 62fps — above any model's emit rate
+// Width (cols) of the dim→bright gradient drawn at the reveal wavefront so freshly
+// revealed text materializes softly instead of popping in at full brightness.
+const REVEAL_FADE_COLUMNS = 6;
 
 /**
  * Max width (in columns) for assistant prose. On wide terminals the body text
@@ -51,6 +65,40 @@ interface BlockComponentCacheEntry {
 	kind: "text" | "thinking";
 	markdown: Markdown;
 	component: ReadingColumn;
+}
+
+// Grapheme-aware splitter for the reveal-edge fade, so the gradient is applied
+// per cluster (never splitting a combining mark or emoji ZWJ sequence).
+const FADE_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/**
+ * Recolor the trailing text of a rendered line as a bright→dim gradient, landing
+ * on the real text edge (right padding is preserved untouched) and keeping the
+ * line's visible characters and width identical — only colors change, so callers
+ * that strip ANSI see no difference. The newest (rightmost) graphemes are dimmest,
+ * easing up to full brightness toward the settled text on the left. Falls back to a
+ * flat dim on non-truecolor terminals (interpolateFg returns undefined there).
+ */
+export function fadeLineTail(line: string): string {
+	const totalCols = visibleWidth(line);
+	if (totalCols === 0) return line;
+	const plain = stripAnsi(line);
+	const trimmed = plain.replace(/\s+$/, "");
+	const contentCols = visibleWidth(trimmed);
+	if (contentCols === 0) return line; // padding / blank only — nothing to fade
+	const graphemes = [...FADE_SEGMENTER.segment(trimmed)].map((s) => s.segment);
+	const k = Math.min(REVEAL_FADE_COLUMNS, graphemes.length);
+	const tailG = graphemes.slice(graphemes.length - k);
+	const tailCols = visibleWidth(tailG.join(""));
+	const head = truncateToWidth(line, Math.max(0, contentCols - tailCols), "");
+	let tail = "";
+	for (let i = 0; i < tailG.length; i++) {
+		const t = tailG.length <= 1 ? 1 : i / (tailG.length - 1); // left bright → right dim
+		const colorize = interpolateFg("text", "dim", t) ?? ((s: string) => theme.fg("dim", s));
+		tail += colorize(tailG[i]);
+	}
+	const pad = " ".repeat(Math.max(0, totalCols - contentCols));
+	return `${head}\x1b[0m${tail}${pad}`;
 }
 
 /**
@@ -140,6 +188,10 @@ export class AssistantMessageComponent extends Container {
 		if (this.hasToolCalls || lines.length === 0) {
 			return lines;
 		}
+
+		// Soft wavefront: while the trailing block is still revealing, fade its
+		// growing edge so freshly streamed text materializes instead of popping.
+		this.applyRevealEdgeFade(lines);
 
 		if (this.isDeliverable && this.hasVisibleTextBlock()) {
 			const glyph = this.deliverableEase ? this.deliverableEase.colorize("accent", "●") : theme.fg("accent", "●");
@@ -334,6 +386,21 @@ export class AssistantMessageComponent extends Container {
 		return text.slice(0, this.revealedChars);
 	}
 
+	/** Fade the wavefront line's trailing edge while the trailing block is still
+	 * revealing, so freshly revealed text eases in. No-op when smoothing is off or
+	 * the block is fully shown; only recolors — never alters the visible characters. */
+	private applyRevealEdgeFade(lines: string[]): void {
+		if (!this.smoothing || this.revealIndex < 0 || !this.lastMessage) return;
+		const target = this.blockTextLength(this.lastMessage, this.revealIndex);
+		if (this.revealedChars >= target) return; // settled — no live edge to fade
+		for (let i = lines.length - 1; i >= 0; i--) {
+			if (visibleWidth(lines[i]) > 0) {
+				lines[i] = fadeLineTail(lines[i]);
+				return;
+			}
+		}
+	}
+
 	private lastVisibleBlockIndex(message: AssistantMessage): number {
 		let idx = -1;
 		for (let i = 0; i < message.content.length; i++) {
@@ -393,7 +460,10 @@ export class AssistantMessageComponent extends Container {
 			return false; // already caught up — nothing changed this frame
 		}
 		const backlog = target - this.revealedChars;
-		const step = Math.max(REVEAL_MIN_STEP, Math.ceil(backlog / REVEAL_CATCHUP_FRAMES));
+		// Geometric catch-up (backlog/FRAMES) already eases out — the step shrinks as
+		// the cursor nears the tail. MAX caps the other end so a big burst eases in
+		// over a few frames instead of snapping; MIN keeps a slow drip moving.
+		const step = Math.min(REVEAL_MAX_STEP, Math.max(REVEAL_MIN_STEP, Math.ceil(backlog / REVEAL_CATCHUP_FRAMES)));
 		this.revealedChars = Math.min(target, this.revealedChars + step);
 		this.rebuildContent();
 		return true;

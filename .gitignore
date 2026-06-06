@@ -44,3 +44,6 @@ collect.sh
 RELATORIO-*.md
 pkglist.txt
 *.pre-cleanup.bak
+
+# Generated thumbnail cache (hyperframes presentation)
+hyperframes-pit-presentation/.thumbnails/

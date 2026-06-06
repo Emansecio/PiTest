@@ -76,6 +76,13 @@ export class Loader extends Text {
 	private startedAtMs = 0;
 	private lastElapsedSec = -1;
 	private coloredElapsed = "";
+	// When the turn blocks on the user (e.g. an `ask` picker is open), the clock
+	// is frozen rather than left running — the agent is waiting, not working, so
+	// counting that interval would misreport effort and pressure the user. The
+	// paused span is discounted from startedAtMs on resume, so the counter picks
+	// up exactly where it froze.
+	private elapsedPaused = false;
+	private pausedAtMs = 0;
 
 	constructor(
 		ui: TUI,
@@ -129,6 +136,24 @@ export class Loader extends Text {
 		this.updateDisplay();
 	}
 
+	/**
+	 * Freeze (or resume) the elapsed counter without resetting it — used while the
+	 * turn is blocked waiting on the user. Pausing holds the displayed value;
+	 * resuming discounts the paused span so the count continues uninterrupted
+	 * instead of jumping by the wait time.
+	 */
+	setElapsedPaused(paused: boolean): void {
+		if (paused === this.elapsedPaused) return;
+		this.elapsedPaused = paused;
+		if (paused) {
+			this.pausedAtMs = Date.now();
+		} else if (this.startedAtMs > 0) {
+			this.startedAtMs += Date.now() - this.pausedAtMs;
+			this.lastElapsedSec = -1;
+		}
+		this.updateDisplay();
+	}
+
 	private static formatElapsed(totalSec: number): string {
 		if (totalSec < 60) return `${totalSec}s`;
 		if (totalSec < 3600) {
@@ -154,6 +179,9 @@ export class Loader extends Text {
 			}
 			return false;
 		}
+		// While paused, hold the last rendered value (the agent is waiting on the
+		// user, so the clock should not advance).
+		if (this.elapsedPaused) return false;
 		const sec = Math.floor((Date.now() - this.startedAtMs) / 1000);
 		if (sec === this.lastElapsedSec) return false;
 		this.lastElapsedSec = sec;

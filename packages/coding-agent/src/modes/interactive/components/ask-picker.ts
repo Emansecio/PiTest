@@ -238,10 +238,15 @@ class AskPicker implements Component, Focusable {
 		if (this.req.header) {
 			lines.push(defaultTheme.fg("accent", truncateToWidth(`[${this.req.header}]`, width, "…")));
 		}
-		// Wrap the question instead of pushing it raw — a long single-line
-		// question would otherwise overflow `width` and crash TUI.doRender.
-		for (const line of wrapPlain(this.req.question, width)) {
-			lines.push(defaultTheme.bold(line));
+		// Inline pickers sit directly beneath the `ask` tool call line, which already
+		// renders the question — repeating it here is pure vertical duplication. An
+		// overlay covers the transcript, so it still needs to show the question.
+		// Wrap it (never push raw) or a long single-line question overflows `width`
+		// and crashes TUI.doRender.
+		if ((this.req.displayMode ?? "inline") !== "inline") {
+			for (const line of wrapPlain(this.req.question, width)) {
+				lines.push(defaultTheme.bold(line));
+			}
 		}
 		if (this.req.context) {
 			for (const line of wrapPlain(this.req.context, width)) {
@@ -255,19 +260,35 @@ class AskPicker implements Component, Focusable {
 		for (let i = 0; i < this.options.length; i++) {
 			const opt = this.options[i];
 			if (!opt) continue;
-			const cursor = i === this.index && this.mode === "list" ? "→ " : "  ";
+			const focused = i === this.index && this.mode === "list";
+			const cursor = focused ? "→ " : "  ";
 			const box = this.allowMultiple ? (this.checked.has(i) ? "[x] " : "[ ] ") : "";
-			const badge = opt.recommended ? RECOMMENDED_BADGE : "";
-			// Clamp the head (cursor + box + label + badge) to the terminal width first;
-			// a long label must never push the rendered line past `width`.
-			const head = truncateToWidth(`${cursor}${box}${opt.label}${badge}`, width, "…");
-			const row = i === this.index && this.mode === "list" ? defaultTheme.fg("accent", head) : head;
-			// Budget the description against what is left after the head (+2 for the gap),
-			// so `head  desc` stays within `width`. Drop it if there is no room.
-			const descBudget = width - visibleWidth(head) - 2;
-			if (opt.description && descBudget >= 10) {
-				const desc = truncateToWidth(opt.description.replace(/\s+/g, " ").trim(), descBudget, "");
-				lines.push(`${row}  ${defaultTheme.fg("muted", desc)}`);
+			// Pre-color the badge (it marks the default pick) and reserve its width
+			// separately, so clamping the head never eats into it.
+			const badge = opt.recommended ? defaultTheme.fg("gutterToolSuccess", RECOMMENDED_BADGE) : "";
+			const head =
+				truncateToWidth(`${cursor}${box}${opt.label}`, Math.max(0, width - visibleWidth(badge)), "…") + badge;
+			const row = focused ? defaultTheme.fg("accent", head) : head;
+			const desc = opt.description?.replace(/\s+/g, " ").trim();
+			if (focused && desc) {
+				// Detail pane: the focused option shows its full description wrapped and
+				// indented, so the choice under the cursor is never clipped — and the
+				// recommended row (focused by default) no longer loses its description to
+				// the badge eating the line width.
+				lines.push(row);
+				const indent = "    ";
+				for (const line of wrapPlain(desc, Math.max(10, width - indent.length))) {
+					lines.push(defaultTheme.fg("muted", `${indent}${line}`));
+				}
+			} else if (desc) {
+				// Unfocused rows keep the description inline but clip with an ellipsis,
+				// so a mid-word cut never reads as a finished sentence.
+				const descBudget = width - visibleWidth(head) - 2;
+				if (descBudget >= 10) {
+					lines.push(`${row}  ${defaultTheme.fg("muted", truncateToWidth(desc, descBudget, "…"))}`);
+				} else {
+					lines.push(row);
+				}
 			} else {
 				lines.push(row);
 			}

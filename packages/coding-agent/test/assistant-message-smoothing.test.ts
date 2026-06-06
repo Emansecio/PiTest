@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@pit/ai";
-import type { TUI } from "@pit/tui";
+import { type TUI, visibleWidth } from "@pit/tui";
 import { beforeAll, describe, expect, it } from "vitest";
-import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
+import { AssistantMessageComponent, fadeLineTail } from "../src/modes/interactive/components/assistant-message.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
 
@@ -88,5 +88,47 @@ describe("assistant message streaming smoothing", () => {
 			tui.tick(guard * 16);
 		}
 		expect(rendered(comp).length).toBeGreaterThanOrEqual(prev);
+	});
+
+	it("keeps the reveal correct while the wavefront edge is faded (#3)", () => {
+		const tui = new ControllableTui();
+		const comp = build(tui, true);
+		comp.updateContent(textMsg(`HELLO ${"w".repeat(40)} WORLD`));
+
+		tui.tick(16); // one frame in: a few chars revealed, capped step
+		const mid = comp.render(120).join("\n");
+		expect(stripAnsi(mid)).not.toContain("WORLD"); // still revealing
+		expect(mid).toContain("\x1b"); // colored output (markdown + edge fade)
+
+		let guard = 0;
+		while (tui.animating && guard++ < 1000) tui.tick(guard * 16);
+		expect(stripAnsi(comp.render(120).join("\n"))).toContain("WORLD"); // settled & complete
+	});
+});
+
+describe("reveal edge fade (fadeLineTail)", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	it("preserves the visible text and width, only recoloring the tail", () => {
+		const line = "hello brave new world";
+		const out = fadeLineTail(line);
+		expect(stripAnsi(out)).toBe(line); // characters unchanged
+		expect(visibleWidth(out)).toBe(visibleWidth(line)); // width unchanged
+		expect(out).not.toBe(line); // the tail was recolored
+		expect(out.length).toBeGreaterThan(line.length); // ANSI was added
+	});
+
+	it("fades the text edge, leaving right padding intact", () => {
+		const padded = `short line${" ".repeat(10)}`;
+		const out = fadeLineTail(padded);
+		expect(stripAnsi(out)).toBe(padded); // text + padding both intact
+		expect(visibleWidth(out)).toBe(visibleWidth(padded));
+	});
+
+	it("is a no-op on blank / padding-only lines", () => {
+		expect(fadeLineTail("     ")).toBe("     ");
+		expect(fadeLineTail("")).toBe("");
 	});
 });

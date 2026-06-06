@@ -312,7 +312,7 @@ export interface Settings {
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	cursorBlink?: boolean; // Blink the input editor's block cursor while focused (default: true)
-	streamingSmoothing?: boolean; // Reveal streamed assistant text at a steady rate instead of in provider-sized bursts (default: false)
+	streamingSmoothing?: boolean; // Reveal streamed assistant text at a steady rate instead of in provider-sized bursts (default: true)
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
@@ -1442,7 +1442,7 @@ export class SettingsManager {
 	}
 
 	getStreamingSmoothing(): boolean {
-		return this.settings.streamingSmoothing ?? false;
+		return this.settings.streamingSmoothing ?? true;
 	}
 
 	setStreamingSmoothing(enabled: boolean): void {

@@ -1,7 +1,7 @@
 import assert from "node:assert";
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
-import { deleteKittyImage, encodeKitty } from "../src/terminal-image.js";
+import { deleteKittyImage, encodeKitty, resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.js";
 import { type Component, TUI } from "../src/tui.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
@@ -65,6 +65,14 @@ function getCellItalic(terminal: VirtualTerminal, row: number, col: number): num
 }
 
 describe("TUI Kitty image cleanup", () => {
+	// These tests inject Kitty image sequences directly. In production those
+	// sequences are only ever emitted when the terminal advertises the Kitty
+	// image protocol (see image.ts), and TUI's per-line image-id scan is now
+	// gated on that capability (extractKittyImageIds) — so declare it here to
+	// exercise the real cleanup path instead of relying on the host's terminal.
+	beforeEach(() => setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true }));
+	afterEach(() => resetCapabilitiesCache());
+
 	it("deletes changed image ids before drawing moved placements", async () => {
 		const terminal = new LoggingVirtualTerminal(40, 10);
 		const tui = new TUI(terminal);

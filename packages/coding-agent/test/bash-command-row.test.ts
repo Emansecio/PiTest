@@ -97,4 +97,22 @@ describe("clampBashCommandRow", () => {
 		const row = clampBashCommandRow({ command: "echo hi", width: 0, colorKey: "bashMode" });
 		expect(visibleWidth(row)).toBe(0);
 	});
+
+	it("collapses a long leading `cd <path> &&` so the real command stays visible", () => {
+		const command = `cd "C:/Users/User/Desktop/Projetos Vibe Coding/Projeto Fitness" && grep -rli "segunda" .`;
+		const row = stripAnsi(clampBashCommandRow({ command, width: 80, colorKey: "toolTitle" }));
+		// The absolute path is shortened to its tail…
+		expect(row).toContain("…/Projeto Fitness");
+		expect(row).not.toContain("C:/Users/User/Desktop");
+		// …and the actual command survives instead of being clipped off-screen.
+		expect(row).toContain("grep -rli");
+	});
+
+	it("leaves a short `cd` path and a command without `cd` untouched", () => {
+		const short = stripAnsi(clampBashCommandRow({ command: "cd src && ls", width: 80, colorKey: "toolTitle" }));
+		expect(short).toContain("$ cd src && ls");
+		const plain = stripAnsi(clampBashCommandRow({ command: "grep -rn foo .", width: 80, colorKey: "toolTitle" }));
+		expect(plain).toContain("$ grep -rn foo .");
+		expect(plain).not.toContain("…");
+	});
 });

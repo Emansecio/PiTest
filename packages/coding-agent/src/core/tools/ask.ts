@@ -39,7 +39,7 @@ const askSchema = Type.Object(
 		),
 		header: Type.Optional(
 			Type.String({
-				description: "Short chip label rendered above the question. Max 16 chars.",
+				description: "Short chip label rendered above the question. Max 24 chars.",
 			}),
 		),
 		options: Type.Optional(
@@ -111,7 +111,7 @@ export interface AskToolOptions {
 	bindTimeoutMs?: number;
 }
 
-const HEADER_MAX = 16;
+const HEADER_MAX = 24;
 const LABEL_MAX = 60;
 
 function trimToMax(value: string, max: number): string {
@@ -141,7 +141,7 @@ export function createAskToolDefinition(
 			"Provide up to 8 short, mutually exclusive options, or omit options for a freeform-only question.",
 			"Set allowMultiple when several options can be picked together; set allowFreeform to also accept a typed answer.",
 			"Mark at most one option as recommended; in non-interactive runs that one is picked automatically.",
-			"Keep question, context, header (≤16 chars), and option labels (≤60 chars) terse.",
+			"Keep question, context, header (≤24 chars), and option labels (≤60 chars) terse.",
 		],
 		parameters: askSchema,
 		async execute(toolCallId: string, input: AskToolInput) {

@@ -127,6 +127,28 @@ describe("ToolExecutionComponent parity", () => {
 		await promise;
 	});
 
+	test("bash cwd arg: absent falls back to session root, absolute is verbatim, relative resolves against root", async () => {
+		const seen: string[] = [];
+		const operations: BashOperations = {
+			exec: async (_command, cwd) => {
+				seen.push(cwd);
+				return { exitCode: 0 };
+			},
+		};
+		const root = process.cwd();
+		const tool = createBashToolDefinition(root, { operations });
+		const run = (args: { command: string; cwd?: string }) =>
+			tool.execute("tool-bash-cwd", args, undefined, undefined, {} as never);
+
+		await run({ command: "pwd" });
+		await run({ command: "pwd", cwd: resolve(root, "sub") });
+		await run({ command: "pwd", cwd: "sub/dir" });
+
+		expect(seen[0]).toBe(root);
+		expect(seen[1]).toBe(resolve(root, "sub"));
+		expect(seen[2]).toBe(resolve(root, "sub/dir"));
+	});
+
 	test("does not duplicate built-in headers when passed the active built-in definition", () => {
 		const component = new ToolExecutionComponent(
 			"read",

@@ -126,7 +126,10 @@ describe("ask picker", () => {
 		// raw by renderHeader and overflow `width`, crashing TUI.doRender.
 		const width = 60;
 		const { component } = createAskPicker(
+			// Overlay mode renders the question (inline mode defers it to the call line),
+			// so exercise the long-question clamp here.
 			makeReq({
+				displayMode: "overlay",
 				header: "h".repeat(120),
 				question: `Como tratar o ${"fade-in ".repeat(40)}de blocos do P5?`,
 				options: [{ label: "Sim" }, { label: "Não" }],
@@ -138,9 +141,15 @@ describe("ask picker", () => {
 		}
 	});
 
-	it("renders question, options, multi checkboxes and a freeform row", () => {
+	it("overlay mode renders question, options, multi checkboxes and a freeform row", () => {
 		const out = drive(
-			makeReq({ allowMultiple: true, allowFreeform: true, header: "scope", context: "pick carefully" }),
+			makeReq({
+				displayMode: "overlay",
+				allowMultiple: true,
+				allowFreeform: true,
+				header: "scope",
+				context: "pick carefully",
+			}),
 		).render();
 		expect(out).toContain("[scope]");
 		expect(out).toContain("Which one?");
@@ -148,5 +157,34 @@ describe("ask picker", () => {
 		expect(out).toContain("[ ] Alpha");
 		expect(out).toContain("Type a custom answer");
 		expect(out).toContain("space to toggle");
+	});
+
+	it("inline mode omits the question (the ask call line already shows it) but keeps header, context and options", () => {
+		const out = drive(makeReq({ header: "scope", context: "pick carefully" })).render();
+		expect(out).toContain("[scope]");
+		expect(out).toContain("pick carefully");
+		expect(out).toContain("Alpha");
+		expect(out).not.toContain("Which one?");
+	});
+
+	it("focused option shows its full description; an unfocused one clips with an ellipsis", () => {
+		const desc = `protege a articulação do joelho de carga acumulada ${"rápido demais ".repeat(4)}na readaptação`;
+		const out = drive(
+			makeReq({
+				options: [
+					{ label: "Recomp", description: desc, recommended: true },
+					{ label: "Bulk", description: desc },
+				],
+			}),
+		).render(80);
+		// The recommended row is focused by default → its description is shown in full.
+		expect(out).toContain("readaptação");
+		// The unfocused row clips its description, so the cut is marked with an ellipsis.
+		expect(out).toContain("…");
+	});
+
+	it("renders the recommended badge", () => {
+		const out = drive(makeReq({ options: [{ label: "Alpha", recommended: true }, { label: "Beta" }] })).render();
+		expect(out).toContain("(recommended)");
 	});
 });

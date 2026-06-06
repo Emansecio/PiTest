@@ -135,6 +135,14 @@ describe("bash tool: prepareArguments aliases", () => {
 			commands: ["a", "b"],
 		});
 	});
+
+	it("normalizes dir/directory/workdir/working_directory -> cwd", () => {
+		const def = createBashToolDefinition(dir);
+		expect(def.prepareArguments!({ command: "ls", dir: "/p" })).toEqual({ command: "ls", cwd: "/p" });
+		expect(def.prepareArguments!({ command: "ls", directory: "/p" })).toEqual({ command: "ls", cwd: "/p" });
+		expect(def.prepareArguments!({ command: "ls", workdir: "/p" })).toEqual({ command: "ls", cwd: "/p" });
+		expect(def.prepareArguments!({ command: "ls", working_directory: "/p" })).toEqual({ command: "ls", cwd: "/p" });
+	});
 });
 
 describe("grep/find/ls tools: prepareArguments path aliases", () => {

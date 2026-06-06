@@ -62,6 +62,13 @@ export function assertComponentWidth(component: Component, lines: string[], widt
 }
 
 function extractKittyImageIds(line: string): number[] {
+	// Kitty placeholder sequences only exist under the Kitty image protocol. On
+	// every other terminal (Windows Terminal, VSCode, iTerm2, tmux, unknown) no
+	// rendered line can contain them, so skip the full-line scan entirely. This
+	// runs once per line on every render path (collect/expand/delete), so the
+	// guard removes an O(total chars) pass per frame on non-Kitty terminals.
+	// getCapabilities() is cached → O(1).
+	if (getCapabilities().images !== "kitty") return [];
 	const sequenceStart = line.indexOf(KITTY_SEQUENCE_PREFIX);
 	if (sequenceStart === -1) return [];
 
@@ -949,11 +956,22 @@ export class TUI extends Container {
 	}
 
 	private static readonly SEGMENT_RESET = "\x1b[0m\x1b]8;;\x07";
-	private static readonly RESET_CACHE_MAX = 4096;
+	// Floor for the per-line reset cache; the live cap scales with the frame (see
+	// applyLineResets) so a transcript longer than this floor still gets ~100%
+	// hits instead of evicting its own head every frame.
+	private static readonly RESET_CACHE_MIN = 4096;
+	// Hard ceiling so the cache can't grow without bound on an enormous transcript.
+	private static readonly RESET_CACHE_HARD_MAX = 1 << 16; // 65536 lines
 
 	private applyLineResets(lines: string[]): string[] {
 		const reset = TUI.SEGMENT_RESET;
 		const cache = this.resetCache;
+		// Scale the cap with the current frame. In-order re-insertion each frame
+		// means a fixed cap smaller than the transcript would evict exactly the
+		// head lines we re-read first next frame → 0% hit-rate and a full
+		// per-frame string recompute. 2× headroom absorbs the few lines that
+		// actually change per frame; the hard max bounds memory.
+		const cap = Math.min(TUI.RESET_CACHE_HARD_MAX, Math.max(TUI.RESET_CACHE_MIN, lines.length * 2));
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
 			if (isImageLine(line)) continue;
@@ -963,7 +981,7 @@ export class TUI extends Container {
 				continue;
 			}
 			const normalized = normalizeTerminalOutput(line) + reset;
-			if (cache.size >= TUI.RESET_CACHE_MAX) {
+			if (cache.size >= cap) {
 				// FIFO eviction: drop the oldest insertion. Map iteration is insertion-ordered.
 				const oldest = cache.keys().next().value;
 				if (oldest !== undefined) cache.delete(oldest);
@@ -972,6 +990,15 @@ export class TUI extends Container {
 			lines[i] = normalized;
 		}
 		return lines;
+	}
+
+	/**
+	 * Number of entries currently held in the per-line reset cache. Test-only
+	 * observability: lets a regression guard assert the cache scales with the
+	 * transcript (so a long session keeps ~100% hit-rate instead of thrashing).
+	 */
+	getResetCacheSizeForTest(): number {
+		return this.resetCache.size;
 	}
 
 	private collectKittyImageIds(lines: string[]): Set<number> {
