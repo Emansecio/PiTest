@@ -89,9 +89,9 @@ describe("NavGroupComponent", () => {
 		expect(out[0]).not.toContain("Did");
 	});
 
-	test("uses a heavy check glyph", () => {
+	test("uses a check glyph", () => {
 		const g = new NavGroupComponent(fakeTui());
 		g.addCall(resolved(navExec("read", "1", { file_path: "a" })));
-		expect(g.render(120)[0]).toContain("✔");
+		expect(g.render(120)[0]).toContain("✓");
 	});
 });

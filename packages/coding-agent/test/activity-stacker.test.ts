@@ -81,7 +81,9 @@ describe("ActivityStacker", () => {
 		stacker.placeCall(navExec());
 		stacker.placeCall(actionExec());
 		stacker.placeCall(navExec());
-		expect(added).toEqual(["NavGroupComponent", "ActivityLineComponent", "NavGroupComponent"]);
+		// A blank Spacer separates consecutive activity blocks (folded nav calls
+		// stay tight inside their NavGroup).
+		expect(added).toEqual(["NavGroupComponent", "Spacer", "ActivityLineComponent", "Spacer", "NavGroupComponent"]);
 	});
 
 	it("ask/resolve are not placed in the activity stream", () => {

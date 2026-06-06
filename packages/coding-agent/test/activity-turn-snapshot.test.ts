@@ -86,6 +86,7 @@ describe("full-turn Amp-layout snapshot", () => {
 		const names = chat.map((c) => c.constructor.name);
 		expect(names).toEqual([
 			"NavGroupComponent",
+			"Spacer",
 			"ActivityLineComponent",
 			"AssistantMessageComponent",
 			"NavGroupComponent",

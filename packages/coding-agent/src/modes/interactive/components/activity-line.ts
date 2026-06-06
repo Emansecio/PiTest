@@ -12,7 +12,7 @@ const TASK_LABEL_MAX = 40;
 
 type LineState = "pending" | "success" | "error";
 
-const ICON_SUCCESS = "✔︎"; // heavy check, text presentation
+const ICON_SUCCESS = "✓"; // light check (U+2713), renders 1 cell — consistent with the rest of the UI
 const ICON_ERROR = "✗";
 
 /** One action call on its own verb-led line. No gutter — the state icon frames
@@ -75,18 +75,13 @@ export class ActivityLineComponent extends Container {
 	}
 
 	private icon(state: LineState): string {
-		// Uniform 2-cell icon slot. ICON_SUCCESS (✔︎) renders 2 cells in emoji-
-		// presentation terminals, while the spinner and ✗ render 1 — pad the narrow
-		// glyphs with a trailing space so the icon slot is a consistent width. This
-		// keeps a visible gap before the label and stops the label from shifting a
-		// column when the spinner settles into ✔/✗.
-		if (state === "pending") return `${theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0])} `;
+		// All state glyphs (spinner, ✓, ✗) render a single cell, matching the width
+		// model — so the header's single space shows cleanly and the label never
+		// shifts column when the spinner settles.
+		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
 		const glyph = state === "error" ? ICON_ERROR : ICON_SUCCESS;
 		const steady: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
-		// Trailing space on every state. With the header's own space that yields two
-		// columns after the glyph, so the wide ✔︎ (drawn 2 cells while the width model
-		// counts 1) still leaves one visible space before the label.
-		return `${this.iconEase.colorize(steady, glyph)} `;
+		return this.iconEase.colorize(steady, glyph);
 	}
 
 	private target(width: number): string {
