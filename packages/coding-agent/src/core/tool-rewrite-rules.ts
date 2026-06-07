@@ -308,7 +308,7 @@ const tier2Rules: ToolRewriteRule[] = [
 		},
 		action: suggestUseTool(
 			"grep",
-			"grep({ pattern: <regex>, paths: [<path>, ...] }) — see tool description for full options",
+			"grep({ pattern: <regex>, path: <dir-or-file> }) — see tool description for full options",
 		),
 	},
 	{
@@ -322,7 +322,7 @@ const tier2Rules: ToolRewriteRule[] = [
 			if (!argv) return false;
 			return argv.length > 0 && (argv[0] === "find" || argv[0] === "fd");
 		},
-		action: suggestUseTool("find", "find({ paths: [<glob>] }) — globs like '**/*.ts' instead of `find . -name`"),
+		action: suggestUseTool("find", "find({ pattern: <glob> }) — globs like '**/*.ts' instead of `find . -name`"),
 	},
 	{
 		// bash("ls ..." | "dir ...") → ls tool. Plain `ls` only — `ls -la` etc.

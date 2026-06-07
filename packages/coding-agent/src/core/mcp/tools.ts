@@ -6,6 +6,7 @@
 import type { TSchema } from "typebox";
 import { Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { collapseRepeatedLines, DEFAULT_MAX_BYTES, formatSize, truncateHead } from "../tools/truncate.ts";
 import type { McpManager } from "./manager.ts";
 import type { McpCallToolResult, McpToolSchema } from "./types.ts";
 
@@ -32,12 +33,26 @@ interface FlattenedContent {
 	isError: boolean;
 }
 
+/**
+ * Cap an MCP text block before it enters the context. MCP is the only tool-output
+ * surface without a built-in ceiling — a single large return (page fetch, SQL
+ * dump, network log) would otherwise persist verbatim in every subsequent turn
+ * until compaction. Mirror the native tools: collapse identical repeated lines
+ * (lossless) then truncate to DEFAULT_MAX_BYTES, exactly like read/grep do.
+ */
+function capMcpText(text: string): string {
+	const collapsed = collapseRepeatedLines(text);
+	const truncation = truncateHead(collapsed, { maxBytes: DEFAULT_MAX_BYTES });
+	if (!truncation.truncated) return collapsed;
+	return `${truncation.content}\n\n[MCP output truncated: ${formatSize(DEFAULT_MAX_BYTES)} limit, ${truncation.totalLines} lines total — refine the query for the rest]`;
+}
+
 function flattenMcpContent(result: McpCallToolResult): FlattenedContent {
 	const isError = result.isError ?? false;
 	const blocks: FlattenedContent["content"] = [];
 	for (const block of result.content) {
 		if (block.type === "text") {
-			blocks.push({ type: "text", text: block.text });
+			blocks.push({ type: "text", text: capMcpText(block.text) });
 			continue;
 		}
 		if (block.type === "image") {
@@ -45,7 +60,7 @@ function flattenMcpContent(result: McpCallToolResult): FlattenedContent {
 			continue;
 		}
 		if (block.type === "resource" && block.resource.text) {
-			blocks.push({ type: "text", text: `[Resource ${block.resource.uri}]\n${block.resource.text}` });
+			blocks.push({ type: "text", text: capMcpText(`[Resource ${block.resource.uri}]\n${block.resource.text}`) });
 		}
 	}
 	if (blocks.length === 0) {

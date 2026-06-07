@@ -231,14 +231,46 @@ export function fingerprintToolArgs(args: unknown, maxChars = 200): string {
 	return `${serialized.slice(0, maxChars)}…`;
 }
 
+/**
+ * Collision-resistant fingerprint for doom-loop detection. Unlike
+ * {@link fingerprintToolArgs} — which caps each string value and the total
+ * length for readable telemetry — this hashes the FULL stable serialization, so
+ * two distinct calls that merely share a long common prefix (e.g. two different
+ * `git log … <ref>` bash commands, or two long `node -e` scripts) do NOT
+ * collapse into the same bucket and trigger a false consecutive-loop streak. The
+ * hash also keeps the ring-buffer key small regardless of argument size.
+ */
+export function fingerprintToolArgsExact(args: unknown): string {
+	let serialized: string;
+	try {
+		serialized = stableStringify(args, Number.POSITIVE_INFINITY);
+	} catch {
+		serialized = String(args);
+	}
+	return hashString(serialized);
+}
+
+/**
+ * FNV-1a 32-bit hash, hex-encoded. Dependency-free and ample for distinguishing
+ * tool-call argument sets within the 16-slot doom-loop ring buffer.
+ */
+function hashString(input: string): string {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < input.length; i++) {
+		hash ^= input.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0).toString(16);
+}
+
 const STRING_VALUE_CAP = 100;
 
-function stableStringify(value: unknown): string {
+function stableStringify(value: unknown, stringValueCap = STRING_VALUE_CAP): string {
 	const seen = new WeakSet<object>();
 	const visit = (input: unknown): unknown => {
 		if (input === null || typeof input !== "object") {
-			if (typeof input === "string" && input.length > STRING_VALUE_CAP) {
-				return `${input.slice(0, STRING_VALUE_CAP)}…`;
+			if (typeof input === "string" && input.length > stringValueCap) {
+				return `${input.slice(0, stringValueCap)}…`;
 			}
 			return input;
 		}

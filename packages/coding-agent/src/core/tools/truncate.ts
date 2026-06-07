@@ -10,6 +10,12 @@
 
 export const DEFAULT_MAX_LINES = 2000;
 export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
+// Safety-net ceiling applied generically in wrapToolDefinition to every tool
+// result. Set well above the 50KB per-tool cap (read/grep/lsp/mcp use
+// DEFAULT_MAX_BYTES) so tools that already truncate — and their own truncation
+// notes — are never re-cut; this only catches tool outputs with no cap of their
+// own (many extensions and some MCP returns).
+export const TOOL_OUTPUT_HARD_CAP_BYTES = 64 * 1024; // 64KB
 export const GREP_MAX_LINE_LENGTH = 500; // Max chars per grep match line
 
 // Bash gets a tighter budget than file reads: command output (build/test logs,

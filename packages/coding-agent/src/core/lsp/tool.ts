@@ -12,6 +12,7 @@ import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { resolveToCwd } from "../tools/path-utils.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
+import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "../tools/truncate.ts";
 import { ensureFileOpen, getOrCreateClient, killClient, sendRequest, waitForProjectLoaded } from "./client.ts";
 import { getServerForFile } from "./config.ts";
 import { applyWorkspaceEdit } from "./edits.ts";
@@ -433,7 +434,11 @@ export function createLspToolDefinition(
 										...plainLines,
 									]
 								: contextualLines;
-							output = `Found ${result.length} reference(s):\n${lines.join("\n")}`;
+							const refsOutput = `Found ${result.length} reference(s):\n${lines.join("\n")}`;
+							const refsTruncation = truncateHead(refsOutput, { maxBytes: DEFAULT_MAX_BYTES });
+							output = refsTruncation.truncated
+								? `${refsTruncation.content}\n\n[references truncated at ${refsTruncation.outputLines} of ${refsTruncation.totalLines} lines (${formatSize(DEFAULT_MAX_BYTES)} limit); refine with grep or a narrower scope]`
+								: refsOutput;
 						}
 						break;
 					}

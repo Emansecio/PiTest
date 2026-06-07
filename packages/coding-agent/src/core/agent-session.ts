@@ -150,7 +150,13 @@ import { buildStagnationReminder, classifyTurn, decideStagnationReminder, Stagna
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { setCurrentTodoManager, type TodoItem, TodoManager, type TodoState } from "./todo/todo-manager.ts";
 import { buildDoomLoopReminder, buildToolErrorReflection, decideErrorReflection } from "./tool-call-feedback.js";
-import { extractErrorMessage, fingerprintToolArgs, ToolCallStats, type ToolStat } from "./tool-call-stats.js";
+import {
+	extractErrorMessage,
+	fingerprintToolArgs,
+	fingerprintToolArgsExact,
+	ToolCallStats,
+	type ToolStat,
+} from "./tool-call-stats.js";
 import {
 	createToolDiscoveryIndex,
 	getCurrentToolDiscoveryIndex,
@@ -1234,7 +1240,7 @@ export class AgentSession {
 	}
 
 	private _handleToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
-		this._toolCallStats.recordInvocation(event.toolName, fingerprintToolArgs(event.args));
+		this._toolCallStats.recordInvocation(event.toolName, fingerprintToolArgsExact(event.args));
 		this._toolCallArgsByCallId.set(event.toolCallId, event.args);
 		this._maybeInjectDoomLoopReminder(event.toolName, event.args);
 	}
@@ -1494,7 +1500,6 @@ export class AgentSession {
 				`Doom loop abort: ${consecutiveCount} consecutive identical calls to "${toolName}". ` +
 					`The model cannot make progress on this task. Aborting turn.`,
 			);
-			(error as any).isDoomLoopAbort = true;
 			throw error;
 		}
 

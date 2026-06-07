@@ -2352,6 +2352,16 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * Strip a slash-command name from the front of the input and trim, e.g.
+	 * `_stripSlashArg("/goal pausar", "/goal") === "pausar"`. Replaces the
+	 * per-command `text.slice(<magic length>)` offsets that duplicated each
+	 * command name as a number and silently broke a character on rename.
+	 */
+	private static _stripSlashArg(text: string, command: string): string {
+		return text.slice(command.length).trim();
+	}
+
+	/**
 	 * Dispatch slash commands. Commands with arguments use startsWith;
 	 * exact-match commands use a lookup table.
 	 * @returns true if a command was handled
@@ -2360,7 +2370,9 @@ export class InteractiveMode {
 		// Commands that accept arguments (need prefix matching)
 		if (text === "/model" || text.startsWith("/model ")) {
 			this.editor.setText("");
-			await this.handleModelCommand(text.startsWith("/model ") ? text.slice(7).trim() : undefined);
+			await this.handleModelCommand(
+				text.startsWith("/model ") ? InteractiveMode._stripSlashArg(text, "/model") : undefined,
+			);
 			return true;
 		}
 		if (text === "/name" || text.startsWith("/name ")) {
@@ -2370,22 +2382,26 @@ export class InteractiveMode {
 		}
 		if (text === "/compact" || text.startsWith("/compact ")) {
 			this.editor.setText("");
-			await this.handleCompactCommand(text.startsWith("/compact ") ? text.slice(9).trim() : undefined);
+			await this.handleCompactCommand(
+				text.startsWith("/compact ") ? InteractiveMode._stripSlashArg(text, "/compact") : undefined,
+			);
 			return true;
 		}
 		if (text === "/ttsr" || text.startsWith("/ttsr ")) {
 			this.editor.setText("");
-			this.handleTTSRCommand(text === "/ttsr" ? "" : text.slice(6).trim());
+			this.handleTTSRCommand(text === "/ttsr" ? "" : InteractiveMode._stripSlashArg(text, "/ttsr"));
 			return true;
 		}
 		if (text === "/hindsight" || text.startsWith("/hindsight ")) {
 			this.editor.setText("");
-			await this.handleHindsightCommand(text === "/hindsight" ? "" : text.slice(11).trim());
+			await this.handleHindsightCommand(
+				text === "/hindsight" ? "" : InteractiveMode._stripSlashArg(text, "/hindsight"),
+			);
 			return true;
 		}
 		if (text === "/goal" || text.startsWith("/goal ")) {
 			this.editor.setText("");
-			await this.handleGoalCommand(text === "/goal" ? "" : text.slice(6).trim());
+			await this.handleGoalCommand(text === "/goal" ? "" : InteractiveMode._stripSlashArg(text, "/goal"));
 			return true;
 		}
 		if (text === "/todos") {

@@ -45,7 +45,7 @@ const bashSchema = Type.Object(
 		timeout: Type.Optional(
 			Type.Number({
 				description:
-					"Timeout em segundos. Sem timeout (ou 0) o comando roda até terminar. Para servidores e processos longos, rode em segundo plano (`cmd &`, `nohup cmd &`, `disown`) em vez de deixá-los segurando o shell. Nunca deixe sem timeout um comando que possa bloquear esperando input interativo.",
+					"Timeout in seconds. Without a timeout (or 0) the command runs to completion. For servers and long-running processes, run them in the background (`cmd &`, `nohup cmd &`, `disown`) instead of holding the shell. Never leave a command that may block on interactive input without a timeout.",
 			}),
 		),
 	},
