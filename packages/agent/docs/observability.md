@@ -4,7 +4,7 @@
 
 ## Goal
 
-Make `packages/ai` and `packages/agent`/harness observable without depending on OpenTelemetry, Sentry, or any APM vendor.
+Make `packages/ai` and `packages/agent` observable without depending on OpenTelemetry, Sentry, or any APM vendor.
 
 Pit should emit stable, structured lifecycle events. External listeners can convert those events into OTel spans, Sentry spans, logs, metrics, or custom telemetry.
 
@@ -45,8 +45,8 @@ JavaScript has one event loop but multiple async chains can interleave. A single
 
 ```ts
 await Promise.all([
-  runWithPiContext({ userId: "alice" }, () => harness.prompt("A")),
-  runWithPiContext({ userId: "bob" }, () => harness.prompt("B")),
+  runWithPiContext({ userId: "alice" }, () => agent.prompt("A")),
+  runWithPiContext({ userId: "bob" }, () => agent.prompt("B")),
 ]);
 ```
 
@@ -191,16 +191,13 @@ pit.session.write
 
 ## Minimal instrumentation points
 
-### packages/agent
+### packages/agent (core loop)
 
-Wrap:
+Wrap the core agent lifecycle:
 
-- `AgentHarness.prompt()`
-- `AgentHarness.skill()`
-- `AgentHarness.promptFromTemplate()`
-- `AgentHarness.compact()`
-- `AgentHarness.navigateTree()`
-- `Session.appendTypedEntry()` or storage append facade
+- `Agent.prompt()` / `Agent.continue()`
+- the per-turn loop in `runAgentLoop` (one `pit.agent.turn` span per model turn)
+- tool execution in `executeToolCalls` (one `pit.agent.tool_call` span per call)
 
 Example:
 
@@ -208,15 +205,24 @@ Example:
 return traceOperation(
   "pit.agent.prompt",
   {
-    sessionId: turnState.sessionId,
-    provider: turnState.model.provider,
-    model: turnState.model.id,
+    sessionId: this.sessionId,
+    provider: this._state.model.provider,
+    model: this._state.model.id,
     promptLength: text.length,
-    imageCount: options?.images?.length ?? 0,
   },
-  () => this.executeTurn(turnState, text, options),
+  () => this.runPromptMessages(messages),
 );
 ```
+
+### packages/coding-agent (session + skills)
+
+Session persistence, compaction, branch navigation, skills and prompt
+templates live in the app layer (the core `Agent` is loop-only), so instrument
+them there:
+
+- `SessionManager.appendMessage()` / append facade → `pit.agent.session.append_entry`
+- compaction and branch navigation in `agent-session.ts` → `pit.agent.compaction` / `pit.agent.branch_navigation`
+- skill and prompt-template dispatch → `pit.agent.skill` / `pit.agent.prompt_template`
 
 Session write:
 
@@ -313,7 +319,7 @@ await runWithPiContext(
     orgId: "acme",
     region: "eu",
   },
-  () => harness.prompt("fix this"),
+  () => agent.prompt("fix this"),
 );
 ```
 
