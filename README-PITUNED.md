@@ -1,6 +1,6 @@
 # PiTuned
 
-Personal fork of [pi-mono](https://github.com/earendil-works/pi-mono) tuned for
+Personal fork of pi-mono tuned for
 local interactive use. Focus: faster startup, faster agent loop, better
 prompt/tool-call quality. No public API changes — runs as a drop-in replacement
 for stock `pit`.

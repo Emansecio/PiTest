@@ -9,22 +9,46 @@ interface MakeFooterOptions {
 	permissions?: string | null;
 	autoCompact?: boolean;
 	extra?: Map<string, string>;
+	/** Simulate a subscription (OAuth) model so the `(sub)` tag can appear. */
+	usingOAuth?: boolean;
+	/** Accrued cost to inject via a single assistant entry. */
+	cost?: number;
 }
 
-function makeFooter({ permissions = null, autoCompact = false, extra }: MakeFooterOptions = {}): FooterComponent {
+function makeFooter({
+	permissions = null,
+	autoCompact = false,
+	extra,
+	usingOAuth = false,
+	cost = 0,
+}: MakeFooterOptions = {}): FooterComponent {
+	// A subscription tag needs a truthy model for isUsingOAuth(state.model).
+	const model = usingOAuth ? { id: "test-model", provider: "anthropic", contextWindow: 200000 } : undefined;
+	const entries =
+		cost > 0
+			? [
+					{
+						type: "message",
+						message: {
+							role: "assistant",
+							usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, cost: { total: cost } },
+						},
+					},
+				]
+			: [];
 	const session: AgentSession = {
 		state: {
-			model: undefined,
+			model,
 			thinkingLevel: "off",
 		},
 		sessionManager: {
-			getEntries: () => [],
+			getEntries: () => entries,
 			getSessionName: () => "",
 			getCwd: () => "C:/x",
 		},
 		getContextUsage: () => null,
 		goalStatusLine: () => null,
-		modelRegistry: { isUsingOAuth: () => false },
+		modelRegistry: { isUsingOAuth: () => usingOAuth },
 	} as unknown as AgentSession;
 
 	const statuses = new Map<string, string>();
@@ -74,4 +98,26 @@ it("keeps a 3rd line when another extension status exists; compact off hides gly
 	expect(lines[1]).toContain("plan");
 	expect(lines[1]).not.toContain("⟳");
 	expect(lines[2]).toContain("whatsapp: 3");
+});
+
+it("hides the cost segment under a subscription when cost rounds to zero", () => {
+	const footer = makeFooter({ usingOAuth: true });
+	const lines = footer.render(80).map(stripAnsi);
+	// No "$0.000 (sub)" noise on a flat subscription plan.
+	expect(lines[1]).not.toContain("$");
+	expect(lines[1]).not.toContain("(sub)");
+});
+
+it("shows the cost segment with the (sub) tag when a subscription accrued real cost", () => {
+	const footer = makeFooter({ usingOAuth: true, cost: 1.5 });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines[1]).toContain("$1.500");
+	expect(lines[1]).toContain("(sub)");
+});
+
+it("hides the cost segment when cost is below the rounding threshold", () => {
+	const footer = makeFooter({ cost: 0.0004 });
+	const lines = footer.render(80).map(stripAnsi);
+	// Would render as "$0.000" — drop it instead of showing a misleading zero.
+	expect(lines[1]).not.toContain("$");
 });

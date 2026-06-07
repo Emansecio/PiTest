@@ -87,10 +87,10 @@ describe("ActivityLineComponent — agent labels", () => {
 		expect(head.length).toBeLessThan(60);
 	});
 
-	it("falls back to a per-turn 'Agente N' when neither name nor prompt help", () => {
+	it("falls back to a per-turn 'Agent N' when neither name nor prompt help", () => {
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(taskExec({}), 3);
-		expect(c.render(120).map(stripAnsi)[0]).toContain("Agente 3");
+		expect(c.render(120).map(stripAnsi)[0]).toContain("Agent 3");
 	});
 
 	it("labels an unknown/MCP action with the tool name, not a bare 'Ran'", () => {

@@ -165,7 +165,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			countText,
 		];
 		return this.isDirty
-			? theme.fg("dim", `  ${parts.join(" · ")} `) + theme.fg("warning", "(unsaved)")
+			? theme.fg("dim", `  ${parts.join(" · ")}`) + theme.fg("warning", " (unsaved)")
 			: theme.fg("dim", `  ${parts.join(" · ")}`);
 	}
 

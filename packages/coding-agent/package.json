@@ -86,11 +86,6 @@
 	],
 	"author": "PiTuned",
 	"license": "MIT",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi-mono.git",
-		"directory": "packages/coding-agent"
-	},
 	"engines": {
 		"node": ">=22.19.0"
 	}

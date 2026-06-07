@@ -210,8 +210,12 @@ export class FooterComponent implements Component {
 		const goalStatus = this.session.goalStatusLine();
 		if (goalStatus) rightParts.push(goalStatus);
 
+		// Cost segment only when it rounds to a visible amount. Under a
+		// subscription the cost is always $0.000 (flat plan), so `$0.000 (sub)`
+		// is pure noise — drop it. 0.0005 is the threshold where toFixed(3)
+		// stops rendering "0.000".
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
-		if (totals.cost || usingSubscription) {
+		if (totals.cost >= 0.0005) {
 			rightParts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
 		}
 		const mode = this.getPermissionMode();

@@ -3,10 +3,12 @@
  *
  * Holds the resolved endpoint (host/port), a cache of CDP connections keyed by
  * targetId, the currently selected page, and ring buffers of console/network
- * events per connection. Connects to an already-running Chrome (started with
+ * events per connection. Connects to a reachable Chrome (started with
  * --remote-debugging-port) and can open a NEW tab via the DevTools HTTP
- * endpoint — it never launches the browser. Published via a module-level
- * registry (mirrors goal/todo/preview-queue).
+ * endpoint. When `launchBrowser` is set (the default), it auto-launches Chrome
+ * into a dedicated persistent profile if the debug port is unreachable;
+ * otherwise it only attaches to an already-running instance. Published via a
+ * module-level registry (mirrors goal/todo/preview-queue).
  */
 
 import {
@@ -93,6 +95,9 @@ export class ChromeDevtoolsManager {
 
 	private selectedTarget: CdpTarget | undefined;
 	private readonly conns = new Map<string, ConnState>();
+	// In-flight getConn promises keyed by targetId, so concurrent callers for the
+	// same target share one connection instead of racing to create (and leak) two.
+	private readonly connecting = new Map<string, Promise<CdpConnectionLike>>();
 	private ensurePromise: Promise<{ launched: boolean }> | undefined;
 	private launchedHere = false;
 
@@ -247,6 +252,7 @@ export class ChromeDevtoolsManager {
 			}
 		}
 		this.conns.clear();
+		this.connecting.clear();
 		this.selectedTarget = undefined;
 	}
 
@@ -269,7 +275,17 @@ export class ChromeDevtoolsManager {
 	private async getConn(target: CdpTarget): Promise<CdpConnectionLike> {
 		const existing = this.conns.get(target.id);
 		if (existing) return existing.conn;
+		// Dedup concurrent opens for the same target: the first caller starts the
+		// connection, later callers await the same promise instead of opening a
+		// second socket that would orphan the first (unsubscribed, never closed).
+		const inFlight = this.connecting.get(target.id);
+		if (inFlight) return inFlight;
+		const pending = this.openConn(target).finally(() => this.connecting.delete(target.id));
+		this.connecting.set(target.id, pending);
+		return pending;
+	}
 
+	private async openConn(target: CdpTarget): Promise<CdpConnectionLike> {
 		const conn = this.connectFactory(target);
 		const state: ConnState = { conn, console: [], network: [], unsubs: [] };
 		this.conns.set(target.id, state);

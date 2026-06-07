@@ -22,6 +22,17 @@ async function runSessionSuite(
 			expect(context.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
 		});
 
+		it("serializes concurrent appends into one linear chain (no accidental fork)", async () => {
+			const session = new Session(await createStorage());
+			const count = 12;
+			await Promise.all(Array.from({ length: count }, (_, i) => session.appendMessage(createUserMessage(`m${i}`))));
+			// A fork (two appends reading the same leaf id) would strand entries off
+			// the leaf's path to root, so the branch would hold fewer than `count`.
+			const branch = await session.getBranch();
+			expect(branch.filter((entry) => entry.type === "message")).toHaveLength(count);
+			expect((await session.buildContext()).messages).toHaveLength(count);
+		});
+
 		it("tracks model and thinking level changes", async () => {
 			const session = new Session(await createStorage());
 			await session.appendMessage(createUserMessage("one"));

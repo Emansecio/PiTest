@@ -337,11 +337,19 @@ export async function generateBranchSummary(
 		},
 	];
 
+	// Derive the output cap from reserveTokens (the space held back for the
+	// response), mirroring compaction's generateSummary instead of a fixed 2048
+	// that silently truncated large structured summaries. 0.5× because the branch
+	// summary prompt is explicitly concise; capped by the model's own maxTokens.
+	const maxTokens = Math.min(
+		Math.floor(0.5 * reserveTokens),
+		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
+	);
 	// Call LLM for summarization
 	const response = await completeSimple(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ apiKey, headers, signal, maxTokens: 2048 },
+		{ apiKey, headers, signal, maxTokens },
 	);
 
 	// Check if aborted or errored

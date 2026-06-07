@@ -87,8 +87,26 @@ export class Session<TMetadata extends SessionMetadata = SessionMetadata> {
 	// (append/navigate move the leaf id). Mirrors SessionManager._ctxCache.
 	private _ctxCache: { leafId: string | null; context: SessionContext } | null = null;
 
+	// Serializes session mutations. Each append/move reads the current leaf id and
+	// mints an entry id before writing; two concurrent writers could read the same
+	// leaf (forking the tree) or race the id-uniqueness check. Chaining every
+	// mutation through this tail makes the read→write sequence atomic per Session.
+	// Reads are not serialized — they never corrupt the tree.
+	private writeChain: Promise<unknown> = Promise.resolve();
+
 	constructor(storage: SessionStorage<TMetadata>) {
 		this.storage = storage;
+	}
+
+	private serializeWrite<T>(op: () => Promise<T>): Promise<T> {
+		const run = this.writeChain.then(op, op);
+		// Keep the chain alive regardless of this op's outcome so one failed write
+		// doesn't wedge every subsequent write.
+		this.writeChain = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
 	}
 
 	getMetadata(): Promise<TMetadata> {
@@ -144,34 +162,40 @@ export class Session<TMetadata extends SessionMetadata = SessionMetadata> {
 	}
 
 	async appendMessage(message: AgentMessage): Promise<string> {
-		return this.appendTypedEntry({
-			type: "message",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			message,
-		} satisfies MessageEntry);
+		return this.serializeWrite(async () =>
+			this.appendTypedEntry({
+				type: "message",
+				id: await this.storage.createEntryId(),
+				parentId: await this.storage.getLeafId(),
+				timestamp: new Date().toISOString(),
+				message,
+			} satisfies MessageEntry),
+		);
 	}
 
 	async appendThinkingLevelChange(thinkingLevel: string): Promise<string> {
-		return this.appendTypedEntry({
-			type: "thinking_level_change",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			thinkingLevel,
-		} satisfies ThinkingLevelChangeEntry);
+		return this.serializeWrite(async () =>
+			this.appendTypedEntry({
+				type: "thinking_level_change",
+				id: await this.storage.createEntryId(),
+				parentId: await this.storage.getLeafId(),
+				timestamp: new Date().toISOString(),
+				thinkingLevel,
+			} satisfies ThinkingLevelChangeEntry),
+		);
 	}
 
 	async appendModelChange(provider: string, modelId: string): Promise<string> {
-		return this.appendTypedEntry({
-			type: "model_change",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			provider,
-			modelId,
-		} satisfies ModelChangeEntry);
+		return this.serializeWrite(async () =>
+			this.appendTypedEntry({
+				type: "model_change",
+				id: await this.storage.createEntryId(),
+				parentId: await this.storage.getLeafId(),
+				timestamp: new Date().toISOString(),
+				provider,
+				modelId,
+			} satisfies ModelChangeEntry),
+		);
 	}
 
 	async appendCompaction<T = unknown>(
@@ -181,28 +205,32 @@ export class Session<TMetadata extends SessionMetadata = SessionMetadata> {
 		details?: T,
 		fromHook?: boolean,
 	): Promise<string> {
-		return this.appendTypedEntry({
-			type: "compaction",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			summary,
-			firstKeptEntryId,
-			tokensBefore,
-			details,
-			fromHook,
-		} satisfies CompactionEntry<T>);
+		return this.serializeWrite(async () =>
+			this.appendTypedEntry({
+				type: "compaction",
+				id: await this.storage.createEntryId(),
+				parentId: await this.storage.getLeafId(),
+				timestamp: new Date().toISOString(),
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromHook,
+			} satisfies CompactionEntry<T>),
+		);
 	}
 
 	async appendCustomEntry(customType: string, data?: unknown): Promise<string> {
-		return this.appendTypedEntry({
-			type: "custom",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			customType,
-			data,
-		} satisfies CustomEntry);
+		return this.serializeWrite(async () =>
+			this.appendTypedEntry({
+				type: "custom",
+				id: await this.storage.createEntryId(),
+				parentId: await this.storage.getLeafId(),
+				timestamp: new Date().toISOString(),
+				customType,
+				data,
+			} satisfies CustomEntry),
+		);
 	}
 
 	async appendCustomMessageEntry<T = unknown>(
@@ -211,60 +239,68 @@ export class Session<TMetadata extends SessionMetadata = SessionMetadata> {
 		display: boolean,
 		details?: T,
 	): Promise<string> {
-		return this.appendTypedEntry({
-			type: "custom_message",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			customType,
-			content,
-			display,
-			details,
-		} satisfies CustomMessageEntry<T>);
+		return this.serializeWrite(async () =>
+			this.appendTypedEntry({
+				type: "custom_message",
+				id: await this.storage.createEntryId(),
+				parentId: await this.storage.getLeafId(),
+				timestamp: new Date().toISOString(),
+				customType,
+				content,
+				display,
+				details,
+			} satisfies CustomMessageEntry<T>),
+		);
 	}
 
 	async appendLabel(targetId: string, label: string | undefined): Promise<string> {
-		if (!(await this.storage.getEntry(targetId))) {
-			throw new SessionError("not_found", `Entry ${targetId} not found`);
-		}
-		return this.appendTypedEntry({
-			type: "label",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			targetId,
-			label,
-		} satisfies LabelEntry);
+		return this.serializeWrite(async () => {
+			if (!(await this.storage.getEntry(targetId))) {
+				throw new SessionError("not_found", `Entry ${targetId} not found`);
+			}
+			return this.appendTypedEntry({
+				type: "label",
+				id: await this.storage.createEntryId(),
+				parentId: await this.storage.getLeafId(),
+				timestamp: new Date().toISOString(),
+				targetId,
+				label,
+			} satisfies LabelEntry);
+		});
 	}
 
 	async appendSessionName(name: string): Promise<string> {
-		return this.appendTypedEntry({
-			type: "session_info",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			name: name.trim(),
-		} satisfies SessionInfoEntry);
+		return this.serializeWrite(async () =>
+			this.appendTypedEntry({
+				type: "session_info",
+				id: await this.storage.createEntryId(),
+				parentId: await this.storage.getLeafId(),
+				timestamp: new Date().toISOString(),
+				name: name.trim(),
+			} satisfies SessionInfoEntry),
+		);
 	}
 
 	async moveTo(
 		entryId: string | null,
 		summary?: { summary: string; details?: unknown; fromHook?: boolean },
 	): Promise<string | undefined> {
-		if (entryId !== null && !(await this.storage.getEntry(entryId))) {
-			throw new SessionError("not_found", `Entry ${entryId} not found`);
-		}
-		await this.storage.setLeafId(entryId);
-		if (!summary) return undefined;
-		return this.appendTypedEntry({
-			type: "branch_summary",
-			id: await this.storage.createEntryId(),
-			parentId: entryId,
-			timestamp: new Date().toISOString(),
-			fromId: entryId ?? "root",
-			summary: summary.summary,
-			details: summary.details,
-			fromHook: summary.fromHook,
-		} satisfies BranchSummaryEntry);
+		return this.serializeWrite(async () => {
+			if (entryId !== null && !(await this.storage.getEntry(entryId))) {
+				throw new SessionError("not_found", `Entry ${entryId} not found`);
+			}
+			await this.storage.setLeafId(entryId);
+			if (!summary) return undefined;
+			return this.appendTypedEntry({
+				type: "branch_summary",
+				id: await this.storage.createEntryId(),
+				parentId: entryId,
+				timestamp: new Date().toISOString(),
+				fromId: entryId ?? "root",
+				summary: summary.summary,
+				details: summary.details,
+				fromHook: summary.fromHook,
+			} satisfies BranchSummaryEntry);
+		});
 	}
 }

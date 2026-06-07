@@ -455,163 +455,166 @@ async function streamAssistantResponse(
 	}
 	let ttsrInterrupt: TTSRInterrupt | undefined;
 
-	const response = await streamFunction(config.model, llmContext, {
-		...config,
-		apiKey: resolvedApiKey,
-		signal: ttsrAbort.signal,
-	});
-
-	let partialMessage: AssistantMessage | null = null;
-	let addedPartial = false;
-
-	// Delta coalescing: accumulate consecutive *_delta events of the same kind
-	// and contentIndex, emitting at most once per 16ms (60fps frame budget).
-	// Listeners that reconstruct text via `deltas.map(e => e.delta).join('')`
-	// still see every character — just batched.
-	type DeltaEvent = Extract<
-		Awaited<ReturnType<typeof response.result>> extends infer _ ? Parameters<typeof emit>[0] : never,
-		{ type: "message_update" }
-	>["assistantMessageEvent"] & { delta: string; contentIndex: number };
-	let pendingDelta: DeltaEvent | undefined;
-	let lastEmitTime = 0;
-	const DELTA_THROTTLE_MS = 16;
-
-	const flushPendingDelta = async () => {
-		if (!pendingDelta || !partialMessage) return;
-		const e = pendingDelta;
-		pendingDelta = undefined;
-		await emit({
-			type: "message_update",
-			assistantMessageEvent: e as any,
-			message: { ...partialMessage },
+	// Single cleanup point: every exit path (normal returns, TTSR interrupt, and
+	// — the case the per-return removals missed — an exception from streamFunction,
+	// response.result(), or the `for await`) runs the finally, so the abort
+	// listener is never left attached to the outer run signal.
+	try {
+		const response = await streamFunction(config.model, llmContext, {
+			...config,
+			apiKey: resolvedApiKey,
+			signal: ttsrAbort.signal,
 		});
-		lastEmitTime = performance.now();
-	};
 
-	for await (const event of response) {
-		switch (event.type) {
-			case "start":
-				partialMessage = event.partial;
-				context.messages.push(partialMessage);
-				addedPartial = true;
-				lastEmitTime = performance.now();
-				await emit({ type: "message_start", message: { ...partialMessage } });
-				break;
+		let partialMessage: AssistantMessage | null = null;
+		let addedPartial = false;
 
-			case "text_delta":
-			case "thinking_delta":
-			case "toolcall_delta":
-				if (partialMessage) {
+		// Delta coalescing: accumulate consecutive *_delta events of the same kind
+		// and contentIndex, emitting at most once per 16ms (60fps frame budget).
+		// Listeners that reconstruct text via `deltas.map(e => e.delta).join('')`
+		// still see every character — just batched.
+		type DeltaEvent = Extract<
+			Awaited<ReturnType<typeof response.result>> extends infer _ ? Parameters<typeof emit>[0] : never,
+			{ type: "message_update" }
+		>["assistantMessageEvent"] & { delta: string; contentIndex: number };
+		let pendingDelta: DeltaEvent | undefined;
+		let lastEmitTime = 0;
+		const DELTA_THROTTLE_MS = 16;
+
+		const flushPendingDelta = async () => {
+			if (!pendingDelta || !partialMessage) return;
+			const e = pendingDelta;
+			pendingDelta = undefined;
+			await emit({
+				type: "message_update",
+				assistantMessageEvent: e as any,
+				message: { ...partialMessage },
+			});
+			lastEmitTime = performance.now();
+		};
+
+		for await (const event of response) {
+			switch (event.type) {
+				case "start":
 					partialMessage = event.partial;
-					context.messages[context.messages.length - 1] = partialMessage;
-					// TTSR: feed text_delta into "assistant_text" scope, toolcall_delta
-					// into "tool_args". thinking_delta is intentionally skipped — model
-					// internal reasoning is not user-visible and should not trigger
-					// hindsight rules.
-					if (config.ttsrMatcher && !ttsrInterrupt) {
-						const delta = (event as { delta?: string }).delta ?? "";
-						let scope: "assistant_text" | "tool_args" | undefined;
-						if (event.type === "text_delta") scope = "assistant_text";
-						else if (event.type === "toolcall_delta") scope = "tool_args";
-						if (scope) {
-							const hit = config.ttsrMatcher.feed(delta, scope);
-							if (hit) {
-								ttsrInterrupt = { ttsr: { name: hit.name, message: hit.message } };
-								ttsrAbort.abort();
+					context.messages.push(partialMessage);
+					addedPartial = true;
+					lastEmitTime = performance.now();
+					await emit({ type: "message_start", message: { ...partialMessage } });
+					break;
+
+				case "text_delta":
+				case "thinking_delta":
+				case "toolcall_delta":
+					if (partialMessage) {
+						partialMessage = event.partial;
+						context.messages[context.messages.length - 1] = partialMessage;
+						// TTSR: feed text_delta into "assistant_text" scope, toolcall_delta
+						// into "tool_args". thinking_delta is intentionally skipped — model
+						// internal reasoning is not user-visible and should not trigger
+						// hindsight rules.
+						if (config.ttsrMatcher && !ttsrInterrupt) {
+							const delta = (event as { delta?: string }).delta ?? "";
+							let scope: "assistant_text" | "tool_args" | undefined;
+							if (event.type === "text_delta") scope = "assistant_text";
+							else if (event.type === "toolcall_delta") scope = "tool_args";
+							if (scope) {
+								const hit = config.ttsrMatcher.feed(delta, scope);
+								if (hit) {
+									ttsrInterrupt = { ttsr: { name: hit.name, message: hit.message } };
+									ttsrAbort.abort();
+								}
 							}
 						}
+						// Accumulate into pending delta if same kind+index, else flush and start anew.
+						if (
+							pendingDelta &&
+							pendingDelta.type === event.type &&
+							pendingDelta.contentIndex === event.contentIndex
+						) {
+							// Mutate the existing copy instead of re-spreading event on
+							// every coalesced chunk (type+contentIndex already match).
+							pendingDelta.delta += event.delta;
+						} else {
+							await flushPendingDelta();
+							pendingDelta = { ...event } as DeltaEvent;
+						}
+						if (performance.now() - lastEmitTime >= DELTA_THROTTLE_MS) {
+							await flushPendingDelta();
+						}
+						if (ttsrInterrupt) {
+							// Drop partial assistant message we pushed at "start".
+							if (addedPartial) {
+								context.messages.pop();
+								addedPartial = false;
+							}
+							return ttsrInterrupt;
+						}
 					}
-					// Accumulate into pending delta if same kind+index, else flush and start anew.
-					if (
-						pendingDelta &&
-						pendingDelta.type === event.type &&
-						pendingDelta.contentIndex === event.contentIndex
-					) {
-						// Mutate the existing copy instead of re-spreading event on
-						// every coalesced chunk (type+contentIndex already match).
-						pendingDelta.delta += event.delta;
-					} else {
-						await flushPendingDelta();
-						pendingDelta = { ...event } as DeltaEvent;
+					break;
+
+				case "text_start":
+				case "text_end":
+				case "thinking_start":
+				case "thinking_end":
+				case "toolcall_start":
+				case "toolcall_end":
+					await flushPendingDelta();
+					if (partialMessage) {
+						partialMessage = event.partial;
+						context.messages[context.messages.length - 1] = partialMessage;
+						await emit({
+							type: "message_update",
+							assistantMessageEvent: event,
+							message: { ...partialMessage },
+						});
 					}
-					if (performance.now() - lastEmitTime >= DELTA_THROTTLE_MS) {
-						await flushPendingDelta();
-					}
+					break;
+
+				case "done":
+				case "error": {
+					await flushPendingDelta();
 					if (ttsrInterrupt) {
-						// Drop partial assistant message we pushed at "start".
 						if (addedPartial) {
 							context.messages.pop();
-							addedPartial = false;
 						}
-						if (signal) signal.removeEventListener("abort", forwardAbort);
 						return ttsrInterrupt;
 					}
-				}
-				break;
-
-			case "text_start":
-			case "text_end":
-			case "thinking_start":
-			case "thinking_end":
-			case "toolcall_start":
-			case "toolcall_end":
-				await flushPendingDelta();
-				if (partialMessage) {
-					partialMessage = event.partial;
-					context.messages[context.messages.length - 1] = partialMessage;
-					await emit({
-						type: "message_update",
-						assistantMessageEvent: event,
-						message: { ...partialMessage },
-					});
-				}
-				break;
-
-			case "done":
-			case "error": {
-				await flushPendingDelta();
-				if (ttsrInterrupt) {
+					const finalMessage = await response.result();
 					if (addedPartial) {
-						context.messages.pop();
+						context.messages[context.messages.length - 1] = finalMessage;
+					} else {
+						context.messages.push(finalMessage);
 					}
-					if (signal) signal.removeEventListener("abort", forwardAbort);
-					return ttsrInterrupt;
+					if (!addedPartial) {
+						await emit({ type: "message_start", message: { ...finalMessage } });
+					}
+					await emit({ type: "message_end", message: finalMessage });
+					return finalMessage;
 				}
-				const finalMessage = await response.result();
-				if (addedPartial) {
-					context.messages[context.messages.length - 1] = finalMessage;
-				} else {
-					context.messages.push(finalMessage);
-				}
-				if (!addedPartial) {
-					await emit({ type: "message_start", message: { ...finalMessage } });
-				}
-				await emit({ type: "message_end", message: finalMessage });
-				if (signal) signal.removeEventListener("abort", forwardAbort);
-				return finalMessage;
 			}
 		}
-	}
-	await flushPendingDelta();
+		await flushPendingDelta();
 
-	if (ttsrInterrupt) {
-		if (addedPartial) {
-			context.messages.pop();
+		if (ttsrInterrupt) {
+			if (addedPartial) {
+				context.messages.pop();
+			}
+			return ttsrInterrupt;
 		}
-		if (signal) signal.removeEventListener("abort", forwardAbort);
-		return ttsrInterrupt;
-	}
 
-	const finalMessage = await response.result();
-	if (addedPartial) {
-		context.messages[context.messages.length - 1] = finalMessage;
-	} else {
-		context.messages.push(finalMessage);
-		await emit({ type: "message_start", message: { ...finalMessage } });
+		const finalMessage = await response.result();
+		if (addedPartial) {
+			context.messages[context.messages.length - 1] = finalMessage;
+		} else {
+			context.messages.push(finalMessage);
+			await emit({ type: "message_start", message: { ...finalMessage } });
+		}
+		await emit({ type: "message_end", message: finalMessage });
+		return finalMessage;
+	} finally {
+		if (signal) signal.removeEventListener("abort", forwardAbort);
 	}
-	await emit({ type: "message_end", message: finalMessage });
-	if (signal) signal.removeEventListener("abort", forwardAbort);
-	return finalMessage;
 }
 
 /**
