@@ -329,6 +329,13 @@ const CHROME_DEVTOOLS_TOOL_NAMES = [
 	"chrome_devtools_read_network",
 ];
 
+/**
+ * Full chrome feature surface: the low-level CDP tools plus the higher-level
+ * `preview` tool. All share the `chromeDevtools` gate (optionsKey) and the
+ * auto-launched Chrome, so they activate and hide from discovery as one unit.
+ */
+const CHROME_FEATURE_TOOL_NAMES = [...CHROME_DEVTOOLS_TOOL_NAMES, "preview"];
+
 export interface PromptOptions {
 	/** Whether to expand file-based prompt templates (default: true) */
 	expandPromptTemplates?: boolean;
@@ -781,7 +788,7 @@ export class AgentSession {
 			"forget",
 			"goal_complete",
 			"todo",
-			...CHROME_DEVTOOLS_TOOL_NAMES,
+			...CHROME_FEATURE_TOOL_NAMES,
 		]);
 		const alwaysActive = new Set(cfg.alwaysActive);
 		const candidates = new Set<string>(explicit);
@@ -3792,11 +3799,20 @@ export class AgentSession {
 		const lspActive = this.settingsManager.getLspSettings().enabled ? ["lsp"] : [];
 		const debugActive = this.settingsManager.getDebugSettings().enabled ? ["debug"] : [];
 		const deferHistoryActive = process.env.PIT_DEFER_HISTORY === "1" ? ["recall_tool_output"] : [];
-		const cdpActive = this.settingsManager.getChromeDevtoolsSettings().enabled ? CHROME_DEVTOOLS_TOOL_NAMES : [];
+		const cdpActive = this.settingsManager.getChromeDevtoolsSettings().enabled ? CHROME_FEATURE_TOOL_NAMES : [];
+		// Single source of truth for the default active surface. The SDK no longer
+		// passes its own list: when no explicit allowlist/noTools is given it sends
+		// `undefined`, so this default decides. read/grep/find/ls/symbol are the
+		// always-on code-navigation core; the spreads are the default-ON gated
+		// features (each opt-out via its `enabled: false` setting).
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
 			: [
 					"read",
+					"grep",
+					"find",
+					"ls",
+					"symbol",
 					"bash",
 					"edit",
 					"write",

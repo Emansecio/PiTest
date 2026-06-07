@@ -39,7 +39,6 @@ import {
 	createReadOnlyTools,
 	createReadTool,
 	createWriteTool,
-	type ToolName,
 	withFileMutationQueue,
 } from "./tools/index.ts";
 
@@ -326,24 +325,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames: ToolName[] = [
-		"read",
-		"grep",
-		"find",
-		"ls",
-		"symbol",
-		"bash",
-		"edit",
-		"write",
-		"ask",
-		"todo",
-	];
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
-	const initialActiveToolNames: string[] = options.tools
+	// No explicit allowlist and no noTools mode → leave the initial active set
+	// undefined so AgentSession._buildRuntime owns the default surface (the single
+	// source of truth, which turns on the default-ON gated features: the
+	// chrome_devtools_* tools + preview, lsp, debug, web_search, eval). An explicit
+	// `tools` list is honored verbatim; `noTools` starts with an empty active set
+	// (built-in extension tools still load when noTools === "builtin").
+	const initialActiveToolNames: string[] | undefined = options.tools
 		? [...options.tools]
 		: options.noTools
 			? []
-			: defaultActiveToolNames;
+			: undefined;
 
 	let agent: Agent;
 
