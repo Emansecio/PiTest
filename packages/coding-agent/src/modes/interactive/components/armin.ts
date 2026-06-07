@@ -59,7 +59,8 @@ function buildFinalGrid(): string[][] {
 
 export class ArminComponent implements Component {
 	private ui: TUI;
-	private interval: ReturnType<typeof setInterval> | null = null;
+	private unsub: (() => void) | null = null;
+	private lastFrame = -1;
 	private effect: Effect;
 	private finalGrid: string[][];
 	private currentGrid: string[][];
@@ -178,21 +179,25 @@ export class ArminComponent implements Component {
 	}
 
 	private startAnimation(): void {
-		const fps = this.effect === "glitch" ? 60 : 30;
-		this.interval = setInterval(() => {
+		// Derive the frame from the shared monotonic clock instead of owning a
+		// timer: glitch runs at 60fps, the rest at 30fps. The ticker coalesces
+		// renders, so we only report dirty when the frame index advances.
+		const frameMs = this.effect === "glitch" ? 1000 / 60 : 1000 / 30;
+		this.unsub = this.ui.addAnimationCallback((now: number) => {
+			const frame = Math.floor(now / frameMs);
+			if (frame === this.lastFrame) return false;
+			this.lastFrame = frame;
 			const done = this.tickEffect();
 			this.updateDisplay();
-			this.ui.requestRender();
-			if (done) {
-				this.stopAnimation();
-			}
-		}, 1000 / fps);
+			if (done) this.stopAnimation();
+			return true;
+		});
 	}
 
 	private stopAnimation(): void {
-		if (this.interval) {
-			clearInterval(this.interval);
-			this.interval = null;
+		if (this.unsub) {
+			this.unsub();
+			this.unsub = null;
 		}
 	}
 

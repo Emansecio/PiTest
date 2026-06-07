@@ -221,7 +221,7 @@ export class FooterComponent implements Component {
 		const mode = this.getPermissionMode();
 		const modeBits: string[] = [];
 		if (mode && mode !== "unsafe") modeBits.push(mode);
-		if (this.autoCompactEnabled) modeBits.push("⟳");
+		if (this.autoCompactEnabled) modeBits.push(theme.fg("dim", "auto"));
 		if (modeBits.length) rightParts.push(modeBits.join(" "));
 
 		const metricsLine = composeLeftRight(ctxText, rightParts.join(" · "), width, {
@@ -277,7 +277,7 @@ function composeLeftRight(rawLeft: string, rawRight: string, width: number, opti
 	let rightWidth = visibleWidth(right);
 
 	if (leftWidth > width) {
-		left = truncateToWidth(left, width, "…");
+		left = truncateToWidth(left, width, options.ellipsis);
 		leftWidth = visibleWidth(left);
 		right = "";
 		rightWidth = 0;

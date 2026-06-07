@@ -1,4 +1,4 @@
-import { Container, SPINNER_FRAMES, type TUI } from "@pit/tui";
+import { Container, SPINNER_FRAMES, type TUI, truncateToWidth } from "@pit/tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { clampBashCommandRow } from "./bash-command-row.ts";
@@ -149,8 +149,11 @@ export class ActivityLineComponent extends Container {
 		let label: string;
 		let target: string;
 		if (name === "task") {
-			label = this.taskLabel();
-			target = "";
+			// Mark a sub-agent explicitly: a "Delegating/Delegated" verb in the header
+			// makes the task line read as an agent, not a plain tool. The agent's own
+			// label (delegated name / prompt snippet / "Agent N") rides in the target.
+			label = pending ? "Delegating" : "Delegated";
+			target = theme.fg("toolTitle", this.taskLabel());
 		} else {
 			label = verbFor(name, pending);
 			target = this.target(width);
@@ -161,9 +164,14 @@ export class ActivityLineComponent extends Container {
 				target = "";
 			}
 		}
-		const header = stripAnsi(target).trim()
+		const rawHeader = stripAnsi(target).trim()
 			? `${this.icon(state)} ${theme.bold(label)} ${target}`
 			: `${this.icon(state)} ${theme.bold(label)}`;
+		// Cap the assembled header once so no branch (free-form agent label, MCP tool
+		// name, web_search query, edit path) can overflow the terminal width. ANSI is
+		// width-free here, so the colorized header is clamped to `width` cells; the
+		// reticência is U+2026 (truncateToWidth's default).
+		const header = truncateToWidth(rawHeader, width);
 		const lines = [header];
 		const showBody = this.expanded || (state === "error" && !this.exec.isAborted());
 		if (showBody) {

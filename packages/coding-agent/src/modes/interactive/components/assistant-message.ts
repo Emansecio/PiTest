@@ -141,7 +141,7 @@ export class AssistantMessageComponent extends Container {
 		message?: AssistantMessage,
 		hideThinkingBlock = false,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
-		hiddenThinkingLabel = "Thinking...",
+		hiddenThinkingLabel = "Thinking…",
 		ui?: TUI,
 		smoothing = false,
 	) {
@@ -297,8 +297,12 @@ export class AssistantMessageComponent extends Container {
 						const label = this.hiddenThinkingLabel;
 						this.contentContainer.addChild({
 							render: () => {
+								// Floor the dark pole at the "dim" text token (#666) and clamp t's
+								// minimum so the breath's vale keeps ~3.0+ contrast on the dark
+								// bg instead of sinking into the decorative-border darkGray.
+								const breathT = this.breathT < 0.15 ? 0.15 : this.breathT;
 								const c =
-									interpolateFg("thinkingOff", "thinkingText", this.breathT) ??
+									interpolateFg("dim", "thinkingText", breathT) ??
 									((t: string) => theme.fg("thinkingText", t));
 								return [` ${theme.italic(c(label))}`];
 							},
@@ -511,7 +515,7 @@ export class AssistantMessageComponent extends Container {
 
 	private makeProseMarkdown(text: string): Markdown {
 		return this.isNarration
-			? new Markdown(text, 1, 0, this.markdownTheme, { color: (t: string) => theme.fg("dim", t) })
+			? new Markdown(text, 1, 0, this.markdownTheme, { color: (t: string) => theme.fg("muted", t) })
 			: new Markdown(text, 1, 0, this.markdownTheme);
 	}
 
@@ -523,7 +527,6 @@ export class AssistantMessageComponent extends Container {
 		this.breathUnsub = this.ui.addAnimationCallback((now: number): boolean => {
 			const phase = ((now - this.breathStart) % THINKING_BREATH_MS) / THINKING_BREATH_MS;
 			this.breathT = (1 - Math.cos(phase * 2 * Math.PI)) / 2; // smooth 0→1→0
-			this.ui?.requestRender();
 			return true;
 		});
 	}

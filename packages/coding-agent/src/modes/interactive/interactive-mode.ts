@@ -291,7 +291,7 @@ export class InteractiveMode {
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
-	private readonly defaultWorkingMessage = "Working...";
+	private readonly defaultWorkingMessage = "Working…";
 	private readonly awaitingUserInputMessage = "Waiting for your answer…";
 	private readonly userWaitMessage = "Waiting for you…";
 	// Reference count of open user-input prompts (ask picker, permission/extension
@@ -300,10 +300,14 @@ export class InteractiveMode {
 	// wins; the clock resumes when the last prompt closes.
 	private userInputPauseDepth = 0;
 	private userInputPauseMessage: string | null = null;
-	private readonly defaultHiddenThinkingLabel = "Thinking...";
+	private readonly defaultHiddenThinkingLabel = "Thinking…";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
 
 	private lastSigintTime = 0;
+	// Ephemeral "Press Ctrl+C again to exit" hint (lives in statusContainer, not the
+	// permanent showStatus channel). Cleared on next input or when the 500ms window expires.
+	private ctrlCHint: Text | undefined = undefined;
+	private ctrlCHintTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 	private lastEscapeTime = 0;
 	private changelogMarkdown: string | undefined = undefined;
 	private startupNoticesShown = false;
@@ -1551,7 +1555,7 @@ export class InteractiveMode {
 				container.addChild(new Text(line, 1, 0));
 			}
 			if (content.length > InteractiveMode.MAX_WIDGET_LINES) {
-				container.addChild(new Text(theme.fg("muted", "... (widget truncated)"), 1, 0));
+				container.addChild(new Text(theme.fg("muted", "… (widget truncated)"), 1, 0));
 			}
 			component = container;
 		} else {
@@ -2287,6 +2291,9 @@ export class InteractiveMode {
 			text = text.trim();
 			if (!text) return;
 
+			// Any real submission dismisses the ephemeral "Press Ctrl+C again" hint.
+			this.clearCtrlCHint();
+
 			// Inline `/chrome` modifier: works anywhere in the message (text before
 			// and/or after it). Ensures Chrome is up, then runs the rest as a prompt.
 			const chrome = extractChromeCommand(text);
@@ -2774,8 +2781,8 @@ export class InteractiveMode {
 				const cancelHint = `(${keyText("app.interrupt")} to cancel)`;
 				const label =
 					event.reason === "manual"
-						? `Compacting context... ${cancelHint}`
-						: `${event.reason === "overflow" ? "Context overflow detected, " : ""}Auto-compacting... ${cancelHint}`;
+						? `Compacting context… ${cancelHint}`
+						: `${event.reason === "overflow" ? "Context overflow detected, " : ""}Auto-compacting… ${cancelHint}`;
 				this.autoCompactionLoader = new Loader(
 					this.ui,
 					workingPulsePalette(),
@@ -2847,9 +2854,11 @@ export class InteractiveMode {
 							: `Verifying (${event.command})…`,
 					);
 				} else if (event.phase === "passed") {
-					this.showStatus(`✓ Verified — ${event.command} passed`);
+					this.showStatus(`✓ Verified — ${event.command} passed`, (text) => theme.fg("success", text));
 				} else if (event.willRetry) {
-					this.showStatus(`✗ ${event.command} failed (exit ${event.exitCode ?? "?"}) — fixing…`);
+					this.showStatus(`✗ ${event.command} failed (exit ${event.exitCode ?? "?"}) — fixing…`, (text) =>
+						theme.fg("warning", text),
+					);
 				} else {
 					this.showError(
 						`✗ ${event.command} still failing after ${event.maxAttempts} fix attempt(s) — reported unverified.`,
@@ -2869,7 +2878,7 @@ export class InteractiveMode {
 				this.statusContainer.clear();
 				this.retryCountdown?.dispose();
 				const retryMessage = (seconds: number) =>
-					`Retrying (${event.attempt}/${event.maxAttempts}) in ${seconds}s... (${keyText("app.interrupt")} to cancel)`;
+					`Retrying (${event.attempt}/${event.maxAttempts}) in ${seconds}s… (${keyText("app.interrupt")} to cancel)`;
 				this.retryLoader = new Loader(
 					this.ui,
 					(spinner) => theme.fg("warning", spinner),
@@ -2988,19 +2997,19 @@ export class InteractiveMode {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
-	private showStatus(message: string): void {
+	private showStatus(message: string, color: (text: string) => string = (text) => theme.fg("dim", text)): void {
 		const children = this.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 
 		if (last && secondLast && last === this.lastStatusText && secondLast === this.lastStatusSpacer) {
-			this.lastStatusText.setText(theme.fg("dim", message));
+			this.lastStatusText.setText(color(message));
 			this.ui.requestRender();
 			return;
 		}
 
 		const spacer = new Spacer(1);
-		const text = new Text(theme.fg("dim", message), 1, 0);
+		const text = new Text(color(message), 1, 0);
 		this.chatContainer.addChild(spacer);
 		this.chatContainer.addChild(text);
 		this.lastStatusSpacer = spacer;
@@ -3242,10 +3251,34 @@ export class InteractiveMode {
 	private handleCtrlC(): void {
 		const now = Date.now();
 		if (now - this.lastSigintTime < 500) {
+			this.clearCtrlCHint();
 			void this.shutdown();
 		} else {
 			this.clearEditor();
 			this.lastSigintTime = now;
+			this.showCtrlCHint();
+		}
+	}
+
+	/** Ephemeral hint shown on the first Ctrl+C; auto-clears when the 500ms window expires. */
+	private showCtrlCHint(): void {
+		this.clearCtrlCHint();
+		const hint = new Text(theme.fg("dim", "Press Ctrl+C again to exit"), 1, 0);
+		this.ctrlCHint = hint;
+		this.statusContainer.addChild(hint);
+		this.ctrlCHintTimer = setTimeout(() => this.clearCtrlCHint(), 500);
+		this.ui.requestRender();
+	}
+
+	private clearCtrlCHint(): void {
+		if (this.ctrlCHintTimer) {
+			clearTimeout(this.ctrlCHintTimer);
+			this.ctrlCHintTimer = undefined;
+		}
+		if (this.ctrlCHint) {
+			this.statusContainer.removeChild(this.ctrlCHint);
+			this.ctrlCHint = undefined;
+			this.ui.requestRender();
 		}
 	}
 
@@ -4416,7 +4449,7 @@ export class InteractiveMode {
 							this.ui,
 							workingPulsePalette(),
 							(text) => theme.fg("muted", text),
-							`Summarizing branch... (${keyText("app.interrupt")} to cancel)`,
+							`Summarizing branch… (${keyText("app.interrupt")} to cancel)`,
 						);
 						this.statusContainer.addChild(summaryLoader);
 						this.ui.requestRender();
@@ -4939,7 +4972,7 @@ export class InteractiveMode {
 		reloadBox.addChild(new DynamicBorder(borderColor));
 		reloadBox.addChild(new Spacer(1));
 		reloadBox.addChild(
-			new Text(theme.fg("muted", "Reloading keybindings, extensions, skills, prompts, themes..."), 1, 0),
+			new Text(theme.fg("muted", "Reloading keybindings, extensions, skills, prompts, themes…"), 1, 0),
 		);
 		reloadBox.addChild(new Spacer(1));
 		reloadBox.addChild(new DynamicBorder(borderColor));

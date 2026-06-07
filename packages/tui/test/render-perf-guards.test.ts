@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import type { Terminal } from "../src/terminal.js";
 import { deleteKittyImage, encodeKitty, resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.js";
-import { type Component, TUI } from "../src/tui.js";
+import { type Component, Container, TUI } from "../src/tui.js";
 
 /**
  * Minimal Terminal that records writes without an xterm backend. Lets these
@@ -100,5 +100,113 @@ describe("render perf guards", () => {
 		// With a frame-scaled cap the whole transcript fits; a fixed 4096 cap would
 		// evict its own head every frame and cap the cache below N (0% hit-rate).
 		assert.ok(size >= N, `reset cache should hold the whole ${N}-line frame, held ${size}`);
+	});
+});
+
+/**
+ * Child whose render() returns its current `out` array. Reassigning `out`
+ * (the way Text/Markdown reallocate on setText) changes the reference, which is
+ * the dirty signal Container.render keys on. Counts renders so a test can assert
+ * children are still polled every frame (the assertComponentWidth/identity check
+ * must keep running even on a cache hit).
+ */
+class RefChild implements Component {
+	out: string[];
+	renders = 0;
+	constructor(out: string[]) {
+		this.out = out;
+	}
+	render(): string[] {
+		this.renders++;
+		return this.out;
+	}
+	invalidate(): void {}
+}
+
+describe("Container.render flatten memoization (D2)", () => {
+	it("reuses the flattened array by identity when no child changed", () => {
+		const container = new Container();
+		const a = new RefChild(["a0", "a1"]);
+		const b = new RefChild(["b0"]);
+		container.addChild(a);
+		container.addChild(b);
+
+		const first = container.render(80);
+		assert.deepStrictEqual(first, ["a0", "a1", "b0"]);
+
+		const second = container.render(80);
+		assert.strictEqual(second, first, "unchanged children should yield the same flattened array instance");
+		// Children are still polled each frame (needed for the assert-width guard and
+		// the reference comparison), even though the flatten is reused.
+		assert.strictEqual(a.renders, 2);
+		assert.strictEqual(b.renders, 2);
+	});
+
+	it("re-flattens (no stale content) when a child swaps its output array", () => {
+		const container = new Container();
+		const a = new RefChild(["a0", "a1"]);
+		const b = new RefChild(["b0"]);
+		container.addChild(a);
+		container.addChild(b);
+
+		const first = container.render(80);
+		assert.deepStrictEqual(first, ["a0", "a1", "b0"]);
+
+		// Mirror Text/Markdown.setText: reallocate the output array.
+		b.out = ["b0-CHANGED", "b1-NEW"];
+		const second = container.render(80);
+		assert.notStrictEqual(second, first, "a changed child must force a fresh flatten");
+		assert.deepStrictEqual(second, ["a0", "a1", "b0-CHANGED", "b1-NEW"]);
+	});
+
+	it("re-flattens when width changes even if child array refs are unchanged", () => {
+		const container = new Container();
+		const a = new RefChild(["a0"]);
+		container.addChild(a);
+
+		const w80 = container.render(80);
+		const w40 = container.render(40);
+		assert.notStrictEqual(w40, w80, "a width change must invalidate the flatten cache");
+		assert.deepStrictEqual(w40, ["a0"]);
+	});
+
+	it("re-flattens when the child list changes", () => {
+		const container = new Container();
+		const a = new RefChild(["a0"]);
+		container.addChild(a);
+		const first = container.render(80);
+		assert.deepStrictEqual(first, ["a0"]);
+
+		container.addChild(new RefChild(["b0"]));
+		const second = container.render(80);
+		assert.deepStrictEqual(second, ["a0", "b0"]);
+	});
+
+	it("does not let downstream line-reset mutation corrupt the flatten cache (TUI path)", () => {
+		// The TUI mutates the rendered frame (resets/markers). Container.render hands
+		// out its memoized array, so if that mutation hit the cache, the second frame
+		// would reuse a reset-baked array and double-apply. Drive two real renders and
+		// assert the second frame emits the same content as the first for an unchanged child.
+		const terminal = new CollectTerminal(40, 6);
+		const tui = new TUI(terminal);
+		const child = new RefChild(["\x1b[3mItalic line", "plain line"]);
+		tui.addChild(child);
+
+		render(tui);
+		const firstOut = terminal.output();
+		terminal.writes.length = 0;
+
+		// Force another render with no child change (e.g. an unrelated requestRender).
+		render(tui);
+		const secondOut = terminal.output();
+
+		// Frame 1 painted the content; frame 2 is a no-op diff (nothing changed), so it
+		// must NOT re-emit the body lines. A corrupted cache would have changed the
+		// stored line bytes and shown a spurious diff.
+		assert.ok(firstOut.includes("Italic line"), "first frame paints the content");
+		assert.ok(
+			!secondOut.includes("Italic line"),
+			"second frame must be a no-op diff, not a re-render from a corrupted cache",
+		);
 	});
 });

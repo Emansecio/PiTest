@@ -57,7 +57,8 @@ function buildImage(): string[] {
 export class DaxnutsComponent implements Component {
 	private ui: TUI;
 	private image: string[];
-	private interval: ReturnType<typeof setInterval> | null = null;
+	private unsubscribe: (() => void) | null = null;
+	private startedAt = -1;
 	private tick = 0;
 	private maxTicks = 25; // ~2 seconds at 80ms
 	private cachedLines: string[] = [];
@@ -75,20 +76,31 @@ export class DaxnutsComponent implements Component {
 	}
 
 	private startAnimation(): void {
-		this.interval = setInterval(() => {
-			this.tick++;
-			if (this.tick >= this.maxTicks) {
-				this.stopAnimation();
-			}
+		// Drive off the shared animation ticker (one timer for the whole TUI)
+		// instead of a private setInterval. Frame is derived from the monotonic
+		// clock — mirroring createSpinnerTicker — and we report dirty only on the
+		// turn of a tick. One-shot: auto-stops at maxTicks and unsubscribes.
+		this.unsubscribe = this.ui.addAnimationCallback((now: number) => {
+			if (this.startedAt < 0) this.startedAt = now;
+			// Frame derived off the shared monotonic clock (floor/divide/modulo),
+			// mirroring createSpinnerTicker. Anchored to startedAt so the reveal
+			// counts up from 0; this is a one-shot, so on the first wrap we clamp
+			// to maxTicks (final frame freezes) instead of looping back to 0.
+			const elapsed = Math.floor((now - this.startedAt) / 80);
+			const frame = elapsed % this.maxTicks;
+			const t = elapsed >= this.maxTicks ? this.maxTicks : frame;
+			if (t === this.tick) return false;
+			this.tick = t;
 			this.cachedWidth = 0;
-			this.ui.requestRender();
-		}, 80);
+			if (this.tick >= this.maxTicks) this.stopAnimation();
+			return true;
+		});
 	}
 
 	private stopAnimation(): void {
-		if (this.interval) {
-			clearInterval(this.interval);
-			this.interval = null;
+		if (this.unsubscribe) {
+			this.unsubscribe();
+			this.unsubscribe = null;
 		}
 	}
 

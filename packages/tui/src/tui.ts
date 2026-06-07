@@ -96,6 +96,15 @@ export interface Component {
 	 * Render the component to lines for the given viewport width
 	 * @param width - Current viewport width
 	 * @returns Array of strings, each representing a line
+	 *
+	 * Memoization contract (relied on by Container.render and Box.render):
+	 * when the output changes, return a *new* array; when it is unchanged you may
+	 * return the same array instance, but you must NOT mutate an
+	 * already-returned array in place. Parents detect "this child changed" by the
+	 * returned array's reference identity, so an in-place mutation that keeps the
+	 * same reference would be missed and show stale content. The built-in
+	 * components honor this by reallocating their cached lines on
+	 * setText()/invalidate().
 	 */
 	render(width: number): string[];
 
@@ -264,6 +273,21 @@ export interface OverlayHandle {
 export class Container implements Component {
 	children: Component[] = [];
 
+	// Memoized flatten of the children's rendered lines. Rebuilding the merged
+	// array every frame is O(total lines); on the steady-state hot path (long
+	// transcript, one bottom line changing per spinner tick) that dominates.
+	// We re-call each child's render() every frame anyway — built-in components
+	// memoize internally and hand back the *same* array object when nothing
+	// changed — so a child signals "I changed" by returning a different array
+	// reference (setText/invalidate always reallocate; they never mutate the
+	// cached array in place). When width, the child list, and every child's
+	// returned array reference all match last frame, the previously flattened
+	// output is byte-identical and is reused without re-pushing. assertComponentWidth
+	// still runs per child every frame (it is gated by PIT_RENDER_ASSERT).
+	private flattenCacheWidth = -1;
+	private flattenCacheChildOutputs: string[][] = [];
+	private flattenCacheLines: string[] = [];
+
 	addChild(component: Component): void {
 		this.children.push(component);
 	}
@@ -286,14 +310,27 @@ export class Container implements Component {
 	}
 
 	render(width: number): string[] {
+		const children = this.children;
+		const childOutputs = new Array<string[]>(children.length);
+		let reusable = this.flattenCacheWidth === width && this.flattenCacheChildOutputs.length === children.length;
+		for (let i = 0; i < children.length; i++) {
+			const childLines = children[i].render(width);
+			if (renderAssertEnabled) assertComponentWidth(children[i], childLines, width);
+			childOutputs[i] = childLines;
+			if (reusable && childLines !== this.flattenCacheChildOutputs[i]) reusable = false;
+		}
+		if (reusable) return this.flattenCacheLines;
+
 		const lines: string[] = [];
-		for (const child of this.children) {
-			const childLines = child.render(width);
-			if (renderAssertEnabled) assertComponentWidth(child, childLines, width);
-			for (const line of childLines) {
-				lines.push(line);
+		for (let i = 0; i < childOutputs.length; i++) {
+			const childLines = childOutputs[i];
+			for (let j = 0; j < childLines.length; j++) {
+				lines.push(childLines[j]);
 			}
 		}
+		this.flattenCacheWidth = width;
+		this.flattenCacheChildOutputs = childOutputs;
+		this.flattenCacheLines = lines;
 		return lines;
 	}
 }
@@ -338,6 +375,16 @@ export class TUI extends Container {
 	// across renders; this cache turns the per-frame O(N) reset concatenation into
 	// O(1) hits on those lines. FIFO-evicted once cache exceeds RESET_CACHE_MAX.
 	private readonly resetCache = new Map<string, string>();
+	// Reference-identity fast path for applyLineResets. Components memoize their
+	// rendered lines (see Text/Markdown), so unchanged lines arrive as the *same*
+	// string object every frame. Holding last frame's input array and its reset
+	// output lets the steady-state loop reuse a line's reset value with a pointer
+	// compare + index lookup instead of hashing the full string for the Map. The
+	// produced output bytes are identical to recomputing via the Map; only the
+	// per-line cost of the O(N) walk drops. Both arrays are replaced wholesale
+	// each call so they can never drift from the array we return.
+	private resetInputCache: string[] = [];
+	private resetOutputCache: string[] = [];
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
@@ -895,6 +942,10 @@ export class TUI extends Container {
 	/** Composite all overlays into content lines (sorted by focusOrder, higher = on top). */
 	private compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[] {
 		if (this.overlayStack.length === 0) return lines;
+		// Copy before compositing: `lines` may be a Container's memoized flatten array
+		// (see Container.render) and is mutated below. The spread is at the O(N) floor
+		// any full-length return requires and is engine-optimized; profiling showed the
+		// overlay frame cost is dominated by per-line compositing + diff, not this copy.
 		const result = [...lines];
 
 		// Pre-render all visible overlays and calculate positions
@@ -972,12 +1023,40 @@ export class TUI extends Container {
 		// per-frame string recompute. 2× headroom absorbs the few lines that
 		// actually change per frame; the hard max bounds memory.
 		const cap = Math.min(TUI.RESET_CACHE_HARD_MAX, Math.max(TUI.RESET_CACHE_MIN, lines.length * 2));
+		const prevInput = this.resetInputCache;
+		const prevOutput = this.resetOutputCache;
+		// Rebuilt this frame so it can't drift from the array returned. Holds the
+		// pre-reset input (key for the pointer compare) and its post-reset output
+		// at each index, for next frame's reference fast path.
+		const nextInput = new Array<string>(lines.length);
+		const nextOutput = new Array<string>(lines.length);
+		// Read-only over `lines`, write into the freshly allocated `nextOutput`
+		// (which is returned). Not mutating the input matters: the input may be a
+		// Container's memoized flatten array (see Container.render) — mutating it
+		// in place would corrupt that cache (double-applied resets, broken
+		// reference fast-path) on the next frame. nextOutput is allocated anyway
+		// for the reference cache, so returning it costs no extra array.
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
-			if (isImageLine(line)) continue;
+			// Same string object as this index last frame → reuse its reset output
+			// verbatim (pointer compare, no full-string hash). Byte-identical to the
+			// Map path, including the isImageLine "leave untouched" case where the
+			// stored output equals the input.
+			if (line === prevInput[i] && i < prevOutput.length) {
+				const out = prevOutput[i];
+				nextInput[i] = line;
+				nextOutput[i] = out;
+				continue;
+			}
+			if (isImageLine(line)) {
+				nextInput[i] = line;
+				nextOutput[i] = line;
+				continue;
+			}
 			const cached = cache.get(line);
 			if (cached !== undefined) {
-				lines[i] = cached;
+				nextInput[i] = line;
+				nextOutput[i] = cached;
 				continue;
 			}
 			const normalized = normalizeTerminalOutput(line) + reset;
@@ -987,9 +1066,12 @@ export class TUI extends Container {
 				if (oldest !== undefined) cache.delete(oldest);
 			}
 			cache.set(line, normalized);
-			lines[i] = normalized;
+			nextInput[i] = line;
+			nextOutput[i] = normalized;
 		}
-		return lines;
+		this.resetInputCache = nextInput;
+		this.resetOutputCache = nextOutput;
+		return nextOutput;
 	}
 
 	/**
@@ -1102,7 +1184,10 @@ export class TUI extends Container {
 	 * @param height - Terminal height (visible viewport size)
 	 * @returns Cursor position { row, col } or null if no marker found
 	 */
-	private extractCursorPosition(lines: string[], height: number): { row: number; col: number } | null {
+	private extractCursorPosition(
+		lines: string[],
+		height: number,
+	): { pos: { row: number; col: number } | null; lines: string[] } {
 		// Only scan the bottom `height` lines (visible viewport)
 		const viewportTop = Math.max(0, lines.length - height);
 		for (let row = lines.length - 1; row >= viewportTop; row--) {
@@ -1113,13 +1198,18 @@ export class TUI extends Container {
 				const beforeMarker = line.slice(0, markerIndex);
 				const col = visibleWidth(beforeMarker);
 
-				// Strip marker from the line
-				lines[row] = line.slice(0, markerIndex) + line.slice(markerIndex + CURSOR_MARKER.length);
+				// Strip marker into a copy rather than mutating in place: `lines` may be a
+				// Container's memoized flatten array (see Container.render). Mutating it would
+				// strip the marker from the cached line permanently, so a later frame that
+				// reuses the cache would no longer find the marker and would lose the cursor.
+				// Marker-found is the rare focused-input path, so the copy is not on the hot path.
+				const out = lines.slice();
+				out[row] = line.slice(0, markerIndex) + line.slice(markerIndex + CURSOR_MARKER.length);
 
-				return { row, col };
+				return { pos: { row, col }, lines: out };
 			}
 		}
-		return null;
+		return { pos: null, lines };
 	}
 
 	/** Absolute path of the render-overflow diagnostic file. */
@@ -1205,18 +1295,32 @@ export class TUI extends Container {
 			newLines = this.compositeOverlays(newLines, width, height);
 		}
 
-		// Extract cursor position before applying line resets (marker must be found first)
-		const cursorPos = this.extractCursorPosition(newLines, height);
+		// Extract cursor position before applying line resets (marker must be found first).
+		// Returns a marker-stripped copy when a marker is present so the source array
+		// (possibly a Container flatten cache) is never mutated in place.
+		const cursor = this.extractCursorPosition(newLines, height);
+		const cursorPos = cursor.pos;
+		newLines = cursor.lines;
 
 		newLines = this.applyLineResets(newLines);
 
-		// Helper to clear scrollback and viewport and render all new lines
-		const fullRender = (clear: boolean): void => {
+		// Helper to repaint every line. clearMode selects how much is wiped first:
+		//   "none"   → no clear (first render onto an assumed-clean screen)
+		//   "all"    → clear screen + home + clear scrollback (\x1b[3J); for width
+		//              changes and shrink, where rewrapped history must not linger
+		//   "screen" → clear visible screen + home but KEEP scrollback; for a
+		//              height change without a width change, where the wrap is
+		//              unchanged so the rolled-up history is still valid and wiping
+		//              it (\x1b[3J) would needlessly destroy the user's scrollback
+		const fullRender = (clearMode: "none" | "all" | "screen"): void => {
 			this.fullRedrawCount += 1;
+			const clear = clearMode !== "none";
 			let buffer = "\x1b[?2026h"; // Begin synchronized output
 			if (clear) {
 				buffer += this.deleteKittyImages(this.previousKittyImageIds);
-				buffer += "\x1b[2J\x1b[H\x1b[3J"; // Clear screen, home, then clear scrollback
+				// Always clear the visible screen + home; only "all" also clears the
+				// scrollback so a height-only repaint preserves rollable history.
+				buffer += clearMode === "all" ? "\x1b[2J\x1b[H\x1b[3J" : "\x1b[2J\x1b[H";
 			}
 			for (let i = 0; i < newLines.length; i++) {
 				if (i > 0) buffer += "\r\n";
@@ -1252,23 +1356,26 @@ export class TUI extends Container {
 		// First render - just output everything without clearing (assumes clean screen)
 		if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {
 			logRedraw("first render");
-			fullRender(false);
+			fullRender("none");
 			return;
 		}
 
 		// Width changes always need a full re-render because wrapping changes.
 		if (widthChanged) {
 			logRedraw(`terminal width changed (${this.previousWidth} -> ${width})`);
-			fullRender(true);
+			fullRender("all");
 			return;
 		}
 
-		// Height changes normally need a full re-render to keep the visible viewport aligned,
-		// but Termux changes height when the software keyboard shows or hides.
-		// In that environment, a full redraw causes the entire history to replay on every toggle.
+		// Height changes need a full repaint to keep the visible viewport aligned, but
+		// the wrap is unchanged (width held), so the rolled-up scrollback is still
+		// valid — repaint with "screen" (clear visible screen, KEEP scrollback) instead
+		// of "all" (\x1b[3J wipes history). Termux toggles height when the soft keyboard
+		// shows/hides and is handled fully differentially below (no repaint at all), so
+		// this branch is for the non-Termux case; both now preserve scrollback.
 		if (heightChanged && !isTermuxSession()) {
 			logRedraw(`terminal height changed (${this.previousHeight} -> ${height})`);
-			fullRender(true);
+			fullRender("screen");
 			return;
 		}
 
@@ -1277,7 +1384,7 @@ export class TUI extends Container {
 		// Configurable via setClearOnShrink() or PIT_CLEAR_ON_SHRINK=0 env var
 		if (this.clearOnShrink && newLines.length < this.maxLinesRendered && this.overlayStack.length === 0) {
 			logRedraw(`clearOnShrink (maxLinesRendered=${this.maxLinesRendered})`);
-			fullRender(true);
+			fullRender("all");
 			return;
 		}
 
@@ -1325,7 +1432,7 @@ export class TUI extends Container {
 				const targetRow = Math.max(0, newLines.length - 1);
 				if (targetRow < prevViewportTop) {
 					logRedraw(`deleted lines moved viewport up (${targetRow} < ${prevViewportTop})`);
-					fullRender(true);
+					fullRender("all");
 					return;
 				}
 				const lineDiff = computeLineDiff(targetRow);
@@ -1336,7 +1443,7 @@ export class TUI extends Container {
 				const extraLines = this.previousLines.length - newLines.length;
 				if (extraLines > height) {
 					logRedraw(`extraLines > height (${extraLines} > ${height})`);
-					fullRender(true);
+					fullRender("all");
 					return;
 				}
 				if (extraLines > 0) {
@@ -1367,7 +1474,7 @@ export class TUI extends Container {
 		// If the first changed line is above the previous viewport, we need a full redraw.
 		if (firstChanged < prevViewportTop) {
 			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-			fullRender(true);
+			fullRender("all");
 			return;
 		}
 
