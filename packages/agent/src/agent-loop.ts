@@ -230,6 +230,15 @@ async function runLoop(
 				pendingMessages = [];
 			}
 
+			// Re-read the active tool surface: a prior turn may have pulled a hidden
+			// tool onto it (e.g. search_tool_bm25 activation). state.tools is a fresh
+			// array on change, so the identity check is a no-op when nothing moved;
+			// when it differs we swap only tools and keep the live messages array.
+			const liveTools = config.getActiveTools?.();
+			if (liveTools && liveTools !== currentContext.tools) {
+				currentContext = { ...currentContext, tools: liveTools };
+			}
+
 			// Stream assistant response. May return a TTSR interrupt; in that case
 			// we inject a system-reminder and replay the same turn (capped by
 			// MAX_TTSR_RETRIES_PER_TURN).

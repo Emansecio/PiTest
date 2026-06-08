@@ -833,7 +833,18 @@ export class AgentSession {
 			const def = allDefs[name];
 			if (!def) continue;
 			const description = typeof def.description === "string" ? def.description : "";
-			index.register({ name, description, definition: def });
+			// BM25 ranks over name + description + promptSnippet + tags. Feed the
+			// one-line snippet and the usage guidelines too: they carry capability
+			// keywords the bare description often omits (e.g. calc's "math" and its
+			// function names live in the guidelines), which lifts discovery recall
+			// without bloating the model-facing description.
+			index.register({
+				name,
+				description,
+				promptSnippet: this._normalizePromptSnippet(def.promptSnippet),
+				tags: this._normalizePromptGuidelines(def.promptGuidelines),
+				definition: def,
+			});
 		}
 	}
 

@@ -9,7 +9,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@pit/ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { getCurrentToolDiscoveryIndex } from "../../src/core/tool-discovery.js";
-import { createHarness, type Harness } from "./harness.js";
+import { createHarness, getMessageText, type Harness } from "./harness.js";
 
 describe("tool discovery activation reconcile", () => {
 	const harnesses: Harness[] = [];
@@ -76,5 +76,38 @@ describe("tool discovery activation reconcile", () => {
 		await harness.session.prompt("go");
 
 		expect([...harness.session.getActiveToolNames()].sort()).toEqual(before);
+	});
+
+	it("discovers, activates, and runs a real built-in tool end-to-end via search_tool_bm25", async () => {
+		// No `tools` override → the session uses its real default surface, so
+		// search_tool_bm25 is active and _seedToolDiscovery populates the index
+		// with the opt-in built-ins (calc among them).
+		const harness = await createHarness();
+		harnesses.push(harness);
+
+		// calc starts hidden (in the index), not on the active surface.
+		expect(harness.session.getActiveToolNames()).toContain("search_tool_bm25");
+		expect(harness.session.getActiveToolNames()).not.toContain("calc");
+
+		// Single run: the model searches+activates calc, then calls it on the very
+		// next turn of the SAME run. This only closes because the loop re-reads the
+		// active tool surface each turn (getActiveTools) after the reconcile.
+		harness.setResponses([
+			fauxAssistantMessage(
+				[fauxToolCall("search_tool_bm25", { query: "evaluate an arithmetic math expression", activate_top: true })],
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage([fauxToolCall("calc", { expression: "111 * 111" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		await harness.session.prompt("do the math for 111 * 111");
+
+		// Full loop in one run: search ranked + activated calc, the reconcile pulled
+		// it onto the surface, the loop re-read it for the next turn, and calc ran.
+		const transcript = harness.session.messages.map(getMessageText).join("\n");
+		expect(transcript).toContain("Activated: calc");
+		expect(harness.session.getActiveToolNames()).toContain("calc");
+		expect(transcript).toContain("12321");
+		expect(transcript).not.toContain('Tool "calc" not found');
 	});
 });

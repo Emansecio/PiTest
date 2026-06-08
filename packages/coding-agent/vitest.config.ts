@@ -41,6 +41,12 @@ export default defineConfig({
 			{ find: /^@pituned\/pi-ai$/, replacement: aiSrcIndex },
 			{ find: /^@pituned\/pi-ai\/oauth$/, replacement: aiSrcOAuth },
 			{ find: /^@pituned\/pi-agent-core$/, replacement: agentSrcIndex },
+			// Current package names (post-rebrand). The code imports `@pit/*`, so
+			// without these the suite resolved them to the built `dist/` instead of
+			// the source under test — stale builds silently masked source changes.
+			{ find: /^@pit\/ai$/, replacement: aiSrcIndex },
+			{ find: /^@pit\/ai\/oauth$/, replacement: aiSrcOAuth },
+			{ find: /^@pit\/agent-core$/, replacement: agentSrcIndex },
 		],
 	},
 });

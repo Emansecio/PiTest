@@ -232,6 +232,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;
 
 	/**
+	 * Returns the current active tool surface, re-read at the start of every turn.
+	 * Lets a tool activated mid-run (e.g. `search_tool_bm25` pulling a hidden tool
+	 * onto the surface) become callable on the very next turn of the same run, not
+	 * only the next run. Identity-stable: return the same array reference when
+	 * nothing changed and the loop skips the swap.
+	 */
+	getActiveTools?: () => AgentTool<any>[];
+
+	/**
 	 * Returns steering messages to inject into the conversation mid-run.
 	 *
 	 * Called after the current assistant turn finishes executing its tool calls, unless `shouldStopAfterTurn` exits first.

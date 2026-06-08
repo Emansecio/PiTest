@@ -479,6 +479,11 @@ export class Agent {
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
+			// Re-read the live tool surface each turn so a tool activated mid-run
+			// (e.g. search_tool_bm25) is callable on the next turn of the same run,
+			// not just the next run. Returns the current array reference; the loop
+			// skips the swap while it is unchanged.
+			getActiveTools: () => this._state.tools,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			getApiKey: this.getApiKey,
