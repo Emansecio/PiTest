@@ -664,8 +664,8 @@ export class AgentSession {
 
 		// Publish a fresh tool discovery index so the `search_tool_bm25` tool
 		// can BM25-search hidden tools. Auto-seeding of hidden entries is gated
-		// by `toolDiscovery.enabled` in settings (default off): callers / SDK
-		// extensions populate the index via setCurrentToolDiscoveryIndex().
+		// by `toolDiscovery.enabled` in settings (default on): callers / SDK
+		// extensions also populate the index via setCurrentToolDiscoveryIndex().
 		this._toolDiscoveryIndex = createToolDiscoveryIndex();
 		this._seedToolDiscovery();
 		setCurrentToolDiscoveryIndex(this._toolDiscoveryIndex);
@@ -737,6 +737,43 @@ export class AgentSession {
 	}
 
 	/**
+	 * The default active tool surface — the single source of truth shared by
+	 * `_buildRuntime` (which seeds the active set) and `_seedToolDiscovery`
+	 * (which derives what stays OFF the discovery index). Gate settings are read
+	 * live, so a per-feature `enabled: false` drops that feature's tools here and
+	 * everywhere downstream.
+	 *
+	 * `read/grep/find/ls/symbol/bash/edit/write/ask/todo` are the always-on core;
+	 * `search_tool_bm25` rides the same gate as the discovery index it queries
+	 * (so it never surfaces with nothing to find); the remaining spreads are the
+	 * default-ON gated features (each opt-out via its `enabled: false` setting).
+	 */
+	private _defaultActiveToolNames(): string[] {
+		const s = this.settingsManager;
+		const on = (enabled: boolean, names: string[]): string[] => (enabled ? names : []);
+		return [
+			"read",
+			"grep",
+			"find",
+			"ls",
+			"symbol",
+			"bash",
+			"edit",
+			"write",
+			"ask",
+			"todo",
+			...on(s.getToolDiscoverySettings().enabled, ["search_tool_bm25"]),
+			...on(s.getHindsightSettings().enabled, ["retain", "recall", "reflect", "forget"]),
+			...on(s.getWebSearchSettings().enabled, ["web_search"]),
+			...on(s.getEvalSettings().enabled, ["eval"]),
+			...on(s.getLspSettings().enabled, ["lsp"]),
+			...on(s.getDebugSettings().enabled, ["debug"]),
+			...on(process.env.PIT_DEFER_HISTORY === "1", ["recall_tool_output"]),
+			...on(s.getChromeDevtoolsSettings().enabled, CHROME_FEATURE_TOOL_NAMES),
+		];
+	}
+
+	/**
 	 * Seed the hidden tool discovery index from settings. Registers two
 	 * disjoint sets of built-ins as hidden:
 	 *
@@ -771,24 +808,19 @@ export class AgentSession {
 		}
 		// 1. Explicit hiddenByDefault entries.
 		const explicit = new Set(cfg.hiddenByDefault);
-		// 2. Delta = allTools − codingTools, minus alwaysActive.
+		// 2. Delta = allTools − default-active surface, minus alwaysActive. The
+		// active surface (single source) already covers the gated features that
+		// are ON. We additionally hide, unconditionally: the chrome feature (its
+		// gate also governs the auto-launched manager, so a discovered-while-off
+		// chrome tool would only fail) and the meta/infra tools the model must
+		// never pull in via discovery.
 		const codingNames = new Set([
-			"read",
-			"bash",
-			"edit",
-			"edit_v2",
-			"write",
-			"symbol",
-			"ask",
-			"resolve",
-			"search_tool_bm25",
-			"retain",
-			"recall",
-			"reflect",
-			"forget",
-			"goal_complete",
-			"todo",
+			...this._defaultActiveToolNames(),
 			...CHROME_FEATURE_TOOL_NAMES,
+			"edit_v2",
+			"resolve",
+			"goal_complete",
+			"recall_tool_output",
 		]);
 		const alwaysActive = new Set(cfg.alwaysActive);
 		const candidates = new Set<string>(explicit);
@@ -3787,45 +3819,13 @@ export class AgentSession {
 		this._bindExtensionCore(this._extensionRunner);
 		this._applyExtensionBindings(this._extensionRunner);
 
-		const hindsightActive = this.settingsManager.getHindsightSettings().enabled
-			? ["retain", "recall", "reflect", "forget"]
-			: [];
-		// Default-on gates: web_search and eval are registered as built-in tool
-		// definitions unconditionally (via createAllToolDefinitions above), but
-		// only join the *active* tool surface when their setting resolves enabled.
-		// Both default to true in settings-manager so they ride out-of-the-box.
-		const webSearchActive = this.settingsManager.getWebSearchSettings().enabled ? ["web_search"] : [];
-		const evalActive = this.settingsManager.getEvalSettings().enabled ? ["eval"] : [];
-		const lspActive = this.settingsManager.getLspSettings().enabled ? ["lsp"] : [];
-		const debugActive = this.settingsManager.getDebugSettings().enabled ? ["debug"] : [];
-		const deferHistoryActive = process.env.PIT_DEFER_HISTORY === "1" ? ["recall_tool_output"] : [];
-		const cdpActive = this.settingsManager.getChromeDevtoolsSettings().enabled ? CHROME_FEATURE_TOOL_NAMES : [];
-		// Single source of truth for the default active surface. The SDK no longer
-		// passes its own list: when no explicit allowlist/noTools is given it sends
-		// `undefined`, so this default decides. read/grep/find/ls/symbol are the
-		// always-on code-navigation core; the spreads are the default-ON gated
-		// features (each opt-out via its `enabled: false` setting).
+		// Default active surface comes from the single source of truth,
+		// `_defaultActiveToolNames()` (shared with the discovery seed so the two
+		// never drift). The SDK no longer passes its own list: with no explicit
+		// allowlist/noTools it sends `undefined`, so this default decides.
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: [
-					"read",
-					"grep",
-					"find",
-					"ls",
-					"symbol",
-					"bash",
-					"edit",
-					"write",
-					"ask",
-					"todo",
-					...hindsightActive,
-					...webSearchActive,
-					...evalActive,
-					...lspActive,
-					...debugActive,
-					...deferHistoryActive,
-					...cdpActive,
-				];
+			: this._defaultActiveToolNames();
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
