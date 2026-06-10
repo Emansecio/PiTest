@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentTool } from "@pit/agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
-import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile } from "fs/promises";
+import { constants, createReadStream } from "fs";
+import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { getReadmePath } from "../../config.js";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.js";
@@ -91,12 +92,22 @@ export interface ReadOperations {
 	access: (absolutePath: string) => Promise<void>;
 	/** Detect image MIME type, return null or undefined for non-images */
 	detectImageMimeType?: (absolutePath: string) => Promise<string | null | undefined>;
+	/**
+	 * Optional: file size lookup. Together with createByteStream it enables the
+	 * large-file streaming fast path. Remote operations (e.g. SSH) may omit both
+	 * and keep the buffered readFile path.
+	 */
+	stat?: (absolutePath: string) => Promise<{ size: number }>;
+	/** Optional: open a raw byte stream over the file (see stat). */
+	createByteStream?: (absolutePath: string) => NodeJS.ReadableStream;
 }
 
 const defaultReadOperations: ReadOperations = {
 	readFile: (path) => fsReadFile(path),
 	access: (path) => fsAccess(path, constants.R_OK),
 	detectImageMimeType: detectSupportedImageMimeTypeFromFile,
+	stat: (path) => fsStat(path),
+	createByteStream: (path) => createReadStream(path),
 };
 
 export interface ReadToolOptions {
@@ -117,6 +128,11 @@ export interface ReadToolOptions {
 	 * repeat reads (replacing it with a short marker). When omitted, no de-dup.
 	 */
 	readDedupeStore?: ReadDedupeStore;
+	/**
+	 * Text files larger than this many bytes stream line-by-line instead of
+	 * being fully buffered. Default: 10MB. Mainly overridable for tests.
+	 */
+	streamingMinBytes?: number;
 }
 
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
@@ -170,6 +186,106 @@ function trimTrailingEmptyLines(lines: string[]): string[] {
 		end--;
 	}
 	return lines.slice(0, end);
+}
+
+/** Files larger than this stream line-by-line instead of being fully buffered. */
+const STREAM_READ_MIN_BYTES = 10 * 1024 * 1024; // 10MB
+
+interface StreamedTextRead {
+	kind: "text";
+	/** Lines [startLine, startLine + collectable), with the buffered path's split("\n") semantics. */
+	selectedLines: string[];
+	/** Exact equivalent of textContent.split("\n").length for the whole file. */
+	totalFileLines: number;
+}
+
+interface StreamedBinaryRead {
+	kind: "binary";
+}
+
+/**
+ * Stream a large text file, collecting only the lines this read could possibly
+ * output plus an exact total line count. Byte-identical to the buffered path:
+ * lines use split("\n") semantics (a CR before LF is preserved, a trailing
+ * newline yields a final empty line) and the binary sniff inspects the same
+ * leading bytes. Once every collectable line is gathered, the remainder is only
+ * scanned for raw 0x0A bytes (no decode) to finish the count — valid because
+ * a UTF-8 continuation byte can never be 0x0A. Memory stays O(collected lines)
+ * instead of O(file size).
+ */
+async function streamLargeTextRead(
+	absolutePath: string,
+	createByteStream: (absolutePath: string) => NodeJS.ReadableStream,
+	startLine: number,
+	limit: number | undefined,
+	signal?: AbortSignal,
+): Promise<StreamedTextRead | StreamedBinaryRead> {
+	// Without a user limit, one line beyond what truncateHead can emit is enough
+	// to make it report truncation exactly as if it had seen the full content.
+	const maxCollect = limit !== undefined ? Math.max(0, limit) : DEFAULT_MAX_LINES + 1;
+	const collectEnd = startLine + maxCollect;
+	const stream = createByteStream(absolutePath);
+	const decoder = new StringDecoder("utf8");
+	const selectedLines: string[] = [];
+	let sniffChunks: Buffer[] = [];
+	let sniffedBytes = 0;
+	let sniffedText = "";
+	let sniffDone = false;
+	let carry = "";
+	// Number of completed (newline-terminated) lines so far == index of the line
+	// currently accumulating in `carry`.
+	let completedLines = 0;
+	let countOnly = false;
+	try {
+		for await (const data of stream) {
+			if (signal?.aborted) throw new Error("Operation aborted");
+			const chunk = data as Buffer;
+			if (countOnly) {
+				let pos = chunk.indexOf(10);
+				while (pos !== -1) {
+					completedLines++;
+					pos = chunk.indexOf(10, pos + 1);
+				}
+				continue;
+			}
+			const text = decoder.write(chunk);
+			if (!sniffDone) {
+				sniffChunks.push(chunk);
+				sniffedBytes += chunk.length;
+				if (sniffedText.length < BINARY_SNIFF_BYTES) sniffedText += text;
+				if (sniffedBytes >= BINARY_SNIFF_BYTES) {
+					sniffDone = true;
+					if (looksBinary(Buffer.concat(sniffChunks), sniffedText)) return { kind: "binary" };
+					sniffChunks = [];
+				}
+			}
+			const parts = (carry + text).split("\n");
+			carry = parts.pop() as string;
+			for (const part of parts) {
+				if (completedLines >= startLine && completedLines < collectEnd) selectedLines.push(part);
+				completedLines++;
+			}
+			if (sniffDone && completedLines >= collectEnd) {
+				// Every collectable line is in; the rest only needs counting.
+				countOnly = true;
+				carry = "";
+			}
+		}
+	} finally {
+		const destroyable = stream as { destroy?: () => void };
+		destroyable.destroy?.();
+	}
+	if (signal?.aborted) throw new Error("Operation aborted");
+	if (!sniffDone && looksBinary(Buffer.concat(sniffChunks), sniffedText)) return { kind: "binary" };
+	if (!countOnly) {
+		// Flush any incomplete trailing multi-byte sequence the same way
+		// buffer.toString("utf-8") would (as replacement chars), then account for
+		// the final line after the last newline.
+		carry += decoder.end();
+		if (completedLines >= startLine && completedLines < collectEnd) selectedLines.push(carry);
+	}
+	const totalFileLines = completedLines + 1;
+	return { kind: "text", selectedLines, totalFileLines };
 }
 
 function getNonVisionImageNote(model: Model<Api> | undefined): string | undefined {
@@ -313,6 +429,7 @@ export function createReadToolDefinition(
 	const embedHashlineAnchors = options?.embedHashlineAnchors ?? true;
 	const embedHashlineAnchorsMode = options?.embedHashlineAnchorsMode ?? "block";
 	const dedupeStore = options?.readDedupeStore;
+	const streamingMinBytes = options?.streamingMinBytes ?? STREAM_READ_MIN_BYTES;
 	return {
 		name: "read",
 		activity: "navigation",
@@ -418,68 +535,116 @@ Common mistakes to avoid:
 									];
 								}
 							} else {
-								// Read text content.
-								const buffer = await ops.readFile(absolutePath);
-								const textContent = buffer.toString("utf-8");
-
-								// Binary sniff: a non-image file with NUL bytes or mostly-invalid
-								// UTF-8 is not displayable as text. Returning the mojibake wastes
-								// context and tells the model nothing; instead point it at bash.
-								if (looksBinary(buffer, textContent)) {
-									const note = `[Binary file: ${basename(absolutePath)}, ${formatSize(buffer.length)} (${buffer.length} bytes). Not displayable as text. Use \`bash\` for hex/metadata (e.g. xxd, file).]`;
-									content = [{ type: "text", text: note }];
-									if (aborted) return;
-									signal?.removeEventListener("abort", onAbort);
-									resolve({ content, details: undefined });
-									return;
+								// Read text content. Output is capped at DEFAULT_MAX_LINES/
+								// DEFAULT_MAX_BYTES, so fully buffering a huge file costs O(file
+								// size) memory for a few KB of output. Files above the streaming
+								// threshold are read line-by-line instead; the buffered path stays
+								// for small files, operations without stat/createByteStream (e.g.
+								// remote), notebooks, and JSON-crush-eligible reads (crush needs
+								// the whole content).
+								// Apply offset if specified. Convert from 1-indexed input to 0-indexed array access.
+								const startLine = offset ? Math.max(0, offset - 1) : 0;
+								const startLineDisplay = startLine + 1;
+								const jsonCrushEligible =
+									process.env.PIT_JSON_CRUSH === "1" && offset === undefined && limit === undefined;
+								let streamed: StreamedTextRead | StreamedBinaryRead | undefined;
+								if (
+									ops.stat &&
+									ops.createByteStream &&
+									!jsonCrushEligible &&
+									!absolutePath.toLowerCase().endsWith(".ipynb")
+								) {
+									const fileStat = await ops.stat(absolutePath);
+									if (fileStat.size > streamingMinBytes) {
+										streamed = await streamLargeTextRead(
+											absolutePath,
+											ops.createByteStream,
+											startLine,
+											limit,
+											signal,
+										);
+										if (streamed.kind === "binary") {
+											const note = `[Binary file: ${basename(absolutePath)}, ${formatSize(fileStat.size)} (${fileStat.size} bytes). Not displayable as text. Use \`bash\` for hex/metadata (e.g. xxd, file).]`;
+											content = [{ type: "text", text: note }];
+											if (aborted) return;
+											signal?.removeEventListener("abort", onAbort);
+											resolve({ content, details: undefined });
+											return;
+										}
+									}
 								}
 
-								// Jupyter notebooks: parse cells[] and render as flat text. Offset/limit
-								// address CELLS (not lines) so a 200-cell notebook pages like a file.
-								// Falls back to plain-text rendering on parse failure rather than blowing
-								// up — many .ipynb files in the wild have stray trailing content.
-								if (absolutePath.toLowerCase().endsWith(".ipynb")) {
-									try {
-										const formatted = formatNotebookSource(textContent, {
-											offset,
-											limit,
-											name: basename(absolutePath),
-										});
-										let outputText = formatted.text;
-										const startIndex = Math.max(0, (offset ?? 1) - 1);
-										const renderedEnd = startIndex + formatted.renderedCells;
-										if (renderedEnd < formatted.totalCells) {
-											outputText += `\n\n[Showing cells ${startIndex + 1}-${renderedEnd} of ${formatted.totalCells}. Use offset=${renderedEnd + 1} to continue.]`;
-										}
-										content = [{ type: "text", text: outputText }];
+								let totalFileLines: number;
+								let selectedLines: string[];
+								// Whole-file data, only available on the buffered path (anchors need it).
+								let wholeFile: { textContent: string; allLines: string[] } | undefined;
+								if (streamed?.kind === "text") {
+									totalFileLines = streamed.totalFileLines;
+									// Check if offset is out of bounds.
+									if (startLine >= totalFileLines) {
+										throw new Error(`Offset ${offset} is beyond end of file (${totalFileLines} lines total)`);
+									}
+									selectedLines = streamed.selectedLines;
+								} else {
+									const buffer = await ops.readFile(absolutePath);
+									const textContent = buffer.toString("utf-8");
+
+									// Binary sniff: a non-image file with NUL bytes or mostly-invalid
+									// UTF-8 is not displayable as text. Returning the mojibake wastes
+									// context and tells the model nothing; instead point it at bash.
+									if (looksBinary(buffer, textContent)) {
+										const note = `[Binary file: ${basename(absolutePath)}, ${formatSize(buffer.length)} (${buffer.length} bytes). Not displayable as text. Use \`bash\` for hex/metadata (e.g. xxd, file).]`;
+										content = [{ type: "text", text: note }];
 										if (aborted) return;
 										signal?.removeEventListener("abort", onAbort);
 										resolve({ content, details: undefined });
 										return;
-									} catch {
-										// Fall through to the generic text path — better degraded than broken.
 									}
+
+									// Jupyter notebooks: parse cells[] and render as flat text. Offset/limit
+									// address CELLS (not lines) so a 200-cell notebook pages like a file.
+									// Falls back to plain-text rendering on parse failure rather than blowing
+									// up — many .ipynb files in the wild have stray trailing content.
+									if (absolutePath.toLowerCase().endsWith(".ipynb")) {
+										try {
+											const formatted = formatNotebookSource(textContent, {
+												offset,
+												limit,
+												name: basename(absolutePath),
+											});
+											let outputText = formatted.text;
+											const startIndex = Math.max(0, (offset ?? 1) - 1);
+											const renderedEnd = startIndex + formatted.renderedCells;
+											if (renderedEnd < formatted.totalCells) {
+												outputText += `\n\n[Showing cells ${startIndex + 1}-${renderedEnd} of ${formatted.totalCells}. Use offset=${renderedEnd + 1} to continue.]`;
+											}
+											content = [{ type: "text", text: outputText }];
+											if (aborted) return;
+											signal?.removeEventListener("abort", onAbort);
+											resolve({ content, details: undefined });
+											return;
+										} catch {
+											// Fall through to the generic text path — better degraded than broken.
+										}
+									}
+
+									const allLines = textContent.split("\n");
+									wholeFile = { textContent, allLines };
+									totalFileLines = allLines.length;
+									// Check if offset is out of bounds.
+									if (startLine >= allLines.length) {
+										throw new Error(
+											`Offset ${offset} is beyond end of file (${allLines.length} lines total)`,
+										);
+									}
+									const endLine =
+										limit !== undefined ? Math.min(startLine + limit, allLines.length) : allLines.length;
+									selectedLines = allLines.slice(startLine, endLine);
 								}
 
-								const allLines = textContent.split("\n");
-								const totalFileLines = allLines.length;
-								// Apply offset if specified. Convert from 1-indexed input to 0-indexed array access.
-								const startLine = offset ? Math.max(0, offset - 1) : 0;
-								const startLineDisplay = startLine + 1;
-								// Check if offset is out of bounds.
-								if (startLine >= allLines.length) {
-									throw new Error(`Offset ${offset} is beyond end of file (${allLines.length} lines total)`);
-								}
-								let selectedContent: string;
-								let userLimitedLines: number | undefined;
 								// If limit is specified by the user, honor it first. Otherwise truncateHead decides.
-								if (limit !== undefined) {
-									const endLine = Math.min(startLine + limit, allLines.length);
-									selectedContent = allLines.slice(startLine, endLine).join("\n");
-									userLimitedLines = endLine - startLine;
-								} else {
-									selectedContent = allLines.slice(startLine).join("\n");
-								}
+								const selectedContent = selectedLines.join("\n");
+								const userLimitedLines = limit !== undefined ? selectedLines.length : undefined;
 								// Apply truncation, respecting both line and byte limits.
 								const truncation = truncateHead(selectedContent);
 								let outputText: string;
@@ -503,7 +668,7 @@ Common mistakes to avoid:
 									details = { truncation };
 								} else if (truncation.firstLineExceedsLimit) {
 									// First line alone exceeds the byte limit. Point the model at a bash fallback.
-									const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine], "utf-8"));
+									const firstLineSize = formatSize(Buffer.byteLength(selectedLines[0] ?? "", "utf-8"));
 									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
 									details = { truncation };
 								} else if (truncation.truncated) {
@@ -517,9 +682,9 @@ Common mistakes to avoid:
 										outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
 									}
 									details = { truncation };
-								} else if (userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length) {
+								} else if (userLimitedLines !== undefined && startLine + userLimitedLines < totalFileLines) {
 									// User-specified limit stopped early, but the file still has more content.
-									const remaining = allLines.length - (startLine + userLimitedLines);
+									const remaining = totalFileLines - (startLine + userLimitedLines);
 									const nextOffset = startLine + userLimitedLines + 1;
 									outputText = `${truncation.content}\n\n[${remaining} more lines in file. Use offset=${nextOffset} to continue.]`;
 								} else {
@@ -544,17 +709,21 @@ Common mistakes to avoid:
 									}
 								}
 								// Anchors: on by default, only when caller did not slice the file.
+								// wholeFile is absent only on the streaming path, where a truncation
+								// always occurs (file > threshold >> byte cap) and this branch is
+								// unreachable anyway.
 								if (
 									!dedupeSuppressed &&
 									embedHashlineAnchors &&
 									offset === undefined &&
 									limit === undefined &&
-									!truncation.truncated
+									!truncation.truncated &&
+									wholeFile !== undefined
 								) {
 									if (embedHashlineAnchorsMode === "interleave") {
 										outputText = interleaveAnchorsIntoLines(outputText);
 									} else {
-										outputText += `\n\n<anchors>\n${formatAnchorsForRead(textContent, { lines: allLines })}\n</anchors>`;
+										outputText += `\n\n<anchors>\n${formatAnchorsForRead(wholeFile.textContent, { lines: wholeFile.allLines })}\n</anchors>`;
 									}
 								}
 								content = [{ type: "text", text: outputText }];

@@ -26,6 +26,7 @@ import {
 	markEntryCooldown,
 	modelsAreEqual,
 	resetApiProviders,
+	splitSystemPromptOnDynamic,
 	streamSimple,
 } from "@pit/ai";
 import { theme } from "../modes/interactive/theme/theme.ts";
@@ -103,6 +104,7 @@ import {
 	loadFrequentFilesSnapshot,
 	saveFrequentFilesSnapshot,
 } from "./frequent-files.js";
+import { readGitBranch } from "./git-state.js";
 import { GoalManager, type GoalSnapshot, type GoalState, setCurrentGoalManager } from "./goal/goal-manager.ts";
 import {
 	defaultBankPath,
@@ -489,6 +491,12 @@ export class AgentSession {
 	// Transient: which Tier 4 rules fired per in-flight toolCallId. Read once
 	// in _handleToolExecutionEnd and dropped to keep memory bounded.
 	private readonly _hintsByToolCallId = new Map<string, string[]>();
+	// Transient: toolCallIds rejected pre-flight by the rewrite registry
+	// (Tier 2 suggest / Tier 3 block). Their error text is a deliberate
+	// registry message, not a model failure pattern worth learning — recording
+	// it would materialise dynamic Tier 4 rules that hint about our own
+	// refusal strings. Read once in _handleToolExecutionEnd and dropped.
+	private readonly _rejectedToolCallIds = new Set<string>();
 
 	// Per-session frequent-files tracker. Recorded on successful file-tool calls
 	// and surfaced in the system prompt when settings.frequentFiles.enabled.
@@ -518,6 +526,18 @@ export class AgentSession {
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
+
+	// Prompt-cache prefix diagnostics. Only the cache-stable prefix (everything
+	// before SYSTEM_PROMPT_DYNAMIC_MARKER) matters for prompt caching: rewriting
+	// it re-bills the whole prefix, while dynamic-suffix churn (date, cwd,
+	// frequent-files) is free. Measured at the source in _rebuildSystemPrompt to
+	// complement the usage-derived `instabilityTurn` in computeCacheStats with a
+	// root-cause count. The first observed prefix is the baseline (never counted).
+	// Note: rebuilds triggered during boot can register here too — they are cheap
+	// (nothing is cached pre-first-request) but honest to surface.
+	private _cachePrefixBaseline: string | undefined;
+	private _cachePrefixRebuilds = 0;
+	private readonly _cachePrefixReasons = new Map<string, number>();
 
 	// Hindsight memory bank, opened in the constructor when settings enable it.
 	private _hindsightBank: HindsightBank | undefined;
@@ -628,8 +648,10 @@ export class AgentSession {
 		this._openDeferredOutputStore();
 
 		// Compute the repo-level "frequent files" index in the background. First
-		// turn may miss it; subsequent turns get the cached list in the system
-		// prompt. Cheap: bounded by a 2s git timeout + a fallback fs walk.
+		// turn may miss it; subsequent turns get the list in the system prompt's
+		// dynamic suffix (after the cache marker), so the late arrival never
+		// invalidates the cacheable prefix. Cheap: bounded by a 2s git timeout +
+		// a fallback fs walk.
 		this._kickoffFrequentFilesIndex();
 
 		// Publish a fresh preview queue for this session so mutation tools can
@@ -905,10 +927,11 @@ export class AgentSession {
 			.then((files) => {
 				if (controller.signal.aborted) return;
 				this._frequentFilesIndex = files;
-				// Rebuild prompt so the next turn sees the index. Active tool list is
-				// unchanged so this is a cheap rerun.
+				// Rebuild so the next turn sees the index. The index now renders in
+				// the dynamic suffix (after the cache marker), so this rebuild does
+				// NOT rewrite the cacheable prefix — the prompt cache survives intact.
 				try {
-					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames(), "frequent-files-index");
 				} catch {
 					// A rebuild failure must not break the session — surface on next turn.
 				}
@@ -1189,6 +1212,7 @@ export class AgentSession {
 				break;
 			case "agent_end":
 				this._toolCallArgsByCallId.clear();
+				this._rejectedToolCallIds.clear();
 				if (this._extensionRunner.hasHandlers("agent_end")) {
 					await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
 				}
@@ -1310,7 +1334,15 @@ export class AgentSession {
 		// hint event recorded earlier in finalize.
 		const matchedHintRules = this._hintsByToolCallId.get(event.toolCallId);
 		this._hintsByToolCallId.delete(event.toolCallId);
-		if (event.isError) {
+		// Pre-flight registry rejections (Tier 2/3) are excluded from the learned-
+		// error store: their text is our own deliberate refusal message, not a model
+		// failure pattern. Learning them would materialise dynamic Tier 4 rules that
+		// hint about our own refusal strings. The per-rule reject counters already
+		// track them.
+		const wasRegistryRejected = this._rejectedToolCallIds.delete(event.toolCallId);
+		if (event.isError && wasRegistryRejected) {
+			this._maybeInjectToolErrorReflection(event.toolName, args, event.result);
+		} else if (event.isError) {
 			const rawError = extractErrorMessage(event.result?.content);
 			const fingerprint = normalizeErrorFingerprint(rawError);
 			if (fingerprint) {
@@ -1405,6 +1437,7 @@ export class AgentSession {
 		const perTool = this._registryRejects.get(event.toolName) ?? new Map<string, number>();
 		perTool.set(event.ruleId, (perTool.get(event.ruleId) ?? 0) + 1);
 		this._registryRejects.set(event.toolName, perTool);
+		this._rejectedToolCallIds.add(event.toolCallId);
 	}
 
 	private _handleToolErrorHintApplied(event: Extract<AgentEvent, { type: "tool_error_hint_applied" }>): void {
@@ -1475,6 +1508,11 @@ export class AgentSession {
 	 */
 	private _persistLearnedErrors(): void {
 		if (this._learnedErrors.size === 0) return;
+		// In-memory sessions (test harnesses, ephemeral SDK embeds) must not
+		// pollute the shared cross-session store: their errors are synthetic
+		// (temp-dir paths, faux providers) and would materialise misleading
+		// dynamic Tier 4 rules for real sessions.
+		if (!this.sessionManager.isPersisted()) return;
 		try {
 			persistSessionLearnedErrors(
 				defaultLearnedErrorsDir(),
@@ -2070,7 +2108,7 @@ export class AgentSession {
 		this.agent.state.tools = tools;
 
 		// Rebuild base system prompt with new tool set
-		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
+		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames, "tool-surface");
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
@@ -2152,7 +2190,7 @@ export class AgentSession {
 		return Array.from(unique);
 	}
 
-	private _rebuildSystemPrompt(toolNames: string[]): string {
+	private _rebuildSystemPrompt(toolNames: string[], reason = "init"): string {
 		const validToolNames = toolNames.filter((name) => this._toolRegistry.has(name));
 		const toolSnippets: Record<string, string> = {};
 		const promptGuidelines: string[] = [];
@@ -2206,6 +2244,7 @@ export class AgentSession {
 		const appendSystemPrompt = appendSections.length > 0 ? appendSections.join("\n\n") : undefined;
 		const loadedSkills = this._resourceLoader.getSkills().skills;
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
+		const gitBranch = readGitBranch(this._cwd);
 
 		this._baseSystemPromptOptions = {
 			cwd: this._cwd,
@@ -2219,8 +2258,47 @@ export class AgentSession {
 			// Repo-level frequent-files index — populated asynchronously after boot.
 			// Empty until the first compute resolves; harmless to pass either way.
 			frequentFiles: this._frequentFilesIndex.length > 0 ? this._frequentFilesIndex : undefined,
+			// Git branch — read synchronously from .git/HEAD on every rebuild
+			// (subprocess-free), rendered in the dynamic suffix only.
+			gitState: gitBranch ? { branch: gitBranch } : undefined,
 		};
-		return buildSystemPrompt(this._baseSystemPromptOptions);
+		const prompt = buildSystemPrompt(this._baseSystemPromptOptions);
+		this._trackPrefixStability(prompt, reason);
+		return prompt;
+	}
+
+	/**
+	 * Record whether this rebuild changed the cache-stable prefix (the slice
+	 * before SYSTEM_PROMPT_DYNAMIC_MARKER). Only prefix changes invalidate the
+	 * prompt cache; dynamic-suffix churn (date, cwd, frequent-files) is free. The
+	 * first observed prefix is the baseline and never counts as a rewrite.
+	 */
+	private _trackPrefixStability(prompt: string, reason: string): void {
+		const { staticPart } = splitSystemPromptOnDynamic(prompt);
+		if (this._cachePrefixBaseline === undefined) {
+			this._cachePrefixBaseline = staticPart;
+			return;
+		}
+		if (staticPart === this._cachePrefixBaseline) {
+			return;
+		}
+		this._cachePrefixBaseline = staticPart;
+		this._cachePrefixRebuilds++;
+		this._cachePrefixReasons.set(reason, (this._cachePrefixReasons.get(reason) ?? 0) + 1);
+	}
+
+	/**
+	 * Source-measured prompt-cache prefix churn: how many times the cacheable
+	 * prefix was rewritten this session and the trigger breakdown. Pairs with
+	 * getCacheStats()'s usage-derived `instabilityTurn` — this answers *why* the
+	 * prefix moved, that one answers *whether* hit-rate collapsed. `reasons` is
+	 * sorted descending by count.
+	 */
+	getCachePrefixDiagnostics(): { rebuilds: number; reasons: Array<{ reason: string; count: number }> } {
+		const reasons = Array.from(this._cachePrefixReasons, ([reason, count]) => ({ reason, count })).sort(
+			(a, b) => b.count - a.count || a.reason.localeCompare(b.reason),
+		);
+		return { rebuilds: this._cachePrefixRebuilds, reasons };
 	}
 
 	// =========================================================================
@@ -3528,7 +3606,7 @@ export class AgentSession {
 		};
 
 		this._resourceLoader.extendResources(extensionPaths);
-		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames(), "extensions-reload");
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 

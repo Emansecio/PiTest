@@ -80,7 +80,8 @@ describe("AgentSession concurrent prompt guard", () => {
 				/* ignore Windows handle race */
 			}
 		}
-	});
+		// 30s: dispose under full-suite contention on Windows can exceed the 10s default.
+	}, 30_000);
 
 	function createSession() {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;

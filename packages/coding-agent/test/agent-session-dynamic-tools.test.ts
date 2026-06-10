@@ -134,7 +134,7 @@ describe("AgentSession dynamic tool registration", () => {
 		await session.dispose();
 	});
 
-	it("keeps custom tools active but omits them from available tools when promptSnippet is not provided", async () => {
+	it("keeps custom tools active and lists them by bare name when promptSnippet is not provided", async () => {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
 		const sessionManager = SessionManager.inMemory();
 
@@ -174,7 +174,8 @@ describe("AgentSession dynamic tool registration", () => {
 
 		expect(session.getAllTools().map((tool) => tool.name)).toContain("hidden_tool");
 		expect(session.getActiveToolNames()).toContain("hidden_tool");
-		expect(session.systemPrompt).not.toContain("hidden_tool");
+		expect(session.systemPrompt).toContain("- hidden_tool");
+		expect(session.systemPrompt).not.toContain("- hidden_tool:");
 		expect(session.systemPrompt).not.toContain("Description should not appear in available tools");
 
 		await session.dispose();

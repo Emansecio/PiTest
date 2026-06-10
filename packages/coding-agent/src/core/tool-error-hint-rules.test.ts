@@ -43,7 +43,7 @@ describe("edit-scoped tool-error hints (#6)", () => {
 		const ids = hintIdsFor(c, err);
 		expect(ids).toContain("edit-enoent-verify-path");
 		const text = hintTextsFor(c, err);
-		expect(text).toMatch(/find\(\{paths:\["\*\*\/missing\.ts"\]\}\)/);
+		expect(text).toMatch(/find\(\{pattern:"\*\*\/missing\.ts"\}\)/);
 	});
 
 	it("does NOT fire the read/bash ENOENT rules for an edit ENOENT (appliesTo filter)", () => {

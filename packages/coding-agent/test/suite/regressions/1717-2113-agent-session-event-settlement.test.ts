@@ -24,7 +24,8 @@ describe("regressions #1717/#2113: agent session event settlement", () => {
 		while (harnesses.length > 0) {
 			await harnesses.pop()?.cleanup();
 		}
-	});
+		// 30s: cleanup under full-suite contention on Windows can exceed the 10s default.
+	}, 30_000);
 
 	it("keeps persisted assistant/toolResult message order when extension message_end handlers yield", async () => {
 		const harness = await createHarness({

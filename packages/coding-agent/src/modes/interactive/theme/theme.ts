@@ -11,6 +11,7 @@ import chalk from "chalk";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import { getCustomThemesDir, getThemesDir } from "../../../config.ts";
+import { createMtimeParseCache } from "../../../core/mtime-cache.ts";
 import type { SourceInfo } from "../../../core/source-info.ts";
 import { closeWatcher, watchWithErrorHandler } from "../../../utils/fs-watch.ts";
 import { highlight, supportsLanguage } from "../../../utils/syntax-highlight.ts";
@@ -639,9 +640,16 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 	});
 }
 
+// mtime-keyed cache for theme JSON: loadThemeFromPath is called for every theme
+// file on every resource reload (theme picker), but the validating parse is the
+// expensive part. Mirrors skillFrontmatterCache / templateParseCache. createTheme
+// stays per-call (cheap) so a `mode` change still rebuilds the Theme correctly.
+const themeJsonCache = createMtimeParseCache<ThemeJson>((content, filePath) =>
+	parseThemeJsonContent(filePath, content),
+);
+
 export function loadThemeFromPath(themePath: string, mode?: ColorMode): Theme {
-	const content = fs.readFileSync(themePath, "utf-8");
-	const themeJson = parseThemeJsonContent(themePath, content);
+	const themeJson = themeJsonCache(themePath);
 	return createTheme(themeJson, mode, themePath);
 }
 
@@ -1253,6 +1261,10 @@ export function getEditorTheme(): EditorTheme {
 	return {
 		borderColor: (text: string) => theme.fg("borderMuted", text),
 		selectList: getSelectListTheme(),
+		// Slash commands (`/chrome`, …) render their leading token in blue,
+		// matching Claude Code's input. `border` resolves to the blue var in
+		// both built-in themes.
+		commandColor: (text: string) => theme.fg("border", text),
 	};
 }
 

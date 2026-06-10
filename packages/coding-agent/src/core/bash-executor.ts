@@ -68,6 +68,13 @@ export async function executeBashWithOperations(
 		const id = randomBytes(8).toString("hex");
 		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
 		tempFileStream = createWriteStream(tempFilePath);
+		// Without a listener, a stream "error" (disk full, tmpdir permissions)
+		// becomes an uncaught exception and crashes the whole process. Drop the
+		// temp file and keep going with the in-memory rolling buffer instead.
+		tempFileStream.on("error", () => {
+			tempFileStream = undefined;
+			tempFilePath = undefined;
+		});
 		for (const chunk of outputChunks) {
 			tempFileStream.write(chunk);
 		}
@@ -98,9 +105,15 @@ export async function executeBashWithOperations(
 			outputBytes -= removed.length;
 		}
 
-		// Stream to callback
+		// Stream to callback. Guard it: a throwing callback (e.g. injected by an
+		// extension) would otherwise kill the child-process data handler and leave
+		// the exec promise hanging.
 		if (options?.onChunk) {
-			options.onChunk(text);
+			try {
+				options.onChunk(text);
+			} catch {
+				// Ignore: output is still captured in the rolling buffer/temp file.
+			}
 		}
 	};
 

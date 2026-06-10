@@ -79,6 +79,19 @@ describe("NavGroupComponent", () => {
 		expect(stripAnsi(lines.join("\n"))).toContain("ENOENT");
 	});
 
+	test("caps a failed child's auto-shown error body with an expand hint", () => {
+		const g = new NavGroupComponent(fakeTui());
+		const bad = navExec("read", "1", { file_path: "missing.ts" });
+		const bigError = Array.from({ length: 30 }, (_, i) => `error line ${i + 1}`).join("\n");
+		bad.updateResult({ content: [{ type: "text", text: bigError }], isError: true });
+		g.addCall(bad);
+		const out = g.render(120).map(stripAnsi);
+		// header + at most ERROR_PREVIEW_LINES body lines + 1 hint line
+		expect(out.length).toBeLessThanOrEqual(1 + 6 + 1);
+		expect(out[out.length - 1]).toContain("more lines");
+		expect(out[out.length - 1]).toContain("to expand");
+	});
+
 	// Task 4 tests
 	test("always uses Explored/Exploring (never Did/Working)", () => {
 		const g = new NavGroupComponent(fakeTui());

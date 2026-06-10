@@ -40,6 +40,9 @@ plans/
 .pi/hf-sessions-backup/
 collect.sh
 
+# Local agent memory bank (per-machine hindsight state)
+.pit/hindsight/
+
 # Scratch analysis artifacts (local-only, not part of the project)
 RELATORIO-*.md
 pkglist.txt

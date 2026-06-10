@@ -12,7 +12,10 @@ const tempDirs: string[] = [];
 
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) {
-		rmSync(dir, { recursive: true, force: true });
+		// maxRetries/retryDelay: on Windows the spawned CLI child can still hold
+		// a handle on the dir for a beat after exit, surfacing as EBUSY under
+		// full-suite contention. Retry instead of failing the test on cleanup.
+		rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 	}
 });
 

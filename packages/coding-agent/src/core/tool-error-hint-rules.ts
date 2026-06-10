@@ -163,7 +163,7 @@ const bashRules: ToolErrorHintRule[] = [
 			/cannot access|cannot open/i.test(errorText) ||
 			/the system cannot find the (path|file) specified/i.test(errorText),
 		hint: () =>
-			'Path not found. Locate the file with `find({paths:["**/<basename>"]})` or inspect the parent dir with `ls({path:<parent>})` before retrying.',
+			'Path not found. Locate the file with `find({pattern:"**/<basename>"})` or inspect the parent dir with `ls({path:<parent>})` before retrying.',
 	},
 	{
 		// "command not found" — model invoked a binary that is not on PATH.
@@ -200,10 +200,10 @@ const readRules: ToolErrorHintRule[] = [
 		hint: ({ call }) => {
 			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");
 			if (!path) {
-				return 'File not found. Use `find({paths:["**/<basename>"]})` to locate it.';
+				return 'File not found. Use `find({pattern:"**/<basename>"})` to locate it.';
 			}
 			const base = basenameOf(path);
-			return `File not found. Locate it with \`find({paths:["**/${base}"]})\` — the path you passed may be relative to a different cwd.`;
+			return `File not found. Locate it with \`find({pattern:"**/${base}"})\` — the path you passed may be relative to a different cwd.`;
 		},
 	},
 ];
@@ -282,7 +282,7 @@ const editRules: ToolErrorHintRule[] = [
 		hint: ({ call }) => {
 			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");
 			const base = path ? basenameOf(path) : "<basename>";
-			return `File not found for edit. Verify the path with \`find({paths:["**/${base}"]})\` or \`ls({path:<parent>})\` before retrying — it may be relative to a different cwd, or the file may not exist yet (use \`write\` to create it).`;
+			return `File not found for edit. Verify the path with \`find({pattern:"**/${base}"})\` or \`ls({path:<parent>})\` before retrying — it may be relative to a different cwd, or the file may not exist yet (use \`write\` to create it).`;
 		},
 	},
 	{

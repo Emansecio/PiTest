@@ -102,7 +102,13 @@ export class McpHttpClient {
 			throw new Error(`MCP ${this.name} ${method}: SSE transport not supported (use HTTP JSON)`);
 		}
 
-		const json = (await response.json()) as JsonRpcResponse<T>;
+		let json: JsonRpcResponse<T>;
+		try {
+			json = (await response.json()) as JsonRpcResponse<T>;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`MCP ${this.name} ${method}: invalid JSON response (${message})`);
+		}
 		if (json.error) {
 			throw new Error(`MCP ${this.name} ${method}: ${json.error.message} (code ${json.error.code})`);
 		}

@@ -1,3 +1,4 @@
+import { splitSystemPromptOnDynamic } from "@pit/ai";
 import { describe, expect, test } from "vitest";
 import { buildSystemPrompt } from "../src/core/system-prompt.js";
 
@@ -14,7 +15,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("Available tools:\n(none)");
 		});
 
-		test("shows file paths guideline even with no tools", () => {
+		test("shows path citation guideline even with no tools", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: [],
 				contextFiles: [],
@@ -22,7 +23,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("Show file paths clearly");
+			expect(prompt).toContain("Cite code locations as path:line");
 		});
 	});
 
@@ -72,7 +73,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- dynamic_tool: Run dynamic test behavior");
 		});
 
-		test("omits custom tools from available tools section when promptSnippet is not provided", () => {
+		test("lists custom tools by bare name when promptSnippet is not provided", () => {
 			const prompt = buildSystemPrompt({
 				selectedTools: ["read", "dynamic_tool"],
 				contextFiles: [],
@@ -80,7 +81,8 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).not.toContain("dynamic_tool");
+			expect(prompt).toContain("- dynamic_tool");
+			expect(prompt).not.toContain("- dynamic_tool:");
 		});
 	});
 
@@ -202,6 +204,79 @@ describe("buildSystemPrompt", () => {
 
 			expect(prompt).toContain("emit independent tool calls in the same turn");
 			expect(prompt).not.toContain("5 reads in 1 turn is ~5x faster");
+		});
+	});
+
+	describe("frequent-files index placement (prompt-cache stability)", () => {
+		const freqFiles = [
+			{ path: "src/a.ts", count: 5, source: "git" as const },
+			{ path: "src/b.ts", count: 3, source: "git" as const },
+		];
+
+		test("renders the frequent-files block in the dynamic suffix, after the cache marker", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+				frequentFiles: freqFiles,
+			});
+
+			const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(prompt);
+			expect(staticPart).not.toContain("<frequent_files>");
+			expect(dynamicPart).toContain("<frequent_files>");
+			expect(dynamicPart).toContain("src/a.ts");
+		});
+
+		test("cacheable prefix is byte-identical with and without the late-arriving index", () => {
+			const base = {
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			};
+
+			const withoutIndex = splitSystemPromptOnDynamic(buildSystemPrompt(base)).staticPart;
+			const withIndex = splitSystemPromptOnDynamic(
+				buildSystemPrompt({ ...base, frequentFiles: freqFiles }),
+			).staticPart;
+
+			// The boot compute resolves async and triggers a rebuild WITH the index;
+			// if the index lived in the prefix, this rebuild would re-bill the whole
+			// cached prefix. Identical prefixes prove the late arrival is cache-free.
+			expect(withIndex).toBe(withoutIndex);
+		});
+	});
+
+	describe("git state placement (prompt-cache stability)", () => {
+		test("renders the git branch in the dynamic suffix, after the cache marker", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+				gitState: { branch: "main" },
+			});
+
+			const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(prompt);
+			expect(staticPart).not.toContain("Git branch:");
+			expect(dynamicPart).toContain("Git branch: main");
+		});
+
+		test("cacheable prefix is byte-identical with and without the git branch", () => {
+			const base = {
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			};
+
+			const without = splitSystemPromptOnDynamic(buildSystemPrompt(base)).staticPart;
+			const withState = splitSystemPromptOnDynamic(
+				buildSystemPrompt({ ...base, gitState: { branch: "main" } }),
+			).staticPart;
+
+			expect(withState).toBe(without);
 		});
 	});
 });

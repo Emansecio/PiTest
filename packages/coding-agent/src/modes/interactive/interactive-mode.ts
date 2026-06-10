@@ -5135,6 +5135,14 @@ export class InteractiveMode {
 			info += theme.fg("muted", "Cache warming up — hit-rate should rise over the next few turns.");
 		}
 
+		// Source-measured prefix churn — complements the usage-derived line above by
+		// naming *what* rewrote the cacheable prefix (vs. merely flagging a collapse).
+		const prefixDiag = this.session.getCachePrefixDiagnostics();
+		if (prefixDiag.rebuilds > 0) {
+			const breakdown = prefixDiag.reasons.map((r) => `${r.reason} ×${r.count}`).join(", ");
+			info += `\n${theme.fg("dim", `Prefix rewritten ${prefixDiag.rebuilds}× this session (${breakdown}).`)}`;
+		}
+
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();

@@ -40,6 +40,45 @@ describe("ActivityLineComponent", () => {
 		expect(out[0]).toContain("-2");
 		for (const l of out) expect(l).not.toContain("│");
 	});
+	it("auto-expands the exec body on a genuine error", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(execStub({ getActivityState: () => "error", isAborted: () => false }));
+		const out = c.render(120).map(stripAnsi);
+		expect(out.some((l) => l.includes("<exec body>"))).toBe(true);
+	});
+	it("caps the auto-shown error body and folds the rest into an expand hint", () => {
+		const bodyLines = Array.from({ length: 25 }, (_, i) => `error line ${i + 1}`);
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getActivityState: () => "error",
+				isAborted: () => false,
+				render: () => bodyLines,
+			}),
+		);
+		const out = c.render(120).map(stripAnsi);
+		// header + ERROR_PREVIEW_LINES + 1 hint line
+		expect(out.length).toBe(1 + 6 + 1);
+		expect(out.some((l) => l.includes("error line 6"))).toBe(true);
+		expect(out.some((l) => l.includes("error line 7"))).toBe(false);
+		expect(out[out.length - 1]).toContain("+19 more lines");
+		expect(out[out.length - 1]).toContain("to expand");
+	});
+	it("renders the full error body when explicitly expanded", () => {
+		const bodyLines = Array.from({ length: 25 }, (_, i) => `error line ${i + 1}`);
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getActivityState: () => "error",
+				isAborted: () => false,
+				render: () => bodyLines,
+			}),
+		);
+		c.setExpanded(true);
+		const out = c.render(120).map(stripAnsi);
+		expect(out.some((l) => l.includes("error line 25"))).toBe(true);
+		expect(out.some((l) => l.includes("more lines"))).toBe(false);
+	});
 	it("renders bash as Ran $ command", () => {
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(
@@ -52,12 +91,6 @@ describe("ActivityLineComponent", () => {
 		const out = c.render(120).map(stripAnsi);
 		expect(out[0]).toContain("Ran");
 		expect(out[0]).toContain("$ npm test");
-	});
-	it("auto-expands the exec body on a genuine error", () => {
-		const c = new ActivityLineComponent(fakeTui());
-		c.setExec(execStub({ getActivityState: () => "error", isAborted: () => false }));
-		const out = c.render(120).map(stripAnsi);
-		expect(out.some((l) => l.includes("<exec body>"))).toBe(true);
 	});
 });
 

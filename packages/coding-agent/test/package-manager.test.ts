@@ -42,6 +42,12 @@ describe("DefaultPackageManager", () => {
 		delete process.env.PIT_OFFLINE;
 		tempDir = join(tmpdir(), `pm-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
+		// Mark tempDir as a git repo root so collectAncestorAgentsSkillDirs stops
+		// here instead of walking up to the filesystem root. On Windows, tmpdir()
+		// lives under the user's home (C:\Users\<u>\AppData\Local\Temp), so an
+		// unbounded walk would pick up a real ~/.agents/skills as "project" scope
+		// — the HOME override in individual tests defeats the user-dir filter.
+		mkdirSync(join(tempDir, ".git"), { recursive: true });
 		agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 

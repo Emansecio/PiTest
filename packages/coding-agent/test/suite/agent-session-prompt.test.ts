@@ -24,7 +24,11 @@ describe("AgentSession prompt characterization", () => {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
 		}
-	});
+		// 30s: harness.cleanup() awaits session.dispose(), which waits for
+		// background workers (frequent-files git child, eval kernels) to release
+		// their handles. Under full-suite contention on Windows that can exceed
+		// the 10s default hookTimeout; the test itself passes isolated.
+	}, 30_000);
 
 	it("prompts while idle and records a single text response", async () => {
 		const harness = await createHarness();

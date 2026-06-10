@@ -4,7 +4,7 @@ import { type ThemeColor, theme } from "../theme/theme.ts";
 import { clampBashCommandRow } from "./bash-command-row.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
-import { diffStat, verbFor } from "./tool-activity.ts";
+import { capErrorPreview, diffStat, verbFor } from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 /** Max width of a derived agent label (from the task prompt). */
@@ -173,10 +173,14 @@ export class ActivityLineComponent extends Container {
 		// reticência is U+2026 (truncateToWidth's default).
 		const header = truncateToWidth(rawHeader, width);
 		const lines = [header];
-		const showBody = this.expanded || (state === "error" && !this.exec.isAborted());
-		if (showBody) {
-			if (state === "error") this.exec.setExpanded(true);
+		const autoError = !this.expanded && state === "error" && !this.exec.isAborted();
+		if (this.expanded) {
 			for (const l of this.exec.render(width - 2)) lines.push(`  ${l}`);
+		} else if (autoError) {
+			// Auto-shown error: render the full error body but cap the visible
+			// lines so a failure never floods the CLI — the rest is one ctrl+o away.
+			this.exec.setExpanded(true);
+			for (const l of capErrorPreview(this.exec.render(width - 2), width - 2)) lines.push(`  ${l}`);
 		}
 		return lines;
 	}

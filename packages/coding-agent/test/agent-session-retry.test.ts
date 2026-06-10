@@ -70,7 +70,8 @@ describe("AgentSession retry", () => {
 				/* ignore Windows handle race */
 			}
 		}
-	});
+		// 30s: dispose under full-suite contention on Windows can exceed the 10s default.
+	}, 30_000);
 
 	function createSession(options?: { failCount?: number; maxRetries?: number; delayAssistantMessageEndMs?: number }) {
 		const failCount = options?.failCount ?? 1;

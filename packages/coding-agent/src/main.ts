@@ -47,6 +47,7 @@ import {
 } from "./core/session-cwd.ts";
 import { SessionManager } from "./core/session-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
+import { sweepStaleTempLogs } from "./core/temp-logs.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
@@ -488,6 +489,10 @@ export async function main(args: string[], options?: MainOptions) {
 		process.env.PIT_OFFLINE = "1";
 		process.env.PIT_SKIP_VERSION_CHECK = "1";
 	}
+
+	// Fire-and-forget: prune week-old pi-bash-*/pi-output-* logs from tmpdir
+	// (Windows never cleans %TEMP%, so they accumulate without bound).
+	void sweepStaleTempLogs();
 
 	if (process.platform === "win32") {
 		cleanupWindowsSelfUpdateQuarantine(getPackageDir());

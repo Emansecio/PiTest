@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "../src/autocomplete.js";
-import { Editor, wordWrapLine } from "../src/components/editor.js";
+import { Editor, type EditorTheme, wordWrapLine } from "../src/components/editor.js";
 import { TUI } from "../src/tui.js";
 import { visibleWidth } from "../src/utils.js";
 import { defaultEditorTheme } from "./test-themes.js";
@@ -50,6 +50,64 @@ describe("Editor border rule", () => {
 		assert.strictEqual(spans, 1, `border rule should be colored once, got ${spans} color spans`);
 		// And it is still a full-width run of "─".
 		assert.strictEqual(visibleWidth(top.replace(/<\/?C>/g, "")), 80);
+	});
+});
+
+describe("Editor slash-command highlight", () => {
+	// Marker-based colorizer so the highlighted token is easy to assert on.
+	const markerTheme: EditorTheme = {
+		...defaultEditorTheme,
+		commandColor: (s: string) => `<CMD>${s}</CMD>`,
+	};
+
+	it("colors the leading /command token", () => {
+		const editor = new Editor(createTestTUI(80, 24), markerTheme);
+		editor.setText("/chrome");
+		const textLine = editor.render(80)[1];
+		assert.ok(
+			textLine.includes("<CMD>/chrome</CMD>"),
+			`expected the command token to be colored, got: ${JSON.stringify(textLine)}`,
+		);
+	});
+
+	it("colors only the command token, not its arguments", () => {
+		const editor = new Editor(createTestTUI(80, 24), markerTheme);
+		editor.setText("/chrome https://example.com");
+		const textLine = editor.render(80)[1];
+		assert.ok(textLine.includes("<CMD>/chrome</CMD>"), "command token colored");
+		assert.strictEqual((textLine.match(/<CMD>/g) ?? []).length, 1, "exactly one colored span");
+	});
+
+	it("does not color a plain (non-slash) line", () => {
+		const editor = new Editor(createTestTUI(80, 24), markerTheme);
+		editor.setText("hello world");
+		assert.ok(!editor.render(80)[1].includes("<CMD>"), "plain text must not be colored");
+	});
+
+	it("does not color a bare slash or a comment-like //", () => {
+		const editor = new Editor(createTestTUI(80, 24), markerTheme);
+		editor.setText("/");
+		assert.ok(!editor.render(80)[1].includes("<CMD>"), "bare slash is not a command");
+		editor.setText("// not a command");
+		assert.ok(!editor.render(80)[1].includes("<CMD>"), "double slash is not a command");
+	});
+
+	it("leaves text uncolored when the theme provides no commandColor", () => {
+		const editor = new Editor(createTestTUI(80, 24), defaultEditorTheme);
+		editor.setText("/chrome");
+		assert.ok(stripVTControlCharacters(editor.render(80)[1]).includes("/chrome"));
+	});
+
+	it("keeps highlighted + wrapped lines within terminal width (ANSI adds no width)", () => {
+		const ansiTheme: EditorTheme = {
+			...defaultEditorTheme,
+			commandColor: (s: string) => `\x1b[34m${s}\x1b[39m`,
+		};
+		const editor = new Editor(createTestTUI(8, 24), ansiTheme);
+		editor.setText("/skillaleatoria extra args here");
+		for (const line of editor.render(8)) {
+			assert.ok(visibleWidth(line) <= 8, `line exceeds width: ${visibleWidth(line)} :: ${JSON.stringify(line)}`);
+		}
 	});
 });
 

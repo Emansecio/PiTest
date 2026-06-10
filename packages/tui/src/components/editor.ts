@@ -5,7 +5,14 @@ import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
 import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
-import { getSegmenter, isPunctuationChar, isWhitespaceChar, truncateToWidth, visibleWidth } from "../utils.ts";
+import {
+	extractAnsiCode,
+	getSegmenter,
+	isPunctuationChar,
+	isWhitespaceChar,
+	truncateToWidth,
+	visibleWidth,
+} from "../utils.ts";
 import { SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list.ts";
 
 const baseSegmenter = getSegmenter();
@@ -223,6 +230,11 @@ interface LayoutLine {
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	selectList: SelectListTheme;
+	/**
+	 * Optional: colorize the leading `/command` token when the buffer starts a
+	 * slash command (e.g. `/chrome`). Omit to leave the command text uncolored.
+	 */
+	commandColor?: (str: string) => string;
 }
 
 export interface EditorOptions {
@@ -510,6 +522,45 @@ export class Editor implements Component, Focusable {
 		this.invalidateWrapCache();
 	}
 
+	/**
+	 * Wrap the first `maxCols` visible columns of `s` with `colorFn`, skipping
+	 * ANSI escape codes and the zero-width cursor marker (they carry no width).
+	 * Each plain run is colored independently, so an embedded reverse-video
+	 * cursor (…\x1b[7m g \x1b[0m…) survives and the color resumes after it.
+	 * Visible width is unchanged — only SGR codes are added — so the upstream
+	 * padding math still holds.
+	 */
+	private paintPrefixVisible(s: string, maxCols: number, colorFn: (t: string) => string): string {
+		if (maxCols <= 0) return s;
+		let out = "";
+		let run = "";
+		let cols = 0;
+		let i = 0;
+		const flushRun = () => {
+			if (run) {
+				out += colorFn(run);
+				run = "";
+			}
+		};
+		while (i < s.length && cols < maxCols) {
+			const esc = extractAnsiCode(s, i);
+			if (esc) {
+				flushRun();
+				out += esc.code;
+				i += esc.length;
+				continue;
+			}
+			const grapheme = this.segment(s.slice(i))[Symbol.iterator]().next().value?.segment ?? s[i];
+			const w = visibleWidth(grapheme);
+			if (cols + w > maxCols) break; // never split a wide glyph across the boundary
+			run += grapheme;
+			cols += w;
+			i += grapheme.length;
+		}
+		flushRun();
+		return out + s.slice(i);
+	}
+
 	render(width: number): string[] {
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
@@ -585,7 +636,16 @@ export class Editor implements Component, Focusable {
 		// Emit hardware cursor marker only when focused and not showing autocomplete
 		const emitCursorMarker = this.focused && !this.autocompleteState;
 
-		for (const layoutLine of visibleLines) {
+		// Slash-command highlight: column width of the leading `/command` token on
+		// the first line. Only when not scrolled — the command always lives at the
+		// buffer start, i.e. the first visible layout line.
+		let commandCols = 0;
+		if (this.theme.commandColor && this.scrollOffset === 0) {
+			const match = /^\/[^\s/]\S*/.exec(this.state.lines[0] ?? "");
+			if (match) commandCols = visibleWidth(match[0]);
+		}
+
+		for (const [visibleIndex, layoutLine] of visibleLines.entries()) {
 			let displayText = layoutLine.text;
 			let lineVisibleWidth = layoutLine.visibleWidth;
 			let cursorInPadding = false;
@@ -621,6 +681,12 @@ export class Editor implements Component, Focusable {
 						cursorInPadding = true;
 					}
 				}
+			}
+
+			// Colorize the leading slash-command token on the first line (after
+			// cursor injection so the reverse-video cursor stays intact).
+			if (commandCols > 0 && visibleIndex === 0 && this.theme.commandColor) {
+				displayText = this.paintPrefixVisible(displayText, commandCols, this.theme.commandColor);
 			}
 
 			// Calculate padding based on actual visible width

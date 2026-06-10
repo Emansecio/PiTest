@@ -2,7 +2,7 @@ import { Container, SPINNER_FRAMES, type TUI } from "@pit/tui";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
-import { nounFor, pluralizeNoun } from "./tool-activity.ts";
+import { capErrorPreview, nounFor, pluralizeNoun } from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 type GroupState = "pending" | "success" | "error";
@@ -128,12 +128,13 @@ export class NavGroupComponent extends Container {
 				for (const l of e.render(width - 2)) lines.push(`  ${l}`);
 			}
 		} else if (state === "error") {
-			// Auto-expand only genuinely failed child(ren); aborts and successes
-			// stay collapsed in the counter.
+			// Auto-show only genuinely failed child(ren); aborts and successes
+			// stay collapsed in the counter. The error body is capped so one
+			// failed call cannot flood the CLI — the rest is one ctrl+o away.
 			for (const e of this.execs) {
 				if (e.getActivityState() !== "error" || e.isAborted()) continue;
 				e.setExpanded(true);
-				for (const l of e.render(width - 2)) lines.push(`  ${l}`);
+				for (const l of capErrorPreview(e.render(width - 2), width - 2)) lines.push(`  ${l}`);
 			}
 		}
 		return lines;

@@ -33,7 +33,8 @@ describe("AgentSessionRuntime characterization", () => {
 		while (cleanups.length > 0) {
 			await cleanups.pop()?.();
 		}
-	});
+		// 30s: dispose under full-suite contention on Windows can exceed the 10s default.
+	}, 30_000);
 
 	async function createRuntimeForTest(
 		extensionFactory: ExtensionFactory,
@@ -515,7 +516,9 @@ describe("AgentSessionRuntime characterization", () => {
 
 		expect(realpathSync(runtime.session.sessionManager.getCwd())).toBe(realpathSync(secondDir));
 		expect(realpathSync(runtime.cwd)).toBe(realpathSync(secondDir));
-	});
+		// 90s: boots two full runtimes + tmpdir I/O; flakes past the 30s default
+		// under full-suite parallel load on Windows (passes in ~2s isolated).
+	}, 90_000);
 
 	it("restores model and thinking state from the destination session", async () => {
 		const { runtime, faux, tempDir } = await createRuntimeForTest(() => {}, {

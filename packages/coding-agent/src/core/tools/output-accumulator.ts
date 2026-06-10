@@ -300,6 +300,13 @@ export class OutputAccumulator {
 		}
 		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
 		this.tempFileStream = createWriteStream(this.tempFilePath);
+		// Without a listener, a stream "error" (disk full, tmpdir permissions)
+		// becomes an uncaught exception and crashes the whole process. Drop the
+		// temp file and keep serving the bounded in-memory tail instead.
+		this.tempFileStream.on("error", () => {
+			this.tempFileStream = undefined;
+			this.tempFilePath = undefined;
+		});
 		for (const chunk of this.rawChunks) {
 			this.tempFileStream.write(chunk);
 		}

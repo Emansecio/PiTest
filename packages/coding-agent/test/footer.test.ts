@@ -78,16 +78,20 @@ beforeAll(() => {
 	initTheme("dark");
 });
 
-it("shows permission mode + compact glyph on metrics line, not a 3rd line", () => {
+it("shows permission mode + compact indicator on metrics line, not a 3rd line", () => {
+	// Permission mode "auto" (acceptEdits) and the auto-compact indicator are
+	// different axes — they must not collide into a confusing "auto auto". The
+	// compact indicator carries its own distinct label.
 	const footer = makeFooter({ permissions: "auto", autoCompact: true });
 	const lines = footer.render(80).map(stripAnsi);
 	expect(lines.length).toBe(2);
-	expect(lines[1]).toContain("auto");
-	expect(lines[1]).toContain("⟳");
+	expect(lines[1]).toContain("auto"); // permission mode
+	expect(lines[1]).toContain("compact"); // auto-compact indicator
+	expect(lines[1]).not.toContain("auto auto");
 	expect(lines.some((l) => l.startsWith("permissions:"))).toBe(false);
 });
 
-it("keeps a 3rd line when another extension status exists; compact off hides glyph", () => {
+it("keeps a 3rd line when another extension status exists; compact off hides indicator", () => {
 	const footer = makeFooter({
 		permissions: "plan",
 		autoCompact: false,
@@ -96,7 +100,7 @@ it("keeps a 3rd line when another extension status exists; compact off hides gly
 	const lines = footer.render(80).map(stripAnsi);
 	expect(lines.length).toBe(3);
 	expect(lines[1]).toContain("plan");
-	expect(lines[1]).not.toContain("⟳");
+	expect(lines[1]).not.toContain("compact");
 	expect(lines[2]).toContain("whatsapp: 3");
 });
 

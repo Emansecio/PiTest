@@ -1,4 +1,32 @@
+import { truncateToWidth } from "@pit/tui";
+import { theme } from "../theme/theme.ts";
+import { keyHint } from "./keybinding-hints.ts";
+
 export type ToolActivity = "navigation" | "action";
+
+/** Max body lines auto-shown under a failed call before folding into a hint.
+ * Errors must stay scannable, not flood the CLI — the full body is one
+ * ctrl+o away. Keep small: the first lines carry the error message. */
+export const ERROR_PREVIEW_LINES = 6;
+
+/**
+ * Cap an auto-shown error body to {@link ERROR_PREVIEW_LINES}, appending a
+ * muted `… +N more lines (… to expand)` trailer when lines were hidden.
+ * `width` is the cell budget of each body line (already inset by the caller);
+ * the trailer is clamped to it so the TUI width invariant holds.
+ */
+export function capErrorPreview(lines: string[], width: number): string[] {
+	if (lines.length <= ERROR_PREVIEW_LINES) return lines;
+	const kept = lines.slice(0, ERROR_PREVIEW_LINES);
+	const hidden = lines.length - kept.length;
+	kept.push(
+		truncateToWidth(
+			`${theme.fg("muted", `… +${hidden} more lines`)} (${keyHint("app.tools.expand", "to expand")})`,
+			width,
+		),
+	);
+	return kept;
+}
 
 /** Singular noun for a tool's aggregated activity-group counter. Covers both
  * navigation and action tools, since the grouped mode folds every call into one

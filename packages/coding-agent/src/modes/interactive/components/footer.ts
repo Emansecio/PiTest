@@ -221,7 +221,9 @@ export class FooterComponent implements Component {
 		const mode = this.getPermissionMode();
 		const modeBits: string[] = [];
 		if (mode && mode !== "unsafe") modeBits.push(mode);
-		if (this.autoCompactEnabled) modeBits.push(theme.fg("dim", "auto"));
+		// Distinct label ("compact", not "auto") so it never collides with the
+		// permission mode — "auto" mode + auto-compact would read "auto auto".
+		if (this.autoCompactEnabled) modeBits.push(theme.fg("dim", "compact"));
 		if (modeBits.length) rightParts.push(modeBits.join(" "));
 
 		const metricsLine = composeLeftRight(ctxText, rightParts.join(" · "), width, {

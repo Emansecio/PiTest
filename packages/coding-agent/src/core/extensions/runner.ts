@@ -882,6 +882,9 @@ export class ExtensionRunner {
 	}
 
 	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
+		// Fast path: skip the context allocation + extension scan when no extension
+		// handles tool_result. Runs on every tool call, so the guard is worth it.
+		if (!this.hasHandlers("tool_result")) return undefined;
 		const ctx = this.createContext();
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
@@ -932,6 +935,9 @@ export class ExtensionRunner {
 	}
 
 	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
+		// Fast path: skip the context allocation + extension scan when no extension
+		// handles tool_call. Runs on every tool call, so the guard is worth it.
+		if (!this.hasHandlers("tool_call")) return undefined;
 		const ctx = this.createContext();
 		let result: ToolCallEventResult | undefined;
 

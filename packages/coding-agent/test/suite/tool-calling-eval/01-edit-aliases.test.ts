@@ -17,7 +17,8 @@ describe("edit tool: alias and shape normalization (e2e)", () => {
 		while (harnesses.length > 0) {
 			await harnesses.pop()?.cleanup();
 		}
-	});
+		// 30s: cleanup under full-suite contention on Windows can exceed the 10s default.
+	}, 30_000);
 
 	async function makeHarness() {
 		// Build the edit tool against a temp dir we don't yet know; the harness
