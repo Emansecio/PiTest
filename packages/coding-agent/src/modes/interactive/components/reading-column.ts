@@ -10,6 +10,11 @@ import type { Component } from "@pit/tui";
  * parent adds (e.g. the message-shell gutter) rather than floating centered and
  * detached from it.
  *
+ * `maxColumns` is supplied by the caller — for assistant prose it comes from the
+ * `assistantReadingColumns` setting (SettingsManager.getAssistantReadingColumns),
+ * so the reading width is user-tunable rather than hardcoded. A non-positive
+ * value disables the cap (full width).
+ *
  * No-op when the available width is already `<= maxColumns` (narrow terminals),
  * and the child's own width-keyed caches stay valid because the capped width is
  * constant across resizes that keep the terminal wider than the cap.

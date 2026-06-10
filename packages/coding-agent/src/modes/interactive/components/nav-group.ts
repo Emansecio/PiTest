@@ -1,4 +1,5 @@
-import { Container, SPINNER_FRAMES, type TUI } from "@pit/tui";
+import { basename } from "node:path";
+import { Container, SPINNER_FRAMES, type TUI, truncateToWidth } from "@pit/tui";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
@@ -9,6 +10,11 @@ type GroupState = "pending" | "success" | "error";
 
 const ICON_SUCCESS = "✓"; // light check (U+2713), renders 1 cell — consistent with the rest of the UI
 const ICON_ERROR = "✗";
+
+/** Up to this many calls, a pure file-read group lists basenames inline
+ * (`config.ts · theme.ts`) instead of collapsing to a `N files` counter — the
+ * identity of a handful of reads is more useful than their count. */
+const BASENAME_LIST_MAX = 4;
 
 /** Aggregates a contiguous burst of NAVIGATION tool calls into one summary line
  * (`✔ Explored 3 files · 1 search`). Actions get their own ActivityLine instead.
@@ -105,9 +111,39 @@ export class NavGroupComponent extends Container {
 		return this.countsCache;
 	}
 
-	private header(state: GroupState): string {
+	/** Basenames of a small, pure file-read group (`config.ts · theme.ts`), or
+	 * `null` when the group is large, mixed, or any read lacks a usable path —
+	 * the caller then falls back to the `N files` counter. */
+	private fileBasenames(): string[] | null {
+		if (this.execs.length === 0 || this.execs.length > BASENAME_LIST_MAX) return null;
+		const names: string[] = [];
+		for (const e of this.execs) {
+			if (e.getToolName() !== "read") return null;
+			const args = e.getArgs() ?? {};
+			const raw = typeof args.file_path === "string" ? args.file_path : "";
+			const name = basename(raw.replace(/[\\/]+$/, ""));
+			if (!name) return null;
+			names.push(name);
+		}
+		return names;
+	}
+
+	private summary(width: number): string {
+		const names = this.fileBasenames();
+		if (!names) return this.countEase.colorize("toolOutput", this.counts());
+		// Width-clamp the inline list so a handful of long paths can't overflow the
+		// terminal; the reticência is U+2026 (truncateToWidth's default).
+		const list = truncateToWidth(names.join(" · "), Math.max(0, width));
+		return this.countEase.colorize("toolOutput", list);
+	}
+
+	private header(state: GroupState, width: number): string {
 		const verb = state === "pending" ? "Exploring" : "Explored";
-		return `${this.icon(state)} ${theme.bold(verb)} ${this.countEase.colorize("toolOutput", this.counts())}`;
+		// Budget the summary against the space the icon + verb + two spaces consume,
+		// so the basename list truncates to the remaining cells rather than the full
+		// width. ANSI in the prefix is width-free, so measure the visible verb only.
+		const prefixCells = 1 /* icon */ + 1 /* space */ + verb.length + 1 /* space */;
+		return `${this.icon(state)} ${theme.bold(verb)} ${this.summary(Math.max(0, width - prefixCells))}`;
 	}
 
 	override render(width: number): string[] {
@@ -122,7 +158,7 @@ export class NavGroupComponent extends Container {
 			}
 			this.prevState = state;
 		}
-		const lines = [this.header(state)];
+		const lines = [this.header(state, width)];
 		if (this.expanded) {
 			for (const e of this.execs) {
 				for (const l of e.render(width - 2)) lines.push(`  ${l}`);

@@ -1,5 +1,5 @@
 import { truncateToWidth } from "@pit/tui";
-import { theme } from "../theme/theme.ts";
+import { type ThemeColor, theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
 export type ToolActivity = "navigation" | "action";
@@ -91,6 +91,62 @@ const ACTION_VERBS: Record<string, { done: string; pending: string }> = {
 export function verbFor(toolName: string, pending: boolean): string {
 	const v = ACTION_VERBS[toolName] ?? { done: "Ran", pending: "Running" };
 	return pending ? v.pending : v.done;
+}
+
+/** Per-tool-type glyph rendered between the state icon and the label so the
+ * action family (edit / run / search / read / …) is legible at a glance. Every
+ * glyph here is verified width-1 (one terminal cell) so it never shifts the
+ * label column — emoji / variation-selectors that measure 2 are banned. */
+const TOOL_GLYPH: Record<string, string> = {
+	edit: "✎",
+	edit_v2: "✎",
+	ast_edit: "✎",
+	write: "✎",
+	bash: "$",
+	grep: "⌕",
+	find: "⌕",
+	ast_grep: "⌕",
+	search_tool_bm25: "⌕",
+	web_search: "⌕",
+	read: "▸",
+	task: "◆",
+	subagent: "◆",
+	preview: "◑",
+};
+
+/** Family tint for a type glyph, mapped onto existing theme tokens (no new
+ * tokens): edits read as `success`, shell as `warning`, searches/reads as
+ * `accent`, agents as `toolTitle`. Unmapped → muted neutral. */
+const TOOL_GLYPH_COLOR: Record<string, ThemeColor> = {
+	edit: "success",
+	edit_v2: "success",
+	ast_edit: "success",
+	write: "success",
+	bash: "warning",
+	grep: "accent",
+	find: "accent",
+	ast_grep: "accent",
+	search_tool_bm25: "accent",
+	web_search: "accent",
+	read: "accent",
+	task: "toolTitle",
+	subagent: "toolTitle",
+	preview: "toolTitle",
+};
+
+/** Neutral fallback glyph for tools without a mapped type glyph (MCP/unknown). */
+const FALLBACK_GLYPH = "·";
+
+/**
+ * Colorized, width-1 type glyph for a tool, tinted by family. Falls back to a
+ * muted neutral dot for unmapped tools so every activity line keeps a stable
+ * `<state> <glyph> <label>` shape. The returned string is exactly one visible
+ * cell wide (ANSI is width-free), preserving the TUI width invariant.
+ */
+export function glyphFor(toolName: string): string {
+	const glyph = TOOL_GLYPH[toolName];
+	if (glyph === undefined) return theme.fg("muted", FALLBACK_GLYPH);
+	return theme.fg(TOOL_GLYPH_COLOR[toolName] ?? "muted", glyph);
 }
 
 export function diffStat(diff: string | undefined): { added: number; removed: number } {

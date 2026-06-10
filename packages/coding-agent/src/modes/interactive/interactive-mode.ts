@@ -145,6 +145,7 @@ import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
+import { WelcomeBox } from "./components/welcome-box.ts";
 import { workingPulsePalette } from "./components/working-palette.ts";
 import {
 	buildScopeGroups,
@@ -278,6 +279,10 @@ export class InteractiveMode {
 	private editorComponentFactory: EditorFactory | undefined;
 	private autocompleteProvider: AutocompleteProvider | undefined;
 	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
+	// All known slash-command names (built-in + template + extension + skill),
+	// refreshed whenever the autocomplete provider is rebuilt. Used to catch a
+	// typo'd "/command" before it is silently sent to the model as a prompt.
+	private _knownCommandNames = new Set<string>();
 	private fdPath: string | undefined;
 	private editorContainer: Container;
 	private footer: FooterComponent;
@@ -413,8 +418,21 @@ export class InteractiveMode {
 	// Header container that holds the built-in or custom header
 	private headerContainer: Container;
 
-	// Built-in header (logo + keybinding hints + changelog)
+	// Built-in header (keybinding hints + rotating tip). The framed identity
+	// block (logo + context) is the separate, static welcomeBox below.
 	private builtInHeader: Component | undefined = undefined;
+
+	// Framed identity block at startup (logo + cwd/model context). Static — it
+	// never expands, so toggling tool output mid-session can't make it flicker.
+	private welcomeBox: WelcomeBox | undefined = undefined;
+
+	// Expansion state for the startup hint block, owned independently of
+	// toolOutputExpanded so a mid-session tool toggle does not resize the header.
+	private startupHeaderExpanded = false;
+
+	// True until the first prompt is submitted: while the welcome screen is the
+	// focus, the expand key grows the startup help instead of tool output.
+	private welcomeActive = true;
 
 	// Custom header from extension (undefined = use built-in header)
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
@@ -584,6 +602,9 @@ export class InteractiveMode {
 			}
 		}
 
+		this._knownCommandNames = new Set(
+			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList].map((c) => c.name),
+		);
 		return new CombinedAutocompleteProvider(
 			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
 			this.sessionManager.getCwd(),
@@ -647,28 +668,27 @@ export class InteractiveMode {
 		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg")]);
 		this.fdPath = fdPath;
 
-		if (this.session.scopedModels.length > 0 && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
-			const modelList = this.session.scopedModels
-				.map((sm) => {
-					const thinkingStr = sm.thinkingLevel ? `:${sm.thinkingLevel}` : "";
-					return `${sm.model.id}${thinkingStr}`;
-				})
-				.join(", ");
-			const cycleKeys = this.keybindings.getKeys("app.model.cycleForward");
-			const cycleHint =
-				cycleKeys.length > 0
-					? theme.fg("muted", ` (${formatKeyText(cycleKeys.join("/"), { capitalize: true })} to cycle)`)
-					: "";
-			console.log(theme.fg("dim", `Model scope: ${modelList}${cycleHint}`));
-		}
-
 		// Add header container as first child
 		this.ui.addChild(this.headerContainer);
 
-		// Add header with keybindings from config (unless silenced)
-		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
-			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
+		// Framed identity block: logo + cwd orientation. The product's face, so it
+		// renders even under quietStartup; quiet only silences the verbose hint/tip
+		// block below. Static (never expands), so a mid-session tool toggle cannot
+		// resize it. The active model is NOT shown here — the footer owns it.
+		const isResumed = this.session.state.messages.length > 0;
+		this.welcomeBox = new WelcomeBox({
+			appName: APP_NAME,
+			version: this.version,
+			tagline: "coding agent in your terminal",
+			cwdDisplay: formatDisplayPath(this.sessionManager.getCwd()),
+			branch: this.footerDataProvider.getGitBranch() ?? undefined,
+			resumedSessionName: isResumed ? this.sessionManager.getSessionName() : undefined,
+		});
+		this.headerContainer.addChild(new Spacer(1));
+		this.headerContainer.addChild(this.welcomeBox);
 
+		// Verbose startup hints + rotating tip — suppressed under quietStartup.
+		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
 			// Build startup instructions using keybinding hint helpers
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
 
@@ -693,38 +713,43 @@ export class InteractiveMode {
 				hint("app.clipboard.pasteImage", "to paste image"),
 				rawKeyHint("drop files", "to attach"),
 			].join("\n");
-			const compactInstructions = [
-				hint("app.interrupt", "interrupt"),
-				rawKeyHint(`${keyText("app.clear")}/${keyText("app.exit")}`, "clear/exit"),
+			// Compact = a short essentials line + (first-run only) one rotating tip,
+			// instead of the old wall of shortcuts. The full list stays one expand away.
+			const essentials = [
 				rawKeyHint("/", "commands"),
 				rawKeyHint("!", "bash"),
 				hint("app.tools.expand", "more"),
-			].join(theme.fg("muted", " · "));
-			const compactOnboarding = theme.fg(
-				"dim",
-				`Press ${keyText("app.tools.expand")} to show full startup help and loaded resources.`,
-			);
+			].join(theme.fg("muted", "   ·   "));
+			const startupTips = [
+				"drag files into the terminal to attach them",
+				`${keyText("app.model.cycleForward")} cycles models · ${keyText("app.model.select")} picks one`,
+				`ask "how does ${APP_NAME} work?" — it can explain and extend itself`,
+				`${keyText("app.editor.external")} opens your editor for long prompts`,
+				`${keyText("app.thinking.cycle")} cycles the thinking level`,
+				"paste an image to include it in your message",
+				`${keyText("app.message.followUp")} queues a follow-up while it works`,
+			];
+			const tip = theme.fg("dim", `tip: ${startupTips[Math.floor(Math.random() * startupTips.length)]}`);
 			const onboarding = theme.fg(
 				"dim",
 				`${APP_NAME} can explain its own features and look up its docs. Ask it how to use or extend ${APP_NAME}.`,
 			);
 			this.builtInHeader = new ExpandableText(
-				() => `${logo}\n${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
-				() => `${logo}\n${expandedInstructions}\n\n${onboarding}`,
+				() => (isResumed ? essentials : `${essentials}\n${tip}`),
+				() => `${expandedInstructions}\n\n${onboarding}`,
 				this.getStartupExpansionState(),
 				1,
 				0,
 			);
 
-			// Setup UI layout
-			this.headerContainer.addChild(new Spacer(1));
+			// Verbose hints render below the identity block.
 			this.headerContainer.addChild(this.builtInHeader);
-			this.headerContainer.addChild(new Spacer(1));
 		} else {
-			// Minimal header when silenced
+			// Quiet startup: the welcome identity stays, only the hints are silenced.
 			this.builtInHeader = new Text("", 0, 0);
 			this.headerContainer.addChild(this.builtInHeader);
 		}
+		this.headerContainer.addChild(new Spacer(1));
 
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
@@ -1017,7 +1042,7 @@ export class InteractiveMode {
 	// =========================================================================
 
 	private getStartupExpansionState(): boolean {
-		return this.options.verbose || this.toolOutputExpanded;
+		return this.options.verbose || this.startupHeaderExpanded;
 	}
 
 	private showLoadedResources(options?: {
@@ -1422,6 +1447,19 @@ export class InteractiveMode {
 		return this.workingMessage ?? this.defaultWorkingMessage;
 	}
 
+	/**
+	 * Set the working-loader phase label (e.g. "Thinking…", "Running bash…") from
+	 * the live agent events, so the status line reflects what is actually
+	 * happening instead of a static "Working…". Persisted in `workingMessage` so a
+	 * loader rebuild keeps the phase. No-op while a prompt/ask pause owns the
+	 * label ("Waiting for your answer…") — the phase resumes when the pause lifts.
+	 */
+	private setWorkingPhase(label: string): void {
+		if (this.userInputPauseDepth > 0) return;
+		this.workingMessage = label;
+		this.loadingAnimation?.setMessage(label);
+	}
+
 	private createWorkingLoader(): Loader {
 		const loader = new Loader(
 			this.ui,
@@ -1714,7 +1752,7 @@ export class InteractiveMode {
 			// Restore built-in header
 			this.customHeader = undefined;
 			if (isExpandable(this.builtInHeader)) {
-				this.builtInHeader.setExpanded(this.toolOutputExpanded);
+				this.builtInHeader.setExpanded(this.startupHeaderExpanded);
 			}
 			if (index !== -1) {
 				this.headerContainer.children[index] = this.builtInHeader;
@@ -2293,6 +2331,9 @@ export class InteractiveMode {
 
 			// Any real submission dismisses the ephemeral "Press Ctrl+C again" hint.
 			this.clearCtrlCHint();
+			// The welcome screen is no longer the focus: from now on the expand key
+			// toggles tool output, not the startup help.
+			this.welcomeActive = false;
 
 			// Inline `/chrome` modifier: works anywhere in the message (text before
 			// and/or after it). Ensures Chrome is up, then runs the rest as a prompt.
@@ -2306,6 +2347,9 @@ export class InteractiveMode {
 			if (text.startsWith("/")) {
 				const handled = await this._dispatchSlashCommand(text);
 				if (handled) return;
+				// A typo'd "/command" must not be silently sent to the model: warn,
+				// suggest the closest match, and keep the text for correction.
+				if (this._warnIfUnknownCommand(text)) return;
 			}
 
 			// Handle bash command (! for normal, !! for excluded from context)
@@ -2351,6 +2395,17 @@ export class InteractiveMode {
 			// Normal message submission
 			this.flushPendingBashComponents();
 
+			// Show the working indicator in the SAME frame as the submit so there is
+			// no dead gap before agent_start fires and the first token streams in.
+			// agent_start reuses this loader instead of rebuilding it (no clock reset).
+			if (this.workingVisible && !this.loadingAnimation) {
+				this.statusContainer.clear();
+				this.loadingAnimation = this.createWorkingLoader();
+				this.statusContainer.addChild(this.loadingAnimation);
+				this.setWorkingPhase("Thinking…");
+				this.ui.requestRender();
+			}
+
 			if (this.onInputCallback) {
 				this.onInputCallback(text);
 			}
@@ -2366,6 +2421,25 @@ export class InteractiveMode {
 	 */
 	private static _stripSlashArg(text: string, command: string): string {
 		return text.slice(command.length).trim();
+	}
+
+	/**
+	 * Warn and recover when the user submits a "/command" that matches no known
+	 * command, instead of silently forwarding it to the model as a prompt. Only
+	 * fires for a clean "/word" token (letters/digits/_/:/-), so a path like
+	 * "/usr/bin" or arbitrary text starting with "/" still goes through. Returns
+	 * true when it handled (warned about) the input.
+	 */
+	private _warnIfUnknownCommand(text: string): boolean {
+		const match = text.match(/^\/([A-Za-z0-9_:-]+)(?:\s|$)/);
+		if (!match) return false;
+		const name = match[1];
+		if (this._knownCommandNames.has(name)) return false;
+		const suggestion = fuzzyFilter([...this._knownCommandNames], name, (n) => n).at(0);
+		const hint = suggestion ? ` Did you mean /${suggestion}?` : "";
+		this.showWarning(`Unknown command: /${name}.${hint}`);
+		this.editor.setText(text);
+		return true;
 	}
 
 	/**
@@ -2585,11 +2659,15 @@ export class InteractiveMode {
 					this.ui.terminal.setProgress(true);
 				}
 				this._cleanupRetryUI();
-				this.stopWorkingLoader();
-				if (this.workingVisible) {
+				// Reuse the loader created at submit (gap-morto) so the elapsed clock
+				// starts at Enter without a reset/flicker; build one only if missing
+				// (e.g. a continuation turn after a prior loader was cleared).
+				if (this.workingVisible && !this.loadingAnimation) {
+					this.statusContainer.clear();
 					this.loadingAnimation = this.createWorkingLoader();
 					this.statusContainer.addChild(this.loadingAnimation);
 				}
+				this.setWorkingPhase("Thinking…");
 				this.ui.requestRender();
 				break;
 
@@ -2626,6 +2704,7 @@ export class InteractiveMode {
 							this.hiddenThinkingLabel,
 							this.ui,
 							this.settingsManager.getStreamingSmoothing(),
+							this.settingsManager.getAssistantReadingColumns(),
 						);
 						this.streamingMessage = event.message;
 						this.streamingComponent.updateContent(this.streamingMessage);
@@ -2714,6 +2793,7 @@ export class InteractiveMode {
 			case "tool_execution_start": {
 				const component = this._ensureToolComponent(event.toolName, event.toolCallId, event.args);
 				component.markExecutionStarted();
+				this.setWorkingPhase(`Running ${event.toolName}…`);
 				this.ui.requestRender();
 				break;
 			}
@@ -2732,6 +2812,11 @@ export class InteractiveMode {
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);
+					// Back to the neutral phase once the last in-flight tool settles
+					// (parallel tools keep their "Running …" label until all finish).
+					if (this.pendingTools.size === 0) {
+						this.setWorkingPhase("Thinking…");
+					}
 					this.ui.requestRender();
 				}
 				break;
@@ -3105,6 +3190,9 @@ export class InteractiveMode {
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
 					this.hiddenThinkingLabel,
+					undefined,
+					false,
+					this.settingsManager.getAssistantReadingColumns(),
 				);
 				this.chatContainer.addChild(assistantComponent);
 				if (messageHasVisibleContent(message, false)) {
@@ -3583,14 +3671,30 @@ export class InteractiveMode {
 	}
 
 	private toggleToolOutputExpansion(): void {
-		this.setToolsExpanded(!this.toolOutputExpanded);
+		// While the welcome screen is the focus, the expand key grows the startup
+		// help (there is no tool output yet). After the first prompt it toggles
+		// tool output and leaves the static welcome header alone — no flicker.
+		if (this.welcomeActive) {
+			this.setStartupHeaderExpanded(!this.startupHeaderExpanded);
+		} else {
+			this.setToolsExpanded(!this.toolOutputExpanded);
+		}
+	}
+
+	private setStartupHeaderExpanded(expanded: boolean): void {
+		this.startupHeaderExpanded = expanded;
+		if (isExpandable(this.builtInHeader)) {
+			this.builtInHeader.setExpanded(expanded);
+		}
+		this.ui.requestRender();
 	}
 
 	private setToolsExpanded(expanded: boolean): void {
 		this.toolOutputExpanded = expanded;
-		const activeHeader = this.customHeader ?? this.builtInHeader;
-		if (isExpandable(activeHeader)) {
-			activeHeader.setExpanded(expanded);
+		// Only a custom extension header follows tool expansion; the built-in
+		// startup header owns its own state so it never flickers on a tool toggle.
+		if (this.customHeader && isExpandable(this.customHeader)) {
+			this.customHeader.setExpanded(expanded);
 		}
 		for (const child of this.chatContainer.children) {
 			if (isExpandable(child)) {

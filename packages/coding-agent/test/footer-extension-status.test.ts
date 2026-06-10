@@ -30,6 +30,7 @@ function makeSession(): AgentSession {
 function makeFooterData(statuses: Map<string, string>): ReadonlyFooterDataProvider {
 	return {
 		getGitBranch: () => null,
+		getRepoDir: () => null,
 		getExtensionStatuses: () => statuses,
 		getStatusVersion: () => 0,
 		getAvailableProviderCount: () => 1,

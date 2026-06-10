@@ -63,6 +63,7 @@ function makeFooter({
 
 	const footerData: ReadonlyFooterDataProvider = {
 		getGitBranch: () => "",
+		getRepoDir: () => null,
 		getExtensionStatuses: () => statuses,
 		getStatusVersion: () => 0,
 		getAvailableProviderCount: () => 1,

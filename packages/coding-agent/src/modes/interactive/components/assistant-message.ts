@@ -33,13 +33,15 @@ const REVEAL_MAX_STEP = 24; // ~1500 cps at 62fps — above any model's emit rat
 const REVEAL_FADE_COLUMNS = 6;
 
 /**
- * Max width (in columns) for assistant prose. On wide terminals the body text
- * is capped to this so lines stay a comfortable reading length instead of
+ * Default max width (in columns) for assistant prose. On wide terminals the body
+ * text is capped to this so lines stay a comfortable reading length instead of
  * running edge to edge; the gutter and full-width rules are unaffected. Only
  * assistant text/thinking is capped — tool output, bash, and code blocks keep
- * full width. Tune here (a settings-backed value is a possible follow-up).
+ * full width. Overridable per-session via the `assistantReadingColumns` setting
+ * (SettingsManager.getAssistantReadingColumns), threaded in through the
+ * constructor; this constant is the fallback when no value is supplied.
  */
-const ASSISTANT_READING_COLUMNS = 100;
+const DEFAULT_ASSISTANT_READING_COLUMNS = 88;
 
 // FTCS / OSC 133 semantic output zone. The assistant response is the "command
 // output": C (output start) … D;<exit> (finished). The user message carries the
@@ -121,6 +123,9 @@ export class AssistantMessageComponent extends Container {
 	// `revealedChars` is how much of that block is shown.
 	private readonly ui?: TUI;
 	private readonly smoothing: boolean;
+	// Settings-backed cap (cols) for prose width; falls back to the default when
+	// no value is threaded in. Read once at construction (stable per component).
+	private readonly readingColumns: number;
 	private revealIndex = -1;
 	private revealedChars = Number.POSITIVE_INFINITY;
 	private revealUnsub: (() => void) | null = null;
@@ -144,6 +149,7 @@ export class AssistantMessageComponent extends Container {
 		hiddenThinkingLabel = "Thinking…",
 		ui?: TUI,
 		smoothing = false,
+		readingColumns: number = DEFAULT_ASSISTANT_READING_COLUMNS,
 	) {
 		super();
 
@@ -152,6 +158,7 @@ export class AssistantMessageComponent extends Container {
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.ui = ui;
 		this.smoothing = smoothing;
+		this.readingColumns = readingColumns > 0 ? readingColumns : DEFAULT_ASSISTANT_READING_COLUMNS;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -270,7 +277,7 @@ export class AssistantMessageComponent extends Container {
 					entry = {
 						kind: "text",
 						markdown,
-						component: new ReadingColumn(markdown, ASSISTANT_READING_COLUMNS),
+						component: new ReadingColumn(markdown, this.readingColumns),
 					};
 					this.blockComponents[i] = entry;
 				}
@@ -330,7 +337,7 @@ export class AssistantMessageComponent extends Container {
 						entry = {
 							kind: "thinking",
 							markdown,
-							component: new ReadingColumn(markdown, ASSISTANT_READING_COLUMNS),
+							component: new ReadingColumn(markdown, this.readingColumns),
 						};
 						this.blockComponents[i] = entry;
 					}

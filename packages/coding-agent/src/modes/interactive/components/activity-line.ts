@@ -4,7 +4,7 @@ import { type ThemeColor, theme } from "../theme/theme.ts";
 import { clampBashCommandRow } from "./bash-command-row.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
-import { capErrorPreview, diffStat, verbFor } from "./tool-activity.ts";
+import { capErrorPreview, diffStat, glyphFor, verbFor } from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 /** Max width of a derived agent label (from the task prompt). */
@@ -164,9 +164,13 @@ export class ActivityLineComponent extends Container {
 				target = "";
 			}
 		}
+		// `<state-icon> <type-glyph> <verb> <target>`: the state icon shows
+		// pending/ok/error, the type glyph (✎ $ ⌕ ▸ ◆) lets edit/run/search/read be
+		// told apart at a glance. Both render a single cell.
+		const glyph = glyphFor(name);
 		const rawHeader = stripAnsi(target).trim()
-			? `${this.icon(state)} ${theme.bold(label)} ${target}`
-			: `${this.icon(state)} ${theme.bold(label)}`;
+			? `${this.icon(state)} ${glyph} ${theme.bold(label)} ${target}`
+			: `${this.icon(state)} ${glyph} ${theme.bold(label)}`;
 		// Cap the assembled header once so no branch (free-form agent label, MCP tool
 		// name, web_search query, edit path) can overflow the terminal width. ANSI is
 		// width-free here, so the colorized header is clamped to `width` cells; the

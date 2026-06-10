@@ -46,6 +46,7 @@ Edit directly or use `/settings` for common options.
 | `treeFilterMode` | string | `"default"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
 | `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
+| `assistantReadingColumns` | number | `88` | Max width (cols) for assistant prose on wide terminals (40-200); tool/bash/code uncapped |
 | `showHardwareCursor` | boolean | `false` | Show terminal cursor |
 
 ### Telemetry and update checks

@@ -13,7 +13,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "../utils.ts";
-import { SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list.ts";
+import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list.ts";
 
 const baseSegmenter = getSegmenter();
 
@@ -343,6 +343,12 @@ export class Editor implements Component, Focusable {
 	// Character jump mode
 	private jumpMode: "forward" | "backward" | null = null;
 
+	// Reverse history search (Ctrl+R). When active, an incremental-filter overlay
+	// over `history` is shown below the editor; the editor buffer is untouched
+	// until the user confirms a pick. null when not searching.
+	private historySearchList: SelectList | null = null;
+	private historySearchQuery: string = "";
+
 	// Preferred visual column for vertical cursor movement (sticky column)
 	private preferredVisualCol: number | null = null;
 
@@ -619,8 +625,23 @@ export class Editor implements Component, Focusable {
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
 
-		// Render top border (with scroll indicator if scrolled down)
-		if (this.scrollOffset > 0) {
+		// Render top border. Priorities, all reusing the same border-rule mechanism:
+		//  - jump mode active: show an ephemeral `─── jump → ` cue so the editor
+		//    doesn't look frozen while it waits for the target character. When also
+		//    scrolled, the scroll count is appended so neither signal is lost.
+		//  - scrolled (no jump): the usual `─── ↑ N more ` indicator.
+		//  - otherwise: the plain horizontal rule.
+		if (this.jumpMode !== null) {
+			const arrow = this.jumpMode === "forward" ? "→" : "←";
+			const scrollSuffix = this.scrollOffset > 0 ? `↑ ${this.scrollOffset} more ` : "";
+			const indicator = `─── jump ${arrow} ${scrollSuffix}`;
+			const remaining = width - visibleWidth(indicator);
+			if (remaining >= 0) {
+				result.push(this.borderColor(indicator + "─".repeat(remaining)));
+			} else {
+				result.push(this.borderColor(truncateToWidth(indicator, width)));
+			}
+		} else if (this.scrollOffset > 0) {
 			const indicator = `─── ↑ ${this.scrollOffset} more `;
 			const remaining = width - visibleWidth(indicator);
 			if (remaining >= 0) {
@@ -634,7 +655,7 @@ export class Editor implements Component, Focusable {
 
 		// Render each visible layout line
 		// Emit hardware cursor marker only when focused and not showing autocomplete
-		const emitCursorMarker = this.focused && !this.autocompleteState;
+		const emitCursorMarker = this.focused && !this.autocompleteState && !this.historySearchList;
 
 		// Slash-command highlight: column width of the leading `/command` token on
 		// the first line. Only when not scrolled — the command always lives at the
@@ -711,6 +732,22 @@ export class Editor implements Component, Focusable {
 		if (this.autocompleteState && this.autocompleteList) {
 			const autocompleteResult = this.autocompleteList.render(contentWidth);
 			for (const line of autocompleteResult) {
+				const lineWidth = visibleWidth(line);
+				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
+				result.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
+			}
+		}
+
+		// Reverse history search overlay (Ctrl+R). Rendered below the editor with a
+		// dim header echoing the live query, then the filtered SelectList.
+		if (this.historySearchList) {
+			const headerText = truncateToWidth(`  history ⌕ ${this.historySearchQuery}`, contentWidth, "…");
+			const header = this.theme.selectList.scrollInfo(headerText);
+			const headerPad = " ".repeat(Math.max(0, contentWidth - visibleWidth(header)));
+			result.push(`${leftPadding}${header}${headerPad}${rightPadding}`);
+
+			const searchResult = this.historySearchList.render(contentWidth);
+			for (const line of searchResult) {
 				const lineWidth = visibleWidth(line);
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
 				result.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
@@ -826,6 +863,12 @@ export class Editor implements Component, Focusable {
 				}
 				return;
 			}
+			return;
+		}
+
+		// Reverse history search overlay: while open it owns all input.
+		if (this.historySearchList) {
+			this.handleHistorySearchInput(data, kb);
 			return;
 		}
 
@@ -1049,6 +1092,12 @@ export class Editor implements Component, Focusable {
 		}
 		if (kb.matches(data, "tui.editor.pageDown")) {
 			this.pageScroll(1);
+			return;
+		}
+
+		// Reverse history search (Ctrl+R)
+		if (kb.matches(data, "tui.editor.historySearch")) {
+			this.openHistorySearch();
 			return;
 		}
 
@@ -2416,7 +2465,11 @@ export class Editor implements Component, Focusable {
 		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
 	): SelectList {
-		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
+		// Enable the trailing key hint so the dropdown spells out how to accept /
+		// navigate / dismiss. The slash-command layout keeps its column sizing; the
+		// hint is layered on top of whichever base layout applies.
+		const baseLayout: SelectListLayoutOptions = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : {};
+		const layout: SelectListLayoutOptions = { ...baseLayout, showKeyHints: true };
 		return new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
 	}
 
@@ -2618,5 +2671,92 @@ export class Editor implements Component, Focusable {
 	private updateAutocomplete(): void {
 		if (!this.autocompleteState || !this.autocompleteProvider) return;
 		this.requestAutocomplete({ force: this.autocompleteState === "force", explicitTab: false });
+	}
+
+	// =========================================================================
+	// Reverse history search (Ctrl+R)
+	// =========================================================================
+
+	/** True while the reverse-history-search overlay is open. */
+	public isShowingHistorySearch(): boolean {
+		return this.historySearchList !== null;
+	}
+
+	/** Build SelectItems from history: full prompt in `value` (injected on
+	 * confirm), single-lined preview in `label` (shown in the list). */
+	private buildHistorySearchItems(): SelectItem[] {
+		return this.history.map((entry) => ({
+			value: entry,
+			// Collapse newlines/whitespace so multi-line prompts show as one row.
+			label: entry.replace(/\s+/g, " ").trim(),
+		}));
+	}
+
+	private openHistorySearch(): void {
+		if (this.history.length === 0) return;
+		// Don't fight the autocomplete overlay; close it first.
+		this.cancelAutocomplete();
+		this.historySearchQuery = "";
+		const list = new SelectList(this.buildHistorySearchItems(), this.autocompleteMaxVisible, this.theme.selectList, {
+			showKeyHints: true,
+		});
+		this.historySearchList = list;
+		this.tui.requestRender();
+	}
+
+	private closeHistorySearch(): void {
+		this.historySearchList = null;
+		this.historySearchQuery = "";
+	}
+
+	private applyHistorySearchSelection(item: SelectItem): void {
+		this.closeHistorySearch();
+		// Inject the chosen prompt as a normal programmatic setText (undoable,
+		// exits history-browsing). Cursor lands at the end via setTextInternal.
+		this.setText(item.value);
+	}
+
+	private handleHistorySearchInput(data: string, kb: ReturnType<typeof getKeybindings>): void {
+		const list = this.historySearchList;
+		if (!list) return;
+
+		// Esc / Ctrl+C close without changing the buffer.
+		if (kb.matches(data, "tui.select.cancel")) {
+			this.closeHistorySearch();
+			return;
+		}
+
+		// Ctrl+R again steps the selection (classic reverse-search cadence).
+		if (kb.matches(data, "tui.editor.historySearch") || kb.matches(data, "tui.select.up")) {
+			list.handleInput(data === "\x12" ? "\x1b[A" : data);
+			return;
+		}
+		if (kb.matches(data, "tui.select.down")) {
+			list.handleInput(data);
+			return;
+		}
+
+		// Enter injects the highlighted prompt.
+		if (kb.matches(data, "tui.select.confirm")) {
+			const selected = list.getSelectedItem();
+			if (selected) this.applyHistorySearchSelection(selected);
+			else this.closeHistorySearch();
+			return;
+		}
+
+		// Backspace narrows/widens the query.
+		if (kb.matches(data, "tui.editor.deleteCharBackward") || matchesKey(data, "shift+backspace")) {
+			this.historySearchQuery = this.historySearchQuery.slice(0, -1);
+			list.setFilter(this.historySearchQuery);
+			return;
+		}
+
+		// Printable input extends the incremental query.
+		const printable = decodePrintableKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined);
+		if (printable !== undefined) {
+			this.historySearchQuery += printable;
+			list.setFilter(this.historySearchQuery);
+		}
+		// Any other control key is swallowed while the overlay is open.
 	}
 }

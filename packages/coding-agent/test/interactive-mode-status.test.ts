@@ -81,13 +81,14 @@ describe("InteractiveMode.showStatus", () => {
 });
 
 describe("InteractiveMode.setToolsExpanded", () => {
-	test("applies expansion state to the active header and chat entries", () => {
-		const header = { setExpanded: vi.fn() };
+	test("expands chat entries and a custom header but leaves the built-in startup header alone", () => {
+		const builtInHeader = { setExpanded: vi.fn() };
+		const customHeader = { setExpanded: vi.fn() };
 		const chatChild = { setExpanded: vi.fn() };
 		const fakeThis: any = {
 			toolOutputExpanded: false,
-			customHeader: undefined,
-			builtInHeader: header,
+			customHeader,
+			builtInHeader,
 			chatContainer: { children: [chatChild] },
 			ui: { requestRender: vi.fn() },
 		};
@@ -95,9 +96,46 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		(InteractiveMode as any).prototype.setToolsExpanded.call(fakeThis, true);
 
 		expect(fakeThis.toolOutputExpanded).toBe(true);
-		expect(header.setExpanded).toHaveBeenCalledWith(true);
+		// A custom extension header follows tool expansion...
+		expect(customHeader.setExpanded).toHaveBeenCalledWith(true);
+		// ...but the built-in startup header owns its own state, so a mid-session
+		// tool toggle can never resize/flicker the welcome screen.
+		expect(builtInHeader.setExpanded).not.toHaveBeenCalled();
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
 		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("InteractiveMode._warnIfUnknownCommand", () => {
+	function makeThis(known: string[]): any {
+		return {
+			_knownCommandNames: new Set(known),
+			showWarning: vi.fn(),
+			editor: { setText: vi.fn() },
+		};
+	}
+	const call = (self: any, text: string): boolean =>
+		(InteractiveMode as any).prototype._warnIfUnknownCommand.call(self, text);
+
+	test("warns and recovers a typo'd command, suggesting the closest match", () => {
+		const self = makeThis(["model", "compact", "name"]);
+		expect(call(self, "/modl")).toBe(true);
+		expect(self.showWarning).toHaveBeenCalledTimes(1);
+		expect(self.showWarning.mock.calls[0][0]).toContain("/modl");
+		expect(self.showWarning.mock.calls[0][0]).toContain("/model");
+		expect(self.editor.setText).toHaveBeenCalledWith("/modl");
+	});
+
+	test("ignores a known command (dispatch owns it)", () => {
+		const self = makeThis(["model"]);
+		expect(call(self, "/model gpt")).toBe(false);
+		expect(self.showWarning).not.toHaveBeenCalled();
+	});
+
+	test("ignores a path-like slash token, not a command attempt", () => {
+		const self = makeThis(["model"]);
+		expect(call(self, "/usr/bin/thing is cool")).toBe(false);
+		expect(self.showWarning).not.toHaveBeenCalled();
 	});
 });
 
@@ -241,6 +279,10 @@ describe("InteractiveMode.showLoadedResources", () => {
 		const fakeThis: any = {
 			options: { verbose: options.verbose ?? false },
 			toolOutputExpanded: options.toolOutputExpanded ?? false,
+			// The startup header (and the loaded-resources sections it gates via
+			// getStartupExpansionState) now own a dedicated expansion state, decoupled
+			// from tool-output expansion. The test option drives it.
+			startupHeaderExpanded: options.toolOutputExpanded ?? false,
 			chatContainer: new Container(),
 			settingsManager: {
 				getQuietStartup: () => options.quietStartup,

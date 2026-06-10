@@ -1,5 +1,18 @@
 import * as Diff from "diff";
-import { theme } from "../theme/theme.ts";
+import { type ThemeColor, theme } from "../theme/theme.ts";
+
+/**
+ * Emphasize an intra-line changed token without video-reverse: bold + the line's
+ * own diff color, re-asserted after the token so the `\x1b[39m` foreground reset
+ * doesn't drop the line color for any trailing context on the same row. Keeps the
+ * diff line's background intact (we never touch bg here) and reads as a brighter,
+ * heavier token instead of an inverted block.
+ */
+function emphasizeToken(value: string, color: ThemeColor): string {
+	// `\x1b[1m` bold on, colored token, `\x1b[22m` bold off, then re-open the line
+	// color so the surrounding unchanged text stays tinted.
+	return `\x1b[1m${theme.fg(color, value)}\x1b[22m${theme.getFgAnsi(color)}`;
+}
 
 /**
  * Parse diff line to extract prefix, line number, and content.
@@ -19,9 +32,10 @@ function replaceTabs(text: string): string {
 }
 
 /**
- * Compute word-level diff and render with inverse on changed parts.
+ * Compute word-level diff and emphasize changed tokens with bold + the line's
+ * diff color (not video-reverse — see {@link emphasizeToken}).
  * Uses diffWords which groups whitespace with adjacent words for cleaner highlighting.
- * Strips leading whitespace from inverse to avoid highlighting indentation.
+ * Strips leading whitespace from the emphasis to avoid highlighting indentation.
  */
 function renderIntraLineDiff(oldContent: string, newContent: string): { removedLine: string; addedLine: string } {
 	const wordDiff = Diff.diffWords(oldContent, newContent);
@@ -42,7 +56,7 @@ function renderIntraLineDiff(oldContent: string, newContent: string): { removedL
 				isFirstRemoved = false;
 			}
 			if (value) {
-				removedLine += theme.inverse(value);
+				removedLine += emphasizeToken(value, "toolDiffRemoved");
 			}
 		} else if (part.added) {
 			let value = part.value;
@@ -54,7 +68,7 @@ function renderIntraLineDiff(oldContent: string, newContent: string): { removedL
 				isFirstAdded = false;
 			}
 			if (value) {
-				addedLine += theme.inverse(value);
+				addedLine += emphasizeToken(value, "toolDiffAdded");
 			}
 		} else {
 			removedLine += part.value;
@@ -73,8 +87,8 @@ export interface RenderDiffOptions {
 /**
  * Render a diff string with colored lines and intra-line change highlighting.
  * - Context lines: dim/gray
- * - Removed lines: red, with inverse on changed tokens
- * - Added lines: green, with inverse on changed tokens
+ * - Removed lines: red, with bold-emphasized changed tokens
+ * - Added lines: green, with bold-emphasized changed tokens
  */
 export function renderDiff(diffText: string, _options: RenderDiffOptions = {}): string {
 	const lines = diffText.split("\n");

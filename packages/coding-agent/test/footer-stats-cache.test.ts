@@ -70,6 +70,7 @@ function createMutableSession(opts?: {
 function createFooterData(providerCount = 1): ReadonlyFooterDataProvider {
 	return {
 		getGitBranch: () => null,
+		getRepoDir: () => null,
 		getExtensionStatuses: () => new Map<string, string>(),
 		getStatusVersion: () => 0,
 		getAvailableProviderCount: () => providerCount,

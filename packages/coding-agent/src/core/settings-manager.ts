@@ -310,6 +310,7 @@ export interface Settings {
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
+	assistantReadingColumns?: number; // Max width (cols) for assistant prose on wide terminals (default: 88)
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	cursorBlink?: boolean; // Blink the input editor's block cursor while focused (default: true)
 	streamingSmoothing?: boolean; // Reveal streamed assistant text at a steady rate instead of in provider-sized bursts (default: true)
@@ -1428,6 +1429,26 @@ export class SettingsManager {
 	setAutocompleteMaxVisible(maxVisible: number): void {
 		this.globalSettings.autocompleteMaxVisible = Math.max(3, Math.min(20, Math.floor(maxVisible)));
 		this.markModified("autocompleteMaxVisible");
+		this.save();
+	}
+
+	/**
+	 * Max column width for assistant prose on wide terminals. Caps reading line
+	 * length so long answers stay comfortable instead of running edge to edge;
+	 * tool output / bash / code blocks are unaffected. Default 88 (a comfortable
+	 * prose measure); clamped to a sane band so a typo can't make prose unreadable.
+	 */
+	getAssistantReadingColumns(): number {
+		const raw = this.settings.assistantReadingColumns;
+		if (typeof raw !== "number" || !Number.isFinite(raw)) {
+			return 88;
+		}
+		return Math.max(40, Math.min(200, Math.floor(raw)));
+	}
+
+	setAssistantReadingColumns(columns: number): void {
+		this.globalSettings.assistantReadingColumns = Math.max(40, Math.min(200, Math.floor(columns)));
+		this.markModified("assistantReadingColumns");
 		this.save();
 	}
 

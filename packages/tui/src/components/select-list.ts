@@ -1,5 +1,6 @@
 import { fuzzyFilter } from "../fuzzy.ts";
-import { getKeybindings } from "../keybindings.ts";
+import { getKeybindings, type Keybinding } from "../keybindings.ts";
+import type { KeyId } from "../keys.ts";
 import type { Component } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
 
@@ -9,6 +10,42 @@ const MIN_DESCRIPTION_WIDTH = 10;
 
 const normalizeToSingleLine = (text: string): string => text.replace(/[\r\n]+/g, " ").trim();
 const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max));
+
+/** Pretty single-key label for a KeyId, e.g. "ctrl+r" → "Ctrl+R", "escape" → "Esc". */
+function prettyKeyId(keyId: KeyId): string {
+	const SPECIAL: Record<string, string> = {
+		escape: "Esc",
+		enter: "↵",
+		return: "↵",
+		tab: "Tab",
+		up: "↑",
+		down: "↓",
+		left: "←",
+		right: "→",
+		space: "Space",
+	};
+	return keyId
+		.split("+")
+		.map((part) => {
+			const lower = part.toLowerCase();
+			if (SPECIAL[lower]) return SPECIAL[lower];
+			if (/^[a-z]$/.test(part)) return part.toUpperCase();
+			if (/^[a-z]+$/.test(part) && part.length > 1) return part.charAt(0).toUpperCase() + part.slice(1);
+			return part;
+		})
+		.join("+");
+}
+
+/**
+ * First configured key for a binding, rendered as a short label. Falls back to
+ * `fallback` when the binding has no keys (e.g. a user cleared it) so the hint
+ * still reads sensibly. Rebind-aware: reflects user overrides via getKeybindings().
+ */
+function keyHintLabel(binding: Keybinding, fallback: string): string {
+	const keys = getKeybindings().getKeys(binding);
+	const first = keys[0];
+	return first ? prettyKeyId(first) : fallback;
+}
 
 export interface SelectItem {
 	value: string;
@@ -36,6 +73,14 @@ export interface SelectListLayoutOptions {
 	minPrimaryColumnWidth?: number;
 	maxPrimaryColumnWidth?: number;
 	truncatePrimary?: (context: SelectListTruncatePrimaryContext) => string;
+	/**
+	 * When true, render a trailing dim hint line spelling out how to accept /
+	 * navigate / dismiss (e.g. "Tab/↵ aplicar · ↑↓ navegar · Esc fechar"). Only
+	 * shown when more than one item is visible — with a single item Tab already
+	 * auto-applies, so the hint would be noise. Off by default so the other
+	 * SelectList consumers (model / session / theme pickers) stay uncluttered.
+	 */
+	showKeyHints?: boolean;
 }
 
 export class SelectList implements Component {
@@ -114,7 +159,27 @@ export class SelectList implements Component {
 			lines.push(this.theme.scrollInfo(truncateToWidth(scrollText, width - 2, "")));
 		}
 
+		// Trailing key hint (opt-in). Only with >1 item: a lone item auto-applies
+		// on Tab, so the hint would be redundant. Reuses the dim scrollInfo style.
+		if (this.layout.showKeyHints && this.filteredItems.length > 1) {
+			const hintLine = this.buildKeyHint(width);
+			if (hintLine) lines.push(this.theme.scrollInfo(hintLine));
+		}
+
 		return lines;
+	}
+
+	/**
+	 * Build the dim key-hint string, truncated to the available width. Returns ""
+	 * when there isn't enough room to show even the truncated hint legibly.
+	 */
+	private buildKeyHint(width: number): string {
+		const apply = `${keyHintLabel("tui.input.tab", "Tab")}/${keyHintLabel("tui.select.confirm", "↵")}`;
+		const cancel = keyHintLabel("tui.select.cancel", "Esc");
+		const hint = `  ${apply} apply · ↑↓ navigate · ${cancel} close`;
+		const truncated = truncateToWidth(hint, width - 2, "…");
+		// Below a tiny floor the hint is unreadable; suppress rather than show "…".
+		return visibleWidth(truncated) >= 6 ? truncated : "";
 	}
 
 	handleInput(keyData: string): void {

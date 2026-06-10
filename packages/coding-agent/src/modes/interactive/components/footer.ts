@@ -1,8 +1,62 @@
+import { basename, relative } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import { formatDisplayPath } from "../display-utils.ts";
-import { theme } from "../theme/theme.ts";
+import { CONTEXT_USAGE_WARN_PERCENT, theme } from "../theme/theme.ts";
+
+/**
+ * Hard cap on the rendered cwd label so a deep absolute path can never crowd out
+ * the model name on the identity line. The mid-path ellipsis kicks in past this.
+ */
+const MAX_PWD_WIDTH = 40;
+
+/**
+ * Shorten a path by collapsing its MIDDLE, preserving the head (drive / leading
+ * segments) and the tail (deepest dirs) — `C:\Users\…\interactive` reads far
+ * better than a right-truncated `C:\Users\Use…`. Splits on both separators so it
+ * works for Windows and POSIX paths; returns the input untouched when it already
+ * fits or is too short to collapse meaningfully.
+ */
+function ellipsizePathMiddle(p: string, maxWidth: number): string {
+	if (visibleWidth(p) <= maxWidth) return p;
+	const segments = p.split(/[\\/]+/).filter((s) => s.length > 0);
+	if (segments.length <= 2) {
+		// No interior segment to drop — fall back to a tail-preserving cut.
+		return `…${p.slice(p.length - (maxWidth - 1))}`;
+	}
+	const sep = p.includes("\\") ? "\\" : "/";
+	const head = segments[0]!;
+	let tailCount = 1;
+	let candidate = `${head}${sep}…${sep}${segments.slice(segments.length - tailCount).join(sep)}`;
+	// Grow the tail (deepest dirs are the most useful) until adding one more would
+	// blow the budget — keeps as much context as fits without exceeding maxWidth.
+	while (tailCount + 1 < segments.length) {
+		const next = `${head}${sep}…${sep}${segments.slice(segments.length - (tailCount + 1)).join(sep)}`;
+		if (visibleWidth(next) > maxWidth) break;
+		candidate = next;
+		tailCount += 1;
+	}
+	return candidate;
+}
+
+/**
+ * Compact a cwd for the identity line. Prefers a path RELATIVE to the git repo
+ * root (`coding-agent` instead of the full absolute path), labelling the repo by
+ * its basename so the project stays identifiable. Outside a repo, falls back to
+ * the home-relative form with a mid-path ellipsis so both ends survive.
+ */
+function compactCwd(cwd: string, repoDir: string | null): string {
+	if (repoDir) {
+		const rel = relative(repoDir, cwd);
+		if (rel === "") return basename(repoDir);
+		if (!rel.startsWith("..") && rel !== "." && !/^[A-Za-z]:/.test(rel)) {
+			const normalized = rel.split(/[\\/]+/).join("/");
+			return `${basename(repoDir)}/${normalized}`;
+		}
+	}
+	return ellipsizePathMiddle(formatDisplayPath(cwd), MAX_PWD_WIDTH);
+}
 
 /**
  * Sanitize text for display in a single-line status.
@@ -157,8 +211,10 @@ export class FooterComponent implements Component {
 
 		// --- Identity (line 1) -----------------------------------------------
 		// Left: cwd (branch) • session — `muted` (not dim) so it stays legible
-		// without competing with the model name.
-		let pwd = formatDisplayPath(this.session.sessionManager.getCwd());
+		// without competing with the model name. The cwd is compacted (repo-relative
+		// when inside a git repo, mid-path ellipsis otherwise) so a deep absolute
+		// path never eats the model name on the right.
+		let pwd = compactCwd(this.session.sessionManager.getCwd(), this.footerData.getRepoDir());
 		const branch = this.footerData.getGitBranch();
 		if (branch) pwd = `${pwd} (${branch})`;
 		const sessionName = this.session.sessionManager.getSessionName();
@@ -201,14 +257,12 @@ export class FooterComponent implements Component {
 				: `ctx ${contextPercent}% · ${formatTokens(contextUsage?.tokens ?? 0)}/${formatTokens(contextWindow)}`;
 		const ctxColorize = theme.getContextUsageColor(contextPercentValue);
 
-		const rightParts: string[] = [];
+		// Group A — usage/cost: `↑in ↓out $cost` kept together on the right.
+		const usageGroup: string[] = [];
 		const io: string[] = [];
 		if (totals.input) io.push(`↑${formatTokens(totals.input)}`);
 		if (totals.output) io.push(`↓${formatTokens(totals.output)}`);
-		if (io.length) rightParts.push(io.join(" "));
-
-		const goalStatus = this.session.goalStatusLine();
-		if (goalStatus) rightParts.push(goalStatus);
+		if (io.length) usageGroup.push(io.join(" "));
 
 		// Cost segment only when it rounds to a visible amount. Under a
 		// subscription the cost is always $0.000 (flat plan), so `$0.000 (sub)`
@@ -216,17 +270,40 @@ export class FooterComponent implements Component {
 		// stops rendering "0.000".
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
 		if (totals.cost >= 0.0005) {
-			rightParts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+			usageGroup.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
 		}
+
+		// Group B — session mode bits (permission / auto-compact).
 		const mode = this.getPermissionMode();
 		const modeBits: string[] = [];
 		if (mode && mode !== "unsafe") modeBits.push(mode);
 		// Distinct label ("compact", not "auto") so it never collides with the
 		// permission mode — "auto" mode + auto-compact would read "auto auto".
 		if (this.autoCompactEnabled) modeBits.push(theme.fg("dim", "compact"));
-		if (modeBits.length) rightParts.push(modeBits.join(" "));
 
-		const metricsLine = composeLeftRight(ctxText, rightParts.join(" · "), width, {
+		// Goal status is ephemeral and actionable: render it bright (accent), not
+		// dim, so it stands out from the trailing usage metrics. Pre-colorized so it
+		// survives the group's outer dim wrapper (its own reset re-opens dim after).
+		const goalStatus = this.session.goalStatusLine();
+
+		// Assemble groups. Intra-group items join with the light ` · `; the two
+		// semantic groups (usage vs. mode) join with a stronger `  •  ` so the line
+		// reads as two clusters instead of one undifferentiated run.
+		const groups: string[] = [];
+		if (usageGroup.length) groups.push(usageGroup.join(" · "));
+		if (goalStatus) groups.push(theme.fg("accent", goalStatus));
+		if (modeBits.length) groups.push(modeBits.join(" · "));
+		let rightText = groups.join("  •  ");
+
+		// #2 — context-pressure signal is COLOR-first: the ctx number already turns
+		// warning/error past the threshold. Add a terse textual nudge only when
+		// auto-compact is armed and we're past the warn band, colorized to match so
+		// it escalates with the number rather than shouting in plain text.
+		if (this.autoCompactEnabled && contextPercentValue > CONTEXT_USAGE_WARN_PERCENT) {
+			rightText = rightText ? `${rightText} ${ctxColorize("⚠ compact soon")}` : ctxColorize("⚠ compact soon");
+		}
+
+		const metricsLine = composeLeftRight(ctxText, rightText, width, {
 			leftColor: ctxColorize,
 			rightColor: (text) => theme.fg("dim", text),
 			ellipsis: theme.fg("dim", "…"),

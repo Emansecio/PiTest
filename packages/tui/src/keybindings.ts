@@ -28,6 +28,7 @@ export interface Keybindings {
 	"tui.editor.yankPop": true;
 	"tui.editor.undo": true;
 	"tui.editor.redo": true;
+	"tui.editor.historySearch": true;
 	// Help
 	"tui.help.cheatsheet": true;
 	// Generic input actions
@@ -119,6 +120,7 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.yankPop": { defaultKeys: "alt+y", description: "Yank pop" },
 	"tui.editor.undo": { defaultKeys: "ctrl+-", description: "Undo" },
 	"tui.editor.redo": { defaultKeys: "ctrl+shift+-", description: "Redo" },
+	"tui.editor.historySearch": { defaultKeys: "ctrl+r", description: "Reverse-search prompt history" },
 	"tui.help.cheatsheet": { defaultKeys: ["f1", "ctrl+/"], description: "Show keybinding cheatsheet" },
 	"tui.input.newLine": { defaultKeys: "shift+enter", description: "Insert newline" },
 	"tui.input.submit": { defaultKeys: "enter", description: "Submit input" },

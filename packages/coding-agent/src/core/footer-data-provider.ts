@@ -110,6 +110,15 @@ export class FooterDataProvider {
 		this.setupGitWatcher();
 	}
 
+	/**
+	 * Absolute path of the git repository root (the directory containing `.git`),
+	 * or null when cwd is not inside a repo. Surfaced so the footer can render the
+	 * cwd relative to the repo root instead of as a long absolute path.
+	 */
+	getRepoDir(): string | null {
+		return this.gitPaths?.repoDir ?? null;
+	}
+
 	/** Current git branch, null if not in repo, "detached" if detached HEAD */
 	getGitBranch(): string | null {
 		if (this.cachedBranch === undefined) {
@@ -358,5 +367,10 @@ export class FooterDataProvider {
 /** Read-only view for extensions - excludes setExtensionStatus, setAvailableProviderCount and dispose */
 export type ReadonlyFooterDataProvider = Pick<
 	FooterDataProvider,
-	"getGitBranch" | "getExtensionStatuses" | "getStatusVersion" | "getAvailableProviderCount" | "onBranchChange"
+	| "getGitBranch"
+	| "getRepoDir"
+	| "getExtensionStatuses"
+	| "getStatusVersion"
+	| "getAvailableProviderCount"
+	| "onBranchChange"
 >;
