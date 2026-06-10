@@ -28,6 +28,14 @@ interface JsonRpcResponse<T = unknown> {
 	error?: { code: number; message: string; data?: unknown };
 }
 
+/**
+ * Transport-level failure (network error, HTTP status, SSE/malformed payload)
+ * as opposed to a JSON-RPC application error returned by a live server. The
+ * manager only marks a server disconnected — and re-initializes — for these;
+ * application errors leave the connection state untouched.
+ */
+export class McpTransportError extends Error {}
+
 export class McpHttpClient {
 	private name: string;
 	private config: McpServerConfig;
@@ -35,6 +43,12 @@ export class McpHttpClient {
 	private initialized = false;
 	private serverInfo?: { name?: string; version?: string };
 	private tools: McpToolSchema[] = [];
+	// Streamable HTTP session id. Spec-compliant servers (official SDK with a
+	// session generator) return `Mcp-Session-Id` on the initialize response and
+	// require it echoed on every subsequent request, else they answer 4xx and the
+	// server appears permanently disconnected. Captured from any response that
+	// carries it; cleared on dispose.
+	private sessionId?: string;
 
 	constructor(name: string, config: McpServerConfig) {
 		this.name = name;
@@ -81,25 +95,38 @@ export class McpHttpClient {
 					"content-type": "application/json",
 					accept: "application/json",
 					...(this.config.headers ?? {}),
+					// Echo the server-assigned session id on every request after
+					// initialize. Placed last so it is authoritative over config.headers.
+					...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
 				},
 				body: JSON.stringify(body),
 				signal: controller.signal,
 			});
+		} catch (error) {
+			// fetch rejection = network/abort/timeout: the request may or may not
+			// have reached the server, so this is a transport failure by definition.
+			const message = error instanceof Error ? error.message : String(error);
+			throw new McpTransportError(`MCP ${this.name} ${method}: ${message}`);
 		} finally {
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
 		}
 
+		// Capture the session id from any response that carries one (servers set it
+		// on the initialize response). Subsequent requests must echo it.
+		const incomingSessionId = response.headers.get("mcp-session-id");
+		if (incomingSessionId) this.sessionId = incomingSessionId;
+
 		if (!response.ok) {
 			const text = await response.text().catch(() => "");
-			throw new Error(`MCP ${this.name} ${method}: HTTP ${response.status} ${text.slice(0, 200)}`);
+			throw new McpTransportError(`MCP ${this.name} ${method}: HTTP ${response.status} ${text.slice(0, 200)}`);
 		}
 
 		// Some servers stream SSE on the same endpoint. We only support the
 		// single-response JSON variant; reject SSE responses to avoid hanging.
 		const contentType = response.headers.get("content-type") ?? "";
 		if (contentType.includes("text/event-stream")) {
-			throw new Error(`MCP ${this.name} ${method}: SSE transport not supported (use HTTP JSON)`);
+			throw new McpTransportError(`MCP ${this.name} ${method}: SSE transport not supported (use HTTP JSON)`);
 		}
 
 		let json: JsonRpcResponse<T>;
@@ -107,7 +134,7 @@ export class McpHttpClient {
 			json = (await response.json()) as JsonRpcResponse<T>;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			throw new Error(`MCP ${this.name} ${method}: invalid JSON response (${message})`);
+			throw new McpTransportError(`MCP ${this.name} ${method}: invalid JSON response (${message})`);
 		}
 		if (json.error) {
 			throw new Error(`MCP ${this.name} ${method}: ${json.error.message} (code ${json.error.code})`);
@@ -143,6 +170,7 @@ export class McpHttpClient {
 					"content-type": "application/json",
 					accept: "application/json",
 					...(this.config.headers ?? {}),
+					...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
 				},
 				body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
 				signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
@@ -156,8 +184,24 @@ export class McpHttpClient {
 	}
 
 	async refreshTools(signal?: AbortSignal): Promise<McpToolSchema[]> {
-		const result = await this.rpc<McpListToolsResult>("tools/list", {}, signal);
-		this.tools = Array.isArray(result.tools) ? result.tools : [];
+		// tools/list is paginated (MCP spec): follow nextCursor until exhausted so
+		// servers with many tools aren't silently truncated to the first page.
+		// PAGE_CAP bounds a server that returns a cursor forever; a repeated
+		// cursor also breaks the loop (no forward progress).
+		const PAGE_CAP = 50;
+		const collected: McpToolSchema[] = [];
+		const seenCursors = new Set<string>();
+		let cursor: string | undefined;
+		for (let page = 0; page < PAGE_CAP; page++) {
+			const params: Record<string, unknown> = cursor === undefined ? {} : { cursor };
+			const result = await this.rpc<McpListToolsResult>("tools/list", params, signal);
+			if (Array.isArray(result.tools)) collected.push(...result.tools);
+			const next = result.nextCursor;
+			if (typeof next !== "string" || next.length === 0 || seenCursors.has(next)) break;
+			seenCursors.add(next);
+			cursor = next;
+		}
+		this.tools = collected;
 		return this.tools;
 	}
 
@@ -173,5 +217,8 @@ export class McpHttpClient {
 	dispose(): void {
 		this.initialized = false;
 		this.tools = [];
+		// Drop the session id so a reconnect performs a fresh initialize handshake
+		// instead of replaying a stale (server-expired) session.
+		this.sessionId = undefined;
 	}
 }

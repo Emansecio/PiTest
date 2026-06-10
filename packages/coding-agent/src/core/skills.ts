@@ -407,7 +407,7 @@ export function formatSkillsForPrompt(skills: Skill[], maxSkills = 100, cwd?: st
 	}
 
 	if (omitted > 0) {
-		lines.push(`  <!-- ${omitted} more skills available. Use /skill list to see all. -->`);
+		lines.push(`  <!-- ${omitted} more skill(s) installed but not shown here (listing caps at ${maxSkills}). -->`);
 	}
 
 	lines.push("</available_skills>");

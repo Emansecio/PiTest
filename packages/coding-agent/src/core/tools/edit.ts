@@ -1,7 +1,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Box, Container, Spacer, Text } from "@pit/tui";
 import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
+import { access as fsAccess, readFile as fsReadFile, stat as fsStat, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import type { ToolDefinition } from "../extensions/types.js";
@@ -470,6 +470,24 @@ export function createEditToolDefinition(
 
 								__written = finalContent;
 
+								// Cheap post-write integrity check (local FS only): confirm the
+								// byte count on disk matches what we wrote, catching a silent
+								// partial write / permission race that would otherwise leave the
+								// model believing a corrupt edit succeeded. Skipped for custom
+								// operations (e.g. SSH) where a local stat is meaningless.
+								let integrityNote = "";
+								if (ops === defaultEditOperations) {
+									try {
+										const st = await fsStat(absolutePath);
+										const expected = Buffer.byteLength(finalContent, "utf-8");
+										if (st.size !== expected) {
+											integrityNote = ` WARNING: post-write size mismatch (expected ${expected} bytes, found ${st.size}). The write may be incomplete — re-read the file to confirm before relying on it.`;
+										}
+									} catch {
+										// stat failed — non-fatal; skip the note rather than fail the edit.
+									}
+								}
+
 								// Clean up abort handler.
 								if (signal) {
 									signal.removeEventListener("abort", onAbort);
@@ -479,7 +497,7 @@ export function createEditToolDefinition(
 									content: [
 										{
 											type: "text",
-											text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
+											text: `Successfully replaced ${edits.length} block(s) in ${path}.${integrityNote}`,
 										},
 									],
 									details: { diff: diffResult.diff, firstChangedLine: diffResult.firstChangedLine },

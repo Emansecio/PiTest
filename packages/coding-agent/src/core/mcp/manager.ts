@@ -3,14 +3,18 @@
  * reconnect / disconnect, and exposes the set of currently advertised tools
  * across all servers.
  *
- * Reconnect strategy: when a `callTool` fails with a network-class error,
- * the manager re-runs `initialize` once. If that succeeds it retries the
- * original call; if it fails the original error is propagated. Background
- * polling is intentionally absent — pi is interactive, so a failed call
- * surfaces immediately and re-connect happens lazily on next attempt.
+ * Reconnect strategy: when a `callTool` fails with a TRANSPORT error (network,
+ * HTTP status, malformed payload — `McpTransportError`), the manager marks the
+ * server disconnected and re-runs `initialize` once so the NEXT call finds a
+ * live session. The failed call itself is never re-sent: tool calls may have
+ * side effects, and a timed-out call may already have been applied server-side.
+ * JSON-RPC application errors and user aborts leave connection state untouched
+ * (the server is alive and answering). A direct success resets the entry back
+ * to healthy. Background polling is intentionally absent — pi is interactive,
+ * so a failed call surfaces immediately and re-connect happens lazily.
  */
 
-import { McpHttpClient } from "./client.ts";
+import { McpHttpClient, McpTransportError } from "./client.ts";
 import type { McpCallToolResult, McpConnectionState, McpServerConfig, McpToolSchema } from "./types.ts";
 
 export interface McpManagerOptions {
@@ -90,6 +94,7 @@ export class McpManager {
 					await entry.client.initialize(signal);
 					entry.connected = true;
 					entry.lastError = undefined;
+					entry.reconnectAttempts = 0;
 				} catch (err) {
 					entry.connected = false;
 					entry.lastError = err instanceof Error ? err.message : String(err);
@@ -99,12 +104,21 @@ export class McpManager {
 		);
 	}
 
+	// Default prefix follows the ecosystem-wide `mcp__<server>__<tool>` naming
+	// (Claude Code et al.). Downstream heuristics depend on it: compaction's
+	// extractFileOpsFromMessage detects MCP calls via the `mcp__` prefix, so a
+	// bare `<server>__` default would make MCP work invisible in branch
+	// summaries. Users can still override per server via `toolPrefix`.
+	private toolPrefixFor(entry: ServerEntry): string {
+		return entry.config.toolPrefix ?? `mcp__${entry.name}__`;
+	}
+
 	/** Returns prefixed tools across all connected servers. */
 	listTools(): Array<{ serverName: string; prefixedName: string; schema: McpToolSchema }> {
 		const out: Array<{ serverName: string; prefixedName: string; schema: McpToolSchema }> = [];
 		for (const entry of this.entries.values()) {
 			if (!entry.connected) continue;
-			const prefix = entry.config.toolPrefix ?? `${entry.name}__`;
+			const prefix = this.toolPrefixFor(entry);
 			for (const tool of entry.client.getTools()) {
 				if (!this.isAllowedTool(entry, tool.name)) continue;
 				out.push({
@@ -130,37 +144,52 @@ export class McpManager {
 		const { entry, originalName } = dispatch;
 
 		try {
-			return await entry.client.callTool(originalName, args, signal);
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			entry.lastError = message;
-			entry.connected = false;
-			this.emit(entry);
-
-			if (entry.reconnectAttempts >= this.maxReconnectAttempts) {
-				throw err;
-			}
-
-			entry.reconnectAttempts++;
-			try {
-				await entry.client.initialize(signal);
+			const result = await entry.client.callTool(originalName, args, signal);
+			// A direct success proves the server healthy: clear any degraded state
+			// left by an earlier transport failure so future failures get their
+			// reconnect attempt back. Emit only on an actual transition.
+			if (!entry.connected || entry.reconnectAttempts > 0 || entry.lastError !== undefined) {
 				entry.connected = true;
 				entry.lastError = undefined;
-				this.emit(entry);
-				const result = await entry.client.callTool(originalName, args, signal);
 				entry.reconnectAttempts = 0;
-				return result;
-			} catch (retryErr) {
-				entry.lastError = retryErr instanceof Error ? retryErr.message : String(retryErr);
 				this.emit(entry);
-				throw retryErr;
 			}
+			return result;
+		} catch (err) {
+			// A user abort is not a server fault: leave connection state untouched.
+			if (signal?.aborted) {
+				throw err;
+			}
+			entry.lastError = err instanceof Error ? err.message : String(err);
+			if (!(err instanceof McpTransportError)) {
+				// JSON-RPC application error: the server is alive and answering.
+				this.emit(entry);
+				throw err;
+			}
+			entry.connected = false;
+			this.emit(entry);
+			// Re-initialize so the NEXT call finds a live session, then propagate
+			// the original failure. The call is never re-sent: it may have side
+			// effects, and a timed-out call may already have been applied.
+			if (entry.reconnectAttempts < this.maxReconnectAttempts) {
+				entry.reconnectAttempts++;
+				try {
+					await entry.client.initialize(signal);
+					entry.connected = true;
+					entry.lastError = undefined;
+					entry.reconnectAttempts = 0;
+				} catch (reconnectErr) {
+					entry.lastError = reconnectErr instanceof Error ? reconnectErr.message : String(reconnectErr);
+				}
+				this.emit(entry);
+			}
+			throw err;
 		}
 	}
 
 	private resolveDispatch(prefixedName: string): { entry: ServerEntry; originalName: string } | undefined {
 		for (const entry of this.entries.values()) {
-			const prefix = entry.config.toolPrefix ?? `${entry.name}__`;
+			const prefix = this.toolPrefixFor(entry);
 			if (!prefixedName.startsWith(prefix)) continue;
 			const originalName = prefixedName.slice(prefix.length);
 			if (!this.isAllowedTool(entry, originalName)) continue;

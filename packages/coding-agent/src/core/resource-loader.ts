@@ -17,11 +17,12 @@ import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResul
 import { discoverLegacyResources, type LegacyDiscoveryResult } from "./legacy-discovery.ts";
 import { discoverMemoryFiles, type MemoryFile } from "./memory/index.ts";
 import { DefaultPackageManager, type PathMetadata } from "./package-manager.ts";
+import { loadProjectConfigContext } from "./project-config-context.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
-import { loadSkills } from "./skills.ts";
+import { getClaudeCodeSkillsDir, loadSkills } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /**
@@ -184,6 +185,14 @@ export function loadProjectContextFiles(options: {
 		for (const rule of legacy.ruleFiles) {
 			contextFiles.push({ path: rule.path, content: rule.content });
 		}
+	}
+
+	// Distill the project's own tsconfig/biome conventions into the context so
+	// the model generates conformant code on the first attempt even when no
+	// AGENTS.md documents them. Best-effort: null when nothing parseable.
+	const configContext = loadProjectConfigContext(resolvedCwd);
+	if (configContext) {
+		contextFiles.push(configContext);
 	}
 
 	return contextFiles;
@@ -530,6 +539,21 @@ export class DefaultResourceLoader implements ResourceLoader {
 					[...cliEnabledSkills, ...enabledSkills],
 					[...this.additionalSkillPaths, ...legacySkillPaths],
 				);
+
+		// Claude Code skills (~/.claude/skills) as a tertiary source. The reload
+		// path always calls loadSkills with includeDefaults:false (it supplies
+		// every directory explicitly), so the default-source block inside
+		// loadSkills never runs in production — without this, that whole skill
+		// class is silently invisible. Appended LAST so agent + project +
+		// explicit skills win on name collisions (first-loaded wins). Suppressed
+		// by --no-skills; getClaudeCodeSkillsDir() itself applies the
+		// PIT_DISABLE_CLAUDE_CODE_SKILLS opt-out (returns null).
+		if (!this.noSkills) {
+			const claudeSkillsDir = getClaudeCodeSkillsDir();
+			if (claudeSkillsDir && existsSync(claudeSkillsDir) && !skillPaths.includes(claudeSkillsDir)) {
+				skillPaths.push(claudeSkillsDir);
+			}
+		}
 
 		this.lastSkillPaths = skillPaths;
 		this.updateSkillsFromPaths(skillPaths, metadataByPath);

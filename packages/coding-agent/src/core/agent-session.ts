@@ -141,14 +141,20 @@ import {
 	type PreviewQueue,
 	setCurrentPreviewQueue,
 } from "./preview-queue.ts";
-import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
+import { expandPromptTemplate, type PromptTemplate, parseCommandArgs, substituteArgs } from "./prompt-templates.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.js";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
-import { buildStagnationReminder, classifyTurn, decideStagnationReminder, StagnationTracker } from "./stagnation.js";
+import {
+	buildStagnationReminder,
+	classifyTurn,
+	decideStagnationReminder,
+	MUTATING_TOOL_NAMES,
+	StagnationTracker,
+} from "./stagnation.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { setCurrentTodoManager, type TodoItem, TodoManager, type TodoState } from "./todo/todo-manager.ts";
 import { buildDoomLoopReminder, buildToolErrorReflection, decideErrorReflection } from "./tool-call-feedback.js";
@@ -165,7 +171,9 @@ import {
 	setCurrentToolDiscoveryIndex,
 	type ToolDiscoveryIndex,
 } from "./tool-discovery.ts";
+import { createSameSessionHintRule } from "./tool-error-hint-rules.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
+import { classifyBashCommand } from "./tools/bash-activity.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { ReadDedupeStore } from "./tools/read.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
@@ -272,6 +280,10 @@ export interface ExtensionBindings {
  * a backstop against a goal that never calls goal_complete and has no budget.
  */
 const GOAL_MAX_AUTO_ITERATIONS = 50;
+// A fingerprint that has failed this many times in the current session gets a
+// live Tier 4 hint rule registered (2 = the second failure arms it, so the
+// third occurrence is the first to carry the corrective hint).
+const SAME_SESSION_HINT_THRESHOLD = 2;
 
 /** Build the continuation prompt that re-injects a failed verification check. */
 function verificationFixPrompt(
@@ -488,6 +500,9 @@ export class AgentSession {
 	// tool_error_hint_applied + tool_execution_end events; persisted on dispose
 	// so the next session boots warm with knowledge of recurring patterns.
 	private readonly _learnedErrors = new Map<string, LearnedErrorEntry>();
+	// Keys for which a same-session Tier 4 hint rule has already been registered
+	// live, so a recurring fingerprint materialises its rule exactly once.
+	private readonly _sameSessionHintKeys = new Set<string>();
 	// Transient: which Tier 4 rules fired per in-flight toolCallId. Read once
 	// in _handleToolExecutionEnd and dropped to keep memory bounded.
 	private readonly _hintsByToolCallId = new Map<string, string[]>();
@@ -517,9 +532,11 @@ export class AgentSession {
 	// number of in-flight tool calls and aggressively pruned on completion.
 	private readonly _toolCallArgsByCallId = new Map<string, unknown>();
 
-	// Throttle for doom-loop reminders; in epoch ms. Resets to 0 on every agent_end
-	// so a long-lived session can still surface reminders later.
-	private _lastDoomLoopReminderAt = 0;
+	// Highest doom-loop tier already fired in the current identical-call streak.
+	// Lets each tier fire once while the sequence counter keeps climbing toward
+	// the Tier-3 abort — replaces the old per-tier resetSequence() that capped the
+	// count at 4 and made the abort unreachable. Reset when the streak breaks.
+	private _doomLoopFiredTier = 0;
 	private readonly _stagnation = new StagnationTracker();
 	private _lastStagnationReminderAt = 0;
 
@@ -537,6 +554,11 @@ export class AgentSession {
 	// (nothing is cached pre-first-request) but honest to surface.
 	private _cachePrefixBaseline: string | undefined;
 	private _cachePrefixRebuilds = 0;
+	// Stable per-session count of discovery-hidden tools. Snapshotted once after
+	// _seedToolDiscovery so the search_tool_bm25 nudge sits in the cacheable
+	// prefix from the first request instead of flipping 0→N (and churning the
+	// cache) when the live index is first consulted on a later rebuild.
+	private _hiddenToolCountSnapshot = 0;
 	private readonly _cachePrefixReasons = new Map<string, number>();
 
 	// Hindsight memory bank, opened in the constructor when settings enable it.
@@ -691,6 +713,21 @@ export class AgentSession {
 		this._toolDiscoveryIndex = createToolDiscoveryIndex();
 		this._seedToolDiscovery();
 		setCurrentToolDiscoveryIndex(this._toolDiscoveryIndex);
+		// Snapshot the hidden-tool count now that discovery is seeded and (when
+		// there are hidden tools) rebuild the base prompt so the search_tool_bm25
+		// nudge is part of the cacheable prefix from the very first request and
+		// stays stable for the session. Without this the nudge's presence tracks
+		// the live mutable index: it flips 0→N on the first post-boot rebuild
+		// (re-charging the cached prefix), or — with frequent-files off — never
+		// renders, so the model never learns it can discover hidden tools. The
+		// baseline reset makes this a true re-baseline, not counted churn: it runs
+		// pre-request during construction, before anything is sent to a provider.
+		this._hiddenToolCountSnapshot = this._toolDiscoveryIndex.listHidden().length;
+		if (this._hiddenToolCountSnapshot > 0) {
+			this._cachePrefixBaseline = undefined;
+			this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames(), "tool-discovery-seed");
+			this.agent.state.systemPrompt = this._baseSystemPrompt;
+		}
 
 		// Spin up the eval kernel manager when enabled. Kernels themselves are
 		// only spawned on first `get(lang)` so an unused setting costs nothing.
@@ -812,21 +849,31 @@ export class AgentSession {
 		if (!index) return;
 		const cfg = this.settingsManager.getToolDiscoverySettings();
 		if (!cfg.enabled) return;
-		const autoResizeImages = this.settingsManager.getImageAutoResize();
-		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
-		const shellPath = this.settingsManager.getShellPath();
+		// Reuse the full definition set _buildRuntime already built into
+		// _baseToolDefinitions (same cwd, same options) — it runs earlier in the
+		// constructor. Only rebuild for the override case, where
+		// _baseToolDefinitions holds the override set, not the full registry, and
+		// discovery must still see every tool.
 		let allDefs: Record<string, ToolDefinition>;
-		try {
-			allDefs = createAllToolDefinitions(this._cwd, {
-				read: {
-					autoResizeImages,
-					embedHashlineAnchors: !this._disableHashlineAnchors,
-					readDedupeStore: this._readDedupeStore,
-				},
-				bash: { commandPrefix: shellCommandPrefix, shellPath },
-			}) as Record<string, ToolDefinition>;
-		} catch {
-			return;
+		if (this._baseToolsOverride) {
+			const autoResizeImages = this.settingsManager.getImageAutoResize();
+			const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
+			const shellPath = this.settingsManager.getShellPath();
+			try {
+				allDefs = createAllToolDefinitions(this._cwd, {
+					read: {
+						autoResizeImages,
+						embedHashlineAnchors: () =>
+							!this._disableHashlineAnchors && this.getActiveToolNames().includes("edit_v2"),
+						readDedupeStore: this._readDedupeStore,
+					},
+					bash: { commandPrefix: shellCommandPrefix, shellPath },
+				}) as Record<string, ToolDefinition>;
+			} catch {
+				return;
+			}
+		} else {
+			allDefs = Object.fromEntries(this._baseToolDefinitions) as Record<string, ToolDefinition>;
 		}
 		// 1. Explicit hiddenByDefault entries.
 		const explicit = new Set(cfg.hiddenByDefault);
@@ -1141,9 +1188,12 @@ export class AgentSession {
 						});
 						this._retryAttempt = 0;
 					}
-					// Reset fallback-chain state so the next failure restarts from the primary.
+					// Reset the fallback chain so the next failure restarts from the
+					// primary. The captured primary model (_fallbackOriginal) is NOT
+					// cleared here — it is restored at the turn boundary in
+					// _handlePostAgentRun so a multi-call turn stays on the working
+					// fallback instead of ping-ponging back to a still-failing primary.
 					this._triedFallbackEntries.clear();
-					this._fallbackOriginal = undefined;
 				}
 			}
 		}
@@ -1353,6 +1403,25 @@ export class AgentSession {
 					if (matchedHintRules && matchedHintRules.length > 0 && !existing.matchedRuleId) {
 						existing.matchedRuleId = matchedHintRules[0];
 					}
+					// Same-session escalation: once a fingerprint recurs and no built-in
+					// rule already covers it, register a live Tier 4 rule so the NEXT
+					// occurrence this session carries a corrective hint — instead of
+					// waiting for the cross-session store to warm next boot.
+					if (
+						existing.count >= SAME_SESSION_HINT_THRESHOLD &&
+						!existing.matchedRuleId &&
+						!this._sameSessionHintKeys.has(key)
+					) {
+						this._sameSessionHintKeys.add(key);
+						this.agent.toolErrorHintRegistry?.add(
+							createSameSessionHintRule({
+								tool: existing.tool,
+								fingerprint: existing.fingerprint,
+								count: existing.count,
+								index: this._sameSessionHintKeys.size,
+							}),
+						);
+					}
 				} else {
 					this._learnedErrors.set(key, {
 						tool: event.toolName,
@@ -1377,6 +1446,13 @@ export class AgentSession {
 						this._lastVisualFile = fileOp.path;
 					}
 				}
+			} else if (this._isMutatingToolCall(event.toolName, args)) {
+				// Mutations the path-based extractor above does not model: bash
+				// commands with an observable effect (sed -i, redirections, git
+				// apply, codegen) and the discoverable edit tools (edit_v2/ast_edit).
+				// Without this a turn whose only change came through these would
+				// skip the project check and let the agent report "done" unverified.
+				this._turnTouchedFiles = true;
 			}
 		}
 		// A tool may have pulled a hidden tool into the active surface this turn
@@ -1565,61 +1641,101 @@ export class AgentSession {
 
 	/**
 	 * Conditionally inject a doom-loop reminder when consecutive identical tool
-	 * calls reach the configured threshold. Settings-gated (off by default) and
-	 * cooldown-throttled. After firing, the sequence window is reset so the next
-	 * identical call starts a fresh streak.
+	 * calls reach the configured threshold. Settings-gated (off by default).
+	 *
+	 * Each escalation tier fires once per streak (tracked by `_doomLoopFiredTier`)
+	 * while the sequence counter keeps climbing, so a persistent loop actually
+	 * reaches the Tier-3 abort. The previous version reset the counter on Tiers 1
+	 * and 2, which capped it at the Tier-2 threshold and left the Tier-3 abort
+	 * permanently unreachable under the default config. The streak (and the fired
+	 * marker) resets when a different call breaks it.
 	 */
 	private _maybeInjectDoomLoopReminder(toolName: string, args: unknown): void {
 		const cfg = this.settingsManager.getToolFeedbackSettings().doomLoopReminder;
 		if (!cfg.enabled) return;
 		const consecutiveCount = this._toolCallStats.getConsecutiveSimilarCount();
 
-		// Escalation tiers: 2x → reminder, 4x → pause, 6x → abort
+		// Escalation tiers: TIER1 → soft reminder, TIER2 → urgent pause, TIER3 → abort.
 		const TIER1_THRESHOLD = cfg.threshold ?? 2;
 		const TIER2_THRESHOLD = 4;
 		const TIER3_THRESHOLD = 6;
 
+		// A fresh or broken streak (a different tool+args just ran) clears which
+		// tiers have fired so the next genuine loop escalates from scratch.
+		if (consecutiveCount <= 1) {
+			this._doomLoopFiredTier = 0;
+			return;
+		}
 		if (consecutiveCount < TIER1_THRESHOLD) return;
 
-		// Tier 3: abort the turn
+		// Tier 3: abort the turn. Now reachable because Tiers 1/2 below no longer
+		// reset the sequence — the count keeps climbing until it hits the abort.
 		if (consecutiveCount >= TIER3_THRESHOLD) {
+			this._doomLoopFiredTier = 0;
 			this._toolCallStats.resetSequence();
-			const error = new Error(
+			throw new Error(
 				`Doom loop abort: ${consecutiveCount} consecutive identical calls to "${toolName}". ` +
 					`The model cannot make progress on this task. Aborting turn.`,
 			);
-			throw error;
 		}
 
-		// Tier 2: pause and ask user (if UI available)
+		// Tier 2: urgent escalation (visible to the user), once per streak.
+		// Delivered as "steer" — not "followUp" — because follow-ups only drain
+		// once the inner loop ends, and a doom-loop by definition keeps producing
+		// tool calls; a steer is injected before the very next model turn while the
+		// loop is still hot. Does NOT reset the sequence: the count must keep
+		// climbing so a persistent loop reaches the Tier-3 abort instead of
+		// oscillating here forever.
 		if (consecutiveCount >= TIER2_THRESHOLD) {
+			if (this._doomLoopFiredTier >= 2) return;
+			this._doomLoopFiredTier = 2;
+			const remaining = TIER3_THRESHOLD - consecutiveCount;
 			const content = buildDoomLoopReminder({ toolName, args, consecutiveCount });
-			const pauseContent =
+			const escalation =
 				content +
-				"\n\n**The harness has paused execution.** The model has made " +
-				`${consecutiveCount} identical calls without progress. Please provide guidance or type "continue" to resume.`;
-			this._toolCallStats.resetSequence();
+				`\n\nYou have made ${consecutiveCount} identical calls without progress. ` +
+				"Do NOT repeat this call again. State what you expected, what actually happened, " +
+				"and switch strategy: different tool, different arguments, or ask the user for guidance. " +
+				`${remaining} more identical call${remaining === 1 ? "" : "s"} will abort the turn.`;
 			this.sendCustomMessage(
-				{ customType: "pi.doom-loop-pause", content: pauseContent, display: true },
-				{ deliverAs: "followUp" },
+				{ customType: "pi.doom-loop-pause", content: escalation, display: true },
+				{ deliverAs: "steer" },
 			).catch((err: unknown) => {
 				process.stderr.write(`[pi] doom-loop pause delivery failed: ${err}\n`);
 			});
 			return;
 		}
 
-		// Tier 1: soft reminder (original behavior)
-		const now = Date.now();
-		if (now - this._lastDoomLoopReminderAt < (cfg.cooldownMs ?? 10000)) return;
-		this._lastDoomLoopReminderAt = now;
-		this._toolCallStats.resetSequence();
+		// Tier 1: soft reminder, once per streak. Also a steer (see Tier 2): a
+		// followUp would sit queued behind the still-running tool-call loop it is
+		// trying to break.
+		if (this._doomLoopFiredTier >= 1) return;
+		this._doomLoopFiredTier = 1;
 		const content = buildDoomLoopReminder({ toolName, args, consecutiveCount });
 		this.sendCustomMessage(
 			{ customType: "pi.doom-loop-reminder", content, display: false },
-			{ deliverAs: "followUp" },
+			{ deliverAs: "steer" },
 		).catch((err: unknown) => {
 			process.stderr.write(`[pi] doom-loop reminder delivery failed: ${err}\n`);
 		});
+	}
+
+	/**
+	 * Whether a (toolName, args) pair represents a file-mutating action that the
+	 * path-based extractToolFileOp does not recognize. Covers the explicit edit
+	 * tools (write/edit/edit_v2/ast_edit, via the shared MUTATING_TOOL_NAMES set)
+	 * and bash commands classified as effectful. Used to arm the verification gate
+	 * so mutations via bash/edit_v2/ast_edit are checked before "done".
+	 */
+	private _isMutatingToolCall(toolName: string, args: unknown): boolean {
+		if (MUTATING_TOOL_NAMES.has(toolName)) return true;
+		if (toolName === "bash" && typeof args === "object" && args !== null) {
+			const command = (args as { command?: unknown }).command;
+			if (typeof command === "string" && command.length > 0) {
+				return classifyBashCommand(command) === "action";
+			}
+		}
+		return false;
 	}
 
 	/**
@@ -1735,6 +1851,13 @@ export class AgentSession {
 		// Cancel any in-flight verification check so its child process does not keep
 		// holding the session cwd (Windows rmSync EBUSY in tests).
 		this._verificationAbort?.abort();
+		// Abort and drain any in-flight background (predictive) compaction BEFORE we
+		// flush and disconnect below. A compaction started at the end of the prior
+		// turn can otherwise append a CompactionEntry and reassign agent.state.messages
+		// AFTER dispose — a write-after-dispose that corrupts the old session's branch
+		// (and pollutes the hindsight bank) when the user switches/forks/new-sessions.
+		this.abortCompaction();
+		await this._awaitBackgroundCompaction();
 		// Opt-in stats export for baseline measurement. Set PIT_STATS_EXPORT_DIR
 		// to a writable directory to get one JSON file per session containing
 		// tool-call totals + per-rule rewrite/reject counts. Used to measure
@@ -2261,6 +2384,10 @@ export class AgentSession {
 			// Git branch — read synchronously from .git/HEAD on every rebuild
 			// (subprocess-free), rendered in the dynamic suffix only.
 			gitState: gitBranch ? { branch: gitBranch } : undefined,
+			// Stable per-session hidden-tool count (snapshotted after seeding) so the
+			// discovery nudge stays in the cacheable prefix without flipping as the
+			// live index mutates. Falls back to the global index only when 0.
+			hiddenToolCount: this._hiddenToolCountSnapshot > 0 ? this._hiddenToolCountSnapshot : undefined,
 		};
 		const prompt = buildSystemPrompt(this._baseSystemPromptOptions);
 		this._trackPrefixStability(prompt, reason);
@@ -2285,6 +2412,25 @@ export class AgentSession {
 		this._cachePrefixBaseline = staticPart;
 		this._cachePrefixRebuilds++;
 		this._cachePrefixReasons.set(reason, (this._cachePrefixReasons.get(reason) ?? 0) + 1);
+	}
+
+	/**
+	 * Recompute the hidden-tool snapshot after extension session_start handlers
+	 * have populated the discovery index (e.g. MCP deferral). The nudge is binary
+	 * (rendered when the count is > 0), so only a 0↔N transition changes the
+	 * prompt — a count that stays > 0 leaves it identical and skips the rebuild.
+	 * When it does flip, re-baseline (pre-request, so it is not counted as churn)
+	 * so the nudge sits in the cacheable prefix from the first request.
+	 */
+	private _resyncHiddenToolSnapshot(): void {
+		const count = this._toolDiscoveryIndex?.listHidden().length ?? 0;
+		if (count === this._hiddenToolCountSnapshot) return;
+		const nudgePresenceFlips = count > 0 !== this._hiddenToolCountSnapshot > 0;
+		this._hiddenToolCountSnapshot = count;
+		if (!nudgePresenceFlips) return;
+		this._cachePrefixBaseline = undefined;
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames(), "tool-discovery-resync");
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
 
 	/**
@@ -2336,6 +2482,12 @@ export class AgentSession {
 			});
 			this._retryAttempt = 0;
 		}
+
+		// The agent run is settling without a pending retry (success or terminal
+		// error): revert any transient fallback model back to the primary so the
+		// next turn starts on the preferred model instead of staying silently
+		// pinned to the (typically weaker) fallback for the rest of the session.
+		await this._restoreFallbackModelIfActive();
 
 		// End-of-turn: allow predictive background compaction (overlaps the user's
 		// read time so the next prompt rarely waits).
@@ -2706,8 +2858,15 @@ export class AgentSession {
 		try {
 			const content = readFileSync(skill.filePath, "utf-8");
 			const body = stripFrontmatter(content).trim();
-			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${body}\n</skill>`;
-			return args ? `${skillBlock}\n\n${args}` : skillBlock;
+			// If the skill body references argument placeholders ($1, $@,
+			// $ARGUMENTS, ${@:N}), substitute them in place — matching the
+			// Claude Code / prompt-template contract. Only then; a body without
+			// placeholders keeps the legacy behavior of appending the raw args
+			// after the block, so existing placeholder-free skills are unchanged.
+			const hasPlaceholder = /\$(?:\d+|@|ARGUMENTS|\{@:)/.test(body);
+			const expandedBody = hasPlaceholder ? substituteArgs(body, parseCommandArgs(args)) : body;
+			const skillBlock = `<skill name="${skill.name}" location="${skill.filePath}">\nReferences are relative to ${skill.baseDir}.\n\n${expandedBody}\n</skill>`;
+			return args && !hasPlaceholder ? `${skillBlock}\n\n${args}` : skillBlock;
 		} catch (err) {
 			// Emit error like extension commands do
 			this._extensionRunner.emitError({
@@ -3582,6 +3741,11 @@ export class AgentSession {
 
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._extensionRunner.emit(this._sessionStartEvent);
+		// Extensions (notably MCP deferral) may have just registered hidden tools
+		// into the discovery index — AFTER the constructor's initial snapshot. Re-
+		// snapshot so the search_tool_bm25 nudge reflects them from the first
+		// request, even when the deferred MCP tools are the ONLY hidden ones.
+		this._resyncHiddenToolSnapshot();
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
 	}
 
@@ -3878,7 +4042,8 @@ export class AgentSession {
 			: createAllToolDefinitions(this._cwd, {
 					read: {
 						autoResizeImages,
-						embedHashlineAnchors: !this._disableHashlineAnchors,
+						embedHashlineAnchors: () =>
+							!this._disableHashlineAnchors && this.getActiveToolNames().includes("edit_v2"),
 						readDedupeStore: this._readDedupeStore,
 					},
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
@@ -4050,6 +4215,30 @@ export class AgentSession {
 		this.agent.state.thinkingLevel = clamped as ThinkingLevel;
 		this.sessionManager.appendModelChange(entry.model.provider, entry.model.id);
 		await this._emitModelSelect(entry.model, previousModel, "set");
+	}
+
+	/**
+	 * Restore the primary model captured before a transient fallback. A fallback
+	 * (e.g. after a 429) is meant to be temporary; once the turn settles we revert
+	 * to the original model + thinking level instead of leaving the session
+	 * degraded for every subsequent turn. No-op when no fallback is active or when
+	 * the current model already matches the captured primary.
+	 */
+	private async _restoreFallbackModelIfActive(): Promise<void> {
+		const original = this._fallbackOriginal;
+		this._fallbackOriginal = undefined;
+		if (!original) return;
+		const current = this.model;
+		if (current && current.provider === original.model.provider && current.id === original.model.id) {
+			return;
+		}
+		this.agent.state.model = original.model;
+		const supported = getSupportedThinkingLevels(original.model);
+		const desired = original.thinkingLevel;
+		const clamped = supported.includes(desired) ? desired : clampThinkingLevel(original.model, desired);
+		this.agent.state.thinkingLevel = clamped as ThinkingLevel;
+		this.sessionManager.appendModelChange(original.model.provider, original.model.id);
+		await this._emitModelSelect(original.model, current, "set");
 	}
 
 	/**

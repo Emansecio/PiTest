@@ -12,10 +12,17 @@ const tempDirs: string[] = [];
 
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) {
-		// maxRetries/retryDelay: on Windows the spawned CLI child can still hold
-		// a handle on the dir for a beat after exit, surfacing as EBUSY under
-		// full-suite contention. Retry instead of failing the test on cleanup.
-		rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+		// Best-effort cleanup: on Windows the spawned CLI child (or AV/indexer)
+		// can hold a handle on the dir for a beat after exit, surfacing as EBUSY
+		// under full-suite contention — and under heavy contention even retries
+		// lose. Cleanup is housekeeping, not the behavior under test: swallow
+		// the failure and leave the tiny dir to the OS temp cleaner instead of
+		// failing the suite.
+		try {
+			rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+		} catch {
+			// EBUSY/EPERM under contention: orphan the temp dir.
+		}
 	}
 });
 

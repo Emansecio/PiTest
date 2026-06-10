@@ -743,7 +743,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).not.toContain("match two");
 		});
 
-		it("should treat flag-like patterns as search text", async () => {
+		it("should treat flag-like patterns as search text (no --pre injection)", async () => {
 			const marker = join(testDir, "grep-injection-marker");
 			const payload = join(testDir, "payload.sh");
 			const testFile = join(testDir, "target.txt");
@@ -751,13 +751,25 @@ describe("Coding Agent Tools", () => {
 			chmodSync(payload, 0o755);
 			writeFileSync(testFile, "target\n");
 
-			const result = await grepTool.execute("test-call-grep-injection", {
-				pattern: `--pre=${payload}`,
-				path: testDir,
-			});
+			// `--pre=<cmd>` is ripgrep's preprocessor flag (arbitrary command exec). It
+			// must be passed as a search PATTERN, never honored as a flag. The payload
+			// path may carry regex-invalid escapes (e.g. Windows `C:\Users` → `\U`), so
+			// the pattern either matches nothing or is rejected as an invalid regex —
+			// both safe. The load-bearing assertion is that the command never ran.
+			let output: string;
+			try {
+				output = getTextOutput(
+					await grepTool.execute("test-call-grep-injection", {
+						pattern: `--pre=${payload}`,
+						path: testDir,
+					}),
+				);
+			} catch (err) {
+				output = err instanceof Error ? err.message : String(err);
+			}
 
-			expect(getTextOutput(result)).toContain("No matches found");
 			expect(existsSync(marker)).toBe(false);
+			expect(output === "No matches found" || /invalid regex/i.test(output)).toBe(true);
 		});
 	});
 

@@ -1,4 +1,4 @@
-export { McpHttpClient } from "./client.ts";
+export { McpHttpClient, McpTransportError } from "./client.ts";
 export { McpManager, type McpManagerOptions } from "./manager.ts";
 export { wrapMcpToolAsDefinition } from "./tools.ts";
 export type {

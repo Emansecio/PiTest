@@ -699,9 +699,13 @@ async function executeToolCallsSequential(
 		);
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
+			let result = preparation.result;
+			if (preparation.isError && !preparation.skipHints) {
+				result = await applyToolErrorHints(toolCall, result, config, emit);
+			}
 			finalized = {
 				toolCall,
-				result: preparation.result,
+				result,
 				isError: preparation.isError,
 			};
 		} else {
@@ -769,9 +773,13 @@ async function executeToolCallsParallel(
 	const orderedFinalizedCalls = await Promise.all(
 		preparations.map(async ({ toolCall, preparation }) => {
 			if (preparation.kind === "immediate") {
+				let result = preparation.result;
+				if (preparation.isError && !preparation.skipHints) {
+					result = await applyToolErrorHints(toolCall, result, config, emit);
+				}
 				const finalized = {
 					toolCall,
-					result: preparation.result,
+					result,
 					isError: preparation.isError,
 				} satisfies FinalizedToolCallOutcome;
 				await emitToolExecutionEnd(finalized, emit);
@@ -817,6 +825,9 @@ type ImmediateToolCallOutcome = {
 	kind: "immediate";
 	result: AgentToolResult<any>;
 	isError: boolean;
+	// Opt-out for Tier-4 hint enrichment: rewrite-registry rejections and abort
+	// results are deliberate, self-contained messages — hints would be noise.
+	skipHints?: boolean;
 };
 
 type ExecutedToolCallOutcome = {
@@ -925,6 +936,7 @@ async function prepareToolCall(
 					kind: "immediate",
 					result: createErrorToolResult(outcome.error),
 					isError: true,
+					skipHints: true,
 				};
 			}
 			if (outcome.kind === "rewritten") {
@@ -955,6 +967,7 @@ async function prepareToolCall(
 					kind: "immediate",
 					result: createErrorToolResult("Operation aborted"),
 					isError: true,
+					skipHints: true,
 				};
 			}
 			if (beforeResult?.block) {
@@ -970,6 +983,7 @@ async function prepareToolCall(
 				kind: "immediate",
 				result: createErrorToolResult("Operation aborted"),
 				isError: true,
+				skipHints: true,
 			};
 		}
 		return {
@@ -1040,6 +1054,29 @@ async function executePreparedToolCall(
 	}
 }
 
+// Tier 4: post-hoc error hint enrichment, shared by the prepared-call
+// finalizer and the immediate-error branches (validation failures, unknown
+// tools, beforeToolCall blocks). Returns the result unchanged when no rule
+// fires; emits `tool_error_hint_applied` when at least one does.
+async function applyToolErrorHints(
+	toolCall: AgentToolCall,
+	result: AgentToolResult<any>,
+	config: AgentLoopConfig,
+	emit: AgentEventSink,
+): Promise<AgentToolResult<any>> {
+	if (!config.toolErrorHintRegistry) return result;
+	const outcome = config.toolErrorHintRegistry.apply(toolCall, result);
+	if (outcome.hints.length === 0) return result;
+	const enriched = { ...result, content: appendHintsToContent(result.content, outcome.hints) };
+	await emit({
+		type: "tool_error_hint_applied",
+		toolCallId: toolCall.id,
+		toolName: toolCall.name,
+		hints: outcome.hints,
+	});
+	return enriched;
+}
+
 async function finalizeExecutedToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -1052,21 +1089,12 @@ async function finalizeExecutedToolCall(
 	let result = executed.result;
 	let isError = executed.isError;
 
-	// Tier 4: post-hoc error hint enrichment. Runs BEFORE `afterToolCall` so a
-	// host that overrides the result via afterToolCall sees (and can mutate)
-	// the hint-enriched content if desired. Skipped when the call succeeded;
-	// the registry has nothing to add to a non-error result.
-	if (isError && config.toolErrorHintRegistry) {
-		const outcome = config.toolErrorHintRegistry.apply(prepared.toolCall, result);
-		if (outcome.hints.length > 0) {
-			result = { ...result, content: appendHintsToContent(result.content, outcome.hints) };
-			await emit({
-				type: "tool_error_hint_applied",
-				toolCallId: prepared.toolCall.id,
-				toolName: prepared.toolCall.name,
-				hints: outcome.hints,
-			});
-		}
+	// Tier 4: runs BEFORE `afterToolCall` so a host that overrides the result
+	// via afterToolCall sees (and can mutate) the hint-enriched content if
+	// desired. Skipped when the call succeeded; the registry has nothing to
+	// add to a non-error result.
+	if (isError) {
+		result = await applyToolErrorHints(prepared.toolCall, result, config, emit);
 	}
 
 	if (config.afterToolCall) {

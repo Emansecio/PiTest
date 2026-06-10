@@ -12,6 +12,24 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 
+/**
+ * Locally-installed `tsc` fallback. When a TS project ships no `check`/
+ * `typecheck` script the gate would stay inert and cross-file type errors only
+ * surface when the user runs a check by hand. We fall back to the project's OWN
+ * `tsc` binary — but only when it is already installed under node_modules/.bin,
+ * so the gate never triggers an `npx` download or a "command not found" that it
+ * would misread as a verification failure and loop the model on. Returns a
+ * shell-ready command string or null.
+ */
+function detectLocalTypecheckCommand(cwd: string): string | null {
+	if (!existsSync(join(cwd, "tsconfig.json"))) return null;
+	const isWindows = process.platform === "win32";
+	const binName = isWindows ? "tsc.cmd" : "tsc";
+	const binPath = join(cwd, "node_modules", ".bin", binName);
+	if (!existsSync(binPath)) return null;
+	return `"${binPath}" --noEmit`;
+}
+
 /** Scripts tried in order — cheap correctness signals first, build/test excluded by default heaviness except `test` last. */
 const CHECK_SCRIPT_PREFERENCE = ["check", "typecheck", "type-check", "lint", "test"] as const;
 
@@ -53,7 +71,9 @@ export function detectCheckCommand(cwd: string): string | null {
 			return `${detectPackageManager(cwd)} run ${name}`;
 		}
 	}
-	return null;
+	// No recognized script — fall back to the project's own locally-installed
+	// tsc so the gate still catches cross-file type errors in TS repos.
+	return detectLocalTypecheckCommand(cwd);
 }
 
 /**

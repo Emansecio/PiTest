@@ -115,8 +115,13 @@ export interface ReadToolOptions {
 	autoResizeImages?: boolean;
 	/** Custom operations for file reading. Default: local filesystem */
 	operations?: ReadOperations;
-	/** When true, embed compact hashline-edit anchors with full-file text reads. Default: true. */
-	embedHashlineAnchors?: boolean;
+	/**
+	 * When true, embed compact hashline-edit anchors with full-file text reads.
+	 * Accepts a getter so the session can gate anchors on the LIVE tool surface
+	 * (they are dead weight unless a hashline editor like edit_v2 is active, and
+	 * the surface can change after this definition is built). Default: true.
+	 */
+	embedHashlineAnchors?: boolean | (() => boolean);
 	/**
 	 * How to embed anchors. "block" appends a trailing `<anchors>` block (default,
 	 * lowest disruption to existing rendering). "interleave" prefixes anchored
@@ -712,9 +717,11 @@ Common mistakes to avoid:
 								// wholeFile is absent only on the streaming path, where a truncation
 								// always occurs (file > threshold >> byte cap) and this branch is
 								// unreachable anyway.
+								const anchorsEnabled =
+									typeof embedHashlineAnchors === "function" ? embedHashlineAnchors() : embedHashlineAnchors;
 								if (
 									!dedupeSuppressed &&
-									embedHashlineAnchors &&
+									anchorsEnabled &&
 									offset === undefined &&
 									limit === undefined &&
 									!truncation.truncated &&

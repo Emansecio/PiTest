@@ -253,6 +253,39 @@ describe("skills", () => {
 			expect(result).toContain("<location>/path/to/skill/SKILL.md</location>");
 		});
 
+		it("does not advertise a /skill list command and names the cap on overflow", () => {
+			const skills: Skill[] = Array.from({ length: 5 }, (_, i) =>
+				createTestSkill({
+					name: `skill-${i}`,
+					description: `Skill ${i}.`,
+					filePath: `/path/to/skill-${i}/SKILL.md`,
+					baseDir: `/path/to/skill-${i}`,
+				}),
+			);
+
+			const result = formatSkillsForPrompt(skills, 2);
+
+			// 2 shown, 3 omitted. The old text pointed at a nonexistent "/skill
+			// list" command; the notice must not resurrect it.
+			expect(result).not.toContain("/skill list");
+			expect(result).toContain("3 more skill(s)");
+			expect(result).toContain("2"); // the cap is named
+		});
+
+		it("omits the overflow notice when all skills fit", () => {
+			const skills: Skill[] = [
+				createTestSkill({
+					name: "only",
+					description: "Only skill.",
+					filePath: "/path/to/only/SKILL.md",
+					baseDir: "/path/to/only",
+				}),
+			];
+
+			const result = formatSkillsForPrompt(skills, 100);
+			expect(result).not.toContain("more skill(s)");
+		});
+
 		it("should include intro text before XML", () => {
 			const skills: Skill[] = [
 				createTestSkill({

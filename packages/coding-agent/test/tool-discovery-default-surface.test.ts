@@ -17,6 +17,7 @@ import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { getCurrentToolDiscoveryIndex } from "../src/core/tool-discovery.js";
+import type { ToolDef } from "../src/core/tools/index.js";
 
 describe("tool discovery default surface", () => {
 	let tempDir: string;
@@ -84,6 +85,70 @@ describe("tool discovery default surface", () => {
 		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ toolDiscovery: { enabled: false } }));
 		const session = await createDefaultSession();
 		expect(session.getActiveToolNames()).not.toContain("search_tool_bm25");
+		await session.dispose();
+	});
+
+	it("bakes the discovery nudge into the system prompt from boot (stable cache prefix)", async () => {
+		const session = await createDefaultSession();
+		// There ARE hidden opt-in tools, so the nudge must be present immediately —
+		// in the cacheable prefix at construction, not added on a later rebuild
+		// (which would flip the prefix 0→N and re-charge the prompt cache once).
+		expect(session.systemPrompt).toContain("not in the active set but can be discovered");
+		// A no-op surface rebuild must not churn the cacheable prefix: the nudge's
+		// presence is driven by the stable per-session snapshot, not the live index.
+		const before = session.getCachePrefixDiagnostics().rebuilds;
+		session.setActiveToolsByName([...session.getActiveToolNames()]);
+		expect(session.getCachePrefixDiagnostics().rebuilds).toBe(before);
+		await session.dispose();
+	});
+
+	it("omits the discovery nudge when toolDiscovery is disabled (no hidden tools)", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ toolDiscovery: { enabled: false } }));
+		const session = await createDefaultSession();
+		expect(session.systemPrompt).not.toContain("not in the active set but can be discovered");
+		await session.dispose();
+	});
+
+	it("re-syncs the hidden-tool snapshot after late (MCP-style) registration, without churning the prefix", async () => {
+		const session = await createDefaultSession();
+		const internals = session as unknown as {
+			_resyncHiddenToolSnapshot: () => void;
+			_hiddenToolCountSnapshot: number;
+		};
+		const index = getCurrentToolDiscoveryIndex()!;
+		// Coding hidden tools already make the nudge present (snapshot > 0).
+		expect(internals._hiddenToolCountSnapshot).toBeGreaterThan(0);
+		const rebuildsBefore = session.getCachePrefixDiagnostics().rebuilds;
+		const snapBefore = internals._hiddenToolCountSnapshot;
+
+		// Simulate the MCP-defer path registering a tool into the index AFTER the
+		// constructor snapshot (this is what session_start does), then the re-sync.
+		index.register({
+			name: "mcp__fake__do_thing",
+			description: "fake deferred tool",
+			definition: {} as unknown as ToolDef,
+		});
+		internals._resyncHiddenToolSnapshot();
+
+		// Snapshot reflects the new hidden tool, but the nudge was already present so
+		// the cacheable prefix is unchanged — no churn.
+		expect(internals._hiddenToolCountSnapshot).toBe(snapBefore + 1);
+		expect(session.getCachePrefixDiagnostics().rebuilds).toBe(rebuildsBefore);
+		expect(session.systemPrompt).toContain("not in the active set but can be discovered");
+		await session.dispose();
+	});
+
+	it("re-sync is a no-op when the hidden-tool count is unchanged", async () => {
+		const session = await createDefaultSession();
+		const internals = session as unknown as {
+			_resyncHiddenToolSnapshot: () => void;
+			_hiddenToolCountSnapshot: number;
+		};
+		const rebuildsBefore = session.getCachePrefixDiagnostics().rebuilds;
+		const snapBefore = internals._hiddenToolCountSnapshot;
+		internals._resyncHiddenToolSnapshot(); // index unchanged since boot
+		expect(internals._hiddenToolCountSnapshot).toBe(snapBefore);
+		expect(session.getCachePrefixDiagnostics().rebuilds).toBe(rebuildsBefore);
 		await session.dispose();
 	});
 });

@@ -59,6 +59,62 @@ describe("McpHttpClient", () => {
 		expect(result.content[0]).toEqual({ type: "text", text: "pong" });
 	});
 
+	it("follows tools/list pagination across pages via nextCursor", async () => {
+		const pages: Record<string, { tools: Array<{ name: string }>; nextCursor?: string }> = {
+			"": { tools: [{ name: "a" }], nextCursor: "p1" },
+			p1: { tools: [{ name: "b" }], nextCursor: "p2" },
+			p2: { tools: [{ name: "c" }] }, // no cursor → last page
+		};
+		const listCalls: Array<unknown> = [];
+		installFetch({
+			[TEST_URL]: (body) => {
+				if (body.method === "initialize") {
+					return { protocolVersion: "2025-06-18", serverInfo: { name: "test", version: "1" } };
+				}
+				if (body.method === "tools/list") {
+					const cursor = (body.params?.cursor as string | undefined) ?? "";
+					listCalls.push(body.params ?? {});
+					const page = pages[cursor];
+					return {
+						tools: page.tools.map((t) => ({ ...t, description: "", inputSchema: { type: "object" } })),
+						...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+					};
+				}
+				throw new Error(`unexpected method ${body.method}`);
+			},
+		});
+		const client = new McpHttpClient("test", { url: TEST_URL });
+		await client.initialize();
+		expect(client.getTools().map((t) => t.name)).toEqual(["a", "b", "c"]);
+		// First page sends no cursor; subsequent pages echo the prior nextCursor.
+		expect(listCalls).toEqual([{}, { cursor: "p1" }, { cursor: "p2" }]);
+	});
+
+	it("stops paginating tools/list if a server repeats a cursor (no forward progress)", async () => {
+		let listCount = 0;
+		installFetch({
+			[TEST_URL]: (body) => {
+				if (body.method === "initialize") {
+					return { protocolVersion: "2025-06-18", serverInfo: { name: "test", version: "1" } };
+				}
+				if (body.method === "tools/list") {
+					listCount++;
+					// Always returns the SAME cursor → would loop forever unguarded.
+					return {
+						tools: [{ name: `t${listCount}`, description: "", inputSchema: { type: "object" } }],
+						nextCursor: "stuck",
+					};
+				}
+				throw new Error(`unexpected method ${body.method}`);
+			},
+		});
+		const client = new McpHttpClient("test", { url: TEST_URL });
+		await client.initialize();
+		// Page 1 sets the cursor; page 2 sees it repeat and breaks.
+		expect(listCount).toBe(2);
+		expect(client.getTools().map((t) => t.name)).toEqual(["t1", "t2"]);
+	});
+
 	it("throws on JSON-RPC error response", async () => {
 		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
 			async () =>
@@ -71,12 +127,101 @@ describe("McpHttpClient", () => {
 		await expect(client.initialize()).rejects.toThrow("boom");
 	});
 
+	it("aborts a hung initialize via the external signal (boot budget)", async () => {
+		// Simulate a server that accepts the request but never responds: the
+		// fetch promise only settles when the (internal) signal aborts, which the
+		// external signal triggers through the rpc abort listener.
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
+			(_input: string | URL | Request, init?: RequestInit) =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => {
+						reject(new DOMException("This operation was aborted", "AbortError"));
+					});
+				}),
+		) as unknown as typeof fetch;
+		const client = new McpHttpClient("hung", { url: TEST_URL });
+		const startedAt = Date.now();
+		await expect(client.initialize(AbortSignal.timeout(100))).rejects.toThrow();
+		// Must fail on the external budget, not the 15s handshake timeout.
+		expect(Date.now() - startedAt).toBeLessThan(5_000);
+	});
+
 	it("rejects SSE responses with a clear error", async () => {
 		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
 			async () => new Response("event: x\n", { status: 200, headers: { "content-type": "text/event-stream" } }),
 		) as typeof fetch;
 		const client = new McpHttpClient("x", { url: TEST_URL });
 		await expect(client.initialize()).rejects.toThrow("SSE transport not supported");
+	});
+
+	it("captures Mcp-Session-Id from initialize and echoes it on every later request", async () => {
+		const SID = "sess-abc-123";
+		const sentSessionIds: Array<string | null> = [];
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url !== TEST_URL) throw new Error(`unexpected url ${url}`);
+				sentSessionIds.push(new Headers(init?.headers).get("mcp-session-id"));
+				const body = init?.body ? JSON.parse(init.body.toString()) : {};
+				// Only the initialize response carries the session id (spec behavior).
+				const headers: Record<string, string> = { "content-type": "application/json" };
+				if (body.method === "initialize") headers["mcp-session-id"] = SID;
+				if (body.method === "notifications/initialized") {
+					return new Response("", { status: 200, headers });
+				}
+				let result: unknown;
+				if (body.method === "initialize") {
+					result = { protocolVersion: "2025-06-18", serverInfo: { name: "test", version: "1" } };
+				} else if (body.method === "tools/list") {
+					result = { tools: [{ name: "ping", description: "", inputSchema: { type: "object" } }] };
+				} else if (body.method === "tools/call") {
+					result = { content: [{ type: "text", text: "pong" }] };
+				} else {
+					throw new Error(`unexpected method ${body.method}`);
+				}
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { status: 200, headers });
+			},
+		) as unknown as typeof fetch;
+
+		const client = new McpHttpClient("test", { url: TEST_URL });
+		await client.initialize();
+		await client.callTool("ping", {});
+
+		// First request (initialize) carries no session id yet; every request after
+		// the server assigned one must echo it (notifications/initialized, tools/list
+		// during initialize, and the later tools/call).
+		expect(sentSessionIds[0]).toBeNull();
+		expect(sentSessionIds.length).toBeGreaterThanOrEqual(4);
+		expect(sentSessionIds.slice(1)).toEqual(sentSessionIds.slice(1).map(() => SID));
+	});
+
+	it("drops the session id on dispose so a reconnect re-handshakes", async () => {
+		const SID = "sess-xyz";
+		const sentSessionIds: Array<string | null> = [];
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url !== TEST_URL) throw new Error(`unexpected url ${url}`);
+				sentSessionIds.push(new Headers(init?.headers).get("mcp-session-id"));
+				const body = init?.body ? JSON.parse(init.body.toString()) : {};
+				const headers: Record<string, string> = { "content-type": "application/json" };
+				if (body.method === "initialize") headers["mcp-session-id"] = SID;
+				if (body.method === "notifications/initialized") return new Response("", { status: 200, headers });
+				const result =
+					body.method === "initialize"
+						? { protocolVersion: "2025-06-18", serverInfo: { name: "t" } }
+						: { tools: [] };
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { status: 200, headers });
+			},
+		) as unknown as typeof fetch;
+
+		const client = new McpHttpClient("test", { url: TEST_URL });
+		await client.initialize();
+		client.dispose();
+		sentSessionIds.length = 0;
+		await client.initialize();
+		// After dispose the first request of the fresh handshake carries no stale id.
+		expect(sentSessionIds[0]).toBeNull();
 	});
 });
 
@@ -100,8 +245,8 @@ describe("McpManager", () => {
 		const manager = new McpManager({ servers: { test: { url: TEST_URL } } });
 		await manager.connectAll();
 		const tools = manager.listTools();
-		expect(tools.map((t) => t.prefixedName)).toEqual(["test__ping"]);
-		const result = await manager.callTool("test__ping", {});
+		expect(tools.map((t) => t.prefixedName)).toEqual(["mcp__test__ping"]);
+		const result = await manager.callTool("mcp__test__ping", {});
 		expect(result.content[0]).toEqual({ type: "text", text: "ok" });
 	});
 
@@ -114,5 +259,148 @@ describe("McpManager", () => {
 		const state = manager.getState("x")!;
 		expect(state.connected).toBe(false);
 		expect(state.lastError).toContain("net down");
+	});
+});
+
+describe("McpManager callTool recovery", () => {
+	const originalFetch = globalThis.fetch;
+	afterEach(() => {
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+		vi.restoreAllMocks();
+	});
+
+	// Programmable counting mock: tracks calls per JSON-RPC method and lets a
+	// test override tools/call behavior per invocation (throw = network-level
+	// transport failure, JSON-RPC error object = application failure).
+	function installRecoveryFetch(onToolsCall: (invocation: number) => unknown) {
+		const counts = { initialize: 0, toolsList: 0, toolsCall: 0 };
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				// Mirror real fetch: a pre-aborted signal rejects immediately.
+				if (init?.signal?.aborted) {
+					throw new DOMException("This operation was aborted", "AbortError");
+				}
+				const body = init?.body ? JSON.parse(init.body.toString()) : {};
+				const respond = (payload: Record<string, unknown>) =>
+					new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, ...payload }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				if (body.method === "notifications/initialized") {
+					return new Response("", { status: 200, headers: { "content-type": "application/json" } });
+				}
+				if (body.method === "initialize") {
+					counts.initialize++;
+					return respond({ result: { protocolVersion: "1", serverInfo: { name: "test" } } });
+				}
+				if (body.method === "tools/list") {
+					counts.toolsList++;
+					return respond({
+						result: { tools: [{ name: "ping", description: "", inputSchema: { type: "object" } }] },
+					});
+				}
+				if (body.method === "tools/call") {
+					counts.toolsCall++;
+					const outcome = onToolsCall(counts.toolsCall);
+					if (outcome instanceof Error) throw outcome;
+					return respond(outcome as Record<string, unknown>);
+				}
+				throw new Error(`unexpected method ${body.method}`);
+			},
+		) as unknown as typeof fetch;
+		return counts;
+	}
+
+	it("keeps the server connected and never re-sends the call on a JSON-RPC application error", async () => {
+		const counts = installRecoveryFetch(() => ({ error: { code: -1, message: "boom" } }));
+		const manager = new McpManager({ servers: { test: { url: TEST_URL } } });
+		await manager.connectAll();
+		await expect(manager.callTool("mcp__test__ping", {})).rejects.toThrow("boom");
+		expect(counts.toolsCall).toBe(1);
+		expect(counts.initialize).toBe(1); // boot only — no reconnect for app errors
+		const state = manager.getState("test")!;
+		expect(state.connected).toBe(true);
+		expect(state.lastError).toContain("boom");
+	});
+
+	it("re-initializes after a transport failure but never re-sends the call", async () => {
+		const counts = installRecoveryFetch(() => new Error("socket hang up"));
+		const manager = new McpManager({ servers: { test: { url: TEST_URL } } });
+		await manager.connectAll();
+		await expect(manager.callTool("mcp__test__ping", {})).rejects.toThrow("socket hang up");
+		expect(counts.toolsCall).toBe(1); // the failed call is NOT retried
+		expect(counts.initialize).toBe(2); // boot + reconnect-for-next-call
+		const state = manager.getState("test")!;
+		expect(state.connected).toBe(true); // reconnect succeeded
+		expect(state.reconnectAttempts).toBe(0); // reset by the successful reconnect
+	});
+
+	it("a direct success resets a degraded entry back to healthy", async () => {
+		let failInitialize = false;
+		const counts = { initialize: 0, toolsCall: 0 };
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const body = init?.body ? JSON.parse(init.body.toString()) : {};
+				const respond = (payload: Record<string, unknown>) =>
+					new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, ...payload }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				if (body.method === "notifications/initialized") {
+					return new Response("", { status: 200, headers: { "content-type": "application/json" } });
+				}
+				if (body.method === "initialize") {
+					counts.initialize++;
+					if (failInitialize) throw new Error("still down");
+					return respond({ result: { protocolVersion: "1", serverInfo: { name: "test" } } });
+				}
+				if (body.method === "tools/list") {
+					return respond({
+						result: { tools: [{ name: "ping", description: "", inputSchema: { type: "object" } }] },
+					});
+				}
+				if (body.method === "tools/call") {
+					counts.toolsCall++;
+					if (counts.toolsCall === 1) throw new Error("blip");
+					return respond({ result: { content: [{ type: "text", text: "pong" }] } });
+				}
+				throw new Error(`unexpected method ${body.method}`);
+			},
+		) as unknown as typeof fetch;
+
+		const manager = new McpManager({ servers: { test: { url: TEST_URL } } });
+		await manager.connectAll();
+
+		// First call: transport failure AND the reconnect attempt fails too.
+		failInitialize = true;
+		await expect(manager.callTool("mcp__test__ping", {})).rejects.toThrow("blip");
+		let state = manager.getState("test")!;
+		expect(state.connected).toBe(false);
+		expect(state.reconnectAttempts).toBe(1);
+
+		// Second call: server is back; a plain success must clear the degraded state.
+		failInitialize = false;
+		const result = await manager.callTool("mcp__test__ping", {});
+		expect(result.content[0]).toEqual({ type: "text", text: "pong" });
+		state = manager.getState("test")!;
+		expect(state.connected).toBe(true);
+		expect(state.reconnectAttempts).toBe(0);
+		expect(state.lastError).toBeUndefined();
+	});
+
+	it("a user abort leaves connection state untouched", async () => {
+		const controller = new AbortController();
+		const counts = installRecoveryFetch(() => {
+			// Abort mid-call, as a user cancel does, then fail like an aborted fetch.
+			controller.abort();
+			throw new DOMException("This operation was aborted", "AbortError");
+		});
+		const manager = new McpManager({ servers: { test: { url: TEST_URL } } });
+		await manager.connectAll();
+		await expect(manager.callTool("mcp__test__ping", {}, controller.signal)).rejects.toThrow();
+		expect(counts.initialize).toBe(1); // no reconnect triggered by the abort
+		const state = manager.getState("test")!;
+		expect(state.connected).toBe(true);
+		expect(state.lastError).toBeUndefined();
 	});
 });

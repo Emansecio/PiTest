@@ -33,6 +33,10 @@ const findSchema = Type.Object(
 export type FindToolInput = Static<typeof findSchema>;
 
 const DEFAULT_LIMIT = 1000;
+// Enumeration ceiling for the post-filter path: fd's --max-results caps the
+// ENUMERATION (pre-minimatch), not the matches, so it must sit far above any
+// realistic result limit or real matches get silently dropped in large trees.
+const FD_POST_FILTER_ENUM_CAP = 100_000;
 
 export interface FindToolDetails {
 	truncation?: TruncationResult;
@@ -232,18 +236,6 @@ export function createFindToolDefinition(
 							return;
 						}
 
-						// Build fd arguments. --no-require-git makes fd apply hierarchical .gitignore
-						// semantics whether or not the search path is inside a git repository, without
-						// leaking sibling-directory rules the way --ignore-file (a global source) would.
-						const args: string[] = [
-							"--glob",
-							"--color=never",
-							"--hidden",
-							"--no-require-git",
-							"--max-results",
-							String(effectiveLimit),
-						];
-
 						// fd --glob matches against the basename by default. For path-containing
 						// patterns (e.g. `src/**/*.spec.ts`), fd's `--full-path` glob mode has
 						// inconsistent behavior across platforms (fd 10.x on Windows fails to
@@ -251,6 +243,25 @@ export function createFindToolDefinition(
 						// from fd and post-filter with minimatch, which gives consistent
 						// glob semantics on every OS.
 						const usePostFilter = pattern.includes("/");
+
+						// Build fd arguments. --no-require-git makes fd apply hierarchical .gitignore
+						// semantics whether or not the search path is inside a git repository, without
+						// leaking sibling-directory rules the way --ignore-file (a global source) would.
+						// --exclude .git: --hidden is needed for dotfiles but also descends into
+						// .git/ (hundreds of junk paths per repo); searches rooted INSIDE .git still
+						// work because the exclusion never matches the traversal root's children.
+						// On the post-filter path --max-results must cap the enumeration, not the
+						// result count, so it uses the high internal ceiling.
+						const args: string[] = [
+							"--glob",
+							"--color=never",
+							"--hidden",
+							"--no-require-git",
+							"--exclude",
+							".git",
+							"--max-results",
+							String(usePostFilter ? FD_POST_FILTER_ENUM_CAP : effectiveLimit),
+						];
 						let effectivePattern = pattern;
 						if (usePostFilter) {
 							// Replace the fd-side pattern with a wildcard so fd just enumerates,
@@ -318,6 +329,7 @@ export function createFindToolDefinition(
 							// call, so post-filtering N≈1000 results meant up to ~2000 compiles.
 							const postMatcher = postFilterPattern ? new Minimatch(postFilterPattern, { dot: true }) : null;
 							for (const rawLine of lines) {
+								if (relativized.length >= effectiveLimit) break;
 								const line = rawLine.replace(/\r$/, "").trim();
 								if (!line) continue;
 								const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
@@ -340,6 +352,7 @@ export function createFindToolDefinition(
 							}
 
 							const resultLimitReached = relativized.length >= effectiveLimit;
+							const enumerationSaturated = usePostFilter && lines.length >= FD_POST_FILTER_ENUM_CAP;
 							const rawOutput = relativized.join("\n");
 							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 							let resultOutput = truncation.content;
@@ -350,6 +363,10 @@ export function createFindToolDefinition(
 									`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
 								);
 								details.resultLimitReached = effectiveLimit;
+							} else if (enumerationSaturated) {
+								notices.push(
+									`enumeration cap of ${FD_POST_FILTER_ENUM_CAP} files reached before filtering; matches may be missing — narrow the search directory`,
+								);
 							}
 							if (truncation.truncated) {
 								notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);

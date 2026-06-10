@@ -320,4 +320,30 @@ describe("AgentSession retry", () => {
 		await session.prompt("Follow-up");
 		expect(callCount).toBe(4);
 	});
+
+	it("restores the primary model after a transient fallback instead of staying pinned", async () => {
+		// A fallback (e.g. after a 429) must be temporary: once a turn settles the
+		// session reverts to the primary model. Previously _fallbackOriginal was
+		// captured but never read, so the session stayed silently pinned to the
+		// (typically weaker) fallback for the rest of its life.
+		const created = createSession({ failCount: 0 });
+		const internals = created.session as unknown as {
+			_activateFallbackEntry: (entry: { model: unknown; thinkingLevel: unknown }, reason?: string) => Promise<void>;
+			_restoreFallbackModelIfActive: () => Promise<void>;
+		};
+		const primary = created.session.model!;
+		const fallback = getModel("anthropic", "claude-haiku-4-5")!;
+		expect(fallback.id).not.toBe(primary.id);
+
+		await internals._activateFallbackEntry({ model: fallback, thinkingLevel: created.session.thinkingLevel });
+		expect(created.session.model?.id).toBe(fallback.id);
+
+		// Turn-boundary restore reverts to the primary.
+		await internals._restoreFallbackModelIfActive();
+		expect(created.session.model?.id).toBe(primary.id);
+
+		// Idempotent: nothing left to restore on a second call.
+		await internals._restoreFallbackModelIfActive();
+		expect(created.session.model?.id).toBe(primary.id);
+	});
 });

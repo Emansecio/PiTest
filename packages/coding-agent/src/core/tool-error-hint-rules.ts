@@ -564,3 +564,27 @@ function normaliseLive(text: string): string {
 	LIVE_RE_DIGITS.lastIndex = 0;
 	return text.replace(LIVE_RE_WHITESPACE, " ").replace(LIVE_RE_DIGITS, "N").trim();
 }
+
+/**
+ * Build a Tier 4 rule from a fingerprint that has ALREADY recurred within the
+ * CURRENT session. The cross-session learned rules only materialise next boot
+ * (they need minSessions >= 2 and a disk round-trip), so a pattern that burns
+ * the model twice in one session would otherwise keep repeating silently until
+ * the session ends. Registering this rule live closes that gap: the next
+ * occurrence of the same normalized error gets a corrective hint immediately.
+ */
+export function createSameSessionHintRule(args: {
+	tool: string;
+	fingerprint: string;
+	count: number;
+	index: number;
+}): ToolErrorHintRule {
+	const { tool, fingerprint, count, index } = args;
+	return {
+		id: `session-${tool}-${index}`,
+		appliesTo: tool,
+		matcher: (input) => normaliseLive(input.errorText).includes(fingerprint),
+		hint: () =>
+			`This same error has already occurred ${count}× in THIS session. Stop retrying the same call — change the approach (different tool, different arguments, or read the relevant file/state first).`,
+	};
+}

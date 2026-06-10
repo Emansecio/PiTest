@@ -218,7 +218,16 @@ export function createGrepToolDefinition(
 							return lines;
 						};
 
+						// --hidden is needed for dotfiles but also descends into .git/ (hundreds
+						// of junk matches per repo: packed-refs, hooks, logs). rg matches globs
+						// against the PRINTED path (which includes the search root), so the
+						// negative glob must be skipped when the user explicitly roots the
+						// search inside .git — it would otherwise exclude everything. A
+						// user-supplied glob comes later and wins on conflict (rg's
+						// last-match-wins precedence).
+						const insideGitDir = /[\\/]\.git([\\/]|$)/.test(searchPath);
 						const args: string[] = ["--json", "--line-number", "--color=never", "--hidden"];
+						if (!insideGitDir) args.push("--glob", "!**/.git/**");
 						if (ignoreCase) args.push("--ignore-case");
 						if (literal) args.push("--fixed-strings");
 						if (glob) args.push("--glob", glob);
@@ -309,12 +318,22 @@ export function createGrepToolDefinition(
 							}
 							if (!killedDueToLimit && code !== 0 && code !== 1) {
 								const errorMsg = stderr.trim() || `ripgrep exited with code ${code}`;
-								// A regex-parse error on a user-supplied pattern (often a flag-like
-								// string with backslashes, e.g. "--pre=C:\\path\\x") should not crash
-								// the tool. Surface it as "no matches" so callers can refine instead.
+								// A regex-parse error means the PATTERN is malformed — a user
+								// authoring mistake, not an empty result. Surfacing it as "No
+								// matches found" (a success) made the model conclude the code was
+								// absent or re-issue the same broken pattern, with no corrective
+								// signal (a success result skips error-hint enrichment). Return an
+								// actionable error so it can escape the metacharacters or set
+								// literal:true (e.g. searching for "foo(", "a[i]", "1.2.3").
 								if (/regex parse error/i.test(errorMsg)) {
 									settle(() =>
-										resolve({ content: [{ type: "text", text: "No matches found" }], details: undefined }),
+										reject(
+											new Error(
+												`Invalid regex pattern: ${errorMsg}. If you meant to match this text ` +
+													`literally (it contains regex metacharacters like ( ) [ ] . * + ? | \\ ), ` +
+													`set literal: true.`,
+											),
+										),
 									);
 									return;
 								}

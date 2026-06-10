@@ -12,13 +12,16 @@
  * `session_before_compact`, forcing the model to re-read every file it had
  * already loaded into context. That is correct in the worst case (model lost
  * the content from memory) but wasteful when the file is unchanged. Instead,
- * on compaction we snapshot the current `(mtimeMs, size)` of every tracked
+ * on compaction we snapshot the current `(mtimeMs, size, hash)` of every tracked
  * file into `postCompactStamps`. Post-compaction, an edit/write is allowed
  * iff the file is either:
  *   - in `readFiles` (re-read this session), OR
- *   - in `postCompactStamps` AND the current stat still matches the snapshot.
- * If the stat drifted (another process / another agent touched the file), the
- * stamp is consumed and the edit is blocked with a "re-read it" reason.
+ *   - in `postCompactStamps` AND the current stat+hash still matches the snapshot.
+ * If the snapshot drifted (another process / another agent touched the file), the
+ * stamp is consumed and the edit is blocked with a "re-read it" reason. For an
+ * `edit` whose snapshot still matches, we additionally require every oldText to
+ * match the file VERBATIM — the model only carried a lossy summary of the file
+ * across compaction, so a fuzzy/indent match there risks corrupting the middle.
  *
  * `extractPathArg` accepts the same aliases `prepareWithPathAliases` will
  * later normalize (path, file_path, filepath, filename, file). The read-guard
@@ -27,7 +30,8 @@
  * bypass the guard entirely.
  */
 
-import { statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
@@ -35,6 +39,39 @@ import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
 interface FileStamp {
 	mtimeMs: number;
 	size: number;
+	/**
+	 * Content hash. mtime+size alone miss an in-place edit that keeps the byte
+	 * count identical (another agent swapping a line for one of equal length);
+	 * the hash closes that drift window so a stale post-compaction snapshot can't
+	 * green-light an edit against changed content.
+	 */
+	hash: string;
+}
+
+/**
+ * Pull every `oldText` an `edit` call will try to match, accepting the same
+ * cross-harness aliases the tool normalizes later (old_string / oldString /
+ * old_str). Returns [] for shapes we can't read (e.g. edits as a JSON string),
+ * which makes the post-compaction exact-match check fail open rather than block
+ * a legitimate edit on a format we didn't parse.
+ */
+function extractEditOldTexts(input: Record<string, unknown>): string[] {
+	const out: string[] = [];
+	const pushIf = (v: unknown) => {
+		if (typeof v === "string" && v.length > 0) out.push(v);
+	};
+	const edits = input.edits;
+	if (Array.isArray(edits)) {
+		for (const e of edits) {
+			if (e && typeof e === "object") {
+				const rec = e as Record<string, unknown>;
+				pushIf(rec.oldText ?? rec.old_string ?? rec.oldString ?? rec.old_str);
+			}
+		}
+	}
+	// Legacy flat single-edit shape.
+	pushIf(input.oldText ?? input.old_string ?? input.oldString ?? input.old_str);
+	return out;
 }
 
 /**
@@ -56,10 +93,19 @@ export interface ReadGuardOptions {
 	cwd: string;
 }
 
+function readFileContentSafe(absPath: string): string | undefined {
+	try {
+		return readFileSync(absPath, "utf-8");
+	} catch {
+		return undefined;
+	}
+}
+
 function stampFile(absPath: string): FileStamp | undefined {
 	try {
 		const st = statSync(absPath);
-		return { mtimeMs: st.mtimeMs, size: st.size };
+		const hash = createHash("sha1").update(readFileSync(absPath)).digest("hex");
+		return { mtimeMs: st.mtimeMs, size: st.size, hash };
 	} catch {
 		return undefined;
 	}
@@ -108,8 +154,33 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 				const stamp = postCompactStamps.get(abs);
 				if (stamp !== undefined) {
 					const current = stampFile(abs);
-					if (current && current.mtimeMs === stamp.mtimeMs && current.size === stamp.size) {
-						// Unchanged since pre-compaction read → allow (no forced re-read).
+					const statMatches =
+						current &&
+						current.mtimeMs === stamp.mtimeMs &&
+						current.size === stamp.size &&
+						current.hash === stamp.hash;
+					if (statMatches) {
+						// Unchanged since pre-compaction read. The model only carried the
+						// SUMMARY of this file across compaction (head+tail excerpt), so the
+						// middle is amnesic. Allow editing without a re-read only when every
+						// oldText still matches EXACTLY — that proves the model is anchored to
+						// real content, not reconstructing from a lossy summary (which would
+						// otherwise slip through fuzzy/indent matching and corrupt the file).
+						// edit only; write has no oldText to verify and keeps prior behavior.
+						if (event.toolName === "edit") {
+							const oldTexts = extractEditOldTexts(event.input as Record<string, unknown>);
+							if (oldTexts.length > 0) {
+								// const (not let) so the narrowed type survives into the `.some` closure.
+								const fileContent = readFileContentSafe(abs);
+								if (fileContent !== undefined && oldTexts.some((t) => !fileContent.includes(t))) {
+									postCompactStamps.delete(abs);
+									return {
+										block: true,
+										reason: `Read guard: "${path}" was only summarized across compaction, and an edit oldText does not match the file verbatim. Read the region again to confirm exact current content before editing (avoids a fuzzy-match corruption).`,
+									};
+								}
+							}
+						}
 						return undefined;
 					}
 					// Drifted (or stat failed) — consume the stale stamp so the

@@ -66,6 +66,35 @@ describe("verification gate", () => {
 		expect(harness.eventsOfType("verification")).toEqual([]);
 	});
 
+	it("runs the check after a turn that mutates only through an effectful bash command", async () => {
+		const harness = await createHarness({ settings: { verification: { command: NODE_OK, maxAttempts: 1 } } });
+		harnesses.push(harness);
+		harness.setResponses([
+			// `node ...` is not a known read-only command, so classifyBashCommand
+			// taints it to "action" — a mutation the path-based extractor never saw.
+			fauxAssistantMessage([fauxToolCall("bash", { command: NODE_OK })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("ran the script"),
+		]);
+
+		await harness.session.prompt("run a build step");
+
+		expect(harness.eventsOfType("verification").some((e) => e.phase === "passed")).toBe(true);
+	});
+
+	it("stays inert after a read-only bash command (no mutation to verify)", async () => {
+		const harness = await createHarness({ settings: { verification: { command: NODE_FAIL, maxAttempts: 1 } } });
+		harnesses.push(harness);
+		harness.setResponses([
+			// `echo` is read-only → classified as navigation → the gate must not arm.
+			fauxAssistantMessage([fauxToolCall("bash", { command: "echo hello" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("just looked around"),
+		]);
+
+		await harness.session.prompt("inspect the repo");
+
+		expect(harness.eventsOfType("verification")).toEqual([]);
+	});
+
 	it("is inert when disabled", async () => {
 		const harness = await createHarness({ settings: { verification: { enabled: false, command: NODE_FAIL } } });
 		harnesses.push(harness);
