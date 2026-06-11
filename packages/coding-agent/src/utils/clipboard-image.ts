@@ -210,6 +210,52 @@ function readClipboardImageViaPowerShell(): ClipboardImage | null {
 	}
 }
 
+/**
+ * Native-Windows fallback for when the @pituned/clipboard binding is missing
+ * (not installed / not built for this arch). Captures the clipboard image via
+ * PowerShell's System.Windows.Forms.Clipboard. Unlike
+ * {@link readClipboardImageViaPowerShell} — which targets WSL and translates the
+ * temp path with `wslpath` — this writes to and reads from a native Windows temp
+ * path directly, so it works on plain Win32.
+ */
+function readClipboardImageViaWindowsPowerShell(): ClipboardImage | null {
+	const tmpFile = join(tmpdir(), `pi-clip-${randomUUID()}.png`);
+	try {
+		const psQuotedPath = tmpFile.replaceAll("'", "''");
+		const psScript = [
+			"Add-Type -AssemblyName System.Windows.Forms",
+			"Add-Type -AssemblyName System.Drawing",
+			`$path = '${psQuotedPath}'`,
+			"$img = [System.Windows.Forms.Clipboard]::GetImage()",
+			"if ($img) { $img.Save($path, [System.Drawing.Imaging.ImageFormat]::Png); Write-Output 'ok' } else { Write-Output 'empty' }",
+		].join("; ");
+
+		const result = runCommand("powershell.exe", ["-NoProfile", "-Command", psScript], {
+			timeoutMs: DEFAULT_POWERSHELL_TIMEOUT_MS,
+		});
+		if (!result.ok) {
+			return null;
+		}
+		if (result.stdout.toString("utf-8").trim() !== "ok") {
+			return null;
+		}
+
+		const bytes = readFileSync(tmpFile);
+		if (bytes.length === 0) {
+			return null;
+		}
+		return { bytes: new Uint8Array(bytes), mimeType: "image/png" };
+	} catch {
+		return null;
+	} finally {
+		try {
+			unlinkSync(tmpFile);
+		} catch {
+			// Ignore cleanup errors.
+		}
+	}
+}
+
 function readClipboardImageViaXclip(): ClipboardImage | null {
 	const targets = runCommand("xclip", ["-selection", "clipboard", "-t", "TARGETS", "-o"], {
 		timeoutMs: DEFAULT_LIST_TIMEOUT_MS,
@@ -279,6 +325,10 @@ export async function readClipboardImage(options?: {
 		if (!image && !wayland) {
 			image = await readClipboardImageViaNativeClipboard();
 		}
+	} else if (platform === "win32") {
+		// Native binding first; fall back to PowerShell when @pituned/clipboard is
+		// unavailable (not installed for this arch) so paste works on plain Win32.
+		image = (await readClipboardImageViaNativeClipboard()) ?? readClipboardImageViaWindowsPowerShell();
 	} else {
 		image = await readClipboardImageViaNativeClipboard();
 	}

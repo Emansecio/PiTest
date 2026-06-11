@@ -147,6 +147,42 @@ describe("AgentSession prompt characterization", () => {
 		expect(sawImage).toBe(true);
 	});
 
+	it("merges attachImages() into the next prompt and clears the buffer", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		let imageCount = -1;
+
+		harness.setResponses([
+			(context) => {
+				const user = context.messages.find((message) => message.role === "user");
+				imageCount =
+					user?.role === "user" && typeof user.content !== "string"
+						? user.content.filter((part) => part.type === "image").length
+						: 0;
+				return fauxAssistantMessage("ok");
+			},
+		]);
+
+		harness.session.attachImages([{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" }]);
+		expect(harness.session.getAttachedImageCount()).toBe(1);
+
+		await harness.session.prompt("describe the pasted image");
+
+		// The attached image rode along on the prompt even though options.images
+		// was empty, and the buffer was consumed exactly once.
+		expect(imageCount).toBe(1);
+		expect(harness.session.getAttachedImageCount()).toBe(0);
+	});
+
+	it("clearAttachedImages() discards pending attachments without sending them", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.attachImages([{ type: "image", mimeType: "image/png", data: "ZmFrZQ==" }]);
+		expect(harness.session.getAttachedImageCount()).toBe(1);
+		harness.session.clearAttachedImages();
+		expect(harness.session.getAttachedImageCount()).toBe(0);
+	});
+
 	it("expands skill commands before sending the prompt", async () => {
 		const tempDir = join(tmpdir(), `pi-skill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });

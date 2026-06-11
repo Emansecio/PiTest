@@ -3,7 +3,6 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 
-import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -108,7 +107,7 @@ import {
 	type UserInputBus,
 } from "../../core/user-input-bus.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
-import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
+import { type ClipboardImage, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { isOfflineMode } from "../../utils/env-flags.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
@@ -2328,25 +2327,31 @@ export class InteractiveMode {
 	}
 
 	private async handleClipboardImagePaste(): Promise<void> {
+		let image: ClipboardImage | null;
 		try {
-			const image = await readClipboardImage();
-			if (!image) {
-				return;
-			}
-
-			// Write to temp file
-			const tmpDir = os.tmpdir();
-			const ext = extensionForImageMimeType(image.mimeType) ?? "png";
-			const fileName = `pi-clipboard-${crypto.randomUUID()}.${ext}`;
-			const filePath = path.join(tmpDir, fileName);
-			fs.writeFileSync(filePath, Buffer.from(image.bytes));
-
-			// Insert file path directly
-			this.editor.insertTextAtCursor?.(filePath);
-			this.ui.requestRender();
+			image = await readClipboardImage();
 		} catch {
-			// Silently ignore clipboard errors (may not have permission, etc.)
+			image = null;
 		}
+		if (!image) {
+			// No image on the clipboard (or the read failed). Tell the user instead
+			// of silently doing nothing, which reads as "paste is broken".
+			this.showWarning("No image found on the clipboard.");
+			return;
+		}
+
+		// Attach the image as a real ImageContent block on the NEXT prompt. The
+		// agent merges attached images into whatever text the user submits, so the
+		// model receives an actual image (not a temp-file path as text).
+		// readClipboardImage already normalizes unsupported formats to PNG, so the
+		// mimeType is always one the Anthropic API accepts.
+		const base64 = Buffer.from(image.bytes).toString("base64");
+		this.session.attachImages([{ type: "image", data: base64, mimeType: image.mimeType }]);
+
+		// Visible marker so the user can see the attachment landed.
+		const index = this.session.getAttachedImageCount();
+		this.editor.insertTextAtCursor?.(`[Image #${index}] `);
+		this.ui.requestRender();
 	}
 
 	private setupEditorSubmitHandler(): void {

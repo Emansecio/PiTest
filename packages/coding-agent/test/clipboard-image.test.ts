@@ -77,6 +77,32 @@ describe("readClipboardImage", () => {
 		expect(Array.from(result?.bytes ?? [])).toEqual([1, 2, 3]);
 	});
 
+	test("win32: falls back to PowerShell when the native binding is unavailable", async () => {
+		// Native @pituned/clipboard reports no image (e.g. binding not installed),
+		// so the read must fall through to the PowerShell path on plain Win32.
+		mocks.clipboard.hasImage.mockReturnValue(false);
+
+		mocks.spawnSync.mockImplementation((command, args, _options) => {
+			if (command === "powershell.exe") {
+				// Mirror System.Windows.Forms.Clipboard: pull the temp path out of the
+				// PS script and write fake PNG bytes to it, then report success.
+				const script = String(args[2] ?? "");
+				const match = script.match(/\$path = '(.+?)'/);
+				if (match) {
+					writeFileSync(match[1].replace(/''/g, "'"), Buffer.from([7, 7, 7]));
+				}
+				return spawnOk(Buffer.from("ok\n", "utf-8"));
+			}
+			throw new Error(`Unexpected spawnSync call: ${command} ${args.join(" ")}`);
+		});
+
+		const { readClipboardImage } = await import("../src/utils/clipboard-image.js");
+		const result = await readClipboardImage({ platform: "win32" });
+		expect(result).not.toBeNull();
+		expect(result?.mimeType).toBe("image/png");
+		expect(Array.from(result?.bytes ?? [])).toEqual([7, 7, 7]);
+	});
+
 	test("Wayland: falls back to xclip when wl-paste is missing", async () => {
 		mocks.clipboard.hasImage.mockImplementation(() => {
 			throw new Error("clipboard.hasImage should not be called on Wayland");

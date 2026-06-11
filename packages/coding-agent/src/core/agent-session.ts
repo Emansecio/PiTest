@@ -412,6 +412,13 @@ export class AgentSession {
 	private _followUpMessages: string[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
+	/**
+	 * Images attached out-of-band (e.g. clipboard paste in the TUI) to be merged
+	 * into the NEXT user prompt's content. Consumed and cleared the first time a
+	 * user message is built in `_promptOnce`, so a pasted image rides along with
+	 * whatever text the user submits next regardless of which prompt path fires.
+	 */
+	private _attachedImages: ImageContent[] = [];
 
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
@@ -2583,6 +2590,25 @@ export class AgentSession {
 	}
 
 	/**
+	 * Attach images to be merged into the NEXT user prompt (e.g. a clipboard
+	 * paste in the TUI, where the image arrives before the user submits text).
+	 * They are consumed exactly once, when the next user message is built.
+	 */
+	attachImages(images: ImageContent[]): void {
+		if (images.length > 0) this._attachedImages.push(...images);
+	}
+
+	/** Drop any pending attached images without sending them (e.g. input cleared). */
+	clearAttachedImages(): void {
+		this._attachedImages = [];
+	}
+
+	/** Number of images currently buffered for the next prompt. */
+	getAttachedImageCount(): number {
+		return this._attachedImages.length;
+	}
+
+	/**
 	 * Send a prompt to the agent, then (in autonomous goal mode) keep driving
 	 * continuation turns until the goal is complete, paused, budget-limited, or
 	 * interrupted. A safety cap bounds runaway loops; hitting it pauses the goal.
@@ -2749,6 +2775,12 @@ export class AgentSession {
 			// Emit input event for extension interception (before skill/template expansion)
 			let currentText = text;
 			let currentImages = options?.images;
+			// Merge any out-of-band attachments (clipboard paste etc.) into this turn,
+			// then clear the buffer so they ride along exactly once.
+			if (this._attachedImages.length > 0) {
+				currentImages = currentImages ? [...currentImages, ...this._attachedImages] : [...this._attachedImages];
+				this._attachedImages = [];
+			}
 			if (this._extensionRunner.hasHandlers("input")) {
 				const inputResult = await this._extensionRunner.emitInput(
 					currentText,
