@@ -706,6 +706,10 @@ describe("Editor component", () => {
 				editor.setText(text);
 
 				for (const line of editor.render(width)) {
+					// The bottom edge is now a blank separator (width 0) in the normal
+					// state, not a padded rule — skip it; the drift check is about the
+					// content/top-border lines.
+					if (line === "") continue;
 					assert.strictEqual(visibleWidth(line), width, `line width drift for ${JSON.stringify(text)}: ${line}`);
 				}
 			}

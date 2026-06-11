@@ -174,6 +174,16 @@ import {
 	theme,
 } from "./theme/theme.ts";
 
+/**
+ * A structural rule for the chat transcript (changelog / hotkeys framing).
+ * Muted hairline rather than DynamicBorder's saturated blue default — the rule
+ * organizes the flow without competing with content. Modal selectors keep the
+ * blue default deliberately, as a focus cue.
+ */
+function mutedBorderRule(): DynamicBorder {
+	return new DynamicBorder((str) => theme.fg("borderMuted", str));
+}
+
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
 	setExpanded(expanded: boolean): void;
@@ -638,7 +648,10 @@ export class InteractiveMode {
 		if (this.chatContainer.children.length > 0) {
 			this.chatContainer.addChild(new Spacer(1));
 		}
-		this.chatContainer.addChild(new DynamicBorder());
+		// Structural chat-flow rules are muted hairlines (mutedBorderRule), not the
+		// saturated blue — they organize the transcript without shouting. Modal
+		// selectors keep DynamicBorder's blue default as a deliberate focus cue.
+		this.chatContainer.addChild(mutedBorderRule());
 		if (this.settingsManager.getCollapseChangelog()) {
 			const versionMatch = this.changelogMarkdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/);
 			const latestVersion = versionMatch ? versionMatch[1] : this.version;
@@ -652,7 +665,7 @@ export class InteractiveMode {
 			);
 			this.chatContainer.addChild(new Spacer(1));
 		}
-		this.chatContainer.addChild(new DynamicBorder());
+		this.chatContainer.addChild(mutedBorderRule());
 	}
 
 	async init(): Promise<void> {
@@ -3571,10 +3584,14 @@ export class InteractiveMode {
 
 	private updateEditorBorderColor(): void {
 		if (this.isBashMode) {
+			// Bash mode keeps its colored rule — that's a MODE signal (you're about
+			// to run a shell command), not decoration.
 			this.editor.borderColor = theme.getBashModeBorderColor();
 		} else {
-			const level = this.session.thinkingLevel || "off";
-			this.editor.borderColor = theme.getThinkingBorderColor(level);
+			// Neutral hairline. The thinking level no longer tints the editor frame:
+			// it already rides permanently in the footer as the `✦ <level>` chip, so
+			// a saturated full-width rule just repeated that signal across 200 columns.
+			this.editor.borderColor = (str: string) => theme.fg("borderMuted", str);
 		}
 		this.ui.requestRender();
 	}
@@ -5519,11 +5536,11 @@ export class InteractiveMode {
 		}
 
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder());
+		this.chatContainer.addChild(mutedBorderRule());
 		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Markdown(hotkeys.trim(), 1, 1, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(new DynamicBorder());
+		this.chatContainer.addChild(mutedBorderRule());
 		this.ui.requestRender();
 	}
 

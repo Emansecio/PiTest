@@ -244,23 +244,29 @@ export class FooterComponent implements Component {
 		const showProvider = this.footerData.getAvailableProviderCount() > 1 && state.model;
 		const providerPrefix = showProvider ? theme.fg("muted", `${state.model!.provider} · `) : "";
 
-		let identityRight: string;
+		// The thinking chip (`• ✦ high`) is a PROTECTED suffix: on a narrow terminal
+		// the model id is truncated (and the provider prefix dropped) before the
+		// chip is ever touched, so the level never clips to a dangling `✦`.
+		const identityRight = `${providerPrefix}${modelName}`;
+		let thinkingChip: { text: string; width: number } | undefined;
 		if (state.model?.reasoning) {
 			const level = asKnownThinkingLevel(state.thinkingLevel);
 			const levelLabel = level === "off" ? "thinking off" : `✦ ${level}`;
 			const colorize = theme.getThinkingBorderColor(level);
-			identityRight = `${providerPrefix}${modelName}${theme.fg("muted", " • ")}${colorize(levelLabel)}`;
-		} else {
-			identityRight = `${providerPrefix}${modelName}`;
+			thinkingChip = {
+				text: `${theme.fg("muted", " • ")}${colorize(levelLabel)}`,
+				width: visibleWidth(` • ${levelLabel}`),
+			};
 		}
 
 		const identityLine = composeLeftRight(pwd, identityRight, width, {
 			leftColor: (text) => theme.fg("muted", text),
-			// identityRight is already partly colored (the level token); apply
-			// foreground to the rest by leaving it as-is — it's the brightest
-			// row in the footer block on purpose.
+			// identityRight (provider + model) is the brightest row in the footer
+			// block on purpose — leave it as foreground. The chip arrives pre-colored
+			// via protectedSuffix.
 			rightColor: (text) => text,
 			ellipsis: theme.fg("muted", "…"),
+			protectedSuffix: thinkingChip,
 		});
 
 		// --- Metrics (line 2) ------------------------------------------------
@@ -378,32 +384,46 @@ interface ComposeOptions {
 	leftColor: (text: string) => string;
 	rightColor: (text: string) => string;
 	ellipsis: string;
+	/**
+	 * A pre-colored suffix glued to the end of `right` that must NEVER be
+	 * truncated. When the line is tight, the truncatable part of `right` shrinks
+	 * (and is ellipsized) while this suffix survives intact. Used to keep the
+	 * `✦ <thinking-level>` chip on the identity line: otherwise a narrow terminal
+	 * clips it to a meaningless dangling `✦`. The suffix is already styled, so its
+	 * visible width is passed separately (ANSI is width-free).
+	 */
+	protectedSuffix?: { text: string; width: number };
 }
 
 /**
  * Render a single line with `left` flushed left and `right` flushed right,
  * padded with spaces in between, never exceeding `width`. Truncates the right
- * side first; if the left is itself too wide, truncate it as well.
+ * side first; if the left is itself too wide, truncate it as well. A
+ * `protectedSuffix` is held back from truncation and always appended to `right`.
  *
  * Color wrappers receive the truncated raw text (no width math inside the
  * wrappers) so callers don't need to worry about ANSI-escape-aware truncation.
  */
 function composeLeftRight(rawLeft: string, rawRight: string, width: number, options: ComposeOptions): string {
-	const minPadding = rawLeft.length > 0 && rawRight.length > 0 ? 2 : 0;
+	const suffix = options.protectedSuffix;
+	const suffixWidth = suffix ? suffix.width : 0;
+	const minPadding = rawLeft.length > 0 && (rawRight.length > 0 || suffixWidth > 0) ? 2 : 0;
 	let left = rawLeft;
 	let right = rawRight;
 	let leftWidth = visibleWidth(left);
 	let rightWidth = visibleWidth(right);
 
+	// The suffix is part of the right cluster's footprint but is never trimmed.
 	if (leftWidth > width) {
 		left = truncateToWidth(left, width, options.ellipsis);
 		leftWidth = visibleWidth(left);
 		right = "";
 		rightWidth = 0;
-	} else if (leftWidth + minPadding + rightWidth > width) {
-		const available = width - leftWidth - minPadding;
+	} else if (leftWidth + minPadding + rightWidth + suffixWidth > width) {
+		// Shrink only the truncatable part; the suffix keeps its full width.
+		const available = width - leftWidth - minPadding - suffixWidth;
 		if (available > 0) {
-			right = truncateToWidth(right, available, "");
+			right = truncateToWidth(right, available, options.ellipsis);
 			rightWidth = visibleWidth(right);
 		} else {
 			right = "";
@@ -411,8 +431,10 @@ function composeLeftRight(rawLeft: string, rawRight: string, width: number, opti
 		}
 	}
 
-	const padding = " ".repeat(Math.max(0, width - leftWidth - rightWidth));
-	const styledLeft = options.leftColor(left);
 	const styledRight = options.rightColor(right);
-	return rightWidth > 0 ? styledLeft + padding + styledRight : styledLeft + padding;
+	const fullRight = suffix ? styledRight + suffix.text : styledRight;
+	const fullRightWidth = rightWidth + suffixWidth;
+	const padding = " ".repeat(Math.max(0, width - leftWidth - fullRightWidth));
+	const styledLeft = options.leftColor(left);
+	return fullRightWidth > 0 ? styledLeft + padding + fullRight : styledLeft + padding;
 }

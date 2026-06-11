@@ -97,7 +97,9 @@ export class WelcomeBox implements Component {
 	private computeRender(width: number): string[] {
 		const w = Math.max(8, width);
 		const d = this.data;
-		const rule = theme.fg("border", "─".repeat(w));
+		// Muted hairline, not the saturated blue `border`: the welcome rule frames
+		// the identity block as quiet structure, matching the chat-flow rules.
+		const rule = theme.fg("borderMuted", "─".repeat(w));
 		const useWordmark = d.appName === "pit" && w >= WORDMARK_WIDTH + 24;
 		const wordmarkColor = d.wordmarkColor ?? ((s: string) => theme.fg("accent", s));
 

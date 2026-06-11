@@ -207,6 +207,16 @@ it("renders the thinking level as a ✦ chip on reasoning models", () => {
 	expect(lines[0]).toContain("test-model • ✦ high");
 });
 
+it("keeps the ✦ chip intact on a narrow line, truncating the model id instead", () => {
+	// At a tight width the right cluster must shrink the MODEL id (with ellipsis),
+	// never the protected `✦ high` chip — otherwise it clips to a dangling `✦`.
+	const footer = makeFooter({ thinkingLevel: "high", providerCount: 2 });
+	const lines = footer.render(30).map(stripAnsi);
+	expect(lines[0]).toContain("✦ high");
+	expect(lines[0]).not.toMatch(/✦$/); // no orphaned glyph at the line end
+	expect(lines[0]).toContain("…"); // the model id absorbed the squeeze
+});
+
 it("dims uncolored extension statuses but passes pre-colorized ones through", () => {
 	const colored = "[32mready[39m";
 	const footer = makeFooter({

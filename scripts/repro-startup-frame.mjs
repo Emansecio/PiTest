@@ -6,7 +6,7 @@
 import { register } from "node:module";
 import { pathToFileURL } from "node:url";
 
-const WIDTH = 100;
+const WIDTH = Number(process.env.REPRO_WIDTH) || 100;
 const HEIGHT = 40;
 
 process.env.FORCE_COLOR = "1";

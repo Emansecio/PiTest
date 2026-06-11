@@ -718,14 +718,18 @@ export class Editor implements Component, Focusable {
 			result.push(`${leftPadding}${displayText}${padding}${lineRightPadding}`);
 		}
 
-		// Render bottom border (with scroll indicator if more content below)
+		// Bottom edge. A second full-width rule directly above the footer was pure
+		// weight — the top rule already separates the chat from the input, and the
+		// footer below carries its own structure. So the bottom rule renders ONLY
+		// when it carries information (`↓ N more` scroll indicator); otherwise it
+		// collapses to a blank line, letting whitespace do the separating.
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
 		if (linesBelow > 0) {
 			const indicator = `─── ↓ ${linesBelow} more `;
 			const remaining = width - visibleWidth(indicator);
 			result.push(this.borderColor(indicator + "─".repeat(Math.max(0, remaining))));
 		} else {
-			result.push(horizontalRule);
+			result.push("");
 		}
 
 		// Add autocomplete list if active
