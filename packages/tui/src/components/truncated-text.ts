@@ -1,5 +1,5 @@
 import type { Component } from "../tui.ts";
-import { truncateToWidth, visibleWidth } from "../utils.ts";
+import { truncateToWidth } from "../utils.ts";
 
 /**
  * Text component that truncates to fit viewport width
@@ -22,12 +22,10 @@ export class TruncatedText implements Component {
 	render(width: number): string[] {
 		const result: string[] = [];
 
-		// Empty line padded to width
-		const emptyLine = " ".repeat(width);
-
-		// Add vertical padding above
+		// Add vertical padding above (blank lines — the renderer owns clearing,
+		// so padding them to width would be dead bytes)
 		for (let i = 0; i < this.paddingY; i++) {
-			result.push(emptyLine);
+			result.push("");
 		}
 
 		// Calculate available width after horizontal padding
@@ -43,21 +41,16 @@ export class TruncatedText implements Component {
 		// Truncate text if needed (accounting for ANSI codes)
 		const displayText = truncateToWidth(singleLineText, availableWidth);
 
-		// Add horizontal padding
+		// Add horizontal padding. No pad-to-width: the renderer clears every
+		// line it rewrites, and trailing spaces overflow shells that prefix
+		// content (gutter + label) — see Text for the full rationale.
 		const leftPadding = " ".repeat(this.paddingX);
 		const rightPadding = " ".repeat(this.paddingX);
-		const lineWithPadding = leftPadding + displayText + rightPadding;
-
-		// Pad line to exactly width characters
-		const lineVisibleWidth = visibleWidth(lineWithPadding);
-		const paddingNeeded = Math.max(0, width - lineVisibleWidth);
-		const finalLine = lineWithPadding + " ".repeat(paddingNeeded);
-
-		result.push(finalLine);
+		result.push(leftPadding + displayText + rightPadding);
 
 		// Add vertical padding below
 		for (let i = 0; i < this.paddingY; i++) {
-			result.push(emptyLine);
+			result.push("");
 		}
 
 		return result;

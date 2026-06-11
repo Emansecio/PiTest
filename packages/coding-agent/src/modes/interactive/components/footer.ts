@@ -232,6 +232,10 @@ export class FooterComponent implements Component {
 		if (branch) pwd = `${pwd} (${branch})`;
 		const sessionName = this.session.sessionManager.getSessionName();
 		if (sessionName) pwd = `${pwd} • ${sessionName}`;
+		// In the home dir with no project context (no branch, no session name) the
+		// label is a lone "~" that orients nothing and reads like a leftover
+		// glyph. Drop it — same rule the welcome box applies to its cwd row.
+		if (pwd === "~") pwd = "";
 
 		// Right: model • thinking-level — the model id is the single bright token
 		// of the line; the provider is secondary metadata (muted, no parens) and

@@ -7,40 +7,48 @@ import { visibleWidth } from "../src/utils.js";
 // Force full color in CI so ANSI assertions are deterministic
 const chalk = new Chalk({ level: 3 });
 
+// TruncatedText emits content as-is (truncated to fit) with NO pad-to-width:
+// the renderer clears every line it rewrites and overlay compositing pads its
+// own segments, so trailing spaces are dead bytes — and they overflow shells
+// that prefix content (gutter + label). These tests assert lines never exceed
+// the width and carry no trailing padding.
+
 describe("TruncatedText component", () => {
-	it("pads output lines to exactly match width", () => {
+	it("emits the content line without pad-to-width", () => {
 		const text = new TruncatedText("Hello world", 1, 0);
 		const lines = text.render(50);
 
 		// Should have exactly one content line (no vertical padding)
 		assert.strictEqual(lines.length, 1);
 
-		// Line should be exactly 50 visible characters
-		const visibleLen = visibleWidth(lines[0]);
-		assert.strictEqual(visibleLen, 50);
+		// paddingX=1 margins survive; no fill to the full 50 columns.
+		assert.strictEqual(lines[0], " Hello world ");
+		assert.ok(visibleWidth(lines[0]) <= 50);
 	});
 
-	it("pads output with vertical padding lines to width", () => {
+	it("emits blank lines (not width-padded) for vertical padding", () => {
 		const text = new TruncatedText("Hello", 0, 2);
 		const lines = text.render(40);
 
 		// Should have 2 padding lines + 1 content line + 2 padding lines = 5 total
 		assert.strictEqual(lines.length, 5);
 
-		// All lines should be exactly 40 characters
-		for (const line of lines) {
-			assert.strictEqual(visibleWidth(line), 40);
-		}
+		// Vertical padding is blank, content is bare; nothing exceeds the width.
+		assert.strictEqual(lines[0], "");
+		assert.strictEqual(lines[1], "");
+		assert.strictEqual(lines[2], "Hello");
+		assert.strictEqual(lines[3], "");
+		assert.strictEqual(lines[4], "");
 	});
 
-	it("truncates long text and pads to width", () => {
+	it("truncates long text to the available width", () => {
 		const longText = "This is a very long piece of text that will definitely exceed the available width";
 		const text = new TruncatedText(longText, 1, 0);
 		const lines = text.render(30);
 
 		assert.strictEqual(lines.length, 1);
 
-		// Should be exactly 30 characters
+		// Truncated content + margins never exceed the viewport width.
 		assert.strictEqual(visibleWidth(lines[0]), 30);
 
 		// Should contain ellipsis
@@ -48,15 +56,15 @@ describe("TruncatedText component", () => {
 		assert.ok(stripped.includes("…"));
 	});
 
-	it("preserves ANSI codes in output and pads correctly", () => {
+	it("preserves ANSI codes in output without padding", () => {
 		const styledText = `${chalk.red("Hello")} ${chalk.blue("world")}`;
 		const text = new TruncatedText(styledText, 1, 0);
 		const lines = text.render(40);
 
 		assert.strictEqual(lines.length, 1);
 
-		// Should be exactly 40 visible characters (ANSI codes don't count)
-		assert.strictEqual(visibleWidth(lines[0]), 40);
+		// "Hello world" + 2 margin columns; ANSI codes don't count.
+		assert.strictEqual(visibleWidth(lines[0]), 13);
 
 		// Should preserve the color codes
 		assert.ok(lines[0].includes("\x1b["));
@@ -83,7 +91,7 @@ describe("TruncatedText component", () => {
 		const lines = text.render(30);
 
 		assert.strictEqual(lines.length, 1);
-		assert.strictEqual(visibleWidth(lines[0]), 30);
+		assert.strictEqual(lines[0], " Hello world ");
 
 		// Should NOT contain ellipsis
 		const stripped = lines[0].replace(/\x1b\[[0-9;]*m/g, "");
@@ -95,7 +103,8 @@ describe("TruncatedText component", () => {
 		const lines = text.render(30);
 
 		assert.strictEqual(lines.length, 1);
-		assert.strictEqual(visibleWidth(lines[0]), 30);
+		// Just the two margin columns — no fill.
+		assert.strictEqual(lines[0], "  ");
 	});
 
 	it("stops at newline and only shows first line", () => {
@@ -104,7 +113,7 @@ describe("TruncatedText component", () => {
 		const lines = text.render(40);
 
 		assert.strictEqual(lines.length, 1);
-		assert.strictEqual(visibleWidth(lines[0]), 40);
+		assert.strictEqual(lines[0], " First line ");
 
 		// Should only contain "First line"
 		const stripped = lines[0].replace(/\x1b\[[0-9;]*m/g, "").trim();

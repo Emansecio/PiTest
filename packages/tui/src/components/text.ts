@@ -1,5 +1,5 @@
 import type { Component } from "../tui.ts";
-import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
+import { applyBackgroundToLine, wrapTextWithAnsi } from "../utils.ts";
 
 /**
  * Text component - displays multi-line text with word wrapping
@@ -80,18 +80,20 @@ export class Text implements Component {
 			if (this.customBgFn) {
 				contentLines.push(applyBackgroundToLine(lineWithMargins, width, this.customBgFn));
 			} else {
-				// No background - just pad to width with spaces
-				const visibleLen = visibleWidth(lineWithMargins);
-				const paddingNeeded = Math.max(0, width - visibleLen);
-				contentLines.push(lineWithMargins + " ".repeat(paddingNeeded));
+				// No background: emit the line as-is. Padding to full width is dead
+				// weight — the renderer clears every line it rewrites (\x1b[2K on
+				// the diff path, screen clear on full redraws) and overlay
+				// compositing pads its own segments — and it overflows shells that
+				// prefix content (gutter + label), dangling an orphan ellipsis at
+				// the right border once the host clamps the line.
+				contentLines.push(lineWithMargins);
 			}
 		}
 
-		// Add top/bottom padding (empty lines)
-		const emptyLine = " ".repeat(width);
+		// Add top/bottom padding (empty lines; painted only when a bg must show)
 		const emptyLines: string[] = [];
 		for (let i = 0; i < this.paddingY; i++) {
-			const line = this.customBgFn ? applyBackgroundToLine(emptyLine, width, this.customBgFn) : emptyLine;
+			const line = this.customBgFn ? applyBackgroundToLine(" ".repeat(width), width, this.customBgFn) : "";
 			emptyLines.push(line);
 		}
 

@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { beforeAll, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.js";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
@@ -19,6 +20,10 @@ interface MakeFooterOptions {
 	providerCount?: number;
 	/** Mark the model as a reasoning model with this thinking level. */
 	thinkingLevel?: string;
+	/** Session cwd (defaults to a plain project path). */
+	cwd?: string;
+	/** Git branch reported by the footer data provider. */
+	branch?: string;
 }
 
 function makeFooter({
@@ -30,6 +35,8 @@ function makeFooter({
 	contextUsage = null,
 	providerCount = 1,
 	thinkingLevel,
+	cwd = "C:/x",
+	branch = "",
 }: MakeFooterOptions = {}): FooterComponent {
 	// A subscription tag needs a truthy model for isUsingOAuth(state.model).
 	const needsModel = usingOAuth || providerCount > 1 || thinkingLevel !== undefined;
@@ -56,7 +63,7 @@ function makeFooter({
 		sessionManager: {
 			getEntries: () => entries,
 			getSessionName: () => "",
-			getCwd: () => "C:/x",
+			getCwd: () => cwd,
 		},
 		getContextUsage: () => contextUsage,
 		goalStatusLine: () => null,
@@ -74,7 +81,7 @@ function makeFooter({
 	}
 
 	const footerData: ReadonlyFooterDataProvider = {
-		getGitBranch: () => "",
+		getGitBranch: () => branch,
 		getRepoDir: () => null,
 		getExtensionStatuses: () => statuses,
 		getStatusVersion: () => 0,
@@ -171,6 +178,20 @@ it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", 
 	});
 	const tinyLines = tiny.render(80).map(stripAnsi);
 	expect(tinyLines[1]).toContain("CTX <1% · 600/200k");
+});
+
+it("suppresses a lone ~ cwd label in the home dir with no project context", () => {
+	const footer = makeFooter({ cwd: homedir() });
+	const lines = footer.render(80).map(stripAnsi);
+	// No branch, no session name: the identity line must not open with a bare
+	// "~" — the right side (model) owns the line alone.
+	expect(lines[0].trimStart().startsWith("~")).toBe(false);
+});
+
+it("keeps the ~ cwd label when a branch gives it context", () => {
+	const footer = makeFooter({ cwd: homedir(), branch: "main" });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines[0]).toContain("~ (main)");
 });
 
 it("shows the provider muted without parentheses when several providers are available", () => {
