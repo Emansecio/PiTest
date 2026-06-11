@@ -37,9 +37,13 @@ export const NON_INTERACTIVE_ENV: Record<string, string> = {
 
 function parseMessage(
 	buffer: Buffer,
-): { message: DapResponseMessage | DapEventMessage | DapRequestMessage; remaining: Buffer } | null {
+):
+	| { message: DapResponseMessage | DapEventMessage | DapRequestMessage; remaining: Buffer }
+	| { error: Error; remaining: Buffer }
+	| null {
 	const frame = parseContentLengthFrame(buffer);
 	if (!frame) return null;
+	if ("error" in frame) return { error: frame.error, remaining: frame.remaining };
 	return {
 		message: frame.json as DapResponseMessage | DapEventMessage | DapRequestMessage,
 		remaining: frame.remaining,
@@ -356,6 +360,11 @@ export class DapClient {
 			while (parsed) {
 				this.#messageBuffer = parsed.remaining;
 				this.#lastActivity = Date.now();
+				if ("error" in parsed) {
+					log.warn("Discarding malformed DAP frame", { error: parsed.error.message });
+					parsed = parseMessage(this.#messageBuffer);
+					continue;
+				}
 				const message = parsed.message;
 				if (message.type === "response") {
 					this.#handleResponse(message);

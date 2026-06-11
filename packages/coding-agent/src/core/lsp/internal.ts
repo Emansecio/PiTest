@@ -48,20 +48,51 @@ export function which(command: string): string | null {
 	}
 
 	const dirs = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+	const commandExt = path.extname(command).toLowerCase();
+	const commandHasExeExt = commandExt !== "" && WINDOWS_EXE_EXTS.includes(commandExt);
 	for (const dir of dirs) {
 		const base = path.join(dir, command);
 		if (process.platform === "win32") {
-			// Bare name may already include an extension; try as-is first.
-			if (isExecutable(base)) return base;
-			for (const ext of WINDOWS_EXE_EXTS) {
-				const candidate = base + ext;
-				if (isExecutable(candidate)) return candidate;
+			// If the name already carries a known executable extension, use it as-is.
+			// Otherwise prefer PATHEXT variants (e.g. the `.cmd` launcher) over the
+			// extensionless Unix shell wrapper npm drops next to it — that wrapper
+			// can't be spawned by Node and would otherwise shadow the real binary.
+			if (commandHasExeExt) {
+				if (isExecutable(base)) return base;
+			} else {
+				for (const ext of WINDOWS_EXE_EXTS) {
+					const candidate = base + ext;
+					if (isExecutable(candidate)) return candidate;
+				}
+				if (isExecutable(base)) return base;
 			}
 		} else if (isExecutable(base)) {
 			return base;
 		}
 	}
 	return null;
+}
+
+// Executable extensions Node cannot `spawn()` directly on Windows: since
+// Node ≥ 20.12, spawning a `.cmd`/`.bat` with args throws `EINVAL`. They must
+// go through a shell. Native binaries (`.exe`, `.com`) and POSIX spawn directly.
+const WINDOWS_SHELL_REQUIRED_EXTS = [".cmd", ".bat"];
+
+/** True when `command` is a Windows batch/cmd script that must run via a shell. */
+export function needsWindowsShell(command: string): boolean {
+	if (process.platform !== "win32") return false;
+	return WINDOWS_SHELL_REQUIRED_EXTS.includes(path.extname(command).toLowerCase());
+}
+
+/**
+ * Quote one command/arg for a Windows `cmd.exe` shell spawn. Node joins the argv
+ * with spaces and wraps the whole line in `"…"` (windowsVerbatimArguments), so
+ * any element containing whitespace or quotes must be quoted here or the shell
+ * re-splits it — e.g. a `node_modules/.bin` path under `C:\Users\Jane Doe\…`.
+ */
+export function quoteWindowsShellArg(value: string): string {
+	if (value.length > 0 && !/[\s"]/.test(value)) return value;
+	return `"${value.replace(/"/g, '""')}"`;
 }
 
 // Re-export the shared sleep helper instead of keeping a local duplicate.
@@ -127,18 +158,31 @@ function findHeaderEnd(buffer: Buffer): number {
  * frame has not arrived yet. Bytes are sliced before UTF-8 decoding so the frame
  * boundary stays length-correct for multi-byte content.
  */
-export function parseContentLengthFrame(buffer: Buffer): { json: unknown; remaining: Buffer } | null {
+export type ContentLengthFrame = { json: unknown; remaining: Buffer } | { error: Error; remaining: Buffer };
+
+export function parseContentLengthFrame(buffer: Buffer): ContentLengthFrame | null {
 	const headerEndIndex = findHeaderEnd(buffer);
 	if (headerEndIndex === -1) return null;
 	const headerText = buffer.subarray(0, headerEndIndex).toString("ascii");
-	const contentLengthMatch = headerText.match(/Content-Length: (\d+)/i);
-	if (!contentLengthMatch) return null;
-	const contentLength = Number.parseInt(contentLengthMatch[1], 10);
 	const messageStart = headerEndIndex + 4;
+	const contentLengthMatch = headerText.match(/Content-Length: (\d+)/i);
+	if (!contentLengthMatch) {
+		// A completed header block with no Content-Length is unrecoverable: drop it
+		// and resync past the terminator so one bad frame can't wedge the reader.
+		return { error: new Error("missing Content-Length header"), remaining: buffer.subarray(messageStart) };
+	}
+	const contentLength = Number.parseInt(contentLengthMatch[1], 10);
 	const messageEnd = messageStart + contentLength;
 	if (buffer.length < messageEnd) return null;
 	const messageText = buffer.subarray(messageStart, messageEnd).toString("utf-8");
-	return { json: JSON.parse(messageText), remaining: buffer.subarray(messageEnd) };
+	const remaining = buffer.subarray(messageEnd);
+	try {
+		return { json: JSON.parse(messageText), remaining };
+	} catch (err) {
+		// Malformed JSON body: discard exactly this frame (header + declared length)
+		// and advance, rather than re-parsing the same bytes forever and stalling.
+		return { error: err instanceof Error ? err : new Error(String(err)), remaining };
+	}
 }
 
 const DEBUG = process.env.PIT_DEBUG === "1" || process.env.PIT_LSP_DEBUG === "1";

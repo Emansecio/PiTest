@@ -12,7 +12,16 @@ import * as fs from "node:fs/promises";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { killProcessTree } from "../../utils/shell.ts";
 import { applyWorkspaceEdit } from "./edits.ts";
-import { isEnoent, log, parseContentLengthFrame, sleep, throwIfAborted, untilAborted } from "./internal.ts";
+import {
+	isEnoent,
+	log,
+	needsWindowsShell,
+	parseContentLengthFrame,
+	quoteWindowsShellArg,
+	sleep,
+	throwIfAborted,
+	untilAborted,
+} from "./internal.ts";
 import type {
 	LspClient,
 	LspJsonRpcNotification,
@@ -163,9 +172,13 @@ const CLIENT_CAPABILITIES = {
 
 function parseMessage(
 	buffer: Buffer,
-): { message: LspJsonRpcResponse | LspJsonRpcNotification; remaining: Buffer } | null {
+):
+	| { message: LspJsonRpcResponse | LspJsonRpcNotification; remaining: Buffer }
+	| { error: Error; remaining: Buffer }
+	| null {
 	const frame = parseContentLengthFrame(buffer);
 	if (!frame) return null;
+	if ("error" in frame) return { error: frame.error, remaining: frame.remaining };
 	return { message: frame.json as LspJsonRpcResponse | LspJsonRpcNotification, remaining: frame.remaining };
 }
 
@@ -203,7 +216,11 @@ async function drainMessages(client: LspClient): Promise<void> {
 		let parsed = parseMessage(client.messageBuffer);
 		while (parsed) {
 			client.messageBuffer = parsed.remaining;
-			await routeMessage(client, parsed.message);
+			if ("error" in parsed) {
+				log.warn("Discarding malformed LSP frame", { error: parsed.error.message });
+			} else {
+				await routeMessage(client, parsed.message);
+			}
 			parsed = parseMessage(client.messageBuffer);
 		}
 	} catch (err) {
@@ -345,11 +362,19 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 		const command = config.resolvedCommand ?? config.command;
 		const args = config.args ?? [];
 
-		const proc = spawn(command, args, {
+		// Node ≥ 20.12 rejects spawning a Windows `.cmd`/`.bat` directly (EINVAL),
+		// so route script launchers (typescript-language-server, biome, pyright…)
+		// through a shell with each argv element quoted. Native binaries spawn
+		// directly as before.
+		const useShell = needsWindowsShell(command);
+		const spawnCommand = useShell ? quoteWindowsShellArg(command) : command;
+		const spawnArgs = useShell ? args.map(quoteWindowsShellArg) : args;
+		const proc = spawn(spawnCommand, spawnArgs, {
 			cwd,
 			stdio: ["pipe", "pipe", "pipe"],
 			env: process.env,
 			windowsHide: true,
+			shell: useShell,
 		}) as ChildProcessWithoutNullStreams;
 
 		let resolveProjectLoaded!: () => void;

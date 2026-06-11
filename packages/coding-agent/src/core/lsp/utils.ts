@@ -41,19 +41,38 @@ export function textResult(text: string, details: LspToolDetails): TextResult {
 // URI Handling (Cross-Platform)
 // =============================================================================
 
+// Characters that must NOT be percent-encoded in a file URI path: the RFC 3986
+// unreserved set plus the sub-delims and ':'/'@' that are legal in a path
+// segment. Keeping these verbatim makes common paths (incl. `node_modules/@scope`
+// and the Windows drive letter `C:`) byte-identical to the previous output;
+// everything else — space, '#', '?', '%', non-ASCII — is encoded. The `u` flag
+// keeps surrogate pairs (emoji, CJK supplementary) intact through the encoder.
+const UNSAFE_URI_PATH_CHARS = /[^A-Za-z0-9\-._~!$&'()*+,;=:@/]/gu;
+
+function encodeUriPath(forwardSlashPath: string): string {
+	return forwardSlashPath.replace(UNSAFE_URI_PATH_CHARS, (ch) => encodeURIComponent(ch));
+}
+
 /** Convert a file path to a file:// URI. Handles Windows drive letters. */
 export function fileToUri(filePath: string): string {
 	const resolved = path.resolve(filePath);
 	if (process.platform === "win32") {
-		return `file:///${resolved.replace(/\\/g, "/")}`;
+		return `file:///${encodeUriPath(resolved.replace(/\\/g, "/"))}`;
 	}
-	return `file://${resolved}`;
+	return `file://${encodeUriPath(resolved)}`;
 }
 
 /** Convert a file:// URI back to a file path. Handles Windows drive letters. */
 export function uriToFile(uri: string): string {
 	if (!uri.startsWith("file://")) return uri;
-	let filePath = decodeURIComponent(uri.slice(7));
+	const raw = uri.slice(7);
+	let filePath: string;
+	try {
+		filePath = decodeURIComponent(raw);
+	} catch {
+		// Malformed percent-encoding from a misbehaving server: fall back to raw.
+		filePath = raw;
+	}
 	if (process.platform === "win32" && filePath.startsWith("/") && /^[A-Za-z]:/.test(filePath.slice(1))) {
 		filePath = filePath.slice(1);
 	}

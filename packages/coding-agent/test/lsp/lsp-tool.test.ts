@@ -6,8 +6,14 @@ import { afterAll, describe, expect, it } from "vitest";
 import { shutdownAll } from "../../src/core/lsp/client.ts";
 import { loadConfig } from "../../src/core/lsp/config.ts";
 import { applyTextEditsToString } from "../../src/core/lsp/edits.ts";
+import { needsWindowsShell, parseContentLengthFrame, quoteWindowsShellArg } from "../../src/core/lsp/internal.ts";
 import { createLspToolDefinition } from "../../src/core/lsp/tool.ts";
 import { detectLanguageId, fileToUri, resolveSymbolColumn, uriToFile } from "../../src/core/lsp/utils.ts";
+
+function frame(json: unknown): Buffer {
+	const body = JSON.stringify(json);
+	return Buffer.from(`Content-Length: ${Buffer.byteLength(body, "utf-8")}\r\n\r\n${body}`, "utf-8");
+}
 
 const FAKE_SERVER = fileURLToPath(new URL("./fake-lsp-server.mjs", import.meta.url));
 
@@ -45,6 +51,67 @@ describe("lsp module — pure helpers", () => {
 		// URIs use forward slashes; on Windows uriToFile keeps them (Node fs accepts `/`).
 		const norm = (p: string) => p.replace(/\\/g, "/");
 		expect(norm(uriToFile(uri))).toBe(norm(target));
+	});
+
+	it("fileToUri encodes spaces, '#' and literal '%' and round-trips", () => {
+		const target = join(process.cwd(), "my dir", "a#1 100%.ts");
+		const uri = fileToUri(target);
+		expect(uri).toContain("%20"); // space
+		expect(uri).toContain("%23"); // #
+		expect(uri).toContain("%25"); // literal percent
+		expect(uri).not.toMatch(/[ #]/); // no raw space or '#' leaked into the URI
+		const norm = (p: string) => p.replace(/\\/g, "/");
+		expect(norm(uriToFile(uri))).toBe(norm(target));
+	});
+
+	it("fileToUri keeps pchar-legal chars (@scope, drive ':') unescaped", () => {
+		const uri = fileToUri(join(process.cwd(), "node_modules", "@scope", "pkg.ts"));
+		expect(uri).toContain("/@scope/");
+		expect(uri).not.toContain("%40");
+	});
+
+	it("uriToFile tolerates malformed percent-encoding instead of throwing", () => {
+		expect(() => uriToFile("file:///tmp/bad%path.ts")).not.toThrow();
+		expect(uriToFile("file:///tmp/bad%path.ts")).toContain("bad%path.ts");
+	});
+
+	it("parseContentLengthFrame decodes a valid frame and returns the remainder", () => {
+		const buf = Buffer.concat([frame({ jsonrpc: "2.0", id: 1, result: null }), Buffer.from("tail")]);
+		const parsed = parseContentLengthFrame(buf);
+		if (!parsed || "error" in parsed) throw new Error("expected a decoded frame");
+		expect(parsed.json).toEqual({ jsonrpc: "2.0", id: 1, result: null });
+		expect(parsed.remaining.toString("utf-8")).toBe("tail");
+	});
+
+	it("parseContentLengthFrame discards a malformed JSON body and advances past it", () => {
+		const body = "{not json";
+		const bad = Buffer.from(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`, "utf-8");
+		const next = frame({ jsonrpc: "2.0", id: 2, result: 1 });
+		const parsed = parseContentLengthFrame(Buffer.concat([bad, next]));
+		if (!parsed || !("error" in parsed)) throw new Error("expected a malformed-frame result");
+		// The remainder must be exactly the next frame, so the reader doesn't stall.
+		const after = parseContentLengthFrame(parsed.remaining);
+		if (!after || "error" in after) throw new Error("expected the following frame to parse");
+		expect(after.json).toEqual({ jsonrpc: "2.0", id: 2, result: 1 });
+	});
+
+	it("parseContentLengthFrame returns null while a frame is still incomplete", () => {
+		const full = frame({ jsonrpc: "2.0", id: 3, result: "x" });
+		expect(parseContentLengthFrame(full.subarray(0, full.length - 3))).toBeNull();
+	});
+
+	it("quoteWindowsShellArg wraps whitespace/quotes only when needed", () => {
+		expect(quoteWindowsShellArg("--stdio")).toBe("--stdio");
+		expect(quoteWindowsShellArg("C:/Program Files/x.cmd")).toBe('"C:/Program Files/x.cmd"');
+		expect(quoteWindowsShellArg('a"b')).toBe('"a""b"');
+	});
+
+	it("needsWindowsShell flags only .cmd/.bat on win32", () => {
+		const expected = process.platform === "win32";
+		expect(needsWindowsShell("foo.cmd")).toBe(expected);
+		expect(needsWindowsShell("foo.bat")).toBe(expected);
+		expect(needsWindowsShell("foo.exe")).toBe(false);
+		expect(needsWindowsShell("rust-analyzer")).toBe(false);
 	});
 
 	it("detectLanguageId maps extensions", () => {

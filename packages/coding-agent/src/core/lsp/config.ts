@@ -182,12 +182,16 @@ const LOCAL_BIN_PATHS: Array<{ markers: string[]; binDir: string }> = [
 const WINDOWS_LOCAL_EXECUTABLE_EXTENSIONS = [".exe", ".cmd", ".bat"] as const;
 
 function resolveLocalCommand(basePath: string): string | null {
-	if (fs.existsSync(basePath)) return basePath;
-	if (process.platform !== "win32") return null;
-	for (const extension of WINDOWS_LOCAL_EXECUTABLE_EXTENSIONS) {
-		const candidate = `${basePath}${extension}`;
-		if (fs.existsSync(candidate)) return candidate;
+	if (process.platform === "win32") {
+		// Prefer a Windows executable (.exe/.cmd/.bat) over the extensionless Unix
+		// shell wrapper npm drops alongside the `.cmd` in node_modules/.bin. The
+		// wrapper matches existsSync but can't be spawned, so it must not win.
+		for (const extension of WINDOWS_LOCAL_EXECUTABLE_EXTENSIONS) {
+			const candidate = `${basePath}${extension}`;
+			if (fs.existsSync(candidate)) return candidate;
+		}
 	}
+	if (fs.existsSync(basePath)) return basePath;
 	return null;
 }
 
