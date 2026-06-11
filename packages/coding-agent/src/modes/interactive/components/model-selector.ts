@@ -85,7 +85,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			this.addChild(this.scopeHintText);
 		} else {
 			const hintText = "Only showing models from configured providers. Use /login to add providers.";
-			this.addChild(new Text(theme.fg("warning", hintText), 0, 0));
+			this.addChild(new Text(theme.fg("muted", hintText), 0, 0));
 		}
 		this.addChild(new Spacer(1));
 

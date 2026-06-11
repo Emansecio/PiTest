@@ -26,8 +26,14 @@ export class DiagnosticsBlockComponent extends MessageShell {
 	private readonly sourceInfos: Map<string, SourceInfo>;
 
 	constructor(label: string, diagnostics: readonly ResourceDiagnostic[], sourceInfos: Map<string, SourceInfo>) {
+		// First-impression de-noise: only genuine errors warrant the saturated
+		// diagnostics color on the gutter + bracketed label. Collisions/warnings
+		// (the common startup case) sit in `muted` so the welcome screen isn't
+		// dominated by a yellow bracket — the full detail is one ctrl+o away
+		// regardless of severity.
+		const hasError = diagnostics.some((d) => d.type === "error");
 		super({
-			gutterColor: (text: string) => theme.fg("gutterDiagnostics", text),
+			gutterColor: (text: string) => theme.fg(hasError ? "gutterDiagnostics" : "muted", text),
 			label,
 		});
 		this.diagnostics = diagnostics;
