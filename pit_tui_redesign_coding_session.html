@@ -1,0 +1,69 @@
+<h2 class="sr-only">Redesign reimaginado da TUI do agente de código Pit, mostrando uma sessão ativa: cabeçalho enxuto com diretório e branch, uma mensagem do usuário, o agente respondendo com tool calls em coluna (read, edit com diff colorido, run rodando com spinner animado) e uma status bar limpa com o medidor CTX colorido.</h2>
+<div style="background:#1a1a1a;border:1px solid #2b2b2b;border-radius:12px;padding:20px 24px 22px;font-family:var(--font-mono);font-size:13px;line-height:1.8;color:#cccccc;">
+
+  <div style="display:flex;justify-content:space-between;align-items:baseline;">
+    <span><span style="color:#6cc0b5;font-weight:500;font-size:17px;letter-spacing:1px;">pit</span> <span style="color:#565656;font-size:11px;">v0.75.3</span></span>
+    <span style="color:#6c6c6c;font-size:12px;"><i class="ti ti-folder" style="font-size:13px;vertical-align:-1px;" aria-hidden="true"></i> ~/projects/ned <span style="color:#3f3f3f;">·</span> <span style="color:#5fb3a8;"><i class="ti ti-git-branch" style="font-size:13px;vertical-align:-1px;" aria-hidden="true"></i> main</span></span>
+  </div>
+  <div style="border-top:1px solid #262626;margin:12px 0 18px;"></div>
+
+  <div style="border-left:2px solid #2f3a38;padding-left:12px;color:#bdbdbd;margin-bottom:18px;">troca o timeout fixo do request builder por um configurável</div>
+
+  <div style="display:flex;gap:10px;">
+    <span style="color:#5fb3a8;">●</span>
+    <div style="flex:1;min-width:0;">
+      <div style="margin-bottom:12px;">Vou trocar o timeout fixo por um configurável, com fallback de 30s.</div>
+
+      <div style="display:flex;justify-content:space-between;margin-bottom:3px;">
+        <span><span style="color:#6f9e5e;">✓</span> <span style="display:inline-block;min-width:42px;color:#9a9a9a;">read</span><span style="color:#cccccc;">src/request.rs</span></span>
+        <span style="color:#5a5a5a;">142 linhas</span>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+        <span><span style="color:#6f9e5e;">✓</span> <span style="display:inline-block;min-width:42px;color:#9a9a9a;">edit</span><span style="color:#cccccc;">src/request.rs</span></span>
+        <span><span style="color:#7aac63;">+2</span> <span style="color:#c5786f;">-1</span></span>
+      </div>
+
+      <div style="border-left:1px solid #303030;padding-left:14px;margin:0 0 8px 4px;white-space:pre;font-size:12.5px;line-height:1.75;">
+<div><span style="display:inline-block;width:2.4em;text-align:right;color:#525252;">44</span><span style="color:#454545;">   </span><span style="color:#a8a8a8;">pub fn build(self) -> Request {</span></div>
+<div><span style="display:inline-block;width:2.4em;text-align:right;color:#525252;">45</span><span style="color:#454545;">   </span><span style="color:#a8a8a8;">    Request {</span></div>
+<div><span style="display:inline-block;width:2.4em;text-align:right;color:#525252;">46</span><span style="color:#454545;">   </span><span style="color:#a8a8a8;">        url: self.url,</span></div>
+<div><span style="display:inline-block;width:2.4em;text-align:right;color:#525252;">47</span><span style="color:#c5786f;"> - </span><span style="color:#c5786f;">        timeout: Duration::from_secs(10),</span></div>
+<div><span style="display:inline-block;width:2.4em;text-align:right;color:#525252;">48</span><span style="color:#7aac63;"> + </span><span style="color:#7aac63;">        timeout: self.timeout</span></div>
+<div><span style="display:inline-block;width:2.4em;text-align:right;color:#525252;">49</span><span style="color:#7aac63;"> + </span><span style="color:#7aac63;">            .unwrap_or(Duration::from_secs(30)),</span></div>
+<div><span style="display:inline-block;width:2.4em;text-align:right;color:#525252;">50</span><span style="color:#454545;">   </span><span style="color:#a8a8a8;">    }</span></div>
+<div><span style="display:inline-block;width:2.4em;text-align:right;color:#525252;">51</span><span style="color:#454545;">   </span><span style="color:#a8a8a8;">}</span></div>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;">
+        <span><span style="color:#5fb3a8;" data-spin>⠹</span> <span style="display:inline-block;min-width:42px;color:#9a9a9a;">run</span><span style="color:#cccccc;">cargo check</span></span>
+        <span style="color:#6c6c6c;">rodando <span style="color:#3f3f3f;">·</span> 4s</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="border-top:1px solid #262626;margin:20px 0 14px;"></div>
+
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
+    <span><span style="color:#5fb3a8;">❯</span> <span style="color:#5fb3a8;" data-caret>▋</span></span>
+    <span style="color:#4e4e4e;font-size:11px;">esc para interromper</span>
+  </div>
+
+  <div style="display:flex;justify-content:space-between;">
+    <span><span style="color:#6c6c6c;letter-spacing:.5px;">CTX</span> <span style="color:#5fb3a8;">41%</span> <span style="color:#3f3f3f;">·</span> <span style="color:#9a9a9a;">412k</span><span style="color:#565656;">/1M</span></span>
+    <span style="color:#6c6c6c;">anthropic <span style="color:#3f3f3f;">·</span> <span style="color:#cccccc;">claude-opus-4-8</span> <span style="color:#3f3f3f;">·</span> <span style="color:#5fb3a8;">✦ high</span></span>
+  </div>
+  <div style="display:flex;justify-content:flex-end;">
+    <span style="color:#6c6c6c;">↑2 ↓18 <span style="color:#3f3f3f;">·</span> $0.318 (sub) <span style="color:#3f3f3f;">·</span> <span style="color:#5e5e5e;">auto</span></span>
+  </div>
+
+</div>
+<script>
+(function(){
+  var fr=['\u280b','\u2819','\u2839','\u2838','\u283c','\u2834','\u2826','\u2827','\u2807','\u280f'],i=0;
+  var sp=document.querySelectorAll('[data-spin]');
+  setInterval(function(){i=(i+1)%fr.length;sp.forEach(function(e){e.textContent=fr[i];});},80);
+  var c=document.querySelectorAll('[data-caret]'),on=true;
+  setInterval(function(){on=!on;c.forEach(function(e){e.style.opacity=on?'1':'0';});},530);
+})();
+</script>

@@ -157,16 +157,15 @@ describe("parseArgs", () => {
 			expect(result.diagnostics).toEqual([]);
 		});
 
-		test("parses --permission-mode unsafe", () => {
+		test("rejects the removed unsafe mode", () => {
 			const result = parseArgs(["--permission-mode", "unsafe"]);
-			expect(result.permissionMode).toBe("unsafe");
-			expect(result.diagnostics).toEqual([]);
-		});
-
-		test("parses --unsafe shorthand", () => {
-			const result = parseArgs(["--unsafe"]);
-			expect(result.permissionMode).toBe("unsafe");
-			expect(result.diagnostics).toEqual([]);
+			expect(result.permissionMode).toBeUndefined();
+			expect(result.diagnostics).toEqual([
+				{
+					type: "warning",
+					message: 'Invalid permission mode "unsafe". Valid values: plan, auto.',
+				},
+			]);
 		});
 
 		test("parses --permission-mode plan", () => {
@@ -181,7 +180,7 @@ describe("parseArgs", () => {
 			expect(result.diagnostics).toEqual([
 				{
 					type: "warning",
-					message: 'Invalid permission mode "yolo". Valid values: plan, auto, unsafe.',
+					message: 'Invalid permission mode "yolo". Valid values: plan, auto.',
 				},
 			]);
 		});

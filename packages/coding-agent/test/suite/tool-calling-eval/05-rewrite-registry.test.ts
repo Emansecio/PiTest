@@ -117,6 +117,24 @@ describe("tool-rewrite-registry (e2e)", () => {
 		expect((rewrites[0] as { ruleIds: string[] }).ruleIds).toContain("read-start-end-line-to-offset-limit");
 	});
 
+	it("auto-normalizes a Windows bash command (drive backslashes) before running", async () => {
+		const harness = await makeHarness();
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("bash", { command: "echo C:\\Users\\x" })], {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("echo");
+		const rewrites = harness.events.filter((e) => e.type === "tool_call_rewritten");
+		expect(rewrites.length).toBe(1);
+		expect((rewrites[0] as { ruleIds: string[] }).ruleIds).toContain("bash-windows-shell-normalize");
+		// The rewritten command ran — no Tier 2/3 rejection intercepted it.
+		const rejections = harness.events.filter((e) => e.type === "tool_call_rejected");
+		expect(rejections.length).toBe(0);
+	});
+
 	// ---------------- Tier 2 (bash → dedicated tool suggestions) ----------------
 
 	it("rejects bash('cat foo') with a copy-pasteable read suggestion", async () => {

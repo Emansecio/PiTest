@@ -191,11 +191,9 @@ export function parseArgs(args: string[]): Args {
 			} else {
 				result.diagnostics.push({
 					type: "warning",
-					message: `Invalid permission mode "${rawMode}". Valid values: plan, auto, unsafe.`,
+					message: `Invalid permission mode "${rawMode}". Valid values: plan, auto.`,
 				});
 			}
-		} else if (arg === "--unsafe") {
-			result.permissionMode = "unsafe";
 		} else if (arg === "--dry-run") {
 			result.dryRun = true;
 			const next = args[i + 1];
@@ -364,8 +362,7 @@ ${chalk.bold("Options:")}
   --list-models [search]         List available models (with optional fuzzy search)
   --verbose                      Force verbose startup (overrides quietStartup setting)
   --offline                      Disable startup network operations (same as PIT_OFFLINE=1)
-  --permission-mode <mode>       Permission mode: plan | auto | unsafe (default = auto)
-  --unsafe                       Drop the built-in safety floor (no-rails; authorized targets only)
+  --permission-mode <mode>       Permission mode: plan | auto (default = auto)
   --dry-run [text|json]          Inspect resolved config/auth/tools/MCP and exit without running the agent
   --help, -h                     Show this help
   --version, -v                  Show version number

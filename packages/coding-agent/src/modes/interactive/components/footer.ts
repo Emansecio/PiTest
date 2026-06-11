@@ -311,7 +311,7 @@ export class FooterComponent implements Component {
 		// Group B — session mode bits (permission / auto-compact).
 		const mode = this.getPermissionMode();
 		const modeBits: string[] = [];
-		if (mode && mode !== "unsafe") modeBits.push(mode);
+		if (mode && mode !== "no-rails") modeBits.push(mode);
 		// Auto-compact is on by default, so showing "compact" permanently is noise.
 		// The signal worth surfacing is the ABNORMAL state — when it's OFF the
 		// context can overflow without rescue — so flag only that, in warning.
@@ -349,12 +349,12 @@ export class FooterComponent implements Component {
 
 		const lines = [identityLine, metricsLine];
 
-		// --- Unsafe alert ----------------------------------------------------
-		// The no-rails permission state must never be silent: bold red, on its
-		// own line. Fires whenever the built-in floor is off (unsafe mode, or
-		// auto + disableBuiltinDefaults — both surface as "unsafe" in the status).
-		if (mode === "unsafe") {
-			lines.push(`\x1b[1m${theme.fg("error", "⚠ UNSAFE — built-in guard-rails off")}\x1b[22m`);
+		// --- No-rails alert --------------------------------------------------
+		// The dropped-floor permission state must never be silent: bold red, on its
+		// own line. Fires whenever the built-in floor is off (any mode with
+		// disableBuiltinDefaults — surfaced as "no-rails" in the status).
+		if (mode === "no-rails") {
+			lines.push(`\x1b[1m${theme.fg("error", "⚠ NO-RAILS — built-in guard-rails off")}\x1b[22m`);
 		}
 
 		// --- Extension statuses (line 3, optional) ---------------------------

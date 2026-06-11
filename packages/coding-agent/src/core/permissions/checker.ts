@@ -5,8 +5,9 @@
  * The checker is pure / synchronous.
  * - plan:   read-only — mutating tools are blocked; reads still honor deny rules.
  * - auto:   guarded — writes/commands run, but built-in + user deny rules apply.
- * - unsafe: no-rails — the built-in floor is dropped; user-authored deny rules
- *           still apply. (`auto` + `disableBuiltinDefaults` is equivalent.)
+ *
+ * The built-in floor can be dropped via `disableBuiltinDefaults` (no-rails);
+ * user-authored deny rules still apply.
  */
 
 import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath } from "./matcher.ts";
@@ -55,10 +56,10 @@ export class PermissionChecker {
 
 	/**
 	 * Whether the built-in deny floor (sensitive paths, dangerous commands) is
-	 * active. Off in `unsafe`, or in any mode with `disableBuiltinDefaults`.
+	 * active. Off in any mode with `disableBuiltinDefaults`.
 	 */
 	get builtinsActive(): boolean {
-		return this.ctx.mode !== "unsafe" && !this.ctx.settings.disableBuiltinDefaults;
+		return !this.ctx.settings.disableBuiltinDefaults;
 	}
 
 	private resolvedDenyPaths(includeBuiltins: boolean): readonly PathRule[] {
@@ -88,7 +89,7 @@ export class PermissionChecker {
 			return this.checkPlan(action);
 		}
 
-		// auto / unsafe — writes and commands run; deny rules gate them.
+		// auto — writes and commands run; deny rules gate them.
 		// allowTools is an explicit, deliberate bypass: skip all further checks.
 		if (settings.allowTools?.includes(action.toolName)) {
 			return { decision: "allow" };

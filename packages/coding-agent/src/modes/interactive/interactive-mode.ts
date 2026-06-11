@@ -542,6 +542,12 @@ export class InteractiveMode {
 			name: command.name,
 			description: command.description,
 		}));
+		// Built-ins flagged `hidden` stay "known" (dispatched when typed, still shadow
+		// same-named extension/skill commands) but are dropped from the "/" menu.
+		const hiddenBuiltinNames = new Set(
+			BUILTIN_SLASH_COMMANDS.filter((command) => command.hidden).map((command) => command.name),
+		);
+		const visibleSlashCommands = slashCommands.filter((command) => !hiddenBuiltinNames.has(command.name));
 
 		const modelCommand = slashCommands.find((command) => command.name === "model");
 		if (modelCommand) {
@@ -616,7 +622,7 @@ export class InteractiveMode {
 			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList].map((c) => c.name),
 		);
 		return new CombinedAutocompleteProvider(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
+			[...visibleSlashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
 			this.sessionManager.getCwd(),
 			this.fdPath,
 		);
@@ -1343,6 +1349,10 @@ export class InteractiveMode {
 	private applyRuntimeSettings(): void {
 		this.footer.setSession(this.session);
 		this.todoOverlay?.setSession(this.session);
+		// Repaint the live todo overlay the instant the list changes, rather than
+		// waiting for an incidental render (loader tick / tool event). Re-registered
+		// here so a session swap points the listener at the new session's manager.
+		this.session.setTodoChangeListener(() => this.ui.requestRender());
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -3660,8 +3670,7 @@ export class InteractiveMode {
 	/**
 	 * Cycle the permission mode between plan and auto by invoking the permissions
 	 * extension's `permission-cycle` command (which owns the shared
-	 * PermissionChecker and updates the footer status). `unsafe` stays out of the
-	 * cycle — entering no-rails must be deliberate (/unsafe).
+	 * PermissionChecker and updates the footer status).
 	 */
 	private async cyclePermissionMode(): Promise<void> {
 		const runner = this.session.extensionRunner;

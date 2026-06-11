@@ -84,10 +84,17 @@ export interface StagnationReminderSettings {
 	cooldownMs?: number; // default: 30000 — minimum gap between soft reminders
 }
 
+export interface CrossErrorReminderSettings {
+	enabled?: boolean; // default: true (opt out with enabled: false)
+	threshold?: number; // default: 3 — same normalised error in a row (across ≥2 approaches) triggers a reminder
+	cooldownMs?: number; // default: 30000 — minimum gap between reminders
+}
+
 export interface ToolFeedbackSettings {
 	errorReflection?: ErrorReflectionSettings;
 	doomLoopReminder?: DoomLoopReminderSettings;
 	stagnationReminder?: StagnationReminderSettings;
+	crossErrorReminder?: CrossErrorReminderSettings;
 }
 
 export interface FrequentFilesSettings {
@@ -249,6 +256,7 @@ export interface ResolvedToolFeedbackSettings {
 	errorReflection: { enabled: boolean };
 	doomLoopReminder: { enabled: boolean; threshold: number; cooldownMs: number };
 	stagnationReminder: { enabled: boolean; softThreshold: number; hardThreshold: number; cooldownMs: number };
+	crossErrorReminder: { enabled: boolean; threshold: number; cooldownMs: number };
 }
 
 export interface WarningSettings {
@@ -1063,6 +1071,11 @@ export class SettingsManager {
 		const rawStagCooldown = sr?.cooldownMs;
 		const stagnationCooldownMs =
 			typeof rawStagCooldown === "number" && rawStagCooldown >= 0 ? Math.floor(rawStagCooldown) : 30000;
+		const ce = tf?.crossErrorReminder;
+		const rawCeThreshold = ce?.threshold;
+		const ceThreshold = typeof rawCeThreshold === "number" && rawCeThreshold > 0 ? Math.floor(rawCeThreshold) : 3;
+		const rawCeCooldown = ce?.cooldownMs;
+		const ceCooldownMs = typeof rawCeCooldown === "number" && rawCeCooldown >= 0 ? Math.floor(rawCeCooldown) : 30000;
 		return {
 			errorReflection: { enabled: tf?.errorReflection?.enabled === true },
 			doomLoopReminder: {
@@ -1075,6 +1088,11 @@ export class SettingsManager {
 				softThreshold,
 				hardThreshold,
 				cooldownMs: stagnationCooldownMs,
+			},
+			crossErrorReminder: {
+				enabled: ce?.enabled !== false,
+				threshold: ceThreshold,
+				cooldownMs: ceCooldownMs,
 			},
 		};
 	}

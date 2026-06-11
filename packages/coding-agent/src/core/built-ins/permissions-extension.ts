@@ -2,11 +2,11 @@
  * Built-in permissions extension.
  *
  * Subscribes to `tool_call` and gates execution through `PermissionChecker`.
- * plan = read-only, auto = guarded (built-in deny floor), unsafe = no-rails.
+ * plan = read-only, auto = guarded (built-in deny floor).
  *
  * Settings layout (Settings.permissions):
  *   {
- *     "mode": "plan" | "auto" | "unsafe",
+ *     "mode": "plan" | "auto",
  *     "allowPaths": [{ "glob": "src/**", ... }],
  *     "denyPaths":  [{ "glob": "**\/.env*" }],
  *     "denyCommands": [{ "pattern": "rm\\s+-rf\\s+/" }],
@@ -15,7 +15,7 @@
  *     "disableBuiltinDefaults": false
  *   }
  *
- * CLI flag `--permission-mode` (or `--unsafe`) overrides `mode` for the session.
+ * CLI flag `--permission-mode` overrides `mode` for the session.
  */
 
 import type { ExtensionAPI } from "../extensions/types.ts";
@@ -30,11 +30,11 @@ const STATUS_KEY = "permissions";
 
 /**
  * UI label for the current permission state. When the built-in floor is off
- * (unsafe mode, or auto + disableBuiltinDefaults) we always surface "unsafe" so
- * the footer can shout the no-rails state regardless of the literal mode.
+ * (a mode with `disableBuiltinDefaults`) we surface "no-rails" so the footer can
+ * shout the dropped-floor state regardless of the literal mode.
  */
 function permissionDisplayLabel(checker: PermissionChecker): string {
-	return checker.builtinsActive ? checker.mode : "unsafe";
+	return checker.builtinsActive ? checker.mode : "no-rails";
 }
 
 export interface PermissionsExtensionOptions {
@@ -69,7 +69,7 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 
 		// Re-evaluate when the user changes mode mid-session via /permission-mode
 		pi.registerCommand("permission-mode", {
-			description: "Switch permission mode (plan | auto | unsafe)",
+			description: "Switch permission mode (plan | auto)",
 			async handler(args, ctx) {
 				const trimmed = args.trim();
 				if (trimmed.length === 0) {
@@ -78,28 +78,16 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 				}
 				const mode = normalizePermissionMode(trimmed);
 				if (!mode) {
-					ctx.ui.notify(`Invalid mode "${trimmed}". Use plan | auto | unsafe.`, "warning");
+					ctx.ui.notify(`Invalid mode "${trimmed}". Use plan | auto.`, "warning");
 					return;
 				}
 				checker.updateMode(mode);
 				ctx.ui.setStatus(STATUS_KEY, `permissions: ${permissionDisplayLabel(checker)}`);
-				ctx.ui.notify(`Permission mode → ${mode}`, mode === "unsafe" ? "warning" : "info");
+				ctx.ui.notify(`Permission mode → ${mode}`, "info");
 			},
 		});
 
-		// Shortcut for the no-rails tier — surfaced loudly because it drops the floor.
-		pi.registerCommand("unsafe", {
-			description: "Drop the built-in safety floor for this session (no-rails; authorized targets only)",
-			async handler(_args, ctx) {
-				checker.updateMode("unsafe");
-				ctx.ui.setStatus(STATUS_KEY, `permissions: ${permissionDisplayLabel(checker)}`);
-				ctx.ui.notify("⚠ Permission mode → unsafe (built-in guard-rails off)", "warning");
-			},
-		});
-
-		// Cycle between plan and auto (bound to a keybinding). `unsafe` stays out of
-		// the cycle — entering no-rails must be deliberate (/unsafe). From unsafe,
-		// a cycle lands on the guarded `auto`.
+		// Cycle between plan and auto (bound to a keybinding).
 		pi.registerCommand("permission-cycle", {
 			description: "Cycle permission mode between plan and auto",
 			async handler(_args, ctx) {

@@ -68,6 +68,16 @@ export function defaultLearnedErrorsDir(): string {
 	}
 }
 
+/**
+ * Learned-errors directory for an explicit agent dir. Used where the caller
+ * already knows the (possibly test-isolated) agent dir and must not fall back to
+ * the shared global store — e.g. the preventive guard extension, which would
+ * otherwise read the real cross-session store during isolated e2e runs.
+ */
+export function learnedErrorsDirFor(agentDir: string): string {
+	return join(agentDir, LEARNED_ERRORS_DIRNAME);
+}
+
 /** Persist a session's normalised fingerprints to a fresh per-session file. */
 export function persistSessionLearnedErrors(dir: string, meta: SessionFileMeta, entries: LearnedErrorEntry[]): void {
 	if (entries.length === 0) return;

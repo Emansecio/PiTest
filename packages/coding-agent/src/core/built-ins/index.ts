@@ -12,6 +12,7 @@ import type { AgentTool } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
 import type { ExtensionFactory } from "../extensions/types.ts";
 import type { HooksSettings } from "../hooks/index.ts";
+import { learnedErrorsDirFor } from "../learned-error-store.ts";
 import type { McpSettings } from "../mcp/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import {
@@ -22,6 +23,7 @@ import {
 } from "../permissions/index.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
+import { createLearnedErrorGuardExtension } from "./learned-error-guard-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
 import { createMemoryExtension } from "./memory-extension.ts";
 import { createPermissionsExtension } from "./permissions-extension.ts";
@@ -76,6 +78,11 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 	const factories: ExtensionFactory[] = [
 		createPermissionsExtension({ checker: permissionChecker, onDecision: options.onPermissionDecision }),
 		createReadGuardExtension({ cwd: options.cwd }),
+		// Preventive cross-session guard: blocks a call whose exact args have failed
+		// repeatedly in prior sessions, before it fails again. Scoped to this
+		// session's agent dir so isolated runs never read the shared store. No-op
+		// when that store is empty or below threshold (fresh installs, tests).
+		createLearnedErrorGuardExtension({ dir: learnedErrorsDirFor(options.agentDir) }),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp }),

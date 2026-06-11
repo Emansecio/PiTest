@@ -1,7 +1,7 @@
 # Permissions
 
 Pit gates every tool call and bash command through a permission system with
-three modes on a single axis of permissiveness, plus a deny/allow rule set.
+two modes on a single axis of permissiveness, plus a deny/allow rule set.
 Permissions are enforced regardless of which provider or model you use; the
 rules live in your settings and the checker runs before every tool execution.
 
@@ -11,13 +11,14 @@ rules live in your settings and the checker runs before every tool execution.
 |------|----------|
 | `plan` | Read-only. Any tool that mutates the filesystem or runs a shell (`bash`, `edit`, `write`) is blocked. Reads still honor deny rules. Useful for exploration / planning passes. |
 | `auto` | **Default.** Writes and commands run without prompts, but the built-in deny floor is enforced as **hard blocks**: sensitive paths (`.env`, `~/.ssh/**`, …) and dangerous commands (`rm -rf /`, fork bomb, …) are denied. A *guarded* default. |
-| `unsafe` | No-rails. The built-in floor is dropped — `.env`, `rm -rf /`, etc. are allowed. **User-authored** `denyPaths`/`denyCommands`/`denyTools` still apply. For authorized targets only; surfaced loudly in the footer so it is never on by accident. |
 
-`unsafe` is exactly `auto` with `disableBuiltinDefaults: true`.
+The built-in floor can still be dropped per-session by setting
+`disableBuiltinDefaults: true` (see below) — a **no-rails** state surfaced
+loudly in the footer. **User-authored** `denyPaths`/`denyCommands`/`denyTools`
+still apply. For authorized targets only.
 
-Override the configured mode for a single run with `--permission-mode <mode>`,
-or jump straight to no-rails with `--unsafe`. Switch mid-session with the
-`/permission-mode <mode>` or `/unsafe` slash commands.
+Override the configured mode for a single run with `--permission-mode <mode>`.
+Switch mid-session with the `/permission-mode <mode>` slash command.
 
 ## Configuration
 
@@ -67,18 +68,18 @@ Within a single check the order is:
 1. `denyTools[name]` → **deny** (every mode)
 2. **plan** only: write / exec / mutating tool → **deny** (read-only)
 3. `allowTools[name]` → **allow** (skips remaining checks)
-4. `denyPaths` (reads in `plan`; reads + writes in `auto`/`unsafe`) and
-   `denyCommands` (exec in `auto`/`unsafe`), including the built-in defaults
+4. `denyPaths` (reads in `plan`; reads + writes in `auto`) and
+   `denyCommands` (exec in `auto`), including the built-in defaults
    unless the floor is off → **deny**
 5. `allowPaths` → **allow**
 6. Otherwise → **allow**
 
 The built-in floor (the defaults in step 4) is active in `plan`/`auto` and off
-in `unsafe` — or in any mode with `disableBuiltinDefaults: true`.
+in any mode with `disableBuiltinDefaults: true`.
 
 ### Built-in defaults
 
-Unless `disableBuiltinDefaults: true` (or mode `unsafe`), Pit adds:
+Unless `disableBuiltinDefaults: true`, Pit adds:
 
 - Deny paths: `**/.env`, `**/.env.*`, `**/.git/config`, `**/.ssh/**`,
   `**/.aws/credentials`, `**/.npmrc`, `**/id_rsa`, `**/id_ed25519`.
@@ -86,8 +87,8 @@ Unless `disableBuiltinDefaults: true` (or mode `unsafe`), Pit adds:
   `mkfs` / `dd if=… of=/dev/`, `chmod -R 777 /`.
 
 Disable when you're testing the system itself, or when working an authorized
-target where the floor gets in the way (prefer `--unsafe` for that — it's
-session-scoped and surfaced in the footer).
+target where the floor gets in the way. The dropped-floor (no-rails) state is
+surfaced loudly in the footer so it is never on by accident.
 
 ## Audit
 

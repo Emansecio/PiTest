@@ -92,6 +92,36 @@ describe("TodoManager CRUD", () => {
 		expect(mgr.systemPromptSection()).toContain("0 open");
 	});
 
+	it("notifies the change listener on every mutation (live overlay repaint)", () => {
+		const mgr = new TodoManager();
+		let calls = 0;
+		mgr.setChangeListener(() => calls++);
+
+		const a = mgr.create({ subject: "a" });
+		expect(calls).toBe(1); // create
+		mgr.update({ id: a.id, status: "in_progress" });
+		expect(calls).toBe(2); // update
+		mgr.delete(a.id);
+		expect(calls).toBe(3); // delete
+
+		const b = mgr.create({ subject: "b" });
+		expect(calls).toBe(4); // create
+		mgr.clear();
+		expect(calls).toBe(5); // clear
+
+		// No-op mutations must not fire (nothing changed → no repaint).
+		mgr.update({ id: 999, status: "completed" });
+		mgr.delete(999);
+		mgr.clear();
+		expect(calls).toBe(5);
+
+		// Clearing the listener stops notifications.
+		mgr.setChangeListener(undefined);
+		mgr.create({ subject: "c" });
+		expect(calls).toBe(5);
+		void b;
+	});
+
 	it("starts a fresh batch when creating after every todo is completed", () => {
 		const mgr = new TodoManager();
 		const a = mgr.create({ subject: "old1" });

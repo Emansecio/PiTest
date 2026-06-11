@@ -1,5 +1,6 @@
 /**
- * Tests for PermissionChecker — plan / auto (guarded) / unsafe (no-rails).
+ * Tests for PermissionChecker — plan / auto (guarded) / no-rails
+ * (auto + disableBuiltinDefaults).
  */
 
 import { describe, expect, it } from "vitest";
@@ -53,22 +54,23 @@ describe("PermissionChecker — auto mode (guarded default)", () => {
 	});
 });
 
-describe("PermissionChecker — unsafe mode (no-rails)", () => {
+describe("PermissionChecker — no-rails (auto + disableBuiltinDefaults)", () => {
 	it("allows writes to .env (builtins off)", () => {
-		const c = new PermissionChecker({ cwd, mode: "unsafe", settings: {} });
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: { disableBuiltinDefaults: true } });
 		expect(c.check({ type: "write", toolName: "write", paths: [".env"] }).decision).toBe("allow");
 	});
 
 	it("allows dangerous commands (builtins off)", () => {
-		const c = new PermissionChecker({ cwd, mode: "unsafe", settings: {} });
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: { disableBuiltinDefaults: true } });
 		expect(c.check({ type: "exec", toolName: "bash", command: "rm -rf /" }).decision).toBe("allow");
 	});
 
 	it("still honors user-authored explicit deny rules", () => {
 		const c = new PermissionChecker({
 			cwd,
-			mode: "unsafe",
+			mode: "auto",
 			settings: {
+				disableBuiltinDefaults: true,
 				denyPaths: [{ glob: "**/secret.key" }],
 				denyCommands: [{ pattern: "shutdown" }],
 				denyTools: ["edit"],
@@ -77,14 +79,6 @@ describe("PermissionChecker — unsafe mode (no-rails)", () => {
 		expect(c.check({ type: "write", toolName: "write", paths: ["secret.key"] }).decision).toBe("deny");
 		expect(c.check({ type: "exec", toolName: "bash", command: "shutdown now" }).decision).toBe("deny");
 		expect(c.check({ type: "tool", toolName: "edit", args: {} }).decision).toBe("deny");
-	});
-});
-
-describe("PermissionChecker — auto + disableBuiltinDefaults behaves like unsafe", () => {
-	it("allows .env and rm -rf / when builtins disabled", () => {
-		const c = new PermissionChecker({ cwd, mode: "auto", settings: { disableBuiltinDefaults: true } });
-		expect(c.check({ type: "write", toolName: "write", paths: [".env"] }).decision).toBe("allow");
-		expect(c.check({ type: "exec", toolName: "bash", command: "rm -rf /" }).decision).toBe("allow");
 	});
 });
 

@@ -55,6 +55,7 @@ import {
 	shouldCompactSoft,
 } from "./compaction/index.ts";
 import { extractToolFileOp } from "./compaction/utils.js";
+import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } from "./cross-error.js";
 import { dapSessionManager } from "./dap/index.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import {
@@ -524,6 +525,11 @@ export class AgentSession {
 	// count at 4 and made the abort unreachable. Reset when the streak breaks.
 	private _doomLoopFiredTier = 0;
 	private readonly _stagnation = new StagnationTracker();
+	// Cross-error ("flailing") detector: same normalised error in a row across
+	// ≥2 distinct call shapes. Complements the doom-loop (which owns identical
+	// repeats). See _maybeInjectCrossErrorReminder.
+	private readonly _crossError = new CrossErrorTracker();
+	private _crossErrorLastFiredAt = 0;
 	private _lastStagnationReminderAt = 0;
 	// Streak length at which the soft stagnation reminder last fired. Paired with
 	// _lastStagnationReminderAt so a flat streak between soft and hard does not
@@ -1445,8 +1451,10 @@ export class AgentSession {
 					});
 				}
 			}
+			this._maybeInjectCrossErrorReminder(fingerprint, args, rawError);
 			this._maybeInjectToolErrorReflection(event.toolName, args, event.result);
 		} else {
+			this._crossError.observeSuccess();
 			const fileOp = extractToolFileOp(event.toolName, args);
 			if (fileOp) {
 				this._frequentFiles.record(fileOp.path, fileOp.op);
@@ -1733,6 +1741,48 @@ export class AgentSession {
 			{ deliverAs: "steer" },
 		).catch((err: unknown) => {
 			process.stderr.write(`[pi] doom-loop reminder delivery failed: ${err}\n`);
+		});
+	}
+
+	/**
+	 * Conditionally inject a "you keep hitting the same error" reminder when the
+	 * agent fails repeatedly with one normalised error across ≥2 distinct call
+	 * shapes. Unlike the doom-loop (identical repeats), this catches "flailing":
+	 * the model reacts to a failure by switching tool or tweaking arguments yet
+	 * keeps producing the same blocker — each call's args differ, so the doom-loop
+	 * never trips. Settings-gated; delivered as a steer (like the doom-loop) so it
+	 * lands before the next turn while the loop is still hot. `observeError` runs
+	 * on every fingerprinted error to keep the streak current even when no reminder
+	 * fires.
+	 */
+	private _maybeInjectCrossErrorReminder(
+		errorFingerprint: string | undefined,
+		args: unknown,
+		sampleError: string | undefined,
+	): void {
+		if (!errorFingerprint) return;
+		const cfg = this.settingsManager.getToolFeedbackSettings().crossErrorReminder;
+		const { count, distinctApproaches } = this._crossError.observeError(
+			errorFingerprint,
+			fingerprintToolArgsExact(args),
+		);
+		const decision = decideCrossErrorReminder({
+			enabled: cfg.enabled,
+			threshold: cfg.threshold,
+			count,
+			distinctApproaches,
+			lastFiredAt: this._crossErrorLastFiredAt,
+			now: Date.now(),
+			cooldownMs: cfg.cooldownMs,
+		});
+		if (!decision.fire) return;
+		this._crossErrorLastFiredAt = decision.nextLastFiredAt;
+		const content = buildCrossErrorReminder({ count, distinctApproaches, sampleError });
+		this.sendCustomMessage(
+			{ customType: "pi.cross-error-reminder", content, display: false },
+			{ deliverAs: "steer" },
+		).catch((err: unknown) => {
+			process.stderr.write(`[pi] cross-error reminder delivery failed: ${err}\n`);
 		});
 	}
 
@@ -2172,6 +2222,15 @@ export class AgentSession {
 	/** Multi-line human summary for the `/todos` command. */
 	todoSummaryText(): string {
 		return this._todo.summaryText();
+	}
+
+	/**
+	 * Register a listener fired whenever the todo list changes, so the interactive
+	 * mode can repaint the live overlay in real time (instead of relying on an
+	 * incidental render). Re-applied on every session rebind. `undefined` clears it.
+	 */
+	setTodoChangeListener(listener: (() => void) | undefined): void {
+		this._todo.setChangeListener(listener);
 	}
 
 	/** True while any todo is in_progress (drives the overlay spinner). */

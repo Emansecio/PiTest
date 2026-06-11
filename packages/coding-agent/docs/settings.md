@@ -240,13 +240,13 @@ See [packages.md](packages.md) for package management details.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `permissions.mode` | string | `"auto"` | `"plan"`, `"auto"`, or `"unsafe"`. Override per-run with `--permission-mode` / `--unsafe`. |
+| `permissions.mode` | string | `"auto"` | `"plan"` or `"auto"`. Override per-run with `--permission-mode`. |
 | `permissions.allowPaths` | array | `[]` | Paths always allowed (each entry: `{ glob, tools?, reason? }`). |
 | `permissions.denyPaths` | array | `[]` | Paths always blocked. Built-in defaults (`.env`, `~/.ssh/**`, …) are appended unless disabled. |
 | `permissions.denyCommands` | array | `[]` | Bash command regex denylist (each entry: `{ pattern, flags?, reason? }`). Built-in dangerous-command defaults appended unless disabled. |
 | `permissions.allowTools` | string[] | `[]` | Tool names that bypass checks. |
 | `permissions.denyTools` | string[] | `[]` | Tool names that are always blocked. |
-| `permissions.disableBuiltinDefaults` | boolean | `false` | Skip the built-in sensitive-paths and dangerous-commands lists (equivalent to running an `auto` session as `unsafe`). |
+| `permissions.disableBuiltinDefaults` | boolean | `false` | Skip the built-in sensitive-paths and dangerous-commands lists — a no-rails state surfaced loudly in the footer. |
 
 See [permissions.md](permissions.md) for the full rule format and precedence.
 

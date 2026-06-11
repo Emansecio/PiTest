@@ -95,6 +95,134 @@ function inline(value: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Windows shell-syntax normalisation (Tier 1 auto)
+//
+// Three deterministic, meaning-preserving fixes for the most common Windows
+// bash-tool failures. Each mirrors a post-error Tier-4 hint rule in
+// tool-error-hint-rules.ts — applied proactively here so the call never fails.
+// ---------------------------------------------------------------------------
+
+const PATH_DELIMITER_RE = /[\s"'|&;<>()`]/;
+
+/**
+ * Rewrite unquoted Windows drive paths `C:\Users\x` → `C:/Users/x` inside a bash
+ * command. Only touches tokens that begin with a drive letter (`X:\`) OUTSIDE of
+ * single/double quotes — exactly the strings bash mangles, because it consumes
+ * each backslash as an escape and `C:\Users` reaches the program as `C:Users`.
+ * Backslashes in a regex (`\bfoo\b`), inside a sed program, or already inside
+ * quotes are left untouched: they have no drive-letter prefix, or the quotes
+ * already make bash pass them through verbatim. Idempotent — a path already using
+ * forward slashes does not match.
+ */
+export function rewriteUnquotedDriveBackslashes(command: string): string {
+	let out = "";
+	let quote: '"' | "'" | undefined;
+	let i = 0;
+	while (i < command.length) {
+		const ch = command[i];
+		if (quote) {
+			out += ch;
+			if (ch === quote) quote = undefined;
+			i++;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			out += ch;
+			i++;
+			continue;
+		}
+		// Drive-path start `X:\` at this position, outside any quote.
+		if (/[A-Za-z]/.test(ch) && command[i + 1] === ":" && command[i + 2] === "\\") {
+			out += `${ch}:`;
+			i += 2; // now positioned on the first backslash
+			while (i < command.length) {
+				const c = command[i];
+				if (c === "\\") {
+					out += "/";
+					i++;
+					continue;
+				}
+				if (PATH_DELIMITER_RE.test(c)) break;
+				out += c;
+				i++;
+			}
+			continue;
+		}
+		out += ch;
+		i++;
+	}
+	return out;
+}
+
+/**
+ * Rewrite cmd.exe-style `2>nul` / `1>nul` / `>nul` to the bash form
+ * `…>/dev/null`. In bash, `2>nul` redirects stderr to a regular file literally
+ * named `nul`, silently swallowing the error AND leaving a stray file behind;
+ * the model almost always means "discard". Case-insensitive on `nul` (the
+ * cmd.exe device is upper-case). Idempotent — `>/dev/null` does not match.
+ */
+export function rewriteNulRedirect(command: string): string {
+	return command.replace(/(^|\s)([12]?)>\s*nul\b/gi, (_m, pre: string, fd: string) => `${pre}${fd}>/dev/null`);
+}
+
+/**
+ * Rewrite MSYS/git-bash-only drive paths `/c/Users/x` → portable `C:/Users/x`.
+ * Native bash (WSL), PowerShell, and cmd treat a leading `/c/` as a literal
+ * directory and ENOENT; `C:/Users/x` resolves everywhere on Windows (git-bash
+ * accepts it too). Win32-only: on POSIX a real `/c/…` directory can legitimately
+ * exist, so rewriting there would corrupt a valid path. Quote-aware and anchored
+ * at a token boundary, so a `/c/` inside `sed 's|/c/|/d/|'` (quoted) or mid-word
+ * survives untouched.
+ */
+export function rewriteUnixDrivePathOnWindows(command: string, platform: NodeJS.Platform = process.platform): string {
+	if (platform !== "win32") return command;
+	let out = "";
+	let quote: '"' | "'" | undefined;
+	let i = 0;
+	let atTokenStart = true;
+	while (i < command.length) {
+		const ch = command[i];
+		if (quote) {
+			out += ch;
+			if (ch === quote) quote = undefined;
+			i++;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			out += ch;
+			atTokenStart = false;
+			i++;
+			continue;
+		}
+		if (atTokenStart && ch === "/" && /[A-Za-z]/.test(command[i + 1] ?? "") && command[i + 2] === "/") {
+			out += `${(command[i + 1] as string).toUpperCase()}:/`;
+			i += 3;
+			atTokenStart = false;
+			continue;
+		}
+		out += ch;
+		atTokenStart = /\s/.test(ch);
+		i++;
+	}
+	return out;
+}
+
+/**
+ * Compose the three Windows shell-syntax fixes in order: drive backslashes →
+ * nul redirect → MSYS drive path. A single pass over the command so a call with
+ * several issues at once (`rg foo C:\x 2>nul`) is fully repaired in one rewrite
+ * rather than one-per-turn. Returns the input unchanged when nothing matched.
+ */
+export function normalizeWindowsBashCommand(command: string, platform: NodeJS.Platform = process.platform): string {
+	let out = rewriteUnquotedDriveBackslashes(command);
+	out = rewriteNulRedirect(out);
+	out = rewriteUnixDrivePathOnWindows(out, platform);
+	return out;
+}
+
+// ---------------------------------------------------------------------------
 // Tier 1 — auto rewrites
 // ---------------------------------------------------------------------------
 
@@ -180,6 +308,34 @@ const tier1Rules: ToolRewriteRule[] = [
 				args[pathKey] = base;
 				args.offset = start;
 				args.limit = Math.max(1, end - start + 1);
+				return { ...c, arguments: args };
+			},
+		},
+	},
+	{
+		// Windows shell-syntax normalisation. Bash mangles unquoted `C:\…`
+		// (backslash = escape), writes a stray file for cmd.exe `2>nul`, and
+		// ENOENTs on MSYS-only `/c/…` paths under native shells. Each fix is
+		// deterministic and meaning-preserving, so we apply it BEFORE execution —
+		// turning three of the most common Windows tool-call failures from
+		// "fail, then hint" into "never fail". Mirrors the post-error Tier-4 rules
+		// in tool-error-hint-rules.ts (bash-path-mangled-backslashes,
+		// bash-cmd-redirect-in-bash, bash-unix-drive-path-on-windows).
+		id: "bash-windows-shell-normalize",
+		appliesTo: "bash",
+		matcher: (c) => {
+			const command = getString(c.arguments as Record<string, unknown>, "command");
+			if (!command) return false;
+			return normalizeWindowsBashCommand(command) !== command;
+		},
+		action: {
+			tier: "auto",
+			rewrite: (c) => {
+				const args = { ...(c.arguments as Record<string, unknown>) };
+				const command = getString(args, "command");
+				if (typeof command === "string") {
+					args.command = normalizeWindowsBashCommand(command);
+				}
 				return { ...c, arguments: args };
 			},
 		},

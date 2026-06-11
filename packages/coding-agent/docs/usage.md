@@ -278,6 +278,6 @@ pit --tools read,grep,find,ls -p "Review the code"
 
 Pit keeps the core cohesive and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
 
-The core ships with native support for the workflows an agent needs every day: an MCP client (`mcp.servers` in [Settings](settings.md)), sub-agents (the `task` tool), to-do tracking (the `todo` tool), and a permission system with `plan`, `auto`, and `unsafe` modes (see [permissions.md](permissions.md)). These built-ins are implemented as extensions on the same APIs available to you — anything beyond them you can build or install as extensions, skills, prompt templates, or packages.
+The core ships with native support for the workflows an agent needs every day: an MCP client (`mcp.servers` in [Settings](settings.md)), sub-agents (the `task` tool), to-do tracking (the `todo` tool), and a permission system with `plan` and `auto` modes (see [permissions.md](permissions.md)). These built-ins are implemented as extensions on the same APIs available to you — anything beyond them you can build or install as extensions, skills, prompt templates, or packages.
 
 For the full rationale, read the [blog post](https://pituned.at/posts/2025-11-30-pi-coding-agent/).

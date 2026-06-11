@@ -5,16 +5,16 @@
  * - plan:   read-only; any tool that mutates the filesystem or runs a shell is blocked.
  * - auto:   guarded default; writes/commands run without prompts, but built-in deny
  *           rules (sensitive paths, dangerous commands) are enforced as hard blocks.
- * - unsafe: no-rails; the built-in floor is dropped. User-authored deny rules still
- *           apply. Equivalent to `auto` + `disableBuiltinDefaults`. For authorized
- *           targets only; surfaced loudly in the UI so it is never on by accident.
+ *
+ * The built-in floor can still be dropped per-session via `disableBuiltinDefaults`
+ * (surfaced loudly in the UI as "no-rails"); user-authored deny rules still apply.
  */
-export type PermissionMode = "auto" | "plan" | "unsafe";
+export type PermissionMode = "auto" | "plan";
 
-export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "auto", "unsafe"] as const;
+export const PERMISSION_MODES: readonly PermissionMode[] = ["plan", "auto"] as const;
 
 export function normalizePermissionMode(value: unknown): PermissionMode | undefined {
-	if (value === "auto" || value === "plan" || value === "unsafe") return value;
+	if (value === "auto" || value === "plan") return value;
 	return undefined;
 }
 

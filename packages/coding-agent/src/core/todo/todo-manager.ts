@@ -49,12 +49,29 @@ export class TodoManager {
 	private items: TodoItem[] = [];
 	private nextId = 1;
 	private dirty = false;
+	private changeListener?: () => void;
 
 	/** Returns whether state changed since the last call, then resets the flag. */
 	takeDirty(): boolean {
 		const was = this.dirty;
 		this.dirty = false;
 		return was;
+	}
+
+	/**
+	 * Register a listener fired synchronously after every mutation. The interactive
+	 * mode points this at `ui.requestRender()` so the live overlay repaints the
+	 * instant a todo is created/updated/deleted/cleared, instead of waiting for an
+	 * incidental render (loader tick, tool event). Pass `undefined` to clear.
+	 */
+	setChangeListener(listener: (() => void) | undefined): void {
+		this.changeListener = listener;
+	}
+
+	/** Mark the state dirty (for persistence) and notify the live-render listener. */
+	private markChanged(): void {
+		this.dirty = true;
+		this.changeListener?.();
 	}
 
 	list(filter?: { status?: TodoStatus }): TodoItem[] {
@@ -83,7 +100,7 @@ export class TodoManager {
 			status: "pending",
 		};
 		this.items.push(item);
-		this.dirty = true;
+		this.markChanged();
 		return { ...item };
 	}
 
@@ -94,20 +111,22 @@ export class TodoManager {
 		if (input.description !== undefined) item.description = input.description.trim() || undefined;
 		if (input.activeForm !== undefined) item.activeForm = input.activeForm.trim() || undefined;
 		if (input.status !== undefined) item.status = input.status;
-		this.dirty = true;
+		this.markChanged();
 		return { ...item };
 	}
 
 	delete(id: number): boolean {
 		const before = this.items.length;
 		this.items = this.items.filter((t) => t.id !== id);
-		if (this.items.length < before) this.dirty = true;
-		return this.items.length < before;
+		const changed = this.items.length < before;
+		if (changed) this.markChanged();
+		return changed;
 	}
 
 	clear(): void {
-		if (this.items.length > 0) this.dirty = true;
+		const had = this.items.length > 0;
 		this.items = [];
+		if (had) this.markChanged();
 	}
 
 	counts(): { done: number; total: number } {
