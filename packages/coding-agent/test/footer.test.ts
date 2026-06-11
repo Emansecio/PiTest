@@ -13,6 +13,12 @@ interface MakeFooterOptions {
 	usingOAuth?: boolean;
 	/** Accrued cost to inject via a single assistant entry. */
 	cost?: number;
+	/** Simulated context usage (null = unknown / fresh session). */
+	contextUsage?: { tokens: number; percent: number; contextWindow: number } | null;
+	/** Providers visible to the registry (provider prefix shows when > 1). */
+	providerCount?: number;
+	/** Mark the model as a reasoning model with this thinking level. */
+	thinkingLevel?: string;
 }
 
 function makeFooter({
@@ -21,9 +27,15 @@ function makeFooter({
 	extra,
 	usingOAuth = false,
 	cost = 0,
+	contextUsage = null,
+	providerCount = 1,
+	thinkingLevel,
 }: MakeFooterOptions = {}): FooterComponent {
 	// A subscription tag needs a truthy model for isUsingOAuth(state.model).
-	const model = usingOAuth ? { id: "test-model", provider: "anthropic", contextWindow: 200000 } : undefined;
+	const needsModel = usingOAuth || providerCount > 1 || thinkingLevel !== undefined;
+	const model = needsModel
+		? { id: "test-model", provider: "anthropic", contextWindow: 200000, reasoning: thinkingLevel !== undefined }
+		: undefined;
 	const entries =
 		cost > 0
 			? [
@@ -39,14 +51,14 @@ function makeFooter({
 	const session: AgentSession = {
 		state: {
 			model,
-			thinkingLevel: "off",
+			thinkingLevel: thinkingLevel ?? "off",
 		},
 		sessionManager: {
 			getEntries: () => entries,
 			getSessionName: () => "",
 			getCwd: () => "C:/x",
 		},
-		getContextUsage: () => null,
+		getContextUsage: () => contextUsage,
 		goalStatusLine: () => null,
 		modelRegistry: { isUsingOAuth: () => usingOAuth },
 	} as unknown as AgentSession;
@@ -66,7 +78,7 @@ function makeFooter({
 		getRepoDir: () => null,
 		getExtensionStatuses: () => statuses,
 		getStatusVersion: () => 0,
-		getAvailableProviderCount: () => 1,
+		getAvailableProviderCount: () => providerCount,
 		onBranchChange: () => () => {},
 	};
 
@@ -79,20 +91,18 @@ beforeAll(() => {
 	initTheme("dark");
 });
 
-it("shows permission mode + compact indicator on metrics line, not a 3rd line", () => {
-	// Permission mode "auto" (acceptEdits) and the auto-compact indicator are
-	// different axes — they must not collide into a confusing "auto auto". The
-	// compact indicator carries its own distinct label.
+it("shows the permission mode but no compact noise when auto-compact is on", () => {
+	// Auto-compact is the default-on state, so it must NOT render a permanent
+	// indicator — only the permission mode shows.
 	const footer = makeFooter({ permissions: "auto", autoCompact: true });
 	const lines = footer.render(80).map(stripAnsi);
 	expect(lines.length).toBe(2);
 	expect(lines[1]).toContain("auto"); // permission mode
-	expect(lines[1]).toContain("compact"); // auto-compact indicator
-	expect(lines[1]).not.toContain("auto auto");
+	expect(lines[1]).not.toContain("compact"); // default-on state is silent
 	expect(lines.some((l) => l.startsWith("permissions:"))).toBe(false);
 });
 
-it("keeps a 3rd line when another extension status exists; compact off hides indicator", () => {
+it("flags no-compact (warning) only when auto-compact is OFF — the abnormal state", () => {
 	const footer = makeFooter({
 		permissions: "plan",
 		autoCompact: false,
@@ -101,7 +111,7 @@ it("keeps a 3rd line when another extension status exists; compact off hides ind
 	const lines = footer.render(80).map(stripAnsi);
 	expect(lines.length).toBe(3);
 	expect(lines[1]).toContain("plan");
-	expect(lines[1]).not.toContain("compact");
+	expect(lines[1]).toContain("no-compact");
 	expect(lines[2]).toContain("whatsapp: 3");
 });
 
@@ -125,4 +135,60 @@ it("hides the cost segment when cost is below the rounding threshold", () => {
 	const lines = footer.render(80).map(stripAnsi);
 	// Would render as "$0.000" — drop it instead of showing a misleading zero.
 	expect(lines[1]).not.toContain("$");
+});
+
+it("renders a dim capacity-only ctx on a pristine session (no 0.0% noise)", () => {
+	const footer = makeFooter({ usingOAuth: true });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines[1]).toContain("ctx 200k");
+	expect(lines[1]).not.toContain("%");
+	expect(lines[1]).not.toContain("0/200k");
+});
+
+it("renders meter + adaptive percent once the context has usage", () => {
+	const footer = makeFooter({
+		usingOAuth: true,
+		contextUsage: { tokens: 46800, percent: 23.4, contextWindow: 200000 },
+	});
+	const lines = footer.render(80).map(stripAnsi);
+	// >=10% drops the decimal; 23.4% lights 1 of 5 cells.
+	expect(lines[1]).toContain("ctx ▰▱▱▱▱ 23% · 47k/200k");
+});
+
+it("keeps one decimal below 10% and lights at least one cell on any usage", () => {
+	const footer = makeFooter({
+		usingOAuth: true,
+		contextUsage: { tokens: 1500, percent: 0.8, contextWindow: 200000 },
+	});
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines[1]).toContain("ctx ▰▱▱▱▱ 0.8% · 1.5k/200k");
+});
+
+it("shows the provider muted without parentheses when several providers are available", () => {
+	const footer = makeFooter({ providerCount: 2 });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines[0]).toContain("anthropic · test-model");
+	expect(lines[0]).not.toContain("(anthropic)");
+});
+
+it("renders the thinking level as a ✦ chip on reasoning models", () => {
+	const footer = makeFooter({ thinkingLevel: "high" });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines[0]).toContain("test-model • ✦ high");
+});
+
+it("dims uncolored extension statuses but passes pre-colorized ones through", () => {
+	const colored = "[32mready[39m";
+	const footer = makeFooter({
+		extra: new Map([
+			["a", "plain status"],
+			["b", colored],
+		]),
+	});
+	const lines = footer.render(80);
+	const statusLine = lines[lines.length - 1];
+	// The plain status gained SOME color wrapper; the colored one is untouched.
+	expect(stripAnsi(statusLine)).toContain("plain status");
+	expect(statusLine).toContain(colored);
+	expect(statusLine.indexOf("plain status")).toBeGreaterThan(statusLine.indexOf("["));
 });

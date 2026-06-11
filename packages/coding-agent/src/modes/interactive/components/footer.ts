@@ -88,6 +88,29 @@ function formatTokens(count: number): string {
 	return `${Math.round(count / 1000000)}M`;
 }
 
+/** Cells in the context-pressure mini meter (`▰▰▱▱▱`). */
+const CONTEXT_METER_CELLS = 5;
+
+/**
+ * Render the context meter. Any non-zero usage lights at least one cell so the
+ * meter never reads "untouched" while tokens are already accruing.
+ */
+function renderContextMeter(percent: number): string {
+	const clamped = Math.max(0, Math.min(100, percent));
+	let filled = Math.round((clamped / 100) * CONTEXT_METER_CELLS);
+	if (clamped > 0 && filled === 0) filled = 1;
+	return "▰".repeat(filled) + "▱".repeat(CONTEXT_METER_CELLS - filled);
+}
+
+/**
+ * Adaptive percent: one decimal only while it still informs (<10%); a session
+ * at 23.4% reads cleaner as `23%`.
+ */
+function formatContextPercent(percent: number): string {
+	if (percent < 10) return `${percent.toFixed(1)}%`;
+	return `${Math.round(percent)}%`;
+}
+
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 const KNOWN_THINKING_LEVELS: ReadonlySet<ThinkingLevel> = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
@@ -220,19 +243,19 @@ export class FooterComponent implements Component {
 		const sessionName = this.session.sessionManager.getSessionName();
 		if (sessionName) pwd = `${pwd} • ${sessionName}`;
 
-		// Right: model • thinking-level — foreground + thinking-colored level
-		// so a glance at the bottom of the screen surfaces "what model am I on
-		// and at which budget".
+		// Right: model • thinking-level — the model id is the single bright token
+		// of the line; the provider is secondary metadata (muted, no parens) and
+		// the thinking level renders as a small colored chip (`✦ high`).
 		const modelName = state.model?.id || "no-model";
 		const showProvider = this.footerData.getAvailableProviderCount() > 1 && state.model;
-		const providerPrefix = showProvider ? `(${state.model!.provider}) ` : "";
+		const providerPrefix = showProvider ? theme.fg("muted", `${state.model!.provider} · `) : "";
 
 		let identityRight: string;
 		if (state.model?.reasoning) {
 			const level = asKnownThinkingLevel(state.thinkingLevel);
-			const levelLabel = level === "off" ? "thinking off" : level;
+			const levelLabel = level === "off" ? "thinking off" : `✦ ${level}`;
 			const colorize = theme.getThinkingBorderColor(level);
-			identityRight = `${providerPrefix}${modelName} • ${colorize(levelLabel)}`;
+			identityRight = `${providerPrefix}${modelName}${theme.fg("muted", " • ")}${colorize(levelLabel)}`;
 		} else {
 			identityRight = `${providerPrefix}${modelName}`;
 		}
@@ -249,13 +272,24 @@ export class FooterComponent implements Component {
 		// --- Metrics (line 2) ------------------------------------------------
 		// Context is the headline: flushed left, brighter (`muted`, or warning/
 		// error when filling up) so the most actionable number reads at a glance.
-		// `ctx 4.9% · 49k/1.0M` = percent used · absolute tokens / window. Usage
-		// (input/output, cost, auto-compact) trails dim on the right.
-		const ctxText =
-			contextPercent === "?"
-				? `ctx ?/${formatTokens(contextWindow)}`
-				: `ctx ${contextPercent}% · ${formatTokens(contextUsage?.tokens ?? 0)}/${formatTokens(contextWindow)}`;
-		const ctxColorize = theme.getContextUsageColor(contextPercentValue);
+		// `ctx ▰▱▱▱▱ 23% · 47k/200k` = pressure meter · percent · used/window.
+		// A pristine session shows only the capacity (`ctx 1.0M`, dim) — three
+		// zeros say nothing. Usage (input/output, cost, auto-compact) trails dim
+		// on the right.
+		const usedTokens = contextUsage?.tokens ?? 0;
+		const pristine = usedTokens === 0 && contextPercentValue === 0 && contextWindow > 0;
+		let ctxText: string;
+		let ctxColorize = theme.getContextUsageColor(contextPercentValue);
+		if (contextPercent === "?") {
+			ctxText = `ctx ?/${formatTokens(contextWindow)}`;
+		} else if (pristine) {
+			ctxText = `ctx ${formatTokens(contextWindow)}`;
+			ctxColorize = (text: string) => theme.fg("dim", text);
+		} else {
+			const meter = renderContextMeter(contextPercentValue);
+			const percentLabel = formatContextPercent(contextPercentValue);
+			ctxText = `ctx ${meter} ${percentLabel} · ${formatTokens(usedTokens)}/${formatTokens(contextWindow)}`;
+		}
 
 		// Group A — usage/cost: `↑in ↓out $cost` kept together on the right.
 		const usageGroup: string[] = [];
@@ -277,9 +311,10 @@ export class FooterComponent implements Component {
 		const mode = this.getPermissionMode();
 		const modeBits: string[] = [];
 		if (mode && mode !== "unsafe") modeBits.push(mode);
-		// Distinct label ("compact", not "auto") so it never collides with the
-		// permission mode — "auto" mode + auto-compact would read "auto auto".
-		if (this.autoCompactEnabled) modeBits.push(theme.fg("dim", "compact"));
+		// Auto-compact is on by default, so showing "compact" permanently is noise.
+		// The signal worth surfacing is the ABNORMAL state — when it's OFF the
+		// context can overflow without rescue — so flag only that, in warning.
+		if (!this.autoCompactEnabled) modeBits.push(theme.fg("warning", "no-compact"));
 
 		// Goal status is ephemeral and actionable: render it bright (accent), not
 		// dim, so it stands out from the trailing usage metrics. Pre-colorized so it
@@ -326,7 +361,15 @@ export class FooterComponent implements Component {
 			.filter(([k]) => k !== "permissions")
 			.sort(([a], [b]) => a.localeCompare(b));
 		if (otherStatuses.length > 0) {
-			const statusLine = otherStatuses.map(([, text]) => sanitizeStatusText(text)).join(" ");
+			// A permanent "ready" must not outshine the model name: statuses with no
+			// color of their own render dim. Pre-colorized ones (ESC present) pass
+			// through untouched — the extension chose its emphasis deliberately.
+			const statusLine = otherStatuses
+				.map(([, text]) => {
+					const sanitized = sanitizeStatusText(text);
+					return sanitized.includes("") ? sanitized : theme.fg("dim", sanitized);
+				})
+				.join(" ");
 			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "…")));
 		}
 

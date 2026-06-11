@@ -54,6 +54,18 @@ describe("WelcomeBox", () => {
 		expect(plain).not.toContain("~/PiTest (main)");
 	});
 
+	it("suppresses a lone '~' cwd row in the home dir with no project context", () => {
+		const out = new WelcomeBox({ ...BASE, cwdDisplay: "~", branch: undefined }).render(80);
+		const plain = out.map(stripAnsi);
+		// No body row is just "~" (the row may carry the wordmark prefix + spaces).
+		expect(plain.some((l) => l.trimEnd().endsWith("~"))).toBe(false);
+	});
+
+	it("still shows the cwd in home when a branch gives it context", () => {
+		const plain = new WelcomeBox({ ...BASE, cwdDisplay: "~", branch: "main" }).render(80).map(stripAnsi).join("\n");
+		expect(plain).toContain("~ (main)");
+	});
+
 	it("drops the block wordmark for a custom app name", () => {
 		const plain = new WelcomeBox({ ...BASE, appName: "scout" }).render(80).map(stripAnsi).join("\n");
 		expect(plain).toContain("scout");

@@ -78,9 +78,18 @@ export class WelcomeBox implements Component {
 		const versionText = theme.fg("dim", `v${d.version}`);
 		const taglineText = theme.fg("dim", d.tagline);
 		const cwd = d.branch ? `${d.cwdDisplay} (${d.branch})` : d.cwdDisplay;
-		const contextText = d.resumedSessionName
-			? theme.fg("muted", `Resuming · ${d.resumedSessionName}`)
-			: theme.fg("muted", cwd);
+		// In the home dir with no project context (`~`, no branch, no resumed
+		// session) the cwd line orients nothing — a lone "~" reads like a leftover
+		// placeholder. Drop it; the footer still carries the live cwd.
+		const homeWithoutContext = !d.resumedSessionName && !d.branch && d.cwdDisplay === "~";
+		let contextText: string;
+		if (d.resumedSessionName) {
+			contextText = theme.fg("muted", `Resuming · ${d.resumedSessionName}`);
+		} else if (homeWithoutContext) {
+			contextText = "";
+		} else {
+			contextText = theme.fg("muted", cwd);
+		}
 
 		const bodyW = this.bodyWidth(w, useWordmark);
 		const bodies = useWordmark

@@ -189,7 +189,7 @@ describe("FooterComponent stats cache", () => {
 		// With everything zero the metric arrows drop out; only the ctx headline remains.
 		expect(line).not.toContain("↑");
 		expect(line).not.toContain("↓");
-		expect(line).toContain("ctx 12.3% · 25k/200k");
+		expect(line).toContain("ctx ▰▱▱▱▱ 12% · 25k/200k");
 	});
 });
 
