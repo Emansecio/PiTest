@@ -20,11 +20,7 @@ const retainSchema = Type.Object(
 		subject: Type.Optional(
 			Type.String({ description: "Optional short tag for the entry (e.g. 'auth-flow'). Max ~40 chars." }),
 		),
-		kind: Type.Optional(
-			Type.Union([Type.Literal("fact"), Type.Literal("decision"), Type.Literal("pattern")], {
-				description: "Entry kind. Default 'fact'.",
-			}),
-		),
+		kind: Type.Optional(Type.Enum(["fact", "decision", "pattern"], { description: "Entry kind. Default 'fact'." })),
 		tags: Type.Optional(Type.Array(Type.String(), { description: "Optional list of short tags." })),
 	},
 	{ additionalProperties: false },

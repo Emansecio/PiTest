@@ -86,12 +86,23 @@ export interface StagnationDecisionInput {
 	lastFiredAt: number;
 	now: number;
 	cooldownMs: number;
+	/**
+	 * Streak length at which the soft reminder last fired (0 = never). A second
+	 * soft reminder additionally requires the streak to have GROWN by at least
+	 * `step` turns since then — so an unchanging streak between soft and hard does
+	 * not re-inject the identical reminder every cooldown window. Defaults to 0
+	 * (treated as "never fired"), preserving the legacy cooldown-only behaviour
+	 * for callers that do not track it.
+	 */
+	lastFiredCount?: number;
 }
 
 export interface StagnationDecisionOutput {
 	action: StagnationAction;
 	/** New value for `lastFiredAt`. Equals `now` when a message fires. */
 	nextLastFiredAt: number;
+	/** New value for `lastFiredCount`. Equals `count` when a soft reminder fires. */
+	nextLastFiredCount: number;
 }
 
 /**
@@ -101,21 +112,33 @@ export interface StagnationDecisionOutput {
  * - `pause`  iff enabled AND `count >= hardThreshold` (ignores cooldown: the
  *            hard ceiling always escalates).
  * - `remind` iff enabled AND `count >= softThreshold` AND (never fired before
- *            OR cooldown elapsed). `lastFiredAt === 0` means "never fired", so
+ *            OR cooldown elapsed) AND the streak has grown by at least `step`
+ *            since the last fire. `lastFiredAt === 0` means "never fired", so
  *            the first reminder is never throttled — the cooldown only spaces
- *            out repeats and never depends on the magnitude of the clock.
+ *            out repeats and never depends on the magnitude of the clock. `step`
+ *            = `ceil((hardThreshold - softThreshold) / 2)`: it caps the soft tier
+ *            at ~2 reminders before the hard ceiling, so the same ~500-char text
+ *            is not re-injected every cooldown window while the streak is flat.
  * - `none`   otherwise.
  */
 export function decideStagnationReminder(input: StagnationDecisionInput): StagnationDecisionOutput {
-	if (!input.enabled) return { action: "none", nextLastFiredAt: input.lastFiredAt };
-	if (input.count >= input.hardThreshold) return { action: "pause", nextLastFiredAt: input.now };
+	const lastFiredCount = input.lastFiredCount ?? 0;
+	if (!input.enabled) {
+		return { action: "none", nextLastFiredAt: input.lastFiredAt, nextLastFiredCount: lastFiredCount };
+	}
+	if (input.count >= input.hardThreshold) {
+		return { action: "pause", nextLastFiredAt: input.now, nextLastFiredCount: lastFiredCount };
+	}
 	if (input.count >= input.softThreshold) {
 		const neverFired = input.lastFiredAt === 0;
-		if (neverFired || input.now - input.lastFiredAt >= input.cooldownMs) {
-			return { action: "remind", nextLastFiredAt: input.now };
+		const cooldownElapsed = input.now - input.lastFiredAt >= input.cooldownMs;
+		const step = Math.max(1, Math.ceil((input.hardThreshold - input.softThreshold) / 2));
+		const grewEnough = input.count - lastFiredCount >= step;
+		if ((neverFired || cooldownElapsed) && grewEnough) {
+			return { action: "remind", nextLastFiredAt: input.now, nextLastFiredCount: input.count };
 		}
 	}
-	return { action: "none", nextLastFiredAt: input.lastFiredAt };
+	return { action: "none", nextLastFiredAt: input.lastFiredAt, nextLastFiredCount: lastFiredCount };
 }
 
 export interface StagnationReminderInput {

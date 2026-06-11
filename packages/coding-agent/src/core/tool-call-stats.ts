@@ -30,6 +30,15 @@ export interface ToolCallStatsOptions {
 export interface ToolCallSequenceEntry {
 	toolName: string;
 	argsFingerprint: string;
+	/**
+	 * Hash of the tool RESULT, backfilled at tool_execution_end. Undefined while
+	 * the call is in flight (recorded at start, result not yet known). The
+	 * result-aware doom-loop count treats two calls as the "same" only when name,
+	 * args AND result hash all match — so a tool that makes real progress with
+	 * identical args but a NEW result each step (e.g. debugger stepping) is not a
+	 * loop, while a call that keeps producing the same error is.
+	 */
+	resultHash?: string;
 }
 
 export interface ToolErrorFingerprint {
@@ -161,6 +170,43 @@ export class ToolCallStats {
 		return count;
 	}
 
+	/**
+	 * Attach a result hash to the most recent invocation (the call that just
+	 * finished). No-op when the window is empty. Pairs with {@link recordInvocation}:
+	 * the start records (name, args) with no result, end backfills the result hash so
+	 * {@link getConsecutiveSimilarResultCount} can distinguish a true loop (same
+	 * result) from real progress (new result each call).
+	 */
+	recordInvocationResult(resultHash: string): void {
+		if (this.ringSize === 0) return;
+		const lastIdx = (this.ringHead - 1 + this.sequenceWindow) % this.sequenceWindow;
+		const last = this.ringBuffer[lastIdx];
+		if (last) last.resultHash = resultHash;
+	}
+
+	/**
+	 * Like {@link getConsecutiveSimilarCount} but also requires the RESULT hash to
+	 * match. Counts the trailing run of entries that share the most recent entry's
+	 * (toolName, argsFingerprint, resultHash). An entry whose result hash is still
+	 * undefined (in flight) only matches another undefined one, so this is meant to
+	 * be read at tool_execution_end after {@link recordInvocationResult} has stamped
+	 * the just-finished call. Returns 0 when the window is empty.
+	 */
+	getConsecutiveSimilarResultCount(): number {
+		if (this.ringSize === 0) return 0;
+		const lastIdx = (this.ringHead - 1 + this.sequenceWindow) % this.sequenceWindow;
+		const last = this.ringBuffer[lastIdx]!;
+		let count = 0;
+		for (let i = 0; i < this.ringSize; i++) {
+			const idx = (this.ringHead - 1 - i + this.sequenceWindow * 2) % this.sequenceWindow;
+			const entry = this.ringBuffer[idx]!;
+			if (entry.toolName !== last.toolName || entry.argsFingerprint !== last.argsFingerprint) break;
+			if (entry.resultHash !== last.resultHash) break;
+			count++;
+		}
+		return count;
+	}
+
 	/** True when consecutive identical invocations reach the configured threshold. */
 	isInDoomLoop(threshold?: number): boolean {
 		const limit = threshold ?? this.doomLoopThreshold;
@@ -246,6 +292,34 @@ export function fingerprintToolArgsExact(args: unknown): string {
 		serialized = stableStringify(args, Number.POSITIVE_INFINITY);
 	} catch {
 		serialized = String(args);
+	}
+	return hashString(serialized);
+}
+
+/**
+ * Hash of a tool RESULT for doom-loop result-awareness. Folds the error flag and
+ * the result's text content into one FNV-1a hash so two calls with identical
+ * output collapse (a real loop) while a call that returns new output each time
+ * (e.g. debugger stepping) gets a fresh hash (real progress). Non-text parts are
+ * keyed by type+order so an image/diff payload still differentiates results.
+ */
+export function fingerprintToolResult(
+	result: { content?: Array<{ type: string; text?: string }> } | undefined,
+	isError: boolean,
+): string {
+	const parts: unknown[] = [isError ? 1 : 0];
+	for (const part of result?.content ?? []) {
+		if (part.type === "text" && typeof part.text === "string") {
+			parts.push(["t", part.text]);
+		} else {
+			parts.push([part.type]);
+		}
+	}
+	let serialized: string;
+	try {
+		serialized = stableStringify(parts, Number.POSITIVE_INFINITY);
+	} catch {
+		serialized = String(parts);
 	}
 	return hashString(serialized);
 }

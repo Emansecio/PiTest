@@ -106,4 +106,25 @@ describe("find/grep .git exclusion and post-filter enumeration", () => {
 		const output = await runGrep({ pattern: "doThing(", literal: true });
 		expect(output).toContain("src/call.ts");
 	});
+
+	it("find with a backslash pattern and no matches hints at forward slashes", async () => {
+		// `src\*.ts` has no "/", so the post-filter is skipped and the raw pattern
+		// goes to fd --glob where "\" is an escape → zero matches. The empty message
+		// must point at the forward-slash form so the model can self-correct.
+		const def = createFindToolDefinition(tempRoot);
+		const ctx = {} as Parameters<typeof def.execute>[4];
+		const result = await def.execute("call-bs", { pattern: "src\\*.ts" } as never, undefined, undefined, ctx);
+		const text = textOf(result);
+		expect(text).toContain("No files found");
+		expect(text).toContain("Glob patterns use forward slashes; try: src/*.ts");
+	});
+
+	it("grep with a backslash glob and no matches hints at forward slashes", async () => {
+		// A backslash glob (`src\*.ts`) reaches rg --glob raw, where "\" is an escape
+		// and "/" is the only separator → it filters everything out. The empty
+		// message must suggest the forward-slash form.
+		const output = await runGrep({ pattern: "ref", glob: "src\\*.ts" });
+		expect(output).toContain("No matches found");
+		expect(output).toContain("Glob patterns use forward slashes; try: src/*.ts");
+	});
 });

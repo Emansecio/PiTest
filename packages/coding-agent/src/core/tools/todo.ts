@@ -13,19 +13,12 @@ import { getCurrentTodoManager, type TodoItem } from "../todo/todo-manager.ts";
 import { getTextOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
+const TODO_ACTIONS = ["create", "update", "list", "get", "delete", "clear"] as const;
+const TODO_STATUSES = ["pending", "in_progress", "completed"] as const;
+
 const todoSchema = Type.Object(
 	{
-		action: Type.Union(
-			[
-				Type.Literal("create"),
-				Type.Literal("update"),
-				Type.Literal("list"),
-				Type.Literal("get"),
-				Type.Literal("delete"),
-				Type.Literal("clear"),
-			],
-			{ description: "Operation to perform on the todo list." },
-		),
+		action: Type.Enum(TODO_ACTIONS, { description: "Operation to perform on the todo list." }),
 		id: Type.Optional(Type.Number({ description: "Todo id (required for update/get/delete)." })),
 		subject: Type.Optional(Type.String({ description: "Short outcome-focused title (required for create)." })),
 		description: Type.Optional(Type.String({ description: "Optional longer detail." })),
@@ -33,9 +26,7 @@ const todoSchema = Type.Object(
 			Type.String({ description: "Present-continuous label shown while in_progress, e.g. 'Writing tests'." }),
 		),
 		status: Type.Optional(
-			Type.Union([Type.Literal("pending"), Type.Literal("in_progress"), Type.Literal("completed")], {
-				description: "Target status for update, or a filter for list.",
-			}),
+			Type.Enum(TODO_STATUSES, { description: "Target status for update, or a filter for list." }),
 		),
 	},
 	{ additionalProperties: false },

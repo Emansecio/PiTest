@@ -9,8 +9,39 @@
  */
 
 import type { ExtensionAPI } from "../extensions/types.ts";
-import { McpManager, type McpServerConfig, type McpSettings, wrapMcpToolAsDefinition } from "../mcp/index.ts";
+import {
+	McpManager,
+	type McpServerConfig,
+	type McpSettings,
+	type McpToolSchema,
+	wrapMcpToolAsDefinition,
+} from "../mcp/index.ts";
 import { getCurrentToolDiscoveryIndex } from "../tool-discovery.ts";
+
+/**
+ * Derive BM25 index tags for a deferred MCP tool from its input schema: the
+ * parameter names (and any string `description` on each property). The MCP wire
+ * schema (`tools.ts` → `wrapMcpToolAsDefinition`) never populates `promptSnippet`
+ * or `tags`, so without this a deferred tool is indexed on name+description only
+ * — a query phrased after the tool's *arguments* (e.g. "issue id", "channel")
+ * would never surface it via search_tool_bm25. Mirrors the built-in seed in
+ * agent-session.ts, which feeds promptGuidelines in as tags.
+ */
+function deriveMcpToolTags(schema: McpToolSchema): string[] {
+	const properties = schema.inputSchema?.properties;
+	if (!properties || typeof properties !== "object") return [];
+	const tags: string[] = [];
+	for (const [paramName, propSchema] of Object.entries(properties as Record<string, unknown>)) {
+		tags.push(paramName);
+		if (propSchema && typeof propSchema === "object") {
+			const description = (propSchema as { description?: unknown }).description;
+			if (typeof description === "string" && description.length > 0) {
+				tags.push(description);
+			}
+		}
+	}
+	return tags;
+}
 
 /** Default tool-count threshold for `mcp.defer: "auto"` — a server advertising at least this many tools is deferred. */
 const DEFAULT_DEFER_THRESHOLD = 10;
@@ -63,21 +94,18 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			return; // No MCP servers configured.
 		}
 
-		const manager = new McpManager({
-			servers,
-			onStateChange: options.onStateChange,
-		});
+		// Prefixed names already registered (eagerly or into the discovery index).
+		// Guards the late-registration path against re-registering tools that the
+		// boot pass already handled when a server merely re-emits "connected".
+		const registeredNames = new Set<string>();
 
-		// Connect on session_start so we capture failures into status diagnostics.
-		// In dry-run mode we skip the network round-trip entirely — the dry-run
-		// report still inspects settings.mcp.servers from settings, so the user
-		// sees what is configured without paying the connect-timeout cost when
-		// a server is unreachable.
-		pi.on("session_start", async () => {
-			if (process.env.PIT_DRY_RUN === "1") {
-				return;
-			}
-			await manager.connectAll(AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
+		// Register every not-yet-registered tool advertised by `manager.listTools()`
+		// (which already filters to connected servers). Eager tools land on the
+		// active surface; deferred tools go into the discovery index. Returns how
+		// many tools were newly deferred so the caller can activate search_tool_bm25.
+		// Shared by the boot pass and the post-boot reconnect path so a server that
+		// blew the connect budget — or dropped and came back — still gets its tools.
+		const registerNewTools = (): number => {
 			const allTools = manager.listTools();
 			// Per-server tool counts drive the "auto" deferral decision.
 			const toolCountByServer = new Map<string, number>();
@@ -97,36 +125,91 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			}
 			let deferredCount = 0;
 			for (const { serverName, prefixedName, schema } of allTools) {
+				if (registeredNames.has(prefixedName)) continue;
 				try {
 					const definition = wrapMcpToolAsDefinition(manager, prefixedName, schema);
 					if (index && deferByServer.get(serverName)) {
 						// Deferred: keep the full schema OFF the active surface; the model
-						// finds it via search_tool_bm25 and the session activates it.
+						// finds it via search_tool_bm25 and the session activates it. Index
+						// the parameter names/descriptions as tags so a query phrased after
+						// the tool's arguments still ranks it (the MCP wrapper never sets
+						// promptSnippet, so there is nothing else to widen the doc with).
 						index.register({
 							name: definition.name,
 							description: typeof definition.description === "string" ? definition.description : "",
-							promptSnippet: typeof definition.promptSnippet === "string" ? definition.promptSnippet : undefined,
+							tags: deriveMcpToolTags(schema),
 							definition,
 						});
 						deferredCount++;
 					} else {
 						pi.registerTool(definition);
 					}
+					registeredNames.add(prefixedName);
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					console.error(`[mcp] failed to register ${prefixedName}: ${message}`);
 				}
 			}
-			// With tools deferred, the discovery tool must be on the active surface
-			// so the model can actually find them. (It is registered but may be
-			// inactive when tool discovery is otherwise off.) No-op when nothing was
-			// deferred or when search_tool_bm25 is already active.
-			if (deferredCount > 0) {
-				const active = pi.getActiveTools();
-				if (!active.includes("search_tool_bm25")) {
-					pi.setActiveTools([...active, "search_tool_bm25"]);
-				}
+			return deferredCount;
+		};
+
+		// With tools deferred, the discovery tool must be on the active surface so
+		// the model can actually find them. (It is registered but may be inactive
+		// when tool discovery is otherwise off.) No-op when nothing was deferred or
+		// when search_tool_bm25 is already active.
+		const ensureDiscoveryActive = (deferredCount: number): void => {
+			if (deferredCount <= 0) return;
+			const active = pi.getActiveTools();
+			if (!active.includes("search_tool_bm25")) {
+				pi.setActiveTools([...active, "search_tool_bm25"]);
 			}
+		};
+
+		// Track which servers we have already registered tools for, so a server
+		// that transitions disconnected→connected AFTER boot (a reconnect, or one
+		// that blew the 10s connect budget and only answered later) gets its tools
+		// registered lazily instead of being toolless for the whole session. The
+		// boot pass below sets this for every server it saw connected.
+		const registeredServers = new Set<string>();
+		let bootDone = false;
+
+		const manager = new McpManager({
+			servers,
+			// Wrap the host's status callback: still forward every state change for
+			// status indicators, but additionally catch post-boot reconnects so the
+			// extension can register the now-available tools (listTools skips a
+			// server until its entry is connected, and the lazy reconnect inside
+			// callTool needs a ToolDefinition that only exists once registered).
+			onStateChange: (state) => {
+				options.onStateChange?.(state);
+				if (!bootDone) return; // Boot pass handles initial connects in one batch.
+				if (!state.connected) return;
+				if (registeredServers.has(state.name)) return;
+				registeredServers.add(state.name);
+				const deferredCount = registerNewTools();
+				ensureDiscoveryActive(deferredCount);
+			},
+		});
+
+		// Connect on session_start so we capture failures into status diagnostics.
+		// In dry-run mode we skip the network round-trip entirely — the dry-run
+		// report still inspects settings.mcp.servers from settings, so the user
+		// sees what is configured without paying the connect-timeout cost when
+		// a server is unreachable.
+		pi.on("session_start", async () => {
+			if (process.env.PIT_DRY_RUN === "1") {
+				return;
+			}
+			await manager.connectAll(AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
+			// Mark every server that came up during the budget as handled, so the
+			// onStateChange path below only fires for *later* transitions.
+			for (const state of manager.getAllStates()) {
+				if (state.connected) registeredServers.add(state.name);
+			}
+			const deferredCount = registerNewTools();
+			ensureDiscoveryActive(deferredCount);
+			// From here on, reconnects/late connects route through onStateChange.
+			bootDone = true;
 		});
 
 		pi.on("session_shutdown", () => {
@@ -136,6 +219,21 @@ export function createMcpExtension(options: McpExtensionOptions) {
 		pi.registerCommand("mcp", {
 			description: "List configured MCP servers and their connection state.",
 			async handler(_args, ctx) {
+				// On-demand recovery: a server that blew the 10s connect budget at boot
+				// has no registered tools, so nothing ever re-triggers its connection
+				// (the lazy callTool reconnect needs an existing ToolDefinition). Retry
+				// any still-disconnected server here, then register whatever came up.
+				// connectAll re-initializes each entry; already-connected servers are
+				// idempotent, and registerNewTools skips tools already registered, so
+				// boot-connected servers see identical behavior.
+				if (manager.getAllStates().some((s) => !s.connected)) {
+					await manager.connectAll(AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
+					for (const state of manager.getAllStates()) {
+						if (state.connected) registeredServers.add(state.name);
+					}
+					const deferredCount = registerNewTools();
+					ensureDiscoveryActive(deferredCount);
+				}
 				const states = manager.getAllStates();
 				if (states.length === 0) {
 					const msg = "No MCP servers configured.";

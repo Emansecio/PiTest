@@ -2,6 +2,7 @@ import type { AgentMessage } from "@pit/agent-core";
 import type { AssistantMessage, Usage } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import {
+	computeFileLists,
 	computeOperationLists,
 	createFileOps,
 	extractFileOpsFromMessage,
@@ -174,5 +175,59 @@ describe("structured summary frame", () => {
 		const entry = [...ops.searches][0];
 		expect(entry.length).toBeLessThan(long.length);
 		expect(entry.endsWith("…")).toBe(true);
+	});
+
+	describe("per-category cap (most-recent 30)", () => {
+		it("caps searches/shellCmds/mcpCalls to the 30 most-recently inserted", () => {
+			const ops = createFileOps();
+			for (let i = 0; i < 100; i++) {
+				ops.searches.add(`search-${i}`);
+				ops.shellCmds.add(`cmd-${i}`);
+				ops.mcpCalls.add(`srv.tool-${i}`);
+			}
+			const lists = computeOperationLists(ops);
+			expect(lists.searches.length).toBe(30);
+			expect(lists.shellCmds.length).toBe(30);
+			expect(lists.mcpCalls.length).toBe(30);
+			// Tail = recency: entries 70..99 survive, 0..69 dropped.
+			expect(lists.searches).toContain("search-99");
+			expect(lists.searches).toContain("search-70");
+			expect(lists.searches).not.toContain("search-69");
+			expect(lists.searches).not.toContain("search-0");
+		});
+
+		it("caps readFiles and modifiedFiles to the 30 most-recent", () => {
+			const ops = createFileOps();
+			for (let i = 0; i < 100; i++) ops.read.add(`r-${i}.ts`);
+			for (let i = 0; i < 100; i++) ops.edited.add(`m-${i}.ts`);
+			const lists = computeFileLists(ops);
+			expect(lists.readFiles.length).toBe(30);
+			expect(lists.modifiedFiles.length).toBe(30);
+			expect(lists.readFiles).toContain("r-99.ts");
+			expect(lists.readFiles).not.toContain("r-69.ts");
+			expect(lists.modifiedFiles).toContain("m-99.ts");
+			expect(lists.modifiedFiles).not.toContain("m-69.ts");
+		});
+
+		it("does not change small lists (≤30) — behavior identical", () => {
+			const ops = createFileOps();
+			for (let i = 0; i < 30; i++) ops.searches.add(`s-${i}`);
+			const lists = computeOperationLists(ops);
+			expect(lists.searches.length).toBe(30);
+			expect(lists.searches).toContain("s-0");
+			expect(lists.searches).toContain("s-29");
+		});
+
+		it("output stays sorted after the tail cap", () => {
+			const ops = createFileOps();
+			// Insert in reverse so insertion-tail and sort disagree, proving sort runs last.
+			for (let i = 99; i >= 0; i--) ops.searches.add(`cmd-${String(i).padStart(3, "0")}`);
+			const lists = computeOperationLists(ops);
+			const sorted = [...lists.searches].sort();
+			expect(lists.searches).toEqual(sorted);
+			expect(lists.searches.length).toBe(30);
+			// Tail of insertion order = the 30 lowest indices here (000..029).
+			expect(lists.searches[0]).toBe("cmd-000");
+		});
 	});
 });

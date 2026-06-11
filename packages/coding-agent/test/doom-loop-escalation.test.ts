@@ -9,7 +9,9 @@
  * aborts.
  */
 
+import type { AgentTool } from "@pit/agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@pit/ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "./suite/harness.js";
 
@@ -72,5 +74,44 @@ describe("doom-loop escalation", () => {
 			(m) => m.role === "assistant" && errorMessageOf(m).includes("Doom loop abort"),
 		);
 		expect(aborted).toBe(false);
+	});
+
+	it("does not abort identical calls that return a NEW result each time (real progress)", async () => {
+		// A tool whose args never change but whose RESULT advances every call — the
+		// canonical false positive (debugger stepping, tailing a growing log). The
+		// pre-fix detector counted by name+args only and aborted on the 6th step; the
+		// result-aware count must let it run to completion.
+		let tick = 0;
+		const stepper: AgentTool = {
+			name: "stepper",
+			label: "Stepper",
+			description: "Advances one step and reports new state",
+			parameters: Type.Object({}),
+			execute: async () => {
+				tick += 1;
+				return { content: [{ type: "text", text: `at line ${tick}` }], details: undefined };
+			},
+		};
+
+		const harness = await createHarness({
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 2 } } },
+			tools: [stepper],
+		});
+		harnesses.push(harness);
+
+		// Twelve identical-args calls (well past the Tier-3 threshold of 6), then a
+		// normal reply. Each yields a distinct result, so the streak never climbs.
+		const stepCall = fauxAssistantMessage([fauxToolCall("stepper", {})], { stopReason: "toolUse" });
+		harness.setResponses([...Array.from({ length: 12 }, () => stepCall), fauxAssistantMessage("done stepping")]);
+
+		await harness.session.prompt("step through it");
+
+		const aborted = harness.session.messages.some(
+			(m) => m.role === "assistant" && errorMessageOf(m).includes("Doom loop abort"),
+		);
+		expect(aborted).toBe(false);
+		// All twelve steps ran — the loop was NOT cut short.
+		const stepResults = harness.session.messages.filter((m) => m.role === "toolResult").length;
+		expect(stepResults).toBe(12);
 	});
 });

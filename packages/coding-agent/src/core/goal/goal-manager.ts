@@ -208,6 +208,14 @@ export class GoalManager {
 	systemPromptSection(): string {
 		const g = this.state;
 		if (!g || g.status === "complete") return "";
+		// While paused or budget-limited the agent is NOT auto-driving the goal, so
+		// the full persistence boilerplate ("Keep working until…", goal_complete
+		// instructions) is dead weight billed every turn on the un-cached suffix.
+		// statusLine/summaryText already surface the paused goal to the user; keep
+		// only a one-line objective reminder here.
+		if (g.status !== "active") {
+			return `<goal>Goal (${g.status}): ${g.objective}</goal>`;
+		}
 		return [
 			"<goal>",
 			"You are operating in autonomous goal mode. Your overarching goal for this session is:",

@@ -18,7 +18,7 @@ const resolveSchema = Type.Object(
 		id: Type.String({
 			description: '8-char preview id returned by the staging tool. Use "*" to resolve all staged previews at once.',
 		}),
-		action: Type.Union([Type.Literal("accept"), Type.Literal("discard")], {
+		action: Type.Enum(["accept", "discard"], {
 			description: "accept commits the staged mutation to disk; discard drops it.",
 		}),
 		reason: Type.Optional(Type.String({ description: "Optional one-line note shown in the TUI." })),

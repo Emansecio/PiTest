@@ -162,6 +162,7 @@ import {
 	extractErrorMessage,
 	fingerprintToolArgs,
 	fingerprintToolArgsExact,
+	fingerprintToolResult,
 	ToolCallStats,
 	type ToolStat,
 } from "./tool-call-stats.js";
@@ -341,6 +342,16 @@ const CHROME_DEVTOOLS_TOOL_NAMES = [
 	"chrome_devtools_screenshot",
 	"chrome_devtools_read_console",
 	"chrome_devtools_read_network",
+	"chrome_devtools_click",
+	"chrome_devtools_fill",
+	"chrome_devtools_press_key",
+	"chrome_devtools_get_text",
+	"chrome_devtools_wait_for",
+	"chrome_devtools_hover",
+	"chrome_devtools_select_option",
+	"chrome_devtools_upload_file",
+	"chrome_devtools_snapshot",
+	"chrome_devtools_get_network_body",
 ];
 
 /**
@@ -446,7 +457,10 @@ export class AgentSession {
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
 	// Models in the active fallback chain that have already been tried this turn.
-	// Reset on successful assistant response or when the user starts a new turn.
+	// Reset on successful assistant response and at every run boundary
+	// (_restoreFallbackModelIfActive) so an exhausted-chain run that ends in error
+	// does not leave entries permanently tried; per-entry cooldown is the only
+	// cross-run memory.
 	private _triedFallbackEntries: Set<string> = new Set();
 	// Original (primary) model + thinking level captured when the chain begins,
 	// so we can revert if every chain entry fails and the agent retries.
@@ -539,6 +553,11 @@ export class AgentSession {
 	private _doomLoopFiredTier = 0;
 	private readonly _stagnation = new StagnationTracker();
 	private _lastStagnationReminderAt = 0;
+	// Streak length at which the soft stagnation reminder last fired. Paired with
+	// _lastStagnationReminderAt so a flat streak between soft and hard does not
+	// re-inject the identical ~500-char reminder every cooldown window — a repeat
+	// also requires the streak to have grown by `step` turns (see stagnation.ts).
+	private _lastStagnationReminderCount = 0;
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
@@ -806,21 +825,18 @@ export class AgentSession {
 	 * `search_tool_bm25` rides the same gate as the discovery index it queries
 	 * (so it never surfaces with nothing to find); the remaining spreads are the
 	 * default-ON gated features (each opt-out via its `enabled: false` setting).
+	 *
+	 * Tools the user listed in `toolDiscovery.hiddenByDefault` are subtracted from
+	 * the gated (non-core) part so they leave the active surface AND get seeded as
+	 * hidden by `_seedToolDiscovery` (which derives its exclude-set from this list)
+	 * instead of being active and indexed-as-hidden at the same time. The core ten
+	 * are never hideable — listing one in `hiddenByDefault` is a no-op for them.
 	 */
 	private _defaultActiveToolNames(): string[] {
 		const s = this.settingsManager;
 		const on = (enabled: boolean, names: string[]): string[] => (enabled ? names : []);
-		return [
-			"read",
-			"grep",
-			"find",
-			"ls",
-			"symbol",
-			"bash",
-			"edit",
-			"write",
-			"ask",
-			"todo",
+		const core = ["read", "grep", "find", "ls", "symbol", "bash", "edit", "write", "ask", "todo"];
+		const gated = [
 			...on(s.getToolDiscoverySettings().enabled, ["search_tool_bm25"]),
 			...on(s.getHindsightSettings().enabled, ["retain", "recall", "reflect", "forget"]),
 			...on(s.getWebSearchSettings().enabled, ["web_search"]),
@@ -830,6 +846,8 @@ export class AgentSession {
 			...on(process.env.PIT_DEFER_HISTORY === "1", ["recall_tool_output"]),
 			...on(s.getChromeDevtoolsSettings().enabled, CHROME_FEATURE_TOOL_NAMES),
 		];
+		const hidden = new Set(s.getToolDiscoverySettings().hiddenByDefault);
+		return [...core, ...gated.filter((name) => !hidden.has(name))];
 	}
 
 	/**
@@ -892,7 +910,18 @@ export class AgentSession {
 			"recall_tool_output",
 		]);
 		const alwaysActive = new Set(cfg.alwaysActive);
-		const candidates = new Set<string>(explicit);
+		// Explicit entries are gated by the same active-surface guard so a tool that
+		// is STILL active (a core tool, or a default-ON feature not subtracted by
+		// _defaultActiveToolNames) can never be seeded as hidden — that would make it
+		// active AND indexed-as-hidden at once. _defaultActiveToolNames already drops
+		// the non-core hiddenByDefault entries, so a genuinely-hidden one is absent
+		// from codingNames and survives this filter.
+		const candidates = new Set<string>();
+		for (const name of explicit) {
+			if (codingNames.has(name)) continue;
+			if (alwaysActive.has(name)) continue;
+			candidates.add(name);
+		}
 		for (const name of Object.keys(allDefs)) {
 			if (codingNames.has(name)) continue;
 			if (alwaysActive.has(name)) continue;
@@ -1364,9 +1393,12 @@ export class AgentSession {
 	}
 
 	private _handleToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
+		// Record (name, args) now; the result hash is backfilled at execution end.
+		// The doom-loop check itself runs at end (see _handleToolExecutionEnd) so it
+		// can compare RESULTS — a call with identical args but a new result each step
+		// (debugger stepping) is real progress, not a loop, and must not trip it.
 		this._toolCallStats.recordInvocation(event.toolName, fingerprintToolArgsExact(event.args));
 		this._toolCallArgsByCallId.set(event.toolCallId, event.args);
-		this._maybeInjectDoomLoopReminder(event.toolName, event.args);
 	}
 
 	private _handleToolExecutionEnd(event: Extract<AgentEvent, { type: "tool_execution_end" }>): void {
@@ -1379,6 +1411,14 @@ export class AgentSession {
 		if (event.toolName === "preview" && !event.isError) this._turnUsedPreview = true;
 		const args = this._toolCallArgsByCallId.get(event.toolCallId);
 		this._toolCallArgsByCallId.delete(event.toolCallId);
+		// Backfill the result hash onto the invocation recorded at start, then run
+		// the doom-loop check now that the RESULT is known. Deferring the check to
+		// end (vs start) is what makes it result-aware: a call repeated with the same
+		// args but a NEW result each time (debugger stepping) is progress, not a loop.
+		// Tier 3 throws here to abort the turn — same propagation as the old start-time
+		// throw, just gated on "same call AND same result".
+		this._toolCallStats.recordInvocationResult(fingerprintToolResult(event.result, event.isError));
+		this._maybeInjectDoomLoopReminder(event.toolName, args);
 		// Capture the learned-error fingerprint so the next session boots warm
 		// with knowledge of recurring patterns. Looked up via the matching
 		// hint event recorded earlier in finalize.
@@ -1653,7 +1693,11 @@ export class AgentSession {
 	private _maybeInjectDoomLoopReminder(toolName: string, args: unknown): void {
 		const cfg = this.settingsManager.getToolFeedbackSettings().doomLoopReminder;
 		if (!cfg.enabled) return;
-		const consecutiveCount = this._toolCallStats.getConsecutiveSimilarCount();
+		// Result-aware: only calls with identical name+args AND identical result count
+		// as a loop. A successful call that returns new output each step (debugger
+		// stepping, tailing a growing log) keeps producing fresh result hashes, so the
+		// streak never climbs and the turn is never falsely aborted.
+		const consecutiveCount = this._toolCallStats.getConsecutiveSimilarResultCount();
 
 		// Escalation tiers: TIER1 → soft reminder, TIER2 → urgent pause, TIER3 → abort.
 		const TIER1_THRESHOLD = cfg.threshold ?? 2;
@@ -1758,15 +1802,26 @@ export class AgentSession {
 			lastFiredAt: this._lastStagnationReminderAt,
 			now: Date.now(),
 			cooldownMs: cfg.cooldownMs,
+			lastFiredCount: this._lastStagnationReminderCount,
 		});
 		if (decision.action === "none") return;
 		this._lastStagnationReminderAt = decision.nextLastFiredAt;
+		this._lastStagnationReminderCount = decision.nextLastFiredCount;
+		// Both tiers deliver as "steer", not "followUp" (same reason as the
+		// doom-loop above): stagnation happens DURING the tool-call loop, and a
+		// followUp would sit queued behind that loop — only draining once it ends,
+		// which is exactly the stall we are trying to break. A steer lands before
+		// the next model turn while the loop is still hot.
 		if (decision.action === "pause") {
 			this._stagnation.reset();
+			// Streak is wiped: clear the soft-reminder memory too so a fresh streak
+			// after the user resumes fires cleanly at the soft threshold again.
+			this._lastStagnationReminderAt = 0;
+			this._lastStagnationReminderCount = 0;
 			const content = buildStagnationReminder({ count, paused: true });
 			this.sendCustomMessage(
 				{ customType: "pi.stagnation-pause", content, display: true },
-				{ deliverAs: "followUp" },
+				{ deliverAs: "steer" },
 			).catch((err: unknown) => {
 				process.stderr.write(`[pi] stagnation pause delivery failed: ${err}\n`);
 			});
@@ -1775,7 +1830,7 @@ export class AgentSession {
 		const content = buildStagnationReminder({ count, paused: false });
 		this.sendCustomMessage(
 			{ customType: "pi.stagnation-reminder", content, display: false },
-			{ deliverAs: "followUp" },
+			{ deliverAs: "steer" },
 		).catch((err: unknown) => {
 			process.stderr.write(`[pi] stagnation reminder delivery failed: ${err}\n`);
 		});
@@ -4225,6 +4280,14 @@ export class AgentSession {
 	 * the current model already matches the captured primary.
 	 */
 	private async _restoreFallbackModelIfActive(): Promise<void> {
+		// Run boundary: forget which chain entries were tried so the next prompt
+		// restarts the walk from the primary. Done unconditionally (even when no
+		// fallback was active) so a run that EXHAUSTED the chain and ended in error
+		// does not leave every entry permanently marked tried — which would make
+		// _pickNextFallbackEntry return undefined next turn and strand the agent on
+		// the dead model. Per-entry cooldown (isEntryCooledDown) remains the only
+		// cross-run memory for "do not immediately re-pick this hot entry".
+		this._triedFallbackEntries.clear();
 		const original = this._fallbackOriginal;
 		this._fallbackOriginal = undefined;
 		if (!original) return;

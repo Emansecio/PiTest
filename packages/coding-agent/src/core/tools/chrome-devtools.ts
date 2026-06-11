@@ -5,6 +5,7 @@
  * with a clear error when Chrome is not reachable or no page is selected.
  */
 
+import * as path from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import type { ImageContent, TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
@@ -113,6 +114,76 @@ const networkSchema = Type.Object(
 	{ limit: Type.Optional(Type.Number({ description: "Max requests to return (default 50)." })) },
 	{ additionalProperties: false },
 );
+const clickSchema = Type.Object(
+	{ selector: Type.String({ description: "CSS selector of the element to click." }) },
+	{ additionalProperties: false },
+);
+const fillSchema = Type.Object(
+	{
+		selector: Type.String({ description: "CSS selector of the input/textarea/contenteditable to fill." }),
+		value: Type.String({ description: "Text to type. Replaces the current content." }),
+	},
+	{ additionalProperties: false },
+);
+const pressKeySchema = Type.Object(
+	{
+		key: Type.String({
+			description:
+				"Named key (Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown) or a single character.",
+		}),
+	},
+	{ additionalProperties: false },
+);
+const getTextSchema = Type.Object(
+	{ limit: Type.Optional(Type.Number({ description: "Max characters to return (default 20000)." })) },
+	{ additionalProperties: false },
+);
+const waitForSchema = Type.Object(
+	{
+		selector: Type.Optional(Type.String({ description: "CSS selector to wait for (visible)." })),
+		text: Type.Optional(Type.String({ description: "Text to wait for in the page body." })),
+		timeoutMs: Type.Optional(Type.Number({ description: "Max wait in ms (default 5000, cap 30000)." })),
+	},
+	{ additionalProperties: false },
+);
+
+const hoverSchema = Type.Object(
+	{ selector: Type.String({ description: "CSS selector of the element to hover." }) },
+	{ additionalProperties: false },
+);
+const selectOptionSchema = Type.Object(
+	{
+		selector: Type.String({ description: "CSS selector of the <select> element." }),
+		value: Type.String({ description: "Option to select, matched by value, label or visible text." }),
+	},
+	{ additionalProperties: false },
+);
+const uploadFileSchema = Type.Object(
+	{
+		selector: Type.String({ description: 'CSS selector of the <input type="file"> element.' }),
+		files: Type.Array(Type.String(), {
+			description: "Local file paths to attach (relative paths resolve from cwd).",
+		}),
+	},
+	{ additionalProperties: false },
+);
+const snapshotSchema = Type.Object(
+	{
+		selector: Type.Optional(
+			Type.String({ description: "CSS selector to scope the snapshot to one element's subtree." }),
+		),
+	},
+	{ additionalProperties: false },
+);
+const networkBodySchema = Type.Object(
+	{
+		requestId: Type.String({ description: "Request id from chrome_devtools_read_network." }),
+		limit: Type.Optional(Type.Number({ description: "Max characters of body to return (default 20000)." })),
+	},
+	{ additionalProperties: false },
+);
+
+const GET_TEXT_DEFAULT_LIMIT = 20_000;
 
 // --- Tool definitions ------------------------------------------------------
 
@@ -155,6 +226,7 @@ export function createChromeNavigateDefinition(): ToolDefinition<typeof navigate
 		guidelines: [
 			"Just call this to use the browser — Chrome is launched automatically if it isn't already running.",
 			"Set newTab to open a fresh tab instead of reusing the selected page.",
+			"After loading, chrome_devtools_snapshot shows the page structure — use it to pick selectors for chrome_devtools_click / chrome_devtools_fill.",
 		],
 		schema: navigateSchema,
 		run: async (mgr, input, signal) => {
@@ -225,7 +297,187 @@ export function createChromeReadNetworkDefinition(): ToolDefinition<typeof netwo
 		run: async (mgr, input) => {
 			const entries = mgr.readNetwork({ limit: input.limit });
 			if (entries.length === 0) return textResult("No network requests.");
-			return textResult(entries.map((e) => `${e.status ?? "..."}  ${e.method}  ${e.url}`).join("\n"));
+			return textResult(
+				entries
+					.map((e) => {
+						const mime = e.mimeType ? `  ${e.mimeType}` : "";
+						return `[${e.requestId}]  ${e.status ?? "..."}  ${e.method}  ${e.url}${mime}`;
+					})
+					.join("\n"),
+			);
+		},
+	});
+}
+
+export function createChromeClickDefinition(): ToolDefinition<typeof clickSchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_click",
+		activity: "action",
+		description: "Click an element in the selected page by CSS selector (real mouse events).",
+		snippet: "Click an element",
+		guidelines: [
+			"The element is scrolled into view and clicked at its center.",
+			"Use chrome_devtools_snapshot (or chrome_devtools_get_text) to discover selectors first.",
+		],
+		schema: clickSchema,
+		run: async (mgr, input, signal) => {
+			await mgr.click(input.selector, signal);
+			return textResult(`Clicked ${input.selector}`);
+		},
+	});
+}
+
+export function createChromeFillDefinition(): ToolDefinition<typeof fillSchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_fill",
+		activity: "action",
+		description: "Fill an input/textarea/contenteditable in the selected page (replaces current content).",
+		snippet: "Fill a form field",
+		guidelines: ["Focuses the element, selects existing content and types the value (input events fire normally)."],
+		schema: fillSchema,
+		run: async (mgr, input, signal) => {
+			await mgr.fill(input.selector, input.value, signal);
+			return textResult(`Filled ${input.selector}`);
+		},
+	});
+}
+
+export function createChromePressKeyDefinition(): ToolDefinition<typeof pressKeySchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_press_key",
+		activity: "action",
+		description: "Press a key on the focused element of the selected page (e.g. Enter to submit).",
+		snippet: "Press a key in the page",
+		guidelines: ["Focus a field first (chrome_devtools_fill or chrome_devtools_click), then press e.g. Enter."],
+		schema: pressKeySchema,
+		run: async (mgr, input, signal) => {
+			await mgr.pressKey(input.key, signal);
+			return textResult(`Pressed ${input.key}`);
+		},
+	});
+}
+
+export function createChromeGetTextDefinition(): ToolDefinition<typeof getTextSchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_get_text",
+		activity: "navigation",
+		description: "Read the visible text of the selected page (cheaper than a screenshot for content checks).",
+		snippet: "Read the page text",
+		guidelines: ["Prefer this over screenshot when you only need the text content."],
+		schema: getTextSchema,
+		run: async (mgr, input, signal) => {
+			const text = await mgr.getPageText(signal);
+			const limit = input.limit ?? GET_TEXT_DEFAULT_LIMIT;
+			if (text.length <= limit) return textResult(text);
+			return textResult(`${text.slice(0, limit)}\n… [truncated ${text.length - limit} of ${text.length} chars]`);
+		},
+	});
+}
+
+export function createChromeWaitForDefinition(): ToolDefinition<typeof waitForSchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_wait_for",
+		activity: "navigation",
+		description: "Wait until a CSS selector is visible or a text appears in the selected page.",
+		snippet: "Wait for an element/text",
+		guidelines: ["Use after navigate/click on dynamic pages before reading or interacting."],
+		schema: waitForSchema,
+		run: async (mgr, input, signal) => {
+			const r = await mgr.waitFor(
+				{ selector: input.selector, text: input.text, timeoutMs: input.timeoutMs },
+				signal,
+			);
+			const what = input.selector ?? JSON.stringify(input.text);
+			if (r.found) return textResult(`Found ${what} after ${r.elapsedMs}ms.`);
+			return fail(`Timed out after ${r.elapsedMs}ms waiting for ${what}.`);
+		},
+	});
+}
+
+export function createChromeHoverDefinition(): ToolDefinition<typeof hoverSchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_hover",
+		activity: "action",
+		description: "Hover an element in the selected page by CSS selector (triggers mouseover/tooltips/menus).",
+		snippet: "Hover an element",
+		guidelines: ["Use before clicking items inside hover-only menus."],
+		schema: hoverSchema,
+		run: async (mgr, input, signal) => {
+			await mgr.hover(input.selector, signal);
+			return textResult(`Hovering ${input.selector}`);
+		},
+	});
+}
+
+export function createChromeSelectOptionDefinition(): ToolDefinition<typeof selectOptionSchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_select_option",
+		activity: "action",
+		description: "Select an option of a <select> element by value, label or visible text.",
+		snippet: "Select a dropdown option",
+		guidelines: ["Fires input/change events so framework bindings update."],
+		schema: selectOptionSchema,
+		run: async (mgr, input, signal) => {
+			const r = await mgr.selectOption(input.selector, input.value, signal);
+			return textResult(`Selected ${JSON.stringify(r.label || r.value)} in ${input.selector}`);
+		},
+	});
+}
+
+export function createChromeUploadFileDefinition(
+	cwd?: string,
+): ToolDefinition<typeof uploadFileSchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_upload_file",
+		activity: "action",
+		description: 'Attach local files to an <input type="file"> in the selected page.',
+		snippet: "Upload files to a file input",
+		guidelines: ["Paths are validated locally before being attached; relative paths resolve from the session cwd."],
+		schema: uploadFileSchema,
+		run: async (mgr, input, signal) => {
+			const resolved = input.files.map((f) => path.resolve(cwd ?? process.cwd(), f));
+			await mgr.uploadFile(input.selector, resolved, signal);
+			return textResult(`Attached ${resolved.length} file(s) to ${input.selector}`);
+		},
+	});
+}
+
+export function createChromeSnapshotDefinition(): ToolDefinition<typeof snapshotSchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_snapshot",
+		activity: "navigation",
+		description:
+			"Accessibility-tree snapshot of the selected page (roles + names, indented). Cheaper than a screenshot for understanding structure and finding targets.",
+		snippet: "Snapshot the page structure",
+		guidelines: [
+			"Prefer this over screenshot to discover what is clickable/fillable.",
+			"Pass selector to scope a big page down to one region (e.g. 'form', '#main').",
+		],
+		schema: snapshotSchema,
+		run: async (mgr, input, signal) => {
+			return textResult(await mgr.a11ySnapshot(input.selector, signal));
+		},
+	});
+}
+
+export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof networkBodySchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_get_network_body",
+		activity: "navigation",
+		description: "Fetch the response body of a request listed by chrome_devtools_read_network.",
+		snippet: "Read a network response body",
+		guidelines: ["Get the requestId from chrome_devtools_read_network first."],
+		schema: networkBodySchema,
+		run: async (mgr, input, signal) => {
+			const r = await mgr.getResponseBody(input.requestId, signal);
+			if (r.base64Encoded) {
+				return textResult(`(binary body, ${r.body.length} base64 chars — not shown)`);
+			}
+			const limit = input.limit ?? GET_TEXT_DEFAULT_LIMIT;
+			if (r.body.length <= limit) return textResult(r.body);
+			return textResult(
+				`${r.body.slice(0, limit)}\n… [truncated ${r.body.length - limit} of ${r.body.length} chars]`,
+			);
 		},
 	});
 }
@@ -260,6 +512,42 @@ export const createChromeReadNetworkTool = (
 	_o?: ChromeDevtoolsToolOptions,
 ): AgentTool<typeof networkSchema> => wrapToolDefinition(createChromeReadNetworkDefinition());
 
+export const createChromeClickTool = (_cwd: string, _o?: ChromeDevtoolsToolOptions): AgentTool<typeof clickSchema> =>
+	wrapToolDefinition(createChromeClickDefinition());
+export const createChromeFillTool = (_cwd: string, _o?: ChromeDevtoolsToolOptions): AgentTool<typeof fillSchema> =>
+	wrapToolDefinition(createChromeFillDefinition());
+export const createChromePressKeyTool = (
+	_cwd: string,
+	_o?: ChromeDevtoolsToolOptions,
+): AgentTool<typeof pressKeySchema> => wrapToolDefinition(createChromePressKeyDefinition());
+export const createChromeGetTextTool = (
+	_cwd: string,
+	_o?: ChromeDevtoolsToolOptions,
+): AgentTool<typeof getTextSchema> => wrapToolDefinition(createChromeGetTextDefinition());
+export const createChromeWaitForTool = (
+	_cwd: string,
+	_o?: ChromeDevtoolsToolOptions,
+): AgentTool<typeof waitForSchema> => wrapToolDefinition(createChromeWaitForDefinition());
+
+export const createChromeHoverTool = (_cwd: string, _o?: ChromeDevtoolsToolOptions): AgentTool<typeof hoverSchema> =>
+	wrapToolDefinition(createChromeHoverDefinition());
+export const createChromeSelectOptionTool = (
+	_cwd: string,
+	_o?: ChromeDevtoolsToolOptions,
+): AgentTool<typeof selectOptionSchema> => wrapToolDefinition(createChromeSelectOptionDefinition());
+export const createChromeUploadFileTool = (
+	cwd: string,
+	_o?: ChromeDevtoolsToolOptions,
+): AgentTool<typeof uploadFileSchema> => wrapToolDefinition(createChromeUploadFileDefinition(cwd));
+export const createChromeSnapshotTool = (
+	_cwd: string,
+	_o?: ChromeDevtoolsToolOptions,
+): AgentTool<typeof snapshotSchema> => wrapToolDefinition(createChromeSnapshotDefinition());
+export const createChromeGetNetworkBodyTool = (
+	_cwd: string,
+	_o?: ChromeDevtoolsToolOptions,
+): AgentTool<typeof networkBodySchema> => wrapToolDefinition(createChromeGetNetworkBodyDefinition());
+
 // Definition-factory wrappers (registry expects (cwd, options) => ToolDef).
 export const createChromeListPagesToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
 	createChromeListPagesDefinition();
@@ -275,3 +563,23 @@ export const createChromeReadConsoleToolDefinition = (_cwd: string, _o?: ChromeD
 	createChromeReadConsoleDefinition();
 export const createChromeReadNetworkToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
 	createChromeReadNetworkDefinition();
+export const createChromeClickToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeClickDefinition();
+export const createChromeFillToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeFillDefinition();
+export const createChromePressKeyToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromePressKeyDefinition();
+export const createChromeGetTextToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeGetTextDefinition();
+export const createChromeWaitForToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeWaitForDefinition();
+export const createChromeHoverToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeHoverDefinition();
+export const createChromeSelectOptionToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeSelectOptionDefinition();
+export const createChromeUploadFileToolDefinition = (cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeUploadFileDefinition(cwd);
+export const createChromeSnapshotToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeSnapshotDefinition();
+export const createChromeGetNetworkBodyToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeGetNetworkBodyDefinition();

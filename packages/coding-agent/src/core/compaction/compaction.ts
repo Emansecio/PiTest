@@ -94,6 +94,11 @@ function extractFileOperations(
 /**
  * Extract AgentMessage from an entry if it produces one.
  * Returns undefined for entries that don't contribute to LLM context.
+ *
+ * NOTE: for `type === "message"` this returns `entry.message` BY REFERENCE — the
+ * SAME object the live session context (buildSessionContext) pushes. Callers that
+ * mutate the returned message (e.g. pruneOldToolOutputs) before a fallible step
+ * must clone first; see `cloneToolResultMessagesForPrune`.
  */
 function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "message") {
@@ -674,7 +679,12 @@ function headTailExcerpt(text: string): string {
  * head+tail excerpt (so the summarizer still sees the output's shape) — or,
  * when history deferral is enabled, persisted to disk with a recall placeholder.
  *
- * Mutates messages in place (they are already clones from entry extraction).
+ * Mutates the passed messages and their text blocks in place. `getMessageFromEntry`
+ * returns `entry.message` BY REFERENCE for `type === "message"` entries (the same
+ * object the live session context holds), so callers that prune before a fallible
+ * summarization (e.g. compact()) MUST pass cloned toolResult messages — see
+ * `cloneToolResultMessagesForPrune` — otherwise an aborted compaction leaves the
+ * live context with elided tool results and no restore path.
  */
 export function pruneOldToolOutputs(
 	messages: AgentMessage[],
@@ -724,6 +734,33 @@ export function pruneOldToolOutputs(
 	}
 
 	return prunedTokens;
+}
+
+/**
+ * Return a new message array where every `toolResult` message — and the
+ * text-bearing content blocks inside it — is shallow-cloned, while all other
+ * messages pass through by reference.
+ *
+ * `pruneOldToolOutputs` rewrites `block.text` in place. For `type === "message"`
+ * entries, `getMessageFromEntry` hands back `entry.message` BY REFERENCE, so the
+ * toolResult objects (and their content blocks) are the very ones the live
+ * session context still points at. Cloning just the toolResult layer here means
+ * the prune mutates throw-away copies: if summarization aborts after pruning, the
+ * live context is untouched and no re-read/re-edit is needed. On the happy path
+ * the produced summary is byte-identical — the clones carry the same text the
+ * uncloned objects would have, the originals are simply discarded with the prep.
+ *
+ * Cloning also sidesteps the per-object `charCountCache` WeakMap: a fresh block
+ * object cannot carry a stale cached char count from the pre-prune text.
+ */
+function cloneToolResultMessagesForPrune(messages: AgentMessage[]): AgentMessage[] {
+	return messages.map((msg) => {
+		if (msg.role !== "toolResult" || !Array.isArray(msg.content)) return msg;
+		return {
+			...msg,
+			content: msg.content.map((block) => (block.type === "text" ? { ...block } : block)),
+		};
+	});
 }
 
 // ============================================================================
@@ -1150,8 +1187,8 @@ export async function compact(
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
-		messagesToSummarize,
-		turnPrefixMessages,
+		messagesToSummarize: messagesToSummarizeRaw,
+		turnPrefixMessages: turnPrefixMessagesRaw,
 		isSplitTurn,
 		tokensBefore,
 		previousSummary,
@@ -1159,6 +1196,16 @@ export async function compact(
 		settings,
 		cwd,
 	} = preparation;
+
+	// Clone toolResult messages BEFORE pruning. getMessageFromEntry returns
+	// entry.message by reference for 'message' entries, so without this the prune
+	// would elide tool results inside the LIVE session context; an aborted
+	// summarization would then leave them elided with no restore. Cloning makes the
+	// prune operate on throw-away copies — happy-path output is unchanged.
+	const messagesToSummarize = cloneToolResultMessagesForPrune(messagesToSummarizeRaw);
+	const turnPrefixMessages = isSplitTurn
+		? cloneToolResultMessagesForPrune(turnPrefixMessagesRaw)
+		: turnPrefixMessagesRaw;
 
 	// Pre-prune large tool outputs before sending to summarizer. Scale the
 	// threshold to the window: tighter windows prune more aggressively (capped at

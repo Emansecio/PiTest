@@ -23,6 +23,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const CLI_ENTRY = path.join(PROJECT_ROOT, "src", "cli.ts");
 const TSX_BIN = path.resolve(PROJECT_ROOT, "../../node_modules/.bin/tsx");
+// tsx discovers tsconfig from the spawn cwd. The test cwd is a temp dir, so
+// without an explicit --tsconfig the `@pit/*` path aliases never apply and the
+// CLI crashes resolving `@pit/ai` to a (possibly absent) dist build.
+const TSCONFIG = path.resolve(PROJECT_ROOT, "../../tsconfig.json");
 
 function tsxAvailable(): boolean {
 	const candidate = process.platform === "win32" ? `${TSX_BIN}.cmd` : TSX_BIN;
@@ -56,7 +60,7 @@ function cleanProviderEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 function runCli(args: string[], cwd: string, agentDir: string): RunResult {
-	const result = crossSpawnSync(TSX_BIN, [CLI_ENTRY, ...args], {
+	const result = crossSpawnSync(TSX_BIN, ["--tsconfig", TSCONFIG, CLI_ENTRY, ...args], {
 		cwd,
 		env: {
 			...cleanProviderEnv(process.env),

@@ -1016,6 +1016,23 @@ describe("edit tool fuzzy matching", () => {
 
 		expect(readFileSync(testFile, "utf-8")).toBe("console.log('world');\nhello universe\n");
 	});
+
+	it("should not normalize content OUTSIDE the matched region during a fuzzy edit", async () => {
+		const testFile = join(testDir, "fuzzy-preserve.txt");
+		// Line 1 needs a fuzzy match (smart double quotes vs ASCII). Line 2 carries
+		// Unicode that must survive byte-for-byte: superscript ² (NFKC→2), the ﬁ
+		// ligature (NFKC→fi), smart quotes, and a trailing-whitespace line break.
+		writeFileSync(testFile, "const msg = “Hello”;\nkeep pi² ﬁle ‘raw’  \n");
+
+		const result = await editTool.execute("test-fuzzy-preserve", {
+			path: testFile,
+			edits: [{ oldText: 'const msg = "Hello";', newText: 'const msg = "Hi";' }],
+		});
+
+		expect(getTextOutput(result)).toContain("Successfully replaced");
+		// Line 1 replaced by the literal newText; line 2 preserved exactly.
+		expect(readFileSync(testFile, "utf-8")).toBe('const msg = "Hi";\nkeep pi² ﬁle ‘raw’  \n');
+	});
 });
 
 describe("edit tool CRLF handling", () => {

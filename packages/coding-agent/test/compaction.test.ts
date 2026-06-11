@@ -5,10 +5,12 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	type CompactionPreparation,
 	type CompactionSettings,
 	calculateContextTokens,
 	compact,
 	computeDynamicReserve,
+	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
 	findCutPoint,
@@ -733,5 +735,122 @@ describe("pruneOldToolOutputs deferred-history mode", () => {
 		expect(replaced).toContain("tokens elided");
 		expect(replaced).not.toContain("src/file2000.ts"); // middle elided
 		expect(replaced.length).toBeLessThan(bigText.length);
+	});
+});
+
+// ============================================================================
+// compact() must not mutate live message objects when pruning (clone-before-prune)
+// ============================================================================
+
+describe("compact() prune isolation", () => {
+	function makeToolResult(text: string): AgentMessage {
+		return {
+			role: "toolResult" as const,
+			content: [{ type: "text" as const, text }],
+			toolCallId: "tc-live",
+			toolName: "read",
+			isError: false,
+			timestamp: Date.now(),
+		} as any;
+	}
+
+	// Fake streamFn: returns a canned summary without any network call. compact() →
+	// completeSummarization only calls `.result()`, so this minimal shape suffices.
+	function fakeStreamFn(summaryText: string) {
+		const response: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: summaryText }],
+			usage: createMockUsage(10, 10),
+			stopReason: "stop",
+			timestamp: Date.now(),
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+		};
+		return (() => ({ result: async () => response })) as any;
+	}
+
+	it("prunes a clone, leaving the original live toolResult message unmutated on success", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const bigText = "x".repeat(90_000); // ~27k dense tokens, well over the prune threshold
+
+		// toolResult sits BEFORE two user turns so it is outside the protection window.
+		const liveToolResult = makeToolResult(bigText);
+		const liveBlock = (liveToolResult as any).content[0];
+		const messagesToSummarize: AgentMessage[] = [
+			liveToolResult,
+			createUserMessage("q1"),
+			createAssistantMessage("a1"),
+			createUserMessage("q2"),
+			createAssistantMessage("a2"),
+		];
+
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-id",
+			messagesToSummarize,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 50_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, selfCorrection: false },
+		};
+
+		const result = await compact(
+			preparation,
+			model,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			fakeStreamFn("## Goal\nfake summary"),
+		);
+
+		// Happy path produced a summary.
+		expect(result.summary).toContain("fake summary");
+		// The ORIGINAL live message object is untouched — prune hit a clone, so an
+		// aborted compaction would leave the live context intact.
+		expect(liveBlock.text).toBe(bigText);
+		expect(liveBlock.text.length).toBe(90_000);
+		// The array still holds the same object identity (not swapped out).
+		expect(messagesToSummarize[0]).toBe(liveToolResult);
+	});
+
+	it("leaves the live toolResult unmutated even when summarization aborts after pruning", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const bigText = "z".repeat(90_000);
+
+		const liveToolResult = makeToolResult(bigText);
+		const liveBlock = (liveToolResult as any).content[0];
+		const messagesToSummarize: AgentMessage[] = [
+			liveToolResult,
+			createUserMessage("q1"),
+			createAssistantMessage("a1"),
+			createUserMessage("q2"),
+			createAssistantMessage("a2"),
+		];
+
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-id",
+			messagesToSummarize,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 50_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, selfCorrection: false },
+		};
+
+		// streamFn that throws → compact() rejects (simulates an aborted/failed summary).
+		const throwingStreamFn = (() => {
+			throw new Error("aborted");
+		}) as any;
+
+		await expect(
+			compact(preparation, model, undefined, undefined, undefined, undefined, undefined, throwingStreamFn),
+		).rejects.toThrow();
+
+		// Even though pruning ran before the failed LLM call, the live object is intact.
+		expect(liveBlock.text).toBe(bigText);
+		expect(liveBlock.text.length).toBe(90_000);
 	});
 });

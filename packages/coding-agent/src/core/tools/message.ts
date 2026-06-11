@@ -12,7 +12,7 @@ export interface MessageToolOptions {
 
 const messageSchema = Type.Object(
 	{
-		op: Type.Union([Type.Literal("send"), Type.Literal("list")], {
+		op: Type.Enum(["send", "list"], {
 			description: 'Operation: "send" a message to a peer, or "list" the agents currently online.',
 		}),
 		to: Type.Optional(

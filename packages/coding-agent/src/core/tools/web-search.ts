@@ -36,7 +36,7 @@ const webSearchSchema = Type.Object(
 			}),
 		),
 		provider: Type.Optional(
-			Type.Union(PROVIDER_NAMES.map((n) => Type.Literal(n)) as any, {
+			Type.Enum(PROVIDER_NAMES, {
 				description: 'Provider id. "auto" walks the configured chain in priority order.',
 			}),
 		),

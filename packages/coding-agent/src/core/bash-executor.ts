@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { stripAnsi } from "../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../utils/shell.ts";
 import type { BashOperations } from "./tools/bash.ts";
-import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.ts";
+import { BASH_MAX_BYTES, BASH_MAX_LINES, collapseRepeatedLines, truncateTail } from "./tools/truncate.ts";
 
 // ============================================================================
 // Types
@@ -55,7 +55,7 @@ export async function executeBashWithOperations(
 ): Promise<BashResult> {
 	const outputChunks: string[] = [];
 	let outputBytes = 0;
-	const maxOutputBytes = DEFAULT_MAX_BYTES * 2;
+	const maxOutputBytes = BASH_MAX_BYTES * 2;
 
 	let tempFilePath: string | undefined;
 	let tempFileStream: WriteStream | undefined;
@@ -89,7 +89,7 @@ export async function executeBashWithOperations(
 		const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(data, { stream: true }))).replace(/\r/g, "");
 
 		// Start writing to temp file if exceeds threshold
-		if (totalBytes > DEFAULT_MAX_BYTES) {
+		if (totalBytes > BASH_MAX_BYTES) {
 			ensureTempFile();
 		}
 
@@ -117,45 +117,48 @@ export async function executeBashWithOperations(
 		}
 	};
 
-	try {
-		const result = await operations.exec(command, cwd, {
-			onData,
-			signal: options?.signal,
-		});
-
+	// Apply the same output budget the agent's bash tool uses (BASH_MAX_LINES /
+	// BASH_MAX_BYTES, tail-only) and collapse runs of identical consecutive lines.
+	// Without this the user's `!` command kept the 2000-line/50KB default and skipped
+	// collapse, so verbose output bloated the context and persisted in history.
+	const finalizeOutput = (): { output: string; truncated: boolean } => {
 		const fullOutput = outputChunks.join("");
-		const truncationResult = truncateTail(fullOutput);
+		const truncationResult = truncateTail(fullOutput, { maxLines: BASH_MAX_LINES, maxBytes: BASH_MAX_BYTES });
 		if (truncationResult.truncated) {
 			ensureTempFile();
 		}
 		if (tempFileStream) {
 			tempFileStream.end();
 		}
+		const content = truncationResult.truncated ? truncationResult.content : fullOutput;
+		return { output: collapseRepeatedLines(content), truncated: truncationResult.truncated };
+	};
+
+	try {
+		const result = await operations.exec(command, cwd, {
+			onData,
+			signal: options?.signal,
+		});
+
+		const finalized = finalizeOutput();
 		const cancelled = options?.signal?.aborted ?? false;
 
 		return {
-			output: truncationResult.truncated ? truncationResult.content : fullOutput,
+			output: finalized.output,
 			exitCode: cancelled ? undefined : (result.exitCode ?? undefined),
 			cancelled,
-			truncated: truncationResult.truncated,
+			truncated: finalized.truncated,
 			fullOutputPath: tempFilePath,
 		};
 	} catch (err) {
 		// Check if it was an abort
 		if (options?.signal?.aborted) {
-			const fullOutput = outputChunks.join("");
-			const truncationResult = truncateTail(fullOutput);
-			if (truncationResult.truncated) {
-				ensureTempFile();
-			}
-			if (tempFileStream) {
-				tempFileStream.end();
-			}
+			const finalized = finalizeOutput();
 			return {
-				output: truncationResult.truncated ? truncationResult.content : fullOutput,
+				output: finalized.output,
 				exitCode: undefined,
 				cancelled: true,
-				truncated: truncationResult.truncated,
+				truncated: finalized.truncated,
 				fullOutputPath: tempFilePath,
 			};
 		}

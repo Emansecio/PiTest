@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { executeBashWithOperations } from "../src/core/bash-executor.js";
 import { type BashOperations, createBashTool } from "../src/core/tools/bash.js";
+import { BASH_MAX_LINES } from "../src/core/tools/truncate.js";
 
 /** A bash op that emits the given output once and exits 0 (no real process). */
 function bashEmitting(content: string): BashOperations {
@@ -60,5 +62,36 @@ describe("bash + json-crush (phase 3 follow-up, behind PIT_JSON_CRUSH)", () => {
 			expect(text).not.toContain("items elided");
 			expect(text).toContain("Full output:");
 		});
+	});
+});
+
+describe("executeBashWithOperations output budget (user `!` command)", () => {
+	it("applies the bash tail budget (BASH_MAX_LINES) instead of the 2000-line default", async () => {
+		// 3000 lines: truncated under the 1000-line bash budget but NOT under the
+		// old 2000-line default — proves the bash budget is now in effect.
+		const lines = Array.from({ length: 3000 }, (_, i) => `line ${i}`).join("\n");
+		const res = await executeBashWithOperations("seq 3000", process.cwd(), bashEmitting(lines));
+
+		expect(res.truncated).toBe(true);
+		// Tail-only: the last line survives, the first does not.
+		expect(res.output).toContain("line 2999");
+		expect(res.output).not.toContain("line 0\n");
+		// Honors the 1000-line cap (well under the previous 2000-line default).
+		expect(res.output.split("\n").length).toBeLessThanOrEqual(BASH_MAX_LINES);
+		// Full output is spilled to a temp file for recovery.
+		expect(res.fullOutputPath).toBeDefined();
+	});
+
+	it("collapses runs of identical consecutive lines like the agent bash tool", async () => {
+		// 50 identical lines + a unique tail line — small enough to NOT truncate, so
+		// the only transform under test is collapseRepeatedLines.
+		const repeated = `${Array.from({ length: 50 }, () => "duplicate warning").join("\n")}\ndone`;
+		const res = await executeBashWithOperations("noisy", process.cwd(), bashEmitting(repeated));
+
+		expect(res.truncated).toBe(false);
+		expect(res.output).toContain("duplicate warning … (×50)");
+		expect(res.output).toContain("done");
+		// Collapsed: the 50 raw repetitions are gone (one marker line remains).
+		expect(res.output.split("\n").length).toBeLessThan(50);
 	});
 });

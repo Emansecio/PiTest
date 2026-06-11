@@ -117,4 +117,36 @@ describe("CdpConnection", () => {
 		ws.emit("close", {});
 		await expect(p).rejects.toThrow();
 	});
+
+	it("flips isClosed() on remote close and refuses new sends", async () => {
+		const { conn, ws } = connect();
+		expect(conn.isClosed()).toBe(false);
+		const p = conn.send("Page.enable");
+		ws.emit("open", {});
+		await flush();
+		ws.emit("close", {});
+		await expect(p).rejects.toThrow();
+		expect(conn.isClosed()).toBe(true);
+		// A dead connection must refuse instead of hanging — the manager relies
+		// on this plus isClosed() to evict and reconnect.
+		await expect(conn.send("Page.enable")).rejects.toThrow(/closed/);
+	});
+
+	it("aborts an in-flight command via the signal", async () => {
+		const { conn, ws } = connect();
+		const controller = new AbortController();
+		const p = conn.send("Slow.op", {}, { signal: controller.signal });
+		ws.emit("open", {});
+		await flush();
+		controller.abort();
+		await expect(p).rejects.toThrow(/aborted/);
+	});
+
+	it("rejects when the socket closes before opening", async () => {
+		const { conn, ws } = connect();
+		const p = conn.send("Page.enable");
+		ws.emit("close", {});
+		await expect(p).rejects.toThrow(/closed before opening/);
+		expect(conn.isClosed()).toBe(true);
+	});
 });

@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CdpTarget } from "../src/core/chrome/cdp-client.js";
 import { type CdpConnectionLike, ChromeDevtoolsManager } from "../src/core/chrome/chrome-devtools-manager.js";
@@ -6,6 +7,9 @@ class FakeConn implements CdpConnectionLike {
 	sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
 	responses: Record<string, unknown> = {};
 	closed = false;
+	isClosed(): boolean {
+		return this.closed;
+	}
 	private handlers = new Map<string, Array<(p: any) => void>>();
 	send(method: string, params?: Record<string, unknown>): Promise<any> {
 		this.sent.push({ method, params });
@@ -122,6 +126,186 @@ describe("ChromeDevtoolsManager", () => {
 		const { mgr } = setup();
 		await expect(mgr.evaluate("1")).rejects.toThrow(/No page selected/);
 		expect(() => mgr.readConsole({})).toThrow(/No page selected/);
+	});
+
+	it("navigate without newTab reports the new URL, not the stale selected-target URL", async () => {
+		const { mgr } = setup();
+		await mgr.selectPage("p1"); // target url is http://a at selection time
+		const res = await mgr.navigate({ url: "http://b" });
+		expect(res.target.url).toBe("http://b");
+	});
+
+	it("evaluate prefers exception.description over the generic text", async () => {
+		const c = new FakeConn();
+		c.responses["Runtime.evaluate"] = {
+			exceptionDetails: { text: "Uncaught", exception: { description: "Error: boom\n    at <anonymous>:1:7" } },
+		};
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		expect((await mgr.evaluate("throw new Error('boom')")).error).toContain("Error: boom");
+	});
+
+	it("reconnects when the cached CDP connection is closed (dead socket auto-recovery)", async () => {
+		const { mgr, conns, targets } = setup();
+		await mgr.selectPage("p1");
+		const first = conns.get("p1")!;
+		// Simulate the WS dropping (tab closed / Chrome restarted with same id).
+		first.closed = true;
+		// Force the factory to hand out a NEW conn for p1 on the next connect.
+		conns.delete("p1");
+		const res = await mgr.evaluate("1");
+		expect(res.error).toBeUndefined();
+		const second = conns.get("p1")!;
+		expect(second).not.toBe(first);
+		// Fresh connection re-enabled its domains.
+		expect(second.sent.map((s) => s.method)).toContain("Runtime.enable");
+		expect(targets.find((t) => t.id === "p1")).toBeDefined();
+	});
+
+	it("click resolves the element center and dispatches press/release", async () => {
+		const c = new FakeConn();
+		c.responses["Runtime.evaluate"] = { result: { value: { x: 10, y: 20 } } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await mgr.click("#btn");
+		const mouse = c.sent.filter((s) => s.method === "Input.dispatchMouseEvent");
+		expect(mouse.map((s) => s.params?.type)).toEqual(["mousePressed", "mouseReleased"]);
+		expect(mouse[0]?.params).toMatchObject({ x: 10, y: 20, button: "left", clickCount: 1 });
+	});
+
+	it("click throws a clear error when the selector matches nothing", async () => {
+		const c = new FakeConn();
+		c.responses["Runtime.evaluate"] = { result: { value: null } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await expect(mgr.click("#missing")).rejects.toThrow(/No element matches/);
+		expect(c.sent.some((s) => s.method === "Input.dispatchMouseEvent")).toBe(false);
+	});
+
+	it("fill focuses the element and inserts the text", async () => {
+		const c = new FakeConn();
+		c.responses["Runtime.evaluate"] = { result: { value: true } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await mgr.fill("#q", "hello");
+		const insert = c.sent.find((s) => s.method === "Input.insertText");
+		expect(insert?.params).toEqual({ text: "hello" });
+	});
+
+	it("pressKey dispatches keyDown/keyUp for named keys and rejects unknown ones", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await mgr.pressKey("Enter");
+		const keys = c.sent.filter((s) => s.method === "Input.dispatchKeyEvent");
+		expect(keys.map((s) => s.params?.type)).toEqual(["keyDown", "keyUp"]);
+		expect(keys[0]?.params).toMatchObject({ key: "Enter", windowsVirtualKeyCode: 13 });
+		await expect(mgr.pressKey("NotAKey")).rejects.toThrow(/Unsupported key/);
+	});
+
+	it("getPageText returns the body innerText", async () => {
+		const c = new FakeConn();
+		c.responses["Runtime.evaluate"] = { result: { value: "Hello world" } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		expect(await mgr.getPageText()).toBe("Hello world");
+	});
+
+	it("waitFor returns found immediately when the condition holds and times out otherwise", async () => {
+		const c = new FakeConn();
+		c.responses["Runtime.evaluate"] = { result: { value: true } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		expect((await mgr.waitFor({ selector: "#ready" })).found).toBe(true);
+
+		c.responses["Runtime.evaluate"] = { result: { value: false } };
+		const r = await mgr.waitFor({ text: "never", timeoutMs: 1 });
+		expect(r.found).toBe(false);
+		await expect(mgr.waitFor({})).rejects.toThrow(/selector or text/);
+	});
+
+	it("hover dispatches a mouse move at the element center", async () => {
+		const c = new FakeConn();
+		c.responses["Runtime.evaluate"] = { result: { value: { x: 5, y: 6 } } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await mgr.hover("#menu");
+		const move = c.sent.find((s) => s.method === "Input.dispatchMouseEvent");
+		expect(move?.params).toMatchObject({ type: "mouseMoved", x: 5, y: 6 });
+	});
+
+	it("selectOption returns the selection and surfaces available values on miss", async () => {
+		const c = new FakeConn();
+		c.responses["Runtime.evaluate"] = { result: { value: { value: "b", label: "Bravo" } } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		expect(await mgr.selectOption("#sel", "Bravo")).toEqual({ value: "b", label: "Bravo" });
+
+		c.responses["Runtime.evaluate"] = { result: { value: { error: "no-option", options: ["a", "b"] } } };
+		await expect(mgr.selectOption("#sel", "zz")).rejects.toThrow(/Available values: a, b/);
+		c.responses["Runtime.evaluate"] = { result: { value: { error: "not-select" } } };
+		await expect(mgr.selectOption("#div", "a")).rejects.toThrow(/not a <select>/);
+	});
+
+	it("uploadFile resolves the node and sets the input files", async () => {
+		const c = new FakeConn();
+		c.responses["DOM.getDocument"] = { root: { nodeId: 1 } };
+		c.responses["DOM.querySelector"] = { nodeId: 42 };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		const real = path.resolve(__dirname, "chrome-devtools-manager.test.ts");
+		await mgr.uploadFile("#file", [real]);
+		const set = c.sent.find((s) => s.method === "DOM.setFileInputFiles");
+		expect(set?.params).toEqual({ files: [real], nodeId: 42 });
+		await expect(mgr.uploadFile("#file", ["Z:/nope/missing.bin"])).rejects.toThrow(/File not found/);
+	});
+
+	it("a11ySnapshot renders roles and names indented, flattening unnamed generics", async () => {
+		const c = new FakeConn();
+		c.responses["Accessibility.getFullAXTree"] = {
+			nodes: [
+				{ nodeId: "1", role: { value: "RootWebArea" }, name: { value: "Home" }, childIds: ["2"] },
+				{ nodeId: "2", parentId: "1", role: { value: "generic" }, childIds: ["3", "4"] },
+				{ nodeId: "3", parentId: "2", role: { value: "button" }, name: { value: "Go" } },
+				{ nodeId: "4", parentId: "2", role: { value: "textbox" }, name: { value: "q" }, value: { value: "abc" } },
+			],
+		};
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		const snap = await mgr.a11ySnapshot();
+		expect(snap.split("\n")).toEqual(['RootWebArea "Home"', '  button "Go"', '  textbox "q" = "abc"']);
+	});
+
+	it("a11ySnapshot with selector scopes to that element's subtree", async () => {
+		const c = new FakeConn();
+		c.responses["DOM.getDocument"] = { root: { nodeId: 1 } };
+		c.responses["DOM.querySelector"] = { nodeId: 7 };
+		c.responses["DOM.describeNode"] = { node: { backendNodeId: 77 } };
+		c.responses["Accessibility.getFullAXTree"] = {
+			nodes: [
+				{ nodeId: "1", role: { value: "RootWebArea" }, name: { value: "Home" }, childIds: ["2", "3"] },
+				{ nodeId: "2", parentId: "1", role: { value: "navigation" }, name: { value: "nav" } },
+				{ nodeId: "3", parentId: "1", role: { value: "form" }, backendDOMNodeId: 77, childIds: ["4"] },
+				{ nodeId: "4", parentId: "3", role: { value: "button" }, name: { value: "Send" } },
+			],
+		};
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		const snap = await mgr.a11ySnapshot("form");
+		// Ancestors render as a breadcrumb so the region's location stays visible.
+		expect(snap.split("\n")).toEqual(['RootWebArea "Home"', "  form", '    button "Send"']);
+		expect(snap).not.toContain("navigation");
+
+		c.responses["DOM.describeNode"] = { node: { backendNodeId: 999 } };
+		await expect(mgr.a11ySnapshot("#hidden")).rejects.toThrow(/no accessibility node/);
+	});
+
+	it("getResponseBody returns the body and base64 flag", async () => {
+		const c = new FakeConn();
+		c.responses["Network.getResponseBody"] = { body: '{"ok":true}', base64Encoded: false };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		expect(await mgr.getResponseBody("r1")).toEqual({ body: '{"ok":true}', base64Encoded: false });
 	});
 
 	it("dispose closes all connections", async () => {

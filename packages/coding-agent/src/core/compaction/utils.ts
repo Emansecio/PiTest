@@ -152,17 +152,41 @@ function stripCwdPrefix(filePath: string, cwd: string | undefined): string {
 }
 
 /**
+ * Cap on how many entries per operation category survive into the summary frame.
+ * The fileOps Sets accumulate across compactions (each compaction re-merges the
+ * previous compaction's details), so unique entries grow without bound and ride
+ * along in the prefix of every request. Keeping only the {@link MAX_OPS_PER_CATEGORY}
+ * most-recent per category bounds that cost. Sets preserve insertion order, so the
+ * tail is the most recently observed.
+ */
+const MAX_OPS_PER_CATEGORY = 30;
+
+/**
+ * Take the last {@link MAX_OPS_PER_CATEGORY} elements from a string iterable
+ * (insertion order = recency for our Sets). Returns fewer when the source is
+ * smaller, so realistic small windows are unchanged.
+ */
+function tailCap(values: Iterable<string>): string[] {
+	const all = [...values];
+	return all.length <= MAX_OPS_PER_CATEGORY ? all : all.slice(all.length - MAX_OPS_PER_CATEGORY);
+}
+
+/**
  * Compute final file lists from file operations.
  * Returns readFiles (files only read, not modified) and modifiedFiles.
  * Paths are stripped of the cwd prefix when provided.
+ *
+ * Each category is capped to the {@link MAX_OPS_PER_CATEGORY} most-recent entries
+ * (tail of insertion order) BEFORE sorting, so unbounded accumulation across
+ * compactions does not bloat the summary frame.
  */
 export function computeFileLists(
 	fileOps: FileOperations,
 	cwd?: string,
 ): { readFiles: string[]; modifiedFiles: string[] } {
 	const modified = new Set([...fileOps.edited, ...fileOps.written]);
-	const readOnly = [...fileOps.read].filter((f) => !modified.has(f)).sort();
-	const modifiedFiles = [...modified].sort();
+	const readOnly = tailCap([...fileOps.read].filter((f) => !modified.has(f))).sort();
+	const modifiedFiles = tailCap(modified).sort();
 	if (!cwd) return { readFiles: readOnly, modifiedFiles };
 	return {
 		readFiles: readOnly.map((f) => stripCwdPrefix(f, cwd)),
@@ -190,7 +214,9 @@ export interface OperationLists {
  */
 export function computeOperationLists(fileOps: FileOperations, cwd?: string): OperationLists {
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps, cwd);
-	const toSorted = (set: Set<string> | undefined): string[] => (set ? [...set].sort() : []);
+	// Cap each category to the most-recent entries (tail of insertion order) before
+	// sorting, mirroring computeFileLists, so the lists do not grow without bound.
+	const toSorted = (set: Set<string> | undefined): string[] => (set ? tailCap(set).sort() : []);
 	return {
 		readFiles,
 		modifiedFiles,

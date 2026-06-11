@@ -313,9 +313,17 @@ export function createFindToolDefinition(
 								}
 							}
 							if (!output) {
+								// Glob patterns are forward-slash only. A Windows-style backslash
+								// pattern (e.g. `src\**\*.ts`) has no "/", skips the post-filter, and
+								// goes raw to fd --glob where "\" is an escape — yielding zero matches
+								// with no hint about the separator. Enrich the empty message so the
+								// model can self-correct without normalizing the success path.
+								const noMatch = pattern.includes("\\")
+									? `No files found matching pattern. Glob patterns use forward slashes; try: ${pattern.replace(/\\/g, "/")}`
+									: "No files found matching pattern";
 								settle(() =>
 									resolve({
-										content: [{ type: "text", text: "No files found matching pattern" }],
+										content: [{ type: "text", text: noMatch }],
 										details: undefined,
 									}),
 								);

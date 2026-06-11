@@ -341,9 +341,15 @@ export function createGrepToolDefinition(
 								return;
 							}
 							if (matchCount === 0) {
-								settle(() =>
-									resolve({ content: [{ type: "text", text: "No matches found" }], details: undefined }),
-								);
+								// A user-supplied glob with a Windows-style backslash (e.g.
+								// `src\**\*.ts`) goes raw to rg --glob, where "/" is the only path
+								// separator and "\" is an escape — so it filters out everything and
+								// returns zero matches with no hint. Enrich the empty message so the
+								// model can self-correct; the success path stays untouched.
+								const noMatch = glob?.includes("\\")
+									? `No matches found. Glob patterns use forward slashes; try: ${glob.replace(/\\/g, "/")}`
+									: "No matches found";
+								settle(() => resolve({ content: [{ type: "text", text: noMatch }], details: undefined }));
 								return;
 							}
 

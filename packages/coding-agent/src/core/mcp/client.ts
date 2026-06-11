@@ -87,65 +87,83 @@ export class McpHttpClient {
 		const onAbort = () => controller.abort();
 		signal?.addEventListener("abort", onAbort, { once: true });
 
-		let response: Response;
+		// The timeout and outer-abort forwarding must stay armed through the BODY
+		// reads, not just the fetch: a server that returns headers and then stalls
+		// the body would otherwise hang response.json() forever with no way for
+		// the user's abort to reach controller.abort(). Single cleanup point in
+		// the outer finally.
 		try {
-			response = await fetch(this.config.url, {
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					accept: "application/json",
-					...(this.config.headers ?? {}),
-					// Echo the server-assigned session id on every request after
-					// initialize. Placed last so it is authoritative over config.headers.
-					...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
-				},
-				body: JSON.stringify(body),
-				signal: controller.signal,
-			});
-		} catch (error) {
-			// fetch rejection = network/abort/timeout: the request may or may not
-			// have reached the server, so this is a transport failure by definition.
-			const message = error instanceof Error ? error.message : String(error);
-			throw new McpTransportError(`MCP ${this.name} ${method}: ${message}`);
+			let response: Response;
+			try {
+				response = await fetch(this.config.url, {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						accept: "application/json",
+						...(this.config.headers ?? {}),
+						// Echo the server-assigned session id on every request after
+						// initialize. Placed last so it is authoritative over config.headers.
+						...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
+					},
+					body: JSON.stringify(body),
+					signal: controller.signal,
+				});
+			} catch (error) {
+				// fetch rejection = network/abort/timeout: the request may or may not
+				// have reached the server, so this is a transport failure by definition.
+				const message = error instanceof Error ? error.message : String(error);
+				throw new McpTransportError(`MCP ${this.name} ${method}: ${message}`);
+			}
+
+			// Capture the session id from any response that carries one (servers set it
+			// on the initialize response). Subsequent requests must echo it.
+			const incomingSessionId = response.headers.get("mcp-session-id");
+			if (incomingSessionId) this.sessionId = incomingSessionId;
+
+			if (!response.ok) {
+				const text = await response.text().catch(() => "");
+				throw new McpTransportError(`MCP ${this.name} ${method}: HTTP ${response.status} ${text.slice(0, 200)}`);
+			}
+
+			// Some servers stream SSE on the same endpoint. We only support the
+			// single-response JSON variant; reject SSE responses to avoid hanging.
+			const contentType = response.headers.get("content-type") ?? "";
+			if (contentType.includes("text/event-stream")) {
+				throw new McpTransportError(`MCP ${this.name} ${method}: SSE transport not supported (use HTTP JSON)`);
+			}
+
+			let json: JsonRpcResponse<T>;
+			try {
+				json = (await response.json()) as JsonRpcResponse<T>;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				throw new McpTransportError(`MCP ${this.name} ${method}: invalid JSON response (${message})`);
+			}
+			if (json.error) {
+				throw new Error(`MCP ${this.name} ${method}: ${json.error.message} (code ${json.error.code})`);
+			}
+			if (json.result === undefined) {
+				throw new Error(`MCP ${this.name} ${method}: response missing result`);
+			}
+			return json.result;
 		} finally {
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);
 		}
+	}
 
-		// Capture the session id from any response that carries one (servers set it
-		// on the initialize response). Subsequent requests must echo it.
-		const incomingSessionId = response.headers.get("mcp-session-id");
-		if (incomingSessionId) this.sessionId = incomingSessionId;
-
-		if (!response.ok) {
-			const text = await response.text().catch(() => "");
-			throw new McpTransportError(`MCP ${this.name} ${method}: HTTP ${response.status} ${text.slice(0, 200)}`);
-		}
-
-		// Some servers stream SSE on the same endpoint. We only support the
-		// single-response JSON variant; reject SSE responses to avoid hanging.
-		const contentType = response.headers.get("content-type") ?? "";
-		if (contentType.includes("text/event-stream")) {
-			throw new McpTransportError(`MCP ${this.name} ${method}: SSE transport not supported (use HTTP JSON)`);
-		}
-
-		let json: JsonRpcResponse<T>;
-		try {
-			json = (await response.json()) as JsonRpcResponse<T>;
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			throw new McpTransportError(`MCP ${this.name} ${method}: invalid JSON response (${message})`);
-		}
-		if (json.error) {
-			throw new Error(`MCP ${this.name} ${method}: ${json.error.message} (code ${json.error.code})`);
-		}
-		if (json.result === undefined) {
-			throw new Error(`MCP ${this.name} ${method}: response missing result`);
-		}
-		return json.result;
+	/** Discard the current session id (see initialize / dispose for why). */
+	private clearSessionId(): void {
+		this.sessionId = undefined;
 	}
 
 	async initialize(signal?: AbortSignal): Promise<void> {
+		// A fresh handshake must not echo a stale session id: the server assigns a new
+		// one on initialize, and on reconnect this client instance is reused (the old
+		// id would otherwise be rejected, bricking the connection until the session ends).
+		// Routed through clearSessionId() so the reset does not narrow this.sessionId to
+		// `undefined` for the notifications/initialized header built later in this method.
+		this.clearSessionId();
 		const result = await this.rpc<{
 			serverInfo?: { name?: string; version?: string };
 			protocolVersion?: string;

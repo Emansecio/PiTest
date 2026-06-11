@@ -165,6 +165,53 @@ describe("decideStagnationReminder", () => {
 		expect(out.action).toBe("pause");
 		expect(out.nextLastFiredAt).toBe(100_000);
 	});
+
+	it("records the fired streak length on the first soft reminder", () => {
+		const out = decideStagnationReminder({ ...base, count: 12 });
+		expect(out.action).toBe("remind");
+		expect(out.nextLastFiredCount).toBe(12);
+	});
+
+	it("suppresses a repeat soft reminder when the streak has not grown by `step` (cooldown elapsed)", () => {
+		// step = ceil((25-12)/2) = 7. Fired at 12, streak crept to 14 (< 12+7): even
+		// though the cooldown is long elapsed, the identical reminder is NOT re-injected.
+		const out = decideStagnationReminder({
+			...base,
+			count: 14,
+			lastFiredAt: 60_000,
+			now: 100_000,
+			lastFiredCount: 12,
+		});
+		expect(out.action).toBe("none");
+		expect(out.nextLastFiredAt).toBe(60_000);
+		expect(out.nextLastFiredCount).toBe(12);
+	});
+
+	it("re-reminds once the streak grows by `step` AND the cooldown elapsed", () => {
+		// Fired at 12, streak now 19 (= 12 + step). Both gates open → remind, and the
+		// new fired-count is recorded so the next gate moves to 26.
+		const out = decideStagnationReminder({
+			...base,
+			count: 19,
+			lastFiredAt: 60_000,
+			now: 100_000,
+			lastFiredCount: 12,
+		});
+		expect(out.action).toBe("remind");
+		expect(out.nextLastFiredCount).toBe(19);
+	});
+
+	it("still gates on cooldown even when the streak grew past `step`", () => {
+		// Streak grew enough (12 → 20) but the cooldown floor has NOT elapsed.
+		const out = decideStagnationReminder({
+			...base,
+			count: 20,
+			lastFiredAt: 95_000,
+			now: 100_000,
+			lastFiredCount: 12,
+		});
+		expect(out.action).toBe("none");
+	});
 });
 
 describe("buildStagnationReminder", () => {

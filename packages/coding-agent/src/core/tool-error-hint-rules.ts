@@ -549,7 +549,7 @@ export function createLearnedErrorRules(
 			// don't break the equality check. The aggregator already normalised
 			// the stored fingerprint, so this gives a fair comparison.
 			const normalised = normaliseLive(input.errorText);
-			return normalised.includes(entry.fingerprint);
+			return fingerprintMatchesLive(normalised, entry.fingerprint);
 		},
 		hint: () =>
 			`This error has occurred ${entry.totalCount} times across ${entry.sessionCount} sessions. Recurring pattern — re-evaluate the approach instead of retrying the same call. Sample of an earlier occurrence: ${entry.sampleErrorText}`,
@@ -563,6 +563,17 @@ function normaliseLive(text: string): string {
 	LIVE_RE_WHITESPACE.lastIndex = 0;
 	LIVE_RE_DIGITS.lastIndex = 0;
 	return text.replace(LIVE_RE_WHITESPACE, " ").replace(LIVE_RE_DIGITS, "N").trim();
+}
+
+/**
+ * Match a stored fingerprint against normalized live error text. Fingerprints
+ * are length-capped to 120 chars with a trailing ellipsis (U+2026) by
+ * normalizeErrorFingerprint, so a literal `includes` of the capped form never
+ * matches the un-capped live text. Strip the ellipsis and match the prefix.
+ */
+function fingerprintMatchesLive(liveNormalised: string, fingerprint: string): boolean {
+	const fp = fingerprint.endsWith("…") ? fingerprint.slice(0, -1) : fingerprint;
+	return fp.length > 0 && liveNormalised.includes(fp);
 }
 
 /**
@@ -583,7 +594,7 @@ export function createSameSessionHintRule(args: {
 	return {
 		id: `session-${tool}-${index}`,
 		appliesTo: tool,
-		matcher: (input) => normaliseLive(input.errorText).includes(fingerprint),
+		matcher: (input) => fingerprintMatchesLive(normaliseLive(input.errorText), fingerprint),
 		hint: () =>
 			`This same error has already occurred ${count}× in THIS session. Stop retrying the same call — change the approach (different tool, different arguments, or read the relevant file/state first).`,
 	};

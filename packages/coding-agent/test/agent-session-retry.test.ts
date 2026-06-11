@@ -321,6 +321,27 @@ describe("AgentSession retry", () => {
 		expect(callCount).toBe(4);
 	});
 
+	it("clears tried fallback entries at the run boundary so an exhausted chain is not stranded", async () => {
+		// Regression: _triedFallbackEntries was only cleared on a SUCCESSFUL response.
+		// A run that exhausted the chain and ended in error left every entry marked
+		// tried, so the next prompt's _pickNextFallbackEntry returned undefined and
+		// the agent was stranded on the dead model. The run boundary must reset it,
+		// leaving per-entry cooldown as the only cross-run memory.
+		const created = createSession({ failCount: 0 });
+		const internals = created.session as unknown as {
+			_triedFallbackEntries: Set<string>;
+			_restoreFallbackModelIfActive: () => Promise<void>;
+		};
+		// Simulate a run that walked + exhausted the chain.
+		internals._triedFallbackEntries.add("anthropic/claude-sonnet-4-5");
+		internals._triedFallbackEntries.add("anthropic/claude-haiku-4-5");
+		expect(internals._triedFallbackEntries.size).toBe(2);
+
+		// Run boundary clears it even though no fallback model was active.
+		await internals._restoreFallbackModelIfActive();
+		expect(internals._triedFallbackEntries.size).toBe(0);
+	});
+
 	it("restores the primary model after a transient fallback instead of staying pinned", async () => {
 		// A fallback (e.g. after a 429) must be temporary: once a turn settles the
 		// session reverts to the primary model. Previously _fallbackOriginal was

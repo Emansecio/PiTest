@@ -31,30 +31,91 @@ export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string 
  * - Normalize Unicode dashes/hyphens to ASCII hyphen
  * - Normalize special Unicode spaces to regular space
  */
-const TRAILING_WS_RE = /[ \t\v\f]+(?=\n|$)/g;
+const COMBINING_MARK_RE = /\p{M}/u;
 
-function foldUnicodeChar(ch: string): string {
+function isHorizontalWs(ch: string): boolean {
+	return ch === " " || ch === "\t" || ch === "\v" || ch === "\f";
+}
+
+/**
+ * Fold a single character: smart quotes (U+2018-U+201F), dashes/hyphens
+ * (U+2010-U+2015, U+2212), special spaces (U+00A0, U+2002-U+200A, U+202F,
+ * U+205F, U+3000). Returns the char unchanged when it is not a fold target.
+ */
+function foldFuzzyChar(ch: string): string {
 	const code = ch.charCodeAt(0);
 	if (code >= 0x2018 && code <= 0x201b) return "'";
 	if (code >= 0x201c && code <= 0x201f) return '"';
 	if ((code >= 0x2010 && code <= 0x2015) || code === 0x2212) return "-";
-	return " ";
+	if (code === 0x00a0 || (code >= 0x2002 && code <= 0x200a) || code === 0x202f || code === 0x205f || code === 0x3000) {
+		return " ";
+	}
+	return ch;
+}
+
+/**
+ * Fuzzy-normalize `text` and return an index map projecting every normalized
+ * code unit back to a byte offset in the ORIGINAL string: `map[k]` is the
+ * original index that produced normalized char `k`, and `map[normalized.length]`
+ * is `text.length` (sentinel). This lets a match found in normalized space be
+ * spliced back onto the original content so regions OUTSIDE the match keep their
+ * exact original bytes (smart quotes, ligatures, trailing whitespace, etc.).
+ *
+ * NFKC is applied per base grapheme (a base code point plus any trailing
+ * combining marks) so cross-code-point composition \u2014 e.g. "e"+U+0301 \u2192 "\u00E9" \u2014
+ * is preserved while each output char still has a defined origin offset.
+ * `normalizeForFuzzyMatch` is derived from this so the two never diverge.
+ */
+export function normalizeForFuzzyMatchWithMap(text: string): { normalized: string; map: number[] } {
+	// Pass 1 \u2014 NFKC per base grapheme; nfkc[k] originated at nfkcOrigin[k].
+	let nfkc = "";
+	const nfkcOrigin: number[] = [];
+	let i = 0;
+	while (i < text.length) {
+		const cp = text.codePointAt(i) as number;
+		let groupEnd = i + (cp > 0xffff ? 2 : 1);
+		while (groupEnd < text.length) {
+			const next = text.codePointAt(groupEnd) as number;
+			if (!COMBINING_MARK_RE.test(String.fromCodePoint(next))) break;
+			groupEnd += next > 0xffff ? 2 : 1;
+		}
+		const norm = text.slice(i, groupEnd).normalize("NFKC");
+		for (let k = 0; k < norm.length; k++) {
+			nfkc += norm[k];
+			nfkcOrigin.push(i);
+		}
+		i = groupEnd;
+	}
+
+	// Pass 2 \u2014 strip trailing horizontal whitespace (runs of [ \t\v\f] before a
+	// newline or end of text), then fold. Order matches normalizeForFuzzyMatch:
+	// strip first, fold second.
+	let normalized = "";
+	const map: number[] = [];
+	let j = 0;
+	while (j < nfkc.length) {
+		if (isHorizontalWs(nfkc[j])) {
+			let k = j;
+			while (k < nfkc.length && isHorizontalWs(nfkc[k])) k++;
+			if (k === nfkc.length || nfkc[k] === "\n") {
+				j = k; // trailing run \u2192 drop
+				continue;
+			}
+			normalized += nfkc[j];
+			map.push(nfkcOrigin[j]);
+			j++;
+			continue;
+		}
+		normalized += foldFuzzyChar(nfkc[j]);
+		map.push(nfkcOrigin[j]);
+		j++;
+	}
+	map.push(text.length);
+	return { normalized, map };
 }
 
 export function normalizeForFuzzyMatch(text: string): string {
-	return (
-		text
-			.normalize("NFKC")
-			// Strip trailing whitespace per line
-			.replace(TRAILING_WS_RE, "")
-			// Single-pass Unicode fold: smart quotes (U+2018-U+201F),
-			// dashes/hyphens (U+2010-U+2015, U+2212), special spaces
-			// (U+00A0, U+2002-U+200A, U+202F, U+205F, U+3000)
-			.replace(
-				/[\u2018-\u201B\u201C-\u201F\u2010-\u2015\u2212\u00A0\u2002-\u200A\u202F\u205F\u3000]/g,
-				foldUnicodeChar,
-			)
-	);
+	return normalizeForFuzzyMatchWithMap(text).normalized;
 }
 
 export interface FuzzyMatchResult {
@@ -460,10 +521,18 @@ function indentBlock(text: string, prefix: string): string {
 		.join("\n");
 }
 
-function countOccurrences(content: string, oldText: string): number {
-	const fuzzyContent = normalizeForFuzzyMatch(content);
-	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	return fuzzyContent.split(fuzzyOldText).length - 1;
+/** Count non-overlapping occurrences of `needle` in `haystack`. */
+function countSubstring(haystack: string, needle: string): number {
+	if (needle.length === 0) return 0;
+	let count = 0;
+	let from = 0;
+	for (;;) {
+		const idx = haystack.indexOf(needle, from);
+		if (idx === -1) break;
+		count++;
+		from = idx + needle.length;
+	}
+	return count;
 }
 
 function getNotFoundError(path: string, editIndex: number, totalEdits: number, hint?: string | null): Error {
@@ -506,12 +575,16 @@ function getNoChangeError(path: string, totalEdits: number): Error {
 }
 
 /**
- * Apply one or more exact-text replacements to LF-normalized content.
+ * Apply one or more text replacements to LF-normalized content.
  *
- * All edits are matched against the same original content. Replacements are
- * then applied in reverse order so offsets remain stable. If any edit needs
- * fuzzy matching, the operation runs in fuzzy-normalized content space to
- * preserve current single-edit behavior.
+ * Every edit is matched and spliced against the ORIGINAL content. Exact matches
+ * use it directly; fuzzy matches (smart quotes, NFKC, trailing whitespace,
+ * Unicode dashes/spaces) are located in normalized space and projected back to
+ * original offsets via {@link normalizeForFuzzyMatchWithMap}, so only the
+ * matched window changes — regions outside every edit keep their exact original
+ * bytes. Replacements are applied in reverse order so offsets stay stable. The
+ * returned baseContent is always the original content, so the caller's diff
+ * reflects the real on-disk delta instead of a file-wide re-normalization.
  */
 export function applyEditsToNormalizedContent(
 	normalizedContent: string,
@@ -529,44 +602,65 @@ export function applyEditsToNormalizedContent(
 		}
 	}
 
-	const initialMatches = normalizedEdits.map((edit) => fuzzyFindText(normalizedContent, edit.oldText));
-	const baseContent = initialMatches.some((match) => match.usedFuzzyMatch)
-		? normalizeForFuzzyMatch(normalizedContent)
-		: normalizedContent;
+	// Fuzzy projection of the original content, built lazily and reused across
+	// edits — only when an edit actually needs fuzzy matching.
+	let fuzzy: { normalized: string; map: number[] } | undefined;
+	const getFuzzy = (): { normalized: string; map: number[] } => {
+		if (!fuzzy) fuzzy = normalizeForFuzzyMatchWithMap(normalizedContent);
+		return fuzzy;
+	};
 
 	const matchedEdits: MatchedEdit[] = [];
 	for (let i = 0; i < normalizedEdits.length; i++) {
 		const edit = normalizedEdits[i];
-		const matchResult = fuzzyFindText(baseContent, edit.oldText);
-		if (!matchResult.found) {
-			// Tier-3: indent-tolerant. Anchored in baseContent so multi-edit offsets
-			// stay consistent. Re-indent the newText to match the surrounding block.
-			const indentMatch = indentTolerantFind(baseContent, edit.oldText);
-			if (indentMatch) {
-				matchedEdits.push({
-					editIndex: i,
-					matchIndex: indentMatch.index,
-					matchLength: indentMatch.matchLength,
-					newText: reindentText(edit.newText, indentMatch.fromIndent, indentMatch.toIndent),
-				});
-				continue;
+
+		// Tier 1 — exact match against the original content.
+		const exactCount = countSubstring(normalizedContent, edit.oldText);
+		if (exactCount > 1) {
+			throw getDuplicateError(path, i, normalizedEdits.length, exactCount);
+		}
+		if (exactCount === 1) {
+			matchedEdits.push({
+				editIndex: i,
+				matchIndex: normalizedContent.indexOf(edit.oldText),
+				matchLength: edit.oldText.length,
+				newText: edit.newText,
+			});
+			continue;
+		}
+
+		// Tier 2 — fuzzy match in normalized space, projected back to original
+		// offsets so the splice preserves everything outside the matched window.
+		const { normalized, map } = getFuzzy();
+		const fuzzyOldText = normalizeForFuzzyMatch(edit.oldText);
+		const fuzzyIndex = normalized.indexOf(fuzzyOldText);
+		if (fuzzyIndex !== -1) {
+			const occurrences = countSubstring(normalized, fuzzyOldText);
+			if (occurrences > 1) {
+				throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
 			}
-			const candidates = buildCandidateMatches(baseContent, edit.oldText, { maxCandidates: 2 });
-			const hint = formatCandidateMatchesForError(candidates);
-			throw getNotFoundError(path, i, normalizedEdits.length, hint);
+			const matchIndex = map[fuzzyIndex];
+			const matchLength = map[fuzzyIndex + fuzzyOldText.length] - matchIndex;
+			matchedEdits.push({ editIndex: i, matchIndex, matchLength, newText: edit.newText });
+			continue;
 		}
 
-		const occurrences = countOccurrences(baseContent, edit.oldText);
-		if (occurrences > 1) {
-			throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
+		// Tier 3 — indent-tolerant, anchored in the original content. Re-indent
+		// the newText to match the surrounding block.
+		const indentMatch = indentTolerantFind(normalizedContent, edit.oldText);
+		if (indentMatch) {
+			matchedEdits.push({
+				editIndex: i,
+				matchIndex: indentMatch.index,
+				matchLength: indentMatch.matchLength,
+				newText: reindentText(edit.newText, indentMatch.fromIndent, indentMatch.toIndent),
+			});
+			continue;
 		}
 
-		matchedEdits.push({
-			editIndex: i,
-			matchIndex: matchResult.index,
-			matchLength: matchResult.matchLength,
-			newText: edit.newText,
-		});
+		const candidates = buildCandidateMatches(normalizedContent, edit.oldText, { maxCandidates: 2 });
+		const hint = formatCandidateMatchesForError(candidates);
+		throw getNotFoundError(path, i, normalizedEdits.length, hint);
 	}
 
 	matchedEdits.sort((a, b) => a.matchIndex - b.matchIndex);
@@ -580,7 +674,7 @@ export function applyEditsToNormalizedContent(
 		}
 	}
 
-	let newContent = baseContent;
+	let newContent = normalizedContent;
 	for (let i = matchedEdits.length - 1; i >= 0; i--) {
 		const edit = matchedEdits[i];
 		newContent =
@@ -589,11 +683,11 @@ export function applyEditsToNormalizedContent(
 			newContent.substring(edit.matchIndex + edit.matchLength);
 	}
 
-	if (baseContent === newContent) {
+	if (normalizedContent === newContent) {
 		throw getNoChangeError(path, normalizedEdits.length);
 	}
 
-	return { baseContent, newContent };
+	return { baseContent: normalizedContent, newContent };
 }
 
 /**

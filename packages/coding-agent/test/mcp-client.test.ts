@@ -146,6 +146,72 @@ describe("McpHttpClient", () => {
 		expect(Date.now() - startedAt).toBeLessThan(5_000);
 	});
 
+	it("aborts a body that stalls after the headers (external signal must reach the body read)", async () => {
+		// Server sends headers immediately but never delivers the JSON body.
+		// Regression: cleanup used to run in the fetch `finally`, detaching the
+		// outer-abort forwarding before response.json() — the stalled body then
+		// hung forever and the user's abort could no longer cancel it.
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
+			(_input: string | URL | Request, init?: RequestInit) => {
+				const body = new ReadableStream({
+					start(controller) {
+						init?.signal?.addEventListener("abort", () => {
+							controller.error(new DOMException("This operation was aborted", "AbortError"));
+						});
+					},
+				});
+				return Promise.resolve(
+					new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+				);
+			},
+		) as unknown as typeof fetch;
+		const client = new McpHttpClient("stalled-body", { url: TEST_URL });
+		const startedAt = Date.now();
+		await expect(client.initialize(AbortSignal.timeout(100))).rejects.toThrow();
+		expect(Date.now() - startedAt).toBeLessThan(5_000);
+	});
+
+	it("times out a tools/call whose body stalls after the headers (internal timer covers the body read)", async () => {
+		const stallOn = "tools/call";
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
+			(_input: string | URL | Request, init?: RequestInit) => {
+				const parsed = init?.body ? JSON.parse(init.body.toString()) : {};
+				if (parsed.method === "notifications/initialized") {
+					return Promise.resolve(
+						new Response("", { status: 200, headers: { "content-type": "application/json" } }),
+					);
+				}
+				if (parsed.method !== stallOn) {
+					const result =
+						parsed.method === "initialize"
+							? { protocolVersion: "2025-06-18", serverInfo: { name: "test", version: "1" } }
+							: { tools: [{ name: "ping", description: "ping", inputSchema: { type: "object" } }] };
+					return Promise.resolve(
+						new Response(JSON.stringify({ jsonrpc: "2.0", id: parsed.id, result }), {
+							status: 200,
+							headers: { "content-type": "application/json" },
+						}),
+					);
+				}
+				const body = new ReadableStream({
+					start(controller) {
+						init?.signal?.addEventListener("abort", () => {
+							controller.error(new DOMException("This operation was aborted", "AbortError"));
+						});
+					},
+				});
+				return Promise.resolve(
+					new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+				);
+			},
+		) as unknown as typeof fetch;
+		const client = new McpHttpClient("stalled-call", { url: TEST_URL, timeoutMs: 100 });
+		await client.initialize();
+		const startedAt = Date.now();
+		await expect(client.callTool("ping", {})).rejects.toThrow();
+		expect(Date.now() - startedAt).toBeLessThan(5_000);
+	});
+
 	it("rejects SSE responses with a clear error", async () => {
 		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
 			async () => new Response("event: x\n", { status: 200, headers: { "content-type": "text/event-stream" } }),
@@ -222,6 +288,53 @@ describe("McpHttpClient", () => {
 		await client.initialize();
 		// After dispose the first request of the fresh handshake carries no stale id.
 		expect(sentSessionIds[0]).toBeNull();
+	});
+
+	it("clears a stale session id when initialize re-runs without dispose (lazy reconnect)", async () => {
+		// The lazy reconnect path reuses the SAME client instance and calls
+		// initialize() again WITHOUT dispose(). The fresh handshake must not echo
+		// the dead id; the server (e.g. after a restart) hands out a new one.
+		const sentSessionIds: Array<string | null> = [];
+		let handshakes = 0;
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = typeof input === "string" ? input : input.toString();
+				if (url !== TEST_URL) throw new Error(`unexpected url ${url}`);
+				sentSessionIds.push(new Headers(init?.headers).get("mcp-session-id"));
+				const body = init?.body ? JSON.parse(init.body.toString()) : {};
+				const headers: Record<string, string> = { "content-type": "application/json" };
+				// Each initialize hands out a distinct id: "sess-1" then "sess-2".
+				if (body.method === "initialize") {
+					handshakes++;
+					headers["mcp-session-id"] = `sess-${handshakes}`;
+				}
+				if (body.method === "notifications/initialized") return new Response("", { status: 200, headers });
+				const result =
+					body.method === "initialize"
+						? { protocolVersion: "2025-06-18", serverInfo: { name: "test", version: "1" } }
+						: body.method === "tools/list"
+							? { tools: [{ name: "ping", description: "", inputSchema: { type: "object" } }] }
+							: { content: [{ type: "text", text: "pong" }] };
+				return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { status: 200, headers });
+			},
+		) as unknown as typeof fetch;
+
+		const client = new McpHttpClient("test", { url: TEST_URL });
+
+		// First handshake: server assigns sess-1; the next call must echo sess-1.
+		await client.initialize();
+		sentSessionIds.length = 0;
+		await client.callTool("ping", {});
+		expect(sentSessionIds).toEqual(["sess-1"]);
+
+		// Reconnect WITHOUT dispose: the second initialize must NOT carry the stale
+		// sess-1. The server then assigns sess-2, which later calls must echo.
+		sentSessionIds.length = 0;
+		await client.initialize();
+		expect(sentSessionIds[0]).toBeNull();
+		sentSessionIds.length = 0;
+		await client.callTool("ping", {});
+		expect(sentSessionIds).toEqual(["sess-2"]);
 	});
 });
 

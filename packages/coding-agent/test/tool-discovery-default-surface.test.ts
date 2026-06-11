@@ -88,6 +88,37 @@ describe("tool discovery default surface", () => {
 		await session.dispose();
 	});
 
+	it("subtracts hiddenByDefault tools from the active surface and seeds them as hidden", async () => {
+		// web_search is default-ON, so without hiddenByDefault it is active and NOT
+		// indexed. Listing it must move it OFF the active surface and ONTO the
+		// discovery index — not leave it active AND indexed-as-hidden.
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ toolDiscovery: { hiddenByDefault: ["web_search"] } }),
+		);
+		const session = await createDefaultSession();
+		const active = new Set(session.getActiveToolNames());
+		expect(active.has("web_search")).toBe(false);
+		const hidden = new Set((getCurrentToolDiscoveryIndex()?.listHidden() ?? []).map((entry) => entry.name));
+		expect(hidden.has("web_search")).toBe(true);
+		// Invariant still holds: never both active and hidden.
+		for (const name of hidden) {
+			expect(active.has(name)).toBe(false);
+		}
+		await session.dispose();
+	});
+
+	it("never hides a core tool listed in hiddenByDefault", async () => {
+		// The always-on core (bash) cannot be turned off via discovery: listing it
+		// is a no-op so the agent never loses its ability to shell out / edit.
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ toolDiscovery: { hiddenByDefault: ["bash"] } }));
+		const session = await createDefaultSession();
+		expect(session.getActiveToolNames()).toContain("bash");
+		const hidden = new Set((getCurrentToolDiscoveryIndex()?.listHidden() ?? []).map((entry) => entry.name));
+		expect(hidden.has("bash")).toBe(false);
+		await session.dispose();
+	});
+
 	it("bakes the discovery nudge into the system prompt from boot (stable cache prefix)", async () => {
 		const session = await createDefaultSession();
 		// There ARE hidden opt-in tools, so the nudge must be present immediately —

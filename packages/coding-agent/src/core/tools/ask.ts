@@ -63,7 +63,7 @@ const askSchema = Type.Object(
 			}),
 		),
 		displayMode: Type.Optional(
-			Type.Union([Type.Literal("overlay"), Type.Literal("inline")], {
+			Type.Enum(["overlay", "inline"], {
 				description:
 					"Render inline above the prompt (default: full-width, in flow, never overlaps the transcript) or as a centered floating overlay.",
 			}),

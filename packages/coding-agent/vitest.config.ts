@@ -10,6 +10,7 @@ process.env.FORCE_COLOR = "0";
 const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url));
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
+const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
 
 export default defineConfig({
 	test: {
@@ -47,6 +48,7 @@ export default defineConfig({
 			{ find: /^@pit\/ai$/, replacement: aiSrcIndex },
 			{ find: /^@pit\/ai\/oauth$/, replacement: aiSrcOAuth },
 			{ find: /^@pit\/agent-core$/, replacement: agentSrcIndex },
+			{ find: /^@pit\/tui$/, replacement: tuiSrcIndex },
 		],
 	},
 });

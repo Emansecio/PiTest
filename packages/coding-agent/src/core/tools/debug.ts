@@ -85,12 +85,12 @@ const DEBUG_ACTIONS = [
 	"sessions",
 ] as const;
 
+const DEBUG_EVALUATE_CONTEXTS = ["watch", "repl", "hover", "variables", "clipboard"] as const;
+const DEBUG_DATA_ACCESS_TYPES = ["read", "write", "readWrite"] as const;
+
 const debugSchema = Type.Object(
 	{
-		action: Type.Union(
-			DEBUG_ACTIONS.map((a) => Type.Literal(a)),
-			{ description: "Debug operation to perform." },
-		),
+		action: Type.Enum(DEBUG_ACTIONS, { description: "Debug operation to perform." }),
 		program: Type.Optional(Type.String({ description: "Launch target path (required for launch)." })),
 		args: Type.Optional(Type.Array(Type.String(), { description: "Program arguments for launch." })),
 		adapter: Type.Optional(Type.String({ description: "Debugger adapter (gdb, lldb-dap, debugpy, dlv, ...)." })),
@@ -102,18 +102,7 @@ const debugSchema = Type.Object(
 		condition: Type.Optional(Type.String({ description: "Breakpoint condition." })),
 		hit_condition: Type.Optional(Type.String({ description: "Hit-count condition." })),
 		expression: Type.Optional(Type.String({ description: "Expression to evaluate (required for evaluate)." })),
-		context: Type.Optional(
-			Type.Union(
-				[
-					Type.Literal("watch"),
-					Type.Literal("repl"),
-					Type.Literal("hover"),
-					Type.Literal("variables"),
-					Type.Literal("clipboard"),
-				],
-				{ description: "Evaluate context (default repl)." },
-			),
-		),
+		context: Type.Optional(Type.Enum(DEBUG_EVALUATE_CONTEXTS, { description: "Evaluate context (default repl)." })),
 		frame_id: Type.Optional(Type.Number({ description: "Frame selector for evaluate/scopes." })),
 		scope_id: Type.Optional(Type.Number({ description: "Scope variables reference." })),
 		variable_ref: Type.Optional(Type.Number({ description: "Variable reference (preferred over scope_id)." })),
@@ -128,11 +117,7 @@ const debugSchema = Type.Object(
 		count: Type.Optional(Type.Number({ description: "Bytes to read (read_memory)." })),
 		data: Type.Optional(Type.String({ description: "Base64 payload for write_memory." })),
 		data_id: Type.Optional(Type.String({ description: "Data breakpoint id." })),
-		access_type: Type.Optional(
-			Type.Union([Type.Literal("read"), Type.Literal("write"), Type.Literal("readWrite")], {
-				description: "Data breakpoint access filter.",
-			}),
-		),
+		access_type: Type.Optional(Type.Enum(DEBUG_DATA_ACCESS_TYPES, { description: "Data breakpoint access filter." })),
 		command: Type.Optional(Type.String({ description: "Custom DAP request command." })),
 		arguments: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "Custom DAP request body." })),
 		offset: Type.Optional(Type.Number({ description: "Offset for breakpoints/disassembly/memory." })),

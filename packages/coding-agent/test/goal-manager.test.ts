@@ -150,6 +150,40 @@ describe("GoalManager lifecycle", () => {
 		expect(mgr.continuationPrompt()).toContain("goal_complete");
 	});
 
+	it("drops the persistence boilerplate when paused or budget_limited", () => {
+		const { mgr } = makeManager();
+		mgr.start("Make tests pass", {});
+		// Active: full boilerplate present.
+		expect(mgr.systemPromptSection()).toContain("Keep working until the goal is fully resolved");
+
+		// Paused: only a one-line objective reminder, no boilerplate / goal_complete.
+		mgr.pause();
+		const paused = mgr.systemPromptSection();
+		expect(paused).toBe("<goal>Goal (paused): Make tests pass</goal>");
+		expect(paused).toContain("Make tests pass");
+		expect(paused).not.toContain("Keep working");
+		expect(paused).not.toContain("goal_complete");
+		expect(paused).not.toContain("autonomous");
+
+		// Budget-limited: same compact one-liner, no boilerplate.
+		mgr.clear();
+		mgr.start("Ship the feature", { tokenBudget: 1000 });
+		mgr.recordTurn(1100);
+		expect(mgr.get()?.status).toBe("budget_limited");
+		const limited = mgr.systemPromptSection();
+		expect(limited).toBe("<goal>Goal (budget_limited): Ship the feature</goal>");
+		expect(limited).not.toContain("Keep working");
+		expect(limited).not.toContain("goal_complete");
+
+		// Resuming restores the full boilerplate.
+		mgr.resume();
+		expect(mgr.systemPromptSection()).toContain("Keep working until the goal is fully resolved");
+
+		// Completed goal still emits nothing.
+		mgr.complete("done");
+		expect(mgr.systemPromptSection()).toBe("");
+	});
+
 	it("serializes and restores state", () => {
 		const { mgr } = makeManager();
 		mgr.start("persist me", { tokenBudget: 5000 });

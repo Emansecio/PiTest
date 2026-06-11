@@ -40,28 +40,60 @@ interface FlattenedContent {
  * until compaction. Mirror the native tools: collapse identical repeated lines
  * (lossless) then truncate to DEFAULT_MAX_BYTES, exactly like read/grep do.
  */
-function capMcpText(text: string): string {
+export function capMcpText(text: string): string {
 	const collapsed = collapseRepeatedLines(text);
 	const truncation = truncateHead(collapsed, { maxBytes: DEFAULT_MAX_BYTES });
 	if (!truncation.truncated) return collapsed;
 	return `${truncation.content}\n\n[MCP output truncated: ${formatSize(DEFAULT_MAX_BYTES)} limit, ${truncation.totalLines} lines total — refine the query for the rest]`;
 }
 
+/**
+ * Flatten an MCP tool result into Pi content blocks under an AGGREGATE text
+ * budget. Each text/resource block is first capped per-block by capMcpText, but
+ * MCP results can carry many blocks; without a shared ceiling, N text blocks
+ * would inject N × DEFAULT_MAX_BYTES verbatim (the only tool surface that could
+ * blow past the per-tool cap). We debit each capped block's size from a single
+ * DEFAULT_MAX_BYTES budget; once it is spent the remaining text/resource blocks
+ * are dropped and replaced by one elision marker. The first text/resource block
+ * is always emitted (so the common single-block case is byte-identical), and
+ * images never count against the text budget nor get elided.
+ */
 function flattenMcpContent(result: McpCallToolResult): FlattenedContent {
 	const isError = result.isError ?? false;
 	const blocks: FlattenedContent["content"] = [];
+	let remaining = DEFAULT_MAX_BYTES;
+	let emittedText = false;
+	let elidedCount = 0;
+	let elidedBytes = 0;
 	for (const block of result.content) {
-		if (block.type === "text") {
-			blocks.push({ type: "text", text: capMcpText(block.text) });
-			continue;
-		}
 		if (block.type === "image") {
 			blocks.push({ type: "image", data: block.data, mimeType: block.mimeType });
 			continue;
 		}
-		if (block.type === "resource" && block.resource.text) {
-			blocks.push({ type: "text", text: capMcpText(`[Resource ${block.resource.uri}]\n${block.resource.text}`) });
+		let text: string | null = null;
+		if (block.type === "text") {
+			text = capMcpText(block.text);
+		} else if (block.type === "resource" && block.resource.text) {
+			text = capMcpText(`[Resource ${block.resource.uri}]\n${block.resource.text}`);
 		}
+		if (text === null) continue;
+		const size = Buffer.byteLength(text, "utf8");
+		// Always emit the first text/resource block (keeps the single-block case
+		// identical even when its own per-block cap pushes it just past the budget).
+		if (!emittedText || size <= remaining) {
+			blocks.push({ type: "text", text });
+			emittedText = true;
+			remaining -= size;
+			continue;
+		}
+		elidedCount += 1;
+		elidedBytes += size;
+	}
+	if (elidedCount > 0) {
+		blocks.push({
+			type: "text",
+			text: `[+${elidedCount} blocos (${formatSize(elidedBytes)}) elididos — refine a query]`,
+		});
 	}
 	if (blocks.length === 0) {
 		blocks.push({ type: "text", text: isError ? "Tool reported error with no content." : "(empty response)" });

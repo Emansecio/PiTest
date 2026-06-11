@@ -86,13 +86,10 @@ const LSP_READONLY_ACTIONS = new Set<string>([
 
 const lspSchema = Type.Object(
 	{
-		action: Type.Union(
-			LSP_ACTIONS.map((a) => Type.Literal(a)),
-			{
-				description:
-					"One of: diagnostics, definition, references, hover, symbols, rename, rename_file, code_actions, type_definition, implementation, status, reload, capabilities, request.",
-			},
-		),
+		action: Type.Enum(LSP_ACTIONS, {
+			description:
+				"One of: diagnostics, definition, references, hover, symbols, rename, rename_file, code_actions, type_definition, implementation, status, reload, capabilities, request.",
+		}),
 		file: Type.Optional(
 			Type.String({
 				description: 'File path, glob (e.g. src/**/*.ts), or "*" for workspace scope; source path for rename_file.',

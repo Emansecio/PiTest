@@ -165,6 +165,15 @@ export class CdpConnection {
 		return () => set.delete(handler);
 	}
 
+	/**
+	 * True once the socket closed (locally via close() or remotely via the WS
+	 * close/error path). A closed connection never recovers — callers should
+	 * drop it and open a fresh one (the manager evicts on this flag).
+	 */
+	isClosed(): boolean {
+		return this.closed;
+	}
+
 	close(): void {
 		if (this.closed) return;
 		this.closed = true;

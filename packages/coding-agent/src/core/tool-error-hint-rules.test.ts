@@ -10,9 +10,14 @@
  *                                `edits[N].after_hash <h> is ambiguous (matches lines ...)`
  */
 
-import type { AgentToolCall, AgentToolResult } from "@pit/agent-core";
+import type { AgentToolCall, AgentToolResult, ToolErrorHintMatchInput } from "@pit/agent-core";
 import { describe, expect, it } from "vitest";
-import { createDefaultToolErrorHintRegistry } from "./tool-error-hint-rules.ts";
+import type { AggregatedLearnedError } from "./learned-error-store.ts";
+import {
+	createDefaultToolErrorHintRegistry,
+	createLearnedErrorRules,
+	createSameSessionHintRule,
+} from "./tool-error-hint-rules.ts";
 
 function call(name: string, args: Record<string, unknown>): AgentToolCall {
 	return { type: "toolCall", id: "tool-1", name, arguments: args };
@@ -135,5 +140,83 @@ describe("edit-old-text-not-found generalization (#7)", () => {
 		const err = "Could not find the exact text. Paste this verbatim as oldText: <block>";
 		const c = call("edit", { path: "src/app.ts", edits: [] });
 		expect(hintIdsFor(c, err)).not.toContain("edit-old-text-not-found");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Truncated-fingerprint matching (#2): normalizeErrorFingerprint caps at 120
+// chars and appends U+2026, so a literal `includes` of the capped form never
+// matches the un-capped live error. Both the cross-session learned rule and
+// the same-session rule must strip the ellipsis and match on the prefix.
+// ---------------------------------------------------------------------------
+
+const ELLIPSIS = "…";
+
+function matchInput(errorText: string): ToolErrorHintMatchInput {
+	const c = call("bash", { command: "noop" });
+	const result: AgentToolResult<unknown> = errorResult(errorText);
+	return { call: c, result, errorText };
+}
+
+function aggregated(overrides: Partial<AggregatedLearnedError>): AggregatedLearnedError {
+	return {
+		tool: "bash",
+		fingerprint: "boom",
+		totalCount: 3,
+		sessionCount: 2,
+		matchedRuleIds: [],
+		sampleErrorText: "boom sample",
+		...overrides,
+	};
+}
+
+describe("createLearnedErrorRules truncated-fingerprint matching (#2)", () => {
+	it("matches a >120-char fingerprint (capped with U+2026) against the un-capped live text", () => {
+		// The aggregator caps the stored fingerprint at 120 chars + ellipsis. The
+		// live error is longer and has no ellipsis; the matcher must strip "…" and
+		// match on the 120-char prefix.
+		const fingerprint = `${"x".repeat(120)}${ELLIPSIS}`;
+		const rules = createLearnedErrorRules([aggregated({ fingerprint })]);
+		expect(rules).toHaveLength(1);
+		const rule = rules[0]!;
+
+		// Live error: 120 "x" prefix, plus digits (exercise the \d+→N normalize),
+		// plus trailing chars that the capped fingerprint dropped.
+		const live = `${"x".repeat(120)} 4096 more bytes that the fingerprint dropped`;
+		expect(rule.matcher(matchInput(live))).toBe(true);
+	});
+
+	it("does NOT match unrelated live text", () => {
+		const fingerprint = `${"x".repeat(120)}${ELLIPSIS}`;
+		const rule = createLearnedErrorRules([aggregated({ fingerprint })])[0]!;
+		expect(rule.matcher(matchInput("a totally different error 500"))).toBe(false);
+	});
+
+	it("regression: a short fingerprint (no ellipsis) still matches exactly as before", () => {
+		const rule = createLearnedErrorRules([aggregated({ fingerprint: "ENOENT no such file N" })])[0]!;
+		// Live error normalizes digits → N, so "errno 17" becomes "errno N".
+		expect(rule.matcher(matchInput("ENOENT no such file 17"))).toBe(true);
+		expect(rule.matcher(matchInput("permission denied"))).toBe(false);
+	});
+});
+
+describe("createSameSessionHintRule truncated-fingerprint matching (#2)", () => {
+	it("matches a >120-char fingerprint (capped with U+2026) on its prefix", () => {
+		const fingerprint = `${"y".repeat(120)}${ELLIPSIS}`;
+		const rule = createSameSessionHintRule({ tool: "bash", fingerprint, count: 2, index: 0 });
+		const live = `${"y".repeat(120)} 8 trailing bytes the cap removed`;
+		expect(rule.matcher(matchInput(live))).toBe(true);
+		expect(rule.matcher(matchInput("unrelated 1"))).toBe(false);
+	});
+
+	it("regression: a short fingerprint (no ellipsis) still matches exactly as before", () => {
+		const rule = createSameSessionHintRule({
+			tool: "bash",
+			fingerprint: "command not found",
+			count: 2,
+			index: 0,
+		});
+		expect(rule.matcher(matchInput("bash: foo: command not found"))).toBe(true);
+		expect(rule.matcher(matchInput("ENOENT"))).toBe(false);
 	});
 });

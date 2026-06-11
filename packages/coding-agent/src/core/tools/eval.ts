@@ -15,7 +15,7 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const evalSchema = Type.Object(
 	{
-		lang: Type.Union([Type.Literal("python"), Type.Literal("javascript")], {
+		lang: Type.Enum(["python", "javascript"], {
 			description: "Language kernel to execute code in. State persists per-lang across calls.",
 		}),
 		code: Type.String({ description: "Source code to execute in the persistent kernel." }),
