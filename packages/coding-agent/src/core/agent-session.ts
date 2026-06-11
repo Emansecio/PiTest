@@ -586,6 +586,11 @@ export class AgentSession {
 	// Guards against re-entering the goal auto-continuation loop from within a
 	// continuation prompt.
 	private _inGoalContinuation = false;
+	// Raised by interrupt() (Esc) and cleared when the next user prompt starts.
+	// Makes the goal auto-continuation loop and the verification gate stop
+	// re-dispatching the agent after the user cancels mid-task — without it, Esc
+	// only aborts the current turn and the orchestration loop immediately restarts.
+	private _userInterrupted = false;
 	// Native verification gate: `_turnTouchedFiles` arms it (set when a file tool
 	// writes/edits this prompt cycle), `_inVerification` guards re-entry, and
 	// `_verificationAbort` cancels an in-flight check on interrupt/dispose.
@@ -2614,6 +2619,9 @@ export class AgentSession {
 	 * interrupted. A safety cap bounds runaway loops; hitting it pauses the goal.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		// A fresh user/extension prompt clears any prior Esc interrupt so the goal
+		// loop and verification gate are allowed to run again.
+		this._userInterrupted = false;
 		// Reset the per-prompt-cycle flag that arms the verification gate.
 		this._turnTouchedFiles = false;
 		this._turnTouchedVisual = false;
@@ -2625,12 +2633,13 @@ export class AgentSession {
 		if (this._inGoalContinuation) return;
 
 		// Goal auto-continuation. Guarded so a continuation prompt (or a steer
-		// arriving mid-loop) never spawns a nested loop.
-		if (this._goal.shouldAutoContinue()) {
+		// arriving mid-loop) never spawns a nested loop, and stopped immediately
+		// when the user interrupts (Esc) so the task doesn't restart itself.
+		if (!this._userInterrupted && this._goal.shouldAutoContinue()) {
 			this._inGoalContinuation = true;
 			try {
 				let iterations = 0;
-				while (this._goal.shouldAutoContinue()) {
+				while (!this._userInterrupted && this._goal.shouldAutoContinue()) {
 					if (iterations++ >= GOAL_MAX_AUTO_ITERATIONS) {
 						this.pauseGoal();
 						break;
@@ -2659,7 +2668,7 @@ export class AgentSession {
 	 */
 	private async _runVerificationGate(options?: PromptOptions): Promise<void> {
 		if (this._inVerification || !this._turnTouchedFiles) return;
-		if (this._lastTurnAborted()) return;
+		if (this._userInterrupted || this._lastTurnAborted()) return;
 		const settings = this.settingsManager.getVerificationSettings();
 		if (!settings.enabled) return;
 
@@ -3216,6 +3225,33 @@ export class AgentSession {
 		this.abortRetry();
 		this.agent.abort();
 		await this.agent.waitForIdle();
+	}
+
+	/**
+	 * True when the agent or any orchestration loop is actively working. Used by
+	 * the Esc handler to decide whether a keypress should interrupt the task vs.
+	 * fall through to editor/double-Esc behavior.
+	 */
+	get isBusy(): boolean {
+		return this.isStreaming || this.isBashRunning || this._inGoalContinuation || this._inVerification;
+	}
+
+	/**
+	 * User-initiated interrupt (Esc): cancel the ENTIRE active task, not just the
+	 * current turn. Aborts the running agent turn, retry backoff, in-flight bash,
+	 * compaction/branch-summary, and the verification gate, then raises a one-shot
+	 * flag so the goal auto-continuation loop and the verification gate stop
+	 * re-dispatching the agent. Synchronous (no waitForIdle) so the keypress feels
+	 * instant. The flag is cleared when the next user prompt starts.
+	 */
+	interrupt(): void {
+		this._userInterrupted = true;
+		this.abortRetry();
+		this._verificationAbort?.abort();
+		this.abortBash();
+		this.abortCompaction();
+		this.abortBranchSummary();
+		this.agent.abort();
 	}
 
 	// =========================================================================

@@ -2229,10 +2229,15 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
-			if (this.session.isStreaming) {
-				this.restoreQueuedMessagesToEditor({ abort: true });
-			} else if (this.session.isBashRunning) {
-				this.session.abortBash();
+			if (this.session.isBusy) {
+				// Interrupt the WHOLE active task — current turn + goal auto-continuation
+				// + verification gate + in-flight bash + retry backoff — not just the
+				// current turn. Without this the orchestration loops restarted the agent
+				// right after the turn aborted, so Esc appeared to do nothing. Queued
+				// messages are returned to the editor so the user doesn't lose them.
+				this.restoreQueuedMessagesToEditor();
+				this.session.interrupt();
+				this.showStatus("Interrupted");
 			} else if (this.isBashMode) {
 				this.editor.setText("");
 				this.isBashMode = false;
