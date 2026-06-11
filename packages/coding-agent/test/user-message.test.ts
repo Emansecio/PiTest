@@ -50,6 +50,28 @@ describe("UserMessageComponent", () => {
 		expect(all).not.toContain(OSC133_OUTPUT_START);
 	});
 
+	test("repeated renders do not accumulate the OSC markers and keep a stable array identity", () => {
+		initTheme("dark");
+
+		const component = new UserMessageComponent("hello");
+		const first = component.render(20);
+		const firstBytes = first.slice();
+
+		const second = component.render(20);
+		const third = component.render(20);
+
+		// Byte-identical across frames; decorating the shell's memoized array in
+		// place would re-prefix A / re-suffix B every render.
+		expect(second).toEqual(firstBytes);
+		expect(third).toEqual(firstBytes);
+		expect(third[0].split(OSC133_PROMPT_START).length - 1).toBe(1);
+		expect(third[third.length - 1].split(OSC133_PROMPT_END).length - 1).toBe(1);
+		// Unchanged content → same instance, so parent flatten caches stay warm.
+		expect(second).toBe(first);
+		// And the previously returned array was never mutated.
+		expect(first).toEqual(firstBytes);
+	});
+
 	test("renders empty input as no output at all (shell collapses)", () => {
 		initTheme("dark");
 

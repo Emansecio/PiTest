@@ -64,10 +64,8 @@ export function which(command: string): string | null {
 	return null;
 }
 
-/** Sleep for `ms` milliseconds. */
-export function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
+// Re-export the shared sleep helper instead of keeping a local duplicate.
+export { sleep } from "../../utils/sleep.ts";
 
 /** Throw a uniform abort error when the signal has fired. */
 export function throwIfAborted(signal?: AbortSignal): void {

@@ -30,7 +30,7 @@ intermediate output are not surfaced to the parent — only the final answer.
 
 ## Inspection
 
-`/tasks` lists every subagent spawned in the current session, including
+Every spawned subagent is recorded on an in-memory registry, including
 status (`pending`, `running`, `completed`, `failed`, `cancelled`), turn
 count, and any error. Records are kept in memory only and are discarded on
 session shutdown.

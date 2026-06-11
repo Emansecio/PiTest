@@ -28,6 +28,21 @@ export class NavGroupComponent extends Container {
 	// Counters depend only on the group's composition (tool names), so cache the
 	// rendered string and rebuild it lazily on addCall instead of every frame.
 	private countsCache: string | null = null;
+	// Frozen aggregate state. Once every exec has settled (non-pending) the
+	// group can never go back to pending without addCall — exec states are
+	// terminal — so the O(execs) scan is computed once and reused. Never frozen
+	// while pending or while the ticker is still live (its check fn polls
+	// aggregateState each tick and must see fresh values until it self-stops).
+	private stateCache: GroupState | null = null;
+	// Assembled-output memo for the settled, collapsed, success header line —
+	// same pattern as ActivityLineComponent. Rebuilding header + summary +
+	// truncateToWidth every frame dominates the steady-state cost of resolved
+	// groups in history. NEVER served while an animation is live: pending
+	// (spinner ticking), the icon ease in flight, the counter ease in flight, or
+	// any body render (expanded / auto-shown error children may animate or
+	// stream) always recompute.
+	private linesCache: string[] | null = null;
+	private linesCacheKey = "";
 	private ticker: SpinnerTicker | null = null;
 	private prevState: GroupState | null = null;
 	private readonly iconEase: ColorEase;
@@ -64,6 +79,8 @@ export class NavGroupComponent extends Container {
 		exec.setActivityChild(true);
 		this.execs.push(exec);
 		this.countsCache = null;
+		this.stateCache = null;
+		this.linesCache = null;
 		// Brighten the counter from full-bright back to its steady muted tone so a
 		// freshly-folded call reads as motion without a layout shift.
 		this.countEase.begin("text", "toolOutput");
@@ -74,10 +91,23 @@ export class NavGroupComponent extends Container {
 	/** Duck-typed Expandable (interactive-mode's ctrl+o loop). */
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
+		this.linesCache = null;
 		for (const e of this.execs) e.setExpanded(expanded);
 	}
 
+	override invalidate(): void {
+		super.invalidate();
+		// Theme change / forced re-render: drop every memo holding colored bytes
+		// and let the wrapped execs rebuild too — they are rendered directly, not
+		// as Container children, so super.invalidate() does not reach them.
+		this.countsCache = null;
+		this.stateCache = null;
+		this.linesCache = null;
+		for (const e of this.execs) e.invalidate();
+	}
+
 	private aggregateState(): GroupState {
+		if (this.stateCache !== null) return this.stateCache;
 		let anyPending = false;
 		let anyError = false;
 		for (const e of this.execs) {
@@ -85,7 +115,11 @@ export class NavGroupComponent extends Container {
 			if (s === "pending") anyPending = true;
 			else if (s === "error" && !e.isAborted()) anyError = true;
 		}
-		return anyPending ? "pending" : anyError ? "error" : "success";
+		const state: GroupState = anyPending ? "pending" : anyError ? "error" : "success";
+		// Freeze only once settled AND the ticker has self-stopped: exec states
+		// are terminal, and addCall/invalidate clear the freeze.
+		if (state !== "pending" && this.ticker === null) this.stateCache = state;
+		return state;
 	}
 
 	private icon(state: GroupState): string {
@@ -158,6 +192,16 @@ export class NavGroupComponent extends Container {
 			}
 			this.prevState = state;
 		}
+		// Serve the memo only on the settled, collapsed, animation-free path:
+		// pending (spinner live), an in-flight icon/counter ease, and the body
+		// renders (expanded / auto-shown error children) keep recomputing every
+		// frame. state === "error" always renders at least one child body, so only
+		// the success header is ever memoized.
+		const cacheable = state === "success" && !this.expanded && !this.iconEase.active && !this.countEase.active;
+		const cacheKey = `${width}|${state}|${this.spinnerGlyph ?? ""}|${this.execs.length}|${this.expanded}`;
+		if (cacheable && this.linesCache !== null && this.linesCacheKey === cacheKey) {
+			return this.linesCache;
+		}
 		const lines = [this.header(state, width)];
 		if (this.expanded) {
 			for (const e of this.execs) {
@@ -172,6 +216,12 @@ export class NavGroupComponent extends Container {
 				e.setExpanded(true);
 				for (const l of capErrorPreview(e.render(width - 2), width - 2)) lines.push(`  ${l}`);
 			}
+		}
+		if (cacheable) {
+			this.linesCache = lines;
+			this.linesCacheKey = cacheKey;
+		} else {
+			this.linesCache = null;
 		}
 		return lines;
 	}

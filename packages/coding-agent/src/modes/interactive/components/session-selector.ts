@@ -18,7 +18,7 @@ import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, keyText } from "./keybinding-hints.ts";
+import { keyHint, keyText, selectionCursor } from "./keybinding-hints.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
@@ -450,7 +450,7 @@ class SessionList implements Component, Focusable {
 			}
 
 			// Cursor
-			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
+			const cursor = selectionCursor(isSelected);
 
 			// Calculate available width for message
 			const prefixWidth = visibleWidth(prefix);

@@ -30,6 +30,7 @@ import {
 	streamSimple,
 } from "@pit/ai";
 import { theme } from "../modes/interactive/theme/theme.ts";
+import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
@@ -100,7 +101,6 @@ import {
 	defaultFrequentFilesPath,
 	type FrequentFile,
 	FrequentFilesTracker,
-	formatFrequentFilesForPrompt,
 	loadFrequentFilesSnapshot,
 	saveFrequentFilesSnapshot,
 } from "./frequent-files.js";
@@ -175,7 +175,7 @@ import {
 import { createSameSessionHintRule } from "./tool-error-hint-rules.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { classifyBashCommand } from "./tools/bash-activity.js";
-import { createAllToolDefinitions } from "./tools/index.js";
+import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.js";
 import { ReadDedupeStore } from "./tools/read.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
@@ -332,34 +332,6 @@ function visualNudgePrompt(file: string): string {
  * goal doesn't append a custom entry on every single turn.
  */
 const GOAL_PERSIST_THROTTLE_MS = 10_000;
-
-/** The chrome_devtools_* tools, activated together when the feature is enabled. */
-const CHROME_DEVTOOLS_TOOL_NAMES = [
-	"chrome_devtools_list_pages",
-	"chrome_devtools_select_page",
-	"chrome_devtools_navigate",
-	"chrome_devtools_evaluate",
-	"chrome_devtools_screenshot",
-	"chrome_devtools_read_console",
-	"chrome_devtools_read_network",
-	"chrome_devtools_click",
-	"chrome_devtools_fill",
-	"chrome_devtools_press_key",
-	"chrome_devtools_get_text",
-	"chrome_devtools_wait_for",
-	"chrome_devtools_hover",
-	"chrome_devtools_select_option",
-	"chrome_devtools_upload_file",
-	"chrome_devtools_snapshot",
-	"chrome_devtools_get_network_body",
-];
-
-/**
- * Full chrome feature surface: the low-level CDP tools plus the higher-level
- * `preview` tool. All share the `chromeDevtools` gate (optionsKey) and the
- * auto-launched Chrome, so they activate and hide from discovery as one unit.
- */
-const CHROME_FEATURE_TOOL_NAMES = [...CHROME_DEVTOOLS_TOOL_NAMES, "preview"];
 
 export interface PromptOptions {
 	/** Whether to expand file-based prompt templates (default: true) */
@@ -843,8 +815,8 @@ export class AgentSession {
 			...on(s.getEvalSettings().enabled, ["eval"]),
 			...on(s.getLspSettings().enabled, ["lsp"]),
 			...on(s.getDebugSettings().enabled, ["debug"]),
-			...on(process.env.PIT_DEFER_HISTORY === "1", ["recall_tool_output"]),
-			...on(s.getChromeDevtoolsSettings().enabled, CHROME_FEATURE_TOOL_NAMES),
+			...on(isTruthyEnvFlag(process.env.PIT_DEFER_HISTORY), ["recall_tool_output"]),
+			...on(s.getChromeDevtoolsSettings().enabled, chromeFeatureToolNames),
 		];
 		const hidden = new Set(s.getToolDiscoverySettings().hiddenByDefault);
 		return [...core, ...gated.filter((name) => !hidden.has(name))];
@@ -856,7 +828,7 @@ export class AgentSession {
 	 *
 	 * 1. Tools the user explicitly listed in `toolDiscovery.hiddenByDefault`.
 	 * 2. Tools that exist in `createAllToolDefinitions` but NOT in the
-	 *    `createCodingToolDefinitions` set — the runtime knows about them but
+	 *    `createCodingTools` set — the runtime knows about them but
 	 *    they are off the active surface. The `alwaysActive` setting can
 	 *    override this so callers can keep a tool on the active surface.
 	 *
@@ -903,7 +875,7 @@ export class AgentSession {
 		// never pull in via discovery.
 		const codingNames = new Set([
 			...this._defaultActiveToolNames(),
-			...CHROME_FEATURE_TOOL_NAMES,
+			...chromeFeatureToolNames,
 			"edit_v2",
 			"resolve",
 			"goal_complete",
@@ -974,7 +946,7 @@ export class AgentSession {
 	 * recall_tool_output tool can access it. No-op when the env var is unset.
 	 */
 	private _openDeferredOutputStore(): void {
-		if (process.env.PIT_DEFER_HISTORY !== "1") return;
+		if (!isTruthyEnvFlag(process.env.PIT_DEFER_HISTORY)) return;
 		try {
 			const store = createDeferredOutputStore();
 			this._deferredOutputStore = store;
@@ -2399,16 +2371,15 @@ export class AgentSession {
 				appendSections.push(memoryBlock);
 			}
 		}
-		// Frequent-files section is opt-in and only rendered when there are
-		// entries clearing the configured min-hits floor. Surfaces hot files so
-		// the agent prefers reading known-relevant paths before broad search.
+		// Session frequent-files tracker: surfaces hot files so the agent prefers
+		// reading known-relevant paths before broad search. Handed to
+		// buildSystemPrompt for the dynamic suffix (NOT appendSections, which
+		// lands in the cacheable prefix): the tracker mutates as the session
+		// works, and a mutable block in the prefix rewrites it on every rebuild.
 		const ffCfg = this.settingsManager.getFrequentFilesSettings();
-		if (ffCfg.enabled) {
-			const top = this._frequentFiles.getTop({ topN: ffCfg.topN, minHits: ffCfg.minHits });
-			if (top.length > 0) {
-				appendSections.push(formatFrequentFilesForPrompt(top));
-			}
-		}
+		const sessionFrequentFiles = ffCfg.enabled
+			? this._frequentFiles.getTop({ topN: ffCfg.topN, minHits: ffCfg.minHits })
+			: [];
 		// Hindsight session-summary prefix: surfaces the most recent N
 		// "session-summary" entries from the bank so the next turn starts with
 		// a compact mental model of prior sessions. Section is only emitted
@@ -2436,6 +2407,9 @@ export class AgentSession {
 			// Repo-level frequent-files index — populated asynchronously after boot.
 			// Empty until the first compute resolves; harmless to pass either way.
 			frequentFiles: this._frequentFilesIndex.length > 0 ? this._frequentFilesIndex : undefined,
+			// Session tracker — rendered in the dynamic suffix, wins over the boot
+			// index once it has entries (only one <frequent_files> is emitted).
+			sessionFrequentFiles: sessionFrequentFiles.length > 0 ? sessionFrequentFiles : undefined,
 			// Git branch — read synchronously from .git/HEAD on every rebuild
 			// (subprocess-free), rendered in the dynamic suffix only.
 			gitState: gitBranch ? { branch: gitBranch } : undefined,

@@ -673,6 +673,17 @@ function toolNamesInOrder(): ToolName[] {
 	return Object.keys(TOOL_REGISTRY) as ToolName[];
 }
 
+/**
+ * The full chrome feature surface (the chrome_devtools_* CDP tools plus the
+ * higher-level `preview` tool), derived from the registry so a new chrome tool
+ * is automatically part of the default surface and the discovery exclude.
+ * All entries share the `chromeDevtools` gate and the auto-launched Chrome,
+ * so they activate and hide from discovery as one unit.
+ */
+export const chromeFeatureToolNames: ToolName[] = toolNamesInOrder().filter(
+	(name) => registry[name].coding === "chromeDevtools",
+);
+
 /** Whether a coding-surface gate is open given the supplied options. */
 function codingGateOpen(gate: CodingGate, options?: ToolsOptions): boolean {
 	switch (gate) {
@@ -756,22 +767,6 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 	const entry = registry[toolName];
 	if (!entry) throw new Error(`Unknown tool name: ${toolName}`);
 	return entry.factory(cwd, options?.[entry.optionsKey]);
-}
-
-export function createCodingToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
-	const tools: ToolDef[] = [];
-	for (const name of toolNamesInOrder()) {
-		const entry = registry[name];
-		if (entry.coding === false || !codingGateOpen(entry.coding, options)) continue;
-		tools.push(entry.definitionFactory(cwd, codingToolOptions(name, options)));
-	}
-	return tools;
-}
-
-export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOptions): ToolDef[] {
-	return toolNamesInOrder()
-		.filter((name) => registry[name].readOnly)
-		.map((name) => createToolDefinition(name, cwd, options));
 }
 
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {

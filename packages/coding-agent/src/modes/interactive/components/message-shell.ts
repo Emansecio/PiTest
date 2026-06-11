@@ -33,7 +33,7 @@
  * `setShowImages` / `setImageWidthCells`).
  */
 
-import { Container } from "@pit/tui";
+import { Container, truncateToWidth, visibleWidth } from "@pit/tui";
 
 /** Single character used for the left gutter. Thin vertical (`│`) per P3. */
 export const SHELL_GUTTER_CHAR = "│";
@@ -86,6 +86,18 @@ export class MessageShell extends Container {
 	// One-column glyph shown in the gutter of the FIRST line instead of the static
 	// bar (e.g. a running spinner). Undefined keeps the steady `│`.
 	private gutterSpinner: string | undefined;
+	// Memoized assembled output (leading blank + gutter + label). Children are
+	// still polled every frame — built-in components memoize internally and
+	// return the same array instance when unchanged (Component render
+	// contract) — so when width, every child's returned array reference, and
+	// the decoration props all match the previous frame, the assembled lines
+	// are byte-identical and the same array instance is returned (which in
+	// turn lets the parent Container reuse its own flatten cache). The prop
+	// setters bust this memo directly instead of calling invalidate(); see
+	// setGutterColor for why invalidate() must never be triggered from them.
+	private memoWidth = -1;
+	private memoChildOutputs: string[][] | null = null;
+	private memoLines: string[] | null = null;
 
 	constructor(options: MessageShellOptions = {}) {
 		super();
@@ -99,17 +111,25 @@ export class MessageShell extends Container {
 	 * Swap the gutter color at runtime — used by ToolExecutionComponent to
 	 * reflect pending → success / error state transitions. Mirrors
 	 * `Box.setBgFn`: does NOT invalidate. The shell reads the color fresh on
-	 * every render and there is no cache to bust; calling `invalidate()` from
-	 * here would recurse infinitely with subclasses whose own `invalidate()`
-	 * override re-enters this setter (e.g. ToolExecutionComponent).
+	 * every render; calling `invalidate()` from here would recurse infinitely
+	 * with subclasses whose own `invalidate()` override re-enters this setter
+	 * (e.g. ToolExecutionComponent). A real change busts the render memo
+	 * directly instead, so the next frame reassembles with the new color.
 	 */
 	setGutterColor(fn: ((text: string) => string) | undefined): void {
-		this.gutterColor = fn ?? identityColor;
+		const next = fn ?? identityColor;
+		if (next !== this.gutterColor) {
+			this.gutterColor = next;
+			this.bustMemo();
+		}
 	}
 
 	/** Update the label. No invalidate — same rationale as `setGutterColor`. */
 	setLabel(label: string | undefined): void {
-		this.label = label;
+		if (label !== this.label) {
+			this.label = label;
+			this.bustMemo();
+		}
 	}
 
 	/**
@@ -118,12 +138,29 @@ export class MessageShell extends Container {
 	 * as `setGutterColor` (the shell reads it fresh on every render).
 	 */
 	setGutterSpinner(glyph: string | undefined): void {
-		this.gutterSpinner = glyph;
+		if (glyph !== this.gutterSpinner) {
+			this.gutterSpinner = glyph;
+			this.bustMemo();
+		}
 	}
 
 	/** Toggle passthrough mode. No invalidate — same rationale as `setGutterColor`. */
 	setShellDisabled(disabled: boolean): void {
-		this.shellDisabled = disabled;
+		if (disabled !== this.shellDisabled) {
+			this.shellDisabled = disabled;
+			this.bustMemo();
+		}
+	}
+
+	/** Drop the memoized framed output (next render reassembles). */
+	private bustMemo(): void {
+		this.memoChildOutputs = null;
+		this.memoLines = null;
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.bustMemo();
 	}
 
 	override render(width: number): string[] {
@@ -135,36 +172,76 @@ export class MessageShell extends Container {
 		}
 
 		const innerWidth = Math.max(1, width - SHELL_GUTTER_COLS);
+		const children = this.children;
+		const childOutputs = new Array<string[]>(children.length);
+		const prevOutputs = this.memoChildOutputs;
+		// Children are re-polled every frame; a child signals "I changed" by
+		// returning a different array reference (Component render contract).
+		let reusable =
+			this.memoLines !== null &&
+			this.memoWidth === width &&
+			prevOutputs !== null &&
+			prevOutputs.length === children.length;
+		for (let i = 0; i < children.length; i++) {
+			const lines = children[i].render(innerWidth);
+			childOutputs[i] = lines;
+			if (reusable && prevOutputs !== null && lines !== prevOutputs[i]) {
+				reusable = false;
+			}
+		}
+		if (reusable && this.memoLines !== null) {
+			return this.memoLines;
+		}
+
+		// Memo miss: flatten the child outputs and assemble the framed lines.
 		const childLines: string[] = [];
-		for (const child of this.children) {
-			const lines = child.render(innerWidth);
+		for (const lines of childOutputs) {
 			for (const line of lines) childLines.push(line);
 		}
+
+		let result: string[];
 		if (childLines.length === 0) {
 			// Empty content collapses the shell entirely so callers can decide
 			// to "hide" a block by clearing its children, mirroring how
 			// ToolExecutionComponent already collapses empty render output.
-			return [];
-		}
+			result = [];
+		} else {
+			const barGutter = this.gutterColor(SHELL_GUTTER_CHAR);
+			// The first line may show a running spinner glyph in place of the bar.
+			const headGutter = this.gutterSpinner !== undefined ? this.gutterColor(this.gutterSpinner) : barGutter;
+			result = [];
 
-		const barGutter = this.gutterColor(SHELL_GUTTER_CHAR);
-		// The first line may show a running spinner glyph in place of the bar.
-		const headGutter = this.gutterSpinner !== undefined ? this.gutterColor(this.gutterSpinner) : barGutter;
-		const result: string[] = [];
-
-		if (!this.noLeadingGap) {
-			result.push("");
-		}
-
-		for (let i = 0; i < childLines.length; i++) {
-			let line = childLines[i];
-			if (i === 0 && this.label !== undefined && this.label.length > 0) {
-				const labelText = `${BOLD_OPEN}${this.label}${BOLD_CLOSE}`;
-				line = `${this.gutterColor(labelText)}  ${line}`;
+			if (!this.noLeadingGap) {
+				result.push("");
 			}
-			result.push(`${i === 0 ? headGutter : barGutter} ${line}`);
+
+			for (let i = 0; i < childLines.length; i++) {
+				let line = childLines[i];
+				const hasLabel = i === 0 && this.label !== undefined && this.label.length > 0;
+				if (hasLabel) {
+					const labelText = `${BOLD_OPEN}${this.label}${BOLD_CLOSE}`;
+					line = `${this.gutterColor(labelText)}  ${line}`;
+				}
+				let assembled = `${i === 0 ? headGutter : barGutter} ${line}`;
+				// Children render at innerWidth and components like Text pad their
+				// lines to full width with spaces — injecting the label in front
+				// pushes the first line past `width`, and the host's clamp would
+				// then dangle a lone `…` at the right border, far from the text.
+				// Trim the invisible padding first; only genuinely overflowing
+				// content earns an ellipsis, attached to where the text ends.
+				if (hasLabel && visibleWidth(assembled) > width) {
+					assembled = assembled.replace(/ +$/, "");
+					if (visibleWidth(assembled) > width) {
+						assembled = truncateToWidth(assembled, width, "…");
+					}
+				}
+				result.push(assembled);
+			}
 		}
 
+		this.memoWidth = width;
+		this.memoChildOutputs = childOutputs;
+		this.memoLines = result;
 		return result;
 	}
 }

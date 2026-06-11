@@ -68,11 +68,7 @@ export function createTodoToolDefinition(
 		description:
 			"Track multi-step work as a todo list. Actions: create (needs subject), update (needs id; set status/activeForm), list (optional status filter), get (needs id), delete (needs id), clear. Mark one todo in_progress at a time and completed as soon as it is done.",
 		promptSnippet: "Plan and track multi-step work as todos",
-		promptGuidelines: [
-			"For non-trivial multi-step tasks, create todos up front, then keep them current.",
-			"Mark exactly one todo in_progress at a time (with a short activeForm) before starting it.",
-			"Mark a todo completed immediately when done — do not batch completions.",
-		],
+		promptGuidelines: ["For non-trivial multi-step tasks, create todos up front, then keep them current."],
 		parameters: todoSchema,
 		async execute(_toolCallId: string, input: TodoToolInput) {
 			const mgr = getCurrentTodoManager();

@@ -14,7 +14,7 @@ import {
 import type { WarningSettings } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyDisplayText } from "./keybinding-hints.ts";
+import { HINT_SEPARATOR, keyDisplayText, keyHint } from "./keybinding-hints.ts";
 
 const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -187,7 +187,13 @@ class SelectSubmenu extends Container {
 
 		// Hint
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to select · Esc to go back"), 0, 0));
+		this.addChild(
+			new Text(
+				`  ${keyHint("tui.select.confirm", "select")}${HINT_SEPARATOR}${keyHint("tui.select.cancel", "back")}`,
+				0,
+				0,
+			),
+		);
 	}
 
 	handleInput(data: string): void {

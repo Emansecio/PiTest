@@ -1,10 +1,19 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { resetCapabilitiesCache, setCapabilities } from "@pit/tui";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ActivityLineComponent } from "../src/modes/interactive/components/activity-line.ts";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
-beforeAll(() => initTheme("dark"));
+beforeAll(() => {
+	initTheme("dark");
+	// Pin capabilities: under a truecolor host (Windows Terminal sets
+	// WT_SESSION) the icon ColorEase would arm against the fake TUI's no-op
+	// animation callback and never settle, so the memoization paths under test
+	// would never be reachable. Tests must not depend on the host terminal.
+	setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+});
+afterAll(() => resetCapabilitiesCache());
 
 function fakeTui() {
 	return {
@@ -58,10 +67,10 @@ describe("ActivityLineComponent", () => {
 		);
 		const out = c.render(120).map(stripAnsi);
 		// header + ERROR_PREVIEW_LINES + 1 hint line
-		expect(out.length).toBe(1 + 6 + 1);
-		expect(out.some((l) => l.includes("error line 6"))).toBe(true);
-		expect(out.some((l) => l.includes("error line 7"))).toBe(false);
-		expect(out[out.length - 1]).toContain("+19 more lines");
+		expect(out.length).toBe(1 + 10 + 1);
+		expect(out.some((l) => l.includes("error line 10"))).toBe(true);
+		expect(out.some((l) => l.includes("error line 11"))).toBe(false);
+		expect(out[out.length - 1]).toContain("+15 more lines");
 		expect(out[out.length - 1]).toContain("to expand");
 	});
 	it("renders the full error body when explicitly expanded", () => {
@@ -91,6 +100,71 @@ describe("ActivityLineComponent", () => {
 		const out = c.render(120).map(stripAnsi);
 		expect(out[0]).toContain("Ran");
 		expect(out[0]).toContain("$ npm test");
+	});
+});
+
+describe("ActivityLineComponent — settled-line memoization", () => {
+	it("returns the same array instance across frames once settled and collapsed", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(execStub({}));
+		const first = c.render(120);
+		const second = c.render(120);
+		expect(second).toBe(first);
+		expect(second.map(stripAnsi)[0]).toContain("Edited");
+	});
+
+	it("recomputes when the width changes", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(execStub({}));
+		const w120 = c.render(120);
+		const w80 = c.render(80);
+		expect(w80).not.toBe(w120);
+		expect(c.render(80)).toBe(w80);
+	});
+
+	it("never serves the memo while pending (spinner is live)", () => {
+		let state = "pending";
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(execStub({ getActivityState: () => state as "pending" | "success" }));
+		const p1 = c.render(120);
+		const p2 = c.render(120);
+		// Each pending frame reassembles — the spinner glyph may change between
+		// any two frames without any other state changing.
+		expect(p2).not.toBe(p1);
+
+		// Settling busts the line and the settled bytes are then memoized.
+		state = "success";
+		const s1 = c.render(120);
+		expect(s1.map(stripAnsi)[0]).toContain("Edited");
+		expect(c.render(120)).toBe(s1);
+	});
+
+	it("setExpanded busts the memo and the body recomputes every frame", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(execStub({}));
+		const collapsed = c.render(120);
+		expect(c.render(120)).toBe(collapsed);
+
+		c.setExpanded(true);
+		const e1 = c.render(120);
+		expect(e1).not.toBe(collapsed);
+		expect(e1.map(stripAnsi).some((l) => l.includes("<exec body>"))).toBe(true);
+		// Expanded body may stream/animate → no memo while expanded.
+		expect(c.render(120)).not.toBe(e1);
+
+		c.setExpanded(false);
+		const back = c.render(120);
+		expect(back.map(stripAnsi)).toEqual(collapsed.map(stripAnsi));
+	});
+
+	it("invalidate() drops the memo and reassembles byte-identically", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(execStub({ invalidate() {} }));
+		const first = c.render(120);
+		c.invalidate();
+		const second = c.render(120);
+		expect(second).not.toBe(first);
+		expect(second).toEqual(first);
 	});
 });
 

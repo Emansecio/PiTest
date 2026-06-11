@@ -343,11 +343,7 @@ export function createEditToolDefinition(
 		promptSnippet:
 			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
 		promptGuidelines: [
-			"Use edit for precise changes (edits[].oldText must match exactly)",
-			"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls",
-			"Each edits[].oldText is matched against the original file, not after earlier edits are applied. Do not emit overlapping or nested edits. Merge nearby changes into one edit.",
 			"Keep edits[].oldText as small as possible while still being unique in the file. Do not pad with large unchanged regions.",
-			"Prefer edit for ordinary text changes. For very large files where output tokens matter, prefer edit_v2 (content-hash anchors); for structural rewrites across multiple files use ast_edit; to create or fully replace a file use write.",
 		],
 		parameters: editSchema,
 		renderShell: "self",

@@ -11,7 +11,7 @@
  *   1  — at least one check "blocked"
  */
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import chalk from "chalk";
 import { CONFIG_DIR_NAME } from "../../config.ts";
 import type { AgentSessionServices } from "../../core/agent-session-services.ts";
@@ -247,14 +247,4 @@ export function formatReportText(report: DryRunReport): string {
 
 export function formatReportJson(report: DryRunReport): string {
 	return JSON.stringify(report, null, 2);
-}
-
-export function maybeStatExists(path: string): boolean {
-	if (!existsSync(path)) return false;
-	try {
-		statSync(path);
-		return true;
-	} catch {
-		return false;
-	}
 }

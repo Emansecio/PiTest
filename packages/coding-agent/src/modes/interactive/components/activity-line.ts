@@ -28,6 +28,15 @@ export class ActivityLineComponent extends Container {
 	private readonly iconEase: ColorEase;
 	private targetCache: string | null = null;
 	private targetCacheKey = "";
+	// Assembled-output memo for the settled, collapsed header line. Rebuilding
+	// the header (stripAnsi + theme.bold + truncateToWidth) every frame
+	// dominates the steady-state cost of a long activity stack; once a line has
+	// settled its bytes only change with width. The cache is NEVER served while
+	// an animation is live — pending (spinner ticking), the icon ease in
+	// flight, or any body render (expanded / auto-shown error, whose exec
+	// children may animate or stream) always recompute.
+	private linesCache: string[] | null = null;
+	private linesCacheKey = "";
 	// Sequence number for an unnamed `task` agent (assigned by ActivityStacker,
 	// per turn). 0 = not a task / unassigned.
 	private taskOrdinal = 0;
@@ -41,6 +50,8 @@ export class ActivityLineComponent extends Container {
 	setExec(exec: ToolExecutionComponent, taskOrdinal = 0): void {
 		this.exec = exec;
 		this.taskOrdinal = taskOrdinal;
+		this.linesCache = null;
+		this.targetCache = null;
 		exec.setActivityChild(true);
 		if (exec.getActivityState() === "pending") this.ensureTicker();
 		this.ui.requestRender();
@@ -48,7 +59,18 @@ export class ActivityLineComponent extends Container {
 
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
+		this.linesCache = null;
 		this.exec?.setExpanded(expanded);
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		// Theme change / forced re-render: drop both memos (they hold colored
+		// bytes) and let the wrapped exec rebuild too — it is rendered directly,
+		// not as a Container child, so super.invalidate() does not reach it.
+		this.linesCache = null;
+		this.targetCache = null;
+		this.exec?.invalidate();
 	}
 
 	private ensureTicker(): void {
@@ -145,6 +167,15 @@ export class ActivityLineComponent extends Container {
 			this.prevState = state;
 		}
 		const pending = state === "pending";
+		const autoError = !this.expanded && state === "error" && !this.exec.isAborted();
+		// Serve the memo only on the settled, collapsed, animation-free path:
+		// pending (spinner live), an in-flight icon ease, and the body renders
+		// (expanded / auto error) must keep recomputing every frame.
+		const cacheable = !pending && !this.expanded && !autoError && !this.iconEase.active;
+		const cacheKey = `${width}|${state}`;
+		if (cacheable && this.linesCache !== null && this.linesCacheKey === cacheKey) {
+			return this.linesCache;
+		}
 		const name = this.exec.getToolName();
 		let label: string;
 		let target: string;
@@ -177,7 +208,6 @@ export class ActivityLineComponent extends Container {
 		// reticência is U+2026 (truncateToWidth's default).
 		const header = truncateToWidth(rawHeader, width);
 		const lines = [header];
-		const autoError = !this.expanded && state === "error" && !this.exec.isAborted();
 		if (this.expanded) {
 			for (const l of this.exec.render(width - 2)) lines.push(`  ${l}`);
 		} else if (autoError) {
@@ -185,6 +215,12 @@ export class ActivityLineComponent extends Container {
 			// lines so a failure never floods the CLI — the rest is one ctrl+o away.
 			this.exec.setExpanded(true);
 			for (const l of capErrorPreview(this.exec.render(width - 2), width - 2)) lines.push(`  ${l}`);
+		}
+		if (cacheable) {
+			this.linesCache = lines;
+			this.linesCacheKey = cacheKey;
+		} else {
+			this.linesCache = null;
 		}
 		return lines;
 	}

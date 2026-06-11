@@ -31,9 +31,9 @@ describe("WelcomeBox", () => {
 		expect(plain).toContain("~/PiTest (main)");
 		// The active model lives in the footer, not the welcome.
 		expect(plain).not.toContain("thinking");
-		// Top and bottom rules frame the block.
-		expect(stripAnsi(out[0])).toMatch(/^─+$/);
+		// A single closing rule — no heavy top rule above the logo.
 		expect(stripAnsi(out[out.length - 1])).toMatch(/^─+$/);
+		expect(stripAnsi(out[0])).not.toMatch(/^─+$/);
 	});
 
 	it("never emits a line wider than the viewport, across widths", () => {
@@ -71,5 +71,55 @@ describe("WelcomeBox", () => {
 		expect(plain).toContain("scout");
 		// The half-block wordmark only ships for the default "pit" name.
 		expect(plain).not.toContain("█");
+	});
+});
+
+describe("WelcomeBox — render memoization", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	it("returns the same array instance across frames with unchanged data and width", () => {
+		const box = new WelcomeBox(BASE);
+		const first = box.render(80);
+		const second = box.render(80);
+		expect(second).toBe(first);
+	});
+
+	it("recomputes when the width changes, then memoizes at the new width", () => {
+		const box = new WelcomeBox(BASE);
+		const w80 = box.render(80);
+		const w60 = box.render(60);
+		expect(w60).not.toBe(w80);
+		expect(box.render(60)).toBe(w60);
+	});
+
+	it("setData busts the memo and the output reflects the new data", () => {
+		const box = new WelcomeBox(BASE);
+		const before = box.render(80);
+		box.setData({ ...BASE, version: "9.9.9" });
+		const after = box.render(80);
+		expect(after).not.toBe(before);
+		expect(after.map(stripAnsi).join("\n")).toContain("v9.9.9");
+	});
+
+	it("invalidate() drops the memo and reassembles byte-identically", () => {
+		const box = new WelcomeBox(BASE);
+		const first = box.render(80);
+		box.invalidate();
+		const second = box.render(80);
+		expect(second).not.toBe(first);
+		expect(second).toEqual(first);
+	});
+
+	it("never serves the memo while a wordmarkColor closure is present", () => {
+		// wordmarkColor may be a time-varying ease closure (logo fade on mount) —
+		// the same (width, data) pair can legitimately change bytes per frame, so
+		// the memo must be bypassed entirely while it is set.
+		const box = new WelcomeBox({ ...BASE, wordmarkColor: (s) => s });
+		const first = box.render(80);
+		const second = box.render(80);
+		expect(second).not.toBe(first);
+		expect(second).toEqual(first);
 	});
 });

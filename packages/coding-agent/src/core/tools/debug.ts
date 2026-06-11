@@ -509,8 +509,6 @@ debug(action: "launch", adapter: "debugpy", program: "scripts/job.py", args: ["-
 const PROMPT_SNIPPET = "Drive a real debugger (DAP): breakpoints, stepping, variable/stack inspection, evaluate.";
 const PROMPT_GUIDELINES = [
 	"Use debug instead of print/bash when you need live program state: breakpoints, stepping, threads, stack, variables.",
-	"Launch with program (and adapter:debugpy for Python); set breakpoints; continue; inspect at the stop.",
-	"Only one debug session at a time — terminate before launching another.",
 ];
 
 // =============================================================================

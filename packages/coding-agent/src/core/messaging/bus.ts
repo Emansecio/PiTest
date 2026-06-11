@@ -13,7 +13,7 @@ import type {
 /** Default per-dispatch reply timeout (matches omp's `irc.timeoutMs`). */
 export const DEFAULT_MESSAGE_TIMEOUT_MS = 120_000;
 
-/** Cap on the in-memory activity log surfaced by `/messages`. */
+/** Cap on the in-memory activity log (consumed by the transcript relay). */
 const MAX_ACTIVITY = 200;
 
 function toPeerInfo(p: AgentParticipant): PeerInfo {
@@ -188,7 +188,7 @@ export class AgentMessageBus {
 		return result;
 	}
 
-	/** Most recent inter-agent sends (newest last), for `/messages`. */
+	/** Most recent inter-agent sends (newest last). */
 	recentActivity(limit = 20): MessageActivity[] {
 		return this.#activity.slice(-limit);
 	}

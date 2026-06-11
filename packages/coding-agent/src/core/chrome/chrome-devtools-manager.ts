@@ -163,7 +163,7 @@ export class ChromeDevtoolsManager {
 		const binary = this.binaryPath || this.findBinary();
 		if (!binary) {
 			throw new Error(
-				"Chrome was not found. Install Chrome, or set chromeDevtools.binaryPath / PI_CHROME_DEVTOOLS_BINARY.",
+				"Chrome was not found. Install Chrome, or set chromeDevtools.binaryPath / PIT_CHROME_DEVTOOLS_BINARY.",
 			);
 		}
 		this.launch({ binary, port: this.port, userDataDir: this.userDataDir });

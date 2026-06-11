@@ -133,7 +133,7 @@ export class DaxnutsComponent implements Component {
 				// Show scan line
 				if (i === revealedRows) {
 					const scanline = "▓".repeat(WIDTH);
-					lines.push(center(rgb(100, 200, 255) + scanline + RESET));
+					lines.push(center(t.fg("accent", scanline)));
 				} else {
 					lines.push(center(" ".repeat(WIDTH)));
 				}

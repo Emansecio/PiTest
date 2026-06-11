@@ -13,7 +13,7 @@ import type { SessionTreeNode } from "../../../core/session-manager.ts";
 import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, keyText } from "./keybinding-hints.ts";
+import { HINT_SEPARATOR, keyHint, keyText, selectionCursor } from "./keybinding-hints.ts";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -624,7 +624,7 @@ class TreeList implements Component {
 			const isSelected = i === this.selectedIndex;
 
 			// Build line: cursor + prefix + path marker + label + content
-			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
+			const cursor = selectionCursor(isSelected);
 
 			// If multiple roots, shift display (roots at 0, not 1)
 			const displayIndent = this.multipleRoots ? Math.max(0, flatNode.indent - 1) : flatNode.indent;
@@ -1105,7 +1105,7 @@ class LabelInput implements Component, Focusable {
 		lines.push(...this.input.render(availableWidth).map((line) => truncateToWidth(`${indent}${line}`, width)));
 		lines.push(
 			truncateToWidth(
-				`${indent}${keyHint("tui.select.confirm", "save")}  ${keyHint("tui.select.cancel", "cancel")}`,
+				`${indent}${keyHint("tui.select.confirm", "save")}${HINT_SEPARATOR}${keyHint("tui.select.cancel", "cancel")}`,
 				width,
 			),
 		);

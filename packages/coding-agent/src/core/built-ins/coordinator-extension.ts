@@ -120,7 +120,7 @@ export function resolveMaxSubagentDepth(env: NodeJS.ProcessEnv = process.env): n
  * Default byte cap on a subagent's final output as it lands in the parent's
  * context. Without it, a verbose subagent (or a giant structured result) floods
  * the parent conversation. The tail is kept — the subagent's summary/conclusion
- * usually lands at the end — and the full output stays retrievable via `/tasks`.
+ * usually lands at the end — and the full output stays on the in-memory registry.
  */
 const DEFAULT_SUBAGENT_MAX_BYTES = 24 * 1024; // 24KB
 const SUBAGENT_MAX_LINES = 1000;
@@ -322,11 +322,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					const rawText =
 						resultSchema && result.value !== undefined ? JSON.stringify(result.value, null, 2) : result.output;
 					// Cap the output before it lands in the parent's context. Keep the
-					// tail (the subagent's summary/conclusion usually lands at the end);
-					// the full output stays retrievable via `/tasks id=…`.
+					// tail (the subagent's summary/conclusion usually lands at the end).
 					const capped = truncateTail(rawText, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
 					const text = capped.truncated
-						? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}; full output via /tasks id=${result.record.id}]`
+						? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}; re-spawn with a narrower prompt or a result_schema if you need the elided part]`
 						: capped.content;
 					return {
 						content: [{ type: "text" as const, text }],
@@ -360,71 +359,5 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 
 	return (pi: ExtensionAPI) => {
 		pi.registerTool(makeTaskTool(0));
-
-		pi.registerCommand("tasks", {
-			description:
-				"List recently spawned subagents and their status. `/tasks <id>` dumps that subagent's full output.",
-			async handler(args, ctx) {
-				const records = registry.list();
-				if (records.length === 0) {
-					const msg = "No subagents spawned yet.";
-					if (ctx.hasUI) ctx.ui.notify(msg, "info");
-					else console.log(msg);
-					return;
-				}
-				// `/tasks <id>` (or `/tasks id=<id>`, as cited in the truncation note)
-				// dumps the full stored output of one subagent — the part elided by the
-				// per-result byte cap.
-				const wanted = args.trim().replace(/^id=/, "").trim();
-				if (wanted) {
-					const record = registry.get(wanted);
-					if (!record) {
-						const msg = `No subagent with id "${wanted}". Run /tasks to list ids.`;
-						if (ctx.hasUI) ctx.ui.notify(msg, "info");
-						else console.log(msg);
-						return;
-					}
-					const header = `${record.id} [${record.status}] depth=${record.depth} turns=${record.turnCount}`;
-					const body = record.output && record.output.length > 0 ? record.output : "(no output recorded)";
-					const dump = `${header}\n\n${body}`;
-					if (ctx.hasUI) ctx.ui.notify(dump, "info");
-					else console.log(dump);
-					return;
-				}
-				const lines = records.map(
-					(r) =>
-						`${r.id} [${r.status}] depth=${r.depth} turns=${r.turnCount}${r.deniedToolCalls?.length ? ` denied=${r.deniedToolCalls.length}(${[...new Set(r.deniedToolCalls)].join(",")})` : ""}${r.error ? ` err=${r.error.slice(0, 60)}` : ""}`,
-				);
-				const out = lines.join("\n");
-				if (ctx.hasUI) ctx.ui.notify(out, "info");
-				else console.log(out);
-			},
-		});
-
-		pi.registerCommand("messages", {
-			description: "List recent inter-agent messages (who coordinated with whom).",
-			async handler(_args, ctx) {
-				const log = agentMessageBus.recentActivity(20);
-				if (log.length === 0) {
-					const msg = "No inter-agent messages yet.";
-					if (ctx.hasUI) ctx.ui.notify(msg, "info");
-					else console.log(msg);
-					return;
-				}
-				const lines = log.map((a) => {
-					const extra = [
-						a.replies > 0 ? `replies=${a.replies}` : "",
-						a.failed > 0 ? `failed=${a.failed}` : "",
-						a.notFound > 0 ? `notFound=${a.notFound}` : "",
-					]
-						.filter(Boolean)
-						.join(" ");
-					return `${a.from} → ${a.to} [${a.mode}] "${a.message}" delivered=${a.delivered.length}${extra ? ` ${extra}` : ""}`;
-				});
-				const out = lines.join("\n");
-				if (ctx.hasUI) ctx.ui.notify(out, "info");
-				else console.log(out);
-			},
-		});
 	};
 }

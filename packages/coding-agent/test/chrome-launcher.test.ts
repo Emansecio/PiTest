@@ -2,13 +2,31 @@ import { describe, expect, it, vi } from "vitest";
 import { findChromeBinary, launchChrome, waitForEndpoint } from "../src/core/chrome/chrome-launcher.js";
 
 describe("findChromeBinary", () => {
-	it("honors the PI_CHROME_DEVTOOLS_BINARY override", () => {
+	it("honors the PIT_CHROME_DEVTOOLS_BINARY override", () => {
 		const found = findChromeBinary({
-			env: { PI_CHROME_DEVTOOLS_BINARY: "/custom/chrome" },
+			env: { PIT_CHROME_DEVTOOLS_BINARY: "/custom/chrome" },
 			platform: "linux",
 			exists: (p) => p === "/custom/chrome",
 		});
 		expect(found).toBe("/custom/chrome");
+	});
+
+	it("falls back to the legacy PI_CHROME_DEVTOOLS_BINARY override", () => {
+		const found = findChromeBinary({
+			env: { PI_CHROME_DEVTOOLS_BINARY: "/legacy/chrome" },
+			platform: "linux",
+			exists: (p) => p === "/legacy/chrome",
+		});
+		expect(found).toBe("/legacy/chrome");
+	});
+
+	it("prefers PIT_CHROME_DEVTOOLS_BINARY over the legacy PI_ name", () => {
+		const found = findChromeBinary({
+			env: { PIT_CHROME_DEVTOOLS_BINARY: "/new/chrome", PI_CHROME_DEVTOOLS_BINARY: "/legacy/chrome" },
+			platform: "linux",
+			exists: (p) => p === "/new/chrome",
+		});
+		expect(found).toBe("/new/chrome");
 	});
 
 	it("finds Chrome on Windows under Program Files", () => {

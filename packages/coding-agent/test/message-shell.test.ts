@@ -225,6 +225,105 @@ describe("MessageShell — shellDisabled (renderShell:'self' opt-out)", () => {
 	});
 });
 
+/** Child that hands back the same array instance until `out` is reassigned —
+ * mirrors how Text/Markdown signal "unchanged" per the Component contract. */
+class StableChild implements Component {
+	out: string[];
+	constructor(out: string[]) {
+		this.out = out;
+	}
+	render(_width: number): string[] {
+		return this.out;
+	}
+	invalidate(): void {
+		this.out = this.out.slice();
+	}
+}
+
+describe("MessageShell — render memoization", () => {
+	it("returns the same array instance when width, children, and props are unchanged", () => {
+		const shell = new MessageShell({ gutterColor: RED, label: "[x]" });
+		shell.addChild(new StableChild(["a", "b"]));
+
+		const first = shell.render(40);
+		const second = shell.render(40);
+		expect(second).toBe(first);
+		expect(second).toEqual(first);
+	});
+
+	it("recomputes when a child swaps its output array (no stale content)", () => {
+		const child = new StableChild(["before"]);
+		const shell = new MessageShell();
+		shell.addChild(child);
+
+		const first = shell.render(40);
+		child.out = ["after"];
+		const second = shell.render(40);
+
+		expect(second).not.toBe(first);
+		expect(stripAnsi(second[1])).toBe(`${SHELL_GUTTER_CHAR} after`);
+		// The previously returned array was not mutated.
+		expect(stripAnsi(first[1])).toBe(`${SHELL_GUTTER_CHAR} before`);
+	});
+
+	it("recomputes when the width changes even with unchanged child refs", () => {
+		const shell = new MessageShell();
+		shell.addChild(new StableChild(["x"]));
+		const w40 = shell.render(40);
+		const w20 = shell.render(20);
+		expect(w20).not.toBe(w40);
+		expect(w20).toEqual(w40); // bytes identical here — the child ignores width
+	});
+
+	it("prop setters bust the memo (label / gutter color / spinner / shellDisabled)", () => {
+		const shell = new MessageShell({ gutterColor: RED });
+		shell.addChild(new StableChild(["body"]));
+		const base = shell.render(40);
+
+		shell.setLabel("[new]");
+		const labeled = shell.render(40);
+		expect(labeled).not.toBe(base);
+		expect(stripAnsi(labeled[1])).toBe(`${SHELL_GUTTER_CHAR} [new]  body`);
+
+		shell.setGutterColor(GREEN);
+		const recolored = shell.render(40);
+		expect(recolored).not.toBe(labeled);
+		expect(recolored[1]).not.toBe(labeled[1]);
+		expect(stripAnsi(recolored[1])).toBe(stripAnsi(labeled[1]));
+
+		shell.setGutterSpinner("⠋");
+		const spun = shell.render(40);
+		expect(spun).not.toBe(recolored);
+		expect(stripAnsi(spun[1]).startsWith("⠋")).toBe(true);
+		shell.setGutterSpinner(undefined);
+		expect(stripAnsi(shell.render(40)[1]).startsWith(SHELL_GUTTER_CHAR)).toBe(true);
+
+		shell.setShellDisabled(true);
+		expect(shell.render(40).map(stripAnsi)).toEqual(["body"]);
+		shell.setShellDisabled(false);
+		expect(shell.render(40).map(stripAnsi)).toEqual(["", `${SHELL_GUTTER_CHAR} [new]  body`]);
+	});
+
+	it("invalidate() drops the memo and reassembles byte-identically", () => {
+		const shell = new MessageShell({ gutterColor: RED, label: "[inv]" });
+		shell.addChild(new StableChild(["line"]));
+
+		const first = shell.render(40);
+		shell.invalidate();
+		const second = shell.render(40);
+
+		expect(second).not.toBe(first);
+		expect(second).toEqual(first);
+	});
+
+	it("memoizes the empty-collapse result too", () => {
+		const shell = new MessageShell();
+		const first = shell.render(40);
+		expect(first).toEqual([]);
+		expect(shell.render(40)).toBe(first);
+	});
+});
+
 describe("MessageShell — composition", () => {
 	it("works with real `Text` children at sensible widths", () => {
 		const shell = new MessageShell({ gutterColor: RED });

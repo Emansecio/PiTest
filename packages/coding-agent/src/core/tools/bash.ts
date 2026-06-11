@@ -9,6 +9,7 @@ import { clampBashCommandRow } from "../../modes/interactive/components/bash-com
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcess } from "../../utils/child-process.ts";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import {
 	getShellConfig,
 	getShellEnv,
@@ -477,7 +478,7 @@ function rebuildBashResultRenderComponent(
  * truncated, the temp file is unavailable, or the output is not JSON.
  */
 async function crushBashJsonOutput(snapshot: OutputSnapshot): Promise<string | undefined> {
-	if (process.env.PIT_JSON_CRUSH !== "1") return undefined;
+	if (!isTruthyEnvFlag(process.env.PIT_JSON_CRUSH)) return undefined;
 	if (!snapshot.truncation.truncated || !snapshot.fullOutputPath) return undefined;
 	let full: string;
 	try {

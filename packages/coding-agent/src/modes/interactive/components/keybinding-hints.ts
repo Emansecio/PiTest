@@ -46,3 +46,15 @@ export function keyHint(keybinding: Keybinding, description: string): string {
 export function rawKeyHint(key: string, description: string): string {
 	return theme.fg("dim", formatKeyText(key)) + theme.fg("muted", ` ${description}`);
 }
+
+/** Standard separator between inline key hints, shared across all selectors. */
+export const HINT_SEPARATOR = " · ";
+
+/**
+ * Standard cursor prefix for selectable list rows: an accent arrow when the row
+ * is selected, two spaces otherwise. Single source so every selector renders the
+ * same glyph and color.
+ */
+export function selectionCursor(isSelected: boolean): string {
+	return isSelected ? theme.fg("accent", "→ ") : "  ";
+}

@@ -118,22 +118,6 @@ export function normalizeForFuzzyMatch(text: string): string {
 	return normalizeForFuzzyMatchWithMap(text).normalized;
 }
 
-export interface FuzzyMatchResult {
-	/** Whether a match was found */
-	found: boolean;
-	/** The index where the match starts (in the content that should be used for replacement) */
-	index: number;
-	/** Length of the matched text */
-	matchLength: number;
-	/** Whether fuzzy matching was used (false = exact match) */
-	usedFuzzyMatch: boolean;
-	/**
-	 * The content to use for replacement operations.
-	 * When exact match: original content. When fuzzy match: normalized content.
-	 */
-	contentForReplacement: string;
-}
-
 /**
  * Result of an indent-tolerant match. The match is anchored in the ORIGINAL
  * (un-stripped) content so we never lose indentation on surrounding lines.
@@ -163,52 +147,6 @@ interface MatchedEdit {
 export interface AppliedEditsResult {
 	baseContent: string;
 	newContent: string;
-}
-
-/**
- * Find oldText in content, trying exact match first, then fuzzy match.
- * When fuzzy matching is used, the returned contentForReplacement is the
- * fuzzy-normalized version of the content (trailing whitespace stripped,
- * Unicode quotes/dashes normalized to ASCII).
- */
-export function fuzzyFindText(content: string, oldText: string): FuzzyMatchResult {
-	// Try exact match first
-	const exactIndex = content.indexOf(oldText);
-	if (exactIndex !== -1) {
-		return {
-			found: true,
-			index: exactIndex,
-			matchLength: oldText.length,
-			usedFuzzyMatch: false,
-			contentForReplacement: content,
-		};
-	}
-
-	// Try fuzzy match - work entirely in normalized space
-	const fuzzyContent = normalizeForFuzzyMatch(content);
-	const fuzzyOldText = normalizeForFuzzyMatch(oldText);
-	const fuzzyIndex = fuzzyContent.indexOf(fuzzyOldText);
-
-	if (fuzzyIndex === -1) {
-		return {
-			found: false,
-			index: -1,
-			matchLength: 0,
-			usedFuzzyMatch: false,
-			contentForReplacement: content,
-		};
-	}
-
-	// When fuzzy matching, we work in the normalized space for replacement.
-	// This means the output will have normalized whitespace/quotes/dashes,
-	// which is acceptable since we're fixing minor formatting differences anyway.
-	return {
-		found: true,
-		index: fuzzyIndex,
-		matchLength: fuzzyOldText.length,
-		usedFuzzyMatch: true,
-		contentForReplacement: fuzzyContent,
-	};
 }
 
 /** Strip UTF-8 BOM if present, return both the BOM (if any) and the text without it */
@@ -861,17 +799,4 @@ export async function computeEditsDiff(
 	} catch (err) {
 		return { error: err instanceof Error ? err.message : String(err) };
 	}
-}
-
-/**
- * Compute the diff for a single edit operation without applying it.
- * Kept as a convenience wrapper for single-edit callers.
- */
-export async function computeEditDiff(
-	path: string,
-	oldText: string,
-	newText: string,
-	cwd: string,
-): Promise<EditDiffResult | EditDiffError> {
-	return computeEditsDiff(path, [{ oldText, newText }], cwd);
 }

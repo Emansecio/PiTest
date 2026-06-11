@@ -42,10 +42,6 @@ export function restoreStdout(): void {
 	stdoutTakeoverState = undefined;
 }
 
-export function isStdoutTakenOver(): boolean {
-	return stdoutTakeoverState !== undefined;
-}
-
 export function writeRawStdout(text: string): void {
 	if (stdoutTakeoverState) {
 		stdoutTakeoverState.rawStdoutWrite(text);

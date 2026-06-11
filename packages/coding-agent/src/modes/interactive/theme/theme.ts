@@ -449,8 +449,8 @@ export class Theme {
 	}
 
 	/**
-	 * Pick a palette colorizer by how full the context window is: `muted` under
-	 * {@link CONTEXT_USAGE_WARN_PERCENT}, `warning` past it, `error` past
+	 * Pick a palette colorizer by how full the context window is: calm `accent`
+	 * under {@link CONTEXT_USAGE_WARN_PERCENT}, `warning` past it, `error` past
 	 * {@link CONTEXT_USAGE_ERROR_PERCENT}, and bold `error` past
 	 * {@link CONTEXT_USAGE_CRITICAL_PERCENT} (about to force compaction).
 	 * Thresholds are strict `>` (the lower band owns its boundary). Shared by the
@@ -463,7 +463,9 @@ export class Theme {
 		if (percent > CONTEXT_USAGE_CRITICAL_PERCENT) return (str: string) => `\x1b[1m${this.fg("error", str)}\x1b[22m`;
 		if (percent > CONTEXT_USAGE_ERROR_PERCENT) return (str: string) => this.fg("error", str);
 		if (percent > CONTEXT_USAGE_WARN_PERCENT) return (str: string) => this.fg("warning", str);
-		return (str: string) => this.fg("muted", str);
+		// Calm band is a real STATE color (teal accent), not neutral gray — the
+		// gauge should read "healthy" at a glance, then escalate by hue.
+		return (str: string) => this.fg("accent", str);
 	}
 
 	getBashModeBorderColor(): (str: string) => string {
@@ -1016,7 +1018,9 @@ export function getResolvedThemeColors(themeName?: string): Record<string, strin
 	const themeJson = loadThemeJson(name);
 	const resolved = resolveThemeColors(themeJson.colors, themeJson.vars);
 
-	// Default text color for empty values (terminal uses default fg color)
+	// HTML export has no "terminal default fg" to inherit, so empty palette
+	// values fall back to a neutral near-black/near-white matching the light/dark
+	// background. These are export-only and intentionally outside the palette.
 	const defaultText = isLight ? "#000000" : "#e5e5e7";
 
 	const cssColors: Record<string, string> = {};
@@ -1031,14 +1035,6 @@ export function getResolvedThemeColors(themeName?: string): Record<string, strin
 		}
 	}
 	return cssColors;
-}
-
-/**
- * Check if a theme is a "light" theme (for CSS that needs light/dark variants).
- */
-export function isLightTheme(themeName?: string): boolean {
-	// Currently just check the name - could be extended to analyze colors
-	return themeName === "light";
 }
 
 /**

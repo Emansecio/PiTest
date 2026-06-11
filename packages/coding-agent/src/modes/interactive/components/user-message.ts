@@ -34,6 +34,15 @@ const OSC133_PROMPT_END = "\x1b]133;B\x07"; // FTCS B: command entered / end of 
  * including the leading blank that the shell emits.
  */
 export class UserMessageComponent extends MessageShell {
+	// Decorated-output memo keyed by the shell's returned array reference.
+	// MessageShell.render is memoized and hands back the same array instance
+	// while nothing changed (Component render contract); mutating it in place
+	// would accumulate the OSC markers frame over frame, and slicing every
+	// frame would defeat the parent Container's flatten cache. Re-decorating
+	// only when the shell's array identity changes keeps both.
+	private decorateSource: string[] | null = null;
+	private decorated: string[] | null = null;
+
 	constructor(text: string, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
 		super({
 			gutterColor: (content: string) => theme.fg("gutterUser", content),
@@ -46,13 +55,20 @@ export class UserMessageComponent extends MessageShell {
 	}
 
 	override render(width: number): string[] {
-		const lines = super.render(width);
-		if (lines.length === 0) {
-			return lines;
+		const rendered = super.render(width);
+		if (rendered.length === 0) {
+			return rendered;
+		}
+		if (rendered === this.decorateSource && this.decorated !== null) {
+			return this.decorated;
 		}
 
+		// Copy-on-write: never mutate the shell's (memoized) array in place.
+		const lines = rendered.slice();
 		lines[0] = OSC133_PROMPT_START + lines[0];
 		lines[lines.length - 1] = lines[lines.length - 1] + OSC133_PROMPT_END;
+		this.decorateSource = rendered;
+		this.decorated = lines;
 		return lines;
 	}
 }

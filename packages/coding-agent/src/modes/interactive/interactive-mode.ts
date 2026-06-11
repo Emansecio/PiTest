@@ -749,7 +749,9 @@ export class InteractiveMode {
 			this.builtInHeader = new Text("", 0, 0);
 			this.headerContainer.addChild(this.builtInHeader);
 		}
-		this.headerContainer.addChild(new Spacer(1));
+		// No trailing spacer: every chat block (MessageShell) and loaded-resource
+		// section brings its own leading blank, so a header-owned gap doubled up
+		// into two dead lines between the banner and the first content.
 
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);

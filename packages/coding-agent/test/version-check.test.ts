@@ -3,7 +3,6 @@ import {
 	checkForNewPiVersion,
 	comparePackageVersions,
 	getLatestPiRelease,
-	getLatestPiVersion,
 	isNewerPackageVersion,
 } from "../src/utils/version-check.js";
 
@@ -55,7 +54,7 @@ describe("version checks", () => {
 		const fetchMock = vi.fn(async () => Response.json({ version: "1.2.4" }));
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(getLatestPiVersion("1.2.3")).resolves.toBe("1.2.4");
+		await expect(getLatestPiRelease("1.2.3")).resolves.toEqual({ version: "1.2.4" });
 		expect(fetchMock).toHaveBeenCalledWith(
 			"https://pit.dev/api/latest-version",
 			expect.objectContaining({
@@ -94,7 +93,7 @@ describe("version checks", () => {
 		const fetchMock = vi.fn();
 		vi.stubGlobal("fetch", fetchMock);
 
-		await expect(getLatestPiVersion("1.2.3")).resolves.toBeUndefined();
+		await expect(getLatestPiRelease("1.2.3")).resolves.toBeUndefined();
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 });

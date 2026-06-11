@@ -2,7 +2,7 @@ import type { Model } from "@pit/ai";
 import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Key, matchesKey, Spacer, Text } from "@pit/tui";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyText } from "./keybinding-hints.ts";
+import { keyText, selectionCursor } from "./keybinding-hints.ts";
 
 // EnabledIds: null = all enabled (no filter), string[] = explicit ordered list
 type EnabledIds = string[] | null;
@@ -200,7 +200,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = this.filteredItems[i]!;
 			const isSelected = i === this.selectedIndex;
-			const prefix = isSelected ? theme.fg("accent", "→ ") : "  ";
+			const prefix = selectionCursor(isSelected);
 			const modelText = isSelected ? theme.fg("accent", item.model.id) : item.model.id;
 			const providerBadge = theme.fg("muted", ` [${item.model.provider}]`);
 			const status = allEnabled ? "" : item.enabled ? theme.fg("success", " ✓") : theme.fg("dim", " ✗");

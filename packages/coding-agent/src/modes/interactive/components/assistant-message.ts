@@ -191,10 +191,18 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	override render(width: number): string[] {
-		const lines = super.render(width);
-		if (this.hasToolCalls || lines.length === 0) {
-			return lines;
+		const rendered = super.render(width);
+		if (this.hasToolCalls || rendered.length === 0) {
+			return rendered;
 		}
+
+		// Copy before decorating: Container.render hands back its memoized array
+		// (the same instance while no child changed), and the Component render
+		// contract forbids mutating an already-returned array. Decorating in
+		// place would bake the OSC 133 markers / deliverable glyph into that
+		// cache and re-apply them on every steady-state frame (accumulating
+		// markers and growing the line past the terminal width).
+		const lines = rendered.slice();
 
 		// Soft wavefront: while the trailing block is still revealing, fade its
 		// growing edge so freshly streamed text materializes instead of popping.

@@ -214,8 +214,8 @@ export async function spawnSubagent(
 
 	const checker = deps.permissionChecker;
 	// Tool calls denied by the parent's policy (including headless ask→deny).
-	// Recorded on the registry so the denial is visible in `/tasks` instead of
-	// vanishing silently inside the subagent loop.
+	// Recorded on the registry (and surfaced in the task result's details) so
+	// the denial doesn't vanish silently inside the subagent loop.
 	const deniedToolCalls: string[] = [];
 	const agent = new Agent({
 		initialState: {

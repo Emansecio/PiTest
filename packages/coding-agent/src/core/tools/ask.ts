@@ -137,11 +137,7 @@ export function createAskToolDefinition(
 			"Ask the user a question mid-turn. Provide up to 8 options for the user to pick one (or several with allowMultiple), and/or allow a freeform typed answer. Use to resolve ambiguity, not to confirm safe actions. In non-interactive runs the recommended (or first) option is auto-selected.",
 		promptSnippet: "Ask the user to choose options and/or type an answer",
 		promptGuidelines: [
-			"Use ask to resolve genuine ambiguity — not to confirm safe actions you can just perform.",
-			"Provide up to 8 short, mutually exclusive options, or omit options for a freeform-only question.",
 			"Set allowMultiple when several options can be picked together; set allowFreeform to also accept a typed answer.",
-			"Mark at most one option as recommended; in non-interactive runs that one is picked automatically.",
-			"Keep question, context, header (≤24 chars), and option labels (≤60 chars) terse.",
 		],
 		parameters: askSchema,
 		async execute(toolCallId: string, input: AskToolInput) {

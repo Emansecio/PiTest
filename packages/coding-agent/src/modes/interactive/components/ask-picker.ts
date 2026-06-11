@@ -24,6 +24,7 @@ import {
 import type { AskOptionsRequest } from "../../../core/user-input-bus.ts";
 import { theme as defaultTheme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
+import { HINT_SEPARATOR, keyText } from "./keybinding-hints.ts";
 
 const RECOMMENDED_BADGE = " (recommended)";
 const FREEFORM_ROW_LABEL = "✎ Type a custom answer…";
@@ -337,15 +338,17 @@ class AskPicker implements Component, Focusable {
 	}
 
 	private hint(): string {
+		const confirm = keyText("tui.select.confirm");
+		const cancel = keyText("tui.select.cancel");
 		if (this.mode === "comment") {
-			return `enter or ${this.commentToggleKey} to save · esc to cancel`;
+			return `${confirm} or ${this.commentToggleKey} to save${HINT_SEPARATOR}${cancel} to cancel`;
 		}
 		const parts = ["↑↓ move"];
-		if (this.allowMultiple) parts.push("space to toggle", "enter to confirm");
-		else parts.push("enter to choose");
+		if (this.allowMultiple) parts.push("space to toggle", `${confirm} to confirm`);
+		else parts.push(`${confirm} to choose`);
 		if (this.allowComment) parts.push(`${this.commentToggleKey} comment`);
-		parts.push("esc to cancel");
-		return parts.join(" · ");
+		parts.push(`${cancel} to cancel`);
+		return parts.join(HINT_SEPARATOR);
 	}
 }
 

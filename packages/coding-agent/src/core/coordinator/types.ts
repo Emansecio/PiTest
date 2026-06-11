@@ -66,7 +66,7 @@ export interface SpawnSubagentOptions {
 	taskName?: string;
 	/** Working directory used as the parent for `.pit/worktrees` and the default cwd. */
 	cwd?: string;
-	/** Nesting depth of the subagent being spawned (0 = top-level). Recorded for `/tasks` visibility. */
+	/** Nesting depth of the subagent being spawned (0 = top-level). Recorded on the registry. */
 	depth?: number;
 	/**
 	 * When true, the parent's model-invocable skills are appended to the

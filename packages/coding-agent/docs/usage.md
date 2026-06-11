@@ -31,7 +31,7 @@ See [Keybindings](keybindings.md) for all shortcuts and customization.
 
 ## Slash Commands
 
-Type `/` in the editor to open command completion. Extensions can register custom commands, skills are available as `/skill:name`, and prompt templates expand via `/templatename`.
+Type `/` in the editor to open command completion. Extensions can register custom commands, skills are available as `/name` (the legacy `/skill:name` form is still accepted), and prompt templates expand via `/templatename`.
 
 | Command | Description |
 |---------|-------------|
@@ -187,7 +187,7 @@ cat README.md | pit -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`.
+Core built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `symbol`, `ask`, `todo`. Feature tools such as `lsp`, `debug`, `eval`, `web_search`, and the Chrome DevTools tools join the surface when their settings are enabled (most are on by default; see [Settings](settings.md)).
 
 ### Resource Options
 
@@ -268,12 +268,16 @@ pit --tools read,grep,find,ls -p "Review the code"
 | `PIT_SKIP_VERSION_CHECK` | Skip the Pit version update check at startup. This prevents the `pit.dev` latest-version request |
 | `PIT_TELEMETRY` | Override install/update telemetry: `1`/`true`/`yes` or `0`/`false`/`no`. This does not disable update checks |
 | `PIT_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
+| `PIT_DEFER_MCP` | `1`/`true`/`yes` forces every MCP server's tools into the tool-discovery index (same as `mcp.defer: "always"`) |
+| `PIT_READ_DEDUPE` | Per-session de-dup of identical repeat reads is on by default; set to `0` to disable |
+| `PIT_JSON_CRUSH` | Set to `1` to enable structural crushing of large JSON tool outputs |
+| `PIT_DEFER_HISTORY` | Set to `1` to defer large historical tool outputs to a session store, recallable via `recall_tool_output` |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
 ## Design Principles
 
-Pit keeps the core small and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
+Pit keeps the core cohesive and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
 
-It intentionally does not include built-in MCP, sub-agents, permission popups, plan mode, to-dos, or background bash. You can build or install those workflows as extensions or packages, or use external tools such as containers and tmux.
+The core ships with native support for the workflows an agent needs every day: an MCP client (`mcp.servers` in [Settings](settings.md)), sub-agents (the `task` tool), to-do tracking (the `todo` tool), and a permission system with `plan`, `auto`, and `unsafe` modes (see [permissions.md](permissions.md)). These built-ins are implemented as extensions on the same APIs available to you — anything beyond them you can build or install as extensions, skills, prompt templates, or packages.
 
 For the full rationale, read the [blog post](https://pituned.at/posts/2025-11-30-pi-coding-agent/).

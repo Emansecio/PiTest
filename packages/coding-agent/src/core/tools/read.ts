@@ -10,6 +10,7 @@ import { type Static, Type } from "typebox";
 import { getReadmePath } from "../../config.js";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.js";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.js";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.js";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.js";
@@ -551,7 +552,7 @@ Common mistakes to avoid:
 								const startLine = offset ? Math.max(0, offset - 1) : 0;
 								const startLineDisplay = startLine + 1;
 								const jsonCrushEligible =
-									process.env.PIT_JSON_CRUSH === "1" && offset === undefined && limit === undefined;
+									isTruthyEnvFlag(process.env.PIT_JSON_CRUSH) && offset === undefined && limit === undefined;
 								let streamed: StreamedTextRead | StreamedBinaryRead | undefined;
 								if (
 									ops.stat &&
@@ -661,7 +662,7 @@ Common mistakes to avoid:
 								// (offset/limit or `bash jq` recover any elided detail). crushJson self-gates
 								// to real JSON, so non-JSON falls through to the normal truncation below.
 								const crushed =
-									process.env.PIT_JSON_CRUSH === "1" &&
+									isTruthyEnvFlag(process.env.PIT_JSON_CRUSH) &&
 									offset === undefined &&
 									limit === undefined &&
 									truncation.truncated

@@ -137,31 +137,40 @@ it("hides the cost segment when cost is below the rounding threshold", () => {
 	expect(lines[1]).not.toContain("$");
 });
 
-it("renders a dim capacity-only ctx on a pristine session (no 0.0% noise)", () => {
+it("renders a dim capacity-only CTX on a pristine session (no 0.0% noise)", () => {
 	const footer = makeFooter({ usingOAuth: true });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[1]).toContain("ctx 200k");
+	expect(lines[1]).toContain("CTX 200k");
 	expect(lines[1]).not.toContain("%");
 	expect(lines[1]).not.toContain("0/200k");
 });
 
-it("renders meter + adaptive percent once the context has usage", () => {
+it("renders whole-percent + counts once the context has usage (no meter bar)", () => {
 	const footer = makeFooter({
 		usingOAuth: true,
 		contextUsage: { tokens: 46800, percent: 23.4, contextWindow: 200000 },
 	});
 	const lines = footer.render(80).map(stripAnsi);
-	// >=10% drops the decimal; 23.4% lights 1 of 5 cells.
-	expect(lines[1]).toContain("ctx ▰▱▱▱▱ 23% · 47k/200k");
+	// Color carries the state; the old 5-cell bar could only disagree with the
+	// precise percent next to it, so it is gone. No decimals in a gauge.
+	expect(lines[1]).toContain("CTX 23% · 47k/200k");
+	expect(lines[1]).not.toContain("▰");
 });
 
-it("keeps one decimal below 10% and lights at least one cell on any usage", () => {
+it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", () => {
 	const footer = makeFooter({
 		usingOAuth: true,
 		contextUsage: { tokens: 1500, percent: 0.8, contextWindow: 200000 },
 	});
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[1]).toContain("ctx ▰▱▱▱▱ 0.8% · 1.5k/200k");
+	expect(lines[1]).toContain("CTX 1% · 1.5k/200k");
+
+	const tiny = makeFooter({
+		usingOAuth: true,
+		contextUsage: { tokens: 600, percent: 0.3, contextWindow: 200000 },
+	});
+	const tinyLines = tiny.render(80).map(stripAnsi);
+	expect(tinyLines[1]).toContain("CTX <1% · 600/200k");
 });
 
 it("shows the provider muted without parentheses when several providers are available", () => {

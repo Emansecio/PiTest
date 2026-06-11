@@ -8,6 +8,7 @@
  * that prints connection state.
  */
 
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import {
 	McpManager,
@@ -55,7 +56,7 @@ const DEFAULT_DEFER_THRESHOLD = 10;
  * churning the cache prefix; small focused servers stay eager so they are
  * immediately callable without a discovery round-trip.
  *
- * Precedence: per-server `defer` override → legacy env `PIT_DEFER_MCP=1` (forces
+ * Precedence: per-server `defer` override → legacy env `PIT_DEFER_MCP` truthy (forces
  * always) → global `mcp.defer` policy (default `"auto"`: defer only servers with
  * at least `deferThreshold` tools).
  *
@@ -67,7 +68,7 @@ export function shouldDeferMcpServer(
 	settings: McpSettings,
 ): boolean {
 	if (serverConfig?.defer !== undefined) return serverConfig.defer;
-	if (process.env.PIT_DEFER_MCP === "1") return true;
+	if (isTruthyEnvFlag(process.env.PIT_DEFER_MCP)) return true;
 	const mode = settings.defer ?? "auto";
 	if (mode === "always") return true;
 	if (mode === "never") return false;

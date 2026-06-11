@@ -57,6 +57,29 @@ describe("AssistantMessageComponent", () => {
 		expect(lines[lines.length - 1]).toContain(`${OSC133_OUTPUT_END_PREFIX};130\x07`);
 	});
 
+	test("repeated renders do not accumulate decoration (copy-on-write over the memoized super array)", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(createAssistantMessage([{ type: "text", text: "hello" }]));
+		const first = component.render(40);
+		const firstBytes = first.slice();
+
+		// Steady state: Container.render memoizes and returns the same child
+		// array; a render() that decorated it in place would re-prefix the OSC
+		// markers (and the deliverable glyph) on every subsequent frame.
+		const second = component.render(40);
+		const third = component.render(40);
+
+		expect(second).toEqual(firstBytes);
+		expect(third).toEqual(firstBytes);
+		// Exactly ONE output-start marker on the first line and ONE finished
+		// marker on the last — accumulation would yield 2+ here.
+		expect(third[0].split(OSC133_OUTPUT_START).length - 1).toBe(1);
+		expect(third[third.length - 1].split(`${OSC133_OUTPUT_END_PREFIX};0\x07`).length - 1).toBe(1);
+		// The array handed out earlier was not mutated by later renders.
+		expect(first).toEqual(firstBytes);
+	});
+
 	test("does not add OSC 133 zone markers when assistant message contains tool calls", () => {
 		initTheme("dark");
 

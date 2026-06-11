@@ -453,14 +453,6 @@ export function expandTildePath(path: string): string {
 	return path;
 }
 
-const DEFAULT_SHARE_VIEWER_URL = "https://pit.dev/session/";
-
-/** Get the share viewer URL for a gist ID */
-export function getShareViewerUrl(gistId: string): string {
-	const baseUrl = process.env.PIT_SHARE_VIEWER_URL || DEFAULT_SHARE_VIEWER_URL;
-	return `${baseUrl}#${gistId}`;
-}
-
 // =============================================================================
 // User Config Paths (~/.pit/agent/*)
 // =============================================================================
@@ -479,34 +471,14 @@ export function getCustomThemesDir(): string {
 	return join(getAgentDir(), "themes");
 }
 
-/** Get path to models.json */
-export function getModelsPath(): string {
-	return join(getAgentDir(), "models.json");
-}
-
 /** Get path to auth.json */
 export function getAuthPath(): string {
 	return join(getAgentDir(), "auth.json");
 }
 
-/** Get path to settings.json */
-export function getSettingsPath(): string {
-	return join(getAgentDir(), "settings.json");
-}
-
-/** Get path to tools directory */
-export function getToolsDir(): string {
-	return join(getAgentDir(), "tools");
-}
-
 /** Get path to managed binaries directory (fd, rg) */
 export function getBinDir(): string {
 	return join(getAgentDir(), "bin");
-}
-
-/** Get path to prompt templates directory */
-export function getPromptsDir(): string {
-	return join(getAgentDir(), "prompts");
 }
 
 /** Get path to sessions directory */

@@ -6,8 +6,9 @@ export type ToolActivity = "navigation" | "action";
 
 /** Max body lines auto-shown under a failed call before folding into a hint.
  * Errors must stay scannable, not flood the CLI — the full body is one
- * ctrl+o away. Keep small: the first lines carry the error message. */
-export const ERROR_PREVIEW_LINES = 6;
+ * ctrl+o away. Sized to fit a typical stack trace / error message without
+ * forcing an expand for the common case. */
+export const ERROR_PREVIEW_LINES = 10;
 
 /**
  * Cap an auto-shown error body to {@link ERROR_PREVIEW_LINES}, appending a

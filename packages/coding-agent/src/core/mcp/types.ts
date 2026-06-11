@@ -48,7 +48,7 @@ export interface McpSettings {
 	 * - `"always"`: defer every server.
 	 * - `"never"`: register every server's tools eagerly (legacy behavior).
 	 * Requires tool discovery to be enabled; with it off, tools are always eager.
-	 * The legacy env `PIT_DEFER_MCP=1` forces `"always"`.
+	 * The legacy env `PIT_DEFER_MCP` (truthy: 1/true/yes) forces `"always"`.
 	 */
 	defer?: "auto" | "always" | "never";
 	/** Tool-count threshold for `defer: "auto"` (default 10). A server with this many tools or more is deferred. */

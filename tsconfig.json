@@ -15,9 +15,7 @@
 			"@pit/coding-agent/*": ["./packages/coding-agent/src/*"],
 			"typebox": ["./node_modules/typebox"],
 			"@pit/tui": ["./packages/tui/src/index.ts"],
-			"@pit/tui/*": ["./packages/tui/src/*"],
-			"@pit/agent-old": ["./packages/agent-old/src/index.ts"],
-			"@pit/agent-old/*": ["./packages/agent-old/src/*"]
+			"@pit/tui/*": ["./packages/tui/src/*"]
 		}
 	},
 	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/coding-agent/examples/**/*"],

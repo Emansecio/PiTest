@@ -1,5 +1,25 @@
-import hljs from "highlight.js/lib/index.js";
+import { createRequire } from "node:module";
 import { decodeHtmlEntityAt } from "./html.ts";
+
+// highlight.js is loaded lazily: the full build registers ~190 languages and
+// costs ~94ms of module-load time, paid on EVERY start (print mode and dry-run
+// included) when imported eagerly — this module sits on the theme import chain.
+// highlight.js@10 is CJS, so a memoized createRequire keeps the load synchronous
+// and behavior-identical while deferring the cost to the first highlight call.
+// String-literal require through createRequire is the same pattern terminal.ts
+// and photon.ts use, which the `bun build --compile` binary already bundles.
+type HighlightJs = typeof import("highlight.js/lib/index.js")["default"];
+
+const requireCjs = createRequire(import.meta.url);
+let _hljs: HighlightJs | undefined;
+
+function getHljs(): HighlightJs {
+	if (!_hljs) {
+		const mod = requireCjs("highlight.js/lib/index.js") as HighlightJs & { default?: HighlightJs };
+		_hljs = mod.default ?? mod;
+	}
+	return _hljs;
+}
 
 export type HighlightFormatter = (text: string) => string;
 export type HighlightTheme = Partial<Record<string, HighlightFormatter>>;
@@ -132,6 +152,7 @@ export function renderHighlightedHtml(html: string, theme: HighlightTheme = {}):
 }
 
 export function highlight(code: string, options: HighlightOptions = {}): string {
+	const hljs = getHljs();
 	const html = options.language
 		? hljs.highlight(code, {
 				language: options.language,
@@ -142,5 +163,5 @@ export function highlight(code: string, options: HighlightOptions = {}): string 
 }
 
 export function supportsLanguage(name: string): boolean {
-	return hljs.getLanguage(name) !== undefined;
+	return getHljs().getLanguage(name) !== undefined;
 }

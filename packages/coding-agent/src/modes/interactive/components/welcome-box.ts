@@ -1,17 +1,18 @@
 /**
  * Welcome box: the framed identity block shown at startup.
  *
- * Pit-native framing = horizontal rules (─), not a 4-sided box: a side `│`
- * gutter forces exact per-line width math and risks the "Rendered line exceeds
- * terminal width" crash on narrow terminals. The rules anchor the screen just as
- * well while staying width-safe. Every emitted line is truncated to the viewport
- * width (the TUI host enforces this for custom components).
+ * Pit-native framing = a single horizontal rule (─), not a 4-sided box: a side
+ * `│` gutter forces exact per-line width math and risks the "Rendered line
+ * exceeds terminal width" crash on narrow terminals, and a second full-width
+ * rule above the logo is dead weight for a first impression — the whitespace
+ * above does the framing, the one rule below closes the block. Every emitted
+ * line is truncated to the viewport width (the TUI host enforces this for
+ * custom components).
  *
- * Layout (3 identity rows between two rules):
- *   ────────────────────────────────────────────────────────────
- *     █▀█ █ ▀█▀   pit                                     v0.4.2
- *     █▀▀ █  █    coding agent in your terminal
- *     ▀   ▀  ▀    ~/proj (main)              opus-4.8 · thinking high
+ * Layout (3 identity rows closed by one rule):
+ *     █▀█ █ ▀█▀   coding agent in your terminal            v0.4.2
+ *     █▀▀ █  █    ~/proj (main)
+ *     ▀   ▀  ▀
  *   ────────────────────────────────────────────────────────────
  *
  * The hint/tip line is rendered separately (below) so its expand toggle stays
@@ -51,6 +52,16 @@ function composeLeftRight(left: string, right: string, width: number): string {
 
 export class WelcomeBox implements Component {
 	private data: WelcomeBoxData;
+	// Memoized output, keyed by (width, data reference). The data object is
+	// treated as immutable — setData swaps the reference, so a reference match
+	// plus equal width means byte-identical output. Theme changes are covered by
+	// `ui.invalidate()` cascading down to this component. When `wordmarkColor` is
+	// present the memo is bypassed entirely: it may be a time-varying closure
+	// (e.g. an ease animating the logo on mount), so the same (width, data) pair
+	// could legitimately produce different bytes between frames.
+	private cachedWidth = -1;
+	private cachedData: WelcomeBoxData | null = null;
+	private cachedLines: string[] | null = null;
 
 	constructor(data: WelcomeBoxData) {
 		this.data = data;
@@ -58,13 +69,32 @@ export class WelcomeBox implements Component {
 
 	setData(data: WelcomeBoxData): void {
 		this.data = data;
+		this.invalidate();
 	}
 
 	invalidate(): void {
-		// Stateless render; nothing cached.
+		this.cachedWidth = -1;
+		this.cachedData = null;
+		this.cachedLines = null;
 	}
 
 	render(width: number): string[] {
+		const cacheable = this.data.wordmarkColor === undefined;
+		if (cacheable && this.cachedLines !== null && this.cachedWidth === width && this.cachedData === this.data) {
+			return this.cachedLines;
+		}
+		const lines = this.computeRender(width);
+		if (cacheable) {
+			this.cachedWidth = width;
+			this.cachedData = this.data;
+			this.cachedLines = lines;
+		} else {
+			this.cachedLines = null;
+		}
+		return lines;
+	}
+
+	private computeRender(width: number): string[] {
 		const w = Math.max(8, width);
 		const d = this.data;
 		const rule = theme.fg("border", "─".repeat(w));
@@ -75,8 +105,11 @@ export class WelcomeBox implements Component {
 		// is intentionally NOT shown here — it lives permanently in the footer, so
 		// repeating it would be redundant. The welcome carries identity
 		// (logo/tagline/version) + cwd orientation only.
-		const versionText = theme.fg("dim", `v${d.version}`);
-		const taglineText = theme.fg("dim", d.tagline);
+		// Tagline/version are secondary but must stay LEGIBLE: `muted` (one step
+		// up from `dim`, which sat at the edge of readability) keeps the
+		// de-emphasis without making the reader squint.
+		const versionText = theme.fg("muted", `v${d.version}`);
+		const taglineText = theme.fg("muted", d.tagline);
 		const cwd = d.branch ? `${d.cwdDisplay} (${d.branch})` : d.cwdDisplay;
 		// In the home dir with no project context (`~`, no branch, no resumed
 		// session) the cwd line orients nothing — a lone "~" reads like a leftover
@@ -108,7 +141,9 @@ export class WelcomeBox implements Component {
 			}
 		}
 
-		const out = [rule, ...rows, rule];
+		// One rule only, below: it closes the identity block and separates it from
+		// the content underneath. The whitespace above the logo frames the top.
+		const out = [...rows, rule];
 		return out.map((line) => truncateToWidth(line, w));
 	}
 

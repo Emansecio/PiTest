@@ -48,6 +48,9 @@ Edit directly or use `/settings` for common options.
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
 | `assistantReadingColumns` | number | `88` | Max width (cols) for assistant prose on wide terminals (40-200); tool/bash/code uncapped |
 | `showHardwareCursor` | boolean | `false` | Show terminal cursor |
+| `cursorBlink` | boolean | `true` | Blink the input editor's block cursor while focused |
+| `streamingSmoothing` | boolean | `true` | Reveal streamed assistant text at a steady rate instead of provider-sized bursts |
+| `toolActivity` | string | `"grouped"` | Tool rendering in the TUI: `"grouped"` groups consecutive tool calls into activity lines; `"legacy"` keeps one stacked block per call |
 
 ### Telemetry and update checks
 
@@ -60,6 +63,8 @@ Set `PIT_SKIP_VERSION_CHECK=1` to disable the Pit version update check. Use `--o
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `warnings.anthropicExtraUsage` | boolean | `true` | Show a warning when Anthropic subscription auth may use paid extra usage |
+| `warnings.newVersion` | boolean | `false` | Show "new version available" banner at startup (opt-in) |
+| `warnings.packageUpdates` | boolean | `false` | Show "package updates available" banner at startup (opt-in) |
 
 ```json
 {
@@ -76,6 +81,7 @@ Set `PIT_SKIP_VERSION_CHECK=1` to disable the Pit version update check. Use `--o
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.selfCorrection` | boolean | `true` | Extra verification LLM pass after summarization |
 
 ```json
 {
@@ -128,7 +134,7 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 |---------|------|---------|-------------|
 | `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
 | `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
-| `transport` | string | `"sse"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, or `"auto"` |
+| `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, or `"auto"` |
 
 ### Terminal & Images
 
@@ -137,6 +143,7 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 | `terminal.showImages` | boolean | `true` | Show images in terminal (if supported) |
 | `terminal.imageWidthCells` | number | `60` | Preferred inline image width in terminal cells |
 | `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when content shrinks (can cause flicker) |
+| `terminal.showTerminalProgress` | boolean | `false` | OSC 9;4 terminal progress indicators |
 | `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max |
 | `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
 
@@ -263,7 +270,10 @@ Each entry: `{ command, matcher?, shell?, timeoutMs?, cwd?, name? }`. See [hooks
 | `mcp.servers.<name>.timeoutMs` | number | `30000` | Per-request timeout. |
 | `mcp.servers.<name>.disabled` | boolean | `false` | Skip without removing. |
 | `mcp.servers.<name>.allowTools` / `denyTools` | string[] | – | Per-server tool filter. |
-| `mcp.servers.<name>.toolPrefix` | string | `"<name>__"` | Prefix used when registering tools with Pit. |
+| `mcp.servers.<name>.toolPrefix` | string | `"mcp__<name>__"` | Prefix used when registering tools with Pit. |
+| `mcp.servers.<name>.defer` | boolean | – | Per-server override of the global `defer` policy: `true` always defers this server's tools, `false` keeps them eager. |
+| `mcp.defer` | string | `"auto"` | When to keep MCP tool schemas off the active surface (deferred tools are pulled in on demand via `search_tool_bm25`): `"auto"` defers servers with `deferThreshold`+ tools, `"always"` defers every server, `"never"` registers everything eagerly. Requires tool discovery. |
+| `mcp.deferThreshold` | number | `10` | Tool-count threshold for `defer: "auto"`. |
 
 See [mcp.md](mcp.md) for protocol details and reconnect behavior.
 
@@ -274,6 +284,122 @@ See [mcp.md](mcp.md) for protocol details and reconnect behavior.
 | `memory.disableInjection` | boolean | `false` | Don't inject `MEMORY.md` into the system prompt. The `memory_append` tool still works. |
 
 See [memory.md](memory.md) for the file format and discovery order.
+
+### Verification
+
+After a code-modifying turn, Pit can run the project check command and self-correct on failure.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `verification.enabled` | boolean | `true` | Run the verification gate after code-modifying turns |
+| `verification.command` | string | `null` | Check command; `null` auto-detects from `package.json` scripts (check/typecheck/lint/test) |
+| `verification.maxAttempts` | number | `2` | Fix attempts before giving up and reporting the failure (min 1) |
+| `verification.timeoutMs` | number | `180000` | Timeout for the check command (min 1000) |
+| `verification.visual` | boolean | `true` | Nudge to `preview` when a rendered artifact changed but was never viewed |
+
+### Eval
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `eval.enabled` | boolean | `true` | Register the `eval` tool. The session boots a persistent Python + JS kernel manager; each kernel is spawned lazily on first use |
+
+### LSP
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `lsp.enabled` | boolean | `true` | Register the `lsp` tool; language servers cold-start on first use |
+| `lsp.diagnosticsOnWrite` | boolean | `true` | Attach LSP diagnostics to write/edit results |
+| `lsp.formatOnWrite` | boolean | `false` | Format files via the language server before writing them |
+
+### Debug (DAP)
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `debug.enabled` | boolean | `true` | Register the `debug` tool for driving a DAP debugger; adapters cold-start on first use |
+
+### Chrome DevTools
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `chromeDevtools.enabled` | boolean | `true` | Register the `chrome_devtools_*` tools |
+| `chromeDevtools.debugPort` | number | `9222` | Chrome remote-debugging port |
+| `chromeDevtools.host` | string | `"127.0.0.1"` | Chrome remote-debugging host |
+| `chromeDevtools.launchBrowser` | boolean | `true` | Auto-launch Chrome into a dedicated persistent profile when not reachable |
+| `chromeDevtools.binaryPath` | string | - | Chrome binary path override |
+
+The env vars `PIT_CHROME_DEVTOOLS_HOST`, `PIT_CHROME_DEVTOOLS_PORT`, and `PIT_CHROME_DEVTOOLS_BINARY` win over settings (the legacy `PI_*` names are still read as a fallback).
+
+### Web Search
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `webSearch.enabled` | boolean | `true` | Register the `web_search` tool. Providers without env keys fall through the chain, so being enabled with no keys is a no-op |
+| `webSearch.defaultProvider` | string | `"auto"` | Chain entry point; `"auto"` walks the configured provider chain |
+| `webSearch.providers.<name>.apiKey` | string | - | Per-provider API key override |
+
+### Hindsight Memory
+
+Per-project memory bank backing the `retain`, `recall`, `reflect`, and `forget` tools.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `hindsight.enabled` | boolean | `true` | Register the hindsight tools and open the per-project bank at session start |
+| `hindsight.bankPath` | string | - | Bank location; defaults to `<cwd>/.pit/hindsight/bank.jsonl` |
+| `hindsight.maxEntries` | number | - | Hard ceiling on entry count; oldest entries evicted on open |
+| `hindsight.pruneOlderThanDays` | number | - | Drop entries older than this many days on open |
+
+### Frequent Files
+
+Surfaces recently-touched files in the prompt to cut redundant searches/reads. The section is only emitted once entries clear `minHits`.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `frequentFiles.enabled` | boolean | `true` | Enable the frequent-files prompt section |
+| `frequentFiles.topN` | number | `10` | Entries surfaced in the prompt |
+| `frequentFiles.minHits` | number | `2` | Filter out one-touch noise |
+| `frequentFiles.maxFiles` | number | `256` | In-memory tracker cap |
+
+### Tool Discovery
+
+The `search_tool_bm25` tool is always registered; these settings gate auto-seeding of the hidden tool index at session boot and which tools live where.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `toolDiscovery.enabled` | boolean | `true` | Seed the hidden tool index so `search_tool_bm25` can surface off-surface tools on demand |
+| `toolDiscovery.alwaysActive` | string[] | `[]` | Tools to keep on the active surface even if they would be hidden |
+| `toolDiscovery.hiddenByDefault` | string[] | `[]` | Tools to remove from the active surface and index as hidden |
+
+### Agent Messaging
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `agentMessaging.enabled` | boolean | `true` | Register the `message` tool so sub-agents can send typed messages to their parent |
+| `agentMessaging.timeoutMs` | number | `120000` | Per-message reply timeout in ms; `0` disables the timeout |
+
+### Tool Feedback
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `toolFeedback.errorReflection.enabled` | boolean | `false` | Inject a reflection prompt as a follow-up turn after a tool error (opt-in; inline error results and hint rules already cover this) |
+| `toolFeedback.doomLoopReminder.enabled` | boolean | `true` | Inject a reminder when consecutive identical tool calls reach the threshold |
+| `toolFeedback.doomLoopReminder.threshold` | number | `2` | Consecutive identical tool calls that trigger a reminder |
+| `toolFeedback.doomLoopReminder.cooldownMs` | number | `30000` | Minimum gap between reminders |
+| `toolFeedback.stagnationReminder.enabled` | boolean | `true` | Remind/pause when the agent stops making progress |
+| `toolFeedback.stagnationReminder.softThreshold` | number | `12` | Non-productive turns that trigger a reminder |
+| `toolFeedback.stagnationReminder.hardThreshold` | number | `25` | Non-productive turns that pause for user guidance (clamped to at least `softThreshold`) |
+| `toolFeedback.stagnationReminder.cooldownMs` | number | `30000` | Minimum gap between soft reminders |
+
+### Engineering Style
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `engineeringStyle` | string | `"karpathy"` | Style pack appended to the system prompt's `Guidelines:` section. `"karpathy"` applies the Karpathy LLM-coding guideline bullets; `"default"` is a no-op. Unknown values resolve to `"karpathy"` |
+
+### Time-Traveling Stream Rules (TTSR)
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `ttsrRules` | array | `[]` | Off by default. Each rule: `{ name, regex, message, scope?, disabled? }`. On the first regex match against the model's stream the turn is aborted and `message` is injected before the retry. `scope` is `"assistant_text"` (default), `"tool_args"`, or `"any"` |
 
 ## Example
 

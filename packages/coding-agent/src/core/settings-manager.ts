@@ -72,7 +72,7 @@ export interface ErrorReflectionSettings {
 }
 
 export interface DoomLoopReminderSettings {
-	enabled?: boolean; // default: false (opt-in)
+	enabled?: boolean; // default: true (opt out with enabled: false)
 	threshold?: number; // default: 2 consecutive identical tool calls trigger a reminder
 	cooldownMs?: number; // default: 30000 — minimum gap between reminders to prevent spam
 }
@@ -91,7 +91,7 @@ export interface ToolFeedbackSettings {
 }
 
 export interface FrequentFilesSettings {
-	enabled?: boolean; // default: false (opt-in)
+	enabled?: boolean; // default: true (opt out with enabled: false)
 	topN?: number; // default: 10 (entries surfaced in the prompt)
 	minHits?: number; // default: 2 (filter out one-touch noise)
 	maxFiles?: number; // default: 256 (in-memory tracker cap)
@@ -164,8 +164,8 @@ export interface ResolvedToolDiscoverySettings {
 }
 
 /**
- * Web search tool configuration. Off by default; opt-in via
- * `webSearch.enabled: true`. `defaultProvider` controls the chain entry point
+ * Web search tool configuration. On by default; opt out via
+ * `webSearch.enabled: false`. `defaultProvider` controls the chain entry point
  * ("auto" walks the configured chain). `providers.<name>.apiKey` is an
  * optional per-provider key override surfaced to the tool via env mirroring.
  */
@@ -182,7 +182,7 @@ export interface ResolvedWebSearchSettings {
 }
 
 /**
- * Eval tool configuration. Off by default; opt-in via `eval.enabled: true`.
+ * Eval tool configuration. On by default; opt out via `eval.enabled: false`.
  * When enabled, the `eval` tool is registered for coding bundles and the
  * session boots a persistent Python + JS kernel manager (one of each kernel
  * spawned lazily on first use).
@@ -253,9 +253,9 @@ export interface ResolvedToolFeedbackSettings {
 
 export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
-	/** Show "new pi version available" banner at startup. Default: true. */
+	/** Show "new version available" banner at startup. Default: false (opt-in). */
 	newVersion?: boolean;
-	/** Show "package updates available" banner at startup. Default: true. */
+	/** Show "package updates available" banner at startup. Default: false (opt-in). */
 	packageUpdates?: boolean;
 }
 
@@ -326,7 +326,7 @@ export interface Settings {
 	 * Engineering style pack appended to the system prompt's `Guidelines:`
 	 * section. "default" is a no-op; "karpathy" applies the Karpathy LLM-coding
 	 * guideline bullets (assumptions, simplicity, surgical edits, goal-driven
-	 * execution). Default: "default".
+	 * execution). Default: "karpathy".
 	 */
 	engineeringStyle?: EngineeringStyle;
 	frequentFiles?: FrequentFilesSettings;
@@ -342,19 +342,20 @@ export interface Settings {
 	/** Per-project hindsight memory bank. On by default; opt out with `hindsight.enabled: false`. */
 	hindsight?: HindsightSettings;
 	/**
-	 * Hidden tool discovery index. Off by default; when enabled, hidden tools
-	 * can be surfaced on-demand via the `search_tool_bm25` tool.
+	 * Hidden tool discovery index. On by default; hidden tools can be surfaced
+	 * on-demand via the `search_tool_bm25` tool. Opt out with `toolDiscovery.enabled: false`.
 	 */
 	toolDiscovery?: ToolDiscoverySettings;
 	/**
-	 * Web search tool. Off by default; when enabled, the `web_search` tool is
-	 * registered for coding bundles and routes through the configured provider
-	 * chain (env-key gated).
+	 * Web search tool. On by default; the `web_search` tool is registered for
+	 * coding bundles and routes through the configured provider chain
+	 * (env-key gated). Opt out with `webSearch.enabled: false`.
 	 */
 	webSearch?: WebSearchSettings;
 	/**
-	 * Eval tool. Off by default; when enabled, registers the `eval` tool and
-	 * starts a per-session persistent Python + JS kernel manager.
+	 * Eval tool. On by default; registers the `eval` tool and starts a
+	 * per-session persistent Python + JS kernel manager (spawned lazily on
+	 * first use). Opt out with `eval.enabled: false`.
 	 */
 	eval?: EvalSettings;
 	lsp?: LspSettings;
@@ -1019,8 +1020,9 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Resolve the configured engineering style pack. Unknown values fall back to
-	 * "default" so user typos never silently disable known styles.
+	 * Resolve the configured engineering style pack. Defaults to "karpathy";
+	 * only an explicit "default" disables it. Unknown values fall back to
+	 * "karpathy" so user typos never silently disable the style pack.
 	 */
 	getEngineeringStyle(): EngineeringStyle {
 		const raw = this.settings.engineeringStyle;
@@ -1567,12 +1569,7 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Resolve web_search settings. Disabled by default; opt-in via
-	 * `webSearch.enabled: true`. Returns a defensive copy of any per-provider
-	 * api-key overrides so callers cannot mutate the in-memory settings.
-	 */
-	/**
-	 * Resolve eval settings. Disabled by default; opt-in via `eval.enabled: true`.
+	 * Resolve eval settings. Enabled by default; opt out via `eval.enabled: false`.
 	 */
 	getEvalSettings(): ResolvedEvalSettings {
 		const raw = this.settings.eval;
@@ -1626,9 +1623,10 @@ export class SettingsManager {
 		// Default ON: the chrome_devtools_* tools are registered. They connect to a
 		// Chrome started with --remote-debugging-port and fail with a clear hint
 		// when it is not reachable. Opt out via `chromeDevtools.enabled: false`.
-		// Env overrides (PI_CHROME_DEVTOOLS_HOST/PORT) win over settings.
-		const envHost = process.env.PI_CHROME_DEVTOOLS_HOST;
-		const envPort = process.env.PI_CHROME_DEVTOOLS_PORT;
+		// Env overrides (PIT_CHROME_DEVTOOLS_HOST/PORT) win over settings.
+		// Legacy PI_* names are still read as a fallback for one release.
+		const envHost = process.env.PIT_CHROME_DEVTOOLS_HOST || process.env.PI_CHROME_DEVTOOLS_HOST;
+		const envPort = process.env.PIT_CHROME_DEVTOOLS_PORT || process.env.PI_CHROME_DEVTOOLS_PORT;
 		const port = envPort && Number.isFinite(Number(envPort)) ? Number(envPort) : (raw?.debugPort ?? 9222);
 		return {
 			enabled: raw?.enabled !== false,
@@ -1636,11 +1634,16 @@ export class SettingsManager {
 			host: envHost || raw?.host || "127.0.0.1",
 			// Auto-launch Chrome (default ON) into a dedicated persistent profile.
 			launchBrowser: raw?.launchBrowser !== false,
-			binaryPath: process.env.PI_CHROME_DEVTOOLS_BINARY || raw?.binaryPath,
+			binaryPath: process.env.PIT_CHROME_DEVTOOLS_BINARY || process.env.PI_CHROME_DEVTOOLS_BINARY || raw?.binaryPath,
 			userDataDir: join(getAgentDir(), "chrome-data"),
 		};
 	}
 
+	/**
+	 * Resolve web_search settings. Enabled by default; opt out via
+	 * `webSearch.enabled: false`. Returns a defensive copy of any per-provider
+	 * api-key overrides so callers cannot mutate the in-memory settings.
+	 */
 	getWebSearchSettings(): ResolvedWebSearchSettings {
 		const raw = this.settings.webSearch;
 		const providers: Record<string, { apiKey?: string }> = {};

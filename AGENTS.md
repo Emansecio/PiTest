@@ -104,12 +104,9 @@ If no browser tool is reachable, say so and report the work as visually unverifi
 
 ## Project tool config
 
-`.pit/settings.json` (project-local, merged over global):
-
-- `frequentFiles.enabled: true` — per-file read/edit/write counts persisted to
-  `.pit/frequent-files.json` so the next session boots warm.
-- `toolDiscovery.enabled: true` — tools outside the coding bundle hide behind
-  `search_tool_bm25` to keep the per-turn tool block short.
+`.pit/settings.json` (project-local, merged over global) only carries keys that
+diverge from the defaults — currently `compaction.selfCorrection: false`.
+`frequentFiles` and `toolDiscovery` are default-ON (no project opt-in needed).
 
 Full surface and quirks: `docs/agents/tools-and-config.md`.
 

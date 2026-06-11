@@ -78,37 +78,27 @@ function sanitizeStatusText(text: string): string {
 }
 
 /**
- * Format token counts for compact footer display.
+ * Format token counts for compact footer display. A trailing `.0` is noise
+ * (`1M`, not `1.0M`), so fractional steps only render when the decimal digit
+ * is non-zero.
  */
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+	if (count < 10000) return `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
 	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+	if (count < 10000000) return `${(count / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
 	return `${Math.round(count / 1000000)}M`;
 }
 
-/** Cells in the context-pressure mini meter (`▰▰▱▱▱`). */
-const CONTEXT_METER_CELLS = 5;
-
 /**
- * Render the context meter. Any non-zero usage lights at least one cell so the
- * meter never reads "untouched" while tokens are already accruing.
- */
-function renderContextMeter(percent: number): string {
-	const clamped = Math.max(0, Math.min(100, percent));
-	let filled = Math.round((clamped / 100) * CONTEXT_METER_CELLS);
-	if (clamped > 0 && filled === 0) filled = 1;
-	return "▰".repeat(filled) + "▱".repeat(CONTEXT_METER_CELLS - filled);
-}
-
-/**
- * Adaptive percent: one decimal only while it still informs (<10%); a session
- * at 23.4% reads cleaner as `23%`.
+ * Whole percent only — nobody acts on a 0.2% difference in a context gauge.
+ * Any non-zero usage reads at least `<1%` so the gauge never claims
+ * "untouched" while tokens are already accruing.
  */
 function formatContextPercent(percent: number): string {
-	if (percent < 10) return `${percent.toFixed(1)}%`;
-	return `${Math.round(percent)}%`;
+	const rounded = Math.round(percent);
+	if (percent > 0 && rounded === 0) return "<1%";
+	return `${rounded}%`;
 }
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -134,7 +124,7 @@ interface CumulativeTotals {
  *
  * Layout (top to bottom; line 1 is the line closest to the editor):
  *   1. Identity: `cwd (branch) • session` (left, muted)  |  `model • thinking-level` (right, foreground + thinking color)
- *   2. Metrics: `ctx %·used/window` (left, colored) | `↑in ↓out $cost (sub) auto` (right, dim)
+ *   2. Metrics: `CTX %·used/window` (left, state-colored) | `↑in ↓out $cost (sub) auto` (right, dim)
  *   3. Optional: extension statuses, single line
  *
  * Cumulative usage stats are cached and updated incrementally (tail-only scan)
@@ -270,25 +260,26 @@ export class FooterComponent implements Component {
 		});
 
 		// --- Metrics (line 2) ------------------------------------------------
-		// Context is the headline: flushed left, brighter (`muted`, or warning/
-		// error when filling up) so the most actionable number reads at a glance.
-		// `ctx ▰▱▱▱▱ 23% · 47k/200k` = pressure meter · percent · used/window.
-		// A pristine session shows only the capacity (`ctx 1.0M`, dim) — three
-		// zeros say nothing. Usage (input/output, cost, auto-compact) trails dim
-		// on the right.
+		// Context is the headline: flushed left, with COLOR carrying the state —
+		// `CTX 23% · 47k/200k`. The label is a stable dim field-name; the percent
+		// is the datum and escalates accent → warning → error as the window fills
+		// (no bar: a 5-cell meter can only lie next to a precise percent). A
+		// pristine session shows only the capacity (`CTX 1M`, dim) — three zeros
+		// say nothing. Usage (input/output, cost, auto-compact) trails dim on the
+		// right.
 		const usedTokens = contextUsage?.tokens ?? 0;
 		const pristine = usedTokens === 0 && contextPercentValue === 0 && contextWindow > 0;
+		const ctxLabel = theme.fg("dim", "CTX");
+		const ctxColorize = theme.getContextUsageColor(contextPercentValue);
 		let ctxText: string;
-		let ctxColorize = theme.getContextUsageColor(contextPercentValue);
 		if (contextPercent === "?") {
-			ctxText = `ctx ?/${formatTokens(contextWindow)}`;
+			ctxText = `${ctxLabel} ${theme.fg("dim", `?/${formatTokens(contextWindow)}`)}`;
 		} else if (pristine) {
-			ctxText = `ctx ${formatTokens(contextWindow)}`;
-			ctxColorize = (text: string) => theme.fg("dim", text);
+			ctxText = `${ctxLabel} ${theme.fg("dim", formatTokens(contextWindow))}`;
 		} else {
-			const meter = renderContextMeter(contextPercentValue);
-			const percentLabel = formatContextPercent(contextPercentValue);
-			ctxText = `ctx ${meter} ${percentLabel} · ${formatTokens(usedTokens)}/${formatTokens(contextWindow)}`;
+			const percentLabel = ctxColorize(formatContextPercent(contextPercentValue));
+			const counts = `${theme.fg("muted", formatTokens(usedTokens))}${theme.fg("dim", `/${formatTokens(contextWindow)}`)}`;
+			ctxText = `${ctxLabel} ${percentLabel} ${theme.fg("dim", "·")} ${counts}`;
 		}
 
 		// Group A — usage/cost: `↑in ↓out $cost` kept together on the right.
@@ -339,7 +330,9 @@ export class FooterComponent implements Component {
 		}
 
 		const metricsLine = composeLeftRight(ctxText, rightText, width, {
-			leftColor: ctxColorize,
+			// ctxText is pre-colorized per segment (dim label, state-colored
+			// percent) — pass it through untouched.
+			leftColor: (text) => text,
 			rightColor: (text) => theme.fg("dim", text),
 			ellipsis: theme.fg("dim", "…"),
 		});

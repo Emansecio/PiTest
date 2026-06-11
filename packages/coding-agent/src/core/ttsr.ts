@@ -118,11 +118,3 @@ export function createMatcher(rules: CompiledTTSRRule[]): TTSRMatcher {
 		},
 	};
 }
-
-/** Marker added to injected custom messages so compaction keeps them verbatim. */
-export const TTSR_INJECTED_FLAG = "_ttsr_injected";
-
-/** Format the reminder body that gets injected into the transcript on a hit. */
-export function formatTTSRReminder(ruleName: string, message: string): string {
-	return `<system-reminder>[TTSR:${ruleName}] ${message}</system-reminder>`;
-}

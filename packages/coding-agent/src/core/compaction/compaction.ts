@@ -8,6 +8,7 @@
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@pit/ai";
 import { completeSimple } from "@pit/ai";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import {
 	convertToLlm,
@@ -706,7 +707,7 @@ export function pruneOldToolOutputs(
 
 	let prunedTokens = 0;
 
-	const store = process.env.PIT_DEFER_HISTORY === "1" ? getCurrentDeferredOutputStore() : undefined;
+	const store = isTruthyEnvFlag(process.env.PIT_DEFER_HISTORY) ? getCurrentDeferredOutputStore() : undefined;
 
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];

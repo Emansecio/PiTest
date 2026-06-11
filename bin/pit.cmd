@@ -17,10 +17,6 @@ if not exist "%PIT_TMP_DIR%" mkdir "%PIT_TMP_DIR%" 2>nul
 set "TMP=%PIT_TMP_DIR%"
 set "TEMP=%PIT_TMP_DIR%"
 
-REM TEMP DIAGNOSTIC
-echo pit.cmd invoked at %date% %time% >> "%USERPROFILE%\pit-diag.log"
-echo   PIT_CODING_AGENT_DIR=%PIT_CODING_AGENT_DIR% >> "%USERPROFILE%\pit-diag.log"
-
 if not exist "%TSX_BIN%" (
   echo pit: tsx not found at %TSX_BIN%. Run `npm install` in %REPO_ROOT% first. 1>&2
   exit /b 1

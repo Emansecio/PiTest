@@ -150,9 +150,13 @@ export async function createAgentSessionServices(
 
 	// Refs filled in after the AgentSession is created. The coordinator extension
 	// reads through these to keep its tool catalog in sync with the parent's
-	// active tools without re-loading.
-	const parentModelRef: { current?: import("@pit/ai").Model<any> } = {};
-	const availableToolsRef: { current?: import("@pit/agent-core").AgentTool[] } = {};
+	// active tools without re-loading. Model and tools are GETTERS, not captured
+	// values: `/model` swaps `agent.state.model` and `setActiveToolsByName`
+	// reassigns `agent.state.tools` (a fresh array), so a snapshot taken at
+	// construction goes stale and subagents would spawn with the boot-time
+	// model/catalog.
+	const parentModelRef: { current?: () => import("@pit/ai").Model<any> | undefined } = {};
+	const availableToolsRef: { current?: () => import("@pit/agent-core").AgentTool[] } = {};
 	const parentMessagingIdRef: { current?: string } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
@@ -165,8 +169,8 @@ export async function createAgentSessionServices(
 			permissionModeOverride: options.permissionModeOverride,
 			hooks: settingsManager.getHooksSettings(),
 			mcp: settingsManager.getMcpSettings(),
-			getParentModel: () => parentModelRef.current,
-			getAvailableTools: () => availableToolsRef.current ?? [],
+			getParentModel: () => parentModelRef.current?.(),
+			getAvailableTools: () => availableToolsRef.current?.() ?? [],
 			// Resolved lazily at subagent-spawn time, well after resourceLoader init.
 			getSkills: () => resourceLoader.getSkills().skills,
 			isMessagingEnabled: () => settingsManager.getAgentMessagingSettings().enabled,
@@ -199,14 +203,14 @@ export async function createAgentSessionServices(
 	(
 		resourceLoader as DefaultResourceLoader & {
 			__bindBuiltInRefs?: (
-				model: import("@pit/ai").Model<any> | undefined,
-				tools: import("@pit/agent-core").AgentTool[],
+				getModel: () => import("@pit/ai").Model<any> | undefined,
+				getTools: () => import("@pit/agent-core").AgentTool[],
 				messagingId: string | undefined,
 			) => void;
 		}
-	).__bindBuiltInRefs = (model, tools, messagingId) => {
-		parentModelRef.current = model;
-		availableToolsRef.current = tools;
+	).__bindBuiltInRefs = (getModel, getTools, messagingId) => {
+		parentModelRef.current = getModel;
+		availableToolsRef.current = getTools;
 		parentMessagingIdRef.current = messagingId;
 	};
 
@@ -290,16 +294,16 @@ export async function createAgentSessionFromServices(
 	const bind = (
 		options.services.resourceLoader as DefaultResourceLoader & {
 			__bindBuiltInRefs?: (
-				model: import("@pit/ai").Model<any> | undefined,
-				tools: import("@pit/agent-core").AgentTool[],
+				getModel: () => import("@pit/ai").Model<any> | undefined,
+				getTools: () => import("@pit/agent-core").AgentTool[],
 				messagingId: string | undefined,
 			) => void;
 		}
 	).__bindBuiltInRefs;
 	if (bind) {
 		bind(
-			result.session.model,
-			result.session.agent.state.tools as import("@pit/agent-core").AgentTool[],
+			() => result.session.model,
+			() => result.session.agent.state.tools as import("@pit/agent-core").AgentTool[],
 			result.session.messagingId,
 		);
 	}

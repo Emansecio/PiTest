@@ -3,6 +3,7 @@ import type { AgentSession } from "../src/core/agent-session.js";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
 import { FooterComponent } from "../src/modes/interactive/components/footer.js";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
+import { stripAnsi } from "../src/utils/ansi.js";
 
 interface MutableEntries {
 	push: (input: number, output: number, cost: number) => void;
@@ -94,14 +95,14 @@ describe("FooterComponent stats cache", () => {
 
 		ctrl.push(1000, 500, 0.01);
 		const first = getMetricsLine(footer);
-		expect(first).toContain("↑1.0k");
+		expect(first).toContain("↑1k");
 		expect(first).toContain("↓500");
 		expect(first).toContain("$0.010");
 
 		ctrl.push(2000, 1500, 0.05);
 		const second = getMetricsLine(footer);
-		expect(second).toContain("↑3.0k");
-		expect(second).toContain("↓2.0k");
+		expect(second).toContain("↑3k");
+		expect(second).toContain("↓2k");
 		expect(second).toContain("$0.060");
 	});
 
@@ -138,7 +139,7 @@ describe("FooterComponent stats cache", () => {
 		entries.pop();
 
 		const after = getMetricsLine(footer);
-		expect(after).toContain("↑1.0k");
+		expect(after).toContain("↑1k");
 		expect(after).toContain("↓500");
 		expect(after).toContain("$0.010");
 	});
@@ -186,10 +187,11 @@ describe("FooterComponent stats cache", () => {
 
 		ctrl.push(0, 0, 0);
 		const line = getMetricsLine(footer);
-		// With everything zero the metric arrows drop out; only the ctx headline remains.
+		// With everything zero the metric arrows drop out; only the CTX headline
+		// remains (segment-colored, so compare with ANSI stripped).
 		expect(line).not.toContain("↑");
 		expect(line).not.toContain("↓");
-		expect(line).toContain("ctx ▰▱▱▱▱ 12% · 25k/200k");
+		expect(stripAnsi(line)).toContain("CTX 12% · 25k/200k");
 	});
 });
 
@@ -199,25 +201,27 @@ describe("FooterComponent context color thresholds", () => {
 	});
 
 	// The ANSI opening escape `theme.fg(color, …)` emits before the wrapped text.
-	const escapeOf = (color: "muted" | "warning" | "error"): string => {
+	const escapeOf = (color: "accent" | "warning" | "error"): string => {
 		const wrapped = theme.fg(color, "_");
 		return wrapped.slice(0, wrapped.indexOf("_"));
 	};
 
-	// Returns the raw (ANSI-bearing) prefix of the metrics line up to the `ctx`
-	// token — i.e. the color escape the context headline was wrapped in.
-	const ctxPrefix = (contextPercent: number): string => {
+	// Returns the raw (ANSI-bearing) escape run immediately before the percent
+	// token — the state color of the gauge (the CTX label itself is fixed dim).
+	const ctxPercentEscape = (contextPercent: number): string => {
 		const { session, ctrl } = createMutableSession({ contextPercent });
 		const footer = new FooterComponent(session, createFooterData());
 		ctrl.push(100, 50, 0.001);
 		const line = footer.render(200)[1];
-		return line.slice(0, line.indexOf("ctx"));
+		const pctIndex = line.indexOf(`${Math.round(contextPercent)}%`);
+		const match = line.slice(0, pctIndex).match(/(?:\x1b\[[0-9;]+m)+$/);
+		return match ? match[0] : "";
 	};
 
-	it("uses muted below 70%, warning above 70%, error above 90%", () => {
-		const low = ctxPrefix(50);
-		const warn = ctxPrefix(80);
-		const err = ctxPrefix(95);
+	it("uses calm accent below 70%, warning above 70%, error above 90%", () => {
+		const low = ctxPercentEscape(50);
+		const warn = ctxPercentEscape(80);
+		const err = ctxPercentEscape(95);
 
 		// Each is wrapped in some SGR escape...
 		const sgr = /\x1b\[[0-9;]+m/;
@@ -226,15 +230,15 @@ describe("FooterComponent context color thresholds", () => {
 		expect(sgr.test(err)).toBe(true);
 
 		// ...and the three thresholds pick distinct, correct palette colors.
-		expect(low.endsWith(escapeOf("muted"))).toBe(true);
+		expect(low.endsWith(escapeOf("accent"))).toBe(true);
 		expect(warn.endsWith(escapeOf("warning"))).toBe(true);
 		expect(err.endsWith(escapeOf("error"))).toBe(true);
 	});
 
 	it("treats the 70 and 90 boundaries as inclusive of the lower band (strict >)", () => {
-		// 70.0 is NOT > 70 → still muted; 90.0 is NOT > 90 → still warning.
-		expect(ctxPrefix(70).endsWith(escapeOf("muted"))).toBe(true);
-		expect(ctxPrefix(90).endsWith(escapeOf("warning"))).toBe(true);
+		// 70.0 is NOT > 70 → still accent; 90.0 is NOT > 90 → still warning.
+		expect(ctxPercentEscape(70).endsWith(escapeOf("accent"))).toBe(true);
+		expect(ctxPercentEscape(90).endsWith(escapeOf("warning"))).toBe(true);
 	});
 });
 

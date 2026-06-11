@@ -32,7 +32,6 @@
 			"!**/test-sessions.ts",
 			"!**/models.generated.ts",
 			"!**/image-models.generated.ts",
-			"!packages/mom/data/**/*",
 			"!!**/node_modules"
 		]
 	}

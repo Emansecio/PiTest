@@ -36,10 +36,6 @@ export interface UrlSchemeRegistry {
 // Matches a URL-like prefix: lowercase scheme followed by `://`.
 const URL_SCHEME_RE = /^([a-z][a-z0-9+-]*):\/\//;
 
-export function isUrlSchemePath(path: string): boolean {
-	return URL_SCHEME_RE.test(path);
-}
-
 class UrlSchemeRegistryImpl implements UrlSchemeRegistry {
 	private readonly resolvers = new Map<string, UrlSchemeResolver>();
 

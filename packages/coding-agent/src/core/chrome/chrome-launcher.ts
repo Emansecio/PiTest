@@ -1,7 +1,8 @@
 /**
  * Auto-launch helpers for Chrome with the DevTools debug port — no external
- * deps. Discovery uses platform-known paths (+ PI_CHROME_DEVTOOLS_BINARY
- * override); launch spawns Chrome detached so it survives the Pit process
+ * deps. Discovery uses platform-known paths (+ PIT_CHROME_DEVTOOLS_BINARY
+ * override, legacy PI_CHROME_DEVTOOLS_BINARY still honored for one release);
+ * launch spawns Chrome detached so it survives the Pit process
  * (the user opted to leave the browser open); readiness is a poll of
  * `/json/version`. Everything is injectable for tests.
  */
@@ -60,7 +61,8 @@ export function findChromeBinary(opts: FindChromeOptions = {}): string | undefin
 	const platform = opts.platform ?? process.platform;
 	const exists = opts.exists ?? existsSync;
 
-	const override = env.PI_CHROME_DEVTOOLS_BINARY;
+	// PIT_* is the canonical prefix; the legacy PI_* name is read as a fallback.
+	const override = env.PIT_CHROME_DEVTOOLS_BINARY || env.PI_CHROME_DEVTOOLS_BINARY;
 	if (override) return exists(override) ? override : undefined;
 
 	for (const candidate of candidatePaths(platform, env)) {

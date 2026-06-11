@@ -4,7 +4,12 @@
 
 import { SYSTEM_PROMPT_DYNAMIC_MARKER } from "@pit/ai";
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
-import { type FrequentFile, formatFrequentFilesIndexForPrompt } from "./frequent-files.ts";
+import {
+	type FrequentFile,
+	type FrequentFileStat,
+	formatFrequentFilesForPrompt,
+	formatFrequentFilesIndexForPrompt,
+} from "./frequent-files.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 import { getCurrentToolDiscoveryIndex } from "./tool-discovery.ts";
 
@@ -42,6 +47,15 @@ export interface BuildSystemPromptOptions {
 	 */
 	frequentFiles?: FrequentFile[];
 	/**
+	 * Per-session frequent-files tracker (files THIS session touched most).
+	 * Rendered in the dynamic suffix after the cache marker, like the repo-level
+	 * index: the tracker mutates as the session reads/edits files, so placing it
+	 * in the cacheable prefix would rewrite the prefix on every rebuild. When
+	 * non-empty it wins over `frequentFiles` — only ONE <frequent_files> section
+	 * is ever emitted.
+	 */
+	sessionFrequentFiles?: FrequentFileStat[];
+	/**
 	 * Current git branch, read from .git/HEAD at rebuild time (subprocess-free).
 	 * Rendered in the dynamic suffix (after the cache marker) so it never
 	 * invalidates the cached prefix. No dirty flag: a boot-time dirty bit goes
@@ -63,6 +77,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		skills: providedSkills,
 		hiddenToolCount,
 		frequentFiles,
+		sessionFrequentFiles,
 		gitState,
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
@@ -106,19 +121,27 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		if (gitState) {
 			parts.push(`\nGit branch: ${gitState.branch}`);
 		}
-		// Frequent-files index lives AFTER the marker, in the dynamic (uncached)
-		// suffix — deliberately NOT in the cacheable prefix. It is computed
-		// asynchronously at boot, so a pre-marker placement guarantees a one-shot
-		// cache invalidation: turn 1 lacks the block, then the compute resolves
-		// and turn 2's prefix differs, re-billing the entire cached prefix. The
-		// block is small (top-N paths), so leaving it uncached is far cheaper than
-		// thrashing the whole prefix once per session. See
-		// agent-session._kickoffFrequentFilesIndex.
-		if (frequentFiles && frequentFiles.length > 0) {
-			const block = formatFrequentFilesIndexForPrompt(frequentFiles);
-			if (block.length > 0) {
-				parts.push(`\n\n${block}\n`);
-			}
+		// Frequent-files lives AFTER the marker, in the dynamic (uncached)
+		// suffix — deliberately NOT in the cacheable prefix. The boot index is
+		// computed asynchronously (a pre-marker placement would guarantee a
+		// one-shot cache invalidation when it resolves) and the session tracker
+		// mutates as the agent works (a pre-marker placement would rewrite the
+		// prefix on every rebuild). The block is small (top-N paths), so leaving
+		// it uncached is far cheaper than thrashing the whole prefix. Exactly ONE
+		// <frequent_files> section is emitted: the session tracker (what THIS
+		// session actually touched) wins over the boot index once it has data.
+		// See agent-session._kickoffFrequentFilesIndex.
+		const sessionBlock =
+			sessionFrequentFiles && sessionFrequentFiles.length > 0
+				? formatFrequentFilesForPrompt(sessionFrequentFiles)
+				: "";
+		const indexBlock =
+			sessionBlock.length === 0 && frequentFiles && frequentFiles.length > 0
+				? formatFrequentFilesIndexForPrompt(frequentFiles)
+				: "";
+		const frequentFilesBlock = sessionBlock.length > 0 ? sessionBlock : indexBlock;
+		if (frequentFilesBlock.length > 0) {
+			parts.push(`\n\n${frequentFilesBlock}\n`);
 		}
 	};
 

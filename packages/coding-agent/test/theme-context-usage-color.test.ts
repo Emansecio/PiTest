@@ -14,12 +14,12 @@ describe("theme.getContextUsageColor", () => {
 
 	// A colorizer is identified by the palette color it wraps text in.
 	const sample = (fn: (s: string) => string): string => fn("_");
-	const expected = (color: "muted" | "warning" | "error"): string => theme.fg(color, "_");
+	const expected = (color: "accent" | "warning" | "error"): string => theme.fg(color, "_");
 	const expectedCritical = (): string => `\x1b[1m${theme.fg("error", "_")}\x1b[22m`;
 
-	it("uses muted below the warn threshold", () => {
-		expect(sample(theme.getContextUsageColor(0))).toBe(expected("muted"));
-		expect(sample(theme.getContextUsageColor(CONTEXT_USAGE_WARN_PERCENT - 0.1))).toBe(expected("muted"));
+	it("uses the calm accent below the warn threshold", () => {
+		expect(sample(theme.getContextUsageColor(0))).toBe(expected("accent"));
+		expect(sample(theme.getContextUsageColor(CONTEXT_USAGE_WARN_PERCENT - 0.1))).toBe(expected("accent"));
 	});
 
 	it("uses warning above the warn threshold and up to the error threshold", () => {
@@ -41,7 +41,7 @@ describe("theme.getContextUsageColor", () => {
 
 	it("treats all thresholds as strict (lower band owns the boundary)", () => {
 		// Exactly at the threshold → still the lower band.
-		expect(sample(theme.getContextUsageColor(CONTEXT_USAGE_WARN_PERCENT))).toBe(expected("muted"));
+		expect(sample(theme.getContextUsageColor(CONTEXT_USAGE_WARN_PERCENT))).toBe(expected("accent"));
 		expect(sample(theme.getContextUsageColor(CONTEXT_USAGE_ERROR_PERCENT))).toBe(expected("warning"));
 		expect(sample(theme.getContextUsageColor(CONTEXT_USAGE_CRITICAL_PERCENT))).toBe(expected("error"));
 	});
