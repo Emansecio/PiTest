@@ -1363,8 +1363,17 @@ export async function compact(
 	if (lists.shellCmds.length > 0) details.shellCmds = lists.shellCmds;
 	if (lists.mcpCalls.length > 0) details.mcpCalls = lists.mcpCalls;
 
-	if (isTruthyEnvFlag(process.env.PIT_FILE_DIGESTS)) {
-		const digests = await buildFileDigests(lists.readFiles, async (p) => {
+	// File digests: a symbol outline of touched files at compaction time, so the
+	// post-compaction model recalls the CURRENT shape of what it worked on without a
+	// re-read. Modified files are the artifact trail that summary prose silently
+	// drops, so they get digests by default; read-only files stay behind
+	// PIT_FILE_DIGESTS to bound prefix growth. The lists are disjoint (read AND
+	// modified surfaces only in modifiedFiles), so concatenating needs no dedup.
+	const digestPaths = isTruthyEnvFlag(process.env.PIT_FILE_DIGESTS)
+		? [...lists.modifiedFiles, ...lists.readFiles]
+		: lists.modifiedFiles;
+	if (digestPaths.length > 0) {
+		const digests = await buildFileDigests(digestPaths, async (p) => {
 			try {
 				return await readFile(isAbsolute(p) ? p : resolve(cwd ?? ".", p), "utf8");
 			} catch {

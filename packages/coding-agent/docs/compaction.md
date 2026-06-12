@@ -250,6 +250,25 @@ path/to/changed.ts
 </modified-files>
 ```
 
+The `<read-files>` / `<modified-files>` lists are derived deterministically from the
+tool calls in the compacted window — they do not depend on the summarizer recalling
+them, so the artifact trail survives intact even when prose summaries drop it.
+
+Modified files additionally carry a symbol digest — an outline of their CURRENT shape
+at compaction time — appended as a `<file-digests>` block, so the post-compaction model
+recalls what it built without spending a re-read:
+
+```
+<file-digests>
+  (outline at compaction time — re-read for current content)
+  src/foo.ts: parseInput, validate, FooError
+</file-digests>
+```
+
+Modified-file digests are on by default (they are the continuity signal most worth
+preserving). Read-only files are digested only when `PIT_FILE_DIGESTS=1` is set, to
+bound prefix growth.
+
 ### Message Serialization
 
 Before summarization, messages are serialized to text via `serializeConversation()`:

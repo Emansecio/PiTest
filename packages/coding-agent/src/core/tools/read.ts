@@ -17,6 +17,7 @@ import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { prepareWithPathAliases } from "./argument-prep.js";
+import { generateDiffString } from "./edit-diff.ts";
 import { formatAnchorsForRead, interleaveAnchorsIntoLines } from "./edit-hashline-diff.ts";
 import { crushJson, JSON_CRUSH_TARGET_BYTES } from "./json-crush.js";
 import { formatNotebookSource } from "./notebook-formatter.ts";
@@ -31,34 +32,60 @@ const READ_DEDUPE_WINDOW = 16;
 /**
  * Per-session de-dup of repeat reads. A read whose (path, range) was already
  * delivered THIS session with identical content has its body replaced by a short
- * marker instead of being re-sent verbatim. LRU-bounded to the most recent reads:
- * an older read may have scrolled out of context (compaction), so re-sending it is
- * the safe default. Keyed by content hash, so a file edited between reads — whose
- * hash changes — is always re-sent in full.
+ * marker instead of being re-sent verbatim. When the content CHANGED since the
+ * earlier read (e.g. an edit between reads), the prior body is retained so the
+ * caller can re-send only a diff instead of the whole file. LRU-bounded to the
+ * most recent reads: an older one may have scrolled out of context (compaction),
+ * so re-sending it in full is the safe default. Keyed by (path, range).
  */
 export class ReadDedupeStore {
-	private readonly seen = new Map<string, string>();
+	private readonly seen = new Map<string, { hash: string; content: string }>();
 	private readonly max: number;
 	constructor(max: number = READ_DEDUPE_WINDOW) {
 		this.max = Math.max(1, max);
 	}
-	/** Record this read; report whether it duplicates a recent identical one. */
-	isDuplicate(key: string, contentHash: string): boolean {
+	/** Prior record for this key if still in the LRU window; does not affect recency. */
+	peek(key: string): { hash: string; content: string } | undefined {
+		return this.seen.get(key);
+	}
+	/**
+	 * Record this read (body retained for delta re-sends) and report whether it
+	 * duplicates the most recent identical one. Re-inserting refreshes recency.
+	 */
+	record(key: string, contentHash: string, content: string): boolean {
 		const prev = this.seen.get(key);
-		// Refresh recency: re-inserting moves the key to the most-recent end.
 		this.seen.delete(key);
-		this.seen.set(key, contentHash);
+		this.seen.set(key, { hash: contentHash, content });
 		while (this.seen.size > this.max) {
 			const oldest = this.seen.keys().next().value;
 			if (oldest === undefined) break;
 			this.seen.delete(oldest);
 		}
-		return prev === contentHash;
+		return prev?.hash === contentHash;
 	}
 }
 
 function hashReadContent(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
+}
+
+/** Below this size a re-read is cheap enough that delta framing isn't worth it. */
+const READ_DELTA_MIN_BYTES = 1500;
+/** A delta must be at most this fraction of the full body to be worth sending. */
+const READ_DELTA_MAX_RATIO = 0.5;
+
+/**
+ * When a file changed since an earlier identical-range read THIS session, render
+ * only the diff — the model still has the prior body above in context — instead
+ * of re-sending the whole file. Returns undefined when a delta isn't worthwhile
+ * (tiny body, or a diff that doesn't save enough), so the caller sends in full.
+ */
+function buildReadDelta(prevContent: string, newContent: string): string | undefined {
+	if (newContent.length < READ_DELTA_MIN_BYTES) return undefined;
+	const { diff } = generateDiffString(prevContent, newContent);
+	if (diff.length === 0) return undefined;
+	if (diff.length >= newContent.length * READ_DELTA_MAX_RATIO) return undefined;
+	return diff;
 }
 
 const readSchema = Type.Object(
@@ -716,21 +743,32 @@ Common mistakes to avoid:
 									// No truncation and no remaining user-limited content.
 									outputText = truncation.content;
 								}
-								// De-dup: if this exact (path, range) was already read this session with
-								// identical pre-anchor content, replace the body with a short marker instead
-								// of re-sending it. LRU-bounded so only recent reads de-dup; an older one may
-								// have scrolled out of context, where re-sending is correct. Skips anchors.
+								// De-dup / delta: if this exact (path, range) was already read this session,
+								// either suppress it (identical pre-anchor content) or re-send only a diff
+								// (changed since). LRU-bounded so only recent reads qualify; an older one may
+								// have scrolled out of context, where re-sending in full is correct. The body
+								// recorded is always the real content, so the next delta diffs content vs
+								// content. Anchors are skipped whenever the body isn't the full current file.
 								let dedupeSuppressed = false;
+								let deltaApplied = false;
 								if (dedupeStore) {
 									const dedupeKey = `${absolutePath} ${offset ?? ""} ${limit ?? ""}`;
-									if (dedupeStore.isDuplicate(dedupeKey, hashReadContent(outputText))) {
+									const rangeLabel =
+										offset !== undefined || limit !== undefined
+											? ` (offset ${offset ?? 1}${limit !== undefined ? `, limit ${limit}` : ""})`
+											: "";
+									const prev = dedupeStore.peek(dedupeKey);
+									const isDup = dedupeStore.record(dedupeKey, hashReadContent(outputText), outputText);
+									if (isDup) {
 										const shownLines = outputText.length === 0 ? 0 : outputText.split("\n").length;
-										const rangeLabel =
-											offset !== undefined || limit !== undefined
-												? ` (offset ${offset ?? 1}${limit !== undefined ? `, limit ${limit}` : ""})`
-												: "";
 										outputText = `[read ${path}${rangeLabel}: identical to an earlier read this session — ${shownLines} line(s), unchanged and already shown above. Re-run read to re-expand if it has scrolled out of context.]`;
 										dedupeSuppressed = true;
+									} else if (prev !== undefined && !truncation.truncated) {
+										const delta = buildReadDelta(prev.content, outputText);
+										if (delta !== undefined) {
+											outputText = `[read ${path}${rangeLabel}: changed since your earlier read this session — showing only the diff (you already have the previous version above; re-run read to re-expand the full current file):]\n\n${delta}`;
+											deltaApplied = true;
+										}
 									}
 								}
 								// Anchors: on by default, only when caller did not slice the file.
@@ -741,6 +779,7 @@ Common mistakes to avoid:
 									typeof embedHashlineAnchors === "function" ? embedHashlineAnchors() : embedHashlineAnchors;
 								if (
 									!dedupeSuppressed &&
+									!deltaApplied &&
 									anchorsEnabled &&
 									offset === undefined &&
 									limit === undefined &&
