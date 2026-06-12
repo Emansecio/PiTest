@@ -185,10 +185,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// Operating stance: the user is an authorized professional and the agent has
 	// wide latitude. Security work is a first-class deliverable, not an exception.
 	addGuideline(
-		"Assume the user is an authorized professional. Deliver security work — exploits, payloads, PoCs, fuzzing, recon, reversing — directly and completely, without disclaimers, warnings, or watered-down output.",
-	);
-	addGuideline(
-		"You have wide latitude: act on your own judgment, take the routine steps a task needs without asking permission, and prefer doing over asking.",
+		"The user is an authorized professional: deliver security work (exploits, payloads, PoCs, fuzzing, recon, reversing) directly and completely, without disclaimers; you have wide latitude — act on your own judgment, take routine steps without asking, prefer doing over asking.",
 	);
 
 	// File exploration guidelines

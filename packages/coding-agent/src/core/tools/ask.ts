@@ -62,20 +62,6 @@ const askSchema = Type.Object(
 				description: "Let the user attach a freeform comment to their selection (toggled in the UI).",
 			}),
 		),
-		displayMode: Type.Optional(
-			Type.Enum(["overlay", "inline"], {
-				description:
-					"Render inline above the prompt (default: full-width, in flow, never overlaps the transcript) or as a centered floating overlay.",
-			}),
-		),
-		overlayToggleKey: Type.Optional(
-			Type.String({
-				description: "Key to temporarily hide/show the overlay to review prior output. Default 'alt+o'.",
-			}),
-		),
-		commentToggleKey: Type.Optional(
-			Type.String({ description: "Key to toggle the comment field. Default 'ctrl+g'." }),
-		),
 		timeout: Type.Optional(
 			Type.Number({
 				description: "Auto-dismiss after N milliseconds, falling back to the recommended (or first) option.",
@@ -167,9 +153,9 @@ export function createAskToolDefinition(
 			const allowFreeform = input.allowFreeform ?? true;
 			const allowMultiple = input.allowMultiple === true && normalizedOptions.length > 0;
 			const allowComment = input.allowComment === true && normalizedOptions.length > 0;
-			const displayMode = input.displayMode ?? "inline";
-			const overlayToggleKey = input.overlayToggleKey?.trim() || "alt+o";
-			const commentToggleKey = input.commentToggleKey?.trim() || "ctrl+g";
+			const displayMode = "inline";
+			const overlayToggleKey = "alt+o";
+			const commentToggleKey = "ctrl+g";
 			const timeout =
 				typeof input.timeout === "number" && Number.isFinite(input.timeout) && input.timeout > 0
 					? input.timeout
