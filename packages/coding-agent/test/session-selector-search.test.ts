@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { SessionInfo } from "../src/core/session-manager.js";
-import { filterAndSortSessions } from "../src/modes/interactive/components/session-selector-search.js";
+import {
+	filterAndSortSessions,
+	matchSession,
+	parseSearchQuery,
+} from "../src/modes/interactive/components/session-selector-search.js";
 
 function makeSession(
 	overrides: Partial<SessionInfo> & { id: string; modified: Date; allMessagesText: string },
@@ -110,6 +114,51 @@ describe("session selector search", () => {
 
 		const result2 = filterAndSortSessions(tieSessions, '"brave"', "relevance");
 		expect(result2.map((s) => s.id)).toEqual(["newer", "older"]);
+	});
+
+	it("matchSession returns identical results across repeated calls (warm cache)", () => {
+		const sessions: SessionInfo[] = [
+			makeSession({
+				id: "a",
+				name: "Alpha",
+				cwd: "/home/user/proj",
+				modified: new Date("2026-01-01T00:00:00.000Z"),
+				allMessagesText: "node\n\n   cve was discussed   here brave",
+			}),
+			makeSession({
+				id: "b",
+				modified: new Date("2026-01-02T00:00:00.000Z"),
+				allMessagesText: "node something else entirely",
+			}),
+		];
+
+		// Fuzzy + phrase tokens together exercise both caches.
+		const parsed = parseSearchQuery('node "node cve" brave');
+		const first = sessions.map((s) => matchSession(s, parsed));
+		const second = sessions.map((s) => matchSession(s, parsed));
+		const third = sessions.map((s) => matchSession(s, parsed));
+
+		expect(second).toEqual(first);
+		expect(third).toEqual(first);
+		// Sanity: session a matches all three tokens, b fails the phrase.
+		expect(first[0]?.matches).toBe(true);
+		expect(first[1]?.matches).toBe(false);
+	});
+
+	it("phrase-mode scores are byte-identical with a warm cache", () => {
+		const session = makeSession({
+			id: "s1",
+			modified: new Date("2026-01-01T00:00:00.000Z"),
+			allMessagesText: "xxxx   node\tcve\n\nyyyy",
+		});
+		const parsed = parseSearchQuery('"node cve"');
+
+		const cold = matchSession(session, parsed);
+		const warm = matchSession(session, parsed);
+
+		expect(warm.matches).toBe(cold.matches);
+		expect(warm.score).toBe(cold.score);
+		expect(cold.matches).toBe(true);
 	});
 
 	it("returns empty list for invalid regex", () => {

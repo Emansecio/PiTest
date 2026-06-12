@@ -1,4 +1,4 @@
-import { Marked, type Token, Tokenizer, type Tokens } from "marked";
+import { Marked, type Token, Tokenizer, type Tokens, type TokensList } from "marked";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -20,6 +20,17 @@ class StrictStrikethroughTokenizer extends Tokenizer {
 			tokens: this.lexer.inlineTokens(text),
 		};
 	}
+}
+
+/**
+ * Whether a lexed token array carries any resolved reference-link definitions.
+ * marked attaches a `links` map (def label → href/title) to the TokensList it
+ * returns from lexer(); a non-empty map means inline rendering depends on
+ * document-wide def resolution, which a tail-only re-lex cannot reproduce.
+ */
+function hasLinkDefs(tokens: Token[]): boolean {
+	const links = (tokens as Token[] & { links?: TokensList["links"] }).links;
+	return links !== undefined && Object.keys(links).length > 0;
 }
 
 function applyTextWithNewlines(text: string, applyText: (t: string) => string): string {
@@ -104,6 +115,19 @@ export class Markdown implements Component {
 	private tokenLineCache?: Map<string, string[]>;
 	// Cached default inline style context (invalidated alongside other caches).
 	private cachedDefaultInlineStyleContext?: InlineStyleContext;
+	// Incremental-lexing state. Tracks the last successfully lexed buffer so that
+	// append-only streaming (setText with a growing prefix) can re-lex only the
+	// trailing region instead of the whole document. NOT cleared by invalidate()
+	// — these are the incremental baseline, replaced wholesale after each render.
+	// When any guard in lexTokens() fails, the path falls back to a full lex and
+	// resets this baseline, so the output is always byte-identical to a full lex.
+	private lastRawText?: string;
+	private lastNormalizedText?: string;
+	private lastTokens?: Token[];
+	// Test-only counter: number of renders whose lex took the incremental tail
+	// path (vs a full re-lex). Exposed via _incrementalLexCount() for the
+	// equivalence suite to confirm the fast path is actually exercised.
+	private incrementalLexCount = 0;
 
 	constructor(
 		text: string,
@@ -150,11 +174,15 @@ export class Markdown implements Component {
 			return result;
 		}
 
-		// Replace tabs with 3 spaces for consistent rendering
-		const normalizedText = this.text.replace(/\t/g, "   ");
+		// Replace tabs with 3 spaces for consistent rendering. During append-only
+		// streaming this reuses the previously normalized prefix (tab→spaces is a
+		// char-local, stateless substitution) and only normalizes the new suffix.
+		const normalizedText = this.normalizeIncrementally();
 
-		// Parse markdown to HTML-like tokens
-		const tokens = markdownParser.lexer(normalizedText);
+		// Parse markdown to HTML-like tokens. lexTokens() re-lexes only the trailing
+		// region when it is provably safe (see its guards); otherwise it performs a
+		// full lex. Either way the result is byte-identical to lexer(normalizedText).
+		const tokens = this.lexTokens(normalizedText);
 
 		// Build the final lines for each top-level token (renderToken → wrap →
 		// margins/bg) and cache them keyed by (width, nextTokenType, token
@@ -167,7 +195,15 @@ export class Markdown implements Component {
 		const rightMargin = " ".repeat(this.paddingX);
 		const bgFn = this.defaultTextStyle?.bgColor;
 
-		const prevTokenCache = this.tokenLineCache;
+		// The per-token line cache is keyed by token.raw, which fully determines a
+		// token's rendering EXCEPT when reference-link definitions are present:
+		// a `[x]` use renders differently once a `[x]: url` def exists elsewhere,
+		// while its raw is unchanged. In that (rare) case, do not reuse lines
+		// carried over from a previous render — the def map may have changed under
+		// an identical raw. Intra-render dedupe (nextTokenCache) stays safe because
+		// the def map is constant within a single render. With no defs (the common
+		// path, incl. all normal streaming) this is byte- and perf-identical.
+		const prevTokenCache = hasLinkDefs(tokens) ? undefined : this.tokenLineCache;
 		const nextTokenCache = new Map<string, string[]>();
 		const contentLines: string[] = [];
 
@@ -203,6 +239,134 @@ export class Markdown implements Component {
 		this.cachedLines = result;
 
 		return result.length > 0 ? result : [""];
+	}
+
+	/** Test-only: count of renders that used the incremental tail-lex path. */
+	_incrementalLexCount(): number {
+		return this.incrementalLexCount;
+	}
+
+	/**
+	 * Normalize this.text (tab → 3 spaces) reusing the previously normalized
+	 * prefix when the new text is an append of the last one. Tab expansion is a
+	 * char-local, stateless substitution, so normalizing only the appended suffix
+	 * yields a byte-identical result to normalizing the whole string.
+	 */
+	private normalizeIncrementally(): string {
+		const last = this.lastRawText;
+		if (
+			last !== undefined &&
+			last.length > 0 &&
+			this.lastNormalizedText !== undefined &&
+			this.text.startsWith(last)
+		) {
+			const delta = this.text.slice(last.length);
+			return this.lastNormalizedText + delta.replace(/\t/g, "   ");
+		}
+		return this.text.replace(/\t/g, "   ");
+	}
+
+	/**
+	 * Lex normalizedText into top-level tokens. When the new buffer is a pure
+	 * append of the previously lexed one and a series of safety guards all pass,
+	 * only the trailing region is re-lexed and concatenated onto the stable
+	 * prefix tokens — turning accumulated O(D·L) streaming lexation into ~O(L).
+	 *
+	 * Every guard failure (and every non-append edit) falls back to a full lex.
+	 * The final coverage guard verifies that the concatenated token.raw exactly
+	 * reconstructs normalizedText, so the incremental result is byte-identical to
+	 * markdownParser.lexer(normalizedText) in all accepted cases.
+	 */
+	private lexTokens(normalizedText: string): Token[] {
+		const incremental = this.tryIncrementalLex(normalizedText);
+		if (incremental) {
+			this.incrementalLexCount++;
+			this.lastRawText = this.text;
+			this.lastNormalizedText = normalizedText;
+			this.lastTokens = incremental;
+			return incremental;
+		}
+
+		const tokens = markdownParser.lexer(normalizedText);
+		this.lastRawText = this.text;
+		this.lastNormalizedText = normalizedText;
+		this.lastTokens = tokens;
+		return tokens;
+	}
+
+	/**
+	 * Attempt the incremental tail re-lex. Returns the merged token array on
+	 * success, or undefined to signal the caller to fall back to a full lex.
+	 */
+	private tryIncrementalLex(normalizedText: string): Token[] | undefined {
+		const prev = this.lastTokens;
+		const prevNormalized = this.lastNormalizedText;
+		// Guard (a): need a previous lex, a pure append, and enough stable tokens
+		// that discarding the trailing two still leaves a prefix to keep.
+		if (!prev || prevNormalized === undefined || prev.length < 3) {
+			return undefined;
+		}
+		if (!normalizedText.startsWith(prevNormalized) || normalizedText.length === prevNormalized.length) {
+			return undefined;
+		}
+
+		// Guard (b): discard the last two tokens. The final token may be "open"
+		// (still being streamed) and the penultimate is often a `space` that can
+		// fuse blocks (e.g. tight→loose list promotion when a new item arrives).
+		const kept = prev.slice(0, prev.length - 2);
+		if (kept.length === 0) {
+			return undefined;
+		}
+
+		// Guard (e): the last kept token must not be a container that can absorb
+		// following content via lazy continuation or looseness changes. Discarding
+		// the trailing two tokens already removes the streaming target, so what
+		// remains here is a structurally settled boundary for the allowed types.
+		const lastKept = kept[kept.length - 1];
+		if (
+			lastKept.type === "list" ||
+			lastKept.type === "table" ||
+			lastKept.type === "blockquote" ||
+			lastKept.type === "html"
+		) {
+			return undefined;
+		}
+
+		let stableRaw = "";
+		for (const token of kept) {
+			stableRaw += token.raw;
+		}
+		// The kept raw must be an exact prefix of the new normalized text, otherwise
+		// the structure shifted under us and the tail offset would be wrong.
+		if (!normalizedText.startsWith(stableRaw)) {
+			return undefined;
+		}
+
+		const tail = normalizedText.slice(stableRaw.length);
+		const tailTokens = markdownParser.lexer(tail);
+
+		// Guard (d): reference-link definitions resolve across the whole document
+		// (a def can change inline rendering of a use anywhere, in both directions).
+		// If either side carries link defs, or the tail introduces a def line, the
+		// tail-only lex cannot see the cross-region relationship → full lex.
+		if (hasLinkDefs(prev) || hasLinkDefs(tailTokens) || /^\s{0,3}\[[^\]]+\]:/m.test(tail)) {
+			return undefined;
+		}
+
+		const merged: Token[] = kept.concat(tailTokens);
+
+		// Guard (f): cheap structural sanity. If the concatenated raw does not
+		// exactly reconstruct the input, the token boundaries diverged from a full
+		// lex (e.g. a structural merge the other guards missed) → full lex.
+		let coverage = "";
+		for (const token of merged) {
+			coverage += token.raw;
+		}
+		if (coverage !== normalizedText) {
+			return undefined;
+		}
+
+		return merged;
 	}
 
 	/**

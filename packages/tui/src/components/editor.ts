@@ -3,16 +3,10 @@ import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocompl
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
+import { computeWordDeletion, computeWordMoveColumn, decodeBracketedPasteCsiU } from "../text-edit-core.ts";
 import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
-import {
-	extractAnsiCode,
-	getSegmenter,
-	isPunctuationChar,
-	isWhitespaceChar,
-	truncateToWidth,
-	visibleWidth,
-} from "../utils.ts";
+import { extractAnsiCode, getSegmenter, isWhitespaceChar, truncateToWidth, visibleWidth } from "../utils.ts";
 import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list.ts";
 
 const baseSegmenter = getSegmenter();
@@ -1406,17 +1400,9 @@ export class Editor implements Component, Focusable {
 
 		this.pushUndoSnapshot();
 
-		// Some terminals (e.g. tmux popups with extended-keys-format=csi-u) re-encode
-		// control bytes inside bracketed paste as CSI-u Ctrl+<letter> sequences
-		// (ESC [ <codepoint> ; 5 u). Decode those back to their literal byte so the
-		// per-char filter below preserves newlines instead of stripping ESC and
-		// leaking the printable tail (e.g. "[106;5u") into the editor.
-		const decodedText = pastedText.replace(/\x1b\[(\d+);5u/g, (match, code) => {
-			const cp = Number(code);
-			if (cp >= 97 && cp <= 122) return String.fromCharCode(cp - 96);
-			if (cp >= 65 && cp <= 90) return String.fromCharCode(cp - 64);
-			return match;
-		});
+		// Decode CSI-u-encoded control bytes some terminals inject into pastes
+		// (see decodeBracketedPasteCsiU) before the per-char filter below runs.
+		const decodedText = decodeBracketedPasteCsiU(pastedText);
 
 		// Clean the pasted text: normalize line endings, expand tabs
 		const cleanText = this.normalizeText(decodedText);
@@ -1833,21 +1819,21 @@ export class Editor implements Component, Focusable {
 		} else {
 			this.pushUndoSnapshot();
 
-			// Save lastAction before cursor movement (moveWordBackwards resets it)
+			// Save lastAction before deletion (kill accumulation)
 			const wasKill = this.lastAction === "kill";
 
-			const oldCursorCol = this.state.cursorCol;
-			this.moveWordBackwards();
-			const deleteFrom = this.state.cursorCol;
-			this.setCursorCol(oldCursorCol);
-
-			const deletedText = currentLine.slice(deleteFrom, this.state.cursorCol);
-			this.killRing.push(deletedText, { prepend: true, accumulate: wasKill });
+			const { deletedText, newText, newCol, prepend } = computeWordDeletion(
+				currentLine,
+				this.state.cursorCol,
+				"backward",
+				(text) => this.segment(text),
+				isPasteMarker,
+			);
+			this.killRing.push(deletedText, { prepend, accumulate: wasKill });
 			this.lastAction = "kill";
 
-			this.state.lines[this.state.cursorLine] =
-				currentLine.slice(0, deleteFrom) + currentLine.slice(this.state.cursorCol);
-			this.setCursorCol(deleteFrom);
+			this.state.lines[this.state.cursorLine] = newText;
+			this.setCursorCol(newCol);
 		}
 
 		if (this.onChange) {
@@ -1876,20 +1862,23 @@ export class Editor implements Component, Focusable {
 		} else {
 			this.pushUndoSnapshot();
 
-			// Save lastAction before cursor movement (moveWordForwards resets it)
+			// Save lastAction before deletion (kill accumulation)
 			const wasKill = this.lastAction === "kill";
 
-			const oldCursorCol = this.state.cursorCol;
-			this.moveWordForwards();
-			const deleteTo = this.state.cursorCol;
-			this.setCursorCol(oldCursorCol);
-
-			const deletedText = currentLine.slice(this.state.cursorCol, deleteTo);
-			this.killRing.push(deletedText, { prepend: false, accumulate: wasKill });
+			const { deletedText, newText, newCol, prepend } = computeWordDeletion(
+				currentLine,
+				this.state.cursorCol,
+				"forward",
+				(text) => this.segment(text),
+				isPasteMarker,
+			);
+			this.killRing.push(deletedText, { prepend, accumulate: wasKill });
 			this.lastAction = "kill";
 
-			this.state.lines[this.state.cursorLine] =
-				currentLine.slice(0, this.state.cursorCol) + currentLine.slice(deleteTo);
+			this.state.lines[this.state.cursorLine] = newText;
+			// newCol === cursorCol (forward delete leaves the cursor put); the call
+			// still resets the sticky visual column, matching the original flow.
+			this.setCursorCol(newCol);
 		}
 
 		if (this.onChange) {
@@ -2125,47 +2114,8 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
-		const graphemes = [...this.segment(textBeforeCursor)];
-		let newCol = this.state.cursorCol;
-
-		// Skip trailing whitespace
-		while (
-			graphemes.length > 0 &&
-			!isPasteMarker(graphemes[graphemes.length - 1]?.segment || "") &&
-			isWhitespaceChar(graphemes[graphemes.length - 1]?.segment || "")
-		) {
-			newCol -= graphemes.pop()?.segment.length || 0;
-		}
-
-		if (graphemes.length > 0) {
-			const lastGrapheme = graphemes[graphemes.length - 1]?.segment || "";
-			if (isPasteMarker(lastGrapheme)) {
-				// Paste marker is a single atomic word
-				newCol -= graphemes.pop()?.segment.length || 0;
-			} else if (isPunctuationChar(lastGrapheme)) {
-				// Skip punctuation run
-				while (
-					graphemes.length > 0 &&
-					isPunctuationChar(graphemes[graphemes.length - 1]?.segment || "") &&
-					!isPasteMarker(graphemes[graphemes.length - 1]?.segment || "")
-				) {
-					newCol -= graphemes.pop()?.segment.length || 0;
-				}
-			} else {
-				// Skip word run
-				while (
-					graphemes.length > 0 &&
-					!isWhitespaceChar(graphemes[graphemes.length - 1]?.segment || "") &&
-					!isPunctuationChar(graphemes[graphemes.length - 1]?.segment || "") &&
-					!isPasteMarker(graphemes[graphemes.length - 1]?.segment || "")
-				) {
-					newCol -= graphemes.pop()?.segment.length || 0;
-				}
-			}
-		}
-
-		this.setCursorCol(newCol);
+		const graphemes = [...this.segment(currentLine.slice(0, this.state.cursorCol))];
+		this.setCursorCol(computeWordMoveColumn(graphemes, this.state.cursorCol, "backward", isPasteMarker));
 	}
 
 	/**
@@ -2378,44 +2328,8 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
-		const textAfterCursor = currentLine.slice(this.state.cursorCol);
-		const segments = this.segment(textAfterCursor);
-		const iterator = segments[Symbol.iterator]();
-		let next = iterator.next();
-		let newCol = this.state.cursorCol;
-
-		// Skip leading whitespace
-		while (!next.done && !isPasteMarker(next.value.segment) && isWhitespaceChar(next.value.segment)) {
-			newCol += next.value.segment.length;
-			next = iterator.next();
-		}
-
-		if (!next.done) {
-			const firstGrapheme = next.value.segment;
-			if (isPasteMarker(firstGrapheme)) {
-				// Paste marker is a single atomic word
-				newCol += firstGrapheme.length;
-			} else if (isPunctuationChar(firstGrapheme)) {
-				// Skip punctuation run
-				while (!next.done && isPunctuationChar(next.value.segment) && !isPasteMarker(next.value.segment)) {
-					newCol += next.value.segment.length;
-					next = iterator.next();
-				}
-			} else {
-				// Skip word run
-				while (
-					!next.done &&
-					!isWhitespaceChar(next.value.segment) &&
-					!isPunctuationChar(next.value.segment) &&
-					!isPasteMarker(next.value.segment)
-				) {
-					newCol += next.value.segment.length;
-					next = iterator.next();
-				}
-			}
-		}
-
-		this.setCursorCol(newCol);
+		const graphemes = [...this.segment(currentLine.slice(this.state.cursorCol))];
+		this.setCursorCol(computeWordMoveColumn(graphemes, this.state.cursorCol, "forward", isPasteMarker));
 	}
 
 	// Slash menu only allowed on the first line of the editor

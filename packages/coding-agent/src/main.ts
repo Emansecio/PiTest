@@ -12,31 +12,22 @@ import { type ImageContent, modelsAreEqual } from "@pit/ai";
 import { ProcessTerminal, setKeybindings, TUI } from "@pit/tui";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
-import { buildDryRunReport, formatReportJson, formatReportText } from "./cli/dry-run/index.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
-import { selectSession } from "./cli/session-picker.ts";
 import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
-import { type CreateAgentSessionRuntimeFactory, createAgentSessionRuntime } from "./core/agent-session-runtime.ts";
-import {
-	type AgentSessionRuntimeDiagnostic,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "./core/agent-session-services.ts";
+// Heavy mode-real-only graphs (agent-session-services pulls the full harness/SDK
+// graph, ~1s of module eval) are loaded lazily inside main()/helpers AFTER the
+// early-exits (--version, --export) so those paths don't pay for modules they
+// never use. Types are kept static here (erased at build via erasableSyntaxOnly).
+import type { CreateAgentSessionRuntimeFactory } from "./core/agent-session-runtime.ts";
+import type { AgentSessionRuntimeDiagnostic } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
-import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
-import {
-	type ModelRole,
-	resolveCliModel,
-	resolveModelScope,
-	resolveRole,
-	type ScopedModel,
-} from "./core/model-resolver.ts";
+import type { ModelRole, ScopedModel } from "./core/model-resolver.ts";
 import { flushRawStdout, restoreStdout, takeOverStdout, writeRawStdout } from "./core/output-guard.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
@@ -45,12 +36,11 @@ import {
 	MissingSessionCwdError,
 	type SessionCwdIssue,
 } from "./core/session-cwd.ts";
-import { SessionManager } from "./core/session-manager.ts";
+import type { SessionManager } from "./core/session-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { sweepStaleTempLogs } from "./core/temp-logs.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
-import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
@@ -156,6 +146,7 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
 		return { type: "path", path: sessionArg };
 	}
 
+	const { SessionManager } = await import("./core/session-manager.ts");
 	// Try to match as session ID in current project first
 	const localSessions = await SessionManager.list(cwd, sessionDir);
 	const localMatches = localSessions.filter((s) => s.id.startsWith(sessionArg));
@@ -207,7 +198,12 @@ function validateForkFlags(parsed: Args): void {
 	}
 }
 
-function forkSessionOrExit(sourcePath: string, cwd: string, sessionDir?: string): SessionManager {
+function forkSessionOrExit(
+	SessionManager: typeof import("./core/session-manager.ts").SessionManager,
+	sourcePath: string,
+	cwd: string,
+	sessionDir?: string,
+): SessionManager {
 	try {
 		return SessionManager.forkFrom(sourcePath, cwd, sessionDir);
 	} catch (error: unknown) {
@@ -223,6 +219,7 @@ async function createSessionManager(
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
 ): Promise<SessionManager> {
+	const { SessionManager } = await import("./core/session-manager.ts");
 	if (parsed.noSession) {
 		return SessionManager.inMemory();
 	}
@@ -234,7 +231,7 @@ async function createSessionManager(
 			case "path":
 			case "local":
 			case "global":
-				return forkSessionOrExit(resolved.path, cwd, sessionDir);
+				return forkSessionOrExit(SessionManager, resolved.path, cwd, sessionDir);
 
 			case "not_found":
 				console.error(chalk.red(`No session found matching '${resolved.arg}'`));
@@ -257,7 +254,7 @@ async function createSessionManager(
 					console.log(chalk.dim("Aborted."));
 					process.exit(0);
 				}
-				return forkSessionOrExit(resolved.path, cwd, sessionDir);
+				return forkSessionOrExit(SessionManager, resolved.path, cwd, sessionDir);
 			}
 
 			case "not_found":
@@ -267,6 +264,7 @@ async function createSessionManager(
 	}
 
 	if (parsed.resume) {
+		const { selectSession } = await import("./cli/session-picker.ts");
 		initTheme(settingsManager.getTheme(), true);
 		try {
 			const selectedPath = await selectSession(
@@ -304,6 +302,8 @@ function buildSessionOptions(
 	modelRegistry: ModelRegistry,
 	settingsManager: SettingsManager,
 	cwd: string,
+	resolveCliModel: typeof import("./core/model-resolver.ts").resolveCliModel,
+	resolveRole: typeof import("./core/model-resolver.ts").resolveRole,
 ): {
 	options: CreateAgentSessionOptions;
 	cliThinkingFromModel: boolean;
@@ -541,6 +541,7 @@ export async function main(args: string[], options?: MainOptions) {
 		let result: string;
 		try {
 			const outputPath = parsed.messages.length > 0 ? parsed.messages[0] : undefined;
+			const { exportFromFile } = await import("./core/export-html/index.ts");
 			result = await exportFromFile(parsed.export, outputPath);
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : "Failed to export session";
@@ -585,6 +586,8 @@ export async function main(args: string[], options?: MainOptions) {
 			if (!selectedCwd) {
 				process.exit(0);
 			}
+			// Module already evaluated by createSessionManager above; this import is a cache hit.
+			const { SessionManager } = await import("./core/session-manager.ts");
 			sessionManager = SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
 		} else {
 			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
@@ -605,6 +608,12 @@ export async function main(args: string[], options?: MainOptions) {
 		sessionStartEvent,
 	}) => {
 		time("createRuntime-start");
+		// Lazy-load the heavy harness/SDK graph here: the runtime factory only runs
+		// for real modes, never on --version/--export early-exits.
+		const [
+			{ createAgentSessionFromServices, createAgentSessionServices },
+			{ resolveCliModel, resolveModelScope, resolveRole },
+		] = await Promise.all([import("./core/agent-session-services.ts"), import("./core/model-resolver.ts")]);
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
@@ -656,6 +665,8 @@ export async function main(args: string[], options?: MainOptions) {
 			modelRegistry,
 			settingsManager,
 			cwd,
+			resolveCliModel,
+			resolveRole,
 		);
 		diagnostics.push(...sessionOptionDiagnostics);
 
@@ -696,6 +707,7 @@ export async function main(args: string[], options?: MainOptions) {
 		};
 	};
 	time("createRuntime");
+	const { createAgentSessionRuntime } = await import("./core/agent-session-runtime.ts");
 	const runtime = await createAgentSessionRuntime(createRuntime, {
 		cwd: sessionManager.getCwd(),
 		agentDir,
@@ -719,6 +731,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (parsed.dryRun) {
+		const { buildDryRunReport, formatReportJson, formatReportText } = await import("./cli/dry-run/index.ts");
 		const activeToolNames = session.getActiveToolNames();
 		const report = buildDryRunReport({
 			services,
@@ -778,6 +791,7 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
+	const { InteractiveMode, runPrintMode, runRpcMode } = await import("./modes/index.ts");
 	if (appMode === "rpc") {
 		printTimings();
 		await runRpcMode(runtime);

@@ -1,9 +1,10 @@
 import { getKeybindings } from "../keybindings.ts";
 import { decodeKittyPrintable } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
+import { computeWordDeletion, computeWordMoveColumn, decodeBracketedPasteCsiU } from "../text-edit-core.ts";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
-import { getSegmenter, isPunctuationChar, isWhitespaceChar, sliceByColumn, visibleWidth } from "../utils.ts";
+import { getSegmenter, isWhitespaceChar, sliceByColumn, visibleWidth } from "../utils.ts";
 
 const segmenter = getSegmenter();
 
@@ -267,42 +268,43 @@ export class Input implements Component, Focusable {
 	private deleteWordBackwards(): void {
 		if (this.cursor === 0) return;
 
-		// Save lastAction before cursor movement (moveWordBackwards resets it)
+		// Save lastAction before deletion (kill accumulation)
 		const wasKill = this.lastAction === "kill";
 
 		this.pushUndo();
 
-		const oldCursor = this.cursor;
-		this.moveWordBackwards();
-		const deleteFrom = this.cursor;
-		this.cursor = oldCursor;
-
-		const deletedText = this.value.slice(deleteFrom, this.cursor);
-		this.killRing.push(deletedText, { prepend: true, accumulate: wasKill });
+		const { deletedText, newText, newCol, prepend } = computeWordDeletion(
+			this.value,
+			this.cursor,
+			"backward",
+			(text) => segmenter.segment(text),
+		);
+		this.killRing.push(deletedText, { prepend, accumulate: wasKill });
 		this.lastAction = "kill";
 
-		this.value = this.value.slice(0, deleteFrom) + this.value.slice(this.cursor);
-		this.cursor = deleteFrom;
+		this.value = newText;
+		this.cursor = newCol;
 	}
 
 	private deleteWordForward(): void {
 		if (this.cursor >= this.value.length) return;
 
-		// Save lastAction before cursor movement (moveWordForwards resets it)
+		// Save lastAction before deletion (kill accumulation)
 		const wasKill = this.lastAction === "kill";
 
 		this.pushUndo();
 
-		const oldCursor = this.cursor;
-		this.moveWordForwards();
-		const deleteTo = this.cursor;
-		this.cursor = oldCursor;
-
-		const deletedText = this.value.slice(this.cursor, deleteTo);
-		this.killRing.push(deletedText, { prepend: false, accumulate: wasKill });
+		const { deletedText, newText, newCol, prepend } = computeWordDeletion(
+			this.value,
+			this.cursor,
+			"forward",
+			(text) => segmenter.segment(text),
+		);
+		this.killRing.push(deletedText, { prepend, accumulate: wasKill });
 		this.lastAction = "kill";
 
-		this.value = this.value.slice(0, this.cursor) + this.value.slice(deleteTo);
+		this.value = newText;
+		this.cursor = newCol;
 	}
 
 	private yank(): void {
@@ -352,32 +354,8 @@ export class Input implements Component, Focusable {
 		}
 
 		this.lastAction = null;
-		const textBeforeCursor = this.value.slice(0, this.cursor);
-		const graphemes = [...segmenter.segment(textBeforeCursor)];
-
-		// Skip trailing whitespace
-		while (graphemes.length > 0 && isWhitespaceChar(graphemes[graphemes.length - 1]?.segment || "")) {
-			this.cursor -= graphemes.pop()?.segment.length || 0;
-		}
-
-		if (graphemes.length > 0) {
-			const lastGrapheme = graphemes[graphemes.length - 1]?.segment || "";
-			if (isPunctuationChar(lastGrapheme)) {
-				// Skip punctuation run
-				while (graphemes.length > 0 && isPunctuationChar(graphemes[graphemes.length - 1]?.segment || "")) {
-					this.cursor -= graphemes.pop()?.segment.length || 0;
-				}
-			} else {
-				// Skip word run
-				while (
-					graphemes.length > 0 &&
-					!isWhitespaceChar(graphemes[graphemes.length - 1]?.segment || "") &&
-					!isPunctuationChar(graphemes[graphemes.length - 1]?.segment || "")
-				) {
-					this.cursor -= graphemes.pop()?.segment.length || 0;
-				}
-			}
-		}
+		const graphemes = [...segmenter.segment(this.value.slice(0, this.cursor))];
+		this.cursor = computeWordMoveColumn(graphemes, this.cursor, "backward");
 	}
 
 	private moveWordForwards(): void {
@@ -386,50 +364,17 @@ export class Input implements Component, Focusable {
 		}
 
 		this.lastAction = null;
-		const textAfterCursor = this.value.slice(this.cursor);
-		const segments = segmenter.segment(textAfterCursor);
-		const iterator = segments[Symbol.iterator]();
-		let next = iterator.next();
-
-		// Skip leading whitespace
-		while (!next.done && isWhitespaceChar(next.value.segment)) {
-			this.cursor += next.value.segment.length;
-			next = iterator.next();
-		}
-
-		if (!next.done) {
-			const firstGrapheme = next.value.segment;
-			if (isPunctuationChar(firstGrapheme)) {
-				// Skip punctuation run
-				while (!next.done && isPunctuationChar(next.value.segment)) {
-					this.cursor += next.value.segment.length;
-					next = iterator.next();
-				}
-			} else {
-				// Skip word run
-				while (!next.done && !isWhitespaceChar(next.value.segment) && !isPunctuationChar(next.value.segment)) {
-					this.cursor += next.value.segment.length;
-					next = iterator.next();
-				}
-			}
-		}
+		const graphemes = [...segmenter.segment(this.value.slice(this.cursor))];
+		this.cursor = computeWordMoveColumn(graphemes, this.cursor, "forward");
 	}
 
 	private handlePaste(pastedText: string): void {
 		this.lastAction = null;
 		this.pushUndo();
 
-		// Some terminals (e.g. tmux popups with extended-keys-format=csi-u) re-encode
-		// control bytes inside bracketed paste as CSI-u Ctrl+<letter> sequences
-		// (ESC [ <codepoint> ; 5 u). Decode those back to their literal byte so the
-		// cleanup below strips them instead of leaking the printable tail
-		// (e.g. "[106;5u") into the input. Same fix as Editor.handlePaste.
-		const decodedText = pastedText.replace(/\x1b\[(\d+);5u/g, (match, code) => {
-			const cp = Number(code);
-			if (cp >= 97 && cp <= 122) return String.fromCharCode(cp - 96);
-			if (cp >= 65 && cp <= 90) return String.fromCharCode(cp - 64);
-			return match;
-		});
+		// Decode CSI-u-encoded control bytes some terminals inject into pastes
+		// (see decodeBracketedPasteCsiU) before the cleanup below strips them.
+		const decodedText = decodeBracketedPasteCsiU(pastedText);
 
 		// Clean the pasted text - remove newlines, carriage returns and control bytes
 		const cleanText = decodedText

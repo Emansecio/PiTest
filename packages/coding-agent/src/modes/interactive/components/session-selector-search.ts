@@ -23,8 +23,25 @@ function normalizeWhitespaceLower(text: string): string {
 	return text.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
+// Per-session caches keyed by object identity. Reloaded sessions are new
+// objects, so stale text never leaks (and old entries are GC-eligible).
+const searchTextCache = new WeakMap<SessionInfo, string>();
+const normalizedTextCache = new WeakMap<SessionInfo, string>();
+
 function getSessionSearchText(session: SessionInfo): string {
-	return `${session.id} ${session.name ?? ""} ${session.allMessagesText} ${session.cwd}`;
+	const cached = searchTextCache.get(session);
+	if (cached !== undefined) return cached;
+	const text = `${session.id} ${session.name ?? ""} ${session.allMessagesText} ${session.cwd}`;
+	searchTextCache.set(session, text);
+	return text;
+}
+
+function getSessionNormalizedText(session: SessionInfo, text: string): string {
+	const cached = normalizedTextCache.get(session);
+	if (cached !== undefined) return cached;
+	const normalized = normalizeWhitespaceLower(text);
+	normalizedTextCache.set(session, normalized);
+	return normalized;
 }
 
 export function hasSessionName(session: SessionInfo): boolean {
@@ -135,7 +152,7 @@ export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): M
 	for (const token of parsed.tokens) {
 		if (token.kind === "phrase") {
 			if (normalizedText === null) {
-				normalizedText = normalizeWhitespaceLower(text);
+				normalizedText = getSessionNormalizedText(session, text);
 			}
 			const phrase = normalizeWhitespaceLower(token.value);
 			if (!phrase) continue;
