@@ -1373,13 +1373,17 @@ export async function compact(
 		? [...lists.modifiedFiles, ...lists.readFiles]
 		: lists.modifiedFiles;
 	if (digestPaths.length > 0) {
-		const digests = await buildFileDigests(digestPaths, async (p) => {
-			try {
-				return await readFile(isAbsolute(p) ? p : resolve(cwd ?? ".", p), "utf8");
-			} catch {
-				return null;
-			}
-		});
+		const digests = await buildFileDigests(
+			digestPaths,
+			async (p) => {
+				try {
+					return await readFile(isAbsolute(p) ? p : resolve(cwd ?? ".", p), { encoding: "utf8", signal });
+				} catch {
+					return null;
+				}
+			},
+			signal,
+		);
 		if (Object.keys(digests).length > 0) {
 			details.fileDigests = digests;
 			summary += `\n${formatFileDigests(digests)}`;
