@@ -5,6 +5,8 @@
  * and after compaction the session is reloaded.
  */
 
+import { readFile } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@pit/ai";
 import { completeSimple } from "@pit/ai";
@@ -18,6 +20,7 @@ import {
 } from "../messages.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
 import { crushJson } from "../tools/json-crush.ts";
+import { buildFileDigests, formatFileDigests } from "./file-digests.ts";
 import {
 	computeOperationLists,
 	createFileOps,
@@ -44,6 +47,8 @@ export interface CompactionDetails {
 	searches?: string[];
 	shellCmds?: string[];
 	mcpCalls?: string[];
+	/** path -> top symbols, derived at compaction time. Lossy guide; re-read for current content. */
+	fileDigests?: Record<string, string>;
 }
 
 /**
@@ -754,7 +759,7 @@ export function pruneOldToolOutputs(
  * Cloning also sidesteps the per-object `charCountCache` WeakMap: a fresh block
  * object cannot carry a stale cached char count from the pre-prune text.
  */
-function cloneToolResultMessagesForPrune(messages: AgentMessage[]): AgentMessage[] {
+export function cloneToolResultMessagesForPrune(messages: AgentMessage[]): AgentMessage[] {
 	return messages.map((msg) => {
 		if (msg.role !== "toolResult" || !Array.isArray(msg.content)) return msg;
 		return {
@@ -1293,6 +1298,20 @@ export async function compact(
 	if (lists.searches.length > 0) details.searches = lists.searches;
 	if (lists.shellCmds.length > 0) details.shellCmds = lists.shellCmds;
 	if (lists.mcpCalls.length > 0) details.mcpCalls = lists.mcpCalls;
+
+	if (isTruthyEnvFlag(process.env.PIT_FILE_DIGESTS)) {
+		const digests = await buildFileDigests(lists.readFiles, async (p) => {
+			try {
+				return await readFile(isAbsolute(p) ? p : resolve(cwd ?? ".", p), "utf8");
+			} catch {
+				return null;
+			}
+		});
+		if (Object.keys(digests).length > 0) {
+			details.fileDigests = digests;
+			summary += `\n${formatFileDigests(digests)}`;
+		}
+	}
 
 	return {
 		summary,

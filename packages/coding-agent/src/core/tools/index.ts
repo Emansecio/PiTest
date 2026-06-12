@@ -278,6 +278,11 @@ import { createRepoMapTool, createRepoMapToolDefinition, type RepoMapToolOptions
 import { createResolveTool, createResolveToolDefinition, type ResolveToolOptions } from "./resolve.ts";
 import { createRetainTool, createRetainToolDefinition, type RetainToolOptions } from "./retain.ts";
 import {
+	createSearchSkillsTool,
+	createSearchSkillsToolDefinition,
+	type SearchSkillsToolOptions,
+} from "./search-skills.ts";
+import {
 	createSearchToolBm25Definition,
 	createSearchToolBm25Tool,
 	type SearchToolBm25Options,
@@ -398,6 +403,13 @@ const TOOL_REGISTRY = {
 		optionsKey: "repo_map",
 		readOnly: true,
 		coding: false,
+	},
+	search_skills: {
+		factory: createSearchSkillsTool,
+		definitionFactory: createSearchSkillsToolDefinition,
+		optionsKey: "search_skills",
+		readOnly: true,
+		coding: "always",
 	},
 	ask: {
 		factory: createAskTool,
@@ -750,6 +762,7 @@ export interface ToolsOptions {
 	symbol?: SymbolToolOptions;
 	find_symbol?: FindSymbolToolOptions;
 	repo_map?: RepoMapToolOptions;
+	search_skills?: SearchSkillsToolOptions;
 	ask?: AskToolOptions;
 	resolve?: ResolveToolOptions;
 	searchToolBm25?: SearchToolBm25Options;

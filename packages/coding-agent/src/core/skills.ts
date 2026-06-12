@@ -356,6 +356,13 @@ function loadSkillFromFile(
  * Skills with disableModelInvocation=true are excluded from the prompt
  * (they can only be invoked explicitly via /name commands).
  */
+export const SKILLS_FULL_LIMIT = 15;
+
+function firstSentence(desc: string, max = 80): string {
+	const cut = desc.split(/(?<=[.!?])\s/)[0] ?? desc;
+	return cut.length > max ? `${cut.slice(0, max - 1)}…` : cut;
+}
+
 export function formatSkillsForPrompt(skills: Skill[], maxSkills = 100, cwd?: string): string {
 	const visibleSkills = skills.filter((s) => !s.disableModelInvocation);
 
@@ -398,14 +405,32 @@ export function formatSkillsForPrompt(skills: Skill[], maxSkills = 100, cwd?: st
 		"<available_skills>",
 	];
 
-	for (const skill of shown) {
-		lines.push("  <skill>");
-		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(shortenPath(skill.filePath))}</location>`);
-		lines.push("  </skill>");
-	}
+	// Auto index-mode: the first SKILLS_FULL_LIMIT skills keep their full
+	// description (the cacheable prefix); the rest shrink to name + first
+	// sentence + location, recoverable via the location or search_skills. Only
+	// bites when more skills are installed than the limit, so small installs are
+	// byte-identical to the old full listing.
+	let indexCount = 0;
+	shown.forEach((skill, i) => {
+		if (i >= SKILLS_FULL_LIMIT) {
+			indexCount++;
+			lines.push(
+				`  <skill><name>${escapeXml(skill.name)}</name><summary>${escapeXml(firstSentence(skill.description))}</summary><location>${escapeXml(shortenPath(skill.filePath))}</location></skill>`,
+			);
+		} else {
+			lines.push("  <skill>");
+			lines.push(`    <name>${escapeXml(skill.name)}</name>`);
+			lines.push(`    <description>${escapeXml(skill.description)}</description>`);
+			lines.push(`    <location>${escapeXml(shortenPath(skill.filePath))}</location>`);
+			lines.push("  </skill>");
+		}
+	});
 
+	if (indexCount > 0) {
+		lines.push(
+			`  <!-- ${indexCount} skill(s) shown in index form (name + first sentence). Read the <location> to load full instructions, or run search_skills "<keywords>" to find one by trigger keyword. -->`,
+		);
+	}
 	if (omitted > 0) {
 		lines.push(`  <!-- ${omitted} more skill(s) installed but not shown here (listing caps at ${maxSkills}). -->`);
 	}

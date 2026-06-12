@@ -14,7 +14,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent, ToolResultMessage } from "@pit/ai";
 import {
@@ -41,6 +41,7 @@ import {
 	getCurrentChromeDevtoolsManager,
 	setCurrentChromeDevtoolsManager,
 } from "./chrome/chrome-devtools-manager.ts";
+import { cloneToolResultMessagesForPrune, pruneOldToolOutputs } from "./compaction/compaction.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -178,6 +179,7 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.js"
 import { classifyBashCommand } from "./tools/bash-activity.js";
 import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.js";
 import { ReadDedupeStore } from "./tools/read.js";
+import { listDeclarations } from "./tools/symbol.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
 import { summarizeCheckFailure } from "./verification/failure-summary.ts";
@@ -516,6 +518,7 @@ export class AgentSession {
 	// session boot and cached for the lifetime of the session. A future
 	// `_recomputeFrequentFiles` slash command may invalidate this.
 	private _frequentFilesIndex: FrequentFile[] = [];
+	private _hotFileOutlines: Array<{ path: string; symbols: string[] }> = [];
 	private _frequentFilesAbort: AbortController | undefined;
 	// Promise returned by the in-flight `computeFrequentFiles` call. Tracked so
 	// `dispose()` can await it before returning, otherwise the spawned `git`
@@ -826,7 +829,20 @@ export class AgentSession {
 	private _defaultActiveToolNames(): string[] {
 		const s = this.settingsManager;
 		const on = (enabled: boolean, names: string[]): string[] => (enabled ? names : []);
-		const core = ["read", "grep", "find", "ls", "symbol", "find_symbol", "bash", "edit", "write", "ask", "todo"];
+		const core = [
+			"read",
+			"grep",
+			"find",
+			"ls",
+			"symbol",
+			"find_symbol",
+			"bash",
+			"edit",
+			"write",
+			"ask",
+			"todo",
+			"search_skills",
+		];
 		const gated = [
 			...on(s.getToolDiscoverySettings().enabled, ["search_tool_bm25"]),
 			...on(s.getHindsightSettings().enabled, ["retain", "recall", "reflect", "forget"]),
@@ -991,9 +1007,30 @@ export class AgentSession {
 		const controller = new AbortController();
 		this._frequentFilesAbort = controller;
 		const promise = computeFrequentFiles({ cwd: this._cwd, limit: cfg.topN, signal: controller.signal })
-			.then((files) => {
+			.then(async (files) => {
 				if (controller.signal.aborted) return;
 				this._frequentFilesIndex = files;
+				// Boot-outline (gated PIT_FREQ_OUTLINE, off by default): heuristic symbol
+				// outline of the hottest files, rendered in the uncached suffix like
+				// frequentFiles. Best-effort; unreadable files are skipped.
+				if (isTruthyEnvFlag(process.env.PIT_FREQ_OUTLINE)) {
+					const outlines: Array<{ path: string; symbols: string[] }> = [];
+					for (const f of files.slice(0, 8)) {
+						if (controller.signal.aborted) break;
+						try {
+							const content = readFileSync(isAbsolute(f.path) ? f.path : resolve(this._cwd, f.path), "utf-8");
+							outlines.push({
+								path: f.path,
+								symbols: listDeclarations(content, f.path)
+									.map((d) => d.name)
+									.slice(0, 12),
+							});
+						} catch {
+							// Unreadable hot file is skipped; outline is best-effort.
+						}
+					}
+					this._hotFileOutlines = outlines;
+				}
 				// Rebuild so the next turn sees the index. The index now renders in
 				// the dynamic suffix (after the cache marker), so this rebuild does
 				// NOT rewrite the cacheable prefix — the prompt cache survives intact.
@@ -2479,6 +2516,7 @@ export class AgentSession {
 			// Repo-level frequent-files index — populated asynchronously after boot.
 			// Empty until the first compute resolves; harmless to pass either way.
 			frequentFiles: this._frequentFilesIndex.length > 0 ? this._frequentFilesIndex : undefined,
+			hotFileOutlines: this._hotFileOutlines.length > 0 ? this._hotFileOutlines : undefined,
 			// Session tracker — rendered in the dynamic suffix, wins over the boot
 			// index once it has entries (only one <frequent_files> is emitted).
 			sessionFrequentFiles: sessionFrequentFiles.length > 0 ? sessionFrequentFiles : undefined,
@@ -2667,6 +2705,23 @@ export class AgentSession {
 	 * by `maxAttempts`. No-op when disabled, when nothing changed, when the turn
 	 * was aborted, or when no check command can be detected (gate stays inert).
 	 */
+	/**
+	 * Proactive prune (off by default, env PIT_PROACTIVE_PRUNE): excerpt old large
+	 * tool outputs from the LIVE context once it crosses a conservative floor, so
+	 * stale read/bash payloads stop being charged cache-read every turn in long
+	 * sessions where compaction rarely fires (e.g. 1M windows). Protects the 2 most
+	 * recent turns and reuses the compaction head+tail excerpt (never blind-drops).
+	 */
+	private _maybePruneStaleToolOutputs(contextTokens: number): void {
+		if (!isTruthyEnvFlag(process.env.PIT_PROACTIVE_PRUNE)) return;
+		const floorRaw = Number(process.env.PIT_PROACTIVE_PRUNE_FLOOR);
+		const floor = Number.isFinite(floorRaw) && floorRaw > 0 ? floorRaw : 64_000;
+		if (contextTokens <= floor) return;
+		const copy = cloneToolResultMessagesForPrune(this.agent.state.messages);
+		const reclaimed = pruneOldToolOutputs(copy);
+		if (reclaimed > 0) this.agent.state.messages = copy;
+	}
+
 	private async _runVerificationGate(options?: PromptOptions): Promise<void> {
 		if (this._inVerification || !this._turnTouchedFiles) return;
 		if (this._userInterrupted || this._lastTurnAborted()) return;
@@ -3744,6 +3799,10 @@ export class AgentSession {
 			this._lastCompactionDeficit = contextTokens - (contextWindow - reserve);
 			return await this._runAutoCompaction("threshold", false);
 		}
+
+		// Proactive prune of stale tool outputs from the live context (gated, off by
+		// default) — frees cache-read cost before the window fills.
+		this._maybePruneStaleToolOutputs(contextTokens);
 
 		// Predictive (soft) compaction: when allowed (end-of-turn path) and we are
 		// approaching — but not yet at — the hard threshold, compact in the

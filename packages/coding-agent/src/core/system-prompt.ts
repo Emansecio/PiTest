@@ -13,6 +13,16 @@ import {
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 import { getCurrentToolDiscoveryIndex } from "./tool-discovery.ts";
 
+/** Render a `<frequent_files_outline>` suffix block (heuristic, boot-computed). */
+export function formatHotFileOutlines(outlines: Array<{ path: string; symbols: string[] }>): string {
+	const body = outlines
+		.filter((o) => o.symbols.length > 0)
+		.map((o) => `  ${o.path}: ${o.symbols.slice(0, 12).join(", ")}`)
+		.join("\n");
+	if (body === "") return "";
+	return `<frequent_files_outline>\n  (computed at boot — re-read for current content)\n${body}\n</frequent_files_outline>`;
+}
+
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
 	customPrompt?: string;
@@ -47,6 +57,11 @@ export interface BuildSystemPromptOptions {
 	 */
 	frequentFiles?: FrequentFile[];
 	/**
+	 * Boot-computed symbol outlines of the hot files (heuristic listDeclarations),
+	 * gated by PIT_FREQ_OUTLINE. Rendered in the dynamic suffix like frequentFiles.
+	 */
+	hotFileOutlines?: Array<{ path: string; symbols: string[] }>;
+	/**
 	 * Per-session frequent-files tracker (files THIS session touched most).
 	 * Rendered in the dynamic suffix after the cache marker, like the repo-level
 	 * index: the tracker mutates as the session reads/edits files, so placing it
@@ -77,6 +92,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		skills: providedSkills,
 		hiddenToolCount,
 		frequentFiles,
+		hotFileOutlines,
 		sessionFrequentFiles,
 		gitState,
 	} = options;
@@ -143,6 +159,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		if (frequentFilesBlock.length > 0) {
 			parts.push(`\n\n${frequentFilesBlock}\n`);
 		}
+		if (hotFileOutlines && hotFileOutlines.length > 0) {
+			const outlineBlock = formatHotFileOutlines(hotFileOutlines);
+			if (outlineBlock.length > 0) parts.push(`\n\n${outlineBlock}\n`);
+		}
 	};
 
 	if (customPrompt) {
@@ -193,6 +213,11 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		addGuideline("Use bash for file operations like ls, rg, find");
 	} else if (hasBash && (hasGrep || hasFind || hasLs)) {
 		addGuideline("Prefer grep/find/ls tools over bash for file exploration (faster, respects .gitignore)");
+	}
+	if (hasBash) {
+		addGuideline(
+			"When you only need which files changed and by how much (not the full patch), run `git diff --numstat` (or `--stat`) instead of `git diff` — a fraction of the tokens.",
+		);
 	}
 
 	for (const guideline of promptGuidelines ?? []) {
