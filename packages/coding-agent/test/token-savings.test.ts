@@ -30,18 +30,18 @@ describe("bash output budget (item 1)", () => {
 describe("ReadDedupeStore (item 2)", () => {
 	test("flags an identical repeat as duplicate, changed content as not", () => {
 		const store = new ReadDedupeStore();
-		expect(store.record("a", "h1", "body1")).toBe(false); // first sighting
-		expect(store.record("a", "h1", "body1")).toBe(true); // identical repeat
-		expect(store.record("a", "h2", "body2")).toBe(false); // content changed → re-sent
-		expect(store.record("a", "h2", "body2")).toBe(true); // identical again
+		expect(store.record("a", "h1", "body1", true)).toBe(false); // first sighting
+		expect(store.record("a", "h1", "body1", true)).toBe(true); // identical repeat
+		expect(store.record("a", "h2", "body2", true)).toBe(false); // content changed → re-sent
+		expect(store.record("a", "h2", "body2", true)).toBe(true); // identical again
 	});
 
 	test("evicts least-recently-used keys beyond the window (older reads re-send)", () => {
 		const store = new ReadDedupeStore(2);
-		expect(store.record("a", "x", "ba")).toBe(false);
-		expect(store.record("b", "y", "bb")).toBe(false);
-		expect(store.record("c", "z", "bc")).toBe(false); // evicts "a"
-		expect(store.record("a", "x", "ba")).toBe(false); // "a" was forgotten → re-sent, not suppressed
+		expect(store.record("a", "x", "ba", true)).toBe(false);
+		expect(store.record("b", "y", "bb", true)).toBe(false);
+		expect(store.record("c", "z", "bc", true)).toBe(false); // evicts "a"
+		expect(store.record("a", "x", "ba", true)).toBe(false); // "a" was forgotten → re-sent, not suppressed
 	});
 });
 

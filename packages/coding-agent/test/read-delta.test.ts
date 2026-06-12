@@ -60,21 +60,47 @@ describe("read delta re-send", () => {
 		expect(second).toContain("export const a = 2;");
 	});
 
-	it("ReadDedupeStore.peek returns the prior body until evicted by the LRU window", () => {
+	it("a re-read of a partial (limit) body never emits a delta, footer and all", async () => {
+		const store = new ReadDedupeStore();
+		const tool = createReadTool(dir, { embedHashlineAnchors: false, readDedupeStore: store });
+		// 200 lines, read with limit 100 → leaves a "100 more lines" footer (unclean body).
+		const vals = Array.from({ length: 200 }, (_, i) => i);
+		writeFileSync(join(dir, "partial.ts"), bigBody(vals));
+		const first = textOf(await tool.execute("t1", { path: "partial.ts", limit: 100 }));
+		expect(first).toContain("more lines in file");
+
+		// Edit a line inside the window, re-read the same range.
+		vals[10] = 9999;
+		writeFileSync(join(dir, "partial.ts"), bigBody(vals));
+		const second = textOf(await tool.execute("t2", { path: "partial.ts", limit: 100 }));
+		// No delta: the unclean (footered) body is never diffed; full body re-sent.
+		expect(second).not.toContain("showing only the diff");
+		expect(second).toContain("more lines in file");
+		expect(second).toContain("9999");
+	});
+
+	it("ReadDedupeStore.peek returns the prior clean body until evicted by the LRU window", () => {
 		const store = new ReadDedupeStore(2);
 		expect(store.peek("k1")).toBeUndefined();
-		store.record("k1", "h1", "body1");
-		expect(store.peek("k1")).toEqual({ hash: "h1", content: "body1" });
-		store.record("k2", "h2", "body2");
-		store.record("k3", "h3", "body3"); // evicts k1 (max=2)
+		store.record("k1", "h1", "body1", true);
+		expect(store.peek("k1")).toEqual({ hash: "h1", content: "body1", clean: true });
+		store.record("k2", "h2", "body2", true);
+		store.record("k3", "h3", "body3", true); // evicts k1 (max=2)
 		expect(store.peek("k1")).toBeUndefined();
-		expect(store.peek("k3")).toEqual({ hash: "h3", content: "body3" });
+		expect(store.peek("k3")).toEqual({ hash: "h3", content: "body3", clean: true });
+	});
+
+	it("ReadDedupeStore drops the body of an unclean read but still dedups by hash", () => {
+		const store = new ReadDedupeStore();
+		expect(store.record("k", "h1", "footered-body", false)).toBe(false);
+		expect(store.peek("k")).toEqual({ hash: "h1", content: "", clean: false }); // body not retained
+		expect(store.record("k", "h1", "footered-body", false)).toBe(true); // still dedups on hash
 	});
 
 	it("ReadDedupeStore.record reports a duplicate only on identical hash", () => {
 		const store = new ReadDedupeStore();
-		expect(store.record("k", "h1", "a")).toBe(false); // first sighting
-		expect(store.record("k", "h1", "a")).toBe(true); // same hash → duplicate
-		expect(store.record("k", "h2", "b")).toBe(false); // changed hash → not a duplicate
+		expect(store.record("k", "h1", "a", true)).toBe(false); // first sighting
+		expect(store.record("k", "h1", "a", true)).toBe(true); // same hash → duplicate
+		expect(store.record("k", "h2", "b", true)).toBe(false); // changed hash → not a duplicate
 	});
 });

@@ -100,10 +100,14 @@ describe("compaction digests modified files by default", () => {
 			fakeStreamFn("## Goal\nfake"),
 		);
 
-		expect(result.summary).toContain("file-digests");
-		expect(result.summary).toContain("touched");
-		expect(result.summary).toContain("Shape");
-		expect(result.summary).toContain("mod.ts");
+		expect(result.summary).toContain("<file-digests>");
+		// Assert the symbols are on the digest LINE for mod.ts, not merely present
+		// somewhere in the summary: mod.ts also appears in <modified-files>, so a bare
+		// toContain("mod.ts") would pass even with an empty digest. This pins the digest.
+		const digestLine = result.summary.split("\n").find((l) => l.trimStart().startsWith("mod.ts:"));
+		expect(digestLine).toBeDefined();
+		expect(digestLine).toContain("touched");
+		expect(digestLine).toContain("Shape");
 	});
 
 	it("does not digest read-only files by default (those stay behind the flag)", async () => {

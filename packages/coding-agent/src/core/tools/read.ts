@@ -39,23 +39,26 @@ const READ_DEDUPE_WINDOW = 16;
  * so re-sending it in full is the safe default. Keyed by (path, range).
  */
 export class ReadDedupeStore {
-	private readonly seen = new Map<string, { hash: string; content: string }>();
+	private readonly seen = new Map<string, { hash: string; content: string; clean: boolean }>();
 	private readonly max: number;
 	constructor(max: number = READ_DEDUPE_WINDOW) {
 		this.max = Math.max(1, max);
 	}
 	/** Prior record for this key if still in the LRU window; does not affect recency. */
-	peek(key: string): { hash: string; content: string } | undefined {
+	peek(key: string): { hash: string; content: string; clean: boolean } | undefined {
 		return this.seen.get(key);
 	}
 	/**
-	 * Record this read (body retained for delta re-sends) and report whether it
-	 * duplicates the most recent identical one. Re-inserting refreshes recency.
+	 * Record this read and report whether it duplicates the most recent identical
+	 * one. `clean` marks a body that is the verbatim file content — no truncation /
+	 * user-limit / crush footer. Only clean bodies are retained (others store ""),
+	 * so a later delta always diffs real file content against real file content and
+	 * never carries a synthetic footer into the diff. Re-inserting refreshes recency.
 	 */
-	record(key: string, contentHash: string, content: string): boolean {
+	record(key: string, contentHash: string, content: string, clean: boolean): boolean {
 		const prev = this.seen.get(key);
 		this.seen.delete(key);
-		this.seen.set(key, { hash: contentHash, content });
+		this.seen.set(key, { hash: contentHash, content: clean ? content : "", clean });
 		while (this.seen.size > this.max) {
 			const oldest = this.seen.keys().next().value;
 			if (oldest === undefined) break;
@@ -700,6 +703,9 @@ Common mistakes to avoid:
 								// Apply truncation, respecting both line and byte limits.
 								const truncation = truncateHead(selectedContent);
 								let outputText: string;
+								// True only when outputText is the verbatim body (no truncation/limit/crush
+								// footer) — the sole case where it is safe to record for and emit as a delta.
+								let bodyIsClean = false;
 								// Structural JSON crush (behind PIT_JSON_CRUSH): a whole-file read of a
 								// large JSON/NDJSON file would otherwise be blindly head-cut — tail lost,
 								// structure broken, and often the whole thing dropped when it is a single
@@ -740,15 +746,17 @@ Common mistakes to avoid:
 									const nextOffset = startLine + userLimitedLines + 1;
 									outputText = `${truncation.content}\n\n[${remaining} more lines in file. Use offset=${nextOffset} to continue.]`;
 								} else {
-									// No truncation and no remaining user-limited content.
+									// No truncation and no remaining user-limited content: a clean body.
 									outputText = truncation.content;
+									bodyIsClean = true;
 								}
 								// De-dup / delta: if this exact (path, range) was already read this session,
-								// either suppress it (identical pre-anchor content) or re-send only a diff
-								// (changed since). LRU-bounded so only recent reads qualify; an older one may
-								// have scrolled out of context, where re-sending in full is correct. The body
-								// recorded is always the real content, so the next delta diffs content vs
-								// content. Anchors are skipped whenever the body isn't the full current file.
+								// either suppress it (identical content) or re-send only a diff (changed
+								// since). LRU-bounded so only recent reads qualify; an older one may have
+								// scrolled out of context, where re-sending in full is correct. A delta only
+								// fires when BOTH the prior and current bodies are clean (verbatim file
+								// content) so the diff never carries a truncation/limit/crush footer. Anchors
+								// are skipped whenever the body isn't the full current file.
 								let dedupeSuppressed = false;
 								let deltaApplied = false;
 								if (dedupeStore) {
@@ -758,12 +766,17 @@ Common mistakes to avoid:
 											? ` (offset ${offset ?? 1}${limit !== undefined ? `, limit ${limit}` : ""})`
 											: "";
 									const prev = dedupeStore.peek(dedupeKey);
-									const isDup = dedupeStore.record(dedupeKey, hashReadContent(outputText), outputText);
+									const isDup = dedupeStore.record(
+										dedupeKey,
+										hashReadContent(outputText),
+										outputText,
+										bodyIsClean,
+									);
 									if (isDup) {
 										const shownLines = outputText.length === 0 ? 0 : outputText.split("\n").length;
 										outputText = `[read ${path}${rangeLabel}: identical to an earlier read this session — ${shownLines} line(s), unchanged and already shown above. Re-run read to re-expand if it has scrolled out of context.]`;
 										dedupeSuppressed = true;
-									} else if (prev !== undefined && !truncation.truncated) {
+									} else if (prev?.clean && bodyIsClean) {
 										const delta = buildReadDelta(prev.content, outputText);
 										if (delta !== undefined) {
 											outputText = `[read ${path}${rangeLabel}: changed since your earlier read this session — showing only the diff (you already have the previous version above; re-run read to re-expand the full current file):]\n\n${delta}`;
