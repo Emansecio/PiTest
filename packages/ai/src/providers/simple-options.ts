@@ -39,6 +39,7 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 		timeoutMs: options?.timeoutMs,
 		maxRetries: options?.maxRetries,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
+		idleTimeoutMs: options?.idleTimeoutMs,
 		metadata: options?.metadata,
 	};
 }

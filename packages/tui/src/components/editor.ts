@@ -250,6 +250,12 @@ const CURSOR_BLINK_HALF_MS = 530;
 // Hoisted: recompiling these per keystroke in insertCharacter is wasteful.
 const AUTOCOMPLETE_TRIGGER_CHAR_RE = /[a-zA-Z0-9.\-_]/;
 const SYMBOL_COMPLETION_CONTEXT_RE = /(?:^|[\s])[@#][^\s]*$/;
+// Control chars to strip from a paste, EXCEPT newline (0x0A): 0x00-0x09 and
+// 0x0B-0x1F. Equivalent to the old `char === "\n" || charCode >= 32` filter.
+const CONTROL_CHARS_EXCEPT_NEWLINE_RE = /[\x00-\x09\x0b-\x1f]/g;
+// Hard cap on a single paste (10 MiB) applied before any full-string pass, so a
+// huge blob can't freeze the event loop or OOM the TUI.
+const MAX_PASTE_BYTES = 10 * 1024 * 1024;
 
 export class Editor implements Component, Focusable {
 	private state: EditorState = {
@@ -1400,18 +1406,24 @@ export class Editor implements Component, Focusable {
 
 		this.pushUndoSnapshot();
 
+		// Cap the paste BEFORE any full-string pass. A multi-MB blob (base64, log,
+		// file dump) would otherwise block the event loop or OOM in the passes
+		// below — the marker branch only kicks in after the cost is already paid.
+		// Truncated silently (no warning surface on this component); the marker
+		// branch still summarizes the result.
+		const cappedText = pastedText.length > MAX_PASTE_BYTES ? pastedText.slice(0, MAX_PASTE_BYTES) : pastedText;
+
 		// Decode CSI-u-encoded control bytes some terminals inject into pastes
 		// (see decodeBracketedPasteCsiU) before the per-char filter below runs.
-		const decodedText = decodeBracketedPasteCsiU(pastedText);
+		const decodedText = decodeBracketedPasteCsiU(cappedText);
 
 		// Clean the pasted text: normalize line endings, expand tabs
 		const cleanText = this.normalizeText(decodedText);
 
-		// Filter out non-printable characters except newlines
-		let filteredText = cleanText
-			.split("")
-			.filter((char) => char === "\n" || char.charCodeAt(0) >= 32)
-			.join("");
+		// Strip control chars except newline (\n is kept; \r was already mapped to
+		// \n by normalizeText). Regex mirrors the old split/filter/join (charCode
+		// >= 32 kept, so 0x7F DEL stays) without materializing a 1-char-per-cell array.
+		let filteredText = cleanText.replace(CONTROL_CHARS_EXCEPT_NEWLINE_RE, "");
 
 		// If pasting a file path (starts with /, ~, or .) and the character before
 		// the cursor is a word character, prepend a space for better readability

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CdpConnection, listTargets, type WebSocketLike } from "../src/core/chrome/cdp-client.js";
 
 /** Minimal scriptable WebSocket double following the WHATWG event API. */
@@ -37,9 +37,9 @@ class FakeWebSocket implements WebSocketLike {
 // Drain microtasks so an awaited send() proceeds past ensureOpen() and writes.
 const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 
-function connect(): { conn: CdpConnection; ws: FakeWebSocket } {
+function connect(opts?: { connectTimeoutMs?: number }): { conn: CdpConnection; ws: FakeWebSocket } {
 	const ws = new FakeWebSocket();
-	const conn = new CdpConnection("ws://x", () => ws);
+	const conn = new CdpConnection("ws://x", () => ws, opts);
 	return { conn, ws };
 }
 
@@ -148,5 +148,58 @@ describe("CdpConnection", () => {
 		ws.emit("close", {});
 		await expect(p).rejects.toThrow(/closed before opening/);
 		expect(conn.isClosed()).toBe(true);
+	});
+
+	describe("connect resilience", () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("times out the connect when the upgrade never completes", async () => {
+			vi.useFakeTimers();
+			// A half-dead port: ws never emits open/error/close. ensureOpen must
+			// hit its connect ceiling and reject instead of hanging forever.
+			const { conn } = connect({ connectTimeoutMs: 100 });
+			const p = conn.send("Page.enable");
+			const assertion = expect(p).rejects.toThrow(/connect to ws:\/\/x timed out/);
+			await vi.advanceTimersByTimeAsync(100);
+			await assertion;
+			// Connect failure marks the connection closed so later sends fail fast.
+			expect(conn.isClosed()).toBe(true);
+		});
+
+		it("aborts during connect and leaves no listener on the signal", async () => {
+			const { conn } = connect({ connectTimeoutMs: 60_000 });
+			const controller = new AbortController();
+			const removed: string[] = [];
+			const origRemove = controller.signal.removeEventListener.bind(controller.signal);
+			controller.signal.removeEventListener = ((type: string, ...rest: unknown[]) => {
+				removed.push(type);
+				return (origRemove as (...args: unknown[]) => void)(type, ...rest);
+			}) as typeof controller.signal.removeEventListener;
+			// Socket is still mid-upgrade (no open emitted) when the caller aborts.
+			const p = conn.send("Page.enable", {}, { signal: controller.signal });
+			controller.abort();
+			await expect(p).rejects.toThrow(/aborted/);
+			// The abort path must detach its listener so the signal isn't leaked.
+			expect(removed).toContain("abort");
+		});
+
+		it("leaves no connect timer pending on the happy path", async () => {
+			vi.useFakeTimers();
+			const { conn, ws } = connect({ connectTimeoutMs: 100 });
+			const p = conn.send("Page.navigate", { url: "http://x" });
+			ws.emit("open", {});
+			// Drain the awaited ensureOpen so send() writes the command.
+			await vi.advanceTimersByTimeAsync(0);
+			const sent = JSON.parse(ws.sent[0]!);
+			expect(sent.method).toBe("Page.navigate");
+			ws.reply({ frameId: "f1" });
+			await expect(p).resolves.toEqual({ frameId: "f1" });
+			// The connect timer was cleared on open: advancing past it must not have
+			// closed the connection (a leaked timer would flip closed via ws.close()).
+			await vi.advanceTimersByTimeAsync(200);
+			expect(conn.isClosed()).toBe(false);
+		});
 	});
 });

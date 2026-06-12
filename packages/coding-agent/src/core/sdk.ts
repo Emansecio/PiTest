@@ -420,6 +420,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs,
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
+				idleTimeoutMs: options?.idleTimeoutMs ?? providerRetrySettings.idleTimeoutMs,
 				cacheRetention: options?.cacheRetention ?? defaultCacheRetention,
 				headers:
 					attributionHeaders || auth.headers || options?.headers

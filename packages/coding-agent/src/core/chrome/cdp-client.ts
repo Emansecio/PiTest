@@ -90,10 +90,15 @@ interface PendingCall {
 }
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+// Ceiling for the WebSocket upgrade itself. A half-dead debug port (TCP accepts
+// but the upgrade never completes — Chrome hung, firewall eating the handshake)
+// emits no open/error/close, so without this the connect would hang forever.
+const CONNECT_TIMEOUT_MS = 15_000;
 
 export class CdpConnection {
 	private readonly url: string;
 	private readonly wsFactory: WebSocketFactory;
+	private readonly connectTimeoutMs: number;
 	private ws: WebSocketLike | undefined;
 	private openPromise: Promise<void> | undefined;
 	private nextId = 1;
@@ -101,28 +106,56 @@ export class CdpConnection {
 	private readonly pending = new Map<number, PendingCall>();
 	private readonly listeners = new Map<string, Set<(params: any) => void>>();
 
-	constructor(url: string, wsFactory: WebSocketFactory = defaultWsFactory) {
+	constructor(url: string, wsFactory: WebSocketFactory = defaultWsFactory, opts?: { connectTimeoutMs?: number }) {
 		this.url = url;
 		this.wsFactory = wsFactory;
+		this.connectTimeoutMs = opts?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
 	}
 
 	private ensureOpen(): Promise<void> {
 		if (this.openPromise) return this.openPromise;
 		this.openPromise = new Promise<void>((resolve, reject) => {
 			let opened = false;
+			// One-shot guard: a half-dead port can race the connect timeout with a
+			// late open/close, so settle (resolve OR reject) at most once.
+			let settled = false;
 			const ws = this.wsFactory(this.url);
 			this.ws = ws;
+			// Race the upgrade against a connect ceiling: if the socket goes silent
+			// (no open/error/close), tear it down and reject instead of hanging.
+			const connectTimer = setTimeout(() => {
+				if (opened || settled) return;
+				settled = true;
+				this.closed = true;
+				try {
+					ws.close();
+				} catch {
+					// ignore
+				}
+				reject(new Error(`WebSocket connect to ${this.url} timed out`));
+			}, this.connectTimeoutMs);
 			ws.addEventListener("open", () => {
+				clearTimeout(connectTimer);
 				opened = true;
+				if (settled) return;
+				settled = true;
 				resolve();
 			});
 			ws.addEventListener("error", () => {
-				if (!opened) reject(new Error(`WebSocket error connecting to ${this.url}`));
+				clearTimeout(connectTimer);
+				if (!opened && !settled) {
+					settled = true;
+					reject(new Error(`WebSocket error connecting to ${this.url}`));
+				}
 				this.failAll(new Error("CDP socket error"));
 			});
 			ws.addEventListener("close", () => {
+				clearTimeout(connectTimer);
 				this.closed = true;
-				if (!opened) reject(new Error(`WebSocket closed before opening: ${this.url}`));
+				if (!opened && !settled) {
+					settled = true;
+					reject(new Error(`WebSocket closed before opening: ${this.url}`));
+				}
 				this.failAll(new Error("CDP socket closed"));
 			});
 			ws.addEventListener("message", (ev) => {
@@ -139,7 +172,11 @@ export class CdpConnection {
 		opts?: { signal?: AbortSignal; timeoutMs?: number },
 	): Promise<any> {
 		if (this.closed) throw new Error("CDP connection is closed.");
-		await this.ensureOpen();
+		if (opts?.signal?.aborted) throw new Error(`CDP command ${method} aborted`);
+		// Race the connect phase against the caller's signal so ESC/abort breaks a
+		// hung upgrade too (ensureOpen has its own connect-timeout ceiling). The
+		// command-timeout below still governs the post-connect phase unchanged.
+		await this.openWithAbort(method, opts?.signal);
 		const id = this.nextId++;
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -155,6 +192,29 @@ export class CdpConnection {
 			this.pending.set(id, { resolve, reject, timer });
 			this.ws?.send(JSON.stringify({ id, method, params }));
 		});
+	}
+
+	/**
+	 * Await the connect while honoring the caller's signal: aborting mid-upgrade
+	 * rejects right away. The abort listener is always removed (finally) so a
+	 * resolved connect never leaves a dangling listener on the signal.
+	 */
+	private async openWithAbort(method: string, signal?: AbortSignal): Promise<void> {
+		if (!signal) return this.ensureOpen();
+		const open = this.ensureOpen();
+		// If abort wins the race the open keeps running in the background; swallow a
+		// later connect-timeout rejection on it so it isn't an unhandled rejection.
+		open.catch(() => {});
+		let onAbort: (() => void) | undefined;
+		const abortRace = new Promise<never>((_resolve, reject) => {
+			onAbort = () => reject(new Error(`CDP command ${method} aborted`));
+			signal.addEventListener("abort", onAbort, { once: true });
+		});
+		try {
+			await Promise.race([open, abortRace]);
+		} finally {
+			if (onAbort) signal.removeEventListener("abort", onAbort);
+		}
 	}
 
 	/** Subscribe to a CDP event (e.g. "Network.responseReceived"). Returns an unsubscribe fn. */

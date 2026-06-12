@@ -146,6 +146,15 @@ export interface StreamOptions {
 	 */
 	maxRetryDelayMs?: number;
 	/**
+	 * Idle-timeout (ms) for the raw network stream body. If no chunk arrives
+	 * within this window the read is treated as a dead socket and fails with a
+	 * retryable error, instead of hanging forever on a half-open connection.
+	 * Unlike `timeoutMs` (SDK time-to-headers), this covers body inactivity.
+	 * Default: 120000 (120 seconds). Honored by providers that consume the raw
+	 * body directly (Anthropic SSE, OpenAI Codex SSE).
+	 */
+	idleTimeoutMs?: number;
+	/**
 	 * Optional metadata to include in API requests.
 	 * Providers extract the fields they understand and ignore the rest.
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.

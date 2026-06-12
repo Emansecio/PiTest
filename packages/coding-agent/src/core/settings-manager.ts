@@ -58,6 +58,7 @@ export interface ProviderRetrySettings {
 	timeoutMs?: number; // SDK/provider request timeout in milliseconds
 	maxRetries?: number; // SDK/provider retry attempts
 	maxRetryDelayMs?: number; // default: 60000 (max server-requested delay before failing)
+	idleTimeoutMs?: number; // default: 120000 (max body inactivity on raw stream before failing as retryable)
 }
 
 export interface RetrySettings {
@@ -1166,11 +1167,17 @@ export class SettingsManager {
 		};
 	}
 
-	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
+	getProviderRetrySettings(): {
+		timeoutMs?: number;
+		maxRetries?: number;
+		maxRetryDelayMs: number;
+		idleTimeoutMs?: number;
+	} {
 		return {
 			timeoutMs: this.settings.retry?.provider?.timeoutMs,
 			maxRetries: this.settings.retry?.provider?.maxRetries,
 			maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
+			idleTimeoutMs: this.settings.retry?.provider?.idleTimeoutMs,
 		};
 	}
 

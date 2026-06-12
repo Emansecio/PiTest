@@ -3998,4 +3998,70 @@ describe("Editor component", () => {
 			assert.strictEqual(submitted, pastedText);
 		});
 	});
+
+	describe("Paste control-char filter and size cap", () => {
+		// Old per-char filter the regex replaces; kept inline as the equivalence oracle.
+		const legacyEditorFilter = (s: string): string =>
+			s
+				.split("")
+				.filter((char) => char === "\n" || char.charCodeAt(0) >= 32)
+				.join("");
+		// Mirror of MAX_PASTE_BYTES in editor.ts (constant is module-private).
+		const MAX_PASTE_BYTES = 10 * 1024 * 1024;
+
+		it("regex strips the exact same chars as the old split/filter/join", () => {
+			const samples: string[] = [
+				"line1\nline2\r\nline3\tend",
+				"emoji 😀 zwj 👨‍👩‍👧 mix",
+				"café ñ 漢字 DEL\x7f keep",
+			];
+			// Every control byte 0x00-0x1f and 0x7f, each wrapped so context survives.
+			for (let i = 0; i <= 0x1f; i++) samples.push(`a${String.fromCharCode(i)}b`);
+			samples.push(`pre\x7fpost`);
+			samples.push("\x00\x01\x09\x0a\x0b\x0d\x1f\x20\x7e\x7f end");
+
+			for (const sample of samples) {
+				const viaRegex = sample.replace(/[\x00-\x09\x0b-\x1f]/g, "");
+				assert.deepStrictEqual(viaRegex, legacyEditorFilter(sample), `mismatch for ${JSON.stringify(sample)}`);
+			}
+		});
+
+		it("inserts a small multi-line paste unchanged (no marker)", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.handleInput("\x1b[200~linha1\nlinha2\x1b[201~");
+			assert.strictEqual(editor.getText(), "linha1\nlinha2");
+		});
+
+		it("turns a >10-line paste into a marker", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const big = "l\n".repeat(15).trimEnd(); // 15 lines
+			editor.handleInput(`\x1b[200~${big}\x1b[201~`);
+			assert.match(editor.getText(), /\[paste #\d+ \+\d+ lines\]/);
+		});
+
+		it("turns a >1000-char single-line paste into a marker", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const big = "x".repeat(1500);
+			editor.handleInput(`\x1b[200~${big}\x1b[201~`);
+			assert.match(editor.getText(), /\[paste #\d+ \d+ chars\]/);
+		});
+
+		it("caps an oversized paste so the result never exceeds MAX_PASTE_BYTES", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			// 12 MiB of 'a' (no control chars → filtered length == kept length).
+			const huge = "a".repeat(12 * 1024 * 1024);
+			const start = Date.now();
+			editor.handleInput(`\x1b[200~${huge}\x1b[201~`);
+			const elapsed = Date.now() - start;
+
+			// Single-line >1000 chars => marker carries the kept char count.
+			const marker = editor.getText().match(/\[paste #\d+ (\d+) chars\]/);
+			assert.ok(marker, `expected a chars marker, got ${JSON.stringify(editor.getText())}`);
+			const keptChars = Number(marker![1]);
+			assert.ok(keptChars <= MAX_PASTE_BYTES, `kept ${keptChars} > cap ${MAX_PASTE_BYTES}`);
+			assert.strictEqual(keptChars, MAX_PASTE_BYTES, "oversized paste should be truncated to the cap");
+			// Sanity: the cap kept it fast (no event-loop freeze). Generous bound for CI.
+			assert.ok(elapsed < 4000, `paste handling took ${elapsed}ms`);
+		});
+	});
 });

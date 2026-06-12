@@ -577,4 +577,47 @@ describe("Input component", () => {
 			assert.strictEqual(input.getValue(), "");
 		});
 	});
+
+	describe("Paste control-char filter and size cap", () => {
+		// Old per-char filter the regex replaces (tabs expanded first); equivalence oracle.
+		const legacyInputFilter = (s: string): string =>
+			s
+				.replace(/\t/g, "    ")
+				.split("")
+				.filter((char) => char.charCodeAt(0) >= 32)
+				.join("");
+		// Mirror of MAX_PASTE_BYTES in input.ts (constant is module-private).
+		const MAX_PASTE_BYTES = 10 * 1024 * 1024;
+
+		it("regex strips the exact same chars as the old split/filter/join", () => {
+			const samples: string[] = ["line1\nline2\r\nline3\tend", "tab\tsep", "emoji 😀 zwj 👨‍👩‍👧 mix", "café ñ 漢字"];
+			for (let i = 0; i <= 0x1f; i++) samples.push(`a${String.fromCharCode(i)}b`);
+			samples.push(`pre\x7fpost`);
+			samples.push("\x00\x09\x0a\x0d\x1f\x20\x7e\x7f end");
+
+			for (const sample of samples) {
+				const viaRegex = sample.replace(/\t/g, "    ").replace(/[\x00-\x1f]/g, "");
+				assert.deepStrictEqual(viaRegex, legacyInputFilter(sample), `mismatch for ${JSON.stringify(sample)}`);
+			}
+		});
+
+		it("inserts a small paste, stripping newlines and expanding tabs", () => {
+			const input = new Input();
+			input.handleInput("\x1b[200~a\tb\nc\x1b[201~");
+			// tab -> 4 spaces, newline stripped
+			assert.strictEqual(input.getValue(), "a    bc");
+		});
+
+		it("caps an oversized paste so the value never exceeds MAX_PASTE_BYTES", () => {
+			const input = new Input();
+			const huge = "a".repeat(12 * 1024 * 1024); // 12 MiB
+			const start = Date.now();
+			input.handleInput(`\x1b[200~${huge}\x1b[201~`);
+			const elapsed = Date.now() - start;
+
+			assert.ok(input.getValue().length <= MAX_PASTE_BYTES, `value length ${input.getValue().length} > cap`);
+			assert.strictEqual(input.getValue().length, MAX_PASTE_BYTES, "oversized paste should be truncated to the cap");
+			assert.ok(elapsed < 4000, `paste handling took ${elapsed}ms`);
+		});
+	});
 });

@@ -1193,9 +1193,12 @@ describe("openai-codex streaming", () => {
 		expect(codexRequests).toBe(4);
 
 		// Backoff stays exponential (1s, 2s, 4s) with jitter stubbed to 1.0x. The
-		// per-attempt 60s connect-phase watchdog timers are filtered out — they're
-		// cleared once response headers arrive and never fire here.
-		const backoffDelays = setTimeoutSpy.mock.calls.map((call) => call[1]).filter((delay) => delay !== 60_000);
+		// per-attempt 60s connect-phase watchdog and the 120s body idle-timeout
+		// watchdog timers are filtered out — both are cleared (connect: once
+		// headers arrive; idle: once each body read resolves) and never fire here.
+		const backoffDelays = setTimeoutSpy.mock.calls
+			.map((call) => call[1])
+			.filter((delay) => delay !== 60_000 && delay !== 120_000);
 		expect(backoffDelays).toEqual([1000, 2000, 4000]);
 	});
 });

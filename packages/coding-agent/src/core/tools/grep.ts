@@ -40,6 +40,13 @@ const grepSchema = Type.Object(
 
 export type GrepToolInput = Static<typeof grepSchema>;
 const DEFAULT_LIMIT = 100;
+// OOM guard: rg skips files above this on the source side (--max-filesize) and
+// getFileLines refuses to buffer a matched file larger than this for context.
+// Matching a pattern inside a giant lockfile / .min.js / dump would otherwise
+// readFile the whole thing into the heap and crash the process. 10MB mirrors
+// read.ts's STREAM_READ_MIN_BYTES.
+const MAX_GREP_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_GREP_FILE_SIZE_ARG = "10M";
 
 export interface GrepToolDetails {
 	truncation?: TruncationResult;
@@ -56,11 +63,14 @@ export interface GrepOperations {
 	isDirectory: (absolutePath: string) => Promise<boolean> | boolean;
 	/** Read file contents for context lines */
 	readFile: (absolutePath: string) => Promise<string> | string;
+	/** Byte size of a file, used as an OOM guard before readFile. Omit to skip the guard. */
+	fileSize?: (absolutePath: string) => Promise<number> | number;
 }
 
 const defaultGrepOperations: GrepOperations = {
 	isDirectory: async (p) => (await stat(p)).isDirectory(),
 	readFile: (p) => readFile(p, "utf-8"),
+	fileSize: async (p) => (await stat(p)).size,
 };
 
 export interface GrepToolOptions {
@@ -208,8 +218,17 @@ export function createGrepToolDefinition(
 							let lines = fileCache.get(filePath);
 							if (!lines) {
 								try {
-									const content = await ops.readFile(filePath);
-									lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+									// OOM guard: never buffer an oversized matched file for context.
+									// rg's --max-filesize should already skip these, but a custom
+									// backend may not — bail to [] so formatBlock emits the existing
+									// "(unable to read file)" fallback instead of crashing the heap.
+									const size = ops.fileSize ? await ops.fileSize(filePath) : 0;
+									if (size > MAX_GREP_FILE_BYTES) {
+										lines = [];
+									} else {
+										const content = await ops.readFile(filePath);
+										lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+									}
 								} catch {
 									lines = [];
 								}
@@ -227,6 +246,8 @@ export function createGrepToolDefinition(
 						// last-match-wins precedence).
 						const insideGitDir = /[\\/]\.git([\\/]|$)/.test(searchPath);
 						const args: string[] = ["--json", "--line-number", "--color=never", "--hidden"];
+						// OOM/CPU guard: skip files above the ceiling at the rg source.
+						args.push("--max-filesize", MAX_GREP_FILE_SIZE_ARG);
 						if (!insideGitDir) args.push("--glob", "!**/.git/**");
 						if (ignoreCase) args.push("--ignore-case");
 						if (literal) args.push("--fixed-strings");

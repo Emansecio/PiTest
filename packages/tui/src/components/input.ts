@@ -8,6 +8,14 @@ import { getSegmenter, isWhitespaceChar, sliceByColumn, visibleWidth } from "../
 
 const segmenter = getSegmenter();
 
+// Strip all control chars (0x00-0x1F) from a paste. Applied after tabs are
+// expanded to spaces; mirrors the old `charCode >= 32` filter without
+// materializing a 1-char-per-cell array.
+const CONTROL_CHARS_RE = /[\x00-\x1f]/g;
+// Hard cap on a single paste (10 MiB) applied before any full-string pass, so a
+// huge blob can't freeze the event loop or OOM.
+const MAX_PASTE_BYTES = 10 * 1024 * 1024;
+
 interface InputState {
 	value: string;
 	cursor: number;
@@ -372,16 +380,18 @@ export class Input implements Component, Focusable {
 		this.lastAction = null;
 		this.pushUndo();
 
+		// Cap the paste BEFORE any full-string pass so a multi-MB blob can't freeze
+		// the event loop or OOM (the cleanup below is O(n) over the whole string).
+		const cappedText = pastedText.length > MAX_PASTE_BYTES ? pastedText.slice(0, MAX_PASTE_BYTES) : pastedText;
+
 		// Decode CSI-u-encoded control bytes some terminals inject into pastes
 		// (see decodeBracketedPasteCsiU) before the cleanup below strips them.
-		const decodedText = decodeBracketedPasteCsiU(pastedText);
+		const decodedText = decodeBracketedPasteCsiU(cappedText);
 
-		// Clean the pasted text - remove newlines, carriage returns and control bytes
-		const cleanText = decodedText
-			.replace(/\t/g, "    ")
-			.split("")
-			.filter((char) => char.charCodeAt(0) >= 32)
-			.join("");
+		// Clean the pasted text - expand tabs, then strip all control bytes
+		// (charCode < 32, incl. newlines/carriage returns). Regex mirrors the old
+		// split/filter/join (charCode >= 32 kept) without allocating a 1-char array.
+		const cleanText = decodedText.replace(/\t/g, "    ").replace(CONTROL_CHARS_RE, "");
 
 		// Insert at cursor position
 		this.value = this.value.slice(0, this.cursor) + cleanText + this.value.slice(this.cursor);

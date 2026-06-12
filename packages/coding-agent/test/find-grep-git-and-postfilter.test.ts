@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -126,5 +127,72 @@ describe("find/grep .git exclusion and post-filter enumeration", () => {
 		const output = await runGrep({ pattern: "ref", glob: "src\\*.ts" });
 		expect(output).toContain("No matches found");
 		expect(output).toContain("Glob patterns use forward slashes; try: src/*.ts");
+	});
+
+	it("grep with context produces unchanged before/after lines for a normal file", async () => {
+		// Snapshot of the existing context formatting: match line uses `:`, context
+		// lines use `-`. The OOM guard must not alter this for normal-sized files.
+		// A single-file search path formats as basename (existing behavior).
+		writeFileSync(join(tempRoot, "src", "ctx.ts"), `const a = 1;\nconst b = 2; // ref here\nconst c = 3;\n`);
+		const output = await runGrep({ pattern: "ref here", path: "src/ctx.ts", context: 1 });
+		expect(output).toContain("ctx.ts-1- const a = 1;");
+		expect(output).toContain("ctx.ts:2: const b = 2; // ref here");
+		expect(output).toContain("ctx.ts-3- const c = 3;");
+	});
+});
+
+describe("grep OOM guard: oversized matched files are not buffered for context", () => {
+	let tempRoot: string;
+
+	beforeEach(() => {
+		tempRoot = mkdtempSync(join(tmpdir(), "pi-grep-oom-"));
+		mkdirSync(join(tempRoot, "src"), { recursive: true });
+		// A small, real file so ripgrep produces a genuine match. The size guard is
+		// driven by the injected fileSize op below, decoupling layer 2 from rg's own
+		// --max-filesize so we exercise the defensive readFile bail in isolation.
+		writeFileSync(join(tempRoot, "src", "huge.min.js"), "var x=/* ref */1;\n");
+	});
+
+	afterEach(() => {
+		rmSync(tempRoot, { recursive: true, force: true });
+	});
+
+	it("stat-guard falls back to '(unable to read file)' instead of readFile when size exceeds the ceiling", async () => {
+		let readFileCalled = false;
+		const def = createGrepToolDefinition(tempRoot, {
+			operations: {
+				isDirectory: async (p) => (await stat(p)).isDirectory(),
+				// Report the matched file as far over the 10MB ceiling.
+				fileSize: () => 50 * 1024 * 1024,
+				readFile: () => {
+					readFileCalled = true;
+					throw new Error("readFile must not be called for an oversized file");
+				},
+			},
+		});
+		const ctx = {} as Parameters<typeof def.execute>[4];
+		// context > 0 forces the getFileLines path that would otherwise readFile.
+		const result = await def.execute("call-oom", { pattern: "ref", context: 2 } as never, undefined, undefined, ctx);
+		const text = textOf(result);
+		expect(readFileCalled).toBe(false);
+		expect(text).toContain("(unable to read file)");
+		expect(text).toContain("huge.min.js");
+	});
+
+	it("under-ceiling file still reads context normally (guard does not over-trigger)", async () => {
+		const def = createGrepToolDefinition(tempRoot, {
+			operations: {
+				isDirectory: async (p) => (await stat(p)).isDirectory(),
+				// Report a small size: well under the ceiling, so readFile runs.
+				fileSize: () => 16,
+				readFile: (p) => readFile(p, "utf-8"),
+			},
+		});
+		const ctx = {} as Parameters<typeof def.execute>[4];
+		// context > 0 routes through getFileLines, the path the guard protects.
+		const result = await def.execute("call-ok", { pattern: "ref", context: 1 } as never, undefined, undefined, ctx);
+		const text = textOf(result);
+		expect(text).toContain("huge.min.js");
+		expect(text).not.toContain("(unable to read file)");
 	});
 });

@@ -30,6 +30,7 @@ import { splitSystemPromptOnDynamic } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { DEFAULT_IDLE_TIMEOUT_MS, raceReadWithIdle } from "../utils/idle-timeout.ts";
 import { finalizeStreamingJson, parseJsonWithRepair } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
@@ -338,6 +339,7 @@ function consumeLineAt(text: string, cursor: number): { line: string; nextCursor
 async function* iterateSseMessages(
 	body: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
+	idleMs: number = DEFAULT_IDLE_TIMEOUT_MS,
 ): AsyncGenerator<ServerSentEvent> {
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
@@ -352,7 +354,13 @@ async function* iterateSseMessages(
 				throw new Error("Request was aborted");
 			}
 
-			const { value, done } = await reader.read();
+			// Idle watchdog: a half-open socket would otherwise block this read
+			// forever. Aborts still throw "Request was aborted" (unchanged ESC path).
+			const { value, done } = await raceReadWithIdle(reader, {
+				idleMs,
+				signal,
+				abortError: () => new Error("Request was aborted"),
+			});
 			if (done) {
 				break;
 			}
@@ -404,6 +412,7 @@ async function* iterateSseMessages(
 async function* iterateAnthropicEvents(
 	response: Response,
 	signal?: AbortSignal,
+	idleMs: number = DEFAULT_IDLE_TIMEOUT_MS,
 ): AsyncGenerator<RawMessageStreamEvent> {
 	if (!response.body) {
 		throw new Error("Attempted to iterate over an Anthropic response with no body");
@@ -412,7 +421,7 @@ async function* iterateAnthropicEvents(
 	let sawMessageStart = false;
 	let sawMessageEnd = false;
 
-	for await (const sse of iterateSseMessages(response.body, signal)) {
+	for await (const sse of iterateSseMessages(response.body, signal, idleMs)) {
 		if (sse.event === "error") {
 			throw new Error(sse.data);
 		}
@@ -496,7 +505,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			// Build O(1) reverse lookup for fromClaudeCodeName once before the loop.
 			const toolNameLookup = buildToolNameLookup(context.tools);
 
-			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
+			for await (const event of iterateAnthropicEvents(response, options?.signal, options?.idleTimeoutMs)) {
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
 					// Capture initial token usage from message_start event

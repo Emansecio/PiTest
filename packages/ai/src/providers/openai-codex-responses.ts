@@ -40,6 +40,7 @@ import {
 } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { DEFAULT_IDLE_TIMEOUT_MS, raceReadWithIdle } from "../utils/idle-timeout.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	applyServiceTierPricing,
@@ -479,11 +480,17 @@ async function processStream(
 	model: Model<"openai-codex-responses">,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
-	await processResponsesStream(mapCodexEvents(parseSSE(response)), output, stream, model, {
-		serviceTier: options?.serviceTier,
-		resolveServiceTier: resolveCodexServiceTier,
-		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
-	});
+	await processResponsesStream(
+		mapCodexEvents(parseSSE(response, options?.signal, options?.idleTimeoutMs)),
+		output,
+		stream,
+		model,
+		{
+			serviceTier: options?.serviceTier,
+			resolveServiceTier: resolveCodexServiceTier,
+			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+		},
+	);
 }
 
 class CodexApiError extends Error {
@@ -557,7 +564,11 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 // SSE Parsing
 // ============================================================================
 
-async function* parseSSE(response: Response): AsyncGenerator<Record<string, unknown>> {
+async function* parseSSE(
+	response: Response,
+	signal?: AbortSignal,
+	idleMs: number = DEFAULT_IDLE_TIMEOUT_MS,
+): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
 
 	const reader = response.body.getReader();
@@ -568,7 +579,9 @@ async function* parseSSE(response: Response): AsyncGenerator<Record<string, unkn
 
 	try {
 		while (true) {
-			const { done, value } = await reader.read();
+			// Idle watchdog: guard against a half-open socket stalling the body
+			// read forever. User abort propagates as before via `signal`.
+			const { done, value } = await raceReadWithIdle(reader, { idleMs, signal });
 			if (done) break;
 			buffer += decoder.decode(value, { stream: true });
 
