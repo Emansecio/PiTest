@@ -668,6 +668,26 @@ type ExecutedToolCallBatch = {
 	terminate: boolean;
 };
 
+/**
+ * Build the abort signal a single tool executes under. When the config carries a
+ * per-tool controller registry, register a fresh controller — combined with the
+ * run signal via `AbortSignal.any`, so a run abort still cancels the tool — and
+ * return a `release` that unregisters it. Without the registry the tool runs
+ * under the run signal unchanged (no behavior change unless a caller opts in).
+ */
+function makePerToolSignal(
+	toolCallId: string,
+	runSignal: AbortSignal | undefined,
+	config: AgentLoopConfig,
+): { signal: AbortSignal | undefined; release: () => void } {
+	const registry = config.toolAbortControllers;
+	if (!registry) return { signal: runSignal, release: () => {} };
+	const controller = new AbortController();
+	registry.set(toolCallId, controller);
+	const signal = runSignal ? AbortSignal.any([runSignal, controller.signal]) : controller.signal;
+	return { signal, release: () => registry.delete(toolCallId) };
+}
+
 async function executeToolCallsSequential(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -785,18 +805,26 @@ async function executeToolCallsParallel(
 				await emitToolExecutionEnd(finalized, emit);
 				return finalized;
 			}
-			const executed = await executePreparedToolCall(preparation, signal, emit, config);
-			const finalized = await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				preparation,
-				executed,
-				config,
-				signal,
-				emit,
-			);
-			await emitToolExecutionEnd(finalized, emit);
-			return finalized;
+			// Per-tool abort: run this tool under a signal that a single
+			// cancelTool(id) can trip, while a run abort still cancels it
+			// (AbortSignal.any inside makePerToolSignal).
+			const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
+			try {
+				const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
+				const finalized = await finalizeExecutedToolCall(
+					currentContext,
+					assistantMessage,
+					preparation,
+					executed,
+					config,
+					toolSignal,
+					emit,
+				);
+				await emitToolExecutionEnd(finalized, emit);
+				return finalized;
+			} finally {
+				release();
+			}
 		}),
 	);
 	const messages = orderedFinalizedCalls.map(createToolResultMessage);

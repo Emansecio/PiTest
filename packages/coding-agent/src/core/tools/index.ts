@@ -263,6 +263,7 @@ import {
 	type InspectImageToolOptions,
 } from "./inspect-image.ts";
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
+import { createPlanTool, createPlanToolDefinition, type PlanToolOptions } from "./plan.ts";
 import { createPreviewTool, createPreviewToolDefinition } from "./preview.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createRecallTool, createRecallToolDefinition, type RecallToolOptions } from "./recall.ts";
@@ -531,6 +532,13 @@ const TOOL_REGISTRY = {
 		readOnly: false,
 		coding: "always",
 	},
+	plan: {
+		factory: createPlanTool,
+		definitionFactory: createPlanToolDefinition,
+		optionsKey: "plan",
+		readOnly: false,
+		coding: "always",
+	},
 	lsp: {
 		factory: createLspTool,
 		definitionFactory: createLspToolDefinition,
@@ -781,6 +789,7 @@ export interface ToolsOptions {
 	render_mermaid?: RenderMermaidToolOptions;
 	goal_complete?: GoalCompleteToolOptions;
 	todo?: TodoToolOptions;
+	plan?: PlanToolOptions;
 	chromeDevtools?: ChromeDevtoolsToolOptions & { enabled?: boolean };
 	hindsight?: { enabled?: boolean };
 	recallToolOutput?: Record<string, never>;

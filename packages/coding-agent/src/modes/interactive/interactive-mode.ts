@@ -2221,6 +2221,56 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	/** Pending tools the user could cancel individually (id + display name). */
+	private getInterruptiblePendingTools(): Array<{ id: string; name: string }> {
+		const out: Array<{ id: string; name: string }> = [];
+		for (const [id, component] of this.pendingTools) {
+			out.push({ id, name: component.getToolName() });
+		}
+		return out;
+	}
+
+	/**
+	 * Esc with tools in flight: ask whether to stop the whole task (default) or
+	 * cancel a single tool. Reuses the ask-options overlay. Any cancel / timeout /
+	 * empty answer falls back to stopping the whole task, so Esc never gets stuck.
+	 */
+	private async promptInterruptChoice(tools: Array<{ id: string; name: string }>): Promise<void> {
+		const STOP_ALL = "Parar a tarefa inteira";
+		const labelToId = new Map<string, string>();
+		const options: Array<{ label: string; recommended?: boolean }> = [{ label: STOP_ALL, recommended: true }];
+		tools.forEach((t, i) => {
+			const label = tools.length > 1 ? `Cancelar só: ${t.name} (#${i + 1})` : `Cancelar só: ${t.name}`;
+			labelToId.set(label, t.id);
+			options.push({ label });
+		});
+
+		let picked: string | undefined;
+		try {
+			const answer = await this.userInputBus.askOptions({
+				question: "Interromper o quê?",
+				header: "Interromper",
+				options,
+				source: { toolName: "interrupt" },
+			});
+			picked = answer.picked[0];
+		} catch {
+			picked = undefined;
+		}
+
+		if (!picked || picked === STOP_ALL) {
+			this.restoreQueuedMessagesToEditor();
+			this.session.interrupt();
+			this.showStatus("Interrupted");
+			return;
+		}
+		const id = labelToId.get(picked);
+		if (!id) return;
+		const cancelled = this.session.cancelTool(id);
+		const tool = tools.find((t) => t.id === id);
+		this.showStatus(cancelled ? `Cancelled ${tool?.name ?? "tool"}` : "Tool already finished");
+	}
+
 	// =========================================================================
 	// Key Handlers
 	// =========================================================================
@@ -2230,14 +2280,20 @@ export class InteractiveMode {
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
 			if (this.session.isBusy) {
-				// Interrupt the WHOLE active task — current turn + goal auto-continuation
-				// + verification gate + in-flight bash + retry backoff — not just the
-				// current turn. Without this the orchestration loops restarted the agent
-				// right after the turn aborted, so Esc appeared to do nothing. Queued
+				// Per-tool interruption: when tools are in flight, offer a choice
+				// between stopping the WHOLE task (default — current turn + goal
+				// auto-continuation + verification gate + in-flight bash + retry
+				// backoff) and cancelling just one tool. With nothing granular in
+				// flight, Esc stops the whole task immediately, as before. Queued
 				// messages are returned to the editor so the user doesn't lose them.
-				this.restoreQueuedMessagesToEditor();
-				this.session.interrupt();
-				this.showStatus("Interrupted");
+				const interruptible = this.getInterruptiblePendingTools();
+				if (interruptible.length === 0) {
+					this.restoreQueuedMessagesToEditor();
+					this.session.interrupt();
+					this.showStatus("Interrupted");
+				} else {
+					void this.promptInterruptChoice(interruptible);
+				}
 			} else if (this.isBashMode) {
 				this.editor.setText("");
 				this.isBashMode = false;

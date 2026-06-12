@@ -345,6 +345,40 @@ function cachedArgsLength(args: unknown): number {
 	return JSON.stringify(args).length;
 }
 
+/** Tool calls whose result lands on disk, so their argument bodies are redundant once old. */
+const MUTATION_TOOL_NAMES = new Set(["write", "edit", "edit_v2", "ast_edit"]);
+/** Min length for a tool-call arg STRING value to be worth eliding (keeps paths/flags intact). */
+const TOOLCALL_ARG_VALUE_MARK_THRESHOLD = 200;
+
+/**
+ * Returns a deep copy of a mutation tool-call's arguments with long string
+ * values (file bodies, edit oldText/newText) replaced by a short marker, plus
+ * the number of chars elided. Short values (paths, flags) pass through. Returns
+ * undefined when nothing was large enough to prune. The original object is never
+ * mutated — callers reassign the returned copy onto a cloned tool-call block.
+ */
+function pruneToolCallArguments(args: unknown): { pruned: unknown; saved: number } | undefined {
+	if (typeof args !== "object" || args === null) return undefined;
+	let saved = 0;
+	const walk = (value: unknown): unknown => {
+		if (typeof value === "string") {
+			if (value.length <= TOOLCALL_ARG_VALUE_MARK_THRESHOLD) return value;
+			saved += value.length;
+			return `[${value.length} chars elided — applied to disk; the file is the source of truth]`;
+		}
+		if (Array.isArray(value)) return value.map(walk);
+		if (typeof value === "object" && value !== null) {
+			const out: Record<string, unknown> = {};
+			for (const [k, v] of Object.entries(value)) out[k] = walk(v);
+			return out;
+		}
+		return value;
+	};
+	const pruned = walk(args);
+	if (saved === 0) return undefined;
+	return { pruned, saved };
+}
+
 /**
  * Classify text as dense (code/JSON/tool-output) or prose.
  * Dense: non-alphanumeric non-space char fraction > 0.20,
@@ -716,6 +750,25 @@ export function pruneOldToolOutputs(
 
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];
+		// Assistant tool-call args for mutation tools (write/edit) carry the full
+		// file body / edit text. Once old, that body is redundant — the result
+		// already landed on disk — yet it stays in context at full cost every turn
+		// until summarization. Elide the heavy string values, keep paths/flags.
+		if (msg.role === "assistant" && Array.isArray(msg.content)) {
+			for (let b = 0; b < msg.content.length; b++) {
+				const block = msg.content[b];
+				if (block.type !== "toolCall" || !MUTATION_TOOL_NAMES.has(block.name)) continue;
+				const before = estimateTextTokens(JSON.stringify(block.arguments), true);
+				if (before <= tokenThreshold) continue;
+				const result = pruneToolCallArguments(block.arguments);
+				if (result) {
+					(block as { arguments: unknown }).arguments = result.pruned;
+					const after = estimateTextTokens(JSON.stringify(result.pruned), true);
+					prunedTokens += Math.max(0, before - after);
+				}
+			}
+			continue;
+		}
 		if (msg.role !== "toolResult") continue;
 		if (!Array.isArray(msg.content)) continue;
 
@@ -761,11 +814,22 @@ export function pruneOldToolOutputs(
  */
 export function cloneToolResultMessagesForPrune(messages: AgentMessage[]): AgentMessage[] {
 	return messages.map((msg) => {
-		if (msg.role !== "toolResult" || !Array.isArray(msg.content)) return msg;
-		return {
-			...msg,
-			content: msg.content.map((block) => (block.type === "text" ? { ...block } : block)),
-		};
+		if (msg.role === "toolResult" && Array.isArray(msg.content)) {
+			return {
+				...msg,
+				content: msg.content.map((block) => (block.type === "text" ? { ...block } : block)),
+			};
+		}
+		// Assistant tool-call blocks are reassigned a pruned `arguments` object by
+		// pruneOldToolOutputs; shallow-clone the block so the live context's
+		// arguments object is never swapped out under it.
+		if (msg.role === "assistant" && Array.isArray(msg.content)) {
+			return {
+				...msg,
+				content: msg.content.map((block) => (block.type === "toolCall" ? { ...block } : block)),
+			};
+		}
+		return msg;
 	});
 }
 

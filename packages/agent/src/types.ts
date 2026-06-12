@@ -138,6 +138,15 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
 
 	/**
+	 * Optional registry of per-tool abort controllers, keyed by tool-call id. The
+	 * loop registers a controller for each executing tool — combined with the run
+	 * signal via `AbortSignal.any`, so a run abort still cancels every tool — and
+	 * removes it on completion. A holder of this map can abort ONE in-flight tool
+	 * without aborting the whole run (per-tool interruption).
+	 */
+	toolAbortControllers?: Map<string, AbortController>;
+
+	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
 	 *
 	 * Each AgentMessage must be converted to a UserMessage, AssistantMessage, or ToolResultMessage

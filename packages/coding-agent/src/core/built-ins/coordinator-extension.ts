@@ -20,15 +20,37 @@
  *   })
  */
 
-import type { Agent, AgentTool } from "@pit/agent-core";
+import type { Agent, AgentTool, ThinkingLevel } from "@pit/agent-core";
+import type { Model } from "@pit/ai";
 import { type Static, type TSchema, Type } from "typebox";
+import { isValidThinkingLevel } from "../../cli/args.ts";
 import { SubagentRegistry, spawnSubagent } from "../coordinator/index.ts";
+import type { SpawnSubagentResult } from "../coordinator/types.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "../messaging/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import { parseModelPattern } from "../model-resolver.ts";
 import type { Skill } from "../skills.ts";
 import { createMessageTool } from "../tools/message.ts";
 import { formatSize, truncateTail } from "../tools/truncate.ts";
+
+/** A subagent launched via `task({op:"spawn"})` — runs detached, collected later via poll/join. */
+interface PendingTask {
+	handle: string;
+	status: "running" | "done" | "error";
+	promise: Promise<void>;
+	controller: AbortController;
+	startedAt: number;
+	result?: string;
+	error?: string;
+}
+
+/** Shared result shape for every `task` op so the inferred tool `details` type unifies. */
+type TaskOpResult = {
+	content: Array<{ type: "text"; text: string }>;
+	isError: boolean;
+	details: Record<string, unknown> | undefined;
+};
 
 const worktreeSchema = Type.Union(
 	[
@@ -45,13 +67,41 @@ const worktreeSchema = Type.Union(
 );
 
 const taskSchema = Type.Object({
+	op: Type.Optional(
+		Type.Union(
+			[Type.Literal("run"), Type.Literal("spawn"), Type.Literal("poll"), Type.Literal("join"), Type.Literal("list")],
+			{
+				description:
+					"run (default, blocking — returns the answer) | spawn (non-blocking — returns a handle so you can keep working) | poll (status of handles) | join (await handles and collect their outputs) | list (active subagents). Use spawn+join to fan out N independent tasks in parallel and gather them.",
+			},
+		),
+	),
 	name: Type.Optional(
 		Type.String({
 			description:
-				"Stable task identifier used for the worktree path. Defaults to the auto-generated subagent id; collisions are auto-resolved.",
+				"Stable task identifier, also used as the handle for spawn/poll/join and the worktree path. Defaults to the auto-generated subagent id; collisions are auto-resolved.",
 		}),
 	),
-	prompt: Type.String({ description: "The task description for the subagent." }),
+	model: Type.Optional(
+		Type.String({
+			description:
+				"Model/pattern for the subagent: 'haiku', 'sonnet', 'opus', or 'provider/id' (optionally ':level', e.g. 'opus:high'). Defaults to the parent's model — pass a cheaper model for trivial fan-out.",
+		}),
+	),
+	thinking_level: Type.Optional(
+		Type.String({
+			description:
+				"Reasoning level: minimal|low|medium|high|xhigh. Defaults to 'medium' — subagents always think ('off' is coerced to 'medium').",
+		}),
+	),
+	handles: Type.Optional(
+		Type.Array(Type.String(), {
+			description: "Task handles to poll or join (each is the `name`/handle returned by a prior op:'spawn').",
+		}),
+	),
+	prompt: Type.Optional(
+		Type.String({ description: "The task description for the subagent (required for run/spawn)." }),
+	),
 	system_prompt: Type.Optional(Type.String({ description: "Override the subagent's system prompt." })),
 	allowed_tools: Type.Optional(
 		Type.Array(Type.String(), {
@@ -215,6 +265,128 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	const maxDepth = resolveMaxSubagentDepth();
 	const maxOutputBytes = resolveSubagentMaxBytes();
 
+	// Detached subagents launched via op:"spawn", keyed by handle. Collected via
+	// op:"poll"/"join"; a joined handle is freed once settled.
+	const pending = new Map<string, PendingTask>();
+	let asyncTaskCounter = 0;
+
+	/**
+	 * Resolves the subagent's model + thinking level from the task params. A bare
+	 * pattern ("haiku", "opus:high", "provider/id") is matched against the
+	 * registry; on no match the parent's model is kept. Thinking defaults to
+	 * "medium" and is never "off" — the rule is that subagents always think.
+	 */
+	async function resolveSubModel(
+		modelPattern: string | undefined,
+		thinkingPattern: string | undefined,
+	): Promise<{ model: Model<any> | undefined; thinkingLevel: ThinkingLevel | undefined }> {
+		let model = options.getParentModel();
+		let thinkingLevel: ThinkingLevel | undefined;
+		const trimmed = modelPattern?.trim();
+		if (trimmed) {
+			try {
+				const available = await options.modelRegistry.getAvailable();
+				const parsed = parseModelPattern(trimmed, available);
+				if (parsed.model) {
+					model = parsed.model;
+					if (parsed.thinkingLevel) thinkingLevel = parsed.thinkingLevel;
+				}
+			} catch {
+				// Keep the parent model on any resolution failure.
+			}
+		}
+		if (thinkingPattern && isValidThinkingLevel(thinkingPattern)) thinkingLevel = thinkingPattern as ThinkingLevel;
+		if (thinkingLevel === "off") thinkingLevel = "medium";
+		return { model, thinkingLevel };
+	}
+
+	/** Formats a settled subagent result into the capped text the parent sees. */
+	function formatSpawnResult(result: SpawnSubagentResult, resultSchema: TSchema | undefined): string {
+		const rawText =
+			resultSchema && result.value !== undefined ? JSON.stringify(result.value, null, 2) : result.output;
+		const capped = truncateTail(rawText, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
+		return capped.truncated
+			? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}; re-spawn with a narrower prompt or a result_schema if you need the elided part]`
+			: capped.content;
+	}
+
+	/** op:"list" — summarize tracked subagents and live async handles. */
+	function listSubagents(): TaskOpResult {
+		const records = registry.list();
+		const recLines = records.map(
+			(r) => `- ${r.taskName} [${r.status}] turns=${r.turnCount}${r.error ? ` (${r.error})` : ""}`,
+		);
+		const handleLines = [...pending.values()].map(
+			(e) => `- ${e.handle} [${e.status}]${e.error ? ` (${e.error})` : ""}`,
+		);
+		const sections: string[] = [];
+		sections.push(
+			records.length ? `Subagents (${records.length}):\n${recLines.join("\n")}` : "No subagents tracked.",
+		);
+		if (handleLines.length) sections.push(`Async handles (${handleLines.length}):\n${handleLines.join("\n")}`);
+		return {
+			content: [{ type: "text" as const, text: sections.join("\n\n") }],
+			isError: false,
+			details: { subagents: records.length, asyncHandles: pending.size },
+		};
+	}
+
+	/** op:"poll" — non-blocking status of the given async handles. */
+	function pollHandles(handles: string[]): TaskOpResult {
+		if (handles.length === 0) {
+			return {
+				content: [{ type: "text" as const, text: "task: poll needs `handles`." }],
+				isError: true,
+				details: undefined,
+			};
+		}
+		const lines = handles.map((h) => {
+			const e = pending.get(h);
+			if (!e) return `${h}: unknown handle`;
+			if (e.status === "running") return `${h}: running`;
+			if (e.status === "error") return `${h}: error — ${e.error ?? "failed"}`;
+			return `${h}: done (collect with op:"join")`;
+		});
+		const anyDone = handles.some((h) => pending.get(h)?.status === "done");
+		const allSettled = handles.every((h) => {
+			const s = pending.get(h)?.status;
+			return s === "done" || s === "error";
+		});
+		return {
+			content: [{ type: "text" as const, text: lines.join("\n") }],
+			isError: false,
+			details: { anyDone, allSettled },
+		};
+	}
+
+	/** op:"join" — await the given async handles, return their outputs, and free settled handles. */
+	async function joinHandles(handles: string[]): Promise<TaskOpResult> {
+		if (handles.length === 0) {
+			return {
+				content: [{ type: "text" as const, text: "task: join needs `handles`." }],
+				isError: true,
+				details: undefined,
+			};
+		}
+		const entries = handles.map((h) => pending.get(h)).filter((e): e is PendingTask => e !== undefined);
+		await Promise.allSettled(entries.map((e) => e.promise));
+		const parts = handles.map((h) => {
+			const e = pending.get(h);
+			if (!e) return `### ${h}\n(unknown handle)`;
+			if (e.status === "error") return `### ${h}\n[failed: ${e.error ?? "error"}]`;
+			return `### ${h}\n${e.result ?? "(no output)"}`;
+		});
+		for (const h of handles) {
+			const e = pending.get(h);
+			if (e && e.status !== "running") pending.delete(h);
+		}
+		return {
+			content: [{ type: "text" as const, text: parts.join("\n\n") }],
+			isError: false,
+			details: { joined: entries.length },
+		};
+	}
+
 	/**
 	 * Builds the `task` tool for an agent living at `depth`. The parent gets
 	 * depth 0; each spawned subagent that is still within the nesting budget
@@ -235,7 +407,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			// `params` is typed `unknown`, not `TaskInput`: this tool flows through the
 			// shared `(depth) => AgentTool` factory, whose `execute` is contravariantly
 			// typed against the erased base schema. A narrower param breaks assignability.
-			async execute(_id: string, params: unknown, signal?: AbortSignal) {
+			async execute(_id: string, params: unknown, signal?: AbortSignal): Promise<TaskOpResult> {
+				const p = params as TaskInput;
+				const op = p.op ?? "run";
+
+				if (op === "list") return listSubagents();
+				if (op === "poll") return pollHandles(p.handles ?? []);
+				if (op === "join") return await joinHandles(p.handles ?? []);
+
+				// op === "run" | "spawn": both need a prompt and a model.
 				const {
 					name,
 					prompt,
@@ -246,7 +426,14 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					worktree,
 					timeout_ms,
 					inherit_skills,
-				} = params as TaskInput;
+				} = p;
+				if (!prompt || !prompt.trim()) {
+					return {
+						content: [{ type: "text" as const, text: "task: `prompt` is required for run/spawn." }],
+						isError: true,
+						details: undefined,
+					};
+				}
 				const model = options.getParentModel();
 				if (!model) {
 					return {
@@ -255,6 +442,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						details: undefined,
 					};
 				}
+				const { model: subModel, thinkingLevel: subThinking } = await resolveSubModel(p.model, p.thinking_level);
 				const resultSchema = coerceResultSchema(result_schema);
 				const cwd = options.getCwd ? options.getCwd() : process.cwd();
 				// The child runs one level deeper than the tool that spawned it. Strip
@@ -267,6 +455,69 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					maxDepth,
 					makeTaskTool,
 				);
+
+				// Non-blocking spawn: launch detached, return a handle, and let the
+				// parent keep working. Async tasks skip the messaging bus (they are
+				// fire-and-collect, not interactive) and run on their own controller
+				// so they outlive the spawning turn.
+				if (op === "spawn") {
+					const handle = name?.trim() ? name.trim() : `task-${++asyncTaskCounter}`;
+					const controller = new AbortController();
+					const entry: PendingTask = {
+						handle,
+						status: "running",
+						startedAt: Date.now(),
+						controller,
+						promise: Promise.resolve(),
+					};
+					entry.promise = (async () => {
+						try {
+							const result = await spawnSubagent(
+								{
+									registry,
+									model,
+									modelRegistry: options.modelRegistry,
+									availableTools: baseChildTools,
+									convertToLlm: options.convertToLlm ?? ((messages) => messages as never),
+									permissionChecker: options.permissionChecker,
+									skills: options.getSkills?.(),
+								},
+								{
+									prompt,
+									model: subModel,
+									thinkingLevel: subThinking,
+									systemPrompt: system_prompt,
+									allowedTools: allowed_tools,
+									maxTurns: max_turns,
+									signal: controller.signal,
+									resultSchema,
+									worktree: worktree as boolean | { branch?: string; cleanup?: "auto" | "keep" } | undefined,
+									timeoutMs: timeout_ms,
+									taskName: handle,
+									cwd,
+									depth: childDepth,
+									inheritSkills: inherit_skills,
+								},
+							);
+							entry.result = formatSpawnResult(result, resultSchema);
+							entry.status = "done";
+						} catch (err) {
+							entry.error = err instanceof Error ? err.message : String(err);
+							entry.status = "error";
+						}
+					})();
+					pending.set(handle, entry);
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `Spawned subagent '${handle}' (non-blocking). Keep working, then collect with task({op:"join", handles:["${handle}"]}) — or check task({op:"poll", handles:["${handle}"]}).`,
+							},
+						],
+						isError: false,
+						details: { handle, async: true, depth: childDepth },
+					};
+				}
 
 				// Inter-agent messaging wiring. Reserve a bus id up front so the
 				// `message` tool can be bound to it, and attach the live responder
@@ -304,6 +555,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						},
 						{
 							prompt,
+							model: subModel,
+							thinkingLevel: subThinking,
 							systemPrompt: system_prompt,
 							allowedTools: allowed_tools,
 							maxTurns: max_turns,
@@ -319,14 +572,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							onAgentReady,
 						},
 					);
-					const rawText =
-						resultSchema && result.value !== undefined ? JSON.stringify(result.value, null, 2) : result.output;
-					// Cap the output before it lands in the parent's context. Keep the
-					// tail (the subagent's summary/conclusion usually lands at the end).
-					const capped = truncateTail(rawText, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
-					const text = capped.truncated
-						? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}; re-spawn with a narrower prompt or a result_schema if you need the elided part]`
-						: capped.content;
+					const text = formatSpawnResult(result, resultSchema);
 					return {
 						content: [{ type: "text" as const, text }],
 						isError: false,

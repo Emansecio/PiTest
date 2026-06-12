@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { shutdownAll } from "../../src/core/lsp/client.ts";
-import { setDiagnosticsOnWrite, setFormatOnWrite } from "../../src/core/lsp/writethrough.ts";
+import {
+	setDiagnosticsOnWrite,
+	setEnforceDiagnosticsOnWrite,
+	setFormatOnWrite,
+} from "../../src/core/lsp/writethrough.ts";
 import { createEditToolDefinition } from "../../src/core/tools/edit.ts";
 import { createWriteToolDefinition } from "../../src/core/tools/write.ts";
 
@@ -58,24 +62,35 @@ describe("lsp writethrough — post-write diagnostics", () => {
 		setFormatOnWrite(false);
 	});
 
-	it("write attaches LSP diagnostics when enabled", async () => {
+	it("write attaches LSP diagnostics (imperative framing on error) when enabled", async () => {
 		setDiagnosticsOnWrite(true);
 		const out = await runWrite(cwd, "a.txt", "hello world\n");
 		expect(out).toContain("Successfully wrote");
-		expect(out).toContain("LSP diagnostics");
+		// Error-severity diagnostic → active directive, not a passive note.
+		expect(out).toContain("Fix the error(s) below");
 		expect(out).toContain("fake diagnostic");
 		// File was still written normally.
 		expect(readFileSync(join(cwd, "a.txt"), "utf-8")).toBe("hello world\n");
 	});
 
-	it("edit attaches LSP diagnostics when enabled", async () => {
+	it("edit attaches LSP diagnostics (imperative framing on error) when enabled", async () => {
 		setDiagnosticsOnWrite(true);
 		writeFileSync(join(cwd, "b.txt"), "foo bar\n");
 		const out = await runEdit(cwd, "b.txt", "foo", "FOO");
 		expect(out).toContain("Successfully replaced 1 block(s)");
-		expect(out).toContain("LSP diagnostics");
+		expect(out).toContain("Fix the error(s) below");
 		expect(out).toContain("fake diagnostic");
 		expect(readFileSync(join(cwd, "b.txt"), "utf-8")).toBe("FOO bar\n");
+	});
+
+	it("uses the neutral framing when enforcement is disabled", async () => {
+		setDiagnosticsOnWrite(true);
+		setEnforceDiagnosticsOnWrite(false);
+		const out = await runWrite(cwd, "a2.txt", "hello world\n");
+		expect(out).toContain("LSP diagnostics");
+		expect(out).toContain("fake diagnostic");
+		expect(out).not.toContain("Fix the error(s) below");
+		setEnforceDiagnosticsOnWrite(true);
 	});
 
 	it("no diagnostics appended when disabled", async () => {

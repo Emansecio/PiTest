@@ -220,8 +220,10 @@ export async function spawnSubagent(
 	const agent = new Agent({
 		initialState: {
 			systemPrompt,
-			model: deps.model,
-			thinkingLevel: "off",
+			// Heterogeneous spawn: a task may run on a cheaper model than the parent.
+			model: options.model ?? deps.model,
+			// Subagents always think (never "off") — default "medium", overridable per task.
+			thinkingLevel: options.thinkingLevel ?? "medium",
 			tools,
 		},
 		convertToLlm: deps.convertToLlm,

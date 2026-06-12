@@ -164,6 +164,8 @@ type EditCallRenderComponent = Box & {
 	preview?: EditPreview;
 	previewArgsKey?: string;
 	previewPending?: boolean;
+	/** argsComplete at the most recent render — read when a dispatched diff resolves. */
+	lastArgsComplete?: boolean;
 	settledError?: boolean;
 	// Memoized `renderDiff` output keyed by the source diff string. `renderDiff`
 	// runs `Diff.diffWords` per changed line pair (O(n²) on large edits); since
@@ -178,6 +180,7 @@ function createEditCallRenderComponent(): EditCallRenderComponent {
 		preview: undefined as EditPreview | undefined,
 		previewArgsKey: undefined as string | undefined,
 		previewPending: false,
+		lastArgsComplete: false,
 		settledError: false,
 		renderedDiffKey: undefined as string | undefined,
 		renderedDiffBody: undefined as string | undefined,
@@ -527,14 +530,27 @@ export function createEditToolDefinition(
 				component.settledError = false;
 			}
 
-			if (context.argsComplete && previewInput && !component.preview && !component.previewPending) {
+			// Live diff: compute the preview as soon as a renderable input exists,
+			// not only once args finish streaming. The diff grows token-by-token as
+			// newText arrives (each delta changes argsKey, resetting + re-dispatching
+			// above). Rendering reuses the same setEditPreview/buildEditCallComponent
+			// path as the final preview, so it's already width-safe.
+			component.lastArgsComplete = context.argsComplete;
+			if (previewInput && !component.preview && !component.previewPending) {
 				component.previewPending = true;
 				const requestKey = argsKey;
 				void computeEditsDiff(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
-					if (component.previewArgsKey === requestKey) {
-						setEditPreview(component, preview, requestKey);
-						context.invalidate();
+					if (component.previewArgsKey !== requestKey) return;
+					// While args are still streaming, a partial oldText/newText may not
+					// match yet — swallow that transient error and let a later delta
+					// retry. Re-read the CURRENT argsComplete (not the value captured at
+					// dispatch) so an error that resolves AFTER args completed is shown.
+					if (!component.lastArgsComplete && "error" in preview) {
+						component.previewPending = false;
+						return;
 					}
+					setEditPreview(component, preview, requestKey);
+					context.invalidate();
 				});
 			}
 

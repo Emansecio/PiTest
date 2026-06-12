@@ -12,6 +12,8 @@
  *   - Running the same prompt against multiple personas
  */
 
+import type { ThinkingLevel } from "@pit/agent-core";
+import type { Model } from "@pit/ai";
 import type { TSchema } from "typebox";
 
 export type SubagentStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
@@ -37,6 +39,17 @@ export interface SubagentRecord {
 
 export interface SpawnSubagentOptions {
 	prompt: string;
+	/**
+	 * Model for the subagent. Defaults to the parent's model (`deps.model`).
+	 * Lets a heterogeneous fan-out run trivial probes on a cheaper model while
+	 * the parent stays on its own tier.
+	 */
+	model?: Model<any>;
+	/**
+	 * Reasoning level for the subagent. Defaults to "medium" — subagents always
+	 * think (never "off"). Pass an explicit level to override per task.
+	 */
+	thinkingLevel?: ThinkingLevel;
 	/** Override system prompt. Defaults to a generic task-completion prompt. */
 	systemPrompt?: string;
 	/** Subset of parent's tool names available to the subagent. */

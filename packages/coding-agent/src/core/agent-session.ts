@@ -125,7 +125,7 @@ import {
 	truncateErrorSample,
 } from "./learned-error-store.js";
 import { createLspManager, getCurrentLspManager, type LspManager, setCurrentLspManager } from "./lsp/manager.ts";
-import { setDiagnosticsOnWrite, setFormatOnWrite } from "./lsp/writethrough.ts";
+import { setDiagnosticsOnWrite, setEnforceDiagnosticsOnWrite, setFormatOnWrite } from "./lsp/writethrough.ts";
 import { formatMemoryForPrompt } from "./memory/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import {
@@ -137,6 +137,7 @@ import {
 } from "./messaging/index.ts";
 import type { ModelRegistry } from "./model-registry.js";
 import { type RoleResolution, resolveRole } from "./model-resolver.js";
+import { PlanManager, type PlanState, setCurrentPlanManager } from "./plan/plan-manager.ts";
 import {
 	createPreviewQueue,
 	getCurrentPreviewQueue,
@@ -585,6 +586,7 @@ export class AgentSession {
 	private readonly _goal = new GoalManager();
 	// Native todo list (the `todo` tool + /todos command + live overlay).
 	private readonly _todo = new TodoManager();
+	private readonly _plan = new PlanManager();
 	// Chrome DevTools controller (the chrome_devtools_* tools + /chrome command).
 	private _chromeDevtools: ChromeDevtoolsManager | undefined;
 	// Guards against re-entering the goal auto-continuation loop from within a
@@ -702,6 +704,7 @@ export class AgentSession {
 		// Same for the todo list: publish it. Restore already happened above via
 		// _restoreGoalFromSession → _restoreStateFromSession (restores both).
 		setCurrentTodoManager(this._todo);
+		setCurrentPlanManager(this._plan);
 
 		// Publish a one-shot project-check runner so goal_complete can refuse while red.
 		setCurrentVerificationProbe(() => this.runConfiguredCheck());
@@ -760,6 +763,7 @@ export class AgentSession {
 		// Gate post-write LSP diagnostics (writethrough) for this session: errors
 		// from a write/edit are attached to the tool result, IDE-style.
 		setDiagnosticsOnWrite(lspSettings.enabled && lspSettings.diagnosticsOnWrite);
+		setEnforceDiagnosticsOnWrite(lspSettings.enabled && lspSettings.diagnosticsOnWrite);
 		setFormatOnWrite(lspSettings.enabled && lspSettings.formatOnWrite);
 
 		// Register this session on the inter-agent message bus as the addressable
@@ -1345,6 +1349,7 @@ export class AgentSession {
 				this._recordGoalTurn(event.message);
 				this._maybeInjectStagnationReminder(event.message, event.toolResults);
 				if (this._todo.takeDirty()) this._persistTodo();
+				if (this._plan.takeDirty()) this._persistPlan();
 				this._turnIndex++;
 				break;
 			case "message_start":
@@ -2320,6 +2325,14 @@ export class AgentSession {
 		}
 	}
 
+	private _persistPlan(): void {
+		try {
+			this.sessionManager.appendCustomEntry("plan", this._plan.serialize());
+		} catch {
+			// Best-effort; a write failure must not break the session.
+		}
+	}
+
 	/**
 	 * Single-pass restore of both goal and todo state from the session file.
 	 * Called once in the constructor (via _restoreGoalFromSession) so that
@@ -2329,13 +2342,20 @@ export class AgentSession {
 		try {
 			let latestGoal: GoalState | undefined;
 			let latestTodo: TodoState | undefined;
+			let latestPlan: PlanState | undefined;
 			for (const e of this.sessionManager.getEntries()) {
-				const entry = e as { type?: string; customType?: string; data?: GoalState | TodoState | null };
+				const entry = e as {
+					type?: string;
+					customType?: string;
+					data?: GoalState | TodoState | PlanState | null;
+				};
 				if (entry.type !== "custom") continue;
 				if (entry.customType === "goal") {
 					latestGoal = (entry.data as GoalState | null) ?? undefined;
 				} else if (entry.customType === "todo") {
 					latestTodo = (entry.data as TodoState | null) ?? undefined;
+				} else if (entry.customType === "plan") {
+					latestPlan = (entry.data as PlanState | null) ?? undefined;
 				}
 			}
 			if (latestGoal && latestGoal.status !== "complete") {
@@ -2343,6 +2363,7 @@ export class AgentSession {
 				this._activateGoalTool(true);
 			}
 			if (latestTodo) this._todo.restore(latestTodo);
+			if (latestPlan) this._plan.restore(latestPlan);
 		} catch {
 			// Best-effort restore; ignore malformed/legacy entries.
 		}
@@ -2980,6 +3001,10 @@ export class AgentSession {
 			if (todoSection) {
 				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${todoSection}`;
 			}
+			const planSection = this._plan.systemPromptSection();
+			if (planSection) {
+				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${planSection}`;
+			}
 		} catch (error) {
 			preflightResult?.(false);
 			throw error;
@@ -3308,6 +3333,16 @@ export class AgentSession {
 		this.abortCompaction();
 		this.abortBranchSummary();
 		this.agent.abort();
+	}
+
+	/**
+	 * Cancel a single in-flight tool by its tool-call id WITHOUT interrupting the
+	 * whole task (unlike interrupt()). The tool sees an aborted signal — combined
+	 * with the run signal in the loop — and the run continues with the remaining
+	 * tools. Returns true if a live per-tool controller matched.
+	 */
+	cancelTool(toolCallId: string): boolean {
+		return this.agent.cancelTool(toolCallId);
 	}
 
 	// =========================================================================

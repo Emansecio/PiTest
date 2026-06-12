@@ -22,6 +22,7 @@ import {
 	type PermissionSettings,
 } from "../permissions/index.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
+import { createEditPreconditionExtension } from "./edit-precondition-extension.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
 import { createLearnedErrorGuardExtension } from "./learned-error-guard-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
@@ -78,6 +79,11 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 	const factories: ExtensionFactory[] = [
 		createPermissionsExtension({ checker: permissionChecker, onDecision: options.onPermissionDecision }),
 		createReadGuardExtension({ cwd: options.cwd }),
+		// Edit dry-run gate: re-uses computeEditsDiff to block an `edit` whose
+		// oldText won't match BEFORE it enters the mutation queue, with a
+		// copy-pasteable candidate hint. Runs after the read-guard so "not read"
+		// is reported first. Opt out with PIT_NO_EDIT_PRECONDITION.
+		createEditPreconditionExtension({ cwd: options.cwd }),
 		// Preventive cross-session guard: blocks a call whose exact args have failed
 		// repeatedly in prior sessions, before it fails again. Scoped to this
 		// session's agent dir so isolated runs never read the shared store. No-op

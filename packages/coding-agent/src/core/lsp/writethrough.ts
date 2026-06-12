@@ -34,6 +34,17 @@ export function setDiagnosticsOnWrite(enabled: boolean): void {
 	diagnosticsOnWrite = enabled;
 }
 
+let enforceDiagnosticsOnWrite = true;
+
+/**
+ * Enable/disable imperative framing of error-severity post-write diagnostics.
+ * When on (default), an edit that introduces a type error gets a firm directive
+ * to fix it before proceeding instead of a neutral note the model skims past.
+ */
+export function setEnforceDiagnosticsOnWrite(enabled: boolean): void {
+	enforceDiagnosticsOnWrite = enabled;
+}
+
 let formatOnWrite = false;
 
 /** Enable/disable LSP format-on-write for the current session. */
@@ -205,11 +216,40 @@ export async function attachPostWriteDiagnostics<R extends { content: Array<{ ty
 	signal?: AbortSignal,
 ): Promise<R> {
 	if (written === undefined) return result;
-	const appendix = await getPostWriteDiagnosticsText(absolutePath, written, cwd, signal);
+	let diag: PostWriteDiagnostics | undefined;
+	try {
+		diag = await getPostWriteDiagnostics(absolutePath, written, cwd, signal);
+	} catch {
+		return result;
+	}
+	if (!diag || diag.messages.length === 0) return result;
+	const appendix = formatPostWriteAppendix(diag, absolutePath, cwd);
 	if (appendix && result.content[0]?.type === "text") {
 		result.content[0].text = (result.content[0].text ?? "") + appendix;
 	}
 	return result;
+}
+
+/**
+ * Build the post-write diagnostics appendix. When the edit introduced an
+ * ERROR-severity diagnostic and enforcement is on, frame it as an imperative
+ * directive (active) rather than a neutral note (passive) the model can skim
+ * past — closing the edit→error→fix loop within the turn instead of deferring
+ * it to the slow project-wide check at the end. Warning-only diagnostics keep
+ * the neutral framing; the file already landed on disk, so this never flips the
+ * result to `isError` (that would make the model think the edit didn't apply).
+ */
+function formatPostWriteAppendix(diag: PostWriteDiagnostics, absolutePath: string, cwd: string): string {
+	const body = diag.messages.join("\n");
+	if (!enforceDiagnosticsOnWrite || !diag.errored) {
+		return `\nLSP diagnostics (${diag.summary}):\n${body}`;
+	}
+	const rel = formatPathRelativeToCwd(absolutePath, cwd);
+	return (
+		`\n⚠ This change introduced ${diag.summary} in ${rel}. Fix the error(s) below before ` +
+		`your next change or declaring the task done — do not keep editing while ` +
+		`${rel} still has type errors:\n${body}`
+	);
 }
 
 /**

@@ -336,9 +336,25 @@ export class Agent {
 		return this.activeRun?.abortController.signal;
 	}
 
+	/** Per-tool abort controllers (keyed by tool-call id), shared with the loop config. */
+	private readonly toolAbortControllers = new Map<string, AbortController>();
+
 	/** Abort the current run, if one is active. */
 	abort(): void {
 		this.activeRun?.abortController.abort();
+	}
+
+	/**
+	 * Cancel a single in-flight tool by its tool-call id, without aborting the
+	 * whole run. Returns true if a live controller was found and aborted. The
+	 * tool sees an aborted signal (combined via AbortSignal.any in the loop) and
+	 * the run continues with the remaining tools.
+	 */
+	cancelTool(toolCallId: string): boolean {
+		const controller = this.toolAbortControllers.get(toolCallId);
+		if (!controller) return false;
+		controller.abort();
+		return true;
 	}
 
 	/**
@@ -476,6 +492,7 @@ export class Agent {
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
 			toolExecution: this.toolExecution,
+			toolAbortControllers: this.toolAbortControllers,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,

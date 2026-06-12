@@ -8,6 +8,7 @@ import {
 	type CompactionPreparation,
 	type CompactionSettings,
 	calculateContextTokens,
+	cloneToolResultMessagesForPrune,
 	compact,
 	computeDynamicReserve,
 	createFileOps,
@@ -852,5 +853,82 @@ describe("compact() prune isolation", () => {
 		// Even though pruning ran before the failed LLM call, the live object is intact.
 		expect(liveBlock.text).toBe(bigText);
 		expect(liveBlock.text.length).toBe(90_000);
+	});
+});
+
+// ============================================================================
+// pruneOldToolOutputs — mutation tool-call argument bodies (write/edit)
+// ============================================================================
+
+describe("pruneOldToolOutputs — mutation tool-call args", () => {
+	afterEach(() => {
+		delete process.env.PIT_DEFER_HISTORY;
+	});
+
+	function bigWriteCall(): AgentMessage {
+		return {
+			role: "assistant" as const,
+			content: [
+				{
+					type: "toolCall" as const,
+					id: "tc-w",
+					name: "write",
+					arguments: { path: "big.ts", content: "Z".repeat(90_000) },
+				},
+			],
+			usage: {
+				input: 100,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 110,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+		} as any;
+	}
+
+	const userMsg = (): AgentMessage => ({ role: "user" as const, content: "q", timestamp: Date.now() });
+	const recentText = (): AgentMessage =>
+		({
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "done" }],
+			timestamp: Date.now(),
+		}) as any;
+
+	it("elides an old write's content body but keeps the path, and leaves recent ones intact", () => {
+		delete process.env.PIT_DEFER_HISTORY;
+		const oldWrite = bigWriteCall();
+		const recentWrite = bigWriteCall();
+		// oldWrite at index 0 (prunable); recentWrite at index 2 (within protected turns).
+		const messages: AgentMessage[] = [oldWrite, userMsg(), recentWrite, userMsg(), recentText()];
+
+		const reclaimed = pruneOldToolOutputs(messages);
+
+		const oldArgs = (messages[0] as any).content[0].arguments as { path: string; content: string };
+		expect(oldArgs.path).toBe("big.ts");
+		expect(oldArgs.content).toContain("chars elided");
+		expect(oldArgs.content.length).toBeLessThan(200);
+		expect(reclaimed).toBeGreaterThan(0);
+
+		// The recent write (protected) is untouched.
+		const recentArgs = (messages[2] as any).content[0].arguments as { content: string };
+		expect(recentArgs.content.length).toBe(90_000);
+	});
+
+	it("clones the assistant tool-call layer so an aborted prune never mutates the live context", () => {
+		delete process.env.PIT_DEFER_HISTORY;
+		const live: AgentMessage[] = [bigWriteCall(), userMsg(), recentText(), userMsg(), recentText()];
+
+		const clone = cloneToolResultMessagesForPrune(live);
+		pruneOldToolOutputs(clone);
+
+		expect(((clone[0] as any).content[0].arguments.content as string).length).toBeLessThan(200);
+		// Live context's arguments object is left intact.
+		expect(((live[0] as any).content[0].arguments.content as string).length).toBe(90_000);
 	});
 });
