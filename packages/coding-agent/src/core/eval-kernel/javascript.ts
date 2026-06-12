@@ -11,9 +11,29 @@
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { killProcessTree } from "../../utils/shell.ts";
 import type { EvalKernel, EvalRequest, EvalResult } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+// Ceiling on captured output per call (parent + child both enforce it). A
+// synchronous runaway loop can flood console output before the timeout fires.
+// Overridable for tests via PIT_EVAL_MAX_OUTPUT_BYTES.
+const DEFAULT_MAX_EVAL_OUTPUT_BYTES = 8 * 1024 * 1024; // 8MB
+
+function resolveMaxEvalOutputBytes(): number {
+	const raw = process.env.PIT_EVAL_MAX_OUTPUT_BYTES;
+	if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_EVAL_OUTPUT_BYTES;
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_EVAL_OUTPUT_BYTES;
+	return parsed;
+}
+
+// The parent kill-timer gets a small grace over the driver's vm timeout so a
+// synchronous runaway loop is aborted in-VM first (clean error reply, kernel
+// state survives) instead of racing the parent's proc.kill(). The parent timer
+// remains the backstop for async hangs that vm's timeout cannot interrupt.
+const DRIVER_TIMEOUT_GRACE_MS = 500;
 
 const DRIVER_SOURCE = `
 const vm = require("node:vm");
@@ -39,9 +59,13 @@ const ctx = vm.createContext({
 // visible to subsequent calls.
 ctx.globalThis = ctx;
 
-function capture(fn) {
+function capture(maxBytes) {
 	const out = [];
 	const err = [];
+	// Track accumulated chars so a runaway console.log loop can't grow the arrays
+	// without bound (the parent would still OOM buffering the reply). Once over
+	// the cap we push one '[output truncated]' marker and drop the rest.
+	const state = { bytes: 0, truncated: false };
 	const origLog = console.log;
 	const origErr = console.error;
 	const origWarn = console.warn;
@@ -50,17 +74,27 @@ function capture(fn) {
 		if (typeof a === "string") return a;
 		try { return JSON.stringify(a); } catch { return String(a); }
 	}).join(" ");
-	console.log = (...args) => { out.push(fmt(args)); };
-	console.info = (...args) => { out.push(fmt(args)); };
-	console.warn = (...args) => { err.push(fmt(args)); };
-	console.error = (...args) => { err.push(fmt(args)); };
+	const sink = (arr, line) => {
+		if (state.truncated) return;
+		if (state.bytes >= maxBytes) {
+			state.truncated = true;
+			arr.push("[output truncated]");
+			return;
+		}
+		state.bytes += line.length;
+		arr.push(line);
+	};
+	console.log = (...args) => { sink(out, fmt(args)); };
+	console.info = (...args) => { sink(out, fmt(args)); };
+	console.warn = (...args) => { sink(err, fmt(args)); };
+	console.error = (...args) => { sink(err, fmt(args)); };
 	const restore = () => {
 		console.log = origLog;
 		console.error = origErr;
 		console.warn = origWarn;
 		console.info = origInfo;
 	};
-	return { out, err, restore, fn };
+	return { out, err, restore };
 }
 
 function hoistTopLevelBindings(src) {
@@ -88,8 +122,8 @@ function needsAsyncWrap(src) {
 	return /\\bawait\\b/.test(src);
 }
 
-async function runOne(code) {
-	const cap = capture();
+async function runOne(code, timeoutMs, maxBytes) {
+	const cap = capture(maxBytes);
 	let error;
 	try {
 		const hoisted = hoistTopLevelBindings(code);
@@ -97,7 +131,12 @@ async function runOne(code) {
 			? "(async () => {\\n" + hoisted + "\\n})()"
 			: hoisted;
 		const script = new vm.Script(wrapped, { filename: "<eval>" });
-		const result = script.runInContext(ctx);
+		// timeout aborts synchronous runaway loops (e.g. \`while(true){}\`) that
+		// would otherwise block this event loop forever — stdin stops being read
+		// and the parent only recovers via kill on its own timeout. vm only honors
+		// it for sync execution; async work still relies on the parent timeout.
+		const runOpts = timeoutMs && timeoutMs > 0 ? { timeout: timeoutMs } : undefined;
+		const result = script.runInContext(ctx, runOpts);
 		if (result && typeof result.then === "function") {
 			await result;
 		}
@@ -124,7 +163,7 @@ process.stdin.on("data", (chunk) => {
 		if (!line) continue;
 		let msg;
 		try { msg = JSON.parse(line); } catch { continue; }
-		runOne(msg.code).then((r) => {
+		runOne(msg.code, msg.timeoutMs, msg.maxBytes).then((r) => {
 			process.stdout.write(JSON.stringify({ id: msg.id, ...r }) + "\\n");
 		}, (e) => {
 			process.stdout.write(JSON.stringify({ id: msg.id, error: String(e && e.stack || e) }) + "\\n");
@@ -149,6 +188,7 @@ class JsKernel implements EvalKernel {
 	private pending = new Map<string, PendingCall>();
 	private stdoutBuf = "";
 	private cwd: string;
+	private maxOutputBytes = resolveMaxEvalOutputBytes();
 
 	constructor(cwd: string) {
 		this.cwd = cwd;
@@ -198,6 +238,26 @@ class JsKernel implements EvalKernel {
 
 	private onStdout(chunk: string): void {
 		this.stdoutBuf += chunk;
+		// Defensive: the child already caps captured output, but if a malformed or
+		// runaway reply floods stdout without a newline the parse loop never drains
+		// it and the buffer grows unbounded. Kill the kernel and fail the in-flight
+		// call rather than OOM. Headroom over the child cap because a single reply
+		// line is the capped payload plus JSON escaping (which can inflate it), so
+		// only an unterminated flood well past that should ever trip this.
+		const parentCap = this.maxOutputBytes * 4;
+		if (this.stdoutBuf.length > parentCap && this.stdoutBuf.indexOf("\n") < 0) {
+			const proc = this.proc;
+			if (proc?.pid) killProcessTree(proc.pid);
+			try {
+				proc?.kill();
+			} catch {
+				// ignore
+			}
+			this.alive = false;
+			this.stdoutBuf = "";
+			this.failPending(new Error(`eval output exceeded ${this.maxOutputBytes} bytes (killed)`));
+			return;
+		}
 		while (true) {
 			const nl = this.stdoutBuf.indexOf("\n");
 			if (nl < 0) break;
@@ -241,6 +301,7 @@ class JsKernel implements EvalKernel {
 		}
 		const id = randomUUID();
 		const timeoutMs = req.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+		const parentTimeoutMs = timeoutMs + DRIVER_TIMEOUT_GRACE_MS;
 		return new Promise<EvalResult>((resolve, reject) => {
 			const call: PendingCall = { id, resolve, reject, startedAt: Date.now(), timer: undefined };
 			call.timer = setTimeout(() => {
@@ -254,7 +315,7 @@ class JsKernel implements EvalKernel {
 					this.alive = false;
 					reject(new Error(`eval timed out after ${timeoutMs}ms`));
 				}
-			}, timeoutMs);
+			}, parentTimeoutMs);
 			if (signal) {
 				const onAbort = () => {
 					if (this.pending.has(id)) {
@@ -276,7 +337,7 @@ class JsKernel implements EvalKernel {
 				signal.addEventListener("abort", onAbort, { once: true });
 			}
 			this.pending.set(id, call);
-			proc.stdin.write(`${JSON.stringify({ id, code: req.code })}\n`);
+			proc.stdin.write(`${JSON.stringify({ id, code: req.code, timeoutMs, maxBytes: this.maxOutputBytes })}\n`);
 		});
 	}
 

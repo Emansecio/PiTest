@@ -63,9 +63,19 @@ export function agentLoop(
 		},
 		signal,
 		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	).then(
+		(messages) => {
+			stream.end(messages);
+		},
+		// A rejection on the path to the first await (convertToLlm/transformContext
+		// throwing, a custom streamFn throwing at construction, getSteeringMessages,
+		// a faulty listener) would otherwise be an unhandled rejection — fatal under
+		// Node's default — and leave the for-await consumer hung. Convert it into a
+		// terminal failure turn so the consumer always sees an `agent_end`.
+		(err) => {
+			endStreamWithFailure(stream, config, err);
+		},
+	);
 
 	return stream;
 }
@@ -102,9 +112,16 @@ export function agentLoopContinue(
 		},
 		signal,
 		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+	).then(
+		(messages) => {
+			stream.end(messages);
+		},
+		// Same rejection guard as agentLoop: surface a terminal failure turn instead
+		// of letting the rejection go unhandled and hanging the consumer.
+		(err) => {
+			endStreamWithFailure(stream, config, err);
+		},
+	);
 
 	return stream;
 }
@@ -164,6 +181,52 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 		(event: AgentEvent) => event.type === "agent_end",
 		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
 	);
+}
+
+/**
+ * Build the terminal assistant message for a synchronous-path rejection (before
+ * any event was emitted). Mirrors the TTSR-bail / turn-budget shape: a zero-usage
+ * error turn carrying the failure reason, so the consumer learns *why* it failed
+ * rather than the error being swallowed.
+ */
+function buildFailureMessage(config: AgentLoopConfig, err: unknown): AssistantMessage {
+	const errorMessage = err instanceof Error ? err.message : String(err);
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		api: config.model.api,
+		provider: config.model.provider,
+		model: config.model.id,
+		stopReason: "error",
+		errorMessage,
+		timestamp: Date.now(),
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+	} as AssistantMessage;
+}
+
+/**
+ * Terminate the stream after a rejection from the loop's promise. Pushes a
+ * failure assistant turn and an `agent_end` (the stream's completion event, which
+ * also resolves `result()`), then `end()` to release any waiting consumer.
+ */
+function endStreamWithFailure(
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	config: AgentLoopConfig,
+	err: unknown,
+): void {
+	const message = buildFailureMessage(config, err);
+	stream.push({ type: "message_start", message });
+	stream.push({ type: "message_end", message });
+	stream.push({ type: "turn_end", message, toolResults: [] });
+	stream.push({ type: "agent_end", messages: [message] });
+	stream.end([]);
 }
 
 /**

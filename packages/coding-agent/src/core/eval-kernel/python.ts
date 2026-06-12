@@ -13,9 +13,24 @@
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { killProcessTree } from "../../utils/shell.ts";
 import type { EvalKernel, EvalRequest, EvalResult } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+// Ceiling on accumulated stdout+stderr per call. A runaway loop (`while True:
+// print('x')`) would otherwise grow the buffer to GBs before the timeout fires
+// and OOM the host. Generous vs bash's 24KB cap — eval legitimately produces
+// larger dumps — but bounded. Overridable for tests via PIT_EVAL_MAX_OUTPUT_BYTES.
+const DEFAULT_MAX_EVAL_OUTPUT_BYTES = 8 * 1024 * 1024; // 8MB
+
+function resolveMaxEvalOutputBytes(): number {
+	const raw = process.env.PIT_EVAL_MAX_OUTPUT_BYTES;
+	if (raw === undefined || raw.trim() === "") return DEFAULT_MAX_EVAL_OUTPUT_BYTES;
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_EVAL_OUTPUT_BYTES;
+	return parsed;
+}
 
 const PRELUDE = "import sys, os, json, traceback as __pi_traceback\n";
 
@@ -26,6 +41,11 @@ interface PendingCall {
 	startedAt: number;
 	stdoutBuf: string;
 	stderrBuf: string;
+	// Index to resume the sentinel scan from, so each chunk doesn't re-scan the
+	// whole buffer (O(n²)). Kept (sentinel.length - 1) behind the buffer end so a
+	// sentinel split across two chunks is still matched.
+	stdoutSearch: number;
+	stderrSearch: number;
 	stdoutDone: boolean;
 	stderrDone: boolean;
 	timer: NodeJS.Timeout | undefined;
@@ -38,6 +58,7 @@ class PythonKernel implements EvalKernel {
 	private current: PendingCall | undefined;
 	private queue: Array<() => void> = [];
 	private cwd: string;
+	private maxOutputBytes = resolveMaxEvalOutputBytes();
 
 	constructor(cwd: string) {
 		this.cwd = cwd;
@@ -92,25 +113,55 @@ class PythonKernel implements EvalKernel {
 	}
 
 	private onStdout(chunk: string): void {
-		if (!this.current) return;
-		this.current.stdoutBuf += chunk;
-		const idx = this.current.stdoutBuf.indexOf(this.current.sentinel);
+		const c = this.current;
+		if (!c) return;
+		c.stdoutBuf += chunk;
+		if (this.enforceOutputCap(c)) return;
+		const idx = c.stdoutBuf.indexOf(c.sentinel, c.stdoutSearch);
 		if (idx >= 0) {
-			this.current.stdoutBuf = this.current.stdoutBuf.slice(0, idx);
-			this.current.stdoutDone = true;
+			c.stdoutBuf = c.stdoutBuf.slice(0, idx);
+			c.stdoutDone = true;
 			this.maybeResolve();
+			return;
 		}
+		// Resume next scan just before the new tail so a split sentinel still matches.
+		c.stdoutSearch = Math.max(0, c.stdoutBuf.length - c.sentinel.length + 1);
 	}
 
 	private onStderr(chunk: string): void {
-		if (!this.current) return;
-		this.current.stderrBuf += chunk;
-		const idx = this.current.stderrBuf.indexOf(this.current.sentinel);
+		const c = this.current;
+		if (!c) return;
+		c.stderrBuf += chunk;
+		if (this.enforceOutputCap(c)) return;
+		const idx = c.stderrBuf.indexOf(c.sentinel, c.stderrSearch);
 		if (idx >= 0) {
-			this.current.stderrBuf = this.current.stderrBuf.slice(0, idx);
-			this.current.stderrDone = true;
+			c.stderrBuf = c.stderrBuf.slice(0, idx);
+			c.stderrDone = true;
 			this.maybeResolve();
+			return;
 		}
+		c.stderrSearch = Math.max(0, c.stderrBuf.length - c.sentinel.length + 1);
+	}
+
+	// Kill the runaway process when combined output exceeds the cap. Returns true
+	// when it tripped (caller must stop touching the now-cleared pending call).
+	private enforceOutputCap(c: PendingCall): boolean {
+		if (c.stdoutBuf.length + c.stderrBuf.length <= this.maxOutputBytes) return false;
+		const proc = this.proc;
+		// killProcessTree tears down any children the user code spawned too.
+		if (proc?.pid) killProcessTree(proc.pid);
+		try {
+			proc?.kill();
+		} catch {
+			// ignore
+		}
+		this.alive = false;
+		if (this.current === c) {
+			if (c.timer) clearTimeout(c.timer);
+			this.current = undefined;
+			c.reject(new Error(`eval output exceeded ${this.maxOutputBytes} bytes (killed)`));
+		}
+		return true;
 	}
 
 	private maybeResolve(): void {
@@ -184,6 +235,8 @@ class PythonKernel implements EvalKernel {
 			startedAt: Date.now(),
 			stdoutBuf: "",
 			stderrBuf: "",
+			stdoutSearch: 0,
+			stderrSearch: 0,
 			stdoutDone: false,
 			stderrDone: false,
 			timer: undefined,

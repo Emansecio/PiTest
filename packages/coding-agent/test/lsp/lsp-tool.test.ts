@@ -100,6 +100,42 @@ describe("lsp module — pure helpers", () => {
 		expect(parseContentLengthFrame(full.subarray(0, full.length - 3))).toBeNull();
 	});
 
+	it("parseContentLengthFrame buffers a short unframed run (still waiting for a header)", () => {
+		// Below the scan cap with no `\r\n\r\n`: not garbage yet, keep buffering.
+		const partial = Buffer.from("server starting up, no header yet...");
+		expect(parseContentLengthFrame(partial)).toBeNull();
+	});
+
+	it("parseContentLengthFrame discards an unframed buffer past the header-scan cap (OOM guard)", () => {
+		// A server dumping unframed text (banner/logs/crash) never closes a header.
+		// Past the cap the parser must drop everything so the buffer can't grow to OOM.
+		const garbage = Buffer.alloc(64 * 1024 + 1, 0x61); // > MAX_HEADER_SCAN_BYTES, no CRLFCRLF
+		const parsed = parseContentLengthFrame(garbage);
+		if (!parsed || !("error" in parsed)) throw new Error("expected the oversized unframed buffer to be discarded");
+		expect(parsed.error.message).toContain("unframed output");
+		// Remainder is empty: the whole garbage buffer is dropped, not retained.
+		expect(parsed.remaining.length).toBe(0);
+	});
+
+	it("parseContentLengthFrame rejects an absurd Content-Length instead of awaiting it", () => {
+		// A multi-GB declared length must be rejected up front, not buffered until full.
+		const huge = 256 * 1024 * 1024; // > MAX_FRAME_BYTES (128MB)
+		const buf = Buffer.from(`Content-Length: ${huge}\r\n\r\n{}`, "utf-8");
+		const parsed = parseContentLengthFrame(buf);
+		if (!parsed || !("error" in parsed)) throw new Error("expected the oversized frame to be rejected");
+		expect(parsed.error.message).toContain("frame too large");
+		// Resync past the header so the reader keeps draining subsequent frames.
+		expect(parsed.remaining.toString("utf-8")).toBe("{}");
+	});
+
+	it("parseContentLengthFrame still decodes a normal frame unchanged (no regression)", () => {
+		const buf = Buffer.concat([frame({ jsonrpc: "2.0", id: 7, result: { ok: true } }), Buffer.from("rest")]);
+		const parsed = parseContentLengthFrame(buf);
+		if (!parsed || "error" in parsed) throw new Error("expected a decoded frame");
+		expect(parsed.json).toEqual({ jsonrpc: "2.0", id: 7, result: { ok: true } });
+		expect(parsed.remaining.toString("utf-8")).toBe("rest");
+	});
+
 	it("quoteWindowsShellArg wraps whitespace/quotes only when needed", () => {
 		expect(quoteWindowsShellArg("--stdio")).toBe("--stdio");
 		expect(quoteWindowsShellArg("C:/Program Files/x.cmd")).toBe('"C:/Program Files/x.cmd"');

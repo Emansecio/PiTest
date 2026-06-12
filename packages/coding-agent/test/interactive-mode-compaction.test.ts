@@ -44,7 +44,10 @@ describe("InteractiveMode compaction events", () => {
 			willRetry: false,
 		});
 
-		expect(fakeThis.chatContainer.clear).toHaveBeenCalledTimes(1);
+		// The redundant chatContainer.clear() was removed from compaction_end:
+		// rebuildChatFromMessages() now owns dispose + clear (a bare clear here
+		// would orphan a pending tool row's spinner ticker on the animation loop).
+		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
 		expect(fakeThis.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(

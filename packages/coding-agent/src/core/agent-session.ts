@@ -1165,8 +1165,24 @@ export class AgentSession {
 
 	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
+		// Isolate each listener: a faulty subscriber (e.g. the TUI renderer
+		// choking on a pathological tool result) must not abort the emit loop.
+		// If a throw escaped here it would reject _handleAgentEvent → handleRunFailure
+		// re-emits through this same faulty listener → it throws again → turn_end/
+		// agent_end never fire (half-emitted state) and the rejection can crash the
+		// process. Report via the extension error channel (a separate listener set,
+		// so it cannot re-enter the faulty subscriber) and keep delivering.
 		for (const l of this._eventListeners) {
-			l(event);
+			try {
+				l(event);
+			} catch (err) {
+				this._extensionRunner.emitError({
+					extensionPath: "<event-listener>",
+					event: `emit:${event.type}`,
+					error: err instanceof Error ? err.message : String(err),
+					stack: err instanceof Error ? err.stack : undefined,
+				});
+			}
 		}
 	}
 

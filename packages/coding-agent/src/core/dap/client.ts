@@ -25,7 +25,11 @@ type DapEventHandler = (body: unknown, event: DapEventMessage) => void | Promise
 type DapReverseRequestHandler = (args: unknown) => unknown | Promise<unknown>;
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
-const SOCKET_CONNECT_TIMEOUT_MS = 10_000;
+/** Socket-mode connect deadline; overridable (tests) via PIT_DAP_CONNECT_TIMEOUT_MS. */
+function socketConnectTimeoutMs(): number {
+	const override = Number.parseInt(process.env.PIT_DAP_CONNECT_TIMEOUT_MS ?? "", 10);
+	return Number.isFinite(override) && override > 0 ? override : 10_000;
+}
 
 /** Env that suppresses interactive prompts/pagers from the adapter or debuggee. */
 export const NON_INTERACTIVE_ENV: Record<string, string> = {
@@ -134,18 +138,55 @@ export class DapClient {
 			windowsHide: true,
 		});
 
+		// Capture stderr and a spawn 'error' BEFORE the connect race: an EACCES/EPERM
+		// (or the process dying) inside the connect window would otherwise be an
+		// unhandled 'error' event and crash the host. We collect the failure here and
+		// surface it as a race rejection; on success we detach and #attachExit takes over.
+		let earlyStderr = "";
+		const onEarlyStderr = (chunk: Buffer) => {
+			earlyStderr = (earlyStderr + chunk.toString("utf-8")).slice(-64 * 1024);
+		};
+		proc.stderr?.on("data", onEarlyStderr);
+		let connected = false;
+		let onEarlyError!: (err: Error) => void;
+		const spawnErrorPromise = new Promise<never>((_, reject) => {
+			onEarlyError = (err) => {
+				const detail = earlyStderr.trim();
+				reject(new Error(detail ? `${adapter.name} failed to start: ${String(err)}: ${detail}` : String(err)));
+			};
+			proc.once("error", onEarlyError);
+		});
+
 		let socket: net.Socket;
 		const timeoutPromise = new Promise<never>((_, reject) => {
 			const t = setTimeout(
 				() => reject(new Error(`${adapter.name} did not connect within 10s`)),
-				SOCKET_CONNECT_TIMEOUT_MS,
+				socketConnectTimeoutMs(),
 			);
 			t.unref?.();
 		});
 		try {
-			socket = await Promise.race([connPromise, timeoutPromise]);
+			socket = await Promise.race([connPromise, spawnErrorPromise, timeoutPromise]);
+			connected = true;
 		} finally {
 			server.close();
+			// Detach the bootstrap listeners so the happy path matches the prior wiring
+			// exactly (only #captureStderr / #attachExit remain active).
+			proc.stderr?.off("data", onEarlyStderr);
+			proc.off("error", onEarlyError);
+			// On timeout or spawn error we never connected: kill the leaked adapter
+			// tree (it may still dial in later to a closed server) instead of orphaning it.
+			if (!connected) {
+				// No DapClient is created on this path, so nothing else will listen for
+				// 'error'. Keep a no-op guard so a late spawn error can't crash the host.
+				proc.on("error", () => {});
+				try {
+					if (proc.pid) killProcessTree(proc.pid);
+					else proc.kill();
+				} catch {
+					/* already gone */
+				}
+			}
 		}
 
 		const client = new DapClient(adapter, cwd, proc, { input: socket, output: socket, socket });

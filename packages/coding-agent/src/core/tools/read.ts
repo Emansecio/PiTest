@@ -537,6 +537,16 @@ Common mistakes to avoid:
 			if (outline) {
 				if (signal?.aborted) throw new Error("Operation aborted");
 				await ops.access(absolutePath);
+				// Same streaming threshold the normal read path uses: outline buffers the
+				// whole file to scan declarations, so a multi-MB minified/generated source
+				// would OOM. Refuse above the cap with an actionable hint instead of crashing.
+				if (ops.stat) {
+					const outlineStat = await ops.stat(absolutePath);
+					if (outlineStat.size > streamingMinBytes) {
+						const text = `[outline of ${path}: ${formatSize(outlineStat.size)} exceeds ${formatSize(streamingMinBytes)} — use grep/ast_grep to locate symbols, or read with offset/limit]`;
+						return { content: [{ type: "text", text } as TextContent], details: undefined };
+					}
+				}
 				const buffer = await ops.readFile(absolutePath);
 				const decls = listDeclarations(buffer.toString("utf-8"), absolutePath);
 				const body =

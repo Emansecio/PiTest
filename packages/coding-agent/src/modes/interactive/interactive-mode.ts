@@ -1310,6 +1310,7 @@ export class InteractiveMode {
 						return { cancelled: true };
 					}
 
+					this._disposeChatComponents();
 					this.chatContainer.clear();
 					this.renderInitialMessages();
 					if (result.editorText && !this.editor.getText().trim()) {
@@ -1389,6 +1390,7 @@ export class InteractiveMode {
 	}
 
 	private renderCurrentSessionState(): void {
+		this._disposeChatComponents();
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
@@ -2982,7 +2984,8 @@ export class InteractiveMode {
 						this.showStatus("Auto-compaction cancelled");
 					}
 				} else if (event.result) {
-					this.chatContainer.clear();
+					// rebuildChatFromMessages() disposes + clears; no redundant clear here
+					// (a bare clear would orphan a pending row's spinner ticker).
 					this.rebuildChatFromMessages();
 					this.addMessageToChat(
 						createCompactionSummaryMessage(
@@ -3299,7 +3302,7 @@ export class InteractiveMode {
 	 */
 	private renderSessionContext(
 		sessionContext: SessionContext,
-		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
+		options: { updateFooter?: boolean; populateHistory?: boolean; settleOrphanTools?: boolean } = {},
 	): void {
 		this.pendingTools.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
@@ -3375,7 +3378,20 @@ export class InteractiveMode {
 		}
 
 		for (const [toolCallId, component] of renderedPendingTools) {
-			this.pendingTools.set(toolCallId, component);
+			// Resume-from-rest: a toolCall persisted in the JSONL without its
+			// toolResult (process died mid-tool) has no live loop to deliver a
+			// result, so leaving it pending would arm a spinner ticker that never
+			// stops. Settle it as incomplete — stops the ticker AND tells the user
+			// the tool didn't finish. The live path (settleOrphanTools=false) keeps
+			// it pending so tool_execution_end can still settle it normally.
+			if (options.settleOrphanTools) {
+				component.updateResult({
+					content: [{ type: "text", text: "(incompleto — sessão retomada)" }],
+					isError: true,
+				});
+			} else {
+				this.pendingTools.set(toolCallId, component);
+			}
 		}
 		this.ui.requestRender();
 	}
@@ -3386,6 +3402,10 @@ export class InteractiveMode {
 		this.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: true,
+			// Resume path: no live agent loop will deliver results for a toolCall
+			// that the JSONL records without its toolResult, so settle those orphans
+			// as incomplete rather than leaving an eternally-spinning pending row.
+			settleOrphanTools: true,
 		});
 
 		// Show compaction info if session was compacted
@@ -3406,7 +3426,19 @@ export class InteractiveMode {
 		});
 	}
 
+	/** Tear down every chat child that owns animation callbacks (tool rows,
+	 * activity lines/groups) before the container is cleared. Container.clear()
+	 * only drops the children array — a still-pending row's spinner ticker /
+	 * settle ease would otherwise stay registered on the animation loop forever
+	 * (CPU + closure retention) after a history rebuild or compaction clear. */
+	private _disposeChatComponents(): void {
+		for (const child of this.chatContainer.children) {
+			(child as Component & { dispose?(): void }).dispose?.();
+		}
+	}
+
 	private rebuildChatFromMessages(): void {
+		this._disposeChatComponents();
 		this.chatContainer.clear();
 		const context = this.sessionManager.buildSessionContext();
 		this.renderSessionContext(context);
@@ -3810,8 +3842,7 @@ export class InteractiveMode {
 		this.hideThinkingBlock = !this.hideThinkingBlock;
 		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
 
-		// Rebuild chat from session messages
-		this.chatContainer.clear();
+		// Rebuild chat from session messages (rebuildChatFromMessages disposes + clears).
 		this.rebuildChatFromMessages();
 
 		// If streaming, re-add the streaming component with updated visibility and re-render
@@ -4319,7 +4350,7 @@ export class InteractiveMode {
 								child.setHideThinkingBlock(hidden);
 							}
 						}
-						this.chatContainer.clear();
+						// rebuildChatFromMessages disposes + clears (avoids orphaned tickers).
 						this.rebuildChatFromMessages();
 					},
 					onCollapseChangelogChange: (collapsed) => {
@@ -4670,6 +4701,7 @@ export class InteractiveMode {
 						}
 
 						// Update UI
+						this._disposeChatComponents();
 						this.chatContainer.clear();
 						this.renderInitialMessages();
 						if (result.editorText && !this.editor.getText().trim()) {

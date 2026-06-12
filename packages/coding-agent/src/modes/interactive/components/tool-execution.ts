@@ -347,6 +347,15 @@ export class ToolExecutionComponent extends MessageShell {
 		return family;
 	}
 
+	/** Stop every animation callback this component registered on the TUI loop
+	 * (running spinner + settle ease). Call when the row is discarded while still
+	 * pending (history rebuild / compaction clear / orphaned resume) so its
+	 * callbacks don't leak into the animation loop forever. Idempotent. */
+	dispose(): void {
+		this.stopRunningSpinner();
+		this.stopGutterEase();
+	}
+
 	/** Run as a child of an activity line/group: drop the gutter and let the
 	 * parent own the state icon + spinner. Idempotent. */
 	setActivityChild(on: boolean): void {

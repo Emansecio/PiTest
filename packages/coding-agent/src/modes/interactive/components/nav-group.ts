@@ -88,6 +88,18 @@ export class NavGroupComponent extends Container {
 		this.ui.requestRender();
 	}
 
+	/** Stop every animation this group owns — its spinner ticker, the icon/counter
+	 * eases, and every wrapped exec's own callbacks — when the group is discarded
+	 * while still pending (history rebuild / compaction clear). Without this the
+	 * ticker keeps polling aggregateState() on the loop forever. Idempotent. */
+	dispose(): void {
+		this.ticker?.stop();
+		this.ticker = null;
+		this.iconEase.stop();
+		this.countEase.stop();
+		for (const e of this.execs) e.dispose();
+	}
+
 	/** Duck-typed Expandable (interactive-mode's ctrl+o loop). */
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;

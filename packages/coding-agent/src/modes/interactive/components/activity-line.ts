@@ -63,6 +63,17 @@ export class ActivityLineComponent extends Container {
 		this.exec?.setExpanded(expanded);
 	}
 
+	/** Stop every animation this line owns — its spinner ticker, the icon ease,
+	 * and the wrapped exec's own callbacks — when the line is discarded while
+	 * still pending (history rebuild / compaction clear). Without this the ticker
+	 * keeps polling the exec's state on the loop forever. Idempotent. */
+	dispose(): void {
+		this.ticker?.stop();
+		this.ticker = null;
+		this.iconEase.stop();
+		this.exec?.dispose();
+	}
+
 	override invalidate(): void {
 		super.invalidate();
 		// Theme change / forced re-render: drop both memos (they hold colored

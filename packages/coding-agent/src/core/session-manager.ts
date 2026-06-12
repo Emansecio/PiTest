@@ -511,6 +511,91 @@ function isValidSessionFile(filePath: string): boolean {
 	}
 }
 
+// Sessions that ran for hours can reach hundreds of MB on disk. buildSessionInfo
+// (for the /resume picker) would read the whole .jsonl into a string AND
+// materialize every message into allMessagesText — multiplying that footprint and
+// risking OOM just to open the selector. Above this size we degrade to a bounded
+// head-read: enough for the card's firstMessage, but no full-body search index.
+const SESSION_INFO_FULL_READ_MAX_BYTES = 8 * 1024 * 1024;
+// How much of an oversized file to read for the header + first user message.
+const SESSION_INFO_HEAD_READ_BYTES = 64 * 1024;
+
+/**
+ * Bounded-read fallback for oversized session files. Reads only the first
+ * SESSION_INFO_HEAD_READ_BYTES (reusing the openSync/readSync pattern of
+ * isValidSessionFile), parses the header and scans the leading lines for the
+ * first user message. allMessagesText is left empty: the card renders from
+ * firstMessage, and body search degrades gracefully rather than OOMing.
+ */
+function buildSessionInfoBounded(filePath: string, stats: { size: number; mtime: Date }): SessionInfo | null {
+	let head: string;
+	try {
+		const fd = openSync(filePath, "r");
+		try {
+			const buffer = Buffer.alloc(SESSION_INFO_HEAD_READ_BYTES);
+			const bytesRead = readSync(fd, buffer, 0, SESSION_INFO_HEAD_READ_BYTES, 0);
+			head = buffer.toString("utf8", 0, bytesRead);
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return null;
+	}
+
+	// Drop the last line: a 64KB cut almost always lands mid-line, and a partial
+	// JSON object would just be skipped anyway.
+	const lines = head.split("\n");
+	lines.pop();
+
+	const entries: FileEntry[] = [];
+	for (const line of lines) {
+		if (!line.trim()) continue;
+		try {
+			entries.push(JSON.parse(line) as FileEntry);
+		} catch {
+			// Skip malformed/partial lines
+		}
+	}
+
+	if (entries.length === 0) return null;
+	const header = entries[0];
+	if (header.type !== "session") return null;
+
+	let firstMessage = "";
+	let name: string | undefined;
+	for (const entry of entries) {
+		if (entry.type === "session_info") {
+			name = (entry as SessionInfoEntry).name?.trim() || undefined;
+		}
+		if (firstMessage || entry.type !== "message") continue;
+		const message = (entry as SessionMessageEntry).message;
+		if (!isMessageWithContent(message)) continue;
+		if (message.role !== "user") continue;
+		const textContent = extractTextContent(message);
+		if (textContent) firstMessage = textContent;
+	}
+
+	const cwd = typeof (header as SessionHeader).cwd === "string" ? (header as SessionHeader).cwd : "";
+	const parentSessionPath = (header as SessionHeader).parentSession;
+	const headerTime = (header as SessionHeader).timestamp;
+
+	return {
+		path: filePath,
+		id: (header as SessionHeader).id,
+		cwd,
+		name,
+		parentSessionPath,
+		created: new Date(headerTime),
+		// We can't scan the whole file for the last activity timestamp without
+		// reading it all, so fall back to the file mtime.
+		modified: stats.mtime,
+		// messageCount/allMessagesText are intentionally degraded for huge files.
+		messageCount: 0,
+		firstMessage: firstMessage || "(large session)",
+		allMessagesText: "",
+	};
+}
+
 /** Exported for testing */
 export function findMostRecentSession(sessionDir: string): string | null {
 	try {
@@ -605,6 +690,14 @@ function getSessionModifiedDate(entries: FileEntry[], header: SessionHeader, sta
 
 async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	try {
+		// Size-guard: stat before reading. Oversized sessions degrade to a
+		// bounded head-read so opening the picker can't OOM on a multi-hundred-MB
+		// file. Small/normal sessions take the identical full-read path below.
+		const preStats = await stat(filePath);
+		if (preStats.size > SESSION_INFO_FULL_READ_MAX_BYTES) {
+			return buildSessionInfoBounded(filePath, preStats);
+		}
+
 		const content = await readFile(filePath, "utf8");
 		const entries: FileEntry[] = [];
 		const lines = content.trim().split("\n");
@@ -622,7 +715,8 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		const header = entries[0];
 		if (header.type !== "session") return null;
 
-		const stats = await stat(filePath);
+		// Reuse the stat from the size-guard above — no second syscall needed.
+		const stats = preStats;
 		let messageCount = 0;
 		let firstMessage = "";
 		const allMessages: string[] = [];
@@ -938,19 +1032,30 @@ export class SessionManager {
 		// or re-open the session immediately after appendMessage rely on the
 		// new entry being durable on disk. The previous async-debounced write
 		// optimization broke that invariant; keep the batching but flush sync.
+		const isInitialFlush = !this.flushed;
 		let batch: string;
-		if (!this.flushed) {
+		if (isInitialFlush) {
 			batch = this.fileEntries.map((e) => `${JSON.stringify(e)}\n`).join("");
-			this.flushed = true;
 		} else {
 			batch = `${JSON.stringify(entry)}\n`;
 		}
-		// If there are still queued async writes from older code paths, drain them
-		// in order by appending them first.
+		// If there are still queued async writes from older code paths, prepend
+		// them in order WITHOUT mutating the queue yet — a throwing append must
+		// leave both `flushed` and `_writeQueue` intact so the next attempt can
+		// rewrite the full batch (header + history) instead of silently dropping
+		// it. Mutate state only after the bytes are durable.
 		if (this._writeQueue.length > 0) {
-			batch = this._writeQueue.splice(0).join("") + batch;
+			batch = this._writeQueue.join("") + batch;
 		}
 		appendFileSync(this.sessionFile, batch);
+		// Append succeeded: now it is safe to commit the flushed flag and clear
+		// the queued writes we just persisted.
+		if (isInitialFlush) {
+			this.flushed = true;
+		}
+		if (this._writeQueue.length > 0) {
+			this._writeQueue.length = 0;
+		}
 	}
 
 	private async _drainQueue(): Promise<void> {

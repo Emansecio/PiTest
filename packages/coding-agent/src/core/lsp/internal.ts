@@ -152,6 +152,15 @@ function findHeaderEnd(buffer: Buffer): number {
 	return -1;
 }
 
+// Caps that stop a misbehaving server from growing the frame buffer to OOM.
+// A server dumping unframed text (banner/logs/REPL/stacktrace, or one that
+// crashed into raw stdout) never closes a header, so the buffer would otherwise
+// grow forever. Mirrors the stderr cap (MAX_STDERR_BYTES) on the framed path.
+/** Max bytes to scan for a header terminator before declaring the stream unframed. */
+const MAX_HEADER_SCAN_BYTES = 64 * 1024;
+/** Max declared Content-Length to honour; larger is treated as garbage, not awaited. */
+const MAX_FRAME_BYTES = 128 * 1024 * 1024;
+
 /**
  * Parse a single `Content-Length`-framed JSON message from the head of `buffer`.
  * Returns the decoded JSON plus the unconsumed remainder, or null when a full
@@ -162,7 +171,15 @@ export type ContentLengthFrame = { json: unknown; remaining: Buffer } | { error:
 
 export function parseContentLengthFrame(buffer: Buffer): ContentLengthFrame | null {
 	const headerEndIndex = findHeaderEnd(buffer);
-	if (headerEndIndex === -1) return null;
+	if (headerEndIndex === -1) {
+		// No header terminator yet. While the unframed run stays under the scan cap
+		// we keep buffering for more bytes; past it the stream is unframed garbage —
+		// discard everything so the buffer can't grow without bound (OOM guard).
+		if (buffer.length > MAX_HEADER_SCAN_BYTES) {
+			return { error: new Error("unframed output (no Content-Length header)"), remaining: Buffer.alloc(0) };
+		}
+		return null;
+	}
 	const headerText = buffer.subarray(0, headerEndIndex).toString("ascii");
 	const messageStart = headerEndIndex + 4;
 	const contentLengthMatch = headerText.match(/Content-Length: (\d+)/i);
@@ -172,6 +189,11 @@ export function parseContentLengthFrame(buffer: Buffer): ContentLengthFrame | nu
 		return { error: new Error("missing Content-Length header"), remaining: buffer.subarray(messageStart) };
 	}
 	const contentLength = Number.parseInt(contentLengthMatch[1], 10);
+	if (contentLength > MAX_FRAME_BYTES) {
+		// Absurd declared length: reject now instead of waiting for the buffer to
+		// fill to a multi-GB frame. Resync past the header so the reader continues.
+		return { error: new Error(`frame too large (${contentLength} bytes)`), remaining: buffer.subarray(messageStart) };
+	}
 	const messageEnd = messageStart + contentLength;
 	if (buffer.length < messageEnd) return null;
 	const messageText = buffer.subarray(messageStart, messageEnd).toString("utf-8");

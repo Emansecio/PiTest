@@ -2,7 +2,7 @@ import type { AgentTool } from "@pit/agent-core";
 import type { ImageContent, TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile } from "fs/promises";
+import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.js";
@@ -32,12 +32,19 @@ export interface SymbolToolDetails {
 export interface SymbolOperations {
 	readFile: (absolutePath: string) => Promise<Buffer>;
 	access: (absolutePath: string) => Promise<void>;
+	stat?: (absolutePath: string) => Promise<{ size: number }>;
 }
 
 const defaultSymbolOperations: SymbolOperations = {
 	readFile: (path) => fsReadFile(path),
 	access: (path) => fsAccess(path, constants.R_OK),
+	stat: (path) => fsStat(path),
 };
+
+// Mirrors read.ts STREAM_READ_MIN_BYTES: symbol buffers the whole file to regex
+// for one declaration, so a multi-MB minified/generated source would OOM. Above
+// this cap we refuse with an actionable hint instead of reading.
+const SYMBOL_MAX_FILE_BYTES = 10 * 1024 * 1024; // 10MB
 
 export interface SymbolToolOptions {
 	operations?: SymbolOperations;
@@ -314,6 +321,17 @@ export function createSymbolToolDefinition(
 			if (signal?.aborted) throw new Error("Operation aborted");
 			await ops.access(absolutePath);
 			if (signal?.aborted) throw new Error("Operation aborted");
+			// Refuse oversized files before buffering (OOM guard, see SYMBOL_MAX_FILE_BYTES).
+			if (ops.stat) {
+				const fileStat = await ops.stat(absolutePath);
+				if (fileStat.size > SYMBOL_MAX_FILE_BYTES) {
+					const text = `[symbol "${name}" in ${path}: file is ${formatSize(fileStat.size)}, exceeds ${formatSize(SYMBOL_MAX_FILE_BYTES)} — use grep/ast_grep to locate the symbol, or read with offset/limit]`;
+					return {
+						content: [{ type: "text", text }] as (TextContent | ImageContent)[],
+						details: undefined,
+					};
+				}
+			}
 			const buffer = await ops.readFile(absolutePath);
 			const text = buffer.toString("utf-8");
 			const lines = text.split("\n");

@@ -1392,3 +1392,84 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(messages[0].role).toBe("assistant");
 	});
 });
+
+describe("agent loop rejection guard", () => {
+	// A throw on the synchronous path to the first await (here: convertToLlm) must
+	// NOT become an unhandled rejection (fatal under Node's default) and must NOT
+	// hang the for-await consumer. The loop's `.then` rejection handler converts
+	// it into a terminal failure turn ending in `agent_end`.
+	async function consumeWithGuard(stream: ReturnType<typeof agentLoop>): Promise<{
+		events: AgentEvent[];
+		unhandled: unknown[];
+	}> {
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => unhandled.push(reason);
+		process.on("unhandledRejection", onUnhandled);
+		const events: AgentEvent[] = [];
+		try {
+			// Race the drain against a timeout so a regression (stream never ends)
+			// fails loudly instead of hanging the whole suite.
+			const drain = (async () => {
+				for await (const event of stream) events.push(event);
+			})();
+			const timeout = new Promise<never>((_resolve, reject) => {
+				setTimeout(() => reject(new Error("stream did not terminate (hung)")), 1000);
+			});
+			await Promise.race([drain, timeout]);
+		} finally {
+			// Give any queued microtask rejection a tick to surface before asserting.
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			process.off("unhandledRejection", onUnhandled);
+		}
+		return { events, unhandled };
+	}
+
+	it("agentLoop: surfaces a terminal failure turn when convertToLlm throws (no unhandled rejection, no hang)", async () => {
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: () => {
+				throw new Error("boom in convertToLlm");
+			},
+		};
+
+		const stream = agentLoop([createUserMessage("hi")], context, config);
+		const { events, unhandled } = await consumeWithGuard(stream);
+
+		// (a) no unhandled rejection escaped the loop.
+		expect(unhandled).toEqual([]);
+		// (b) the consumer saw a terminal agent_end and the stream resolved.
+		const eventTypes = events.map((e) => e.type);
+		expect(eventTypes).toContain("agent_end");
+		const messages = await stream.result();
+		const last = messages[messages.length - 1] as AssistantMessage;
+		expect(last.role).toBe("assistant");
+		expect(last.stopReason).toBe("error");
+		// the error reason is carried through, not swallowed.
+		expect(last.errorMessage).toMatch(/boom in convertToLlm/);
+	});
+
+	it("agentLoopContinue: surfaces a terminal failure turn when convertToLlm throws", async () => {
+		const context: AgentContext = {
+			systemPrompt: "s",
+			messages: [createUserMessage("hi")],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: () => {
+				throw new Error("boom in continue");
+			},
+		};
+
+		const stream = agentLoopContinue(context, config);
+		const { events, unhandled } = await consumeWithGuard(stream);
+
+		expect(unhandled).toEqual([]);
+		expect(events.map((e) => e.type)).toContain("agent_end");
+		const messages = await stream.result();
+		const last = messages[messages.length - 1] as AssistantMessage;
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toMatch(/boom in continue/);
+	});
+});
