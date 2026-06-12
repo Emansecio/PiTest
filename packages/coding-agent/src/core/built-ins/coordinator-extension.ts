@@ -85,7 +85,12 @@ const taskSchema = Type.Object({
 	model: Type.Optional(
 		Type.String({
 			description:
-				"Model/pattern for the subagent: 'haiku', 'sonnet', 'opus', or 'provider/id' (optionally ':level', e.g. 'opus:high'). Defaults to the parent's model — pass a cheaper model for trivial fan-out.",
+				"Model for the subagent — CHOOSE BY THE SUB-TASK'S COMPLEXITY, picking the smallest model that can do the job well. " +
+				"Trivial/mechanical (search, read, list, extract, classify, summarize, repetitive same-shape probes) → 'haiku'. " +
+				"Focused analysis or simple, low-risk code → 'sonnet'. " +
+				"Hard reasoning, intricate or critical code, architecture/design decisions, tricky debugging, multi-source synthesis → OMIT this to inherit the parent's model (or 'opus'). " +
+				"When unsure, OMIT it — never trade quality for cost on a hard sub-task. " +
+				"Pattern: 'haiku' | 'sonnet' | 'opus' | 'provider/id' (optionally ':level', e.g. 'opus:high').",
 		}),
 	),
 	thinking_level: Type.Optional(
@@ -400,7 +405,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			description:
 				"Spawn a focused subagent to complete an isolated sub-task and return its final answer. " +
 				"Use this to delegate research, file exploration, or repetitive checks without polluting the main conversation. " +
-				"Pass `result_schema` for structured output, or `worktree: true` to run in an isolated git worktree.",
+				"Pass `result_schema` for structured output, or `worktree: true` to run in an isolated git worktree. " +
+				"Scale the subagent's `model` to the sub-task's complexity (cheap for trivial fan-out, inherit the parent's for hard reasoning) — see the `model` field.",
 			promptSnippet:
 				"Spawn a subagent to handle an isolated sub-task. Supports structured output via result_schema and isolated git worktrees via worktree.",
 			parameters: taskSchema,
