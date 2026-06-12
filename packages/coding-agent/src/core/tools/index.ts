@@ -205,39 +205,22 @@ import { type BashToolOptions, createBashTool, createBashToolDefinition } from "
 import { type CalcToolOptions, createCalcTool, createCalcToolDefinition } from "./calc.ts";
 import {
 	type ChromeDevtoolsToolOptions,
-	createChromeClickTool,
 	createChromeClickToolDefinition,
-	createChromeEvaluateTool,
 	createChromeEvaluateToolDefinition,
-	createChromeFillTool,
 	createChromeFillToolDefinition,
-	createChromeGetNetworkBodyTool,
 	createChromeGetNetworkBodyToolDefinition,
-	createChromeGetTextTool,
 	createChromeGetTextToolDefinition,
-	createChromeHoverTool,
 	createChromeHoverToolDefinition,
-	createChromeListPagesTool,
 	createChromeListPagesToolDefinition,
-	createChromeNavigateTool,
 	createChromeNavigateToolDefinition,
-	createChromePressKeyTool,
 	createChromePressKeyToolDefinition,
-	createChromeReadConsoleTool,
 	createChromeReadConsoleToolDefinition,
-	createChromeReadNetworkTool,
 	createChromeReadNetworkToolDefinition,
-	createChromeScreenshotTool,
 	createChromeScreenshotToolDefinition,
-	createChromeSelectOptionTool,
 	createChromeSelectOptionToolDefinition,
-	createChromeSelectPageTool,
 	createChromeSelectPageToolDefinition,
-	createChromeSnapshotTool,
 	createChromeSnapshotToolDefinition,
-	createChromeUploadFileTool,
 	createChromeUploadFileToolDefinition,
-	createChromeWaitForTool,
 	createChromeWaitForToolDefinition,
 } from "./chrome-devtools.ts";
 import { createDebugTool, createDebugToolDefinition, type DebugToolOptions } from "./debug.ts";
@@ -290,6 +273,7 @@ import {
 } from "./search-tool-bm25.ts";
 import { createSymbolTool, createSymbolToolDefinition, type SymbolToolOptions } from "./symbol.ts";
 import { createTodoTool, createTodoToolDefinition, type TodoToolOptions } from "./todo.ts";
+import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { createWebSearchTool, createWebSearchToolDefinition, type WebSearchToolOptions } from "./web-search.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
@@ -299,8 +283,13 @@ export type ToolDef = ToolDefinition<any, any>;
 type CodingGate = "always" | "native" | "webSearch" | "eval" | "hindsight" | "chromeDevtools" | "lsp" | "debug";
 
 interface ToolRegistryEntry {
-	/** Builds the executable tool. */
-	factory: (cwd: string, options?: any) => Tool;
+	/**
+	 * Builds the executable tool. Optional: every built-in factory is exactly
+	 * `wrapToolDefinition(definitionFactory(cwd, options))`, so an entry may omit
+	 * this and let `buildTool` derive it from `definitionFactory` (used by the
+	 * chrome_devtools_* tools to drop their pass-through factory wrappers).
+	 */
+	factory?: (cwd: string, options?: any) => Tool;
 	/** Builds the lazy tool definition. */
 	definitionFactory: (cwd: string, options?: any) => ToolDef;
 	/**
@@ -556,119 +545,102 @@ const TOOL_REGISTRY = {
 		coding: "debug",
 	},
 	chrome_devtools_list_pages: {
-		factory: createChromeListPagesTool,
 		definitionFactory: createChromeListPagesToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_select_page: {
-		factory: createChromeSelectPageTool,
 		definitionFactory: createChromeSelectPageToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_navigate: {
-		factory: createChromeNavigateTool,
 		definitionFactory: createChromeNavigateToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_evaluate: {
-		factory: createChromeEvaluateTool,
 		definitionFactory: createChromeEvaluateToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_screenshot: {
-		factory: createChromeScreenshotTool,
 		definitionFactory: createChromeScreenshotToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_read_console: {
-		factory: createChromeReadConsoleTool,
 		definitionFactory: createChromeReadConsoleToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_read_network: {
-		factory: createChromeReadNetworkTool,
 		definitionFactory: createChromeReadNetworkToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_click: {
-		factory: createChromeClickTool,
 		definitionFactory: createChromeClickToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_fill: {
-		factory: createChromeFillTool,
 		definitionFactory: createChromeFillToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_press_key: {
-		factory: createChromePressKeyTool,
 		definitionFactory: createChromePressKeyToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_get_text: {
-		factory: createChromeGetTextTool,
 		definitionFactory: createChromeGetTextToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_wait_for: {
-		factory: createChromeWaitForTool,
 		definitionFactory: createChromeWaitForToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_hover: {
-		factory: createChromeHoverTool,
 		definitionFactory: createChromeHoverToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_select_option: {
-		factory: createChromeSelectOptionTool,
 		definitionFactory: createChromeSelectOptionToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_upload_file: {
-		factory: createChromeUploadFileTool,
 		definitionFactory: createChromeUploadFileToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_snapshot: {
-		factory: createChromeSnapshotTool,
 		definitionFactory: createChromeSnapshotToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_get_network_body: {
-		factory: createChromeGetNetworkBodyTool,
 		definitionFactory: createChromeGetNetworkBodyToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: true,
@@ -703,6 +675,16 @@ export const allToolNames: Set<ToolName> = new Set(Object.keys(TOOL_REGISTRY) as
  * signature the generic builders below rely on.
  */
 const registry: Record<ToolName, ToolRegistryEntry> = TOOL_REGISTRY;
+
+/**
+ * Build a tool from a registry entry. Uses the entry's explicit `factory` when
+ * present; otherwise derives it from `definitionFactory` the same way every
+ * built-in factory does — `wrapToolDefinition(definitionFactory(cwd, options))`.
+ */
+function buildTool(entry: ToolRegistryEntry, cwd: string, options?: unknown): Tool {
+	if (entry.factory) return entry.factory(cwd, options);
+	return wrapToolDefinition(entry.definitionFactory(cwd, options));
+}
 
 /** Every tool name in canonical (registry insertion) order. */
 function toolNamesInOrder(): ToolName[] {
@@ -806,7 +788,7 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptions): Tool {
 	const entry = registry[toolName];
 	if (!entry) throw new Error(`Unknown tool name: ${toolName}`);
-	return entry.factory(cwd, options?.[entry.optionsKey]);
+	return buildTool(entry, cwd, options?.[entry.optionsKey]);
 }
 
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
@@ -820,7 +802,7 @@ export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
 	for (const name of toolNamesInOrder()) {
 		const entry = registry[name];
 		if (entry.coding === false || !codingGateOpen(entry.coding, options)) continue;
-		tools.push(entry.factory(cwd, codingToolOptions(name, options)));
+		tools.push(buildTool(entry, cwd, codingToolOptions(name, options)));
 	}
 	return tools;
 }

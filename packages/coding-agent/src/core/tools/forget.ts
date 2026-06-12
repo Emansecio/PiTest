@@ -12,7 +12,7 @@ import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentHindsightBank, type HindsightBank } from "../hindsight/index.ts";
-import { getTextOutput, str } from "./render-utils.ts";
+import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const forgetSchema = Type.Object(
@@ -157,12 +157,7 @@ export function createForgetToolDefinition(
 			text.setText(`${theme.fg("toolTitle", theme.bold("forget"))} ${theme.fg("accent", target)}`);
 			return text;
 		},
-		renderResult(result, _options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const output = getTextOutput(result, context.showImages).trim();
-			text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
-			return text;
-		},
+		renderResult: renderToolOutput,
 	};
 }
 

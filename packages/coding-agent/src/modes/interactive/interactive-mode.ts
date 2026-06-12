@@ -183,6 +183,11 @@ function mutedBorderRule(): DynamicBorder {
 	return new DynamicBorder((str) => theme.fg("borderMuted", str));
 }
 
+/** Normalize a caught value into a human-readable message string. */
+function errMsg(e: unknown): string {
+	return e instanceof Error ? e.message : String(e);
+}
+
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
 	setExpanded(expanded: boolean): void;
@@ -1269,11 +1274,7 @@ export class InteractiveMode {
 			commandContextActions: {
 				waitForIdle: () => this.session.agent.waitForIdle(),
 				newSession: async (options) => {
-					if (this.loadingAnimation) {
-						this.loadingAnimation.stop();
-						this.loadingAnimation = undefined;
-					}
-					this.statusContainer.clear();
+					this.stopWorkingLoader();
 					try {
 						const result = await this.runtimeHost.newSession(options);
 						if (!result.cancelled) {
@@ -1380,7 +1381,7 @@ export class InteractiveMode {
 	}
 
 	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
-		const message = error instanceof Error ? error.message : String(error);
+		const message = errMsg(error);
 		this.showError(`${prefix}: ${message}`);
 		stopThemeWatcher();
 		this.stop();
@@ -1450,7 +1451,7 @@ export class InteractiveMode {
 				if (matchesKey(data, shortcutStr as KeyId)) {
 					// Run handler async, don't block input
 					Promise.resolve(shortcut.handler(createContext())).catch((err) => {
-						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
+						this.showError(`Shortcut handler error: ${errMsg(err)}`);
 					});
 					return true;
 				}
@@ -2746,9 +2747,7 @@ export class InteractiveMode {
 				this.lastAssistantComponent = null;
 				this.turnAssistantComponents = [];
 				this.streamingAttached = false;
-				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(true);
-				}
+				this.setTerminalProgress(true);
 				this._cleanupRetryUI();
 				// Reuse the loader created at submit (gap-morto) so the elapsed clock
 				// starts at Enter without a reset/flicker; build one only if missing
@@ -2774,8 +2773,7 @@ export class InteractiveMode {
 				break;
 
 			case "thinking_level_changed":
-				this.footer.invalidate();
-				this.updateEditorBorderColor();
+				this.refreshModelIndicators();
 				break;
 
 			case "message_start":
@@ -2914,9 +2912,7 @@ export class InteractiveMode {
 			}
 
 			case "agent_end":
-				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(false);
-				}
+				this.setTerminalProgress(false);
 				if (this.loadingAnimation) {
 					this.loadingAnimation.stop();
 					this.loadingAnimation = undefined;
@@ -2945,9 +2941,7 @@ export class InteractiveMode {
 				break;
 
 			case "compaction_start": {
-				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(true);
-				}
+				this.setTerminalProgress(true);
 				// Keep editor active; submissions are queued during compaction.
 				this.autoCompactionEscapeHandler = this.defaultEditor.onEscape;
 				this.defaultEditor.onEscape = () => {
@@ -2971,9 +2965,7 @@ export class InteractiveMode {
 			}
 
 			case "compaction_end": {
-				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(false);
-				}
+				this.setTerminalProgress(false);
 				if (this.autoCompactionEscapeHandler) {
 					this.defaultEditor.onEscape = this.autoCompactionEscapeHandler;
 					this.autoCompactionEscapeHandler = undefined;
@@ -3020,9 +3012,7 @@ export class InteractiveMode {
 			}
 
 			case "verification": {
-				if (this.settingsManager.getShowTerminalProgress()) {
-					this.ui.terminal.setProgress(event.phase === "running");
-				}
+				this.setTerminalProgress(event.phase === "running");
 				if (event.phase === "running") {
 					this.showStatus(
 						event.attempt > 1
@@ -3315,8 +3305,7 @@ export class InteractiveMode {
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 
 		if (options.updateFooter) {
-			this.footer.invalidate();
-			this.updateEditorBorderColor();
+			this.refreshModelIndicators();
 		}
 
 		const grouped = this.settingsManager.getToolActivity() === "grouped";
@@ -3672,13 +3661,34 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	/** Forward the OSC 9;4 terminal progress state when the user has it enabled. */
+	private setTerminalProgress(on: boolean): void {
+		if (this.settingsManager.getShowTerminalProgress()) {
+			this.ui.terminal.setProgress(on);
+		}
+	}
+
+	/** Repaint the model/thinking signals: footer chips + editor border. */
+	private refreshModelIndicators(): void {
+		this.footer.invalidate();
+		this.updateEditorBorderColor();
+	}
+
+	/** Switch the active model and refresh all the model-dependent UI/state. */
+	private async applyModel(model: Model<any>): Promise<void> {
+		await this.session.setModel(model);
+		this.refreshModelIndicators();
+		this.showStatus(`Model: ${model.id}`);
+		void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
+		this.checkDaxnutsEasterEgg(model);
+	}
+
 	private cycleThinkingLevel(): void {
 		const newLevel = this.session.cycleThinkingLevel();
 		if (newLevel === undefined) {
 			this.showStatus("Current model does not support thinking");
 		} else {
-			this.footer.invalidate();
-			this.updateEditorBorderColor();
+			this.refreshModelIndicators();
 			this.showStatus(`Thinking level: ${newLevel}`);
 		}
 	}
@@ -3707,8 +3717,7 @@ export class InteractiveMode {
 				const next = roleChain[nextIdx];
 				await this.session.setModel(next.model);
 				this.session.setThinkingLevel(next.thinkingLevel);
-				this.footer.invalidate();
-				this.updateEditorBorderColor();
+				this.refreshModelIndicators();
 				const thinkingStr =
 					next.model.reasoning && next.thinkingLevel !== "off" ? ` (thinking: ${next.thinkingLevel})` : "";
 				this.showStatus(`Role ${this.activeRole}: ${next.model.name || next.model.id}${thinkingStr}`);
@@ -3721,15 +3730,14 @@ export class InteractiveMode {
 				const msg = this.session.scopedModels.length > 0 ? "Only one model in scope" : "Only one model available";
 				this.showStatus(msg);
 			} else {
-				this.footer.invalidate();
-				this.updateEditorBorderColor();
+				this.refreshModelIndicators();
 				const thinkingStr =
 					result.model.reasoning && result.thinkingLevel !== "off" ? ` (thinking: ${result.thinkingLevel})` : "";
 				this.showStatus(`Switched to ${result.model.name || result.model.id}${thinkingStr}`);
 				void this.maybeWarnAboutAnthropicSubscriptionAuth(result.model);
 			}
 		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
+			this.showError(errMsg(error));
 		}
 	}
 
@@ -3745,7 +3753,7 @@ export class InteractiveMode {
 		try {
 			await command.handler("", runner.createCommandContext());
 		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
+			this.showError(errMsg(error));
 		}
 	}
 
@@ -4044,11 +4052,7 @@ export class InteractiveMode {
 			this.session.clearQueue();
 			this.compactionQueuedMessages = queuedMessages;
 			this.updatePendingMessagesDisplay();
-			this.showError(
-				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
+			this.showError(`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${errMsg(error)}`);
 		};
 
 		try {
@@ -4290,8 +4294,7 @@ export class InteractiveMode {
 					},
 					onThinkingLevelChange: (level) => {
 						this.session.setThinkingLevel(level);
-						this.footer.invalidate();
-						this.updateEditorBorderColor();
+						this.refreshModelIndicators();
 					},
 					onThemeChange: (themeName) => {
 						const result = setTheme(themeName, true);
@@ -4414,11 +4417,10 @@ export class InteractiveMode {
 				try {
 					await this.session.setModel(resolution.model);
 					this.session.setThinkingLevel(resolution.thinkingLevel);
-					this.footer.invalidate();
-					this.updateEditorBorderColor();
+					this.refreshModelIndicators();
 					this.showStatus(`Role: ${searchTerm} -> ${resolution.model.provider}/${resolution.model.id}`);
 				} catch (error) {
-					this.showError(error instanceof Error ? error.message : String(error));
+					this.showError(errMsg(error));
 				}
 			} else {
 				this.showStatus(`Role: ${searchTerm} active (no model configured; using current)`);
@@ -4429,14 +4431,9 @@ export class InteractiveMode {
 		const model = await this.findExactModelMatch(searchTerm);
 		if (model) {
 			try {
-				await this.session.setModel(model);
-				this.footer.invalidate();
-				this.updateEditorBorderColor();
-				this.showStatus(`Model: ${model.id}`);
-				void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
-				this.checkDaxnutsEasterEgg(model);
+				await this.applyModel(model);
 			} catch (error) {
-				this.showError(error instanceof Error ? error.message : String(error));
+				this.showError(errMsg(error));
 			}
 			return;
 		}
@@ -4510,17 +4507,19 @@ export class InteractiveMode {
 				this.session.modelRegistry,
 				this.session.scopedModels,
 				async (model) => {
+					// Not folded into applyModel(): done() is interleaved between the
+					// indicator refresh and the status/warn/easter-egg tail, so the
+					// editor-restore ordering must stay exactly here.
 					try {
 						await this.session.setModel(model);
-						this.footer.invalidate();
-						this.updateEditorBorderColor();
+						this.refreshModelIndicators();
 						done();
 						this.showStatus(`Model: ${model.id}`);
 						void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
 						this.checkDaxnutsEasterEgg(model);
 					} catch (error) {
 						done();
-						this.showError(error instanceof Error ? error.message : String(error));
+						this.showError(errMsg(error));
 					}
 				},
 				() => {
@@ -4561,7 +4560,7 @@ export class InteractiveMode {
 						this.showStatus("Forked to new session");
 					} catch (error: unknown) {
 						done();
-						this.showError(error instanceof Error ? error.message : String(error));
+						this.showError(errMsg(error));
 					}
 				},
 				() => {
@@ -4679,7 +4678,7 @@ export class InteractiveMode {
 						this.showStatus("Navigated to selected point");
 						void this.flushCompactionQueue({ willRetry: false });
 					} catch (error) {
-						this.showError(error instanceof Error ? error.message : String(error));
+						this.showError(errMsg(error));
 					} finally {
 						if (summaryLoader) {
 							summaryLoader.stop();
@@ -4742,11 +4741,7 @@ export class InteractiveMode {
 		sessionPath: string,
 		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
 	): Promise<{ cancelled: boolean }> {
-		if (this.loadingAnimation) {
-			this.loadingAnimation.stop();
-			this.loadingAnimation = undefined;
-		}
-		this.statusContainer.clear();
+		this.stopWorkingLoader();
 		try {
 			const result = await this.runtimeHost.switchSession(sessionPath, {
 				withSession: options?.withSession,
@@ -4920,7 +4915,7 @@ export class InteractiveMode {
 								: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
 						this.showStatus(message);
 					} catch (error: unknown) {
-						this.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
+						this.showError(`Logout failed: ${errMsg(error)}`);
 					}
 				},
 				() => {
@@ -4961,7 +4956,7 @@ export class InteractiveMode {
 						await this.session.setModel(selectedModel);
 					} catch (error: unknown) {
 						selectedModel = undefined;
-						const errorMessage = error instanceof Error ? error.message : String(error);
+						const errorMessage = errMsg(error);
 						selectionError = `${actionLabel}, but selecting its default model failed: ${errorMessage}. Use /model to select a model.`;
 					}
 				}
@@ -4969,8 +4964,7 @@ export class InteractiveMode {
 		}
 
 		await this.updateAvailableProviderCount();
-		this.footer.invalidate();
-		this.updateEditorBorderColor();
+		this.refreshModelIndicators();
 		if (selectedModel) {
 			this.showStatus(`${actionLabel}. Selected ${selectedModel.id}. Credentials saved to ${getAuthPath()}`);
 			void this.maybeWarnAboutAnthropicSubscriptionAuth(selectedModel);
@@ -5021,7 +5015,7 @@ export class InteractiveMode {
 			await this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel);
 		} catch (error: unknown) {
 			restoreEditor();
-			const errorMsg = error instanceof Error ? error.message : String(error);
+			const errorMsg = errMsg(error);
 			if (errorMsg !== "Login cancelled") {
 				this.showError(`Failed to save API key for ${providerName}: ${errorMsg}`);
 			}
@@ -5142,7 +5136,7 @@ export class InteractiveMode {
 			await this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel);
 		} catch (error: unknown) {
 			restoreEditor();
-			const errorMsg = error instanceof Error ? error.message : String(error);
+			const errorMsg = errMsg(error);
 			if (errorMsg !== "Login cancelled") {
 				this.showError(`Failed to login to ${providerName}: ${errorMsg}`);
 			}
@@ -5229,7 +5223,7 @@ export class InteractiveMode {
 			this.showStatus("Reloaded keybindings, extensions, skills, prompts, themes");
 		} catch (error) {
 			dismissReloadBox(previousEditor as Component);
-			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.showError(`Reload failed: ${errMsg(error)}`);
 		}
 	}
 
@@ -5479,7 +5473,7 @@ export class InteractiveMode {
 				);
 				this.ui.requestRender();
 			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
+				const message = errMsg(err);
 				this.showError(`Failed to export hindsight: ${message}`);
 			}
 			return;
@@ -5620,11 +5614,7 @@ export class InteractiveMode {
 	}
 
 	private async handleClearCommand(): Promise<void> {
-		if (this.loadingAnimation) {
-			this.loadingAnimation.stop();
-			this.loadingAnimation = undefined;
-		}
-		this.statusContainer.clear();
+		this.stopWorkingLoader();
 		try {
 			const result = await this.runtimeHost.newSession();
 			if (result.cancelled) {
@@ -5792,11 +5782,7 @@ export class InteractiveMode {
 			return;
 		}
 
-		if (this.loadingAnimation) {
-			this.loadingAnimation.stop();
-			this.loadingAnimation = undefined;
-		}
-		this.statusContainer.clear();
+		this.stopWorkingLoader();
 
 		try {
 			await this.session.compact(customInstructions);
@@ -5807,9 +5793,7 @@ export class InteractiveMode {
 
 	stop(): void {
 		this.unregisterSignalHandlers();
-		if (this.settingsManager.getShowTerminalProgress()) {
-			this.ui.terminal.setProgress(false);
-		}
+		this.setTerminalProgress(false);
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;

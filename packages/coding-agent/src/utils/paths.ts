@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 
 /**
  * Resolve a path to its canonical (real) form, following symlinks.
@@ -54,4 +55,20 @@ export function getCwdRelativePath(filePath: string, cwd: string): string | unde
 export function formatPathRelativeToCwdOrAbsolute(filePath: string, cwd: string): string {
 	const absolutePath = resolveAgainstCwd(filePath, cwd);
 	return (getCwdRelativePath(absolutePath, cwd) ?? absolutePath).split(sep).join("/");
+}
+
+/**
+ * Expand a leading tilde to the user's home directory.
+ * - "~" alone becomes the home directory.
+ * - "~/x" or "~\x" becomes join(homedir(), rest) (both separators handled).
+ * - Anything else is returned unchanged.
+ * Mirrors expandTildePath in config.ts but is self-contained to avoid an
+ * import cycle (config.ts ← utils/paths.ts).
+ */
+export function expandTilde(input: string): string {
+	if (input === "~") return homedir();
+	if (input.startsWith("~/") || input.startsWith("~\\")) {
+		return join(homedir(), input.slice(2));
+	}
+	return input;
 }

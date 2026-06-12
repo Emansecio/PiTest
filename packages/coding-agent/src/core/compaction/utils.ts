@@ -4,6 +4,8 @@
 
 import type { AgentMessage } from "@pit/agent-core";
 import type { Message } from "@pit/ai";
+import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "../messages.ts";
+import type { SessionEntry } from "../session-manager.ts";
 
 // ============================================================================
 // File Operation Tracking
@@ -30,6 +32,47 @@ export function createFileOps(): FileOperations {
 		shellCmds: new Set(),
 		mcpCalls: new Set(),
 	};
+}
+
+/**
+ * Structured operation lists persisted in a summary entry's `details`. Both
+ * compaction (`CompactionDetails`) and branch summarization (`BranchSummaryDetails`)
+ * carry exactly these fields; compaction extends it with `fileDigests`. Older
+ * sessions may only have `readFiles`/`modifiedFiles`, so every array is read
+ * defensively (the merge below `Array.isArray`-guards each).
+ */
+export interface SummaryDetails {
+	readFiles: string[];
+	modifiedFiles: string[];
+	searches?: string[];
+	shellCmds?: string[];
+	mcpCalls?: string[];
+}
+
+/**
+ * Merge a previous summary entry's persisted `details` lists back into a live
+ * {@link FileOperations} accumulator (cumulative cross-compaction tracking).
+ * `readFiles`→read, `modifiedFiles`→edited, plus searches/shellCmds/mcpCalls.
+ * Every field is `Array.isArray`-guarded for sessions written before the field
+ * existed. Identical merge previously hand-inlined in compaction's
+ * `extractFileOperations` and branch summarization's `prepareBranchEntries`.
+ */
+export function mergeSummaryDetailsIntoFileOps(details: SummaryDetails, fileOps: FileOperations): void {
+	if (Array.isArray(details.readFiles)) {
+		for (const f of details.readFiles) fileOps.read.add(f);
+	}
+	if (Array.isArray(details.modifiedFiles)) {
+		for (const f of details.modifiedFiles) fileOps.edited.add(f);
+	}
+	if (Array.isArray(details.searches)) {
+		for (const s of details.searches) fileOps.searches.add(s);
+	}
+	if (Array.isArray(details.shellCmds)) {
+		for (const c of details.shellCmds) fileOps.shellCmds.add(c);
+	}
+	if (Array.isArray(details.mcpCalls)) {
+		for (const c of details.mcpCalls) fileOps.mcpCalls.add(c);
+	}
 }
 
 export type FileToolOp = "read" | "write" | "edit";
@@ -271,33 +314,76 @@ const TOOL_RESULT_MAX_CHARS = 2000;
 /** Fraction of the truncation budget kept from the head; the remainder is kept from the tail. */
 const TRUNCATE_HEAD_FRACTION = 0.65;
 
-/**
- * Truncate text to ~maxChars while preserving BOTH its head and its tail.
- *
- * Tool outputs frequently carry their most decisive signal at the end — a stack
- * trace's exception line, the last matches of a grep, a command's final status.
- * A head-only cut discards exactly that. Keeping a head+tail excerpt lets the
- * summarizer see the output's shape. This also mirrors `headTailExcerpt` in
- * compaction.ts (the pre-prune path): a large tool result the prune step already
- * shrank to head+tail is no longer re-truncated back to head-only here. Cuts snap
- * to line breaks for readability.
- */
-function truncateForSummary(text: string, maxChars: number): string {
-	if (text.length <= maxChars) return text;
+export interface HeadTailExcerptOptions {
+	/** Chars kept from the head before snapping to a line break. */
+	headBudget: number;
+	/** Chars kept from the tail before snapping to a line break. */
+	tailBudget: number;
+	/** A head/tail line-break snap is taken only when it lands within this many chars of the budget edge. */
+	snapWindow: number;
+	/**
+	 * Builds the elision marker placed between head and tail. Receives the count
+	 * of elided chars and the raw elided middle (so callers can report tokens
+	 * instead of chars). The returned string is inserted verbatim with a blank
+	 * line on each side.
+	 */
+	marker: (elidedChars: number, middle: string) => string;
+	/**
+	 * When set, attempt a structural JSON/NDJSON crush to this char budget BEFORE
+	 * the head+tail cut; if it produces output, that is returned instead. Omit to
+	 * skip the crush path entirely.
+	 */
+	crush?: (text: string) => string | undefined;
+}
 
-	const headBudget = Math.floor(maxChars * TRUNCATE_HEAD_FRACTION);
-	const tailBudget = maxChars - headBudget;
+/**
+ * Shrink text to a head + tail excerpt, eliding the middle, while preserving the
+ * output's *shape* for a summarizer — first/last grep matches, a file's header +
+ * footer, an error message + the tail of its stack. Tool outputs frequently carry
+ * their most decisive signal at the end (a stack trace's exception line, a
+ * command's final status); a head-only cut discards exactly that. Cuts snap to
+ * line breaks for readability.
+ *
+ * Returns `text` unchanged when it already fits within `headBudget + tailBudget`.
+ * Shared by the compaction pre-prune path (`headTailExcerpt`, token-count marker,
+ * crushJson enabled) and the serialization path (`truncateForSummary`,
+ * char-count marker, no crush) — they only differ in the option values, so the
+ * two excerpts stay byte-identical to their previous hand-rolled forms.
+ */
+export function headTailExcerpt(text: string, options: HeadTailExcerptOptions): string {
+	const { headBudget, tailBudget, snapWindow, marker, crush } = options;
+	if (text.length <= headBudget + tailBudget) return text;
+
+	if (crush) {
+		const crushed = crush(text);
+		if (crushed !== undefined) return crushed;
+	}
 
 	let head = text.slice(0, headBudget);
 	const headNl = head.lastIndexOf("\n");
-	if (headNl > headBudget - 200) head = head.slice(0, headNl);
+	if (headNl > headBudget - snapWindow) head = head.slice(0, headNl);
 
 	let tail = text.slice(text.length - tailBudget);
 	const tailNl = tail.indexOf("\n");
-	if (tailNl >= 0 && tailNl < 200) tail = tail.slice(tailNl + 1);
+	if (tailNl >= 0 && tailNl < snapWindow) tail = tail.slice(tailNl + 1);
 
-	const elided = text.length - head.length - tail.length;
-	return `${head}\n\n[... ${elided} characters truncated ...]\n\n${tail}`;
+	const middle = text.slice(head.length, text.length - tail.length);
+	return `${head}\n\n${marker(middle.length, middle)}\n\n${tail}`;
+}
+
+/**
+ * Truncate text to ~maxChars while preserving BOTH its head and its tail.
+ * Thin wrapper over {@link headTailExcerpt} using the serialization-path budgets
+ * (65/35 split, 200-char snap, char-count marker, no JSON crush).
+ */
+function truncateForSummary(text: string, maxChars: number): string {
+	const headBudget = Math.floor(maxChars * TRUNCATE_HEAD_FRACTION);
+	return headTailExcerpt(text, {
+		headBudget,
+		tailBudget: maxChars - headBudget,
+		snapWindow: 200,
+		marker: (elidedChars) => `[... ${elidedChars} characters truncated ...]`,
+	});
 }
 
 /**
@@ -473,3 +559,48 @@ function findPrecedingToolCall(parts: Array<{ dedupKey?: string; isToolResult?: 
 export const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured summary following the exact format specified.
 
 Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.`;
+
+// ============================================================================
+// Entry to Message Conversion
+// ============================================================================
+
+export interface GetMessageFromEntryOptions {
+	/** Skip `toolResult` messages — their context lives in the assistant tool call (branch summarization). */
+	skipToolResults?: boolean;
+	/** Return undefined for `compaction` entries instead of their summary message (compaction history pass). */
+	skipCompaction?: boolean;
+}
+
+/**
+ * Extract an {@link AgentMessage} from a session entry, or undefined for entries
+ * that don't contribute to LLM context.
+ *
+ * NOTE: for `type === "message"` this returns `entry.message` BY REFERENCE — the
+ * SAME object the live session context (buildSessionContext) pushes. Callers that
+ * mutate the returned message (e.g. pruneOldToolOutputs) before a fallible step
+ * must clone first; see `cloneToolResultMessagesForPrune`.
+ *
+ * Options select the two pre-existing variants: branch summarization skips
+ * `toolResult` entries (`skipToolResults`); compaction's history walk skips
+ * `compaction` entries (`skipCompaction`). With no options the behavior matches
+ * compaction's base `getMessageFromEntry`.
+ */
+export function getMessageFromEntry(
+	entry: SessionEntry,
+	options: GetMessageFromEntryOptions = {},
+): AgentMessage | undefined {
+	switch (entry.type) {
+		case "message":
+			if (options.skipToolResults && entry.message.role === "toolResult") return undefined;
+			return entry.message;
+		case "custom_message":
+			return createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp);
+		case "branch_summary":
+			return createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp);
+		case "compaction":
+			if (options.skipCompaction) return undefined;
+			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
+		default:
+			return undefined;
+	}
+}

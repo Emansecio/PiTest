@@ -10,7 +10,6 @@ import { getEnvApiKey } from "../env-api-keys.ts";
 import { calculateCost } from "../models.ts";
 import type {
 	AnthropicMessagesCompat,
-	Api,
 	AssistantMessage,
 	CacheRetention,
 	Context,
@@ -35,6 +34,7 @@ import { finalizeStreamingJson, parseJsonWithRepair } from "../utils/json-parse.
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
+import { createInitialAssistantMessage, sanitizeToolCallId, stripStreamingScratch } from "./openai-responses-shared.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, resolveCacheRetention } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -450,23 +450,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: model.api as Api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
+		const output: AssistantMessage = createInitialAssistantMessage(model);
 
 		try {
 			let client: Anthropic;
@@ -692,9 +676,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
+				stripStreamingScratch(block);
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
@@ -1018,7 +1000,7 @@ export function buildParams(
 
 // Normalize tool call IDs to match Anthropic's required pattern and length
 function normalizeToolCallId(id: string): string {
-	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+	return sanitizeToolCallId(id, 64);
 }
 
 // Prefix produced by harness for compaction summary user messages.

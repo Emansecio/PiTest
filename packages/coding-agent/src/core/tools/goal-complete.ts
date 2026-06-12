@@ -12,7 +12,7 @@ import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentGoalManager } from "../goal/goal-manager.ts";
 import { getCurrentVerificationProbe } from "../verification/verification.ts";
-import { getTextOutput } from "./render-utils.ts";
+import { renderToolOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const goalCompleteSchema = Type.Object(
@@ -95,12 +95,7 @@ export function createGoalCompleteToolDefinition(
 			text.setText(theme.fg("toolTitle", theme.bold("goal_complete")));
 			return text;
 		},
-		renderResult(result, _options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const output = getTextOutput(result, context.showImages).trim();
-			text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
-			return text;
-		},
+		renderResult: renderToolOutput,
 	};
 }
 

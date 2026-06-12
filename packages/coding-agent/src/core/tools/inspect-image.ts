@@ -17,7 +17,7 @@ import { type Static, Type } from "typebox";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import { getTextOutput, str } from "./render-utils.ts";
+import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const inspectImageSchema = Type.Object(
@@ -156,12 +156,7 @@ export function createInspectImageToolDefinition(
 			);
 			return text;
 		},
-		renderResult(result, _options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const output = getTextOutput(result, context.showImages).trim();
-			text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
-			return text;
-		},
+		renderResult: renderToolOutput,
 	};
 }
 

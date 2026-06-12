@@ -22,53 +22,9 @@
  */
 
 import { statSync } from "node:fs";
-import { resolve } from "node:path";
 import type { ExtensionAPI } from "../extensions/index.js";
-import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
-import { computeEditsDiff, type Edit } from "../tools/edit-diff.ts";
-
-/** Same path-alias extraction the read-guard uses (kept in sync with PATH_KEY_ALIASES). */
-function extractPathArg(input: Record<string, unknown>): string | undefined {
-	if (typeof input.path === "string") return input.path;
-	for (const alias of Object.keys(PATH_KEY_ALIASES)) {
-		const value = input[alias];
-		if (typeof value === "string") return value;
-	}
-	return undefined;
-}
-
-/**
- * Normalize the raw tool input into `Edit[]` ({oldText,newText}), accepting the
- * cross-harness aliases the tool will. Returns null for any shape we can't fully
- * parse (e.g. edits as a JSON string, a missing newText) so the gate fails open
- * rather than blocking on a format it didn't understand.
- */
-function extractEdits(input: Record<string, unknown>): Edit[] | null {
-	const toEdit = (oldRaw: unknown, newRaw: unknown): Edit | null =>
-		typeof oldRaw === "string" && typeof newRaw === "string" ? { oldText: oldRaw, newText: newRaw } : null;
-
-	const edits = input.edits;
-	if (Array.isArray(edits)) {
-		const out: Edit[] = [];
-		for (const e of edits) {
-			if (!e || typeof e !== "object") return null;
-			const rec = e as Record<string, unknown>;
-			const edit = toEdit(
-				rec.oldText ?? rec.old_string ?? rec.oldString ?? rec.old_str,
-				rec.newText ?? rec.new_string ?? rec.newString ?? rec.new_str,
-			);
-			if (!edit) return null;
-			out.push(edit);
-		}
-		return out.length > 0 ? out : null;
-	}
-	// Legacy flat single-edit shape.
-	const flat = toEdit(
-		input.oldText ?? input.old_string ?? input.oldString ?? input.old_str,
-		input.newText ?? input.new_string ?? input.newString ?? input.new_str,
-	);
-	return flat ? [flat] : null;
-}
+import { extractEdits, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
+import { computeEditsDiff } from "../tools/edit-diff.ts";
 
 export interface EditPreconditionOptions {
 	cwd: string;
@@ -77,11 +33,6 @@ export interface EditPreconditionOptions {
 export function createEditPreconditionExtension(options: EditPreconditionOptions) {
 	return (pi: ExtensionAPI) => {
 		const editedThisTurn = new Set<string>();
-
-		const resolvePath = (filePath: string): string => {
-			if (filePath.startsWith("/") || /^[a-zA-Z]:/.test(filePath)) return filePath;
-			return resolve(options.cwd, filePath);
-		};
 
 		pi.on("turn_start", () => {
 			editedThisTurn.clear();
@@ -95,7 +46,7 @@ export function createEditPreconditionExtension(options: EditPreconditionOptions
 			const path = extractPathArg(input);
 			if (path === undefined) return undefined;
 
-			const abs = resolvePath(path);
+			const abs = resolveToolPath(path, options.cwd);
 			// A later edit of an already-touched file may depend on the earlier one,
 			// which the pre-batch dry-run can't see — skip to avoid a false block.
 			if (editedThisTurn.has(abs)) return undefined;

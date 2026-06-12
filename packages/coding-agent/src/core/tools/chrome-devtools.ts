@@ -6,14 +6,12 @@
  */
 
 import * as path from "node:path";
-import type { AgentTool } from "@pit/agent-core";
 import type { ImageContent, TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { type Static, type TSchema, Type } from "typebox";
 import { getCurrentChromeDevtoolsManager } from "../chrome/chrome-devtools-manager.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getTextOutput } from "./render-utils.ts";
-import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export interface ChromeDevtoolsToolOptions {}
 
@@ -482,73 +480,9 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 	});
 }
 
-// Factory wrappers for the tool registry.
-export const createChromeListPagesTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof emptySchema> => wrapToolDefinition(createChromeListPagesDefinition());
-export const createChromeSelectPageTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof selectSchema> => wrapToolDefinition(createChromeSelectPageDefinition());
-export const createChromeNavigateTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof navigateSchema> => wrapToolDefinition(createChromeNavigateDefinition());
-export const createChromeEvaluateTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof evaluateSchema> => wrapToolDefinition(createChromeEvaluateDefinition());
-export const createChromeScreenshotTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof screenshotSchema> => wrapToolDefinition(createChromeScreenshotDefinition());
-export const createChromeReadConsoleTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof consoleSchema> => wrapToolDefinition(createChromeReadConsoleDefinition());
-export const createChromeReadNetworkTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof networkSchema> => wrapToolDefinition(createChromeReadNetworkDefinition());
-
-export const createChromeClickTool = (_cwd: string, _o?: ChromeDevtoolsToolOptions): AgentTool<typeof clickSchema> =>
-	wrapToolDefinition(createChromeClickDefinition());
-export const createChromeFillTool = (_cwd: string, _o?: ChromeDevtoolsToolOptions): AgentTool<typeof fillSchema> =>
-	wrapToolDefinition(createChromeFillDefinition());
-export const createChromePressKeyTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof pressKeySchema> => wrapToolDefinition(createChromePressKeyDefinition());
-export const createChromeGetTextTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof getTextSchema> => wrapToolDefinition(createChromeGetTextDefinition());
-export const createChromeWaitForTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof waitForSchema> => wrapToolDefinition(createChromeWaitForDefinition());
-
-export const createChromeHoverTool = (_cwd: string, _o?: ChromeDevtoolsToolOptions): AgentTool<typeof hoverSchema> =>
-	wrapToolDefinition(createChromeHoverDefinition());
-export const createChromeSelectOptionTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof selectOptionSchema> => wrapToolDefinition(createChromeSelectOptionDefinition());
-export const createChromeUploadFileTool = (
-	cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof uploadFileSchema> => wrapToolDefinition(createChromeUploadFileDefinition(cwd));
-export const createChromeSnapshotTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof snapshotSchema> => wrapToolDefinition(createChromeSnapshotDefinition());
-export const createChromeGetNetworkBodyTool = (
-	_cwd: string,
-	_o?: ChromeDevtoolsToolOptions,
-): AgentTool<typeof networkBodySchema> => wrapToolDefinition(createChromeGetNetworkBodyDefinition());
-
 // Definition-factory wrappers (registry expects (cwd, options) => ToolDef).
+// The registry derives each executable tool from these via wrapToolDefinition
+// (see buildTool in tools/index.ts), so no per-tool `create*Tool` wrapper is needed.
 export const createChromeListPagesToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
 	createChromeListPagesDefinition();
 export const createChromeSelectPageToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>

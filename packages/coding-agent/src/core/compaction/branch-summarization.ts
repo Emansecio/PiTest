@@ -7,22 +7,18 @@
 
 import type { AgentMessage } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
-import { completeSimple } from "@pit/ai";
-import {
-	convertToLlm,
-	createBranchSummaryMessage,
-	createCompactionSummaryMessage,
-	createCustomMessage,
-} from "../messages.ts";
+import { convertToLlm } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
-import { estimateTokens } from "./compaction.ts";
+import { estimateTokens, runSummarizationWithStatus } from "./compaction.ts";
 import {
 	computeOperationLists,
 	createFileOps,
 	extractFileOpsFromMessage,
 	type FileOperations,
 	formatFileOperations,
-	SUMMARIZATION_SYSTEM_PROMPT,
+	getMessageFromEntry,
+	mergeSummaryDetailsIntoFileOps,
+	type SummaryDetails,
 	serializeConversation,
 } from "./utils.ts";
 
@@ -41,14 +37,12 @@ export interface BranchSummaryResult {
 	error?: string;
 }
 
-/** Details stored in BranchSummaryEntry.details for the structured summary frame. */
-export interface BranchSummaryDetails {
-	readFiles: string[];
-	modifiedFiles: string[];
-	searches?: string[];
-	shellCmds?: string[];
-	mcpCalls?: string[];
-}
+/**
+ * Details stored in BranchSummaryEntry.details for the structured summary frame.
+ * Identical to the shared {@link SummaryDetails} (compaction extends the same
+ * type with file digests).
+ */
+export type BranchSummaryDetails = SummaryDetails;
 
 export type { FileOperations } from "./utils.ts";
 
@@ -147,35 +141,9 @@ export function collectEntriesForBranchSummary(
 // Entry to Message Conversion
 // ============================================================================
 
-/**
- * Extract AgentMessage from a session entry.
- * Similar to getMessageFromEntry in compaction.ts but also handles compaction entries.
- */
-function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
-	switch (entry.type) {
-		case "message":
-			// Skip tool results - context is in assistant's tool call
-			if (entry.message.role === "toolResult") return undefined;
-			return entry.message;
-
-		case "custom_message":
-			return createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp);
-
-		case "branch_summary":
-			return createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp);
-
-		case "compaction":
-			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp);
-
-		// These don't contribute to conversation content
-		case "thinking_level_change":
-		case "model_change":
-		case "custom":
-		case "label":
-		case "session_info":
-			return undefined;
-	}
-}
+// Entry → AgentMessage conversion now lives in ./utils.ts as the shared
+// getMessageFromEntry. The branch summarizer skips tool-result messages (their
+// context is in the assistant's tool call), selected via { skipToolResults: true }.
 
 /**
  * Prepare entries for summarization with token budget.
@@ -200,32 +168,15 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 	// Only extract from pi-generated summaries (fromHook !== true), not extension-generated ones
 	for (const entry of entries) {
 		if (entry.type === "branch_summary" && !entry.fromHook && entry.details) {
-			const details = entry.details as BranchSummaryDetails;
-			if (Array.isArray(details.readFiles)) {
-				for (const f of details.readFiles) fileOps.read.add(f);
-			}
-			if (Array.isArray(details.modifiedFiles)) {
-				// Modified files go into both edited and written for proper deduplication
-				for (const f of details.modifiedFiles) {
-					fileOps.edited.add(f);
-				}
-			}
-			if (Array.isArray(details.searches)) {
-				for (const s of details.searches) fileOps.searches.add(s);
-			}
-			if (Array.isArray(details.shellCmds)) {
-				for (const c of details.shellCmds) fileOps.shellCmds.add(c);
-			}
-			if (Array.isArray(details.mcpCalls)) {
-				for (const c of details.mcpCalls) fileOps.mcpCalls.add(c);
-			}
+			mergeSummaryDetailsIntoFileOps(entry.details as BranchSummaryDetails, fileOps);
 		}
 	}
 
 	// Second pass: walk from newest to oldest, adding messages until token budget
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
-		const message = getMessageFromEntry(entry);
+		// Skip tool results — their context is in the assistant's tool call.
+		const message = getMessageFromEntry(entry, { skipToolResults: true });
 		if (!message) continue;
 
 		// Extract file ops from assistant messages (tool calls)
@@ -329,14 +280,6 @@ export async function generateBranchSummary(
 	}
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${instructions}`;
 
-	const summarizationMessages = [
-		{
-			role: "user" as const,
-			content: [{ type: "text" as const, text: promptText }],
-			timestamp: Date.now(),
-		},
-	];
-
 	// Derive the output cap from reserveTokens (the space held back for the
 	// response), mirroring compaction's generateSummary instead of a fixed 2048
 	// that silently truncated large structured summaries. 0.5× because the branch
@@ -345,28 +288,29 @@ export async function generateBranchSummary(
 		Math.floor(0.5 * reserveTokens),
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	);
-	// Call LLM for summarization
-	const response = await completeSimple(
+	// Call LLM via the shared summarization runner (no streamFn / reasoning here),
+	// preserving the aborted-vs-error distinction this caller surfaces separately.
+	const outcome = await runSummarizationWithStatus(
 		model,
-		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ apiKey, headers, signal, maxTokens },
+		promptText,
+		maxTokens,
+		apiKey,
+		headers,
+		signal,
+		undefined,
+		undefined,
 	);
 
 	// Check if aborted or errored
-	if (response.stopReason === "aborted") {
+	if (outcome.status === "aborted") {
 		return { aborted: true };
 	}
-	if (response.stopReason === "error") {
-		return { error: response.errorMessage || "Summarization failed" };
+	if (outcome.status === "error") {
+		return { error: outcome.errorMessage || "Summarization failed" };
 	}
 
-	let summary = response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
-
 	// Prepend preamble to provide context about the branch summary
-	summary = BRANCH_SUMMARY_PREAMBLE + summary;
+	let summary = BRANCH_SUMMARY_PREAMBLE + outcome.text;
 
 	// Compute structured operation lists and append to summary (paths stripped of cwd)
 	const lists = computeOperationLists(fileOps, options.cwd);

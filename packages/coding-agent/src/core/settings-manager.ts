@@ -1,15 +1,46 @@
 import type { Transport } from "@pit/ai";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { expandTilde } from "../utils/paths.ts";
 import type { EngineeringStyle } from "./engineering-styles.ts";
 import type { HooksSettings } from "./hooks/types.ts";
 import type { McpSettings } from "./mcp/types.ts";
 import type { PermissionSettings } from "./permissions/types.ts";
 
 const SETTINGS_LOCK_SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Coerce `raw` to a finite, floored, strictly-positive integer; otherwise
+ * return `fallback`. Extracted from the local `positive` helper that
+ * `getFrequentFilesSettings` grew so the ~15 scattered numeric coercions
+ * across the resolvers can share one implementation.
+ */
+function posInt(raw: unknown, fallback: number): number {
+	if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return fallback;
+	return Math.floor(raw);
+}
+
+/**
+ * Coerce `raw` to a finite, floored, non-negative integer (zero allowed);
+ * otherwise return `fallback`. Twin of `posInt` for cooldown-style values
+ * where 0 is a legitimate setting.
+ */
+function nonNegInt(raw: unknown, fallback: number): number {
+	if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return fallback;
+	return Math.floor(raw);
+}
+
+/**
+ * Coerce `raw` to a finite, floored integer clamped to [lo, hi]; otherwise
+ * return `fallback`. Mirrors the `Math.max(lo, Math.min(hi, Math.floor(raw)))`
+ * idiom used by the padding/column setters and getters.
+ */
+function clampInt(raw: unknown, lo: number, hi: number, fallback: number): number {
+	if (typeof raw !== "number" || !Number.isFinite(raw)) return fallback;
+	return Math.max(lo, Math.min(hi, Math.floor(raw)));
+}
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -752,6 +783,34 @@ export class SettingsManager {
 		this.save();
 	}
 
+	/**
+	 * Set a nested global field under a section, lazy-initializing the parent
+	 * object, marking the section+key modified, and persisting. Twin of
+	 * `setTopLevel` that collapses the identical 4-line body shared by every
+	 * nested scalar setter (compaction/retry/terminal/images), so each section
+	 * key is named once instead of in both the assignment and the markModified
+	 * string.
+	 */
+	private setNested<P extends keyof Settings, V>(parent: P, key: string, value: V): void {
+		const section = (this.globalSettings[parent] ?? {}) as Record<string, unknown>;
+		section[key] = value;
+		this.globalSettings[parent] = section as Settings[P];
+		this.markModified(parent, key);
+		this.save();
+	}
+
+	/**
+	 * Set a top-level project field on a cloned project-settings snapshot, mark
+	 * it modified, and persist. Collapses the identical 4-line body shared by
+	 * every `setProjectXPaths` setter so the field key is named exactly once.
+	 */
+	private setProjectField<K extends keyof Settings>(field: K, value: Settings[K]): void {
+		const projectSettings = structuredClone(this.projectSettings);
+		projectSettings[field] = value;
+		this.markProjectModified(field);
+		this.saveProjectSettings(projectSettings);
+	}
+
 	/** Mark a project field as modified during this session */
 	private markProjectModified(field: keyof Settings, nestedKey?: string): void {
 		this.modifiedProjectFields.add(field);
@@ -884,13 +943,7 @@ export class SettingsManager {
 		if (!sessionDir) {
 			return sessionDir;
 		}
-		if (sessionDir === "~") {
-			return homedir();
-		}
-		if (sessionDir.startsWith("~/")) {
-			return join(homedir(), sessionDir.slice(2));
-		}
-		return sessionDir;
+		return expandTilde(sessionDir);
 	}
 
 	getDefaultProvider(): string | undefined {
@@ -962,12 +1015,7 @@ export class SettingsManager {
 	}
 
 	setCompactionEnabled(enabled: boolean): void {
-		if (!this.globalSettings.compaction) {
-			this.globalSettings.compaction = {};
-		}
-		this.globalSettings.compaction.enabled = enabled;
-		this.markModified("compaction", "enabled");
-		this.save();
+		this.setNested("compaction", "enabled", enabled);
 	}
 
 	getCompactionReserveTokens(): number {
@@ -1007,23 +1055,15 @@ export class SettingsManager {
 	 */
 	getFrequentFilesSettings(): ResolvedFrequentFilesSettings {
 		const ff = this.settings.frequentFiles;
-		const positive = (raw: unknown, fallback: number): number => {
-			if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return fallback;
-			return Math.floor(raw);
-		};
-		const nonNegative = (raw: unknown, fallback: number): number => {
-			if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return fallback;
-			return Math.floor(raw);
-		};
 		return {
 			// Default ON: anchors the model to recently-touched files, cutting redundant
 			// searches/reads. Section is only emitted when there are entries clearing
 			// `minHits`, so the prompt cost stays zero in fresh sessions. Opt out by
 			// setting `frequentFiles.enabled: false` in settings.json.
 			enabled: ff?.enabled !== false,
-			topN: positive(ff?.topN, 10),
-			minHits: nonNegative(ff?.minHits, 2),
-			maxFiles: positive(ff?.maxFiles, 256),
+			topN: posInt(ff?.topN, 10),
+			minHits: nonNegInt(ff?.minHits, 2),
+			maxFiles: posInt(ff?.maxFiles, 256),
 		};
 	}
 
@@ -1056,26 +1096,18 @@ export class SettingsManager {
 	 */
 	getToolFeedbackSettings(): ResolvedToolFeedbackSettings {
 		const tf = this.settings.toolFeedback;
-		const rawThreshold = tf?.doomLoopReminder?.threshold;
-		const threshold = typeof rawThreshold === "number" && rawThreshold > 0 ? Math.floor(rawThreshold) : 2;
-		const rawCooldown = tf?.doomLoopReminder?.cooldownMs;
-		const cooldownMs = typeof rawCooldown === "number" && rawCooldown >= 0 ? Math.floor(rawCooldown) : 30000;
+		const threshold = posInt(tf?.doomLoopReminder?.threshold, 2);
+		const cooldownMs = nonNegInt(tf?.doomLoopReminder?.cooldownMs, 30000);
 		const sr = tf?.stagnationReminder;
-		const rawSoft = sr?.softThreshold;
-		const softThreshold = typeof rawSoft === "number" && rawSoft > 0 ? Math.floor(rawSoft) : 12;
-		const rawHard = sr?.hardThreshold;
-		const hardCandidate = typeof rawHard === "number" && rawHard > 0 ? Math.floor(rawHard) : 25;
+		const softThreshold = posInt(sr?.softThreshold, 12);
+		const hardCandidate = posInt(sr?.hardThreshold, 25);
 		// Hard ceiling must sit at or above the soft floor; otherwise the pause
 		// would pre-empt the reminder and the soft tier could never fire.
 		const hardThreshold = Math.max(hardCandidate, softThreshold);
-		const rawStagCooldown = sr?.cooldownMs;
-		const stagnationCooldownMs =
-			typeof rawStagCooldown === "number" && rawStagCooldown >= 0 ? Math.floor(rawStagCooldown) : 30000;
+		const stagnationCooldownMs = nonNegInt(sr?.cooldownMs, 30000);
 		const ce = tf?.crossErrorReminder;
-		const rawCeThreshold = ce?.threshold;
-		const ceThreshold = typeof rawCeThreshold === "number" && rawCeThreshold > 0 ? Math.floor(rawCeThreshold) : 3;
-		const rawCeCooldown = ce?.cooldownMs;
-		const ceCooldownMs = typeof rawCeCooldown === "number" && rawCeCooldown >= 0 ? Math.floor(rawCeCooldown) : 30000;
+		const ceThreshold = posInt(ce?.threshold, 3);
+		const ceCooldownMs = nonNegInt(ce?.cooldownMs, 30000);
 		return {
 			errorReflection: { enabled: tf?.errorReflection?.enabled === true },
 			doomLoopReminder: {
@@ -1106,12 +1138,7 @@ export class SettingsManager {
 	}
 
 	setRetryEnabled(enabled: boolean): void {
-		if (!this.globalSettings.retry) {
-			this.globalSettings.retry = {};
-		}
-		this.globalSettings.retry.enabled = enabled;
-		this.markModified("retry", "enabled");
-		this.save();
+		this.setNested("retry", "enabled", enabled);
 	}
 
 	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
@@ -1214,10 +1241,7 @@ export class SettingsManager {
 	}
 
 	setProjectPackages(packages: PackageSource[]): void {
-		const projectSettings = structuredClone(this.projectSettings);
-		projectSettings.packages = packages;
-		this.markProjectModified("packages");
-		this.saveProjectSettings(projectSettings);
+		this.setProjectField("packages", packages);
 	}
 
 	getExtensionPaths(): string[] {
@@ -1229,10 +1253,7 @@ export class SettingsManager {
 	}
 
 	setProjectExtensionPaths(paths: string[]): void {
-		const projectSettings = structuredClone(this.projectSettings);
-		projectSettings.extensions = paths;
-		this.markProjectModified("extensions");
-		this.saveProjectSettings(projectSettings);
+		this.setProjectField("extensions", paths);
 	}
 
 	getSkillPaths(): string[] {
@@ -1244,10 +1265,7 @@ export class SettingsManager {
 	}
 
 	setProjectSkillPaths(paths: string[]): void {
-		const projectSettings = structuredClone(this.projectSettings);
-		projectSettings.skills = paths;
-		this.markProjectModified("skills");
-		this.saveProjectSettings(projectSettings);
+		this.setProjectField("skills", paths);
 	}
 
 	getPromptTemplatePaths(): string[] {
@@ -1259,10 +1277,7 @@ export class SettingsManager {
 	}
 
 	setProjectPromptTemplatePaths(paths: string[]): void {
-		const projectSettings = structuredClone(this.projectSettings);
-		projectSettings.prompts = paths;
-		this.markProjectModified("prompts");
-		this.saveProjectSettings(projectSettings);
+		this.setProjectField("prompts", paths);
 	}
 
 	getThemePaths(): string[] {
@@ -1274,10 +1289,7 @@ export class SettingsManager {
 	}
 
 	setProjectThemePaths(paths: string[]): void {
-		const projectSettings = structuredClone(this.projectSettings);
-		projectSettings.themes = paths;
-		this.markProjectModified("themes");
-		this.saveProjectSettings(projectSettings);
+		this.setProjectField("themes", paths);
 	}
 
 	getEnableSkillCommands(): boolean {
@@ -1297,29 +1309,15 @@ export class SettingsManager {
 	}
 
 	setShowImages(show: boolean): void {
-		if (!this.globalSettings.terminal) {
-			this.globalSettings.terminal = {};
-		}
-		this.globalSettings.terminal.showImages = show;
-		this.markModified("terminal", "showImages");
-		this.save();
+		this.setNested("terminal", "showImages", show);
 	}
 
 	getImageWidthCells(): number {
-		const width = this.settings.terminal?.imageWidthCells;
-		if (typeof width !== "number" || !Number.isFinite(width)) {
-			return 60;
-		}
-		return Math.max(1, Math.floor(width));
+		return clampInt(this.settings.terminal?.imageWidthCells, 1, Number.POSITIVE_INFINITY, 60);
 	}
 
 	setImageWidthCells(width: number): void {
-		if (!this.globalSettings.terminal) {
-			this.globalSettings.terminal = {};
-		}
-		this.globalSettings.terminal.imageWidthCells = Math.max(1, Math.floor(width));
-		this.markModified("terminal", "imageWidthCells");
-		this.save();
+		this.setNested("terminal", "imageWidthCells", Math.max(1, Math.floor(width)));
 	}
 
 	getClearOnShrink(): boolean {
@@ -1331,12 +1329,7 @@ export class SettingsManager {
 	}
 
 	setClearOnShrink(enabled: boolean): void {
-		if (!this.globalSettings.terminal) {
-			this.globalSettings.terminal = {};
-		}
-		this.globalSettings.terminal.clearOnShrink = enabled;
-		this.markModified("terminal", "clearOnShrink");
-		this.save();
+		this.setNested("terminal", "clearOnShrink", enabled);
 	}
 
 	getShowTerminalProgress(): boolean {
@@ -1344,12 +1337,7 @@ export class SettingsManager {
 	}
 
 	setShowTerminalProgress(enabled: boolean): void {
-		if (!this.globalSettings.terminal) {
-			this.globalSettings.terminal = {};
-		}
-		this.globalSettings.terminal.showTerminalProgress = enabled;
-		this.markModified("terminal", "showTerminalProgress");
-		this.save();
+		this.setNested("terminal", "showTerminalProgress", enabled);
 	}
 
 	getImageAutoResize(): boolean {
@@ -1357,12 +1345,7 @@ export class SettingsManager {
 	}
 
 	setImageAutoResize(enabled: boolean): void {
-		if (!this.globalSettings.images) {
-			this.globalSettings.images = {};
-		}
-		this.globalSettings.images.autoResize = enabled;
-		this.markModified("images", "autoResize");
-		this.save();
+		this.setNested("images", "autoResize", enabled);
 	}
 
 	getBlockImages(): boolean {
@@ -1370,12 +1353,7 @@ export class SettingsManager {
 	}
 
 	setBlockImages(blocked: boolean): void {
-		if (!this.globalSettings.images) {
-			this.globalSettings.images = {};
-		}
-		this.globalSettings.images.blockImages = blocked;
-		this.markModified("images", "blockImages");
-		this.save();
+		this.setNested("images", "blockImages", blocked);
 	}
 
 	getEnabledModels(): string[] | undefined {
@@ -1459,11 +1437,7 @@ export class SettingsManager {
 	 * prose measure); clamped to a sane band so a typo can't make prose unreadable.
 	 */
 	getAssistantReadingColumns(): number {
-		const raw = this.settings.assistantReadingColumns;
-		if (typeof raw !== "number" || !Number.isFinite(raw)) {
-			return 88;
-		}
-		return Math.max(40, Math.min(200, Math.floor(raw)));
+		return clampInt(this.settings.assistantReadingColumns, 40, 200, 88);
 	}
 
 	setAssistantReadingColumns(columns: number): void {

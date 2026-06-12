@@ -202,24 +202,11 @@ const CUBE_VALUES = [0, 95, 135, 175, 215, 255];
 // Grayscale ramp values (indices 232-255, 24 grays from 8 to 238)
 const GRAY_VALUES = Array.from({ length: 24 }, (_, i) => 8 + i * 10);
 
-function findClosestCubeIndex(value: number): number {
+function closestIndex(value: number, table: number[]): number {
 	let minDist = Infinity;
 	let minIdx = 0;
-	for (let i = 0; i < CUBE_VALUES.length; i++) {
-		const dist = Math.abs(value - CUBE_VALUES[i]);
-		if (dist < minDist) {
-			minDist = dist;
-			minIdx = i;
-		}
-	}
-	return minIdx;
-}
-
-function findClosestGrayIndex(gray: number): number {
-	let minDist = Infinity;
-	let minIdx = 0;
-	for (let i = 0; i < GRAY_VALUES.length; i++) {
-		const dist = Math.abs(gray - GRAY_VALUES[i]);
+	for (let i = 0; i < table.length; i++) {
+		const dist = Math.abs(value - table[i]);
 		if (dist < minDist) {
 			minDist = dist;
 			minIdx = i;
@@ -238,9 +225,9 @@ function colorDistance(r1: number, g1: number, b1: number, r2: number, g2: numbe
 
 function rgbTo256(r: number, g: number, b: number): number {
 	// Find closest color in the 6x6x6 cube
-	const rIdx = findClosestCubeIndex(r);
-	const gIdx = findClosestCubeIndex(g);
-	const bIdx = findClosestCubeIndex(b);
+	const rIdx = closestIndex(r, CUBE_VALUES);
+	const gIdx = closestIndex(g, CUBE_VALUES);
+	const bIdx = closestIndex(b, CUBE_VALUES);
 	const cubeR = CUBE_VALUES[rIdx];
 	const cubeG = CUBE_VALUES[gIdx];
 	const cubeB = CUBE_VALUES[bIdx];
@@ -249,7 +236,7 @@ function rgbTo256(r: number, g: number, b: number): number {
 
 	// Find closest grayscale
 	const gray = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-	const grayIdx = findClosestGrayIndex(gray);
+	const grayIdx = closestIndex(gray, GRAY_VALUES);
 	const grayValue = GRAY_VALUES[grayIdx];
 	const grayIndex = 232 + grayIdx;
 	const grayDist = colorDistance(r, g, b, grayValue, grayValue, grayValue);
@@ -429,23 +416,11 @@ export class Theme {
 	}
 
 	getThinkingBorderColor(level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"): (str: string) => string {
-		// Map thinking levels to dedicated theme colors
-		switch (level) {
-			case "off":
-				return (str: string) => this.fg("thinkingOff", str);
-			case "minimal":
-				return (str: string) => this.fg("thinkingMinimal", str);
-			case "low":
-				return (str: string) => this.fg("thinkingLow", str);
-			case "medium":
-				return (str: string) => this.fg("thinkingMedium", str);
-			case "high":
-				return (str: string) => this.fg("thinkingHigh", str);
-			case "xhigh":
-				return (str: string) => this.fg("thinkingXhigh", str);
-			default:
-				return (str: string) => this.fg("thinkingOff", str);
-		}
+		// Map thinking levels to dedicated theme colors. The level names map 1:1 to
+		// `thinking<Cap(level)>` ThemeColor keys; fall back to `thinkingOff`.
+		const key = `thinking${level[0].toUpperCase()}${level.slice(1)}` as ThemeColor;
+		const color: ThemeColor = this.fgColors.has(key) ? key : "thinkingOff";
+		return (str: string) => this.fg(color, str);
 	}
 
 	/**

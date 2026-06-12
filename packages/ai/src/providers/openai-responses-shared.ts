@@ -38,6 +38,53 @@ import { transformMessages } from "./transform-messages.ts";
 // Utilities
 // =============================================================================
 
+/** Fresh zeroed {@link Usage} (all token counts and costs at 0). */
+export function zeroUsage(): Usage {
+	return {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+/**
+ * Build the initial assistant-message skeleton shared by every streaming
+ * provider: empty content, zeroed usage, `stop` stop reason, current timestamp.
+ * Pass {@link api} to override the API tag (defaults to `model.api`); providers
+ * that hardcode a fixed api literal pass it explicitly.
+ */
+export function createInitialAssistantMessage<TApi extends Api>(
+	model: Model<TApi>,
+	api: Api = model.api,
+): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api,
+		provider: model.provider,
+		model: model.id,
+		usage: zeroUsage(),
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+/**
+ * Strip transitory streaming scratch fields from a finalized content block so
+ * replay never carries parser bookkeeping. Deletes the full set used across
+ * providers (`index`, `partialJson`, `partialArgs`, `streamIndex`); absent
+ * fields are no-ops, so this is safe to call on any block shape.
+ */
+export function stripStreamingScratch(block: object): void {
+	delete (block as { index?: number }).index;
+	delete (block as { partialJson?: string }).partialJson;
+	delete (block as { partialArgs?: string }).partialArgs;
+	delete (block as { streamIndex?: number }).streamIndex;
+}
+
 // Memoize parsed reasoning items per thinking block. The signature JSON is
 // immutable once produced, so we can reuse the parsed object across requests
 // instead of re-parsing every reasoning block on every turn. Keyed by the block
@@ -91,6 +138,36 @@ export function getServiceTierCostMultiplier(
 		default:
 			return 1;
 	}
+}
+
+/**
+ * Scale an already-computed {@link Usage} cost by the response's service-tier
+ * multiplier in place. No-op when the multiplier is 1 (the common case).
+ */
+export function applyServiceTierPricing(
+	usage: Usage,
+	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+	model: Pick<Model<any>, "id">,
+): void {
+	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
+	if (multiplier === 1) return;
+
+	usage.cost.input *= multiplier;
+	usage.cost.output *= multiplier;
+	usage.cost.cacheRead *= multiplier;
+	usage.cost.cacheWrite *= multiplier;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+}
+
+/**
+ * Sanitize a tool-call id to the provider-required charset and length: replace
+ * any char outside `[a-zA-Z0-9_-]` with `_`, then truncate to {@link maxLen}.
+ * With `stripTrailingUnderscores`, also drops trailing `_` left after truncation.
+ */
+export function sanitizeToolCallId(id: string, maxLen: number, opts?: { stripTrailingUnderscores?: boolean }): string {
+	const sanitized = id.replace(/[^a-zA-Z0-9_-]/g, "_");
+	const truncated = sanitized.length > maxLen ? sanitized.slice(0, maxLen) : sanitized;
+	return opts?.stripTrailingUnderscores ? truncated.replace(/_+$/, "") : truncated;
 }
 
 function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): string {
@@ -151,11 +228,7 @@ export function convertResponsesMessages<TApi extends Api>(
 ): ResponseInput {
 	const messages: ResponseInput = [];
 
-	const normalizeIdPart = (part: string): string => {
-		const sanitized = part.replace(/[^a-zA-Z0-9_-]/g, "_");
-		const normalized = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
-		return normalized.replace(/_+$/, "");
-	};
+	const normalizeIdPart = (part: string): string => sanitizeToolCallId(part, 64, { stripTrailingUnderscores: true });
 
 	const buildForeignResponsesItemId = (itemId: string): string => {
 		const normalized = `fc_${shortHash(itemId)}`;

@@ -15,6 +15,8 @@
  * lets us add new aliases without touching the agent loop.
  */
 
+import { resolve as nodeResolve } from "node:path";
+
 /** Map of alias -> canonical key used by `applyKeyAliases`. */
 export type KeyAliasMap = Record<string, string>;
 
@@ -124,4 +126,126 @@ export const EDIT_KEY_ALIASES: KeyAliasMap = {
 export function prepareWithPathAliases<T>(input: unknown): T {
 	if (!isPlainRecord(input)) return input as T;
 	return applyKeyAliases(input, PATH_KEY_ALIASES) as T;
+}
+
+/**
+ * Read a canonical field off a record, falling back to any alias that maps to
+ * it — the centralized form of the `oldText ?? old_string ?? oldString ?? old_str`
+ * chains the call sites used to hardcode. Semantics match that `??` chain exactly:
+ * canonical first, then aliases in declaration order; the FIRST key with a
+ * non-nullish value wins (a present-but-non-string value stops the chain, same as
+ * `??`, and is reported as undefined). Returns the resolved string, or undefined
+ * when the winning value is absent/nullish/non-string.
+ */
+function coalesceAliasedString(
+	rec: Record<string, unknown>,
+	canonical: string,
+	aliases: KeyAliasMap,
+): string | undefined {
+	const pick = (value: unknown): { hit: true; value: string | undefined } | { hit: false } => {
+		// `?? ` only advances past null/undefined; a non-nullish value (even a number)
+		// terminates the chain. Mirror that so a non-string here yields undefined
+		// rather than silently falling through to an alias.
+		if (value === undefined || value === null) return { hit: false };
+		return { hit: true, value: typeof value === "string" ? value : undefined };
+	};
+	const direct = pick(rec[canonical]);
+	if (direct.hit) return direct.value;
+	for (const [alias, target] of Object.entries(aliases)) {
+		if (target !== canonical) continue;
+		const candidate = pick(rec[alias]);
+		if (candidate.hit) return candidate.value;
+	}
+	return undefined;
+}
+
+/**
+ * Extract a path argument from raw tool input, accepting every alias in
+ * PATH_KEY_ALIASES (path / file_path / filepath / filename / file). Returns
+ * undefined when no recognised key holds a string. Used by the built-in guards
+ * that run on `tool_call` (BEFORE prepareArguments), so they must agree with the
+ * tool on which key wins — hence the shared single source of truth here.
+ */
+export function extractPathArg(input: Record<string, unknown>): string | undefined {
+	return coalesceAliasedString(input, "path", PATH_KEY_ALIASES);
+}
+
+/**
+ * Resolve a tool path argument against `cwd`, treating POSIX-absolute (`/…`) and
+ * Windows drive-prefixed (`C:…`) paths as already absolute and everything else as
+ * cwd-relative. Mirrors the per-guard `resolvePath` closures verbatim.
+ *
+ * NOTE: intentionally NOT `resolveToCwd` from path-utils — that helper additionally
+ * expands `~`/`@`, short-circuits `scheme://` URLs, and uses node's `isAbsolute`
+ * (which treats `C:foo` as relative). The guards predate that and must keep their
+ * exact resolution to stay behaviourally identical; routing them through
+ * `resolveToCwd` would change which inputs count as absolute.
+ */
+export function resolveToolPath(filePath: string, cwd: string): string {
+	if (filePath.startsWith("/") || /^[a-zA-Z]:/.test(filePath)) return filePath;
+	return nodeResolve(cwd, filePath);
+}
+
+/** {oldText,newText} edit block in canonical form. */
+export interface ExtractedEdit {
+	oldText: string;
+	newText: string;
+}
+
+/**
+ * Normalize raw tool input into canonical `{oldText,newText}[]`, accepting the
+ * cross-harness aliases in EDIT_KEY_ALIASES (old_string/oldString/old_str and the
+ * new_* variants). Supports both the `edits[]` array shape and the legacy flat
+ * single-edit shape. Returns null for any shape we can't fully parse (edits as a
+ * JSON string, a non-object array element, a missing oldText/newText) so callers
+ * fail open rather than acting on a partially-understood payload.
+ */
+export function extractEdits(input: Record<string, unknown>): ExtractedEdit[] | null {
+	const toEdit = (rec: Record<string, unknown>): ExtractedEdit | null => {
+		const oldText = coalesceAliasedString(rec, "oldText", EDIT_KEY_ALIASES);
+		const newText = coalesceAliasedString(rec, "newText", EDIT_KEY_ALIASES);
+		return oldText !== undefined && newText !== undefined ? { oldText, newText } : null;
+	};
+
+	const edits = input.edits;
+	if (Array.isArray(edits)) {
+		const out: ExtractedEdit[] = [];
+		for (const e of edits) {
+			if (!e || typeof e !== "object") return null;
+			const edit = toEdit(e as Record<string, unknown>);
+			if (!edit) return null;
+			out.push(edit);
+		}
+		return out.length > 0 ? out : null;
+	}
+	// Legacy flat single-edit shape.
+	const flat = toEdit(input);
+	return flat ? [flat] : null;
+}
+
+/**
+ * Pull every non-empty `oldText` an `edit` call will try to match, accepting the
+ * EDIT_KEY_ALIASES the tool normalizes later. Deliberately MORE lenient than
+ * `extractEdits`: it does not require a matching `newText`, and it skips (rather
+ * than rejects) non-object `edits[]` elements — the read-guard uses this for a
+ * verbatim-match safety gate that should still fire on a `{oldText}`-only payload
+ * where `extractEdits` would return null and drop the gate. Returns [] for shapes
+ * with no readable oldText, which makes that gate fail open.
+ */
+export function extractEditOldTexts(input: Record<string, unknown>): string[] {
+	const out: string[] = [];
+	const pushIf = (v: string | undefined) => {
+		if (v !== undefined && v.length > 0) out.push(v);
+	};
+	const edits = input.edits;
+	if (Array.isArray(edits)) {
+		for (const e of edits) {
+			if (e && typeof e === "object") {
+				pushIf(coalesceAliasedString(e as Record<string, unknown>, "oldText", EDIT_KEY_ALIASES));
+			}
+		}
+	}
+	// Legacy flat single-edit shape.
+	pushIf(coalesceAliasedString(input, "oldText", EDIT_KEY_ALIASES));
+	return out;
 }

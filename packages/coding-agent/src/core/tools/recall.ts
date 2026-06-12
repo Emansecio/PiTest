@@ -13,7 +13,7 @@ import {
 	type HindsightKind,
 	type HindsightSearchResult,
 } from "../hindsight/index.ts";
-import { getTextOutput, str } from "./render-utils.ts";
+import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const BODY_TRUNCATE = 400;
@@ -124,12 +124,7 @@ export function createRecallToolDefinition(
 			text.setText(`${theme.fg("toolTitle", theme.bold("recall"))} ${theme.fg("accent", query)}`);
 			return text;
 		},
-		renderResult(result, _options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const output = getTextOutput(result, context.showImages).trim();
-			text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
-			return text;
-		},
+		renderResult: renderToolOutput,
 	};
 }
 

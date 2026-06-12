@@ -9,7 +9,7 @@ import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import { getTextOutput, str } from "./render-utils.ts";
+import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const recallToolOutputSchema = Type.Object(
@@ -64,12 +64,7 @@ export function createRecallToolOutputDefinition(
 			text.setText(`${theme.fg("toolTitle", theme.bold("recall_tool_output"))} ${display}`);
 			return text;
 		},
-		renderResult(result, _options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const output = getTextOutput(result, context.showImages).trim();
-			text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
-			return text;
-		},
+		renderResult: renderToolOutput,
 	};
 }
 

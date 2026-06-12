@@ -434,12 +434,21 @@ function collectAncestorAgentsSkillDirs(startDir: string): string[] {
 	return skillDirs;
 }
 
-function collectAutoPromptEntries(dir: string): string[] {
+/**
+ * Collect flat (non-recursive, single-level) auto-discovered entries from a
+ * directory, filtered by `FILE_PATTERNS[type]`. Collapses the byte-identical
+ * `collectAutoPromptEntries`/`collectAutoThemeEntries` (which differed only in
+ * the `.md` vs `.json` extension test). Used for prompts and themes, whose
+ * auto-discovery is a shallow scan with no subdirectory recursion.
+ */
+function collectAutoFlatEntries(dir: string, type: "prompts" | "themes"): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
 
 	const ig = ignore();
 	addIgnoreRules(ig, dir, dir);
+
+	const filePattern = FILE_PATTERNS[type];
 
 	try {
 		const dirEntries = readdirSync(dir, { withFileTypes: true });
@@ -460,44 +469,7 @@ function collectAutoPromptEntries(dir: string): string[] {
 			const relPath = toPosixPath(relative(dir, fullPath));
 			if (ig.ignores(relPath)) continue;
 
-			if (isFile && entry.name.endsWith(".md")) {
-				entries.push(fullPath);
-			}
-		}
-	} catch {
-		// Ignore errors
-	}
-
-	return entries;
-}
-
-function collectAutoThemeEntries(dir: string): string[] {
-	const entries: string[] = [];
-	if (!existsSync(dir)) return entries;
-
-	const ig = ignore();
-	addIgnoreRules(ig, dir, dir);
-
-	try {
-		const dirEntries = readdirSync(dir, { withFileTypes: true });
-		for (const entry of dirEntries) {
-			if (entry.name.startsWith(".")) continue;
-			if (entry.name === "node_modules") continue;
-
-			const fullPath = join(dir, entry.name);
-			let isFile = entry.isFile();
-			if (entry.isSymbolicLink()) {
-				try {
-					isFile = statSync(fullPath).isFile();
-				} catch {
-					continue;
-				}
-			}
-
-			const relPath = toPosixPath(relative(dir, fullPath));
-			if (ig.ignores(relPath)) continue;
-
-			if (isFile && entry.name.endsWith(".json")) {
+			if (isFile && filePattern.test(entry.name)) {
 				entries.push(fullPath);
 			}
 		}
@@ -1101,7 +1073,15 @@ export class DefaultPackageManager implements PackageManager {
 		return typeof pkg === "string" ? pkg : pkg.source;
 	}
 
-	private getSourceMatchKeyForInput(source: string): string {
+	/**
+	 * Version/ref-independent identity key for a package source. npm and git
+	 * sources key on their normalized name / host+path (so SSH and HTTPS URLs
+	 * for the same repo collapse). Local sources resolve their path against
+	 * `baseDir` when provided, else against cwd via `resolvePath`. Single source
+	 * of truth collapsing the former getSourceMatchKeyForInput /
+	 * getSourceMatchKeyForSettings / getPackageIdentity trio.
+	 */
+	private sourceIdentity(source: string, baseDir?: string): string {
 		const parsed = this.parseSource(source);
 		if (parsed.type === "npm") {
 			return `npm:${parsed.name}`;
@@ -1109,24 +1089,24 @@ export class DefaultPackageManager implements PackageManager {
 		if (parsed.type === "git") {
 			return `git:${parsed.host}/${parsed.path}`;
 		}
-		return `local:${this.resolvePath(parsed.path)}`;
+		const resolved =
+			baseDir !== undefined ? this.resolvePathFromBase(parsed.path, baseDir) : this.resolvePath(parsed.path);
+		return `local:${resolved}`;
 	}
 
-	private getSourceMatchKeyForSettings(source: string, scope: SourceScope): string {
-		const parsed = this.parseSource(source);
-		if (parsed.type === "npm") {
-			return `npm:${parsed.name}`;
-		}
-		if (parsed.type === "git") {
-			return `git:${parsed.host}/${parsed.path}`;
-		}
-		const baseDir = this.getBaseDirForScope(scope);
-		return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
+	/**
+	 * Version/ref-independent package identity. Thin wrapper over
+	 * `sourceIdentity` (kept as a named method because the test-suite reaches it
+	 * via `(pm as any).getPackageIdentity(...)`); a `scope` resolves the local
+	 * baseDir, its absence keys the local path against cwd.
+	 */
+	private getPackageIdentity(source: string, scope?: SourceScope): string {
+		return this.sourceIdentity(source, scope ? this.getBaseDirForScope(scope) : undefined);
 	}
 
 	private packageSourcesMatch(existing: PackageSource, inputSource: string, scope: SourceScope): boolean {
-		const left = this.getSourceMatchKeyForSettings(this.getPackageSourceString(existing), scope);
-		const right = this.getSourceMatchKeyForInput(inputSource);
+		const left = this.sourceIdentity(this.getPackageSourceString(existing), this.getBaseDirForScope(scope));
+		const right = this.sourceIdentity(inputSource);
 		return left === right;
 	}
 
@@ -1164,28 +1144,6 @@ export class DefaultPackageManager implements PackageManager {
 		}
 
 		return { type: "local", path: source };
-	}
-
-	/**
-	 * Get a unique identity for a package, ignoring version/ref.
-	 * Used to detect when the same package is in both global and project settings.
-	 * For git packages, uses normalized host/path to ensure SSH and HTTPS URLs
-	 * for the same repository are treated as identical.
-	 */
-	private getPackageIdentity(source: string, scope?: SourceScope): string {
-		const parsed = this.parseSource(source);
-		if (parsed.type === "npm") {
-			return `npm:${parsed.name}`;
-		}
-		if (parsed.type === "git") {
-			// Use host/path for identity to normalize SSH and HTTPS
-			return `git:${parsed.host}/${parsed.path}`;
-		}
-		if (scope) {
-			const baseDir = this.getBaseDirForScope(scope);
-			return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
-		}
-		return `local:${this.resolvePath(parsed.path)}`;
 	}
 
 	/**
@@ -1336,11 +1294,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private resolvePath(input: string): string {
-		const trimmed = input.trim();
-		if (trimmed === "~") return getHomeDir();
-		if (trimmed.startsWith("~/")) return join(getHomeDir(), trimmed.slice(2));
-		if (trimmed.startsWith("~")) return join(getHomeDir(), trimmed.slice(1));
-		return resolve(this.cwd, trimmed);
+		return this.resolvePathFromBase(input, this.cwd);
 	}
 
 	private resolvePathFromBase(input: string, baseDir: string): string {
@@ -1650,14 +1604,14 @@ export class DefaultPackageManager implements PackageManager {
 
 		addResources(
 			"prompts",
-			collectAutoPromptEntries(projectDirs.prompts),
+			collectAutoFlatEntries(projectDirs.prompts, "prompts"),
 			projectMetadata,
 			projectOverrides.prompts,
 			projectBaseDir,
 		);
 		addResources(
 			"themes",
-			collectAutoThemeEntries(projectDirs.themes),
+			collectAutoFlatEntries(projectDirs.themes, "themes"),
 			projectMetadata,
 			projectOverrides.themes,
 			projectBaseDir,
@@ -1697,14 +1651,14 @@ export class DefaultPackageManager implements PackageManager {
 
 		addResources(
 			"prompts",
-			collectAutoPromptEntries(userDirs.prompts),
+			collectAutoFlatEntries(userDirs.prompts, "prompts"),
 			userMetadata,
 			userOverrides.prompts,
 			globalBaseDir,
 		);
 		addResources(
 			"themes",
-			collectAutoThemeEntries(userDirs.themes),
+			collectAutoFlatEntries(userDirs.themes, "themes"),
 			userMetadata,
 			userOverrides.themes,
 			globalBaseDir,

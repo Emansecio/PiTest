@@ -10,7 +10,7 @@ import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentPreviewQueue, type PreviewQueue } from "../preview-queue.ts";
-import { getTextOutput, str } from "./render-utils.ts";
+import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const resolveSchema = Type.Object(
@@ -133,12 +133,7 @@ export function createResolveToolDefinition(
 			);
 			return text;
 		},
-		renderResult(result, _options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const output = getTextOutput(result, context.showImages).trim();
-			text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
-			return text;
-		},
+		renderResult: renderToolOutput,
 	};
 }
 

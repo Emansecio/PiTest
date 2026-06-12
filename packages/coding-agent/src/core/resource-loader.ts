@@ -658,10 +658,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const resolvedSkills = this.skillsOverride ? this.skillsOverride(skillsResult) : skillsResult;
 		this.skills = resolvedSkills.skills.map((skill) => ({
 			...skill,
-			sourceInfo:
-				this.findSourceInfoForPath(skill.filePath, this.extensionSkillSourceInfos, metadataByPath) ??
-				skill.sourceInfo ??
-				this.getDefaultSourceInfoForPath(skill.filePath),
+			sourceInfo: this.resolveSourceInfo(
+				skill.filePath,
+				this.extensionSkillSourceInfos,
+				skill.sourceInfo,
+				metadataByPath,
+			),
 		}));
 		this.skillsByName = new Map(this.skills.map((s) => [s.name, s]));
 		this.skillDiagnostics = resolvedSkills.diagnostics;
@@ -683,10 +685,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 		const resolvedPrompts = this.promptsOverride ? this.promptsOverride(promptsResult) : promptsResult;
 		this.prompts = resolvedPrompts.prompts.map((prompt) => ({
 			...prompt,
-			sourceInfo:
-				this.findSourceInfoForPath(prompt.filePath, this.extensionPromptSourceInfos, metadataByPath) ??
-				prompt.sourceInfo ??
-				this.getDefaultSourceInfoForPath(prompt.filePath),
+			sourceInfo: this.resolveSourceInfo(
+				prompt.filePath,
+				this.extensionPromptSourceInfos,
+				prompt.sourceInfo,
+				metadataByPath,
+			),
 		}));
 		this.promptDiagnostics = resolvedPrompts.diagnostics;
 	}
@@ -704,9 +708,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.themes = resolvedThemes.themes.map((theme) => {
 			const sourcePath = theme.sourcePath;
 			theme.sourceInfo = sourcePath
-				? (this.findSourceInfoForPath(sourcePath, this.extensionThemeSourceInfos, metadataByPath) ??
-					theme.sourceInfo ??
-					this.getDefaultSourceInfoForPath(sourcePath))
+				? this.resolveSourceInfo(sourcePath, this.extensionThemeSourceInfos, theme.sourceInfo, metadataByPath)
 				: theme.sourceInfo;
 			return theme;
 		});
@@ -767,6 +769,26 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 
 		return undefined;
+	}
+
+	/**
+	 * Shared resolution trailer for skills/prompts/themes: prefer an
+	 * extension/metadata-derived SourceInfo, then the resource's own
+	 * pre-existing sourceInfo, then a path-derived default. Extracted verbatim
+	 * from updateSkillsFromPaths/updatePromptsFromPaths/updateThemesFromPaths —
+	 * behavior is identical; `existing` is the resource's current sourceInfo.
+	 */
+	private resolveSourceInfo(
+		path: string,
+		extraSourceInfos: Map<string, SourceInfo>,
+		existing: SourceInfo | undefined,
+		metadataByPath: Map<string, PathMetadata> | undefined,
+	): SourceInfo {
+		return (
+			this.findSourceInfoForPath(path, extraSourceInfos, metadataByPath) ??
+			existing ??
+			this.getDefaultSourceInfoForPath(path)
+		);
 	}
 
 	private getDefaultSourceInfoForPath(filePath: string): SourceInfo {

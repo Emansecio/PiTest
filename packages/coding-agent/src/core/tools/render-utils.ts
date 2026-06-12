@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import type { ImageContent, TextContent } from "@pit/ai";
-import { getCapabilities, getImageDimensions, imageFallback } from "@pit/tui";
+import { getCapabilities, getImageDimensions, imageFallback, Text } from "@pit/tui";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 
@@ -95,6 +95,19 @@ export function replaceTabs(text: string): string {
 	return text.replace(/\t/g, "   ");
 }
 
+/**
+ * Drop trailing all-empty lines from a rendered line array so a file/content
+ * preview doesn't show a tail of blank rows (e.g. a file ending in a newline
+ * splits to a final ""). Shared by the read and write result renderers.
+ */
+export function trimTrailingEmptyLines(lines: string[]): string[] {
+	let end = lines.length;
+	while (end > 0 && lines[end - 1] === "") {
+		end--;
+	}
+	return lines.slice(0, end);
+}
+
 export function normalizeDisplayText(text: string): string {
 	return text.replace(/\r/g, "");
 }
@@ -137,4 +150,41 @@ export function invalidArgText(theme: { fg: (name: any, text: string) => string 
 
 export function nonEmptyDetails<T extends object>(d: T): T | undefined {
 	return Object.keys(d).length > 0 ? d : undefined;
+}
+
+/**
+ * Reuse the previously-rendered Text component for this tool row when present,
+ * otherwise allocate a fresh empty one. Every tool whose result render is a
+ * single Text node threads its component through `context.lastComponent`; this
+ * centralizes that `(lastComponent as Text) ?? new Text(...)` idiom.
+ */
+export function reuseText(context: { lastComponent?: unknown }): Text {
+	return (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+}
+
+/**
+ * Default tool-result renderer: dump the (trimmed) textual output into a single
+ * Text node, prefixed with a blank line so the result detaches from the call
+ * title, and render nothing when there is no output. This is the byte-identical
+ * body that the hindsight, plan-adjacent, and utility tools all repeated inline
+ * (reflect/recall/retain/resolve/eval/search_tool_bm25/recipe/inspect_image/
+ * render_mermaid/recall_tool_output/goal_complete/forget). Tools whose body
+ * differs (no leading newline, custom prefix, error-only) keep their own.
+ *
+ * Signature mirrors ToolDefinition.renderResult — (result, options, theme,
+ * context) — so it drops straight into `renderResult: renderToolOutput`. The
+ * `options` slot is unused. Loosely typed because it is shared across tools with
+ * distinct param/detail schemas; only `content`, `showImages`, `lastComponent`,
+ * and `theme.fg` are touched.
+ */
+export function renderToolOutput(
+	result: { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> },
+	_options: unknown,
+	theme: { fg: (name: any, text: string) => string },
+	context: { lastComponent?: unknown; showImages: boolean },
+): Text {
+	const text = reuseText(context);
+	const output = getTextOutput(result, context.showImages).trim();
+	text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
+	return text;
 }

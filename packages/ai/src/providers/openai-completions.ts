@@ -38,7 +38,13 @@ import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import { imageDataUrl, serializeToolArgs } from "./openai-responses-shared.ts";
+import {
+	createInitialAssistantMessage,
+	imageDataUrl,
+	sanitizeToolCallId,
+	serializeToolArgs,
+	stripStreamingScratch,
+} from "./openai-responses-shared.ts";
 import { buildBaseOptions, resolveCacheRetention } from "./simple-options.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -115,23 +121,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-		};
+		const output: AssistantMessage = createInitialAssistantMessage(model);
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -410,10 +400,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// Streaming scratch buffers are only used during parsing; never persist them.
-				delete (block as { partialArgs?: string }).partialArgs;
-				delete (block as { streamIndex?: number }).streamIndex;
+				stripStreamingScratch(block);
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
@@ -753,9 +740,12 @@ export function convertMessages(
 		if (id.includes("|")) {
 			const [callId] = id.split("|");
 			// Sanitize to allowed chars and truncate to 40 chars (OpenAI limit)
-			return callId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40);
+			return sanitizeToolCallId(callId, 40);
 		}
 
+		// Truncate-only (no charset sanitize) for the openai provider: existing ids
+		// already match the required pattern, so this intentionally diverges from
+		// sanitizeToolCallId and must NOT be folded into it.
 		if (model.provider === "openai") return id.length > 40 ? id.slice(0, 40) : id;
 		return id;
 	};

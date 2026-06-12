@@ -1715,6 +1715,26 @@ export class AgentSession {
 	}
 
 	/**
+	 * Fire-and-forget delivery of a reminder/pause custom message. Wraps the
+	 * shared `sendCustomMessage(...).catch(stderr)` tail that every steer-based
+	 * injector (doom-loop, cross-error, stagnation) repeats verbatim, so a failed
+	 * injection logs to stderr without breaking the tool-call loop. `label` is the
+	 * human-readable prefix used in the stderr line ("[pi] <label> delivery
+	 * failed"). Behaviour is identical to inlining the call at each site.
+	 */
+	private _fireReminder(
+		customType: string,
+		content: string,
+		opts: { deliverAs: "steer" | "followUp"; display: boolean; label: string },
+	): void {
+		this.sendCustomMessage({ customType, content, display: opts.display }, { deliverAs: opts.deliverAs }).catch(
+			(err: unknown) => {
+				process.stderr.write(`[pi] ${opts.label} delivery failed: ${err}\n`);
+			},
+		);
+	}
+
+	/**
 	 * Conditionally inject a doom-loop reminder when consecutive identical tool
 	 * calls reach the configured threshold. Settings-gated (off by default).
 	 *
@@ -1776,11 +1796,10 @@ export class AgentSession {
 				"Do NOT repeat this call again. State what you expected, what actually happened, " +
 				"and switch strategy: different tool, different arguments, or ask the user for guidance. " +
 				`${remaining} more identical call${remaining === 1 ? "" : "s"} will abort the turn.`;
-			this.sendCustomMessage(
-				{ customType: "pi.doom-loop-pause", content: escalation, display: true },
-				{ deliverAs: "steer" },
-			).catch((err: unknown) => {
-				process.stderr.write(`[pi] doom-loop pause delivery failed: ${err}\n`);
+			this._fireReminder("pi.doom-loop-pause", escalation, {
+				deliverAs: "steer",
+				display: true,
+				label: "doom-loop pause",
 			});
 			return;
 		}
@@ -1791,11 +1810,10 @@ export class AgentSession {
 		if (this._doomLoopFiredTier >= 1) return;
 		this._doomLoopFiredTier = 1;
 		const content = buildDoomLoopReminder({ toolName, args, consecutiveCount });
-		this.sendCustomMessage(
-			{ customType: "pi.doom-loop-reminder", content, display: false },
-			{ deliverAs: "steer" },
-		).catch((err: unknown) => {
-			process.stderr.write(`[pi] doom-loop reminder delivery failed: ${err}\n`);
+		this._fireReminder("pi.doom-loop-reminder", content, {
+			deliverAs: "steer",
+			display: false,
+			label: "doom-loop reminder",
 		});
 	}
 
@@ -1833,11 +1851,10 @@ export class AgentSession {
 		if (!decision.fire) return;
 		this._crossErrorLastFiredAt = decision.nextLastFiredAt;
 		const content = buildCrossErrorReminder({ count, distinctApproaches, sampleError });
-		this.sendCustomMessage(
-			{ customType: "pi.cross-error-reminder", content, display: false },
-			{ deliverAs: "steer" },
-		).catch((err: unknown) => {
-			process.stderr.write(`[pi] cross-error reminder delivery failed: ${err}\n`);
+		this._fireReminder("pi.cross-error-reminder", content, {
+			deliverAs: "steer",
+			display: false,
+			label: "cross-error reminder",
 		});
 	}
 
@@ -1896,20 +1913,18 @@ export class AgentSession {
 			this._lastStagnationReminderAt = 0;
 			this._lastStagnationReminderCount = 0;
 			const content = buildStagnationReminder({ count, paused: true });
-			this.sendCustomMessage(
-				{ customType: "pi.stagnation-pause", content, display: true },
-				{ deliverAs: "steer" },
-			).catch((err: unknown) => {
-				process.stderr.write(`[pi] stagnation pause delivery failed: ${err}\n`);
+			this._fireReminder("pi.stagnation-pause", content, {
+				deliverAs: "steer",
+				display: true,
+				label: "stagnation pause",
 			});
 			return;
 		}
 		const content = buildStagnationReminder({ count, paused: false });
-		this.sendCustomMessage(
-			{ customType: "pi.stagnation-reminder", content, display: false },
-			{ deliverAs: "steer" },
-		).catch((err: unknown) => {
-			process.stderr.write(`[pi] stagnation reminder delivery failed: ${err}\n`);
+		this._fireReminder("pi.stagnation-reminder", content, {
+			deliverAs: "steer",
+			display: false,
+			label: "stagnation reminder",
 		});
 	}
 

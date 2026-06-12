@@ -22,7 +22,14 @@ import { formatAnchorsForRead, interleaveAnchorsIntoLines } from "./edit-hashlin
 import { crushJson, JSON_CRUSH_TARGET_BYTES } from "./json-crush.js";
 import { formatNotebookSource } from "./notebook-formatter.ts";
 import { resolveReadPath } from "./path-utils.js";
-import { getFilePathArg, getTextOutput, invalidArgText, replaceTabs, shortenPath } from "./render-utils.js";
+import {
+	getFilePathArg,
+	getTextOutput,
+	invalidArgText,
+	replaceTabs,
+	shortenPath,
+	trimTrailingEmptyLines,
+} from "./render-utils.js";
 import { listDeclarations } from "./symbol.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
@@ -223,12 +230,13 @@ function looksBinary(buffer: Buffer, decoded: string): boolean {
 	return replacements / scanLen > REPLACEMENT_CHAR_RATIO_THRESHOLD;
 }
 
-function trimTrailingEmptyLines(lines: string[]): string[] {
-	let end = lines.length;
-	while (end > 0 && lines[end - 1] === "") {
-		end--;
-	}
-	return lines.slice(0, end);
+/**
+ * The "not displayable as text" note for a binary file, pointing the model at
+ * bash for hex/metadata. Shared by the streaming and buffered read paths, which
+ * differ only in where the byte count comes from (stat size vs buffer length).
+ */
+function formatBinaryFileNote(absolutePath: string, byteLength: number): string {
+	return `[Binary file: ${basename(absolutePath)}, ${formatSize(byteLength)} (${byteLength} bytes). Not displayable as text. Use \`bash\` for hex/metadata (e.g. xxd, file).]`;
 }
 
 /** Files larger than this stream line-by-line instead of being fully buffered. */
@@ -619,7 +627,7 @@ Common mistakes to avoid:
 											signal,
 										);
 										if (streamed.kind === "binary") {
-											const note = `[Binary file: ${basename(absolutePath)}, ${formatSize(fileStat.size)} (${fileStat.size} bytes). Not displayable as text. Use \`bash\` for hex/metadata (e.g. xxd, file).]`;
+											const note = formatBinaryFileNote(absolutePath, fileStat.size);
 											content = [{ type: "text", text: note }];
 											if (aborted) return;
 											signal?.removeEventListener("abort", onAbort);
@@ -648,7 +656,7 @@ Common mistakes to avoid:
 									// UTF-8 is not displayable as text. Returning the mojibake wastes
 									// context and tells the model nothing; instead point it at bash.
 									if (looksBinary(buffer, textContent)) {
-										const note = `[Binary file: ${basename(absolutePath)}, ${formatSize(buffer.length)} (${buffer.length} bytes). Not displayable as text. Use \`bash\` for hex/metadata (e.g. xxd, file).]`;
+										const note = formatBinaryFileNote(absolutePath, buffer.length);
 										content = [{ type: "text", text: note }];
 										if (aborted) return;
 										signal?.removeEventListener("abort", onAbort);
@@ -714,10 +722,7 @@ Common mistakes to avoid:
 								// (offset/limit or `bash jq` recover any elided detail). crushJson self-gates
 								// to real JSON, so non-JSON falls through to the normal truncation below.
 								const crushed =
-									isTruthyEnvFlag(process.env.PIT_JSON_CRUSH) &&
-									offset === undefined &&
-									limit === undefined &&
-									truncation.truncated
+									jsonCrushEligible && truncation.truncated
 										? crushJson(selectedContent, { targetChars: JSON_CRUSH_TARGET_BYTES })
 										: undefined;
 								if (crushed !== undefined) {

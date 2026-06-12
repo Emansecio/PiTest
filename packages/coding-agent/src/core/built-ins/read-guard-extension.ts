@@ -23,8 +23,8 @@
  * match the file VERBATIM — the model only carried a lossy summary of the file
  * across compaction, so a fuzzy/indent match there risks corrupting the middle.
  *
- * `extractPathArg` accepts the same aliases `prepareWithPathAliases` will
- * later normalize (path, file_path, filepath, filename, file). The read-guard
+ * The shared `extractPathArg` accepts the same aliases `prepareWithPathAliases`
+ * will later normalize (path, file_path, filepath, filename, file). The read-guard
  * runs on the `tool_call` event — BEFORE prepareArguments — so it must accept
  * the same aliases the tool will, or a model emitting `file_path` would
  * bypass the guard entirely.
@@ -32,9 +32,8 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
 import type { ExtensionAPI } from "../extensions/index.js";
-import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
+import { extractEditOldTexts, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
 
 interface FileStamp {
 	mtimeMs: number;
@@ -46,47 +45,6 @@ interface FileStamp {
 	 * green-light an edit against changed content.
 	 */
 	hash: string;
-}
-
-/**
- * Pull every `oldText` an `edit` call will try to match, accepting the same
- * cross-harness aliases the tool normalizes later (old_string / oldString /
- * old_str). Returns [] for shapes we can't read (e.g. edits as a JSON string),
- * which makes the post-compaction exact-match check fail open rather than block
- * a legitimate edit on a format we didn't parse.
- */
-function extractEditOldTexts(input: Record<string, unknown>): string[] {
-	const out: string[] = [];
-	const pushIf = (v: unknown) => {
-		if (typeof v === "string" && v.length > 0) out.push(v);
-	};
-	const edits = input.edits;
-	if (Array.isArray(edits)) {
-		for (const e of edits) {
-			if (e && typeof e === "object") {
-				const rec = e as Record<string, unknown>;
-				pushIf(rec.oldText ?? rec.old_string ?? rec.oldString ?? rec.old_str);
-			}
-		}
-	}
-	// Legacy flat single-edit shape.
-	pushIf(input.oldText ?? input.old_string ?? input.oldString ?? input.old_str);
-	return out;
-}
-
-/**
- * Extract a path argument from raw tool input, accepting every alias that
- * `prepareWithPathAliases` would normalize later. Returns undefined when no
- * recognised key is present or the value is not a string. Kept in sync with
- * PATH_KEY_ALIASES so the guard and the tool agree on which key wins.
- */
-function extractPathArg(input: Record<string, unknown>): string | undefined {
-	if (typeof input.path === "string") return input.path;
-	for (const alias of Object.keys(PATH_KEY_ALIASES)) {
-		const value = input[alias];
-		if (typeof value === "string") return value;
-	}
-	return undefined;
 }
 
 export interface ReadGuardOptions {
@@ -116,16 +74,11 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 		const readFiles = new Set<string>();
 		const postCompactStamps = new Map<string, FileStamp>();
 
-		const resolvePath = (filePath: string): string => {
-			if (filePath.startsWith("/") || /^[a-zA-Z]:/.test(filePath)) return filePath;
-			return resolve(options.cwd, filePath);
-		};
-
 		pi.on("tool_call", (event) => {
 			if (event.toolName === "read") {
 				const path = extractPathArg(event.input as Record<string, unknown>);
 				if (path !== undefined) {
-					const abs = resolvePath(path);
+					const abs = resolveToolPath(path, options.cwd);
 					readFiles.add(abs);
 					// A fresh read supersedes any post-compaction stamp gate.
 					postCompactStamps.delete(abs);
@@ -137,7 +90,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 				const path = extractPathArg(event.input as Record<string, unknown>);
 				if (path === undefined) return undefined;
 
-				const abs = resolvePath(path);
+				const abs = resolveToolPath(path, options.cwd);
 
 				// New files don't need a prior read. Probe existence with a
 				// single statSync instead of existsSync (+ a later statSync):

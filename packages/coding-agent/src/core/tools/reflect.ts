@@ -17,7 +17,7 @@ import {
 	type HindsightEntry,
 	type HindsightSearchResult,
 } from "../hindsight/index.ts";
-import { getTextOutput, str } from "./render-utils.ts";
+import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const MAX_BYTES = 4 * 1024;
@@ -142,12 +142,7 @@ export function createReflectToolDefinition(
 			text.setText(`${theme.fg("toolTitle", theme.bold("reflect"))} ${theme.fg("accent", question)}`);
 			return text;
 		},
-		renderResult(result, _options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			const output = getTextOutput(result, context.showImages).trim();
-			text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
-			return text;
-		},
+		renderResult: renderToolOutput,
 	};
 }
 

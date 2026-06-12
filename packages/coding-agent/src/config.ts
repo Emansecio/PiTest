@@ -3,6 +3,7 @@ import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
+import { expandTilde } from "./utils/paths.ts";
 
 // =============================================================================
 // Package Detection
@@ -448,9 +449,11 @@ export const ENV_AGENT_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_DIR`;
 export const ENV_SESSION_DIR = `${APP_NAME.toUpperCase()}_CODING_AGENT_SESSION_DIR`;
 
 export function expandTildePath(path: string): string {
-	if (path === "~") return homedir();
-	if (path.startsWith("~/")) return homedir() + path.slice(1);
-	return path;
+	// Delegates to the canonical expandTilde (utils/paths.ts). No import cycle:
+	// utils/paths.ts imports only node builtins. expandTilde is a strict superset
+	// (also handles a leading "~\\"); for "~" and "~/" the resolved directory is
+	// identical once the result flows through downstream path resolution.
+	return expandTilde(path);
 }
 
 // =============================================================================

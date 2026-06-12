@@ -16,6 +16,7 @@ import type {
 	Usage,
 } from "../types.ts";
 import { createAssistantMessageEventStream } from "../utils/event-stream.ts";
+import { zeroUsage } from "./openai-responses-shared.ts";
 
 const DEFAULT_API = "faux";
 const DEFAULT_PROVIDER = "faux";
@@ -25,14 +26,7 @@ const DEFAULT_BASE_URL = "http://localhost:0";
 const DEFAULT_MIN_TOKEN_SIZE = 3;
 const DEFAULT_MAX_TOKEN_SIZE = 5;
 
-const DEFAULT_USAGE: Usage = {
-	input: 0,
-	output: 0,
-	cacheRead: 0,
-	cacheWrite: 0,
-	totalTokens: 0,
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
+const DEFAULT_USAGE: Usage = zeroUsage();
 
 export interface FauxModelDefinition {
 	id: string;

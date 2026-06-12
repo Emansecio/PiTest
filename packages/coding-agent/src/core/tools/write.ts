@@ -11,7 +11,15 @@ import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { applyKeyAliases, PATH_KEY_ALIASES } from "./argument-prep.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { resolveToCwd } from "./path-utils.js";
-import { getFilePathArg, invalidArgText, normalizeDisplayText, replaceTabs, shortenPath, str } from "./render-utils.js";
+import {
+	getFilePathArg,
+	invalidArgText,
+	normalizeDisplayText,
+	replaceTabs,
+	shortenPath,
+	str,
+	trimTrailingEmptyLines,
+} from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const writeSchema = Type.Object(
@@ -144,14 +152,6 @@ function updateWriteHighlightCacheIncremental(
 	}
 	refreshWriteHighlightPrefix(cache);
 	return cache;
-}
-
-function trimTrailingEmptyLines(lines: string[]): string[] {
-	let end = lines.length;
-	while (end > 0 && lines[end - 1] === "") {
-		end--;
-	}
-	return lines.slice(0, end);
 }
 
 function formatWriteCall(
