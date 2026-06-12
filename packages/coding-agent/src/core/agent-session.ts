@@ -180,6 +180,7 @@ import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.
 import { ReadDedupeStore } from "./tools/read.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
+import { summarizeCheckFailure } from "./verification/failure-summary.ts";
 import {
 	type CheckResult,
 	detectCheckCommand,
@@ -292,7 +293,7 @@ function verificationFixPrompt(
 	command: string,
 	result: { exitCode: number; output: string; timedOut: boolean },
 ): string {
-	const tail = result.output.length > 4000 ? `…\n${result.output.slice(-4000)}` : result.output;
+	const tail = summarizeCheckFailure(result.output, command);
 	const status = result.timedOut ? "timed out" : `exited ${result.exitCode}`;
 	return [
 		`The change isn't verified yet — I ran the project check and it ${status}:`,
