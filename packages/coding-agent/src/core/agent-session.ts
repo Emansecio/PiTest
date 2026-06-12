@@ -826,7 +826,7 @@ export class AgentSession {
 	private _defaultActiveToolNames(): string[] {
 		const s = this.settingsManager;
 		const on = (enabled: boolean, names: string[]): string[] => (enabled ? names : []);
-		const core = ["read", "grep", "find", "ls", "symbol", "bash", "edit", "write", "ask", "todo"];
+		const core = ["read", "grep", "find", "ls", "symbol", "find_symbol", "bash", "edit", "write", "ask", "todo"];
 		const gated = [
 			...on(s.getToolDiscoverySettings().enabled, ["search_tool_bm25"]),
 			...on(s.getHindsightSettings().enabled, ["retain", "recall", "reflect", "forget"]),

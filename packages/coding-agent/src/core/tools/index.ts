@@ -249,6 +249,7 @@ import {
 } from "./edit-hashline.ts";
 import { createEvalTool, createEvalToolDefinition, type EvalToolOptions } from "./eval.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
+import { createFindSymbolTool, createFindSymbolToolDefinition, type FindSymbolToolOptions } from "./find-symbol.ts";
 import { createForgetTool, createForgetToolDefinition, type ForgetToolOptions } from "./forget.ts";
 import {
 	createGoalCompleteTool,
@@ -273,6 +274,7 @@ import {
 	createRenderMermaidToolDefinition,
 	type RenderMermaidToolOptions,
 } from "./render-mermaid.ts";
+import { createRepoMapTool, createRepoMapToolDefinition, type RepoMapToolOptions } from "./repo-map.ts";
 import { createResolveTool, createResolveToolDefinition, type ResolveToolOptions } from "./resolve.ts";
 import { createRetainTool, createRetainToolDefinition, type RetainToolOptions } from "./retain.ts";
 import {
@@ -382,6 +384,20 @@ const TOOL_REGISTRY = {
 		optionsKey: "symbol",
 		readOnly: true,
 		coding: "always",
+	},
+	find_symbol: {
+		factory: createFindSymbolTool,
+		definitionFactory: createFindSymbolToolDefinition,
+		optionsKey: "find_symbol",
+		readOnly: true,
+		coding: "always",
+	},
+	repo_map: {
+		factory: createRepoMapTool,
+		definitionFactory: createRepoMapToolDefinition,
+		optionsKey: "repo_map",
+		readOnly: true,
+		coding: false,
 	},
 	ask: {
 		factory: createAskTool,
@@ -732,6 +748,8 @@ export interface ToolsOptions {
 	find?: FindToolOptions;
 	ls?: LsToolOptions;
 	symbol?: SymbolToolOptions;
+	find_symbol?: FindSymbolToolOptions;
+	repo_map?: RepoMapToolOptions;
 	ask?: AskToolOptions;
 	resolve?: ResolveToolOptions;
 	searchToolBm25?: SearchToolBm25Options;

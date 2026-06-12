@@ -22,6 +22,7 @@ import { crushJson, JSON_CRUSH_TARGET_BYTES } from "./json-crush.js";
 import { formatNotebookSource } from "./notebook-formatter.ts";
 import { resolveReadPath } from "./path-utils.js";
 import { getFilePathArg, getTextOutput, invalidArgText, replaceTabs, shortenPath } from "./render-utils.js";
+import { listDeclarations } from "./symbol.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
@@ -65,6 +66,12 @@ const readSchema = Type.Object(
 		path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 		offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
 		limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+		outline: Type.Optional(
+			Type.Boolean({
+				description:
+					"Return only a symbol outline (top-level names + line ranges) instead of file content. Use to locate a function in a large file cheaply, then read the specific range before editing.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -455,7 +462,7 @@ Common mistakes to avoid:
 		prepareArguments: prepareWithPathAliases,
 		async execute(
 			_toolCallId,
-			{ path, offset, limit }: { path: string; offset?: number; limit?: number },
+			{ path, offset, limit, outline }: { path: string; offset?: number; limit?: number; outline?: boolean },
 			signal?: AbortSignal,
 			_onUpdate?,
 			ctx?,
@@ -489,6 +496,18 @@ Common mistakes to avoid:
 				return { content: [{ type: "text", text } as TextContent], details: undefined };
 			}
 			const absolutePath = resolveReadPath(path, cwd);
+			if (outline) {
+				if (signal?.aborted) throw new Error("Operation aborted");
+				await ops.access(absolutePath);
+				const buffer = await ops.readFile(absolutePath);
+				const decls = listDeclarations(buffer.toString("utf-8"), absolutePath);
+				const body =
+					decls.length > 0
+						? decls.map((d) => `${d.name}  L${d.line}-${d.endLine}  [${d.kind}]`).join("\n")
+						: "(no top-level symbols detected — read the file or use grep)";
+				const text = `Outline of ${path} (heuristic — read the range before editing):\n${body}`;
+				return { content: [{ type: "text", text } as TextContent], details: undefined };
+			}
 			return new Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }>(
 				(resolve, reject) => {
 					if (signal?.aborted) {

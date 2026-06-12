@@ -45,7 +45,7 @@ export interface SymbolToolOptions {
 
 type SymbolKind = "brace" | "indent" | "unknown";
 
-function detectKind(path: string): SymbolKind {
+export function detectKind(path: string): SymbolKind {
 	const lower = path.toLowerCase();
 	if (/\.(ts|tsx|js|jsx|mjs|cjs|mts|cts|java|c|cc|cpp|h|hpp|cs|go|rs|swift|kt|kts|scala|php|m|mm)$/.test(lower)) {
 		return "brace";
@@ -85,7 +85,7 @@ function buildDeclarationPatterns(name: string, kind: SymbolKind): RegExp[] {
 	return patterns;
 }
 
-function findDeclarationLine(lines: string[], name: string, kind: SymbolKind): number {
+export function findDeclarationLine(lines: string[], name: string, kind: SymbolKind): number {
 	const patterns = buildDeclarationPatterns(name, kind);
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i]!;
@@ -217,6 +217,43 @@ function findIndentBlockEnd(lines: string[], startLine: number): number {
 		lastContent = i;
 	}
 	return lastContent;
+}
+
+export interface DeclarationEntry {
+	name: string;
+	line: number;
+	endLine: number;
+	kind: string;
+}
+
+const MAX_DECLARATIONS = 400;
+
+// Top-level only (column 0). Capture group 1 = kind keyword, group 2 = name.
+const BRACE_DECL_RE =
+	/^(?:export\s+(?:default\s+)?)?(?:async\s+)?(function\*?|class|interface|type|enum|namespace|const|let|var)\s+([A-Za-z_$][\w$]*)/;
+const INDENT_DECL_RE = /^(?:async\s+)?(def|class)\s+([A-Za-z_][\w]*)/;
+
+/**
+ * Heuristic, NOT AST: enumerate top-level (column-0) declarations with their
+ * line ranges. Shared primitive for outline / find_symbol / repo_map. Callers
+ * MUST treat the result as a guide and read the body before editing.
+ */
+export function listDeclarations(content: string, path: string): DeclarationEntry[] {
+	const kind = detectKind(path);
+	if (kind === "unknown") return [];
+	const lines = content.split(/\r?\n/);
+	const re = kind === "brace" ? BRACE_DECL_RE : INDENT_DECL_RE;
+	const out: DeclarationEntry[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (/^\s/.test(line)) continue; // indented → member/nested, skip
+		const m = re.exec(line);
+		if (!m) continue;
+		const end = kind === "brace" ? findBraceBlockEnd(lines, i) : findIndentBlockEnd(lines, i);
+		out.push({ kind: m[1]!, name: m[2]!, line: i + 1, endLine: end + 1 });
+		if (out.length >= MAX_DECLARATIONS) break;
+	}
+	return out;
 }
 
 type SymbolRenderArgs = { path?: string; file_path?: string; name?: string };
