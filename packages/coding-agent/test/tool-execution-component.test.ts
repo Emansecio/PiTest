@@ -811,4 +811,77 @@ describe("ToolExecutionComponent parity", () => {
 		expect(commandRows[0]).toContain("to expand");
 		expect(lines.some((l) => l.includes("line2"))).toBe(false);
 	});
+
+	test("memoizes result text processing across same-snapshot rebuilds; reprocesses on new output", () => {
+		const def = createBashToolDefinition(process.cwd());
+		// Drive renderResult against an owned shared state so we can read the
+		// test-only memo-miss counter. A fresh `state` argument gives a cold memo.
+		const renderWith = (state: any, lastComponent: any, result: any) => {
+			// isPartial:false → no live elapsed interval is armed (no leak); the memo
+			// logic is identical regardless of partial-ness.
+			const component = def.renderResult!(
+				result,
+				{ expanded: false, isPartial: false },
+				undefined as never,
+				{
+					args: { command: "seq 8" },
+					toolCallId: "memo-1",
+					invalidate: () => {},
+					lastComponent,
+					state,
+					cwd: process.cwd(),
+					executionStarted: true,
+					argsComplete: true,
+					isPartial: false,
+					expanded: false,
+					showImages: false,
+					isError: false,
+				} as any,
+			);
+			return { component, lines: stripAnsi(component.render(120).join("\n")) };
+		};
+
+		// Owned shared render state, reused across rebuilds like the real TUI.
+		const state: any = { startedAt: Date.now() };
+		let lastComponent: any;
+		const renderOnce = (result: any) => {
+			const r = renderWith(state, lastComponent, result);
+			lastComponent = r.component;
+			return r.lines;
+		};
+
+		// A streaming snapshot: same `result` object reused across the 1s elapsed
+		// interval / TUI resize / invalidate — the content array reference is stable.
+		const snapshot = { content: [{ type: "text", text: "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8" }], details: undefined };
+
+		// Cold render through an independent fresh state — the byte-identity baseline
+		// the memoized path must reproduce exactly.
+		const coldState: any = { startedAt: state.startedAt };
+		const cold = renderWith(coldState, undefined, snapshot);
+		expect(coldState.textComputeCount).toBe(1);
+
+		const first = renderOnce(snapshot);
+		expect(first).toBe(cold.lines);
+		expect(state.textComputeCount).toBe(1);
+		// 8 lines collapsed (BASH_PREVIEW_LINES === 0) → skippedHint reflects the
+		// processed line count handed to the title component.
+		expect(state.skippedHint).toBe(8);
+
+		// Second rebuild with the SAME snapshot (interval/resize/invalidate path):
+		// reuses the memo — no reprocess — and renders byte-identically.
+		const second = renderOnce(snapshot);
+		expect(state.textComputeCount).toBe(1);
+		expect(second).toBe(first);
+		expect(state.skippedHint).toBe(8);
+
+		// A genuinely new 100ms streaming update: fresh content array + new text →
+		// memo miss, reprocesses, and the body reflects the new line count.
+		const grown = {
+			content: [{ type: "text", text: "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10" }],
+			details: undefined,
+		};
+		renderOnce(grown);
+		expect(state.textComputeCount).toBe(2);
+		expect(state.skippedHint).toBe(10);
+	});
 });

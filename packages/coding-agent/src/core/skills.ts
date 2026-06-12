@@ -6,7 +6,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath } from "../utils/paths.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
-import { createMtimeParseCache } from "./mtime-cache.ts";
+import { createMtimePrefixParseCache } from "./mtime-cache.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /** Max name length per spec */
@@ -293,11 +293,54 @@ function loadSkillsFromDirInternal(
 	return { skills, diagnostics };
 }
 
+// Bytes of head we pull off a SKILL.md before deciding whether the frontmatter
+// fence is in reach. Real-world SKILL.md frontmatter is ~1-2KB; 16KB is a wide
+// margin (and the cap that defines "giant frontmatter" → full-read fallback).
+const SKILL_FRONTMATTER_PREFIX_BYTES = 16384;
+
+// Conservative slack (chars) kept between the closing `\n---` fence and the end
+// of the decoded prefix. Guards against a multi-byte char split across the
+// prefix boundary: if the fence sits this far inside the prefix, no truncated
+// trailing byte can touch the YAML region we actually parse.
+const SKILL_FENCE_TAIL_MARGIN = 8;
+
+// True iff parsing just this prefix yields the same frontmatter the whole file
+// would. The skills consumer discards the body, so once the closing fence is
+// contained (and comfortably away from a possibly-truncated tail) the prefix
+// parse is identical to the full-file parse. Mirrors extractFrontmatter():
+// normalize CRLF, require a leading `---`, locate `\n---` from offset 3.
+function skillPrefixHasFrontmatterFence(prefix: string, atEof: boolean): boolean {
+	// Whole file fit in the prefix → nothing was truncated, parse is exact.
+	if (atEof) {
+		return true;
+	}
+	const normalized = prefix.replace(/\r\n?/g, "\n");
+	if (!normalized.startsWith("---")) {
+		// No frontmatter regardless of body → prefix already decides it.
+		return true;
+	}
+	const endIndex = normalized.indexOf("\n---", 3);
+	if (endIndex === -1) {
+		// Fence not in the prefix (giant frontmatter / unterminated) → full read.
+		return false;
+	}
+	// Closing fence (`\n---`, 4 chars) plus slack must clear the prefix tail.
+	return endIndex + 4 + SKILL_FENCE_TAIL_MARGIN <= normalized.length;
+}
+
 // mtime-keyed cache of the expensive read+parse step. The Skill object itself
 // is rebuilt fresh per call (cheap) so source-dependent fields stay correct.
-const skillFrontmatterCache = createMtimeParseCache<{ frontmatter: SkillFrontmatter }>((rawContent) => ({
-	frontmatter: parseFrontmatter<SkillFrontmatter>(rawContent).frontmatter,
-}));
+// Reads only the head of each SKILL.md (frontmatter) instead of the whole file,
+// falling back to a full read when the closing fence isn't within the prefix.
+const skillFrontmatterCache = createMtimePrefixParseCache<{ frontmatter: SkillFrontmatter }>(
+	(rawContent) => ({
+		frontmatter: parseFrontmatter<SkillFrontmatter>(rawContent).frontmatter,
+	}),
+	{
+		prefixBytes: SKILL_FRONTMATTER_PREFIX_BYTES,
+		prefixIsSufficient: (prefix, ctx) => skillPrefixHasFrontmatterFence(prefix, ctx.atEof),
+	},
+);
 
 function loadSkillFromFile(
 	filePath: string,

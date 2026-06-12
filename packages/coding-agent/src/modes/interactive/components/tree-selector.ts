@@ -50,6 +50,7 @@ interface ToolCallInfo {
 
 class TreeList implements Component {
 	private flatNodes: FlatNode[] = [];
+	private entryById: Map<string, FlatNode> = new Map();
 	private filteredNodes: FlatNode[] = [];
 	private selectedIndex = 0;
 	private currentLeafId: string | null;
@@ -81,6 +82,9 @@ class TreeList implements Component {
 		this.filterMode = initialFilterMode ?? "default";
 		this.multipleRoots = tree.length > 1;
 		this.flatNodes = this.flattenTree(tree);
+		for (const flatNode of this.flatNodes) {
+			this.entryById.set(flatNode.node.entry.id, flatNode);
+		}
 		this.buildActivePath();
 		this.applyFilter();
 
@@ -97,12 +101,6 @@ class TreeList implements Component {
 	private findNearestVisibleIndex(entryId: string | null): number {
 		if (this.filteredNodes.length === 0) return 0;
 
-		// Build a map for parent lookup
-		const entryMap = new Map<string, FlatNode>();
-		for (const flatNode of this.flatNodes) {
-			entryMap.set(flatNode.node.entry.id, flatNode);
-		}
-
 		// Build a map of visible entry IDs to their indices in filteredNodes
 		const visibleIdToIndex = new Map<string, number>(this.filteredNodes.map((node, i) => [node.node.entry.id, i]));
 
@@ -111,7 +109,7 @@ class TreeList implements Component {
 		while (currentId !== null) {
 			const index = visibleIdToIndex.get(currentId);
 			if (index !== undefined) return index;
-			const node = entryMap.get(currentId);
+			const node = this.entryById.get(currentId);
 			if (!node) break;
 			currentId = node.node.entry.parentId ?? null;
 		}
@@ -125,17 +123,11 @@ class TreeList implements Component {
 		this.activePathIds.clear();
 		if (!this.currentLeafId) return;
 
-		// Build a map of id -> entry for parent lookup
-		const entryMap = new Map<string, FlatNode>();
-		for (const flatNode of this.flatNodes) {
-			entryMap.set(flatNode.node.entry.id, flatNode);
-		}
-
 		// Walk from leaf to root
 		let currentId: string | null = this.currentLeafId;
 		while (currentId) {
 			this.activePathIds.add(currentId);
-			const node = entryMap.get(currentId);
+			const node = this.entryById.get(currentId);
 			if (!node) break;
 			currentId = node.node.entry.parentId ?? null;
 		}
@@ -380,20 +372,14 @@ class TreeList implements Component {
 
 		const visibleIds = new Set(this.filteredNodes.map((n) => n.node.entry.id));
 
-		// Build entry map for efficient parent lookup (using full tree)
-		const entryMap = new Map<string, FlatNode>();
-		for (const flatNode of this.flatNodes) {
-			entryMap.set(flatNode.node.entry.id, flatNode);
-		}
-
 		// Find nearest visible ancestor for a node
 		const findVisibleAncestor = (nodeId: string): string | null => {
-			let currentId = entryMap.get(nodeId)?.node.entry.parentId ?? null;
+			let currentId = this.entryById.get(nodeId)?.node.entry.parentId ?? null;
 			while (currentId !== null) {
 				if (visibleIds.has(currentId)) {
 					return currentId;
 				}
-				currentId = entryMap.get(currentId)?.node.entry.parentId ?? null;
+				currentId = this.entryById.get(currentId)?.node.entry.parentId ?? null;
 			}
 			return null;
 		};

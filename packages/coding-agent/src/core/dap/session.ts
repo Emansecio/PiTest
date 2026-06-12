@@ -104,7 +104,7 @@ export interface DapOutputSnapshot {
 const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 30 * 1000;
 const HEARTBEAT_INTERVAL_MS = 5 * 1000;
-const MAX_OUTPUT_BYTES = 128 * 1024;
+export const MAX_OUTPUT_BYTES = 128 * 1024;
 const STOP_CAPTURE_TIMEOUT_MS = 5_000;
 
 interface DapStartRequestFailure {
@@ -161,12 +161,41 @@ function normalizePath(filePath: string): string {
 	return path.resolve(filePath);
 }
 
-function truncateOutput(session: DapSession, output: string): void {
+// Mutable subset of DapSession that truncateOutput touches — exported so the
+// retention algorithm can be exercised directly (byte-identity) from tests.
+export interface DapOutputBuffer {
+	output: string;
+	outputBytes: number;
+	outputTruncated: boolean;
+}
+
+function isHighSurrogate(code: number): boolean {
+	return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+	return code >= 0xdc00 && code <= 0xdfff;
+}
+
+export function truncateOutput(session: DapOutputBuffer, output: string): void {
 	if (!output) return;
 	session.output += output;
 	session.outputBytes += Buffer.byteLength(output, "utf-8");
-	while (Buffer.byteLength(session.output, "utf-8") > MAX_OUTPUT_BYTES) {
-		session.output = session.output.slice(Math.min(1024, session.output.length));
+	// Drop fixed 1024-char slices off the front until under cap, tracking the
+	// byte total incrementally (encode only the removed slice, not the whole
+	// buffer) so a large burst stays O(n) instead of O(n²) on re-encode.
+	let curBytes = Buffer.byteLength(session.output, "utf-8");
+	while (curBytes > MAX_OUTPUT_BYTES) {
+		const n = Math.min(1024, session.output.length);
+		curBytes -= Buffer.byteLength(session.output.slice(0, n), "utf-8");
+		// A 1024-char cut can split a surrogate pair: the head keeps a lone high
+		// and the tail a lone low, each encoding to a 3-byte U+FFFD, so the 4-byte
+		// astral char becomes 6 bytes. byteLength(head) then over-counts the removal
+		// by 2 vs re-encoding the whole remainder — add it back to stay byte-exact.
+		if (isHighSurrogate(session.output.charCodeAt(n - 1)) && isLowSurrogate(session.output.charCodeAt(n))) {
+			curBytes += 2;
+		}
+		session.output = session.output.slice(n);
 		session.outputTruncated = true;
 	}
 }

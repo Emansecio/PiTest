@@ -10,7 +10,7 @@ import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, EDIT_KEY_ALIASES, PATH_KEY_ALIASES } from "./argument-prep.js";
 import {
 	applyEditsToNormalizedContent,
-	computeEditsDiff,
+	computeEditsDiffWithBaseCache,
 	detectLineEnding,
 	type Edit,
 	type EditDiffError,
@@ -539,7 +539,7 @@ export function createEditToolDefinition(
 			if (previewInput && !component.preview && !component.previewPending) {
 				component.previewPending = true;
 				const requestKey = argsKey;
-				void computeEditsDiff(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
+				void computeEditsDiffWithBaseCache(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
 					if (component.previewArgsKey !== requestKey) return;
 					// While args are still streaming, a partial oldText/newText may not
 					// match yet — swallow that transient error and let a later delta

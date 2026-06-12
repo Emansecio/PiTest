@@ -248,6 +248,47 @@ describe("TreeSelectorComponent", () => {
 		});
 	});
 
+	describe("search filter hiding the selected node", () => {
+		test("walks up to nearest visible ancestor when search hides the selected node", () => {
+			// Linear chain: user-1 → asst-1 → user-2 → asst-2 (selected leaf).
+			// Searching "zebra" (only in user-1) hides asst-1/user-2/asst-2, forcing
+			// findNearestVisibleIndex to walk the parent chain up to user-1.
+			const entries = [
+				userMessage("user-1", null, "zebra start"),
+				assistantMessage("asst-1", "user-1", "hi"),
+				userMessage("user-2", "asst-1", "middle"),
+				assistantMessage("asst-2", "user-2", "leaf"),
+			];
+			const tree = buildTree(entries);
+
+			const selector = new TreeSelectorComponent(
+				tree,
+				"asst-2",
+				24,
+				() => {},
+				() => {},
+			);
+
+			const list = selector.getTreeList();
+			expect(list.getSelectedNode()?.entry.id).toBe("asst-2");
+
+			// Type a search that matches only the ancestor user-1
+			for (const ch of "zebra") {
+				selector.handleInput(ch);
+			}
+
+			// Only user-1 remains visible; selection walked up the parent chain to it
+			expect(list.getSelectedNode()?.entry.id).toBe("user-1");
+			const render = list.render(200).join("\n");
+			expect(render).toContain("(1/1)");
+			expect(render).toContain("zebra start");
+
+			// Clearing the search restores the full tree and re-anchors on user-1
+			selector.handleInput("\x1b");
+			expect(list.getSelectedNode()?.entry.id).toBe("user-1");
+		});
+	});
+
 	describe("label timestamps", () => {
 		test("toggles label timestamps for labeled nodes", () => {
 			const entries = [userMessage("user-1", null, "hello"), assistantMessage("asst-1", "user-1", "hi")];

@@ -5,7 +5,7 @@
 
 import * as Diff from "diff";
 import { constants } from "fs";
-import { access, readFile } from "fs/promises";
+import { access, readFile, stat } from "fs/promises";
 import { resolveToCwd } from "./path-utils.ts";
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
@@ -767,8 +767,31 @@ export interface EditDiffError {
 }
 
 /**
+ * Match `edits` against already-normalized (BOM-stripped, LF) base content and
+ * render the diff. Shared by {@link computeEditsDiff} and
+ * {@link computeEditsDiffWithBaseCache} so both produce byte-identical output;
+ * only the way `normalizedContent` is obtained (fresh read vs. cache) differs.
+ */
+function diffFromNormalizedBase(
+	normalizedContent: string,
+	edits: Edit[],
+	path: string,
+): EditDiffResult | EditDiffError {
+	try {
+		const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
+		return generateDiffString(baseContent, newContent);
+	} catch (err) {
+		return { error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+/**
  * Compute the diff for one or more edit operations without applying them.
  * Used for preview rendering in the TUI before the tool executes.
+ *
+ * Always re-reads from disk — callers that re-run this for the SAME file while
+ * args stream (the edit renderCall) should use {@link computeEditsDiffWithBaseCache}
+ * instead to skip redundant whole-file reads.
  */
 export async function computeEditsDiff(
 	path: string,
@@ -792,10 +815,106 @@ export async function computeEditsDiff(
 		// Strip BOM before matching (LLM won't include invisible BOM in oldText)
 		const { text: content } = stripBom(rawContent);
 		const normalizedContent = normalizeToLF(content);
-		const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
+		return diffFromNormalizedBase(normalizedContent, edits, path);
+	} catch (err) {
+		return { error: err instanceof Error ? err.message : String(err) };
+	}
+}
 
-		// Generate the diff
-		return generateDiffString(baseContent, newContent);
+// --- Cached base read for streaming preview -----------------------------------
+//
+// During an `edit` tool-call the renderCall re-dispatches computeEditsDiff on
+// every newText/oldText delta (each delta changes argsKey). The base FILE
+// content is invariant across those dispatches, so re-reading + re-normalizing
+// the whole file K times per edit is pure waste on a 1500–3000 line file.
+//
+// We cache the normalized (BOM-stripped, LF) base content keyed by
+// (absolutePath, mtimeMs). The cache stores the SAME string that the non-cached
+// path feeds to applyEditsToNormalizedContent, so the diff is byte-identical.
+// Invalidation is by mtimeMs: stat() is cheap and a changed mtime means the
+// file was edited externally mid-stream, so we re-read. The cache is a tiny LRU
+// (2 entries) — it never retains large file bodies indefinitely.
+
+interface BaseCacheEntry {
+	key: string;
+	normalizedContent: string;
+}
+
+const BASE_CACHE_MAX_ENTRIES = 2;
+const baseCache: BaseCacheEntry[] = [];
+
+// Test seam: counts actual whole-file reads done by the cached path so a test
+// can prove a cache hit skipped disk. Not part of the public contract.
+let baseCacheDiskReads = 0;
+
+export function __getEditDiffBaseCacheDiskReads(): number {
+	return baseCacheDiskReads;
+}
+
+export function __resetEditDiffBaseCache(): void {
+	baseCache.length = 0;
+	baseCacheDiskReads = 0;
+}
+
+function getCachedBase(key: string): string | undefined {
+	const idx = baseCache.findIndex((entry) => entry.key === key);
+	if (idx === -1) return undefined;
+	// Move to most-recently-used position.
+	const [entry] = baseCache.splice(idx, 1);
+	baseCache.push(entry);
+	return entry.normalizedContent;
+}
+
+function putCachedBase(key: string, normalizedContent: string): void {
+	const existing = baseCache.findIndex((entry) => entry.key === key);
+	if (existing !== -1) baseCache.splice(existing, 1);
+	baseCache.push({ key, normalizedContent });
+	while (baseCache.length > BASE_CACHE_MAX_ENTRIES) baseCache.shift();
+}
+
+/**
+ * Like {@link computeEditsDiff}, but caches the normalized base content by
+ * (absolutePath, mtimeMs) and reuses it across repeated calls for the same
+ * unchanged file — the streaming-preview hot path. Result is byte-identical to
+ * {@link computeEditsDiff}; only redundant whole-file reads are elided.
+ */
+export async function computeEditsDiffWithBaseCache(
+	path: string,
+	edits: Edit[],
+	cwd: string,
+): Promise<EditDiffResult | EditDiffError> {
+	const absolutePath = resolveToCwd(path, cwd);
+
+	try {
+		// Check if file exists and is readable
+		try {
+			await access(absolutePath, constants.R_OK);
+		} catch (error: unknown) {
+			const errorMessage = error instanceof Error && "code" in error ? `Error code: ${error.code}` : String(error);
+			return { error: `Could not edit file: ${path}. ${errorMessage}.` };
+		}
+
+		let normalizedContent: string | undefined;
+		try {
+			const stats = await stat(absolutePath);
+			const key = `${absolutePath} ${stats.mtimeMs}`;
+			normalizedContent = getCachedBase(key);
+			if (normalizedContent === undefined) {
+				const rawContent = await readFile(absolutePath, "utf-8");
+				baseCacheDiskReads++;
+				const { text: content } = stripBom(rawContent);
+				normalizedContent = normalizeToLF(content);
+				putCachedBase(key, normalizedContent);
+			}
+		} catch {
+			// stat/read failed after the access check (race, transient FS error):
+			// fall back to a plain uncached read so behavior matches computeEditsDiff.
+			const rawContent = await readFile(absolutePath, "utf-8");
+			const { text: content } = stripBom(rawContent);
+			normalizedContent = normalizeToLF(content);
+		}
+
+		return diffFromNormalizedBase(normalizedContent, edits, path);
 	} catch (err) {
 		return { error: err instanceof Error ? err.message : String(err) };
 	}

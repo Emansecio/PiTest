@@ -238,6 +238,27 @@ const BASH_UPDATE_THROTTLE_MS = 100;
 // duration carries no signal, so we drop it (kept on error/truncation/slow).
 const BASH_SLOW_FOOTER_MS = 2000;
 
+// Derived text the result render consumes. Recomputed only when the source
+// snapshot identity changes (see BashTextMemo) — interval/resize/invalidate
+// re-renders reuse it instead of re-running stripAnsi/sanitize/split.
+type BashTextDerived = {
+	failure: { body: string; label: string } | undefined;
+	output: string;
+	logicalLines: string[];
+};
+
+// Memoized text processing for the result body. `contentRef` is the
+// `result.content` array reference — stable across re-renders without a new
+// tool update (tool-execution.ts forwards the same array by reference), and
+// freshly allocated on each 100ms streaming update. So `===` on it (plus the
+// two flags that feed the computation) is an exact "same snapshot" check.
+type BashTextMemo = {
+	contentRef: unknown;
+	showImages: boolean;
+	isError: boolean;
+	derived: BashTextDerived;
+};
+
 type BashRenderState = {
 	startedAt: number | undefined;
 	endedAt: number | undefined;
@@ -247,6 +268,11 @@ type BashRenderState = {
 	// command line instead of costing its own row. Logical-line based (not visual)
 	// so it's width-independent — no cross-component render-order race.
 	skippedHint: number | undefined;
+	// Memo of the last text processing; reused on same-snapshot rebuilds.
+	textMemo: BashTextMemo | undefined;
+	// Test-only: bumped whenever the text is actually (re)processed (memo miss),
+	// so tests can assert that a no-op rebuild reused the memo. Never read by prod.
+	textComputeCount?: number;
 };
 
 class BashResultRenderComponent extends Container {}
@@ -361,6 +387,35 @@ function formatBashCall(args: { command?: string; timeout?: number } | undefined
 	return theme.fg("toolTitle", theme.bold(`$ ${command}`)) + timeoutSuffix;
 }
 
+// Process the result text (stripAnsi/sanitize/failure-peel/split) once per
+// distinct snapshot and cache it on the shared state. A streaming bash emits a
+// partial update every 100ms with a fresh content array, but the 1s elapsed
+// interval, TUI resizes, and invalidates re-run this render with the SAME
+// array — those reuse the memo and skip the per-rebuild string work. Only the
+// content identity + the two flags that affect the computation are compared
+// (expanded changes presentation, not text, so it's excluded by design).
+function computeBashTextDerived(
+	result: { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> },
+	showImages: boolean,
+	isError: boolean,
+	callState: BashRenderState,
+): BashTextDerived {
+	const memo = callState.textMemo;
+	if (memo && memo.contentRef === result.content && memo.showImages === showImages && memo.isError === isError) {
+		return memo.derived;
+	}
+
+	const rawOutput = getTextOutput(result, showImages).trim();
+	// Peel the trailing `Command (exited|aborted|timed out…)` line off so it
+	// becomes a chip on the muted footer instead of a standalone paragraph.
+	const failure = isError ? extractFailureSuffix(rawOutput) : undefined;
+	const output = failure ? failure.body : rawOutput;
+	const derived: BashTextDerived = { failure, output, logicalLines: output.split("\n") };
+	callState.textMemo = { contentRef: result.content, showImages, isError, derived };
+	callState.textComputeCount = (callState.textComputeCount ?? 0) + 1;
+	return derived;
+}
+
 function rebuildBashResultRenderComponent(
 	component: BashResultRenderComponent,
 	result: {
@@ -376,11 +431,7 @@ function rebuildBashResultRenderComponent(
 ): void {
 	component.clear();
 
-	const rawOutput = getTextOutput(result, showImages).trim();
-	// Peel the trailing `Command (exited|aborted|timed out…)` line off so it
-	// becomes a chip on the muted footer instead of a standalone paragraph.
-	const failure = isError ? extractFailureSuffix(rawOutput) : undefined;
-	const output = failure ? failure.body : rawOutput;
+	const { failure, output, logicalLines } = computeBashTextDerived(result, showImages, isError, callState);
 	const emptyOutput = output.length === 0 || output === "(no output)";
 
 	// Default: nothing hidden. The collapsed branch below overrides this; the
@@ -393,8 +444,6 @@ function rebuildBashResultRenderComponent(
 	// of leaving an orphan blank line.
 	let hasContentAbove = false;
 	if (!emptyOutput) {
-		const logicalLines = output.split("\n");
-
 		if (options.expanded) {
 			const styledOutput = logicalLines.map((line) => theme.fg("toolOutput", line)).join("\n");
 			component.addChild(new Text(styledOutput, 0, 0));
