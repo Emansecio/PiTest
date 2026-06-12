@@ -619,5 +619,25 @@ describe("Input component", () => {
 			assert.strictEqual(input.getValue().length, MAX_PASTE_BYTES, "oversized paste should be truncated to the cap");
 			assert.ok(elapsed < 4000, `paste handling took ${elapsed}ms`);
 		});
+
+		it("fires onPasteTruncated with original/kept bytes when a paste is truncated", () => {
+			const calls: Array<{ originalBytes: number; keptBytes: number }> = [];
+			const input = new Input({ onPasteTruncated: (info) => calls.push(info) });
+			const originalLen = 12 * 1024 * 1024;
+			input.handleInput(`\x1b[200~${"a".repeat(originalLen)}\x1b[201~`);
+
+			assert.strictEqual(calls.length, 1, "callback should fire exactly once");
+			assert.strictEqual(calls[0]!.originalBytes, originalLen, "originalBytes is the pre-truncation length");
+			assert.strictEqual(calls[0]!.keptBytes, MAX_PASTE_BYTES, "keptBytes is the cap");
+			assert.strictEqual(input.getValue().length, MAX_PASTE_BYTES, "value truncated to the cap");
+		});
+
+		it("does not fire onPasteTruncated for a normal (sub-cap) paste", () => {
+			const calls: Array<{ originalBytes: number; keptBytes: number }> = [];
+			const input = new Input({ onPasteTruncated: (info) => calls.push(info) });
+			input.handleInput("\x1b[200~hello world\x1b[201~");
+			assert.strictEqual(calls.length, 0, "no truncation => no callback");
+			assert.strictEqual(input.getValue(), "hello world");
+		});
 	});
 });

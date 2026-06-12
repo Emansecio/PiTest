@@ -1098,7 +1098,10 @@ async function executePreparedToolCall(
 	emit: AgentEventSink,
 	config: AgentLoopConfig,
 ): Promise<ExecutedToolCallOutcome> {
-	const updateEvents: Promise<void>[] = [];
+	// Only retain in-flight update emits; each removes itself on settle so a
+	// long-running tool streaming thousands of updates doesn't accumulate
+	// settled promises for the life of the process.
+	const pendingUpdates = new Set<Promise<void>>();
 
 	let executeCtx: import("./types.ts").AgentToolExecuteContext | undefined;
 	if (config.getToolExecuteContext) {
@@ -1115,24 +1118,23 @@ async function executePreparedToolCall(
 			prepared.args as never,
 			signal,
 			(partialResult) => {
-				updateEvents.push(
-					Promise.resolve(
-						emit({
-							type: "tool_execution_update",
-							toolCallId: prepared.toolCall.id,
-							toolName: prepared.toolCall.name,
-							args: prepared.toolCall.arguments,
-							partialResult,
-						}),
-					),
-				);
+				const p = Promise.resolve(
+					emit({
+						type: "tool_execution_update",
+						toolCallId: prepared.toolCall.id,
+						toolName: prepared.toolCall.name,
+						args: prepared.toolCall.arguments,
+						partialResult,
+					}),
+				).finally(() => pendingUpdates.delete(p));
+				pendingUpdates.add(p);
 			},
 			executeCtx,
 		);
-		await Promise.all(updateEvents);
+		await Promise.all(pendingUpdates);
 		return { result, isError: false };
 	} catch (error) {
-		await Promise.all(updateEvents);
+		await Promise.all(pendingUpdates);
 		// Generic convention: an error may attach a structured `detail` field
 		// (HashlineEditError does); carry it through to the result so hint rules
 		// get the structured data, not just the flattened message string.

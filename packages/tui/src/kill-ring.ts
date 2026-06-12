@@ -5,6 +5,10 @@
  * into a single entry. Supports yank (paste most recent) and yank-pop
  * (cycle through older entries).
  */
+
+/** Cap on retained kill entries; oldest are dropped once exceeded. */
+const MAX_KILL_RING_ENTRIES = 60;
+
 export class KillRing {
 	private ring: string[] = [];
 
@@ -24,6 +28,10 @@ export class KillRing {
 			this.ring.push(opts.prepend ? text + last : last + text);
 		} else {
 			this.ring.push(text);
+			// Drop oldest entries (front) to retain the N most recent for yank-pop.
+			while (this.ring.length > MAX_KILL_RING_ENTRIES) {
+				this.ring.shift();
+			}
 		}
 	}
 

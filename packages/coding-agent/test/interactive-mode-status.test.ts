@@ -106,6 +106,23 @@ describe("InteractiveMode.setToolsExpanded", () => {
 	});
 });
 
+describe("InteractiveMode._onPasteTruncated", () => {
+	const call = (self: any, info: { originalBytes: number; keptBytes: number }): void =>
+		(InteractiveMode as any).prototype._onPasteTruncated.call(self, info);
+
+	test("surfaces a truncated paste as a visible warning with MB sizes", () => {
+		const self = { showWarning: vi.fn() };
+		const MiB = 1024 * 1024;
+		call(self, { originalBytes: 12.5 * MiB, keptBytes: 10 * MiB });
+
+		expect(self.showWarning).toHaveBeenCalledTimes(1);
+		const message = self.showWarning.mock.calls[0][0] as string;
+		expect(message).toContain("12.5 MB"); // original size, one decimal
+		expect(message).toContain("10 MB"); // kept / limit
+		expect(message).toMatch(/truncad/i);
+	});
+});
+
 describe("InteractiveMode._warnIfUnknownCommand", () => {
 	function makeThis(known: string[]): any {
 		return {

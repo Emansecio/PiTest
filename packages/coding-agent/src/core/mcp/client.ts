@@ -14,6 +14,67 @@ import type { McpCallToolResult, McpListToolsResult, McpServerConfig, McpToolSch
 const PROTOCOL_VERSION = "2025-06-18";
 const CLIENT_INFO = { name: "pi-coding-agent", version: "0.1.0" };
 
+// Hard ceiling on an MCP response body. A misbehaving/untrusted server returning
+// a multi-GB body would otherwise OOM the process. 25MB is far above any
+// legitimate JSON-RPC payload but finite. Enforced before materializing the
+// body: by Content-Length when present, otherwise by capping the stream read.
+const MAX_MCP_RESPONSE_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Read a response body to a string under MAX_MCP_RESPONSE_BYTES.
+ *
+ * If Content-Length is present and exceeds the cap, reject without reading any
+ * body. Otherwise read the stream chunk-by-chunk, and if the accumulated size
+ * crosses the cap, cancel the body and reject — the whole body is never
+ * materialized first. Normal (small) responses read identically to text().
+ */
+async function readBodyWithCap(response: Response, label: string): Promise<string> {
+	const declared = Number(response.headers.get("content-length"));
+	if (Number.isFinite(declared) && declared > MAX_MCP_RESPONSE_BYTES) {
+		throw new McpTransportError(`${label}: MCP response too large (${declared} bytes)`);
+	}
+	const stream = response.body;
+	// No stream body (mock/empty): fall back to text(), still bounded after read.
+	if (!stream) {
+		const text = await response.text();
+		const size = new TextEncoder().encode(text).length;
+		if (size > MAX_MCP_RESPONSE_BYTES) {
+			throw new McpTransportError(`${label}: MCP response too large (${size} bytes)`);
+		}
+		return text;
+	}
+	const reader = stream.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			total += value.byteLength;
+			if (total > MAX_MCP_RESPONSE_BYTES) {
+				await reader.cancel().catch(() => {});
+				throw new McpTransportError(`${label}: MCP response too large (>${MAX_MCP_RESPONSE_BYTES} bytes)`);
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	return new TextDecoder().decode(concatChunks(chunks, total));
+}
+
+/** Join the collected byte chunks into one buffer of the known total length. */
+function concatChunks(chunks: Uint8Array[], total: number): Uint8Array {
+	const out = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		out.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return out;
+}
+
 interface JsonRpcRequest {
 	jsonrpc: "2.0";
 	id: number | string;
@@ -132,9 +193,12 @@ export class McpHttpClient {
 				throw new McpTransportError(`MCP ${this.name} ${method}: SSE transport not supported (use HTTP JSON)`);
 			}
 
+			// Read under a size cap BEFORE parsing so an untrusted server can't OOM
+			// us with a giant body (checked via Content-Length, else capped stream).
+			const rawBody = await readBodyWithCap(response, `MCP ${this.name} ${method}`);
 			let json: JsonRpcResponse<T>;
 			try {
-				json = (await response.json()) as JsonRpcResponse<T>;
+				json = JSON.parse(rawBody) as JsonRpcResponse<T>;
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				throw new McpTransportError(`MCP ${this.name} ${method}: invalid JSON response (${message})`);

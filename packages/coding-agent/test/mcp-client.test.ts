@@ -220,6 +220,82 @@ describe("McpHttpClient", () => {
 		await expect(client.initialize()).rejects.toThrow("SSE transport not supported");
 	});
 
+	it("rejects a response whose Content-Length exceeds the cap without reading the body", async () => {
+		// Declares a 100MB body via Content-Length. The guard must reject up front;
+		// the body itself must never be read (readBody would throw if touched).
+		let bodyRead = false;
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(async () => {
+			const headers = new Headers({
+				"content-type": "application/json",
+				"content-length": String(100 * 1024 * 1024),
+			});
+			const resp = new Response("{}", { status: 200, headers });
+			Object.defineProperty(resp, "text", {
+				value: () => {
+					bodyRead = true;
+					throw new Error("body should not be read when Content-Length exceeds cap");
+				},
+			});
+			Object.defineProperty(resp, "json", {
+				value: () => {
+					bodyRead = true;
+					throw new Error("body should not be read when Content-Length exceeds cap");
+				},
+			});
+			return resp;
+		}) as unknown as typeof fetch;
+		const client = new McpHttpClient("big", { url: TEST_URL });
+		await expect(client.initialize()).rejects.toThrow("MCP response too large");
+		expect(bodyRead).toBe(false);
+	});
+
+	it("aborts and rejects a chunked response that streams past the cap (no Content-Length)", async () => {
+		// No Content-Length → guard must cap the stream read. Emits 1MB chunks
+		// without end; once the accumulated size crosses the cap it cancels the
+		// body and rejects. `cancel()` resolves the stream so the test terminates.
+		let cancelled = false;
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(async () => {
+			const oneMb = new Uint8Array(1024 * 1024);
+			const body = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					// Endless 1MB chunks; the reader cap stops us well before OOM.
+					controller.enqueue(oneMb);
+				},
+				cancel() {
+					cancelled = true;
+				},
+			});
+			// No content-length header → forces the streaming cap path.
+			return new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+		}) as unknown as typeof fetch;
+		const client = new McpHttpClient("flood", { url: TEST_URL });
+		await expect(client.initialize()).rejects.toThrow("MCP response too large");
+		expect(cancelled).toBe(true);
+	});
+
+	it("parses a normal (under-cap) response identically through the capped reader", async () => {
+		// Behavior-preservation: a small body must parse to the exact same result.
+		installFetch({
+			[TEST_URL]: (body) => {
+				if (body.method === "initialize") {
+					return { protocolVersion: "2025-06-18", serverInfo: { name: "test", version: "1" } };
+				}
+				if (body.method === "tools/list") {
+					return { tools: [{ name: "ping", description: "ping", inputSchema: { type: "object" } }] };
+				}
+				if (body.method === "tools/call") {
+					return { content: [{ type: "text", text: "pong" }] };
+				}
+				throw new Error(`unexpected method ${body.method}`);
+			},
+		});
+		const client = new McpHttpClient("normal", { url: TEST_URL });
+		await client.initialize();
+		expect(client.getTools().map((t) => t.name)).toEqual(["ping"]);
+		const result = await client.callTool("ping", {});
+		expect(result.content[0]).toEqual({ type: "text", text: "pong" });
+	});
+
 	it("captures Mcp-Session-Id from initialize and echoes it on every later request", async () => {
 		const SID = "sess-abc-123";
 		const sentSessionIds: Array<string | null> = [];

@@ -47,6 +47,17 @@ const DEFAULT_LIMIT = 100;
 // read.ts's STREAM_READ_MIN_BYTES.
 const MAX_GREP_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_GREP_FILE_SIZE_ARG = "10M";
+// Cap retained rg stderr so a tree spewing permission/diagnostic warnings can't
+// grow memory unbounded. Mirrors the LSP's MAX_STDERR_BYTES. We keep the HEAD,
+// not the tail: stderr is consumed once as the error message and the first line
+// carries the actionable failure (e.g. the "regex parse error" we sniff below).
+const MAX_GREP_STDERR_BYTES = 64 * 1024;
+
+/** Append a stderr chunk while retaining at most the leading MAX_GREP_STDERR_BYTES. */
+export function appendCappedStderr(current: string, chunk: string): string {
+	if (current.length >= MAX_GREP_STDERR_BYTES) return current;
+	return (current + chunk).slice(0, MAX_GREP_STDERR_BYTES);
+}
 
 export interface GrepToolDetails {
 	truncation?: TruncationResult;
@@ -280,7 +291,7 @@ export function createGrepToolDefinition(
 						};
 						signal?.addEventListener("abort", onAbort, { once: true });
 						child.stderr?.on("data", (chunk) => {
-							stderr += chunk.toString();
+							stderr = appendCappedStderr(stderr, chunk.toString());
 						});
 
 						const formatBlock = async (filePath: string, lineNumber: number): Promise<string[]> => {

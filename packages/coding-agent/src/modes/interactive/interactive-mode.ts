@@ -509,6 +509,7 @@ export class InteractiveMode {
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
+			onPasteTruncated: (info) => this._onPasteTruncated(info),
 		});
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
@@ -3933,6 +3934,17 @@ export class InteractiveMode {
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));
 		this.ui.requestRender();
+	}
+
+	/** Surface a paste-truncation event from the editor as a visible warning. The
+	 * editor has no warning channel of its own, so it plumbs this here. */
+	private _onPasteTruncated(info: { originalBytes: number; keptBytes: number }): void {
+		const bytesPerMB = 1024 * 1024;
+		const originalMB = (info.originalBytes / bytesPerMB).toFixed(1);
+		const keptMB = Math.round(info.keptBytes / bytesPerMB);
+		this.showWarning(
+			`Paste truncado: ${originalMB} MB excede o limite de ${keptMB} MB, mantido os primeiros ${keptMB} MB.`,
+		);
 	}
 
 	showNewVersionNotification(release: LatestPiRelease): void {

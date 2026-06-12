@@ -75,6 +75,42 @@ const WAIT_FOR_POLL_MS = 200;
 const WAIT_FOR_DEFAULT_TIMEOUT_MS = 5_000;
 const WAIT_FOR_MAX_TIMEOUT_MS = 30_000;
 const A11Y_SNAPSHOT_MAX_LINES = 800;
+// Hard ceiling on a single CDP payload (network body / evaluate result) we keep
+// and hand downstream. A multi-hundred-MB asset would otherwise be copied into
+// the tool result / render / compaction and blow the heap. Truncate at this cap.
+const MAX_CDP_BODY_BYTES = 10 * 1024 * 1024;
+
+/** Cap an oversized payload string, replacing the tail with a byte-count marker. */
+function capPayload(text: string, max: number): string {
+	if (text.length <= max) return text;
+	return `${text.slice(0, max)}\n[corpo truncado: ${max} de ${text.length} bytes]`;
+}
+
+/**
+ * Bound an evaluate result so a huge serialized value never propagates. Small
+ * values pass through untouched (identical behavior); only an oversized value is
+ * capped to a marker string. Strings cap directly; other types serialize once to
+ * measure, and when oversized return the capped JSON text as the value.
+ */
+function capEvaluateValue(value: unknown): unknown {
+	if (typeof value === "string") {
+		if (value.length <= MAX_CDP_BODY_BYTES) return value;
+		return capPayload(value, MAX_CDP_BODY_BYTES);
+	}
+	if (value === undefined || value === null) return value;
+	const serialized = safeStringify(value);
+	if (serialized === undefined || serialized.length <= MAX_CDP_BODY_BYTES) return value;
+	return capPayload(serialized, MAX_CDP_BODY_BYTES);
+}
+
+/** JSON.stringify that swallows cyclic/throwing values (returns undefined). */
+function safeStringify(value: unknown): string | undefined {
+	try {
+		return JSON.stringify(value);
+	} catch {
+		return undefined;
+	}
+}
 
 /** Named keys for pressKey, mapped to CDP Input.dispatchKeyEvent fields. */
 const KEY_DEFS: Record<string, { key: string; code: string; keyCode: number; text?: string }> = {
@@ -246,7 +282,7 @@ export class ChromeDevtoolsManager {
 			return { error: details.exception?.description ?? details.text ?? "Evaluation threw an exception." };
 		}
 		const r = res?.result ?? {};
-		return { value: r.value, description: r.description };
+		return { value: capEvaluateValue(r.value), description: r.description };
 	}
 
 	/**
@@ -502,7 +538,10 @@ export class ChromeDevtoolsManager {
 	async getResponseBody(requestId: string, signal?: AbortSignal): Promise<{ body: string; base64Encoded: boolean }> {
 		const conn = await this.requireConn();
 		const res = await conn.send("Network.getResponseBody", { requestId }, { signal });
-		return { body: typeof res?.body === "string" ? res.body : "", base64Encoded: !!res?.base64Encoded };
+		// CDP returns the whole body; cap it so a giant asset isn't retained or
+		// propagated to the rest of the pipeline (tool result, render, compaction).
+		const raw = typeof res?.body === "string" ? res.body : "";
+		return { body: capPayload(raw, MAX_CDP_BODY_BYTES), base64Encoded: !!res?.base64Encoded };
 	}
 
 	private async elementCenter(

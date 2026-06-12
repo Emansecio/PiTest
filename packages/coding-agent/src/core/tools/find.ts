@@ -37,6 +37,17 @@ const DEFAULT_LIMIT = 1000;
 // ENUMERATION (pre-minimatch), not the matches, so it must sit far above any
 // realistic result limit or real matches get silently dropped in large trees.
 const FD_POST_FILTER_ENUM_CAP = 100_000;
+// Cap retained fd stderr so a tree spewing permission/diagnostic warnings can't
+// grow memory unbounded. Mirrors the LSP's MAX_STDERR_BYTES. We keep the HEAD,
+// not the tail: stderr is consumed once as the error message and the first line
+// carries the actionable failure.
+const MAX_FIND_STDERR_BYTES = 64 * 1024;
+
+/** Append a stderr chunk while retaining at most the leading MAX_FIND_STDERR_BYTES. */
+export function appendCappedStderr(current: string, chunk: string): string {
+	if (current.length >= MAX_FIND_STDERR_BYTES) return current;
+	return (current + chunk).slice(0, MAX_FIND_STDERR_BYTES);
+}
 
 export interface FindToolDetails {
 	truncation?: TruncationResult;
@@ -286,7 +297,7 @@ export function createFindToolDefinition(
 						};
 
 						child.stderr?.on("data", (chunk) => {
-							stderr += chunk.toString();
+							stderr = appendCappedStderr(stderr, chunk.toString());
 						});
 
 						rl.on("line", (line) => {

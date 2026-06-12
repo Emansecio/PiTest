@@ -1,5 +1,23 @@
 import type { AssistantMessage, AssistantMessageEvent } from "../types.ts";
 
+// Pathological backlog threshold for the observability guard below. The producer
+// (provider SSE loop) is network-paced and the consumer (agent-loop) drains at
+// microtask speed with no blocking I/O between events, so the live backlog
+// normally stays tiny. Real backpressure (async push) is an invasive follow-up:
+// it would change push()'s signature and require awaiting at ~80 provider
+// call-sites. Until then, warn once if depth ever crosses this watermark so a
+// slow-consumer regression is detectable in production without changing
+// semantics. Override via PIT_EVENT_STREAM_WARN_DEPTH (<=0 disables).
+const DEFAULT_BACKLOG_WARN_DEPTH = 50000;
+
+function resolveBacklogWarnDepth(): number {
+	const raw = process.env.PIT_EVENT_STREAM_WARN_DEPTH;
+	if (raw === undefined) return DEFAULT_BACKLOG_WARN_DEPTH;
+	const parsed = Number.parseInt(raw, 10);
+	if (Number.isNaN(parsed)) return DEFAULT_BACKLOG_WARN_DEPTH;
+	return parsed;
+}
+
 // Generic event stream class for async iteration
 export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private queue: T[] = [];
@@ -10,6 +28,10 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private resolveFinalResult!: (result: R) => void;
 	private isComplete: (event: T) => boolean;
 	private extractResult: (event: T) => R;
+	// One-shot rate limit so a pathological backlog logs exactly once per stream.
+	private warnedBacklog = false;
+	// Resolved once at construction; reading env per-push would be wasteful.
+	private backlogWarnDepth = resolveBacklogWarnDepth();
 
 	constructor(isComplete: (event: T) => boolean, extractResult: (event: T) => R) {
 		this.isComplete = isComplete;
@@ -33,6 +55,16 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			waiter({ value: event, done: false });
 		} else {
 			this.queue.push(event);
+			// Live backlog = queued entries not yet consumed by the cursor.
+			// Observability only: never drops, blocks, or coalesces events.
+			const depth = this.queue.length - this.head;
+			if (!this.warnedBacklog && depth >= this.backlogWarnDepth && this.backlogWarnDepth > 0) {
+				this.warnedBacklog = true;
+				console.warn(
+					`[EventStream] backlog reached ${depth} events (consumer slower than producer); ` +
+						"events are buffered, not dropped. Set PIT_EVENT_STREAM_WARN_DEPTH to tune.",
+				);
+			}
 		}
 	}
 

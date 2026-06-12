@@ -828,9 +828,14 @@ function scheduleSessionWebSocketExpiry(sessionId: string, entry: CachedWebSocke
 		clearTimeout(entry.idleTimer);
 	}
 	entry.idleTimer = setTimeout(() => {
+		// Drop our own handle first so a later clearTimeout can't target a fired
+		// timer, then bail if the slot was reused/replaced (delete only OUR entry).
+		entry.idleTimer = undefined;
 		if (entry.busy) return;
 		closeWebSocketSilently(entry.socket, 1000, "idle_timeout");
-		websocketSessionCache.delete(sessionId);
+		if (websocketSessionCache.get(sessionId) === entry) {
+			websocketSessionCache.delete(sessionId);
+		}
 	}, SESSION_WEBSOCKET_CACHE_TTL_MS);
 }
 
@@ -1058,30 +1063,41 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 		resolve();
 	};
 
-	const onMessage: WebSocketListener = (event) => {
-		void (async () => {
-			let text: string | null = null;
-			try {
-				if (!event || typeof event !== "object" || !("data" in event)) return;
-				text = await decodeWebSocketData((event as { data?: unknown }).data);
-				if (!text) return;
-				const parsed = JSON.parse(text) as Record<string, unknown>;
-				const type = typeof parsed.type === "string" ? parsed.type : "";
-				if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
-					sawCompletion = true;
-					done = true;
-				}
-				queue.push(parsed);
-				wake();
-			} catch (cause) {
-				failed = new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
-					cause,
-					payload: text,
-				});
+	// Serialize frame decode+enqueue through a promise-chain. decodeWebSocketData
+	// is async (Blob/ArrayBuffer await a real boundary), so fire-and-forget could
+	// let a later string frame enqueue before an earlier binary one. Chaining each
+	// frame after the previous preserves arrival order and bounds in-flight work to
+	// one decode at a time (natural backpressure). The happy path (few spaced
+	// frames) is unchanged — the chain stays resolved between frames.
+	let tail: Promise<void> = Promise.resolve();
+
+	const decodeAndEmit = async (data: unknown): Promise<void> => {
+		let text: string | null = null;
+		try {
+			text = await decodeWebSocketData(data);
+			if (!text) return;
+			const parsed = JSON.parse(text) as Record<string, unknown>;
+			const type = typeof parsed.type === "string" ? parsed.type : "";
+			if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
+				sawCompletion = true;
 				done = true;
-				wake();
 			}
-		})();
+			queue.push(parsed);
+			wake();
+		} catch (cause) {
+			failed = new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
+				cause,
+				payload: text,
+			});
+			done = true;
+			wake();
+		}
+	};
+
+	const onMessage: WebSocketListener = (event) => {
+		if (!event || typeof event !== "object" || !("data" in event)) return;
+		const data = (event as { data?: unknown }).data;
+		tail = tail.then(() => decodeAndEmit(data));
 	};
 
 	const onError: WebSocketListener = (event) => {
@@ -1237,31 +1253,36 @@ async function processWebSocketStream(
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
 	const { socket, entry, reused, release } = await acquireWebSocket(url, headers, options?.sessionId, options?.signal);
+	// keepConnection drives release({ keep }) in finally. The try spans EVERY use
+	// of the acquired connection (stats prep + body build + send + stream) so that
+	// any throw or abort between acquire and stream end still routes through
+	// release — otherwise a freshly-cached busy entry leaks (socket open, pinned in
+	// the cache, never reusable, never expired since the idle timer skips busy).
 	let keepConnection = true;
 	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
-	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
-	// WebSocket continuation still works via connection-scoped previous_response_id state.
-	const fullBody = body;
-	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
-	const stats = options?.sessionId ? getOrCreateWebSocketDebugStats(options.sessionId) : undefined;
-	if (stats) {
-		stats.requests++;
-		if (reused) stats.connectionsReused++;
-		else stats.connectionsCreated++;
-		if (useCachedContext) stats.cachedContextRequests++;
-		if (requestBody.store === true) stats.storeTrueRequests++;
-		stats.lastInputItems = requestBody.input?.length ?? 0;
-		if (requestBody.previous_response_id) {
-			stats.deltaRequests++;
-			stats.lastDeltaInputItems = requestBody.input?.length ?? 0;
-			stats.lastPreviousResponseId = requestBody.previous_response_id;
-		} else {
-			stats.fullContextRequests++;
-			stats.lastDeltaInputItems = undefined;
-			stats.lastPreviousResponseId = undefined;
-		}
-	}
 	try {
+		// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
+		// WebSocket continuation still works via connection-scoped previous_response_id state.
+		const fullBody = body;
+		const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;
+		const stats = options?.sessionId ? getOrCreateWebSocketDebugStats(options.sessionId) : undefined;
+		if (stats) {
+			stats.requests++;
+			if (reused) stats.connectionsReused++;
+			else stats.connectionsCreated++;
+			if (useCachedContext) stats.cachedContextRequests++;
+			if (requestBody.store === true) stats.storeTrueRequests++;
+			stats.lastInputItems = requestBody.input?.length ?? 0;
+			if (requestBody.previous_response_id) {
+				stats.deltaRequests++;
+				stats.lastDeltaInputItems = requestBody.input?.length ?? 0;
+				stats.lastPreviousResponseId = requestBody.previous_response_id;
+			} else {
+				stats.fullContextRequests++;
+				stats.lastDeltaInputItems = undefined;
+				stats.lastPreviousResponseId = undefined;
+			}
+		}
 		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(

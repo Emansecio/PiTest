@@ -20,7 +20,7 @@ export {
 } from "./components/cheatsheet.ts";
 export { Editor, type EditorOptions, type EditorTheme } from "./components/editor.ts";
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.ts";
-export { Input } from "./components/input.ts";
+export { Input, type InputOptions } from "./components/input.ts";
 export {
 	Loader,
 	type LoaderColorFn,

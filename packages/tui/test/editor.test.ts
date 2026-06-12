@@ -2151,6 +2151,62 @@ describe("Editor component", () => {
 	});
 
 	describe("Autocomplete", () => {
+		it("does not wedge the serialized chain when a provider hangs (B10)", async () => {
+			// Force a tiny timeout so the test doesn't wait the real multi-second bound.
+			const prevTimeout = process.env.PIT_AUTOCOMPLETE_TIMEOUT_MS;
+			process.env.PIT_AUTOCOMPLETE_TIMEOUT_MS = "30";
+			try {
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+
+				let callCount = 0;
+				const mockProvider: AutocompleteProvider = {
+					getSuggestions: async (lines, _cursorLine, cursorCol, options) => {
+						callCount += 1;
+						if (callCount === 1) {
+							// First request HANGS: a Promise that never settles. Without the
+							// timeout this pins `await previousTask` and the whole chain.
+							return new Promise(() => {});
+						}
+						if (!options.force) return null;
+						const text = lines[0] || "";
+						const prefix = text.slice(0, cursorCol);
+						if (prefix === "Work") {
+							return { items: [{ value: "Workspace/", label: "Workspace/" }], prefix: "Work" };
+						}
+						return null;
+					},
+					applyCompletion,
+				};
+
+				editor.setAutocompleteProvider(mockProvider);
+
+				// First Tab: provider hangs, leaving a pending request in the chain.
+				editor.handleInput("\t");
+				await flushAutocomplete();
+
+				// Type "Work" then Tab again: this request must NOT be blocked by the
+				// hung predecessor — after the timeout clears it, it runs and applies.
+				for (const ch of "Work") editor.handleInput(ch);
+				editor.handleInput("\t");
+
+				// Wait long enough for the 30ms predecessor-timeout to elapse and the
+				// second request to settle. Poll instead of a fixed sleep.
+				const deadline = Date.now() + 2000;
+				while (editor.getText() !== "Workspace/" && Date.now() < deadline) {
+					await new Promise((resolve) => setTimeout(resolve, 10));
+				}
+
+				assert.strictEqual(editor.getText(), "Workspace/", "second request completed despite the hung first one");
+				assert.ok(callCount >= 2, "the second (non-hung) request actually ran");
+			} finally {
+				if (prevTimeout === undefined) {
+					delete process.env.PIT_AUTOCOMPLETE_TIMEOUT_MS;
+				} else {
+					process.env.PIT_AUTOCOMPLETE_TIMEOUT_MS = prevTimeout;
+				}
+			}
+		});
+
 		it("auto-applies single force-file suggestion without showing menu", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
@@ -4062,6 +4118,34 @@ describe("Editor component", () => {
 			assert.strictEqual(keptChars, MAX_PASTE_BYTES, "oversized paste should be truncated to the cap");
 			// Sanity: the cap kept it fast (no event-loop freeze). Generous bound for CI.
 			assert.ok(elapsed < 4000, `paste handling took ${elapsed}ms`);
+		});
+
+		it("fires onPasteTruncated with original/kept bytes when a paste is truncated", () => {
+			const calls: Array<{ originalBytes: number; keptBytes: number }> = [];
+			const editor = new Editor(createTestTUI(), defaultEditorTheme, {
+				onPasteTruncated: (info) => calls.push(info),
+			});
+			const originalLen = 12 * 1024 * 1024;
+			const huge = "a".repeat(originalLen);
+			editor.handleInput(`\x1b[200~${huge}\x1b[201~`);
+
+			assert.strictEqual(calls.length, 1, "callback should fire exactly once");
+			assert.strictEqual(calls[0]!.originalBytes, originalLen, "originalBytes is the pre-truncation length");
+			assert.strictEqual(calls[0]!.keptBytes, MAX_PASTE_BYTES, "keptBytes is the cap");
+			// And the inserted text was actually truncated to the cap.
+			const marker = editor.getText().match(/\[paste #\d+ (\d+) chars\]/);
+			assert.ok(marker, "oversized paste still summarized as a marker");
+			assert.strictEqual(Number(marker![1]), MAX_PASTE_BYTES, "kept text equals the cap");
+		});
+
+		it("does not fire onPasteTruncated for a normal (sub-cap) paste", () => {
+			const calls: Array<{ originalBytes: number; keptBytes: number }> = [];
+			const editor = new Editor(createTestTUI(), defaultEditorTheme, {
+				onPasteTruncated: (info) => calls.push(info),
+			});
+			editor.handleInput("\x1b[200~hello world\x1b[201~");
+			assert.strictEqual(calls.length, 0, "no truncation => no callback");
+			assert.strictEqual(editor.getText(), "hello world");
 		});
 	});
 });

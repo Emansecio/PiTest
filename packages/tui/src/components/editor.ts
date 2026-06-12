@@ -234,6 +234,13 @@ export interface EditorTheme {
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
+	/**
+	 * Called when a paste exceeds MAX_PASTE_BYTES and is truncated. The editor has
+	 * no warning surface of its own, so the consumer plumbs this to its own warning
+	 * mechanism (e.g. showWarning). `originalBytes` is the pre-truncation length,
+	 * `keptBytes` the length actually inserted.
+	 */
+	onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
 }
 
 const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -242,6 +249,41 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 };
 
 const ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS = 20;
+
+/**
+ * Max time to wait for one autocomplete request (provider response) and for the
+ * previous request in the serialized chain. A provider that hangs (a Promise that
+ * never settles) would otherwise wedge the whole `await previousTask` chain and
+ * retain its closures; on timeout we abandon that request and let the chain
+ * proceed. A fast provider settles well under this, so normal behavior is unchanged.
+ */
+const AUTOCOMPLETE_REQUEST_TIMEOUT_MS = 4000;
+
+/** Effective autocomplete timeout. Overridable via PIT_AUTOCOMPLETE_TIMEOUT_MS
+ * (used by tests to avoid a real multi-second wait); read per call so the env can
+ * be set after import. Falls back to the constant when unset/invalid. */
+function autocompleteTimeoutMs(): number {
+	const raw = Number(process.env.PIT_AUTOCOMPLETE_TIMEOUT_MS);
+	return Number.isFinite(raw) && raw > 0 ? raw : AUTOCOMPLETE_REQUEST_TIMEOUT_MS;
+}
+
+/** Resolve when `promise` settles or after `ms`, whichever comes first. The
+ * timer is cleared on settle so a resolved request leaves no dangling handle. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+	return new Promise<T | undefined>((resolve) => {
+		const timer = setTimeout(() => resolve(undefined), ms);
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			() => {
+				clearTimeout(timer);
+				resolve(undefined);
+			},
+		);
+	});
+}
 
 /** Default half-period of the cursor blink: cursor on for this long, then off
  * for this long (~530ms each, the classic terminal cadence). */
@@ -327,6 +369,8 @@ export class Editor implements Component, Focusable {
 	// Paste tracking for large pastes
 	private pastes: Map<number, string> = new Map();
 	private pasteCounter: number = 0;
+	// Optional consumer callback fired when a paste is truncated at MAX_PASTE_BYTES.
+	private onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
 
 	// Bracketed paste mode buffering
 	private pasteBuffer: string = "";
@@ -381,6 +425,7 @@ export class Editor implements Component, Focusable {
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
 		this.autocompleteMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
+		this.onPasteTruncated = options.onPasteTruncated;
 	}
 
 	/** Set of currently valid paste IDs, for marker-aware segmentation. */
@@ -1409,9 +1454,13 @@ export class Editor implements Component, Focusable {
 		// Cap the paste BEFORE any full-string pass. A multi-MB blob (base64, log,
 		// file dump) would otherwise block the event loop or OOM in the passes
 		// below — the marker branch only kicks in after the cost is already paid.
-		// Truncated silently (no warning surface on this component); the marker
-		// branch still summarizes the result.
-		const cappedText = pastedText.length > MAX_PASTE_BYTES ? pastedText.slice(0, MAX_PASTE_BYTES) : pastedText;
+		// The editor has no warning surface; the consumer's onPasteTruncated (if
+		// provided) surfaces the truncation, and the marker branch still summarizes.
+		const wasTruncated = pastedText.length > MAX_PASTE_BYTES;
+		const cappedText = wasTruncated ? pastedText.slice(0, MAX_PASTE_BYTES) : pastedText;
+		if (wasTruncated) {
+			this.onPasteTruncated?.({ originalBytes: pastedText.length, keptBytes: cappedText.length });
+		}
 
 		// Decode CSI-u-encoded control bytes some terminals inject into pastes
 		// (see decodeBracketedPasteCsiU) before the per-char filter below runs.
@@ -2465,7 +2514,10 @@ export class Editor implements Component, Focusable {
 	): Promise<void> {
 		const previousTask = this.autocompleteRequestTask;
 		this.autocompleteRequestTask = (async () => {
-			await previousTask;
+			// Bound the wait on the predecessor: a hung prior request (provider Promise
+			// that never settles) must not wedge the serialized chain forever. On
+			// timeout we drop through; staleness is re-checked via the start token below.
+			await withTimeout(previousTask, autocompleteTimeoutMs());
 			if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) {
 				return;
 			}
@@ -2503,12 +2555,27 @@ export class Editor implements Component, Focusable {
 	): Promise<void> {
 		if (!this.autocompleteProvider) return;
 
-		const suggestions = await this.autocompleteProvider.getSuggestions(
+		// Bound the provider call: if it hangs (Promise that never settles), abandon
+		// this request after the timeout instead of pinning the serialized chain.
+		// withTimeout yields undefined on timeout — distinct from a provider that
+		// resolves with no items — so we abort and bail without touching the UI.
+		const providerPromise = this.autocompleteProvider.getSuggestions(
 			this.state.lines,
 			this.state.cursorLine,
 			this.state.cursorCol,
 			{ signal: controller.signal, force: options.force },
 		);
+		const settled = await withTimeout(
+			providerPromise.then((value) => ({ value }) as const),
+			autocompleteTimeoutMs(),
+		);
+		if (settled === undefined) {
+			// Timed out: signal the (still-pending) provider to abort and stop here.
+			controller.abort();
+			if (this.autocompleteAbort === controller) this.autocompleteAbort = undefined;
+			return;
+		}
+		const suggestions = settled.value;
 
 		if (!this.isAutocompleteRequestCurrent(requestId, controller, snapshotText, snapshotLine, snapshotCol)) {
 			return;

@@ -290,6 +290,12 @@ const GOAL_MAX_AUTO_ITERATIONS = 50;
 // live Tier 4 hint rule registered (2 = the second failure arms it, so the
 // third occurrence is the first to carry the corrective hint).
 const SAME_SESSION_HINT_THRESHOLD = 2;
+// LRU cap on the in-memory learned-error store. The fingerprint normalizes only
+// digits, so path/identifier-varied errors mint unbounded distinct keys over a
+// long exploration session. Evict the least-recently-used (coldest) entry when a
+// NEW key would exceed the cap — cold entries are the least useful to the
+// recurring-error guard, and the disk persist iterates values order-insensitively.
+const MAX_LEARNED_ERRORS = 500;
 
 /** Build the continuation prompt that re-injects a failed verification check. */
 function verificationFixPrompt(
@@ -1340,6 +1346,11 @@ export class AgentSession {
 			case "agent_end":
 				this._toolCallArgsByCallId.clear();
 				this._rejectedToolCallIds.clear();
+				// Symmetric with the sibling maps: a turn aborted between hint-applied
+				// and execution-end leaves an orphan entry that nothing collects.
+				// Read happens earlier in _handleToolExecutionEnd, so the happy path
+				// has already drained the relevant key before agent_end fires.
+				this._hintsByToolCallId.clear();
 				if (this._extensionRunner.hasHandlers("agent_end")) {
 					await this._extensionRunner.emit({ type: "agent_end", messages: event.messages });
 				}
@@ -1488,6 +1499,10 @@ export class AgentSession {
 				const key = `${event.toolName}:${fingerprint}`;
 				const existing = this._learnedErrors.get(key);
 				if (existing) {
+					// LRU touch: re-insert at the tail so a still-active fingerprint is
+					// not the one evicted when a new key later overflows the cap.
+					this._learnedErrors.delete(key);
+					this._learnedErrors.set(key, existing);
 					existing.count += 1;
 					if (matchedHintRules && matchedHintRules.length > 0 && !existing.matchedRuleId) {
 						existing.matchedRuleId = matchedHintRules[0];
@@ -1512,6 +1527,13 @@ export class AgentSession {
 						);
 					}
 				} else {
+					// Cap cardinality: drop the least-recently-used (oldest insertion-
+					// ordered) key before adding a new one. Cold entries are the least
+					// useful to the recurring-error guard.
+					if (this._learnedErrors.size >= MAX_LEARNED_ERRORS) {
+						const oldestKey = this._learnedErrors.keys().next().value;
+						if (oldestKey !== undefined) this._learnedErrors.delete(oldestKey);
+					}
 					this._learnedErrors.set(key, {
 						tool: event.toolName,
 						fingerprint,

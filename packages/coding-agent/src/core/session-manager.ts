@@ -10,7 +10,9 @@ import {
 	readdirSync,
 	readFileSync,
 	readSync,
+	renameSync,
 	statSync,
+	unlinkSync,
 	writeFileSync,
 } from "fs";
 import { appendFile, readdir, readFile, stat } from "fs/promises";
@@ -844,6 +846,89 @@ async function listSessionsFromDir(
 	return sessions;
 }
 
+// On Windows, AV scanners / indexers hold a transient handle on a just-written
+// file, so a write racing them fails with one of these codes. They clear within
+// a few ms, so a short bounded retry absorbs them. Hard errors (ENOSPC/ENOENT)
+// are NOT here — they must propagate immediately.
+const TRANSIENT_FS_CODES = new Set(["EBUSY", "EPERM", "EACCES"]);
+const FS_RETRY_BACKOFF_MS = [0, 20, 60];
+
+function isTransientFsError(err: unknown): boolean {
+	const code = (err as { code?: string } | null)?.code;
+	return typeof code === "string" && TRANSIENT_FS_CODES.has(code);
+}
+
+// Synchronous sleep without busy-spinning the CPU: Atomics.wait blocks the
+// thread on a throwaway buffer for the given ms. _persist is sync (appendFileSync),
+// so we can't await a timer here.
+const SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+function sleepSync(ms: number): void {
+	if (ms <= 0) return;
+	Atomics.wait(SLEEP_BUFFER, 0, 0, ms);
+}
+
+// appendFileSync of a complete batch is a single write() syscall, but a transient
+// AV/indexer lock (EBUSY/EPERM/EACCES) can still bounce it. Retry a few times with
+// a short backoff; on the final failure the error propagates (the caller's state
+// is kept safe for a later retry by the flushed/_writeQueue invariants in _persist).
+function appendWithRetry(file: string, data: string): void {
+	for (let attempt = 0; attempt < FS_RETRY_BACKOFF_MS.length; attempt++) {
+		try {
+			appendFileSync(file, data);
+			return;
+		} catch (err) {
+			const last = attempt === FS_RETRY_BACKOFF_MS.length - 1;
+			if (last || !isTransientFsError(err)) throw err;
+			sleepSync(FS_RETRY_BACKOFF_MS[attempt + 1]);
+		}
+	}
+}
+
+// Atomic full-file rewrite: write to a sibling temp file, then rename over the
+// destination (rename is atomic on the same filesystem). A crash mid-write leaves
+// only the temp file, never a truncated session. On Windows rename onto an existing
+// file can fail with EEXIST/EPERM, and AV locks can throw transient codes, so we
+// retry; if rename still fails we fall back to a direct write (degrades to the old
+// non-atomic behavior — no worse than before). The temp file is always cleaned up.
+function writeFileAtomic(file: string, data: string): void {
+	const tmp = `${file}.tmp-${process.pid}`;
+	try {
+		writeFileSync(tmp, data);
+	} catch (err) {
+		tryUnlink(tmp);
+		throw err;
+	}
+	for (let attempt = 0; attempt < FS_RETRY_BACKOFF_MS.length; attempt++) {
+		try {
+			renameSync(tmp, file);
+			return;
+		} catch (err) {
+			const last = attempt === FS_RETRY_BACKOFF_MS.length - 1;
+			if (!last && isTransientFsError(err)) {
+				sleepSync(FS_RETRY_BACKOFF_MS[attempt + 1]);
+				continue;
+			}
+			// Final attempt failed (or a non-transient error like EEXIST on some
+			// Windows configs): fall back to a direct in-place write so we still
+			// persist, then drop the temp file.
+			try {
+				writeFileSync(file, data);
+			} finally {
+				tryUnlink(tmp);
+			}
+			return;
+		}
+	}
+}
+
+function tryUnlink(file: string): void {
+	try {
+		unlinkSync(file);
+	} catch {
+		// Best-effort cleanup; a leftover .tmp is harmless and gets overwritten.
+	}
+}
+
 /**
  * Manages conversation sessions as append-only trees stored in JSONL files.
  *
@@ -976,7 +1061,9 @@ export class SessionManager {
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
 		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
-		writeFileSync(this.sessionFile, content);
+		// Atomic rewrite (temp + rename) so a crash mid-write never truncates the
+		// session file. Falls back to a direct write if rename is unavailable.
+		writeFileAtomic(this.sessionFile, content);
 	}
 
 	isPersisted(): boolean {
@@ -1047,7 +1134,13 @@ export class SessionManager {
 		if (this._writeQueue.length > 0) {
 			batch = this._writeQueue.join("") + batch;
 		}
-		appendFileSync(this.sessionFile, batch);
+		// Single appendFileSync of the COMPLETE batch = one write() syscall, so an
+		// entry is never split across appends. Cross-process concurrent appends to
+		// the same .jsonl (two `pit` on one session) could still interleave at the
+		// byte level — accepted as best-effort; a full cross-process lockfile is a
+		// follow-up. The retry absorbs transient AV/indexer locks on Windows; on
+		// final failure it throws with state kept safe for the next attempt.
+		appendWithRetry(this.sessionFile, batch);
 		// Append succeeded: now it is safe to commit the flushed flag and clear
 		// the queued writes we just persisted.
 		if (isInitialFlush) {
@@ -1648,7 +1741,9 @@ export class SessionManager {
 				lines.push(`${JSON.stringify(entry)}\n`);
 			}
 		}
-		writeFileSync(newSessionFile, lines.join(""));
+		// Atomic write (temp + rename): a crash mid-fork never leaves a truncated
+		// forked session on disk.
+		writeFileAtomic(newSessionFile, lines.join(""));
 
 		return new SessionManager(targetCwd, dir, newSessionFile, true);
 	}

@@ -308,6 +308,41 @@ describe("ChromeDevtoolsManager", () => {
 		expect(await mgr.getResponseBody("r1")).toEqual({ body: '{"ok":true}', base64Encoded: false });
 	});
 
+	it("getResponseBody truncates a body larger than the cap (no full-blob retention)", async () => {
+		const cap = 10 * 1024 * 1024;
+		const huge = "x".repeat(cap + 5000);
+		const c = new FakeConn();
+		c.responses["Network.getResponseBody"] = { body: huge, base64Encoded: false };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		const r = await mgr.getResponseBody("r1");
+		// Capped to cap + marker, never the full giant string.
+		expect(r.body.length).toBeLessThan(huge.length);
+		expect(r.body.startsWith("x".repeat(cap))).toBe(true);
+		expect(r.body).toContain(`[corpo truncado: ${cap} de ${huge.length} bytes]`);
+	});
+
+	it("evaluate truncates an oversized string result", async () => {
+		const cap = 10 * 1024 * 1024;
+		const huge = "y".repeat(cap + 5000);
+		const c = new FakeConn();
+		c.responses["Runtime.evaluate"] = { result: { value: huge } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		const r = await mgr.evaluate("bigString()");
+		const value = r.value as string;
+		expect(value.length).toBeLessThan(huge.length);
+		expect(value).toContain(`[corpo truncado: ${cap} de ${huge.length} bytes]`);
+	});
+
+	it("evaluate leaves a normal result untouched", async () => {
+		const c = new FakeConn();
+		c.responses["Runtime.evaluate"] = { result: { value: { a: 1, b: "ok" } } };
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		expect(await mgr.evaluate("obj()")).toEqual({ value: { a: 1, b: "ok" }, description: undefined });
+	});
+
 	it("dispose closes all connections", async () => {
 		const { mgr, conns } = setup();
 		await mgr.selectPage("p1");

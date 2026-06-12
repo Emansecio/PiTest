@@ -3,8 +3,8 @@ import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createFindToolDefinition } from "../src/core/tools/find.js";
-import { createGrepToolDefinition } from "../src/core/tools/grep.js";
+import { appendCappedStderr as appendCappedFindStderr, createFindToolDefinition } from "../src/core/tools/find.js";
+import { appendCappedStderr as appendCappedGrepStderr, createGrepToolDefinition } from "../src/core/tools/grep.js";
 
 /**
  * Audit fixes (2026-06): search hygiene in the fd/rg-backed tools.
@@ -195,4 +195,46 @@ describe("grep OOM guard: oversized matched files are not buffered for context",
 		expect(text).toContain("huge.min.js");
 		expect(text).not.toContain("(unable to read file)");
 	});
+});
+
+describe("grep/find stderr accumulation is capped (no unbounded growth)", () => {
+	const MAX = 64 * 1024;
+
+	// The stderr handler in both tools is an inline closure over a spawned child;
+	// reliably driving a real rg/fd to emit >64KB of stderr in a unit test is
+	// flaky and platform-specific. The capping logic is therefore extracted into
+	// `appendCappedStderr` and exercised directly here, which is exactly what the
+	// `data` handler calls per chunk.
+	for (const [name, append] of [
+		["grep", appendCappedGrepStderr],
+		["find", appendCappedFindStderr],
+	] as const) {
+		it(`${name}: accumulation never exceeds the 64KB ceiling under a flood`, () => {
+			let stderr = "";
+			// 200 chunks of 1KB = ~200KB of incoming warnings — far over the cap.
+			const chunk = "x".repeat(1024);
+			for (let i = 0; i < 200; i++) {
+				stderr = append(stderr, chunk);
+			}
+			expect(stderr.length).toBe(MAX);
+		});
+
+		it(`${name}: keeps the HEAD so the first error line survives`, () => {
+			let stderr = "";
+			// The first line carries the actionable failure (e.g. "regex parse error").
+			stderr = append(stderr, "regex parse error: unclosed group\n");
+			// Then a flood of trailing noise that must be dropped, not the head.
+			for (let i = 0; i < 200; i++) {
+				stderr = append(stderr, "y".repeat(1024));
+			}
+			expect(stderr.length).toBe(MAX);
+			expect(stderr.startsWith("regex parse error: unclosed group")).toBe(true);
+		});
+
+		it(`${name}: small stderr is passed through byte-identical (no cap behavior)`, () => {
+			const msg = "permission denied: /root/secret\n";
+			const stderr = append("", msg);
+			expect(stderr).toBe(msg);
+		});
+	}
 });

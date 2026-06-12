@@ -21,6 +21,16 @@ interface InputState {
 	cursor: number;
 }
 
+export interface InputOptions {
+	/**
+	 * Called when a paste exceeds MAX_PASTE_BYTES and is truncated. Input has no
+	 * warning surface of its own, so the consumer plumbs this to its own warning
+	 * mechanism. `originalBytes` is the pre-truncation length, `keptBytes` the
+	 * length actually inserted.
+	 */
+	onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
+}
+
 /**
  * Input component - single-line text input with horizontal scrolling
  */
@@ -29,6 +39,11 @@ export class Input implements Component, Focusable {
 	private cursor: number = 0; // Cursor position in the value
 	public onSubmit?: (value: string) => void;
 	public onEscape?: () => void;
+	private onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
+
+	constructor(options: InputOptions = {}) {
+		this.onPasteTruncated = options.onPasteTruncated;
+	}
 
 	/** Focusable interface - set by TUI when focus changes */
 	focused: boolean = false;
@@ -382,7 +397,12 @@ export class Input implements Component, Focusable {
 
 		// Cap the paste BEFORE any full-string pass so a multi-MB blob can't freeze
 		// the event loop or OOM (the cleanup below is O(n) over the whole string).
-		const cappedText = pastedText.length > MAX_PASTE_BYTES ? pastedText.slice(0, MAX_PASTE_BYTES) : pastedText;
+		// Input has no warning surface; the consumer's onPasteTruncated surfaces it.
+		const wasTruncated = pastedText.length > MAX_PASTE_BYTES;
+		const cappedText = wasTruncated ? pastedText.slice(0, MAX_PASTE_BYTES) : pastedText;
+		if (wasTruncated) {
+			this.onPasteTruncated?.({ originalBytes: pastedText.length, keptBytes: cappedText.length });
+		}
 
 		// Decode CSI-u-encoded control bytes some terminals inject into pastes
 		// (see decodeBracketedPasteCsiU) before the cleanup below strips them.

@@ -150,6 +150,72 @@ describe("CdpConnection", () => {
 		expect(conn.isClosed()).toBe(true);
 	});
 
+	describe("abort-listener hygiene", () => {
+		// Wrap a real AbortSignal so we can net-count its "abort" listeners. Both the
+		// connect race (openWithAbort) and each command add one; a leak is a positive
+		// residual after every command settles.
+		function countingSignal(signal: AbortSignal): { signal: AbortSignal; live: () => number } {
+			let live = 0;
+			const add = signal.addEventListener.bind(signal);
+			const remove = signal.removeEventListener.bind(signal);
+			signal.addEventListener = ((type: string, ...rest: unknown[]) => {
+				if (type === "abort") live += 1;
+				return (add as (...args: unknown[]) => void)(type, ...rest);
+			}) as typeof signal.addEventListener;
+			signal.removeEventListener = ((type: string, ...rest: unknown[]) => {
+				if (type === "abort") live -= 1;
+				return (remove as (...args: unknown[]) => void)(type, ...rest);
+			}) as typeof signal.removeEventListener;
+			return { signal, live: () => live };
+		}
+
+		it("removes the abort listener on every normal settle (no accumulation)", async () => {
+			const { conn, ws } = connect();
+			const controller = new AbortController();
+			const { signal, live } = countingSignal(controller.signal);
+			// Many commands sharing ONE signal across a long turn.
+			const sends: Promise<unknown>[] = [];
+			for (let i = 0; i < 8; i++) sends.push(conn.send(`Cmd.${i}`, {}, { signal }));
+			ws.emit("open", {});
+			await flush();
+			// Reply to each distinct command id (reply() only targets the last send).
+			for (const raw of ws.sent) {
+				const { id } = JSON.parse(raw);
+				ws.emit("message", { data: JSON.stringify({ id, result: { ok: id } }) });
+			}
+			await Promise.all(sends);
+			// All resolved → both the connect-race and command listeners detached.
+			expect(live()).toBe(0);
+			expect(controller.signal.aborted).toBe(false);
+		});
+
+		it("removes the abort listener when a command rejects via CDP error", async () => {
+			const { conn, ws } = connect();
+			const controller = new AbortController();
+			const { signal, live } = countingSignal(controller.signal);
+			const p = conn.send("Bad.method", {}, { signal });
+			ws.emit("open", {});
+			await flush();
+			ws.reply(undefined, { message: "boom" });
+			await expect(p).rejects.toThrow(/boom/);
+			expect(live()).toBe(0);
+		});
+
+		it("still rejects on real abort and leaves no listener behind", async () => {
+			const { conn, ws } = connect();
+			const controller = new AbortController();
+			const { signal, live } = countingSignal(controller.signal);
+			const p = conn.send("Slow.op", {}, { signal });
+			ws.emit("open", {});
+			await flush();
+			controller.abort();
+			await expect(p).rejects.toThrow(/aborted/);
+			// once:true detaches on fire; the settle cleanup's remove is a no-op here,
+			// and net listeners are back to zero.
+			expect(live()).toBe(0);
+		});
+	});
+
 	describe("connect resilience", () => {
 		afterEach(() => {
 			vi.useRealTimers();

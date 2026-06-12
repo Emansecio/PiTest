@@ -1201,4 +1201,290 @@ describe("openai-codex streaming", () => {
 			.filter((delay) => delay !== 60_000 && delay !== 120_000);
 		expect(backoffDelays).toEqual([1000, 2000, 4000]);
 	});
+
+	// B13: request #1 succeeds and schedules an idle-expiry timer on the cached
+	// socket. Request #2 REUSES that socket and is aborted mid-stream. The abort
+	// must still route through release (keep:false): the idle timer scheduled by
+	// #1 is cleared (no dangling timer holding the event loop) and the reused
+	// socket is closed + evicted (no half-open connection retained in the cache).
+	it("clears the cached idle timer and closes the socket when a reused request is aborted mid-stream", async () => {
+		const token = mockToken();
+		const closedSockets: MockWebSocket[] = [];
+		const constructedSockets: MockWebSocket[] = [];
+		// The id of the idle-expiry timer scheduled after request #1 completes.
+		let idleTimerId: ReturnType<typeof setTimeout> | undefined;
+		const realSetTimeout = globalThis.setTimeout;
+		const TTL_MS = 5 * 60 * 1000;
+		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+			const id = realSetTimeout(fn, ms);
+			// Capture the session-cache TTL timer (distinct from connect/idle watchdogs).
+			if (ms === TTL_MS) idleTimerId = id;
+			return id;
+		}) as typeof setTimeout);
+		const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+
+		// First send → a complete response (so the connection is kept + timer scheduled).
+		// Second send → partials only (stream stays open until the test aborts).
+		let sendCount = 0;
+
+		class MockWebSocket {
+			static OPEN = 1;
+			readyState = MockWebSocket.OPEN;
+			closeCount = 0;
+			private listeners = new Map<string, Set<(event: unknown) => void>>();
+
+			constructor(_url: string, _protocols?: string | string[] | { headers?: Record<string, string> }) {
+				constructedSockets.push(this);
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				let listeners = this.listeners.get(type);
+				if (!listeners) {
+					listeners = new Set();
+					this.listeners.set(type, listeners);
+				}
+				listeners.add(listener);
+			}
+
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
+
+			send(): void {
+				sendCount++;
+				const prelude = [
+					{
+						type: "response.output_item.added",
+						item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+					},
+					{ type: "response.content_part.added", part: { type: "output_text", text: "" } },
+					{ type: "response.output_text.delta", delta: "Hel" },
+				];
+				const completion = [
+					{
+						type: "response.output_item.done",
+						item: {
+							type: "message",
+							id: "msg_1",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "Hel" }],
+						},
+					},
+					{
+						type: "response.completed",
+						response: {
+							status: "completed",
+							usage: {
+								input_tokens: 5,
+								output_tokens: 3,
+								total_tokens: 8,
+								input_tokens_details: { cached_tokens: 0 },
+							},
+						},
+					},
+				];
+				const isFirst = sendCount === 1;
+				const events = isFirst ? [...prelude, ...completion] : prelude;
+				queueMicrotask(() => {
+					for (const event of events) {
+						this.dispatch("message", { data: JSON.stringify(event) });
+					}
+				});
+			}
+
+			close(): void {
+				this.closeCount++;
+				this.readyState = 3;
+				closedSockets.push(this);
+				this.dispatch("close", { code: 1000, wasClean: true });
+			}
+
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) {
+					listener(event);
+				}
+			}
+		}
+
+		vi.stubGlobal("WebSocket", MockWebSocket);
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+		};
+
+		const sessionId = "session-abort";
+
+		// Request #1: completes normally → connection cached + idle timer scheduled.
+		await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			sessionId,
+			transport: "auto",
+		}).result();
+		expect(idleTimerId).toBeDefined();
+		expect(constructedSockets).toHaveLength(1);
+
+		// Request #2: reuses the cached socket, then aborts on the first delta.
+		const controller = new AbortController();
+		const streamResult = streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			sessionId,
+			transport: "auto",
+			signal: controller.signal,
+		});
+
+		let sawDelta = false;
+		for await (const event of streamResult) {
+			if (event.type === "text_delta") {
+				sawDelta = true;
+				controller.abort();
+			}
+		}
+
+		expect(sawDelta).toBe(true);
+		// No second socket was created — request #2 reused the cached one.
+		expect(constructedSockets).toHaveLength(1);
+		// The idle timer scheduled by request #1 was cleared (not left dangling).
+		expect(clearTimeoutSpy).toHaveBeenCalledWith(idleTimerId);
+		// The reused socket was closed by release(keep:false) — no half-open leak.
+		expect(constructedSockets[0]?.closeCount).toBeGreaterThanOrEqual(1);
+
+		setTimeoutSpy.mockRestore();
+	});
+
+	// B12: a burst of frames where an earlier binary frame decodes async and a
+	// later string frame decodes sync must still be DELIVERED in arrival order.
+	it("delivers a burst of websocket frames in arrival order despite async decode", async () => {
+		const token = mockToken();
+		const deltas: string[] = [];
+
+		// Blob-like whose arrayBuffer resolves only after several microtask ticks,
+		// so a fire-and-forget decode of a *later* string frame (which resolves in
+		// one tick) would win the race and reorder. Timer-independent on purpose
+		// (the suite has fake-timer tests; relying on real setTimeout is flaky).
+		const makeSlowBlob = (text: string) => ({
+			arrayBuffer: async (): Promise<ArrayBuffer> => {
+				for (let i = 0; i < 8; i++) await Promise.resolve();
+				const bytes = new TextEncoder().encode(text);
+				return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+			},
+		});
+
+		const deltaFrame = (delta: string) => JSON.stringify({ type: "response.output_text.delta", delta });
+
+		class MockWebSocket {
+			static OPEN = 1;
+			readyState = MockWebSocket.OPEN;
+			private listeners = new Map<string, Set<(event: unknown) => void>>();
+
+			constructor(_url: string, _protocols?: string | string[] | { headers?: Record<string, string> }) {
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				let listeners = this.listeners.get(type);
+				if (!listeners) {
+					listeners = new Set();
+					this.listeners.set(type, listeners);
+				}
+				listeners.add(listener);
+			}
+
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
+
+			send(): void {
+				queueMicrotask(() => {
+					this.dispatch("message", {
+						data: JSON.stringify({
+							type: "response.output_item.added",
+							item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] },
+						}),
+					});
+					this.dispatch("message", {
+						data: JSON.stringify({
+							type: "response.content_part.added",
+							part: { type: "output_text", text: "" },
+						}),
+					});
+					// Frame A: slow binary "AAA". Frame B: fast string "BBB".
+					// Without serialization, B would arrive before A.
+					this.dispatch("message", { data: makeSlowBlob(deltaFrame("AAA")) });
+					this.dispatch("message", { data: deltaFrame("BBB") });
+					this.dispatch("message", { data: makeSlowBlob(deltaFrame("CCC")) });
+					this.dispatch("message", { data: deltaFrame("DDD") });
+					this.dispatch("message", {
+						data: JSON.stringify({
+							type: "response.completed",
+							response: {
+								status: "completed",
+								usage: {
+									input_tokens: 5,
+									output_tokens: 3,
+									total_tokens: 8,
+									input_tokens_details: { cached_tokens: 0 },
+								},
+							},
+						}),
+					});
+				});
+			}
+
+			close(): void {
+				this.readyState = 3;
+			}
+
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) {
+					listener(event);
+				}
+			}
+		}
+
+		vi.stubGlobal("WebSocket", MockWebSocket);
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+		};
+
+		const streamResult = streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			transport: "websocket-cached",
+		});
+		for await (const event of streamResult) {
+			if (event.type === "text_delta") {
+				deltas.push(event.delta);
+			}
+		}
+
+		expect(deltas).toEqual(["AAA", "BBB", "CCC", "DDD"]);
+	});
 });

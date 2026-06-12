@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventStream } from "../src/utils/event-stream.js";
 
 // A tiny event shape with an optional completion marker so we can drive
@@ -135,5 +135,83 @@ describe("EventStream cursor dequeue", () => {
 			seen.push(e);
 		}
 		expect(seen.map((e) => e.n)).toEqual([1, 2]);
+	});
+});
+
+describe("EventStream backlog observability guard", () => {
+	const prev = process.env.PIT_EVENT_STREAM_WARN_DEPTH;
+	let warnSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+	afterEach(() => {
+		warnSpy.mockRestore();
+		if (prev === undefined) {
+			delete process.env.PIT_EVENT_STREAM_WARN_DEPTH;
+		} else {
+			process.env.PIT_EVENT_STREAM_WARN_DEPTH = prev;
+		}
+	});
+
+	it("(6) warns exactly once when the unconsumed backlog crosses the threshold", () => {
+		process.env.PIT_EVENT_STREAM_WARN_DEPTH = "10";
+		const s = makeStream(); // threshold resolved at construction
+		// Nobody consumes -> every push queues. Crossing depth 10 trips the guard.
+		for (let i = 0; i < 25; i++) {
+			s.push({ n: i });
+		}
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(String(warnSpy.mock.calls[0]?.[0])).toContain("backlog");
+
+		// Events are buffered, not dropped: the full burst still drains in order.
+		const seen: number[] = [];
+		const drain = (async () => {
+			for await (const e of s) seen.push(e.n);
+		})();
+		s.end();
+		return drain.then(() => {
+			expect(seen.length).toBe(25);
+			expect(seen[0]).toBe(0);
+			expect(seen[24]).toBe(24);
+		});
+	});
+
+	it("(7) does not warn below the threshold", () => {
+		process.env.PIT_EVENT_STREAM_WARN_DEPTH = "10000";
+		const s = makeStream();
+		for (let i = 0; i < 100; i++) {
+			s.push({ n: i });
+		}
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it("(8) a value <= 0 disables the guard entirely", () => {
+		process.env.PIT_EVENT_STREAM_WARN_DEPTH = "0";
+		const s = makeStream();
+		for (let i = 0; i < 1000; i++) {
+			s.push({ n: i });
+		}
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it("(9) a keeping-up consumer (waiter present) never trips the guard", async () => {
+		process.env.PIT_EVENT_STREAM_WARN_DEPTH = "5";
+		const s = makeStream();
+		const it = s[Symbol.asyncIterator]();
+		const seen: number[] = [];
+
+		// Lock-step: park a waiter, then push. The event lands on the waiter
+		// (depth stays 0), so a keeping-up consumer never buffers a backlog.
+		for (let i = 0; i < 50; i++) {
+			const pending = it.next();
+			await Promise.resolve(); // let it.next() register the waiter
+			s.push({ n: i });
+			const r = await pending;
+			if (!r.done) seen.push(r.value.n);
+		}
+
+		expect(seen.length).toBe(50);
+		expect(warnSpy).not.toHaveBeenCalled();
 	});
 });

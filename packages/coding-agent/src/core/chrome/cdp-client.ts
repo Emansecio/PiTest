@@ -87,6 +87,10 @@ interface PendingCall {
 	resolve: (value: unknown) => void;
 	reject: (err: Error) => void;
 	timer: ReturnType<typeof setTimeout>;
+	// Detach the per-command abort listener + clear the timer. Idempotent, run on
+	// every settle path (reply / error / close / timeout / abort) so a shared
+	// signal never accumulates orphaned listeners across a long turn.
+	cleanup: () => void;
 }
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
@@ -179,17 +183,35 @@ export class CdpConnection {
 		await this.openWithAbort(method, opts?.signal);
 		const id = this.nextId++;
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
-				this.pending.delete(id);
-				reject(new Error(`CDP command ${method} timed out`));
-			}, opts?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
-			const onAbort = () => {
+			const signal = opts?.signal;
+			let settled = false;
+			const onAbort = () => settleReject(new Error(`CDP command ${method} aborted`));
+			const cleanup = () => {
 				clearTimeout(timer);
-				this.pending.delete(id);
-				reject(new Error(`CDP command ${method} aborted`));
+				signal?.removeEventListener("abort", onAbort);
 			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
-			this.pending.set(id, { resolve, reject, timer });
+			// Single exit for every settle path: clear timer + detach the abort
+			// listener, drop the pending entry, then settle once. Guarding here means
+			// onMessage/failAll/timeout/abort can all call through without re-settling.
+			const settleResolve = (value: unknown) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				this.pending.delete(id);
+				resolve(value);
+			};
+			const settleReject = (err: Error) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				this.pending.delete(id);
+				reject(err);
+			};
+			const timer = setTimeout(() => {
+				settleReject(new Error(`CDP command ${method} timed out`));
+			}, opts?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			this.pending.set(id, { resolve: settleResolve, reject: settleReject, timer, cleanup });
 			this.ws?.send(JSON.stringify({ id, method, params }));
 		});
 	}
@@ -246,6 +268,11 @@ export class CdpConnection {
 	}
 
 	private onMessage(raw: string): void {
+		// Each ws "message" event is one COMPLETE CDP message — there is no manual
+		// chunk reassembly here, so there is no unbounded accumulation to cap at this
+		// level. A giant payload (huge network body / evaluate result) is bounded
+		// where it is consumed instead (ChromeDevtoolsManager get-body/evaluate),
+		// since a JSON frame cannot be safely truncated before parsing.
 		let msg: { id?: number; result?: unknown; error?: { message?: string }; method?: string; params?: unknown };
 		try {
 			msg = JSON.parse(raw);
@@ -255,8 +282,8 @@ export class CdpConnection {
 		if (typeof msg.id === "number") {
 			const call = this.pending.get(msg.id);
 			if (!call) return;
-			clearTimeout(call.timer);
-			this.pending.delete(msg.id);
+			// resolve/reject are the wrapped settlers: they clear the timer, detach
+			// the abort listener, and drop the pending entry exactly once.
 			if (msg.error) call.reject(new Error(msg.error.message ?? "CDP error"));
 			else call.resolve(msg.result);
 		} else if (msg.method) {
@@ -266,10 +293,10 @@ export class CdpConnection {
 	}
 
 	private failAll(err: Error): void {
-		for (const [, call] of this.pending) {
-			clearTimeout(call.timer);
-			call.reject(err);
-		}
+		// Snapshot: each wrapped reject deletes its own pending entry (and detaches
+		// the abort listener), so iterate a copy to avoid mutating during the loop.
+		const calls = [...this.pending.values()];
+		for (const call of calls) call.reject(err);
 		this.pending.clear();
 	}
 }

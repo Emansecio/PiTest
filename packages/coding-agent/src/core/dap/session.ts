@@ -1125,13 +1125,26 @@ export class DapSessionManager {
 	}
 
 	#prepareStopOutcome(session: DapSession, signal?: AbortSignal, timeoutMs = 30_000): Promise<unknown> {
+		// Internal controller cancels the race losers once a winner settles, so the
+		// other two waiters release their event listener + timeout immediately instead
+		// of lingering until their own 30s timeout (listener/timer leak under fast stepping).
+		const raceController = new AbortController();
+		const raceSignal = raceController.signal;
+		const onCallerAbort = () => raceController.abort(signal?.reason);
+		if (signal) {
+			if (signal.aborted) raceController.abort(signal.reason);
+			else signal.addEventListener("abort", onCallerAbort, { once: true });
+		}
 		const promises = [
-			session.client.waitForEvent("stopped", undefined, signal, timeoutMs),
-			session.client.waitForEvent("terminated", undefined, signal, timeoutMs),
-			session.client.waitForEvent("exited", undefined, signal, timeoutMs),
+			session.client.waitForEvent("stopped", undefined, raceSignal, timeoutMs),
+			session.client.waitForEvent("terminated", undefined, raceSignal, timeoutMs),
+			session.client.waitForEvent("exited", undefined, raceSignal, timeoutMs),
 		];
 		for (const p of promises) p.catch(() => {});
-		const outcome = Promise.race(promises);
+		const outcome = Promise.race(promises).finally(() => {
+			signal?.removeEventListener("abort", onCallerAbort);
+			raceController.abort();
+		});
 		outcome.catch(() => {});
 		return outcome;
 	}

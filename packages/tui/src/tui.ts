@@ -720,7 +720,14 @@ export class TUI extends Container {
 		buf.length = 0;
 		for (const callback of this.animationCallbacks) buf.push(callback);
 		for (let i = 0; i < buf.length; i++) {
-			if (buf[i]!(now)) dirty = true;
+			// Isolate each callback: a throwing animation tick (spinner/pulse) must not
+			// escape the setInterval and crash the process, nor stop the other callbacks.
+			try {
+				if (buf[i]!(now)) dirty = true;
+			} catch {
+				// No render-safe error channel here; writing to the TTY would corrupt
+				// the frame. Swallow so one faulty component can't kill the loop.
+			}
 		}
 		buf.length = 0;
 		if (dirty) this.requestRender();

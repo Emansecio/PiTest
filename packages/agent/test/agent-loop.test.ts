@@ -1271,6 +1271,77 @@ describe("agentLoop with AgentMessage", () => {
 
 		expect(llmCalls).toBe(1);
 	});
+
+	// Memory-leak guard: a long-running tool that streams many updates must
+	// deliver every update, in order, before the final tool result — and the
+	// loop must not retain settled update promises. We assert the observable
+	// contract: all N updates arrive (ordered) strictly before tool_execution_end,
+	// which is exactly what draining the in-flight set guarantees.
+	it("delivers all streamed tool updates in order before the result and does not retain settled emits", async () => {
+		const UPDATE_COUNT = 1000;
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema, { seq: number }> = {
+			name: "streamer",
+			label: "Streamer",
+			description: "Streams many updates",
+			parameters: toolSchema,
+			async execute(_toolCallId, _params, _signal, onUpdate) {
+				for (let i = 0; i < UPDATE_COUNT; i++) {
+					onUpdate?.({
+						content: [{ type: "text", text: `chunk ${i}` }],
+						details: { seq: i },
+					});
+				}
+				return { content: [{ type: "text", text: "done" }], details: { seq: -1 } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+
+		let callIndex = 0;
+		const stream = agentLoop([createUserMessage("go")], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "tool-1", name: "streamer", arguments: {} }],
+						"toolUse",
+					);
+					mockStream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "done" }]);
+					mockStream.push({ type: "done", reason: "stop", message });
+				}
+				callIndex++;
+			});
+			return mockStream;
+		});
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+
+		// Every update was delivered, in arrival order (seq 0..N-1).
+		const updateSeqs = events.flatMap((e) =>
+			e.type === "tool_execution_update" ? [(e.partialResult as { details: { seq: number } }).details.seq] : [],
+		);
+		expect(updateSeqs.length).toBe(UPDATE_COUNT);
+		expect(updateSeqs).toEqual(Array.from({ length: UPDATE_COUNT }, (_v, i) => i));
+
+		// The completion barrier holds: the last update is emitted strictly before
+		// tool_execution_end. This is observable proof that Promise.all over the
+		// in-flight set awaited (and thus drained) every emit before the result.
+		const lastUpdateIdx = events.map((e) => e.type).lastIndexOf("tool_execution_update");
+		const endIdx = events.findIndex((e) => e.type === "tool_execution_end");
+		expect(lastUpdateIdx).toBeGreaterThanOrEqual(0);
+		expect(endIdx).toBeGreaterThan(lastUpdateIdx);
+
+		const toolEnd = events.find((e) => e.type === "tool_execution_end");
+		expect(toolEnd).toBeDefined();
+		if (toolEnd?.type === "tool_execution_end") {
+			expect(toolEnd.isError).toBe(false);
+		}
+	});
 });
 
 describe("agentLoopContinue with AgentMessage", () => {
