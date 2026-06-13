@@ -23,6 +23,7 @@ import {
 } from "../permissions/index.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createEditPreconditionExtension } from "./edit-precondition-extension.ts";
+import { createGroundingGuardExtension } from "./grounding-guard-extension.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
 import { createLearnedErrorGuardExtension } from "./learned-error-guard-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
@@ -89,6 +90,11 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// session's agent dir so isolated runs never read the shared store. No-op
 		// when that store is empty or below threshold (fresh installs, tests).
 		createLearnedErrorGuardExtension({ dir: learnedErrorsDirFor(options.agentDir) }),
+		// Grounding guard: pre-exec, grounds a debug function-breakpoint name / lsp
+		// workspace-symbol query against the repo-map + LSP authority; auto-fixes a
+		// single dominant typo or blocks with candidates. After the learned-error
+		// guard so basic guards report first. Fail-open; opt out PIT_NO_GROUNDING_GUARD.
+		createGroundingGuardExtension({ cwd: options.cwd }),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp }),
