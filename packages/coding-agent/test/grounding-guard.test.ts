@@ -319,6 +319,54 @@ describe("groundToolCall — calibration: length floor + no affix fallback", () 
 		});
 		expect(decision).toEqual({ action: "allow" });
 	});
+
+	it("index fast-path hit is CASE-INSENSITIVE — a case-variant short-circuits without the LSP", async () => {
+		let lspCalls = 0;
+		const decision = await groundToolCall(symbolsQuery("calculatetotal"), {
+			...makeDeps(),
+			indexLookup: async () => new Set(["calculateTotal"]),
+			lspResolve: async () => {
+				lspCalls++;
+				return [];
+			},
+		});
+		// A case-only variance of an indexed symbol must count as a hit (matching the
+		// LSP/fuzzy layers), not slip through to a silent case rewrite.
+		expect(decision).toEqual({ action: "allow" });
+		expect(lspCalls).toBe(0);
+	});
+
+	it("does NOT ground a qualified name (pkg.Func / Class.method) — not a global simple identifier", async () => {
+		for (const fn of ["main.run", "Server.Start", "a.b.c"]) {
+			const decision = await groundToolCall(debugBreakpoint(fn), {
+				...makeDeps(),
+				indexLookup: async () => new Set(["mainRun", "ServerStart"]),
+				lspResolve: async () => [],
+			});
+			expect(decision).toEqual({ action: "allow" });
+		}
+	});
+
+	it("does NOT ground a multi-token / punctuated query", async () => {
+		const decision = await groundToolCall(symbolsQuery("My Class"), {
+			...makeDeps(),
+			indexLookup: async () => new Set(["MyClass"]),
+			lspResolve: async () => [],
+		});
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("does NOT ground debug remove_breakpoint (targets a SET breakpoint, not a live symbol)", async () => {
+		const decision = await groundToolCall(
+			{ toolName: "debug", args: { action: "remove_breakpoint", function: "calculateTotl" } },
+			{
+				...makeDeps(),
+				indexLookup: async () => new Set(["calculateTotal"]),
+				lspResolve: async () => [],
+			},
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
 });
 
 describe("groundToolCall — out-of-scope tools are ignored", () => {

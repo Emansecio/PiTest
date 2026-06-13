@@ -9,9 +9,13 @@
  * this adapter only wires the real repo-map + LSP deps and translates the verdict
  * into the extension pipeline's `{ block, reason }` / in-place rewrite.
  *
- * The only session state added here is a fire-once set: if the model re-issues the
- * identical blocked call, it runs — the guard advises, it never wedges (mirrors the
- * learned-error guard's anti-wedge escape). Opt out with PIT_NO_GROUNDING_GUARD.
+ * Session state added here: a short-lived symbol-set cache (so a burst of
+ * groundable calls doesn't re-scan/re-run git per call) and a fire-once set (an
+ * insistent model re-issuing the identical blocked call runs it — the guard
+ * advises, never wedges). The whole handler is wrapped in try/catch because
+ * `emitToolCall` has no per-handler isolation and a throw out of beforeToolCall
+ * would hard-block the call — fail-open is load-bearing. Opt out with
+ * PIT_NO_GROUNDING_GUARD.
  */
 
 import { suggestClosest } from "@pit/ai";
@@ -29,72 +33,98 @@ import type { SymbolInformation } from "../lsp/types.ts";
 import { filterWorkspaceSymbols } from "../lsp/utils.ts";
 import { getLivingRepoMap } from "../repo-map/living-index.ts";
 
-/** Short LSP timeout: a pre-exec guard must not stall a tool call on a slow server. */
+/** Per-server LSP ceiling: a pre-exec guard must not stall a tool call on a slow server. */
 const WORKSPACE_SYMBOL_TIMEOUT_MS = 8000;
+/**
+ * Reuse the flattened symbol set within this window so a burst of groundable
+ * calls doesn't re-scan / re-run the git delta per call. The set is at most this
+ * stale; the guard is advisory + fail-open, so a just-created symbol the cache
+ * misses simply isn't grounded (allow), never wrongly blocked.
+ */
+const INDEX_CACHE_TTL_MS = 5000;
 
 export function createGroundingGuardExtension(options: { cwd: string }) {
 	return (pi: ExtensionAPI) => {
-		// Fire-once per identical blocked call (session-state, not pure logic).
 		const fired = new Set<string>();
+		let indexCache: { at: number; names: Set<string> } | undefined;
 
-		// Fast-path pool: flattened symbol names from the living repo-map.
+		// Fast-path pool: flattened symbol names from the living repo-map, memoised
+		// for a short window to amortise the git delta + disk read across a burst.
 		const indexLookup: GroundingGuardDeps["indexLookup"] = async () => {
+			const now = Date.now();
+			if (indexCache && now - indexCache.at < INDEX_CACHE_TTL_MS) return indexCache.names;
 			const { map } = await getLivingRepoMap(options.cwd);
-			return repoMapToSymbolSet(map);
-		};
-
-		// Authority: LSP workspace/symbol. Returns undefined when there is no LSP at
-		// all (FAIL-OPEN), an aggregated name pool otherwise ([] = answered-empty).
-		const lspResolve: GroundingGuardDeps["lspResolve"] = async (query, signal) => {
-			const servers = getLspServers(getConfig(options.cwd));
-			if (servers.length === 0) return undefined;
-			const names: string[] = [];
-			for (const [, serverConfig] of servers) {
-				try {
-					const client = await getOrCreateClient(serverConfig, options.cwd);
-					const res = (await sendRequest(
-						client,
-						"workspace/symbol",
-						{ query },
-						signal,
-						WORKSPACE_SYMBOL_TIMEOUT_MS,
-					)) as SymbolInformation[] | null;
-					if (res) for (const sym of filterWorkspaceSymbols(res, query)) names.push(sym.name);
-				} catch {
-					// Per-server failure: keep aggregating; never throw out of the resolver.
-				}
-			}
+			const names = repoMapToSymbolSet(map);
+			indexCache = { at: now, names };
 			return names;
 		};
 
-		pi.on("tool_call", async (event) => {
-			if (isGroundingGuardDisabled()) return undefined;
-			if (event.toolName !== "debug" && event.toolName !== "lsp") return undefined;
-
-			const input = event.input as Record<string, unknown>;
-			const decision = await groundToolCall(
-				{ toolName: event.toolName, args: input },
-				{
-					indexLookup,
-					lspResolve,
-					fuzzy: suggestClosest,
-					maxDistance: GROUNDING_GUARD_DEFAULTS.maxDistance,
-					prefixMinOverlap: GROUNDING_GUARD_DEFAULTS.prefixMinOverlap,
-				},
+		// Authority: LSP workspace/symbol across every server IN PARALLEL under a
+		// shared per-server ceiling, so a hung server caps total latency at one
+		// timeout (not N*timeout). undefined when there is no LSP at all OR every
+		// server errored (cannot prove absence -> FAIL-OPEN); a name pool otherwise
+		// ([] = at least one server answered and found nothing -> block-eligible).
+		const lspResolve: GroundingGuardDeps["lspResolve"] = async (query, signal) => {
+			const servers = getLspServers(getConfig(options.cwd));
+			if (servers.length === 0) return undefined;
+			const perServer = await Promise.all(
+				servers.map(async ([, serverConfig]) => {
+					try {
+						const client = await getOrCreateClient(serverConfig, options.cwd);
+						const res = (await sendRequest(
+							client,
+							"workspace/symbol",
+							{ query },
+							signal,
+							WORKSPACE_SYMBOL_TIMEOUT_MS,
+						)) as SymbolInformation[] | null;
+						const names = res ? filterWorkspaceSymbols(res, query).map((sym) => sym.name) : [];
+						return { answered: true, names };
+					} catch {
+						return { answered: false, names: [] as string[] };
+					}
+				}),
 			);
+			if (!perServer.some((r) => r.answered)) return undefined; // every server errored -> FAIL-OPEN
+			return perServer.flatMap((r) => r.names);
+		};
 
-			if (decision.action === "rewrite") {
-				// event.input is mutable in place; patch the corrected args and PASS.
-				Object.assign(input, decision.args);
+		pi.on("tool_call", async (event) => {
+			try {
+				if (isGroundingGuardDisabled()) return undefined;
+				if (event.toolName !== "debug" && event.toolName !== "lsp") return undefined;
+
+				const input = event.input as Record<string, unknown>;
+				const decision = await groundToolCall(
+					{ toolName: event.toolName, args: input },
+					{
+						indexLookup,
+						lspResolve,
+						fuzzy: suggestClosest,
+						maxDistance: GROUNDING_GUARD_DEFAULTS.maxDistance,
+						prefixMinOverlap: GROUNDING_GUARD_DEFAULTS.prefixMinOverlap,
+					},
+				);
+
+				if (decision.action === "rewrite") {
+					// event.input is mutable in place; patch the corrected args and PASS.
+					Object.assign(input, decision.args);
+					return undefined;
+				}
+				if (decision.action === "block") {
+					// Stable key (sorted top-level arg keys) so a verbatim re-issue with
+					// reordered keys still matches the fire-once escape.
+					const key = `${event.toolName}:${JSON.stringify(input, Object.keys(input).sort())}`;
+					if (fired.has(key)) return undefined; // already advised once -> let it run
+					fired.add(key);
+					return { block: true, reason: decision.message };
+				}
+				return undefined;
+			} catch {
+				// emitToolCall has no per-handler try/catch; a throw out of beforeToolCall
+				// would hard-block the call. Fail-open is the invariant -> swallow.
 				return undefined;
 			}
-			if (decision.action === "block") {
-				const key = `${event.toolName}:${JSON.stringify(input)}`;
-				if (fired.has(key)) return undefined; // already advised once -> let it run
-				fired.add(key);
-				return { block: true, reason: decision.message };
-			}
-			return undefined;
 		});
 	};
 }

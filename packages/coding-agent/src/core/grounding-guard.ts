@@ -129,15 +129,28 @@ const MAX_BLOCK_CANDIDATES = 5;
  */
 const MIN_GROUNDED_NAME_LENGTH = 4;
 
+/**
+ * Only a bare, simple identifier is a groundable GLOBAL name. A qualified or
+ * multi-token value (pkg.Func, Class.method, "My Class", a.b.c) is language-
+ * qualified, line-scoped, or a search expression that the global index and a
+ * bare-name workspace/symbol cannot carry — grounding it would false-block a
+ * valid target (e.g. a Go `main.run` / Java method breakpoint). Such names pass
+ * through untouched.
+ */
+const SIMPLE_IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
+
 // ============================================================================
 // Reference extraction — the ONLY place a tool/arg becomes "groundable"
 // ============================================================================
 
 /**
  * Debug actions where `function` names an existing function (the breakpoint
- * target) — a REFERENCE that must already exist in the program.
+ * target) — a REFERENCE that must already exist in the program. Only `set` is
+ * grounded: `remove_breakpoint` targets a PREVIOUSLY-SET breakpoint by name
+ * (debug.ts removeFunctionBreakpoint), so the live symbol index is the wrong
+ * oracle — a rewrite there could silently retarget and no-op the removal.
  */
-const DEBUG_FUNCTION_REFERENCE_ACTIONS = new Set<string>(["set_breakpoint", "remove_breakpoint"]);
+const DEBUG_FUNCTION_REFERENCE_ACTIONS = new Set<string>(["set_breakpoint"]);
 
 function asString(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
@@ -221,8 +234,14 @@ async function checkExistence(name: string, deps: GroundingGuardDeps): Promise<E
 		// resolve. Treat as an empty index (not a failure) and continue.
 		indexNames = new Set<string>();
 	}
-	if (indexNames.has(name)) return { exists: true, candidates };
-	for (const candidate of indexNames) candidates.push(candidate);
+	// Case-insensitive existence — matches the LSP exact-match and the fuzzy layer,
+	// so a case-variant hit short-circuits here instead of slipping to a silent
+	// case rewrite downstream. The original-cased names still feed the fuzzy pool.
+	const loweredName = name.toLowerCase();
+	for (const candidate of indexNames) {
+		if (candidate.toLowerCase() === loweredName) return { exists: true, candidates: [] };
+		candidates.push(candidate);
+	}
 
 	// --- Authority: LSP workspace/symbol ---------------------------------------
 	if (deps.lspResolve === undefined) {
@@ -325,9 +344,11 @@ export async function groundToolCall(
 		if (target === undefined) return { action: "allow" };
 
 		const name = target.name;
-		// Short names are too ambiguous to ground — the fuzzy pool yields near
-		// neighbours that are almost always wrong. Below the floor, never intervene.
+		// Short names are too ambiguous to ground; non-simple identifiers (qualified
+		// names, multi-token queries, punctuation) are not global names the index can
+		// carry. Either way, never intervene.
 		if (name.length < MIN_GROUNDED_NAME_LENGTH) return { action: "allow" };
+		if (!SIMPLE_IDENTIFIER.test(name)) return { action: "allow" };
 
 		const { exists, candidates } = await checkExistence(name, deps);
 
