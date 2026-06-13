@@ -29,6 +29,7 @@ import { createImportGroundingExtension } from "./import-grounding-extension.ts"
 import { createLearnedErrorGuardExtension } from "./learned-error-guard-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
 import { createMemoryExtension } from "./memory-extension.ts";
+import { createPathGroundingExtension } from "./path-grounding-extension.ts";
 import { createPermissionsExtension } from "./permissions-extension.ts";
 import { createReadGuardExtension } from "./read-guard-extension.ts";
 
@@ -102,6 +103,11 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// After the symbol grounding-guard so basic guards report first. Fail-open;
 		// opt out PIT_NO_IMPORT_GROUNDING.
 		createImportGroundingExtension({ cwd: options.cwd }),
+		// Path grounding: pre-exec, blocks a read/edit whose file path doesn't exist
+		// on disk with the close-named sibling from its directory. Block-only (never
+		// retargets to a real-but-wrong file). write is out of scope (it creates).
+		// Fail-open; opt out PIT_NO_PATH_GROUNDING.
+		createPathGroundingExtension({ cwd: options.cwd }),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp }),
