@@ -13,7 +13,14 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { recordDiagnostic } from "@pit/ai";
 import { killProcessTree } from "../../utils/shell.ts";
-import type { EvalKernel, EvalRequest, EvalResult } from "./types.ts";
+import type {
+	CodeModeChannel,
+	CodeModeToolCall,
+	CodeModeToolResult,
+	EvalKernel,
+	EvalRequest,
+	EvalResult,
+} from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -153,6 +160,93 @@ async function runOne(code, timeoutMs, maxBytes) {
 	};
 }
 
+// ── CODE-MODE: bidirectional tool-call channel ──────────────────────────────
+// A code-mode program calls \`await tools.read({ path })\` etc. Each call emits a
+// {toolCall:{callId,name,args}} frame on stdout; the parent routes it through
+// the harness pipeline and writes {toolResult:{callId,content,isError}} on
+// stdin. The driver pumps results back to the awaiting promise by callId. The
+// \`tools\` object is rebuilt per code-mode run from the active-tool name list so
+// the program can only reach currently-active tools.
+let toolCallSeq = 0;
+const pendingToolCalls = new Map();
+
+function makeToolsProxy(toolNames) {
+	const tools = {};
+	for (const name of toolNames) {
+		tools[name] = (args) => {
+			const callId = "tc_" + (++toolCallSeq);
+			return new Promise((resolve, reject) => {
+				pendingToolCalls.set(callId, { resolve, reject });
+				try {
+					process.stdout.write(
+						JSON.stringify({ toolCall: { callId, name, args: args === undefined ? {} : args } }) + "\\n",
+					);
+				} catch (e) {
+					pendingToolCalls.delete(callId);
+					reject(e);
+				}
+			});
+		};
+	}
+	return tools;
+}
+
+function resolveToolResult(res) {
+	if (!res || typeof res.callId !== "string") return;
+	const p = pendingToolCalls.get(res.callId);
+	if (!p) return;
+	pendingToolCalls.delete(res.callId);
+	// The bridge flattens content to text; surface it as a string to the program.
+	let text = "";
+	if (Array.isArray(res.content)) {
+		text = res.content.map((b) => (b && typeof b.text === "string" ? b.text : "")).join("\\n");
+	}
+	if (res.isError) {
+		const err = new Error(text || ("tool error"));
+		err.isToolError = true;
+		p.reject(err);
+	} else {
+		p.resolve(text);
+	}
+}
+
+async function runCodeMode(code, timeoutMs, maxBytes, toolNames) {
+	const cap = capture(maxBytes);
+	let error;
+	// Install the per-run tools proxy on the shared context. Code-mode programs
+	// are wrapped in an async IIFE unconditionally (they always await tool calls).
+	ctx.tools = makeToolsProxy(Array.isArray(toolNames) ? toolNames : []);
+	try {
+		const hoisted = hoistTopLevelBindings(code);
+		const wrapped = "(async () => {\\n" + hoisted + "\\n})()";
+		const script = new vm.Script(wrapped, { filename: "<code-mode>" });
+		// No sync vm timeout here: a code-mode program is await-driven (tool calls
+		// suspend it), so a sync timeout would mostly misfire. The parent timeout is
+		// the backstop for hangs, same as async eval.
+		const result = script.runInContext(ctx);
+		if (result && typeof result.then === "function") {
+			await result;
+		}
+	} catch (e) {
+		error = e && e.stack ? e.stack : String(e);
+	} finally {
+		cap.restore();
+		// Reject any tool calls still in flight (program returned without awaiting,
+		// or threw) so they cannot leak across runs.
+		const leftover = Array.from(pendingToolCalls.values());
+		pendingToolCalls.clear();
+		for (const p of leftover) {
+			try { p.reject(new Error("code-mode run ended")); } catch {}
+		}
+		delete ctx.tools;
+	}
+	return {
+		stdout: cap.out.join("\\n"),
+		stderr: cap.err.join("\\n"),
+		error,
+	};
+}
+
 let buf = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -164,7 +258,16 @@ process.stdin.on("data", (chunk) => {
 		if (!line) continue;
 		let msg;
 		try { msg = JSON.parse(line); } catch { continue; }
-		runOne(msg.code, msg.timeoutMs, msg.maxBytes).then((r) => {
+		// Tool-result frame from the parent bridge: resolve the awaiting promise
+		// in-vm. No reply frame — the resolution IS the reply to the program.
+		if (msg.toolResult) {
+			resolveToolResult(msg.toolResult);
+			continue;
+		}
+		const run = msg.codeMode
+			? runCodeMode(msg.code, msg.timeoutMs, msg.maxBytes, msg.toolNames)
+			: runOne(msg.code, msg.timeoutMs, msg.maxBytes);
+		run.then((r) => {
 			process.stdout.write(JSON.stringify({ id: msg.id, ...r }) + "\\n");
 		}, (e) => {
 			process.stdout.write(JSON.stringify({ id: msg.id, error: String(e && e.stack || e) }) + "\\n");
@@ -190,6 +293,10 @@ class JsKernel implements EvalKernel {
 	private stdoutBuf = "";
 	private cwd: string;
 	private maxOutputBytes = resolveMaxEvalOutputBytes();
+	// At most one code-mode run is active per kernel at a time (the agent loop
+	// runs the `code` tool sequentially). The handler routes vm tool-call frames
+	// to the active bridge; undefined when no code-mode run is in flight.
+	private codeModeToolCallHandler: ((call: CodeModeToolCall) => void) | undefined;
 
 	constructor(cwd: string) {
 		this.cwd = cwd;
@@ -271,10 +378,23 @@ class JsKernel implements EvalKernel {
 			const line = this.stdoutBuf.slice(0, nl);
 			this.stdoutBuf = this.stdoutBuf.slice(nl + 1);
 			if (!line) continue;
-			let msg: { id: string; stdout?: string; stderr?: string; error?: string };
+			let msg: {
+				id: string;
+				stdout?: string;
+				stderr?: string;
+				error?: string;
+				toolCall?: { callId: string; name: string; args: unknown };
+			};
 			try {
 				msg = JSON.parse(line);
 			} catch {
+				continue;
+			}
+			// Code-mode tool-call frame from the vm: route to the active channel
+			// handler. The channel writes the matching toolResult back to stdin.
+			if (msg.toolCall) {
+				const handler = this.codeModeToolCallHandler;
+				if (handler) handler(msg.toolCall);
 				continue;
 			}
 			const call = this.pending.get(msg.id);
@@ -345,6 +465,102 @@ class JsKernel implements EvalKernel {
 			}
 			this.pending.set(id, call);
 			proc.stdin.write(`${JSON.stringify({ id, code: req.code, timeoutMs, maxBytes: this.maxOutputBytes })}\n`);
+		});
+	}
+
+	openCodeMode(): CodeModeChannel | undefined {
+		const self = this;
+		return {
+			onToolCall(handler: (call: CodeModeToolCall) => void): () => void {
+				self.codeModeToolCallHandler = handler;
+				return () => {
+					if (self.codeModeToolCallHandler === handler) {
+						self.codeModeToolCallHandler = undefined;
+					}
+				};
+			},
+			sendToolResult(result: CodeModeToolResult): void {
+				const proc = self.proc;
+				if (!proc || !self.alive) return;
+				try {
+					proc.stdin.write(`${JSON.stringify({ toolResult: result })}\n`);
+				} catch {
+					// Kernel gone; the program's pending tool calls fail with the run.
+				}
+			},
+			runProgram(
+				code: string,
+				toolNames: string[],
+				timeoutMs: number | undefined,
+				signal: AbortSignal | undefined,
+			): Promise<EvalResult> {
+				return self.submitCodeMode(code, toolNames, timeoutMs, signal);
+			},
+		};
+	}
+
+	/**
+	 * Submit a code-mode program. Mirrors `exec`'s pending-call + timeout + abort
+	 * machinery (kept separate so `exec`'s tested path is untouched) but sends a
+	 * `codeMode` frame carrying the active tool names for the vm proxy.
+	 */
+	private submitCodeMode(
+		code: string,
+		toolNames: string[],
+		timeoutMs: number | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<EvalResult> {
+		if (!this.alive) {
+			this.spawn();
+			if (!this.alive) {
+				return Promise.reject(this.spawnError ?? new Error("node kernel not alive"));
+			}
+		}
+		const proc = this.proc;
+		if (!proc) return Promise.reject(new Error("node kernel not alive"));
+		const id = randomUUID();
+		const effectiveTimeout = timeoutMs ?? DEFAULT_TIMEOUT_MS;
+		const parentTimeoutMs = effectiveTimeout + DRIVER_TIMEOUT_GRACE_MS;
+		return new Promise<EvalResult>((resolve, reject) => {
+			const call: PendingCall = { id, resolve, reject, startedAt: Date.now(), timer: undefined };
+			call.timer = setTimeout(() => {
+				if (this.pending.has(id)) {
+					this.pending.delete(id);
+					try {
+						proc.kill();
+					} catch {
+						// ignore
+					}
+					this.alive = false;
+					reject(new Error(`code-mode timed out after ${effectiveTimeout}ms`));
+				}
+			}, parentTimeoutMs);
+			if (signal) {
+				const onAbort = () => {
+					if (this.pending.has(id)) {
+						this.pending.delete(id);
+						if (call.timer) clearTimeout(call.timer);
+						// Abort kills the kernel, which fails every in-flight tool call
+						// (and any other pending eval) — the whole vm is torn down.
+						try {
+							proc.kill();
+						} catch {
+							// ignore
+						}
+						this.alive = false;
+						reject(new Error("aborted"));
+					}
+				};
+				if (signal.aborted) {
+					onAbort();
+					return;
+				}
+				signal.addEventListener("abort", onAbort, { once: true });
+			}
+			this.pending.set(id, call);
+			proc.stdin.write(
+				`${JSON.stringify({ id, codeMode: true, code, timeoutMs: effectiveTimeout, maxBytes: this.maxOutputBytes, toolNames })}\n`,
+			);
 		});
 	}
 

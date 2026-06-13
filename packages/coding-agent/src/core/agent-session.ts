@@ -42,6 +42,7 @@ import {
 	getCurrentChromeDevtoolsManager,
 	setCurrentChromeDevtoolsManager,
 } from "./chrome/chrome-devtools-manager.ts";
+import { buildHarnessDispatcher, type CodeModeDispatcher } from "./code-mode/bridge.ts";
 import { cloneToolResultMessagesForPrune, pruneOldToolOutputs } from "./compaction/compaction.ts";
 import {
 	type CompactionPreparation,
@@ -59,6 +60,7 @@ import {
 import { extractToolFileOp } from "./compaction/utils.js";
 import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } from "./cross-error.js";
 import { dapSessionManager } from "./dap/index.ts";
+import { debugVerifyContextPrompt, maybeRunDebugVerify } from "./debug-verify.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import {
 	createDeferredOutputStore,
@@ -633,6 +635,10 @@ export class AgentSession {
 	// writes/edits this prompt cycle), `_inVerification` guards re-entry, and
 	// `_verificationAbort` cancels an in-flight check on interrupt/dispose.
 	private _turnTouchedFiles = false;
+	// Absolute paths of files this prompt cycle modified (op !== "read"). Feeds
+	// debug-driven verify (`maybeRunDebugVerify`) so it can locate the touched
+	// test/source as a runtime repro. Reset alongside `_turnTouchedFiles`.
+	private readonly _turnTouchedFilePaths = new Set<string>();
 	private _inVerification = false;
 	private _verificationAbort: AbortController | undefined;
 	// Visual definition-of-done tracking: did this prompt cycle change a rendered
@@ -884,6 +890,11 @@ export class AgentSession {
 			...on(s.getHindsightSettings().enabled, ["retain", "recall", "reflect", "forget"]),
 			...on(s.getWebSearchSettings().enabled, ["web_search"]),
 			...on(s.getEvalSettings().enabled, ["eval"]),
+			// Code-mode is native + default-on. It rides on the JS eval kernel (its
+			// bidirectional tool channel lives there), so it's gated on eval being
+			// enabled; PIT_NO_CODE_MODE=1 is the emergency opt-out. The harness-routed
+			// dispatcher is injected in `_buildRuntime`.
+			...on(s.getEvalSettings().enabled && process.env.PIT_NO_CODE_MODE !== "1", ["code"]),
 			...on(s.getLspSettings().enabled, ["lsp"]),
 			...on(s.getDebugSettings().enabled, ["debug"]),
 			...on(isTruthyEnvFlag(process.env.PIT_DEFER_HISTORY), ["recall_tool_output"]),
@@ -1606,6 +1617,7 @@ export class AgentSession {
 				// Arm the verification gate when this turn actually changed a file.
 				if (fileOp.op !== "read") {
 					this._turnTouchedFiles = true;
+					this._turnTouchedFilePaths.add(fileOp.path);
 					if (VISUAL_FILE_EXTENSIONS.has(extname(fileOp.path).toLowerCase())) {
 						this._turnTouchedVisual = true;
 						this._lastVisualFile = fileOp.path;
@@ -2895,6 +2907,7 @@ export class AgentSession {
 		this._userInterrupted = false;
 		// Reset the per-prompt-cycle flag that arms the verification gate.
 		this._turnTouchedFiles = false;
+		this._turnTouchedFilePaths.clear();
 		this._turnTouchedVisual = false;
 		this._turnUsedPreview = false;
 		// Reset the per-turn, per-tool failure budget so each tool starts the turn
@@ -2998,6 +3011,30 @@ export class AgentSession {
 						attempt,
 						maxAttempts: settings.maxAttempts,
 					});
+					// Debug-driven verify (additive, fail-open): on green, if a file this
+					// turn touched is a debuggable repro (pytest+debugpy / go test+dlv),
+					// launch it under the native DAP debugger and capture runtime state. A
+					// "suspect" verdict (a fixed variable still nullish at the fix site) is
+					// re-injected as context for the next turn. ANY failure / missing
+					// adapter / non-applicable repro → no-op (NEVER blocks the green gate).
+					if (!this._userInterrupted && !abort.signal.aborted && this._turnTouchedFilePaths.size > 0) {
+						try {
+							const snapshot = await maybeRunDebugVerify({
+								cwd: this._cwd,
+								touchedFiles: Array.from(this._turnTouchedFilePaths),
+								checkResult: result,
+								signal: abort.signal,
+							});
+							if (snapshot?.verdict === "suspect" && !abort.signal.aborted && !this._userInterrupted) {
+								await this._promptOnce(debugVerifyContextPrompt(snapshot), {
+									expandPromptTemplates: false,
+									source: options?.source,
+								});
+							}
+						} catch {
+							// Fail-open absolute: debug-verify must never affect the passed result.
+						}
+					}
 					return;
 				}
 				const willRetry = fixes < settings.maxAttempts;
@@ -4490,6 +4527,47 @@ export class AgentSession {
 		this.setActiveToolsByName([...new Set(nextActiveToolNames)]);
 	}
 
+	/**
+	 * Build the harness-routed dispatcher for code-mode. Each `tools.x()` call from
+	 * a code-mode program runs through the SAME pipeline as a normal model tool call
+	 * (rewrite → permission/extension hooks → execute → error-hints → afterToolCall),
+	 * reconstructed from the agent's harness primitives because the per-tool executor
+	 * is private to the agent loop. The before/after hooks are read dynamically (the
+	 * session reassigns them after construction). Loop detectors (doom-loop /
+	 * repeating-pattern) are intentionally NOT applied here: a deterministic program
+	 * iterating over N files is not model flailing, and tripping the loop guard would
+	 * defeat code-mode's purpose. Gate-arming IS preserved so a code-mode write still
+	 * arms the verification gate, exactly like a normal mutating tool call.
+	 */
+	private _buildCodeModeDispatcher(): CodeModeDispatcher {
+		const base = buildHarnessDispatcher({
+			getTool: (name) => this.agent.state.tools.find((t) => t.name === name),
+			toolRewriteRegistry: this.agent.toolRewriteRegistry,
+			toolErrorHintRegistry: this.agent.toolErrorHintRegistry,
+			beforeToolCall: (ctx, signal) =>
+				this.agent.beforeToolCall ? this.agent.beforeToolCall(ctx, signal) : Promise.resolve(undefined),
+			afterToolCall: (ctx, signal) =>
+				this.agent.afterToolCall ? this.agent.afterToolCall(ctx, signal) : Promise.resolve(undefined),
+			getContext: () => this.agent.state,
+			// The agent message that requested the `code` call. Handlers only read
+			// toolCall/args, so this is informational; it is always set when a tool runs.
+			getAssistantMessage: () => this._lastAssistantMessage as AssistantMessage,
+		});
+		return async (name, args, signal) => {
+			const result = await base(name, args, signal);
+			if (!result.isError) {
+				const fileOp = extractToolFileOp(name, args);
+				if (fileOp && fileOp.op !== "read") {
+					this._turnTouchedFiles = true;
+					this._turnTouchedFilePaths.add(fileOp.path);
+				} else if (this._isMutatingToolCall(name, args)) {
+					this._turnTouchedFiles = true;
+				}
+			}
+			return result;
+		};
+	}
+
 	private _buildRuntime(options: {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
@@ -4513,6 +4591,13 @@ export class AgentSession {
 						readDedupeStore: this._readDedupeStore,
 					},
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					// Code-mode: inject the harness-routed dispatcher so a code-mode
+					// program's `tools.x()` calls pass through the same pipeline as a
+					// normal model tool call (anti-bypass). See _buildCodeModeDispatcher.
+					code: {
+						dispatcher: this._buildCodeModeDispatcher(),
+						getActiveToolNames: () => this.getActiveToolNames(),
+					},
 				});
 
 		this._baseToolDefinitions = new Map(

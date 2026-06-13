@@ -121,7 +121,9 @@ export interface DapCapabilities {
 }
 
 export interface DapLaunchArguments {
-	program: string;
+	program?: string;
+	/** Module-mode launch (e.g. debugpy `python -m <module>`). Replaces `program`. */
+	module?: string;
 	args?: string[];
 	cwd?: string;
 	stopOnEntry?: boolean;
@@ -579,6 +581,13 @@ export interface DapContinueOutcome {
 export interface DapLaunchSessionOptions {
 	adapter: DapResolvedAdapter;
 	program: string;
+	/**
+	 * When set, the launch request is sent in module mode (`module: <name>`, no
+	 * `program` in the DAP args), e.g. debugpy `python -m pytest`. `program` is still
+	 * required and used for session display/tracking. Additive + backward-compatible:
+	 * callers that omit it get the existing program-mode launch.
+	 */
+	module?: string;
 	args?: string[];
 	cwd: string;
 }

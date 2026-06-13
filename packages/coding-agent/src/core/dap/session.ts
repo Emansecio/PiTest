@@ -310,9 +310,15 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs = 30_000,
 	): Promise<DapSessionSummary> {
+		// Module-mode launch (e.g. debugpy `python -m pytest`) carries `module` and
+		// MUST NOT carry `program` — debugpy treats `program` as a script path and
+		// ignores `module` when both are present. Program-mode is the default.
+		const target: { module: string } | { program: string } = options.module
+			? { module: options.module }
+			: { program: options.program };
 		const requestArgs: DapLaunchArguments = {
 			...options.adapter.launchDefaults,
-			program: options.program,
+			...target,
 			cwd: options.cwd,
 			args: options.args,
 		};

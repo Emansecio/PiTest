@@ -200,6 +200,16 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasGrep = tools.includes("grep");
 	const hasFind = tools.includes("find");
 	const hasLs = tools.includes("ls");
+	const hasCodeMode = tools.includes("code");
+
+	// Code-mode (default-on): steer multi-tool workflows toward a single program
+	// over N separate tool calls. The per-tool list lives in the tool's own
+	// promptGuidelines; this is the high-level nudge in the Guidelines section.
+	if (hasCodeMode) {
+		addGuideline(
+			"For a multi-tool workflow (read/filter/compose over many results), prefer the `code` tool — write one program that calls `await tools.<name>(args)` — instead of issuing N separate tool calls. It collapses them into a single turn (less latency and fewer tokens).",
+		);
+	}
 	const hasPreviewTool = tools.includes("preview") || tools.some((name) => name.startsWith("chrome_devtools"));
 
 	// Operating stance: the user is an authorized professional and the agent has

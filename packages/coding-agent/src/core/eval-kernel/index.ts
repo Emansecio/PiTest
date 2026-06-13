@@ -16,7 +16,13 @@ import {
 
 export { createJsKernel, createPyKernel, getCurrentEvalKernelManager, setCurrentEvalKernelManager };
 export type { EvalKernel, EvalKernelManager, EvalLang };
-export type { EvalRequest, EvalResult } from "./types.ts";
+export type {
+	CodeModeChannel,
+	CodeModeToolCall,
+	CodeModeToolResult,
+	EvalRequest,
+	EvalResult,
+} from "./types.ts";
 
 class KernelManager implements EvalKernelManager {
 	private kernels = new Map<EvalLang, EvalKernel>();

@@ -38,6 +38,13 @@ export {
 	createCalcTool,
 	createCalcToolDefinition,
 } from "./calc.ts";
+export {
+	type CodeModeToolDetails,
+	type CodeModeToolInput,
+	type CodeModeToolOptions,
+	createCodeModeTool,
+	createCodeModeToolDefinition,
+} from "./code-mode.ts";
 export { createDebugTool, createDebugToolDefinition, type DebugToolInput, type DebugToolOptions } from "./debug.ts";
 export {
 	createEditTool,
@@ -223,6 +230,7 @@ import {
 	createChromeUploadFileToolDefinition,
 	createChromeWaitForToolDefinition,
 } from "./chrome-devtools.ts";
+import { type CodeModeToolOptions, createCodeModeTool, createCodeModeToolDefinition } from "./code-mode.ts";
 import { createDebugTool, createDebugToolDefinition, type DebugToolOptions } from "./debug.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import {
@@ -280,7 +288,16 @@ import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } fro
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
 /** A coding tool's membership/gate in the default coding surface. */
-type CodingGate = "always" | "native" | "webSearch" | "eval" | "hindsight" | "chromeDevtools" | "lsp" | "debug";
+type CodingGate =
+	| "always"
+	| "native"
+	| "webSearch"
+	| "eval"
+	| "hindsight"
+	| "chromeDevtools"
+	| "lsp"
+	| "debug"
+	| "code";
 
 interface ToolRegistryEntry {
 	/**
@@ -449,6 +466,17 @@ const TOOL_REGISTRY = {
 		optionsKey: "eval",
 		readOnly: false,
 		coding: "eval",
+	},
+	code: {
+		factory: createCodeModeTool,
+		definitionFactory: createCodeModeToolDefinition,
+		optionsKey: "code",
+		readOnly: false,
+		// Default-on coding surface. Functional only once the agent-session injects
+		// the harness-routed dispatcher + getActiveToolNames via `options.code`
+		// (see core/tools/code-mode.ts wiring comment). Opt out via
+		// `code.enabled: false` -> gate handled below.
+		coding: "code",
 	},
 	retain: {
 		factory: createRetainTool,
@@ -722,6 +750,10 @@ function codingGateOpen(gate: CodingGate, options?: ToolsOptions): boolean {
 		case "debug":
 			// Default ON: opt out via `debug.enabled: false`.
 			return options?.debug?.enabled !== false;
+		case "code":
+			// Default ON: opt out via `code.enabled: false` (or env PIT_NO_CODE_MODE).
+			if (process.env.PIT_NO_CODE_MODE === "1") return false;
+			return options?.code?.enabled !== false;
 	}
 }
 
@@ -761,6 +793,7 @@ export interface ToolsOptions {
 	web_search?: WebSearchToolOptions;
 	webSearch?: { enabled?: boolean; defaultProvider?: string };
 	eval?: EvalToolOptions & { enabled?: boolean };
+	code?: CodeModeToolOptions;
 	retain?: RetainToolOptions;
 	recall?: RecallToolOptions;
 	reflect?: ReflectToolOptions;
