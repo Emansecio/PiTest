@@ -73,6 +73,8 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 	return (pi: ExtensionAPI) => {
 		const readFiles = new Set<string>();
 		const postCompactStamps = new Map<string, FileStamp>();
+		// Files already warned about overwriting post-compaction (fire-once anti-wedge).
+		const firedWriteWarnings = new Set<string>();
 
 		pi.on("tool_call", (event) => {
 			if (event.toolName === "read") {
@@ -119,7 +121,8 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 						// oldText still matches EXACTLY — that proves the model is anchored to
 						// real content, not reconstructing from a lossy summary (which would
 						// otherwise slip through fuzzy/indent matching and corrupt the file).
-						// edit only; write has no oldText to verify and keeps prior behavior.
+						// edit verifies every oldText verbatim (below); write has no anchor at
+						// all, so a post-compaction overwrite gets a one-time warning instead.
 						if (event.toolName === "edit") {
 							const oldTexts = extractEditOldTexts(event.input as Record<string, unknown>);
 							if (oldTexts.length > 0) {
@@ -133,6 +136,18 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 									};
 								}
 							}
+						}
+						if (event.toolName === "write" && !firedWriteWarnings.has(abs)) {
+							// A write OVERWRITES the whole file. Across compaction the model only
+							// carried a lossy summary (head+tail excerpt), so a blind overwrite
+							// from that risks dropping the amnesic middle — a higher data-loss
+							// risk than an edit (which is anchored by oldText). Warn ONCE: a
+							// re-issue means the overwrite is intended and runs.
+							firedWriteWarnings.add(abs);
+							return {
+								block: true,
+								reason: `Read guard: "${path}" was only summarized across compaction and a write would OVERWRITE its full content from that lossy summary. Read it again to confirm what you're replacing, or re-issue the identical write to overwrite anyway.`,
+							};
 						}
 						return undefined;
 					}

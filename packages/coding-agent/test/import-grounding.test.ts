@@ -3,6 +3,7 @@
 import { resolve as resolvePath } from "node:path";
 import { suggestClosest } from "@pit/ai";
 import { describe, expect, it } from "vitest";
+import { reconstructEditedRegion } from "../src/core/built-ins/import-grounding-extension.ts";
 import {
 	groundImports,
 	IMPORT_GROUNDING_DEFAULTS,
@@ -283,6 +284,30 @@ describe("groundImports — does not double-report a UNIQUE specifier", () => {
 		);
 		// One block (the first), not a throw or a duplicated candidate set.
 		expect(decision.action).toBe("block");
+	});
+});
+
+describe("import-grounding edit reconstruction (surgical specifier swap — reinforcement)", () => {
+	it("rebuilds the full import line from oldText context so the regex still matches", () => {
+		const file = `import { x } from "./old";\nconst y = 1;\n`;
+		// the edit swaps ONLY the specifier — newText alone carries no `import` keyword
+		expect(reconstructEditedRegion(file, "./old", "./renamed")).toBe(`import { x } from "./renamed";`);
+	});
+
+	it("falls back to the raw newText when the file is unavailable or oldText is absent (fail-open)", () => {
+		expect(reconstructEditedRegion(undefined, "./old", "./new")).toBe("./new");
+		expect(reconstructEditedRegion(`import x from "./a";`, "./zzz", "./new")).toBe("./new");
+	});
+
+	it("the reconstructed line feeds groundImports so a surgical specifier typo is caught", () => {
+		const file = `import { calc } from "./utils";\n`;
+		const reconstructed = reconstructEditedRegion(file, "./utils", "./utis");
+		const decision = groundImports(
+			{ targetFile: TARGET, content: reconstructed },
+			makeDeps([resolvePath(ROOT, "utils.ts")]),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") expect(decision.message).toContain("./utis");
 	});
 });
 

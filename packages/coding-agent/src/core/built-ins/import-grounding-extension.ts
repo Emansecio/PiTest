@@ -22,7 +22,7 @@
  * load-bearing. Opt out with PIT_NO_IMPORT_GROUNDING.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { suggestClosest } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundImports, IMPORT_GROUNDING_DEFAULTS, isImportGroundingDisabled } from "../import-grounding.ts";
@@ -31,8 +31,34 @@ import { extractEdits, extractPathArg, resolveToolPath } from "../tools/argument
 /** Aliases the write tool accepts for the content body (WRITE_KEY_ALIASES in write.ts). */
 const CONTENT_KEYS = ["content", "text", "body", "data"] as const;
 
-/** Read the new content to scan for a write (full body) or edit (added newText). */
-function extractContent(toolName: string, input: Record<string, unknown>): string | undefined {
+function readFileSafe(absPath: string): string | undefined {
+	try {
+		return readFileSync(absPath, "utf-8");
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Reconstruct the full edited LINE so a surgical edit that swaps ONLY the
+ * specifier (newText without the `import` keyword) still presents a complete
+ * import statement to the regex. Find oldText in the file, expand to its whole
+ * line, and apply newText in place. Falls back to the raw newText when the file
+ * or oldText can't be located (fail-open — exported for tests).
+ */
+export function reconstructEditedRegion(fileContent: string | undefined, oldText: string, newText: string): string {
+	if (fileContent === undefined) return newText;
+	const idx = fileContent.indexOf(oldText);
+	if (idx < 0) return newText;
+	const lineStart = fileContent.lastIndexOf("\n", idx) + 1;
+	const matchEnd = idx + oldText.length;
+	const nextNewline = fileContent.indexOf("\n", matchEnd);
+	const lineEnd = nextNewline < 0 ? fileContent.length : nextNewline;
+	return `${fileContent.slice(lineStart, idx)}${newText}${fileContent.slice(matchEnd, lineEnd)}`;
+}
+
+/** New content to scan: a write's full body, or an edit's reconstructed lines. */
+function extractContent(toolName: string, input: Record<string, unknown>, targetFile: string): string | undefined {
 	if (toolName === "write") {
 		for (const key of CONTENT_KEYS) {
 			const value = input[key];
@@ -40,10 +66,10 @@ function extractContent(toolName: string, input: Record<string, unknown>): strin
 		}
 		return undefined;
 	}
-	// edit: scan only the ADDED text (newText) — that is where a new import appears.
 	const edits = extractEdits(input);
 	if (!edits) return undefined;
-	return edits.map((edit) => edit.newText).join("\n");
+	const fileContent = readFileSafe(targetFile);
+	return edits.map((edit) => reconstructEditedRegion(fileContent, edit.oldText, edit.newText)).join("\n");
 }
 
 export function createImportGroundingExtension(options: { cwd: string }) {
@@ -62,10 +88,9 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 				// Only TS/JS targets carry the import forms we resolve.
 				if (!/\.(?:[cm]?[jt]sx?)$/i.test(path)) return undefined;
 
-				const content = extractContent(event.toolName, input);
-				if (content === undefined || content.length === 0) return undefined;
-
 				const targetFile = resolveToolPath(path, options.cwd);
+				const content = extractContent(event.toolName, input, targetFile);
+				if (content === undefined || content.length === 0) return undefined;
 				const decision = groundImports(
 					{ targetFile, content },
 					{
