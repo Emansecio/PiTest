@@ -6,9 +6,17 @@
  *   - tool_result (PostToolUse) — may transform tool output
  *   - input (UserPromptSubmit) — may block or augment the prompt
  *   - agent_end (Stop) — fires when a turn finishes
+ *   - session_start (SessionStart) — fires when a session starts/loads/reloads;
+ *     informative only (no block). `additionalContext` is surfaced via the UI
+ *     when available, since the agent loop has not started yet.
+ *   - session_before_compact (PreCompact) — fires before context compaction with
+ *     light, derived facts (token/message counts, split flag); informative only.
+ *     `SessionBeforeCompactResult` has no `additionalContext` field, so PreCompact
+ *     cannot inject context — it logs/notifies and never cancels compaction.
  *
  * Hook contract is documented in `core/hooks/types.ts`. Hooks run sequentially
- * within each event; the first hook to return `decision: "block"` short-circuits.
+ * within each event; the first hook to return `decision: "block"` short-circuits
+ * (only PreToolUse/UserPromptSubmit actually act on a block).
  */
 
 import type { ExtensionAPI } from "../extensions/types.ts";
@@ -44,8 +52,10 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 		const hasPost = (settings.PostToolUse?.length ?? 0) > 0;
 		const hasUps = (settings.UserPromptSubmit?.length ?? 0) > 0;
 		const hasStop = (settings.Stop?.length ?? 0) > 0;
+		const hasSessionStart = (settings.SessionStart?.length ?? 0) > 0;
+		const hasPreCompact = (settings.PreCompact?.length ?? 0) > 0;
 
-		if (!hasPre && !hasPost && !hasUps && !hasStop) {
+		if (!hasPre && !hasPost && !hasUps && !hasStop && !hasSessionStart && !hasPreCompact) {
 			return; // No hooks configured — install no listeners.
 		}
 
@@ -172,6 +182,58 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 				};
 				const { executions } = await runHookChain(matched, payload, { cwd, signal: ctx.signal });
 				logErrors(executions, "Stop", onExecution);
+			});
+		}
+
+		if (hasSessionStart) {
+			pi.on("session_start", async (event, ctx) => {
+				const matched = selectHooks(settings.SessionStart, "*");
+				if (matched.length === 0) return;
+				const payload = {
+					event: "SessionStart" as const,
+					reason: event.reason,
+					cwd: ctx.cwd,
+				};
+				const { executions } = await runHookChain(matched, payload, { cwd, signal: ctx.signal });
+				logErrors(executions, "SessionStart", onExecution);
+				// The agent loop hasn't started yet, so there is no prompt to augment.
+				// Surface any additionalContext via the UI when one is available;
+				// otherwise it is still captured by onExecution for audit.
+				if (!ctx.hasUI) return;
+				const extras = executions
+					.map((e) => e.parsed?.additionalContext?.trim())
+					.filter((s): s is string => !!s && s.length > 0);
+				if (extras.length > 0) {
+					ctx.ui.notify(extras.join("\n\n"), "info");
+				}
+			});
+		}
+
+		if (hasPreCompact) {
+			pi.on("session_before_compact", async (event, ctx) => {
+				const matched = selectHooks(settings.PreCompact, "*");
+				if (matched.length === 0) return undefined;
+				const prep = event.preparation;
+				// Only light, derived facts — never the message arrays / fileOps maps.
+				const payload = {
+					event: "PreCompact" as const,
+					cwd: ctx.cwd,
+					tokensBefore: prep.tokensBefore,
+					messagesToSummarize: prep.messagesToSummarize.length,
+					turnPrefixMessages: prep.turnPrefixMessages.length,
+					isSplitTurn: prep.isSplitTurn,
+					hasPreviousSummary: prep.previousSummary !== undefined,
+				};
+				// Prefer the compaction event's own abort signal over the (possibly
+				// undefined) idle ctx.signal so hooks are cancelled with the compaction.
+				const { executions } = await runHookChain(matched, payload, {
+					cwd,
+					signal: event.signal,
+				});
+				logErrors(executions, "PreCompact", onExecution);
+				// SessionBeforeCompactResult has no additionalContext field — PreCompact
+				// is informative only and never cancels or customizes compaction.
+				return undefined;
 			});
 		}
 	};

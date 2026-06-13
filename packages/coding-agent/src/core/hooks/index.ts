@@ -7,7 +7,9 @@ export type {
 	HookResult,
 	HooksSettings,
 	PostToolUsePayload,
+	PreCompactPayload,
 	PreToolUsePayload,
+	SessionStartPayload,
 	StopPayload,
 	UserPromptSubmitPayload,
 } from "./types.ts";

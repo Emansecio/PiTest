@@ -303,6 +303,11 @@ const SAME_SESSION_HINT_THRESHOLD = 2;
 // recurring-error guard, and the disk persist iterates values order-insensitively.
 const MAX_LEARNED_ERRORS = 500;
 
+// Minimum back-to-back repetitions of a multi-tool cycle (e.g. [read,edit,bash])
+// before the repeating-pattern detector steers. Three full cycles of >= 2 distinct
+// tools is a strong "productive-looking loop" signal the same-call doom-loop misses.
+const REPEATING_PATTERN_THRESHOLD = 3;
+
 /** Build the continuation prompt that re-injects a failed verification check. */
 function verificationFixPrompt(
 	command: string,
@@ -548,6 +553,11 @@ export class AgentSession {
 	// the Tier-3 abort — replaces the old per-tier resetSequence() that capped the
 	// count at 4 and made the abort unreachable. Reset when the streak breaks.
 	private _doomLoopFiredTier = 0;
+	// Signature of the last repeating multi-tool CYCLE we fired a reminder for
+	// ("<patternLength>x<repetitions>"), so we steer once per detected pattern and
+	// re-arm only when the pattern grows or a different cycle/break supersedes it.
+	// Complements _doomLoopFiredTier, which tracks the SAME-call loop. Empty = none.
+	private _repeatingPatternFiredKey = "";
 	private readonly _stagnation = new StagnationTracker();
 	// Cross-error ("flailing") detector: same normalised error in a row across
 	// ≥2 distinct call shapes. Complements the doom-loop (which owns identical
@@ -1502,6 +1512,10 @@ export class AgentSession {
 		// throw, just gated on "same call AND same result".
 		this._toolCallStats.recordInvocationResult(fingerprintToolResult(event.result, event.isError));
 		this._maybeInjectDoomLoopReminder(event.toolName, args);
+		// Complementary to the doom-loop above (same call repeated): detect a
+		// repeating MULTI-tool cycle [A,B,C]x3 of DIFFERENT tools. Runs after — if
+		// the doom-loop Tier-3 aborted, this is skipped (identical-loop abort wins).
+		this._maybeInjectRepeatingPatternReminder();
 		// Capture the learned-error fingerprint so the next session boots warm
 		// with knowledge of recurring patterns. Looked up via the matching
 		// hint event recorded earlier in finalize.
@@ -1890,6 +1904,67 @@ export class AgentSession {
 			deliverAs: "steer",
 			display: false,
 			label: "doom-loop reminder",
+		});
+	}
+
+	/**
+	 * Conditionally inject a reminder when the agent is cycling a repeating
+	 * MULTI-tool pattern at the tail of the recent-call window — e.g.
+	 * [read,edit,bash] run three times in a row. This is the "productive-looking"
+	 * loop that the consecutive-identical doom-loop ({@link
+	 * _maybeInjectDoomLoopReminder}) cannot see, because each call within a cycle
+	 * is a DIFFERENT tool. Complementary and non-overlapping: it requires
+	 * patternLength >= 2 (cycles of distinct calls), so a single call repeated
+	 * stays exclusively the doom-loop's job and never double-fires.
+	 *
+	 * Fires ONCE per detected pattern (tracked by `_repeatingPatternFiredKey`),
+	 * re-arming only when the cycle/repetition signature changes or the pattern
+	 * breaks. Default-on; disable with `PIT_NO_REPEATING_PATTERN=1`. Delivered as a
+	 * steer (like the doom-loop) so it lands before the next turn while the loop is
+	 * still hot.
+	 */
+	private _maybeInjectRepeatingPatternReminder(): void {
+		if (process.env.PIT_NO_REPEATING_PATTERN === "1") {
+			this._repeatingPatternFiredKey = "";
+			return;
+		}
+		const match = this._toolCallStats.getRepeatingPatternCount();
+		// patternLength >= 2 excludes the same-call loop (the doom-loop owns it), so
+		// the two detectors never fire on the same condition.
+		if (match.patternLength < 2 || match.repetitions < REPEATING_PATTERN_THRESHOLD) {
+			// Pattern broke or never reached threshold — re-arm for the next cycle.
+			this._repeatingPatternFiredKey = "";
+			return;
+		}
+		// Fire-once signature is the CYCLE composition (the trailing block of tool
+		// names), NOT the repetition count — so the same cycle repeating more times
+		// does not re-spam every pass. Re-arms only when a different cycle takes over
+		// or the pattern breaks (handled above). `getRepeatingPatternCount` keys on
+		// args, so the displayed tool names alone suffice as the anti-respam key.
+		const cycle = this._toolCallStats
+			.getSequence()
+			.slice(-match.patternLength)
+			.map((e) => e.toolName)
+			.join(" → ");
+		const key = `${match.patternLength}:${cycle}`;
+		if (this._repeatingPatternFiredKey === key) return;
+		this._repeatingPatternFiredKey = key;
+		const content =
+			"<repeating-pattern-reminder>\n" +
+			`You have repeated the same ${match.patternLength}-step tool cycle ` +
+			`(${cycle}) ${match.repetitions} times in a row without resolving the task. ` +
+			"This pattern looks productive but is not converging.\n\n" +
+			"Stop and reassess before running the cycle again:\n" +
+			"- What is the cycle supposed to achieve, and why has it not finished after " +
+			`${match.repetitions} passes?\n` +
+			"- Is there a root cause you are working around instead of fixing?\n" +
+			"- Would a different approach, a larger single change, or asking the user for " +
+			"guidance break the loop?\n" +
+			"</repeating-pattern-reminder>";
+		this._fireReminder("pi.repeating-pattern-reminder", content, {
+			deliverAs: "steer",
+			display: false,
+			label: "repeating-pattern reminder",
 		});
 	}
 

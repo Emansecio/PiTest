@@ -744,6 +744,17 @@ describe("pruneOldToolOutputs deferred-history mode", () => {
 // ============================================================================
 
 describe("compact() prune isolation", () => {
+	// These tests exercise the LLM summarization path (clone/abort isolation around
+	// the summarizer call). Their windows carry almost no prose, so the default
+	// structural-only fast path would skip the summarizer entirely — force the
+	// always-LLM path here so the isolation assertions still run.
+	beforeEach(() => {
+		process.env.PIT_NO_STRUCTURAL_COMPACTION = "1";
+	});
+	afterEach(() => {
+		delete process.env.PIT_NO_STRUCTURAL_COMPACTION;
+	});
+
 	function makeToolResult(text: string): AgentMessage {
 		return {
 			role: "toolResult" as const,

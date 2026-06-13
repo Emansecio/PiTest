@@ -1,5 +1,5 @@
 import { type AssistantMessage, createAssistantMessageEventStream, fauxAssistantMessage, type Model } from "@pit/ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
 
 type SessionWithCompactionInternals = {
@@ -81,7 +81,16 @@ function seedCompactableSession(harness: Harness): void {
 describe("AgentSession compaction characterization", () => {
 	const harnesses: Harness[] = [];
 
+	// These tests characterize the LLM summarization pipeline (stream call counts,
+	// custom streamFn, self-correction) on small seeded windows. Force the
+	// always-LLM path so the default structural-only fast path (which skips the
+	// summarizer for prose-free windows) does not change the call counts.
+	beforeEach(() => {
+		process.env.PIT_NO_STRUCTURAL_COMPACTION = "1";
+	});
+
 	afterEach(async () => {
+		delete process.env.PIT_NO_STRUCTURAL_COMPACTION;
 		vi.useRealTimers();
 		vi.restoreAllMocks();
 		while (harnesses.length > 0) {

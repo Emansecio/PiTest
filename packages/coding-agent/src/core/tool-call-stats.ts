@@ -13,6 +13,18 @@ const DEFAULT_SEQUENCE_WINDOW = 16;
 const DEFAULT_ARGS_FINGERPRINT_LENGTH = 200;
 const DEFAULT_DOOM_LOOP_THRESHOLD = 4;
 
+/**
+ * Longest cycle period the repeating-pattern detector scans for, e.g. 5 catches
+ * a [read,edit,bash,lsp,test] cycle. Kept small so the scan stays O(cap*window).
+ */
+const REPEATING_PATTERN_MAX_PERIOD = 5;
+/**
+ * Hard cap on how many trailing entries the repeating-pattern scan considers,
+ * independent of the (larger) sequence window, so the cost is bounded even if
+ * the ring grows. Twenty entries hold 5 reps of a length-4 cycle.
+ */
+const REPEATING_PATTERN_WINDOW = 20;
+
 const RE_WHITESPACE = /\s+/g;
 const RE_DIGITS = /\d+/g;
 
@@ -44,6 +56,18 @@ export interface ToolCallSequenceEntry {
 export interface ToolErrorFingerprint {
 	message: string;
 	count: number;
+}
+
+/**
+ * Result of {@link ToolCallStats.getRepeatingPatternCount}: the longest
+ * multi-tool cycle that repeats at the tail of the sequence window.
+ * `patternLength` is the cycle period (number of distinct calls per cycle) and
+ * `repetitions` is how many back-to-back copies of that cycle anchor the end of
+ * the window. `{ patternLength: 0, repetitions: 0 }` means no repeating cycle.
+ */
+export interface RepeatingPatternMatch {
+	patternLength: number;
+	repetitions: number;
 }
 
 export interface ToolStat {
@@ -207,6 +231,76 @@ export class ToolCallStats {
 		return count;
 	}
 
+	/**
+	 * Longest repeating multi-tool CYCLE anchored at the end of the sequence
+	 * window — the "productive-looking" loop the consecutive-identical detector
+	 * misses (e.g. [read,edit,bash] run four times in a row). Complementary to
+	 * {@link getConsecutiveSimilarCount}: that one catches the SAME call repeated,
+	 * this catches a block of DIFFERENT calls repeated.
+	 *
+	 * Each entry is keyed by (toolName, argsFingerprint) so a cycle that makes real
+	 * progress — same tool sequence but a different file/arg each pass — does NOT
+	 * register as a loop (its blocks differ). For every period `p` in
+	 * 2..{@link REPEATING_PATTERN_MAX_PERIOD} it counts how many copies of the
+	 * final block-of-size-`p` repeat walking backwards, and returns the match with
+	 * the most repetitions (ties broken toward the longer cycle, which is the more
+	 * specific/informative pattern). Considers only the last
+	 * {@link REPEATING_PATTERN_WINDOW} entries, so the cost is O(cap*window).
+	 *
+	 * A pure period-1 cycle (identical call repeated) is intentionally NOT reported
+	 * here — that is the consecutive-identical detector's job; this method requires
+	 * `patternLength >= 2`. Returns `{ patternLength: 0, repetitions: 0 }` when no
+	 * cycle of period >= 2 repeats at least twice.
+	 */
+	getRepeatingPatternCount(): RepeatingPatternMatch {
+		const none: RepeatingPatternMatch = { patternLength: 0, repetitions: 0 };
+		if (this.ringSize < 4) return none;
+		// Most-recent-first keys, capped to the pattern window (anti-OOM, bounded cost).
+		const limit = Math.min(this.ringSize, REPEATING_PATTERN_WINDOW);
+		// NUL-separated (toolName, argsFingerprint) keys, collision-safe even if a
+		// tool name contains spaces; most-recent-first.
+		const keys: string[] = new Array(limit);
+		for (let i = 0; i < limit; i++) {
+			const idx = (this.ringHead - 1 - i + this.sequenceWindow * 2) % this.sequenceWindow;
+			const entry = this.ringBuffer[idx]!;
+			keys[i] = `${entry.toolName} ${entry.argsFingerprint}`;
+		}
+		let best = none;
+		const maxPeriod = Math.min(REPEATING_PATTERN_MAX_PERIOD, Math.floor(limit / 2));
+		for (let period = 2; period <= maxPeriod; period++) {
+			// Walk backwards comparing each block of `period` keys to the final block.
+			// `reps` counts how many consecutive copies of the final block match.
+			let reps = 1;
+			let aligned = true;
+			while (aligned && (reps + 1) * period <= limit) {
+				const base = reps * period;
+				for (let j = 0; j < period; j++) {
+					if (keys[j] !== keys[base + j]) {
+						aligned = false;
+						break;
+					}
+				}
+				if (aligned) reps++;
+			}
+			// A period that is itself made of a smaller repeating unit (e.g. period 4
+			// over [a,b,a,b]) is a degenerate restatement of the shorter cycle; the
+			// shorter period already captured it with >= the same reps, so prefer
+			// fewer-but-real cycles by requiring reps >= 2 and taking max reps, ties
+			// toward longer (more specific) period.
+			//
+			// Distinctness guard: the cycle block must contain >= 2 distinct keys.
+			// An all-identical block (e.g. [a,a]) is just the SAME call repeated — a
+			// period-1 loop the consecutive-identical detector owns — so excluding it
+			// here keeps the two detectors strictly complementary and avoids a
+			// double-fire on a pure identical loop.
+			if (reps >= 2 && blockHasDistinctKeys(keys, period)) {
+				const better = reps > best.repetitions || (reps === best.repetitions && period > best.patternLength);
+				if (better) best = { patternLength: period, repetitions: reps };
+			}
+		}
+		return best;
+	}
+
 	/** True when consecutive identical invocations reach the configured threshold. */
 	isInDoomLoop(threshold?: number): boolean {
 		const limit = threshold ?? this.doomLoopThreshold;
@@ -322,6 +416,19 @@ export function fingerprintToolResult(
 		serialized = String(parts);
 	}
 	return hashString(serialized);
+}
+
+/**
+ * True when the first `period` keys (the trailing cycle block, most-recent-first)
+ * are not all identical. Used by {@link ToolCallStats.getRepeatingPatternCount} to
+ * reject all-same blocks, which are period-1 identical loops in disguise.
+ */
+function blockHasDistinctKeys(keys: readonly string[], period: number): boolean {
+	const first = keys[0];
+	for (let j = 1; j < period; j++) {
+		if (keys[j] !== first) return true;
+	}
+	return false;
 }
 
 /**

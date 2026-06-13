@@ -114,7 +114,11 @@ export interface BashOperations {
 	 * @param command The command to execute
 	 * @param cwd Working directory
 	 * @param options Execution options
-	 * @returns Promise resolving to exit code (null if killed)
+	 * @returns Resolves to the exit code (null if killed). When `promotedJobId` is
+	 *   set, the command did NOT finish — it crossed the auto-background threshold
+	 *   and was detached into a tracked background job; the process is still alive
+	 *   under that id (poll/kill via the background-job registry), `exitCode` is
+	 *   null, and the caller should surface the partial output collected so far.
 	 */
 	exec: (
 		command: string,
@@ -124,8 +128,110 @@ export interface BashOperations {
 			signal?: AbortSignal;
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
+			/** Command label used for the background-job record on promotion. */
+			label?: string;
+			/**
+			 * Opt IN to auto-backgrounding. When true, a command WITHOUT an explicit
+			 * `timeout` that outruns the threshold is promoted to a tracked background
+			 * job (the caller MUST read `promotedJobId`). Default OFF: the command runs
+			 * to completion (or is killed by `timeout`) and is never silently detached.
+			 * The agent's `bash` tool sets this; the user `!` path (bash-executor) does
+			 * not — it reads only `exitCode`, so a silent promotion there would leave a
+			 * detached process with no reachable handle.
+			 */
+			autoBackground?: boolean;
 		},
-	) => Promise<{ exitCode: number | null }>;
+	) => Promise<{ exitCode: number | null; promotedJobId?: string }>;
+}
+
+// Default auto-background threshold (seconds). A synchronous command WITHOUT an
+// explicit `timeout` that runs longer than this is PROMOTED to a tracked
+// background job instead of being killed — builds/dev-servers/long scans keep
+// running and the model gets a handle + the output captured so far. An explicit
+// `timeout` is honored verbatim as a hard kill (idle-real death), never promoted.
+// Override with PIT_BASH_AUTO_BACKGROUND_SECONDS; set to 0 / a non-positive
+// value to disable auto-backgrounding (commands without a timeout run forever).
+const BASH_AUTO_BACKGROUND_SECONDS = 60;
+
+function resolveAutoBackgroundSeconds(): number {
+	const raw = process.env.PIT_BASH_AUTO_BACKGROUND_SECONDS;
+	if (raw === undefined || raw === "") return BASH_AUTO_BACKGROUND_SECONDS;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+	return parsed;
+}
+
+// Per-job ring-buffer cap for output captured AFTER promotion. Bounds memory so a
+// chatty detached process (a dev-server logging forever) can't grow the registry
+// without limit. Oldest bytes are dropped first; the pre-promotion output the
+// model already saw is unaffected (it lives in the caller's accumulator).
+const BASH_BG_RING_MAX_BYTES = 256 * 1024;
+// Absolute ceiling on concurrently tracked background jobs. Beyond this, the
+// oldest finished job is evicted (and, if still running, its tree is killed) so
+// the registry can never leak unboundedly across a long session.
+const BASH_BG_MAX_JOBS = 32;
+
+/**
+ * A command promoted to the background after crossing the auto-background
+ * threshold. Stays tracked via `trackDetachedChildPid` so the existing
+ * shutdown reaper (`killTrackedDetachedChildren`) kills it on exit — promotion
+ * deliberately does NOT untrack the pid. The ring buffer keeps post-promotion
+ * output under a byte cap for later polling.
+ */
+export interface BashBackgroundJob {
+	id: string;
+	pid: number | undefined;
+	command: string;
+	startedAt: number;
+	promotedAt: number;
+	exited: boolean;
+	exitCode: number | null;
+	/** Bounded post-promotion output (oldest bytes dropped past the cap). */
+	ringBuffer: string;
+	ringTruncated: boolean;
+	kill: () => void;
+}
+
+const backgroundJobs = new Map<string, BashBackgroundJob>();
+let backgroundJobSeq = 0;
+
+/** Snapshot of currently tracked background jobs (poll surface for callers). */
+export function listBashBackgroundJobs(): BashBackgroundJob[] {
+	return [...backgroundJobs.values()];
+}
+
+/** Look up a single promoted background job by id. */
+export function getBashBackgroundJob(id: string): BashBackgroundJob | undefined {
+	return backgroundJobs.get(id);
+}
+
+/** Kill a promoted background job's tree and drop it from the registry. */
+export function killBashBackgroundJob(id: string): boolean {
+	const job = backgroundJobs.get(id);
+	if (!job) return false;
+	job.kill();
+	backgroundJobs.delete(id);
+	return true;
+}
+
+// Test-only reset so suites don't leak registry state across cases. No prod path
+// calls this; shutdown cleanup goes through killTrackedDetachedChildren by pid.
+export function _resetBashBackgroundJobsForTest(): void {
+	backgroundJobs.clear();
+	backgroundJobSeq = 0;
+}
+
+function registerBackgroundJob(job: BashBackgroundJob): void {
+	// Evict the oldest already-exited job first; if all are still running and we're
+	// at the ceiling, evict (and kill) the oldest to bound the registry.
+	while (backgroundJobs.size >= BASH_BG_MAX_JOBS) {
+		const oldestExited = [...backgroundJobs.values()].find((j) => j.exited);
+		const victim = oldestExited ?? backgroundJobs.values().next().value;
+		if (!victim) break;
+		if (!victim.exited) victim.kill();
+		backgroundJobs.delete(victim.id);
+	}
+	backgroundJobs.set(job.id, job);
 }
 
 /**
@@ -136,7 +242,7 @@ export interface BashOperations {
  */
 export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
 	return {
-		exec: (command, cwd, { onData, signal, timeout, env }) => {
+		exec: (command, cwd, { onData, signal, timeout, env, label, autoBackground }) => {
 			return new Promise((resolve, reject) => {
 				const { shell, args } = getShellConfig(options?.shellPath);
 				if (!existsSync(cwd)) {
@@ -151,9 +257,11 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					windowsHide: true,
 				});
 				if (child.pid) trackDetachedChildPid(child.pid);
+				const startedAt = Date.now();
 				let timedOut = false;
 				let timeoutHandle: NodeJS.Timeout | undefined;
-				// Set timeout if provided.
+				// Set hard timeout if the caller asked for one. An explicit timeout is
+				// an intent to KILL (idle-real death) — it is never auto-backgrounded.
 				if (timeout !== undefined && timeout > 0) {
 					timeoutHandle = setTimeout(() => {
 						timedOut = true;
@@ -166,10 +274,28 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 						if (child.pid) killProcessTree(child.pid);
 					}, timeout * 1000);
 				}
-				// Stream stdout and stderr.
-				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
-				// Handle abort signal by killing the entire process tree.
+
+				// Auto-background: opt-in (`autoBackground`) AND only for commands with NO
+				// explicit hard timeout. When such a command outruns the threshold we
+				// PROMOTE it to a tracked background job (keeping it alive + detached)
+				// instead of holding the shell forever. The pid stays in
+				// `trackDetachedChildPid` so the shutdown reaper still kills it —
+				// promotion does not untrack. Callers that do NOT read `promotedJobId`
+				// (the user `!` path via bash-executor) leave this OFF so a long command
+				// is never silently detached out from under them — it runs to completion
+				// or is killed by an explicit timeout, exactly as before.
+				const autoBgSeconds = autoBackground === true ? resolveAutoBackgroundSeconds() : 0;
+				let promoted: BashBackgroundJob | undefined;
+				let autoBgHandle: NodeJS.Timeout | undefined;
+				const settled = { done: false };
+
+				const killTree = () => {
+					if (child.pid) killProcessTree(child.pid);
+				};
+
+				// Handle abort signal by killing the entire process tree. Declared before
+				// `promoteToBackground` so the latter can detach it on promotion (a
+				// backgrounded process must survive a tool-call abort).
 				const onAbort = () => {
 					recordDiagnostic({
 						category: "process.kill",
@@ -177,8 +303,64 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 						source: "bash.abort",
 						context: { pid: child.pid },
 					});
-					if (child.pid) killProcessTree(child.pid);
+					killTree();
 				};
+
+				const promoteToBackground = () => {
+					if (settled.done) return;
+					backgroundJobSeq += 1;
+					const id = `bg-${backgroundJobSeq}`;
+					const job: BashBackgroundJob = {
+						id,
+						pid: child.pid,
+						command: label ?? command,
+						startedAt,
+						promotedAt: Date.now(),
+						exited: false,
+						exitCode: null,
+						ringBuffer: "",
+						ringTruncated: false,
+						kill: killTree,
+					};
+					promoted = job;
+					registerBackgroundJob(job);
+					// NOTE: no runtime-diagnostics event is recorded on promotion. The
+					// closed DiagnosticCategory union is owned by @pit/ai (out of this lane)
+					// and has no "promoted"/"background" member; reusing an existing
+					// category would corrupt its last-write-wins counter level for unrelated
+					// callers. The observable surface for a promotion is the returned tool
+					// message + the queryable registry (listBashBackgroundJobs). A dedicated
+					// `process.background` category in @pit/ai is a clean follow-up.
+					// Stop feeding the caller's `onData`: the foreground tool call is about
+					// to finish its accumulator, and appending to it post-finish throws.
+					// Post-promotion output goes only into the bounded ring buffer below.
+					child.stdout?.off("data", onData);
+					child.stderr?.off("data", onData);
+					// Keep capturing output into a bounded ring buffer for later polling.
+					// The pre-promotion bytes already went to the caller via `onData`.
+					const appendRing = (data: Buffer) => {
+						job.ringBuffer += data.toString("utf-8");
+						if (job.ringBuffer.length > BASH_BG_RING_MAX_BYTES) {
+							job.ringBuffer = job.ringBuffer.slice(job.ringBuffer.length - BASH_BG_RING_MAX_BYTES);
+							job.ringTruncated = true;
+						}
+					};
+					child.stdout?.on("data", appendRing);
+					child.stderr?.on("data", appendRing);
+					// Resolve the foreground promise NOW with the handle; the detached
+					// process lives on and its eventual exit is recorded below.
+					settled.done = true;
+					if (signal) signal.removeEventListener("abort", onAbort);
+					resolve({ exitCode: null, promotedJobId: id });
+				};
+
+				if (autoBgSeconds > 0 && (timeout === undefined || timeout <= 0)) {
+					autoBgHandle = setTimeout(promoteToBackground, autoBgSeconds * 1000);
+				}
+
+				// Stream stdout and stderr.
+				child.stdout?.on("data", onData);
+				child.stderr?.on("data", onData);
 				if (signal) {
 					if (signal.aborted) onAbort();
 					else signal.addEventListener("abort", onAbort, { once: true });
@@ -187,8 +369,17 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				// on inherited stdio handles held by detached descendants.
 				waitForChildProcess(child)
 					.then((code) => {
-						if (child.pid) untrackDetachedChildPid(child.pid);
 						if (timeoutHandle) clearTimeout(timeoutHandle);
+						if (autoBgHandle) clearTimeout(autoBgHandle);
+						// Already promoted: the foreground promise resolved on promotion.
+						// Just record the eventual exit on the job and stop tracking the pid.
+						if (promoted) {
+							promoted.exited = true;
+							promoted.exitCode = code;
+							if (child.pid) untrackDetachedChildPid(child.pid);
+							return;
+						}
+						if (child.pid) untrackDetachedChildPid(child.pid);
 						if (signal) signal.removeEventListener("abort", onAbort);
 						if (signal?.aborted) {
 							reject(new Error("aborted"));
@@ -198,11 +389,18 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 							reject(new Error(`timeout:${timeout}`));
 							return;
 						}
+						settled.done = true;
 						resolve({ exitCode: code });
 					})
 					.catch((err) => {
-						if (child.pid) untrackDetachedChildPid(child.pid);
 						if (timeoutHandle) clearTimeout(timeoutHandle);
+						if (autoBgHandle) clearTimeout(autoBgHandle);
+						if (promoted) {
+							promoted.exited = true;
+							if (child.pid) untrackDetachedChildPid(child.pid);
+							return;
+						}
+						if (child.pid) untrackDetachedChildPid(child.pid);
 						if (signal) signal.removeEventListener("abort", onAbort);
 						reject(err);
 					});
@@ -675,14 +873,21 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 
 			try {
 				let exitCode: number | null;
+				let promotedJobId: string | undefined;
 				try {
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
 						timeout: normalizeBashTimeout(timeout),
 						env: spawnContext.env,
+						label: command,
+						// The agent tool consumes `promotedJobId` (surfaces the handle in the
+						// returned message), so it opts IN to auto-backgrounding. The user `!`
+						// path (bash-executor) does not read it and therefore leaves it OFF.
+						autoBackground: true,
 					});
 					exitCode = result.exitCode;
+					promotedJobId = result.promotedJobId;
 				} catch (err) {
 					const snapshot = await finishOutput();
 					const { text } = formatOutput(snapshot, "");
@@ -699,6 +904,21 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 				const snapshot = await finishOutput();
 				const { text: formattedText, details } = formatOutput(snapshot);
 				const outputText = (await crushBashJsonOutput(snapshot)) ?? formattedText;
+				// Promoted to background: the command did NOT finish — it crossed the
+				// auto-background threshold and was detached into a tracked job. Surface
+				// the handle + the output captured up to promotion, without throwing.
+				if (promotedJobId) {
+					// Report the REAL wall-clock time the command ran before promotion
+					// (promotedAt − startedAt on the job), not the configured threshold —
+					// the env can change between exec and here, and event-loop drift means
+					// the timer fires at/after the threshold, never exactly on it. Fall
+					// back to the threshold only if the job record is somehow gone.
+					const job = getBashBackgroundJob(promotedJobId);
+					const elapsedSeconds =
+						job !== undefined ? (job.promotedAt - job.startedAt) / 1000 : resolveAutoBackgroundSeconds();
+					const status = `Command promoted to background id=${promotedJobId} after ${elapsedSeconds.toFixed(1)}s (still running). Output shown is up to promotion; the process keeps running detached and is killed on shutdown.`;
+					return { content: [{ type: "text", text: appendStatus(outputText, status) }], details };
+				}
 				if (exitCode !== 0 && exitCode !== null) {
 					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
 				}

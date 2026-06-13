@@ -12,19 +12,30 @@
  *   and a notification is shown when a UI is available).
  * - Stop: fires when the agent ends a turn (no more tool calls pending). Useful
  *   for auto-commit, lint runs, etc.
+ * - SessionStart: fires when a session is started, loaded, or reloaded. Carries
+ *   the reason ("startup" | "reload" | "new" | "resume" | "fork"). Informative
+ *   only — cannot block; a returned `additionalContext` is surfaced via the UI
+ *   when one is available (the agent loop has not started yet, so it cannot be
+ *   injected into the prompt the way UserPromptSubmit does).
+ * - PreCompact: fires before context compaction. Carries light, derived facts
+ *   about the upcoming compaction (token count, message counts, split flag) so
+ *   the hook can log/notify without the heavy message arrays being serialized.
+ *   Informative only — cannot block or cancel compaction.
  *
  * Hook commands receive a JSON payload on stdin and respond with JSON on stdout.
  * Non-zero exit codes are treated as failures and the hook output is logged but
  * the agent loop continues — except for PreToolUse failures, which block.
  */
 
-export type HookEventName = "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "Stop";
+export type HookEventName = "PreToolUse" | "PostToolUse" | "UserPromptSubmit" | "Stop" | "SessionStart" | "PreCompact";
 
 export const HOOK_EVENT_NAMES: readonly HookEventName[] = [
 	"PreToolUse",
 	"PostToolUse",
 	"UserPromptSubmit",
 	"Stop",
+	"SessionStart",
+	"PreCompact",
 ] as const;
 
 export function isHookEventName(value: unknown): value is HookEventName {
@@ -51,6 +62,8 @@ export interface HooksSettings {
 	PostToolUse?: HookCommand[];
 	UserPromptSubmit?: HookCommand[];
 	Stop?: HookCommand[];
+	SessionStart?: HookCommand[];
+	PreCompact?: HookCommand[];
 }
 
 /** Stdin payload sent to PreToolUse hooks. */
@@ -87,7 +100,41 @@ export interface StopPayload {
 	cwd: string;
 }
 
-export type HookPayload = PreToolUsePayload | PostToolUsePayload | UserPromptSubmitPayload | StopPayload;
+/** Stdin payload sent to SessionStart hooks. */
+export interface SessionStartPayload {
+	event: "SessionStart";
+	/** Why this session start happened. */
+	reason: "startup" | "reload" | "new" | "resume" | "fork";
+	cwd: string;
+}
+
+/**
+ * Stdin payload sent to PreCompact hooks. Only light, derived facts about the
+ * upcoming compaction are included — never the message arrays or file-op maps,
+ * to avoid serializing megabytes of context onto a hook's stdin.
+ */
+export interface PreCompactPayload {
+	event: "PreCompact";
+	cwd: string;
+	/** Token count of the context before compaction. */
+	tokensBefore: number;
+	/** Number of messages that will be summarized and discarded. */
+	messagesToSummarize: number;
+	/** Number of messages folded into the turn-prefix summary (split turns). */
+	turnPrefixMessages: number;
+	/** Whether the cut point falls in the middle of a turn. */
+	isSplitTurn: boolean;
+	/** True when this compaction iterates over a previous summary. */
+	hasPreviousSummary: boolean;
+}
+
+export type HookPayload =
+	| PreToolUsePayload
+	| PostToolUsePayload
+	| UserPromptSubmitPayload
+	| StopPayload
+	| SessionStartPayload
+	| PreCompactPayload;
 
 /**
  * Hook stdout JSON contract:

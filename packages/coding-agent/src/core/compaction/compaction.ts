@@ -13,6 +13,7 @@ import { completeSimple } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import { convertToLlm } from "../messages.ts";
+import { MESSAGE_RELAY_CUSTOM_TYPE } from "../messaging/types.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
 import { crushJson } from "../tools/json-crush.ts";
 import { buildFileDigests, formatFileDigests } from "./file-digests.ts";
@@ -1248,6 +1249,94 @@ Summarize the prefix to provide context for the retained suffix:
 Be concise. Focus on what's needed to understand the kept suffix.`;
 
 /**
+ * Below this many chars of explanatory prose in the compacted window, skip the
+ * summarization LLM entirely and emit only the deterministic structural frame
+ * (file operations + digests). A window that is a pure burst of tool I/O —
+ * back-to-back reads/greps/edits with no assistant narration and no user prose —
+ * has nothing for the summarizer to add over the structural lists, so the LLM
+ * call (and its self-correction pass) is wasted latency and tokens. The bar is
+ * deliberately small: ANY non-trivial prose tips the window back to the LLM path
+ * so context quality is never degraded. Forced always-LLM via
+ * PIT_NO_STRUCTURAL_COMPACTION=1.
+ */
+const STRUCTURAL_ONLY_PROSE_THRESHOLD = 200;
+
+/**
+ * Count chars of explanatory prose in the compacted window: assistant `text`
+ * blocks, user free-text, and non-relay `custom` (extension-injected) text —
+ * each as string content or `text`-type content blocks. Custom text IS counted
+ * because convertToLlm relays it to the summarizer as a user message (a relay
+ * custom — customType === MESSAGE_RELAY_CUSTOM_TYPE — is excluded, since
+ * convertToLlm drops it, so it never reaches the model). Deliberately EXCLUDES
+ * tool calls, tool results, thinking, bash output and the structured fields of
+ * system/branch/compaction messages — those are mechanical and already captured
+ * deterministically by the structural frame. This measures only what a
+ * summarizer could add over the structural lists.
+ */
+function measureProseChars(messages: AgentMessage[]): number {
+	let prose = 0;
+	for (const message of messages) {
+		if (message.role === "assistant") {
+			for (const block of message.content) {
+				if (block.type === "text") prose += block.text.length;
+			}
+			continue;
+		}
+		if (message.role === "user") {
+			const content = (message as { content: string | Array<{ type: string; text?: string }> }).content;
+			if (typeof content === "string") {
+				prose += content.length;
+			} else if (Array.isArray(content)) {
+				for (const block of content) {
+					if (block.type === "text" && block.text) prose += block.text.length;
+				}
+			}
+			continue;
+		}
+		if (message.role === "custom") {
+			// Relay custom messages are display-only — convertToLlm drops them, so
+			// they carry no prose the summarizer would ever see.
+			if (message.customType === MESSAGE_RELAY_CUSTOM_TYPE) continue;
+			const content = message.content;
+			if (typeof content === "string") {
+				prose += content.length;
+			} else if (Array.isArray(content)) {
+				for (const block of content) {
+					if (block.type === "text" && block.text) prose += block.text.length;
+				}
+			}
+		}
+	}
+	return prose;
+}
+
+/**
+ * True when the window has so little explanatory prose that the structural frame
+ * already captures everything a summary could. Gated off by
+ * PIT_NO_STRUCTURAL_COMPACTION=1 (forces the always-LLM path). A previousSummary
+ * present means this is an INCREMENTAL compaction whose prose lives in the prior
+ * summary, not the window — never collapse to structural-only there, or that
+ * prose would be silently dropped.
+ */
+function shouldUseStructuralOnly(
+	messagesToSummarize: AgentMessage[],
+	turnPrefixMessages: AgentMessage[],
+	previousSummary: string | undefined,
+): boolean {
+	if (isTruthyEnvFlag(process.env.PIT_NO_STRUCTURAL_COMPACTION)) return false;
+	if (previousSummary) return false;
+	const prose = measureProseChars(messagesToSummarize) + measureProseChars(turnPrefixMessages);
+	return prose < STRUCTURAL_ONLY_PROSE_THRESHOLD;
+}
+
+/** Deterministic header emitted in place of an LLM summary for tool-only windows. */
+const STRUCTURAL_ONLY_HEADER = `## Goal
+(No explanatory prose in this window — mechanical tool activity only. See operations below.)
+
+## Progress
+- Tool operations on the listed files/searches/commands were applied. The retained recent context continues the work.`;
+
+/**
  * Generate summaries for compaction using prepared data.
  * Returns CompactionResult - SessionManager adds uuid/parentUuid when saving.
  *
@@ -1301,7 +1390,16 @@ export async function compact(
 	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
 
-	if (isSplitTurn && turnPrefixMessages.length > 0) {
+	// Structural-only fast path: when the compacted window is a pure burst of tool
+	// I/O with no explanatory prose, the deterministic operation lists + digests
+	// (appended below) already capture everything a summary could. Skip the
+	// summarizer LLM and its self-correction pass. Disabled by
+	// PIT_NO_STRUCTURAL_COMPACTION=1 and never taken for incremental compactions
+	// (see shouldUseStructuralOnly).
+	const structuralOnly = shouldUseStructuralOnly(messagesToSummarize, turnPrefixMessages, previousSummary);
+	if (structuralOnly) {
+		summary = STRUCTURAL_ONLY_HEADER;
+	} else if (isSplitTurn && turnPrefixMessages.length > 0) {
 		const [historyResult, turnPrefixResult] = await Promise.all([
 			messagesToSummarize.length > 0
 				? generateSummary(
@@ -1348,7 +1446,7 @@ export async function compact(
 	// small/incremental compactions skip the second LLM call (low omission risk).
 	const verifyInputTokens =
 		sumMessageTokens(messagesToSummarize) + (isSplitTurn ? sumMessageTokens(turnPrefixMessages) : 0);
-	if (settings.selfCorrection !== false && verifyInputTokens >= VERIFY_MIN_INPUT_TOKENS) {
+	if (!structuralOnly && settings.selfCorrection !== false && verifyInputTokens >= VERIFY_MIN_INPUT_TOKENS) {
 		const maxTokens = Math.min(
 			Math.floor(0.8 * settings.reserveTokens),
 			model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,

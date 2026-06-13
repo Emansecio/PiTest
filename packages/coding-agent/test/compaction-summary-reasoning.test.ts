@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@pit/agent-core";
 import type { AssistantMessage, Model } from "@pit/ai";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type CompactionPreparation, compact, generateSummary } from "../src/core/compaction/index.js";
 
 const { completeSimpleMock } = vi.hoisted(() => ({
@@ -51,9 +51,16 @@ const mockSummaryResponse: AssistantMessage = {
 const messages: AgentMessage[] = [{ role: "user", content: "Summarize this.", timestamp: Date.now() }];
 
 describe("generateSummary reasoning options", () => {
+	// The compact()-based test below uses a tiny-prose window; force the always-LLM
+	// path so it exercises summarizer maxTokens clamping (not the structural-only
+	// fast path). generateSummary() tests call the summarizer directly, unaffected.
 	beforeEach(() => {
 		completeSimpleMock.mockReset();
 		completeSimpleMock.mockResolvedValue(mockSummaryResponse);
+		process.env.PIT_NO_STRUCTURAL_COMPACTION = "1";
+	});
+	afterEach(() => {
+		delete process.env.PIT_NO_STRUCTURAL_COMPACTION;
 	});
 
 	it("uses the provided thinking level for reasoning-capable models", async () => {
@@ -147,9 +154,16 @@ describe("generateSummary reasoning options", () => {
 });
 
 describe("self-correction gating by input size (#3)", () => {
+	// Force always-LLM: the "small inputs" case has tiny prose and would otherwise
+	// take the structural-only fast path (zero LLM calls), defeating the count
+	// assertions. Large-input cases carry real prose and are unaffected by the flag.
 	beforeEach(() => {
 		completeSimpleMock.mockReset();
 		completeSimpleMock.mockResolvedValue(mockSummaryResponse);
+		process.env.PIT_NO_STRUCTURAL_COMPACTION = "1";
+	});
+	afterEach(() => {
+		delete process.env.PIT_NO_STRUCTURAL_COMPACTION;
 	});
 
 	const baseFileOps = () => ({
