@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentTool } from "@pit/agent-core";
-import type { Api, ImageContent, Model, TextContent } from "@pit/ai";
+import { type Api, type ImageContent, type Model, recordDiagnostic, type TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { constants, createReadStream } from "fs";
 import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/promises";
@@ -543,6 +543,13 @@ Common mistakes to avoid:
 				if (ops.stat) {
 					const outlineStat = await ops.stat(absolutePath);
 					if (outlineStat.size > streamingMinBytes) {
+						// Observe the size refusal (additive; behavior unchanged).
+						recordDiagnostic({
+							category: "output.cap",
+							level: "info",
+							source: "read.outline",
+							context: { path, bytes: outlineStat.size },
+						});
 						const text = `[outline of ${path}: ${formatSize(outlineStat.size)} exceeds ${formatSize(streamingMinBytes)} — use grep/ast_grep to locate symbols, or read with offset/limit]`;
 						return { content: [{ type: "text", text } as TextContent], details: undefined };
 					}

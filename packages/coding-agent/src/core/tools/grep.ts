@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@pit/agent-core";
+import { recordDiagnostic } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { spawn } from "child_process";
 import { readFile, stat } from "fs/promises";
@@ -235,6 +236,13 @@ export function createGrepToolDefinition(
 									// "(unable to read file)" fallback instead of crashing the heap.
 									const size = ops.fileSize ? await ops.fileSize(filePath) : 0;
 									if (size > MAX_GREP_FILE_BYTES) {
+										// Observe the OOM-guard skip (additive; behavior unchanged).
+										recordDiagnostic({
+											category: "output.cap",
+											level: "info",
+											source: "grep.fileSizeGuard",
+											context: { path: filePath, bytes: size },
+										});
 										lines = [];
 									} else {
 										const content = await ops.readFile(filePath);
@@ -291,7 +299,17 @@ export function createGrepToolDefinition(
 						};
 						signal?.addEventListener("abort", onAbort, { once: true });
 						child.stderr?.on("data", (chunk) => {
+							const before = stderr.length;
 							stderr = appendCappedStderr(stderr, chunk.toString());
+							// Record once, on the chunk that first saturates the cap.
+							if (before < MAX_GREP_STDERR_BYTES && stderr.length >= MAX_GREP_STDERR_BYTES) {
+								recordDiagnostic({
+									category: "output.cap",
+									level: "info",
+									source: "grep.stderrCap",
+									context: { bytes: MAX_GREP_STDERR_BYTES },
+								});
+							}
 						});
 
 						const formatBlock = async (filePath: string, lineNumber: number): Promise<string[]> => {

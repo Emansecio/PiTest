@@ -9,6 +9,7 @@
  * Reconnect = re-run initialize + tools/list. The manager handles backoff.
  */
 
+import { recordDiagnostic } from "@pit/ai";
 import type { McpCallToolResult, McpListToolsResult, McpServerConfig, McpToolSchema } from "./types.ts";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -31,6 +32,13 @@ const MAX_MCP_RESPONSE_BYTES = 25 * 1024 * 1024;
 async function readBodyWithCap(response: Response, label: string): Promise<string> {
 	const declared = Number(response.headers.get("content-length"));
 	if (Number.isFinite(declared) && declared > MAX_MCP_RESPONSE_BYTES) {
+		// Observe the cap before rejecting (behavior unchanged).
+		recordDiagnostic({
+			category: "output.cap",
+			level: "error",
+			source: "mcp.rpc",
+			context: { bytes: declared, note: label },
+		});
 		throw new McpTransportError(`${label}: MCP response too large (${declared} bytes)`);
 	}
 	const stream = response.body;
@@ -39,6 +47,13 @@ async function readBodyWithCap(response: Response, label: string): Promise<strin
 		const text = await response.text();
 		const size = new TextEncoder().encode(text).length;
 		if (size > MAX_MCP_RESPONSE_BYTES) {
+			// Observe the cap before rejecting (behavior unchanged).
+			recordDiagnostic({
+				category: "output.cap",
+				level: "error",
+				source: "mcp.rpc",
+				context: { bytes: size, note: label },
+			});
 			throw new McpTransportError(`${label}: MCP response too large (${size} bytes)`);
 		}
 		return text;
@@ -54,6 +69,13 @@ async function readBodyWithCap(response: Response, label: string): Promise<strin
 			total += value.byteLength;
 			if (total > MAX_MCP_RESPONSE_BYTES) {
 				await reader.cancel().catch(() => {});
+				// Observe the cap before rejecting (behavior unchanged).
+				recordDiagnostic({
+					category: "output.cap",
+					level: "error",
+					source: "mcp.rpc",
+					context: { bytes: total, note: label },
+				});
 				throw new McpTransportError(`${label}: MCP response too large (>${MAX_MCP_RESPONSE_BYTES} bytes)`);
 			}
 			chunks.push(value);

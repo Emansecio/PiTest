@@ -6,7 +6,7 @@
  * - `pi --mode json "prompt"` - JSON event stream
  */
 
-import type { AssistantMessage, ImageContent } from "@pit/ai";
+import { type AssistantMessage, getRuntimeDiagnostics, type ImageContent } from "@pit/ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
@@ -146,6 +146,20 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 						}
 					}
 				}
+			}
+		}
+
+		// Surface the otherwise-invisible runtime-diagnostics channel (@pit/ai) at
+		// the end of a headless run. In `json` mode it rides the same stdout JSONL
+		// stream as a `{type:"diagnostics"}` event (lowest friction, always on). In
+		// `text` mode it would corrupt the plain output, so it is opt-in via
+		// PIT_DUMP_DIAGNOSTICS and goes to stderr instead.
+		const diagnostics = getRuntimeDiagnostics();
+		if (diagnostics.total > 0) {
+			if (mode === "json") {
+				writeRawStdout(`${JSON.stringify({ type: "diagnostics", ...diagnostics })}\n`);
+			} else if (process.env.PIT_DUMP_DIAGNOSTICS) {
+				process.stderr.write(`${JSON.stringify({ type: "diagnostics", ...diagnostics })}\n`);
 			}
 		}
 

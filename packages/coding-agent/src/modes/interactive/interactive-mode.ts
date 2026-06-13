@@ -9,12 +9,15 @@ import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@pit/agent-core";
 import {
 	type AssistantMessage,
+	type DiagnosticEvent,
 	getProviders,
+	getRuntimeDiagnostics,
 	type ImageContent,
 	type Message,
 	type Model,
 	type OAuthProviderId,
 	type OAuthSelectPrompt,
+	onDiagnostic,
 } from "@pit/ai";
 import type {
 	AutocompleteItem,
@@ -146,6 +149,7 @@ import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import { WelcomeBox } from "./components/welcome-box.ts";
 import { workingPulsePalette } from "./components/working-palette.ts";
+import { formatRuntimeDiagnostics } from "./diagnostics-summary.ts";
 import {
 	buildScopeGroups,
 	formatContextPath,
@@ -368,6 +372,8 @@ export class InteractiveMode {
 
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
+	// Runtime-diagnostics (@pit/ai) bridge: surfaces error-level guard events live.
+	private diagnosticsUnsubscribe?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	// Shared-ticker subscription that keeps the goal spinner (and, by extension,
@@ -457,6 +463,7 @@ export class InteractiveMode {
 		["/settings", (s) => s.showSettingsSelector()],
 		["/session", (s) => s.handleSessionCommand()],
 		["/cache-status", (s) => s.handleCacheStatusCommand()],
+		["/diagnostics", (s) => s.handleDiagnosticsCommand()],
 		["/hotkeys", (s) => s.handleHotkeysCommand()],
 		["/login", (s) => s.showOAuthSelector("login")],
 		["/logout", (s) => s.showOAuthSelector("logout")],
@@ -2729,6 +2736,13 @@ export class InteractiveMode {
 	private subscribeToAgent(): void {
 		this.unsubscribe = this.session.subscribe(async (event) => {
 			await this.handleEvent(event);
+		});
+		// Live bridge for grave runtime guards (error level only, to avoid noise);
+		// info/warn stay queryable via /diagnostics. Unsubscribed in stop().
+		this.diagnosticsUnsubscribe?.();
+		this.diagnosticsUnsubscribe = onDiagnostic((event: DiagnosticEvent) => {
+			if (event.level !== "error") return;
+			this.showWarning(`⚠ runtime: ${event.category} (${event.source})`);
 		});
 	}
 
@@ -5384,6 +5398,17 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	// Surfaces the process-global runtime-diagnostics channel (@pit/ai). In an
+	// interactive run the underlying guards (output caps, idle timeouts, process
+	// kills, retries) are otherwise invisible; this prints a per-category roll-up
+	// ordered by count so the user can see what fired this session.
+	private handleDiagnosticsCommand(): void {
+		const text = formatRuntimeDiagnostics(getRuntimeDiagnostics());
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Text(text, 1, 0));
+		this.ui.requestRender();
+	}
+
 	private handleTTSRCommand(rest: string): void {
 		const parts = rest.split(/\s+/).filter((p) => p.length > 0);
 		const sub = parts[0];
@@ -5847,6 +5872,10 @@ export class InteractiveMode {
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {
 			this.unsubscribe();
+		}
+		if (this.diagnosticsUnsubscribe) {
+			this.diagnosticsUnsubscribe();
+			this.diagnosticsUnsubscribe = undefined;
 		}
 		if (this.isInitialized) {
 			this.ui.stop();

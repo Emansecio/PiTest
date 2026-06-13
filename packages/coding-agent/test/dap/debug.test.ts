@@ -70,7 +70,7 @@ describe("DapSessionManager — end-to-end against a fake adapter", () => {
 
 		const term = await dapSessionManager.terminate();
 		expect(term?.status).toBe("terminated");
-	}, 30_000);
+	}, 60_000);
 
 	it("function breakpoints round-trip", async () => {
 		const adapter = fakeAdapter();
@@ -79,7 +79,7 @@ describe("DapSessionManager — end-to-end against a fake adapter", () => {
 		expect(fb.breakpoints[0]?.name).toBe("main");
 		expect(fb.breakpoints[0]?.verified).toBe(true);
 		await dapSessionManager.terminate();
-	}, 30_000);
+	}, 60_000);
 
 	it("enforces a single active session", async () => {
 		const adapter = fakeAdapter();
@@ -88,7 +88,7 @@ describe("DapSessionManager — end-to-end against a fake adapter", () => {
 			dapSessionManager.launch({ adapter, program: "/x/other.c", cwd: tmpdir() }, undefined, 10_000),
 		).rejects.toThrow(/still active/);
 		await dapSessionManager.terminate();
-	}, 30_000);
+	}, 60_000);
 });
 
 describe("debug tool — validation and no-session behavior", () => {

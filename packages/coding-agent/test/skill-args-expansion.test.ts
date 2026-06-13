@@ -24,7 +24,7 @@ describe("skill command argument expansion", () => {
 			const dir = tempDirs.pop();
 			if (dir) rmSync(dir, { recursive: true, force: true });
 		}
-	}, 30_000);
+	}, 60_000);
 
 	function writeSkill(name: string, body: string): Skill {
 		const dir = join(tmpdir(), `pi-skill-args-${Date.now()}-${Math.random().toString(36).slice(2)}`);

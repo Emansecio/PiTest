@@ -1,3 +1,4 @@
+import { cpus } from "node:os";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vitest/config";
 
@@ -16,7 +17,25 @@ export default defineConfig({
 	test: {
 		globals: true,
 		environment: "node",
-		testTimeout: 30000,
+		// 60s (was 30s) gives headroom to the handful of inherently heavy tests
+		// (process-spawn E2E like dry-run-cli, full AgentSession boot) so a busy
+		// or thermally-throttled machine doesn't fail them spuriously. Fast tests
+		// (the vast majority, <1s) are unaffected; a genuine hang still surfaces.
+		testTimeout: 60000,
+		// Heavy beforeAll/afterAll (spawning git children, eval kernels, runtimes)
+		// need far more than the 10s default when the box is under load — match the
+		// 60s test budget so setup/teardown never times out spuriously.
+		hookTimeout: 60000,
+		poolOptions: {
+			forks: {
+				// Default forks one worker per core. With every core busy, the OS and
+				// any process the E2E tests SPAWN (the tsx boot in dry-run-cli) get
+				// starved and blow their deadline. Cap at cpu-4 so a few cores stay
+				// free for spawned work and the scheduler — the suite stays fast and
+				// stops flaking under contention. Floor of 2 for small CI boxes.
+				maxForks: Math.max(2, cpus().length - 4),
+			},
+		},
 		// Test isolation: skip the developer's `~/.claude/skills/` so test
 		// fixtures stay deterministic regardless of which Claude Code skills
 		// the contributor has on their machine. Real usage opts in by default.

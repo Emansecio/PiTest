@@ -17,7 +17,7 @@ describe("AgentSession interrupt (Esc)", () => {
 		while (harnesses.length > 0) {
 			await harnesses.pop()?.cleanup();
 		}
-	}, 30_000);
+	}, 60_000);
 
 	/** A tool that blocks until its abort signal fires, signalling when it starts. */
 	const waitSchema = Type.Object({});

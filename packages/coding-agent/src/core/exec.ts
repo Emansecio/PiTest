@@ -3,6 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { recordDiagnostic } from "@pit/ai";
 import { waitForChildProcess } from "../utils/child-process.ts";
 import { killProcessTree } from "../utils/shell.ts";
 import { OutputAccumulator } from "./tools/output-accumulator.ts";
@@ -92,6 +93,12 @@ export async function execCommand(
 		const killProcess = () => {
 			if (killed) return;
 			killed = true;
+			recordDiagnostic({
+				category: "process.kill",
+				level: "warn",
+				source: "exec.execCommand",
+				context: { pid: proc.pid },
+			});
 			proc.kill("SIGTERM");
 			// Force kill the whole tree after a grace period if SIGTERM is ignored.
 			killTimer = setTimeout(() => {
@@ -118,6 +125,14 @@ export async function execCommand(
 			const stdoutSnap = stdoutAcc.snapshot();
 			const stderrSnap = stderrAcc.snapshot();
 			const truncated = stdoutSnap.truncation.truncated || stderrSnap.truncation.truncated;
+			if (truncated) {
+				recordDiagnostic({
+					category: "output.cap",
+					level: "warn",
+					source: "exec.execCommand",
+					context: { note: "stdout/stderr truncated" },
+				});
+			}
 			resolve({
 				stdout: stdoutSnap.content,
 				stderr: stderrSnap.content,

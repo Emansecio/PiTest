@@ -25,6 +25,7 @@ import {
 	isEntryCooledDown,
 	markEntryCooldown,
 	modelsAreEqual,
+	recordDiagnostic,
 	resetApiProviders,
 	splitSystemPromptOnDynamic,
 	streamSimple,
@@ -1188,6 +1189,13 @@ export class AgentSession {
 					error: err instanceof Error ? err.message : String(err),
 					stack: err instanceof Error ? err.stack : undefined,
 				});
+				// Observe-only: a listener threw and was contained; emit keeps delivering.
+				recordDiagnostic({
+					category: "error.isolated",
+					level: "error",
+					source: "agent-session._emit",
+					context: { note: event.type },
+				});
 			}
 		}
 	}
@@ -1532,7 +1540,16 @@ export class AgentSession {
 					// useful to the recurring-error guard.
 					if (this._learnedErrors.size >= MAX_LEARNED_ERRORS) {
 						const oldestKey = this._learnedErrors.keys().next().value;
-						if (oldestKey !== undefined) this._learnedErrors.delete(oldestKey);
+						if (oldestKey !== undefined) {
+							this._learnedErrors.delete(oldestKey);
+							// Observe-only: LRU cap reached, coldest fingerprint dropped.
+							recordDiagnostic({
+								category: "limit.evicted",
+								level: "info",
+								source: "agent-session.learnedErrors",
+								context: { note: "learned-errors cap" },
+							});
+						}
 					}
 					this._learnedErrors.set(key, {
 						tool: event.toolName,

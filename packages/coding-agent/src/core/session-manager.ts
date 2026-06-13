@@ -1,5 +1,6 @@
 import { type AgentMessage, uuidv7 } from "@pit/agent-core";
 import type { ImageContent, Message, TextContent } from "@pit/ai";
+import { recordDiagnostic } from "@pit/ai";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
@@ -879,6 +880,17 @@ function appendWithRetry(file: string, data: string): void {
 		} catch (err) {
 			const last = attempt === FS_RETRY_BACKOFF_MS.length - 1;
 			if (last || !isTransientFsError(err)) throw err;
+			// Observe-only: a transient FS lock bounced the append; we are about to retry.
+			recordDiagnostic({
+				category: "io.retry",
+				level: "warn",
+				source: "session-manager.appendWithRetry",
+				context: {
+					attempt: attempt + 1,
+					path: file,
+					note: (err as { code?: string } | null)?.code,
+				},
+			});
 			sleepSync(FS_RETRY_BACKOFF_MS[attempt + 1]);
 		}
 	}

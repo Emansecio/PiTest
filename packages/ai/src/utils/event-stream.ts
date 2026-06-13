@@ -1,4 +1,5 @@
 import type { AssistantMessage, AssistantMessageEvent } from "../types.ts";
+import { recordDiagnostic } from "./runtime-diagnostics.ts";
 
 // Pathological backlog threshold for the observability guard below. The producer
 // (provider SSE loop) is network-paced and the consumer (agent-loop) drains at
@@ -60,6 +61,12 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 			const depth = this.queue.length - this.head;
 			if (!this.warnedBacklog && depth >= this.backlogWarnDepth && this.backlogWarnDepth > 0) {
 				this.warnedBacklog = true;
+				recordDiagnostic({
+					category: "stream.backpressure",
+					level: "warn",
+					source: "event-stream.push",
+					context: { note: "backlog", bytes: depth },
+				});
 				console.warn(
 					`[EventStream] backlog reached ${depth} events (consumer slower than producer); ` +
 						"events are buffered, not dropped. Set PIT_EVENT_STREAM_WARN_DEPTH to tune.",

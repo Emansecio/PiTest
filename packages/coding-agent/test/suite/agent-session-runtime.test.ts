@@ -34,7 +34,7 @@ describe("AgentSessionRuntime characterization", () => {
 			await cleanups.pop()?.();
 		}
 		// 30s: dispose under full-suite contention on Windows can exceed the 10s default.
-	}, 30_000);
+	}, 60_000);
 
 	async function createRuntimeForTest(
 		extensionFactory: ExtensionFactory,

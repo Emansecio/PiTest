@@ -13,6 +13,7 @@
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { recordDiagnostic } from "@pit/ai";
 import { killProcessTree } from "../../utils/shell.ts";
 import type { EvalKernel, EvalRequest, EvalResult } from "./types.ts";
 
@@ -148,6 +149,12 @@ class PythonKernel implements EvalKernel {
 	private enforceOutputCap(c: PendingCall): boolean {
 		if (c.stdoutBuf.length + c.stderrBuf.length <= this.maxOutputBytes) return false;
 		const proc = this.proc;
+		recordDiagnostic({
+			category: "output.cap",
+			level: "error",
+			source: "eval-kernel.python",
+			context: { bytes: c.stdoutBuf.length + c.stderrBuf.length, pid: proc?.pid },
+		});
 		// killProcessTree tears down any children the user code spawned too.
 		if (proc?.pid) killProcessTree(proc.pid);
 		try {

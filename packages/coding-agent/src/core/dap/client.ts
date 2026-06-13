@@ -8,6 +8,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import * as net from "node:net";
 import type { Readable, Writable } from "node:stream";
+import { recordDiagnostic } from "@pit/ai";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { killProcessTree } from "../../utils/shell.ts";
 import { log, parseContentLengthFrame, toErrorMessage } from "../lsp/internal.ts";
@@ -158,11 +159,18 @@ export class DapClient {
 		});
 
 		let socket: net.Socket;
+		const connectTimeoutMs = socketConnectTimeoutMs();
 		const timeoutPromise = new Promise<never>((_, reject) => {
-			const t = setTimeout(
-				() => reject(new Error(`${adapter.name} did not connect within 10s`)),
-				socketConnectTimeoutMs(),
-			);
+			const t = setTimeout(() => {
+				// Surface the connect-timeout that kills the adapter (covers the kill too).
+				recordDiagnostic({
+					category: "net.connect-timeout",
+					level: "error",
+					source: "dap.spawnSocket",
+					context: { pid: proc.pid, ms: connectTimeoutMs },
+				});
+				reject(new Error(`${adapter.name} did not connect within 10s`));
+			}, connectTimeoutMs);
 			t.unref?.();
 		});
 		try {

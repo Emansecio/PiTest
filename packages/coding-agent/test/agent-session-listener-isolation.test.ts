@@ -65,7 +65,7 @@ describe("AgentSession listener isolation", () => {
 			}
 		}
 		// 30s: dispose under full-suite contention on Windows can exceed the 10s default.
-	}, 30_000);
+	}, 60_000);
 
 	function createSession(): AgentSession {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;

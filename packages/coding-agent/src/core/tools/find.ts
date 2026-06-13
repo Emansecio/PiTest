@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@pit/agent-core";
+import { recordDiagnostic } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { spawn } from "child_process";
 import { existsSync } from "fs";
@@ -297,7 +298,17 @@ export function createFindToolDefinition(
 						};
 
 						child.stderr?.on("data", (chunk) => {
+							const before = stderr.length;
 							stderr = appendCappedStderr(stderr, chunk.toString());
+							// Record once, on the chunk that first saturates the cap.
+							if (before < MAX_FIND_STDERR_BYTES && stderr.length >= MAX_FIND_STDERR_BYTES) {
+								recordDiagnostic({
+									category: "output.cap",
+									level: "info",
+									source: "find.stderrCap",
+									context: { bytes: MAX_FIND_STDERR_BYTES },
+								});
+							}
 						});
 
 						rl.on("line", (line) => {

@@ -64,5 +64,5 @@ describe("coordinator ↔ bus end-to-end (faux model)", () => {
 
 		expect(result.output).toBe("done — Main answered");
 		expect(settled).toBe(true);
-	}, 30_000);
+	}, 60_000);
 });

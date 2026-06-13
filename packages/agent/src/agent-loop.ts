@@ -7,6 +7,7 @@ import {
 	type AssistantMessage,
 	type Context,
 	EventStream,
+	recordDiagnostic,
 	streamSimple,
 	suggestClosest,
 	type ToolResultMessage,
@@ -222,6 +223,14 @@ function endStreamWithFailure(
 	err: unknown,
 ): void {
 	const message = buildFailureMessage(config, err);
+	// Observe-only: the run rejected and we emit a failure turn; record the contained fault.
+	const failNote = err instanceof Error ? err.message : String(err);
+	recordDiagnostic({
+		category: "error.isolated",
+		level: "error",
+		source: "agent-loop.endStreamWithFailure",
+		context: { note: failNote.slice(0, 200) },
+	});
 	stream.push({ type: "message_start", message });
 	stream.push({ type: "message_end", message });
 	stream.push({ type: "turn_end", message, toolResults: [] });

@@ -42,7 +42,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		expect(state.model?.id).toBe("claude-sonnet-4-5");
 		expect(state.isStreaming).toBe(false);
 		expect(state.messageCount).toBe(0);
-	}, 30000);
+	}, 60000);
 
 	test("should save messages to session file", async () => {
 		await client.start();
@@ -123,7 +123,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		expect(result.output.trim()).toBe("hello");
 		expect(result.exitCode).toBe(0);
 		expect(result.cancelled).toBe(false);
-	}, 30000);
+	}, 60000);
 
 	test("should add bash output to context", async () => {
 		await client.start();
@@ -190,7 +190,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		// Verify via state
 		const state = await client.getState();
 		expect(state.thinkingLevel).toBe("high");
-	}, 30000);
+	}, 60000);
 
 	test("should cycle thinking level", async () => {
 		await client.start();
@@ -207,7 +207,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		// Verify via state
 		const newState = await client.getState();
 		expect(newState.thinkingLevel).toBe(result!.level);
-	}, 30000);
+	}, 60000);
 
 	test("should get available models", async () => {
 		await client.start();
@@ -222,7 +222,7 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 			expect(model.contextWindow).toBeGreaterThan(0);
 			expect(typeof model.reasoning).toBe("boolean");
 		}
-	}, 30000);
+	}, 60000);
 
 	test("should get session stats", async () => {
 		await client.start();

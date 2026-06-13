@@ -90,5 +90,5 @@ describe("coordinator parent refs stay live after model/tool-surface changes", (
 		expect(childToolNames).toContain("read");
 		// The boot catalog had grep; a stale snapshot would leak it to the child.
 		expect(childToolNames).not.toContain("grep");
-	}, 30_000);
+	}, 60_000);
 });

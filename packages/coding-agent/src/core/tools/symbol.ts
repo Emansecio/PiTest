@@ -1,5 +1,5 @@
 import type { AgentTool } from "@pit/agent-core";
-import type { ImageContent, TextContent } from "@pit/ai";
+import { type ImageContent, recordDiagnostic, type TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/promises";
@@ -325,6 +325,13 @@ export function createSymbolToolDefinition(
 			if (ops.stat) {
 				const fileStat = await ops.stat(absolutePath);
 				if (fileStat.size > SYMBOL_MAX_FILE_BYTES) {
+					// Observe the size refusal (additive; behavior unchanged).
+					recordDiagnostic({
+						category: "output.cap",
+						level: "info",
+						source: "symbol",
+						context: { path, bytes: fileStat.size },
+					});
 					const text = `[symbol "${name}" in ${path}: file is ${formatSize(fileStat.size)}, exceeds ${formatSize(SYMBOL_MAX_FILE_BYTES)} — use grep/ast_grep to locate the symbol, or read with offset/limit]`;
 					return {
 						content: [{ type: "text", text }] as (TextContent | ImageContent)[],

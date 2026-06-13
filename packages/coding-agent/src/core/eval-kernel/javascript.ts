@@ -11,6 +11,7 @@
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { recordDiagnostic } from "@pit/ai";
 import { killProcessTree } from "../../utils/shell.ts";
 import type { EvalKernel, EvalRequest, EvalResult } from "./types.ts";
 
@@ -247,6 +248,12 @@ class JsKernel implements EvalKernel {
 		const parentCap = this.maxOutputBytes * 4;
 		if (this.stdoutBuf.length > parentCap && this.stdoutBuf.indexOf("\n") < 0) {
 			const proc = this.proc;
+			recordDiagnostic({
+				category: "output.cap",
+				level: "error",
+				source: "eval-kernel.javascript",
+				context: { bytes: this.stdoutBuf.length, pid: proc?.pid },
+			});
 			if (proc?.pid) killProcessTree(proc.pid);
 			try {
 				proc?.kill();

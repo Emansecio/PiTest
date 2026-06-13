@@ -12,6 +12,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { recordDiagnostic } from "@pit/ai";
 import {
 	CdpConnection,
 	type CdpTarget,
@@ -80,9 +81,19 @@ const A11Y_SNAPSHOT_MAX_LINES = 800;
 // the tool result / render / compaction and blow the heap. Truncate at this cap.
 const MAX_CDP_BODY_BYTES = 10 * 1024 * 1024;
 
+// Source label for the cap diagnostic, so getResponseBody vs evaluate are distinct.
+type CapSource = "chrome.getResponseBody" | "chrome.evaluate";
+
 /** Cap an oversized payload string, replacing the tail with a byte-count marker. */
-function capPayload(text: string, max: number): string {
+function capPayload(text: string, max: number, source: CapSource): string {
 	if (text.length <= max) return text;
+	// Observe only a REAL truncation (over the ceiling), not a normal payload.
+	recordDiagnostic({
+		category: "output.cap",
+		level: "warn",
+		source,
+		context: { bytes: text.length },
+	});
 	return `${text.slice(0, max)}\n[corpo truncado: ${max} de ${text.length} bytes]`;
 }
 
@@ -95,12 +106,12 @@ function capPayload(text: string, max: number): string {
 function capEvaluateValue(value: unknown): unknown {
 	if (typeof value === "string") {
 		if (value.length <= MAX_CDP_BODY_BYTES) return value;
-		return capPayload(value, MAX_CDP_BODY_BYTES);
+		return capPayload(value, MAX_CDP_BODY_BYTES, "chrome.evaluate");
 	}
 	if (value === undefined || value === null) return value;
 	const serialized = safeStringify(value);
 	if (serialized === undefined || serialized.length <= MAX_CDP_BODY_BYTES) return value;
-	return capPayload(serialized, MAX_CDP_BODY_BYTES);
+	return capPayload(serialized, MAX_CDP_BODY_BYTES, "chrome.evaluate");
 }
 
 /** JSON.stringify that swallows cyclic/throwing values (returns undefined). */
@@ -541,7 +552,10 @@ export class ChromeDevtoolsManager {
 		// CDP returns the whole body; cap it so a giant asset isn't retained or
 		// propagated to the rest of the pipeline (tool result, render, compaction).
 		const raw = typeof res?.body === "string" ? res.body : "";
-		return { body: capPayload(raw, MAX_CDP_BODY_BYTES), base64Encoded: !!res?.base64Encoded };
+		return {
+			body: capPayload(raw, MAX_CDP_BODY_BYTES, "chrome.getResponseBody"),
+			base64Encoded: !!res?.base64Encoded,
+		};
 	}
 
 	private async elementCenter(

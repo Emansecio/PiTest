@@ -8,6 +8,8 @@
  * pattern of the eval kernel (core/eval-kernel/javascript.ts).
  */
 
+import { recordDiagnostic } from "@pit/ai";
+
 export interface CdpTarget {
 	id: string;
 	type: string;
@@ -136,6 +138,13 @@ export class CdpConnection {
 				} catch {
 					// ignore
 				}
+				// Observe the connect-timeout before rejecting (behavior unchanged).
+				recordDiagnostic({
+					category: "net.connect-timeout",
+					level: "error",
+					source: "cdp.ensureOpen",
+					context: { ms: this.connectTimeoutMs, note: this.url },
+				});
 				reject(new Error(`WebSocket connect to ${this.url} timed out`));
 			}, this.connectTimeoutMs);
 			ws.addEventListener("open", () => {
@@ -207,9 +216,17 @@ export class CdpConnection {
 				this.pending.delete(id);
 				reject(err);
 			};
+			const commandTimeoutMs = opts?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
 			const timer = setTimeout(() => {
+				// Observe the command-timeout before rejecting (behavior unchanged).
+				recordDiagnostic({
+					category: "net.command-timeout",
+					level: "warn",
+					source: "cdp.send",
+					context: { ms: commandTimeoutMs, note: method },
+				});
 				settleReject(new Error(`CDP command ${method} timed out`));
-			}, opts?.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
+			}, commandTimeoutMs);
 			signal?.addEventListener("abort", onAbort, { once: true });
 			this.pending.set(id, { resolve: settleResolve, reject: settleReject, timer, cleanup });
 			this.ws?.send(JSON.stringify({ id, method, params }));

@@ -9,6 +9,7 @@
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
+import { recordDiagnostic } from "@pit/ai";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { killProcessTree } from "../../utils/shell.ts";
 import { applyWorkspaceEdit } from "./edits.ts";
@@ -441,7 +442,9 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 		proc.on("exit", onExit);
 		proc.on("error", (err) => {
 			// Spawn failure (e.g. ENOENT). Reject the init lock via exit path.
-			client.stderrBuffer = `${client.stderrBuffer}${String(err)}\n`;
+			// Apply the same cap the data handler uses so a flood here can't grow
+			// the buffer unbounded (parity with the :data path above).
+			client.stderrBuffer = `${client.stderrBuffer}${String(err)}\n`.slice(-MAX_STDERR_BYTES);
 			onExit(proc.exitCode);
 		});
 
@@ -664,8 +667,16 @@ async function shutdownClientInstance(client: LspClient): Promise<void> {
 
 function killClientProcess(client: LspClient): void {
 	try {
-		if (client.proc.pid) killProcessTree(client.proc.pid);
-		else client.proc.kill();
+		if (client.proc.pid) {
+			// Surface the otherwise-silent forced kill of the LSP process tree.
+			recordDiagnostic({
+				category: "process.kill",
+				level: "info",
+				source: "lsp.dispose",
+				context: { pid: client.proc.pid },
+			});
+			killProcessTree(client.proc.pid);
+		} else client.proc.kill();
 	} catch {
 		try {
 			client.proc.kill();

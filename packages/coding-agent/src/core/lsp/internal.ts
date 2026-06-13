@@ -6,6 +6,7 @@
 
 import { accessSync, constants } from "node:fs";
 import * as path from "node:path";
+import { recordDiagnostic } from "@pit/ai";
 
 /** True when an error is a Node ENOENT (file/dir not found). */
 export function isEnoent(err: unknown): boolean {
@@ -176,6 +177,13 @@ export function parseContentLengthFrame(buffer: Buffer): ContentLengthFrame | nu
 		// we keep buffering for more bytes; past it the stream is unframed garbage —
 		// discard everything so the buffer can't grow without bound (OOM guard).
 		if (buffer.length > MAX_HEADER_SCAN_BYTES) {
+			// Observe the unframed-stream discard (additive; behavior unchanged).
+			recordDiagnostic({
+				category: "output.cap",
+				level: "warn",
+				source: "lsp.parseContentLengthFrame",
+				context: { bytes: buffer.length, note: "unframed" },
+			});
 			return { error: new Error("unframed output (no Content-Length header)"), remaining: Buffer.alloc(0) };
 		}
 		return null;
@@ -192,6 +200,12 @@ export function parseContentLengthFrame(buffer: Buffer): ContentLengthFrame | nu
 	if (contentLength > MAX_FRAME_BYTES) {
 		// Absurd declared length: reject now instead of waiting for the buffer to
 		// fill to a multi-GB frame. Resync past the header so the reader continues.
+		recordDiagnostic({
+			category: "output.cap",
+			level: "warn",
+			source: "lsp.parseContentLengthFrame",
+			context: { bytes: contentLength, note: "frame-too-large" },
+		});
 		return { error: new Error(`frame too large (${contentLength} bytes)`), remaining: buffer.subarray(messageStart) };
 	}
 	const messageEnd = messageStart + contentLength;

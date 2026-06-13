@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process";
 import * as path from "node:path";
 import * as timers from "node:timers/promises";
+import { recordDiagnostic } from "@pit/ai";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { trackDetachedChildPid } from "../../utils/shell.ts";
 import { log, toErrorMessage, untilAborted } from "../lsp/internal.ts";
@@ -179,6 +180,7 @@ function isLowSurrogate(code: number): boolean {
 
 export function truncateOutput(session: DapOutputBuffer, output: string): void {
 	if (!output) return;
+	const wasTruncated = session.outputTruncated;
 	session.output += output;
 	session.outputBytes += Buffer.byteLength(output, "utf-8");
 	// Drop fixed 1024-char slices off the front until under cap, tracking the
@@ -197,6 +199,15 @@ export function truncateOutput(session: DapOutputBuffer, output: string): void {
 		}
 		session.output = session.output.slice(n);
 		session.outputTruncated = true;
+	}
+	// Record once per session, on the first false→true transition (not per chunk).
+	if (!wasTruncated && session.outputTruncated) {
+		recordDiagnostic({
+			category: "output.cap",
+			level: "info",
+			source: "dap.truncateOutput",
+			context: { bytes: MAX_OUTPUT_BYTES },
+		});
 	}
 }
 

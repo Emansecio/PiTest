@@ -1,3 +1,5 @@
+import { recordDiagnostic } from "./runtime-diagnostics.ts";
+
 // Idle-timeout watchdog for raw network stream readers.
 //
 // Provider SSE loops call `reader.read()` in a `while (true)` and only check
@@ -100,6 +102,12 @@ export async function raceReadWithIdle<T>(
 				// surface a retryable error. Cancel rejection is ignored: the
 				// reader may already be torn down.
 				reader.cancel(new IdleStreamTimeoutError(idleMs)).catch(() => {});
+				recordDiagnostic({
+					category: "stream.idle-timeout",
+					level: "warn",
+					source: "idle-timeout.raceReadWithIdle",
+					context: { ms: idleMs },
+				});
 				reject(new IdleStreamTimeoutError(idleMs));
 			}, idleMs);
 		});

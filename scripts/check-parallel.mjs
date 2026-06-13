@@ -25,17 +25,29 @@ function run(name, command) {
 	});
 }
 
-const tasks = [
+// The fast static checks. tsgo (~3s) and biome (~1s) are CPU-bound but brief;
+// the two smoke checks are trivial. These run concurrently with each other.
+const fastChecks = [
 	{ name: "biome", command: "biome check --error-on-warnings ." },
 	{ name: "tsgo", command: "tsgo --noEmit" },
 	{ name: "browser-smoke", command: "node scripts/check-browser-smoke.mjs" },
 	{ name: "generated", command: "node scripts/check-generated-models.mjs" },
-	// Vitest unit/integration suite — keeps assertions like footer.test.ts from
-	// silently rotting (this gate previously ran only type/lint/smoke checks).
-	{ name: "vitest", command: "npm run test -w @pit/coding-agent" },
 ];
 
-const results = await Promise.all(tasks.map((task) => run(task.name, task.command)));
+// Vitest is the heavy task: it forks up to (cpu-count) workers and saturates
+// every core during its ~280s-CPU collect. Running it inside the SAME parallel
+// batch as tsgo/biome oversubscribes the machine — that contention is what made
+// timing-sensitive tests (real-timer polling, process-spawn E2E) flake on the
+// 30s deadline, even though the suite is rock-stable solo (~21s, 2495 green).
+// So: finish the fast checks first, then give vitest the machine to itself. Net
+// wall is LOWER than the old contended run AND deterministic. All tasks still
+// run (no early bail) so one failure never hides another, and the suite is never
+// skipped. Keeps the footer.test.ts-style assertions from silently rotting.
+const vitestTask = { name: "vitest", command: "npm run test -w @pit/coding-agent" };
+
+const fastResults = await Promise.all(fastChecks.map((task) => run(task.name, task.command)));
+const vitestResult = await run(vitestTask.name, vitestTask.command);
+const results = [...fastResults, vitestResult];
 for (const result of results) {
 	if (result.out.trim()) {
 		process.stdout.write(`\n=== ${result.name} ===\n${result.out}`);

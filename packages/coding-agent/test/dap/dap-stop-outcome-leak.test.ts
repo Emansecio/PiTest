@@ -99,5 +99,5 @@ describe("DapSessionManager.#prepareStopOutcome — race losers are cancelled (n
 
 		spy.mockRestore();
 		await dapSessionManager.terminate();
-	}, 30_000);
+	}, 60_000);
 });

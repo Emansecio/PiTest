@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { AgentTool } from "@pit/agent-core";
+import { recordDiagnostic } from "@pit/ai";
 import { Container, Text, truncateToWidth } from "@pit/tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
@@ -156,6 +157,12 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				if (timeout !== undefined && timeout > 0) {
 					timeoutHandle = setTimeout(() => {
 						timedOut = true;
+						recordDiagnostic({
+							category: "process.kill",
+							level: "warn",
+							source: "bash.timeout",
+							context: { pid: child.pid },
+						});
 						if (child.pid) killProcessTree(child.pid);
 					}, timeout * 1000);
 				}
@@ -164,6 +171,12 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				child.stderr?.on("data", onData);
 				// Handle abort signal by killing the entire process tree.
 				const onAbort = () => {
+					recordDiagnostic({
+						category: "process.kill",
+						level: "info",
+						source: "bash.abort",
+						context: { pid: child.pid },
+					});
 					if (child.pid) killProcessTree(child.pid);
 				};
 				if (signal) {

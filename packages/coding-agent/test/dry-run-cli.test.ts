@@ -18,7 +18,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { sync as crossSpawnSync } from "cross-spawn";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const CLI_ENTRY = path.join(PROJECT_ROOT, "src", "cli.ts");
@@ -76,7 +76,11 @@ function runCli(args: string[], cwd: string, agentDir: string): RunResult {
 			FORCE_COLOR: "0",
 		},
 		encoding: "utf-8",
-		timeout: 60_000,
+		// 90s for the child (tsx transpile + full CLI boot). Comfortably above a
+		// cold boot (~seconds); the headroom is for a loaded/CI box. The vitest
+		// testTimeout (120s, set in beforeAll) stays above this so the child's own
+		// timeout is always the arbiter.
+		timeout: 90_000,
 	});
 	return {
 		status: typeof result.status === "number" ? result.status : -1,
@@ -97,7 +101,14 @@ describe("pi --dry-run (E2E)", () => {
 	let cwd: string;
 	let agentDir: string;
 
+	// Each `it` spawns a fresh `tsx` that transpiles + boots the whole CLI — a
+	// genuinely heavy E2E step. The crossSpawnSync below caps the child at 90s;
+	// give the vitest deadline clear headroom above that (120s) so the test is
+	// arbitrated by the child's own timeout, never killed mid-spawn by a tie with
+	// the global 60s testTimeout. A cold machine boots tsx in seconds; this only
+	// matters under heavy load/CI.
 	beforeAll(() => {
+		vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dryrun-e2e-"));
 		cwd = path.join(tempDir, "proj");
 		agentDir = path.join(tempDir, "agent");
