@@ -115,4 +115,33 @@ describe("SettingsManager.getToolFeedbackSettings", () => {
 		expect(cfg.stagnationReminder.hardThreshold).toBe(25);
 		expect(cfg.stagnationReminder.cooldownMs).toBe(30000);
 	});
+
+	it("defaults failureBudget to ON with maxPerTurn 3", () => {
+		const cfg = SettingsManager.inMemory().getToolFeedbackSettings();
+		expect(cfg.failureBudget.enabled).toBe(true);
+		expect(cfg.failureBudget.maxPerTurn).toBe(3);
+	});
+
+	it("honors explicit opt-out for failureBudget", () => {
+		const sm = SettingsManager.inMemory({ toolFeedback: { failureBudget: { enabled: false } } });
+		const cfg = sm.getToolFeedbackSettings();
+		expect(cfg.failureBudget.enabled).toBe(false);
+		// maxPerTurn still resolves to its default even when disabled.
+		expect(cfg.failureBudget.maxPerTurn).toBe(3);
+	});
+
+	it("respects a custom failureBudget.maxPerTurn", () => {
+		const sm = SettingsManager.inMemory({ toolFeedback: { failureBudget: { enabled: true, maxPerTurn: 5 } } });
+		expect(sm.getToolFeedbackSettings().failureBudget.maxPerTurn).toBe(5);
+	});
+
+	it("clamps invalid failureBudget.maxPerTurn to the default", () => {
+		const sm = SettingsManager.inMemory({ toolFeedback: { failureBudget: { maxPerTurn: 0 } } });
+		expect(sm.getToolFeedbackSettings().failureBudget.maxPerTurn).toBe(3);
+	});
+
+	it("floors a fractional failureBudget.maxPerTurn", () => {
+		const sm = SettingsManager.inMemory({ toolFeedback: { failureBudget: { maxPerTurn: 4.9 } } });
+		expect(sm.getToolFeedbackSettings().failureBudget.maxPerTurn).toBe(4);
+	});
 });

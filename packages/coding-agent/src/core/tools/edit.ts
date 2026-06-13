@@ -21,6 +21,7 @@ import {
 	stripBom,
 } from "./edit-diff.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
+import { attachOmissionWarning } from "./lazy-omission-attach.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getFilePathArg, invalidArgText, shortenPath } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -356,6 +357,11 @@ export function createEditToolDefinition(
 			const absolutePath = resolveToCwd(path, cwd);
 
 			let __written: string | undefined;
+			// Captured for the post-write lazy-omission scan (LF-normalized base/new
+			// from the edit engine — the right comparison inputs for "new placeholder
+			// vs original"). Set only on a real write, not on the preview path.
+			let __omissionBase: string | undefined;
+			let __omissionNew: string | undefined;
 			const writeResult = await withFileMutationQueue(
 				absolutePath,
 				() =>
@@ -468,6 +474,8 @@ export function createEditToolDefinition(
 								}
 
 								__written = finalContent;
+								__omissionBase = baseContent;
+								__omissionNew = newContent;
 
 								// Cheap post-write integrity check (local FS only): confirm the
 								// byte count on disk matches what we wrote, catching a silent
@@ -514,7 +522,8 @@ export function createEditToolDefinition(
 						})();
 					}),
 			);
-			return attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal);
+			const diagResult = await attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal);
+			return attachOmissionWarning(diagResult, absolutePath, __omissionBase, __omissionNew, cwd);
 		},
 		renderCall(args, theme, context) {
 			const component = getEditCallRenderComponent(context.state, context.lastComponent);

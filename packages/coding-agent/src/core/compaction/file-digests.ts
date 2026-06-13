@@ -1,3 +1,4 @@
+import { redactForDisk } from "../secret-redactor.ts";
 import { listDeclarations } from "../tools/symbol.js";
 
 /**
@@ -29,7 +30,11 @@ export async function buildFileDigests(
 			const names = listDeclarations(content, path)
 				.map((d) => d.name)
 				.slice(0, 12);
-			return names.length > 0 ? ([path, names.join(", ")] as const) : undefined;
+			if (names.length === 0) return undefined;
+			// The digest is persisted into the compaction summary (disk + remote),
+			// so scrub any credential-shaped symbol/value before it leaves memory.
+			// Output is plain text, so plain-string redaction stays well-formed.
+			return [path, redactForDisk(names.join(", "))] as const;
 		}),
 	);
 	const out: Record<string, string> = {};

@@ -388,6 +388,11 @@ The `search_tool_bm25` tool is always registered; these settings gate auto-seedi
 | `toolFeedback.stagnationReminder.softThreshold` | number | `12` | Non-productive turns that trigger a reminder |
 | `toolFeedback.stagnationReminder.hardThreshold` | number | `25` | Non-productive turns that pause for user guidance (clamped to at least `softThreshold`) |
 | `toolFeedback.stagnationReminder.cooldownMs` | number | `30000` | Minimum gap between soft reminders |
+| `toolFeedback.crossErrorReminder.enabled` | boolean | `true` | Inject a reminder when the same normalised error recurs across ≥2 distinct call shapes (flailing) |
+| `toolFeedback.crossErrorReminder.threshold` | number | `3` | Recurring same-error count (across ≥2 approaches) that triggers a reminder |
+| `toolFeedback.crossErrorReminder.cooldownMs` | number | `30000` | Minimum gap between reminders |
+| `toolFeedback.failureBudget.enabled` | boolean | `true` | Inject a forceful steer when a single tool (by name) exhausts its per-turn failure budget |
+| `toolFeedback.failureBudget.maxPerTurn` | number | `3` | Failures of one tool (by name) allowed in a turn before the steer fires |
 
 ### Engineering Style
 

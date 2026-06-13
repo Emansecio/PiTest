@@ -41,6 +41,7 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS, raceReadWithIdle } from "../utils/idle-timeout.ts";
+import { computeRetryDelay, isRetryableStatus, parseRetryAfter } from "../utils/retry-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	applyServiceTierPricing,
@@ -109,7 +110,7 @@ interface RequestBody {
 // ============================================================================
 
 function isRetryableError(status: number, errorText: string): boolean {
-	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
+	if (isRetryableStatus(status)) {
 		return true;
 	}
 	return /rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused/i.test(errorText);
@@ -260,31 +261,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 
 					const errorText = await response.text();
 					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
-						// Jitter the exponential backoff to avoid a thundering-herd retry
-						// storm against the provider. Server-specified retry-after below
-						// overrides this and is honored verbatim.
-						let delayMs = BASE_DELAY_MS * 2 ** attempt * (0.5 + Math.random());
-
-						const retryAfterMs = response.headers.get("retry-after-ms");
-						if (retryAfterMs !== null) {
-							const millis = Number(retryAfterMs);
-							if (Number.isFinite(millis)) {
-								delayMs = Math.max(0, millis);
-							}
-						} else {
-							const retryAfter = response.headers.get("retry-after");
-							if (retryAfter) {
-								const seconds = Number(retryAfter);
-								if (Number.isFinite(seconds)) {
-									delayMs = Math.max(0, seconds * 1000);
-								} else {
-									const date = Date.parse(retryAfter);
-									if (!Number.isNaN(date)) {
-										delayMs = Math.max(0, date - Date.now());
-									}
-								}
-							}
-						}
+						// Honor the server's requested retry-after verbatim when present;
+						// otherwise jitter an exponential backoff to avoid a thundering-herd
+						// retry storm against the provider.
+						const retryAfterMs = parseRetryAfter(response.headers);
+						const delayMs = computeRetryDelay(attempt, retryAfterMs, { baseDelayMs: BASE_DELAY_MS });
 
 						await sleep(delayMs, options?.signal);
 						continue;
@@ -307,7 +288,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					lastError = error instanceof Error ? error : new Error(String(error));
 					// Network errors are retryable
 					if (attempt < MAX_RETRIES && !lastError.message.includes("usage limit")) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt * (0.5 + Math.random());
+						const delayMs = computeRetryDelay(attempt, null, { baseDelayMs: BASE_DELAY_MS });
 						await sleep(delayMs, options?.signal);
 						continue;
 					}

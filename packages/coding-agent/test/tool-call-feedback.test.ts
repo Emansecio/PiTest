@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	buildDoomLoopReminder,
+	buildFailureBudgetReminder,
 	buildToolErrorReflection,
 	decideDoomLoopReminder,
 	decideErrorReflection,
@@ -98,6 +99,33 @@ describe("buildDoomLoopReminder", () => {
 	it("floors fractional counts", () => {
 		const out = buildDoomLoopReminder({ toolName: "x", consecutiveCount: 3.9 });
 		expect(out).toContain("3 consecutive");
+	});
+});
+
+describe("buildFailureBudgetReminder", () => {
+	it("names the tool, reports the count, and tells the model to change approach", () => {
+		const out = buildFailureBudgetReminder({ toolName: "bash", failureCount: 3, maxPerTurn: 3 });
+		expect(out).toContain("<tool-failure-budget>");
+		expect(out).toContain("`bash`");
+		expect(out).toContain("failed 3 times in this turn");
+		expect(out).toContain("Change approach");
+		expect(out).toContain("Explain the blocker");
+		expect(out).toContain("</tool-failure-budget>");
+	});
+
+	it("uses the singular when the count is 1", () => {
+		const out = buildFailureBudgetReminder({ toolName: "edit", failureCount: 1, maxPerTurn: 1 });
+		expect(out).toContain("failed 1 time in this turn");
+		expect(out).not.toContain("failed 1 times");
+	});
+
+	it("clamps negative/fractional counts", () => {
+		expect(buildFailureBudgetReminder({ toolName: "x", failureCount: -2, maxPerTurn: 3 })).toContain(
+			"failed 0 times in this turn",
+		);
+		expect(buildFailureBudgetReminder({ toolName: "x", failureCount: 3.9, maxPerTurn: 3 })).toContain(
+			"failed 3 times in this turn",
+		);
 	});
 });
 

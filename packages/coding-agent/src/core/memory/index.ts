@@ -17,6 +17,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { redactForDisk } from "../secret-redactor.ts";
 
 export interface MemoryFile {
 	scope: "global" | "project";
@@ -112,6 +113,10 @@ export function appendMemory(options: AppendMemoryOptions): { path: string; crea
 		? `\n\n## ${heading} (${stamp})\n${options.entry.trim()}\n`
 		: `\n\n- (${stamp}) ${options.entry.trim()}\n`;
 	const existing = readIfExists(path) ?? `# Persistent Memory (${options.scope})\n\n`;
-	writeFileSync(path, `${existing}${block}`, "utf-8");
+	// Redact only the newly appended block on the way to disk: `existing` was
+	// already on disk (and already scrubbed if it passed through here), so we
+	// avoid re-rewriting the user's prose, and a credential the model put in the
+	// new entry never lands verbatim in a pushed file.
+	writeFileSync(path, `${existing}${redactForDisk(block)}`, "utf-8");
 	return { path, created };
 }

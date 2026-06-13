@@ -34,6 +34,14 @@ export interface DoomLoopReminderInput {
 	consecutiveCount: number;
 }
 
+export interface FailureBudgetReminderInput {
+	toolName: string;
+	/** Total failures of this tool (by name) so far in the current turn. */
+	failureCount: number;
+	/** The configured per-turn budget for a single tool. */
+	maxPerTurn: number;
+}
+
 /**
  * Build a structured reflection prompt for the most recent failing tool call.
  *
@@ -110,6 +118,37 @@ export function buildDoomLoopReminder(input: DoomLoopReminderInput): string {
 	lines.push("");
 	lines.push("Do not repeat the same call with the same arguments. Pick a different action.");
 	lines.push("</doom-loop-reminder>");
+
+	return lines.join("\n");
+}
+
+/**
+ * Build a forceful reminder fired when a single tool (by NAME) has exhausted its
+ * per-turn failure budget. Unlike the doom-loop (identical repeats) and the
+ * cross-error reminder (same error across approaches), this fires purely on the
+ * COUNT of failures for one tool in the current turn — regardless of args or
+ * error text. It tells an autonomous agent to stop burning the turn on one tool
+ * and either change approach or explain the blocker.
+ */
+export function buildFailureBudgetReminder(input: FailureBudgetReminderInput): string {
+	const count = Math.max(0, Math.floor(input.failureCount));
+	const lines: string[] = [];
+
+	lines.push("<tool-failure-budget>");
+	lines.push(
+		`The \`${input.toolName}\` tool has failed ${count} time${count === 1 ? "" : "s"} in this turn — ` +
+			"its per-turn failure budget is exhausted.",
+	);
+	lines.push("");
+	lines.push("Stop repeating this tool. Before anything else, decide one of:");
+	lines.push(
+		"- **Change approach**: a different tool, a different file/target, or fundamentally different arguments.",
+	);
+	lines.push("- **Fix the root cause**: state why it keeps failing, then address that — not the symptom.");
+	lines.push("- **Explain the blocker**: if you cannot proceed, say what is blocking you instead of retrying.");
+	lines.push("");
+	lines.push(`Do not call \`${input.toolName}\` again until you have changed something material.`);
+	lines.push("</tool-failure-budget>");
 
 	return lines.join("\n");
 }

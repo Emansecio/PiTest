@@ -122,11 +122,17 @@ export interface CrossErrorReminderSettings {
 	cooldownMs?: number; // default: 30000 — minimum gap between reminders
 }
 
+export interface FailureBudgetSettings {
+	enabled?: boolean; // default: true (opt out with enabled: false)
+	maxPerTurn?: number; // default: 3 — failures of one tool (by name) allowed in a turn before a forceful steer fires
+}
+
 export interface ToolFeedbackSettings {
 	errorReflection?: ErrorReflectionSettings;
 	doomLoopReminder?: DoomLoopReminderSettings;
 	stagnationReminder?: StagnationReminderSettings;
 	crossErrorReminder?: CrossErrorReminderSettings;
+	failureBudget?: FailureBudgetSettings;
 }
 
 export interface FrequentFilesSettings {
@@ -289,6 +295,7 @@ export interface ResolvedToolFeedbackSettings {
 	doomLoopReminder: { enabled: boolean; threshold: number; cooldownMs: number };
 	stagnationReminder: { enabled: boolean; softThreshold: number; hardThreshold: number; cooldownMs: number };
 	crossErrorReminder: { enabled: boolean; threshold: number; cooldownMs: number };
+	failureBudget: { enabled: boolean; maxPerTurn: number };
 }
 
 export interface WarningSettings {
@@ -1094,6 +1101,12 @@ export class SettingsManager {
 	 *   pauses/aborts) when consecutive identical tool calls reach the threshold.
 	 *   Bounded by `cooldownMs` so it never spams. Opt out with
 	 *   `toolFeedback.doomLoopReminder.enabled: false`.
+	 * - failureBudget: ON by default. A per-turn, per-tool-NAME failure budget
+	 *   (complements doom-loop = same identical call, and cross-error = same error
+	 *   across approaches). Once one tool fails `maxPerTurn` times in a single
+	 *   turn — regardless of args or error text — a forceful steer fires telling
+	 *   the model to stop hammering that tool and change approach. Opt out with
+	 *   `toolFeedback.failureBudget.enabled: false`.
 	 */
 	getToolFeedbackSettings(): ResolvedToolFeedbackSettings {
 		const tf = this.settings.toolFeedback;
@@ -1109,6 +1122,8 @@ export class SettingsManager {
 		const ce = tf?.crossErrorReminder;
 		const ceThreshold = posInt(ce?.threshold, 3);
 		const ceCooldownMs = nonNegInt(ce?.cooldownMs, 30000);
+		const fb = tf?.failureBudget;
+		const fbMaxPerTurn = posInt(fb?.maxPerTurn, 3);
 		return {
 			errorReflection: { enabled: tf?.errorReflection?.enabled === true },
 			doomLoopReminder: {
@@ -1126,6 +1141,10 @@ export class SettingsManager {
 				enabled: ce?.enabled !== false,
 				threshold: ceThreshold,
 				cooldownMs: ceCooldownMs,
+			},
+			failureBudget: {
+				enabled: fb?.enabled !== false,
+				maxPerTurn: fbMaxPerTurn,
 			},
 		};
 	}

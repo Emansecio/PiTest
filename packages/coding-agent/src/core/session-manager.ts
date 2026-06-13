@@ -26,6 +26,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import { redactForDisk } from "./secret-redactor.ts";
 
 export const CURRENT_SESSION_VERSION = 3;
 
@@ -1073,9 +1074,13 @@ export class SessionManager {
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
 		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
+		// Redact credentials on the way to disk only: each [REDACTED:x] token has no
+		// JSON metacharacters, so the serialized lines stay parseable. The in-memory
+		// fileEntries keep the verbatim value for the live turn.
+		const safe = redactForDisk(content);
 		// Atomic rewrite (temp + rename) so a crash mid-write never truncates the
 		// session file. Falls back to a direct write if rename is unavailable.
-		writeFileAtomic(this.sessionFile, content);
+		writeFileAtomic(this.sessionFile, safe);
 	}
 
 	isPersisted(): boolean {
@@ -1152,7 +1157,11 @@ export class SessionManager {
 		// byte level — accepted as best-effort; a full cross-process lockfile is a
 		// follow-up. The retry absorbs transient AV/indexer locks on Windows; on
 		// final failure it throws with state kept safe for the next attempt.
-		appendWithRetry(this.sessionFile, batch);
+		// Redact credentials on the disk-egress boundary only. batch is fully
+		// serialized JSONL (one JSON.stringify per line), and [REDACTED:x] carries
+		// no JSON metacharacters, so the written lines remain valid JSON. The live
+		// in-memory entries are left verbatim for the active turn.
+		appendWithRetry(this.sessionFile, redactForDisk(batch));
 		// Append succeeded: now it is safe to commit the flushed flag and clear
 		// the queued writes we just persisted.
 		if (isInitialFlush) {
@@ -1174,7 +1183,9 @@ export class SessionManager {
 		const drainPromise = (async () => {
 			while (this._writeQueue.length > 0 && this.sessionFile) {
 				const batch = this._writeQueue.splice(0).join("");
-				await appendFile(this.sessionFile, batch);
+				// Disk-egress redaction (same JSON-safe guarantee as _persist's
+				// synchronous append path).
+				await appendFile(this.sessionFile, redactForDisk(batch));
 			}
 		})();
 		this._draining = drainPromise;

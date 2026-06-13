@@ -10,6 +10,7 @@ import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { applyKeyAliases, PATH_KEY_ALIASES } from "./argument-prep.js";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
+import { attachOmissionWarning } from "./lazy-omission-attach.ts";
 import { resolveToCwd } from "./path-utils.js";
 import {
 	getFilePathArg,
@@ -301,7 +302,10 @@ export function createWriteToolDefinition(
 						},
 					),
 			);
-			return attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal);
+			const diagResult = await attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal);
+			// New file / full overwrite: no prior content to diff against, so any
+			// elision placeholder in the written body is suspect — pass "" as base.
+			return attachOmissionWarning(diagResult, absolutePath, "", __written, cwd);
 		},
 		renderCall(args, theme, context) {
 			const renderArgs = args as { path?: string; file_path?: string; content?: string } | undefined;

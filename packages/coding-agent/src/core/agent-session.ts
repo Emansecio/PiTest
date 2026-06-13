@@ -161,7 +161,12 @@ import {
 } from "./stagnation.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { setCurrentTodoManager, type TodoItem, TodoManager, type TodoState } from "./todo/todo-manager.ts";
-import { buildDoomLoopReminder, buildToolErrorReflection, decideErrorReflection } from "./tool-call-feedback.js";
+import {
+	buildDoomLoopReminder,
+	buildFailureBudgetReminder,
+	buildToolErrorReflection,
+	decideErrorReflection,
+} from "./tool-call-feedback.js";
 import {
 	extractErrorMessage,
 	fingerprintToolArgs,
@@ -604,6 +609,16 @@ export class AgentSession {
 	// re-dispatching the agent after the user cancels mid-task — without it, Esc
 	// only aborts the current turn and the orchestration loop immediately restarts.
 	private _userInterrupted = false;
+	// Per-turn, per-tool-NAME failure budget. Counts how many times each tool
+	// failed in the CURRENT turn (keyed by tool name, not args), reset strictly at
+	// the top of each prompt cycle alongside `_turnTouchedFiles`. Complements the
+	// doom-loop (same identical call) and cross-error (same error across ≥2
+	// approaches) detectors: this trips purely on the failure COUNT for one tool,
+	// catching an autonomous agent that burns a turn flailing on one tool with
+	// varied args and varied errors. `_turnFailureBudgetFired` marks the tools that
+	// already emitted the forceful steer this turn so it fires once per tool/turn.
+	private readonly _turnToolFailures = new Map<string, number>();
+	private readonly _turnFailureBudgetFired = new Set<string>();
 	// Native verification gate: `_turnTouchedFiles` arms it (set when a file tool
 	// writes/edits this prompt cycle), `_inVerification` guards re-entry, and
 	// `_verificationAbort` cancels an in-flight check on interrupt/dispose.
@@ -1498,8 +1513,13 @@ export class AgentSession {
 		// hint about our own refusal strings. The per-rule reject counters already
 		// track them.
 		const wasRegistryRejected = this._rejectedToolCallIds.delete(event.toolCallId);
+		// Per-turn, per-tool failure budget (complements doom-loop + cross-error):
+		// bump the by-NAME failure count for this turn and surface the remaining
+		// budget to the reflection prompt. Computed once for both error branches.
+		const budget = event.isError ? this._recordTurnToolFailure(event.toolName) : undefined;
 		if (event.isError && wasRegistryRejected) {
-			this._maybeInjectToolErrorReflection(event.toolName, args, event.result);
+			this._maybeInjectToolErrorReflection(event.toolName, args, event.result, budget?.attemptsLeft);
+			if (budget) this._maybeInjectFailureBudgetReminder(event.toolName, budget.count, budget.max);
 		} else if (event.isError) {
 			const rawError = extractErrorMessage(event.result?.content);
 			const fingerprint = normalizeErrorFingerprint(rawError);
@@ -1562,7 +1582,8 @@ export class AgentSession {
 				}
 			}
 			this._maybeInjectCrossErrorReminder(fingerprint, args, rawError);
-			this._maybeInjectToolErrorReflection(event.toolName, args, event.result);
+			this._maybeInjectToolErrorReflection(event.toolName, args, event.result, budget?.attemptsLeft);
+			if (budget) this._maybeInjectFailureBudgetReminder(event.toolName, budget.count, budget.max);
 		} else {
 			this._crossError.observeSuccess();
 			const fileOp = extractToolFileOp(event.toolName, args);
@@ -1993,17 +2014,62 @@ export class AgentSession {
 	 * toolFeedback.errorReflection.enabled. Args captured at tool_execution_start
 	 * name the exact failing invocation.
 	 */
-	private _maybeInjectToolErrorReflection(toolName: string, args: unknown, result: unknown): void {
+	private _maybeInjectToolErrorReflection(
+		toolName: string,
+		args: unknown,
+		result: unknown,
+		attemptsLeft?: number,
+	): void {
 		const cfg = this.settingsManager.getToolFeedbackSettings().errorReflection;
 		if (!decideErrorReflection({ enabled: cfg.enabled, isError: true })) return;
 		const resultContent = (result as { content?: Array<{ type: string; text?: string }> } | undefined)?.content;
 		const errorMessage = extractErrorMessage(resultContent);
-		const content = buildToolErrorReflection({ toolName, args, errorMessage });
+		const content = buildToolErrorReflection({ toolName, args, errorMessage, attemptsLeft });
 		this.sendCustomMessage(
 			{ customType: "pi.tool-error-reflection", content, display: false },
 			{ deliverAs: "followUp" },
 		).catch(() => {
 			// Failure to inject a reflection must not break tool execution.
+		});
+	}
+
+	/**
+	 * Increment the per-turn failure counter for `toolName` (keyed by NAME, not
+	 * args) and report the remaining budget. Called once per failing tool call.
+	 * Returns the new count and the retries left under the configured per-turn
+	 * cap (clamped at 0). When the budget is disabled, attemptsLeft is left
+	 * undefined so the reflection prompt simply omits the line.
+	 */
+	private _recordTurnToolFailure(toolName: string): { count: number; attemptsLeft: number | undefined; max: number } {
+		const cfg = this.settingsManager.getToolFeedbackSettings().failureBudget;
+		const count = (this._turnToolFailures.get(toolName) ?? 0) + 1;
+		this._turnToolFailures.set(toolName, count);
+		if (!cfg.enabled) return { count, attemptsLeft: undefined, max: cfg.maxPerTurn };
+		return { count, attemptsLeft: Math.max(0, cfg.maxPerTurn - count), max: cfg.maxPerTurn };
+	}
+
+	/**
+	 * Inject a forceful steer when a single tool exhausts its per-turn failure
+	 * budget (count >= maxPerTurn). Fires once per tool per turn so a tool that
+	 * keeps failing after exhaustion does not re-spam the reminder every call.
+	 * Delivered as a "steer" (like the doom-loop/cross-error reminders) so it
+	 * lands before the next model turn while the tool-call loop is still hot —
+	 * a followUp would sit queued behind the loop it is trying to break.
+	 * Complements, not duplicates: doom-loop owns identical repeats, cross-error
+	 * owns one error across approaches, and this owns the raw per-tool failure
+	 * count regardless of args or error text.
+	 */
+	private _maybeInjectFailureBudgetReminder(toolName: string, count: number, max: number): void {
+		const cfg = this.settingsManager.getToolFeedbackSettings().failureBudget;
+		if (!cfg.enabled) return;
+		if (count < max) return;
+		if (this._turnFailureBudgetFired.has(toolName)) return;
+		this._turnFailureBudgetFired.add(toolName);
+		const content = buildFailureBudgetReminder({ toolName, failureCount: count, maxPerTurn: max });
+		this._fireReminder("pi.tool-failure-budget", content, {
+			deliverAs: "steer",
+			display: false,
+			label: "tool-failure-budget reminder",
 		});
 	}
 
@@ -2756,6 +2822,10 @@ export class AgentSession {
 		this._turnTouchedFiles = false;
 		this._turnTouchedVisual = false;
 		this._turnUsedPreview = false;
+		// Reset the per-turn, per-tool failure budget so each tool starts the turn
+		// with a fresh allowance (strict per-turn reset).
+		this._turnToolFailures.clear();
+		this._turnFailureBudgetFired.clear();
 		await this._promptOnce(text, options);
 
 		// Re-entrant call from within a continuation: the outer prompt() owns the
