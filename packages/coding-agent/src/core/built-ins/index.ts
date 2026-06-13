@@ -25,6 +25,7 @@ import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createEditPreconditionExtension } from "./edit-precondition-extension.ts";
 import { createGroundingGuardExtension } from "./grounding-guard-extension.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
+import { createImportGroundingExtension } from "./import-grounding-extension.ts";
 import { createLearnedErrorGuardExtension } from "./learned-error-guard-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
 import { createMemoryExtension } from "./memory-extension.ts";
@@ -95,6 +96,12 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// single dominant typo or blocks with candidates. After the learned-error
 		// guard so basic guards report first. Fail-open; opt out PIT_NO_GROUNDING_GUARD.
 		createGroundingGuardExtension({ cwd: options.cwd }),
+		// Import grounding: pre-exec, scans a write/edit's NEW content for RELATIVE
+		// import paths (./x, ../y) and blocks with close filename candidates when the
+		// target module doesn't resolve on disk. Block-only (never rewrites user code).
+		// After the symbol grounding-guard so basic guards report first. Fail-open;
+		// opt out PIT_NO_IMPORT_GROUNDING.
+		createImportGroundingExtension({ cwd: options.cwd }),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp }),
