@@ -40,8 +40,8 @@ plans/
 .pi/hf-sessions-backup/
 collect.sh
 
-# Local agent memory bank (per-machine hindsight state)
-.pit/hindsight/
+# Pit local state + runtime caches (hindsight, repo-map, frequent-files) — per-cwd, never versioned
+.pit/
 
 # Scratch analysis artifacts (local-only, not part of the project)
 RELATORIO-*.md

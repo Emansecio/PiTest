@@ -20,6 +20,7 @@ import {
 	listTargets as defaultListTargets,
 } from "./cdp-client.ts";
 import { findChromeBinary, launchChrome, waitForEndpoint } from "./chrome-launcher.ts";
+import { type ElementToSourceResult, resolveElementToSource } from "./element-to-source.ts";
 
 export interface CdpConnectionLike {
 	send(
@@ -445,6 +446,17 @@ export class ChromeDevtoolsManager {
 		const conn = await this.requireConn();
 		const nodeId = await this.domNodeId(conn, selector, signal);
 		await conn.send("DOM.setFileInputFiles", { files, nodeId }, { signal });
+	}
+
+	/**
+	 * Element → source: resolve the event-listener handlers bound to the element
+	 * matching `selector` to their position in the ORIGINAL source (file:line) via
+	 * CDP getEventListeners + source maps. Degrades to the transpiled position when
+	 * no dev source map is present (mapped:false). See core/chrome/element-to-source.ts.
+	 */
+	async elementToSource(selector: string, signal?: AbortSignal): Promise<ElementToSourceResult> {
+		const conn = await this.requireConn();
+		return resolveElementToSource({ send: (m, p, o) => conn.send(m, p, o), signal }, selector);
 	}
 
 	/** DOM nodeId of the first element matching the selector. */

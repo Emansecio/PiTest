@@ -7,13 +7,22 @@
  * filesystem I/O are Node-native.
  */
 
+import { readFile, rename, writeFile } from "node:fs/promises";
 import type { AgentTool } from "@pit/agent-core";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { runRenameTransaction } from "../refactor-transaction.ts";
 import { resolveToCwd } from "../tools/path-utils.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "../tools/truncate.ts";
-import { ensureFileOpen, getOrCreateClient, killClient, sendRequest, waitForProjectLoaded } from "./client.ts";
+import {
+	ensureFileOpen,
+	getOrCreateClient,
+	killClient,
+	sendRequest,
+	syncContent,
+	waitForProjectLoaded,
+} from "./client.ts";
 import { getServerForFile } from "./config.ts";
 import { applyWorkspaceEdit } from "./edits.ts";
 import { sleep, throwIfAborted } from "./internal.ts";
@@ -23,6 +32,7 @@ import type {
 	CodeAction,
 	CodeActionContext,
 	Command,
+	Diagnostic,
 	DocumentSymbol,
 	Hover,
 	Location,
@@ -38,6 +48,7 @@ import {
 	extractHoverText,
 	fileToUri,
 	formatCodeAction,
+	formatDiagnostic,
 	formatDocumentSymbol,
 	formatLocation,
 	formatPathRelativeToCwd,
@@ -48,6 +59,7 @@ import {
 	type TextResult,
 	textResult,
 	uriToFile,
+	waitForDiagnostics,
 } from "./utils.ts";
 
 // =============================================================================
@@ -562,8 +574,61 @@ export function createLspToolDefinition(
 						if (!result) {
 							output = "Rename returned no edits";
 						} else if (apply !== false) {
-							const applied = await applyWorkspaceEdit(result, cwd);
-							output = `Applied rename:\n${applied.map((a) => `  ${a}`).join("\n")}`;
+							// Atomic rename transaction: snapshot affected files, apply, recheck
+							// diagnostics (versionOk so we wait for the FRESH push, not the stale
+							// one), and roll back if the edit introduced any NEW error. Degrades
+							// to a plain commit when no project-aware server / recheck is
+							// available (fail-safe — never reverts a wanted rename on a timeout).
+							// Escape hatch: PIT_NO_REFACTOR_TX (handled inside the transaction).
+							let applied: string[] = [];
+							const tx = await runRenameTransaction(result, {
+								captureDiagnosticsBaseline: async (uris) =>
+									new Map(uris.map((u) => [u, client.diagnostics.get(u)?.diagnostics ?? []] as const)),
+								readFile: (fileUri) => readFile(uriToFile(fileUri), "utf-8"),
+								applyWorkspaceEdit: async (e) => {
+									applied = await applyWorkspaceEdit(e, cwd);
+									return applied;
+								},
+								recheckDiagnostics: async (uris) => {
+									const out = new Map<string, Diagnostic[]>();
+									for (const u of uris) {
+										const file = uriToFile(u);
+										const minVersion = client.diagnosticsVersion;
+										let content: string;
+										try {
+											content = await readFile(file, "utf-8");
+										} catch {
+											continue;
+										}
+										await syncContent(client, file, content, signal);
+										const expectedDocumentVersion = client.openFiles.get(u)?.version;
+										out.set(
+											u,
+											await waitForDiagnostics(client, u, {
+												timeoutMs: 4000,
+												signal,
+												minVersion,
+												expectedDocumentVersion,
+											}),
+										);
+									}
+									return out;
+								},
+								restoreFiles: async (snaps) => {
+									for (const s of snaps) await writeFileAtomicLocal(uriToFile(s.uri), s.content);
+								},
+							});
+							if (tx.rolledBack) {
+								const errLines = tx.newErrors
+									.map(
+										(e) =>
+											`  ${formatDiagnostic(e.diagnostic, formatPathRelativeToCwd(uriToFile(e.uri), cwd))}`,
+									)
+									.join("\n");
+								output = `Rename ROLLED BACK — it introduced ${tx.newErrors.length} new error(s):\n${errLines}\nThe workspace was restored to its pre-rename state.`;
+							} else {
+								output = `Applied rename:\n${applied.map((a) => `  ${a}`).join("\n")}`;
+							}
 						} else {
 							const preview = formatWorkspaceEdit(result, cwd);
 							output = `Rename preview:\n${preview.map((p) => `  ${p}`).join("\n")}`;
@@ -602,4 +667,16 @@ export function createLspToolDefinition(
 
 export function createLspTool(cwd: string, options?: LspToolOptions): AgentTool<typeof lspSchema> {
 	return wrapToolDefinition(createLspToolDefinition(cwd, options));
+}
+
+/**
+ * Atomic write used by the rename transaction rollback: write a sibling tmp file
+ * then rename over the original, so a crash mid-restore can't leave a half-written
+ * file. Mirrors the session-manager writeFileAtomic idea without importing it
+ * (keeps the LSP tool off that dependency).
+ */
+async function writeFileAtomicLocal(filePath: string, content: string): Promise<void> {
+	const tmp = `${filePath}.tmp-${process.pid}`;
+	await writeFile(tmp, content, "utf-8");
+	await rename(tmp, filePath);
 }

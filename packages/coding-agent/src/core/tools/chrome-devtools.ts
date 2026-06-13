@@ -10,6 +10,7 @@ import type { ImageContent, TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { type Static, type TSchema, Type } from "typebox";
 import { getCurrentChromeDevtoolsManager } from "../chrome/chrome-devtools-manager.ts";
+import type { ElementToSourceResult } from "../chrome/element-to-source.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getTextOutput } from "./render-utils.ts";
 
@@ -480,6 +481,46 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 	});
 }
 
+const elementToSourceSchema = Type.Object(
+	{ selector: Type.String({ description: "CSS selector of the element whose event handlers to locate." }) },
+	{ additionalProperties: false },
+);
+
+function formatElementToSource(result: ElementToSourceResult): string {
+	const lines: string[] = [];
+	for (const listener of result.listeners) {
+		const where = `${listener.source.file}:${listener.source.line}:${listener.source.column}`;
+		const tag = listener.mapped ? "source" : "transpiled";
+		const name = listener.name ? ` ${listener.name}` : "";
+		const note = listener.note ? ` (${listener.note})` : "";
+		lines.push(`${listener.type} → ${where} [${tag}]${name}${note}`);
+	}
+	if (result.note) lines.push(result.note);
+	return lines.length > 0 ? lines.join("\n") : "(no handlers resolved)";
+}
+
+export function createChromeElementToSourceDefinition(): ToolDefinition<
+	typeof elementToSourceSchema,
+	ChromeToolDetails
+> {
+	return buildChromeTool({
+		name: "chrome_devtools_element_to_source",
+		activity: "navigation",
+		description:
+			"Map an element (CSS selector) to the source-code handler(s) bound to it: resolves each event listener to file:line in the ORIGINAL source via CDP getEventListeners + source maps. Degrades to the transpiled position when no dev source map exists.",
+		snippet: "Locate an element's handler in source",
+		guidelines: [
+			"Use after a click/interaction to find WHERE a handler lives instead of grepping.",
+			"Pass a specific selector (e.g. '#submit', 'button.save'); the first match is used.",
+			"mapped:false means no source map was available — the position is the transpiled bundle.",
+		],
+		schema: elementToSourceSchema,
+		run: async (mgr, input, signal) => {
+			return textResult(formatElementToSource(await mgr.elementToSource(input.selector, signal)));
+		},
+	});
+}
+
 // Definition-factory wrappers (registry expects (cwd, options) => ToolDef).
 // The registry derives each executable tool from these via wrapToolDefinition
 // (see buildTool in tools/index.ts), so no per-tool `create*Tool` wrapper is needed.
@@ -517,3 +558,5 @@ export const createChromeSnapshotToolDefinition = (_cwd: string, _o?: ChromeDevt
 	createChromeSnapshotDefinition();
 export const createChromeGetNetworkBodyToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
 	createChromeGetNetworkBodyDefinition();
+export const createChromeElementToSourceToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeElementToSourceDefinition();

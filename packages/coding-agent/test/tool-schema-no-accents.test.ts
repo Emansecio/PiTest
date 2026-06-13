@@ -80,6 +80,7 @@ describe("string-literal schema fields use Type.Enum (compact, not anyOf)", () =
 				"data_breakpoint_info",
 				"set_data_breakpoint",
 				"remove_data_breakpoint",
+				"watchpoint_bisect",
 				"continue",
 				"step_over",
 				"step_in",

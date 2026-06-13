@@ -21,10 +21,19 @@ export async function buildFileDigests(
 	paths: string[],
 	readContent: (path: string) => string | null | Promise<string | null>,
 	signal?: AbortSignal,
+	preSeed?: Record<string, string>,
 ): Promise<Record<string, string>> {
 	const entries = await Promise.all(
 		paths.map(async (path): Promise<readonly [string, string] | undefined> => {
 			if (signal?.aborted) return undefined;
+			// Cache hit: a precomputed outline (the living repo map) already holds this
+			// file's symbols — skip the disk read + parse. Still run it through
+			// redactForDisk so a seeded symbol can't bypass the credential scrub the
+			// from-disk path applies below (the digest is persisted to disk + remote).
+			const seeded = preSeed?.[path];
+			if (seeded !== undefined && seeded.length > 0) {
+				return [path, redactForDisk(seeded)] as const;
+			}
 			const content = await readContent(path);
 			if (!content || content.length > MAX_DIGEST_BYTES) return undefined;
 			const names = listDeclarations(content, path)

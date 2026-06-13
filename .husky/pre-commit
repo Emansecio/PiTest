@@ -30,9 +30,11 @@ if [ $RUN_BROWSER_SMOKE -eq 1 ]; then
   fi
 fi
 
-# Restage files that were previously staged and may have been modified by formatting
+# Restage files that were previously staged and may have been modified by formatting.
+# Skip gitignored paths (e.g. .pit/ runtime caches a test run may regenerate) so the
+# re-stage never fails on a file the project intentionally does not track.
 for file in $STAGED_FILES; do
-  if [ -f "$file" ]; then
+  if [ -f "$file" ] && ! git check-ignore -q "$file"; then
     git add "$file"
   fi
 done

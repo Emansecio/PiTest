@@ -213,6 +213,7 @@ import { type CalcToolOptions, createCalcTool, createCalcToolDefinition } from "
 import {
 	type ChromeDevtoolsToolOptions,
 	createChromeClickToolDefinition,
+	createChromeElementToSourceToolDefinition,
 	createChromeEvaluateToolDefinition,
 	createChromeFillToolDefinition,
 	createChromeGetNetworkBodyToolDefinition,
@@ -670,6 +671,12 @@ const TOOL_REGISTRY = {
 	},
 	chrome_devtools_get_network_body: {
 		definitionFactory: createChromeGetNetworkBodyToolDefinition,
+		optionsKey: "chromeDevtools",
+		readOnly: true,
+		coding: "chromeDevtools",
+	},
+	chrome_devtools_element_to_source: {
+		definitionFactory: createChromeElementToSourceToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",

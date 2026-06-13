@@ -33,6 +33,7 @@ import {
 import type { ToolDefinition } from "../extensions/types.ts";
 import { isEnoent } from "../lsp/internal.ts";
 import { formatPathRelativeToCwd } from "../lsp/utils.ts";
+import { formatWatchpointBisect, runWatchpointBisect, type WatchpointBisectDeps } from "../watchpoint-bisect.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -64,6 +65,7 @@ const DEBUG_ACTIONS = [
 	"data_breakpoint_info",
 	"set_data_breakpoint",
 	"remove_data_breakpoint",
+	"watchpoint_bisect",
 	"continue",
 	"step_over",
 	"step_in",
@@ -688,6 +690,40 @@ export function createDebugToolDefinition(
 					details.snapshot = response.snapshot;
 					details.dataBreakpoints = response.breakpoints;
 					return textResult(formatDataBreakpoints(response.breakpoints), details);
+				}
+				case "watchpoint_bisect": {
+					// "Who writes/corrupts X?" — arm a hardware write-watchpoint and capture
+					// every writer's stack. Pure-additive and degrades on its own (conditional
+					// breakpoint when the adapter lacks data breakpoints), so NO
+					// requireCapability — but it still needs a live session to inspect.
+					getActiveSessionSnapshot();
+					const expr = params.expression ?? params.name;
+					if (!expr) throw new Error("watchpoint_bisect requires expression or name");
+					const deps: WatchpointBisectDeps = {
+						supportsDataBreakpoints: () => dapSessionManager.getCapabilities()?.supportsDataBreakpoints === true,
+						dataBreakpointInfo: (n, vref, fid, sig, t) =>
+							dapSessionManager.dataBreakpointInfo(n, vref, fid, sig, t),
+						setDataBreakpoint: (id, at, c, hc, sig, t) =>
+							dapSessionManager.setDataBreakpoint(id, at, c, hc, sig, t),
+						continue: (sig, t) => dapSessionManager.continue(sig, t),
+						stackTrace: (n, sig, t) => dapSessionManager.stackTrace(n, sig, t),
+						scopes: (fid, sig, t) => dapSessionManager.scopes(fid, sig, t),
+						evaluate: (e, ctx, fid, sig, t) => dapSessionManager.evaluate(e, ctx, fid, sig, t),
+						setBreakpoint: (f, l, c, sig, t) => dapSessionManager.setBreakpoint(f, l, c, sig, t),
+						setFunctionBreakpoint: (nm, c, sig, t) => dapSessionManager.setFunctionBreakpoint(nm, c, sig, t),
+					};
+					const result = await runWatchpointBisect(deps, {
+						expression: expr,
+						variablesReference: params.variable_ref ?? params.scope_id,
+						frameId: params.frame_id,
+						accessType: params.access_type,
+						fallbackFile: params.file ? resolveToCwd(params.file, cwd) : undefined,
+						fallbackLine: params.line,
+						fallbackFunction: params.function,
+						timeoutMs,
+					});
+					details.snapshot = dapSessionManager.getActiveSession() ?? undefined;
+					return textResult(formatWatchpointBisect(result), details);
 				}
 				case "continue": {
 					const outcome = await dapSessionManager.continue(signal, timeoutMs);

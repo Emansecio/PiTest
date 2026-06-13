@@ -59,6 +59,7 @@ const TOOL_NOUNS: Record<string, string> = {
 	chrome_devtools_upload_file: "upload",
 	chrome_devtools_snapshot: "snapshot",
 	chrome_devtools_get_network_body: "response body",
+	chrome_devtools_element_to_source: "source map",
 	edit: "edit",
 	edit_v2: "edit",
 	ast_edit: "edit",

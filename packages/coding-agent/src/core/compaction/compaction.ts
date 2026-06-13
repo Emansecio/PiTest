@@ -6,7 +6,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@pit/ai";
 import { completeSimple } from "@pit/ai";
@@ -14,6 +14,7 @@ import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import { convertToLlm } from "../messages.ts";
 import { MESSAGE_RELAY_CUSTOM_TYPE } from "../messaging/types.ts";
+import { getLivingRepoMap, livingRepoMapToDigests } from "../repo-map/living-index.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
 import { crushJson } from "../tools/json-crush.ts";
 import { buildFileDigests, formatFileDigests } from "./file-digests.ts";
@@ -1480,6 +1481,27 @@ export async function compact(
 		? [...lists.modifiedFiles, ...lists.readFiles]
 		: lists.modifiedFiles;
 	if (digestPaths.length > 0) {
+		// Living repo map: a git-anchored incremental symbol index. Project it onto the
+		// touched files and pass as a pre-seed so anything it already indexed is NOT
+		// re-read/re-parsed here — the digest becomes a cache READ. Fail-open: any
+		// failure leaves preSeed undefined and buildFileDigests rebuilds from disk
+		// (output is identical; only the cost differs).
+		let preSeed: Record<string, string> | undefined;
+		try {
+			const { map } = await getLivingRepoMap(cwd ?? ".");
+			const mapDigests = livingRepoMapToDigests(map);
+			const seed: Record<string, string> = {};
+			for (const p of digestPaths) {
+				const relKey = relative(cwd ?? ".", isAbsolute(p) ? p : resolve(cwd ?? ".", p))
+					.split("\\")
+					.join("/");
+				const symbols = mapDigests[relKey];
+				if (symbols !== undefined) seed[p] = symbols;
+			}
+			preSeed = seed;
+		} catch {
+			preSeed = undefined;
+		}
 		const digests = await buildFileDigests(
 			digestPaths,
 			async (p) => {
@@ -1490,6 +1512,7 @@ export async function compact(
 				}
 			},
 			signal,
+			preSeed,
 		);
 		if (Object.keys(digests).length > 0) {
 			details.fileDigests = digests;
