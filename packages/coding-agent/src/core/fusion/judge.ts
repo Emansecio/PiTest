@@ -3,6 +3,24 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { JudgeAnalysis, PanelResult } from "./types.ts";
 
+const WRITER_SYSTEM =
+	"You are the writer in a model-fusion pipeline. Using the judge's analysis, write the single " +
+	"best answer to the task — take the best of each member rather than discarding one wholesale. " +
+	"Add a one-line rationale only when you override one member in favor of the other.";
+
+/** Build the synthesis (writer) context from the panel answers + judge analysis. */
+export function buildWriterContext(userPrompt: string, results: PanelResult[], analysis: JudgeAnalysis): Context {
+	const ans = results
+		.map((r, i) => `### Member ${i + 1} (${r.member.cli}:${r.member.model})\n${r.ok ? r.text : "[failed]"}`)
+		.join("\n\n");
+	const a = JSON.stringify(analysis, null, 2);
+	const content = `## Task\n${userPrompt}\n\n## Panel answers\n${ans}\n\n## Judge analysis\n${a}`;
+	return {
+		systemPrompt: WRITER_SYSTEM,
+		messages: [{ role: "user", content, timestamp: Date.now() }],
+	};
+}
+
 const SCHEMA_PROMPT_SUFFIX =
 	"\n\nYour final assistant message MUST be a single fenced ```json``` block matching the schema. No prose outside the fence.";
 

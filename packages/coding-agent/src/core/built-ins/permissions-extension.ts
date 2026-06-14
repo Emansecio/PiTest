@@ -19,10 +19,12 @@
  */
 
 import type { ExtensionAPI } from "../extensions/types.ts";
+import type { Orchestration } from "../fusion/types.ts";
 import {
 	describeToolAction,
 	normalizePermissionMode,
 	type PermissionChecker,
+	type PermissionMode,
 	type PermissionSettings,
 } from "../permissions/index.ts";
 
@@ -37,6 +39,29 @@ function permissionDisplayLabel(checker: PermissionChecker): string {
 	return checker.builtinsActive ? checker.mode : "no-rails";
 }
 
+/**
+ * Composite footer label that folds the Fusion orchestration facet over the base
+ * permission label: `fusion · <base>` when fusion is active, else just `<base>`.
+ */
+export function modeDisplayLabel(checker: PermissionChecker, orchestration: Orchestration): string {
+	const base = permissionDisplayLabel(checker);
+	return orchestration === "fusion" ? `fusion · ${base}` : base;
+}
+
+/**
+ * Pure 3-stop cycle over (orchestration × permission mode):
+ *   Plan → Auto → Fusion·Plan → Plan.
+ * Fusion always rides on plan-mode (read-only) in v1.
+ */
+export function nextFusionCycleState(
+	orchestration: Orchestration,
+	mode: PermissionMode,
+): { orchestration: Orchestration; mode: PermissionMode } {
+	if (orchestration === "fusion") return { orchestration: "solo", mode: "plan" }; // Fusion·Plan → Plan
+	if (mode === "plan") return { orchestration: "solo", mode: "auto" }; // Plan → Auto
+	return { orchestration: "fusion", mode: "plan" }; // Auto → Fusion·Plan
+}
+
 export interface PermissionsExtensionOptions {
 	checker: PermissionChecker;
 	/** Optional callback fired whenever a decision is made (for audit/logging). */
@@ -49,7 +74,7 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 
 		pi.on("session_start", (_event, ctx) => {
 			if (!ctx.hasUI) return;
-			ctx.ui.setStatus(STATUS_KEY, `permissions: ${permissionDisplayLabel(checker)}`);
+			ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, pi.getOrchestration())}`);
 		});
 
 		pi.on("tool_call", (event, _ctx) => {
@@ -82,19 +107,21 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 					return;
 				}
 				checker.updateMode(mode);
-				ctx.ui.setStatus(STATUS_KEY, `permissions: ${permissionDisplayLabel(checker)}`);
+				ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, pi.getOrchestration())}`);
 				ctx.ui.notify(`Permission mode → ${mode}`, "info");
 			},
 		});
 
-		// Cycle between plan and auto (bound to a keybinding).
+		// 3-stop cycle over orchestration × mode: plan → auto → fusion·plan (bound to a keybinding).
 		pi.registerCommand("permission-cycle", {
-			description: "Cycle permission mode between plan and auto",
+			description: "Cycle mode: plan → auto → fusion·plan",
 			async handler(_args, ctx) {
-				const next = checker.mode === "auto" ? "plan" : "auto";
-				checker.updateMode(next);
-				ctx.ui.setStatus(STATUS_KEY, `permissions: ${permissionDisplayLabel(checker)}`);
-				ctx.ui.notify(`Permission mode → ${next}`, "info");
+				const current = pi.getOrchestration();
+				const next = nextFusionCycleState(current, checker.mode);
+				checker.updateMode(next.mode);
+				pi.setOrchestration(next.orchestration);
+				ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, next.orchestration)}`);
+				ctx.ui.notify(`Mode → ${next.orchestration === "fusion" ? "fusion · " : ""}${next.mode}`, "info");
 			},
 		});
 	};

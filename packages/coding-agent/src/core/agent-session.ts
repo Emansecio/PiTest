@@ -16,10 +16,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent, ToolResultMessage } from "@pit/ai";
+import type { AssistantMessage, ImageContent, Message, Model, TextContent, ToolResultMessage, Usage } from "@pit/ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	completeSimple,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	isEntryCooledDown,
@@ -109,6 +110,9 @@ import {
 	loadFrequentFilesSnapshot,
 	saveFrequentFilesSnapshot,
 } from "./frequent-files.js";
+import { runPanelMember } from "./fusion/cli-runner.ts";
+import { buildJudgeContext, buildWriterContext, parseJudgeOutput } from "./fusion/judge.ts";
+import { runFusionTurn } from "./fusion/orchestrator.ts";
 import type { Orchestration } from "./fusion/types.ts";
 import { readGitBranch } from "./git-state.js";
 import { GoalManager, type GoalSnapshot, type GoalState, setCurrentGoalManager } from "./goal/goal-manager.ts";
@@ -433,6 +437,8 @@ export class AgentSession {
 
 	// Fusion orchestration facet (session-local; resets to "solo" on a new session in v1).
 	private _orchestration: Orchestration = "solo";
+	// In-flight Fusion turn (panel fan-out + judge + writer). Aborted by interrupt().
+	private _fusionAbort: AbortController | undefined = undefined;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -3115,6 +3121,15 @@ export class AgentSession {
 				}
 			}
 
+			// Fusion·Plan: route the turn to the panel+synthesizer unless it can't run (then fall through to solo).
+			if (this._orchestration === "fusion" && !text.startsWith("/")) {
+				const handled = await this._runFusionTurn(text);
+				if (handled) {
+					preflightResult?.(true);
+					return;
+				}
+			}
+
 			// Emit input event for extension interception (before skill/template expansion)
 			let currentText = text;
 			let currentImages = options?.images;
@@ -3589,6 +3604,7 @@ export class AgentSession {
 		this.abortBash();
 		this.abortCompaction();
 		this.abortBranchSummary();
+		this.abortFusion();
 		this.agent.abort();
 	}
 
@@ -4003,6 +4019,116 @@ export class AgentSession {
 	 */
 	abortBranchSummary(): void {
 		this._branchSummaryAbortController?.abort();
+	}
+
+	/**
+	 * Cancel an in-flight Fusion turn (panel subprocesses + judge/writer LLM calls).
+	 * The signal is wired into runPanelMember (taskkill on win32) and the judge/writer
+	 * completeSimple calls, so this reaps the whole fan-out.
+	 */
+	abortFusion(): void {
+		this._fusionAbort?.abort();
+	}
+
+	/** Concatenate the visible text blocks of an assistant message (mirrors coordinator/spawn extractAssistantText). */
+	private _assistantText(message: AssistantMessage): string {
+		return message.content
+			.filter((block): block is TextContent => block.type === "text")
+			.map((block) => block.text)
+			.join("\n")
+			.trim();
+	}
+
+	/**
+	 * Inject a synthetic assistant message into the transcript: render it (message_start/
+	 * message_end pair, like the inter-agent relay), persist it as a SessionMessageEntry, and
+	 * push it into agent state so it's in context for the next turn. Used by Fusion to emit the
+	 * writer's synthesized answer as the turn's assistant reply (no live LLM stream owns it).
+	 */
+	private _emitSyntheticAssistant(text: string): void {
+		const model = this.model;
+		const zeroUsage: Usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const appMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: model?.api ?? "anthropic-messages",
+			provider: model?.provider ?? "anthropic",
+			model: model?.id ?? "fusion",
+			usage: zeroUsage,
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		this.agent.state.messages.push(appMessage);
+		this.sessionManager.appendMessage(appMessage);
+		this._lastAssistantMessage = appMessage;
+		this._emit({ type: "message_start", message: appMessage });
+		this._emit({ type: "message_end", message: appMessage });
+	}
+
+	/**
+	 * Run a Fusion·Plan turn: fan out the panel, judge, synthesize. Returns true if it handled
+	 * the turn; false → the caller falls back to a normal solo turn. Never throws (failures
+	 * degrade to false). The whole fan-out is cancellable via abortFusion() / interrupt().
+	 */
+	private async _runFusionTurn(text: string): Promise<boolean> {
+		const model = this.model;
+		if (!model) return false;
+		const settings = this.settingsManager.getFusionSettings();
+		if (settings.panel.length < 2) {
+			this._emitSyntheticAssistant(
+				"Fusion panel not configured (need 2 models). Run /fusion. Falling back to a single-model turn.",
+			);
+			return false;
+		}
+		const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+		this._fusionAbort = new AbortController();
+		try {
+			const outcome = await runFusionTurn({
+				userPrompt: text,
+				panel: settings.panel,
+				staggerSameCliMs: settings.staggerSameCliMs,
+				signal: this._fusionAbort.signal,
+				runMember: (member) =>
+					runPanelMember(member, {
+						prompt: text,
+						cwd: this._cwd,
+						timeoutMs: settings.timeoutMs,
+						signal: this._fusionAbort?.signal,
+					}),
+				runJudge: async (userPrompt, results) => {
+					const out = await completeSimple(model, buildJudgeContext(userPrompt, results), {
+						apiKey,
+						headers,
+						signal: this._fusionAbort?.signal,
+					});
+					const parsed = parseJudgeOutput(this._assistantText(out));
+					if (parsed.ok) return parsed.value;
+					return { consensus: [], contradictions: [], partialCoverage: [], uniqueInsights: [], blindSpots: [] };
+				},
+				writer: async (userPrompt, results, analysis) => {
+					const out = await completeSimple(model, buildWriterContext(userPrompt, results, analysis), {
+						apiKey,
+						headers,
+						signal: this._fusionAbort?.signal,
+					});
+					return this._assistantText(out);
+				},
+			});
+			if (!outcome.handled) return false;
+			this._emitSyntheticAssistant(outcome.text);
+			return true;
+		} catch {
+			return false;
+		} finally {
+			this._fusionAbort = undefined;
+		}
 	}
 
 	/**
