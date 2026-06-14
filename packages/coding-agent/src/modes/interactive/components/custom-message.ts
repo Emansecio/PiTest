@@ -1,9 +1,16 @@
 import type { TextContent } from "@pit/ai";
 import type { Component } from "@pit/tui";
-import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@pit/tui";
+import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text, TruncatedText } from "@pit/tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+
+/**
+ * Fusion flow lines (panel dispatch / member results / judge / writer) render
+ * as a clean muted timeline: one plain line each, no purple box, no spacer, no
+ * `[customType]` header — distinct from the default custom-message styling.
+ */
+const FUSION_FLOW_CUSTOM_TYPE = "pi.fusion-flow";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -27,7 +34,10 @@ export class CustomMessageComponent extends Container {
 		this.customRenderer = customRenderer;
 		this.markdownTheme = markdownTheme;
 
-		this.addChild(new Spacer(1));
+		// Fusion-flow lines are a compact timeline: no leading spacer per line.
+		if (message.customType !== FUSION_FLOW_CUSTOM_TYPE) {
+			this.addChild(new Spacer(1));
+		}
 
 		// Create box with purple background (used for default rendering)
 		this.box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
@@ -55,6 +65,15 @@ export class CustomMessageComponent extends Container {
 		}
 		this.removeChild(this.box);
 
+		// Fusion-flow timeline: a single muted line, width-truncated, no box/header/spacer.
+		if (this.message.customType === FUSION_FLOW_CUSTOM_TYPE) {
+			const line = this.extractText();
+			const component = new TruncatedText(theme.fg("muted", line));
+			this.customComponent = component;
+			this.addChild(component);
+			return;
+		}
+
 		// Try custom renderer first - it handles its own styling
 		if (this.customRenderer) {
 			try {
@@ -79,21 +98,22 @@ export class CustomMessageComponent extends Container {
 		this.box.addChild(new Text(label, 0, 0));
 		this.box.addChild(new Spacer(1));
 
-		// Extract text content
-		let text: string;
-		if (typeof this.message.content === "string") {
-			text = this.message.content;
-		} else {
-			text = this.message.content
-				.filter((c): c is TextContent => c.type === "text")
-				.map((c) => c.text)
-				.join("\n");
-		}
+		const text = this.extractText();
 
 		this.box.addChild(
 			new Markdown(text, 0, 0, this.markdownTheme, {
 				color: (text: string) => theme.fg("customMessageText", text),
 			}),
 		);
+	}
+
+	private extractText(): string {
+		if (typeof this.message.content === "string") {
+			return this.message.content;
+		}
+		return this.message.content
+			.filter((c): c is TextContent => c.type === "text")
+			.map((c) => c.text)
+			.join("\n");
 	}
 }
