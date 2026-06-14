@@ -12,6 +12,7 @@
 - Fixed tool-call preflight to stop preparing sibling tool calls after the run is aborted ([#4276](https://github.com/earendil-works/pit/issues/4276)).
 - Fixed tail truncation for oversized single-line output that ends with a trailing newline ([#4715](https://github.com/earendil-works/pit/issues/4715)).
 - Fixed Windows Node execution environment command spawns to hide helper console windows from background processes ([#4699](https://github.com/earendil-works/pit/issues/4699)).
+- Fixed the tool-call partial-result update flush to use `Promise.allSettled`, so a rejected fire-and-forget update cannot turn a successful tool call into a thrown error.
 
 ## [0.75.3] - 2026-05-18
 

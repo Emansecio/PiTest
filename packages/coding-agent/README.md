@@ -634,6 +634,23 @@ pit --thinking high "Solve this complex problem"
 | `PIT_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
+Feature kill-switches (all default-ON; set the variable to `1`/`true`/`yes` to disable):
+
+| Variable | Disables |
+|----------|----------|
+| `PIT_NO_GROUNDING` | Symbol grounding — pre-exec resolution of a navigation `symbol`/breakpoint name against the repo-map index + LSP workspace symbols |
+| `PIT_NO_IMPORT_GROUNDING` | Import grounding — pre-exec check that a relative import specifier in a `write`/`edit` resolves on disk |
+| `PIT_NO_PATH_GROUNDING` | Path grounding — pre-exec check that a `read`/`edit` target path exists |
+| `PIT_NO_PATTERN_GROUNDING` | Pattern grounding — pre-exec structural balance-check of a `grep`/`find` regex/glob |
+| `PIT_NO_EDIT_PRECONDITION` | The `edit` dry-run precondition check |
+| `PIT_NO_CODE_MODE` | The code-mode execution path |
+| `PIT_NO_DEBUG_VERIFY` | The debug-driven verification gate |
+| `PIT_NO_REFACTOR_TX` | The refactor-transaction staged multi-file edit primitive |
+| `PIT_NO_LIVING_REPO_MAP` | The git-anchored incremental repo-map index |
+| `PIT_NO_REPEATING_PATTERN` | The repeating-pattern (multi-tool cycle) doom-loop detector |
+| `PIT_NO_STRUCTURAL_COMPACTION` | Structural-only compaction |
+| `PIT_NO_SECRET_REDACT` | Secret redaction on egress |
+
 ---
 
 ## Contributing & Development

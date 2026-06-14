@@ -15,17 +15,20 @@ Context window management strategy. When accumulated tokens approach the context
 A modular behavioral feature implemented as an extension factory (like `permissions-extension.ts`). Hooks into the agent session pipeline via events (`tool_call`, `afterToolCall`, `before_agent_start`, `message_end`). Can be enabled/disabled without modifying the core loop.
 
 ### Read Guard
-A built-in extension that blocks `edit` and `write` tool calls on files not previously read in the current session. Prevents the model from generating diffs against hallucinated file content. Read tracking resets after compaction.
+A built-in extension that blocks `edit` and `write` tool calls on files not previously read in the current session. Prevents the model from generating diffs against hallucinated file content. Across a compaction boundary the read set is replaced by a `(mtimeMs, size)` stat snapshot: a post-compaction edit/write is allowed when the on-disk stat still matches (no forced re-read of unchanged files) and blocked with a "re-read it" reason when it drifted. A `write` that would overwrite a file only summarized across compaction additionally gets a fire-once warning (re-issue to proceed).
+
+### Grounding Firewall
+A family of pre-execution guards that ground a tool call's REFERENCES against reality before the call runs — siblings of the Read Guard. Four layers, each fail-open and opt-out via a `PIT_NO_*` env var: **symbol grounding** (a navigation `symbol` / breakpoint name checked against the living repo-map index + LSP workspace symbols — auto-fixed to the closest match or blocked with candidates); **import grounding** (a relative import specifier in a `write`/`edit` resolved against the filesystem, blocked with close filenames when it does not exist); **path grounding** (a `read`/`edit` target path resolved against the filesystem, blocked with candidates when missing); **pattern grounding** (a `grep`/`find` regex/glob structurally balance-checked so a malformed pattern is caught before it silently matches nothing — a malformed glob reads as a false "not found"). All four are block-only advice with a fire-once escape: re-issuing the identical call runs it.
 
 ### Permission Mode
-The session-wide capability tier for tool execution, on a single axis of increasing permissiveness. Three modes: **plan** (read-only — `bash`/`edit`/`write` blocked); **auto** (default — writes enabled, but built-in deny rules are hard-blocked: sensitive paths like `.env`/`~/.ssh`, dangerous commands like `rm -rf /`/fork bomb — never prompted); **unsafe** (writes enabled, builtin floor OFF — a no-rails run for authorized targets). `auto` is a *guarded* default; `unsafe` is the explicit opt-out, surfaced loudly (footer alert) so it is never on by accident. `unsafe` only drops the *builtin* defaults — user-authored `denyPaths`/`denyTools`/`denyCommands` are intentional and apply in every mode (so `unsafe` ≡ `auto` + `disableBuiltinDefaults`). There is no separate sandbox axis — containment is deny rules, not a cwd jail. Switched via `--permission-mode`/`--unsafe` flags or `/permission-mode`/`/unsafe` commands.
-_Avoid_: yolo (removed — `unsafe` is the honest name for the no-rails tier), default (removed mode), approval-policy/sandbox-policy (codex's two axes — deliberately collapsed to one).
+The session-wide capability for tool execution, on a single axis. The code exposes two modes (`PermissionMode = "auto" | "plan"`): **plan** (read-only — `bash`/`edit`/`write` blocked); **auto** (default — writes enabled, but built-in deny rules are hard-blocked: sensitive paths like `.env`/`~/.ssh`, dangerous commands like `rm -rf /`/fork bomb — never prompted). `auto` is a *guarded* default. Dropping the builtin deny floor is `disableBuiltinDefaults`, not a third mode. User-authored `denyPaths`/`denyTools`/`denyCommands` are intentional and apply in every mode. There is no separate sandbox axis — containment is deny rules, not a cwd jail. Switched via the `--permission-mode` flag or `/permission-mode` command.
+_Avoid_: yolo (removed); unsafe (described as a third tier in ADR-0006 but never landed — the code is `auto | plan`; a no-rails run is `auto` + `disableBuiltinDefaults`); default (removed mode); approval-policy/sandbox-policy (codex's two axes — deliberately collapsed to one).
 
 ### Diff Limit
 A built-in extension that pauses execution and requests user confirmation when a single turn produces more than a configured number of changed lines (default: 300). Prevents over-engineering and unintended large-scale changes.
 
 ### Doom Loop
-A pattern where the model retries the same failing tool call repeatedly without changing approach. Detected by `ToolCallStats` via consecutive identical (toolName, argsFingerprint) entries in the ring buffer. The harness escalates: reminder (3x) → pause (5x) → abort (8x).
+A pattern where the model retries the same failing tool call repeatedly without changing approach. Detected by `ToolCallStats` via consecutive identical (toolName, argsFingerprint) entries in the ring buffer; a complementary repeating-pattern detector catches a multi-tool CYCLE repeated at the tail (e.g. `[read,edit,bash]` run four times) that the consecutive-identical check misses. The harness escalates: reminder (3x) → pause (5x) → abort (8x).
 
 ### Engineering Style
 Behavioral guidelines injected into the system prompt that bias the model toward surgical, minimal changes. Based on Karpathy guidelines: think before coding, simplicity first, surgical changes, goal-driven execution.
@@ -39,8 +42,8 @@ Per-session telemetry that counts calls/errors per tool and maintains a ring buf
 ## Flagged ambiguities
 
 - **"plan"** is overloaded: a **Permission Mode** (read-only enforcement) *and* a **model role** (`--plan` / `--role plan` — which model answers a planning turn). Unrelated axes — keep distinct: "plan mode" = permissions, "plan role" = model selection.
-- **"yolo"** was used as an alias for `auto`, but connoted *no safety net* while `auto` keeps a builtin deny floor. Resolved: yolo removed; the no-rails tier is the explicit **unsafe** mode (honest name), not a misnamed alias.
-- **"auto"** ≠ codex's `danger-full-access`. Pit's `auto` is guarded (builtins enforced); the codex-equivalent full-access is the **unsafe** mode.
+- **"yolo"** was used as an alias for `auto`, but connoted *no safety net* while `auto` keeps a builtin deny floor. Resolved: yolo removed. The code's `PermissionMode` is `auto | plan` only; a no-rails run is `auto` + `disableBuiltinDefaults`, not a separate mode. ADR-0006's "unsafe" third tier was proposed but never landed — treat that ADR as stale on this point.
+- **"auto"** ≠ codex's `danger-full-access`. Pit's `auto` is guarded (builtins enforced); the codex-equivalent full-access is `auto` + `disableBuiltinDefaults`.
 
 ## Interactive TUI Rendering
 
@@ -63,3 +66,4 @@ The agent emits multiple visible `text` blocks across a turn: intermediate **nar
 3. **The model must prove it knows file state before mutating it.** Read guard enforces this at runtime.
 4. **Escalation over termination.** The harness warns before blocking, blocks before aborting.
 5. **Token budget is implicit.** Context window management happens via compaction triggers, not explicit per-turn budgets.
+6. **References are grounded before they persist.** A symbol, import path, file path, or search pattern in a tool call is checked against reality (repo-map / LSP / filesystem / structural balance) before the call runs — fail-open, advice-only, re-issue to override. The Grounding Firewall is the pre-execution counterpart to the Read Guard.

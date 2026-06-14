@@ -11,6 +11,8 @@
 
 - Fixed OpenAI-compatible `streamSimple()` requests to stop sending model-derived default output token caps, avoiding context-window reservation failures on servers such as vLLM while preserving explicit `maxTokens` and required Anthropic `max_tokens` handling ([#4675](https://github.com/earendil-works/pit/issues/4675)).
 - Fixed OpenAI prompt cache keys to clamp session-derived values to the 64-character API limit across OpenAI Responses, Chat Completions, Codex Responses, and Azure OpenAI Responses ([#4720](https://github.com/earendil-works/pit/issues/4720)).
+- Fixed `parseRetryAfter` to treat a present-but-empty `retry-after-ms` header as absent instead of parsing it as `0ms` — an empty header otherwise short-circuited a real `retry-after` and retried immediately against a 429/5xx.
+- Fixed the Bun `/proc/self/environ` fallback (`getProcEnv`) to check `typeof process` before dereferencing `process.versions`, so the guard against a missing `process` actually protects.
 
 ## [0.75.3] - 2026-05-18
 

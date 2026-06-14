@@ -6,6 +6,11 @@
 
 - Removed the package-level development watch script now that the root TypeScript check validates strip-only-compatible sources.
 
+### Fixed
+
+- Fixed bracketed-paste scanning to search only from near the previous tail instead of re-scanning the whole accumulated buffer on every chunk (`O(N²)` → `O(N)` over a byte-at-a-time paste).
+- Fixed the undo stack to cap its snapshot history defensively so a long-lived component (e.g. the chat input) cannot grow it without bound.
+
 ## [0.75.3] - 2026-05-18
 
 ## [0.75.2] - 2026-05-18
