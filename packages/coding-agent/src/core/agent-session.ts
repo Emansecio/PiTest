@@ -4074,6 +4074,28 @@ export class AgentSession {
 	}
 
 	/**
+	 * Emit a display-only Fusion flow line into the transcript (panel dispatch, each member's
+	 * result, judge summary, writer start). Mirrors the inter-agent relay: a `custom` message
+	 * with `display: true` renders in the chat but is NOT fed to the model's context. A render
+	 * failure must never break the Fusion turn.
+	 */
+	private _emitFusionLine(content: string): void {
+		const line = {
+			role: "custom" as const,
+			customType: "pi.fusion-flow",
+			content,
+			display: true,
+			timestamp: Date.now(),
+		};
+		try {
+			this._emit({ type: "message_start", message: line });
+			this._emit({ type: "message_end", message: line });
+		} catch {
+			// flow-line render failure is non-fatal
+		}
+	}
+
+	/**
 	 * Run a Fusion·Plan turn: fan out the panel, judge, synthesize. Returns true if it handled
 	 * the turn; false → the caller falls back to a normal solo turn. Never throws (failures
 	 * degrade to false). The whole fan-out is cancellable via abortFusion() / interrupt().
@@ -4098,35 +4120,50 @@ export class AgentSession {
 		};
 		try {
 			this._emit({ type: "fusion_phase", label: `Fusion · panel running (${panelDesc})…` });
+			this._emitFusionLine(`⚡ Fusion · panel dispatched (read-only) → ${panelDesc}`);
 			const outcome = await runFusionTurn({
 				userPrompt: text,
 				panel: settings.panel,
 				staggerSameCliMs: settings.staggerSameCliMs,
 				signal: this._fusionAbort.signal,
 				runMember: async (member) => {
+					const started = Date.now();
 					const r = await runPanelMember(member, {
 						prompt: text,
 						cwd: this._cwd,
 						timeoutMs: settings.timeoutMs,
 						signal: this._fusionAbort?.signal,
 					});
+					const secs = ((Date.now() - started) / 1000).toFixed(1);
 					memberStatus.set(`${member.cli}/${member.model}`, r.ok ? "✓" : "✗");
 					this._emit({ type: "fusion_phase", label: panelLabel() });
+					this._emitFusionLine(
+						r.ok
+							? `   ✓ ${member.cli}:${member.model} · ${secs}s · ${r.text.length} chars`
+							: `   ✗ ${member.cli}:${member.model} · ${secs}s · ${r.error ?? "failed"}`,
+					);
 					return r;
 				},
 				runJudge: async (userPrompt, results) => {
 					this._emit({ type: "fusion_phase", label: "Fusion · judging…" });
+					this._emitFusionLine(`⚖ Fusion · judging with ${model.id}…`);
 					const out = await completeSimple(model, buildJudgeContext(userPrompt, results), {
 						apiKey,
 						headers,
 						signal: this._fusionAbort?.signal,
 					});
 					const parsed = parseJudgeOutput(this._assistantText(out));
-					if (parsed.ok) return parsed.value;
-					return { consensus: [], contradictions: [], partialCoverage: [], uniqueInsights: [], blindSpots: [] };
+					const analysis = parsed.ok
+						? parsed.value
+						: { consensus: [], contradictions: [], partialCoverage: [], uniqueInsights: [], blindSpots: [] };
+					this._emitFusionLine(
+						`   consensus ${analysis.consensus.length} · contradictions ${analysis.contradictions.length} · partial ${analysis.partialCoverage.length} · unique ${analysis.uniqueInsights.length} · blind-spots ${analysis.blindSpots.length}`,
+					);
+					return analysis;
 				},
 				writer: async (userPrompt, results, analysis) => {
 					this._emit({ type: "fusion_phase", label: "Fusion · writing…" });
+					this._emitFusionLine(`✍ Fusion · synthesizing final answer with ${model.id}…`);
 					const out = await completeSimple(model, buildWriterContext(userPrompt, results, analysis), {
 						apiKey,
 						headers,
