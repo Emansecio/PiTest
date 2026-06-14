@@ -67,6 +67,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import { detectCli, inferCli } from "../../core/fusion/cli-runner.ts";
 import { parseTokenBudget } from "../../core/goal/goal-manager.ts";
 
 /**
@@ -2558,6 +2559,11 @@ export class InteractiveMode {
 			);
 			return true;
 		}
+		if (text === "/fusion") {
+			this.editor.setText("");
+			await this.handleFusionCommand();
+			return true;
+		}
 		if (text === "/name" || text.startsWith("/name ")) {
 			this.handleNameCommand(text);
 			this.editor.setText("");
@@ -4553,6 +4559,44 @@ export class InteractiveMode {
 		} catch {
 			// Ignore auth lookup failures for warning-only checks.
 		}
+	}
+
+	private async handleFusionCommand(): Promise<void> {
+		const clis: Array<"codex" | "claude"> = [];
+		if (detectCli("codex")) clis.push("codex");
+		if (detectCli("claude")) clis.push("claude");
+		if (clis.length === 0) {
+			this.showError("Fusion needs the codex and/or claude CLI on PATH.");
+			return;
+		}
+		const providers = new Set<string>();
+		if (clis.includes("claude")) providers.add("anthropic");
+		if (clis.includes("codex")) providers.add("openai-codex");
+		const candidates = this.session.modelRegistry.getAll().filter((m) => providers.has(m.provider));
+		if (candidates.length === 0) {
+			this.showError("No installed-CLI models available for Fusion.");
+			return;
+		}
+		const labels = candidates.map((m) => `${m.id}  (${inferCli(m.provider)})`);
+
+		const pickA = await this.showExtensionSelector("Fusion · slot A — pick model", labels);
+		if (pickA === undefined) return;
+		const pickB = await this.showExtensionSelector("Fusion · slot B — pick model", labels);
+		if (pickB === undefined) return;
+
+		const modelA = candidates[labels.indexOf(pickA)];
+		const modelB = candidates[labels.indexOf(pickB)];
+		const cliA = inferCli(modelA.provider);
+		const cliB = inferCli(modelB.provider);
+		if (cliA === undefined || cliB === undefined) {
+			this.showError("Selected model is not driven by an installed CLI.");
+			return;
+		}
+		this.settingsManager.setFusionPanel([
+			{ cli: cliA, model: modelA.id },
+			{ cli: cliB, model: modelB.id },
+		]);
+		this.showStatus(`Fusion panel: ${modelA.id} + ${modelB.id}`);
 	}
 
 	private showModelSelector(initialSearchInput?: string): void {
