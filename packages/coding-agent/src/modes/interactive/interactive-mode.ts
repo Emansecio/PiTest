@@ -110,7 +110,7 @@ import {
 	setCurrentUserInputBus,
 	type UserInputBus,
 } from "../../core/user-input-bus.ts";
-import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
+import { compareVersions, getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { type ClipboardImage, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { isOfflineMode } from "../../utils/env-flags.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
@@ -465,6 +465,7 @@ export class InteractiveMode {
 		["/session", (s) => s.handleSessionCommand()],
 		["/cache-status", (s) => s.handleCacheStatusCommand()],
 		["/diagnostics", (s) => s.handleDiagnosticsCommand()],
+		["/changelog", (s) => s.handleChangelogCommand()],
 		["/hotkeys", (s) => s.handleHotkeysCommand()],
 		["/login", (s) => s.showOAuthSelector("login")],
 		["/logout", (s) => s.showOAuthSelector("logout")],
@@ -5457,6 +5458,31 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	// `/changelog` — render the most recent changelog entries on demand. Unlike the
+	// startup box (which only shows entries newer than the last-seen version), this
+	// always shows the latest entries so the command is useful at any time.
+	private handleChangelogCommand(): void {
+		const entries = parseChangelog(getChangelogPath());
+		if (entries.length === 0) {
+			this.showStatus("No changelog available.");
+			return;
+		}
+		const latest = entries
+			.slice()
+			.sort((a, b) => compareVersions(b, a))
+			.slice(0, 5)
+			.map((e) => e.content)
+			.join("\n\n");
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(mutedBorderRule());
+		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Markdown(latest.trim(), 1, 0, this.getMarkdownThemeWithSettings()));
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(mutedBorderRule());
+		this.ui.requestRender();
+	}
+
 	private handleTTSRCommand(rest: string): void {
 		const parts = rest.split(/\s+/).filter((p) => p.length > 0);
 		const sub = parts[0];
@@ -5693,7 +5719,7 @@ export class InteractiveMode {
 | \`${cycleThinkingLevel}\` | Cycle thinking level |
 | \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
 | \`${selectModel}\` | Open model selector |
-| \`${cyclePermission}\` | Cycle permission mode (plan/auto) |
+| \`${cyclePermission}\` | Cycle mode (plan → auto → fusion) |
 | \`${expandTools}\` | Toggle tool output expansion |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${externalEditor}\` | Edit message in external editor |

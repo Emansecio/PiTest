@@ -83,7 +83,7 @@ export const KEYBINDINGS = {
 		description: "Cycle to previous model",
 	},
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
-	"app.permission.cycle": { defaultKeys: "alt+p", description: "Cycle permission mode (plan/auto)" },
+	"app.permission.cycle": { defaultKeys: "alt+p", description: "Cycle mode (plan → auto → fusion)" },
 	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
