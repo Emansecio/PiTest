@@ -16,7 +16,16 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, TextContent, ToolResultMessage, Usage } from "@pit/ai";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	Model,
+	TextContent,
+	ToolResultMessage,
+	Usage,
+} from "@pit/ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -4096,6 +4105,46 @@ export class AgentSession {
 	}
 
 	/**
+	 * Stream the Fusion writer's synthesized answer as a normal assistant message
+	 * (message_start → message_update deltas → message_end) so it renders token-by-token
+	 * like a regular turn, and persist it into agent state + the session log for context.
+	 * Returns the final answer text.
+	 */
+	private async _streamFusionWriter(
+		context: Context,
+		opts: { apiKey?: string; headers?: Record<string, string>; signal?: AbortSignal },
+	): Promise<string> {
+		const model = this.model;
+		if (!model) return "";
+		const stream = streamSimple(model, context, opts);
+		let started = false;
+		const ensureStart = (partial: AssistantMessage): void => {
+			if (started) return;
+			started = true;
+			this._emit({ type: "message_start", message: partial });
+		};
+		try {
+			for await (const ev of stream) {
+				if (ev.type === "start") {
+					ensureStart(ev.partial);
+				} else if (ev.type === "text_start" || ev.type === "text_delta" || ev.type === "text_end") {
+					ensureStart(ev.partial);
+					this._emit({ type: "message_update", message: ev.partial, assistantMessageEvent: ev });
+				}
+			}
+		} catch {
+			// Whatever the stream produced (or the error message it encoded) is finalized below.
+		}
+		const final = await stream.result();
+		ensureStart(final);
+		this.agent.state.messages.push(final);
+		this.sessionManager.appendMessage(final);
+		this._lastAssistantMessage = final;
+		this._emit({ type: "message_end", message: final });
+		return this._assistantText(final);
+	}
+
+	/**
 	 * Run a Fusion·Plan turn: fan out the panel, judge, synthesize. Returns true if it handled
 	 * the turn; false → the caller falls back to a normal solo turn. Never throws (failures
 	 * degrade to false). The whole fan-out is cancellable via abortFusion() / interrupt().
@@ -4132,48 +4181,72 @@ export class AgentSession {
 						prompt: text,
 						cwd: this._cwd,
 						timeoutMs: settings.timeoutMs,
+						lean: settings.lean,
 						signal: this._fusionAbort?.signal,
 					});
 					const secs = ((Date.now() - started) / 1000).toFixed(1);
 					memberStatus.set(`${member.cli}/${member.model}`, r.ok ? "✓" : "✗");
 					this._emit({ type: "fusion_phase", label: panelLabel() });
+					const err = (r.error ?? "failed").slice(0, 160);
 					this._emitFusionLine(
 						r.ok
 							? `   ✓ ${member.cli}:${member.model} · ${secs}s · ${r.text.length} chars`
-							: `   ✗ ${member.cli}:${member.model} · ${secs}s · ${r.error ?? "failed"}`,
+							: `   ✗ ${member.cli}:${member.model} · ${secs}s · ${err}`,
 					);
 					return r;
 				},
 				runJudge: async (userPrompt, results) => {
 					this._emit({ type: "fusion_phase", label: "Fusion · judging…" });
 					this._emitFusionLine(`⚖ Fusion · judging with ${model.id}…`);
-					const out = await completeSimple(model, buildJudgeContext(userPrompt, results), {
-						apiKey,
-						headers,
-						signal: this._fusionAbort?.signal,
-					});
-					const parsed = parseJudgeOutput(this._assistantText(out));
+					const judgeOnce = async () => {
+						const out = await completeSimple(model, buildJudgeContext(userPrompt, results), {
+							apiKey,
+							headers,
+							signal: this._fusionAbort?.signal,
+						});
+						return parseJudgeOutput(this._assistantText(out));
+					};
+					let parsed = await judgeOnce();
+					// One retry — models often leak prose outside the JSON fence on the first try.
+					if (!parsed.ok) parsed = await judgeOnce();
 					const analysis = parsed.ok
 						? parsed.value
 						: { consensus: [], contradictions: [], partialCoverage: [], uniqueInsights: [], blindSpots: [] };
 					this._emitFusionLine(
 						`   consensus ${analysis.consensus.length} · contradictions ${analysis.contradictions.length} · partial ${analysis.partialCoverage.length} · unique ${analysis.uniqueInsights.length} · blind-spots ${analysis.blindSpots.length}`,
 					);
+					if (settings.showSynthesis) {
+						const detail = (label: string, items: string[]): void => {
+							for (const it of items) this._emitFusionLine(`      ${label}: ${it.slice(0, 200)}`);
+						};
+						detail("consensus", analysis.consensus);
+						detail("contradiction", analysis.contradictions);
+						detail("unique", analysis.uniqueInsights);
+						detail("blind-spot", analysis.blindSpots);
+					}
 					return analysis;
 				},
 				writer: async (userPrompt, results, analysis) => {
 					this._emit({ type: "fusion_phase", label: "Fusion · writing…" });
 					this._emitFusionLine(`✍ Fusion · synthesizing final answer with ${model.id}…`);
-					const out = await completeSimple(model, buildWriterContext(userPrompt, results, analysis), {
+					return this._streamFusionWriter(buildWriterContext(userPrompt, results, analysis), {
 						apiKey,
 						headers,
 						signal: this._fusionAbort?.signal,
 					});
-					return this._assistantText(out);
 				},
 			});
-			if (!outcome.handled) return false;
-			this._emitSyntheticAssistant(outcome.text);
+			if (!outcome.handled) {
+				// Distinguish a user interrupt (consume the turn so Esc doesn't surprise the user with
+				// a fresh solo run) from a genuine panel failure (fall through to a solo turn).
+				if (this._fusionAbort?.signal.aborted || this._userInterrupted) {
+					this._emitFusionLine("⚡ Fusion · interrupted");
+					return true;
+				}
+				this._emitSyntheticAssistant(`Both Fusion panel members failed — answering solo with ${model.id}.`);
+				return false;
+			}
+			// The writer already streamed + persisted the answer as an assistant message.
 			return true;
 		} catch {
 			return false;

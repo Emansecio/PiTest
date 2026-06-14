@@ -29,18 +29,28 @@ describe("runFusionTurn", () => {
 		expect(out.text).toBe("FINAL(2)");
 	});
 
-	it("degrades to 1+synth when one member fails", async () => {
+	it("degrades to 1+synth when one member fails (skips judge)", async () => {
+		let judgeCalls = 0;
+		let writerAnalysis: JudgeAnalysis | undefined;
 		const out = await runFusionTurn({
 			userPrompt: "Q",
 			panel: PANEL,
 			staggerSameCliMs: 0,
 			runMember: async (m) =>
 				m.cli === "codex" ? { member: m, ok: false, text: "", error: "boom" } : okResult(m, "A"),
-			runJudge: async () => EMPTY_JUDGE,
-			writer: async (_p, results) => `FINAL(${results.filter((r) => r.ok).length})`,
+			runJudge: async () => {
+				judgeCalls++;
+				return EMPTY_JUDGE;
+			},
+			writer: async (_p, results, analysis) => {
+				writerAnalysis = analysis;
+				return `FINAL(${results.filter((r) => r.ok).length})`;
+			},
 		});
 		expect(out.handled).toBe(true);
 		expect(out.text).toBe("FINAL(1)");
+		expect(judgeCalls).toBe(0);
+		expect(writerAnalysis).toEqual(EMPTY_JUDGE);
 	});
 
 	it("returns unhandled when both members fail (caller falls back to solo)", async () => {

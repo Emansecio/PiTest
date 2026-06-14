@@ -47,6 +47,19 @@ export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOut
 	const survivors = results.filter((r) => r.ok);
 	if (survivors.length === 0) return { handled: false, text: "" };
 
+	// Single survivor: skip the judge (degenerate over [1 real + 1 failed]); writer still streams/synthesizes.
+	if (survivors.length === 1) {
+		const emptyAnalysis: JudgeAnalysis = {
+			consensus: [],
+			contradictions: [],
+			partialCoverage: [],
+			uniqueInsights: [],
+			blindSpots: [],
+		};
+		const text = await deps.writer(deps.userPrompt, results, emptyAnalysis);
+		return { handled: true, text, results };
+	}
+
 	const analysis = await deps.runJudge(deps.userPrompt, results);
 	const text = await deps.writer(deps.userPrompt, results, analysis);
 	return { handled: true, text, analysis, results };

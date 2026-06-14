@@ -268,6 +268,8 @@ export interface FusionSettings {
 	staggerSameCliMs?: number;
 	/** Surface the judge's structured analysis inline. */
 	showSynthesis?: boolean;
+	/** Run panel CLIs lean (skip user hooks/skills/MCP). Default true. */
+	lean?: boolean;
 }
 
 export interface ResolvedFusionSettings {
@@ -275,6 +277,7 @@ export interface ResolvedFusionSettings {
 	timeoutMs: number;
 	staggerSameCliMs: number;
 	showSynthesis: boolean;
+	lean: boolean;
 }
 
 export interface DebugSettings {
@@ -1647,7 +1650,13 @@ export class SettingsManager {
 		const timeoutMs = typeof raw?.timeoutMs === "number" && raw.timeoutMs > 0 ? raw.timeoutMs : 180_000;
 		const stagger =
 			typeof raw?.staggerSameCliMs === "number" && raw.staggerSameCliMs >= 0 ? raw.staggerSameCliMs : 400;
-		return { panel, timeoutMs, staggerSameCliMs: stagger, showSynthesis: raw?.showSynthesis === true };
+		return {
+			panel,
+			timeoutMs,
+			staggerSameCliMs: stagger,
+			showSynthesis: raw?.showSynthesis === true,
+			lean: raw?.lean !== false,
+		};
 	}
 
 	setFusionPanel(panel: PanelMemberSetting[]): void {

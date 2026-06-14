@@ -13,12 +13,16 @@ export function inferCli(provider: string): FusionCli | undefined {
 	return undefined;
 }
 
-export function buildCodexArgs(model: string, cwd: string, outFile: string): string[] {
-	return ["exec", "-s", "read-only", "-m", model, "-C", cwd, "-o", outFile, "--skip-git-repo-check"];
+export function buildCodexArgs(model: string, cwd: string, outFile: string, lean: boolean): string[] {
+	const args = ["exec", "-s", "read-only", "-m", model, "-C", cwd, "-o", outFile, "--skip-git-repo-check"];
+	if (lean) args.push("--ignore-user-config", "--color", "never");
+	return args;
 }
 
-export function buildClaudeArgs(model: string): string[] {
-	return ["-p", "--output-format", "json", "--permission-mode", "plan", "--model", model];
+export function buildClaudeArgs(model: string, lean: boolean): string[] {
+	const args = ["-p", "--output-format", "json", "--permission-mode", "plan", "--model", model];
+	if (lean) args.push("--bare", "--strict-mcp-config", "--setting-sources", "project");
+	return args;
 }
 
 /** claude -p --output-format json emits one JSON object; the final text is `.result`. */
@@ -64,16 +68,19 @@ export interface RunMemberOptions {
 	/** Injectable for tests. */
 	spawnFn?: typeof nodeSpawn;
 	tmpDir?: string;
+	lean?: boolean;
 }
 
 /** Run one Panel member as a read-only subprocess; never throws — failure is encoded in PanelResult. */
 export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Promise<PanelResult> {
 	const spawnFn = opts.spawnFn ?? nodeSpawn;
 	const isCodex = member.cli === "codex";
+	const safeModel = member.model.replace(/[^\w.-]/g, "_");
 	const outFile = isCodex
-		? join(opts.tmpDir ?? tmpdir(), `fusion-${member.cli}-${member.model}-${process.pid}-${randomTag()}.txt`)
+		? join(opts.tmpDir ?? tmpdir(), `fusion-${member.cli}-${safeModel}-${process.pid}-${randomTag()}.txt`)
 		: "";
-	const args = isCodex ? buildCodexArgs(member.model, opts.cwd, outFile) : buildClaudeArgs(member.model);
+	const lean = opts.lean ?? true;
+	const args = isCodex ? buildCodexArgs(member.model, opts.cwd, outFile, lean) : buildClaudeArgs(member.model, lean);
 
 	return new Promise<PanelResult>((resolve) => {
 		let stdout = "";
@@ -121,7 +128,8 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 			opts.signal?.removeEventListener("abort", onAbort);
 			if (settled) return;
 			if (code !== 0) {
-				finish({ member, ok: false, text: "", error: stderr.slice(-400) || `exit ${code}` });
+				const stderrExcerpt = stderr.length > 400 ? `${stderr.slice(0, 200)} … ${stderr.slice(-200)}` : stderr;
+				finish({ member, ok: false, text: "", error: stderrExcerpt || `exit ${code}` });
 				return;
 			}
 			const text = isCodex ? readCodexOut(outFile) : parseClaudeResult(stdout);

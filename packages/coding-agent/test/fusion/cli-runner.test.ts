@@ -16,7 +16,7 @@ describe("fusion cli-runner pure helpers", () => {
 	});
 
 	it("builds codex read-only exec args with tmpfile capture", () => {
-		expect(buildCodexArgs("gpt-5.5-codex", "C:/PiTest", "C:/tmp/a.txt")).toEqual([
+		expect(buildCodexArgs("gpt-5.5-codex", "C:/PiTest", "C:/tmp/a.txt", false)).toEqual([
 			"exec",
 			"-s",
 			"read-only",
@@ -30,8 +30,26 @@ describe("fusion cli-runner pure helpers", () => {
 		]);
 	});
 
+	it("appends lean flags to codex args when lean", () => {
+		expect(buildCodexArgs("gpt-5.5-codex", "C:/PiTest", "C:/tmp/a.txt", true)).toEqual([
+			"exec",
+			"-s",
+			"read-only",
+			"-m",
+			"gpt-5.5-codex",
+			"-C",
+			"C:/PiTest",
+			"-o",
+			"C:/tmp/a.txt",
+			"--skip-git-repo-check",
+			"--ignore-user-config",
+			"--color",
+			"never",
+		]);
+	});
+
 	it("builds claude plan-mode print args", () => {
-		expect(buildClaudeArgs("opus")).toEqual([
+		expect(buildClaudeArgs("opus", false)).toEqual([
 			"-p",
 			"--output-format",
 			"json",
@@ -39,6 +57,22 @@ describe("fusion cli-runner pure helpers", () => {
 			"plan",
 			"--model",
 			"opus",
+		]);
+	});
+
+	it("appends lean flags to claude args when lean", () => {
+		expect(buildClaudeArgs("opus", true)).toEqual([
+			"-p",
+			"--output-format",
+			"json",
+			"--permission-mode",
+			"plan",
+			"--model",
+			"opus",
+			"--bare",
+			"--strict-mcp-config",
+			"--setting-sources",
+			"project",
 		]);
 	});
 
