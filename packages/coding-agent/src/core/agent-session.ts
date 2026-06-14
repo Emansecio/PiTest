@@ -224,6 +224,7 @@ export type AgentSessionEvent =
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "orchestration_changed"; orchestration: Orchestration }
+	| { type: "fusion_phase"; label: string }
 	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";
@@ -4089,20 +4090,32 @@ export class AgentSession {
 		}
 		const { apiKey, headers } = await this._getRequiredRequestAuth(model);
 		this._fusionAbort = new AbortController();
+		const panelDesc = settings.panel.map((m) => `${m.cli}:${m.model}`).join(" + ");
+		const memberStatus = new Map<string, string>();
+		const panelLabel = (): string => {
+			const parts = settings.panel.map((m) => `${m.cli} ${memberStatus.get(`${m.cli}/${m.model}`) ?? "⋯"}`);
+			return `Fusion · panel: ${parts.join(" · ")}`;
+		};
 		try {
+			this._emit({ type: "fusion_phase", label: `Fusion · panel running (${panelDesc})…` });
 			const outcome = await runFusionTurn({
 				userPrompt: text,
 				panel: settings.panel,
 				staggerSameCliMs: settings.staggerSameCliMs,
 				signal: this._fusionAbort.signal,
-				runMember: (member) =>
-					runPanelMember(member, {
+				runMember: async (member) => {
+					const r = await runPanelMember(member, {
 						prompt: text,
 						cwd: this._cwd,
 						timeoutMs: settings.timeoutMs,
 						signal: this._fusionAbort?.signal,
-					}),
+					});
+					memberStatus.set(`${member.cli}/${member.model}`, r.ok ? "✓" : "✗");
+					this._emit({ type: "fusion_phase", label: panelLabel() });
+					return r;
+				},
 				runJudge: async (userPrompt, results) => {
+					this._emit({ type: "fusion_phase", label: "Fusion · judging…" });
 					const out = await completeSimple(model, buildJudgeContext(userPrompt, results), {
 						apiKey,
 						headers,
@@ -4113,6 +4126,7 @@ export class AgentSession {
 					return { consensus: [], contradictions: [], partialCoverage: [], uniqueInsights: [], blindSpots: [] };
 				},
 				writer: async (userPrompt, results, analysis) => {
+					this._emit({ type: "fusion_phase", label: "Fusion · writing…" });
 					const out = await completeSimple(model, buildWriterContext(userPrompt, results, analysis), {
 						apiKey,
 						headers,

@@ -2799,6 +2799,10 @@ export class InteractiveMode {
 				this.refreshModelIndicators();
 				break;
 
+			case "fusion_phase":
+				this.setWorkingPhase(event.label);
+				break;
+
 			case "message_start":
 				switch (event.message.role) {
 					case "custom":
