@@ -46,6 +46,7 @@ import type { CompactionPreparation, CompactionResult } from "../compaction/inde
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
+import type { Orchestration } from "../fusion/types.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -1258,6 +1259,12 @@ export interface ExtensionAPI {
 	/** Set thinking level (clamped to model capabilities). */
 	setThinkingLevel(level: ThinkingLevel): void;
 
+	/** Get the current orchestration facet ("solo" | "fusion"). */
+	getOrchestration(): Orchestration;
+
+	/** Set the orchestration facet. */
+	setOrchestration(orchestration: Orchestration): void;
+
 	// =========================================================================
 	// Provider Registration
 	// =========================================================================
@@ -1466,6 +1473,10 @@ export type GetThinkingLevelHandler = () => ThinkingLevel;
 
 export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
 
+export type GetOrchestrationHandler = () => Orchestration;
+
+export type SetOrchestrationHandler = (orchestration: Orchestration) => void;
+
 export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
 
 /**
@@ -1509,6 +1520,8 @@ export interface ExtensionActions {
 	setModel: SetModelHandler;
 	getThinkingLevel: GetThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
+	getOrchestration: GetOrchestrationHandler;
+	setOrchestration: SetOrchestrationHandler;
 }
 
 /**

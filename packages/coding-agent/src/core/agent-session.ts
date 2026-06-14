@@ -109,6 +109,7 @@ import {
 	loadFrequentFilesSnapshot,
 	saveFrequentFilesSnapshot,
 } from "./frequent-files.js";
+import type { Orchestration } from "./fusion/types.ts";
 import { readGitBranch } from "./git-state.js";
 import { GoalManager, type GoalSnapshot, type GoalState, setCurrentGoalManager } from "./goal/goal-manager.ts";
 import {
@@ -218,6 +219,7 @@ export type AgentSessionEvent =
 	| { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
+	| { type: "orchestration_changed"; orchestration: Orchestration }
 	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";
@@ -428,6 +430,9 @@ export class AgentSession {
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
+
+	// Fusion orchestration facet (session-local; resets to "solo" on a new session in v1).
+	private _orchestration: Orchestration = "solo";
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -3737,6 +3742,16 @@ export class AgentSession {
 		}
 	}
 
+	get orchestration(): Orchestration {
+		return this._orchestration;
+	}
+
+	setOrchestration(orchestration: Orchestration): void {
+		if (orchestration === this._orchestration) return;
+		this._orchestration = orchestration;
+		this._emit({ type: "orchestration_changed", orchestration });
+	}
+
 	/**
 	 * Cycle to next thinking level.
 	 * @returns New level, or undefined if model doesn't support thinking
@@ -4399,6 +4414,8 @@ export class AgentSession {
 				},
 				getThinkingLevel: () => this.thinkingLevel,
 				setThinkingLevel: (level) => this.setThinkingLevel(level),
+				getOrchestration: () => this.orchestration,
+				setOrchestration: (o) => this.setOrchestration(o),
 			},
 			{
 				getModel: () => this.model,
