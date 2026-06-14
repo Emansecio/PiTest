@@ -4208,7 +4208,15 @@ export class AgentSession {
 					};
 					let parsed = await judgeOnce();
 					// One retry — models often leak prose outside the JSON fence on the first try.
-					if (!parsed.ok) parsed = await judgeOnce();
+					if (!parsed.ok) {
+						recordDiagnostic({
+							category: "fusion.judge-retry",
+							level: "warn",
+							source: "fusion.judge",
+							context: { note: `${model.id}:parse-fail` },
+						});
+						parsed = await judgeOnce();
+					}
 					const analysis = parsed.ok
 						? parsed.value
 						: { consensus: [], contradictions: [], partialCoverage: [], uniqueInsights: [], blindSpots: [] };
@@ -4243,6 +4251,12 @@ export class AgentSession {
 					this._emitFusionLine("⚡ Fusion · interrupted");
 					return true;
 				}
+				recordDiagnostic({
+					category: "fusion.degraded",
+					level: "warn",
+					source: "fusion.session",
+					context: { note: `both-failed:solo ${model.id}` },
+				});
 				this._emitSyntheticAssistant(`Both Fusion panel members failed — answering solo with ${model.id}.`);
 				return false;
 			}

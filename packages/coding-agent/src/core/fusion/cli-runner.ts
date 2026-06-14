@@ -2,6 +2,7 @@ import { type ChildProcess, spawn as nodeSpawn, spawnSync as nodeSpawnSync } fro
 import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { recordDiagnostic } from "@pit/ai";
 import type { FusionCli, PanelMember, PanelResult } from "./types.ts";
 
 const IS_WIN = process.platform === "win32";
@@ -104,11 +105,23 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 
 		const timer = setTimeout(() => {
 			killTree(child);
+			recordDiagnostic({
+				category: "fusion.member-failed",
+				level: "warn",
+				source: "fusion.cli-runner",
+				context: { note: `${member.cli}:timeout`, ms: opts.timeoutMs },
+			});
 			finish({ member, ok: false, text: "", error: "timeout" });
 		}, opts.timeoutMs);
 
 		const onAbort = () => {
 			killTree(child);
+			recordDiagnostic({
+				category: "fusion.member-failed",
+				level: "warn",
+				source: "fusion.cli-runner",
+				context: { note: `${member.cli}:aborted` },
+			});
 			finish({ member, ok: false, text: "", error: "aborted" });
 		};
 		opts.signal?.addEventListener("abort", onAbort, { once: true });
@@ -121,6 +134,12 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 		});
 		child.on("error", (err) => {
 			clearTimeout(timer);
+			recordDiagnostic({
+				category: "fusion.member-failed",
+				level: "warn",
+				source: "fusion.cli-runner",
+				context: { note: `${member.cli}:${err.message}` },
+			});
 			finish({ member, ok: false, text: "", error: err.message });
 		});
 		child.on("close", (code) => {
@@ -129,10 +148,24 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 			if (settled) return;
 			if (code !== 0) {
 				const stderrExcerpt = stderr.length > 400 ? `${stderr.slice(0, 200)} … ${stderr.slice(-200)}` : stderr;
+				recordDiagnostic({
+					category: "fusion.member-failed",
+					level: "warn",
+					source: "fusion.cli-runner",
+					context: { note: `${member.cli}:exit ${code}` },
+				});
 				finish({ member, ok: false, text: "", error: stderrExcerpt || `exit ${code}` });
 				return;
 			}
 			const text = isCodex ? readCodexOut(outFile) : parseClaudeResult(stdout);
+			if (!text) {
+				recordDiagnostic({
+					category: "fusion.member-failed",
+					level: "warn",
+					source: "fusion.cli-runner",
+					context: { note: `${member.cli}:empty output` },
+				});
+			}
 			finish(text ? { member, ok: true, text } : { member, ok: false, text: "", error: "empty output" });
 		});
 

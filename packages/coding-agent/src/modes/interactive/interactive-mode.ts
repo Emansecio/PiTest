@@ -4584,9 +4584,19 @@ export class InteractiveMode {
 		}
 		const labels = candidates.map((m) => `${m.id}  (${inferCli(m.provider)})`);
 
-		const pickA = await this.showExtensionSelector("Fusion · slot A — pick model", labels);
+		// The active session model is the synthesizer: it judges both panel answers
+		// and writes the merged result. Surface that in the selector titles so the
+		// panel picks read as "two advisors", not "two models that answer".
+		const synthId = this.session.model?.id ?? "active model";
+		const pickA = await this.showExtensionSelector(
+			`Fusion · slot A — pick advisor (your active model ${synthId} judges & writes)`,
+			labels,
+		);
 		if (pickA === undefined) return;
-		const pickB = await this.showExtensionSelector("Fusion · slot B — pick model", labels);
+		const pickB = await this.showExtensionSelector(
+			`Fusion · slot B — pick advisor (your active model ${synthId} judges & writes)`,
+			labels,
+		);
 		if (pickB === undefined) return;
 
 		const modelA = candidates[labels.indexOf(pickA)];
@@ -4601,7 +4611,7 @@ export class InteractiveMode {
 			{ cli: cliA, model: modelA.id },
 			{ cli: cliB, model: modelB.id },
 		]);
-		this.showStatus(`Fusion panel: ${modelA.id} + ${modelB.id}`);
+		this.showStatus(`Fusion: ${modelA.id} + ${modelB.id} → judged/written by ${synthId}`);
 	}
 
 	private showModelSelector(initialSearchInput?: string): void {

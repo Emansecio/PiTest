@@ -35,7 +35,10 @@ export type DiagnosticCategory =
 	| "io.retry"
 	| "error.isolated"
 	| "limit.evicted"
-	| "input.truncated";
+	| "input.truncated"
+	| "fusion.member-failed"
+	| "fusion.judge-retry"
+	| "fusion.degraded";
 
 export interface DiagnosticContext {
 	/** Byte size involved (cap hit, payload, buffer depth). */

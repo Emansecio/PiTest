@@ -212,6 +212,27 @@ export class FooterComponent implements Component {
 		return m ? m[1] : null;
 	}
 
+	/**
+	 * Compact Fusion-mode indicator: the two panel members and the synthesizer
+	 * that judges + writes the merged answer. Returns null in solo mode so the
+	 * segment is absent entirely. Read straight off the session (orchestration
+	 * facet + resolved fusion panel) — same source-of-truth pattern as the model
+	 * and goal segments. The synthesizer is the session's active model id.
+	 *
+	 * Layout: `fusion: <cliA>:<modelA> + <cliB>:<modelB> → <synthId>`. With no
+	 * panel bound it nudges toward the command: `fusion: (no panel — /fusion)`.
+	 * The returned string is raw (uncolored); the caller colorizes and the whole
+	 * line is width-bounded by composeLeftRight, so no clipping math here.
+	 */
+	private getFusionSegment(): string | null {
+		if (this.session.orchestration !== "fusion") return null;
+		const panel = this.session.settingsManager.getFusionSettings().panel;
+		if (panel.length === 0) return "fusion: (no panel — /fusion)";
+		const synthId = this.session.state.model?.id ?? "no-model";
+		const members = panel.map((m) => `${m.cli}:${m.model}`).join(" + ");
+		return `fusion: ${members} → ${synthId}`;
+	}
+
 	render(width: number): string[] {
 		const state = this.session.state;
 		const totals = this.getCumulativeTotals();
@@ -325,7 +346,13 @@ export class FooterComponent implements Component {
 		// Assemble groups. Intra-group items join with the light ` · `; the two
 		// semantic groups (usage vs. mode) join with a stronger `  •  ` so the line
 		// reads as two clusters instead of one undifferentiated run.
+		// Fusion panel indicator (orchestration === "fusion"): the two panel
+		// members + the synthesizer that judges/writes. Accent so it reads as an
+		// active-mode signal next to the dim usage metrics, not as a stat.
+		const fusionSegment = this.getFusionSegment();
+
 		const groups: string[] = [];
+		if (fusionSegment) groups.push(theme.fg("accent", fusionSegment));
 		if (usageGroup.length) groups.push(usageGroup.join(" · "));
 		if (goalStatus) groups.push(theme.fg("accent", goalStatus));
 		if (modeBits.length) groups.push(modeBits.join(" · "));
