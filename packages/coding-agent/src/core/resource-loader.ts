@@ -827,12 +827,20 @@ export class DefaultResourceLoader implements ResourceLoader {
 			}
 		}
 
+		// statSync can throw if the path vanished between checks (TOCTOU) — one
+		// unguarded stat must not abort the whole reload(). Fall back to the parent.
+		let baseDir: string;
+		try {
+			baseDir = statSync(normalizedPath).isDirectory() ? normalizedPath : resolve(normalizedPath, "..");
+		} catch {
+			baseDir = resolve(normalizedPath, "..");
+		}
 		return {
 			path: filePath,
 			source: "local",
 			scope: "temporary",
 			origin: "top-level",
-			baseDir: statSync(normalizedPath).isDirectory() ? normalizedPath : resolve(normalizedPath, ".."),
+			baseDir,
 		};
 	}
 

@@ -311,17 +311,22 @@ class JsKernel implements EvalKernel {
 				env: process.env,
 			});
 			child.on("error", (err) => {
+				if (this.proc !== child) return; // a respawn superseded this child
 				this.spawnError = err as Error;
 				this.alive = false;
 				this.failPending(err as Error);
 			});
 			child.on("exit", () => {
+				if (this.proc !== child) return; // stale child from before a respawn
 				this.alive = false;
 				this.failPending(new Error("node kernel exited"));
 			});
 			child.stdout.setEncoding("utf8");
 			child.stderr.setEncoding("utf8");
-			child.stdout.on("data", (chunk: string) => this.onStdout(chunk));
+			child.stdout.on("data", (chunk: string) => {
+				if (this.proc !== child) return;
+				this.onStdout(chunk);
+			});
 			// Driver stderr is rare (uncaught errors only). Surface it as a fatal
 			// kernel error against the most recent pending call.
 			child.stderr.on("data", () => {

@@ -435,6 +435,10 @@ export class ExtensionRunner {
 		this._cachedCommands = undefined;
 		this._cachedCommandLookup = undefined;
 		this._cachedBprPartition = undefined;
+		// Hot cache of "does any extension handle event X". Omitting it here let a
+		// handler registered via a late api.on() stay invisible after an earlier
+		// emit cached `false` for that event.
+		this._handlerExistsCache.clear();
 	}
 
 	/** Get a tool definition by name. Returns undefined if not found. */

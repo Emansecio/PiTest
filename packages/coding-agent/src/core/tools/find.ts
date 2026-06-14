@@ -326,15 +326,17 @@ export function createFindToolDefinition(
 								settle(() => reject(new Error("Operation aborted")));
 								return;
 							}
-							const output = lines.join("\n");
+							// Empty-result test only — the success path below iterates `lines`
+							// directly, so don't join up to 100k paths into one multi-MB string
+							// just to check for emptiness.
 							if (code !== 0) {
 								const errorMsg = stderr.trim() || `fd exited with code ${code}`;
-								if (!output) {
+								if (lines.length === 0) {
 									settle(() => reject(new Error(errorMsg)));
 									return;
 								}
 							}
-							if (!output) {
+							if (lines.length === 0) {
 								// Glob patterns are forward-slash only. A Windows-style backslash
 								// pattern (e.g. `src\**\*.ts`) has no "/", skips the post-filter, and
 								// goes raw to fd --glob where "\" is an escape — yielding zero matches

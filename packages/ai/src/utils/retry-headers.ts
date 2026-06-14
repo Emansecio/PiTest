@@ -48,7 +48,10 @@ export function isRetryableStatus(status: number): boolean {
  */
 export function parseRetryAfter(headers: RetryHeaderLookup, now: () => number = Date.now): number | null {
 	const retryAfterMs = headers.get("retry-after-ms");
-	if (retryAfterMs !== null) {
+	// A present-but-empty header ("") must not short-circuit to 0ms — Number("")
+	// === 0 is finite, which would swallow a real `retry-after` and retry
+	// immediately (thundering herd against a 429/5xx). Treat blank as absent.
+	if (retryAfterMs !== null && retryAfterMs.trim() !== "") {
 		const millis = Number(retryAfterMs);
 		if (Number.isFinite(millis)) {
 			return Math.max(0, millis);

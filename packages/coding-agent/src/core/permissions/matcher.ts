@@ -119,6 +119,10 @@ export function findMatchingCommandRule<T extends { pattern: string; flags?: str
 			}
 			cmdRegExpCache.set(cacheKey, re);
 		}
+		// Reset lastIndex: a user-authored rule compiled with a `g`/`y` flag makes
+		// RegExp.test() stateful, so a cached regex could otherwise skip a match on
+		// a later call and silently leak a deny rule (fail-open on a security gate).
+		re.lastIndex = 0;
 		if (re.test(command)) return rule;
 	}
 	return undefined;

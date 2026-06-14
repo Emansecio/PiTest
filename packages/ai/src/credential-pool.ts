@@ -1,5 +1,5 @@
 /**
- * Round-robin API credential pool.
+ * First-ready API credential pool with session affinity and failover rotation.
  *
  * Each provider owns a list of credential entries. Entries may be cooled
  * down after rate-limit / auth failures so callers transparently rotate to

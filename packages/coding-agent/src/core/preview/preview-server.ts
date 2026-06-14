@@ -59,7 +59,16 @@ export function mimeForPath(p: string): string {
 }
 
 async function serveRequest(root: string, rawUrl: string, res: ServerResponse): Promise<void> {
-	const pathname = decodeURIComponent((rawUrl.split(/[?#]/)[0] || "/").trim());
+	// decodeURIComponent throws on a malformed %-escape; unguarded (the try below
+	// starts later) that becomes an unhandledRejection with the socket left hung.
+	let pathname: string;
+	try {
+		pathname = decodeURIComponent((rawUrl.split(/[?#]/)[0] || "/").trim());
+	} catch {
+		res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+		res.end("Bad Request");
+		return;
+	}
 	const rel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
 	const filePath = normalize(join(root, rel));
 	// Path-traversal guard: the resolved file must stay inside root.

@@ -57,7 +57,7 @@ describe("findChromeBinary", () => {
 
 describe("launchChrome", () => {
 	it("spawns the binary detached with the debug flags and returns the pid", () => {
-		const child = { pid: 4321, unref: vi.fn() };
+		const child = { pid: 4321, unref: vi.fn(), on: vi.fn() };
 		const spawnImpl = vi.fn().mockReturnValue(child);
 		const mkdir = vi.fn();
 		const pid = launchChrome({
@@ -70,6 +70,9 @@ describe("launchChrome", () => {
 		expect(pid).toBe(4321);
 		expect(mkdir).toHaveBeenCalledWith("/data/chrome");
 		expect(child.unref).toHaveBeenCalled();
+		// A spawn-error listener must be attached so a failed launch can't crash Pit
+		// with an uncaughtException.
+		expect(child.on).toHaveBeenCalledWith("error", expect.any(Function));
 		const [bin, args, options] = spawnImpl.mock.calls[0]!;
 		expect(bin).toBe("/bin/chrome");
 		expect(args).toContain("--remote-debugging-port=9222");

@@ -10,7 +10,6 @@
 const DEFAULT_MAX_ERROR_FINGERPRINTS_PER_TOOL = 20;
 const DEFAULT_ERROR_FINGERPRINT_LENGTH = 120;
 const DEFAULT_SEQUENCE_WINDOW = 16;
-const DEFAULT_ARGS_FINGERPRINT_LENGTH = 200;
 const DEFAULT_DOOM_LOOP_THRESHOLD = 4;
 
 /**
@@ -33,8 +32,6 @@ export interface ToolCallStatsOptions {
 	errorFingerprintLength?: number;
 	/** How many recent calls to retain for doom-loop detection. */
 	sequenceWindow?: number;
-	/** Max characters of args fingerprint after JSON stable-serialize. */
-	argsFingerprintLength?: number;
 	/** Consecutive identical (toolName,argsFingerprint) calls that count as a loop. */
 	doomLoopThreshold?: number;
 }
@@ -90,7 +87,6 @@ export class ToolCallStats {
 	private readonly maxFingerprints: number;
 	private readonly fingerprintLength: number;
 	private readonly sequenceWindow: number;
-	private readonly argsFingerprintLength: number;
 	private readonly doomLoopThreshold: number;
 	private readonly ringBuffer: (ToolCallSequenceEntry | undefined)[];
 	private ringHead = 0;
@@ -100,7 +96,6 @@ export class ToolCallStats {
 		this.maxFingerprints = options?.maxErrorFingerprintsPerTool ?? DEFAULT_MAX_ERROR_FINGERPRINTS_PER_TOOL;
 		this.fingerprintLength = options?.errorFingerprintLength ?? DEFAULT_ERROR_FINGERPRINT_LENGTH;
 		this.sequenceWindow = options?.sequenceWindow ?? DEFAULT_SEQUENCE_WINDOW;
-		this.argsFingerprintLength = options?.argsFingerprintLength ?? DEFAULT_ARGS_FINGERPRINT_LENGTH;
 		this.doomLoopThreshold = options?.doomLoopThreshold ?? DEFAULT_DOOM_LOOP_THRESHOLD;
 		this.ringBuffer = new Array(this.sequenceWindow);
 	}

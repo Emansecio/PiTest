@@ -33,14 +33,30 @@ function clampLimit(limit: number, max: number): number {
 	return Math.min(Math.floor(limit), max);
 }
 
+const FETCH_TIMEOUT_MS = 10_000;
+
 async function fetchJson(url: string, init: RequestInit, signal?: AbortSignal): Promise<unknown> {
-	const merged: RequestInit = { ...init, signal: signal ?? init.signal };
-	const res = await fetch(url, merged);
-	if (!res.ok) {
-		const text = await res.text().catch(() => "");
-		throw new Error(`HTTP ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+	// Per-request timeout: without it a black-hole provider hangs web_search
+	// indefinitely and stalls the (serial) fallback chain — the global undici
+	// dispatcher is configured with bodyTimeout:0, so this is the only backstop.
+	// Compose with any caller signal so an external abort still wins.
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+	const external = signal ?? init.signal ?? undefined;
+	if (external) {
+		if (external.aborted) controller.abort();
+		else external.addEventListener("abort", () => controller.abort(), { once: true });
 	}
-	return (await res.json()) as unknown;
+	try {
+		const res = await fetch(url, { ...init, signal: controller.signal });
+		if (!res.ok) {
+			const text = await res.text().catch(() => "");
+			throw new Error(`HTTP ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+		}
+		return (await res.json()) as unknown;
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 function asString(value: unknown): string | undefined {

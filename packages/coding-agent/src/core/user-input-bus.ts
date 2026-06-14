@@ -72,7 +72,6 @@ export interface UserInputBus {
 
 interface PendingEntry {
 	resolve: (answer: AskOptionsAnswer) => void;
-	reject: (err: Error) => void;
 }
 
 function pickDefaultLabel(req: Pick<AskOptionsRequest, "options">): string {
@@ -113,8 +112,8 @@ export function createUserInputBus(): UserInputBus {
 				return Promise.resolve(autoAnswer(req));
 			}
 
-			return new Promise<AskOptionsAnswer>((resolve, reject) => {
-				pending.set(requestId, { resolve, reject });
+			return new Promise<AskOptionsAnswer>((resolve) => {
+				pending.set(requestId, { resolve });
 				// Notify listeners synchronously; errors thrown by a listener should
 				// not break the bus.
 				for (const listener of listeners.slice()) {

@@ -11,7 +11,6 @@
 
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import type { HindsightEntry, HindsightKind, HindsightSearchOptions, HindsightSearchResult } from "./types.ts";
 
 export interface HindsightBank {
@@ -192,10 +191,6 @@ function loadEntries(filePath: string): HindsightEntry[] {
 
 function atomicRewrite(filePath: string, entries: HindsightEntry[]): void {
 	const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-	const dir = dirname(filePath);
-	if (dir && !existsSync(dir)) {
-		// Defer dir creation to caller; if missing here, surface the error.
-	}
 	const payload = entries.map((entry) => JSON.stringify(entry)).join("\n");
 	writeFileSync(tmp, payload ? `${payload}\n` : "", "utf-8");
 	renameSync(tmp, filePath);
@@ -249,12 +244,13 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 			if (queryTokens.length === 0) return [];
 
 			const { docs, avgLen, df } = buildDocStats(candidates);
-			const docById = new Map<string, DocStats>();
-			for (const doc of docs) docById.set(doc.id, doc);
 
+			// buildDocStats pushes one doc per candidate in order, so docs[i] lines
+			// up with candidates[i] — index directly instead of a Map<id> lookup.
 			const scored: HindsightSearchResult[] = [];
-			for (const entry of candidates) {
-				const doc = docById.get(entry.id);
+			for (let i = 0; i < candidates.length; i++) {
+				const entry = candidates[i];
+				const doc = docs[i];
 				if (!doc) continue;
 				const { score, bestTerm } = bm25Score(queryTokens, doc, avgLen, df, candidates.length);
 				if (score <= 0) continue;

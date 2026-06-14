@@ -5,11 +5,18 @@
  * directly (no re-cloning) since they are already detached.
  */
 export class UndoStack<S> {
+	/**
+	 * Defensive cap so a long-lived component (e.g. the chat Input, which never
+	 * clears its stack) can't grow the snapshot list without bound. Far above any
+	 * realistic undo depth, so it never truncates a real history.
+	 */
+	private static readonly MAX_ENTRIES = 1000;
 	private stack: S[] = [];
 
 	/** Push a clone of the given state onto the stack. */
 	push(state: S): void {
 		this.stack.push(this.clone(state));
+		if (this.stack.length > UndoStack.MAX_ENTRIES) this.stack.shift();
 	}
 
 	/**

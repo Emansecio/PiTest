@@ -43,7 +43,7 @@ function getNumber(args: Record<string, unknown>, key: string): number | undefin
  * Parse a `bash` command into its leading argv tokens, respecting single and
  * double quotes. Returns undefined when the command contains shell metacharacters
  * that would change semantics (pipes, redirects, `&&`, `;`, `$(...)`, backticks,
- * subshells, glob expansion of `*` outside quotes). Tier 2 rules use this to
+ * subshells). A bare `*` is passed through as a literal argument, not rejected. Tier 2 rules use this to
  * decide whether a `bash("cat X")` style call is safely substitutable for a
  * dedicated tool — if any metacharacter is present, we conservatively pass
  * through and let bash run the original command.

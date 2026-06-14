@@ -8,8 +8,8 @@ let _procEnvCache: Map<string, string> | null = null;
  * environments on Linux. We can recover the env from `/proc/self/environ`.
  */
 function getProcEnv(key: string): string | undefined {
-	if (!process.versions?.bun) return undefined;
 	if (typeof process === "undefined") return undefined;
+	if (!process.versions?.bun) return undefined;
 
 	// If process.env already has entries, the bug is not triggered.
 	if (Object.keys(process.env).length > 0) return undefined;

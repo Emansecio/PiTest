@@ -313,10 +313,16 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.buffer += str;
 
 		if (this.pasteMode) {
+			// Search only from near the previous tail: a bracketed-paste end marker
+			// can't begin before (prevLen - (END.length - 1)) without having been
+			// found last chunk, so re-scanning the whole accumulated buffer every
+			// chunk (O(N^2) over a byte-at-a-time paste) is wasted work.
+			const prevLen = this.pasteBuffer.length;
 			this.pasteBuffer += this.buffer;
 			this.buffer = "";
 
-			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
+			const searchFrom = Math.max(0, prevLen - (BRACKETED_PASTE_END.length - 1));
+			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END, searchFrom);
 			if (endIndex !== -1) {
 				const pastedContent = this.pasteBuffer.slice(0, endIndex);
 				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);

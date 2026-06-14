@@ -91,6 +91,11 @@ export function launchChrome(opts: LaunchChromeOptions): number | undefined {
 	];
 	const spawnImpl = opts.spawnImpl ?? ((c, a, o) => spawn(c, a, o));
 	const child = spawnImpl(opts.binary, args, { detached: true, stdio: "ignore", windowsHide: false });
+	// A detached child with no 'error' listener turns a spawn failure (binary
+	// present but not executable, EACCES/ENOEXEC) into an uncaughtException that
+	// would kill Pit. Swallow it — the failure surfaces later via the missing
+	// DevTools endpoint (waitForEndpoint times out).
+	child.on("error", () => {});
 	// Detach from the Pit process so Chrome keeps running after Pit exits.
 	child.unref?.();
 	return child.pid ?? undefined;

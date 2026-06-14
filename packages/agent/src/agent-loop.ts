@@ -1140,10 +1140,10 @@ async function executePreparedToolCall(
 			},
 			executeCtx,
 		);
-		await Promise.all(pendingUpdates);
+		await Promise.allSettled(pendingUpdates);
 		return { result, isError: false };
 	} catch (error) {
-		await Promise.all(pendingUpdates);
+		await Promise.allSettled(pendingUpdates);
 		// Generic convention: an error may attach a structured `detail` field
 		// (HashlineEditError does); carry it through to the result so hint rules
 		// get the structured data, not just the flattened message string.
