@@ -254,6 +254,29 @@ export interface ResolvedLspSettings {
 	formatOnWrite: boolean;
 }
 
+export interface PanelMemberSetting {
+	cli: "codex" | "claude";
+	model: string;
+}
+
+export interface FusionSettings {
+	/** Exactly two members; each binds a CLI to a model id. */
+	panel?: PanelMemberSetting[];
+	/** Per-member wall-clock cap (ms). */
+	timeoutMs?: number;
+	/** Delay before launching a second member on the same CLI (ms). */
+	staggerSameCliMs?: number;
+	/** Surface the judge's structured analysis inline. */
+	showSynthesis?: boolean;
+}
+
+export interface ResolvedFusionSettings {
+	panel: PanelMemberSetting[];
+	timeoutMs: number;
+	staggerSameCliMs: number;
+	showSynthesis: boolean;
+}
+
 export interface DebugSettings {
 	enabled?: boolean;
 }
@@ -407,6 +430,7 @@ export interface Settings {
 	eval?: EvalSettings;
 	lsp?: LspSettings;
 	debug?: DebugSettings;
+	fusion?: FusionSettings;
 	agentMessaging?: AgentMessagingSettings;
 	chromeDevtools?: ChromeDevtoolsSettings;
 	/** Interactive TUI tool rendering: "grouped" (default) groups consecutive
@@ -1611,6 +1635,23 @@ export class SettingsManager {
 			// Default OFF: opt in to rewrite files through the language server's formatter.
 			formatOnWrite: raw?.formatOnWrite === true,
 		};
+	}
+
+	/**
+	 * Resolve Fusion-mode settings. The panel binds up to two CLI/model members;
+	 * timeout/stagger/showSynthesis fall back to defaults when absent or invalid.
+	 */
+	getFusionSettings(): ResolvedFusionSettings {
+		const raw = this.settings.fusion;
+		const panel = Array.isArray(raw?.panel) ? raw.panel.slice(0, 2) : [];
+		const timeoutMs = typeof raw?.timeoutMs === "number" && raw.timeoutMs > 0 ? raw.timeoutMs : 180_000;
+		const stagger =
+			typeof raw?.staggerSameCliMs === "number" && raw.staggerSameCliMs >= 0 ? raw.staggerSameCliMs : 400;
+		return { panel, timeoutMs, staggerSameCliMs: stagger, showSynthesis: raw?.showSynthesis === true };
+	}
+
+	setFusionPanel(panel: PanelMemberSetting[]): void {
+		this.setTopLevel("fusion", { ...this.globalSettings.fusion, panel: panel.slice(0, 2) });
 	}
 
 	/**
