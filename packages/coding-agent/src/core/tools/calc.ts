@@ -140,7 +140,9 @@ function tokenize(input: string): Tok[] {
 				i++;
 				continue;
 			default:
-				throw new CalcError(`Unsupported in calc: ${c}. Use Python via eval for complex expressions.`);
+				throw new CalcError(
+					`Unsupported in calc: ${c}. Use a general-purpose evaluator (eval) or bash for complex expressions.`,
+				);
 		}
 	}
 	out.push({ kind: "eof", value: "", pos: i });
@@ -294,7 +296,9 @@ class Parser {
 				this.expect("rparen");
 				const fn = FUNCS[name];
 				if (!fn) {
-					throw new CalcError(`Unsupported in calc: ${t.value}. Use Python via eval for complex expressions.`);
+					throw new CalcError(
+						`Unsupported in calc: ${t.value}. Use a general-purpose evaluator (eval) or bash for complex expressions.`,
+					);
 				}
 				const a = fn.arity;
 				if (typeof a === "number") {
@@ -310,7 +314,9 @@ class Parser {
 			}
 			// Constant
 			if (name in CONSTS) return CONSTS[name]!;
-			throw new CalcError(`Unsupported in calc: ${t.value}. Use Python via eval for complex expressions.`);
+			throw new CalcError(
+				`Unsupported in calc: ${t.value}. Use a general-purpose evaluator (eval) or bash for complex expressions.`,
+			);
 		}
 		throw new CalcError(`Unexpected '${t.value || t.kind}' at position ${t.pos}.`);
 	}
@@ -353,7 +359,7 @@ export function createCalcToolDefinition(
 		promptGuidelines: [
 			"Use calc for arithmetic — never bash echo $((...)) or python -c for math.",
 			"Supports constants pi, e and functions like sin, log, sqrt, pow, min, max.",
-			"For anything beyond arithmetic (variables, control flow, libraries) use eval instead.",
+			"For anything beyond arithmetic (variables, control flow, libraries) use a general-purpose evaluator (eval) or bash instead.",
 		],
 		parameters: calcSchema,
 		async execute(_toolCallId, input: CalcToolInput) {

@@ -10,6 +10,7 @@ import { time } from "./timings.js";
 
 export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 
+import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { canonicalizePath, isLocalPath } from "../utils/paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.ts";
@@ -532,7 +533,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 				: discoverLegacyResources({ cwd: this.cwd, agentDir: this.agentDir });
 		time("reload-legacy-discovery");
 
-		const legacySkillPaths = this.noLegacyDiscovery ? [] : legacyResult.skillDirs;
+		// PIT_NO_LEGACY_SKILLS opts out of legacy skill *directories* only
+		// (.claude/.cursor/.codex/.gemini skills/), leaving legacy rule files
+		// intact. Default-on: unset = identical behavior. The global
+		// --no-legacy-discovery still wins (already yields an empty skillDirs).
+		const legacySkillPaths =
+			this.noLegacyDiscovery || isTruthyEnvFlag(process.env.PIT_NO_LEGACY_SKILLS) ? [] : legacyResult.skillDirs;
 		const skillPaths = this.noSkills
 			? this.mergePaths(cliEnabledSkills, [...this.additionalSkillPaths, ...legacySkillPaths])
 			: this.mergePaths(

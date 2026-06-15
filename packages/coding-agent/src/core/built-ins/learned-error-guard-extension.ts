@@ -21,6 +21,7 @@
  */
 
 import { recordDiagnostic } from "@pit/ai";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
 import {
 	type AggregatedLearnedError,
@@ -67,7 +68,7 @@ function normaliseInput(input: unknown): unknown {
 
 export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptions = {}) {
 	return (pi: ExtensionAPI) => {
-		if (options.enabled === false) return;
+		if (options.enabled === false || isTruthyEnvFlag(process.env.PIT_NO_LEARNED_ERROR_GUARD)) return;
 		const minOccurrences = Math.max(2, options.minOccurrences ?? 3);
 		const minSessions = Math.max(1, options.minSessions ?? 2);
 		const provider =

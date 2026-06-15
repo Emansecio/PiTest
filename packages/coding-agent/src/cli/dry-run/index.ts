@@ -13,7 +13,7 @@
 
 import { existsSync } from "node:fs";
 import chalk from "chalk";
-import { CONFIG_DIR_NAME } from "../../config.ts";
+import { APP_NAME, CONFIG_DIR_NAME } from "../../config.ts";
 import type { AgentSessionServices } from "../../core/agent-session-services.ts";
 import { discoverLegacyResources } from "../../core/legacy-discovery.ts";
 import { discoverMemoryFiles } from "../../core/memory/index.ts";
@@ -235,7 +235,9 @@ export function buildDryRunReport(options: BuildDryRunReportOptions): DryRunRepo
 
 export function formatReportText(report: DryRunReport): string {
 	const lines: string[] = [];
-	lines.push(chalk.bold(`pi dry-run — ${statusGlyph(report.overallStatus)} ${report.overallStatus.toUpperCase()}`));
+	lines.push(
+		chalk.bold(`${APP_NAME} dry-run — ${statusGlyph(report.overallStatus)} ${report.overallStatus.toUpperCase()}`),
+	);
 	lines.push(`  cwd:       ${report.cwd}`);
 	lines.push(`  agentDir:  ${report.agentDir}`);
 	lines.push("");

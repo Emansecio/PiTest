@@ -88,7 +88,7 @@ export class Loader extends Text {
 		ui: TUI,
 		spinnerColor: LoaderColorFn | LoaderColorFn[],
 		messageColorFn: LoaderColorFn,
-		message: string = "Loading...",
+		message: string = "Loading…",
 		indicator?: LoaderIndicatorOptions,
 	) {
 		super("", 1, 0);

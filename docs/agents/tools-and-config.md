@@ -2,7 +2,7 @@
 
 > Loaded on demand. The per-turn rules in `AGENTS.md` already cover the
 > load-bearing behavior; this doc explains the optional knobs and the few
-> idiosyncrasies of working inside `pi-mono`.
+> idiosyncrasies of working inside `Pit`.
 
 ## `.pit/settings.json`
 
@@ -29,7 +29,7 @@ there by editing that file; nothing here is load-bearing.
 
 ## Tool quirks in this repo
 
-These are project-specific facts about how tools behave inside `pi-mono`. Each
+These are project-specific facts about how tools behave inside `Pit`. Each
 saves a class of tool-call errors:
 
 - **Vitest path**: `npx tsx ../../node_modules/vitest/dist/cli.js --run

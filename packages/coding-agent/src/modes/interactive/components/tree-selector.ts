@@ -853,7 +853,7 @@ class TreeList implements Component {
 					.replace(/[\n\t]/g, " ")
 					.trim()
 					.slice(0, 50);
-				return `[bash: ${cmd}${rawCmd.length > 50 ? "..." : ""}]`;
+				return `[bash: ${cmd}${rawCmd.length > 50 ? "…" : ""}]`;
 			}
 			case "grep": {
 				const pattern = String(args.pattern || "");
@@ -872,7 +872,7 @@ class TreeList implements Component {
 			default: {
 				// Custom tool - show name and truncated JSON args
 				const argsStr = JSON.stringify(args).slice(0, 40);
-				return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? "..." : ""}]`;
+				return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? "…" : ""}]`;
 			}
 		}
 	}

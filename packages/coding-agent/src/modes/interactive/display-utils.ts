@@ -357,7 +357,9 @@ export function formatDiagnostics(
 	for (const [name, collisionList] of collisions) {
 		const first = collisionList[0]?.collision;
 		if (!first) continue;
-		lines.push(theme.fg("warning", `  "${name}" collision:`));
+		const precedence =
+			first.winnerSource && first.loserSource ? ` (${first.winnerSource} > ${first.loserSource})` : "";
+		lines.push(theme.fg("warning", `  "${name}" collision${precedence}:`));
 		lines.push(
 			theme.fg(
 				"dim",

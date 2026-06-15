@@ -349,12 +349,6 @@ export interface ExtensionBindings {
 }
 
 /** Options for AgentSession.prompt() */
-/**
- * Safety cap on autonomous goal continuations spawned from a single user
- * prompt. Hitting it pauses the goal so the user can decide whether to resume —
- * a backstop against a goal that never calls goal_complete and has no budget.
- */
-const GOAL_MAX_AUTO_ITERATIONS = 50;
 // A fingerprint that has failed this many times in the current session gets a
 // live Tier 4 hint rule registered (2 = the second failure arms it, so the
 // third occurrence is the first to carry the corrective hint).
@@ -1923,9 +1917,12 @@ export class AgentSession {
 		const consecutiveCount = this._toolCallStats.getConsecutiveSimilarResultCount();
 
 		// Escalation tiers: TIER1 → soft reminder, TIER2 → urgent pause, TIER3 → abort.
+		// Tier2/Tier3 clamp above Tier1 so a configured threshold > 3 cannot invert the
+		// order (pause/abort firing before the soft reminder). Default (threshold=2) keeps
+		// the historical 2/4/6 cadence.
 		const TIER1_THRESHOLD = cfg.threshold ?? 2;
-		const TIER2_THRESHOLD = 4;
-		const TIER3_THRESHOLD = 6;
+		const TIER2_THRESHOLD = Math.max(4, TIER1_THRESHOLD + 2);
+		const TIER3_THRESHOLD = Math.max(6, TIER1_THRESHOLD + 4);
 
 		// A fresh or broken streak (a different tool+args just ran) clears which
 		// tiers have fired so the next genuine loop escalates from scratch.
@@ -3004,9 +3001,11 @@ export class AgentSession {
 			this._inGoalContinuation = true;
 			try {
 				let iterations = 0;
+				const maxIterations = this.settingsManager.getGoalMaxAutoIterations();
 				while (!this._userInterrupted && this._goal.shouldAutoContinue()) {
-					if (iterations++ >= GOAL_MAX_AUTO_ITERATIONS) {
+					if (iterations++ >= maxIterations) {
 						this.pauseGoal();
+						this._emitGoalCapNote(maxIterations);
 						break;
 					}
 					// Re-arm the per-attempt failure budget so each continuation gets a
@@ -4163,7 +4162,7 @@ export class AgentSession {
 	private _emitFusionSummary(data: FusionSummaryData): void {
 		const line = {
 			role: "custom" as const,
-			customType: "pi.fusion-summary",
+			customType: "pit.fusion-summary",
 			content: JSON.stringify(data),
 			display: true,
 			timestamp: Date.now(),
@@ -4178,7 +4177,7 @@ export class AgentSession {
 
 	/**
 	 * Emit a one-line Fusion flow note as a DISPLAY-ONLY custom message — it renders in the
-	 * transcript (muted timeline line, via the `pi.fusion-flow` renderer) but is NOT pushed
+	 * transcript (muted timeline line, via the `pit.fusion-flow` renderer) but is NOT pushed
 	 * into agent.state.messages or persisted, so it never enters the model's context. Used
 	 * for the both-failed degradation note: the solo turn that follows owns the real reply,
 	 * and a synthetic assistant message would pollute context and persist as a phantom turn.
@@ -4186,8 +4185,33 @@ export class AgentSession {
 	private _emitFusionNote(text: string): void {
 		const line = {
 			role: "custom" as const,
-			customType: "pi.fusion-flow",
+			customType: "pit.fusion-flow",
 			content: text,
+			display: true,
+			timestamp: Date.now(),
+		};
+		try {
+			this._emit({ type: "message_start", message: line });
+			this._emit({ type: "message_end", message: line });
+		} catch {
+			// note render failure is non-fatal
+		}
+	}
+
+	/**
+	 * Emit an actionable, display-only note when the goal auto-continuation safety
+	 * cap is hit. The goal is paused (not failed); this tells the user how to
+	 * continue and how to raise the cap. Display-only: it renders in the
+	 * transcript but is never fed into the model's context (same pattern as
+	 * `_emitFusionNote`), and a render failure must not break the paused goal.
+	 */
+	private _emitGoalCapNote(maxIterations: number): void {
+		const line = {
+			role: "custom" as const,
+			customType: "pit.goal-cap",
+			content:
+				`Goal paused after ${maxIterations} auto-continuations — ` +
+				"/goal resume to continue, or raise goal.maxAutoIterations.",
 			display: true,
 			timestamp: Date.now(),
 		};

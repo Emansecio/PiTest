@@ -11,14 +11,14 @@ import { getMarkdownTheme, theme } from "../theme/theme.ts";
  * as a clean muted timeline: one plain line each, no purple box, no spacer, no
  * `[customType]` header — distinct from the default custom-message styling.
  */
-const FUSION_FLOW_CUSTOM_TYPE = "pi.fusion-flow";
+const FUSION_FLOW_CUSTOM_TYPE = "pit.fusion-flow";
 
 /**
  * Fusion summary: emitted once per fusion turn with a structured JSON payload
  * describing member results, judge stats, degradation state, and optional
  * synthesis excerpts. Renders as a coloured compact timeline block.
  */
-const FUSION_SUMMARY_CUSTOM_TYPE = "pi.fusion-summary";
+const FUSION_SUMMARY_CUSTOM_TYPE = "pit.fusion-summary";
 
 function labelForKind(kind: FusionSummarySynthesisItem["kind"]): string {
 	if (kind === "consensus") return "consensus";
@@ -112,7 +112,7 @@ export class CustomMessageComponent extends Container {
 
 			// Compose main line segments — each pre-coloured, no outer fg wrap
 			// that would overwrite semantic colours.
-			let mainLine = `  ` + badges + theme.fg("muted", `  fusion  `) + theme.fg("muted", memberParts.join(" · "));
+			let mainLine = `  ${badges}${theme.fg("muted", "  fusion  ")}${theme.fg("muted", memberParts.join(" · "))}`;
 
 			// Judge stats (only non-zero fields).
 			if (data.judge) {
@@ -172,7 +172,7 @@ export class CustomMessageComponent extends Container {
 				for (const item of data.synthesis) {
 					const label = labelForKind(item.kind);
 					const excerpt = item.text.slice(0, 200);
-					const subLine = `    ` + theme.fg("muted", label) + `  ` + theme.fg("dim", excerpt);
+					const subLine = `    ${theme.fg("muted", label)}  ${theme.fg("dim", excerpt)}`;
 					container.addChild(new TruncatedText(subLine));
 				}
 			}

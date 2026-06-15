@@ -16,18 +16,19 @@ import { CONFIG_DIR_NAME } from "../../config.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import { appendMemory, getGlobalMemoryPath, getProjectMemoryPath } from "../memory/index.ts";
 
-const memoryAppendSchema = Type.Object({
-	scope: Type.Union([Type.Literal("project"), Type.Literal("global")], {
-		description:
-			"Where to store the entry. 'project' = ./.<config>/memory/MEMORY.md; 'global' = ~/.<config>/agent/memory/MEMORY.md",
-	}),
-	entry: Type.String({ description: "Single fact, insight, or convention worth remembering across sessions." }),
-	heading: Type.Optional(
-		Type.String({ description: "Optional H2 heading for the entry (otherwise rendered as a bullet)." }),
-	),
-});
+function makeMemoryAppendSchema(configDirName: string) {
+	return Type.Object({
+		scope: Type.Union([Type.Literal("project"), Type.Literal("global")], {
+			description: `Where to store the entry. 'project' = ./${configDirName}/memory/MEMORY.md; 'global' = ~/${configDirName}/agent/memory/MEMORY.md`,
+		}),
+		entry: Type.String({ description: "Single fact, insight, or convention worth remembering across sessions." }),
+		heading: Type.Optional(
+			Type.String({ description: "Optional H2 heading for the entry (otherwise rendered as a bullet)." }),
+		),
+	});
+}
 
-type MemoryAppendInput = Static<typeof memoryAppendSchema>;
+type MemoryAppendInput = Static<ReturnType<typeof makeMemoryAppendSchema>>;
 
 export interface MemoryExtensionOptions {
 	cwd: string;
@@ -45,7 +46,7 @@ export function createMemoryExtension(options: MemoryExtensionOptions) {
 			description:
 				"Append a single durable note to MEMORY.md. Use sparingly for facts that should survive across sessions: conventions, user preferences, project gotchas, or stable architectural decisions. Never store ephemeral state, transient task progress, or anything derivable from git history. The entry is dated automatically.",
 			promptSnippet: "Append a durable, cross-session note to MEMORY.md (scope: project | global).",
-			parameters: memoryAppendSchema,
+			parameters: makeMemoryAppendSchema(configDirName),
 			async execute(_id, { scope, entry, heading }: MemoryAppendInput) {
 				const result = appendMemory({
 					scope,
@@ -68,7 +69,7 @@ export function createMemoryExtension(options: MemoryExtensionOptions) {
 		});
 
 		pi.registerCommand("memory", {
-			description: "Show paths of the project and global MEMORY.md files",
+			description: "Show paths and contents of the project and global MEMORY.md files",
 			async handler(_args, ctx) {
 				const project = getProjectMemoryPath(cwd, configDirName);
 				const global = getGlobalMemoryPath(agentDir);

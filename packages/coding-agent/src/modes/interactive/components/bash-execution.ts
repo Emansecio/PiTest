@@ -75,7 +75,7 @@ export class BashExecutionComponent extends MessageShell {
 			ui,
 			(spinner) => theme.fg(headerColor, spinner),
 			(text) => theme.fg("muted", text),
-			`Running... (${keyText("tui.select.cancel")} to cancel)`,
+			`Running… (${keyText("tui.select.cancel")} to cancel)`,
 		);
 		this.contentContainer.addChild(this.loader);
 	}
@@ -227,7 +227,7 @@ export class BashExecutionComponent extends MessageShell {
 					statusParts.push(`(${keyHint("app.tools.expand", "to collapse")})`);
 				} else {
 					statusParts.push(
-						`${theme.fg("muted", `... ${hiddenLineCount} more lines`)} (${keyHint("app.tools.expand", "to expand")})`,
+						`${theme.fg("muted", `… ${hiddenLineCount} more lines`)} (${keyHint("app.tools.expand", "to expand")})`,
 					);
 				}
 			}

@@ -130,7 +130,7 @@ class SessionSelectorHeader implements Component {
 
 		let scopeText: string;
 		if (this.loading) {
-			const progressText = this.loadProgress ? `${this.loadProgress.loaded}/${this.loadProgress.total}` : "...";
+			const progressText = this.loadProgress ? `${this.loadProgress.loaded}/${this.loadProgress.total}` : "…";
 			scopeText = `${theme.fg("muted", "○ Current Folder | ")}${theme.fg("accent", `Loading ${progressText}`)}`;
 		} else if (this.scope === "current") {
 			scopeText = `${theme.fg("accent", "◉ Current Folder")}${theme.fg("muted", " | ○ All")}`;

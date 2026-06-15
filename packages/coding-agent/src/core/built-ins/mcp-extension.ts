@@ -242,12 +242,15 @@ export function createMcpExtension(options: McpExtensionOptions) {
 					else console.log(msg);
 					return;
 				}
-				const lines = states.map(
-					(s) =>
+				const lines = states.map((s) => {
+					const deferred = shouldDeferMcpServer(s.tools.length, servers[s.name], options.settings);
+					const deferredSuffix = deferred ? " (deferred — discovered on demand)" : "";
+					return (
 						`${s.connected ? "✓" : "✗"} ${s.name} (${s.url})` +
 						`${s.lastError ? ` — ${s.lastError}` : ""}` +
-						`${s.tools.length > 0 ? `\n    tools: ${s.tools.map((t) => t.name).join(", ")}` : ""}`,
-				);
+						`${s.tools.length > 0 ? `\n    tools: ${s.tools.map((t) => t.name).join(", ")}${deferredSuffix}` : ""}`
+					);
+				});
 				const out = lines.join("\n");
 				if (ctx.hasUI) ctx.ui.notify(out, "info");
 				else console.log(out);

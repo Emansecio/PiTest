@@ -42,6 +42,16 @@ function clampInt(raw: unknown, lo: number, hi: number, fallback: number): numbe
 	return Math.max(lo, Math.min(hi, Math.floor(raw)));
 }
 
+/**
+ * Return `raw` when it is one of the `allowed` string-literal values; otherwise
+ * `fallback`. Mirrors the membership-check idiom in `getTreeFilterMode` so the
+ * enum-shaped getters validate against their value set instead of trusting any
+ * stored string.
+ */
+function oneOf<T extends string>(raw: unknown, allowed: readonly T[], fallback: T): T {
+	return typeof raw === "string" && (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback;
+}
+
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
@@ -456,6 +466,16 @@ export interface Settings {
 	/** Interactive TUI tool rendering: "grouped" (default) groups consecutive
 	 * tool calls into activity lines; "legacy" keeps one stacked block per call. */
 	toolActivity?: "grouped" | "legacy";
+	/** Autonomous goal-continuation behavior. */
+	goal?: GoalSettings;
+}
+
+export interface GoalSettings {
+	/**
+	 * Safety cap on autonomous goal continuations spawned from a single user
+	 * prompt. Hitting it pauses the goal so the user can resume. Default: 50.
+	 */
+	maxAutoIterations?: number;
 }
 
 export interface MemorySettings {
@@ -1191,7 +1211,16 @@ export class SettingsManager {
 	}
 
 	getBranchSummarySkipPrompt(): boolean {
-		return this.settings.branchSummary?.skipPrompt ?? false;
+		return this.getBranchSummarySettings().skipPrompt;
+	}
+
+	/**
+	 * Safety cap on autonomous goal continuations from a single prompt. Defaults
+	 * to 50; coerced to a strictly-positive integer so a bad value can't disable
+	 * the backstop.
+	 */
+	getGoalMaxAutoIterations(): number {
+		return posInt(this.settings.goal?.maxAutoIterations, 50);
 	}
 
 	getRetryEnabled(): boolean {
@@ -1380,11 +1409,11 @@ export class SettingsManager {
 	}
 
 	getImageWidthCells(): number {
-		return clampInt(this.settings.terminal?.imageWidthCells, 1, Number.POSITIVE_INFINITY, 60);
+		return clampInt(this.settings.terminal?.imageWidthCells, 1, 400, 60);
 	}
 
 	setImageWidthCells(width: number): void {
-		this.setNested("terminal", "imageWidthCells", Math.max(1, Math.floor(width)));
+		this.setNested("terminal", "imageWidthCells", Math.max(1, Math.min(400, Math.floor(width))));
 	}
 
 	getClearOnShrink(): boolean {
@@ -1432,11 +1461,11 @@ export class SettingsManager {
 	}
 
 	getDoubleEscapeAction(): "fork" | "tree" | "none" {
-		return this.settings.doubleEscapeAction ?? "tree";
+		return oneOf(this.settings.doubleEscapeAction, ["fork", "tree", "none"] as const, "tree");
 	}
 
 	getToolActivity(): "grouped" | "legacy" {
-		return this.settings.toolActivity ?? "grouped";
+		return oneOf(this.settings.toolActivity, ["grouped", "legacy"] as const, "grouped");
 	}
 
 	setDoubleEscapeAction(action: "fork" | "tree" | "none"): void {
@@ -1444,9 +1473,11 @@ export class SettingsManager {
 	}
 
 	getTreeFilterMode(): "default" | "no-tools" | "user-only" | "labeled-only" | "all" {
-		const mode = this.settings.treeFilterMode;
-		const valid = ["default", "no-tools", "user-only", "labeled-only", "all"];
-		return mode && valid.includes(mode) ? mode : "default";
+		return oneOf(
+			this.settings.treeFilterMode,
+			["default", "no-tools", "user-only", "labeled-only", "all"] as const,
+			"default",
+		);
 	}
 
 	setTreeFilterMode(mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all"): void {

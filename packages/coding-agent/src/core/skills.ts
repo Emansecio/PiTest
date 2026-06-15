@@ -553,11 +553,14 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 	const resolvedAgentDir = agentDir ?? getAgentDir();
 
 	const skillMap = new Map<string, Skill>();
+	// Tracks the load source ("user"/"project"/"claude-code"/"path") of each
+	// winning skill so a later collision can report precedence (winner > loser).
+	const skillSourceMap = new Map<string, string>();
 	const realPathSet = new Set<string>();
 	const allDiagnostics: ResourceDiagnostic[] = [];
 	const collisionDiagnostics: ResourceDiagnostic[] = [];
 
-	function addSkills(result: LoadSkillsResult) {
+	function addSkills(result: LoadSkillsResult, source: string) {
 		allDiagnostics.push(...result.diagnostics);
 		for (const skill of result.skills) {
 			// Resolve symlinks to detect duplicate files
@@ -579,18 +582,21 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 						name: skill.name,
 						winnerPath: existing.filePath,
 						loserPath: skill.filePath,
+						winnerSource: skillSourceMap.get(skill.name),
+						loserSource: source,
 					},
 				});
 			} else {
 				skillMap.set(skill.name, skill);
+				skillSourceMap.set(skill.name, source);
 				realPathSet.add(realPath);
 			}
 		}
 	}
 
 	if (includeDefaults) {
-		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true));
-		addSkills(loadSkillsFromDirInternal(resolve(cwd, CONFIG_DIR_NAME, "skills"), "project", true));
+		addSkills(loadSkillsFromDirInternal(join(resolvedAgentDir, "skills"), "user", true), "user");
+		addSkills(loadSkillsFromDirInternal(resolve(cwd, CONFIG_DIR_NAME, "skills"), "project", true), "project");
 		// Claude Code skills (~/.claude/skills/) are loaded as a tertiary user
 		// source — they only fill gaps left by the agent's own skills dir and
 		// project skills, so pit-curated and project-scoped skills always win
@@ -600,7 +606,7 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		// PIT_DISABLE_CLAUDE_CODE_SKILLS).
 		const claudeSkillsDir = getClaudeCodeSkillsDir();
 		if (claudeSkillsDir && existsSync(claudeSkillsDir)) {
-			addSkills(loadSkillsFromDirInternal(claudeSkillsDir, "claude-code", true));
+			addSkills(loadSkillsFromDirInternal(claudeSkillsDir, "claude-code", true), "claude-code");
 		}
 	}
 
@@ -635,11 +641,11 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 			const stats = statSync(resolvedPath);
 			const source = getSource(resolvedPath);
 			if (stats.isDirectory()) {
-				addSkills(loadSkillsFromDirInternal(resolvedPath, source, true));
+				addSkills(loadSkillsFromDirInternal(resolvedPath, source, true), source);
 			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
 				const result = loadSkillFromFile(resolvedPath, source);
 				if (result.skill) {
-					addSkills({ skills: [result.skill], diagnostics: result.diagnostics });
+					addSkills({ skills: [result.skill], diagnostics: result.diagnostics }, source);
 				} else {
 					allDiagnostics.push(...result.diagnostics);
 				}

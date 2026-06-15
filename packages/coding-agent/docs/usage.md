@@ -273,6 +273,45 @@ pit --tools read,grep,find,ls -p "Review the code"
 | `PIT_JSON_CRUSH` | Set to `1` to enable structural crushing of large JSON tool outputs |
 | `PIT_DEFER_HISTORY` | Set to `1` to defer large historical tool outputs to a session store, recallable via `recall_tool_output` |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
+| `PIT_KEY_COOLDOWN_MS` | Cooldown in milliseconds before retrying a rate-limited API key (default: `300000` — 5 minutes). Applies to the per-key cool-down in the credential pool |
+
+Feature kill-switches (all default-ON; set the variable to `1`/`true`/`yes` to disable):
+
+| Variable | Disables |
+|----------|----------|
+| `PIT_NO_GROUNDING` | Symbol grounding — pre-exec resolution of a `debug` breakpoint name / `lsp` workspace-symbol query against the repo-map index + LSP workspace symbols |
+| `PIT_NO_IMPORT_GROUNDING` | Import grounding — pre-exec check that a relative import specifier in a `write`/`edit` resolves on disk |
+| `PIT_NO_PATH_GROUNDING` | Path grounding — pre-exec check that a `read`/`edit` target path exists |
+| `PIT_NO_PATTERN_GROUNDING` | Pattern grounding — pre-exec structural balance-check of a `grep`/`find` regex/glob |
+| `PIT_NO_EDIT_PRECONDITION` | The `edit` dry-run precondition check |
+| `PIT_NO_CODE_MODE` | The code-mode execution path |
+| `PIT_NO_DEBUG_VERIFY` | The debug-driven verification gate |
+| `PIT_NO_REFACTOR_TX` | The refactor-transaction staged multi-file edit primitive |
+| `PIT_NO_LIVING_REPO_MAP` | The git-anchored incremental repo-map index |
+| `PIT_NO_REPEATING_PATTERN` | The repeating-pattern (multi-tool cycle) doom-loop detector |
+| `PIT_NO_STRUCTURAL_COMPACTION` | Structural-only compaction |
+| `PIT_NO_SECRET_REDACT` | Secret redaction on egress |
+| `PIT_NO_LEARNED_ERROR_GUARD` | The learned-error guard (blocks pre-exec calls matching a cross-session error pattern) |
+| `PIT_NO_LEGACY_SKILLS` | Discovery of skills from legacy directories (`.claude/`, `.cursor/`, `.codex/`, `.gemini/`) |
+| `PIT_NO_CLAUDE_CODE_SKILLS` | Loading skills from `~/.claude/skills/` (alias: `PIT_DISABLE_CLAUDE_CODE_SKILLS`) |
+
+### Advanced tuning
+
+Optional knobs for power users. None require changes to work correctly — defaults are tuned for typical use.
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `PIT_SUBAGENT_MAX_DEPTH` | `1` | Maximum sub-agent nesting depth. `0` disables sub-agents entirely |
+| `PIT_SUBAGENT_MAX_BYTES` | `24576` (24 KB) | Byte cap on the output a sub-agent injects into the parent context (tail is kept; full output stays in-memory) |
+| `PIT_BASH_AUTO_BACKGROUND_SECONDS` | `60` | Bash commands that run longer than this are automatically promoted to background jobs instead of being killed. Set to `0` to disable auto-backgrounding |
+| `PIT_CODE_MODE_MAX_RESULT_BYTES` | `262144` (256 KB) | Byte cap on a single tool result re-injected into the code-mode VM |
+| `PIT_FREQ_OUTLINE` | off | Set to `1` to enable the boot-outline heuristic: a symbol outline of the hottest frequent-files is appended to the system prompt each session |
+| `PIT_NARRATION` | off | Set to `1` to enable verbose narration in the system prompt (increases output tokens ~5×) |
+| `PIT_PROACTIVE_PRUNE` | off | Set to `1` to proactively excerpt old large tool outputs from the live context once it crosses the floor below. Protects the 2 most recent turns |
+| `PIT_PROACTIVE_PRUNE_FLOOR` | `64000` | Token floor below which proactive pruning is skipped (only used when `PIT_PROACTIVE_PRUNE=1`) |
+| `PIT_KEY_COOLDOWN_MS` | `300000` | Milliseconds a rate-limited API key stays on cool-down before being retried |
+
+The per-model fallback-chain cool-down (distinct from the per-key cool-down above) is adjustable via `settings.retry.cooldownMs` in `settings.json` (default: `300000` ms). This controls how long a failed model in a fallback chain is skipped before being retried.
 
 ## Design Principles
 

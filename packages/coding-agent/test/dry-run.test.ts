@@ -85,7 +85,7 @@ describe("dry-run builder", () => {
 			resolvedToolNames: ["read"],
 		});
 		const text = formatReportText(report);
-		expect(text).toContain("pi dry-run");
+		expect(text).toContain("pit dry-run");
 		expect(text).toContain("READY");
 	});
 

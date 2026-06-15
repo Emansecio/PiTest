@@ -269,6 +269,10 @@ async function runLoop(
 			if (turnCount >= maxTurns) {
 				const notice = buildTurnBudgetMessage(config, maxTurns);
 				newMessages.push(notice);
+				// Emit a turn_start for this notice turn so the terminal
+				// turn_start/turn_end pair stays balanced (this block runs
+				// before the normal turnCount++/turn_start below).
+				await emit({ type: "turn_start" });
 				await emit({ type: "message_start", message: notice });
 				await emit({ type: "message_end", message: notice });
 				await emit({ type: "turn_end", message: notice, toolResults: [] });
@@ -332,7 +336,7 @@ async function runLoop(
 						provider: config.model.provider,
 						model: config.model.id,
 						stopReason: "error",
-						errorMessage: `TTSR: exceeded ${MAX_TTSR_RETRIES_PER_TURN} retries (rule "${response.ttsr.name}")`,
+						errorMessage: `[stop: ttsr] TTSR: exceeded ${MAX_TTSR_RETRIES_PER_TURN} retries (rule "${response.ttsr.name}")`,
 						timestamp: Date.now(),
 						usage: {
 							input: 0,
@@ -445,7 +449,7 @@ function buildTurnBudgetMessage(config: AgentLoopConfig, maxTurns: number): Assi
 		provider: config.model.provider,
 		model: config.model.id,
 		stopReason: "error",
-		errorMessage: `Reached the turn budget of ${maxTurns} turns in a single run; stopping to avoid an unbounded tool-call loop.`,
+		errorMessage: `[stop: turn-budget] Reached the turn budget of ${maxTurns} turns in a single run; stopping to avoid an unbounded tool-call loop.`,
 		timestamp: Date.now(),
 		usage: {
 			input: 0,

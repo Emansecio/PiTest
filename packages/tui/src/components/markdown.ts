@@ -222,11 +222,11 @@ export class Markdown implements Component {
 		}
 		this.tokenLineCache = nextTokenCache;
 
-		// Add top/bottom padding (empty lines)
-		const emptyLine = " ".repeat(width);
+		// Add top/bottom padding (empty lines).
+		// No background: emit "" (same rule as Text/TruncatedText — no trailing-space pad without bgFn).
 		const emptyLines: string[] = [];
 		for (let i = 0; i < this.paddingY; i++) {
-			const line = bgFn ? applyBackgroundToLine(emptyLine, width, bgFn) : emptyLine;
+			const line = bgFn ? applyBackgroundToLine(" ".repeat(width), width, bgFn) : "";
 			emptyLines.push(line);
 		}
 
@@ -410,10 +410,10 @@ export class Markdown implements Component {
 			if (bgFn) {
 				out.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
 			} else {
-				// No background - just pad to width
-				const visibleLen = visibleWidth(lineWithMargins);
-				const paddingNeeded = Math.max(0, width - visibleLen);
-				out.push(lineWithMargins + " ".repeat(paddingNeeded));
+				// No background: emit the line as-is without right-padding.
+				// Mirrors Text/TruncatedText, which deliberately skip trailing spaces
+				// when no bgFn is set (background extends only via the color function).
+				out.push(lineWithMargins);
 			}
 		}
 		return out;

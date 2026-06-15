@@ -6,6 +6,7 @@ export const BUILT_IN_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 	opencode: "OpenCode Zen",
 	"opencode-go": "OpenCode Go",
 	openai: "OpenAI",
+	"openai-codex": "OpenAI Codex",
 	openrouter: "OpenRouter",
 	xiaomi: "Xiaomi MiMo",
 };

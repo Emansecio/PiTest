@@ -334,6 +334,11 @@ interface ToolRegistryEntry {
  * instead of edits across nine sites. Renaming a tool (e.g. `search_tool_bm25`)
  * is now a single key rename too; left as-is to avoid changing the
  * model-facing tool name and any settings that reference it.
+ *
+ * Scope: the `coding` gates here govern the SDK export `createCodingTools`
+ * (which tools land in a coding-surface build). They do NOT decide the TUI's
+ * active surface — that is `_defaultActiveToolNames` in agent-session.ts, which
+ * can gate differently (e.g. `code` additionally requires eval to be enabled).
  */
 const TOOL_REGISTRY = {
 	read: {
@@ -738,7 +743,13 @@ export const chromeFeatureToolNames: ToolName[] = toolNamesInOrder().filter(
 	(name) => registry[name].coding === "chromeDevtools",
 );
 
-/** Whether a coding-surface gate is open given the supplied options. */
+/**
+ * Whether a coding-surface gate is open given the supplied options.
+ *
+ * Gate convention: `code` honors env PIT_NO_CODE_MODE + settings code.enabled
+ * (and requires eval.enabled); `debug`/`lsp` are settings-only
+ * (debug.enabled/lsp.enabled). No env opt-out for the latter two.
+ */
 function codingGateOpen(gate: CodingGate, options?: ToolsOptions): boolean {
 	switch (gate) {
 		case "always":
@@ -760,7 +771,11 @@ function codingGateOpen(gate: CodingGate, options?: ToolsOptions): boolean {
 			return options?.debug?.enabled !== false;
 		case "code":
 			// Default ON: opt out via `code.enabled: false` (or env PIT_NO_CODE_MODE).
+			// Also requires eval: code-mode rides on the JS eval kernel for its
+			// bidirectional tool channel, matching the TUI surface gate in
+			// agent-session._defaultActiveToolNames (code is gated on eval being on).
 			if (isTruthyEnvFlag(process.env.PIT_NO_CODE_MODE)) return false;
+			if (options?.eval?.enabled === false) return false;
 			return options?.code?.enabled !== false;
 	}
 }

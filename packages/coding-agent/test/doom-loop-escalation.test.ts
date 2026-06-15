@@ -76,6 +76,31 @@ describe("doom-loop escalation", () => {
 		expect(aborted).toBe(false);
 	});
 
+	it("keeps tier order when threshold > 3 (abort clamps above the soft reminder)", async () => {
+		// With threshold=5 the abort must clamp to max(6, 5+4)=9 instead of the literal
+		// 6, so the soft reminder (tier 1 at 5) still fires before the urgent pause and
+		// the abort. The pre-fix literals (4/6) would have inverted the order: the pause
+		// at 4 and abort at 6 both fire before the configured tier-1 threshold of 5.
+		const harness = await createHarness({
+			settings: { toolFeedback: { doomLoopReminder: { enabled: true, threshold: 5 } } },
+		});
+		harnesses.push(harness);
+
+		const fixated = fauxAssistantMessage([fauxToolCall("read", { path: "does-not-exist.txt" })], {
+			stopReason: "toolUse",
+		});
+		harness.setResponses(Array.from({ length: 14 }, () => fixated));
+
+		await harness.session.prompt("read the file");
+
+		const abortMsg = harness.session.messages.find(
+			(m) => m.role === "assistant" && errorMessageOf(m).includes("Doom loop abort"),
+		);
+		expect(abortMsg).toBeDefined();
+		// Aborts at the clamped tier-3 count of 9, not the old literal 6.
+		expect(errorMessageOf(abortMsg)).toContain("9 consecutive");
+	});
+
 	it("does not abort identical calls that return a NEW result each time (real progress)", async () => {
 		// A tool whose args never change but whose RESULT advances every call — the
 		// canonical false positive (debugger stepping, tailing a growing log). The

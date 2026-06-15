@@ -15,7 +15,7 @@ import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
-import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
+import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
 // Heavy mode-real-only graphs (agent-session-services pulls the full harness/SDK
 // graph, ~1s of module eval) are loaded lazily inside main()/helpers AFTER the
 // early-exits (--version, --export) so those paths don't pay for modules they
@@ -822,6 +822,12 @@ export async function main(args: string[], options?: MainOptions) {
 		printTimings();
 		await interactiveMode.run();
 	} else {
+		if (!initialMessage && parsed.messages.length === 0) {
+			console.error(
+				chalk.red(`No prompt provided. Pass a message (${APP_NAME} -p "...") or pipe input (… | ${APP_NAME} -p).`),
+			);
+			process.exit(1);
+		}
 		printTimings();
 		const exitCode = await runPrintMode(runtime, {
 			mode: toPrintOutputMode(appMode),

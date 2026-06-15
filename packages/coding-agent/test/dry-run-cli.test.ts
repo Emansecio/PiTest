@@ -149,7 +149,7 @@ describe("pi --dry-run (E2E)", () => {
 		it("text format includes 'pi dry-run' header and tool list", () => {
 			const result = runCli(["--dry-run", "text", "--no-extensions", "--no-skills"], cwd, agentDir);
 			expect(result.status).toBe(1);
-			expect(result.stdout).toContain("pi dry-run");
+			expect(result.stdout).toContain("pit dry-run");
 			expect(result.stdout).toContain("Model & auth");
 			expect(result.stdout).toContain("Permissions");
 		});

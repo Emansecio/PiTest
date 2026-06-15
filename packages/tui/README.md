@@ -383,10 +383,10 @@ const loader = new Loader(
   tui,                              // TUI instance for render updates
   (s) => chalk.cyan(s),            // spinner color function
   (s) => chalk.gray(s),            // message color function
-  "Loading..."                      // message (default: "Loading...")
+  "Loading…"                        // message (default: "Loading…")
 );
 loader.start();
-loader.setMessage("Still loading...");
+loader.setMessage("Still loading…");
 loader.stop();
 ```
 
@@ -399,7 +399,7 @@ const loader = new CancellableLoader(
   tui,                              // TUI instance for render updates
   (s) => chalk.cyan(s),            // spinner color function
   (s) => chalk.gray(s),            // message color function
-  "Working..."                      // message
+  "Working…"                        // message
 );
 loader.onAbort = () => done(null); // Called when user presses Escape
 doAsyncWork(loader.signal).then(done);

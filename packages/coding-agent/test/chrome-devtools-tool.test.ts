@@ -38,7 +38,7 @@ describe("chrome_devtools tools", () => {
 		const def = createChromeListPagesDefinition();
 		const res = await runExec(def, {});
 		expect(res.details.ok).toBe(false);
-		expect(text(res)).toMatch(/not enabled/i);
+		expect(text(res)).toMatch(/unavailable/i);
 	});
 
 	it("list_pages renders the page list", async () => {

@@ -132,13 +132,14 @@ export class Box implements Component {
 	}
 
 	private applyBg(line: string, width: number): string {
-		const visLen = visibleWidth(line);
-		const padNeeded = Math.max(0, width - visLen);
-		const padded = line + " ".repeat(padNeeded);
-
 		if (this.bgFn) {
+			const visLen = visibleWidth(line);
+			const padNeeded = Math.max(0, width - visLen);
+			const padded = line + " ".repeat(padNeeded);
 			return applyBackgroundToLine(padded, width, this.bgFn);
 		}
-		return padded;
+		// No background: return the line without trailing-space padding,
+		// mirroring Text/TruncatedText (padding serves no purpose without bgFn).
+		return line;
 	}
 }

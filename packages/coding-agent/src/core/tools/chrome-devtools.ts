@@ -58,7 +58,9 @@ function buildChromeTool<S extends TSchema>(spec: ChromeToolSpec<S>): ToolDefini
 		async execute(_toolCallId: string, input: Static<S>, signal: AbortSignal | undefined) {
 			const mgr = getCurrentChromeDevtoolsManager();
 			if (!mgr) {
-				return fail("Chrome DevTools is not enabled. Enable it in settings (chromeDevtools.enabled).");
+				return fail(
+					"Chrome DevTools unavailable in this session. Ensure Chrome is reachable (chromeDevtools is on by default) and retry.",
+				);
 			}
 			try {
 				return await spec.run(mgr, input, signal);

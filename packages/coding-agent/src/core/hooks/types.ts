@@ -2,7 +2,7 @@
  * Declarative hook system, settings-driven.
  *
  * Hook events:
- * - PreToolUse: fires before a tool call. Hook may block (decision: "deny") or
+ * - PreToolUse: fires before a tool call. Hook may block (decision: "block") or
  *   mutate the tool args via a returned `inputOverride`.
  * - PostToolUse: fires after a tool call, with the result. Hook may transform
  *   the content via `outputOverride` or mark the result as error.
