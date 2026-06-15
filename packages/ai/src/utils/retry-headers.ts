@@ -19,8 +19,8 @@ export interface RetryHeaderLookup {
 	get(name: string): string | null;
 }
 
-/** Statuses we always retry: rate-limit plus the transient 5xx family. */
-const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+/** Statuses we always retry: rate-limit, the transient 5xx family, and 529 (overloaded). */
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
 
 /**
  * Whether an HTTP status should be retried. 429 (rate limit) and the transient

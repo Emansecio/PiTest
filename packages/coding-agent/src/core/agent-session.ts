@@ -467,7 +467,14 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 
 // Hoisted so it isn't recompiled on every error message checked for retry.
 const RETRYABLE_ERROR_RE =
-	/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
+	/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|529|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i;
+
+/**
+ * Hard cap on a single auto-retry backoff wait, so a long provider-overloaded
+ * (HTTP 529) window can't push a late attempt into a multi-minute sleep while
+ * still letting the backoff grow enough to ride out the outage.
+ */
+const RETRY_MAX_DELAY_MS = 30_000;
 
 // ============================================================================
 // AgentSession Class
@@ -5451,7 +5458,8 @@ export class AgentSession {
 
 		// Jitter the exponential backoff to avoid a thundering-herd retry storm
 		// against the provider when many sessions fail at once.
-		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1) * (0.5 + Math.random());
+		const cappedBackoff = Math.min(settings.baseDelayMs * 2 ** (this._retryAttempt - 1), RETRY_MAX_DELAY_MS);
+		const delayMs = cappedBackoff * (0.5 + Math.random());
 
 		this._emit({
 			type: "auto_retry_start",

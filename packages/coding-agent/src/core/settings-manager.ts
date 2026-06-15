@@ -73,8 +73,8 @@ export interface ProviderRetrySettings {
 
 export interface RetrySettings {
 	enabled?: boolean; // default: true
-	maxRetries?: number; // default: 3
-	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s)
+	maxRetries?: number; // default: 5
+	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s, 16s, capped at 30s)
 	provider?: ProviderRetrySettings;
 	fallbackChains?: Record<string, string[]>; // per-role fallback model chains (consumed by model-resolver.ts)
 	cooldownMs?: number; // default: 300000 — cooldown before retrying a failed model in a fallback chain (agent-session.ts)
@@ -1234,7 +1234,7 @@ export class SettingsManager {
 	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
 		return {
 			enabled: this.getRetryEnabled(),
-			maxRetries: this.settings.retry?.maxRetries ?? 3,
+			maxRetries: this.settings.retry?.maxRetries ?? 5,
 			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
 		};
 	}
