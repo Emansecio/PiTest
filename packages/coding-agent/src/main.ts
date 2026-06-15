@@ -24,6 +24,7 @@ import type { CreateAgentSessionRuntimeFactory } from "./core/agent-session-runt
 import type { AgentSessionRuntimeDiagnostic } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
+import { ensureClaudeCodeVersionEnv } from "./core/claude-code-version.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
@@ -488,6 +489,15 @@ export async function main(args: string[], options?: MainOptions) {
 	if (offlineMode) {
 		process.env.PIT_OFFLINE = "1";
 		process.env.PIT_SKIP_VERSION_CHECK = "1";
+	}
+
+	// Spoof a current Claude Code user-agent for Anthropic OAuth routing: detect
+	// the installed `claude --version` once, before the first model request, so
+	// the spoofed version tracks the real release instead of drifting behind
+	// (a stale version draws intermittent OAuth 5xx). Skipped offline and when
+	// PIT_CLAUDE_CODE_VERSION is already pinned.
+	if (!offlineMode) {
+		ensureClaudeCodeVersionEnv();
 	}
 
 	// Fire-and-forget: prune week-old pi-bash-*/pi-output-* logs from tmpdir
