@@ -1,0 +1,1 @@
+Count how many files with the `.mjs` extension exist directly inside the `src/` directory (top level only — do not count files in subdirectories). Write just that number (only the digits) to a file named `count.txt` in the project root.

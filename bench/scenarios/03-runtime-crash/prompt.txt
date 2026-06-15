@@ -1,0 +1,1 @@
+`node app.mjs` crashes with a TypeError. Fix the root cause so it runs and prints the correct total. Do not change the cart data or the output format (it must print a line `TOTAL=<number>`).

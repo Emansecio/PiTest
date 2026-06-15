@@ -19,6 +19,8 @@
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
 		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
 		"bench:tool-rewrites": "tsx scripts/bench-tool-rewrites.mts",
+		"bench:compare": "tsx bench/run-all.mts",
+		"bench:compare:one": "tsx bench/runner.mts",
 		"learn:report": "tsx scripts/learned-errors-report.mts",
 		"test": "npm run test --workspaces --if-present",
 		"version:patch": "npm version patch -ws --no-git-tag-version && node scripts/sync-versions.js && shx rm -rf node_modules packages/*/node_modules package-lock.json && npm install",

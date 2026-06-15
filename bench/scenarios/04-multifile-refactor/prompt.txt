@@ -1,0 +1,1 @@
+Rename the function `getUserName` to `resolveDisplayName` everywhere in this project — its definition in user.mjs and every import and call site (a.mjs, b.mjs, c.mjs). Behavior must stay exactly the same; `node main.mjs` must still print the same three lines.

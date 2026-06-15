@@ -1,0 +1,6 @@
+{
+	"id": "02-bug-fix-verify",
+	"title": "Corrigir bug a partir de teste falho (sem editar o teste)",
+	"angle": "debug guiado por teste + anti-cheat",
+	"timeoutSec": 420
+}

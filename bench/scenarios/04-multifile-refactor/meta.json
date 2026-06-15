@@ -1,0 +1,6 @@
+{
+	"id": "04-multifile-refactor",
+	"title": "Renomear símbolo em todos os arquivos",
+	"angle": "refactor cross-file / coerência + grounding",
+	"timeoutSec": 420
+}

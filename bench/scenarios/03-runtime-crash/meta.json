@@ -1,0 +1,6 @@
+{
+	"id": "03-runtime-crash",
+	"title": "Corrigir crash em runtime (stack trace)",
+	"angle": "debug guiado por exceção em runtime",
+	"timeoutSec": 300
+}

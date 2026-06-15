@@ -1,0 +1,1 @@
+In config.mjs, change ONLY the `retryMs` value from 1000 to 2500. Every other field must remain exactly as it is (several fields also have the value 1000 — do not touch those). Do not reformat the file.

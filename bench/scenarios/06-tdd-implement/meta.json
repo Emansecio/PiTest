@@ -1,0 +1,6 @@
+{
+	"id": "06-tdd-implement",
+	"title": "Implementar para satisfazer testes (sem editá-los)",
+	"angle": "build-to-spec / TDD + anti-cheat",
+	"timeoutSec": 360
+}

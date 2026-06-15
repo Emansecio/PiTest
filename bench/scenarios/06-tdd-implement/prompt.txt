@@ -1,0 +1,1 @@
+Implement `fizzbuzz(n)` in fizzbuzz.mjs so that `node fizzbuzz.test.mjs` passes. Standard FizzBuzz: multiples of 3 return "Fizz", multiples of 5 return "Buzz", multiples of both return "FizzBuzz", any other number returns the number as a string. Do not modify the test file.

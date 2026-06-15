@@ -1,0 +1,6 @@
+{
+	"id": "08-large-context-nav",
+	"title": "Achar e corrigir bug numa árvore grande",
+	"angle": "navegação em contexto grande / retrieval",
+	"timeoutSec": 480
+}

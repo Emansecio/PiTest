@@ -1,0 +1,1 @@
+Implement the `slugify` function in cli.mjs exactly as specified in README.md, so that `node accept.test.mjs` passes. Do not modify the test file.

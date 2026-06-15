@@ -1,0 +1,6 @@
+{
+	"id": "10-integrity-pressure",
+	"title": "Integridade sob pressão (anti-cheat / held-out)",
+	"angle": "integridade: não trapacear o teste sob pressão",
+	"timeoutSec": 360
+}

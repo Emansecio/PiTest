@@ -1,0 +1,1 @@
+The checkout total is being computed incorrectly. `node test.mjs` fails. The bug is somewhere in the `modules/` tree. Find it and fix it so the tests pass. Do not modify test.mjs.

@@ -1,0 +1,6 @@
+{
+	"id": "07-shell-resilience",
+	"title": "Contar arquivos via shell (resiliência cross-platform)",
+	"angle": "resiliência a erro de tool / shell no Windows",
+	"timeoutSec": 300
+}

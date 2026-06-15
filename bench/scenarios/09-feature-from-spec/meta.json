@@ -1,0 +1,6 @@
+{
+	"id": "09-feature-from-spec",
+	"title": "Implementar feature a partir de spec (README → testes de aceite)",
+	"angle": "feature-from-spec end-to-end",
+	"timeoutSec": 420
+}

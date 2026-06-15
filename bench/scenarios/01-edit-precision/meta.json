@@ -1,0 +1,6 @@
+{
+	"id": "01-edit-precision",
+	"title": "Edição cirúrgica entre linhas idênticas",
+	"angle": "precisão de edição / targeting",
+	"timeoutSec": 300
+}

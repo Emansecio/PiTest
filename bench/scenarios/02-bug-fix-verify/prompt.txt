@@ -1,0 +1,1 @@
+Running `node sum.test.mjs` fails. Find and fix the bug in sum.mjs so every test passes. Do not modify sum.test.mjs — only fix the source.
