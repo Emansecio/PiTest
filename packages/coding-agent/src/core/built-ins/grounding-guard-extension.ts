@@ -18,7 +18,7 @@
  * PIT_NO_GROUNDING_GUARD.
  */
 
-import { suggestClosest } from "@pit/ai";
+import { recordDiagnostic, suggestClosest } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import {
 	GROUNDING_GUARD_DEFAULTS,
@@ -109,6 +109,12 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 				if (decision.action === "rewrite") {
 					// event.input is mutable in place; patch the corrected args and PASS.
 					Object.assign(input, decision.args);
+					recordDiagnostic({
+						category: "guard.grounding",
+						level: "info",
+						source: "grounding-guard-extension",
+						context: { note: event.toolName },
+					});
 					return undefined;
 				}
 				if (decision.action === "block") {
@@ -117,6 +123,12 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 					const key = `${event.toolName}:${JSON.stringify(input, Object.keys(input).sort())}`;
 					if (fired.has(key)) return undefined; // already advised once -> let it run
 					fired.add(key);
+					recordDiagnostic({
+						category: "guard.grounding",
+						level: "info",
+						source: "grounding-guard-extension",
+						context: { note: event.toolName },
+					});
 					return { block: true, reason: decision.message };
 				}
 				return undefined;

@@ -20,6 +20,7 @@
  * `sampleArgs` captured from the canonical `path` form.
  */
 
+import { recordDiagnostic } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import {
 	type AggregatedLearnedError,
@@ -119,6 +120,12 @@ export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptio
 			// truly means it, so the guard can never wedge a legitimate retry.
 			if (blocked.has(key)) return undefined;
 			blocked.add(key);
+			recordDiagnostic({
+				category: "guard.learned-error",
+				level: "info",
+				source: "learned-error-guard-extension",
+				context: { note: `${event.toolName} ${fingerprint}` },
+			});
 			return {
 				block: true,
 				reason:

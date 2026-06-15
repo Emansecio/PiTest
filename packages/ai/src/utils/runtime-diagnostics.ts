@@ -38,7 +38,14 @@ export type DiagnosticCategory =
 	| "input.truncated"
 	| "fusion.member-failed"
 	| "fusion.judge-retry"
-	| "fusion.degraded";
+	| "fusion.degraded"
+	| "guard.grounding"
+	| "guard.import-grounding"
+	| "guard.path-grounding"
+	| "guard.pattern-grounding"
+	| "guard.edit-precondition"
+	| "guard.read"
+	| "guard.learned-error";
 
 export interface DiagnosticContext {
 	/** Byte size involved (cap hit, payload, buffer depth). */

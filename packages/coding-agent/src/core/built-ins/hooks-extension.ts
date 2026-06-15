@@ -33,6 +33,7 @@ export interface HooksExtensionOptions {
 function logErrors(
 	executions: HookExecutionResult[],
 	event: string,
+	ctx: { hasUI: boolean; ui: { notify: (msg: string, level: "warning" | "info") => void } },
 	onExecution?: (e: string, r: HookExecutionResult) => void,
 ) {
 	for (const exec of executions) {
@@ -40,7 +41,12 @@ function logErrors(
 		if (exec.exitCode !== 0 && !exec.parsed) {
 			const name = exec.hook.name ?? exec.hook.command;
 			const msg = (exec.stderr || exec.rawError || `exit ${exec.exitCode}`).trim().slice(0, 200);
-			console.error(`[hook] ${event}/${name}: ${msg}`);
+			const line = `[hook] ${event}/${name}: ${msg}`;
+			if (ctx.hasUI) {
+				ctx.ui.notify(line, "warning");
+			} else {
+				console.error(line);
+			}
 		}
 	}
 }
@@ -74,7 +80,7 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 					cwd,
 					signal: ctx.signal,
 				});
-				logErrors(executions, "PreToolUse", onExecution);
+				logErrors(executions, "PreToolUse", ctx, onExecution);
 				// Apply input overrides from non-blocking hooks.
 				for (const exec of executions) {
 					if (exec.parsed?.inputOverride && typeof exec.parsed.inputOverride === "object") {
@@ -109,7 +115,7 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 					cwd,
 					signal: ctx.signal,
 				});
-				logErrors(executions, "PostToolUse", onExecution);
+				logErrors(executions, "PostToolUse", ctx, onExecution);
 
 				let newOutput: string | undefined;
 				let isError = event.isError;
@@ -148,7 +154,7 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 					cwd,
 					signal: ctx.signal,
 				});
-				logErrors(executions, "UserPromptSubmit", onExecution);
+				logErrors(executions, "UserPromptSubmit", ctx, onExecution);
 				if (blocked) {
 					if (ctx.hasUI) {
 						ctx.ui.notify(`Prompt blocked by hook: ${blocked.parsed?.reason ?? "no reason"}`, "warning");
@@ -181,7 +187,7 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 					cwd: ctx.cwd,
 				};
 				const { executions } = await runHookChain(matched, payload, { cwd, signal: ctx.signal });
-				logErrors(executions, "Stop", onExecution);
+				logErrors(executions, "Stop", ctx, onExecution);
 			});
 		}
 
@@ -195,7 +201,7 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 					cwd: ctx.cwd,
 				};
 				const { executions } = await runHookChain(matched, payload, { cwd, signal: ctx.signal });
-				logErrors(executions, "SessionStart", onExecution);
+				logErrors(executions, "SessionStart", ctx, onExecution);
 				// The agent loop hasn't started yet, so there is no prompt to augment.
 				// Surface any additionalContext via the UI when one is available;
 				// otherwise it is still captured by onExecution for audit.
@@ -230,7 +236,7 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 					cwd,
 					signal: event.signal,
 				});
-				logErrors(executions, "PreCompact", onExecution);
+				logErrors(executions, "PreCompact", ctx, onExecution);
 				// SessionBeforeCompactResult has no additionalContext field — PreCompact
 				// is informative only and never cancels or customizes compaction.
 				return undefined;

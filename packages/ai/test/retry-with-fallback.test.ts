@@ -27,6 +27,8 @@ class HttpError extends Error {
 describe("defaultIsRetryable", () => {
 	test("returns true for retryable HTTP statuses", () => {
 		expect(defaultIsRetryable(new HttpError(429))).toBe(true);
+		// 500 is retryable here to match retry-headers.ts (transient 5xx family).
+		expect(defaultIsRetryable(new HttpError(500))).toBe(true);
 		expect(defaultIsRetryable(new HttpError(502))).toBe(true);
 		expect(defaultIsRetryable(new HttpError(503))).toBe(true);
 		expect(defaultIsRetryable(new HttpError(504))).toBe(true);

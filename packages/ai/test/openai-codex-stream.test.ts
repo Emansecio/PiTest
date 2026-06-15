@@ -1487,4 +1487,154 @@ describe("openai-codex streaming", () => {
 
 		expect(deltas).toEqual(["AAA", "BBB", "CCC", "DDD"]);
 	});
+
+	it("honors options.maxRetries as the SSE retry ceiling", async () => {
+		const token = mockToken();
+		let codexRequests = 0;
+
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			codexRequests++;
+			// Always 429 so the loop exhausts its retry budget.
+			return new Response(JSON.stringify({ error: { code: "rate_limit_exceeded", message: "rate limited" } }), {
+				status: 429,
+				// retry-after-ms: 0 so retries fire immediately under real timers.
+				headers: { "content-type": "application/json", "retry-after-ms": "0" },
+			});
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		// maxRetries: 1 → 2 total attempts (initial + 1 retry).
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			transport: "sse",
+			maxRetries: 1,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(codexRequests).toBe(2);
+	});
+
+	it("makes exactly one SSE attempt when options.maxRetries is 0", async () => {
+		const token = mockToken();
+		let codexRequests = 0;
+
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			codexRequests++;
+			return new Response(JSON.stringify({ error: { code: "rate_limit_exceeded", message: "rate limited" } }), {
+				status: 429,
+				headers: { "content-type": "application/json", "retry-after-ms": "0" },
+			});
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			transport: "sse",
+			maxRetries: 0,
+		}).result();
+
+		// maxRetries: 0 → single attempt, no retry loop, no hang.
+		expect(result.stopReason).toBe("error");
+		expect(codexRequests).toBe(1);
+	});
+
+	it("uses options.timeoutMs for the SSE connect-phase watchdog", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-05-13T00:00:00Z"));
+		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+		const token = mockToken();
+		const encoder = new TextEncoder();
+		const sse = buildSSEPayload({ status: "completed" });
+
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url !== "https://chatgpt.com/backend-api/codex/responses") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			return new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(encoder.encode(sse));
+						controller.close();
+					},
+				}),
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const resultPromise = streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			transport: "sse",
+			timeoutMs: 5_000,
+		}).result();
+		await vi.advanceTimersByTimeAsync(0);
+		await vi.advanceTimersToNextTimerAsync();
+		await resultPromise;
+
+		// The connect-phase watchdog is armed with the caller's timeoutMs (5s),
+		// not the hardcoded 60s default.
+		const connectTimerDelays = setTimeoutSpy.mock.calls.map((call) => call[1]);
+		expect(connectTimerDelays).toContain(5_000);
+		expect(connectTimerDelays).not.toContain(60_000);
+	});
 });

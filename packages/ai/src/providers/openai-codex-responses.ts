@@ -230,19 +230,27 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				}
 			}
 
-			// Fetch with retry logic for rate limits and transient errors
+			// Fetch with retry logic for rate limits and transient errors.
+			// Honor caller-provided maxRetries/timeoutMs (StreamOptions) like the
+			// Anthropic/OpenAI providers do; fall back to the Codex defaults when
+			// unset. maxRetries=0 means a single attempt (no retries), not an
+			// infinite loop — Math.max(0, ...) guards against negative input.
+			const maxRetries = Math.max(0, options?.maxRetries ?? MAX_RETRIES);
+			const connectTimeoutMs = options?.timeoutMs ?? 60_000;
 			let response: Response | undefined;
 			let lastError: Error | undefined;
 
-			for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+			for (let attempt = 0; attempt <= maxRetries; attempt++) {
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
 
 				try {
 					connectTimer = setTimeout(() => {
-						connectController.abort(new Error("Codex connect timeout after 60s"));
-					}, 60_000);
+						connectController.abort(
+							new Error(`Codex connect timeout after ${Math.round(connectTimeoutMs / 1000)}s`),
+						);
+					}, connectTimeoutMs);
 					response = await fetch(resolveCodexUrl(model.baseUrl), {
 						method: "POST",
 						headers: sseHeaders,
@@ -260,7 +268,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					}
 
 					const errorText = await response.text();
-					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
+					if (attempt < maxRetries && isRetryableError(response.status, errorText)) {
 						// Honor the server's requested retry-after verbatim when present;
 						// otherwise jitter an exponential backoff to avoid a thundering-herd
 						// retry storm against the provider.
@@ -287,7 +295,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
 					// Network errors are retryable
-					if (attempt < MAX_RETRIES && !lastError.message.includes("usage limit")) {
+					if (attempt < maxRetries && !lastError.message.includes("usage limit")) {
 						const delayMs = computeRetryDelay(attempt, null, { baseDelayMs: BASE_DELAY_MS });
 						await sleep(delayMs, options?.signal);
 						continue;

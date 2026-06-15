@@ -258,6 +258,8 @@ See [permissions.md](permissions.md) for the full rule format and precedence.
 | `hooks.PostToolUse` | array | `[]` | Hooks fired after each tool call. May transform output. |
 | `hooks.UserPromptSubmit` | array | `[]` | Hooks fired when the user submits a prompt. May block or add context. |
 | `hooks.Stop` | array | `[]` | Hooks fired when the agent finishes a turn. |
+| `hooks.SessionStart` | array | `[]` | Hooks fired when a session starts, loads, or reloads. Informative only — cannot block. |
+| `hooks.PreCompact` | array | `[]` | Hooks fired before context compaction runs. Informative only — cannot block or cancel. |
 
 Each entry: `{ command, matcher?, shell?, timeoutMs?, cwd?, name? }`. See [hooks.md](hooks.md) for the JSON stdin/stdout contract.
 

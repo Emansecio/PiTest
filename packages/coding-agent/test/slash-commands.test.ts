@@ -30,6 +30,7 @@ const DISPATCHED_COMMANDS = [
 	"cache-status",
 	"diagnostics",
 	"changelog",
+	"help",
 	"hotkeys",
 	"login",
 	"logout",

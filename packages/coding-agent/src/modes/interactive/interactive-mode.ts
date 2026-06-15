@@ -18,6 +18,7 @@ import {
 	type OAuthProviderId,
 	type OAuthSelectPrompt,
 	onDiagnostic,
+	suggestClosest,
 } from "@pit/ai";
 import type {
 	AutocompleteItem,
@@ -477,6 +478,7 @@ export class InteractiveMode {
 		["/cache-status", (s) => s.handleCacheStatusCommand()],
 		["/diagnostics", (s) => s.handleDiagnosticsCommand()],
 		["/changelog", (s) => s.handleChangelogCommand()],
+		["/help", (s) => s.handleHelpCommand()],
 		["/hotkeys", (s) => s.handleHotkeysCommand()],
 		["/login", (s) => s.showOAuthSelector("login")],
 		["/logout", (s) => s.showOAuthSelector("logout")],
@@ -1240,9 +1242,12 @@ export class InteractiveMode {
 		if (showDiagnostics) {
 			const skillDiagnostics = skillsResult.diagnostics;
 			if (skillDiagnostics.length > 0) {
-				this.chatContainer.addChild(
-					new DiagnosticsBlockComponent("[Skill conflicts]", skillDiagnostics, sourceInfos),
-				);
+				const duplicateCount = skillDiagnostics.filter((d) => d.type === "collision").length;
+				const skillLabel =
+					duplicateCount > 0
+						? `[Skills: ${duplicateCount} duplicate${duplicateCount === 1 ? "" : "s"} ignored]`
+						: "[Skills: notices]";
+				this.chatContainer.addChild(new DiagnosticsBlockComponent(skillLabel, skillDiagnostics, sourceInfos));
 			}
 
 			const promptDiagnostics = promptsResult.diagnostics;
@@ -2585,7 +2590,10 @@ export class InteractiveMode {
 		if (!match) return false;
 		const name = match[1];
 		if (this._knownCommandNames.has(name)) return false;
-		const suggestion = fuzzyFilter([...this._knownCommandNames], name, (n) => n).at(0);
+		const suggestion = suggestClosest(name, [...this._knownCommandNames], {
+			maxDistance: 3,
+			prefixMinOverlap: 3,
+		});
 		const hint = suggestion ? ` Did you mean /${suggestion}?` : "";
 		this.showWarning(`Unknown command: /${name}.${hint}`);
 		this.editor.setText(text);
@@ -5772,6 +5780,25 @@ export class InteractiveMode {
 	 */
 	private getEditorKeyDisplay(action: Keybinding): string {
 		return keyDisplayText(action);
+	}
+
+	private handleHelpCommand(): void {
+		const visible = BUILTIN_SLASH_COMMANDS.filter((command) => !command.hidden);
+		const rows = visible.map((command) => `| \`/${command.name}\` | ${command.description} |`).join("\n");
+		const help = `**Slash commands**
+| Command | Description |
+|---------|-------------|
+${rows}
+
+Type \`/hotkeys\` for keyboard shortcuts.`;
+
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(mutedBorderRule());
+		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Help")), 1, 0));
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(new Markdown(help.trim(), 1, 1, this.getMarkdownThemeWithSettings()));
+		this.chatContainer.addChild(mutedBorderRule());
+		this.ui.requestRender();
 	}
 
 	private handleHotkeysCommand(): void {

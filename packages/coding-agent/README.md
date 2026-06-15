@@ -650,6 +650,7 @@ Feature kill-switches (all default-ON; set the variable to `1`/`true`/`yes` to d
 | `PIT_NO_REPEATING_PATTERN` | The repeating-pattern (multi-tool cycle) doom-loop detector |
 | `PIT_NO_STRUCTURAL_COMPACTION` | Structural-only compaction |
 | `PIT_NO_SECRET_REDACT` | Secret redaction on egress |
+| `PIT_NO_CLAUDE_CODE_SKILLS` | Loading skills from `~/.claude/skills/` (alias: `PIT_DISABLE_CLAUDE_CODE_SKILLS`) |
 
 ---
 

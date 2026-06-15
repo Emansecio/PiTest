@@ -12,6 +12,8 @@ language with stdio access works — shell, Python, Go, anything.
 | `PostToolUse` | After a tool returns | no (can transform output) | redact secrets, summarize long output |
 | `UserPromptSubmit` | After the user submits a prompt, before the agent loop | yes (cancels the turn) | inject context, enforce prompt policy |
 | `Stop` | When the agent finishes a turn | no | auto-lint, auto-commit, post-run notification |
+| `SessionStart` | When a session is started, loaded, or reloaded | no — informative only | startup notifications, env validation |
+| `PreCompact` | Before context compaction runs | no — informative only; cannot cancel compaction | logging, external notifications |
 
 ## Configuration
 
@@ -64,6 +66,12 @@ Each hook receives a JSON payload on **stdin**:
 
 // Stop
 { "event": "Stop", "turnIndex": 4, "cwd": "/…" }
+
+// SessionStart
+{ "event": "SessionStart", "reason": "startup", "cwd": "/…" }
+
+// PreCompact
+{ "event": "PreCompact", "cwd": "/…", "tokensBefore": 142000, "messagesToSummarize": 38, "turnPrefixMessages": 4, "isSplitTurn": false, "hasPreviousSummary": true }
 ```
 
 The hook responds with **JSON on stdout**:
@@ -79,6 +87,24 @@ The hook responds with **JSON on stdout**:
 ```
 
 Non-JSON output and empty stdout are treated as `{ decision: "allow" }`.
+
+#### SessionStart payload fields
+
+`reason` is one of `"startup"` | `"reload"` | `"new"` | `"resume"` | `"fork"`.
+
+**Cannot block.** The agent loop has not started yet. When a TUI is active, any `additionalContext` returned is surfaced as an info notification instead of being injected into a prompt.
+
+#### PreCompact payload fields
+
+| Field | Description |
+|-------|-------------|
+| `tokensBefore` | Token count of the context window before compaction. |
+| `messagesToSummarize` | Number of messages that will be summarized and discarded. |
+| `turnPrefixMessages` | Messages folded into the turn-prefix summary (only non-zero for split turns). |
+| `isSplitTurn` | True when the compaction cut point falls in the middle of a turn. |
+| `hasPreviousSummary` | True when this compaction iterates over an existing summary. |
+
+**Cannot block and cannot cancel compaction.** `SessionBeforeCompactResult` has no `additionalContext` field — PreCompact is purely informative.
 
 ### Failure modes
 

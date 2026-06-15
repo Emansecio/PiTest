@@ -14,6 +14,93 @@ Add custom providers and models (Ollama, vLLM, LM Studio, proxies) via `~/.pit/a
 - [Anthropic Messages Compatibility](#anthropic-messages-compatibility)
 - [OpenAI Compatibility](#openai-compatibility)
 
+## Model roles
+
+Roles map an _intent_ to a concrete model configuration. Pit ships five roles:
+
+| Role | Intent | CLI shortcut |
+|-|-|-|
+| `default` | Normal agent turn — the model used for most interactions | `--model` / `/model default` |
+| `smol` | Cheap sub-agent fan-out; prefer a fast, low-cost model | `--smol [model]` |
+| `slow` | Deep reasoning; prefer a high-thinking model | `--slow [model]` |
+| `plan` | Plan-mode turns (read-only permission context) | `--plan [model]` |
+| `commit` | Commit message generation (no CLI shortcut; resolved automatically) | `/model commit` |
+
+`--smol`, `--slow`, and `--plan` are mutually exclusive; the rightmost flag wins. Each shortcut accepts an optional inline model override:
+
+```sh
+pit --smol claude-sonnet-4-6          # smol role with this specific model
+pit --slow                             # slow role with the model from settings
+pit --plan anthropic/claude-opus-4-8  # plan role with explicit model
+```
+
+You can also switch the active role interactively: `/model <role>` (e.g. `/model smol`, `/model slow`).
+
+### Configuring roles in settings
+
+Roles are configured under `modelRoles` in `settings.json` (not in `models.json`):
+
+```jsonc
+{
+  "modelRoles": {
+    "default": {
+      "model": "anthropic/claude-opus-4-8",
+      "thinkingLevel": "medium"
+    },
+    "smol": {
+      "model": "anthropic/claude-sonnet-4-6",
+      "thinkingLevel": "off",
+      "fallbackChain": ["anthropic/claude-haiku-4-8"]
+    },
+    "slow": {
+      "model": "anthropic/claude-opus-4-8",
+      "thinkingLevel": "xhigh"
+    },
+    "plan": {
+      "model": "anthropic/claude-opus-4-8",
+      "thinkingLevel": "high",
+      "paths": {
+        "/work/big-repo/**": "anthropic/claude-sonnet-4-6"
+      }
+    },
+    "commit": {
+      "model": "anthropic/claude-haiku-4-8",
+      "thinkingLevel": "off"
+    }
+  }
+}
+```
+
+### `ModelRoleConfig` fields
+
+| Field | Type | Description |
+|-|-|-|
+| `model` | `string` | Primary model pattern, e.g. `"anthropic/claude-opus-4-8"` or `"sonnet:high"`. |
+| `thinkingLevel` | `string` | Default thinking level for this role: `"off"` \| `"minimal"` \| `"low"` \| `"medium"` \| `"high"` \| `"xhigh"`. |
+| `fallbackChain` | `string[]` | Ordered fallback models tried when the primary is unavailable. |
+| `paths` | `Record<string, string>` | Glob-keyed per-path overrides; the closest matching glob wins. |
+
+`paths` globs are matched against the session `cwd` using `minimatch`. A path override replaces only the model pattern — `thinkingLevel` falls back to the role's top-level value unless the pattern includes an inline `:level` suffix.
+
+### Fallback chains
+
+The `retry.fallbackChains` settings key provides an alternative (and higher-priority) location for per-role fallback chains:
+
+```jsonc
+{
+  "retry": {
+    "fallbackChains": {
+      "default": ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4"],
+      "smol": ["anthropic/claude-haiku-4-8"]
+    }
+  }
+}
+```
+
+When both `fallbackChain` (in `modelRoles[role]`) and `retry.fallbackChains[role]` are set, `retry.fallbackChains` takes precedence.
+
+---
+
 ## Minimal Example
 
 For local models (Ollama, LM Studio, vLLM), only `id` is required per model:

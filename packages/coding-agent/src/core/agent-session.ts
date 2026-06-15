@@ -5155,6 +5155,9 @@ export class AgentSession {
 						dispatcher: this._buildCodeModeDispatcher(),
 						getActiveToolNames: () => this.getActiveToolNames(),
 					},
+					search_skills: {
+						getSkills: () => this._resourceLoader.getSkills().skills,
+					},
 				});
 
 		this._baseToolDefinitions = new Map(

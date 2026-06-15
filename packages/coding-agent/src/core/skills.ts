@@ -3,6 +3,7 @@ import ignore from "ignore";
 import { homedir } from "os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath } from "../utils/paths.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
@@ -517,15 +518,22 @@ function normalizePath(input: string): string {
 
 /**
  * Resolve the Claude Code skills directory (`~/.claude/skills/`), or null when
- * the user opted out via `PIT_DISABLE_CLAUDE_CODE_SKILLS=1`. The path is not
- * checked for existence here — the caller decides whether to load.
+ * the user opted out via `PIT_NO_CLAUDE_CODE_SKILLS` (canonical PIT_NO_* kill
+ * switch) or the legacy alias `PIT_DISABLE_CLAUDE_CODE_SKILLS`. Both are parsed
+ * with `isTruthyEnvFlag`, so "1"/"true"/"yes" opt out. The path is not checked
+ * for existence here — the caller decides whether to load.
  *
  * Lives here rather than `config.ts` because it is loader-internal: only the
  * skill discovery path consumes it, and folding it into the config surface
  * would suggest a generality that does not exist.
  */
 export function getClaudeCodeSkillsDir(): string | null {
-	if (process.env.PIT_DISABLE_CLAUDE_CODE_SKILLS === "1") return null;
+	if (
+		isTruthyEnvFlag(process.env.PIT_NO_CLAUDE_CODE_SKILLS) ||
+		isTruthyEnvFlag(process.env.PIT_DISABLE_CLAUDE_CODE_SKILLS)
+	) {
+		return null;
+	}
 	return join(homedir(), ".claude", "skills");
 }
 
@@ -588,7 +596,8 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		// project skills, so pit-curated and project-scoped skills always win
 		// on a name collision. The Skill format is byte-compatible with our
 		// own (same SKILL.md + YAML frontmatter), so they slot in without
-		// translation. Opt-out: PIT_DISABLE_CLAUDE_CODE_SKILLS=1.
+		// translation. Opt-out: PIT_NO_CLAUDE_CODE_SKILLS (alias
+		// PIT_DISABLE_CLAUDE_CODE_SKILLS).
 		const claudeSkillsDir = getClaudeCodeSkillsDir();
 		if (claudeSkillsDir && existsSync(claudeSkillsDir)) {
 			addSkills(loadSkillsFromDirInternal(claudeSkillsDir, "claude-code", true));

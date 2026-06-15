@@ -2,7 +2,7 @@ import type { AgentTool } from "@pit/agent-core";
 import { Type } from "typebox";
 import { getAgentDir } from "../../config.js";
 import type { ToolDefinition } from "../extensions/types.js";
-import { loadSkills } from "../skills.js";
+import { loadSkills, type Skill } from "../skills.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const searchSkillsSchema = Type.Object(
@@ -14,7 +14,16 @@ const searchSkillsSchema = Type.Object(
 
 const MAX_RESULTS = 8;
 
-export interface SearchSkillsToolOptions {}
+export interface SearchSkillsToolOptions {
+	/**
+	 * Returns the already-loaded skill list (the same set the system prompt is
+	 * built from, e.g. `resourceLoader.getSkills().skills`). When provided, the
+	 * tool searches this list instead of re-loading from disk, so its results
+	 * never diverge from what the prompt advertises. Falls back to a fresh
+	 * `loadSkills(...)` when absent or when the getter throws.
+	 */
+	getSkills?: () => Skill[];
+}
 
 /** Term-overlap score of a query against a skill's name + full description. */
 export function scoreSkillForQuery(query: string, name: string, description: string): number {
@@ -27,7 +36,11 @@ export function scoreSkillForQuery(query: string, name: string, description: str
 	return score;
 }
 
-export function createSearchSkillsToolDefinition(cwd: string): ToolDefinition<typeof searchSkillsSchema, undefined> {
+export function createSearchSkillsToolDefinition(
+	cwd: string,
+	options?: SearchSkillsToolOptions,
+): ToolDefinition<typeof searchSkillsSchema, undefined> {
+	const getSkills = options?.getSkills;
 	return {
 		name: "search_skills",
 		label: "search_skills",
@@ -37,9 +50,14 @@ export function createSearchSkillsToolDefinition(cwd: string): ToolDefinition<ty
 		promptSnippet: "Find a skill by trigger keywords.",
 		parameters: searchSkillsSchema,
 		async execute(_toolCallId, { query }) {
-			let skills: Awaited<ReturnType<typeof loadSkills>>["skills"];
+			let skills: Skill[];
 			try {
-				skills = loadSkills({ cwd, agentDir: getAgentDir() ?? "", skillPaths: [], includeDefaults: true }).skills;
+				// Prefer the prompt's own skill list (single source of truth) so
+				// search results never diverge from what the prompt advertises.
+				// Fall back to a fresh disk load when no getter is wired or it throws.
+				skills =
+					getSkills?.() ??
+					loadSkills({ cwd, agentDir: getAgentDir() ?? "", skillPaths: [], includeDefaults: true }).skills;
 			} catch {
 				skills = [];
 			}
@@ -58,6 +76,9 @@ export function createSearchSkillsToolDefinition(cwd: string): ToolDefinition<ty
 	};
 }
 
-export function createSearchSkillsTool(cwd: string): AgentTool<typeof searchSkillsSchema> {
-	return wrapToolDefinition(createSearchSkillsToolDefinition(cwd));
+export function createSearchSkillsTool(
+	cwd: string,
+	options?: SearchSkillsToolOptions,
+): AgentTool<typeof searchSkillsSchema> {
+	return wrapToolDefinition(createSearchSkillsToolDefinition(cwd, options));
 }

@@ -143,6 +143,15 @@ describe("InteractiveMode._warnIfUnknownCommand", () => {
 		expect(self.editor.setText).toHaveBeenCalledWith("/modl");
 	});
 
+	test("suggests the closest match for a transposition typo (Levenshtein)", () => {
+		const self = makeThis(["model", "compact", "name"]);
+		expect(call(self, "/modle")).toBe(true);
+		expect(self.showWarning).toHaveBeenCalledTimes(1);
+		expect(self.showWarning.mock.calls[0][0]).toContain("/modle");
+		expect(self.showWarning.mock.calls[0][0]).toContain("/model");
+		expect(self.editor.setText).toHaveBeenCalledWith("/modle");
+	});
+
 	test("ignores a known command (dispatch owns it)", () => {
 		const self = makeThis(["model"]);
 		expect(call(self, "/model gpt")).toBe(false);
@@ -913,7 +922,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		const output = renderAll(fakeThis.chatContainer);
-		expect(output).toContain("[Skill conflicts]");
+		expect(output).toContain("[Skills: notices]");
 		expect(output).not.toContain("[Skills]");
+		expect(output).not.toContain("[Skill conflicts]");
 	});
 });

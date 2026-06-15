@@ -345,6 +345,15 @@ export function formatDiagnostics(
 		}
 	}
 
+	if (collisions.size > 0) {
+		lines.push(
+			theme.fg(
+				"dim",
+				`  Highest-precedence source wins; ${theme.fg("success", "✓")} kept, ${theme.fg("warning", "✗")} ignored.`,
+			),
+		);
+	}
+
 	for (const [name, collisionList] of collisions) {
 		const first = collisionList[0]?.collision;
 		if (!first) continue;

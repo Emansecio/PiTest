@@ -28,7 +28,7 @@ const MAX_WAIT_FOR_COOLDOWN_MS = 30_000;
 
 const RETRYABLE_MESSAGE_REGEX =
 	/429|rate.?limit|quota|connection.?refused|ECONNREFUSED|ETIMEDOUT|insufficient.{0,20}quota/i;
-const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 const NON_RETRYABLE_STATUSES = new Set([401, 403, 404]);
 
 const cooldownMap = new Map<string, { until: number }>();

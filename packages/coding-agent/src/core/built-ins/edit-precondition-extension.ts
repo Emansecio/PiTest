@@ -22,6 +22,7 @@
  */
 
 import { statSync } from "node:fs";
+import { recordDiagnostic } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { extractEdits, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
@@ -70,6 +71,12 @@ export function createEditPreconditionExtension(options: EditPreconditionOptions
 			}
 
 			if ("error" in diff) {
+				recordDiagnostic({
+					category: "guard.edit-precondition",
+					level: "info",
+					source: "edit-precondition-extension",
+					context: { path },
+				});
 				return {
 					block: true,
 					reason: `Edit precondition (dry-run, no write attempted): ${diff.error}`,

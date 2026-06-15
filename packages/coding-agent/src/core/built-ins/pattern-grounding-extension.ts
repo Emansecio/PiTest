@@ -15,6 +15,7 @@
  * with PIT_NO_PATTERN_GROUNDING.
  */
 
+import { recordDiagnostic } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundPattern, isPatternGroundingDisabled } from "../pattern-grounding.ts";
 
@@ -35,6 +36,12 @@ export function createPatternGroundingExtension() {
 					const key = `${event.toolName}:${JSON.stringify(input, Object.keys(input).sort())}`;
 					if (fired.has(key)) return undefined; // already advised once -> let it run
 					fired.add(key);
+					recordDiagnostic({
+						category: "guard.pattern-grounding",
+						level: "info",
+						source: "pattern-grounding-extension",
+						context: { note: event.toolName },
+					});
 					return { block: true, reason: decision.message };
 				}
 				return undefined;

@@ -17,7 +17,7 @@
  */
 
 import { existsSync, readdirSync } from "node:fs";
-import { suggestClosest } from "@pit/ai";
+import { recordDiagnostic, suggestClosest } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundPath, isPathGroundingDisabled, PATH_GROUNDING_DEFAULTS } from "../path-grounding.ts";
 import { extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
@@ -54,6 +54,12 @@ export function createPathGroundingExtension(options: { cwd: string }) {
 					const key = `${event.toolName}:${JSON.stringify(input, Object.keys(input).sort())}`;
 					if (fired.has(key)) return undefined; // already advised once -> let it run
 					fired.add(key);
+					recordDiagnostic({
+						category: "guard.path-grounding",
+						level: "info",
+						source: "path-grounding-extension",
+						context: { note: event.toolName },
+					});
 					return { block: true, reason: decision.message };
 				}
 				return undefined;

@@ -160,7 +160,9 @@ export function buildDryRunReport(options: BuildDryRunReportOptions): DryRunRepo
 		(hooksSettings.PreToolUse?.length ?? 0) +
 		(hooksSettings.PostToolUse?.length ?? 0) +
 		(hooksSettings.UserPromptSubmit?.length ?? 0) +
-		(hooksSettings.Stop?.length ?? 0);
+		(hooksSettings.Stop?.length ?? 0) +
+		(hooksSettings.SessionStart?.length ?? 0) +
+		(hooksSettings.PreCompact?.length ?? 0);
 	checks.push({
 		name: "Hooks",
 		status: "ready",
@@ -173,6 +175,8 @@ export function buildDryRunReport(options: BuildDryRunReportOptions): DryRunRepo
 						{ label: "PostToolUse", value: String(hooksSettings.PostToolUse?.length ?? 0) },
 						{ label: "UserPromptSubmit", value: String(hooksSettings.UserPromptSubmit?.length ?? 0) },
 						{ label: "Stop", value: String(hooksSettings.Stop?.length ?? 0) },
+						{ label: "SessionStart", value: String(hooksSettings.SessionStart?.length ?? 0) },
+						{ label: "PreCompact", value: String(hooksSettings.PreCompact?.length ?? 0) },
 					],
 	});
 

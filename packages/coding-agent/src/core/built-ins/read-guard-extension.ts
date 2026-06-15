@@ -32,6 +32,7 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
+import { recordDiagnostic } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { extractEditOldTexts, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
 
@@ -130,6 +131,12 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								const fileContent = readFileContentSafe(abs);
 								if (fileContent !== undefined && oldTexts.some((t) => !fileContent.includes(t))) {
 									postCompactStamps.delete(abs);
+									recordDiagnostic({
+										category: "guard.read",
+										level: "info",
+										source: "read-guard-extension.postCompactEditMismatch",
+										context: { path },
+									});
 									return {
 										block: true,
 										reason: `Read guard: "${path}" was only summarized across compaction, and an edit oldText does not match the file verbatim. Read the region again to confirm exact current content before editing (avoids a fuzzy-match corruption).`,
@@ -144,6 +151,12 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 							// risk than an edit (which is anchored by oldText). Warn ONCE: a
 							// re-issue means the overwrite is intended and runs.
 							firedWriteWarnings.add(abs);
+							recordDiagnostic({
+								category: "guard.read",
+								level: "info",
+								source: "read-guard-extension.postCompactWriteWarn",
+								context: { path },
+							});
 							return {
 								block: true,
 								reason: `Read guard: "${path}" was only summarized across compaction and a write would OVERWRITE its full content from that lossy summary. Read it again to confirm what you're replacing, or re-issue the identical write to overwrite anyway.`,
@@ -154,12 +167,24 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 					// Drifted (or stat failed) — consume the stale stamp so the
 					// model can't accidentally retry and slip through.
 					postCompactStamps.delete(abs);
+					recordDiagnostic({
+						category: "guard.read",
+						level: "info",
+						source: "read-guard-extension.stampDrifted",
+						context: { path },
+					});
 					return {
 						block: true,
 						reason: `Read guard: file "${path}" changed since it was last read (pre-compaction snapshot stale). Read it again to confirm current content before editing.`,
 					};
 				}
 
+				recordDiagnostic({
+					category: "guard.read",
+					level: "info",
+					source: "read-guard-extension.neverRead",
+					context: { path },
+				});
 				return {
 					block: true,
 					reason: `Read guard: file "${path}" has not been read in this session. Read it first to confirm its current content before editing.`,

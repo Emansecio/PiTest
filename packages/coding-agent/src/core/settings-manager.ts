@@ -66,6 +66,8 @@ export interface RetrySettings {
 	maxRetries?: number; // default: 3
 	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s)
 	provider?: ProviderRetrySettings;
+	fallbackChains?: Record<string, string[]>; // per-role fallback model chains (consumed by model-resolver.ts)
+	cooldownMs?: number; // default: 300000 — cooldown before retrying a failed model in a fallback chain (agent-session.ts)
 }
 
 export interface VerificationSettings {
@@ -485,10 +487,7 @@ export interface ModelRoleSettings {
 		plan?: ModelRoleConfig;
 		commit?: ModelRoleConfig;
 	};
-	retry?: {
-		fallbackChains?: Record<string, string[]>;
-		cooldownMs?: number;
-	};
+	retry?: Pick<RetrySettings, "fallbackChains" | "cooldownMs">;
 }
 
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
@@ -1577,8 +1576,8 @@ export class SettingsManager {
 			modelRoles: this.settings.modelRoles ? structuredClone(this.settings.modelRoles) : undefined,
 			retry: this.settings.retry
 				? {
-						fallbackChains: (this.settings.retry as { fallbackChains?: Record<string, string[]> }).fallbackChains,
-						cooldownMs: (this.settings.retry as { cooldownMs?: number }).cooldownMs,
+						fallbackChains: this.settings.retry.fallbackChains,
+						cooldownMs: this.settings.retry.cooldownMs,
 					}
 				: undefined,
 		};
