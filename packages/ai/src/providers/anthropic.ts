@@ -54,8 +54,20 @@ function getCacheControl(
 	};
 }
 
-// Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.75";
+// Stealth mode: mimic Claude Code's OAuth fingerprint exactly.
+// Anthropic routes Pro/Max OAuth traffic by the Claude Code fingerprint, and the
+// user-agent VERSION is part of it. A spoofed version too far behind the actual
+// release gets intermittent 5xx (overloaded_error) on OAuth traffic — worst on
+// the newest models (e.g. opus-4-8, whose validation is stricter than 4-7's).
+// The coding-agent detects the installed `claude --version` at boot and exports
+// PIT_CLAUDE_CODE_VERSION; this constant is the offline fallback. Override
+// per-machine via the env var without a rebuild.
+const CLAUDE_CODE_VERSION_FALLBACK = "2.1.170";
+function getClaudeCodeVersion(): string {
+	const env = typeof process !== "undefined" ? process.env?.PIT_CLAUDE_CODE_VERSION : undefined;
+	const trimmed = env?.trim();
+	return trimmed ? trimmed : CLAUDE_CODE_VERSION_FALLBACK;
+}
 
 // Claude Code 2.x tool names (canonical casing)
 // Source: https://cchistory.pituned.at/data/prompts-2.1.11.md
@@ -853,7 +865,7 @@ function createClient(
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
 					"anthropic-beta": ["claude-code-20250219", "oauth-2025-04-20", ...betaFeatures].join(","),
-					"user-agent": `claude-cli/${claudeCodeVersion}`,
+					"user-agent": `claude-cli/${getClaudeCodeVersion()} (external, cli)`,
 					"x-app": "cli",
 				},
 				model.headers,
