@@ -6,6 +6,7 @@
 import type { TSchema } from "typebox";
 import { Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { isJsonCrushEnabled, maybeCrushJsonOutput } from "../tools/json-crush.ts";
 import { collapseRepeatedLines, DEFAULT_MAX_BYTES, formatSize, truncateHead } from "../tools/truncate.ts";
 import type { McpManager } from "./manager.ts";
 import type { McpCallToolResult, McpToolSchema } from "./types.ts";
@@ -38,12 +39,21 @@ interface FlattenedContent {
  * surface without a built-in ceiling — a single large return (page fetch, SQL
  * dump, network log) would otherwise persist verbatim in every subsequent turn
  * until compaction. Mirror the native tools: collapse identical repeated lines
- * (lossless) then truncate to DEFAULT_MAX_BYTES, exactly like read/grep do.
+ * (lossless) then truncate to DEFAULT_MAX_BYTES, exactly like read/grep do. MCP
+ * is the surface most likely to return large JSON (API responses, SQL dumps,
+ * network logs), so when the output overflows, prefer a structural crush
+ * (schema + head/tail samples) over a blind head-cut — exactly like bash/read.
  */
 export function capMcpText(text: string): string {
 	const collapsed = collapseRepeatedLines(text);
 	const truncation = truncateHead(collapsed, { maxBytes: DEFAULT_MAX_BYTES });
 	if (!truncation.truncated) return collapsed;
+	const crushed = maybeCrushJsonOutput({
+		text: collapsed,
+		shouldAttempt: isJsonCrushEnabled(),
+		recoveryHint: "Refine the query to fetch any elided detail.",
+	});
+	if (crushed !== undefined) return crushed;
 	return `${truncation.content}\n\n[MCP output truncated: ${formatSize(DEFAULT_MAX_BYTES)} limit, ${truncation.totalLines} lines total — refine the query for the rest]`;
 }
 

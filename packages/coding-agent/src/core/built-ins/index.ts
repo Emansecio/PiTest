@@ -59,6 +59,8 @@ export interface BuiltInExtensionsOptions {
 	isMessagingEnabled?: () => boolean;
 	getParentMessagingId?: () => string | undefined;
 	getMessagingTimeoutMs?: () => number | undefined;
+	/** Forwarded to the coordinator extension: fires when an async (op:"spawn") subagent settles. Returns true if re-injected. */
+	onAsyncComplete?: (handle: string, text: string, status: "done" | "error") => boolean;
 }
 
 export interface BuiltInExtensionsResult {
@@ -126,6 +128,7 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			isMessagingEnabled: options.isMessagingEnabled,
 			getParentMessagingId: options.getParentMessagingId,
 			getMessagingTimeoutMs: options.getMessagingTimeoutMs,
+			onAsyncComplete: options.onAsyncComplete,
 		}),
 	];
 

@@ -22,19 +22,20 @@ async function runRead(content: string, path = "data.json"): Promise<string> {
 	return (res.content[0] as { text: string }).text;
 }
 
-function withFlag(value: string | undefined, fn: () => Promise<void>): Promise<void> {
-	const prev = process.env.PIT_JSON_CRUSH;
-	if (value === undefined) delete process.env.PIT_JSON_CRUSH;
-	else process.env.PIT_JSON_CRUSH = value;
+// json-crush is ON by default; PIT_NO_JSON_CRUSH=1 opts out.
+function withCrush(enabled: boolean, fn: () => Promise<void>): Promise<void> {
+	const prev = process.env.PIT_NO_JSON_CRUSH;
+	if (enabled) delete process.env.PIT_NO_JSON_CRUSH;
+	else process.env.PIT_NO_JSON_CRUSH = "1";
 	return fn().finally(() => {
-		if (prev === undefined) delete process.env.PIT_JSON_CRUSH;
-		else process.env.PIT_JSON_CRUSH = prev;
+		if (prev === undefined) delete process.env.PIT_NO_JSON_CRUSH;
+		else process.env.PIT_NO_JSON_CRUSH = prev;
 	});
 }
 
-describe("read + json-crush (phase 3, behind PIT_JSON_CRUSH)", () => {
-	it("crushes a large JSON file when the flag is on", async () => {
-		await withFlag("1", async () => {
+describe("read + json-crush (on by default, opt out with PIT_NO_JSON_CRUSH)", () => {
+	it("crushes a large JSON file by default", async () => {
+		await withCrush(true, async () => {
 			const text = await runRead(bigJson);
 			expect(text).toContain("items elided"); // structural crush, not blind cut
 			expect(text).toContain('"status"'); // schema preserved
@@ -45,8 +46,8 @@ describe("read + json-crush (phase 3, behind PIT_JSON_CRUSH)", () => {
 		});
 	});
 
-	it("falls back to the blind head-cut when the flag is off", async () => {
-		await withFlag(undefined, async () => {
+	it("falls back to the blind head-cut when crush is disabled", async () => {
+		await withCrush(false, async () => {
 			const text = await runRead(bigJson);
 			expect(text).not.toContain("items elided");
 			// minified single line > 50KB → firstLineExceedsLimit recovery hint
@@ -54,8 +55,8 @@ describe("read + json-crush (phase 3, behind PIT_JSON_CRUSH)", () => {
 		});
 	});
 
-	it("leaves non-JSON files to the normal truncation even with the flag on", async () => {
-		await withFlag("1", async () => {
+	it("leaves non-JSON files to the normal truncation even when enabled", async () => {
+		await withCrush(true, async () => {
 			const bigLog = Array.from({ length: 5000 }, (_, i) => `line ${i} of a big log file`).join("\n");
 			const text = await runRead(bigLog, "app.log");
 			expect(text).not.toContain("items elided");

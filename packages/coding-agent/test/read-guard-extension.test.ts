@@ -8,6 +8,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createReadGuardExtension } from "../src/core/built-ins/read-guard-extension.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
@@ -54,6 +55,11 @@ function makeDir(): string {
 }
 
 const toolCall = (toolName: string, input: Record<string, unknown>) => ({ toolName, input });
+const toolResult = (toolName: string, input: Record<string, unknown>, isError = false) => ({
+	toolName,
+	input,
+	isError,
+});
 
 describe("read-guard — basic invariants", () => {
 	it("blocks an edit/write on a file that was never read this session", () => {
@@ -80,6 +86,60 @@ describe("read-guard — basic invariants", () => {
 		createReadGuardExtension({ cwd })(api);
 		fire("tool_call", toolCall("read", { path: "a.ts" }));
 		expect(fire("tool_call", toolCall("edit", { path: "a.ts", oldText: "hello", newText: "bye" }))).toBeUndefined();
+	});
+});
+
+describe("read-guard — intra-session drift guard (WRITE only)", () => {
+	it("allows a write to a read file whose disk content is unchanged", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "export const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		fire("tool_call", toolCall("read", { path: "a.ts" }));
+		expect(fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }))).toBeUndefined();
+	});
+
+	it("blocks a write when the file DRIFTED on disk since it was read this session (fire-once)", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "export const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		fire("tool_call", toolCall("read", { path: "a.ts" }));
+		// A concurrent user edit / git op changes the file after the read.
+		writeFileSync(join(cwd, "a.ts"), "export const x = 1; // user touched\n", "utf-8");
+
+		const first = fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }));
+		expect(first?.block).toBe(true);
+		expect(String(first?.reason)).toContain("changed on disk since you read it");
+
+		// fire-once escape: re-issuing the identical write runs it.
+		expect(fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }))).toBeUndefined();
+	});
+
+	it("does NOT drift-block an EDIT (edit-precondition owns oldText matching)", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "hello\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		fire("tool_call", toolCall("read", { path: "a.ts" }));
+		writeFileSync(join(cwd, "a.ts"), "hello world\n", "utf-8");
+		expect(fire("tool_call", toolCall("edit", { path: "a.ts", oldText: "hello", newText: "bye" }))).toBeUndefined();
+	});
+
+	it("re-stamps after the model's OWN write so a second write is not a false drift", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "export const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		fire("tool_call", toolCall("read", { path: "a.ts" }));
+
+		// First write is allowed; simulate it landing on disk + the success result.
+		expect(fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }))).toBeUndefined();
+		writeFileSync(join(cwd, "a.ts"), "export const x = 2;\n", "utf-8");
+		fire("tool_result", toolResult("write", { path: "a.ts", content: "export const x = 2;\n" }));
+
+		// Second write must NOT be blocked as drift — the model itself made the change.
+		expect(fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 3;\n" }))).toBeUndefined();
 	});
 });
 
@@ -131,5 +191,83 @@ describe("read-guard — post-compaction WRITE warning (the reinforcement)", () 
 		const r = fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }));
 		expect(r?.block).toBe(true);
 		expect(String(r?.reason)).toContain("changed since");
+	});
+});
+
+describe("read-guard — write-warning override telemetry (acceptance vs block)", () => {
+	// The runtime-diagnostics sink is a process-global singleton; reset it so this
+	// test reads only its own events (source = read-guard-extension.*).
+	afterEach(() => resetRuntimeDiagnostics());
+
+	function readGuardSources(): string[] {
+		return getRuntimeDiagnostics()
+			.recent.filter((e) => e.source.startsWith("read-guard-extension."))
+			.map((e) => e.source);
+	}
+
+	it("blocks the 1st write on drift (outcome=blocked) then records an override on the identical re-issue", () => {
+		resetRuntimeDiagnostics();
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "export const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+
+		fire("tool_call", toolCall("read", { path: "a.ts" }));
+		// Concurrent change after the read => intra-session drift.
+		writeFileSync(join(cwd, "a.ts"), "export const x = 1; // user touched\n", "utf-8");
+
+		// 1st write blocks (warn fires once).
+		const first = fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }));
+		expect(first?.block).toBe(true);
+
+		// 2nd identical write passes (fire-once escape) AND records the override.
+		const second = fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }));
+		expect(second).toBeUndefined();
+
+		const snap = getRuntimeDiagnostics();
+		const blocked = snap.recent.find((e) => e.source === "read-guard-extension.intraSessionDrift");
+		const overridden = snap.recent.find((e) => e.source === "read-guard-extension.writeWarnOverridden");
+		expect(blocked?.context?.outcome).toBe("blocked");
+		expect(overridden?.context?.outcome).toBe("overridden");
+		expect(overridden?.context?.path).toBe("a.ts");
+		// Exactly one block + one override (no double-fire on the override path).
+		expect(readGuardSources().filter((s) => s === "read-guard-extension.writeWarnOverridden")).toHaveLength(1);
+	});
+
+	it("records an override when a post-compaction write-warning is re-issued", () => {
+		resetRuntimeDiagnostics();
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "export const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+
+		fire("tool_call", toolCall("read", { path: "a.ts" }));
+		fire("session_before_compact", {});
+
+		// 1st write blocks (postCompactWriteWarn, outcome=blocked).
+		const first = fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }));
+		expect(first?.block).toBe(true);
+		// 2nd identical write passes AND records the override.
+		expect(fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }))).toBeUndefined();
+
+		const snap = getRuntimeDiagnostics();
+		const blocked = snap.recent.find((e) => e.source === "read-guard-extension.postCompactWriteWarn");
+		const overridden = snap.recent.find((e) => e.source === "read-guard-extension.writeWarnOverridden");
+		expect(blocked?.context?.outcome).toBe("blocked");
+		expect(overridden?.context?.outcome).toBe("overridden");
+	});
+
+	it("does NOT record an override for a normal write to a read, undrifted file", () => {
+		resetRuntimeDiagnostics();
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "export const x = 1;\n", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+
+		fire("tool_call", toolCall("read", { path: "a.ts" }));
+		// File unchanged => no warning ever entered firedWriteWarnings.
+		expect(fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }))).toBeUndefined();
+
+		expect(readGuardSources()).not.toContain("read-guard-extension.writeWarnOverridden");
 	});
 });

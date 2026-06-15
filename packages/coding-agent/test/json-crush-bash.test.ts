@@ -19,13 +19,14 @@ async function runBash(content: string): Promise<string> {
 	return (res.content[0] as { text: string }).text;
 }
 
-function withFlag(value: string | undefined, fn: () => Promise<void>): Promise<void> {
-	const prev = process.env.PIT_JSON_CRUSH;
-	if (value === undefined) delete process.env.PIT_JSON_CRUSH;
-	else process.env.PIT_JSON_CRUSH = value;
+// json-crush is ON by default; PIT_NO_JSON_CRUSH=1 opts out.
+function withCrush(enabled: boolean, fn: () => Promise<void>): Promise<void> {
+	const prev = process.env.PIT_NO_JSON_CRUSH;
+	if (enabled) delete process.env.PIT_NO_JSON_CRUSH;
+	else process.env.PIT_NO_JSON_CRUSH = "1";
 	return fn().finally(() => {
-		if (prev === undefined) delete process.env.PIT_JSON_CRUSH;
-		else process.env.PIT_JSON_CRUSH = prev;
+		if (prev === undefined) delete process.env.PIT_NO_JSON_CRUSH;
+		else process.env.PIT_NO_JSON_CRUSH = prev;
 	});
 }
 
@@ -35,9 +36,9 @@ const bigJson = JSON.stringify(
 	Array.from({ length: 1500 }, (_, i) => ({ id: i, name: `item-${i}`, status: i % 2 ? "ok" : "err" })),
 );
 
-describe("bash + json-crush (phase 3 follow-up, behind PIT_JSON_CRUSH)", () => {
-	it("structurally crushes large truncated JSON bash output when the flag is on", async () => {
-		await withFlag("1", async () => {
+describe("bash + json-crush (on by default, opt out with PIT_NO_JSON_CRUSH)", () => {
+	it("structurally crushes large truncated JSON bash output by default", async () => {
+		await withCrush(true, async () => {
 			const text = await runBash(bigJson);
 			expect(text).toContain("items elided"); // structural crush from the temp file
 			expect(text).toContain('"status"'); // schema preserved
@@ -47,16 +48,16 @@ describe("bash + json-crush (phase 3 follow-up, behind PIT_JSON_CRUSH)", () => {
 		});
 	});
 
-	it("falls back to the blind truncation when the flag is off", async () => {
-		await withFlag(undefined, async () => {
+	it("falls back to the blind truncation when crush is disabled", async () => {
+		await withCrush(false, async () => {
 			const text = await runBash(bigJson);
 			expect(text).not.toContain("items elided");
 			expect(text).toContain("Full output:"); // normal truncation notice
 		});
 	});
 
-	it("leaves non-JSON output to normal truncation even with the flag on", async () => {
-		await withFlag("1", async () => {
+	it("leaves non-JSON output to normal truncation even when enabled", async () => {
+		await withCrush(true, async () => {
 			const bigLog = Array.from({ length: 3000 }, (_, i) => `log line ${i} doing work`).join("\n");
 			const text = await runBash(bigLog);
 			expect(text).not.toContain("items elided");

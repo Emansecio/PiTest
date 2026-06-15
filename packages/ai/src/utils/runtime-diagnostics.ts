@@ -36,6 +36,7 @@ export type DiagnosticCategory =
 	| "error.isolated"
 	| "limit.evicted"
 	| "input.truncated"
+	| "prune.proactive"
 	| "fusion.member-failed"
 	| "fusion.judge-retry"
 	| "fusion.degraded"
@@ -58,6 +59,12 @@ export interface DiagnosticContext {
 	attempt?: number;
 	/** Milliseconds (timeout window, idle window). */
 	ms?: number;
+	/**
+	 * Whether a guard BLOCKED a tool call or the model OVERRODE the block by
+	 * re-issuing it (fire-once escape). Lets acceptance/override rate be measured
+	 * per guard from the diagnostics ring buffer.
+	 */
+	outcome?: "blocked" | "overridden";
 	/** Free-form short note; keep it small, it is retained in the ring buffer. */
 	note?: string;
 }

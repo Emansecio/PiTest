@@ -10,7 +10,6 @@ import { clampBashCommandRow } from "../../modes/interactive/components/bash-com
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcess } from "../../utils/child-process.ts";
-import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import {
 	getShellConfig,
 	getShellEnv,
@@ -21,7 +20,7 @@ import {
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { applyKeyAliases } from "./argument-prep.js";
 import { classifyBashCommand } from "./bash-activity.js";
-import { crushJson, JSON_CRUSH_TARGET_BYTES } from "./json-crush.js";
+import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.js";
 import { OutputAccumulator, type OutputSnapshot } from "./output-accumulator.js";
 import { getTextOutput, invalidArgText, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -729,8 +728,8 @@ function rebuildBashResultRenderComponent(
 }
 
 /**
- * When PIT_JSON_CRUSH is on and a bash command produced large JSON/NDJSON that
- * was truncated, replace the blind head/tail line-cut with a structural crush
+ * When a bash command produced large JSON/NDJSON that was truncated (crush is on
+ * by default; PIT_NO_JSON_CRUSH opts out), replace the blind head/tail line-cut with a structural crush
  * (schema + head/tail samples + omitted counts). Reads the full output back from
  * the temp file the accumulator already persisted on truncation, so nothing is
  * lost — the file stays the source of truth for any elided detail. Returns
@@ -738,7 +737,7 @@ function rebuildBashResultRenderComponent(
  * truncated, the temp file is unavailable, or the output is not JSON.
  */
 async function crushBashJsonOutput(snapshot: OutputSnapshot): Promise<string | undefined> {
-	if (!isTruthyEnvFlag(process.env.PIT_JSON_CRUSH)) return undefined;
+	if (!isJsonCrushEnabled()) return undefined;
 	if (!snapshot.truncation.truncated || !snapshot.fullOutputPath) return undefined;
 	let full: string;
 	try {
@@ -746,10 +745,12 @@ async function crushBashJsonOutput(snapshot: OutputSnapshot): Promise<string | u
 	} catch {
 		return undefined;
 	}
-	const crushed = crushJson(full, { targetChars: JSON_CRUSH_TARGET_BYTES });
-	if (crushed === undefined) return undefined;
-	const originalSize = formatSize(snapshot.truncation.totalBytes);
-	return `${crushed}\n\n[Large JSON crushed to schema + samples (${originalSize} original). Full output: ${snapshot.fullOutputPath} — read it or use \`bash jq\` for any elided detail.]`;
+	return maybeCrushJsonOutput({
+		text: full,
+		shouldAttempt: true,
+		originalSize: formatSize(snapshot.truncation.totalBytes),
+		recoveryHint: `Full output: ${snapshot.fullOutputPath} — read it or use \`bash jq\` for any elided detail.`,
+	});
 }
 
 export function createBashToolDefinition(

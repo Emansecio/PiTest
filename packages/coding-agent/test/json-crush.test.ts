@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { crushJson } from "../src/core/tools/json-crush.js";
+import { crushJson, maybeCrushJsonOutput } from "../src/core/tools/json-crush.js";
 
 const bigArray = (n: number): string =>
 	JSON.stringify(Array.from({ length: n }, (_, i) => ({ id: i, name: `name-${i}`, status: i % 2 ? "ok" : "err" })));
@@ -70,5 +70,41 @@ describe("crushJson", () => {
 			const out = crushJson(bigArray(n), { targetChars: 800 });
 			if (out !== undefined) expect(out.length).toBeLessThanOrEqual(800);
 		}
+	});
+});
+
+describe("maybeCrushJsonOutput (shared router)", () => {
+	it("returns undefined when shouldAttempt is false (caller keeps its blind cut)", () => {
+		expect(maybeCrushJsonOutput({ text: bigArray(1000), shouldAttempt: false, recoveryHint: "h" })).toBeUndefined();
+	});
+
+	it("returns undefined for non-JSON so the caller falls back to its truncation", () => {
+		const out = maybeCrushJsonOutput({ text: "x".repeat(50_000), shouldAttempt: true, recoveryHint: "h" });
+		expect(out).toBeUndefined();
+	});
+
+	it("crushes large JSON and wraps it in the standard footer with the recovery hint", () => {
+		const out = maybeCrushJsonOutput({
+			text: bigArray(2000),
+			shouldAttempt: true,
+			recoveryHint: "Refine the query for the rest.",
+		});
+		expect(out).toBeDefined();
+		const s = out ?? "";
+		expect(s).toContain("[crushed JSON");
+		expect(s).toContain("Large JSON crushed to schema + samples");
+		expect(s).toContain("Refine the query for the rest.");
+		// The crush must be far smaller than the original payload.
+		expect(s.length).toBeLessThan(bigArray(2000).length / 4);
+	});
+
+	it("honors a caller-supplied originalSize in the footer", () => {
+		const out = maybeCrushJsonOutput({
+			text: bigArray(2000),
+			shouldAttempt: true,
+			recoveryHint: "h",
+			originalSize: "123.4KB",
+		});
+		expect(out ?? "").toContain("(123.4KB original)");
 	});
 });

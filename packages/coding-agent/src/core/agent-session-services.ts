@@ -158,6 +158,7 @@ export async function createAgentSessionServices(
 	const parentModelRef: { current?: () => import("@pit/ai").Model<any> | undefined } = {};
 	const availableToolsRef: { current?: () => import("@pit/agent-core").AgentTool[] } = {};
 	const parentMessagingIdRef: { current?: string } = {};
+	const asyncDeliverRef: { current?: (handle: string, text: string, status: "done" | "error") => boolean } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
 	if (!options.disableBuiltInExtensions) {
@@ -176,6 +177,7 @@ export async function createAgentSessionServices(
 			isMessagingEnabled: () => settingsManager.getAgentMessagingSettings().enabled,
 			getParentMessagingId: () => parentMessagingIdRef.current,
 			getMessagingTimeoutMs: () => settingsManager.getAgentMessagingSettings().timeoutMs,
+			onAsyncComplete: (handle, text, status) => asyncDeliverRef.current?.(handle, text, status) ?? false,
 		});
 		builtInFactories = bundle.factories;
 	}
@@ -206,12 +208,14 @@ export async function createAgentSessionServices(
 				getModel: () => import("@pit/ai").Model<any> | undefined,
 				getTools: () => import("@pit/agent-core").AgentTool[],
 				messagingId: string | undefined,
+				deliverAsync: (handle: string, text: string, status: "done" | "error") => boolean,
 			) => void;
 		}
-	).__bindBuiltInRefs = (getModel, getTools, messagingId) => {
+	).__bindBuiltInRefs = (getModel, getTools, messagingId, deliverAsync) => {
 		parentModelRef.current = getModel;
 		availableToolsRef.current = getTools;
 		parentMessagingIdRef.current = messagingId;
+		asyncDeliverRef.current = deliverAsync;
 	};
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
@@ -297,6 +301,7 @@ export async function createAgentSessionFromServices(
 				getModel: () => import("@pit/ai").Model<any> | undefined,
 				getTools: () => import("@pit/agent-core").AgentTool[],
 				messagingId: string | undefined,
+				deliverAsync: (handle: string, text: string, status: "done" | "error") => boolean,
 			) => void;
 		}
 	).__bindBuiltInRefs;
@@ -305,6 +310,7 @@ export async function createAgentSessionFromServices(
 			() => result.session.model,
 			() => result.session.agent.state.tools as import("@pit/agent-core").AgentTool[],
 			result.session.messagingId,
+			(handle, text, status) => result.session._deliverAsyncResult(handle, text, status),
 		);
 	}
 

@@ -49,6 +49,18 @@ function makeDeps(paths: string[], overrides: Partial<ImportGroundingDeps> = {})
 	};
 }
 
+// Deps backed by a {absPath -> source} map so the named-export pass (pass 2) can
+// read each resolved module. Paths double as the on-disk set for pass 1.
+function makeDepsWithFiles(
+	files: Record<string, string>,
+	overrides: Partial<ImportGroundingDeps> = {},
+): ImportGroundingDeps {
+	const byAbs = new Map<string, string>();
+	for (const [p, source] of Object.entries(files)) byAbs.set(resolvePath(p), source);
+	const base = makeDeps([...byAbs.keys()], overrides);
+	return { ...base, readFile: (absPath) => byAbs.get(resolvePath(absPath)), ...overrides };
+}
+
 // Anchor a project layout under an absolute root so path.resolve is deterministic.
 const ROOT = resolvePath("/proj/src");
 const TARGET = resolvePath(ROOT, "app.ts");
@@ -308,6 +320,228 @@ describe("import-grounding edit reconstruction (surgical specifier swap — rein
 		);
 		expect(decision.action).toBe("block");
 		if (decision.action === "block") expect(decision.message).toContain("./utis");
+	});
+});
+
+describe("groundImports — named-export validation (pass 2)", () => {
+	const MATH = resolvePath(ROOT, "math.ts");
+
+	it("blocks a typo'd named import and suggests the close export (calcualte -> calculate)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { calcualte } from "./math";` },
+			makeDepsWithFiles({ [MATH]: "export function calculate() {}\nexport const PI = 3;\n" }),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") {
+			expect(decision.message).toContain("calcualte");
+			expect(decision.message).toContain("calculate");
+			expect(decision.message).toContain("has no exported member");
+			expect(decision.message).toContain("re-issue the identical call");
+		}
+	});
+
+	it("allows a named import that DOES exist", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { calculate, PI } from "./math";` },
+			makeDepsWithFiles({ [MATH]: "export function calculate() {}\nexport const PI = 3;\n" }),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("validates the SOURCE name (before `as`) of a renamed import", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { calcualte as fn } from "./math";` },
+			makeDepsWithFiles({ [MATH]: "export function calculate() {}\n" }),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") expect(decision.message).toContain("calcualte");
+	});
+
+	it("recognises an `export { internal as Public }` re-name (import the public name -> allow)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { Public } from "./math";` },
+			makeDepsWithFiles({ [MATH]: "function internal() {}\nexport { internal as Public };\n" }),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("recognises a MULTI-LINE export list block", () => {
+		const src = "export {\n  alpha,\n  beta,\n};\n";
+		const ok = groundImports(
+			{ targetFile: TARGET, content: `import { alpha } from "./math";` },
+			makeDepsWithFiles({ [MATH]: src }),
+		);
+		const bad = groundImports(
+			{ targetFile: TARGET, content: `import { alfa } from "./math";` },
+			makeDepsWithFiles({ [MATH]: src }),
+		);
+		expect(ok).toEqual({ action: "allow" });
+		expect(bad.action).toBe("block");
+		if (bad.action === "block") expect(bad.message).toContain("alpha");
+	});
+
+	it("validates `export type`/`interface` exports against a (type) import", () => {
+		const src = "export type Foo = number;\nexport interface Bar {}\n";
+		const ok = groundImports(
+			{ targetFile: TARGET, content: `import type { Foo } from "./math";` },
+			makeDepsWithFiles({ [MATH]: src }),
+		);
+		const bad = groundImports(
+			{ targetFile: TARGET, content: `import { Fo } from "./math";` },
+			makeDepsWithFiles({ [MATH]: src }),
+		);
+		expect(ok).toEqual({ action: "allow" });
+		expect(bad.action).toBe("block");
+		if (bad.action === "block") expect(bad.message).toContain("Foo");
+	});
+
+	it("FAIL-OPEN: a bare `export *` re-export defeats enumeration (no block)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { anything } from "./math";` },
+			makeDepsWithFiles({ [MATH]: `export * from "./other";\nexport const known = 1;\n` }),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("does NOT validate default or namespace imports", () => {
+		const dflt = groundImports(
+			{ targetFile: TARGET, content: `import math from "./math";` },
+			makeDepsWithFiles({ [MATH]: "export const PI = 3;\n" }),
+		);
+		const ns = groundImports(
+			{ targetFile: TARGET, content: `import * as m from "./math";` },
+			makeDepsWithFiles({ [MATH]: "export const PI = 3;\n" }),
+		);
+		expect(dflt).toEqual({ action: "allow" });
+		expect(ns).toEqual({ action: "allow" });
+	});
+
+	it("FAIL-OPEN: an absent name with NO close export candidate is allowed", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { zzzzzzzz } from "./math";` },
+			makeDepsWithFiles({ [MATH]: "export function calculate() {}\n" }),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("FAIL-OPEN: skips export validation entirely when no readFile dep is wired", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { calcualte } from "./math";` },
+			makeDeps([MATH]), // resolves on disk, but no readFile -> pass 2 is skipped
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("export-list `export *` wildcard does NOT trip on `export * as ns` (ns IS a named export)", () => {
+		const ok = groundImports(
+			{ targetFile: TARGET, content: `import { ns } from "./math";` },
+			makeDepsWithFiles({ [MATH]: `export * as ns from "./other";\n` }),
+		);
+		expect(ok).toEqual({ action: "allow" });
+	});
+
+	it("still reports a broken PATH (pass 1) before any export check", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { x } from "./mth";` },
+			makeDepsWithFiles({ [MATH]: "export const x = 1;\n" }),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") expect(decision.message).toContain("does not resolve");
+	});
+});
+
+describe("groundImports — MULTI-LINE imports (Change 1)", () => {
+	const MATH = resolvePath(ROOT, "math.ts");
+
+	it("blocks a MULTI-LINE named import whose PATH is broken (path) with a candidate", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import {\n  a,\n  b,\n} from "./utis";\n` },
+			makeDeps([resolvePath(ROOT, "utils.ts")]),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") {
+			expect(decision.kind).toBe("path");
+			expect(decision.message).toContain("./utis");
+			expect(decision.message).toContain("./utils");
+		}
+	});
+
+	it("blocks a MULTI-LINE named import whose SYMBOL is not exported (export) with a candidate", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import {\n  calcualte,\n  PI,\n} from "./math";\n` },
+			makeDepsWithFiles({ [MATH]: "export function calculate() {}\nexport const PI = 3;\n" }),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") {
+			expect(decision.kind).toBe("export");
+			expect(decision.message).toContain("calcualte");
+			expect(decision.message).toContain("calculate");
+			expect(decision.message).toContain("has no exported member");
+		}
+	});
+
+	it("allows a VALID MULTI-LINE named import (path resolves + symbols exported)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import {\n  calculate,\n  PI,\n} from "./math";\n` },
+			makeDepsWithFiles({ [MATH]: "export function calculate() {}\nexport const PI = 3;\n" }),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("handles a MULTI-LINE import with `as` renames and inline `type` across lines", () => {
+		const src = "export function calculate() {}\nexport type Vec = number;\n";
+		const ok = groundImports(
+			{ targetFile: TARGET, content: `import {\n  calculate as run,\n  type Vec,\n} from "./math";\n` },
+			makeDepsWithFiles({ [MATH]: src }),
+		);
+		expect(ok).toEqual({ action: "allow" });
+	});
+
+	it("does NOT match a LINE-comment import even when adjacent to real lines (multi-line content)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `// import { x } from "./fake"\nconst y = 1;\nexport {};\n` },
+			makeDeps([resolvePath(ROOT, "face.ts")]),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("does NOT match an indented LINE-comment import (leading whitespace before //)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `function f() {\n  // import { x } from "./fake";\n}\n` },
+			makeDeps([resolvePath(ROOT, "face.ts")]),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("a broken MULTI-LINE export … from re-export blocks with kind path", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `export {\n  a,\n  b,\n} from "./utis";\n` },
+			makeDeps([resolvePath(ROOT, "utils.ts")]),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") expect(decision.kind).toBe("path");
+	});
+});
+
+describe("ImportGroundingDecision — block carries kind (Change 2)", () => {
+	const MATH = resolvePath(ROOT, "math.ts");
+
+	it('a PATH block reports kind "path"', () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { u } from "./utis";` },
+			makeDeps([resolvePath(ROOT, "utils.ts")]),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") expect(decision.kind).toBe("path");
+	});
+
+	it('an EXPORT block reports kind "export"', () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { calcualte } from "./math";` },
+			makeDepsWithFiles({ [MATH]: "export function calculate() {}\n" }),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") expect(decision.kind).toBe("export");
 	});
 });
 

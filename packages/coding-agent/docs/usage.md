@@ -294,6 +294,7 @@ Feature kill-switches (all default-ON; set the variable to `1`/`true`/`yes` to d
 | `PIT_NO_LEARNED_ERROR_GUARD` | The learned-error guard (blocks pre-exec calls matching a cross-session error pattern) |
 | `PIT_NO_LEGACY_SKILLS` | Discovery of skills from legacy directories (`.claude/`, `.cursor/`, `.codex/`, `.gemini/`) |
 | `PIT_NO_CLAUDE_CODE_SKILLS` | Loading skills from `~/.claude/skills/` (alias: `PIT_DISABLE_CLAUDE_CODE_SKILLS`) |
+| `PIT_NO_ASYNC_REINJECT` | Auto re-injection of async (`task` `op:"spawn"`) subagent results into the chat — falls back to manual collection via `op:"poll"`/`op:"join"` |
 
 ### Advanced tuning
 

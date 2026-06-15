@@ -10,7 +10,6 @@ import { type Static, Type } from "typebox";
 import { getReadmePath } from "../../config.js";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.js";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.js";
-import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.js";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.js";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.js";
@@ -19,7 +18,7 @@ import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { prepareWithPathAliases } from "./argument-prep.js";
 import { generateDiffString } from "./edit-diff.ts";
 import { formatAnchorsForRead, interleaveAnchorsIntoLines } from "./edit-hashline-diff.ts";
-import { crushJson, JSON_CRUSH_TARGET_BYTES } from "./json-crush.js";
+import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.js";
 import { formatNotebookSource } from "./notebook-formatter.ts";
 import { resolveReadPath } from "./path-utils.js";
 import {
@@ -625,8 +624,7 @@ Common mistakes to avoid:
 								// Apply offset if specified. Convert from 1-indexed input to 0-indexed array access.
 								const startLine = offset ? Math.max(0, offset - 1) : 0;
 								const startLineDisplay = startLine + 1;
-								const jsonCrushEligible =
-									isTruthyEnvFlag(process.env.PIT_JSON_CRUSH) && offset === undefined && limit === undefined;
+								const jsonCrushEligible = isJsonCrushEnabled() && offset === undefined && limit === undefined;
 								let streamed: StreamedTextRead | StreamedBinaryRead | undefined;
 								if (
 									ops.stat &&
@@ -731,20 +729,20 @@ Common mistakes to avoid:
 								// True only when outputText is the verbatim body (no truncation/limit/crush
 								// footer) — the sole case where it is safe to record for and emit as a delta.
 								let bodyIsClean = false;
-								// Structural JSON crush (behind PIT_JSON_CRUSH): a whole-file read of a
+								// Structural JSON crush (on by default; PIT_NO_JSON_CRUSH opts out): a whole-file read of a
 								// large JSON/NDJSON file would otherwise be blindly head-cut — tail lost,
 								// structure broken, and often the whole thing dropped when it is a single
 								// minified line. Emit a schema + head/tail-samples crush instead. Only when
 								// it would already truncate; the file on disk stays the source of truth
 								// (offset/limit or `bash jq` recover any elided detail). crushJson self-gates
 								// to real JSON, so non-JSON falls through to the normal truncation below.
-								const crushed =
-									jsonCrushEligible && truncation.truncated
-										? crushJson(selectedContent, { targetChars: JSON_CRUSH_TARGET_BYTES })
-										: undefined;
+								const crushed = maybeCrushJsonOutput({
+									text: selectedContent,
+									shouldAttempt: jsonCrushEligible && truncation.truncated,
+									recoveryHint: "Re-read with offset/limit or use `bash jq` for any elided detail.",
+								});
 								if (crushed !== undefined) {
-									const originalSize = formatSize(Buffer.byteLength(selectedContent, "utf-8"));
-									outputText = `${crushed}\n\n[Large JSON crushed to schema + samples (${originalSize} original). Re-read with offset/limit or use \`bash jq\` for any elided detail.]`;
+									outputText = crushed;
 									details = { truncation };
 								} else if (truncation.firstLineExceedsLimit) {
 									// First line alone exceeds the byte limit. Point the model at a bash fallback.

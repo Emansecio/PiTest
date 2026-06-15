@@ -107,3 +107,26 @@ describe("flattenMcpContent aggregate budget", () => {
 		expect(res.content).toEqual([{ type: "text", text: "[Resource file://x]\nhello" }]);
 	});
 });
+
+describe("capMcpText JSON crush", () => {
+	it("structurally crushes a large JSON array instead of a blind head-cut", () => {
+		const bigJson = JSON.stringify(
+			Array.from({ length: 6000 }, (_, i) => ({ id: i, name: `item-${i}`, ok: i % 2 === 0 })),
+		);
+		expect(bigJson.length).toBeGreaterThan(DEFAULT_MAX_BYTES); // would otherwise be head-cut
+		const out = capMcpText(bigJson);
+		// Crushed, not blind-truncated: keeps the schema + samples + omitted count.
+		expect(out).toContain("[crushed JSON");
+		expect(out).toContain("Large JSON crushed to schema + samples");
+		expect(out).not.toContain("[MCP output truncated");
+		// Far smaller than the original payload AND smaller than the old 50KB head-cut.
+		expect(out.length).toBeLessThan(DEFAULT_MAX_BYTES / 2);
+	});
+
+	it("falls back to the head-cut for large non-JSON output (byte-identical to before)", () => {
+		const blob = "x".repeat(DEFAULT_MAX_BYTES * 2);
+		const out = capMcpText(blob);
+		expect(out).toContain("[MCP output truncated");
+		expect(out).not.toContain("[crushed JSON");
+	});
+});

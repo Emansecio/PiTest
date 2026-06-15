@@ -43,6 +43,8 @@ interface PendingTask {
 	startedAt: number;
 	result?: string;
 	error?: string;
+	/** True once the result was re-injected into the chat, so poll/join don't repeat the payload. */
+	delivered?: boolean;
 }
 
 /** Shared result shape for every `task` op so the inferred tool `details` type unifies. */
@@ -252,6 +254,12 @@ export interface CoordinatorExtensionOptions {
 	getParentMessagingId?: () => string | undefined;
 	/** Per-message reply timeout (ms) from settings. */
 	getMessagingTimeoutMs?: () => number | undefined;
+	/**
+	 * Called when an async (op:"spawn") subagent settles, with the same string
+	 * op:"join" would return. The parent session re-injects it into the chat so
+	 * the model never has to poll. Absent → spawn stays poll-only (legacy).
+	 */
+	onAsyncComplete?: (handle: string, text: string, status: "done" | "error") => boolean;
 }
 
 function messagingPreamble(selfId: string, parentId: string | undefined): string {
@@ -351,6 +359,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			if (!e) return `${h}: unknown handle`;
 			if (e.status === "running") return `${h}: running`;
 			if (e.status === "error") return `${h}: error — ${e.error ?? "failed"}`;
+			if (e.delivered) return `${h}: done (already delivered to chat)`;
 			return `${h}: done (collect with op:"join")`;
 		});
 		const anyDone = handles.some((h) => pending.get(h)?.status === "done");
@@ -380,6 +389,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			const e = pending.get(h);
 			if (!e) return `### ${h}\n(unknown handle)`;
 			if (e.status === "error") return `### ${h}\n[failed: ${e.error ?? "error"}]`;
+			if (e.delivered)
+				return `### ${h}\n(already delivered to the chat automatically when it finished — not repeated)`;
 			return `### ${h}\n${e.result ?? "(no output)"}`;
 		});
 		for (const h of handles) {
@@ -508,9 +519,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							);
 							entry.result = formatSpawnResult(result, resultSchema);
 							entry.status = "done";
+							if (options.onAsyncComplete?.(handle, entry.result, "done")) entry.delivered = true;
 						} catch (err) {
 							entry.error = err instanceof Error ? err.message : String(err);
 							entry.status = "error";
+							if (options.onAsyncComplete?.(handle, entry.error, "error")) entry.delivered = true;
 						}
 					})();
 					pending.set(handle, entry);
@@ -518,7 +531,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						content: [
 							{
 								type: "text" as const,
-								text: `Spawned subagent '${handle}' (non-blocking). Keep working, then collect with task({op:"join", handles:["${handle}"]}) — or check task({op:"poll", handles:["${handle}"]}).`,
+								text: `Spawned subagent '${handle}' (non-blocking). Keep working — its result re-injects automatically when it finishes. You may also check task({op:"poll", handles:["${handle}"]}) or collect early with task({op:"join", handles:["${handle}"]}).`,
 							},
 						],
 						isError: false,

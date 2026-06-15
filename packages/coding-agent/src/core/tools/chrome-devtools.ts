@@ -12,6 +12,7 @@ import { type Static, type TSchema, Type } from "typebox";
 import { getCurrentChromeDevtoolsManager } from "../chrome/chrome-devtools-manager.ts";
 import type { ElementToSourceResult } from "../chrome/element-to-source.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.ts";
 import { getTextOutput } from "./render-utils.ts";
 
 export interface ChromeDevtoolsToolOptions {}
@@ -476,6 +477,14 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 			}
 			const limit = input.limit ?? GET_TEXT_DEFAULT_LIMIT;
 			if (r.body.length <= limit) return textResult(r.body);
+			// Network bodies are JSON API responses far more often than not; prefer a
+			// structural crush (schema + head/tail samples) over a blind char-cut.
+			const crushed = maybeCrushJsonOutput({
+				text: r.body,
+				shouldAttempt: isJsonCrushEnabled(),
+				recoveryHint: "Re-fetch with a larger limit for any elided detail.",
+			});
+			if (crushed !== undefined) return textResult(crushed);
 			return textResult(
 				`${r.body.slice(0, limit)}\n… [truncated ${r.body.length - limit} of ${r.body.length} chars]`,
 			);

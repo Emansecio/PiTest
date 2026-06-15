@@ -3183,6 +3183,15 @@ export class InteractiveMode {
 				break;
 			}
 
+			case "subagent_complete":
+				this.showStatus(
+					event.status === "done"
+						? `✓ subagent '${event.handle}' finished`
+						: `✗ subagent '${event.handle}' failed`,
+					event.status === "done" ? (text) => theme.fg("success", text) : (text) => theme.fg("warning", text),
+				);
+				break;
+
 			case "auto_retry_start": {
 				// Set up escape to abort retry
 				this.retryEscapeHandler = this.defaultEditor.onEscape;

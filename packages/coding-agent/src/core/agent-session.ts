@@ -68,6 +68,7 @@ import {
 	shouldCompactSoft,
 } from "./compaction/index.ts";
 import { extractToolFileOp } from "./compaction/utils.js";
+import { buildAsyncDeliveryBody } from "./coordinator/async-delivery.ts";
 import { SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
 import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } from "./cross-error.js";
 import { dapSessionManager } from "./dap/index.ts";
@@ -296,7 +297,8 @@ export type AgentSessionEvent =
 			exitCode?: number;
 			willRetry?: boolean;
 	  }
-	| { type: "visual_review"; file: string };
+	| { type: "visual_review"; file: string }
+	| { type: "subagent_complete"; handle: string; status: "done" | "error" };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -3041,20 +3043,70 @@ export class AgentSession {
 	 * was aborted, or when no check command can be detected (gate stays inert).
 	 */
 	/**
-	 * Proactive prune (off by default, env PIT_PROACTIVE_PRUNE): excerpt old large
-	 * tool outputs from the LIVE context once it crosses a conservative floor, so
-	 * stale read/bash payloads stop being charged cache-read every turn in long
-	 * sessions where compaction rarely fires (e.g. 1M windows). Protects the 2 most
-	 * recent turns and reuses the compaction head+tail excerpt (never blind-drops).
+	 * Proactive prune (ON by default; PIT_NO_PROACTIVE_PRUNE=1 opts out): excerpt
+	 * old large tool outputs from the LIVE context once it crosses a conservative
+	 * floor, so stale read/bash payloads (and big write/edit arg bodies) stop being
+	 * charged cache-read every turn in long sessions where compaction rarely fires
+	 * (e.g. 1M windows). Safe-by-design: only outputs OLDER than the 2 most recent
+	 * turns and ABOVE the prune token threshold are touched, the head+tail excerpt
+	 * preserves the output's shape (never a blind drop), and the file on disk stays
+	 * the source of truth — so the model can always re-read if it needs elided detail.
 	 */
 	private _maybePruneStaleToolOutputs(contextTokens: number): void {
-		if (!isTruthyEnvFlag(process.env.PIT_PROACTIVE_PRUNE)) return;
+		if (isTruthyEnvFlag(process.env.PIT_NO_PROACTIVE_PRUNE)) return;
 		const floorRaw = Number(process.env.PIT_PROACTIVE_PRUNE_FLOOR);
 		const floor = Number.isFinite(floorRaw) && floorRaw > 0 ? floorRaw : 64_000;
 		if (contextTokens <= floor) return;
 		const copy = cloneToolResultMessagesForPrune(this.agent.state.messages);
 		const reclaimed = pruneOldToolOutputs(copy);
+		// Telemetry: record EVERY run above the floor (including reclaimed=0), so
+		// /diagnostics can show whether the proactive prune is actually reclaiming
+		// tokens in real sessions or firing no-op — and, when it does reclaim, how
+		// much. Without this the prune is blind: its real-world yield (and the
+		// cache-invalidation trade-off of rewriting old messages) can't be measured.
+		recordDiagnostic({
+			category: "prune.proactive",
+			level: "info",
+			source: "agent-session.maybePruneStaleToolOutputs",
+			context: { bytes: reclaimed, note: `ctx=${contextTokens}tok reclaimed=${reclaimed}tok` },
+		});
 		if (reclaimed > 0) this.agent.state.messages = copy;
+	}
+
+	/**
+	 * Re-inject a settled async (op:"spawn") subagent result into the chat so the
+	 * model never has to poll. Routes by liveness: while a run is in flight, splice
+	 * it out-of-band onto that turn (injectPassive); while idle, start a fresh turn
+	 * (_runAgentPrompt) so the result surfaces on its own. Either way the TUI gets a
+	 * subagent_complete status line. PIT_NO_ASYNC_REINJECT=1 reverts to poll-only.
+	 * Called from a detached spawn IIFE, so it must never throw.
+	 *
+	 * @internal Wired from agent-session-services via __bindBuiltInRefs; not part
+	 * of the public API. Kept non-private only so that cross-module wiring can
+	 * reach it without an unsafe cast.
+	 * @returns true when the result was re-injected (so the coordinator marks the
+	 * handle delivered and poll/join won't repeat it); false when
+	 * PIT_NO_ASYNC_REINJECT disabled re-injection.
+	 */
+	_deliverAsyncResult(handle: string, text: string, status: "done" | "error"): boolean {
+		this._emit({ type: "subagent_complete", handle, status });
+		if (isTruthyEnvFlag(process.env.PIT_NO_ASYNC_REINJECT)) return false;
+		const message: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: buildAsyncDeliveryBody(handle, status, text) }],
+			timestamp: Date.now(),
+		};
+		if (this.isBusy) {
+			this.agent.injectPassive(message);
+			return true;
+		}
+		// Idle: spawn a turn. If a user prompt wins the race and a run is already
+		// active by the time this lands, _runAgentPrompt rejects — fall back to
+		// passive so the result still rides that now-active turn.
+		this._runAgentPrompt(message).catch(() => {
+			this.agent.injectPassive(message);
+		});
+		return true;
 	}
 
 	private async _runVerificationGate(options?: PromptOptions): Promise<void> {
@@ -4673,8 +4725,8 @@ export class AgentSession {
 			return await this._runAutoCompaction("threshold", false);
 		}
 
-		// Proactive prune of stale tool outputs from the live context (gated, off by
-		// default) — frees cache-read cost before the window fills.
+		// Proactive prune of stale tool outputs from the live context (on by default;
+		// PIT_NO_PROACTIVE_PRUNE opts out) — frees cache-read cost before the window fills.
 		this._maybePruneStaleToolOutputs(contextTokens);
 
 		// Predictive (soft) compaction: when allowed (end-of-turn path) and we are

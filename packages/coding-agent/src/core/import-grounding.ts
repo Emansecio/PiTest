@@ -43,8 +43,14 @@ import { dirname, resolve as resolvePath } from "node:path";
 // Public verdict / input shapes
 // ============================================================================
 
-/** Verdict returned by `groundImports`. BLOCK-only: never rewrites content. */
-export type ImportGroundingDecision = { action: "allow" } | { action: "block"; message: string };
+/**
+ * Verdict returned by `groundImports`. BLOCK-only: never rewrites content.
+ * The block branch carries `kind` ("path" = pass-1 unresolved module,
+ * "export" = pass-2 unexported named binding) for downstream telemetry.
+ */
+export type ImportGroundingDecision =
+	| { action: "allow" }
+	| { action: "block"; kind: "path" | "export"; message: string };
 
 /** The file being written + its new content, plus the injectable fs/fuzzy deps. */
 export interface ImportGroundingInput {
@@ -85,6 +91,15 @@ export interface ImportGroundingDeps {
 	maxDistance: number;
 	/** Min affix overlap for the fuzzy affix fallback. */
 	prefixMinOverlap: number;
+	/**
+	 * Read a resolved module's source so its EXPORTS can be enumerated for
+	 * named-export validation (the second pass below). OPTIONAL: when omitted,
+	 * export validation is skipped entirely and only the import-path resolution
+	 * pass runs (preserves the original contract for callers that don't wire fs
+	 * reads). Returns undefined when the file can't be read -> that module is
+	 * skipped (fail-open). Defaults to fs.readFileSync in the adapter.
+	 */
+	readFile?: (absPath: string) => string | undefined;
 }
 
 // ============================================================================
@@ -146,15 +161,29 @@ export const IMPORT_GROUNDING_DEFAULTS = {
  *   - `import … from "X"`   / `import "X"` (side-effect)
  *   - `export … from "X"`   (re-export)
  *
- * Anchoring at `^\s*(import|export)` (multiline) is what keeps the extractor OUT
- * of comments (`// import …`), string and template literals: a line starting with
- * `const x = "import …"` begins with `const`, not `import`. `require()` and
- * dynamic `import()` are intentionally NOT matched in v1 — they carry no line
- * anchor and commonly appear inside codegen strings/templates (false positives).
+ * Anchoring at `^[ \t]*(import|export)` (multiline) is what keeps the extractor
+ * OUT of comments (`// import …`), string and template literals: a line starting
+ * with `const x = "import …"` begins with `const`, not `import`. We use `[ \t]`
+ * (not `\s`) for the leading indent so `^` truly anchors at the START of a line —
+ * `\s` would swallow the preceding newline and let the anchor drift mid-content.
+ *
+ * MULTI-LINE imports ARE matched: the clause between `import`/`export` and `from`
+ * may span lines (`import {\n  a,\n  b,\n} from "X"`), so `\n` is REMOVED from the
+ * clause negation (`[^'"]*?`), but the clause still stops at a quote (the next
+ * specifier) and is non-greedy. The specifier groups keep `[^'"\n]+` (a path never
+ * spans a line). `require()` and dynamic `import()` are intentionally NOT matched
+ * in v1 — they carry no line anchor and commonly appear inside codegen
+ * strings/templates (false positives).
+ *
+ * LIMITATION (accepted, fail-open + fire-once cover it): an `import … from "…"`
+ * whose FIRST line starts inside a `/* … *\/` block comment can match (we do NOT
+ * strip comments). A line-comment (`// import …`) never starts with `import`, so
+ * it is still excluded by the `^[ \t]*` anchor.
+ *
  * Three capture groups: import-from, side-effect import, export-from.
  */
 const IMPORT_SPECIFIER_RE =
-	/^\s*(?:import\b[^'"\n]*?\bfrom\s*['"]([^'"\n]+)['"]|import\s*['"]([^'"\n]+)['"]|export\b[^'"\n]*?\bfrom\s*['"]([^'"\n]+)['"])/gm;
+	/^[ \t]*(?:import\b[^'"]*?\bfrom\s*['"]([^'"\n]+)['"]|import\s*['"]([^'"\n]+)['"]|export\b[^'"]*?\bfrom\s*['"]([^'"\n]+)['"])/gm;
 
 /** A specifier is RELATIVE iff it starts with "./" or "../". Bare/alias -> not ours. */
 function isRelativeSpecifier(spec: string): boolean {
@@ -191,11 +220,13 @@ function extractRelativeSpecifiers(content: string): string[] {
  *   1. the exact path as written,
  *   2. the path + each known extension (.ts/.tsx/.js/.jsx/.mjs/.cjs/.json),
  *   3. the directory index form (`<path>/index.<ext>`).
- * Returns true iff ANY candidate exists (the import is valid).
+ * Returns the ABSOLUTE resolved path of the first candidate that exists, or null
+ * when nothing resolves. (Returning the path — not just a boolean — lets the
+ * export-validation pass read the very module it resolved to.)
  */
-function resolvesOnDisk(fromDir: string, specifier: string, fileExists: FileExists): boolean {
+function resolveModulePath(fromDir: string, specifier: string, fileExists: FileExists): string | null {
 	const base = resolvePath(fromDir, specifier);
-	if (fileExists(base)) return true;
+	if (fileExists(base)) return base;
 	// NodeNext/ESM: a `.js/.jsx/.mjs/.cjs` specifier resolves to its TS source on
 	// disk (import "./x.js" -> x.ts). Try the TS-family sibling before giving up,
 	// so a correct ESM import isn't false-blocked.
@@ -203,16 +234,22 @@ function resolvesOnDisk(fromDir: string, specifier: string, fileExists: FileExis
 	if (jsExt) {
 		const stem = base.slice(0, base.length - jsExt[0].length);
 		for (const ext of [".ts", ".tsx", ".mts", ".cts"]) {
-			if (fileExists(stem + ext)) return true;
+			if (fileExists(stem + ext)) return stem + ext;
 		}
 	}
 	for (const ext of RESOLVE_EXTENSIONS) {
-		if (fileExists(base + ext)) return true;
+		if (fileExists(base + ext)) return base + ext;
 	}
 	for (const ext of RESOLVE_EXTENSIONS) {
-		if (fileExists(resolvePath(base, `index${ext}`))) return true;
+		const indexPath = resolvePath(base, `index${ext}`);
+		if (fileExists(indexPath)) return indexPath;
 	}
-	return false;
+	return null;
+}
+
+/** True iff the relative `specifier` resolves to any module on disk. */
+function resolvesOnDisk(fromDir: string, specifier: string, fileExists: FileExists): boolean {
+	return resolveModulePath(fromDir, specifier, fileExists) !== null;
 }
 
 // ============================================================================
@@ -302,6 +339,199 @@ function formatBlockMessage(specifier: string, candidates: string[]): string {
 }
 
 // ============================================================================
+// Named-export validation
+// ----------------------------------------------------------------------------
+// Pass 1 (above) proves the MODULE exists. Pass 2 (below) proves the NAMED
+// BINDINGS a `import { foo } from "./mod"` asks for are actually exported by
+// that module — the second-most-common codegen error after a wrong path: a
+// named import of a symbol the module never exports (or a typo of one it does).
+//
+// SAME block-only / fail-open posture as the path pass, plus extra restraint:
+//   - LINE-ANCHORED imports (single- OR multi-line). The clause between `import`
+//     and `from` may span lines (`import {\n a,\n b,\n} from`); only the line-start
+//     anchor + quote/`;` bounds keep it out of comments/strings.
+//   - NAMED bindings only. Default (`import x from`) and namespace (`import * as`)
+//     imports are NOT validated — proving a default/namespace absent is far more
+//     false-positive prone (`export { x as default }`, dynamic namespace use).
+//   - If the module has a bare `export * from "..."` re-export, its full export
+//     set is NOT enumerable from this file alone -> the module is SKIPPED (we can
+//     never prove a name is absent through a wildcard).
+//   - BLOCK only when a close export name exists (fuzzy, same threshold as the
+//     path pass) — a genuinely-absent binding with NO near name is ALLOWED, since
+//     our regex export parser may not capture every exotic re-export form.
+// ============================================================================
+
+/** Parsed bindings of ONE `import … from "spec"` statement (single- or multi-line). */
+interface ParsedImport {
+	specifier: string;
+	/**
+	 * Names imported BY NAME — the source-module name (the part BEFORE any `as`,
+	 * since `import { a as b }` pulls export `a`). Excludes `default` and the
+	 * namespace form. These are what we validate against the module's exports.
+	 */
+	named: string[];
+}
+
+/**
+ * Match a static import that has a `from` clause, anchored at line start
+ * (`^[ \t]*`, NOT `^\s*` — `\s` would let the anchor drift past a newline). The
+ * binding clause `[^'";]*?` forbids quote/semicolon (so it stays within ONE
+ * statement and can't run into the next import's specifier) but ALLOWS newlines,
+ * so a MULTI-LINE `import {\n  a,\n  b,\n} from "X"` is captured. `parseNamed
+ * Bindings` splits the `{ … }` on commas and trims each entry, so embedded
+ * newlines inside the binding list are harmless. Group 1 = clause, group 2 = spec.
+ */
+const IMPORT_CLAUSE_RE = /^[ \t]*import\b([^'";]*?)\bfrom\s*['"]([^'"\n]+)['"]/gm;
+
+const IDENT_RE = /^[A-Za-z_$][\w$]*$/;
+
+/** Extract the source-module names from a `{ … }` binding clause. */
+function parseNamedBindings(clause: string): string[] {
+	const open = clause.indexOf("{");
+	const close = clause.indexOf("}", open + 1);
+	if (open < 0 || close < 0) return [];
+	const out: string[] = [];
+	for (const rawEntry of clause.slice(open + 1, close).split(",")) {
+		let entry = rawEntry.trim();
+		if (entry.length === 0) continue;
+		// Inline type import marker: `import { type Foo }` imports type export Foo.
+		if (entry.startsWith("type ")) entry = entry.slice(5).trim();
+		// `a as b` imports export `a` (validate the source name, before `as`).
+		const asIdx = entry.search(/\bas\b/);
+		const sourceName = (asIdx >= 0 ? entry.slice(0, asIdx) : entry).trim();
+		if (sourceName === "default") continue; // default import via named syntax — not validated
+		if (IDENT_RE.test(sourceName)) out.push(sourceName);
+	}
+	return out;
+}
+
+/** Parse every line-anchored import with named bindings into {specifier, named} (single- or multi-line). */
+function parseImports(content: string): ParsedImport[] {
+	const out: ParsedImport[] = [];
+	IMPORT_CLAUSE_RE.lastIndex = 0;
+	let match: RegExpExecArray | null = IMPORT_CLAUSE_RE.exec(content);
+	while (match !== null) {
+		const clause = match[1] ?? "";
+		const specifier = match[2];
+		if (specifier !== undefined) {
+			const named = parseNamedBindings(clause);
+			if (named.length > 0) out.push({ specifier, named });
+		}
+		match = IMPORT_CLAUSE_RE.exec(content);
+	}
+	return out;
+}
+
+/** The enumerable named exports of a module + whether a wildcard re-export defeats enumeration. */
+interface ModuleExports {
+	names: Set<string>;
+	/** A bare `export * from "…"` — the export set is NOT fully knowable from this file. */
+	wildcard: boolean;
+}
+
+/** Declaration exports: `export [declare] [async] [abstract] <kw> NAME`. NO `default` (a default is not a named export). */
+const EXPORT_DECL_RE =
+	/^\s*export\s+(?:declare\s+)?(?:async\s+)?(?:abstract\s+)?(?:const\s+enum|const|let|var|function\*?|class|interface|type|enum|namespace)\s+([A-Za-z_$][\w$]*)/gm;
+
+/** `export { a, b as c, type T }` lists (may span lines — `[^}]` allows newlines). */
+const EXPORT_LIST_RE = /export\s*\{([^}]*)\}/g;
+
+/** `export * as ns from "…"` — exports the single namespace binding `ns` (NOT a wildcard). */
+const EXPORT_STAR_AS_RE = /^\s*export\s+\*\s+as\s+([A-Za-z_$][\w$]*)\s+from/gm;
+
+/** `export * from "…"` (no `as`) — a true wildcard that defeats enumeration. */
+const EXPORT_STAR_BARE_RE = /^\s*export\s+\*\s+from\s*['"][^'"\n]+['"]/m;
+
+/**
+ * Enumerate a module's NAMED exports from its source. Best-effort by regex:
+ * declarations, `export { … }` lists (incl. re-exports & renames), and
+ * `export * as ns`. A bare `export *` sets `wildcard` (caller then skips).
+ * `export default …` is intentionally NOT collected.
+ */
+function extractExports(source: string): ModuleExports {
+	const names = new Set<string>();
+	const wildcard = EXPORT_STAR_BARE_RE.test(source);
+
+	EXPORT_DECL_RE.lastIndex = 0;
+	for (let m = EXPORT_DECL_RE.exec(source); m !== null; m = EXPORT_DECL_RE.exec(source)) {
+		if (m[1] !== undefined) names.add(m[1]);
+	}
+
+	EXPORT_LIST_RE.lastIndex = 0;
+	for (let m = EXPORT_LIST_RE.exec(source); m !== null; m = EXPORT_LIST_RE.exec(source)) {
+		for (const rawEntry of (m[1] ?? "").split(",")) {
+			let entry = rawEntry.trim();
+			if (entry.length === 0) continue;
+			if (entry.startsWith("type ")) entry = entry.slice(5).trim();
+			// The EXPORTED name is AFTER `as` (`internal as Public` exports `Public`).
+			const asIdx = entry.search(/\bas\b/);
+			const exportedName = (asIdx >= 0 ? entry.slice(asIdx + 2) : entry).trim();
+			if (exportedName === "default") continue; // `x as default` — not importable by name
+			if (IDENT_RE.test(exportedName)) names.add(exportedName);
+		}
+	}
+
+	EXPORT_STAR_AS_RE.lastIndex = 0;
+	for (let m = EXPORT_STAR_AS_RE.exec(source); m !== null; m = EXPORT_STAR_AS_RE.exec(source)) {
+		if (m[1] !== undefined) names.add(m[1]);
+	}
+
+	return { names, wildcard };
+}
+
+/** Block message for a named import whose symbol the module does not export. */
+function formatExportBlockMessage(specifier: string, name: string, candidate: string): string {
+	return (
+		`Import grounding (no write attempted): "${specifier}" has no exported member "${name}". ` +
+		`Did you mean: ${candidate}? Fix the import name, ` +
+		"or re-issue the identical call to write it anyway."
+	);
+}
+
+/**
+ * Pass 2: for each line-anchored named import whose module RESOLVES, verify every
+ * named binding is exported. Returns the first BLOCK (an unexported name with a
+ * close candidate) or null. Pure — all fs access via injected `deps`.
+ */
+function validateNamedExports(
+	fromDir: string,
+	content: string,
+	deps: ImportGroundingDeps,
+): ImportGroundingDecision | null {
+	const readFile = deps.readFile;
+	if (readFile === undefined) return null; // export validation not wired -> skip
+	for (const imp of parseImports(content)) {
+		if (!isRelativeSpecifier(imp.specifier)) continue;
+		if (hasNonGroundableExtension(imp.specifier)) continue;
+		const resolved = resolveModulePath(fromDir, imp.specifier, deps.fileExists);
+		if (resolved === null) continue; // unresolved is pass 1's job (or fail-open)
+		const source = readFile(resolved);
+		if (source === undefined) continue; // unreadable -> fail-open for this module
+		const exports = extractExports(source);
+		if (exports.wildcard) continue; // wildcard re-export -> can't prove absence
+		if (exports.names.size === 0) continue; // nothing enumerable -> fail-open
+		const exportList = [...exports.names];
+		for (const name of imp.named) {
+			if (exports.names.has(name)) continue;
+			const candidate = deps.fuzzy(name, exportList, {
+				maxDistance: deps.maxDistance,
+				prefixMinOverlap: deps.prefixMinOverlap,
+			});
+			// Block only on a close candidate; a genuinely-absent name with no near
+			// match is ALLOWED (the regex parser may miss an exotic re-export form).
+			if (candidate !== undefined) {
+				return {
+					action: "block",
+					kind: "export",
+					message: formatExportBlockMessage(imp.specifier, name, candidate),
+				};
+			}
+		}
+	}
+	return null;
+}
+
+// ============================================================================
 // Main entry point
 // ============================================================================
 
@@ -325,6 +555,8 @@ export function groundImports(input: ImportGroundingInput, deps: ImportGrounding
 		const fromDir = dirname(targetFile);
 		const specifiers = extractRelativeSpecifiers(content);
 
+		// Pass 1 — the MODULE must resolve. A wrong path is more fundamental than a
+		// wrong member, so it is reported first and short-circuits.
 		for (const specifier of specifiers) {
 			// Assets (.css/.svg/.png/…) are bundler-resolved, not on the node/TS
 			// resolution surface — skip so a near-named sibling never produces a
@@ -335,8 +567,14 @@ export function groundImports(input: ImportGroundingInput, deps: ImportGrounding
 			// keep scanning the rest.
 			const candidates = rankCandidates(fromDir, specifier, deps);
 			if (candidates.length === 0) continue;
-			return { action: "block", message: formatBlockMessage(specifier, candidates) };
+			return { action: "block", kind: "path", message: formatBlockMessage(specifier, candidates) };
 		}
+
+		// Pass 2 — every named binding must be exported by its (resolved) module.
+		// Only runs when a `readFile` dep is wired; fail-open everywhere else.
+		const exportDecision = validateNamedExports(fromDir, content, deps);
+		if (exportDecision !== null) return exportDecision;
+
 		return { action: "allow" };
 	} catch {
 		// Any unexpected throw anywhere -> FAIL-OPEN.

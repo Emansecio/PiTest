@@ -16,6 +16,19 @@
  * blind cut it replaces.
  */
 
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
+import { formatSize } from "./truncate.ts";
+
+/**
+ * JSON crush is ON by default. It only ever upgrades a truncation that would
+ * happen anyway (see the design contract above), so there is no reason to opt
+ * in — `PIT_NO_JSON_CRUSH=1` is the emergency opt-out, mirroring the project's
+ * other default-on features (PIT_NO_STRUCTURAL_COMPACTION, PIT_NO_LIVING_REPO_MAP…).
+ */
+export function isJsonCrushEnabled(): boolean {
+	return !isTruthyEnvFlag(process.env.PIT_NO_JSON_CRUSH);
+}
+
 export interface JsonCrushOptions {
 	/** Target character budget for the crushed output. */
 	targetChars: number;
@@ -28,8 +41,8 @@ export interface JsonCrushOptions {
 }
 
 /**
- * Default target size for a structural crush at the *source* (a tool output),
- * behind the PIT_JSON_CRUSH flag. Smaller than a read's byte budget on purpose:
+ * Default target size for a structural crush at the *source* (a tool output).
+ * Smaller than a read's byte budget on purpose:
  * the crush keeps schema + head/tail samples, so a few KB carries the shape of a
  * payload that would otherwise be blindly head-cut. The file/temp output on disk
  * remains the source of truth for any elided detail.
@@ -180,4 +193,33 @@ export function crushJson(text: string, opts: JsonCrushOptions): string | undefi
 	if (nd) return emit(nd, text.length, opts, true);
 
 	return undefined;
+}
+
+/**
+ * Shared router for the "blind truncation → structural JSON crush" upgrade used
+ * by every tool-output surface (bash, read, MCP, chrome). Encapsulates the
+ * design contract in one place: only attempt when the caller's blind cut already
+ * fired (`shouldAttempt`), fall back to that cut when `crushJson` returns
+ * `undefined` (not JSON, fits, or won't collapse), and wrap the crush in the
+ * standard footer with a surface-specific `recoveryHint` pointing at where the
+ * elided detail still lives. Returns `undefined` → the caller keeps its existing
+ * truncated output unchanged (byte-identical to before this helper existed).
+ */
+export function maybeCrushJsonOutput(opts: {
+	/** The full (pre-cut) output to compress. */
+	text: string;
+	/** Caller's combined gate: crush enabled AND its blind truncation already fired AND eligible. */
+	shouldAttempt: boolean;
+	/** Where elided detail can be recovered, e.g. "Re-read with offset/limit or use `bash jq`…". */
+	recoveryHint: string;
+	/** Human size of the original payload for the footer; defaults to `text`'s byte length. */
+	originalSize?: string;
+	/** Crush budget; defaults to `JSON_CRUSH_TARGET_BYTES`. */
+	targetChars?: number;
+}): string | undefined {
+	if (!opts.shouldAttempt) return undefined;
+	const crushed = crushJson(opts.text, { targetChars: opts.targetChars ?? JSON_CRUSH_TARGET_BYTES });
+	if (crushed === undefined) return undefined;
+	const size = opts.originalSize ?? formatSize(Buffer.byteLength(opts.text, "utf-8"));
+	return `${crushed}\n\n[Large JSON crushed to schema + samples (${size} original). ${opts.recoveryHint}]`;
 }

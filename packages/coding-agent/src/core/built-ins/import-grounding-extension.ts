@@ -99,6 +99,10 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 						fuzzy: suggestClosest,
 						maxDistance: IMPORT_GROUNDING_DEFAULTS.maxDistance,
 						prefixMinOverlap: IMPORT_GROUNDING_DEFAULTS.prefixMinOverlap,
+						// Wires the named-export validation pass: read a resolved module's
+						// source so a `import { nope } from "./mod"` of a non-existent member
+						// is caught one round-trip before type-check.
+						readFile: readFileSafe,
 					},
 				);
 
@@ -106,13 +110,27 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 					// Stable key (sorted top-level arg keys) so a verbatim re-issue with
 					// reordered keys still matches the fire-once escape.
 					const key = `${event.toolName}:${JSON.stringify(input, Object.keys(input).sort())}`;
-					if (fired.has(key)) return undefined; // already advised once -> let it run
+					// `note` carries the block KIND (path vs export) + the tool so the
+					// acceptance rate can be read per-kind from the diagnostics buffer.
+					const note = `${decision.kind}:${event.toolName}`;
+					if (fired.has(key)) {
+						// The model is OVERRIDING the fire-once advisory by re-issuing the
+						// identical call — record the acceptance so override-rate is
+						// measurable against the blocks below.
+						recordDiagnostic({
+							category: "guard.import-grounding",
+							level: "info",
+							source: "import-grounding-extension",
+							context: { note, outcome: "overridden" },
+						});
+						return undefined; // already advised once -> let it run
+					}
 					fired.add(key);
 					recordDiagnostic({
 						category: "guard.import-grounding",
 						level: "info",
 						source: "import-grounding-extension",
-						context: { note: event.toolName },
+						context: { note, outcome: "blocked" },
 					});
 					return { block: true, reason: decision.message };
 				}

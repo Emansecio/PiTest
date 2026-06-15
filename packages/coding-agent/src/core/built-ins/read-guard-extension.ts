@@ -72,9 +72,13 @@ function stampFile(absPath: string): FileStamp | undefined {
 
 export function createReadGuardExtension(options: ReadGuardOptions) {
 	return (pi: ExtensionAPI) => {
-		const readFiles = new Set<string>();
+		// Maps an absolute path to its content stamp AT READ TIME (or null when the
+		// file couldn't be stamped). Membership = "read this session"; the stamp
+		// powers the intra-session drift guard below.
+		const readFiles = new Map<string, FileStamp | null>();
 		const postCompactStamps = new Map<string, FileStamp>();
-		// Files already warned about overwriting post-compaction (fire-once anti-wedge).
+		// Files already warned about overwriting (post-compaction OR intra-session
+		// drift) — fire-once anti-wedge: a verbatim re-issue runs.
 		const firedWriteWarnings = new Set<string>();
 
 		pi.on("tool_call", (event) => {
@@ -82,9 +86,13 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 				const path = extractPathArg(event.input as Record<string, unknown>);
 				if (path !== undefined) {
 					const abs = resolveToolPath(path, options.cwd);
-					readFiles.add(abs);
-					// A fresh read supersedes any post-compaction stamp gate.
+					// Stamp at read time so a later write can detect the file drifting
+					// underneath the model (concurrent user edit / git checkout / another
+					// agent). null = unstampable -> drift check can't fire (fail-open).
+					readFiles.set(abs, stampFile(abs) ?? null);
+					// A fresh read supersedes any stale gate.
 					postCompactStamps.delete(abs);
+					firedWriteWarnings.delete(abs);
 				}
 				return undefined;
 			}
@@ -105,7 +113,53 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 					return undefined;
 				}
 
-				if (readFiles.has(abs)) return undefined;
+				if (readFiles.has(abs)) {
+					// Intra-session drift guard (WRITE only): the file was read this
+					// session, but a `write` OVERWRITES the whole file from the model's
+					// in-context copy. If the bytes on disk changed since that read
+					// (concurrent user edit / git op / another agent), the overwrite
+					// would silently clobber that change. `edit` is exempt — its oldText
+					// is dry-run-matched against current disk by edit-precondition, so a
+					// surgical edit can't clobber an unseen region. Compare on content
+					// (hash+size), ignoring mtime, so a touch/reformat that left bytes
+					// identical isn't a false drift.
+					if (event.toolName === "write") {
+						const readStamp = readFiles.get(abs);
+						const current = stampFile(abs);
+						const drifted =
+							readStamp != null &&
+							current !== undefined &&
+							(current.hash !== readStamp.hash || current.size !== readStamp.size);
+						if (drifted && !firedWriteWarnings.has(abs)) {
+							firedWriteWarnings.add(abs);
+							recordDiagnostic({
+								category: "guard.read",
+								level: "info",
+								source: "read-guard-extension.intraSessionDrift",
+								context: { path, outcome: "blocked" },
+							});
+							return {
+								block: true,
+								reason: `Read guard: file "${path}" changed on disk since you read it this session — a write would OVERWRITE that change. Read it again to confirm current content, or re-issue the identical write to overwrite anyway.`,
+							};
+						}
+						// A write that reaches here with a pending intra-session-drift
+						// warning means the model is OVERRIDING the fire-once warning by
+						// re-issuing the identical call. Record the acceptance so
+						// override-rate is measurable vs the blocks above. (A normal write
+						// to a read, undrifted file never entered firedWriteWarnings, so
+						// this stays silent in the common case.)
+						if (firedWriteWarnings.has(abs)) {
+							recordDiagnostic({
+								category: "guard.read",
+								level: "info",
+								source: "read-guard-extension.writeWarnOverridden",
+								context: { path, outcome: "overridden" },
+							});
+						}
+					}
+					return undefined;
+				}
 
 				const stamp = postCompactStamps.get(abs);
 				if (stamp !== undefined) {
@@ -155,12 +209,25 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								category: "guard.read",
 								level: "info",
 								source: "read-guard-extension.postCompactWriteWarn",
-								context: { path },
+								context: { path, outcome: "blocked" },
 							});
 							return {
 								block: true,
 								reason: `Read guard: "${path}" was only summarized across compaction and a write would OVERWRITE its full content from that lossy summary. Read it again to confirm what you're replacing, or re-issue the identical write to overwrite anyway.`,
 							};
+						}
+						// A write that reaches here with a pending post-compaction warning
+						// is the model OVERRIDING the fire-once warn by re-issuing the
+						// identical call. Record the acceptance so override-rate is
+						// measurable vs the postCompactWriteWarn blocks above. (Stays
+						// silent for an edit, or a write that was never warned.)
+						if (event.toolName === "write" && firedWriteWarnings.has(abs)) {
+							recordDiagnostic({
+								category: "guard.read",
+								level: "info",
+								source: "read-guard-extension.writeWarnOverridden",
+								context: { path, outcome: "overridden" },
+							});
 						}
 						return undefined;
 					}
@@ -194,12 +261,30 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 			return undefined;
 		});
 
+		// After the model's OWN successful write/edit, the file on disk is now what
+		// the model just authored — re-stamp it so a follow-up write doesn't read
+		// the model's own change as external drift (false positive). Only re-stamp
+		// already-tracked files: a brand-new file the model just created stays
+		// untracked (its first edit still requires the normal read), preserving the
+		// existing new-file contract.
+		pi.on("tool_result", (event) => {
+			if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
+			if (event.isError) return undefined;
+			const path = extractPathArg(event.input as Record<string, unknown>);
+			if (path === undefined) return undefined;
+			const abs = resolveToolPath(path, options.cwd);
+			if (!readFiles.has(abs)) return undefined;
+			readFiles.set(abs, stampFile(abs) ?? null);
+			firedWriteWarnings.delete(abs);
+			return undefined;
+		});
+
 		// On compaction, migrate the in-memory read set to a stat snapshot. The
 		// model loses the verbatim content (it only sees the summary) but if the
 		// file on disk has not drifted by the time it tries to edit, we can
 		// still trust the snapshot it carried into context.
 		pi.on("session_before_compact" as any, () => {
-			for (const abs of readFiles) {
+			for (const abs of readFiles.keys()) {
 				const stamp = stampFile(abs);
 				if (stamp) postCompactStamps.set(abs, stamp);
 				// If stat fails (file deleted/permissions), we drop the entry —
