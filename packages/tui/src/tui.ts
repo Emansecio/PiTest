@@ -572,7 +572,18 @@ export class TUI extends Container {
 		this.stopped = false;
 		this.terminal.start(
 			(data) => this.handleInput(data),
-			() => this.requestRender(),
+			() => {
+				// On terminal resize, force the next render onto the clean full-redraw path.
+				// After the emulator reflows the buffer, differential rendering relies on
+				// cursor/viewport tracking that is now stale and progressively duplicates the
+				// frame — most visibly while the working spinner is driving renders mid-turn
+				// (idle resizes already hit fullRender via widthChanged and stay clean).
+				// Resetting previousWidth guarantees the widthChanged → fullRender("all") branch.
+				// Termux toggles height for the soft keyboard and is handled differentially
+				// below, so leave its path untouched.
+				if (!isTermuxSession()) this.previousWidth = -1;
+				this.requestRender();
+			},
 		);
 		this.terminal.hideCursor();
 		this.queryCellSize();

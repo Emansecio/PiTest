@@ -1,4 +1,4 @@
-import type { Model } from "@pit/ai";
+import { getModels, type KnownProvider, type Model } from "@pit/ai";
 import { describe, expect, test } from "vitest";
 import {
 	defaultModelPerProvider,
@@ -433,5 +433,17 @@ describe("default model selection", () => {
 
 		expect(result.model?.provider).toBe("vercel-ai-gateway");
 		expect(result.model?.id).toBe("anthropic/claude-opus-4-6");
+	});
+});
+
+describe("defaultModelPerProvider sanity", () => {
+	// Guards against a default drifting to a model id that no longer exists in the
+	// registry (e.g. the Opus 4.7 -> 4.8 staleness): every per-provider default
+	// must resolve to a real model.
+	test("every provider default exists in the model registry", () => {
+		for (const [provider, modelId] of Object.entries(defaultModelPerProvider)) {
+			const ids = getModels(provider as KnownProvider).map((m) => m.id);
+			expect(ids, `default for "${provider}" (${modelId}) must exist in the registry`).toContain(modelId);
+		}
 	});
 });

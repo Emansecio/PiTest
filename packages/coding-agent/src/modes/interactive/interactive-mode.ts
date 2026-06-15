@@ -136,6 +136,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
+import { FusionLiveComponent, type FusionLiveMember } from "./components/fusion-live.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
@@ -312,6 +313,16 @@ export class InteractiveMode {
 	private isInitialized = false;
 	private onInputCallback?: (text: string) => void;
 	private loadingAnimation: Loader | undefined = undefined;
+	private fusionLive: FusionLiveComponent | undefined = undefined;
+	// Per-session memo of `detectCli` probes (a blocking spawnSync, 10s timeout):
+	// cache the result per CLI so /fusion runs the probe at most once per CLI per
+	// session instead of re-spawning on every invocation.
+	private readonly _cliDetectCache = new Map<string, boolean>();
+	// Set when the Fusion writer stage shows its bridging "Synthesizing…" loader.
+	// The Fusion turn never emits agent_end, so nothing else would stop that loader;
+	// the writer's own message_start consumes this flag to tear it down. Scoped so
+	// normal turns keep their persistent working loader untouched.
+	private _fusionWriterLoaderActive = false;
 	private workingMessage: string | undefined = undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
@@ -1519,11 +1530,40 @@ export class InteractiveMode {
 	}
 
 	private stopWorkingLoader(): void {
+		if (this.fusionLive) {
+			this.fusionLive.dispose();
+			this.fusionLive = undefined;
+		}
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
 		this.statusContainer.clear();
+	}
+
+	private ensureFusionLive(): void {
+		if (!this.fusionLive) {
+			this.stopWorkingLoader();
+			this.fusionLive = new FusionLiveComponent(this.ui);
+			this.statusContainer.addChild(this.fusionLive);
+		}
+	}
+
+	private disposeFusionLive(): void {
+		if (this.fusionLive) {
+			this.fusionLive.dispose();
+			this.fusionLive = undefined;
+			this.statusContainer.clear();
+		}
+		// If the Fusion writer's bridging "Synthesizing…" loader is the active one,
+		// retire it too. By the writer stage the strip is already gone, so the block
+		// above is a no-op; this covers the interrupt path (Esc aborts the writer, so
+		// its message_start never fires to clear the loader). Scoped by the flag so a
+		// normal turn's working loader is never touched here.
+		if (this._fusionWriterLoaderActive) {
+			this._fusionWriterLoaderActive = false;
+			this.stopWorkingLoader();
+		}
 	}
 
 	private setWorkingVisible(visible: boolean): void {
@@ -2274,6 +2314,9 @@ export class InteractiveMode {
 		if (!picked || picked === STOP_ALL) {
 			this.restoreQueuedMessagesToEditor();
 			this.session.interrupt();
+			// Same as the bare-Esc path: a Fusion turn has no agent_end, so dispose
+			// its live strip + ticker explicitly when the whole task is stopped.
+			this.disposeFusionLive();
 			this.showStatus("Interrupted");
 			return;
 		}
@@ -2303,6 +2346,9 @@ export class InteractiveMode {
 				if (interruptible.length === 0) {
 					this.restoreQueuedMessagesToEditor();
 					this.session.interrupt();
+					// A Fusion turn returns before agent_end, so its live strip + ticker
+					// would leak when the user aborts mid-run. Tear it down explicitly.
+					this.disposeFusionLive();
 					this.showStatus("Interrupted");
 				} else {
 					void this.promptInterruptChoice(interruptible);
@@ -2766,6 +2812,11 @@ export class InteractiveMode {
 
 		switch (event.type) {
 			case "agent_start":
+				// Tear down any live Fusion strip first. The both-failed→solo fallback
+				// runs a normal turn that emits agent_start; without this the panel
+				// strip from the aborted Fusion run would be orphaned in the status band
+				// (the Fusion turn returns before agent_end). Idempotent.
+				this.disposeFusionLive();
 				this.pendingTools.clear();
 				this.activityStacker.reset();
 				this.lastAssistantComponent = null;
@@ -2804,6 +2855,58 @@ export class InteractiveMode {
 				this.setWorkingPhase(event.label);
 				break;
 
+			case "fusion_member": {
+				this.ensureFusionLive();
+				const member: FusionLiveMember = {
+					index: event.index,
+					cli: event.cli,
+					model: event.model,
+					status: event.status,
+					elapsedMs: event.elapsedMs,
+					timeoutMs: event.timeoutMs,
+					chars: event.chars,
+					error: event.error,
+				};
+				// upsertMember already calls ui.requestRender() internally.
+				this.fusionLive?.upsertMember(member);
+				break;
+			}
+
+			case "fusion_member_activity":
+				// recordActivity already calls ui.requestRender() internally.
+				this.fusionLive?.recordActivity(event.index, event.kind, event.tool);
+				break;
+
+			case "fusion_stage":
+				if (event.stage === "writer") {
+					// The judge has handed off; the panel strip retires here and the
+					// writer streams into the transcript. Bridge the gap with a working
+					// loader so the UI doesn't look frozen on a slow synthesizer between
+					// the strip going away and the writer's first token. Build the loader
+					// directly: the Fusion turn bypasses agent.run(), so isStreaming is
+					// false and setWorkingVisible's streaming-gated path wouldn't create
+					// one. The writer's message_start retires it via _fusionWriterLoaderActive.
+					this.disposeFusionLive();
+					this.workingVisible = true;
+					if (!this.loadingAnimation) {
+						this.statusContainer.clear();
+						this.loadingAnimation = this.createWorkingLoader();
+						this.statusContainer.addChild(this.loadingAnimation);
+					}
+					this.setWorkingPhase("Synthesizing…");
+					this._fusionWriterLoaderActive = true;
+					this.ui.requestRender();
+				} else {
+					this.ensureFusionLive();
+					// setSynth/setStage early-return when the value is unchanged, so on a
+					// freshly created strip (default stage "brief", synthId "") neither
+					// may render — keep an explicit render to guarantee the create-time paint.
+					this.fusionLive?.setSynth(event.synthId);
+					this.fusionLive?.setStage(event.stage);
+					this.ui.requestRender();
+				}
+				break;
+
 			case "message_start":
 				switch (event.message.role) {
 					case "custom":
@@ -2814,6 +2917,14 @@ export class InteractiveMode {
 						this.updatePendingMessagesDisplay();
 						break;
 					case "assistant":
+						// Fusion writer hand-off: the bridging "Synthesizing…" loader set at
+						// fusion_stage:writer has no agent_end to clear it, so retire it here —
+						// the moment the writer's stream owns the frame — before the streaming
+						// block attaches. Flag-gated so normal turns keep their working loader.
+						if (this._fusionWriterLoaderActive) {
+							this._fusionWriterLoaderActive = false;
+							this.stopWorkingLoader();
+						}
 						this.streamingComponent = new AssistantMessageComponent(
 							undefined,
 							this.hideThinkingBlock,
@@ -2941,6 +3052,7 @@ export class InteractiveMode {
 
 			case "agent_end":
 				this.setTerminalProgress(false);
+				this.disposeFusionLive();
 				if (this.loadingAnimation) {
 					this.loadingAnimation.stop();
 					this.loadingAnimation = undefined;
@@ -4566,10 +4678,23 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * `detectCli` shells out via a blocking spawnSync (10s timeout). Memoize the
+	 * result per CLI for the session so repeated /fusion invocations don't re-probe
+	 * PATH every time — the probe runs at most once per CLI per session.
+	 */
+	private detectCliCached(cli: "codex" | "claude"): boolean {
+		const cached = this._cliDetectCache.get(cli);
+		if (cached !== undefined) return cached;
+		const found = detectCli(cli);
+		this._cliDetectCache.set(cli, found);
+		return found;
+	}
+
 	private async handleFusionCommand(): Promise<void> {
 		const clis: Array<"codex" | "claude"> = [];
-		if (detectCli("codex")) clis.push("codex");
-		if (detectCli("claude")) clis.push("claude");
+		if (this.detectCliCached("codex")) clis.push("codex");
+		if (this.detectCliCached("claude")) clis.push("claude");
 		if (clis.length === 0) {
 			this.showError("Fusion needs the codex and/or claude CLI on PATH.");
 			return;

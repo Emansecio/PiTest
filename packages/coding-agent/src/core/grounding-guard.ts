@@ -396,9 +396,9 @@ export const GROUNDING_GUARD_DEFAULTS = {
 	prefixMinOverlap: DEFAULT_PREFIX_MIN_OVERLAP,
 } as const;
 
-/** Opt-out: PIT_NO_GROUNDING_GUARD disables the guard entirely (FAIL-OPEN). */
+/** Opt-out: PIT_NO_GROUNDING (or legacy PIT_NO_GROUNDING_GUARD) disables the guard entirely (FAIL-OPEN). */
 export function isGroundingGuardDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const value = env.PIT_NO_GROUNDING_GUARD;
+	const value = env.PIT_NO_GROUNDING || env.PIT_NO_GROUNDING_GUARD;
 	if (!value) return false;
 	const v = value.toLowerCase();
 	return v === "1" || v === "true" || v === "yes";

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { buildJudgeContext, JUDGE_SCHEMA, parseJudgeOutput } from "../../src/core/fusion/judge.ts";
+import {
+	buildJudgeContext,
+	buildVerifierPrompt,
+	JUDGE_SCHEMA,
+	parseJudgeOutput,
+	VERIFICATION_SCHEMA,
+} from "../../src/core/fusion/judge.ts";
 
 describe("fusion judge", () => {
 	it("builds a judge system prompt that forces a json block", () => {
@@ -21,12 +27,36 @@ describe("fusion judge", () => {
 			partialCoverage: [],
 			uniqueInsights: ["y"],
 			blindSpots: [],
+			unsupportedClaims: ["z"],
 		});
 		const parsed = parseJudgeOutput(`\`\`\`json\n${json}\n\`\`\``);
 		expect(parsed.ok).toBe(true);
-		if (parsed.ok) expect(parsed.value.uniqueInsights).toEqual(["y"]);
+		if (parsed.ok) {
+			expect(parsed.value.uniqueInsights).toEqual(["y"]);
+			expect(parsed.value.unsupportedClaims).toEqual(["z"]);
+		}
 		// keep JUDGE_SCHEMA referenced as a public export
 		expect(JUDGE_SCHEMA.type).toBe("object");
+	});
+
+	it("builds a verifier prompt with the advisor reports + judge-flagged claims", () => {
+		const prompt = buildVerifierPrompt(
+			"Q",
+			[{ member: { cli: "claude", model: "opus" }, ok: true, text: "the report" }],
+			{
+				consensus: [],
+				contradictions: ["contra-1"],
+				partialCoverage: [],
+				uniqueInsights: ["uniq-1"],
+				blindSpots: [],
+				unsupportedClaims: ["claim-1"],
+			},
+		);
+		expect(prompt).toContain("the report");
+		expect(prompt).toContain("claim-1");
+		expect(prompt).toContain("contra-1");
+		expect(prompt).toContain("uniq-1");
+		expect(VERIFICATION_SCHEMA.type).toBe("object");
 	});
 
 	it("rejects malformed judge output", () => {

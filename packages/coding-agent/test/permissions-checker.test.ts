@@ -127,6 +127,62 @@ describe("PermissionChecker — plan mode tool-level rules", () => {
 	});
 });
 
+describe("PermissionChecker — plan mode blocks side-effecting tools", () => {
+	it("blocks eval (arbitrary code execution)", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check(describeToolAction("eval", { lang: "javascript", code: "1+1" })).decision).toBe("deny");
+	});
+
+	it("blocks debug (program execution)", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check(describeToolAction("debug", { action: "launch", program: "a.out" })).decision).toBe("deny");
+	});
+
+	it("blocks lsp rename and applied code_actions (workspace mutation)", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check(describeToolAction("lsp", { action: "rename", file: "a.ts", new_name: "B" })).decision).toBe(
+			"deny",
+		);
+		expect(
+			c.check(describeToolAction("lsp", { action: "rename_file", file: "a.ts", new_name: "b.ts" })).decision,
+		).toBe("deny");
+		expect(c.check(describeToolAction("lsp", { action: "code_actions", file: "a.ts", apply: true })).decision).toBe(
+			"deny",
+		);
+	});
+
+	it("allows read-only lsp actions", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check(describeToolAction("lsp", { action: "diagnostics", file: "a.ts" })).decision).toBe("allow");
+		expect(c.check(describeToolAction("lsp", { action: "code_actions", file: "a.ts" })).decision).toBe("allow");
+	});
+
+	it("blocks chrome evaluate and interaction, allows read ops", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check(describeToolAction("chrome_devtools_evaluate", { function: "()=>1" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("chrome_devtools_click", { uid: "x" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("chrome_devtools_navigate", { url: "http://x" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("chrome_devtools_screenshot", {})).decision).toBe("allow");
+	});
+});
+
+describe("PermissionChecker — auto mode unchanged for side-effecting tools", () => {
+	it("allows eval/debug/lsp-write/chrome on non-denied targets", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		expect(c.check(describeToolAction("eval", { code: "1+1" })).decision).toBe("allow");
+		expect(c.check(describeToolAction("debug", { action: "launch" })).decision).toBe("allow");
+		expect(c.check(describeToolAction("lsp", { action: "rename", file: "a.ts" })).decision).toBe("allow");
+		expect(c.check(describeToolAction("chrome_devtools_navigate", { url: "http://x" })).decision).toBe("allow");
+	});
+
+	it("denies an lsp write to a builtin-sensitive path", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		expect(
+			c.check(describeToolAction("lsp", { action: "rename_file", file: ".env", new_name: ".env.bak" })).decision,
+		).toBe("deny");
+	});
+});
+
 describe("describeToolAction", () => {
 	it("maps bash to exec action", () => {
 		const a = describeToolAction("bash", { command: "ls" });
@@ -143,5 +199,23 @@ describe("describeToolAction", () => {
 	it("collects edit[].file paths", () => {
 		const a = describeToolAction("edit", { file: "a.ts", edits: [{ file: "b.ts" }] });
 		expect((a as { paths: string[] }).paths).toEqual(["a.ts", "b.ts"]);
+	});
+
+	it("maps eval and debug to exec", () => {
+		expect(describeToolAction("eval", { code: "x" }).type).toBe("exec");
+		expect(describeToolAction("debug", { action: "continue" }).type).toBe("exec");
+	});
+
+	it("maps lsp write actions to write and read actions to tool", () => {
+		expect(describeToolAction("lsp", { action: "rename", file: "a.ts" }).type).toBe("write");
+		expect(describeToolAction("lsp", { action: "code_actions", file: "a.ts", apply: true }).type).toBe("write");
+		expect(describeToolAction("lsp", { action: "code_actions", file: "a.ts" }).type).toBe("tool");
+		expect(describeToolAction("lsp", { action: "diagnostics", file: "a.ts" }).type).toBe("tool");
+	});
+
+	it("maps chrome side effects to exec/write and read ops to tool", () => {
+		expect(describeToolAction("chrome_devtools_evaluate", {}).type).toBe("exec");
+		expect(describeToolAction("chrome_devtools_click", {}).type).toBe("write");
+		expect(describeToolAction("chrome_devtools_screenshot", {}).type).toBe("tool");
 	});
 });

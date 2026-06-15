@@ -68,6 +68,7 @@ import {
 	shouldCompactSoft,
 } from "./compaction/index.ts";
 import { extractToolFileOp } from "./compaction/utils.js";
+import { SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
 import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } from "./cross-error.js";
 import { dapSessionManager } from "./dap/index.ts";
 import { debugVerifyContextPrompt, maybeRunDebugVerify } from "./debug-verify.ts";
@@ -119,10 +120,24 @@ import {
 	loadFrequentFilesSnapshot,
 	saveFrequentFilesSnapshot,
 } from "./frequent-files.js";
-import { runPanelMember } from "./fusion/cli-runner.ts";
-import { buildJudgeContext, buildWriterContext, parseJudgeOutput } from "./fusion/judge.ts";
+import { providerForCli, runPanelMember } from "./fusion/cli-runner.ts";
+import {
+	buildAdvisorBriefContext,
+	buildJudgeContext,
+	buildVerifierPrompt,
+	buildWriterContext,
+	parseJudgeOutput,
+	VERIFICATION_SCHEMA,
+	VERIFIER_SYSTEM_PROMPT,
+} from "./fusion/judge.ts";
 import { runFusionTurn } from "./fusion/orchestrator.ts";
-import type { Orchestration } from "./fusion/types.ts";
+import type {
+	FusionSummaryData,
+	JudgeAnalysis,
+	Orchestration,
+	PanelResult,
+	VerificationReport,
+} from "./fusion/types.ts";
 import { readGitBranch } from "./git-state.js";
 import { GoalManager, type GoalSnapshot, type GoalState, setCurrentGoalManager } from "./goal/goal-manager.ts";
 import {
@@ -235,6 +250,33 @@ export type AgentSessionEvent =
 	| { type: "orchestration_changed"; orchestration: Orchestration }
 	| { type: "fusion_phase"; label: string }
 	| {
+			type: "fusion_member";
+			/** Panel slot (0-based). Distinguishes identical members in a self-fusion
+			 * (e.g. two claude-opus-4-8) that would otherwise collide on cli/model. */
+			index: number;
+			cli: string;
+			model: string;
+			status: "running" | "done" | "failed";
+			elapsedMs: number;
+			/** Hard wall-clock cap, so the live strip can show "running Ns / Ts". */
+			timeoutMs?: number;
+			/** Idle cap (ms): the strip shows an "idle Ns / Ts" countdown when the member goes
+			 * quiet, since that — not the wall-clock cap — is what actually kills a stuck member. */
+			idleTimeoutMs?: number;
+			chars?: number;
+			error?: string;
+	  }
+	| { type: "fusion_stage"; stage: "brief" | "panel" | "verify" | "judge" | "writer"; synthId: string }
+	| {
+			/** Live advisor activity (claude stream-json): what panel slot `index` is
+			 * doing right now — thinking, writing, or invoking a tool. Lets the panel
+			 * show real work (tool counts) instead of an opaque "running" clock. */
+			type: "fusion_member_activity";
+			index: number;
+			kind: "thinking" | "writing" | "tool" | "tool_result";
+			tool?: string;
+	  }
+	| {
 			type: "compaction_end";
 			reason: "manual" | "threshold" | "overflow";
 			result: CompactionResult | undefined;
@@ -258,6 +300,9 @@ export type AgentSessionEvent =
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
+
+// `FusionSummaryData` (the render-agnostic summary of a completed Fusion turn) lives in
+// ./fusion/types.ts so both the core layer and the TUI presentation share one shape.
 
 // ============================================================================
 // Types
@@ -915,7 +960,7 @@ export class AgentSession {
 			// bidirectional tool channel lives there), so it's gated on eval being
 			// enabled; PIT_NO_CODE_MODE=1 is the emergency opt-out. The harness-routed
 			// dispatcher is injected in `_buildRuntime`.
-			...on(s.getEvalSettings().enabled && process.env.PIT_NO_CODE_MODE !== "1", ["code"]),
+			...on(s.getEvalSettings().enabled && !isTruthyEnvFlag(process.env.PIT_NO_CODE_MODE), ["code"]),
 			...on(s.getLspSettings().enabled, ["lsp"]),
 			...on(s.getDebugSettings().enabled, ["debug"]),
 			...on(isTruthyEnvFlag(process.env.PIT_DEFER_HISTORY), ["recall_tool_output"]),
@@ -1957,7 +2002,7 @@ export class AgentSession {
 	 * still hot.
 	 */
 	private _maybeInjectRepeatingPatternReminder(): void {
-		if (process.env.PIT_NO_REPEATING_PATTERN === "1") {
+		if (isTruthyEnvFlag(process.env.PIT_NO_REPEATING_PATTERN)) {
 			this._repeatingPatternFiredKey = "";
 			return;
 		}
@@ -2918,6 +2963,17 @@ export class AgentSession {
 	}
 
 	/**
+	 * Clear the per-model-attempt failure budget (per-tool failure counts + the
+	 * fire-once set). Called at the top of prompt() and before each goal
+	 * continuation so the budget re-arms per attempt instead of lasting the whole
+	 * goal — in autonomous mode a single prompt() drives many _promptOnce turns.
+	 */
+	private _resetTurnFailureBudget(): void {
+		this._turnToolFailures.clear();
+		this._turnFailureBudgetFired.clear();
+	}
+
+	/**
 	 * Send a prompt to the agent, then (in autonomous goal mode) keep driving
 	 * continuation turns until the goal is complete, paused, budget-limited, or
 	 * interrupted. A safety cap bounds runaway loops; hitting it pauses the goal.
@@ -2932,9 +2988,9 @@ export class AgentSession {
 		this._turnTouchedVisual = false;
 		this._turnUsedPreview = false;
 		// Reset the per-turn, per-tool failure budget so each tool starts the turn
-		// with a fresh allowance (strict per-turn reset).
-		this._turnToolFailures.clear();
-		this._turnFailureBudgetFired.clear();
+		// with a fresh allowance. Re-armed before every goal continuation below so
+		// the budget is per model-attempt, not shared across the whole goal.
+		this._resetTurnFailureBudget();
 		await this._promptOnce(text, options);
 
 		// Re-entrant call from within a continuation: the outer prompt() owns the
@@ -2953,6 +3009,9 @@ export class AgentSession {
 						this.pauseGoal();
 						break;
 					}
+					// Re-arm the per-attempt failure budget so each continuation gets a
+					// fresh allowance instead of sharing 3 failures across the whole goal.
+					this._resetTurnFailureBudget();
 					await this._promptOnce(this._goal.continuationPrompt(), {
 						expandPromptTemplates: false,
 						source: options?.source,
@@ -3596,7 +3655,19 @@ export class AgentSession {
 	 * fall through to editor/double-Esc behavior.
 	 */
 	get isBusy(): boolean {
-		return this.isStreaming || this.isBashRunning || this._inGoalContinuation || this._inVerification;
+		return (
+			this.isStreaming || this.isBashRunning || this._inGoalContinuation || this._inVerification || this.isFusing
+		);
+	}
+
+	/**
+	 * True while a Fusion turn (panel fan-out + judge + writer) is in flight. Folded into
+	 * isBusy so the Esc handler routes a keypress to interrupt() (which calls abortFusion())
+	 * instead of falling through to editor/double-Esc behavior — the Fusion turn returns
+	 * before agent.run(), so without this it would not count as "busy".
+	 */
+	get isFusing(): boolean {
+		return this._fusionAbort !== undefined;
 	}
 
 	/**
@@ -4083,16 +4154,17 @@ export class AgentSession {
 	}
 
 	/**
-	 * Emit a display-only Fusion flow line into the transcript (panel dispatch, each member's
-	 * result, judge summary, writer start). Mirrors the inter-agent relay: a `custom` message
-	 * with `display: true` renders in the chat but is NOT fed to the model's context. A render
-	 * failure must never break the Fusion turn.
+	 * Emit the structured post-process Fusion summary as a display-only custom message.
+	 * Carries `FusionSummaryData` as JSON (not a colorized string) so the presentation
+	 * layer renders it — the core layer stays free of theme/interactive imports. A render
+	 * failure must never break the Fusion turn (a `custom` message with `display: true`
+	 * renders in chat but is NOT fed to the model's context).
 	 */
-	private _emitFusionLine(content: string): void {
+	private _emitFusionSummary(data: FusionSummaryData): void {
 		const line = {
 			role: "custom" as const,
-			customType: "pi.fusion-flow",
-			content,
+			customType: "pi.fusion-summary",
+			content: JSON.stringify(data),
 			display: true,
 			timestamp: Date.now(),
 		};
@@ -4100,7 +4172,30 @@ export class AgentSession {
 			this._emit({ type: "message_start", message: line });
 			this._emit({ type: "message_end", message: line });
 		} catch {
-			// flow-line render failure is non-fatal
+			// summary render failure is non-fatal
+		}
+	}
+
+	/**
+	 * Emit a one-line Fusion flow note as a DISPLAY-ONLY custom message — it renders in the
+	 * transcript (muted timeline line, via the `pi.fusion-flow` renderer) but is NOT pushed
+	 * into agent.state.messages or persisted, so it never enters the model's context. Used
+	 * for the both-failed degradation note: the solo turn that follows owns the real reply,
+	 * and a synthetic assistant message would pollute context and persist as a phantom turn.
+	 */
+	private _emitFusionNote(text: string): void {
+		const line = {
+			role: "custom" as const,
+			customType: "pi.fusion-flow",
+			content: text,
+			display: true,
+			timestamp: Date.now(),
+		};
+		try {
+			this._emit({ type: "message_start", message: line });
+			this._emit({ type: "message_end", message: line });
+		} catch {
+			// note render failure is non-fatal
 		}
 	}
 
@@ -4149,7 +4244,50 @@ export class AgentSession {
 	 * the turn; false → the caller falls back to a normal solo turn. Never throws (failures
 	 * degrade to false). The whole fan-out is cancellable via abortFusion() / interrupt().
 	 */
+	/**
+	 * Verify stage (Fusion): a read-only subagent fact-checks the surviving advisor
+	 * claims against the ACTUAL code (the judge flags what to check first). Returns the
+	 * report, or undefined when verification is disabled/fails — fail-open, never blocks
+	 * the writer. Runs with read-only tools only (read/grep/find/ls/symbol).
+	 */
+	private async _fusionVerify(
+		userPrompt: string,
+		results: PanelResult[],
+		analysis: JudgeAnalysis,
+		model: import("@pit/ai").Model<any>,
+	): Promise<VerificationReport | undefined> {
+		this._emit({ type: "fusion_stage", stage: "verify", synthId: model.id });
+		try {
+			const result = await spawnSubagent(
+				{
+					registry: new SubagentRegistry(),
+					model,
+					modelRegistry: this._modelRegistry,
+					availableTools: this.agent.state.tools as import("@pit/agent-core").AgentTool[],
+					convertToLlm: (m) => m as never,
+				},
+				{
+					prompt: buildVerifierPrompt(userPrompt, results, analysis),
+					systemPrompt: VERIFIER_SYSTEM_PROMPT,
+					allowedTools: ["read", "grep", "find", "ls", "symbol", "find_symbol"],
+					resultSchema: VERIFICATION_SCHEMA,
+					cwd: this._cwd,
+					timeoutMs: this.settingsManager.getFusionSettings().verifyTimeoutMs,
+					maxTurns: 12,
+					thinkingLevel: "medium",
+					signal: this._fusionAbort?.signal,
+				},
+			);
+			return result.value as VerificationReport | undefined;
+		} catch {
+			// Fail-open: a failed/aborted/schema-mismatched verify never blocks the writer.
+			return undefined;
+		}
+	}
+
 	private async _runFusionTurn(text: string): Promise<boolean> {
+		// Kill-switch: PIT_NO_FUSION forces the solo turn (the caller falls through to agent.run()).
+		if (isTruthyEnvFlag(process.env.PIT_NO_FUSION)) return false;
 		const model = this.model;
 		if (!model) return false;
 		const settings = this.settingsManager.getFusionSettings();
@@ -4160,44 +4298,124 @@ export class AgentSession {
 			return false;
 		}
 		const { apiKey, headers } = await this._getRequiredRequestAuth(model);
-		this._fusionAbort = new AbortController();
-		const panelDesc = settings.panel.map((m) => `${m.cli}:${m.model}`).join(" + ");
-		const memberStatus = new Map<string, string>();
-		const panelLabel = (): string => {
-			const parts = settings.panel.map((m) => `${m.cli} ${memberStatus.get(`${m.cli}/${m.model}`) ?? "⋯"}`);
-			return `Fusion · panel: ${parts.join(" · ")}`;
-		};
+		// Resolve each panel CLI's token from Pit's OWN credentials so members run
+		// under the same login as Pit (e.g. opus via the same Claude OAuth) — no
+		// separate `claude /login`. Failure to resolve falls back to the subprocess's
+		// own auth (best-effort; an unauthenticated member just degrades the panel).
+		const cliTokens = new Map<string, string | undefined>();
+		for (const cli of new Set(settings.panel.map((m) => m.cli))) {
+			const provider = providerForCli(cli);
+			if (!provider) continue;
+			try {
+				cliTokens.set(cli, await this._modelRegistry.getApiKeyForProvider(provider));
+			} catch {
+				cliTokens.set(cli, undefined);
+			}
+		}
+		// Structured per-member metrics keyed by PANEL SLOT (index), not cli/model —
+		// a self-fusion of two identical members (e.g. claude-opus-4-8 ×2) would collide
+		// on cli/model and report the same metric twice. Harvested in runMember, folded
+		// into the post-process FusionSummaryData (what the presentation layer renders).
+		const memberMetrics = new Map<number, { elapsedMs: number; chars: number; ok: boolean; error?: string }>();
+		const buildSummaryMembers = (): FusionSummaryData["members"] =>
+			settings.panel.map((m, i) => {
+				const metric = memberMetrics.get(i);
+				return {
+					cli: m.cli,
+					model: m.model,
+					ok: metric?.ok ?? false,
+					elapsedMs: metric?.elapsedMs ?? 0,
+					chars: metric?.chars ?? 0,
+					error: metric?.error,
+				};
+			});
+		// Flattened synthesis items accumulated by the judge, surfaced in the summary when
+		// settings.showSynthesis is on. Includes partialCoverage (kind:"partial").
+		const synthesisItems: NonNullable<FusionSummaryData["synthesis"]> = [];
 		try {
-			this._emit({ type: "fusion_phase", label: `Fusion · panel running (${panelDesc})…` });
-			this._emitFusionLine(`⚡ Fusion · panel dispatched (read-only) → ${panelDesc}`);
+			// Create the abort controller as the FIRST statement in the try so the `finally`
+			// always clears it — otherwise a throw here would leave `isFusing` (hence
+			// isBusy/Esc) stuck on permanently.
+			this._fusionAbort = new AbortController();
+			// Pre-pass: the synthesizer (the /model principal) turns the raw request into a
+			// sharp, self-contained brief so the advisors don't get the prompt cru. Failure or
+			// empty output falls back to the raw prompt — the brief never blocks the turn.
+			// Opt-out (settings.brief === false): skip the pre-pass entirely and fan out on the raw text.
+			let advisorPrompt = text;
+			if (settings.brief !== false) {
+				this._emit({ type: "fusion_stage", stage: "brief", synthId: model.id });
+				try {
+					const briefOut = await completeSimple(model, buildAdvisorBriefContext(text), {
+						apiKey,
+						headers,
+						signal: this._fusionAbort?.signal,
+					});
+					const brief = this._assistantText(briefOut).trim();
+					if (brief) advisorPrompt = brief;
+				} catch {
+					// keep advisorPrompt = text (raw) — never block the turn on the brief pass
+				}
+				// Esc during the brief: consume the turn (don't fan out with an already-aborted signal,
+				// which would just produce a pointless all-failed panel).
+				if (this._fusionAbort?.signal.aborted) return true;
+			}
+			this._emit({ type: "fusion_stage", stage: "panel", synthId: model.id });
 			const outcome = await runFusionTurn({
 				userPrompt: text,
 				panel: settings.panel,
 				staggerSameCliMs: settings.staggerSameCliMs,
 				signal: this._fusionAbort.signal,
 				runMember: async (member) => {
+					// indexOf is by reference — correct even for identical {cli,model} members
+					// (each panel entry is a distinct object), so slots never collide.
+					const index = settings.panel.indexOf(member);
 					const started = Date.now();
+					this._emit({
+						type: "fusion_member",
+						index,
+						cli: member.cli,
+						model: member.model,
+						status: "running",
+						elapsedMs: 0,
+						timeoutMs: settings.timeoutMs,
+						idleTimeoutMs: settings.idleTimeoutMs,
+					});
 					const r = await runPanelMember(member, {
-						prompt: text,
+						prompt: advisorPrompt,
 						cwd: this._cwd,
 						timeoutMs: settings.timeoutMs,
+						idleTimeoutMs: settings.idleTimeoutMs,
 						lean: settings.lean,
 						signal: this._fusionAbort?.signal,
+						authToken: cliTokens.get(member.cli),
+						onProgress: (p) => {
+							this._emit({ type: "fusion_member_activity", index, kind: p.kind, tool: p.tool });
+						},
 					});
-					const secs = ((Date.now() - started) / 1000).toFixed(1);
-					memberStatus.set(`${member.cli}/${member.model}`, r.ok ? "✓" : "✗");
-					this._emit({ type: "fusion_phase", label: panelLabel() });
-					const err = (r.error ?? "failed").slice(0, 160);
-					this._emitFusionLine(
-						r.ok
-							? `   ✓ ${member.cli}:${member.model} · ${secs}s · ${r.text.length} chars`
-							: `   ✗ ${member.cli}:${member.model} · ${secs}s · ${err}`,
-					);
+					const elapsedMs = Date.now() - started;
+					const err = r.ok ? undefined : (r.error ?? "failed").slice(0, 160);
+					memberMetrics.set(index, {
+						elapsedMs,
+						chars: r.ok ? r.text.length : 0,
+						ok: r.ok,
+						error: err,
+					});
+					this._emit({
+						type: "fusion_member",
+						index,
+						cli: member.cli,
+						model: member.model,
+						status: r.ok ? "done" : "failed",
+						timeoutMs: settings.timeoutMs,
+						idleTimeoutMs: settings.idleTimeoutMs,
+						elapsedMs,
+						chars: r.ok ? r.text.length : undefined,
+						error: err,
+					});
 					return r;
 				},
 				runJudge: async (userPrompt, results) => {
-					this._emit({ type: "fusion_phase", label: "Fusion · judging…" });
-					this._emitFusionLine(`⚖ Fusion · judging with ${model.id}…`);
+					this._emit({ type: "fusion_stage", stage: "judge", synthId: model.id });
 					const judgeOnce = async () => {
 						const out = await completeSimple(model, buildJudgeContext(userPrompt, results), {
 							apiKey,
@@ -4219,25 +4437,68 @@ export class AgentSession {
 					}
 					const analysis = parsed.ok
 						? parsed.value
-						: { consensus: [], contradictions: [], partialCoverage: [], uniqueInsights: [], blindSpots: [] };
-					this._emitFusionLine(
-						`   consensus ${analysis.consensus.length} · contradictions ${analysis.contradictions.length} · partial ${analysis.partialCoverage.length} · unique ${analysis.uniqueInsights.length} · blind-spots ${analysis.blindSpots.length}`,
-					);
+						: {
+								consensus: [],
+								contradictions: [],
+								partialCoverage: [],
+								uniqueInsights: [],
+								blindSpots: [],
+								unsupportedClaims: [],
+							};
 					if (settings.showSynthesis) {
-						const detail = (label: string, items: string[]): void => {
-							for (const it of items) this._emitFusionLine(`      ${label}: ${it.slice(0, 200)}`);
+						const collect = (
+							kind: NonNullable<FusionSummaryData["synthesis"]>[number]["kind"],
+							items: string[],
+						): void => {
+							for (const it of items) synthesisItems.push({ kind, text: it.slice(0, 200) });
 						};
-						detail("consensus", analysis.consensus);
-						detail("contradiction", analysis.contradictions);
-						detail("unique", analysis.uniqueInsights);
-						detail("blind-spot", analysis.blindSpots);
+						collect("consensus", analysis.consensus);
+						collect("contradiction", analysis.contradictions);
+						collect("partial", analysis.partialCoverage);
+						collect("unique", analysis.uniqueInsights);
+						collect("blind-spot", analysis.blindSpots);
 					}
 					return analysis;
 				},
-				writer: async (userPrompt, results, analysis) => {
-					this._emit({ type: "fusion_phase", label: "Fusion · writing…" });
-					this._emitFusionLine(`✍ Fusion · synthesizing final answer with ${model.id}…`);
-					return this._streamFusionWriter(buildWriterContext(userPrompt, results, analysis), {
+				verify: settings.verify
+					? (userPrompt, results, analysis) => this._fusionVerify(userPrompt, results, analysis, model)
+					: undefined,
+				writer: async (userPrompt, results, analysis, verification) => {
+					this._emit({ type: "fusion_stage", stage: "writer", synthId: model.id });
+					// A single-survivor turn skips the judge, so the analysis arrives all-empty;
+					// omit `judge` in that case and mark the panel as degraded to a solo synthesis.
+					const hasJudge =
+						analysis.consensus.length > 0 ||
+						analysis.contradictions.length > 0 ||
+						analysis.partialCoverage.length > 0 ||
+						analysis.uniqueInsights.length > 0 ||
+						analysis.blindSpots.length > 0;
+					const members = buildSummaryMembers();
+					const okCount = members.filter((m) => m.ok).length;
+					const summary: FusionSummaryData = {
+						members,
+						degraded: okCount < members.length ? "solo-synth" : "none",
+						synthId: model.id,
+					};
+					if (hasJudge) {
+						summary.judge = {
+							consensus: analysis.consensus.length,
+							contradictions: analysis.contradictions.length,
+							partial: analysis.partialCoverage.length,
+							unique: analysis.uniqueInsights.length,
+							blindSpots: analysis.blindSpots.length,
+						};
+					}
+					if (verification && verification.findings.length > 0) {
+						summary.verification = {
+							confirmed: verification.findings.filter((f) => f.verdict === "confirmed").length,
+							refuted: verification.findings.filter((f) => f.verdict === "refuted").length,
+							unverified: verification.findings.filter((f) => f.verdict === "unverified").length,
+						};
+					}
+					if (settings.showSynthesis) summary.synthesis = synthesisItems;
+					this._emitFusionSummary(summary);
+					return this._streamFusionWriter(buildWriterContext(userPrompt, results, analysis, verification), {
 						apiKey,
 						headers,
 						signal: this._fusionAbort?.signal,
@@ -4248,7 +4509,7 @@ export class AgentSession {
 				// Distinguish a user interrupt (consume the turn so Esc doesn't surprise the user with
 				// a fresh solo run) from a genuine panel failure (fall through to a solo turn).
 				if (this._fusionAbort?.signal.aborted || this._userInterrupted) {
-					this._emitFusionLine("⚡ Fusion · interrupted");
+					// No visual summary on interrupt — the TUI tears down on agent_end.
 					return true;
 				}
 				recordDiagnostic({
@@ -4257,7 +4518,22 @@ export class AgentSession {
 					source: "fusion.session",
 					context: { note: `both-failed:solo ${model.id}` },
 				});
-				this._emitSyntheticAssistant(`Both Fusion panel members failed — answering solo with ${model.id}.`);
+				const summaryMembers = buildSummaryMembers();
+				this._emitFusionSummary({
+					members: summaryMembers,
+					degraded: "both-failed",
+					synthId: model.id,
+				});
+				// Make the flow explicit: the read-only ADVISORS (the panel) both failed,
+				// so the synthesizer (the active /model) answers directly. Surface a shared
+				// cause (e.g. "timeout") inline so the degradation isn't a mystery. DISPLAY-ONLY:
+				// the solo turn runs next and owns the real assistant reply — a synthetic message
+				// here would pollute the model's context and persist as a phantom turn.
+				const reasons = [...new Set(summaryMembers.map((m) => m.error).filter((e): e is string => Boolean(e)))];
+				const why = reasons.length === 1 ? ` (${reasons[0]})` : "";
+				this._emitFusionNote(
+					`Both Fusion advisors failed${why} — answering directly with ${model.id} (the synthesizer).`,
+				);
 				return false;
 			}
 			// The writer already streamed + persisted the answer as an assistant message.

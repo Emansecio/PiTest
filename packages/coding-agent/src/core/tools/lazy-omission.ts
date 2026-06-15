@@ -18,6 +18,8 @@
  * `// TODO`, `// NOTE`, or any ordinary comment never fires.
  */
 
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
+
 export interface CodeOmissionResult {
 	detected: boolean;
 	/** The offending placeholder lines (trimmed), in file order, deduped. */
@@ -149,7 +151,7 @@ const MAX_MARKERS = 10;
 
 /** Env opt-out: `PIT_NO_OMISSION_CHECK=1` disables the post-write scan. */
 export function isOmissionCheckEnabled(): boolean {
-	return !process.env.PIT_NO_OMISSION_CHECK;
+	return !isTruthyEnvFlag(process.env.PIT_NO_OMISSION_CHECK);
 }
 
 /**

@@ -161,6 +161,29 @@ describe("spawnSubagent (faux model)", () => {
 		expect(result.record.status).toBe("completed");
 	});
 
+	it("resultSchema: serializes the schema (property names) into the subagent system prompt", async () => {
+		const rig = newRig();
+		const schema = Type.Object({
+			verdict: Type.String(),
+			evidence: Type.String(),
+		});
+		let seenPrompt: string | undefined;
+		rig.faux.setResponses([
+			(context: Context) => {
+				seenPrompt = context.systemPrompt;
+				return fauxAssistantMessage(`\`\`\`json\n${JSON.stringify({ verdict: "x", evidence: "y" })}\n\`\`\``);
+			},
+		]);
+
+		await spawnSubagent(rig.deps, { prompt: "p", taskName: "schema-in-prompt", resultSchema: schema });
+
+		// The schema is serialized into the prompt so the model emits the EXACT field names
+		// (not a guess like "status" for "verdict") — without this the Value.Check rejects it.
+		expect(seenPrompt).toContain("JSON Schema");
+		expect(seenPrompt).toContain("verdict");
+		expect(seenPrompt).toContain("evidence");
+	});
+
 	it("resultSchema invalid: rejects with a schema-mismatch error and marks the record failed", async () => {
 		const rig = newRig();
 		const schema = Type.Object({

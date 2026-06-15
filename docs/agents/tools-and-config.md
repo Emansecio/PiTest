@@ -7,7 +7,7 @@
 ## `.pit/settings.json`
 
 `SettingsManager` reads `<cwd>/.pit/settings.json` and merges it OVER the global
-settings file in the agent dir (typically `~/.pit/settings.json`). Anything you
+settings file in the agent dir (typically `~/.pit/agent/settings.json`). Anything you
 put here is project-local and only active when an agent runs inside this repo.
 
 Live shape: see `Settings` in

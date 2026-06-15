@@ -213,6 +213,13 @@ describe("groundToolCall — invariant 3: fail-open on missing infra / throws", 
 		expect(isGroundingGuardDisabled({ PIT_NO_GROUNDING_GUARD: "0" })).toBe(false);
 		expect(isGroundingGuardDisabled({})).toBe(false);
 	});
+
+	it("PIT_NO_GROUNDING (preferred alias) opt-out is honored by isGroundingGuardDisabled", () => {
+		expect(isGroundingGuardDisabled({ PIT_NO_GROUNDING: "1" })).toBe(true);
+		expect(isGroundingGuardDisabled({ PIT_NO_GROUNDING: "true" })).toBe(true);
+		expect(isGroundingGuardDisabled({ PIT_NO_GROUNDING: "yes" })).toBe(true);
+		expect(isGroundingGuardDisabled({ PIT_NO_GROUNDING: "0" })).toBe(false);
+	});
 });
 
 describe("groundToolCall — debug function breakpoint (REFERENCE)", () => {

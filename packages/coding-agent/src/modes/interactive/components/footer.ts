@@ -78,6 +78,23 @@ function sanitizeStatusText(text: string): string {
 }
 
 /**
+ * Collapse runs of identical labels into `label ×N` so a self-fusion of two
+ * identical members reads `claude-opus-4-8 ×2` instead of repeating the full id
+ * twice. Distinct groups join with ` + `, preserving order.
+ */
+function collapseAdjacent(labels: string[]): string {
+	const out: string[] = [];
+	let i = 0;
+	while (i < labels.length) {
+		let n = 1;
+		while (i + n < labels.length && labels[i + n] === labels[i]) n++;
+		out.push(n > 1 ? `${labels[i]} ×${n}` : (labels[i] as string));
+		i += n;
+	}
+	return out.join(" + ");
+}
+
+/**
  * Format token counts for compact footer display. A trailing `.0` is noise
  * (`1M`, not `1.0M`), so fractional steps only render when the decimal digit
  * is non-zero.
@@ -219,18 +236,21 @@ export class FooterComponent implements Component {
 	 * facet + resolved fusion panel) — same source-of-truth pattern as the model
 	 * and goal segments. The synthesizer is the session's active model id.
 	 *
-	 * Layout: `fusion: <cliA>:<modelA> + <cliB>:<modelB> → <synthId>`. With no
-	 * panel bound it nudges toward the command: `fusion: (no panel — /fusion)`.
-	 * The returned string is raw (uncolored); the caller colorizes and the whole
-	 * line is width-bounded by composeLeftRight, so no clipping math here.
+	 * Layout: `fusion: <member> + <member>` (identical members collapse to
+	 * `<member> ×N`). With no panel bound it nudges toward the command:
+	 * `fusion: (no panel — /fusion)`. The synthesizer is the active /model, already
+	 * shown on the footer's first line, so it is NOT repeated here. The redundant
+	 * `cli:` prefix is dropped when the model id already names the cli
+	 * (`claude:claude-opus-4-8` → `claude-opus-4-8`), kept otherwise
+	 * (`codex:gpt-5.5-codex`). The string is raw (uncolored); the caller colorizes
+	 * and composeLeftRight width-bounds the line, so no clipping math here.
 	 */
 	private getFusionSegment(): string | null {
 		if (this.session.orchestration !== "fusion") return null;
 		const panel = this.session.settingsManager.getFusionSettings().panel;
 		if (panel.length === 0) return "fusion: (no panel — /fusion)";
-		const synthId = this.session.state.model?.id ?? "no-model";
-		const members = panel.map((m) => `${m.cli}:${m.model}`).join(" + ");
-		return `fusion: ${members} → ${synthId}`;
+		const labels = panel.map((m) => (m.model.startsWith(m.cli) ? m.model : `${m.cli}:${m.model}`));
+		return `fusion: ${collapseAdjacent(labels)}`;
 	}
 
 	render(width: number): string[] {
@@ -332,7 +352,11 @@ export class FooterComponent implements Component {
 		// Group B — session mode bits (permission / auto-compact).
 		const mode = this.getPermissionMode();
 		const modeBits: string[] = [];
-		if (mode && mode !== "no-rails") modeBits.push(mode);
+		// In fusion the orchestration status is `fusion · plan`, which getPermissionMode
+		// clips to just "fusion" — exactly what the `fusion: <members>` segment already
+		// says. Fusion always rides plan-mode (read-only) in v1, so the bit carries no
+		// extra signal; drop it to avoid the duplicate "fusion" on the metrics line.
+		if (mode && mode !== "no-rails" && this.session.orchestration !== "fusion") modeBits.push(mode);
 		// Auto-compact is on by default, so showing "compact" permanently is noise.
 		// The signal worth surfacing is the ABNORMAL state — when it's OFF the
 		// context can overflow without rescue — so flag only that, in warning.

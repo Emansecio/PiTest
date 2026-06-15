@@ -22,8 +22,18 @@ import {
 	type PermissionSettings,
 } from "./types.ts";
 
-/** Built-in tools considered mutating for the purpose of mode "plan". */
-const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
+/**
+ * Built-in tools considered mutating for the purpose of mode "plan". Used by the
+ * defensive `type: "tool"` branch in `checkPlan`; the primary classification
+ * happens in `describeToolAction`, which maps these to `write`/`exec` directly.
+ */
+const MUTATING_TOOLS = new Set(["bash", "edit", "write", "eval", "debug"]);
+
+/** `lsp` actions that mutate the workspace (rename a symbol/file). */
+const LSP_WRITE_ACTIONS = new Set(["rename", "rename_file"]);
+
+/** `chrome_devtools_*` operations with an observable side effect (navigation, input, upload). */
+const CHROME_EFFECT_OPS = new Set(["navigate", "click", "fill", "press_key", "hover", "select_option", "upload_file"]);
 
 export interface PermissionContext {
 	cwd: string;
@@ -193,8 +203,36 @@ export function describeToolAction(toolName: string, input: Record<string, unkno
 			const command = typeof input.command === "string" ? input.command : "";
 			return { type: "exec", toolName, command };
 		}
-		default:
+		// Code-execution tools: classified as `exec` so plan mode (read-only) blocks
+		// them. The command body is left empty — plan blocks on the action type alone,
+		// and auto-mode deny rules target shell command lines, not code/program bodies,
+		// so auto behavior is unchanged.
+		case "eval":
+		case "debug":
+			return { type: "exec", toolName, command: "" };
+		// `lsp` is dual-mode: only the workspace-mutating actions are writes. Read
+		// actions (diagnostics, definition, hover, list-only code_actions, …) stay
+		// `tool` so auto behavior is unchanged and plan still allows read-only navigation.
+		case "lsp": {
+			const action = typeof input.action === "string" ? input.action : "";
+			const mutates = LSP_WRITE_ACTIONS.has(action) || (action === "code_actions" && input.apply === true);
+			if (mutates) {
+				return { type: "write", toolName, paths: collectPathFields(input, ["file"]) };
+			}
 			return { type: "tool", toolName, args: input };
+		}
+		default: {
+			// `chrome_devtools_*` is dual-mode: `evaluate` runs arbitrary JS, and the
+			// interaction ops (navigate/click/fill/…) have observable side effects, so
+			// plan mode must block them. Read ops (screenshot, snapshot, get_text, …)
+			// fall through to `tool`.
+			if (toolName.startsWith("chrome_devtools_")) {
+				const op = toolName.slice("chrome_devtools_".length);
+				if (op === "evaluate") return { type: "exec", toolName, command: "" };
+				if (CHROME_EFFECT_OPS.has(op)) return { type: "write", toolName, paths: [] };
+			}
+			return { type: "tool", toolName, args: input };
+		}
 	}
 }
 

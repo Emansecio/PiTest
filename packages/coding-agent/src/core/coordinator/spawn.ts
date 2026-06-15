@@ -22,6 +22,7 @@ import { promisify } from "node:util";
 import { Agent, type AgentMessage, type AgentTool, type BeforeToolCallResult } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
 import { type Message, streamSimple } from "@pit/ai";
+import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import type { ModelRegistry } from "../model-registry.ts";
 import { describeToolAction, type PermissionChecker } from "../permissions/index.ts";
@@ -35,8 +36,19 @@ const DEFAULT_SYSTEM_PROMPT =
 	"You are a focused subagent. Use the provided tools to complete the task in as few turns as possible, " +
 	"then summarize the result in a final assistant message. Do not ask follow-up questions; deliver a self-contained answer.";
 
-const SCHEMA_PROMPT_SUFFIX =
-	"\n\nYour final assistant message MUST be a single fenced ```json``` block containing a JSON object that matches the provided result schema. Do not include any prose outside the fence.";
+/** Build the schema instruction appended to a subagent's system prompt when a
+ * `resultSchema` is set. The schema is SERIALIZED into the prompt (not merely
+ * referenced) so the model emits the exact property names and value types — without
+ * this the model guesses the shape (e.g. "status" instead of "verdict") and the
+ * downstream `Value.Check` silently rejects an otherwise-fine answer. */
+function schemaPromptSuffix(schema: TSchema): string {
+	return (
+		"\n\nYour final assistant message MUST be a single fenced ```json``` block containing a JSON " +
+		"object that conforms to this JSON Schema:\n```json\n" +
+		`${JSON.stringify(schema, null, 2)}\n` +
+		"```\nUse exactly the property names and value types it specifies. Do not include any prose outside the fence."
+	);
+}
 
 export interface SpawnSubagentDependencies {
 	registry: SubagentRegistry;
@@ -207,7 +219,7 @@ export async function spawnSubagent(
 			: "";
 	const withSkills = skillsSection ? `${systemPromptBase}\n\n${skillsSection}` : systemPromptBase;
 	const withSuffix = options.systemPromptSuffix ? `${withSkills}\n\n${options.systemPromptSuffix}` : withSkills;
-	const systemPrompt = options.resultSchema ? `${withSuffix}${SCHEMA_PROMPT_SUFFIX}` : withSuffix;
+	const systemPrompt = options.resultSchema ? `${withSuffix}${schemaPromptSuffix(options.resultSchema)}` : withSuffix;
 	const tools = filterTools(deps.availableTools, options.allowedTools);
 	const maxTurns = options.maxTurns ?? 25;
 	let turnCount = 0;

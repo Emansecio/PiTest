@@ -638,7 +638,7 @@ Feature kill-switches (all default-ON; set the variable to `1`/`true`/`yes` to d
 
 | Variable | Disables |
 |----------|----------|
-| `PIT_NO_GROUNDING` | Symbol grounding — pre-exec resolution of a navigation `symbol`/breakpoint name against the repo-map index + LSP workspace symbols |
+| `PIT_NO_GROUNDING` | Symbol grounding — pre-exec resolution of a `debug` breakpoint name / `lsp` workspace-symbol query against the repo-map index + LSP workspace symbols |
 | `PIT_NO_IMPORT_GROUNDING` | Import grounding — pre-exec check that a relative import specifier in a `write`/`edit` resolves on disk |
 | `PIT_NO_PATH_GROUNDING` | Path grounding — pre-exec check that a `read`/`edit` target path exists |
 | `PIT_NO_PATTERN_GROUNDING` | Pattern grounding — pre-exec structural balance-check of a `grep`/`find` regex/glob |

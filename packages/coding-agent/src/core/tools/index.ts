@@ -203,6 +203,7 @@ export {
 } from "./write.ts";
 
 import type { AgentTool } from "@pit/agent-core";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { createLspTool, createLspToolDefinition, type LspToolOptions } from "../lsp/tool.ts";
 import { type AskToolOptions, createAskTool, createAskToolDefinition } from "./ask.ts";
@@ -759,7 +760,7 @@ function codingGateOpen(gate: CodingGate, options?: ToolsOptions): boolean {
 			return options?.debug?.enabled !== false;
 		case "code":
 			// Default ON: opt out via `code.enabled: false` (or env PIT_NO_CODE_MODE).
-			if (process.env.PIT_NO_CODE_MODE === "1") return false;
+			if (isTruthyEnvFlag(process.env.PIT_NO_CODE_MODE)) return false;
 			return options?.code?.enabled !== false;
 	}
 }

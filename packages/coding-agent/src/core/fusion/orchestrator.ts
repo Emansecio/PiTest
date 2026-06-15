@@ -1,4 +1,4 @@
-import type { JudgeAnalysis, PanelMember, PanelResult } from "./types.ts";
+import type { JudgeAnalysis, PanelMember, PanelResult, VerificationReport } from "./types.ts";
 
 export interface FusionTurnDeps {
 	userPrompt: string;
@@ -9,8 +9,20 @@ export interface FusionTurnDeps {
 	runMember: (member: PanelMember) => Promise<PanelResult>;
 	/** Structured judge over the surviving results. */
 	runJudge: (userPrompt: string, results: PanelResult[]) => Promise<JudgeAnalysis>;
+	/** Optional read-only fact-check of the surviving results against the code, before the
+	 * writer synthesizes. Returns undefined when verification is disabled or fails (fail-open). */
+	verify?: (
+		userPrompt: string,
+		results: PanelResult[],
+		analysis: JudgeAnalysis,
+	) => Promise<VerificationReport | undefined>;
 	/** Final writer pass; returns the answer text. */
-	writer: (userPrompt: string, results: PanelResult[], analysis: JudgeAnalysis) => Promise<string>;
+	writer: (
+		userPrompt: string,
+		results: PanelResult[],
+		analysis: JudgeAnalysis,
+		verification?: VerificationReport,
+	) => Promise<string>;
 }
 
 export interface FusionTurnOutcome {
@@ -18,6 +30,7 @@ export interface FusionTurnOutcome {
 	text: string;
 	analysis?: JudgeAnalysis;
 	results?: PanelResult[];
+	verification?: VerificationReport;
 }
 
 export const delay = (ms: number, signal?: AbortSignal): Promise<void> =>
@@ -34,12 +47,24 @@ export const delay = (ms: number, signal?: AbortSignal): Promise<void> =>
 		);
 	});
 
+const EMPTY_ANALYSIS: JudgeAnalysis = {
+	consensus: [],
+	contradictions: [],
+	partialCoverage: [],
+	uniqueInsights: [],
+	blindSpots: [],
+	unsupportedClaims: [],
+};
+
 export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOutcome> {
 	const { panel, staggerSameCliMs, signal } = deps;
 
-	// Fan-out in parallel; stagger a same-CLI second member to dodge correlated throttling.
+	// Fan-out in parallel; stagger any later same-CLI member to dodge correlated throttling.
 	const launches = panel.map(async (member, i) => {
-		if (i > 0 && panel[i - 1].cli === member.cli) await delay(staggerSameCliMs, signal);
+		const hasEarlierSameCli = panel.slice(0, i).filter((m) => m.cli === member.cli).length > 0;
+		if (hasEarlierSameCli) await delay(staggerSameCliMs, signal);
+		// Abort can land during the stagger; don't spawn a subprocess we'd immediately discard.
+		if (signal?.aborted) return { member, ok: false, text: "", error: "aborted" };
 		return deps.runMember(member);
 	});
 	const results = await Promise.all(launches);
@@ -47,20 +72,15 @@ export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOut
 	const survivors = results.filter((r) => r.ok);
 	if (survivors.length === 0) return { handled: false, text: "" };
 
-	// Single survivor: skip the judge (degenerate over [1 real + 1 failed]); writer still streams/synthesizes.
-	if (survivors.length === 1) {
-		const emptyAnalysis: JudgeAnalysis = {
-			consensus: [],
-			contradictions: [],
-			partialCoverage: [],
-			uniqueInsights: [],
-			blindSpots: [],
-		};
-		const text = await deps.writer(deps.userPrompt, results, emptyAnalysis);
-		return { handled: true, text, results };
-	}
+	// Single survivor: skip the judge (degenerate over [1 real + 1 failed]); the verifier still
+	// fact-checks the lone advisor, and the writer synthesizes/streams.
+	const judged = survivors.length >= 2;
+	const analysis = judged ? await deps.runJudge(deps.userPrompt, results) : EMPTY_ANALYSIS;
 
-	const analysis = await deps.runJudge(deps.userPrompt, results);
-	const text = await deps.writer(deps.userPrompt, results, analysis);
-	return { handled: true, text, analysis, results };
+	// Verify stage: fact-check the surviving claims against the code (read-only). Fail-open —
+	// verify() swallows its own errors and returns undefined, so a bad pass never blocks the turn.
+	const verification = deps.verify ? await deps.verify(deps.userPrompt, results, analysis) : undefined;
+
+	const text = await deps.writer(deps.userPrompt, results, analysis, verification);
+	return { handled: true, text, analysis: judged ? analysis : undefined, results, verification };
 }

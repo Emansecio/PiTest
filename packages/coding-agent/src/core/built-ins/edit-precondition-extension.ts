@@ -22,6 +22,7 @@
  */
 
 import { statSync } from "node:fs";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { extractEdits, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
 import { computeEditsDiff } from "../tools/edit-diff.ts";
@@ -40,7 +41,7 @@ export function createEditPreconditionExtension(options: EditPreconditionOptions
 
 		pi.on("tool_call", async (event) => {
 			if (event.toolName !== "edit") return undefined;
-			if (process.env.PIT_NO_EDIT_PRECONDITION) return undefined;
+			if (isTruthyEnvFlag(process.env.PIT_NO_EDIT_PRECONDITION)) return undefined;
 
 			const input = event.input as Record<string, unknown>;
 			const path = extractPathArg(input);

@@ -772,7 +772,11 @@ export class Editor implements Component, Focusable {
 		if (linesBelow > 0) {
 			const indicator = `─── ↓ ${linesBelow} more `;
 			const remaining = width - visibleWidth(indicator);
-			result.push(this.borderColor(indicator + "─".repeat(Math.max(0, remaining))));
+			if (remaining >= 0) {
+				result.push(this.borderColor(indicator + "─".repeat(remaining)));
+			} else {
+				result.push(this.borderColor(truncateToWidth(indicator, width)));
+			}
 		} else {
 			result.push("");
 		}

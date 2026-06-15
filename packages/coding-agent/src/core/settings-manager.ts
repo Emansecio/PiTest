@@ -262,22 +262,37 @@ export interface PanelMemberSetting {
 export interface FusionSettings {
 	/** Exactly two members; each binds a CLI to a model id. */
 	panel?: PanelMemberSetting[];
-	/** Per-member wall-clock cap (ms). */
+	/** Per-member HARD wall-clock cap (ms) — backstop against a member that streams
+	 * forever. A working member is bounded by `idleTimeoutMs`, not by this. */
 	timeoutMs?: number;
+	/** Idle cap (ms): kill a member only after this long with NO output (stuck). Reset
+	 * on every chunk, so an actively-working member is never killed for taking long. */
+	idleTimeoutMs?: number;
 	/** Delay before launching a second member on the same CLI (ms). */
 	staggerSameCliMs?: number;
 	/** Surface the judge's structured analysis inline. */
 	showSynthesis?: boolean;
 	/** Run panel CLIs lean (skip user hooks/skills/MCP). Default true. */
 	lean?: boolean;
+	/** Run the synthesizer brief pre-pass (rewrite the prompt before advisors). Default true. */
+	brief?: boolean;
+	/** Run the read-only verify pass (fact-check advisor claims against the code) before the
+	 * writer synthesizes. Default true. */
+	verify?: boolean;
+	/** Wall-clock cap (ms) for the verify subagent. */
+	verifyTimeoutMs?: number;
 }
 
 export interface ResolvedFusionSettings {
 	panel: PanelMemberSetting[];
 	timeoutMs: number;
+	idleTimeoutMs: number;
 	staggerSameCliMs: number;
 	showSynthesis: boolean;
 	lean: boolean;
+	brief: boolean;
+	verify: boolean;
+	verifyTimeoutMs: number;
 }
 
 export interface DebugSettings {
@@ -1647,15 +1662,23 @@ export class SettingsManager {
 	getFusionSettings(): ResolvedFusionSettings {
 		const raw = this.settings.fusion;
 		const panel = Array.isArray(raw?.panel) ? raw.panel.slice(0, 2) : [];
-		const timeoutMs = typeof raw?.timeoutMs === "number" && raw.timeoutMs > 0 ? raw.timeoutMs : 180_000;
+		const timeoutMs = typeof raw?.timeoutMs === "number" && raw.timeoutMs > 0 ? raw.timeoutMs : 600_000;
+		const idleTimeoutMs =
+			typeof raw?.idleTimeoutMs === "number" && raw.idleTimeoutMs > 0 ? raw.idleTimeoutMs : 90_000;
 		const stagger =
 			typeof raw?.staggerSameCliMs === "number" && raw.staggerSameCliMs >= 0 ? raw.staggerSameCliMs : 400;
+		const verifyTimeoutMs =
+			typeof raw?.verifyTimeoutMs === "number" && raw.verifyTimeoutMs > 0 ? raw.verifyTimeoutMs : 120_000;
 		return {
 			panel,
 			timeoutMs,
+			idleTimeoutMs,
 			staggerSameCliMs: stagger,
 			showSynthesis: raw?.showSynthesis === true,
 			lean: raw?.lean !== false,
+			brief: raw?.brief !== false,
+			verify: raw?.verify !== false,
+			verifyTimeoutMs,
 		};
 	}
 
