@@ -5,7 +5,7 @@ import type { AgentTool } from "@pit/agent-core";
 import { type Api, type ImageContent, type Model, recordDiagnostic, type TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { constants, createReadStream } from "fs";
-import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/promises";
+import { access as fsAccess, readdir as fsReaddir, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { getReadmePath } from "../../config.js";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.js";
@@ -144,6 +144,12 @@ export interface ReadOperations {
 	stat?: (absolutePath: string) => Promise<{ size: number; isDirectory?: () => boolean }>;
 	/** Optional: open a raw byte stream over the file (see stat). */
 	createByteStream?: (absolutePath: string) => NodeJS.ReadableStream;
+	/**
+	 * Optional: list directory entries. When present, a `read` that targets a
+	 * directory returns a listing (like `ls`) instead of a "use ls" note. Remote
+	 * ops (e.g. SSH) may omit it and fall back to the note.
+	 */
+	readdir?: (absolutePath: string) => Promise<Array<{ name: string; isDirectory: boolean }>>;
 }
 
 const defaultReadOperations: ReadOperations = {
@@ -152,6 +158,10 @@ const defaultReadOperations: ReadOperations = {
 	detectImageMimeType: detectSupportedImageMimeTypeFromFile,
 	stat: (path) => fsStat(path),
 	createByteStream: (path) => createReadStream(path),
+	readdir: async (path) => {
+		const ents = await fsReaddir(path, { withFileTypes: true });
+		return ents.map((e) => ({ name: e.name, isDirectory: e.isDirectory() }));
+	},
 };
 
 /** Note returned when `read` targets a directory. A directory passes access(R_OK)
@@ -159,6 +169,45 @@ const defaultReadOperations: ReadOperations = {
  * instead of surfacing a raw "illegal operation on a directory" crash. */
 function formatDirectoryReadNote(path: string): string {
 	return `[${path} is a directory, not a file. Use the "ls" tool to list its contents, or read a specific file inside it.]`;
+}
+
+/**
+ * Resolves a `read` that targeted a directory into a listing (like `ls`):
+ * entries sorted case-insensitively, directories suffixed with `/`. Honors
+ * offset/limit for paging large directories; otherwise caps the body with
+ * truncateHead so an enormous directory can't blow the context window. Falls
+ * back to the "use ls" note when the ops can't list (remote without readdir).
+ */
+async function resolveDirectoryRead(
+	displayPath: string,
+	absolutePath: string,
+	ops: ReadOperations,
+	offset?: number,
+	limit?: number,
+): Promise<string> {
+	if (!ops.readdir) return formatDirectoryReadNote(displayPath);
+	let entries: Array<{ name: string; isDirectory: boolean }>;
+	try {
+		entries = await ops.readdir(absolutePath);
+	} catch {
+		return formatDirectoryReadNote(displayPath);
+	}
+	if (entries.length === 0) return `[${displayPath} is a directory (empty).]`;
+	const allLines = entries
+		.slice()
+		.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+		.map((e) => (e.isDirectory ? `${e.name}/` : e.name));
+	const header = `Directory ${displayPath} (${allLines.length} ${allLines.length === 1 ? "entry" : "entries"}):`;
+	if (offset !== undefined || limit !== undefined) {
+		const startLine = offset ? Math.max(0, offset - 1) : 0;
+		const endLine = limit !== undefined ? Math.min(startLine + limit, allLines.length) : allLines.length;
+		return `${header}\n${allLines.slice(startLine, endLine).join("\n")}`;
+	}
+	const truncation = truncateHead(allLines.join("\n"));
+	const body = truncation.truncated
+		? `${truncation.content}\n\n[Listing truncated. Use the ls tool with a limit, or read a specific entry.]`
+		: truncation.content;
+	return `${header}\n${body}`;
 }
 
 export interface ReadToolOptions {
@@ -594,11 +643,10 @@ Common mistakes to avoid:
 								const earlyStat = await ops.stat(absolutePath);
 								if (aborted) return;
 								if (earlyStat.isDirectory?.()) {
+									const text = await resolveDirectoryRead(path, absolutePath, ops, offset, limit);
+									if (aborted) return;
 									signal?.removeEventListener("abort", onAbort);
-									resolve({
-										content: [{ type: "text", text: formatDirectoryReadNote(path) }],
-										details: undefined,
-									});
+									resolve({ content: [{ type: "text", text }], details: undefined });
 									return;
 								}
 							}
@@ -857,12 +905,10 @@ Common mistakes to avoid:
 							signal?.removeEventListener("abort", onAbort);
 							if (aborted) return;
 							// Ops without stat (e.g. remote SSH) reach the read syscall on a
-							// directory; convert EISDIR into the same actionable note.
+							// directory; convert EISDIR into a listing (or the note fallback).
 							if (error?.code === "EISDIR") {
-								resolve({
-									content: [{ type: "text", text: formatDirectoryReadNote(path) }],
-									details: undefined,
-								});
+								const text = await resolveDirectoryRead(path, absolutePath, ops, offset, limit);
+								resolve({ content: [{ type: "text", text }], details: undefined });
 								return;
 							}
 							reject(error);
