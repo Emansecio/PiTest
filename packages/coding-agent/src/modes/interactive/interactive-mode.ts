@@ -3262,6 +3262,23 @@ export class InteractiveMode {
 			: "Operation aborted";
 	}
 
+	/**
+	 * Append a tool/bash block to the chat, suppressing its leading blank line
+	 * when the previous chat block is also a tool/bash block. Consecutive tool
+	 * calls then stack one below the other with no gap between them; the blank
+	 * is kept only before the first tool block after non-tool content (assistant
+	 * text, user input). Grouped tool-activity mode has its own layout, so its
+	 * activity-stacker container doesn't match the predicate and is unaffected.
+	 */
+	private _addToolBlock(component: ToolExecutionComponent | BashExecutionComponent): void {
+		const kids = this.chatContainer.children;
+		const prev = kids.length > 0 ? kids[kids.length - 1] : undefined;
+		if (prev instanceof ToolExecutionComponent || prev instanceof BashExecutionComponent) {
+			component.setNoLeadingGap(true);
+		}
+		this.chatContainer.addChild(component);
+	}
+
 	private _ensureToolComponent(toolName: string, toolCallId: string, args: unknown): ToolExecutionComponent {
 		const existing = this.pendingTools.get(toolCallId);
 		if (existing) return existing;
@@ -3281,9 +3298,9 @@ export class InteractiveMode {
 		component.setExpanded(this.toolOutputExpanded);
 		if (this.settingsManager.getToolActivity() === "grouped") {
 			const placed = this.activityStacker.placeCall(component);
-			if (!placed) this.chatContainer.addChild(component);
+			if (!placed) this._addToolBlock(component);
 		} else {
-			this.chatContainer.addChild(component);
+			this._addToolBlock(component);
 		}
 		this.pendingTools.set(toolCallId, component);
 		return component;
@@ -3354,7 +3371,7 @@ export class InteractiveMode {
 					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
 					message.fullOutputPath,
 				);
-				this.chatContainer.addChild(component);
+				this._addToolBlock(component);
 				break;
 			}
 			case "custom": {
@@ -3501,9 +3518,9 @@ export class InteractiveMode {
 						component.setExpanded(this.toolOutputExpanded);
 						if (grouped) {
 							const placed = this.activityStacker.placeCall(component);
-							if (!placed) this.chatContainer.addChild(component);
+							if (!placed) this._addToolBlock(component);
 						} else {
-							this.chatContainer.addChild(component);
+							this._addToolBlock(component);
 						}
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {

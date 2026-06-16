@@ -152,6 +152,18 @@ export class MessageShell extends Container {
 		}
 	}
 
+	/**
+	 * Toggle the leading blank line. The placement logic suppresses it when the
+	 * previous chat block is also a tool/bash block, so consecutive tool calls
+	 * stack tightly. No invalidate — same rationale as `setGutterColor`.
+	 */
+	setNoLeadingGap(noLeadingGap: boolean): void {
+		if (noLeadingGap !== this.noLeadingGap) {
+			this.noLeadingGap = noLeadingGap;
+			this.bustMemo();
+		}
+	}
+
 	/** Drop the memoized framed output (next render reassembles). */
 	private bustMemo(): void {
 		this.memoChildOutputs = null;

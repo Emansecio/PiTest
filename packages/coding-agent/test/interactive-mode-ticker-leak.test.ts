@@ -86,7 +86,12 @@ describe("renderSessionContext orphan-tool handling (resume path)", () => {
 			session: { retryAttempt: 0 },
 			_abortedErrorMessage: () => "aborted",
 			refreshModelIndicators: vi.fn(),
-			chatContainer: { addChild: vi.fn() },
+			chatContainer: { addChild: vi.fn(), children: [] as unknown[] },
+			// Passthrough stub for the real consecutive-tool-block grouping helper;
+			// these tests assert pending/orphan registration, not the leading-gap.
+			_addToolBlock(component: ToolExecutionComponent) {
+				this.chatContainer.addChild(component);
+			},
 			settle,
 		};
 	}

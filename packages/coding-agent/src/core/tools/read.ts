@@ -141,7 +141,7 @@ export interface ReadOperations {
 	 * large-file streaming fast path. Remote operations (e.g. SSH) may omit both
 	 * and keep the buffered readFile path.
 	 */
-	stat?: (absolutePath: string) => Promise<{ size: number }>;
+	stat?: (absolutePath: string) => Promise<{ size: number; isDirectory?: () => boolean }>;
 	/** Optional: open a raw byte stream over the file (see stat). */
 	createByteStream?: (absolutePath: string) => NodeJS.ReadableStream;
 }
@@ -153,6 +153,13 @@ const defaultReadOperations: ReadOperations = {
 	stat: (path) => fsStat(path),
 	createByteStream: (path) => createReadStream(path),
 };
+
+/** Note returned when `read` targets a directory. A directory passes access(R_OK)
+ * but every read syscall on it throws EISDIR, so we redirect the model to `ls`
+ * instead of surfacing a raw "illegal operation on a directory" crash. */
+function formatDirectoryReadNote(path: string): string {
+	return `[${path} is a directory, not a file. Use the "ls" tool to list its contents, or read a specific file inside it.]`;
+}
 
 export interface ReadToolOptions {
 	/** Whether to auto-resize images to 2000x2000 max. Default: true */
@@ -580,6 +587,21 @@ Common mistakes to avoid:
 							// Check if file exists and is readable.
 							await ops.access(absolutePath);
 							if (aborted) return;
+							// A directory passes access(R_OK), but every read syscall on it
+							// (image sniff, byte stream, readFile) throws EISDIR. Detect it up
+							// front and return an actionable note instead of crashing.
+							if (ops.stat) {
+								const earlyStat = await ops.stat(absolutePath);
+								if (aborted) return;
+								if (earlyStat.isDirectory?.()) {
+									signal?.removeEventListener("abort", onAbort);
+									resolve({
+										content: [{ type: "text", text: formatDirectoryReadNote(path) }],
+										details: undefined,
+									});
+									return;
+								}
+							}
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							let content: (TextContent | ImageContent)[];
 							let details: ReadToolDetails | undefined;
@@ -833,7 +855,17 @@ Common mistakes to avoid:
 							resolve({ content, details });
 						} catch (error: any) {
 							signal?.removeEventListener("abort", onAbort);
-							if (!aborted) reject(error);
+							if (aborted) return;
+							// Ops without stat (e.g. remote SSH) reach the read syscall on a
+							// directory; convert EISDIR into the same actionable note.
+							if (error?.code === "EISDIR") {
+								resolve({
+									content: [{ type: "text", text: formatDirectoryReadNote(path) }],
+									details: undefined,
+								});
+								return;
+							}
+							reject(error);
 						}
 					})();
 				},
