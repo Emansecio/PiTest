@@ -21,14 +21,22 @@ export const IS_WIN = process.platform === "win32";
 export const REPO_ROOT = resolve(import.meta.dirname, "..");
 export const SCENARIOS_DIR = join(REPO_ROOT, "bench", "scenarios");
 
-export type AgentId = "pit" | "cc" | "codex";
-export const ALL_AGENTS: AgentId[] = ["pit", "cc", "codex"];
+export type AgentId = "pit" | "cc" | "codex" | "droid" | "opencode";
+export const ALL_AGENTS: AgentId[] = ["pit", "cc", "codex", "droid", "opencode"];
 
 export const AGENT_LABEL: Record<AgentId, string> = {
 	pit: "Pit",
 	cc: "Claude Code",
 	codex: "Codex",
+	droid: "Droid",
+	opencode: "opencode",
 };
+
+/** Zeroed counter keyed by every agent — use instead of a `{pit,cc,codex}`
+ * literal so adding an agent doesn't desync the tallies. */
+export function zeroByAgent(): Record<AgentId, number> {
+	return Object.fromEntries(ALL_AGENTS.map((a) => [a, 0])) as Record<AgentId, number>;
+}
 
 /** Tool categories normalized so the three agents are comparable. Codex reads
  * and edits files by shelling out, so its "shell" count is naturally high — that
@@ -306,10 +314,75 @@ export function parseCodex(jsonl: string): Metrics {
 	return m;
 }
 
+/** Droid `exec -o json` emits a single final `result` object: turns + usage,
+ * but no per-tool events — so toolTotal stays 0 (a measurement limit, noted in
+ * the report). is_error marks a run-level failure. */
+export function parseDroid(jsonl: string): Metrics {
+	const m = emptyMetrics();
+	for (const line of jsonl.split("\n")) {
+		if (!line.trim()) continue;
+		let ev: any;
+		try {
+			ev = JSON.parse(line);
+		} catch {
+			m.parseErrors++;
+			continue;
+		}
+		if (ev.type === "result") {
+			if (typeof ev.num_turns === "number") m.turns = ev.num_turns;
+			if (ev.is_error) m.toolErrors++;
+			const u = ev.usage;
+			if (u) {
+				m.inTok = u.input_tokens ?? 0;
+				m.outTok = u.output_tokens ?? 0;
+				m.cacheReadTok = u.cache_read_input_tokens ?? 0;
+			}
+		}
+	}
+	if (m.turns === 0) m.turns = 1;
+	return m;
+}
+
+/** opencode `run --format json` streams `step_start` / `tool_use` / `step_finish`
+ * events. tokens.input is the per-step FULL context (take latest, like Codex);
+ * output+reasoning are per-step (sum). cost is per-step (sum → real total). */
+export function parseOpencode(jsonl: string): Metrics {
+	const m = emptyMetrics();
+	for (const line of jsonl.split("\n")) {
+		if (!line.trim()) continue;
+		let ev: any;
+		try {
+			ev = JSON.parse(line);
+		} catch {
+			m.parseErrors++;
+			continue;
+		}
+		const part = ev.part;
+		if (ev.type === "step_start") {
+			m.turns++;
+		} else if (ev.type === "tool_use" && part) {
+			bumpTool(m, String(part.tool ?? "?"));
+			if (part.state?.status === "error") m.toolErrors++;
+		} else if (ev.type === "step_finish" && part?.tokens) {
+			const t = part.tokens;
+			m.outTok += (t.output ?? 0) + (t.reasoning ?? 0);
+			m.inTok = t.input ?? m.inTok;
+			m.cacheReadTok = t.cache?.read ?? m.cacheReadTok;
+			if (typeof part.cost === "number") m.costUsd = (m.costUsd ?? 0) + part.cost;
+		} else if (ev.type === "error") {
+			m.toolErrors++;
+		}
+	}
+	if (m.turns === 0) m.turns = 1;
+	return m;
+}
+
 export function parseMetrics(agent: AgentId, jsonl: string): Metrics {
 	if (agent === "pit") return parsePit(jsonl);
 	if (agent === "cc") return parseCC(jsonl);
-	return parseCodex(jsonl);
+	if (agent === "codex") return parseCodex(jsonl);
+	if (agent === "droid") return parseDroid(jsonl);
+	return parseOpencode(jsonl);
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +427,12 @@ export function captureDiff(cwd: string): DiffStat {
 		":(exclude).claude/**",
 		":(exclude).codex",
 		":(exclude).codex/**",
+		":(exclude).droid",
+		":(exclude).droid/**",
+		":(exclude).factory",
+		":(exclude).factory/**",
+		":(exclude).opencode",
+		":(exclude).opencode/**",
 	];
 	const raw = git(cwd, ["diff", "--cached", "--", ".", ...exclude]);
 	const names = git(cwd, ["diff", "--cached", "--name-only", "--", ".", ...exclude])
@@ -381,6 +460,8 @@ export interface AgentModels {
 	pit: string;
 	cc: string;
 	codex: string;
+	droid: string;
+	opencode: string;
 	thinking?: string;
 }
 
@@ -388,7 +469,22 @@ export const DEFAULT_MODELS: AgentModels = {
 	pit: "claude-opus-4-8",
 	cc: "opus",
 	codex: "gpt-5.5",
+	droid: "claude-opus-4-8",
+	// Registered as a custom model in opencode.json (provider.anthropic.models).
+	// Routes via opencode's anthropic OAuth; runs once the Max opus quota is free
+	// (a 400 "out of extra usage" means quota, not a config problem).
+	opencode: "anthropic/claude-opus-4-8",
 };
+
+export function modelOf(models: AgentModels, agent: AgentId): string {
+	return models[agent];
+}
+
+/** "pit=`x` · cc=`y` · …" line for only the agents shown. */
+export function modelsLine(models: AgentModels, agents: AgentId[]): string {
+	const parts = agents.map((a) => `${a}=\`${modelOf(models, a)}\``);
+	return `modelos: ${parts.join(" · ")}${models.thinking ? ` · thinking=${models.thinking}` : ""}`;
+}
 
 export function pitLauncher(): string {
 	return join(REPO_ROOT, "bin", IS_WIN ? "pit.cmd" : "pit");
@@ -406,26 +502,47 @@ export function buildLaunch(agent: AgentId, models: AgentModels, sandbox: string
 			args: ["-p", "--output-format", "stream-json", "--verbose", "--model", models.cc, "--permission-mode", "bypassPermissions"],
 		};
 	}
-	// codex
+	if (agent === "codex") {
+		return {
+			command: IS_WIN ? "codex.cmd" : "codex",
+			args: [
+				"exec",
+				"--json",
+				"--skip-git-repo-check",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"-C",
+				sandbox,
+				"-m",
+				models.codex,
+			],
+		};
+	}
+	if (agent === "droid") {
+		// Factory droid. exec is non-interactive; --skip-permissions-unsafe grants
+		// edits/commands without prompts (full autonomy — mutually exclusive with
+		// --auto). -o json = final result object.
+		return {
+			command: IS_WIN ? "droid.cmd" : "droid",
+			args: ["exec", "-o", "json", "--skip-permissions-unsafe", "-m", models.droid, "--cwd", sandbox],
+		};
+	}
+	// opencode
 	return {
-		command: IS_WIN ? "codex.cmd" : "codex",
-		args: [
-			"exec",
-			"--json",
-			"--skip-git-repo-check",
-			"--dangerously-bypass-approvals-and-sandbox",
-			"-C",
-			sandbox,
-			"-m",
-			models.codex,
-		],
+		command: IS_WIN ? "opencode.cmd" : "opencode",
+		args: ["run", "--format", "json", "--dangerously-skip-permissions", "-m", models.opencode, "--dir", sandbox],
 	};
 }
 
+const AGENT_COMMAND: Record<Exclude<AgentId, "pit">, string> = {
+	cc: IS_WIN ? "claude.cmd" : "claude",
+	codex: IS_WIN ? "codex.cmd" : "codex",
+	droid: IS_WIN ? "droid.cmd" : "droid",
+	opencode: IS_WIN ? "opencode.cmd" : "opencode",
+};
+
 export function agentAvailable(agent: AgentId): boolean {
 	if (agent === "pit") return existsSync(pitLauncher());
-	const cmd = agent === "cc" ? (IS_WIN ? "claude.cmd" : "claude") : IS_WIN ? "codex.cmd" : "codex";
-	const probe = spawnSync(cmd, ["--version"], { encoding: "utf8", shell: IS_WIN });
+	const probe = spawnSync(AGENT_COMMAND[agent], ["--version"], { encoding: "utf8", shell: IS_WIN });
 	return probe.status === 0;
 }
 

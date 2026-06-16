@@ -33,7 +33,7 @@ fora de escopo mudou.
 ## Como rodar
 
 Pré-requisitos no PATH: `bin/pit.cmd` (Pit local), `claude` (Claude Code),
-`codex` (Codex CLI). Os que faltarem são pulados.
+`codex` (Codex CLI), `droid` (Factory) e `opencode`. Os que faltarem são pulados.
 
 ```sh
 # tudo (10 cenários × 3 agentes) → SCORECARD.md
@@ -42,8 +42,8 @@ npx tsx bench/run-all.mts --keep --out C:/tmp/bench-full
 # só alguns cenários
 npx tsx bench/run-all.mts --only 02,08,10
 
-# só alguns agentes
-npx tsx bench/run-all.mts --agents pit,cc
+# só alguns agentes (de 5: pit, cc, codex, droid, opencode)
+npx tsx bench/run-all.mts --agents pit,cc,codex,droid,opencode
 
 # um cenário isolado, com relatório detalhado
 npx tsx bench/runner.mts 08-large-context-nav --keep
@@ -52,10 +52,27 @@ npx tsx bench/runner.mts 08-large-context-nav --keep
 npx tsx bench/run-all.mts --dry
 ```
 
-Flags: `--pit-model`, `--cc-model`, `--codex-model`, `--thinking <lvl>` (Pit),
-`--timeout <seg>`, `--out <dir>`, `--only a,b`, `--agents`, `--keep`, `--dry`.
+Flags: `--pit-model`, `--cc-model`, `--codex-model`, `--droid-model`,
+`--opencode-model`, `--thinking <lvl>` (Pit), `--timeout <seg>`, `--out <dir>`,
+`--only a,b`, `--agents`, `--keep`, `--dry`.
 
-Defaults: pit=`claude-opus-4-8`, cc=`opus`, codex=`gpt-5.5`.
+Defaults: pit=`claude-opus-4-8`, cc=`opus`, codex=`gpt-5.5`,
+droid=`claude-opus-4-8`, opencode=`anthropic/claude-opus-4-8`.
+
+### Notas por agente (droid e opencode)
+
+- **Droid** (`droid exec -o json --skip-permissions-unsafe`): o `-o json` só emite
+  o objeto `result` final (turnos + tokens), **sem eventos por-tool** → tool calls
+  conta 0 (limite de medição). Droid roteia o Claude por um CLIProxyAPI embutido;
+  se outro proxy (ex.: CCS) já ocupa a porta `:8317`, o do droid sobe com "0 Claude
+  API keys" e retorna `Exec failed`. Libere `:8317` para o droid antes de rodar.
+- **opencode** (`opencode run --format json --dangerously-skip-permissions`): o
+  `opus-4-8` foi adicionado como **custom model** em
+  `~/.config/opencode/opencode.json` (`provider.anthropic.models.claude-opus-4-8`)
+  e roteia pela OAuth anthropic do opencode. Um erro `400 "out of extra usage"`
+  significa **cota Max esgotada** (overage desabilitado no org), não falha de
+  config — roda quando a janela de uso liberar. opencode reporta **custo real** por
+  step no stream.
 
 ## Métricas
 
@@ -106,7 +123,10 @@ Invocação headless de cada agente:
   --permission-mode bypassPermissions`.
 - **Codex**: `codex exec --json --skip-git-repo-check
   --dangerously-bypass-approvals-and-sandbox -C <dir> -m <m>`.
+- **Droid**: `droid exec -o json --skip-permissions-unsafe -m <m> --cwd <dir>`.
+- **opencode**: `opencode run --format json --dangerously-skip-permissions -m <m>
+  --dir <dir>`.
 
-Cada agente roda num sandbox próprio com baseline `git` para medir o diff. O
+Todos recebem o prompt via **stdin**. Cada agente roda num sandbox próprio com baseline `git` para medir o diff. O
 oráculo roda com `cwd` = sandbox e `BENCH_PRISTINE` = cópia limpa do seed (para
 diferenciar arquivos que NÃO podiam mudar).

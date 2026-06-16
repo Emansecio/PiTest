@@ -31,6 +31,7 @@ import {
 	DEFAULT_MODELS,
 	emptyMetrics,
 	loadScenario,
+	modelsLine,
 	parseMetrics,
 	prepareSandbox,
 	runOracle,
@@ -175,9 +176,7 @@ export function renderScenarioReport(r: ScenarioResult, models: AgentModels): st
 	L.push("");
 	L.push(`**Prompt:** ${r.scenario.prompt.replace(/\n/g, " ")}`);
 	L.push("");
-	L.push(
-		`modelos: pit=\`${models.pit}\` · cc=\`${models.cc}\` · codex=\`${models.codex}\`${models.thinking ? ` · thinking=${models.thinking}` : ""}`,
-	);
+	L.push(modelsLine(models, present.map((x) => x.agent)));
 	L.push("");
 	const head = present.map((x) => AGENT_LABEL[x.agent]);
 	L.push(`| métrica | ${head.join(" | ")} |`);
@@ -238,6 +237,8 @@ export function parseRunOpts(argv: string[]): { scenarioArg: string; opts: RunOp
 		else if (a === "--pit-model") models.pit = argv[++i];
 		else if (a === "--cc-model") models.cc = argv[++i];
 		else if (a === "--codex-model") models.codex = argv[++i];
+		else if (a === "--droid-model") models.droid = argv[++i];
+		else if (a === "--opencode-model") models.opencode = argv[++i];
 		else if (a === "--thinking") models.thinking = argv[++i];
 		else if (a === "--timeout") timeoutSec = Number(argv[++i]);
 		else if (a === "--out") out = argv[++i];

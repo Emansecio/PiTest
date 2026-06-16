@@ -26,7 +26,9 @@ import {
 	ALL_AGENTS,
 	DEFAULT_MODELS,
 	loadScenario,
+	modelsLine,
 	SCENARIOS_DIR,
+	zeroByAgent,
 } from "./lib.mts";
 import { renderScenarioReport, type RunOpts, runScenario, type ScenarioResult } from "./runner.mts";
 
@@ -56,6 +58,8 @@ function parseAll(argv: string[]): AllOpts {
 		else if (a === "--pit-model") models.pit = argv[++i];
 		else if (a === "--cc-model") models.cc = argv[++i];
 		else if (a === "--codex-model") models.codex = argv[++i];
+		else if (a === "--droid-model") models.droid = argv[++i];
+		else if (a === "--opencode-model") models.opencode = argv[++i];
 		else if (a === "--thinking") models.thinking = argv[++i];
 		else if (a === "--timeout") timeoutSec = Number(argv[++i]);
 		else if (a === "--out") out = argv[++i];
@@ -114,7 +118,7 @@ export function renderScorecard(results: ScenarioResult[], opts: { agents: Agent
 	L.push("# Scorecard — Pit × Claude Code × Codex");
 	L.push("");
 	L.push(
-		`modelos: pit=\`${opts.models.pit}\` · cc=\`${opts.models.cc}\` · codex=\`${opts.models.codex}\`${opts.models.thinking ? ` · thinking=${opts.models.thinking}` : ""}`,
+		modelsLine(opts.models, agents),
 	);
 	L.push("");
 	L.push(`gerado: ${new Date().toISOString()} · cenários: ${results.length}`);
@@ -125,8 +129,8 @@ export function renderScorecard(results: ScenarioResult[], opts: { agents: Agent
 	L.push("");
 	L.push(`| # | cenário | ângulo | ${agents.map((a) => AGENT_LABEL[a]).join(" | ")} | venc. eficiência |`);
 	L.push(`|-|-|-${"|-".repeat(agents.length)}|-|`);
-	const pass: Record<AgentId, number> = { pit: 0, cc: 0, codex: 0 };
-	const effWins: Record<AgentId, number> = { pit: 0, cc: 0, codex: 0 };
+	const pass: Record<AgentId, number> = zeroByAgent();
+	const effWins: Record<AgentId, number> = zeroByAgent();
 	let idx = 0;
 	for (const r of results) {
 		idx++;
@@ -184,7 +188,7 @@ export function renderScorecard(results: ScenarioResult[], opts: { agents: Agent
 	L.push(`| eixo (menor = melhor) | ${agents.map((a) => AGENT_LABEL[a]).join(" | ")} |`);
 	L.push(`|-${"|-".repeat(agents.length)}|`);
 	for (const [name, pick] of axes) {
-		const wins: Record<AgentId, number> = { pit: 0, cc: 0, codex: 0 };
+		const wins: Record<AgentId, number> = zeroByAgent();
 		for (const r of results) {
 			const w = axisWinner(r.runs, pick);
 			if (w) wins[w]++;
