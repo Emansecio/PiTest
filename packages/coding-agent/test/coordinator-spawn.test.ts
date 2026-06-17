@@ -27,6 +27,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { SubagentRegistry } from "../src/core/coordinator/registry.js";
 import {
+	DEFAULT_MAX_TURNS,
 	evaluateSubagentToolPermission,
 	type SpawnSubagentDependencies,
 	spawnSubagent,
@@ -323,10 +324,35 @@ describe("spawnSubagent (faux model)", () => {
 				taskName: "timeout",
 				timeoutMs: 10,
 			}),
-		).rejects.toThrow(/aborted/);
+			// The reason now names the trigger instead of a bare "aborted".
+		).rejects.toThrow(/aborted: timeout after 10ms/);
 
 		const record = rig.registry.list().find((r) => r.prompt === "slow");
 		expect(record?.status).toBe("cancelled");
+		expect(record?.error).toMatch(/timeout after 10ms/);
+	});
+
+	it("turn cap: aborts with an informative reason naming the cap and marks cancelled", async () => {
+		const rig = newRig({ tools: [makeTool("read")] });
+		// Every turn calls a tool and never finalizes, so the loop only ends when
+		// the turn cap fires — exercising the turn-cap abort path (not timeout).
+		rig.faux.setResponses(
+			Array.from({ length: 6 }, () =>
+				fauxAssistantMessage([fauxToolCall("read", { value: "x" })], { stopReason: "toolUse" }),
+			),
+		);
+
+		await expect(spawnSubagent(rig.deps, { prompt: "loops forever", taskName: "cap", maxTurns: 2 })).rejects.toThrow(
+			/aborted: turn cap \(2\) reached/,
+		);
+
+		const record = rig.registry.list().find((r) => r.prompt === "loops forever");
+		expect(record?.status).toBe("cancelled");
+		expect(record?.error).toMatch(/turn cap \(2\) reached/);
+	});
+
+	it("default turn cap is 50 (raised from 25 for long recon/mining tasks)", () => {
+		expect(DEFAULT_MAX_TURNS).toBe(50);
 	});
 
 	it("inheritSkills: appends the parent's skills to the subagent system prompt", async () => {

@@ -36,6 +36,24 @@ const DEFAULT_SYSTEM_PROMPT =
 	"You are a focused subagent. Use the provided tools to complete the task in as few turns as possible, " +
 	"then summarize the result in a final assistant message. Do not ask follow-up questions; deliver a self-contained answer.";
 
+/**
+ * Default hard cap on subagent turns when the caller does not pass `maxTurns`.
+ * 25 was too low for long recon/mining tasks (MFE bundle reversing, JS chunk
+ * walks) that silently hit the cap and surfaced only a bare "aborted" — raised
+ * to give those room while still bounding a runaway loop. Callers can override
+ * per task via the `max_turns` tool param.
+ */
+export const DEFAULT_MAX_TURNS = 50;
+
+/** Coerce an AbortSignal `reason` into an Error for rejection. `controller.abort()`
+ * may be called with an explanatory Error (turn cap / timeout / parent), a string,
+ * or nothing (default DOMException). Keeps the message informative downstream. */
+function toAbortError(reason: unknown): Error {
+	if (reason instanceof Error) return reason;
+	if (typeof reason === "string" && reason.length > 0) return new Error(reason);
+	return new Error("aborted");
+}
+
 /** Build the schema instruction appended to a subagent's system prompt when a
  * `resultSchema` is set. The schema is SERIALIZED into the prompt (not merely
  * referenced) so the model emits the exact property names and value types — without
@@ -198,15 +216,18 @@ export async function spawnSubagent(
 	// Combine the caller's signal with any internally-derived ones (timeout,
 	// turn cap). We own the controller so we can fire abort in either case.
 	const controller = new AbortController();
-	const onParentAbort = () => controller.abort();
+	// Propagate the parent's abort reason so a parent-driven cancel stays
+	// distinguishable downstream (falls back to a generic note if unset).
+	const onParentAbort = () => controller.abort(options.signal?.reason ?? new Error("aborted: parent signal"));
 	if (options.signal) {
-		if (options.signal.aborted) controller.abort();
+		if (options.signal.aborted) controller.abort(options.signal.reason ?? new Error("aborted: parent signal"));
 		else options.signal.addEventListener("abort", onParentAbort, { once: true });
 	}
 
 	let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 	if (options.timeoutMs && options.timeoutMs > 0) {
-		timeoutHandle = setTimeout(() => controller.abort(), options.timeoutMs);
+		const ms = options.timeoutMs;
+		timeoutHandle = setTimeout(() => controller.abort(new Error(`aborted: timeout after ${ms}ms`)), ms);
 	}
 
 	const systemPromptBase = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
@@ -221,7 +242,7 @@ export async function spawnSubagent(
 	const withSuffix = options.systemPromptSuffix ? `${withSkills}\n\n${options.systemPromptSuffix}` : withSkills;
 	const systemPrompt = options.resultSchema ? `${withSuffix}${schemaPromptSuffix(options.resultSchema)}` : withSuffix;
 	const tools = filterTools(deps.availableTools, options.allowedTools);
-	const maxTurns = options.maxTurns ?? 25;
+	const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
 	let turnCount = 0;
 
 	const checker = deps.permissionChecker;
@@ -276,7 +297,7 @@ export async function spawnSubagent(
 			turnCount++;
 			deps.registry.update(record.id, { turnCount });
 			if (turnCount >= maxTurns) {
-				controller.abort();
+				controller.abort(new Error(`aborted: turn cap (${maxTurns}) reached`));
 			}
 		}
 	});
@@ -310,11 +331,12 @@ export async function spawnSubagent(
 		const promptText = options.prompt;
 		const promise = agent.prompt(promptText);
 		const aborted = new Promise<void>((_, reject) => {
+			const fail = () => reject(toAbortError(controller.signal.reason));
 			if (controller.signal.aborted) {
-				reject(new Error("aborted"));
+				fail();
 				return;
 			}
-			controller.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+			controller.signal.addEventListener("abort", fail, { once: true });
 		});
 		await Promise.race([promise, aborted]);
 
@@ -369,7 +391,9 @@ export async function spawnSubagent(
 		};
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		const status = message === "aborted" ? "cancelled" : "failed";
+		// Any controller-driven abort (parent / timeout / turn cap) => cancelled.
+		// Decoupled from the message string so richer reasons don't get miscategorized.
+		const status = controller.signal.aborted ? "cancelled" : "failed";
 		deps.registry.update(record.id, {
 			status,
 			endedAt: Date.now(),

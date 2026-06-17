@@ -146,7 +146,7 @@ const taskSchema = Type.Object({
 				"Always pass a minimal subset scoped to the task — e.g. ['read','grep','find','ls'] for exploration.",
 		}),
 	),
-	max_turns: Type.Optional(Type.Number({ description: "Hard limit on subagent turns. Default: 25." })),
+	max_turns: Type.Optional(Type.Number({ description: "Hard limit on subagent turns. Default: 50." })),
 	inherit_skills: Type.Optional(
 		Type.Boolean({
 			description:
