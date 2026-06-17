@@ -19,7 +19,7 @@
 
 Pit is a minimal terminal coding harness. Adapt pit to your workflows, not the other way around, without having to fork and modify pit internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Pit Packages](#pi-packages) and share them with others via npm or git.
 
-Pit ships with powerful defaults but skips features like sub agents and plan mode. Instead, you can ask pit to build what you want or install a third party pit package that matches your workflow.
+Pit ships with powerful defaults — including native sub-agents (the `task` tool), plan mode, and automatic background bash. Anything beyond that, you can ask pit to build or install a third party pit package that matches your workflow.
 
 Pit runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps. See [openclaw/openclaw](https://github.com/openclaw/openclaw) for a real-world SDK integration.
 
@@ -358,7 +358,7 @@ The default export can also be `async`. pit waits for async extension factories 
 
 **What's possible:**
 - Custom tools (or replace built-in tools entirely)
-- Sub-agents and plan mode
+- Custom sub-agent orchestration and plan-mode flows (native versions also ship built-in)
 - Custom compaction and summarization
 - Permission gates and path protection
 - Custom editors and UI components
@@ -471,15 +471,15 @@ Pit is aggressively extensible so it doesn't have to dictate your workflow. Feat
 
 **No MCP.** Build CLI tools with READMEs (see [Skills](#skills)), or build an extension that adds MCP support. [Why?](https://pituned.at/posts/2025-11-02-what-if-you-dont-need-mcp/)
 
-**No sub-agents.** There's many ways to do this. Spawn pit instances via tmux, or build your own with [extensions](#extensions), or install a package that does it your way.
+**Native sub-agents.** The `task` tool spawns focused subagents — blocking, or detached (`spawn`/`join`) to fan out work in parallel — with reusable agent types in `.pit/agents/`, structured output, and resume of runs interrupted by ESC or a network drop. Want it to work differently? Build your own with [extensions](#extensions) or install a package.
 
 **No permission popups.** Run in a container, or build your own confirmation flow with [extensions](#extensions) inline with your environment and security requirements.
 
-**No plan mode.** Write plans to files, or build it with [extensions](#extensions), or install a package.
+**Native plan mode.** A read-only permission mode (`/permission-mode plan`) that blocks mutations while the model investigates and proposes. Customize the flow further with [extensions](#extensions).
 
 **No built-in to-dos.** They confuse models. Use a TODO.md file, or build your own with [extensions](#extensions).
 
-**No background bash.** Use tmux. Full observability, direct interaction.
+**Automatic background bash.** Long-running commands are promoted to background jobs (`PIT_BASH_AUTO_BACKGROUND_SECONDS`), and detached subagents (`task` `spawn`) run work off the main turn. Use tmux too when you want full direct interaction.
 
 Read the [blog post](https://pituned.at/posts/2025-11-30-pi-coding-agent/) for the full rationale.
 

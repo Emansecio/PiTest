@@ -1,3 +1,5 @@
+> **Archived:** session report — 2026-06-04 config/DX audit (62 confirmed findings, tiered). Historical; not a living document.
+
 # Revisão de Config & Polish do Pit — relatório ranqueado e conferido
 
 Eixo: zero-config, gates corretos, naming/env/flags coerentes, ergonomia, descoberta, mensagens acionáveis, consistência visual/terminológica. **Não** latência/perf.

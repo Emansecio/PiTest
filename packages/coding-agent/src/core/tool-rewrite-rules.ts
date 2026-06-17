@@ -22,6 +22,7 @@
  */
 
 import { ToolRewriteRegistry, type ToolRewriteRule } from "@pit/agent-core";
+import { parseSimpleArgv } from "./simple-argv.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -37,56 +38,6 @@ function getString(args: Record<string, unknown>, key: string): string | undefin
 function getNumber(args: Record<string, unknown>, key: string): number | undefined {
 	const value = args[key];
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-/**
- * Parse a `bash` command into its leading argv tokens, respecting single and
- * double quotes. Returns undefined when the command contains shell metacharacters
- * that would change semantics (pipes, redirects, `&&`, `;`, `$(...)`, backticks,
- * subshells). A bare `*` is passed through as a literal argument, not rejected. Tier 2 rules use this to
- * decide whether a `bash("cat X")` style call is safely substitutable for a
- * dedicated tool — if any metacharacter is present, we conservatively pass
- * through and let bash run the original command.
- */
-function parseSimpleArgv(command: string): string[] | undefined {
-	if (!command.trim()) return undefined;
-	// Reject any shell metacharacter that would change semantics under substitution.
-	if (/[|;&`$()<>]/.test(command)) return undefined;
-	if (/\s>\s|\s<\s|>>|<<|&&|\|\|/.test(command)) return undefined;
-	const argv: string[] = [];
-	let current = "";
-	let quote: '"' | "'" | undefined;
-	for (let i = 0; i < command.length; i++) {
-		const ch = command[i];
-		if (quote) {
-			if (ch === quote) {
-				quote = undefined;
-			} else {
-				current += ch;
-			}
-			continue;
-		}
-		if (ch === '"' || ch === "'") {
-			quote = ch;
-			continue;
-		}
-		if (ch === "\\" && i + 1 < command.length) {
-			current += command[i + 1];
-			i++;
-			continue;
-		}
-		if (/\s/.test(ch)) {
-			if (current.length > 0) {
-				argv.push(current);
-				current = "";
-			}
-			continue;
-		}
-		current += ch;
-	}
-	if (quote) return undefined;
-	if (current.length > 0) argv.push(current);
-	return argv;
 }
 
 /** JSON-encode a value compactly for inline use in suggestion messages. */

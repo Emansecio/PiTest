@@ -24,8 +24,8 @@ A family of pre-execution guards that ground a tool call's REFERENCES against re
 The session-wide capability for tool execution, on a single axis. The code exposes two modes (`PermissionMode = "auto" | "plan"`): **plan** (read-only — filesystem/shell/code-execution tools blocked: `bash`/`edit`/`write`/`eval`/`debug`, `lsp` write actions, and `chrome_devtools` interaction ops); **auto** (default — writes enabled, but built-in deny rules are hard-blocked: sensitive paths like `.env`/`~/.ssh`, dangerous commands like `rm -rf /`/fork bomb — never prompted). `auto` is a *guarded* default. Dropping the builtin deny floor is `disableBuiltinDefaults`, not a third mode. User-authored `denyPaths`/`denyTools`/`denyCommands` are intentional and apply in every mode. There is no separate sandbox axis — containment is deny rules, not a cwd jail. Switched via the `--permission-mode` flag or `/permission-mode` command.
 _Avoid_: yolo (removed); default (removed mode); approval-policy/sandbox-policy (codex's two axes — deliberately collapsed to one).
 
-### Diff Limit
-A built-in extension that pauses execution and requests user confirmation when a single turn produces more than a configured number of changed lines (default: 300). Prevents over-engineering and unintended large-scale changes.
+### Diff Limit (planned — not implemented)
+A *proposed* built-in extension (see [ADR-0002](adr/0002-diff-limit-pause.md), status **Proposed**) that would pause execution and request user confirmation when a single turn produces more than a configured number of changed lines (default: 300), to curb over-engineering and unintended large-scale changes. **Not shipped:** there is no diff-limit code in `packages/coding-agent/src` (grep for `diffLimit|changedLines|DiffLimit` returns 0 matches) and no diff guard in the built-in factory array. Over-engineering is currently addressed only by the Karpathy **Engineering Style** prompt guidelines, not by runtime enforcement.
 
 ### Doom Loop
 A pattern where the model retries the same failing tool call repeatedly without changing approach. Detected by `ToolCallStats` via consecutive identical (toolName, argsFingerprint) entries in the ring buffer; a complementary repeating-pattern detector catches a multi-tool CYCLE repeated at the tail (e.g. `[read,edit,bash]` run four times) that the consecutive-identical check misses. The harness escalates: reminder (3x) → pause (5x) → abort (8x).
@@ -38,6 +38,21 @@ An in-session data structure that counts per-file read/write/edit operations. Us
 
 ### Tool Call Stats
 Per-session telemetry that counts calls/errors per tool and maintains a ring buffer of recent invocations for doom-loop detection. Bounded by design to prevent memory leaks in pathological loops.
+
+### Subagent Coordinator
+A built-in extension (`coordinator-extension.ts`) that registers the `task` tool, letting the model launch focused subagents — each runs its own in-memory `Agent` loop sharing the parent's model, auth, and a filtered tool catalog, gated through the parent's permission policy. Ops: **run** (blocking, returns the answer), **spawn** (detached → returns a handle; result re-injects automatically when it settles), **poll**/**join** (status / await + collect detached handles), **list** (active + resumable + disk-persisted), **agents** (loaded agent types), **resume** (continue an interrupted subagent). Recursion is bounded (`PIT_SUBAGENT_MAX_DEPTH`, default 1 — a subagent cannot spawn its own) and output is byte-capped (`PIT_SUBAGENT_MAX_BYTES`). Optional structured output via `result_schema` (typebox-validated); optional isolated git worktree via `worktree`.
+
+### Agent Type
+A curated, versioned subagent preset loaded from `.pit/agents/<name>.md` (project) or `~/.pit/agents/` (user; project overrides on name collision) — YAML frontmatter (`name`/`description`/`tools`/`model`/`thinking`) plus the Markdown body as the system prompt. Spawned by name via `task({type:"<name>"})`, which applies the preset as **defaults** that explicit `task` fields override. `task({op:"agents"})` lists the loaded types with origin. The native counterpart to Claude Code's `.claude/agents/`.
+
+### Subagent Resume
+Continuation of a subagent cut short by ESC or a long network drop, via `task({op:"resume", name})`, reusing the partial transcript rather than restarting. **Tier 1** keeps the live `Agent` in memory (same session). **Tier 2** also persists the transcript + spawn context to `.pit/subagents/<handle>.json` — the disk write is awaited, so an interrupted `run` is durable the moment it returns — so a resume survives a process restart; the file is removed once the resume completes. A worktree subagent with `cleanup:"auto"` is not resumable (its on-disk state is gone). Short drops self-recover via provider retries; resume is for long drops / ESC.
+
+### Inter-Agent Messaging
+A message bus (`message` tool, default-on) that lets concurrently-running agents coordinate: `op:"list"` shows who is online; `op:"send"` with `to` (an agent id or `"all"`) asks a question and returns the reply synchronously. Each subagent receives a coordination preamble naming its own id and its spawning parent.
+
+### Fusion Mode
+A multi-model panel (`/fusion`; `/model` split into judge→writer) that shells out to read-only model CLIs (codex / claude) and fuses their answers through a brainstorm → plan → subagent-driven execution cycle. Cycled with `alt+p`.
 
 ## Flagged ambiguities
 

@@ -46,7 +46,7 @@ Edit directly or use `/settings` for common options.
 | `treeFilterMode` | string | `"default"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
 | `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
-| `assistantReadingColumns` | number | `88` | Max width (cols) for assistant prose on wide terminals (40-200); tool/bash/code uncapped |
+| `assistantReadingColumns` | number | `0` | Reading-column cap (cols) for assistant prose. `0` (default) = full width, like Claude Code; a positive value (clamped 40-200) wraps long answers at that measure. Tool/bash/code blocks are never capped |
 | `showHardwareCursor` | boolean | `false` | Show terminal cursor |
 | `cursorBlink` | boolean | `true` | Blink the input editor's block cursor while focused |
 | `streamingSmoothing` | boolean | `true` | Reveal streamed assistant text at a steady rate instead of provider-sized bursts |

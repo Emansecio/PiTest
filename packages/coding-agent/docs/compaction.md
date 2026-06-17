@@ -2,7 +2,7 @@
 
 LLMs have limited context windows. When conversations grow too long, pit uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
 
-**Source files** (pi-mono):
+**Source files** (PiTest):
 - `packages/coding-agent/src/core/compaction/compaction.ts` - Auto-compaction logic
 - `packages/coding-agent/src/core/compaction/branch-summarization.ts` - Branch summarization
 - `packages/coding-agent/src/core/compaction/utils.ts` - Shared utilities (file tracking, serialization)

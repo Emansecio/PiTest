@@ -554,3 +554,92 @@ describe("isImportGroundingDisabled — opt-out", () => {
 		expect(isImportGroundingDisabled({ PIT_NO_IMPORT_GROUNDING: "0" })).toBe(false);
 	});
 });
+
+// PV3-bare: ground BARE package specifiers against knownPackages + Node builtins.
+// No fs needed (packages aren't on disk) — only the injected knownPackages set.
+function makeBareDeps(packageNames: string[] | undefined): ImportGroundingDeps {
+	return makeDeps([], packageNames === undefined ? {} : { knownPackages: () => new Set(packageNames) });
+}
+
+describe("groundImports — BARE package grounding (PV3-bare)", () => {
+	it("blocks an unknown package that typos a known dep (lodash-es -> lodash)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import x from "lodash-es";` },
+			makeBareDeps(["lodash"]),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") {
+			expect(decision.kind).toBe("bare");
+			expect(decision.message).toContain("lodash-es");
+			expect(decision.message).toContain("lodash");
+			expect(decision.message).toContain("re-issue the identical call");
+		}
+	});
+
+	it("allows a package that IS a known dependency (react)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import x from "react";` },
+			makeBareDeps(["react"]),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("allows Node builtins (node:fs prefix and bare path)", () => {
+		const prefixed = groundImports(
+			{ targetFile: TARGET, content: `import { readFile } from "node:fs";` },
+			makeBareDeps(["react"]),
+		);
+		const bare = groundImports({ targetFile: TARGET, content: `import "path";` }, makeBareDeps(["react"]));
+		expect(prefixed).toEqual({ action: "allow" });
+		expect(bare).toEqual({ action: "allow" });
+	});
+
+	it("allows a SUBPATH of a known scoped package (@scope/pkg/sub -> @scope/pkg)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import x from "@scope/pkg/sub";` },
+			makeBareDeps(["@scope/pkg"]),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("allows ALIAS specifiers @/… and ~/… (out of scope, never grounded as bare)", () => {
+		// knownPackages wired but EMPTY: a bare typo would block — these must not even
+		// be considered bare (alias is explicitly out of scope).
+		const at = groundImports(
+			{ targetFile: TARGET, content: `import x from "@/components/X";` },
+			makeBareDeps(["components"]),
+		);
+		const tilde = groundImports({ targetFile: TARGET, content: `import x from "~/lib";` }, makeBareDeps(["lib"]));
+		expect(at).toEqual({ action: "allow" });
+		expect(tilde).toEqual({ action: "allow" });
+	});
+
+	it("allows a workspace package present in knownPackages (@pit/ai — no internal false-block)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import { x } from "@pit/ai";` },
+			makeBareDeps(["@pit/ai", "@pit/coding-agent", "@pit/tui"]),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("FAIL-OPEN: bare grounding is skipped when knownPackages is not wired", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import x from "lodash-es";` },
+			makeBareDeps(undefined),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("FAIL-OPEN: an empty knownPackages set never blocks (no close candidate)", () => {
+		const decision = groundImports({ targetFile: TARGET, content: `import x from "lodash-es";` }, makeBareDeps([]));
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("FAIL-OPEN: an unknown package with NO close known name is allowed (genuinely new dep)", () => {
+		const decision = groundImports(
+			{ targetFile: TARGET, content: `import x from "react";` },
+			makeBareDeps(["@scope/pkg", "typescript"]),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+});

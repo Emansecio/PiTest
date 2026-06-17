@@ -1,7 +1,17 @@
 # ADR-0002: Diff Size Limit with Pause
 
 ## Status
-Accepted
+Proposed — never implemented (was incorrectly marked Accepted).
+
+> **Reconciliation note (2026-06-16):** The code was never shipped — a grep for
+> `diffLimit|changedLines|DiffLimit|createDiffLimit|diff-limit` across
+> `packages/coding-agent/src` returns 0 matches, and the built-in factory array
+> registers no diff guard. The "Implementation" paragraph below describes an
+> `afterToolCall` extension that does not exist; treat this ADR as a proposal,
+> not a record of shipped behavior. If revived, see item **PV2** of
+> `docs/optimization/weak-model-uplift-audit.md`: prefer a telemetry / diagnostic
+> -only signal over an interactive pause, which conflicts with the autonomous
+> `/goal` flow.
 
 ## Context
 Models frequently over-engineer: a 10-line task becomes 200+ lines with abstractions, helper functions, and speculative error handling. This wastes tokens, introduces bugs, and creates maintenance burden.

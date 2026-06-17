@@ -146,9 +146,11 @@ export function buildDryRunReport(options: BuildDryRunReportOptions): DryRunRepo
 		detail: mcpServerNames.length === 0 ? "none configured" : `${mcpServerNames.length} configured`,
 		items: mcpServerNames.map((name) => {
 			const cfg = mcpSettings.servers![name];
+			// http/sse servers show their url; stdio servers show the launch command.
+			const target = cfg.url ?? ([cfg.command, ...(cfg.args ?? [])].filter(Boolean).join(" ") || "(unconfigured)");
 			return {
 				label: name,
-				value: cfg.disabled ? `${cfg.url} (disabled)` : cfg.url,
+				value: cfg.disabled ? `${target} (disabled)` : target,
 				status: cfg.disabled ? ("warning" as const) : ("ready" as const),
 			};
 		}),

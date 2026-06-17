@@ -1,3 +1,5 @@
+> **Status:** Shipped — commits 1b89056d → 87628914 → d254b5c4 (Fusion·Plan mode). Historical record of a delivered feature.
+
 # Fusion Mode — Design Spec
 
 **Status:** Spec of record (decisions locked) — v1 scope is **Fusion · Plan**.

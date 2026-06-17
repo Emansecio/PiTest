@@ -212,12 +212,35 @@ describe("McpHttpClient", () => {
 		expect(Date.now() - startedAt).toBeLessThan(5_000);
 	});
 
-	it("rejects SSE responses with a clear error", async () => {
+	it("parses a Streamable-HTTP SSE response (event: message) carrying the JSON-RPC result", async () => {
+		// Modern Streamable HTTP servers may answer a POST with text/event-stream
+		// instead of application/json. The transport must read the SSE frame whose
+		// JSON-RPC id matches the request and return it (no longer a hard reject).
 		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(
-			async () => new Response("event: x\n", { status: 200, headers: { "content-type": "text/event-stream" } }),
-		) as typeof fetch;
-		const client = new McpHttpClient("x", { url: TEST_URL });
-		await expect(client.initialize()).rejects.toThrow("SSE transport not supported");
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const body = init?.body ? JSON.parse(init.body.toString()) : {};
+				if (body.method === "notifications/initialized") {
+					return new Response("", { status: 200, headers: { "content-type": "application/json" } });
+				}
+				const result =
+					body.method === "initialize"
+						? {
+								protocolVersion: "2025-06-18",
+								serverInfo: { name: "test", version: "1" },
+								capabilities: { tools: {} },
+							}
+						: body.method === "tools/list"
+							? { tools: [{ name: "ping", description: "", inputSchema: { type: "object" } }] }
+							: { content: [{ type: "text", text: "pong" }] };
+				const frame = `event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", id: body.id, result })}\n\n`;
+				return new Response(frame, { status: 200, headers: { "content-type": "text/event-stream" } });
+			},
+		) as unknown as typeof fetch;
+		const client = new McpHttpClient("sse-http", { url: TEST_URL });
+		await client.initialize();
+		expect(client.getTools().map((t) => t.name)).toEqual(["ping"]);
+		const result = await client.callTool("ping", {});
+		expect(result.content[0]).toEqual({ type: "text", text: "pong" });
 	});
 
 	it("rejects a response whose Content-Length exceeds the cap without reading the body", async () => {

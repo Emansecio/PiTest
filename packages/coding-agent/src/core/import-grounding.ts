@@ -26,10 +26,12 @@
  *     name). So scanning the new content for imports never touches something the
  *     author is creating.
  *
- *   - RELATIVE paths only, BLOCK-only. Only specifiers starting with "./" or
- *     "../" are grounded (a real fs target exists for those at write time). Bare
- *     ("react", "@scope/x") and alias ("@/x", "~/x") specifiers ALLOW untouched —
- *     resolving those needs node_modules / tsconfig paths, out of scope for v1.
+ *   - RELATIVE + BARE, BLOCK-only. Relative specifiers ("./", "../") are grounded
+ *     against the filesystem; BARE package specifiers ("react", "@scope/x") are
+ *     grounded against the project's known packages + Node builtins (when the
+ *     `knownPackages` dep is wired). ALIAS specifiers ("@/x", "~/x") and
+ *     `#imports`-map subpaths ALLOW untouched — resolving those needs tsconfig
+ *     paths / package `imports`, the monorepo false-block hotspot, out of scope.
  *     We NEVER rewrite the content; we only block with a suggestion.
  *
  * This module touches NO agent-session / registries / hubs. It only takes
@@ -37,6 +39,7 @@
  * by the thin adapter. The wiring is documented in the WIRING block at the end.
  */
 
+import { builtinModules } from "node:module";
 import { dirname, resolve as resolvePath } from "node:path";
 
 // ============================================================================
@@ -45,12 +48,13 @@ import { dirname, resolve as resolvePath } from "node:path";
 
 /**
  * Verdict returned by `groundImports`. BLOCK-only: never rewrites content.
- * The block branch carries `kind` ("path" = pass-1 unresolved module,
- * "export" = pass-2 unexported named binding) for downstream telemetry.
+ * The block branch carries `kind` ("path" = unresolved relative module,
+ * "bare" = unknown package specifier, "export" = unexported named binding) for
+ * downstream telemetry.
  */
 export type ImportGroundingDecision =
 	| { action: "allow" }
-	| { action: "block"; kind: "path" | "export"; message: string };
+	| { action: "block"; kind: "path" | "export" | "bare"; message: string };
 
 /** The file being written + its new content, plus the injectable fs/fuzzy deps. */
 export interface ImportGroundingInput {
@@ -100,6 +104,15 @@ export interface ImportGroundingDeps {
 	 * skipped (fail-open). Defaults to fs.readFileSync in the adapter.
 	 */
 	readFile?: (absPath: string) => string | undefined;
+	/**
+	 * The set of package names the project may legitimately import — the union of
+	 * dependencies + devDependencies + peerDependencies (+ workspace package names
+	 * in a monorepo). Wired by the adapter from the project's package.json(s).
+	 * OPTIONAL: when omitted (mirroring `readFile`), the BARE-package pass is
+	 * skipped entirely (fail-open). An empty set is harmless — a bare specifier
+	 * with no close known-package name is always ALLOWED.
+	 */
+	knownPackages?: () => Set<string>;
 }
 
 // ============================================================================
@@ -188,6 +201,77 @@ const IMPORT_SPECIFIER_RE =
 /** A specifier is RELATIVE iff it starts with "./" or "../". Bare/alias -> not ours. */
 function isRelativeSpecifier(spec: string): boolean {
 	return spec.startsWith("./") || spec.startsWith("../");
+}
+
+/**
+ * A specifier is an ALIAS iff it starts with "@/" (empty scope before the slash)
+ * or "~/" — the tsconfig-`paths` / bundler conventions. Aliases are OUT OF SCOPE
+ * for bare-package grounding (resolving them needs tsconfig, the monorepo's
+ * false-block hotspot). NOTE: "@scope/pkg" is a real scoped package (BARE), not an
+ * alias — only the empty-scope "@/" form is.
+ */
+function isAliasSpecifier(spec: string): boolean {
+	return spec.startsWith("@/") || spec.startsWith("~/");
+}
+
+/** Node builtins (without the `node:` prefix), e.g. "fs", "path", "fs/promises". */
+const NODE_BUILTINS = new Set<string>(builtinModules);
+
+/**
+ * True iff `spec` names a Node builtin: the `node:` prefix is ALWAYS a builtin
+ * (node:fs, node:test), and an un-prefixed name is a builtin when it (or its
+ * first path segment, for "fs/promises") is in {@link NODE_BUILTINS}.
+ */
+function isNodeBuiltin(spec: string): boolean {
+	if (spec.startsWith("node:")) return true;
+	if (NODE_BUILTINS.has(spec)) return true;
+	const slash = spec.indexOf("/");
+	const firstSegment = slash >= 0 ? spec.slice(0, slash) : spec;
+	return NODE_BUILTINS.has(firstSegment);
+}
+
+/**
+ * Reduce a bare specifier to the PACKAGE name a dependency manifest lists:
+ *   `@scope/pkg/sub` -> `@scope/pkg` (scope + first segment)
+ *   `pkg/sub/path`   -> `pkg`        (first segment)
+ *   `pkg`            -> `pkg`
+ */
+function barePackageName(spec: string): string {
+	if (spec.startsWith("@")) {
+		const parts = spec.split("/");
+		return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : spec;
+	}
+	const slash = spec.indexOf("/");
+	return slash >= 0 ? spec.slice(0, slash) : spec;
+}
+
+/**
+ * Extract every UNIQUE BARE specifier from `content`, in first-seen order. A bare
+ * specifier is a package import: NOT relative (`./`, `../`), NOT an alias (`@/`,
+ * `~/`), and NOT a Node `imports`-map subpath (`#internal`). Scoped packages
+ * (`@scope/pkg`) ARE bare. Aliases/relative/imports-map are dropped (out of
+ * scope for package grounding).
+ */
+function extractBareSpecifiers(content: string): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	IMPORT_SPECIFIER_RE.lastIndex = 0;
+	let match: RegExpExecArray | null = IMPORT_SPECIFIER_RE.exec(content);
+	while (match !== null) {
+		const spec = match[1] ?? match[2] ?? match[3];
+		if (
+			spec !== undefined &&
+			!isRelativeSpecifier(spec) &&
+			!isAliasSpecifier(spec) &&
+			!spec.startsWith("#") &&
+			!seen.has(spec)
+		) {
+			seen.add(spec);
+			out.push(spec);
+		}
+		match = IMPORT_SPECIFIER_RE.exec(content);
+	}
+	return out;
 }
 
 /**
@@ -532,6 +616,58 @@ function validateNamedExports(
 }
 
 // ============================================================================
+// Bare-package validation
+// ----------------------------------------------------------------------------
+// A BARE specifier (`react`, `@scope/x`, `lodash/fp`) imports a package, not a
+// file on disk. We can still ground it cheaply: its package name must be either a
+// Node builtin or a name the project declares (dependencies + devDependencies +
+// peerDependencies, plus workspace package names in a monorepo). When it is
+// neither AND a close known-package name exists, that is a missing/typo'd
+// dependency (`lodash-es` -> `lodash`) we block one round-trip before the install
+// or type-check fails. SAME block-only / fail-open posture as the path pass:
+//   - ALIAS specifiers (`@/x`, `~/x`) and `#imports`-map subpaths are NOT bare —
+//     resolving those needs tsconfig/package `imports`, explicitly out of scope.
+//   - OPTIONAL `knownPackages` dep: omitted -> the whole pass is skipped.
+//   - NO close known-package name -> ALLOWED (a genuinely new package the model
+//     is about to install has no near neighbour; we never wedge it).
+// ============================================================================
+
+/** Block message for a bare import whose package is not a known dependency. */
+function formatBareBlockMessage(packageName: string, candidate: string): string {
+	return (
+		`Import grounding (no write attempted): package "${packageName}" is not in the project's ` +
+		`dependencies. Did you mean: ${candidate}? Install it or fix the package name, ` +
+		"or re-issue the identical call to write it anyway."
+	);
+}
+
+/**
+ * Validate every BARE import specifier against the project's known packages +
+ * Node builtins. Returns the FIRST block (an unknown package with a close known
+ * name) or null. Pure — the known-package set is supplied via injected `deps`.
+ */
+function validateBarePackages(content: string, deps: ImportGroundingDeps): ImportGroundingDecision | null {
+	const knownPackages = deps.knownPackages;
+	if (knownPackages === undefined) return null; // bare grounding not wired -> skip
+	const known = knownPackages();
+	const candidates = Array.from(known);
+	for (const spec of extractBareSpecifiers(content)) {
+		if (isNodeBuiltin(spec)) continue; // builtins are always valid
+		const packageName = barePackageName(spec);
+		if (known.has(packageName)) continue; // declared dependency / workspace package
+		// Unknown package: only block when a close known name exists (a typo of a
+		// real dep). No near match -> ALLOW (fail-open, same as the path pass).
+		const candidate = deps.fuzzy(packageName, candidates, {
+			maxDistance: deps.maxDistance,
+			prefixMinOverlap: deps.prefixMinOverlap,
+		});
+		if (candidate === undefined) continue;
+		return { action: "block", kind: "bare", message: formatBareBlockMessage(packageName, candidate) };
+	}
+	return null;
+}
+
+// ============================================================================
 // Main entry point
 // ============================================================================
 
@@ -569,6 +705,13 @@ export function groundImports(input: ImportGroundingInput, deps: ImportGrounding
 			if (candidates.length === 0) continue;
 			return { action: "block", kind: "path", message: formatBlockMessage(specifier, candidates) };
 		}
+
+		// Bare-package pass — a package import (`react`, `@scope/x`) whose name is
+		// neither a Node builtin nor a known project dependency, but is a close typo of
+		// one, is blocked. Disjoint from the relative passes (different specifier set).
+		// Only runs when `knownPackages` is wired; fail-open everywhere else.
+		const bareDecision = validateBarePackages(content, deps);
+		if (bareDecision !== null) return bareDecision;
 
 		// Pass 2 — every named binding must be exported by its (resolved) module.
 		// Only runs when a `readFile` dep is wired; fail-open everywhere else.

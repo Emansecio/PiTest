@@ -6,7 +6,7 @@ See [AGENTS.md](../../../AGENTS.md) for additional guidelines.
 
 ```bash
 git clone 
-cd pi-mono
+cd PiTest
 npm install
 npm run build
 ```
@@ -14,7 +14,7 @@ npm run build
 Run from source:
 
 ```bash
-/path/to/pi-mono/pi-test.sh
+/path/to/PiTest/pi-test.sh
 ```
 
 The script can be run from any directory. Pit keeps the caller's current working directory.
@@ -48,7 +48,7 @@ Never use `__dirname` directly for package assets.
 
 ## Debug Command
 
-`/debug` (hidden) writes to `~/.pit/agent/pi-debug.log`:
+`/debug` (hidden) writes to `~/.pit/agent/pit-debug.log`:
 - Rendered TUI lines with ANSI codes
 - Last messages sent to the LLM
 

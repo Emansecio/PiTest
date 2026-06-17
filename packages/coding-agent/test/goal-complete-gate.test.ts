@@ -50,6 +50,32 @@ describe("goal_complete verification gate (R7)", () => {
 		}
 	});
 
+	it("summarizes the dominant failure (tsc) instead of dumping the raw tail", async () => {
+		const mgr = new GoalManager();
+		mgr.start("ship it", {});
+		setCurrentGoalManager(mgr);
+		// A long, noisy probe output with one load-bearing tsc error buried in the
+		// MIDDLE — far enough from the end that a raw `slice(-2000)` tail would lose
+		// it under the trailing progress noise.
+		const tscError = "src/widgets/foo.ts(42,7): error TS2322: Type 'string' is not assignable to type 'number'.";
+		const noise = Array.from({ length: 120 }, (_, i) => `  ✓ some/passing/spec-${i}.test.ts passed`).join("\n");
+		const output = `${noise}\n${tscError}\n${noise}`;
+		setCurrentVerificationProbe(async () => ({ ok: false, exitCode: 2, output, timedOut: false }));
+		try {
+			const red = await complete("c1", "done");
+			expect(red.details?.completed).toBe(false);
+			expect(textOf(red)).toContain("Not completing");
+			// The extracted root-cause line is present…
+			expect(textOf(red)).toContain(tscError);
+			// …and the passing-spec noise was dropped (proves summary, not raw tail).
+			expect(textOf(red)).not.toContain("some/passing/spec-119.test.ts");
+			expect(mgr.get()?.status).toBe("active");
+		} finally {
+			setCurrentVerificationProbe(undefined);
+			setCurrentGoalManager(undefined);
+		}
+	});
+
 	it("completes when no probe is registered", async () => {
 		const mgr = new GoalManager();
 		mgr.start("ship it", {});

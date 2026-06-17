@@ -3,6 +3,14 @@
 ## Status
 Accepted
 
+> **As shipped (reconciled 2026-06-16):** the escalation ladder shipped, but the
+> cadence was tuned to **2/4/6** (not 3/5/8 — the tightening anticipated in the Risk
+> below). Tier 2 is a **non-blocking steer**, not a user-facing pause, and Tier 3
+> runs one structured-recovery pass before aborting on relapse. A complementary
+> repeating-pattern detector also catches multi-tool cycles. The tiers/wording below
+> are the original provisional design; the mechanism lives in the `agent-session.ts`
+> doom-loop handler.
+
 ## Context
 Models enter doom loops: retrying the same failing command 5-10 times without changing approach. Current behavior (single reminder at threshold=4) is insufficient — models often ignore the reminder and continue looping, burning tokens.
 

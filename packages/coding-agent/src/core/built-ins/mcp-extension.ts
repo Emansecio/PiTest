@@ -12,12 +12,35 @@ import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import {
 	McpManager,
+	type McpPromptDescriptor,
 	type McpServerConfig,
 	type McpSettings,
 	type McpToolSchema,
 	wrapMcpToolAsDefinition,
 } from "../mcp/index.ts";
+import { createListResourcesTool, createReadResourceTool } from "../mcp/resource-tools.ts";
 import { getCurrentToolDiscoveryIndex } from "../tool-discovery.ts";
+
+/** Flatten an MCP prompt result into a single user-message string. */
+function promptMessagesToText(messages: Array<{ content: unknown }>): string {
+	const parts: string[] = [];
+	for (const m of messages) {
+		const c = m.content as { type?: string; text?: string };
+		if (c && c.type === "text" && typeof c.text === "string") parts.push(c.text);
+	}
+	return parts.join("\n\n");
+}
+
+/** Map a slash-command argument string positionally onto a prompt's declared arguments. */
+function parsePromptArgs(argsStr: string, argDefs: McpPromptDescriptor["arguments"]): Record<string, string> {
+	const trimmed = argsStr.trim();
+	const tokens = trimmed.length > 0 ? trimmed.split(/\s+/) : [];
+	const out: Record<string, string> = {};
+	(argDefs ?? []).forEach((def, i) => {
+		if (tokens[i] !== undefined) out[def.name] = tokens[i];
+	});
+	return out;
+}
 
 /**
  * Derive BM25 index tags for a deferred MCP tool from its input schema: the
@@ -166,6 +189,79 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			}
 		};
 
+		// Resources + prompts (Phase 3). Unlike tools, these are never deferred —
+		// they are few and pulled on demand. Resource access is via two eager native
+		// tools (registered once any server advertises the capability); each prompt
+		// becomes a slash command `/mcp__<server>__<prompt>` that injects the
+		// server-rendered messages as a user turn.
+		let resourceToolsRegistered = false;
+		const promptedServers = new Set<string>();
+
+		const discoverResourcesAndPrompts = async (): Promise<void> => {
+			const clients = manager.connectedClients();
+
+			if (!resourceToolsRegistered && clients.some((c) => c.client.getCapabilities().resources)) {
+				try {
+					pi.registerTool(createListResourcesTool(manager));
+					pi.registerTool(createReadResourceTool(manager));
+					const active = pi.getActiveTools();
+					const toAdd = ["list_mcp_resources", "read_mcp_resource"].filter((n) => !active.includes(n));
+					if (toAdd.length > 0) pi.setActiveTools([...active, ...toAdd]);
+					resourceToolsRegistered = true;
+				} catch (err) {
+					console.error(
+						`[mcp] failed to register resource tools: ${err instanceof Error ? err.message : String(err)}`,
+					);
+				}
+			}
+
+			for (const { name, client } of clients) {
+				if (promptedServers.has(name)) continue;
+				if (!client.getCapabilities().prompts) {
+					promptedServers.add(name); // nothing to do; don't re-check every reconnect
+					continue;
+				}
+				let prompts: McpPromptDescriptor[];
+				try {
+					prompts = await client.listPrompts();
+				} catch (err) {
+					console.error(`[mcp] ${name} prompts/list failed: ${err instanceof Error ? err.message : String(err)}`);
+					continue; // leave unmarked so a later reconnect retries
+				}
+				promptedServers.add(name);
+				const prefix = manager.prefixFor(name) ?? `mcp__${name}__`;
+				for (const prompt of prompts) {
+					const commandName = `${prefix}${prompt.name}`;
+					pi.registerCommand(commandName, {
+						description: prompt.description ?? `MCP prompt "${prompt.name}" from ${name}`,
+						getArgumentCompletions: () =>
+							(prompt.arguments ?? []).map((a) => ({
+								value: a.name,
+								label: a.required ? `${a.name} (required)` : a.name,
+								description: a.description,
+							})),
+						async handler(argsStr, ctx) {
+							try {
+								const result = await client.getPrompt(prompt.name, parsePromptArgs(argsStr, prompt.arguments));
+								const text = promptMessagesToText(result.messages ?? []);
+								if (!text.trim()) {
+									const msg = `MCP prompt "${prompt.name}" returned no text.`;
+									if (ctx.hasUI) ctx.ui.notify(msg, "warning");
+									else console.log(msg);
+									return;
+								}
+								pi.sendUserMessage(text);
+							} catch (err) {
+								const msg = `MCP prompt "${prompt.name}" failed: ${err instanceof Error ? err.message : String(err)}`;
+								if (ctx.hasUI) ctx.ui.notify(msg, "error");
+								else console.error(msg);
+							}
+						},
+					});
+				}
+			}
+		};
+
 		// Track which servers we have already registered tools for, so a server
 		// that transitions disconnected→connected AFTER boot (a reconnect, or one
 		// that blew the 10s connect budget and only answered later) gets its tools
@@ -189,6 +285,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 				registeredServers.add(state.name);
 				const deferredCount = registerNewTools();
 				ensureDiscoveryActive(deferredCount);
+				void discoverResourcesAndPrompts();
 			},
 		});
 
@@ -209,6 +306,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			}
 			const deferredCount = registerNewTools();
 			ensureDiscoveryActive(deferredCount);
+			await discoverResourcesAndPrompts();
 			// From here on, reconnects/late connects route through onStateChange.
 			bootDone = true;
 		});
@@ -234,6 +332,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 					}
 					const deferredCount = registerNewTools();
 					ensureDiscoveryActive(deferredCount);
+					await discoverResourcesAndPrompts();
 				}
 				const states = manager.getAllStates();
 				if (states.length === 0) {

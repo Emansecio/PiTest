@@ -7,21 +7,26 @@ To test pit's TUI in a controlled terminal environment:
 
 ```bash
 # Create tmux session with specific dimensions
-tmux new-session -d -s pi-test -x 80 -y 24
+tmux new-session -d -s pit-test -x 80 -y 24
 
-# Start pit from source
-tmux send-keys -t pi-test "cd /Users/pituned/workspaces/pi-mono && ./pi-test.sh" Enter
+# Start pit (installed globally, or `node dist/cli.js` from a built checkout)
+tmux send-keys -t pit-test "pit" Enter
 
 # Wait for startup, then capture output
-sleep 3 && tmux capture-pane -t pi-test -p
+sleep 3 && tmux capture-pane -t pit-test -p
 
 # Send input
-tmux send-keys -t pi-test "your prompt here" Enter
+tmux send-keys -t pit-test "your prompt here" Enter
 
 # Send special keys
-tmux send-keys -t pi-test Escape
-tmux send-keys -t pi-test C-o  # ctrl+o
+tmux send-keys -t pit-test Escape
+tmux send-keys -t pit-test C-o  # ctrl+o
 
 # Cleanup
-tmux kill-session -t pi-test
+tmux kill-session -t pit-test
 ```
+
+> **Windows (no native tmux):** drive the real TUI via computer-use against a
+> pre-configured terminal, or run the tmux flow above under WSL. Headless render
+> checks (no TTY) go through `scripts/repro-startup-frame.mjs` and the
+> `@pit/tui` `VirtualTerminal` in tests.

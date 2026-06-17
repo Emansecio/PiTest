@@ -45,9 +45,10 @@ saves a class of tool-call errors:
   artifact — edit `packages/ai/scripts/generate-models.ts` instead.
 - **No inline imports**: no `await import("./foo.js")`, no
   `import("pkg").Type` in type positions. Top-level imports only.
-- **`pi-chrome` first** for any browser-driven task. Falls back to
-  `playwright` / `chrome-devtools-mcp` only when explicitly authorized or the
-  bridge is unavailable.
+- **Native Chrome first** for any browser-driven task: the built-in
+  `chrome_devtools_*` tools (managed by `ChromeDevtoolsManager`, opened with
+  `/chrome`). Fall back to `playwright` / `chrome-devtools-mcp` only when
+  explicitly authorized or the native bridge is unavailable.
 - **Tests**: faux provider + `test/suite/harness.ts` only for
   `packages/coding-agent/test/suite/`. Never real provider APIs or paid
   tokens.

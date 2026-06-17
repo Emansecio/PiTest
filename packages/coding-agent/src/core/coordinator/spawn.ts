@@ -97,7 +97,7 @@ function filterTools(tools: readonly AgentTool[], allowed: readonly string[] | u
 	return tools.filter((tool) => allowSet.has(tool.name));
 }
 
-function extractAssistantText(messages: readonly AgentMessage[]): string {
+export function extractAssistantText(messages: readonly AgentMessage[]): string {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role !== "assistant") continue;
@@ -237,6 +237,8 @@ export async function spawnSubagent(
 			// Subagents always think (never "off") — default "medium", overridable per task.
 			thinkingLevel: options.thinkingLevel ?? "medium",
 			tools,
+			// Seed prior transcript when resuming from disk (Tier 2); empty otherwise.
+			messages: options.initialMessages,
 		},
 		convertToLlm: deps.convertToLlm,
 		// Gate every subagent tool call through the parent's permission policy.

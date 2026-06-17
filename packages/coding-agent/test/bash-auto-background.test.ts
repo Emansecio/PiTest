@@ -58,6 +58,12 @@ describe("bash auto-background: promote on threshold instead of kill", () => {
 	it.skipIf(!BASH_AVAILABLE)(
 		"promotes a long command (no timeout) to a tracked background job, returning a handle + partial output",
 		async () => {
+			// De-flake: under the full parallel suite the child SPAWN alone can exceed the
+			// 0.15s promotion threshold, so `echo started` may not land before promotion and
+			// `partial` comes back empty. Give spawn+echo a comfortable window — still far
+			// below the 5s sleep, so promotion (not completion) is what settles it, and well
+			// under the 3s settle assertion below.
+			process.env.PIT_BASH_AUTO_BACKGROUND_SECONDS = "1";
 			const ops = createLocalBashOperations();
 			const start = Date.now();
 			let partial = "";
@@ -152,6 +158,10 @@ describe("bash auto-background: promote on threshold instead of kill", () => {
 	it.skipIf(!BASH_AVAILABLE)(
 		"end-to-end through the bash tool: execute returns the 'promoted to background id=' message + partial output, no throw",
 		async () => {
+			// De-flake (same race as the first promotion test): widen the window so the
+			// `echo marker-line` reliably lands before promotion under full-suite load.
+			// Still ≪ the 5s sleep, so promotion is what settles it.
+			process.env.PIT_BASH_AUTO_BACKGROUND_SECONDS = "1";
 			const def = createBashToolDefinition(process.cwd());
 			const ctx = {} as Parameters<typeof def.execute>[4];
 			// No timeout arg => eligible. echo lands before promotion, sleep blocks.

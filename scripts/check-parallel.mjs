@@ -9,9 +9,35 @@ import { spawn } from "node:child_process";
 // the others (the "exit 1 cancels the batch on Windows" issue is specific to
 // `&&`-chained shells, not this Promise.all fan-out).
 
+// Track live children so an interrupted runner (Ctrl-C, SIGTERM, a parent that
+// dies) reaps the whole spawned tree instead of orphaning it. On Windows,
+// killing the shell does NOT kill its descendants (npm -> vitest -> N forks), so
+// we taskkill the tree by pid; POSIX gets a direct kill signal.
+const activeChildren = new Set();
+
+function killTree(child) {
+	if (child.pid === undefined) return;
+	if (process.platform === "win32") {
+		spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+	} else {
+		child.kill("SIGKILL");
+	}
+}
+
+function shutdown(signal) {
+	for (const child of activeChildren) {
+		killTree(child);
+	}
+	process.exit(signal === "SIGINT" ? 130 : 143);
+}
+
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+
 function run(name, command) {
 	return new Promise((resolve) => {
 		const child = spawn(command, { shell: true, stdio: ["ignore", "pipe", "pipe"] });
+		activeChildren.add(child);
 		let out = "";
 		child.stdout.on("data", (chunk) => {
 			out += chunk;
@@ -20,6 +46,7 @@ function run(name, command) {
 			out += chunk;
 		});
 		child.on("close", (code) => {
+			activeChildren.delete(child);
 			resolve({ name, code: code ?? 1, out });
 		});
 	});

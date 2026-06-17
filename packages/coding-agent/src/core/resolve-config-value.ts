@@ -140,3 +140,21 @@ export function resolveHeadersOrThrow(
 export function clearConfigValueCache(): void {
 	commandResultCache.clear();
 }
+
+/**
+ * Expand shell-style `${VAR}` / `${VAR:-default}` references inside a string.
+ *
+ * Matches the `.mcp.json` convention used across the MCP ecosystem (Claude Code
+ * et al.) so configs authored for those tools import cleanly. `${VAR}` expands to
+ * the env value or "" if unset; `${VAR:-default}` falls back to `default` when
+ * the variable is unset OR empty. Other text passes through verbatim. This is
+ * substring interpolation, distinct from `resolveConfigValue` (whole-value env
+ * name or `!command`).
+ */
+export function interpolateEnvVars(value: string, env: NodeJS.ProcessEnv = process.env): string {
+	return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_match, name: string, fallback?: string) => {
+		const resolved = env[name];
+		if (resolved !== undefined && resolved !== "") return resolved;
+		return fallback ?? "";
+	});
+}

@@ -5,6 +5,7 @@ import { getAgentDir } from "../config.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { bundleBuiltInExtensions } from "./built-ins/index.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import { composeMcpSettings, loadMcpConfigFiles } from "./mcp/config-files.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { PermissionMode } from "./permissions/index.ts";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.ts";
@@ -169,7 +170,7 @@ export async function createAgentSessionServices(
 			permissions: settingsManager.getPermissionSettings(),
 			permissionModeOverride: options.permissionModeOverride,
 			hooks: settingsManager.getHooksSettings(),
-			mcp: settingsManager.getMcpSettings(),
+			mcp: composeMcpSettings(settingsManager.getMcpSettingsLayered(), loadMcpConfigFiles(cwd, agentDir)),
 			getParentModel: () => parentModelRef.current?.(),
 			getAvailableTools: () => availableToolsRef.current?.() ?? [],
 			// Resolved lazily at subagent-spawn time, well after resourceLoader init.

@@ -11,6 +11,7 @@ import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentGoalManager } from "../goal/goal-manager.ts";
+import { summarizeCheckFailure } from "../verification/failure-summary.ts";
 import { getCurrentVerificationProbe } from "../verification/verification.ts";
 import { renderToolOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -65,7 +66,10 @@ export function createGoalCompleteToolDefinition(
 			if (probe) {
 				const result = await probe();
 				if (result && !result.ok) {
-					const tail = result.output.length > 2000 ? `…\n${result.output.slice(-2000)}` : result.output;
+					// Summarize the dominant failure (tsc/biome/vitest/thrown) instead of a raw
+					// tail slice, so the model sees the root-cause error — same extraction the
+					// end-of-turn verification gate uses. Falls back to a tail when nothing matches.
+					const tail = summarizeCheckFailure(result.output, "");
 					const status = result.timedOut ? "timed out" : `exited ${result.exitCode}`;
 					return {
 						content: [

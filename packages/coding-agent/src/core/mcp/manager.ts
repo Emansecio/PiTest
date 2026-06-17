@@ -14,8 +14,15 @@
  * so a failed call surfaces immediately and re-connect happens lazily.
  */
 
-import { McpHttpClient, McpTransportError } from "./client.ts";
+import { McpClient, McpTransportError } from "./client.ts";
 import type { McpCallToolResult, McpConnectionState, McpServerConfig, McpToolSchema } from "./types.ts";
+
+/** Display label for a server: its endpoint URL (http/sse) or launch command (stdio). */
+function serverDisplayTarget(config: McpServerConfig): string {
+	if (config.url) return config.url;
+	if (config.command) return [config.command, ...(config.args ?? [])].join(" ");
+	return "(unconfigured)";
+}
 
 export interface McpManagerOptions {
 	servers: Record<string, McpServerConfig>;
@@ -28,7 +35,7 @@ export interface McpManagerOptions {
 interface ServerEntry {
 	name: string;
 	config: McpServerConfig;
-	client: McpHttpClient;
+	client: McpClient;
 	connected: boolean;
 	lastError?: string;
 	reconnectAttempts: number;
@@ -48,7 +55,7 @@ export class McpManager {
 			this.entries.set(name, {
 				name,
 				config,
-				client: new McpHttpClient(name, config),
+				client: new McpClient(name, config),
 				connected: false,
 				reconnectAttempts: 0,
 			});
@@ -64,7 +71,7 @@ export class McpManager {
 		if (!entry) return undefined;
 		return {
 			name: entry.name,
-			url: entry.config.url,
+			url: serverDisplayTarget(entry.config),
 			connected: entry.connected,
 			lastError: entry.lastError,
 			tools: entry.client.getTools(),
@@ -74,6 +81,27 @@ export class McpManager {
 
 	getAllStates(): McpConnectionState[] {
 		return [...this.entries.keys()].map((name) => this.getState(name)!).filter(Boolean);
+	}
+
+	/** The live client for a connected server (for resources/prompts access). */
+	getClient(name: string): McpClient | undefined {
+		const entry = this.entries.get(name);
+		return entry?.connected ? entry.client : undefined;
+	}
+
+	/** Names + clients of every currently connected server. */
+	connectedClients(): Array<{ name: string; client: McpClient; config: McpServerConfig }> {
+		const out: Array<{ name: string; client: McpClient; config: McpServerConfig }> = [];
+		for (const entry of this.entries.values()) {
+			if (entry.connected) out.push({ name: entry.name, client: entry.client, config: entry.config });
+		}
+		return out;
+	}
+
+	/** Resolve a configured server's tool prefix (public for prompt/resource naming). */
+	prefixFor(name: string): string | undefined {
+		const entry = this.entries.get(name);
+		return entry ? this.toolPrefixFor(entry) : undefined;
 	}
 
 	private emit(entry: ServerEntry) {

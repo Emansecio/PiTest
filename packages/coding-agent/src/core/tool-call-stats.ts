@@ -48,6 +48,13 @@ export interface ToolCallSequenceEntry {
 	 * loop, while a call that keeps producing the same error is.
 	 */
 	resultHash?: string;
+	/**
+	 * Whether the backfilled result was an error. Stamped alongside `resultHash` at
+	 * tool_execution_end. Used by {@link ToolCallStats.getConsecutiveSimilarResultOnlyCount}
+	 * to gate the result-only thrash signal on errors (a run of identical SUCCESS
+	 * results is progress, not a loop). Undefined while the call is in flight.
+	 */
+	isError?: boolean;
 }
 
 export interface ToolErrorFingerprint {
@@ -196,11 +203,14 @@ export class ToolCallStats {
 	 * {@link getConsecutiveSimilarResultCount} can distinguish a true loop (same
 	 * result) from real progress (new result each call).
 	 */
-	recordInvocationResult(resultHash: string): void {
+	recordInvocationResult(resultHash: string, isError: boolean): void {
 		if (this.ringSize === 0) return;
 		const lastIdx = (this.ringHead - 1 + this.sequenceWindow) % this.sequenceWindow;
 		const last = this.ringBuffer[lastIdx];
-		if (last) last.resultHash = resultHash;
+		if (last) {
+			last.resultHash = resultHash;
+			last.isError = isError;
+		}
 	}
 
 	/**
@@ -220,6 +230,31 @@ export class ToolCallStats {
 			const idx = (this.ringHead - 1 - i + this.sequenceWindow * 2) % this.sequenceWindow;
 			const entry = this.ringBuffer[idx]!;
 			if (entry.toolName !== last.toolName || entry.argsFingerprint !== last.argsFingerprint) break;
+			if (entry.resultHash !== last.resultHash) break;
+			count++;
+		}
+		return count;
+	}
+
+	/**
+	 * Count the trailing run of entries that share the most recent entry's RESULT
+	 * hash, IGNORING toolName/argsFingerprint — and ONLY when that last result was an
+	 * error. This catches the "thrash" loop the args-keyed counts miss: the model
+	 * tweaks the arguments every call (shifted offset, slightly different oldText)
+	 * but keeps getting the SAME error, so {@link getConsecutiveSimilarResultCount}
+	 * resets each call and never climbs. Returns 0 on an empty window or when the
+	 * last result is a success/in-flight (a run of identical SUCCESSES is progress,
+	 * not a loop). Read at tool_execution_end after {@link recordInvocationResult}.
+	 */
+	getConsecutiveSimilarResultOnlyCount(): number {
+		if (this.ringSize === 0) return 0;
+		const lastIdx = (this.ringHead - 1 + this.sequenceWindow) % this.sequenceWindow;
+		const last = this.ringBuffer[lastIdx]!;
+		if (last.isError !== true) return 0;
+		let count = 0;
+		for (let i = 0; i < this.ringSize; i++) {
+			const idx = (this.ringHead - 1 - i + this.sequenceWindow * 2) % this.sequenceWindow;
+			const entry = this.ringBuffer[idx]!;
 			if (entry.resultHash !== last.resultHash) break;
 			count++;
 		}

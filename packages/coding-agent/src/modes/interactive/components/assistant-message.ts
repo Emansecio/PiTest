@@ -33,15 +33,17 @@ const REVEAL_MAX_STEP = 24; // ~1500 cps at 62fps — above any model's emit rat
 const REVEAL_FADE_COLUMNS = 6;
 
 /**
- * Default max width (in columns) for assistant prose. On wide terminals the body
- * text is capped to this so lines stay a comfortable reading length instead of
- * running edge to edge; the gutter and full-width rules are unaffected. Only
- * assistant text/thinking is capped — tool output, bash, and code blocks keep
- * full width. Overridable per-session via the `assistantReadingColumns` setting
- * (SettingsManager.getAssistantReadingColumns), threaded in through the
- * constructor; this constant is the fallback when no value is supplied.
+ * Default reading-column cap (in columns) for assistant prose. `0` means no cap:
+ * prose uses the full terminal width and reflows on resize, matching Claude Code
+ * so a wide window isn't left half-empty. A positive value re-enables a fixed
+ * reading measure — long answers wrap at that width instead of running edge to
+ * edge. Only assistant text/thinking is ever capped; tool output, bash, and code
+ * blocks always keep full width. Overridable per-session via the
+ * `assistantReadingColumns` setting (SettingsManager.getAssistantReadingColumns),
+ * threaded in through the constructor; this constant is the fallback when no
+ * value is supplied.
  */
-const DEFAULT_ASSISTANT_READING_COLUMNS = 88;
+const DEFAULT_ASSISTANT_READING_COLUMNS = 0;
 
 // FTCS / OSC 133 semantic output zone. The assistant response is the "command
 // output": C (output start) … D;<exit> (finished). The user message carries the
@@ -123,8 +125,8 @@ export class AssistantMessageComponent extends Container {
 	// `revealedChars` is how much of that block is shown.
 	private readonly ui?: TUI;
 	private readonly smoothing: boolean;
-	// Settings-backed cap (cols) for prose width; falls back to the default when
-	// no value is threaded in. Read once at construction (stable per component).
+	// Reading-column cap (cols) for prose width: >0 caps prose to that many
+	// columns, 0 = full terminal width (no cap). Read once at construction.
 	private readonly readingColumns: number;
 	private revealIndex = -1;
 	private revealedChars = Number.POSITIVE_INFINITY;
@@ -158,7 +160,8 @@ export class AssistantMessageComponent extends Container {
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.ui = ui;
 		this.smoothing = smoothing;
-		this.readingColumns = readingColumns > 0 ? readingColumns : DEFAULT_ASSISTANT_READING_COLUMNS;
+		// >0 caps prose to that many columns; 0 / non-positive = full width (no cap).
+		this.readingColumns = readingColumns > 0 ? readingColumns : 0;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -296,12 +299,16 @@ export class AssistantMessageComponent extends Container {
 				const hasVisibleContentAfter = i < lastVisibleIndex;
 
 				if (this.hideThinkingBlock) {
-					// Show static thinking label when hidden. Drop any cached Markdown at
-					// this slot so a later un-hide rebuilds it fresh.
+					// Hidden-thinking mode. Drop any cached Markdown at this slot so a
+					// later un-hide rebuilds it fresh.
 					this.blockComponents[i] = undefined;
-					// "Live" = this hidden-thinking block is the latest content (no answer
-					// after it yet) and we have a ui to animate on → breathe the label.
-					// Otherwise render it static (history, or once the answer arrives).
+					// Only the LIVE thinking block — the latest content of the still
+					// in-flight turn, with a ui to animate on — shows an in-transcript
+					// breathing "Thinking…" label. Thinking blocks from settled turns render
+					// nothing: the single footer working loader is the only "Thinking…"
+					// indicator, so finished turns don't litter the transcript with
+					// identical-looking stale labels (which read as if several "current"
+					// thoughts were live at once).
 					// `!message.stopReason` keeps the breath from re-arming once the turn
 					// settles/aborts (otherwise an aborted thinking-only turn leaks a
 					// forever-running ticker that pins the component).
@@ -323,14 +330,10 @@ export class AssistantMessageComponent extends Container {
 							},
 							invalidate: () => {},
 						});
-					} else {
-						this.contentContainer.addChild(
-							new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), 1, 0),
-						);
 					}
-					// No spacer after the "Thinking…" label: keep the following content
-					// (the assistant's text/answer) flush with the label so they read as
-					// one block instead of being split by a blank line.
+					// Settled thinking blocks render nothing (see above); the footer working
+					// loader is the only live "Thinking…". No spacer either, so following
+					// content (the assistant's text/answer) stays flush.
 				} else {
 					// Thinking traces in thinkingText color, italic
 					const thinking = this.clampReveal(i, content.thinking.trim());

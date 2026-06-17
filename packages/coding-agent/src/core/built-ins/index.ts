@@ -21,6 +21,7 @@ import {
 	type PermissionMode,
 	type PermissionSettings,
 } from "../permissions/index.ts";
+import { createBashGroundingExtension } from "./bash-grounding-extension.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createEditPreconditionExtension } from "./edit-precondition-extension.ts";
 import { createGroundingGuardExtension } from "./grounding-guard-extension.ts";
@@ -116,6 +117,12 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// errors post-spawn or a bad glob silently matches nothing. Block-only,
 		// fail-open; opt out PIT_NO_PATTERN_GROUNDING.
 		createPatternGroundingExtension(),
+		// Bash grounding: pre-exec, blocks a `npm/pnpm/yarn run <script>` whose script
+		// isn't defined in package.json but is a close typo of one that is (npm run
+		// biuld -> build) — before the runner spawns and fails with "Missing script".
+		// Only the explicit `run <script>` form. Block-only, fail-open; opt out
+		// PIT_NO_BASH_GROUNDING.
+		createBashGroundingExtension({ cwd: options.cwd }),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp }),

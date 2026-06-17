@@ -12,7 +12,7 @@
  *   - Running the same prompt against multiple personas
  */
 
-import type { ThinkingLevel } from "@pit/agent-core";
+import type { AgentMessage, ThinkingLevel } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
 import type { TSchema } from "typebox";
 
@@ -39,6 +39,12 @@ export interface SubagentRecord {
 
 export interface SpawnSubagentOptions {
 	prompt: string;
+	/**
+	 * Seed transcript when resuming an interrupted subagent from disk (Tier 2).
+	 * The continuation `prompt` runs on top of these prior messages so the model
+	 * continues with full context instead of starting fresh.
+	 */
+	initialMessages?: AgentMessage[];
 	/**
 	 * Model for the subagent. Defaults to the parent's model (`deps.model`).
 	 * Lets a heterogeneous fan-out run trivial probes on a cheaper model while

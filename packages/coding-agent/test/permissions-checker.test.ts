@@ -52,6 +52,16 @@ describe("PermissionChecker — auto mode (guarded default)", () => {
 		const c = new PermissionChecker({ cwd, mode: "auto", settings: { allowTools: ["write"] } });
 		expect(c.check({ type: "write", toolName: "write", paths: [".env"] }).decision).toBe("allow");
 	});
+
+	it("denyTools/allowTools support globs for whole MCP servers (mcp__github__*)", () => {
+		const deny = new PermissionChecker({ cwd, mode: "auto", settings: { denyTools: ["mcp__github__*"] } });
+		expect(deny.check({ type: "tool", toolName: "mcp__github__create_issue", args: {} }).decision).toBe("deny");
+		// A different server is unaffected by the github glob.
+		expect(deny.check({ type: "tool", toolName: "mcp__slack__post", args: {} }).decision).toBe("allow");
+
+		const allow = new PermissionChecker({ cwd, mode: "auto", settings: { allowTools: ["mcp__fs__*"] } });
+		expect(allow.check({ type: "tool", toolName: "mcp__fs__read", args: {} }).decision).toBe("allow");
+	});
 });
 
 describe("PermissionChecker — no-rails (auto + disableBuiltinDefaults)", () => {
@@ -180,6 +190,42 @@ describe("PermissionChecker — auto mode unchanged for side-effecting tools", (
 		expect(
 			c.check(describeToolAction("lsp", { action: "rename_file", file: ".env", new_name: ".env.bak" })).decision,
 		).toBe("deny");
+	});
+});
+
+describe("PermissionChecker — deny-floor path aliases (security)", () => {
+	const auto = () => new PermissionChecker({ cwd, mode: "auto", settings: {} });
+
+	it("denies edit when path is sent via the file_path alias (.env)", () => {
+		expect(auto().check(describeToolAction("edit", { file_path: ".env", oldText: "a", newText: "b" })).decision).toBe(
+			"deny",
+		);
+	});
+
+	it("denies write when path is sent via the filepath alias (.env)", () => {
+		expect(auto().check(describeToolAction("write", { filepath: ".env", content: "x" })).decision).toBe("deny");
+	});
+
+	it("denies edit when the alias is buried inside an edits[] element (.env)", () => {
+		expect(
+			auto().check(describeToolAction("edit", { edits: [{ file_path: ".env", oldText: "a", newText: "b" }] }))
+				.decision,
+		).toBe("deny");
+	});
+
+	it("denies read when path is sent via the file_path alias (.ssh/id_rsa)", () => {
+		expect(auto().check(describeToolAction("read", { file_path: ".ssh/id_rsa" })).decision).toBe("deny");
+	});
+
+	it("still allows a legitimate edit sent via the file_path alias (src/app.ts)", () => {
+		expect(
+			auto().check(describeToolAction("edit", { file_path: "src/app.ts", oldText: "a", newText: "b" })).decision,
+		).toBe("allow");
+	});
+
+	it("still collects the `directory` field for ls (regression guard)", () => {
+		const a = describeToolAction("ls", { directory: "src" });
+		expect((a as { paths: string[] }).paths).toEqual(["src"]);
 	});
 });
 

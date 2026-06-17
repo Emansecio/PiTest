@@ -124,3 +124,40 @@ describe("thinking breath lifecycle", () => {
 		expect(counter.n).toBe(0); // no forever-running ticker on a settled turn
 	});
 });
+
+describe("hidden-thinking label visibility", () => {
+	function thinkingThenTextMsg(thinking: string, text: string, stopReason?: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking },
+				{ type: "text", text },
+			],
+			stopReason,
+		} as unknown as AssistantMessage;
+	}
+
+	it("renders no stale 'Thinking…' label for a settled hidden-thinking turn", () => {
+		const c = new AssistantMessageComponent(undefined, true, undefined, undefined, fakeTui(), false);
+		c.updateContent(thinkingThenTextMsg("raciocínio interno", "Vou ler o arquivo.", "stop"));
+		const out = stripAnsi(c.render(80).join("\n"));
+		expect(out).toContain("Vou ler o arquivo.");
+		expect(out).not.toContain("Thinking…");
+	});
+
+	it("hides the settled thinking trace itself (only the answer text shows)", () => {
+		const c = new AssistantMessageComponent(undefined, true, undefined, undefined, fakeTui(), false);
+		c.updateContent(thinkingThenTextMsg("segredo-interno-do-modelo", "Resposta final.", "stop"));
+		const out = stripAnsi(c.render(80).join("\n"));
+		expect(out).toContain("Resposta final.");
+		expect(out).not.toContain("Thinking…");
+		expect(out).not.toContain("segredo-interno-do-modelo");
+	});
+
+	it("still shows the live 'Thinking…' label while the turn is in flight", () => {
+		const c = new AssistantMessageComponent(undefined, true, undefined, undefined, fakeTui(), false);
+		c.updateContent(thinkingOnlyMsg("pensando agora"));
+		const out = stripAnsi(c.render(80).join("\n"));
+		expect(out).toContain("Thinking…");
+	});
+});

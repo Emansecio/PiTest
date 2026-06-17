@@ -6,10 +6,13 @@
  * disk, this blocks with the close filename candidates from the target dir —
  * BEFORE the write lands and the import fails at type-check / runtime. The #1
  * real error in generated code is a wrong relative import path; this catches it
- * one round-trip earlier. All the decision logic (the resolve cascade, the
- * relative-only / block-only / fail-open invariants) lives in the pure
- * `../import-grounding.ts`; this adapter only wires the fs deps + fuzzy matcher
- * and harvests {targetFile, content} from the tool input.
+ * one round-trip earlier. It ALSO grounds BARE package imports (`react`,
+ * `@scope/x`): a specifier whose package name is neither a Node builtin nor a
+ * declared dependency, but a close typo of one (`lodash-es` -> `lodash`), is
+ * blocked the same way. All the decision logic (the resolve cascade, the
+ * block-only / fail-open invariants) lives in the pure `../import-grounding.ts`;
+ * this adapter only wires the fs deps + fuzzy matcher + the project's known
+ * package names, and harvests {targetFile, content} from the tool input.
  *
  * For a `write`, content = the full `content` arg (the complete new file body).
  * For an `edit`, there is no whole-file content at pre-exec, so content = the
@@ -23,6 +26,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { recordDiagnostic, suggestClosest } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundImports, IMPORT_GROUNDING_DEFAULTS, isImportGroundingDisabled } from "../import-grounding.ts";
@@ -31,12 +35,102 @@ import { extractEdits, extractPathArg, resolveToolPath } from "../tools/argument
 /** Aliases the write tool accepts for the content body (WRITE_KEY_ALIASES in write.ts). */
 const CONTENT_KEYS = ["content", "text", "body", "data"] as const;
 
+/** Manifest fields whose KEYS name packages the project may legitimately import. */
+const DEP_FIELDS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
+
 function readFileSafe(absPath: string): string | undefined {
 	try {
 		return readFileSync(absPath, "utf-8");
 	} catch {
 		return undefined;
 	}
+}
+
+function readJsonSafe(absPath: string): Record<string, unknown> | undefined {
+	const raw = readFileSafe(absPath);
+	if (raw === undefined) return undefined;
+	try {
+		const parsed = JSON.parse(raw);
+		return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Add a manifest's own `name` + every declared dependency name to `out`. */
+function addManifestPackages(pkg: Record<string, unknown> | undefined, out: Set<string>): void {
+	if (!pkg) return;
+	if (typeof pkg.name === "string") out.add(pkg.name);
+	for (const field of DEP_FIELDS) {
+		const deps = pkg[field];
+		if (deps && typeof deps === "object") {
+			for (const name of Object.keys(deps as Record<string, unknown>)) out.add(name);
+		}
+	}
+}
+
+/** The `workspaces` globs of a manifest (array form, or the `{ packages: [] }` form). */
+function workspacePatterns(pkg: Record<string, unknown>): string[] {
+	const ws = pkg.workspaces;
+	if (Array.isArray(ws)) return ws.filter((p): p is string => typeof p === "string");
+	if (ws && typeof ws === "object") {
+		const packages = (ws as { packages?: unknown }).packages;
+		if (Array.isArray(packages)) return packages.filter((p): p is string => typeof p === "string");
+	}
+	return [];
+}
+
+/**
+ * Walk up from `startDir` to the monorepo root (the nearest manifest declaring
+ * `workspaces`), falling back to the nearest manifest found. Returns its dir +
+ * parsed manifest, or undefined when no package.json exists upward.
+ */
+function findWorkspaceRoot(startDir: string): { dir: string; pkg: Record<string, unknown> } | undefined {
+	let dir = resolve(startDir);
+	let fallback: { dir: string; pkg: Record<string, unknown> } | undefined;
+	for (;;) {
+		const pkg = readJsonSafe(join(dir, "package.json"));
+		if (pkg) {
+			if (fallback === undefined) fallback = { dir, pkg };
+			if (workspacePatterns(pkg).length > 0) return { dir, pkg };
+		}
+		const parent = dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return fallback;
+}
+
+/**
+ * Build the set of package names the project may legitimately import: the nearest
+ * manifest's deps + the monorepo root's deps + every workspace package's `name`
+ * and deps. Including workspace package names is what keeps a valid INTERNAL
+ * import (`@pit/ai`) from being false-blocked. Entirely best-effort / fail-open:
+ * any unreadable manifest is skipped, so a degraded set only blocks LESS.
+ */
+function collectKnownPackages(cwd: string): Set<string> {
+	const out = new Set<string>();
+	addManifestPackages(readJsonSafe(join(resolve(cwd), "package.json")), out);
+	const root = findWorkspaceRoot(cwd);
+	if (!root) return out;
+	addManifestPackages(root.pkg, out);
+	for (const pattern of workspacePatterns(root.pkg)) {
+		if (pattern.endsWith("/*")) {
+			const baseDir = join(root.dir, pattern.slice(0, -2));
+			let entries: string[];
+			try {
+				entries = readdirSync(baseDir);
+			} catch {
+				continue;
+			}
+			for (const entry of entries) {
+				addManifestPackages(readJsonSafe(join(baseDir, entry, "package.json")), out);
+			}
+		} else {
+			addManifestPackages(readJsonSafe(join(root.dir, pattern, "package.json")), out);
+		}
+	}
+	return out;
 }
 
 /**
@@ -75,6 +169,20 @@ function extractContent(toolName: string, input: Record<string, unknown>, target
 export function createImportGroundingExtension(options: { cwd: string }) {
 	return (pi: ExtensionAPI) => {
 		const fired = new Set<string>();
+		// Lazily computed once per session (first write/edit), then cached. Reading the
+		// monorepo's manifests is best-effort; any failure yields an empty set, which
+		// only makes the bare pass block LESS (fail-open).
+		let knownPackagesCache: Set<string> | undefined;
+		const knownPackages = (): Set<string> => {
+			if (knownPackagesCache === undefined) {
+				try {
+					knownPackagesCache = collectKnownPackages(options.cwd);
+				} catch {
+					knownPackagesCache = new Set();
+				}
+			}
+			return knownPackagesCache;
+		};
 
 		pi.on("tool_call", async (event) => {
 			try {
@@ -103,6 +211,11 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 						// source so a `import { nope } from "./mod"` of a non-existent member
 						// is caught one round-trip before type-check.
 						readFile: readFileSafe,
+						// Wires the BARE-package pass: an import of a package not in the
+						// project's deps (nor a Node builtin) that typos a known one is
+						// blocked. Workspace package names are included so internal imports
+						// (@pit/*) are never false-blocked.
+						knownPackages,
 					},
 				);
 

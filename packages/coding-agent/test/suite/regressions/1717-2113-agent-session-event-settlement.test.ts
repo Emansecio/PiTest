@@ -24,8 +24,11 @@ describe("regressions #1717/#2113: agent session event settlement", () => {
 		while (harnesses.length > 0) {
 			await harnesses.pop()?.cleanup();
 		}
-		// 30s: cleanup under full-suite contention on Windows can exceed the 10s default.
-	}, 60_000);
+		// 120s: harness cleanup under full-suite contention on Windows can exceed the
+		// 10s default (and has been seen to blow past 60s when collect/transform is
+		// starving every worker). The body completes fast in isolation (~90ms); this
+		// headroom only guards the teardown against CPU starvation, not correctness.
+	}, 120_000);
 
 	it("keeps persisted assistant/toolResult message order when extension message_end handlers yield", async () => {
 		const harness = await createHarness({

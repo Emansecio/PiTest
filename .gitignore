@@ -2,6 +2,9 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# Local (personal, untracked) MCP server config — see .mcp.json for the shared one
+.mcp.local.json
 *.tsbuildinfo
 # packages/*/node_modules/
 packages/*/dist/
@@ -40,8 +43,15 @@ plans/
 .pi/hf-sessions-backup/
 collect.sh
 
-# Pit local state + runtime caches (hindsight, repo-map, frequent-files) — per-cwd, never versioned
-.pit/
+# Pit local state + runtime caches (hindsight, repo-map, frequent-files, interrupted-subagent
+# resume snapshots) — per-cwd, never versioned. Exception: .pit/agents/ holds curated, reusable
+# subagent type definitions (like .claude/agents/), which ARE meant to be versioned.
+.pit/*
+!.pit/agents/
+# Same caches under any package (e.g. packages/coding-agent/.pit/repo-map.jsonl).
+# Use a contents glob (not a dir glob) so the agents/ whitelist still applies.
+**/.pit/*
+!**/.pit/agents/
 
 # Scratch analysis artifacts (local-only, not part of the project)
 RELATORIO-*.md

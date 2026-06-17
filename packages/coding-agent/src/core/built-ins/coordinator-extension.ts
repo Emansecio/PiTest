@@ -20,11 +20,21 @@
  *   })
  */
 
-import type { Agent, AgentTool, ThinkingLevel } from "@pit/agent-core";
+import type { Agent, AgentMessage, AgentTool, ThinkingLevel } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
 import { type Static, type TSchema, Type } from "typebox";
 import { isValidThinkingLevel } from "../../cli/args.ts";
-import { SubagentRegistry, spawnSubagent } from "../coordinator/index.ts";
+import {
+	type AgentTypeDef,
+	deleteResumeState,
+	extractAssistantText,
+	listResumeHandlesSync,
+	loadAgentTypes,
+	loadResumeState,
+	SubagentRegistry,
+	saveResumeState,
+	spawnSubagent,
+} from "../coordinator/index.ts";
 import type { SpawnSubagentResult } from "../coordinator/types.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "../messaging/index.ts";
@@ -71,17 +81,31 @@ const worktreeSchema = Type.Union(
 const taskSchema = Type.Object({
 	op: Type.Optional(
 		Type.Union(
-			[Type.Literal("run"), Type.Literal("spawn"), Type.Literal("poll"), Type.Literal("join"), Type.Literal("list")],
+			[
+				Type.Literal("run"),
+				Type.Literal("spawn"),
+				Type.Literal("poll"),
+				Type.Literal("join"),
+				Type.Literal("list"),
+				Type.Literal("resume"),
+				Type.Literal("agents"),
+			],
 			{
 				description:
-					"run (default, blocking — returns the answer) | spawn (non-blocking — returns a handle so you can keep working) | poll (status of handles) | join (await handles and collect their outputs) | list (active subagents). Use spawn+join to fan out N independent tasks in parallel and gather them.",
+					"run (default, blocking — returns the answer) | spawn (non-blocking — returns a handle so you can keep working) | poll (status of handles) | join (await handles and collect their outputs) | list (active + resumable subagents) | agents (list the reusable agent types loaded from .pit/agents) | resume (continue a subagent cut short by ESC or a network drop, by its `name`/handle, with its transcript intact; pass `prompt` to steer the continuation). Use spawn+join to fan out N independent tasks in parallel and gather them.",
 			},
 		),
+	),
+	type: Type.Optional(
+		Type.String({
+			description:
+				"Reusable agent type from .pit/agents/<name>.md — applies its system prompt, tools, model, and thinking level as defaults (any field set explicitly here overrides). See this tool's description for the available types.",
+		}),
 	),
 	name: Type.Optional(
 		Type.String({
 			description:
-				"Stable task identifier, also used as the handle for spawn/poll/join and the worktree path. Defaults to the auto-generated subagent id; collisions are auto-resolved.",
+				"Stable task identifier, also used as the handle for spawn/poll/join/resume and the worktree path. Defaults to the auto-generated subagent id; collisions are auto-resolved.",
 		}),
 	),
 	model: Type.Optional(
@@ -108,7 +132,10 @@ const taskSchema = Type.Object({
 		}),
 	),
 	prompt: Type.Optional(
-		Type.String({ description: "The task description for the subagent (required for run/spawn)." }),
+		Type.String({
+			description:
+				"The task description for the subagent (required for run/spawn; optional on resume to steer the continuation).",
+		}),
 	),
 	system_prompt: Type.Optional(Type.String({ description: "Override the subagent's system prompt." })),
 	allowed_tools: Type.Optional(
@@ -152,6 +179,18 @@ export const COORDINATOR_TOOL_BRAND: unique symbol = Symbol("pit.coordinatorTool
 /** True when `tool` is a coordinator-spawned `task` tool (carries the brand). */
 function isCoordinatorTool(tool: AgentTool): boolean {
 	return (tool as { [COORDINATOR_TOOL_BRAND]?: boolean })[COORDINATOR_TOOL_BRAND] === true;
+}
+
+/**
+ * True when a settled subagent's last turn failed or was aborted — i.e. it
+ * stopped with unfinished business (ESC, or a network drop that ended the turn
+ * with stopReason "error") and is worth resuming rather than reporting as done.
+ */
+function agentEndedWithError(agent: Agent): boolean {
+	if (agent.state.errorMessage) return true;
+	const messages = agent.state.messages;
+	const last = messages[messages.length - 1] as AgentMessage | undefined;
+	return !!last && last.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted");
 }
 
 /**
@@ -283,6 +322,25 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	// op:"poll"/"join"; a joined handle is freed once settled.
 	const pending = new Map<string, PendingTask>();
 	let asyncTaskCounter = 0;
+	let runTaskCounter = 0;
+
+	// Live Agents whose run was cut short (ESC abort, or a network drop that ended
+	// the turn with stopReason "error") and still hold a usable transcript, keyed by
+	// handle. op:"resume" re-drives the same Agent so the model continues from where
+	// it stopped. In-memory: cleared when the parent session ends.
+	const resumable = new Map<string, Agent>();
+
+	// Reusable agent types from .pit/agents/*.md, loaded once. Spawn via task({type}).
+	const agentTypeMap = new Map<string, AgentTypeDef>();
+	try {
+		for (const t of loadAgentTypes(options.getCwd ? options.getCwd() : process.cwd())) agentTypeMap.set(t.name, t);
+	} catch {
+		// Agent types are optional and best-effort — never fatal.
+	}
+	const agentTypeSummary =
+		agentTypeMap.size > 0
+			? [...agentTypeMap.values()].map((t) => (t.description ? `${t.name} (${t.description})` : t.name)).join("; ")
+			: "";
 
 	/**
 	 * Resolves the subagent's model + thinking level from the task params. A bare
@@ -338,10 +396,24 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			records.length ? `Subagents (${records.length}):\n${recLines.join("\n")}` : "No subagents tracked.",
 		);
 		if (handleLines.length) sections.push(`Async handles (${handleLines.length}):\n${handleLines.join("\n")}`);
+		const diskHandles = listResumeHandlesSync(options.getCwd ? options.getCwd() : process.cwd()).filter(
+			(h) => !resumable.has(h),
+		);
+		const resumeLines = [
+			...[...resumable.keys()].map((h) => `- ${h}`),
+			...diskHandles.map((h) => `- ${h} (persisted)`),
+		];
+		if (resumeLines.length > 0) {
+			sections.push(`Resumable (interrupted — continue with op:"resume"):\n${resumeLines.join("\n")}`);
+		}
 		return {
 			content: [{ type: "text" as const, text: sections.join("\n\n") }],
 			isError: false,
-			details: { subagents: records.length, asyncHandles: pending.size },
+			details: {
+				subagents: records.length,
+				asyncHandles: pending.size,
+				resumable: resumable.size + diskHandles.length,
+			},
 		};
 	}
 
@@ -405,6 +477,90 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	}
 
 	/**
+	 * op:"resume" — re-drive a subagent that was interrupted (ESC) or dropped
+	 * (network error) mid-task, reusing the SAME live Agent so its transcript is
+	 * intact. The dead-end trailing turn is dropped and a continuation prompt
+	 * (caller-supplied or a default) is issued. On success the handle is freed; if
+	 * it errors again it stays resumable for another attempt.
+	 */
+	async function resumeHandle(
+		handle: string | undefined,
+		continuation: string | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<TaskOpResult> {
+		const key = handle?.trim();
+		if (!key) {
+			return {
+				content: [{ type: "text" as const, text: "task: resume needs `name` (the handle to resume)." }],
+				isError: true,
+				details: undefined,
+			};
+		}
+		const rcwd = options.getCwd ? options.getCwd() : process.cwd();
+		const agent = resumable.get(key);
+		if (!agent) {
+			return await resumeFromDisk(key, continuation, signal);
+		}
+		// The interrupted run may still be settling (an aborted stream resolves
+		// async). Stop it and wait for idle before re-driving the same Agent.
+		agent.abort();
+		await agent.waitForIdle();
+		// Drop a trailing failed/aborted assistant turn so the model resumes from the
+		// last real work instead of from a dead-end error message.
+		const messages = agent.state.messages;
+		const last = messages[messages.length - 1] as AgentMessage | undefined;
+		if (last && last.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+			agent.state.messages = messages.slice(0, -1);
+		}
+		// A fresh ESC during the resume aborts the same Agent (it stays resumable).
+		const onAbort = () => agent.abort();
+		if (signal) {
+			if (signal.aborted) agent.abort();
+			else signal.addEventListener("abort", onAbort, { once: true });
+		}
+		const text =
+			continuation?.trim() ||
+			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
+		try {
+			await agent.prompt(text);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			return {
+				content: [{ type: "text" as const, text: `Subagent resume failed: ${message}` }],
+				isError: true,
+				details: { handle: key, resumed: true },
+			};
+		} finally {
+			if (signal) signal.removeEventListener("abort", onAbort);
+		}
+		if (agentEndedWithError(agent)) {
+			// Still unfinished — keep it resumable for another attempt.
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `Resume of "${key}" did not complete (it erred again). It remains resumable.`,
+					},
+				],
+				isError: true,
+				details: { handle: key, resumed: true, stillResumable: true },
+			};
+		}
+		resumable.delete(key);
+		void deleteResumeState(rcwd, key);
+		const output = extractAssistantText(agent.state.messages);
+		const capped = truncateTail(output, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
+		const body = capped.truncated
+			? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}]`
+			: capped.content;
+		return {
+			content: [{ type: "text" as const, text: body }],
+			isError: false,
+			details: { handle: key, resumed: true },
+		};
+	}
+
+	/**
 	 * Builds the `task` tool for an agent living at `depth`. The parent gets
 	 * depth 0; each spawned subagent that is still within the nesting budget
 	 * receives a depth-incremented copy.
@@ -418,7 +574,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				"Spawn a focused subagent to complete an isolated sub-task and return its final answer. " +
 				"Use this to delegate research, file exploration, or repetitive checks without polluting the main conversation. " +
 				"Pass `result_schema` for structured output, or `worktree: true` to run in an isolated git worktree. " +
-				"Scale the subagent's `model` to the sub-task's complexity (cheap for trivial fan-out, inherit the parent's for hard reasoning) — see the `model` field.",
+				"Scale the subagent's `model` to the sub-task's complexity (cheap for trivial fan-out, inherit the parent's for hard reasoning) — see the `model` field." +
+				(agentTypeSummary ? ` Reusable agent types (use the type field): ${agentTypeSummary}.` : ""),
 			promptSnippet:
 				"Spawn a subagent to handle an isolated sub-task. Supports structured output via result_schema and isolated git worktrees via worktree.",
 			parameters: taskSchema,
@@ -430,8 +587,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				const op = p.op ?? "run";
 
 				if (op === "list") return listSubagents();
+				if (op === "agents") return listAgentTypes();
 				if (op === "poll") return pollHandles(p.handles ?? []);
 				if (op === "join") return await joinHandles(p.handles ?? []);
+				if (op === "resume") return await resumeHandle(p.name ?? p.handles?.[0], p.prompt, signal);
 
 				// op === "run" | "spawn": both need a prompt and a model.
 				const {
@@ -460,19 +619,64 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						details: undefined,
 					};
 				}
-				const { model: subModel, thinkingLevel: subThinking } = await resolveSubModel(p.model, p.thinking_level);
+				const agentType = p.type?.trim() ? agentTypeMap.get(p.type.trim()) : undefined;
+				if (p.type?.trim() && !agentType) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `task: unknown agent type "${p.type.trim()}". Available: ${agentTypeSummary || "(none — define one in .pit/agents/<name>.md)"}.`,
+							},
+						],
+						isError: true,
+						details: undefined,
+					};
+				}
+				const effSystemPrompt = system_prompt ?? agentType?.systemPrompt;
+				const effAllowedTools = allowed_tools ?? agentType?.tools;
+				const { model: subModel, thinkingLevel: subThinking } = await resolveSubModel(
+					p.model ?? agentType?.model,
+					p.thinking_level ?? agentType?.thinkingLevel,
+				);
 				const resultSchema = coerceResultSchema(result_schema);
 				const cwd = options.getCwd ? options.getCwd() : process.cwd();
 				// The child runs one level deeper than the tool that spawned it. Strip
 				// our own tool from its catalog and re-add a depth-incremented copy
 				// only if the nesting budget still allows it.
 				const childDepth = depth + 1;
+				// Mark a subagent resumable: keep the live Agent for in-session resume
+				// (Tier 1) AND persist its transcript to disk so it survives a Pit
+				// restart (Tier 2). Callers await the disk write so an interrupted run is
+				// durably persisted before its result returns; saveResumeState never throws.
+				const markResumable = (handle: string, agent: Agent): Promise<void> => {
+					resumable.set(handle, agent);
+					return saveResumeState(cwd, {
+						handle,
+						messages: agent.state.messages,
+						modelId: subModel?.id ?? model.id,
+						thinkingLevel: subThinking,
+						systemPrompt: effSystemPrompt,
+						allowedTools: effAllowedTools,
+						cwd,
+						depth: childDepth,
+						savedAt: Date.now(),
+					});
+				};
 				const baseChildTools = buildSubagentToolCatalog(
 					options.getAvailableTools(),
 					childDepth,
 					maxDepth,
 					makeTaskTool,
 				);
+
+				// A subagent whose auto-cleanup worktree is removed on settle can't be
+				// resumed (its on-disk state is gone); without a worktree, or with
+				// worktree cleanup:"keep", the transcript-based resume stays valid.
+				const usedAutoWorktree =
+					worktree === true ||
+					(typeof worktree === "object" &&
+						worktree !== null &&
+						(worktree as { cleanup?: string }).cleanup !== "keep");
 
 				// Non-blocking spawn: launch detached, return a handle, and let the
 				// parent keep working. Async tasks skip the messaging bus (they are
@@ -488,6 +692,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						controller,
 						promise: Promise.resolve(),
 					};
+					// Capture the live Agent so a drop/abort leaves a resumable transcript.
+					let capturedAgent: Agent | undefined;
 					entry.promise = (async () => {
 						try {
 							const result = await spawnSubagent(
@@ -504,8 +710,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 									prompt,
 									model: subModel,
 									thinkingLevel: subThinking,
-									systemPrompt: system_prompt,
-									allowedTools: allowed_tools,
+									systemPrompt: effSystemPrompt,
+									allowedTools: effAllowedTools,
 									maxTurns: max_turns,
 									signal: controller.signal,
 									resultSchema,
@@ -515,15 +721,31 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 									cwd,
 									depth: childDepth,
 									inheritSkills: inherit_skills,
+									onAgentReady: (agent) => {
+										capturedAgent = agent;
+									},
 								},
 							);
-							entry.result = formatSpawnResult(result, resultSchema);
-							entry.status = "done";
-							if (options.onAsyncComplete?.(handle, entry.result, "done")) entry.delivered = true;
+							// A drop that ended the turn on an error (without throwing) still
+							// leaves a resumable transcript — surface it as such, not "done".
+							if (capturedAgent && agentEndedWithError(capturedAgent) && !usedAutoWorktree) {
+								await markResumable(handle, capturedAgent);
+								entry.status = "error";
+								entry.error = "interrupted (resumable)";
+								const note = `Subagent '${handle}' was interrupted before finishing — resume with task({op:"resume", name:"${handle}"}).`;
+								if (options.onAsyncComplete?.(handle, note, "error")) entry.delivered = true;
+							} else {
+								entry.result = formatSpawnResult(result, resultSchema);
+								entry.status = "done";
+								if (options.onAsyncComplete?.(handle, entry.result, "done")) entry.delivered = true;
+							}
 						} catch (err) {
 							entry.error = err instanceof Error ? err.message : String(err);
 							entry.status = "error";
-							if (options.onAsyncComplete?.(handle, entry.error, "error")) entry.delivered = true;
+							if (capturedAgent && !usedAutoWorktree) await markResumable(handle, capturedAgent);
+							const suffix =
+								capturedAgent && !usedAutoWorktree ? ` Resume with task({op:"resume", name:"${handle}"}).` : "";
+							if (options.onAsyncComplete?.(handle, `${entry.error}${suffix}`, "error")) entry.delivered = true;
 						}
 					})();
 					pending.set(handle, entry);
@@ -545,9 +767,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				// below — guaranteed even if spawnSubagent throws before its own
 				// teardown runs (e.g. a worktree-setup failure).
 				const messagingOn = options.isMessagingEnabled?.() ?? false;
+				const runHandle = name?.trim() ? name.trim() : `run-${++runTaskCounter}`;
+				// Capture the live Agent so an interrupted run (ESC / network drop) can be resumed via op:"resume".
+				let capturedAgent: Agent | undefined;
 				let childTools = baseChildTools;
 				let systemPromptSuffix: string | undefined;
-				let onAgentReady: ((agent: Agent) => void) | undefined;
+				let messagingReady: ((agent: Agent) => void) | undefined;
 				let messagingId: string | undefined;
 				if (messagingOn) {
 					const parentId = options.getParentMessagingId?.();
@@ -556,7 +781,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					const timeoutMs = options.getMessagingTimeoutMs?.();
 					childTools = [...baseChildTools, createMessageTool(cwd, { selfId, timeoutMs })];
 					systemPromptSuffix = messagingPreamble(selfId, parentId);
-					onAgentReady = (agent) => {
+					messagingReady = (agent) => {
 						agentMessageBus.attachResponder(selfId, makeAgentResponder(agent));
 						agentMessageBus.attachDelivery(selfId, makeAgentDelivery(agent));
 					};
@@ -577,8 +802,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							prompt,
 							model: subModel,
 							thinkingLevel: subThinking,
-							systemPrompt: system_prompt,
-							allowedTools: allowed_tools,
+							systemPrompt: effSystemPrompt,
+							allowedTools: effAllowedTools,
 							maxTurns: max_turns,
 							signal,
 							resultSchema,
@@ -589,13 +814,25 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							depth: childDepth,
 							inheritSkills: inherit_skills,
 							systemPromptSuffix,
-							onAgentReady,
+							onAgentReady: (agent) => {
+								capturedAgent = agent;
+								messagingReady?.(agent);
+							},
 						},
 					);
-					const text = formatSpawnResult(result, resultSchema);
+					const interrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
+					if (interrupted && capturedAgent && !usedAutoWorktree) {
+						await markResumable(runHandle, capturedAgent);
+					} else {
+						resumable.delete(runHandle);
+					}
+					let text = formatSpawnResult(result, resultSchema);
+					if (interrupted) {
+						text = `${text}\n\n[subagent ended on an error turn — resume with task({op:"resume", name:"${runHandle}"})]`;
+					}
 					return {
 						content: [{ type: "text" as const, text }],
-						isError: false,
+						isError: interrupted,
 						details: {
 							subagentId: result.record.id,
 							taskName: result.record.taskName,
@@ -608,8 +845,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					};
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
+					if (capturedAgent && !usedAutoWorktree) await markResumable(runHandle, capturedAgent);
+					const hint =
+						capturedAgent && !usedAutoWorktree ? ` Resume with task({op:"resume", name:"${runHandle}"}).` : "";
 					return {
-						content: [{ type: "text" as const, text: `Subagent failed: ${message}` }],
+						content: [{ type: "text" as const, text: `Subagent failed: ${message}${hint}` }],
 						isError: true,
 						details: undefined,
 					};
@@ -620,6 +860,131 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					if (messagingId) agentMessageBus.unregister(messagingId);
 				}
 			},
+		};
+	}
+
+	/**
+	 * op:"resume" Tier 2 — reopen a subagent whose live Agent is gone (the Pit
+	 * process was restarted) from its persisted transcript on disk, re-running the
+	 * saved model / tools / system prompt with a continuation prompt. The state
+	 * file is removed once the resume completes.
+	 */
+	async function resumeFromDisk(
+		key: string,
+		continuation: string | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<TaskOpResult> {
+		const cwd = options.getCwd ? options.getCwd() : process.cwd();
+		const state = await loadResumeState(cwd, key);
+		if (!state) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `task: no resumable subagent for "${key}". Use op:"list" to see resumable handles.`,
+					},
+				],
+				isError: true,
+				details: undefined,
+			};
+		}
+		const model = options.getParentModel();
+		if (!model) {
+			return {
+				content: [{ type: "text" as const, text: "No model available to resume subagent." }],
+				isError: true,
+				details: undefined,
+			};
+		}
+		let subModel = model;
+		if (state.modelId) {
+			try {
+				const available = await options.modelRegistry.getAvailable();
+				const found = available.find((m) => m.id === state.modelId);
+				if (found) subModel = found;
+			} catch {
+				// Keep the parent model if the saved one can't be resolved.
+			}
+		}
+		// Drop a trailing failed/aborted assistant turn from the seed transcript.
+		const seed = [...state.messages];
+		const tail = seed[seed.length - 1] as AgentMessage | undefined;
+		if (tail && tail.role === "assistant" && (tail.stopReason === "error" || tail.stopReason === "aborted")) {
+			seed.pop();
+		}
+		const childTools = buildSubagentToolCatalog(options.getAvailableTools(), state.depth, maxDepth, makeTaskTool);
+		const text =
+			continuation?.trim() ||
+			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
+		try {
+			const result = await spawnSubagent(
+				{
+					registry,
+					model,
+					modelRegistry: options.modelRegistry,
+					availableTools: childTools,
+					convertToLlm: options.convertToLlm ?? ((messages) => messages as never),
+					permissionChecker: options.permissionChecker,
+					skills: options.getSkills?.(),
+				},
+				{
+					prompt: text,
+					initialMessages: seed,
+					model: subModel,
+					thinkingLevel: state.thinkingLevel as ThinkingLevel | undefined,
+					systemPrompt: state.systemPrompt,
+					allowedTools: state.allowedTools,
+					signal,
+					cwd: state.cwd,
+					depth: state.depth,
+					taskName: key,
+				},
+			);
+			await deleteResumeState(cwd, key);
+			const out = formatSpawnResult(result, undefined);
+			return {
+				content: [{ type: "text" as const, text: out }],
+				isError: false,
+				details: { handle: key, resumed: true, fromDisk: true },
+			};
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			return {
+				content: [{ type: "text" as const, text: `Subagent resume failed: ${message}` }],
+				isError: true,
+				details: { handle: key, resumed: true },
+			};
+		}
+	}
+
+	/** op:"agents" — list the reusable agent types loaded from .pit/agents, with origin. */
+	function listAgentTypes(): TaskOpResult {
+		const types = [...agentTypeMap.values()];
+		if (types.length === 0) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: "No agent types loaded. Define one in .pit/agents/<name>.md (project) or ~/.pit/agents/ (user).",
+					},
+				],
+				isError: false,
+				details: { agentTypes: 0 },
+			};
+		}
+		const lines = types.map((t) => {
+			const attrs: string[] = [];
+			if (t.tools) attrs.push(`tools: ${t.tools.join(", ")}`);
+			if (t.model) attrs.push(`model: ${t.model}`);
+			if (t.thinkingLevel) attrs.push(`thinking: ${t.thinkingLevel}`);
+			const meta = attrs.length > 0 ? ` (${attrs.join("; ")})` : "";
+			const desc = t.description ? ` — ${t.description}` : "";
+			return `- ${t.name} [${t.source}]${desc}${meta}`;
+		});
+		return {
+			content: [{ type: "text" as const, text: `Agent types (${types.length}):\n${lines.join("\n")}` }],
+			isError: false,
+			details: { agentTypes: types.length },
 		};
 	}
 

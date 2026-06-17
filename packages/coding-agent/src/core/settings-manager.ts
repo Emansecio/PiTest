@@ -410,7 +410,7 @@ export interface Settings {
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
-	assistantReadingColumns?: number; // Max width (cols) for assistant prose on wide terminals (default: 88)
+	assistantReadingColumns?: number; // Reading-column cap (cols) for assistant prose; 0 = full width (default: 0)
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	cursorBlink?: boolean; // Blink the input editor's block cursor while focused (default: true)
 	streamingSmoothing?: boolean; // Reveal streamed assistant text at a steady rate instead of in provider-sized bursts (default: true)
@@ -1529,17 +1529,22 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Max column width for assistant prose on wide terminals. Caps reading line
-	 * length so long answers stay comfortable instead of running edge to edge;
-	 * tool output / bash / code blocks are unaffected. Default 88 (a comfortable
-	 * prose measure); clamped to a sane band so a typo can't make prose unreadable.
+	 * Reading-column cap (cols) for assistant prose. `0` (the default) disables the
+	 * cap: prose uses the full terminal width and reflows on resize, like Claude
+	 * Code, instead of leaving a wide window half-empty. A positive value re-enables
+	 * a fixed reading measure for long answers, clamped to a sane band so a typo
+	 * can't make prose unreadable; tool output / bash / code blocks are never capped.
 	 */
 	getAssistantReadingColumns(): number {
-		return clampInt(this.settings.assistantReadingColumns, 40, 200, 88);
+		const raw = this.settings.assistantReadingColumns;
+		// Unset / 0 / non-positive = full width (no cap); else clamp to a readable band.
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 0;
+		return clampInt(raw, 40, 200, 0);
 	}
 
 	setAssistantReadingColumns(columns: number): void {
-		this.globalSettings.assistantReadingColumns = Math.max(40, Math.min(200, Math.floor(columns)));
+		// <= 0 disables the cap (full width); otherwise clamp to the readable band.
+		this.globalSettings.assistantReadingColumns = columns <= 0 ? 0 : Math.max(40, Math.min(200, Math.floor(columns)));
 		this.markModified("assistantReadingColumns");
 		this.save();
 	}
@@ -1568,6 +1573,19 @@ export class SettingsManager {
 
 	getMcpSettings(): McpSettings {
 		return { ...(this.settings.mcp ?? {}) };
+	}
+
+	/**
+	 * Expose the global (user) and project layers of MCP settings separately so the
+	 * session can interleave the versioned `.mcp.json` (project, shared) and
+	 * `.mcp.local.json` (local, gitignored) files at the right precedence — which
+	 * the already-merged `getMcpSettings()` view cannot reconstruct.
+	 */
+	getMcpSettingsLayered(): { global: McpSettings; project: McpSettings } {
+		return {
+			global: { ...(this.globalSettings.mcp ?? {}) },
+			project: { ...(this.projectSettings.mcp ?? {}) },
+		};
 	}
 
 	getMemorySettings(): MemorySettings {

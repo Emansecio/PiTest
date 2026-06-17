@@ -41,6 +41,7 @@ import type { SessionManager } from "./core/session-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { sweepStaleTempLogs } from "./core/temp-logs.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
+import { handleMcpCommand } from "./mcp-cli.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
@@ -517,6 +518,10 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (await handleConfigCommand(args)) {
+		return;
+	}
+
+	if (await handleMcpCommand(args)) {
 		return;
 	}
 

@@ -367,6 +367,12 @@ const MAX_LEARNED_ERRORS = 500;
 // tools is a strong "productive-looking loop" signal the same-call doom-loop misses.
 const REPEATING_PATTERN_THRESHOLD = 3;
 
+// Trailing run of identical ERROR results (args VARYING) before the result-only
+// thrash detector steers. Deliberately HIGHER than the args-keyed doom-loop
+// threshold (default 2) and error-only, so this softer no-abort signal stays
+// conservative and rarely false-fires. See _maybeInjectResultLoopReminder.
+const RESULT_LOOP_THRESHOLD = 5;
+
 /** Build the continuation prompt that re-injects a failed verification check. */
 function verificationFixPrompt(
 	command: string,
@@ -382,6 +388,62 @@ function verificationFixPrompt(
 		"",
 		"Fix the underlying cause and keep going; don't report the work done until this check passes. If the failure is pre-existing and unrelated to this change, say so explicitly instead of forcing a fix.",
 	].join("\n");
+}
+
+/**
+ * Distinctive "the work is finished" phrases, used ONLY to optionally append a
+ * single contradiction sentence to the terminal verification message. Kept short
+ * and high-signal; this is best-effort and locale-limited by design — a miss just
+ * omits one sentence, a false hit only appends one, neither changes flow.
+ */
+const COMPLETION_PHRASES: readonly string[] = [
+	"all done",
+	"task is complete",
+	"task complete",
+	"task is done",
+	"successfully completed",
+	"is now complete",
+	"all set",
+	"completed the task",
+	"the fix is complete",
+	// pt-BR
+	"tarefa concluída",
+	"está concluído",
+	"está pronto",
+	"tudo certo",
+];
+
+/**
+ * Terminal message injected when the project check is STILL failing after the
+ * fix budget is exhausted. Distinct from `verificationFixPrompt`: it does NOT ask
+ * for another fix (the loop is over) — it tells the model the check is still red
+ * and to summarize honestly instead of declaring the task done. When the model's
+ * last message already implied completion, `contradictClaim` appends one sentence
+ * making the contradiction explicit.
+ */
+function verificationExhaustedPrompt(
+	command: string,
+	result: { exitCode: number; output: string; timedOut: boolean },
+	attempts: number,
+	contradictClaim: boolean,
+): string {
+	const tail = summarizeCheckFailure(result.output, command);
+	const status = result.timedOut ? "timed out" : `exited ${result.exitCode}`;
+	const attemptWord = attempts === 1 ? "attempt" : "attempts";
+	const lines = [
+		`The check \`${command}\` is STILL failing (${status}) after ${attempts} fix ${attemptWord}:`,
+		"",
+		`$ ${command}`,
+		tail || "(no output)",
+		"",
+		"Do NOT report the task as done. Give an honest summary of what is still broken and what you tried, so the user can decide how to proceed.",
+	];
+	if (contradictClaim) {
+		lines.push(
+			"Your previous message implied the work was complete — that directly contradicts the still-failing check above. Correct that claim explicitly.",
+		);
+	}
+	return lines.join("\n");
 }
 
 /** Extensions whose change triggers the visual definition-of-done nudge. */
@@ -583,9 +645,15 @@ export class AgentSession {
 	private readonly _registryRejects = new Map<string, Map<string, number>>();
 
 	// Cross-session learned errors. Built during the session from
-	// tool_error_hint_applied + tool_execution_end events; persisted on dispose
-	// so the next session boots warm with knowledge of recurring patterns.
+	// tool_error_hint_applied + tool_execution_end events; persisted incrementally
+	// at each turn_end (and again on dispose) so the next session boots warm with
+	// knowledge of recurring patterns — even when this session is killed/crashes
+	// before teardown.
 	private readonly _learnedErrors = new Map<string, LearnedErrorEntry>();
+	// Set whenever `_learnedErrors` is mutated (new fingerprint or count bump) and
+	// cleared by `_flushLearnedErrorsIfDirty`. Gates the per-turn flush so a turn
+	// that learned nothing new triggers no writeFileSync/pruneOldFiles.
+	private _learnedErrorsDirty = false;
 	// Keys for which a same-session Tier 4 hint rule has already been registered
 	// live, so a recurring fingerprint materialises its rule exactly once.
 	private readonly _sameSessionHintKeys = new Set<string>();
@@ -624,11 +692,21 @@ export class AgentSession {
 	// the Tier-3 abort — replaces the old per-tier resetSequence() that capped the
 	// count at 4 and made the abort unreachable. Reset when the streak breaks.
 	private _doomLoopFiredTier = 0;
+	// CR6: how many times the CURRENT identical-call streak has been given a
+	// structured-recovery steer at the Tier-3 threshold instead of being aborted.
+	// Caps recovery at RECOVERY_LIMIT so a model that ignores the steer and keeps
+	// looping still hits the hard safety abort (the throw stays reachable). Reset
+	// when the streak breaks (the model left the loop). See _maybeInjectDoomLoopReminder.
+	private _doomLoopRecoveryAttempts = 0;
 	// Signature of the last repeating multi-tool CYCLE we fired a reminder for
 	// ("<patternLength>x<repetitions>"), so we steer once per detected pattern and
 	// re-arm only when the pattern grows or a different cycle/break supersedes it.
 	// Complements _doomLoopFiredTier, which tracks the SAME-call loop. Empty = none.
 	private _repeatingPatternFiredKey = "";
+	// Once-per-streak latch for the result-only thrash signal (same error, varying
+	// args). Reset when the run of identical errors breaks (count <= 1). Separate
+	// from the args-keyed _doomLoopFiredTier ladder. See _maybeInjectResultLoopReminder.
+	private _resultLoopFired = false;
 	private readonly _stagnation = new StagnationTracker();
 	// Cross-error ("flailing") detector: same normalised error in a row across
 	// ≥2 distinct call shapes. Complements the doom-loop (which owns identical
@@ -1431,6 +1509,29 @@ export class AgentSession {
 		return undefined;
 	}
 
+	/**
+	 * Best-effort, conservative check: did the LAST assistant message use completion
+	 * language? Used ONLY to optionally strengthen the terminal verification message
+	 * — never to gate or alter flow. Keyword matching is locale-limited and fragile
+	 * by design: a miss just omits one sentence, a false hit only appends one.
+	 */
+	private _lastAssistantClaimedCompletion(): boolean {
+		const message = this._findLastAssistantMessage();
+		if (!message) return false;
+		const content = message.content;
+		let text = "";
+		if (typeof content === "string") {
+			text = content;
+		} else {
+			text = content
+				.filter((c) => c.type === "text")
+				.map((c) => (c as TextContent).text)
+				.join(" ");
+		}
+		const lower = text.toLowerCase();
+		return COMPLETION_PHRASES.some((phrase) => lower.includes(phrase));
+	}
+
 	private _replaceMessageInPlace(target: AgentMessage, replacement: AgentMessage): void {
 		// Agent-core stores the finalized message object in its state before emitting message_end.
 		// SessionManager persistence happens later in _handleAgentEvent() with event.message.
@@ -1490,6 +1591,11 @@ export class AgentSession {
 				this._maybeInjectStagnationReminder(event.message, event.toolResults);
 				if (this._todo.takeDirty()) this._persistTodo();
 				if (this._plan.takeDirty()) this._persistPlan();
+				// Incremental persistence: flush newly-learned error fingerprints so a
+				// session killed before dispose still warms the cross-session store. No-op
+				// when nothing was learned this turn (dirty flag) or the session is
+				// ephemeral/empty (guards inside _persistLearnedErrors). Best-effort.
+				this._flushLearnedErrorsIfDirty();
 				this._turnIndex++;
 				break;
 			case "message_start":
@@ -1575,11 +1681,8 @@ export class AgentSession {
 	}
 
 	private _handleToolExecutionEnd(event: Extract<AgentEvent, { type: "tool_execution_end" }>): void {
-		this._toolCallStats.record(
-			event.toolName,
-			event.isError,
-			event.isError ? extractErrorMessage(event.result?.content) : undefined,
-		);
+		const errorMessage = event.isError ? extractErrorMessage(event.result?.content) : undefined;
+		this._toolCallStats.record(event.toolName, event.isError, errorMessage);
 		// The agent looked at rendered output this turn — satisfies the visual DoD.
 		if (event.toolName === "preview" && !event.isError) this._turnUsedPreview = true;
 		const args = this._toolCallArgsByCallId.get(event.toolCallId);
@@ -1590,8 +1693,8 @@ export class AgentSession {
 		// args but a NEW result each time (debugger stepping) is progress, not a loop.
 		// Tier 3 throws here to abort the turn — same propagation as the old start-time
 		// throw, just gated on "same call AND same result".
-		this._toolCallStats.recordInvocationResult(fingerprintToolResult(event.result, event.isError));
-		this._maybeInjectDoomLoopReminder(event.toolName, args);
+		this._toolCallStats.recordInvocationResult(fingerprintToolResult(event.result, event.isError), event.isError);
+		this._maybeInjectDoomLoopReminder(event.toolName, args, errorMessage);
 		// Complementary to the doom-loop above (same call repeated): detect a
 		// repeating MULTI-tool cycle [A,B,C]x3 of DIFFERENT tools. Runs after — if
 		// the doom-loop Tier-3 aborted, this is skipped (identical-loop abort wins).
@@ -1626,6 +1729,7 @@ export class AgentSession {
 					this._learnedErrors.delete(key);
 					this._learnedErrors.set(key, existing);
 					existing.count += 1;
+					this._learnedErrorsDirty = true;
 					if (matchedHintRules && matchedHintRules.length > 0 && !existing.matchedRuleId) {
 						existing.matchedRuleId = matchedHintRules[0];
 					}
@@ -1673,6 +1777,7 @@ export class AgentSession {
 						sampleErrorText: truncateErrorSample(rawError ?? ""),
 						sampleArgs: args !== undefined ? fingerprintToolArgs(args, 160) : undefined,
 					});
+					this._learnedErrorsDirty = true;
 				}
 			}
 			this._maybeInjectCrossErrorReminder(fingerprint, args, rawError);
@@ -1851,6 +1956,22 @@ export class AgentSession {
 	}
 
 	/**
+	 * Persist the learned-error store at runtime when it changed this turn, so a
+	 * session that is killed/crashes before dispose still contributes its warmed
+	 * fingerprints to the cross-session store. Idempotent: `persistSessionLearnedErrors`
+	 * OVERWRITES this session's single `${sessionId}.jsonl` (no append), so flushing
+	 * every turn keeps one file at the latest accumulated state and never inflates
+	 * `aggregateLearnedErrors`' per-file sessionCount. The dirty flag skips the
+	 * writeFileSync/pruneOldFiles on turns that learned nothing new. Reuses
+	 * `_persistLearnedErrors`' guards (size==0, !isPersisted, try/catch) verbatim.
+	 */
+	private _flushLearnedErrorsIfDirty(): void {
+		if (!this._learnedErrorsDirty) return;
+		this._learnedErrorsDirty = false;
+		this._persistLearnedErrors();
+	}
+
+	/**
 	 * Snapshot of per-tool call counts and top error fingerprints for this
 	 * session. Sorted by descending error count, then by call count.
 	 */
@@ -1916,7 +2037,7 @@ export class AgentSession {
 	 * permanently unreachable under the default config. The streak (and the fired
 	 * marker) resets when a different call breaks it.
 	 */
-	private _maybeInjectDoomLoopReminder(toolName: string, args: unknown): void {
+	private _maybeInjectDoomLoopReminder(toolName: string, args: unknown, errorMessage: string | undefined): void {
 		const cfg = this.settingsManager.getToolFeedbackSettings().doomLoopReminder;
 		if (!cfg.enabled) return;
 		// Result-aware: only calls with identical name+args AND identical result count
@@ -1925,25 +2046,69 @@ export class AgentSession {
 		// streak never climbs and the turn is never falsely aborted.
 		const consecutiveCount = this._toolCallStats.getConsecutiveSimilarResultCount();
 
-		// Escalation tiers: TIER1 → soft reminder, TIER2 → urgent pause, TIER3 → abort.
+		// Escalation tiers: TIER1 → soft reminder, TIER2 → urgent pause, TIER3 →
+		// structured recovery once (CR6), then a safety abort on relapse.
 		// Tier2/Tier3 clamp above Tier1 so a configured threshold > 3 cannot invert the
 		// order (pause/abort firing before the soft reminder). Default (threshold=2) keeps
 		// the historical 2/4/6 cadence.
 		const TIER1_THRESHOLD = cfg.threshold ?? 2;
 		const TIER2_THRESHOLD = Math.max(4, TIER1_THRESHOLD + 2);
 		const TIER3_THRESHOLD = Math.max(6, TIER1_THRESHOLD + 4);
+		// CR6: how many structured-recovery steers a single streak may receive at the
+		// Tier-3 threshold before the hard abort. 1 = one chance to course-correct,
+		// then the safety throw on relapse. Adjustable if recovery proves too eager.
+		const RECOVERY_LIMIT = 1;
+
+		// CR5: result-only thrash signal — SEPARATE from the args-keyed ladder below
+		// and run on EVERY call (the ladder's early returns must not skip it). When the
+		// args ARE identical the ladder owns this point, so defer (pass that as active)
+		// to avoid a double-steer. Never aborts.
+		this._maybeInjectResultLoopReminder(toolName, errorMessage, consecutiveCount >= TIER1_THRESHOLD);
 
 		// A fresh or broken streak (a different tool+args just ran) clears which
 		// tiers have fired so the next genuine loop escalates from scratch.
 		if (consecutiveCount <= 1) {
 			this._doomLoopFiredTier = 0;
+			// CR6: a genuinely different call broke the streak — the model left the loop,
+			// so forgive its recovery budget. The next distinct loop gets a fresh recovery
+			// attempt before the abort (not an immediate hard stop).
+			this._doomLoopRecoveryAttempts = 0;
 			return;
 		}
 		if (consecutiveCount < TIER1_THRESHOLD) return;
 
-		// Tier 3: abort the turn. Now reachable because Tiers 1/2 below no longer
-		// reset the sequence — the count keeps climbing until it hits the abort.
+		// Tier 3: structured recovery, then a safety abort on relapse. The FIRST time a
+		// streak reaches this threshold we inject a recovery steer (decompose the step,
+		// switch approach) instead of killing the turn — a bare abort leaves the model
+		// mid-task and it tends to reopen the same loop next turn. Only a RELAPSE (the
+		// streak keeps climbing past Tier-3 because the model ignored the steer and
+		// repeated the call) trips the hard abort. We do NOT resetSequence() on recovery:
+		// that would restart the count at 1, hit the streak-break branch above, clear the
+		// recovery budget, and let the loop inject recovery forever — the safety throw
+		// must stay reachable, so the count is left climbing toward the relapse abort.
 		if (consecutiveCount >= TIER3_THRESHOLD) {
+			if (this._doomLoopRecoveryAttempts < RECOVERY_LIMIT) {
+				this._doomLoopRecoveryAttempts++;
+				this._doomLoopFiredTier = 0;
+				const base = buildDoomLoopReminder({ toolName, args, consecutiveCount });
+				const recovery =
+					`${base}\n\n` +
+					`You have repeated ${consecutiveCount} calls to \`${toolName}\` with no progress. ` +
+					"STOP repeating this call. Rethink from scratch: " +
+					"(1) restate the goal of the current step in one sentence; " +
+					"(2) list the sub-steps; " +
+					"(3) execute ONLY sub-step 1, with a DIFFERENT approach (another tool or different " +
+					"arguments) — or ask the user. Repeating the same call again will abort the turn.";
+				this._fireReminder("pi.doom-loop-recovery", recovery, {
+					deliverAs: "steer",
+					display: true,
+					label: "doom-loop recovery",
+				});
+				return;
+			}
+			// Relapsed after recovery: hard safety abort. Reset the recovery budget so a
+			// future loop (next turn) is once again offered recovery before aborting.
+			this._doomLoopRecoveryAttempts = 0;
 			this._doomLoopFiredTier = 0;
 			this._toolCallStats.resetSequence();
 			throw new Error(
@@ -1988,6 +2153,52 @@ export class AgentSession {
 			deliverAs: "steer",
 			display: false,
 			label: "doom-loop reminder",
+		});
+	}
+
+	/**
+	 * CR5 result-only doom-loop: the model keeps CHANGING the arguments but gets the
+	 * SAME error every call. The args-keyed ladder in {@link _maybeInjectDoomLoopReminder}
+	 * resets each call (args differ) and never climbs, so it never catches this
+	 * thrash; this does. Higher threshold ({@link RESULT_LOOP_THRESHOLD}) and
+	 * error-only by design (see {@link ToolCallStats.getConsecutiveSimilarResultOnlyCount})
+	 * to keep false positives low. Fires ONE steer per streak and NEVER aborts (the
+	 * Tier-3 abort stays exclusive to the args-keyed loop). Deferred to that ladder
+	 * when args ARE identical (`argsLadderActive`) so a pure identical loop is not
+	 * double-steered. The once-per-streak latch resets when the run breaks (count <= 1).
+	 */
+	private _maybeInjectResultLoopReminder(
+		toolName: string,
+		errorMessage: string | undefined,
+		argsLadderActive: boolean,
+	): void {
+		const count = this._toolCallStats.getConsecutiveSimilarResultOnlyCount();
+		if (count <= 1) {
+			this._resultLoopFired = false;
+			return;
+		}
+		// The args-keyed ladder already owns an identical-call loop — don't stack two steers.
+		if (argsLadderActive) return;
+		if (count < RESULT_LOOP_THRESHOLD) return;
+		if (this._resultLoopFired) return;
+		this._resultLoopFired = true;
+		const summary = (errorMessage ?? "(no error text)").trim();
+		const cappedSummary = summary.length > 300 ? `${summary.slice(0, 300)}\u2026` : summary;
+		const content = [
+			"<result-loop-reminder>",
+			`You have called \`${toolName}\` ${count} times with DIFFERENT arguments but got the SAME error every time:`,
+			"",
+			"```",
+			cappedSummary,
+			"```",
+			"",
+			"Varying the arguments is not working — the failure is identical regardless. Stop tweaking the arguments and change approach: a different tool, a fundamentally different strategy, or ask the user for guidance. Do not retry another small variation.",
+			"</result-loop-reminder>",
+		].join("\n");
+		this._fireReminder("pi.result-loop-reminder", content, {
+			deliverAs: "steer",
+			display: true,
+			label: "result-loop reminder",
 		});
 	}
 
@@ -3185,7 +3396,18 @@ export class AgentSession {
 					exitCode: result.exitCode,
 					willRetry,
 				});
-				if (!willRetry) return;
+				if (!willRetry) {
+					// Fix budget exhausted with the check still red. Don't end the turn
+					// silently — the model may have already claimed "done". Inject a single
+					// TERMINAL message (NOT the fix prompt): tell it the check is still
+					// failing and to summarize honestly instead of reporting success.
+					// One-shot: no loop re-entry, `fixes` is not incremented.
+					await this._promptOnce(
+						verificationExhaustedPrompt(command, result, fixes, this._lastAssistantClaimedCompletion()),
+						{ expandPromptTemplates: false, source: options?.source },
+					);
+					return;
+				}
 				fixes++;
 				await this._promptOnce(verificationFixPrompt(command, result), {
 					expandPromptTemplates: false,

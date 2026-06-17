@@ -1,101 +1,35 @@
 /**
- * Minimal JSON-RPC 2.0 client for MCP over HTTP.
+ * McpClient — the JSON-RPC 2.0 layer of an MCP connection.
  *
- * Connect performs an `initialize` round-trip then a `tools/list`. Subsequent
- * `tools/call` requests reuse the same fetch transport. There is no persistent
- * socket — the HTTP transport in the MCP spec is request/response, so we treat
- * each call as an independent POST.
+ * Owns id allocation, the initialize handshake, result/error unwrapping, and the
+ * tools/resources/prompts methods. Byte delivery is delegated to an `McpTransport`
+ * (HTTP / stdio / SSE — see ./transport), so the protocol code is transport-blind.
  *
- * Reconnect = re-run initialize + tools/list. The manager handles backoff.
+ * Reconnect = re-run `initialize` (which re-runs `transport.start()`: a fresh
+ * session for HTTP, a fresh subprocess for stdio, a fresh channel for SSE). The
+ * manager handles backoff. A failed `tools/call` is never re-sent: tool calls may
+ * have side effects, and a timed-out call may already have been applied.
  */
 
-import { recordDiagnostic } from "@pit/ai";
-import type { McpCallToolResult, McpListToolsResult, McpServerConfig, McpToolSchema } from "./types.ts";
+import { resolveServerConfig } from "./config-files.ts";
+import { isTokenExpired, loadMcpToken, refreshMcpToken } from "./oauth.ts";
+import { createTransport, type McpTransport, McpTransportError } from "./transport/index.ts";
+import type {
+	McpCallToolResult,
+	McpGetPromptResult,
+	McpListToolsResult,
+	McpPromptDescriptor,
+	McpResourceContents,
+	McpResourceDescriptor,
+	McpServerCapabilities,
+	McpServerConfig,
+	McpToolSchema,
+} from "./types.ts";
+
+export { McpTransportError };
 
 const PROTOCOL_VERSION = "2025-06-18";
 const CLIENT_INFO = { name: "pi-coding-agent", version: "0.1.0" };
-
-// Hard ceiling on an MCP response body. A misbehaving/untrusted server returning
-// a multi-GB body would otherwise OOM the process. 25MB is far above any
-// legitimate JSON-RPC payload but finite. Enforced before materializing the
-// body: by Content-Length when present, otherwise by capping the stream read.
-const MAX_MCP_RESPONSE_BYTES = 25 * 1024 * 1024;
-
-/**
- * Read a response body to a string under MAX_MCP_RESPONSE_BYTES.
- *
- * If Content-Length is present and exceeds the cap, reject without reading any
- * body. Otherwise read the stream chunk-by-chunk, and if the accumulated size
- * crosses the cap, cancel the body and reject — the whole body is never
- * materialized first. Normal (small) responses read identically to text().
- */
-async function readBodyWithCap(response: Response, label: string): Promise<string> {
-	const declared = Number(response.headers.get("content-length"));
-	if (Number.isFinite(declared) && declared > MAX_MCP_RESPONSE_BYTES) {
-		// Observe the cap before rejecting (behavior unchanged).
-		recordDiagnostic({
-			category: "output.cap",
-			level: "error",
-			source: "mcp.rpc",
-			context: { bytes: declared, note: label },
-		});
-		throw new McpTransportError(`${label}: MCP response too large (${declared} bytes)`);
-	}
-	const stream = response.body;
-	// No stream body (mock/empty): fall back to text(), still bounded after read.
-	if (!stream) {
-		const text = await response.text();
-		const size = new TextEncoder().encode(text).length;
-		if (size > MAX_MCP_RESPONSE_BYTES) {
-			// Observe the cap before rejecting (behavior unchanged).
-			recordDiagnostic({
-				category: "output.cap",
-				level: "error",
-				source: "mcp.rpc",
-				context: { bytes: size, note: label },
-			});
-			throw new McpTransportError(`${label}: MCP response too large (${size} bytes)`);
-		}
-		return text;
-	}
-	const reader = stream.getReader();
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	try {
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (!value) continue;
-			total += value.byteLength;
-			if (total > MAX_MCP_RESPONSE_BYTES) {
-				await reader.cancel().catch(() => {});
-				// Observe the cap before rejecting (behavior unchanged).
-				recordDiagnostic({
-					category: "output.cap",
-					level: "error",
-					source: "mcp.rpc",
-					context: { bytes: total, note: label },
-				});
-				throw new McpTransportError(`${label}: MCP response too large (>${MAX_MCP_RESPONSE_BYTES} bytes)`);
-			}
-			chunks.push(value);
-		}
-	} finally {
-		reader.releaseLock();
-	}
-	return new TextDecoder().decode(concatChunks(chunks, total));
-}
-
-/** Join the collected byte chunks into one buffer of the known total length. */
-function concatChunks(chunks: Uint8Array[], total: number): Uint8Array {
-	const out = new Uint8Array(total);
-	let offset = 0;
-	for (const chunk of chunks) {
-		out.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-	return out;
-}
 
 interface JsonRpcRequest {
 	jsonrpc: "2.0";
@@ -104,38 +38,53 @@ interface JsonRpcRequest {
 	params?: Record<string, unknown>;
 }
 
-interface JsonRpcResponse<T = unknown> {
-	jsonrpc: "2.0";
-	id: number | string;
-	result?: T;
-	error?: { code: number; message: string; data?: unknown };
-}
-
-/**
- * Transport-level failure (network error, HTTP status, SSE/malformed payload)
- * as opposed to a JSON-RPC application error returned by a live server. The
- * manager only marks a server disconnected — and re-initializes — for these;
- * application errors leave the connection state untouched.
- */
-export class McpTransportError extends Error {}
-
-export class McpHttpClient {
+export class McpClient {
 	private name: string;
 	private config: McpServerConfig;
+	private transport: McpTransport;
 	private nextId = 1;
 	private initialized = false;
 	private serverInfo?: { name?: string; version?: string };
+	private capabilities: McpServerCapabilities = {};
 	private tools: McpToolSchema[] = [];
-	// Streamable HTTP session id. Spec-compliant servers (official SDK with a
-	// session generator) return `Mcp-Session-Id` on the initialize response and
-	// require it echoed on every subsequent request, else they answer 4xx and the
-	// server appears permanently disconnected. Captured from any response that
-	// carries it; cleared on dispose.
-	private sessionId?: string;
+	/** `Bearer <token>` from OAuth, injected when the server has no static Authorization header. */
+	private authHeader?: string;
 
 	constructor(name: string, config: McpServerConfig) {
 		this.name = name;
 		this.config = config;
+		// Attach an existing OAuth token (remote servers only) so the first connect
+		// is authenticated without a separate step.
+		const token = config.url ? loadMcpToken(name) : undefined;
+		if (token) this.authHeader = `Bearer ${token.accessToken}`;
+		// Resolve ${VAR} / !cmd in url/headers/env/args at the point of use; the raw
+		// config is kept for timeout/display so secrets never land in stored state.
+		this.transport = createTransport(name, this.transportConfig());
+	}
+
+	/** Whether the user configured a static Authorization header (which takes precedence over OAuth). */
+	private hasStaticAuth(): boolean {
+		return Object.keys(this.config.headers ?? {}).some((k) => k.toLowerCase() === "authorization");
+	}
+
+	/** Resolved config for the transport, with the OAuth bearer merged in when applicable. */
+	private transportConfig(): McpServerConfig {
+		const resolved = resolveServerConfig(this.config);
+		if (this.authHeader && !this.hasStaticAuth()) {
+			resolved.headers = { ...(resolved.headers ?? {}), Authorization: this.authHeader };
+		}
+		return resolved;
+	}
+
+	/** Refresh an expired OAuth token before a (re)connect so the handshake is authenticated. */
+	private async ensureFreshAuth(): Promise<void> {
+		if (!this.config.url) return;
+		let token = loadMcpToken(this.name);
+		if (token && isTokenExpired(token)) {
+			const refreshed = await refreshMcpToken(this.name);
+			if (refreshed) token = refreshed;
+		}
+		if (token) this.authHeader = `Bearer ${token.accessToken}`;
 	}
 
 	get serverName(): string {
@@ -154,6 +103,10 @@ export class McpHttpClient {
 		return this.serverInfo;
 	}
 
+	getCapabilities(): McpServerCapabilities {
+		return this.capabilities;
+	}
+
 	private async rpc<T>(
 		method: string,
 		params?: Record<string, unknown>,
@@ -161,128 +114,54 @@ export class McpHttpClient {
 		timeoutOverrideMs?: number,
 	): Promise<T> {
 		const id = this.nextId++;
-		const body: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
-		const controller = new AbortController();
-		// Connect handshake uses a shorter 15s budget (passed via timeoutOverrideMs);
-		// tool calls keep the default 30s so slow MCP tools don't get cut off.
+		const message: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
 		const timeoutMs = timeoutOverrideMs ?? this.config.timeoutMs ?? 30_000;
-		const timer = setTimeout(() => controller.abort(), timeoutMs);
-		const onAbort = () => controller.abort();
-		signal?.addEventListener("abort", onAbort, { once: true });
-
-		// The timeout and outer-abort forwarding must stay armed through the BODY
-		// reads, not just the fetch: a server that returns headers and then stalls
-		// the body would otherwise hang response.json() forever with no way for
-		// the user's abort to reach controller.abort(). Single cleanup point in
-		// the outer finally.
-		try {
-			let response: Response;
-			try {
-				response = await fetch(this.config.url, {
-					method: "POST",
-					headers: {
-						"content-type": "application/json",
-						accept: "application/json",
-						...(this.config.headers ?? {}),
-						// Echo the server-assigned session id on every request after
-						// initialize. Placed last so it is authoritative over config.headers.
-						...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
-					},
-					body: JSON.stringify(body),
-					signal: controller.signal,
-				});
-			} catch (error) {
-				// fetch rejection = network/abort/timeout: the request may or may not
-				// have reached the server, so this is a transport failure by definition.
-				const message = error instanceof Error ? error.message : String(error);
-				throw new McpTransportError(`MCP ${this.name} ${method}: ${message}`);
-			}
-
-			// Capture the session id from any response that carries one (servers set it
-			// on the initialize response). Subsequent requests must echo it.
-			const incomingSessionId = response.headers.get("mcp-session-id");
-			if (incomingSessionId) this.sessionId = incomingSessionId;
-
-			if (!response.ok) {
-				const text = await response.text().catch(() => "");
-				throw new McpTransportError(`MCP ${this.name} ${method}: HTTP ${response.status} ${text.slice(0, 200)}`);
-			}
-
-			// Some servers stream SSE on the same endpoint. We only support the
-			// single-response JSON variant; reject SSE responses to avoid hanging.
-			const contentType = response.headers.get("content-type") ?? "";
-			if (contentType.includes("text/event-stream")) {
-				throw new McpTransportError(`MCP ${this.name} ${method}: SSE transport not supported (use HTTP JSON)`);
-			}
-
-			// Read under a size cap BEFORE parsing so an untrusted server can't OOM
-			// us with a giant body (checked via Content-Length, else capped stream).
-			const rawBody = await readBodyWithCap(response, `MCP ${this.name} ${method}`);
-			let json: JsonRpcResponse<T>;
-			try {
-				json = JSON.parse(rawBody) as JsonRpcResponse<T>;
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				throw new McpTransportError(`MCP ${this.name} ${method}: invalid JSON response (${message})`);
-			}
-			if (json.error) {
-				throw new Error(`MCP ${this.name} ${method}: ${json.error.message} (code ${json.error.code})`);
-			}
-			if (json.result === undefined) {
-				throw new Error(`MCP ${this.name} ${method}: response missing result`);
-			}
-			return json.result;
-		} finally {
-			clearTimeout(timer);
-			signal?.removeEventListener("abort", onAbort);
+		const response = await this.transport.request<T>(message, signal, timeoutMs);
+		if (response.error) {
+			throw new Error(`MCP ${this.name} ${method}: ${response.error.message} (code ${response.error.code})`);
 		}
-	}
-
-	/** Discard the current session id (see initialize / dispose for why). */
-	private clearSessionId(): void {
-		this.sessionId = undefined;
+		if (response.result === undefined) {
+			throw new Error(`MCP ${this.name} ${method}: response missing result`);
+		}
+		return response.result;
 	}
 
 	async initialize(signal?: AbortSignal): Promise<void> {
-		// A fresh handshake must not echo a stale session id: the server assigns a new
-		// one on initialize, and on reconnect this client instance is reused (the old
-		// id would otherwise be rejected, bricking the connection until the session ends).
-		// Routed through clearSessionId() so the reset does not narrow this.sessionId to
-		// `undefined` for the notifications/initialized header built later in this method.
-		this.clearSessionId();
+		// Refresh an expired OAuth token and re-inject the bearer before connecting,
+		// so a reconnect after token expiry re-handshakes with a valid token.
+		await this.ensureFreshAuth();
+		this.transport.updateConfig?.(this.transportConfig());
+		// start() resets/(re)opens the transport so a reconnect re-handshakes with
+		// fresh state (no stale HTTP session id, no dead subprocess, no dead channel).
+		await this.transport.start(signal);
 		const result = await this.rpc<{
 			serverInfo?: { name?: string; version?: string };
 			protocolVersion?: string;
+			capabilities?: Record<string, unknown>;
 		}>(
 			"initialize",
 			{
 				protocolVersion: PROTOCOL_VERSION,
-				capabilities: { tools: {} },
+				capabilities: { tools: {}, resources: {}, prompts: {} },
 				clientInfo: CLIENT_INFO,
 			},
 			signal,
 			15_000,
 		);
 		this.serverInfo = result.serverInfo;
+		const caps = result.capabilities ?? {};
+		this.capabilities = {
+			tools: caps.tools !== undefined,
+			resources: caps.resources !== undefined,
+			prompts: caps.prompts !== undefined,
+		};
 
-		// Send the initialized notification (no response expected, but our rpc
-		// path expects one so use a fire-and-forget POST instead).
-		try {
-			await fetch(this.config.url, {
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					accept: "application/json",
-					...(this.config.headers ?? {}),
-					...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
-				},
-				body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
-				signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
-			});
-		} catch {
-			/* Notification failures are non-fatal */
-		}
+		// Send the initialized notification (no response expected).
+		await this.transport.notify({ jsonrpc: "2.0", method: "notifications/initialized" }, signal);
 
+		// Always refresh tools (servers commonly advertise tools without an explicit
+		// capability flag; tools/list is harmless if empty). Resources/prompts are
+		// only listed lazily, gated by their capability.
 		await this.refreshTools(signal);
 		this.initialized = true;
 	}
@@ -290,8 +169,8 @@ export class McpHttpClient {
 	async refreshTools(signal?: AbortSignal): Promise<McpToolSchema[]> {
 		// tools/list is paginated (MCP spec): follow nextCursor until exhausted so
 		// servers with many tools aren't silently truncated to the first page.
-		// PAGE_CAP bounds a server that returns a cursor forever; a repeated
-		// cursor also breaks the loop (no forward progress).
+		// PAGE_CAP bounds a server that returns a cursor forever; a repeated cursor
+		// also breaks the loop (no forward progress).
 		const PAGE_CAP = 50;
 		const collected: McpToolSchema[] = [];
 		const seenCursors = new Set<string>();
@@ -310,19 +189,75 @@ export class McpHttpClient {
 	}
 
 	async callTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallToolResult> {
-		const result = await this.rpc<McpCallToolResult>("tools/call", { name: toolName, arguments: args }, signal);
-		return result;
+		return this.rpc<McpCallToolResult>("tools/call", { name: toolName, arguments: args }, signal);
+	}
+
+	/** List resources (paginated, capped). Returns [] if the server has no resources capability. */
+	async listResources(signal?: AbortSignal): Promise<McpResourceDescriptor[]> {
+		if (!this.capabilities.resources) return [];
+		const PAGE_CAP = 50;
+		const collected: McpResourceDescriptor[] = [];
+		const seenCursors = new Set<string>();
+		let cursor: string | undefined;
+		for (let page = 0; page < PAGE_CAP; page++) {
+			const params: Record<string, unknown> = cursor === undefined ? {} : { cursor };
+			const result = await this.rpc<{ resources?: McpResourceDescriptor[]; nextCursor?: string }>(
+				"resources/list",
+				params,
+				signal,
+			);
+			if (Array.isArray(result.resources)) collected.push(...result.resources);
+			const next = result.nextCursor;
+			if (typeof next !== "string" || next.length === 0 || seenCursors.has(next)) break;
+			seenCursors.add(next);
+			cursor = next;
+		}
+		return collected;
+	}
+
+	async readResource(uri: string, signal?: AbortSignal): Promise<McpResourceContents> {
+		return this.rpc<McpResourceContents>("resources/read", { uri }, signal);
+	}
+
+	/** List prompts. Returns [] if the server has no prompts capability. */
+	async listPrompts(signal?: AbortSignal): Promise<McpPromptDescriptor[]> {
+		if (!this.capabilities.prompts) return [];
+		const PAGE_CAP = 50;
+		const collected: McpPromptDescriptor[] = [];
+		const seenCursors = new Set<string>();
+		let cursor: string | undefined;
+		for (let page = 0; page < PAGE_CAP; page++) {
+			const params: Record<string, unknown> = cursor === undefined ? {} : { cursor };
+			const result = await this.rpc<{ prompts?: McpPromptDescriptor[]; nextCursor?: string }>(
+				"prompts/list",
+				params,
+				signal,
+			);
+			if (Array.isArray(result.prompts)) collected.push(...result.prompts);
+			const next = result.nextCursor;
+			if (typeof next !== "string" || next.length === 0 || seenCursors.has(next)) break;
+			seenCursors.add(next);
+			cursor = next;
+		}
+		return collected;
+	}
+
+	async getPrompt(name: string, args: Record<string, string>, signal?: AbortSignal): Promise<McpGetPromptResult> {
+		return this.rpc<McpGetPromptResult>("prompts/get", { name, arguments: args }, signal);
 	}
 
 	updateConfig(config: McpServerConfig): void {
 		this.config = config;
+		this.transport.updateConfig?.(this.transportConfig());
 	}
 
 	dispose(): void {
 		this.initialized = false;
 		this.tools = [];
-		// Drop the session id so a reconnect performs a fresh initialize handshake
-		// instead of replaying a stale (server-expired) session.
-		this.sessionId = undefined;
+		this.capabilities = {};
+		this.transport.dispose();
 	}
 }
+
+/** @deprecated Backward-compatible alias; the client is no longer HTTP-only. */
+export const McpHttpClient = McpClient;

@@ -11,8 +11,22 @@
  */
 
 export interface McpServerConfig {
-	/** Endpoint URL. Required. */
-	url: string;
+	/**
+	 * Wire transport. Usually inferred and omitted: a `command` implies `"stdio"`,
+	 * otherwise a `url` implies `"http"` (Streamable HTTP). Set `"sse"` explicitly
+	 * for the legacy HTTP+SSE transport.
+	 */
+	transport?: "http" | "sse" | "stdio";
+	/** Endpoint URL. Required for http/sse transports. */
+	url?: string;
+	/** Executable to launch for the stdio transport (local subprocess MCP server). */
+	command?: string;
+	/** Arguments passed to `command` (stdio transport). */
+	args?: string[];
+	/** Extra environment variables for the stdio subprocess (merged over the inherited env). */
+	env?: Record<string, string>;
+	/** Working directory for the stdio subprocess. Default: process cwd. */
+	cwd?: string;
 	/** Optional request headers (e.g. `{ Authorization: "Bearer ${MY_TOKEN}" }`). */
 	headers?: Record<string, string>;
 	/** Per-request timeout in ms. Default: 30000. */
@@ -32,6 +46,24 @@ export interface McpServerConfig {
 	 * the global `defer` policy.
 	 */
 	defer?: boolean;
+	/**
+	 * OAuth 2.0 settings for a remote (http/sse) server that requires browser-flow
+	 * auth. When present, the manager attaches a bearer token (obtained via
+	 * `pit mcp authenticate`) and refreshes it on 401. Static `headers` still win
+	 * if both are set.
+	 */
+	oauth?: McpOAuthConfig;
+}
+
+export interface McpOAuthConfig {
+	/** Pre-registered client id (skips Dynamic Client Registration if set). */
+	clientId?: string;
+	/** Pre-registered client secret (confidential clients). */
+	clientSecret?: string;
+	/** Explicit authorization-server metadata URL (skips discovery if set). */
+	authorizationServerUrl?: string;
+	/** OAuth scopes to request. */
+	scopes?: string[];
 }
 
 export interface McpSettings {
@@ -76,8 +108,52 @@ export interface McpCallToolResult {
 	isError?: boolean;
 }
 
+/** Server capabilities reported by the initialize handshake. */
+export interface McpServerCapabilities {
+	tools?: boolean;
+	resources?: boolean;
+	prompts?: boolean;
+}
+
+export interface McpResourceDescriptor {
+	uri: string;
+	name?: string;
+	description?: string;
+	mimeType?: string;
+}
+
+export interface McpResourceContents {
+	contents: Array<{ uri: string; mimeType?: string; text?: string; blob?: string }>;
+}
+
+export interface McpPromptArgument {
+	name: string;
+	description?: string;
+	required?: boolean;
+}
+
+export interface McpPromptDescriptor {
+	name: string;
+	description?: string;
+	arguments?: McpPromptArgument[];
+}
+
+export interface McpPromptMessage {
+	role: "user" | "assistant";
+	content:
+		| { type: "text"; text: string }
+		| { type: "image"; data: string; mimeType: string }
+		| { type: "resource"; resource: { uri: string; mimeType?: string; text?: string } };
+}
+
+export interface McpGetPromptResult {
+	description?: string;
+	messages: McpPromptMessage[];
+}
+
 export interface McpConnectionState {
 	name: string;
+	/** Endpoint URL (http/sse) or the launch command (stdio), for display. */
 	url: string;
 	connected: boolean;
 	lastError?: string;

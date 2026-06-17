@@ -129,6 +129,49 @@ describe("ToolCallStats.recordInvocation (doom-loop)", () => {
 	});
 });
 
+describe("ToolCallStats.getConsecutiveSimilarResultOnlyCount (result-only thrash loop)", () => {
+	it("counts trailing same-error results even when args differ every call", () => {
+		const stats = new ToolCallStats();
+		for (let i = 0; i < 4; i++) {
+			// DIFFERENT args each call (shifted offset) ...
+			stats.recordInvocation("edit", `{"offset":${i}}`);
+			// ... but the SAME error result.
+			stats.recordInvocationResult("ERR", true);
+		}
+		expect(stats.getConsecutiveSimilarResultOnlyCount()).toBe(4);
+		// The args-keyed result count resets each call because the args differ.
+		expect(stats.getConsecutiveSimilarResultCount()).toBe(1);
+	});
+
+	it("returns 0 when the last result is a success (a run of successes is progress)", () => {
+		const stats = new ToolCallStats();
+		for (let i = 0; i < 4; i++) {
+			stats.recordInvocation("read", `{"path":"f${i}"}`);
+			stats.recordInvocationResult("OK", false);
+		}
+		expect(stats.getConsecutiveSimilarResultOnlyCount()).toBe(0);
+	});
+
+	it("resets the run when the result hash changes mid-stream", () => {
+		const stats = new ToolCallStats();
+		stats.recordInvocation("edit", "a");
+		stats.recordInvocationResult("ERR", true);
+		stats.recordInvocation("edit", "b");
+		stats.recordInvocationResult("ERR", true);
+		stats.recordInvocation("edit", "c");
+		stats.recordInvocationResult("OTHER", true);
+		stats.recordInvocation("edit", "d");
+		stats.recordInvocationResult("OTHER", true);
+		// Trailing run of the last hash ("OTHER") is 2; the earlier "ERR" pair is a
+		// different hash and stops the count.
+		expect(stats.getConsecutiveSimilarResultOnlyCount()).toBe(2);
+	});
+
+	it("is 0 on an empty window", () => {
+		expect(new ToolCallStats().getConsecutiveSimilarResultOnlyCount()).toBe(0);
+	});
+});
+
 describe("fingerprintToolArgs", () => {
 	it("produces stable output regardless of key order", () => {
 		expect(fingerprintToolArgs({ a: 1, b: 2 })).toBe(fingerprintToolArgs({ b: 2, a: 1 }));

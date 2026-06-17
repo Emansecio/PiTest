@@ -1,3 +1,5 @@
+> **Status:** Shipped — commits 7629073d, f8dc43e2, 4cf9ab8b (coordinator fan-out + acceptance gates). Historical record of a delivered feature.
+
 # Design: Acceptance Gates + Dynamic Fanout for the Subagent Coordinator
 
 Date: 2026-05-31

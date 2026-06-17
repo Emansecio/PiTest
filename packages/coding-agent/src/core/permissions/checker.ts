@@ -10,6 +10,7 @@
  * user-authored deny rules still apply.
  */
 
+import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
 import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath } from "./matcher.ts";
 import {
 	BUILTIN_DANGEROUS_COMMANDS,
@@ -39,6 +40,34 @@ export interface PermissionContext {
 	cwd: string;
 	mode: PermissionMode;
 	settings: PermissionSettings;
+}
+
+/**
+ * Match a tool name against an allow/deny rule list, supporting `*`/`?` globs so
+ * a whole MCP server can be gated at once (e.g. `mcp__github__*`). Exact names
+ * still match exactly (backward compatible).
+ */
+export function matchesAnyToolRule(rules: readonly string[] | undefined, toolName: string): boolean {
+	if (!rules || rules.length === 0) return false;
+	for (const rule of rules) {
+		if (rule === toolName) return true;
+		if ((rule.includes("*") || rule.includes("?")) && toolPatternToRegExp(rule).test(toolName)) return true;
+	}
+	return false;
+}
+
+const toolPatternCache = new Map<string, RegExp>();
+function toolPatternToRegExp(pattern: string): RegExp {
+	let re = toolPatternCache.get(pattern);
+	if (!re) {
+		const escaped = pattern
+			.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+			.replace(/\*/g, ".*")
+			.replace(/\?/g, ".");
+		re = new RegExp(`^${escaped}$`);
+		toolPatternCache.set(pattern, re);
+	}
+	return re;
 }
 
 export class PermissionChecker {
@@ -90,8 +119,8 @@ export class PermissionChecker {
 	check(action: PermissionAction): PermissionDecision {
 		const { settings, mode } = this.ctx;
 
-		// Explicit tool-level deny always wins, in every mode.
-		if (settings.denyTools?.includes(action.toolName)) {
+		// Explicit tool-level deny always wins, in every mode (supports globs).
+		if (matchesAnyToolRule(settings.denyTools, action.toolName)) {
 			return { decision: "deny", reason: `Tool "${action.toolName}" is in denyTools.` };
 		}
 
@@ -101,7 +130,7 @@ export class PermissionChecker {
 
 		// auto — writes and commands run; deny rules gate them.
 		// allowTools is an explicit, deliberate bypass: skip all further checks.
-		if (settings.allowTools?.includes(action.toolName)) {
+		if (matchesAnyToolRule(settings.allowTools, action.toolName)) {
 			return { decision: "allow" };
 		}
 
@@ -137,7 +166,7 @@ export class PermissionChecker {
 			return { decision: "deny", reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.` };
 		}
 
-		if (this.ctx.settings.allowTools?.includes(action.toolName)) {
+		if (matchesAnyToolRule(this.ctx.settings.allowTools, action.toolName)) {
 			return { decision: "allow" };
 		}
 
@@ -188,15 +217,15 @@ export function describeToolAction(toolName: string, input: Record<string, unkno
 		case "grep":
 		case "find":
 		case "ls": {
-			const paths = collectPathFields(input, ["file", "path", "directory"]);
+			const paths = collectPathFields(input, ["directory"]);
 			return { type: "read", toolName, paths };
 		}
 		case "edit": {
-			const paths = collectPathFields(input, ["file"]);
+			const paths = collectPathFields(input);
 			return { type: "write", toolName, paths };
 		}
 		case "write": {
-			const paths = collectPathFields(input, ["file", "path"]);
+			const paths = collectPathFields(input);
 			return { type: "write", toolName, paths };
 		}
 		case "bash": {
@@ -217,7 +246,7 @@ export function describeToolAction(toolName: string, input: Record<string, unkno
 			const action = typeof input.action === "string" ? input.action : "";
 			const mutates = LSP_WRITE_ACTIONS.has(action) || (action === "code_actions" && input.apply === true);
 			if (mutates) {
-				return { type: "write", toolName, paths: collectPathFields(input, ["file"]) };
+				return { type: "write", toolName, paths: collectPathFields(input) };
 			}
 			return { type: "tool", toolName, args: input };
 		}
@@ -236,22 +265,38 @@ export function describeToolAction(toolName: string, input: Record<string, unkno
 	}
 }
 
-function collectPathFields(input: Record<string, unknown>, fields: readonly string[]): string[] {
+/**
+ * Canonical path key plus every alias that maps to it. Derived from the SAME
+ * source of truth (`PATH_KEY_ALIASES`) the tool_call guards use, so the deny
+ * floor sees the path no matter which OpenAI-style alias
+ * (file_path/filepath/filename/file) the model emitted.
+ */
+const PATH_KEYS: readonly string[] = ["path", ...Object.keys(PATH_KEY_ALIASES)];
+
+/**
+ * Collect every path candidate from raw (pre-normalization) tool input for the
+ * deny floor. Defensive posture: gather ALL aliased path keys present (not just
+ * the coalesce "winner"), plus any `extraFields` (e.g. `directory` for ls/find),
+ * and apply the same path aliases inside each `edits[]` element. Over-collecting
+ * here can only ever cause an extra (correct) deny match — never a leak.
+ */
+function collectPathFields(input: Record<string, unknown>, extraFields: readonly string[] = []): string[] {
 	const paths: string[] = [];
-	for (const field of fields) {
-		const value = input[field];
-		if (typeof value === "string" && value.length > 0) {
-			paths.push(value);
+	const pushFrom = (rec: Record<string, unknown>, fields: readonly string[]): void => {
+		for (const field of fields) {
+			const value = rec[field];
+			if (typeof value === "string" && value.length > 0) {
+				paths.push(value);
+			}
 		}
-	}
-	// Edit tool has an "edits[]" array with per-edit overrides — collect those too.
+	};
+	pushFrom(input, [...PATH_KEYS, ...extraFields]);
+	// Edit tool has an "edits[]" array with per-edit overrides — collect those too,
+	// honoring the same path aliases on each element.
 	if (Array.isArray(input.edits)) {
 		for (const item of input.edits) {
 			if (item && typeof item === "object") {
-				const itemRec = item as Record<string, unknown>;
-				if (typeof itemRec.file === "string" && itemRec.file.length > 0) {
-					paths.push(itemRec.file);
-				}
+				pushFrom(item as Record<string, unknown>, PATH_KEYS);
 			}
 		}
 	}

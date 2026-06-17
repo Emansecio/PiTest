@@ -45,8 +45,9 @@ describe("doom-loop escalation", () => {
 			(m) => m.role === "assistant" && errorMessageOf(m).includes("Doom loop abort"),
 		);
 		expect(abortMsg).toBeDefined();
-		// Reached the Tier-3 count of 6 (the old bug capped it at the Tier-2 reset).
-		expect(errorMessageOf(abortMsg)).toContain("6 consecutive");
+		// CR6: the first Tier-3 (count 6) now injects a recovery steer instead of
+		// aborting; the model ignores it and the 7th identical call relapses → abort.
+		expect(errorMessageOf(abortMsg)).toContain("7 consecutive");
 
 		// The loop was actually cut short — far fewer reads ran than were queued.
 		const reads = harness.session.messages.filter((m) => m.role === "toolResult").length;
@@ -97,8 +98,9 @@ describe("doom-loop escalation", () => {
 			(m) => m.role === "assistant" && errorMessageOf(m).includes("Doom loop abort"),
 		);
 		expect(abortMsg).toBeDefined();
-		// Aborts at the clamped tier-3 count of 9, not the old literal 6.
-		expect(errorMessageOf(abortMsg)).toContain("9 consecutive");
+		// CR6: recovery fires at the clamped tier-3 count of 9, then the relapse aborts
+		// at 10 (not the old literal 6, and one past the recovery point).
+		expect(errorMessageOf(abortMsg)).toContain("10 consecutive");
 	});
 
 	it("does not abort identical calls that return a NEW result each time (real progress)", async () => {
