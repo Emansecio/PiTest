@@ -139,12 +139,19 @@ export interface FailureBudgetSettings {
 	maxPerTurn?: number; // default: 3 — failures of one tool (by name) allowed in a turn before a forceful steer fires
 }
 
+export interface TodoCadenceReminderSettings {
+	enabled?: boolean; // default: true (opt out with enabled: false)
+	threshold?: number; // default: 3 — turns a todo sits in_progress without an update before a sync reminder fires
+	cooldownMs?: number; // default: 30000 — minimum gap between reminders
+}
+
 export interface ToolFeedbackSettings {
 	errorReflection?: ErrorReflectionSettings;
 	doomLoopReminder?: DoomLoopReminderSettings;
 	stagnationReminder?: StagnationReminderSettings;
 	crossErrorReminder?: CrossErrorReminderSettings;
 	failureBudget?: FailureBudgetSettings;
+	todoCadenceReminder?: TodoCadenceReminderSettings;
 }
 
 export interface FrequentFilesSettings {
@@ -349,6 +356,7 @@ export interface ResolvedToolFeedbackSettings {
 	stagnationReminder: { enabled: boolean; softThreshold: number; hardThreshold: number; cooldownMs: number };
 	crossErrorReminder: { enabled: boolean; threshold: number; cooldownMs: number };
 	failureBudget: { enabled: boolean; maxPerTurn: number };
+	todoCadenceReminder: { enabled: boolean; threshold: number; cooldownMs: number };
 }
 
 export interface WarningSettings {
@@ -1185,6 +1193,9 @@ export class SettingsManager {
 		const ceCooldownMs = nonNegInt(ce?.cooldownMs, 30000);
 		const fb = tf?.failureBudget;
 		const fbMaxPerTurn = posInt(fb?.maxPerTurn, 3);
+		const tc = tf?.todoCadenceReminder;
+		const tcThreshold = posInt(tc?.threshold, 3);
+		const tcCooldownMs = nonNegInt(tc?.cooldownMs, 30000);
 		return {
 			errorReflection: { enabled: tf?.errorReflection?.enabled === true },
 			doomLoopReminder: {
@@ -1206,6 +1217,11 @@ export class SettingsManager {
 			failureBudget: {
 				enabled: fb?.enabled !== false,
 				maxPerTurn: fbMaxPerTurn,
+			},
+			todoCadenceReminder: {
+				enabled: tc?.enabled !== false,
+				threshold: tcThreshold,
+				cooldownMs: tcCooldownMs,
 			},
 		};
 	}

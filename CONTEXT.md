@@ -50,6 +50,30 @@ A named mapping to a concrete model + thinking level (`default`, `smol`, `slow`,
 Selected via `--role`.
 _Avoid_: confusing Role with Mode — Role picks the model; Mode picks the stance.
 
+**Todo**:
+The agent's canonical, universal task list — materialized *before* acting on any
+non-trivial task, including pure investigation/diagnosis, not just implementation. The
+threshold is "≥2 actions OR some discovery"; genuinely single-step requests skip it.
+_Avoid_: checklist, task list (use Todo); do not conflate with Plan.
+
+**Plan**:
+The versioned task DAG (steps with dependencies and verify commands) reserved for long,
+multi-phase work. Secondary to the Todo in the interactive flow — Plan is for when
+dependencies and verification matter, not for everyday task tracking.
+_Avoid_: using Plan as a synonym for Todo (they are distinct systems).
+
+**Triage** (Todo triage):
+The cognitive act, at the opening of the agent's reasoning, of classifying the task
+against the threshold and creating a Todo when it applies. It is a reasoning ritual, not
+a mechanical gate — a light one-shot nudge is the only safety net behind it.
+_Avoid_: "todo gate" (there is no blocking gate; triage is soft).
+
+**Sync reminder** (Todo cadence reminder):
+The ephemeral nudge that hands the enumerated Todo back to the model and asks it to update
+status when the list has fallen behind the real work — i.e. an item sits in_progress too
+long, or code was mutated without any Todo update. It reminds; it never auto-completes.
+_Avoid_: "todo nag"; do not describe it as auto-advancing the list.
+
 ## Flagged ambiguities
 
 - **"mode"** was overloaded across three concepts: the I/O surface (`type Mode`), the
@@ -58,6 +82,9 @@ _Avoid_: confusing Role with Mode — Role picks the model; Mode picks the stanc
   stays **Role**.
 - **"plan"** appears as both a Role and a Permission facet value. They are distinct: the
   Role `plan` selects a model/thinking config; the Permission facet `plan` means read-only.
+- **Todo vs Plan** were two competing task-tracking systems injected into the same turn.
+  Resolution (ADR-0007): **Todo** is the canonical universal tracker for interactive work;
+  **Plan** is reserved for long, multi-phase work with dependencies/verification.
 
 ## Example dialogue
 

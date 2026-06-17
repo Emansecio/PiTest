@@ -196,6 +196,17 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		guidelinesList.push(guideline);
 	};
 
+	// Todo-first triage (ADR-0007): the highest-leverage opening move. Make the
+	// agent classify the task at the start of its reasoning and materialize a todo
+	// BEFORE acting — including for investigation/diagnosis, not just implementation.
+	// Gated on the todo tool being present; the trivial single-step escape keeps it
+	// from being ceremony.
+	if (tools.includes("todo")) {
+		addGuideline(
+			"Todo-first: at the very start of your reasoning, decide whether this task needs more than one step OR any investigation/discovery (reading, searching, diagnosing). If so, create a todo (even a single '1. Identify X') BEFORE you act, then keep it current as you go. Skip only for genuinely single-step requests.",
+		);
+	}
+
 	const hasBash = tools.includes("bash");
 	const hasGrep = tools.includes("grep");
 	const hasFind = tools.includes("find");

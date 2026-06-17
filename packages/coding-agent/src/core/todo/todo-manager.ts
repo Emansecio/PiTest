@@ -173,9 +173,16 @@ export class TodoManager {
 	systemPromptSection(): string {
 		if (this.items.length === 0) return "";
 		const open = this.items.filter((t) => t.status !== "completed").length;
+		const glyph: Record<TodoStatus, string> = { completed: "✓", in_progress: "◐", pending: "○" };
+		const itemLines = this.items.map((t) => {
+			const active = t.status === "in_progress" && t.activeForm ? ` (${t.activeForm})` : "";
+			return `${glyph[t.status]} #${t.id} ${t.subject}${active}`;
+		});
 		return [
 			"<todos>",
-			`You are tracking a task list (${open} open of ${this.items.length}). Keep it current with the \`todo\` tool:`,
+			`Current task list (${open} open of ${this.items.length}):`,
+			...itemLines,
+			"Keep it current with the `todo` tool:",
 			"- Mark exactly one todo in_progress at a time before you start it, with a short present-continuous activeForm.",
 			"- Mark a todo completed immediately when it is done — do not batch completions.",
 			"- Add new todos as you discover follow-up work; keep subjects short and outcome-focused.",

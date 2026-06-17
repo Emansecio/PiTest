@@ -194,6 +194,12 @@ import {
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { setCurrentTodoManager, type TodoItem, TodoManager, type TodoState } from "./todo/todo-manager.ts";
 import {
+	buildTodoCadenceReminder,
+	classifyTodoTurn,
+	decideTodoCadenceReminder,
+	TodoCadenceTracker,
+} from "./todo-cadence.js";
+import {
 	buildDoomLoopReminder,
 	buildFailureBudgetReminder,
 	buildToolErrorReflection,
@@ -719,6 +725,16 @@ export class AgentSession {
 	// re-inject the identical ~500-char reminder every cooldown window — a repeat
 	// also requires the streak to have grown by `step` turns (see stagnation.ts).
 	private _lastStagnationReminderCount = 0;
+	// Todo cadence ("sync") detector: nudges when an in_progress todo drifts from the
+	// real work (stale for K turns, or a file mutation without a todo update). See
+	// _maybeInjectTodoCadenceReminder + ADR-0007. Persists across the session like
+	// _stagnation (NOT reset per prompt).
+	private readonly _todoCadence = new TodoCadenceTracker();
+	private _lastTodoCadenceReminderAt = 0;
+	// Todo-first safety net: non-todo work actions taken in the current prompt, plus a
+	// one-shot latch so the nudge fires at most once per prompt. Both reset in prompt().
+	private _promptWorkActions = 0;
+	private _todoFirstNudgeFired = false;
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
@@ -1589,6 +1605,7 @@ export class AgentSession {
 				}
 				this._recordGoalTurn(event.message);
 				this._maybeInjectStagnationReminder(event.message, event.toolResults);
+				this._maybeInjectTodoCadenceReminder(event.message, event.toolResults);
 				if (this._todo.takeDirty()) this._persistTodo();
 				if (this._plan.takeDirty()) this._persistPlan();
 				// Incremental persistence: flush newly-learned error fingerprints so a
@@ -1685,6 +1702,12 @@ export class AgentSession {
 		this._toolCallStats.record(event.toolName, event.isError, errorMessage);
 		// The agent looked at rendered output this turn — satisfies the visual DoD.
 		if (event.toolName === "preview" && !event.isError) this._turnUsedPreview = true;
+		// Todo-first safety net: count successful non-todo/plan work actions this prompt;
+		// at the 2nd one without a todo, the triage protocol was skipped — nudge once. ADR-0007.
+		if (!event.isError && event.toolName !== "todo" && event.toolName !== "plan") {
+			this._promptWorkActions++;
+			this._maybeFireTodoFirstNudge();
+		}
 		const args = this._toolCallArgsByCallId.get(event.toolCallId);
 		this._toolCallArgsByCallId.delete(event.toolCallId);
 		// Backfill the result hash onto the invocation recorded at start, then run
@@ -2371,6 +2394,71 @@ export class AgentSession {
 			deliverAs: "steer",
 			display: false,
 			label: "stagnation reminder",
+		});
+	}
+
+	/**
+	 * Todo-first safety net (ADR-0007): the triage protocol in the system prompt
+	 * should make the agent create a todo before non-trivial work. This catches the
+	 * miss — once the agent has taken ≥2 non-todo work actions in a prompt with an
+	 * empty todo list, fire a single silent nudge. One-shot per prompt (latched),
+	 * settings-gated via the shared todoCadenceReminder switch.
+	 */
+	private _maybeFireTodoFirstNudge(): void {
+		if (this._todoFirstNudgeFired) return;
+		if (this._promptWorkActions < 2) return;
+		if (!this._todo.isEmpty()) return;
+		const cfg = this.settingsManager.getToolFeedbackSettings().todoCadenceReminder;
+		if (!cfg.enabled) return;
+		this._todoFirstNudgeFired = true;
+		const content = [
+			"<todo-first-reminder>",
+			"You have taken several actions without a todo list. If this task needs more than one step " +
+				"or any investigation, create a todo now (even a single '1. Identify X') and mark one " +
+				"in_progress so your progress stays tracked.",
+			"</todo-first-reminder>",
+		].join("\n");
+		this._fireReminder("pi.todo-first-nudge", content, {
+			deliverAs: "steer",
+			display: false,
+			label: "todo-first nudge",
+		});
+	}
+
+	/**
+	 * Todo cadence ("sync") reminder (ADR-0007): hand the enumerated todo list back
+	 * to the model and ask it to update status when the list has drifted from the
+	 * real work — an item sits in_progress for K turns with no todo update, or a file
+	 * was mutated this turn without touching the todo. Reminds, never auto-completes.
+	 * Delivered as a steer (lands before the next turn while the loop is hot, like
+	 * stagnation). Settings-gated + cooldown-throttled.
+	 */
+	private _maybeInjectTodoCadenceReminder(message: AgentMessage, toolResults: ToolResultMessage[]): void {
+		const cfg = this.settingsManager.getToolFeedbackSettings().todoCadenceReminder;
+		if (!cfg.enabled) return;
+		const { touchedTodo, mutated } = classifyTodoTurn(message, toolResults);
+		const hasInProgress = this._todo.hasInProgress();
+		const staleTurns = this._todoCadence.observe({ hasInProgress, touchedTodo });
+		const mutatedWithoutTodo = mutated && !touchedTodo && !this._todo.isEmpty();
+		const decision = decideTodoCadenceReminder({
+			enabled: cfg.enabled,
+			threshold: cfg.threshold,
+			staleTurns,
+			mutatedWithoutTodo,
+			lastFiredAt: this._lastTodoCadenceReminderAt,
+			now: Date.now(),
+			cooldownMs: cfg.cooldownMs,
+		});
+		if (decision.action === "none") return;
+		this._lastTodoCadenceReminderAt = decision.nextLastFiredAt;
+		const items = this._todo.list();
+		const staleItem = items.find((t) => t.status === "in_progress");
+		const reason = mutatedWithoutTodo ? "mutated" : "stale";
+		const content = buildTodoCadenceReminder({ items, staleItem, reason });
+		this._fireReminder("pi.todo-cadence-reminder", content, {
+			deliverAs: "steer",
+			display: false,
+			label: "todo cadence reminder",
 		});
 	}
 
@@ -3204,6 +3292,10 @@ export class AgentSession {
 		this._turnTouchedFilePaths.clear();
 		this._turnTouchedVisual = false;
 		this._turnUsedPreview = false;
+		// Per-prompt reset for the todo-first safety net (the cadence tracker itself
+		// persists across the session, like _stagnation).
+		this._promptWorkActions = 0;
+		this._todoFirstNudgeFired = false;
 		// Reset the per-turn, per-tool failure budget so each tool starts the turn
 		// with a fresh allowance. Re-armed before every goal continuation below so
 		// the budget is per model-attempt, not shared across the whole goal.
