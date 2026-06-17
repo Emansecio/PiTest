@@ -288,6 +288,14 @@ export function createMcpExtension(options: McpExtensionOptions) {
 				ensureDiscoveryActive(deferredCount);
 				void discoverResourcesAndPrompts();
 			},
+			// A server re-listed its tools at runtime (notifications/tools/list_changed):
+			// register whatever is newly advertised so new tools become callable without
+			// a reconnect. registerNewTools skips already-registered names (idempotent);
+			// tools removed by the server stay registered but simply fail if called.
+			onToolsChanged: () => {
+				const deferredCount = registerNewTools();
+				ensureDiscoveryActive(deferredCount);
+			},
 		});
 
 		// Connect on session_start so we capture failures into status diagnostics.

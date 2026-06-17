@@ -57,6 +57,7 @@ interface Pending {
 type StdioChild = ChildProcessByStdio<Writable, Readable, Readable>;
 
 export class StdioTransport implements McpTransport {
+	onNotification?: (method: string, params?: Record<string, unknown>) => void;
 	private name: string;
 	private config: McpServerConfig;
 	private proc?: StdioChild;
@@ -178,10 +179,14 @@ export class StdioTransport implements McpTransport {
 
 	private routeMessage(json: unknown): void {
 		if (!json || typeof json !== "object") return;
-		const msg = json as JsonRpcResponse & { method?: string };
-		// Server-initiated notifications/requests (no id, or a method we don't
-		// implement) are ignored — Pit does not expose sampling/roots back.
-		if (!("id" in msg) || msg.id === undefined || msg.id === null) return;
+		const msg = json as JsonRpcResponse & { method?: string; params?: Record<string, unknown> };
+		// Server-initiated notification (method, no id): forward to the client (e.g.
+		// notifications/tools/list_changed). Server→client REQUESTS (method + id,
+		// sampling/roots) are not implemented and left unanswered.
+		if (!("id" in msg) || msg.id === undefined || msg.id === null) {
+			if (typeof msg.method === "string") this.onNotification?.(msg.method, msg.params);
+			return;
+		}
 		const p = this.pending.get(msg.id);
 		if (!p) return;
 		this.pending.delete(msg.id);

@@ -148,6 +148,12 @@ is no background reconnect loop.
 Each MCP response body is capped (25 MB) and structurally crushed on overflow,
 the only tool surface that could otherwise blow past the context budget.
 
+A server may also announce catalog changes at runtime: on
+`notifications/tools/list_changed` (delivered over a persistent stdio/SSE channel)
+Pit re-lists and registers the newly advertised tools without a reconnect.
+`resources/list_changed` is likewise observed (resource reads are on-demand, so no
+re-registration is needed).
+
 ## Inspection
 
 `/mcp` lists every configured server, its connection state, and the tools it

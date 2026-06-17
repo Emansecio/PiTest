@@ -28,6 +28,8 @@ export interface McpManagerOptions {
 	servers: Record<string, McpServerConfig>;
 	/** Callback invoked when a server's state changes (connected, disconnected, error). */
 	onStateChange?: (state: McpConnectionState) => void;
+	/** Invoked when a server re-listed its tools at runtime (tools/list_changed) so the host can re-register. */
+	onToolsChanged?: (serverName: string) => void;
 	/** Max consecutive reconnect attempts per call. Default: 1. */
 	maxReconnectAttempts?: number;
 }
@@ -44,18 +46,23 @@ interface ServerEntry {
 export class McpManager {
 	private entries = new Map<string, ServerEntry>();
 	private onStateChange?: (state: McpConnectionState) => void;
+	private onToolsChanged?: (serverName: string) => void;
 	private maxReconnectAttempts: number;
 	private disposed = false;
 
 	constructor(options: McpManagerOptions) {
 		this.onStateChange = options.onStateChange;
+		this.onToolsChanged = options.onToolsChanged;
 		this.maxReconnectAttempts = options.maxReconnectAttempts ?? 1;
 		for (const [name, config] of Object.entries(options.servers)) {
 			if (config.disabled) continue;
+			const client = new McpClient(name, config);
+			// Runtime tools/list_changed → host re-registers the (possibly new) tools.
+			client.onToolsChanged = () => this.onToolsChanged?.(name);
 			this.entries.set(name, {
 				name,
 				config,
-				client: new McpClient(name, config),
+				client,
 				connected: false,
 				reconnectAttempts: 0,
 			});

@@ -52,6 +52,12 @@ export interface McpTransport {
 	request<T = unknown>(message: JsonRpcRequest, signal?: AbortSignal, timeoutMs?: number): Promise<JsonRpcResponse<T>>;
 	/** Fire a notification (no response expected). Failures are non-fatal. */
 	notify(message: JsonRpcNotification, signal?: AbortSignal): Promise<void>;
+	/**
+	 * Sink for server-initiated notifications (no id) arriving on a persistent
+	 * channel — e.g. `notifications/tools/list_changed`. Set by McpClient; only the
+	 * persistent transports (stdio, sse, and an SSE-response on http) ever call it.
+	 */
+	onNotification?: (method: string, params?: Record<string, unknown>) => void;
 	/** Swap the (already env-resolved) config — used to inject a refreshed OAuth bearer before reconnect. */
 	updateConfig?(config: McpServerConfig): void;
 	/** Tear down: kill the subprocess (stdio), close the channel (sse), clear session (http). */

@@ -29,6 +29,7 @@ interface Pending {
 const ENDPOINT_WAIT_MS = 15_000;
 
 export class SseTransport implements McpTransport {
+	onNotification?: (method: string, params?: Record<string, unknown>) => void;
 	private name: string;
 	private config: McpServerConfig;
 	private postUrl?: string;
@@ -122,7 +123,7 @@ export class SseTransport implements McpTransport {
 					this.postUrl = new URL(ev.data, this.config.url ?? "").toString();
 					onEndpoint();
 				} else if (ev.event === "message" && ev.data) {
-					let parsed: JsonRpcResponse & { method?: string };
+					let parsed: JsonRpcResponse & { method?: string; params?: Record<string, unknown> };
 					try {
 						parsed = JSON.parse(ev.data);
 					} catch {
@@ -135,6 +136,9 @@ export class SseTransport implements McpTransport {
 							clearTimeout(p.timer);
 							p.resolve(parsed);
 						}
+					} else if (typeof parsed?.method === "string") {
+						// Server-initiated notification (e.g. tools/list_changed).
+						this.onNotification?.(parsed.method, parsed.params);
 					}
 				}
 			}

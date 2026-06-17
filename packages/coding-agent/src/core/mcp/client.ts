@@ -59,6 +59,11 @@ export class McpClient {
 	private tools: McpToolSchema[] = [];
 	/** `Bearer <token>` from OAuth, injected when the server has no static Authorization header. */
 	private authHeader?: string;
+	/** Set by the manager: invoked after a runtime tools/list_changed re-list so tools get re-registered. */
+	onToolsChanged?: () => void;
+	/** Set by the manager: invoked on a runtime resources/list_changed notification. */
+	onResourcesChanged?: () => void;
+	private relistInFlight = false;
 
 	constructor(name: string, config: McpServerConfig) {
 		this.name = name;
@@ -70,6 +75,35 @@ export class McpClient {
 		// Resolve ${VAR} / !cmd in url/headers/env/args at the point of use; the raw
 		// config is kept for timeout/display so secrets never land in stored state.
 		this.transport = createTransport(name, this.transportConfig());
+		// Receive server-initiated notifications (persistent transports only).
+		this.transport.onNotification = (method) => this.handleNotification(method);
+	}
+
+	/**
+	 * React to a server list-changed notification by re-listing at runtime — no
+	 * reconnect needed. A tools change re-lists and asks the host to re-register
+	 * (new tools become callable); a resources change just signals the host. The
+	 * in-flight guard collapses a burst of notifications into one refresh.
+	 */
+	private handleNotification(method: string): void {
+		if (method === "notifications/tools/list_changed") {
+			void this.relistTools();
+		} else if (method === "notifications/resources/list_changed") {
+			this.onResourcesChanged?.();
+		}
+	}
+
+	private async relistTools(): Promise<void> {
+		if (this.relistInFlight) return;
+		this.relistInFlight = true;
+		try {
+			await this.refreshTools();
+			this.onToolsChanged?.();
+		} catch {
+			// Best-effort: a failed re-list leaves the prior catalog in place.
+		} finally {
+			this.relistInFlight = false;
+		}
 	}
 
 	/** Whether the user configured a static Authorization header (which takes precedence over OAuth). */

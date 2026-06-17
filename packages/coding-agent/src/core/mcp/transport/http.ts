@@ -99,6 +99,7 @@ function concatChunks(chunks: Uint8Array[], total: number): Uint8Array {
 }
 
 export class HttpTransport implements McpTransport {
+	onNotification?: (method: string, params?: Record<string, unknown>) => void;
 	private name: string;
 	private config: McpServerConfig;
 	// Streamable HTTP session id. Spec-compliant servers (official SDK with a
@@ -219,10 +220,14 @@ export class HttpTransport implements McpTransport {
 			} catch {
 				continue; // ignore non-JSON frames (heartbeats etc.)
 			}
-			// Only the response to our request matters; ignore server-initiated
-			// notifications/requests interleaved on the stream.
+			// The response to our request ends the drain; a server notification
+			// (method, no matching id) interleaved on the stream is forwarded.
 			if (parsed && typeof parsed === "object" && "id" in parsed && parsed.id === id) {
 				return parsed;
+			}
+			const note = parsed as { method?: string; params?: Record<string, unknown> };
+			if (note && typeof note.method === "string" && !("id" in (parsed as object))) {
+				this.onNotification?.(note.method, note.params);
 			}
 		}
 		throw new McpTransportError(`MCP ${this.name} ${method}: SSE stream ended without a matching response`);
