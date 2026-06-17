@@ -74,4 +74,22 @@ describe("handleMcpCommand", () => {
 		expect(parsed.mcpServers.j.url).toBe("https://e/sse");
 		expect(parsed.mcpServers.j.transport).toBe("sse");
 	});
+
+	it("disable then enable toggles the disabled flag in the scope file", async () => {
+		await handleMcpCommand(["mcp", "add", "fs", "npx", "server-fs"]);
+		await handleMcpCommand(["mcp", "disable", "fs"]);
+		expect(JSON.parse(readFileSync(join(dir, ".mcp.local.json"), "utf-8")).mcpServers.fs.disabled).toBe(true);
+		await handleMcpCommand(["mcp", "enable", "fs"]);
+		expect(JSON.parse(readFileSync(join(dir, ".mcp.local.json"), "utf-8")).mcpServers.fs.disabled).toBeUndefined();
+	});
+
+	it("get returns true for an existing server and sets exit 1 for a missing one", async () => {
+		await handleMcpCommand(["mcp", "add", "fs", "npx", "server-fs"]);
+		process.exitCode = undefined;
+		expect(await handleMcpCommand(["mcp", "get", "fs"])).toBe(true);
+		expect(process.exitCode).not.toBe(1);
+		await handleMcpCommand(["mcp", "get", "nope"]);
+		expect(process.exitCode).toBe(1);
+		process.exitCode = undefined;
+	});
 });

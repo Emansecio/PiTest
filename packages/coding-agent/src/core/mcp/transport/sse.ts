@@ -99,6 +99,12 @@ export class SseTransport implements McpTransport {
 
 		try {
 			await endpointReady;
+		} catch (err) {
+			// start() failed (timeout / channel closed before `endpoint`): tear the
+			// background GET reader down so its fetch+stream don't leak until the next
+			// start()/dispose().
+			this.disposeChannel();
+			throw err;
 		} finally {
 			signal?.removeEventListener("abort", onOuterAbort);
 		}

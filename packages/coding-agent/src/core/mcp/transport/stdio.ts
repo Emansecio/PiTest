@@ -29,6 +29,25 @@ import {
 /** Cap retained stderr so a chatty server can't grow memory unbounded. */
 const MAX_STDERR_BYTES = 64 * 1024;
 
+// Best-effort safety net: if the host exits without a graceful dispose (crash,
+// SIGKILL of the agent), don't leak the spawned MCP server subprocesses. Mirrors
+// the LSP client's exit hook. Registered lazily on the first spawn.
+const liveStdioProcs = new Set<StdioChild>();
+let exitHookRegistered = false;
+function registerStdioExitHook(): void {
+	if (exitHookRegistered) return;
+	exitHookRegistered = true;
+	process.on("exit", () => {
+		for (const proc of liveStdioProcs) {
+			try {
+				proc.kill();
+			} catch {
+				// ignore
+			}
+		}
+	});
+}
+
 interface Pending {
 	resolve: (response: JsonRpcResponse) => void;
 	reject: (error: Error) => void;
@@ -91,6 +110,8 @@ export class StdioTransport implements McpTransport {
 			shell: useShell,
 		}) as StdioChild;
 		this.proc = proc;
+		registerStdioExitHook();
+		liveStdioProcs.add(proc);
 
 		proc.stdout.on("data", (chunk: Buffer) => this.onStdoutData(chunk));
 		proc.stderr.on("data", (chunk: Buffer) => {
@@ -110,6 +131,7 @@ export class StdioTransport implements McpTransport {
 	private onExit(code: number | null): void {
 		if (this.exited) return;
 		this.exited = true;
+		if (this.proc) liveStdioProcs.delete(this.proc);
 		const stderr = this.stderrBuffer.trim();
 		this.exitError = new McpTransportError(
 			stderr
@@ -234,6 +256,7 @@ export class StdioTransport implements McpTransport {
 		const proc = this.proc;
 		if (!proc) return;
 		this.proc = undefined;
+		liveStdioProcs.delete(proc);
 		try {
 			if (typeof proc.pid === "number") killProcessTree(proc.pid);
 			else proc.kill();

@@ -179,7 +179,7 @@ export class HttpTransport implements McpTransport {
 
 			const contentType = response.headers.get("content-type") ?? "";
 			if (contentType.includes("text/event-stream")) {
-				return await this.readSseResponse<T>(response, message.id, method);
+				return await this.readSseResponse<T>(response, message.id, method, controller.signal);
 			}
 
 			const rawBody = await readBodyWithCap(response, `MCP ${this.name} ${method}`);
@@ -200,12 +200,15 @@ export class HttpTransport implements McpTransport {
 		response: Response,
 		id: number | string,
 		method: string,
+		signal: AbortSignal,
 	): Promise<JsonRpcResponse<T>> {
 		if (!response.body) {
 			throw new McpTransportError(`MCP ${this.name} ${method}: SSE response with no body`);
 		}
+		// Forward the request's abort/timeout signal so a stalled SSE body is
+		// cancelled deterministically (not only via the fetch stream teardown).
 		for await (const ev of parseSseStream(response.body, {
-			signal: undefined,
+			signal,
 			label: `MCP ${this.name} ${method}`,
 			maxBytes: MAX_MCP_RESPONSE_BYTES,
 		})) {
