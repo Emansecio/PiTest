@@ -31,6 +31,16 @@ export { McpTransportError };
 const PROTOCOL_VERSION = "2025-06-18";
 const CLIENT_INFO = { name: "pi-coding-agent", version: "0.1.0" };
 
+/**
+ * Whether a transport error is an HTTP 401/403 (auth rejected before the request
+ * was processed). A 401 means the bearer was rejected at the gate, so refreshing
+ * and retrying the SAME call once is safe — the call never reached business logic.
+ */
+function isUnauthorizedError(err: unknown): boolean {
+	if (!(err instanceof McpTransportError)) return false;
+	return /\bHTTP 401\b/.test(err.message) || /\bHTTP 403\b/.test(err.message);
+}
+
 interface JsonRpcRequest {
 	jsonrpc: "2.0";
 	id: number | string;
@@ -87,6 +97,21 @@ export class McpClient {
 		if (token) this.authHeader = `Bearer ${token.accessToken}`;
 	}
 
+	/**
+	 * Force an OAuth refresh regardless of the stored expiry — used when the server
+	 * answers 401 (the token was revoked/rotated server-side, or had no `expires_in`
+	 * so `isTokenExpired` couldn't predict it). Re-injects the new bearer into the
+	 * transport. Returns true only if a fresh token was obtained.
+	 */
+	private async forceTokenRefresh(): Promise<boolean> {
+		if (!this.config.url || this.hasStaticAuth()) return false;
+		const refreshed = await refreshMcpToken(this.name);
+		if (!refreshed) return false;
+		this.authHeader = `Bearer ${refreshed.accessToken}`;
+		this.transport.updateConfig?.(this.transportConfig());
+		return true;
+	}
+
 	get serverName(): string {
 		return this.name;
 	}
@@ -134,20 +159,28 @@ export class McpClient {
 		// start() resets/(re)opens the transport so a reconnect re-handshakes with
 		// fresh state (no stale HTTP session id, no dead subprocess, no dead channel).
 		await this.transport.start(signal);
-		const result = await this.rpc<{
+		const initParams = {
+			protocolVersion: PROTOCOL_VERSION,
+			capabilities: { tools: {}, resources: {}, prompts: {} },
+			clientInfo: CLIENT_INFO,
+		};
+		type InitResult = {
 			serverInfo?: { name?: string; version?: string };
 			protocolVersion?: string;
 			capabilities?: Record<string, unknown>;
-		}>(
-			"initialize",
-			{
-				protocolVersion: PROTOCOL_VERSION,
-				capabilities: { tools: {}, resources: {}, prompts: {} },
-				clientInfo: CLIENT_INFO,
-			},
-			signal,
-			15_000,
-		);
+		};
+		let result: InitResult;
+		try {
+			result = await this.rpc<InitResult>("initialize", initParams, signal, 15_000);
+		} catch (err) {
+			// Stored token rejected at handshake (revoked/rotated, or no expiry to
+			// pre-refresh): force a refresh and re-handshake once.
+			if (isUnauthorizedError(err) && (await this.forceTokenRefresh())) {
+				result = await this.rpc<InitResult>("initialize", initParams, signal, 15_000);
+			} else {
+				throw err;
+			}
+		}
 		this.serverInfo = result.serverInfo;
 		const caps = result.capabilities ?? {};
 		this.capabilities = {
@@ -189,7 +222,18 @@ export class McpClient {
 	}
 
 	async callTool(toolName: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallToolResult> {
-		return this.rpc<McpCallToolResult>("tools/call", { name: toolName, arguments: args }, signal);
+		const params = { name: toolName, arguments: args };
+		try {
+			return await this.rpc<McpCallToolResult>("tools/call", params, signal);
+		} catch (err) {
+			// A 401 means the OAuth bearer was rejected (revoked/rotated, or it never
+			// had an expiry so we couldn't refresh proactively). Refresh once and retry
+			// the same call — it was rejected at the auth gate, never executed.
+			if (isUnauthorizedError(err) && (await this.forceTokenRefresh())) {
+				return await this.rpc<McpCallToolResult>("tools/call", params, signal);
+			}
+			throw err;
+		}
 	}
 
 	/** List resources (paginated, capped). Returns [] if the server has no resources capability. */

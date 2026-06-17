@@ -11,6 +11,7 @@
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import {
+	capMcpText,
 	McpManager,
 	type McpPromptDescriptor,
 	type McpServerConfig,
@@ -313,6 +314,59 @@ export function createMcpExtension(options: McpExtensionOptions) {
 
 		pi.on("session_shutdown", () => {
 			manager.dispose();
+		});
+
+		// Expand `@<server>:<uri>` mentions in the user's prompt into resource content
+		// (parity with Claude Code's `@server:protocol://...`). Only mentions whose
+		// `<server>` is a connected MCP server with the resources capability are
+		// expanded; anything else (emails, plain @handles) is left untouched. The
+		// resolved content is injected as a display:false context message (LLM-visible,
+		// TUI-quiet), bounded so it can't blow the before_agent_start TTFT budget.
+		const MENTION_RE = /@([A-Za-z0-9_-]+):([^\s]+)/g;
+		pi.on("before_agent_start", async (event) => {
+			const prompt = event.prompt;
+			if (!prompt.includes("@")) return;
+			const seen = new Set<string>();
+			const targets: Array<{ server: string; uri: string }> = [];
+			for (const m of prompt.matchAll(MENTION_RE)) {
+				const server = m[1];
+				// Trim trailing prose punctuation a URI wouldn't really end with.
+				const uri = m[2].replace(/[.,;:!?)\]}]+$/, "");
+				const key = `${server} ${uri}`;
+				if (seen.has(key)) continue;
+				if (!manager.getClient(server)?.getCapabilities().resources) continue;
+				seen.add(key);
+				targets.push({ server, uri });
+			}
+			if (targets.length === 0) return;
+
+			// Bounded so a slow server can't stall the turn (handler budget is 5s).
+			const signal = AbortSignal.timeout(4_000);
+			const blocks = await Promise.all(
+				targets.map(async ({ server, uri }) => {
+					const client = manager.getClient(server);
+					if (!client) return `[@${server}:${uri}] server no longer connected`;
+					try {
+						const result = await client.readResource(uri, signal);
+						const text = (result.contents ?? [])
+							.map((c) =>
+								typeof c.text === "string" ? c.text : c.blob ? `(binary ${c.mimeType ?? "resource"})` : "",
+							)
+							.filter(Boolean)
+							.join("\n");
+						return `[@${server}:${uri}]\n${capMcpText(text || "(empty resource)")}`;
+					} catch (err) {
+						return `[@${server}:${uri}] error: ${err instanceof Error ? err.message : String(err)}`;
+					}
+				}),
+			);
+			return {
+				message: {
+					customType: "mcp.resource",
+					content: `Referenced MCP resources:\n\n${blocks.join("\n\n")}`,
+					display: false,
+				},
+			};
 		});
 
 		pi.registerCommand("mcp", {

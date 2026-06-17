@@ -92,6 +92,10 @@ function createFakePi() {
 		getActiveTools: () => activeTools,
 		fireSessionStart: () => handlers.get("session_start")?.({ type: "session_start" }, {}),
 		runCommand: (name: string, args: string) => commands.get(name)?.(args, { hasUI: false }),
+		fireBeforeAgentStart: (prompt: string) =>
+			handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt }, {}) as Promise<
+				{ message?: { content: string } } | undefined
+			>,
 	};
 }
 
@@ -135,5 +139,26 @@ describe("MCP resources + prompts wiring", () => {
 
 		await harness.runCommand("mcp__full__greet", "world");
 		expect(harness.userMessages).toEqual(["Hello world"]);
+	});
+
+	it("expands @server:uri mentions in the prompt into a resource context message", async () => {
+		installFetch();
+		const harness = createFakePi();
+		createMcpExtension({ settings: { servers: { full: { url: URL } } } })(harness.pi);
+		await harness.fireSessionStart();
+
+		const result = await harness.fireBeforeAgentStart("look at @full:file://a.txt please");
+		expect(result?.message?.content).toContain("[@full:file://a.txt]");
+		expect(result?.message?.content).toContain("hello-resource");
+	});
+
+	it("leaves a mention for an unknown server untouched (no expansion)", async () => {
+		installFetch();
+		const harness = createFakePi();
+		createMcpExtension({ settings: { servers: { full: { url: URL } } } })(harness.pi);
+		await harness.fireSessionStart();
+
+		const result = await harness.fireBeforeAgentStart("ping @someone:hello on slack");
+		expect(result).toBeUndefined();
 	});
 });
