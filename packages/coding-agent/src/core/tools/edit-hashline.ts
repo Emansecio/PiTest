@@ -334,8 +334,10 @@ export function createEditHashlineToolDefinition(
 									return;
 								}
 
-								await ops.writeFile(absolutePath, finalContent);
-								if (aborted) return;
+								await ops.writeFile(absolutePath, finalContent, signal);
+								// Committed (atomic rename): stop honoring abort so a late ESC can't
+								// reject a write that already landed (a pre-commit abort throws and is
+								// handled in the catch with the original file intact).
 								__written = finalContent;
 								if (signal) signal.removeEventListener("abort", onAbort);
 

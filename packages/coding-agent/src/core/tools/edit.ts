@@ -1,9 +1,10 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Box, Container, Spacer, Text } from "@pit/tui";
 import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile, stat as fsStat, writeFile as fsWriteFile } from "fs/promises";
+import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
+import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import type { ToolDefinition } from "../extensions/types.js";
 import { attachPostWriteDiagnostics } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
@@ -79,15 +80,21 @@ export interface EditToolDetails {
 export interface EditOperations {
 	/** Read file contents as a Buffer */
 	readFile: (absolutePath: string) => Promise<Buffer>;
-	/** Write content to a file */
-	writeFile: (absolutePath: string, content: string) => Promise<void>;
+	/**
+	 * Write content to a file. The optional `signal` lets an atomic implementation
+	 * honor abort up to its commit point (see writeFileAtomic): an abort before the
+	 * rename leaves the original untouched.
+	 */
+	writeFile: (absolutePath: string, content: string, signal?: AbortSignal) => Promise<void>;
 	/** Check if file is readable and writable (throw if not) */
 	access: (absolutePath: string) => Promise<void>;
 }
 
 export const defaultEditOperations: EditOperations = {
 	readFile: (path) => fsReadFile(path),
-	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
+	// Atomic (temp + rename): a concurrent `read` of the same path never sees a
+	// half-written file, and an abort before the rename leaves the original intact.
+	writeFile: (path, content, signal) => writeFileAtomic(path, content, signal),
 	access: (path) => fsAccess(path, constants.R_OK | constants.W_OK),
 };
 
@@ -466,12 +473,14 @@ export function createEditToolDefinition(
 									return;
 								}
 
-								await ops.writeFile(absolutePath, finalContent);
+								await ops.writeFile(absolutePath, finalContent, signal);
 
-								// Check if aborted after writing.
-								if (aborted) {
-									return;
-								}
+								// Point of no return: the file is committed (atomic rename done).
+								// Stop honoring abort so a late ESC can't reject a result that
+								// already landed on disk — which would desync disk vs the model and
+								// risk a duplicate edit on retry. (A pre-commit abort throws from
+								// writeFile and is handled in the catch with the original intact.)
+								if (signal) signal.removeEventListener("abort", onAbort);
 
 								__written = finalContent;
 								__omissionBase = baseContent;

@@ -7,9 +7,10 @@
  * filesystem I/O are Node-native.
  */
 
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import type { AgentTool } from "@pit/agent-core";
 import { type Static, Type } from "typebox";
+import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { runRenameTransaction } from "../refactor-transaction.ts";
 import { resolveToCwd } from "../tools/path-utils.ts";
@@ -615,7 +616,7 @@ export function createLspToolDefinition(
 									return out;
 								},
 								restoreFiles: async (snaps) => {
-									for (const s of snaps) await writeFileAtomicLocal(uriToFile(s.uri), s.content);
+									for (const s of snaps) await writeFileAtomic(uriToFile(s.uri), s.content);
 								},
 							});
 							if (tx.rolledBack) {
@@ -667,16 +668,4 @@ export function createLspToolDefinition(
 
 export function createLspTool(cwd: string, options?: LspToolOptions): AgentTool<typeof lspSchema> {
 	return wrapToolDefinition(createLspToolDefinition(cwd, options));
-}
-
-/**
- * Atomic write used by the rename transaction rollback: write a sibling tmp file
- * then rename over the original, so a crash mid-restore can't leave a half-written
- * file. Mirrors the session-manager writeFileAtomic idea without importing it
- * (keeps the LSP tool off that dependency).
- */
-async function writeFileAtomicLocal(filePath: string, content: string): Promise<void> {
-	const tmp = `${filePath}.tmp-${process.pid}`;
-	await writeFile(tmp, content, "utf-8");
-	await rename(tmp, filePath);
 }

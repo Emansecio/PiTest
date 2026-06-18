@@ -1,9 +1,10 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Container, Text } from "@pit/tui";
-import { mkdir as fsMkdir, writeFile as fsWriteFile } from "fs/promises";
+import { mkdir as fsMkdir } from "fs/promises";
 import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
+import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { attachPostWriteDiagnostics, maybeFormat } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
@@ -58,14 +59,16 @@ export type WriteToolInput = Static<typeof writeSchema>;
  * Override these to delegate file writing to remote systems (for example SSH).
  */
 export interface WriteOperations {
-	/** Write content to a file */
-	writeFile: (absolutePath: string, content: string) => Promise<void>;
+	/** Write content to a file. `signal` lets an atomic impl honor abort up to the rename. */
+	writeFile: (absolutePath: string, content: string, signal?: AbortSignal) => Promise<void>;
 	/** Create directory recursively */
 	mkdir: (dir: string) => Promise<void>;
 }
 
 const defaultWriteOperations: WriteOperations = {
-	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
+	// Atomic (temp + rename): a concurrent `read` never sees a partially-written
+	// file, and an abort before the rename leaves any existing file untouched.
+	writeFile: (path, content, signal) => writeFileAtomic(path, content, signal),
 	mkdir: (dir) => fsMkdir(dir, { recursive: true }).then(() => {}),
 };
 
@@ -281,8 +284,10 @@ export function createWriteToolDefinition(
 									if (aborted) return;
 									// Write the file contents.
 									const formatted = await maybeFormat(absolutePath, content, cwd, signal);
-									await ops.writeFile(absolutePath, formatted.content);
-									if (aborted) return;
+									await ops.writeFile(absolutePath, formatted.content, signal);
+									// Committed (atomic rename): stop honoring abort so a late ESC
+									// can't reject a write that already landed. A pre-commit abort
+									// throws from writeFile and is caught below with disk intact.
 									__written = formatted.content;
 									signal?.removeEventListener("abort", onAbort);
 									resolve({

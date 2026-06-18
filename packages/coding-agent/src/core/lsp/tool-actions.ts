@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { killProcessTree } from "../../utils/shell.ts";
 import { resolveToCwd } from "../tools/path-utils.ts";
 import {
 	ensureFileOpen,
@@ -124,9 +125,25 @@ function runSubprocess(command: string[], cwd: string, signal?: AbortSignal): Pr
 			windowsHide: true,
 		});
 		let out = "";
+		// Cap accumulation: only the first 50 lines are kept downstream, so a
+		// chatty compiler (thousands of diagnostics) must not grow the heap. Stop
+		// appending once over the cap; the head is what we report.
+		const MAX_OUTPUT_BYTES = 512 * 1024;
+		let capped = false;
+		const append = (c: Buffer) => {
+			if (capped) return;
+			out += c.toString("utf-8");
+			if (out.length > MAX_OUTPUT_BYTES) {
+				out = out.slice(0, MAX_OUTPUT_BYTES);
+				capped = true;
+			}
+		};
 		const onAbort = () => {
 			try {
-				child.kill();
+				// On Windows shell:true wraps the compiler in cmd.exe; child.kill only
+				// signals the wrapper and leaves tsc/cargo running. Tear down the tree.
+				if (child.pid !== undefined) killProcessTree(child.pid);
+				else child.kill();
 			} catch {
 				// ignore
 			}
@@ -135,12 +152,8 @@ function runSubprocess(command: string[], cwd: string, signal?: AbortSignal): Pr
 			if (signal.aborted) onAbort();
 			else signal.addEventListener("abort", onAbort, { once: true });
 		}
-		child.stdout?.on("data", (c: Buffer) => {
-			out += c.toString("utf-8");
-		});
-		child.stderr?.on("data", (c: Buffer) => {
-			out += c.toString("utf-8");
-		});
+		child.stdout?.on("data", append);
+		child.stderr?.on("data", append);
 		child.on("error", (err) => {
 			signal?.removeEventListener("abort", onAbort);
 			reject(err);

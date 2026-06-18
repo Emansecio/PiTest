@@ -421,7 +421,10 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 			stderrBuffer: "",
 			exitCode: null,
 		};
-		clients.set(key, client);
+		// NOTE: do NOT publish to `clients` yet — only after initialize+initialized
+		// complete (below). Publishing here would let a concurrent caller hit the
+		// clients.get fast-path and use a server that hasn't seen `initialize`,
+		// emitting requests it may reject. In-flight callers de-dup via clientLocks.
 
 		proc.stdout.on("data", (chunk: Buffer) => onStdoutData(client, chunk));
 		proc.stderr.on("data", (chunk: Buffer) => {
@@ -478,6 +481,9 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 			if (!initResult) throw new Error("Failed to initialize LSP: no response");
 			client.serverCapabilities = initResult.capabilities as LspClient["serverCapabilities"];
 			await sendNotification(client, "initialized", {});
+			// Publish only now that the server has seen initialize + initialized, so a
+			// concurrent clients.get fast-path can't return a pre-init server.
+			clients.set(key, client);
 			return client;
 		} catch (err) {
 			clients.delete(key);
