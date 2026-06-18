@@ -1,6 +1,6 @@
 # PiTuned
 
-Personal fork of pi-mono tuned for
+Personal fork of [pit](https://pit.dev) tuned for
 local interactive use. Focus: faster startup, faster agent loop, better
 prompt/tool-call quality. No public API changes — runs as a drop-in replacement
 for stock `pit`.
@@ -176,16 +176,18 @@ node scripts/bench-persistence.mjs
 PIT_TIMING=1 ./pi-test.sh --help           # per-extension load timings
 ```
 
-## Syncing upstream
+## Remotes
+
+This repo pushes to **two** mirrors, both yours:
 
 ```bash
-git fetch origin
-git rebase origin/main      # never force push
-git push pituned main
+git push origin main        # github.com/thiagovelsa/Pit
+git push pituned main        # github.com/thiagovelsa/PiTuned
 ```
 
-`origin` is upstream `earendil-works/pit`; `pituned` is this fork.
+`origin` is `thiagovelsa/Pit` and `pituned` is `thiagovelsa/PiTuned` — commits land
+directly on `main` and go to both. There is no separate upstream remote configured.
 
 ## License
 
-Same as upstream pi-mono: MIT.
+MIT.

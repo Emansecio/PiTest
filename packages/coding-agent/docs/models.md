@@ -419,7 +419,7 @@ By default pit sends per-tool `eager_input_streaming: true`. If a proxy or Anthr
       },
       "models": [
         {
-          "id": "claude-opus-4-7",
+          "id": "claude-opus-4-8",
           "reasoning": true,
           "input": ["text", "image"]
         }
