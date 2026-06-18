@@ -207,7 +207,11 @@ export function extractEdits(input: Record<string, unknown>): ExtractedEdit[] | 
 		return oldText !== undefined && newText !== undefined ? { oldText, newText } : null;
 	};
 
-	const edits = input.edits;
+	// Coerce a JSON-stringified `edits` ("[{...}]") back to an array first — some
+	// models (Opus 4.6, GLM-5.1) emit it stringified. Without this the guard sees a
+	// string, falls through to the flat shape, and silently extracts nothing.
+	const coerced = coerceJsonArrayField(input, "edits");
+	const edits = coerced.edits;
 	if (Array.isArray(edits)) {
 		const out: ExtractedEdit[] = [];
 		for (const e of edits) {
@@ -219,7 +223,7 @@ export function extractEdits(input: Record<string, unknown>): ExtractedEdit[] | 
 		return out.length > 0 ? out : null;
 	}
 	// Legacy flat single-edit shape.
-	const flat = toEdit(input);
+	const flat = toEdit(coerced);
 	return flat ? [flat] : null;
 }
 
@@ -233,11 +237,15 @@ export function extractEdits(input: Record<string, unknown>): ExtractedEdit[] | 
  * with no readable oldText, which makes that gate fail open.
  */
 export function extractEditOldTexts(input: Record<string, unknown>): string[] {
+	// Mirror extractEdits: coerce a JSON-stringified `edits` to an array so the
+	// read-guard's post-compaction verbatim check isn't silently skipped (empty
+	// oldTexts -> `.some()` vacuously passes -> a stale-summary edit clobbers).
+	const coerced = coerceJsonArrayField(input, "edits");
 	const out: string[] = [];
 	const pushIf = (v: string | undefined) => {
 		if (v !== undefined && v.length > 0) out.push(v);
 	};
-	const edits = input.edits;
+	const edits = coerced.edits;
 	if (Array.isArray(edits)) {
 		for (const e of edits) {
 			if (e && typeof e === "object") {
@@ -246,6 +254,6 @@ export function extractEditOldTexts(input: Record<string, unknown>): string[] {
 		}
 	}
 	// Legacy flat single-edit shape.
-	pushIf(coalesceAliasedString(input, "oldText", EDIT_KEY_ALIASES));
+	pushIf(coalesceAliasedString(coerced, "oldText", EDIT_KEY_ALIASES));
 	return out;
 }

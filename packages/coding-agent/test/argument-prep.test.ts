@@ -3,9 +3,30 @@ import {
 	applyKeyAliases,
 	coerceJsonArrayField,
 	composePreparers,
+	extractEditOldTexts,
+	extractEdits,
 	PATH_KEY_ALIASES,
 	prepareWithPathAliases,
 } from "../src/core/tools/argument-prep.js";
+
+describe("extractEdits / extractEditOldTexts — JSON-stringified edits coercion", () => {
+	it("extracts oldTexts when edits arrive as a JSON-encoded string", () => {
+		const input = { path: "f.ts", edits: JSON.stringify([{ oldText: "a", newText: "b" }]) };
+		expect(extractEditOldTexts(input)).toEqual(["a"]);
+		expect(extractEdits(input)).toEqual([{ oldText: "a", newText: "b" }]);
+	});
+
+	it("still handles a real array", () => {
+		const input = { path: "f.ts", edits: [{ oldText: "x", newText: "y" }] };
+		expect(extractEditOldTexts(input)).toEqual(["x"]);
+	});
+
+	it("is a no-op for a non-array string (fail-open)", () => {
+		const input = { path: "f.ts", edits: "not json" };
+		expect(extractEditOldTexts(input)).toEqual([]);
+		expect(extractEdits(input)).toBeNull();
+	});
+});
 
 describe("applyKeyAliases", () => {
 	it("renames aliases to canonical keys", () => {

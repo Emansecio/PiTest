@@ -67,7 +67,7 @@ const BASH_KEY_ALIASES = {
 	working_directory: "cwd",
 } as const;
 
-function prepareBashArguments(input: unknown): BashToolInput {
+export function prepareBashArguments(input: unknown): BashToolInput {
 	if (!input || typeof input !== "object" || Array.isArray(input)) return input as BashToolInput;
 	let args = applyKeyAliases(input as Record<string, unknown>, BASH_KEY_ALIASES);
 	// `commands: ["a", "b"]` -> `command: "a && b"`. Only triggers when canonical
@@ -79,6 +79,17 @@ function prepareBashArguments(input: unknown): BashToolInput {
 			next.command = (commands as string[]).join(" && ");
 			delete next.commands;
 			args = next;
+		}
+	}
+	// Trim whitespace the model sometimes wraps the command in ("  npm run build  ");
+	// it reaches the shell literally otherwise. bash-grounding/simple-argv already
+	// trim for parsing — this aligns execution. Clone only when it changes so a clean
+	// command keeps its reference. Surrounding whitespace is never shell-significant.
+	const withCommand = args as Record<string, unknown>;
+	if (typeof withCommand.command === "string") {
+		const trimmed = withCommand.command.trim();
+		if (trimmed !== withCommand.command) {
+			args = { ...withCommand, command: trimmed } as BashToolInput;
 		}
 	}
 	return args as BashToolInput;

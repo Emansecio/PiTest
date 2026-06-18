@@ -74,6 +74,17 @@ function getSubSchemaValidator(schema: JsonSchemaObject): ReturnType<typeof Comp
 	}
 }
 
+/**
+ * Union coercion order: numeric types are attempted before boolean so a numeric
+ * string ("1"/"0") coerces to a number, not the boolean "1"->true / "0"->false
+ * form (preserves e.g. ["boolean","number"] + "1" -> 1). Single-type schemas are
+ * unaffected — the boolean "1"/"0" coercion only kicks in when boolean is the
+ * sole type.
+ */
+function coercionTypeRank(type: string): number {
+	return type === "number" || type === "integer" ? 0 : 1;
+}
+
 function coercePrimitiveByType(value: unknown, type: string): unknown {
 	switch (type) {
 		case "number": {
@@ -111,10 +122,10 @@ function coercePrimitiveByType(value: unknown, type: string): unknown {
 				return false;
 			}
 			if (typeof value === "string") {
-				if (value === "true") {
+				if (value === "true" || value === "1") {
 					return true;
 				}
-				if (value === "false") {
+				if (value === "false" || value === "0") {
 					return false;
 				}
 			}
@@ -235,7 +246,11 @@ function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown
 	const matchesUnionMember =
 		schemaTypes.length > 1 && schemaTypes.some((schemaType) => matchesJsonType(nextValue, schemaType));
 	if (schemaTypes.length > 0 && !matchesUnionMember) {
-		for (const schemaType of schemaTypes) {
+		const ordered =
+			schemaTypes.length > 1
+				? [...schemaTypes].sort((a, b) => coercionTypeRank(a) - coercionTypeRank(b))
+				: schemaTypes;
+		for (const schemaType of ordered) {
 			const candidate = coercePrimitiveByType(nextValue, schemaType);
 			if (candidate !== nextValue) {
 				nextValue = candidate;

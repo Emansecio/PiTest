@@ -74,6 +74,8 @@ describe("validateToolArguments", () => {
 			{ schema: { type: "boolean" } as Tool["parameters"], input: "false", expected: false },
 			{ schema: { type: "boolean" } as Tool["parameters"], input: 1, expected: true },
 			{ schema: { type: "boolean" } as Tool["parameters"], input: 0, expected: false },
+			{ schema: { type: "boolean" } as Tool["parameters"], input: "1", expected: true },
+			{ schema: { type: "boolean" } as Tool["parameters"], input: "0", expected: false },
 			{ schema: { type: "string" } as Tool["parameters"], input: null, expected: "" },
 			{ schema: { type: "string" } as Tool["parameters"], input: true, expected: "true" },
 			{ schema: { type: "null" } as Tool["parameters"], input: "", expected: null },
@@ -102,8 +104,6 @@ describe("validateToolArguments", () => {
 			schema: Tool["parameters"];
 			input: unknown;
 		}> = [
-			{ schema: { type: "boolean" } as Tool["parameters"], input: "1" },
-			{ schema: { type: "boolean" } as Tool["parameters"], input: "0" },
 			{ schema: { type: "null" } as Tool["parameters"], input: "null" },
 			{ schema: { type: "integer" } as Tool["parameters"], input: "42.1" },
 		];

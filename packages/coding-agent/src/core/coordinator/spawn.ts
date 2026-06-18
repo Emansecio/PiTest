@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { Agent, type AgentMessage, type AgentTool, type BeforeToolCallResult } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
-import { type Message, streamSimple } from "@pit/ai";
+import { type Message, repairJson, streamSimple } from "@pit/ai";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { areSubagentGuardsDisabled, createSubagentGuardChain } from "../built-ins/subagent-guards.ts";
@@ -145,8 +145,15 @@ function extractJsonPayload(text: string): { ok: true; value: unknown } | { ok: 
 	try {
 		return { ok: true, value: JSON.parse(candidate) };
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		return { ok: false, error: `JSON parse failed: ${message}` };
+		// Deterministic second pass: repairJson fixes control chars / invalid escapes
+		// the model leaves in (no-op on already-valid JSON). Only runs on parse
+		// failure, so a clean payload never pays for it.
+		try {
+			return { ok: true, value: JSON.parse(repairJson(candidate)) };
+		} catch {
+			const message = err instanceof Error ? err.message : String(err);
+			return { ok: false, error: `JSON parse failed: ${message}` };
+		}
 	}
 }
 
