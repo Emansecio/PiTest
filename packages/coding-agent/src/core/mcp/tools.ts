@@ -76,7 +76,7 @@ function flattenMcpContent(result: McpCallToolResult): FlattenedContent {
 	let emittedText = false;
 	let elidedCount = 0;
 	let elidedBytes = 0;
-	for (const block of result.content) {
+	for (const block of result.content ?? []) {
 		if (block.type === "image") {
 			blocks.push({ type: "image", data: block.data, mimeType: block.mimeType });
 			continue;
@@ -105,6 +105,19 @@ function flattenMcpContent(result: McpCallToolResult): FlattenedContent {
 			type: "text",
 			text: `[+${elidedCount} blocos (${formatSize(elidedBytes)}) elididos — refine a query]`,
 		});
+	}
+	if (blocks.length === 0 && result.structuredContent !== undefined) {
+		// Spec 2025-06-18: a server with an outputSchema may return only
+		// `structuredContent` and omit `content[]`. Surface it as serialized JSON.
+		let serialized: string;
+		try {
+			serialized = JSON.stringify(result.structuredContent, null, 2);
+		} catch {
+			serialized = String(result.structuredContent);
+		}
+		if (serialized !== undefined) {
+			blocks.push({ type: "text", text: capMcpText(serialized) });
+		}
 	}
 	if (blocks.length === 0) {
 		blocks.push({ type: "text", text: isError ? "Tool reported error with no content." : "(empty response)" });

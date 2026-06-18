@@ -14,7 +14,8 @@
  * The bridge NEVER calls `ToolDefinition.execute` directly. It is constructed
  * with a `dispatcher` supplied by the agent-session that encapsulates the full
  * harness pipeline: permission-gate, tool-rewrite-rules, learned-error guard,
- * loop/doom detectors, tool_call/tool_result extension events, and rendering.
+ * loop/doom detectors, tool_execution_start/tool_execution_end events (when an
+ * event sink is wired — see `buildHarnessDispatcher`), and rendering.
  * Bypassing that pipeline would forfeit the harness — one of Pit's core
  * strengths — so the dispatcher is the only path a code-mode tool call takes.
  * The bridge's job is purely transport + safety caps (active-tool gating, result
@@ -25,6 +26,7 @@ import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
 	AgentContext,
+	AgentEvent,
 	AgentTool,
 	AgentToolCall,
 	AgentToolResult,
@@ -234,6 +236,17 @@ export interface HarnessDispatcherDeps {
 	getContext: () => AgentContext;
 	/** The assistant message that requested the `code` call (for the hook contexts). */
 	getAssistantMessage: () => AssistantMessage;
+	/**
+	 * Optional event sink, wired by the agent-session to the SAME handler the
+	 * agent loop uses. When supplied, the dispatcher emits `tool_execution_start`
+	 * before `tool.execute` and `tool_execution_end` after, mirroring the agent
+	 * loop so a code-mode `tools.x()` call shows up in telemetry / extension
+	 * events / the TUI exactly like a normal model tool call. Omitting it keeps
+	 * the dispatcher silent (used by the bridge unit test).
+	 */
+	emitEvent?: (
+		event: Extract<AgentEvent, { type: "tool_execution_start" | "tool_execution_end" }>,
+	) => void | Promise<void>;
 }
 
 function textResult(text: string): AgentToolResult<unknown> {
@@ -243,8 +256,11 @@ function textResult(text: string): AgentToolResult<unknown> {
 /**
  * Build a {@link CodeModeDispatcher} that runs each code-mode tool call through
  * the harness pipeline (rewrite → permission/block → execute → error-hints →
- * afterToolCall), mirroring the agent loop. This is the recommended value for
- * the `code` tool's `options.code.dispatcher`.
+ * afterToolCall), mirroring the agent loop. When `deps.emitEvent` is supplied it
+ * also emits `tool_execution_start`/`tool_execution_end` around the call (the two
+ * events the agent loop fires per tool), so code-mode's inner tool calls feed
+ * telemetry, extension events and the TUI like normal calls. This is the
+ * recommended value for the `code` tool's `options.code.dispatcher`.
  *
  * ── WHERE THE AGENT-SESSION CALLS THIS ──────────────────────────────────────
  * In agent-session, when assembling the coding tools' options (the `_buildRuntime`
@@ -258,6 +274,7 @@ function textResult(text: string): AgentToolResult<unknown> {
  *     afterToolCall: this.agent.afterToolCall,
  *     getContext: () => this.agent.state, // or the live AgentContext accessor
  *     getAssistantMessage: () => this._currentAssistantMessage, // synthetic ok
+ *     emitEvent: (e) => this._handleAgentEvent(e), // same sink the agent loop uses
  *   });
  *   options.code = { dispatcher, getActiveToolNames: () => this.getActiveToolNames() };
  *
@@ -280,102 +297,146 @@ export function buildHarnessDispatcher(deps: HarnessDispatcherDeps): CodeModeDis
 			arguments: args,
 		} as AgentToolCall;
 
-		// Tier 1: rewrite registry (auto rewrite / suggest-block).
-		if (deps.toolRewriteRegistry) {
-			const outcome = deps.toolRewriteRegistry.apply(call);
-			if (outcome.kind === "rejected") {
-				return { content: [{ type: "text", text: outcome.error }], isError: true };
-			}
-			if (outcome.kind === "rewritten") {
-				call = outcome.call;
-			}
+		// Mirror the agent loop: announce the call BEFORE any gating runs, with the
+		// original args. The session-wired sink records telemetry / fires extension
+		// events / surfaces it in the TUI exactly like a normal model tool call.
+		if (deps.emitEvent) {
+			await deps.emitEvent({
+				type: "tool_execution_start",
+				toolCallId: call.id,
+				toolName: call.name,
+				args: call.arguments,
+			});
 		}
 
-		// prepareArguments shim + (validation happens inside the tool wrapper).
-		let execArgs: unknown = call.arguments;
-		if (tool.prepareArguments) {
-			try {
-				execArgs = tool.prepareArguments(call.arguments);
-			} catch (err) {
-				return {
-					content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }],
-					isError: true,
-				};
-			}
-		}
+		// Track the result actually returned so we can mirror the agent loop's
+		// `tool_execution_end` on EVERY exit path below (a gate rejection, a
+		// prepareArguments throw, a block, abort, or a normal execute). Keeping
+		// start/end balanced is load-bearing: the session handler records args by
+		// callId on start and deletes them on end.
+		let finalResult: AgentToolResult<unknown> = textResult("");
+		let finalIsError = false;
 
-		// Permission / loop gate.
-		if (deps.beforeToolCall) {
-			const before = await deps.beforeToolCall(
-				{
-					assistantMessage: deps.getAssistantMessage(),
-					toolCall: call,
-					args: execArgs,
-					context: deps.getContext(),
-				},
-				signal,
-			);
-			if (signal?.aborted) {
-				return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
+		const dispatch = async (): Promise<CodeModeDispatchResult> => {
+			// Tier 1: rewrite registry (auto rewrite / suggest-block).
+			if (deps.toolRewriteRegistry) {
+				const outcome = deps.toolRewriteRegistry.apply(call);
+				if (outcome.kind === "rejected") {
+					finalResult = textResult(outcome.error);
+					finalIsError = true;
+					return { content: [{ type: "text", text: outcome.error }], isError: true };
+				}
+				if (outcome.kind === "rewritten") {
+					call = outcome.call;
+				}
 			}
-			if (before?.block) {
-				return {
-					content: [{ type: "text", text: before.reason || "Tool execution was blocked" }],
-					isError: true,
-				};
+
+			// prepareArguments shim + (validation happens inside the tool wrapper).
+			let execArgs: unknown = call.arguments;
+			if (tool.prepareArguments) {
+				try {
+					execArgs = tool.prepareArguments(call.arguments);
+				} catch (err) {
+					const msg = err instanceof Error ? err.message : String(err);
+					finalResult = textResult(msg);
+					finalIsError = true;
+					return { content: [{ type: "text", text: msg }], isError: true };
+				}
 			}
-		}
 
-		// Execute the real tool.
-		let result: AgentToolResult<unknown>;
-		let isError = false;
-		try {
-			result = await tool.execute(call.id, execArgs as never, signal, undefined, undefined);
-		} catch (err) {
-			result = textResult(err instanceof Error ? err.message : String(err));
-			isError = true;
-		}
-
-		// Tier 4: error hints (only on error, like the agent loop).
-		if (isError && deps.toolErrorHintRegistry) {
-			const outcome = deps.toolErrorHintRegistry.apply(call, result);
-			if (outcome.hints.length > 0) {
-				const hintLines = outcome.hints.map((h) => `[hint] ${h.hint}`).join("\n");
-				const merged: Array<TextContent | { type: string; text?: string }> = [
-					...result.content,
-					{ type: "text", text: hintLines } as TextContent,
-				];
-				result = { ...result, content: merged as AgentToolResult<unknown>["content"] };
-			}
-		}
-
-		// afterToolCall override hook.
-		if (deps.afterToolCall) {
-			try {
-				const after = await deps.afterToolCall(
+			// Permission / loop gate.
+			if (deps.beforeToolCall) {
+				const before = await deps.beforeToolCall(
 					{
 						assistantMessage: deps.getAssistantMessage(),
 						toolCall: call,
 						args: execArgs,
-						result,
-						isError,
 						context: deps.getContext(),
 					},
 					signal,
 				);
-				if (after) {
-					if (after.content) result = { ...result, content: after.content };
-					if (after.isError !== undefined) isError = after.isError;
+				if (signal?.aborted) {
+					finalResult = textResult("Operation aborted");
+					finalIsError = true;
+					return { content: [{ type: "text", text: "Operation aborted" }], isError: true };
 				}
+				if (before?.block) {
+					const reason = before.reason || "Tool execution was blocked";
+					finalResult = textResult(reason);
+					finalIsError = true;
+					return { content: [{ type: "text", text: reason }], isError: true };
+				}
+			}
+
+			// Execute the real tool.
+			let result: AgentToolResult<unknown>;
+			let isError = false;
+			try {
+				result = await tool.execute(call.id, execArgs as never, signal, undefined, undefined);
 			} catch (err) {
 				result = textResult(err instanceof Error ? err.message : String(err));
 				isError = true;
 			}
-		}
 
-		return {
-			content: result.content as Array<{ type: string; text?: string }>,
-			isError,
+			// Tier 4: error hints (only on error, like the agent loop).
+			if (isError && deps.toolErrorHintRegistry) {
+				const outcome = deps.toolErrorHintRegistry.apply(call, result);
+				if (outcome.hints.length > 0) {
+					const hintLines = outcome.hints.map((h) => `[hint] ${h.hint}`).join("\n");
+					const merged: Array<TextContent | { type: string; text?: string }> = [
+						...result.content,
+						{ type: "text", text: hintLines } as TextContent,
+					];
+					result = { ...result, content: merged as AgentToolResult<unknown>["content"] };
+				}
+			}
+
+			// afterToolCall override hook.
+			if (deps.afterToolCall) {
+				try {
+					const after = await deps.afterToolCall(
+						{
+							assistantMessage: deps.getAssistantMessage(),
+							toolCall: call,
+							args: execArgs,
+							result,
+							isError,
+							context: deps.getContext(),
+						},
+						signal,
+					);
+					if (after) {
+						if (after.content) result = { ...result, content: after.content };
+						if (after.isError !== undefined) isError = after.isError;
+					}
+				} catch (err) {
+					result = textResult(err instanceof Error ? err.message : String(err));
+					isError = true;
+				}
+			}
+
+			finalResult = result;
+			finalIsError = isError;
+			return {
+				content: result.content as Array<{ type: string; text?: string }>,
+				isError,
+			};
 		};
+
+		try {
+			return await dispatch();
+		} finally {
+			// Mirror the agent loop: always close with `tool_execution_end`, even on
+			// an early gate rejection or abort, so every `start` is balanced.
+			if (deps.emitEvent) {
+				await deps.emitEvent({
+					type: "tool_execution_end",
+					toolCallId: call.id,
+					toolName: call.name,
+					result: finalResult,
+					isError: finalIsError,
+				});
+			}
+		}
 	};
 }

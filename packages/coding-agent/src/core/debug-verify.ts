@@ -61,7 +61,7 @@ import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { selectLaunchAdapter } from "./dap/config.ts";
 import { dapSessionManager } from "./dap/index.ts";
 import type { DapSessionSummary, DapVariable } from "./dap/types.ts";
-import { type CheckResult, type DebuggableRepro, isDebuggableRepro } from "./verification/verification.ts";
+import { type CheckResult, type DebuggableRepro, isDebuggableRepro, withFixSite } from "./verification/verification.ts";
 
 /** Hard upper bound on the whole debug-verify excursion. Short by design. */
 const DEBUG_VERIFY_TIMEOUT_MS = 20_000;
@@ -78,6 +78,12 @@ export interface DebugVerifyContext {
 	checkResult: CheckResult;
 	/** Caller abort (turn interrupt) — honored alongside the internal timeout. */
 	signal?: AbortSignal;
+	/**
+	 * Dominant source file:line the turn edited. When present (and the file matches
+	 * the repro's ecosystem), the breakpoint binds to the corrected statement via
+	 * `withFixSite` instead of falling back to `stopOnEntry`. No-ops on invalid input.
+	 */
+	fixSite?: { file: string; line: number };
 }
 
 export interface DebugVerifyVariable {
@@ -198,6 +204,12 @@ export async function maybeRunDebugVerify(ctx: DebugVerifyContext): Promise<Debu
 		return null;
 	}
 	if (!repro) return null;
+
+	// Refine the breakpoint to the touched source line when the wire tracked one.
+	// withFixSite no-ops on invalid input or an ecosystem-mismatched file.
+	if (ctx.fixSite) {
+		repro = withFixSite(repro, ctx.fixSite.file, ctx.fixSite.line, ctx.cwd);
+	}
 
 	// Bound the entire excursion: internal timeout ∨ caller abort.
 	const timeoutSignal = AbortSignal.timeout(DEBUG_VERIFY_TIMEOUT_MS);

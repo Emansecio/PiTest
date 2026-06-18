@@ -317,6 +317,14 @@ export function formatFileOperations(arg1: string[] | OperationLists, modifiedFi
 /** Maximum characters for a tool result in serialized summaries. */
 const TOOL_RESULT_MAX_CHARS = 2000;
 
+/**
+ * Maximum characters for assistant thinking in serialized summaries. A head-only
+ * cut amputated the conclusion — the decision the SUMMARIZATION prompt asks for
+ * ("Key Decisions") lives at the END of the reasoning. Use a head+tail excerpt so
+ * the final decision survives.
+ */
+const THINKING_MAX_CHARS = 1500;
+
 /** Fraction of the truncation budget kept from the head; the remainder is kept from the tail. */
 const TRUNCATE_HEAD_FRACTION = 0.65;
 
@@ -485,7 +493,7 @@ export function serializeConversation(messages: Message[]): string {
 
 			if (thinkingParts.length > 0) {
 				const joined = thinkingParts.join("\n");
-				const capped = joined.length <= 500 ? joined : `${joined.slice(0, 500)}…[truncated]`;
+				const capped = truncateForSummary(joined, THINKING_MAX_CHARS);
 				parts.push({ text: `[Assistant thinking]: ${capped}` });
 			}
 			if (textParts.length > 0) {

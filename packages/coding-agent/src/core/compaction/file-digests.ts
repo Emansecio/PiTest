@@ -8,6 +8,9 @@ import { listDeclarations } from "../tools/symbol.js";
  */
 const MAX_DIGEST_BYTES = 256 * 1024;
 
+/** Symbols kept per file before a `(+N more)` truncation marker (mirrors living-index). */
+const MAX_SYMBOLS_PER_FILE = 12;
+
 /**
  * path -> "sym1, sym2, …" derived from each readable source file's current
  * content. LOSSY guide (outline at compaction time) — the model must re-read
@@ -36,10 +39,11 @@ export async function buildFileDigests(
 			}
 			const content = await readContent(path);
 			if (!content || content.length > MAX_DIGEST_BYTES) return undefined;
-			const names = listDeclarations(content, path)
-				.map((d) => d.name)
-				.slice(0, 12);
+			const decls = listDeclarations(content, path);
+			const names = decls.slice(0, MAX_SYMBOLS_PER_FILE).map((d) => `${d.kind} ${d.name}:${d.line}`);
 			if (names.length === 0) return undefined;
+			// Mark truncation so the model knows the outline is partial, not the whole file.
+			if (decls.length > MAX_SYMBOLS_PER_FILE) names.push(`(+${decls.length - MAX_SYMBOLS_PER_FILE} more)`);
 			// The digest is persisted into the compaction summary (disk + remote),
 			// so scrub any credential-shaped symbol/value before it leaves memory.
 			// Output is plain text, so plain-string redaction stays well-formed.

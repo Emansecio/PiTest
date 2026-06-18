@@ -105,6 +105,11 @@ export interface McpCallToolResult {
 		| { type: "image"; data: string; mimeType: string }
 		| { type: "resource"; resource: { uri: string; mimeType?: string; text?: string } }
 	>;
+	/**
+	 * Structured tool output (MCP spec 2025-06-18). Servers that declare an
+	 * `outputSchema` may return only `structuredContent` and omit `content[]`.
+	 */
+	structuredContent?: unknown;
 	isError?: boolean;
 }
 

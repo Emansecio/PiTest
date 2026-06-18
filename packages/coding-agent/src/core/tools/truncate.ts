@@ -339,16 +339,38 @@ function truncateStringToBytesFromEnd(str: string, maxBytes: number): string {
 	return buf.slice(start).toString("utf-8");
 }
 
+/** Leading context to keep before the match when centering a truncation window. */
+const TRUNCATE_WINDOW_MARGIN = 80;
+
 /**
  * Truncate a single line to max characters, adding [truncated] suffix.
  * Used for grep match lines.
+ *
+ * When `matchStart` (a 0-based char index of the match within the line) is
+ * provided and the match would fall outside a leading slice(0, maxChars), the
+ * window is centered on the match instead of taken from the head — otherwise a
+ * match in a high column (minified/bundle/lockfile line) would be elided and the
+ * emitted line would not contain the search term. An ellipsis marks each side
+ * that was cut. Lines within `maxChars` are returned verbatim (identical to the
+ * 2-arg behavior), so existing callers and tests are unaffected.
  */
 export function truncateLine(
 	line: string,
 	maxChars: number = GREP_MAX_LINE_LENGTH,
+	matchStart?: number,
 ): { text: string; wasTruncated: boolean } {
 	if (line.length <= maxChars) {
 		return { text: line, wasTruncated: false };
 	}
-	return { text: `${line.slice(0, maxChars)}... [truncated]`, wasTruncated: true };
+	// Head truncation: match is absent, near the start, or already visible in the
+	// leading slice. Keep the original behavior byte-for-byte.
+	if (matchStart === undefined || matchStart < 0 || matchStart < maxChars - TRUNCATE_WINDOW_MARGIN) {
+		return { text: `${line.slice(0, maxChars)}... [truncated]`, wasTruncated: true };
+	}
+	// Center the window on the match so the search term survives truncation.
+	const windowStart = Math.max(0, matchStart - TRUNCATE_WINDOW_MARGIN);
+	const windowEnd = Math.min(line.length, windowStart + maxChars);
+	const head = windowStart > 0 ? "…" : "";
+	const tail = windowEnd < line.length ? "… [truncated]" : "";
+	return { text: `${head}${line.slice(windowStart, windowEnd)}${tail}`, wasTruncated: true };
 }

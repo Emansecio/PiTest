@@ -25,13 +25,22 @@ export interface SearchSkillsToolOptions {
 	getSkills?: () => Skill[];
 }
 
-/** Term-overlap score of a query against a skill's name + full description. */
+/** Weight applied to a query term matching the skill name (vs the description). */
+const NAME_MATCH_WEIGHT = 3;
+
+/**
+ * Term-overlap score of a query against a skill's name + full description.
+ * A term hitting the name is weighted above one hitting only the description,
+ * so name matches rank ahead of incidental trigger-text matches.
+ */
 export function scoreSkillForQuery(query: string, name: string, description: string): number {
 	const terms = query.toLowerCase().split(/\W+/).filter(Boolean);
-	const hay = `${name} ${description}`.toLowerCase();
+	const nameHay = name.toLowerCase();
+	const descHay = description.toLowerCase();
 	let score = 0;
 	for (const term of terms) {
-		if (hay.includes(term)) score++;
+		if (nameHay.includes(term)) score += NAME_MATCH_WEIGHT;
+		else if (descHay.includes(term)) score++;
 	}
 	return score;
 }
@@ -65,7 +74,7 @@ export function createSearchSkillsToolDefinition(
 				.filter((s) => !s.disableModelInvocation)
 				.map((s) => ({ s, score: scoreSkillForQuery(query, s.name, s.description) }))
 				.filter((r) => r.score > 0)
-				.sort((a, b) => b.score - a.score)
+				.sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name))
 				.slice(0, MAX_RESULTS);
 			const text =
 				ranked.length > 0

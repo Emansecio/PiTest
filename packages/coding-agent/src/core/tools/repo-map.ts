@@ -41,7 +41,7 @@ export function createRepoMapToolDefinition(cwd: string): ToolDefinition<typeof 
 				} catch {
 					continue;
 				}
-				const names = listDeclarations(content, file).map((d) => d.name);
+				const names = listDeclarations(content, file).map((d) => `${d.kind} ${d.name}:${d.line}`);
 				if (names.length === 0) continue;
 				const line = `${relative(cwd, file)}: ${names.join(", ")}`;
 				bytes += line.length + 1;

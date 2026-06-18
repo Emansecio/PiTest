@@ -810,6 +810,10 @@ export class AgentSession {
 	// debug-driven verify (`maybeRunDebugVerify`) so it can locate the touched
 	// test/source as a runtime repro. Reset alongside `_turnTouchedFiles`.
 	private readonly _turnTouchedFilePaths = new Set<string>();
+	// Dominant source file:line edited this prompt cycle (from edit/edit-hashline
+	// `firstChangedLine`). Refines the debug-verify breakpoint to the corrected
+	// statement via `withFixSite`; last qualifying edit wins. Reset with the set above.
+	private _turnFixSite: { file: string; line: number } | undefined;
 	private _inVerification = false;
 	private _verificationAbort: AbortController | undefined;
 	// Visual definition-of-done tracking: did this prompt cycle change a rendered
@@ -1823,6 +1827,13 @@ export class AgentSession {
 				if (fileOp.op !== "read") {
 					this._turnTouchedFiles = true;
 					this._turnTouchedFilePaths.add(fileOp.path);
+					// Track the edited source line (edit/edit-hashline carry firstChangedLine
+					// in details) so debug-verify can bind the breakpoint to the fix site.
+					const firstChangedLine = (event.result as { details?: { firstChangedLine?: number } } | undefined)
+						?.details?.firstChangedLine;
+					if (typeof firstChangedLine === "number" && firstChangedLine >= 1) {
+						this._turnFixSite = { file: fileOp.path, line: firstChangedLine };
+					}
 					if (VISUAL_FILE_EXTENSIONS.has(extname(fileOp.path).toLowerCase())) {
 						this._turnTouchedVisual = true;
 						this._lastVisualFile = fileOp.path;
@@ -3318,6 +3329,7 @@ export class AgentSession {
 		// Reset the per-prompt-cycle flag that arms the verification gate.
 		this._turnTouchedFiles = false;
 		this._turnTouchedFilePaths.clear();
+		this._turnFixSite = undefined;
 		this._turnTouchedVisual = false;
 		this._turnUsedPreview = false;
 		// Per-prompt reset for the todo-first safety net (the cadence tracker itself
@@ -3517,6 +3529,7 @@ export class AgentSession {
 								touchedFiles: Array.from(this._turnTouchedFilePaths),
 								checkResult: result,
 								signal: abort.signal,
+								fixSite: this._turnFixSite,
 							});
 							if (snapshot?.verdict === "suspect" && !abort.signal.aborted && !this._userInterrupted) {
 								await this._promptOnce(debugVerifyContextPrompt(snapshot), {
@@ -4466,7 +4479,7 @@ export class AgentSession {
 			const pathEntries = this.sessionManager.getBranch();
 			const settings = this.settingsManager.getCompactionSettings();
 
-			const preparation = prepareCompaction(pathEntries, settings);
+			const preparation = prepareCompaction(pathEntries, settings, this.model?.contextWindow);
 			if (!preparation) {
 				const lastEntry = pathEntries[pathEntries.length - 1];
 				throw new Error(
@@ -5167,7 +5180,7 @@ export class AgentSession {
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, settings);
+			const preparation = prepareCompaction(pathEntries, settings, this.model?.contextWindow);
 			if (preparation) preparation.cwd = this._cwd;
 			if (!preparation) {
 				emitSilentEnd();
@@ -5558,6 +5571,7 @@ export class AgentSession {
 			// The agent message that requested the `code` call. Handlers only read
 			// toolCall/args, so this is informational; it is always set when a tool runs.
 			getAssistantMessage: () => this._lastAssistantMessage as AssistantMessage,
+			emitEvent: (e) => this._emitCodeModeEvent(e),
 		});
 		return async (name, args, signal) => {
 			const result = await base(name, args, signal);
@@ -5573,6 +5587,26 @@ export class AgentSession {
 			return result;
 		};
 	}
+
+	/**
+	 * Observability-only sink for code-mode inner tool calls (the `tools.x()` a
+	 * code program runs): surfaces each in extension events + the TUI like a normal
+	 * tool call, so they are no longer invisible. Deliberately does NOT re-run the
+	 * per-turn handlers (doom-loop / failure-budget / fix-site tracking): those
+	 * would double-count or spuriously abort a multi-call code-mode program, and
+	 * permission/rewrite/learned-error already run inline in the dispatcher.
+	 * Never throws into code-mode execution.
+	 */
+	private _emitCodeModeEvent = async (
+		event: Extract<AgentEvent, { type: "tool_execution_start" | "tool_execution_end" }>,
+	): Promise<void> => {
+		try {
+			await this._emitExtensionEvent(event);
+			this._emit(event);
+		} catch {
+			// Observability must never break code-mode execution.
+		}
+	};
 
 	private _buildRuntime(options: {
 		activeToolNames?: string[];

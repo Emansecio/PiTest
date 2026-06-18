@@ -30,7 +30,7 @@ import type {
 import { systemPromptWithoutDynamicMarker } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
-import { parseStreamingJson } from "../utils/json-parse.ts";
+import { finalizeStreamingJson, parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -596,16 +596,21 @@ export async function processResponsesStream<TApi extends Api>(
 				});
 				currentBlock = null;
 			} else if (item.type === "function_call") {
-				const args =
+				const finalizeSource =
 					currentBlock?.type === "toolCall" && currentBlock.partialJson
-						? parseStreamingJson(currentBlock.partialJson)
-						: parseStreamingJson(item.arguments || "{}");
+						? currentBlock.partialJson
+						: item.arguments || "{}";
+				const finalized = finalizeStreamingJson(finalizeSource);
+				const args = finalized.value;
 
 				let toolCall: ToolCall;
 				if (currentBlock?.type === "toolCall") {
 					// Finalize in-place and strip the scratch buffer so replay only
 					// carries parsed arguments.
 					currentBlock.arguments = args;
+					if (finalized.parseError && finalizeSource.length > 2) {
+						(currentBlock as any)._streamingParseError = true;
+					}
 					delete (currentBlock as { partialJson?: string }).partialJson;
 					toolCall = currentBlock;
 				} else {

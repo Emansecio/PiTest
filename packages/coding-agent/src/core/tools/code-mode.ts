@@ -71,7 +71,9 @@ export interface CodeModeToolOptions {
 
 /**
  * Build the guideline bullets, listing the active `tools.*` available. The list
- * is resolved lazily at definition build time from `getActiveToolNames`.
+ * is resolved live at read time from `getActiveToolNames` (see the
+ * `promptGuidelines` getter on the definition), so a tool activated after boot
+ * shows up the next time the system prompt is rebuilt.
  */
 function buildGuidelines(toolNames: string[]): string[] {
 	const head =
@@ -121,7 +123,13 @@ export function createCodeModeToolDefinition(
 			"Run ONE JavaScript program that calls the agent's tools as `await tools.<name>(args)`. Use for multi-tool workflows (read/filter/compose over many results) to collapse N tool calls into a single turn — less latency and fewer tokens. Tool calls go through the same permission/safety pipeline as normal calls.",
 		promptSnippet:
 			"Write one JS program calling tools via `await tools.<name>(args)`; collapses N tool calls into one turn.",
-		promptGuidelines: buildGuidelines(getActiveToolNames().filter((n) => n !== "code")),
+		// Live catalog: re-derive from the CURRENT active tool names at read time
+		// (a getter), not eagerly at definition-build time. The agent-session reads
+		// this in `_refreshToolRegistry` whenever the active surface changes, so a
+		// tool activated post-boot now appears in "Available in code-mode:".
+		get promptGuidelines(): string[] {
+			return buildGuidelines(getActiveToolNames().filter((n) => n !== "code"));
+		},
 		parameters: codeModeSchema,
 		// Has observable effects (it runs tools); keep it on its own activity line.
 		activity: "action",

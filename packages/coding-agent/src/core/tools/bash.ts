@@ -928,7 +928,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 					const job = getBashBackgroundJob(promotedJobId);
 					const elapsedSeconds =
 						job !== undefined ? (job.promotedAt - job.startedAt) / 1000 : resolveAutoBackgroundSeconds();
-					const status = `Command promoted to background id=${promotedJobId} after ${elapsedSeconds.toFixed(1)}s (still running). Output shown is up to promotion; the process keeps running detached and is killed on shutdown.`;
+					const status = `Command promoted to background id=${promotedJobId} after ${elapsedSeconds.toFixed(1)}s (still running). Output shown is up to promotion; the process keeps running detached and is killed on shutdown. Its later output and exit code are buffered under this id and can be recovered, and the job can be killed on demand by referencing id=${promotedJobId}.`;
 					return { content: [{ type: "text", text: appendStatus(outputText, status) }], details };
 				}
 				if (exitCode !== 0 && exitCode !== null) {

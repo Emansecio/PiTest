@@ -225,6 +225,23 @@ export function computeDynamicReserve(contextWindow: number, configuredReserve: 
 	return Math.max(configuredReserve, Math.floor(contextWindow * 0.1));
 }
 
+/**
+ * Effective verbatim-retention budget for findCutPoint.
+ *
+ * The configured `keepRecentTokens` (default 20k) is a flat floor. On a large
+ * window the trigger scales (computeDynamicReserve) but a flat 20k retention
+ * would discard ~950k of raw recent messages in favor of a lossy summary. Scale
+ * retention to 10% of the window above 200k (same threshold/percentage as the
+ * reserve), keeping the configured value as a floor. Windows ≤200k are byte-
+ * identical (10% of 200k == the 20k default floor).
+ */
+export function effectiveKeepRecentTokens(configured: number, contextWindow?: number): number {
+	if (!contextWindow || contextWindow <= 200_000) {
+		return configured;
+	}
+	return Math.max(configured, Math.floor(contextWindow * 0.1));
+}
+
 /** Hysteresis threshold: only re-compact if deficit grew by this many tokens since last compaction. */
 const COALESCING_THRESHOLD_TOKENS = 8192;
 
@@ -1169,6 +1186,7 @@ export interface CompactionPreparation {
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
+	contextWindow?: number,
 ): CompactionPreparation | undefined {
 	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
@@ -1194,7 +1212,8 @@ export function prepareCompaction(
 
 	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
 
-	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, settings.keepRecentTokens);
+	const keepRecentTokens = effectiveKeepRecentTokens(settings.keepRecentTokens, contextWindow);
+	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, keepRecentTokens);
 
 	// Get UUID of first kept entry
 	const firstKeptEntry = pathEntries[cutPoint.firstKeptEntryIndex];

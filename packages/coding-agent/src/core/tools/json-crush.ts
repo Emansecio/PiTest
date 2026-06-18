@@ -53,6 +53,13 @@ export const JSON_CRUSH_TARGET_BYTES = 8 * 1024;
 const MAX_PARSE_CHARS = 5_000_000;
 /** Recursion guard for pathologically nested JSON. */
 const MAX_DEPTH = 64;
+/**
+ * Floor for how many keys of a wide object we keep before eliding the middle.
+ * Deliberately generous: ordinary schema objects (a handful of keys) must stay
+ * byte-identical across every tier — only pathologically wide objects (hundreds
+ * to thousands of keys, e.g. a map keyed by id) ever cross this and get collapsed.
+ */
+const OBJ_KEY_CAP_FLOOR = 32;
 
 interface Tier {
 	keepHead: number;
@@ -129,8 +136,29 @@ function pruneValue(value: unknown, tier: Tier, depth: number): unknown {
 	}
 
 	if (value !== null && typeof value === "object") {
+		const entries = Object.entries(value);
+		// Cap derived from the tier (head+tail) but floored so ordinary schema
+		// objects stay intact; only very wide objects keep head + tail keys with a
+		// single sentinel entry for the omitted middle.
+		const objKeyCap = Math.max(tier.keepHead + tier.keepTail, OBJ_KEY_CAP_FLOOR);
+		if (entries.length > objKeyCap) {
+			const tailKeys = Math.min(tier.keepTail, objKeyCap - 1);
+			const headKeys = Math.max(1, objKeyCap - tailKeys);
+			const out: Record<string, unknown> = {};
+			for (let i = 0; i < headKeys; i++) {
+				const [k, v] = entries[i];
+				out[k] = pruneValue(v, tier, depth + 1);
+			}
+			const omitted = entries.length - headKeys - tailKeys;
+			out["… elided …"] = elisionMarker(omitted, "keys");
+			for (let i = entries.length - tailKeys; i < entries.length; i++) {
+				const [k, v] = entries[i];
+				out[k] = pruneValue(v, tier, depth + 1);
+			}
+			return out;
+		}
 		const out: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(value)) {
+		for (const [k, v] of entries) {
 			out[k] = pruneValue(v, tier, depth + 1);
 		}
 		return out;

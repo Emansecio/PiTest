@@ -298,8 +298,9 @@ export class PlanManager {
 		if (!v) return "(no plan)";
 		const { done, total } = this.counts();
 		const lines = [`plan v${v.version} (${done}/${total} done)`];
+		const statusById = new Map(v.steps.map((s) => [s.id, s.status]));
 		for (const step of topoOrder(v.steps)) {
-			lines.push(renderStepLine(step));
+			lines.push(renderStepLine(step, statusById));
 		}
 		return lines.join("\n");
 	}
@@ -353,17 +354,26 @@ export class PlanManager {
 			"- Honor `dependsOn`: do not start a step before its dependencies are done.",
 			"Current plan (topological order):",
 		];
-		for (const step of topoOrder(v.steps)) lines.push(renderStepLine(step));
+		const statusById = new Map(v.steps.map((s) => [s.id, s.status]));
+		for (const step of topoOrder(v.steps)) lines.push(renderStepLine(step, statusById));
+		const readyNow = v.steps
+			.filter((s) => s.status === "pending" && s.dependsOn.every((d) => statusById.get(d) === "done"))
+			.map((s) => s.id);
+		if (readyNow.length > 0) lines.push(`Ready now: ${readyNow.join(", ")}`);
 		lines.push("</plan>");
 		return lines.join("\n");
 	}
 }
 
-function renderStepLine(step: PlanStep): string {
+function renderStepLine(step: PlanStep, statusById?: Map<string, PlanStepStatus>): string {
 	const deps = step.dependsOn.length > 0 ? ` [needs ${step.dependsOn.join(",")}]` : "";
 	const artifact = step.producesArtifact ? ` →${step.producesArtifact}` : "";
 	const verify = step.verifyCmd ? ` ⟨${step.verifyCmd}⟩` : "";
-	return `  ${STATUS_GLYPH[step.status]} ${step.id}  ${step.intent}${deps}${artifact}${verify}`;
+	const ready =
+		statusById && step.status === "pending" && step.dependsOn.every((d) => statusById.get(d) === "done")
+			? " ← ready"
+			: "";
+	return `  ${STATUS_GLYPH[step.status]} ${step.id}  ${step.intent}${deps}${artifact}${verify}${ready}`;
 }
 
 function cloneVersion(v: PlanVersion): PlanVersion {

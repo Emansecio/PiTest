@@ -598,10 +598,11 @@ function extractExports(source: string): ModuleExports {
 }
 
 /** Block message for a named import whose symbol the module does not export. */
-function formatExportBlockMessage(specifier: string, name: string, candidate: string): string {
+function formatExportBlockMessage(specifier: string, name: string, candidates: string[]): string {
+	const list = candidates.join(", ");
 	return (
 		`Import grounding (no write attempted): "${specifier}" has no exported member "${name}". ` +
-		`Did you mean: ${candidate}? Fix the import name, ` +
+		`Did you mean: ${list}? Fix the import name, ` +
 		"or re-issue the identical call to write it anyway."
 	);
 }
@@ -631,17 +632,14 @@ function validateNamedExports(
 		const exportList = [...exports.names];
 		for (const name of imp.named) {
 			if (exports.names.has(name)) continue;
-			const candidate = deps.fuzzy(name, exportList, {
-				maxDistance: deps.maxDistance,
-				prefixMinOverlap: deps.prefixMinOverlap,
-			});
+			const candidates = rankBareNames(name, exportList, deps);
 			// Block only on a close candidate; a genuinely-absent name with no near
 			// match is ALLOWED (the regex parser may miss an exotic re-export form).
-			if (candidate !== undefined) {
+			if (candidates.length > 0) {
 				return {
 					action: "block",
 					kind: "export",
-					message: formatExportBlockMessage(imp.specifier, name, candidate),
+					message: formatExportBlockMessage(imp.specifier, name, candidates),
 				};
 			}
 		}
@@ -667,10 +665,11 @@ function validateNamedExports(
 // ============================================================================
 
 /** Block message for a bare import whose package is not a known dependency. */
-function formatBareBlockMessage(packageName: string, candidate: string): string {
+function formatBareBlockMessage(packageName: string, candidates: string[]): string {
+	const list = candidates.join(", ");
 	return (
 		`Import grounding (no write attempted): package "${packageName}" is not in the project's ` +
-		`dependencies. Did you mean: ${candidate}? Install it or fix the package name, ` +
+		`dependencies. Did you mean: ${list}? Install it or fix the package name, ` +
 		"or re-issue the identical call to write it anyway."
 	);
 }
@@ -684,19 +683,16 @@ function validateBarePackages(content: string, deps: ImportGroundingDeps): Impor
 	const knownPackages = deps.knownPackages;
 	if (knownPackages === undefined) return null; // bare grounding not wired -> skip
 	const known = knownPackages();
-	const candidates = Array.from(known);
+	const pool = Array.from(known);
 	for (const spec of extractBareSpecifiers(content)) {
 		if (isNodeBuiltin(spec)) continue; // builtins are always valid
 		const packageName = barePackageName(spec);
 		if (known.has(packageName)) continue; // declared dependency / workspace package
 		// Unknown package: only block when a close known name exists (a typo of a
 		// real dep). No near match -> ALLOW (fail-open, same as the path pass).
-		const candidate = deps.fuzzy(packageName, candidates, {
-			maxDistance: deps.maxDistance,
-			prefixMinOverlap: deps.prefixMinOverlap,
-		});
-		if (candidate === undefined) continue;
-		return { action: "block", kind: "bare", message: formatBareBlockMessage(packageName, candidate) };
+		const candidates = rankBareNames(packageName, pool, deps);
+		if (candidates.length === 0) continue;
+		return { action: "block", kind: "bare", message: formatBareBlockMessage(packageName, candidates) };
 	}
 	return null;
 }

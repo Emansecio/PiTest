@@ -312,6 +312,36 @@ const editRules: ToolErrorHintRule[] = [
 		},
 	},
 	{
+		// EISDIR/ENOTDIR from the edit pre-flight. The target resolved to a
+		// directory (EISDIR), or a path component that should be a directory is
+		// not one / the parent is missing (ENOTDIR). Retrying the same path is
+		// useless; the model must inspect the path shape first.
+		id: "edit-path-type",
+		appliesTo: "edit",
+		matcher: ({ errorText }) => /could not edit file:.*error code:\s*(EISDIR|ENOTDIR)/i.test(errorText),
+		hint: ({ call, errorText }) => {
+			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");
+			const target = path ?? "<path>";
+			if (/ENOTDIR/i.test(errorText)) {
+				return `Edit failed: a parent path component of \`${target}\` is not a directory (ENOTDIR). Check the parent exists and is a directory with \`ls({path:<parent>})\` before retrying — a file is being treated as a folder somewhere in the path.`;
+			}
+			return `Edit target \`${target}\` is a directory (EISDIR), not a file. Confirm with \`ls({path:"${target}"})\` and point the edit at a file inside it instead of the directory.`;
+		},
+	},
+	{
+		// EACCES/EPERM from the edit pre-flight. The file exists but the process
+		// lacks permission to write it. The model must not silently chmod it —
+		// surface the path to the user, who decides whether to grant access.
+		id: "edit-permission",
+		appliesTo: "edit",
+		matcher: ({ errorText }) => /could not edit file:.*error code:\s*(EACCES|EPERM)/i.test(errorText),
+		hint: ({ call }) => {
+			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");
+			const target = path ?? "<path>";
+			return `Permission denied writing \`${target}\` (EACCES/EPERM). Report this path to the user and ask how to proceed — do not silently \`chmod\` or change ownership to force the write.`;
+		},
+	},
+	{
 		// Read-guard block: editing a file that was never read this session.
 		// read-guard-extension.ts emits `Read guard: file "<p>" has not been
 		// read in this session. ...`. The model must read first; this rule makes

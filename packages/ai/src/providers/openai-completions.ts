@@ -34,7 +34,7 @@ import { systemPromptWithoutDynamicMarker } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { parseStreamingJson } from "../utils/json-parse.ts";
+import { finalizeStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -188,7 +188,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						partial: output,
 					});
 				} else if (block.type === "toolCall") {
-					block.arguments = parseStreamingJson(block.partialArgs);
+					const finalized = finalizeStreamingJson(block.partialArgs);
+					block.arguments = finalized.value;
+					if (finalized.parseError && block.partialArgs && block.partialArgs.length > 2) {
+						(block as any)._streamingParseError = true;
+					}
 					// Finalize in-place and strip the scratch buffers so replay only
 					// carries parsed arguments.
 					delete block.partialArgs;

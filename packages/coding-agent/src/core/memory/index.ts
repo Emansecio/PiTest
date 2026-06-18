@@ -80,7 +80,7 @@ export function formatMemoryForPrompt(files: readonly MemoryFile[]): string {
 	const sections = files.map(
 		(file) => `<memory_entry scope="${file.scope}" path="${file.path}">\n${file.content}\n</memory_entry>`,
 	);
-	return `\n\n<persistent_memory>\nLong-lived notes you maintain across sessions. Update with the memory_append tool when you learn something durable.\n\n${sections.join("\n\n")}\n</persistent_memory>\n`;
+	return `\n\n<persistent_memory>\nLong-lived notes you maintain across sessions. Consult and apply these notes before acting; they override defaults and record durable preferences/gotchas. Update with the memory_append tool when you learn something durable.\n\n${sections.join("\n\n")}\n</persistent_memory>\n`;
 }
 
 export interface AppendMemoryOptions {

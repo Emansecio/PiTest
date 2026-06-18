@@ -488,6 +488,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		if (resumeLines.length > 0) {
 			sections.push(`Resumable (interrupted — continue with op:"resume"):\n${resumeLines.join("\n")}`);
 		}
+		const totalTokens = records.reduce((sum, r) => sum + (r.usage ? r.usage.totalTokens : 0), 0);
+		sections.push(
+			`Slots (process-wide): active=${activeSubagents}, queued=${slotWaiters.length}; totalTokens=${totalTokens}`,
+		);
 		return {
 			content: [{ type: "text" as const, text: sections.join("\n\n") }],
 			isError: false,
@@ -495,6 +499,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				subagents: records.length,
 				asyncHandles: pending.size,
 				resumable: resumable.size + diskHandles.length,
+				// active/queued are process-wide (module-scoped slot budget shared across coordinator instances).
+				active: activeSubagents,
+				queued: slotWaiters.length,
+				totalTokens,
 			},
 		};
 	}

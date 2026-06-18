@@ -221,9 +221,13 @@ function defaultStatMtime(absPath: string): number {
 }
 
 function defaultExtractSymbols(content: string, path: string): string[] {
-	return listDeclarations(content, path)
-		.map((d) => d.name)
-		.slice(0, MAX_SYMBOLS_PER_FILE);
+	const decls = listDeclarations(content, path);
+	// Keep bare names: `repoMapToSymbolSet` flattens these into the grounding-guard
+	// name pool, which must match identifiers verbatim (kind/line would break it).
+	const names = decls.slice(0, MAX_SYMBOLS_PER_FILE).map((d) => d.name);
+	// Mark truncation so a consumer (digest / repo map) sees the outline is partial.
+	if (decls.length > MAX_SYMBOLS_PER_FILE) names.push(`(+${decls.length - MAX_SYMBOLS_PER_FILE} more)`);
+	return names;
 }
 
 /**

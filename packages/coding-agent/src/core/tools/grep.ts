@@ -54,6 +54,35 @@ const MAX_GREP_FILE_SIZE_ARG = "10M";
 // carries the actionable failure (e.g. the "regex parse error" we sniff below).
 const MAX_GREP_STDERR_BYTES = 64 * 1024;
 
+/**
+ * Convert a UTF-8 byte offset (as emitted by `rg --json` submatch `start`) into a
+ * JS string char index (UTF-16 code units) for the given line text. Walks code
+ * points accumulating their UTF-8 byte width until the target offset is reached.
+ * Clamps to the string length; returns 0 for a non-positive offset.
+ */
+export function byteOffsetToCharIndex(text: string, byteOffset: number): number {
+	if (byteOffset <= 0) return 0;
+	let bytes = 0;
+	const len = text.length;
+	for (let i = 0; i < len; i++) {
+		if (bytes >= byteOffset) return i;
+		const code = text.charCodeAt(i);
+		if (code < 0x80) {
+			bytes += 1;
+		} else if (code < 0x800) {
+			bytes += 2;
+		} else if (code >= 0xd800 && code <= 0xdbff) {
+			// Surrogate pair → 4 bytes; the low surrogate is consumed here so it is
+			// not counted again on the next iteration.
+			bytes += 4;
+			i++;
+		} else {
+			bytes += 3;
+		}
+	}
+	return len;
+}
+
 /** Append a stderr chunk while retaining at most the leading MAX_GREP_STDERR_BYTES. */
 export function appendCappedStderr(current: string, chunk: string): string {
 	if (current.length >= MAX_GREP_STDERR_BYTES) return current;
@@ -312,7 +341,11 @@ export function createGrepToolDefinition(
 							}
 						});
 
-						const formatBlock = async (filePath: string, lineNumber: number): Promise<string[]> => {
+						const formatBlock = async (
+							filePath: string,
+							lineNumber: number,
+							matchStart?: number,
+						): Promise<string[]> => {
 							const relativePath = formatPath(filePath);
 							const lines = await getFileLines(filePath);
 							if (!lines.length) return [`${relativePath}:${lineNumber}: (unable to read file)`];
@@ -323,8 +356,14 @@ export function createGrepToolDefinition(
 								const lineText = lines[current - 1] ?? "";
 								const sanitized = lineText.replace(/\r/g, "");
 								const isMatchLine = current === lineNumber;
-								// Truncate long lines so grep output stays compact.
-								const { text: truncatedText, wasTruncated } = truncateLine(sanitized);
+								// Truncate long lines so grep output stays compact. Center the
+								// window on the match for the match line so a high-column hit
+								// is not elided; context lines keep head truncation.
+								const { text: truncatedText, wasTruncated } = truncateLine(
+									sanitized,
+									GREP_MAX_LINE_LENGTH,
+									isMatchLine ? matchStart : undefined,
+								);
 								if (wasTruncated) linesTruncated = true;
 								if (isMatchLine) block.push(`${relativePath}:${current}: ${truncatedText}`);
 								else block.push(`${relativePath}-${current}- ${truncatedText}`);
@@ -333,7 +372,12 @@ export function createGrepToolDefinition(
 						};
 
 						// Collect matches during streaming, then format them after rg exits.
-						const matches: Array<{ filePath: string; lineNumber: number; lineText?: string }> = [];
+						const matches: Array<{
+							filePath: string;
+							lineNumber: number;
+							lineText?: string;
+							matchStart?: number;
+						}> = [];
 						rl.on("line", (line) => {
 							if (!line.trim() || matchCount >= effectiveLimit) return;
 							let event: any;
@@ -347,8 +391,17 @@ export function createGrepToolDefinition(
 								const filePath = event.data?.path?.text;
 								const lineNumber = event.data?.line_number;
 								const lineText = event.data?.lines?.text;
+								// rg --json exposes submatch offsets (bytes into lines.text).
+								// Carry the first match's start so a high-column match in a
+								// long/minified line survives truncation centered on the term
+								// instead of being sliced away at column 0.
+								const firstSub = event.data?.submatches?.[0];
+								const matchStart =
+									lineText !== undefined && typeof firstSub?.start === "number"
+										? byteOffsetToCharIndex(lineText, firstSub.start)
+										: undefined;
 								if (filePath && typeof lineNumber === "number")
-									matches.push({ filePath, lineNumber, lineText });
+									matches.push({ filePath, lineNumber, lineText, matchStart });
 								if (matchCount >= effectiveLimit) {
 									matchLimitReached = true;
 									stopChild(true);
@@ -411,11 +464,15 @@ export function createGrepToolDefinition(
 										.replace(/\r\n/g, "\n")
 										.replace(/\r/g, "")
 										.replace(/\n$/, "");
-									const { text: truncatedText, wasTruncated } = truncateLine(sanitized);
+									const { text: truncatedText, wasTruncated } = truncateLine(
+										sanitized,
+										GREP_MAX_LINE_LENGTH,
+										match.matchStart,
+									);
 									if (wasTruncated) linesTruncated = true;
 									outputLines.push(`${relativePath}:${match.lineNumber}: ${truncatedText}`);
 								} else {
-									const block = await formatBlock(match.filePath, match.lineNumber);
+									const block = await formatBlock(match.filePath, match.lineNumber, match.matchStart);
 									outputLines.push(...block);
 								}
 							}

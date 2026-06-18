@@ -228,14 +228,37 @@ function stripDiagnosticNoise(message: string): string {
 		.trim();
 }
 
-export function formatDiagnostic(diagnostic: Diagnostic, filePath: string): string {
+const DIAGNOSTIC_TAG_NAMES: Record<number, string> = { 1: "unnecessary", 2: "deprecated" };
+
+function formatDiagnosticTags(tags?: number[]): string {
+	if (!tags || tags.length === 0) return "";
+	const names: string[] = [];
+	for (const tag of tags) {
+		const name = DIAGNOSTIC_TAG_NAMES[tag];
+		if (name) names.push(`[${name}]`);
+	}
+	return names.length > 0 ? ` ${names.join("")}` : "";
+}
+
+export function formatDiagnostic(diagnostic: Diagnostic, filePath: string, cwd?: string): string {
 	const severity = severityToString(diagnostic.severity);
 	const line = diagnostic.range.start.line + 1;
 	const col = diagnostic.range.start.character + 1;
 	const source = diagnostic.source ? `[${diagnostic.source}] ` : "";
 	const code = diagnostic.code ? ` (${diagnostic.code})` : "";
+	const tags = formatDiagnosticTags(diagnostic.tags);
 	const message = stripDiagnosticNoise(diagnostic.message);
-	return `${filePath}:${line}:${col} [${severity}] ${source}${message}${code}`;
+	let result = `${filePath}:${line}:${col} [${severity}] ${source}${message}${tags}${code}`;
+	if (diagnostic.relatedInformation && diagnostic.relatedInformation.length > 0) {
+		for (const related of diagnostic.relatedInformation) {
+			const relFile = uriToFile(related.location.uri);
+			const relPath = cwd !== undefined ? formatPathRelativeToCwd(relFile, cwd) : relFile.replace(/\\/g, "/");
+			const relLine = related.location.range.start.line + 1;
+			const relCol = related.location.range.start.character + 1;
+			result += `\n  -> ${relPath}:${relLine}:${relCol} ${related.message}`;
+		}
+	}
+	return result;
 }
 
 /** Join pre-formatted diagnostic messages (already path-prefixed). */
