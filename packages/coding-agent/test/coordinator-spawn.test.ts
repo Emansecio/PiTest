@@ -355,6 +355,35 @@ describe("spawnSubagent (faux model)", () => {
 		expect(DEFAULT_MAX_TURNS).toBe(50);
 	});
 
+	it("returns aggregate token usage on the result and the registry record", async () => {
+		const rig = newRig();
+		rig.faux.setResponses([fauxAssistantMessage("done")]);
+		const result = await spawnSubagent(rig.deps, { prompt: "p", taskName: "usage" });
+		expect(result.usage).toBeDefined();
+		expect(result.usage?.totalTokens).toBeGreaterThanOrEqual(0);
+		expect(result.usage?.costUsd).toBeGreaterThanOrEqual(0);
+		// The result usage matches what was written to the registry record.
+		expect(result.record.usage).toEqual(result.usage);
+	});
+
+	it("invokes onSubagentEvent once per finished turn, carrying the turn number and last tool", async () => {
+		const rig = newRig({ tools: [makeTool("read")] });
+		rig.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("read", { value: "x" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		const events: Array<{ turn: number; lastTool?: string }> = [];
+		await spawnSubagent(rig.deps, {
+			prompt: "p",
+			taskName: "progress",
+			onSubagentEvent: (info) => events.push(info),
+		});
+		expect(events.length).toBeGreaterThanOrEqual(2);
+		expect(events[0].turn).toBe(1);
+		// The turn that called `read` reports it as the last tool.
+		expect(events.some((e) => e.lastTool === "read")).toBe(true);
+	});
+
 	it("inheritSkills: appends the parent's skills to the subagent system prompt", async () => {
 		const rig = newRig();
 		rig.deps.skills = [makeSkill("emansec-pentest", "web bug bounty engagement work")];

@@ -160,6 +160,8 @@ export async function createAgentSessionServices(
 	const availableToolsRef: { current?: () => import("@pit/agent-core").AgentTool[] } = {};
 	const parentMessagingIdRef: { current?: string } = {};
 	const asyncDeliverRef: { current?: (handle: string, text: string, status: "done" | "error") => boolean } = {};
+	const subagentStartRef: { current?: (handle: string) => void } = {};
+	const subagentProgressRef: { current?: (handle: string, info: { turn: number; lastTool?: string }) => void } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
 	if (!options.disableBuiltInExtensions) {
@@ -179,6 +181,8 @@ export async function createAgentSessionServices(
 			getParentMessagingId: () => parentMessagingIdRef.current,
 			getMessagingTimeoutMs: () => settingsManager.getAgentMessagingSettings().timeoutMs,
 			onAsyncComplete: (handle, text, status) => asyncDeliverRef.current?.(handle, text, status) ?? false,
+			onSubagentStart: (handle) => subagentStartRef.current?.(handle),
+			onSubagentProgress: (handle, info) => subagentProgressRef.current?.(handle, info),
 		});
 		builtInFactories = bundle.factories;
 	}
@@ -210,13 +214,17 @@ export async function createAgentSessionServices(
 				getTools: () => import("@pit/agent-core").AgentTool[],
 				messagingId: string | undefined,
 				deliverAsync: (handle: string, text: string, status: "done" | "error") => boolean,
+				emitSubStart: (handle: string) => void,
+				emitSubProgress: (handle: string, info: { turn: number; lastTool?: string }) => void,
 			) => void;
 		}
-	).__bindBuiltInRefs = (getModel, getTools, messagingId, deliverAsync) => {
+	).__bindBuiltInRefs = (getModel, getTools, messagingId, deliverAsync, emitSubStart, emitSubProgress) => {
 		parentModelRef.current = getModel;
 		availableToolsRef.current = getTools;
 		parentMessagingIdRef.current = messagingId;
 		asyncDeliverRef.current = deliverAsync;
+		subagentStartRef.current = emitSubStart;
+		subagentProgressRef.current = emitSubProgress;
 	};
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
@@ -303,6 +311,8 @@ export async function createAgentSessionFromServices(
 				getTools: () => import("@pit/agent-core").AgentTool[],
 				messagingId: string | undefined,
 				deliverAsync: (handle: string, text: string, status: "done" | "error") => boolean,
+				emitSubStart: (handle: string) => void,
+				emitSubProgress: (handle: string, info: { turn: number; lastTool?: string }) => void,
 			) => void;
 		}
 	).__bindBuiltInRefs;
@@ -312,6 +322,8 @@ export async function createAgentSessionFromServices(
 			() => result.session.agent.state.tools as import("@pit/agent-core").AgentTool[],
 			result.session.messagingId,
 			(handle, text, status) => result.session._deliverAsyncResult(handle, text, status),
+			(handle) => result.session._emitSubagentStart(handle),
+			(handle, info) => result.session._emitSubagentProgress(handle, info),
 		);
 	}
 

@@ -3183,14 +3183,31 @@ export class InteractiveMode {
 				break;
 			}
 
-			case "subagent_complete":
+			case "subagent_start":
+				this.showStatus(`◐ subagent '${event.handle}' started`, (text) => theme.fg("muted", text));
+				break;
+
+			case "subagent_progress": {
+				const tool = event.lastTool ? ` · ${event.lastTool}` : "";
+				this.showStatus(`◐ subagent '${event.handle}' · turn ${event.turn}${tool}`, (text) =>
+					theme.fg("muted", text),
+				);
+				break;
+			}
+
+			case "subagent_complete": {
+				const meta: string[] = [];
+				if (event.turns !== undefined) meta.push(`${event.turns} turns`);
+				if (event.totalTokens !== undefined) meta.push(`${event.totalTokens.toLocaleString()} tok`);
+				const suffix = meta.length > 0 ? ` · ${meta.join(" · ")}` : "";
 				this.showStatus(
 					event.status === "done"
-						? `✓ subagent '${event.handle}' finished`
-						: `✗ subagent '${event.handle}' failed`,
+						? `✓ subagent '${event.handle}' finished${suffix}`
+						: `✗ subagent '${event.handle}' failed${suffix}`,
 					event.status === "done" ? (text) => theme.fg("success", text) : (text) => theme.fg("warning", text),
 				);
 				break;
+			}
 
 			case "auto_retry_start": {
 				// Set up escape to abort retry

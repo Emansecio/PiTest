@@ -18,6 +18,26 @@ import type { TSchema } from "typebox";
 
 export type SubagentStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
+/** Aggregate token/cost usage for a subagent run, summed across its turns. */
+export interface SubagentUsage {
+	inputTokens: number;
+	outputTokens: number;
+	totalTokens: number;
+	costUsd: number;
+}
+
+/**
+ * Lightweight progress signal emitted while a subagent runs, so the parent can
+ * surface live status (turn N, last tool) instead of a black box until settle.
+ * Deliberately coarse — one event per turn, not per streamed token.
+ */
+export interface SubagentProgressInfo {
+	/** 1-based turn the subagent just finished. */
+	turn: number;
+	/** Name of the last tool the subagent called this turn, if any. */
+	lastTool?: string;
+}
+
 export interface SubagentRecord {
 	id: string;
 	/** Unique, collision-resolved task name (see SubagentRegistry.create). */
@@ -35,6 +55,8 @@ export interface SubagentRecord {
 	turnCount: number;
 	/** Tool calls the subagent attempted that the parent's policy denied (headless ask→deny included). */
 	deniedToolCalls?: string[];
+	/** Aggregate token/cost usage, accumulated across the subagent's turns. */
+	usage?: SubagentUsage;
 }
 
 export interface SpawnSubagentOptions {
@@ -60,8 +82,14 @@ export interface SpawnSubagentOptions {
 	systemPrompt?: string;
 	/** Subset of parent's tool names available to the subagent. */
 	allowedTools?: string[];
-	/** Maximum turns. Default: 25. */
+	/** Maximum turns. Default: DEFAULT_MAX_TURNS (50). */
 	maxTurns?: number;
+	/**
+	 * Optional progress callback, invoked once per finished turn while the subagent
+	 * runs. Lets the coordinator surface live status (turn N, last tool) to the
+	 * parent/TUI instead of the subagent being a black box until it settles.
+	 */
+	onSubagentEvent?: (info: SubagentProgressInfo) => void;
 	/** Cancellation signal. */
 	signal?: AbortSignal;
 	/**
@@ -127,4 +155,6 @@ export interface SpawnSubagentResult {
 	value?: unknown;
 	/** Absolute path of the git worktree, if one was created. */
 	worktreePath?: string;
+	/** Aggregate token/cost usage for the run, when the provider reported it. */
+	usage?: SubagentUsage;
 }

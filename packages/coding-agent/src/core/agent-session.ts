@@ -304,7 +304,9 @@ export type AgentSessionEvent =
 			willRetry?: boolean;
 	  }
 	| { type: "visual_review"; file: string }
-	| { type: "subagent_complete"; handle: string; status: "done" | "error" };
+	| { type: "subagent_start"; handle: string }
+	| { type: "subagent_progress"; handle: string; turn: number; lastTool?: string }
+	| { type: "subagent_complete"; handle: string; status: "done" | "error"; turns?: number; totalTokens?: number };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -3374,6 +3376,23 @@ export class AgentSession {
 			context: { bytes: reclaimed, note: `ctx=${contextTokens}tok reclaimed=${reclaimed}tok` },
 		});
 		if (reclaimed > 0) this.agent.state.messages = copy;
+	}
+
+	/**
+	 * Emit a subagent lifecycle "start" event so the TUI can show a live status
+	 * line while a subagent runs (instead of the subagent being a black box).
+	 * @internal Wired from agent-session-services via __bindBuiltInRefs.
+	 */
+	_emitSubagentStart(handle: string): void {
+		this._emit({ type: "subagent_start", handle });
+	}
+
+	/**
+	 * Emit a lightweight per-turn progress event for a running subagent.
+	 * @internal Wired from agent-session-services via __bindBuiltInRefs.
+	 */
+	_emitSubagentProgress(handle: string, info: { turn: number; lastTool?: string }): void {
+		this._emit({ type: "subagent_progress", handle, turn: info.turn, lastTool: info.lastTool });
 	}
 
 	/**

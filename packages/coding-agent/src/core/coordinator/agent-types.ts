@@ -14,6 +14,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseFrontmatter } from "../../utils/frontmatter.ts";
+import { BUILT_IN_AGENT_TYPES } from "./builtin-agents.ts";
 
 export interface AgentTypeDef {
 	/** Stable identifier referenced by `task({type})`. */
@@ -28,8 +29,8 @@ export interface AgentTypeDef {
 	model?: string;
 	/** Optional thinking level (minimal|low|medium|high|xhigh). */
 	thinkingLevel?: string;
-	/** Where it was loaded from — project overrides user. */
-	source: "project" | "user";
+	/** Where it was loaded from — project overrides user overrides builtin. */
+	source: "project" | "user" | "builtin";
 }
 
 interface AgentTypeFrontmatter {
@@ -82,12 +83,14 @@ function loadDir(dir: string, source: "project" | "user", out: Map<string, Agent
 }
 
 /**
- * Loads agent types from `~/.pit/agents` (user) then `<cwd>/.pit/agents`
- * (project), so a project type shadows a user type of the same name. `homeDir`
- * is injectable for tests.
+ * Seeds curated built-in types first, then loads `~/.pit/agents` (user) and
+ * `<cwd>/.pit/agents` (project), so a user/project type shadows a built-in and a
+ * project type shadows a user type of the same name. `homeDir` is injectable for
+ * tests.
  */
 export function loadAgentTypes(cwd: string, homeDir: string = homedir()): AgentTypeDef[] {
 	const map = new Map<string, AgentTypeDef>();
+	for (const t of BUILT_IN_AGENT_TYPES) map.set(t.name, t);
 	loadDir(join(homeDir, ".pit", "agents"), "user", map);
 	loadDir(join(cwd, ".pit", "agents"), "project", map);
 	return [...map.values()];

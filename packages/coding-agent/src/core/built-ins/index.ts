@@ -62,6 +62,10 @@ export interface BuiltInExtensionsOptions {
 	getMessagingTimeoutMs?: () => number | undefined;
 	/** Forwarded to the coordinator extension: fires when an async (op:"spawn") subagent settles. Returns true if re-injected. */
 	onAsyncComplete?: (handle: string, text: string, status: "done" | "error") => boolean;
+	/** Forwarded to the coordinator: fires once when a subagent (run or spawn) starts. */
+	onSubagentStart?: (handle: string) => void;
+	/** Forwarded to the coordinator: fires once per finished subagent turn (live progress). */
+	onSubagentProgress?: (handle: string, info: { turn: number; lastTool?: string }) => void;
 }
 
 export interface BuiltInExtensionsResult {
@@ -136,6 +140,8 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			getParentMessagingId: options.getParentMessagingId,
 			getMessagingTimeoutMs: options.getMessagingTimeoutMs,
 			onAsyncComplete: options.onAsyncComplete,
+			onSubagentStart: options.onSubagentStart,
+			onSubagentProgress: options.onSubagentProgress,
 		}),
 	];
 

@@ -28,7 +28,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import { describeToolAction, type PermissionChecker } from "../permissions/index.ts";
 import { formatSkillsForPrompt, type Skill } from "../skills.ts";
 import type { SubagentRegistry } from "./registry.ts";
-import type { SpawnSubagentOptions, SpawnSubagentResult, WorktreeSpec } from "./types.ts";
+import type { SpawnSubagentOptions, SpawnSubagentResult, SubagentUsage, WorktreeSpec } from "./types.ts";
 
 const execFileP = promisify(execFile);
 
@@ -244,6 +244,9 @@ export async function spawnSubagent(
 	const tools = filterTools(deps.availableTools, options.allowedTools);
 	const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
 	let turnCount = 0;
+	// GAP #5 token accounting: sum each assistant turn's reported usage so the
+	// run's aggregate cost is available on the registry record and the result.
+	const usage: SubagentUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 };
 
 	const checker = deps.permissionChecker;
 	// Tool calls denied by the parent's policy (including headless ask→deny).
@@ -295,7 +298,23 @@ export async function spawnSubagent(
 	agent.subscribe((event) => {
 		if (event.type === "turn_end") {
 			turnCount++;
-			deps.registry.update(record.id, { turnCount });
+			// GAP #5: accumulate token/cost usage from the assistant message.
+			const message = event.message;
+			if (message.role === "assistant" && message.usage) {
+				usage.inputTokens += message.usage.input;
+				usage.outputTokens += message.usage.output;
+				usage.totalTokens += message.usage.totalTokens;
+				usage.costUsd += message.usage.cost.total;
+			}
+			deps.registry.update(record.id, { turnCount, usage });
+			// GAP #3: emit a lightweight per-turn progress signal (turn, last tool).
+			let lastTool: string | undefined;
+			if (message.role === "assistant" && Array.isArray(message.content)) {
+				for (const block of message.content) {
+					if (block.type === "toolCall") lastTool = block.name;
+				}
+			}
+			options.onSubagentEvent?.({ turn: turnCount, lastTool });
 			if (turnCount >= maxTurns) {
 				controller.abort(new Error(`aborted: turn cap (${maxTurns}) reached`));
 			}
@@ -380,6 +399,7 @@ export async function spawnSubagent(
 			endedAt: Date.now(),
 			output,
 			turnCount,
+			usage,
 		});
 
 		await cleanup();
@@ -387,6 +407,7 @@ export async function spawnSubagent(
 			record: deps.registry.get(record.id)!,
 			output,
 			value,
+			usage,
 			worktreePath: worktree?.path,
 		};
 	} catch (err) {
