@@ -581,10 +581,18 @@ async function* parseSSE(
 				const chunk = buffer.slice(cursor, idx);
 				cursor = idx + 2;
 
-				const dataLines = chunk
-					.split("\n")
-					.filter((l) => l.startsWith("data:"))
-					.map((l) => l.slice(5).trim());
+				// Single-pass line scan over `chunk` (avoids split/filter/map
+				// allocating intermediate arrays + closures per delta). Same
+				// predicate/slice/trim as before: data: prefix → slice(5).trim().
+				const dataLines: string[] = [];
+				let lineStart = 0;
+				while (lineStart <= chunk.length) {
+					let nl = chunk.indexOf("\n", lineStart);
+					if (nl === -1) nl = chunk.length;
+					const line = chunk.slice(lineStart, nl);
+					if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+					lineStart = nl + 1;
+				}
 				if (dataLines.length > 0) {
 					const data = dataLines.join("\n").trim();
 					if (data && data !== "[DONE]") {

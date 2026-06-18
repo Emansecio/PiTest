@@ -60,12 +60,27 @@ export type FuzzyClosest = (
 	candidates: string[],
 	options: { maxDistance: number; prefixMinOverlap: number },
 ) => string | undefined;
+/**
+ * Top-N variant of {@link FuzzyClosest} (same `suggestClosestN` from @pit/ai).
+ * Returns up to `limit` best candidates, best-first, with IDENTICAL scoring/order
+ * to calling {@link FuzzyClosest} repeatedly and removing each pick. OPTIONAL: when
+ * wired, `rankCandidates` ranks in a single pass instead of re-scanning the pool
+ * per pick; when omitted, the per-pick `fuzzy` loop is used (identical result).
+ */
+export type FuzzyClosestN = (
+	name: string,
+	candidates: string[],
+	options: { maxDistance: number; prefixMinOverlap: number },
+	limit: number,
+) => string[];
 
 export interface PathGroundingDeps {
 	resolve: ResolvePath;
 	fileExists: FileExists;
 	listDir: ListDir;
 	fuzzy: FuzzyClosest;
+	/** OPTIONAL single-pass top-N matcher (suggestClosestN); falls back to `fuzzy` loop. */
+	fuzzyN?: FuzzyClosestN;
 	maxDistance: number;
 	prefixMinOverlap: number;
 }
@@ -128,15 +143,29 @@ function rankCandidates(rawPath: string, deps: PathGroundingDeps): string[] {
 	const pool = entries.filter((entry) => entry.length > 0 && entry !== wanted);
 	const prefix = lastSlash >= 0 ? rawPath.slice(0, lastSlash + 1) : "";
 
+	const closest = rankBasenames(wanted, pool, deps);
+	return closest.map((name) => `${prefix}${name}`);
+}
+
+/**
+ * Rank up to {@link MAX_BLOCK_CANDIDATES} basenames against `wanted`, best-first.
+ * Uses the single-pass `fuzzyN` when wired; otherwise the per-pick `fuzzy` loop
+ * (pick closest, drop it, repeat). Both return the IDENTICAL top-N ordering —
+ * `fuzzyN` IS `suggestClosestN`, whose stable ascending-score sort matches the
+ * loop's repeated `< best.score` selection.
+ */
+function rankBasenames(wanted: string, pool: string[], deps: PathGroundingDeps): string[] {
+	const options = { maxDistance: deps.maxDistance, prefixMinOverlap: deps.prefixMinOverlap };
+	const fuzzyN = deps.fuzzyN;
+	if (fuzzyN !== undefined) {
+		return fuzzyN(wanted, pool, options, MAX_BLOCK_CANDIDATES);
+	}
 	const ranked: string[] = [];
 	let remaining = pool;
 	while (remaining.length > 0 && ranked.length < MAX_BLOCK_CANDIDATES) {
-		const closest = deps.fuzzy(wanted, remaining, {
-			maxDistance: deps.maxDistance,
-			prefixMinOverlap: deps.prefixMinOverlap,
-		});
+		const closest = deps.fuzzy(wanted, remaining, options);
 		if (closest === undefined) break;
-		ranked.push(`${prefix}${closest}`);
+		ranked.push(closest);
 		remaining = remaining.filter((entry) => entry !== closest);
 	}
 	return ranked;

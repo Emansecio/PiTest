@@ -356,6 +356,8 @@ export interface LspClient {
 	openFiles: Map<string, OpenFile>;
 	pendingRequests: Map<number, PendingRequest>;
 	messageBuffer: Buffer;
+	/** Raw chunks awaiting coalesce into `messageBuffer` (avoids per-chunk O(B²) concat). */
+	pendingChunks: Buffer[];
 	isReading: boolean;
 	serverCapabilities?: LspServerCapabilities;
 	lastActivity: number;

@@ -95,6 +95,21 @@ export type FuzzyClosest = (
 	options: { maxDistance: number; prefixMinOverlap: number },
 ) => string | undefined;
 
+/**
+ * Top-N variant of {@link FuzzyClosest} (same `suggestClosestN` from `@pit/ai`).
+ * Returns up to `limit` best candidates, best-first, with IDENTICAL scoring/order
+ * to calling {@link FuzzyClosest} repeatedly and removing each pick. OPTIONAL: when
+ * wired, `rankCandidates` ranks in a single pass instead of re-scanning the pool
+ * per pick (O(k·pool·L²) -> O(pool·L²)). When omitted, the per-pick loop over
+ * `fuzzy` is used (identical result).
+ */
+export type FuzzyClosestN = (
+	name: string,
+	candidates: string[],
+	options: { maxDistance: number; prefixMinOverlap: number },
+	limit: number,
+) => string[];
+
 export interface GroundingGuardDeps {
 	/** Fast-path: flattened symbol-name set from the repo-map. */
 	indexLookup: IndexLookup;
@@ -102,6 +117,12 @@ export interface GroundingGuardDeps {
 	lspResolve?: LspResolve;
 	/** Fuzzy matcher (defaults to suggestClosest from @pit/ai). */
 	fuzzy: FuzzyClosest;
+	/**
+	 * OPTIONAL single-pass top-N fuzzy matcher (suggestClosestN from @pit/ai). When
+	 * wired, candidate ranking does ONE scan; when omitted, the `fuzzy` loop is used
+	 * (identical output). See {@link FuzzyClosestN}.
+	 */
+	fuzzyN?: FuzzyClosestN;
 	/** Max edit distance for an auto-fix / candidate to qualify. */
 	maxDistance: number;
 	/** Min affix overlap for the fuzzy affix fallback. */
@@ -291,13 +312,19 @@ function rankCandidates(name: string, pool: string[], deps: GroundingGuardDeps):
 		unique.push(candidate);
 	}
 
+	const options = { maxDistance: deps.maxDistance, prefixMinOverlap: deps.prefixMinOverlap };
+	const fuzzyN = deps.fuzzyN;
+	if (fuzzyN !== undefined) {
+		// Single pass over the deduped pool: IDENTICAL top-N ordering — `fuzzyN` IS
+		// `suggestClosestN`, whose stable ascending-score sort matches the loop's
+		// repeated `< best.score` selection below.
+		return fuzzyN(name, unique, options, MAX_BLOCK_CANDIDATES);
+	}
+
 	const ranked: string[] = [];
 	let remaining = unique;
 	while (remaining.length > 0 && ranked.length < MAX_BLOCK_CANDIDATES) {
-		const closest = deps.fuzzy(name, remaining, {
-			maxDistance: deps.maxDistance,
-			prefixMinOverlap: deps.prefixMinOverlap,
-		});
+		const closest = deps.fuzzy(name, remaining, options);
 		if (closest === undefined) break;
 		ranked.push(closest);
 		remaining = remaining.filter((candidate) => candidate !== closest);

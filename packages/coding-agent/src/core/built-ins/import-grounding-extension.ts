@@ -27,7 +27,7 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { recordDiagnostic, suggestClosest } from "@pit/ai";
+import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundImports, IMPORT_GROUNDING_DEFAULTS, isImportGroundingDisabled } from "../import-grounding.ts";
 import { extractEdits, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
@@ -205,6 +205,7 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 						fileExists: (absPath) => existsSync(absPath),
 						listDir: (absDir) => readdirSync(absDir),
 						fuzzy: suggestClosest,
+						fuzzyN: suggestClosestN,
 						maxDistance: IMPORT_GROUNDING_DEFAULTS.maxDistance,
 						prefixMinOverlap: IMPORT_GROUNDING_DEFAULTS.prefixMinOverlap,
 						// Wires the named-export validation pass: read a resolved module's

@@ -16,6 +16,7 @@ import { recordDiagnostic } from "@pit/ai";
 import { spawnProcess, waitForChildProcess } from "../../../utils/child-process.ts";
 import { killProcessTree } from "../../../utils/shell.ts";
 import { resolveCommand } from "../../lsp/config.ts";
+import { coalesceChunks } from "../../lsp/frame-chunks.ts";
 import { needsWindowsShell, parseContentLengthFrame, quoteWindowsShellArg } from "../../lsp/internal.ts";
 import type { McpServerConfig } from "../types.ts";
 import {
@@ -62,6 +63,8 @@ export class StdioTransport implements McpTransport {
 	private config: McpServerConfig;
 	private proc?: StdioChild;
 	private buffer: Buffer = Buffer.alloc(0);
+	/** Raw chunks awaiting coalesce into `buffer` (avoids per-chunk O(B²) concat). */
+	private pendingChunks: Buffer[] = [];
 	private isReading = false;
 	private pending = new Map<number | string, Pending>();
 	private stderrBuffer = "";
@@ -82,6 +85,7 @@ export class StdioTransport implements McpTransport {
 		// process first so we always hand the handshake a fresh subprocess.
 		this.killProc();
 		this.buffer = Buffer.alloc(0);
+		this.pendingChunks.length = 0;
 		this.exited = false;
 		this.exitError = undefined;
 		this.stderrBuffer = "";
@@ -147,7 +151,7 @@ export class StdioTransport implements McpTransport {
 	}
 
 	private onStdoutData(chunk: Buffer): void {
-		this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
+		this.pendingChunks.push(chunk);
 		this.drain();
 	}
 
@@ -155,6 +159,10 @@ export class StdioTransport implements McpTransport {
 		if (this.isReading) return;
 		this.isReading = true;
 		try {
+			if (this.pendingChunks.length > 0) {
+				this.buffer = coalesceChunks(this.buffer, this.pendingChunks);
+				this.pendingChunks.length = 0;
+			}
 			let frame = parseContentLengthFrame(this.buffer);
 			while (frame) {
 				this.buffer = frame.remaining;
@@ -174,7 +182,7 @@ export class StdioTransport implements McpTransport {
 			this.isReading = false;
 		}
 		// A chunk may have arrived after the last parse but before the flag cleared.
-		if (parseContentLengthFrame(this.buffer)) this.drain();
+		if (this.pendingChunks.length > 0 || parseContentLengthFrame(this.buffer)) this.drain();
 	}
 
 	private routeMessage(json: unknown): void {

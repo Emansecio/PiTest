@@ -18,7 +18,7 @@
  * PIT_NO_GROUNDING_GUARD.
  */
 
-import { recordDiagnostic, suggestClosest } from "@pit/ai";
+import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import {
 	GROUNDING_GUARD_DEFAULTS,
@@ -101,6 +101,7 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 						indexLookup,
 						lspResolve,
 						fuzzy: suggestClosest,
+						fuzzyN: suggestClosestN,
 						maxDistance: GROUNDING_GUARD_DEFAULTS.maxDistance,
 						prefixMinOverlap: GROUNDING_GUARD_DEFAULTS.prefixMinOverlap,
 					},

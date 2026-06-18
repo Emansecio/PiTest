@@ -84,6 +84,21 @@ export type FuzzyClosest = (
 	options: { maxDistance: number; prefixMinOverlap: number },
 ) => string | undefined;
 
+/**
+ * Top-N variant of {@link FuzzyClosest} (same `suggestClosestN` from `@pit/ai`).
+ * Returns up to `limit` best candidates, best-first, with IDENTICAL scoring/order
+ * to calling {@link FuzzyClosest} repeatedly and removing each pick. OPTIONAL: when
+ * wired, `rankCandidates` ranks in a single pass instead of re-scanning the pool
+ * per pick (O(k·pool·L²) -> O(pool·L²)). When omitted, the per-pick loop over
+ * `fuzzy` is used (identical result).
+ */
+export type FuzzyClosestN = (
+	name: string,
+	candidates: string[],
+	options: { maxDistance: number; prefixMinOverlap: number },
+	limit: number,
+) => string[];
+
 export interface ImportGroundingDeps {
 	/** Existence check for a fully-resolved candidate path. */
 	fileExists: FileExists;
@@ -91,6 +106,12 @@ export interface ImportGroundingDeps {
 	listDir: ListDir;
 	/** Fuzzy matcher (defaults to suggestClosest from @pit/ai). */
 	fuzzy: FuzzyClosest;
+	/**
+	 * OPTIONAL single-pass top-N fuzzy matcher (suggestClosestN from @pit/ai). When
+	 * wired, candidate ranking does ONE scan; when omitted, the `fuzzy` loop is used
+	 * (identical output). See {@link FuzzyClosestN}.
+	 */
+	fuzzyN?: FuzzyClosestN;
 	/** Max edit distance for a candidate to qualify. */
 	maxDistance: number;
 	/** Min affix overlap for the fuzzy affix fallback. */
@@ -353,6 +374,30 @@ function stripKnownExtension(basename: string): string {
 }
 
 /**
+ * Rank up to {@link MAX_BLOCK_CANDIDATES} bare entry names against `wanted`,
+ * best-first. Uses the single-pass `fuzzyN` when wired; otherwise falls back to
+ * the per-pick `fuzzy` loop (pick the closest, drop it, repeat). Both paths return
+ * the IDENTICAL top-N ordering — `fuzzyN` IS `suggestClosestN`, whose stable
+ * ascending-score sort matches the loop's repeated `< best.score` selection.
+ */
+function rankBareNames(wanted: string, pool: string[], deps: ImportGroundingDeps): string[] {
+	const options = { maxDistance: deps.maxDistance, prefixMinOverlap: deps.prefixMinOverlap };
+	const fuzzyN = deps.fuzzyN;
+	if (fuzzyN !== undefined) {
+		return fuzzyN(wanted, pool, options, MAX_BLOCK_CANDIDATES);
+	}
+	const ranked: string[] = [];
+	let remaining = pool;
+	while (remaining.length > 0 && ranked.length < MAX_BLOCK_CANDIDATES) {
+		const closest = deps.fuzzy(wanted, remaining, options);
+		if (closest === undefined) break;
+		ranked.push(closest);
+		remaining = remaining.filter((candidate) => candidate !== closest);
+	}
+	return ranked;
+}
+
+/**
  * Build the close-candidate list for a broken `specifier`. We resolve its parent
  * directory (the part before the last "/"), list that dir, and fuzzy-rank the
  * entries' bare names against the broken last segment. Returns candidate module
@@ -390,22 +435,11 @@ function rankCandidates(fromDir: string, specifier: string, deps: ImportGroundin
 		pool.push(bare);
 	}
 
-	const ranked: string[] = [];
-	let remaining = pool;
-	while (remaining.length > 0 && ranked.length < MAX_BLOCK_CANDIDATES) {
-		const closest = deps.fuzzy(wanted, remaining, {
-			maxDistance: deps.maxDistance,
-			prefixMinOverlap: deps.prefixMinOverlap,
-		});
-		if (closest === undefined) break;
-		// Re-attach the sub-directory prefix AND the original extension so the
-		// suggestion is itself a usable specifier (`./sub/utils.js`, not bare `utils`).
-		const prefix = specDir === "." ? "./" : `${specDir}/`;
-		const suggestion = `${prefix}${closest}${originalExt}`;
-		ranked.push(suggestion);
-		remaining = remaining.filter((candidate) => candidate !== closest);
-	}
-	return ranked;
+	// Re-attach the sub-directory prefix AND the original extension so each
+	// suggestion is itself a usable specifier (`./sub/utils.js`, not bare `utils`).
+	const prefix = specDir === "." ? "./" : `${specDir}/`;
+	const closest = rankBareNames(wanted, pool, deps);
+	return closest.map((name) => `${prefix}${name}${originalExt}`);
 }
 
 /**

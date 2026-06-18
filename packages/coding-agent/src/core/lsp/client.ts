@@ -13,6 +13,7 @@ import { recordDiagnostic } from "@pit/ai";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { killProcessTree } from "../../utils/shell.ts";
 import { applyWorkspaceEdit } from "./edits.ts";
+import { coalesceChunks } from "./frame-chunks.ts";
 import {
 	isEnoent,
 	log,
@@ -206,7 +207,7 @@ function queueWriteMessage(
 // =============================================================================
 
 function onStdoutData(client: LspClient, chunk: Buffer): void {
-	client.messageBuffer = client.messageBuffer.length === 0 ? chunk : Buffer.concat([client.messageBuffer, chunk]);
+	client.pendingChunks.push(chunk);
 	void drainMessages(client);
 }
 
@@ -214,6 +215,10 @@ async function drainMessages(client: LspClient): Promise<void> {
 	if (client.isReading) return;
 	client.isReading = true;
 	try {
+		if (client.pendingChunks.length > 0) {
+			client.messageBuffer = coalesceChunks(client.messageBuffer, client.pendingChunks);
+			client.pendingChunks.length = 0;
+		}
 		let parsed = parseMessage(client.messageBuffer);
 		while (parsed) {
 			client.messageBuffer = parsed.remaining;
@@ -221,6 +226,11 @@ async function drainMessages(client: LspClient): Promise<void> {
 				log.warn("Discarding malformed LSP frame", { error: parsed.error.message });
 			} else {
 				await routeMessage(client, parsed.message);
+			}
+			// Chunks may have arrived during the await; fold them in before re-parsing.
+			if (client.pendingChunks.length > 0) {
+				client.messageBuffer = coalesceChunks(client.messageBuffer, client.pendingChunks);
+				client.pendingChunks.length = 0;
 			}
 			parsed = parseMessage(client.messageBuffer);
 		}
@@ -230,7 +240,7 @@ async function drainMessages(client: LspClient): Promise<void> {
 		client.isReading = false;
 	}
 	// A chunk may have arrived after the last parse but before the flag cleared.
-	if (parseMessage(client.messageBuffer)) void drainMessages(client);
+	if (client.pendingChunks.length > 0 || parseMessage(client.messageBuffer)) void drainMessages(client);
 }
 
 async function routeMessage(client: LspClient, message: LspJsonRpcResponse | LspJsonRpcNotification): Promise<void> {
@@ -401,6 +411,7 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 			openFiles: new Map(),
 			pendingRequests: new Map(),
 			messageBuffer: Buffer.alloc(0),
+			pendingChunks: [],
 			isReading: false,
 			lastActivity: Date.now(),
 			writeQueue: Promise.resolve(),

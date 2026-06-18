@@ -11,6 +11,7 @@ import type { Readable, Writable } from "node:stream";
 import { recordDiagnostic } from "@pit/ai";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { killProcessTree } from "../../utils/shell.ts";
+import { coalesceChunks } from "../lsp/frame-chunks.ts";
 import { log, parseContentLengthFrame, toErrorMessage } from "../lsp/internal.ts";
 import type {
 	DapCapabilities,
@@ -65,6 +66,8 @@ export class DapClient {
 	#requestSeq = 0;
 	#pendingRequests = new Map<number, DapPendingRequest>();
 	#messageBuffer: Buffer = Buffer.alloc(0);
+	/** Raw chunks awaiting coalesce into #messageBuffer (avoids per-chunk O(B²) concat). */
+	#pendingChunks: Buffer[] = [];
 	#isReading = false;
 	#disposed = false;
 	#lastActivity = Date.now();
@@ -397,20 +400,28 @@ export class DapClient {
 	}
 
 	#onData(chunk: Buffer): void {
-		this.#messageBuffer = this.#messageBuffer.length === 0 ? chunk : Buffer.concat([this.#messageBuffer, chunk]);
+		this.#pendingChunks.push(chunk);
 		void this.#drain();
+	}
+
+	#coalescePending(): void {
+		if (this.#pendingChunks.length === 0) return;
+		this.#messageBuffer = coalesceChunks(this.#messageBuffer, this.#pendingChunks);
+		this.#pendingChunks.length = 0;
 	}
 
 	async #drain(): Promise<void> {
 		if (this.#isReading) return;
 		this.#isReading = true;
 		try {
+			this.#coalescePending();
 			let parsed = parseMessage(this.#messageBuffer);
 			while (parsed) {
 				this.#messageBuffer = parsed.remaining;
 				this.#lastActivity = Date.now();
 				if ("error" in parsed) {
 					log.warn("Discarding malformed DAP frame", { error: parsed.error.message });
+					this.#coalescePending();
 					parsed = parseMessage(this.#messageBuffer);
 					continue;
 				}
@@ -422,6 +433,8 @@ export class DapClient {
 				} else {
 					await this.#handleAdapterRequest(message);
 				}
+				// Chunks may have arrived during the await; fold them in before re-parsing.
+				this.#coalescePending();
 				parsed = parseMessage(this.#messageBuffer);
 			}
 		} catch (error) {
@@ -429,7 +442,7 @@ export class DapClient {
 		} finally {
 			this.#isReading = false;
 		}
-		if (parseMessage(this.#messageBuffer)) void this.#drain();
+		if (this.#pendingChunks.length > 0 || parseMessage(this.#messageBuffer)) void this.#drain();
 	}
 
 	#handleResponse(message: DapResponseMessage): void {

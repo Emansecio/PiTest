@@ -684,6 +684,13 @@ function headTailExcerpt(text: string): string {
  * `cloneToolResultMessagesForPrune` — otherwise an aborted compaction leaves the
  * live context with elided tool results and no restore path.
  */
+// Memoize the (stringify + token-estimate) of a mutation tool-call's arguments by
+// reference. The same large write/edit body is re-checked every turn above the 64k
+// floor; the cost number only changes when `block.arguments` is reassigned (which
+// yields a fresh reference on prune), so a WeakMap keyed by the object naturally
+// recomputes exactly once for the new (small) value.
+const beforeTokensCache = new WeakMap<object, number>();
+
 export function pruneOldToolOutputs(
 	messages: AgentMessage[],
 	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
@@ -716,7 +723,13 @@ export function pruneOldToolOutputs(
 			for (let b = 0; b < msg.content.length; b++) {
 				const block = msg.content[b];
 				if (block.type !== "toolCall" || !MUTATION_TOOL_NAMES.has(block.name)) continue;
-				const before = estimateTextTokens(JSON.stringify(block.arguments), true);
+				const argsRef =
+					typeof block.arguments === "object" && block.arguments !== null ? block.arguments : undefined;
+				let before = argsRef ? beforeTokensCache.get(argsRef) : undefined;
+				if (before === undefined) {
+					before = estimateTextTokens(JSON.stringify(block.arguments), true);
+					if (argsRef) beforeTokensCache.set(argsRef, before);
+				}
 				if (before <= tokenThreshold) continue;
 				const result = pruneToolCallArguments(block.arguments);
 				if (result) {

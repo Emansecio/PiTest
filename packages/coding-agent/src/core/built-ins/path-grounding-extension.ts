@@ -17,7 +17,7 @@
  */
 
 import { existsSync, readdirSync } from "node:fs";
-import { recordDiagnostic, suggestClosest } from "@pit/ai";
+import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundPath, isPathGroundingDisabled, PATH_GROUNDING_DEFAULTS } from "../path-grounding.ts";
 import { extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
@@ -43,6 +43,7 @@ export function createPathGroundingExtension(options: { cwd: string }) {
 						fileExists: (absPath) => existsSync(absPath),
 						listDir: (absDir) => readdirSync(absDir),
 						fuzzy: suggestClosest,
+						fuzzyN: suggestClosestN,
 						maxDistance: PATH_GROUNDING_DEFAULTS.maxDistance,
 						prefixMinOverlap: PATH_GROUNDING_DEFAULTS.prefixMinOverlap,
 					},

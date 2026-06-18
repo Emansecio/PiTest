@@ -334,8 +334,24 @@ export function suggestClosest(
 	candidates: string[],
 	options: { maxDistance: number; prefixMinOverlap: number },
 ): string | undefined {
+	return suggestClosestN(name, candidates, options, 1)[0];
+}
+
+/**
+ * Top-N variant of {@link suggestClosest}. Scores every candidate with the same
+ * Levenshtein/affix logic, then returns up to `limit` candidate names ordered by
+ * ascending score. The sort is stable (V8), so candidates that tie keep their
+ * original insertion order — matching the strict `< best.score` tie-breaking of
+ * the single-result path.
+ */
+export function suggestClosestN(
+	name: string,
+	candidates: string[],
+	options: { maxDistance: number; prefixMinOverlap: number },
+	limit: number,
+): string[] {
 	const lower = name.toLowerCase();
-	let best: { name: string; score: number } | undefined;
+	const scored: Array<{ name: string; score: number }> = [];
 	for (const candidate of candidates) {
 		const candidateLower = candidate.toLowerCase();
 		const distance = levenshteinKey(lower, candidateLower);
@@ -347,11 +363,10 @@ export function suggestClosest(
 			if (!longer.includes(shorter)) continue;
 			score = longer.length - shorter.length;
 		}
-		if (!best || score < best.score) {
-			best = { name: candidate, score };
-		}
+		scored.push({ name: candidate, score });
 	}
-	return best?.name;
+	scored.sort((a, b) => a.score - b.score);
+	return scored.slice(0, limit).map((entry) => entry.name);
 }
 
 function suggestKeyName(name: string, validKeys: string[]): string | undefined {
