@@ -41,8 +41,24 @@ function normalizeAtPrefix(filePath: string): string {
 	return filePath.startsWith("@") ? filePath.slice(1) : filePath;
 }
 
+/**
+ * Strip a trailing `:line` or `:line:col` suffix a model copied from grep /
+ * find-symbol output into a path arg ("src/x.ts:42" -> "src/x.ts"). The capture
+ * requires a non-`:` char before the suffix and bails on a bare drive-relative
+ * path ("C:42"), so a Windows drive prefix is never mangled. Real filenames
+ * almost never end in `:<digits>` (the char is invalid on Windows, vanishing on
+ * POSIX), so this is safe to apply unconditionally to every path arg.
+ */
+function stripLineSuffix(filePath: string): string {
+	const match = filePath.match(/^(.*?[^:]):\d+(?::\d+)?$/);
+	if (!match) return filePath;
+	const base = match[1];
+	if (/^[a-zA-Z]$/.test(base)) return filePath; // "C:42" drive-relative — leave intact
+	return base;
+}
+
 export function expandPath(filePath: string): string {
-	const normalized = normalizeUnicodeSpaces(normalizeAtPrefix(filePath));
+	const normalized = stripLineSuffix(normalizeUnicodeSpaces(normalizeAtPrefix(filePath)));
 	if (normalized === "~") {
 		return os.homedir();
 	}

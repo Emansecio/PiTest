@@ -16,6 +16,28 @@ describe("path-utils", () => {
 			expect(result).not.toContain("~/");
 		});
 
+		it("strips a trailing :line suffix copied from grep output", () => {
+			expect(expandPath("src/x.ts:42")).toBe("src/x.ts");
+		});
+
+		it("strips a trailing :line:col suffix", () => {
+			expect(expandPath("src/x.ts:42:10")).toBe("src/x.ts");
+		});
+
+		it("leaves a bare Windows drive-relative path intact", () => {
+			expect(expandPath("C:42")).toBe("C:42");
+		});
+
+		it("leaves a path with no line suffix untouched", () => {
+			expect(expandPath("src/x.ts")).toBe("src/x.ts");
+		});
+
+		it("strips the line suffix after expanding ~", () => {
+			const result = expandPath("~/x.ts:42");
+			expect(result).not.toContain("~");
+			expect(result.endsWith("x.ts")).toBe(true);
+		});
+
 		it("should normalize Unicode spaces", () => {
 			// Non-breaking space (U+00A0) should become regular space
 			const withNBSP = "file\u00A0name.txt";

@@ -16,6 +16,7 @@
  */
 
 import { resolve as nodeResolve } from "node:path";
+import { expandPath } from "./path-utils.ts";
 
 /** Map of alias -> canonical key used by `applyKeyAliases`. */
 export type KeyAliasMap = Record<string, string>;
@@ -253,17 +254,20 @@ export function extractPathArg(input: Record<string, unknown>): string | undefin
 /**
  * Resolve a tool path argument against `cwd`, treating POSIX-absolute (`/…`) and
  * Windows drive-prefixed (`C:…`) paths as already absolute and everything else as
- * cwd-relative. Mirrors the per-guard `resolvePath` closures verbatim.
+ * cwd-relative.
  *
- * NOTE: intentionally NOT `resolveToCwd` from path-utils — that helper additionally
- * expands `~`/`@`, short-circuits `scheme://` URLs, and uses node's `isAbsolute`
- * (which treats `C:foo` as relative). The guards predate that and must keep their
- * exact resolution to stay behaviourally identical; routing them through
- * `resolveToCwd` would change which inputs count as absolute.
+ * Runs `expandPath` first so the guards see the SAME normalization the tools do
+ * (`~`/`@` expansion, unicode spaces, and a trailing `:line[:col]` suffix the
+ * model copied from grep output) — otherwise a guard would resolve `~/x` or
+ * `x.ts:42` to a different file than the tool and mis-fire. It intentionally
+ * keeps its OWN absolute-path check (regex, not node's `isAbsolute`) rather than
+ * routing through `resolveToCwd`, so `C:foo` stays treated as absolute and
+ * `scheme://` URLs aren't special-cased here.
  */
 export function resolveToolPath(filePath: string, cwd: string): string {
-	if (filePath.startsWith("/") || /^[a-zA-Z]:/.test(filePath)) return filePath;
-	return nodeResolve(cwd, filePath);
+	const expanded = expandPath(filePath);
+	if (expanded.startsWith("/") || /^[a-zA-Z]:/.test(expanded)) return expanded;
+	return nodeResolve(cwd, expanded);
 }
 
 /** {oldText,newText} edit block in canonical form. */

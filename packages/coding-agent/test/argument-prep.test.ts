@@ -8,7 +8,26 @@ import {
 	PATH_KEY_ALIASES,
 	prepareArgsForLooseSchema,
 	prepareWithPathAliases,
+	resolveToolPath,
 } from "../src/core/tools/argument-prep.js";
+
+describe("resolveToolPath — aligned with the tools' expandPath", () => {
+	it("strips a :line suffix before resolving (matches the tool)", () => {
+		const cwd = process.platform === "win32" ? "C:\\work" : "/work";
+		expect(resolveToolPath("x.ts:42", cwd)).toBe(resolveToolPath("x.ts", cwd));
+	});
+
+	it("expands ~ so the guard resolves the same file the tool reads", () => {
+		const out = resolveToolPath("~/x.ts", process.platform === "win32" ? "C:\\work" : "/work");
+		expect(out).not.toContain("~");
+		expect(out.endsWith("x.ts")).toBe(true);
+	});
+
+	it("keeps an absolute path absolute", () => {
+		const abs = process.platform === "win32" ? "C:\\a\\b.ts" : "/a/b.ts";
+		expect(resolveToolPath(abs, process.platform === "win32" ? "C:\\work" : "/work")).toBe(abs);
+	});
+});
 
 describe("prepareArgsForLooseSchema (MCP / loose-schema tools)", () => {
 	const schema = { properties: { path: { type: "string" }, items: { type: "array" } } };
