@@ -458,7 +458,7 @@ interface ComposeOptions {
 function composeLeftRight(rawLeft: string, rawRight: string, width: number, options: ComposeOptions): string {
 	const suffix = options.protectedSuffix;
 	const suffixWidth = suffix ? suffix.width : 0;
-	const minPadding = rawLeft.length > 0 && (rawRight.length > 0 || suffixWidth > 0) ? 2 : 0;
+	const minPadding = visibleWidth(rawLeft) > 0 && (visibleWidth(rawRight) > 0 || suffixWidth > 0) ? 2 : 0;
 	let left = rawLeft;
 	let right = rawRight;
 	let leftWidth = visibleWidth(left);

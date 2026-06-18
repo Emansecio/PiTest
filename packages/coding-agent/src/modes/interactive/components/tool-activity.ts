@@ -1,6 +1,6 @@
 import { truncateToWidth } from "@pit/tui";
 import { type ThemeColor, theme } from "../theme/theme.ts";
-import { keyHint } from "./keybinding-hints.ts";
+import { keyText } from "./keybinding-hints.ts";
 
 export type ToolActivity = "navigation" | "action";
 
@@ -9,6 +9,24 @@ export type ToolActivity = "navigation" | "action";
  * ctrl+o away. Sized to fit a typical stack trace / error message without
  * forcing an expand for the common case. */
 export const ERROR_PREVIEW_LINES = 10;
+
+/**
+ * Canonical "more lines" trailer shown when a body is folded to a preview.
+ * One format across every collapse site (tool result / bash / error preview):
+ * `… +N more lines (<key> to expand)`. `expandHint` is the already-styled key
+ * text for the expand keybinding each site uses (dim key + muted words), so the
+ * shortcut shown stays whatever that site binds. ANSI is width-free, so callers
+ * may still clamp the result with truncateToWidth to honor the TUI invariant.
+ */
+export function moreLinesTrailer(n: number, expandHint: string): string {
+	return `${theme.fg("muted", `… +${n} more lines`)} (${expandHint}${theme.fg("muted", " to expand")})`;
+}
+
+/** Styled key text for the standard expand keybinding, used as the `expandHint`
+ * argument to {@link moreLinesTrailer}. Dim to match the other inline hints. */
+export function expandKeyHint(): string {
+	return theme.fg("dim", keyText("app.tools.expand"));
+}
 
 /**
  * Cap an auto-shown error body to {@link ERROR_PREVIEW_LINES}, appending a
@@ -20,12 +38,7 @@ export function capErrorPreview(lines: string[], width: number): string[] {
 	if (lines.length <= ERROR_PREVIEW_LINES) return lines;
 	const kept = lines.slice(0, ERROR_PREVIEW_LINES);
 	const hidden = lines.length - kept.length;
-	kept.push(
-		truncateToWidth(
-			`${theme.fg("muted", `… +${hidden} more lines`)} (${keyHint("app.tools.expand", "to expand")})`,
-			width,
-		),
-	);
+	kept.push(truncateToWidth(moreLinesTrailer(hidden, expandKeyHint()), width));
 	return kept;
 }
 
@@ -78,9 +91,16 @@ export function nounFor(toolName: string): string {
 	return TOOL_NOUNS[toolName] ?? "step";
 }
 
+const CONSONANTS_BEFORE_Y = /[bcdfghjklmnpqrstvwxz]y$/i;
+
 export function pluralizeNoun(noun: string, n: number): string {
 	if (n === 1) return noun;
-	if (noun.endsWith("h") || noun.endsWith("s")) return `${noun}es`;
+	// consonant + y → ies (body → bodies); vowel + y keeps +s (key → keys).
+	if (CONSONANTS_BEFORE_Y.test(noun)) return `${noun.slice(0, -1)}ies`;
+	// sibilant endings (s, x, z, ch, sh) → es (search → searches, match → matches).
+	if (noun.endsWith("s") || noun.endsWith("x") || noun.endsWith("z") || noun.endsWith("ch") || noun.endsWith("sh")) {
+		return `${noun}es`;
+	}
 	return `${noun}s`;
 }
 
@@ -88,6 +108,7 @@ export function pluralizeNoun(noun: string, n: number): string {
  * participle shown while the call runs (spinner state). Unknown action tools
  * fall back to the neutral Ran/Running pair. */
 const ACTION_VERBS: Record<string, { done: string; pending: string }> = {
+	read: { done: "Read", pending: "Reading" },
 	edit: { done: "Edited", pending: "Editing" },
 	edit_v2: { done: "Edited", pending: "Editing" },
 	ast_edit: { done: "Edited", pending: "Editing" },

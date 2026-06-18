@@ -131,6 +131,20 @@ export class AssistantMessageComponent extends Container {
 	private revealIndex = -1;
 	private revealedChars = Number.POSITIVE_INFINITY;
 	private revealUnsub: (() => void) | null = null;
+	// Decorated-output memo keyed by the Container's returned array reference plus
+	// the dynamic-decoration inputs (deliverable flag + exit code). Container.render
+	// is memoized and hands back the same array instance while no child changed
+	// (Component render contract); re-slicing + re-decorating it every frame would
+	// allocate a fresh array each tick and defeat the parent Container's flatten
+	// cache (childLines !== the cached ref → O(lines) re-flatten per animation
+	// frame, including history off-screen). We may only reuse the memo when BOTH
+	// per-frame decorations are inactive: the reveal-edge fade (settled) and the
+	// deliverable ColorEase (not animating). While either is live the decoration
+	// changes every frame, so we fall through to the recompute path and skip caching.
+	private decorateSource: string[] | null = null;
+	private decorated: string[] | null = null;
+	private decoratedDeliverable = false;
+	private decoratedExitCode = -1;
 	// Deliverable-marker state
 	private isDeliverable = false;
 	// Dim the prose: set on intermediate (non-deliverable) turn messages so step
@@ -193,10 +207,45 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	/** True when neither per-frame decoration is live, so the decorated output is
+	 * stable across frames and safe to memoize. The reveal-edge fade is active only
+	 * while the trailing block is still revealing (mirrors applyRevealEdgeFade's own
+	 * guard); the deliverable glyph recolors only while its ColorEase animates. */
+	private decorationIsStatic(): boolean {
+		if (this.smoothing && this.revealIndex >= 0 && this.lastMessage) {
+			const target = this.blockTextLength(this.lastMessage, this.revealIndex);
+			if (this.revealedChars < target) return false; // reveal fade still live
+		}
+		if (this.deliverableEase?.active) return false; // glyph ease still animating
+		return true;
+	}
+
 	override render(width: number): string[] {
 		const rendered = super.render(width);
 		if (this.hasToolCalls || rendered.length === 0) {
 			return rendered;
+		}
+
+		// Exit status on D: aborted turns report 130 (SIGINT), errored turns 1,
+		// everything else 0. Recomputed each frame; the final settled render
+		// carries the true code.
+		const stop = this.lastMessage?.stopReason;
+		const exitCode = stop === "aborted" ? 130 : stop === "error" ? 1 : 0;
+
+		// Reuse the decorated memo when the underlying Container array is the same
+		// instance AND the dynamic decoration inputs (deliverable flag, exit code)
+		// match what we cached AND no per-frame decoration is live. This keeps the
+		// returned array identity-stable for the parent's flatten cache while the
+		// animation ticker fires, instead of allocating a fresh decorated array per
+		// frame. Recomputed below (and re-cached) whenever any of these differ.
+		if (
+			rendered === this.decorateSource &&
+			this.decorated !== null &&
+			this.decoratedDeliverable === this.isDeliverable &&
+			this.decoratedExitCode === exitCode &&
+			this.decorationIsStatic()
+		) {
+			return this.decorated;
 		}
 
 		// Copy before decorating: Container.render hands back its memoized array
@@ -216,18 +265,35 @@ export class AssistantMessageComponent extends Container {
 			for (let i = 0; i < lines.length; i++) {
 				if (visibleWidth(stripAnsi(lines[i])) > 0) {
 					lines[i] = `${glyph} ${lines[i]}`;
+					// Prepending "● " adds 2 cols without re-truncating. With
+					// readingColumns=0 the prose already fills the full width, so the
+					// marked line can spill to width+2. Downstream clampLineToWidth would
+					// catch it (and truncate to the same `truncateToWidth(line, width, "…")`),
+					// but under PIT_RENDER_ASSERT it throws instead. Re-truncate here to the
+					// identical result so the assert never trips; the common case (line fits)
+					// short-circuits and is byte-identical.
+					if (visibleWidth(stripAnsi(lines[i])) > width) {
+						lines[i] = truncateToWidth(lines[i], width, "…");
+					}
 					break;
 				}
 			}
 		}
 
-		// Exit status on D: aborted turns report 130 (SIGINT), errored turns 1,
-		// everything else 0. Recomputed each frame; the final settled render
-		// carries the true code.
-		const stop = this.lastMessage?.stopReason;
-		const exitCode = stop === "aborted" ? 130 : stop === "error" ? 1 : 0;
 		lines[0] = OSC133_OUTPUT_START + lines[0];
 		lines[lines.length - 1] = `${lines[lines.length - 1]}\x1b]133;D;${exitCode}\x07`;
+
+		// Cache the decorated array for identity-stable reuse on subsequent frames —
+		// but only when no per-frame decoration is live, so the memo can't pin a
+		// stale fade/glyph frame. While a decoration animates we leave the previous
+		// memo untouched (and the guard above won't hit it, since decorationIsStatic
+		// is false), recomputing fresh every frame as before.
+		if (this.decorationIsStatic()) {
+			this.decorateSource = rendered;
+			this.decorated = lines;
+			this.decoratedDeliverable = this.isDeliverable;
+			this.decoratedExitCode = exitCode;
+		}
 		return lines;
 	}
 

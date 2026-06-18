@@ -14,6 +14,7 @@ import { theme } from "../theme/theme.ts";
 import { clampBashCommandRow } from "./bash-command-row.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 import { MessageShell } from "./message-shell.ts";
+import { expandKeyHint, moreLinesTrailer } from "./tool-activity.ts";
 
 import { truncateToVisualLines } from "./visual-truncate.ts";
 
@@ -84,6 +85,7 @@ export class BashExecutionComponent extends MessageShell {
 	 * Set whether the output is expanded (shows full output) or collapsed (preview only).
 	 */
 	setExpanded(expanded: boolean): void {
+		if (this.expanded === expanded) return;
 		this.expanded = expanded;
 		this.updateDisplay();
 	}
@@ -226,9 +228,7 @@ export class BashExecutionComponent extends MessageShell {
 				if (this.expanded) {
 					statusParts.push(`(${keyHint("app.tools.expand", "to collapse")})`);
 				} else {
-					statusParts.push(
-						`${theme.fg("muted", `… ${hiddenLineCount} more lines`)} (${keyHint("app.tools.expand", "to expand")})`,
-					);
+					statusParts.push(moreLinesTrailer(hiddenLineCount, expandKeyHint()));
 				}
 			}
 

@@ -17,9 +17,8 @@ import { convertToPng } from "../../../utils/image-convert.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { summarizeArgsOneLine } from "./arg-summary.ts";
-import { keyHint } from "./keybinding-hints.js";
 import { MessageShell } from "./message-shell.ts";
-import type { ToolActivity } from "./tool-activity.ts";
+import { expandKeyHint, moreLinesTrailer, type ToolActivity } from "./tool-activity.ts";
 
 // Cap for the no-custom-renderer result fallback. Tools without their own
 // renderResult (MCP tools, the coordinator/Task tool, extension tools) would
@@ -237,7 +236,7 @@ export class ToolExecutionComponent extends MessageShell {
 		const remaining = lines.length - maxLines;
 		let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
 		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n… (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
+			text += `\n${moreLinesTrailer(remaining, expandKeyHint())}`;
 		}
 		return text;
 	}
@@ -299,6 +298,7 @@ export class ToolExecutionComponent extends MessageShell {
 	}
 
 	setExpanded(expanded: boolean): void {
+		if (this.expanded === expanded) return;
 		this.expanded = expanded;
 		this.updateDisplay();
 	}
