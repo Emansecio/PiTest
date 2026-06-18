@@ -6,6 +6,7 @@
 import type { TSchema } from "typebox";
 import { Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { prepareArgsForLooseSchema } from "../tools/argument-prep.ts";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "../tools/json-crush.ts";
 import { collapseRepeatedLines, DEFAULT_MAX_BYTES, formatSize, truncateHead } from "../tools/truncate.ts";
 import type { McpManager } from "./manager.ts";
@@ -123,7 +124,8 @@ export function wrapMcpToolAsDefinition(
 		label: schema.name,
 		description,
 		parameters: params,
-		prepareArguments: (args: unknown) => (args ?? {}) as Record<string, unknown>,
+		prepareArguments: (args: unknown) =>
+			prepareArgsForLooseSchema(args ?? {}, schema.inputSchema) as Record<string, unknown>,
 		async execute(_id, providedArgs, signal) {
 			const argRecord = (providedArgs ?? {}) as Record<string, unknown>;
 			try {

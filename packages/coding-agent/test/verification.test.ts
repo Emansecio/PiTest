@@ -1,8 +1,12 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { detectCheckCommand, runCheckCommand } from "../src/core/verification/verification.js";
+import {
+	detectCheckCommand,
+	detectLocalTypecheckCommand,
+	runCheckCommand,
+} from "../src/core/verification/verification.js";
 
 describe("verification module", () => {
 	let dir: string;
@@ -11,6 +15,22 @@ describe("verification module", () => {
 	});
 	afterEach(async () => {
 		await rm(dir, { recursive: true, force: true });
+	});
+
+	describe("detectLocalTypecheckCommand", () => {
+		it("returns the cwd-relative tsc path (no absolute/quoted path that cmd.exe mis-parses)", async () => {
+			await writeFile(join(dir, "tsconfig.json"), "{}");
+			const binName = process.platform === "win32" ? "tsc.cmd" : "tsc";
+			await mkdir(join(dir, "node_modules", ".bin"), { recursive: true });
+			await writeFile(join(dir, "node_modules", ".bin", binName), "");
+			const cmd = detectLocalTypecheckCommand(dir);
+			expect(cmd).toBe(`${join("node_modules", ".bin", binName)} --noEmit`);
+			expect(cmd).not.toContain(dir);
+		});
+
+		it("returns null without tsconfig.json", () => {
+			expect(detectLocalTypecheckCommand(dir)).toBeNull();
+		});
 	});
 
 	describe("detectCheckCommand", () => {

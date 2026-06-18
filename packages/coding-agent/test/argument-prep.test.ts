@@ -6,8 +6,39 @@ import {
 	extractEditOldTexts,
 	extractEdits,
 	PATH_KEY_ALIASES,
+	prepareArgsForLooseSchema,
 	prepareWithPathAliases,
 } from "../src/core/tools/argument-prep.js";
+
+describe("prepareArgsForLooseSchema (MCP / loose-schema tools)", () => {
+	const schema = { properties: { path: { type: "string" }, items: { type: "array" } } };
+
+	it("renames an alias to the canonical when the schema declares the canonical and not the alias", () => {
+		expect(prepareArgsForLooseSchema({ file_path: "x.ts" }, schema)).toEqual({ path: "x.ts" });
+	});
+
+	it("does NOT rename when the server's real param IS the alias", () => {
+		const s = { properties: { file_path: { type: "string" } } };
+		expect(prepareArgsForLooseSchema({ file_path: "x.ts" }, s)).toEqual({ file_path: "x.ts" });
+	});
+
+	it("does NOT clobber a canonical the model already supplied", () => {
+		expect(prepareArgsForLooseSchema({ file_path: "a", path: "b" }, schema)).toEqual({ file_path: "a", path: "b" });
+	});
+
+	it("coerces a JSON-stringified array into an array-typed field", () => {
+		expect(prepareArgsForLooseSchema({ items: "[1,2]" }, schema)).toEqual({ items: [1, 2] });
+	});
+
+	it("leaves a string field that is not array-typed untouched", () => {
+		expect(prepareArgsForLooseSchema({ path: "[1,2]" }, schema)).toEqual({ path: "[1,2]" });
+	});
+
+	it("no-ops (same reference) when the schema has no properties", () => {
+		const input = { file_path: "x" };
+		expect(prepareArgsForLooseSchema(input, undefined)).toBe(input);
+	});
+});
 
 describe("extractEdits / extractEditOldTexts — JSON-stringified edits coercion", () => {
 	it("extracts oldTexts when edits arrive as a JSON-encoded string", () => {

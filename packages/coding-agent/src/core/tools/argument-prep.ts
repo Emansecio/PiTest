@@ -129,6 +129,86 @@ export function prepareWithPathAliases<T>(input: unknown): T {
 }
 
 /**
+ * Broad alias set used ONLY for loose-schema tools (MCP/custom) where the
+ * canonical key isn't known ahead of time. Safe to keep wide because
+ * {@link prepareArgsForLooseSchema} applies each entry conditionally on the
+ * tool's own schema — never blindly.
+ */
+const LOOSE_SCHEMA_KEY_ALIASES: KeyAliasMap = {
+	file_path: "path",
+	filepath: "path",
+	filename: "path",
+	cmd: "command",
+	script: "command",
+	text: "content",
+	body: "content",
+	old_string: "oldText",
+	oldString: "oldText",
+	old_str: "oldText",
+	new_string: "newText",
+	newString: "newText",
+	new_str: "newText",
+};
+
+function schemaTypeIsArray(propSchema: unknown): boolean {
+	if (!isPlainRecord(propSchema)) return false;
+	const t = propSchema.type;
+	return t === "array" || (Array.isArray(t) && t.includes("array"));
+}
+
+/**
+ * Schema-AWARE preparer for tools whose schema is arbitrary (MCP / custom),
+ * which until now forwarded `(args ?? {})` untouched while every built-in
+ * normalizes aliases + array-strings via prepareArguments. Unlike the built-in
+ * preparers (which know their canonical keys), this consults the tool's OWN
+ * schema so it is safe on a server whose real parameter happens to BE an alias:
+ *
+ *   - key alias -> canonical: applied only when the schema declares the canonical
+ *     and NOT the alias (so a tool whose real param is `file_path` is never
+ *     rewritten to `path`).
+ *   - JSON-stringified array -> array: applied only to a field the schema types
+ *     as `array` (a model that emits `["a"]` as a string self-corrects).
+ *
+ * Type coercion (string->number/boolean) already happens downstream in
+ * validateToolArguments via the schema, so it is intentionally not duplicated
+ * here. No-op for non-object input or a schema without `properties`.
+ */
+export function prepareArgsForLooseSchema(input: unknown, inputSchema: unknown): unknown {
+	if (!isPlainRecord(input)) return input;
+	const properties =
+		isPlainRecord(inputSchema) && isPlainRecord(inputSchema.properties) ? inputSchema.properties : undefined;
+	if (!properties) return input;
+
+	let out = input;
+	let mutated = false;
+	const ensureClone = () => {
+		if (!mutated) {
+			out = { ...input };
+			mutated = true;
+		}
+	};
+
+	for (const [alias, canonical] of Object.entries(LOOSE_SCHEMA_KEY_ALIASES)) {
+		if (alias in out && !(alias in properties) && canonical in properties && !(canonical in out)) {
+			ensureClone();
+			out[canonical] = out[alias];
+			delete out[alias];
+		}
+	}
+
+	for (const key of Object.keys(properties)) {
+		if (typeof out[key] !== "string" || !schemaTypeIsArray(properties[key])) continue;
+		const coerced = coerceJsonArrayField(out, key);
+		if (coerced !== out) {
+			ensureClone();
+			out[key] = (coerced as Record<string, unknown>)[key];
+		}
+	}
+
+	return mutated ? out : input;
+}
+
+/**
  * Read a canonical field off a record, falling back to any alias that maps to
  * it — the centralized form of the `oldText ?? old_string ?? oldString ?? old_str`
  * chains the call sites used to hardcode. Semantics match that `??` chain exactly:

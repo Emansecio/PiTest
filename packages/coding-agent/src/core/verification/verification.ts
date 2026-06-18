@@ -22,13 +22,19 @@ import { getAvailableAdapters } from "../dap/config.ts";
  * would misread as a verification failure and loop the model on. Returns a
  * shell-ready command string or null.
  */
-function detectLocalTypecheckCommand(cwd: string): string | null {
+export function detectLocalTypecheckCommand(cwd: string): string | null {
 	if (!existsSync(join(cwd, "tsconfig.json"))) return null;
 	const isWindows = process.platform === "win32";
 	const binName = isWindows ? "tsc.cmd" : "tsc";
 	const binPath = join(cwd, "node_modules", ".bin", binName);
 	if (!existsSync(binPath)) return null;
-	return `"${binPath}" --noEmit`;
+	// Return the cwd-RELATIVE path, not the quoted absolute one. runCheckCommand
+	// spawns with `cwd`, so the relative path resolves the same — and because its
+	// segments are fixed (node_modules/.bin/<bin>) it never contains spaces, so it
+	// needs no quoting. The absolute form with a space in cwd is mis-parsed by
+	// cmd.exe under `shell:true` on Windows (the quotes reach the shell literally).
+	const relBin = join("node_modules", ".bin", binName);
+	return `${relBin} --noEmit`;
 }
 
 /** Scripts tried in order — cheap correctness signals first, build/test excluded by default heaviness except `test` last. */

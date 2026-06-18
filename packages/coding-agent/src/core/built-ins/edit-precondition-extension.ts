@@ -61,7 +61,26 @@ export function createEditPreconditionExtension(options: EditPreconditionOptions
 			}
 
 			const edits = extractEdits(input);
-			if (!edits) return undefined;
+			if (!edits) {
+				// Path is valid and the file exists, but `edits` can't be parsed into
+				// [{oldText,newText}] (non-object element, missing a field, empty array,
+				// JSON-stringified-but-not-an-array). The tool would reject this with a
+				// generic schema error the model often re-issues verbatim. Block early
+				// with the exact shape so it self-corrects in the same turn.
+				recordDiagnostic({
+					category: "guard.edit-precondition",
+					level: "info",
+					source: "edit-precondition-extension.malformedShape",
+					context: { path },
+				});
+				return {
+					block: true,
+					reason:
+						'Edit precondition (no write attempted): the "edits" argument is missing or malformed. ' +
+						"Expected `edits: [{ oldText, newText }, …]` — a non-empty array where every element is an " +
+						"object carrying both string fields. Re-issue with that exact shape.",
+				};
+			}
 
 			let diff: Awaited<ReturnType<typeof computeEditsDiff>>;
 			try {
