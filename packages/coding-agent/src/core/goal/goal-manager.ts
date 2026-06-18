@@ -8,6 +8,8 @@
  * the interactive mode owns continuation. Clocks/ids are injected for testing.
  */
 
+import { sliceSafe } from "../../utils/surrogate.ts";
+
 export type GoalStatus = "active" | "paused" | "budget_limited" | "complete";
 
 export interface GoalState {
@@ -103,7 +105,7 @@ export class GoalManager {
 	}
 
 	start(objective: string, opts: { tokenBudget?: number }): GoalSnapshot {
-		const trimmed = objective.trim().slice(0, MAX_OBJECTIVE_CHARS);
+		const trimmed = sliceSafe(objective.trim(), 0, MAX_OBJECTIVE_CHARS);
 		this.state = {
 			id: this.genId(),
 			objective: trimmed,
@@ -118,7 +120,7 @@ export class GoalManager {
 
 	edit(objective: string): void {
 		if (!this.state) return;
-		this.state.objective = objective.trim().slice(0, MAX_OBJECTIVE_CHARS);
+		this.state.objective = sliceSafe(objective.trim(), 0, MAX_OBJECTIVE_CHARS);
 	}
 
 	pause(): void {

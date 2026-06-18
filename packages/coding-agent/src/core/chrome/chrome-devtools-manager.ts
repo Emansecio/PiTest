@@ -13,6 +13,7 @@
 
 import { existsSync } from "node:fs";
 import { recordDiagnostic } from "@pit/ai";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import {
 	CdpConnection,
 	type CdpTarget,
@@ -95,7 +96,7 @@ function capPayload(text: string, max: number, source: CapSource): string {
 		source,
 		context: { bytes: text.length },
 	});
-	return `${text.slice(0, max)}\n[corpo truncado: ${max} de ${text.length} bytes]`;
+	return `${sliceSafe(text, 0, max)}\n[corpo truncado: ${max} de ${text.length} bytes]`;
 }
 
 /**

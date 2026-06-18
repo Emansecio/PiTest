@@ -361,6 +361,19 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	let asyncTaskCounter = 0;
 	let runTaskCounter = 0;
 
+	// Bound the async-task map: auto-delivered results (delivered=true) are never
+	// joined, so without pruning they'd accumulate (handle + result, up to ~24KB
+	// each) for the whole session. Evict the OLDEST SETTLED entries past the cap
+	// (insertion-order iteration); running tasks are never evicted.
+	const PENDING_MAX = 64;
+	function prunePending(): void {
+		if (pending.size <= PENDING_MAX) return;
+		for (const [h, e] of pending) {
+			if (pending.size <= PENDING_MAX) break;
+			if (e.status !== "running") pending.delete(h);
+		}
+	}
+
 	// Live Agents whose run was cut short (ESC abort, or a network drop that ended
 	// the turn with stopReason "error") and still hold a usable transcript, keyed by
 	// handle. op:"resume" re-drives the same Agent so the model continues from where
@@ -380,6 +393,20 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		if (continuable.size > CONTINUABLE_MAX) {
 			const oldest = continuable.keys().next().value;
 			if (oldest !== undefined) continuable.delete(oldest);
+		}
+	}
+
+	// Mirror continuable's cap so an interrupted-run map can't grow unbounded over a
+	// long session: each entry pins a live Agent + its full transcript. Disk-based
+	// resume still works for evicted handles (markResumable persists to disk too).
+	const RESUMABLE_MAX = 8;
+
+	/** Record an interrupted Agent as resumable, evicting the oldest past the cap. */
+	function rememberResumable(handle: string, agent: Agent): void {
+		resumable.set(handle, agent);
+		if (resumable.size > RESUMABLE_MAX) {
+			const oldest = resumable.keys().next().value;
+			if (oldest !== undefined && oldest !== handle) resumable.delete(oldest);
 		}
 	}
 
@@ -576,6 +603,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		const text =
 			continuation?.trim() ||
 			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
+		// Respect the concurrency cap: a re-driven Agent is a live run like any spawn.
+		await acquireSlot();
 		try {
 			await agent.prompt(text);
 		} catch (err) {
@@ -587,6 +616,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		} finally {
 			if (signal) signal.removeEventListener("abort", onAbort);
+			releaseSlot();
 		}
 		if (agentEndedWithError(agent)) {
 			// Still unfinished — keep it resumable for another attempt.
@@ -661,6 +691,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			if (signal.aborted) agent.abort();
 			else signal.addEventListener("abort", onAbort, { once: true });
 		}
+		// Respect the concurrency cap: a follow-up is a live run like any spawn.
+		await acquireSlot();
 		try {
 			await agent.prompt(text);
 		} catch (err) {
@@ -672,6 +704,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		} finally {
 			if (signal) signal.removeEventListener("abort", onAbort);
+			releaseSlot();
 		}
 		const output = extractAssistantText(agent.state.messages);
 		const capped = truncateTail(output, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
@@ -775,7 +808,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				// restart (Tier 2). Callers await the disk write so an interrupted run is
 				// durably persisted before its result returns; saveResumeState never throws.
 				const markResumable = (handle: string, agent: Agent): Promise<void> => {
-					resumable.set(handle, agent);
+					rememberResumable(handle, agent);
 					return saveResumeState(cwd, {
 						handle,
 						messages: agent.state.messages,
@@ -883,6 +916,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						}
 					})();
 					pending.set(handle, entry);
+					prunePending();
 					return {
 						content: [
 							{
@@ -1060,6 +1094,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		const text =
 			continuation?.trim() ||
 			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
+		// Respect the concurrency cap: a disk-resumed run is a live spawn.
+		await acquireSlot();
 		try {
 			const result = await spawnSubagent(
 				{
@@ -1098,6 +1134,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				isError: true,
 				details: { handle: key, resumed: true },
 			};
+		} finally {
+			releaseSlot();
 		}
 	}
 

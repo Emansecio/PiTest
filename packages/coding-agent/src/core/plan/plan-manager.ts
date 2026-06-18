@@ -20,6 +20,8 @@
  * message never loses the plan.
  */
 
+import { truncateWithEllipsis } from "../../utils/surrogate.ts";
+
 export const PLAN_STEP_STATUSES = ["pending", "active", "done", "blocked"] as const;
 export type PlanStepStatus = (typeof PLAN_STEP_STATUSES)[number];
 
@@ -57,8 +59,7 @@ const ARTIFACT_MAX = 200;
 const VERIFY_MAX = 400;
 
 function clamp(s: string, max: number): string {
-	const t = s.trim();
-	return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
+	return truncateWithEllipsis(s.trim(), max);
 }
 
 /**

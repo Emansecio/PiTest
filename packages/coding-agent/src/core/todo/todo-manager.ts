@@ -8,6 +8,8 @@
  * GoalManager pattern (see goal/goal-manager.ts).
  */
 
+import { truncateWithEllipsis } from "../../utils/surrogate.ts";
+
 export type TodoStatus = "pending" | "in_progress" | "completed";
 
 export interface TodoItem {
@@ -41,8 +43,7 @@ export interface UpdateTodoInput {
 const SUBJECT_MAX = 200;
 
 function clampSubject(s: string): string {
-	const t = s.trim();
-	return t.length <= SUBJECT_MAX ? t : `${t.slice(0, SUBJECT_MAX - 1)}…`;
+	return truncateWithEllipsis(s.trim(), SUBJECT_MAX);
 }
 
 export class TodoManager {

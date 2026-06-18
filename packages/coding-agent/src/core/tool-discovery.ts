@@ -12,6 +12,7 @@
  * cleared on dispose, so tools can pull the active index on demand.
  */
 
+import { sliceSafe } from "../utils/surrogate.ts";
 import type { ToolDef } from "./tools/index.ts";
 
 export interface HiddenToolEntry {
@@ -97,12 +98,12 @@ function findBestSnippet(description: string, queryTerms: Set<string>): string {
 		}
 	}
 	if (bestPos < 0) {
-		return description.length <= SNIPPET_WINDOW ? description : `${description.slice(0, SNIPPET_WINDOW)}…`;
+		return description.length <= SNIPPET_WINDOW ? description : `${sliceSafe(description, 0, SNIPPET_WINDOW)}…`;
 	}
 	const half = Math.floor(SNIPPET_WINDOW / 2);
 	const start = Math.max(0, bestPos - half);
 	const end = Math.min(description.length, start + SNIPPET_WINDOW);
-	const slice = description.slice(start, end);
+	const slice = sliceSafe(description, start, end);
 	const prefix = start > 0 ? "…" : "";
 	const suffix = end < description.length ? "…" : "";
 	return `${prefix}${slice}${suffix}`;

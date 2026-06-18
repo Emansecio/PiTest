@@ -9,6 +9,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentToolDiscoveryIndex, type ToolDiscoveryIndex } from "../tool-discovery.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
@@ -115,7 +116,7 @@ export function createSearchToolBm25Definition(
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const query = str(args?.query);
-			const display = query ? theme.fg("accent", query.length > 60 ? `${query.slice(0, 59)}…` : query) : "...";
+			const display = query ? theme.fg("accent", truncateWithEllipsis(query, 60)) : "...";
 			text.setText(`${theme.fg("toolTitle", theme.bold("search_tool_bm25"))} ${display}`);
 			return text;
 		},

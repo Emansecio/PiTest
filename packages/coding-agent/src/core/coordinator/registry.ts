@@ -6,8 +6,18 @@
 import { randomBytes } from "node:crypto";
 import type { SubagentRecord, SubagentStatus } from "./types.ts";
 
+const TERMINAL_STATUSES: ReadonlySet<SubagentStatus> = new Set(["completed", "failed", "cancelled"]);
+
 export class SubagentRegistry {
 	private records = new Map<string, SubagentRecord>();
+	/** Live mirror of every record's taskName for O(1) collision checks in create(). */
+	private takenNames = new Set<string>();
+	/**
+	 * Cap on retained TERMINAL records (running/pending are never evicted). Without
+	 * this the map grew once per subagent for the whole session — each record pins
+	 * the full prompt + output. Evicted on every create(), oldest terminal first.
+	 */
+	private static readonly MAX_TERMINAL_RECORDS = 64;
 
 	create(input: {
 		prompt: string;
@@ -28,6 +38,8 @@ export class SubagentRegistry {
 			turnCount: 0,
 		};
 		this.records.set(id, record);
+		this.takenNames.add(record.taskName);
+		this.evictTerminal();
 		return record;
 	}
 
@@ -39,9 +51,25 @@ export class SubagentRegistry {
 	 */
 	private uniqueTaskName(desired: string | undefined, id: string): string {
 		if (!desired) return id;
-		const taken = new Set([...this.records.values()].map((r) => r.taskName));
-		if (!taken.has(desired)) return desired;
+		if (!this.takenNames.has(desired)) return desired;
 		return `${desired}-${id.slice(4)}`;
+	}
+
+	/** Drop the oldest terminal records once their count exceeds the cap. */
+	private evictTerminal(): void {
+		let terminal = 0;
+		for (const r of this.records.values()) {
+			if (TERMINAL_STATUSES.has(r.status)) terminal++;
+		}
+		if (terminal <= SubagentRegistry.MAX_TERMINAL_RECORDS) return;
+		for (const [id, r] of this.records) {
+			if (terminal <= SubagentRegistry.MAX_TERMINAL_RECORDS) break;
+			if (TERMINAL_STATUSES.has(r.status)) {
+				this.records.delete(id);
+				this.takenNames.delete(r.taskName);
+				terminal--;
+			}
+		}
 	}
 
 	update(id: string, patch: Partial<SubagentRecord>): SubagentRecord | undefined {
@@ -65,10 +93,13 @@ export class SubagentRegistry {
 	}
 
 	remove(id: string): void {
+		const record = this.records.get(id);
+		if (record) this.takenNames.delete(record.taskName);
 		this.records.delete(id);
 	}
 
 	clear(): void {
 		this.records.clear();
+		this.takenNames.clear();
 	}
 }

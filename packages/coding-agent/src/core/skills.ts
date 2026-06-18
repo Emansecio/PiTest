@@ -6,6 +6,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath } from "../utils/paths.ts";
+import { truncateWithEllipsis } from "../utils/surrogate.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 import { createMtimePrefixParseCache } from "./mtime-cache.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
@@ -404,7 +405,7 @@ export const SKILLS_FULL_LIMIT = 15;
 
 function firstSentence(desc: string, max = 80): string {
 	const cut = desc.split(/(?<=[.!?])\s/)[0] ?? desc;
-	return cut.length > max ? `${cut.slice(0, max - 1)}…` : cut;
+	return truncateWithEllipsis(cut, max);
 }
 
 export function formatSkillsForPrompt(skills: Skill[], maxSkills = 100, cwd?: string): string {

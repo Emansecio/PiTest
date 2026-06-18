@@ -4,7 +4,9 @@
 
 import type { AgentMessage } from "@pit/agent-core";
 import type { Message } from "@pit/ai";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "../messages.ts";
+import { redactForDisk } from "../secret-redactor.ts";
 import type { SessionEntry } from "../session-manager.ts";
 
 // ============================================================================
@@ -100,10 +102,14 @@ function previewOpArg(value: unknown): string | undefined {
 	if (value === undefined || value === null) return undefined;
 	const text = typeof value === "string" ? value : safeStringify(value);
 	if (!text) return undefined;
-	const collapsed = text.replace(/\s+/g, " ").trim();
+	// Redact at the SOURCE: a secret in a shell command or search pattern would
+	// otherwise reach every summary sink verbatim (session JSONL, hindsight bank,
+	// any future sink). file-digests already redact at source; this closes the
+	// shell/search gap. Respects the PIT_NO_SECRET_REDACT kill-switch.
+	const collapsed = redactForDisk(text.replace(/\s+/g, " ").trim());
 	if (!collapsed) return undefined;
 	if (collapsed.length <= OP_PREVIEW_MAX_CHARS) return collapsed;
-	return `${collapsed.slice(0, OP_PREVIEW_MAX_CHARS)}…`;
+	return `${sliceSafe(collapsed, 0, OP_PREVIEW_MAX_CHARS)}…`;
 }
 
 function safeStringify(value: unknown): string {

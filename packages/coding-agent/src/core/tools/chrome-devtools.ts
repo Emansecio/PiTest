@@ -9,6 +9,7 @@ import * as path from "node:path";
 import type { ImageContent, TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { type Static, type TSchema, Type } from "typebox";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import { getCurrentChromeDevtoolsManager } from "../chrome/chrome-devtools-manager.ts";
 import type { ElementToSourceResult } from "../chrome/element-to-source.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -371,7 +372,9 @@ export function createChromeGetTextDefinition(): ToolDefinition<typeof getTextSc
 			const text = await mgr.getPageText(signal);
 			const limit = input.limit ?? GET_TEXT_DEFAULT_LIMIT;
 			if (text.length <= limit) return textResult(text);
-			return textResult(`${text.slice(0, limit)}\n… [truncated ${text.length - limit} of ${text.length} chars]`);
+			return textResult(
+				`${sliceSafe(text, 0, limit)}\n… [truncated ${text.length - limit} of ${text.length} chars]`,
+			);
 		},
 	});
 }
@@ -486,7 +489,7 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 			});
 			if (crushed !== undefined) return textResult(crushed);
 			return textResult(
-				`${r.body.slice(0, limit)}\n… [truncated ${r.body.length - limit} of ${r.body.length} chars]`,
+				`${sliceSafe(r.body, 0, limit)}\n… [truncated ${r.body.length - limit} of ${r.body.length} chars]`,
 			);
 		},
 	});
