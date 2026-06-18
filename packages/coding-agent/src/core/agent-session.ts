@@ -2834,6 +2834,12 @@ export class AgentSession {
 		this._persistGoal();
 	}
 
+	/** Raise the active goal's token budget (lifts a budget_limited goal). */
+	setGoalTokenBudget(tokenBudget: number): void {
+		this._goal.setTokenBudget(tokenBudget);
+		this._persistGoal();
+	}
+
 	clearGoal(): void {
 		this._goal.clear();
 		this._activateGoalTool(false);
@@ -3417,10 +3423,16 @@ export class AgentSession {
 
 	/**
 	 * Re-inject a settled async (op:"spawn") subagent result into the chat so the
-	 * model never has to poll. Routes by liveness: while a run is in flight, splice
-	 * it out-of-band onto that turn (injectPassive); while idle, start a fresh turn
-	 * (_runAgentPrompt) so the result surfaces on its own. Either way the TUI gets a
-	 * subagent_complete status line. PIT_NO_ASYNC_REINJECT=1 reverts to poll-only.
+	 * model never has to poll. Routes by liveness: while a run is in flight, queue
+	 * it as a follow-up (guaranteed to run a turn before the agent stops); while
+	 * idle, start a fresh turn (_runAgentPrompt) so the result surfaces on its own.
+	 * Either way the TUI gets a subagent_complete status line.
+	 * PIT_NO_ASYNC_REINJECT=1 reverts to poll-only.
+	 *
+	 * NOTE: must NOT use injectPassive here — a passive message is dropped if the
+	 * current turn stops without more tool calls (common in fan-out), yet this
+	 * returns true and the coordinator marks the handle delivered, silently losing
+	 * the result. followUp keeps the loop alive until the message is consumed.
 	 * Called from a detached spawn IIFE, so it must never throw.
 	 *
 	 * @internal Wired from agent-session-services via __bindBuiltInRefs; not part
@@ -3439,14 +3451,15 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		if (this.isBusy) {
-			this.agent.injectPassive(message);
+			this.agent.followUp(message);
 			return true;
 		}
 		// Idle: spawn a turn. If a user prompt wins the race and a run is already
-		// active by the time this lands, _runAgentPrompt rejects — fall back to
-		// passive so the result still rides that now-active turn.
+		// active by the time this lands, _runAgentPrompt rejects — fall back to a
+		// follow-up so the result still rides (and is consumed by) that now-active
+		// run instead of being dropped as a passive message.
 		this._runAgentPrompt(message).catch(() => {
-			this.agent.injectPassive(message);
+			this.agent.followUp(message);
 		});
 		return true;
 	}

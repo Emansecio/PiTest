@@ -21,6 +21,7 @@ import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundPath, isPathGroundingDisabled, PATH_GROUNDING_DEFAULTS } from "../path-grounding.ts";
 import { extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
+import { expandPath } from "../tools/path-utils.ts";
 
 export function createPathGroundingExtension(options: { cwd: string }) {
 	return (pi: ExtensionAPI) => {
@@ -44,6 +45,7 @@ export function createPathGroundingExtension(options: { cwd: string }) {
 						listDir: (absDir) => readdirSync(absDir),
 						fuzzy: suggestClosest,
 						fuzzyN: suggestClosestN,
+						normalize: expandPath,
 						maxDistance: PATH_GROUNDING_DEFAULTS.maxDistance,
 						prefixMinOverlap: PATH_GROUNDING_DEFAULTS.prefixMinOverlap,
 					},

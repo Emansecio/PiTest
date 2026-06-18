@@ -2,9 +2,8 @@
  * Shared command execution utilities for extensions and custom tools.
  */
 
-import { spawn } from "node:child_process";
 import { recordDiagnostic } from "@pit/ai";
-import { waitForChildProcess } from "../utils/child-process.ts";
+import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import { killProcessTree } from "../utils/shell.ts";
 import { OutputAccumulator } from "./tools/output-accumulator.ts";
 import { BASH_HEAD_MAX_BYTES, BASH_HEAD_MAX_LINES, BASH_MAX_BYTES, BASH_MAX_LINES } from "./tools/truncate.ts";
@@ -56,7 +55,11 @@ export async function execCommand(
 	options?: ExecOptions,
 ): Promise<ExecResult> {
 	return new Promise((resolve) => {
-		const proc = spawn(command, args, {
+		// spawnProcess uses cross-spawn on win32 so PATHEXT shims (.cmd/.bat —
+		// npm/npx/git/tsc) resolve; raw node spawn with shell:false would ENOENT
+		// on the target OS and silently settle code:1, making the command look
+		// like it ran and failed rather than never having launched.
+		const proc = spawnProcess(command, args, {
 			cwd,
 			shell: false,
 			stdio: ["ignore", "pipe", "pipe"],

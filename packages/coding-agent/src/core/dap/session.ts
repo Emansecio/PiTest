@@ -1009,6 +1009,12 @@ export class DapSessionManager {
 				stdio: ["ignore", "pipe", "pipe"],
 				windowsHide: true,
 			});
+			// A late spawn failure (ENOENT/EACCES) is emitted asynchronously AFTER
+			// this handler already returned, so #handleAdapterRequest's try/catch
+			// can't see it; without a listener the ChildProcess re-throws 'error'
+			// as an uncaught exception and crashes the host. Same guard the
+			// socket-mode spawn already uses.
+			proc.on("error", () => {});
 			if (proc.pid) trackDetachedChildPid(proc.pid);
 			proc.unref?.();
 			return { processId: proc.pid } satisfies DapRunInTerminalResponse;
@@ -1047,7 +1053,12 @@ export class DapSessionManager {
 			if (!client.isAlive()) session.status = "terminated";
 		}, HEARTBEAT_INTERVAL_MS);
 		heartbeat.unref?.();
-		waitForChildProcess(client.proc).finally(() => clearInterval(heartbeat));
+		// waitForChildProcess rejects on the ChildProcess 'error' event; .finally
+		// alone would propagate that as an unhandledRejection. Swallow it — the
+		// heartbeat already flips status to terminated when the proc dies.
+		waitForChildProcess(client.proc)
+			.catch(() => {})
+			.finally(() => clearInterval(heartbeat));
 		return session;
 	}
 

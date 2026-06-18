@@ -81,6 +81,15 @@ export interface PathGroundingDeps {
 	fuzzy: FuzzyClosest;
 	/** OPTIONAL single-pass top-N matcher (suggestClosestN); falls back to `fuzzy` loop. */
 	fuzzyN?: FuzzyClosestN;
+	/**
+	 * OPTIONAL path normalizer (the tools' `expandPath`: strips a trailing
+	 * `:line[:col]`, expands `~`/`@`, folds unicode spaces). Applied to the raw
+	 * path BEFORE splitting dir/basename so the fuzzy match sees the SAME filename
+	 * the tool resolves — otherwise a model pasting `dir/uti.ts:42` from grep makes
+	 * `wanted` = `uti.ts:42`, inflating the edit distance and silently skipping the
+	 * block in exactly the case the guard exists to catch. Identity when omitted.
+	 */
+	normalize?: (rawPath: string) => string;
 	maxDistance: number;
 	prefixMinOverlap: number;
 }
@@ -123,11 +132,14 @@ const GLOB_MAGIC = /[*?[\]{}]/;
  * Returns [] when the dir can't be listed or nothing is close (caller -> allow).
  */
 function rankCandidates(rawPath: string, deps: PathGroundingDeps): string[] {
-	// Normalize the separator only for SPLITTING; keep the original prefix verbatim
+	// Strip the `:line[:col]` suffix / expand ~/@ the SAME way the tool does before
+	// splitting, so `wanted` is the real basename (`uti.ts`, not `uti.ts:42`).
+	const expanded = deps.normalize ? deps.normalize(rawPath) : rawPath;
+	// Normalize the separator only for SPLITTING; keep the expanded prefix verbatim
 	// in the suggestion so we don't flip a model's `/` into `\` or vice versa.
-	const norm = rawPath.replace(/\\/g, "/");
+	const norm = expanded.replace(/\\/g, "/");
 	const lastSlash = norm.lastIndexOf("/");
-	const dirPart = lastSlash >= 0 ? rawPath.slice(0, lastSlash) : ".";
+	const dirPart = lastSlash >= 0 ? expanded.slice(0, lastSlash) : ".";
 	const wanted = norm.slice(lastSlash + 1);
 	if (wanted.length === 0) return [];
 
@@ -141,7 +153,7 @@ function rankCandidates(rawPath: string, deps: PathGroundingDeps): string[] {
 	if (entries.length === 0) return [];
 
 	const pool = entries.filter((entry) => entry.length > 0 && entry !== wanted);
-	const prefix = lastSlash >= 0 ? rawPath.slice(0, lastSlash + 1) : "";
+	const prefix = lastSlash >= 0 ? expanded.slice(0, lastSlash + 1) : "";
 
 	const closest = rankBasenames(wanted, pool, deps);
 	return closest.map((name) => `${prefix}${name}`);

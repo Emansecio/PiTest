@@ -80,8 +80,15 @@ const PATTERNS: readonly SecretPattern[] = [
 	// Anchored on an explicit key=value assignment so prose ("the password is on
 	// the wiki") is untouched.
 	{
+		// The quoted alt tolerates a backslash immediately before/after the quote so
+		// it also matches the ALREADY JSON-serialized line, where `KEY="value"` (the
+		// dominant dotenv/config shape) appears as `KEY=\"value\"`. The value class
+		// excludes backslash so it STOPS at the `\` before the closing `\"` instead
+		// of greedily swallowing the structural quote (which would corrupt the JSON).
+		// Without this, the quoted form matched neither alt and leaked verbatim to
+		// the pushed .jsonl. Group 1 = quote, group 2 = quoted value, group 3 = bare.
 		type: "credential",
-		re: /\b(?:password|passwd|pwd|api[_-]?key|secret|access[_-]?token|auth[_-]?token|client[_-]?secret)\b(?:\s*[=:]\s*(['"])([^'"]{4,})\1|[=:]([^\s'"&]{6,}))/gi,
+		re: /\b(?:password|passwd|pwd|api[_-]?key|secret|access[_-]?token|auth[_-]?token|client[_-]?secret)\b(?:\s*[=:]\s*\\?(['"])([^'"\\]{4,})\\?\1|[=:]([^\s'"&]{6,}))/gi,
 	},
 ];
 

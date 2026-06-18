@@ -76,6 +76,7 @@ function createMutableAgentState(
 		systemPrompt: initialState?.systemPrompt ?? "",
 		model: initialState?.model ?? DEFAULT_MODEL,
 		thinkingLevel: initialState?.thinkingLevel ?? "off",
+		maxTurns: initialState?.maxTurns,
 		get tools() {
 			return tools;
 		},
@@ -485,6 +486,10 @@ export class Agent {
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
+			// Forward the per-run turn budget so the loop's native backstop cuts at
+			// the caller's cap (undefined => loop default). Without this the cap was
+			// inert and every run silently used DEFAULT_MAX_TURNS.
+			maxTurns: this._state.maxTurns,
 			sessionId: this.sessionId,
 			onPayload: this.onPayload,
 			onResponse: this.onResponse,

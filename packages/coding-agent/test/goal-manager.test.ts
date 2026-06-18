@@ -88,12 +88,18 @@ describe("GoalManager lifecycle", () => {
 		expect(mgr.shouldAutoContinue()).toBe(false);
 	});
 
-	it("resume from budget_limited stays active until budget exceeded again", () => {
+	it("resume on an exhausted budget does NOT reactivate; setTokenBudget unwedges it", () => {
 		const { mgr } = makeManager();
 		mgr.start("x", { tokenBudget: 1000 });
 		mgr.recordTurn(1100);
 		expect(mgr.get()?.status).toBe("budget_limited");
+		// resume() alone can't progress: tokensUsed already >= budget, so it would
+		// re-trip budget_limited on the very next recordTurn (yields ~1 turn then
+		// wedges). It must stay budget_limited until the budget is raised.
 		mgr.resume();
+		expect(mgr.get()?.status).toBe("budget_limited");
+		// Raising the ceiling above tokensUsed is the real unwedge.
+		mgr.setTokenBudget(2000);
 		expect(mgr.get()?.status).toBe("active");
 	});
 
@@ -175,8 +181,9 @@ describe("GoalManager lifecycle", () => {
 		expect(limited).not.toContain("Keep working");
 		expect(limited).not.toContain("goal_complete");
 
-		// Resuming restores the full boilerplate.
-		mgr.resume();
+		// Raising the budget reactivates it and restores the full boilerplate
+		// (resume() alone can't lift an exhausted budget — see the resume test).
+		mgr.setTokenBudget(2000);
 		expect(mgr.systemPromptSection()).toContain("Keep working until the goal is fully resolved");
 
 		// Completed goal still emits nothing.

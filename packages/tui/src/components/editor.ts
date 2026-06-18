@@ -118,6 +118,15 @@ export function wordWrapLine(line: string, maxWidth: number, preSegmented?: Intl
 	const chunks: TextChunk[] = [];
 	const segments = preSegmented ?? [...baseSegmenter.segment(line)];
 
+	// Base case: a single indivisible grapheme can't be wrapped below its own
+	// width. Emit it as one chunk and accept the overflow. Without this the
+	// `gWidth > maxWidth` branch below would recurse with the identical
+	// single-grapheme string and stack-overflow (e.g. a 2-wide CJK/emoji in a
+	// 1-column terminal).
+	if (segments.length === 1) {
+		return [{ text: line, startIndex: 0, endIndex: line.length, width: lineWidth }];
+	}
+
 	let currentWidth = 0;
 	let chunkStart = 0;
 

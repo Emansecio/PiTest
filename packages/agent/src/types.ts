@@ -430,6 +430,12 @@ export interface AgentState {
 	model: Model<any>;
 	/** Requested reasoning level for future turns. */
 	thinkingLevel: ThinkingLevel;
+	/**
+	 * Hard per-run turn budget. Forwarded to the loop's `maxTurns` backstop;
+	 * undefined falls back to the loop default (DEFAULT_MAX_TURNS). Set by callers
+	 * (e.g. the coordinator) that need a tighter cap than the default 250.
+	 */
+	maxTurns?: number;
 	/** Available tools. Assigning a new array copies the top-level array. */
 	set tools(tools: AgentTool<any>[]);
 	get tools(): AgentTool<any>[];

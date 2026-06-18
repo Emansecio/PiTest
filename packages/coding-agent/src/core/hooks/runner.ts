@@ -148,11 +148,28 @@ export async function runHook(
 			finish(-1, true);
 		}, timeoutMs);
 
+		// A hook runs inline (awaited in beforeToolCall), so unbounded stdout/stderr
+		// would grow the heap until OOM AND stall the session before the timeout
+		// fires. Cap the combined output and kill the process when exceeded —
+		// kill() settles via 'close'. Mirrors the OOM caps in bash/grep readers.
+		const MAX_HOOK_OUTPUT_BYTES = 4 * 1024 * 1024;
+		let outputBytes = 0;
+		let outputCapped = false;
+		const appendCapped = (chunk: string, sink: "out" | "err") => {
+			if (outputCapped) return;
+			outputBytes += Buffer.byteLength(chunk);
+			if (sink === "out") stdout += chunk;
+			else stderr += chunk;
+			if (outputBytes > MAX_HOOK_OUTPUT_BYTES) {
+				outputCapped = true;
+				kill();
+			}
+		};
 		proc.stdout?.on("data", (data) => {
-			stdout += data.toString();
+			appendCapped(data.toString(), "out");
 		});
 		proc.stderr?.on("data", (data) => {
-			stderr += data.toString();
+			appendCapped(data.toString(), "err");
 		});
 
 		proc.on("error", (err) => {

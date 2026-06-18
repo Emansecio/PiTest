@@ -176,6 +176,21 @@ describe("redactSecrets — JSON round-trip safety", () => {
 		expect(parsed.message.content).not.toContain("sk-ant-api03");
 	});
 
+	it('redacts a quoted credential after JSON serialization (KEY="value" → KEY=\\"value\\")', () => {
+		// The dominant dotenv/config shape `PASSWORD="hunter2secret"` becomes
+		// `PASSWORD=\"hunter2secret\"` once the line is JSON-serialized. Before the
+		// fix neither alt matched that form and the secret leaked verbatim to the
+		// pushed .jsonl.
+		const entry = { type: "message", message: { role: "user", content: 'PASSWORD="hunter2secret"' } };
+		const line = JSON.stringify(entry);
+		expect(line).toContain('PASSWORD=\\"hunter2secret\\"');
+		const { redacted, count } = redactSecrets(line);
+		expect(count).toBeGreaterThan(0);
+		const parsed = JSON.parse(redacted) as typeof entry;
+		expect(parsed.message.content).toContain("[REDACTED:credential]");
+		expect(parsed.message.content).not.toContain("hunter2secret");
+	});
+
 	it("a multi-line JSONL batch with a PEM key stays valid per line", () => {
 		const pem = "-----BEGIN PRIVATE KEY-----\\nMIIEvQ123\\n-----END PRIVATE KEY-----";
 		const batch = `${JSON.stringify({ a: 1, k: pem })}\n${JSON.stringify({ b: 2 })}\n`;

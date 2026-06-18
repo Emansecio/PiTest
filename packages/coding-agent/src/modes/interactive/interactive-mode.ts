@@ -2720,6 +2720,21 @@ export class InteractiveMode {
 			tokenBudget = parsed;
 			budgetLabel = ` (budget ${budgetStr})`;
 			objective = parts.slice(2).join(" ").trim();
+			// `/goal --tokens <n>` with no objective raises the EXISTING goal's
+			// budget (the only way to lift a budget_limited goal) instead of
+			// discarding it. Falls through to the usage warning when no goal exists.
+			if (!objective) {
+				const current = this.session.goalSnapshot();
+				if (current && current.status !== "complete") {
+					this.session.setGoalTokenBudget(parsed);
+					this.showStatus(this.session.goalSummaryText());
+					if (this.session.goalShouldAutoContinue()) {
+						this._startGoalSpinner();
+						await this.session.prompt("Resume working toward the goal.", { expandPromptTemplates: false });
+					}
+					return;
+				}
+			}
 		}
 		if (!objective) {
 			this.showWarning("Usage: /goal <objective> | edit <obj> | pause | resume | clear | --tokens <budget> <obj>");

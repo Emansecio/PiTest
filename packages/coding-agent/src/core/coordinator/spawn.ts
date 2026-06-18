@@ -272,6 +272,9 @@ export async function spawnSubagent(
 			model: options.model ?? deps.model,
 			// Subagents always think (never "off") — default "medium", overridable per task.
 			thinkingLevel: options.thinkingLevel ?? "medium",
+			// Forward the resolved turn cap so the loop's native backstop enforces it
+			// (it was inert before — every subagent ran at DEFAULT_MAX_TURNS=250).
+			maxTurns,
 			tools,
 			// Seed prior transcript when resuming from disk (Tier 2); empty otherwise.
 			messages: options.initialMessages,
@@ -363,6 +366,15 @@ export async function spawnSubagent(
 		}
 	});
 
+	// Wire the controller to the Agent: a timeout / turn-cap / parent-ESC abort
+	// must actually STOP the run, not merely reject the Promise.race below and
+	// leave the Agent running orphaned — burning tokens, emitting phantom
+	// turn_end telemetry, and writing into the worktree that cleanup() is about
+	// to remove (corruption risk). abort() settles agent.prompt() so the race
+	// resolves and cleanup awaits a quiesced run before removing the worktree.
+	if (controller.signal.aborted) agent.abort();
+	else controller.signal.addEventListener("abort", () => agent.abort(), { once: true });
+
 	// Best-effort: a throwing onAgentReady must not abort the spawn (and leak the
 	// timeout/abort wiring set up below). The only caller attaches a bus responder.
 	try {
@@ -371,6 +383,9 @@ export async function spawnSubagent(
 		// ignore — readiness notification is not load-bearing for the task.
 	}
 
+	// The live run promise, so cleanup() can wait for the Agent to fully stop
+	// (post-abort) before removing the worktree it may still be writing to.
+	let runPromise: Promise<void> | undefined;
 	let settled = false;
 	const cleanup = async () => {
 		if (!settled) {
@@ -384,13 +399,17 @@ export async function spawnSubagent(
 		if (timeoutHandle) clearTimeout(timeoutHandle);
 		if (options.signal) options.signal.removeEventListener("abort", onParentAbort);
 		if (worktree && worktree.cleanup === "auto") {
+			// Let an aborted run settle so it isn't still writing into the worktree
+			// while we delete it (the race may have returned via the abort branch).
+			if (runPromise) await runPromise.catch(() => {});
 			await removeWorktree(parentCwd, worktree.path);
 		}
 	};
 
 	try {
 		const promptText = options.prompt;
-		const promise = agent.prompt(promptText);
+		runPromise = agent.prompt(promptText);
+		const promise = runPromise;
 		const aborted = new Promise<void>((_, reject) => {
 			const fail = () => reject(toAbortError(controller.signal.reason));
 			if (controller.signal.aborted) {

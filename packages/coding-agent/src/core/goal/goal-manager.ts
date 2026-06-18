@@ -126,7 +126,31 @@ export class GoalManager {
 	}
 
 	resume(): void {
-		if (this.state && (this.state.status === "paused" || this.state.status === "budget_limited")) {
+		if (!this.state) return;
+		if (this.state.status === "paused") {
+			this.state.status = "active";
+			return;
+		}
+		// budget_limited: only re-activate when there's headroom. Resuming a goal
+		// whose tokensUsed already meets the budget would re-trip budget_limited on
+		// the very next recordTurn (it yields ~1 turn then wedges). The user must
+		// raise the cap via setTokenBudget (/goal --tokens <n>) to make progress.
+		if (this.state.status === "budget_limited") {
+			if (this.state.tokenBudget === undefined || this.state.tokensUsed < this.state.tokenBudget) {
+				this.state.status = "active";
+			}
+		}
+	}
+
+	/**
+	 * Raise (or set) the active goal's token budget. Re-activates a budget_limited
+	 * goal when the new ceiling clears the tokens already spent — the only path to
+	 * unwedge a goal that hit its budget (resume() alone can't, by design above).
+	 */
+	setTokenBudget(tokenBudget: number): void {
+		if (!this.state || this.state.status === "complete") return;
+		this.state.tokenBudget = tokenBudget;
+		if (this.state.status === "budget_limited" && this.state.tokensUsed < tokenBudget) {
 			this.state.status = "active";
 		}
 	}
@@ -200,7 +224,7 @@ export class GoalManager {
 		];
 		if (g.status === "paused") lines.push("   paused — resume with /goal resume");
 		if (g.status === "budget_limited")
-			lines.push("   token budget reached — raise it with /goal --tokens or /goal resume");
+			lines.push("   token budget reached — raise it with /goal --tokens <n> (resume alone won't progress)");
 		return lines.join("\n");
 	}
 
