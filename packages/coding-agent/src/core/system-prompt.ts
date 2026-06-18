@@ -100,7 +100,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const resolvedHiddenToolCount = hiddenToolCount ?? getCurrentToolDiscoveryIndex()?.listHidden().length ?? 0;
 	const hiddenToolsNudge =
 		resolvedHiddenToolCount > 0
-			? '\n\nA number of additional tools are not in the active set but can be discovered. Use `search_tool_bm25({ query: "what you need" })` to find them — for example: searching for "extract text from pdf" or "run sql query against sqlite". The top result will be activated automatically when score is high.'
+			? '\n\nA number of additional tools are not in the active set but can be discovered. Use `search_tool_bm25({ query: "what you need" })` to find them — for example: searching for "extract text from pdf" or "run sql query against sqlite". Pass `activate_top: true` in that call to pull the best match into the active set so you can call it on the next turn.'
 			: "";
 
 	const now = new Date();

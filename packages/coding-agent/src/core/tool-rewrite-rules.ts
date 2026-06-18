@@ -177,6 +177,19 @@ export function normalizeWindowsBashCommand(command: string, platform: NodeJS.Pl
 // Tier 1 — auto rewrites
 // ---------------------------------------------------------------------------
 
+/**
+ * Coerce a line-number arg to a finite number: pass numbers through, parse a
+ * purely-numeric string (mirrors read-numeric-offset-limit), reject everything
+ * else. Lets the start_line/end_line rewrite below absorb the common quoted form
+ * `{ start_line: "2", end_line: "4" }` instead of silently dropping it (matcher
+ * keys on presence, not type) and reading from line 1 with no limit.
+ */
+function coerceLineArg(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string" && /^\d+$/.test(value)) return Number.parseInt(value, 10);
+	return undefined;
+}
+
 const tier1Rules: ToolRewriteRule[] = [
 	{
 		// read({ offset: "10", limit: "20" }) → numeric coercion. Some models
@@ -219,8 +232,8 @@ const tier1Rules: ToolRewriteRule[] = [
 			tier: "auto",
 			rewrite: (c) => {
 				const args = { ...(c.arguments as Record<string, unknown>) };
-				const start = typeof args.start_line === "number" ? args.start_line : undefined;
-				const end = typeof args.end_line === "number" ? args.end_line : undefined;
+				const start = coerceLineArg(args.start_line);
+				const end = coerceLineArg(args.end_line);
 				delete args.start_line;
 				delete args.end_line;
 				if (start !== undefined) args.offset = start;

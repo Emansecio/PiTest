@@ -24,6 +24,8 @@ import type { Model } from "@pit/ai";
 import { type Message, streamSimple } from "@pit/ai";
 import type { TSchema } from "typebox";
 import { Value } from "typebox/value";
+import { areSubagentGuardsDisabled, createSubagentGuardChain } from "../built-ins/subagent-guards.ts";
+import type { ToolCallEvent, ToolResultEvent } from "../extensions/types.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { describeToolAction, type PermissionChecker } from "../permissions/index.ts";
 import { formatSkillsForPrompt, type Skill } from "../skills.ts";
@@ -253,6 +255,9 @@ export async function spawnSubagent(
 	// Recorded on the registry (and surfaced in the task result's details) so
 	// the denial doesn't vanish silently inside the subagent loop.
 	const deniedToolCalls: string[] = [];
+	// Per-spawn grounding-guard chain (isolated session state). Default on; opt out
+	// with PIT_NO_SUBAGENT_GUARDS. Individual guards keep their own PIT_NO_* opt-outs.
+	const guardChain = areSubagentGuardsDisabled() ? undefined : createSubagentGuardChain({ cwd: parentCwd });
 	const agent = new Agent({
 		initialState: {
 			systemPrompt,
@@ -268,18 +273,48 @@ export async function spawnSubagent(
 		// Gate every subagent tool call through the parent's permission policy.
 		// Without this, the subagent's raw Agent loop would bypass the parent's
 		// permissions extension entirely (deny rules, plan-mode mutation blocks).
-		beforeToolCall: checker
-			? async ({ toolCall, args }) => {
-					const decision = evaluateSubagentToolPermission(
-						checker,
-						toolCall.name,
-						(args ?? {}) as Record<string, unknown>,
-					);
-					if (decision?.block) {
-						deniedToolCalls.push(toolCall.name);
-						deps.registry.update(record.id, { deniedToolCalls: [...deniedToolCalls] });
-					}
+		beforeToolCall: async ({ toolCall, args }) => {
+			if (checker) {
+				const decision = evaluateSubagentToolPermission(
+					checker,
+					toolCall.name,
+					(args ?? {}) as Record<string, unknown>,
+				);
+				if (decision?.block) {
+					deniedToolCalls.push(toolCall.name);
+					deps.registry.update(record.id, { deniedToolCalls: [...deniedToolCalls] });
 					return decision;
+				}
+			}
+			// Propagate the parent's grounding guards (read-guard, edit-precondition,
+			// symbol/import/path/pattern/bash grounding) so a subagent can't edit an
+			// unread file, submit a non-matching edit, or write a broken import —
+			// failures the main agent is structurally prevented from making.
+			if (guardChain) {
+				const guardDecision = await guardChain.beforeToolCall({
+					type: "tool_call",
+					toolName: toolCall.name,
+					toolCallId: toolCall.id,
+					input: (args ?? {}) as Record<string, unknown>,
+				} as ToolCallEvent);
+				if (guardDecision?.block) return guardDecision;
+			}
+			return undefined;
+		},
+		afterToolCall: guardChain
+			? async ({ toolCall, args, result, isError }) => {
+					// Lets the read-guard re-stamp the file the subagent just wrote so a
+					// follow-up write isn't seen as external drift (false positive).
+					await guardChain.afterToolCall({
+						type: "tool_result",
+						toolName: toolCall.name,
+						toolCallId: toolCall.id,
+						input: (args ?? {}) as Record<string, unknown>,
+						content: result.content,
+						details: result.details,
+						isError,
+					} as ToolResultEvent);
+					return undefined;
 				}
 			: undefined,
 		streamFn: async (model, context, streamOptions) => {

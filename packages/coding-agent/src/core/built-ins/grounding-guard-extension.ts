@@ -42,11 +42,25 @@ const WORKSPACE_SYMBOL_TIMEOUT_MS = 8000;
  * misses simply isn't grounded (allow), never wrongly blocked.
  */
 const INDEX_CACHE_TTL_MS = 5000;
+/**
+ * Same short window for the LSP authority: a burst of groundable debug/lsp calls
+ * for the same symbol re-ran `workspace/symbol` across every server each time
+ * (up to {@link WORKSPACE_SYMBOL_TIMEOUT_MS} per server), the single biggest
+ * latency a strong model feels from the guard. Cache per query so the burst pays
+ * one round-trip. At most this stale; the guard is advisory + fail-open, so a
+ * just-created symbol the cache misses is simply not grounded (allow), never
+ * wrongly blocked. `undefined` (every server errored) is cached too, so a dead
+ * server isn't re-probed on every call within the window.
+ */
+const LSP_CACHE_TTL_MS = 5000;
+/** Bound the per-query cache so a long session with many distinct symbols can't grow it unbounded. */
+const LSP_CACHE_MAX = 128;
 
 export function createGroundingGuardExtension(options: { cwd: string }) {
 	return (pi: ExtensionAPI) => {
 		const fired = new Set<string>();
 		let indexCache: { at: number; names: Set<string> } | undefined;
+		const lspCache = new Map<string, { at: number; names: string[] | undefined }>();
 
 		// Fast-path pool: flattened symbol names from the living repo-map, memoised
 		// for a short window to amortise the git delta + disk read across a burst.
@@ -65,6 +79,10 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 		// server errored (cannot prove absence -> FAIL-OPEN); a name pool otherwise
 		// ([] = at least one server answered and found nothing -> block-eligible).
 		const lspResolve: GroundingGuardDeps["lspResolve"] = async (query, signal) => {
+			const now = Date.now();
+			const cached = lspCache.get(query);
+			if (cached && now - cached.at < LSP_CACHE_TTL_MS) return cached.names;
+
 			const servers = getLspServers(getConfig(options.cwd));
 			if (servers.length === 0) return undefined;
 			const perServer = await Promise.all(
@@ -85,8 +103,15 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 					}
 				}),
 			);
-			if (!perServer.some((r) => r.answered)) return undefined; // every server errored -> FAIL-OPEN
-			return perServer.flatMap((r) => r.names);
+			// undefined when every server errored (cannot prove absence -> FAIL-OPEN).
+			const names = perServer.some((r) => r.answered) ? perServer.flatMap((r) => r.names) : undefined;
+
+			if (lspCache.size >= LSP_CACHE_MAX) {
+				const oldest = lspCache.keys().next().value;
+				if (oldest !== undefined) lspCache.delete(oldest);
+			}
+			lspCache.set(query, { at: now, names });
+			return names;
 		};
 
 		pi.on("tool_call", async (event) => {

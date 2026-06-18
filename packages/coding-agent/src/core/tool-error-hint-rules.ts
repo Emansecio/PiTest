@@ -154,6 +154,32 @@ const bashRules: ToolErrorHintRule[] = [
 			"Inline JS via `node -e` is fragile across shells. Write the script to a temp file with `write({path:'/tmp/x.mjs', content:...})`, then `bash({command:'node /tmp/x.mjs'})`.",
 	},
 	{
+		// Shell quoting collapsed: an unterminated quote / heredoc / unbalanced
+		// construct. The shell reports "unexpected EOF" / "unterminated quoted
+		// string" / "syntax error near unexpected token". Covers POSIX sh/bash and
+		// the `python -c`/`awk` inline forms that hit the same quoting wall.
+		id: "bash-shell-quoting-error",
+		appliesTo: "bash",
+		matcher: ({ errorText }) =>
+			/unexpected EOF|unterminated quoted|unexpected end of file|unmatched (?:'|")|syntax error near unexpected token|here-document/i.test(
+				errorText,
+			),
+		hint: () =>
+			"Shell quoting broke (unterminated quote / unexpected EOF). Don't nest quotes or heredocs inside one command — write the payload to a temp file with `write({path:'/tmp/x', content:...})` then run it, or flip the outer/inner quote style so they don't collide.",
+	},
+	{
+		// A genuine command timeout (the bash tool killed the process after its
+		// `timeout` elapsed) surfaces as "Command timed out after N seconds" — an
+		// internal tool error, NOT a user/ESC abort (those carry skipHints upstream
+		// and never reach the hint layer), so this hint only ever fires on real
+		// timeouts. Steer away from blindly re-running the same blocking command.
+		id: "bash-timed-out",
+		appliesTo: "bash",
+		matcher: ({ errorText }) => /command timed out after|timed out after [\d.]+ ?s|\btimeout:\d+\b/i.test(errorText),
+		hint: () =>
+			"The command hit its timeout and was killed. If it's a server or other long-running process, start it in the background (`cmd &`, `nohup cmd & disown`) and poll its output instead of holding the shell; otherwise raise the `timeout` arg. Don't just re-issue the same blocking command.",
+	},
+	{
 		// ENOENT inside bash. Either `cat: file: No such file or directory` or
 		// the Windows equivalent. Cover both shells.
 		id: "bash-path-not-found",
@@ -256,7 +282,7 @@ const editRules: ToolErrorHintRule[] = [
 				/\.(before|after)_hash .* not found|is ambiguous \(matches lines/i.test(errorText)) &&
 			!/Paste this verbatim as oldText/i.test(errorText),
 		hint: () =>
-			"oldText not matched. Re-`read` a few lines around the target, then paste an exact slice (including whitespace) as `oldText`. Avoid trimming or summarising.",
+			"oldText not matched. The dominant cause is leading-whitespace drift — tabs vs spaces, or a different indent depth — so the text looks identical but isn't. Re-`read` a few lines around the target and paste the exact slice, preserving the line's leading tabs/spaces verbatim. Avoid trimming, re-indenting, or summarising.",
 	},
 	{
 		// Schema mismatch on additionalProperties — `validation DYM` already

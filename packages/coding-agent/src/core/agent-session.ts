@@ -651,6 +651,12 @@ export class AgentSession {
 	// each rule fires across real sessions.
 	private readonly _registryRewrites = new Map<string, Map<string, number>>();
 	private readonly _registryRejects = new Map<string, Map<string, number>>();
+	// Per-session counter for Tier 4 error-hint rules: rule id -> fire count.
+	// Mirrors the rewrite/reject counters so getRegistryStats() can expose which
+	// hints actually fire across real sessions — previously hints were only held
+	// transiently per toolCallId (_hintsByToolCallId) and dropped, leaving them
+	// unmeasurable against tool error-rate deltas.
+	private readonly _registryHints = new Map<string, number>();
 
 	// Cross-session learned errors. Built during the session from
 	// tool_error_hint_applied + tool_execution_end events; persisted incrementally
@@ -1895,7 +1901,12 @@ export class AgentSession {
 	private _handleToolErrorHintApplied(event: Extract<AgentEvent, { type: "tool_error_hint_applied" }>): void {
 		const existing = this._hintsByToolCallId.get(event.toolCallId) ?? [];
 		for (const h of event.hints) {
-			if (!existing.includes(h.ruleId)) existing.push(h.ruleId);
+			// Count each (toolCallId, ruleId) once, mirroring the transient dedupe,
+			// so the persistent counter tracks distinct hint applications.
+			if (!existing.includes(h.ruleId)) {
+				existing.push(h.ruleId);
+				this._registryHints.set(h.ruleId, (this._registryHints.get(h.ruleId) ?? 0) + 1);
+			}
 		}
 		this._hintsByToolCallId.set(event.toolCallId, existing);
 	}
@@ -1908,6 +1919,7 @@ export class AgentSession {
 	getRegistryStats(): {
 		rewrites: Array<{ tool: string; rule: string; count: number }>;
 		rejects: Array<{ tool: string; rule: string; count: number }>;
+		hints: Array<{ rule: string; count: number }>;
 	} {
 		const flatten = (source: Map<string, Map<string, number>>) => {
 			const out: Array<{ tool: string; rule: string; count: number }> = [];
@@ -1918,7 +1930,10 @@ export class AgentSession {
 			}
 			return out.sort((a, b) => b.count - a.count);
 		};
-		return { rewrites: flatten(this._registryRewrites), rejects: flatten(this._registryRejects) };
+		const hints = [...this._registryHints.entries()]
+			.map(([rule, count]) => ({ rule, count }))
+			.sort((a, b) => b.count - a.count);
+		return { rewrites: flatten(this._registryRewrites), rejects: flatten(this._registryRejects), hints };
 	}
 
 	/**
@@ -1934,7 +1949,12 @@ export class AgentSession {
 		const registry = this.getRegistryStats();
 		// Skip empty snapshots: keeps the export dir noise-free on quick
 		// sessions that never invoked a tool.
-		if (toolStats.length === 0 && registry.rewrites.length === 0 && registry.rejects.length === 0) {
+		if (
+			toolStats.length === 0 &&
+			registry.rewrites.length === 0 &&
+			registry.rejects.length === 0 &&
+			registry.hints.length === 0
+		) {
 			return;
 		}
 		try {
