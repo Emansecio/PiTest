@@ -926,6 +926,17 @@ async function completeSummarization(
 }
 
 /**
+ * Token ceiling for a summarization LLM call: a fraction of the reserve, clamped
+ * to the model's own output limit (unbounded when the model reports none).
+ */
+function summarizationMaxTokens(model: Model<any>, reserveTokens: number, fraction: number): number {
+	return Math.min(
+		Math.floor(fraction * reserveTokens),
+		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
+	);
+}
+
+/**
  * Generate a summary of the conversation using the LLM.
  * If previousSummary is provided, uses the update prompt to merge.
  */
@@ -941,10 +952,7 @@ export async function generateSummary(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 ): Promise<string> {
-	const maxTokens = Math.min(
-		Math.floor(0.8 * reserveTokens),
-		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-	);
+	const maxTokens = summarizationMaxTokens(model, reserveTokens, 0.8);
 
 	// Use update prompt if we have a previous summary, otherwise initial prompt
 	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
@@ -1480,10 +1488,7 @@ export async function compact(
 	const verifyInputTokens =
 		sumMessageTokens(messagesToSummarize) + (isSplitTurn ? sumMessageTokens(turnPrefixMessages) : 0);
 	if (!structuralOnly && settings.selfCorrection !== false && verifyInputTokens >= VERIFY_MIN_INPUT_TOKENS) {
-		const maxTokens = Math.min(
-			Math.floor(0.8 * settings.reserveTokens),
-			model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-		);
+		const maxTokens = summarizationMaxTokens(model, settings.reserveTokens, 0.8);
 		summary = await verifySummary(summary, model, maxTokens, apiKey, headers, signal, thinkingLevel, streamFn);
 	}
 
@@ -1573,10 +1578,7 @@ async function generateTurnPrefixSummary(
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
 ): Promise<string> {
-	const maxTokens = Math.min(
-		Math.floor(0.5 * reserveTokens),
-		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-	); // Smaller budget for turn prefix
+	const maxTokens = summarizationMaxTokens(model, reserveTokens, 0.5); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;

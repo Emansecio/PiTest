@@ -274,20 +274,20 @@ function barePackageName(spec: string): string {
  * (`@scope/pkg`) ARE bare. Aliases/relative/imports-map are dropped (out of
  * scope for package grounding).
  */
-function extractBareSpecifiers(content: string): string[] {
+/**
+ * Extract every UNIQUE specifier matching `accept` from `content`, in first-seen
+ * order. Shared loop+dedup engine for the bare/relative extractors below — only
+ * the acceptance predicate differs. `IMPORT_SPECIFIER_RE` stays module-scoped;
+ * its lastIndex is reset here so each call is independent.
+ */
+function extractSpecifiers(content: string, accept: (spec: string) => boolean): string[] {
 	const seen = new Set<string>();
 	const out: string[] = [];
 	IMPORT_SPECIFIER_RE.lastIndex = 0;
 	let match: RegExpExecArray | null = IMPORT_SPECIFIER_RE.exec(content);
 	while (match !== null) {
 		const spec = match[1] ?? match[2] ?? match[3];
-		if (
-			spec !== undefined &&
-			!isRelativeSpecifier(spec) &&
-			!isAliasSpecifier(spec) &&
-			!spec.startsWith("#") &&
-			!seen.has(spec)
-		) {
+		if (spec !== undefined && !seen.has(spec) && accept(spec)) {
 			seen.add(spec);
 			out.push(spec);
 		}
@@ -296,25 +296,20 @@ function extractBareSpecifiers(content: string): string[] {
 	return out;
 }
 
+function extractBareSpecifiers(content: string): string[] {
+	return extractSpecifiers(
+		content,
+		(spec) => !isRelativeSpecifier(spec) && !isAliasSpecifier(spec) && !spec.startsWith("#"),
+	);
+}
+
 /**
  * Extract every UNIQUE relative specifier from `content`, in first-seen order.
  * Non-relative specifiers (bare packages, `@/…`, `~/…`) are dropped here — they
  * are out of scope (need node_modules / tsconfig resolution).
  */
 function extractRelativeSpecifiers(content: string): string[] {
-	const seen = new Set<string>();
-	const out: string[] = [];
-	IMPORT_SPECIFIER_RE.lastIndex = 0;
-	let match: RegExpExecArray | null = IMPORT_SPECIFIER_RE.exec(content);
-	while (match !== null) {
-		const spec = match[1] ?? match[2] ?? match[3];
-		if (spec !== undefined && isRelativeSpecifier(spec) && !seen.has(spec)) {
-			seen.add(spec);
-			out.push(spec);
-		}
-		match = IMPORT_SPECIFIER_RE.exec(content);
-	}
-	return out;
+	return extractSpecifiers(content, isRelativeSpecifier);
 }
 
 // ============================================================================

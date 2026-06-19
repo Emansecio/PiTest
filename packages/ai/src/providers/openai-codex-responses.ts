@@ -914,11 +914,9 @@ async function acquireWebSocket(
 		return {
 			socket,
 			reused: false,
-			release: ({ keep } = {}) => {
-				if (keep === false) {
-					closeWebSocketSilently(socket);
-					return;
-				}
+			// A connection without a sessionId is never cacheable/reusable, so always
+			// close it on release regardless of `keep`.
+			release: () => {
 				closeWebSocketSilently(socket);
 			},
 		};

@@ -655,15 +655,18 @@ export async function processResponsesStream<TApi extends Api>(
 				output.stopReason = "toolUse";
 			}
 		} else if (event.type === "error") {
-			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
+			throw new Error(`Error Code ${event.code}: ${event.message}`);
 		} else if (event.type === "response.failed") {
 			const error = event.response?.error;
 			const details = event.response?.incomplete_details;
-			const msg = error
-				? `${error.code || "unknown"}: ${error.message || "no message"}`
-				: details?.reason
-					? `incomplete: ${details.reason}`
-					: "Unknown error (no error details in response)";
+			let msg: string;
+			if (error) {
+				msg = `${error.code || "unknown"}: ${error.message || "no message"}`;
+			} else if (details?.reason) {
+				msg = `incomplete: ${details.reason}`;
+			} else {
+				msg = "Unknown error (no error details in response)";
+			}
 			throw new Error(msg);
 		}
 	}

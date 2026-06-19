@@ -76,6 +76,11 @@ export function rangesOverlap(a: Range, b: Range): boolean {
 	return comparePosition(a.start, b.end) < 0 && comparePosition(b.start, a.end) < 0;
 }
 
+/** Keep only the plain TextEdits from a documentChange's edit list (drops annotated/other shapes). */
+function extractTextEdits(edits: TextDocumentEdit["edits"]): TextEdit[] {
+	return edits.filter((e): e is TextEdit => "range" in e && "newText" in e);
+}
+
 /** Flatten a WorkspaceEdit's text edits into a Map<uri, TextEdit[]>. */
 export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, TextEdit[]> {
 	const out = new Map<string, TextEdit[]>();
@@ -93,7 +98,7 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
 		for (const change of edit.documentChanges) {
 			if ("textDocument" in change && change.textDocument && "edits" in change && change.edits) {
 				const tdc = change as TextDocumentEdit;
-				const textEdits = tdc.edits.filter((e): e is TextEdit => "range" in e && "newText" in e);
+				const textEdits = extractTextEdits(tdc.edits);
 				push(tdc.textDocument.uri, textEdits);
 			}
 		}
@@ -146,7 +151,7 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Prom
 			if ("textDocument" in change && change.textDocument && "edits" in change && change.edits) {
 				const tdc = change as TextDocumentEdit;
 				const uri = tdc.textDocument.uri;
-				const textEdits = tdc.edits.filter((e): e is TextEdit => "range" in e && "newText" in e);
+				const textEdits = extractTextEdits(tdc.edits);
 				if (textEdits.length > 0) {
 					const prev = pending.get(uri);
 					if (prev) prev.push(...textEdits);

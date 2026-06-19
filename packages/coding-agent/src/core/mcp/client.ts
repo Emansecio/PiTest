@@ -116,13 +116,17 @@ export class McpClient {
 		return Object.keys(this.config.headers ?? {}).some((k) => k.toLowerCase() === "authorization");
 	}
 
-	/** Resolved config for the transport, with the OAuth bearer merged in when applicable. */
-	private transportConfig(): McpServerConfig {
-		const resolved = resolveServerConfig(this.config);
+	/** Merge the OAuth bearer into a resolved config's headers when there's no static Authorization. */
+	private mergeAuthHeader(resolved: McpServerConfig): McpServerConfig {
 		if (this.authHeader && !this.hasStaticAuth()) {
 			resolved.headers = { ...(resolved.headers ?? {}), Authorization: this.authHeader };
 		}
 		return resolved;
+	}
+
+	/** Resolved config for the transport, with the OAuth bearer merged in when applicable. */
+	private transportConfig(): McpServerConfig {
+		return this.mergeAuthHeader(resolveServerConfig(this.config));
 	}
 
 	/**
@@ -133,11 +137,7 @@ export class McpClient {
 	 * sync version.
 	 */
 	private async transportConfigAsync(): Promise<McpServerConfig> {
-		const resolved = await resolveServerConfigAsync(this.config);
-		if (this.authHeader && !this.hasStaticAuth()) {
-			resolved.headers = { ...(resolved.headers ?? {}), Authorization: this.authHeader };
-		}
-		return resolved;
+		return this.mergeAuthHeader(await resolveServerConfigAsync(this.config));
 	}
 
 	/** Refresh an expired OAuth token before a (re)connect so the handshake is authenticated. */
