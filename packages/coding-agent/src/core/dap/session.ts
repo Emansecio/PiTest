@@ -1006,7 +1006,11 @@ export class DapSessionManager {
 				cwd: args.cwd ?? session.cwd,
 				env: { ...process.env, ...NON_INTERACTIVE_ENV, ...extraEnv },
 				detached: process.platform !== "win32",
-				stdio: ["ignore", "pipe", "pipe"],
+				// stdout/stderr are ignored (not piped): nothing here drains them, so a
+				// piped buffer would fill its OS limit (~64KB) and deadlock a chatty
+				// debuggee on its next write. The program's output reaches us via DAP
+				// 'output' events, not these pipes. Same reasoning as the socket-mode spawn.
+				stdio: ["ignore", "ignore", "ignore"],
 				windowsHide: true,
 			});
 			// A late spawn failure (ENOENT/EACCES) is emitted asynchronously AFTER

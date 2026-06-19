@@ -23,6 +23,14 @@ const ESC = "\x1b";
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 
+// Cap for the bracketed-paste accumulator. An unterminated paste — interrupted
+// before the end marker arrives, a terminal that never emits one, or a blob
+// sliced across chunks that overshoots — would otherwise let pasteBuffer grow
+// without bound (OOM) and trap us in paste mode forever (input swallowed). Once
+// we exceed this with no end marker, we flush what we have (truncated) and exit
+// paste mode. Generous so legitimate large pastes still complete normally.
+const MAX_PASTE_BYTES = 10 * 1024 * 1024;
+
 /**
  * Check if a string is a complete escape sequence or needs more data
  */
@@ -336,6 +344,18 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 				if (remaining.length > 0) {
 					this.process(remaining);
 				}
+				return;
+			}
+
+			// No end marker yet: guard against an unterminated paste growing without
+			// bound. Flush the (truncated) content and exit paste mode so subsequent
+			// input is no longer swallowed.
+			if (this.pasteBuffer.length > MAX_PASTE_BYTES) {
+				const pastedContent = this.pasteBuffer.slice(0, MAX_PASTE_BYTES);
+				this.pasteMode = false;
+				this.pasteBuffer = "";
+				this.pendingKittyPrintableCodepoint = undefined;
+				this.emit("paste", pastedContent);
 			}
 			return;
 		}

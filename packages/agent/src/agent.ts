@@ -561,10 +561,22 @@ export class Agent {
 			errorMessage: error instanceof Error ? error.message : String(error),
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
-		await this.processEvents({ type: "message_start", message: failureMessage });
-		await this.processEvents({ type: "message_end", message: failureMessage });
-		await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
-		await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+		// Each processEvents runs subscriber listeners (e.g. session persistence) that
+		// can throw — and this runs INSIDE runWithLifecycle's catch, so a throw here
+		// would escape (→ unhandledRejection / process death) AND skip the remaining
+		// lifecycle events. Isolate each so message_end's failure can't suppress
+		// turn_end/agent_end and nothing escapes onto the failure path.
+		const emitSafe = async (event: AgentEvent): Promise<void> => {
+			try {
+				await this.processEvents(event);
+			} catch {
+				// A listener failure on the error path must not kill the run.
+			}
+		};
+		await emitSafe({ type: "message_start", message: failureMessage });
+		await emitSafe({ type: "message_end", message: failureMessage });
+		await emitSafe({ type: "turn_end", message: failureMessage, toolResults: [] });
+		await emitSafe({ type: "agent_end", messages: [failureMessage] });
 	}
 
 	private finishRun(): void {

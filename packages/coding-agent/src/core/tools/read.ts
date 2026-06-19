@@ -297,6 +297,13 @@ function formatBinaryFileNote(absolutePath: string, byteLength: number): string 
 /** Files larger than this stream line-by-line instead of being fully buffered. */
 const STREAM_READ_MIN_BYTES = 10 * 1024 * 1024; // 10MB
 
+// Mirrors MAX_PARSE_CHARS in json-crush.ts: above this size crushJson refuses to
+// parse and returns undefined, so a JSON-crush-eligible read of a huge file would
+// fully buffer the file (O(file size) heap → OOM) only to fall back to a blind
+// head-cut. Cap eligibility at this size so larger JSON/NDJSON drops into the
+// streamLargeTextRead path (which is bounded) like every other text type.
+const JSON_CRUSH_MAX_BYTES = 5_000_000;
+
 interface StreamedTextRead {
 	kind: "text";
 	/** Lines [startLine, startLine + collectable), with the buffered path's split("\n") semantics. */
@@ -694,15 +701,27 @@ Common mistakes to avoid:
 								// Apply offset if specified. Convert from 1-indexed input to 0-indexed array access.
 								const startLine = offset ? Math.max(0, offset - 1) : 0;
 								const startLineDisplay = startLine + 1;
-								const jsonCrushEligible = isJsonCrushEnabled() && offset === undefined && limit === undefined;
+								// Stat once up front (when available) so json-crush eligibility can be
+								// size-gated. Reused by the streaming branch below.
+								const preReadStat = ops.stat ? await ops.stat(absolutePath) : undefined;
+								if (aborted) return;
+								// crushJson buffers the whole file, but refuses to parse above
+								// JSON_CRUSH_MAX_BYTES (it returns undefined and the caller blind-cuts).
+								// Treating a file that large as crush-eligible would skip the bounded
+								// streaming path and fully buffer it → OOM. Only stay eligible when the
+								// file fits the crush ceiling, or when size is unknown (ops without
+								// stat: remote/in-memory, where the buffered path is the only option).
+								const fitsJsonCrush = preReadStat === undefined || preReadStat.size <= JSON_CRUSH_MAX_BYTES;
+								const jsonCrushEligible =
+									isJsonCrushEnabled() && offset === undefined && limit === undefined && fitsJsonCrush;
 								let streamed: StreamedTextRead | StreamedBinaryRead | undefined;
 								if (
-									ops.stat &&
+									preReadStat &&
 									ops.createByteStream &&
 									!jsonCrushEligible &&
 									!absolutePath.toLowerCase().endsWith(".ipynb")
 								) {
-									const fileStat = await ops.stat(absolutePath);
+									const fileStat = preReadStat;
 									if (fileStat.size > streamingMinBytes) {
 										streamed = await streamLargeTextRead(
 											absolutePath,

@@ -88,7 +88,11 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 			const perServer = await Promise.all(
 				servers.map(async ([, serverConfig]) => {
 					try {
-						const client = await getOrCreateClient(serverConfig, options.cwd);
+						// Cap the (possibly cold) LSP initialize at the guard's own ceiling
+						// instead of the 30s client default — a first-session/cold server
+						// would otherwise stall the guard ~30s. Fail-open: an init timeout is
+						// caught below and the server counts as "did not answer" -> allow.
+						const client = await getOrCreateClient(serverConfig, options.cwd, WORKSPACE_SYMBOL_TIMEOUT_MS);
 						const res = (await sendRequest(
 							client,
 							"workspace/symbol",

@@ -1,4 +1,4 @@
-import type { Transport } from "@pit/ai";
+import { recordDiagnostic, type Transport } from "@pit/ai";
 import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -966,12 +966,34 @@ export class SettingsManager {
 
 			return JSON.stringify(mergedSettings, null, 2);
 		});
+
+		// withLock is synchronous and writeFileAtomicSync throws on failure; reaching
+		// this point means the atomic write succeeded and the file is integral again.
+		// Clear any prior transient load error (EBUSY/EACCES from AV, torn file) so that
+		// subsequent save()/saveProjectSettings() are no longer suppressed for the rest
+		// of the session.
+		if (scope === "global") {
+			this.globalSettingsLoadError = null;
+		} else {
+			this.projectSettingsLoadError = null;
+		}
 	}
 
 	private save(): void {
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 
 		if (this.globalSettingsLoadError) {
+			// A prior transient load error (EBUSY/EACCES from AV, torn file) is suppressing
+			// writes to avoid clobbering on-disk settings with possibly-incomplete in-memory
+			// state. Surface it so the suppression is not silent for the rest of the session.
+			recordDiagnostic({
+				category: "error.isolated",
+				level: "warn",
+				source: "settings-manager.save",
+				context: {
+					note: `global settings save suppressed by prior load error: ${this.globalSettingsLoadError.message}`,
+				},
+			});
 			return;
 		}
 
@@ -989,6 +1011,14 @@ export class SettingsManager {
 		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
 
 		if (this.projectSettingsLoadError) {
+			recordDiagnostic({
+				category: "error.isolated",
+				level: "warn",
+				source: "settings-manager.save",
+				context: {
+					note: `project settings save suppressed by prior load error: ${this.projectSettingsLoadError.message}`,
+				},
+			});
 			return;
 		}
 

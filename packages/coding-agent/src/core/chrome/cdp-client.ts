@@ -96,6 +96,12 @@ interface PendingCall {
 }
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+// Hard ceiling on a single WS frame before we even JSON.parse it. A giant network
+// body (Network.getResponseBody on a multi-hundred-MB asset) arrives as one frame;
+// parsing it blocks the loop and can OOM. The consumer caps at ~10MB after the fact,
+// so anything several times larger is already unusable — reject the matching pending
+// pre-parse instead of materializing the object. Normal frames are far under this.
+const MAX_CDP_FRAME_BYTES = 64 * 1024 * 1024;
 // Ceiling for the WebSocket upgrade itself. A half-dead debug port (TCP accepts
 // but the upgrade never completes — Chrome hung, firewall eating the handshake)
 // emits no open/error/close, so without this the connect would hang forever.
@@ -286,10 +292,34 @@ export class CdpConnection {
 
 	private onMessage(raw: string): void {
 		// Each ws "message" event is one COMPLETE CDP message — there is no manual
-		// chunk reassembly here, so there is no unbounded accumulation to cap at this
-		// level. A giant payload (huge network body / evaluate result) is bounded
-		// where it is consumed instead (ChromeDevtoolsManager get-body/evaluate),
-		// since a JSON frame cannot be safely truncated before parsing.
+		// chunk reassembly here. A JSON frame cannot be safely truncated before
+		// parsing, but a frame that is grossly oversized (a multi-hundred-MB network
+		// body) would block the loop / OOM if we parse it. So before parsing, if the
+		// raw frame blows past MAX_CDP_FRAME_BYTES, find its pending id with a cheap
+		// regex and reject ONLY that command — frames of normal size are parsed
+		// unchanged below (behavior/tests intact). Events have no id and are dropped.
+		if (raw.length > MAX_CDP_FRAME_BYTES) {
+			const idMatch = /"id"\s*:\s*(\d+)/.exec(raw);
+			const id = idMatch ? Number(idMatch[1]) : Number.NaN;
+			const call = Number.isFinite(id) ? this.pending.get(id) : undefined;
+			if (call) {
+				call.reject(
+					new Error(
+						`CDP response too large (${raw.length} bytes > ${MAX_CDP_FRAME_BYTES} cap); refused before parse`,
+					),
+				);
+			}
+			recordDiagnostic({
+				category: "output.cap",
+				level: "warn",
+				source: "cdp.onMessage",
+				context: {
+					bytes: raw.length,
+					note: `frame too large (cap ${MAX_CDP_FRAME_BYTES}, matched=${Boolean(call)})`,
+				},
+			});
+			return;
+		}
 		let msg: { id?: number; result?: unknown; error?: { message?: string }; method?: string; params?: unknown };
 		try {
 			msg = JSON.parse(raw);

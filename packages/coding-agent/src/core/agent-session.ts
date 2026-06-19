@@ -1454,24 +1454,37 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
-			// Check if this is a custom message from extensions
-			if (event.message.role === "custom") {
-				// Persist as CustomMessageEntry
-				this.sessionManager.appendCustomMessageEntry(
-					event.message.customType,
-					event.message.content,
-					event.message.display,
-					event.message.details,
-				);
-			} else if (
-				event.message.role === "user" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult"
-			) {
-				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+			// Persisting to disk can fail (disk full, EBUSY/EPERM from AV on Windows).
+			// This handler runs from the agent's failure path too, where a throw escapes
+			// runWithLifecycle's catch → unhandledRejection → host death, and on any path
+			// a throw here desyncs the lifecycle. Best-effort: record and continue.
+			try {
+				// Check if this is a custom message from extensions
+				if (event.message.role === "custom") {
+					// Persist as CustomMessageEntry
+					this.sessionManager.appendCustomMessageEntry(
+						event.message.customType,
+						event.message.content,
+						event.message.display,
+						event.message.details,
+					);
+				} else if (
+					event.message.role === "user" ||
+					event.message.role === "assistant" ||
+					event.message.role === "toolResult"
+				) {
+					// Regular LLM message - persist as SessionMessageEntry
+					this.sessionManager.appendMessage(event.message);
+				}
+				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
+			} catch (err) {
+				recordDiagnostic({
+					category: "error.isolated",
+					level: "warn",
+					source: "agent-session.message_end",
+					context: { note: err instanceof Error ? err.message : String(err) },
+				});
 			}
-			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {

@@ -706,6 +706,13 @@ export class ChromeDevtoolsManager {
 					entry.mimeType = p?.response?.mimeType;
 				}
 			}),
+			// A JS dialog (alert/confirm/prompt/beforeunload) blocks the renderer: every
+			// subsequent CDP command stalls until the per-command 30s timeout, repeatedly.
+			// Auto-dismiss so the renderer unblocks and following commands resolve. Fire-
+			// and-forget — never throw out of the event loop.
+			conn.on("Page.javascriptDialogOpening", () => {
+				conn.send("Page.handleJavaScriptDialog", { accept: false }).catch(() => {});
+			}),
 		);
 
 		// Enable the domains we buffer + need; tolerate individual failures.
