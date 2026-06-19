@@ -16,7 +16,11 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { interpolateEnvVars, resolveConfigValueUncached } from "../resolve-config-value.ts";
+import {
+	interpolateEnvVars,
+	resolveConfigValueUncached,
+	resolveConfigValueUncachedAsync,
+} from "../resolve-config-value.ts";
 import type { McpServerConfig, McpSettings } from "./types.ts";
 
 /** Raw shape of a `.mcp.json` entry (Claude Code uses `type` for the transport). */
@@ -153,5 +157,41 @@ export function resolveServerConfig(config: McpServerConfig): McpServerConfig {
 	if (config.args !== undefined) resolved.args = config.args.map((a) => interpolateEnvVars(a));
 	if (config.headers !== undefined) resolved.headers = resolveStringMap(config.headers);
 	if (config.env !== undefined) resolved.env = resolveStringMap(config.env);
+	return resolved;
+}
+
+/**
+ * Async, non-blocking mirror of resolveStringMap. `${VAR}` interpolation stays
+ * sync (no spawn); only the `!command` branch awaits the non-blocking resolver
+ * so a slow command yields the event loop instead of freezing it.
+ */
+async function resolveStringMapAsync(
+	map: Record<string, string> | undefined,
+): Promise<Record<string, string> | undefined> {
+	if (!map) return undefined;
+	const out: Record<string, string> = {};
+	for (const [k, v] of Object.entries(map)) {
+		if (v.startsWith("!")) {
+			out[k] = (await resolveConfigValueUncachedAsync(v)) ?? "";
+		} else {
+			out[k] = interpolateEnvVars(v);
+		}
+	}
+	return out;
+}
+
+/**
+ * Async, non-blocking mirror of resolveServerConfig. url/command/cwd/args use the
+ * sync `${VAR}` interpolation (no spawn); headers/env use the async string-map
+ * resolver so `!cmd` values don't block the event loop during MCP connect/reconnect.
+ */
+export async function resolveServerConfigAsync(config: McpServerConfig): Promise<McpServerConfig> {
+	const resolved: McpServerConfig = { ...config };
+	if (config.url !== undefined) resolved.url = interpolateEnvVars(config.url);
+	if (config.command !== undefined) resolved.command = interpolateEnvVars(config.command);
+	if (config.cwd !== undefined) resolved.cwd = interpolateEnvVars(config.cwd);
+	if (config.args !== undefined) resolved.args = config.args.map((a) => interpolateEnvVars(a));
+	if (config.headers !== undefined) resolved.headers = await resolveStringMapAsync(config.headers);
+	if (config.env !== undefined) resolved.env = await resolveStringMapAsync(config.env);
 	return resolved;
 }

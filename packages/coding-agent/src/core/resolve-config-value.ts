@@ -3,8 +3,12 @@
  * Used by auth-storage.ts and model-registry.ts.
  */
 
-import { execSync, spawnSync } from "child_process";
+import { promisify } from "node:util";
+import { exec, execFile, execSync, spawnSync } from "child_process";
 import { getShellConfig } from "../utils/shell.ts";
+
+const execFileAsync = promisify(execFile);
+const execAsync = promisify(exec);
 
 // Cache for shell command results (persists for process lifetime)
 const commandResultCache = new Map<string, string | undefined>();
@@ -91,6 +95,80 @@ function executeCommand(commandConfig: string): string | undefined {
 export function resolveConfigValueUncached(config: string): string | undefined {
 	if (config.startsWith("!")) {
 		return executeCommandUncached(config);
+	}
+	const envValue = process.env[config];
+	return envValue || config;
+}
+
+/**
+ * Async, non-blocking mirror of executeWithConfiguredShell. Used by the MCP
+ * transport-resolution path so a slow `!cmd` (up to the 10s timeout) yields the
+ * event loop instead of freezing it. Same params as the sync version 1:1
+ * (configured shell, timeout 10000, stdio ignore/pipe/ignore, shell:false,
+ * windowsHide, trim, undefined on failure/status!=0/empty).
+ */
+async function executeWithConfiguredShellAsync(
+	command: string,
+): Promise<{ executed: boolean; value: string | undefined }> {
+	try {
+		const { shell, args } = getShellConfig();
+		const { stdout } = await execFileAsync(shell, [...args, command], {
+			encoding: "utf-8",
+			timeout: 10000,
+			windowsHide: true,
+			shell: false,
+		});
+		const value = (stdout ?? "").trim();
+		return { executed: true, value: value || undefined };
+	} catch (err) {
+		const error = err as NodeJS.ErrnoException;
+		// ENOENT = shell binary not found -> not executed (caller falls back to default shell).
+		if (error?.code === "ENOENT") {
+			return { executed: false, value: undefined };
+		}
+		// Any other failure (non-zero exit, timeout) = executed but no usable value.
+		return { executed: true, value: undefined };
+	}
+}
+
+/** Async, non-blocking mirror of executeWithDefaultShell (execSync -> promisified exec). */
+async function executeWithDefaultShellAsync(command: string): Promise<string | undefined> {
+	try {
+		const { stdout } = await execAsync(command, {
+			encoding: "utf-8",
+			timeout: 10000,
+		});
+		return stdout.trim() || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Async, non-blocking mirror of executeCommandUncached. Same uncached semantics
+ * (fresh each call — never cached, rotating tokens). Written with if/else, not a
+ * nested ternary IIFE, to satisfy tsgo erasableSyntaxOnly lint.
+ */
+async function executeCommandUncachedAsync(commandConfig: string): Promise<string | undefined> {
+	const command = commandConfig.slice(1);
+	if (process.platform === "win32") {
+		const configuredResult = await executeWithConfiguredShellAsync(command);
+		if (configuredResult.executed) {
+			return configuredResult.value;
+		}
+		return executeWithDefaultShellAsync(command);
+	}
+	return executeWithDefaultShellAsync(command);
+}
+
+/**
+ * Async, non-blocking mirror of resolveConfigValueUncached. `!cmd` runs the
+ * command without blocking the event loop; `${VAR}`/env/literal resolution is
+ * identical to the sync version.
+ */
+export async function resolveConfigValueUncachedAsync(config: string): Promise<string | undefined> {
+	if (config.startsWith("!")) {
+		return executeCommandUncachedAsync(config);
 	}
 	const envValue = process.env[config];
 	return envValue || config;

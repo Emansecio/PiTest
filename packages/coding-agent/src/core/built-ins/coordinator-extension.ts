@@ -282,29 +282,103 @@ function coerceResultSchema(raw: unknown): TSchema | undefined {
  * the budget is shared across every coordinator instance in the process.
  */
 const MAX_CONCURRENCY = Number(process.env.PIT_SUBAGENT_MAX_CONCURRENCY) || 4;
+/**
+ * Upper bound on queued waiters past the cap. Without it, a runaway fan-out
+ * could pile up an unbounded queue of pending acquires. Generous default
+ * (8× the cap) so legitimate batches never hit it; overridable via env.
+ */
+const MAX_QUEUE = Number(process.env.PIT_SUBAGENT_MAX_QUEUE) || MAX_CONCURRENCY * 8;
 let activeSubagents = 0;
-const slotWaiters: Array<() => void> = [];
 
-/** Acquire a run slot, awaiting a free one past the cap. Queue time is NOT counted toward task timeouts. */
-function acquireSlot(): Promise<void> {
+/**
+ * A queued acquire. `wake()` grants the slot (resolves the caller); `settled`
+ * guards against double-settling — set once by whichever of wake()/onAbort
+ * fires first (both are synchronous check-and-set in the same single-thread).
+ */
+interface SlotWaiter {
+	wake(): void;
+	settled: boolean;
+}
+const slotWaiters: SlotWaiter[] = [];
+
+/** Coerce an AbortSignal reason into an Error (signals may carry a string or arbitrary value). */
+function toAbortError(reason: unknown): Error {
+	if (reason instanceof Error) return reason;
+	return new Error(typeof reason === "string" ? reason : "aborted");
+}
+
+/**
+ * Acquire a run slot, awaiting a free one past the cap. Queue time is NOT
+ * counted toward task timeouts. Abort-aware: if `signal` aborts while queued,
+ * the waiter is removed and the promise rejects immediately (the caller is
+ * freed on ESC without waiting for a sibling to release). `bypassQueueCap`
+ * lets fire-and-forget detached spawns always enqueue (never reject on a full
+ * queue), since they have no turn signal to surface a rejection to a user.
+ */
+function acquireSlot(signal?: AbortSignal, opts?: { bypassQueueCap?: boolean }): Promise<void> {
+	if (signal?.aborted) {
+		return Promise.reject(toAbortError(signal.reason));
+	}
 	if (activeSubagents < MAX_CONCURRENCY) {
 		activeSubagents++;
 		return Promise.resolve();
 	}
-	return new Promise<void>((resolve) => {
-		slotWaiters.push(() => {
+	if (!opts?.bypassQueueCap && slotWaiters.length >= MAX_QUEUE) {
+		return Promise.reject(
+			new Error(`subagent queue full (${slotWaiters.length} waiting); try again after running tasks settle`),
+		);
+	}
+	const w: SlotWaiter = { settled: false, wake: () => {} };
+	return new Promise<void>((resolve, reject) => {
+		const cleanup = () => {
+			if (signal) signal.removeEventListener("abort", onAbort);
+		};
+		const onAbort = () => {
+			if (w.settled) return;
+			w.settled = true;
+			const i = slotWaiters.indexOf(w);
+			if (i >= 0) slotWaiters.splice(i, 1);
+			cleanup();
+			// onAbort is only registered when signal is defined.
+			reject(toAbortError((signal as AbortSignal).reason));
+		};
+		w.wake = () => {
+			if (w.settled) return;
+			w.settled = true;
 			activeSubagents++;
+			cleanup();
 			resolve();
-		});
+		};
+		if (signal) signal.addEventListener("abort", onAbort, { once: true });
+		slotWaiters.push(w);
 	});
 }
 
-/** Release a run slot and wake the oldest waiter, if any. */
+/** Release a run slot and wake the oldest live waiter, if any. */
 function releaseSlot(): void {
 	activeSubagents--;
-	const next = slotWaiters.shift();
-	if (next) next();
+	// Skip any already-settled waiters defensively (onAbort splices them out, so
+	// this is belt-and-suspenders); wake the first live one.
+	let next = slotWaiters.shift();
+	while (next?.settled) next = slotWaiters.shift();
+	if (next) next.wake();
 }
+
+/** @internal Test hooks for the module-scoped slot semaphore — not part of the public API. */
+export const __slotInternals = {
+	acquireSlot,
+	releaseSlot,
+	get activeSubagents() {
+		return activeSubagents;
+	},
+	get queueLength() {
+		return slotWaiters.length;
+	},
+	reset() {
+		activeSubagents = 0;
+		slotWaiters.length = 0;
+	},
+};
 
 export interface CoordinatorExtensionOptions {
 	modelRegistry: ModelRegistry;
@@ -644,8 +718,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			continuation?.trim() ||
 			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
 		// Respect the concurrency cap: a re-driven Agent is a live run like any spawn.
-		await acquireSlot();
+		let acquired = false;
 		try {
+			await acquireSlot(signal);
+			acquired = true;
 			await agent.prompt(text);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -656,7 +732,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		} finally {
 			cleanupAbort();
-			releaseSlot();
+			if (acquired) releaseSlot();
 		}
 		if (agentEndedWithError(agent)) {
 			// Still unfinished — keep it resumable for another attempt.
@@ -724,8 +800,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		// A fresh ESC during the follow-up aborts this Agent; it stays continuable.
 		const cleanupAbort = wireAbort(agent, signal);
 		// Respect the concurrency cap: a follow-up is a live run like any spawn.
-		await acquireSlot();
+		let acquired = false;
 		try {
+			await acquireSlot(signal);
+			acquired = true;
 			await agent.prompt(text);
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
@@ -736,7 +814,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		} finally {
 			cleanupAbort();
-			releaseSlot();
+			if (acquired) releaseSlot();
 		}
 		const body = cappedBody(extractAssistantText(agent.state.messages));
 		return {
@@ -882,9 +960,18 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					let capturedAgent: Agent | undefined;
 					entry.promise = (async () => {
 						// Queue past the concurrency cap before doing any work; queue time is
-						// not counted against the task timeout (acquire is outside spawnSubagent).
-						await acquireSlot();
+						// not counted against the task timeout. Detached spawns are
+						// fire-and-forget: they bypass the queue cap (no turn signal to
+						// surface a rejection to a user) and never pass the subagent
+						// controller as an acquire-abort signal. The acquire lives INSIDE
+						// the try so any rejection is caught below (status="error" +
+						// onAsyncComplete) instead of escaping the IIFE as an
+						// unhandledRejection that would orphan the handle. `acquired`
+						// gates the finally so a failed acquire never underflows the slot.
+						let acquired = false;
 						try {
+							await acquireSlot(undefined, { bypassQueueCap: true });
+							acquired = true;
 							options.onSubagentStart?.(handle);
 							const result = await spawnSubagent(makeSpawnDeps(baseChildTools, model), {
 								prompt,
@@ -928,7 +1015,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								capturedAgent && !usedAutoWorktree ? ` Resume with task({op:"resume", name:"${handle}"}).` : "";
 							if (options.onAsyncComplete?.(handle, `${entry.error}${suffix}`, "error")) entry.delivered = true;
 						} finally {
-							releaseSlot();
+							if (acquired) releaseSlot();
 						}
 					})();
 					pending.set(handle, entry);
@@ -972,9 +1059,14 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				}
 
 				// Queue past the concurrency cap before any work; queue time is not
-				// counted against the task timeout (acquire is outside spawnSubagent).
-				await acquireSlot();
+				// counted against the task timeout. acquire lives inside the try so a
+				// queue-full / ESC rejection falls into the catch below (returns
+				// isError) instead of escaping execute() and crashing the batch.
+				// `acquired` gates the finally so a failed acquire never underflows.
+				let acquired = false;
 				try {
+					await acquireSlot(signal);
+					acquired = true;
 					options.onSubagentStart?.(runHandle);
 					const result = await spawnSubagent(makeSpawnDeps(childTools, model), {
 						prompt,
@@ -1039,8 +1131,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					// spawnSubagent outcome (success, caught failure, or a throw before
 					// the agent's own teardown ran). delete is idempotent.
 					if (messagingId) agentMessageBus.unregister(messagingId);
-					// Release the concurrency slot acquired before this try.
-					releaseSlot();
+					// Release the concurrency slot only if it was actually acquired
+					// (a rejected acquire leaves nothing to release → no underflow).
+					if (acquired) releaseSlot();
 				}
 			},
 		};
@@ -1100,8 +1193,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			continuation?.trim() ||
 			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
 		// Respect the concurrency cap: a disk-resumed run is a live spawn.
-		await acquireSlot();
+		let acquired = false;
 		try {
+			await acquireSlot(signal);
+			acquired = true;
 			const result = await spawnSubagent(makeSpawnDeps(childTools, model), {
 				prompt: text,
 				initialMessages: seed,
@@ -1129,7 +1224,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				details: { handle: key, resumed: true },
 			};
 		} finally {
-			releaseSlot();
+			if (acquired) releaseSlot();
 		}
 	}
 

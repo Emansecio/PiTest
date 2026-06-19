@@ -11,7 +11,7 @@
  * have side effects, and a timed-out call may already have been applied.
  */
 
-import { resolveServerConfig } from "./config-files.ts";
+import { resolveServerConfig, resolveServerConfigAsync } from "./config-files.ts";
 import { isTokenExpired, loadMcpToken, refreshMcpToken } from "./oauth.ts";
 import { createTransport, type McpTransport, McpTransportError } from "./transport/index.ts";
 import type {
@@ -69,9 +69,19 @@ export class McpClient {
 		// is authenticated without a separate step.
 		const token = config.url ? loadMcpToken(name) : undefined;
 		if (token) this.authHeader = `Bearer ${token.accessToken}`;
-		// Resolve ${VAR} / !cmd in url/headers/env/args at the point of use; the raw
-		// config is kept for timeout/display so secrets never land in stored state.
-		this.transport = createTransport(name, this.transportConfig());
+		// Build the transport from the RAW config (no `!cmd` resolution here). This
+		// keeps the ctor non-blocking: a slow `!cmd` would otherwise freeze the event
+		// loop synchronously (spawnSync), and the McpManager ctor builds every client
+		// synchronously, so N slow servers would stall boot by ~N×10s.
+		//
+		// INVARIANT (verified across all three transports): no transport reads
+		// headers/env/command in its constructor — Stdio reads env only in start();
+		// Http/Sse read headers only when sending. createTransport itself only uses
+		// transport/command/url to infer the kind and validate presence, and a raw
+		// `${VAR}`/`!cmd` string is still a non-empty value for that check. initialize()
+		// always re-resolves via updateConfig(await transportConfigAsync()) BEFORE
+		// start(), so `!cmd` is resolved async before the first byte is sent.
+		this.transport = createTransport(name, config);
 		// Receive server-initiated notifications (persistent transports only).
 		this.transport.onNotification = (method) => this.handleNotification(method);
 	}
@@ -115,6 +125,21 @@ export class McpClient {
 		return resolved;
 	}
 
+	/**
+	 * Async, non-blocking variant of transportConfig used on the connect/reconnect
+	 * paths (initialize / forceTokenRefresh). Resolves `!cmd` values via the
+	 * non-blocking resolver so a slow command yields the event loop instead of
+	 * freezing it, then merges the OAuth bearer with the same precedence as the
+	 * sync version.
+	 */
+	private async transportConfigAsync(): Promise<McpServerConfig> {
+		const resolved = await resolveServerConfigAsync(this.config);
+		if (this.authHeader && !this.hasStaticAuth()) {
+			resolved.headers = { ...(resolved.headers ?? {}), Authorization: this.authHeader };
+		}
+		return resolved;
+	}
+
 	/** Refresh an expired OAuth token before a (re)connect so the handshake is authenticated. */
 	private async ensureFreshAuth(): Promise<void> {
 		if (!this.config.url) return;
@@ -137,7 +162,7 @@ export class McpClient {
 		const refreshed = await refreshMcpToken(this.name);
 		if (!refreshed) return false;
 		this.authHeader = `Bearer ${refreshed.accessToken}`;
-		this.transport.updateConfig?.(this.transportConfig());
+		this.transport.updateConfig?.(await this.transportConfigAsync());
 		return true;
 	}
 
@@ -180,7 +205,7 @@ export class McpClient {
 		// Refresh an expired OAuth token and re-inject the bearer before connecting,
 		// so a reconnect after token expiry re-handshakes with a valid token.
 		await this.ensureFreshAuth();
-		this.transport.updateConfig?.(this.transportConfig());
+		this.transport.updateConfig?.(await this.transportConfigAsync());
 		// start() resets/(re)opens the transport so a reconnect re-handshakes with
 		// fresh state (no stale HTTP session id, no dead subprocess, no dead channel).
 		await this.transport.start(signal);
