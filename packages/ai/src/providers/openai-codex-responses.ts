@@ -40,7 +40,7 @@ import {
 } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { DEFAULT_IDLE_TIMEOUT_MS, raceReadWithIdle } from "../utils/idle-timeout.ts";
+import { DEFAULT_IDLE_TIMEOUT_MS, IdleStreamTimeoutError, raceReadWithIdle } from "../utils/idle-timeout.ts";
 import { computeRetryDelay, isRetryableStatus, parseRetryAfter } from "../utils/retry-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
@@ -1145,9 +1145,24 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 				continue;
 			}
 			if (done) break;
-			await new Promise<void>((resolve) => {
-				pending = resolve;
+			let idleTimer: ReturnType<typeof setTimeout> | undefined;
+			const woke = await new Promise<boolean>((resolve) => {
+				pending = () => resolve(true);
+				idleTimer = setTimeout(() => resolve(false), DEFAULT_IDLE_TIMEOUT_MS);
 			});
+			if (idleTimer !== undefined) {
+				clearTimeout(idleTimer);
+			}
+			if (!woke) {
+				// Idle watchdog: a half-open WebSocket (no frame, no close/error event)
+				// would otherwise leave this await pending forever — the turn hangs with no
+				// error and no retry. Treat prolonged silence as a dead socket and surface a
+				// retryable error so the normal retry/fallback path takes over.
+				pending = null;
+				failed = new IdleStreamTimeoutError(DEFAULT_IDLE_TIMEOUT_MS);
+				done = true;
+				break;
+			}
 		}
 
 		if (failed) {

@@ -139,3 +139,80 @@ export async function raceReadWithIdle<T>(
 		}
 	}
 }
+
+/**
+ * Idle watchdog for a `for await` over an async iterable (e.g. an SDK stream like
+ * the OpenAI/Google clients return, which expose `[Symbol.asyncIterator]` rather
+ * than a raw `reader.read()`). Same guarantee as {@link raceReadWithIdle}: each
+ * `iterator.next()` is raced against a per-step timer rearmed on every item, so a
+ * slow-but-alive stream never trips it, but a half-open socket that stalls
+ * `.next()` forever throws a retryable {@link IdleStreamTimeoutError} instead of
+ * hanging the turn. On idle/abort it calls the iterator's `return()` to abort the
+ * underlying request and free the socket.
+ *
+ * Behavior on a healthy stream is identical to a bare `for await` (the timer is
+ * cleared the instant each item resolves).
+ */
+export async function* iterateWithIdleTimeout<T>(
+	iterable: AsyncIterable<T>,
+	options?: RaceReadWithIdleOptions,
+): AsyncGenerator<T> {
+	const idleMs = options?.idleMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+	const signal = options?.signal;
+	const makeAbortError = options?.abortError ?? defaultAbortError;
+	const iterator = iterable[Symbol.asyncIterator]();
+
+	try {
+		while (true) {
+			if (signal?.aborted) {
+				throw makeAbortError();
+			}
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let onAbort: (() => void) | undefined;
+			let result: IteratorResult<T>;
+			try {
+				const nextPromise = iterator.next();
+				const idlePromise = new Promise<never>((_resolve, reject) => {
+					timer = setTimeout(() => {
+						recordDiagnostic({
+							category: "stream.idle-timeout",
+							level: "warn",
+							source: "idle-timeout.iterateWithIdleTimeout",
+							context: { ms: idleMs },
+						});
+						reject(new IdleStreamTimeoutError(idleMs));
+					}, idleMs);
+				});
+				const racers: Array<Promise<IteratorResult<T>>> = [nextPromise, idlePromise];
+				if (signal) {
+					const abortPromise = new Promise<never>((_resolve, reject) => {
+						onAbort = () => reject(makeAbortError());
+						signal.addEventListener("abort", onAbort, { once: true });
+					});
+					racers.push(abortPromise);
+				}
+				result = await Promise.race(racers);
+			} finally {
+				if (timer !== undefined) {
+					clearTimeout(timer);
+				}
+				if (signal && onAbort) {
+					signal.removeEventListener("abort", onAbort);
+				}
+			}
+			if (result.done) {
+				return;
+			}
+			yield result.value;
+		}
+	} finally {
+		// Idle stall, abort, or an early `break` in the consumer: ask the underlying
+		// iterator to tear down (the SDK streams' return() aborts the request and frees
+		// the socket). Best-effort — never throw out of cleanup.
+		try {
+			await iterator.return?.();
+		} catch {
+			// iterator may already be torn down
+		}
+	}
+}

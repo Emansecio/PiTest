@@ -34,6 +34,7 @@ import { systemPromptWithoutDynamicMarker } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { iterateWithIdleTimeout } from "../utils/idle-timeout.ts";
 import { finalizeStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
@@ -263,7 +264,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				return block;
 			};
 
-			for await (const chunk of openaiStream) {
+			for await (const chunk of iterateWithIdleTimeout(openaiStream, {
+				idleMs: options?.idleTimeoutMs,
+				signal: options?.signal,
+			})) {
 				if (!chunk || typeof chunk !== "object") continue;
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,

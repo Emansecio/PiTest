@@ -22,6 +22,7 @@ import type {
 } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { iterateWithIdleTimeout } from "../utils/idle-timeout.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import type { GoogleThinkingLevel } from "./google-shared.ts";
 import {
@@ -91,7 +92,10 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 				}
 			}
 
-			for await (const chunk of googleStream) {
+			for await (const chunk of iterateWithIdleTimeout(googleStream, {
+				idleMs: options?.idleTimeoutMs,
+				signal: options?.signal,
+			})) {
 				// @google/genai documents GenerateContentResponse.responseId as an output-only field
 				// used to identify each response. Keep the first non-empty one from the stream.
 				output.responseId ||= chunk.responseId;

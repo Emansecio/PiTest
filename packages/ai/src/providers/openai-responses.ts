@@ -15,6 +15,7 @@ import type {
 import { createClientCache } from "../utils/client-cache.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { iterateWithIdleTimeout } from "../utils/idle-timeout.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
@@ -99,10 +100,16 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
-			await processResponsesStream(openaiStream, output, stream, model, {
-				serviceTier: options?.serviceTier,
-				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
-			});
+			await processResponsesStream(
+				iterateWithIdleTimeout(openaiStream, { idleMs: options?.idleTimeoutMs, signal: options?.signal }),
+				output,
+				stream,
+				model,
+				{
+					serviceTier: options?.serviceTier,
+					applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				},
+			);
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
