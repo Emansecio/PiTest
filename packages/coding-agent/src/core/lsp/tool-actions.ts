@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import { killProcessTree } from "../../utils/shell.ts";
 import { resolveToCwd } from "../tools/path-utils.ts";
 import {
@@ -634,23 +635,56 @@ export async function renameFile(
 		}
 	}
 
-	for (const [uri, bucket] of acceptedByUri) {
+	// Snapshot every file we are about to edit so a partial failure (a bad edit, or
+	// fs.rename failing with EXDEV/EBUSY/EPERM mid-operation) rolls back instead of
+	// leaving the workspace hybrid — importers rewritten but the file not moved.
+	const renameSnapshots = new Map<string, string>();
+	for (const uri of acceptedByUri.keys()) {
 		const filePath = uriToFile(uri);
-		await applyTextEdits(filePath, bucket.edits);
-		const rel = formatPathRelativeToCwd(filePath, cwd);
-		summary.push(`  ${bucket.primaryServer}: applied ${bucket.edits.length} edit(s) to ${rel}`);
-		if (bucket.discarded > 0) {
-			const others = Array.from(bucket.conflictServers).join(", ");
-			summary.push(
-				`    note: discarded ${bucket.discarded} overlapping edit(s) from ${others} (kept ${bucket.primaryServer})`,
-			);
-			log.warn(`rename_file discarded overlapping edits on ${rel}`, { discarded: bucket.discarded, others });
+		try {
+			renameSnapshots.set(filePath, await fs.readFile(filePath, "utf-8"));
+		} catch {
+			// Missing/unreadable — applyTextEdits surfaces the real error below.
 		}
 	}
+	let renamed = false;
+	try {
+		for (const [uri, bucket] of acceptedByUri) {
+			const filePath = uriToFile(uri);
+			await applyTextEdits(filePath, bucket.edits);
+			const rel = formatPathRelativeToCwd(filePath, cwd);
+			summary.push(`  ${bucket.primaryServer}: applied ${bucket.edits.length} edit(s) to ${rel}`);
+			if (bucket.discarded > 0) {
+				const others = Array.from(bucket.conflictServers).join(", ");
+				summary.push(
+					`    note: discarded ${bucket.discarded} overlapping edit(s) from ${others} (kept ${bucket.primaryServer})`,
+				);
+				log.warn(`rename_file discarded overlapping edits on ${rel}`, { discarded: bucket.discarded, others });
+			}
+		}
 
-	await fs.mkdir(path.dirname(dest), { recursive: true });
-	await fs.rename(source, dest);
-	summary.push(`  Renamed ${sourceLabel} -> ${destLabel}`);
+		await fs.mkdir(path.dirname(dest), { recursive: true });
+		await fs.rename(source, dest);
+		renamed = true;
+		summary.push(`  Renamed ${sourceLabel} -> ${destLabel}`);
+	} catch (err) {
+		// Roll back the edited files and undo the rename if it already happened.
+		for (const [filePath, content] of renameSnapshots) {
+			try {
+				await writeFileAtomic(filePath, content);
+			} catch {
+				// best-effort restore
+			}
+		}
+		if (renamed) {
+			try {
+				await fs.rename(dest, source);
+			} catch {
+				// best-effort un-rename
+			}
+		}
+		throw new Error(`rename_file failed and was rolled back: ${err instanceof Error ? err.message : String(err)}`);
+	}
 
 	for (const [serverName, serverConfig] of servers) {
 		try {

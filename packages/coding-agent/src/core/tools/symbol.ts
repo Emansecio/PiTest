@@ -103,6 +103,28 @@ export function findDeclarationLine(lines: string[], name: string, kind: SymbolK
 	return -1;
 }
 
+/**
+ * All line indices that look like a declaration of `name`. Same matcher as
+ * {@link findDeclarationLine}; used to detect ambiguity (overloads, a method
+ * homonymous with a top-level symbol, re-declarations) so the tool can flag that
+ * it returned the first of several rather than silently picking one. The inner
+ * `break` counts a line at most once even when several patterns match it.
+ */
+export function findAllDeclarationLines(lines: string[], name: string, kind: SymbolKind): number[] {
+	const patterns = buildDeclarationPatterns(name, kind);
+	const out: number[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		for (const pattern of patterns) {
+			if (pattern.test(line)) {
+				out.push(i);
+				break;
+			}
+		}
+	}
+	return out;
+}
+
 function stripTrailingComment(line: string): string {
 	let inString: string | null = null;
 	for (let j = 0; j < line.length; j++) {
@@ -343,7 +365,8 @@ export function createSymbolToolDefinition(
 			const text = buffer.toString("utf-8");
 			const lines = text.split("\n");
 			const kind = detectKind(absolutePath);
-			const declLine = findDeclarationLine(lines, name, kind);
+			const declLines = findAllDeclarationLines(lines, name, kind);
+			const declLine = declLines[0] ?? -1;
 			if (declLine < 0) {
 				throw new Error(`Symbol "${name}" not found in ${path}. Try grep for cross-file lookup.`);
 			}
@@ -376,6 +399,14 @@ export function createSymbolToolDefinition(
 				outputText = `${truncation.content}\n\n[symbol truncated at line ${lastShownDisplay} of ${endDisplay}; use read path="${path}" offset=${nextOffset} limit=${remainingLimit} for the rest]`;
 			} else {
 				outputText = truncation.content;
+			}
+			// The tool returns the FIRST declaration; if the name is declared more than
+			// once in this file (overloads, a method homonymous with a top-level symbol,
+			// re-declarations) signal it so the model can pick another — the description
+			// promises this fallback but findDeclarationLine alone can't detect it.
+			if (declLines.length > 1) {
+				const otherLines = declLines.map((i) => i + 1).join(", ");
+				outputText += `\n\n[symbol "${name}" has ${declLines.length} declarations in this file at lines ${otherLines}; showing the first — use read with offset to pick another, or grep for cross-file lookup]`;
 			}
 			return {
 				content: [{ type: "text", text: outputText }] as (TextContent | ImageContent)[],

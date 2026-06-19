@@ -280,9 +280,39 @@ export function createAstEditToolDefinition(
 				};
 			}
 
-			// Default: apply with --update-all.
-			const args = [...baseArgs, "--update-all", target];
-			const res = await execAstGrep(binary, args, cwd, signal);
+			// Default: count BEFORE applying. The match count must be taken pre-edit —
+			// after --update-all the rewritten code no longer matches the original pattern,
+			// so a post-apply --json=stream always reports zero. Discover first, then apply.
+			const countRes = await execAstGrep(binary, [...baseArgs, "--json=stream", target], cwd, signal);
+			if (countRes.missing) {
+				return {
+					content: [{ type: "text" as const, text: AST_GREP_INSTALL_HINT }],
+					isError: true,
+					details: undefined,
+				};
+			}
+			if (countRes.code !== 0 && countRes.code !== 1) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: countRes.stderr.trim() || `ast-grep exited with code ${countRes.code}`,
+						},
+					],
+					isError: true,
+					details: undefined,
+				};
+			}
+			const matches = parseJsonStream<AstGrepRewriteMatch>(countRes.stdout);
+			const replacementCount = matches.length;
+			const fileCount = countFiles(matches);
+			if (replacementCount === 0) {
+				return {
+					content: [{ type: "text" as const, text: "No matches found" }],
+					details: { replacementCount: 0, fileCount: 0 },
+				};
+			}
+			const res = await execAstGrep(binary, [...baseArgs, "--update-all", target], cwd, signal);
 			if (res.missing) {
 				return {
 					content: [{ type: "text" as const, text: AST_GREP_INSTALL_HINT }],
@@ -297,20 +327,10 @@ export function createAstEditToolDefinition(
 					details: undefined,
 				};
 			}
-			// ast-grep --update-all prints a human summary to stderr/stdout. Try to extract counts from
-			// stderr; otherwise fall back to a generic success message. Run a follow-up --json=stream
-			// to surface concrete numbers; this is cheap because patterns are usually localized.
-			const summaryRes = await execAstGrep(binary, [...baseArgs, "--json=stream", target], cwd, signal);
-			const matches = summaryRes.missing ? [] : parseJsonStream(summaryRes.stdout);
-			const replacementCount = matches.length;
-			const fileCount = countFiles(matches);
-			// After --update-all the second pass shows zero remaining matches (the rewrite already
-			// happened). That makes the count unreliable. Surface what the apply step itself printed
-			// when we have it.
+			// Prefer ast-grep's own human summary for the text; details carry the accurate
+			// pre-edit counts computed above.
 			const reportedFromCli = res.stdout.trim() || res.stderr.trim();
-			const text = reportedFromCli
-				? reportedFromCli
-				: `Applied ${replacementCount} replacement(s) in ${fileCount} file(s).`;
+			const text = reportedFromCli || `Applied ${replacementCount} replacement(s) in ${fileCount} file(s).`;
 			return {
 				content: [{ type: "text" as const, text }],
 				details: { replacementCount, fileCount },

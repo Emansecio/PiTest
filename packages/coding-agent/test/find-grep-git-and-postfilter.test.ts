@@ -204,6 +204,18 @@ describe("grep outputMode + multiline (locate-cheaply / cross-line patterns)", (
 		const multi = await runGrep({ pattern: "interface Foo \\{[^}]*bar", path: "src/multi.ts", multiline: true });
 		expect(multi).toContain("multi.ts");
 	});
+
+	it("multiline content mode prefixes each physical line with its own line number", async () => {
+		// The match spans lines 1-2; each physical line must carry its own `path:N:`
+		// prefix and correct number, not collapse into one mislabeled row.
+		writeFileSync(join(tempRoot, "src", "span.ts"), "interface Foo {\n  bar: string;\n}\n");
+		const out = await runGrep({ pattern: "interface Foo \\{[^}]*bar", path: "src/span.ts", multiline: true });
+		const matchLines = out.split("\n").filter((l) => /span\.ts:\d+:/.test(l));
+		// Two physical lines covered by the match → two prefixed rows, lines 1 and 2.
+		expect(matchLines.length).toBe(2);
+		expect(out).toContain("span.ts:1: interface Foo {");
+		expect(out).toContain("span.ts:2:   bar: string;");
+	});
 });
 
 describe("grep OOM guard: oversized matched files are not buffered for context", () => {

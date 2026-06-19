@@ -10,7 +10,7 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 const repoMapSchema = Type.Object(
 	{
 		path: Type.Optional(Type.String({ description: "Subdirectory to map (default: project root)." })),
-		max_files: Type.Optional(Type.Number({ description: "Cap on files scanned (default 200)." })),
+		max_files: Type.Optional(Type.Number({ description: "Cap on files scanned (default 1000)." })),
 	},
 	{ additionalProperties: false },
 );
@@ -30,9 +30,14 @@ export function createRepoMapToolDefinition(cwd: string): ToolDefinition<typeof 
 		parameters: repoMapSchema,
 		async execute(_toolCallId, args, signal) {
 			const root = args.path ? join(cwd, args.path) : cwd;
-			const files = await scanSourceFiles(root, { maxFiles: args.max_files ?? 200, signal });
+			const maxFiles = args.max_files ?? 1000;
+			const files = await scanSourceFiles(root, { maxFiles, signal });
+			// scanSourceFiles stops silently at maxFiles; surface that so the model does
+			// not conclude a symbol is absent merely because its file fell outside the cap.
+			const fileCapHit = files.length >= maxFiles;
 			const lines: string[] = ["Repo map (heuristic, not AST — verify with read/grep):"];
 			let bytes = lines[0]!.length;
+			let byteCapHit = false;
 			for (const file of files) {
 				if (signal?.aborted) break;
 				let content: string;
@@ -46,10 +51,16 @@ export function createRepoMapToolDefinition(cwd: string): ToolDefinition<typeof 
 				const line = `${relative(cwd, file)}: ${names.join(", ")}`;
 				bytes += line.length + 1;
 				if (bytes > MAX_BYTES) {
-					lines.push("… (truncated)");
+					byteCapHit = true;
+					lines.push("… (truncated: byte limit reached — pass path= to focus on a subdirectory)");
 					break;
 				}
 				lines.push(line);
+			}
+			if (fileCapHit && !byteCapHit) {
+				lines.push(
+					`… (file cap of ${maxFiles} reached; more files may exist — raise max_files or pass path= to narrow)`,
+				);
 			}
 			return { content: [{ type: "text" as const, text: lines.join("\n") }], details: undefined };
 		},

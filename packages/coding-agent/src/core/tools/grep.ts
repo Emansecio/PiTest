@@ -549,13 +549,20 @@ export function createGrepToolDefinition(
 										.replace(/\r\n/g, "\n")
 										.replace(/\r/g, "")
 										.replace(/\n$/, "");
-									const { text: truncatedText, wasTruncated } = truncateLine(
-										sanitized,
-										GREP_MAX_LINE_LENGTH,
-										match.matchStart,
-									);
-									if (wasTruncated) linesTruncated = true;
-									outputLines.push(`${relativePath}:${match.lineNumber}: ${truncatedText}`);
+									// A multiline match (multiline:true) carries a block spanning several
+									// physical lines in one event; line_number is only the first. Emit each
+									// physical line with its own `path:N:` prefix and per-line truncation so
+									// numbering stays correct and a long blob isn't sliced to one row.
+									const physicalLines = sanitized.split("\n");
+									for (let li = 0; li < physicalLines.length; li++) {
+										const { text: truncatedText, wasTruncated } = truncateLine(
+											physicalLines[li] ?? "",
+											GREP_MAX_LINE_LENGTH,
+											li === 0 ? match.matchStart : undefined,
+										);
+										if (wasTruncated) linesTruncated = true;
+										outputLines.push(`${relativePath}:${match.lineNumber + li}: ${truncatedText}`);
+									}
 								} else {
 									const block = await formatBlock(match.filePath, match.lineNumber, match.matchStart);
 									outputLines.push(...block);

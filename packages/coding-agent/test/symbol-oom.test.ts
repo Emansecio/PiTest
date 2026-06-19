@@ -28,6 +28,41 @@ describe("symbol tool OOM guard", () => {
 		expect(text).not.toContain("exceeds");
 	});
 
+	it("flags ambiguity when a name is declared more than once in the file", async () => {
+		const tool = createSymbolTool("/cwd", {
+			operations: {
+				access: async () => {},
+				stat: async () => ({ size: 128 }),
+				// `target` is declared twice (overload-like): the tool returns the first
+				// but must signal the other so the model doesn't edit the wrong one.
+				readFile: async () =>
+					Buffer.from(
+						"export function target(a: number): void;\nexport function target(a: string): void {\n\treturn;\n}\n",
+						"utf-8",
+					),
+			},
+		});
+		const res = await tool.execute("t", { path: "overloads.ts", name: "target" });
+		const c = res.content[0];
+		const text = c?.type === "text" ? c.text : "";
+		expect(text).toContain("2 declarations");
+		expect(text).toContain("lines 1, 2");
+	});
+
+	it("does not add an ambiguity note for a unique symbol", async () => {
+		const tool = createSymbolTool("/cwd", {
+			operations: {
+				access: async () => {},
+				stat: async () => ({ size: 64 }),
+				readFile: async () => Buffer.from("export function only() {\n\treturn 1;\n}\n", "utf-8"),
+			},
+		});
+		const res = await tool.execute("t", { path: "u.ts", name: "only" });
+		const c = res.content[0];
+		const text = c?.type === "text" ? c.text : "";
+		expect(text).not.toContain("declarations in this file");
+	});
+
 	it("refuses oversized files without buffering them", async () => {
 		let readFileCalled = false;
 		const tool = createSymbolTool("/cwd", {

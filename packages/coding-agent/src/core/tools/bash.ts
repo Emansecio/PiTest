@@ -46,7 +46,13 @@ const bashSchema = Type.Object(
 		timeout: Type.Optional(
 			Type.Number({
 				description:
-					"Timeout in seconds. Without a timeout (or 0) the command runs to completion. For servers and long-running processes, run them in the background (`cmd &`, `nohup cmd &`, `disown`) instead of holding the shell. Never leave a command that may block on interactive input without a timeout.",
+					"Timeout in seconds. Without a timeout (or 0) the command runs to completion. For servers and long-running processes, prefer `background: true` over holding the shell. Never leave a command that may block on interactive input without a timeout.",
+			}),
+		),
+		background: Type.Optional(
+			Type.Boolean({
+				description:
+					"Start the command in the background and return immediately with a job id (dev servers, watchers, long builds). Output up to the hand-off is returned; later output and the exit code are buffered under the id. A command that finishes (or errors) within the brief startup window returns normally instead. Preferred over `cmd &`, which yields an untracked process with no id.",
 			}),
 		),
 	},
@@ -150,6 +156,13 @@ export interface BashOperations {
 			 * detached process with no reachable handle.
 			 */
 			autoBackground?: boolean;
+			/**
+			 * Background the command on request: promote to a tracked job after a brief
+			 * startup window (so an immediate failure still surfaces in the foreground)
+			 * regardless of `autoBackground`/`timeout`. The caller MUST read
+			 * `promotedJobId`. Used by the `bash` tool's `background: true` param.
+			 */
+			backgroundImmediate?: boolean;
 		},
 	) => Promise<{ exitCode: number | null; promotedJobId?: string }>;
 }
@@ -162,6 +175,19 @@ export interface BashOperations {
 // Override with PIT_BASH_AUTO_BACKGROUND_SECONDS; set to 0 / a non-positive
 // value to disable auto-backgrounding (commands without a timeout run forever).
 const BASH_AUTO_BACKGROUND_SECONDS = 60;
+
+// Startup window for an explicit `background: true` request. The command is given
+// this long to fail fast (bad flag, missing binary) in the foreground; if it is
+// still running afterwards it is promoted to a tracked job. Override with
+// PIT_BASH_BACKGROUND_STARTUP_MS.
+const BASH_BACKGROUND_STARTUP_MS = 250;
+
+function resolveBackgroundStartupMs(): number {
+	const raw = process.env.PIT_BASH_BACKGROUND_STARTUP_MS;
+	if (raw === undefined || raw === "") return BASH_BACKGROUND_STARTUP_MS;
+	const n = Number(raw);
+	return Number.isFinite(n) && n >= 0 ? n : BASH_BACKGROUND_STARTUP_MS;
+}
 
 function resolveAutoBackgroundSeconds(): number {
 	const raw = process.env.PIT_BASH_AUTO_BACKGROUND_SECONDS;
@@ -252,7 +278,7 @@ function registerBackgroundJob(job: BashBackgroundJob): void {
  */
 export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
 	return {
-		exec: (command, cwd, { onData, signal, timeout, env, label, autoBackground }) => {
+		exec: (command, cwd, { onData, signal, timeout, env, label, autoBackground, backgroundImmediate }) => {
 			return new Promise((resolve, reject) => {
 				const { shell, args } = getShellConfig(options?.shellPath);
 				if (!existsSync(cwd)) {
@@ -364,7 +390,12 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					resolve({ exitCode: null, promotedJobId: id });
 				};
 
-				if (autoBgSeconds > 0 && (timeout === undefined || timeout <= 0)) {
+				if (backgroundImmediate) {
+					// Explicit background request: detach after a brief startup window so an
+					// immediate failure still surfaces in the foreground. A command that
+					// finishes within the window resolves normally (close handler clears this).
+					autoBgHandle = setTimeout(promoteToBackground, resolveBackgroundStartupMs());
+				} else if (autoBgSeconds > 0 && (timeout === undefined || timeout <= 0)) {
 					autoBgHandle = setTimeout(promoteToBackground, autoBgSeconds * 1000);
 				}
 
@@ -783,7 +814,12 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 		prepareArguments: prepareBashArguments,
 		async execute(
 			_toolCallId,
-			{ command, timeout, cwd: cwdArg }: { command: string; timeout?: number; cwd?: string },
+			{
+				command,
+				timeout,
+				cwd: cwdArg,
+				background,
+			}: { command: string; timeout?: number; cwd?: string; background?: boolean },
 			signal?: AbortSignal,
 			onUpdate?,
 			_ctx?,
@@ -897,6 +933,9 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 						// returned message), so it opts IN to auto-backgrounding. The user `!`
 						// path (bash-executor) does not read it and therefore leaves it OFF.
 						autoBackground: true,
+						// Explicit `background: true` detaches right after startup instead of
+						// waiting out the auto-background threshold.
+						backgroundImmediate: background === true,
 					});
 					exitCode = result.exitCode;
 					promotedJobId = result.promotedJobId;

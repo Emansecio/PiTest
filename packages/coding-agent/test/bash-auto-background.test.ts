@@ -212,6 +212,69 @@ describe("bash auto-background: promote on threshold instead of kill", () => {
 	);
 
 	it.skipIf(!BASH_AVAILABLE)(
+		"explicit backgroundImmediate detaches a long command after the startup window, returning a handle",
+		async () => {
+			// Small startup window: `sleep 5` is still running after it, so it promotes
+			// fast — completion (5s) cannot be what settles this.
+			process.env.PIT_BASH_BACKGROUND_STARTUP_MS = "150";
+			const ops = createLocalBashOperations();
+			const start = Date.now();
+			const { exitCode, promotedJobId } = await ops.exec("sleep 5", process.cwd(), {
+				autoBackground: true,
+				backgroundImmediate: true,
+				onData: () => undefined,
+			});
+			expect(Date.now() - start).toBeLessThan(3_000);
+			expect(exitCode).toBeNull();
+			expect(promotedJobId).toBeTruthy();
+			expect(getBashBackgroundJob(promotedJobId as string)?.exited).toBe(false);
+			delete process.env.PIT_BASH_BACKGROUND_STARTUP_MS;
+		},
+		15_000,
+	);
+
+	it.skipIf(!BASH_AVAILABLE)(
+		"a background command that finishes within the startup window returns normally (not promoted)",
+		async () => {
+			// Generous startup window so the sub-second `echo` completes inside it and
+			// resolves with a real exit code instead of detaching.
+			process.env.PIT_BASH_BACKGROUND_STARTUP_MS = "5000";
+			const ops = createLocalBashOperations();
+			const { exitCode, promotedJobId } = await ops.exec("echo hi", process.cwd(), {
+				autoBackground: true,
+				backgroundImmediate: true,
+				onData: () => undefined,
+			});
+			expect(exitCode).toBe(0);
+			expect(promotedJobId).toBeUndefined();
+			expect(listBashBackgroundJobs()).toHaveLength(0);
+			delete process.env.PIT_BASH_BACKGROUND_STARTUP_MS;
+		},
+		15_000,
+	);
+
+	it.skipIf(!BASH_AVAILABLE)(
+		"end-to-end: bash tool with background:true returns the 'promoted to background id=' message without throwing",
+		async () => {
+			process.env.PIT_BASH_BACKGROUND_STARTUP_MS = "150";
+			const def = createBashToolDefinition(process.cwd());
+			const ctx = {} as Parameters<typeof def.execute>[4];
+			const result = (await def.execute(
+				"call-bg-explicit",
+				{ command: "sleep 5", background: true },
+				undefined,
+				undefined,
+				ctx,
+			)) as { content: Array<{ type: string; text?: string }> };
+			const text = result.content[0]?.text ?? "";
+			expect(text).toMatch(/promoted to background id=/i);
+			expect(listBashBackgroundJobs()).toHaveLength(1);
+			delete process.env.PIT_BASH_BACKGROUND_STARTUP_MS;
+		},
+		15_000,
+	);
+
+	it.skipIf(!BASH_AVAILABLE)(
 		"WITHOUT autoBackground opt-in (the user `!` path), a long command is NOT silently detached — it runs to completion",
 		async () => {
 			// Regression guard: the user `!` path goes through executeBashWithOperations,
