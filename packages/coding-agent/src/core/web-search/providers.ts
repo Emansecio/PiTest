@@ -7,6 +7,8 @@
  * auto mode but throw a clear error when the user selects them explicitly.
  */
 
+import { sleep } from "../../utils/sleep.ts";
+
 export interface SearchHit {
 	title: string;
 	url: string;
@@ -34,28 +36,51 @@ function clampLimit(limit: number, max: number): number {
 }
 
 const FETCH_TIMEOUT_MS = 10_000;
+/** Max retries on HTTP 429 before giving up on this provider (the chain then falls through). */
+const MAX_429_RETRIES = 2;
+/** Base backoff between 429 retries; doubled per attempt, capped, or overridden by Retry-After. */
+const RETRY_BASE_MS = 500;
+const RETRY_MAX_MS = 5_000;
 
 async function fetchJson(url: string, init: RequestInit, signal?: AbortSignal): Promise<unknown> {
 	// Per-request timeout: without it a black-hole provider hangs web_search
 	// indefinitely and stalls the (serial) fallback chain — the global undici
 	// dispatcher is configured with bodyTimeout:0, so this is the only backstop.
-	// Compose with any caller signal so an external abort still wins.
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+	// Compose with any caller signal so an external abort still wins. On HTTP 429
+	// we back off and retry (honoring Retry-After) instead of immediately failing
+	// over to the next provider, which would burn the chain on a transient limit.
 	const external = signal ?? init.signal ?? undefined;
-	if (external) {
-		if (external.aborted) controller.abort();
-		else external.addEventListener("abort", () => controller.abort(), { once: true });
-	}
-	try {
-		const res = await fetch(url, { ...init, signal: controller.signal });
-		if (!res.ok) {
-			const text = await res.text().catch(() => "");
-			throw new Error(`HTTP ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+	for (let attempt = 0; ; attempt++) {
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+		const onExternalAbort = () => controller.abort();
+		if (external) {
+			if (external.aborted) controller.abort();
+			else external.addEventListener("abort", onExternalAbort, { once: true });
 		}
-		return (await res.json()) as unknown;
-	} finally {
-		clearTimeout(timer);
+		let backoffMs = -1;
+		try {
+			const res = await fetch(url, { ...init, signal: controller.signal });
+			if (res.status === 429 && attempt < MAX_429_RETRIES && !external?.aborted) {
+				const retryAfter = Number(res.headers.get("retry-after"));
+				backoffMs =
+					Number.isFinite(retryAfter) && retryAfter > 0
+						? Math.min(retryAfter * 1000, RETRY_MAX_MS)
+						: Math.min(RETRY_BASE_MS * 2 ** attempt, RETRY_MAX_MS);
+			} else {
+				if (!res.ok) {
+					const text = await res.text().catch(() => "");
+					throw new Error(`HTTP ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+				}
+				return (await res.json()) as unknown;
+			}
+		} finally {
+			clearTimeout(timer);
+			if (external) external.removeEventListener("abort", onExternalAbort);
+		}
+		// 429 with retries left: per-attempt timer/listener are already cleared
+		// above, so the backoff sleep is governed only by the external signal.
+		await sleep(backoffMs, external);
 	}
 }
 

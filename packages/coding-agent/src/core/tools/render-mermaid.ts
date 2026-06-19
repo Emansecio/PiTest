@@ -98,7 +98,15 @@ function stripComment(line: string): string {
  * Try to parse a Mermaid flowchart. Returns null when the source is too
  * complex or doesn't match the simple grammar.
  */
+/** Reject oversized diagrams (fall back to a fenced block) before the superlinear layout. */
+const MAX_MERMAID_SOURCE_BYTES = 50_000;
+const MAX_MERMAID_NODES = 500;
+const MAX_MERMAID_EDGES = 1000;
+
 function tryParse(source: string): ParsedDiagram | null {
+	// Oversized source: bail to the fenced-block fallback instead of parsing and
+	// laying out a huge graph (the layout is superlinear in node/edge count).
+	if (source.length > MAX_MERMAID_SOURCE_BYTES) return null;
 	const rawLines = source.split(/\r?\n/);
 	const lines: string[] = [];
 	for (const raw of rawLines) {
@@ -133,6 +141,8 @@ function tryParse(source: string): ParsedDiagram | null {
 	}
 
 	if (nodes.size === 0 && edges.length === 0) return null;
+	// Too many nodes/edges: fall back rather than run the superlinear layout.
+	if (nodes.size > MAX_MERMAID_NODES || edges.length > MAX_MERMAID_EDGES) return null;
 
 	return { direction, nodes, edges };
 }

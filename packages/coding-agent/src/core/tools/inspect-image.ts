@@ -8,7 +8,7 @@
  */
 
 import { constants } from "node:fs";
-import { access as fsAccess, readFile as fsReadFile } from "node:fs/promises";
+import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { basename, isAbsolute, resolve as resolvePath } from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import type { ImageContent, Model, TextContent } from "@pit/ai";
@@ -19,6 +19,12 @@ import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { formatSize } from "./truncate.ts";
+
+/** Largest image file we will load into memory; above this, fail fast and tell the model to downscale. */
+const MAX_IMAGE_FILE_BYTES = 25 * 1024 * 1024;
+/** Largest base64 payload we will attach; above this providers reject the image, so error instead of sending. */
+const MAX_ATTACH_BASE64_BYTES = 7 * 1024 * 1024;
 
 const inspectImageSchema = Type.Object(
 	{
@@ -112,6 +118,23 @@ export function createInspectImageToolDefinition(
 					details: undefined,
 				};
 			}
+			try {
+				const fileSize = (await fsStat(resolvedPath)).size;
+				if (fileSize > MAX_IMAGE_FILE_BYTES) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `inspect_image error: ${basename(resolvedPath)} is ${formatSize(fileSize)}, exceeds the ${formatSize(MAX_IMAGE_FILE_BYTES)} limit. Downscale or crop it first (e.g. via bash) before inspecting.`,
+							},
+						],
+						isError: true,
+						details: undefined,
+					};
+				}
+			} catch {
+				// stat failed — fall through; fsReadFile below surfaces the real error.
+			}
 			const buffer = await fsReadFile(resolvedPath);
 			const base64 = buffer.toString("base64");
 
@@ -125,6 +148,19 @@ export function createInspectImageToolDefinition(
 					finalMime = resized.mimeType;
 					dimensionNote = formatDimensionNote(resized);
 				}
+			}
+
+			if (Buffer.byteLength(finalData, "utf8") > MAX_ATTACH_BASE64_BYTES) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `inspect_image error: ${basename(resolvedPath)} is too large to attach (${formatSize(Buffer.byteLength(finalData, "utf8"))} encoded)${autoResize ? " and could not be downscaled" : " (auto-resize is off)"}. Crop or downscale it first.`,
+						},
+					],
+					isError: true,
+					details: undefined,
+				};
 			}
 
 			const fileLabel = basename(resolvedPath);

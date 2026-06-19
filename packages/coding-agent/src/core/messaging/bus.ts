@@ -16,6 +16,12 @@ export const DEFAULT_MESSAGE_TIMEOUT_MS = 120_000;
 /** Cap on the in-memory activity log (consumed by the transcript relay). */
 const MAX_ACTIVITY = 200;
 
+/**
+ * Per-message clip for the activity-log preview only — the recipient always gets
+ * the full message; this just bounds what the transcript relay retains/shows.
+ */
+const ACTIVITY_MESSAGE_CLIP = 500;
+
 function toPeerInfo(p: AgentParticipant): PeerInfo {
 	return { id: p.id, displayName: p.displayName, kind: p.kind, parentId: p.parentId, status: p.status };
 }
@@ -167,7 +173,7 @@ export class AgentMessageBus {
 		const activity: MessageActivity = {
 			from,
 			to,
-			message: message.length > 200 ? `${message.slice(0, 199)}…` : message,
+			message: message.length > ACTIVITY_MESSAGE_CLIP ? `${message.slice(0, ACTIVITY_MESSAGE_CLIP - 1)}…` : message,
 			mode: awaitReply ? "reply" : "notify",
 			delivered: result.delivered,
 			replies: result.replies.length,
