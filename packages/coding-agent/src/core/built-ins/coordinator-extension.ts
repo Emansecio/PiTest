@@ -49,6 +49,8 @@ interface PendingTask {
 	handle: string;
 	status: "running" | "done" | "error";
 	promise: Promise<void>;
+	/** Abort controller for the detached run, so session teardown can stop it. */
+	controller: AbortController;
 	result?: string;
 	error?: string;
 	/** True once the result was re-injected into the chat, so poll/join don't repeat the payload. */
@@ -874,6 +876,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						handle,
 						status: "running",
 						promise: Promise.resolve(),
+						controller,
 					};
 					// Capture the live Agent so a drop/abort leaves a resumable transcript.
 					let capturedAgent: Agent | undefined;
@@ -1163,5 +1166,22 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 
 	return (pi: ExtensionAPI) => {
 		pi.registerTool(makeTaskTool(0));
+		// On session teardown (/new, /fork, switchSession, /quit) abort any detached
+		// spawns so they stop burning tokens and writing to a now-orphaned worktree.
+		// Worktree paths are UUID-unique (no cross-session corruption), so after a short
+		// grace we stop blocking teardown even if a queued spawn hasn't settled yet.
+		// pi.on is optional-called: test stubs pass { registerTool } without `.on`.
+		pi.on?.("session_shutdown", async () => {
+			const inflight: Array<Promise<void>> = [];
+			for (const e of pending.values()) {
+				if (e.status === "running") {
+					e.controller.abort(new Error("aborted: session teardown"));
+					inflight.push(e.promise.catch(() => {}));
+				}
+			}
+			if (inflight.length === 0) return;
+			const grace = new Promise<void>((r) => setTimeout(r, 1500));
+			await Promise.race([Promise.all(inflight), grace]);
+		});
 	};
 }

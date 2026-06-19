@@ -787,6 +787,10 @@ export class AgentSession {
 	// Guards against re-entering the goal auto-continuation loop from within a
 	// continuation prompt.
 	private _inGoalContinuation = false;
+	// Set as the first synchronous step of dispose(). An orphaned subagent can settle
+	// AFTER the session is torn down; _deliverAsyncResult checks this to drop the late
+	// result instead of mutating a dead session (re-injecting a phantom turn).
+	private _disposed = false;
 	// Raised by interrupt() (Esc) and cleared when the next user prompt starts.
 	// Makes the goal auto-continuation loop and the verification gate stop
 	// re-dispatching the agent after the user cancels mid-task — without it, Esc
@@ -2620,6 +2624,9 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	async dispose(): Promise<void> {
+		// First synchronous step: mark disposed so a subagent that settles during/after
+		// teardown is dropped by _deliverAsyncResult instead of mutating a dead session.
+		this._disposed = true;
 		// Cancel any in-flight verification check so its child process does not keep
 		// holding the session cwd (Windows rmSync EBUSY in tests).
 		this._verificationAbort?.abort();
@@ -3258,6 +3265,12 @@ export class AgentSession {
 	// =========================================================================
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+		// Drain any in-flight background/predictive compaction before starting ANY turn.
+		// The compaction pipeline reassigns agent.state.messages outside runWithLifecycle;
+		// a turn started concurrently (notably from _deliverAsyncResult and sendCustomMessage,
+		// which enter here without going through _promptOnce) would clobber/lose messages.
+		// Idempotent no-op when there is no background compaction.
+		await this._awaitBackgroundCompaction();
 		try {
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
@@ -3468,6 +3481,10 @@ export class AgentSession {
 	 * PIT_NO_ASYNC_REINJECT disabled re-injection.
 	 */
 	_deliverAsyncResult(handle: string, text: string, status: "done" | "error"): boolean {
+		// Session torn down: an orphaned subagent settled late. Drop it without mutating
+		// dead state. Return true so the coordinator marks the handle delivered (poll/join
+		// won't repeat) — false is reserved for the PIT_NO_ASYNC_REINJECT kill-switch.
+		if (this._disposed) return true;
 		this._emit({ type: "subagent_complete", handle, status });
 		if (isTruthyEnvFlag(process.env.PIT_NO_ASYNC_REINJECT)) return false;
 		const message: AgentMessage = {
@@ -5110,6 +5127,13 @@ export class AgentSession {
 			contextTokens = calculateContextTokens(assistantMessage.usage);
 		}
 		if (shouldCompact(contextTokens, contextWindow, settings, this._lastCompactionDeficit)) {
+			// Serialize hard compaction. Drain any predictive compaction still in flight
+			// (avoids a second _runAutoCompaction overwriting _autoCompactionAbortController
+			// and orphaning the first), and cede if a manual compaction or a branch-summary
+			// is already rewriting agent.state.messages/leaf (isCompacting covers both) —
+			// the overflow path on the next turn is the safety net.
+			if (this._backgroundCompactionPromise) await this._awaitBackgroundCompaction();
+			if (this.isCompacting) return false;
 			// Same reserve `shouldCompact` uses, via the shared helper (was a
 			// hand-inlined copy that drifted from computeDynamicReserve).
 			const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);

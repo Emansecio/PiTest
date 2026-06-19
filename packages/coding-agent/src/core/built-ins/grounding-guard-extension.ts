@@ -119,7 +119,7 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 			return names;
 		};
 
-		pi.on("tool_call", async (event) => {
+		pi.on("tool_call", async (event, ctx) => {
 			try {
 				if (isGroundingGuardDisabled()) return undefined;
 				if (event.toolName !== "debug" && event.toolName !== "lsp") return undefined;
@@ -130,6 +130,11 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 					{
 						indexLookup,
 						lspResolve,
+						// Run signal so ESC interrupts a slow workspace/symbol mid-guard (the
+						// LSP chain already honors it; only the wiring was dropping it). Optional
+						// chaining is load-bearing: subagent-guards invokes the handler with
+						// ctx=undefined — `ctx.signal` would throw and silently no-op the guard.
+						signal: ctx?.signal,
 						fuzzy: suggestClosest,
 						fuzzyN: suggestClosestN,
 						maxDistance: GROUNDING_GUARD_DEFAULTS.maxDistance,
