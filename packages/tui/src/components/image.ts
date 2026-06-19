@@ -57,6 +57,11 @@ export class Image implements Component {
 		this.cachedWidth = undefined;
 	}
 
+	private renderFallback(): string[] {
+		const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
+		return [this.theme.fallbackColor(fallback)];
+	}
+
 	render(width: number): string[] {
 		if (this.cachedLines && this.cachedWidth === width) {
 			return this.cachedLines;
@@ -110,12 +115,10 @@ export class Image implements Component {
 					lines.push(moveUp + result.sequence);
 				}
 			} else {
-				const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
-				lines = [this.theme.fallbackColor(fallback)];
+				lines = this.renderFallback();
 			}
 		} else {
-			const fallback = imageFallback(this.mimeType, this.dimensions, this.options.filename);
-			lines = [this.theme.fallbackColor(fallback)];
+			lines = this.renderFallback();
 		}
 
 		this.cachedLines = lines;

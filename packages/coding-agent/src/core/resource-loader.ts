@@ -11,7 +11,7 @@ import { time } from "./timings.js";
 export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
-import { canonicalizePath, isLocalPath } from "../utils/paths.ts";
+import { canonicalizePath, isLocalPath, isUnderPath } from "../utils/paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.ts";
 import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.ts";
@@ -822,13 +822,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		];
 
 		for (const root of agentRoots) {
-			if (this.isUnderPath(normalizedPath, root)) {
+			if (isUnderPath(normalizedPath, root)) {
 				return { path: filePath, source: "local", scope: "user", origin: "top-level", baseDir: root };
 			}
 		}
 
 		for (const root of projectRoots) {
-			if (this.isUnderPath(normalizedPath, root)) {
+			if (isUnderPath(normalizedPath, root)) {
 				return { path: filePath, source: "local", scope: "project", origin: "top-level", baseDir: root };
 			}
 		}
@@ -1059,15 +1059,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 
 		return undefined;
-	}
-
-	private isUnderPath(target: string, root: string): boolean {
-		const normalizedRoot = resolve(root);
-		if (target === normalizedRoot) {
-			return true;
-		}
-		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-		return target.startsWith(prefix);
 	}
 
 	private detectExtensionConflicts(extensions: Extension[]): Array<{ path: string; message: string }> {

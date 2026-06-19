@@ -1,8 +1,9 @@
 import { existsSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "path";
+import { basename, dirname, isAbsolute, join, resolve } from "path";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
+import { isUnderPath } from "../utils/paths.ts";
 import { createMtimeParseCache } from "./mtime-cache.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
@@ -220,15 +221,6 @@ export function loadPromptTemplates(options: LoadPromptTemplatesOptions): Prompt
 
 	const globalPromptsDir = options.agentDir ? join(options.agentDir, "prompts") : resolvedAgentDir;
 	const projectPromptsDir = resolve(resolvedCwd, CONFIG_DIR_NAME, "prompts");
-
-	const isUnderPath = (target: string, root: string): boolean => {
-		const normalizedRoot = resolve(root);
-		if (target === normalizedRoot) {
-			return true;
-		}
-		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-		return target.startsWith(prefix);
-	};
 
 	const getSourceInfo = (resolvedPath: string): SourceInfo => {
 		if (isUnderPath(resolvedPath, globalPromptsDir)) {

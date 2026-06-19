@@ -349,7 +349,7 @@ function buildSessionOptions(
 	if (!options.model && !hasExistingSession) {
 		const roleSettings = settingsManager.getModelRoleSettings();
 		const isRoleConfigured = role !== "default" || roleSettings.modelRoles?.default !== undefined;
-		if (role !== "default" || isRoleConfigured) {
+		if (isRoleConfigured) {
 			const availableModels = modelRegistry.getAll();
 			// When `--smol`/`--slow`/`--plan` are given a value (e.g.
 			// `--smol claude-sonnet-4-7`), pass it as `cliOverride` so the role's

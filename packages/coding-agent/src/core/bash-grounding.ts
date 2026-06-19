@@ -29,6 +29,7 @@
  * (readScripts / fuzzy), each fail-open, wired by the thin adapter.
  */
 
+import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { parseSimpleArgv } from "./simple-argv.ts";
 
 // ============================================================================
@@ -135,10 +136,7 @@ export function groundBashScript(input: BashGroundingInput, deps: BashGroundingD
 
 /** Opt-out: PIT_NO_BASH_GROUNDING disables bash-script grounding entirely (FAIL-OPEN). */
 export function isBashGroundingDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const value = env.PIT_NO_BASH_GROUNDING;
-	if (!value) return false;
-	const v = value.toLowerCase();
-	return v === "1" || v === "true" || v === "yes";
+	return isTruthyEnvFlag(env.PIT_NO_BASH_GROUNDING);
 }
 
 /* ============================================================================

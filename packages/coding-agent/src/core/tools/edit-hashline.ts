@@ -22,6 +22,7 @@ import {
 	type HashlineEdit,
 	HashlineEditError,
 } from "./edit-hashline-diff.ts";
+import { getEditHeaderBg, setEditPreview } from "./edit-preview-shared.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getFilePathArg, invalidArgText, shortenPath } from "./render-utils.ts";
@@ -125,22 +126,6 @@ function getRenderablePreviewInput(args: RenderableArgs | undefined): { path: st
 	return { path, edits: args.edits };
 }
 
-function setEditPreview(component: CallComponent, preview: HashlineEditPreview, argsKey: string | undefined): boolean {
-	const current = component.preview;
-	const changed =
-		current === undefined ||
-		("error" in current && "error" in preview
-			? current.error !== preview.error
-			: "error" in current !== "error" in preview) ||
-		(!("error" in current) &&
-			!("error" in preview) &&
-			(current.diff !== preview.diff || current.firstChangedLine !== preview.firstChangedLine));
-	component.preview = preview;
-	component.previewArgsKey = argsKey;
-	component.previewPending = false;
-	return changed;
-}
-
 function prepareArguments(input: unknown): EditHashlineToolInput {
 	if (!input || typeof input !== "object") return input as EditHashlineToolInput;
 	let args = applyKeyAliases(input as Record<string, unknown>, PATH_KEY_ALIASES);
@@ -181,26 +166,13 @@ function formatCall(
 	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
 }
 
-function getHeaderBg(
-	preview: HashlineEditPreview | undefined,
-	settledError: boolean | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-): (text: string) => string {
-	if (preview) {
-		if ("error" in preview) return (text: string) => theme.bg("toolErrorBg", text);
-		return (text: string) => theme.bg("toolSuccessBg", text);
-	}
-	if (settledError) return (text: string) => theme.bg("toolErrorBg", text);
-	return (text: string) => theme.bg("toolPendingBg", text);
-}
-
 function buildCallComponent(
 	component: CallComponent,
 	args: RenderableArgs | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
 	cwd?: string,
 ): CallComponent {
-	component.setBgFn(getHeaderBg(component.preview, component.settledError, theme));
+	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
 	component.clear();
 	component.addChild(new Text(formatCall(args, theme, cwd), 0, 0));
 	if (component.preview) {

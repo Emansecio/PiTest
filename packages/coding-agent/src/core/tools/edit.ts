@@ -21,6 +21,7 @@ import {
 	restoreLineEndings,
 	stripBom,
 } from "./edit-diff.ts";
+import { getEditHeaderBg, setEditPreview } from "./edit-preview-shared.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { attachOmissionWarning } from "./lazy-omission-attach.ts";
 import { resolveToCwd } from "./path-utils.ts";
@@ -275,23 +276,6 @@ function formatEditResult(
 	return undefined;
 }
 
-function getEditHeaderBg(
-	preview: EditPreview | undefined,
-	settledError: boolean | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-): (text: string) => string {
-	if (preview) {
-		if ("error" in preview) {
-			return (text: string) => theme.bg("toolErrorBg", text);
-		}
-		return (text: string) => theme.bg("toolSuccessBg", text);
-	}
-	if (settledError) {
-		return (text: string) => theme.bg("toolErrorBg", text);
-	}
-	return (text: string) => theme.bg("toolPendingBg", text);
-}
-
 function buildEditCallComponent(
 	component: EditCallRenderComponent,
 	args: RenderableEditArgs | undefined,
@@ -319,26 +303,6 @@ function buildEditCallComponent(
 	component.addChild(new Spacer(1));
 	component.addChild(new Text(body, 0, 0));
 	return component;
-}
-
-function setEditPreview(
-	component: EditCallRenderComponent,
-	preview: EditPreview,
-	argsKey: string | undefined,
-): boolean {
-	const current = component.preview;
-	const changed =
-		current === undefined ||
-		("error" in current && "error" in preview
-			? current.error !== preview.error
-			: "error" in current !== "error" in preview) ||
-		(!("error" in current) &&
-			!("error" in preview) &&
-			(current.diff !== preview.diff || current.firstChangedLine !== preview.firstChangedLine));
-	component.preview = preview;
-	component.previewArgsKey = argsKey;
-	component.previewPending = false;
-	return changed;
 }
 
 export function createEditToolDefinition(

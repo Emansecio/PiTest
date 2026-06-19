@@ -22,6 +22,7 @@ import { join, resolve } from "node:path";
 import { recordDiagnostic, suggestClosest } from "@pit/ai";
 import { groundBashScript, isBashGroundingDisabled } from "../bash-grounding.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
+import { stableToolCallKey } from "./grounding-fire-once.ts";
 
 /** Read the `scripts` keys from the cwd's package.json. Any error -> [] (fail-open). */
 function readScriptsOf(cwd: string): string[] {
@@ -57,9 +58,7 @@ export function createBashGroundingExtension(options: { cwd: string }) {
 
 				const decision = groundBashScript({ command }, { readScripts, fuzzy: suggestClosest });
 				if (decision.action === "block") {
-					// Stable key (sorted top-level arg keys) so a verbatim re-issue with
-					// reordered keys still matches the fire-once escape.
-					const key = `${event.toolName}:${JSON.stringify(input, Object.keys(input).sort())}`;
+					const key = stableToolCallKey(event.toolName, input);
 					if (fired.has(key)) return undefined; // already advised once -> let it run
 					fired.add(key);
 					recordDiagnostic({

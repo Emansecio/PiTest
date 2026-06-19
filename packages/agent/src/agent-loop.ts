@@ -203,8 +203,10 @@ function makeZeroUsage() {
 	};
 }
 
-function buildFailureMessage(config: AgentLoopConfig, err: unknown): AssistantMessage {
-	const errorMessage = err instanceof Error ? err.message : String(err);
+// Assemble the canonical zero-usage error turn shared by every synthetic
+// failure path (sync-path rejection, TTSR-bail, turn-budget). Only the
+// `errorMessage` differs between call-sites; the rest of the shape is fixed.
+function buildErrorTurn(config: AgentLoopConfig, errorMessage: string): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text: "" }],
@@ -216,6 +218,11 @@ function buildFailureMessage(config: AgentLoopConfig, err: unknown): AssistantMe
 		timestamp: Date.now(),
 		usage: makeZeroUsage(),
 	} as AssistantMessage;
+}
+
+function buildFailureMessage(config: AgentLoopConfig, err: unknown): AssistantMessage {
+	const errorMessage = err instanceof Error ? err.message : String(err);
+	return buildErrorTurn(config, errorMessage);
 }
 
 /**
@@ -335,17 +342,10 @@ async function runLoop(
 				}
 				if (ttsrRetries >= MAX_TTSR_RETRIES_PER_TURN) {
 					// Bail: surface an aborted assistant message so the caller stops the turn.
-					message = {
-						role: "assistant",
-						content: [{ type: "text", text: "" }],
-						api: config.model.api,
-						provider: config.model.provider,
-						model: config.model.id,
-						stopReason: "error",
-						errorMessage: `[stop: ttsr] TTSR: exceeded ${MAX_TTSR_RETRIES_PER_TURN} retries (rule "${response.ttsr.name}")`,
-						timestamp: Date.now(),
-						usage: makeZeroUsage(),
-					} as AssistantMessage;
+					message = buildErrorTurn(
+						config,
+						`[stop: ttsr] TTSR: exceeded ${MAX_TTSR_RETRIES_PER_TURN} retries (rule "${response.ttsr.name}")`,
+					);
 					await emit({ type: "message_start", message });
 					await emit({ type: "message_end", message });
 					break;
@@ -441,17 +441,10 @@ async function runLoop(
  * loop with a clear, model- and user-visible reason instead of failing silently.
  */
 function buildTurnBudgetMessage(config: AgentLoopConfig, maxTurns: number): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text: "" }],
-		api: config.model.api,
-		provider: config.model.provider,
-		model: config.model.id,
-		stopReason: "error",
-		errorMessage: `[stop: turn-budget] Reached the turn budget of ${maxTurns} turns in a single run; stopping to avoid an unbounded tool-call loop.`,
-		timestamp: Date.now(),
-		usage: makeZeroUsage(),
-	} as AssistantMessage;
+	return buildErrorTurn(
+		config,
+		`[stop: turn-budget] Reached the turn budget of ${maxTurns} turns in a single run; stopping to avoid an unbounded tool-call loop.`,
+	);
 }
 
 /**

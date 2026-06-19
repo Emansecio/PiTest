@@ -25,7 +25,7 @@ import {
 	waitForProjectLoaded,
 } from "./client.ts";
 import { getServerForFile } from "./config.ts";
-import { applyWorkspaceEdit } from "./edits.ts";
+import { applyWorkspaceEdit, comparePosition } from "./edits.ts";
 import { sleep, throwIfAborted } from "./internal.ts";
 import { getConfig, getLspServers, isProjectAwareLspServer } from "./manager.ts";
 import { rawRequest, renameFile, runCapabilities, runDiagnostics, workspaceSymbols } from "./tool-actions.ts";
@@ -151,10 +151,6 @@ function clampTimeout(timeout: number | undefined): number {
 // =============================================================================
 // Location Normalization / Formatting
 // =============================================================================
-
-function comparePosition(a: Position, b: Position): number {
-	return a.line === b.line ? a.character - b.character : a.line - b.line;
-}
 
 function rangeContainsPosition(range: Location["range"], position: Position): boolean {
 	return comparePosition(range.start, position) <= 0 && comparePosition(position, range.end) <= 0;

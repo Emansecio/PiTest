@@ -1105,7 +1105,6 @@ export class SessionManager {
 
 	private _hasAssistantMessage = false;
 	private _writeQueue: string[] = [];
-	private _flushTimer: ReturnType<typeof setTimeout> | null = null;
 	private _draining: Promise<void> | null = null;
 	private _entriesOnlyCache: SessionEntry[] | null = null;
 	// Cache the built context per leaf. buildSessionContext() is called from
@@ -1199,10 +1198,6 @@ export class SessionManager {
 	}
 
 	async flushWrites(): Promise<void> {
-		if (this._flushTimer !== null) {
-			clearTimeout(this._flushTimer);
-			this._flushTimer = null;
-		}
 		await this._drainQueue();
 	}
 

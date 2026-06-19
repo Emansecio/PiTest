@@ -35,6 +35,7 @@
  * and intentionally NOT performed here.
  */
 
+import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import type { LivingRepoMap, RepoMapEntry } from "./repo-map/living-index.ts";
 
 // ============================================================================
@@ -425,10 +426,7 @@ export const GROUNDING_GUARD_DEFAULTS = {
 
 /** Opt-out: PIT_NO_GROUNDING (or legacy PIT_NO_GROUNDING_GUARD) disables the guard entirely (FAIL-OPEN). */
 export function isGroundingGuardDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const value = env.PIT_NO_GROUNDING || env.PIT_NO_GROUNDING_GUARD;
-	if (!value) return false;
-	const v = value.toLowerCase();
-	return v === "1" || v === "true" || v === "yes";
+	return isTruthyEnvFlag(env.PIT_NO_GROUNDING || env.PIT_NO_GROUNDING_GUARD);
 }
 
 /* ============================================================================

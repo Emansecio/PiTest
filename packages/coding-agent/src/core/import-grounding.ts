@@ -41,6 +41,7 @@
 
 import { builtinModules } from "node:module";
 import { dirname, resolve as resolvePath } from "node:path";
+import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 
 // ============================================================================
 // Public verdict / input shapes
@@ -761,10 +762,7 @@ export function groundImports(input: ImportGroundingInput, deps: ImportGrounding
 
 /** Opt-out: PIT_NO_IMPORT_GROUNDING disables import grounding entirely (FAIL-OPEN). */
 export function isImportGroundingDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	const value = env.PIT_NO_IMPORT_GROUNDING;
-	if (!value) return false;
-	const v = value.toLowerCase();
-	return v === "1" || v === "true" || v === "yes";
+	return isTruthyEnvFlag(env.PIT_NO_IMPORT_GROUNDING);
 }
 
 /* ============================================================================

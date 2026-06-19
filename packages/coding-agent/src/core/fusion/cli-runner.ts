@@ -122,16 +122,6 @@ export function buildClaudeArgs(model: string, lean: boolean): string[] {
 	return args;
 }
 
-/** claude -p --output-format json emits one JSON object; the final text is `.result`. */
-export function parseClaudeResult(stdout: string): string {
-	try {
-		const obj = JSON.parse(stdout) as { result?: unknown };
-		return typeof obj.result === "string" ? obj.result : "";
-	} catch {
-		return "";
-	}
-}
-
 /**
  * On failure, `claude -p --output-format json` STILL emits its JSON envelope on
  * stdout (exit code is non-zero, but `is_error` is true and `.result` carries the

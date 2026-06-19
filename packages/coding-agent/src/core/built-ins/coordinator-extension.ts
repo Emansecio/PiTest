@@ -49,7 +49,6 @@ interface PendingTask {
 	handle: string;
 	status: "running" | "done" | "error";
 	promise: Promise<void>;
-	controller: AbortController;
 	result?: string;
 	error?: string;
 	/** True once the result was re-injected into the chat, so poll/join don't repeat the payload. */
@@ -461,6 +460,42 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			: capped.content;
 	}
 
+	/** Caps a resume/continue body to the subagent output budget, appending a truncation note. */
+	function cappedBody(output: string): string {
+		const capped = truncateTail(output, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
+		return capped.truncated
+			? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}]`
+			: capped.content;
+	}
+
+	/**
+	 * Wires a fresh ESC (parent abort) to abort the live Agent during a
+	 * resume/continue follow-up. Returns a cleanup that removes the listener.
+	 */
+	function wireAbort(agent: Agent, signal: AbortSignal | undefined): () => void {
+		if (!signal) return () => {};
+		const onAbort = () => agent.abort();
+		if (signal.aborted) agent.abort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+		return () => signal.removeEventListener("abort", onAbort);
+	}
+
+	/**
+	 * The dependency object handed to every `spawnSubagent` call — identical across
+	 * ops except for the tool catalog (`tools`) and the op-scoped `model`.
+	 */
+	function makeSpawnDeps(tools: AgentTool[], model: Model<any>) {
+		return {
+			registry,
+			model,
+			modelRegistry: options.modelRegistry,
+			availableTools: tools,
+			convertToLlm: options.convertToLlm ?? ((messages) => messages as never),
+			permissionChecker: options.permissionChecker,
+			skills: options.getSkills?.(),
+		};
+	}
+
 	/** op:"list" — summarize tracked subagents and live async handles. */
 	function listSubagents(): TaskOpResult {
 		const records = registry.list();
@@ -602,11 +637,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			agent.state.messages = messages.slice(0, -1);
 		}
 		// A fresh ESC during the resume aborts the same Agent (it stays resumable).
-		const onAbort = () => agent.abort();
-		if (signal) {
-			if (signal.aborted) agent.abort();
-			else signal.addEventListener("abort", onAbort, { once: true });
-		}
+		const cleanupAbort = wireAbort(agent, signal);
 		const text =
 			continuation?.trim() ||
 			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
@@ -622,7 +653,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				details: { handle: key, resumed: true },
 			};
 		} finally {
-			if (signal) signal.removeEventListener("abort", onAbort);
+			cleanupAbort();
 			releaseSlot();
 		}
 		if (agentEndedWithError(agent)) {
@@ -640,11 +671,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		}
 		resumable.delete(key);
 		void deleteResumeState(rcwd, key);
-		const output = extractAssistantText(agent.state.messages);
-		const capped = truncateTail(output, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
-		const body = capped.truncated
-			? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}]`
-			: capped.content;
+		const body = cappedBody(extractAssistantText(agent.state.messages));
 		return {
 			content: [{ type: "text" as const, text: body }],
 			isError: false,
@@ -693,11 +720,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		// A fresh ESC during the follow-up aborts this Agent; it stays continuable.
-		const onAbort = () => agent.abort();
-		if (signal) {
-			if (signal.aborted) agent.abort();
-			else signal.addEventListener("abort", onAbort, { once: true });
-		}
+		const cleanupAbort = wireAbort(agent, signal);
 		// Respect the concurrency cap: a follow-up is a live run like any spawn.
 		await acquireSlot();
 		try {
@@ -710,14 +733,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				details: { handle: key, continued: true },
 			};
 		} finally {
-			if (signal) signal.removeEventListener("abort", onAbort);
+			cleanupAbort();
 			releaseSlot();
 		}
-		const output = extractAssistantText(agent.state.messages);
-		const capped = truncateTail(output, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
-		const body = capped.truncated
-			? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}]`
-			: capped.content;
+		const body = cappedBody(extractAssistantText(agent.state.messages));
 		return {
 			content: [{ type: "text" as const, text: body }],
 			isError: false,
@@ -854,7 +873,6 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					const entry: PendingTask = {
 						handle,
 						status: "running",
-						controller,
 						promise: Promise.resolve(),
 					};
 					// Capture the live Agent so a drop/abort leaves a resumable transcript.
@@ -865,37 +883,26 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						await acquireSlot();
 						try {
 							options.onSubagentStart?.(handle);
-							const result = await spawnSubagent(
-								{
-									registry,
-									model,
-									modelRegistry: options.modelRegistry,
-									availableTools: baseChildTools,
-									convertToLlm: options.convertToLlm ?? ((messages) => messages as never),
-									permissionChecker: options.permissionChecker,
-									skills: options.getSkills?.(),
+							const result = await spawnSubagent(makeSpawnDeps(baseChildTools, model), {
+								prompt,
+								model: subModel,
+								thinkingLevel: subThinking,
+								systemPrompt: effSystemPrompt,
+								allowedTools: effAllowedTools,
+								maxTurns: max_turns,
+								signal: controller.signal,
+								resultSchema,
+								worktree: worktree as boolean | { branch?: string; cleanup?: "auto" | "keep" } | undefined,
+								timeoutMs: timeout_ms,
+								taskName: handle,
+								cwd,
+								depth: childDepth,
+								inheritSkills: inherit_skills,
+								onSubagentEvent: (info) => options.onSubagentProgress?.(handle, info),
+								onAgentReady: (agent) => {
+									capturedAgent = agent;
 								},
-								{
-									prompt,
-									model: subModel,
-									thinkingLevel: subThinking,
-									systemPrompt: effSystemPrompt,
-									allowedTools: effAllowedTools,
-									maxTurns: max_turns,
-									signal: controller.signal,
-									resultSchema,
-									worktree: worktree as boolean | { branch?: string; cleanup?: "auto" | "keep" } | undefined,
-									timeoutMs: timeout_ms,
-									taskName: handle,
-									cwd,
-									depth: childDepth,
-									inheritSkills: inherit_skills,
-									onSubagentEvent: (info) => options.onSubagentProgress?.(handle, info),
-									onAgentReady: (agent) => {
-										capturedAgent = agent;
-									},
-								},
-							);
+							});
 							// A drop that ended the turn on an error (without throwing) still
 							// leaves a resumable transcript — surface it as such, not "done".
 							if (capturedAgent && agentEndedWithError(capturedAgent) && !usedAutoWorktree) {
@@ -966,39 +973,28 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				await acquireSlot();
 				try {
 					options.onSubagentStart?.(runHandle);
-					const result = await spawnSubagent(
-						{
-							registry,
-							model,
-							modelRegistry: options.modelRegistry,
-							availableTools: childTools,
-							convertToLlm: options.convertToLlm ?? ((messages) => messages as never),
-							permissionChecker: options.permissionChecker,
-							skills: options.getSkills?.(),
+					const result = await spawnSubagent(makeSpawnDeps(childTools, model), {
+						prompt,
+						model: subModel,
+						thinkingLevel: subThinking,
+						systemPrompt: effSystemPrompt,
+						allowedTools: effAllowedTools,
+						maxTurns: max_turns,
+						signal,
+						resultSchema,
+						worktree: worktree as boolean | { branch?: string; cleanup?: "auto" | "keep" } | undefined,
+						timeoutMs: timeout_ms,
+						taskName: name ?? undefined,
+						cwd,
+						depth: childDepth,
+						inheritSkills: inherit_skills,
+						systemPromptSuffix,
+						onSubagentEvent: (info) => options.onSubagentProgress?.(runHandle, info),
+						onAgentReady: (agent) => {
+							capturedAgent = agent;
+							messagingReady?.(agent);
 						},
-						{
-							prompt,
-							model: subModel,
-							thinkingLevel: subThinking,
-							systemPrompt: effSystemPrompt,
-							allowedTools: effAllowedTools,
-							maxTurns: max_turns,
-							signal,
-							resultSchema,
-							worktree: worktree as boolean | { branch?: string; cleanup?: "auto" | "keep" } | undefined,
-							timeoutMs: timeout_ms,
-							taskName: name ?? undefined,
-							cwd,
-							depth: childDepth,
-							inheritSkills: inherit_skills,
-							systemPromptSuffix,
-							onSubagentEvent: (info) => options.onSubagentProgress?.(runHandle, info),
-							onAgentReady: (agent) => {
-								capturedAgent = agent;
-								messagingReady?.(agent);
-							},
-						},
-					);
+					});
 					const interrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
 					if (interrupted && capturedAgent && !usedAutoWorktree) {
 						await markResumable(runHandle, capturedAgent);
@@ -1103,29 +1099,18 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		// Respect the concurrency cap: a disk-resumed run is a live spawn.
 		await acquireSlot();
 		try {
-			const result = await spawnSubagent(
-				{
-					registry,
-					model,
-					modelRegistry: options.modelRegistry,
-					availableTools: childTools,
-					convertToLlm: options.convertToLlm ?? ((messages) => messages as never),
-					permissionChecker: options.permissionChecker,
-					skills: options.getSkills?.(),
-				},
-				{
-					prompt: text,
-					initialMessages: seed,
-					model: subModel,
-					thinkingLevel: state.thinkingLevel as ThinkingLevel | undefined,
-					systemPrompt: state.systemPrompt,
-					allowedTools: state.allowedTools,
-					signal,
-					cwd: state.cwd,
-					depth: state.depth,
-					taskName: key,
-				},
-			);
+			const result = await spawnSubagent(makeSpawnDeps(childTools, model), {
+				prompt: text,
+				initialMessages: seed,
+				model: subModel,
+				thinkingLevel: state.thinkingLevel as ThinkingLevel | undefined,
+				systemPrompt: state.systemPrompt,
+				allowedTools: state.allowedTools,
+				signal,
+				cwd: state.cwd,
+				depth: state.depth,
+				taskName: key,
+			});
 			await deleteResumeState(cwd, key);
 			const out = formatSpawnResult(result, undefined);
 			return {

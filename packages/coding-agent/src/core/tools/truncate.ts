@@ -73,7 +73,7 @@ export function formatSize(bytes: number): string {
 }
 
 /** Default: collapse a run of this many identical consecutive lines or more. */
-export const DEFAULT_COLLAPSE_MIN_RUN = 3;
+const DEFAULT_COLLAPSE_MIN_RUN = 3;
 
 /**
  * Collapse runs of identical consecutive lines to shrink verbose command output

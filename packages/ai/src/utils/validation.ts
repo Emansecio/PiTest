@@ -281,6 +281,11 @@ function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
 	return validator;
 }
 
+function formatSubschemaTypes(label: string, subs: JsonSchemaObject[]): string {
+	const types = subs.map((s) => (s.type as string) || "object");
+	return `${label}: [${types.join(", ")}]`;
+}
+
 function summarizeSchemaParams(schema: Tool["parameters"]): string {
 	if (!isJsonSchemaObject(schema) || !schema.properties) return "";
 	const required = new Set<string>((schema as any).required ?? []);
@@ -294,12 +299,10 @@ function summarizeSchemaParams(schema: Tool["parameters"]): string {
 			parts.push(`enum: ${JSON.stringify((prop as any).enum)}`);
 		}
 		if (prop.anyOf) {
-			const types = prop.anyOf.map((s) => (s.type as string) || "object");
-			parts.push(`anyOf: [${types.join(", ")}]`);
+			parts.push(formatSubschemaTypes("anyOf", prop.anyOf));
 		}
 		if (prop.oneOf) {
-			const types = prop.oneOf.map((s) => (s.type as string) || "object");
-			parts.push(`oneOf: [${types.join(", ")}]`);
+			parts.push(formatSubschemaTypes("oneOf", prop.oneOf));
 		}
 		if (required.has(key)) {
 			parts.push("(required)");

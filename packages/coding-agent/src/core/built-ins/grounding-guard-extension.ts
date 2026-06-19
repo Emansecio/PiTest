@@ -32,6 +32,7 @@ import { getConfig, getLspServers } from "../lsp/manager.ts";
 import type { SymbolInformation } from "../lsp/types.ts";
 import { filterWorkspaceSymbols } from "../lsp/utils.ts";
 import { getLivingRepoMap } from "../repo-map/living-index.ts";
+import { stableToolCallKey } from "./grounding-fire-once.ts";
 
 /** Per-server LSP ceiling: a pre-exec guard must not stall a tool call on a slow server. */
 const WORKSPACE_SYMBOL_TIMEOUT_MS = 8000;
@@ -148,9 +149,7 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 					return undefined;
 				}
 				if (decision.action === "block") {
-					// Stable key (sorted top-level arg keys) so a verbatim re-issue with
-					// reordered keys still matches the fire-once escape.
-					const key = `${event.toolName}:${JSON.stringify(input, Object.keys(input).sort())}`;
+					const key = stableToolCallKey(event.toolName, input);
 					if (fired.has(key)) return undefined; // already advised once -> let it run
 					fired.add(key);
 					recordDiagnostic({

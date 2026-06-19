@@ -410,10 +410,6 @@ export class TUI extends Container {
 		return this.fullRedrawCount;
 	}
 
-	getShowHardwareCursor(): boolean {
-		return this.showHardwareCursor;
-	}
-
 	setShowHardwareCursor(enabled: boolean): void {
 		if (this.showHardwareCursor === enabled) return;
 		this.showHardwareCursor = enabled;
@@ -597,10 +593,6 @@ export class TUI extends Container {
 		return () => {
 			this.inputListeners.delete(listener);
 		};
-	}
-
-	removeInputListener(listener: InputListener): void {
-		this.inputListeners.delete(listener);
 	}
 
 	private queryCellSize(): void {

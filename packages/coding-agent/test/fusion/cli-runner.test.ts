@@ -11,7 +11,6 @@ import {
 	inferCli,
 	type MemberProgress,
 	parseClaudeError,
-	parseClaudeResult,
 	providerForCli,
 	runPanelMember,
 	toClaudeModel,
@@ -102,11 +101,6 @@ describe("fusion cli-runner pure helpers", () => {
 			"--setting-sources",
 			"project",
 		]);
-	});
-
-	it("parses the claude json result, empty on garbage", () => {
-		expect(parseClaudeResult(JSON.stringify({ result: "hello" }))).toBe("hello");
-		expect(parseClaudeResult("not json")).toBe("");
 	});
 
 	it("extracts the human cause from a claude error envelope", () => {

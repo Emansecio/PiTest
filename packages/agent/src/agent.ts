@@ -247,9 +247,10 @@ export class Agent {
 	/**
 	 * Subscribe to agent lifecycle events.
 	 *
-	 * Listener promises are awaited in subscription order and are included in
-	 * the current run's settlement. Listeners also receive the active abort
-	 * signal for the current run.
+	 * Listener promises run in parallel (via `Promise.all`) and all settle
+	 * before the next event is dispatched; execution order between listeners is
+	 * not observable. They are included in the current run's settlement.
+	 * Listeners also receive the active abort signal for the current run.
 	 *
 	 * `agent_end` is the final emitted event for a run, but the agent does not
 	 * become idle until all awaited listeners for that event have settled.

@@ -58,6 +58,21 @@ export function formatPathRelativeToCwdOrAbsolute(filePath: string, cwd: string)
 }
 
 /**
+ * Returns true if `target` is `root` itself or lies underneath it.
+ * `root` is resolved to absolute first; containment is a separator-aware
+ * prefix match so that "/a/bc" is NOT considered under "/a/b".
+ * `target` is expected to already be absolute/normalized by the caller.
+ */
+export function isUnderPath(target: string, root: string): boolean {
+	const normalizedRoot = resolvePath(root);
+	if (target === normalizedRoot) {
+		return true;
+	}
+	const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
+	return target.startsWith(prefix);
+}
+
+/**
  * Expand a leading tilde to the user's home directory.
  * - "~" alone becomes the home directory.
  * - "~/x" or "~\x" becomes join(homedir(), rest) (both separators handled).

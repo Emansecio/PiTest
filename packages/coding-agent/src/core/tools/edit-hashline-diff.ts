@@ -122,21 +122,7 @@ export function interleaveAnchorsIntoLines(content: string, opts?: { stride?: nu
 	return out.join("\n");
 }
 
-/**
- * 2-of-3 partial match. For each candidate window we compute its 2-line
- * sub-window hashes (lines 0-1 and 1-2) and check if either matches a
- * 2-line sub-window of any other window with the same target full hash.
- *
- * Cheaper, deterministic version: cache per-line hashes once, then for each
- * window count how many of its 3 line-hashes appear among the line-hashes of
- * windows that already produced `hash`. We approximate "window agrees on 2/3
- * lines with the target" by maintaining a multiset of line-hashes from
- * windows whose neighbors are likely the intended anchor.
- *
- * In practice we use the simpler heuristic: for the target hash, take the
- * windows that share its first 2 hex chars (cheap pre-filter), then rank
- * candidates by line-trim equality against those windows' lines.
- */
+/** sha256 hash per line, truncated to HASHLINE_HASH_LEN. */
 function computeLineHashes(lines: string[]): string[] {
 	return lines.map((line) => createHash("sha256").update(line).digest("hex").slice(0, HASHLINE_HASH_LEN));
 }
@@ -144,8 +130,8 @@ function computeLineHashes(lines: string[]): string[] {
 function nearbyLineNumbers(
 	lines: string[],
 	hash: string,
-	limit = 3,
-	precomputedIndex?: Map<string, number[]>,
+	limit: number,
+	precomputedIndex: Map<string, number[]>,
 ): number[] {
 	// Walk windows and score 2-of-3 line-hash agreement against the union of
 	// line-hashes from windows that fully matched `hash`. If no window matches
@@ -158,34 +144,19 @@ function nearbyLineNumbers(
 	const prefixMatchLineHashes = new Set<string>();
 	const prefix = hash.slice(0, 2);
 
-	if (precomputedIndex) {
-		// Reuse precomputed window hashes instead of re-hashing every window.
-		for (const [wh, positions] of precomputedIndex) {
-			if (wh === hash) {
-				for (const i of positions) {
-					fullMatchLineHashes.add(lineHashes[i]);
-					if (i + 1 < lineHashes.length) fullMatchLineHashes.add(lineHashes[i + 1]);
-					if (i + 2 < lineHashes.length) fullMatchLineHashes.add(lineHashes[i + 2]);
-				}
-			} else if (wh.startsWith(prefix)) {
-				for (const i of positions) {
-					prefixMatchLineHashes.add(lineHashes[i]);
-					if (i + 1 < lineHashes.length) prefixMatchLineHashes.add(lineHashes[i + 1]);
-					if (i + 2 < lineHashes.length) prefixMatchLineHashes.add(lineHashes[i + 2]);
-				}
-			}
-		}
-	} else {
-		for (let i = 0; i <= last; i++) {
-			const wh = hashWindow(lines, i);
-			if (wh === hash) {
+	// Reuse precomputed window hashes instead of re-hashing every window.
+	for (const [wh, positions] of precomputedIndex) {
+		if (wh === hash) {
+			for (const i of positions) {
 				fullMatchLineHashes.add(lineHashes[i]);
-				fullMatchLineHashes.add(lineHashes[i + 1]);
-				fullMatchLineHashes.add(lineHashes[i + 2]);
-			} else if (wh.startsWith(prefix)) {
+				if (i + 1 < lineHashes.length) fullMatchLineHashes.add(lineHashes[i + 1]);
+				if (i + 2 < lineHashes.length) fullMatchLineHashes.add(lineHashes[i + 2]);
+			}
+		} else if (wh.startsWith(prefix)) {
+			for (const i of positions) {
 				prefixMatchLineHashes.add(lineHashes[i]);
-				prefixMatchLineHashes.add(lineHashes[i + 1]);
-				prefixMatchLineHashes.add(lineHashes[i + 2]);
+				if (i + 1 < lineHashes.length) prefixMatchLineHashes.add(lineHashes[i + 1]);
+				if (i + 2 < lineHashes.length) prefixMatchLineHashes.add(lineHashes[i + 2]);
 			}
 		}
 	}

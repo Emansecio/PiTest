@@ -54,15 +54,12 @@ export class McpClient {
 	private transport: McpTransport;
 	private nextId = 1;
 	private initialized = false;
-	private serverInfo?: { name?: string; version?: string };
 	private capabilities: McpServerCapabilities = {};
 	private tools: McpToolSchema[] = [];
 	/** `Bearer <token>` from OAuth, injected when the server has no static Authorization header. */
 	private authHeader?: string;
 	/** Set by the manager: invoked after a runtime tools/list_changed re-list so tools get re-registered. */
 	onToolsChanged?: () => void;
-	/** Set by the manager: invoked on a runtime resources/list_changed notification. */
-	onResourcesChanged?: () => void;
 	private relistInFlight = false;
 
 	constructor(name: string, config: McpServerConfig) {
@@ -82,14 +79,12 @@ export class McpClient {
 	/**
 	 * React to a server list-changed notification by re-listing at runtime — no
 	 * reconnect needed. A tools change re-lists and asks the host to re-register
-	 * (new tools become callable); a resources change just signals the host. The
-	 * in-flight guard collapses a burst of notifications into one refresh.
+	 * (new tools become callable). The in-flight guard collapses a burst of
+	 * notifications into one refresh.
 	 */
 	private handleNotification(method: string): void {
 		if (method === "notifications/tools/list_changed") {
 			void this.relistTools();
-		} else if (method === "notifications/resources/list_changed") {
-			this.onResourcesChanged?.();
 		}
 	}
 
@@ -158,10 +153,6 @@ export class McpClient {
 		return this.tools;
 	}
 
-	getServerInfo(): { name?: string; version?: string } | undefined {
-		return this.serverInfo;
-	}
-
 	getCapabilities(): McpServerCapabilities {
 		return this.capabilities;
 	}
@@ -199,7 +190,6 @@ export class McpClient {
 			clientInfo: CLIENT_INFO,
 		};
 		type InitResult = {
-			serverInfo?: { name?: string; version?: string };
 			protocolVersion?: string;
 			capabilities?: Record<string, unknown>;
 		};
@@ -215,7 +205,6 @@ export class McpClient {
 				throw err;
 			}
 		}
-		this.serverInfo = result.serverInfo;
 		const caps = result.capabilities ?? {};
 		this.capabilities = {
 			tools: caps.tools !== undefined,
@@ -233,25 +222,41 @@ export class McpClient {
 		this.initialized = true;
 	}
 
-	async refreshTools(signal?: AbortSignal): Promise<McpToolSchema[]> {
-		// tools/list is paginated (MCP spec): follow nextCursor until exhausted so
-		// servers with many tools aren't silently truncated to the first page.
-		// PAGE_CAP bounds a server that returns a cursor forever; a repeated cursor
-		// also breaks the loop (no forward progress).
+	/**
+	 * Drive a paginated list method (tools/resources/prompts): follow nextCursor
+	 * until exhausted so a server with many entries isn't silently truncated to the
+	 * first page. PAGE_CAP bounds a server that returns a cursor forever; a repeated
+	 * cursor also breaks the loop (no forward progress). `pick` extracts the array
+	 * from each page's result.
+	 */
+	private async paginate<TItem, TResult>(
+		method: string,
+		pick: (result: TResult) => TItem[] | undefined,
+		signal?: AbortSignal,
+	): Promise<TItem[]> {
 		const PAGE_CAP = 50;
-		const collected: McpToolSchema[] = [];
+		const collected: TItem[] = [];
 		const seenCursors = new Set<string>();
 		let cursor: string | undefined;
 		for (let page = 0; page < PAGE_CAP; page++) {
 			const params: Record<string, unknown> = cursor === undefined ? {} : { cursor };
-			const result = await this.rpc<McpListToolsResult>("tools/list", params, signal);
-			if (Array.isArray(result.tools)) collected.push(...result.tools);
+			const result = await this.rpc<TResult & { nextCursor?: string }>(method, params, signal);
+			const items = pick(result);
+			if (Array.isArray(items)) collected.push(...items);
 			const next = result.nextCursor;
 			if (typeof next !== "string" || next.length === 0 || seenCursors.has(next)) break;
 			seenCursors.add(next);
 			cursor = next;
 		}
-		this.tools = collected;
+		return collected;
+	}
+
+	async refreshTools(signal?: AbortSignal): Promise<McpToolSchema[]> {
+		this.tools = await this.paginate<McpToolSchema, McpListToolsResult>(
+			"tools/list",
+			(result) => result.tools,
+			signal,
+		);
 		return this.tools;
 	}
 
@@ -273,24 +278,11 @@ export class McpClient {
 	/** List resources (paginated, capped). Returns [] if the server has no resources capability. */
 	async listResources(signal?: AbortSignal): Promise<McpResourceDescriptor[]> {
 		if (!this.capabilities.resources) return [];
-		const PAGE_CAP = 50;
-		const collected: McpResourceDescriptor[] = [];
-		const seenCursors = new Set<string>();
-		let cursor: string | undefined;
-		for (let page = 0; page < PAGE_CAP; page++) {
-			const params: Record<string, unknown> = cursor === undefined ? {} : { cursor };
-			const result = await this.rpc<{ resources?: McpResourceDescriptor[]; nextCursor?: string }>(
-				"resources/list",
-				params,
-				signal,
-			);
-			if (Array.isArray(result.resources)) collected.push(...result.resources);
-			const next = result.nextCursor;
-			if (typeof next !== "string" || next.length === 0 || seenCursors.has(next)) break;
-			seenCursors.add(next);
-			cursor = next;
-		}
-		return collected;
+		return this.paginate<McpResourceDescriptor, { resources?: McpResourceDescriptor[] }>(
+			"resources/list",
+			(result) => result.resources,
+			signal,
+		);
 	}
 
 	async readResource(uri: string, signal?: AbortSignal): Promise<McpResourceContents> {
@@ -300,24 +292,11 @@ export class McpClient {
 	/** List prompts. Returns [] if the server has no prompts capability. */
 	async listPrompts(signal?: AbortSignal): Promise<McpPromptDescriptor[]> {
 		if (!this.capabilities.prompts) return [];
-		const PAGE_CAP = 50;
-		const collected: McpPromptDescriptor[] = [];
-		const seenCursors = new Set<string>();
-		let cursor: string | undefined;
-		for (let page = 0; page < PAGE_CAP; page++) {
-			const params: Record<string, unknown> = cursor === undefined ? {} : { cursor };
-			const result = await this.rpc<{ prompts?: McpPromptDescriptor[]; nextCursor?: string }>(
-				"prompts/list",
-				params,
-				signal,
-			);
-			if (Array.isArray(result.prompts)) collected.push(...result.prompts);
-			const next = result.nextCursor;
-			if (typeof next !== "string" || next.length === 0 || seenCursors.has(next)) break;
-			seenCursors.add(next);
-			cursor = next;
-		}
-		return collected;
+		return this.paginate<McpPromptDescriptor, { prompts?: McpPromptDescriptor[] }>(
+			"prompts/list",
+			(result) => result.prompts,
+			signal,
+		);
 	}
 
 	async getPrompt(name: string, args: Record<string, string>, signal?: AbortSignal): Promise<McpGetPromptResult> {

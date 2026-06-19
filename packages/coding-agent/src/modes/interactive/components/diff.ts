@@ -1,4 +1,5 @@
 import * as Diff from "diff";
+import { replaceTabs } from "../../../core/tools/render-utils.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 
 /**
@@ -22,13 +23,6 @@ function parseDiffLine(line: string): { prefix: string; lineNum: string; content
 	const match = line.match(/^([+-\s])(\s*\d*)\s(.*)$/);
 	if (!match) return null;
 	return { prefix: match[1], lineNum: match[2], content: match[3] };
-}
-
-/**
- * Replace tabs with spaces for consistent rendering.
- */
-function replaceTabs(text: string): string {
-	return text.replace(/\t/g, "   ");
 }
 
 /**

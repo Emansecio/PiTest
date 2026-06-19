@@ -63,7 +63,7 @@ export function applyTextEditsToString(content: string, edits: TextEdit[]): stri
 	return lines.join("\n");
 }
 
-function comparePosition(a: Position, b: Position): number {
+export function comparePosition(a: Position, b: Position): number {
 	return a.line === b.line ? a.character - b.character : a.line - b.line;
 }
 

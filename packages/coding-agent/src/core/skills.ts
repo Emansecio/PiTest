@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "pat
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
-import { canonicalizePath } from "../utils/paths.ts";
+import { canonicalizePath, isUnderPath } from "../utils/paths.ts";
 import { truncateWithEllipsis } from "../utils/surrogate.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 import { createMtimePrefixParseCache } from "./mtime-cache.ts";
@@ -613,15 +613,6 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 
 	const userSkillsDir = join(resolvedAgentDir, "skills");
 	const projectSkillsDir = resolve(cwd, CONFIG_DIR_NAME, "skills");
-
-	const isUnderPath = (target: string, root: string): boolean => {
-		const normalizedRoot = resolve(root);
-		if (target === normalizedRoot) {
-			return true;
-		}
-		const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-		return target.startsWith(prefix);
-	};
 
 	const getSource = (resolvedPath: string): "user" | "project" | "path" => {
 		if (!includeDefaults) {

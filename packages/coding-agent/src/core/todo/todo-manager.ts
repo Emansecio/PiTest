@@ -42,6 +42,8 @@ export interface UpdateTodoInput {
 
 const SUBJECT_MAX = 200;
 
+const STATUS_GLYPH: Record<TodoStatus, string> = { completed: "✓", in_progress: "◐", pending: "○" };
+
 function clampSubject(s: string): string {
 	return truncateWithEllipsis(s.trim(), SUBJECT_MAX);
 }
@@ -161,11 +163,10 @@ export class TodoManager {
 	summaryText(): string {
 		if (this.items.length === 0) return "No todos. The agent creates them with the `todo` tool.";
 		const { done, total } = this.counts();
-		const glyph: Record<TodoStatus, string> = { completed: "✓", in_progress: "◐", pending: "○" };
 		const lines = [`Todos (${done}/${total})`];
 		for (const t of this.items) {
 			const active = t.status === "in_progress" && t.activeForm ? ` (${t.activeForm})` : "";
-			lines.push(`  ${glyph[t.status]} #${t.id} ${t.subject}${active}`);
+			lines.push(`  ${STATUS_GLYPH[t.status]} #${t.id} ${t.subject}${active}`);
 		}
 		return lines.join("\n");
 	}
@@ -174,10 +175,9 @@ export class TodoManager {
 	systemPromptSection(): string {
 		if (this.items.length === 0) return "";
 		const open = this.items.filter((t) => t.status !== "completed").length;
-		const glyph: Record<TodoStatus, string> = { completed: "✓", in_progress: "◐", pending: "○" };
 		const itemLines = this.items.map((t) => {
 			const active = t.status === "in_progress" && t.activeForm ? ` (${t.activeForm})` : "";
-			return `${glyph[t.status]} #${t.id} ${t.subject}${active}`;
+			return `${STATUS_GLYPH[t.status]} #${t.id} ${t.subject}${active}`;
 		});
 		return [
 			"<todos>",

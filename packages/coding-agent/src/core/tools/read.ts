@@ -17,7 +17,7 @@ import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/type
 import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { prepareWithPathAliases } from "./argument-prep.js";
 import { generateDiffString } from "./edit-diff.ts";
-import { formatAnchorsForRead, interleaveAnchorsIntoLines } from "./edit-hashline-diff.ts";
+import { formatAnchorsForRead } from "./edit-hashline-diff.ts";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.js";
 import { formatNotebookSource } from "./notebook-formatter.ts";
 import { resolveReadPath } from "./path-utils.js";
@@ -222,12 +222,6 @@ export interface ReadToolOptions {
 	 * the surface can change after this definition is built). Default: true.
 	 */
 	embedHashlineAnchors?: boolean | (() => boolean);
-	/**
-	 * How to embed anchors. "block" appends a trailing `<anchors>` block (default,
-	 * lowest disruption to existing rendering). "interleave" prefixes anchored
-	 * lines inline with `L<n> <hash> │ <code>`.
-	 */
-	embedHashlineAnchorsMode?: "block" | "interleave";
 	/**
 	 * Optional per-session store that suppresses the body of identical, recent
 	 * repeat reads (replacing it with a short marker). When omitted, no de-dup.
@@ -540,7 +534,6 @@ export function createReadToolDefinition(
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	const ops = options?.operations ?? defaultReadOperations;
 	const embedHashlineAnchors = options?.embedHashlineAnchors ?? true;
-	const embedHashlineAnchorsMode = options?.embedHashlineAnchorsMode ?? "block";
 	const dedupeStore = options?.readDedupeStore;
 	const streamingMinBytes = options?.streamingMinBytes ?? STREAM_READ_MIN_BYTES;
 	return {
@@ -908,11 +901,7 @@ Common mistakes to avoid:
 									!truncation.truncated &&
 									wholeFile !== undefined
 								) {
-									if (embedHashlineAnchorsMode === "interleave") {
-										outputText = interleaveAnchorsIntoLines(outputText);
-									} else {
-										outputText += `\n\n<anchors>\n${formatAnchorsForRead(wholeFile.textContent, { lines: wholeFile.allLines })}\n</anchors>`;
-									}
+									outputText += `\n\n<anchors>\n${formatAnchorsForRead(wholeFile.textContent, { lines: wholeFile.allLines })}\n</anchors>`;
 								}
 								content = [{ type: "text", text: outputText }];
 							}

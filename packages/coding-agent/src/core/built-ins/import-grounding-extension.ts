@@ -31,6 +31,7 @@ import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundImports, IMPORT_GROUNDING_DEFAULTS, isImportGroundingDisabled } from "../import-grounding.ts";
 import { extractEdits, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
+import { stableToolCallKey } from "./grounding-fire-once.ts";
 
 /** Aliases the write tool accepts for the content body (WRITE_KEY_ALIASES in write.ts). */
 const CONTENT_KEYS = ["content", "text", "body", "data"] as const;
@@ -221,9 +222,7 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 				);
 
 				if (decision.action === "block") {
-					// Stable key (sorted top-level arg keys) so a verbatim re-issue with
-					// reordered keys still matches the fire-once escape.
-					const key = `${event.toolName}:${JSON.stringify(input, Object.keys(input).sort())}`;
+					const key = stableToolCallKey(event.toolName, input);
 					// `note` carries the block KIND (path vs export) + the tool so the
 					// acceptance rate can be read per-kind from the diagnostics buffer.
 					const note = `${decision.kind}:${event.toolName}`;

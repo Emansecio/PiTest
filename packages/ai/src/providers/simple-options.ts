@@ -44,7 +44,7 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 	};
 }
 
-export function clampReasoning(effort: ThinkingLevel | undefined): Exclude<ThinkingLevel, "xhigh"> | undefined {
+function clampReasoning(effort: ThinkingLevel | undefined): Exclude<ThinkingLevel, "xhigh"> | undefined {
 	return effort === "xhigh" ? "high" : effort;
 }
 

@@ -1,5 +1,5 @@
 /**
- * McpManager — owns a pool of McpHttpClient instances, handles connect /
+ * McpManager — owns a pool of McpClient instances, handles connect /
  * reconnect / disconnect, and exposes the set of currently advertised tools
  * across all servers.
  *
@@ -97,10 +97,10 @@ export class McpManager {
 	}
 
 	/** Names + clients of every currently connected server. */
-	connectedClients(): Array<{ name: string; client: McpClient; config: McpServerConfig }> {
-		const out: Array<{ name: string; client: McpClient; config: McpServerConfig }> = [];
+	connectedClients(): Array<{ name: string; client: McpClient }> {
+		const out: Array<{ name: string; client: McpClient }> = [];
 		for (const entry of this.entries.values()) {
-			if (entry.connected) out.push({ name: entry.name, client: entry.client, config: entry.config });
+			if (entry.connected) out.push({ name: entry.name, client: entry.client });
 		}
 		return out;
 	}

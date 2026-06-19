@@ -977,7 +977,7 @@ export async function generateSummary(
 	);
 }
 
-export function extractTextFromResponse(response: AssistantMessage): string {
+function extractTextFromResponse(response: AssistantMessage): string {
 	return response.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map((c) => c.text)

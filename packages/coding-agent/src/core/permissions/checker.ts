@@ -159,10 +159,11 @@ export class PermissionChecker {
 
 	/** Read-only mode: block mutations, still apply read deny/allow rules. */
 	private checkPlan(action: PermissionAction): PermissionDecision {
-		if (action.type === "write" || action.type === "exec") {
-			return { decision: "deny", reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.` };
-		}
-		if (action.type === "tool" && MUTATING_TOOLS.has(action.toolName)) {
+		if (
+			action.type === "write" ||
+			action.type === "exec" ||
+			(action.type === "tool" && MUTATING_TOOLS.has(action.toolName))
+		) {
 			return { decision: "deny", reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.` };
 		}
 

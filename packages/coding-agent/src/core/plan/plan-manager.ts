@@ -22,8 +22,8 @@
 
 import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 
-export const PLAN_STEP_STATUSES = ["pending", "active", "done", "blocked"] as const;
-export type PlanStepStatus = (typeof PLAN_STEP_STATUSES)[number];
+const PLAN_STEP_STATUSES = ["pending", "active", "done", "blocked"] as const;
+type PlanStepStatus = (typeof PLAN_STEP_STATUSES)[number];
 
 export interface PlanStep {
 	id: string;
