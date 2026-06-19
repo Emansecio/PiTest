@@ -15,8 +15,9 @@
  * the user's file; the LLM has to explicitly call the tool.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { writeFileAtomicSync } from "../../utils/atomic-write.ts";
 import { redactForDisk } from "../secret-redactor.ts";
 
 export interface MemoryFile {
@@ -117,6 +118,8 @@ export function appendMemory(options: AppendMemoryOptions): { path: string; crea
 	// already on disk (and already scrubbed if it passed through here), so we
 	// avoid re-rewriting the user's prose, and a credential the model put in the
 	// new entry never lands verbatim in a pushed file.
-	writeFileSync(path, `${existing}${redactForDisk(block)}`, "utf-8");
+	// Atomic: a crash/kill during this write must not truncate MEMORY.md (next session
+	// reads it at boot — a torn file means corrupted/partial cross-session knowledge).
+	writeFileAtomicSync(path, `${existing}${redactForDisk(block)}`);
 	return { path, created };
 }

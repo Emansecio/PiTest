@@ -1,3 +1,4 @@
+import { renameSync, rmSync, writeFileSync } from "node:fs";
 import { rename, rm, writeFile } from "node:fs/promises";
 
 // Per-process monotonic counter so two overlapping writes to the SAME path don't
@@ -38,5 +39,26 @@ export async function writeFileAtomic(filePath: string, content: string, signal?
 		// Rename can fail across volumes or on locked targets — fall back to a
 		// direct write so the operation still succeeds where a plain writeFile would.
 		await writeFile(filePath, content, "utf-8");
+	}
+}
+
+/**
+ * Synchronous counterpart of {@link writeFileAtomic} for call-sites that must stay
+ * sync (e.g. inside a sync file lock). Same temp-then-rename guarantee: a crash or
+ * kill during the write never truncates the original, and a concurrent reader never
+ * sees a half-written file. Falls back to a direct write if the rename fails.
+ */
+export function writeFileAtomicSync(filePath: string, content: string): void {
+	const tmp = `${filePath}.tmp-${process.pid}-${tmpCounter++}`;
+	try {
+		writeFileSync(tmp, content, "utf-8");
+		renameSync(tmp, filePath);
+	} catch {
+		try {
+			rmSync(tmp, { force: true });
+		} catch {
+			// best-effort cleanup
+		}
+		writeFileSync(filePath, content, "utf-8");
 	}
 }

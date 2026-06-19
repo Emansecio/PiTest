@@ -6,6 +6,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import type {
 	CreateFile,
 	DeleteFile,
@@ -104,7 +105,10 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
 export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
 	const content = await fs.readFile(filePath, "utf-8");
 	const result = applyTextEditsToString(content, edits);
-	await fs.writeFile(filePath, result, "utf-8");
+	// Atomic write: a quick-fix/rename interrupted (ESC/crash) mid-write must never
+	// leave the user's source file truncated, and a concurrent reader must never see
+	// a half-written file (temp-then-rename instead of truncate-then-rewrite).
+	await writeFileAtomic(filePath, result);
 }
 
 // =============================================================================

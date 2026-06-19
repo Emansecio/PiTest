@@ -211,7 +211,7 @@ function fakeChild(stdoutData: string, exitCode: number) {
 	child.pid = 1234;
 	child.stdout = new EventEmitter();
 	child.stderr = new EventEmitter();
-	child.stdin = { write() {}, end() {} };
+	child.stdin = { write() {}, end() {}, on() {} };
 	queueMicrotask(() => {
 		if (stdoutData) child.stdout.emit("data", stdoutData);
 		child.emit("close", exitCode);

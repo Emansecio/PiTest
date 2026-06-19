@@ -332,6 +332,11 @@ class JsKernel implements EvalKernel {
 			child.stderr.on("data", () => {
 				// Intentionally swallow — uncaught driver errors will surface via exit.
 			});
+			// A write racing a kernel death (timeout/abort proc.kill, child exit) hits a
+			// closed stdin → EPIPE as an async 'error' event. Without a listener Node
+			// makes it fatal (uncaughtException → process death). Swallow it; the exit
+			// handler above already fails the pending calls.
+			child.stdin.on("error", () => {});
 			this.proc = child;
 			this.alive = true;
 		} catch (err) {

@@ -1,8 +1,9 @@
 import type { Transport } from "@pit/ai";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { writeFileAtomicSync } from "../utils/atomic-write.ts";
 import { expandTilde } from "../utils/paths.ts";
 import type { EngineeringStyle } from "./engineering-styles.ts";
 import type { HooksSettings } from "./hooks/types.ts";
@@ -615,7 +616,9 @@ export class FileSettingsStorage implements SettingsStorage {
 				if (!release) {
 					release = this.acquireLockSyncWithRetry(path);
 				}
-				writeFileSync(path, next, "utf-8");
+				// Atomic: a crash/kill during this write must not truncate settings.json
+				// (a torn file fails JSON.parse on next boot and silently resets ALL settings).
+				writeFileAtomicSync(path, next);
 			}
 		} finally {
 			if (release) {

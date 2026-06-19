@@ -97,6 +97,11 @@ class PythonKernel implements EvalKernel {
 					if (this.proc !== child) return;
 					this.onStderr(chunk);
 				});
+				// A write racing the interpreter's death (timeout/abort proc.kill, exit)
+				// hits a closed stdin → EPIPE as an async 'error' event. Without a listener
+				// Node makes it fatal (uncaughtException → process death). Swallow it; the
+				// exit handler above already fails the pending calls.
+				child.stdin.on("error", () => {});
 				this.proc = child;
 				this.alive = true;
 				// Seed the prelude so common modules are pre-imported. Use a no-op exec

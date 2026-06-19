@@ -184,6 +184,13 @@ export async function runHook(
 			finish(code ?? 0, false);
 		});
 
+		// The hook may exit before draining stdin (e.g. early `exit 0`), closing the
+		// pipe under our write. EPIPE arrives as an async 'error' event on the stdin
+		// stream; without a listener Node treats it as fatal (uncaughtException →
+		// process death). The try/catch only guards the synchronous throw.
+		proc.stdin?.on("error", () => {
+			/* stdin closed by the hook before we finished writing — non-fatal */
+		});
 		try {
 			proc.stdin?.write(JSON.stringify(payload));
 			proc.stdin?.end();

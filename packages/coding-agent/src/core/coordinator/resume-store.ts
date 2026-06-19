@@ -12,9 +12,10 @@
  */
 
 import { readdirSync } from "node:fs";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentMessage } from "@pit/agent-core";
+import { writeFileAtomic } from "../../utils/atomic-write.ts";
 
 export interface ResumeState {
 	/** Handle the subagent was tracked under (already filesystem-safe). */
@@ -47,7 +48,9 @@ function stateFile(cwd: string, handle: string): string {
 export async function saveResumeState(cwd: string, state: ResumeState): Promise<void> {
 	try {
 		await mkdir(storeDir(cwd), { recursive: true });
-		await writeFile(stateFile(cwd, state.handle), JSON.stringify(state), "utf8");
+		// Atomic write so a crash mid-save can't truncate the resume JSON (a torn file
+		// would fail to parse and silently lose the resumable subagent).
+		await writeFileAtomic(stateFile(cwd, state.handle), JSON.stringify(state));
 	} catch {
 		// Best-effort: a persistence failure must not break the spawn/turn.
 	}

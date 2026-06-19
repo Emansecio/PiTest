@@ -745,6 +745,18 @@ export class TUI extends Container {
 	}
 
 	private handleInput(data: string): void {
+		try {
+			this._handleInputCore(data);
+		} catch {
+			// A throw from an input listener, an overlay visibility predicate, or the
+			// focused component's handleInput must NOT become an uncaughtException
+			// (process death) on a keystroke. Drop the offending event and keep the
+			// session alive; the next render reflects current state.
+			this.requestRender();
+		}
+	}
+
+	private _handleInputCore(data: string): void {
 		if (this.inputListeners.size > 0) {
 			let current = data;
 			for (const listener of this.inputListeners) {
@@ -1290,6 +1302,19 @@ export class TUI extends Container {
 	}
 
 	private doRender(): void {
+		try {
+			this._doRenderCore();
+		} catch {
+			// doRender runs from a nextTick/timer callback, so a throw from any
+			// component render() (markdown, an extension overlay, compositeOverlays)
+			// would be an uncaughtException → process death. Skip the bad frame instead;
+			// `this.previous*` state is only committed at the end of a successful render,
+			// so the next requestRender diffs against the last good frame.
+			this.requestRender();
+		}
+	}
+
+	private _doRenderCore(): void {
 		if (this.stopped) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;

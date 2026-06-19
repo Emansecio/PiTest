@@ -387,6 +387,11 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 		const command = IS_WIN ? `"${member.cli}"` : member.cli;
 		const env = buildMemberEnv(member.cli, opts.authToken);
 		const child = spawnFn(command, args, { cwd: opts.cwd, shell: IS_WIN, stdio: ["pipe", "pipe", "pipe"], env });
+		// A misconfigured member CLI (bad model id, "not logged in") can exit and close
+		// stdin before/while we write the prompt; the resulting EPIPE arrives as an async
+		// 'error' on the stdin stream. Without a listener Node makes it fatal — a single
+		// bad advisor would take down the whole TUI instead of being reported as failed.
+		child.stdin?.on("error", () => {});
 
 		// Idle-timeout: `timeoutMs` is a HARD wall-clock cap (backstop against a CLI that
 		// streams forever), but a working advisor must NOT be killed just for taking long.

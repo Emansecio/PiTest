@@ -3796,6 +3796,23 @@ export class InteractiveMode {
 		const uncaughtExceptionHandler = (error: Error) => this.uncaughtCrash(error);
 		process.prependListener("uncaughtException", uncaughtExceptionHandler);
 		this.signalCleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
+
+		// A floating-promise rejection (a fire-and-forget onSubmit/steer/slash path, or
+		// a preflight throw) would otherwise terminate the process under Node's default
+		// unhandledRejection policy — bypassing the uncaughtException terminal-restore and
+		// killing the session mid-work. Registering this handler keeps the session alive:
+		// surface the error like any prompt error and carry on (the terminal stays intact
+		// because we don't exit). A genuinely fatal throw still routes via uncaughtException.
+		const unhandledRejectionHandler = (reason: unknown) => {
+			const errorMessage = reason instanceof Error ? reason.message : String(reason);
+			try {
+				this.showError(errorMessage);
+			} catch {
+				// the safety net must never throw
+			}
+		};
+		process.prependListener("unhandledRejection", unhandledRejectionHandler);
+		this.signalCleanupHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
 	}
 
 	private unregisterSignalHandlers(): void {
