@@ -10,7 +10,7 @@
  * Matches are case-insensitive on Windows, case-sensitive elsewhere.
  */
 
-import { isAbsolute, resolve, sep } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
 const globRegExpCache = new Map<string, RegExp>();
 const cmdRegExpCache = new Map<string, RegExp>();
@@ -77,19 +77,6 @@ export function normalizeTargetPath(path: string, cwd: string): string {
 	return normalizePathForMatch(abs);
 }
 
-/** Returns true if any provided glob matches the resolved path. */
-export function anyGlobMatches(
-	patterns: readonly { glob: string; tools?: string[] }[],
-	target: string,
-	toolName?: string,
-): boolean {
-	for (const p of patterns) {
-		if (p.tools && toolName && !p.tools.includes(toolName)) continue;
-		if (matchGlob(p.glob, target)) return true;
-	}
-	return false;
-}
-
 /** Returns the matching pattern entry (with its reason) or undefined. */
 export function findMatchingGlob<T extends { glob: string; tools?: string[]; reason?: string }>(
 	patterns: readonly T[],
@@ -126,10 +113,4 @@ export function findMatchingCommandRule<T extends { pattern: string; flags?: str
 		if (re.test(command)) return rule;
 	}
 	return undefined;
-}
-
-/** Make sure we use the same separator regardless of platform when displaying paths. */
-export function displayPath(path: string): string {
-	if (process.platform === "win32") return path;
-	return path.replace(/\//g, sep);
 }

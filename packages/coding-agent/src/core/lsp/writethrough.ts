@@ -251,24 +251,3 @@ function formatPostWriteAppendix(diag: PostWriteDiagnostics, absolutePath: strin
 		`${rel} still has type errors:\n${body}`
 	);
 }
-
-/**
- * Convenience wrapper for tools: returns a text appendix ("\n<summary>:\n<...>")
- * to splice onto a successful write/edit result, or "" when there's nothing to
- * add. Swallows all errors.
- */
-export async function getPostWriteDiagnosticsText(
-	absolutePath: string,
-	content: string,
-	cwd: string,
-	signal?: AbortSignal,
-	options?: PostWriteOptions,
-): Promise<string> {
-	try {
-		const diag = await getPostWriteDiagnostics(absolutePath, content, cwd, signal, options);
-		if (!diag || diag.messages.length === 0) return "";
-		return `\nLSP diagnostics (${diag.summary}):\n${diag.messages.join("\n")}`;
-	} catch {
-		return "";
-	}
-}

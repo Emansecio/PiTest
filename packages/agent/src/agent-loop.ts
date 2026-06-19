@@ -190,6 +190,19 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
  * error turn carrying the failure reason, so the consumer learns *why* it failed
  * rather than the error being swallowed.
  */
+// Zero-valued usage for synthetic error-turn messages (no tokens were spent).
+// Factory (not a shared const) so each message gets its own object — no aliasing.
+function makeZeroUsage() {
+	return {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
 function buildFailureMessage(config: AgentLoopConfig, err: unknown): AssistantMessage {
 	const errorMessage = err instanceof Error ? err.message : String(err);
 	return {
@@ -201,14 +214,7 @@ function buildFailureMessage(config: AgentLoopConfig, err: unknown): AssistantMe
 		stopReason: "error",
 		errorMessage,
 		timestamp: Date.now(),
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
+		usage: makeZeroUsage(),
 	} as AssistantMessage;
 }
 
@@ -338,14 +344,7 @@ async function runLoop(
 						stopReason: "error",
 						errorMessage: `[stop: ttsr] TTSR: exceeded ${MAX_TTSR_RETRIES_PER_TURN} retries (rule "${response.ttsr.name}")`,
 						timestamp: Date.now(),
-						usage: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
+						usage: makeZeroUsage(),
 					} as AssistantMessage;
 					await emit({ type: "message_start", message });
 					await emit({ type: "message_end", message });
@@ -451,14 +450,7 @@ function buildTurnBudgetMessage(config: AgentLoopConfig, maxTurns: number): Assi
 		stopReason: "error",
 		errorMessage: `[stop: turn-budget] Reached the turn budget of ${maxTurns} turns in a single run; stopping to avoid an unbounded tool-call loop.`,
 		timestamp: Date.now(),
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
+		usage: makeZeroUsage(),
 	} as AssistantMessage;
 }
 

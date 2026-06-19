@@ -1,7 +1,5 @@
 export { describeToolAction, PermissionChecker } from "./checker.ts";
 export {
-	anyGlobMatches,
-	displayPath,
 	findMatchingCommandRule,
 	findMatchingGlob,
 	globToRegExp,

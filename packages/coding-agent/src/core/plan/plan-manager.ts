@@ -269,17 +269,6 @@ export class PlanManager {
 		return { ...step };
 	}
 
-	/** Set an arbitrary status on a current-version step (used for active/blocked). */
-	setStepStatus(id: string, status: PlanStepStatus): PlanStep | undefined {
-		const v = this.versions[this.versions.length - 1];
-		if (!v) return undefined;
-		const step = v.steps.find((s) => s.id === id);
-		if (!step) return undefined;
-		step.status = status;
-		this.dirty = true;
-		return { ...step };
-	}
-
 	/** {done,total} for the current version. */
 	counts(): { done: number; total: number } {
 		const v = this.versions[this.versions.length - 1];

@@ -1,5 +1,4 @@
 import * as os from "node:os";
-import type { ImageContent, TextContent } from "@pit/ai";
 import { getCapabilities, getImageDimensions, imageFallback, Text } from "@pit/tui";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
@@ -138,11 +137,6 @@ export function getTextOutput(
 
 	return output;
 }
-
-export type ToolRenderResultLike<TDetails> = {
-	content: (TextContent | ImageContent)[];
-	details: TDetails;
-};
 
 export function invalidArgText(theme: { fg: (name: any, text: string) => string }): string {
 	return theme.fg("error", "[invalid arg]");

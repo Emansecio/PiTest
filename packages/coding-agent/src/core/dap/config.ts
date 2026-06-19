@@ -48,10 +48,6 @@ function getDefaults(): Record<string, DapAdapterConfig> {
 
 const DEFAULT_ADAPTERS = getDefaults();
 
-export function getAdapterConfigs(): Record<string, DapAdapterConfig> {
-	return { ...DEFAULT_ADAPTERS };
-}
-
 export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAdapter | null {
 	const config = DEFAULT_ADAPTERS[adapterName];
 	if (!config) return null;

@@ -144,23 +144,7 @@ export function finalizeStreamingJson<T = Record<string, unknown>>(
  * @returns Parsed object or empty object if parsing fails
  */
 export function parseStreamingJson<T = Record<string, unknown>>(partialJson: string | undefined): T {
-	if (!partialJson || partialJson.trim() === "") {
-		return {} as T;
-	}
-
-	try {
-		return parseJsonWithRepair<T>(partialJson);
-	} catch {
-		try {
-			const result = partialParse(partialJson);
-			return (result ?? {}) as T;
-		} catch {
-			try {
-				const result = partialParse(repairJson(partialJson));
-				return (result ?? {}) as T;
-			} catch {
-				return {} as T;
-			}
-		}
-	}
+	// Identical parse cascade to finalizeStreamingJson; this variant just discards
+	// the parseError flag. The returned value is provably the same in every branch.
+	return finalizeStreamingJson<T>(partialJson).value;
 }

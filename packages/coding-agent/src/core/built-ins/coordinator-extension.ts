@@ -50,7 +50,6 @@ interface PendingTask {
 	status: "running" | "done" | "error";
 	promise: Promise<void>;
 	controller: AbortController;
-	startedAt: number;
 	result?: string;
 	error?: string;
 	/** True once the result was re-injected into the chat, so poll/join don't repeat the payload. */
@@ -855,7 +854,6 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					const entry: PendingTask = {
 						handle,
 						status: "running",
-						startedAt: Date.now(),
 						controller,
 						promise: Promise.resolve(),
 					};
