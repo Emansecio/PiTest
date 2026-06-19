@@ -141,6 +141,71 @@ describe("find/grep .git exclusion and post-filter enumeration", () => {
 	});
 });
 
+describe("grep outputMode + multiline (locate-cheaply / cross-line patterns)", () => {
+	let tempRoot: string;
+
+	beforeEach(() => {
+		tempRoot = mkdtempSync(join(tmpdir(), "pi-grep-mode-"));
+		mkdirSync(join(tempRoot, "src"), { recursive: true });
+		writeFileSync(join(tempRoot, "src", "a.ts"), "const ref = 1;\nconst ref2 = ref + 1;\n");
+		writeFileSync(join(tempRoot, "src", "b.ts"), "// no match here\n");
+		writeFileSync(join(tempRoot, "src", "c.ts"), "export const ref = 2;\n");
+	});
+
+	afterEach(() => {
+		rmSync(tempRoot, { recursive: true, force: true });
+	});
+
+	async function runGrep(args: Record<string, unknown>): Promise<string> {
+		const def = createGrepToolDefinition(tempRoot);
+		const ctx = {} as Parameters<typeof def.execute>[4];
+		const result = await def.execute("call-mode", args as never, undefined, undefined, ctx);
+		return textOf(result);
+	}
+
+	it("files_with_matches returns only the matching file paths, no line content", async () => {
+		const output = await runGrep({ pattern: "ref", outputMode: "files_with_matches" });
+		const lines = output.split("\n").filter((l) => l && !l.startsWith("["));
+		expect(lines.sort()).toEqual(["src/a.ts", "src/c.ts"]);
+		// No line numbers / line bodies in this mode.
+		expect(output).not.toContain("const ref = 1;");
+		expect(output).not.toMatch(/:\d+:/);
+	});
+
+	it("count returns matches-per-file as 'path:count'", async () => {
+		const output = await runGrep({ pattern: "ref", outputMode: "count" });
+		const map = new Map(
+			output
+				.split("\n")
+				.filter((l) => l && !l.startsWith("["))
+				.map((l) => {
+					const m = /^(.*):(\d+)$/.exec(l);
+					return [m?.[1] ?? l, Number(m?.[2] ?? 0)] as const;
+				}),
+		);
+		// a.ts: "ref" appears on both lines (line 1 + 2 references) → 2 matching lines.
+		expect(map.get("src/a.ts")).toBe(2);
+		expect(map.get("src/c.ts")).toBe(1);
+		expect(map.has("src/b.ts")).toBe(false);
+	});
+
+	it("files_with_matches caps files by limit and notes it", async () => {
+		const output = await runGrep({ pattern: "ref", outputMode: "files_with_matches", limit: 1 });
+		const lines = output.split("\n").filter((l) => l && !l.startsWith("["));
+		expect(lines.length).toBe(1);
+		expect(output).toContain("files limit reached");
+	});
+
+	it("multiline lets a pattern span line boundaries", async () => {
+		writeFileSync(join(tempRoot, "src", "multi.ts"), "interface Foo {\n  bar: string;\n}\n");
+		// Without multiline this never matches (the body crosses a newline).
+		const plain = await runGrep({ pattern: "interface Foo \\{[^}]*bar", path: "src/multi.ts" });
+		expect(plain).toContain("No matches found");
+		const multi = await runGrep({ pattern: "interface Foo \\{[^}]*bar", path: "src/multi.ts", multiline: true });
+		expect(multi).toContain("multi.ts");
+	});
+});
+
 describe("grep OOM guard: oversized matched files are not buffered for context", () => {
 	let tempRoot: string;
 

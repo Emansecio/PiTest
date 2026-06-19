@@ -285,7 +285,15 @@ export function createFindToolDefinition(
 						const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
 						const rl = createInterface({ input: child.stdout });
 						let stderr = "";
-						const lines: string[] = [];
+						// Filter + relativize INLINE as fd streams, instead of buffering up to
+						// FD_POST_FILTER_ENUM_CAP (100k) raw paths and filtering at close. Compile
+						// the glob ONCE here (the convenience `minimatch()` rebuilds the matcher per
+						// call). Once `limit` matches land we kill fd early — same first-N result.
+						const relativized: string[] = [];
+						let enumeratedCount = 0;
+						let limitReached = false;
+						let killedDueToLimit = false;
+						const postMatcher = usePostFilter ? new Minimatch(pattern, { dot: true }) : null;
 
 						stopChild = () => {
 							if (!child.killed) {
@@ -311,8 +319,33 @@ export function createFindToolDefinition(
 							}
 						});
 
-						rl.on("line", (line) => {
-							lines.push(line);
+						rl.on("line", (rawLine) => {
+							if (limitReached) return;
+							enumeratedCount++;
+							const line = rawLine.replace(/\r$/, "").trim();
+							if (!line) return;
+							const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
+							let relativePath = line;
+							if (line.startsWith(searchPath)) {
+								relativePath = line.slice(searchPath.length + 1);
+							} else {
+								relativePath = path.relative(searchPath, line);
+							}
+							if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
+							const posixPath = toPosixPath(relativePath);
+							if (postMatcher) {
+								// Match the relative posix path against the user pattern.
+								// `matchBase: false`, `dot: true` so hidden segments aren't rejected.
+								if (!postMatcher.match(posixPath) && !postMatcher.match(posixPath.replace(/\/$/, ""))) {
+									return;
+								}
+							}
+							relativized.push(posixPath);
+							if (relativized.length >= effectiveLimit) {
+								limitReached = true;
+								killedDueToLimit = true;
+								stopChild?.();
+							}
 						});
 
 						child.on("error", (error) => {
@@ -326,17 +359,14 @@ export function createFindToolDefinition(
 								settle(() => reject(new Error("Operation aborted")));
 								return;
 							}
-							// Empty-result test only — the success path below iterates `lines`
-							// directly, so don't join up to 100k paths into one multi-MB string
-							// just to check for emptiness.
-							if (code !== 0) {
-								const errorMsg = stderr.trim() || `fd exited with code ${code}`;
-								if (lines.length === 0) {
-									settle(() => reject(new Error(errorMsg)));
-									return;
-								}
+							// We kill fd ourselves once `limit` matches land, which surfaces as a
+							// non-zero exit — that is success, not failure. A genuine fd error is a
+							// non-zero exit with zero matches collected.
+							if (code !== 0 && !killedDueToLimit && relativized.length === 0) {
+								settle(() => reject(new Error(stderr.trim() || `fd exited with code ${code}`)));
+								return;
 							}
-							if (lines.length === 0) {
+							if (relativized.length === 0) {
 								// Glob patterns are forward-slash only. A Windows-style backslash
 								// pattern (e.g. `src\**\*.ts`) has no "/", skips the post-filter, and
 								// goes raw to fd --glob where "\" is an escape — yielding zero matches
@@ -354,37 +384,9 @@ export function createFindToolDefinition(
 								return;
 							}
 
-							const relativized: string[] = [];
-							const postFilterPattern = usePostFilter ? pattern : null;
-							// Compile the glob ONCE, not once per result line. The convenience
-							// `minimatch()` fn rebuilds a Minimatch (glob → AST → regex) on every
-							// call, so post-filtering N≈1000 results meant up to ~2000 compiles.
-							const postMatcher = postFilterPattern ? new Minimatch(postFilterPattern, { dot: true }) : null;
-							for (const rawLine of lines) {
-								if (relativized.length >= effectiveLimit) break;
-								const line = rawLine.replace(/\r$/, "").trim();
-								if (!line) continue;
-								const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
-								let relativePath = line;
-								if (line.startsWith(searchPath)) {
-									relativePath = line.slice(searchPath.length + 1);
-								} else {
-									relativePath = path.relative(searchPath, line);
-								}
-								if (hadTrailingSlash && !relativePath.endsWith("/")) relativePath += "/";
-								const posixPath = toPosixPath(relativePath);
-								if (postMatcher) {
-									// Match the relative posix path against the user pattern.
-									// `matchBase: false`, `dot: true` so hidden segments aren't rejected.
-									if (!postMatcher.match(posixPath) && !postMatcher.match(posixPath.replace(/\/$/, ""))) {
-										continue;
-									}
-								}
-								relativized.push(posixPath);
-							}
-
 							const resultLimitReached = relativized.length >= effectiveLimit;
-							const enumerationSaturated = usePostFilter && lines.length >= FD_POST_FILTER_ENUM_CAP;
+							const enumerationSaturated =
+								usePostFilter && !resultLimitReached && enumeratedCount >= FD_POST_FILTER_ENUM_CAP;
 							const rawOutput = relativized.join("\n");
 							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
 							let resultOutput = truncation.content;

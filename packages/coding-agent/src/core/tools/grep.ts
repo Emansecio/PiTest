@@ -34,6 +34,18 @@ const grepSchema = Type.Object(
 		context: Type.Optional(
 			Type.Number({ description: "Number of lines to show before and after each match (default: 0)" }),
 		),
+		multiline: Type.Optional(
+			Type.Boolean({
+				description:
+					"Let the pattern span lines: '.' matches newlines and a match can cross line boundaries (default: false).",
+			}),
+		),
+		outputMode: Type.Optional(
+			Type.Union([Type.Literal("content"), Type.Literal("files_with_matches"), Type.Literal("count")], {
+				description:
+					"What to return: 'content' = matching lines (default); 'files_with_matches' = just the file paths that match (cheapest — use to locate); 'count' = matches-per-file as 'path:count'. With files/count, 'limit' caps files and 'context' is ignored.",
+			}),
+		),
 		limit: Type.Optional(Type.Number({ description: "Maximum number of matches to return (default: 100)" })),
 	},
 	{ additionalProperties: false },
@@ -184,7 +196,7 @@ export function createGrepToolDefinition(
 		name: "grep",
 		activity: "navigation",
 		label: "grep",
-		description: `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Long lines are truncated to ${GREP_MAX_LINE_LENGTH} chars. Use \`grep\` for text, identifiers, or literal/regex string search. For structural code patterns (call sites, signatures, AST shape) use \`ast_grep\`. To find files by name use \`find\`. To jump to a symbol definition use \`symbol\`.`,
+		description: `Search file contents for a pattern. Returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Long lines are truncated to ${GREP_MAX_LINE_LENGTH} chars. Set \`outputMode: "files_with_matches"\` to get just the matching file paths (cheapest — best for locating) or \`"count"\` for matches-per-file. Set \`multiline: true\` for patterns that span lines. Use \`grep\` for text, identifiers, or literal/regex string search. For structural code patterns (call sites, signatures, AST shape) use \`ast_grep\`. To find files by name use \`find\`. To jump to a symbol definition use \`symbol\`.`,
 		promptSnippet: "Search file contents for patterns (respects .gitignore)",
 		parameters: grepSchema,
 		prepareArguments: prepareWithPathAliases,
@@ -197,6 +209,8 @@ export function createGrepToolDefinition(
 				ignoreCase,
 				literal,
 				context,
+				multiline,
+				outputMode,
 				limit,
 			}: {
 				pattern: string;
@@ -205,6 +219,8 @@ export function createGrepToolDefinition(
 				ignoreCase?: boolean;
 				literal?: boolean;
 				context?: number;
+				multiline?: boolean;
+				outputMode?: "content" | "files_with_matches" | "count";
 				limit?: number;
 			},
 			signal?: AbortSignal,
@@ -293,12 +309,26 @@ export function createGrepToolDefinition(
 						// user-supplied glob comes later and wins on conflict (rg's
 						// last-match-wins precedence).
 						const insideGitDir = /[\\/]\.git([\\/]|$)/.test(searchPath);
-						const args: string[] = ["--json", "--line-number", "--color=never", "--hidden"];
+						const mode = outputMode ?? "content";
+						const args: string[] = ["--color=never", "--hidden"];
+						// content streams structured matches; the locate-only modes let rg do the
+						// work natively (rg -l short-circuits per file; rg -c tallies in-engine) so
+						// the model can find files without paying for every matching line.
+						if (mode === "content") {
+							args.push("--json", "--line-number");
+						} else if (mode === "files_with_matches") {
+							args.push("--files-with-matches");
+						} else {
+							// --with-filename forces the `path:` prefix even when a single file is
+							// searched (rg omits it otherwise), so the count output is always parseable.
+							args.push("--count", "--with-filename");
+						}
 						// OOM/CPU guard: skip files above the ceiling at the rg source.
 						args.push("--max-filesize", MAX_GREP_FILE_SIZE_ARG);
 						if (!insideGitDir) args.push("--glob", "!**/.git/**");
 						if (ignoreCase) args.push("--ignore-case");
 						if (literal) args.push("--fixed-strings");
+						if (multiline) args.push("--multiline", "--multiline-dotall");
 						if (glob) args.push("--glob", glob);
 						args.push("--", pattern, searchPath);
 
@@ -311,6 +341,8 @@ export function createGrepToolDefinition(
 						let aborted = false;
 						let killedDueToLimit = false;
 						const outputLines: string[] = [];
+						// Raw rg lines for the files_with_matches / count modes (one per file).
+						const plainLines: string[] = [];
 
 						const cleanup = () => {
 							rl.close();
@@ -379,6 +411,16 @@ export function createGrepToolDefinition(
 							matchStart?: number;
 						}> = [];
 						rl.on("line", (line) => {
+							if (mode !== "content") {
+								// files_with_matches / count: one rg line per file; limit caps files.
+								if (!line.trim() || plainLines.length >= effectiveLimit) return;
+								plainLines.push(line);
+								if (plainLines.length >= effectiveLimit) {
+									matchLimitReached = true;
+									stopChild(true);
+								}
+								return;
+							}
 							if (!line.trim() || matchCount >= effectiveLimit) return;
 							let event: any;
 							try {
@@ -441,6 +483,49 @@ export function createGrepToolDefinition(
 									return;
 								}
 								settle(() => reject(new Error(errorMsg)));
+								return;
+							}
+							if (mode !== "content") {
+								if (plainLines.length === 0) {
+									const noMatch = glob?.includes("\\")
+										? `No matches found. Glob patterns use forward slashes; try: ${glob.replace(/\\/g, "/")}`
+										: "No matches found";
+									settle(() => resolve({ content: [{ type: "text", text: noMatch }], details: undefined }));
+									return;
+								}
+								for (const raw of plainLines) {
+									const clean = raw.replace(/\r$/, "");
+									if (mode === "files_with_matches") {
+										outputLines.push(formatPath(clean));
+									} else {
+										// "path:count" — split on the trailing :<digits> so a Windows
+										// drive-letter colon inside the path stays with the path.
+										const parsed = /^(.*):(\d+)$/.exec(clean);
+										outputLines.push(parsed ? `${formatPath(parsed[1])}:${parsed[2]}` : clean);
+									}
+								}
+								const rawList = outputLines.join("\n");
+								const listTruncation = truncateHead(rawList, { maxLines: Number.MAX_SAFE_INTEGER });
+								let listOutput = listTruncation.content;
+								const listDetails: GrepToolDetails = {};
+								const listNotices: string[] = [];
+								if (matchLimitReached) {
+									listNotices.push(
+										`${effectiveLimit} files limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+									);
+									listDetails.matchLimitReached = effectiveLimit;
+								}
+								if (listTruncation.truncated) {
+									listNotices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+									listDetails.truncation = listTruncation;
+								}
+								if (listNotices.length > 0) listOutput += `\n\n[${listNotices.join(". ")}]`;
+								settle(() =>
+									resolve({
+										content: [{ type: "text", text: listOutput }],
+										details: nonEmptyDetails(listDetails),
+									}),
+								);
 								return;
 							}
 							if (matchCount === 0) {
