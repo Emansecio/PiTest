@@ -23,6 +23,12 @@ const astEditSchema = Type.Object(
 			Type.String({ description: "Language id (e.g. ts, tsx, js, py, rs). Inferred from path when omitted." }),
 		),
 		path: Type.Optional(Type.String({ description: "File or directory to operate on. Default: cwd." })),
+		globs: Type.Optional(
+			Type.Array(Type.String(), {
+				description:
+					"Glob filters to scope the rewrite, e.g. ['src/**/*.ts'] or ['!**/*.test.ts'] to exclude. Forward slashes only.",
+			}),
+		),
 		preview: Type.Optional(
 			Type.Boolean({
 				description:
@@ -182,10 +188,11 @@ export function createAstEditToolDefinition(
 		parameters: astEditSchema,
 		prepareArguments: prepareWithPathAliases,
 		async execute(_toolCallId, input: AstEditToolInput, signal?: AbortSignal) {
-			const { pattern, rewrite, lang, path: targetPath, preview, dry_run } = input;
+			const { pattern, rewrite, lang, path: targetPath, globs, preview, dry_run } = input;
 			const target = resolveToCwd(targetPath || ".", cwd);
 			const baseArgs: string[] = ["run", "--pattern", pattern, "--rewrite", rewrite];
 			if (lang) baseArgs.push("--lang", lang);
+			if (globs) for (const g of globs) baseArgs.push("--globs", g);
 
 			// Dry-run path: compute matches with --json=stream and --update-all combined? No — ast-grep accepts
 			// --json without --update-all to preview rewrites in the JSON output.

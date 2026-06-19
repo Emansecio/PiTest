@@ -135,6 +135,13 @@ export interface IndentMatchResult {
 export interface Edit {
 	oldText: string;
 	newText: string;
+	/**
+	 * Replace every occurrence of `oldText` instead of requiring it to be unique.
+	 * When false/absent, more than one match is a duplicate error (the default —
+	 * forces the model to disambiguate). Use for renames where the same identifier
+	 * appears many times intentionally.
+	 */
+	replaceAll?: boolean;
 }
 
 interface MatchedEdit {
@@ -485,14 +492,38 @@ function getNotFoundError(path: string, editIndex: number, totalEdits: number, h
 	);
 }
 
-function getDuplicateError(path: string, editIndex: number, totalEdits: number, occurrences: number): Error {
+/** 1-based line numbers of the first `limit` non-overlapping occurrences of `needle`. */
+function findOccurrenceLines(content: string, needle: string, limit: number): number[] {
+	const out: number[] = [];
+	let from = content.indexOf(needle);
+	while (from !== -1 && out.length < limit) {
+		out.push(content.slice(0, from).split("\n").length);
+		from = content.indexOf(needle, from + needle.length);
+	}
+	return out;
+}
+
+function getDuplicateError(
+	path: string,
+	editIndex: number,
+	totalEdits: number,
+	occurrences: number,
+	occurrenceLines?: number[],
+): Error {
+	// Unlike the not-found path, a duplicate gave the model no clue WHERE the
+	// matches are, so it would retry with a still-ambiguous oldText. Naming the
+	// lines lets it add a unique surrounding line in one shot.
+	const locationHint =
+		occurrenceLines && occurrenceLines.length > 0
+			? ` Occurrences at line(s): ${occurrenceLines.join(", ")}${occurrenceLines.length < occurrences ? ", …" : ""}. Add a unique surrounding line to disambiguate.`
+			: " Please provide more context to make it unique.";
 	if (totalEdits === 1) {
 		return new Error(
-			`Found ${occurrences} occurrences of the text in ${path}. The text must be unique. Please provide more context to make it unique.`,
+			`Found ${occurrences} occurrences of the text in ${path}. The text must be unique.${locationHint}`,
 		);
 	}
 	return new Error(
-		`Found ${occurrences} occurrences of edits[${editIndex}] in ${path}. Each oldText must be unique. Please provide more context to make it unique.`,
+		`Found ${occurrences} occurrences of edits[${editIndex}] in ${path}. Each oldText must be unique.${locationHint}`,
 	);
 }
 
@@ -532,6 +563,7 @@ export function applyEditsToNormalizedContent(
 	const normalizedEdits = edits.map((edit) => ({
 		oldText: normalizeToLF(edit.oldText),
 		newText: normalizeToLF(edit.newText),
+		replaceAll: edit.replaceAll === true,
 	}));
 
 	for (let i = 0; i < normalizedEdits.length; i++) {
@@ -555,7 +587,24 @@ export function applyEditsToNormalizedContent(
 		// Tier 1 — exact match against the original content.
 		const exactCount = countSubstring(normalizedContent, edit.oldText);
 		if (exactCount > 1) {
-			throw getDuplicateError(path, i, normalizedEdits.length, exactCount);
+			if (!edit.replaceAll) {
+				const lines = findOccurrenceLines(normalizedContent, edit.oldText, 5);
+				throw getDuplicateError(path, i, normalizedEdits.length, exactCount, lines);
+			}
+			// replaceAll: stage every non-overlapping occurrence. They cannot overlap
+			// each other (scan advances past each match), and the reverse-order splice
+			// below keeps offsets stable.
+			let from = normalizedContent.indexOf(edit.oldText);
+			while (from !== -1) {
+				matchedEdits.push({
+					editIndex: i,
+					matchIndex: from,
+					matchLength: edit.oldText.length,
+					newText: edit.newText,
+				});
+				from = normalizedContent.indexOf(edit.oldText, from + edit.oldText.length);
+			}
+			continue;
 		}
 		if (exactCount === 1) {
 			matchedEdits.push({
@@ -575,7 +624,17 @@ export function applyEditsToNormalizedContent(
 		if (fuzzyIndex !== -1) {
 			const occurrences = countSubstring(normalized, fuzzyOldText);
 			if (occurrences > 1) {
-				throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
+				if (!edit.replaceAll) {
+					throw getDuplicateError(path, i, normalizedEdits.length, occurrences);
+				}
+				let from = fuzzyIndex;
+				while (from !== -1) {
+					const matchIndex = map[from];
+					const matchLength = map[from + fuzzyOldText.length] - matchIndex;
+					matchedEdits.push({ editIndex: i, matchIndex, matchLength, newText: edit.newText });
+					from = normalized.indexOf(fuzzyOldText, from + fuzzyOldText.length);
+				}
+				continue;
 			}
 			const matchIndex = map[fuzzyIndex];
 			const matchLength = map[fuzzyIndex + fuzzyOldText.length] - matchIndex;

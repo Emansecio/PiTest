@@ -249,7 +249,11 @@ export function createWriteToolDefinition(
 					path,
 					apply: async () => {
 						await ops.mkdir(dir);
-						await ops.writeFile(absolutePath, content);
+						// Format at commit exactly as the direct-write path does, so the bytes
+						// landed by a previewed write match a non-previewed one (no signal: the
+						// commit runs later in the resolve lifecycle, not the staging one).
+						const formatted = await maybeFormat(absolutePath, content, cwd);
+						await ops.writeFile(absolutePath, formatted.content);
 					},
 					summary: {
 						description: `write ${path}: ${content.length} bytes`,

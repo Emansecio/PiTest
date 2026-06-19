@@ -22,6 +22,12 @@ const astGrepSchema = Type.Object(
 			Type.String({ description: "Language id (e.g. ts, tsx, js, py, rs). Inferred from path when omitted." }),
 		),
 		path: Type.Optional(Type.String({ description: "File or directory to search. Default: cwd." })),
+		globs: Type.Optional(
+			Type.Array(Type.String(), {
+				description:
+					"Glob filters to scope the search, e.g. ['src/**/*.ts'] or ['!**/*.test.ts'] to exclude. Forward slashes only.",
+			}),
+		),
 		context: Type.Optional(Type.Number({ description: "Lines of context around each match (default: 0)." })),
 		limit: Type.Optional(
 			Type.Number({ description: `Max matches to return (default ${DEFAULT_LIMIT}, hard cap ${MAX_LIMIT}).` }),
@@ -165,12 +171,13 @@ export function createAstGrepToolDefinition(
 		parameters: astGrepSchema,
 		prepareArguments: prepareWithPathAliases,
 		async execute(_toolCallId, input: AstGrepToolInput, signal?: AbortSignal) {
-			const { pattern, lang, path: searchPath, context, limit } = input;
+			const { pattern, lang, path: searchPath, globs, context, limit } = input;
 			const target = resolveToCwd(searchPath || ".", cwd);
 			const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, limit ?? DEFAULT_LIMIT));
 
 			const args: string[] = ["run", "--pattern", pattern];
 			if (lang) args.push("--lang", lang);
+			if (globs) for (const g of globs) args.push("--globs", g);
 			if (context && context > 0) args.push("--context", String(context));
 			args.push("--json=stream");
 			args.push(target);

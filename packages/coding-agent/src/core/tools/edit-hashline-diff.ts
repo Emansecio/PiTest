@@ -187,6 +187,16 @@ function findAnchor(
 	const all = index.get(hash) ?? [];
 	const filtered = all.filter((i) => i >= minStart);
 	if (filtered.length === 0) {
+		// The hash DOES exist, just not after the before window — distinct from truly
+		// absent. Saying "not found, re-read" sends the model into a sterile retry (it
+		// re-reads, sees the same hash, and is none the wiser). Tell it the real cause.
+		if (all.length > 0) {
+			const at = all.map((i) => i + 1);
+			throw new HashlineEditError(
+				{ kind: "not_found", which, editIndex, hash, nearby: all },
+				`edits[${editIndex}].${which} ${hash} exists at line(s) ${at.join(", ")} but at/before the before_hash window (must start at line ${minStart + 1} or later); after_hash must come after before_hash. Swap the anchors or pick an after_hash further down.`,
+			);
+		}
 		const nearby = nearbyLineNumbers(lines, hash, 3, index);
 		const nearbyStr = nearby.length > 0 ? ` Nearby lines: ${nearby.join(", ")}.` : "";
 		throw new HashlineEditError(

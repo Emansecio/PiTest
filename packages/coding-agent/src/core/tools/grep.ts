@@ -60,6 +60,13 @@ const DEFAULT_LIMIT = 100;
 // read.ts's STREAM_READ_MIN_BYTES.
 const MAX_GREP_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_GREP_FILE_SIZE_ARG = "10M";
+// Per-LINE byte ceiling for content mode. Without it a match inside a minified
+// single-line file (a 10MB .min.js / one-line JSON dump under MAX_GREP_FILE_BYTES)
+// puts the entire line in rg's `--json` `lines.text`, which createInterface buffers
+// and JSON.parse materialises on the heap BEFORE truncateLine cuts it to 500 chars.
+// Generous enough that ordinary lines (and the match-centred window) are unaffected
+// — the visible output is truncated downstream regardless; this only bounds heap.
+const GREP_MAX_COLUMNS = 4096;
 // Cap retained rg stderr so a tree spewing permission/diagnostic warnings can't
 // grow memory unbounded. Mirrors the LSP's MAX_STDERR_BYTES. We keep the HEAD,
 // not the tail: stderr is consumed once as the error message and the first line
@@ -316,6 +323,10 @@ export function createGrepToolDefinition(
 						// the model can find files without paying for every matching line.
 						if (mode === "content") {
 							args.push("--json", "--line-number");
+							// Bound per-line bytes so a giant minified line doesn't spike the heap on
+							// JSON.parse. --max-columns-preview keeps a leading slice so the match line
+							// still renders (the output is truncated to GREP_MAX_LINE_LENGTH anyway).
+							args.push("--max-columns", String(GREP_MAX_COLUMNS), "--max-columns-preview");
 						} else if (mode === "files_with_matches") {
 							args.push("--files-with-matches");
 						} else {

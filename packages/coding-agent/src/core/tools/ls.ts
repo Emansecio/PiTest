@@ -182,8 +182,16 @@ export function createLsToolDefinition(
 							const settled = await Promise.allSettled(
 								batch.map(async (entry) => {
 									const fullPath = nodePath.join(dirPath, entry);
-									const entryStat = await ops.stat(fullPath);
-									return entry + (entryStat.isDirectory() ? "/" : "");
+									try {
+										const entryStat = await ops.stat(fullPath);
+										return entry + (entryStat.isDirectory() ? "/" : "");
+									} catch {
+										// stat follows symlinks, so a dangling link (or a no-permission
+										// entry) throws. Never drop it — the entry exists in the directory.
+										// Mark with `@` (the common cause is a broken symlink) instead of
+										// silently vanishing, which would make the listing look incomplete.
+										return `${entry}@`;
+									}
 								}),
 							);
 							for (const result of settled) {

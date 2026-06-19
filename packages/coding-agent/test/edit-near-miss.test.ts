@@ -22,6 +22,46 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
+describe("applyEditsToNormalizedContent replaceAll", () => {
+	it("replaces every occurrence when replaceAll is true", () => {
+		const content = "const x = old; foo(old); return old;\n";
+		const { newContent } = applyEditsToNormalizedContent(
+			content,
+			[{ oldText: "old", newText: "neo", replaceAll: true }],
+			"f.ts",
+		);
+		expect(newContent).toBe("const x = neo; foo(neo); return neo;\n");
+	});
+
+	it("still throws a duplicate error when replaceAll is absent and the text is not unique", () => {
+		const content = "a old b old c\n";
+		expect(() => applyEditsToNormalizedContent(content, [{ oldText: "old", newText: "neo" }], "f.ts")).toThrow(
+			/occurrences/i,
+		);
+	});
+
+	it("the duplicate error names the occurrence line numbers", () => {
+		const content = "line one foo\nline two\nline three foo\nfoo again\n";
+		try {
+			applyEditsToNormalizedContent(content, [{ oldText: "foo", newText: "bar" }], "f.ts");
+			throw new Error("should have thrown");
+		} catch (e) {
+			const msg = (e as Error).message;
+			expect(msg).toMatch(/Occurrences at line\(s\): 1, 3, 4/);
+		}
+	});
+
+	it("replaceAll on a unique occurrence behaves like a normal single replace", () => {
+		const content = "only one here\n";
+		const { newContent } = applyEditsToNormalizedContent(
+			content,
+			[{ oldText: "one", newText: "1", replaceAll: true }],
+			"f.ts",
+		);
+		expect(newContent).toBe("only 1 here\n");
+	});
+});
+
 describe("buildNearMissHint", () => {
 	it("returns null when content and oldText share no lines", () => {
 		const hint = buildNearMissHint("alpha\nbeta\n", "totally\nunrelated\n");

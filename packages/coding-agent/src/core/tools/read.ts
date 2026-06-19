@@ -901,7 +901,11 @@ Common mistakes to avoid:
 									!truncation.truncated &&
 									wholeFile !== undefined
 								) {
-									outputText += `\n\n<anchors>\n${formatAnchorsForRead(wholeFile.textContent, { lines: wholeFile.allLines })}\n</anchors>`;
+									// stride:1 anchors EVERY window so edit_hashline can target any line
+									// boundary (the model can't compute sha256, so it can only anchor on
+									// printed hashes). formatAnchorsForRead still doubles the stride under
+									// the byte budget, so large files degrade gracefully instead of bloating.
+									outputText += `\n\n<anchors>\n${formatAnchorsForRead(wholeFile.textContent, { lines: wholeFile.allLines, stride: 1 })}\n</anchors>`;
 								}
 								content = [{ type: "text", text: outputText }];
 							}

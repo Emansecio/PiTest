@@ -38,9 +38,15 @@ const replaceEditSchema = Type.Object(
 	{
 		oldText: Type.String({
 			description:
-				"Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call.",
+				"Exact text for one targeted replacement. It must be unique in the original file (unless replaceAll is true) and must not overlap with any other edits[].oldText in the same call.",
 		}),
 		newText: Type.String({ description: "Replacement text for this targeted edit." }),
+		replaceAll: Type.Optional(
+			Type.Boolean({
+				description:
+					"Replace EVERY occurrence of oldText instead of requiring it to be unique (default false). Use for renames where the same identifier appears many times.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );

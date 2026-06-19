@@ -205,6 +205,17 @@ describe("grep outputMode + multiline (locate-cheaply / cross-line patterns)", (
 		expect(multi).toContain("multi.ts");
 	});
 
+	it("a match in a very long (minified) line still renders via the column preview", async () => {
+		// A single line far longer than GREP_MAX_COLUMNS: rg must still emit a preview
+		// (so the match shows) instead of suppressing the line, and not buffer the whole
+		// thing. Match token sits early so it survives both the column cap and truncation.
+		const longLine = `const NEEDLE_TOKEN = 1; ${"x".repeat(6000)}`;
+		writeFileSync(join(tempRoot, "src", "min.js"), `${longLine}\n`);
+		const out = await runGrep({ pattern: "NEEDLE_TOKEN", path: "src/min.js" });
+		expect(out).toContain("min.js");
+		expect(out).toContain("NEEDLE_TOKEN");
+	});
+
 	it("multiline content mode prefixes each physical line with its own line number", async () => {
 		// The match spans lines 1-2; each physical line must carry its own `path:N:`
 		// prefix and correct number, not collapse into one mislabeled row.

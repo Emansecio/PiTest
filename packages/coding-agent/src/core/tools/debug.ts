@@ -36,6 +36,7 @@ import { formatPathRelativeToCwd } from "../lsp/utils.ts";
 import { formatWatchpointBisect, runWatchpointBisect, type WatchpointBisectDeps } from "../watchpoint-bisect.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { DEFAULT_MAX_BYTES, formatSize, truncateTail } from "./truncate.ts";
 
 /**
  * DAP debug actions that only read program state (no mutation, no execution).
@@ -890,7 +891,15 @@ export function createDebugToolDefinition(
 					const response = dapSessionManager.getOutput();
 					details.snapshot = response.snapshot;
 					details.output = response.output;
-					return textResult(response.output.length > 0 ? response.output : "(no output captured)", details);
+					if (response.output.length === 0) return textResult("(no output captured)", details);
+					// Debug output is an unbounded temporal stream (a logging loop / progress
+					// spam can be megabytes). Cap it, keeping the TAIL — in a hang the most
+					// recent lines are the relevant ones. The full text stays in details.output.
+					const truncation = truncateTail(response.output);
+					const text = truncation.truncated
+						? `[debug output truncated to the last ${formatSize(DEFAULT_MAX_BYTES)} — most recent lines shown]\n${truncation.content}`
+						: truncation.content;
+					return textResult(text, details);
 				}
 				case "terminate": {
 					const snapshot = await dapSessionManager.terminate(signal, timeoutMs);

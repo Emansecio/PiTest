@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import { recordDiagnostic } from "@pit/ai";
@@ -467,9 +468,16 @@ function resolveSpawnContext(command: string, cwd: string, spawnHook?: BashSpawn
  * paths are used verbatim; relative ones resolve against `baseCwd`; empty/missing
  * falls back to `baseCwd`. Existence is validated downstream by the executor,
  * which rejects with a clear "Working directory does not exist" error. */
-function resolveBashCwd(baseCwd: string, cwdArg?: string): string {
+export function resolveBashCwd(baseCwd: string, cwdArg?: string): string {
 	const trimmed = cwdArg?.trim();
 	if (!trimmed) return baseCwd;
+	// Expand a leading `~`/`~/` to the home dir first — otherwise `~/proj` is not
+	// absolute (especially on Windows) and resolves under baseCwd as a literal
+	// directory named "~", which the executor then rejects as non-existent.
+	if (trimmed === "~") return homedir();
+	if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+		return resolvePath(homedir(), trimmed.slice(2));
+	}
 	return isAbsolute(trimmed) ? trimmed : resolvePath(baseCwd, trimmed);
 }
 
