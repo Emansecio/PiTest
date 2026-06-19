@@ -463,20 +463,15 @@ function trySave(deps: LivingRepoMapDeps, cachePath: string, map: LivingRepoMap)
  * of a compaction) so the digest only covers what the turn actually used; pass
  * undefined to project the entire map.
  *
- * WIRE POINT (do NOT edit compaction.ts from this lane — main loop wires it):
- *   In `packages/coding-agent/src/core/compaction/compaction.ts` at the
- *   `buildFileDigests(...)` call site (currently line ~1483, inside the
- *   `if (digestPaths.length > 0)` block, line ~1482), the main loop should:
- *     1. `const { map } = await getLivingRepoMap(cwd ?? ".");`  (top of the block)
- *     2. `const cached = livingRepoMapToDigests(map, digestPaths.map((p) => relative(cwd ?? ".", isAbsolute(p) ? p : resolve(cwd ?? ".", p))));`
- *     3. Pass `cached` as a pre-seed to `buildFileDigests` so files already in
- *        the map are NOT re-read/re-parsed — only cache-miss paths hit disk.
- *   This makes the digest a cache READ instead of a full rebuild. The import to
- *   add at compaction.ts:19 area:
- *     `import { getLivingRepoMap, livingRepoMapToDigests } from "../repo-map/living-index.ts";`
- *   Degradation: if `getLivingRepoMap` returns a `full-scan` map (non-git), the
- *   seed simply has fewer/all entries — `buildFileDigests` still fills any gaps,
- *   so correctness is unchanged; only the cost differs.
+ * WIRED: this adapter is consumed by compaction. In
+ * `packages/coding-agent/src/core/compaction/compaction.ts`, inside the
+ * `if (digestPaths.length > 0)` block (~line 1520), the compaction path calls
+ * `getLivingRepoMap(cwd)` + `livingRepoMapToDigests(map)` and passes the result
+ * as the `preSeed` to `buildFileDigests`, so anything already indexed is NOT
+ * re-read/re-parsed — the digest becomes a cache READ instead of a full rebuild.
+ * Fail-open: if `getLivingRepoMap` returns a `full-scan` map (non-git), the seed
+ * simply has fewer/all entries and `buildFileDigests` fills any gaps, so output
+ * is identical; only the cost differs.
  */
 export function livingRepoMapToDigests(map: LivingRepoMap, forPaths?: string[]): Record<string, string> {
 	const want = forPaths ? new Set(forPaths.map((p) => p.split("\\").join("/"))) : undefined;

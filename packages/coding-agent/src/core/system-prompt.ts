@@ -313,6 +313,15 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 	addGuideline("Cite code locations as path:line when referencing code.");
 	addGuideline(
+		"Default to NO code comments. Add one only when the logic is non-obvious and the comment explains *why*, not *what*. Never narrate the diff in comments.",
+	);
+	addGuideline(
+		"If the user's premise is wrong (a false assumption, a bug in their suggested fix, a misread of the code), say so directly and briefly before proceeding — do not silently comply.",
+	);
+	addGuideline(
+		"Report outcomes faithfully: if a check failed, was skipped, or you did not run it, say so plainly — never imply a pass you did not verify.",
+	);
+	addGuideline(
 		"Your output renders in a terminal: keep prose compact, prefer short lists, and avoid wide tables or deeply nested markdown.",
 	);
 

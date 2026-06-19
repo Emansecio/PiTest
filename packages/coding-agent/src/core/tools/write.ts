@@ -1,6 +1,6 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Container, Text } from "@pit/tui";
-import { mkdir as fsMkdir } from "fs/promises";
+import { mkdir as fsMkdir, stat as fsStat } from "fs/promises";
 import { dirname } from "path";
 import { type Static, Type } from "typebox";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
@@ -10,6 +10,7 @@ import { attachPostWriteDiagnostics, maybeFormat } from "../lsp/writethrough.ts"
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { applyKeyAliases, PATH_KEY_ALIASES } from "./argument-prep.js";
+import type { FileMtimeStore } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { attachOmissionWarning } from "./lazy-omission-attach.ts";
 import { resolveToCwd } from "./path-utils.js";
@@ -75,6 +76,23 @@ const defaultWriteOperations: WriteOperations = {
 export interface WriteToolOptions {
 	/** Custom operations for file writing. Default: local filesystem */
 	operations?: WriteOperations;
+	/**
+	 * Optional per-session mtime store (shared with read/edit). When present, a
+	 * successful write refreshes the recorded mtime so a later edit's stale-read
+	 * check doesn't flag our own write as an external change.
+	 */
+	mtimeStore?: FileMtimeStore;
+}
+
+/** Record the file's post-write mtime in the shared store. Non-fatal on failure. */
+async function refreshMtime(store: FileMtimeStore | undefined, absolutePath: string): Promise<void> {
+	if (!store) return;
+	try {
+		const st = await fsStat(absolutePath);
+		store.set(absolutePath, st.mtimeMs);
+	} catch {
+		// stat failed — non-fatal; the next read re-records it.
+	}
 }
 
 type WriteHighlightCache = {
@@ -207,6 +225,7 @@ export function createWriteToolDefinition(
 	options?: WriteToolOptions,
 ): ToolDefinition<typeof writeSchema, undefined> {
 	const ops = options?.operations ?? defaultWriteOperations;
+	const mtimeStore = options?.mtimeStore;
 	return {
 		name: "write",
 		label: "write",
@@ -254,6 +273,7 @@ export function createWriteToolDefinition(
 						// commit runs later in the resolve lifecycle, not the staging one).
 						const formatted = await maybeFormat(absolutePath, content, cwd);
 						await ops.writeFile(absolutePath, formatted.content);
+						await refreshMtime(mtimeStore, absolutePath);
 					},
 					summary: {
 						description: `write ${path}: ${content.length} bytes`,
@@ -293,6 +313,7 @@ export function createWriteToolDefinition(
 									// can't reject a write that already landed. A pre-commit abort
 									// throws from writeFile and is caught below with disk intact.
 									__written = formatted.content;
+									await refreshMtime(mtimeStore, absolutePath);
 									signal?.removeEventListener("abort", onAbort);
 									resolve({
 										content: [

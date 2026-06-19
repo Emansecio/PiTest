@@ -18,6 +18,7 @@ import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { prepareWithPathAliases } from "./argument-prep.js";
 import { generateDiffString } from "./edit-diff.ts";
 import { formatAnchorsForRead } from "./edit-hashline-diff.ts";
+import type { FileMtimeStore } from "./file-mtime-store.ts";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.js";
 import { formatNotebookSource } from "./notebook-formatter.ts";
 import { resolveReadPath } from "./path-utils.js";
@@ -141,7 +142,7 @@ export interface ReadOperations {
 	 * large-file streaming fast path. Remote operations (e.g. SSH) may omit both
 	 * and keep the buffered readFile path.
 	 */
-	stat?: (absolutePath: string) => Promise<{ size: number; isDirectory?: () => boolean }>;
+	stat?: (absolutePath: string) => Promise<{ size: number; mtimeMs?: number; isDirectory?: () => boolean }>;
 	/** Optional: open a raw byte stream over the file (see stat). */
 	createByteStream?: (absolutePath: string) => NodeJS.ReadableStream;
 	/**
@@ -227,6 +228,12 @@ export interface ReadToolOptions {
 	 * repeat reads (replacing it with a short marker). When omitted, no de-dup.
 	 */
 	readDedupeStore?: ReadDedupeStore;
+	/**
+	 * Optional per-session store of each file's on-disk mtime at read time, so a
+	 * later edit/write can warn when the file changed externally since this read.
+	 * When omitted, no stale-read tracking.
+	 */
+	mtimeStore?: FileMtimeStore;
 	/**
 	 * Text files larger than this many bytes stream line-by-line instead of
 	 * being fully buffered. Default: 10MB. Mainly overridable for tests.
@@ -535,6 +542,7 @@ export function createReadToolDefinition(
 	const ops = options?.operations ?? defaultReadOperations;
 	const embedHashlineAnchors = options?.embedHashlineAnchors ?? true;
 	const dedupeStore = options?.readDedupeStore;
+	const mtimeStore = options?.mtimeStore;
 	const streamingMinBytes = options?.streamingMinBytes ?? STREAM_READ_MIN_BYTES;
 	return {
 		name: "read",
@@ -698,6 +706,11 @@ Common mistakes to avoid:
 								// size-gated. Reused by the streaming branch below.
 								const preReadStat = ops.stat ? await ops.stat(absolutePath) : undefined;
 								if (aborted) return;
+								// Record the on-disk mtime so a later edit/write can warn if the file
+								// changes externally before the model acts on what it read here.
+								if (mtimeStore && preReadStat?.mtimeMs !== undefined) {
+									mtimeStore.set(absolutePath, preReadStat.mtimeMs);
+								}
 								// crushJson buffers the whole file, but refuses to parse above
 								// JSON_CRUSH_MAX_BYTES (it returns undefined and the caller blind-cuts).
 								// Treating a file that large as crush-eligible would skip the bounded

@@ -37,6 +37,7 @@ export type DiagnosticCategory =
 	| "limit.evicted"
 	| "input.truncated"
 	| "prune.proactive"
+	| "compaction.presend-overflow-guard"
 	| "fusion.member-failed"
 	| "fusion.judge-retry"
 	| "fusion.degraded"

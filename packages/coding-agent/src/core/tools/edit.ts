@@ -22,6 +22,7 @@ import {
 	stripBom,
 } from "./edit-diff.ts";
 import { getEditHeaderBg, setEditPreview } from "./edit-preview-shared.ts";
+import type { FileMtimeStore } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { attachOmissionWarning } from "./lazy-omission-attach.ts";
 import { resolveToCwd } from "./path-utils.ts";
@@ -108,6 +109,12 @@ export const defaultEditOperations: EditOperations = {
 export interface EditToolOptions {
 	/** Custom operations for file editing. Default: local filesystem */
 	operations?: EditOperations;
+	/**
+	 * Optional per-session mtime store (shared with read/write). When present, the
+	 * edit warns if the file changed on disk since the model last read it this
+	 * session, and refreshes the recorded mtime after a successful commit.
+	 */
+	mtimeStore?: FileMtimeStore;
 }
 
 function prepareEditArguments(input: unknown): EditToolInput {
@@ -316,6 +323,7 @@ export function createEditToolDefinition(
 	options?: EditToolOptions,
 ): ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState> {
 	const ops = options?.operations ?? defaultEditOperations;
+	const mtimeStore = options?.mtimeStore;
 	return {
 		name: "edit",
 		label: "edit",
@@ -443,6 +451,24 @@ export function createEditToolDefinition(
 									return;
 								}
 
+								// Stale-read note: if the file changed on disk since the model last
+								// read it this session, the edit still applies to the CURRENT content,
+								// but content the model wasn't shown may have moved — flag it.
+								let staleNote = "";
+								if (ops === defaultEditOperations && mtimeStore) {
+									const seenMtime = mtimeStore.get(absolutePath);
+									if (seenMtime !== undefined) {
+										try {
+											const curStat = await fsStat(absolutePath);
+											if (curStat.mtimeMs !== seenMtime) {
+												staleNote = ` NOTE: ${path} changed on disk since you last read it this session — the edit applied to the current file, but content you weren't shown may have moved; re-read if the result looks unexpected.`;
+											}
+										} catch {
+											// stat failed — non-fatal; skip the note.
+										}
+									}
+								}
+
 								await ops.writeFile(absolutePath, finalContent, signal);
 
 								// Point of no return: the file is committed (atomic rename done).
@@ -469,6 +495,9 @@ export function createEditToolDefinition(
 										if (st.size !== expected) {
 											integrityNote = ` WARNING: post-write size mismatch (expected ${expected} bytes, found ${st.size}). The write may be incomplete — re-read the file to confirm before relying on it.`;
 										}
+										// Refresh the observed mtime so our own write isn't later flagged as
+										// a stale external change by the next edit of this path.
+										if (mtimeStore) mtimeStore.set(absolutePath, st.mtimeMs);
 									} catch {
 										// stat failed — non-fatal; skip the note rather than fail the edit.
 									}
@@ -483,7 +512,7 @@ export function createEditToolDefinition(
 									content: [
 										{
 											type: "text",
-											text: `Successfully replaced ${edits.length} block(s) in ${path}.${integrityNote}`,
+											text: `Successfully replaced ${edits.length} block(s) in ${path}.${integrityNote}${staleNote}`,
 										},
 									],
 									details: { diff: diffResult.diff, firstChangedLine: diffResult.firstChangedLine },

@@ -222,6 +222,7 @@ import {
 import { createSameSessionHintRule } from "./tool-error-hint-rules.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
 import { classifyBashCommand } from "./tools/bash-activity.js";
+import { FileMtimeStore } from "./tools/file-mtime-store.ts";
 import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.js";
 import { ReadDedupeStore } from "./tools/read.js";
 import { listDeclarations } from "./tools/symbol.ts";
@@ -380,6 +381,14 @@ const REPEATING_PATTERN_THRESHOLD = 3;
 // threshold (default 2) and error-only, so this softer no-abort signal stays
 // conservative and rarely false-fires. See _maybeInjectResultLoopReminder.
 const RESULT_LOOP_THRESHOLD = 5;
+
+/**
+ * Fraction of the context window above which the pre-send overflow guard forces a
+ * compaction, measured on the assembled payload (last usage + trailing tool
+ * results). Kept high so it only catches an imminent overflow the normal
+ * threshold check — which keys off `usage` alone — would miss.
+ */
+const PRESEND_OVERFLOW_RATIO = 0.95;
 
 /** Build the continuation prompt that re-injects a failed verification check. */
 function verificationFixPrompt(
@@ -626,6 +635,7 @@ export class AgentSession {
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _disableHashlineAnchors: boolean;
 	private readonly _readDedupeStore: ReadDedupeStore | undefined;
+	private readonly _fileMtimeStore: FileMtimeStore | undefined;
 	private _sessionStartEvent: SessionStartEvent;
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionCommandContextActions?: ExtensionCommandContextActions;
@@ -867,6 +877,12 @@ export class AgentSession {
 		// disables. Content-hashed + LRU-bounded, so edited or long-ago reads re-send.
 		this._readDedupeStore =
 			typeof process !== "undefined" && process.env.PIT_READ_DEDUPE === "0" ? undefined : new ReadDedupeStore();
+		// Per-session file mtime tracking for the stale-read warning: edit/write flag
+		// a file that changed on disk since the model read it. PIT_NO_STALE_READ_WARNING=1 disables.
+		this._fileMtimeStore =
+			typeof process !== "undefined" && process.env.PIT_NO_STALE_READ_WARNING === "1"
+				? undefined
+				: new FileMtimeStore();
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
 		// Size the frequent-files tracker from settings so an opt-in user with a
@@ -1117,7 +1133,10 @@ export class AgentSession {
 						embedHashlineAnchors: () =>
 							!this._disableHashlineAnchors && this.getActiveToolNames().includes("edit_v2"),
 						readDedupeStore: this._readDedupeStore,
+						mtimeStore: this._fileMtimeStore,
 					},
+					edit: { mtimeStore: this._fileMtimeStore },
+					write: { mtimeStore: this._fileMtimeStore },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 				}) as Record<string, ToolDefinition>;
 			} catch {
@@ -5126,6 +5145,36 @@ export class AgentSession {
 		} else {
 			contextTokens = calculateContextTokens(assistantMessage.usage);
 		}
+		// Pre-send overflow guard: `usage` reflects the context AT the last model
+		// response; large tool results that landed afterward are not counted, so the
+		// assembled payload can be about to exceed the window while `contextTokens`
+		// still looks safe. Re-estimate INCLUDING trailing messages and, if the real
+		// payload is near the ceiling, force a compaction now rather than discovering
+		// the overflow only when the next send is rejected (a wasted round-trip). The
+		// `> contextTokens` clause limits this to the case where trailing actually
+		// added mass; it trips only near the top, so the normal threshold path below
+		// is unchanged in the common case. PIT_NO_PRESEND_OVERFLOW_GUARD=1 disables.
+		if (
+			contextWindow > 0 &&
+			!this.isCompacting &&
+			!(typeof process !== "undefined" && process.env.PIT_NO_PRESEND_OVERFLOW_GUARD === "1")
+		) {
+			const assembled = estimateContextTokens(this.agent.state.messages).tokens;
+			if (assembled > contextWindow * PRESEND_OVERFLOW_RATIO && assembled > contextTokens) {
+				if (this._backgroundCompactionPromise) await this._awaitBackgroundCompaction();
+				if (!this.isCompacting) {
+					const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
+					this._lastCompactionDeficit = assembled - (contextWindow - reserve);
+					recordDiagnostic({
+						category: "compaction.presend-overflow-guard",
+						level: "warn",
+						source: "agent-session._checkCompaction",
+						context: { bytes: assembled, note: `window=${contextWindow}` },
+					});
+					return await this._runAutoCompaction("threshold", false);
+				}
+			}
+		}
 		if (shouldCompact(contextTokens, contextWindow, settings, this._lastCompactionDeficit)) {
 			// Serialize hard compaction. Drain any predictive compaction still in flight
 			// (avoids a second _runAutoCompaction overwriting _autoCompactionAbortController
@@ -5666,7 +5715,10 @@ export class AgentSession {
 						embedHashlineAnchors: () =>
 							!this._disableHashlineAnchors && this.getActiveToolNames().includes("edit_v2"),
 						readDedupeStore: this._readDedupeStore,
+						mtimeStore: this._fileMtimeStore,
 					},
+					edit: { mtimeStore: this._fileMtimeStore },
+					write: { mtimeStore: this._fileMtimeStore },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 					// Code-mode: inject the harness-routed dispatcher so a code-mode
 					// program's `tools.x()` calls pass through the same pipeline as a
