@@ -130,6 +130,35 @@ describe("code-mode bridge + kernel", () => {
 		}
 	}, 20_000);
 
+	it("a multibyte tool result is capped by UTF-8 bytes, not UTF-16 units (#40)", async () => {
+		const kernel = createJsKernel(process.cwd());
+		// 1000 CJK chars = 1000 UTF-16 units but 3000 UTF-8 bytes. With a 1500-byte
+		// cap the old .length check (1000 <= 1500) would NOT truncate and re-inject
+		// ~3000 bytes; the byte-accurate cap must truncate to <= 1500 bytes.
+		const big = "\u4e2d".repeat(1000);
+		const dispatcher: CodeModeDispatcher = async () => ({
+			content: [{ type: "text", text: big }],
+			isError: false,
+		});
+		const { channel, dispose } = wire(kernel, dispatcher, ["fetch"], undefined, 1500);
+		try {
+			const program = `
+				const r = await tools.fetch({});
+				console.log("bytes=" + new TextEncoder().encode(r).length);
+				console.log("trunc=" + r.includes("truncated"));
+			`;
+			const r = await channel.runProgram(program, ["fetch"], 10_000, undefined);
+			expect(r.error).toBeFalsy();
+			const lines = r.stdout.trim().split("\n");
+			const bytes = Number(lines[0].split("=")[1]);
+			expect(bytes).toBeLessThanOrEqual(1500);
+			expect(lines[1]).toBe("trunc=true");
+		} finally {
+			dispose();
+			await kernel.close().catch(() => undefined);
+		}
+	}, 20_000);
+
 	it("a failing tool call rejects only that call; the pump keeps serving", async () => {
 		const kernel = createJsKernel(process.cwd());
 		const dispatcher: CodeModeDispatcher = async (name, args) => {

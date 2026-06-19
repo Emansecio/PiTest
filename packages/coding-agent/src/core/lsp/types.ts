@@ -381,14 +381,16 @@ export interface LspClient {
 
 export interface LspJsonRpcRequest {
 	jsonrpc: "2.0";
-	id: number;
+	// JSON-RPC 2.0 allows string ids; some servers use uuid-style ids for
+	// server-initiated requests (workspace/configuration, workspace/applyEdit).
+	id: number | string;
 	method: string;
 	params: unknown;
 }
 
 export interface LspJsonRpcResponse {
 	jsonrpc: "2.0";
-	id?: number;
+	id?: number | string;
 	result?: unknown;
 	error?: { code: number; message: string; data?: unknown };
 }

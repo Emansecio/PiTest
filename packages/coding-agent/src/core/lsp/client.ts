@@ -243,20 +243,22 @@ async function drainMessages(client: LspClient): Promise<void> {
 	if (client.pendingChunks.length > 0 || parseMessage(client.messageBuffer)) void drainMessages(client);
 }
 
-async function routeMessage(client: LspClient, message: LspJsonRpcResponse | LspJsonRpcNotification): Promise<void> {
-	if ("id" in message && message.id !== undefined) {
-		const pending = client.pendingRequests.get(message.id as number);
-		if (pending) {
-			client.pendingRequests.delete(message.id as number);
-			if ("error" in message && message.error) {
-				pending.reject(new Error(`LSP error: ${message.error.message}`));
-			} else {
-				pending.resolve(message.result);
-			}
-		} else if ("method" in message) {
+export async function routeMessage(
+	client: LspClient,
+	message: LspJsonRpcResponse | LspJsonRpcNotification,
+): Promise<void> {
+	// Discriminate by `method`, NOT by id lookup. A server-initiated REQUEST
+	// carries both `method` and `id`; its id comes from the server's own counter
+	// and can collide with one of our in-flight outbound request ids. Looking up
+	// pendingRequests first would resolve our own promise with the request's
+	// (absent) result and never answer the server. So: any message with a
+	// `method` is a server request (has id) or a notification (no id); only a
+	// message WITHOUT a method is a response to one of our outbound requests.
+	if ("method" in message) {
+		if ("id" in message && message.id !== undefined && message.id !== null) {
 			await handleServerRequest(client, message as unknown as LspJsonRpcRequest);
+			return;
 		}
-	} else if ("method" in message) {
 		const notification = message as LspJsonRpcNotification;
 		if (notification.method === "textDocument/publishDiagnostics" && notification.params) {
 			const params = notification.params as PublishDiagnosticsParams;
@@ -270,15 +272,30 @@ async function routeMessage(client: LspClient, message: LspJsonRpcResponse | Lsp
 			if (params.value?.kind === "begin") {
 				client.activeProgressTokens.add(params.token);
 			} else if (params.value?.kind === "end") {
-				client.activeProgressTokens.delete(params.token);
-				if (client.activeProgressTokens.size === 0) client.resolveProjectLoaded();
+				// Only resolve when an actually-tracked token ends and none remain.
+				// A spurious 'end' for a token we never saw 'begin' for (delete=false)
+				// must NOT resolve projectLoaded prematurely.
+				const wasActive = client.activeProgressTokens.delete(params.token);
+				if (wasActive && client.activeProgressTokens.size === 0) client.resolveProjectLoaded();
+			}
+		}
+		return;
+	}
+	if ("id" in message && message.id !== undefined) {
+		const pending = client.pendingRequests.get(message.id as number);
+		if (pending) {
+			client.pendingRequests.delete(message.id as number);
+			if ("error" in message && message.error) {
+				pending.reject(new Error(`LSP error: ${message.error.message}`));
+			} else {
+				pending.resolve(message.result);
 			}
 		}
 	}
 }
 
 async function handleConfigurationRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
-	if (typeof message.id !== "number") return;
+	if (message.id === undefined || message.id === null) return;
 	const params = message.params as { items?: Array<{ section?: string }> };
 	const items = params?.items ?? [];
 	const result = items.map((item) => {
@@ -289,7 +306,7 @@ async function handleConfigurationRequest(client: LspClient, message: LspJsonRpc
 }
 
 async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
-	if (typeof message.id !== "number") return;
+	if (message.id === undefined || message.id === null) return;
 	const params = message.params as { edit?: WorkspaceEdit };
 	if (!params?.edit) {
 		await sendResponse(
@@ -318,10 +335,12 @@ async function handleServerRequest(client: LspClient, message: LspJsonRpcRequest
 		return;
 	}
 	if (message.method === "window/workDoneProgress/create") {
-		if (typeof message.id === "number") await sendResponse(client, message.id, null, message.method);
+		if (message.id !== undefined && message.id !== null) {
+			await sendResponse(client, message.id, null, message.method);
+		}
 		return;
 	}
-	if (typeof message.id !== "number") return;
+	if (message.id === undefined || message.id === null) return;
 	await sendResponse(client, message.id, null, message.method, {
 		code: -32601,
 		message: `Method not found: ${message.method}`,
@@ -330,7 +349,7 @@ async function handleServerRequest(client: LspClient, message: LspJsonRpcRequest
 
 async function sendResponse(
 	client: LspClient,
-	id: number,
+	id: number | string,
 	result: unknown,
 	method: string,
 	error?: { code: number; message: string; data?: unknown },
@@ -550,12 +569,26 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
  */
 export async function waitForProjectLoaded(client: LspClient, signal?: AbortSignal): Promise<void> {
 	if (signal?.aborted) return;
-	await Promise.race([
-		client.projectLoaded,
-		...(signal
-			? [new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }))]
-			: []),
-	]);
+	if (!signal) {
+		await client.projectLoaded;
+		return;
+	}
+	// Always remove the abort listener after the race. `{ once: true }` only
+	// removes it when 'abort' actually fires; in the common case projectLoaded
+	// wins and the listener would otherwise stay attached to a long-lived caller
+	// signal, accumulating across retries (MaxListenersExceededWarning).
+	let onAbort: (() => void) | undefined;
+	try {
+		await Promise.race([
+			client.projectLoaded,
+			new Promise<void>((resolve) => {
+				onAbort = () => resolve();
+				signal.addEventListener("abort", onAbort, { once: true });
+			}),
+		]);
+	} finally {
+		if (onAbort) signal.removeEventListener("abort", onAbort);
+	}
 }
 
 /** Sync in-memory content to the server (didOpen if new, didChange if open). */

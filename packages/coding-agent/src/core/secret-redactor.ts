@@ -50,8 +50,8 @@ const PATTERNS: readonly SecretPattern[] = [
 	{ type: "openai-key", re: /\bsk-[A-Za-z0-9]{20,}\b/g },
 	// Google API key.
 	{ type: "google-api-key", re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
-	// GitHub tokens (personal / oauth / server / user-to-server).
-	{ type: "github-token", re: /\bgh[posu]_[A-Za-z0-9]{36,}\b/g },
+	// GitHub tokens (personal / oauth / refresh / server / user-to-server).
+	{ type: "github-token", re: /\bgh[oprsu]_[A-Za-z0-9]{36,}\b/g },
 	// Slack token (bot/user/app/refresh/legacy).
 	{ type: "slack-token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/g },
 	// JWT (three base64url segments). The header segment starts `eyJ`, which is
@@ -111,6 +111,7 @@ const CASE_SENSITIVE_INDICATORS: readonly string[] = [
 	"AIza",
 	"ghp_",
 	"gho_",
+	"ghr_",
 	"ghs_",
 	"ghu_",
 	"xox",

@@ -78,6 +78,26 @@ describe("GoalManager lifecycle", () => {
 		expect(mgr.shouldAutoContinue()).toBe(false);
 	});
 
+	it("counts the completing turn once but freezes counters afterward (#13)", () => {
+		const { mgr } = makeManager();
+		mgr.start("x", {});
+		mgr.recordTurn(500); // an ordinary work turn
+		// goal_complete fires mid-turn (status -> complete); the completing turn's
+		// recordTurn runs AFTER complete() and must still count once.
+		mgr.complete("done");
+		mgr.recordTurn(400); // completing turn
+		const afterCompletingTurn = mgr.get();
+		expect(afterCompletingTurn?.iterations).toBe(2);
+		expect(afterCompletingTurn?.tokensUsed).toBe(900);
+		// Subsequent turns on the completed goal must NOT inflate the counters.
+		mgr.recordTurn(900);
+		mgr.recordTurn(900);
+		const frozen = mgr.get();
+		expect(frozen?.iterations).toBe(2);
+		expect(frozen?.tokensUsed).toBe(900);
+		expect(frozen?.status).toBe("complete");
+	});
+
 	it("enforces the token budget", () => {
 		const { mgr } = makeManager();
 		mgr.start("x", { tokenBudget: 1000 });

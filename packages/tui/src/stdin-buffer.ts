@@ -253,7 +253,19 @@ function extractCompleteSequences(buffer: string): { sequences: string[]; remain
 				return { sequences, remainder: remaining };
 			}
 		} else {
-			// Not an escape sequence - take a single character
+			// Not an escape sequence - take a single character. Astral-plane
+			// characters (emoji, CJK extensions, math symbols) are encoded as a
+			// UTF-16 surrogate PAIR (two code units); emit the whole pair as one
+			// sequence so downstream key matching never sees a lone surrogate.
+			const code = remaining.charCodeAt(0);
+			if (code >= 0xd800 && code <= 0xdbff && remaining.length > 1) {
+				const low = remaining.charCodeAt(1);
+				if (low >= 0xdc00 && low <= 0xdfff) {
+					sequences.push(remaining.slice(0, 2));
+					pos += 2;
+					continue;
+				}
+			}
 			sequences.push(remaining[0]!);
 			pos++;
 		}

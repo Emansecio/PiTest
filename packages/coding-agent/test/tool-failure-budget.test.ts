@@ -117,13 +117,13 @@ describe("per-turn per-tool failure budget", () => {
 		const session = makeBareSession({ enabled: true, maxPerTurn: 3 });
 		try {
 			const internal = session as unknown as {
-				_recordTurnToolFailure(name: string): { count: number; attemptsLeft: number | undefined };
+				_steering: { recordTurnToolFailure(name: string): { count: number; attemptsLeft: number | undefined } };
 			};
-			expect(internal._recordTurnToolFailure("flaky").attemptsLeft).toBe(2);
-			expect(internal._recordTurnToolFailure("flaky").attemptsLeft).toBe(1);
-			expect(internal._recordTurnToolFailure("flaky").attemptsLeft).toBe(0);
+			expect(internal._steering.recordTurnToolFailure("flaky").attemptsLeft).toBe(2);
+			expect(internal._steering.recordTurnToolFailure("flaky").attemptsLeft).toBe(1);
+			expect(internal._steering.recordTurnToolFailure("flaky").attemptsLeft).toBe(0);
 			// A 4th failure stays clamped at 0 (never negative).
-			expect(internal._recordTurnToolFailure("flaky").attemptsLeft).toBe(0);
+			expect(internal._steering.recordTurnToolFailure("flaky").attemptsLeft).toBe(0);
 		} finally {
 			session.dispose();
 		}
@@ -221,7 +221,8 @@ describe("per-turn per-tool failure budget", () => {
 
 		await harness.session.prompt("use both tools");
 
-		const failures = (harness.session as unknown as { _turnToolFailures: Map<string, number> })._turnToolFailures;
+		const failures = (harness.session as unknown as { _steering: { _turnToolFailures: Map<string, number> } })
+			._steering._turnToolFailures;
 		// "ok" succeeded twice → never recorded; "flaky" failed once → counted once.
 		expect(failures.get("ok")).toBeUndefined();
 		expect(failures.get("flaky")).toBe(1);

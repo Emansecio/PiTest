@@ -16,16 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
-import type {
-	AssistantMessage,
-	Context,
-	ImageContent,
-	Message,
-	Model,
-	TextContent,
-	ToolResultMessage,
-	Usage,
-} from "@pit/ai";
+import type { AssistantMessage, Context, ImageContent, Message, Model, TextContent, Usage } from "@pit/ai";
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
@@ -70,7 +61,6 @@ import {
 import { extractToolFileOp } from "./compaction/utils.js";
 import { buildAsyncDeliveryBody } from "./coordinator/async-delivery.ts";
 import { SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
-import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } from "./cross-error.js";
 import { dapSessionManager } from "./dap/index.ts";
 import { debugVerifyContextPrompt, maybeRunDebugVerify } from "./debug-verify.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -184,27 +174,9 @@ import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader }
 import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
-import {
-	buildStagnationReminder,
-	classifyTurn,
-	decideStagnationReminder,
-	MUTATING_TOOL_NAMES,
-	StagnationTracker,
-} from "./stagnation.js";
+import { MUTATING_TOOL_NAMES } from "./stagnation.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { setCurrentTodoManager, type TodoItem, TodoManager, type TodoState } from "./todo/todo-manager.ts";
-import {
-	buildTodoCadenceReminder,
-	classifyTodoTurn,
-	decideTodoCadenceReminder,
-	TodoCadenceTracker,
-} from "./todo-cadence.js";
-import {
-	buildDoomLoopReminder,
-	buildFailureBudgetReminder,
-	buildToolErrorReflection,
-	decideErrorReflection,
-} from "./tool-call-feedback.js";
 import {
 	extractErrorMessage,
 	fingerprintToolArgs,
@@ -227,6 +199,7 @@ import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.
 import { ReadDedupeStore } from "./tools/read.js";
 import { listDeclarations } from "./tools/symbol.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
+import { TurnSteeringEngine } from "./turn-steering-engine.ts";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
 import { summarizeCheckFailure } from "./verification/failure-summary.ts";
 import {
@@ -370,17 +343,6 @@ const SAME_SESSION_HINT_THRESHOLD = 2;
 // NEW key would exceed the cap — cold entries are the least useful to the
 // recurring-error guard, and the disk persist iterates values order-insensitively.
 const MAX_LEARNED_ERRORS = 500;
-
-// Minimum back-to-back repetitions of a multi-tool cycle (e.g. [read,edit,bash])
-// before the repeating-pattern detector steers. Three full cycles of >= 2 distinct
-// tools is a strong "productive-looking loop" signal the same-call doom-loop misses.
-const REPEATING_PATTERN_THRESHOLD = 3;
-
-// Trailing run of identical ERROR results (args VARYING) before the result-only
-// thrash detector steers. Deliberately HIGHER than the args-keyed doom-loop
-// threshold (default 2) and error-only, so this softer no-abort signal stays
-// conservative and rarely false-fires. See _maybeInjectResultLoopReminder.
-const RESULT_LOOP_THRESHOLD = 5;
 
 /**
  * Fraction of the context window above which the pre-send overflow guard forces a
@@ -711,48 +673,11 @@ export class AgentSession {
 	// number of in-flight tool calls and aggressively pruned on completion.
 	private readonly _toolCallArgsByCallId = new Map<string, unknown>();
 
-	// Highest doom-loop tier already fired in the current identical-call streak.
-	// Lets each tier fire once while the sequence counter keeps climbing toward
-	// the Tier-3 abort — replaces the old per-tier resetSequence() that capped the
-	// count at 4 and made the abort unreachable. Reset when the streak breaks.
-	private _doomLoopFiredTier = 0;
-	// CR6: how many times the CURRENT identical-call streak has been given a
-	// structured-recovery steer at the Tier-3 threshold instead of being aborted.
-	// Caps recovery at RECOVERY_LIMIT so a model that ignores the steer and keeps
-	// looping still hits the hard safety abort (the throw stays reachable). Reset
-	// when the streak breaks (the model left the loop). See _maybeInjectDoomLoopReminder.
-	private _doomLoopRecoveryAttempts = 0;
-	// Signature of the last repeating multi-tool CYCLE we fired a reminder for
-	// ("<patternLength>x<repetitions>"), so we steer once per detected pattern and
-	// re-arm only when the pattern grows or a different cycle/break supersedes it.
-	// Complements _doomLoopFiredTier, which tracks the SAME-call loop. Empty = none.
-	private _repeatingPatternFiredKey = "";
-	// Once-per-streak latch for the result-only thrash signal (same error, varying
-	// args). Reset when the run of identical errors breaks (count <= 1). Separate
-	// from the args-keyed _doomLoopFiredTier ladder. See _maybeInjectResultLoopReminder.
-	private _resultLoopFired = false;
-	private readonly _stagnation = new StagnationTracker();
-	// Cross-error ("flailing") detector: same normalised error in a row across
-	// ≥2 distinct call shapes. Complements the doom-loop (which owns identical
-	// repeats). See _maybeInjectCrossErrorReminder.
-	private readonly _crossError = new CrossErrorTracker();
-	private _crossErrorLastFiredAt = 0;
-	private _lastStagnationReminderAt = 0;
-	// Streak length at which the soft stagnation reminder last fired. Paired with
-	// _lastStagnationReminderAt so a flat streak between soft and hard does not
-	// re-inject the identical ~500-char reminder every cooldown window — a repeat
-	// also requires the streak to have grown by `step` turns (see stagnation.ts).
-	private _lastStagnationReminderCount = 0;
-	// Todo cadence ("sync") detector: nudges when an in_progress todo drifts from the
-	// real work (stale for K turns, or a file mutation without a todo update). See
-	// _maybeInjectTodoCadenceReminder + ADR-0007. Persists across the session like
-	// _stagnation (NOT reset per prompt).
-	private readonly _todoCadence = new TodoCadenceTracker();
-	private _lastTodoCadenceReminderAt = 0;
-	// Todo-first safety net: non-todo work actions taken in the current prompt, plus a
-	// one-shot latch so the nudge fires at most once per prompt. Both reset in prompt().
-	private _promptWorkActions = 0;
-	private _todoFirstNudgeFired = false;
+	// Per-session steering/reminder policy engine: owns the doom-loop / result-loop /
+	// repeating-pattern / cross-error / stagnation / todo-cadence / failure-budget
+	// detectors and their once-per-streak latches + the per-turn failure budget.
+	// Created in the constructor once its injected collaborators exist.
+	private readonly _steering: TurnSteeringEngine;
 
 	// Base system prompt (without extension appends) - used to apply fresh appends each turn
 	private _baseSystemPrompt = "";
@@ -806,16 +731,6 @@ export class AgentSession {
 	// re-dispatching the agent after the user cancels mid-task — without it, Esc
 	// only aborts the current turn and the orchestration loop immediately restarts.
 	private _userInterrupted = false;
-	// Per-turn, per-tool-NAME failure budget. Counts how many times each tool
-	// failed in the CURRENT turn (keyed by tool name, not args), reset strictly at
-	// the top of each prompt cycle alongside `_turnTouchedFiles`. Complements the
-	// doom-loop (same identical call) and cross-error (same error across ≥2
-	// approaches) detectors: this trips purely on the failure COUNT for one tool,
-	// catching an autonomous agent that burns a turn flailing on one tool with
-	// varied args and varied errors. `_turnFailureBudgetFired` marks the tools that
-	// already emitted the forceful steer this turn so it fires once per tool/turn.
-	private readonly _turnToolFailures = new Map<string, number>();
-	private readonly _turnFailureBudgetFired = new Set<string>();
 	// Native verification gate: `_turnTouchedFiles` arms it (set when a file tool
 	// writes/edits this prompt cycle), `_inVerification` guards re-entry, and
 	// `_verificationAbort` cancels an in-flight check on interrupt/dispose.
@@ -884,6 +799,18 @@ export class AgentSession {
 				? undefined
 				: new FileMtimeStore();
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+
+		// Steering/reminder policy engine. Reads settings + the (already standalone)
+		// tool-call stats and todo manager, and posts steers/follow-ups via
+		// sendCustomMessage — it never reaches back into the session. Created here
+		// because its collaborators (settingsManager assigned above; _toolCallStats /
+		// _todo field-initialized) all exist by the time the constructor body runs.
+		this._steering = new TurnSteeringEngine({
+			settingsManager: this.settingsManager,
+			toolCallStats: this._toolCallStats,
+			todo: this._todo,
+			sendCustomMessage: this.sendCustomMessage.bind(this),
+		});
 
 		// Size the frequent-files tracker from settings so an opt-in user with a
 		// very large session does not silently lose hot files to the default cap.
@@ -1136,6 +1063,7 @@ export class AgentSession {
 						mtimeStore: this._fileMtimeStore,
 					},
 					edit: { mtimeStore: this._fileMtimeStore },
+					edit_v2: { mtimeStore: this._fileMtimeStore },
 					write: { mtimeStore: this._fileMtimeStore },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 				}) as Record<string, ToolDefinition>;
@@ -1652,8 +1580,8 @@ export class AgentSession {
 					} satisfies TurnEndEvent);
 				}
 				this._recordGoalTurn(event.message);
-				this._maybeInjectStagnationReminder(event.message, event.toolResults);
-				this._maybeInjectTodoCadenceReminder(event.message, event.toolResults);
+				this._steering.maybeInjectStagnation(event.message, event.toolResults);
+				this._steering.maybeInjectTodoCadence(event.message, event.toolResults);
 				if (this._todo.takeDirty()) this._persistTodo();
 				if (this._plan.takeDirty()) this._persistPlan();
 				// Incremental persistence: flush newly-learned error fingerprints so a
@@ -1741,7 +1669,7 @@ export class AgentSession {
 		// The doom-loop check itself runs at end (see _handleToolExecutionEnd) so it
 		// can compare RESULTS — a call with identical args but a new result each step
 		// (debugger stepping) is real progress, not a loop, and must not trip it.
-		this._toolCallStats.recordInvocation(event.toolName, fingerprintToolArgsExact(event.args));
+		this._toolCallStats.recordInvocation(event.toolName, fingerprintToolArgsExact(event.args), event.toolCallId);
 		this._toolCallArgsByCallId.set(event.toolCallId, event.args);
 	}
 
@@ -1753,8 +1681,7 @@ export class AgentSession {
 		// Todo-first safety net: count successful non-todo/plan work actions this prompt;
 		// at the 2nd one without a todo, the triage protocol was skipped — nudge once. ADR-0007.
 		if (!event.isError && event.toolName !== "todo" && event.toolName !== "plan") {
-			this._promptWorkActions++;
-			this._maybeFireTodoFirstNudge();
+			this._steering.recordWorkAction();
 		}
 		const args = this._toolCallArgsByCallId.get(event.toolCallId);
 		this._toolCallArgsByCallId.delete(event.toolCallId);
@@ -1764,12 +1691,16 @@ export class AgentSession {
 		// args but a NEW result each time (debugger stepping) is progress, not a loop.
 		// Tier 3 throws here to abort the turn — same propagation as the old start-time
 		// throw, just gated on "same call AND same result".
-		this._toolCallStats.recordInvocationResult(fingerprintToolResult(event.result, event.isError), event.isError);
-		this._maybeInjectDoomLoopReminder(event.toolName, args, errorMessage);
+		this._toolCallStats.recordInvocationResult(
+			fingerprintToolResult(event.result, event.isError),
+			event.isError,
+			event.toolCallId,
+		);
+		this._steering.maybeInjectDoomLoop(event.toolName, args, errorMessage);
 		// Complementary to the doom-loop above (same call repeated): detect a
 		// repeating MULTI-tool cycle [A,B,C]x3 of DIFFERENT tools. Runs after — if
 		// the doom-loop Tier-3 aborted, this is skipped (identical-loop abort wins).
-		this._maybeInjectRepeatingPatternReminder();
+		this._steering.maybeInjectRepeatingPattern();
 		// Capture the learned-error fingerprint so the next session boots warm
 		// with knowledge of recurring patterns. Looked up via the matching
 		// hint event recorded earlier in finalize.
@@ -1784,10 +1715,10 @@ export class AgentSession {
 		// Per-turn, per-tool failure budget (complements doom-loop + cross-error):
 		// bump the by-NAME failure count for this turn and surface the remaining
 		// budget to the reflection prompt. Computed once for both error branches.
-		const budget = event.isError ? this._recordTurnToolFailure(event.toolName) : undefined;
+		const budget = event.isError ? this._steering.recordTurnToolFailure(event.toolName) : undefined;
 		if (event.isError && wasRegistryRejected) {
-			this._maybeInjectToolErrorReflection(event.toolName, args, event.result, budget?.attemptsLeft);
-			if (budget) this._maybeInjectFailureBudgetReminder(event.toolName, budget.count, budget.max);
+			this._steering.maybeInjectToolErrorReflection(event.toolName, args, event.result, budget?.attemptsLeft);
+			if (budget) this._steering.maybeInjectFailureBudget(event.toolName, budget.count, budget.max);
 		} else if (event.isError) {
 			const rawError = extractErrorMessage(event.result?.content);
 			const fingerprint = normalizeErrorFingerprint(rawError);
@@ -1851,11 +1782,11 @@ export class AgentSession {
 					this._learnedErrorsDirty = true;
 				}
 			}
-			this._maybeInjectCrossErrorReminder(fingerprint, args, rawError);
-			this._maybeInjectToolErrorReflection(event.toolName, args, event.result, budget?.attemptsLeft);
-			if (budget) this._maybeInjectFailureBudgetReminder(event.toolName, budget.count, budget.max);
+			this._steering.maybeInjectCrossError(fingerprint, args, rawError);
+			this._steering.maybeInjectToolErrorReflection(event.toolName, args, event.result, budget?.attemptsLeft);
+			if (budget) this._steering.maybeInjectFailureBudget(event.toolName, budget.count, budget.max);
 		} else {
-			this._crossError.observeSuccess();
+			this._steering.observeToolSuccess();
 			const fileOp = extractToolFileOp(event.toolName, args);
 			if (fileOp) {
 				this._frequentFiles.record(fileOp.path, fileOp.op);
@@ -2099,304 +2030,6 @@ export class AgentSession {
 	}
 
 	/**
-	 * Fire-and-forget delivery of a reminder/pause custom message. Wraps the
-	 * shared `sendCustomMessage(...).catch(stderr)` tail that every steer-based
-	 * injector (doom-loop, cross-error, stagnation) repeats verbatim, so a failed
-	 * injection logs to stderr without breaking the tool-call loop. `label` is the
-	 * human-readable prefix used in the stderr line ("[pi] <label> delivery
-	 * failed"). Behaviour is identical to inlining the call at each site.
-	 */
-	private _fireReminder(
-		customType: string,
-		content: string,
-		opts: { deliverAs: "steer" | "followUp"; display: boolean; label: string },
-	): void {
-		this.sendCustomMessage({ customType, content, display: opts.display }, { deliverAs: opts.deliverAs }).catch(
-			(err: unknown) => {
-				process.stderr.write(`[pi] ${opts.label} delivery failed: ${err}\n`);
-			},
-		);
-	}
-
-	/**
-	 * Conditionally inject a doom-loop reminder when consecutive identical tool
-	 * calls reach the configured threshold. Settings-gated (off by default).
-	 *
-	 * Each escalation tier fires once per streak (tracked by `_doomLoopFiredTier`)
-	 * while the sequence counter keeps climbing, so a persistent loop actually
-	 * reaches the Tier-3 abort. The previous version reset the counter on Tiers 1
-	 * and 2, which capped it at the Tier-2 threshold and left the Tier-3 abort
-	 * permanently unreachable under the default config. The streak (and the fired
-	 * marker) resets when a different call breaks it.
-	 */
-	private _maybeInjectDoomLoopReminder(toolName: string, args: unknown, errorMessage: string | undefined): void {
-		const cfg = this.settingsManager.getToolFeedbackSettings().doomLoopReminder;
-		if (!cfg.enabled) return;
-		// Result-aware: only calls with identical name+args AND identical result count
-		// as a loop. A successful call that returns new output each step (debugger
-		// stepping, tailing a growing log) keeps producing fresh result hashes, so the
-		// streak never climbs and the turn is never falsely aborted.
-		const consecutiveCount = this._toolCallStats.getConsecutiveSimilarResultCount();
-
-		// Escalation tiers: TIER1 → soft reminder, TIER2 → urgent pause, TIER3 →
-		// structured recovery once (CR6), then a safety abort on relapse.
-		// Tier2/Tier3 clamp above Tier1 so a configured threshold > 3 cannot invert the
-		// order (pause/abort firing before the soft reminder). Default (threshold=2) keeps
-		// the historical 2/4/6 cadence.
-		const TIER1_THRESHOLD = cfg.threshold ?? 2;
-		const TIER2_THRESHOLD = Math.max(4, TIER1_THRESHOLD + 2);
-		const TIER3_THRESHOLD = Math.max(6, TIER1_THRESHOLD + 4);
-		// CR6: how many structured-recovery steers a single streak may receive at the
-		// Tier-3 threshold before the hard abort. 1 = one chance to course-correct,
-		// then the safety throw on relapse. Adjustable if recovery proves too eager.
-		const RECOVERY_LIMIT = 1;
-
-		// CR5: result-only thrash signal — SEPARATE from the args-keyed ladder below
-		// and run on EVERY call (the ladder's early returns must not skip it). When the
-		// args ARE identical the ladder owns this point, so defer (pass that as active)
-		// to avoid a double-steer. Never aborts.
-		this._maybeInjectResultLoopReminder(toolName, errorMessage, consecutiveCount >= TIER1_THRESHOLD);
-
-		// A fresh or broken streak (a different tool+args just ran) clears which
-		// tiers have fired so the next genuine loop escalates from scratch.
-		if (consecutiveCount <= 1) {
-			this._doomLoopFiredTier = 0;
-			// CR6: a genuinely different call broke the streak — the model left the loop,
-			// so forgive its recovery budget. The next distinct loop gets a fresh recovery
-			// attempt before the abort (not an immediate hard stop).
-			this._doomLoopRecoveryAttempts = 0;
-			return;
-		}
-		if (consecutiveCount < TIER1_THRESHOLD) return;
-
-		// Tier 3: structured recovery, then a safety abort on relapse. The FIRST time a
-		// streak reaches this threshold we inject a recovery steer (decompose the step,
-		// switch approach) instead of killing the turn — a bare abort leaves the model
-		// mid-task and it tends to reopen the same loop next turn. Only a RELAPSE (the
-		// streak keeps climbing past Tier-3 because the model ignored the steer and
-		// repeated the call) trips the hard abort. We do NOT resetSequence() on recovery:
-		// that would restart the count at 1, hit the streak-break branch above, clear the
-		// recovery budget, and let the loop inject recovery forever — the safety throw
-		// must stay reachable, so the count is left climbing toward the relapse abort.
-		if (consecutiveCount >= TIER3_THRESHOLD) {
-			if (this._doomLoopRecoveryAttempts < RECOVERY_LIMIT) {
-				this._doomLoopRecoveryAttempts++;
-				this._doomLoopFiredTier = 0;
-				const base = buildDoomLoopReminder({ toolName, args, consecutiveCount });
-				const recovery =
-					`${base}\n\n` +
-					`You have repeated ${consecutiveCount} calls to \`${toolName}\` with no progress. ` +
-					"STOP repeating this call. Rethink from scratch: " +
-					"(1) restate the goal of the current step in one sentence; " +
-					"(2) list the sub-steps; " +
-					"(3) execute ONLY sub-step 1, with a DIFFERENT approach (another tool or different " +
-					"arguments) — or ask the user. Repeating the same call again will abort the turn.";
-				this._fireReminder("pi.doom-loop-recovery", recovery, {
-					deliverAs: "steer",
-					display: true,
-					label: "doom-loop recovery",
-				});
-				return;
-			}
-			// Relapsed after recovery: hard safety abort. Reset the recovery budget so a
-			// future loop (next turn) is once again offered recovery before aborting.
-			this._doomLoopRecoveryAttempts = 0;
-			this._doomLoopFiredTier = 0;
-			this._toolCallStats.resetSequence();
-			throw new Error(
-				`Doom loop abort: ${consecutiveCount} consecutive identical calls to "${toolName}". ` +
-					`The model cannot make progress on this task. Aborting turn.`,
-			);
-		}
-
-		// Tier 2: urgent escalation (visible to the user), once per streak.
-		// Delivered as "steer" — not "followUp" — because follow-ups only drain
-		// once the inner loop ends, and a doom-loop by definition keeps producing
-		// tool calls; a steer is injected before the very next model turn while the
-		// loop is still hot. Does NOT reset the sequence: the count must keep
-		// climbing so a persistent loop reaches the Tier-3 abort instead of
-		// oscillating here forever.
-		if (consecutiveCount >= TIER2_THRESHOLD) {
-			if (this._doomLoopFiredTier >= 2) return;
-			this._doomLoopFiredTier = 2;
-			const remaining = TIER3_THRESHOLD - consecutiveCount;
-			const content = buildDoomLoopReminder({ toolName, args, consecutiveCount });
-			const escalation =
-				content +
-				`\n\nYou have made ${consecutiveCount} identical calls without progress. ` +
-				"Do NOT repeat this call again. State what you expected, what actually happened, " +
-				"and switch strategy: different tool, different arguments, or ask the user for guidance. " +
-				`${remaining} more identical call${remaining === 1 ? "" : "s"} will abort the turn.`;
-			this._fireReminder("pi.doom-loop-pause", escalation, {
-				deliverAs: "steer",
-				display: true,
-				label: "doom-loop pause",
-			});
-			return;
-		}
-
-		// Tier 1: soft reminder, once per streak. Also a steer (see Tier 2): a
-		// followUp would sit queued behind the still-running tool-call loop it is
-		// trying to break.
-		if (this._doomLoopFiredTier >= 1) return;
-		this._doomLoopFiredTier = 1;
-		const content = buildDoomLoopReminder({ toolName, args, consecutiveCount });
-		this._fireReminder("pi.doom-loop-reminder", content, {
-			deliverAs: "steer",
-			display: false,
-			label: "doom-loop reminder",
-		});
-	}
-
-	/**
-	 * CR5 result-only doom-loop: the model keeps CHANGING the arguments but gets the
-	 * SAME error every call. The args-keyed ladder in {@link _maybeInjectDoomLoopReminder}
-	 * resets each call (args differ) and never climbs, so it never catches this
-	 * thrash; this does. Higher threshold ({@link RESULT_LOOP_THRESHOLD}) and
-	 * error-only by design (see {@link ToolCallStats.getConsecutiveSimilarResultOnlyCount})
-	 * to keep false positives low. Fires ONE steer per streak and NEVER aborts (the
-	 * Tier-3 abort stays exclusive to the args-keyed loop). Deferred to that ladder
-	 * when args ARE identical (`argsLadderActive`) so a pure identical loop is not
-	 * double-steered. The once-per-streak latch resets when the run breaks (count <= 1).
-	 */
-	private _maybeInjectResultLoopReminder(
-		toolName: string,
-		errorMessage: string | undefined,
-		argsLadderActive: boolean,
-	): void {
-		const count = this._toolCallStats.getConsecutiveSimilarResultOnlyCount();
-		if (count <= 1) {
-			this._resultLoopFired = false;
-			return;
-		}
-		// The args-keyed ladder already owns an identical-call loop — don't stack two steers.
-		if (argsLadderActive) return;
-		if (count < RESULT_LOOP_THRESHOLD) return;
-		if (this._resultLoopFired) return;
-		this._resultLoopFired = true;
-		const summary = (errorMessage ?? "(no error text)").trim();
-		const cappedSummary = summary.length > 300 ? `${summary.slice(0, 300)}\u2026` : summary;
-		const content = [
-			"<result-loop-reminder>",
-			`You have called \`${toolName}\` ${count} times with DIFFERENT arguments but got the SAME error every time:`,
-			"",
-			"```",
-			cappedSummary,
-			"```",
-			"",
-			"Varying the arguments is not working — the failure is identical regardless. Stop tweaking the arguments and change approach: a different tool, a fundamentally different strategy, or ask the user for guidance. Do not retry another small variation.",
-			"</result-loop-reminder>",
-		].join("\n");
-		this._fireReminder("pi.result-loop-reminder", content, {
-			deliverAs: "steer",
-			display: true,
-			label: "result-loop reminder",
-		});
-	}
-
-	/**
-	 * Conditionally inject a reminder when the agent is cycling a repeating
-	 * MULTI-tool pattern at the tail of the recent-call window — e.g.
-	 * [read,edit,bash] run three times in a row. This is the "productive-looking"
-	 * loop that the consecutive-identical doom-loop ({@link
-	 * _maybeInjectDoomLoopReminder}) cannot see, because each call within a cycle
-	 * is a DIFFERENT tool. Complementary and non-overlapping: it requires
-	 * patternLength >= 2 (cycles of distinct calls), so a single call repeated
-	 * stays exclusively the doom-loop's job and never double-fires.
-	 *
-	 * Fires ONCE per detected pattern (tracked by `_repeatingPatternFiredKey`),
-	 * re-arming only when the cycle/repetition signature changes or the pattern
-	 * breaks. Default-on; disable with `PIT_NO_REPEATING_PATTERN=1`. Delivered as a
-	 * steer (like the doom-loop) so it lands before the next turn while the loop is
-	 * still hot.
-	 */
-	private _maybeInjectRepeatingPatternReminder(): void {
-		if (isTruthyEnvFlag(process.env.PIT_NO_REPEATING_PATTERN)) {
-			this._repeatingPatternFiredKey = "";
-			return;
-		}
-		const match = this._toolCallStats.getRepeatingPatternCount();
-		// patternLength >= 2 excludes the same-call loop (the doom-loop owns it), so
-		// the two detectors never fire on the same condition.
-		if (match.patternLength < 2 || match.repetitions < REPEATING_PATTERN_THRESHOLD) {
-			// Pattern broke or never reached threshold — re-arm for the next cycle.
-			this._repeatingPatternFiredKey = "";
-			return;
-		}
-		// Fire-once signature is the CYCLE composition (the trailing block of tool
-		// names), NOT the repetition count — so the same cycle repeating more times
-		// does not re-spam every pass. Re-arms only when a different cycle takes over
-		// or the pattern breaks (handled above). `getRepeatingPatternCount` keys on
-		// args, so the displayed tool names alone suffice as the anti-respam key.
-		const cycle = this._toolCallStats
-			.getSequence()
-			.slice(-match.patternLength)
-			.map((e) => e.toolName)
-			.join(" → ");
-		const key = `${match.patternLength}:${cycle}`;
-		if (this._repeatingPatternFiredKey === key) return;
-		this._repeatingPatternFiredKey = key;
-		const content =
-			"<repeating-pattern-reminder>\n" +
-			`You have repeated the same ${match.patternLength}-step tool cycle ` +
-			`(${cycle}) ${match.repetitions} times in a row without resolving the task. ` +
-			"This pattern looks productive but is not converging.\n\n" +
-			"Stop and reassess before running the cycle again:\n" +
-			"- What is the cycle supposed to achieve, and why has it not finished after " +
-			`${match.repetitions} passes?\n` +
-			"- Is there a root cause you are working around instead of fixing?\n" +
-			"- Would a different approach, a larger single change, or asking the user for " +
-			"guidance break the loop?\n" +
-			"</repeating-pattern-reminder>";
-		this._fireReminder("pi.repeating-pattern-reminder", content, {
-			deliverAs: "steer",
-			display: false,
-			label: "repeating-pattern reminder",
-		});
-	}
-
-	/**
-	 * Conditionally inject a "you keep hitting the same error" reminder when the
-	 * agent fails repeatedly with one normalised error across ≥2 distinct call
-	 * shapes. Unlike the doom-loop (identical repeats), this catches "flailing":
-	 * the model reacts to a failure by switching tool or tweaking arguments yet
-	 * keeps producing the same blocker — each call's args differ, so the doom-loop
-	 * never trips. Settings-gated; delivered as a steer (like the doom-loop) so it
-	 * lands before the next turn while the loop is still hot. `observeError` runs
-	 * on every fingerprinted error to keep the streak current even when no reminder
-	 * fires.
-	 */
-	private _maybeInjectCrossErrorReminder(
-		errorFingerprint: string | undefined,
-		args: unknown,
-		sampleError: string | undefined,
-	): void {
-		if (!errorFingerprint) return;
-		const cfg = this.settingsManager.getToolFeedbackSettings().crossErrorReminder;
-		const { count, distinctApproaches } = this._crossError.observeError(
-			errorFingerprint,
-			fingerprintToolArgsExact(args),
-		);
-		const decision = decideCrossErrorReminder({
-			enabled: cfg.enabled,
-			threshold: cfg.threshold,
-			count,
-			distinctApproaches,
-			lastFiredAt: this._crossErrorLastFiredAt,
-			now: Date.now(),
-			cooldownMs: cfg.cooldownMs,
-		});
-		if (!decision.fire) return;
-		this._crossErrorLastFiredAt = decision.nextLastFiredAt;
-		const content = buildCrossErrorReminder({ count, distinctApproaches, sampleError });
-		this._fireReminder("pi.cross-error-reminder", content, {
-			deliverAs: "steer",
-			display: false,
-			label: "cross-error reminder",
-		});
-	}
-
-	/**
 	 * Whether a (toolName, args) pair represents a file-mutating action that the
 	 * path-based extractToolFileOp does not recognize. Covers the explicit edit
 	 * tools (write/edit/edit_v2/ast_edit, via the shared MUTATING_TOOL_NAMES set)
@@ -2412,192 +2045,6 @@ export class AgentSession {
 			}
 		}
 		return false;
-	}
-
-	/**
-	 * Conditionally nudge (soft) — then pause (hard) — when the agent runs many
-	 * consecutive turns that call tools but never edit a file. Settings-gated
-	 * (on by default; opt out via toolFeedback.stagnationReminder.enabled: false)
-	 * and cooldown-throttled for the soft tier; the hard tier
-	 * always escalates and resets the streak. Complements the identical-call
-	 * doom-loop detector, which this does not duplicate.
-	 */
-	private _maybeInjectStagnationReminder(message: AgentMessage, toolResults: ToolResultMessage[]): void {
-		const cfg = this.settingsManager.getToolFeedbackSettings().stagnationReminder;
-		if (!cfg.enabled) return;
-		const count = this._stagnation.observe(classifyTurn(message, toolResults));
-		const decision = decideStagnationReminder({
-			enabled: cfg.enabled,
-			softThreshold: cfg.softThreshold,
-			hardThreshold: cfg.hardThreshold,
-			count,
-			lastFiredAt: this._lastStagnationReminderAt,
-			now: Date.now(),
-			cooldownMs: cfg.cooldownMs,
-			lastFiredCount: this._lastStagnationReminderCount,
-		});
-		if (decision.action === "none") return;
-		this._lastStagnationReminderAt = decision.nextLastFiredAt;
-		this._lastStagnationReminderCount = decision.nextLastFiredCount;
-		// Both tiers deliver as "steer", not "followUp" (same reason as the
-		// doom-loop above): stagnation happens DURING the tool-call loop, and a
-		// followUp would sit queued behind that loop — only draining once it ends,
-		// which is exactly the stall we are trying to break. A steer lands before
-		// the next model turn while the loop is still hot.
-		if (decision.action === "pause") {
-			this._stagnation.reset();
-			// Streak is wiped: clear the soft-reminder memory too so a fresh streak
-			// after the user resumes fires cleanly at the soft threshold again.
-			this._lastStagnationReminderAt = 0;
-			this._lastStagnationReminderCount = 0;
-			const content = buildStagnationReminder({ count, paused: true });
-			this._fireReminder("pi.stagnation-pause", content, {
-				deliverAs: "steer",
-				display: true,
-				label: "stagnation pause",
-			});
-			return;
-		}
-		const content = buildStagnationReminder({ count, paused: false });
-		this._fireReminder("pi.stagnation-reminder", content, {
-			deliverAs: "steer",
-			display: false,
-			label: "stagnation reminder",
-		});
-	}
-
-	/**
-	 * Todo-first safety net (ADR-0007): the triage protocol in the system prompt
-	 * should make the agent create a todo before non-trivial work. This catches the
-	 * miss — once the agent has taken ≥2 non-todo work actions in a prompt with an
-	 * empty todo list, fire a single silent nudge. One-shot per prompt (latched),
-	 * settings-gated via the shared todoCadenceReminder switch.
-	 */
-	private _maybeFireTodoFirstNudge(): void {
-		if (this._todoFirstNudgeFired) return;
-		if (this._promptWorkActions < 2) return;
-		if (!this._todo.isEmpty()) return;
-		const cfg = this.settingsManager.getToolFeedbackSettings().todoCadenceReminder;
-		if (!cfg.enabled) return;
-		this._todoFirstNudgeFired = true;
-		const content = [
-			"<todo-first-reminder>",
-			"You have taken several actions without a todo list. If this task needs more than one step " +
-				"or any investigation, create a todo now (even a single '1. Identify X') and mark one " +
-				"in_progress so your progress stays tracked.",
-			"</todo-first-reminder>",
-		].join("\n");
-		this._fireReminder("pi.todo-first-nudge", content, {
-			deliverAs: "steer",
-			display: false,
-			label: "todo-first nudge",
-		});
-	}
-
-	/**
-	 * Todo cadence ("sync") reminder (ADR-0007): hand the enumerated todo list back
-	 * to the model and ask it to update status when the list has drifted from the
-	 * real work — an item sits in_progress for K turns with no todo update, or a file
-	 * was mutated this turn without touching the todo. Reminds, never auto-completes.
-	 * Delivered as a steer (lands before the next turn while the loop is hot, like
-	 * stagnation). Settings-gated + cooldown-throttled.
-	 */
-	private _maybeInjectTodoCadenceReminder(message: AgentMessage, toolResults: ToolResultMessage[]): void {
-		const cfg = this.settingsManager.getToolFeedbackSettings().todoCadenceReminder;
-		if (!cfg.enabled) return;
-		const { touchedTodo, mutated } = classifyTodoTurn(message, toolResults);
-		const hasInProgress = this._todo.hasInProgress();
-		const staleTurns = this._todoCadence.observe({ hasInProgress, touchedTodo });
-		const mutatedWithoutTodo = mutated && !touchedTodo && !this._todo.isEmpty();
-		const decision = decideTodoCadenceReminder({
-			enabled: cfg.enabled,
-			threshold: cfg.threshold,
-			staleTurns,
-			mutatedWithoutTodo,
-			lastFiredAt: this._lastTodoCadenceReminderAt,
-			now: Date.now(),
-			cooldownMs: cfg.cooldownMs,
-		});
-		if (decision.action === "none") return;
-		this._lastTodoCadenceReminderAt = decision.nextLastFiredAt;
-		const items = this._todo.list();
-		const staleItem = items.find((t) => t.status === "in_progress");
-		const reason = mutatedWithoutTodo ? "mutated" : "stale";
-		const content = buildTodoCadenceReminder({ items, staleItem, reason });
-		this._fireReminder("pi.todo-cadence-reminder", content, {
-			deliverAs: "steer",
-			display: false,
-			label: "todo cadence reminder",
-		});
-	}
-
-	/**
-	 * Conditionally inject a structured reflection prompt after a failing tool
-	 * call. Settings-gated, OFF by default: delivered as a `followUp`, it fires a
-	 * separate turn that runs after the model has already read the error inline
-	 * and self-corrected, so it lands stale and leaks a phantom "stale reflection"
-	 * reply to the user. Inline feedback (raw tool-result + Tier-4 hint rules)
-	 * already covers this behind the scenes. Opt in via
-	 * toolFeedback.errorReflection.enabled. Args captured at tool_execution_start
-	 * name the exact failing invocation.
-	 */
-	private _maybeInjectToolErrorReflection(
-		toolName: string,
-		args: unknown,
-		result: unknown,
-		attemptsLeft?: number,
-	): void {
-		const cfg = this.settingsManager.getToolFeedbackSettings().errorReflection;
-		if (!decideErrorReflection({ enabled: cfg.enabled, isError: true })) return;
-		const resultContent = (result as { content?: Array<{ type: string; text?: string }> } | undefined)?.content;
-		const errorMessage = extractErrorMessage(resultContent);
-		const content = buildToolErrorReflection({ toolName, args, errorMessage, attemptsLeft });
-		this.sendCustomMessage(
-			{ customType: "pi.tool-error-reflection", content, display: false },
-			{ deliverAs: "followUp" },
-		).catch(() => {
-			// Failure to inject a reflection must not break tool execution.
-		});
-	}
-
-	/**
-	 * Increment the per-turn failure counter for `toolName` (keyed by NAME, not
-	 * args) and report the remaining budget. Called once per failing tool call.
-	 * Returns the new count and the retries left under the configured per-turn
-	 * cap (clamped at 0). When the budget is disabled, attemptsLeft is left
-	 * undefined so the reflection prompt simply omits the line.
-	 */
-	private _recordTurnToolFailure(toolName: string): { count: number; attemptsLeft: number | undefined; max: number } {
-		const cfg = this.settingsManager.getToolFeedbackSettings().failureBudget;
-		const count = (this._turnToolFailures.get(toolName) ?? 0) + 1;
-		this._turnToolFailures.set(toolName, count);
-		if (!cfg.enabled) return { count, attemptsLeft: undefined, max: cfg.maxPerTurn };
-		return { count, attemptsLeft: Math.max(0, cfg.maxPerTurn - count), max: cfg.maxPerTurn };
-	}
-
-	/**
-	 * Inject a forceful steer when a single tool exhausts its per-turn failure
-	 * budget (count >= maxPerTurn). Fires once per tool per turn so a tool that
-	 * keeps failing after exhaustion does not re-spam the reminder every call.
-	 * Delivered as a "steer" (like the doom-loop/cross-error reminders) so it
-	 * lands before the next model turn while the tool-call loop is still hot —
-	 * a followUp would sit queued behind the loop it is trying to break.
-	 * Complements, not duplicates: doom-loop owns identical repeats, cross-error
-	 * owns one error across approaches, and this owns the raw per-tool failure
-	 * count regardless of args or error text.
-	 */
-	private _maybeInjectFailureBudgetReminder(toolName: string, count: number, max: number): void {
-		const cfg = this.settingsManager.getToolFeedbackSettings().failureBudget;
-		if (!cfg.enabled) return;
-		if (count < max) return;
-		if (this._turnFailureBudgetFired.has(toolName)) return;
-		this._turnFailureBudgetFired.add(toolName);
-		const content = buildFailureBudgetReminder({ toolName, failureCount: count, maxPerTurn: max });
-		this._fireReminder("pi.tool-failure-budget", content, {
-			deliverAs: "steer",
-			display: false,
-			label: "tool-failure-budget reminder",
-		});
 	}
 
 	/**
@@ -3358,8 +2805,7 @@ export class AgentSession {
 	 * goal — in autonomous mode a single prompt() drives many _promptOnce turns.
 	 */
 	private _resetTurnFailureBudget(): void {
-		this._turnToolFailures.clear();
-		this._turnFailureBudgetFired.clear();
+		this._steering.resetTurnFailureBudget();
 	}
 
 	/**
@@ -3379,8 +2825,7 @@ export class AgentSession {
 		this._turnUsedPreview = false;
 		// Per-prompt reset for the todo-first safety net (the cadence tracker itself
 		// persists across the session, like _stagnation).
-		this._promptWorkActions = 0;
-		this._todoFirstNudgeFired = false;
+		this._steering.resetPromptWorkActions();
 		// Reset the per-turn, per-tool failure budget so each tool starts the turn
 		// with a fresh allowance. Re-armed before every goal continuation below so
 		// the budget is per model-attempt, not shared across the whole goal.
@@ -5159,10 +4604,15 @@ export class AgentSession {
 			!this.isCompacting &&
 			!(typeof process !== "undefined" && process.env.PIT_NO_PRESEND_OVERFLOW_GUARD === "1")
 		) {
-			const assembled = estimateContextTokens(this.agent.state.messages).tokens;
+			let assembled = estimateContextTokens(this.agent.state.messages).tokens;
 			if (assembled > contextWindow * PRESEND_OVERFLOW_RATIO && assembled > contextTokens) {
-				if (this._backgroundCompactionPromise) await this._awaitBackgroundCompaction();
-				if (!this.isCompacting) {
+				if (this._backgroundCompactionPromise) {
+					await this._awaitBackgroundCompaction();
+					// Background compaction just rewrote agent.state.messages; re-estimate so
+					// we don't fire a redundant full compaction on a context it already reduced.
+					assembled = estimateContextTokens(this.agent.state.messages).tokens;
+				}
+				if (assembled > contextWindow * PRESEND_OVERFLOW_RATIO && !this.isCompacting) {
 					const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
 					this._lastCompactionDeficit = assembled - (contextWindow - reserve);
 					recordDiagnostic({
@@ -5718,6 +5168,7 @@ export class AgentSession {
 						mtimeStore: this._fileMtimeStore,
 					},
 					edit: { mtimeStore: this._fileMtimeStore },
+					edit_v2: { mtimeStore: this._fileMtimeStore },
 					write: { mtimeStore: this._fileMtimeStore },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 					// Code-mode: inject the harness-routed dispatcher so a code-mode

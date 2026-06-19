@@ -265,10 +265,17 @@ class PythonKernel implements EvalKernel {
 
 		pending.timer = setTimeout(() => {
 			// Kill the kernel — the interpreter state is unrecoverable mid-exec.
-			try {
-				proc.kill();
-			} catch {
-				// ignore
+			// killProcessTree tears down any children the user code spawned too. Do
+			// not also call proc.kill() here: on Windows it terminates the parent
+			// synchronously before the async taskkill /T can enumerate the tree,
+			// orphaning the children. killProcessTree already targets the parent pid.
+			if (proc.pid) killProcessTree(proc.pid);
+			else {
+				try {
+					proc.kill();
+				} catch {
+					// ignore
+				}
 			}
 			this.alive = false;
 			if (this.current === pending) {
@@ -279,10 +286,15 @@ class PythonKernel implements EvalKernel {
 
 		if (signal) {
 			const onAbort = () => {
-				try {
-					proc.kill();
-				} catch {
-					// ignore
+				// killProcessTree tears down any children the user code spawned too;
+				// avoid proc.kill() so we don't pre-empt taskkill /T (see timeout path).
+				if (proc.pid) killProcessTree(proc.pid);
+				else {
+					try {
+						proc.kill();
+					} catch {
+						// ignore
+					}
 				}
 				this.alive = false;
 				if (this.current === pending) {
@@ -331,10 +343,15 @@ class PythonKernel implements EvalKernel {
 	async close(): Promise<void> {
 		this.alive = false;
 		if (this.proc) {
-			try {
-				this.proc.kill();
-			} catch {
-				// ignore
+			// killProcessTree tears down any children the user code spawned too;
+			// avoid proc.kill() so we don't pre-empt taskkill /T (see timeout path).
+			if (this.proc.pid) killProcessTree(this.proc.pid);
+			else {
+				try {
+					this.proc.kill();
+				} catch {
+					// ignore
+				}
 			}
 			this.proc = undefined;
 		}

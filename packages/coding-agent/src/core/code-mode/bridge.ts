@@ -107,9 +107,16 @@ function flattenContent(content: Array<{ type: string; text?: string }>): string
 
 /** Truncate a result string to the cap, appending a deterministic marker. */
 function capResult(text: string, maxBytes: number): { text: string; truncated: boolean } {
-	if (text.length <= maxBytes) return { text, truncated: false };
+	// Measure in UTF-8 bytes (the cap's unit), not UTF-16 code units, so multibyte
+	// content (CJK/emoji) cannot silently overshoot the cap by ~3-4x.
+	const buf = Buffer.from(text, "utf8");
+	if (buf.length <= maxBytes) return { text, truncated: false };
 	const marker = `\n[code-mode: tool result truncated at ${maxBytes} bytes]`;
-	const head = text.slice(0, Math.max(0, maxBytes - marker.length));
+	const budget = Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8"));
+	// Back off any trailing UTF-8 continuation byte so we never split a code point.
+	let end = Math.min(budget, buf.length);
+	while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
+	const head = buf.subarray(0, end).toString("utf8");
 	return { text: head + marker, truncated: true };
 }
 

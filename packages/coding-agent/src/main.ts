@@ -5,7 +5,6 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@pit/ai";
@@ -48,6 +47,7 @@ import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts"
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isTruthyEnvFlag } from "./utils/env-flags.ts";
 import { isLocalPath } from "./utils/paths.ts";
+import { ensureWindowsUtf8Console } from "./utils/windows-console.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
 /**
@@ -507,10 +507,9 @@ export async function main(args: string[], options?: MainOptions) {
 
 	if (process.platform === "win32") {
 		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
-		// Force UTF-8 console output — cp1252 (Windows pt-BR default) crashes on Unicode > 0xFF
-		try {
-			execSync("chcp 65001", { stdio: "ignore" });
-		} catch {}
+		// Force UTF-8 console input/output so accented characters (e.g. pt-BR
+		// "Verificacao") render correctly instead of cp1252 mojibake.
+		ensureWindowsUtf8Console();
 	}
 
 	if (await handlePackageCommand(args)) {

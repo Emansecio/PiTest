@@ -396,6 +396,11 @@ export class DapClient {
 		this.#input.on("data", (chunk: Buffer) => this.#onData(chunk));
 		this.#input.on("error", (err) => {
 			this.#rejectPendingRequests(new Error(`DAP connection error: ${toErrorMessage(err)}`));
+			// A transport (socket/pipe) error leaves the session unusable even when the
+			// adapter PROCESS is still alive (e.g. ECONNRESET on a dlv socket). Mark it
+			// disposed and tear it down so isAlive() turns false and #ensureLaunchSlot
+			// does not block new launches on a zombie session until the idle timeout (#29).
+			void this.dispose();
 		});
 	}
 

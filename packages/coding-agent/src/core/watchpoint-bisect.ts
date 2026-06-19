@@ -136,8 +136,12 @@ export interface WatchpointWriter {
 	file: string;
 	line: number;
 	function: string;
-	/** The full captured frame for tooling/UI; top-of-stack writer. */
-	frame: DapStackFrame;
+	/**
+	 * The full captured frame for tooling/UI; top-of-stack writer. Optional: a
+	 * stop with no stack frames yields no frame, so consumers must guard before
+	 * dereferencing rather than relying on a (lying) non-null cast.
+	 */
+	frame?: DapStackFrame;
 }
 
 export interface WatchpointHit {
@@ -333,7 +337,9 @@ async function runHitLoop(
 		if (!writer) {
 			// Stopped but no frames (rare). Record reason and stop — re-continuing risks a loop.
 			hits.push({
-				writer: { file: "<unknown>", line: 0, function: "<unknown>", frame: stack[0] as DapStackFrame },
+				// No frames at this stop, so there is genuinely no writer frame. Leave
+				// `frame` undefined instead of casting `undefined` to DapStackFrame.
+				writer: { file: "<unknown>", line: 0, function: "<unknown>", frame: stack[0] },
 				stack,
 				stopReason: outcome.snapshot.stopReason,
 			});
@@ -341,7 +347,7 @@ async function runHitLoop(
 		}
 
 		// Read the value at the writer's frame (best-effort).
-		const value = await readValue(deps, expression, writer.frame.id, undefined, timeoutMs);
+		const value = await readValue(deps, expression, writer.frame?.id, undefined, timeoutMs);
 		hits.push({ writer, value, stack, stopReason: outcome.snapshot.stopReason });
 	}
 	return hits;

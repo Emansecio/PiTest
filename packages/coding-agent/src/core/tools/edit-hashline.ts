@@ -1,5 +1,6 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Box, Container, Spacer, Text } from "@pit/tui";
+import { stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import type { ToolDefinition } from "../extensions/types.js";
@@ -23,6 +24,7 @@ import {
 	HashlineEditError,
 } from "./edit-hashline-diff.ts";
 import { getEditHeaderBg, setEditPreview } from "./edit-preview-shared.ts";
+import type { FileMtimeStore } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getFilePathArg, invalidArgText, shortenPath } from "./render-utils.ts";
@@ -65,6 +67,22 @@ export type EditHashlineToolInput = Static<typeof editHashlineSchema>;
 
 export interface EditHashlineToolOptions {
 	operations?: EditOperations;
+	mtimeStore?: FileMtimeStore;
+}
+
+/**
+ * Record the file's post-write mtime in the shared store so edit_v2's own write
+ * isn't later flagged as a stale external change by the next edit of this path.
+ * Only meaningful against the real filesystem (default ops). Non-fatal.
+ */
+async function refreshHashlineMtime(store: FileMtimeStore | undefined, absolutePath: string): Promise<void> {
+	if (!store) return;
+	try {
+		const st = await fsStat(absolutePath);
+		store.set(absolutePath, st.mtimeMs);
+	} catch {
+		// stat failed — non-fatal; the next read re-records it.
+	}
 }
 
 type RenderableArgs = {
@@ -189,6 +207,7 @@ export function createEditHashlineToolDefinition(
 	options?: EditHashlineToolOptions,
 ): ToolDefinition<typeof editHashlineSchema, EditToolDetails | undefined, RenderState> {
 	const ops = options?.operations ?? defaultEditOperations;
+	const mtimeStore = ops === defaultEditOperations ? options?.mtimeStore : undefined;
 	return {
 		name: "edit_v2",
 		label: "edit_v2",
@@ -283,6 +302,7 @@ export function createEditHashlineToolDefinition(
 										path,
 										apply: async () => {
 											await ops.writeFile(absolutePath, finalContent);
+											await refreshHashlineMtime(mtimeStore, absolutePath);
 										},
 										summary: {
 											description: `edit_v2 ${path}: ${appliedCount} hashline edit(s)`,
@@ -307,6 +327,7 @@ export function createEditHashlineToolDefinition(
 								}
 
 								await ops.writeFile(absolutePath, finalContent, signal);
+								await refreshHashlineMtime(mtimeStore, absolutePath);
 								// Committed (atomic rename): stop honoring abort so a late ESC can't
 								// reject a write that already landed (a pre-commit abort throws and is
 								// handled in the catch with the original file intact).

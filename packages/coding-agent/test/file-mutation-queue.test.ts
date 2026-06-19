@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEditTool } from "../src/core/tools/edit.js";
-import { withFileMutationQueue } from "../src/core/tools/file-mutation-queue.js";
+import {
+	_realpathCacheSizeForTest,
+	_resetRealpathCacheForTest,
+	withFileMutationQueue,
+} from "../src/core/tools/file-mutation-queue.js";
 import { createWriteTool } from "../src/core/tools/write.js";
 
 function delay(ms: number): Promise<void> {
@@ -83,6 +87,19 @@ describe("withFileMutationQueue", () => {
 		]);
 
 		expect(order).toEqual(["target:start", "target:end", "alias:start", "alias:end"]);
+	});
+});
+
+describe("realpath cache is bounded (#17)", () => {
+	it("does not grow without limit across many distinct paths", async () => {
+		_resetRealpathCacheForTest();
+		// Touch far more distinct (non-existent) paths than the cache cap.
+		for (let i = 0; i < 5000; i++) {
+			await withFileMutationQueue(`/tmp/pi-mutation-cap-${i}.txt`, async () => {});
+		}
+		// The cache must have evicted down to its bound, not retained all 5000.
+		expect(_realpathCacheSizeForTest()).toBeLessThanOrEqual(2048);
+		_resetRealpathCacheForTest();
 	});
 });
 

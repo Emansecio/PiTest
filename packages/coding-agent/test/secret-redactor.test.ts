@@ -27,6 +27,12 @@ describe("redactSecrets — each secret type is caught and replaced", () => {
 			sample: "ghp_1234567890abcdefghijklmnopqrstuvwxyzAB",
 			type: "github-token",
 		},
+		{
+			// #33: refresh tokens use the ghr_ prefix and must not leak verbatim.
+			name: "GitHub refresh token",
+			sample: "ghr_1234567890abcdefghijklmnopqrstuvwxyzAB",
+			type: "github-token",
+		},
 		// Prefix split with an interpolation so no literal Slack-token string sits in
 		// the source (GitHub push protection flags the test file otherwise); the
 		// assembled value still exercises the slack-token regex.

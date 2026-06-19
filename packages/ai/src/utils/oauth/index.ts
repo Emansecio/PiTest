@@ -24,6 +24,13 @@ import type { OAuthCredentials, OAuthProviderId, OAuthProviderInfo, OAuthProvide
 
 const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [anthropicOAuthProvider, openaiCodexOAuthProvider];
 
+/**
+ * Proactive refresh window: refresh a token this many ms before its `expires`
+ * instant so a call fired just before expiry does not reach the server already
+ * expired (network + server processing latency). 60s comfortably covers that.
+ */
+const OAUTH_REFRESH_BUFFER_MS = 60_000;
+
 const oauthProviderRegistry = new Map<string, OAuthProviderInterface>(
 	BUILT_IN_OAUTH_PROVIDERS.map((provider) => [provider.id, provider]),
 );
@@ -125,8 +132,11 @@ export async function getOAuthApiKey(
 		return null;
 	}
 
-	// Refresh if expired
-	if (Date.now() >= creds.expires) {
+	// Refresh if expired, with a safety buffer so a token that is valid "now" but
+	// expires within the request's network+processing window is refreshed proactively
+	// rather than reaching the server already expired (intermittent 401). Anthropic
+	// already bakes a buffer into `expires`; Codex does not, so guard here.
+	if (Date.now() >= creds.expires - OAUTH_REFRESH_BUFFER_MS) {
 		try {
 			creds = await provider.refreshToken(creds);
 		} catch (_error) {

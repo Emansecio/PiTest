@@ -767,12 +767,23 @@ export function pruneOldToolOutputs(
 				const est = estimateTextTokens(block.text, true);
 				if (est > tokenThreshold) {
 					prunedTokens += est;
+					// store.put writes to disk (writeFileSync). A disk-full/permission error
+					// must degrade to the in-message head+tail excerpt rather than abort the
+					// turn that awaits this prune.
+					let id: string | undefined;
 					if (store) {
-						const id = store.put(block.text);
+						try {
+							id = store.put(block.text);
+						} catch {
+							id = undefined;
+						}
+					}
+					if (id !== undefined) {
 						(msg.content[b] as any).text =
 							`[Tool output deferred (~${est} tokens) — id=${id}. Retrieve with recall_tool_output({ id: "${id}" }) if needed.]`;
 					} else {
-						// Keep the output's shape (head + tail) instead of discarding it.
+						// No store, or the deferred write failed: keep the output's shape
+						// (head + tail) instead of discarding it.
 						(msg.content[b] as any).text = headTailExcerpt(block.text);
 					}
 				}

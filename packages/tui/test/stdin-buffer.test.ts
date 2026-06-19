@@ -44,6 +44,21 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, ["a", "b", "c"]);
 		});
 
+		it("should emit an astral-plane (non-BMP) character as a single sequence (#39)", () => {
+			// U+1F600 GRINNING FACE is a surrogate pair in UTF-16; it must arrive as
+			// one event, not split into two lone surrogates.
+			const emoji = String.fromCodePoint(0x1f600);
+			assert.strictEqual(emoji.length, 2); // sanity: it is a surrogate pair
+			processInput(emoji);
+			assert.deepStrictEqual(emittedSequences, [emoji]);
+		});
+
+		it("keeps surrounding BMP chars intact around an astral char", () => {
+			const emoji = String.fromCodePoint(0x1f600);
+			processInput(`a${emoji}b`);
+			assert.deepStrictEqual(emittedSequences, ["a", emoji, "b"]);
+		});
+
 		it("should handle unicode characters", () => {
 			processInput("hello 世界");
 			assert.deepStrictEqual(emittedSequences, ["h", "e", "l", "l", "o", " ", "世", "界"]);

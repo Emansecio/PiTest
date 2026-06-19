@@ -1265,6 +1265,6 @@ function mapStopReason(reason: Anthropic.Messages.StopReason | string): StopReas
 			return "error";
 		default:
 			// Handle unknown stop reasons gracefully (API may add new values)
-			throw new Error(`Unhandled stop reason: ${reason}`);
+			return "stop";
 	}
 }

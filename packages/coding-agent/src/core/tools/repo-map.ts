@@ -36,7 +36,7 @@ export function createRepoMapToolDefinition(cwd: string): ToolDefinition<typeof 
 			// not conclude a symbol is absent merely because its file fell outside the cap.
 			const fileCapHit = files.length >= maxFiles;
 			const lines: string[] = ["Repo map (heuristic, not AST — verify with read/grep):"];
-			let bytes = lines[0]!.length;
+			let bytes = Buffer.byteLength(lines[0]!, "utf8");
 			let byteCapHit = false;
 			for (const file of files) {
 				if (signal?.aborted) break;
@@ -49,7 +49,7 @@ export function createRepoMapToolDefinition(cwd: string): ToolDefinition<typeof 
 				const names = listDeclarations(content, file).map((d) => `${d.kind} ${d.name}:${d.line}`);
 				if (names.length === 0) continue;
 				const line = `${relative(cwd, file)}: ${names.join(", ")}`;
-				bytes += line.length + 1;
+				bytes += Buffer.byteLength(line, "utf8") + 1;
 				if (bytes > MAX_BYTES) {
 					byteCapHit = true;
 					lines.push("… (truncated: byte limit reached — pass path= to focus on a subdirectory)");

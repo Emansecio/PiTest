@@ -188,6 +188,21 @@ describe("runWatchpointBisect — data breakpoint path", () => {
 		expect(calls.continueCount).toBe(3);
 	});
 
+	it("a stop with no stack frames records a hit with no frame, without crashing (#30)", async () => {
+		// Adapter stops but returns an empty stack: writerFromStack yields no writer.
+		const { deps } = makeDeps({ supports: true, stops: [[]] });
+		const result = await runWatchpointBisect(deps, { expression: "x", maxHits: 8 });
+		expect(result.hits).toHaveLength(1);
+		const hit = result.hits[0];
+		// `frame` must be undefined (not a non-null-cast lie); guard-safe for consumers.
+		expect(hit.writer.frame).toBeUndefined();
+		expect(hit.writer.function).toBe("<unknown>");
+		// A consumer that guards the optional frame must not throw.
+		expect(() => hit.writer.frame?.id).not.toThrow();
+		// formatWatchpointBisect tolerates the frame-less hit.
+		expect(() => formatWatchpointBisect(result)).not.toThrow();
+	});
+
 	it("downgrades access type when the adapter doesn't support write-only", async () => {
 		const { deps, calls } = makeDeps({
 			supports: true,

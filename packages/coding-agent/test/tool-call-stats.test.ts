@@ -172,6 +172,32 @@ describe("ToolCallStats.getConsecutiveSimilarResultOnlyCount (result-only thrash
 	});
 });
 
+describe("ToolCallStats parallel result stamping by toolCallId (#12/#34)", () => {
+	it("stamps each parallel call's result onto its own ring entry, not ringHead-1", () => {
+		const stats = new ToolCallStats();
+		// Four identical parallel batches: each batch records BOTH starts first, then
+		// the ends fire in completion order (here: second tool finishes before first).
+		for (let b = 0; b < 4; b++) {
+			stats.recordInvocation("read", '{"path":"a"}', `call-${b}-A`);
+			stats.recordInvocation("read", '{"path":"a"}', `call-${b}-B`);
+			// ends out of order: B (last pushed) then A (first pushed).
+			stats.recordInvocationResult("RES", false, `call-${b}-B`);
+			stats.recordInvocationResult("RES", false, `call-${b}-A`);
+		}
+		// All 8 entries share (read, args, RES); the result-aware count must see the
+		// full trailing run. Before the fix the N-1 starts kept resultHash=undefined
+		// and broke the streak at 1.
+		expect(stats.getConsecutiveSimilarResultCount()).toBe(8);
+	});
+
+	it("without a toolCallId it still stamps the most recent entry (sequential path)", () => {
+		const stats = new ToolCallStats();
+		stats.recordInvocation("read", "a");
+		stats.recordInvocationResult("RES", false);
+		expect(stats.getConsecutiveSimilarResultCount()).toBe(1);
+	});
+});
+
 describe("fingerprintToolArgs", () => {
 	it("produces stable output regardless of key order", () => {
 		expect(fingerprintToolArgs({ a: 1, b: 2 })).toBe(fingerprintToolArgs({ b: 2, a: 1 }));

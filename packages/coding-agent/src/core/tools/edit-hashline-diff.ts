@@ -274,7 +274,8 @@ export function applyHashlineEdits(
 				`edits[${i}] anchors overlap: after_hash window starts before before_hash window ends.`,
 			);
 		}
-		const replacement = edit.new_text === "" ? [] : edit.new_text.split("\n");
+		const normalizedNewText = normalizeToLF(edit.new_text);
+		const replacement = normalizedNewText === "" ? [] : normalizedNewText.split("\n");
 		lines = [...lines.slice(0, replaceStart), ...replacement, ...lines.slice(replaceEnd)];
 		applied++;
 	}

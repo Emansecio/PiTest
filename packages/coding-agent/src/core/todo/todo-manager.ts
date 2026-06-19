@@ -154,9 +154,21 @@ export class TodoManager {
 			this.nextId = 1;
 			return;
 		}
-		this.items = data.items.map((t) => ({ ...t }));
+		// Validate id/status from untrusted persisted state. A non-numeric id
+		// poisons nextId with NaN (Math.max(_, NaN) === NaN), which then makes every
+		// future create() produce id:NaN (NaN !== NaN breaks get/update/delete); an
+		// out-of-enum status renders STATUS_GLYPH[status] as literal "undefined" in
+		// the system prompt. Drop entries we cannot key on; coerce unknown statuses.
+		const validStatuses = new Set<TodoStatus>(["pending", "in_progress", "completed"]);
+		this.items = data.items
+			.filter((t): t is TodoItem => !!t && typeof t.id === "number" && Number.isFinite(t.id))
+			.map((t) => ({
+				...t,
+				status: validStatuses.has(t.status) ? t.status : "pending",
+			}));
 		const maxId = this.items.reduce((m, t) => Math.max(m, t.id), 0);
-		this.nextId = Math.max(typeof data.nextId === "number" ? data.nextId : 1, maxId + 1);
+		const nextIdRaw = typeof data.nextId === "number" && Number.isFinite(data.nextId) ? data.nextId : 1;
+		this.nextId = Math.max(nextIdRaw, maxId + 1);
 	}
 
 	/** Human-readable multi-line summary for the `/todos` command. */

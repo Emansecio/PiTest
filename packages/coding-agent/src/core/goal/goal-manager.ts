@@ -24,6 +24,12 @@ export interface GoalState {
 	startedAt: number;
 	/** Epoch ms when the goal completed, if it did. */
 	completedAt?: number;
+	/**
+	 * iterations value captured at the moment goal_complete fired. Lets the
+	 * completing turn's recordTurn still count once, while freezing the counters
+	 * for every turn AFTER completion.
+	 */
+	completedAtIteration?: number;
 	/** Short summary recorded when goal_complete is called. */
 	summary?: string;
 }
@@ -165,12 +171,20 @@ export class GoalManager {
 		if (!this.state) return;
 		this.state.status = "complete";
 		this.state.completedAt = this.now();
+		this.state.completedAtIteration = this.state.iterations;
 		if (summary) this.state.summary = summary.trim();
 	}
 
 	/** Record a finished turn: bumps iterations + token usage, may exhaust budget. */
 	recordTurn(tokensDelta: number): void {
 		if (!this.state) return;
+		// A completed goal is no longer accruing work: once the completing turn has
+		// been counted, stop bumping iterations/tokens so post-completion turns don't
+		// inflate the goal's reported counters until the user clears it. The turn that
+		// fired goal_complete still counts (its recordTurn runs after complete()).
+		if (this.state.status === "complete" && this.state.iterations > (this.state.completedAtIteration ?? -1)) {
+			return;
+		}
 		this.state.iterations += 1;
 		this.state.tokensUsed += Math.max(0, Math.round(tokensDelta));
 		if (

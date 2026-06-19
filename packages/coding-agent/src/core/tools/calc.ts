@@ -227,12 +227,12 @@ class Parser {
 		return left;
 	}
 
-	// term := factor ( (*|/|%) factor )*
+	// term := unary ( (*|/|%) unary )*
 	private term(): number {
-		let left = this.factor();
+		let left = this.unary();
 		while (this.peek().kind === "star" || this.peek().kind === "slash" || this.peek().kind === "percent") {
 			const op = this.eat().kind;
-			const right = this.factor();
+			const right = this.unary();
 			if (op === "star") left = left * right;
 			else if (op === "slash") left = left / right;
 			else left = left % right;
@@ -240,18 +240,8 @@ class Parser {
 		return left;
 	}
 
-	// factor := unary ( ^ factor )?    (right-assoc)
-	private factor(): number {
-		const base = this.unary();
-		if (this.peek().kind === "caret") {
-			this.eat();
-			const exp = this.factor();
-			return base ** exp;
-		}
-		return base;
-	}
-
-	// unary := (+|-) unary | primary
+	// unary := (+|-) unary | factor
+	// Unary sign binds LOOSER than exponentiation, matching math/Python: -2^2 = -(2^2).
 	private unary(): number {
 		if (this.peek().kind === "plus") {
 			this.eat();
@@ -261,7 +251,20 @@ class Parser {
 			this.eat();
 			return -this.unary();
 		}
-		return this.primary();
+		return this.factor();
+	}
+
+	// factor := primary ( ^ unary )?    (right-assoc; exponent may carry a sign)
+	// The base is a primary (NOT a unary), so a leading minus is applied to the
+	// whole power by `unary` above rather than absorbed into the base.
+	private factor(): number {
+		const base = this.primary();
+		if (this.peek().kind === "caret") {
+			this.eat();
+			const exp = this.unary();
+			return base ** exp;
+		}
+		return base;
 	}
 
 	// primary := num | ident ( ( args? ) )? | ( expr )

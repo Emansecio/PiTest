@@ -40,6 +40,13 @@ export interface ToolCallSequenceEntry {
 	toolName: string;
 	argsFingerprint: string;
 	/**
+	 * The originating tool call id, when known. Lets {@link ToolCallStats.recordInvocationResult}
+	 * backfill the result onto the CORRECT ring entry instead of positionally
+	 * (ringHead-1), which is wrong under parallel tool execution where all starts
+	 * are recorded before any end fires.
+	 */
+	toolCallId?: string;
+	/**
 	 * Hash of the tool RESULT, backfilled at tool_execution_end. Undefined while
 	 * the call is in flight (recorded at start, result not yet known). The
 	 * result-aware doom-loop count treats two calls as the "same" only when name,
@@ -172,8 +179,8 @@ export class ToolCallStats {
 	 * callers can capture invocations even when outcomes are not yet known (e.g. on
 	 * `tool_execution_start`). Args fingerprint should be produced via {@link fingerprintToolArgs}.
 	 */
-	recordInvocation(toolName: string, argsFingerprint: string): void {
-		this.ringBuffer[this.ringHead] = { toolName, argsFingerprint };
+	recordInvocation(toolName: string, argsFingerprint: string, toolCallId?: string): void {
+		this.ringBuffer[this.ringHead] = { toolName, argsFingerprint, toolCallId };
 		this.ringHead = (this.ringHead + 1) % this.sequenceWindow;
 		if (this.ringSize < this.sequenceWindow) this.ringSize++;
 	}
@@ -203,13 +210,30 @@ export class ToolCallStats {
 	 * {@link getConsecutiveSimilarResultCount} can distinguish a true loop (same
 	 * result) from real progress (new result each call).
 	 */
-	recordInvocationResult(resultHash: string, isError: boolean): void {
+	recordInvocationResult(resultHash: string, isError: boolean, toolCallId?: string): void {
 		if (this.ringSize === 0) return;
-		const lastIdx = (this.ringHead - 1 + this.sequenceWindow) % this.sequenceWindow;
-		const last = this.ringBuffer[lastIdx];
-		if (last) {
-			last.resultHash = resultHash;
-			last.isError = isError;
+		// Locate the entry to stamp. With a toolCallId, find the matching invocation
+		// (scanning back from the most recent) so parallel batches — where all starts
+		// are recorded before any end fires — stamp the right call rather than always
+		// the last-pushed entry. Without an id, fall back to ringHead-1 (correct for
+		// strictly sequential start/end interleaving).
+		let target: ToolCallSequenceEntry | undefined;
+		if (toolCallId !== undefined) {
+			for (let i = 0; i < this.ringSize; i++) {
+				const idx = (this.ringHead - 1 - i + this.sequenceWindow * 2) % this.sequenceWindow;
+				const entry = this.ringBuffer[idx];
+				if (entry && entry.toolCallId === toolCallId) {
+					target = entry;
+					break;
+				}
+			}
+		} else {
+			const lastIdx = (this.ringHead - 1 + this.sequenceWindow) % this.sequenceWindow;
+			target = this.ringBuffer[lastIdx];
+		}
+		if (target) {
+			target.resultHash = resultHash;
+			target.isError = isError;
 		}
 	}
 

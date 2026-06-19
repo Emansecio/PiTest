@@ -1047,6 +1047,11 @@ export class DapSessionManager {
 		});
 		client.onEvent("exited", (body) => {
 			session.exitCode = (body as DapExitedEventBody | undefined)?.exitCode;
+			// The debuggee process has exited -- it is no longer running. Some adapters
+			// emit 'exited' without (or well before) a matching 'terminated'; without
+			// this, a continue/step that races to 'exited' would still report the program
+			// as "running" (status stays "running") and drop the captured exit code.
+			if (session.status !== "terminated") session.status = "terminated";
 		});
 		client.onEvent("terminated", () => {
 			session.status = "terminated";

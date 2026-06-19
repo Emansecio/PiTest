@@ -66,6 +66,34 @@ describe("TodoManager CRUD", () => {
 		expect(mgr2.create({ subject: "third" }).id).toBe(3);
 	});
 
+	it("restore sanitizes a non-numeric id so nextId never becomes NaN (#35)", () => {
+		const mgr = new TodoManager();
+		// Legacy/corrupt persisted item without a numeric id.
+		mgr.restore({
+			items: [{ subject: "legacy", status: "pending" } as never, { id: 4, subject: "ok", status: "pending" }],
+			nextId: Number.NaN,
+		} as never);
+		// The bad entry is dropped; nextId is finite and past the max valid id.
+		const created = mgr.create({ subject: "fresh" });
+		expect(Number.isFinite(created.id)).toBe(true);
+		expect(created.id).toBe(5);
+		// update/get must work on the freshly created (finite) id.
+		expect(mgr.get(created.id)?.subject).toBe("fresh");
+		expect(mgr.update({ id: created.id, status: "completed" })?.status).toBe("completed");
+	});
+
+	it("restore coerces an out-of-enum status so the prompt never leaks 'undefined' (#36)", () => {
+		const mgr = new TodoManager();
+		mgr.restore({
+			items: [{ id: 1, subject: "bad status", status: "in-progress" as never }],
+			nextId: 2,
+		});
+		expect(mgr.systemPromptSection()).not.toContain("undefined");
+		expect(mgr.summaryText()).not.toContain("undefined");
+		// Coerced to a valid status (pending) so the glyph resolves.
+		expect(mgr.get(1)?.status).toBe("pending");
+	});
+
 	it("ignores updates/deletes for unknown ids", () => {
 		const mgr = new TodoManager();
 		expect(() => mgr.update({ id: 99, status: "completed" })).not.toThrow();
