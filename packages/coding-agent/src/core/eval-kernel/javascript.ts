@@ -453,6 +453,7 @@ class JsKernel implements EvalKernel {
 					reject(new Error(`eval timed out after ${timeoutMs}ms`));
 				}
 			}, parentTimeoutMs);
+			this.pending.set(id, call);
 			if (signal) {
 				const onAbort = () => {
 					if (this.pending.has(id)) {
@@ -473,7 +474,6 @@ class JsKernel implements EvalKernel {
 				}
 				signal.addEventListener("abort", onAbort, { once: true });
 			}
-			this.pending.set(id, call);
 			proc.stdin.write(`${JSON.stringify({ id, code: req.code, timeoutMs, maxBytes: this.maxOutputBytes })}\n`);
 		});
 	}
@@ -545,6 +545,7 @@ class JsKernel implements EvalKernel {
 					reject(new Error(`code-mode timed out after ${effectiveTimeout}ms`));
 				}
 			}, parentTimeoutMs);
+			this.pending.set(id, call);
 			if (signal) {
 				const onAbort = () => {
 					if (this.pending.has(id)) {
@@ -567,7 +568,6 @@ class JsKernel implements EvalKernel {
 				}
 				signal.addEventListener("abort", onAbort, { once: true });
 			}
-			this.pending.set(id, call);
 			proc.stdin.write(
 				`${JSON.stringify({ id, codeMode: true, code, timeoutMs: effectiveTimeout, maxBytes: this.maxOutputBytes, toolNames })}\n`,
 			);

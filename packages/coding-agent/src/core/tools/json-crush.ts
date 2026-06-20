@@ -17,6 +17,7 @@
  */
 
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import { formatSize } from "./truncate.ts";
 
 /**
@@ -165,7 +166,7 @@ function pruneValue(value: unknown, tier: Tier, depth: number): unknown {
 	}
 
 	if (typeof value === "string" && value.length > tier.maxStringChars) {
-		return `${value.slice(0, tier.maxStringChars)}…(+${value.length - tier.maxStringChars} chars)`;
+		return `${sliceSafe(value, 0, tier.maxStringChars)}…(+${value.length - tier.maxStringChars} chars)`;
 	}
 
 	return value;

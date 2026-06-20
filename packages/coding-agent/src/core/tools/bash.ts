@@ -408,6 +408,13 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					// Resolve the foreground promise NOW with the handle; the detached
 					// process lives on and its eventual exit is recorded below.
 					settled.done = true;
+					// Cancel the explicit-timeout hard-kill: once detached into a tracked
+					// job, the foreground timeout intent no longer applies (the job is
+					// killed on shutdown or on demand instead). Without this, a
+					// `background:true` + `timeout>0` combo would let timeoutHandle fire
+					// killProcessTree on the already-detached job, contradicting the
+					// "keeps running detached" contract surfaced to the caller.
+					if (timeoutHandle) clearTimeout(timeoutHandle);
 					if (signal) signal.removeEventListener("abort", onAbort);
 					resolve({ exitCode: null, promotedJobId: id });
 				};

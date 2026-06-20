@@ -7,6 +7,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentHindsightBank, type HindsightBank, type HindsightKind } from "../hindsight/index.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
@@ -41,8 +42,7 @@ export interface RetainToolOptions {
 
 function shortPreview(text: string, max = 40): string {
 	const compact = text.replace(/\s+/g, " ").trim();
-	if (compact.length <= max) return compact;
-	return `${compact.slice(0, max - 1)}…`;
+	return truncateWithEllipsis(compact, max);
 }
 
 export function createRetainToolDefinition(

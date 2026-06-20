@@ -84,6 +84,16 @@ function capBody(text: string, max: number): string {
 	return `${text.slice(0, max - 3)}...`;
 }
 
+// Cut a string to at most `max` UTF-16 code units without splitting a surrogate
+// pair: if the cut would land between a high and low surrogate, drop the trailing
+// lone high surrogate so the caller can safely append an ellipsis.
+function clampQuery(text: string, max: number): string {
+	const cut = text.slice(0, max);
+	const last = cut.charCodeAt(cut.length - 1);
+	if (last >= 0xd800 && last <= 0xdbff) return cut.slice(0, -1);
+	return cut;
+}
+
 function formatHits(hits: SearchHit[], outcome: ChainOutcome, extracts: Map<string, string>): string {
 	if (hits.length === 0) return "No results.";
 	const lines: string[] = [];
@@ -199,7 +209,7 @@ export function createWebSearchToolDefinition(
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const q = str(args?.query);
-			const display = q && q.length > 0 ? (q.length > 80 ? `${q.slice(0, 79)}…` : q) : "(missing)";
+			const display = q && q.length > 0 ? (q.length > 80 ? `${clampQuery(q, 79)}…` : q) : "(missing)";
 			const provider = str(args?.provider);
 			const providerDisplay = provider && provider !== "auto" ? ` [${provider}]` : "";
 			text.setText(

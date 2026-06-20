@@ -16,6 +16,7 @@ import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -186,7 +187,7 @@ export function createInspectImageToolDefinition(
 			const path = str(args?.path) || "";
 			const display = path.length > 60 ? `…${path.slice(-59)}` : path;
 			const question = str(args?.question) || "";
-			const qDisplay = question ? ` ${theme.fg("toolOutput", `(${question.slice(0, 40)})`)}` : "";
+			const qDisplay = question ? ` ${theme.fg("toolOutput", `(${sliceSafe(question, 0, 40)})`)}` : "";
 			text.setText(
 				`${theme.fg("toolTitle", theme.bold("inspect_image"))} ${theme.fg("accent", display)}${qDisplay}`,
 			);

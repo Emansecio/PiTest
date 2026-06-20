@@ -9,6 +9,7 @@
 
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import type { HindsightBank } from "./bank.ts";
 
 export * from "./bank.ts";
@@ -55,7 +56,7 @@ export function formatSessionSummariesForPrompt(limit = 5, perEntryChars = 400):
 		const subject = entry.subject ? ` (${entry.subject})` : "";
 		const date = new Date(entry.createdAt).toISOString().slice(0, 10);
 		const trimmed =
-			entry.body.length > perEntryChars ? `${entry.body.slice(0, perEntryChars).trimEnd()}…` : entry.body;
+			entry.body.length > perEntryChars ? `${sliceSafe(entry.body, 0, perEntryChars).trimEnd()}…` : entry.body;
 		blocks.push(`- ${date}${subject}: ${trimmed}`);
 	}
 	blocks.push("</hindsight_session_memory>");

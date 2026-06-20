@@ -102,6 +102,23 @@ export class Input implements Component, Focusable {
 				if (remaining) {
 					this.handleInput(remaining);
 				}
+				return;
+			}
+			// Guard against an unterminated paste: a paste interrupted before the
+			// end marker (\x1b[201~) arrives — or a terminal that never emits one,
+			// or a blob sliced across chunks that overshoots — would let pasteBuffer
+			// grow without bound, eventually OOMing or hanging (subsequent input is
+			// swallowed because we stay in paste mode forever). Once we have clearly
+			// exceeded the cap with no end marker in sight, flush what we have
+			// (handlePaste truncates at MAX_PASTE_BYTES) and exit paste mode.
+			if (this.pasteBuffer.length > MAX_PASTE_BYTES) {
+				const pasteContent = this.pasteBuffer;
+				this.isInPaste = false;
+				this.pasteBuffer = "";
+				if (pasteContent.length > 0) {
+					this.handlePaste(pasteContent);
+				}
+				return;
 			}
 			return;
 		}

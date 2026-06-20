@@ -14,6 +14,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -518,7 +519,7 @@ export function createRenderMermaidToolDefinition(
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const source = str(args?.source) || "";
 			const firstLine = source.split(/\r?\n/, 1)[0] ?? "";
-			const display = firstLine.length > 60 ? `${firstLine.slice(0, 59)}…` : firstLine;
+			const display = truncateWithEllipsis(firstLine, 60);
 			text.setText(`${theme.fg("toolTitle", theme.bold("render_mermaid"))} ${theme.fg("toolOutput", display)}`);
 			return text;
 		},

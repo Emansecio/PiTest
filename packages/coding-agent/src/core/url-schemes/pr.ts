@@ -114,11 +114,18 @@ interface GhExecResult {
 
 function runGh(args: string[], ctx: UrlContext): Promise<GhExecResult | { notInstalled: true }> {
 	return new Promise((resolve, reject) => {
+		const onAbort = () => {
+			child.kill();
+		};
+		const cleanup = () => {
+			ctx.signal?.removeEventListener("abort", onAbort);
+		};
 		const child = execFile(
 			"gh",
 			args,
 			{ cwd: ctx.cwd, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
 			(err, stdout, stderr) => {
+				cleanup();
 				if (err && (err as NodeJS.ErrnoException).code === "ENOENT") {
 					resolve({ notInstalled: true });
 					return;
@@ -136,9 +143,6 @@ function runGh(args: string[], ctx: UrlContext): Promise<GhExecResult | { notIns
 			},
 		);
 		if (ctx.signal) {
-			const onAbort = () => {
-				child.kill();
-			};
 			if (ctx.signal.aborted) child.kill();
 			else ctx.signal.addEventListener("abort", onAbort, { once: true });
 		}

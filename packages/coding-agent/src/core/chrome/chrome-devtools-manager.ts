@@ -816,7 +816,7 @@ export class ChromeDevtoolsManager {
 		let lines = state.console;
 		if (input.level) lines = lines.filter((l) => l.level === input.level);
 		const limit = input.limit ?? 50;
-		return lines.slice(-limit);
+		return limit <= 0 ? [] : lines.slice(-limit);
 	}
 
 	/**
@@ -850,7 +850,8 @@ export class ChromeDevtoolsManager {
 			const matches = statusMatcher(input.status);
 			entries = entries.filter((e) => e.status !== undefined && matches(e.status));
 		}
-		return entries.slice(-(input.limit ?? 50));
+		const limit = input.limit ?? 50;
+		return limit <= 0 ? [] : entries.slice(-limit);
 	}
 
 	dispose(): void {

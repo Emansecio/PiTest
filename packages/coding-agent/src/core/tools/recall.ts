@@ -6,6 +6,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
 	getCurrentHindsightBank,
@@ -61,7 +62,7 @@ function formatResult(result: HindsightSearchResult): string {
 	let body = entry.body;
 	let truncatedNote = "";
 	if (body.length > BODY_TRUNCATE) {
-		body = `${body.slice(0, BODY_TRUNCATE).trimEnd()}…`;
+		body = `${sliceSafe(body, 0, BODY_TRUNCATE).trimEnd()}…`;
 		truncatedNote = `\n(see full entry: ${entry.id})`;
 	}
 	return `## ${entry.kind}${subject} [id: ${entry.id}]${tags}\n${body}${truncatedNote}`;

@@ -24,7 +24,6 @@ export function parseSimpleArgv(command: string): string[] | undefined {
 	if (!command.trim()) return undefined;
 	// Reject any shell metacharacter that would change semantics under substitution.
 	if (/[|;&`$()<>]/.test(command)) return undefined;
-	if (/\s>\s|\s<\s|>>|<<|&&|\|\|/.test(command)) return undefined;
 	const argv: string[] = [];
 	let current = "";
 	let quote: '"' | "'" | undefined;
