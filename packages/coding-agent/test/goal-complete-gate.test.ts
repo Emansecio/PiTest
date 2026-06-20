@@ -2,8 +2,13 @@
  * Unit test for R7: goal_complete refuses to finish while the project check is
  * red, consulting the session-published verification probe.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { GoalManager, setCurrentGoalManager } from "../src/core/goal/goal-manager.js";
+import {
+	_registerBashBackgroundJobForTest,
+	_resetBashBackgroundJobsForTest,
+	type BashBackgroundJob,
+} from "../src/core/tools/bash.js";
 import { createGoalCompleteToolDefinition } from "../src/core/tools/goal-complete.js";
 import { setCurrentVerificationProbe } from "../src/core/verification/verification.js";
 
@@ -21,6 +26,67 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 		.map((c) => c.text ?? "")
 		.join("\n");
 }
+
+function bgJob(over: Partial<BashBackgroundJob>): BashBackgroundJob {
+	return {
+		id: "bg-1",
+		pid: 1,
+		command: "npm run check",
+		startedAt: 0,
+		promotedAt: 0,
+		exited: false,
+		exitCode: null,
+		ringBuffer: "",
+		ringTruncated: false,
+		kill: () => {},
+		...over,
+	};
+}
+
+describe("goal_complete background-check gate (R8)", () => {
+	afterEach(() => {
+		_resetBashBackgroundJobsForTest();
+		setCurrentVerificationProbe(undefined);
+		setCurrentGoalManager(undefined);
+	});
+
+	it("refuses while a backgrounded test/check is still running", async () => {
+		const mgr = new GoalManager();
+		mgr.start("ship it", {});
+		setCurrentGoalManager(mgr);
+		setCurrentVerificationProbe(async () => ({ ok: true, exitCode: 0, output: "", timedOut: false }));
+		_registerBashBackgroundJobForTest(bgJob({ id: "bg-7", command: "npm run check", exited: false }));
+
+		const r = await complete("c1", "done");
+		expect(r.details?.completed).toBe(false);
+		expect(textOf(r)).toContain("still running in the background");
+		expect(textOf(r)).toContain("bg-7");
+		expect(mgr.get()?.status).toBe("active");
+	});
+
+	it("completes once the backgrounded check has exited (and the probe is green)", async () => {
+		const mgr = new GoalManager();
+		mgr.start("ship it", {});
+		setCurrentGoalManager(mgr);
+		setCurrentVerificationProbe(async () => ({ ok: true, exitCode: 0, output: "", timedOut: false }));
+		_registerBashBackgroundJobForTest(bgJob({ id: "bg-8", command: "npm run check", exited: true, exitCode: 0 }));
+
+		const r = await complete("c1", "done");
+		expect(r.details?.completed).toBe(true);
+		expect(mgr.get()?.status).toBe("complete");
+	});
+
+	it("ignores a backgrounded dev server (not a check)", async () => {
+		const mgr = new GoalManager();
+		mgr.start("ship it", {});
+		setCurrentGoalManager(mgr);
+		setCurrentVerificationProbe(async () => ({ ok: true, exitCode: 0, output: "", timedOut: false }));
+		_registerBashBackgroundJobForTest(bgJob({ id: "bg-9", command: "npm run dev", exited: false }));
+
+		const r = await complete("c1", "done");
+		expect(r.details?.completed).toBe(true);
+	});
+});
 
 describe("goal_complete verification gate (R7)", () => {
 	it("refuses while the check is red, then completes once it is green", async () => {

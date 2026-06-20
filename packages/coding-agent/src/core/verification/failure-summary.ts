@@ -1,4 +1,6 @@
-const MAX_FAILURE_LINES = 40;
+import { summarizeTestRun } from "./test-summary.ts";
+
+const MAX_FAILURE_LINES = 16;
 const TAIL_CHARS = 4000;
 
 // Ordered so the most specific/diagnostic patterns win the line cap first.
@@ -17,21 +19,25 @@ const FAILURE_PATTERNS: RegExp[] = [
  * signal on an unrecognized toolchain.
  */
 export function summarizeCheckFailure(output: string, _command: string): string {
+	const headline = summarizeTestRun(output)?.headline;
 	const seen = new Set<string>();
 	const hits: string[] = [];
+	let matched = 0;
 	for (const re of FAILURE_PATTERNS) {
 		for (const match of output.matchAll(re)) {
 			const line = match[0].trim();
-			if (line.length > 0 && !seen.has(line)) {
-				seen.add(line);
-				hits.push(line);
-			}
-			if (hits.length >= MAX_FAILURE_LINES) break;
+			if (line.length === 0 || seen.has(line)) continue;
+			seen.add(line);
+			matched++;
+			if (hits.length < MAX_FAILURE_LINES) hits.push(line);
 		}
-		if (hits.length >= MAX_FAILURE_LINES) break;
 	}
 	if (hits.length === 0) {
+		if (headline) return headline;
 		return output.length > TAIL_CHARS ? `…\n${output.slice(-TAIL_CHARS)}` : output;
 	}
-	return hits.join("\n");
+	const omitted = matched - hits.length;
+	const lines = headline ? [headline, ...hits] : [...hits];
+	if (omitted > 0) lines.push(`… (+${omitted} more failing line${omitted === 1 ? "" : "s"})`);
+	return lines.join("\n");
 }

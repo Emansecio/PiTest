@@ -12,7 +12,9 @@ import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentGoalManager } from "../goal/goal-manager.ts";
 import { summarizeCheckFailure } from "../verification/failure-summary.ts";
+import { pendingVerificationJobs } from "../verification/pending-checks.ts";
 import { getCurrentVerificationProbe } from "../verification/verification.ts";
+import { listBashBackgroundJobs } from "./bash.ts";
 import { renderToolOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -58,6 +60,21 @@ export function createGoalCompleteToolDefinition(
 				return {
 					content: [{ type: "text" as const, text: "No active goal to complete." }],
 					details: { completed: false },
+				};
+			}
+			// R8: a test/check the agent backgrounded is still running — its result is
+			// unknown, so the goal can't be declared done (and no commit suggested) yet.
+			const pending = pendingVerificationJobs(listBashBackgroundJobs());
+			if (pending.length > 0) {
+				const list = pending.map((j) => `  • id=${j.id}: ${j.command}`).join("\n");
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Not completing the goal — a test/check is still running in the background. Wait for it to finish and confirm it passed, then call goal_complete again:\n${list}`,
+						},
+					],
+					details: { completed: false, objective: goal.objective },
 				};
 			}
 			// R7: don't let the agent declare the goal done while the project check

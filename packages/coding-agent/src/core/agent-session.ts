@@ -192,7 +192,12 @@ import {
 	type ToolDiscoveryIndex,
 } from "./tool-discovery.ts";
 import { createSameSessionHintRule } from "./tool-error-hint-rules.ts";
-import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
+import {
+	type BashBackgroundJob,
+	type BashOperations,
+	createLocalBashOperations,
+	listBashBackgroundJobs,
+} from "./tools/bash.js";
 import { classifyBashCommand } from "./tools/bash-activity.js";
 import { FileMtimeStore } from "./tools/file-mtime-store.ts";
 import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.js";
@@ -202,6 +207,7 @@ import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapp
 import { TurnSteeringEngine } from "./turn-steering-engine.ts";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
 import { summarizeCheckFailure } from "./verification/failure-summary.ts";
+import { pendingVerificationJobs } from "./verification/pending-checks.ts";
 import {
 	type CheckResult,
 	detectCheckCommand,
@@ -420,6 +426,36 @@ function verificationExhaustedPrompt(
 	if (contradictClaim) {
 		lines.push(
 			"Your previous message implied the work was complete — that directly contradicts the still-failing check above. Correct that claim explicitly.",
+		);
+	}
+	return lines.join("\n");
+}
+
+/**
+ * Terminal message injected when the turn is about to hand back to the user while
+ * a test/check the agent backgrounded is unfinished or failed. Keeps the agent
+ * from reporting done / suggesting a commit on a result it never actually saw —
+ * the exact "committed, then the test came back red" failure mode.
+ */
+function pendingChecksPrompt(failed: BashBackgroundJob[], running: BashBackgroundJob[]): string {
+	const lines: string[] = [];
+	if (failed.length > 0) {
+		lines.push(
+			"A test/check you ran in the background has FAILED. Do NOT report the task as done or suggest committing — the project is in a broken state.",
+		);
+		for (const job of failed) {
+			const tail = summarizeCheckFailure(job.ringBuffer ?? "", job.command);
+			lines.push("", `$ ${job.command}  (id=${job.id}, exit ${job.exitCode})`, tail || "(no output captured)");
+		}
+		lines.push("", "Fix the cause, re-run the check to green, and only then conclude.");
+	} else if (running.length > 0) {
+		lines.push(
+			"A test/check you started in the background is STILL running. Do NOT report the task as done or suggest committing until it has finished and passed:",
+		);
+		for (const job of running) lines.push(`  • id=${job.id}: ${job.command}`);
+		lines.push(
+			"",
+			"Wait for it to finish and confirm it passed before concluding. If it is a watcher that never exits, say so explicitly instead of assuming success.",
 		);
 	}
 	return lines.join("\n");
@@ -2863,9 +2899,79 @@ export class AgentSession {
 			}
 		}
 
+		// Background-check guard: if the agent backgrounded a test/check, make sure it
+		// has finished and passed before the turn hands back — never report done or
+		// suggest a commit on a test that is still running (or already failed).
+		await this._guardPendingBackgroundChecks(options);
+
 		// Native verification gate: after a code-modifying turn, run the project
 		// check and re-inject failures so the agent self-corrects before "done".
 		await this._runVerificationGate(options);
+	}
+
+	/**
+	 * Wait (bounded) for any test/check the agent backgrounded to settle, then
+	 * re-inject the outcome when it failed or is still running. Closes the
+	 * "reported done / suggested a commit while `npm run …` was still in flight"
+	 * gap: a long check is auto-promoted to a background job, so the turn can end
+	 * before its real exit code is known. No-op when nothing relevant is pending.
+	 */
+	private async _guardPendingBackgroundChecks(options?: PromptOptions): Promise<void> {
+		if (this._inVerification || this._userInterrupted || this._lastTurnAborted()) return;
+		const settings = this.settingsManager.getVerificationSettings();
+		if (!settings.enabled) return;
+		const pending = pendingVerificationJobs(listBashBackgroundJobs());
+		if (pending.length === 0) return;
+
+		const ids = new Set(pending.map((j) => j.id));
+		const label = pending.length === 1 ? pending[0].command : `${pending.length} background checks`;
+		const abort = new AbortController();
+		this._verificationAbort = abort;
+		this._inVerification = true;
+		try {
+			this._emit({ type: "verification", phase: "running", command: label, attempt: 1, maxAttempts: 1 });
+			const deadline = Date.now() + settings.timeoutMs;
+			while (Date.now() < deadline) {
+				if (abort.signal.aborted || this._userInterrupted) return;
+				if (listBashBackgroundJobs().every((j) => !ids.has(j.id) || j.exited)) break;
+				await new Promise<void>((res) => {
+					const t = setTimeout(res, 500);
+					abort.signal.addEventListener(
+						"abort",
+						() => {
+							clearTimeout(t);
+							res();
+						},
+						{ once: true },
+					);
+				});
+			}
+			if (abort.signal.aborted || this._userInterrupted) return;
+
+			const jobs = listBashBackgroundJobs().filter((j) => ids.has(j.id));
+			const failed = jobs.filter((j) => j.exited && j.exitCode !== 0 && j.exitCode !== null);
+			const running = jobs.filter((j) => !j.exited);
+			if (failed.length === 0 && running.length === 0) {
+				this._emit({ type: "verification", phase: "passed", command: label, attempt: 1, maxAttempts: 1 });
+				return;
+			}
+			this._emit({
+				type: "verification",
+				phase: "failed",
+				command: label,
+				attempt: 1,
+				maxAttempts: 1,
+				exitCode: failed[0]?.exitCode ?? undefined,
+				willRetry: false,
+			});
+			await this._promptOnce(pendingChecksPrompt(failed, running), {
+				expandPromptTemplates: false,
+				source: options?.source,
+			});
+		} finally {
+			this._inVerification = false;
+			this._verificationAbort = undefined;
+		}
 	}
 
 	/**

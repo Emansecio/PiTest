@@ -607,6 +607,30 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toMatch(/\(no output\) · exit 2 · Took \d+\.\ds/);
 	});
 
+	test("surfaces a compiled test-summary chip on the bash footer", () => {
+		const component = new ToolExecutionComponent(
+			"bash",
+			"tool-bash-test-summary",
+			{ command: "npm run check" },
+			{},
+			createBashToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.markExecutionStarted();
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "Tests  3 failed | 142 passed (145)" }],
+				details: { testSummary: "✗ 3 failed · 142 passed" },
+				isError: true,
+			},
+			false,
+		);
+
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("✗ 3 failed · 142 passed");
+	});
+
 	test("collapses output but appends exit chip to Took line on bash failure", () => {
 		const component = new ToolExecutionComponent(
 			"bash",

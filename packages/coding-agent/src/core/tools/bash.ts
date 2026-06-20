@@ -19,6 +19,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { summarizeTestRun } from "../verification/test-summary.ts";
 import { applyKeyAliases } from "./argument-prep.js";
 import { classifyBashCommand } from "./bash-activity.js";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.js";
@@ -119,6 +120,8 @@ export type BashToolInput = Static<typeof bashSchema>;
 export interface BashToolDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
+	/** Compiled test-runner headline (e.g. "✓ 142 passed") shown as a footer chip. */
+	testSummary?: string;
 }
 
 /**
@@ -256,6 +259,12 @@ export function killBashBackgroundJob(id: string): boolean {
 export function _resetBashBackgroundJobsForTest(): void {
 	backgroundJobs.clear();
 	backgroundJobSeq = 0;
+}
+
+// Test-only: seed the registry with a synthetic job so suites can exercise the
+// pending-check guards without spawning a real long-running process.
+export function _registerBashBackgroundJobForTest(job: BashBackgroundJob): void {
+	backgroundJobs.set(job.id, job);
 }
 
 function registerBackgroundJob(job: BashBackgroundJob): void {
@@ -764,6 +773,10 @@ function rebuildBashResultRenderComponent(
 	// collapsed (no preview lines / no warning), or the last rendered line
 	// otherwise — so no orphan blank line sits between the command and the footer.
 	const footerParts: string[] = [];
+	const testSummary = result.details?.testSummary;
+	if (testSummary) {
+		footerParts.push(testSummary);
+	}
 	if (emptyOutput && (failure || isError)) {
 		footerParts.push("(no output)");
 	}
@@ -918,6 +931,9 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 				// output is preserved on disk when truncated (fullOutputPath below).
 				let text = snapshot.content ? collapseRepeatedLines(snapshot.content) : emptyText;
 				let details: BashToolDetails | undefined;
+				// Compile a test-runner headline ("✓ 142 passed") so the activity row shows a
+				// compact result chip instead of leaving the full dump as the only signal.
+				const testSummary = snapshot.content ? summarizeTestRun(snapshot.content)?.headline : undefined;
 				if (truncation.truncated) {
 					details = { truncation, fullOutputPath: snapshot.fullOutputPath };
 					const startLine = truncation.totalLines - truncation.outputLines + 1;
@@ -934,6 +950,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(BASH_MAX_BYTES)} limit). Full output: ${snapshot.fullOutputPath}]`;
 					}
 				}
+				if (testSummary) details = { ...details, testSummary };
 				return { text, details };
 			};
 
