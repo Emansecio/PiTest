@@ -131,9 +131,13 @@ function runSubprocess(command: string[], cwd: string, signal?: AbortSignal): Pr
 		// appending once over the cap; the head is what we report.
 		const MAX_OUTPUT_BYTES = 512 * 1024;
 		let capped = false;
+		// Keep a single streaming decoder across chunks so a multibyte UTF-8
+		// sequence split across two data events (e.g. an accented path in a
+		// compiler diagnostic) is not corrupted into U+FFFD at the boundary.
+		const decoder = new TextDecoder();
 		const append = (c: Buffer) => {
 			if (capped) return;
-			out += c.toString("utf-8");
+			out += decoder.decode(c, { stream: true });
 			if (out.length > MAX_OUTPUT_BYTES) {
 				out = out.slice(0, MAX_OUTPUT_BYTES);
 				capped = true;
@@ -161,6 +165,9 @@ function runSubprocess(command: string[], cwd: string, signal?: AbortSignal): Pr
 		});
 		child.on("close", () => {
 			signal?.removeEventListener("abort", onAbort);
+			// Flush any trailing bytes held by the streaming decoder. If we already
+			// hit the byte cap the head is what we report, so skip the flush.
+			if (!capped) out += decoder.decode();
 			resolve(out);
 		});
 	});

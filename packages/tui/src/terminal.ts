@@ -75,6 +75,7 @@ export class ProcessTerminal implements Terminal {
 	// SIGWINCH events down to a single resizeHandler() call once the drag stops.
 	private resizeListener?: () => void;
 	private resizeDebounceTimer?: ReturnType<typeof setTimeout>;
+	private kittyFallbackTimer?: ReturnType<typeof setTimeout>;
 	private _kittyProtocolActive = false;
 	private _modifyOtherKeysActive = false;
 	private stdinBuffer?: StdinBuffer;
@@ -215,12 +216,14 @@ export class ProcessTerminal implements Terminal {
 		this.setupStdinBuffer();
 		process.stdin.on("data", this.stdinDataHandler!);
 		process.stdout.write("\x1b[?u");
-		setTimeout(() => {
+		this.kittyFallbackTimer = setTimeout(() => {
+			this.kittyFallbackTimer = undefined;
 			if (!this._kittyProtocolActive && !this._modifyOtherKeysActive) {
 				process.stdout.write("\x1b[>4;2m");
 				this._modifyOtherKeysActive = true;
 			}
 		}, 150);
+		(this.kittyFallbackTimer as { unref?: () => void }).unref?.();
 	}
 
 	/**
@@ -253,6 +256,10 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	async drainInput(maxMs = 1000, idleMs = 50): Promise<void> {
+		if (this.kittyFallbackTimer) {
+			clearTimeout(this.kittyFallbackTimer);
+			this.kittyFallbackTimer = undefined;
+		}
 		if (this._kittyProtocolActive) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
@@ -293,6 +300,14 @@ export class ProcessTerminal implements Terminal {
 	stop(): void {
 		if (this.clearProgressInterval()) {
 			process.stdout.write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+		}
+
+		// Cancel the pending Kitty-fallback timer so it cannot write
+		// modifyOtherKeys-enable escapes (or set _modifyOtherKeysActive) after
+		// teardown when stop() runs within 150ms of start().
+		if (this.kittyFallbackTimer) {
+			clearTimeout(this.kittyFallbackTimer);
+			this.kittyFallbackTimer = undefined;
 		}
 
 		// Disable bracketed paste mode

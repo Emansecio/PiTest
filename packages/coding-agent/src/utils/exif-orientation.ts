@@ -14,7 +14,7 @@ function readOrientationFromTiff(bytes: Uint8Array, tiffStart: number): number {
 	};
 
 	const read32 = (pos: number): number => {
-		if (le) return bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24);
+		if (le) return (bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24)) >>> 0;
 		return ((bytes[pos] << 24) | (bytes[pos + 1] << 16) | (bytes[pos + 2] << 8) | bytes[pos + 3]) >>> 0;
 	};
 

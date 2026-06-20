@@ -117,7 +117,15 @@ export async function runCheckCommand(
 			if (process.platform === "win32" && pid !== undefined) {
 				// `shell:true` runs cmd.exe; killing it leaves the real child alive.
 				// taskkill /T tears down the whole process tree.
-				spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+				const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+					stdio: "ignore",
+					windowsHide: true,
+				});
+				// If taskkill can't start (PATH without System32, renamed/missing binary) the
+				// failure arrives as an async 'error' event; without a listener Node makes it
+				// fatal (uncaughtException). This runs on the timeout/abort recovery path, so a
+				// crash here would defeat the very kill it's performing.
+				killer.on("error", () => {});
 			} else if (pid !== undefined) {
 				process.kill(-pid, "SIGKILL"); // negative pid → kill the process group
 			} else {

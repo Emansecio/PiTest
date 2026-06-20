@@ -28,7 +28,10 @@ function decodeEntities(text: string): string {
 		.replace(/&quot;/g, '"')
 		.replace(/&#39;/g, "'")
 		.replace(/&apos;/g, "'")
-		.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n, 10)));
+		.replace(/&#(\d+);/g, (_, n) => {
+			const cp = parseInt(n, 10);
+			return Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : _;
+		});
 }
 
 export function stripBoilerplate(html: string): string {

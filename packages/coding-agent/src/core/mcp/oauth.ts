@@ -279,33 +279,38 @@ export async function authenticateMcpServer(
 	const callback = await startCallbackServer(state);
 	const redirectUri = `http://localhost:${callback.port}/callback`;
 
-	let clientId = config.oauth?.clientId;
-	let clientSecret = config.oauth?.clientSecret;
-	if (!clientId) {
-		if (!meta.registration_endpoint) {
-			throw new Error(`Server requires a client_id (no registration endpoint and no oauth.clientId configured)`);
-		}
-		const reg = await registerClient(meta.registration_endpoint, redirectUri);
-		clientId = reg.clientId;
-		clientSecret = reg.clientSecret;
-	}
-
-	const { verifier, challenge } = generatePkce();
-	const scopes = config.oauth?.scopes ?? meta.scopes_supported;
-	const authUrl = new URL(meta.authorization_endpoint);
-	authUrl.searchParams.set("response_type", "code");
-	authUrl.searchParams.set("client_id", clientId);
-	authUrl.searchParams.set("redirect_uri", redirectUri);
-	authUrl.searchParams.set("code_challenge", challenge);
-	authUrl.searchParams.set("code_challenge_method", "S256");
-	authUrl.searchParams.set("state", state);
-	if (scopes && scopes.length > 0) authUrl.searchParams.set("scope", scopes.join(" "));
-
-	console.log(`Opening browser to authorize "${name}":\n  ${authUrl.toString()}`);
-	openBrowser(authUrl.toString());
-
+	let clientId: string;
+	let clientSecret: string | undefined;
+	let verifier: string;
+	let scopes: string[] | undefined;
 	let code: string;
 	try {
+		clientId = config.oauth?.clientId ?? "";
+		clientSecret = config.oauth?.clientSecret;
+		if (!clientId) {
+			if (!meta.registration_endpoint) {
+				throw new Error(`Server requires a client_id (no registration endpoint and no oauth.clientId configured)`);
+			}
+			const reg = await registerClient(meta.registration_endpoint, redirectUri);
+			clientId = reg.clientId;
+			clientSecret = reg.clientSecret;
+		}
+
+		const pkce = generatePkce();
+		verifier = pkce.verifier;
+		scopes = config.oauth?.scopes ?? meta.scopes_supported;
+		const authUrl = new URL(meta.authorization_endpoint);
+		authUrl.searchParams.set("response_type", "code");
+		authUrl.searchParams.set("client_id", clientId);
+		authUrl.searchParams.set("redirect_uri", redirectUri);
+		authUrl.searchParams.set("code_challenge", pkce.challenge);
+		authUrl.searchParams.set("code_challenge_method", "S256");
+		authUrl.searchParams.set("state", state);
+		if (scopes && scopes.length > 0) authUrl.searchParams.set("scope", scopes.join(" "));
+
+		console.log(`Opening browser to authorize "${name}":\n  ${authUrl.toString()}`);
+		openBrowser(authUrl.toString());
+
 		code = await callback.code;
 	} finally {
 		callback.close();
