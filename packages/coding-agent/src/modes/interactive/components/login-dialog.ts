@@ -110,9 +110,12 @@ export class LoginDialogComponent extends Container implements Focusable {
 					process.platform === "darwin"
 						? spawn("open", [url], { stdio: "ignore", detached: true })
 						: process.platform === "win32"
-							? // `start` is a cmd builtin; empty "" is the window title. URL is a
-								// single argv element (no shell interpolation) and already validated.
-								spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true })
+							? // Do NOT use `cmd /c start`: cmd re-tokenizes the command line and treats
+								// the `&` separators in an OAuth query string as command separators, so the
+								// URL is truncated at the first `&` (client_id and the rest are dropped).
+								// rundll32 passes the URL straight to the protocol handler with no shell
+								// re-parsing. URL is a single argv element and already validated above.
+								spawn("rundll32", ["url.dll,FileProtocolHandler", url], { stdio: "ignore", detached: true })
 							: spawn("xdg-open", [url], { stdio: "ignore", detached: true });
 				child.on("error", () => {});
 				child.unref();
