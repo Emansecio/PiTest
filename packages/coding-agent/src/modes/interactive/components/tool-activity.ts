@@ -182,6 +182,30 @@ export function glyphFor(toolName: string): string {
 	return theme.fg(TOOL_GLYPH_COLOR[toolName] ?? "muted", glyph);
 }
 
+/**
+ * Coalescing key for an action line: consecutive actions that share a key fold
+ * into one line with a `×N` count instead of stacking N identical rows (e.g.
+ * four `todo` updates → `Updated todos ×4`). Keyed by tool name + the call's
+ * target identity (path / command / query) so repeated edits to the SAME file
+ * also fold, while two different commands stay distinct. Returns `null` for
+ * tools that must never coalesce (each `task` agent is its own line).
+ */
+export function actionCoalesceKey(toolName: string, args: Record<string, unknown> | undefined): string | null {
+	if (toolName === "task") return null;
+	const a = args ?? {};
+	const target =
+		typeof a.path === "string"
+			? a.path
+			: typeof a.file_path === "string"
+				? a.file_path
+				: typeof a.command === "string"
+					? a.command
+					: typeof a.query === "string"
+						? a.query
+						: "";
+	return `${toolName}|${target}`;
+}
+
 export function diffStat(diff: string | undefined): { added: number; removed: number } {
 	let added = 0;
 	let removed = 0;
