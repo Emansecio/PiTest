@@ -47,6 +47,8 @@ export interface NetworkEntry {
 	url: string;
 	status?: number;
 	mimeType?: string;
+	/** CDP resource type (Document/Script/XHR/Fetch/Image/Font/…) — used by readNetwork filters. */
+	resourceType?: string;
 }
 
 export interface ChromeDevtoolsDeps {
@@ -72,6 +74,13 @@ interface ConnState {
 	conn: CdpConnectionLike;
 	console: ConsoleLine[];
 	network: NetworkEntry[];
+	// Proactively captured response bodies, keyed by requestId. CDP evicts bodies
+	// from its own buffer as new requests pile up (and on navigation), so a body
+	// fetched lazily by getResponseBody is often already gone. We snapshot text-ish
+	// bodies on Network.loadingFinished instead, so they stay readable for the page's
+	// lifetime. Bounded by BODY_CACHE_BUDGET (total) + BODY_CACHE_PER_ENTRY (each).
+	bodies: Map<string, { body: string; base64Encoded: boolean; bytes: number }>;
+	bodyBytes: number;
 	unsubs: Array<() => void>;
 	// Memoized "renderer ready for synthetic input" gate (see ensureInputReady).
 	// One per connection: a freshly launched/navigated page drops Input.dispatch*
@@ -81,6 +90,16 @@ interface ConnState {
 }
 
 const BUFFER_MAX = 200;
+// Proactive network-body cache bounds. Each cached body is capped (complete
+// bodies only — anything larger is left to a live getResponseBody fetch), and the
+// running total is capped so a flood of JSON responses can't grow without limit.
+const BODY_CACHE_PER_ENTRY = 1024 * 1024;
+const BODY_CACHE_BUDGET = 16 * 1024 * 1024;
+// CDP's own response-body buffer (Network.enable). Larger than the default so a
+// body we did NOT proactively cache (e.g. a big JS bundle) still survives long
+// enough for a live getResponseBody fetch on a busy page.
+const NETWORK_TOTAL_BUFFER_BYTES = 64 * 1024 * 1024;
+const NETWORK_RESOURCE_BUFFER_BYTES = 16 * 1024 * 1024;
 const WAIT_FOR_POLL_MS = 200;
 const WAIT_FOR_DEFAULT_TIMEOUT_MS = 5_000;
 const WAIT_FOR_MAX_TIMEOUT_MS = 30_000;
@@ -155,6 +174,56 @@ const KEY_DEFS: Record<string, { key: string; code: string; keyCode: number; tex
 	PageUp: { key: "PageUp", code: "PageUp", keyCode: 33 },
 	PageDown: { key: "PageDown", code: "PageDown", keyCode: 34 },
 };
+
+/**
+ * Whether a response body of this MIME type is worth proactively caching. Targets
+ * the inspectable bodies an agent actually reads (JSON / text / XML / form data /
+ * GraphQL) and skips large static assets (scripts, styles, images, fonts, media)
+ * that are rarely examined as network bodies and only bloat the cache.
+ */
+function isCacheableMime(mime: string): boolean {
+	const m = mime.toLowerCase();
+	if (m.includes("json")) return true;
+	if (m.includes("xml")) return true;
+	if (m.includes("graphql")) return true;
+	if (m.includes("x-www-form-urlencoded")) return true;
+	if (m.startsWith("text/")) return !(m.startsWith("text/javascript") || m.startsWith("text/css"));
+	return false;
+}
+
+/**
+ * Compile a status filter into a predicate. Accepts a number (exact), "NNN"
+ * (exact), a class like "2xx"/"4xx"/"5xx", or a comparison ">=400" / ">399" /
+ * "<=299" / "<300". Throws on an unrecognized spec so the tool can report it.
+ */
+function statusMatcher(spec: string | number): (status: number) => boolean {
+	if (typeof spec === "number") return (n) => n === spec;
+	const s = spec.trim().toLowerCase();
+	const cls = /^([1-5])xx$/.exec(s);
+	if (cls) {
+		const base = Number(cls[1]) * 100;
+		return (n) => n >= base && n < base + 100;
+	}
+	const cmp = /^(>=|<=|>|<)\s*(\d{3})$/.exec(s);
+	if (cmp) {
+		const v = Number(cmp[2]);
+		switch (cmp[1]) {
+			case ">=":
+				return (n) => n >= v;
+			case "<=":
+				return (n) => n <= v;
+			case ">":
+				return (n) => n > v;
+			default:
+				return (n) => n < v;
+		}
+	}
+	if (/^\d{3}$/.test(s)) {
+		const v = Number(s);
+		return (n) => n === v;
+	}
+	throw new Error(`Invalid status filter ${JSON.stringify(spec)}. Use 404, "4xx", ">=400", "<300", etc.`);
+}
 
 function remoteArgsToText(args: unknown): string {
 	if (!Array.isArray(args)) return "";
@@ -605,17 +674,78 @@ export class ChromeDevtoolsManager {
 		return lines.join("\n");
 	}
 
-	/** Response body of a buffered network request (see readNetwork for ids). */
+	/**
+	 * Response body of a buffered network request (see readNetwork for ids).
+	 * Returns the proactively cached snapshot when present (the common path — CDP
+	 * would otherwise have evicted it), falling back to a live CDP fetch for bodies
+	 * we did not cache (binary assets, oversized bodies, scripts/styles).
+	 */
 	async getResponseBody(requestId: string, signal?: AbortSignal): Promise<{ body: string; base64Encoded: boolean }> {
+		const state = this.requireState();
+		const cached = state.bodies.get(requestId);
+		if (cached) {
+			return {
+				body: capPayload(cached.body, MAX_CDP_BODY_BYTES, "chrome.getResponseBody"),
+				base64Encoded: cached.base64Encoded,
+			};
+		}
 		const conn = await this.requireConn();
-		const res = await conn.send("Network.getResponseBody", { requestId }, { signal });
-		// CDP returns the whole body; cap it so a giant asset isn't retained or
-		// propagated to the rest of the pipeline (tool result, render, compaction).
-		const raw = typeof res?.body === "string" ? res.body : "";
-		return {
-			body: capPayload(raw, MAX_CDP_BODY_BYTES, "chrome.getResponseBody"),
-			base64Encoded: !!res?.base64Encoded,
-		};
+		try {
+			const res = await conn.send("Network.getResponseBody", { requestId }, { signal });
+			// CDP returns the whole body; cap it so a giant asset isn't retained or
+			// propagated to the rest of the pipeline (tool result, render, compaction).
+			const raw = typeof res?.body === "string" ? res.body : "";
+			return {
+				body: capPayload(raw, MAX_CDP_BODY_BYTES, "chrome.getResponseBody"),
+				base64Encoded: !!res?.base64Encoded,
+			};
+		} catch (err) {
+			throw new Error(
+				`Could not read body for request ${requestId}: ${(err as Error).message}. ` +
+					"Chrome may have evicted it — re-trigger the request and read it again.",
+			);
+		}
+	}
+
+	/**
+	 * Snapshot a text-ish response body on Network.loadingFinished so it survives
+	 * CDP's own buffer eviction. Fire-and-forget from the event handler; never
+	 * throws out of the event loop. Skips bodies already cached, non-text MIME
+	 * types, binary payloads, and bodies over the per-entry cap (left to a live
+	 * fetch). Enforces the total budget with FIFO eviction.
+	 */
+	private async cacheBody(conn: CdpConnectionLike, state: ConnState, requestId: string | undefined): Promise<void> {
+		if (!requestId || state.bodies.has(requestId)) return;
+		const entry = state.network.find((e) => e.requestId === requestId);
+		if (!entry || !isCacheableMime(entry.mimeType ?? "")) return;
+		if (conn.isClosed?.()) return;
+		try {
+			const res = await conn.send("Network.getResponseBody", { requestId });
+			if (res?.base64Encoded) return;
+			const body = typeof res?.body === "string" ? res.body : "";
+			const bytes = body.length;
+			if (bytes === 0 || bytes > BODY_CACHE_PER_ENTRY) return;
+			// A late event for a request already dropped from the ring would leak its
+			// bytes (no eviction ever reclaims them), so only cache what's still buffered.
+			if (!state.network.some((e) => e.requestId === requestId)) return;
+			state.bodies.set(requestId, { body, base64Encoded: false, bytes });
+			state.bodyBytes += bytes;
+			while (state.bodyBytes > BODY_CACHE_BUDGET) {
+				const oldest = state.bodies.keys().next();
+				if (oldest.done) break;
+				this.dropCachedBody(state, oldest.value);
+			}
+		} catch {
+			// No body for this request (redirect / 204 / already gone) — ignore.
+		}
+	}
+
+	/** Remove a cached body and reclaim its bytes from the running total. */
+	private dropCachedBody(state: ConnState, requestId: string): void {
+		const hit = state.bodies.get(requestId);
+		if (!hit) return;
+		state.bodies.delete(requestId);
+		state.bodyBytes -= hit.bytes;
 	}
 
 	/**
@@ -689,9 +819,38 @@ export class ChromeDevtoolsManager {
 		return lines.slice(-limit);
 	}
 
-	readNetwork(input: { limit?: number }): NetworkEntry[] {
+	/**
+	 * Buffered network requests, newest last. Filters (urlPattern / method / type /
+	 * status) narrow the FULL buffer before the limit is applied, so a small limit
+	 * still returns the matching requests rather than the last N of everything (the
+	 * usual case: the real API call drowned in tracking/pixel noise).
+	 */
+	readNetwork(input: {
+		limit?: number;
+		urlPattern?: string;
+		method?: string;
+		type?: string;
+		status?: string | number;
+	}): NetworkEntry[] {
 		const state = this.requireState();
-		return state.network.slice(-(input.limit ?? 50));
+		let entries = state.network;
+		if (input.urlPattern) {
+			const needle = input.urlPattern.toLowerCase();
+			entries = entries.filter((e) => e.url.toLowerCase().includes(needle));
+		}
+		if (input.method) {
+			const m = input.method.toLowerCase();
+			entries = entries.filter((e) => e.method.toLowerCase() === m);
+		}
+		if (input.type) {
+			const t = input.type.toLowerCase();
+			entries = entries.filter((e) => (e.resourceType ?? "").toLowerCase() === t);
+		}
+		if (input.status !== undefined) {
+			const matches = statusMatcher(input.status);
+			entries = entries.filter((e) => e.status !== undefined && matches(e.status));
+		}
+		return entries.slice(-(input.limit ?? 50));
 	}
 
 	dispose(): void {
@@ -758,7 +917,7 @@ export class ChromeDevtoolsManager {
 
 	private async openConn(target: CdpTarget): Promise<CdpConnectionLike> {
 		const conn = this.connectFactory(target);
-		const state: ConnState = { conn, console: [], network: [], unsubs: [] };
+		const state: ConnState = { conn, console: [], network: [], bodies: new Map(), bodyBytes: 0, unsubs: [] };
 		this.conns.set(target.id, state);
 
 		const pushConsole = (line: ConsoleLine) => {
@@ -777,15 +936,27 @@ export class ChromeDevtoolsManager {
 					requestId: p?.requestId,
 					method: p?.request?.method ?? "GET",
 					url: p?.request?.url ?? "",
+					...(p?.type ? { resourceType: p.type } : {}),
 				});
-				if (state.network.length > BUFFER_MAX) state.network.shift();
+				if (state.network.length > BUFFER_MAX) {
+					const removed = state.network.shift();
+					// Drop the evicted request's cached body too, so the body cache can
+					// never outlive its ring entry (and its bytes are reclaimed).
+					if (removed) this.dropCachedBody(state, removed.requestId);
+				}
 			}),
 			conn.on("Network.responseReceived", (p) => {
 				const entry = state.network.find((e) => e.requestId === p?.requestId);
 				if (entry) {
 					entry.status = p?.response?.status;
 					entry.mimeType = p?.response?.mimeType;
+					if (p?.type) entry.resourceType = p.type;
 				}
+			}),
+			// Snapshot text-ish bodies the moment they finish, before CDP evicts them
+			// from its own buffer. Fire-and-forget — cacheBody swallows its own errors.
+			conn.on("Network.loadingFinished", (p) => {
+				void this.cacheBody(conn, state, p?.requestId);
 			}),
 			// A JS dialog (alert/confirm/prompt/beforeunload) blocks the renderer: every
 			// subsequent CDP command stalls until the per-command 30s timeout, repeatedly.
@@ -796,10 +967,19 @@ export class ChromeDevtoolsManager {
 			}),
 		);
 
-		// Enable the domains we buffer + need; tolerate individual failures.
+		// Enable the domains we buffer + need; tolerate individual failures. Network
+		// gets enlarged buffers so a body we did not proactively cache still survives
+		// a live getResponseBody fetch on a busy page.
 		for (const domain of ["Page", "Runtime", "Log", "Network"]) {
 			try {
-				await conn.send(`${domain}.enable`);
+				const params =
+					domain === "Network"
+						? {
+								maxTotalBufferSize: NETWORK_TOTAL_BUFFER_BYTES,
+								maxResourceBufferSize: NETWORK_RESOURCE_BUFFER_BYTES,
+							}
+						: {};
+				await conn.send(`${domain}.enable`, params);
 			} catch {
 				// A domain may be unavailable for some target types; keep going.
 			}

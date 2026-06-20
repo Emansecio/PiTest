@@ -124,7 +124,25 @@ const consoleSchema = Type.Object(
 	{ additionalProperties: false },
 );
 const networkSchema = Type.Object(
-	{ limit: Type.Optional(Type.Number({ description: "Max requests to return (default 50)." })) },
+	{
+		limit: Type.Optional(Type.Number({ description: "Max requests to return (default 50)." })),
+		urlPattern: Type.Optional(
+			Type.String({ description: "Keep only requests whose URL contains this substring (case-insensitive)." }),
+		),
+		method: Type.Optional(Type.String({ description: "Keep only this HTTP method (GET/POST/…, case-insensitive)." })),
+		type: Type.Optional(
+			Type.String({
+				description:
+					"Keep only this resource type (case-insensitive): Document, Stylesheet, Image, Media, Font, Script, XHR, Fetch, WebSocket, Other.",
+			}),
+		),
+		status: Type.Optional(
+			Type.Union([Type.Number(), Type.String()], {
+				description:
+					'Keep only matching statuses: a number (404), a class ("4xx"), or a comparison (">=400", "<300").',
+			}),
+		),
+	},
 	{ additionalProperties: false },
 );
 const clickSchema = Type.Object(
@@ -323,18 +341,29 @@ export function createChromeReadNetworkDefinition(): ToolDefinition<typeof netwo
 	return buildChromeTool({
 		name: "chrome_devtools_read_network",
 		activity: "navigation",
-		description: "Read buffered network requests from the selected page.",
+		description:
+			"Read buffered network requests from the selected page. Filter by urlPattern / method / type / status to cut through tracking noise; filters apply to the whole buffer before the limit.",
 		snippet: "Read network requests",
-		guidelines: ["Shows recent requests with method, url and status."],
+		guidelines: [
+			"Shows recent requests with id, status, method, url, resource type and mime.",
+			'Filter to find the real call fast, e.g. type:"XHR" or type:"Fetch" for API calls, urlPattern:"/api", or status:">=400" for failures.',
+		],
 		schema: networkSchema,
 		run: async (mgr, input) => {
-			const entries = mgr.readNetwork({ limit: input.limit });
+			const entries = mgr.readNetwork({
+				limit: input.limit,
+				urlPattern: input.urlPattern,
+				method: input.method,
+				type: input.type,
+				status: input.status,
+			});
 			if (entries.length === 0) return textResult("No network requests.");
 			return textResult(
 				entries
 					.map((e) => {
+						const type = e.resourceType ? `  ${e.resourceType}` : "";
 						const mime = e.mimeType ? `  ${e.mimeType}` : "";
-						return `[${e.requestId}]  ${e.status ?? "..."}  ${e.method}  ${e.url}${mime}`;
+						return `[${e.requestId}]  ${e.status ?? "..."}  ${e.method}  ${e.url}${type}${mime}`;
 					})
 					.join("\n"),
 			);
@@ -499,9 +528,13 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 	return buildChromeTool({
 		name: "chrome_devtools_get_network_body",
 		activity: "navigation",
-		description: "Fetch the response body of a request listed by chrome_devtools_read_network.",
+		description:
+			"Fetch the response body of a request listed by chrome_devtools_read_network. Text/JSON/XML bodies are captured when the request finishes, so they stay readable for the page's lifetime even after Chrome would have evicted them.",
 		snippet: "Read a network response body",
-		guidelines: ["Get the requestId from chrome_devtools_read_network first."],
+		guidelines: [
+			"Get the requestId from chrome_devtools_read_network first.",
+			"Binary, oversized, or script/style bodies are not cached and fall back to a live fetch — which can fail if Chrome already evicted them.",
+		],
 		schema: networkBodySchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.getResponseBody(input.requestId, signal);

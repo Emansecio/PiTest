@@ -156,6 +156,46 @@ suite("chrome_devtools real-Chrome E2E (PIT_CHROME_E2E=1)", () => {
 		expect(body?.body).toContain("pit-body-ok");
 	});
 
+	// Network body persistence + filters against real Chrome: a JSON body is
+	// captured on loadingFinished (served from cache, no live fetch needed), the
+	// resource type is recorded, and readNetwork filters narrow the buffer.
+	it("caches the JSON body and filters the network buffer", { timeout: 60_000 }, async () => {
+		await mgr.navigate({ url: `http://127.0.0.1:${HTTP_PORT}/`, newTab: true });
+		expect((await mgr.waitFor({ selector: "#login", timeoutMs: 15_000 })).found).toBe(true);
+
+		// Consume the body (as a real app does) so Chrome reliably retains it for the
+		// loadingFinished snapshot instead of dropping an unread fetch stream.
+		await mgr.evaluate("fetch('/api').then((r) => r.text())");
+		let entry: { requestId: string; status?: number; resourceType?: string } | undefined;
+		for (let i = 0; i < 25 && entry?.status === undefined; i++) {
+			entry = mgr.readNetwork({ urlPattern: "/api" }).find((e) => e.url.endsWith("/api"));
+			if (entry?.status === undefined) await new Promise((r) => setTimeout(r, 200));
+		}
+		expect(entry).toBeDefined();
+		// Real Chrome reports fetch() as resource type "Fetch".
+		expect(entry?.resourceType).toBe("Fetch");
+
+		// The body is captured on loadingFinished (fire-and-forget) and served from
+		// cache; tolerate a transient miss until the snapshot/live fetch lands.
+		let body: { body: string } | undefined;
+		for (let i = 0; i < 25 && !body?.body.includes("pit-body-ok"); i++) {
+			try {
+				body = await mgr.getResponseBody((entry as { requestId: string }).requestId);
+			} catch {
+				// body not ready yet — retry
+			}
+			if (!body?.body.includes("pit-body-ok")) await new Promise((r) => setTimeout(r, 200));
+		}
+		expect(body?.body).toContain("pit-body-ok");
+
+		// Filters: type and status narrow the whole buffer.
+		expect(mgr.readNetwork({ type: "Fetch" }).some((e) => e.url.endsWith("/api"))).toBe(true);
+		expect(mgr.readNetwork({ status: "2xx" }).some((e) => e.url.endsWith("/api"))).toBe(true);
+		expect(mgr.readNetwork({ status: ">=400" }).some((e) => e.url.endsWith("/api"))).toBe(false);
+
+		await mgr.closePage();
+	});
+
 	// Regression: a freshly opened tab drops Input.dispatch* / insertText until its
 	// compositor produces a frame. Open a NEW tab (cold renderer) and assert each
 	// synthetic input lands — fill sets the value, the keydown listener fires, and

@@ -13,7 +13,9 @@ class FakeConn implements CdpConnectionLike {
 	private handlers = new Map<string, Array<(p: any) => void>>();
 	send(method: string, params?: Record<string, unknown>): Promise<any> {
 		this.sent.push({ method, params });
-		return Promise.resolve(this.responses[method] ?? {});
+		const res = this.responses[method];
+		if (res instanceof Error) return Promise.reject(res);
+		return Promise.resolve(res ?? {});
 	}
 	on(event: string, handler: (p: any) => void): () => void {
 		let arr = this.handlers.get(event);
@@ -390,6 +392,128 @@ describe("ChromeDevtoolsManager", () => {
 		mgr.dispose();
 		expect(conns.get("p1")?.closed).toBe(true);
 		expect(mgr.selectedPageId()).toBeUndefined();
+	});
+});
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+describe("ChromeDevtoolsManager network body cache", () => {
+	async function fireRequest(
+		c: FakeConn,
+		opts: {
+			requestId: string;
+			url?: string;
+			mimeType?: string;
+			type?: string;
+			body?: string;
+			base64Encoded?: boolean;
+		},
+	) {
+		c.emit("Network.requestWillBeSent", {
+			requestId: opts.requestId,
+			request: { method: "GET", url: opts.url ?? "http://a/api" },
+		});
+		c.emit("Network.responseReceived", {
+			requestId: opts.requestId,
+			type: opts.type,
+			response: { status: 200, mimeType: opts.mimeType ?? "application/json" },
+		});
+		c.responses["Network.getResponseBody"] = {
+			body: opts.body ?? '{"ok":true}',
+			base64Encoded: !!opts.base64Encoded,
+		};
+		c.emit("Network.loadingFinished", { requestId: opts.requestId });
+		await flush();
+	}
+
+	it("caches a text body on loadingFinished and serves it without a live fetch", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await fireRequest(c, { requestId: "r1", body: '{"cached":1}' });
+		// Live CDP would now return a different body; the cache must win.
+		c.responses["Network.getResponseBody"] = { body: "LIVE-NOT-USED", base64Encoded: false };
+		expect(await mgr.getResponseBody("r1")).toEqual({ body: '{"cached":1}', base64Encoded: false });
+	});
+
+	it("does not cache binary or script bodies (falls back to a live fetch)", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await fireRequest(c, { requestId: "img", mimeType: "image/png", body: "PNGDATA", base64Encoded: true });
+		c.responses["Network.getResponseBody"] = { body: "LIVE-IMG", base64Encoded: true };
+		expect(await mgr.getResponseBody("img")).toEqual({ body: "LIVE-IMG", base64Encoded: true });
+	});
+
+	it("surfaces a clear error when an uncached body was evicted", async () => {
+		const c = new FakeConn();
+		c.responses["Network.getResponseBody"] = new Error("No resource with given identifier found");
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await expect(mgr.getResponseBody("gone")).rejects.toThrow(/Chrome may have evicted it/);
+	});
+
+	it("drops a cached body when its request is evicted from the ring buffer", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		await fireRequest(c, { requestId: "old", body: '{"old":1}' });
+		// Push past BUFFER_MAX (200) so "old" is shifted out of the ring.
+		for (let i = 0; i < 201; i++) {
+			c.emit("Network.requestWillBeSent", { requestId: `n${i}`, request: { method: "GET", url: "http://a/x" } });
+		}
+		c.responses["Network.getResponseBody"] = new Error("No resource with given identifier found");
+		await expect(mgr.getResponseBody("old")).rejects.toThrow(/evicted/);
+	});
+});
+
+describe("ChromeDevtoolsManager readNetwork filters", () => {
+	function seed(c: FakeConn) {
+		const rows = [
+			{ id: "a", method: "GET", url: "http://a/api/users", type: "XHR", status: 200 },
+			{ id: "b", method: "POST", url: "http://a/api/login", type: "Fetch", status: 401 },
+			{ id: "c", method: "GET", url: "http://cdn/tracker.gif", type: "Image", status: 200 },
+			{ id: "d", method: "GET", url: "http://a/api/missing", type: "Fetch", status: 404 },
+		];
+		for (const r of rows) {
+			c.emit("Network.requestWillBeSent", {
+				requestId: r.id,
+				type: r.type,
+				request: { method: r.method, url: r.url },
+			});
+			c.emit("Network.responseReceived", { requestId: r.id, type: r.type, response: { status: r.status } });
+		}
+	}
+
+	it("filters by urlPattern, method, type and captures resourceType", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		seed(c);
+		expect(mgr.readNetwork({ urlPattern: "/api" }).map((e) => e.requestId)).toEqual(["a", "b", "d"]);
+		expect(mgr.readNetwork({ method: "post" }).map((e) => e.requestId)).toEqual(["b"]);
+		expect(mgr.readNetwork({ type: "fetch" }).map((e) => e.requestId)).toEqual(["b", "d"]);
+		expect(mgr.readNetwork({})[0]?.resourceType).toBe("XHR");
+	});
+
+	it("filters by status (exact, class and comparison) and rejects a bad spec", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		seed(c);
+		expect(mgr.readNetwork({ status: 404 }).map((e) => e.requestId)).toEqual(["d"]);
+		expect(mgr.readNetwork({ status: "4xx" }).map((e) => e.requestId)).toEqual(["b", "d"]);
+		expect(mgr.readNetwork({ status: ">=400" }).map((e) => e.requestId)).toEqual(["b", "d"]);
+		expect(mgr.readNetwork({ status: "<300" }).map((e) => e.requestId)).toEqual(["a", "c"]);
+		expect(() => mgr.readNetwork({ status: "bogus" })).toThrow(/Invalid status filter/);
+	});
+
+	it("applies filters across the whole buffer before the limit", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		seed(c);
+		expect(mgr.readNetwork({ type: "fetch", limit: 1 }).map((e) => e.requestId)).toEqual(["d"]);
 	});
 });
 
