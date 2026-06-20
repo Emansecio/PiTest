@@ -38,6 +38,12 @@ function setup(opts?: { preset?: Record<string, FakeConn> }) {
 		{ id: "p1", type: "page", title: "A", url: "http://a", webSocketDebuggerUrl: "ws://p1" },
 		{ id: "bg", type: "background_page", title: "bg", url: "" },
 	];
+	const closed: string[] = [];
+	const close = vi.fn(async (id: string) => {
+		closed.push(id);
+		const idx = targets.findIndex((t) => t.id === id);
+		if (idx >= 0) targets.splice(idx, 1);
+	});
 	const mgr = new ChromeDevtoolsManager({
 		host: "h",
 		port: 9222,
@@ -47,6 +53,7 @@ function setup(opts?: { preset?: Record<string, FakeConn> }) {
 			targets.push(t);
 			return t;
 		},
+		close,
 		connect: (t) => {
 			let c = conns.get(t.id);
 			if (!c) {
@@ -56,7 +63,7 @@ function setup(opts?: { preset?: Record<string, FakeConn> }) {
 			return c;
 		},
 	});
-	return { mgr, conns, targets };
+	return { mgr, conns, targets, close, closed };
 }
 
 describe("ChromeDevtoolsManager", () => {
@@ -341,6 +348,40 @@ describe("ChromeDevtoolsManager", () => {
 		const { mgr } = setup({ preset: { p1: c } });
 		await mgr.selectPage("p1");
 		expect(await mgr.evaluate("obj()")).toEqual({ value: { a: 1, b: "ok" }, description: undefined });
+	});
+
+	it("closePage closes the selected page, evicts its connection and deselects", async () => {
+		const { mgr, conns, close, closed } = setup();
+		await mgr.navigate({ url: "http://x", newTab: true });
+		expect(mgr.selectedPageId()).toBe("new1");
+		const conn = conns.get("new1")!;
+
+		const res = await mgr.closePage();
+		expect(res).toEqual({ closedId: "new1" });
+		// closeTargetImpl was called for the right id...
+		expect(close).toHaveBeenCalledWith("new1", undefined);
+		expect(closed).toEqual(["new1"]);
+		// ...the cached connection was torn down (evictConn -> close)...
+		expect(conn.closed).toBe(true);
+		// ...and the page is no longer selected, so the next navigate opens a new tab.
+		expect(mgr.selectedPageId()).toBeUndefined();
+		// listPages no longer shows the closed tab.
+		expect((await mgr.listPages()).map((t) => t.id)).not.toContain("new1");
+	});
+
+	it("closePage with an explicit id keeps a different selected page selected", async () => {
+		const { mgr, close } = setup();
+		await mgr.selectPage("p1");
+		const res = await mgr.closePage("bg");
+		expect(res).toEqual({ closedId: "bg" });
+		expect(close).toHaveBeenCalledWith("bg", undefined);
+		// p1 was the selected page and was NOT the one closed -> stays selected.
+		expect(mgr.selectedPageId()).toBe("p1");
+	});
+
+	it("closePage throws a clear error when there is nothing to close", async () => {
+		const { mgr } = setup();
+		await expect(mgr.closePage()).rejects.toThrow(/No page to close/);
 	});
 
 	it("dispose closes all connections", async () => {

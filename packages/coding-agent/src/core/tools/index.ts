@@ -214,6 +214,7 @@ import { type CalcToolOptions, createCalcTool, createCalcToolDefinition } from "
 import {
 	type ChromeDevtoolsToolOptions,
 	createChromeClickToolDefinition,
+	createChromeClosePageToolDefinition,
 	createChromeElementToSourceToolDefinition,
 	createChromeEvaluateToolDefinition,
 	createChromeFillToolDefinition,
@@ -593,6 +594,12 @@ const TOOL_REGISTRY = {
 	},
 	chrome_devtools_navigate: {
 		definitionFactory: createChromeNavigateToolDefinition,
+		optionsKey: "chromeDevtools",
+		readOnly: false,
+		coding: "chromeDevtools",
+	},
+	chrome_devtools_close_page: {
+		definitionFactory: createChromeClosePageToolDefinition,
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",

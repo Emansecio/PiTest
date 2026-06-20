@@ -174,4 +174,41 @@ suite("chrome_devtools real-Chrome E2E (PIT_CHROME_E2E=1)", () => {
 		await mgr.click("#b");
 		expect((await mgr.waitFor({ text: "clicked:cold start", timeoutMs: 5_000 })).found).toBe(true);
 	});
+
+	// Full lifecycle: open a tab, interact, close it, and confirm the manager is
+	// back to a clean state -- the closed tab is gone from listPages, nothing is
+	// selected, and a fresh navigate re-opens a working tab. This is the "finish
+	// the browser task and go back to the chat" path the agent must be able to run.
+	it("closePage closes the tab and a fresh navigate reopens cleanly", { timeout: 60_000 }, async () => {
+		// open a new tab and interact so it is a live, selected page
+		await mgr.navigate({ url: `http://127.0.0.1:${HTTP_PORT}/`, newTab: true });
+		expect((await mgr.waitFor({ selector: "#login", timeoutMs: 15_000 })).found).toBe(true);
+		await mgr.fill("#q", "lifecycle");
+		const openedId = mgr.selectedPageId();
+		expect(openedId).toBeTruthy();
+		expect((await mgr.listPages()).map((p) => p.id)).toContain(openedId);
+
+		// close it -> gone from listPages, nothing selected
+		const closed = await mgr.closePage();
+		expect(closed.closedId).toBe(openedId);
+		// Chrome destroys the target async; poll until listPages no longer shows it.
+		let stillThere = true;
+		for (let i = 0; i < 25 && stillThere; i++) {
+			stillThere = (await mgr.listPages()).some((p) => p.id === openedId);
+			if (stillThere) await new Promise((r) => setTimeout(r, 200));
+		}
+		expect(stillThere).toBe(false);
+		expect(mgr.selectedPageId()).toBeUndefined();
+
+		// a fresh navigate reopens a working tab (auto new tab since none selected)
+		await mgr.navigate({ url: `http://127.0.0.1:${HTTP_PORT}/` });
+		expect((await mgr.waitFor({ selector: "#login", timeoutMs: 15_000 })).found).toBe(true);
+		const reopenedId = mgr.selectedPageId();
+		expect(reopenedId).toBeTruthy();
+		expect(reopenedId).not.toBe(openedId);
+		expect(await mgr.getPageText()).toContain("hover me");
+
+		// clean up the reopened tab too
+		await mgr.closePage();
+	});
 });

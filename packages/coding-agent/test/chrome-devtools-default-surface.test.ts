@@ -55,6 +55,7 @@ describe("chrome devtools default active surface", () => {
 		const session = await createDefaultSession();
 		const active = session.getActiveToolNames();
 		expect(active).toContain("chrome_devtools_navigate");
+		expect(active).toContain("chrome_devtools_close_page");
 		expect(active).toContain("chrome_devtools_screenshot");
 		expect(active).toContain("chrome_devtools_list_pages");
 		expect(active).toContain("preview");

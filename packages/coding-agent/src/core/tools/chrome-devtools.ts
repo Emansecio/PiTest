@@ -98,6 +98,16 @@ const navigateSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+const closePageSchema = Type.Object(
+	{
+		id: Type.Optional(
+			Type.String({
+				description: "Target/page id to close (from chrome_devtools_list_pages). Defaults to the selected page.",
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
 const evaluateSchema = Type.Object(
 	{ expression: Type.String({ description: "JavaScript to evaluate in the selected page." }) },
 	{ additionalProperties: false },
@@ -229,12 +239,32 @@ export function createChromeNavigateDefinition(): ToolDefinition<typeof navigate
 		guidelines: [
 			"Just call this to use the browser — Chrome is launched automatically if it isn't already running.",
 			"Set newTab to open a fresh tab instead of reusing the selected page.",
+			"Full cycle: navigate (auto-launches Chrome) -> snapshot/get_text -> interact (click/fill/press_key) -> when the browser task is done, call chrome_devtools_close_page to close the tab, then answer the user.",
 			"After loading, chrome_devtools_snapshot shows the page structure — use it to pick selectors for chrome_devtools_click / chrome_devtools_fill.",
 		],
 		schema: navigateSchema,
 		run: async (mgr, input, signal) => {
 			const r = await mgr.navigate({ url: input.url, newTab: input.newTab }, signal);
 			return textResult(`${r.created ? "Opened new tab" : "Navigated"} → ${r.target.url || input.url}`);
+		},
+	});
+}
+
+export function createChromeClosePageDefinition(): ToolDefinition<typeof closePageSchema, ChromeToolDetails> {
+	return buildChromeTool({
+		name: "chrome_devtools_close_page",
+		activity: "action",
+		description:
+			"Close a Chrome tab/page (the selected one by default, or a given id). Use to finish a browser task and return to a clean state.",
+		snippet: "Close a Chrome tab",
+		guidelines: [
+			"Close the tab when you are done with the browser task so tabs do not pile up, then just answer the user -- Chrome itself stays available for the next use.",
+			"Omit id to close the currently selected page; pass an id from chrome_devtools_list_pages to close a specific one.",
+		],
+		schema: closePageSchema,
+		run: async (mgr, input, signal) => {
+			const r = await mgr.closePage(input.id, signal);
+			return textResult(`Closed page ${r.closedId}; no page selected now -- navigate to open one.`);
 		},
 	});
 }
@@ -544,6 +574,8 @@ export const createChromeSelectPageToolDefinition = (_cwd: string, _o?: ChromeDe
 	createChromeSelectPageDefinition();
 export const createChromeNavigateToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
 	createChromeNavigateDefinition();
+export const createChromeClosePageToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
+	createChromeClosePageDefinition();
 export const createChromeEvaluateToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>
 	createChromeEvaluateDefinition();
 export const createChromeScreenshotToolDefinition = (_cwd: string, _o?: ChromeDevtoolsToolOptions) =>

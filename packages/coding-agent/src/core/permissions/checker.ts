@@ -34,7 +34,16 @@ const MUTATING_TOOLS = new Set(["bash", "edit", "write", "eval", "debug"]);
 const LSP_WRITE_ACTIONS = new Set(["rename", "rename_file"]);
 
 /** `chrome_devtools_*` operations with an observable side effect (navigation, input, upload). */
-const CHROME_EFFECT_OPS = new Set(["navigate", "click", "fill", "press_key", "hover", "select_option", "upload_file"]);
+const CHROME_EFFECT_OPS = new Set([
+	"navigate",
+	"close_page",
+	"click",
+	"fill",
+	"press_key",
+	"hover",
+	"select_option",
+	"upload_file",
+]);
 
 export interface PermissionContext {
 	cwd: string;

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChromeDevtoolsManager, setCurrentChromeDevtoolsManager } from "../src/core/chrome/chrome-devtools-manager.js";
 import {
+	createChromeClosePageDefinition,
 	createChromeEvaluateDefinition,
 	createChromeListPagesDefinition,
 	createChromeNavigateDefinition,
@@ -60,6 +61,25 @@ describe("chrome_devtools tools", () => {
 		const res = await runExec(createChromeNavigateDefinition(), { url: "http://x", newTab: true });
 		expect(text(res)).toContain("Opened new tab");
 		expect(text(res)).toContain("http://x");
+	});
+
+	it("close_page closes the page and reports a clean state", async () => {
+		const closePage = vi.fn().mockResolvedValue({ closedId: "n1" });
+		const mgr = mockManager({ closePage });
+		setCurrentChromeDevtoolsManager(mgr);
+		const res = await runExec(createChromeClosePageDefinition(), {});
+		expect(closePage).toHaveBeenCalledWith(undefined, undefined);
+		expect(res.details.ok).toBe(true);
+		expect(text(res)).toContain("Closed page n1");
+		expect(text(res)).toContain("no page selected");
+	});
+
+	it("close_page forwards an explicit id", async () => {
+		const closePage = vi.fn().mockResolvedValue({ closedId: "abc" });
+		const mgr = mockManager({ closePage });
+		setCurrentChromeDevtoolsManager(mgr);
+		await runExec(createChromeClosePageDefinition(), { id: "abc" });
+		expect(closePage).toHaveBeenCalledWith("abc", undefined);
 	});
 
 	it("evaluate returns the JSON value", async () => {

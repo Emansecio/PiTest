@@ -17,6 +17,7 @@ import { sliceSafe } from "../../utils/surrogate.ts";
 import {
 	CdpConnection,
 	type CdpTarget,
+	closeTarget as defaultCloseTarget,
 	createTarget as defaultCreateTarget,
 	listTargets as defaultListTargets,
 } from "./cdp-client.ts";
@@ -59,6 +60,7 @@ export interface ChromeDevtoolsDeps {
 	binaryPath?: string;
 	list?: (signal?: AbortSignal) => Promise<CdpTarget[]>;
 	create?: (url: string, signal?: AbortSignal) => Promise<CdpTarget>;
+	close?: (id: string, signal?: AbortSignal) => Promise<void>;
 	connect?: (target: CdpTarget) => CdpConnectionLike;
 	// Injectable launcher pieces (tests).
 	findBinary?: () => string | undefined;
@@ -171,6 +173,7 @@ export class ChromeDevtoolsManager {
 	private readonly port: number;
 	private readonly list: (signal?: AbortSignal) => Promise<CdpTarget[]>;
 	private readonly create: (url: string, signal?: AbortSignal) => Promise<CdpTarget>;
+	private readonly closeTargetImpl: (id: string, signal?: AbortSignal) => Promise<void>;
 	private readonly connectFactory: (target: CdpTarget) => CdpConnectionLike;
 	private readonly launchBrowser: boolean;
 	private readonly userDataDir: string;
@@ -195,6 +198,7 @@ export class ChromeDevtoolsManager {
 		this.binaryPath = deps.binaryPath;
 		this.list = deps.list ?? ((signal) => defaultListTargets(this.host, this.port, signal));
 		this.create = deps.create ?? ((url, signal) => defaultCreateTarget(this.host, this.port, url, signal));
+		this.closeTargetImpl = deps.close ?? ((id, signal) => defaultCloseTarget(this.host, this.port, id, signal));
 		this.connectFactory = deps.connect ?? ((target) => new CdpConnection(target.webSocketDebuggerUrl ?? ""));
 		this.findBinary = deps.findBinary ?? (() => findChromeBinary());
 		this.launch = deps.launch ?? ((opts) => void launchChrome(opts));
@@ -293,6 +297,28 @@ export class ChromeDevtoolsManager {
 		// page we just navigated to, not where the tab used to be.
 		this.selectedTarget = { ...this.selectedTarget, url: input.url };
 		return { created: false, target: this.selectedTarget };
+	}
+
+	/**
+	 * Close a tab and return to a clean state. Closes the page with the given
+	 * `targetId` (or the currently selected page when omitted), tears down its
+	 * cached CDP connection (evictConn drops the socket + buffers), and -- if it
+	 * was the selected page -- clears selectedTarget so the next navigate opens a
+	 * fresh tab instead of reusing a dead one. This is the "finish the browser
+	 * task and go back to the chat" step.
+	 */
+	async closePage(targetId?: string, signal?: AbortSignal): Promise<{ closedId: string }> {
+		await this.ensureBrowser(signal);
+		const id = targetId ?? this.selectedTarget?.id;
+		if (!id) {
+			throw new Error(
+				"No page to close. Pass an id from chrome_devtools_list_pages, or select/navigate to one first.",
+			);
+		}
+		await this.closeTargetImpl(id, signal);
+		this.evictConn(id);
+		if (this.selectedTarget?.id === id) this.selectedTarget = undefined;
+		return { closedId: id };
 	}
 
 	async evaluate(

@@ -70,6 +70,20 @@ export async function createTarget(
 	return target;
 }
 
+/** Close a tab/page in the running Chrome via the DevTools HTTP endpoint. */
+export async function closeTarget(
+	host: string,
+	port: number,
+	id: string,
+	signal?: AbortSignal,
+	fetchImpl: FetchLike = defaultFetch,
+): Promise<void> {
+	const res = await fetchImpl(`http://${host}:${port}/json/close/${encodeURIComponent(id)}`, { signal });
+	// Chrome returns 200 ("Target is closing") on success and 404 when the id is
+	// already gone — treat a missing target as already closed, anything else as an error.
+	if (!res.ok && res.status !== 404) throw new Error(`Could not close tab ${id} (HTTP ${res.status}).`);
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket transport (WHATWG event API), injectable for tests.
 // ---------------------------------------------------------------------------
