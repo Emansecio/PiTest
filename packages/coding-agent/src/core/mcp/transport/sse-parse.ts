@@ -46,10 +46,20 @@ export async function* parseSseStream(
 
 	const onAbort = () => reader.cancel().catch(() => {});
 	opts.signal?.addEventListener("abort", onAbort, { once: true });
+	// Track whether the stream drained naturally. If the consumer breaks out of
+	// the for-await early (e.g. Streamable-HTTP found its matching JSON-RPC
+	// response), the generator's `return()` runs `finally` while the body is only
+	// half-read; releaseLock() alone does NOT return the socket to the pool —
+	// the connection leaks until GC/socket-timeout. Cancel the reader in that
+	// case so the underlying HTTP connection is released deterministically.
+	let drained = false;
 	try {
 		while (true) {
 			const { done, value } = await reader.read();
-			if (done) break;
+			if (done) {
+				drained = true;
+				break;
+			}
 			if (!value) continue;
 			buffer += decoder.decode(value, { stream: true });
 			if (buffer.length > maxBytes) {
@@ -84,6 +94,9 @@ export async function* parseSseStream(
 		if (ev) yield ev;
 	} finally {
 		opts.signal?.removeEventListener("abort", onAbort);
+		// Early-return / break before the stream finished: cancel so the body and
+		// its socket are released (releaseLock alone leaks the connection in undici).
+		if (!drained) await reader.cancel().catch(() => {});
 		reader.releaseLock();
 	}
 }

@@ -197,6 +197,68 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("applyOverrides precedence", () => {
+		it("should preserve overrides across a subsequent save() (triggered by any setter)", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			// Programmatic override (SDK use): disable compaction, custom retry.
+			manager.applyOverrides({
+				compaction: { enabled: false },
+				retry: { enabled: true, maxRetries: 9, baseDelayMs: 1 },
+			});
+			expect(manager.getCompactionEnabled()).toBe(false);
+			expect(manager.getRetrySettings().maxRetries).toBe(9);
+
+			// Any setter calls save(), which recomputes this.settings. Without the
+			// sessionOverrides layer the override above is silently discarded here.
+			manager.setDefaultThinkingLevel("high");
+			await manager.flush();
+
+			expect(manager.getCompactionEnabled()).toBe(false);
+			expect(manager.getRetrySettings().maxRetries).toBe(9);
+			expect(manager.getDefaultThinkingLevel()).toBe("high");
+
+			// Overrides are session-only: never persisted to disk.
+			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			expect(savedSettings.compaction).toBeUndefined();
+			expect(savedSettings.retry).toBeUndefined();
+			expect(savedSettings.defaultThinkingLevel).toBe("high");
+		});
+
+		it("should preserve overrides across reload()", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ theme: "dark", compaction: { enabled: true } }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.applyOverrides({ compaction: { enabled: false } });
+			expect(manager.getCompactionEnabled()).toBe(false);
+
+			// External edit + reload recomputes from disk; override must still win.
+			writeFileSync(settingsPath, JSON.stringify({ theme: "light", compaction: { enabled: true } }));
+			await manager.reload();
+
+			expect(manager.getCompactionEnabled()).toBe(false);
+			// Non-overridden fields still reflect the reloaded on-disk values.
+			expect(manager.getTheme()).toBe("light");
+		});
+
+		it("should keep override precedence over a project-settings save", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.applyOverrides({ retry: { enabled: false } });
+			expect(manager.getRetryEnabled()).toBe(false);
+
+			// saveProjectSettings() recomputes this.settings; override must survive.
+			manager.setProjectExtensionPaths(["/proj/ext.ts"]);
+			await manager.flush();
+
+			expect(manager.getRetryEnabled()).toBe(false);
+			expect(manager.getExtensionPaths()).toEqual(["/proj/ext.ts"]);
+		});
+	});
+
 	describe("error tracking", () => {
 		it("should collect and clear load errors via drainErrors", () => {
 			const globalSettingsPath = join(agentDir, "settings.json");

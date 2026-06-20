@@ -265,6 +265,18 @@ export function createGrepToolDefinition(
 							return;
 						}
 
+						// Re-check after the awaits above (ensureTool can download rg over the
+						// network — a long window; isDirectory can stat a slow NFS/SMB path). The
+						// onAbort listener is registered only further down (after spawn), and
+						// addEventListener with {once:true} does NOT replay an abort that already
+						// fired during these awaits. Without this re-check, an ESC mid-setup is
+						// dropped: `aborted` stays false, rg runs to completion, and the
+						// `if (aborted)` close handler never rejects. Mirrors find.ts's re-checks.
+						if (signal?.aborted) {
+							settle(() => reject(new Error("Operation aborted")));
+							return;
+						}
+
 						const contextValue = context && context > 0 ? context : 0;
 						const effectiveLimit = Math.max(1, limit ?? DEFAULT_LIMIT);
 						const formatPath = (filePath: string): string => {

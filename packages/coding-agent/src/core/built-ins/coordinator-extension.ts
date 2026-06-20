@@ -949,6 +949,27 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				// so they outlive the spawning turn.
 				if (op === "spawn") {
 					const handle = name?.trim() ? name.trim() : `task-${++asyncTaskCounter}`;
+					// Dedup the handle: a second spawn reusing the SAME `name` while the
+					// first is still running would otherwise overwrite the `pending` entry,
+					// orphaning the first run's AbortController — session teardown only
+					// iterates `pending.values()`, so the first detached run would never be
+					// aborted (burning tokens, writing to a now-orphaned worktree) and its
+					// result/poll would be unreachable. Reject instead of clobbering the
+					// live controller; the caller can pick a distinct name or join/poll the
+					// running one first.
+					const existing = pending.get(handle);
+					if (existing && existing.status === "running") {
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `task: a subagent named "${handle}" is already running. Use a different name, or task({op:"join", handles:["${handle}"]}) it before re-spawning.`,
+								},
+							],
+							isError: true,
+							details: { handle, async: true },
+						};
+					}
 					const controller = new AbortController();
 					const entry: PendingTask = {
 						handle,
@@ -1194,6 +1215,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
 		// Respect the concurrency cap: a disk-resumed run is a live spawn.
 		let acquired = false;
+		// Capture the live Agent so a resume that resolves but ends on an error turn
+		// (a fresh network drop ending the turn with stopReason "error" WITHOUT
+		// throwing — exactly what resume exists to recover from) is detected before
+		// we delete the only persisted transcript. Mirrors the agentEndedWithError
+		// guard the in-memory (resumeHandle) and synchronous spawn paths already have.
+		let capturedAgent: Agent | undefined;
 		try {
 			await acquireSlot(signal);
 			acquired = true;
@@ -1208,7 +1235,37 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				cwd: state.cwd,
 				depth: state.depth,
 				taskName: key,
+				onAgentReady: (agent) => {
+					capturedAgent = agent;
+				},
 			});
+			if (capturedAgent && agentEndedWithError(capturedAgent)) {
+				// Still unfinished — keep the on-disk transcript (do NOT delete) so a
+				// later attempt can resume again, and persist the latest progress so the
+				// next resume continues from here instead of replaying the old seed. Save
+				// to the same `cwd` load/delete use so the next op:"resume" finds it.
+				await saveResumeState(cwd, {
+					handle: key,
+					messages: capturedAgent.state.messages,
+					modelId: state.modelId,
+					thinkingLevel: state.thinkingLevel,
+					systemPrompt: state.systemPrompt,
+					allowedTools: state.allowedTools,
+					cwd: state.cwd,
+					depth: state.depth,
+					savedAt: Date.now(),
+				});
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Resume of "${key}" did not complete (it erred again). It remains resumable.`,
+						},
+					],
+					isError: true,
+					details: { handle: key, resumed: true, fromDisk: true, stillResumable: true },
+				};
+			}
 			await deleteResumeState(cwd, key);
 			const out = formatSpawnResult(result, undefined);
 			return {

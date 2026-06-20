@@ -80,6 +80,42 @@ describe("coordinator op:resume from disk (Tier 2)", () => {
 		expect(existsSync(stateFile)).toBe(false);
 	});
 
+	it("a disk resume that ENDS ON AN ERROR TURN keeps the state file and reports failure (still resumable)", async () => {
+		// Regression for finding #3: resumeFromDisk used to delete the persisted
+		// transcript unconditionally and return isError:false, even when the resumed
+		// run ended on a stopReason:"error" turn WITHOUT throwing (a fresh network
+		// drop). That destroyed the only resumable transcript and lied about success.
+		root = mkdtempSync(join(tmpdir(), "pit-rd-"));
+		const stateFile = join(root, ".pit", "subagents", "probe.json");
+
+		// Process #1: interrupted run → persisted to disk.
+		const task1 = freshCoordinator(root, [fauxAssistantMessage("", { stopReason: "error", errorMessage: "drop" })]);
+		const r1 = await exec(task1, { op: "run", name: "probe", prompt: "do the thing" });
+		expect(isErr(r1)).toBe(true);
+		expect(existsSync(stateFile)).toBe(true);
+
+		// Process #2: brand-new coordinator, same cwd. The resumed run drops AGAIN
+		// (ends on an error turn without throwing).
+		const task2 = freshCoordinator(root, [
+			fauxAssistantMessage("partial progress", { stopReason: "error", errorMessage: "drop again" }),
+		]);
+		const r2 = await exec(task2, { op: "resume", name: "probe" });
+
+		// Reports failure, not a false success.
+		expect(isErr(r2)).toBe(true);
+		expect(textOf(r2)).toMatch(/did not complete|remains resumable/i);
+		// The state file is PRESERVED so another resume is possible.
+		expect(existsSync(stateFile)).toBe(true);
+
+		// Process #3: a fresh coordinator can still resume the same handle — and on a
+		// clean turn it completes and removes the file.
+		const task3 = freshCoordinator(root, [fauxAssistantMessage("FINALLY DONE")]);
+		const r3 = await exec(task3, { op: "resume", name: "probe" });
+		expect(isErr(r3)).toBe(false);
+		expect(textOf(r3)).toContain("FINALLY DONE");
+		expect(existsSync(stateFile)).toBe(false);
+	});
+
 	it("errors clearly when neither memory nor disk has the handle", async () => {
 		root = mkdtempSync(join(tmpdir(), "pit-rd-"));
 		const task = freshCoordinator(root, [fauxAssistantMessage("x")]);

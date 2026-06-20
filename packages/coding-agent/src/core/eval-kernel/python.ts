@@ -157,16 +157,42 @@ class PythonKernel implements EvalKernel {
 		c.stderrSearch = Math.max(0, c.stderrBuf.length - c.sentinel.length + 1);
 	}
 
+	// Length of a buffer counting only the payload BEFORE the sentinel. Once the
+	// sentinel has landed the call is finished, so its trailing bytes (sentinel +
+	// any post-sentinel noise) must not count toward the runaway cap. When the
+	// sentinel is split across chunks, the partial sentinel prefix is sitting at the
+	// tail of the buffer not yet matchable by indexOf — discount the longest such
+	// trailing prefix so an in-flight sentinel can't push a completed call over the
+	// cap. The discount is bounded by sentinel.length, so a genuine runaway (which
+	// never emits the sentinel) trips at most ~46 bytes later — negligible.
+	private payloadLength(buf: string, sentinel: string): number {
+		const idx = buf.indexOf(sentinel);
+		if (idx >= 0) return idx;
+		// Longest suffix of buf that is a prefix of sentinel (a possible split sentinel).
+		const maxK = Math.min(sentinel.length - 1, buf.length);
+		for (let k = maxK; k > 0; k--) {
+			if (buf.endsWith(sentinel.slice(0, k))) return buf.length - k;
+		}
+		return buf.length;
+	}
+
 	// Kill the runaway process when combined output exceeds the cap. Returns true
 	// when it tripped (caller must stop touching the now-cleared pending call).
 	private enforceOutputCap(c: PendingCall): boolean {
-		if (c.stdoutBuf.length + c.stderrBuf.length <= this.maxOutputBytes) return false;
+		// Measure only the pre-sentinel payload. The sentinel (~46 bytes) is appended
+		// to these same buffers when the call COMPLETES; if legitimate output lands
+		// right at the cap boundary, the chunk carrying the sentinel could push the
+		// raw length over the limit and kill a call that actually finished, wiping the
+		// whole kernel. Scanning to the sentinel first keeps the cap honest: a true
+		// runaway never reaches the finally that emits the sentinel, so it still trips.
+		const effective = this.payloadLength(c.stdoutBuf, c.sentinel) + this.payloadLength(c.stderrBuf, c.sentinel);
+		if (effective <= this.maxOutputBytes) return false;
 		const proc = this.proc;
 		recordDiagnostic({
 			category: "output.cap",
 			level: "error",
 			source: "eval-kernel.python",
-			context: { bytes: c.stdoutBuf.length + c.stderrBuf.length, pid: proc?.pid },
+			context: { bytes: effective, pid: proc?.pid },
 		});
 		// killProcessTree tears down any children the user code spawned too.
 		if (proc?.pid) killProcessTree(proc.pid);

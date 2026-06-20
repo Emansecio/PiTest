@@ -29,27 +29,39 @@ function publishDiagnostics(uri) {
 	});
 }
 
+// Test hook: delay the `initialize` reply so a test can race shutdown against a
+// still-warming-up client. Off unless FAKE_LSP_INIT_DELAY_MS is set.
+const INIT_DELAY_MS = Number.parseInt(process.env.FAKE_LSP_INIT_DELAY_MS ?? "0", 10) || 0;
+
+function handleInitialize(msg) {
+	send({
+		jsonrpc: "2.0",
+		id: msg.id,
+		result: {
+			capabilities: {
+				hoverProvider: true,
+				definitionProvider: true,
+				typeDefinitionProvider: true,
+				implementationProvider: true,
+				referencesProvider: true,
+				renameProvider: true,
+				documentSymbolProvider: true,
+				workspaceSymbolProvider: true,
+				codeActionProvider: true,
+				documentFormattingProvider: true,
+			},
+		},
+	});
+}
+
 function handle(msg) {
+	if (msg.method === "initialize" && INIT_DELAY_MS > 0) {
+		setTimeout(() => handleInitialize(msg), INIT_DELAY_MS);
+		return;
+	}
 	switch (msg.method) {
 		case "initialize":
-			send({
-				jsonrpc: "2.0",
-				id: msg.id,
-				result: {
-					capabilities: {
-						hoverProvider: true,
-						definitionProvider: true,
-						typeDefinitionProvider: true,
-						implementationProvider: true,
-						referencesProvider: true,
-						renameProvider: true,
-						documentSymbolProvider: true,
-						workspaceSymbolProvider: true,
-						codeActionProvider: true,
-						documentFormattingProvider: true,
-					},
-				},
-			});
+			handleInitialize(msg);
 			return;
 		case "initialized":
 			// Resolve project-load tracking fast so cross-file actions don't wait.

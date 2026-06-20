@@ -109,6 +109,70 @@ describe("coordinator op:spawn re-injection", () => {
 		expect(textOf(join)).not.toContain("the answer is 42");
 	});
 
+	it("rejects a second spawn reusing a RUNNING handle instead of orphaning the first's controller", async () => {
+		// Regression for finding #4: `pending.set(handle, ...)` used to overwrite the
+		// entry unconditionally. A second op:"spawn" with the same `name` while the
+		// first still ran clobbered the first's AbortController in `pending` →
+		// session teardown (which only iterates pending.values()) could no longer
+		// abort the first detached run, leaking tokens/worktree.
+		faux = registerFauxProvider();
+		// Gate the first spawn's turn open so it is provably still "running" when the
+		// second spawn arrives; release it afterward.
+		let release!: () => void;
+		const gate = new Promise<void>((r) => {
+			release = r;
+		});
+		faux.setResponses([
+			async () => {
+				await gate;
+				return fauxAssistantMessage("first-result");
+			},
+			fauxAssistantMessage("second-result"),
+		]);
+		const model = faux.getModel();
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+
+		let resolveFirst!: (v: { text: string; status: string }) => void;
+		const settledFirst = new Promise<{ text: string; status: string }>((r) => {
+			resolveFirst = r;
+		});
+
+		const ext = createCoordinatorExtension({
+			modelRegistry,
+			getParentModel: () => model,
+			getAvailableTools: () => [],
+			convertToLlm: (messages) => convertToLlm(messages),
+			onAsyncComplete: (handle, text, status) => {
+				if (handle === "dup") resolveFirst({ text, status });
+				return true;
+			},
+		});
+		const tools: Record<string, { execute: (...a: unknown[]) => Promise<unknown> }> = {};
+		ext({
+			registerTool: (def: { name: string }) => {
+				tools[def.name] = def as never;
+			},
+		} as never);
+		const task = tools.task;
+
+		const firstSpawn = await spawn(task, "dup");
+		expect((firstSpawn as { isError: boolean }).isError).toBe(false);
+
+		// Second spawn with the SAME name while the first is still gated/running.
+		const secondSpawn = await spawn(task, "dup");
+		expect((secondSpawn as { isError: boolean }).isError).toBe(true);
+		expect(textOf(secondSpawn)).toMatch(/already running/i);
+
+		// Release the first run; it must still settle and deliver ITS result (proof
+		// the first controller/entry was never clobbered).
+		release();
+		const first = await settledFirst;
+		expect(first.status).toBe("done");
+		expect(first.text).toContain("first-result");
+	});
+
 	it("does NOT mark delivered when the callback declines (e.g. kill-switch returns false)", async () => {
 		let resolve!: () => void;
 		const fired = new Promise<void>((r) => {

@@ -112,7 +112,14 @@ export class McpManager {
 	}
 
 	private emit(entry: ServerEntry) {
-		this.onStateChange?.(this.getState(entry.name)!);
+		// getState returns undefined once the entry is gone (dispose() clears the
+		// map). connectAll/callTool capture `entry` and emit AFTER awaits, so a
+		// dispose racing an in-flight initialize would otherwise pass undefined to
+		// onStateChange, crashing consumers that read `state.connected`. Skip the
+		// emit when the state has been disposed out from under us.
+		const state = this.getState(entry.name);
+		if (!state) return;
+		this.onStateChange?.(state);
 	}
 
 	private isAllowedTool(entry: ServerEntry, toolName: string): boolean {

@@ -649,7 +649,11 @@ export class SettingsManager {
 	private storage: SettingsStorage;
 	private globalSettings: Settings;
 	private projectSettings: Settings;
-	private settings: Settings;
+	private settings!: Settings; // assigned via recomputeSettings() in the constructor
+	// Programmatic overrides applied via applyOverrides(). Kept as their own layer
+	// (highest precedence) and re-applied on every recompute of `this.settings` so a
+	// subsequent save()/reload()/saveProjectSettings() can't silently discard them.
+	private sessionOverrides: Partial<Settings> = {};
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
@@ -673,7 +677,19 @@ export class SettingsManager {
 		this.globalSettingsLoadError = globalLoadError;
 		this.projectSettingsLoadError = projectLoadError;
 		this.errors = [...initialErrors];
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
+	}
+
+	/**
+	 * Recompute the effective `this.settings` from the layered sources in
+	 * precedence order: global < project < sessionOverrides. Every site that
+	 * rebuilds `this.settings` (constructor / reload / save / saveProjectSettings)
+	 * MUST go through here so programmatic overrides applied via applyOverrides()
+	 * are re-applied and never silently dropped by a later recompute.
+	 */
+	private recomputeSettings(): void {
+		const merged = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.settings = deepMergeSettings(merged, this.sessionOverrides as Settings);
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -832,12 +848,18 @@ export class SettingsManager {
 			this.recordError("project", projectLoad.error);
 		}
 
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 	}
 
-	/** Apply additional overrides on top of current settings */
+	/**
+	 * Apply additional programmatic overrides on top of the current settings.
+	 * Overrides are stored in their own layer (highest precedence) and re-applied
+	 * on every recompute, so a later save()/reload()/saveProjectSettings() can no
+	 * longer silently discard them. Repeated calls accumulate (deep-merged).
+	 */
 	applyOverrides(overrides: Partial<Settings>): void {
-		this.settings = deepMergeSettings(this.settings, overrides);
+		this.sessionOverrides = deepMergeSettings(this.sessionOverrides as Settings, overrides as Settings);
+		this.recomputeSettings();
 	}
 
 	/** Mark a global field as modified during this session */
@@ -980,7 +1002,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 
 		if (this.globalSettingsLoadError) {
 			// A prior transient load error (EBUSY/EACCES from AV, torn file) is suppressing
@@ -1008,7 +1030,7 @@ export class SettingsManager {
 
 	private saveProjectSettings(settings: Settings): void {
 		this.projectSettings = structuredClone(settings);
-		this.settings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		this.recomputeSettings();
 
 		if (this.projectSettingsLoadError) {
 			recordDiagnostic({

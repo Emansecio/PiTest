@@ -340,6 +340,18 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 						source: "bash.abort",
 						context: { pid: child.pid },
 					});
+					// Cancel a pending promotion and lock it out. The promotion timer
+					// (autoBgHandle) is only cleared by waitForChildProcess's resolution
+					// (lines below); if the death event lags the timer after an abort fires
+					// in the startup window, promoteToBackground would otherwise run — its
+					// only guard is `if (settled.done) return`, and settled.done was still
+					// false on abort. That registered a background job for a dying pid and
+					// resolved the foreground promise with a "still running" handle instead
+					// of rejecting with "aborted". Marking settled.done + clearing the timer
+					// here keeps the abort authoritative: the real "aborted" rejection comes
+					// from the waitForChildProcess path (signal?.aborted) below.
+					settled.done = true;
+					if (autoBgHandle) clearTimeout(autoBgHandle);
 					killTree();
 				};
 

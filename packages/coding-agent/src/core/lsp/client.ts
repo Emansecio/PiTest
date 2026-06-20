@@ -736,8 +736,25 @@ function killClientProcess(client: LspClient): void {
 	}
 }
 
+/**
+ * Resolve a possibly-in-flight client for `key`. A client warming up lives only
+ * in `clientLocks` (it is published to `clients` only after initialize+initialized
+ * complete, line ~505). Awaiting the lock lets shutdown reach a server that is
+ * still mid-handshake instead of leaking it (the lock would otherwise resolve
+ * AFTER dispose and re-register an orphaned client). Init failures already clean
+ * up `clients`/`clientLocks` and kill the proc, so a rejected lock is benign.
+ */
+async function resolvePendingClient(key: string): Promise<LspClient | undefined> {
+	const lock = clientLocks.get(key);
+	if (!lock) return undefined;
+	return lock.then(
+		(client) => client,
+		() => undefined,
+	);
+}
+
 export async function shutdownClient(key: string): Promise<void> {
-	const client = clients.get(key);
+	const client = clients.get(key) ?? (await resolvePendingClient(key));
 	if (!client) return;
 	clients.delete(key);
 	await shutdownClientInstance(client);
@@ -833,14 +850,38 @@ export function killClient(client: LspClient): void {
 }
 
 export async function shutdownAll(): Promise<void> {
-	const clientsToShutdown = Array.from(clients.values());
+	// Drain in-flight warmups too: a client still mid-initialize lives only in
+	// clientLocks (not `clients` yet), so a snapshot of `clients` alone would let
+	// the racing server re-register after shutdown and leak.
+	const pendingKeys = Array.from(clientLocks.keys());
+	const pending = await Promise.all(pendingKeys.map((key) => resolvePendingClient(key)));
+	const clientsToShutdown = new Set<LspClient>(clients.values());
+	for (const client of pending) {
+		if (client) clientsToShutdown.add(client);
+	}
 	clients.clear();
-	await Promise.allSettled(clientsToShutdown.map((client) => shutdownClientInstance(client)));
+	await Promise.allSettled(Array.from(clientsToShutdown).map((client) => shutdownClientInstance(client)));
 }
 
 /** Shut down only the clients rooted at a given cwd. */
 export async function shutdownClientsForCwd(cwd: string): Promise<void> {
-	const targets = Array.from(clients.entries()).filter(([, client]) => client.cwd === cwd);
-	for (const [key] of targets) clients.delete(key);
-	await Promise.allSettled(targets.map(([, client]) => shutdownClientInstance(client)));
+	// Resolve any in-flight warmups first so a server still mid-handshake for this
+	// cwd is torn down rather than re-registering after dispose (the lock key is
+	// `${command}:${cwd}` and resolves to a client whose .cwd === cwd).
+	const pendingKeys = Array.from(clientLocks.keys()).filter((key) => key.endsWith(`:${cwd}`));
+	const pending = await Promise.all(pendingKeys.map((key) => resolvePendingClient(key)));
+	const targets = new Set<LspClient>();
+	for (const [key, client] of clients.entries()) {
+		if (client.cwd === cwd) {
+			targets.add(client);
+			clients.delete(key);
+		}
+	}
+	for (const client of pending) {
+		if (client && client.cwd === cwd) {
+			targets.add(client);
+			clients.delete(client.name);
+		}
+	}
+	await Promise.allSettled(Array.from(targets).map((client) => shutdownClientInstance(client)));
 }
