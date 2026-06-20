@@ -283,7 +283,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 		// model loses the verbatim content (it only sees the summary) but if the
 		// file on disk has not drifted by the time it tries to edit, we can
 		// still trust the snapshot it carried into context.
-		pi.on("session_before_compact" as any, () => {
+		pi.on("session_before_compact", () => {
 			for (const abs of readFiles.keys()) {
 				const stamp = stampFile(abs);
 				if (stamp) postCompactStamps.set(abs, stamp);

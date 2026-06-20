@@ -283,6 +283,7 @@ interface PendingCall {
 	reject(e: Error): void;
 	startedAt: number;
 	timer: NodeJS.Timeout | undefined;
+	cleanupAbort?: () => void;
 }
 
 class JsKernel implements EvalKernel {
@@ -350,6 +351,7 @@ class JsKernel implements EvalKernel {
 		this.pending.clear();
 		for (const c of calls) {
 			if (c.timer) clearTimeout(c.timer);
+			c.cleanupAbort?.();
 			c.reject(err);
 		}
 	}
@@ -411,6 +413,7 @@ class JsKernel implements EvalKernel {
 			if (!call) continue;
 			this.pending.delete(msg.id);
 			if (call.timer) clearTimeout(call.timer);
+			call.cleanupAbort?.();
 			const result: EvalResult = {
 				stdout: msg.stdout ?? "",
 				stderr: msg.stderr ?? "",
@@ -444,6 +447,7 @@ class JsKernel implements EvalKernel {
 			call.timer = setTimeout(() => {
 				if (this.pending.has(id)) {
 					this.pending.delete(id);
+					call.cleanupAbort?.();
 					try {
 						proc.kill();
 					} catch {
@@ -459,6 +463,7 @@ class JsKernel implements EvalKernel {
 					if (this.pending.has(id)) {
 						this.pending.delete(id);
 						if (call.timer) clearTimeout(call.timer);
+						call.cleanupAbort?.();
 						try {
 							proc.kill();
 						} catch {
@@ -473,6 +478,7 @@ class JsKernel implements EvalKernel {
 					return;
 				}
 				signal.addEventListener("abort", onAbort, { once: true });
+				call.cleanupAbort = () => signal.removeEventListener("abort", onAbort);
 			}
 			proc.stdin.write(`${JSON.stringify({ id, code: req.code, timeoutMs, maxBytes: this.maxOutputBytes })}\n`);
 		});
@@ -536,6 +542,7 @@ class JsKernel implements EvalKernel {
 			call.timer = setTimeout(() => {
 				if (this.pending.has(id)) {
 					this.pending.delete(id);
+					call.cleanupAbort?.();
 					try {
 						proc.kill();
 					} catch {
@@ -551,6 +558,7 @@ class JsKernel implements EvalKernel {
 					if (this.pending.has(id)) {
 						this.pending.delete(id);
 						if (call.timer) clearTimeout(call.timer);
+						call.cleanupAbort?.();
 						// Abort kills the kernel, which fails every in-flight tool call
 						// (and any other pending eval) — the whole vm is torn down.
 						try {
@@ -567,6 +575,7 @@ class JsKernel implements EvalKernel {
 					return;
 				}
 				signal.addEventListener("abort", onAbort, { once: true });
+				call.cleanupAbort = () => signal.removeEventListener("abort", onAbort);
 			}
 			proc.stdin.write(
 				`${JSON.stringify({ id, codeMode: true, code, timeoutMs: effectiveTimeout, maxBytes: this.maxOutputBytes, toolNames })}\n`,

@@ -168,8 +168,9 @@ export class SseTransport implements McpTransport {
 		if (!this.postUrl) throw new McpTransportError(`MCP ${this.name}: SSE endpoint not yet known`);
 		const effectiveTimeout = timeoutMs ?? this.config.timeoutMs ?? 30_000;
 
+		let onAbort: () => void = () => {};
 		const responsePromise = new Promise<JsonRpcResponse<T>>((resolve, reject) => {
-			const onAbort = () => {
+			onAbort = () => {
 				this.pending.delete(message.id);
 				clearTimeout(timer);
 				reject(signal?.reason instanceof Error ? signal.reason : new Error("aborted"));
@@ -213,6 +214,7 @@ export class SseTransport implements McpTransport {
 				this.pending.delete(message.id);
 				clearTimeout(p.timer);
 			}
+			signal?.removeEventListener("abort", onAbort);
 			throw new McpTransportError(
 				`MCP ${this.name} ${message.method}: ${error instanceof Error ? error.message : String(error)}`,
 			);
@@ -223,6 +225,7 @@ export class SseTransport implements McpTransport {
 				this.pending.delete(message.id);
 				clearTimeout(p.timer);
 			}
+			signal?.removeEventListener("abort", onAbort);
 			const text = await postResp.text().catch(() => "");
 			throw new McpTransportError(
 				`MCP ${this.name} ${message.method}: HTTP ${postResp.status} ${text.slice(0, 200)}`,
@@ -237,6 +240,7 @@ export class SseTransport implements McpTransport {
 					this.pending.delete(message.id);
 					clearTimeout(p.timer);
 				}
+				signal?.removeEventListener("abort", onAbort);
 				return inline;
 			}
 		}

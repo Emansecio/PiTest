@@ -135,6 +135,9 @@ export class RpcClient {
 		});
 
 		this.process = null;
+		for (const pending of this.pendingRequests.values()) {
+			pending.reject(new Error("Client stopped"));
+		}
 		this.pendingRequests.clear();
 	}
 

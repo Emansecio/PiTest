@@ -105,7 +105,7 @@ export function createEvalToolDefinition(
 					details: { lang, durationMs: result.durationMs, hadError },
 				};
 			} catch (err) {
-				const msg = (err as Error).message ?? String(err);
+				const msg = err instanceof Error ? err.message : String(err);
 				return {
 					content: [{ type: "text" as const, text: `eval error: ${msg}` }],
 					isError: true,

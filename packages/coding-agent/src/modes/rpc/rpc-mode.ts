@@ -724,13 +724,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 			await checkShutdownRequested();
 		} catch (commandError: unknown) {
-			output(
-				error(
-					command.id,
-					command.type,
-					commandError instanceof Error ? commandError.message : String(commandError),
-				),
-			);
+			const safeId =
+				parsed && typeof parsed === "object" && "id" in parsed ? (parsed as { id?: string }).id : undefined;
+			const safeType =
+				parsed && typeof parsed === "object" && "type" in parsed
+					? String((parsed as { type?: unknown }).type)
+					: "unknown";
+			output(error(safeId, safeType, commandError instanceof Error ? commandError.message : String(commandError)));
 		}
 	};
 

@@ -291,7 +291,9 @@ function killTree(child: ChildProcess): void {
 		return;
 	}
 	child.kill("SIGTERM");
-	setTimeout(() => child.kill("SIGKILL"), 3000);
+	// Don't let the SIGKILL escalation timer keep the event loop alive after the
+	// child already exited (parity with hooks/runner.ts and exec.ts).
+	setTimeout(() => child.kill("SIGKILL"), 3000).unref?.();
 }
 
 export interface RunMemberOptions {
