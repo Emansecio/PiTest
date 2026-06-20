@@ -19,6 +19,7 @@ import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { needsWindowsShell, which } from "../lsp/internal.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -141,6 +142,50 @@ interface RunOutcome {
 	timedOut: boolean;
 }
 
+/**
+ * Quote one command/arg for a Windows `cmd.exe` shell spawn, hardened for
+ * model-controlled input. Wraps the token in double quotes when it contains
+ * whitespace, a quote, OR any cmd.exe metacharacter (& | < > ^ ( ) % !). Inside
+ * a double-quoted token cmd.exe treats those metacharacters as literal data, so
+ * wrapping neutralizes command injection; embedded quotes are doubled. A token
+ * with none of those characters is returned unquoted (cmd parses it verbatim).
+ *
+ * This is stricter than the LSP `quoteWindowsShellArg` (which only guards
+ * whitespace/quotes) because `recipe`'s `target`/`args` are free text from the
+ * model: an arg like `plain&inject` has no whitespace yet must still be quoted.
+ */
+export function quoteRecipeShellArg(value: string): string {
+	if (value.length > 0 && !/[\s"&|<>^()%!]/.test(value)) return value;
+	return `"${value.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Decide how to spawn `binary` with `args`. On Windows a `.cmd`/`.bat` shim
+ * (npm/pnpm/yarn) cannot be spawned directly (Node >= 20.12 EINVAL), so it must
+ * go through cmd.exe with every token quoted by `quoteRecipeShellArg`. Native
+ * executables (.exe/.com) and all POSIX binaries spawn with `shell:false`, where
+ * the args array is passed straight to execvp with no shell re-interpretation.
+ *
+ * Returns the resolved command, the (possibly quoted) args, and whether a shell
+ * is used. Exported for unit testing the quoting/strategy decision.
+ */
+export function resolveSpawnStrategy(
+	binary: string,
+	args: string[],
+): { command: string; args: string[]; useShell: boolean } {
+	const resolved = which(binary);
+	// Use a shell only for Windows `.cmd`/`.bat` shims. When the binary cannot be
+	// resolved on Windows, fall back to the shell so a shim `which` missed still
+	// runs (preserving the prior behavior); a truly missing binary then surfaces
+	// via cmd.exe. On POSIX, never use a shell.
+	const useShell = process.platform === "win32" ? (resolved ? needsWindowsShell(resolved) : true) : false;
+	const command = resolved ?? binary;
+	if (useShell) {
+		return { command: quoteRecipeShellArg(command), args: args.map(quoteRecipeShellArg), useShell };
+	}
+	return { command, args, useShell };
+}
+
 function runRunner(
 	binary: string,
 	args: string[],
@@ -150,20 +195,24 @@ function runRunner(
 ): Promise<RunOutcome> {
 	return new Promise((resolve) => {
 		let timedOut = false;
-		// On Windows, package-manager binaries (npm, pnpm, yarn, bun) are typically
-		// installed as `.cmd` / `.bat` shims, which Node's execFile cannot resolve
-		// without invoking the shell. We still pass args as an array so the shell
-		// receives properly quoted tokens, not a concatenated command string.
-		const useShell = process.platform === "win32";
+		// SECURITY: never hand the model-controlled `target`/`args` to a shell that
+		// re-parses them. `shell:true` with an args array concatenates the tokens
+		// into one unquoted command line that cmd.exe then re-splits and re-parses
+		// -- so a space breaks one arg into several and a metacharacter (& | > ^)
+		// injects commands. Instead resolve the binary and, only for Windows
+		// `.cmd`/`.bat` shims, route through cmd.exe with each token strictly quoted
+		// so the metacharacters arrive as literal data. Native binaries spawn with
+		// shell:false (execvp), which is already injection-safe everywhere.
+		const strategy = resolveSpawnStrategy(binary, args);
 		const child = execFile(
-			binary,
-			args,
+			strategy.command,
+			strategy.args,
 			{
 				cwd,
 				signal,
 				timeout: timeoutMs,
 				maxBuffer: 16 * 1024 * 1024,
-				shell: useShell,
+				shell: strategy.useShell,
 				windowsHide: true,
 			},
 			(err, stdout, stderr) => {
