@@ -335,7 +335,10 @@ function descCompare(a: FrequentFileStat, b: FrequentFileStat): number {
 function heapGt(a: FrequentFileStat, b: FrequentFileStat): boolean {
 	if (a.hits !== b.hits) return a.hits > b.hits;
 	if (a.lastTouchedAt !== b.lastTouchedAt) return a.lastTouchedAt > b.lastTouchedAt;
-	return a.path < b.path;
+	// Mirror descCompare's path tiebreak (localeCompare, not raw `<`) so heap
+	// eviction and the final sort agree at the topN boundary — otherwise a tie
+	// in both hits and lastTouchedAt can evict the entry descCompare ranks higher.
+	return a.path.localeCompare(b.path) < 0;
 }
 
 /** Min-heap by ranking (root = weakest element = eviction candidate). */

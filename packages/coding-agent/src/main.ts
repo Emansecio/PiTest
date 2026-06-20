@@ -62,13 +62,28 @@ async function readPipedStdin(): Promise<string | undefined> {
 
 	return new Promise((resolve) => {
 		let data = "";
-		process.stdin.setEncoding("utf8");
-		process.stdin.on("data", (chunk) => {
+		const onData = (chunk: string): void => {
 			data += chunk;
-		});
-		process.stdin.on("end", () => {
+		};
+		const settle = (): void => {
+			process.stdin.off("data", onData);
+			process.stdin.off("end", onEnd);
+			process.stdin.off("error", onError);
 			resolve(data.trim() || undefined);
-		});
+		};
+		const onEnd = (): void => {
+			settle();
+		};
+		// If the upstream pipe source dies mid-read (EPIPE/ECONNRESET), Node treats
+		// an unhandled stream 'error' as fatal and kills the process before the agent
+		// runs. Swallow it and resolve with whatever was buffered so startup proceeds.
+		const onError = (): void => {
+			settle();
+		};
+		process.stdin.setEncoding("utf8");
+		process.stdin.on("data", onData);
+		process.stdin.on("end", onEnd);
+		process.stdin.on("error", onError);
 		process.stdin.resume();
 	});
 }

@@ -32,13 +32,17 @@ const PROTOCOL_VERSION = "2025-06-18";
 const CLIENT_INFO = { name: "pi-coding-agent", version: "0.1.0" };
 
 /**
- * Whether a transport error is an HTTP 401/403 (auth rejected before the request
- * was processed). A 401 means the bearer was rejected at the gate, so refreshing
- * and retrying the SAME call once is safe — the call never reached business logic.
+ * Whether a transport error is an HTTP 401 — the bearer was rejected at the auth
+ * gate, BEFORE the request reached business logic. This is the only status for
+ * which refreshing and re-sending the SAME call is safe: a 401 guarantees the call
+ * never executed, so it cannot have applied a side effect. A 403 is deliberately
+ * NOT included: many servers return 403 from inside tool execution (mid-operation
+ * permission denial) after partial side effects, so re-sending a 403'd tools/call
+ * could double-apply it — see callTool.
  */
 function isUnauthorizedError(err: unknown): boolean {
 	if (!(err instanceof McpTransportError)) return false;
-	return /\bHTTP 401\b/.test(err.message) || /\bHTTP 403\b/.test(err.message);
+	return /\bHTTP 401\b/.test(err.message);
 }
 
 interface JsonRpcRequest {
@@ -61,6 +65,14 @@ export class McpClient {
 	/** Set by the manager: invoked after a runtime tools/list_changed re-list so tools get re-registered. */
 	onToolsChanged?: () => void;
 	private relistInFlight = false;
+	/**
+	 * Single-flight guard for forceTokenRefresh. Concurrent 401s (e.g. two tool calls
+	 * in flight when the bearer expires server-side) must NOT each issue a parallel
+	 * OAuth refresh: many servers rotate the refresh_token (single-use), so a second
+	 * refresh reading the now-consumed token fails and can clobber the freshly stored
+	 * one. Concurrent callers await this shared promise instead. Mirrors relistInFlight.
+	 */
+	private refreshInFlight?: Promise<boolean>;
 
 	constructor(name: string, config: McpServerConfig) {
 		this.name = name;
@@ -156,8 +168,22 @@ export class McpClient {
 	 * answers 401 (the token was revoked/rotated server-side, or had no `expires_in`
 	 * so `isTokenExpired` couldn't predict it). Re-injects the new bearer into the
 	 * transport. Returns true only if a fresh token was obtained.
+	 *
+	 * Single-flighted: concurrent callers (e.g. two tool calls that both 401 when the
+	 * bearer expires server-side) await the same in-flight refresh rather than issuing
+	 * parallel refreshMcpToken calls, which would consume a single-use refresh_token
+	 * twice and lose the freshly stored token.
 	 */
-	private async forceTokenRefresh(): Promise<boolean> {
+	private forceTokenRefresh(): Promise<boolean> {
+		if (this.refreshInFlight) return this.refreshInFlight;
+		const inFlight = this.doForceTokenRefresh().finally(() => {
+			this.refreshInFlight = undefined;
+		});
+		this.refreshInFlight = inFlight;
+		return inFlight;
+	}
+
+	private async doForceTokenRefresh(): Promise<boolean> {
 		if (!this.config.url || this.hasStaticAuth()) return false;
 		const refreshed = await refreshMcpToken(this.name);
 		if (!refreshed) return false;
@@ -290,9 +316,12 @@ export class McpClient {
 		try {
 			return await this.rpc<McpCallToolResult>("tools/call", params, signal);
 		} catch (err) {
-			// A 401 means the OAuth bearer was rejected (revoked/rotated, or it never
-			// had an expiry so we couldn't refresh proactively). Refresh once and retry
-			// the same call — it was rejected at the auth gate, never executed.
+			// A 401 means the OAuth bearer was rejected at the auth gate (revoked/rotated,
+			// or it never had an expiry so we couldn't refresh proactively): the call
+			// never reached business logic, so refreshing once and re-sending the SAME
+			// call is side-effect-safe. isUnauthorizedError matches 401 ONLY — a 403 may
+			// be a mid-operation permission denial after partial side effects, so it is
+			// surfaced without resend to avoid double-applying a side-effecting tool.
 			if (isUnauthorizedError(err) && (await this.forceTokenRefresh())) {
 				return await this.rpc<McpCallToolResult>("tools/call", params, signal);
 			}

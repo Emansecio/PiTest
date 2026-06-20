@@ -129,7 +129,11 @@ export async function loadPhoton(): Promise<typeof import("@silvia-odwyer/photon
 			return photonModule;
 		} catch {
 			photonModule = null;
-			return photonModule;
+			// Reset the in-flight promise so a transient import failure (EBUSY/EMFILE,
+			// AV-locked photon_rs_bg.wasm on Windows) does not permanently disable image
+			// processing — a later call should be able to retry.
+			loadPromise = null;
+			return null;
 		} finally {
 			restoreReadFileSync();
 		}

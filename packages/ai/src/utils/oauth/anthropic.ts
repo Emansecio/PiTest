@@ -30,6 +30,20 @@ const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const CALLBACK_HOST = process.env.PIT_OAUTH_CALLBACK_HOST || "127.0.0.1";
 const CALLBACK_PORT = 53692;
+/**
+ * Maximum time to block on the browser callback before falling through to the
+ * manual `onPrompt` paste path. Without this bound, a callback that never
+ * arrives (browser closed, login on a remote machine, etc.) would hang
+ * `loginAnthropic` forever. Override via PIT_OAUTH_CALLBACK_TIMEOUT_MS.
+ */
+function parseCallbackTimeoutMs(): number {
+	const raw = process.env.PIT_OAUTH_CALLBACK_TIMEOUT_MS;
+	if (raw) {
+		const parsed = Number.parseInt(raw, 10);
+		if (Number.isFinite(parsed) && parsed > 0) return parsed;
+	}
+	return 5 * 60 * 1000;
+}
 const CALLBACK_PATH = "/callback";
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`;
 const SCOPES =
@@ -166,6 +180,44 @@ async function startCallbackServer(expectedState: string): Promise<CallbackServe
 	});
 }
 
+/**
+ * Wait for the OAuth callback, but bound the wait so a never-arriving redirect
+ * (browser closed, remote-machine login, etc.) cannot hang forever. The wait
+ * resolves early — to `null` — when `signal` aborts or the timeout elapses, in
+ * which case the caller falls through to the manual paste path. All timers and
+ * listeners are cleaned up regardless of which path wins.
+ */
+async function waitForCallbackBounded(
+	server: CallbackServerInfo,
+	signal: AbortSignal | undefined,
+	timeoutMs: number,
+): Promise<{ code: string; state: string } | null> {
+	if (signal?.aborted) {
+		server.cancelWait();
+		return server.waitForCode();
+	}
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const onAbort = () => {
+		server.cancelWait();
+	};
+
+	try {
+		if (timeoutMs > 0 && timeoutMs !== Number.POSITIVE_INFINITY) {
+			timer = setTimeout(() => {
+				server.cancelWait();
+			}, timeoutMs);
+			// Don't keep the process alive solely for this fallback timer.
+			timer.unref?.();
+		}
+		signal?.addEventListener("abort", onAbort, { once: true });
+		return await server.waitForCode();
+	} finally {
+		if (timer) clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
 async function postJson(url: string, body: Record<string, string | number>): Promise<string> {
 	const response = await fetch(url, {
 		method: "POST",
@@ -232,9 +284,11 @@ export async function loginAnthropic(options: {
 	onPrompt: (prompt: OAuthPrompt) => Promise<string>;
 	onProgress?: (message: string) => void;
 	onManualCodeInput?: () => Promise<string>;
+	signal?: AbortSignal;
 }): Promise<OAuthCredentials> {
 	const { verifier, challenge } = await generatePKCE();
 	const server = await startCallbackServer(verifier);
+	const callbackTimeoutMs = parseCallbackTimeoutMs();
 
 	let code: string | undefined;
 	let state: string | undefined;
@@ -272,7 +326,11 @@ export async function loginAnthropic(options: {
 					server.cancelWait();
 				});
 
-			const result = await server.waitForCode();
+			// `signal` also unblocks here: without it an external abort while the
+			// user neither pastes a code nor the browser redirect arrives would
+			// hang on `waitForCode()`. The manual paste path already supplies its
+			// own cancel via `cancelWait()`, so no timeout is forced here.
+			const result = await waitForCallbackBounded(server, options.signal, Number.POSITIVE_INFINITY);
 
 			if (manualError) {
 				throw manualError;
@@ -306,7 +364,10 @@ export async function loginAnthropic(options: {
 				}
 			}
 		} else {
-			const result = await server.waitForCode();
+			// Bound the callback wait: if the browser redirect never arrives
+			// (window closed, remote-machine login, abort), fall through to the
+			// manual `onPrompt` path instead of hanging forever.
+			const result = await waitForCallbackBounded(server, options.signal, callbackTimeoutMs);
 			if (result?.code) {
 				code = result.code;
 				state = result.state;
@@ -389,6 +450,7 @@ export const anthropicOAuthProvider: OAuthProviderInterface = {
 			onPrompt: callbacks.onPrompt,
 			onProgress: callbacks.onProgress,
 			onManualCodeInput: callbacks.onManualCodeInput,
+			signal: callbacks.signal,
 		});
 	},
 

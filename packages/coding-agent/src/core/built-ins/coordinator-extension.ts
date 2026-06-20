@@ -281,13 +281,15 @@ function coerceResultSchema(raw: unknown): TSchema | undefined {
  * callers past the cap; `releaseSlot` wakes the oldest waiter. Module-scoped so
  * the budget is shared across every coordinator instance in the process.
  */
-const MAX_CONCURRENCY = Number(process.env.PIT_SUBAGENT_MAX_CONCURRENCY) || 4;
+const MAX_CONCURRENCY_RAW = Number(process.env.PIT_SUBAGENT_MAX_CONCURRENCY);
+const MAX_CONCURRENCY = Number.isFinite(MAX_CONCURRENCY_RAW) && MAX_CONCURRENCY_RAW >= 1 ? MAX_CONCURRENCY_RAW : 4;
 /**
  * Upper bound on queued waiters past the cap. Without it, a runaway fan-out
  * could pile up an unbounded queue of pending acquires. Generous default
  * (8× the cap) so legitimate batches never hit it; overridable via env.
  */
-const MAX_QUEUE = Number(process.env.PIT_SUBAGENT_MAX_QUEUE) || MAX_CONCURRENCY * 8;
+const MAX_QUEUE_RAW = Number(process.env.PIT_SUBAGENT_MAX_QUEUE);
+const MAX_QUEUE = Number.isFinite(MAX_QUEUE_RAW) && MAX_QUEUE_RAW >= 1 ? MAX_QUEUE_RAW : MAX_CONCURRENCY * 8;
 let activeSubagents = 0;
 
 /**
@@ -656,9 +658,17 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		const entries = handles.map((h) => pending.get(h)).filter((e): e is PendingTask => e !== undefined);
+		// Snapshot the resolved entries (keyed by handle) BEFORE awaiting. A concurrent
+		// op:spawn can call prunePending() while we're suspended on the await, which evicts
+		// the oldest SETTLED entries — including a just-joined one — from `pending`. Reading
+		// back via `pending.get(h)` would then report a successfully-completed task as
+		// `(unknown handle)` and silently drop its result. The snapshot holds the same live
+		// entry objects, whose status/result/error mutate in place, so it reflects the final
+		// settled state once the await resolves.
+		const snapshot = new Map(entries.map((e) => [e.handle, e]));
 		await Promise.allSettled(entries.map((e) => e.promise));
 		const parts = handles.map((h) => {
-			const e = pending.get(h);
+			const e = snapshot.get(h) ?? pending.get(h);
 			if (!e) return `### ${h}\n(unknown handle)`;
 			if (e.status === "error") return `### ${h}\n[failed: ${e.error ?? "error"}]`;
 			if (e.delivered)

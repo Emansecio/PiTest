@@ -21,6 +21,7 @@ export {
 import {
 	availableProviders,
 	braveProvider,
+	exaProvider,
 	jinaProvider,
 	perplexityProvider,
 	type SearchProvider,
@@ -28,10 +29,10 @@ import {
 } from "./providers.ts";
 
 /**
- * Default provider chain order: Brave → Tavily → Jina → Perplexity. Filtered
- * down to providers whose env var is present, so an empty array means the
- * caller hasn't configured any API keys.
+ * Default provider chain order: Brave → Tavily → Jina → Perplexity → Exa.
+ * Filtered down to providers whose env var is present, so an empty array means
+ * the caller hasn't configured any API keys.
  */
 export function getDefaultProviderChain(): SearchProvider[] {
-	return availableProviders([braveProvider, tavilyProvider, jinaProvider, perplexityProvider]);
+	return availableProviders([braveProvider, tavilyProvider, jinaProvider, perplexityProvider, exaProvider]);
 }

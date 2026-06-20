@@ -377,6 +377,10 @@ export class Editor implements Component, Focusable {
 
 	// Paste tracking for large pastes
 	private pastes: Map<number, string> = new Map();
+	// Memoized id set for validPasteIds(); rebuilt lazily after pastes mutates.
+	// Invalidated on paste add (handlePaste) and clear (submitValue) only — never
+	// on cursor moves — so it stays valid across the hot keystroke path.
+	private validPasteIdsCache?: Set<number>;
 	private pasteCounter: number = 0;
 	// Optional consumer callback fired when a paste is truncated at MAX_PASTE_BYTES.
 	private onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
@@ -442,7 +446,12 @@ export class Editor implements Component, Focusable {
 		// Common case: no active pastes. Reuse a shared empty set so the hot path
 		// (segment() runs on every backspace/delete/arrow/word-move) allocates nothing.
 		if (this.pastes.size === 0) return EMPTY_PASTE_IDS;
-		return new Set(this.pastes.keys());
+		// Active pastes: ids only change on paste/clear (which reset the cache),
+		// not on cursor moves, so the cached set is valid across the keystroke path.
+		if (this.validPasteIdsCache === undefined) {
+			this.validPasteIdsCache = new Set(this.pastes.keys());
+		}
+		return this.validPasteIdsCache;
 	}
 
 	/** Segment text with paste-marker awareness, only merging markers with valid IDs. */
@@ -1525,6 +1534,7 @@ export class Editor implements Component, Focusable {
 			this.pasteCounter++;
 			const pasteId = this.pasteCounter;
 			this.pastes.set(pasteId, filteredText);
+			this.validPasteIdsCache = undefined;
 			this.invalidateWrapCache();
 
 			// Insert marker like "[paste #1 +123 lines]" or "[paste #1 1234 chars]"
@@ -1588,6 +1598,7 @@ export class Editor implements Component, Focusable {
 
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
+		this.validPasteIdsCache = undefined;
 		this.invalidateWrapCache();
 		this.pasteCounter = 0;
 		this.historyIndex = -1;

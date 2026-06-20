@@ -327,12 +327,14 @@ export function createEditHashlineToolDefinition(
 								}
 
 								await ops.writeFile(absolutePath, finalContent, signal);
-								await refreshHashlineMtime(mtimeStore, absolutePath);
 								// Committed (atomic rename): stop honoring abort so a late ESC can't
 								// reject a write that already landed (a pre-commit abort throws and is
-								// handled in the catch with the original file intact).
+								// handled in the catch with the original file intact). Remove the
+								// listener BEFORE the best-effort mtime refresh below so a late ESC
+								// during that fsStat window can't reject an edit already on disk.
 								__written = finalContent;
 								if (signal) signal.removeEventListener("abort", onAbort);
+								await refreshHashlineMtime(mtimeStore, absolutePath);
 
 								resolve({
 									content: [

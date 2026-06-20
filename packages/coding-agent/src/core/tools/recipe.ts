@@ -229,6 +229,18 @@ function runRunner(
 						});
 						return;
 					}
+					if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+						// Node killed the child for exceeding maxBuffer and handed back
+						// TRUNCATED stdout/stderr. Surface this explicitly so the model
+						// does not mistake a capped/killed process for a plain failure.
+						resolve({
+							exitCode: 1,
+							stdout: stdoutStr,
+							stderr: `${stderrStr}\n[recipe: output exceeded 16MB cap and was truncated; the process was killed]`,
+							timedOut: false,
+						});
+						return;
+					}
 					if (e.signal === "SIGTERM" && e.killed) {
 						timedOut = true;
 					}

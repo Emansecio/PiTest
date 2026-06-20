@@ -673,7 +673,51 @@ async function streamAssistantResponse(
 			return ttsrInterrupt;
 		}
 
-		const finalMessage = await response.result();
+		// Reaching here means the async iterator drained without the in-loop
+		// `done`/`error` case ever firing (that path returns directly). The
+		// StreamFn contract requires failures be encoded as a terminal
+		// done/error event, but a custom streamFn or the proxy can call end()
+		// to terminate the iterator WITHOUT pushing a terminal event. In that
+		// case `result()` (EventStream.finalResultPromise) never resolves and
+		// this await would hang the turn — and the whole run, since there is no
+		// idle-timeout around it. Defensively detect that: once the iterator has
+		// drained the stream is already internally `done`, so a legitimate
+		// result has resolved within microtasks; race the await against a
+		// deferred sentinel that only fires after a macrotask. If the sentinel
+		// wins, result() can no longer resolve, so synthesize a failure turn
+		// instead of deadlocking — matching how every other untrusted callback
+		// path is converted into a terminal failure turn.
+		const RESULT_PENDING = Symbol("result-pending");
+		let sentinelTimer: ReturnType<typeof setTimeout> | undefined;
+		const sentinel = new Promise<typeof RESULT_PENDING>((resolve) => {
+			sentinelTimer = setTimeout(() => resolve(RESULT_PENDING), 0);
+			// Don't keep the event loop alive solely for this watchdog.
+			(sentinelTimer as { unref?: () => void }).unref?.();
+		});
+		const settled = await Promise.race([response.result(), sentinel]);
+		if (sentinelTimer) clearTimeout(sentinelTimer);
+
+		if (settled === RESULT_PENDING) {
+			// Observe-only: the stream ended without a terminal event; record the
+			// fault so a misbehaving streamFn is detectable in production.
+			recordDiagnostic({
+				category: "stream.idle-timeout",
+				level: "warn",
+				source: "agent-loop.streamAssistantResponse",
+				context: { note: "stream ended without a terminal event" },
+			});
+			const errorTurn = buildErrorTurn(config, "Stream ended without a terminal event");
+			if (addedPartial) {
+				context.messages[context.messages.length - 1] = errorTurn;
+			} else {
+				context.messages.push(errorTurn);
+				await emit({ type: "message_start", message: { ...errorTurn } });
+			}
+			await emit({ type: "message_end", message: errorTurn });
+			return errorTurn;
+		}
+
+		const finalMessage = settled;
 		if (addedPartial) {
 			context.messages[context.messages.length - 1] = finalMessage;
 		} else {

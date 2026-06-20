@@ -19,6 +19,11 @@ import type {
 } from "./types.ts";
 import { formatPathRelativeToCwd, uriToFile } from "./utils.ts";
 
+/** True when an error is a Node ENOENT (missing path) rejection. */
+function isEnoent(err: unknown): boolean {
+	return typeof err === "object" && err !== null && (err as { code?: string }).code === "ENOENT";
+}
+
 // =============================================================================
 // Text Edit Application
 // =============================================================================
@@ -183,17 +188,46 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Prom
 					await flushSubtree(renameOp.newUri);
 					const oldPath = uriToFile(renameOp.oldUri);
 					const newPath = uriToFile(renameOp.newUri);
-					await fs.mkdir(path.dirname(newPath), { recursive: true });
-					await fs.rename(oldPath, newPath);
-					applied.push(
-						`Renamed ${formatPathRelativeToCwd(oldPath, cwd)} -> ${formatPathRelativeToCwd(newPath, cwd)}`,
-					);
+					try {
+						await fs.mkdir(path.dirname(newPath), { recursive: true });
+						await fs.rename(oldPath, newPath);
+						applied.push(
+							`Renamed ${formatPathRelativeToCwd(oldPath, cwd)} -> ${formatPathRelativeToCwd(newPath, cwd)}`,
+						);
+					} catch (err) {
+						// A missing source (e.g. already renamed/removed by an earlier op in the
+						// same batch, or a stale edit after a concurrent fs change) must not abort
+						// the remaining documentChanges and the trailing flush loop.
+						if (isEnoent(err)) {
+							applied.push(`Skipped rename of missing ${formatPathRelativeToCwd(oldPath, cwd)}`);
+						} else {
+							throw err;
+						}
+					}
 				} else if (change.kind === "delete") {
 					const deleteOp = change as DeleteFile;
 					await flushSubtree(deleteOp.uri);
 					const filePath = uriToFile(deleteOp.uri);
-					await fs.rm(filePath, { recursive: true });
-					applied.push(`Deleted ${formatPathRelativeToCwd(filePath, cwd)}`);
+					const ignoreMissing = deleteOp.options?.ignoreIfNotExists === true;
+					try {
+						// Honor LSP §3.16 DeleteFileOptions: `recursive` (default true here to
+						// preserve prior behavior) and `ignoreIfNotExists` (force makes a missing
+						// path a no-op instead of an ENOENT rejection that aborts the whole batch).
+						await fs.rm(filePath, {
+							recursive: deleteOp.options?.recursive ?? true,
+							force: ignoreMissing,
+						});
+						applied.push(`Deleted ${formatPathRelativeToCwd(filePath, cwd)}`);
+					} catch (err) {
+						// A redundant delete of an already-gone path (e.g. removed by an earlier
+						// op / overlapping rename's flushSubtree, or a stale edit) is a no-op,
+						// never a batch-aborting crash that leaves a partially-applied workspace.
+						if (isEnoent(err)) {
+							applied.push(`Skipped delete of missing ${formatPathRelativeToCwd(filePath, cwd)}`);
+						} else {
+							throw err;
+						}
+					}
 				}
 			}
 		}

@@ -41,6 +41,10 @@ interface MemberEntry {
 	toolCounts: Map<string, number>;
 	/** Total tool calls so far. */
 	toolCount: number;
+	/** Memoized join of `toolCounts` ("Read 2 · Bash 1"), rebuilt only when the
+	 * tally mutates (in recordActivity), NOT on every render frame. `null` = stale,
+	 * recompute lazily. */
+	toolSummaryCache: string | null;
 }
 
 type FusionStage = "brief" | "panel" | "judge" | "verify" | "writer";
@@ -73,9 +77,15 @@ function secsFor(entry: MemberEntry, now: number): number {
  * This is the "what is it actually doing" signal the opaque "running" clock lacked. */
 function activitySummary(entry: MemberEntry): string {
 	if (entry.toolCount > 0) {
-		const parts: string[] = [];
-		for (const [name, n] of entry.toolCounts) parts.push(`${name} ${n}`);
-		return parts.join(" · ");
+		// Memoized: the join only changes when recordActivity mutates the tally, so
+		// rebuild it lazily on a stale cache instead of re-iterating+joining the Map
+		// on every animation frame (render hot path).
+		if (entry.toolSummaryCache === null) {
+			const parts: string[] = [];
+			for (const [name, n] of entry.toolCounts) parts.push(`${name} ${n}`);
+			entry.toolSummaryCache = parts.join(" · ");
+		}
+		return entry.toolSummaryCache;
 	}
 	return entry.action || "starting";
 }
@@ -189,6 +199,7 @@ export class FusionLiveComponent implements Component {
 				action: "",
 				toolCounts: new Map(),
 				toolCount: 0,
+				toolSummaryCache: null,
 			});
 		}
 		this.ui.requestRender();
@@ -207,6 +218,9 @@ export class FusionLiveComponent implements Component {
 			entry.action = name;
 			entry.toolCount += 1;
 			entry.toolCounts.set(name, (entry.toolCounts.get(name) ?? 0) + 1);
+			// The tally changed — drop the memoized join so activitySummary rebuilds
+			// it on the next render (and only then), not every frame.
+			entry.toolSummaryCache = null;
 		} else if (kind === "thinking") {
 			entry.action = "thinking";
 		} else if (kind === "writing") {

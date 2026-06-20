@@ -503,13 +503,16 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 function isValidSessionFile(filePath: string): boolean {
 	try {
 		const fd = openSync(filePath, "r");
-		const buffer = Buffer.alloc(512);
-		const bytesRead = readSync(fd, buffer, 0, 512, 0);
-		closeSync(fd);
-		const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n")[0];
-		if (!firstLine) return false;
-		const header = JSON.parse(firstLine);
-		return header.type === "session" && typeof header.id === "string";
+		try {
+			const buffer = Buffer.alloc(512);
+			const bytesRead = readSync(fd, buffer, 0, 512, 0);
+			const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n")[0];
+			if (!firstLine) return false;
+			const header = JSON.parse(firstLine);
+			return header.type === "session" && typeof header.id === "string";
+		} finally {
+			closeSync(fd);
+		}
 	} catch {
 		return false;
 	}

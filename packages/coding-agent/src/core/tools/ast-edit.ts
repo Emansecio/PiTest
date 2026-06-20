@@ -68,20 +68,32 @@ interface AstGrepRewriteMatch {
 	replacement_offsets?: unknown;
 }
 
+const AST_EDIT_OVERFLOW_HINT =
+	"ast-grep produced more than 64MB of output and was truncated; results are incomplete. Narrow the rewrite with a more specific pattern, a smaller `path`, `lang`, or `globs`.";
+
 function execAstGrep(
 	binary: string,
 	args: string[],
 	cwd: string,
 	signal?: AbortSignal,
-): Promise<{ code: number; stdout: string; stderr: string; missing?: boolean }> {
+): Promise<{ code: number; stdout: string; stderr: string; missing?: boolean; overflow?: boolean }> {
 	return new Promise((resolve) => {
 		execFile(binary, args, { cwd, signal, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
 			if (err) {
+				const e = err as NodeJS.ErrnoException & { code?: string | number };
 				if (isMissingBinaryError(err)) {
 					resolve({ code: -1, stdout: "", stderr: AST_GREP_INSTALL_HINT, missing: true });
 					return;
 				}
-				const code = typeof (err as { code?: unknown }).code === "number" ? Number((err as any).code) : 1;
+				// Output exceeded maxBuffer: the child was killed and stdout is partial.
+				// Surfacing the partial NDJSON as a normal result would silently truncate the
+				// match set (and the default path would still --update-all every match on disk
+				// while reporting an under-count), so flag it and let each call site error out.
+				if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || /maxBuffer/.test(err.message ?? "")) {
+					resolve({ code: -1, stdout: "", stderr: AST_EDIT_OVERFLOW_HINT, overflow: true });
+					return;
+				}
+				const code = typeof e.code === "number" ? e.code : 1;
 				resolve({
 					code,
 					stdout: stdout?.toString() ?? "",
@@ -206,6 +218,13 @@ export function createAstEditToolDefinition(
 						details: undefined,
 					};
 				}
+				if (res.overflow) {
+					return {
+						content: [{ type: "text" as const, text: AST_EDIT_OVERFLOW_HINT }],
+						isError: true,
+						details: undefined,
+					};
+				}
 				if (res.code !== 0 && res.code !== 1) {
 					return {
 						content: [
@@ -240,6 +259,13 @@ export function createAstEditToolDefinition(
 						details: undefined,
 					};
 				}
+				if (res.overflow) {
+					return {
+						content: [{ type: "text" as const, text: AST_EDIT_OVERFLOW_HINT }],
+						isError: true,
+						details: undefined,
+					};
+				}
 				if (res.code !== 0 && res.code !== 1) {
 					return {
 						content: [
@@ -266,6 +292,7 @@ export function createAstEditToolDefinition(
 						const applyArgs = [...baseArgs, "--update-all", target];
 						const applyRes = await execAstGrep(binary, applyArgs, cwd);
 						if (applyRes.missing) throw new Error(AST_GREP_INSTALL_HINT);
+						if (applyRes.overflow) throw new Error(AST_EDIT_OVERFLOW_HINT);
 						if (applyRes.code !== 0 && applyRes.code !== 1) {
 							throw new Error(applyRes.stderr.trim() || `ast-grep exited with code ${applyRes.code}`);
 						}
@@ -298,6 +325,15 @@ export function createAstEditToolDefinition(
 					details: undefined,
 				};
 			}
+			if (countRes.overflow) {
+				// Partial NDJSON would under-count; the subsequent --update-all would still
+				// rewrite every match on disk. Refuse instead of corrupting silently.
+				return {
+					content: [{ type: "text" as const, text: AST_EDIT_OVERFLOW_HINT }],
+					isError: true,
+					details: undefined,
+				};
+			}
 			if (countRes.code !== 0 && countRes.code !== 1) {
 				return {
 					content: [
@@ -323,6 +359,13 @@ export function createAstEditToolDefinition(
 			if (res.missing) {
 				return {
 					content: [{ type: "text" as const, text: AST_GREP_INSTALL_HINT }],
+					isError: true,
+					details: undefined,
+				};
+			}
+			if (res.overflow) {
+				return {
+					content: [{ type: "text" as const, text: AST_EDIT_OVERFLOW_HINT }],
 					isError: true,
 					details: undefined,
 				};

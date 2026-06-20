@@ -23,6 +23,42 @@ import { getEditorTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
+type EditorSpawnPlan = {
+	command: string;
+	args: string[];
+	shell: boolean;
+};
+
+/**
+ * Build a spawn plan for the external editor without naively space-splitting the
+ * command string. A bare value with no spaces is the binary itself (the common case,
+ * e.g. "vim", "nano", "code"); on win32 we keep shell:true so .cmd/.bat launchers
+ * resolve. A value that contains spaces is ambiguous (it may be a single quoted path,
+ * a path with flags, or a path containing spaces), so we hand the raw string to the
+ * shell and append the quoted tmpFile — letting the shell tokenize exactly as the
+ * user intended their $VISUAL/$EDITOR value to be parsed, rather than guessing here.
+ */
+function resolveEditorSpawn(editorCmd: string, tmpFile: string): EditorSpawnPlan {
+	const trimmed = editorCmd.trim();
+	if (!trimmed.includes(" ")) {
+		// Single token: it is the binary. Do not split; pass tmpFile as the only arg.
+		return {
+			command: trimmed,
+			args: [tmpFile],
+			shell: process.platform === "win32",
+		};
+	}
+	// Contains spaces: run through the shell so the user's command string is tokenized
+	// by the shell (preserving quoted/spaced paths). Quote the tmpFile we append; the
+	// generated tmp path is a Date.now()-suffixed name under os.tmpdir() with no quotes.
+	const quotedTmp = process.platform === "win32" ? `"${tmpFile}"` : `'${tmpFile}'`;
+	return {
+		command: `${trimmed} ${quotedTmp}`,
+		args: [],
+		shell: true,
+	};
+}
+
 export class ExtensionEditorComponent extends Container implements Focusable {
 	private editor: Editor;
 	private onSubmitCallback: (value: string) => void;
@@ -126,18 +162,23 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 			this.tui.stop();
 			stopped = true;
 
-			const [editor, ...editorArgs] = editorCmd.split(" ");
 			process.stdout.write(
 				`Launching external editor: ${editorCmd}\n${APP_NAME} will resume when the editor exits.\n`,
 			);
+
+			// Resolve the command/args without naively splitting on spaces, which would
+			// break editor paths that contain spaces (e.g. the very common Windows value
+			// "C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd"). A space-split there
+			// yields argv[0]="C:\\Program" and the spawn fails, silently dropping the edit.
+			const spawnPlan = resolveEditorSpawn(editorCmd, tmpFile);
 
 			// Do not use spawnSync here. On Windows, synchronous child_process calls can keep
 			// Node/libuv's console input read active after tui.stop() pauses stdin, racing
 			// vim/nvim for the console input buffer until Ctrl+C cancels the pending read.
 			const status = await new Promise<number | null>((resolve) => {
-				const child = spawn(editor, [...editorArgs, tmpFile], {
+				const child = spawn(spawnPlan.command, spawnPlan.args, {
 					stdio: "inherit",
-					shell: process.platform === "win32",
+					shell: spawnPlan.shell,
 				});
 				child.on("error", () => resolve(null));
 				child.on("close", (code) => resolve(code));

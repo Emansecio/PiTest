@@ -189,6 +189,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 			reader = response.body!.getReader();
 			const decoder = new TextDecoder();
 			let buffer = "";
+			let sawTerminal = false;
 
 			while (true) {
 				const { done, value } = await reader.read();
@@ -209,6 +210,9 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 							const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
 							const event = processProxyEvent(proxyEvent, partial);
 							if (event) {
+								if (event.type === "done" || event.type === "error") {
+									sawTerminal = true;
+								}
 								stream.push(event);
 							}
 						}
@@ -218,6 +222,17 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 
 			if (options.signal?.aborted) {
 				throw new Error("Request aborted by user");
+			}
+
+			// If the upstream connection closed cleanly without ever emitting a
+			// terminal `done`/`error` event (truncated stream, dropped connection,
+			// proxy crash after a 200), result() would never resolve and the agent
+			// loop's `await response.result()` would hang forever. Synthesize a
+			// terminal error so the consumer always sees a completion.
+			if (!sawTerminal) {
+				partial.stopReason = "error";
+				partial.errorMessage = "Proxy stream ended without a terminal event";
+				stream.push({ type: "error", reason: "error", error: partial });
 			}
 
 			stream.end();
@@ -237,6 +252,12 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 			if (options.signal) {
 				options.signal.removeEventListener("abort", abortHandler);
 				options.signal.removeEventListener("abort", onUserAbort);
+			}
+			// Release the body stream on every exit path (normal completion, parse
+			// throw, or abort) so the underlying socket/connection is not pinned by
+			// a locked reader until GC reclaims it.
+			if (reader) {
+				reader.cancel().catch(() => {});
 			}
 		}
 	})();
@@ -351,8 +372,11 @@ function processProxyEvent(
 				if (now - carrier.lastParseAt >= TOOLCALL_PARSE_THROTTLE_MS) {
 					carrier.lastParseAt = now;
 					content.arguments = parseStreamingJson(carrier.partialJson) || {};
+					// Only spread a fresh object when the throttled parse actually ran;
+					// the clone exists solely to trigger UI reactivity for the updated
+					// `arguments`, so cloning on every delta is wasted allocation churn.
+					partial.content[proxyEvent.contentIndex] = { ...content };
 				}
-				partial.content[proxyEvent.contentIndex] = { ...content }; // Trigger reactivity
 				return {
 					type: "toolcall_delta",
 					contentIndex: proxyEvent.contentIndex,

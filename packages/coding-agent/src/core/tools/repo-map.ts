@@ -38,24 +38,30 @@ export function createRepoMapToolDefinition(cwd: string): ToolDefinition<typeof 
 			const lines: string[] = ["Repo map (heuristic, not AST — verify with read/grep):"];
 			let bytes = Buffer.byteLength(lines[0]!, "utf8");
 			let byteCapHit = false;
-			for (const file of files) {
+			// Read files in bounded-concurrency batches so disk I/O overlaps on a cold
+			// cache (mirrors ls.ts). listDeclarations is pure and the byte-cap check below
+			// stays in declaration order, so the output is byte-identical to a serial read.
+			const BATCH_SIZE = 24;
+			outer: for (let batchStart = 0; batchStart < files.length; batchStart += BATCH_SIZE) {
 				if (signal?.aborted) break;
-				let content: string;
-				try {
-					content = await readFile(file, "utf8");
-				} catch {
-					continue;
+				const batch = files.slice(batchStart, batchStart + BATCH_SIZE);
+				const settled = await Promise.allSettled(batch.map((file) => readFile(file, "utf8")));
+				for (let i = 0; i < batch.length; i++) {
+					if (signal?.aborted) break outer;
+					const result = settled[i]!;
+					if (result.status !== "fulfilled") continue;
+					const file = batch[i]!;
+					const names = listDeclarations(result.value, file).map((d) => `${d.kind} ${d.name}:${d.line}`);
+					if (names.length === 0) continue;
+					const line = `${relative(cwd, file)}: ${names.join(", ")}`;
+					bytes += Buffer.byteLength(line, "utf8") + 1;
+					if (bytes > MAX_BYTES) {
+						byteCapHit = true;
+						lines.push("… (truncated: byte limit reached — pass path= to focus on a subdirectory)");
+						break outer;
+					}
+					lines.push(line);
 				}
-				const names = listDeclarations(content, file).map((d) => `${d.kind} ${d.name}:${d.line}`);
-				if (names.length === 0) continue;
-				const line = `${relative(cwd, file)}: ${names.join(", ")}`;
-				bytes += Buffer.byteLength(line, "utf8") + 1;
-				if (bytes > MAX_BYTES) {
-					byteCapHit = true;
-					lines.push("… (truncated: byte limit reached — pass path= to focus on a subdirectory)");
-					break;
-				}
-				lines.push(line);
 			}
 			if (fileCapHit && !byteCapHit) {
 				lines.push(

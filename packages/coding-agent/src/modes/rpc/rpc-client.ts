@@ -66,6 +66,14 @@ export class RpcClient {
 	private eventListeners: RpcEventListener[] = [];
 	private pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
+	/**
+	 * Active waiters from waitForIdle()/collectEvents(). Unlike pendingRequests
+	 * these don't have an RPC id — they settle on an agent_end event or their own
+	 * timeout. Tracking them here lets failPendingAndReset() reject them fast when
+	 * the child crashes/exits, instead of leaving them to stall on the timeout.
+	 * Each waiter removes itself on normal resolve to avoid a double-settle.
+	 */
+	private idleWaiters: Set<{ reject: (error: Error) => void }> = new Set();
 	private requestId = 0;
 	private stderr = "";
 	/** Decodes stderr chunks without splitting multibyte UTF-8 across boundaries. */
@@ -161,6 +169,15 @@ export class RpcClient {
 		for (const request of pending) {
 			request.reject(new Error(message));
 		}
+		// waitForIdle()/collectEvents() callers don't live in pendingRequests; fail
+		// them here too so a child crash mid-run rejects them immediately instead of
+		// leaving them to stall on their own timeout. Each waiter's reject wrapper
+		// clears its timer and removes itself from the set.
+		const waiters = Array.from(this.idleWaiters);
+		this.idleWaiters.clear();
+		for (const waiter of waiters) {
+			waiter.reject(new Error(message));
+		}
 	}
 
 	/**
@@ -196,6 +213,13 @@ export class RpcClient {
 			pending.reject(new Error("Client stopped"));
 		}
 		this.pendingRequests.clear();
+		// Also release any waitForIdle()/collectEvents() callers so an explicit
+		// stop() mid-run doesn't leave them stalled on their own timeout.
+		const waiters = Array.from(this.idleWaiters);
+		this.idleWaiters.clear();
+		for (const waiter of waiters) {
+			waiter.reject(new Error("Client stopped"));
+		}
 	}
 
 	/**
@@ -463,18 +487,34 @@ export class RpcClient {
 	 */
 	waitForIdle(timeout = 60000): Promise<void> {
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
+			let settled = false;
+			const cleanup = (): void => {
+				clearTimeout(timer);
 				unsubscribe();
-				reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
+				this.idleWaiters.delete(waiter);
+			};
+			const waiter = {
+				reject: (error: Error): void => {
+					if (settled) return;
+					settled = true;
+					cleanup();
+					reject(error);
+				},
+			};
+
+			const timer = setTimeout(() => {
+				waiter.reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
 			}, timeout);
 
 			const unsubscribe = this.onEvent((event) => {
-				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsubscribe();
+				if (event.type === "agent_end" && !settled) {
+					settled = true;
+					cleanup();
 					resolve();
 				}
 			});
+
+			this.idleWaiters.add(waiter);
 		});
 	}
 
@@ -484,19 +524,35 @@ export class RpcClient {
 	collectEvents(timeout = 60000): Promise<AgentEvent[]> {
 		return new Promise((resolve, reject) => {
 			const events: AgentEvent[] = [];
-			const timer = setTimeout(() => {
+			let settled = false;
+			const cleanup = (): void => {
+				clearTimeout(timer);
 				unsubscribe();
-				reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
+				this.idleWaiters.delete(waiter);
+			};
+			const waiter = {
+				reject: (error: Error): void => {
+					if (settled) return;
+					settled = true;
+					cleanup();
+					reject(error);
+				},
+			};
+
+			const timer = setTimeout(() => {
+				waiter.reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
 			}, timeout);
 
 			const unsubscribe = this.onEvent((event) => {
 				events.push(event);
-				if (event.type === "agent_end") {
-					clearTimeout(timer);
-					unsubscribe();
+				if (event.type === "agent_end" && !settled) {
+					settled = true;
+					cleanup();
 					resolve(events);
 				}
 			});
+
+			this.idleWaiters.add(waiter);
 		});
 	}
 
