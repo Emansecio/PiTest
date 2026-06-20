@@ -59,6 +59,7 @@ const fastChecks = [
 	{ name: "tsgo", command: "tsgo --noEmit" },
 	{ name: "browser-smoke", command: "node scripts/check-browser-smoke.mjs" },
 	{ name: "generated", command: "node scripts/check-generated-models.mjs" },
+	{ name: "surrogate-slice", command: "node scripts/check-surrogate-slice.mjs" },
 ];
 
 // Vitest is the heavy task: it forks up to (cpu-count) workers and saturates

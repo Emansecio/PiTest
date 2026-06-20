@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@pit/agent-core";
 import type { ToolResultMessage } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
+import { sliceSafe } from "../utils/surrogate.ts";
 import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } from "./cross-error.js";
 import type { CustomMessage } from "./messages.js";
 import type { SettingsManager } from "./settings-manager.js";
@@ -294,7 +295,7 @@ export class TurnSteeringEngine {
 		if (this._resultLoopFired) return;
 		this._resultLoopFired = true;
 		const summary = (errorMessage ?? "(no error text)").trim();
-		const cappedSummary = summary.length > 300 ? `${summary.slice(0, 300)}…` : summary;
+		const cappedSummary = summary.length > 300 ? `${sliceSafe(summary, 0, 300)}…` : summary;
 		const content = [
 			"<result-loop-reminder>",
 			`You have called \`${toolName}\` ${count} times with DIFFERENT arguments but got the SAME error every time:`,

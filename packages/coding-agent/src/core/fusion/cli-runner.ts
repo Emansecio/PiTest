@@ -3,6 +3,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordDiagnostic } from "@pit/ai";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import type { FusionCli, PanelMember, PanelResult } from "./types.ts";
 
 const IS_WIN = process.platform === "win32";
@@ -467,7 +468,10 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 			// can't apply here; the is_error cause is folded into claudeState.error.
 			const streamErr = isCodex ? codexState.error : claudeState.error;
 			if (code !== 0) {
-				const stderrExcerpt = stderr.length > 400 ? `${stderr.slice(0, 200)} … ${stderr.slice(-200)}` : stderr;
+				const stderrExcerpt =
+					stderr.length > 400
+						? `${sliceSafe(stderr, 0, 200)} … ${sliceSafe(stderr, stderr.length - 200)}`
+						: stderr;
 				recordDiagnostic({
 					category: "fusion.member-failed",
 					level: "warn",

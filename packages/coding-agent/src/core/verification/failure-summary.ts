@@ -1,3 +1,4 @@
+import { sliceSafe } from "../../utils/surrogate.ts";
 import { summarizeTestRun } from "./test-summary.ts";
 
 const MAX_FAILURE_LINES = 16;
@@ -34,7 +35,7 @@ export function summarizeCheckFailure(output: string, _command: string): string 
 	}
 	if (hits.length === 0) {
 		if (headline) return headline;
-		return output.length > TAIL_CHARS ? `…\n${output.slice(-TAIL_CHARS)}` : output;
+		return output.length > TAIL_CHARS ? `…\n${sliceSafe(output, output.length - TAIL_CHARS)}` : output;
 	}
 	const omitted = matched - hits.length;
 	const lines = headline ? [headline, ...hits] : [...hits];

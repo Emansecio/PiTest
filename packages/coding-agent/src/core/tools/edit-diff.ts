@@ -6,6 +6,7 @@
 import * as Diff from "diff";
 import { constants } from "fs";
 import { access, readFile, stat } from "fs/promises";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
@@ -320,7 +321,7 @@ const NEAR_MISS_MAX_CANDIDATE_WINDOWS = 4000;
 function truncateForDiagnostic(text: string): string {
 	const single = text.replace(/\n/g, "\\n");
 	if (single.length <= NEAR_MISS_MAX_BODY_CHARS) return single;
-	return `${single.slice(0, NEAR_MISS_MAX_BODY_CHARS)}…`;
+	return `${sliceSafe(single, 0, NEAR_MISS_MAX_BODY_CHARS)}…`;
 }
 
 /**

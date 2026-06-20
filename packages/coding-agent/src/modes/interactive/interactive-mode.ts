@@ -70,6 +70,7 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { detectCli, inferCli } from "../../core/fusion/cli-runner.ts";
 import { parseTokenBudget } from "../../core/goal/goal-manager.ts";
+import { sliceSafe } from "../../utils/surrogate.ts";
 
 /**
  * Detect an inline `/chrome` token anywhere in the message (start, middle, or
@@ -5793,7 +5794,7 @@ export class InteractiveMode {
 			for (const entry of sorted) {
 				const subject = entry.subject ?? "-";
 				const body = entry.body.replace(/\s+/g, " ");
-				const snippet = body.length > 60 ? `${body.slice(0, 60)}…` : body;
+				const snippet = body.length > 60 ? `${sliceSafe(body, 0, 60)}…` : body;
 				info += `${entry.id} | ${entry.kind} | ${subject} | ${snippet}\n`;
 			}
 			this.chatContainer.addChild(new Spacer(1));

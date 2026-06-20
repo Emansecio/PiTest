@@ -25,6 +25,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import { type CodeModeDispatcher, createCodeModeBridge } from "../code-mode/bridge.ts";
 import { getCurrentEvalKernelManager } from "../eval-kernel/index.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -193,7 +194,7 @@ export function createCodeModeToolDefinition(
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const code = str(args?.code) || "";
 			const firstLine = code.split(/\r?\n/, 1)[0] ?? "";
-			const display = firstLine.length > 70 ? `${firstLine.slice(0, 69)}…` : firstLine;
+			const display = firstLine.length > 70 ? `${sliceSafe(firstLine, 0, 69)}…` : firstLine;
 			text.setText(`${theme.fg("toolTitle", theme.bold("code"))} ${theme.fg("toolOutput", display)}`);
 			return text;
 		},

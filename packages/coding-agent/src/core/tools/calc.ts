@@ -7,6 +7,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getTextOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -386,7 +387,7 @@ export function createCalcToolDefinition(
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const expr = str(args?.expression) || "";
-			const display = expr.length > 70 ? `${expr.slice(0, 69)}…` : expr;
+			const display = expr.length > 70 ? `${sliceSafe(expr, 0, 69)}…` : expr;
 			text.setText(`${theme.fg("toolTitle", theme.bold("calc"))} ${theme.fg("toolOutput", display)}`);
 			return text;
 		},

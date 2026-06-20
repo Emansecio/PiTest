@@ -7,6 +7,8 @@
  * fixed "other" bucket once the per-tool fingerprint cap is reached.
  */
 
+import { sliceSafe } from "../utils/surrogate.ts";
+
 const DEFAULT_MAX_ERROR_FINGERPRINTS_PER_TOOL = 20;
 const DEFAULT_ERROR_FINGERPRINT_LENGTH = 120;
 const DEFAULT_SEQUENCE_WINDOW = 16;
@@ -422,7 +424,7 @@ export function fingerprintToolArgs(args: unknown, maxChars = 200): string {
 		serialized = String(args);
 	}
 	if (serialized.length <= maxChars) return serialized;
-	return `${serialized.slice(0, maxChars)}…`;
+	return `${sliceSafe(serialized, 0, maxChars)}…`;
 }
 
 /**
@@ -505,7 +507,7 @@ function stableStringify(value: unknown, stringValueCap = STRING_VALUE_CAP): str
 	const visit = (input: unknown): unknown => {
 		if (input === null || typeof input !== "object") {
 			if (typeof input === "string" && input.length > stringValueCap) {
-				return `${input.slice(0, stringValueCap)}…`;
+				return `${sliceSafe(input, 0, stringValueCap)}…`;
 			}
 			return input;
 		}

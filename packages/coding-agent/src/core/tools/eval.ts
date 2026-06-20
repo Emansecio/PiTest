@@ -7,6 +7,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import { getCurrentEvalKernelManager } from "../eval-kernel/index.ts";
 import type { EvalLang, EvalResult } from "../eval-kernel/types.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -118,7 +119,7 @@ export function createEvalToolDefinition(
 			const lang = str(args?.lang) || "?";
 			const code = str(args?.code) || "";
 			const firstLine = code.split(/\r?\n/, 1)[0] ?? "";
-			const display = firstLine.length > 70 ? `${firstLine.slice(0, 69)}…` : firstLine;
+			const display = firstLine.length > 70 ? `${sliceSafe(firstLine, 0, 69)}…` : firstLine;
 			text.setText(
 				`${theme.fg("toolTitle", theme.bold("eval"))} ${theme.fg("accent", `[${lang}]`)} ${theme.fg(
 					"toolOutput",
