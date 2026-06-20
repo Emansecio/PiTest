@@ -686,9 +686,9 @@ function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): Sto
 		case "in_progress":
 		case "queued":
 			return "stop";
-		default: {
-			const _exhaustive: never = status;
-			throw new Error(`Unhandled stop reason: ${_exhaustive}`);
-		}
+		// `status` is server-supplied at runtime; a forward-compat lifecycle
+		// state outside the SDK union must degrade gracefully, not throw.
+		default:
+			return "stop";
 	}
 }

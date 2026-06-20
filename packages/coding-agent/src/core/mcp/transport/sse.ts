@@ -258,6 +258,10 @@ export class SseTransport implements McpTransport {
 				return inline;
 			}
 		}
+		// We are not using the POST body inline (non-JSON 2xx, or JSON whose id
+		// did not match). Cancel any undrained body so the socket is released
+		// back to the undici pool (same leak http.ts notify() guards against).
+		await postResp.body?.cancel().catch(() => {});
 		return responsePromise;
 	}
 

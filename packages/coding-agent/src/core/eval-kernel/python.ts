@@ -47,6 +47,11 @@ interface PendingCall {
 	// sentinel split across two chunks is still matched.
 	stdoutSearch: number;
 	stderrSearch: number;
+	// Index to resume the cap-scan's sentinel search from, mirroring stdout/stderrSearch.
+	// payloadLength would otherwise indexOf(sentinel) from 0 on every chunk (O(n²)); we
+	// advance these incrementally on the no-sentinel path so the cap stays O(n) overall.
+	stdoutCapScan: number;
+	stderrCapScan: number;
 	stdoutDone: boolean;
 	stderrDone: boolean;
 	timer: NodeJS.Timeout | undefined;
@@ -157,23 +162,31 @@ class PythonKernel implements EvalKernel {
 		c.stderrSearch = Math.max(0, c.stderrBuf.length - c.sentinel.length + 1);
 	}
 
-	// Length of a buffer counting only the payload BEFORE the sentinel. Once the
-	// sentinel has landed the call is finished, so its trailing bytes (sentinel +
-	// any post-sentinel noise) must not count toward the runaway cap. When the
-	// sentinel is split across chunks, the partial sentinel prefix is sitting at the
-	// tail of the buffer not yet matchable by indexOf — discount the longest such
-	// trailing prefix so an in-flight sentinel can't push a completed call over the
-	// cap. The discount is bounded by sentinel.length, so a genuine runaway (which
-	// never emits the sentinel) trips at most ~46 bytes later — negligible.
-	private payloadLength(buf: string, sentinel: string): number {
-		const idx = buf.indexOf(sentinel);
-		if (idx >= 0) return idx;
+	// Length of a buffer counting only the payload BEFORE the sentinel, plus the
+	// position to resume the next search from. Once the sentinel has landed the call
+	// is finished, so its trailing bytes (sentinel + any post-sentinel noise) must
+	// not count toward the runaway cap. When the sentinel is split across chunks, the
+	// partial sentinel prefix is sitting at the tail of the buffer not yet matchable
+	// by indexOf — discount the longest such trailing prefix so an in-flight sentinel
+	// can't push a completed call over the cap. The discount is bounded by
+	// sentinel.length, so a genuine runaway (which never emits the sentinel) trips at
+	// most ~46 bytes later — negligible.
+	//
+	// `scannedUpTo` is the resume index from the previous call: indexOf starts
+	// (sentinel.length - 1) behind it so a sentinel split across two chunks is still
+	// matched, instead of re-scanning the whole buffer from 0 every chunk (O(n²)).
+	private payloadLength(buf: string, sentinel: string, scannedUpTo: number): { length: number; scan: number } {
+		const from = Math.max(0, Math.min(scannedUpTo, buf.length) - sentinel.length + 1);
+		const idx = buf.indexOf(sentinel, from);
+		if (idx >= 0) return { length: idx, scan: idx };
 		// Longest suffix of buf that is a prefix of sentinel (a possible split sentinel).
 		const maxK = Math.min(sentinel.length - 1, buf.length);
 		for (let k = maxK; k > 0; k--) {
-			if (buf.endsWith(sentinel.slice(0, k))) return buf.length - k;
+			if (buf.endsWith(sentinel.slice(0, k))) {
+				return { length: buf.length - k, scan: Math.max(0, buf.length - sentinel.length + 1) };
+			}
 		}
-		return buf.length;
+		return { length: buf.length, scan: Math.max(0, buf.length - sentinel.length + 1) };
 	}
 
 	// Kill the runaway process when combined output exceeds the cap. Returns true
@@ -185,7 +198,11 @@ class PythonKernel implements EvalKernel {
 		// raw length over the limit and kill a call that actually finished, wiping the
 		// whole kernel. Scanning to the sentinel first keeps the cap honest: a true
 		// runaway never reaches the finally that emits the sentinel, so it still trips.
-		const effective = this.payloadLength(c.stdoutBuf, c.sentinel) + this.payloadLength(c.stderrBuf, c.sentinel);
+		const out = this.payloadLength(c.stdoutBuf, c.sentinel, c.stdoutCapScan);
+		const err = this.payloadLength(c.stderrBuf, c.sentinel, c.stderrCapScan);
+		c.stdoutCapScan = out.scan;
+		c.stderrCapScan = err.scan;
+		const effective = out.length + err.length;
 		if (effective <= this.maxOutputBytes) return false;
 		const proc = this.proc;
 		recordDiagnostic({
@@ -289,6 +306,8 @@ class PythonKernel implements EvalKernel {
 			stderrBuf: "",
 			stdoutSearch: 0,
 			stderrSearch: 0,
+			stdoutCapScan: 0,
+			stderrCapScan: 0,
 			stdoutDone: false,
 			stderrDone: false,
 			timer: undefined,

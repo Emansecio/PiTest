@@ -280,6 +280,15 @@ export class ArminComponent implements Component {
 				}
 			}
 
+			// Empty column: no pixel can ever settle here, so mark it done
+			// immediately. Otherwise targetRow stays -1, the settle branch below
+			// never fires, drop.settled never reaches DISPLAY_HEIGHT, and
+			// allSettled is permanently false (animation ticker leaks forever).
+			if (targetRow < 0) {
+				drop.settled = DISPLAY_HEIGHT;
+				continue;
+			}
+
 			// Move drop down
 			drop.y++;
 

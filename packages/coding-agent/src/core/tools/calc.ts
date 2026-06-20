@@ -190,9 +190,16 @@ const FUNCS: Record<string, { arity: number | [number, number]; fn: Fn }> = {
 
 class Parser {
 	private pos = 0;
+	private depth = 0;
 	private readonly toks: Tok[];
 	constructor(toks: Tok[]) {
 		this.toks = toks;
+	}
+	private enter(): void {
+		this.depth++;
+		if (this.depth > MAX_PARSE_DEPTH) {
+			throw new CalcError("Expression nesting too deep for calc; use a general-purpose evaluator (eval) or bash.");
+		}
 	}
 	private peek(): Tok {
 		return this.toks[this.pos]!;
@@ -219,13 +226,18 @@ class Parser {
 
 	// expr := term ( (+|-) term )*
 	private expr(): number {
-		let left = this.term();
-		while (this.peek().kind === "plus" || this.peek().kind === "minus") {
-			const op = this.eat().kind;
-			const right = this.term();
-			left = op === "plus" ? left + right : left - right;
+		this.enter();
+		try {
+			let left = this.term();
+			while (this.peek().kind === "plus" || this.peek().kind === "minus") {
+				const op = this.eat().kind;
+				const right = this.term();
+				left = op === "plus" ? left + right : left - right;
+			}
+			return left;
+		} finally {
+			this.depth--;
 		}
-		return left;
 	}
 
 	// term := unary ( (*|/|%) unary )*
@@ -244,15 +256,20 @@ class Parser {
 	// unary := (+|-) unary | factor
 	// Unary sign binds LOOSER than exponentiation, matching math/Python: -2^2 = -(2^2).
 	private unary(): number {
-		if (this.peek().kind === "plus") {
-			this.eat();
-			return this.unary();
+		this.enter();
+		try {
+			if (this.peek().kind === "plus") {
+				this.eat();
+				return this.unary();
+			}
+			if (this.peek().kind === "minus") {
+				this.eat();
+				return -this.unary();
+			}
+			return this.factor();
+		} finally {
+			this.depth--;
 		}
-		if (this.peek().kind === "minus") {
-			this.eat();
-			return -this.unary();
-		}
-		return this.factor();
 	}
 
 	// factor := primary ( ^ unary )?    (right-assoc; exponent may carry a sign)
@@ -326,7 +343,16 @@ class Parser {
 	}
 }
 
+// Upper bound on input size and parser recursion. Both guard against
+// pathological inputs (deep nesting / long unary runs) that would otherwise
+// recurse one V8 stack frame per level and throw an opaque RangeError.
+const MAX_EXPRESSION_LENGTH = 10_000;
+const MAX_PARSE_DEPTH = 1000;
+
 function evaluate(expression: string): number {
+	if (expression.length > MAX_EXPRESSION_LENGTH) {
+		throw new CalcError("Expression too long for calc; use a general-purpose evaluator (eval) or bash.");
+	}
 	const toks = tokenize(expression);
 	if (toks.length === 1 && toks[0]!.kind === "eof") {
 		throw new CalcError("Empty expression.");

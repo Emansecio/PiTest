@@ -244,6 +244,14 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 	return stream;
 }
 
+// Frame budget (60fps) for re-parsing a streaming tool-call's accumulated
+// partial JSON. Re-parsing the full buffer on every delta is O(N*M) for a
+// tool call streamed in N chunks to a final size of M bytes; coalescing the
+// re-parse to at most once per frame keeps live UI reactivity while making the
+// streaming path effectively linear. The final, exact `arguments` value is
+// always produced from the complete buffer on `toolcall_end`.
+const TOOLCALL_PARSE_THROTTLE_MS = 16;
+
 /**
  * Process a proxy event and update the partial message.
  */
@@ -326,14 +334,24 @@ function processProxyEvent(
 				name: proxyEvent.toolName,
 				arguments: {},
 				partialJson: "",
-			} satisfies ToolCall & { partialJson: string } as ToolCall;
+				lastParseAt: 0,
+			} satisfies ToolCall & { partialJson: string; lastParseAt: number } as ToolCall;
 			return { type: "toolcall_start", contentIndex: proxyEvent.contentIndex, partial };
 
 		case "toolcall_delta": {
 			const content = partial.content[proxyEvent.contentIndex];
 			if (content?.type === "toolCall") {
-				(content as ToolCall & { partialJson: string }).partialJson += proxyEvent.delta;
-				content.arguments = parseStreamingJson((content as ToolCall & { partialJson: string }).partialJson) || {};
+				const carrier = content as ToolCall & { partialJson: string; lastParseAt: number };
+				carrier.partialJson += proxyEvent.delta;
+				// Re-parsing the full accumulated buffer on every delta is O(N*M).
+				// Coalesce to at most once per frame; the intermediate `arguments`
+				// value only drives live UI reactivity, and `toolcall_end` always
+				// produces the exact final value from the complete buffer.
+				const now = performance.now();
+				if (now - carrier.lastParseAt >= TOOLCALL_PARSE_THROTTLE_MS) {
+					carrier.lastParseAt = now;
+					content.arguments = parseStreamingJson(carrier.partialJson) || {};
+				}
 				partial.content[proxyEvent.contentIndex] = { ...content }; // Trigger reactivity
 				return {
 					type: "toolcall_delta",
@@ -348,7 +366,14 @@ function processProxyEvent(
 		case "toolcall_end": {
 			const content = partial.content[proxyEvent.contentIndex];
 			if (content?.type === "toolCall") {
-				delete (content as ToolCall & { partialJson?: string }).partialJson;
+				const carrier = content as ToolCall & { partialJson?: string; lastParseAt?: number };
+				// Always produce the exact final arguments from the complete buffer,
+				// regardless of how the streaming re-parses were throttled above.
+				if (typeof carrier.partialJson === "string") {
+					content.arguments = parseStreamingJson(carrier.partialJson) || {};
+				}
+				delete carrier.partialJson;
+				delete carrier.lastParseAt;
 				return {
 					type: "toolcall_end",
 					contentIndex: proxyEvent.contentIndex,

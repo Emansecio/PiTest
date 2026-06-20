@@ -181,6 +181,11 @@ export function createLsToolDefinition(
 						const BATCH_SIZE = 64;
 						const results: string[] = [];
 						for (let batchStart = 0; batchStart < entries.length; batchStart += BATCH_SIZE) {
+							if (signal?.aborted) {
+								signal?.removeEventListener("abort", onAbort);
+								reject(new Error("Operation aborted"));
+								return;
+							}
 							const batch = entries.slice(batchStart, batchStart + BATCH_SIZE);
 							const settled = await Promise.allSettled(
 								batch.map(async (entry) => {

@@ -92,7 +92,11 @@ export async function runHook(
 			if (resolved) return;
 			resolved = true;
 			if (timer) clearTimeout(timer);
-			if (killTimer) clearTimeout(killTimer);
+			// Do NOT clear killTimer here: on the timeout/abort paths kill() arms the
+			// SIGKILL escalation and finish() runs immediately after — clearing it would
+			// cancel the escalation the instant it is armed, orphaning a SIGTERM-ignoring
+			// child. The timer is unref()'d (won't keep the loop alive) and its callback
+			// no-ops once proc.killed. Only the genuine-exit path ('close') clears it.
 			if (options.signal) {
 				options.signal.removeEventListener("abort", abort);
 			}
@@ -122,7 +126,7 @@ export async function runHook(
 					}
 				}, 2000);
 				// Don't let the SIGKILL escalation timer keep the event loop alive after
-				// the process already exited; finish() also clears it on the happy path.
+				// the process already exited; the 'close' handler clears it on real exit.
 				killTimer.unref();
 			} catch {
 				/* ignore */
@@ -181,6 +185,10 @@ export async function runHook(
 		});
 
 		proc.on("close", (code) => {
+			// Genuine process exit — the SIGKILL escalation is no longer needed. This is
+			// the only place killTimer is cleared; finish() deliberately leaves it armed
+			// so a SIGTERM-ignoring child still gets force-killed on the timeout/abort path.
+			if (killTimer) clearTimeout(killTimer);
 			finish(code ?? 0, false);
 		});
 

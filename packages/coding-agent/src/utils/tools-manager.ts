@@ -256,19 +256,23 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 	mkdirSync(TOOLS_DIR, { recursive: true });
 
 	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
-	const archivePath = join(TOOLS_DIR, assetName);
 	const binaryExt = plat === "win32" ? ".exe" : "";
 	const binaryPath = join(TOOLS_DIR, config.binaryName + binaryExt);
+
+	// Use a unique per-call suffix for the archive and the staged binary. fd and rg
+	// downloads (and even two concurrent calls for the same tool before the cache is
+	// populated) can run at once during startup; sharing a fixed archivePath/binaryPath
+	// corrupts the archive bytes and races renameSync onto the same destination.
+	const uniqueSuffix = `${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+	const archivePath = join(TOOLS_DIR, `${assetName}.${uniqueSuffix}.part`);
+	const stagedBinaryPath = join(TOOLS_DIR, `${config.binaryName}${binaryExt}.${uniqueSuffix}.staged`);
 
 	// Download
 	await downloadFile(downloadUrl, archivePath);
 
 	// Extract into a unique temp directory. fd and rg downloads can run concurrently
 	// during startup, so sharing a fixed directory causes races.
-	const extractDir = join(
-		TOOLS_DIR,
-		`extract_tmp_${config.binaryName}_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
-	);
+	const extractDir = join(TOOLS_DIR, `extract_tmp_${config.binaryName}_${uniqueSuffix}`);
 	mkdirSync(extractDir, { recursive: true });
 
 	try {
@@ -291,19 +295,26 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 			extractedBinary = findBinaryRecursively(extractDir, binaryFileName) ?? undefined;
 		}
 
-		if (extractedBinary) {
-			renameSync(extractedBinary, binaryPath);
-		} else {
+		if (!extractedBinary) {
 			throw new Error(`Binary not found in archive: expected ${binaryFileName} under ${extractDir}`);
 		}
 
-		// Make executable (Unix only)
+		// Stage the extracted binary under a unique name, then atomically rename it
+		// onto the shared binaryPath. This keeps the final publish a single atomic
+		// rename instead of writing a shared destination mid-extraction, so two
+		// concurrent downloads for the same tool can't observe a half-written binary.
+		renameSync(extractedBinary, stagedBinaryPath);
+
+		// Make executable (Unix only) on the staged copy before publishing.
 		if (plat !== "win32") {
-			chmodSync(binaryPath, 0o755);
+			chmodSync(stagedBinaryPath, 0o755);
 		}
+
+		renameSync(stagedBinaryPath, binaryPath);
 	} finally {
 		// Cleanup
 		rmSync(archivePath, { force: true });
+		rmSync(stagedBinaryPath, { force: true });
 		rmSync(extractDir, { recursive: true, force: true });
 	}
 
@@ -317,6 +328,11 @@ const TERMUX_PACKAGES: Record<string, string> = {
 };
 
 const ensureToolCache = new Map<string, string>();
+// In-flight downloads keyed by tool. Concurrent ensureTool() calls for the same tool
+// (e.g. interactive startup priming fd/rg while a find/grep tool independently calls
+// ensureTool before the cache is populated) must share a single download instead of
+// racing two downloadTool() runs onto the same archive/binary paths.
+const inflightDownloads = new Map<string, Promise<string | undefined>>();
 
 // Ensure a tool is available, downloading if necessary
 // Returns the path to the tool, or null if unavailable
@@ -329,6 +345,10 @@ export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Pr
 		ensureToolCache.set(tool, existingPath);
 		return existingPath;
 	}
+
+	// If a download for this tool is already running, await it instead of starting another.
+	const inflight = inflightDownloads.get(tool);
+	if (inflight) return inflight;
 
 	const config = TOOLS[tool];
 	if (!config) return undefined;
@@ -355,17 +375,24 @@ export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Pr
 		console.log(chalk.dim(`${config.name} not found. Downloading...`));
 	}
 
-	try {
-		const path = await downloadTool(tool);
-		if (!silent) {
-			console.log(chalk.dim(`${config.name} installed to ${path}`));
+	const downloadPromise = (async (): Promise<string | undefined> => {
+		try {
+			const path = await downloadTool(tool);
+			if (!silent) {
+				console.log(chalk.dim(`${config.name} installed to ${path}`));
+			}
+			ensureToolCache.set(tool, path);
+			return path;
+		} catch (e) {
+			if (!silent) {
+				console.log(chalk.yellow(`Failed to download ${config.name}: ${e instanceof Error ? e.message : e}`));
+			}
+			return undefined;
+		} finally {
+			inflightDownloads.delete(tool);
 		}
-		ensureToolCache.set(tool, path);
-		return path;
-	} catch (e) {
-		if (!silent) {
-			console.log(chalk.yellow(`Failed to download ${config.name}: ${e instanceof Error ? e.message : e}`));
-		}
-		return undefined;
-	}
+	})();
+
+	inflightDownloads.set(tool, downloadPromise);
+	return downloadPromise;
 }

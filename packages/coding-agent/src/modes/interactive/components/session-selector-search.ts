@@ -28,6 +28,14 @@ function normalizeWhitespaceLower(text: string): string {
 const searchTextCache = new WeakMap<SessionInfo, string>();
 const normalizedTextCache = new WeakMap<SessionInfo, string>();
 
+// Cap the text length a user-supplied regex is executed against. Session
+// `allMessagesText` can be very large, and a pathological pattern (e.g.
+// `re:(a+)+$`) triggers catastrophic backtracking that synchronously freezes
+// the TUI input/render loop on every keystroke. Bounding the input length
+// keeps the worst-case match time linear-ish without changing results for
+// realistic patterns (which match well within this window).
+const REGEX_SEARCH_TEXT_CAP = 50_000;
+
 function getSessionSearchText(session: SessionInfo): string {
 	const cached = searchTextCache.get(session);
 	if (cached !== undefined) return cached;
@@ -137,7 +145,8 @@ export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): M
 		if (!parsed.regex) {
 			return { matches: false, score: 0 };
 		}
-		const idx = text.search(parsed.regex);
+		const searchText = text.length > REGEX_SEARCH_TEXT_CAP ? text.slice(0, REGEX_SEARCH_TEXT_CAP) : text;
+		const idx = searchText.search(parsed.regex);
 		if (idx < 0) return { matches: false, score: 0 };
 		return { matches: true, score: idx * 0.1 };
 	}

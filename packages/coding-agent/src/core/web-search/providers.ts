@@ -67,6 +67,10 @@ async function fetchJson(url: string, init: RequestInit, signal?: AbortSignal): 
 					Number.isFinite(retryAfter) && retryAfter > 0
 						? Math.min(retryAfter * 1000, RETRY_MAX_MS)
 						: Math.min(RETRY_BASE_MS * 2 ** attempt, RETRY_MAX_MS);
+				// Discard the 429 body so undici releases the socket back to the pool
+				// immediately instead of holding it open across the backoff window
+				// until GC reclaims the undrained response stream.
+				await res.body?.cancel().catch(() => {});
 			} else {
 				if (!res.ok) {
 					const text = await res.text().catch(() => "");

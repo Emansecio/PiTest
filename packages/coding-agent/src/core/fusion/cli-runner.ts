@@ -516,7 +516,7 @@ function readCodexOut(outFile: string): string {
 const STREAM_TAIL_BYTES = 8192;
 function appendTail(buf: string, chunk: string): string {
 	const next = buf + chunk;
-	return next.length > STREAM_TAIL_BYTES ? next.slice(-STREAM_TAIL_BYTES) : next;
+	return next.length > STREAM_TAIL_BYTES ? sliceSafe(next, next.length - STREAM_TAIL_BYTES) : next;
 }
 
 let _tag = 0;

@@ -16,6 +16,7 @@ import type {
 	ImagesOptions,
 	TextContent,
 } from "../../types.ts";
+import { createClientCache } from "../../utils/client-cache.ts";
 import { headersToRecord } from "../../utils/headers.ts";
 import { sanitizeSurrogates } from "../../utils/sanitize-unicode.ts";
 
@@ -104,12 +105,16 @@ export const generateImagesOpenRouter: ImagesFunction<"openrouter-images", Image
 	}
 };
 
+// Reuse OpenAI SDK clients across image requests to keep the HTTP connection pool alive.
+// Keyed by full config (apiKey + baseURL + headers) so credentials/headers are never stale.
+const clientCache = createClientCache<OpenAI>();
+
 function createClient(
 	model: ImagesModel<"openrouter-images">,
 	apiKey: string,
 	optionsHeaders?: Record<string, string>,
 ): OpenAI {
-	return new OpenAI({
+	const config = {
 		apiKey,
 		baseURL: model.baseUrl,
 		dangerouslyAllowBrowser: true,
@@ -117,7 +122,8 @@ function createClient(
 			...model.headers,
 			...optionsHeaders,
 		},
-	});
+	};
+	return clientCache.getOrCreate(config, () => new OpenAI(config));
 }
 
 type OpenRouterImagesCreateParams = Omit<ChatCompletionCreateParamsNonStreaming, "modalities"> & {

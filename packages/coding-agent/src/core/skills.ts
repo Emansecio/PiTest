@@ -191,12 +191,19 @@ export function loadSkillsFromDir(options: LoadSkillsFromDirOptions): LoadSkills
 	return loadSkillsFromDirInternal(dir, source, true);
 }
 
+// Belt-and-suspenders cap on how deep the recursive skill walk can descend.
+// The visited-set cycle guard already terminates symlink loops; this bounds
+// pathological-but-acyclic deep trees as well.
+const MAX_SKILL_WALK_DEPTH = 32;
+
 function loadSkillsFromDirInternal(
 	dir: string,
 	source: string,
 	includeRootFiles: boolean,
 	ignoreMatcher?: IgnoreMatcher,
 	rootDir?: string,
+	visited?: Set<string>,
+	depth: number = 0,
 ): LoadSkillsResult {
 	const skills: Skill[] = [];
 	const diagnostics: ResourceDiagnostic[] = [];
@@ -204,6 +211,15 @@ function loadSkillsFromDirInternal(
 	if (!existsSync(dir)) {
 		return { skills, diagnostics };
 	}
+
+	if (depth > MAX_SKILL_WALK_DEPTH) {
+		return { skills, diagnostics };
+	}
+
+	// Track canonical directory paths already walked so a symlink/junction cycle
+	// (e.g. skills/loop -> skills) terminates instead of recursing forever.
+	const seen = visited ?? new Set<string>();
+	seen.add(canonicalizePath(dir));
 
 	const root = rootDir ?? dir;
 	const ig = ignoreMatcher ?? ignore();
@@ -274,7 +290,14 @@ function loadSkillsFromDirInternal(
 			}
 
 			if (isDirectory) {
-				const subResult = loadSkillsFromDirInternal(fullPath, source, false, ig, root);
+				// Skip directories we have already walked (resolved through any
+				// symlink/junction) to break cycles before recursing.
+				const canonicalChild = canonicalizePath(fullPath);
+				if (seen.has(canonicalChild)) {
+					continue;
+				}
+				seen.add(canonicalChild);
+				const subResult = loadSkillsFromDirInternal(fullPath, source, false, ig, root, seen, depth + 1);
 				skills.push(...subResult.skills);
 				diagnostics.push(...subResult.diagnostics);
 				continue;

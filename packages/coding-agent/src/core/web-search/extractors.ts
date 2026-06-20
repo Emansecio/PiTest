@@ -7,6 +7,13 @@
 
 const MAX_BYTES = 4096;
 const FETCH_TIMEOUT_MS = 10_000;
+/**
+ * Hard ceiling on the raw response body read before markdown conversion.
+ * The final markdown is capped at MAX_BYTES (4KB); this bounds both the
+ * resident string size and the regex backtracking work in htmlToMarkdown()
+ * over attacker-influenced result URLs, while leaving ample headroom.
+ */
+const MAX_FETCH_BYTES = 512 * 1024;
 
 export interface ExtractedContent {
 	markdown: string;
@@ -99,6 +106,34 @@ function combineSignals(timeoutMs: number, signal?: AbortSignal): { signal: Abor
 	};
 }
 
+async function readCapped(res: Response, maxBytes: number): Promise<string> {
+	const body = res.body;
+	if (!body) {
+		const text = await res.text();
+		return text.length > maxBytes ? text.slice(0, maxBytes) : text;
+	}
+	const reader = body.getReader();
+	const decoder = new TextDecoder("utf-8");
+	let out = "";
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!value) continue;
+			const remaining = maxBytes - total;
+			const chunk = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+			out += decoder.decode(chunk, { stream: true });
+			total += chunk.byteLength;
+			if (total >= maxBytes) break;
+		}
+		out += decoder.decode();
+	} finally {
+		await reader.cancel().catch(() => {});
+	}
+	return out;
+}
+
 async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
 	const { signal: combined, cancel } = combineSignals(FETCH_TIMEOUT_MS, signal);
 	try {
@@ -112,7 +147,7 @@ async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
 		if (!res.ok) {
 			throw new Error(`HTTP ${res.status} ${res.statusText}`);
 		}
-		return await res.text();
+		return await readCapped(res, MAX_FETCH_BYTES);
 	} finally {
 		cancel();
 	}

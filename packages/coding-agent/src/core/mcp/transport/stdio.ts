@@ -182,7 +182,13 @@ export class StdioTransport implements McpTransport {
 			this.isReading = false;
 		}
 		// A chunk may have arrived after the last parse but before the flag cleared.
-		if (this.pendingChunks.length > 0 || parseContentLengthFrame(this.buffer)) this.drain();
+		// The `while` loop above already drained every complete frame out of
+		// `this.buffer` (its exit condition is `parseContentLengthFrame` returning
+		// falsy), and no new bytes can enter `this.buffer` without first arriving as
+		// a pending chunk and being coalesced at the top of drain(). So a fresh chunk
+		// is the only thing that can produce more work — re-checking the buffer here
+		// would be a redundant O(n) header scan.
+		if (this.pendingChunks.length > 0) this.drain();
 	}
 
 	private routeMessage(json: unknown): void {

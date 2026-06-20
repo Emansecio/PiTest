@@ -79,6 +79,18 @@ export function quarantineWindowsNativeDependencies(packageDir: string): void {
 		const quarantinePath = join(quarantineRunDir, relative(resolvedPackageDir, loadedFile));
 		mkdirSync(dirname(quarantinePath), { recursive: true });
 		renameSync(loadedFile, quarantinePath);
-		copyFileSync(quarantinePath, loadedFile);
+		try {
+			copyFileSync(quarantinePath, loadedFile);
+		} catch (error) {
+			// The live DLL was moved into quarantine but the restoring copy failed
+			// (disk full, EACCES, antivirus lock, ...). Roll the original file back
+			// so a partial quarantine never leaves a native dependency missing.
+			try {
+				renameSync(quarantinePath, loadedFile);
+			} catch {
+				// Rollback itself failed; surface the original copy failure below.
+			}
+			throw error;
+		}
 	}
 }

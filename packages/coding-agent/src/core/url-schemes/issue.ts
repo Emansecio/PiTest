@@ -20,8 +20,12 @@ const GH_AUTH_HINT = "gh CLI is installed but not authenticated. Run: gh auth lo
 
 type GhAuthStatus = "ok" | "unauthenticated" | "not-installed";
 
-// Module-level cache: undefined = unchecked.
+// Module-level cache. Only the positive ("ok") result is memoized permanently;
+// negative results carry a short TTL so they self-heal once gh becomes
+// installed/authenticated mid-session (no agent restart required).
+const GH_AUTH_NEGATIVE_TTL_MS = 30_000;
 let ghAuthCache: GhAuthStatus | undefined;
+let ghAuthCacheExpiry = 0;
 
 function probeGhAuth(cwd: string): Promise<GhAuthStatus> {
 	return new Promise((resolve) => {
@@ -40,9 +44,17 @@ function probeGhAuth(cwd: string): Promise<GhAuthStatus> {
 }
 
 async function ensureGhAuth(cwd: string): Promise<GhAuthStatus> {
-	if (ghAuthCache !== undefined) return ghAuthCache;
-	ghAuthCache = await probeGhAuth(cwd);
-	return ghAuthCache;
+	if (ghAuthCache === "ok") return ghAuthCache;
+	if (ghAuthCache !== undefined && Date.now() < ghAuthCacheExpiry) return ghAuthCache;
+	const status = await probeGhAuth(cwd);
+	ghAuthCache = status;
+	ghAuthCacheExpiry = status === "ok" ? 0 : Date.now() + GH_AUTH_NEGATIVE_TTL_MS;
+	return status;
+}
+
+function invalidateGhAuthCache(): void {
+	ghAuthCache = undefined;
+	ghAuthCacheExpiry = 0;
 }
 
 function looksLikeAuthError(stderr: string): boolean {
@@ -165,9 +177,16 @@ export function createIssueSchemeResolver(): UrlSchemeResolver {
 				[...repoArgs, "issue", "view", parsed.number, "--json", "title,body,state,labels,comments"],
 				ctx,
 			);
-			if ("notInstalled" in res) return { kind: "error", error: GH_INSTALL_HINT };
+			if ("notInstalled" in res) {
+				invalidateGhAuthCache();
+				return { kind: "error", error: GH_INSTALL_HINT };
+			}
 			if (res.code !== 0) {
-				if (looksLikeAuthError(res.stderr)) return { kind: "error", error: GH_AUTH_HINT };
+				if (looksLikeAuthError(res.stderr)) {
+					// Auth dropped after a previously-cached "ok"; force a re-probe next read.
+					invalidateGhAuthCache();
+					return { kind: "error", error: GH_AUTH_HINT };
+				}
 				return {
 					kind: "error",
 					error: `gh issue view #${parsed.number} failed: ${res.stderr.trim() || res.stdout.trim()}`,

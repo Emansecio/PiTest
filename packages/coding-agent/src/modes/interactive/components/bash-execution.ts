@@ -130,6 +130,20 @@ export class BashExecutionComponent extends MessageShell {
 			this.outputLines.splice(0, this.outputLines.length - OUTPUT_LINES_CAP);
 		}
 
+		// The line-count cap above does nothing when the stream emits no newlines
+		// (e.g. `yes | tr -d '\n'`, a \r-redrawing progress bar, a binary blob):
+		// every chunk lands in the `newLines.length === 1` continuation branch, so
+		// outputLines stays length 1 and that single string grows for the whole
+		// lifetime of the stream → OOM, plus updateDisplay() re-scans the giant line
+		// each chunk → O(n²). Bound the trailing element to DEFAULT_MAX_BYTES by
+		// trimming its head. truncateTail() in updateDisplay() already keeps only the
+		// trailing DEFAULT_MAX_BYTES of the visible/context content, so head-trimming
+		// is byte-identical for both; the full output is persisted on disk.
+		const lastIdx = this.outputLines.length - 1;
+		if (lastIdx >= 0 && this.outputLines[lastIdx].length > DEFAULT_MAX_BYTES) {
+			this.outputLines[lastIdx] = this.outputLines[lastIdx].slice(-DEFAULT_MAX_BYTES);
+		}
+
 		this.outputVersion++;
 		this.updateDisplay();
 	}

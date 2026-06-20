@@ -328,9 +328,11 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case FinishReason.UNEXPECTED_TOOL_CALL:
 		case FinishReason.NO_IMAGE:
 			return "error";
-		default: {
-			const _exhaustive: never = reason;
-			throw new Error(`Unhandled stop reason: ${_exhaustive}`);
-		}
+		default:
+			// A finishReason value not present in the bundled @google/genai
+			// enum (e.g. a newer server-side reason the SDK lags behind) must
+			// degrade gracefully instead of throwing and turning a normally
+			// finished stream into a hard error.
+			return "error";
 	}
 }

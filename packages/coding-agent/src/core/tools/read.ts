@@ -661,6 +661,11 @@ Common mistakes to avoid:
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							let content: (TextContent | ImageContent)[];
 							let details: ReadToolDetails | undefined;
+							// Captured on the text path; the mtime baseline is committed to the
+							// shared per-session store only just before resolve() (after the final
+							// abort guard), so an aborted read whose result is discarded never
+							// poisons the baseline a later edit/write compares against.
+							let pendingMtime: number | undefined;
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
 							if (mimeType) {
 								// Read image as binary.
@@ -706,10 +711,12 @@ Common mistakes to avoid:
 								// size-gated. Reused by the streaming branch below.
 								const preReadStat = ops.stat ? await ops.stat(absolutePath) : undefined;
 								if (aborted) return;
-								// Record the on-disk mtime so a later edit/write can warn if the file
-								// changes externally before the model acts on what it read here.
+								// Capture the on-disk mtime so a later edit/write can warn if the file
+								// changes externally before the model acts on what it read here. The
+								// commit into the shared store is deferred to just before resolve() so an
+								// aborted read (whose result is discarded) never poisons the baseline.
 								if (mtimeStore && preReadStat?.mtimeMs !== undefined) {
-									mtimeStore.set(absolutePath, preReadStat.mtimeMs);
+									pendingMtime = preReadStat.mtimeMs;
 								}
 								// crushJson buffers the whole file, but refuses to parse above
 								// JSON_CRUSH_MAX_BYTES (it returns undefined and the caller blind-cuts).
@@ -740,6 +747,12 @@ Common mistakes to avoid:
 											const note = formatBinaryFileNote(absolutePath, fileStat.size);
 											content = [{ type: "text", text: note }];
 											if (aborted) return;
+											// Commit the captured mtime baseline only now (post abort-guard), so an
+											// aborted read never poisons shared session state (parity with the
+											// deferred commit on the main text path below).
+											if (mtimeStore && pendingMtime !== undefined) {
+												mtimeStore.set(absolutePath, pendingMtime);
+											}
 											signal?.removeEventListener("abort", onAbort);
 											resolve({ content, details: undefined });
 											return;
@@ -779,6 +792,12 @@ Common mistakes to avoid:
 										});
 										const note = `[notebook ${path}: ${formatSize(preReadStat.size)} exceeds ${formatSize(streamingMinBytes)} — read with offset/limit (cells) to page through it, or use grep/bash jq to locate content]`;
 										if (aborted) return;
+										// Commit the captured mtime baseline only now (post abort-guard), so an
+										// aborted read never poisons shared session state (parity with the
+										// deferred commit on the main text path below).
+										if (mtimeStore && pendingMtime !== undefined) {
+											mtimeStore.set(absolutePath, pendingMtime);
+										}
 										signal?.removeEventListener("abort", onAbort);
 										resolve({ content: [{ type: "text", text: note } as TextContent], details: undefined });
 										return;
@@ -793,6 +812,12 @@ Common mistakes to avoid:
 										const note = formatBinaryFileNote(absolutePath, buffer.length);
 										content = [{ type: "text", text: note }];
 										if (aborted) return;
+										// Commit the captured mtime baseline only now (post abort-guard), so an
+										// aborted read never poisons shared session state (parity with the
+										// deferred commit on the main text path below).
+										if (mtimeStore && pendingMtime !== undefined) {
+											mtimeStore.set(absolutePath, pendingMtime);
+										}
 										signal?.removeEventListener("abort", onAbort);
 										resolve({ content, details: undefined });
 										return;
@@ -817,6 +842,12 @@ Common mistakes to avoid:
 											}
 											content = [{ type: "text", text: outputText }];
 											if (aborted) return;
+											// Commit the captured mtime baseline only now (post abort-guard), so an
+											// aborted read never poisons shared session state (parity with the
+											// deferred commit on the main text path below).
+											if (mtimeStore && pendingMtime !== undefined) {
+												mtimeStore.set(absolutePath, pendingMtime);
+											}
 											signal?.removeEventListener("abort", onAbort);
 											resolve({ content, details: undefined });
 											return;
@@ -953,6 +984,12 @@ Common mistakes to avoid:
 							}
 
 							if (aborted) return;
+							// Read completed and is about to reach the model: now it is safe to
+							// commit the mtime baseline into shared session state (mirrors the
+							// dedupe-store guard above — never mutate on an aborted read).
+							if (mtimeStore && pendingMtime !== undefined) {
+								mtimeStore.set(absolutePath, pendingMtime);
+							}
 							signal?.removeEventListener("abort", onAbort);
 							resolve({ content, details });
 						} catch (error: any) {

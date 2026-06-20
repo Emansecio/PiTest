@@ -1048,7 +1048,11 @@ async function decodeWebSocketData(data: unknown): Promise<string | null> {
 	return null;
 }
 
-async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): AsyncGenerator<Record<string, unknown>> {
+async function* parseWebSocket(
+	socket: WebSocketLike,
+	signal?: AbortSignal,
+	idleMs: number = DEFAULT_IDLE_TIMEOUT_MS,
+): AsyncGenerator<Record<string, unknown>> {
 	const queue: Record<string, unknown>[] = [];
 	let pending: (() => void) | null = null;
 	let done = false;
@@ -1150,7 +1154,7 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 			let idleTimer: ReturnType<typeof setTimeout> | undefined;
 			const woke = await new Promise<boolean>((resolve) => {
 				pending = () => resolve(true);
-				idleTimer = setTimeout(() => resolve(false), DEFAULT_IDLE_TIMEOUT_MS);
+				idleTimer = setTimeout(() => resolve(false), idleMs);
 			});
 			if (idleTimer !== undefined) {
 				clearTimeout(idleTimer);
@@ -1161,7 +1165,7 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 				// error and no retry. Treat prolonged silence as a dead socket and surface a
 				// retryable error so the normal retry/fallback path takes over.
 				pending = null;
-				failed = new IdleStreamTimeoutError(DEFAULT_IDLE_TIMEOUT_MS);
+				failed = new IdleStreamTimeoutError(idleMs);
 				done = true;
 				break;
 			}
@@ -1300,7 +1304,7 @@ async function processWebSocketStream(
 		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
-				mapCodexEvents(parseWebSocket(socket, options?.signal)),
+				mapCodexEvents(parseWebSocket(socket, options?.signal, options?.idleTimeoutMs)),
 				output,
 				stream,
 				onStart,
