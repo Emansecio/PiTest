@@ -766,7 +766,6 @@ export function pruneOldToolOutputs(
 				// Tool outputs are dense (JSON/code), use dense divisor
 				const est = estimateTextTokens(block.text, true);
 				if (est > tokenThreshold) {
-					prunedTokens += est;
 					// store.put writes to disk (writeFileSync). A disk-full/permission error
 					// must degrade to the in-message head+tail excerpt rather than abort the
 					// turn that awaits this prune.
@@ -779,12 +778,18 @@ export function pruneOldToolOutputs(
 						}
 					}
 					if (id !== undefined) {
+						// The block collapses to a tiny placeholder — the full estimate is reclaimed.
+						prunedTokens += est;
 						(msg.content[b] as any).text =
 							`[Tool output deferred (~${est} tokens) — id=${id}. Retrieve with recall_tool_output({ id: "${id}" }) if needed.]`;
 					} else {
 						// No store, or the deferred write failed: keep the output's shape
-						// (head + tail) instead of discarding it.
-						(msg.content[b] as any).text = headTailExcerpt(block.text);
+						// (head + tail) instead of discarding it. The excerpt still retains a
+						// non-trivial head+tail, so only the delta is actually reclaimed —
+						// mirror the mutation-args accounting (before - after) above.
+						const excerpt = headTailExcerpt(block.text);
+						(msg.content[b] as any).text = excerpt;
+						prunedTokens += Math.max(0, est - estimateTextTokens(excerpt, true));
 					}
 				}
 			}

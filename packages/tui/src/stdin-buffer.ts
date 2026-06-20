@@ -258,12 +258,20 @@ function extractCompleteSequences(buffer: string): { sequences: string[]; remain
 			// UTF-16 surrogate PAIR (two code units); emit the whole pair as one
 			// sequence so downstream key matching never sees a lone surrogate.
 			const code = remaining.charCodeAt(0);
-			if (code >= 0xd800 && code <= 0xdbff && remaining.length > 1) {
-				const low = remaining.charCodeAt(1);
-				if (low >= 0xdc00 && low <= 0xdfff) {
-					sequences.push(remaining.slice(0, 2));
-					pos += 2;
-					continue;
+			if (code >= 0xd800 && code <= 0xdbff) {
+				if (remaining.length > 1) {
+					const low = remaining.charCodeAt(1);
+					if (low >= 0xdc00 && low <= 0xdfff) {
+						sequences.push(remaining.slice(0, 2));
+						pos += 2;
+						continue;
+					}
+				} else {
+					// Lone high surrogate at the buffer tail: its low surrogate may
+					// still be arriving in the next chunk. Hold it as the remainder so
+					// the pair is reassembled and emitted whole, instead of emitting a
+					// lone surrogate now and another lone surrogate next chunk.
+					return { sequences, remainder: remaining };
 				}
 			}
 			sequences.push(remaining[0]!);

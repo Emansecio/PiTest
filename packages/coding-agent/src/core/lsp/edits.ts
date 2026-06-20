@@ -163,8 +163,20 @@ export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Prom
 					await flushUri(createOp.uri);
 					const filePath = uriToFile(createOp.uri);
 					await fs.mkdir(path.dirname(filePath), { recursive: true });
-					await fs.writeFile(filePath, "", "utf-8");
-					applied.push(`Created ${formatPathRelativeToCwd(filePath, cwd)}`);
+					// Per LSP §3.16, `create` must not clobber an existing file unless
+					// `overwrite:true`. With the default options (overwrite unset) or
+					// `ignoreIfExists`, an already-present file is left untouched and the
+					// op is a no-op — only write when absent or explicitly overwriting.
+					const exists = await fs
+						.access(filePath)
+						.then(() => true)
+						.catch(() => false);
+					if (exists && createOp.options?.overwrite !== true) {
+						applied.push(`Skipped create of existing ${formatPathRelativeToCwd(filePath, cwd)}`);
+					} else {
+						await fs.writeFile(filePath, "", "utf-8");
+						applied.push(`Created ${formatPathRelativeToCwd(filePath, cwd)}`);
+					}
 				} else if (change.kind === "rename") {
 					const renameOp = change as RenameFile;
 					await flushSubtree(renameOp.oldUri);

@@ -94,11 +94,11 @@ export function substituteArgs(content: string, args: string[]): string {
 	// Pre-compute all args joined (optimization)
 	const allArgs = args.join(" ");
 
-	// Replace $ARGUMENTS with all args joined (new syntax, aligns with Claude, Codex, OpenCode)
-	result = result.replace(/\$ARGUMENTS/g, allArgs);
-
-	// Replace $@ with all args joined (existing syntax)
-	result = result.replace(/\$@/g, allArgs);
+	// Replace $ARGUMENTS (new syntax, aligns with Claude, Codex, OpenCode) and $@
+	// (existing syntax) with all args joined. A single combined pass ensures injected
+	// text is never re-scanned: an argument value containing a literal $@ injected by
+	// the $ARGUMENTS expansion must not be substituted a second time.
+	result = result.replace(/\$ARGUMENTS|\$@/g, () => allArgs);
 
 	return result;
 }

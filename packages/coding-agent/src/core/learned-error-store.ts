@@ -27,6 +27,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "../config.ts";
+import { sliceSafe } from "../utils/surrogate.ts";
 
 /** One entry per (tool, errorFingerprint) pair within a single session. */
 export interface LearnedErrorEntry {
@@ -215,11 +216,11 @@ export function normalizeErrorFingerprint(message: string | undefined, maxLength
 	const collapsed = message.replace(RE_WHITESPACE, " ").replace(RE_DIGITS, "N").trim();
 	if (collapsed.length === 0) return undefined;
 	if (collapsed.length <= maxLength) return collapsed;
-	return `${collapsed.slice(0, maxLength)}\u2026`;
+	return `${sliceSafe(collapsed, 0, maxLength)}\u2026`;
 }
 
 /** Truncate to {@link SAMPLE_TEXT_MAX_CHARS} for storage. */
 export function truncateErrorSample(text: string): string {
 	if (text.length <= SAMPLE_TEXT_MAX_CHARS) return text;
-	return `${text.slice(0, SAMPLE_TEXT_MAX_CHARS)}\u2026`;
+	return `${sliceSafe(text, 0, SAMPLE_TEXT_MAX_CHARS)}\u2026`;
 }

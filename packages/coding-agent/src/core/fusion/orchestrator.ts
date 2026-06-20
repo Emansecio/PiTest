@@ -36,15 +36,16 @@ export interface FusionTurnOutcome {
 export const delay = (ms: number, signal?: AbortSignal): Promise<void> =>
 	new Promise<void>((resolve) => {
 		if (ms <= 0) return resolve();
-		const t = setTimeout(resolve, ms);
-		signal?.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(t);
-				resolve();
-			},
-			{ once: true },
-		);
+		const onAbort = () => {
+			clearTimeout(t);
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		};
+		const t = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal?.addEventListener("abort", onAbort, { once: true });
 	});
 
 const EMPTY_ANALYSIS: JudgeAnalysis = {

@@ -317,11 +317,15 @@ export const defaultLivingRepoMapDeps: LivingRepoMapDeps = {
 /** Index one file (abs path) into an entry, or null if it has no symbols/unreadable. */
 function indexFile(cwd: string, relPath: string, deps: LivingRepoMapDeps): RepoMapEntry | null {
 	const abs = isAbsolute(relPath) ? relPath : join(cwd, relPath);
+	// Capture mtime BEFORE reading content so a write racing between the two
+	// makes the stored mtime strictly older than the file's real mtime, forcing
+	// a reindex next run instead of pairing the new mtime with stale symbols.
+	const mtimeMs = deps.statMtime(abs);
 	const content = deps.readFile(abs);
 	if (content === null) return null;
 	const symbols = deps.extractSymbols(content, abs);
 	if (symbols.length === 0) return null;
-	return { path: toRelKey(cwd, relPath), symbols, mtimeMs: deps.statMtime(abs) };
+	return { path: toRelKey(cwd, relPath), symbols, mtimeMs };
 }
 
 /** Build a fresh map from a full source-file walk (non-git / cold-start path). */

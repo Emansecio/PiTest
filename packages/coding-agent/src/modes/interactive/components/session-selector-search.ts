@@ -125,7 +125,7 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
 		};
 	}
 
-	flush(inQuote ? "phrase" : "fuzzy");
+	flush("fuzzy");
 
 	return { mode: "tokens", tokens, regex: null };
 }

@@ -185,7 +185,7 @@ export function createInspectImageToolDefinition(
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 			const path = str(args?.path) || "";
-			const display = path.length > 60 ? `…${path.slice(-59)}` : path;
+			const display = path.length > 60 ? `…${sliceSafe(path, path.length - 59)}` : path;
 			const question = str(args?.question) || "";
 			const qDisplay = question ? ` ${theme.fg("toolOutput", `(${sliceSafe(question, 0, 40)})`)}` : "";
 			text.setText(

@@ -2,6 +2,7 @@ import { basename, relative } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+import { sliceSafe } from "../../../utils/surrogate.ts";
 import { formatDisplayPath } from "../display-utils.ts";
 import { CONTEXT_USAGE_WARN_PERCENT, theme } from "../theme/theme.ts";
 
@@ -23,7 +24,10 @@ function ellipsizePathMiddle(p: string, maxWidth: number): string {
 	const segments = p.split(/[\\/]+/).filter((s) => s.length > 0);
 	if (segments.length <= 2) {
 		// No interior segment to drop — fall back to a tail-preserving cut.
-		return `…${p.slice(p.length - (maxWidth - 1))}`;
+		// sliceSafe (not raw .slice) so a cut landing inside a surrogate pair
+		// snaps off the boundary instead of emitting a lone surrogate / mojibake;
+		// byte-identical to .slice for ASCII paths (the common case).
+		return `…${sliceSafe(p, p.length - (maxWidth - 1))}`;
 	}
 	const sep = p.includes("\\") ? "\\" : "/";
 	const head = segments[0]!;

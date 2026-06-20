@@ -8,5 +8,9 @@
  * five adapters byte-identical (and the subagent-guards re-instantiation in sync).
  */
 export function stableToolCallKey(toolName: string, input: Record<string, unknown>): string {
-	return `${toolName}:${JSON.stringify(input, Object.keys(input).sort())}`;
+	const ordered: Record<string, unknown> = {};
+	for (const k of Object.keys(input).sort()) {
+		ordered[k] = input[k];
+	}
+	return `${toolName}:${JSON.stringify(ordered)}`;
 }

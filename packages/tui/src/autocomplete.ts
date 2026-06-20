@@ -170,7 +170,7 @@ async function walkDirectoryWithFd(
 		}
 
 		const child = spawn(fdPath, args, {
-			stdio: ["ignore", "pipe", "pipe"],
+			stdio: ["ignore", "pipe", "ignore"],
 		});
 		let stdout = "";
 		let resolved = false;
