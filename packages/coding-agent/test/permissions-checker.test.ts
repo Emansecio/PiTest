@@ -176,6 +176,37 @@ describe("PermissionChecker — plan mode blocks side-effecting tools", () => {
 	});
 });
 
+describe("PermissionChecker — plan mode default-denies opaque MCP tools", () => {
+	it("denies an MCP tool by default (it may mutate)", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		const decision = c.check(describeToolAction("mcp__github__create_issue", { title: "x" }));
+		expect(decision.decision).toBe("deny");
+		// The deny reason tells the model how to allow it.
+		const reason = decision.decision === "deny" ? decision.reason : "";
+		expect(reason).toContain("allowTools");
+	});
+
+	it("allows an MCP tool that matches an allowTools glob (opt-in read-only)", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: { allowTools: ["mcp__foo__*"] } });
+		expect(c.check(describeToolAction("mcp__foo__list_files", { dir: "." })).decision).toBe("allow");
+		expect(c.check(describeToolAction("mcp__foo__create", { name: "x" })).decision).toBe("allow");
+	});
+
+	it("denies a non-allowlisted MCP tool even when a different MCP glob is allowed (fail-safe)", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: { allowTools: ["mcp__foo__*"] } });
+		expect(c.check(describeToolAction("mcp__bar__write", { name: "x" })).decision).toBe("deny");
+	});
+
+	it("leaves native read-only tools (read/grep) and read-only lsp/chrome unaffected", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check(describeToolAction("read", { path: "index.ts" })).decision).toBe("allow");
+		expect(c.check(describeToolAction("grep", { pattern: "x" })).decision).toBe("allow");
+		// Native read-only `type:"tool"` actions (lsp navigation, chrome read ops) stay allowed.
+		expect(c.check(describeToolAction("lsp", { action: "diagnostics", file: "a.ts" })).decision).toBe("allow");
+		expect(c.check(describeToolAction("chrome_devtools_screenshot", {})).decision).toBe("allow");
+	});
+});
+
 describe("PermissionChecker — auto mode unchanged for side-effecting tools", () => {
 	it("allows eval/debug/lsp-write/chrome on non-denied targets", () => {
 		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });

@@ -10,7 +10,8 @@ import { type Static, Type } from "typebox";
 import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
-import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { withOutputCap, wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { RECALL_OUTPUT_CAP_BYTES } from "./truncate.ts";
 
 const recallToolOutputSchema = Type.Object(
 	{
@@ -28,7 +29,7 @@ export interface RecallToolOutputDetails {
 export function createRecallToolOutputDefinition(
 	_cwd: string,
 ): ToolDefinition<typeof recallToolOutputSchema, RecallToolOutputDetails> {
-	return {
+	const definition: ToolDefinition<typeof recallToolOutputSchema, RecallToolOutputDetails> = {
 		name: "recall_tool_output",
 		label: "recall_tool_output",
 		description:
@@ -66,6 +67,12 @@ export function createRecallToolOutputDefinition(
 		},
 		renderResult: renderToolOutput,
 	};
+	// Opt out of the generic 64KB head-only output cap: a deferred output is
+	// ALWAYS larger than 64KB (it was deferred precisely because it exceeded the
+	// prune threshold), so a head-only re-cut would drop the tail (error/stack/
+	// final status) the model recalled it for. Use a larger dedicated cap and keep
+	// head + tail. Every other tool keeps the default 64KB head-only net.
+	return withOutputCap(definition, { maxBytes: RECALL_OUTPUT_CAP_BYTES, mode: "headTail" });
 }
 
 export function createRecallToolOutputTool(_cwd: string): AgentTool<typeof recallToolOutputSchema> {

@@ -171,6 +171,18 @@ export class PermissionChecker {
 			return { decision: "allow" };
 		}
 
+		// Default-deny opaque external tools (MCP) in plan mode: a `type:"tool"`
+		// action whose name is `mcp__*` is an external server we cannot prove is
+		// read-only, so it could mutate. Built-in read-only `type:"tool"` actions
+		// (lsp navigation, chrome read ops) are NOT mcp__-prefixed and stay allowed.
+		// The allowTools check above is the explicit opt-in escape hatch.
+		if (action.type === "tool" && action.toolName.startsWith("mcp__")) {
+			return {
+				decision: "deny",
+				reason: `Plan mode blocks MCP tools by default (they may mutate). Add "${action.toolName}" (or a glob) to allowTools to permit it.`,
+			};
+		}
+
 		if (action.type === "read") {
 			const denyTarget = this.firstMatchingPath(
 				this.resolvedDenyPaths(this.builtinsActive),

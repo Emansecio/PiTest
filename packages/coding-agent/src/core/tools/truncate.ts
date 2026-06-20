@@ -16,6 +16,13 @@ export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
 // notes — are never re-cut; this only catches tool outputs with no cap of their
 // own (many extensions and some MCP returns).
 export const TOOL_OUTPUT_HARD_CAP_BYTES = 64 * 1024; // 64KB
+// Dedicated, larger ceiling for `recall_tool_output`. A deferred output is only
+// stored when it exceeds the compaction prune threshold (~20k dense tokens ≈ 66KB
+// of text), so it is ALWAYS bigger than the generic 64KB hard cap — re-cutting it
+// head-only on recall would drop exactly the tail (final error/stack/status) the
+// model recalled it for. 256KB keeps the recalled excerpt large enough to carry
+// both head and tail while still bounding how much a single recall can re-inject.
+export const RECALL_OUTPUT_CAP_BYTES = 256 * 1024; // 256KB
 export const GREP_MAX_LINE_LENGTH = 500; // Max chars per grep match line
 
 // Bash gets a tighter budget than file reads: command output (build/test logs,
@@ -316,6 +323,61 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 		maxLines,
 		maxBytes,
 	};
+}
+
+export interface HeadTailTruncationResult {
+	/** The head + tail excerpt (or the original content when it already fits). */
+	content: string;
+	/** Whether any middle was elided. */
+	truncated: boolean;
+	/** Total bytes in the original content. */
+	totalBytes: number;
+	/** Total lines in the original content. */
+	totalLines: number;
+}
+
+/**
+ * Truncate content keeping BOTH the head and the tail, eliding only the middle.
+ *
+ * Tool outputs frequently carry their most decisive signal at the END (a stack
+ * trace's exception line, a command's final status); a head-only cut discards
+ * exactly that. Used by `recall_tool_output`, whose whole purpose is to re-fetch
+ * a large deferred output — a head-only re-cut would defeat the recall.
+ *
+ * The byte budget is split between head and tail (default 50/50) and both halves
+ * snap to whole lines via the existing `truncateHead`/`truncateTail` (so this never
+ * duplicates their UTF-8 byte accounting). The elided middle is replaced by a
+ * single marker line. Returns the original content unchanged when it already fits.
+ */
+export function truncateHeadTail(
+	content: string,
+	options: { maxBytes?: number; headFraction?: number } = {},
+): HeadTailTruncationResult {
+	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+	const headFraction = options.headFraction ?? 0.5;
+
+	const fastPath = tryNoTruncation(content, Number.POSITIVE_INFINITY, maxBytes);
+	if (fastPath) {
+		return { content, truncated: false, totalBytes: fastPath.totalBytes, totalLines: fastPath.totalLines };
+	}
+
+	const totalBytes = utf8ByteLength(content);
+	const totalLines = content.split("\n").length;
+
+	const headBudget = Math.max(1, Math.floor(maxBytes * headFraction));
+	const tailBudget = Math.max(1, maxBytes - headBudget);
+
+	// Line-based ceilings only; the byte budget is what bounds the excerpt here.
+	const head = truncateHead(content, { maxBytes: headBudget, maxLines: Number.POSITIVE_INFINITY });
+	const tail = truncateTail(content, { maxBytes: tailBudget, maxLines: Number.POSITIVE_INFINITY });
+
+	const headText = head.content;
+	const tailText = tail.content;
+	const keptBytes = head.outputBytes + tail.outputBytes;
+	const elidedBytes = Math.max(0, totalBytes - keptBytes);
+
+	const marker = `\n\n[... ${formatSize(elidedBytes)} (${totalLines} lines total) truncated from the middle ...]\n\n`;
+	return { content: `${headText}${marker}${tailText}`, truncated: true, totalBytes, totalLines };
 }
 
 /**
