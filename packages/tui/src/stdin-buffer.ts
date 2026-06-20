@@ -340,95 +340,110 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 
 		this.buffer += str;
 
-		if (this.pasteMode) {
-			// Search only from near the previous tail: a bracketed-paste end marker
-			// can't begin before (prevLen - (END.length - 1)) without having been
-			// found last chunk, so re-scanning the whole accumulated buffer every
-			// chunk (O(N^2) over a byte-at-a-time paste) is wasted work.
-			const prevLen = this.pasteBuffer.length;
-			this.pasteBuffer += this.buffer;
-			this.buffer = "";
+		// A completed paste can leave a remainder that itself contains further
+		// paste markers (a malformed terminal stream, or pasted content that
+		// embeds paste markers). Feeding that remainder back through the same
+		// logic must NOT recurse — thousands of back-to-back paste pairs in a
+		// single chunk would otherwise overflow the V8 stack. Drive it with a
+		// loop instead so N paste pairs use O(1) stack. On each re-feed the
+		// remainder is assigned straight into this.buffer (already emptied by the
+		// paste handling), equivalent to the prior `this.process(remaining)`
+		// whose str-append landed on an empty buffer; the empty-input early
+		// return never applied because the remainder is always non-empty.
+		for (;;) {
+			if (this.pasteMode) {
+				// Search only from near the previous tail: a bracketed-paste end marker
+				// can't begin before (prevLen - (END.length - 1)) without having been
+				// found last chunk, so re-scanning the whole accumulated buffer every
+				// chunk (O(N^2) over a byte-at-a-time paste) is wasted work.
+				const prevLen = this.pasteBuffer.length;
+				this.pasteBuffer += this.buffer;
+				this.buffer = "";
 
-			const searchFrom = Math.max(0, prevLen - (BRACKETED_PASTE_END.length - 1));
-			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END, searchFrom);
-			if (endIndex !== -1) {
-				const pastedContent = this.pasteBuffer.slice(0, endIndex);
-				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
+				const searchFrom = Math.max(0, prevLen - (BRACKETED_PASTE_END.length - 1));
+				const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END, searchFrom);
+				if (endIndex !== -1) {
+					const pastedContent = this.pasteBuffer.slice(0, endIndex);
+					const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
 
-				this.pasteMode = false;
-				this.pasteBuffer = "";
-				this.pendingKittyPrintableCodepoint = undefined;
+					this.pasteMode = false;
+					this.pasteBuffer = "";
+					this.pendingKittyPrintableCodepoint = undefined;
 
-				this.emit("paste", pastedContent);
+					this.emit("paste", pastedContent);
 
-				if (remaining.length > 0) {
-					this.process(remaining);
+					if (remaining.length > 0) {
+						this.buffer = remaining;
+						continue;
+					}
+					return;
+				}
+
+				// No end marker yet: guard against an unterminated paste growing without
+				// bound. Flush the (truncated) content and exit paste mode so subsequent
+				// input is no longer swallowed.
+				if (this.pasteBuffer.length > MAX_PASTE_BYTES) {
+					const pastedContent = this.pasteBuffer.slice(0, MAX_PASTE_BYTES);
+					this.pasteMode = false;
+					this.pasteBuffer = "";
+					this.pendingKittyPrintableCodepoint = undefined;
+					this.emit("paste", pastedContent);
 				}
 				return;
 			}
 
-			// No end marker yet: guard against an unterminated paste growing without
-			// bound. Flush the (truncated) content and exit paste mode so subsequent
-			// input is no longer swallowed.
-			if (this.pasteBuffer.length > MAX_PASTE_BYTES) {
-				const pastedContent = this.pasteBuffer.slice(0, MAX_PASTE_BYTES);
-				this.pasteMode = false;
-				this.pasteBuffer = "";
+			const startIndex = this.buffer.indexOf(BRACKETED_PASTE_START);
+			if (startIndex !== -1) {
+				if (startIndex > 0) {
+					const beforePaste = this.buffer.slice(0, startIndex);
+					const result = extractCompleteSequences(beforePaste);
+					for (const sequence of result.sequences) {
+						this.emitDataSequence(sequence);
+					}
+				}
+
 				this.pendingKittyPrintableCodepoint = undefined;
-				this.emit("paste", pastedContent);
+				this.buffer = this.buffer.slice(startIndex + BRACKETED_PASTE_START.length);
+				this.pasteMode = true;
+				this.pasteBuffer = this.buffer;
+				this.buffer = "";
+
+				const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
+				if (endIndex !== -1) {
+					const pastedContent = this.pasteBuffer.slice(0, endIndex);
+					const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
+
+					this.pasteMode = false;
+					this.pasteBuffer = "";
+					this.pendingKittyPrintableCodepoint = undefined;
+
+					this.emit("paste", pastedContent);
+
+					if (remaining.length > 0) {
+						this.buffer = remaining;
+						continue;
+					}
+				}
+				return;
+			}
+
+			const result = extractCompleteSequences(this.buffer);
+			this.buffer = result.remainder;
+
+			for (const sequence of result.sequences) {
+				this.emitDataSequence(sequence);
+			}
+
+			if (this.buffer.length > 0) {
+				this.timeout = setTimeout(() => {
+					const flushed = this.flush();
+
+					for (const sequence of flushed) {
+						this.emitDataSequence(sequence);
+					}
+				}, this.timeoutMs);
 			}
 			return;
-		}
-
-		const startIndex = this.buffer.indexOf(BRACKETED_PASTE_START);
-		if (startIndex !== -1) {
-			if (startIndex > 0) {
-				const beforePaste = this.buffer.slice(0, startIndex);
-				const result = extractCompleteSequences(beforePaste);
-				for (const sequence of result.sequences) {
-					this.emitDataSequence(sequence);
-				}
-			}
-
-			this.pendingKittyPrintableCodepoint = undefined;
-			this.buffer = this.buffer.slice(startIndex + BRACKETED_PASTE_START.length);
-			this.pasteMode = true;
-			this.pasteBuffer = this.buffer;
-			this.buffer = "";
-
-			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
-			if (endIndex !== -1) {
-				const pastedContent = this.pasteBuffer.slice(0, endIndex);
-				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
-
-				this.pasteMode = false;
-				this.pasteBuffer = "";
-				this.pendingKittyPrintableCodepoint = undefined;
-
-				this.emit("paste", pastedContent);
-
-				if (remaining.length > 0) {
-					this.process(remaining);
-				}
-			}
-			return;
-		}
-
-		const result = extractCompleteSequences(this.buffer);
-		this.buffer = result.remainder;
-
-		for (const sequence of result.sequences) {
-			this.emitDataSequence(sequence);
-		}
-
-		if (this.buffer.length > 0) {
-			this.timeout = setTimeout(() => {
-				const flushed = this.flush();
-
-				for (const sequence of flushed) {
-					this.emitDataSequence(sequence);
-				}
-			}, this.timeoutMs);
 		}
 	}
 

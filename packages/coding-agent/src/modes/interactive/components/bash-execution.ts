@@ -21,6 +21,17 @@ import { truncateToVisualLines } from "./visual-truncate.ts";
 // Preview line limit when not expanded (matches tool execution behavior)
 const PREVIEW_LINES = 20;
 
+// Rolling cap on the in-memory output buffer. A streaming command (e.g. `yes`,
+// `tail -f`, a chatty build) fires appendOutput() for every child-process data
+// event with no byte/rate limit on the producer side, so an uncapped
+// outputLines grows to the full lifetime size of the stream → OOM in the TUI
+// process. updateDisplay() already only ever feeds truncateTail the last
+// DEFAULT_MAX_LINES+1 lines and shows only the last PREVIEW_LINES, and the
+// untruncated output is persisted on disk via fullOutputPath, so trimming the
+// head beyond this generous bound is byte-identical for the visible preview and
+// the context-truncated content while keeping memory bounded.
+const OUTPUT_LINES_CAP = DEFAULT_MAX_LINES * 2 + 1;
+
 export class BashExecutionComponent extends MessageShell {
 	private command: string;
 	private outputLines: string[] = [];
@@ -108,6 +119,15 @@ export class BashExecutionComponent extends MessageShell {
 			this.outputLines.push(...newLines.slice(1));
 		} else {
 			this.outputLines.push(...newLines);
+		}
+
+		// Cap the in-memory buffer to a rolling tail so a long-running streaming
+		// command can't grow outputLines without bound (→ OOM). The kept tail is
+		// far larger than what updateDisplay() consumes (last DEFAULT_MAX_LINES+1)
+		// or shows (last PREVIEW_LINES), so this is byte-identical for the preview
+		// and the context-truncated content; the full output lives on disk.
+		if (this.outputLines.length > OUTPUT_LINES_CAP) {
+			this.outputLines.splice(0, this.outputLines.length - OUTPUT_LINES_CAP);
 		}
 
 		this.outputVersion++;

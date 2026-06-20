@@ -1305,12 +1305,14 @@ export class Editor implements Component, Focusable {
 	}
 
 	private expandPasteMarkers(text: string): string {
-		let result = text;
-		for (const [pasteId, pasteContent] of this.pastes) {
-			const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]`, "g");
-			result = result.replace(markerRegex, () => pasteContent);
-		}
-		return result;
+		// Single pass: one combined regex matches every paste marker; the replacer
+		// looks up the stored content by id, falling back to the original match when
+		// the id is unknown. Avoids compiling N regexes / scanning the text N times.
+		const markerRegex = /\[paste #(\d+)( (?:\+\d+ lines|\d+ chars))?\]/g;
+		return text.replace(markerRegex, (match, id: string) => {
+			const pasteContent = this.pastes.get(Number(id));
+			return pasteContent === undefined ? match : pasteContent;
+		});
 	}
 
 	/**
@@ -2386,6 +2388,13 @@ export class Editor implements Component, Focusable {
 		for (let lineIdx = this.state.cursorLine; lineIdx !== end; lineIdx += step) {
 			const line = lines[lineIdx] || "";
 			const isCurrentLine = lineIdx === this.state.cursorLine;
+
+			// Backward from column 0: nothing before the cursor on this line.
+			// lastIndexOf(char, -1) treats -1 as 0 and would inspect index 0
+			// (the cursor's own position), so skip the current line entirely.
+			if (isCurrentLine && !isForward && this.state.cursorCol === 0) {
+				continue;
+			}
 
 			// Current line: start after/before cursor; other lines: search full line
 			const searchFrom = isCurrentLine

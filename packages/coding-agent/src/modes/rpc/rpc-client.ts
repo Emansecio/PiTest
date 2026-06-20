@@ -86,28 +86,62 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		this.process = spawn("node", [cliPath, ...args], {
+		const child = spawn("node", [cliPath, ...args], {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
 		});
+		this.process = child;
 
 		// Collect stderr for debugging
-		this.process.stderr?.on("data", (data) => {
+		child.stderr?.on("data", (data) => {
 			this.stderr += data.toString();
 			process.stderr.write(data);
 		});
 
+		// If the agent process dies or errors unexpectedly (segfault, OOM, native
+		// addon crash) after the init window below, fail every in-flight request
+		// fast instead of letting each one stall on its own 30-60s timeout.
+		// stop() sets this.process = null before its cleanup, so the `=== child`
+		// guard prevents this from firing during an intentional shutdown.
+		child.on("error", (err) => {
+			if (this.process !== child) return;
+			this.failPendingAndReset(`Agent process error: ${err.message}. Stderr: ${this.stderr}`);
+		});
+		child.on("exit", (code, signal) => {
+			if (this.process !== child) return;
+			const how = code !== null ? `code ${code}` : `signal ${signal}`;
+			this.failPendingAndReset(`Agent process exited unexpectedly with ${how}. Stderr: ${this.stderr}`);
+		});
+
 		// Set up strict JSONL reader for stdout.
-		this.stopReadingStdout = attachJsonlLineReader(this.process.stdout!, (line) => {
+		this.stopReadingStdout = attachJsonlLineReader(child.stdout!, (line) => {
 			this.handleLine(line);
 		});
 
 		// Wait a moment for process to initialize
 		await new Promise((resolve) => setTimeout(resolve, 100));
 
-		if (this.process.exitCode !== null) {
-			throw new Error(`Agent process exited immediately with code ${this.process.exitCode}. Stderr: ${this.stderr}`);
+		if (child.exitCode !== null) {
+			throw new Error(`Agent process exited immediately with code ${child.exitCode}. Stderr: ${this.stderr}`);
+		}
+	}
+
+	/**
+	 * Reject every in-flight request with the given error and reset the client so
+	 * later send() calls fail with "Client not started" rather than hanging.
+	 * Mirrors stop()'s pending-request cleanup; safe to call once per termination
+	 * (per-request reject wrappers clear their own timeouts and removing entries
+	 * before rejecting guards against any later double-settle).
+	 */
+	private failPendingAndReset(message: string): void {
+		this.stopReadingStdout?.();
+		this.stopReadingStdout = null;
+		this.process = null;
+		const pending = Array.from(this.pendingRequests.values());
+		this.pendingRequests.clear();
+		for (const request of pending) {
+			request.reject(new Error(message));
 		}
 	}
 
@@ -119,22 +153,27 @@ export class RpcClient {
 
 		this.stopReadingStdout?.();
 		this.stopReadingStdout = null;
-		this.process.kill("SIGTERM");
+
+		// Detach our reference up front so the unexpected-termination handler
+		// installed in start() (guarded by `this.process === child`) treats the
+		// kill below as an intentional shutdown rather than a crash.
+		const child = this.process;
+		this.process = null;
+		child.kill("SIGTERM");
 
 		// Wait for process to exit
 		await new Promise<void>((resolve) => {
 			const timeout = setTimeout(() => {
-				this.process?.kill("SIGKILL");
+				child.kill("SIGKILL");
 				resolve();
 			}, 1000);
 
-			this.process?.on("exit", () => {
+			child.on("exit", () => {
 				clearTimeout(timeout);
 				resolve();
 			});
 		});
 
-		this.process = null;
 		for (const pending of this.pendingRequests.values()) {
 			pending.reject(new Error("Client stopped"));
 		}

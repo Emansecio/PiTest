@@ -38,6 +38,9 @@ export class SseTransport implements McpTransport {
 	private channelAbort?: AbortController;
 	private closed = false;
 	private closeError?: Error;
+	// Monotonic generation tag. Each start() bumps it; the runChannel loop captures
+	// its epoch so a superseded channel's async teardown can't close the live one.
+	private channelEpoch = 0;
 
 	constructor(name: string, config: McpServerConfig) {
 		this.name = name;
@@ -50,6 +53,10 @@ export class SseTransport implements McpTransport {
 
 	async start(signal?: AbortSignal): Promise<void> {
 		this.disposeChannel();
+		// Open a new channel generation. The previous runChannel loop (now driven by
+		// an aborted signal) will unwind on a later tick; tagging it stale here keeps
+		// its onChannelClosed from rejecting this new connection's pending requests.
+		const epoch = ++this.channelEpoch;
 		this.closed = false;
 		this.closeError = undefined;
 		this.postUrl = undefined;
@@ -89,7 +96,7 @@ export class SseTransport implements McpTransport {
 					),
 				ENDPOINT_WAIT_MS,
 			);
-			void this.runChannel(response.body as ReadableStream<Uint8Array>, controller.signal, () => {
+			void this.runChannel(response.body as ReadableStream<Uint8Array>, controller.signal, epoch, () => {
 				clearTimeout(timer);
 				resolve();
 			}).catch((err) => {
@@ -115,10 +122,14 @@ export class SseTransport implements McpTransport {
 	private async runChannel(
 		body: ReadableStream<Uint8Array>,
 		signal: AbortSignal,
+		epoch: number,
 		onEndpoint: () => void,
 	): Promise<void> {
 		try {
 			for await (const ev of parseSseStream(body, { signal, label: `MCP ${this.name} sse` })) {
+				// A superseded channel may still drain a buffered frame after abort;
+				// don't let it touch the live connection's endpoint or pending map.
+				if (epoch !== this.channelEpoch) break;
 				if (ev.event === "endpoint") {
 					this.postUrl = new URL(ev.data, this.config.url ?? "").toString();
 					onEndpoint();
@@ -142,13 +153,16 @@ export class SseTransport implements McpTransport {
 					}
 				}
 			}
-			this.onChannelClosed(new McpTransportError(`MCP ${this.name}: SSE channel closed`));
+			this.onChannelClosed(new McpTransportError(`MCP ${this.name}: SSE channel closed`), epoch);
 		} catch (err) {
-			this.onChannelClosed(err instanceof Error ? err : new Error(String(err)));
+			this.onChannelClosed(err instanceof Error ? err : new Error(String(err)), epoch);
 		}
 	}
 
-	private onChannelClosed(error: Error): void {
+	private onChannelClosed(error: Error, epoch?: number): void {
+		// A superseded channel's teardown must not close the live one. start() bumps
+		// channelEpoch; if this close carries a stale epoch, ignore it.
+		if (epoch !== undefined && epoch !== this.channelEpoch) return;
 		if (this.closed) return;
 		this.closed = true;
 		this.closeError = error;

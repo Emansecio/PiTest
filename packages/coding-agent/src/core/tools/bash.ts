@@ -547,10 +547,25 @@ type BashTextMemo = {
 	derived: BashTextDerived;
 };
 
+// Consecutive 1s elapsed-interval ticks allowed without a `renderResult` before
+// the interval is treated as orphaned and self-cleared. A live row re-renders
+// within one frame of the interval's `invalidate()`, so this many seconds of
+// silence means the row was torn down without a final render — generous enough
+// to never trip a still-attached row, small enough to bound the leak.
+const BASH_INTERVAL_STALE_TICKS = 5;
+
 type BashRenderState = {
 	startedAt: number | undefined;
 	endedAt: number | undefined;
 	interval: NodeJS.Timeout | undefined;
+	// Ticks the live-elapsed `interval` has fired without `renderResult` running
+	// in between. A still-attached row re-renders within one frame of the
+	// interval's `invalidate()`, so a few consecutive ticks with no render means
+	// the row was torn down (session reset, transcript trimmed, view swapped)
+	// without a final non-partial/error render ever clearing the timer. We then
+	// self-clear so the interval can't fire `invalidate()` for the process
+	// lifetime. Reset to 0 on every `renderResult`.
+	intervalTicksSinceRender: number | undefined;
 	// Count of collapsed (hidden) output lines, set by the result body and read
 	// by the call/title component so the `(N earlier lines, …)` hint rides on the
 	// command line instead of costing its own row. Logical-line based (not visual)
@@ -1040,8 +1055,29 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 		},
 		renderResult(result, options, _theme, context) {
 			const state = context.state;
+			// This render proves the row is still live (an interval-driven
+			// invalidate, a streaming update, or a resize all land here), so reset
+			// the no-render tick counter the interval uses to detect teardown.
+			state.intervalTicksSinceRender = 0;
 			if (state.startedAt !== undefined && options.isPartial && !state.interval) {
-				state.interval = setInterval(() => context.invalidate(), 1000);
+				// Refresh the elapsed-time footer once per second while the command
+				// streams. If the row is torn down without a final non-partial/error
+				// render (session reset, transcript trim, view swap), nothing here
+				// would ever clear this timer — it would fire invalidate() forever.
+				// Guard it: each tick increments a counter that renderResult resets;
+				// a live row re-renders within one frame, so several consecutive
+				// ticks with no render means the row is gone — self-clear then.
+				state.interval = setInterval(() => {
+					state.intervalTicksSinceRender = (state.intervalTicksSinceRender ?? 0) + 1;
+					if ((state.intervalTicksSinceRender ?? 0) > BASH_INTERVAL_STALE_TICKS) {
+						if (state.interval) {
+							clearInterval(state.interval);
+							state.interval = undefined;
+						}
+						return;
+					}
+					context.invalidate();
+				}, 1000);
 			}
 			if (!options.isPartial || context.isError) {
 				state.endedAt ??= Date.now();

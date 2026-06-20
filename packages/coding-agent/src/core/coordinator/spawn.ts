@@ -388,13 +388,15 @@ export async function spawnSubagent(
 	let runPromise: Promise<void> | undefined;
 	let settled = false;
 	const cleanup = async () => {
-		if (!settled) {
-			settled = true;
-			try {
-				options.onSettle?.();
-			} catch {
-				// onSettle is best-effort teardown; never mask the task result.
-			}
+		// Idempotent-once: a second call (e.g. resultSchema failure paths cleanup +
+		// re-throw caught by the outer catch) must be a full no-op, otherwise the
+		// listener teardown and `git worktree remove --force` would run twice.
+		if (settled) return;
+		settled = true;
+		try {
+			options.onSettle?.();
+		} catch {
+			// onSettle is best-effort teardown; never mask the task result.
 		}
 		if (timeoutHandle) clearTimeout(timeoutHandle);
 		if (options.signal) options.signal.removeEventListener("abort", onParentAbort);

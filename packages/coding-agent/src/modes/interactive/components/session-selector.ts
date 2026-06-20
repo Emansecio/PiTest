@@ -691,6 +691,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 	private currentLoading = false;
 	private allLoading = false;
 	private allLoadSeq = 0;
+	private currentLoadSeq = 0;
 
 	private mode: "list" | "rename" = "list";
 	private renameInput = new Input();
@@ -908,14 +909,15 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			this.allLoading = true;
 		}
 
-		const seq = scope === "all" ? ++this.allLoadSeq : undefined;
+		const seq = scope === "all" ? ++this.allLoadSeq : ++this.currentLoadSeq;
+		const isStaleSeq = () => (scope === "all" ? seq !== this.allLoadSeq : seq !== this.currentLoadSeq);
 		this.header.setScope(scope);
 		this.header.setLoading(true);
 		this.requestRender();
 
 		const onProgress = (loaded: number, total: number) => {
 			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
+			if (isStaleSeq()) return;
 			this.header.setProgress(loaded, total);
 			this.requestRender();
 		};
@@ -924,6 +926,11 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			const sessions = await (scope === "current"
 				? this.currentSessionsLoader(onProgress)
 				: this.allSessionsLoader(onProgress));
+
+			// A newer load for the same scope superseded this one: bail before
+			// touching shared state so the stale result can't overwrite it
+			// (last-writer-wins on out-of-order completion).
+			if (isStaleSeq()) return;
 
 			if (scope === "current") {
 				this.currentSessions = sessions;
@@ -934,7 +941,6 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			}
 
 			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
 
 			this.header.setLoading(false);
 			this.sessionList.setSessions(sessions, showCwd);
@@ -944,6 +950,10 @@ export class SessionSelectorComponent extends Container implements Focusable {
 				this.onCancel();
 			}
 		} catch (err) {
+			// A newer load superseded this one: leave the loading flag and shared
+			// state to the newer load instead of clobbering them.
+			if (isStaleSeq()) return;
+
 			if (scope === "current") {
 				this.currentLoading = false;
 			} else {
@@ -951,7 +961,6 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			}
 
 			if (scope !== this.scope) return;
-			if (seq !== undefined && seq !== this.allLoadSeq) return;
 
 			const message = err instanceof Error ? err.message : String(err);
 			this.header.setLoading(false);

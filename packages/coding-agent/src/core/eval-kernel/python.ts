@@ -194,12 +194,18 @@ class PythonKernel implements EvalKernel {
 			source: "eval-kernel.python",
 			context: { bytes: effective, pid: proc?.pid },
 		});
-		// killProcessTree tears down any children the user code spawned too.
+		// killProcessTree tears down any children the user code spawned too; avoid
+		// proc.kill() so we don't pre-empt taskkill /T (see timeout path). On Windows
+		// proc.kill() terminates the parent synchronously before the async taskkill /T
+		// can enumerate the tree, orphaning the children. Fall back to proc.kill() only
+		// when there is no pid to target.
 		if (proc?.pid) killProcessTree(proc.pid);
-		try {
-			proc?.kill();
-		} catch {
-			// ignore
+		else {
+			try {
+				proc?.kill();
+			} catch {
+				// ignore
+			}
 		}
 		this.alive = false;
 		if (this.current === c) {

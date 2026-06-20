@@ -149,6 +149,20 @@ export function redactSecrets(text: string): RedactionResult {
 	let count = 0;
 	let out = text;
 	for (const { type, re } of PATTERNS) {
+		// The private-key pattern's `[\s\S]*?` body scans for a closing END armor.
+		// With a BEGIN marker but NO matching END, the engine scans the entire
+		// remaining string once per BEGIN occurrence before failing — O(k*N) on
+		// malformed/huge input on the sync disk-egress path. A cheap substring gate
+		// short-circuits that: every successful match contains the literal `-----END `
+		// (the close-armor prefix, always with a trailing space before the optional
+		// algo / `PRIVATE KEY`), so if that literal is absent no match is possible and
+		// skipping the cross-block regex is behavior-identical for real PEM blocks.
+		// Note `hasIndicator`'s `PRIVATE KEY` probe does NOT prove a close armor: the
+		// BEGIN armor also contains `PRIVATE KEY`, so a lone BEGIN passes that gate —
+		// it is exactly the O(k*N) case this `-----END ` check eliminates.
+		if (type === "private-key" && !out.includes("-----END ")) {
+			continue;
+		}
 		// Reset lastIndex defensively: the regex is shared and global, and a prior
 		// partial use could otherwise resume mid-string.
 		re.lastIndex = 0;

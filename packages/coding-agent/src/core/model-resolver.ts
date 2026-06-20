@@ -361,6 +361,10 @@ export function resolveRole(opts: ResolveRoleOptions): RoleResolution | undefine
 export async function resolveModelScope(patterns: string[], modelRegistry: ModelRegistry): Promise<ScopedModel[]> {
 	const availableModels = await modelRegistry.getAvailable();
 	const scopedModels: ScopedModel[] = [];
+	// Dedup in O(1) per model: modelsAreEqual compares provider+id, so a Set
+	// keyed by `provider/id` is behavior-identical to the prior `.find` scan
+	// while avoiding O(M^2) work when a broad glob matches the whole registry.
+	const seen = new Set<string>();
 
 	for (const pattern of patterns) {
 		// Check if pattern contains glob characters
@@ -391,7 +395,9 @@ export async function resolveModelScope(patterns: string[], modelRegistry: Model
 			}
 
 			for (const model of matchingModels) {
-				if (!scopedModels.find((sm) => modelsAreEqual(sm.model, model))) {
+				const key = `${model.provider}/${model.id}`;
+				if (!seen.has(key)) {
+					seen.add(key);
 					scopedModels.push({ model, thinkingLevel });
 				}
 			}
@@ -409,8 +415,10 @@ export async function resolveModelScope(patterns: string[], modelRegistry: Model
 			continue;
 		}
 
-		// Avoid duplicates
-		if (!scopedModels.find((sm) => modelsAreEqual(sm.model, model))) {
+		// Avoid duplicates (O(1) membership check, same provider+id key)
+		const key = `${model.provider}/${model.id}`;
+		if (!seen.has(key)) {
+			seen.add(key);
 			scopedModels.push({ model, thinkingLevel });
 		}
 	}

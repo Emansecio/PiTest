@@ -18,8 +18,9 @@
  */
 
 import type { Dirent, Stats } from "node:fs";
-import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
+import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import type { UrlContext, UrlReadResult, UrlSchemeResolver } from "./registry.ts";
 
 const CONFLICT_START = /^<{7}(?:\s|$)/;
@@ -269,6 +270,7 @@ function resolutionLinesFor(block: ConflictBlock, content: string): string[] | {
 async function applyResolutionToFile(
 	fc: FileConflicts,
 	resolutions: Map<number, string[]>, // 1-indexed block index within this file -> replacement lines
+	signal?: AbortSignal,
 ): Promise<void> {
 	// Apply from bottom to top to keep line indices stable.
 	const entries = Array.from(resolutions.entries()).sort((a, b) => b[0] - a[0]);
@@ -281,7 +283,9 @@ async function applyResolutionToFile(
 		lines.splice(startIdx, endIdx - startIdx + 1, ...replacement);
 	}
 	const joined = lines.join("\n") + (fc.hadTrailingNewline ? "\n" : "");
-	await writeFile(fc.file, joined, "utf-8");
+	// Atomic temp+rename so a concurrent read never observes a torn document and an
+	// interrupted write never truncates the original (matches the write tool).
+	await writeFileAtomic(fc.file, joined, signal);
 }
 
 export function createConflictSchemeResolver(): UrlSchemeResolver {
@@ -329,6 +333,10 @@ export function createConflictSchemeResolver(): UrlSchemeResolver {
 				}
 				// Group blocks back to their owning file and compute the resolution per block.
 				for (const fc of files) {
+					// Honor abort BETWEEN files so a cancel stops cleanly after a whole
+					// file is committed rather than half-applying the tree. (writeFileAtomic
+					// also honors the signal up to its own commit point per file.)
+					if (ctx.signal?.aborted) throw new Error("Operation aborted");
 					const resolutions = new Map<number, string[]>();
 					for (let i = 0; i < fc.blocks.length; i++) {
 						const block = fc.blocks[i];
@@ -336,7 +344,7 @@ export function createConflictSchemeResolver(): UrlSchemeResolver {
 						if (!Array.isArray(r)) throw new Error(r.error);
 						resolutions.set(i + 1, r);
 					}
-					await applyResolutionToFile(fc, resolutions);
+					await applyResolutionToFile(fc, resolutions, ctx.signal);
 				}
 				invalidateScanCache(ctx.cwd);
 				return;
@@ -361,7 +369,7 @@ export function createConflictSchemeResolver(): UrlSchemeResolver {
 			if (!owner) throw new Error("internal: could not locate conflict block owner file");
 			const r = resolutionLinesFor(target, content);
 			if (!Array.isArray(r)) throw new Error(r.error);
-			await applyResolutionToFile(owner, new Map([[localIndex, r]]));
+			await applyResolutionToFile(owner, new Map([[localIndex, r]]), ctx.signal);
 			invalidateScanCache(ctx.cwd);
 		},
 	};

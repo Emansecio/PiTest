@@ -163,8 +163,9 @@ export class DapClient {
 
 		let socket: net.Socket;
 		const connectTimeoutMs = socketConnectTimeoutMs();
+		let timeoutHandle!: ReturnType<typeof setTimeout>;
 		const timeoutPromise = new Promise<never>((_, reject) => {
-			const t = setTimeout(() => {
+			timeoutHandle = setTimeout(() => {
 				// Surface the connect-timeout that kills the adapter (covers the kill too).
 				recordDiagnostic({
 					category: "net.connect-timeout",
@@ -174,12 +175,16 @@ export class DapClient {
 				});
 				reject(new Error(`${adapter.name} did not connect within 10s`));
 			}, connectTimeoutMs);
-			t.unref?.();
+			timeoutHandle.unref?.();
 		});
 		try {
 			socket = await Promise.race([connPromise, spawnErrorPromise, timeoutPromise]);
 			connected = true;
 		} finally {
+			// Cancel the connect-timeout the moment the race settles, regardless of which
+			// branch won, so a successful connect can't fire a spurious error diagnostic
+			// (or leave the timer object lingering) ~10s later.
+			clearTimeout(timeoutHandle);
 			server.close();
 			// Detach the bootstrap listeners so the happy path matches the prior wiring
 			// exactly (only #captureStderr / #attachExit remain active).

@@ -622,6 +622,20 @@ export class AssistantMessageComponent extends Container {
 			this.breathUnsub = null;
 		}
 	}
+
+	/** Release every animation-ticker subscription this component holds so it is
+	 * not retained on the shared animation loop after a history rebuild /
+	 * compaction clear. _disposeChatComponents invokes this on each chat child
+	 * before tearing the chat down; without it the breath ("Thinking…"),
+	 * reveal-cursor, and deliverable-glyph tickers of an in-flight turn would stay
+	 * registered forever (CPU each frame + closure retention), exactly the leak the
+	 * sibling animated components (Armin/Daxnuts/FusionLive/NavGroup/ActivityLine)
+	 * implement dispose() to avoid. Idempotent: each stop is a no-op when inactive. */
+	dispose(): void {
+		this.stopThinkingBreath();
+		this.stopReveal();
+		this.deliverableEase?.stop();
+	}
 }
 
 /** True when the message has content that should appear as its own block:

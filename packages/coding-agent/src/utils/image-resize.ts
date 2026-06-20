@@ -104,15 +104,29 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 			targetHeight = opts.maxHeight;
 		}
 
-		function tryEncodings(width: number, height: number, jpegQualities: number[]): EncodedCandidate[] {
+		// Encode lazily: try PNG first and only fall through to JPEG qualities
+		// if the PNG does not fit. The first candidate under maxBytes wins, in
+		// the same order as before (PNG, then each JPEG quality), so we never
+		// pay for a JPEG re-encode once an earlier candidate already fits.
+		function findFittingCandidate(
+			width: number,
+			height: number,
+			jpegQualities: number[],
+		): EncodedCandidate | undefined {
 			const resized = photon!.resize(image!, width, height, photon!.SamplingFilter.Lanczos3);
 
 			try {
-				const candidates: EncodedCandidate[] = [encodeCandidate(resized.get_bytes(), "image/png")];
-				for (const quality of jpegQualities) {
-					candidates.push(encodeCandidate(resized.get_bytes_jpeg(quality), "image/jpeg"));
+				const png = encodeCandidate(resized.get_bytes(), "image/png");
+				if (png.encodedSize < opts.maxBytes) {
+					return png;
 				}
-				return candidates;
+				for (const quality of jpegQualities) {
+					const jpeg = encodeCandidate(resized.get_bytes_jpeg(quality), "image/jpeg");
+					if (jpeg.encodedSize < opts.maxBytes) {
+						return jpeg;
+					}
+				}
+				return undefined;
 			} finally {
 				resized.free();
 			}
@@ -123,19 +137,17 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 		let currentHeight = targetHeight;
 
 		while (true) {
-			const candidates = tryEncodings(currentWidth, currentHeight, qualitySteps);
-			for (const candidate of candidates) {
-				if (candidate.encodedSize < opts.maxBytes) {
-					return {
-						data: candidate.data,
-						mimeType: candidate.mimeType,
-						originalWidth,
-						originalHeight,
-						width: currentWidth,
-						height: currentHeight,
-						wasResized: true,
-					};
-				}
+			const candidate = findFittingCandidate(currentWidth, currentHeight, qualitySteps);
+			if (candidate) {
+				return {
+					data: candidate.data,
+					mimeType: candidate.mimeType,
+					originalWidth,
+					originalHeight,
+					width: currentWidth,
+					height: currentHeight,
+					wasResized: true,
+				};
 			}
 
 			if (currentWidth === 1 && currentHeight === 1) {

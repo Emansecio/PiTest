@@ -60,9 +60,15 @@ export async function executeBashWithOperations(
 	let tempFilePath: string | undefined;
 	let tempFileStream: WriteStream | undefined;
 	let totalBytes = 0;
+	// Set once a temp-file write stream errored out (disk full, permissions).
+	// After that point the in-memory rolling buffer has likely already discarded
+	// early output, so re-creating a temp file would yield a silently truncated
+	// "full output". When this is set we refuse to (re-)create a temp file and
+	// leave fullOutputPath undefined — no path is more honest than a partial one.
+	let tempFileFailed = false;
 
 	const ensureTempFile = () => {
-		if (tempFilePath) {
+		if (tempFilePath || tempFileFailed) {
 			return;
 		}
 		const id = randomBytes(8).toString("hex");
@@ -74,6 +80,7 @@ export async function executeBashWithOperations(
 		tempFileStream.on("error", () => {
 			tempFileStream = undefined;
 			tempFilePath = undefined;
+			tempFileFailed = true;
 		});
 		for (const chunk of outputChunks) {
 			tempFileStream.write(chunk);

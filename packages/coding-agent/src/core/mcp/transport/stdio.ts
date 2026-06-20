@@ -270,6 +270,20 @@ export class StdioTransport implements McpTransport {
 		if (!proc) return;
 		this.proc = undefined;
 		liveStdioProcs.delete(proc);
+		// Detach this transport's handlers from the old process BEFORE killing it.
+		// A reconnect re-runs start() on the same instance and resets `exited`,
+		// `pending`, etc.; if the dying process drains its `exit`/`error` event
+		// afterwards, onExit() would see the reset state and tear down the
+		// brand-new connection (delete the current proc from liveStdioProcs,
+		// reject the fresh in-flight RPCs). Removing the listeners here makes the
+		// superseded process's late events no-ops.
+		proc.removeAllListeners("exit");
+		proc.removeAllListeners("error");
+		proc.stdout.removeAllListeners("data");
+		proc.stderr.removeAllListeners("data");
+		// NOTE: the stdin `error` listener is intentionally left in place — it only
+		// swallows a late EPIPE on the dying pipe; removing it could surface that
+		// EPIPE as an uncaught exception and crash the host.
 		try {
 			if (typeof proc.pid === "number") killProcessTree(proc.pid);
 			else proc.kill();

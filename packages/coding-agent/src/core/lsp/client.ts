@@ -528,37 +528,40 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 	const lockKey = `${client.name}:${uri}`;
 	if (client.openFiles.has(uri)) return;
 
-	const existingLock = fileOperationLocks.get(lockKey);
-	if (existingLock) {
-		await untilAborted(signal, () => existingLock);
-		return;
-	}
-
-	const openPromise = (async () => {
-		throwIfAborted(signal);
-		if (client.openFiles.has(uri)) return;
-		let content: string;
-		try {
-			content = await fs.readFile(filePath, "utf-8");
-			throwIfAborted(signal);
-		} catch (err) {
-			if (isEnoent(err)) return;
-			throw err;
-		}
-		const languageId = detectLanguageId(filePath);
-		throwIfAborted(signal);
-		await sendNotification(client, "textDocument/didOpen", {
-			textDocument: { uri, languageId, version: 1, text: content },
+	// Atomically chain onto any in-flight op for this uri so concurrent callers
+	// serialize on one promise chain. Acquisition (read prev + set op) must be
+	// synchronous with no `await` between, or a second caller could read the same
+	// prev and clobber the lock (TOCTOU).
+	const prev = fileOperationLocks.get(lockKey) ?? Promise.resolve();
+	const op = prev
+		.catch(() => {})
+		.then(async () => {
+			// Signal-unaware body: it runs to completion for whoever chained it so
+			// later callers in the chain observe a consistent server state. Each
+			// caller aborts its own *wait* via untilAborted below.
+			if (client.openFiles.has(uri)) return;
+			let content: string;
+			try {
+				content = await fs.readFile(filePath, "utf-8");
+			} catch (err) {
+				if (isEnoent(err)) return;
+				throw err;
+			}
+			const languageId = detectLanguageId(filePath);
+			await sendNotification(client, "textDocument/didOpen", {
+				textDocument: { uri, languageId, version: 1, text: content },
+			});
+			client.openFiles.set(uri, { version: 1, languageId });
+			client.lastActivity = Date.now();
 		});
-		client.openFiles.set(uri, { version: 1, languageId });
-		client.lastActivity = Date.now();
-	})();
 
-	fileOperationLocks.set(lockKey, openPromise);
+	fileOperationLocks.set(lockKey, op);
 	try {
-		await openPromise;
+		await untilAborted(signal, () => op);
 	} finally {
-		fileOperationLocks.delete(lockKey);
+		// Only clear the lock if it's still ours; a later caller may have already
+		// chained its own op and replaced the map entry.
+		if (fileOperationLocks.get(lockKey) === op) fileOperationLocks.delete(lockKey);
 	}
 }
 
@@ -602,36 +605,37 @@ export async function syncContent(
 	const lockKey = `${client.name}:${uri}`;
 	throwIfAborted(signal);
 
-	const existingLock = fileOperationLocks.get(lockKey);
-	if (existingLock) await untilAborted(signal, () => existingLock);
-
-	const syncPromise = (async () => {
-		client.diagnostics.delete(uri);
-		const info = client.openFiles.get(uri);
-		if (!info) {
-			const languageId = detectLanguageId(filePath);
-			throwIfAborted(signal);
-			await sendNotification(client, "textDocument/didOpen", {
-				textDocument: { uri, languageId, version: 1, text: content },
+	// Atomically chain onto any in-flight op for this uri (see ensureFileOpen):
+	// read prev + set op with no `await` between, so concurrent same-uri callers
+	// serialize and the version bump / didChange order can't interleave.
+	const prev = fileOperationLocks.get(lockKey) ?? Promise.resolve();
+	const op = prev
+		.catch(() => {})
+		.then(async () => {
+			client.diagnostics.delete(uri);
+			const info = client.openFiles.get(uri);
+			if (!info) {
+				const languageId = detectLanguageId(filePath);
+				await sendNotification(client, "textDocument/didOpen", {
+					textDocument: { uri, languageId, version: 1, text: content },
+				});
+				client.openFiles.set(uri, { version: 1, languageId });
+				client.lastActivity = Date.now();
+				return;
+			}
+			const version = ++info.version;
+			await sendNotification(client, "textDocument/didChange", {
+				textDocument: { uri, version },
+				contentChanges: [{ text: content }],
 			});
-			client.openFiles.set(uri, { version: 1, languageId });
 			client.lastActivity = Date.now();
-			return;
-		}
-		const version = ++info.version;
-		throwIfAborted(signal);
-		await sendNotification(client, "textDocument/didChange", {
-			textDocument: { uri, version },
-			contentChanges: [{ text: content }],
 		});
-		client.lastActivity = Date.now();
-	})();
 
-	fileOperationLocks.set(lockKey, syncPromise);
+	fileOperationLocks.set(lockKey, op);
 	try {
-		await syncPromise;
+		await untilAborted(signal, () => op);
 	} finally {
-		fileOperationLocks.delete(lockKey);
+		if (fileOperationLocks.get(lockKey) === op) fileOperationLocks.delete(lockKey);
 	}
 }
 
@@ -650,41 +654,53 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 	throwIfAborted(signal);
 	const uri = fileToUri(filePath);
 	const lockKey = `${client.name}:${uri}`;
-	const existingLock = fileOperationLocks.get(lockKey);
-	if (existingLock) await untilAborted(signal, () => existingLock);
-
-	const refreshPromise = (async () => {
-		throwIfAborted(signal);
-		client.diagnostics.delete(uri);
-		const info = client.openFiles.get(uri);
-		if (!info) {
-			await ensureFileOpen(client, filePath, signal);
-			return;
-		}
-		let content: string;
-		try {
-			content = await fs.readFile(filePath, "utf-8");
-			throwIfAborted(signal);
-		} catch (err) {
-			if (isEnoent(err)) return;
-			throw err;
-		}
-		const version = ++info.version;
-		throwIfAborted(signal);
-		await sendNotification(client, "textDocument/didChange", {
-			textDocument: { uri, version },
-			contentChanges: [{ text: content }],
+	// Atomically chain onto any in-flight op for this uri (see ensureFileOpen):
+	// read prev + set op with no `await` between. The open-from-scratch path is
+	// inlined rather than delegating to ensureFileOpen, because ensureFileOpen
+	// would chain onto *this* op as its prev and await it — a self-deadlock.
+	const prev = fileOperationLocks.get(lockKey) ?? Promise.resolve();
+	const op = prev
+		.catch(() => {})
+		.then(async () => {
+			client.diagnostics.delete(uri);
+			const info = client.openFiles.get(uri);
+			if (!info) {
+				let openText: string;
+				try {
+					openText = await fs.readFile(filePath, "utf-8");
+				} catch (err) {
+					if (isEnoent(err)) return;
+					throw err;
+				}
+				const languageId = detectLanguageId(filePath);
+				await sendNotification(client, "textDocument/didOpen", {
+					textDocument: { uri, languageId, version: 1, text: openText },
+				});
+				client.openFiles.set(uri, { version: 1, languageId });
+				client.lastActivity = Date.now();
+				return;
+			}
+			let content: string;
+			try {
+				content = await fs.readFile(filePath, "utf-8");
+			} catch (err) {
+				if (isEnoent(err)) return;
+				throw err;
+			}
+			const version = ++info.version;
+			await sendNotification(client, "textDocument/didChange", {
+				textDocument: { uri, version },
+				contentChanges: [{ text: content }],
+			});
+			await sendNotification(client, "textDocument/didSave", { textDocument: { uri }, text: content });
+			client.lastActivity = Date.now();
 		});
-		throwIfAborted(signal);
-		await sendNotification(client, "textDocument/didSave", { textDocument: { uri }, text: content });
-		client.lastActivity = Date.now();
-	})();
 
-	fileOperationLocks.set(lockKey, refreshPromise);
+	fileOperationLocks.set(lockKey, op);
 	try {
-		await refreshPromise;
+		await untilAborted(signal, () => op);
 	} finally {
-		fileOperationLocks.delete(lockKey);
+		if (fileOperationLocks.get(lockKey) === op) fileOperationLocks.delete(lockKey);
 	}
 }
 

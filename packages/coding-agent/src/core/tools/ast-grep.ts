@@ -145,6 +145,15 @@ export function runAstGrep(
 					reject(Object.assign(new Error(AST_GREP_INSTALL_HINT), { __astGrepMissing: true }));
 					return;
 				}
+				// Output exceeded maxBuffer: the child was killed and stdout is partial.
+				// Surfacing the partial NDJSON as a complete result would silently truncate
+				// the match set, so reject explicitly and let the caller narrow the search.
+				if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || /maxBuffer/.test(err.message ?? "")) {
+					reject(
+						Object.assign(new Error("ast-grep output exceeded the buffer limit"), { __astGrepOverflow: true }),
+					);
+					return;
+				}
 				// Non-zero exit code: still resolve with stderr so callers can choose what to do.
 				const code = typeof e.code === "number" ? e.code : 1;
 				resolve({ code, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? String(err) });
@@ -189,6 +198,18 @@ export function createAstGrepToolDefinition(
 				if ((err as { __astGrepMissing?: boolean }).__astGrepMissing) {
 					return {
 						content: [{ type: "text" as const, text: AST_GREP_INSTALL_HINT }],
+						isError: true,
+						details: undefined,
+					};
+				}
+				if ((err as { __astGrepOverflow?: boolean }).__astGrepOverflow) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: "ast-grep produced more than 64MB of output and was truncated; results are incomplete. Narrow the search with a more specific pattern, a smaller `path`, `lang`, or `globs`.",
+							},
+						],
 						isError: true,
 						details: undefined,
 					};

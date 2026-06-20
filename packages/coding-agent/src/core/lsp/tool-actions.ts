@@ -82,15 +82,27 @@ async function enumerateRenamePairs(
 	if (!stat.isDirectory()) {
 		return { pairs: [{ oldUri: fileToUri(source), newUri: fileToUri(dest) }], directory: false, exceeded: false };
 	}
-	const entries = await fs.readdir(source, { recursive: true, withFileTypes: true });
+	// Stream entries instead of materializing the whole subtree: a directory
+	// containing node_modules or a huge generated tree would allocate the full
+	// Dirent list up front, defeating the MAX_RENAME_PAIRS cap (the very OOM the
+	// cap exists to prevent). opendir lets the cap short-circuit and close the
+	// handle before reading the rest of the tree.
+	const dir = await fs.opendir(source, { recursive: true });
 	const pairs: FileRenamePair[] = [];
-	for (const entry of entries) {
-		if (!entry.isFile()) continue;
-		if (pairs.length >= MAX_RENAME_PAIRS) return { pairs, directory: true, exceeded: true };
-		const parent = entry.parentPath ?? source;
-		const absOld = path.join(parent, entry.name);
-		const rel = path.relative(source, absOld);
-		pairs.push({ oldUri: fileToUri(absOld), newUri: fileToUri(path.join(dest, rel)) });
+	try {
+		for await (const entry of dir) {
+			if (!entry.isFile()) continue;
+			if (pairs.length >= MAX_RENAME_PAIRS) return { pairs, directory: true, exceeded: true };
+			const parent = entry.parentPath ?? source;
+			const absOld = path.join(parent, entry.name);
+			const rel = path.relative(source, absOld);
+			pairs.push({ oldUri: fileToUri(absOld), newUri: fileToUri(path.join(dest, rel)) });
+		}
+	} finally {
+		// The for-await loop closes the Dir on normal completion, but an early
+		// return (cap hit) leaves it open; closeSync-equivalent via close() here.
+		// Closing an already-closed Dir rejects, so guard with a no-op catch.
+		await dir.close().catch(() => {});
 	}
 	return { pairs, directory: true, exceeded: false };
 }

@@ -237,12 +237,16 @@ export class HttpTransport implements McpTransport {
 		// Fire-and-forget: notifications have no response. Bounded by a 10s timeout
 		// and the outer signal so a hung server can't wedge the handshake.
 		try {
-			await fetch(this.config.url ?? "", {
+			const response = await fetch(this.config.url ?? "", {
 				method: "POST",
 				headers: this.baseHeaders("application/json, text/event-stream"),
 				body: JSON.stringify(message),
 				signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
 			});
+			// Notifications have no response we care about, but an undrained body keeps the
+			// socket checked out of the undici pool (same leak sse-parse.ts guards against).
+			// Cancel it so the connection is released; failures here are non-fatal.
+			await response.body?.cancel().catch(() => {});
 		} catch {
 			/* Notification failures are non-fatal */
 		}

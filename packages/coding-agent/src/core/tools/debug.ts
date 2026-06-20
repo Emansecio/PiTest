@@ -279,8 +279,8 @@ function formatSourceLabel(source: DapSource | undefined, line?: number, column?
 function formatDisassembly(instructions: DapDisassembledInstruction[]): string {
 	if (instructions.length === 0) return "Disassembly:\n(empty)";
 	const lines = ["Disassembly:"];
-	const addressWidth = Math.max(...instructions.map((i) => i.address.length));
-	const bytesWidth = Math.max(...instructions.map((i) => i.instructionBytes?.length ?? 0), 2);
+	const addressWidth = instructions.reduce((max, i) => Math.max(max, i.address.length), 0);
+	const bytesWidth = instructions.reduce((max, i) => Math.max(max, i.instructionBytes?.length ?? 0), 2);
 	for (const instruction of instructions) {
 		const location = formatSourceLabel(instruction.location, instruction.line, instruction.column);
 		const parts = [
@@ -323,7 +323,7 @@ function formatMemoryRead(address: string, data: string | undefined, unreadableB
 
 function formatTable(headers: string[], rows: string[][]): string {
 	const widths = headers.map((header, index) =>
-		Math.max(header.length, ...rows.map((row) => (row[index] ?? "").length)),
+		rows.reduce((max, row) => Math.max(max, (row[index] ?? "").length), header.length),
 	);
 	const formatRow = (row: string[]) => row.map((cell, index) => (cell ?? "").padEnd(widths[index])).join("  ");
 	return [formatRow(headers), formatRow(widths.map((width) => "-".repeat(width))), ...rows.map(formatRow)].join("\n");

@@ -759,6 +759,30 @@ Common mistakes to avoid:
 									}
 									selectedLines = streamed.selectedLines;
 								} else {
+									// Notebooks always fall through here (the streaming branch above
+									// excludes .ipynb because formatNotebookSource needs the whole JSON).
+									// Every other large-file path is size-gated; without this guard a
+									// hundreds-of-MB notebook is fully buffered, stringified, and JSON.parsed
+									// for a tool whose output is capped at a few KB → OOM. Refuse above the
+									// streaming threshold with the same actionable hint outline uses.
+									if (
+										preReadStat &&
+										preReadStat.size > streamingMinBytes &&
+										absolutePath.toLowerCase().endsWith(".ipynb")
+									) {
+										// Observe the size refusal (additive; behavior unchanged for in-bound files).
+										recordDiagnostic({
+											category: "output.cap",
+											level: "info",
+											source: "read.notebook",
+											context: { path, bytes: preReadStat.size },
+										});
+										const note = `[notebook ${path}: ${formatSize(preReadStat.size)} exceeds ${formatSize(streamingMinBytes)} — read with offset/limit (cells) to page through it, or use grep/bash jq to locate content]`;
+										if (aborted) return;
+										signal?.removeEventListener("abort", onAbort);
+										resolve({ content: [{ type: "text", text: note } as TextContent], details: undefined });
+										return;
+									}
 									const buffer = await ops.readFile(absolutePath);
 									const textContent = buffer.toString("utf-8");
 
@@ -874,6 +898,11 @@ Common mistakes to avoid:
 								// are skipped whenever the body isn't the full current file.
 								let dedupeSuppressed = false;
 								let deltaApplied = false;
+								// An aborted read (ESC mid-flight) never reached the model: rejecting the
+								// promise discards `outputText`. Recording its hash here would poison the
+								// store so a later identical read is wrongly suppressed as "already shown
+								// above". Bail before mutating shared session state.
+								if (aborted) return;
 								if (dedupeStore) {
 									const dedupeKey = `${absolutePath} ${offset ?? ""} ${limit ?? ""}`;
 									const rangeLabel =
