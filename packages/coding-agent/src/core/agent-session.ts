@@ -2935,15 +2935,15 @@ export class AgentSession {
 				if (abort.signal.aborted || this._userInterrupted) return;
 				if (listBashBackgroundJobs().every((j) => !ids.has(j.id) || j.exited)) break;
 				await new Promise<void>((res) => {
-					const t = setTimeout(res, 500);
-					abort.signal.addEventListener(
-						"abort",
-						() => {
-							clearTimeout(t);
-							res();
-						},
-						{ once: true },
-					);
+					const onAbort = () => {
+						clearTimeout(t);
+						res();
+					};
+					const t = setTimeout(() => {
+						abort.signal.removeEventListener("abort", onAbort);
+						res();
+					}, 500);
+					abort.signal.addEventListener("abort", onAbort, { once: true });
 				});
 			}
 			if (abort.signal.aborted || this._userInterrupted) return;

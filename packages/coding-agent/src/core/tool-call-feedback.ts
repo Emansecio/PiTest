@@ -10,6 +10,8 @@
  * arguments. Inspired by the prompt patterns used in tailcallhq/forgecode.
  */
 
+import { sliceSafe } from "../utils/surrogate.ts";
+
 const MAX_ARGS_PREVIEW_CHARS = 400;
 const MAX_ERROR_PREVIEW_CHARS = 600;
 
@@ -174,7 +176,7 @@ function previewError(message: string | undefined): string | undefined {
 
 function truncate(text: string, max: number): string {
 	if (text.length <= max) return text;
-	return `${text.slice(0, max)}\n… [truncated ${text.length - max} chars]`;
+	return `${sliceSafe(text, 0, max)}\n… [truncated ${text.length - max} chars]`;
 }
 
 // ============================================================================

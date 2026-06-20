@@ -168,11 +168,6 @@ function findCycle(steps: PlanStep[]): string[] | undefined {
  * cycles; defensively appends any stragglers.
  */
 export function topoOrder(steps: PlanStep[]): PlanStep[] {
-	const indegree = new Map<string, number>();
-	for (const s of steps) indegree.set(s.id, 0);
-	for (const s of steps) {
-		for (const _dep of s.dependsOn) indegree.set(s.id, (indegree.get(s.id) ?? 0) + 1);
-	}
 	const order: PlanStep[] = [];
 	const placed = new Set<string>();
 	// Repeatedly emit every step whose deps are all already placed.

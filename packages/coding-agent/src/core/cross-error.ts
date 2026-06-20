@@ -15,6 +15,8 @@
  * agent-session wiring stays thin.
  */
 
+import { sliceSafe } from "../utils/surrogate.ts";
+
 /**
  * Counts the trailing run of tool errors sharing one normalised fingerprint, and
  * how many distinct call shapes (args fingerprints) appeared in that run. A
@@ -122,7 +124,7 @@ export function buildCrossErrorReminder(input: CrossErrorReminderInput): string 
 	if (input.sampleError) {
 		const sample =
 			input.sampleError.length > MAX_SAMPLE_CHARS
-				? `${input.sampleError.slice(0, MAX_SAMPLE_CHARS)}…`
+				? `${sliceSafe(input.sampleError, 0, MAX_SAMPLE_CHARS)}…`
 				: input.sampleError;
 		lines.push("");
 		lines.push("Recurring error:");

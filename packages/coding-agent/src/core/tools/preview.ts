@@ -72,15 +72,15 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 			resolvePromise();
 			return;
 		}
-		const id = setTimeout(resolvePromise, ms);
-		signal?.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(id);
-				resolvePromise();
-			},
-			{ once: true },
-		);
+		const onAbort = () => {
+			clearTimeout(id);
+			resolvePromise();
+		};
+		const id = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolvePromise();
+		}, ms);
+		signal?.addEventListener("abort", onAbort, { once: true });
 	});
 }
 

@@ -28,6 +28,7 @@ const SCOPES: McpConfigScope[] = ["user", "project", "local"];
 
 interface ParsedFlags {
 	scope: McpConfigScope;
+	scopeExplicit: boolean;
 	transport?: "http" | "sse" | "stdio";
 	headers: Record<string, string>;
 	env: Record<string, string>;
@@ -36,13 +37,23 @@ interface ParsedFlags {
 }
 
 function parseFlags(rest: string[]): ParsedFlags {
-	const out: ParsedFlags = { scope: "local", headers: {}, env: {}, positionals: [], help: false };
+	const out: ParsedFlags = {
+		scope: "local",
+		scopeExplicit: false,
+		headers: {},
+		env: {},
+		positionals: [],
+		help: false,
+	};
 	for (let i = 0; i < rest.length; i++) {
 		const arg = rest[i];
 		if (arg === "-h" || arg === "--help") out.help = true;
 		else if (arg === "--scope" || arg === "-s") {
 			const v = rest[++i];
-			if (v && (SCOPES as string[]).includes(v)) out.scope = v as McpConfigScope;
+			if (v && (SCOPES as string[]).includes(v)) {
+				out.scope = v as McpConfigScope;
+				out.scopeExplicit = true;
+			}
 		} else if (arg === "--transport" || arg === "-t") {
 			const v = rest[++i];
 			if (v === "http" || v === "sse" || v === "stdio") out.transport = v;
@@ -252,7 +263,7 @@ function cmdRemove(rest: string[], cwd: string, agentDir: string): void {
 		return;
 	}
 	// Remove from the named scope if it has the server; otherwise from wherever it lives.
-	const scopesToTry = flags.positionals.includes(name) && rest.includes("--scope") ? [flags.scope] : SCOPES;
+	const scopesToTry = flags.scopeExplicit ? [flags.scope] : SCOPES;
 	let removed = false;
 	for (const scope of scopesToTry) {
 		const path = mcpConfigFilePath(scope, cwd, agentDir);

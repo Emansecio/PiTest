@@ -230,7 +230,6 @@ function formatBlock(block: ConflictBlock, index: number, total: number): string
 		for (const l of block.base) lines.push(l);
 	}
 	lines.push("=======");
-	lines.push("theirs");
 	for (const l of block.theirs) lines.push(l);
 	lines.push(`>>>>>>> ${block.theirsLabel || "theirs"}`);
 	return lines.join("\n");

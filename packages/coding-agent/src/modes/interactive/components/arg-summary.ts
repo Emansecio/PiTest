@@ -17,6 +17,7 @@ export function summarizeArgsOneLine(args: unknown, maxLen = FALLBACK_CALL_SUMMA
 		return "";
 	}
 	const parts: string[] = [];
+	let joinedLen = 0;
 	for (const [k, v] of Object.entries(args as Record<string, unknown>)) {
 		if (v === null || v === undefined) continue;
 		let val: string;
@@ -24,9 +25,11 @@ export function summarizeArgsOneLine(args: unknown, maxLen = FALLBACK_CALL_SUMMA
 		else if (typeof v === "number" || typeof v === "boolean") val = String(v);
 		else if (Array.isArray(v)) val = `[${v.length}]`;
 		else val = "{…}";
-		parts.push(`${k}: ${val.replace(/\s+/g, " ").trim()}`);
+		const part = `${k}: ${val.replace(/\s+/g, " ").trim()}`;
+		parts.push(part);
+		joinedLen += (parts.length > 1 ? 2 : 0) + part.length;
 		// Stop once we already overflow — no point formatting the tail.
-		if (parts.join("  ").length >= maxLen) break;
+		if (joinedLen >= maxLen) break;
 	}
 	return clamp(parts.join("  "));
 }

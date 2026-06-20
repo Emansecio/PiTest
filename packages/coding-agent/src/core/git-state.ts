@@ -42,8 +42,9 @@ export function readGitBranch(cwd: string): string | undefined {
 	if (refMatch) {
 		return refMatch[1]!.trim();
 	}
-	// Detached HEAD: the file holds a raw commit hash.
-	if (/^[0-9a-f]{40}$/.test(head)) {
+	// Detached HEAD: the file holds a raw commit hash. Accept 40-hex (SHA-1)
+	// and 64-hex (SHA-256, `extensions.objectFormat=sha256`) object ids.
+	if (/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(head)) {
 		return `detached @ ${head.slice(0, 12)}`;
 	}
 	return undefined;

@@ -151,12 +151,18 @@ export class FrequentFilesTracker {
 				if (stat.lastTouchedAt > existing.lastTouchedAt) {
 					existing.lastTouchedAt = stat.lastTouchedAt;
 				}
+				// Bumping an existing entry's hits can move it off being coldest (and
+				// raises the floor); the cached coldest is now stale. Mirror loadSnapshot.
+				this._coldestDirty = true;
 				continue;
 			}
 			if (this.entries.size >= this.maxFiles) {
 				this.evictColdest();
 			}
 			this.entries.set(stat.path, { ...stat });
+			// A freshly-inserted entry may be the new coldest; force a recompute on the
+			// next eviction rather than trusting the stale cached coldest.
+			this._coldestDirty = true;
 		}
 	}
 

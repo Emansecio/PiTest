@@ -1332,8 +1332,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				}
 			}
 			if (inflight.length === 0) return;
-			const grace = new Promise<void>((r) => setTimeout(r, 1500));
-			await Promise.race([Promise.all(inflight), grace]);
+			let graceTimer: ReturnType<typeof setTimeout> | undefined;
+			const grace = new Promise<void>((r) => {
+				graceTimer = setTimeout(r, 1500);
+			});
+			try {
+				await Promise.race([Promise.all(inflight), grace]);
+			} finally {
+				if (graceTimer !== undefined) clearTimeout(graceTimer);
+			}
 		});
 	};
 }

@@ -441,6 +441,10 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 		});
 		child.on("error", (err) => {
 			clearTimers();
+			// A spawn failure (e.g. ENOENT) emits 'error' WITHOUT a following 'close',
+			// so detach the abort listener here too — otherwise it leaks on the shared
+			// per-turn signal for every member that fails to spawn.
+			opts.signal?.removeEventListener("abort", onAbort);
 			recordDiagnostic({
 				category: "fusion.member-failed",
 				level: "warn",

@@ -480,7 +480,7 @@ export function serializeConversation(messages: Message[]): string {
 					const argsStr = Object.entries(args)
 						.map(([k, v]) => {
 							const serialized = JSON.stringify(v);
-							return serialized.length <= 300 ? `${k}=${serialized}` : `${k}=${serialized.slice(0, 300)}…`;
+							return serialized.length <= 300 ? `${k}=${serialized}` : `${k}=${sliceSafe(serialized, 0, 300)}…`;
 						})
 						.join(", ");
 					toolCalls.push({

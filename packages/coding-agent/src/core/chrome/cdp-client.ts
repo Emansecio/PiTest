@@ -210,6 +210,12 @@ export class CdpConnection {
 		// hung upgrade too (ensureOpen has its own connect-timeout ceiling). The
 		// command-timeout below still governs the post-connect phase unchanged.
 		await this.openWithAbort(method, opts?.signal);
+		// The socket may have opened and then closed during the await above: the WS
+		// 'close'/'error' handler sets `this.closed` and runs failAll() over the
+		// pending map *before* this entry exists, so without this guard the command
+		// would only settle via its 30s timeout. Re-check and fail fast, mirroring
+		// the pre-await guard on line 207.
+		if (this.closed) throw new Error("CDP connection is closed.");
 		const id = this.nextId++;
 		return new Promise((resolve, reject) => {
 			const signal = opts?.signal;

@@ -262,8 +262,9 @@ const tier1Rules: ToolRewriteRule[] = [
 			tier: "auto",
 			rewrite: (c) => {
 				const args = { ...(c.arguments as Record<string, unknown>) };
-				const pathKey = "path" in args ? "path" : "file_path";
-				const raw = args[pathKey] as string;
+				const pathKey = typeof args.path === "string" ? "path" : "file_path";
+				const raw = args[pathKey];
+				if (typeof raw !== "string") return c;
 				const match = raw.match(/^(.*):(\d+)-(\d+)$/);
 				if (!match) return c;
 				const [, base, startStr, endStr] = match;

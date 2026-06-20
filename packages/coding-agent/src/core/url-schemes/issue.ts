@@ -18,22 +18,28 @@ interface IssueUrlParts {
 const GH_INSTALL_HINT = "gh CLI not installed; install via https://cli.github.com/ to use issue:// scheme";
 const GH_AUTH_HINT = "gh CLI is installed but not authenticated. Run: gh auth login";
 
-// Module-level cache: undefined = unchecked, true = authenticated, false = unauthenticated/missing.
-let ghAuthCache: boolean | undefined;
+type GhAuthStatus = "ok" | "unauthenticated" | "not-installed";
 
-function probeGhAuth(cwd: string): Promise<boolean> {
+// Module-level cache: undefined = unchecked.
+let ghAuthCache: GhAuthStatus | undefined;
+
+function probeGhAuth(cwd: string): Promise<GhAuthStatus> {
 	return new Promise((resolve) => {
 		execFile("gh", ["auth", "status"], { cwd, maxBuffer: 1 * 1024 * 1024, windowsHide: true }, (err) => {
-			if (err) {
-				resolve(false);
+			if (err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+				resolve("not-installed");
 				return;
 			}
-			resolve(true);
+			if (err) {
+				resolve("unauthenticated");
+				return;
+			}
+			resolve("ok");
 		});
 	});
 }
 
-async function ensureGhAuth(cwd: string): Promise<boolean> {
+async function ensureGhAuth(cwd: string): Promise<GhAuthStatus> {
 	if (ghAuthCache !== undefined) return ghAuthCache;
 	ghAuthCache = await probeGhAuth(cwd);
 	return ghAuthCache;
@@ -143,7 +149,11 @@ export function createIssueSchemeResolver(): UrlSchemeResolver {
 		async read(url: URL, ctx: UrlContext): Promise<UrlReadResult> {
 			const parsed = parseIssueUrl(url);
 			if ("error" in parsed) return { kind: "error", error: parsed.error };
-			if (!(await ensureGhAuth(ctx.cwd))) {
+			const authStatus = await ensureGhAuth(ctx.cwd);
+			if (authStatus === "not-installed") {
+				return { kind: "error", error: GH_INSTALL_HINT };
+			}
+			if (authStatus === "unauthenticated") {
 				return { kind: "error", error: GH_AUTH_HINT };
 			}
 			const repoArgs = parsed.owner && parsed.repo ? ["--repo", `${parsed.owner}/${parsed.repo}`] : [];
