@@ -417,7 +417,14 @@ async function* iterateSseMessages(
 			yield trailingEvent;
 		}
 	} finally {
-		reader.releaseLock();
+		try {
+			await reader.cancel();
+		} catch {
+		} finally {
+			try {
+				reader.releaseLock();
+			} catch {}
+		}
 	}
 }
 

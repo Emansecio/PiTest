@@ -277,7 +277,32 @@ class PythonKernel implements EvalKernel {
 		return new Promise<EvalResult>((resolve, reject) => {
 			const run = () => this.runOne(req, signal, resolve, reject);
 			if (this.current) {
-				this.queue.push(run);
+				// Queued behind an in-flight call. runOne (which registers its own abort
+				// listener) won't execute until this call is dequeued, so an abort that
+				// arrives while we wait would otherwise be ignored until the head call
+				// finishes/times out (up to a full timeout). Attach a lightweight listener
+				// here that drops the queued `run` and rejects immediately. If the call is
+				// later dequeued and starts running, this listener is removed so runOne's
+				// own abort handling takes over.
+				if (signal) {
+					const onQueuedAbort = () => {
+						const i = this.queue.indexOf(queuedEntry);
+						if (i >= 0) this.queue.splice(i, 1);
+						reject(new Error("aborted"));
+					};
+					const queuedEntry = () => {
+						signal.removeEventListener("abort", onQueuedAbort);
+						run();
+					};
+					if (signal.aborted) {
+						reject(new Error("aborted"));
+						return;
+					}
+					signal.addEventListener("abort", onQueuedAbort, { once: true });
+					this.queue.push(queuedEntry);
+				} else {
+					this.queue.push(run);
+				}
 			} else {
 				run();
 			}

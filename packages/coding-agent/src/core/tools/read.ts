@@ -647,16 +647,17 @@ Common mistakes to avoid:
 							// A directory passes access(R_OK), but every read syscall on it
 							// (image sniff, byte stream, readFile) throws EISDIR. Detect it up
 							// front and return an actionable note instead of crashing.
-							if (ops.stat) {
-								const earlyStat = await ops.stat(absolutePath);
+							// Stat once here: the same object carries size/mtimeMs reused by the
+							// crush/stream gating on the text path below, so the buffered read path
+							// never pays a second stat syscall per file.
+							const earlyStat = ops.stat ? await ops.stat(absolutePath) : undefined;
+							if (aborted) return;
+							if (earlyStat?.isDirectory?.()) {
+								const text = await resolveDirectoryRead(path, absolutePath, ops, offset, limit);
 								if (aborted) return;
-								if (earlyStat.isDirectory?.()) {
-									const text = await resolveDirectoryRead(path, absolutePath, ops, offset, limit);
-									if (aborted) return;
-									signal?.removeEventListener("abort", onAbort);
-									resolve({ content: [{ type: "text", text }], details: undefined });
-									return;
-								}
+								signal?.removeEventListener("abort", onAbort);
+								resolve({ content: [{ type: "text", text }], details: undefined });
+								return;
 							}
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							let content: (TextContent | ImageContent)[];
@@ -707,10 +708,10 @@ Common mistakes to avoid:
 								// Apply offset if specified. Convert from 1-indexed input to 0-indexed array access.
 								const startLine = offset ? Math.max(0, offset - 1) : 0;
 								const startLineDisplay = startLine + 1;
-								// Stat once up front (when available) so json-crush eligibility can be
-								// size-gated. Reused by the streaming branch below.
-								const preReadStat = ops.stat ? await ops.stat(absolutePath) : undefined;
-								if (aborted) return;
+								// Reuse the single stat taken up front (when available) so json-crush
+								// eligibility can be size-gated and the streaming branch below can read
+								// size/mtimeMs without a second stat syscall on the hot read path.
+								const preReadStat = earlyStat;
 								// Capture the on-disk mtime so a later edit/write can warn if the file
 								// changes externally before the model acts on what it read here. The
 								// commit into the shared store is deferred to just before resolve() so an

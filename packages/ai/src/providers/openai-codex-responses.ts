@@ -148,15 +148,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 	(async () => {
 		const output: AssistantMessage = createInitialAssistantMessage(model, "openai-codex-responses" as Api);
 
-		// Connect-phase timeout shared across retries: aborts if response headers
-		// don't arrive in time. Cleared once each fetch resolves so the SSE body
-		// stream (a long generation) is never killed mid-flight. Declared outside the
-		// try so the listener is removed in finally (no AbortSignal listener leak).
-		const connectController = new AbortController();
-		const onUserAbort = () => connectController.abort();
-		options?.signal?.addEventListener("abort", onUserAbort);
-		let connectTimer: ReturnType<typeof setTimeout> | undefined;
-
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			if (!apiKey) {
@@ -249,6 +240,16 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					throw new Error("Request was aborted");
 				}
 
+				// Fresh per-attempt connect controller: a connect-timeout (or user
+				// abort) on one attempt must not poison the next retry's fetch. The
+				// watchdog aborts only THIS attempt's controller; the user-abort
+				// listener is forwarded to it and removed in the per-attempt finally
+				// so there is no AbortSignal listener leak across retries.
+				const connectController = new AbortController();
+				const onUserAbort = () => connectController.abort();
+				options?.signal?.addEventListener("abort", onUserAbort, { once: true });
+				let connectTimer: ReturnType<typeof setTimeout> | undefined;
+
 				try {
 					connectTimer = setTimeout(() => {
 						connectController.abort(
@@ -291,20 +292,28 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					const info = await parseErrorResponse(fakeResponse);
 					throw new Error(info.friendlyMessage || info.message);
 				} catch (error) {
-					clearTimeout(connectTimer);
-					if (error instanceof Error) {
+					// A user abort (not a per-attempt connect-timeout) is terminal: surface
+					// it immediately. A connect-timeout aborts only this attempt's controller,
+					// so options.signal stays un-aborted and the error falls through to retry.
+					const userAborted = options?.signal?.aborted === true;
+					if (userAborted && error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
 						}
 					}
 					lastError = error instanceof Error ? error : new Error(String(error));
-					// Network errors are retryable
+					// Network errors (including a per-attempt connect-timeout) are retryable
 					if (attempt < maxRetries && !lastError.message.includes("usage limit")) {
 						const delayMs = computeRetryDelay(attempt, null, { baseDelayMs: BASE_DELAY_MS });
 						await sleep(delayMs, options?.signal);
 						continue;
 					}
 					throw lastError;
+				} finally {
+					if (connectTimer !== undefined) {
+						clearTimeout(connectTimer);
+					}
+					options?.signal?.removeEventListener("abort", onUserAbort);
 				}
 			}
 
@@ -333,9 +342,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			output.errorMessage = error instanceof Error ? error.message : String(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
-		} finally {
-			clearTimeout(connectTimer);
-			options?.signal?.removeEventListener("abort", onUserAbort);
 		}
 	})();
 

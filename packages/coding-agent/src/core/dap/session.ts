@@ -9,7 +9,7 @@ import * as path from "node:path";
 import * as timers from "node:timers/promises";
 import { recordDiagnostic } from "@pit/ai";
 import { waitForChildProcess } from "../../utils/child-process.ts";
-import { trackDetachedChildPid } from "../../utils/shell.ts";
+import { trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
 import { log, toErrorMessage, untilAborted } from "../lsp/internal.ts";
 import { DapClient, NON_INTERACTIVE_ENV } from "./client.ts";
 import type {
@@ -1019,7 +1019,15 @@ export class DapSessionManager {
 			// as an uncaught exception and crashes the host. Same guard the
 			// socket-mode spawn already uses.
 			proc.on("error", () => {});
-			if (proc.pid) trackDetachedChildPid(proc.pid);
+			// Pair tracking with an exit handler so each detached PID is removed once its
+			// process dies; otherwise trackedDetachedChildPids (a module-level Set in
+			// utils/shell.ts) grows unbounded across launch/attach cycles and
+			// killTrackedDetachedChildren() at shutdown would killProcessTree stale,
+			// possibly OS-recycled PIDs. Mirrors the bash.ts pairing.
+			if (proc.pid) {
+				trackDetachedChildPid(proc.pid);
+				proc.once("exit", () => untrackDetachedChildPid(proc.pid!));
+			}
 			proc.unref?.();
 			return { processId: proc.pid } satisfies DapRunInTerminalResponse;
 		});

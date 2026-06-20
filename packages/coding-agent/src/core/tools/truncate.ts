@@ -83,6 +83,58 @@ export function formatSize(bytes: number): string {
 const DEFAULT_COLLAPSE_MIN_RUN = 3;
 
 /**
+ * Allocation-free scan for the presence of any run of `minRun` (or more)
+ * identical consecutive lines, where "line" matches `text.split("\n")` exactly
+ * (newline-delimited segments, with a trailing empty segment for a trailing
+ * newline). Returns true as soon as one such run is found, letting
+ * `collapseRepeatedLines` skip the full split/array/join when nothing collapses.
+ *
+ * Equality is checked by comparing each newline-delimited segment against the
+ * previous one via substring bounds — no per-line strings are allocated.
+ */
+function hasCollapsibleRun(text: string, minRun: number): boolean {
+	const len = text.length;
+	// Start/end (exclusive) of the previous segment, and how many consecutive
+	// segments (including the previous one) have been identical so far.
+	let prevStart = 0;
+	let prevEnd = -1;
+	let hasPrev = false;
+	let runLength = 1;
+	let segStart = 0;
+	let i = 0;
+	while (i <= len) {
+		const isBoundary = i === len || text.charCodeAt(i) === 10;
+		if (!isBoundary) {
+			i++;
+			continue;
+		}
+		const segEnd = i;
+		if (hasPrev && segmentsEqual(text, prevStart, prevEnd, segStart, segEnd)) {
+			runLength++;
+			if (runLength >= minRun) return true;
+		} else {
+			runLength = 1;
+		}
+		prevStart = segStart;
+		prevEnd = segEnd;
+		hasPrev = true;
+		segStart = i + 1;
+		i++;
+	}
+	return false;
+}
+
+/** Compare two substrings of `text` for equality without allocating slices. */
+function segmentsEqual(text: string, aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
+	const aLen = aEnd - aStart;
+	if (aLen !== bEnd - bStart) return false;
+	for (let k = 0; k < aLen; k++) {
+		if (text.charCodeAt(aStart + k) !== text.charCodeAt(bStart + k)) return false;
+	}
+	return true;
+}
+
+/**
  * Collapse runs of identical consecutive lines to shrink verbose command output
  * before it reaches the LLM (repeated log/test/progress/warning lines). A run of
  * `minRun` or more identical lines becomes one line + a `… (×N)` count marker;
@@ -92,6 +144,10 @@ const DEFAULT_COLLAPSE_MIN_RUN = 3;
  */
 export function collapseRepeatedLines(text: string, minRun = DEFAULT_COLLAPSE_MIN_RUN): string {
 	if (!text || minRun < 2) return text;
+	// Fast path: scan for the first run of >= minRun identical consecutive lines
+	// without allocating. The common case (bash/check output with no collapsible
+	// run) returns the original string here, skipping the full split/array/join.
+	if (!hasCollapsibleRun(text, minRun)) return text;
 	const lines = text.split("\n");
 	const out: string[] = [];
 	let i = 0;

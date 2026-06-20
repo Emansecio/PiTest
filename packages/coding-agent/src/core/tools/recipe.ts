@@ -12,12 +12,13 @@
  * honors the agent's abort signal.
  */
 
-import { execFile } from "node:child_process";
+import { type ExecFileOptions, execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import * as nodePath from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { killProcessTree } from "../../utils/shell.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { needsWindowsShell, which } from "../lsp/internal.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
@@ -53,6 +54,14 @@ export interface RecipeToolOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Grace window after a kill is requested (timeout/abort) before escalating to a
+ * whole-process-tree kill. Lets execFile's own single-process SIGTERM land and
+ * the callback report the outcome first; the tree-kill then only reaps orphaned
+ * grandchildren that ignored or outlived the SIGTERM. Mirrors exec.ts.
+ */
+const SIGKILL_GRACE_MS = 5000;
 
 const CARGO_SUBCOMMANDS = new Set(["build", "test", "check", "run", "clippy", "fmt"]);
 
@@ -204,54 +213,114 @@ function runRunner(
 		// so the metacharacters arrive as literal data. Native binaries spawn with
 		// shell:false (execvp), which is already injection-safe everywhere.
 		const strategy = resolveSpawnStrategy(binary, args);
-		const child = execFile(
-			strategy.command,
-			strategy.args,
-			{
-				cwd,
-				signal,
-				timeout: timeoutMs,
-				maxBuffer: 16 * 1024 * 1024,
-				shell: strategy.useShell,
-				windowsHide: true,
-			},
-			(err, stdout, stderr) => {
-				const stdoutStr = stdout?.toString() ?? "";
-				const stderrStr = stderr?.toString() ?? "";
-				if (err) {
-					const e = err as NodeJS.ErrnoException & { code?: string | number; killed?: boolean; signal?: string };
-					if (e.code === "ENOENT") {
-						resolve({
-							exitCode: 127,
-							stdout: stdoutStr,
-							stderr: stderrStr || `recipe error: binary not found in PATH: ${binary}`,
-							timedOut: false,
-						});
-						return;
-					}
-					if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
-						// Node killed the child for exceeding maxBuffer and handed back
-						// TRUNCATED stdout/stderr. Surface this explicitly so the model
-						// does not mistake a capped/killed process for a plain failure.
-						resolve({
-							exitCode: 1,
-							stdout: stdoutStr,
-							stderr: `${stderrStr}\n[recipe: output exceeded 16MB cap and was truncated; the process was killed]`,
-							timedOut: false,
-						});
-						return;
-					}
-					if (e.signal === "SIGTERM" && e.killed) {
-						timedOut = true;
-					}
-					const exitCode = typeof e.code === "number" ? e.code : 1;
-					resolve({ exitCode, stdout: stdoutStr, stderr: stderrStr || String(err), timedOut });
+		// Detach on POSIX so the child leads its own process group; that makes the
+		// `process.kill(-pid)` group-kill in killProcessTree reap grandchildren the
+		// shim spawned (the actual node/build process). On Windows execFile cannot
+		// place the child in a job object, so killProcessTree falls back to
+		// `taskkill /T`, which walks the tree by pid. `detached` is honored by
+		// execFile at runtime (forwarded to the underlying spawn) but is absent from
+		// the narrower `ExecFileOptions` type, so widen the annotation to include it
+		// rather than letting excess-property checking break overload resolution.
+		const execOptions: ExecFileOptions & { detached?: boolean } = {
+			cwd,
+			signal,
+			timeout: timeoutMs,
+			maxBuffer: 16 * 1024 * 1024,
+			shell: strategy.useShell,
+			windowsHide: true,
+			detached: process.platform !== "win32",
+		};
+		const child = execFile(strategy.command, strategy.args, execOptions, (err, stdout, stderr) => {
+			const stdoutStr = stdout?.toString() ?? "";
+			const stderrStr = stderr?.toString() ?? "";
+			if (err) {
+				const e = err as NodeJS.ErrnoException & { code?: string | number; killed?: boolean; signal?: string };
+				if (e.code === "ENOENT") {
+					resolve({
+						exitCode: 127,
+						stdout: stdoutStr,
+						stderr: stderrStr || `recipe error: binary not found in PATH: ${binary}`,
+						timedOut: false,
+					});
 					return;
 				}
-				resolve({ exitCode: 0, stdout: stdoutStr, stderr: stderrStr, timedOut });
-			},
-		);
-		void child;
+				if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+					// Node killed the child for exceeding maxBuffer and handed back
+					// TRUNCATED stdout/stderr. Surface this explicitly so the model
+					// does not mistake a capped/killed process for a plain failure.
+					resolve({
+						exitCode: 1,
+						stdout: stdoutStr,
+						stderr: `${stderrStr}\n[recipe: output exceeded 16MB cap and was truncated; the process was killed]`,
+						timedOut: false,
+					});
+					return;
+				}
+				if (e.signal === "SIGTERM" && e.killed) {
+					timedOut = true;
+				}
+				const exitCode = typeof e.code === "number" ? e.code : 1;
+				resolve({ exitCode, stdout: stdoutStr, stderr: stderrStr || String(err), timedOut });
+				return;
+			}
+			resolve({ exitCode: 0, stdout: stdoutStr, stderr: stderrStr, timedOut });
+		});
+
+		// execFile's built-in `timeout`/`signal` send a single SIGTERM to the DIRECT
+		// child only. On Windows that's the `npm.cmd`/`pnpm.cmd` shim; the real
+		// node/build grandchild it spawned is left orphaned and keeps burning
+		// CPU/memory after a timeout or ESC abort. On POSIX a `cargo`/`make` child
+		// can likewise leave a detached subprocess. Mirror the bash/runSubprocess
+		// path: when a kill is requested, escalate to a whole-tree kill via
+		// killProcessTree (taskkill /T on Windows, process-group SIGKILL on POSIX).
+		//
+		// The escalation is deferred by a grace period so execFile's own SIGTERM
+		// lands first — that lets the child exit cleanly and the callback above
+		// report `timedOut`/exit code exactly as before; the tree-kill then only
+		// reaps survivors. The execFile callback still settles the Promise; this
+		// only guarantees the descendants die too. Behavior on the success path is
+		// unchanged: `close` clears everything before the timer can fire.
+		let settled = false;
+		let killTimer: NodeJS.Timeout | undefined;
+		const scheduleTreeKill = () => {
+			if (settled || killTimer !== undefined) return;
+			killTimer = setTimeout(() => {
+				killTimer = undefined;
+				if (!settled && child.pid !== undefined) killProcessTree(child.pid);
+			}, SIGKILL_GRACE_MS);
+			// Don't keep the event loop alive solely for this timer.
+			killTimer.unref?.();
+		};
+
+		// Arm the tree-kill at the timeout deadline (execFile fires its SIGTERM at
+		// the same moment) and on abort. execFile also reacts to `signal`, so this
+		// listener only adds the tree escalation on top.
+		let deadlineTimer: NodeJS.Timeout | undefined;
+		if (timeoutMs > 0) {
+			deadlineTimer = setTimeout(scheduleTreeKill, timeoutMs);
+			deadlineTimer.unref?.();
+		}
+		const onAbort = () => scheduleTreeKill();
+		if (signal) {
+			if (signal.aborted) scheduleTreeKill();
+			else signal.addEventListener("abort", onAbort, { once: true });
+		}
+
+		// Once the process settles, cancel every pending timer/listener so a
+		// normally-finished run leaves nothing pending and never tree-kills a pid
+		// that the OS may have recycled.
+		child.on("close", () => {
+			settled = true;
+			if (deadlineTimer) {
+				clearTimeout(deadlineTimer);
+				deadlineTimer = undefined;
+			}
+			if (killTimer) {
+				clearTimeout(killTimer);
+				killTimer = undefined;
+			}
+			if (signal) signal.removeEventListener("abort", onAbort);
+		});
 	});
 }
 

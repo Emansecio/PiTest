@@ -236,7 +236,7 @@ function extractCodexError(raw: string): string {
 	} catch {
 		// not nested JSON — fall through to the raw string
 	}
-	return raw.slice(0, 160);
+	return sliceSafe(raw, 0, 160);
 }
 
 /**
@@ -355,6 +355,15 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 				if (line) parseLine(line);
 				nl = lineBuf.indexOf("\n");
 			}
+			// A member CLI that emits a huge blob on a SINGLE line with no trailing
+			// newline (malformed output mode, an oversized tool_result) would grow lineBuf
+			// without bound — chunks keep arriving so armIdle() defers the idle kill and only
+			// the hard timeout eventually frees it. Bound the retained partial: an over-cap
+			// line can't be valid JSONL we'd parse anyway, so keep only its surrogate-safe
+			// tail (mirrors STREAM_TAIL_BYTES for stderr / MAX_HOOK_OUTPUT_BYTES in hooks).
+			if (lineBuf.length > MAX_LINE_BUF_BYTES) {
+				lineBuf = sliceSafe(lineBuf, lineBuf.length - MAX_LINE_BUF_BYTES);
+			}
 		};
 		const finish = (r: PanelResult) => {
 			if (settled) return;
@@ -393,6 +402,12 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 		const idleMs = opts.idleTimeoutMs && opts.idleTimeoutMs > 0 ? opts.idleTimeoutMs : 0;
 		let idleTimer: ReturnType<typeof setTimeout> | undefined;
 		const killWith = (note: string, error: string, ms: number) => {
+			// killWith is the timeout/idle-timeout firing path: it does NOT wait for 'close'
+			// to clear timers. Clear them (and detach the abort listener) up front so a child
+			// that fails to emit 'close' (taskkill failure, detached grandchild) can't leave a
+			// still-armed timer holding the event loop open after the promise has settled.
+			clearTimers();
+			opts.signal?.removeEventListener("abort", onAbort);
 			killTree(child);
 			recordDiagnostic({
 				category: "fusion.member-failed",
@@ -406,10 +421,15 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 			opts.timeoutMs > 0
 				? setTimeout(() => killWith("timeout", "timeout", opts.timeoutMs), opts.timeoutMs)
 				: undefined;
+		// Belt-and-suspenders against a stuck child that never emits 'close': unref so a
+		// still-armed timer can never keep the loop alive after the promise settles (parity
+		// with the SIGKILL escalation timer in killTree).
+		hardTimer?.unref?.();
 		const armIdle = () => {
 			if (idleMs <= 0) return;
 			if (idleTimer) clearTimeout(idleTimer);
 			idleTimer = setTimeout(() => killWith("idle-timeout", "idle timeout", idleMs), idleMs);
+			idleTimer.unref?.();
 		};
 		const clearTimers = () => {
 			if (hardTimer) clearTimeout(hardTimer);
@@ -514,6 +534,10 @@ function readCodexOut(outFile: string): string {
  * from `claudeState.result` / the codex `-o` file and every chunk still reaches the
  * line parser; this tail bound only stops the retained buffer growing without limit. */
 const STREAM_TAIL_BYTES = 8192;
+/** Ceiling for the in-flight line accumulator (`lineBuf`). A well-formed JSONL line
+ * is far below this; exceeding it means a member is emitting an unbounded single line
+ * (no newline), so we drop everything but the tail to keep heap flat. */
+const MAX_LINE_BUF_BYTES = 4 * 1024 * 1024;
 function appendTail(buf: string, chunk: string): string {
 	const next = buf + chunk;
 	return next.length > STREAM_TAIL_BYTES ? sliceSafe(next, next.length - STREAM_TAIL_BYTES) : next;

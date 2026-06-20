@@ -126,6 +126,7 @@ export class ProcessTerminal implements Terminal {
 				this.resizeDebounceTimer = undefined;
 				this.resizeHandler?.();
 			}, TERMINAL_RESIZE_DEBOUNCE_MS);
+			(this.resizeDebounceTimer as { unref?: () => void }).unref?.();
 		};
 		process.stdout.on("resize", this.resizeListener);
 

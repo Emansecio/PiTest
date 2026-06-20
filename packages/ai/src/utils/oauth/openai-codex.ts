@@ -22,6 +22,20 @@ import { generatePKCE } from "./pkce.ts";
 import type { OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface } from "./types.ts";
 
 const CALLBACK_HOST = process.env.PIT_OAUTH_CALLBACK_HOST || "127.0.0.1";
+/**
+ * Maximum time to block on the browser callback before falling through to the
+ * manual `onPrompt` paste path. Without this bound, a callback that never
+ * arrives (browser closed, login on a remote machine, redirect lost, etc.)
+ * would hang `loginOpenAICodex` forever. Override via PIT_OAUTH_CALLBACK_TIMEOUT_MS.
+ */
+function parseCallbackTimeoutMs(): number {
+	const raw = process.env.PIT_OAUTH_CALLBACK_TIMEOUT_MS;
+	if (raw) {
+		const parsed = Number.parseInt(raw, 10);
+		if (Number.isFinite(parsed) && parsed > 0) return parsed;
+	}
+	return 5 * 60 * 1000;
+}
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL = "https://auth.openai.com/oauth/token";
@@ -289,6 +303,44 @@ function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
 	});
 }
 
+/**
+ * Wait for the OAuth callback, but bound the wait so a never-arriving redirect
+ * (browser closed, remote-machine login, etc.) cannot hang forever. The wait
+ * resolves early — to `null` — when `signal` aborts or the timeout elapses, in
+ * which case the caller falls through to the manual paste path. All timers and
+ * listeners are cleaned up regardless of which path wins.
+ */
+async function waitForCallbackBounded(
+	server: OAuthServerInfo,
+	signal: AbortSignal | undefined,
+	timeoutMs: number,
+): Promise<{ code: string } | null> {
+	if (signal?.aborted) {
+		server.cancelWait();
+		return server.waitForCode();
+	}
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const onAbort = () => {
+		server.cancelWait();
+	};
+
+	try {
+		if (timeoutMs > 0 && timeoutMs !== Number.POSITIVE_INFINITY) {
+			timer = setTimeout(() => {
+				server.cancelWait();
+			}, timeoutMs);
+			// Don't keep the process alive solely for this fallback timer.
+			timer.unref?.();
+		}
+		signal?.addEventListener("abort", onAbort, { once: true });
+		return await server.waitForCode();
+	} finally {
+		if (timer) clearTimeout(timer);
+		signal?.removeEventListener("abort", onAbort);
+	}
+}
+
 function getAccountId(accessToken: string): string | null {
 	const payload = decodeJwt(accessToken);
 	const auth = payload?.[JWT_CLAIM_PATH];
@@ -313,9 +365,11 @@ export async function loginOpenAICodex(options: {
 	onProgress?: (message: string) => void;
 	onManualCodeInput?: () => Promise<string>;
 	originator?: string;
+	signal?: AbortSignal;
 }): Promise<OAuthCredentials> {
 	const { verifier, state, url } = await createAuthorizationFlow(options.originator);
 	const server = await startLocalOAuthServer(state);
+	const callbackTimeoutMs = parseCallbackTimeoutMs();
 
 	options.onAuth({ url, instructions: "A browser window should open. Complete login to finish." });
 
@@ -336,7 +390,11 @@ export async function loginOpenAICodex(options: {
 					server.cancelWait();
 				});
 
-			const result = await server.waitForCode();
+			// `signal` also unblocks here: without it an external abort while the
+			// user neither pastes a code nor the browser redirect arrives would
+			// hang on `waitForCode()`. The manual paste path already supplies its
+			// own cancel via `cancelWait()`, so no timeout is forced here.
+			const result = await waitForCallbackBounded(server, options.signal, Number.POSITIVE_INFINITY);
 
 			// If manual input was cancelled, throw that error
 			if (manualError) {
@@ -370,8 +428,11 @@ export async function loginOpenAICodex(options: {
 				}
 			}
 		} else {
-			// Original flow: wait for callback, then prompt if needed
-			const result = await server.waitForCode();
+			// Original flow: wait for callback, then prompt if needed.
+			// Bound the callback wait: if the browser redirect never arrives
+			// (window closed, remote-machine login, abort), fall through to the
+			// manual `onPrompt` path instead of hanging forever.
+			const result = await waitForCallbackBounded(server, options.signal, callbackTimeoutMs);
 			if (result?.code) {
 				code = result.code;
 			}
@@ -447,6 +508,7 @@ export const openaiCodexOAuthProvider: OAuthProviderInterface = {
 			onPrompt: callbacks.onPrompt,
 			onProgress: callbacks.onProgress,
 			onManualCodeInput: callbacks.onManualCodeInput,
+			signal: callbacks.signal,
 		});
 	},
 

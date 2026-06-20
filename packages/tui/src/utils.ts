@@ -35,6 +35,11 @@ const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 
 // Cache for non-ASCII strings
 const WIDTH_CACHE_SIZE = 512;
+// Skip caching very large strings: the key is the full input, so a multi-MB
+// line would be retained until FIFO-evicted (potentially gigabytes across 512
+// such entries). The width is still computed/returned for these — only the
+// cache write is skipped, so behavior is identical.
+const WIDTH_CACHE_MAX_KEY_LENGTH = 4096;
 const widthCache = new Map<string, number>();
 
 function isPrintableAscii(str: string): boolean {
@@ -243,14 +248,16 @@ export function visibleWidth(str: string): number {
 		width += graphemeWidth(segment);
 	}
 
-	// Cache result
-	if (widthCache.size >= WIDTH_CACHE_SIZE) {
-		const firstKey = widthCache.keys().next().value;
-		if (firstKey !== undefined) {
-			widthCache.delete(firstKey);
+	// Cache result (skip huge keys to bound retained bytes, not just entry count)
+	if (str.length <= WIDTH_CACHE_MAX_KEY_LENGTH) {
+		if (widthCache.size >= WIDTH_CACHE_SIZE) {
+			const firstKey = widthCache.keys().next().value;
+			if (firstKey !== undefined) {
+				widthCache.delete(firstKey);
+			}
 		}
+		widthCache.set(str, width);
 	}
-	widthCache.set(str, width);
 
 	return width;
 }

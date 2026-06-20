@@ -479,149 +479,153 @@ export function createGrepToolDefinition(
 							settle(() => reject(new Error(`Failed to run ripgrep: ${error.message}`)));
 						});
 						child.on("close", async (code) => {
-							cleanup();
-							if (aborted) {
-								settle(() => reject(new Error("Operation aborted")));
-								return;
-							}
-							if (!killedDueToLimit && code !== 0 && code !== 1) {
-								const errorMsg = stderr.trim() || `ripgrep exited with code ${code}`;
-								// A regex-parse error means the PATTERN is malformed — a user
-								// authoring mistake, not an empty result. Surfacing it as "No
-								// matches found" (a success) made the model conclude the code was
-								// absent or re-issue the same broken pattern, with no corrective
-								// signal (a success result skips error-hint enrichment). Return an
-								// actionable error so it can escape the metacharacters or set
-								// literal:true (e.g. searching for "foo(", "a[i]", "1.2.3").
-								if (/regex parse error/i.test(errorMsg)) {
-									settle(() =>
-										reject(
-											new Error(
-												`Invalid regex pattern: ${errorMsg}. If you meant to match this text ` +
-													`literally (it contains regex metacharacters like ( ) [ ] . * + ? | \\ ), ` +
-													`set literal: true.`,
+							try {
+								cleanup();
+								if (aborted) {
+									settle(() => reject(new Error("Operation aborted")));
+									return;
+								}
+								if (!killedDueToLimit && code !== 0 && code !== 1) {
+									const errorMsg = stderr.trim() || `ripgrep exited with code ${code}`;
+									// A regex-parse error means the PATTERN is malformed — a user
+									// authoring mistake, not an empty result. Surfacing it as "No
+									// matches found" (a success) made the model conclude the code was
+									// absent or re-issue the same broken pattern, with no corrective
+									// signal (a success result skips error-hint enrichment). Return an
+									// actionable error so it can escape the metacharacters or set
+									// literal:true (e.g. searching for "foo(", "a[i]", "1.2.3").
+									if (/regex parse error/i.test(errorMsg)) {
+										settle(() =>
+											reject(
+												new Error(
+													`Invalid regex pattern: ${errorMsg}. If you meant to match this text ` +
+														`literally (it contains regex metacharacters like ( ) [ ] . * + ? | \\ ), ` +
+														`set literal: true.`,
+												),
 											),
-										),
+										);
+										return;
+									}
+									settle(() => reject(new Error(errorMsg)));
+									return;
+								}
+								if (mode !== "content") {
+									if (plainLines.length === 0) {
+										const noMatch = glob?.includes("\\")
+											? `No matches found. Glob patterns use forward slashes; try: ${glob.replace(/\\/g, "/")}`
+											: "No matches found";
+										settle(() => resolve({ content: [{ type: "text", text: noMatch }], details: undefined }));
+										return;
+									}
+									for (const raw of plainLines) {
+										const clean = raw.replace(/\r$/, "");
+										if (mode === "files_with_matches") {
+											outputLines.push(formatPath(clean));
+										} else {
+											// "path:count" — split on the trailing :<digits> so a Windows
+											// drive-letter colon inside the path stays with the path.
+											const parsed = /^(.*):(\d+)$/.exec(clean);
+											outputLines.push(parsed ? `${formatPath(parsed[1])}:${parsed[2]}` : clean);
+										}
+									}
+									const rawList = outputLines.join("\n");
+									const listTruncation = truncateHead(rawList, { maxLines: Number.MAX_SAFE_INTEGER });
+									let listOutput = listTruncation.content;
+									const listDetails: GrepToolDetails = {};
+									const listNotices: string[] = [];
+									if (matchLimitReached) {
+										listNotices.push(
+											`${effectiveLimit} files limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+										);
+										listDetails.matchLimitReached = effectiveLimit;
+									}
+									if (listTruncation.truncated) {
+										listNotices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+										listDetails.truncation = listTruncation;
+									}
+									if (listNotices.length > 0) listOutput += `\n\n[${listNotices.join(". ")}]`;
+									settle(() =>
+										resolve({
+											content: [{ type: "text", text: listOutput }],
+											details: nonEmptyDetails(listDetails),
+										}),
 									);
 									return;
 								}
-								settle(() => reject(new Error(errorMsg)));
-								return;
-							}
-							if (mode !== "content") {
-								if (plainLines.length === 0) {
+								if (matchCount === 0) {
+									// A user-supplied glob with a Windows-style backslash (e.g.
+									// `src\**\*.ts`) goes raw to rg --glob, where "/" is the only path
+									// separator and "\" is an escape — so it filters out everything and
+									// returns zero matches with no hint. Enrich the empty message so the
+									// model can self-correct; the success path stays untouched.
 									const noMatch = glob?.includes("\\")
 										? `No matches found. Glob patterns use forward slashes; try: ${glob.replace(/\\/g, "/")}`
 										: "No matches found";
 									settle(() => resolve({ content: [{ type: "text", text: noMatch }], details: undefined }));
 									return;
 								}
-								for (const raw of plainLines) {
-									const clean = raw.replace(/\r$/, "");
-									if (mode === "files_with_matches") {
-										outputLines.push(formatPath(clean));
+
+								// Format matches after streaming finishes so custom readFile() backends can be async.
+								for (const match of matches) {
+									if (contextValue === 0 && match.lineText !== undefined) {
+										const relativePath = formatPath(match.filePath);
+										const sanitized = match.lineText
+											.replace(/\r\n/g, "\n")
+											.replace(/\r/g, "")
+											.replace(/\n$/, "");
+										// A multiline match (multiline:true) carries a block spanning several
+										// physical lines in one event; line_number is only the first. Emit each
+										// physical line with its own `path:N:` prefix and per-line truncation so
+										// numbering stays correct and a long blob isn't sliced to one row.
+										const physicalLines = sanitized.split("\n");
+										for (let li = 0; li < physicalLines.length; li++) {
+											const { text: truncatedText, wasTruncated } = truncateLine(
+												physicalLines[li] ?? "",
+												GREP_MAX_LINE_LENGTH,
+												li === 0 ? match.matchStart : undefined,
+											);
+											if (wasTruncated) linesTruncated = true;
+											outputLines.push(`${relativePath}:${match.lineNumber + li}: ${truncatedText}`);
+										}
 									} else {
-										// "path:count" — split on the trailing :<digits> so a Windows
-										// drive-letter colon inside the path stays with the path.
-										const parsed = /^(.*):(\d+)$/.exec(clean);
-										outputLines.push(parsed ? `${formatPath(parsed[1])}:${parsed[2]}` : clean);
+										const block = await formatBlock(match.filePath, match.lineNumber, match.matchStart);
+										outputLines.push(...block);
 									}
 								}
-								const rawList = outputLines.join("\n");
-								const listTruncation = truncateHead(rawList, { maxLines: Number.MAX_SAFE_INTEGER });
-								let listOutput = listTruncation.content;
-								const listDetails: GrepToolDetails = {};
-								const listNotices: string[] = [];
+
+								const rawOutput = outputLines.join("\n");
+								// Apply byte truncation. There is no line limit here because the match limit already capped rows.
+								const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+								let output = truncation.content;
+								const details: GrepToolDetails = {};
+								// Build actionable notices for truncation and match limits.
+								const notices: string[] = [];
 								if (matchLimitReached) {
-									listNotices.push(
-										`${effectiveLimit} files limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+									notices.push(
+										`${effectiveLimit} matches limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
 									);
-									listDetails.matchLimitReached = effectiveLimit;
+									details.matchLimitReached = effectiveLimit;
 								}
-								if (listTruncation.truncated) {
-									listNotices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-									listDetails.truncation = listTruncation;
+								if (truncation.truncated) {
+									notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+									details.truncation = truncation;
 								}
-								if (listNotices.length > 0) listOutput += `\n\n[${listNotices.join(". ")}]`;
+								if (linesTruncated) {
+									notices.push(
+										`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`,
+									);
+									details.linesTruncated = true;
+								}
+								if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
 								settle(() =>
 									resolve({
-										content: [{ type: "text", text: listOutput }],
-										details: nonEmptyDetails(listDetails),
+										content: [{ type: "text", text: output }],
+										details: nonEmptyDetails(details),
 									}),
 								);
-								return;
+							} catch (err) {
+								settle(() => reject(err instanceof Error ? err : new Error(String(err))));
 							}
-							if (matchCount === 0) {
-								// A user-supplied glob with a Windows-style backslash (e.g.
-								// `src\**\*.ts`) goes raw to rg --glob, where "/" is the only path
-								// separator and "\" is an escape — so it filters out everything and
-								// returns zero matches with no hint. Enrich the empty message so the
-								// model can self-correct; the success path stays untouched.
-								const noMatch = glob?.includes("\\")
-									? `No matches found. Glob patterns use forward slashes; try: ${glob.replace(/\\/g, "/")}`
-									: "No matches found";
-								settle(() => resolve({ content: [{ type: "text", text: noMatch }], details: undefined }));
-								return;
-							}
-
-							// Format matches after streaming finishes so custom readFile() backends can be async.
-							for (const match of matches) {
-								if (contextValue === 0 && match.lineText !== undefined) {
-									const relativePath = formatPath(match.filePath);
-									const sanitized = match.lineText
-										.replace(/\r\n/g, "\n")
-										.replace(/\r/g, "")
-										.replace(/\n$/, "");
-									// A multiline match (multiline:true) carries a block spanning several
-									// physical lines in one event; line_number is only the first. Emit each
-									// physical line with its own `path:N:` prefix and per-line truncation so
-									// numbering stays correct and a long blob isn't sliced to one row.
-									const physicalLines = sanitized.split("\n");
-									for (let li = 0; li < physicalLines.length; li++) {
-										const { text: truncatedText, wasTruncated } = truncateLine(
-											physicalLines[li] ?? "",
-											GREP_MAX_LINE_LENGTH,
-											li === 0 ? match.matchStart : undefined,
-										);
-										if (wasTruncated) linesTruncated = true;
-										outputLines.push(`${relativePath}:${match.lineNumber + li}: ${truncatedText}`);
-									}
-								} else {
-									const block = await formatBlock(match.filePath, match.lineNumber, match.matchStart);
-									outputLines.push(...block);
-								}
-							}
-
-							const rawOutput = outputLines.join("\n");
-							// Apply byte truncation. There is no line limit here because the match limit already capped rows.
-							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-							let output = truncation.content;
-							const details: GrepToolDetails = {};
-							// Build actionable notices for truncation and match limits.
-							const notices: string[] = [];
-							if (matchLimitReached) {
-								notices.push(
-									`${effectiveLimit} matches limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
-								);
-								details.matchLimitReached = effectiveLimit;
-							}
-							if (truncation.truncated) {
-								notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-								details.truncation = truncation;
-							}
-							if (linesTruncated) {
-								notices.push(
-									`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`,
-								);
-								details.linesTruncated = true;
-							}
-							if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
-							settle(() =>
-								resolve({
-									content: [{ type: "text", text: output }],
-									details: nonEmptyDetails(details),
-								}),
-							);
 						});
 					} catch (err) {
 						settle(() => reject(err as Error));

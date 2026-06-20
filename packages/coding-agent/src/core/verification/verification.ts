@@ -101,11 +101,28 @@ export async function runCheckCommand(
 		detached: process.platform !== "win32",
 	});
 
-	let output = "";
+	// Accumulate chunks in an array and only join+tail-slice when the buffered
+	// total grows past 2× the cap, then once more at the end. The old code did
+	// `output += chunk; output = output.slice(-CAP)` on EVERY chunk after the
+	// cap was hit, allocating and copying a fresh ~64KB string per chunk — a GC
+	// hotspot for verbose checks emitting megabytes. Compacting only at 2× the
+	// cap amortizes the slice so it runs once per ~CAP bytes, not per chunk, and
+	// bounds the in-flight buffer to <3× the cap. The retained tail is identical.
+	const chunks: string[] = [];
+	let bufferedLength = 0;
 	let timedOut = false;
+	const compact = () => {
+		const joined = chunks.join("");
+		const tail = joined.length > MAX_OUTPUT_BYTES ? joined.slice(-MAX_OUTPUT_BYTES) : joined;
+		chunks.length = 0;
+		chunks.push(tail);
+		bufferedLength = tail.length;
+	};
 	const append = (chunk: Buffer) => {
-		output += chunk.toString();
-		if (output.length > MAX_OUTPUT_BYTES) output = output.slice(-MAX_OUTPUT_BYTES);
+		const text = chunk.toString();
+		chunks.push(text);
+		bufferedLength += text.length;
+		if (bufferedLength > MAX_OUTPUT_BYTES * 2) compact();
 	};
 	proc.stdout?.on("data", append);
 	proc.stderr?.on("data", append);
@@ -160,6 +177,8 @@ export async function runCheckCommand(
 		opts?.signal?.removeEventListener("abort", onAbort);
 	}
 
+	compact();
+	const output = chunks.length > 0 ? chunks[0] : "";
 	return { ok: exitCode === 0 && !timedOut, exitCode, output: output.trim(), timedOut };
 }
 

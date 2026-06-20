@@ -16,6 +16,13 @@ import {
 	type ToolCall,
 } from "@pit/ai";
 
+// Hard cap on the SSE line-accumulation buffer (and on any single `data:`
+// payload). A well-behaved proxy emits newline-delimited frames far smaller
+// than this; a body that never breaks on a newline would otherwise grow the
+// buffer without bound until the process OOMs. 16 MiB is generous for any
+// legitimate single event while still bounding worst-case memory.
+const MAX_STREAM_BUFFER_BYTES = 16 * 1024 * 1024;
+
 // Create stream class matching ProxyMessageEventStream
 class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
@@ -200,13 +207,40 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 				}
 
 				buffer += decoder.decode(value, { stream: true });
+
+				// Guard against a hostile/malformed 200 body that never emits a
+				// newline (e.g. one giant JSON blob, wrong content type, or raw
+				// bytes from a proxy bug). Without a cap, `buffer` accumulates every
+				// chunk for the full stream duration and OOMs the process. Treat an
+				// over-long unbroken buffer as a protocol error and stop reading.
+				if (buffer.length > MAX_STREAM_BUFFER_BYTES) {
+					finalizeOpenToolCalls(partial);
+					partial.stopReason = "error";
+					partial.errorMessage = "Proxy stream exceeded max line buffer";
+					stream.push({ type: "error", reason: "error", error: partial });
+					sawTerminal = true;
+					break;
+				}
+
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
 
+				let bufferOverflow = false;
 				for (const line of lines) {
 					if (line.startsWith("data: ")) {
 						const data = line.slice(6).trim();
 						if (data) {
+							// Cap the per-`data:` payload too, so a single oversized SSE
+							// frame can't force a multi-megabyte JSON.parse.
+							if (data.length > MAX_STREAM_BUFFER_BYTES) {
+								finalizeOpenToolCalls(partial);
+								partial.stopReason = "error";
+								partial.errorMessage = "Proxy stream exceeded max line buffer";
+								stream.push({ type: "error", reason: "error", error: partial });
+								sawTerminal = true;
+								bufferOverflow = true;
+								break;
+							}
 							const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
 							const event = processProxyEvent(proxyEvent, partial);
 							if (event) {
@@ -218,6 +252,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 						}
 					}
 				}
+				if (bufferOverflow) break;
 			}
 
 			if (options.signal?.aborted) {
@@ -230,6 +265,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 			// loop's `await response.result()` would hang forever. Synthesize a
 			// terminal error so the consumer always sees a completion.
 			if (!sawTerminal) {
+				finalizeOpenToolCalls(partial);
 				partial.stopReason = "error";
 				partial.errorMessage = "Proxy stream ended without a terminal event";
 				stream.push({ type: "error", reason: "error", error: partial });
@@ -239,6 +275,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const reason = options.signal?.aborted ? "aborted" : "error";
+			finalizeOpenToolCalls(partial);
 			partial.stopReason = reason;
 			partial.errorMessage = errorMessage;
 			stream.push({
@@ -272,6 +309,28 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 // streaming path effectively linear. The final, exact `arguments` value is
 // always produced from the complete buffer on `toolcall_end`.
 const TOOLCALL_PARSE_THROTTLE_MS = 16;
+
+/**
+ * Finalize any tool-call content blocks still carrying the transient streaming
+ * fields (`partialJson`/`lastParseAt`). Normally these are stripped on
+ * `toolcall_end`, but if the stream terminates via `done`/`error` while a tool
+ * call is still open (truncated/aborted mid tool-call), those internal fields
+ * would otherwise leak into the persisted transcript as enumerable junk and
+ * `arguments` would retain the last throttled (possibly stale) parse. This
+ * mirrors the `toolcall_end` finalization: produce the exact final arguments
+ * from the complete buffer, then delete the carrier fields.
+ */
+function finalizeOpenToolCalls(partial: AssistantMessage): void {
+	for (const content of partial.content) {
+		if (content?.type !== "toolCall") continue;
+		const carrier = content as ToolCall & { partialJson?: string; lastParseAt?: number };
+		if (typeof carrier.partialJson === "string") {
+			content.arguments = parseStreamingJson(carrier.partialJson) || {};
+		}
+		delete carrier.partialJson;
+		delete carrier.lastParseAt;
+	}
+}
 
 /**
  * Process a proxy event and update the partial message.
@@ -409,11 +468,13 @@ function processProxyEvent(
 		}
 
 		case "done":
+			finalizeOpenToolCalls(partial);
 			partial.stopReason = proxyEvent.reason;
 			partial.usage = proxyEvent.usage;
 			return { type: "done", reason: proxyEvent.reason, message: partial };
 
 		case "error":
+			finalizeOpenToolCalls(partial);
 			partial.stopReason = proxyEvent.reason;
 			partial.errorMessage = proxyEvent.errorMessage;
 			partial.usage = proxyEvent.usage;

@@ -581,8 +581,11 @@ export class RpcClient {
 				return;
 			}
 
-			// Otherwise it's an event
-			for (const listener of this.eventListeners) {
+			// Otherwise it's an event.
+			// Iterate over a snapshot so a listener that unsubscribes itself
+			// mid-dispatch (e.g. waitForIdle/collectEvents on agent_end) does not
+			// splice the live array and cause the for-of to skip the next listener.
+			for (const listener of [...this.eventListeners]) {
 				listener(data as AgentEvent);
 			}
 		} catch {

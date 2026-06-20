@@ -226,7 +226,14 @@ export class AgentMessageBus {
 			if (parentSignal.aborted) controller.abort();
 			else parentSignal.addEventListener("abort", onParentAbort, { once: true });
 		}
-		const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+		// Liveness guarantee: the race can only settle via the responder, an abort
+		// timer, or `parentSignal`. `timeoutMs <= 0` ("disabled") is only safe when a
+		// `parentSignal` provides an alternate settle path; with neither a timer nor a
+		// signal, a non-aborting responder would hang the caller forever. In that case
+		// fall back to the default upper bound so send() always has a way out.
+		let effectiveTimeoutMs = timeoutMs;
+		if (effectiveTimeoutMs <= 0 && !parentSignal) effectiveTimeoutMs = DEFAULT_MESSAGE_TIMEOUT_MS;
+		const timer = effectiveTimeoutMs > 0 ? setTimeout(() => controller.abort(), effectiveTimeoutMs) : undefined;
 		const timedOut = new Promise<never>((_resolve, reject) => {
 			if (controller.signal.aborted) {
 				reject(new Error("message dispatch aborted"));
