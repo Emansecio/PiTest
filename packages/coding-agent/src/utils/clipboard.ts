@@ -92,6 +92,12 @@ export async function copyToClipboard(text: string): Promise<void> {
 							execSync("which wl-copy", { stdio: "ignore" });
 							// wl-copy with execSync hangs due to fork behavior; use spawn instead
 							const proc = spawn("wl-copy", [], { stdio: ["pipe", "ignore", "ignore"] });
+							proc.on("error", () => {
+								// `which wl-copy` only proves the binary is on PATH; the spawn can still
+								// emit an async 'error' (EACCES, TOCTOU removal, fork/exec failure) that the
+								// synchronous try/catch cannot catch and Node would turn into a fatal
+								// uncaughtException. Swallowing it lets the catch below fall back to xclip/OSC52.
+							});
 							proc.stdin.on("error", () => {
 								// Ignore EPIPE errors if wl-copy exits early
 							});

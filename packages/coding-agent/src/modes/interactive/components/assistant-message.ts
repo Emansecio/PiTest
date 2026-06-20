@@ -10,6 +10,7 @@ import {
 	visibleWidth,
 } from "@pit/tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
+import { sliceSafe } from "../../../utils/surrogate.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { ColorEase } from "./color-ease.ts";
@@ -471,7 +472,7 @@ export class AssistantMessageComponent extends Container {
 	 * being smoothed; otherwise return it whole. */
 	private clampReveal(index: number, text: string): string {
 		if (this.revealIndex !== index || this.revealedChars >= text.length) return text;
-		return text.slice(0, this.revealedChars);
+		return sliceSafe(text, 0, this.revealedChars);
 	}
 
 	/** Fade the wavefront line's trailing edge while the trailing block is still

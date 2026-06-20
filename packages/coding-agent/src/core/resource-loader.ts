@@ -591,7 +591,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		this.updateThemesFromPaths(themePaths, metadataByPath);
 		time("reload-update-themes");
 		for (const p of this.additionalThemePaths) {
-			if (!existsSync(p) && !this.themeDiagnostics.some((d) => d.path === p)) {
+			if (isLocalPath(p) && !existsSync(p) && !this.themeDiagnostics.some((d) => d.path === p)) {
 				this.themeDiagnostics.push({ type: "error", message: "Theme path does not exist", path: p });
 			}
 		}

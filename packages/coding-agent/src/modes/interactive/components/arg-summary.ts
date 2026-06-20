@@ -1,3 +1,5 @@
+import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
+
 // Max width of the one-line arg summary shown next to a tool name for tools
 // without a custom renderCall.
 export const FALLBACK_CALL_SUMMARY_MAX = 80;
@@ -9,7 +11,7 @@ export const FALLBACK_CALL_SUMMARY_MAX = 80;
  * is clamped to maxLen.
  */
 export function summarizeArgsOneLine(args: unknown, maxLen = FALLBACK_CALL_SUMMARY_MAX): string {
-	const clamp = (s: string): string => (s.length > maxLen ? `${s.slice(0, maxLen - 1)}…` : s);
+	const clamp = (s: string): string => truncateWithEllipsis(s, maxLen);
 	if (typeof args === "string") {
 		return clamp(args.replace(/\s+/g, " ").trim());
 	}

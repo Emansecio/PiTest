@@ -14,6 +14,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentUserInputBus, type UserInputBus } from "../user-input-bus.ts";
 import { getTextOutput, str } from "./render-utils.ts";
@@ -101,8 +102,7 @@ const HEADER_MAX = 24;
 const LABEL_MAX = 60;
 
 function trimToMax(value: string, max: number): string {
-	if (value.length <= max) return value;
-	return `${value.slice(0, Math.max(0, max - 1))}…`;
+	return truncateWithEllipsis(value, max);
 }
 
 function pickFallbackLabel(options: Array<{ label: string; recommended?: boolean }>): string {

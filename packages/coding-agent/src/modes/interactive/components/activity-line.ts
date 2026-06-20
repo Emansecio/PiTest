@@ -1,5 +1,6 @@
 import { Container, SPINNER_FRAMES, type TUI, truncateToWidth } from "@pit/tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
+import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { clampBashCommandRow } from "./bash-command-row.ts";
 import { ColorEase } from "./color-ease.ts";
@@ -171,7 +172,7 @@ export class ActivityLineComponent extends Container {
 		const name = typeof args.name === "string" ? args.name.trim() : "";
 		if (name) return name;
 		const prompt = typeof args.prompt === "string" ? args.prompt.trim().replace(/\s+/g, " ") : "";
-		if (prompt) return prompt.length > TASK_LABEL_MAX ? `${prompt.slice(0, TASK_LABEL_MAX - 1)}…` : prompt;
+		if (prompt) return truncateWithEllipsis(prompt, TASK_LABEL_MAX);
 		return `Agent ${this.taskOrdinal || 1}`;
 	}
 

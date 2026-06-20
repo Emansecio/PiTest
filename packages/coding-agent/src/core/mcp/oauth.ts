@@ -215,7 +215,8 @@ function startCallbackServer(
 			const error = url.searchParams.get("error");
 			res.writeHead(200, { "content-type": "text/html" });
 			if (error) {
-				res.end(`<html><body><h3>Authorization failed: ${error}</h3>You can close this tab.</body></html>`);
+				const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+				res.end(`<html><body><h3>Authorization failed: ${esc(error)}</h3>You can close this tab.</body></html>`);
 				rejectCode(new Error(`Authorization error: ${error}`));
 			} else if (!code || state !== expectedState) {
 				res.end("<html><body><h3>Invalid callback.</h3>You can close this tab.</body></html>");

@@ -122,6 +122,17 @@ export async function executeBashWithOperations(
 	// Without this the user's `!` command kept the 2000-line/50KB default and skipped
 	// collapse, so verbose output bloated the context and persisted in history.
 	const finalizeOutput = (): { output: string; truncated: boolean } => {
+		// Flush the streaming decoder once: if the last data chunk ended mid
+		// multibyte sequence, the leading bytes are buffered inside the decoder
+		// and would otherwise be dropped from the captured output. The flush
+		// returns "" when output does not end on a split boundary.
+		const tail = sanitizeBinaryOutput(stripAnsi(decoder.decode())).replace(/\r/g, "");
+		if (tail) {
+			outputChunks.push(tail);
+			if (tempFileStream) {
+				tempFileStream.write(tail);
+			}
+		}
 		const fullOutput = outputChunks.join("");
 		const truncationResult = truncateTail(fullOutput, { maxLines: BASH_MAX_LINES, maxBytes: BASH_MAX_BYTES });
 		if (truncationResult.truncated) {

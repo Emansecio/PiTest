@@ -1,3 +1,4 @@
+import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import type {
 	AgentDelivery,
 	AgentParticipant,
@@ -173,7 +174,7 @@ export class AgentMessageBus {
 		const activity: MessageActivity = {
 			from,
 			to,
-			message: message.length > ACTIVITY_MESSAGE_CLIP ? `${message.slice(0, ACTIVITY_MESSAGE_CLIP - 1)}…` : message,
+			message: truncateWithEllipsis(message, ACTIVITY_MESSAGE_CLIP),
 			mode: awaitReply ? "reply" : "notify",
 			delivered: result.delivered,
 			replies: result.replies.length,

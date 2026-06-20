@@ -1,5 +1,6 @@
 import type { Agent, AgentMessage } from "@pit/agent-core";
 import type { AssistantMessage, Context } from "@pit/ai";
+import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import type { AgentDelivery, AgentResponder } from "./types.ts";
 
 /** One completed side-channel exchange, kept so a thread stays coherent. */
@@ -16,7 +17,7 @@ const CLIP = 400;
 
 function clip(text: string, max = CLIP): string {
 	const t = text.replace(/\s+/g, " ").trim();
-	return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+	return truncateWithEllipsis(t, max);
 }
 
 /** Renders prior exchanges as a compact recap the recipient can read back. */

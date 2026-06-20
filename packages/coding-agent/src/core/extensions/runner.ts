@@ -1174,8 +1174,15 @@ export class ExtensionRunner {
 					};
 					const TIMED_OUT = Symbol();
 					let timer: ReturnType<typeof setTimeout> | undefined;
+					// Normalize to a promise so a synchronous return is handled
+					// identically by the race below (a resolved value passes through
+					// Promise.race the same way). If the timeout wins the race, this
+					// promise is dropped while still pending; attach a no-op catch so a
+					// late rejection cannot surface as an unhandled promise rejection.
+					const handlerPromise = Promise.resolve(handler(event, ctx));
+					handlerPromise.catch(() => {});
 					const handlerResult = await Promise.race([
-						handler(event, ctx),
+						handlerPromise,
 						new Promise<typeof TIMED_OUT>((resolve) => {
 							timer = setTimeout(() => resolve(TIMED_OUT), BEFORE_AGENT_START_TIMEOUT_MS);
 						}),
