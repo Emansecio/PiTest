@@ -1,6 +1,7 @@
 import type { Component, TUI } from "@pit/tui";
 import { beforeAll, describe, expect, it, test } from "vitest";
 import { ActivityStacker } from "../src/modes/interactive/activity-stacker.js";
+import { ActivityLineComponent } from "../src/modes/interactive/components/activity-line.js";
 import { NavGroupComponent } from "../src/modes/interactive/components/nav-group.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -34,6 +35,12 @@ function actionExec() {
 }
 function askExec() {
 	return makeExec({ getActivityFamily: () => "action", getToolName: () => "ask" });
+}
+function todoExec() {
+	return makeExec({ getActivityFamily: () => "action", getToolName: () => "todo", getArgs: () => ({}) });
+}
+function taskExec() {
+	return makeExec({ getActivityFamily: () => "action", getToolName: () => "task", getArgs: () => ({}) });
 }
 
 describe("ActivityStacker", () => {
@@ -81,9 +88,50 @@ describe("ActivityStacker", () => {
 		stacker.placeCall(navExec());
 		stacker.placeCall(actionExec());
 		stacker.placeCall(navExec());
-		// A blank Spacer separates consecutive activity blocks (folded nav calls
-		// stay tight inside their NavGroup).
-		expect(added).toEqual(["NavGroupComponent", "Spacer", "ActivityLineComponent", "Spacer", "NavGroupComponent"]);
+		// Activity blocks stack tight — no Spacer between them (folded nav calls also
+		// stay tight inside their NavGroup). Breathing room comes from agent text.
+		expect(added).toEqual(["NavGroupComponent", "ActivityLineComponent", "NavGroupComponent"]);
+	});
+
+	it("folds identical consecutive actions into one line (×N)", () => {
+		const added: Component[] = [];
+		const s = new ActivityStacker(fakeTui(), (c) => added.push(c));
+		s.placeCall(todoExec());
+		s.placeCall(todoExec());
+		s.placeCall(todoExec());
+		expect(added.length).toBe(1);
+		expect(added[0]).toBeInstanceOf(ActivityLineComponent);
+	});
+
+	it("does not fold actions separated by a navigation call", () => {
+		const added: Component[] = [];
+		const s = new ActivityStacker(fakeTui(), (c) => added.push(c));
+		s.placeCall(todoExec());
+		s.placeCall(navExec());
+		s.placeCall(todoExec());
+		expect(added.map((c) => c.constructor.name)).toEqual([
+			"ActivityLineComponent",
+			"NavGroupComponent",
+			"ActivityLineComponent",
+		]);
+	});
+
+	it("does not fold actions separated by agent text (divide)", () => {
+		const added: Component[] = [];
+		const s = new ActivityStacker(fakeTui(), (c) => added.push(c));
+		s.placeCall(todoExec());
+		s.divide();
+		s.placeCall(todoExec());
+		expect(added.length).toBe(2);
+		expect(added[0]).not.toBe(added[1]);
+	});
+
+	it("never folds task agents — each gets its own line", () => {
+		const added: Component[] = [];
+		const s = new ActivityStacker(fakeTui(), (c) => added.push(c));
+		s.placeCall(taskExec());
+		s.placeCall(taskExec());
+		expect(added.filter((c) => c instanceof ActivityLineComponent).length).toBe(2);
 	});
 
 	it("ask/resolve are not placed in the activity stream", () => {

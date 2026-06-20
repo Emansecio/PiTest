@@ -84,9 +84,10 @@ describe("full-turn Amp-layout snapshot", () => {
 
 		// --- assert component sequence ---
 		const names = chat.map((c) => c.constructor.name);
+		// Activity blocks stack tight (no Spacer between them); the breathing room
+		// comes from the AssistantMessage boundary, which brings its own leading blank.
 		expect(names).toEqual([
 			"NavGroupComponent",
-			"Spacer",
 			"ActivityLineComponent",
 			"AssistantMessageComponent",
 			"NavGroupComponent",

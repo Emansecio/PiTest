@@ -88,6 +88,24 @@ describe("ActivityLineComponent", () => {
 		expect(out.some((l) => l.includes("error line 25"))).toBe(true);
 		expect(out.some((l) => l.includes("more lines"))).toBe(false);
 	});
+	it("folds identical repeated actions into a ×N counter", () => {
+		const todoStub = () =>
+			execStub({
+				getToolName: () => "todo",
+				getArgs: () => ({}),
+				getResultDetails: () => undefined,
+				render: () => [],
+			});
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(todoStub());
+		expect(c.render(120).map(stripAnsi)[0]).not.toContain("×");
+		c.coalesce(todoStub());
+		c.coalesce(todoStub());
+		const out = c.render(120).map(stripAnsi);
+		expect(out[0]).toContain("Updated todos");
+		expect(out[0]).toContain("×3");
+	});
+
 	it("renders bash as Ran $ command", () => {
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(

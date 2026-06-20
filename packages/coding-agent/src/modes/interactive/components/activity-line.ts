@@ -40,6 +40,9 @@ export class ActivityLineComponent extends Container {
 	// Sequence number for an unnamed `task` agent (assigned by ActivityStacker,
 	// per turn). 0 = not a task / unassigned.
 	private taskOrdinal = 0;
+	// Count of identical consecutive actions folded into this one line. >1 renders
+	// a muted `×N` suffix (e.g. `Updated todos ×4`) instead of stacking N rows.
+	private count = 1;
 
 	constructor(ui: TUI) {
 		super();
@@ -61,6 +64,15 @@ export class ActivityLineComponent extends Container {
 		this.expanded = expanded;
 		this.linesCache = null;
 		this.exec?.setExpanded(expanded);
+	}
+
+	/** Fold an identical repeated action into this line: bump the `×N` counter and
+	 * adopt the newest exec so the line's state/spinner/target track the latest
+	 * call (the earlier identical call has already settled). Used by ActivityStacker
+	 * for consecutive same-target actions so they collapse to one row. */
+	coalesce(exec: ToolExecutionComponent): void {
+		this.count += 1;
+		this.setExec(exec, this.taskOrdinal);
 	}
 
 	/** Stop every animation this line owns — its spinner ticker, the icon ease,
@@ -183,7 +195,7 @@ export class ActivityLineComponent extends Container {
 		// pending (spinner live), an in-flight icon ease, and the body renders
 		// (expanded / auto error) must keep recomputing every frame.
 		const cacheable = !pending && !this.expanded && !autoError && !this.iconEase.active;
-		const cacheKey = `${width}|${state}`;
+		const cacheKey = `${width}|${state}|${this.count}`;
 		if (cacheable && this.linesCache !== null && this.linesCacheKey === cacheKey) {
 			return this.linesCache;
 		}
@@ -210,9 +222,11 @@ export class ActivityLineComponent extends Container {
 		// pending/ok/error, the type glyph (✎ $ ⌕ ▸ ◆) lets edit/run/search/read be
 		// told apart at a glance. Both render a single cell.
 		const glyph = glyphFor(name);
+		// `×N` when identical actions were folded in; muted so it reads as a counter.
+		const countSuffix = this.count > 1 ? ` ${theme.fg("muted", `×${this.count}`)}` : "";
 		const rawHeader = stripAnsi(target).trim()
-			? `${this.icon(state)} ${glyph} ${theme.bold(label)} ${target}`
-			: `${this.icon(state)} ${glyph} ${theme.bold(label)}`;
+			? `${this.icon(state)} ${glyph} ${theme.bold(label)} ${target}${countSuffix}`
+			: `${this.icon(state)} ${glyph} ${theme.bold(label)}${countSuffix}`;
 		// Cap the assembled header once so no branch (free-form agent label, MCP tool
 		// name, web_search query, edit path) can overflow the terminal width. ANSI is
 		// width-free here, so the colorized header is clamped to `width` cells; the
