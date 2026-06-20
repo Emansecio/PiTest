@@ -24,16 +24,20 @@ export default defineConfig({
 		testTimeout: 60000,
 		// Heavy beforeAll/afterAll (spawning git children, eval kernels, runtimes)
 		// need far more than the 10s default when the box is under load — match the
-		// 60s test budget so setup/teardown never times out spuriously.
+		// 60s test budget so setup/teardown never times out spuriously. A hook that
+		// blows this is treated as a genuine hang (fail fast) rather than waited on
+		// longer; contention is kept in check by the reduced maxForks below.
 		hookTimeout: 60000,
 		poolOptions: {
 			forks: {
 				// Default forks one worker per core. With every core busy, the OS and
-				// any process the E2E tests SPAWN (the tsx boot in dry-run-cli) get
-				// starved and blow their deadline. Cap at cpu-4 so a few cores stay
-				// free for spawned work and the scheduler — the suite stays fast and
-				// stops flaking under contention. Floor of 2 for small CI boxes.
-				maxForks: Math.max(2, cpus().length - 4),
+				// the processes these tests SPAWN (tsx boots, git children, and the
+				// taskkill/AgentSession.dispose teardown) get starved and blow their
+				// per-hook deadline — which made a DIFFERENT teardown flake each full
+				// run on Windows. Use only HALF the cores for vitest workers so the
+				// other half stays free for spawned work + the scheduler; hooks then
+				// finish well inside the 60s budget. Floor of 2 for small CI boxes.
+				maxForks: Math.max(2, Math.floor(cpus().length / 2)),
 			},
 		},
 		// Test isolation: skip the developer's `~/.claude/skills/` so test

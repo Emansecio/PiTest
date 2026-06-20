@@ -78,7 +78,10 @@ describe.skipIf(process.platform !== "win32")("Windows child-process close handl
 	});
 
 	afterEach(() => {
-		rmSync(testDir, { recursive: true, force: true });
+		// Windows releases the (grand)child's inherited stdio/file handles
+		// asynchronously after taskkill, so an immediate rmdir can hit EBUSY under
+		// full-suite load — retry while the handle drains instead of failing teardown.
+		rmSync(testDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
 	});
 
 	it("executeBash resolves after the shell exits even if inherited stdio handles stay open", async () => {
