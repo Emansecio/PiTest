@@ -3657,11 +3657,25 @@ export class InteractiveMode {
 		if (now - this.lastSigintTime < 500) {
 			this.clearCtrlCHint();
 			void this.shutdown();
-		} else {
-			this.clearEditor();
-			this.lastSigintTime = now;
-			this.showCtrlCHint();
+			return;
 		}
+		this.lastSigintTime = now;
+		// While a turn is active, the first Ctrl+C INTERRUPTS the task (parity with
+		// Esc and Claude Code) instead of only arming the exit hint. Ctrl+C (0x03)
+		// is delivered immediately by the stdin buffer — unlike the ambiguous Esc,
+		// which waits on a disambiguation timer that can lag while the model is
+		// thinking/streaming — so it is the reliable stop path mid-turn. A second
+		// Ctrl+C within 500ms still exits.
+		if (this.session.isBusy) {
+			this.restoreQueuedMessagesToEditor();
+			this.session.interrupt();
+			this.disposeFusionLive();
+			this.showStatus("Interrupted");
+			this.showCtrlCHint();
+			return;
+		}
+		this.clearEditor();
+		this.showCtrlCHint();
 	}
 
 	/** Ephemeral hint shown on the first Ctrl+C; auto-clears when the 500ms window expires. */
