@@ -155,4 +155,23 @@ suite("chrome_devtools real-Chrome E2E (PIT_CHROME_E2E=1)", () => {
 		}
 		expect(body?.body).toContain("pit-body-ok");
 	});
+
+	// Regression: a freshly opened tab drops Input.dispatch* / insertText until its
+	// compositor produces a frame. Open a NEW tab (cold renderer) and assert each
+	// synthetic input lands — fill sets the value, the keydown listener fires, and
+	// the click handler runs. Before the ensureInputReady gate this failed ~75% of
+	// fresh launches (value set by evaluate, but key/click silently swallowed).
+	it("synthetic input lands on a freshly opened (cold) tab", { timeout: 60_000 }, async () => {
+		await mgr.navigate({ url: `http://127.0.0.1:${HTTP_PORT}/`, newTab: true });
+		expect((await mgr.waitFor({ selector: "#login", timeoutMs: 15_000 })).found).toBe(true);
+
+		await mgr.fill("#q", "cold start");
+		expect((await mgr.evaluate("document.getElementById('q').value")).value).toBe("cold start");
+
+		await mgr.pressKey("Enter");
+		expect((await mgr.waitFor({ text: "key:Enter", timeoutMs: 5_000 })).found).toBe(true);
+
+		await mgr.click("#b");
+		expect((await mgr.waitFor({ text: "clicked:cold start", timeoutMs: 5_000 })).found).toBe(true);
+	});
 });

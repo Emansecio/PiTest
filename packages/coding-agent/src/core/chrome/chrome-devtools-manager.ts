@@ -71,6 +71,11 @@ interface ConnState {
 	console: ConsoleLine[];
 	network: NetworkEntry[];
 	unsubs: Array<() => void>;
+	// Memoized "renderer ready for synthetic input" gate (see ensureInputReady).
+	// One per connection: a freshly launched/navigated page drops Input.dispatch*
+	// events until its compositor has produced a frame, so the first interaction
+	// waits on this once.
+	inputReady?: Promise<void>;
 }
 
 const BUFFER_MAX = 200;
@@ -78,6 +83,13 @@ const WAIT_FOR_POLL_MS = 200;
 const WAIT_FOR_DEFAULT_TIMEOUT_MS = 5_000;
 const WAIT_FOR_MAX_TIMEOUT_MS = 30_000;
 const A11Y_SNAPSHOT_MAX_LINES = 800;
+// A just-launched / just-navigated renderer accepts Runtime.evaluate (DOM is
+// parsed) well before its compositor produces the first frame — and Chrome
+// silently DROPS Input.dispatchMouseEvent / dispatchKeyEvent / insertText that
+// arrive in that window. The double-rAF below resolves only after a frame has
+// been composited; if it stalls we fall back to this short delay rather than
+// blocking an interaction forever.
+const INPUT_READY_MAX_MS = 2_000;
 // Hard ceiling on a single CDP payload (network body / evaluate result) we keep
 // and hand downstream. A multi-hundred-MB asset would otherwise be copied into
 // the tool result / render / compaction and blow the heap. Truncate at this cap.
@@ -271,6 +283,11 @@ export class ChromeDevtoolsManager {
 			return { created: true, target };
 		}
 		const conn = await this.getConn(this.selectedTarget);
+		// A same-tab navigation swaps the renderer, so the input-ready gate of the
+		// old document no longer applies — clear it so the next interaction re-waits
+		// for the new document's first frame.
+		const state = this.conns.get(this.selectedTarget.id);
+		if (state) state.inputReady = undefined;
 		await conn.send("Page.navigate", { url: input.url }, { signal });
 		// The cached target still carries the URL from selection time; report the
 		// page we just navigated to, not where the tab used to be.
@@ -305,6 +322,7 @@ export class ChromeDevtoolsManager {
 	 */
 	async click(selector: string, signal?: AbortSignal): Promise<void> {
 		const conn = await this.requireConn();
+		await this.ensureInputReady(conn, signal);
 		const point = await this.elementCenter(conn, selector, signal);
 		const base = { x: point.x, y: point.y, button: "left", clickCount: 1 };
 		await conn.send("Input.dispatchMouseEvent", { type: "mousePressed", ...base }, { signal });
@@ -329,12 +347,14 @@ export class ChromeDevtoolsManager {
 		})()`;
 		const res = await conn.send("Runtime.evaluate", { expression: focusExpr, returnByValue: true }, { signal });
 		if (!res?.result?.value) throw new Error(`No element matches selector ${JSON.stringify(selector)}.`);
+		await this.ensureInputReady(conn, signal);
 		await conn.send("Input.insertText", { text: value }, { signal });
 	}
 
 	/** Press a named key (Enter, Tab, …) or a single character on the focused element. */
 	async pressKey(key: string, signal?: AbortSignal): Promise<void> {
 		const conn = await this.requireConn();
+		await this.ensureInputReady(conn, signal);
 		const def = KEY_DEFS[key];
 		if (!def) {
 			if ([...key].length === 1) {
@@ -399,6 +419,7 @@ export class ChromeDevtoolsManager {
 	/** Hover an element by CSS selector (dispatches a real mouse move to its center). */
 	async hover(selector: string, signal?: AbortSignal): Promise<void> {
 		const conn = await this.requireConn();
+		await this.ensureInputReady(conn, signal);
 		const point = await this.elementCenter(conn, selector, signal);
 		await conn.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y }, { signal });
 	}
@@ -569,6 +590,40 @@ export class ChromeDevtoolsManager {
 			body: capPayload(raw, MAX_CDP_BODY_BYTES, "chrome.getResponseBody"),
 			base64Encoded: !!res?.base64Encoded,
 		};
+	}
+
+	/**
+	 * Wait, once per connection, until the renderer can actually receive synthetic
+	 * input. A freshly launched or just-navigated page answers Runtime.evaluate
+	 * (DOM parsed) before its compositor has produced a frame, and Chrome silently
+	 * drops the Input.dispatch / insertText events that land in that gap -- so the first
+	 * fill/click/pressKey would no-op. Two chained requestAnimationFrame callbacks
+	 * resolve only after a frame has been composited, which is exactly the point
+	 * the input pipeline starts delivering events. Memoized on the ConnState so the
+	 * cost is paid once; on a warm page it resolves in ~one frame. Capped + fail-
+	 * open so a stuck rAF (background/throttled tab) can never block an action.
+	 */
+	private async ensureInputReady(conn: CdpConnectionLike, signal?: AbortSignal): Promise<void> {
+		const id = this.selectedTarget?.id;
+		const state = id ? this.conns.get(id) : undefined;
+		if (state?.inputReady) return state.inputReady;
+		const gate = (async () => {
+			const expr = "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(1))))";
+			try {
+				await conn.send(
+					"Runtime.evaluate",
+					{ expression: expr, awaitPromise: true, returnByValue: true },
+					{ signal, timeoutMs: INPUT_READY_MAX_MS },
+				);
+			} catch {
+				// rAF never fired (throttled/background tab) or timed out — don't block
+				// the interaction. A best-effort short settle keeps the common cold-start
+				// case working; the action proceeds either way.
+				await new Promise((r) => setTimeout(r, 100));
+			}
+		})();
+		if (state) state.inputReady = gate;
+		return gate;
 	}
 
 	private async elementCenter(
