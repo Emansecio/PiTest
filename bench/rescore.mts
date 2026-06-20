@@ -42,10 +42,17 @@ function reconstructRun(j: any): AgentRun {
 		agent: j.agent,
 		available: j.available ?? true,
 		wallMs: j.wallMs ?? 0,
+		firstOutputMs: typeof j.firstOutputMs === "number" ? j.firstOutputMs : null,
+		firstEditMs: typeof j.firstEditMs === "number" ? j.firstEditMs : null,
 		exitCode: j.exitCode ?? null,
 		timedOut: j.timedOut ?? false,
 		metrics: m,
-		diff: { files: j.diff?.files ?? 0, added: j.diff?.added ?? 0, removed: j.diff?.removed ?? 0, raw: "" },
+		diff: { files: j.diff?.files ?? 0, added: j.diff?.added ?? 0, removed: j.diff?.removed ?? 0, raw: "", names: j.diff?.names ?? [] },
+		quality: {
+			filesChecked: j.quality?.filesChecked ?? 0,
+			syntaxErrors: j.quality?.syntaxErrors ?? 0,
+			errorFiles: j.quality?.errorFiles ?? [],
+		},
 		oracle: { pass: j.oraclePass ?? false, reason: j.oracleReason ?? "", raw: "", exitCode: j.oraclePass ? 0 : 1 },
 	};
 }

@@ -1,0 +1,6 @@
+{
+	"id": "11-async-correctness",
+	"title": "Corrigir bug de concorrência async (forEach não-aguardado)",
+	"angle": "correção de race/promise + preservar ordem + anti-cheat",
+	"timeoutSec": 420
+}

@@ -1,0 +1,5 @@
+O teste `collect.test.mjs` falha. Há um bug de concorrência em `collect.mjs`: a
+função resolve antes das tarefas assíncronas terminarem (usa `forEach` com
+callback async, que não é aguardado), devolvendo resultados incompletos. Corrija
+`collect.mjs` para aguardar TODAS as tarefas e devolver os resultados na mesma
+ordem da entrada. NÃO edite o arquivo de teste.

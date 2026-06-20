@@ -1,0 +1,5 @@
+`dedupe.mjs` remove duplicatas preservando a ordem da primeira ocorrência. Está
+CORRETO, mas é O(n²) (usa `includes` dentro do loop) e fica lento para listas
+grandes. Otimize para O(n) preservando EXATAMENTE o comportamento: mesma ordem
+(primeira ocorrência) e mesma semântica de igualdade. O teste `dedupe.test.mjs`
+deve continuar passando. NÃO edite o teste.

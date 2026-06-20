@@ -35,6 +35,8 @@ interface Run {
 	available: boolean;
 	oraclePass: boolean;
 	wallMs: number;
+	firstOutputMs?: number | null;
+	firstEditMs?: number | null;
 	turns: number;
 	toolTotal: number;
 	toolByCat: Record<string, number>;
@@ -43,7 +45,9 @@ interface Run {
 	outTok: number;
 	cacheReadTok: number;
 	costUsd?: number;
+	estCostUsd?: number;
 	diff: { files: number; added: number; removed: number };
+	quality?: { filesChecked: number; syntaxErrors: number; errorFiles: string[] };
 	timedOut: boolean;
 }
 interface Scn {
@@ -130,12 +134,18 @@ function build(outDir: string): string {
 			pass: rs.filter((r) => r.oraclePass).length,
 			ran: rs.length,
 			wall: rs.map((r) => r.wallMs),
+			firstEdit: rs.map((r) => r.firstEditMs).filter((x): x is number => typeof x === "number"),
 			out: rs.map((r) => r.outTok),
 			inn: rs.map((r) => r.inTok),
 			cache: rs.map((r) => r.cacheReadTok),
 			tools: rs.map((r) => r.toolTotal),
 			errors: sum(rs.map((r) => r.toolErrors)),
 			cost: rs.map((r) => r.costUsd).filter((x): x is number => typeof x === "number"),
+			estCost: rs.map((r) => r.estCostUsd).filter((x): x is number => typeof x === "number"),
+			churn: rs.map((r) => r.diff.added + r.diff.removed),
+			netLoc: rs.map((r) => r.diff.added - r.diff.removed),
+			filesChecked: sum(rs.map((r) => r.quality?.filesChecked ?? 0)),
+			syntaxErrors: sum(rs.map((r) => r.quality?.syntaxErrors ?? 0)),
 		};
 	};
 	const A = Object.fromEntries(ORDER.map((a) => [a, agg(a)])) as Record<AgentId, ReturnType<typeof agg>>;
@@ -194,16 +204,20 @@ function build(outDir: string): string {
 	masterRow("oracle PASS", (x) => `${x.pass}/${n}`);
 	masterRow("wall total (s)", (x) => s1(sum(x.wall)));
 	masterRow("wall mediana (s)", (x) => s1(median(x.wall)));
+	masterRow("→ 1º edit mediana (s)§", (x) => (x.firstEdit.length ? s1(median(x.firstEdit)) : "n/d"));
 	masterRow("tokens out total", (x) => fmt(sum(x.out)));
 	masterRow("tokens out médio", (x) => fmt(mean(x.out)));
 	masterRow("tokens in total (≈)†", (x) => fmt(sum(x.inn)));
 	masterRow("cache-read total†", (x) => fmt(sum(x.cache)));
 	masterRow("tool calls total‡", (x) => fmt(sum(x.tools)));
 	masterRow("tool errors total", (x) => fmt(x.errors));
+	masterRow("churn total (linhas ±)", (x) => fmt(sum(x.churn)));
+	masterRow("syntax-err / arq. checados", (x) => `${x.syntaxErrors} / ${x.filesChecked}`);
 	masterRow("custo real US$", (x) => (x.cost.length ? `$${sum(x.cost).toFixed(2)}` : "—"));
+	masterRow("custo est. US$◊", (x) => (x.estCost.length ? `$${sum(x.estCost).toFixed(2)}` : "—"));
 	L.push("");
 	L.push(
-		"† Tokens de entrada **não são comparáveis 1:1** entre os agentes (Pit reporta só o não-cacheado; Codex e Droid reportam contexto cumulativo; opencode reporta o contexto por step). Ver §4. ‡ Droid (`-o json`) não expõe eventos por-tool → tool calls = 0 (limite de medição, não zero real).",
+		"† Tokens de entrada **não são comparáveis 1:1** entre os agentes (Pit reporta só o não-cacheado; Codex e Droid reportam contexto cumulativo; opencode reporta o contexto por step). Ver §5. ‡ Droid (`-o json`) não expõe eventos por-tool → tool calls = 0 (limite de medição, não zero real). § Droid não emite stream por-tool → latência até o 1º edit é **n/d**. ◊ Custo estimado a preço de tabela **público** (não o que se paga via Max/OAuth) — proxy comparável; ver §7.",
 	);
 	L.push("");
 
@@ -233,8 +247,42 @@ function build(outDir: string): string {
 	L.push(`Vitórias de velocidade (sem empate): ${ORDER.map((a, idx) => `${LABEL[a]} ${fastWins[idx]}`).join(" · ")} de ${n}.`);
 	L.push("");
 
+	// ---- tempo-para-código (latência até o 1º edit) ----
+	L.push("## 3. Tempo-para-código (latência até a 1ª edição)");
+	L.push("");
+	L.push(
+		"Wall-clock total mistura 'pensar' com 'startup do CLI'. Este eixo isola **quão rápido o harness começa a entregar código**: ms do spawn até o PRIMEIRO evento de edit/write no stream. Latência baixa = menos turnos de exploração antes de agir; alta = o harness lê/raciocina muito antes de tocar o arquivo. Droid não emite stream por-tool → **n/d**.",
+	);
+	L.push("");
+	L.push(`| # | cenário | ${head} | mais rápido p/ código |`);
+	L.push(sep(3 + ORDER.length));
+	i = 0;
+	for (const s of scns) {
+		i++;
+		const w = winnerLow(s, (r) => (typeof r.firstEditMs === "number" ? r.firstEditMs : Number.POSITIVE_INFINITY));
+		L.push(
+			`| ${i} | ${s.id} | ${ORDER.map((a) =>
+				cell(a, (r) => (typeof r?.firstEditMs === "number" ? s1(r.firstEditMs) : r ? "n/d" : "—"), s),
+			).join(" | ")} | ${w ? LABEL[w] : "—"} |`,
+		);
+	}
+	L.push(
+		`| | mediana / mín / máx (s) | ${ORDER.map((a) =>
+			A[a].firstEdit.length ? `${s1(median(A[a].firstEdit))} / ${s1(min(A[a].firstEdit))} / ${s1(max(A[a].firstEdit))}` : "n/d",
+		).join(" | ")} | |`,
+	);
+	L.push("");
+	const ttfeWins = ORDER.map(
+		(a) =>
+			scns.filter(
+				(s) => winnerLow(s, (r) => (typeof r.firstEditMs === "number" ? r.firstEditMs : Number.POSITIVE_INFINITY)) === a,
+			).length,
+	);
+	L.push(`Mais rápido a produzir código (sem empate): ${ORDER.map((a, idx) => `${LABEL[a]} ${ttfeWins[idx]}`).join(" · ")} de ${n}.`);
+	L.push("");
+
 	// ---- tokens out ----
-	L.push("## 3. Tokens de saída (gerados pelo modelo)");
+	L.push("## 4. Tokens de saída (gerados pelo modelo)");
 	L.push("");
 	L.push(
 		"Quanto o modelo *escreveu* para resolver a tarefa (raciocínio + texto + tool-args). Comparável entre os agentes — proxy direto de verbosidade do harness.",
@@ -255,7 +303,7 @@ function build(outDir: string): string {
 	L.push("");
 
 	// ---- tokens in / cache ----
-	L.push("## 4. Tokens de entrada e cache (consumo de contexto)");
+	L.push("## 5. Tokens de entrada e cache (consumo de contexto)");
 	L.push("");
 	L.push(
 		"Quanto contexto cada harness empurrou para o modelo. **Atenção à medição:** o Pit reporta só o input *não-cacheado* (o trabalho real aparece em `cache-read`); Codex/Droid reportam contexto *cumulativo*; opencode reporta o contexto por step. Não compare a coluna `in` diretamente — olhe `in + cache` como ordem de grandeza.",
@@ -280,7 +328,7 @@ function build(outDir: string): string {
 	L.push("");
 
 	// ---- consumo de ferramentas ----
-	L.push("## 5. Consumo de ferramentas");
+	L.push("## 6. Consumo de ferramentas");
 	L.push("");
 	L.push(
 		"Número de tool-calls e como se distribuem. **Granularidade difere:** o Codex não tem Read/Edit dedicado (lê/edita via shell), e o Droid (`-o json`) não expõe eventos por-tool (conta 0). Por isso o total não é 1:1, mas a forma é reveladora.",
@@ -310,15 +358,39 @@ function build(outDir: string): string {
 	L.push("");
 
 	// ---- custo ----
-	L.push("## 6. Custo");
+	L.push("## 7. Custo");
 	L.push("");
+	L.push(
+		"Dois números. **Custo estimado (◊)** aplica preço de tabela público da API (US$/Mtok: opus 15/75, sonnet 3/15, gpt-5/codex 1,25/10) aos tokens medidos — um proxy **uniforme** entre todos os agentes que responde \"quanto esta tarefa custaria a preço de API\". **Custo real** é o que o agente reportou no próprio stream (billing de verdade), disponível só para quem expõe. Aqui Pit/CC/opencode roteiam Anthropic via OAuth/Max (custo marginal $0 na prática) — por isso o estimado é o eixo comparável, e o componente mais limpo dele é o de **tokens de saída** (§4); a parcela de entrada herda o viés de medição da §5.",
+	);
+	L.push("");
+	const withEst = ORDER.filter((a) => A[a].estCost.length > 0);
+	if (withEst.length > 0) {
+		L.push(`Custo **estimado** a preço de tabela (US$):`);
+		L.push("");
+		L.push(`| # | cenário | ${withEst.map((a) => LABEL[a]).join(" | ")} | mais barato |`);
+		L.push(sep(3 + withEst.length));
+		i = 0;
+		for (const s of scns) {
+			i++;
+			const c = (a: AgentId) => {
+				const r = s.runs.find((x) => x.agent === a);
+				return typeof r?.estCostUsd === "number" ? `$${r.estCostUsd.toFixed(4)}` : "—";
+			};
+			const w = winnerLow(s, (r) => (typeof r.estCostUsd === "number" ? r.estCostUsd : Number.POSITIVE_INFINITY));
+			L.push(`| ${i} | ${s.id} | ${withEst.map((a) => c(a)).join(" | ")} | ${w ? LABEL[w] : "—"} |`);
+		}
+		L.push(`| | **total** | ${withEst.map((a) => `**$${sum(A[a].estCost).toFixed(4)}**`).join(" | ")} | |`);
+		L.push(`| | médio / tarefa | ${withEst.map((a) => `$${mean(A[a].estCost).toFixed(4)}`).join(" | ")} | |`);
+		L.push("");
+	}
 	if (withCost.length === 0) {
 		L.push(
-			"Nenhum agente reportou custo em dólar no stream desta rodada (Pit roda via OAuth/Max; Codex e Droid não expõem custo). Os proxies comparáveis são **tokens de saída** (§3) e **tempo** (§2).",
+			"Custo **real** no stream: nenhum agente reportou nesta rodada (Pit roda via OAuth/Max; Codex e Droid não expõem). Proxies comparáveis: custo estimado (acima), tokens de saída (§4) e tempo (§2).",
 		);
 	} else {
 		L.push(
-			`Custo em dólar reportado no stream por: ${withCost.map((a) => LABEL[a]).join(", ")} (billing real). Os demais não expõem (Pit OAuth/Max; Codex/Droid sem custo no stream) — proxies comparáveis: tokens de saída (§3) e tempo (§2).`,
+			`Custo **real** reportado no stream por: ${withCost.map((a) => LABEL[a]).join(", ")} (billing real). Os demais não expõem (Pit OAuth/Max; Codex/Droid sem custo no stream).`,
 		);
 		L.push("");
 		L.push(`| # | cenário | ${withCost.map((a) => LABEL[a]).join(" | ")} |`);
@@ -337,8 +409,40 @@ function build(outDir: string): string {
 	}
 	L.push("");
 
+	// ---- qualidade de código (syntax-gate + tamanho/churn) ----
+	L.push("## 8. Qualidade e tamanho do código produzido");
+	L.push("");
+	L.push(
+		"Dois sinais objetivos independentes do oráculo. **Syntax-gate:** todo arquivo `.mjs/.js` alterado passa por `node --check` (parse-only) — um harness que deixa uma edição malformada pontua erro aqui mesmo que o oráculo já fosse FAIL por outro motivo. **Tamanho/churn:** linhas adicionadas+removidas (churn) e net-LOC do diff — entre dois agentes que PASSAM, o de menor churn resolveu com menos código (menos superfície, menos risco). Inflar o diff para passar é penalizado na leitura, não no oráculo.",
+	);
+	L.push("");
+	L.push(`| # | cenário | ${ORDER.map((a) => `${LABEL[a]} syntax`).join(" | ")} |`);
+	L.push(sep(2 + ORDER.length));
+	i = 0;
+	for (const s of scns) {
+		i++;
+		const c = (a: AgentId) => {
+			const r = s.runs.find((x) => x.agent === a);
+			if (!r || !r.quality) return "—";
+			if (r.quality.filesChecked === 0) return "—";
+			if (r.quality.syntaxErrors === 0) return `✅ ${r.quality.filesChecked}`;
+			return `❌ ${r.quality.syntaxErrors}/${r.quality.filesChecked}`;
+		};
+		L.push(`| ${i} | ${s.id} | ${ORDER.map((a) => c(a)).join(" | ")} |`);
+	}
+	L.push(`| | **syntax-err / checados** | ${ORDER.map((a) => `${A[a].syntaxErrors} / ${A[a].filesChecked}`).join(" | ")} |`);
+	L.push("");
+	L.push(`Churn do diff (linhas adicionadas + removidas na suíte; só código, sidecars excluídos):`);
+	L.push("");
+	L.push(`| métrica | ${head} |`);
+	L.push(sepM);
+	L.push(`| churn total (±linhas) | ${ORDER.map((a) => fmt(sum(A[a].churn))).join(" | ")} |`);
+	L.push(`| churn médio / cenário | ${ORDER.map((a) => fmt(mean(A[a].churn))).join(" | ")} |`);
+	L.push(`| net-LOC total (add−del) | ${ORDER.map((a) => fmt(sum(A[a].netLoc))).join(" | ")} |`);
+	L.push("");
+
 	// ---- detalhe por cenário ----
-	L.push("## 7. Detalhe por cenário");
+	L.push("## 9. Detalhe por cenário");
 	L.push("");
 	i = 0;
 	for (const s of scns) {
@@ -353,6 +457,7 @@ function build(outDir: string): string {
 			L.push(`| ${name} | ${ORDER.map((a) => fn(s.runs.find((r) => r.agent === a))).join(" | ")} |`);
 		row("oracle", (r) => (r?.oraclePass ? "✅ PASS" : r ? "❌ FAIL" : "—"));
 		row("wall (s)", (r) => (r ? s1(r.wallMs) : "—"));
+		row("→ 1º edit (s)", (r) => (typeof r?.firstEditMs === "number" ? s1(r.firstEditMs) : r ? "n/d" : "—"));
 		row("tokens out", (r) => (r ? fmt(r.outTok) : "—"));
 		row("tokens in (≈)", (r) => (r ? fmt(r.inTok) : "—"));
 		row("cache-read", (r) => (r ? fmt(r.cacheReadTok) : "—"));
@@ -364,12 +469,18 @@ function build(outDir: string): string {
 			return `${c.read ?? 0}/${(c.edit ?? 0) + (c.write ?? 0)}/${c.shell ?? 0}/${c.search ?? 0}`;
 		});
 		row("diff (files +/-)", (r) => (r ? `${r.diff.files} (+${r.diff.added}/-${r.diff.removed})` : "—"));
-		row("custo US$", (r) => (typeof r?.costUsd === "number" ? `$${r.costUsd.toFixed(4)}` : "—"));
+		row("syntax-check", (r) => {
+			if (!r || !r.quality || r.quality.filesChecked === 0) return "—";
+			if (r.quality.syntaxErrors === 0) return `✅ ${r.quality.filesChecked}`;
+			return `❌ ${r.quality.syntaxErrors}/${r.quality.filesChecked}`;
+		});
+		row("custo real US$", (r) => (typeof r?.costUsd === "number" ? `$${r.costUsd.toFixed(4)}` : "—"));
+		row("custo est. US$◊", (r) => (typeof r?.estCostUsd === "number" ? `$${r.estCostUsd.toFixed(4)}` : "—"));
 		L.push("");
 	}
 
 	// ---- conclusão (data-driven) ----
-	L.push("## 8. Conclusão");
+	L.push("## 10. Conclusão");
 	L.push("");
 	const allPass = ORDER.every((a) => A[a].ran > 0 && A[a].pass === A[a].ran);
 	if (allPass) {
@@ -396,13 +507,40 @@ function build(outDir: string): string {
 			`- **${LABEL[verbose.a]} é o mais verboso em tokens de saída** (${fmt(sum(A[verbose.a].out))}, ~${(sum(A[verbose.a].out) / Math.max(1, sum(A[lean.a].out))).toFixed(1)}× o ${LABEL[lean.a]}, o mais enxuto) — verbosidade que vira custo e latência.`,
 		);
 	}
+	const byEdit = ORDER.filter((a) => A[a].firstEdit.length > 0)
+		.map((a) => ({ a, v: median(A[a].firstEdit) }))
+		.sort((x, y) => x.v - y.v);
+	if (byEdit.length >= 2) {
+		const f = byEdit[0];
+		const slow = byEdit[byEdit.length - 1];
+		L.push(
+			`- **${LABEL[f.a]} começa a escrever código mais cedo** (mediana ${s1(f.v)}s até o 1º edit, vs ${s1(slow.v)}s do ${LABEL[slow.a]}) — menos exploração antes de agir (§3).`,
+		);
+	}
+	const byChurn = ORDER.filter((a) => A[a].churn.length > 0)
+		.map((a) => ({ a, v: sum(A[a].churn) }))
+		.sort((x, y) => x.v - y.v);
+	if (byChurn.length >= 2) {
+		const lean = byChurn[0];
+		const fat = byChurn[byChurn.length - 1];
+		L.push(
+			`- **${LABEL[lean.a]} produz o diff mais enxuto** (${fmt(sum(A[lean.a].churn))} linhas de churn na suíte, vs ${fmt(sum(A[fat.a].churn))} do ${LABEL[fat.a]}) — menos código para o mesmo resultado, menos superfície de risco (§8).`,
+		);
+	}
+	const totalSyntaxErr = sum(ORDER.map((a) => A[a].syntaxErrors));
+	if (totalSyntaxErr === 0) {
+		L.push("- **Syntax-gate:** nenhum agente deixou um arquivo malformado em toda a suíte (`node --check` limpo em todos os diffs).");
+	} else {
+		const worst = [...ORDER].sort((a, b) => A[b].syntaxErrors - A[a].syntaxErrors)[0];
+		L.push(`- **Syntax-gate:** ${totalSyntaxErr} arquivo(s) malformado(s) no total; pior caso ${LABEL[worst]} (${A[worst].syntaxErrors}). Código que nem parseia (§8).`);
+	}
 	const errLeader = [...ORDER].sort((a, b) => A[b].errors - A[a].errors)[0];
 	if (errLeader && A[errLeader].errors > 0) {
 		L.push(`- **Tool errors:** ${LABEL[errLeader]} liderou com ${A[errLeader].errors}; os demais: ${ORDER.filter((a) => a !== errLeader).map((a) => `${LABEL[a]} ${A[a].errors}`).join(" · ")}.`);
 	}
 	L.push("");
 	L.push(
-		"**Ressalvas honestas.** (a) n=1 por cenário — sem repetição não há barra de erro, e wall-clock tem variância de carga/rede. (b) Tokens de entrada não são comparáveis entre vendors/harnesses (§4). (c) Droid `-o json` não expõe tool-calls (conta 0). (d) Custo em dólar só é confiável para quem reporta no stream. (e) Agentes podem aparecer com ❌ por falta de credencial/cota (ex.: opencode + opus pendente de configurar), não por falha de capacidade.",
+		"**Ressalvas honestas.** (a) n=1 por cenário — sem repetição não há barra de erro, e wall-clock/latência têm variância de carga/rede. (b) Tokens de entrada não são comparáveis entre vendors/harnesses (§5). (c) Droid `-o json` não expõe tool-calls (conta 0) nem stream por-tool → latência-até-código n/d. (d) Custo real só é confiável para quem reporta no stream; o **custo estimado** (§7) usa preço de tabela público e herda o viés de tokens-in — leia-o como ordem de grandeza, com o componente de saída sendo o mais limpo. (e) O syntax-gate só roda em `.mjs/.js` (todos os seeds são JS) — é um piso de validade sintática, não prova semântica (isso é o oráculo). (f) Agentes podem aparecer com ❌ por falta de credencial/cota, não por falha de capacidade.",
 	);
 	L.push("");
 	return L.join("\n");

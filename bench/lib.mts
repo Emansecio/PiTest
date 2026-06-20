@@ -100,6 +100,8 @@ export interface DiffStat {
 	added: number;
 	removed: number;
 	raw: string;
+	/** changed file paths (relative to sandbox), for the syntax gate. */
+	names: string[];
 }
 
 export interface OracleResult {
@@ -109,14 +111,35 @@ export interface OracleResult {
 	exitCode: number | null;
 }
 
+/** Objective code-quality signal independent of the oracle: every changed JS
+ * file is run through `node --check` (parse-only). All seeds are plain `.mjs`,
+ * so this is a uniform, fair "did the agent leave syntactically valid code"
+ * axis — a harness that lands a malformed edit scores a syntaxError here even if
+ * the oracle would already FAIL for another reason. */
+export interface CodeQuality {
+	filesChecked: number;
+	syntaxErrors: number;
+	errorFiles: string[];
+}
+
+export function emptyQuality(): CodeQuality {
+	return { filesChecked: 0, syntaxErrors: 0, errorFiles: [] };
+}
+
 export interface AgentRun {
 	agent: AgentId;
 	available: boolean;
 	wallMs: number;
+	/** ms from spawn to first stdout byte (time-to-first-token proxy). */
+	firstOutputMs: number | null;
+	/** ms from spawn to the first edit/write tool event (time-to-first-code).
+	 * null when the agent emits no per-tool stream (Droid `-o json`). */
+	firstEditMs: number | null;
 	exitCode: number | null;
 	timedOut: boolean;
 	metrics: Metrics;
 	diff: DiffStat;
+	quality: CodeQuality;
 	oracle: OracleResult;
 }
 
@@ -444,7 +467,106 @@ export function captureDiff(cwd: string): DiffStat {
 		if (l.startsWith("+") && !l.startsWith("+++")) added++;
 		else if (l.startsWith("-") && !l.startsWith("---")) removed++;
 	}
-	return { files: names.length, added, removed, raw };
+	return { files: names.length, added, removed, raw, names };
+}
+
+// ---------------------------------------------------------------------------
+// code-quality gate (node --check on every changed JS file)
+// ---------------------------------------------------------------------------
+
+/** Parse-checks every changed `.mjs/.cjs/.js` file in the sandbox. A deleted
+ * file is skipped (nothing to parse). Runs FOR each agent independently so a
+ * malformed edit is caught as an objective quality regression, distinct from
+ * the oracle verdict. */
+export function checkSyntax(sandbox: string, names: string[]): CodeQuality {
+	const q = emptyQuality();
+	for (const rel of names) {
+		if (!/\.(mjs|cjs|js)$/i.test(rel)) continue;
+		const abs = join(sandbox, rel);
+		if (!existsSync(abs)) continue; // deleted by the agent — nothing to check
+		q.filesChecked++;
+		const r = spawnSync("node", ["--check", abs], { encoding: "utf8" });
+		if (r.status !== 0) {
+			q.syntaxErrors++;
+			q.errorFiles.push(rel);
+		}
+	}
+	return q;
+}
+
+// ---------------------------------------------------------------------------
+// first-edit detection (time-to-first-code latency)
+// ---------------------------------------------------------------------------
+
+function isEditCat(name: string): boolean {
+	const c = categorize(name);
+	return c === "edit" || c === "write";
+}
+
+/** True if a single JSONL stream line marks the agent STARTING to edit/write a
+ * file. Reuses the same `categorize()` taxonomy as the tool tallies, so the
+ * latency axis and the tool-call axis agree on what "an edit" is. Droid emits
+ * only a final result object (no per-tool stream) → always false (firstEdit
+ * stays null, reported as "n/d"). */
+export function isEditLine(agent: AgentId, line: string): boolean {
+	let ev: any;
+	try {
+		ev = JSON.parse(line);
+	} catch {
+		return false;
+	}
+	if (agent === "pit") {
+		return ev.type === "tool_execution_start" && isEditCat(String(ev.toolName ?? ""));
+	}
+	if (agent === "cc") {
+		if (ev.type !== "assistant" || !Array.isArray(ev.message?.content)) return false;
+		return ev.message.content.some((c: any) => c?.type === "tool_use" && isEditCat(String(c.name ?? "")));
+	}
+	if (agent === "codex") {
+		const t = ev.type === "item.completed" ? String(ev.item?.type ?? "") : "";
+		return t === "file_change" || t === "patch_apply";
+	}
+	if (agent === "opencode") {
+		return ev.type === "tool_use" && ev.part && isEditCat(String(ev.part.tool ?? ""));
+	}
+	return false; // droid: no per-tool events
+}
+
+// ---------------------------------------------------------------------------
+// cost estimate (public list price — NOT what the owner pays via Max/OAuth)
+// ---------------------------------------------------------------------------
+
+interface Price {
+	in: number;
+	out: number;
+	cache: number;
+}
+
+/** Public list price in US$ per million tokens, matched by model-name
+ * substring. This is a normalized COMPARISON proxy, not a bill: Pit/CC/opencode
+ * here route Anthropic via OAuth/Max (flat-rate, $0 marginal), so this column
+ * answers "what would this run cost at API list price", uniformly across
+ * agents. Input-token bias (§ caveat in report) carries over — out-token cost
+ * is the cleanest component. */
+const PRICES: { match: RegExp; price: Price }[] = [
+	{ match: /opus/i, price: { in: 15, out: 75, cache: 1.5 } },
+	{ match: /sonnet/i, price: { in: 3, out: 15, cache: 0.3 } },
+	{ match: /haiku/i, price: { in: 1, out: 5, cache: 0.1 } },
+	{ match: /gpt-5|codex/i, price: { in: 1.25, out: 10, cache: 0.125 } },
+	{ match: /minimax/i, price: { in: 0.3, out: 1.2, cache: 0.03 } },
+];
+
+export function priceFor(model: string): Price | null {
+	for (const p of PRICES) if (p.match.test(model)) return p.price;
+	return null;
+}
+
+/** Estimated US$ at list price from the parsed token counts. null when the
+ * model isn't in the table. */
+export function estimateCostUsd(model: string, m: Metrics): number | null {
+	const p = priceFor(model);
+	if (!p) return null;
+	return (m.inTok * p.in + m.outTok * p.out + m.cacheReadTok * p.cache) / 1e6;
 }
 
 // ---------------------------------------------------------------------------
@@ -552,6 +674,10 @@ export interface RawRun {
 	stderr: string;
 	exitCode: number | null;
 	timedOut: boolean;
+	/** ms to first stdout byte; null if the agent never wrote to stdout. */
+	firstOutputMs: number | null;
+	/** ms to the first edit/write tool event; null if none detected. */
+	firstEditMs: number | null;
 }
 
 export function runProcess(
@@ -561,6 +687,8 @@ export function runProcess(
 	prompt: string,
 	timeoutSec: number,
 	onTick?: (label: string) => void,
+	/** Per-line predicate marking the first edit/write event (time-to-code). */
+	isEdit?: (line: string) => boolean,
 ): Promise<RawRun> {
 	return new Promise((resolveRun) => {
 		const t0 = performance.now();
@@ -573,13 +701,31 @@ export function runProcess(
 		let stdout = "";
 		let stderr = "";
 		let timedOut = false;
+		let firstOutputMs: number | null = null;
+		let firstEditMs: number | null = null;
+		// Carry an incomplete trailing line across chunks so the edit predicate
+		// only ever sees whole JSONL lines.
+		let lineCarry = "";
 		const timer = setTimeout(() => {
 			timedOut = true;
 			child.kill("SIGTERM");
 			setTimeout(() => child.kill("SIGKILL"), 4000);
 		}, timeoutSec * 1000);
 		child.stdout.on("data", (d) => {
-			stdout += d.toString();
+			const text = d.toString();
+			if (firstOutputMs === null && text.length > 0) firstOutputMs = performance.now() - t0;
+			stdout += text;
+			if (isEdit && firstEditMs === null) {
+				lineCarry += text;
+				const lines = lineCarry.split("\n");
+				lineCarry = lines.pop() ?? "";
+				for (const line of lines) {
+					if (line.trim() && isEdit(line)) {
+						firstEditMs = performance.now() - t0;
+						break;
+					}
+				}
+			}
 		});
 		child.stderr.on("data", (d) => {
 			stderr += d.toString();
@@ -589,7 +735,7 @@ export function runProcess(
 		});
 		child.on("close", (code) => {
 			clearTimeout(timer);
-			resolveRun({ durationMs: performance.now() - t0, stdout, stderr, exitCode: code, timedOut });
+			resolveRun({ durationMs: performance.now() - t0, stdout, stderr, exitCode: code, timedOut, firstOutputMs, firstEditMs });
 		});
 		child.stdin.write(prompt);
 		child.stdin.end();

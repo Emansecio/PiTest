@@ -1,0 +1,6 @@
+{
+	"id": "12-perf-preserve",
+	"title": "Otimizar O(n²)→O(n) preservando comportamento idêntico",
+	"angle": "otimização sob perf-gate objetivo + comportamento byte-idêntico + anti-cheat",
+	"timeoutSec": 420
+}

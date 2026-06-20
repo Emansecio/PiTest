@@ -1,12 +1,12 @@
-# bench — Pit × Claude Code × Codex
+# bench — Pit × Claude Code × Codex × Droid × opencode
 
-Suíte de **dez benchmarks** que rodam a MESMA tarefa nos três harnesses, em
+Suíte de **doze benchmarks** que rodam a MESMA tarefa nos cinco harnesses, em
 sandboxes idênticos e isolados, com um **oráculo objetivo** (script Node
 zero-dependência rodado FORA do agente). Fixando modelos de capacidade
 comparável, a diferença observada é do **harness** — system prompt, toolset,
 tool-rewrite, grounding, gate de verificação, compaction — não da LLM.
 
-## Por que dez ângulos
+## Por que doze ângulos
 
 Um harness de coding-agent é bom ou ruim em coisas diferentes. Cada cenário
 isola um eixo:
@@ -23,6 +23,8 @@ isola um eixo:
 | 08 | large-context-nav | achar e corrigir 1 bug numa árvore de ~19 arquivos (retrieval) |
 | 09 | feature-from-spec | implementar feature a partir de spec em README → testes de aceite |
 | 10 | integrity-pressure | sob pressão de "passe o teste de qualquer jeito", não fazer hardcode |
+| 11 | async-correctness | corrigir bug de concorrência (forEach async não-aguardado) preservando ordem |
+| 12 | perf-preserve | otimizar O(n²)→O(n) sob **perf-gate objetivo** (timeout) sem mudar comportamento |
 
 O oráculo é a fonte de verdade: o agente **não** se auto-avalia. Cenários de
 integridade (02, 06, 09, 10) usam **casos held-out** que o agente nunca viu, mais
@@ -76,16 +78,40 @@ droid=`claude-opus-4-8`, opencode=`anthropic/claude-opus-4-8`.
 
 ## Métricas
 
-Comparáveis entre os três: **oracle pass** (passou a tarefa?), **wall**,
+Comparáveis entre os cinco: **oracle pass** (passou a tarefa?), **wall**,
 **turnos**, **tool calls** (e por categoria normalizada read/edit/shell/search),
 **tool errors**, **tokens out**, **tamanho do diff**. O SCORECARD também marca,
 por cenário, o **vencedor de eficiência** entre quem PASSOU (menos turnos →
 menos tools → menos tokens; ser barato falhando não conta).
 
+Quatro eixos adicionais cobrem **qualidade, tamanho, latência-até-código e
+consumo** (todos derivados sem instrumentar o agente):
+
+- **→ 1º edit (tempo-para-código):** ms do spawn até o PRIMEIRO evento de
+  edit/write no stream — quão rápido o harness começa a entregar código, isolado
+  do wall total que mistura startup + raciocínio. Droid (`-o json`, sem stream
+  por-tool) fica **n/d**.
+- **syntax-check (qualidade):** todo `.mjs/.js` alterado passa por `node --check`
+  (parse-only). Um harness que deixa uma edição malformada pontua erro aqui mesmo
+  que o oráculo já fosse FAIL por outro motivo — sinal de qualidade independente
+  do veredito.
+- **churn / net-LOC (tamanho):** linhas adicionadas+removidas e net-LOC do diff
+  (só código, sidecars `.pit/.claude/.codex/.droid/.opencode` excluídos). Entre
+  dois agentes que PASSAM, o de menor churn resolveu com menos código.
+- **custo estimado US$ (consumo):** preço de tabela público (opus 15/75, gpt-5
+  1,25/10 US$/Mtok) × tokens medidos — proxy **uniforme** entre todos. Não é o
+  que se paga via Max/OAuth (custo marginal $0), mas responde "quanto custaria a
+  preço de API". O componente de saída é o mais limpo; o de entrada herda o viés
+  de medição abaixo.
+
 Só do Pit, do stream de eventos: **rewrites** (reescrita preventiva de
 tool-call), **rejects** (call inválida bloqueada), **error-hints**, **gate de
 verificação** (typecheck/teste antes de declarar pronto) e **auto-retries**.
-CC e Codex não expõem esses sinais.
+Os outros harnesses não expõem esses sinais.
+
+A infra de métricas tem um **self-test** determinístico (sem LLM): `npx tsx
+bench/selftest.mts` valida o detector de 1º-edit por formato, o syntax-gate e o
+custo estimado.
 
 ### Cuidados de leitura (tokens de entrada NÃO são 1:1)
 

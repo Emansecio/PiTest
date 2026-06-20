@@ -158,7 +158,8 @@ export function renderScorecard(results: ScenarioResult[], opts: { agents: Agent
 	const avg = (a: AgentId, pick: (r: AgentRun) => number) => {
 		const xs = results
 			.flatMap((r) => r.runs.filter((x) => x.agent === a && x.available && x.oracle.pass))
-			.map(pick);
+			.map(pick)
+			.filter((v) => Number.isFinite(v)); // drops n/d axes (e.g. Droid firstEdit)
 		if (xs.length === 0) return "—";
 		return (xs.reduce((s, v) => s + v, 0) / xs.length).toFixed(1);
 	};
@@ -169,7 +170,13 @@ export function renderScorecard(results: ScenarioResult[], opts: { agents: Agent
 	avgRow("tool errors (méd)", (r) => r.metrics.toolErrors);
 	avgRow("tokens out (méd)", (r) => num(r.metrics.outTok));
 	avgRow("wall s (méd)", (r) => r.wallMs / 1000);
+	avgRow("→ 1º edit s (méd)", (r) => (typeof r.firstEditMs === "number" ? r.firstEditMs / 1000 : Number.NaN));
 	avgRow("diff linhas ± (méd)", (r) => r.diff.added + r.diff.removed);
+	// syntax-gate is a run-level signal over ALL available runs (not just passers):
+	// a malformed edit is a quality regression even when the task FAILed.
+	const syntaxErr = (a: AgentId) =>
+		results.flatMap((r) => r.runs.filter((x) => x.agent === a && x.available)).reduce((s, r) => s + r.quality.syntaxErrors, 0);
+	L.push(`| syntax-err (total, todos os runs) | ${agents.map((a) => syntaxErr(a)).join(" | ")} |`);
 	L.push("");
 	L.push(
 		`**vitórias por wall-clock** (entre quem passou): ${agents.map((a) => `${AGENT_LABEL[a]} ${effWins[a]}`).join(" · ")}`,
