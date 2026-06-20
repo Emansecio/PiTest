@@ -210,6 +210,15 @@ export class SseTransport implements McpTransport {
 
 		// POST the request. Most servers answer 202 and deliver the result on the
 		// GET channel; a few answer inline — if so, resolve directly.
+		// Bound the POST itself with the request timeout (same pattern as notify()
+		// and http.ts). Without this the function blocks on `await fetch` forever if
+		// the endpoint accepts the connection but never sends response headers — the
+		// responsePromise timer below only guards the *response* wait, which we never
+		// reach. The catch path deletes the pending entry, so a timeout abort surfaces
+		// as an McpTransportError instead of an unsettled promise.
+		const postSignal = signal
+			? AbortSignal.any([signal, AbortSignal.timeout(effectiveTimeout)])
+			: AbortSignal.timeout(effectiveTimeout);
 		let postResp: Response;
 		try {
 			postResp = await fetch(this.postUrl, {
@@ -220,7 +229,7 @@ export class SseTransport implements McpTransport {
 					...(this.sessionId ? { "mcp-session-id": this.sessionId } : {}),
 				},
 				body: JSON.stringify(message),
-				signal,
+				signal: postSignal,
 			});
 		} catch (error) {
 			const p = this.pending.get(message.id);

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 
 function getEnv(): NodeJS.ProcessEnv {
@@ -274,6 +274,7 @@ function collectFiles(
 	skipNodeModules = true,
 	ignoreMatcher?: IgnoreMatcher,
 	rootDir?: string,
+	visited?: Set<string>,
 ): string[] {
 	const files: string[] = [];
 	if (!existsSync(dir)) return files;
@@ -281,6 +282,15 @@ function collectFiles(
 	const root = rootDir ?? dir;
 	const ig = ignoreMatcher ?? ignore();
 	addIgnoreRules(ig, dir, root);
+
+	// Guard against directory-symlink cycles (e.g. a dir symlink pointing at an
+	// ancestor) that would otherwise recurse until a stack overflow.
+	const seen = visited ?? new Set<string>();
+	try {
+		seen.add(realpathSync(dir));
+	} catch {
+		// realpath failed (e.g. broken link mid-path); proceed without recording.
+	}
 
 	try {
 		const entries = readdirSync(dir, { withFileTypes: true });
@@ -307,7 +317,14 @@ function collectFiles(
 			if (ig.ignores(ignorePath)) continue;
 
 			if (isDir) {
-				files.push(...collectFiles(fullPath, filePattern, skipNodeModules, ig, root));
+				let realChild: string | undefined;
+				try {
+					realChild = realpathSync(fullPath);
+				} catch {
+					continue;
+				}
+				if (seen.has(realChild)) continue;
+				files.push(...collectFiles(fullPath, filePattern, skipNodeModules, ig, root, seen));
 			} else if (isFile && filePattern.test(entry.name)) {
 				files.push(fullPath);
 			}
@@ -326,6 +343,7 @@ function collectSkillEntries(
 	mode: SkillDiscoveryMode,
 	ignoreMatcher?: IgnoreMatcher,
 	rootDir?: string,
+	visited?: Set<string>,
 ): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
@@ -333,6 +351,15 @@ function collectSkillEntries(
 	const root = rootDir ?? dir;
 	const ig = ignoreMatcher ?? ignore();
 	addIgnoreRules(ig, dir, root);
+
+	// Guard against directory-symlink cycles that would otherwise recurse until
+	// a stack overflow.
+	const seen = visited ?? new Set<string>();
+	try {
+		seen.add(realpathSync(dir));
+	} catch {
+		// realpath failed (e.g. broken link mid-path); proceed without recording.
+	}
 
 	try {
 		const dirEntries = readdirSync(dir, { withFileTypes: true });
@@ -386,7 +413,14 @@ function collectSkillEntries(
 			if (!isDir) continue;
 			if (ig.ignores(`${relPath}/`)) continue;
 
-			entries.push(...collectSkillEntries(fullPath, mode, ig, root));
+			let realChild: string | undefined;
+			try {
+				realChild = realpathSync(fullPath);
+			} catch {
+				continue;
+			}
+			if (seen.has(realChild)) continue;
+			entries.push(...collectSkillEntries(fullPath, mode, ig, root, seen));
 		}
 	} catch {
 		// Ignore errors

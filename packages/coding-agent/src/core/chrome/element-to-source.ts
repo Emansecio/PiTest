@@ -442,15 +442,21 @@ function decodeVlqSegment(segment: string): number[] {
 	for (let i = 0; i < segment.length; i++) {
 		const digit = BASE64.indexOf(segment[i]);
 		if (digit === -1) return out; // malformed char: stop, fail-soft
+		// A field wider than 32 bits cannot be represented by JS `<<` (it shifts
+		// mod 32, silently corrupting the value). Bail out fail-soft on an
+		// over-long VLQ run and accumulate into a Number via `2**shift` so the
+		// in-range case stays exact without relying on signed 32-bit shifts.
+		if (shift >= 32) return out;
 		const hasContinuation = (digit & VLQ_CONTINUATION) !== 0;
-		value += (digit & VLQ_BASE_MASK) << shift;
+		value += (digit & VLQ_BASE_MASK) * 2 ** shift;
 		if (hasContinuation) {
 			shift += VLQ_BASE_SHIFT;
 		} else {
+			if (value > Number.MAX_SAFE_INTEGER) return out; // overflowed: fail-soft
 			// Last bit of the accumulated value is the sign.
 			const shouldNegate = (value & 1) === 1;
-			value >>= 1;
-			out.push(shouldNegate ? -value : value);
+			const magnitude = Math.floor(value / 2);
+			out.push(shouldNegate ? -magnitude : magnitude);
 			value = 0;
 			shift = 0;
 		}

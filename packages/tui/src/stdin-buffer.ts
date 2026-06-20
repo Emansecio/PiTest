@@ -31,6 +31,20 @@ const BRACKETED_PASTE_END = "\x1b[201~";
 // paste mode. Generous so legitimate large pastes still complete normally.
 const MAX_PASTE_BYTES = 10 * 1024 * 1024;
 
+// Cap for the general escape-sequence accumulator (this.buffer). The pending
+// flush timeout is cleared at the top of every process() call and only re-armed
+// when a non-empty remainder survives extractCompleteSequences(). A continuous
+// stream that never forms a complete sequence — an endless unterminated CSI
+// ('\x1b[' followed by an unbroken run of digits/';', each candidate ending in a
+// byte < 0x40 so it stays "incomplete"), or an SGR-mouse '\x1b[<99999...' that
+// never closes — arriving faster than timeoutMs would clear the timeout before
+// it can fire and let this.buffer grow without bound (OOM). Mirroring the
+// MAX_PASTE_BYTES guard, once the remainder exceeds this cap we force-flush the
+// buffered content as data and reset, so growth is bounded even when no chunk
+// gap ever reaches timeoutMs. Generous so legitimate long sequences still buffer
+// normally before completion.
+const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+
 /**
  * Check if a string is a complete escape sequence or needs more data
  */
@@ -432,6 +446,18 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 
 			for (const sequence of result.sequences) {
 				this.emitDataSequence(sequence);
+			}
+
+			// Bound the remainder: a stream that never completes a sequence would
+			// otherwise accumulate forever because the flush timeout is cleared each
+			// process() call before it can fire. Force-flush what we have as data and
+			// reset so growth stays bounded even with no chunk gap >= timeoutMs.
+			if (this.buffer.length > MAX_BUFFER_BYTES) {
+				const forced = this.buffer;
+				this.buffer = "";
+				this.pendingKittyPrintableCodepoint = undefined;
+				this.emitDataSequence(forced);
+				return;
 			}
 
 			if (this.buffer.length > 0) {

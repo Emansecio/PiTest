@@ -5,6 +5,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import type { AgentEvent, AgentMessage, ThinkingLevel } from "@pit/agent-core";
 import type { ImageContent } from "@pit/ai";
 import type { SessionStats } from "../../core/agent-session.ts";
@@ -47,6 +48,14 @@ export interface ModelInfo {
 
 export type RpcEventListener = (event: AgentEvent) => void;
 
+/**
+ * Cap on retained subprocess stderr. The buffer is only ever interpolated into
+ * error messages, so retaining the child's entire lifetime of stderr is both
+ * unnecessary and an OOM risk on long-lived sessions with chatty children. Keep
+ * the most recent slice — that's where a crash's cause usually is.
+ */
+const STDERR_MAX_BYTES = 65536;
+
 // ============================================================================
 // RPC Client
 // ============================================================================
@@ -59,6 +68,8 @@ export class RpcClient {
 		new Map();
 	private requestId = 0;
 	private stderr = "";
+	/** Decodes stderr chunks without splitting multibyte UTF-8 across boundaries. */
+	private stderrDecoder = new StringDecoder("utf8");
 	private options: RpcClientOptions;
 
 	constructor(options: RpcClientOptions = {}) {
@@ -93,9 +104,16 @@ export class RpcClient {
 		});
 		this.process = child;
 
-		// Collect stderr for debugging
+		// Collect stderr for debugging. Bound the retained buffer to the last
+		// STDERR_MAX_BYTES so a long-lived session with a chatty child can't OOM
+		// the parent; the buffer is only read into error messages. The decoder
+		// keeps multibyte UTF-8 sequences intact across chunk boundaries.
 		child.stderr?.on("data", (data) => {
-			this.stderr += data.toString();
+			const chunk = Buffer.isBuffer(data) ? this.stderrDecoder.write(data) : String(data);
+			if (chunk.length > 0) {
+				const combined = this.stderr + chunk;
+				this.stderr = combined.length > STDERR_MAX_BYTES ? combined.slice(-STDERR_MAX_BYTES) : combined;
+			}
 			process.stderr.write(data);
 		});
 

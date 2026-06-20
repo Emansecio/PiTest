@@ -42,9 +42,14 @@ function hashWindow(lines: string[], start: number): string {
 		.slice(0, HASHLINE_HASH_LEN);
 }
 
-/** Map of 8-hex anchor hash -> list of start line indices (0-based) for the 3-line window. */
-export function computeAnchorIndex(content: string): Map<string, number[]> {
-	const lines = content.split("\n");
+/**
+ * Map of 8-hex anchor hash -> list of start line indices (0-based) for the 3-line window.
+ * Accepts either raw content or an already-split line array; callers that hold the
+ * line array (e.g. the per-edit loop in applyHashlineEdits) pass it directly to avoid
+ * a redundant join/split round-trip. Hashing is identical in both cases.
+ */
+export function computeAnchorIndex(content: string | string[]): Map<string, number[]> {
+	const lines = typeof content === "string" ? content.split("\n") : content;
 	const index = new Map<string, number[]>();
 	const last = lines.length - HASHLINE_WINDOW;
 	for (let i = 0; i <= last; i++) {
@@ -255,7 +260,7 @@ export function applyHashlineEdits(
 
 	for (let i = 0; i < edits.length; i++) {
 		const edit = edits[i];
-		const anchorIndex = computeAnchorIndex(lines.join("\n"));
+		const anchorIndex = computeAnchorIndex(lines);
 		const beforeStart = findAnchor(lines, edit.before_hash, i, "before_hash", 0, anchorIndex);
 		// after window must start strictly after the before window ends
 		const afterStart = findAnchor(

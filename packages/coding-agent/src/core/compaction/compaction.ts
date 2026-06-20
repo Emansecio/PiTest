@@ -713,9 +713,13 @@ export function pruneOldToolOutputs(
 	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
 	protectTurns = PRUNE_PROTECT_TURNS,
 ): number {
-	// Find the index of the Nth-from-last user message to establish the protection boundary
+	// Find the index of the Nth-from-last user message to establish the protection boundary.
+	// If the window holds fewer than `protectTurns` user messages, the whole window IS the
+	// recent set the protect-turns guard is meant to shield, so protect it entirely (index 0)
+	// rather than leaving the boundary at messages.length, which would sweep every message —
+	// including the most-recent large tool outputs — the opposite of the intended behavior.
 	let userCount = 0;
-	let protectFromIndex = messages.length;
+	let protectFromIndex = 0;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		if (messages[i].role === "user") {
 			userCount++;

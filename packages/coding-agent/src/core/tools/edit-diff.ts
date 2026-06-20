@@ -380,7 +380,14 @@ export function buildCandidateMatches(
 	const maxStart = Math.min(contentLines.length - windowSize + 1, NEAR_MISS_MAX_CANDIDATE_WINDOWS);
 	if (maxStart <= 0) return [];
 
-	const nonBlankOldLines = oldLines.filter((line) => line.trimStart() !== "").length;
+	// Precompute leading-trimmed lines once. The Pass-1 scan compares every
+	// window position against `oldText`, so without caching each `trimStart()`
+	// would be recomputed up to `maxStart` times per line — tens of millions of
+	// allocations for a large failed edit. Cache is behavior-identical.
+	const oldTrim = oldLines.map((line) => line.trimStart());
+	const contentTrim = contentLines.map((line) => line.trimStart());
+
+	const nonBlankOldLines = oldTrim.reduce((count, line) => (line !== "" ? count + 1 : count), 0);
 
 	// Pass 1 — score every window position. Cheap O(n × windowSize) scan.
 	type ScoredWindow = { start: number; score: number };
@@ -388,10 +395,10 @@ export function buildCandidateMatches(
 	for (let start = 0; start < maxStart; start++) {
 		let score = 0;
 		for (let j = 0; j < windowSize; j++) {
-			const expected = oldLines[j].trimStart();
+			const expected = oldTrim[j];
 			// Only count non-blank line agreements so blank-line pile-up doesn't
 			// fabricate near-miss hints out of unrelated files.
-			if (expected !== "" && contentLines[start + j].trimStart() === expected) {
+			if (expected !== "" && contentTrim[start + j] === expected) {
 				score++;
 			}
 		}
@@ -426,7 +433,7 @@ export function buildCandidateMatches(
 	return selected.map((candidate) => {
 		let divergenceOffset = 0;
 		for (let j = 0; j < windowSize; j++) {
-			if (contentLines[candidate.start + j].trimStart() !== oldLines[j].trimStart()) {
+			if (contentTrim[candidate.start + j] !== oldTrim[j]) {
 				divergenceOffset = j;
 				break;
 			}

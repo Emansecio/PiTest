@@ -274,13 +274,16 @@ async function applyResolutionToFile(
 ): Promise<void> {
 	// Apply from bottom to top to keep line indices stable.
 	const entries = Array.from(resolutions.entries()).sort((a, b) => b[0] - a[0]);
-	const lines = fc.originalLines.slice();
+	let lines = fc.originalLines.slice();
 	for (const [blockIndex, replacement] of entries) {
 		const block = fc.blocks[blockIndex - 1];
 		if (!block) continue;
 		const startIdx = block.startLine - 1;
 		const endIdx = block.endLine - 1;
-		lines.splice(startIdx, endIdx - startIdx + 1, ...replacement);
+		// Rebuild the array via concat instead of `splice(..., ...replacement)`:
+		// spreading a multi-hundred-thousand-element replacement as call arguments
+		// overflows the engine arg/stack limit (RangeError) on huge conflict blocks.
+		lines = lines.slice(0, startIdx).concat(replacement, lines.slice(endIdx + 1));
 	}
 	const joined = lines.join("\n") + (fc.hadTrailingNewline ? "\n" : "");
 	// Atomic temp+rename so a concurrent read never observes a torn document and an
@@ -331,12 +334,12 @@ export function createConflictSchemeResolver(): UrlSchemeResolver {
 						"bulk conflict://* resolution requires @ours, @theirs, or @base (custom content not allowed)",
 					);
 				}
-				// Group blocks back to their owning file and compute the resolution per block.
+				// Pre-flight pass: compute resolutions for EVERY block of EVERY file
+				// BEFORE writing anything. A missing base section (2-way conflict under
+				// @base) throws here, so a tree that mixes diff3 and 2-way conflicts is
+				// rejected wholesale instead of leaving earlier files resolved on disk.
+				const planned: Array<{ fc: FileConflicts; resolutions: Map<number, string[]> }> = [];
 				for (const fc of files) {
-					// Honor abort BETWEEN files so a cancel stops cleanly after a whole
-					// file is committed rather than half-applying the tree. (writeFileAtomic
-					// also honors the signal up to its own commit point per file.)
-					if (ctx.signal?.aborted) throw new Error("Operation aborted");
 					const resolutions = new Map<number, string[]>();
 					for (let i = 0; i < fc.blocks.length; i++) {
 						const block = fc.blocks[i];
@@ -344,6 +347,14 @@ export function createConflictSchemeResolver(): UrlSchemeResolver {
 						if (!Array.isArray(r)) throw new Error(r.error);
 						resolutions.set(i + 1, r);
 					}
+					planned.push({ fc, resolutions });
+				}
+				// Write pass: now that every block validated, commit the files.
+				for (const { fc, resolutions } of planned) {
+					// Honor abort BETWEEN files so a cancel stops cleanly after a whole
+					// file is committed rather than half-applying the tree. (writeFileAtomic
+					// also honors the signal up to its own commit point per file.)
+					if (ctx.signal?.aborted) throw new Error("Operation aborted");
 					await applyResolutionToFile(fc, resolutions, ctx.signal);
 				}
 				invalidateScanCache(ctx.cwd);

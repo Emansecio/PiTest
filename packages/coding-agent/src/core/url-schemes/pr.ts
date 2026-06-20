@@ -22,29 +22,43 @@ interface PrUrlParts {
 const GH_INSTALL_HINT = "gh CLI not installed; install via https://cli.github.com/ to use pr:// scheme";
 const GH_AUTH_HINT = "gh CLI is installed but not authenticated. Run: gh auth login";
 
-// Module-level cache: undefined = unchecked, true = authenticated, false = unauthenticated/missing.
-let ghAuthCache: boolean | undefined;
+type GhAuthStatus = "ok" | "unauthenticated" | "not-installed";
 
-function probeGhAuth(cwd: string): Promise<boolean> {
+// Module-level cache. Only the positive ("ok") result is memoized permanently;
+// negative results carry a short TTL so they self-heal once gh becomes
+// installed/authenticated mid-session (no agent restart required).
+const GH_AUTH_NEGATIVE_TTL_MS = 30_000;
+let ghAuthCache: GhAuthStatus | undefined;
+let ghAuthCacheExpiry = 0;
+
+function probeGhAuth(cwd: string): Promise<GhAuthStatus> {
 	return new Promise((resolve) => {
 		execFile("gh", ["auth", "status"], { cwd, maxBuffer: 1 * 1024 * 1024, windowsHide: true }, (err) => {
 			if (err && (err as NodeJS.ErrnoException).code === "ENOENT") {
-				resolve(false);
+				resolve("not-installed");
 				return;
 			}
 			if (err) {
-				resolve(false);
+				resolve("unauthenticated");
 				return;
 			}
-			resolve(true);
+			resolve("ok");
 		});
 	});
 }
 
-async function ensureGhAuth(cwd: string): Promise<boolean> {
-	if (ghAuthCache !== undefined) return ghAuthCache;
-	ghAuthCache = await probeGhAuth(cwd);
-	return ghAuthCache;
+async function ensureGhAuth(cwd: string): Promise<GhAuthStatus> {
+	if (ghAuthCache === "ok") return ghAuthCache;
+	if (ghAuthCache !== undefined && Date.now() < ghAuthCacheExpiry) return ghAuthCache;
+	const status = await probeGhAuth(cwd);
+	ghAuthCache = status;
+	ghAuthCacheExpiry = status === "ok" ? 0 : Date.now() + GH_AUTH_NEGATIVE_TTL_MS;
+	return status;
+}
+
+function invalidateGhAuthCache(): void {
+	ghAuthCache = undefined;
+	ghAuthCacheExpiry = 0;
 }
 
 function looksLikeAuthError(stderr: string): boolean {
@@ -231,7 +245,11 @@ export function createPrSchemeResolver(): UrlSchemeResolver {
 			if ("error" in parsed) return { kind: "error", error: parsed.error };
 
 			if (parsed.view === "overview") {
-				if (!(await ensureGhAuth(ctx.cwd))) {
+				const authStatus = await ensureGhAuth(ctx.cwd);
+				if (authStatus === "not-installed") {
+					return { kind: "error", error: GH_INSTALL_HINT };
+				}
+				if (authStatus === "unauthenticated") {
 					return { kind: "error", error: GH_AUTH_HINT };
 				}
 				const res = await runGh(
@@ -245,9 +263,16 @@ export function createPrSchemeResolver(): UrlSchemeResolver {
 					],
 					ctx,
 				);
-				if ("notInstalled" in res) return { kind: "error", error: GH_INSTALL_HINT };
+				if ("notInstalled" in res) {
+					invalidateGhAuthCache();
+					return { kind: "error", error: GH_INSTALL_HINT };
+				}
 				if (res.code !== 0) {
-					if (looksLikeAuthError(res.stderr)) return { kind: "error", error: GH_AUTH_HINT };
+					if (looksLikeAuthError(res.stderr)) {
+						// Auth dropped after a previously-cached "ok"; force a re-probe next read.
+						invalidateGhAuthCache();
+						return { kind: "error", error: GH_AUTH_HINT };
+					}
 					return {
 						kind: "error",
 						error: `gh pr view #${parsed.number} failed: ${res.stderr.trim() || res.stdout.trim()}`,
@@ -263,13 +288,24 @@ export function createPrSchemeResolver(): UrlSchemeResolver {
 			}
 
 			// view === "diff"
-			if (!(await ensureGhAuth(ctx.cwd))) {
+			const authStatus = await ensureGhAuth(ctx.cwd);
+			if (authStatus === "not-installed") {
+				return { kind: "error", error: GH_INSTALL_HINT };
+			}
+			if (authStatus === "unauthenticated") {
 				return { kind: "error", error: GH_AUTH_HINT };
 			}
 			const res = await runGh([...repoFlag(parsed), "pr", "diff", parsed.number], ctx);
-			if ("notInstalled" in res) return { kind: "error", error: GH_INSTALL_HINT };
+			if ("notInstalled" in res) {
+				invalidateGhAuthCache();
+				return { kind: "error", error: GH_INSTALL_HINT };
+			}
 			if (res.code !== 0) {
-				if (looksLikeAuthError(res.stderr)) return { kind: "error", error: GH_AUTH_HINT };
+				if (looksLikeAuthError(res.stderr)) {
+					// Auth dropped after a previously-cached "ok"; force a re-probe next read.
+					invalidateGhAuthCache();
+					return { kind: "error", error: GH_AUTH_HINT };
+				}
 				return {
 					kind: "error",
 					error: `gh pr diff #${parsed.number} failed: ${res.stderr.trim() || res.stdout.trim()}`,

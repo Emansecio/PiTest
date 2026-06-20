@@ -119,6 +119,14 @@ export function findExactModelReferenceMatch(
  * Returns the matched model or undefined if no match found.
  */
 function tryMatchModel(modelPattern: string, availableModels: Model<Api>[]): Model<Api> | undefined {
+	// An empty/whitespace pattern is a malformed reference. Without this guard the
+	// partial-match filter below uses `includes("")`, which is true for every model,
+	// so ALL models would match and an arbitrary alias would be returned. Bail out so
+	// the caller routes to its proper "not found" error/warning path instead.
+	if (!modelPattern.trim()) {
+		return undefined;
+	}
+
 	const exactMatch = findExactModelReferenceMatch(modelPattern, availableModels);
 	if (exactMatch) {
 		return exactMatch;

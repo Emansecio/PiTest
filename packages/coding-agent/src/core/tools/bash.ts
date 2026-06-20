@@ -554,6 +554,25 @@ type BashTextMemo = {
 // to never trip a still-attached row, small enough to bound the leak.
 const BASH_INTERVAL_STALE_TICKS = 5;
 
+// Absolute upper bound (ms) on how long the live-elapsed `interval` may stay
+// armed, regardless of re-renders. The tick heuristic clears a row that stops
+// re-rendering, but a detached-yet-still-re-rendered row resets the tick
+// counter every frame and would tick forever. A foreground command without an
+// explicit timeout is promoted to a tracked background job after the
+// auto-background threshold (which fires a terminal render that clears the
+// timer); one with an explicit timeout is killed at the timeout (same). So by
+// the time this cap elapses the row should already be finalized — if it isn't,
+// the row is orphaned and we self-clear unconditionally. Losing the per-second
+// elapsed-footer refresh past this point is purely cosmetic. Generous slack on
+// top of the threshold so a genuinely long-running visible command is never
+// tripped; floored so a disabled/zero auto-background config still bounds it.
+function resolveBashIntervalMaxAgeMs(): number {
+	const autoBgSeconds = resolveAutoBackgroundSeconds();
+	const thresholdMs = autoBgSeconds > 0 ? autoBgSeconds * 1000 : 0;
+	const flooredMs = Math.max(thresholdMs, 5 * 60 * 1000);
+	return flooredMs + 60 * 1000;
+}
+
 type BashRenderState = {
 	startedAt: number | undefined;
 	endedAt: number | undefined;
@@ -566,6 +585,14 @@ type BashRenderState = {
 	// self-clear so the interval can't fire `invalidate()` for the process
 	// lifetime. Reset to 0 on every `renderResult`.
 	intervalTicksSinceRender: number | undefined;
+	// Wall-clock time (ms) the live-elapsed `interval` was armed. The tick
+	// heuristic above self-clears a row that stops re-rendering, but a detached
+	// row that keeps being re-rendered (its `invalidate()` still routes back to
+	// `renderResult`) without ever reaching a final non-partial/error render
+	// would reset the tick counter every frame and tick for the process lifetime.
+	// We bound that with an absolute max-age cap (see BASH_INTERVAL_MAX_AGE_MS):
+	// once the interval has lived past it the timer self-clears unconditionally.
+	intervalStartedAt: number | undefined;
 	// Count of collapsed (hidden) output lines, set by the result body and read
 	// by the call/title component so the `(N earlier lines, …)` hint rides on the
 	// command line instead of costing its own row. Logical-line based (not visual)
@@ -1067,9 +1094,17 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 				// Guard it: each tick increments a counter that renderResult resets;
 				// a live row re-renders within one frame, so several consecutive
 				// ticks with no render means the row is gone — self-clear then.
+				state.intervalStartedAt = Date.now();
+				const maxAgeMs = resolveBashIntervalMaxAgeMs();
 				state.interval = setInterval(() => {
 					state.intervalTicksSinceRender = (state.intervalTicksSinceRender ?? 0) + 1;
-					if ((state.intervalTicksSinceRender ?? 0) > BASH_INTERVAL_STALE_TICKS) {
+					const aliveMs = Date.now() - (state.intervalStartedAt ?? Date.now());
+					// Self-clear on EITHER orphan signal: several consecutive ticks
+					// with no render (row stopped re-rendering) OR the absolute
+					// max-age cap (row keeps re-rendering but never finalizes). The
+					// cap defeats a detached-yet-re-rendered row that would otherwise
+					// reset the tick counter every frame and tick forever.
+					if ((state.intervalTicksSinceRender ?? 0) > BASH_INTERVAL_STALE_TICKS || aliveMs > maxAgeMs) {
 						if (state.interval) {
 							clearInterval(state.interval);
 							state.interval = undefined;
@@ -1085,6 +1120,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 					clearInterval(state.interval);
 					state.interval = undefined;
 				}
+				state.intervalStartedAt = undefined;
 			}
 			const component =
 				(context.lastComponent as BashResultRenderComponent | undefined) ?? new BashResultRenderComponent();

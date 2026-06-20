@@ -1073,11 +1073,19 @@ export class SessionManager {
 
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
 		// Redact credentials on the way to disk only: each [REDACTED:x] token has no
 		// JSON metacharacters, so the serialized lines stay parseable. The in-memory
 		// fileEntries keep the verbatim value for the live turn.
-		const safe = redactForDisk(content);
+		//
+		// Redact PER PHYSICAL LINE, never on the joined multi-line buffer: the
+		// private-key pattern's `[\s\S]*?` body matches across literal `\n`, so a
+		// BEGIN armor in one entry plus an END armor in a later entry would collapse
+		// the whole span — including the JSONL line separators and any entries
+		// between them — into a single token, destroying valid history. Inside a
+		// single serialized line all real newlines are escaped to `\\n`, so the
+		// documented single-line JSON-safety guarantee holds only when each line is
+		// scrubbed in isolation.
+		const safe = `${this.fileEntries.map((e) => redactForDisk(JSON.stringify(e))).join("\n")}\n`;
 		// Atomic rewrite (temp + rename) so a crash mid-write never truncates the
 		// session file. Falls back to a direct write if rename is unavailable.
 		writeFileAtomic(this.sessionFile, safe);
@@ -1135,20 +1143,31 @@ export class SessionManager {
 		// or re-open the session immediately after appendMessage rely on the
 		// new entry being durable on disk. The previous async-debounced write
 		// optimization broke that invariant; keep the batching but flush sync.
+		// Redact credentials on the disk-egress boundary only, PER PHYSICAL LINE.
+		// The private-key pattern's `[\s\S]*?` body matches across literal `\n`, so
+		// scrubbing the joined multi-line batch would let a BEGIN armor in one entry
+		// pair with an END armor in a later entry and collapse the span — including
+		// the JSONL separators and any entries between — into a single token,
+		// corrupting the file. Inside one serialized line all real newlines are
+		// escaped to `\\n`, so the documented single-line JSON-safety guarantee
+		// holds only when each line is redacted in isolation. [REDACTED:x] carries
+		// no JSON metacharacters, so the written lines stay valid JSON. The live
+		// in-memory entries are left verbatim for the active turn.
 		const isInitialFlush = !this.flushed;
 		let batch: string;
 		if (isInitialFlush) {
-			batch = this.fileEntries.map((e) => `${JSON.stringify(e)}\n`).join("");
+			batch = this.fileEntries.map((e) => `${redactForDisk(JSON.stringify(e))}\n`).join("");
 		} else {
-			batch = `${JSON.stringify(entry)}\n`;
+			batch = `${redactForDisk(JSON.stringify(entry))}\n`;
 		}
 		// If there are still queued async writes from older code paths, prepend
 		// them in order WITHOUT mutating the queue yet — a throwing append must
 		// leave both `flushed` and `_writeQueue` intact so the next attempt can
 		// rewrite the full batch (header + history) instead of silently dropping
-		// it. Mutate state only after the bytes are durable.
+		// it. Mutate state only after the bytes are durable. Queued entries are
+		// already one-JSON-per-line, so redact each line independently here too.
 		if (this._writeQueue.length > 0) {
-			batch = this._writeQueue.join("") + batch;
+			batch = this._writeQueue.map((line) => redactForDisk(line)).join("") + batch;
 		}
 		// Single appendFileSync of the COMPLETE batch = one write() syscall, so an
 		// entry is never split across appends. Cross-process concurrent appends to
@@ -1156,11 +1175,7 @@ export class SessionManager {
 		// byte level — accepted as best-effort; a full cross-process lockfile is a
 		// follow-up. The retry absorbs transient AV/indexer locks on Windows; on
 		// final failure it throws with state kept safe for the next attempt.
-		// Redact credentials on the disk-egress boundary only. batch is fully
-		// serialized JSONL (one JSON.stringify per line), and [REDACTED:x] carries
-		// no JSON metacharacters, so the written lines remain valid JSON. The live
-		// in-memory entries are left verbatim for the active turn.
-		appendWithRetry(this.sessionFile, redactForDisk(batch));
+		appendWithRetry(this.sessionFile, batch);
 		// Append succeeded: now it is safe to commit the flushed flag and clear
 		// the queued writes we just persisted.
 		if (isInitialFlush) {

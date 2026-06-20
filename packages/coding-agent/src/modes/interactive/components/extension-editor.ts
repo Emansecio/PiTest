@@ -120,9 +120,11 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		const currentText = this.editor.getText();
 		const tmpFile = path.join(os.tmpdir(), `pi-extension-editor-${Date.now()}.md`);
 
+		let stopped = false;
 		try {
 			fs.writeFileSync(tmpFile, currentText, "utf-8");
 			this.tui.stop();
+			stopped = true;
 
 			const [editor, ...editorArgs] = editorCmd.split(" ");
 			process.stdout.write(
@@ -151,9 +153,15 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 			} catch {
 				// Ignore cleanup errors
 			}
-			this.tui.start();
-			// Force full re-render since external editor uses alternate screen
-			this.tui.requestRender(true);
+			// Only restart the TUI if it was actually stopped. If writeFileSync
+			// threw before tui.stop(), the TUI is still running and a second
+			// start() would double-register stdout/stdin listeners (every
+			// keystroke handled twice + leaked listeners for the rest of the session).
+			if (stopped) {
+				this.tui.start();
+				// Force full re-render since external editor uses alternate screen
+				this.tui.requestRender(true);
+			}
 		}
 	}
 }

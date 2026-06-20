@@ -3,7 +3,18 @@
  */
 
 import chalk from "chalk";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import {
+	closeSync,
+	existsSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	readSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "fs";
 import { basename, dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir } from "./config.ts";
 import { migrateKeybindingsConfig } from "./core/keybindings.ts";
@@ -68,6 +79,34 @@ export function migrateAuthToAuthJson(): string[] {
 }
 
 /**
+ * Read only the first line of a (possibly multi-MB) file without loading the
+ * whole thing into memory. Reads bounded chunks until a newline is found or the
+ * file ends. Returns the first line without its trailing newline.
+ */
+function readFirstLineSync(file: string): string {
+	const fd = openSync(file, "r");
+	try {
+		const chunk = Buffer.allocUnsafe(64 * 1024);
+		const collected: Buffer[] = [];
+		// 0x0a === "\n". Accumulate raw bytes so a multi-byte UTF-8 char split
+		// across a chunk boundary is never decoded mid-sequence.
+		while (true) {
+			const bytesRead = readSync(fd, chunk, 0, chunk.length, null);
+			if (bytesRead === 0) break;
+			const newlineIndex = chunk.indexOf(0x0a, 0);
+			if (newlineIndex !== -1 && newlineIndex < bytesRead) {
+				collected.push(Buffer.from(chunk.subarray(0, newlineIndex)));
+				return Buffer.concat(collected).toString("utf8");
+			}
+			collected.push(Buffer.from(chunk.subarray(0, bytesRead)));
+		}
+		return Buffer.concat(collected).toString("utf8");
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/**
  * Migrate sessions from ~/.pit/agent/*.jsonl to proper session directories.
  *
  * Bug in v0.30.0: Sessions were saved to ~/.pit/agent/ instead of
@@ -93,10 +132,9 @@ export function migrateSessionsFromAgentRoot(): void {
 
 	for (const file of files) {
 		try {
-			// Read first line to get session header
-			const content = readFileSync(file, "utf8");
-			const firstLine = content.split("\n")[0];
-			if (!firstLine?.trim()) continue;
+			// Read first line to get session header (bounded read, not the whole file)
+			const firstLine = readFirstLineSync(file);
+			if (!firstLine.trim()) continue;
 
 			const header = JSON.parse(firstLine);
 			if (header.type !== "session" || !header.cwd) continue;
