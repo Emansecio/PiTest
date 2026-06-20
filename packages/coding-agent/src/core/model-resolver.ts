@@ -199,54 +199,65 @@ export function parseModelPattern(
 	availableModels: Model<Api>[],
 	options?: { allowInvalidThinkingLevelFallback?: boolean },
 ): ParsedModelResult {
-	// Try exact match first
-	const exactMatch = tryMatchModel(pattern, availableModels);
-	if (exactMatch) {
-		return { model: exactMatch, thinkingLevel: undefined, warning: undefined };
+	// Iterative form of the original tail recursion that stripped one trailing
+	// colon segment per call. A colon-heavy pattern (e.g. a malformed `modelScope`
+	// entry such as `":".repeat(100000) + "x"`) used to drive recursion depth =
+	// number of colons, overflowing the stack with an uncaught RangeError that
+	// aborted model resolution at startup. The loop below is behavior-identical
+	// but bounded by the input length.
+
+	// Phase 1: strip trailing colon segments from the right until a prefix matches
+	// a model (innermost recursion), recording each stripped suffix and the frame
+	// pattern it belonged to so the fold can reproduce per-frame warning strings.
+	const segments: Array<{ suffix: string; framePattern: string }> = [];
+	let current = pattern;
+	let matched: Model<Api> | undefined = tryMatchModel(current, availableModels);
+
+	while (!matched) {
+		const lastColonIndex = current.lastIndexOf(":");
+		if (lastColonIndex === -1) {
+			// No colons left and nothing matched: the pattern resolves to no model.
+			// Outer suffix segments are irrelevant (the original returned the inner
+			// unmatched result unchanged), so bail with the empty result.
+			return { model: undefined, thinkingLevel: undefined, warning: undefined };
+		}
+
+		const suffix = current.substring(lastColonIndex + 1);
+		// In strict mode (CLI --model parsing) an invalid suffix is treated as part
+		// of the model id and fails, rather than being stripped. This mirrors the
+		// original early return and avoids resolving to a different model.
+		const allowFallback = options?.allowInvalidThinkingLevelFallback ?? true;
+		if (!allowFallback && !isValidThinkingLevel(suffix)) {
+			return { model: undefined, thinkingLevel: undefined, warning: undefined };
+		}
+
+		segments.push({ suffix, framePattern: current });
+		current = current.substring(0, lastColonIndex);
+		matched = tryMatchModel(current, availableModels);
 	}
 
-	// No match - try splitting on last colon if present
-	const lastColonIndex = pattern.lastIndexOf(":");
-	if (lastColonIndex === -1) {
-		// No colons, pattern simply doesn't match any model
-		return { model: undefined, thinkingLevel: undefined, warning: undefined };
-	}
-
-	const prefix = pattern.substring(0, lastColonIndex);
-	const suffix = pattern.substring(lastColonIndex + 1);
-
-	if (isValidThinkingLevel(suffix)) {
-		// Valid thinking level - recurse on prefix and use this level
-		const result = parseModelPattern(prefix, availableModels, options);
-		if (result.model) {
-			// Only use this thinking level if no warning from inner recursion
-			return {
+	// Phase 2: fold the stripped suffixes from innermost (leftmost) to outermost
+	// (rightmost). `segments` was filled right-to-left, so iterate it in reverse.
+	let result: ParsedModelResult = { model: matched, thinkingLevel: undefined, warning: undefined };
+	for (let i = segments.length - 1; i >= 0; i--) {
+		const { suffix, framePattern } = segments[i];
+		if (isValidThinkingLevel(suffix)) {
+			// Only adopt this thinking level if no warning surfaced from an inner frame.
+			result = {
 				model: result.model,
 				thinkingLevel: result.warning ? undefined : suffix,
 				warning: result.warning,
 			};
-		}
-		return result;
-	} else {
-		// Invalid suffix
-		const allowFallback = options?.allowInvalidThinkingLevelFallback ?? true;
-		if (!allowFallback) {
-			// In strict mode (CLI --model parsing), treat it as part of the model id and fail.
-			// This avoids accidentally resolving to a different model.
-			return { model: undefined, thinkingLevel: undefined, warning: undefined };
-		}
-
-		// Scope mode: recurse on prefix and warn
-		const result = parseModelPattern(prefix, availableModels, options);
-		if (result.model) {
-			return {
+		} else {
+			result = {
 				model: result.model,
 				thinkingLevel: undefined,
-				warning: `Invalid thinking level "${suffix}" in pattern "${pattern}". Using default instead.`,
+				warning: `Invalid thinking level "${suffix}" in pattern "${framePattern}". Using default instead.`,
 			};
 		}
-		return result;
 	}
+
+	return result;
 }
 
 /**

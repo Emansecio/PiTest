@@ -103,6 +103,7 @@ export class FooterDataProvider {
 	private refreshInFlight = false;
 	private refreshPending = false;
 	private disposed = false;
+	private generation = 0;
 
 	constructor(cwd: string) {
 		this.cwd = cwd;
@@ -175,6 +176,7 @@ export class FooterDataProvider {
 		}
 
 		this.cwd = cwd;
+		this.generation++;
 		if (this.refreshTimer) {
 			clearTimeout(this.refreshTimer);
 			this.refreshTimer = null;
@@ -189,6 +191,7 @@ export class FooterDataProvider {
 	/** Internal: cleanup */
 	dispose(): void {
 		this.disposed = true;
+		this.generation++;
 		if (this.refreshTimer) {
 			clearTimeout(this.refreshTimer);
 			this.refreshTimer = null;
@@ -221,9 +224,13 @@ export class FooterDataProvider {
 		}
 
 		this.refreshInFlight = true;
+		const generationAtStart = this.generation;
 		try {
 			const nextBranch = await this.resolveGitBranchAsync();
 			if (this.disposed) return;
+			// If cwd changed (or we were disposed) while the refresh was in flight,
+			// the resolved branch belongs to the old repo — discard it.
+			if (this.generation !== generationAtStart) return;
 			if (this.cachedBranch !== undefined && this.cachedBranch !== nextBranch) {
 				this.cachedBranch = nextBranch;
 				this.notifyBranchChange();

@@ -255,7 +255,14 @@ export class CdpConnection {
 			}, commandTimeoutMs);
 			signal?.addEventListener("abort", onAbort, { once: true });
 			this.pending.set(id, { resolve: settleResolve, reject: settleReject, timer, cleanup });
-			this.ws?.send(JSON.stringify({ id, method, params }));
+			// A WS whose socket is CLOSING/CLOSED throws synchronously from send(); route
+			// that through settleReject so the timer, abort listener, and pending entry are
+			// cleaned up instead of leaking for the full command timeout.
+			try {
+				this.ws?.send(JSON.stringify({ id, method, params }));
+			} catch (err) {
+				settleReject(err instanceof Error ? err : new Error(String(err)));
+			}
 		});
 	}
 

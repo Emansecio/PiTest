@@ -267,8 +267,17 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 	const archivePath = join(TOOLS_DIR, `${assetName}.${uniqueSuffix}.part`);
 	const stagedBinaryPath = join(TOOLS_DIR, `${config.binaryName}${binaryExt}.${uniqueSuffix}.staged`);
 
-	// Download
-	await downloadFile(downloadUrl, archivePath);
+	// Download. If downloadFile throws (network abort, ECONNRESET mid-stream), the
+	// pipeline destroys the write stream but leaves the partial .part file at
+	// archivePath on disk. This happens before the try/finally below is entered, so
+	// remove the orphaned archive here to prevent failed downloads from accumulating
+	// <asset>.<suffix>.part files in the tools dir.
+	try {
+		await downloadFile(downloadUrl, archivePath);
+	} catch (e) {
+		rmSync(archivePath, { force: true });
+		throw e;
+	}
 
 	// Extract into a unique temp directory. fd and rg downloads can run concurrently
 	// during startup, so sharing a fixed directory causes races.

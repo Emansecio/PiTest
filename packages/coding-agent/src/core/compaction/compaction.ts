@@ -1546,14 +1546,19 @@ export async function compact(
 		let preSeed: Record<string, string> | undefined;
 		try {
 			const { map } = await getLivingRepoMap(cwd ?? ".");
-			const mapDigests = livingRepoMapToDigests(map);
 			const seed: Record<string, string> = {};
-			for (const p of digestPaths) {
-				const relKey = relative(cwd ?? ".", isAbsolute(p) ? p : resolve(cwd ?? ".", p))
+			const relKeys = digestPaths.map((p) =>
+				relative(cwd ?? ".", isAbsolute(p) ? p : resolve(cwd ?? ".", p))
 					.split("\\")
-					.join("/");
-				const symbols = mapDigests[relKey];
-				if (symbols !== undefined) seed[p] = symbols;
+					.join("/"),
+			);
+			// Filter the living-repo-map projection to just the touched files so we don't
+			// materialize a digest string for every indexed file in the repo. The lookup
+			// keys (and resulting seed) are identical; only the intermediate dict shrinks.
+			const mapDigests = livingRepoMapToDigests(map, relKeys);
+			for (let i = 0; i < digestPaths.length; i++) {
+				const symbols = mapDigests[relKeys[i]];
+				if (symbols !== undefined) seed[digestPaths[i]] = symbols;
 			}
 			preSeed = seed;
 		} catch {

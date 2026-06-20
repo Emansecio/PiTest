@@ -567,6 +567,14 @@ export function createGrepToolDefinition(
 
 								// Format matches after streaming finishes so custom readFile() backends can be async.
 								for (const match of matches) {
+									// A late abort (ESC after rg already closed) can't be interrupted by
+									// onAbort — the child is gone and the listener was removed in cleanup().
+									// Re-check before each per-file read so a pluggable/slow readFile backend
+									// doesn't run every matched file to completion before the abort rejects.
+									if (aborted || signal?.aborted) {
+										settle(() => reject(new Error("Operation aborted")));
+										return;
+									}
 									if (contextValue === 0 && match.lineText !== undefined) {
 										const relativePath = formatPath(match.filePath);
 										const sanitized = match.lineText

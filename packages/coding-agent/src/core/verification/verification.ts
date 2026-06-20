@@ -10,6 +10,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, isAbsolute, join, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { getAvailableAdapters } from "../dap/config.ts";
 
@@ -118,14 +119,23 @@ export async function runCheckCommand(
 		chunks.push(tail);
 		bufferedLength = tail.length;
 	};
-	const append = (chunk: Buffer) => {
-		const text = chunk.toString();
+	const append = (text: string) => {
+		if (text.length === 0) return;
 		chunks.push(text);
 		bufferedLength += text.length;
 		if (bufferedLength > MAX_OUTPUT_BYTES * 2) compact();
 	};
-	proc.stdout?.on("data", append);
-	proc.stderr?.on("data", append);
+	// Decode each stream through its OWN StringDecoder so a multibyte UTF-8
+	// sequence (pt-BR accents, box glyphs, emoji) split across two `data` events
+	// is buffered until complete instead of being decoded as two halves — each
+	// half would otherwise emit a U+FFFD replacement char (mojibake) that flows
+	// into the gate failure summary and the re-injected prompt. Per-stream
+	// decoders matter because a partial sequence at the tail of a stdout chunk is
+	// only completed by the NEXT stdout chunk, never by an interleaved stderr one.
+	const stdoutDecoder = new StringDecoder("utf8");
+	const stderrDecoder = new StringDecoder("utf8");
+	proc.stdout?.on("data", (chunk: Buffer) => append(stdoutDecoder.write(chunk)));
+	proc.stderr?.on("data", (chunk: Buffer) => append(stderrDecoder.write(chunk)));
 
 	let killTimer: NodeJS.Timeout | undefined;
 	const kill = () => {
@@ -177,6 +187,12 @@ export async function runCheckCommand(
 		opts?.signal?.removeEventListener("abort", onAbort);
 	}
 
+	// Flush any bytes still buffered inside the decoders (a final chunk that ended
+	// mid-sequence). `.end()` emits the residual for a complete sequence, or a
+	// single U+FFFD for a genuinely truncated trailing one — the right result for
+	// output the process cut off, and it avoids silently dropping the tail.
+	append(stdoutDecoder.end());
+	append(stderrDecoder.end());
 	compact();
 	const output = chunks.length > 0 ? chunks[0] : "";
 	return { ok: exitCode === 0 && !timedOut, exitCode, output: output.trim(), timedOut };

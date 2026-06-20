@@ -1055,6 +1055,16 @@ export function sliceWithWidth(
 		const nextEscIdx = line.indexOf("\x1b", i);
 		const textEnd = nextEscIdx === -1 ? line.length : nextEscIdx;
 
+		// extractAnsiCode returned null for the ESC at `i` (unrecognized or
+		// unterminated sequence — e.g. a stray ESC, or an OSC 8 link split across a
+		// truncation boundary). textEnd === i, so the segmenter loop below does
+		// nothing and `i = textEnd` makes no progress → infinite loop / hang. Skip
+		// the lone ESC as a zero-width byte (matching visibleWidth's `nextEsc + 1`).
+		if (textEnd === i) {
+			i++;
+			continue;
+		}
+
 		for (const { segment } of segmenter.segment(line.slice(i, textEnd))) {
 			const w = graphemeWidth(segment);
 			const inRange = currentCol >= startCol && currentCol < endCol;
@@ -1122,6 +1132,15 @@ export function extractSegments(
 
 		const nextEscIdx = line.indexOf("\x1b", i);
 		const textEnd = nextEscIdx === -1 ? line.length : nextEscIdx;
+
+		// extractAnsiCode returned null for the ESC at `i` (unrecognized or
+		// unterminated sequence). textEnd === i, so the segmenter loop below does
+		// nothing and `i = textEnd` makes no progress → infinite loop / hang. Skip
+		// the lone ESC as a zero-width byte (matching visibleWidth's `nextEsc + 1`).
+		if (textEnd === i) {
+			i++;
+			continue;
+		}
 
 		for (const { segment } of segmenter.segment(line.slice(i, textEnd))) {
 			const w = graphemeWidth(segment);

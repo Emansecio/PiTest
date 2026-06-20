@@ -348,13 +348,19 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 		};
 		const drain = (chunk: string): void => {
 			lineBuf += chunk;
-			let nl = lineBuf.indexOf("\n");
+			// Walk a running index instead of re-slicing lineBuf per newline. Re-slicing
+			// reallocated and copied the entire remaining buffer for each line, so one chunk
+			// carrying k short JSONL lines cost O(k·len) ≈ O(n²) in the chunk size. Slice each
+			// line once, advance `start`, then drop the consumed prefix a single time below.
+			let start = 0;
+			let nl = lineBuf.indexOf("\n", start);
 			while (nl >= 0) {
-				const line = lineBuf.slice(0, nl).trim();
-				lineBuf = lineBuf.slice(nl + 1);
+				const line = lineBuf.slice(start, nl).trim();
+				start = nl + 1;
 				if (line) parseLine(line);
-				nl = lineBuf.indexOf("\n");
+				nl = lineBuf.indexOf("\n", start);
 			}
+			lineBuf = start > 0 ? lineBuf.slice(start) : lineBuf;
 			// A member CLI that emits a huge blob on a SINGLE line with no trailing
 			// newline (malformed output mode, an oversized tool_result) would grow lineBuf
 			// without bound — chunks keep arriving so armIdle() defers the idle kill and only

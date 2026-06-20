@@ -439,14 +439,21 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 
 	// Bound the async-task map: auto-delivered results (delivered=true) are never
 	// joined, so without pruning they'd accumulate (handle + result, up to ~24KB
-	// each) for the whole session. Evict the OLDEST SETTLED entries past the cap
-	// (insertion-order iteration); running tasks are never evicted.
+	// each) for the whole session. Evict the OLDEST COLLECTED entries past the cap
+	// (insertion-order iteration). Running tasks are never evicted, and neither is a
+	// settled-but-undelivered result: when async re-injection is off (e.g.
+	// PIT_NO_ASYNC_REINJECT), onAsyncComplete returns false so a finished task stays
+	// `status==="done" && !delivered` and the model is expected to poll/join it.
+	// Dropping such an entry would make its output unreachable (poll/join would then
+	// report `unknown handle`). Errored entries are collectible-once but safe to drop
+	// under pressure since their payload is small.
 	const PENDING_MAX = 64;
 	function prunePending(): void {
 		if (pending.size <= PENDING_MAX) return;
 		for (const [h, e] of pending) {
 			if (pending.size <= PENDING_MAX) break;
-			if (e.status !== "running") pending.delete(h);
+			const collectible = e.status === "done" && !e.delivered;
+			if (e.status !== "running" && !collectible) pending.delete(h);
 		}
 	}
 

@@ -5,6 +5,19 @@ import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
+// Hard cap on block-render recursion depth (nested blockquotes / lists). marked
+// nests blockquote tokens by `>`-prefix depth and list tokens by indentation, so
+// untrusted/streamed content (pasted text, model output) can drive renderToken/
+// renderList recursion arbitrarily deep and throw RangeError: Maximum call stack
+// size exceeded. That throw is caught by TUI.doRender(), which retries render —
+// but the offending markdown stays in the tree, so every retry re-throws and the
+// UI wedges in a render-fail loop. Real markdown nests only a handful of levels,
+// so capping here is output-identical for all realistic input. The cap also bounds
+// the multiplicative cost of nested blockquote border-wrapping (each level re-wraps
+// its children), so it is deliberately modest rather than near the raw stack limit.
+// Past the cap we stop descending and emit the remaining raw token text instead.
+const MAX_BLOCK_RENDER_DEPTH = 24;
+
 class StrictStrikethroughTokenizer extends Tokenizer {
 	override del(src: string): Tokens.Del | undefined {
 		const match = STRICT_STRIKETHROUGH_REGEX.exec(src);
@@ -287,7 +300,18 @@ export class Markdown implements Component {
 			return incremental;
 		}
 
-		const tokens = markdownParser.lexer(normalizedText);
+		// marked's blockquote/list block tokenizers recurse by nesting depth, so a
+		// pathologically nested document (thousands of `>`/indent levels, easily
+		// produced by a paste or a runaway model stream) can throw RangeError before
+		// rendering even begins. Catch it and fall back to a single plain-text token
+		// so the document still renders (un-formatted) instead of wedging the TUI in
+		// a render-fail retry loop. Realistic documents never reach this path.
+		let tokens: Token[];
+		try {
+			tokens = markdownParser.lexer(normalizedText);
+		} catch {
+			tokens = [{ type: "text", raw: normalizedText, text: normalizedText } as Token];
+		}
 		this.lastRawText = this.text;
 		this.lastNormalizedText = normalizedText;
 		this.lastTokens = tokens;
@@ -343,7 +367,15 @@ export class Markdown implements Component {
 		}
 
 		const tail = normalizedText.slice(stableRaw.length);
-		const tailTokens = markdownParser.lexer(tail);
+		// marked's blockquote/list tokenizers recurse by nesting depth, so a
+		// pathologically nested tail can throw RangeError. Fall back to the full
+		// (also-guarded) lex path rather than propagating the throw.
+		let tailTokens: Token[];
+		try {
+			tailTokens = markdownParser.lexer(tail);
+		} catch {
+			return undefined;
+		}
 
 		// Guard (d): reference-link definitions resolve across the whole document
 		// (a def can change inline rendering of a use anywhere, in both directions).
@@ -522,8 +554,26 @@ export class Markdown implements Component {
 		width: number,
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
+		depth = 0,
 	): string[] {
 		const lines: string[] = [];
+
+		// Recursion-depth guard. Block-level tokens (blockquote, list) recurse via
+		// renderToken/renderList; pathologically nested untrusted input would
+		// otherwise overflow the stack. Past the cap, stop descending and emit the
+		// remaining raw token text so the document still renders (just un-nested).
+		if (depth > MAX_BLOCK_RENDER_DEPTH) {
+			let rawText: string | undefined;
+			if ("raw" in token && typeof token.raw === "string") {
+				rawText = token.raw;
+			} else if ("text" in token && typeof token.text === "string") {
+				rawText = token.text;
+			}
+			if (rawText !== undefined && rawText.length > 0) {
+				lines.push(this.applyDefaultStyle(rawText));
+			}
+			return lines;
+		}
 
 		switch (token.type) {
 			case "heading": {
@@ -592,8 +642,12 @@ export class Markdown implements Component {
 			}
 
 			case "list": {
-				const listLines = this.renderList(token as Tokens.List, 0, width, styleContext);
-				lines.push(...listLines);
+				const listLines = this.renderList(token as Tokens.List, 0, width, styleContext, depth);
+				// Push via loop (not spread): deeply nested input can make this array
+				// large enough to exceed the spread argument-count limit (RangeError).
+				for (const line of listLines) {
+					lines.push(line);
+				}
 				// Don't add spacing after lists if a space token follows
 				// (the space token will handle it)
 				break;
@@ -601,7 +655,9 @@ export class Markdown implements Component {
 
 			case "table": {
 				const tableLines = this.renderTable(token as Tokens.Table, width, nextTokenType, styleContext);
-				lines.push(...tableLines);
+				for (const line of tableLines) {
+					lines.push(line);
+				}
 				break;
 			}
 
@@ -631,9 +687,18 @@ export class Markdown implements Component {
 				for (let i = 0; i < quoteTokens.length; i++) {
 					const quoteToken = quoteTokens[i];
 					const nextQuoteToken = quoteTokens[i + 1];
-					renderedQuoteLines.push(
-						...this.renderToken(quoteToken, quoteContentWidth, nextQuoteToken?.type, quoteInlineStyleContext),
+					const childLines = this.renderToken(
+						quoteToken,
+						quoteContentWidth,
+						nextQuoteToken?.type,
+						quoteInlineStyleContext,
+						depth + 1,
 					);
+					// Push via loop (not spread): deeply nested blockquotes can make this
+					// array exceed the spread argument-count limit (RangeError).
+					for (const line of childLines) {
+						renderedQuoteLines.push(line);
+					}
 				}
 
 				// Avoid rendering an extra empty quote line before the outer blockquote spacing.
@@ -777,8 +842,27 @@ export class Markdown implements Component {
 	/**
 	 * Render a list with proper nesting support
 	 */
-	private renderList(token: Tokens.List, depth: number, width: number, styleContext?: InlineStyleContext): string[] {
+	private renderList(
+		token: Tokens.List,
+		depth: number,
+		width: number,
+		styleContext?: InlineStyleContext,
+		renderDepth = 0,
+	): string[] {
 		const lines: string[] = [];
+
+		// Recursion-depth guard shared with renderToken (see MAX_BLOCK_RENDER_DEPTH).
+		// `depth` is the visual indentation level; `renderDepth` is the actual
+		// renderToken/renderList call-stack depth, which is what we must bound.
+		// Past the cap, emit the list's raw source instead of descending further.
+		if (renderDepth > MAX_BLOCK_RENDER_DEPTH) {
+			const rawText = typeof token.raw === "string" ? token.raw : undefined;
+			if (rawText && rawText.length > 0) {
+				lines.push(this.applyDefaultStyle(rawText));
+			}
+			return lines;
+		}
+
 		const indent = "    ".repeat(depth);
 		// Use the list's start property (defaults to 1 for ordered lists)
 		const startNumber = typeof token.start === "number" ? token.start : 1;
@@ -795,12 +879,23 @@ export class Markdown implements Component {
 
 			for (const itemToken of item.tokens) {
 				if (itemToken.type === "list") {
-					lines.push(...this.renderList(itemToken as Tokens.List, depth + 1, width, styleContext));
+					const nestedLines = this.renderList(
+						itemToken as Tokens.List,
+						depth + 1,
+						width,
+						styleContext,
+						renderDepth + 1,
+					);
+					// Push via loop (not spread): deeply nested lists can make this array
+					// exceed the spread argument-count limit (RangeError).
+					for (const line of nestedLines) {
+						lines.push(line);
+					}
 					renderedAnyLine = true;
 					continue;
 				}
 
-				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext);
+				const itemLines = this.renderToken(itemToken, itemWidth, undefined, styleContext, renderDepth + 1);
 				for (const line of itemLines) {
 					for (const wrappedLine of wrapTextWithAnsi(line, itemWidth)) {
 						const linePrefix = renderedAnyLine ? continuationPrefix : firstPrefix;

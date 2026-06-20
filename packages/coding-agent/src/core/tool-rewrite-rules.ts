@@ -167,6 +167,13 @@ export function rewriteUnixDrivePathOnWindows(command: string, platform: NodeJS.
  * rather than one-per-turn. Returns the input unchanged when nothing matched.
  */
 export function normalizeWindowsBashCommand(command: string, platform: NodeJS.Platform = process.platform): string {
+	// These three fixes are only correct on Windows: an unquoted `X:\…` token, a
+	// `>nul` redirect, and an MSYS `/c/…` path all carry legitimate meanings on
+	// POSIX (a literal data string, a real file named `nul`, an actual `/c/…`
+	// directory). Gating the whole composition mirrors the existing win32 guard
+	// inside rewriteUnixDrivePathOnWindows so a valid POSIX command is never
+	// silently mutated before execution.
+	if (platform !== "win32") return command;
 	let out = rewriteUnquotedDriveBackslashes(command);
 	out = rewriteNulRedirect(out);
 	out = rewriteUnixDrivePathOnWindows(out, platform);

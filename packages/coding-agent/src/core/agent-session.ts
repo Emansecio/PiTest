@@ -2949,7 +2949,11 @@ export class AgentSession {
 			if (abort.signal.aborted || this._userInterrupted) return;
 
 			const jobs = listBashBackgroundJobs().filter((j) => ids.has(j.id));
-			const failed = jobs.filter((j) => j.exited && j.exitCode !== 0 && j.exitCode !== null);
+			// An exited job whose exitCode stayed `null` (spawn error / waitForChildProcess
+			// rejection — see tools/bash.ts .catch) never actually succeeded, so it must
+			// count as a non-success, not a silent pass. Dropping the `!== null` clause
+			// folds those errored jobs into `failed` instead of falling through to `passed`.
+			const failed = jobs.filter((j) => j.exited && j.exitCode !== 0);
 			const running = jobs.filter((j) => !j.exited);
 			if (failed.length === 0 && running.length === 0) {
 				this._emit({ type: "verification", phase: "passed", command: label, attempt: 1, maxAttempts: 1 });

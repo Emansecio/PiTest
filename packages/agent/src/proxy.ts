@@ -248,6 +248,14 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 									sawTerminal = true;
 								}
 								stream.push(event);
+								// A terminal `error` returned by `processProxyEvent` (e.g. the
+								// tool-call argument cap was exceeded) means the message has
+								// already been finalized; stop reading so we don't keep
+								// accumulating bytes from a hostile/buggy proxy.
+								if (event.type === "error") {
+									bufferOverflow = true;
+									break;
+								}
 							}
 						}
 					}
@@ -423,6 +431,20 @@ function processProxyEvent(
 			if (content?.type === "toolCall") {
 				const carrier = content as ToolCall & { partialJson: string; lastParseAt: number };
 				carrier.partialJson += proxyEvent.delta;
+				// Cap the accumulated tool-call argument buffer. The per-line and
+				// per-`data:` guards (above) only bound a single SSE frame; a hostile
+				// or buggy proxy can stream an unbounded tool-call argument as a long
+				// series of individually-legal small frames, growing `partialJson`
+				// (and the re-cloned partial content) without bound until OOM. Treat
+				// an over-long accumulation as a protocol error, finalize open tool
+				// calls, and emit a terminal error — mirroring the line-buffer
+				// overflow handling in the read loop.
+				if (carrier.partialJson.length > MAX_STREAM_BUFFER_BYTES) {
+					finalizeOpenToolCalls(partial);
+					partial.stopReason = "error";
+					partial.errorMessage = "Proxy tool-call args exceeded max buffer";
+					return { type: "error", reason: "error", error: partial };
+				}
 				// Re-parsing the full accumulated buffer on every delta is O(N*M).
 				// Coalesce to at most once per frame; the intermediate `arguments`
 				// value only drives live UI reactivity, and `toolcall_end` always

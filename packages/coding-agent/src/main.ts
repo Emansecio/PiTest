@@ -60,16 +60,32 @@ async function readPipedStdin(): Promise<string | undefined> {
 		return undefined;
 	}
 
+	// Cap accumulated piped stdin so a runaway/unbounded pipe (`yes | pit -p`, an
+	// accidental file/stream redirect) cannot exhaust memory at startup before the
+	// agent even runs. Mirrors the capping in other capture paths (runCheckCommand
+	// MAX_OUTPUT_BYTES, readCapped MAX_FETCH_BYTES). 4 MiB is far above any sane
+	// piped prompt; beyond it we stop appending and note the truncation.
+	const MAX_STDIN_CHARS = 4 * 1024 * 1024;
 	return new Promise((resolve) => {
 		let data = "";
+		let truncated = false;
 		const onData = (chunk: string): void => {
+			if (truncated) {
+				return;
+			}
+			if (data.length + chunk.length > MAX_STDIN_CHARS) {
+				data += chunk.slice(0, Math.max(0, MAX_STDIN_CHARS - data.length));
+				truncated = true;
+				return;
+			}
 			data += chunk;
 		};
 		const settle = (): void => {
 			process.stdin.off("data", onData);
 			process.stdin.off("end", onEnd);
 			process.stdin.off("error", onError);
-			resolve(data.trim() || undefined);
+			const result = truncated ? `${data}\n\n[stdin truncated at ${MAX_STDIN_CHARS} characters]` : data;
+			resolve(result.trim() || undefined);
 		};
 		const onEnd = (): void => {
 			settle();

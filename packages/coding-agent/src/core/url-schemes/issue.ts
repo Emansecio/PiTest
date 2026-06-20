@@ -26,6 +26,10 @@ type GhAuthStatus = "ok" | "unauthenticated" | "not-installed";
 const GH_AUTH_NEGATIVE_TTL_MS = 30_000;
 let ghAuthCache: GhAuthStatus | undefined;
 let ghAuthCacheExpiry = 0;
+// In-flight de-duplication: concurrent issue:// reads issued before the first
+// probe resolves share a single `gh auth status` spawn instead of each spawning
+// their own child process. Cleared once the probe settles.
+let ghAuthInflight: Promise<GhAuthStatus> | undefined;
 
 function probeGhAuth(cwd: string): Promise<GhAuthStatus> {
 	return new Promise((resolve) => {
@@ -46,15 +50,21 @@ function probeGhAuth(cwd: string): Promise<GhAuthStatus> {
 async function ensureGhAuth(cwd: string): Promise<GhAuthStatus> {
 	if (ghAuthCache === "ok") return ghAuthCache;
 	if (ghAuthCache !== undefined && Date.now() < ghAuthCacheExpiry) return ghAuthCache;
-	const status = await probeGhAuth(cwd);
-	ghAuthCache = status;
-	ghAuthCacheExpiry = status === "ok" ? 0 : Date.now() + GH_AUTH_NEGATIVE_TTL_MS;
-	return status;
+	if (ghAuthInflight !== undefined) return ghAuthInflight;
+	const probe = probeGhAuth(cwd).then((status) => {
+		ghAuthCache = status;
+		ghAuthCacheExpiry = status === "ok" ? 0 : Date.now() + GH_AUTH_NEGATIVE_TTL_MS;
+		ghAuthInflight = undefined;
+		return status;
+	});
+	ghAuthInflight = probe;
+	return probe;
 }
 
 function invalidateGhAuthCache(): void {
 	ghAuthCache = undefined;
 	ghAuthCacheExpiry = 0;
+	ghAuthInflight = undefined;
 }
 
 function looksLikeAuthError(stderr: string): boolean {

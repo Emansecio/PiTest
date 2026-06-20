@@ -215,6 +215,14 @@ function createExtensionAPI(
 			const list = extension.handlers.get(event) ?? [];
 			list.push(handler);
 			extension.handlers.set(event, list);
+			// Invalidate the runner's hot caches so a handler registered via a late
+			// api.on() (inside a command/event handler, without also registering a
+			// tool) becomes visible. Without this, the runner's _handlerExistsCache
+			// and _cachedBprPartition keep returning the value computed before this
+			// handler existed, and emit() short-circuits — the handler never fires.
+			// Pre-bind refreshTools is a no-op (no emit has happened yet); post-bind
+			// (bindCore) it maps to invalidateCaches().
+			runtime.refreshTools();
 		},
 
 		markSideEffect<F extends (...args: any[]) => any>(handler: F): F {

@@ -45,6 +45,13 @@ const DRIVER_TIMEOUT_GRACE_MS = 500;
 
 const DRIVER_SOURCE = `
 const vm = require("node:vm");
+// An orphaned tool-call Promise (a code-mode program that fired a tool call
+// without awaiting it, or threw while one was pending) is rejected by
+// runCodeMode's finally with "code-mode run ended". That rejection has no
+// .catch attached, so Node's default unhandledRejection mode (>=15: throw)
+// would terminate this driver and wipe all persistent vm state accumulated
+// across prior eval calls. Swallow it: the orphan is expected and harmless.
+process.on("unhandledRejection", () => {});
 const ctx = vm.createContext({
 	console,
 	require,

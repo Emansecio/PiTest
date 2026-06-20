@@ -21,9 +21,15 @@ function createLazyLoadErrorImages(model: ImagesModel<"openrouter-images">, erro
 }
 
 function loadOpenRouterImagesProviderModule(): Promise<OpenRouterImagesProviderModule> {
-	openRouterImagesProviderModulePromise ||= import("./openrouter.ts").then(
-		(module) => module as OpenRouterImagesProviderModule,
-	);
+	if (!openRouterImagesProviderModulePromise) {
+		const pending = import("./openrouter.ts").then((module) => module as OpenRouterImagesProviderModule);
+		pending.catch(() => {
+			if (openRouterImagesProviderModulePromise === pending) {
+				openRouterImagesProviderModulePromise = undefined;
+			}
+		});
+		openRouterImagesProviderModulePromise = pending;
+	}
 	return openRouterImagesProviderModulePromise;
 }
 

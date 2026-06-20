@@ -52,6 +52,24 @@ export function applyTextEditsToString(content: string, edits: TextEdit[]): stri
 		}
 	}
 
+	// Bounds-check each edit's line indices against the file. A stale/inconsistent
+	// edit (e.g. a multi-server rename where one server already removed trailing
+	// lines another still references, or a server returning a position past EOF)
+	// can carry a line index >= lines.length. Indexing/splicing past the array end
+	// leaves JS sparse holes that join("\n") renders as silent blank lines, quietly
+	// corrupting the saved file. Reject such edits rather than write garbage. A
+	// single-line edit must address an existing line (< length); a multi-line edit's
+	// end may sit on the last line (< length). lines.length itself is never a valid
+	// index for either branch (would write/splice past EOF into a hole).
+	for (const edit of sortedEdits) {
+		const { start, end } = edit.range;
+		if (start.line < 0 || end.line < 0 || start.line >= lines.length || end.line >= lines.length) {
+			throw new Error(
+				`LSP edit position out of range: ${formatRange(edit.range)} exceeds file length (${lines.length} line(s)); stale edit from an inconsistent multi-server response`,
+			);
+		}
+	}
+
 	for (const edit of sortedEdits) {
 		const { start, end } = edit.range;
 		if (start.line === end.line) {
