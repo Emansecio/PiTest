@@ -14,20 +14,42 @@ import type { AssistantMessage, ToolCall, ToolResultMessage } from "@pit/ai";
 
 /**
  * Tool names that produce a file mutation. A turn that successfully calls any
- * of these is "productive" and resets the stagnation streak. `bash` is
- * deliberately excluded: shelling out (tests, git, builds) is not, by itself,
- * forward progress on the edit the user asked for.
+ * of these is "productive" and resets the stagnation streak.
  */
 export const MUTATING_TOOL_NAMES: ReadonlySet<string> = new Set(["write", "edit", "edit_v2", "ast_edit"]);
 
-export type TurnClass = "productive" | "nonproductive" | "text-only";
+/**
+ * Matches the command of a `bash` call that is verification/build work rather
+ * than aimless shelling out. Running the project's tests, type-checker, linter,
+ * or build IS the verify half of an edit→verify loop — so a turn whose only
+ * activity is a passing/failing check is NOT stagnation. Word-boundary anchored
+ * to avoid substring hits (`checkout` does not match `check`, `makefile` does
+ * not match `make`). Inclusive on purpose: a false match merely declines to nag.
+ */
+export const VERIFICATION_CMD_RE =
+	/\b(tests?|specs?|vitest|jest|mocha|pytest|rspec|phpunit|tsc|tsgo|typecheck|type-check|lint|biome|eslint|ruff|clippy|gofmt|build|check|make|gradle|mvn|cargo|pre-commit)\b/i;
+
+/** True when a tool call is a `bash` running a verification/build/test/lint command. */
+function isVerificationBash(call: ToolCall): boolean {
+	if (call.name !== "bash") return false;
+	const command = call.arguments?.command;
+	return typeof command === "string" && VERIFICATION_CMD_RE.test(command);
+}
+
+export type TurnClass = "productive" | "neutral" | "nonproductive" | "text-only";
 
 /**
  * Classify one finished turn for stagnation tracking.
  *
  * - `text-only`    — the assistant produced no tool calls (answering/finishing).
- * - `productive`   — at least one mutating tool call did not error.
- * - `nonproductive`— had tool calls, none of which was a successful mutation.
+ * - `productive`   — at least one mutating tool call (or a delegated `task`)
+ *                    did not error. Resets the streak.
+ * - `neutral`      — the only forward activity was a successful verification
+ *                    `bash` (tests/build/lint/typecheck). Leaves the streak
+ *                    unchanged: verifying after an edit is not spinning, but it
+ *                    is not itself the change either.
+ * - `nonproductive`— had tool calls, none of which was a successful mutation,
+ *                    delegation, or verification (pure read/grep/ls spinning).
  */
 export function classifyTurn(message: AgentMessage, toolResults: ToolResultMessage[]): TurnClass {
 	const toolCalls: ToolCall[] = [];
@@ -43,13 +65,18 @@ export function classifyTurn(message: AgentMessage, toolResults: ToolResultMessa
 		if (result.isError) errorIds.add(result.toolCallId);
 	}
 
+	// A call with no error result (or no result at all) counts as success — lean
+	// toward NOT firing so legitimate progress is never mistaken for stagnation.
+	let sawVerification = false;
 	for (const call of toolCalls) {
-		if (!MUTATING_TOOL_NAMES.has(call.name)) continue;
-		// A mutating call with no error result (or no result at all) means the
-		// turn produced a change: lean toward NOT firing so a legitimate edit is
-		// never mistaken for stagnation.
-		if (!errorIds.has(call.id)) return "productive";
+		if (errorIds.has(call.id)) continue;
+		if (MUTATING_TOOL_NAMES.has(call.name)) return "productive";
+		// Delegating real work to a subagent (`task`) is forward progress, not
+		// spinning — the edits happen inside the child, invisible to this tracker.
+		if (call.name === "task") return "productive";
+		if (isVerificationBash(call)) sawVerification = true;
 	}
+	if (sawVerification) return "neutral";
 	return "nonproductive";
 }
 
@@ -63,7 +90,10 @@ export class StagnationTracker {
 
 	/** Fold one classified turn into the streak; returns the new streak length. */
 	observe(turnClass: TurnClass): number {
-		this.count = turnClass === "nonproductive" ? this.count + 1 : 0;
+		if (turnClass === "nonproductive") this.count += 1;
+		else if (turnClass !== "neutral") this.count = 0;
+		// `neutral` (a verification run) leaves the streak untouched: it neither
+		// counts as spinning nor resets a real prior streak.
 		return this.count;
 	}
 

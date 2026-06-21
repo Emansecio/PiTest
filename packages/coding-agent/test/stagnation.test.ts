@@ -10,10 +10,12 @@ import {
 
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
 
-function assistantWithToolCalls(calls: Array<{ id: string; name: string }>): AssistantMessage {
+function assistantWithToolCalls(
+	calls: Array<{ id: string; name: string; arguments?: Record<string, unknown> }>,
+): AssistantMessage {
 	return {
 		role: "assistant",
-		content: calls.map((c) => ({ type: "toolCall", id: c.id, name: c.name, arguments: {} })),
+		content: calls.map((c) => ({ type: "toolCall", id: c.id, name: c.name, arguments: c.arguments ?? {} })),
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
@@ -80,9 +82,31 @@ describe("classifyTurn", () => {
 		expect(classifyTurn(msg, [result("a", false), result("b", false)])).toBe("nonproductive");
 	});
 
-	it("treats bash as non-productive (shelling out is not progress)", () => {
-		const msg = assistantWithToolCalls([{ id: "a", name: "bash" }]);
+	it("treats a plain (non-verification) bash as non-productive", () => {
+		const msg = assistantWithToolCalls([{ id: "a", name: "bash", arguments: { command: "git status" } }]);
 		expect(classifyTurn(msg, [result("a", false)])).toBe("nonproductive");
+	});
+
+	it("treats a verification bash (tests/build/lint) as neutral", () => {
+		for (const command of ["npm run check", "npx vitest --run test/x.test.ts", "cargo build", "pytest -q"]) {
+			const msg = assistantWithToolCalls([{ id: "a", name: "bash", arguments: { command } }]);
+			expect(classifyTurn(msg, [result("a", false)])).toBe("neutral");
+		}
+	});
+
+	it("keeps an errored verification bash non-productive", () => {
+		const msg = assistantWithToolCalls([{ id: "a", name: "bash", arguments: { command: "npm run check" } }]);
+		expect(classifyTurn(msg, [result("a", true)])).toBe("nonproductive");
+	});
+
+	it("does not match verification keywords inside other words (checkout, makefile)", () => {
+		const msg = assistantWithToolCalls([{ id: "a", name: "bash", arguments: { command: "git checkout main" } }]);
+		expect(classifyTurn(msg, [result("a", false)])).toBe("nonproductive");
+	});
+
+	it("treats a successful task delegation as productive", () => {
+		const msg = assistantWithToolCalls([{ id: "a", name: "task" }]);
+		expect(classifyTurn(msg, [result("a", false)])).toBe("productive");
 	});
 
 	it("returns productive when a mutating call succeeded", () => {
@@ -113,6 +137,15 @@ describe("StagnationTracker", () => {
 		expect(t.observe("nonproductive")).toBe(1);
 		expect(t.observe("text-only")).toBe(0);
 		expect(t.nonProductiveTurns).toBe(0);
+	});
+
+	it("leaves the streak unchanged on a neutral (verification) turn", () => {
+		const t = new StagnationTracker();
+		expect(t.observe("nonproductive")).toBe(1);
+		expect(t.observe("nonproductive")).toBe(2);
+		expect(t.observe("neutral")).toBe(2);
+		expect(t.observe("neutral")).toBe(2);
+		expect(t.observe("nonproductive")).toBe(3);
 	});
 
 	it("reset() zeroes the streak", () => {
