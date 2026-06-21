@@ -1,24 +1,27 @@
 /**
- * Built-in erasable-syntax precondition extension (thin adapter).
+ * Built-in TS preflight precondition extension (thin adapter).
  *
- * Pre-exec counterpart for emit-bearing TS syntax in a `write`/`edit`: when the
- * NEW content introduces an `enum`, a `namespace`/`module` body, or a constructor
- * parameter property, AND the project's tsconfig sets `erasableSyntaxOnly`, this
- * blocks ONCE with a copy-pasteable rewrite hint — BEFORE the write lands and the
- * project `check` command rejects it a round trip later. The decision logic lives
- * in the pure `../erasable-syntax-grounding.ts`; this adapter only gates on the
- * project config, harvests {targetFile, content} from the tool input, and applies
- * the fire-once / fail-open invariants shared by the grounding guards.
+ * Pre-exec counterpart for TS that passes the tool but fails the project's `check`
+ * command a round trip later. Two independently-gated checks on a `write`/`edit`'s
+ * NEW content:
+ *   - emit-bearing syntax (`enum` / `namespace` body / constructor parameter
+ *     property) when the tsconfig sets `erasableSyntaxOnly`; and
+ *   - nested ternaries when biome's `noNestedTernary` rule is active.
+ * Either match blocks ONCE with a copy-pasteable rewrite hint. The decision logic
+ * lives in the pure `../erasable-syntax-grounding.ts`; this adapter only gates on
+ * the project config, harvests {targetFile, content} from the tool input, and
+ * applies the fire-once / fail-open invariants shared by the grounding guards.
  *
- * Gated by `projectEnforcesErasableSyntax(cwd)` so it stays completely silent on
- * any project that legitimately allows enums. Opt out with PIT_NO_ERASABLE_PREFLIGHT.
+ * Each check stays completely silent on any project that doesn't enforce its rule,
+ * so it never mis-fires where enums or nested ternaries are allowed. Opt out with
+ * PIT_NO_ERASABLE_PREFLIGHT.
  */
 
 import { recordDiagnostic } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
-import { detectNonErasableSyntax } from "../erasable-syntax-grounding.ts";
+import { detectNestedTernary, detectNonErasableSyntax, type NonErasableFinding } from "../erasable-syntax-grounding.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
-import { projectEnforcesErasableSyntax } from "../project-config-context.ts";
+import { projectEnforcesErasableSyntax, projectEnforcesNoNestedTernary } from "../project-config-context.ts";
 import { extractEdits, extractPathArg } from "../tools/argument-prep.ts";
 import { stableToolCallKey } from "./grounding-fire-once.ts";
 
@@ -45,17 +48,28 @@ function extractNewContent(toolName: string, input: Record<string, unknown>): st
 export function createErasableSyntaxPreconditionExtension(options: { cwd: string }) {
 	return (pi: ExtensionAPI) => {
 		const fired = new Set<string>();
-		// Resolve the gate once per session (reading tsconfig is best-effort).
-		let enforced: boolean | undefined;
-		const isEnforced = (): boolean => {
-			if (enforced === undefined) {
+		// Resolve each gate once per session (reading the configs is best-effort).
+		let erasableGate: boolean | undefined;
+		let ternaryGate: boolean | undefined;
+		const erasableEnforced = (): boolean => {
+			if (erasableGate === undefined) {
 				try {
-					enforced = projectEnforcesErasableSyntax(options.cwd);
+					erasableGate = projectEnforcesErasableSyntax(options.cwd);
 				} catch {
-					enforced = false;
+					erasableGate = false;
 				}
 			}
-			return enforced;
+			return erasableGate;
+		};
+		const ternaryEnforced = (): boolean => {
+			if (ternaryGate === undefined) {
+				try {
+					ternaryGate = projectEnforcesNoNestedTernary(options.cwd);
+				} catch {
+					ternaryGate = false;
+				}
+			}
+			return ternaryGate;
 		};
 
 		pi.on("tool_call", async (event) => {
@@ -66,12 +80,15 @@ export function createErasableSyntaxPreconditionExtension(options: { cwd: string
 				const input = event.input as Record<string, unknown>;
 				const path = extractPathArg(input);
 				if (path === undefined || !TS_PATH_RE.test(path)) return undefined;
-				if (!isEnforced()) return undefined;
+				const wantErasable = erasableEnforced();
+				const wantTernary = ternaryEnforced();
+				if (!wantErasable && !wantTernary) return undefined;
 
 				const content = extractNewContent(event.toolName, input);
 				if (content === undefined || content.length === 0) return undefined;
 
-				const finding = detectNonErasableSyntax(content);
+				let finding: NonErasableFinding | undefined = wantErasable ? detectNonErasableSyntax(content) : undefined;
+				if (!finding && wantTernary) finding = detectNestedTernary(content);
 				if (!finding) return undefined;
 
 				const key = stableToolCallKey(event.toolName, input);
@@ -96,7 +113,7 @@ export function createErasableSyntaxPreconditionExtension(options: { cwd: string
 				});
 				return {
 					block: true,
-					reason: `Erasable-syntax precondition (no write attempted): ${finding.hint}`,
+					reason: `TS preflight (no write attempted): ${finding.hint}`,
 				};
 			} catch {
 				// emitToolCall has no per-handler try/catch; a throw out of beforeToolCall

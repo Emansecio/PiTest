@@ -85,6 +85,28 @@ describe("erasable-syntax precondition extension", () => {
 		expect(await call(handler, "write", input)).toBeUndefined();
 	});
 
+	it("blocks a nested ternary when biome enforces noNestedTernary", async () => {
+		writeFileSync(join(dir, "biome.json"), JSON.stringify({ linter: { rules: { recommended: true } } }));
+		const handler = collectHandler(dir);
+		const decision = await call(handler, "write", {
+			path: join(dir, "x.ts"),
+			content: "export const v = a ? b : c ? d : e;",
+		});
+		expect(decision?.block).toBe(true);
+		expect(decision?.reason).toContain("noNestedTernary");
+	});
+
+	it("does NOT block a nested ternary when biome does not enforce it", async () => {
+		// No biome config + tsconfig without erasableSyntaxOnly -> both gates off.
+		writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true } }));
+		const handler = collectHandler(dir);
+		const decision = await call(handler, "write", {
+			path: join(dir, "x.ts"),
+			content: "export const v = a ? b : c ? d : e;",
+		});
+		expect(decision).toBeUndefined();
+	});
+
 	it("respects PIT_NO_ERASABLE_PREFLIGHT", async () => {
 		enableErasable();
 		const prev = process.env.PIT_NO_ERASABLE_PREFLIGHT;

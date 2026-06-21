@@ -190,6 +190,32 @@ export function projectEnforcesErasableSyntax(cwd: string): boolean {
 }
 
 /**
+ * Does this project's biome config enforce `noNestedTernary`? Used to GATE the
+ * nested-ternary half of the TS preflight, so it stays silent on any project that
+ * allows nested ternaries. A rule is active when the linter is on and the rule is
+ * not explicitly "off"; absent-but-recommended counts (noNestedTernary ships in
+ * Biome 2.x's recommended set, on by default). Best-effort: any failure → false.
+ */
+export function projectEnforcesNoNestedTernary(cwd: string): boolean {
+	try {
+		const path = ["biome.json", "biome.jsonc"].map((f) => join(cwd, f)).find((p) => existsSync(p));
+		if (!path) return false;
+		const json = readJsonc(path);
+		if (!json) return false;
+		const linter = asRecord(json.linter);
+		if (linter?.enabled === false) return false;
+		const rules = asRecord(linter?.rules);
+		const rule = asRecord(rules?.style)?.noNestedTernary;
+		if (rule === "off") return false;
+		if (rule !== undefined) return true; // "error" | "warn" | { level: ... }
+		// Not set explicitly → inherited from the recommended set unless disabled.
+		return rules?.recommended !== false;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Build a synthetic context-file entry describing the project's enforced
  * TS/lint conventions, or null when nothing useful could be read. The returned
  * shape matches `loadProjectContextFiles` entries so it slots into the existing

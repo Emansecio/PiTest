@@ -16,7 +16,7 @@
  * construction — the adapter wraps the call and treats any throw as "allow".
  */
 
-export type NonErasableConstruct = "enum" | "namespace" | "parameter-property";
+export type NonErasableConstruct = "enum" | "namespace" | "parameter-property" | "nested-ternary";
 
 export interface NonErasableFinding {
 	construct: NonErasableConstruct;
@@ -136,5 +136,73 @@ export function detectNonErasableSyntax(content: string): NonErasableFinding | u
 		}
 	}
 
+	return undefined;
+}
+
+/**
+ * Heuristic nested-ternary detector — gated separately from erasable syntax by
+ * the project's biome `noNestedTernary` rule. Returns a finding when a value-level
+ * conditional is nested inside another (`a ? b : c ? d : e`, `a ? b ? c : d : e`).
+ *
+ * Precision-tuned, not a parser. It counts ternary `?` operators per bracket depth
+ * within a statement and flags two-at-the-same-depth — which catches the common
+ * unparenthesized then-/else-nesting the model writes, while excluding the usual
+ * false positives: optional chaining (`a?.b`), nullish (`a ?? b`), TS optional
+ * markers (`x?: T`), object/type colons, and two independent ternaries (separated
+ * by `;` or `,`). It deliberately MISSES parenthesized inner ternaries and
+ * conditional TYPES — false negatives are harmless (the project's biome catches
+ * them at check time); the goal is to catch the obvious case one round-trip early.
+ */
+export function detectNestedTernary(content: string): NonErasableFinding | undefined {
+	if (!content) return undefined;
+	const code = blankNonCode(content);
+	let depth = 0;
+	// depth -> count of ternary `?` seen in the current statement at that depth.
+	const ternaryCount = new Map<number, number>();
+
+	for (let i = 0; i < code.length; i++) {
+		const ch = code[i];
+		if (ch === "(" || ch === "[" || ch === "{") {
+			depth++;
+			continue;
+		}
+		if (ch === ")" || ch === "]" || ch === "}") {
+			ternaryCount.delete(depth); // leaving this scope resets its tally
+			if (depth > 0) depth--;
+			continue;
+		}
+		if (ch === ";") {
+			ternaryCount.clear(); // statement boundary
+			continue;
+		}
+		if (ch === ",") {
+			ternaryCount.set(depth, 0); // sibling expression (e.g. another call arg)
+			continue;
+		}
+		if (ch !== "?") continue;
+
+		const next = code[i + 1];
+		if (next === "?") {
+			i++; // nullish `??` — consume both
+			continue;
+		}
+		if (next === ".") continue; // optional chain `?.`
+		// TS optional marker `x?:` — `?` then optional whitespace then `:`.
+		let j = i + 1;
+		while (j < code.length && (code[j] === " " || code[j] === "\t")) j++;
+		if (code[j] === ":") continue;
+
+		const count = (ternaryCount.get(depth) ?? 0) + 1;
+		ternaryCount.set(depth, count);
+		if (count >= 2) {
+			return {
+				construct: "nested-ternary",
+				hint:
+					"Nested ternaries are disallowed by this project's lint config (biome noNestedTernary). " +
+					"Extract the inner conditional into a variable, an early return, or an if/else — e.g. " +
+					"`const inner = q ? a : b; return p ? inner : c;`.",
+			};
+		}
+	}
 	return undefined;
 }

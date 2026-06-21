@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { detectNonErasableSyntax } from "../src/core/erasable-syntax-grounding.js";
+import { detectNestedTernary, detectNonErasableSyntax } from "../src/core/erasable-syntax-grounding.js";
 
 describe("detectNonErasableSyntax", () => {
 	test("flags a plain enum", () => {
@@ -68,5 +68,61 @@ describe("detectNonErasableSyntax", () => {
 
 	test("empty content is undefined", () => {
 		expect(detectNonErasableSyntax("")).toBeUndefined();
+	});
+});
+
+describe("detectNestedTernary", () => {
+	const nested = (s: string): boolean => detectNestedTernary(s)?.construct === "nested-ternary";
+
+	test("flags else-branch nesting", () => {
+		expect(nested("const x = a ? b : c ? d : e;")).toBe(true);
+	});
+
+	test("flags then-branch nesting (unparenthesized)", () => {
+		expect(nested("const x = a ? b ? c : d : e;")).toBe(true);
+	});
+
+	test("flags a multiline nested ternary", () => {
+		expect(nested("const x = a\n  ? b\n  : c\n    ? d\n    : e;")).toBe(true);
+	});
+
+	test("flags nesting inside an object value", () => {
+		expect(nested("const o = { k: p ? q : r ? s : t };")).toBe(true);
+	});
+
+	test("does NOT flag a single ternary", () => {
+		expect(nested("const x = a ? b : c;")).toBe(false);
+	});
+
+	test("does NOT flag a ternary returning object literals", () => {
+		expect(nested("const x = cond ? { a: 1 } : { b: 2 };")).toBe(false);
+	});
+
+	test("does NOT flag two ternaries as separate call args", () => {
+		expect(nested("f(x ? 1 : 2, y ? 3 : 4);")).toBe(false);
+	});
+
+	test("does NOT flag two ternaries in separate statements", () => {
+		expect(nested("const a = x ? 1 : 2;\nconst b = y ? 3 : 4;")).toBe(false);
+	});
+
+	test("does NOT flag optional chaining / nullish", () => {
+		expect(nested("const v = a?.b?.c ?? d ?? e;")).toBe(false);
+	});
+
+	test("does NOT flag TS optional markers in a signature", () => {
+		expect(nested("function f(a?: number, b?: string): void {}")).toBe(false);
+	});
+
+	test("does NOT flag a ternary inside one branch's parentheses only (single ternary)", () => {
+		expect(nested("const x = cond ? (a + b) : c;")).toBe(false);
+	});
+
+	test("does NOT flag the word ? inside a string", () => {
+		expect(nested('const s = "a ? b : c ? d : e";')).toBe(false);
+	});
+
+	test("empty content is undefined", () => {
+		expect(detectNestedTernary("")).toBeUndefined();
 	});
 });

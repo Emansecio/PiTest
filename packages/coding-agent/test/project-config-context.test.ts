@@ -2,7 +2,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadProjectConfigContext, projectEnforcesErasableSyntax } from "../src/core/project-config-context.js";
+import {
+	loadProjectConfigContext,
+	projectEnforcesErasableSyntax,
+	projectEnforcesNoNestedTernary,
+} from "../src/core/project-config-context.js";
 
 describe("loadProjectConfigContext", () => {
 	let dir: string;
@@ -113,5 +117,46 @@ describe("projectEnforcesErasableSyntax", () => {
 			JSON.stringify({ extends: "./base.json", compilerOptions: { erasableSyntaxOnly: false } }),
 		);
 		expect(projectEnforcesErasableSyntax(dir)).toBe(false);
+	});
+});
+
+describe("projectEnforcesNoNestedTernary", () => {
+	let dir: string;
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "pit-cfg-nnt-"));
+	});
+	afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+	it("is false with no biome config", () => {
+		expect(projectEnforcesNoNestedTernary(dir)).toBe(false);
+	});
+
+	it("is true via the recommended set", () => {
+		writeFileSync(
+			join(dir, "biome.json"),
+			JSON.stringify({ linter: { enabled: true, rules: { recommended: true } } }),
+		);
+		expect(projectEnforcesNoNestedTernary(dir)).toBe(true);
+	});
+
+	it("is false when the rule is explicitly off", () => {
+		writeFileSync(
+			join(dir, "biome.json"),
+			JSON.stringify({ linter: { rules: { recommended: true, style: { noNestedTernary: "off" } } } }),
+		);
+		expect(projectEnforcesNoNestedTernary(dir)).toBe(false);
+	});
+
+	it("is false when the linter is disabled", () => {
+		writeFileSync(join(dir, "biome.json"), JSON.stringify({ linter: { enabled: false } }));
+		expect(projectEnforcesNoNestedTernary(dir)).toBe(false);
+	});
+
+	it("is true when set explicitly even with recommended off", () => {
+		writeFileSync(
+			join(dir, "biome.json"),
+			JSON.stringify({ linter: { rules: { recommended: false, style: { noNestedTernary: "error" } } } }),
+		);
+		expect(projectEnforcesNoNestedTernary(dir)).toBe(true);
 	});
 });
