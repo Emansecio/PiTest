@@ -242,6 +242,26 @@ export function effectiveKeepRecentTokens(configured: number, contextWindow?: nu
 	return Math.max(configured, Math.floor(contextWindow * 0.1));
 }
 
+/** Absolute minimum floor for the proactive prune; below this the cache cost is not worth it. */
+const PROACTIVE_PRUNE_MIN_FLOOR = 64_000;
+
+/**
+ * Context size (tokens) below which the proactive stale-tool-output prune is NOT
+ * worth running. The prune rewrites old messages, which busts the provider
+ * prompt cache — only pay that when there is real pressure.
+ *
+ * A flat floor over-prunes on very large windows: at 64k a 1M-window session is
+ * ~6% full, so pruning there churns the cache while ~94% of room remains. Scale
+ * the floor to 25% of the window, keeping 64k as an absolute minimum (windows up
+ * to 256k stay at 64k, byte-identical to the old behaviour). A positive explicit
+ * `override` (PIT_PROACTIVE_PRUNE_FLOOR) always wins.
+ */
+export function proactivePruneFloor(contextWindow: number, override?: number): number {
+	if (override !== undefined && Number.isFinite(override) && override > 0) return override;
+	const scaled = Number.isFinite(contextWindow) && contextWindow > 0 ? Math.floor(contextWindow * 0.25) : 0;
+	return Math.max(PROACTIVE_PRUNE_MIN_FLOOR, scaled);
+}
+
 /** Hysteresis threshold: only re-compact if deficit grew by this many tokens since last compaction. */
 const COALESCING_THRESHOLD_TOKENS = 8192;
 

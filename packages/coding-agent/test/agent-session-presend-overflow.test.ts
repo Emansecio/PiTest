@@ -39,6 +39,8 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	// trigger _runAutoCompaction in these tests.
 	shouldCompact: () => false,
 	computeDynamicReserve: (_contextWindow: number, configuredReserve: number) => configuredReserve,
+	proactivePruneFloor: (contextWindow: number, override?: number) =>
+		override !== undefined && override > 0 ? override : Math.max(64_000, Math.floor((contextWindow || 0) * 0.25)),
 	shouldCompactSoft: () => false,
 }));
 

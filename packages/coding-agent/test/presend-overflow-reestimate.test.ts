@@ -32,6 +32,8 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	// Only the pre-send overflow guard matters here; keep the threshold path inert.
 	shouldCompact: () => false,
 	computeDynamicReserve: (_w: number, r: number) => r,
+	proactivePruneFloor: (contextWindow: number, override?: number) =>
+		override !== undefined && override > 0 ? override : Math.max(64_000, Math.floor((contextWindow || 0) * 0.25)),
 	shouldCompactSoft: () => false,
 }));
 

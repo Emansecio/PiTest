@@ -17,6 +17,7 @@ import {
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
+	proactivePruneFloor,
 	pruneOldToolOutputs,
 	shouldCompact,
 	shouldCompactSoft,
@@ -274,6 +275,35 @@ describe("computeDynamicReserve", () => {
 		expect(computeDynamicReserve(1_000_000, 16_384)).toBe(25_000);
 		// configured reserve still wins when larger than both floors
 		expect(computeDynamicReserve(1_000_000, 40_000)).toBe(40_000);
+	});
+});
+
+describe("proactivePruneFloor", () => {
+	it("keeps the 64k floor for small/normal windows (≤256k)", () => {
+		expect(proactivePruneFloor(128_000)).toBe(64_000);
+		expect(proactivePruneFloor(200_000)).toBe(64_000);
+		expect(proactivePruneFloor(256_000)).toBe(64_000); // 25% == 64k, boundary
+	});
+
+	it("scales to 25% of the window for large windows (>256k)", () => {
+		expect(proactivePruneFloor(400_000)).toBe(100_000);
+		expect(proactivePruneFloor(1_000_000)).toBe(250_000);
+	});
+
+	it("lets a positive explicit override win", () => {
+		expect(proactivePruneFloor(1_000_000, 80_000)).toBe(80_000);
+		expect(proactivePruneFloor(128_000, 30_000)).toBe(30_000);
+	});
+
+	it("ignores a non-positive or non-finite override", () => {
+		expect(proactivePruneFloor(128_000, 0)).toBe(64_000);
+		expect(proactivePruneFloor(128_000, -5)).toBe(64_000);
+		expect(proactivePruneFloor(128_000, Number.NaN)).toBe(64_000);
+	});
+
+	it("falls back to the 64k floor for a zero/invalid window", () => {
+		expect(proactivePruneFloor(0)).toBe(64_000);
+		expect(proactivePruneFloor(Number.NaN)).toBe(64_000);
 	});
 });
 

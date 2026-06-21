@@ -56,6 +56,7 @@ import {
 	estimateContextTokens,
 	generateBranchSummary,
 	prepareCompaction,
+	proactivePruneFloor,
 	shouldCompact,
 	shouldCompactSoft,
 } from "./compaction/index.ts";
@@ -3013,7 +3014,10 @@ export class AgentSession {
 	private _maybePruneStaleToolOutputs(contextTokens: number): void {
 		if (isTruthyEnvFlag(process.env.PIT_NO_PROACTIVE_PRUNE)) return;
 		const floorRaw = Number(process.env.PIT_PROACTIVE_PRUNE_FLOOR);
-		const floor = Number.isFinite(floorRaw) && floorRaw > 0 ? floorRaw : 64_000;
+		const floor = proactivePruneFloor(
+			this.model?.contextWindow ?? 0,
+			Number.isFinite(floorRaw) ? floorRaw : undefined,
+		);
 		if (contextTokens <= floor) return;
 		const copy = cloneToolResultMessagesForPrune(this.agent.state.messages);
 		const reclaimed = pruneOldToolOutputs(copy);
