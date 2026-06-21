@@ -14,7 +14,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 /**
  * Strip `//` and block comments so JSONC configs (tsconfig, biome) parse.
@@ -76,11 +76,55 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
+/** Normalize an `extends` target to an absolute tsconfig path, or undefined for a bare specifier we can't resolve cheaply. */
+function resolveExtendsPath(spec: string, fromDir: string): string | undefined {
+	// Only relative / absolute paths are resolved here; bare package specifiers
+	// (@tsconfig/node20, some-pkg/tsconfig) would need node module resolution and
+	// rarely carry erasableSyntaxOnly — skip them (best-effort, fail-open).
+	if (!spec.startsWith(".") && !isAbsolute(spec)) return undefined;
+	const base = isAbsolute(spec) ? spec : resolve(fromDir, spec);
+	return base.endsWith(".json") ? base : `${base}.json`;
+}
+
+/**
+ * Read `cwd/tsconfig.json` and merge its `compilerOptions` with those inherited
+ * through the `extends` chain (child overrides parent). Strict flags like
+ * `erasableSyntaxOnly` commonly live in a shared base config, so reading only the
+ * leaf would miss them. Bounded depth + a visited set guard against cycles.
+ * Best-effort: any unreadable link contributes nothing.
+ */
+function loadMergedCompilerOptions(cwd: string): Record<string, unknown> | undefined {
+	const root = join(cwd, "tsconfig.json");
+	if (!existsSync(root)) return undefined;
+
+	const visited = new Set<string>();
+	const merge = (absPath: string, depth: number): Record<string, unknown> | undefined => {
+		if (depth > 8 || visited.has(absPath)) return undefined;
+		visited.add(absPath);
+		const json = readJsonc(absPath);
+		if (!json) return undefined;
+		const own = asRecord(json.compilerOptions) ?? {};
+
+		// Resolve parents first (one or many), then let `own` override them.
+		let inherited: Record<string, unknown> = {};
+		const ext = json.extends;
+		const specs =
+			typeof ext === "string" ? [ext] : Array.isArray(ext) ? ext.filter((s) => typeof s === "string") : [];
+		for (const spec of specs) {
+			const parentPath = resolveExtendsPath(spec as string, dirname(absPath));
+			if (!parentPath) continue;
+			const parentCo = merge(parentPath, depth + 1);
+			if (parentCo) inherited = { ...inherited, ...parentCo };
+		}
+		return { ...inherited, ...own };
+	};
+
+	const merged = merge(root, 0);
+	return merged && Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 function summarizeTsconfig(cwd: string): string[] {
-	const path = join(cwd, "tsconfig.json");
-	if (!existsSync(path)) return [];
-	const json = readJsonc(path);
-	const co = asRecord(json?.compilerOptions);
+	const co = loadMergedCompilerOptions(cwd);
 	if (!co) return [];
 
 	const flags: string[] = [];
@@ -126,6 +170,23 @@ function summarizeBiome(cwd: string): string[] {
 	if (fmtParts.length > 0) lines.push(`Biome format: ${fmtParts.join(", ")}.`);
 
 	return lines;
+}
+
+/**
+ * Does this project's tsconfig enforce `erasableSyntaxOnly`? When true, the
+ * compiler (or Node's native type-stripping) rejects emit-bearing TS syntax —
+ * enums, namespaces/modules with a body, and constructor parameter properties.
+ * Used to GATE the erasable-syntax write/edit preflight: the guard only fires
+ * where the project's own check command would reject the construct, so it never
+ * mis-fires on a project that legitimately allows enums. Best-effort: any
+ * read/parse failure returns false (guard stays off).
+ */
+export function projectEnforcesErasableSyntax(cwd: string): boolean {
+	try {
+		return loadMergedCompilerOptions(cwd)?.erasableSyntaxOnly === true;
+	} catch {
+		return false;
+	}
 }
 
 /**

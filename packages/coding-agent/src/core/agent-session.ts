@@ -16,6 +16,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
+import { setUnknownToolHintProvider } from "@pit/agent-core";
 import type { AssistantMessage, Context, ImageContent, Message, Model, TextContent, Usage } from "@pit/ai";
 import {
 	clampThinkingLevel,
@@ -186,6 +187,7 @@ import {
 	type ToolStat,
 } from "./tool-call-stats.js";
 import {
+	buildHiddenToolHint,
 	createToolDiscoveryIndex,
 	getCurrentToolDiscoveryIndex,
 	setCurrentToolDiscoveryIndex,
@@ -926,6 +928,11 @@ export class AgentSession {
 		this._toolDiscoveryIndex = createToolDiscoveryIndex();
 		this._seedToolDiscovery();
 		setCurrentToolDiscoveryIndex(this._toolDiscoveryIndex);
+		// Augment the agent-core unknown-tool error: when the model calls a name that
+		// isn't active but matches a HIDDEN discovery entry, point it there (and
+		// activate an exact match so it's callable next turn). Reads the current index
+		// so it always reflects the live session; cleared on dispose.
+		setUnknownToolHintProvider((name) => buildHiddenToolHint(getCurrentToolDiscoveryIndex(), name));
 		// Snapshot the hidden-tool count now that discovery is seeded and (when
 		// there are hidden tools) rebuild the base prompt so the search_tool_bm25
 		// nudge is part of the cacheable prefix from the very first request and
@@ -2211,6 +2218,9 @@ export class AgentSession {
 		// Clear tool discovery index registry only if this session owns it.
 		if (this._toolDiscoveryIndex && getCurrentToolDiscoveryIndex() === this._toolDiscoveryIndex) {
 			setCurrentToolDiscoveryIndex(undefined);
+			// The unknown-tool hint provider reads the current index; drop it with the
+			// index so a disposed session leaves no dangling global.
+			setUnknownToolHintProvider(undefined);
 		}
 		this._toolDiscoveryIndex = undefined;
 		// Tear down eval kernels owned by this session.

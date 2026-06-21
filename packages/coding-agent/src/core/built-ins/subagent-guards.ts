@@ -30,6 +30,7 @@ import type { ExtensionAPI } from "../extensions/index.js";
 import type { ToolCallEvent, ToolCallEventResult, ToolResultEvent } from "../extensions/types.ts";
 import { createBashGroundingExtension } from "./bash-grounding-extension.ts";
 import { createEditPreconditionExtension } from "./edit-precondition-extension.ts";
+import { createErasableSyntaxPreconditionExtension } from "./erasable-syntax-precondition-extension.ts";
 import { createGroundingGuardExtension } from "./grounding-guard-extension.ts";
 import { createImportGroundingExtension } from "./import-grounding-extension.ts";
 import { createPathGroundingExtension } from "./path-grounding-extension.ts";
@@ -78,6 +79,7 @@ export function createSubagentGuardChain(options: { cwd: string }): SubagentGuar
 	createEditPreconditionExtension({ cwd: options.cwd })(shim);
 	createGroundingGuardExtension({ cwd: options.cwd })(shim);
 	createImportGroundingExtension({ cwd: options.cwd })(shim);
+	createErasableSyntaxPreconditionExtension({ cwd: options.cwd })(shim);
 	createPathGroundingExtension({ cwd: options.cwd })(shim);
 	createPatternGroundingExtension()(shim);
 	createBashGroundingExtension({ cwd: options.cwd })(shim);

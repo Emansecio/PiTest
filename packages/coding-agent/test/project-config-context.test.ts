@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadProjectConfigContext } from "../src/core/project-config-context.js";
+import { loadProjectConfigContext, projectEnforcesErasableSyntax } from "../src/core/project-config-context.js";
 
 describe("loadProjectConfigContext", () => {
 	let dir: string;
@@ -65,5 +65,53 @@ describe("loadProjectConfigContext", () => {
 	it("returns null on malformed JSON rather than throwing", () => {
 		writeFileSync(join(dir, "tsconfig.json"), "{ this is not json");
 		expect(loadProjectConfigContext(dir)).toBeNull();
+	});
+
+	it("inherits compilerOptions through the extends chain", () => {
+		writeFileSync(join(dir, "tsconfig.base.json"), JSON.stringify({ compilerOptions: { erasableSyntaxOnly: true } }));
+		writeFileSync(
+			join(dir, "tsconfig.json"),
+			JSON.stringify({ extends: "./tsconfig.base.json", compilerOptions: { strict: true } }),
+		);
+		const content = loadProjectConfigContext(dir)?.content ?? "";
+		expect(content).toContain("erasableSyntaxOnly");
+		expect(content).toContain("strict");
+	});
+});
+
+describe("projectEnforcesErasableSyntax", () => {
+	let dir: string;
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "pit-cfg-eso-"));
+	});
+	afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+	it("is false with no tsconfig", () => {
+		expect(projectEnforcesErasableSyntax(dir)).toBe(false);
+	});
+
+	it("is true when set directly", () => {
+		writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ compilerOptions: { erasableSyntaxOnly: true } }));
+		expect(projectEnforcesErasableSyntax(dir)).toBe(true);
+	});
+
+	it("is true when inherited via extends", () => {
+		writeFileSync(join(dir, "base.json"), JSON.stringify({ compilerOptions: { erasableSyntaxOnly: true } }));
+		writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ extends: "./base.json" }));
+		expect(projectEnforcesErasableSyntax(dir)).toBe(true);
+	});
+
+	it("is false when the project allows enums", () => {
+		writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ compilerOptions: { strict: true } }));
+		expect(projectEnforcesErasableSyntax(dir)).toBe(false);
+	});
+
+	it("child can override an inherited true back to false", () => {
+		writeFileSync(join(dir, "base.json"), JSON.stringify({ compilerOptions: { erasableSyntaxOnly: true } }));
+		writeFileSync(
+			join(dir, "tsconfig.json"),
+			JSON.stringify({ extends: "./base.json", compilerOptions: { erasableSyntaxOnly: false } }),
+		);
+		expect(projectEnforcesErasableSyntax(dir)).toBe(false);
 	});
 });

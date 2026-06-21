@@ -47,6 +47,7 @@ export type DiagnosticCategory =
 	| "guard.pattern-grounding"
 	| "guard.bash-grounding"
 	| "guard.edit-precondition"
+	| "guard.erasable-syntax"
 	| "guard.read"
 	| "guard.learned-error";
 

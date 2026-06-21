@@ -24,6 +24,7 @@ import {
 import { createBashGroundingExtension } from "./bash-grounding-extension.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createEditPreconditionExtension } from "./edit-precondition-extension.ts";
+import { createErasableSyntaxPreconditionExtension } from "./erasable-syntax-precondition-extension.ts";
 import { createGroundingGuardExtension } from "./grounding-guard-extension.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
 import { createImportGroundingExtension } from "./import-grounding-extension.ts";
@@ -113,6 +114,13 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// After the symbol grounding-guard so basic guards report first. Fail-open;
 		// opt out PIT_NO_IMPORT_GROUNDING.
 		createImportGroundingExtension({ cwd: options.cwd }),
+		// Erasable-syntax preflight: pre-exec, blocks a write/edit whose NEW content
+		// adds emit-bearing TS (enum / namespace body / constructor parameter
+		// property) — but ONLY on projects whose tsconfig sets erasableSyntaxOnly, so
+		// it never mis-fires where enums are allowed. Catches the construct one round
+		// trip before the project `check` rejects it. Fail-open; opt out
+		// PIT_NO_ERASABLE_PREFLIGHT.
+		createErasableSyntaxPreconditionExtension({ cwd: options.cwd }),
 		// Path grounding: pre-exec, blocks a read/edit whose file path doesn't exist
 		// on disk with the close-named sibling from its directory. Block-only (never
 		// retargets to a real-but-wrong file). write is out of scope (it creates).

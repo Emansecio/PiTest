@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { formatUnknownToolError } from "../src/agent-loop.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { formatUnknownToolError, setUnknownToolHintProvider } from "../src/agent-loop.js";
 import type { AgentTool } from "../src/types.js";
 
 function makeToolMap(names: string[]): Map<string, AgentTool<any>> {
@@ -47,5 +47,35 @@ describe("formatUnknownToolError", () => {
 	it("is case-insensitive when picking suggestions", () => {
 		const error = formatUnknownToolError("READ", makeToolMap(["read"]));
 		expect(error).toContain('Did you mean "read"?');
+	});
+});
+
+describe("formatUnknownToolError + hidden-tool hint provider", () => {
+	afterEach(() => setUnknownToolHintProvider(undefined));
+
+	it("appends the provider hint when no active tool is close", () => {
+		setUnknownToolHintProvider((name) => (name === "query_sqlite" ? "HIDDEN_HINT" : undefined));
+		const error = formatUnknownToolError("query_sqlite", makeToolMap(["read", "bash"]));
+		expect(error).toContain("HIDDEN_HINT");
+	});
+
+	it("prefers an active-tool 'did you mean' over the hidden hint", () => {
+		let called = false;
+		setUnknownToolHintProvider(() => {
+			called = true;
+			return "HIDDEN_HINT";
+		});
+		const error = formatUnknownToolError("readd", makeToolMap(["read", "bash"]));
+		expect(error).toContain('Did you mean "read"?');
+		expect(error).not.toContain("HIDDEN_HINT");
+		expect(called).toBe(false);
+	});
+
+	it("is fail-open when the provider throws", () => {
+		setUnknownToolHintProvider(() => {
+			throw new Error("boom");
+		});
+		const error = formatUnknownToolError("totally_unrelated_xyz", makeToolMap(["read", "bash"]));
+		expect(error).toContain('Tool "totally_unrelated_xyz" not found.');
 	});
 });

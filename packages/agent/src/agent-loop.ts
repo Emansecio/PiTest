@@ -1003,6 +1003,22 @@ function suggestToolName(name: string, available: string[]): string | undefined 
 	});
 }
 
+/**
+ * Optional hook to augment an unknown-tool error with a hint pointing at a
+ * specialized tool that exists but is NOT in the active surface (e.g. the hidden
+ * tool-discovery index in pi-coding-agent). Kept as an injected provider so this
+ * package stays free of any dependency on the discovery index. The provider may
+ * activate the matched tool as a side effect and should return the line to append
+ * (or undefined when there is nothing relevant). Fail-open: a throw is swallowed.
+ */
+export type UnknownToolHintProvider = (name: string) => string | undefined;
+
+let unknownToolHintProvider: UnknownToolHintProvider | undefined;
+
+export function setUnknownToolHintProvider(provider: UnknownToolHintProvider | undefined): void {
+	unknownToolHintProvider = provider;
+}
+
 export function formatUnknownToolError(name: string, toolMap: Map<string, AgentTool<any>>): string {
 	const available = Array.from(toolMap.keys()).sort();
 	const suggestion = suggestToolName(name, available);
@@ -1011,7 +1027,18 @@ export function formatUnknownToolError(name: string, toolMap: Map<string, AgentT
 		available.length > UNKNOWN_TOOL_MAX_LISTED ? `, … (${available.length - UNKNOWN_TOOL_MAX_LISTED} more)` : "";
 	const availableSection = available.length > 0 ? `\nAvailable tools: ${listed}${more}.` : "";
 	const suggestionSection = suggestion ? `\nDid you mean "${suggestion}"?` : "";
-	return `Tool "${name}" not found.${availableSection}${suggestionSection}`;
+	// A near-miss against an ACTIVE tool wins (the model just typoed); only reach
+	// for the hidden index when no active tool was close enough.
+	let hiddenSection = "";
+	if (!suggestion && unknownToolHintProvider) {
+		try {
+			const hint = unknownToolHintProvider(name);
+			if (hint) hiddenSection = `\n${hint}`;
+		} catch {
+			// Fail-open: a broken provider must never turn a recoverable error fatal.
+		}
+	}
+	return `Tool "${name}" not found.${availableSection}${suggestionSection}${hiddenSection}`;
 }
 
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {

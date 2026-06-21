@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createToolDiscoveryIndex, type HiddenToolEntry } from "../src/core/tool-discovery.js";
+import { buildHiddenToolHint, createToolDiscoveryIndex, type HiddenToolEntry } from "../src/core/tool-discovery.js";
 
 function fakeDef(name: string): HiddenToolEntry["definition"] {
 	// Tests only inspect identity, never execute. A bare placeholder is fine.
@@ -87,6 +87,19 @@ describe("ToolDiscoveryIndex", () => {
 		expect(idx.unregister("pdf_extract")).toBe(false);
 	});
 
+	test("re-register replaces old indexed terms", () => {
+		const idx = createToolDiscoveryIndex();
+		idx.register(pdfEntry());
+		idx.register({
+			...pdfEntry(),
+			description: "Inspect spreadsheet formulas.",
+			tags: ["spreadsheet"],
+		});
+
+		expect(idx.search("tables")).toEqual([]);
+		expect(idx.search("spreadsheet")[0]!.entry.name).toBe("pdf_extract");
+	});
+
 	test("clear empties hidden and activated", () => {
 		const idx = createToolDiscoveryIndex();
 		idx.register(pdfEntry());
@@ -94,5 +107,70 @@ describe("ToolDiscoveryIndex", () => {
 		idx.clear();
 		expect(idx.listHidden()).toEqual([]);
 		expect(idx.activatedNames()).toEqual([]);
+	});
+
+	test("camelCase queries match camelCase tool names/descriptions", () => {
+		const idx = createToolDiscoveryIndex();
+		idx.register({
+			name: "renderMermaidDiagram",
+			description: "Render a Mermaid diagram to an image.",
+			definition: fakeDef("renderMermaidDiagram"),
+		});
+		// "render" / "diagram" are camel parts of the name; pre-split they were buried
+		// in the single token "rendermermaiddiagram" and never matched.
+		expect(idx.search("render diagram")[0]!.entry.name).toBe("renderMermaidDiagram");
+	});
+
+	test("letter↔digit boundary splits so 'bm 25' matches 'bm25'", () => {
+		const idx = createToolDiscoveryIndex();
+		idx.register({
+			name: "search_tool_bm25",
+			description: "BM25-rank hidden tools.",
+			definition: fakeDef("search_tool_bm25"),
+		});
+		expect(idx.search("bm25")[0]!.entry.name).toBe("search_tool_bm25");
+	});
+});
+
+describe("buildHiddenToolHint", () => {
+	const entry = (name: string): HiddenToolEntry => ({
+		name,
+		description: `${name} description`,
+		definition: fakeDef(name),
+	});
+
+	test("returns undefined with no index", () => {
+		expect(buildHiddenToolHint(undefined, "x")).toBeUndefined();
+	});
+
+	test("exact hidden match activates the tool and tells the model to retry", () => {
+		const idx = createToolDiscoveryIndex();
+		idx.register(entry("query_sqlite"));
+		const hint = buildHiddenToolHint(idx, "query_sqlite");
+		expect(hint).toContain("query_sqlite");
+		expect(hint).toContain("activated");
+		expect(idx.activatedNames()).toContain("query_sqlite");
+	});
+
+	test("near miss points at search_tool_bm25 without activating", () => {
+		const idx = createToolDiscoveryIndex();
+		idx.register(entry("query_sqlite"));
+		const hint = buildHiddenToolHint(idx, "query_sqlit");
+		expect(hint).toContain("search_tool_bm25");
+		expect(idx.activatedNames()).toEqual([]);
+	});
+
+	test("no match returns undefined", () => {
+		const idx = createToolDiscoveryIndex();
+		idx.register(entry("query_sqlite"));
+		expect(buildHiddenToolHint(idx, "totally_unrelated_xyz")).toBeUndefined();
+	});
+
+	test("already-activated exact name does not re-activate via the hint", () => {
+		const idx = createToolDiscoveryIndex();
+		idx.register(entry("query_sqlite"));
+		idx.activate("query_sqlite");
+		// Already active -> nothing hidden to surface; fall through to fuzzy (none).
+		expect(buildHiddenToolHint(idx, "query_sqlite")).toBeUndefined();
 	});
 });
