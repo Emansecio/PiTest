@@ -59,6 +59,15 @@ function installFetch() {
 	) as unknown as typeof fetch;
 }
 
+async function waitForMcpEffect(check: () => boolean): Promise<void> {
+	const deadline = Date.now() + 1000;
+	while (Date.now() < deadline) {
+		if (check()) return;
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+	expect(check()).toBe(true);
+}
+
 function createFakePi() {
 	const registeredTools = new Map<string, ToolDefinition>();
 	const commands = new Map<string, (args: string, ctx: unknown) => Promise<void>>();
@@ -91,6 +100,7 @@ function createFakePi() {
 		userMessages,
 		getActiveTools: () => activeTools,
 		fireSessionStart: () => handlers.get("session_start")?.({ type: "session_start" }, {}),
+		hasCommand: (name: string) => commands.has(name),
 		runCommand: (name: string, args: string) => commands.get(name)?.(args, { hasUI: false }),
 		fireBeforeAgentStart: (prompt: string) =>
 			handlers.get("before_agent_start")?.({ type: "before_agent_start", prompt }, {}) as Promise<
@@ -111,6 +121,7 @@ describe("MCP resources + prompts wiring", () => {
 		const harness = createFakePi();
 		createMcpExtension({ settings: { servers: { full: { url: URL } } } })(harness.pi);
 		await harness.fireSessionStart();
+		await waitForMcpEffect(() => harness.registeredTools.has("read_mcp_resource"));
 
 		expect(harness.registeredTools.has("list_mcp_resources")).toBe(true);
 		expect(harness.registeredTools.has("read_mcp_resource")).toBe(true);
@@ -136,6 +147,7 @@ describe("MCP resources + prompts wiring", () => {
 		const harness = createFakePi();
 		createMcpExtension({ settings: { servers: { full: { url: URL } } } })(harness.pi);
 		await harness.fireSessionStart();
+		await waitForMcpEffect(() => harness.hasCommand("mcp__full__greet"));
 
 		await harness.runCommand("mcp__full__greet", "world");
 		expect(harness.userMessages).toEqual(["Hello world"]);
@@ -146,6 +158,7 @@ describe("MCP resources + prompts wiring", () => {
 		const harness = createFakePi();
 		createMcpExtension({ settings: { servers: { full: { url: URL } } } })(harness.pi);
 		await harness.fireSessionStart();
+		await waitForMcpEffect(() => harness.registeredTools.has("read_mcp_resource"));
 
 		const result = await harness.fireBeforeAgentStart("look at @full:file://a.txt please");
 		expect(result?.message?.content).toContain("[@full:file://a.txt]");
@@ -157,6 +170,7 @@ describe("MCP resources + prompts wiring", () => {
 		const harness = createFakePi();
 		createMcpExtension({ settings: { servers: { full: { url: URL } } } })(harness.pi);
 		await harness.fireSessionStart();
+		await waitForMcpEffect(() => harness.registeredTools.has("read_mcp_resource"));
 
 		const result = await harness.fireBeforeAgentStart("ping @someone:hello on slack");
 		expect(result).toBeUndefined();

@@ -270,6 +270,9 @@ export function createMcpExtension(options: McpExtensionOptions) {
 		// boot pass below sets this for every server it saw connected.
 		const registeredServers = new Set<string>();
 		let bootDone = false;
+		let bootConnectPromise: Promise<void> | undefined;
+		let bootConnectController: AbortController | undefined;
+		let bootConnectTimer: ReturnType<typeof setTimeout> | undefined;
 
 		const manager = new McpManager({
 			servers,
@@ -298,16 +301,8 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			},
 		});
 
-		// Connect on session_start so we capture failures into status diagnostics.
-		// In dry-run mode we skip the network round-trip entirely — the dry-run
-		// report still inspects settings.mcp.servers from settings, so the user
-		// sees what is configured without paying the connect-timeout cost when
-		// a server is unreachable.
-		pi.on("session_start", async () => {
-			if (process.env.PIT_DRY_RUN === "1") {
-				return;
-			}
-			await manager.connectAll(AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
+		const connectAndRegister = async (signal: AbortSignal): Promise<void> => {
+			await manager.connectAll(signal);
 			// Mark every server that came up during the budget as handled, so the
 			// onStateChange path below only fires for *later* transitions.
 			for (const state of manager.getAllStates()) {
@@ -316,11 +311,61 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			const deferredCount = registerNewTools();
 			ensureDiscoveryActive(deferredCount);
 			await discoverResourcesAndPrompts();
-			// From here on, reconnects/late connects route through onStateChange.
-			bootDone = true;
+		};
+
+		const clearBootConnectTimer = (): void => {
+			if (bootConnectTimer === undefined) return;
+			clearTimeout(bootConnectTimer);
+			bootConnectTimer = undefined;
+		};
+
+		const createBootConnectSignal = (): AbortSignal => {
+			const controller = new AbortController();
+			bootConnectController = controller;
+			bootConnectTimer = setTimeout(() => {
+				controller.abort(new Error(`MCP startup connect timed out after ${CONNECT_ALL_BUDGET_MS}ms`));
+			}, CONNECT_ALL_BUDGET_MS);
+			return controller.signal;
+		};
+
+		const startBootConnect = (): void => {
+			if (bootConnectPromise) return;
+			const signal = createBootConnectSignal();
+			bootConnectPromise = (async () => {
+				try {
+					await connectAndRegister(signal);
+				} catch (err) {
+					if (!signal.aborted) {
+						console.error(`[mcp] startup connect failed: ${err instanceof Error ? err.message : String(err)}`);
+					}
+				} finally {
+					clearBootConnectTimer();
+					if (bootConnectController?.signal === signal) {
+						bootConnectController = undefined;
+					}
+					// From here on, reconnects/late connects route through onStateChange.
+					bootDone = true;
+				}
+			})();
+		};
+
+		// Connect after session_start without blocking first prompt processing. Slow
+		// or unreachable MCP servers still report status and register tools when
+		// they connect; /mcp below awaits/retries explicitly when the user asks.
+		// In dry-run mode we skip the network round-trip entirely — the dry-run
+		// report still inspects settings.mcp.servers from settings, so the user
+		// sees what is configured without paying the connect-timeout cost when
+		// a server is unreachable.
+		pi.on("session_start", () => {
+			if (process.env.PIT_DRY_RUN === "1") {
+				return;
+			}
+			startBootConnect();
 		});
 
 		pi.on("session_shutdown", () => {
+			clearBootConnectTimer();
+			bootConnectController?.abort(new Error("MCP startup connect cancelled by session shutdown"));
 			manager.dispose();
 		});
 
@@ -387,14 +432,11 @@ export function createMcpExtension(options: McpExtensionOptions) {
 				// connectAll re-initializes each entry; already-connected servers are
 				// idempotent, and registerNewTools skips tools already registered, so
 				// boot-connected servers see identical behavior.
+				if (bootConnectPromise) {
+					await bootConnectPromise;
+				}
 				if (manager.getAllStates().some((s) => !s.connected)) {
-					await manager.connectAll(AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
-					for (const state of manager.getAllStates()) {
-						if (state.connected) registeredServers.add(state.name);
-					}
-					const deferredCount = registerNewTools();
-					ensureDiscoveryActive(deferredCount);
-					await discoverResourcesAndPrompts();
+					await connectAndRegister(AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
 				}
 				const states = manager.getAllStates();
 				if (states.length === 0) {

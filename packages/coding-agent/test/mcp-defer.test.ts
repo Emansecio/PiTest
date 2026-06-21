@@ -122,6 +122,15 @@ function installMcpFetch(serversByUrl: Record<string, FakeServer>) {
 	return fetchMock;
 }
 
+async function waitForMcpEffect(check: () => boolean): Promise<void> {
+	const deadline = Date.now() + 1000;
+	while (Date.now() < deadline) {
+		if (check()) return;
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+	expect(check()).toBe(true);
+}
+
 /** Minimal in-memory ExtensionAPI capturing exactly what the MCP extension uses. */
 function createFakePi() {
 	const registeredTools = new Map<string, ToolDefinition>();
@@ -184,6 +193,11 @@ describe("createMcpExtension registration wiring", () => {
 		const harness = createFakePi();
 		createMcpExtension({ settings: { servers: { small: { url: SMALL_URL }, big: { url: BIG_URL } } } })(harness.pi);
 		await harness.fireSessionStart();
+		await waitForMcpEffect(
+			() =>
+				harness.registeredTools.has("mcp__small__ping") &&
+				index.listHidden().some((e) => e.name === "mcp__big__tool0"),
+		);
 
 		// Small server (2 tools < threshold 10): eager, on the registered surface.
 		expect([...harness.registeredTools.keys()].sort()).toEqual(["mcp__small__ping", "mcp__small__pong"]);
@@ -219,6 +233,7 @@ describe("createMcpExtension registration wiring", () => {
 		const harness = createFakePi();
 		createMcpExtension({ settings: { servers: { big: { url: BIG_URL } } } })(harness.pi);
 		await harness.fireSessionStart();
+		await waitForMcpEffect(() => index.search("boomerang_priority")[0]?.entry.name === "mcp__big__create_issue");
 
 		// The param name is captured as a tag and is searchable even though it is
 		// absent from the tool's name and description (the dead promptSnippet check
@@ -241,6 +256,7 @@ describe("createMcpExtension registration wiring", () => {
 		const harness = createFakePi();
 		createMcpExtension({ settings: { servers: { small: { url: SMALL_URL }, late: { url: BIG_URL } } } })(harness.pi);
 		await harness.fireSessionStart();
+		await waitForMcpEffect(() => harness.registeredTools.has("mcp__small__ping"));
 
 		// Only the boot-connected server registered; the late one is toolless.
 		expect([...harness.registeredTools.keys()]).toEqual(["mcp__small__ping"]);
@@ -256,6 +272,7 @@ describe("createMcpExtension registration wiring", () => {
 		const harness = createFakePi();
 		createMcpExtension({ settings: { servers: { small: { url: SMALL_URL } } } })(harness.pi);
 		await harness.fireSessionStart();
+		await waitForMcpEffect(() => harness.registeredTools.has("mcp__small__ping"));
 		// Nothing deferred → search_tool_bm25 is not force-activated (identical to prior behavior).
 		expect(harness.getActiveTools()).not.toContain("search_tool_bm25");
 		// A second /mcp with no disconnected servers must not re-register or churn.
