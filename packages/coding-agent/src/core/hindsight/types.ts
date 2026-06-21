@@ -18,12 +18,29 @@ export interface HindsightEntry {
 	body: string; // actual content (markdown)
 	tags?: string[];
 	source?: { sessionId?: string; toolCallId?: string };
+	/**
+	 * Agent scope that wrote this entry. Undefined = global (main agent or an
+	 * ad-hoc untyped subagent). A subagent spawned with `type: "<name>"` stamps
+	 * its type name here, so reads can be scoped per agent type.
+	 */
+	agentScope?: string;
 }
 
 export interface HindsightSearchOptions {
 	query: string;
 	limit?: number; // default 10
 	kinds?: HindsightKind[];
+	/**
+	 * Restrict to these scopes. `null` matches global (undefined agentScope).
+	 * Omitted = no scope filter (every scope is eligible).
+	 */
+	scopes?: (string | null)[];
+	/**
+	 * Rank entries whose scope matches above ties. A string boosts that named
+	 * scope; `null` boosts global (undefined-scope) entries — used by the main
+	 * agent to keep its own memory on top while still reading subagent scopes.
+	 */
+	boostScope?: string | null;
 }
 
 export interface HindsightSearchResult {

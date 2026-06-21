@@ -24,6 +24,8 @@ export interface HindsightBank {
 	pruneOlderThan(days: number): number;
 	/** Keep at most `maxEntries`, evicting oldest by `updatedAt`. Returns count removed. */
 	enforceLimit(maxEntries: number): number;
+	/** Cap each NON-global scope at `perScopeMax`, evicting oldest within that scope. Returns count removed. */
+	enforcePerScopeLimit(perScopeMax: number): number;
 }
 
 export interface OpenBankOptions {
@@ -31,7 +33,11 @@ export interface OpenBankOptions {
 	maxEntries?: number;
 	/** Drop entries older than this many days on open. */
 	pruneOlderThanDays?: number;
+	/** Per non-global-scope ceiling. Evicts oldest within an over-cap scope on open. */
+	perScopeMax?: number;
 }
+
+const SCOPE_BOOST = 1.25;
 
 const TOKEN_REGEX = /[a-z0-9_]+/g;
 const STOPWORDS = new Set([
@@ -119,6 +125,13 @@ function buildDocStats(entries: HindsightEntry[]): { docs: DocStats[]; avgLen: n
 	return { docs, avgLen, df };
 }
 
+interface SearchStats {
+	entries: HindsightEntry[];
+	docs: DocStats[];
+	avgLen: number;
+	df: Map<string, number>;
+}
+
 /** Classic BM25 with k1=1.5, b=0.75. */
 function bm25Score(
 	queryTokens: string[],
@@ -200,6 +213,23 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 	const entries: HindsightEntry[] = loadEntries(filePath);
 	const byId = new Map<string, HindsightEntry>();
 	for (const entry of entries) byId.set(entry.id, entry);
+	const searchStatsCache = new Map<string, SearchStats>();
+
+	function invalidateSearchStats(): void {
+		searchStatsCache.clear();
+	}
+
+	function searchStatsFor(kinds: Set<HindsightKind> | undefined): SearchStats {
+		const key = kinds ? Array.from(kinds).sort().join("\0") : "";
+		const cached = searchStatsCache.get(key);
+		if (cached) return cached;
+
+		const candidates = kinds ? entries.filter((entry) => kinds.has(entry.kind)) : entries.slice();
+		const { docs, avgLen, df } = buildDocStats(candidates);
+		const stats = { entries: candidates, docs, avgLen, df };
+		searchStatsCache.set(key, stats);
+		return stats;
+	}
 
 	const bank: HindsightBank = {
 		add(input) {
@@ -213,9 +243,11 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 				body: input.body,
 				tags: input.tags,
 				source: input.source,
+				agentScope: input.agentScope,
 			};
 			entries.push(entry);
 			byId.set(entry.id, entry);
+			invalidateSearchStats();
 			const line = `${JSON.stringify(entry)}\n`;
 			appendFileSync(filePath, line, "utf-8");
 			return entry;
@@ -230,6 +262,7 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 			byId.delete(id);
 			const idx = entries.findIndex((e) => e.id === id);
 			if (idx !== -1) entries.splice(idx, 1);
+			invalidateSearchStats();
 			atomicRewrite(filePath, entries);
 			return true;
 		},
@@ -237,22 +270,20 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 		search(opts) {
 			const limit = opts.limit && opts.limit > 0 ? Math.floor(opts.limit) : 10;
 			const kinds = opts.kinds && opts.kinds.length > 0 ? new Set<HindsightKind>(opts.kinds) : undefined;
-			const candidates = kinds ? entries.filter((e) => kinds.has(e.kind)) : entries;
-			if (candidates.length === 0) return [];
+			const stats = searchStatsFor(kinds);
+			if (stats.entries.length === 0) return [];
 
 			const queryTokens = tokenize(opts.query);
 			if (queryTokens.length === 0) return [];
 
-			const { docs, avgLen, df } = buildDocStats(candidates);
-
 			// buildDocStats pushes one doc per candidate in order, so docs[i] lines
 			// up with candidates[i] — index directly instead of a Map<id> lookup.
 			const scored: HindsightSearchResult[] = [];
-			for (let i = 0; i < candidates.length; i++) {
-				const entry = candidates[i];
-				const doc = docs[i];
+			for (let i = 0; i < stats.entries.length; i++) {
+				const entry = stats.entries[i];
+				const doc = stats.docs[i];
 				if (!doc) continue;
-				const { score, bestTerm } = bm25Score(queryTokens, doc, avgLen, df, candidates.length);
+				const { score, bestTerm } = bm25Score(queryTokens, doc, stats.avgLen, stats.df, stats.entries.length);
 				if (score <= 0) continue;
 				scored.push({
 					entry,
@@ -260,8 +291,22 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 					matchedSnippet: snippetAround(entry.body, bestTerm),
 				});
 			}
-			scored.sort((a, b) => b.score - a.score);
-			return scored.slice(0, limit);
+			let results = scored;
+			if (opts.scopes) {
+				const allowGlobal = opts.scopes.includes(null);
+				const allowSet = new Set(opts.scopes.filter((s): s is string => typeof s === "string"));
+				results = results.filter((r) =>
+					r.entry.agentScope === undefined ? allowGlobal : allowSet.has(r.entry.agentScope),
+				);
+			}
+			if (opts.boostScope !== undefined) {
+				const target = opts.boostScope; // string | null
+				for (const r of results) {
+					if ((r.entry.agentScope ?? null) === target) r.score *= SCOPE_BOOST;
+				}
+			}
+			results.sort((a, b) => b.score - a.score);
+			return results.slice(0, limit);
 		},
 
 		all() {
@@ -271,6 +316,7 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 		clear() {
 			entries.length = 0;
 			byId.clear();
+			invalidateSearchStats();
 			atomicRewrite(filePath, entries);
 		},
 
@@ -287,7 +333,10 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 					removed += 1;
 				}
 			}
-			if (removed > 0) atomicRewrite(filePath, entries);
+			if (removed > 0) {
+				invalidateSearchStats();
+				atomicRewrite(filePath, entries);
+			}
 			return removed;
 		},
 
@@ -303,14 +352,49 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 			const removed = entries.length - maxEntries;
 			const dropped = entries.splice(maxEntries, removed);
 			for (const d of dropped) byId.delete(d.id);
+			invalidateSearchStats();
 			atomicRewrite(filePath, entries);
 			return removed;
+		},
+
+		enforcePerScopeLimit(perScopeMax) {
+			if (!Number.isFinite(perScopeMax) || perScopeMax <= 0) return 0;
+			const byScope = new Map<string, HindsightEntry[]>();
+			for (const e of entries) {
+				if (e.agentScope === undefined) continue; // global is exempt
+				const bucket = byScope.get(e.agentScope);
+				if (bucket) bucket.push(e);
+				else byScope.set(e.agentScope, [e]);
+			}
+			const toDrop = new Set<string>();
+			for (const bucket of byScope.values()) {
+				if (bucket.length <= perScopeMax) continue;
+				bucket.sort((a, b) => {
+					const at = typeof a.updatedAt === "number" ? a.updatedAt : a.createdAt;
+					const bt = typeof b.updatedAt === "number" ? b.updatedAt : b.createdAt;
+					return bt - at; // newest first
+				});
+				for (const e of bucket.slice(perScopeMax)) toDrop.add(e.id);
+			}
+			if (toDrop.size === 0) return 0;
+			for (let i = entries.length - 1; i >= 0; i--) {
+				if (toDrop.has(entries[i].id)) {
+					byId.delete(entries[i].id);
+					entries.splice(i, 1);
+				}
+			}
+			invalidateSearchStats();
+			atomicRewrite(filePath, entries);
+			return toDrop.size;
 		},
 	};
 
 	if (opts) {
 		if (typeof opts.pruneOlderThanDays === "number" && opts.pruneOlderThanDays > 0) {
 			bank.pruneOlderThan(opts.pruneOlderThanDays);
+		}
+		if (typeof opts.perScopeMax === "number" && opts.perScopeMax > 0) {
+			bank.enforcePerScopeLimit(opts.perScopeMax);
 		}
 		if (typeof opts.maxEntries === "number" && opts.maxEntries > 0) {
 			bank.enforceLimit(opts.maxEntries);

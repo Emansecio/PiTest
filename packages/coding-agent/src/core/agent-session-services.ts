@@ -183,6 +183,7 @@ export async function createAgentSessionServices(
 			onAsyncComplete: (handle, text, status) => asyncDeliverRef.current?.(handle, text, status) ?? false,
 			onSubagentStart: (handle) => subagentStartRef.current?.(handle),
 			onSubagentProgress: (handle, info) => subagentProgressRef.current?.(handle, info),
+			isScopedHindsightEnabled: () => settingsManager.getHindsightSettings().scopedSubagents,
 		});
 		builtInFactories = bundle.factories;
 	}

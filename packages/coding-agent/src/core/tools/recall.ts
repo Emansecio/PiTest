@@ -28,6 +28,12 @@ const recallSchema = Type.Object(
 				description: "Filter by entry kinds: fact, decision, pattern, session-summary.",
 			}),
 		),
+		scope: Type.Optional(
+			Type.String({
+				description:
+					"Override search scope: 'own' (this agent's scope + global, default), 'global' (global only), 'all' (every scope), or a specific agent-type name.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -40,6 +46,21 @@ export interface RecallToolDetails {
 
 export interface RecallToolOptions {
 	bank?: HindsightBank;
+	/** Bound agent scope; drives default scope filtering for this instance. */
+	agentScope?: string;
+}
+
+function resolveScope(
+	bound: string | undefined,
+	override: string | undefined,
+): { scopes?: (string | null)[]; boostScope?: string | null } {
+	const ov = override?.trim();
+	if (ov === "all") return {};
+	if (ov === "global") return { scopes: [null] };
+	if (ov && ov !== "own") return { scopes: [ov, null], boostScope: ov };
+	// default ("own" or unset): bound scope reads own+global; main reads all, global boosted.
+	if (bound) return { scopes: [bound, null], boostScope: bound };
+	return { boostScope: null };
 }
 
 const VALID_KINDS: ReadonlySet<HindsightKind> = new Set(["fact", "decision", "pattern", "session-summary"]);
@@ -100,7 +121,8 @@ export function createRecallToolDefinition(
 
 			const limit = typeof input.limit === "number" && input.limit > 0 ? Math.floor(input.limit) : 10;
 			const kinds = coerceKinds(input.kinds);
-			const results = bank.search({ query: input.query, limit, kinds });
+			const { scopes, boostScope } = resolveScope(options?.agentScope, input.scope);
+			const results = bank.search({ query: input.query, limit, kinds, scopes, boostScope });
 			if (results.length === 0) {
 				return {
 					content: [

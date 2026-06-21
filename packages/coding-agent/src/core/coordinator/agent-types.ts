@@ -29,6 +29,8 @@ export interface AgentTypeDef {
 	model?: string;
 	/** Optional thinking level (minimal|low|medium|high|xhigh). */
 	thinkingLevel?: string;
+	/** When true, the spawn auto-adds scoped recall/retain/reflect even if `tools` omits them. */
+	memory?: boolean;
 	/** Where it was loaded from — project overrides user overrides builtin. */
 	source: "project" | "user" | "builtin";
 }
@@ -39,6 +41,7 @@ interface AgentTypeFrontmatter {
 	tools?: string | string[];
 	model?: string;
 	thinking?: string;
+	memory?: boolean;
 	[key: string]: unknown;
 }
 
@@ -74,6 +77,7 @@ function loadDir(dir: string, source: "project" | "user", out: Map<string, Agent
 				tools: parseToolsField(frontmatter.tools),
 				model: frontmatter.model?.trim() || undefined,
 				thinkingLevel: frontmatter.thinking?.trim() || undefined,
+				memory: frontmatter.memory === true,
 				source,
 			});
 		} catch {

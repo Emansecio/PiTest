@@ -29,6 +29,12 @@ const reflectSchema = Type.Object(
 			description:
 				"The question to reflect on. Returns ALL relevant hindsight entries as a single block for you to synthesize.",
 		}),
+		scope: Type.Optional(
+			Type.String({
+				description:
+					"Override search scope: 'own' (this agent's scope + global, default), 'global' (global only), 'all' (every scope), or a specific agent-type name.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -43,6 +49,21 @@ export interface ReflectToolDetails {
 
 export interface ReflectToolOptions {
 	bank?: HindsightBank;
+	/** Bound agent scope; drives default scope filtering for this instance. */
+	agentScope?: string;
+}
+
+function resolveScope(
+	bound: string | undefined,
+	override: string | undefined,
+): { scopes?: (string | null)[]; boostScope?: string | null } {
+	const ov = override?.trim();
+	if (ov === "all") return {};
+	if (ov === "global") return { scopes: [null] };
+	if (ov && ov !== "own") return { scopes: [ov, null], boostScope: ov };
+	// default ("own" or unset): bound scope reads own+global; main reads all, global boosted.
+	if (bound) return { scopes: [bound, null], boostScope: bound };
+	return { boostScope: null };
 }
 
 function formatEntry(entry: HindsightEntry): string {
@@ -113,7 +134,8 @@ export function createReflectToolDefinition(
 				};
 			}
 
-			const results = bank.search({ query: input.question, limit: REFLECT_LIMIT });
+			const { scopes, boostScope } = resolveScope(options?.agentScope, input.scope);
+			const results = bank.search({ query: input.question, limit: REFLECT_LIMIT, scopes, boostScope });
 			if (results.length === 0) {
 				return {
 					content: [

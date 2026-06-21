@@ -66,6 +66,8 @@ export interface BuiltInExtensionsOptions {
 	onSubagentStart?: (handle: string) => void;
 	/** Forwarded to the coordinator: fires once per finished subagent turn (live progress). */
 	onSubagentProgress?: (handle: string, info: { turn: number; lastTool?: string }) => void;
+	/** Forwarded to the coordinator: true when subagent memory should be scoped by agent type. */
+	isScopedHindsightEnabled?: () => boolean;
 }
 
 export interface BuiltInExtensionsResult {
@@ -142,6 +144,7 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			onAsyncComplete: options.onAsyncComplete,
 			onSubagentStart: options.onSubagentStart,
 			onSubagentProgress: options.onSubagentProgress,
+			isScopedHindsightEnabled: options.isScopedHindsightEnabled,
 		}),
 	];
 

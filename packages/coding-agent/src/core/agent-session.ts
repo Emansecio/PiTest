@@ -349,6 +349,7 @@ const SAME_SESSION_HINT_THRESHOLD = 2;
 // NEW key would exceed the cap — cold entries are the least useful to the
 // recurring-error guard, and the disk persist iterates values order-insensitively.
 const MAX_LEARNED_ERRORS = 500;
+const FREQUENT_FILES_DISPOSE_WAIT_MS = 2_500;
 
 /**
  * Fraction of the context window above which the pre-send overflow guard forces a
@@ -1176,6 +1177,7 @@ export class AgentSession {
 			const bank = openBank(path, {
 				maxEntries: cfg.maxEntries,
 				pruneOlderThanDays: cfg.pruneOlderThanDays,
+				perScopeMax: cfg.scopedSubagents ? cfg.scopedSubagentsMaxEntriesPerScope : undefined,
 			});
 			this._hindsightBank = bank;
 			setCurrentHindsightBank(bank);
@@ -2163,7 +2165,10 @@ export class AgentSession {
 		}
 		if (this._frequentFilesPromise) {
 			try {
-				await this._frequentFilesPromise;
+				// Frequent-files is a best-effort prompt hint. It is aborted above, but
+				// Windows can occasionally leave the child-process callback delayed;
+				// dispose must not hang the CLI or the test harness indefinitely for it.
+				await Promise.race([this._frequentFilesPromise, sleep(FREQUENT_FILES_DISPOSE_WAIT_MS)]);
 			} catch {
 				// ignore
 			}

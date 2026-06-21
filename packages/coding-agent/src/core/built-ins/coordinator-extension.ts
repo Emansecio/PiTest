@@ -41,6 +41,7 @@ import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "../messa
 import type { ModelRegistry } from "../model-registry.ts";
 import { parseModelPattern } from "../model-resolver.ts";
 import type { Skill } from "../skills.ts";
+import { withAgentScope } from "../tools/hindsight-scope.ts";
 import { createMessageTool } from "../tools/message.ts";
 import { formatSize, truncateTail } from "../tools/truncate.ts";
 
@@ -412,6 +413,8 @@ export interface CoordinatorExtensionOptions {
 	onSubagentStart?: (handle: string) => void;
 	/** Fired once per finished subagent turn with coarse progress (turn N, last tool). */
 	onSubagentProgress?: (handle: string, info: { turn: number; lastTool?: string }) => void;
+	/** True when subagent memory should be scoped by agent type (default-on setting). */
+	isScopedHindsightEnabled?: () => boolean;
 }
 
 function messagingPreamble(selfId: string, parentId: string | undefined): string {
@@ -430,6 +433,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	const registry = new SubagentRegistry();
 	const maxDepth = resolveMaxSubagentDepth();
 	const maxOutputBytes = resolveSubagentMaxBytes();
+	const scopedHindsightEnabled = () => {
+		if (process.env.PIT_NO_SCOPED_HINDSIGHT === "1") return false;
+		return options.isScopedHindsightEnabled?.() ?? true;
+	};
 
 	// Detached subagents launched via op:"spawn", keyed by handle. Collected via
 	// op:"poll"/"join"; a joined handle is freed once settled.
@@ -916,6 +923,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				}
 				const effSystemPrompt = system_prompt ?? agentType?.systemPrompt;
 				const effAllowedTools = allowed_tools ?? agentType?.tools;
+				const hindsightScope = scopedHindsightEnabled() ? agentType?.name : undefined;
+				const autoAddMemory = scopedHindsightEnabled() && agentType?.memory === true;
+				const effAllowedToolsScoped =
+					autoAddMemory && effAllowedTools
+						? Array.from(new Set([...effAllowedTools, "recall", "retain", "reflect"]))
+						: effAllowedTools;
 				const { model: subModel, thinkingLevel: subThinking } = await resolveSubModel(
 					p.model ?? agentType?.model,
 					p.thinking_level ?? agentType?.thinkingLevel,
@@ -938,17 +951,18 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						modelId: subModel?.id ?? model.id,
 						thinkingLevel: subThinking,
 						systemPrompt: effSystemPrompt,
-						allowedTools: effAllowedTools,
+						allowedTools: effAllowedToolsScoped,
+						agentScope: hindsightScope,
 						cwd,
 						depth: childDepth,
 						savedAt: Date.now(),
 					});
 				};
-				const baseChildTools = buildSubagentToolCatalog(
-					options.getAvailableTools(),
-					childDepth,
-					maxDepth,
-					makeTaskTool,
+				const baseChildTools = withAgentScope(
+					buildSubagentToolCatalog(options.getAvailableTools(), childDepth, maxDepth, makeTaskTool),
+					hindsightScope,
+					cwd,
+					autoAddMemory,
 				);
 
 				// A subagent whose auto-cleanup worktree is removed on settle can't be
@@ -1016,7 +1030,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								model: subModel,
 								thinkingLevel: subThinking,
 								systemPrompt: effSystemPrompt,
-								allowedTools: effAllowedTools,
+								allowedTools: effAllowedToolsScoped,
 								maxTurns: max_turns,
 								signal: controller.signal,
 								resultSchema,
@@ -1111,7 +1125,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						model: subModel,
 						thinkingLevel: subThinking,
 						systemPrompt: effSystemPrompt,
-						allowedTools: effAllowedTools,
+						allowedTools: effAllowedToolsScoped,
 						maxTurns: max_turns,
 						signal,
 						resultSchema,
@@ -1227,6 +1241,10 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			seed.pop();
 		}
 		const childTools = buildSubagentToolCatalog(options.getAvailableTools(), state.depth, maxDepth, makeTaskTool);
+		const scopedChildTools =
+			process.env.PIT_NO_SCOPED_HINDSIGHT === "1"
+				? childTools
+				: withAgentScope(childTools, state.agentScope, state.cwd, false);
 		const text =
 			continuation?.trim() ||
 			"You were interrupted before finishing. Continue from where you left off using the conversation above, then give your final answer.";
@@ -1241,7 +1259,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		try {
 			await acquireSlot(signal);
 			acquired = true;
-			const result = await spawnSubagent(makeSpawnDeps(childTools, model), {
+			const result = await spawnSubagent(makeSpawnDeps(scopedChildTools, model), {
 				prompt: text,
 				initialMessages: seed,
 				model: subModel,
@@ -1268,6 +1286,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					thinkingLevel: state.thinkingLevel,
 					systemPrompt: state.systemPrompt,
 					allowedTools: state.allowedTools,
+					agentScope: state.agentScope,
 					cwd: state.cwd,
 					depth: state.depth,
 					savedAt: Date.now(),

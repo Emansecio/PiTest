@@ -38,6 +38,8 @@ export interface RetainToolDetails {
 export interface RetainToolOptions {
 	/** Override the active bank (otherwise pulled from the module registry). */
 	bank?: HindsightBank;
+	/** Bound agent scope stamped on every entry this instance writes. */
+	agentScope?: string;
 }
 
 function shortPreview(text: string, max = 40): string {
@@ -83,6 +85,7 @@ export function createRetainToolDefinition(
 				subject: input.subject,
 				tags: input.tags,
 				source: { toolCallId },
+				agentScope: options?.agentScope,
 			});
 			const label = input.subject ?? shortPreview(input.body);
 			return {

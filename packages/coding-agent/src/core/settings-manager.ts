@@ -200,6 +200,8 @@ export interface HindsightSettings {
 	maxEntries?: number;
 	/** Optional age cap: drop entries older than this many days on open. */
 	pruneOlderThanDays?: number;
+	scopedSubagents?: boolean;
+	scopedSubagentsMaxEntriesPerScope?: number;
 }
 
 export interface ResolvedHindsightSettings {
@@ -207,6 +209,8 @@ export interface ResolvedHindsightSettings {
 	bankPath?: string;
 	maxEntries?: number;
 	pruneOlderThanDays?: number;
+	scopedSubagents: boolean;
+	scopedSubagentsMaxEntriesPerScope: number;
 }
 
 /**
@@ -386,7 +390,6 @@ export type PackageSource =
 	  };
 
 export interface Settings {
-	lastChangelogVersion?: string;
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -403,8 +406,6 @@ export interface Settings {
 	quietStartup?: boolean;
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
-	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
-	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates (install-ping is killed by PIT_OFFLINE; this flag ALSO gates OpenRouter/Cloudflare attribution headers, so leave default true to keep attribution)
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
 	extensions?: string[]; // Array of local extension file paths or directories
 	skills?: string[]; // Array of local skill file paths or directories
@@ -1062,14 +1063,6 @@ export class SettingsManager {
 		return drained;
 	}
 
-	getLastChangelogVersion(): string | undefined {
-		return this.settings.lastChangelogVersion;
-	}
-
-	setLastChangelogVersion(version: string): void {
-		this.setTopLevel("lastChangelogVersion", version);
-	}
-
 	getSessionDir(): string | undefined {
 		const sessionDir = this.settings.sessionDir;
 		if (!sessionDir) {
@@ -1381,22 +1374,6 @@ export class SettingsManager {
 		this.globalSettings.npmCommand = command ? [...command] : undefined;
 		this.markModified("npmCommand");
 		this.save();
-	}
-
-	getCollapseChangelog(): boolean {
-		return this.settings.collapseChangelog ?? false;
-	}
-
-	setCollapseChangelog(collapse: boolean): void {
-		this.setTopLevel("collapseChangelog", collapse);
-	}
-
-	getEnableInstallTelemetry(): boolean {
-		return this.settings.enableInstallTelemetry ?? true;
-	}
-
-	setEnableInstallTelemetry(enabled: boolean): void {
-		this.setTopLevel("enableInstallTelemetry", enabled);
 	}
 
 	getPackages(): PackageSource[] {
@@ -1721,6 +1698,12 @@ export class SettingsManager {
 			raw.pruneOlderThanDays > 0
 				? raw.pruneOlderThanDays
 				: undefined;
+		const scopedSubagentsMaxEntriesPerScope =
+			typeof raw?.scopedSubagentsMaxEntriesPerScope === "number" &&
+			Number.isFinite(raw.scopedSubagentsMaxEntriesPerScope) &&
+			raw.scopedSubagentsMaxEntriesPerScope > 0
+				? Math.floor(raw.scopedSubagentsMaxEntriesPerScope)
+				: 200;
 		// Default ON: retain/recall/reflect/forget ride out-of-the-box with a per-project
 		// bank under `<cwd>/.pit/hindsight/bank.jsonl`. Opt out via
 		// `hindsight.enabled: false` in settings.json.
@@ -1729,6 +1712,8 @@ export class SettingsManager {
 			bankPath: typeof raw?.bankPath === "string" && raw.bankPath.length > 0 ? raw.bankPath : undefined,
 			maxEntries,
 			pruneOlderThanDays,
+			scopedSubagents: raw?.scopedSubagents !== false,
+			scopedSubagentsMaxEntriesPerScope,
 		};
 	}
 

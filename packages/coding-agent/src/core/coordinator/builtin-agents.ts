@@ -17,6 +17,7 @@ export const BUILT_IN_AGENT_TYPES: AgentTypeDef[] = [
 		tools: ["read", "grep", "find", "ls", "bash"],
 		model: "haiku",
 		thinkingLevel: "low",
+		memory: true,
 		source: "builtin",
 	},
 	{
@@ -35,6 +36,7 @@ export const BUILT_IN_AGENT_TYPES: AgentTypeDef[] = [
 			"You are a critical code reviewer. Inspect the diff or code for correctness bugs, edge cases, security risks, and quality problems. Report each issue with a file:line anchor, a short explanation of why it is wrong, and its severity. You are read-only: point out problems precisely — do not fix or edit anything.",
 		tools: ["read", "grep", "find", "ls"],
 		thinkingLevel: "high",
+		memory: true,
 		source: "builtin",
 	},
 	{

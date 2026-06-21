@@ -11,7 +11,7 @@ import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
-import { getCurrentHindsightBank, type HindsightBank } from "../hindsight/index.ts";
+import { getCurrentHindsightBank, type HindsightBank, type HindsightEntry } from "../hindsight/index.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -53,6 +53,8 @@ export interface ForgetToolDetails {
 export interface ForgetToolOptions {
 	/** Override the active bank (otherwise pulled from the module registry). */
 	bank?: HindsightBank;
+	/** Bound agent scope; fences subject/tags deletion to own + global entries. */
+	agentScope?: string;
 }
 
 function textResult(text: string, details: ForgetToolDetails, isError?: boolean) {
@@ -109,8 +111,13 @@ export function createForgetToolDefinition(
 
 			// Resolve the target id: explicit id wins; otherwise match by subject/tags.
 			let targetId = input.id;
+			let resolvedEntry: HindsightEntry | undefined;
 			if (!targetId && (subject || hasTagFilter)) {
 				let matches = bank.all();
+				if (options?.agentScope) {
+					const scope = options.agentScope;
+					matches = matches.filter((e) => e.agentScope === undefined || e.agentScope === scope);
+				}
 				if (subject) {
 					matches = matches.filter((e) => e.subject && e.subject.trim().toLowerCase() === subject.toLowerCase());
 				}
@@ -133,10 +140,11 @@ export function createForgetToolDefinition(
 					);
 				}
 				targetId = matches[0].id;
+				resolvedEntry = matches[0];
 			}
 
 			const id = targetId!;
-			const existing = bank.get(id);
+			const existing = resolvedEntry ?? bank.get(id);
 			if (!existing) {
 				return textResult(`No hindsight entry found with id: ${id}`, { id, subject, tags, deleted: false });
 			}

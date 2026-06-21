@@ -27,6 +27,8 @@ export interface ResumeState {
 	thinkingLevel?: string;
 	systemPrompt?: string;
 	allowedTools?: string[];
+	/** Agent scope to rebind hindsight tools to on disk-resume (undefined = global). */
+	agentScope?: string;
 	cwd: string;
 	depth: number;
 	savedAt: number;
