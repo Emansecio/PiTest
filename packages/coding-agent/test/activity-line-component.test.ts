@@ -106,7 +106,7 @@ describe("ActivityLineComponent", () => {
 		expect(out[0]).toContain("×3");
 	});
 
-	it("renders bash as Ran $ command", () => {
+	it("renders bash as `$ Ran <command>` without a redundant `$ ` sigil", () => {
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(
 			execStub({
@@ -116,8 +116,23 @@ describe("ActivityLineComponent", () => {
 			}),
 		);
 		const out = c.render(120).map(stripAnsi);
-		expect(out[0]).toContain("Ran");
-		expect(out[0]).toContain("$ npm test");
+		// `$` family glyph + "Ran" verb, then the bare command (no second `$ `).
+		expect(out[0]).toContain("Ran npm test");
+		expect(out[0]).not.toContain("Ran $ npm test");
+	});
+
+	it("elides a leading `cd <path> &&` in the bash row", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getToolName: () => "bash",
+				getArgs: () => ({ command: "cd C:/PiTest && npm run check" }),
+				getResultDetails: () => undefined,
+			}),
+		);
+		const out = c.render(120).map(stripAnsi);
+		expect(out[0]).toContain("Ran npm run check");
+		expect(out[0]).not.toContain("cd ");
 	});
 });
 

@@ -150,6 +150,11 @@ export class ActivityLineComponent extends Container {
 				command: String(args.command ?? ""),
 				width: Math.max(0, width - 12),
 				colorKey: "toolTitle",
+				// The row already carries the `$` family glyph + "Ran" verb, so drop the
+				// redundant `$ ` sigil and elide the `cd …/dir &&` boilerplate; the
+				// verbatim command stays available on expand.
+				prefix: false,
+				elideCd: true,
 			});
 		}
 		if (name === "web_search") {

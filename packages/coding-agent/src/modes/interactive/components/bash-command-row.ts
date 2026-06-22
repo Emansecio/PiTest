@@ -29,6 +29,18 @@ function collapseCdPrefix(line: string): string {
 }
 
 /**
+ * Elide a leading `cd <path> && <rest>` entirely, returning just `<rest>`. The
+ * grouped activity row already carries the shell `$` glyph + "Ran" verb, so the
+ * `cd …/dir &&` boilerplate only eats width before the command that matters. The
+ * verbatim command (cd included) is still one ctrl+o away on expand. No leading
+ * `cd … &&` → the line is returned unchanged.
+ */
+function stripLeadingCd(line: string): string {
+	const m = line.match(/^cd\s+(?:"[^"]*"|'[^']*'|[^\s&]+)\s*&&\s*(.+)$/);
+	return m ? (m[1] ?? line) : line;
+}
+
+/**
  * Build a single visual row for a collapsed bash command title/header. A long
  * command is clipped horizontally (with `…`); multi-line scripts/heredocs show
  * only the first line. Anything hidden — extra command lines plus `extraHidden`
@@ -46,12 +58,27 @@ export function clampBashCommandRow(opts: {
 	extraHidden?: number;
 	/** Pre-styled trailing text (e.g. timeout) — reserved in width and appended. */
 	suffix?: string;
+	/**
+	 * Omit the leading `$ ` sigil. The grouped activity row already shows a `$`
+	 * family glyph + the "Ran" verb, so a second `$ ` reads as redundant there.
+	 * Default true (keep it) for the user `!` header and the standalone tool title,
+	 * which have no glyph and rely on `$ ` to read as a shell command.
+	 */
+	prefix?: boolean;
+	/**
+	 * Elide a leading `cd <path> &&` entirely (show just the command) instead of
+	 * shortening its path. Used by the activity row, where the `cd …/dir &&`
+	 * boilerplate only eats width before the command that matters. Default false.
+	 */
+	elideCd?: boolean;
 }): string {
 	const { command, width, colorKey } = opts;
 	const extraHidden = opts.extraHidden ?? 0;
 	const suffix = opts.suffix ?? "";
 	const lines = command.split("\n");
-	const cmd = theme.fg(colorKey, theme.bold(`$ ${collapseCdPrefix(lines[0] ?? "")}`));
+	const firstLine = lines[0] ?? "";
+	const head = opts.elideCd ? stripLeadingCd(firstLine) : collapseCdPrefix(firstLine);
+	const cmd = theme.fg(colorKey, theme.bold(opts.prefix === false ? head : `$ ${head}`));
 	const hiddenLines = lines.length - 1 + extraHidden;
 	const suffixW = visibleWidth(suffix);
 	const horizontalClip = visibleWidth(cmd) + suffixW > width;

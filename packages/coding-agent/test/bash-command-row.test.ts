@@ -115,4 +115,44 @@ describe("clampBashCommandRow", () => {
 		expect(plain).toContain("$ grep -rn foo .");
 		expect(plain).not.toContain("…");
 	});
+
+	it("omits the `$ ` sigil when prefix:false (activity row already shows a $ glyph)", () => {
+		const row = stripAnsi(
+			clampBashCommandRow({ command: "npm run check", width: 80, colorKey: "toolTitle", prefix: false }),
+		);
+		expect(row).toBe("npm run check");
+		expect(row).not.toContain("$");
+	});
+
+	it("keeps the `$ ` sigil by default (user `!` header / standalone tool title)", () => {
+		const row = stripAnsi(clampBashCommandRow({ command: "npm run check", width: 80, colorKey: "bashMode" }));
+		expect(row).toContain("$ npm run check");
+	});
+
+	it("elides a leading `cd <path> &&` when elideCd:true (full command on expand)", () => {
+		const row = stripAnsi(
+			clampBashCommandRow({
+				command: `cd "C:/Users/User/Desktop/Projeto Fitness" && grep -rli "segunda" .`,
+				width: 80,
+				colorKey: "toolTitle",
+				prefix: false,
+				elideCd: true,
+			}),
+		);
+		expect(row).toBe(`grep -rli "segunda" .`);
+		expect(row).not.toContain("cd ");
+	});
+
+	it("leaves a command without a leading `cd` unchanged under elideCd:true", () => {
+		const row = stripAnsi(
+			clampBashCommandRow({
+				command: "grep -rn foo .",
+				width: 80,
+				colorKey: "toolTitle",
+				prefix: false,
+				elideCd: true,
+			}),
+		);
+		expect(row).toBe("grep -rn foo .");
+	});
 });
