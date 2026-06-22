@@ -13,6 +13,39 @@ const execAsync = promisify(exec);
 // Cache for shell command results (persists for process lifetime)
 const commandResultCache = new Map<string, string | undefined>();
 
+// Short-lived TTL memo for the "uncached" `!command` resolvers. The per-request
+// auth path (model-registry.getApiKeyAndHeaders → apiKey + provider headers +
+// model headers, plus retries and overlapping turns) resolves the same handful
+// of commands repeatedly; without this each one spawned a fresh shell before
+// every model request, adding 50–200ms (Windows especially) to time-to-first-
+// token. Distinct from commandResultCache: bounded to configCommandTtlMs() so
+// rotating tokens stay fresh, and failures are never memoised (a flaky command
+// must not turn into a sticky auth outage).
+const ttlCommandCache = new Map<string, { value: string; expiresAt: number }>();
+const DEFAULT_CONFIG_COMMAND_TTL_MS = 30_000;
+
+// Window for ttlCommandCache, overridable via PIT_CONFIG_COMMAND_TTL_MS
+// (milliseconds; 0 disables the memo and restores fresh-every-call behaviour).
+function configCommandTtlMs(): number {
+	const raw = process.env.PIT_CONFIG_COMMAND_TTL_MS;
+	if (raw === undefined) return DEFAULT_CONFIG_COMMAND_TTL_MS;
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_CONFIG_COMMAND_TTL_MS;
+}
+
+function ttlCacheGet(commandConfig: string): string | undefined {
+	const entry = ttlCommandCache.get(commandConfig);
+	if (entry && entry.expiresAt > Date.now()) return entry.value;
+	return undefined;
+}
+
+function ttlCacheSet(commandConfig: string, value: string | undefined): void {
+	if (value === undefined) return; // never memoise failures/empty output
+	const ttl = configCommandTtlMs();
+	if (ttl <= 0) return;
+	ttlCommandCache.set(commandConfig, { value, expiresAt: Date.now() + ttl });
+}
+
 /**
  * Resolve a config value (API key, header value, etc.) to an actual value.
  * - If starts with "!", executes the rest as a shell command and uses stdout (cached)
@@ -70,13 +103,20 @@ function executeWithDefaultShell(command: string): string | undefined {
 }
 
 function executeCommandUncached(commandConfig: string): string | undefined {
+	const cached = ttlCacheGet(commandConfig);
+	if (cached !== undefined) {
+		return cached;
+	}
 	const command = commandConfig.slice(1);
-	return process.platform === "win32"
-		? (() => {
-				const configuredResult = executeWithConfiguredShell(command);
-				return configuredResult.executed ? configuredResult.value : executeWithDefaultShell(command);
-			})()
-		: executeWithDefaultShell(command);
+	let value: string | undefined;
+	if (process.platform === "win32") {
+		const configuredResult = executeWithConfiguredShell(command);
+		value = configuredResult.executed ? configuredResult.value : executeWithDefaultShell(command);
+	} else {
+		value = executeWithDefaultShell(command);
+	}
+	ttlCacheSet(commandConfig, value);
+	return value;
 }
 
 function executeCommand(commandConfig: string): string | undefined {
@@ -145,20 +185,30 @@ async function executeWithDefaultShellAsync(command: string): Promise<string | u
 }
 
 /**
- * Async, non-blocking mirror of executeCommandUncached. Same uncached semantics
- * (fresh each call — never cached, rotating tokens). Written with if/else, not a
- * nested ternary IIFE, to satisfy tsgo erasableSyntaxOnly lint.
+ * Async, non-blocking mirror of executeCommandUncached. Bypasses the
+ * process-lifetime commandResultCache but consults the short-lived TTL memo
+ * (ttlCommandCache) so the per-request auth path does not re-spawn the same
+ * `!command` on every turn. Only successful (defined) results are memoised, and
+ * only for configCommandTtlMs(); transient failures are never cached and
+ * rotating tokens stay fresh within the small window (0 disables it entirely).
+ * Written with if/else, not a nested ternary IIFE, to satisfy tsgo
+ * erasableSyntaxOnly lint.
  */
 async function executeCommandUncachedAsync(commandConfig: string): Promise<string | undefined> {
+	const cached = ttlCacheGet(commandConfig);
+	if (cached !== undefined) {
+		return cached;
+	}
 	const command = commandConfig.slice(1);
+	let value: string | undefined;
 	if (process.platform === "win32") {
 		const configuredResult = await executeWithConfiguredShellAsync(command);
-		if (configuredResult.executed) {
-			return configuredResult.value;
-		}
-		return executeWithDefaultShellAsync(command);
+		value = configuredResult.executed ? configuredResult.value : await executeWithDefaultShellAsync(command);
+	} else {
+		value = await executeWithDefaultShellAsync(command);
 	}
-	return executeWithDefaultShellAsync(command);
+	ttlCacheSet(commandConfig, value);
+	return value;
 }
 
 /**
@@ -176,6 +226,19 @@ export async function resolveConfigValueUncachedAsync(config: string): Promise<s
 
 export function resolveConfigValueOrThrow(config: string, description: string): string {
 	const resolvedValue = resolveConfigValueUncached(config);
+	if (resolvedValue !== undefined) {
+		return resolvedValue;
+	}
+
+	if (config.startsWith("!")) {
+		throw new Error(`Failed to resolve ${description} from shell command: ${config.slice(1)}`);
+	}
+
+	throw new Error(`Failed to resolve ${description}`);
+}
+
+export async function resolveConfigValueOrThrowAsync(config: string, description: string): Promise<string> {
+	const resolvedValue = await resolveConfigValueUncachedAsync(config);
 	if (resolvedValue !== undefined) {
 		return resolvedValue;
 	}
@@ -214,9 +277,22 @@ export function resolveHeadersOrThrow(
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
 }
 
+export async function resolveHeadersOrThrowAsync(
+	headers: Record<string, string> | undefined,
+	description: string,
+): Promise<Record<string, string> | undefined> {
+	if (!headers) return undefined;
+	const resolved: Record<string, string> = {};
+	for (const [key, value] of Object.entries(headers)) {
+		resolved[key] = await resolveConfigValueOrThrowAsync(value, `${description} header "${key}"`);
+	}
+	return Object.keys(resolved).length > 0 ? resolved : undefined;
+}
+
 /** Clear the config value command cache. Exported for testing. */
 export function clearConfigValueCache(): void {
 	commandResultCache.clear();
+	ttlCommandCache.clear();
 }
 
 /**

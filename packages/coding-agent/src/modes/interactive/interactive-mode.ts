@@ -37,9 +37,7 @@ import {
 	type Component,
 	Container,
 	fuzzyFilter,
-	getCapabilities,
 	getKeybindings,
-	hyperlink,
 	Loader,
 	type LoaderIndicatorOptions,
 	Markdown,
@@ -68,7 +66,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
-import { detectCli, inferCli } from "../../core/fusion/cli-runner.ts";
+import { detectCliAsync, inferCli } from "../../core/fusion/cli-runner.ts";
 import { parseTokenBudget } from "../../core/goal/goal-manager.ts";
 import { sliceSafe } from "../../utils/surrogate.ts";
 
@@ -102,7 +100,6 @@ import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../cor
 import { type SessionContext, SessionManager } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
-import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import {
 	type AskOptionsAnswer,
@@ -112,10 +109,8 @@ import {
 	setCurrentUserInputBus,
 	type UserInputBus,
 } from "../../core/user-input-bus.ts";
-import { compareVersions, getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { type ClipboardImage, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { isOfflineMode } from "../../utils/env-flags.ts";
-import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
@@ -182,7 +177,7 @@ import {
 } from "./theme/theme.ts";
 
 /**
- * A structural rule for the chat transcript (changelog / hotkeys framing).
+ * A structural rule for the chat transcript (e.g. hotkeys framing).
  * Muted hairline rather than DynamicBorder's saturated blue default — the rule
  * organizes the flow without competing with content. Modal selectors keep the
  * blue default deliberately, as a focus cue.
@@ -346,8 +341,6 @@ export class InteractiveMode {
 	private ctrlCHint: Text | undefined = undefined;
 	private ctrlCHintTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 	private lastEscapeTime = 0;
-	private changelogMarkdown: string | undefined = undefined;
-	private startupNoticesShown = false;
 	private anthropicSubscriptionWarningShown = false;
 
 	// Status line tracking (for mutating immediately-sequential status updates)
@@ -478,7 +471,6 @@ export class InteractiveMode {
 		["/session", (s) => s.handleSessionCommand()],
 		["/cache-status", (s) => s.handleCacheStatusCommand()],
 		["/diagnostics", (s) => s.handleDiagnosticsCommand()],
-		["/changelog", (s) => s.handleChangelogCommand()],
 		["/help", (s) => s.handleHelpCommand()],
 		["/hotkeys", (s) => s.handleHotkeysCommand()],
 		["/login", (s) => s.showOAuthSelector("login")],
@@ -669,46 +661,10 @@ export class InteractiveMode {
 		}
 	}
 
-	private showStartupNoticesIfNeeded(): void {
-		if (this.startupNoticesShown) {
-			return;
-		}
-		this.startupNoticesShown = true;
-
-		if (!this.changelogMarkdown) {
-			return;
-		}
-
-		if (this.chatContainer.children.length > 0) {
-			this.chatContainer.addChild(new Spacer(1));
-		}
-		// Structural chat-flow rules are muted hairlines (mutedBorderRule), not the
-		// saturated blue — they organize the transcript without shouting. Modal
-		// selectors keep DynamicBorder's blue default as a deliberate focus cue.
-		this.chatContainer.addChild(mutedBorderRule());
-		if (this.settingsManager.getCollapseChangelog()) {
-			const versionMatch = this.changelogMarkdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/);
-			const latestVersion = versionMatch ? versionMatch[1] : this.version;
-			const condensedText = `Updated to v${latestVersion}. Use ${theme.bold("/changelog")} to view full changelog.`;
-			this.chatContainer.addChild(new Text(condensedText, 1, 0));
-		} else {
-			this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(
-				new Markdown(this.changelogMarkdown.trim(), 1, 0, this.getMarkdownThemeWithSettings()),
-			);
-			this.chatContainer.addChild(new Spacer(1));
-		}
-		this.chatContainer.addChild(mutedBorderRule());
-	}
-
 	async init(): Promise<void> {
 		if (this.isInitialized) return;
 
 		this.registerSignalHandlers();
-
-		// Load changelog (only show new entries, skip for resumed sessions)
-		this.changelogMarkdown = this.getChangelogForDisplay();
 
 		// Ensure fd and rg are available (downloads if missing, adds to PATH via getBinDir)
 		// Both are needed: fd for autocomplete, rg for grep tool and bash commands
@@ -1013,56 +969,6 @@ export class InteractiveMode {
 		}
 
 		return undefined;
-	}
-
-	/**
-	 * Get changelog entries to display on startup.
-	 * Only shows new entries since last seen version, skips for resumed sessions.
-	 */
-	private getChangelogForDisplay(): string | undefined {
-		// Skip changelog for resumed/continued sessions (already have messages)
-		if (this.session.state.messages.length > 0) {
-			return undefined;
-		}
-
-		const lastVersion = this.settingsManager.getLastChangelogVersion();
-		const changelogPath = getChangelogPath();
-		const entries = parseChangelog(changelogPath);
-
-		if (!lastVersion) {
-			// Fresh install - record the version, send telemetry, don't show changelog
-			this.settingsManager.setLastChangelogVersion(VERSION);
-			this.reportInstallTelemetry(VERSION);
-			return undefined;
-		}
-
-		const newEntries = getNewEntries(entries, lastVersion);
-		if (newEntries.length > 0) {
-			this.settingsManager.setLastChangelogVersion(VERSION);
-			this.reportInstallTelemetry(VERSION);
-			return newEntries.map((e) => e.content).join("\n\n");
-		}
-
-		return undefined;
-	}
-
-	private reportInstallTelemetry(version: string): void {
-		if (isOfflineMode()) {
-			return;
-		}
-
-		if (!isInstallTelemetryEnabled(this.settingsManager)) {
-			return;
-		}
-
-		void fetch(`https://pit.dev/api/report-install?version=${encodeURIComponent(version)}`, {
-			headers: {
-				"User-Agent": getPiUserAgent(version),
-			},
-			signal: AbortSignal.timeout(5000),
-		})
-			.then(() => undefined)
-			.catch(() => undefined);
 	}
 
 	private _cachedMarkdownTheme?: MarkdownTheme;
@@ -1371,7 +1277,6 @@ export class InteractiveMode {
 		const extensionRunner = this.session.extensionRunner;
 		this.setupExtensionShortcuts(extensionRunner);
 		this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
-		this.showStartupNoticesIfNeeded();
 	}
 
 	private applyRuntimeSettings(): void {
@@ -2898,7 +2803,12 @@ export class InteractiveMode {
 
 			case "fusion_member_activity":
 				// recordActivity already calls ui.requestRender() internally.
-				this.fusionLive?.recordActivity(event.index, event.kind, event.tool);
+				this.fusionLive?.recordActivity(event.index, event.kind, event.tool, event.text);
+				break;
+
+			case "fusion_verify_activity":
+				// recordVerifyActivity already calls ui.requestRender() internally.
+				this.fusionLive?.recordVerifyActivity(event.turn, event.tool);
 				break;
 
 			case "fusion_stage":
@@ -4185,11 +4095,6 @@ export class InteractiveMode {
 	showNewVersionNotification(release: LatestPiRelease): void {
 		const action = theme.fg("accent", `${APP_NAME} update`);
 		const updateInstruction = theme.fg("muted", `New version ${release.version} is available. Run `) + action;
-		const changelogUrl = "https://pit.dev/changelog";
-		const changelogLink = getCapabilities().hyperlinks
-			? hyperlink(theme.fg("accent", "open changelog"), changelogUrl)
-			: theme.fg("accent", changelogUrl);
-		const changelogLine = theme.fg("muted", "Changelog: ") + changelogLink;
 		const note = release.note?.trim();
 
 		this.chatContainer.addChild(new Spacer(1));
@@ -4206,7 +4111,6 @@ export class InteractiveMode {
 			);
 			this.chatContainer.addChild(new Spacer(1));
 		}
-		this.chatContainer.addChild(new Text(changelogLine, 1, 0));
 		this.chatContainer.addChild(new DynamicBorder((text) => theme.fg("warning", text)));
 		this.ui.requestRender();
 	}
@@ -4517,8 +4421,6 @@ export class InteractiveMode {
 					currentTheme: this.settingsManager.getTheme() || "dark",
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,
-					collapseChangelog: this.settingsManager.getCollapseChangelog(),
-					enableInstallTelemetry: this.settingsManager.getEnableInstallTelemetry(),
 					doubleEscapeAction: this.settingsManager.getDoubleEscapeAction(),
 					treeFilterMode: this.settingsManager.getTreeFilterMode(),
 					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
@@ -4599,12 +4501,6 @@ export class InteractiveMode {
 						}
 						// rebuildChatFromMessages disposes + clears (avoids orphaned tickers).
 						this.rebuildChatFromMessages();
-					},
-					onCollapseChangelogChange: (collapsed) => {
-						this.settingsManager.setCollapseChangelog(collapsed);
-					},
-					onEnableInstallTelemetryChange: (enabled) => {
-						this.settingsManager.setEnableInstallTelemetry(enabled);
 					},
 					onQuietStartupChange: (enabled) => {
 						this.settingsManager.setQuietStartup(enabled);
@@ -4777,22 +4673,23 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * `detectCli` shells out via a blocking spawnSync (10s timeout). Memoize the
-	 * result per CLI for the session so repeated /fusion invocations don't re-probe
-	 * PATH every time — the probe runs at most once per CLI per session.
+	 * `detectCliAsync` shells out via a non-blocking spawn (10s timeout) so a slow or
+	 * hung CLI never freezes the TUI frame. Memoize the result per CLI for the session
+	 * so repeated /fusion invocations don't re-probe PATH — the probe runs at most once
+	 * per CLI per session.
 	 */
-	private detectCliCached(cli: "codex" | "claude"): boolean {
+	private async detectCliCached(cli: "codex" | "claude"): Promise<boolean> {
 		const cached = this._cliDetectCache.get(cli);
 		if (cached !== undefined) return cached;
-		const found = detectCli(cli);
+		const found = await detectCliAsync(cli);
 		this._cliDetectCache.set(cli, found);
 		return found;
 	}
 
 	private async handleFusionCommand(): Promise<void> {
 		const clis: Array<"codex" | "claude"> = [];
-		if (this.detectCliCached("codex")) clis.push("codex");
-		if (this.detectCliCached("claude")) clis.push("claude");
+		if (await this.detectCliCached("codex")) clis.push("codex");
+		if (await this.detectCliCached("claude")) clis.push("claude");
 		if (clis.length === 0) {
 			this.showError("Fusion needs the codex and/or claude CLI on PATH.");
 			return;
@@ -5688,31 +5585,6 @@ export class InteractiveMode {
 		const text = formatRuntimeDiagnostics(getRuntimeDiagnostics());
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(text, 1, 0));
-		this.ui.requestRender();
-	}
-
-	// `/changelog` — render the most recent changelog entries on demand. Unlike the
-	// startup box (which only shows entries newer than the last-seen version), this
-	// always shows the latest entries so the command is useful at any time.
-	private handleChangelogCommand(): void {
-		const entries = parseChangelog(getChangelogPath());
-		if (entries.length === 0) {
-			this.showStatus("No changelog available.");
-			return;
-		}
-		const latest = entries
-			.slice()
-			.sort((a, b) => compareVersions(b, a))
-			.slice(0, 5)
-			.map((e) => e.content)
-			.join("\n\n");
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(mutedBorderRule());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(latest.trim(), 1, 0, this.getMarkdownThemeWithSettings()));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(mutedBorderRule());
 		this.ui.requestRender();
 	}
 

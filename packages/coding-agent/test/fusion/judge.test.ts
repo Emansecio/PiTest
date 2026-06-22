@@ -1,7 +1,9 @@
+import type { Message } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import {
 	buildJudgeContext,
 	buildVerifierPrompt,
+	buildWriterContext,
 	JUDGE_SCHEMA,
 	parseJudgeOutput,
 	VERIFICATION_SCHEMA,
@@ -62,5 +64,50 @@ describe("fusion judge", () => {
 	it("rejects malformed judge output", () => {
 		expect(parseJudgeOutput("garbage").ok).toBe(false);
 		expect(parseJudgeOutput('```json\n{"consensus":"notarray"}\n```').ok).toBe(false);
+	});
+
+	const EMPTY_ANALYSIS = {
+		consensus: [],
+		contradictions: [],
+		partialCoverage: [],
+		uniqueInsights: [],
+		blindSpots: [],
+		unsupportedClaims: [],
+	};
+
+	it("buildWriterContext is self-contained when no history is passed", () => {
+		const ctx = buildWriterContext(
+			"the task",
+			[{ member: { cli: "claude", model: "opus" }, ok: true, text: "panel answer" }],
+			EMPTY_ANALYSIS,
+		);
+		expect(ctx.messages).toHaveLength(1);
+		const only = ctx.messages[0];
+		expect(only.role).toBe("user");
+		const content = typeof only.content === "string" ? only.content : JSON.stringify(only.content);
+		expect(content).toContain("the task");
+		expect(content).toContain("panel answer");
+	});
+
+	it("buildWriterContext prepends prior conversation history before the task block", () => {
+		// Minimal user/assistant turns; the writer only spreads them, so full AssistantMessage
+		// fields (api/provider/usage/…) are irrelevant to this prepend-ordering check.
+		const history = [
+			{ role: "user", content: "earlier question", timestamp: 1 },
+			{ role: "assistant", content: "earlier answer", timestamp: 2 },
+		] as unknown as Message[];
+		const ctx = buildWriterContext(
+			"follow-up question",
+			[{ member: { cli: "claude", model: "opus" }, ok: true, text: "panel answer" }],
+			EMPTY_ANALYSIS,
+			undefined,
+			history,
+		);
+		expect(ctx.messages).toHaveLength(3);
+		expect(ctx.messages[0]).toMatchObject({ role: "user", content: "earlier question" });
+		expect(ctx.messages[1]).toMatchObject({ role: "assistant", content: "earlier answer" });
+		const last = ctx.messages[2];
+		const lastContent = typeof last.content === "string" ? last.content : JSON.stringify(last.content);
+		expect(lastContent).toContain("follow-up question");
 	});
 });

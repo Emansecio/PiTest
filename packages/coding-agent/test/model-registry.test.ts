@@ -25,6 +25,7 @@ describe("ModelRegistry", () => {
 			rmSync(tempDir, { recursive: true });
 		}
 		clearApiKeyCache();
+		delete process.env.PIT_CONFIG_COMMAND_TTL_MS;
 	});
 
 	/** Create minimal provider config  */
@@ -1235,7 +1236,7 @@ describe("ModelRegistry", () => {
 		});
 
 		describe("request-time resolution", () => {
-			test("command is executed on every provider lookup", async () => {
+			test("command is memoised across lookups within the TTL window", async () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
@@ -1250,11 +1251,12 @@ describe("ModelRegistry", () => {
 				await registry.getApiKeyForProvider("custom-provider");
 				await registry.getApiKeyForProvider("custom-provider");
 
+				// The short-lived memo collapses the repeated request-time spawns into one.
 				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
-				expect(count).toBe(3);
+				expect(count).toBe(1);
 			});
 
-			test("commands are re-executed across registry instances", async () => {
+			test("command memo is shared across registry instances within the TTL window", async () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
@@ -1270,8 +1272,9 @@ describe("ModelRegistry", () => {
 				const registry2 = ModelRegistry.create(authStorage, modelsJsonPath);
 				await registry2.getApiKeyForProvider("custom-provider");
 
+				// The memo lives in the process, not the registry, so a second instance reuses it.
 				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
-				expect(count).toBe(2);
+				expect(count).toBe(1);
 			});
 
 			test("different commands resolve independently", async () => {
@@ -1415,7 +1418,9 @@ describe("ModelRegistry", () => {
 				expect(count).toBe(0);
 			});
 
-			test("getApiKeyAndHeaders resolves authHeader on every request", async () => {
+			test("getApiKeyAndHeaders re-resolves authHeader each request when the memo is disabled", async () => {
+				// Rotating-token contract: TTL=0 opts out of the memo so each request is fresh.
+				process.env.PIT_CONFIG_COMMAND_TTL_MS = "0";
 				const tokenFile = join(tempDir, "token");
 				writeFileSync(tokenFile, "token-1");
 				const tokenPath = toShPath(tokenFile);
@@ -1445,6 +1450,41 @@ describe("ModelRegistry", () => {
 					ok: true,
 					apiKey: "token-2",
 					headers: { Authorization: "Bearer token-2" },
+				});
+			});
+
+			test("getApiKeyAndHeaders memoises authHeader within the TTL window", async () => {
+				const tokenFile = join(tempDir, "token");
+				writeFileSync(tokenFile, "token-1");
+				const tokenPath = toShPath(tokenFile);
+
+				writeRawModelsJson({
+					"custom-provider": {
+						...providerWithApiKey(`!sh -c 'cat "${tokenPath}"'`),
+						authHeader: true,
+					},
+				});
+
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+				const model = registry.find("custom-provider", "test-model");
+				expect(model).toBeDefined();
+
+				const auth1 = await registry.getApiKeyAndHeaders(model!);
+				expect(auth1).toEqual({
+					ok: true,
+					apiKey: "token-1",
+					headers: { Authorization: "Bearer token-1" },
+				});
+
+				writeFileSync(tokenFile, "token-2");
+
+				// Within the TTL window the resolved token is reused (the latency win): the
+				// file change is not observed until the memo expires or is disabled.
+				const auth2 = await registry.getApiKeyAndHeaders(model!);
+				expect(auth2).toEqual({
+					ok: true,
+					apiKey: "token-1",
+					headers: { Authorization: "Bearer token-1" },
 				});
 			});
 

@@ -285,6 +285,10 @@ export interface ContextUsage {
 	contextWindow: number;
 	/** Context usage as percentage of context window, or null if tokens is unknown. */
 	percent: number | null;
+	/** True when `tokens` is a STRUCTURAL estimate (right after compaction, before the next
+	 * LLM response confirms the exact size) rather than a provider-reported usage. The UI marks
+	 * it with a `~` so an estimate never reads as an authoritative figure. */
+	estimated?: boolean;
 }
 
 export interface CompactOptions {

@@ -1,4 +1,4 @@
-import type { Context } from "@pit/ai";
+import type { Context, Message } from "@pit/ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import type { JudgeAnalysis, PanelResult, VerificationReport } from "./types.ts";
@@ -17,6 +17,7 @@ export function buildWriterContext(
 	results: PanelResult[],
 	analysis: JudgeAnalysis,
 	verification?: VerificationReport,
+	history: Message[] = [],
 ): Context {
 	const ans = results
 		.map((r, i) => `### Member ${i + 1} (${r.member.cli}:${r.member.model})\n${r.ok ? r.text : "[failed]"}`)
@@ -29,7 +30,9 @@ export function buildWriterContext(
 	const content = `## Task\n${userPrompt}\n\n## Panel answers\n${ans}\n\n## Judge analysis\n${a}${verifySection}`;
 	return {
 		systemPrompt: WRITER_SYSTEM,
-		messages: [{ role: "user", content, timestamp: Date.now() }],
+		// Prepend prior conversation so a follow-up Fusion turn has memory; the synthetic
+		// user block below restates the current task + panel/judge/verify material.
+		messages: [...history, { role: "user", content, timestamp: Date.now() }],
 	};
 }
 

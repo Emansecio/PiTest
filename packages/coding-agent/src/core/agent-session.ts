@@ -54,6 +54,7 @@ import {
 	compact,
 	computeDynamicReserve,
 	estimateContextTokens,
+	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	proactivePruneFloor,
@@ -264,6 +265,16 @@ export type AgentSessionEvent =
 			type: "fusion_member_activity";
 			index: number;
 			kind: "thinking" | "writing" | "tool" | "tool_result";
+			tool?: string;
+			/** Snippet of the latest thinking/assistant text, so the strip can show WHAT the
+			 * advisor is thinking/writing (claude stream-json). Undefined for tool events. */
+			text?: string;
+	  }
+	| {
+			/** Live verify-stage activity: the read-only verifier subagent finished a turn.
+			 * Surfaces "turn N · <last tool>" so the verify phase isn't an opaque clock. */
+			type: "fusion_verify_activity";
+			turn: number;
 			tool?: string;
 	  }
 	| {
@@ -4214,6 +4225,27 @@ export class AgentSession {
 	}
 
 	/**
+	 * Inject the turn's USER message into the transcript the same way the normal solo
+	 * path does: render it (message_start), persist it as a SessionMessageEntry, and push
+	 * it into agent state. The Fusion branch returns from _promptOnce BEFORE agent.prompt()
+	 * runs, so without this the writer's assistant reply would land in history with no
+	 * preceding user message — a malformed transcript that breaks provider user↔assistant
+	 * alternation on the next turn (Anthropic rejects a history that starts with an
+	 * assistant message). message_end is emitted for symmetry (the TUI no-ops it for
+	 * role:"user"); persistence is done explicitly here, not via the agent-core message_end
+	 * handler (which never fires on the Fusion path). Mirrors _emitSyntheticAssistant.
+	 */
+	private _emitFusionUserMessage(text: string, images?: ImageContent[]): void {
+		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+		if (images && images.length > 0) content.push(...images);
+		const userMessage: AgentMessage = { role: "user", content, timestamp: Date.now() };
+		this.agent.state.messages.push(userMessage);
+		this.sessionManager.appendMessage(userMessage);
+		this._emit({ type: "message_start", message: userMessage });
+		this._emit({ type: "message_end", message: userMessage });
+	}
+
+	/**
 	 * Emit the structured post-process Fusion summary as a display-only custom message.
 	 * Carries `FusionSummaryData` as JSON (not a colorized string) so the presentation
 	 * layer renders it — the core layer stays free of theme/interactive imports. A render
@@ -4321,6 +4353,15 @@ export class AgentSession {
 		this.sessionManager.appendMessage(final);
 		this._lastAssistantMessage = final;
 		this._emit({ type: "message_end", message: final });
+		// Fusion bypasses _handlePostAgentRun, so run the same end-of-turn compaction check here
+		// (predictive background compaction allowed) — otherwise a pure-Fusion session never
+		// compacts until it overflows. Best-effort: a compaction hiccup must never break the
+		// writer's answer (errors surface via compaction_end).
+		try {
+			await this._checkCompaction(final, true, true);
+		} catch {
+			// non-fatal — the hard threshold check on the next turn is the fallback.
+		}
 		return this._assistantText(final);
 	}
 
@@ -4358,9 +4399,15 @@ export class AgentSession {
 					resultSchema: VERIFICATION_SCHEMA,
 					cwd: this._cwd,
 					timeoutMs: this.settingsManager.getFusionSettings().verifyTimeoutMs,
-					maxTurns: 12,
+					// Bounded so the verify pass can't dominate Fusion-turn latency. Pairs with
+					// the orchestrator's verify-always policy and the 60s verifyTimeoutMs default.
+					maxTurns: 6,
 					thinkingLevel: "medium",
 					signal: this._fusionAbort?.signal,
+					// Surface the verifier's per-turn progress (turn N + last tool) so the live
+					// strip shows real work instead of an opaque "verifying" clock.
+					onSubagentEvent: (info) =>
+						this._emit({ type: "fusion_verify_activity", turn: info.turn, tool: info.lastTool }),
 				},
 			);
 			return result.value as VerificationReport | undefined;
@@ -4378,10 +4425,16 @@ export class AgentSession {
 		const settings = this.settingsManager.getFusionSettings();
 		if (settings.panel.length < 2) {
 			this._emitSyntheticAssistant(
-				"Fusion panel not configured (need 2 models). Run /fusion. Falling back to a single-model turn.",
+				"Fusion is selected but the panel isn't configured (need 2 advisor models). " +
+					"Run /fusion to pick them — this turn ran as a normal single-model turn.",
 			);
 			return false;
 		}
+		// Drain any predictive background compaction from the previous turn before we read
+		// agent.state.messages for the panel/writer context — Fusion bypasses the solo pre-send
+		// path (_promptOnce) that normally awaits it, so without this a freshly-started
+		// background compaction could rewrite state mid-fan-out.
+		await this._awaitBackgroundCompaction();
 		const { apiKey, headers } = await this._getRequiredRequestAuth(model);
 		// Resolve each panel CLI's token from Pit's OWN credentials so members run
 		// under the same login as Pit (e.g. opus via the same Claude OAuth) — no
@@ -4474,7 +4527,7 @@ export class AgentSession {
 						signal: this._fusionAbort?.signal,
 						authToken: cliTokens.get(member.cli),
 						onProgress: (p) => {
-							this._emit({ type: "fusion_member_activity", index, kind: p.kind, tool: p.tool });
+							this._emit({ type: "fusion_member_activity", index, kind: p.kind, tool: p.tool, text: p.text });
 						},
 					});
 					const elapsedMs = Date.now() - started;
@@ -4549,6 +4602,11 @@ export class AgentSession {
 					? (userPrompt, results, analysis) => this._fusionVerify(userPrompt, results, analysis, model)
 					: undefined,
 				writer: async (userPrompt, results, analysis, verification) => {
+					// Persist the user prompt BEFORE the assistant reply so history stays
+					// [user, assistant]. The orchestrator calls writer only with >=1 survivor, so
+					// this never runs on the both-failed→solo fallback (which returns false and lets
+					// the solo path append the user message itself — no duplicate).
+					this._emitFusionUserMessage(userPrompt);
 					this._emit({ type: "fusion_stage", stage: "writer", synthId: model.id });
 					// A single-survivor turn skips the judge, so the analysis arrives all-empty;
 					// omit `judge` in that case and mark the panel as degraded to a solo synthesis.
@@ -4583,11 +4641,21 @@ export class AgentSession {
 					}
 					if (settings.showSynthesis) summary.synthesis = synthesisItems;
 					this._emitFusionSummary(summary);
-					return this._streamFusionWriter(buildWriterContext(userPrompt, results, analysis, verification), {
-						apiKey,
-						headers,
-						signal: this._fusionAbort?.signal,
-					});
+					// Prior conversation (user/assistant turns) up to — but not including — this
+					// turn's just-persisted user message, so a follow-up Fusion turn has memory.
+					// The synthetic task block already restates the current prompt; tool/custom
+					// entries are dropped so they don't confuse the writer.
+					const priorHistory = this.agent.state.messages
+						.filter((m): m is Message => m.role === "user" || m.role === "assistant")
+						.slice(0, -1);
+					return this._streamFusionWriter(
+						buildWriterContext(userPrompt, results, analysis, verification, priorHistory),
+						{
+							apiKey,
+							headers,
+							signal: this._fusionAbort?.signal,
+						},
+					);
 				},
 			});
 			if (!outcome.handled) {
@@ -6116,7 +6184,20 @@ export class AgentSession {
 			}
 
 			if (!hasPostCompactionUsage) {
-				return { tokens: null, contextWindow, percent: null };
+				// No provider-confirmed size yet for the freshly reduced context. Rather than
+				// showing "?", give an immediate STRUCTURAL estimate over the (already compacted)
+				// messages so the drop is visible at once — and bypass estimateContextTokens here,
+				// which would otherwise latch onto a kept message's stale pre-compaction usage and
+				// report the OLD (large) size. The next assistant response replaces this estimate
+				// with the exact provider figure (estimated:false).
+				let estimated = 0;
+				for (const message of this.messages) estimated += estimateTokens(message);
+				return {
+					tokens: estimated,
+					contextWindow,
+					percent: (estimated / contextWindow) * 100,
+					estimated: true,
+				};
 			}
 		}
 

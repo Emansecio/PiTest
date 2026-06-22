@@ -331,6 +331,17 @@ describe("shouldCompactSoft", () => {
 		expect(shouldCompactSoft(95_000, 100_000, settings)).toBe(false);
 	});
 
+	it("widens the predictive band on large windows via effectiveKeepRecentTokens", () => {
+		// 1M window: reserve = max(16384, 20000, 2.5%=25000) = 25000 → hard threshold 975k.
+		// The soft band scales to 10% retention (100k), NOT the raw 20k, so soft threshold = 875k.
+		const big: CompactionSettings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 };
+		expect(shouldCompactSoft(880_000, 1_000_000, big)).toBe(true); // 875k < 880k < 975k
+		expect(shouldCompactSoft(860_000, 1_000_000, big)).toBe(false); // below the scaled soft band
+		expect(shouldCompactSoft(976_000, 1_000_000, big)).toBe(false); // above hard → sync path owns it
+		// ≤200k windows are byte-identical (effectiveKeepRecentTokens returns the raw 20k).
+		expect(shouldCompactSoft(75_000, 100_000, big)).toBe(true);
+	});
+
 	it("returns false when disabled", () => {
 		expect(shouldCompactSoft(75_000, 100_000, { ...settings, enabled: false })).toBe(false);
 	});

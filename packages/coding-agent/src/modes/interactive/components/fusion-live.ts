@@ -41,6 +41,9 @@ interface MemberEntry {
 	toolCounts: Map<string, number>;
 	/** Total tool calls so far. */
 	toolCount: number;
+	/** Latest one-line snippet of what the advisor is thinking/writing (claude stream-json
+	 * text/thinking blocks) — the "WHAT are they thinking" signal, shown as a sub-line. */
+	thought: string;
 	/** Memoized join of `toolCounts` ("Read 2 · Bash 1"), rebuilt only when the
 	 * tally mutates (in recordActivity), NOT on every render frame. `null` = stale,
 	 * recompute lazily. */
@@ -88,6 +91,12 @@ function activitySummary(entry: MemberEntry): string {
 		return entry.toolSummaryCache;
 	}
 	return entry.action || "starting";
+}
+
+/** Collapse whitespace and cap a thinking/text snippet to one short line. The render pass
+ * truncates to the viewport width too; this just bounds what we store per entry. */
+function oneLine(text: string): string {
+	return text.replace(/\s+/g, " ").trim().slice(0, 200);
 }
 
 /** The trailing status fragment for a member row. Uses if/return (no nested ternary).
@@ -148,6 +157,12 @@ export class FusionLiveComponent implements Component {
 	// Captured when the strip enters the "verify" stage (0 = not yet), so the verify
 	// line counts up honestly from when the read-only fact-check began.
 	private verifyStartedAt = 0;
+	// Verify-stage live activity (read-only verifier subagent): the turn it just finished +
+	// a per-(last-tool) tally, so the verify line reads "turn N · read 2 · grep 1" instead of an
+	// opaque clock. A fresh strip is built per Fusion turn, so no mid-life reset is needed.
+	private verifyTurn = 0;
+	private verifyToolCounts = new Map<string, number>();
+	private verifyToolSummaryCache: string | null = null;
 	// Last spinner frame index + the elapsed-second snapshot we painted, so the
 	// tick callback can report "nothing visible changed" and let the shared
 	// ticker coalesce the frame away (mirrors Loader.refreshElapsed gating).
@@ -199,6 +214,7 @@ export class FusionLiveComponent implements Component {
 				action: "",
 				toolCounts: new Map(),
 				toolCount: 0,
+				thought: "",
 				toolSummaryCache: null,
 			});
 		}
@@ -208,7 +224,12 @@ export class FusionLiveComponent implements Component {
 	/** Fold a live activity event into the advisor's running row: bump the tool tally
 	 * (which/how many) and the current action so the panel shows real work, not just a
 	 * clock. No-op if the slot hasn't been registered yet. */
-	recordActivity(index: number, kind: "thinking" | "writing" | "tool" | "tool_result", tool?: string): void {
+	recordActivity(
+		index: number,
+		kind: "thinking" | "writing" | "tool" | "tool_result",
+		tool?: string,
+		text?: string,
+	): void {
 		const entry = this.members.get(index);
 		if (!entry) return;
 		// Any activity event pushes back the idle deadline shown in the row.
@@ -225,6 +246,24 @@ export class FusionLiveComponent implements Component {
 			entry.action = "thinking";
 		} else if (kind === "writing") {
 			entry.action = "writing";
+		}
+		// Capture WHAT the advisor is thinking/writing (claude streams the text) — keep the
+		// latest one-line snippet so the row can show a sub-line under the member.
+		if (text) {
+			const snippet = oneLine(text);
+			if (snippet) entry.thought = snippet;
+		}
+		this.ui.requestRender();
+	}
+
+	/** Fold one verify-stage progress event (the read-only verifier subagent finished a
+	 * turn) into the verify line's "turn N · <last-tool tally>" signal. No-op offstage:
+	 * the verify line only renders while the strip is in the verify stage. */
+	recordVerifyActivity(turn: number, tool?: string): void {
+		this.verifyTurn = turn;
+		if (tool) {
+			this.verifyToolCounts.set(tool, (this.verifyToolCounts.get(tool) ?? 0) + 1);
+			this.verifyToolSummaryCache = null;
 		}
 		this.ui.requestRender();
 	}
@@ -297,6 +336,19 @@ export class FusionLiveComponent implements Component {
 		return s + " ".repeat(Math.max(0, col - visibleWidth(s)));
 	}
 
+	/** Verify line's activity fragment: "turn N · read 2 · grep 1" (turn = authoritative step
+	 * count; the tally is by last-tool-per-turn). Empty until the first verifier turn lands. */
+	private verifyActivitySummary(): string {
+		if (this.verifyTurn <= 0) return "";
+		if (this.verifyToolCounts.size === 0) return `turn ${this.verifyTurn}`;
+		if (this.verifyToolSummaryCache === null) {
+			const parts: string[] = [];
+			for (const [name, n] of this.verifyToolCounts) parts.push(`${name} ${n}`);
+			this.verifyToolSummaryCache = parts.join(" · ");
+		}
+		return `turn ${this.verifyTurn} · ${this.verifyToolSummaryCache}`;
+	}
+
 	render(width: number): string[] {
 		const now = Date.now();
 		const spinner = this.spinnerFrame();
@@ -344,6 +396,11 @@ export class FusionLiveComponent implements Component {
 			const name = this.padVisible(theme.fg("muted", `${m.cli}:${m.model}`), nameCol);
 			const tail = statusTail(entry, secs, now);
 			lines.push(`  ${glyph} ${slot}  ${name}  ${tail}`);
+			// "WHAT are they thinking": a dim, truncated sub-line with the latest thought/text
+			// snippet, only while the advisor is actively running.
+			if (m.status === "running" && entry.thought) {
+				lines.push(`       ${theme.fg("dim", `↳ ${entry.thought}`)}`);
+			}
 		}
 
 		// Judge stage: the synthesizer reconciles the advisors. Name the synth so it
@@ -360,9 +417,11 @@ export class FusionLiveComponent implements Component {
 		// (read-only subagent). Same shape as the judge line so the phase reads clearly.
 		if (this.stage === "verify") {
 			const verifySecs = this.verifyStartedAt > 0 ? Math.max(0, Math.floor((now - this.verifyStartedAt) / 1000)) : 0;
+			const vAct = this.verifyActivitySummary();
+			const vActStr = vAct ? `  ${theme.fg("accent", vAct)}` : "";
 			lines.push("");
 			lines.push(
-				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId} · verifying claims against the code`)}  ${theme.fg("dim", `${verifySecs}s`)}`,
+				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId} · verifying claims against the code`)}${vActStr}  ${theme.fg("dim", `${verifySecs}s`)}`,
 			);
 		}
 

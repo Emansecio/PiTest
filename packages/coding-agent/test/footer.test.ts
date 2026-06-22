@@ -15,7 +15,7 @@ interface MakeFooterOptions {
 	/** Accrued cost to inject via a single assistant entry. */
 	cost?: number;
 	/** Simulated context usage (null = unknown / fresh session). */
-	contextUsage?: { tokens: number; percent: number; contextWindow: number } | null;
+	contextUsage?: { tokens: number; percent: number; contextWindow: number; estimated?: boolean } | null;
 	/** Providers visible to the registry (provider prefix shows when > 1). */
 	providerCount?: number;
 	/** Mark the model as a reasoning model with this thinking level. */
@@ -162,6 +162,15 @@ it("renders whole-percent + counts once the context has usage (no meter bar)", (
 	// precise percent next to it, so it is gone. No decimals in a gauge.
 	expect(lines[1]).toContain("CTX 23% · 47k/200k");
 	expect(lines[1]).not.toContain("▰");
+});
+
+it("marks a post-compaction structural estimate with a ~ (never reads as an exact figure)", () => {
+	const footer = makeFooter({
+		usingOAuth: true,
+		contextUsage: { tokens: 12000, percent: 6, contextWindow: 200000, estimated: true },
+	});
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines[1]).toContain("CTX ~6% · ~12k/200k");
 });
 
 it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", () => {

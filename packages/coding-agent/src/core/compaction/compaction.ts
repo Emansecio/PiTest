@@ -302,7 +302,11 @@ export function shouldCompactSoft(contextTokens: number, contextWindow: number, 
 	const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
 	const hardThreshold = contextWindow - reserve;
 	if (contextTokens > hardThreshold) return false; // hard path owns this
-	const softThreshold = hardThreshold - settings.keepRecentTokens;
+	// Scale the predictive band with the window (same 10%-above-200k rule as retention) so a
+	// large window gets a real head-start instead of a flat 20k sliver below the hard threshold
+	// that a single big turn would jump straight past into the synchronous path. Windows ≤200k
+	// are byte-identical (effectiveKeepRecentTokens returns the raw keepRecentTokens).
+	const softThreshold = hardThreshold - effectiveKeepRecentTokens(settings.keepRecentTokens, contextWindow);
 	return softThreshold > 0 && contextTokens > softThreshold;
 }
 

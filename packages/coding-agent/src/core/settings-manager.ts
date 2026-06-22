@@ -1772,7 +1772,7 @@ export class SettingsManager {
 		const stagger =
 			typeof raw?.staggerSameCliMs === "number" && raw.staggerSameCliMs >= 0 ? raw.staggerSameCliMs : 400;
 		const verifyTimeoutMs =
-			typeof raw?.verifyTimeoutMs === "number" && raw.verifyTimeoutMs > 0 ? raw.verifyTimeoutMs : 120_000;
+			typeof raw?.verifyTimeoutMs === "number" && raw.verifyTimeoutMs > 0 ? raw.verifyTimeoutMs : 60_000;
 		return {
 			panel,
 			timeoutMs,

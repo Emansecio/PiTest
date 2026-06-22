@@ -8,6 +8,7 @@ import {
 	buildMemberEnv,
 	type ClaudeStreamState,
 	type CodexStreamState,
+	detectCliAsync,
 	inferCli,
 	type MemberProgress,
 	parseClaudeError,
@@ -175,6 +176,27 @@ describe("fusion cli-runner pure helpers", () => {
 		expect(state.error).toBe("The 'gpt-5-codex' model is not supported.");
 	});
 
+	it("forwards the thinking/writing text snippet from claude stream-json", () => {
+		const state: ClaudeStreamState = { result: "", error: "", sawResult: false };
+		const seen: MemberProgress[] = [];
+		const on = (p: MemberProgress) => seen.push(p);
+		applyClaudeStreamLine(
+			JSON.stringify({
+				type: "assistant",
+				message: { content: [{ type: "thinking", thinking: "weighing the cache TTL" }] },
+			}),
+			state,
+			on,
+		);
+		applyClaudeStreamLine(
+			JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Here is my analysis" }] } }),
+			state,
+			on,
+		);
+		expect(seen).toContainEqual({ kind: "thinking", text: "weighing the cache TTL" });
+		expect(seen).toContainEqual({ kind: "writing", text: "Here is my analysis" });
+	});
+
 	it("injects Pit's anthropic OAuth token as CLAUDE_CODE_OAUTH_TOKEN for claude members", () => {
 		const base = { PATH: "/x", ANTHROPIC_API_KEY: "stray" };
 		const env = buildMemberEnv("claude", "sk-ant-oat01-abc", base);
@@ -275,5 +297,29 @@ describe("runPanelMember (injected spawn)", () => {
 		expect(r.ok).toBe(false);
 		expect(r.error).toBe("aborted");
 		expect(spawnCalls).toBe(0);
+	});
+});
+
+describe("detectCliAsync (non-blocking probe)", () => {
+	it("resolves true when --version exits 0", async () => {
+		const spawnFn = (() => fakeChild("codex 1.0", 0)) as never;
+		await expect(detectCliAsync("codex", spawnFn)).resolves.toBe(true);
+	});
+
+	it("resolves false when --version exits non-zero", async () => {
+		const spawnFn = (() => fakeChild("", 1)) as never;
+		await expect(detectCliAsync("claude", spawnFn)).resolves.toBe(false);
+	});
+
+	it("resolves false on a spawn error (ENOENT)", async () => {
+		const spawnFn = (() => {
+			const child: any = new EventEmitter();
+			child.pid = 1;
+			child.stdout = new EventEmitter();
+			child.stderr = new EventEmitter();
+			queueMicrotask(() => child.emit("error", Object.assign(new Error("not found"), { code: "ENOENT" })));
+			return child;
+		}) as never;
+		await expect(detectCliAsync("claude", spawnFn)).resolves.toBe(false);
 	});
 });

@@ -33,7 +33,7 @@ describe("fusion settings", () => {
 		expect(f.lean).toBe(true);
 		expect(f.brief).toBe(true);
 		expect(f.verify).toBe(true);
-		expect(f.verifyTimeoutMs).toBe(120_000);
+		expect(f.verifyTimeoutMs).toBe(60_000);
 	});
 
 	it("respects a custom idleTimeoutMs and verify: false", () => {

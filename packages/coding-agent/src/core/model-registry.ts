@@ -29,9 +29,9 @@ import type { AuthStatus, AuthStorage } from "./auth-storage.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
 import {
 	clearConfigValueCache,
-	resolveConfigValueOrThrow,
-	resolveConfigValueUncached,
-	resolveHeadersOrThrow,
+	resolveConfigValueOrThrowAsync,
+	resolveConfigValueUncachedAsync,
+	resolveHeadersOrThrowAsync,
 } from "./resolve-config-value.ts";
 
 // Schema for OpenRouter routing preferences
@@ -771,11 +771,14 @@ export class ModelRegistry {
 			const apiKey =
 				apiKeyFromAuthStorage ??
 				(providerConfig?.apiKey
-					? resolveConfigValueOrThrow(providerConfig.apiKey, `API key for provider "${model.provider}"`)
+					? await resolveConfigValueOrThrowAsync(providerConfig.apiKey, `API key for provider "${model.provider}"`)
 					: undefined);
 
-			const providerHeaders = resolveHeadersOrThrow(providerConfig?.headers, `provider "${model.provider}"`);
-			const modelHeaders = resolveHeadersOrThrow(
+			const providerHeaders = await resolveHeadersOrThrowAsync(
+				providerConfig?.headers,
+				`provider "${model.provider}"`,
+			);
+			const modelHeaders = await resolveHeadersOrThrowAsync(
 				this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)),
 				`model "${model.provider}/${model.id}"`,
 			);
@@ -859,7 +862,7 @@ export class ModelRegistry {
 
 		this.ensureLoaded();
 		const providerApiKey = this.providerRequestConfigs.get(provider)?.apiKey;
-		return providerApiKey ? resolveConfigValueUncached(providerApiKey) : undefined;
+		return providerApiKey ? await resolveConfigValueUncachedAsync(providerApiKey) : undefined;
 	}
 
 	/**

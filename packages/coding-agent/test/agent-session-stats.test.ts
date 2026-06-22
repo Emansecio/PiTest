@@ -96,7 +96,7 @@ describe("AgentSession.getSessionStats", () => {
 		}
 	});
 
-	it("reports unknown current context usage immediately after compaction", () => {
+	it("reports an immediate structural estimate after compaction (not stale, not null)", () => {
 		const { session, sessionManager } = createSession();
 
 		try {
@@ -111,8 +111,12 @@ describe("AgentSession.getSessionStats", () => {
 			const stats = session.getSessionStats();
 			expect(stats.tokens.input).toBe(195_000);
 			expect(stats.contextUsage).toBeDefined();
-			expect(stats.contextUsage?.tokens).toBeNull();
-			expect(stats.contextUsage?.percent).toBeNull();
+			// No provider usage exists after the compaction boundary, so the size is a STRUCTURAL
+			// estimate over the reduced messages — flagged, small, and nowhere near the stale 195k.
+			expect(stats.contextUsage?.estimated).toBe(true);
+			expect(stats.contextUsage?.tokens ?? 0).toBeGreaterThan(0);
+			expect(stats.contextUsage?.tokens ?? Number.POSITIVE_INFINITY).toBeLessThan(50_000);
+			expect(stats.contextUsage?.percent ?? 0).toBeGreaterThan(0);
 		} finally {
 			session.dispose();
 		}

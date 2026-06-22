@@ -146,6 +146,10 @@ export interface MemberProgress {
 	kind: "thinking" | "writing" | "tool" | "tool_result";
 	/** Tool name when kind === "tool" (e.g. "Read", "Bash", "Grep", "Glob"). */
 	tool?: string;
+	/** A snippet of the latest thinking/assistant text (claude stream-json), so the panel
+	 * can surface WHAT the advisor is thinking/writing — not just that it is. Undefined for
+	 * tool events and for CLIs that don't stream the text (codex reasoning text). */
+	text?: string;
 }
 
 /** Accumulated terminal state from a claude stream-json run (the final text, or the
@@ -160,7 +164,7 @@ type ClaudeStreamEvent = {
 	type?: string;
 	is_error?: boolean;
 	result?: unknown;
-	message?: { content?: Array<{ type?: string; name?: unknown }> };
+	message?: { content?: Array<{ type?: string; name?: unknown; text?: unknown; thinking?: unknown }> };
 };
 
 /**
@@ -191,8 +195,10 @@ export function applyClaudeStreamLine(
 	if (o.type === "assistant" && Array.isArray(o.message?.content)) {
 		for (const c of o.message.content) {
 			if (c?.type === "tool_use") onProgress?.({ kind: "tool", tool: String(c.name ?? "tool") });
-			else if (c?.type === "text") onProgress?.({ kind: "writing" });
-			else if (c?.type === "thinking") onProgress?.({ kind: "thinking" });
+			else if (c?.type === "text")
+				onProgress?.({ kind: "writing", text: typeof c.text === "string" ? c.text : undefined });
+			else if (c?.type === "thinking")
+				onProgress?.({ kind: "thinking", text: typeof c.thinking === "string" ? c.thinking : undefined });
 		}
 		return;
 	}
@@ -278,6 +284,39 @@ export function detectCli(cli: FusionCli, spawnSyncFn = nodeSpawnSync): boolean 
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * Async, non-blocking twin of detectCli: spawn `<cli> --version`, resolve true on exit 0,
+ * false on non-zero exit / spawn error / 10s timeout. The sync detectCli blocks the event
+ * loop (hence the whole TUI) for up to 10s per CLI on a slow or hung binary; the first
+ * /fusion probes both, so use this from the UI to keep the frame responsive.
+ */
+export function detectCliAsync(cli: FusionCli, spawnFn = nodeSpawn): Promise<boolean> {
+	return new Promise<boolean>((resolve) => {
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const done = (ok: boolean) => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			resolve(ok);
+		};
+		let child: ChildProcess;
+		try {
+			child = spawnFn(cli, ["--version"], { shell: IS_WIN, stdio: "ignore", windowsHide: true });
+		} catch {
+			resolve(false);
+			return;
+		}
+		timer = setTimeout(() => {
+			killTree(child);
+			done(false);
+		}, 10_000);
+		timer.unref?.();
+		child.on("error", () => done(false));
+		child.on("close", (code) => done(code === 0));
+	});
 }
 
 /** Kill a (possibly shell-wrapped) child and its descendants. On win32 the shell

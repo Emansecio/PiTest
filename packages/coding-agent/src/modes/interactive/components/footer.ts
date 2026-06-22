@@ -333,8 +333,11 @@ export class FooterComponent implements Component {
 			ctxText = `${ctxLabel} ${theme.fg("dim", formatTokens(contextWindow))}`;
 		} else {
 			const percentLabel = ctxColorize(formatContextPercent(contextPercentValue));
-			const counts = `${theme.fg("muted", formatTokens(usedTokens))}${theme.fg("dim", `/${formatTokens(contextWindow)}`)}`;
-			ctxText = `${ctxLabel} ${percentLabel} ${theme.fg("dim", "·")} ${counts}`;
+			// A `~` marks a structural ESTIMATE (right after compaction, before the next response
+			// confirms the exact size) so it never reads as an authoritative figure.
+			const est = contextUsage?.estimated ? "~" : "";
+			const counts = `${theme.fg("muted", `${est}${formatTokens(usedTokens)}`)}${theme.fg("dim", `/${formatTokens(contextWindow)}`)}`;
+			ctxText = `${ctxLabel} ${est ? theme.fg("dim", "~") : ""}${percentLabel} ${theme.fg("dim", "·")} ${counts}`;
 		}
 
 		// Group A — usage/cost: `↑in ↓out $cost` kept together on the right.

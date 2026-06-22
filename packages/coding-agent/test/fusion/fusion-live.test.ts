@@ -88,6 +88,46 @@ describe("FusionLiveComponent", () => {
 		c.dispose();
 	});
 
+	it("shows a sub-line with WHAT the advisor is thinking/writing", () => {
+		const c = new FusionLiveComponent(fakeUi());
+		c.setStage("panel");
+		c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "running", elapsedMs: 0 });
+		c.recordActivity(0, "thinking", undefined, "Checking how auth tokens are refreshed in auth-storage");
+		const lines = c.render(200).map(stripAnsi);
+		expect(lines.some((l) => l.includes("↳") && l.includes("Checking how auth tokens are refreshed"))).toBe(true);
+		c.dispose();
+	});
+
+	it("drops the thought sub-line once the advisor is done", () => {
+		const c = new FusionLiveComponent(fakeUi());
+		c.setStage("panel");
+		c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "running", elapsedMs: 0 });
+		c.recordActivity(0, "writing", undefined, "drafting the report");
+		c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "done", elapsedMs: 1000, chars: 100 });
+		const lines = c.render(200).map(stripAnsi);
+		expect(lines.some((l) => l.includes("↳"))).toBe(false);
+		c.dispose();
+	});
+
+	it("shows verify-stage turn + tool tally instead of an opaque clock", () => {
+		const c = new FusionLiveComponent(fakeUi());
+		c.setSynth("opus");
+		c.setStage("verify");
+		c.recordVerifyActivity(1, "read");
+		c.recordVerifyActivity(2, "grep");
+		c.recordVerifyActivity(3, "read");
+		// The detail line (not the header) carries the activity — match it by "against the code".
+		const verifyLine =
+			c
+				.render(200)
+				.map(stripAnsi)
+				.find((l) => l.includes("against the code")) ?? "";
+		expect(verifyLine).toContain("turn 3");
+		expect(verifyLine).toContain("read 2");
+		expect(verifyLine).toContain("grep 1");
+		c.dispose();
+	});
+
 	it("names the synth as the principal in the panel header (roles are explicit)", () => {
 		const c = new FusionLiveComponent(fakeUi());
 		c.setSynth("claude-opus-4-8");
