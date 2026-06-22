@@ -3147,10 +3147,17 @@ export class AgentSession {
 			}
 
 			// Code check: run the project's check and re-inject failures to fix.
-			const command = this._resolveCheckCommand(settings.command);
+			let command = this._resolveCheckCommand(settings.command);
 			if (!command) return;
 			let fixes = 0;
 			for (let attempt = 1; ; attempt++) {
+				// Re-resolve on each retry so the syntax-fallback tier picks up files the
+				// model edited WHILE fixing: that tier embeds the touched-file list, so a
+				// command frozen at gate entry would skip newly-touched files and pass a
+				// turn that still has a syntax error. The script/tsc tiers are
+				// touched-file independent and re-resolve to the same string; keep the
+				// last good command if a retry resolves to null.
+				if (attempt > 1) command = this._resolveCheckCommand(settings.command) ?? command;
 				this._emit({ type: "verification", phase: "running", command, attempt, maxAttempts: settings.maxAttempts });
 				const result = await runCheckCommand(command, this._cwd, {
 					signal: abort.signal,

@@ -131,6 +131,44 @@ describe("verification module", () => {
 			if (cmd !== null) expect(cmd).toContain("-m py_compile a.py");
 		});
 
+		it("emits per-language syntax checks only when the interpreter resolves on PATH", async () => {
+			// Each is environment-tolerant: null when the toolchain is absent (the
+			// language is skipped, fail-open), else the documented invocation.
+			await writeFile(join(dir, "a.rb"), "x = 1\n");
+			const rb = detectSyntaxFallbackCommand(dir, [join(dir, "a.rb")]);
+			if (rb !== null) expect(rb).toContain("-c a.rb");
+
+			await writeFile(join(dir, "a.php"), "<?php $x = 1;\n");
+			const php = detectSyntaxFallbackCommand(dir, [join(dir, "a.php")]);
+			if (php !== null) expect(php).toContain("-l a.php");
+
+			await writeFile(join(dir, "a.go"), "package main\n");
+			const go = detectSyntaxFallbackCommand(dir, [join(dir, "a.go")]);
+			if (go !== null) expect(go).toContain("-e a.go");
+
+			await writeFile(join(dir, "a.sh"), "echo hi\n");
+			const sh = detectSyntaxFallbackCommand(dir, [join(dir, "a.sh")]);
+			if (sh !== null) expect(sh).toContain("-n a.sh");
+		});
+
+		it("returns null for an extension no checker covers", async () => {
+			await writeFile(join(dir, "a.txt"), "hello\n");
+			await writeFile(join(dir, "a.rs"), "fn main() {}\n");
+			expect(detectSyntaxFallbackCommand(dir, [join(dir, "a.txt"), join(dir, "a.rs")])).toBeNull();
+		});
+
+		it("keeps JS first and chains multiple languages in deterministic table order", async () => {
+			await writeFile(join(dir, "a.js"), "const x = 1;\n");
+			await writeFile(join(dir, "b.py"), "x = 1\n");
+			const cmd = detectSyntaxFallbackCommand(dir, [join(dir, "b.py"), join(dir, "a.js")]);
+			expect(cmd).not.toBeNull();
+			// JS always precedes Python regardless of input order (table order).
+			expect(cmd).toContain("node --check a.js");
+			if ((cmd as string).includes("py_compile")) {
+				expect((cmd as string).indexOf("node --check a.js")).toBeLessThan((cmd as string).indexOf("py_compile"));
+			}
+		});
+
 		it("produces a command that actually passes for valid JS and fails for broken JS", async () => {
 			await writeFile(join(dir, "good.js"), "const x = 1;\nconsole.log(x);\n");
 			const okCmd = detectSyntaxFallbackCommand(dir, [join(dir, "good.js")]);

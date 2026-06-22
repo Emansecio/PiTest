@@ -139,6 +139,51 @@ function toSafeRelativePath(file: string, cwd: string): string | null {
 }
 
 /**
+ * One syntax-only checker: the extensions it covers, the interpreter(s) to
+ * resolve on PATH (null = always present, i.e. node), whether one invocation can
+ * take many files (`batch`), and how to build the shell fragment. Every command
+ * is PARSE-ONLY — no build, no execution, no network — so the gate stays a pure
+ * syntax signal. A language whose interpreter does not resolve on PATH is
+ * silently skipped: a "command not found" would be misread as a syntax failure
+ * and loop the model on.
+ */
+interface SyntaxCheckLang {
+	readonly exts: readonly string[];
+	readonly interpreters: readonly string[] | null;
+	readonly batch: boolean;
+	readonly command: (exe: string, files: readonly string[]) => string;
+}
+
+const SYNTAX_CHECK_LANGS: readonly SyntaxCheckLang[] = [
+	// node is always present (the agent runs on it). `node --check` validates ONE
+	// file per invocation, so chain them. NOT applied to .ts/.tsx/.jsx — node
+	// --check rejects type/JSX syntax and would false-fail valid sources; the tsc
+	// fallback and the erasable-syntax guard already cover TypeScript.
+	{
+		exts: [".js", ".mjs", ".cjs"],
+		interpreters: null,
+		batch: false,
+		command: (_exe, files) => `node --check ${files[0]}`,
+	},
+	// CPython's py_compile validates MANY files in one call.
+	{
+		exts: [".py"],
+		interpreters: ["python3", "python"],
+		batch: true,
+		command: (exe, files) => `${exe} -m py_compile ${files.join(" ")}`,
+	},
+	// `ruby -c` checks syntax without executing — one file per invocation.
+	{ exts: [".rb"], interpreters: ["ruby"], batch: false, command: (exe, files) => `${exe} -c ${files[0]}` },
+	// `php -l` (lint) — one file per invocation.
+	{ exts: [".php"], interpreters: ["php"], batch: false, command: (exe, files) => `${exe} -l ${files[0]}` },
+	// `gofmt -e` parses and reports syntax errors (non-zero exit); a mere
+	// formatting difference is NOT an error, so this stays syntax-only.
+	{ exts: [".go"], interpreters: ["gofmt"], batch: false, command: (exe, files) => `${exe} -e ${files[0]}` },
+	// `bash -n` parses a script without executing it.
+	{ exts: [".sh", ".bash"], interpreters: ["bash"], batch: false, command: (exe, files) => `${exe} -n ${files[0]}` },
+];
+
+/**
  * Build a syntax-only check command for the turn's touched files, or null when
  * nothing is safely checkable. Used as the final fallback when detectCheckCommand
  * returns null. See the section comment above for the invariants.
@@ -146,35 +191,42 @@ function toSafeRelativePath(file: string, cwd: string): string | null {
 export function detectSyntaxFallbackCommand(cwd: string, touchedFiles: readonly string[]): string | null {
 	if (!Array.isArray(touchedFiles) || touchedFiles.length === 0) return null;
 
-	const jsFiles: string[] = [];
-	const pyFiles: string[] = [];
+	// Bucket every safely-relativizable touched file under the checker for its
+	// extension (skipping paths that are missing / outside cwd / shell-unsafe).
+	const filesByLang = new Map<SyntaxCheckLang, string[]>();
 	for (const file of touchedFiles) {
 		const rel = toSafeRelativePath(file, cwd);
 		if (rel === null) continue;
 		const ext = extname(rel).toLowerCase();
-		if (ext === ".js" || ext === ".mjs" || ext === ".cjs") jsFiles.push(rel);
-		else if (ext === ".py") pyFiles.push(rel);
+		const lang = SYNTAX_CHECK_LANGS.find((candidate) => candidate.exts.includes(ext));
+		if (lang === undefined) continue;
+		const list = filesByLang.get(lang);
+		if (list) list.push(rel);
+		else filesByLang.set(lang, [rel]);
 	}
+	if (filesByLang.size === 0) return null;
 
 	const parts: string[] = [];
 	let budget = MAX_SYNTAX_FALLBACK_FILES;
-
-	// JavaScript: node is always present (the agent runs on it). `node --check`
-	// validates ONE file per invocation, so chain them. NOT applied to .ts — node
-	// --check rejects type syntax and would false-fail valid TS; the tsc fallback
-	// and the erasable-syntax guard already cover TypeScript.
-	for (const file of jsFiles) {
+	// Deterministic table order so the emitted command is stable (JS, then py, …).
+	for (const lang of SYNTAX_CHECK_LANGS) {
 		if (budget <= 0) break;
-		parts.push(`node --check ${file}`);
-		budget--;
-	}
-
-	// Python: py_compile validates many files in one call. Only when an interpreter
-	// resolves on PATH (else the command would be "command not found", which the
-	// gate would misread as a syntax failure and loop the model on).
-	if (pyFiles.length > 0 && budget > 0) {
-		const python = resolveExecutableOnPath(["python3", "python"]);
-		if (python) parts.push(`${python} -m py_compile ${pyFiles.slice(0, budget).join(" ")}`);
+		const files = filesByLang.get(lang);
+		if (files === undefined || files.length === 0) continue;
+		// Resolve the interpreter ONCE; skip the whole language when it is absent.
+		let exe = "";
+		if (lang.interpreters !== null) {
+			const resolved = resolveExecutableOnPath(lang.interpreters);
+			if (resolved === null) continue;
+			exe = resolved;
+		}
+		const capped = files.slice(0, budget);
+		if (lang.batch) {
+			parts.push(lang.command(exe, capped));
+		} else {
+			for (const file of capped) parts.push(lang.command(exe, [file]));
+		}
+		budget -= capped.length;
 	}
 
 	if (parts.length === 0) return null;
