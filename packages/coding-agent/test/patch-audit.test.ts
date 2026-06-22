@@ -62,6 +62,9 @@ describe("auditPatchResult", () => {
 			expect(decision.audit.risk).toBe("medium");
 			expect(decision.audit.changedLines).toBe(50);
 			expect(decision.message).toContain("Patch audit: medium-risk");
+			expect(decision.message).toContain("self-review this diff:");
+			// Medium-risk gets the shorter 3-item checklist.
+			expect(decision.message.match(/- \[ \] /g)).toHaveLength(3);
 		}
 	});
 
@@ -77,7 +80,12 @@ describe("auditPatchResult", () => {
 		if (decision.action === "append") {
 			expect(decision.audit.risk).toBe("high");
 			expect(decision.audit.changedLines).toBe(180);
-			expect(decision.message).toContain("run the relevant verification");
+			expect(decision.message).toContain("Patch audit: high-risk");
+			expect(decision.message).toContain("self-review this diff:");
+			expect(decision.message).toContain("- [ ] ");
+			// High-risk gets the extended checklist (5 items), medium gets 3.
+			expect(decision.message.match(/- \[ \] /g)).toHaveLength(5);
+			expect(decision.message).toContain("Run the relevant verification");
 		}
 	});
 

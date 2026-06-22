@@ -183,11 +183,30 @@ export function auditPatchResult(input: PatchAuditInput, options?: PatchAuditOpt
 	};
 }
 
+/**
+ * Concrete self-review checklists, scaled by risk. A specific checklist forces a
+ * model to walk items it would not generate on its own (the generic one-liner it
+ * skims past); kept short (3 / 5 items) so it never drowns the signal in context.
+ * Both are model-agnostic — the item set depends on patch shape, not model tier.
+ */
+const MEDIUM_RISK_CHECKLIST: readonly string[] = [
+	"Every changed line traces to the request — no incidental refactor, reformat, or rename.",
+	"No leftovers: dead code, unused imports, debug logging, or stray TODOs.",
+	"Re-read the touched area and run the relevant check before reporting done.",
+];
+
+const HIGH_RISK_CHECKLIST: readonly string[] = [
+	"Every changed line traces to the request — no incidental refactor, reformat, or rename.",
+	"No leftovers: dead code, unused imports, debug logging, or stray TODOs.",
+	"Edge cases covered — empty, null, and error paths, not just the happy path.",
+	"Public signatures and contracts unchanged, or every call site updated.",
+	"Run the relevant verification (check, test, or LSP) before reporting done; never report done while it is red.",
+];
+
 export function formatPatchAuditMessage(audit: PatchAuditResult): string {
 	const location = audit.path === undefined ? "this change" : audit.path;
-	const action =
-		audit.risk === "high"
-			? "Do a focused diff self-review and run the relevant verification before declaring the task done."
-			: "Re-read the touched area or run the relevant check before declaring the task done.";
-	return `Patch audit: ${audit.risk}-risk change in ${location} (${audit.changedLines} changed lines: +${audit.addedLines}/-${audit.removedLines}). ${action}`;
+	const header = `Patch audit: ${audit.risk}-risk change in ${location} (${audit.changedLines} changed lines: +${audit.addedLines}/-${audit.removedLines}).`;
+	const items = audit.risk === "high" ? HIGH_RISK_CHECKLIST : MEDIUM_RISK_CHECKLIST;
+	const checklist = items.map((item) => `- [ ] ${item}`).join("\n");
+	return `${header} Before declaring the task done, self-review this diff:\n${checklist}`;
 }
