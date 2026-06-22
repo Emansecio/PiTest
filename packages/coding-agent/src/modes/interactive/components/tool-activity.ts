@@ -142,6 +142,7 @@ const TOOL_GLYPH: Record<string, string> = {
 	search_tool_bm25: "⌕",
 	web_search: "⌕",
 	read: "▸",
+	todo: "≡",
 	task: "◆",
 	subagent: "◆",
 	preview: "◑",

@@ -52,7 +52,6 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files |
 | `/hotkeys` | Show all keyboard shortcuts |
-| `/changelog` | Display version history |
 | `/quit` | Quit pit |
 
 ## Message Queue
@@ -264,9 +263,8 @@ pit --tools read,grep,find,ls -p "Review the code"
 | `PIT_CODING_AGENT_DIR` | Override config directory; default is `~/.pit/agent` |
 | `PIT_CODING_AGENT_SESSION_DIR` | Override session storage directory; overridden by `--session-dir` |
 | `PIT_PACKAGE_DIR` | Override package directory, useful for Nix/Guix store paths |
-| `PIT_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
+| `PIT_OFFLINE` | Disable startup network operations, including update checks and package update checks |
 | `PIT_SKIP_VERSION_CHECK` | Skip the Pit version update check at startup. This prevents the `pit.dev` latest-version request |
-| `PIT_TELEMETRY` | Override install/update telemetry: `1`/`true`/`yes` or `0`/`false`/`no`. This does not disable update checks |
 | `PIT_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
 | `PIT_DEFER_MCP` | `1`/`true`/`yes` forces every MCP server's tools into the tool-discovery index (same as `mcp.defer: "always"`) |
 | `PIT_READ_DEDUPE` | Per-session de-dup of identical repeat reads is on by default; set to `0` to disable |

@@ -50,7 +50,7 @@ describe("assistant message streaming smoothing", () => {
 		const comp = build(tui, true);
 
 		comp.updateContent(textMsg(`START ${"x".repeat(50)} END`));
-		// First frame: nothing revealed yet, ticker subscribed.
+		// First delta: an initial prefix is visible, with the ticker still subscribed.
 		expect(rendered(comp)).not.toContain("END");
 		expect(tui.animating).toBe(true);
 
@@ -60,6 +60,49 @@ describe("assistant message streaming smoothing", () => {
 
 		expect(rendered(comp)).toContain("END");
 		expect(tui.animating).toBe(false); // unsubscribed once caught up — no idle frames
+	});
+
+	it("shows an initial prefix immediately instead of attaching a blank streaming block", () => {
+		const tui = new ControllableTui();
+		const comp = build(tui, true);
+
+		comp.updateContent(textMsg(`START ${"x".repeat(80)} END`));
+
+		const first = rendered(comp);
+		expect(first.length).toBeGreaterThan(0);
+		expect(first).not.toContain("END");
+		expect(tui.animating).toBe(true);
+	});
+
+	it("catches up proportionally after a delayed animation tick", () => {
+		const tui = new ControllableTui();
+		const comp = build(tui, true);
+
+		comp.updateContent(textMsg(`START ${"x".repeat(500)} END`));
+		tui.tick(16);
+		expect(rendered(comp)).not.toContain("END");
+
+		tui.tick(500);
+
+		expect(rendered(comp)).toContain("END");
+		expect(tui.animating).toBe(false);
+	});
+
+	it("does not retract visible text when another delta arrives after catching up", () => {
+		const tui = new ControllableTui();
+		const comp = build(tui, true);
+		const firstText = `START ${"x".repeat(70)}`;
+
+		comp.updateContent(textMsg(firstText));
+		let guard = 0;
+		while (tui.animating && guard++ < 1000) tui.tick(guard * 16);
+		expect(rendered(comp)).toContain(firstText);
+
+		comp.updateContent(textMsg(`${firstText} ${"y".repeat(120)} END`));
+
+		expect(rendered(comp)).toContain(firstText);
+		expect(rendered(comp)).not.toContain("END");
+		expect(tui.animating).toBe(true);
 	});
 
 	it("flushes to full text the moment the message settles (stopReason set)", () => {

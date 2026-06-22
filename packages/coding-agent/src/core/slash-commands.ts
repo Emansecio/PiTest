@@ -34,7 +34,6 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "help", description: "List available slash commands" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
-	{ name: "changelog", description: "Show the latest changelog entries" },
 	{ name: "diagnostics", description: "Show runtime diagnostics", hidden: true },
 	{ name: "hindsight", description: "Manage hindsight bank: list | <subcommand>", hidden: true },
 	{ name: "debug", description: "Dump current render state to the debug log", hidden: true },

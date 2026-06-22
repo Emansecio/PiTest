@@ -29,7 +29,6 @@ const DISPATCHED_COMMANDS = [
 	"session",
 	"cache-status",
 	"diagnostics",
-	"changelog",
 	"help",
 	"hotkeys",
 	"login",
@@ -49,7 +48,7 @@ describe("slash command registry", () => {
 	});
 
 	test("previously-orphan commands are now registered", () => {
-		for (const name of ["hindsight", "diagnostics", "changelog", "debug"]) {
+		for (const name of ["hindsight", "diagnostics", "debug"]) {
 			expect(builtinNames.has(name)).toBe(true);
 		}
 	});

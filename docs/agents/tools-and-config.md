@@ -21,7 +21,7 @@ knowing for token-efficient operation:
 | `toolDiscovery.enabled` | When `true` (default), tools NOT in the coding bundle are hidden behind `search_tool_bm25`. Keeps the per-turn tool snippet block short while leaving everything discoverable on demand. |
 | `toolDiscovery.alwaysActive` | Force-includes tools by name on the active surface even if they would otherwise be hidden. |
 | `toolDiscovery.hiddenByDefault` | Explicitly hide named tools regardless of the bundle delta. |
-| `engineeringStyle` | `"default"` (no-op) or `"karpathy"` (assumptions, simplicity, surgical edits, goal-driven execution). See `docs/adr/0004-karpathy-engineering-style.md`. |
+| `engineeringStyle` | `"default"` (no-op) or `"karpathy"` (assumptions, root-cause identification, simplicity, surgical edits, goal-driven execution). See `docs/adr/0004-karpathy-engineering-style.md`. |
 | `compaction.keepRecentTokens` | Floor for "recent context" preserved verbatim through compaction. |
 
 This repo ships a minimal template at `.pit/settings.json`. Override anything

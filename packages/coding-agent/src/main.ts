@@ -523,15 +523,6 @@ export async function main(args: string[], options?: MainOptions) {
 		process.env.PIT_SKIP_VERSION_CHECK = "1";
 	}
 
-	// Spoof a current Claude Code user-agent for Anthropic OAuth routing: detect
-	// the installed `claude --version` once, before the first model request, so
-	// the spoofed version tracks the real release instead of drifting behind
-	// (a stale version draws intermittent OAuth 5xx). Skipped offline and when
-	// PIT_CLAUDE_CODE_VERSION is already pinned.
-	if (!offlineMode) {
-		ensureClaudeCodeVersionEnv();
-	}
-
 	// Fire-and-forget: prune week-old pi-bash-*/pi-output-* logs from tmpdir
 	// (Windows never cleans %TEMP%, so they accumulate without bound).
 	void sweepStaleTempLogs();
@@ -752,6 +743,15 @@ export async function main(args: string[], options?: MainOptions) {
 		};
 	};
 	time("createRuntime");
+	// Spoof a current Claude Code user-agent for Anthropic OAuth routing: detect
+	// the installed `claude --version` once, before the first model request, so
+	// the spoofed version tracks the real release instead of drifting behind
+	// (a stale version draws intermittent OAuth 5xx). Skipped offline and when
+	// PIT_CLAUDE_CODE_VERSION is already pinned. Kept after early-exit commands
+	// so package/config/mcp/version/export do not pay for provider setup.
+	if (!offlineMode) {
+		ensureClaudeCodeVersionEnv();
+	}
 	const { createAgentSessionRuntime } = await import("./core/agent-session-runtime.ts");
 	const runtime = await createAgentSessionRuntime(createRuntime, {
 		cwd: sessionManager.getCwd(),

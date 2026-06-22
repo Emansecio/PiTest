@@ -31,10 +31,12 @@ import { createImportGroundingExtension } from "./import-grounding-extension.ts"
 import { createLearnedErrorGuardExtension } from "./learned-error-guard-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
 import { createMemoryExtension } from "./memory-extension.ts";
+import { createPatchAuditExtension } from "./patch-audit-extension.ts";
 import { createPathGroundingExtension } from "./path-grounding-extension.ts";
 import { createPatternGroundingExtension } from "./pattern-grounding-extension.ts";
 import { createPermissionsExtension } from "./permissions-extension.ts";
 import { createReadGuardExtension } from "./read-guard-extension.ts";
+import { createTaskRigorExtension } from "./task-rigor-extension.ts";
 
 export { createCoordinatorExtension } from "./coordinator-extension.ts";
 export { createHooksExtension } from "./hooks-extension.ts";
@@ -92,6 +94,10 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 
 	const factories: ExtensionFactory[] = [
 		createPermissionsExtension({ checker: permissionChecker, onDecision: options.onPermissionDecision }),
+		// Task rigor: before each turn, classify task risk from the prompt and
+		// append concise rigor instructions. Model-agnostic, fail-open; opt out
+		// PIT_NO_TASK_RIGOR.
+		createTaskRigorExtension(),
 		createReadGuardExtension({ cwd: options.cwd }),
 		// Edit dry-run gate: re-uses computeEditsDiff to block an `edit` whose
 		// oldText won't match BEFORE it enters the mutation queue, with a
@@ -137,6 +143,10 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// Only the explicit `run <script>` form. Block-only, fail-open; opt out
 		// PIT_NO_BASH_GROUNDING.
 		createBashGroundingExtension({ cwd: options.cwd }),
+		// Patch audit: post-exec, appends a compact self-review directive to
+		// medium/high-risk write/edit results based on patch shape. Model-agnostic,
+		// fail-open; opt out PIT_NO_PATCH_AUDIT.
+		createPatchAuditExtension(),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
 		createMcpExtension({ settings: options.mcp }),

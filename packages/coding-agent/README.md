@@ -189,7 +189,6 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files (themes hot-reload automatically) |
 | `/hotkeys` | Show all keyboard shortcuts |
-| `/changelog` | Display version history |
 | `/quit` | Quit pit |
 
 ### Keyboard Shortcuts
@@ -282,14 +281,11 @@ Use `/settings` to modify common options, or edit JSON files directly:
 
 See [docs/settings.md](docs/settings.md) for all options.
 
-### Telemetry and update checks
+### Update checks
 
-Pit has two separate startup features:
+At startup Pit fetches `https://pit.dev/api/latest-version` to check whether a newer Pit version exists. Disable it with `PIT_SKIP_VERSION_CHECK=1`.
 
-- **Update check:** fetches `https://pit.dev/api/latest-version` to check whether a newer Pit version exists. Disable it with `PIT_SKIP_VERSION_CHECK=1`. Disabling update checks only turns off this check.
-- **Install/update telemetry:** after first install or a changelog-detected update, sends an anonymous version ping to `https://pit.dev/api/report-install`. Opt out by setting `enableInstallTelemetry` to `false` in `settings.json`, or by setting `PIT_TELEMETRY=0`. This does not disable update checks; Pit may still contact `pit.dev` for the latest version unless update checks are disabled or offline mode is enabled.
-
-Use `--offline` or `PIT_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
+Use `--offline` or `PIT_OFFLINE=1` to disable all startup network operations described here, including update checks and package update checks.
 
 ---
 
@@ -628,9 +624,8 @@ pit --thinking high "Solve this complex problem"
 | `PIT_CODING_AGENT_DIR` | Override config directory (default: `~/.pit/agent`) |
 | `PIT_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
 | `PIT_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
-| `PIT_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
+| `PIT_OFFLINE` | Disable startup network operations, including update checks and package update checks |
 | `PIT_SKIP_VERSION_CHECK` | Skip the Pit version update check at startup. This prevents the `pit.dev` latest-version request |
-| `PIT_TELEMETRY` | Override install/update telemetry. Use `1`/`true`/`yes` to enable or `0`/`false`/`no` to disable. This does not disable update checks |
 | `PIT_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 | `PIT_KEY_COOLDOWN_MS` | Cooldown in milliseconds before retrying a rate-limited API key (default: `300000` — 5 minutes) |

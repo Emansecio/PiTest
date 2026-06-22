@@ -777,6 +777,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 export type SessionListProgress = (loaded: number, total: number) => void;
 
 const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
+const MAX_CONCURRENT_SESSION_DIR_READS = 10;
 
 async function buildSessionInfosWithConcurrency(
 	files: string[],
@@ -808,6 +809,42 @@ async function buildSessionInfosWithConcurrency(
 
 	while (nextIndex < files.length || inFlight.size > 0) {
 		while (nextIndex < files.length && inFlight.size < MAX_CONCURRENT_SESSION_INFO_LOADS) {
+			startNext();
+		}
+		if (inFlight.size > 0) {
+			await Promise.race(inFlight);
+		}
+	}
+
+	return results;
+}
+
+async function listSessionFilesFromDirsWithConcurrency(dirs: string[]): Promise<string[][]> {
+	const results: string[][] = Array.from({ length: dirs.length }, () => []);
+	const inFlight = new Set<Promise<void>>();
+	let nextIndex = 0;
+
+	const startNext = (): void => {
+		const index = nextIndex++;
+		const dir = dirs[index];
+		if (!dir) return;
+
+		let task: Promise<void>;
+		task = readdir(dir)
+			.then((files) => {
+				results[index] = files.filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
+			})
+			.catch(() => {
+				results[index] = [];
+			})
+			.finally(() => {
+				inFlight.delete(task);
+			});
+		inFlight.add(task);
+	};
+
+	while (nextIndex < dirs.length || inFlight.size > 0) {
+		while (nextIndex < dirs.length && inFlight.size < MAX_CONCURRENT_SESSION_DIR_READS) {
 			startNext();
 		}
 		if (inFlight.size > 0) {
@@ -1811,18 +1848,9 @@ export class SessionManager {
 			const entries = await readdir(sessionsDir, { withFileTypes: true });
 			const dirs = entries.filter((e) => e.isDirectory()).map((e) => join(sessionsDir, e.name));
 
-			// Count total files first for accurate progress
-			let totalFiles = 0;
-			const dirFiles: string[][] = [];
-			for (const dir of dirs) {
-				try {
-					const files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
-					dirFiles.push(files.map((f) => join(dir, f)));
-					totalFiles += files.length;
-				} catch {
-					dirFiles.push([]);
-				}
-			}
+			// Count total files first for accurate progress.
+			const dirFiles = await listSessionFilesFromDirsWithConcurrency(dirs);
+			const totalFiles = dirFiles.reduce((sum, files) => sum + files.length, 0);
 
 			// Process all files with progress tracking
 			let loaded = 0;

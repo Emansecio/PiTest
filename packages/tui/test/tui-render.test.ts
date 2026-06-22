@@ -13,6 +13,20 @@ class TestComponent implements Component {
 	invalidate(): void {}
 }
 
+class ThrowingComponent implements Component {
+	private readonly message: string;
+
+	constructor(message: string) {
+		this.message = message;
+	}
+
+	render(_width: number): string[] {
+		throw new Error(this.message);
+	}
+
+	invalidate(): void {}
+}
+
 class LoggingVirtualTerminal extends VirtualTerminal {
 	private writes: string[] = [];
 
@@ -315,6 +329,52 @@ describe("TUI content shrinkage", () => {
 });
 
 describe("TUI differential rendering", () => {
+	it("renders component failures inline without dropping sibling content", async () => {
+		const terminal = new VirtualTerminal(60, 10);
+		const tui = new TUI(terminal);
+		const before = new TestComponent();
+		const after = new TestComponent();
+		before.lines = ["Before"];
+		after.lines = ["After"];
+		tui.addChild(before);
+		tui.addChild(new ThrowingComponent("boom"));
+		tui.addChild(after);
+
+		tui.start();
+		await terminal.waitForRender();
+
+		const viewport = terminal.getViewport();
+		assert.ok(viewport[0]?.includes("Before"), `Before line rendered: ${viewport[0]}`);
+		assert.ok(
+			viewport[1]?.includes("! render error in ThrowingComponent: boom"),
+			`Diagnostic line rendered: ${viewport[1]}`,
+		);
+		assert.ok(viewport[2]?.includes("After"), `After line rendered: ${viewport[2]}`);
+
+		tui.stop();
+	});
+
+	it("keeps component failure diagnostics on one sanitized line", async () => {
+		const terminal = new VirtualTerminal(80, 10);
+		const tui = new TUI(terminal);
+		const after = new TestComponent();
+		after.lines = ["After"];
+		tui.addChild(new ThrowingComponent("boom\nsecond \x1b[31mred\x1b[0m\rthird"));
+		tui.addChild(after);
+
+		tui.start();
+		await terminal.waitForRender();
+
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport[0]?.includes("! render error in ThrowingComponent: boom second red third"),
+			`Sanitized diagnostic line rendered: ${viewport[0]}`,
+		);
+		assert.ok(viewport[1]?.includes("After"), `Sibling line rendered after diagnostic: ${viewport[1]}`);
+
+		tui.stop();
+	});
+
 	it("tracks cursor correctly when content shrinks with unchanged remaining lines", async () => {
 		const terminal = new VirtualTerminal(40, 10);
 		const tui = new TUI(terminal);

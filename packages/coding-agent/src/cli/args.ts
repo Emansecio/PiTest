@@ -430,7 +430,6 @@ ${chalk.bold("Environment Variables:")}
   ${ENV_SESSION_DIR.padEnd(32)} - Session storage directory (overridden by --session-dir)
   PIT_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
   PIT_OFFLINE                       - Disable startup network operations when set to 1/true/yes
-  PIT_TELEMETRY                     - Override install telemetry when set to 1/true/yes or 0/false/no
 
 ${chalk.bold("Built-in Tool Names:")}
   read   - Read file contents

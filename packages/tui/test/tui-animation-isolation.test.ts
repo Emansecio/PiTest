@@ -15,6 +15,7 @@ class TestComponent implements Component {
 // racing the real 16ms setInterval. Mirrors the `as unknown as` casts the rest
 // of the tui suite uses to inspect internals.
 type TickableTUI = { tickAnimations(): void };
+type AnimationInspectableTUI = TickableTUI & { animationCallbacks: Set<AnimationFrameCallback> };
 
 describe("TUI animation callback isolation", () => {
 	it("a throwing callback does not crash the tick and the others still run", () => {
@@ -53,5 +54,33 @@ describe("TUI animation callback isolation", () => {
 		assert.deepStrictEqual(calls, ["first", "middle", "last"], "the next tick still drives every callback");
 
 		tui.stop();
+	});
+
+	it("renders a transient diagnostic when an animation callback throws", async () => {
+		const terminal = new VirtualTerminal(60, 10);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		component.lines = ["ok"];
+		tui.addChild(component);
+
+		tui.start();
+		try {
+			await terminal.waitForRender();
+
+			const internals = tui as unknown as AnimationInspectableTUI;
+			internals.animationCallbacks.add(() => {
+				throw new Error("spin boom");
+			});
+			internals.tickAnimations();
+			await terminal.waitForRender();
+
+			const viewport = terminal.getViewport();
+			assert.ok(
+				viewport.some((line) => line.includes("! animation error: spin boom")),
+				`animation diagnostic rendered: ${JSON.stringify(viewport)}`,
+			);
+		} finally {
+			tui.stop();
+		}
 	});
 });

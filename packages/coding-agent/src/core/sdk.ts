@@ -25,7 +25,6 @@ import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
-import { isInstallTelemetryEnabled } from "./telemetry.ts";
 import { time } from "./timings.ts";
 import { createDefaultToolErrorHintRegistry } from "./tool-error-hint-rules.ts";
 import { createDefaultToolRewriteRegistry } from "./tool-rewrite-rules.ts";
@@ -158,36 +157,6 @@ function loadLearnedErrorsSafe(): ReturnType<typeof aggregateLearnedErrors> {
 	} catch {
 		return [];
 	}
-}
-
-function getAttributionHeaders(
-	model: Model<any>,
-	settingsManager: SettingsManager,
-): Record<string, string> | undefined {
-	if (!isInstallTelemetryEnabled(settingsManager)) {
-		return undefined;
-	}
-
-	if (model.provider === "openrouter" || model.baseUrl.includes("openrouter.ai")) {
-		return {
-			"HTTP-Referer": "https://pit.dev",
-			"X-OpenRouter-Title": "pit",
-			"X-OpenRouter-Categories": "cli-agent",
-		};
-	}
-
-	if (
-		model.provider === "cloudflare-workers-ai" ||
-		model.provider === "cloudflare-ai-gateway" ||
-		model.baseUrl.includes("api.cloudflare.com") ||
-		model.baseUrl.includes("gateway.ai.cloudflare.com")
-	) {
-		return {
-			"User-Agent": "pit-coding-agent",
-		};
-	}
-
-	return undefined;
 }
 
 /**
@@ -393,7 +362,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				throw new Error(auth.error);
 			}
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
-			const attributionHeaders = getAttributionHeaders(model, settingsManager);
 			// Default to long cache retention (Anthropic 1h, OpenAI 24h) for local
 			// interactive use: sessions span minutes-to-hours and benefit from
 			// keeping system prompt + tools cached across pauses. Providers that do
@@ -422,10 +390,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 				idleTimeoutMs: options?.idleTimeoutMs ?? providerRetrySettings.idleTimeoutMs,
 				cacheRetention: options?.cacheRetention ?? defaultCacheRetention,
-				headers:
-					attributionHeaders || auth.headers || options?.headers
-						? { ...attributionHeaders, ...auth.headers, ...options?.headers }
-						: undefined,
+				headers: auth.headers || options?.headers ? { ...auth.headers, ...options?.headers } : undefined,
 			});
 
 			// Side-tap the result promise so credential-pool cooldown / success

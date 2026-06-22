@@ -8,11 +8,12 @@ describe("getEngineeringStyleGuidelines", () => {
 		expect(getEngineeringStyleGuidelines("default")).toEqual([]);
 	});
 
-	it("returns 4 bullets covering the four Karpathy principles", () => {
+	it("returns 5 bullets covering the core engineering principles", () => {
 		const bullets = getEngineeringStyleGuidelines("karpathy");
-		expect(bullets).toHaveLength(4);
+		expect(bullets).toHaveLength(5);
 		const joined = bullets.join("\n").toLowerCase();
 		expect(joined).toContain("assumption");
+		expect(joined).toContain("root cause");
 		expect(joined).toContain("simplicity");
 		expect(joined).toContain("surgical");
 		expect(joined).toContain("verifiable");

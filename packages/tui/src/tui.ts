@@ -19,6 +19,12 @@ import {
 } from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
+const RENDER_FAULT_VISIBLE_MS = 5000;
+const RENDER_FAULT_MAX_MESSAGE_WIDTH = 240;
+const ANSI_ESCAPE_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)?|_[^\x07]*(?:\x07|\x1b\\)?|.)/g;
+const CONTROL_PATTERN = /[\x00-\x1f\x7f]/g;
+const SPACES_PATTERN = /\s+/g;
+const UNKNOWN_RENDER_FAULT = "unknown error";
 
 // Dev-only render guard. When enabled, each component's rendered lines are
 // checked against `width` *at the component boundary*, throwing an error that
@@ -59,6 +65,44 @@ export function assertComponentWidth(component: Component, lines: string[], widt
 			);
 		}
 	}
+}
+
+type RenderFaultKind = "render" | "animation";
+
+interface RenderFault {
+	kind: RenderFaultKind;
+	count: number;
+	message: string;
+	expiresAt: number;
+}
+
+function sanitizeRenderFaultMessage(message: string): string {
+	const sanitized = message
+		.replace(ANSI_ESCAPE_PATTERN, "")
+		.replace(CONTROL_PATTERN, " ")
+		.replace(SPACES_PATTERN, " ")
+		.trim();
+	if (sanitized.length === 0) return UNKNOWN_RENDER_FAULT;
+	return truncateToWidth(sanitized, RENDER_FAULT_MAX_MESSAGE_WIDTH, "…");
+}
+
+function errorToMessage(error: unknown): string {
+	try {
+		if (error instanceof Error) return sanitizeRenderFaultMessage(error.message);
+		if (typeof error === "string") return sanitizeRenderFaultMessage(error);
+		return sanitizeRenderFaultMessage(String(error));
+	} catch {
+		return UNKNOWN_RENDER_FAULT;
+	}
+}
+
+function componentName(component: Component): string {
+	return component?.constructor?.name ?? "Component";
+}
+
+function formatComponentRenderError(component: Component, error: unknown, width: number): string {
+	if (width <= 0) return "";
+	return truncateToWidth(`! render error in ${componentName(component)}: ${errorToMessage(error)}`, width, "…");
 }
 
 function extractKittyImageIds(line: string): number[] {
@@ -314,7 +358,12 @@ export class Container implements Component {
 		const childOutputs = new Array<string[]>(children.length);
 		let reusable = this.flattenCacheWidth === width && this.flattenCacheChildOutputs.length === children.length;
 		for (let i = 0; i < children.length; i++) {
-			const childLines = children[i].render(width);
+			let childLines: string[];
+			try {
+				childLines = children[i].render(width);
+			} catch (error) {
+				childLines = [formatComponentRenderError(children[i], error, width)];
+			}
 			if (renderAssertEnabled) assertComponentWidth(children[i], childLines, width);
 			childOutputs[i] = childLines;
 			if (reusable && childLines !== this.flattenCacheChildOutputs[i]) reusable = false;
@@ -370,6 +419,8 @@ export class TUI extends Container {
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
 	private stopped = false;
+	private renderFault: RenderFault | null = null;
+	private renderFaultClearTimer: NodeJS.Timeout | undefined;
 	// Per-line memoization of normalizeTerminalOutput(line) + SEGMENT_RESET. Markdown
 	// caches its rendered lines, so unchanged content keeps stable string identity
 	// across renders; this cache turns the per-frame O(N) reset concatenation into
@@ -612,6 +663,10 @@ export class TUI extends Container {
 			clearTimeout(this.renderTimer);
 			this.renderTimer = undefined;
 		}
+		if (this.renderFaultClearTimer) {
+			clearTimeout(this.renderFaultClearTimer);
+			this.renderFaultClearTimer = undefined;
+		}
 		// Move cursor to the end of the content to prevent overwriting/artifacts on exit
 		if (this.previousLines.length > 0) {
 			const targetRow = this.previousLines.length; // Line after the last content
@@ -727,9 +782,11 @@ export class TUI extends Container {
 			// escape the setInterval and crash the process, nor stop the other callbacks.
 			try {
 				if (buf[i]!(now)) dirty = true;
-			} catch {
-				// No render-safe error channel here; writing to the TTY would corrupt
-				// the frame. Swallow so one faulty component can't kill the loop.
+			} catch (error) {
+				this.recordRenderFault("animation", error);
+				// Keep the feedback inside the normal renderer so a faulty animation
+				// can't corrupt the terminal with an out-of-band write.
+				dirty = true;
 			}
 		}
 		buf.length = 0;
@@ -984,7 +1041,12 @@ export class TUI extends Container {
 			const { width, maxHeight } = this.resolveOverlayLayout(options, 0, termWidth, termHeight);
 
 			// Render component at calculated width
-			let overlayLines = component.render(width);
+			let overlayLines: string[];
+			try {
+				overlayLines = component.render(width);
+			} catch (error) {
+				overlayLines = [formatComponentRenderError(component, error, width)];
+			}
 			if (renderAssertEnabled) assertComponentWidth(component, overlayLines, width);
 
 			// Apply maxHeight if specified
@@ -1293,15 +1355,52 @@ export class TUI extends Container {
 		return truncateToWidth(line, width, "…");
 	}
 
+	private recordRenderFault(kind: RenderFaultKind, error: unknown): void {
+		const message = errorToMessage(error);
+		const now = performance.now();
+		const count =
+			this.renderFault?.kind === kind && this.renderFault.message === message ? this.renderFault.count + 1 : 1;
+		this.renderFault = {
+			kind,
+			count,
+			message,
+			expiresAt: now + RENDER_FAULT_VISIBLE_MS,
+		};
+		if (this.renderFaultClearTimer) {
+			clearTimeout(this.renderFaultClearTimer);
+		}
+		const delay = Math.max(0, this.renderFault.expiresAt - now + 1);
+		this.renderFaultClearTimer = setTimeout(() => {
+			this.renderFaultClearTimer = undefined;
+			if (this.stopped || this.renderFault === null) return;
+			if (this.renderFault.expiresAt > performance.now()) return;
+			this.renderFault = null;
+			this.requestRender();
+		}, delay);
+		this.renderFaultClearTimer.unref?.();
+	}
+
+	private renderFaultLines(width: number, now: number): string[] {
+		if (this.renderFault === null) return [];
+		if (this.renderFault.expiresAt <= now) {
+			this.renderFault = null;
+			return [];
+		}
+		const label = this.renderFault.kind === "animation" ? "animation error" : "render error";
+		const count = this.renderFault.count > 1 ? ` x${this.renderFault.count}` : "";
+		return [truncateToWidth(`! ${label}${count}: ${this.renderFault.message}`, width, "…")];
+	}
+
 	private doRender(): void {
 		try {
 			this._doRenderCore();
-		} catch {
+		} catch (error) {
 			// doRender runs from a nextTick/timer callback, so a throw from any
 			// component render() (markdown, an extension overlay, compositeOverlays)
 			// would be an uncaughtException → process death. Skip the bad frame instead;
 			// `this.previous*` state is only committed at the end of a successful render,
 			// so the next requestRender diffs against the last good frame.
+			this.recordRenderFault("render", error);
 			this.requestRender();
 		}
 	}
@@ -1324,6 +1423,10 @@ export class TUI extends Container {
 
 		// Render all components to get new lines
 		let newLines = this.render(width);
+		const faultLines = this.renderFaultLines(width, performance.now());
+		if (faultLines.length > 0) {
+			newLines = [...newLines, ...faultLines];
+		}
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.overlayStack.length > 0) {

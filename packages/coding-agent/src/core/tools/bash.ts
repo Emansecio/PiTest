@@ -522,6 +522,9 @@ export interface BashToolOptions {
 
 const BASH_PREVIEW_LINES = 0;
 const BASH_UPDATE_THROTTLE_MS = 100;
+const BASH_FAST_UPDATE_THROTTLE_MS = 50;
+const BASH_FAST_UPDATE_WINDOW_MS = 1000;
+const BASH_FAST_UPDATE_MAX_BYTES = 16 * 1024;
 // Below this, a successful command's `Took Xs` footer is pure noise — the
 // duration carries no signal, so we drop it (kept on error/truncation/slow).
 const BASH_SLOW_FOOTER_MS = 2000;
@@ -918,6 +921,8 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 			let updateTimer: NodeJS.Timeout | undefined;
 			let updateDirty = false;
 			let lastUpdateAt = 0;
+			const outputStreamStartedAt = Date.now();
+			let outputStreamedBytes = 0;
 
 			const emitOutputUpdate = () => {
 				if (!onUpdate || !updateDirty) return;
@@ -943,7 +948,12 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 			const scheduleOutputUpdate = () => {
 				if (!onUpdate) return;
 				updateDirty = true;
-				const delay = BASH_UPDATE_THROTTLE_MS - (Date.now() - lastUpdateAt);
+				const elapsed = Date.now() - outputStreamStartedAt;
+				const throttleMs =
+					elapsed <= BASH_FAST_UPDATE_WINDOW_MS || outputStreamedBytes <= BASH_FAST_UPDATE_MAX_BYTES
+						? BASH_FAST_UPDATE_THROTTLE_MS
+						: BASH_UPDATE_THROTTLE_MS;
+				const delay = throttleMs - (Date.now() - lastUpdateAt);
 				if (delay <= 0) {
 					clearUpdateTimer();
 					emitOutputUpdate();
@@ -960,6 +970,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 			}
 
 			const handleData = (data: Buffer) => {
+				outputStreamedBytes += data.length;
 				output.append(data);
 				scheduleOutputUpdate();
 			};

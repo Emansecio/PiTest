@@ -104,6 +104,26 @@ describe("HindsightBank", () => {
 		expect(onlyFacts).toHaveLength(1);
 	});
 
+	test("search reflects entries added after a cached filtered search", () => {
+		const { bank } = freshBank();
+		bank.add({ kind: "fact", body: "shared word marker here" });
+		expect(bank.search({ query: "late", kinds: ["fact"] })).toEqual([]);
+
+		bank.add({ kind: "fact", body: "late marker appears after cache" });
+		const results = bank.search({ query: "late", kinds: ["fact"] });
+		expect(results).toHaveLength(1);
+		expect(results[0]!.entry.body).toContain("late marker");
+	});
+
+	test("search stops returning deleted entries after a cached search", () => {
+		const { bank } = freshBank();
+		const entry = bank.add({ kind: "fact", body: "temporary marker for deletion" });
+		expect(bank.search({ query: "temporary", kinds: ["fact"] })).toHaveLength(1);
+
+		expect(bank.delete(entry.id)).toBe(true);
+		expect(bank.search({ query: "temporary", kinds: ["fact"] })).toEqual([]);
+	});
+
 	// TODO: enable once `pruneOlderThan` lands on HindsightBank.
 	test.skip("pruneOlderThan(days) removes entries older than the cutoff", () => {
 		// pruneOlderThan is not yet present on the bank API; another agent will add it.

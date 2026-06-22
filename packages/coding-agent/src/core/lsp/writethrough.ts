@@ -114,6 +114,24 @@ export async function maybeFormat(
 const DEFAULT_WAIT_MS = 4000;
 const DIAGNOSTIC_MESSAGE_LIMIT = 50;
 
+function diagnosticFingerprint(diagnostic: Diagnostic): string {
+	return [
+		diagnostic.range.start.line,
+		diagnostic.range.start.character,
+		diagnostic.range.end.line,
+		diagnostic.range.end.character,
+		diagnostic.source ?? "",
+		diagnostic.code ?? "",
+		diagnostic.message,
+	].join(":");
+}
+
+function filterBaselineDiagnostics(current: Diagnostic[], baseline: Diagnostic[]): Diagnostic[] {
+	if (baseline.length === 0) return current;
+	const baselineKeys = new Set(baseline.map(diagnosticFingerprint));
+	return current.filter((diagnostic) => !baselineKeys.has(diagnosticFingerprint(diagnostic)));
+}
+
 // =============================================================================
 // Public API
 // =============================================================================
@@ -123,6 +141,7 @@ export interface PostWriteDiagnostics {
 	summary: string;
 	errored: boolean;
 	messages: string[];
+	baselineCompared: boolean;
 }
 
 export interface PostWriteOptions {
@@ -159,6 +178,8 @@ export async function getPostWriteDiagnostics(
 	const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
 
 	const all: Diagnostic[] = [];
+	const baseline: Diagnostic[] = [];
+	let baselineCompared = false;
 	const serverNames: string[] = [];
 
 	await Promise.allSettled(
@@ -166,6 +187,11 @@ export async function getPostWriteDiagnostics(
 			const client = await getOrCreateClient(serverConfig, cwd);
 			if (isProjectAwareLspServer(serverConfig)) {
 				await waitForProjectLoaded(client, combined);
+			}
+			const existing = client.diagnostics.get(uri);
+			if (existing) {
+				baselineCompared = true;
+				baseline.push(...existing.diagnostics);
 			}
 			const minVersion = client.diagnosticsVersion;
 			await syncContent(client, absolutePath, content, combined);
@@ -186,18 +212,27 @@ export async function getPostWriteDiagnostics(
 
 	// Deduplicate by range + message (different servers may report the same issue).
 	const unique = dedupeDiagnostics(all);
+	const baselineUnique = baselineCompared ? dedupeDiagnostics(baseline) : [];
+	const reportable = baselineCompared ? filterBaselineDiagnostics(unique, baselineUnique) : unique;
 
-	if (unique.length === 0) {
-		return { server: serverNames.join(", "), summary: "no issues", errored: false, messages: [] };
+	if (reportable.length === 0) {
+		return {
+			server: serverNames.join(", "),
+			summary: baselineCompared ? "no new issues" : "no issues",
+			errored: false,
+			messages: [],
+			baselineCompared,
+		};
 	}
 
-	sortDiagnostics(unique);
-	const messages = unique.map((d) => formatDiagnostic(d, relPath)).slice(0, DIAGNOSTIC_MESSAGE_LIMIT);
+	sortDiagnostics(reportable);
+	const messages = reportable.map((d) => formatDiagnostic(d, relPath)).slice(0, DIAGNOSTIC_MESSAGE_LIMIT);
 	return {
 		server: serverNames.join(", "),
-		summary: formatDiagnosticsSummary(unique),
-		errored: unique.some((d) => d.severity === 1),
+		summary: formatDiagnosticsSummary(reportable),
+		errored: reportable.some((d) => d.severity === 1),
 		messages,
+		baselineCompared,
 	};
 }
 
@@ -242,12 +277,14 @@ export async function attachPostWriteDiagnostics<R extends { content: Array<{ ty
 function formatPostWriteAppendix(diag: PostWriteDiagnostics, absolutePath: string, cwd: string): string {
 	const body = diag.messages.join("\n");
 	if (!enforceDiagnosticsOnWrite || !diag.errored) {
-		return `\nLSP diagnostics (${diag.summary}):\n${body}`;
+		const label = diag.baselineCompared ? "New LSP diagnostics" : "LSP diagnostics";
+		return `\n${label} (${diag.summary}):\n${body}`;
 	}
 	const rel = formatPathRelativeToCwd(absolutePath, cwd);
+	const source = diag.baselineCompared ? "This change introduced" : "LSP reported";
 	return (
-		`\n⚠ This change introduced ${diag.summary} in ${rel}. Fix the error(s) below before ` +
-		`your next change or declaring the task done — do not keep editing while ` +
+		`\nLSP check failed: ${source} ${diag.summary} in ${rel}. Fix the error(s) below before ` +
+		`your next change or declaring the task done; do not keep editing while ` +
 		`${rel} still has type errors:\n${body}`
 	);
 }

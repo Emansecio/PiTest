@@ -28,7 +28,8 @@ const THINKING_BREATH_MS = 1800;
 // burst is capped to REVEAL_MAX_STEP so it eases in instead of snapping.
 const REVEAL_CATCHUP_FRAMES = 8; // ~130ms to absorb a burst at 60fps
 const REVEAL_MIN_STEP = 1;
-const REVEAL_MAX_STEP = 24; // ~1500 cps at 62fps — above any model's emit rate
+const REVEAL_MAX_STEP = 48; // ~3000 cps at 62fps — above any model's emit rate
+const REVEAL_FRAME_MS = 16;
 // Width (cols) of the dim→bright gradient drawn at the reveal wavefront so freshly
 // revealed text materializes softly instead of popping in at full brightness.
 const REVEAL_FADE_COLUMNS = 6;
@@ -131,6 +132,8 @@ export class AssistantMessageComponent extends Container {
 	private readonly readingColumns: number;
 	private revealIndex = -1;
 	private revealedChars = Number.POSITIVE_INFINITY;
+	private lastRevealTarget = 0;
+	private lastRevealTickAt = 0;
 	private revealUnsub: (() => void) | null = null;
 	// Decorated-output memo keyed by the Container's returned array reference plus
 	// the dynamic-decoration inputs (deliverable flag + exit code). Container.render
@@ -524,20 +527,48 @@ export class AssistantMessageComponent extends Container {
 			this.stopReveal();
 			return;
 		}
+		const newRevealBlock = idx !== this.revealIndex;
 		if (idx !== this.revealIndex) {
 			// A new trailing block started: reveal it from scratch. Earlier blocks
 			// render unclamped (clampReveal only touches revealIndex).
 			this.revealIndex = idx;
 			this.revealedChars = 0;
+			this.lastRevealTarget = 0;
+			this.lastRevealTickAt = 0;
 		}
 		const target = this.blockTextLength(message, idx);
+		const caughtUpBeforeThisDelta = !newRevealBlock && this.revealedChars >= this.lastRevealTarget;
+		if ((newRevealBlock || caughtUpBeforeThisDelta) && this.revealedChars < target) {
+			this.revealedChars = Math.min(
+				target,
+				this.revealedChars + this.computeRevealStep(target - this.revealedChars, 1),
+			);
+		}
+		this.lastRevealTarget = target;
 		if (this.revealedChars < target && !this.revealUnsub) {
+			this.lastRevealTickAt = 0;
 			this.revealUnsub = this.ui.addAnimationCallback((now) => this.revealTick(now));
 		}
 	}
 
+	private computeRevealStep(backlog: number, frameCount: number): number {
+		const perFrame = Math.min(REVEAL_MAX_STEP, Math.max(REVEAL_MIN_STEP, Math.ceil(backlog / REVEAL_CATCHUP_FRAMES)));
+		return Math.min(backlog, perFrame * frameCount);
+	}
+
+	private revealFrameCount(now: number): number {
+		if (this.lastRevealTickAt <= 0) {
+			this.lastRevealTickAt = now;
+			return 1;
+		}
+		const elapsedMs = now - this.lastRevealTickAt;
+		this.lastRevealTickAt = now;
+		if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return 1;
+		return Math.max(1, Math.min(60, Math.round(elapsedMs / REVEAL_FRAME_MS)));
+	}
+
 	/** Advance the reveal cursor one frame; unsubscribe once it catches up. */
-	private revealTick(_now: number): boolean {
+	private revealTick(now: number): boolean {
 		const message = this.lastMessage;
 		if (!message || this.revealIndex === -1) {
 			this.stopReveal();
@@ -545,27 +576,37 @@ export class AssistantMessageComponent extends Container {
 		}
 		const target = this.blockTextLength(message, this.revealIndex);
 		if (this.revealedChars >= target) {
-			this.stopReveal();
+			this.pauseReveal();
 			return false; // already caught up — nothing changed this frame
 		}
 		const backlog = target - this.revealedChars;
 		// Geometric catch-up (backlog/FRAMES) already eases out — the step shrinks as
 		// the cursor nears the tail. MAX caps the other end so a big burst eases in
 		// over a few frames instead of snapping; MIN keeps a slow drip moving.
-		const step = Math.min(REVEAL_MAX_STEP, Math.max(REVEAL_MIN_STEP, Math.ceil(backlog / REVEAL_CATCHUP_FRAMES)));
+		const step = this.computeRevealStep(backlog, this.revealFrameCount(now));
 		this.revealedChars = Math.min(target, this.revealedChars + step);
 		this.rebuildContent();
+		if (this.revealedChars >= target) {
+			this.pauseReveal();
+		}
 		return true;
+	}
+
+	private pauseReveal(): void {
+		this.lastRevealTickAt = 0;
+		if (this.revealUnsub) {
+			this.revealUnsub();
+			this.revealUnsub = null;
+		}
 	}
 
 	/** Stop smoothing and reveal everything (idempotent). */
 	private stopReveal(): void {
 		this.revealIndex = -1;
 		this.revealedChars = Number.POSITIVE_INFINITY;
-		if (this.revealUnsub) {
-			this.revealUnsub();
-			this.revealUnsub = null;
-		}
+		this.lastRevealTarget = 0;
+		this.lastRevealTickAt = 0;
+		this.pauseReveal();
 	}
 
 	/** A deliverable is the final TEXT block; thinking-only / empty messages are

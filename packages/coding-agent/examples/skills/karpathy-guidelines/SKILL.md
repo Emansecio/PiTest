@@ -30,7 +30,17 @@ Before implementing:
 - If a simpler approach exists, say so. Push back when warranted.
 - If something is unclear, stop. Name what's confusing. Ask.
 
-## 2. Simplicity First
+## 2. Identify Before Changing
+
+**Find the real code path and root cause before editing.**
+
+Before touching code:
+- Locate the actual code path and read the involved code in full - don't pattern-match on a snippet.
+- Trace data flow and call sites; form an explicit hypothesis you can point to.
+- Fix the cause, not the symptom. Reproduce a bug before patching it.
+- Reuse existing utilities and patterns instead of inventing parallel ones.
+
+## 3. Simplicity First
 
 **Minimum code that solves the problem. Nothing speculative.**
 
@@ -42,7 +52,7 @@ Before implementing:
 
 Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
 
-## 3. Surgical Changes
+## 4. Surgical Changes
 
 **Touch only what you must. Clean up only your own mess.**
 
@@ -58,7 +68,7 @@ When your changes create orphans:
 
 The test: Every changed line should trace directly to the user's request.
 
-## 4. Goal-Driven Execution
+## 5. Goal-Driven Execution
 
 **Define success criteria. Loop until verified.**
 

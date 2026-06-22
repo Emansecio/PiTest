@@ -397,11 +397,6 @@ export function getExamplesPath(): string {
 	return resolve(join(getPackageDir(), "examples"));
 }
 
-/** Get path to CHANGELOG.md */
-export function getChangelogPath(): string {
-	return resolve(join(getPackageDir(), "CHANGELOG.md"));
-}
-
 /**
  * Get path to built-in interactive assets directory.
  * - For Bun binary: assets/ next to executable

@@ -12,6 +12,7 @@ const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url))
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
 const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
+const maxVitestForks = Math.max(2, Math.floor(cpus().length / 4));
 
 export default defineConfig({
 	test: {
@@ -23,21 +24,20 @@ export default defineConfig({
 		// (the vast majority, <1s) are unaffected; a genuine hang still surfaces.
 		testTimeout: 60000,
 		// Heavy beforeAll/afterAll (spawning git children, eval kernels, runtimes)
-		// need far more than the 10s default when the box is under load — match the
-		// 60s test budget so setup/teardown never times out spuriously. A hook that
-		// blows this is treated as a genuine hang (fail fast) rather than waited on
-		// longer; contention is kept in check by the reduced maxForks below.
-		hookTimeout: 60000,
+		// need far more than the 10s default when the box is under load. Teardown can
+		// queue behind spawned processes in the full suite on Windows, so give hooks
+		// extra room while keeping genuine hangs bounded.
+		hookTimeout: 120000,
 		poolOptions: {
 			forks: {
 				// Default forks one worker per core. With every core busy, the OS and
 				// the processes these tests SPAWN (tsx boots, git children, and the
 				// taskkill/AgentSession.dispose teardown) get starved and blow their
 				// per-hook deadline — which made a DIFFERENT teardown flake each full
-				// run on Windows. Use only HALF the cores for vitest workers so the
-				// other half stays free for spawned work + the scheduler; hooks then
-				// finish well inside the 60s budget. Floor of 2 for small CI boxes.
-				maxForks: Math.max(2, Math.floor(cpus().length / 2)),
+				// run on Windows. Use only a quarter of the cores for vitest workers so
+				// spawned work + the scheduler keep enough headroom during teardown.
+				// Floor of 2 for small CI boxes.
+				maxForks: maxVitestForks,
 			},
 		},
 		// Test isolation: skip the developer's `~/.claude/skills/` so test
