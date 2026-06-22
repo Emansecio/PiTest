@@ -9,7 +9,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { extname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { getAvailableAdapters } from "../dap/config.ts";
@@ -82,6 +82,103 @@ export function detectCheckCommand(cwd: string): string | null {
 	// No recognized script — fall back to the project's own locally-installed
 	// tsc so the gate still catches cross-file type errors in TS repos.
 	return detectLocalTypecheckCommand(cwd);
+}
+
+// ---------------------------------------------------------------------------
+// Syntax/parse fallback — the last tier below detectCheckCommand.
+//
+// When a repo ships NO check/typecheck/lint/test script AND no locally-installed
+// tsc, the gate would stay inert and a model (especially a weak one) could leave
+// broken syntax with zero automatic signal. This builds a command that
+// syntax-checks ONLY the files the turn touched, using interpreters that are
+// either guaranteed present (node) or resolved on PATH first — so the gate never
+// emits a "command not found" it would misread as a verification failure and loop
+// the model on. Deliberately syntax-only (node --check / py_compile): no build, no
+// test, no network, no config; scoped to touched files so it never surfaces
+// pre-existing errors elsewhere in the repo. Fail-open: returns null on anything
+// it can't safely check.
+// ---------------------------------------------------------------------------
+
+/** Cap how many files one fallback command checks, bounding command-line length. */
+const MAX_SYNTAX_FALLBACK_FILES = 50;
+
+/** Shell-safe cwd-relative path: alnum, dot, dash, underscore, forward slash only. */
+const SAFE_RELATIVE_PATH = /^[A-Za-z0-9._/-]+$/;
+
+/**
+ * First of `candidates` resolvable as an executable on PATH, or null. Returns the
+ * bare candidate name (the shell re-resolves it) so the emitted command stays
+ * portable. Probes the platform's executable extensions on Windows.
+ */
+function resolveExecutableOnPath(candidates: readonly string[]): string | null {
+	const pathDirs = (process.env.PATH ?? "").split(delimiter).filter((d) => d.length > 0);
+	const exeExts = process.platform === "win32" ? ["", ".exe", ".cmd", ".bat"] : [""];
+	for (const candidate of candidates) {
+		for (const dir of pathDirs) {
+			for (const ext of exeExts) {
+				if (existsSync(join(dir, candidate + ext))) return candidate;
+			}
+		}
+	}
+	return null;
+}
+
+/**
+ * Convert a touched-file path to a cwd-relative path safe to drop unquoted into a
+ * shell command, or null when it is missing, outside `cwd`, or contains a space /
+ * shell metacharacter (skipped rather than risk fragile cross-platform quoting).
+ */
+function toSafeRelativePath(file: string, cwd: string): string | null {
+	if (typeof file !== "string" || file.length === 0) return null;
+	const abs = isAbsolute(file) ? file : resolve(cwd, file);
+	if (!existsSync(abs)) return null;
+	const rel = relative(cwd, abs).split("\\").join("/");
+	if (rel.length === 0 || rel.startsWith("..") || isAbsolute(rel)) return null;
+	if (!SAFE_RELATIVE_PATH.test(rel)) return null;
+	return rel;
+}
+
+/**
+ * Build a syntax-only check command for the turn's touched files, or null when
+ * nothing is safely checkable. Used as the final fallback when detectCheckCommand
+ * returns null. See the section comment above for the invariants.
+ */
+export function detectSyntaxFallbackCommand(cwd: string, touchedFiles: readonly string[]): string | null {
+	if (!Array.isArray(touchedFiles) || touchedFiles.length === 0) return null;
+
+	const jsFiles: string[] = [];
+	const pyFiles: string[] = [];
+	for (const file of touchedFiles) {
+		const rel = toSafeRelativePath(file, cwd);
+		if (rel === null) continue;
+		const ext = extname(rel).toLowerCase();
+		if (ext === ".js" || ext === ".mjs" || ext === ".cjs") jsFiles.push(rel);
+		else if (ext === ".py") pyFiles.push(rel);
+	}
+
+	const parts: string[] = [];
+	let budget = MAX_SYNTAX_FALLBACK_FILES;
+
+	// JavaScript: node is always present (the agent runs on it). `node --check`
+	// validates ONE file per invocation, so chain them. NOT applied to .ts — node
+	// --check rejects type syntax and would false-fail valid TS; the tsc fallback
+	// and the erasable-syntax guard already cover TypeScript.
+	for (const file of jsFiles) {
+		if (budget <= 0) break;
+		parts.push(`node --check ${file}`);
+		budget--;
+	}
+
+	// Python: py_compile validates many files in one call. Only when an interpreter
+	// resolves on PATH (else the command would be "command not found", which the
+	// gate would misread as a syntax failure and loop the model on).
+	if (pyFiles.length > 0 && budget > 0) {
+		const python = resolveExecutableOnPath(["python3", "python"]);
+		if (python) parts.push(`${python} -m py_compile ${pyFiles.slice(0, budget).join(" ")}`);
+	}
+
+	if (parts.length === 0) return null;
+	return parts.join(" && ");
 }
 
 /**

@@ -215,6 +215,7 @@ import { pendingVerificationJobs } from "./verification/pending-checks.ts";
 import {
 	type CheckResult,
 	detectCheckCommand,
+	detectSyntaxFallbackCommand,
 	runCheckCommand,
 	setCurrentVerificationProbe,
 } from "./verification/verification.ts";
@@ -3110,6 +3111,20 @@ export class AgentSession {
 		return true;
 	}
 
+	/**
+	 * Resolve the command the verification gate/probe should run, in priority
+	 * order: explicit user setting -> detected project check (scripts / local tsc)
+	 * -> per-file syntax fallback over THIS turn's touched files. The last tier is
+	 * what catches broken syntax in repos with no toolchain at all. Returns null
+	 * when nothing is runnable (fail-open: gate/probe then no-op).
+	 */
+	private _resolveCheckCommand(settingsCommand: string | null): string | null {
+		if (settingsCommand) return settingsCommand;
+		const detected = detectCheckCommand(this._cwd);
+		if (detected) return detected;
+		return detectSyntaxFallbackCommand(this._cwd, Array.from(this._turnTouchedFilePaths));
+	}
+
 	private async _runVerificationGate(options?: PromptOptions): Promise<void> {
 		if (this._inVerification || !this._turnTouchedFiles) return;
 		if (this._userInterrupted || this._lastTurnAborted()) return;
@@ -3132,7 +3147,7 @@ export class AgentSession {
 			}
 
 			// Code check: run the project's check and re-inject failures to fix.
-			const command = settings.command ?? detectCheckCommand(this._cwd);
+			const command = this._resolveCheckCommand(settings.command);
 			if (!command) return;
 			let fixes = 0;
 			for (let attempt = 1; ; attempt++) {
@@ -3220,7 +3235,7 @@ export class AgentSession {
 	async runConfiguredCheck(signal?: AbortSignal): Promise<CheckResult | null> {
 		const settings = this.settingsManager.getVerificationSettings();
 		if (!settings.enabled) return null;
-		const command = settings.command ?? detectCheckCommand(this._cwd);
+		const command = this._resolveCheckCommand(settings.command);
 		if (!command) return null;
 		return runCheckCommand(command, this._cwd, { signal, timeoutMs: settings.timeoutMs });
 	}

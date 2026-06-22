@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	detectCheckCommand,
 	detectLocalTypecheckCommand,
+	detectSyntaxFallbackCommand,
 	runCheckCommand,
 } from "../src/core/verification/verification.js";
 
@@ -77,6 +78,71 @@ describe("verification module", () => {
 			const r = await runCheckCommand(`node -e "setTimeout(() => {}, 10000)"`, process.cwd(), { timeoutMs: 400 });
 			expect(r.ok).toBe(false);
 			expect(r.timedOut).toBe(true);
+		});
+	});
+
+	describe("detectSyntaxFallbackCommand", () => {
+		it("returns null for no touched files", () => {
+			expect(detectSyntaxFallbackCommand(dir, [])).toBeNull();
+		});
+
+		it("builds a per-file `node --check` for touched JS files", async () => {
+			await writeFile(join(dir, "a.js"), "const x = 1;\n");
+			await writeFile(join(dir, "b.mjs"), "export const y = 2;\n");
+			await writeFile(join(dir, "c.cjs"), "module.exports = 3;\n");
+			const cmd = detectSyntaxFallbackCommand(dir, [join(dir, "a.js"), join(dir, "b.mjs"), join(dir, "c.cjs")]);
+			expect(cmd).toBe("node --check a.js && node --check b.mjs && node --check c.cjs");
+		});
+
+		it("normalizes subdirectory paths to forward slashes", async () => {
+			await mkdir(join(dir, "src"), { recursive: true });
+			await writeFile(join(dir, "src", "f.js"), "const x = 1;\n");
+			expect(detectSyntaxFallbackCommand(dir, [join(dir, "src", "f.js")])).toBe("node --check src/f.js");
+		});
+
+		it("ignores .ts files (node --check rejects type syntax)", async () => {
+			await writeFile(join(dir, "a.ts"), "const x: number = 1;\n");
+			expect(detectSyntaxFallbackCommand(dir, [join(dir, "a.ts")])).toBeNull();
+		});
+
+		it("skips non-existent files (fail-open)", () => {
+			expect(detectSyntaxFallbackCommand(dir, [join(dir, "ghost.js")])).toBeNull();
+		});
+
+		it("skips files outside cwd", async () => {
+			const outside = await mkdtemp(join(tmpdir(), "pit-verify-out-"));
+			try {
+				await writeFile(join(outside, "x.js"), "const x = 1;\n");
+				expect(detectSyntaxFallbackCommand(dir, [join(outside, "x.js")])).toBeNull();
+			} finally {
+				await rm(outside, { recursive: true, force: true });
+			}
+		});
+
+		it("skips paths with spaces or shell metacharacters (avoids fragile quoting)", async () => {
+			await writeFile(join(dir, "has space.js"), "const x = 1;\n");
+			expect(detectSyntaxFallbackCommand(dir, [join(dir, "has space.js")])).toBeNull();
+		});
+
+		it("only emits a Python check when an interpreter resolves on PATH", async () => {
+			await writeFile(join(dir, "a.py"), "x = 1\n");
+			const cmd = detectSyntaxFallbackCommand(dir, [join(dir, "a.py")]);
+			// Environment-tolerant: null when no python, else a py_compile invocation.
+			if (cmd !== null) expect(cmd).toContain("-m py_compile a.py");
+		});
+
+		it("produces a command that actually passes for valid JS and fails for broken JS", async () => {
+			await writeFile(join(dir, "good.js"), "const x = 1;\nconsole.log(x);\n");
+			const okCmd = detectSyntaxFallbackCommand(dir, [join(dir, "good.js")]);
+			expect(okCmd).not.toBeNull();
+			const okRun = await runCheckCommand(okCmd as string, dir, { timeoutMs: 10_000 });
+			expect(okRun.ok).toBe(true);
+
+			await writeFile(join(dir, "bad.js"), "const x = ;\n");
+			const badCmd = detectSyntaxFallbackCommand(dir, [join(dir, "bad.js")]);
+			expect(badCmd).not.toBeNull();
+			const badRun = await runCheckCommand(badCmd as string, dir, { timeoutMs: 10_000 });
+			expect(badRun.ok).toBe(false);
 		});
 	});
 });
