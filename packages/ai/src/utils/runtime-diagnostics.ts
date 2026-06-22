@@ -47,6 +47,7 @@ export type DiagnosticCategory =
 	| "guard.path-grounding"
 	| "guard.pattern-grounding"
 	| "guard.bash-grounding"
+	| "guard.destructive-command"
 	| "guard.patch-audit"
 	| "guard.edit-precondition"
 	| "guard.erasable-syntax"

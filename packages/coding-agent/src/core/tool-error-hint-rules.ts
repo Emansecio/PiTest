@@ -204,6 +204,48 @@ const bashRules: ToolErrorHintRule[] = [
 			'The shell could not resolve that binary. Check availability with `bash({command:"which <name>"})`, or use a dedicated tool if one exists (read/grep/find/ls/edit/write).',
 	},
 	{
+		// DEPENDENCY class: a script failed at RUNTIME because a module/package is
+		// missing — Python `ModuleNotFoundError`/`No module named`/`ImportError`, or
+		// Node `Cannot find module`/`ERR_MODULE_NOT_FOUND`. Distinct from
+		// `command not found` (a missing BINARY on PATH) and `spawn ENOENT`. Routing:
+		// re-running won't help — install the dep or fix the import first.
+		id: "bash-dependency-missing",
+		appliesTo: "bash",
+		matcher: ({ errorText }) =>
+			/no module named|modulenotfounderror|cannot find module|err_module_not_found|^\s*importerror:/im.test(
+				errorText,
+			),
+		hint: () =>
+			"Missing dependency at runtime (module/package not found). Re-running the same command won't make it appear: install it (`pip install <pkg>` / `npm install <pkg>`) or fix the import path. If the name looks off, verify it on the package index before retrying.",
+	},
+	{
+		// TRANSIENT/NETWORK class: the host/remote was unreachable (curl/wget/npm/git
+		// over the network). Distinct from the tool's own `command timed out after Ns`
+		// kill (that text never contains these codes). Routing: a retry MAY work, so
+		// don't treat it as a code bug — but don't loop on it either.
+		id: "bash-network-transient",
+		appliesTo: "bash",
+		matcher: ({ errorText }) =>
+			/\b(econnrefused|etimedout|enotfound|econnreset|eai_again|enetunreach)\b|getaddrinfo|socket hang up|network is unreachable|temporary failure in name resolution|connection (?:refused|reset|timed out)/i.test(
+				errorText,
+			),
+		hint: () =>
+			"Transient network error — the host/remote was unreachable, not a bug in your code. A single retry may succeed; if it persists, the service is likely offline/unreachable here, so switch to an offline path instead of looping on it.",
+	},
+	{
+		// RESOURCE class: disk or memory exhausted. Routing: re-running as-is fails
+		// the same way — free space / shrink the operation, or escalate as an
+		// environment limit. Never a retry-til-it-works case.
+		id: "bash-resource-exhausted",
+		appliesTo: "bash",
+		matcher: ({ errorText }) =>
+			/\benospc\b|no space left on device|\benomem\b|cannot allocate memory|out of memory|heap out of memory|javascript heap/i.test(
+				errorText,
+			),
+		hint: () =>
+			"Resource exhausted (disk or memory). Re-running as-is will fail identically: free space or shrink the operation's footprint (smaller batch, stream instead of loading everything at once), and report it to the user if it's an environment limit.",
+	},
+	{
 		// Permission denied. Hand it back to the user — agents should never
 		// chmod files unilaterally.
 		id: "bash-permission-denied",

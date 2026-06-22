@@ -23,6 +23,7 @@ import {
 } from "../permissions/index.ts";
 import { createBashGroundingExtension } from "./bash-grounding-extension.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
+import { createDestructiveCommandGuardExtension } from "./destructive-command-guard-extension.ts";
 import { createEditPreconditionExtension } from "./edit-precondition-extension.ts";
 import { createErasableSyntaxPreconditionExtension } from "./erasable-syntax-precondition-extension.ts";
 import { createGroundingGuardExtension } from "./grounding-guard-extension.ts";
@@ -143,6 +144,12 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// Only the explicit `run <script>` form. Block-only, fail-open; opt out
 		// PIT_NO_BASH_GROUNDING.
 		createBashGroundingExtension({ cwd: options.cwd }),
+		// Destructive-command guard: pre-exec, fire-once speed-bump for the MIDDLE tier
+		// of destruction the permission deny-floor (catastrophic `/`/`~` only) lets run
+		// under auto mode — `rm -rf ./src`, `git reset --hard`, `git clean -fd`,
+		// `git checkout .`, `git push --force`. Block-once with an impact note;
+		// re-issue confirms and runs. Fail-open; opt out PIT_NO_DESTRUCTIVE_GUARD.
+		createDestructiveCommandGuardExtension(),
 		// Patch audit: post-exec, appends a compact self-review directive to
 		// medium/high-risk write/edit results based on patch shape. Model-agnostic,
 		// fail-open; opt out PIT_NO_PATCH_AUDIT.

@@ -220,3 +220,51 @@ describe("createSameSessionHintRule truncated-fingerprint matching (#2)", () => 
 		expect(rule.matcher(matchInput("ENOENT"))).toBe(false);
 	});
 });
+
+describe("error-class coverage hints (#15)", () => {
+	it("routes a Python ModuleNotFoundError to the install-dependency hint", () => {
+		const c = call("bash", { command: "python app.py" });
+		const ids = hintIdsFor(c, "Traceback (most recent call last):\nModuleNotFoundError: No module named 'flask'");
+		expect(ids).toContain("bash-dependency-missing");
+		expect(hintTextsFor(c, "ModuleNotFoundError: No module named 'flask'")).toMatch(/install it/i);
+	});
+
+	it("routes a Node 'Cannot find module' to the install-dependency hint", () => {
+		const c = call("bash", { command: "node server.js" });
+		expect(hintIdsFor(c, "Error: Cannot find module 'express'")).toContain("bash-dependency-missing");
+	});
+
+	it("routes a network ECONNREFUSED to the transient hint", () => {
+		const c = call("bash", { command: "curl https://api.example.com" });
+		const ids = hintIdsFor(c, "curl: (7) Failed to connect: connect ECONNREFUSED 127.0.0.1:443");
+		expect(ids).toContain("bash-network-transient");
+	});
+
+	it("routes getaddrinfo ENOTFOUND to the transient hint", () => {
+		const c = call("bash", { command: "npm install" });
+		expect(hintIdsFor(c, "npm ERR! getaddrinfo ENOTFOUND registry.npmjs.org")).toContain("bash-network-transient");
+	});
+
+	it("routes ENOSPC to the resource-exhausted hint", () => {
+		const c = call("bash", { command: "npm install" });
+		expect(hintIdsFor(c, "Error: ENOSPC: no space left on device, write")).toContain("bash-resource-exhausted");
+	});
+
+	it("routes a V8 heap OOM to the resource-exhausted hint", () => {
+		const c = call("bash", { command: "node build.js" });
+		expect(hintIdsFor(c, "FATAL ERROR: ... JavaScript heap out of memory")).toContain("bash-resource-exhausted");
+	});
+
+	it("does not misroute a plain grep no-match as dependency/network/resource", () => {
+		const c = call("bash", { command: "grep foo bar.txt" });
+		const ids = hintIdsFor(c, "Command exited with code 1");
+		expect(ids).not.toContain("bash-dependency-missing");
+		expect(ids).not.toContain("bash-network-transient");
+		expect(ids).not.toContain("bash-resource-exhausted");
+	});
+
+	it("does not fire bash-only class hints for non-bash tools", () => {
+		const c = call("read", { path: "x.py" });
+		expect(hintIdsFor(c, "ModuleNotFoundError: No module named 'flask'")).not.toContain("bash-dependency-missing");
+	});
+});
