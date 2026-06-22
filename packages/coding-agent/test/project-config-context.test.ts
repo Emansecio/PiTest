@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	findTsconfigPathsForFile,
 	loadProjectConfigContext,
 	projectEnforcesErasableSyntax,
 	projectEnforcesNoNestedTernary,
@@ -158,5 +159,64 @@ describe("projectEnforcesNoNestedTernary", () => {
 			JSON.stringify({ linter: { rules: { recommended: false, style: { noNestedTernary: "error" } } } }),
 		);
 		expect(projectEnforcesNoNestedTernary(dir)).toBe(true);
+	});
+});
+
+describe("findTsconfigPathsForFile", () => {
+	let dir: string;
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "pit-cfg-paths-"));
+	});
+	afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+	it("returns undefined when no tsconfig governs the file", () => {
+		expect(findTsconfigPathsForFile(join(dir, "src", "app.ts"))).toBeUndefined();
+	});
+
+	it("reads paths with baseUrl resolved against the config dir", () => {
+		writeFileSync(
+			join(dir, "tsconfig.json"),
+			JSON.stringify({ compilerOptions: { baseUrl: ".", paths: { "@/*": ["src/*"] } } }),
+		);
+		const result = findTsconfigPathsForFile(join(dir, "src", "app.ts"));
+		expect(result?.baseUrl).toBe(join(dir));
+		expect(result?.paths).toEqual({ "@/*": ["src/*"] });
+	});
+
+	it("defaults baseUrl to the config dir when baseUrl is unset", () => {
+		writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ compilerOptions: { paths: { "~/*": ["./*"] } } }));
+		expect(findTsconfigPathsForFile(join(dir, "a.ts"))?.baseUrl).toBe(join(dir));
+	});
+
+	it("parses JSONC comments (which break a plain JSON.parse)", () => {
+		writeFileSync(
+			join(dir, "tsconfig.json"),
+			'{\n  // project config\n  "compilerOptions": {\n    /* alias map */\n    "paths": { "@/*": ["src/*"] }\n  }\n}',
+		);
+		expect(findTsconfigPathsForFile(join(dir, "app.ts"))?.paths).toEqual({ "@/*": ["src/*"] });
+	});
+
+	it("fails open (undefined) on a tsconfig the shared parser can't read (trailing commas)", () => {
+		// The reused readJsonc strips comments but not trailing commas; an unparseable
+		// config yields no mapping rather than throwing -> aliases simply ALLOW.
+		writeFileSync(join(dir, "tsconfig.json"), '{\n  "compilerOptions": { "paths": { "@/*": ["src/*"], } },\n}');
+		expect(findTsconfigPathsForFile(join(dir, "app.ts"))).toBeUndefined();
+	});
+
+	it("inherits paths through the extends chain", () => {
+		writeFileSync(
+			join(dir, "tsconfig.base.json"),
+			JSON.stringify({ compilerOptions: { paths: { "@/*": ["src/*"] } } }),
+		);
+		writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ extends: "./tsconfig.base.json" }));
+		expect(findTsconfigPathsForFile(join(dir, "app.ts"))?.paths).toEqual({ "@/*": ["src/*"] });
+	});
+
+	it("uses the nearest config; a child without paths is authoritative (no paths)", () => {
+		writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({ compilerOptions: { paths: { "@/*": ["src/*"] } } }));
+		const sub = join(dir, "packages", "app");
+		mkdirSync(sub, { recursive: true });
+		writeFileSync(join(sub, "tsconfig.json"), JSON.stringify({ compilerOptions: {} }));
+		expect(findTsconfigPathsForFile(join(sub, "x.ts"))).toBeUndefined();
 	});
 });

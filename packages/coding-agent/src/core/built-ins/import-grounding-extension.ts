@@ -30,6 +30,7 @@ import { dirname, join, resolve } from "node:path";
 import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundImports, IMPORT_GROUNDING_DEFAULTS, isImportGroundingDisabled } from "../import-grounding.ts";
+import { findTsconfigPathsForFile } from "../project-config-context.ts";
 import { extractEdits, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
 import { stableToolCallKey } from "./grounding-fire-once.ts";
 
@@ -218,6 +219,11 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 						// blocked. Workspace package names are included so internal imports
 						// (@pit/*) are never false-blocked.
 						knownPackages,
+						// Wires the ALIAS pass: an `@/x` / `~/x` import that the project's
+						// tsconfig `paths` map but that doesn't resolve on disk (and typos a
+						// real sibling) is blocked. Walk-up + extends + JSONC live in
+						// project-config-context; undefined (no governing paths) -> ALLOW.
+						readTsconfigPaths: findTsconfigPathsForFile,
 					},
 				);
 

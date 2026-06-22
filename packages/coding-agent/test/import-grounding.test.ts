@@ -71,7 +71,7 @@ describe("groundImports — invariant: RELATIVE paths only", () => {
 		expect(decision).toEqual({ action: "allow" });
 	});
 
-	it("allows an alias specifier @/… and ~/… (tsconfig paths, out of scope)", () => {
+	it("allows an alias specifier @/… and ~/… (skipped when the tsconfig-paths dep is not wired)", () => {
 		const a = groundImports({ targetFile: TARGET, content: `import x from "@/utils";` }, makeDeps([]));
 		const b = groundImports({ targetFile: TARGET, content: `import y from "~/lib/foo";` }, makeDeps([]));
 		expect(a).toEqual({ action: "allow" });
@@ -80,6 +80,65 @@ describe("groundImports — invariant: RELATIVE paths only", () => {
 
 	it("allows a scoped package @scope/pkg (not relative)", () => {
 		const decision = groundImports({ targetFile: TARGET, content: `import { z } from "@pit/ai";` }, makeDeps([]));
+		expect(decision).toEqual({ action: "allow" });
+	});
+});
+
+describe("groundImports — tsconfig path aliases (@/…, ~/…)", () => {
+	// baseUrl is the project root; @/* -> src/*, ~/* -> ./* (root-relative).
+	const TS_PATHS = { baseUrl: resolvePath("/proj"), paths: { "@/*": ["src/*"], "~/*": ["./*"] } };
+	const readTsconfigPaths = () => TS_PATHS;
+
+	it("skips the alias pass entirely when readTsconfigPaths is not wired", () => {
+		const decision = groundImports({ targetFile: TARGET, content: `import x from "@/nope";` }, makeDeps([]));
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("allows when readTsconfigPaths returns undefined (no governing config)", () => {
+		const deps = makeDeps([], { readTsconfigPaths: () => undefined });
+		const decision = groundImports({ targetFile: TARGET, content: `import x from "@/nope";` }, deps);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("allows a mapped alias that resolves on disk (@/* -> src/*)", () => {
+		const deps = makeDeps([resolvePath("/proj/src/utils.ts")], { readTsconfigPaths });
+		const decision = groundImports({ targetFile: TARGET, content: `import { u } from "@/utils";` }, deps);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("resolves the ~/* -> ./* mapping (subdir target)", () => {
+		const deps = makeDeps([resolvePath("/proj/lib/foo.ts")], { readTsconfigPaths });
+		const decision = groundImports({ targetFile: TARGET, content: `import y from "~/lib/foo";` }, deps);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("blocks a mapped alias that is missing but typos a real sibling", () => {
+		const deps = makeDeps([resolvePath("/proj/src/utils.ts")], { readTsconfigPaths });
+		const decision = groundImports({ targetFile: TARGET, content: `import { u } from "@/utis";` }, deps);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") {
+			expect(decision.kind).toBe("alias");
+			expect(decision.message).toContain("@/utils");
+		}
+	});
+
+	it("allows a missing alias with no close sibling (fail-open)", () => {
+		const deps = makeDeps([resolvePath("/proj/src/utils.ts")], { readTsconfigPaths });
+		const decision = groundImports({ targetFile: TARGET, content: `import x from "@/zzzzzz";` }, deps);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("allows an alias not covered by any paths pattern", () => {
+		const onlyAt = { baseUrl: resolvePath("/proj"), paths: { "@/*": ["src/*"] } };
+		const deps = makeDeps([], { readTsconfigPaths: () => onlyAt });
+		const decision = groundImports({ targetFile: TARGET, content: `import x from "~/whatever";` }, deps);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("picks the longest-prefix pattern (@/ui/* over @/*)", () => {
+		const cfg = { baseUrl: resolvePath("/proj"), paths: { "@/*": ["src/*"], "@/ui/*": ["components/*"] } };
+		const deps = makeDeps([resolvePath("/proj/components/Button.ts")], { readTsconfigPaths: () => cfg });
+		const decision = groundImports({ targetFile: TARGET, content: `import { B } from "@/ui/Button";` }, deps);
 		expect(decision).toEqual({ action: "allow" });
 	});
 });

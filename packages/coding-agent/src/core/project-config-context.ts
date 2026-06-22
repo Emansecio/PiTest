@@ -123,6 +123,78 @@ function loadMergedCompilerOptions(cwd: string): Record<string, unknown> | undef
 	return merged && Object.keys(merged).length > 0 ? merged : undefined;
 }
 
+/** A resolved tsconfig `paths`/`baseUrl` mapping (absolute baseUrl). */
+export interface TsconfigPathsResult {
+	baseUrl: string;
+	paths: Record<string, string[]>;
+}
+
+/** Coerce a raw `compilerOptions.paths` value to `Record<string, string[]>`, or undefined when empty/invalid. */
+function normalizeTsPaths(raw: unknown): Record<string, string[]> | undefined {
+	const record = asRecord(raw);
+	if (!record) return undefined;
+	const out: Record<string, string[]> = {};
+	for (const [key, value] of Object.entries(record)) {
+		if (!Array.isArray(value)) continue;
+		const targets = value.filter((target): target is string => typeof target === "string" && target.length > 0);
+		if (targets.length > 0) out[key] = targets;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Resolve the first `paths` mapping reachable from `absPath` (its own, else its
+ * `extends` chain), with `baseUrl` resolved against the config that DEFINES the
+ * paths (TS semantics). Bounded depth + visited set guard against cycles.
+ */
+function resolvePathsFromConfig(absPath: string, depth: number, visited: Set<string>): TsconfigPathsResult | undefined {
+	if (depth > 8 || visited.has(absPath)) return undefined;
+	visited.add(absPath);
+	const json = readJsonc(absPath);
+	if (!json) return undefined;
+	const configDir = dirname(absPath);
+	const co = asRecord(json.compilerOptions);
+	if (co) {
+		const paths = normalizeTsPaths(co.paths);
+		if (paths) {
+			const baseUrl = typeof co.baseUrl === "string" ? resolve(configDir, co.baseUrl) : configDir;
+			return { baseUrl, paths };
+		}
+	}
+	const ext = json.extends;
+	let specs: string[] = [];
+	if (typeof ext === "string") specs = [ext];
+	else if (Array.isArray(ext)) specs = ext.filter((s): s is string => typeof s === "string");
+	for (const spec of specs) {
+		const parentPath = resolveExtendsPath(spec, configDir);
+		if (!parentPath) continue;
+		const found = resolvePathsFromConfig(parentPath, depth + 1, visited);
+		if (found) return found;
+	}
+	return undefined;
+}
+
+/**
+ * Resolve the tsconfig/jsconfig `paths` mapping that governs `targetFile`: walk up
+ * from its directory to the NEAREST config, then take the first `paths` found
+ * through that config's `extends` chain. The nearest config is authoritative — if
+ * it maps no paths, aliases are not grounded here (return undefined -> caller
+ * ALLOWs). Best-effort / fail-open: any unreadable link yields undefined.
+ */
+export function findTsconfigPathsForFile(targetFile: string): TsconfigPathsResult | undefined {
+	if (typeof targetFile !== "string" || targetFile.length === 0) return undefined;
+	let dir = dirname(resolve(targetFile));
+	for (;;) {
+		for (const name of ["tsconfig.json", "jsconfig.json"]) {
+			const file = join(dir, name);
+			if (existsSync(file)) return resolvePathsFromConfig(file, 0, new Set());
+		}
+		const parent = dirname(dir);
+		if (parent === dir) return undefined;
+		dir = parent;
+	}
+}
+
 function summarizeTsconfig(cwd: string): string[] {
 	const co = loadMergedCompilerOptions(cwd);
 	if (!co) return [];

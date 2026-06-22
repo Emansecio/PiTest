@@ -50,12 +50,12 @@ import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 /**
  * Verdict returned by `groundImports`. BLOCK-only: never rewrites content.
  * The block branch carries `kind` ("path" = unresolved relative module,
- * "bare" = unknown package specifier, "export" = unexported named binding) for
- * downstream telemetry.
+ * "bare" = unknown package specifier, "export" = unexported named binding,
+ * "alias" = unresolved tsconfig-`paths` alias) for downstream telemetry.
  */
 export type ImportGroundingDecision =
 	| { action: "allow" }
-	| { action: "block"; kind: "path" | "export" | "bare"; message: string };
+	| { action: "block"; kind: "path" | "export" | "bare" | "alias"; message: string };
 
 /** The file being written + its new content, plus the injectable fs/fuzzy deps. */
 export interface ImportGroundingInput {
@@ -135,7 +135,30 @@ export interface ImportGroundingDeps {
 	 * with no close known-package name is always ALLOWED.
 	 */
 	knownPackages?: () => Set<string>;
+	/**
+	 * Resolve the nearest tsconfig/jsconfig `paths`/`baseUrl` mapping that governs
+	 * `targetFile` (the file being written). OPTIONAL: when omitted (mirroring
+	 * `readFile`/`knownPackages`), the ALIAS pass is skipped entirely (fail-open).
+	 * Returns undefined when no config applies (no governing tsconfig, no `paths`,
+	 * or it can't be read), in which case aliases ALLOW untouched.
+	 */
+	readTsconfigPaths?: ReadTsconfigPaths;
 }
+
+/** A resolved tsconfig path-mapping context for a target file. */
+export interface TsconfigPaths {
+	/** Absolute base directory that the substitution targets resolve against. */
+	baseUrl: string;
+	/** compilerOptions.paths: pattern -> substitution targets (relative to baseUrl). */
+	paths: Record<string, string[]>;
+}
+
+/**
+ * Resolve the tsconfig `paths` context governing `targetFile`, or undefined. The
+ * heavy IO (walk-up to the nearest config, `extends` chain, JSONC parse) lives in
+ * the adapter; the pure module only consumes the resolved mapping.
+ */
+export type ReadTsconfigPaths = (targetFile: string) => TsconfigPaths | undefined;
 
 // ============================================================================
 // Tuning
@@ -310,6 +333,15 @@ function extractBareSpecifiers(content: string): string[] {
  */
 function extractRelativeSpecifiers(content: string): string[] {
 	return extractSpecifiers(content, isRelativeSpecifier);
+}
+
+/**
+ * Extract every UNIQUE alias specifier (`@/…`, `~/…`) from `content`, in
+ * first-seen order. These are the tsconfig-`paths` aliases the alias pass
+ * resolves; relative/bare/imports-map specifiers are dropped.
+ */
+function extractAliasSpecifiers(content: string): string[] {
+	return extractSpecifiers(content, isAliasSpecifier);
 }
 
 // ============================================================================
@@ -694,6 +726,144 @@ function validateBarePackages(content: string, deps: ImportGroundingDeps): Impor
 }
 
 // ============================================================================
+// Alias validation (tsconfig `paths`)
+// ----------------------------------------------------------------------------
+// A specifier starting with `@/` or `~/` is a tsconfig-`paths` alias, not a file
+// on disk nor a package. When the project's tsconfig maps it (e.g. `@/*`->`src/*`)
+// we can resolve the substituted target against the fs exactly like a relative
+// import, and block one round-trip before the type-check when it doesn't exist.
+// SAME block-only / fail-open posture as the other passes, plus extra restraint
+// for the monorepo false-block hazard the audit flagged:
+//   - readTsconfigPaths dep OMITTED -> pass skipped entirely.
+//   - no governing tsconfig / config has no `paths` -> the dep returns undefined
+//     -> ALLOW (we never guess a mapping).
+//   - the alias matches NO `paths` pattern -> ALLOW (it may be a bundler/`imports`
+//     alias we don't model).
+//   - a target that DOES resolve on disk -> ALLOW.
+//   - unresolved BUT no close-named sibling in the target dir -> ALLOW.
+// Only an alias that the tsconfig maps, whose every target is missing, AND that
+// has a close typo'd sibling, is blocked.
+// ============================================================================
+
+/**
+ * Substitute an alias `spec` through ONE tsconfig `paths` pattern, returning the
+ * candidate targets (relative to baseUrl) or null when the pattern doesn't match.
+ * Supports the single-`*` wildcard form (`@/*` -> `src/*`) and exact patterns.
+ */
+function substituteAliasPattern(spec: string, pattern: string, targets: string[]): string[] | null {
+	const star = pattern.indexOf("*");
+	if (star < 0) {
+		if (spec !== pattern) return null;
+		return targets.filter((target) => !target.includes("*"));
+	}
+	const prefix = pattern.slice(0, star);
+	const suffix = pattern.slice(star + 1);
+	if (spec.length < prefix.length + suffix.length) return null;
+	if (!spec.startsWith(prefix) || !spec.endsWith(suffix)) return null;
+	const captured = spec.slice(prefix.length, spec.length - suffix.length);
+	return targets.map((target) => (target.includes("*") ? target.replace("*", captured) : target));
+}
+
+/**
+ * Resolve an alias `spec` to its substitution targets via the BEST-matching
+ * pattern (longest static prefix wins, mirroring TS `paths` resolution). Returns
+ * the targets (relative to baseUrl) or undefined when no pattern matches.
+ */
+function resolveAliasTargets(spec: string, cfg: TsconfigPaths): string[] | undefined {
+	let best: { prefixLen: number; targets: string[] } | undefined;
+	for (const [pattern, targets] of Object.entries(cfg.paths)) {
+		const subbed = substituteAliasPattern(spec, pattern, targets);
+		if (subbed === null || subbed.length === 0) continue;
+		const star = pattern.indexOf("*");
+		const prefixLen = star < 0 ? pattern.length : star;
+		if (best === undefined || prefixLen > best.prefixLen) best = { prefixLen, targets: subbed };
+	}
+	return best?.targets;
+}
+
+/**
+ * Build close-candidate ALIAS specifiers for a broken `spec` whose targets don't
+ * resolve: list the dir of the first listable target, fuzzy-rank its entries
+ * against the wanted basename, and re-attach the alias prefix so each suggestion
+ * is itself a usable specifier. [] when nothing is close (caller -> ALLOW).
+ */
+function rankAliasCandidates(spec: string, targets: string[], baseUrl: string, deps: ImportGroundingDeps): string[] {
+	const aliasLastSlash = spec.lastIndexOf("/");
+	const aliasPrefix = aliasLastSlash >= 0 ? spec.slice(0, aliasLastSlash + 1) : "";
+	for (const target of targets) {
+		const lastSlash = target.lastIndexOf("/");
+		const targetDir = lastSlash >= 0 ? target.slice(0, lastSlash) : ".";
+		const wanted = stripKnownExtension(lastSlash >= 0 ? target.slice(lastSlash + 1) : target);
+		if (wanted.length === 0) continue;
+		const absDir = resolvePath(baseUrl, targetDir);
+		let entries: string[];
+		try {
+			entries = deps.listDir(absDir);
+		} catch {
+			continue;
+		}
+		if (entries.length === 0) continue;
+		const seen = new Set<string>();
+		const pool: string[] = [];
+		for (const entry of entries) {
+			const bare = stripKnownExtension(entry);
+			if (bare.length === 0 || bare === wanted || seen.has(bare)) continue;
+			seen.add(bare);
+			pool.push(bare);
+		}
+		const ranked = rankBareNames(wanted, pool, deps);
+		if (ranked.length > 0) return ranked.map((name) => `${aliasPrefix}${name}`);
+	}
+	return [];
+}
+
+/** Block message for an aliased import that the project's tsconfig paths don't resolve. */
+function formatAliasBlockMessage(specifier: string, candidates: string[]): string {
+	const list = candidates.join(", ");
+	return (
+		`Import grounding (no write attempted): aliased import "${specifier}" does not resolve ` +
+		`through the project's tsconfig paths. Did you mean: ${list}? Fix the import path, ` +
+		"or re-issue the identical call to write it anyway."
+	);
+}
+
+/**
+ * Validate every ALIAS specifier (`@/x`, `~/x`) against the tsconfig `paths`
+ * mapping governing `targetFile`. Returns the FIRST block (a mapped alias whose
+ * targets are all missing AND that has a close sibling) or null. Pure — the
+ * tsconfig lookup is supplied via the injected `readTsconfigPaths` dep.
+ */
+function validateAliasImports(
+	targetFile: string,
+	content: string,
+	deps: ImportGroundingDeps,
+): ImportGroundingDecision | null {
+	const readTsconfigPaths = deps.readTsconfigPaths;
+	if (readTsconfigPaths === undefined) return null; // alias grounding not wired -> skip
+	const aliasSpecs = extractAliasSpecifiers(content);
+	if (aliasSpecs.length === 0) return null;
+	let cfg: TsconfigPaths | undefined;
+	try {
+		cfg = readTsconfigPaths(targetFile);
+	} catch {
+		return null; // tsconfig unreadable -> fail-open
+	}
+	if (cfg === undefined) return null; // no governing tsconfig paths -> ALLOW
+	const config = cfg;
+	for (const spec of aliasSpecs) {
+		if (hasNonGroundableExtension(spec)) continue;
+		const targets = resolveAliasTargets(spec, config);
+		if (targets === undefined) continue; // alias not mapped by this tsconfig -> ALLOW
+		const resolved = targets.some((target) => resolveModulePath(config.baseUrl, target, deps.fileExists) !== null);
+		if (resolved) continue;
+		const candidates = rankAliasCandidates(spec, targets, config.baseUrl, deps);
+		if (candidates.length === 0) continue; // no close sibling -> ALLOW (fail-open)
+		return { action: "block", kind: "alias", message: formatAliasBlockMessage(spec, candidates) };
+	}
+	return null;
+}
+
+// ============================================================================
 // Main entry point
 // ============================================================================
 
@@ -738,6 +908,12 @@ export function groundImports(input: ImportGroundingInput, deps: ImportGrounding
 		// Only runs when `knownPackages` is wired; fail-open everywhere else.
 		const bareDecision = validateBarePackages(content, deps);
 		if (bareDecision !== null) return bareDecision;
+
+		// Alias pass — an `@/x` / `~/x` import the tsconfig `paths` map but that does
+		// not resolve on disk. Disjoint from the relative/bare passes (alias specifier
+		// set). Only runs when `readTsconfigPaths` is wired; fail-open everywhere else.
+		const aliasDecision = validateAliasImports(targetFile, content, deps);
+		if (aliasDecision !== null) return aliasDecision;
 
 		// Pass 2 — every named binding must be exported by its (resolved) module.
 		// Only runs when a `readFile` dep is wired; fail-open everywhere else.
