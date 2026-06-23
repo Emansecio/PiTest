@@ -763,8 +763,11 @@ npx tsx test/chat-simple.ts
 # Install dependencies (from monorepo root)
 npm install
 
-# Run type checking
+# Run root validation checks (does not include the @pit/tui node:test suite)
 npm run check
+
+# Run the @pit/tui test suite after touching TUI code
+npm run test -w @pit/tui
 
 # Run the demo
 npx tsx test/chat-simple.ts

@@ -35,7 +35,10 @@ saves a class of tool-call errors:
 - **Vitest path**: `npx tsx ../../node_modules/vitest/dist/cli.js --run
   test/specific.test.ts` — run from the package root, not the repo root.
 - **`npm run check`**: full output, no tail. Fix all errors, warnings, and
-  infos. It does NOT run tests.
+  infos. It runs the root static/smoke checks plus the `@pit/coding-agent`
+  vitest suite. It does not run every workspace package test suite; run the
+  affected package test command separately when touching `@pit/ai`,
+  `@pit/agent-core`, or `@pit/tui`.
 - **NEVER run from an agent loop**: `npm run build`, `npm test`, `npm run
   release:*`, anything that bumps versions or publishes.
 - **Erasable TypeScript only** in src/test under the root tsconfig: no `enum`,
