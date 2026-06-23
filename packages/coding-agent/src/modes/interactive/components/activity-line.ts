@@ -165,7 +165,12 @@ export class ActivityLineComponent extends Container {
 		let line = theme.fg("toolTitle", path);
 		const { added, removed } = diffStat(this.exec.getResultDetails()?.diff);
 		if (added || removed) {
-			line += ` ${theme.fg("gutterToolSuccess", `+${added}`)} ${theme.fg("gutterToolError", `-${removed}`)}`;
+			// Show only the non-zero side(s): `+12` for a write, `-3` for a deletion,
+			// `+12 -3` for a real edit — no noisy `+0`/`-0` filler.
+			const stat: string[] = [];
+			if (added) stat.push(theme.fg("gutterToolSuccess", `+${added}`));
+			if (removed) stat.push(theme.fg("gutterToolError", `-${removed}`));
+			line += ` ${stat.join(" ")}`;
 		}
 		return line;
 	}

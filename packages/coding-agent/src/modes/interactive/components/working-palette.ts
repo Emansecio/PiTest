@@ -6,7 +6,7 @@ import { theme as globalTheme, type Theme } from "../theme/theme.ts";
  * Number of phases in the truecolor breathing gradient. The Loader sweeps the
  * whole palette once per breath cycle, so more phases = smoother (not slower).
  */
-const BREATH_PHASES = 16;
+const BREATH_PHASES = 24;
 
 /**
  * Spinner color pulse for every "work in progress" Loader.

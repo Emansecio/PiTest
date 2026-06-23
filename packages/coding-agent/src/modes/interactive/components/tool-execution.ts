@@ -33,7 +33,7 @@ const FALLBACK_RESULT_PREVIEW_LINES = 15;
 const SINGLE_LINE_PREVIEW_TOOLS = new Set<string>(["task"]);
 
 /** Duration of the gutter color fade when a tool settles pending → success/error (P5). */
-const GUTTER_EASE_MS = 220;
+const GUTTER_EASE_MS = 180;
 
 /** Result text marking an aborted/interrupted tool (vs a real failure). Such
  * results must not auto-expand their captured output — the user chose to stop. */

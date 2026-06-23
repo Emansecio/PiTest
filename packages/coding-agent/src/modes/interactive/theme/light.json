@@ -52,7 +52,7 @@
 		"mdCodeBlock": "#2f6f5a",
 		"mdCodeBlockBorder": "borderMuted",
 		"mdQuote": "muted",
-		"mdQuoteBorder": "dim",
+		"mdQuoteBorder": "muted",
 		"mdHr": "muted",
 		"mdListBullet": "teal",
 

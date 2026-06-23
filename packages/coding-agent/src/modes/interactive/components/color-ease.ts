@@ -4,7 +4,7 @@ import { type ThemeColor, theme } from "../theme/theme.ts";
 
 /** Matches the gutter ease (tool-execution.ts) so all state-icon settles share
  * one cadence. */
-const COLOR_EASE_MS = 220;
+const COLOR_EASE_MS = 180;
 
 /**
  * Drives a one-shot foreground color transition for a single glyph/label,
