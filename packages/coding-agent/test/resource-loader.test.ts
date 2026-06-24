@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ExtensionRunner } from "../src/core/extensions/runner.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -25,6 +25,7 @@ describe("DefaultResourceLoader", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -425,6 +426,32 @@ Content`,
 
 			const { skills } = loader.getSkills();
 			expect(skills).toEqual([]);
+		});
+
+		it("should NOT load legacy skill dirs (.codex/.claude/…) when noSkills is true", async () => {
+			// PIT_NO_LEGACY_SKILLS disables legacy discovery suite-wide; re-enable it
+			// locally so this actually exercises the legacy path the fix touches.
+			vi.stubEnv("PIT_NO_LEGACY_SKILLS", "");
+			const legacySkills = join(agentDir, ".codex", "skills");
+			mkdirSync(legacySkills, { recursive: true });
+			writeFileSync(
+				join(legacySkills, "legacy-skill.md"),
+				`---
+name: legacy-skill
+description: A legacy skill
+---
+Content`,
+			);
+
+			// Sanity: discovery ON + noSkills OFF finds the legacy skill.
+			const withDiscovery = new DefaultResourceLoader({ cwd, agentDir });
+			await withDiscovery.reload();
+			expect(withDiscovery.getSkills().skills.some((s) => s.name === "legacy-skill")).toBe(true);
+
+			// noSkills ON must drop legacy discovery too → no skills.
+			const noSkills = new DefaultResourceLoader({ cwd, agentDir, noSkills: true });
+			await noSkills.reload();
+			expect(noSkills.getSkills().skills).toEqual([]);
 		});
 
 		it("should still load additional skill paths when noSkills is true", async () => {

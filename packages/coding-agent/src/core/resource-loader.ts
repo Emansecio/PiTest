@@ -539,8 +539,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 		// --no-legacy-discovery still wins (already yields an empty skillDirs).
 		const legacySkillPaths =
 			this.noLegacyDiscovery || isTruthyEnvFlag(process.env.PIT_NO_LEGACY_SKILLS) ? [] : legacyResult.skillDirs;
+		// `noSkills` drops ALL auto-discovery — both settings-enabled skills AND
+		// legacy skill dirs (.claude/.codex/.cursor/.gemini). Only EXPLICIT sources
+		// survive (CLI --skill, programmatic additionalSkillPaths). Previously
+		// legacySkillPaths leaked through here, so --no-skills still loaded skills
+		// from the user's legacy dirs, contradicting the flag.
 		const skillPaths = this.noSkills
-			? this.mergePaths(cliEnabledSkills, [...this.additionalSkillPaths, ...legacySkillPaths])
+			? this.mergePaths(cliEnabledSkills, [...this.additionalSkillPaths])
 			: this.mergePaths(
 					[...cliEnabledSkills, ...enabledSkills],
 					[...this.additionalSkillPaths, ...legacySkillPaths],
