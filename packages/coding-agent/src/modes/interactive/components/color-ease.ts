@@ -1,4 +1,5 @@
 import type { TUI } from "@pit/tui";
+import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 
@@ -34,12 +35,20 @@ export class ColorEase {
 		return this.unsub !== null;
 	}
 
+	/** Eased progress 0→1 of the in-flight transition (smoothstep); 1 when settled.
+	 * Lets a caller stage a two-phase settle (e.g. hold one glyph through the first
+	 * half, swap on the second) against this same shared ease. */
+	get progress(): number {
+		return this.unsub !== null ? this.eased : 1;
+	}
+
 	/** Begin easing `from` → `to`. No-op-animates (snaps) without truecolor. */
 	begin(from: ThemeColor, to: ThemeColor): void {
 		this.stop();
 		this.to = to;
-		// No truecolor easing available: leave it to the steady color.
-		if (!interpolateFg(from, to, 0)) {
+		// No truecolor easing available, or motion suppressed (reduced-motion):
+		// settle on the steady color without registering an animation callback.
+		if (isReducedMotion() || !interpolateFg(from, to, 0)) {
 			this.onFrame();
 			return;
 		}

@@ -10,6 +10,7 @@ import {
 	visibleWidth,
 } from "@pit/tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
+import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { sliceSafe } from "../../../utils/surrogate.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
@@ -518,7 +519,7 @@ export class AssistantMessageComponent extends Container {
 	 * at once, so the final text never lags behind completion.
 	 */
 	private syncReveal(message: AssistantMessage): void {
-		if (!this.smoothing || !this.ui || message.stopReason) {
+		if (!this.smoothing || isReducedMotion() || !this.ui || message.stopReason) {
 			this.stopReveal();
 			return;
 		}
@@ -649,6 +650,10 @@ export class AssistantMessageComponent extends Container {
 	 * already running (keeps the phase stable across content rebuilds) or no ui. */
 	private startThinkingBreath(): void {
 		if (this.breathUnsub || !this.ui) return;
+		if (isReducedMotion()) {
+			this.breathT = 1; // static, fully-lit label; no oscillation
+			return;
+		}
 		this.breathStart = performance.now();
 		this.breathUnsub = this.ui.addAnimationCallback((now: number): boolean => {
 			const phase = ((now - this.breathStart) % THINKING_BREATH_MS) / THINKING_BREATH_MS;

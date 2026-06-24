@@ -1,4 +1,5 @@
 import { getCapabilities, type LoaderColorFn } from "@pit/tui";
+import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { lerpRgb, parseTrueColorFg, rgbFg } from "../theme/color-interpolation.ts";
 import { theme as globalTheme, type Theme } from "../theme/theme.ts";
 
@@ -25,6 +26,11 @@ const BREATH_PHASES = 24;
  * the right default and tracks theme switches at runtime.
  */
 export function workingPulsePalette(themeInstance: Theme = globalTheme): LoaderColorFn[] {
+	if (isReducedMotion()) {
+		// Reduced-motion: a single steady accent phase. The spinner glyph still turns;
+		// only its color stops breathing.
+		return [(s) => themeInstance.fg("accent", s)];
+	}
 	const gradient = breathingGradient(themeInstance);
 	if (gradient) return gradient;
 	if (grayPolesCollapse(themeInstance)) {

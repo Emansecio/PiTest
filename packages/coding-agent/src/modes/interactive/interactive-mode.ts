@@ -4069,9 +4069,10 @@ export class InteractiveMode {
 	}
 
 	showError(errorMessage: string): void {
+		// Leading blank only — mirror showWarning. A trailing Spacer here stacked a
+		// second blank against the next block's own leading gap (double gap after errors).
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
 		this.ui.requestRender();
 	}
 

@@ -25,6 +25,9 @@ export class NavGroupComponent extends Container {
 	private execs: ToolExecutionComponent[] = [];
 	private expanded = false;
 	private spinnerGlyph: string | null = null;
+	// Last non-null spinner frame, kept after the ticker stops so the settle
+	// crossfade can hold the glyph through the first half of the icon ease.
+	private lastSpinnerGlyph: string | null = null;
 	// Counters depend only on the group's composition (tool names), so cache the
 	// rendered string and rebuild it lazily on addCall instead of every frame.
 	private countsCache: string | null = null;
@@ -66,6 +69,7 @@ export class NavGroupComponent extends Container {
 			() => this.aggregateState() === "pending",
 			(g) => {
 				this.spinnerGlyph = g;
+				if (g !== null) this.lastSpinnerGlyph = g;
 				if (g === null) {
 					this.ticker?.stop();
 					this.ticker = null;
@@ -141,6 +145,12 @@ export class NavGroupComponent extends Container {
 		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
 		const glyph = state === "error" ? ICON_ERROR : ICON_SUCCESS;
 		const steady: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
+		// Crossfade on settle: hold the last spinner frame through the first half of
+		// the color ease, then hand off to the check/cross glyph instead of snapping.
+		// No-op under reduced-motion (the ease never starts).
+		if (this.iconEase.active && this.iconEase.progress < 0.5) {
+			return this.iconEase.colorize(steady, this.lastSpinnerGlyph ?? SPINNER_FRAMES[0]);
+		}
 		return this.iconEase.colorize(steady, glyph);
 	}
 

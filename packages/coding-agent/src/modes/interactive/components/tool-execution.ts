@@ -13,6 +13,7 @@ import {
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { allToolNames, createToolDefinition, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
@@ -549,8 +550,9 @@ export class ToolExecutionComponent extends MessageShell {
 		// Hand the gutter back from the running spinner to the static bar first.
 		this.stopRunningSpinner();
 		const to: ThemeColor = target === "error" ? "gutterToolError" : "gutterToolSuccess";
-		// No truecolor easing available (256-color / unparseable): snap.
-		if (!interpolateFg("gutterToolPending", to, 0)) {
+		// No truecolor easing available (256-color / unparseable), or motion
+		// suppressed (reduced-motion): snap straight to the settled gutter color.
+		if (isReducedMotion() || !interpolateFg("gutterToolPending", to, 0)) {
 			this.stopGutterEase();
 			this.setGutterColor(this.toolGutterColor(target));
 			return;

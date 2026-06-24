@@ -24,6 +24,9 @@ export class ActivityLineComponent extends Container {
 	private exec!: ToolExecutionComponent;
 	private expanded = false;
 	private spinnerGlyph: string | null = null;
+	// Last non-null spinner frame, kept after the ticker stops so the settle
+	// crossfade can hold the glyph through the first half of the icon ease.
+	private lastSpinnerGlyph: string | null = null;
 	private ticker: SpinnerTicker | null = null;
 	private prevState: LineState | null = null;
 	private readonly iconEase: ColorEase;
@@ -104,6 +107,7 @@ export class ActivityLineComponent extends Container {
 			() => this.exec.getActivityState() === "pending",
 			(g) => {
 				this.spinnerGlyph = g;
+				if (g !== null) this.lastSpinnerGlyph = g;
 				if (g === null) {
 					this.ticker?.stop();
 					this.ticker = null;
@@ -127,6 +131,12 @@ export class ActivityLineComponent extends Container {
 		if (state === "pending") return theme.fg("gutterToolPending", this.spinnerGlyph ?? SPINNER_FRAMES[0]);
 		const glyph = state === "error" ? ICON_ERROR : ICON_SUCCESS;
 		const steady: ThemeColor = state === "error" ? "gutterToolError" : "gutterToolSuccess";
+		// Crossfade on settle: hold the last spinner frame through the first half of
+		// the color ease, then hand off to ✓/✗ — the glyph eases into the check
+		// instead of snapping. Reduced-motion skips the ease, so this is a no-op there.
+		if (this.iconEase.active && this.iconEase.progress < 0.5) {
+			return this.iconEase.colorize(steady, this.lastSpinnerGlyph ?? SPINNER_FRAMES[0]);
+		}
 		return this.iconEase.colorize(steady, glyph);
 	}
 
