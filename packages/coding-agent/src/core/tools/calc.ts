@@ -397,6 +397,18 @@ export function createCalcToolDefinition(
 			try {
 				const value = evaluate(input.expression);
 				const formatted = formatValue(value, precision);
+				if (!Number.isFinite(value)) {
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: `calc error: result is ${formatted} (division by zero or domain error)`,
+							},
+						],
+						isError: true,
+						details: { value, formatted },
+					};
+				}
 				return {
 					content: [{ type: "text" as const, text: formatted }],
 					details: { value, formatted },

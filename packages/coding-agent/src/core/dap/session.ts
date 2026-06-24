@@ -777,12 +777,13 @@ export class DapSessionManager {
 		const session = this.#touchActiveSession();
 		if (session.status === "stopped") return buildSummary(session);
 		const threadId = await this.#resolveThreadId(session, signal, timeoutMs);
+		// Subscribe to "stopped" BEFORE sending the request so a fast adapter that delivers
+		// the event before the await is attached doesn't fall through to the full timeout.
+		const stoppedPromise = session.client.waitForEvent<DapStoppedEventBody>("stopped", undefined, signal, timeoutMs);
+		stoppedPromise.catch(() => {});
 		await this.#sendRequestWithConfig(session, "pause", { threadId } satisfies DapPauseArguments, signal, timeoutMs);
 		try {
-			await untilAborted(
-				signal,
-				session.client.waitForEvent<DapStoppedEventBody>("stopped", undefined, signal, timeoutMs),
-			);
+			await untilAborted(signal, stoppedPromise);
 		} catch {
 			// Timeout or abort — report current state regardless.
 		}

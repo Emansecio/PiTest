@@ -1,6 +1,7 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { unlink } from "node:fs/promises";
+import { promisify } from "node:util";
 import {
 	type Component,
 	Container,
@@ -622,16 +623,34 @@ type SessionsLoader = (onProgress?: SessionListProgress) => Promise<SessionInfo[
 async function deleteSessionFile(
 	sessionPath: string,
 ): Promise<{ ok: boolean; method: "trash" | "unlink"; error?: string }> {
-	// Try `trash` first (if installed)
+	// Try `trash` first (if installed). Run it off the render thread via an awaited
+	// promisified execFile so a slow/hung `trash` binary never freezes the TUI.
 	const trashArgs = sessionPath.startsWith("-") ? ["--", sessionPath] : [sessionPath];
-	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8" });
+	let trashOk = false;
+	let trashSpawnError: string | null = null;
+	let trashStderr = "";
+	try {
+		await promisify(execFile)("trash", trashArgs, { encoding: "utf-8" });
+		trashOk = true;
+	} catch (err) {
+		// execFile rejects on spawn failure (e.g. ENOENT) and on non-zero exit.
+		const e = err as { message?: string; code?: unknown; stderr?: string };
+		if (typeof e.stderr === "string") {
+			trashStderr = e.stderr;
+		}
+		// spawnSync only populated `.error` on a spawn failure (string `code` such as
+		// "ENOENT"), not on a non-zero exit; mirror that so the hint stays identical.
+		if (typeof e.code === "string") {
+			trashSpawnError = e.message ?? String(err);
+		}
+	}
 
 	const getTrashErrorHint = (): string | null => {
 		const parts: string[] = [];
-		if (trashResult.error) {
-			parts.push(trashResult.error.message);
+		if (trashSpawnError) {
+			parts.push(trashSpawnError);
 		}
-		const stderr = trashResult.stderr?.trim();
+		const stderr = trashStderr.trim();
 		if (stderr) {
 			parts.push(stderr.split("\n")[0] ?? stderr);
 		}
@@ -640,7 +659,7 @@ async function deleteSessionFile(
 	};
 
 	// If trash reports success, or the file is gone afterwards, treat it as successful
-	if (trashResult.status === 0 || !existsSync(sessionPath)) {
+	if (trashOk || !existsSync(sessionPath)) {
 		return { ok: true, method: "trash" };
 	}
 

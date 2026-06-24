@@ -215,6 +215,7 @@ const networkBodySchema = Type.Object(
 );
 
 const GET_TEXT_DEFAULT_LIMIT = 20_000;
+const GET_TEXT_MAX_LIMIT = 1_000_000;
 
 // --- Tool definitions ------------------------------------------------------
 
@@ -429,7 +430,7 @@ export function createChromeGetTextDefinition(): ToolDefinition<typeof getTextSc
 		schema: getTextSchema,
 		run: async (mgr, input, signal) => {
 			const text = await mgr.getPageText(signal);
-			const limit = input.limit ?? GET_TEXT_DEFAULT_LIMIT;
+			const limit = Math.max(1, Math.min(GET_TEXT_MAX_LIMIT, input.limit ?? GET_TEXT_DEFAULT_LIMIT));
 			if (text.length <= limit) return textResult(text);
 			return textResult(
 				`${sliceSafe(text, 0, limit)}\n… [truncated ${text.length - limit} of ${text.length} chars]`,
@@ -541,7 +542,7 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 			if (r.base64Encoded) {
 				return textResult(`(binary body, ${r.body.length} base64 chars — not shown)`);
 			}
-			const limit = input.limit ?? GET_TEXT_DEFAULT_LIMIT;
+			const limit = Math.max(1, Math.min(GET_TEXT_MAX_LIMIT, input.limit ?? GET_TEXT_DEFAULT_LIMIT));
 			if (r.body.length <= limit) return textResult(r.body);
 			// Network bodies are JSON API responses far more often than not; prefer a
 			// structural crush (schema + head/tail samples) over a blind char-cut.

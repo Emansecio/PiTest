@@ -407,7 +407,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 				const server = m[1];
 				// Trim trailing prose punctuation a URI wouldn't really end with.
 				const uri = m[2].replace(/[.,;:!?)\]}]+$/, "");
-				const key = `${server} ${uri}`;
+				const key = `${server} ${uri}`;
 				if (seen.has(key)) continue;
 				if (!manager.getClient(server)?.getCapabilities().resources) continue;
 				seen.add(key);
@@ -487,6 +487,16 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			const eager = eagerToolsByServer.get(name);
 			if (eager && eager.size > 0) {
 				pi.setActiveTools(pi.getActiveTools().filter((n) => !eager.has(n)));
+			}
+			// Drop the server's registration bookkeeping so a later re-enable
+			// re-registers its tools (registerNewTools skips names still in
+			// registeredNames) and its prompts (discoverResourcesAndPrompts skips
+			// servers still in promptedServers). Without this, disable→enable of the
+			// same server silently never re-creates its prompt slash-commands.
+			promptedServers.delete(name);
+			const prefix = manager.prefixFor(name) ?? `mcp__${name}__`;
+			for (const prefixedName of [...registeredNames]) {
+				if (prefixedName.startsWith(prefix)) registeredNames.delete(prefixedName);
 			}
 		};
 

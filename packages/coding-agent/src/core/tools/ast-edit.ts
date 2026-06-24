@@ -186,6 +186,19 @@ function countFiles(matches: AstGrepRewriteMatch[]): number {
 	return set.size;
 }
 
+// Glob patterns are forward-slash only. A Windows-style backslash glob
+// (e.g. `src\**\*.ts`) is forwarded raw to ast-grep --globs, where "\" is a
+// glob escape — so it silently matches nothing and reports zero rewrites with
+// no hint about the separator. Enrich the empty message so the model can
+// self-correct, mirroring find.ts/grep.ts. The success path stays untouched.
+function noMatchesMessage(globs: string[] | undefined): string {
+	const offending = globs?.find((g) => g.includes("\\"));
+	if (offending !== undefined) {
+		return `No matches found. Glob patterns use forward slashes; try: ${offending.replace(/\\/g, "/")}`;
+	}
+	return "No matches found";
+}
+
 export function createAstEditToolDefinition(
 	cwd: string,
 	options?: AstEditToolOptions,
@@ -278,7 +291,7 @@ export function createAstEditToolDefinition(
 				const matches = parseJsonStream<AstGrepRewriteMatch>(res.stdout);
 				if (matches.length === 0) {
 					return {
-						content: [{ type: "text" as const, text: "No matches found" }],
+						content: [{ type: "text" as const, text: noMatchesMessage(globs) }],
 						details: { replacementCount: 0, fileCount: 0 },
 					};
 				}
@@ -351,7 +364,7 @@ export function createAstEditToolDefinition(
 			const fileCount = countFiles(matches);
 			if (replacementCount === 0) {
 				return {
-					content: [{ type: "text" as const, text: "No matches found" }],
+					content: [{ type: "text" as const, text: noMatchesMessage(globs) }],
 					details: { replacementCount: 0, fileCount: 0 },
 				};
 			}

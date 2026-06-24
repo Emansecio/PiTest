@@ -636,14 +636,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	}
 
 	/** op:"poll" — non-blocking status of the given async handles. */
-	function pollHandles(handles: string[]): TaskOpResult {
-		if (handles.length === 0) {
+	function pollHandles(rawHandles: string[]): TaskOpResult {
+		if (rawHandles.length === 0) {
 			return {
 				content: [{ type: "text" as const, text: "task: poll needs `handles`." }],
 				isError: true,
 				details: undefined,
 			};
 		}
+		const handles = [...new Set(rawHandles)];
 		const lines = handles.map((h) => {
 			const e = pending.get(h);
 			if (!e) return `${h}: unknown handle`;
@@ -665,14 +666,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	}
 
 	/** op:"join" — await the given async handles, return their outputs, and free settled handles. */
-	async function joinHandles(handles: string[]): Promise<TaskOpResult> {
-		if (handles.length === 0) {
+	async function joinHandles(rawHandles: string[]): Promise<TaskOpResult> {
+		if (rawHandles.length === 0) {
 			return {
 				content: [{ type: "text" as const, text: "task: join needs `handles`." }],
 				isError: true,
 				details: undefined,
 			};
 		}
+		const handles = [...new Set(rawHandles)];
 		const entries = handles.map((h) => pending.get(h)).filter((e): e is PendingTask => e !== undefined);
 		// Snapshot the resolved entries (keyed by handle) BEFORE awaiting. A concurrent
 		// op:spawn can call prunePending() while we're suspended on the await, which evicts

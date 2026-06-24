@@ -98,7 +98,17 @@ const BARE_ELISION_RE = new RegExp(
 	"i",
 );
 
+/**
+ * Per-line length cap. A genuine elision marker is always a short comment, so
+ * lines longer than this can't be one. Skipping them keeps the regex off the
+ * pathological input: a single minified/bundled line of hundreds of KB triggers
+ * quadratic backtracking in `PHRASE_RE` (lazy prefix + `[^\n]*` alternatives),
+ * which would freeze the main thread for seconds-to-minutes.
+ */
+const MAX_LINE_LEN = 2000;
+
 function isPlaceholderLine(line: string): boolean {
+	if (line.length > MAX_LINE_LEN) return false;
 	return PHRASE_RE.test(line) || BARE_ELISION_RE.test(line);
 }
 
@@ -116,6 +126,15 @@ function normalizeLine(line: string): string {
  */
 export function detectCodeOmission(oldContent: string, newContent: string): CodeOmissionResult {
 	if (!newContent) {
+		return { detected: false, markers: [] };
+	}
+
+	// OOM/CPU guard, mirroring the size gates in read/symbol: a placeholder
+	// elision marker is a short hand-written comment, never present in a giant
+	// generated/minified blob. Skip detection wholesale above this ceiling so a
+	// multi-MB write/edit can't stall the main thread (per-line cap below handles
+	// the single-long-line case within an otherwise normal file).
+	if (newContent.length > MAX_SCAN_BYTES) {
 		return { detected: false, markers: [] };
 	}
 
@@ -148,6 +167,14 @@ export function detectCodeOmission(oldContent: string, newContent: string): Code
 
 /** Cap the number of reported markers so a pathological file can't bloat output. */
 const MAX_MARKERS = 10;
+
+/**
+ * Total-content ceiling for the scan. Above this we skip detection entirely:
+ * the line-by-line regex would risk pathological backtracking cost on huge
+ * generated/minified content, and such content never carries a hand-written
+ * elision comment anyway. ~2 MB comfortably covers normal source files.
+ */
+const MAX_SCAN_BYTES = 2_000_000;
 
 /** Env opt-out: `PIT_NO_OMISSION_CHECK=1` disables the post-write scan. */
 export function isOmissionCheckEnabled(): boolean {

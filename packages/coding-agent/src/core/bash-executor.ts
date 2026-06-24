@@ -106,10 +106,10 @@ export async function executeBashWithOperations(
 
 		// Keep rolling buffer
 		outputChunks.push(text);
-		outputBytes += text.length;
+		outputBytes += Buffer.byteLength(text);
 		while (outputBytes > maxOutputBytes && outputChunks.length > 1) {
 			const removed = outputChunks.shift()!;
-			outputBytes -= removed.length;
+			outputBytes -= Buffer.byteLength(removed);
 		}
 
 		// Stream to callback. Guard it: a throwing callback (e.g. injected by an

@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "path";
 import { CONFIG_DIR_NAME } from "../config.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { isUnderPath } from "../utils/paths.ts";
+import { truncateWithEllipsis } from "../utils/surrogate.ts";
 import { createMtimeParseCache } from "./mtime-cache.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
@@ -120,9 +121,8 @@ function loadTemplateFromFile(filePath: string, sourceInfo: SourceInfo): PromptT
 		if (!description) {
 			const firstLine = body.split("\n").find((line) => line.trim());
 			if (firstLine) {
-				// Truncate if too long
-				description = firstLine.slice(0, 60);
-				if (firstLine.length > 60) description += "...";
+				// Truncate if too long (surrogate-safe)
+				description = truncateWithEllipsis(firstLine, 60, "...");
 			}
 		}
 

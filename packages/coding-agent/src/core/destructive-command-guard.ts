@@ -57,8 +57,57 @@ const REGENERABLE_DIRS = new Set([
 	".gradle",
 ]);
 
-/** Shell separators that end one command segment. */
-const SEGMENT_SPLIT = /&&|\|\||;|\||\n/;
+/**
+ * Split a command on shell separators (`&&`, `||`, `;`, `|`, newline) while
+ * honoring single/double quotes, so a separator INSIDE a quoted span (e.g.
+ * `rm -rf "build;old"`) stays within one segment instead of mangling the target.
+ *
+ * Mirrors the previous `command.split(/&&|\|\||;|\||\n/)` exactly for unquoted
+ * input; the only difference is that quoted metacharacters are preserved.
+ */
+function splitSegments(command: string): string[] {
+	const segments: string[] = [];
+	let current = "";
+	let quote = "";
+	let i = 0;
+	while (i < command.length) {
+		const ch = command[i];
+		if (quote !== "") {
+			current += ch;
+			if (ch === quote) quote = "";
+			i += 1;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			current += ch;
+			i += 1;
+			continue;
+		}
+		if (ch === "&" && command[i + 1] === "&") {
+			segments.push(current);
+			current = "";
+			i += 2;
+			continue;
+		}
+		if (ch === "|" && command[i + 1] === "|") {
+			segments.push(current);
+			current = "";
+			i += 2;
+			continue;
+		}
+		if (ch === ";" || ch === "|" || ch === "\n") {
+			segments.push(current);
+			current = "";
+			i += 1;
+			continue;
+		}
+		current += ch;
+		i += 1;
+	}
+	segments.push(current);
+	return segments;
+}
 
 /**
  * Command wrappers stripped before anchoring, so the destructive verb is matched
@@ -198,7 +247,7 @@ export function groundDestructiveCommand(input: DestructiveCommandInput): Destru
 
 		const impacts: string[] = [];
 
-		for (const rawSegment of command.split(SEGMENT_SPLIT)) {
+		for (const rawSegment of splitSegments(command)) {
 			const segment = rawSegment.trim().replace(COMMAND_PREFIX, "");
 			if (segment.length === 0) continue;
 

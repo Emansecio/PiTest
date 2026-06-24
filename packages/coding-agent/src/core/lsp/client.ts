@@ -52,9 +52,18 @@ function registerExitHook(): void {
 	process.on("exit", () => {
 		for (const client of clients.values()) {
 			try {
-				client.proc.kill();
+				// Script launchers spawn through a cmd.exe shell wrapper on Windows
+				// (shell:true), so client.proc is the wrapper, not the real LSP
+				// server. Reap the whole tree like killClientProcess does, falling
+				// back to a direct kill only when there's no pid.
+				if (client.proc.pid) killProcessTree(client.proc.pid);
+				else client.proc.kill();
 			} catch {
-				// ignore
+				try {
+					client.proc.kill();
+				} catch {
+					// ignore
+				}
 			}
 		}
 	});

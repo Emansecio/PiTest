@@ -1,5 +1,5 @@
 /**
- * Stdio transport — speaks JSON-RPC over a subprocess's stdin/stdout using the
+ * Stdio transport â€” speaks JSON-RPC over a subprocess's stdin/stdout using the
  * same `Content-Length` framing as the LSP/DAP clients. This is how local MCP
  * servers (the npm `@modelcontextprotocol/server-*` family, Desktop Commander,
  * etc.) are launched. Reuses the project's cross-platform spawn + framing +
@@ -7,7 +7,7 @@
  *  - `spawnProcess` / `waitForChildProcess` (utils/child-process.ts)
  *  - `needsWindowsShell` / `quoteWindowsShellArg` (lsp/internal.ts)
  *  - `resolveCommand` (lsp/config.ts) for project-local-bin-then-PATH resolution
- *  - `parseContentLengthFrame` (lsp/internal.ts) — shared LSP/DAP frame parser
+ *  - `parseContentLengthFrame` (lsp/internal.ts) â€” shared LSP/DAP frame parser
  */
 
 import type { ChildProcessByStdio } from "node:child_process";
@@ -63,7 +63,7 @@ export class StdioTransport implements McpTransport {
 	private config: McpServerConfig;
 	private proc?: StdioChild;
 	private buffer: Buffer = Buffer.alloc(0);
-	/** Raw chunks awaiting coalesce into `buffer` (avoids per-chunk O(B²) concat). */
+	/** Raw chunks awaiting coalesce into `buffer` (avoids per-chunk O(BÂ²) concat). */
 	private pendingChunks: Buffer[] = [];
 	private isReading = false;
 	private pending = new Map<number | string, Pending>();
@@ -98,7 +98,7 @@ export class StdioTransport implements McpTransport {
 		const resolved = resolveCommand(command, cwd) ?? command;
 		const args = this.config.args ?? [];
 
-		// Node ≥ 20.12 rejects spawning a Windows `.cmd`/`.bat` directly (EINVAL),
+		// Node â‰¥ 20.12 rejects spawning a Windows `.cmd`/`.bat` directly (EINVAL),
 		// so route script launchers (npx, server shims) through a shell with each
 		// argv element quoted. Native binaries spawn directly.
 		const useShell = needsWindowsShell(resolved);
@@ -120,9 +120,7 @@ export class StdioTransport implements McpTransport {
 
 		proc.stdout.on("data", (chunk: Buffer) => this.onStdoutData(chunk));
 		proc.stderr.on("data", (chunk: Buffer) => {
-			if (this.stderrBuffer.length < MAX_STDERR_BYTES) {
-				this.stderrBuffer = (this.stderrBuffer + chunk.toString("utf-8")).slice(-MAX_STDERR_BYTES);
-			}
+			this.stderrBuffer = (this.stderrBuffer + chunk.toString("utf-8")).slice(-MAX_STDERR_BYTES);
 		});
 		// Swallow stdin EPIPE so a dead server doesn't crash the host process.
 		proc.stdin.on("error", () => {});
@@ -186,7 +184,7 @@ export class StdioTransport implements McpTransport {
 		// `this.buffer` (its exit condition is `parseContentLengthFrame` returning
 		// falsy), and no new bytes can enter `this.buffer` without first arriving as
 		// a pending chunk and being coalesced at the top of drain(). So a fresh chunk
-		// is the only thing that can produce more work — re-checking the buffer here
+		// is the only thing that can produce more work â€” re-checking the buffer here
 		// would be a redundant O(n) header scan.
 		if (this.pendingChunks.length > 0) this.drain();
 	}
@@ -195,7 +193,7 @@ export class StdioTransport implements McpTransport {
 		if (!json || typeof json !== "object") return;
 		const msg = json as JsonRpcResponse & { method?: string; params?: Record<string, unknown> };
 		// Server-initiated notification (method, no id): forward to the client (e.g.
-		// notifications/tools/list_changed). Server→client REQUESTS (method + id,
+		// notifications/tools/list_changed). Serverâ†’client REQUESTS (method + id,
 		// sampling/roots) are not implemented and left unanswered.
 		if (!("id" in msg) || msg.id === undefined || msg.id === null) {
 			if (typeof msg.method === "string") this.onNotification?.(msg.method, msg.params);
@@ -287,7 +285,7 @@ export class StdioTransport implements McpTransport {
 		proc.removeAllListeners("error");
 		proc.stdout.removeAllListeners("data");
 		proc.stderr.removeAllListeners("data");
-		// NOTE: the stdin `error` listener is intentionally left in place — it only
+		// NOTE: the stdin `error` listener is intentionally left in place â€” it only
 		// swallows a late EPIPE on the dying pipe; removing it could surface that
 		// EPIPE as an uncaught exception and crash the host.
 		try {
