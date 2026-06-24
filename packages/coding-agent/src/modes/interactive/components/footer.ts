@@ -145,7 +145,7 @@ interface CumulativeTotals {
  *
  * Layout (top to bottom; line 1 is the line closest to the editor):
  *   1. Identity: `cwd (branch) • session` (left, muted)  |  `model • thinking-level` (right, foreground + thinking color)
- *   2. Metrics: `CTX %·used/window` (left, state-colored) | `↑in ↓out $cost (sub) auto` (right, dim)
+ *   2. Metrics: `CTX %·used/window` (left, state-colored) | `↑in ↓out auto` (right, dim)
  *   3. Optional: extension statuses, single line
  *
  * Cumulative usage stats are cached and updated incrementally (tail-only scan)
@@ -340,21 +340,12 @@ export class FooterComponent implements Component {
 			ctxText = `${ctxLabel} ${est ? theme.fg("dim", "~") : ""}${percentLabel} ${theme.fg("dim", "·")} ${counts}`;
 		}
 
-		// Group A — usage/cost: `↑in ↓out $cost` kept together on the right.
+		// Group A — usage: `↑in ↓out` kept together on the right.
 		const usageGroup: string[] = [];
 		const io: string[] = [];
 		if (totals.input) io.push(`↑${formatTokens(totals.input)}`);
 		if (totals.output) io.push(`↓${formatTokens(totals.output)}`);
 		if (io.length) usageGroup.push(io.join(" "));
-
-		// Cost segment only when it rounds to a visible amount. Under a
-		// subscription the cost is always $0.000 (flat plan), so `$0.000 (sub)`
-		// is pure noise — drop it. 0.0005 is the threshold where toFixed(3)
-		// stops rendering "0.000".
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
-		if (totals.cost >= 0.0005) {
-			usageGroup.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
-		}
 
 		// Group B — session mode bits (permission / auto-compact).
 		const mode = this.getPermissionMode();

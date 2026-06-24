@@ -156,7 +156,7 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		createPatchAuditExtension(),
 		createHooksExtension({ settings: options.hooks, cwd: options.cwd }),
 		createMemoryExtension({ cwd: options.cwd, agentDir: options.agentDir }),
-		createMcpExtension({ settings: options.mcp }),
+		createMcpExtension({ settings: options.mcp, cwd: options.cwd, agentDir: options.agentDir }),
 		createCoordinatorExtension({
 			modelRegistry: options.modelRegistry,
 			permissionChecker,

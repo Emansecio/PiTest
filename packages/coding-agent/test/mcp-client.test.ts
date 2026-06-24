@@ -616,3 +616,75 @@ describe("McpManager callTool recovery", () => {
 		expect(state.lastError).toBeUndefined();
 	});
 });
+
+describe("McpManager enable / disable / reconnect", () => {
+	const originalFetch = globalThis.fetch;
+	afterEach(() => {
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch;
+		vi.restoreAllMocks();
+	});
+
+	const pingServer = (): Record<string, Handler> => ({
+		[TEST_URL]: (body) => {
+			if (body.method === "initialize") return { protocolVersion: "1", serverInfo: { name: "test" } };
+			if (body.method === "tools/list")
+				return { tools: [{ name: "ping", description: "", inputSchema: { type: "object" } }] };
+			if (body.method === "tools/call") return { content: [{ type: "text", text: "ok" }] };
+			throw new Error("unexpected");
+		},
+	});
+
+	it("lists a disabled server but never connects it", async () => {
+		installFetch(pingServer());
+		const manager = new McpManager({ servers: { test: { url: TEST_URL, disabled: true } } });
+		await manager.connectAll();
+		const state = manager.getState("test")!;
+		expect(state.disabled).toBe(true);
+		expect(state.connected).toBe(false);
+		expect(manager.listTools()).toEqual([]);
+	});
+
+	it("enable connects a disabled server; disable tears it down", async () => {
+		installFetch(pingServer());
+		const manager = new McpManager({ servers: { test: { url: TEST_URL, disabled: true } } });
+		await manager.connectAll();
+		expect(manager.getState("test")!.connected).toBe(false);
+
+		const enabled = await manager.enable("test");
+		expect(enabled!.disabled).toBe(false);
+		expect(enabled!.connected).toBe(true);
+		expect(manager.listTools().map((t) => t.prefixedName)).toEqual(["mcp__test__ping"]);
+
+		const disabled = manager.disable("test");
+		expect(disabled!.disabled).toBe(true);
+		expect(disabled!.connected).toBe(false);
+		expect(disabled!.tools).toEqual([]);
+		expect(manager.listTools()).toEqual([]);
+	});
+
+	it("reconnect re-handshakes a server that failed at boot", async () => {
+		let up = false;
+		(globalThis as unknown as { fetch: typeof fetch }).fetch = vi.fn(async (_input, init?: RequestInit) => {
+			if (!up) throw new Error("net down");
+			const body = init?.body ? JSON.parse(init.body.toString()) : {};
+			if (body.method === "notifications/initialized") {
+				return new Response("", { status: 200, headers: { "content-type": "application/json" } });
+			}
+			const result = pingServer()[TEST_URL](body);
+			return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as unknown as typeof fetch;
+
+		const manager = new McpManager({ servers: { test: { url: TEST_URL } } });
+		await manager.connectAll();
+		expect(manager.getState("test")!.connected).toBe(false);
+
+		up = true;
+		const state = await manager.reconnect("test");
+		expect(state!.connected).toBe(true);
+		expect(state!.lastError).toBeUndefined();
+		expect(manager.listTools().map((t) => t.prefixedName)).toEqual(["mcp__test__ping"]);
+	});
+});

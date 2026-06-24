@@ -10,6 +10,7 @@
 
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
+import { setMcpServerDisabled } from "../mcp/config-files.ts";
 import {
 	capMcpText,
 	McpManager,
@@ -19,6 +20,7 @@ import {
 	type McpToolSchema,
 	wrapMcpToolAsDefinition,
 } from "../mcp/index.ts";
+import { McpPanelComponent, type McpPanelRow, type McpPanelStatus } from "../mcp/mcp-panel.ts";
 import { createListResourcesTool, createReadResourceTool } from "../mcp/resource-tools.ts";
 import { getCurrentToolDiscoveryIndex } from "../tool-discovery.ts";
 
@@ -108,6 +110,10 @@ const CONNECT_ALL_BUDGET_MS = 10_000;
 
 export interface McpExtensionOptions {
 	settings: McpSettings;
+	/** Working directory (for persisting enable/disable to project-scope config files). Omit to skip persistence. */
+	cwd?: string;
+	/** Agent dir (for persisting enable/disable to the user-scope `mcp.json`). Omit to skip persistence. */
+	agentDir?: string;
 	/** Called when a server's connection state changes (for status indicators). */
 	onStateChange?: (state: { name: string; connected: boolean; lastError?: string }) => void;
 }
@@ -123,6 +129,13 @@ export function createMcpExtension(options: McpExtensionOptions) {
 		// Guards the late-registration path against re-registering tools that the
 		// boot pass already handled when a server merely re-emits "connected".
 		const registeredNames = new Set<string>();
+
+		// Eager (on-surface) tool names registered per server, so /mcp's disable can
+		// pull exactly that server's tools off the active surface and enable can put
+		// them back. Deferred tools live in the discovery index and aren't tracked
+		// here (they're never on the surface; a call to a disabled server's deferred
+		// tool simply fails to resolve until it is re-enabled).
+		const eagerToolsByServer = new Map<string, Set<string>>();
 
 		// Register every not-yet-registered tool advertised by `manager.listTools()`
 		// (which already filters to connected servers). Eager tools land on the
@@ -168,6 +181,12 @@ export function createMcpExtension(options: McpExtensionOptions) {
 						deferredCount++;
 					} else {
 						pi.registerTool(definition);
+						let eager = eagerToolsByServer.get(serverName);
+						if (!eager) {
+							eager = new Set<string>();
+							eagerToolsByServer.set(serverName, eager);
+						}
+						eager.add(definition.name);
 					}
 					registeredNames.add(prefixedName);
 				} catch (err) {
@@ -269,6 +288,8 @@ export function createMcpExtension(options: McpExtensionOptions) {
 		// registered lazily instead of being toolless for the whole session. The
 		// boot pass below sets this for every server it saw connected.
 		const registeredServers = new Set<string>();
+		// Set while the interactive /mcp panel is open so live state changes redraw it.
+		let panelRefresh: (() => void) | undefined;
 		let bootDone = false;
 		let bootConnectPromise: Promise<void> | undefined;
 		let bootConnectController: AbortController | undefined;
@@ -283,6 +304,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			// callTool needs a ToolDefinition that only exists once registered).
 			onStateChange: (state) => {
 				options.onStateChange?.(state);
+				panelRefresh?.();
 				if (!bootDone) return; // Boot pass handles initial connects in one batch.
 				if (!state.connected) return;
 				if (registeredServers.has(state.name)) return;
@@ -422,20 +444,86 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			};
 		});
 
+		// Add the named server's eager tools back onto the active surface (no-op for
+		// servers with only deferred tools). Used after a reconnect/enable.
+		const activateEagerTools = (name: string): void => {
+			const eager = eagerToolsByServer.get(name);
+			if (!eager || eager.size === 0) return;
+			const active = pi.getActiveTools();
+			const toAdd = [...eager].filter((n) => !active.includes(n));
+			if (toAdd.length > 0) pi.setActiveTools([...active, ...toAdd]);
+		};
+
+		// /mcp panel actions. Each re-runs the same registration/discovery the boot
+		// pass uses so tools become callable immediately, and persists enable/disable
+		// so the choice survives a restart (mirrors `pit mcp enable|disable`).
+		const reconnectServer = async (name: string): Promise<void> => {
+			await manager.reconnect(name, AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
+			registeredServers.add(name);
+			const deferredCount = registerNewTools();
+			ensureDiscoveryActive(deferredCount);
+			await discoverResourcesAndPrompts();
+			activateEagerTools(name);
+		};
+
+		const enableServer = async (name: string): Promise<void> => {
+			await manager.enable(name, AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
+			if (options.cwd && options.agentDir) {
+				setMcpServerDisabled(name, false, servers[name] ?? {}, options.cwd, options.agentDir);
+			}
+			registeredServers.add(name);
+			const deferredCount = registerNewTools();
+			ensureDiscoveryActive(deferredCount);
+			await discoverResourcesAndPrompts();
+			activateEagerTools(name);
+		};
+
+		const disableServer = (name: string): void => {
+			manager.disable(name);
+			if (options.cwd && options.agentDir) {
+				setMcpServerDisabled(name, true, servers[name] ?? {}, options.cwd, options.agentDir);
+			}
+			registeredServers.delete(name);
+			const eager = eagerToolsByServer.get(name);
+			if (eager && eager.size > 0) {
+				pi.setActiveTools(pi.getActiveTools().filter((n) => !eager.has(n)));
+			}
+		};
+
+		const toggleServer = async (name: string): Promise<void> => {
+			const state = manager.getState(name);
+			if (!state) return;
+			if (state.disabled) await enableServer(name);
+			else disableServer(name);
+		};
+
+		const buildPanelRows = (): McpPanelRow[] =>
+			manager.getAllStates().map((s) => {
+				const status: McpPanelStatus = s.disabled ? "disabled" : s.connected ? "connected" : "disconnected";
+				return {
+					name: s.name,
+					target: s.url,
+					status,
+					error: s.lastError,
+					tools: s.tools.map((t) => t.name),
+					deferred: shouldDeferMcpServer(s.tools.length, servers[s.name], options.settings),
+				};
+			});
+
 		pi.registerCommand("mcp", {
-			description: "List configured MCP servers and their connection state.",
+			description: "Manage MCP servers: live status, reconnect, enable/disable.",
 			async handler(_args, ctx) {
 				// On-demand recovery: a server that blew the 10s connect budget at boot
 				// has no registered tools, so nothing ever re-triggers its connection
 				// (the lazy callTool reconnect needs an existing ToolDefinition). Retry
-				// any still-disconnected server here, then register whatever came up.
-				// connectAll re-initializes each entry; already-connected servers are
-				// idempotent, and registerNewTools skips tools already registered, so
-				// boot-connected servers see identical behavior.
+				// any still-disconnected (and not deliberately disabled) server here, then
+				// register whatever came up. connectAll re-initializes each entry;
+				// already-connected servers are idempotent, and registerNewTools skips
+				// tools already registered, so boot-connected servers see identical behavior.
 				if (bootConnectPromise) {
 					await bootConnectPromise;
 				}
-				if (manager.getAllStates().some((s) => !s.connected)) {
+				if (manager.getAllStates().some((s) => !s.connected && !s.disabled)) {
 					await connectAndRegister(AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
 				}
 				const states = manager.getAllStates();
@@ -445,18 +533,41 @@ export function createMcpExtension(options: McpExtensionOptions) {
 					else console.log(msg);
 					return;
 				}
+
+				// Interactive panel (live status + reconnect/enable/disable). Falls back
+				// to a plain text dump in non-UI contexts (RPC / print mode).
+				if (ctx.hasUI) {
+					try {
+						await ctx.ui.custom<void>(
+							(_tui, panelTheme, _kb, done) => {
+								const panel = new McpPanelComponent(panelTheme, buildPanelRows, {
+									reconnect: reconnectServer,
+									toggle: toggleServer,
+									close: () => done(undefined),
+								});
+								panelRefresh = () => panel.refresh();
+								return panel;
+							},
+							{ overlay: true, overlayOptions: { width: "70%", maxHeight: "80%", anchor: "center" } },
+						);
+					} finally {
+						panelRefresh = undefined;
+					}
+					return;
+				}
+
 				const lines = states.map((s) => {
 					const deferred = shouldDeferMcpServer(s.tools.length, servers[s.name], options.settings);
 					const deferredSuffix = deferred ? " (deferred — discovered on demand)" : "";
+					const glyph = s.disabled ? "○" : s.connected ? "✓" : "✗";
+					const disabledWord = s.disabled ? " (disabled)" : "";
 					return (
-						`${s.connected ? "✓" : "✗"} ${s.name} (${s.url})` +
+						`${glyph} ${s.name} (${s.url})${disabledWord}` +
 						`${s.lastError ? ` — ${s.lastError}` : ""}` +
 						`${s.tools.length > 0 ? `\n    tools: ${s.tools.map((t) => t.name).join(", ")}${deferredSuffix}` : ""}`
 					);
 				});
-				const out = lines.join("\n");
-				if (ctx.hasUI) ctx.ui.notify(out, "info");
-				else console.log(out);
+				console.log(lines.join("\n"));
 			},
 		});
 	};

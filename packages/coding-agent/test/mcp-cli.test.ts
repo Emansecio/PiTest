@@ -3,10 +3,11 @@
  * remove, and the CC `mcpServers` file format. Runs against a temp cwd.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setMcpServerDisabled } from "../src/core/mcp/config-files.js";
 import { handleMcpCommand } from "../src/mcp-cli.js";
 
 describe("handleMcpCommand", () => {
@@ -91,5 +92,30 @@ describe("handleMcpCommand", () => {
 		await handleMcpCommand(["mcp", "get", "nope"]);
 		expect(process.exitCode).toBe(1);
 		process.exitCode = undefined;
+	});
+
+	it("setMcpServerDisabled toggles the flag in place in the scope file that defines the server", () => {
+		const agentDir = join(dir, "agent");
+		const projectFile = join(dir, ".mcp.json");
+		writeFileSync(projectFile, JSON.stringify({ mcpServers: { fs: { command: "npx", args: ["server-fs"] } } }));
+
+		expect(setMcpServerDisabled("fs", true, {}, dir, agentDir)).toBe(true);
+		let parsed = JSON.parse(readFileSync(projectFile, "utf-8"));
+		expect(parsed.mcpServers.fs.disabled).toBe(true);
+		// In-place: no stray user-scope override file is created.
+		expect(existsSync(join(agentDir, "mcp.json"))).toBe(false);
+
+		expect(setMcpServerDisabled("fs", false, {}, dir, agentDir)).toBe(true);
+		parsed = JSON.parse(readFileSync(projectFile, "utf-8"));
+		expect(parsed.mcpServers.fs.disabled).toBeUndefined();
+	});
+
+	it("setMcpServerDisabled writes a user-scope override when the server lives only in settings", () => {
+		const agentDir = join(dir, "agent");
+		mkdirSync(agentDir, { recursive: true });
+		const resolved = { url: "https://e/mcp", transport: "http" as const };
+		expect(setMcpServerDisabled("remote", true, resolved, dir, agentDir)).toBe(true);
+		const parsed = JSON.parse(readFileSync(join(agentDir, "mcp.json"), "utf-8"));
+		expect(parsed.mcpServers.remote).toEqual({ ...resolved, disabled: true });
 	});
 });

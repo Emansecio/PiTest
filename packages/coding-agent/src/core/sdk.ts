@@ -12,6 +12,7 @@ import {
 	streamSimple,
 } from "@pit/ai";
 import { getAgentDir } from "../config.ts";
+import { settleOrAbort } from "../utils/abort-race.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
@@ -433,10 +434,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 		},
 		sessionId: sessionManager.getSessionId(),
-		transformContext: async (messages) => {
+		transformContext: async (messages, signal) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner) return messages;
-			return runner.emitContext(messages);
+			// Race against the run signal: a context handler parked on slow IO must
+			// not wedge the turn — Esc/abort always unblocks the loop. See settleOrAbort.
+			return settleOrAbort(runner.emitContext(messages), signal);
 		},
 		steeringMode: settingsManager.getSteeringMode(),
 		followUpMode: settingsManager.getFollowUpMode(),

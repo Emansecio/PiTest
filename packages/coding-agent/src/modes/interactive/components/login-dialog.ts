@@ -172,6 +172,54 @@ export class LoginDialogComponent extends Container implements Focusable {
 	}
 
 	/**
+	 * Like {@link showPrompt} but clears prior content first, so a multi-step wizard
+	 * (base URL → model → key) does not stack duplicate inputs (`addChild` is a plain
+	 * push). `context` lines are shown above the prompt to echo already-entered values.
+	 */
+	showStepPrompt(message: string, options?: { placeholder?: string; context?: string[] }): Promise<string> {
+		this.contentContainer.clear();
+		this.contentContainer.addChild(new Spacer(1));
+		const context = options?.context ?? [];
+		for (const line of context) {
+			this.contentContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
+		}
+		if (context.length > 0) {
+			this.contentContainer.addChild(new Spacer(1));
+		}
+		this.contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
+		if (options?.placeholder) {
+			this.contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${options.placeholder}`), 1, 0));
+		}
+		this.contentContainer.addChild(this.input);
+		this.contentContainer.addChild(
+			new Text(
+				`(${keyHint("tui.select.cancel", "to cancel,")} ${keyHint("tui.select.confirm", "to submit")})`,
+				1,
+				0,
+			),
+		);
+
+		this.input.setValue("");
+		this.tui.requestRender();
+
+		return new Promise((resolve, reject) => {
+			this.inputResolver = resolve;
+			this.inputRejecter = reject;
+		});
+	}
+
+	/**
+	 * Replace the content with a single status line (no input), e.g. while a
+	 * connection test is in flight.
+	 */
+	showBusy(message: string): void {
+		this.contentContainer.clear();
+		this.contentContainer.addChild(new Spacer(1));
+		this.contentContainer.addChild(new Text(theme.fg("dim", message), 1, 0));
+		this.tui.requestRender();
+	}
+
+	/**
 	 * Show informational text without prompting for input.
 	 */
 	showInfo(lines: string[]): void {

@@ -1507,5 +1507,19 @@ describe("ModelRegistry", () => {
 				}
 			});
 		});
+
+		describe("hidden providers (openrouter)", () => {
+			test("openrouter is excluded from getAvailable even with auth, but stays in getAll/find", () => {
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+				// Present in the full catalog and resolvable by id (overrides keep working).
+				expect(registry.getAll().some((m) => m.provider === "openrouter")).toBe(true);
+
+				// Configure auth like a real user would — it must still not surface in the picker.
+				authStorage.set("openrouter", { type: "api_key", key: "k" });
+				registry.refresh();
+				expect(registry.getAvailable().some((m) => m.provider === "openrouter")).toBe(false);
+			});
+		});
 	});
 });

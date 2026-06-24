@@ -405,8 +405,10 @@ export interface CoordinatorExtensionOptions {
 	getMessagingTimeoutMs?: () => number | undefined;
 	/**
 	 * Called when an async (op:"spawn") subagent settles, with the same string
-	 * op:"join" would return. The parent session re-injects it into the chat so
-	 * the model never has to poll. Absent → spawn stays poll-only (legacy).
+	 * op:"join" would return. By default the parent only emits a status line and
+	 * leaves the result to be collected via join/poll (returns false). With
+	 * PIT_ASYNC_REINJECT it re-injects the result into the chat (returns true), so
+	 * poll/join won't repeat it. Absent → spawn stays poll-only.
 	 */
 	onAsyncComplete?: (handle: string, text: string, status: "done" | "error") => boolean;
 	/** Fired just before a subagent (run or spawn) starts, so the parent can surface it as live. */
@@ -448,8 +450,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	// joined, so without pruning they'd accumulate (handle + result, up to ~24KB
 	// each) for the whole session. Evict the OLDEST COLLECTED entries past the cap
 	// (insertion-order iteration). Running tasks are never evicted, and neither is a
-	// settled-but-undelivered result: when async re-injection is off (e.g.
-	// PIT_NO_ASYNC_REINJECT), onAsyncComplete returns false so a finished task stays
+	// settled-but-undelivered result: by default async re-injection is OFF, so
+	// onAsyncComplete returns false and a finished task stays
 	// `status==="done" && !delivered` and the model is expected to poll/join it.
 	// Dropping such an entry would make its output unreachable (poll/join would then
 	// report `unknown handle`). Errored entries are collectible-once but safe to drop
@@ -1076,7 +1078,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						content: [
 							{
 								type: "text" as const,
-								text: `Spawned subagent '${handle}' (non-blocking). Keep working — its result re-injects automatically when it finishes. You may also check task({op:"poll", handles:["${handle}"]}) or collect early with task({op:"join", handles:["${handle}"]}).`,
+								text: `Spawned subagent '${handle}' (non-blocking). Keep working, then collect its result with task({op:"join", handles:["${handle}"]}) — results are NOT auto-delivered, so you must join (or poll) to read them. Check status anytime with task({op:"poll", handles:["${handle}"]}).`,
 							},
 						],
 						isError: false,

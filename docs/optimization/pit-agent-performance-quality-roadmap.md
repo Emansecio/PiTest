@@ -1,14 +1,14 @@
-# Roadmap de desempenho e qualidade do agente Pit/Pit
+# Roadmap de desempenho e qualidade do agente Pit
 
 ## Leitor e objetivo
 
-**Leitor-alvo:** mantenedor futuro do Pit/Pit que precisa priorizar e implementar melhorias sem reler esta conversa.
+**Leitor-alvo:** mantenedor futuro do Pit que precisa priorizar e implementar melhorias sem reler esta conversa.
 
 **Ação após leitura:** escolher a próxima melhoria, editar os arquivos certos, rodar o benchmark correto e saber quais achados não devem ser retrabalhados.
 
 ## Escopo
 
-Este documento consolida achados revisados sobre desempenho, velocidade e qualidade do agente Pit/Pit. Ele deduplica os resultados dos subagentes e remove conclusões que ficaram obsoletas após leitura direta do código atual.
+Este documento consolida achados revisados sobre desempenho, velocidade e qualidade do agente Pit. Ele deduplica os resultados dos subagentes e remove conclusões que ficaram obsoletas após leitura direta do código atual.
 
 Foco principal:
 
@@ -142,17 +142,19 @@ Adicionar casos em `permissions-checker.test.ts`:
 
 Alta qualidade/segurança. Evita bypass acidental de regras de path em edições.
 
-## Prioridade P1: corrigir `diff-limit` para schema atual do `edit`
+## Prioridade P1: diff-limit (proposto — nunca implementado)
+
+> ⚠️ **VAPORWARE:** A extensão `diff-limit-extension.ts` (mencionada abaixo) **nunca foi criada**. O grep por `diffLimit|changedLines|DiffLimit|diff-limit` em `packages/coding-agent/src` retorna 0 matches, e o array de built-ins não registra nenhum diff guard. Esta seção descreve uma *proposta* não implementada, não um componente existente. Veja [ADR-0002](../adr/0002-diff-limit-pause.md) (status **Proposed**).
 
 ### Problema
 
-`diff-limit-extension.ts` procura `old_string/new_string` ou `oldString/newString`, mas o tool `edit` atual usa `edits[].oldText/newText`. Resultado: grandes edições podem não entrar corretamente no limite de linhas.
+Um extensor de diff-limit proposto que procuraria `old_string/new_string` ou `oldString/newString`, mas o tool `edit` atual usa `edits[].oldText/newText`. Resultado: se um dia for implementado, grandes edições podem não entrar corretamente no limite de linhas.
 
-### Arquivo
+### Arquivo (proposto)
 
-- `packages/coding-agent/src/core/built-ins/diff-limit-extension.ts`
+- `packages/coding-agent/src/core/built-ins/diff-limit-extension.ts` (não existe — criar se implementar)
 
-### Correção
+### Correção (se for implementar)
 
 - Para `write`, continuar contando linhas de `content`.
 - Para `edit`, iterar `edits[]`.
@@ -160,7 +162,7 @@ Alta qualidade/segurança. Evita bypass acidental de regras de path em edições
 - Suportar LF e CRLF.
 - Evitar dupla contagem absurda em múltiplas edições próximas; se necessário, manter estimativa conservadora.
 
-### Validação
+### Validação (se for implementar)
 
 Adicionar teste com:
 
@@ -504,7 +506,7 @@ Para mudanças em guards, rodar testes focados do pacote `packages/coding-agent`
 1. **Config/perfis de modelo + thinking**  
    Maior ganho de velocidade percebida.
 
-2. **Corrigir permissões do `edit` e `diff-limit`**  
+2. **Corrigir permissões do `edit`** (diff-limit é vaporware — [ADR-0002](../adr/0002-diff-limit-pause.md) propõe, nunca implementado)  
    Alto impacto em segurança/qualidade do harness.
 
 3. **Precompile/local extension fast path e native import fallback**  

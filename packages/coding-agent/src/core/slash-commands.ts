@@ -46,8 +46,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "ttsr", description: "Manage TTSR rules: list | enable <name> | disable <name>", hidden: true },
 	{
 		name: "goal",
-		description: "Autonomous goal mode: <objective> | edit <obj> | pause | resume | clear | --tokens <budget> <obj>",
-		hidden: true,
+		description: "Autonomous goal: status, start <obj>, edit <obj>, pause, resume, clear, --tokens <budget> <obj>",
 	},
 	{ name: "todos", description: "Show the current todo list", hidden: true },
 	{

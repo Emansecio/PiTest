@@ -1,6 +1,8 @@
 import { SPINNER_FRAME_MS, SPINNER_FRAMES } from "@pit/tui";
 import { describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.js";
+import type { GoalSnapshot } from "../src/core/goal/goal-manager.js";
+import { createGoalOverlay } from "../src/modes/interactive/components/goal-overlay.js";
 import { createTodoOverlay } from "../src/modes/interactive/components/todo-overlay.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
@@ -38,6 +40,42 @@ describe("unified spinner cadence + style (P7)", () => {
 
 		// Still frame 0 just before the first boundary — proves the cadence is
 		// SPINNER_FRAME_MS, not the old 120ms (which would not have advanced by 100).
+		expect(frameAt(SPINNER_FRAME_MS - 1)).toContain(SPINNER_FRAMES[0]);
+		expect(frameAt(100)).toContain(SPINNER_FRAMES[1]); // 100ms is past the 80ms boundary
+	});
+
+	it("advances the goal overlay spinner once per SPINNER_FRAME_MS using the shared glyphs", () => {
+		initTheme("dark");
+		const snap: GoalSnapshot = {
+			id: "g1",
+			objective: "ship it",
+			status: "active",
+			tokensUsed: 0,
+			iterations: 0,
+			startedAt: 0,
+			elapsedMs: 0,
+		};
+		const session = {
+			goalSnapshot: () => snap,
+			goalIsDriving: () => true,
+		} as unknown as AgentSession;
+
+		let nowMs = 0;
+		const overlay = createGoalOverlay(session, () => nowMs);
+		const frameAt = (t: number): string => {
+			nowMs = t;
+			return stripAnsi(overlay.render(80).join("\n"));
+		};
+
+		const n = SPINNER_FRAMES.length;
+		// One frame per SPINNER_FRAME_MS bucket, drawn from the shared set, wrapping after n.
+		for (let k = 0; k < n; k++) {
+			expect(frameAt(SPINNER_FRAME_MS * k)).toContain(SPINNER_FRAMES[k]);
+		}
+		expect(frameAt(SPINNER_FRAME_MS * n)).toContain(SPINNER_FRAMES[0]); // wraps
+
+		// Still frame 0 just before the first boundary — proves the cadence is
+		// SPINNER_FRAME_MS, same as the todo overlay (not a separate interval).
 		expect(frameAt(SPINNER_FRAME_MS - 1)).toContain(SPINNER_FRAMES[0]);
 		expect(frameAt(100)).toContain(SPINNER_FRAMES[1]); // 100ms is past the 80ms boundary
 	});

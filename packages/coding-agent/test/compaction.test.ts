@@ -674,8 +674,7 @@ describe("pruneOldToolOutputs deferred-history mode", () => {
 		} as any;
 	}
 
-	it("with PIT_DEFER_HISTORY=1 and a store, large output becomes a deferred placeholder with a valid id", () => {
-		process.env.PIT_DEFER_HISTORY = "1";
+	it("with defer=true and a store, large output keeps a head+tail excerpt plus a recall id (hybrid)", () => {
 		const store = createDeferredOutputStore();
 		setCurrentDeferredOutputStore(store);
 
@@ -703,14 +702,17 @@ describe("pruneOldToolOutputs deferred-history mode", () => {
 		const toolResult = makeToolResultMessage(bigText);
 		const messages: AgentMessage[] = [toolResult, userMsg, assistantMsg, userMsg, assistantMsg];
 
-		pruneOldToolOutputs(messages);
+		pruneOldToolOutputs(messages, undefined, undefined, true);
 
 		const replaced = (messages[0] as any).content[0].text as string;
 		expect(replaced).toContain("recall_tool_output");
 		expect(replaced).not.toContain("pruned");
+		// Hybrid keeps the output's shape inline alongside the recall pointer.
+		expect(replaced).toContain("tokens elided");
+		expect(replaced.startsWith("xxx")).toBe(true);
 
-		// Extract id from placeholder
-		const match = replaced.match(/id=(\w+)/);
+		// Extract id from the recall footer and confirm the FULL text is recoverable.
+		const match = replaced.match(/id: "(\w+)"/);
 		expect(match).toBeTruthy();
 		const id = match![1];
 		expect(store.get(id)).toBe(bigText);

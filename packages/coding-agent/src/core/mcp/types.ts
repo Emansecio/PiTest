@@ -161,6 +161,8 @@ export interface McpConnectionState {
 	/** Endpoint URL (http/sse) or the launch command (stdio), for display. */
 	url: string;
 	connected: boolean;
+	/** Turned off at runtime (or via `disabled` in config): keeps its entry but never connects. */
+	disabled: boolean;
 	lastError?: string;
 	tools: McpToolSchema[];
 	reconnectAttempts: number;

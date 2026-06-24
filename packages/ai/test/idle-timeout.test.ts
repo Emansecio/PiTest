@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_IDLE_TIMEOUT_MS, IdleStreamTimeoutError, raceReadWithIdle } from "../src/utils/idle-timeout.js";
+import {
+	DEFAULT_IDLE_TIMEOUT_MS,
+	IdleStreamTimeoutError,
+	iterateWithIdleTimeout,
+	raceReadWithIdle,
+} from "../src/utils/idle-timeout.js";
 
 // A controllable fake reader over a queue of chunks. Each read() resolves with
 // the next chunk; once the queue is drained it can either hang forever (to
@@ -177,5 +182,79 @@ describe("raceReadWithIdle", () => {
 		expect(idleArmed.length).toBe(2);
 		expect(idleCleared.length).toBe(idleArmed.length);
 		expect(reader.canceled).toBe(false);
+	});
+});
+
+describe("iterateWithIdleTimeout", () => {
+	// Models a real SDK stream (an async generator) whose body is parked on a
+	// never-resolving await: next() hangs forever, and — by the async-iterator
+	// protocol — return() is QUEUED behind that pending next(), so it never settles
+	// either. This is the exact shape of a frozen-socket OpenAI/GLM/Google stream.
+	function frozenAsyncIterable(): { iterable: AsyncIterable<number>; returnCalled: () => boolean } {
+		let returnCalled = false;
+		async function* gen(): AsyncGenerator<number> {
+			try {
+				// Park forever: the SDK is blocked on a dead-socket read.
+				await new Promise<void>(() => {});
+				yield 1;
+			} finally {
+				returnCalled = true;
+			}
+		}
+		const it = gen();
+		return { iterable: it, returnCalled: () => returnCalled };
+	}
+
+	it("(5) idle stall rejects promptly even when iterator.return() is wedged behind a frozen next()", async () => {
+		const { iterable } = frozenAsyncIterable();
+		const start = Date.now();
+
+		await expect(
+			(async () => {
+				for await (const _ of iterateWithIdleTimeout(iterable, { idleMs: 40 })) {
+					// no chunk ever arrives
+				}
+			})(),
+		).rejects.toBeInstanceOf(IdleStreamTimeoutError);
+
+		// Must NOT hang on the queued return(); fires roughly at idleMs.
+		expect(Date.now() - start).toBeLessThan(2000);
+	});
+
+	it("(6) abort rejects promptly even when iterator.return() is wedged behind a frozen next()", async () => {
+		const { iterable } = frozenAsyncIterable();
+		const controller = new AbortController();
+		const abortMarker = new Error("aborted-by-user-sentinel");
+
+		const consume = (async () => {
+			for await (const _ of iterateWithIdleTimeout(iterable, {
+				idleMs: 10_000, // long, so only the abort can win
+				signal: controller.signal,
+				abortError: () => abortMarker,
+			})) {
+				// no chunk ever arrives
+			}
+		})();
+
+		controller.abort();
+
+		const start = Date.now();
+		await expect(consume).rejects.toBe(abortMarker);
+		// The ESC path: aborts immediately, not stuck behind the dead next()/return().
+		expect(Date.now() - start).toBeLessThan(2000);
+	});
+
+	it("(7) delivers every chunk for a slow-but-alive stream and never trips", async () => {
+		async function* gen(): AsyncGenerator<number> {
+			for (const v of [1, 2, 3]) {
+				await new Promise((r) => setTimeout(r, 20));
+				yield v;
+			}
+		}
+		const received: number[] = [];
+		for await (const v of iterateWithIdleTimeout(gen(), { idleMs: 200 })) {
+			received.push(v);
+		}
+		expect(received).toEqual([1, 2, 3]);
 	});
 });

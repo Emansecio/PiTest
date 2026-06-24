@@ -33,6 +33,7 @@ import {
 	streamSimple,
 } from "@pit/ai";
 import { theme } from "../modes/interactive/theme/theme.ts";
+import { settleOrAbort } from "../utils/abort-race.ts";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
@@ -45,7 +46,11 @@ import {
 	setCurrentChromeDevtoolsManager,
 } from "./chrome/chrome-devtools-manager.ts";
 import { buildHarnessDispatcher, type CodeModeDispatcher } from "./code-mode/bridge.ts";
-import { cloneToolResultMessagesForPrune, pruneOldToolOutputs } from "./compaction/compaction.ts";
+import {
+	adaptivePruneThreshold,
+	cloneToolResultMessagesForPrune,
+	pruneOldToolOutputs,
+} from "./compaction/compaction.ts";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
@@ -1076,7 +1081,7 @@ export class AgentSession {
 			...on(s.getEvalSettings().enabled && !isTruthyEnvFlag(process.env.PIT_NO_CODE_MODE), ["code"]),
 			...on(s.getLspSettings().enabled, ["lsp"]),
 			...on(s.getDebugSettings().enabled, ["debug"]),
-			...on(isTruthyEnvFlag(process.env.PIT_DEFER_HISTORY), ["recall_tool_output"]),
+			...on(!isTruthyEnvFlag(process.env.PIT_NO_DEFER_HISTORY), ["recall_tool_output"]),
 			...on(s.getChromeDevtoolsSettings().enabled, chromeFeatureToolNames),
 		];
 		const hidden = new Set(s.getToolDiscoverySettings().hiddenByDefault);
@@ -1207,12 +1212,14 @@ export class AgentSession {
 	}
 
 	/**
-	 * Open a session-scoped deferred-output store when PIT_DEFER_HISTORY=1.
-	 * Publishes it via the module-level registry so pruneOldToolOutputs and the
-	 * recall_tool_output tool can access it. No-op when the env var is unset.
+	 * Open a session-scoped deferred-output store (default ON; opt out with
+	 * PIT_NO_DEFER_HISTORY=1). Publishes it via the module-level registry so the
+	 * live-context prune (pruneOldToolOutputs with defer=true) and the
+	 * recall_tool_output tool can access it: large stale outputs collapse to a
+	 * head+tail excerpt inline while the full text stays recoverable on disk.
 	 */
 	private _openDeferredOutputStore(): void {
-		if (!isTruthyEnvFlag(process.env.PIT_DEFER_HISTORY)) return;
+		if (isTruthyEnvFlag(process.env.PIT_NO_DEFER_HISTORY)) return;
 		try {
 			const store = createDeferredOutputStore();
 			this._deferredOutputStore = store;
@@ -1338,35 +1345,38 @@ export class AgentSession {
 	private static readonly _resolvedUndefined = Promise.resolve(undefined);
 
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = ({ toolCall, args }) => {
+		this.agent.beforeToolCall = ({ toolCall, args }, signal) => {
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return AgentSession._resolvedUndefined;
 			}
 
-			return runner
-				.emitToolCall({
+			// Race against the run signal so a tool_call handler parked on slow IO
+			// can't wedge the turn — Esc/abort always unblocks the loop (settleOrAbort).
+			return settleOrAbort(
+				runner.emitToolCall({
 					type: "tool_call",
 					toolName: toolCall.name,
 					toolCallId: toolCall.id,
 					input: args as Record<string, unknown>,
-				})
-				.catch((err) => {
-					if (err instanceof Error) {
-						throw err;
-					}
-					throw new Error(`Extension failed, blocking execution: ${String(err)}`);
-				});
+				}),
+				signal,
+			).catch((err) => {
+				if (err instanceof Error) {
+					throw err;
+				}
+				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
+			});
 		};
 
-		this.agent.afterToolCall = ({ toolCall, args, result, isError }) => {
+		this.agent.afterToolCall = ({ toolCall, args, result, isError }, signal) => {
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_result")) {
 				return AgentSession._resolvedUndefined;
 			}
 
-			return runner
-				.emitToolResult({
+			return settleOrAbort(
+				runner.emitToolResult({
 					type: "tool_result",
 					toolName: toolCall.name,
 					toolCallId: toolCall.id,
@@ -1374,15 +1384,16 @@ export class AgentSession {
 					content: result.content,
 					details: result.details,
 					isError,
-				})
-				.then((hookResult) => {
-					if (!hookResult) return undefined;
-					return {
-						content: hookResult.content,
-						details: hookResult.details,
-						isError: hookResult.isError ?? isError,
-					};
-				});
+				}),
+				signal,
+			).then((hookResult) => {
+				if (!hookResult) return undefined;
+				return {
+					content: hookResult.content,
+					details: hookResult.details,
+					isError: hookResult.isError ?? isError,
+				};
+			});
 		};
 	}
 
@@ -2359,7 +2370,12 @@ export class AgentSession {
 	goalStatusLine(): string {
 		// ⟳ marker when the agent is actively driving the goal (streaming a turn
 		// or inside the auto-continuation loop) vs. an idle active goal.
-		return this._goal.statusLine(this._inGoalContinuation || this.isStreaming);
+		return this._goal.statusLine(this.goalIsDriving());
+	}
+
+	/** True quando o agente está ativamente dirigindo o goal (streaming ou continuation). */
+	goalIsDriving(): boolean {
+		return this._inGoalContinuation || this.isStreaming;
 	}
 
 	/** Multi-line human summary for `/goal` with no args. */
@@ -3031,8 +3047,13 @@ export class AgentSession {
 			Number.isFinite(floorRaw) ? floorRaw : undefined,
 		);
 		if (contextTokens <= floor) return;
+		// Tighten the per-output threshold as the window fills, so accumulated medium
+		// outputs (each below the flat 20k) still get reclaimed under real pressure.
+		const threshold = adaptivePruneThreshold(contextTokens, this.model?.contextWindow ?? 0);
 		const copy = cloneToolResultMessagesForPrune(this.agent.state.messages);
-		const reclaimed = pruneOldToolOutputs(copy);
+		// defer=true: persist the full text of large stale outputs to the deferred
+		// store (when open) and leave a recall_tool_output id on the inline excerpt.
+		const reclaimed = pruneOldToolOutputs(copy, threshold, undefined, true);
 		// Telemetry: record EVERY run above the floor (including reclaimed=0), so
 		// /diagnostics can show whether the proactive prune is actually reclaiming
 		// tokens in real sessions or firing no-op — and, when it does reclaim, how
@@ -3065,33 +3086,42 @@ export class AgentSession {
 	}
 
 	/**
-	 * Re-inject a settled async (op:"spawn") subagent result into the chat so the
+	 * Handle a settled async (op:"spawn") subagent result. Always emits a
+	 * `subagent_complete` status line so the TUI surfaces progress.
+	 *
+	 * Default (Claude Code parity): does NOT re-inject the result into the chat —
+	 * the parent collects it explicitly via op:"join"/"poll", so finishing
+	 * subagents never interrupt the parent mid-turn with a new message. Returning
+	 * false leaves the handle undelivered so join returns the real payload.
+	 *
+	 * Opt-in legacy behavior (PIT_ASYNC_REINJECT): re-inject the result so the
 	 * model never has to poll. Routes by liveness: while a run is in flight, queue
 	 * it as a follow-up (guaranteed to run a turn before the agent stops); while
 	 * idle, start a fresh turn (_runAgentPrompt) so the result surfaces on its own.
-	 * Either way the TUI gets a subagent_complete status line.
-	 * PIT_NO_ASYNC_REINJECT=1 reverts to poll-only.
 	 *
-	 * NOTE: must NOT use injectPassive here — a passive message is dropped if the
-	 * current turn stops without more tool calls (common in fan-out), yet this
-	 * returns true and the coordinator marks the handle delivered, silently losing
-	 * the result. followUp keeps the loop alive until the message is consumed.
-	 * Called from a detached spawn IIFE, so it must never throw.
+	 * NOTE: in the opt-in path it must NOT use injectPassive — a passive message is
+	 * dropped if the current turn stops without more tool calls (common in
+	 * fan-out), yet this returns true and the coordinator marks the handle
+	 * delivered, silently losing the result. followUp keeps the loop alive until
+	 * the message is consumed. Called from a detached spawn IIFE, so it must never
+	 * throw.
 	 *
 	 * @internal Wired from agent-session-services via __bindBuiltInRefs; not part
 	 * of the public API. Kept non-private only so that cross-module wiring can
 	 * reach it without an unsafe cast.
 	 * @returns true when the result was re-injected (so the coordinator marks the
-	 * handle delivered and poll/join won't repeat it); false when
-	 * PIT_NO_ASYNC_REINJECT disabled re-injection.
+	 * handle delivered and poll/join won't repeat it); false otherwise (the
+	 * default — result stays collectible via join/poll).
 	 */
 	_deliverAsyncResult(handle: string, text: string, status: "done" | "error"): boolean {
 		// Session torn down: an orphaned subagent settled late. Drop it without mutating
 		// dead state. Return true so the coordinator marks the handle delivered (poll/join
-		// won't repeat) — false is reserved for the PIT_NO_ASYNC_REINJECT kill-switch.
+		// won't repeat) — there is no live session left to collect it from anyway.
 		if (this._disposed) return true;
 		this._emit({ type: "subagent_complete", handle, status });
-		if (isTruthyEnvFlag(process.env.PIT_NO_ASYNC_REINJECT)) return false;
+		// Default: no auto re-injection (Claude Code parity). Collect via join/poll.
+		// PIT_ASYNC_REINJECT opts back into the legacy auto-delivery below.
+		if (!isTruthyEnvFlag(process.env.PIT_ASYNC_REINJECT)) return false;
 		const message: AgentMessage = {
 			role: "user",
 			content: [{ type: "text", text: buildAsyncDeliveryBody(handle, status, text) }],

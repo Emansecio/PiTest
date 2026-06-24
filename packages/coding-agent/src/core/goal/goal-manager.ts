@@ -66,13 +66,13 @@ export function parseTokenBudget(raw: string): number | undefined {
 	return Math.round(n * mult);
 }
 
-function formatTokens(n: number): string {
+export function formatTokens(n: number): string {
 	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}m`;
 	if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
 	return String(n);
 }
 
-function formatElapsed(ms: number): string {
+export function formatElapsed(ms: number): string {
 	const totalSec = Math.floor(ms / 1000);
 	if (totalSec < 60) return `${totalSec}s`;
 	const totalMin = Math.floor(totalSec / 60);

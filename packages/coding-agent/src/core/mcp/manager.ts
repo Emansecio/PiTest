@@ -41,6 +41,8 @@ interface ServerEntry {
 	connected: boolean;
 	lastError?: string;
 	reconnectAttempts: number;
+	/** Runtime on/off switch. A disabled server keeps its entry (so it stays listed) but is never connected. */
+	disabled: boolean;
 }
 
 export class McpManager {
@@ -55,7 +57,8 @@ export class McpManager {
 		this.onToolsChanged = options.onToolsChanged;
 		this.maxReconnectAttempts = options.maxReconnectAttempts ?? 1;
 		for (const [name, config] of Object.entries(options.servers)) {
-			if (config.disabled) continue;
+			// A disabled server still gets an entry so it stays visible in /mcp and can
+			// be enabled at runtime; connectAll simply skips it.
 			const client = new McpClient(name, config);
 			// Runtime tools/list_changed → host re-registers the (possibly new) tools.
 			client.onToolsChanged = () => this.onToolsChanged?.(name);
@@ -65,6 +68,7 @@ export class McpManager {
 				client,
 				connected: false,
 				reconnectAttempts: 0,
+				disabled: config.disabled ?? false,
 			});
 		}
 	}
@@ -80,6 +84,7 @@ export class McpManager {
 			name: entry.name,
 			url: serverDisplayTarget(entry.config),
 			connected: entry.connected,
+			disabled: entry.disabled,
 			lastError: entry.lastError,
 			tools: entry.client.getTools(),
 			reconnectAttempts: entry.reconnectAttempts,
@@ -128,22 +133,74 @@ export class McpManager {
 		return true;
 	}
 
-	/** Connect every server in parallel; failures are recorded per-server, not thrown. */
+	/** Connect every (enabled) server in parallel; failures are recorded per-server, not thrown. */
 	async connectAll(signal?: AbortSignal): Promise<void> {
 		await Promise.all(
-			[...this.entries.values()].map(async (entry) => {
-				try {
-					await entry.client.initialize(signal);
-					entry.connected = true;
-					entry.lastError = undefined;
-					entry.reconnectAttempts = 0;
-				} catch (err) {
-					entry.connected = false;
-					entry.lastError = err instanceof Error ? err.message : String(err);
-				}
-				this.emit(entry);
-			}),
+			[...this.entries.values()]
+				.filter((entry) => !entry.disabled)
+				.map(async (entry) => {
+					try {
+						await entry.client.initialize(signal);
+						entry.connected = true;
+						entry.lastError = undefined;
+						entry.reconnectAttempts = 0;
+					} catch (err) {
+						entry.connected = false;
+						entry.lastError = err instanceof Error ? err.message : String(err);
+					}
+					this.emit(entry);
+				}),
 		);
+	}
+
+	/**
+	 * Re-handshake a single server on demand (the /mcp panel's "reconnect" action,
+	 * or recovery for a server that blew the boot connect budget). Re-runs
+	 * `initialize`, which opens a fresh transport session/subprocess. A disabled
+	 * server is a no-op (enable it first). Emits the resulting state either way.
+	 */
+	async reconnect(name: string, signal?: AbortSignal): Promise<McpConnectionState | undefined> {
+		const entry = this.entries.get(name);
+		if (!entry || entry.disabled) return this.getState(name);
+		entry.reconnectAttempts = 0;
+		try {
+			await entry.client.initialize(signal);
+			entry.connected = true;
+			entry.lastError = undefined;
+		} catch (err) {
+			entry.connected = false;
+			entry.lastError = err instanceof Error ? err.message : String(err);
+		}
+		this.emit(entry);
+		return this.getState(name);
+	}
+
+	/** Clear the disabled flag and connect the server. Returns the resulting state. */
+	async enable(name: string, signal?: AbortSignal): Promise<McpConnectionState | undefined> {
+		const entry = this.entries.get(name);
+		if (!entry) return undefined;
+		entry.disabled = false;
+		return this.reconnect(name, signal);
+	}
+
+	/**
+	 * Turn a server off at runtime: tear down its live transport (closing the stdio
+	 * subprocess / HTTP session) and replace the client with a fresh, unconnected
+	 * one so a later enable re-handshakes cleanly. Its tools stop resolving
+	 * immediately (getTools() is empty until reconnected). Emits the new state.
+	 */
+	disable(name: string): McpConnectionState | undefined {
+		const entry = this.entries.get(name);
+		if (!entry) return undefined;
+		entry.disabled = true;
+		entry.connected = false;
+		entry.lastError = undefined;
+		entry.reconnectAttempts = 0;
+		entry.client.dispose();
+		entry.client = new McpClient(entry.name, entry.config);
+		entry.client.onToolsChanged = () => this.onToolsChanged?.(entry.name);
+		this.emit(entry);
+		return this.getState(name);
 	}
 
 	// Default prefix follows the ecosystem-wide `mcp__<server>__<tool>` naming

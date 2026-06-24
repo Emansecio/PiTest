@@ -292,7 +292,6 @@ Feature kill-switches (all default-ON; set the variable to `1`/`true`/`yes` to d
 | `PIT_NO_LEARNED_ERROR_GUARD` | The learned-error guard (blocks pre-exec calls matching a cross-session error pattern) |
 | `PIT_NO_LEGACY_SKILLS` | Discovery of skills from legacy directories (`.claude/`, `.cursor/`, `.codex/`, `.gemini/`) |
 | `PIT_NO_CLAUDE_CODE_SKILLS` | Loading skills from `~/.claude/skills/` (alias: `PIT_DISABLE_CLAUDE_CODE_SKILLS`) |
-| `PIT_NO_ASYNC_REINJECT` | Auto re-injection of async (`task` `op:"spawn"`) subagent results into the chat — falls back to manual collection via `op:"poll"`/`op:"join"` |
 
 ### Advanced tuning
 
@@ -305,6 +304,7 @@ Optional knobs for power users. None require changes to work correctly — defau
 | `PIT_BASH_AUTO_BACKGROUND_SECONDS` | `60` | Bash commands that run longer than this are automatically promoted to background jobs instead of being killed. Set to `0` to disable auto-backgrounding |
 | `PIT_CODE_MODE_MAX_RESULT_BYTES` | `262144` (256 KB) | Byte cap on a single tool result re-injected into the code-mode VM |
 | `PIT_FREQ_OUTLINE` | off | Set to `1` to enable the boot-outline heuristic: a symbol outline of the hottest frequent-files is appended to the system prompt each session |
+| `PIT_ASYNC_REINJECT` | off | Set to `1` to auto-inject each async (`task` `op:"spawn"`) subagent result into the chat when it settles. Off by default (Claude Code parity): collect results via `op:"join"`/`op:"poll"` instead |
 | `PIT_NARRATION` | off | Set to `1` to enable verbose narration in the system prompt (increases output tokens ~5×) |
 | `PIT_PROACTIVE_PRUNE` | off | Set to `1` to proactively excerpt old large tool outputs from the live context once it crosses the floor below. Protects the 2 most recent turns |
 | `PIT_PROACTIVE_PRUNE_FLOOR` | `64000` | Token floor below which proactive pruning is skipped (only used when `PIT_PROACTIVE_PRUNE=1`) |

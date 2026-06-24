@@ -23,7 +23,7 @@ session, so its turns never persist to the parent's session file.
 | `op` | Behavior |
 |------|----------|
 | `run` (default) | Blocking — spawn the subagent and return its final answer. |
-| `spawn` | Non-blocking — launch detached and return a `handle`. The result re-injects into the chat automatically when it finishes (see [async delegation](#async-delegation)). |
+| `spawn` | Non-blocking — launch detached and return a `handle`. Collect the result later with `join` (or check `poll`); see [async delegation](#async-delegation). |
 | `poll` | Non-blocking status of the given `handles`. |
 | `join` | Await the given `handles` and collect their outputs. |
 | `list` | List tracked subagents, live async handles, and resumable (interrupted) ones. |
@@ -91,10 +91,12 @@ loaded types.
 ## Async delegation
 
 `task({ op: "spawn" })` launches a subagent detached and returns a handle so the
-parent can keep working. When the subagent settles, its result is **re-injected
-into the chat automatically** — the model never has to poll. You may still
-`poll` for status or `join` early to collect it. Disable the auto re-injection
-with `PIT_NO_ASYNC_REINJECT` (falls back to manual `poll`/`join`).
+parent can keep working. By default the result is **not** pushed into the chat —
+when a subagent finishes it only emits a status line, and you collect its output
+explicitly with `join` (await + read) or check `poll` for status. This mirrors
+Claude Code: spawn N tasks, then `join` them and summarize, with no mid-turn
+interruptions. Set `PIT_ASYNC_REINJECT=1` to opt into the legacy behavior where
+each settled result is auto-injected into the chat.
 
 ## Inter-agent messaging
 

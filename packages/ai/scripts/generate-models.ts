@@ -1111,6 +1111,27 @@ async function generateModels() {
 		});
 	}
 
+	// Add missing GLM-5.2 (1M context, 128K output) until upstream includes it.
+	if (!allModels.some((m) => m.provider === "opencode" && m.id === "glm-5.2")) {
+		allModels.push({
+			id: "glm-5.2",
+			name: "GLM-5.2",
+			api: "openai-completions",
+			baseUrl: "https://opencode.ai/zen/v1",
+			provider: "opencode",
+			reasoning: true,
+			input: ["text"],
+			cost: {
+				input: 1.4,
+				output: 4.4,
+				cacheRead: 0.26,
+				cacheWrite: 0,
+			},
+			contextWindow: 1000000,
+			maxTokens: 131072,
+		});
+	}
+
 	const deepseekCompat: OpenAICompletionsCompat = {
 		requiresReasoningContentOnAssistantMessages: true,
 		thinkingFormat: "deepseek",

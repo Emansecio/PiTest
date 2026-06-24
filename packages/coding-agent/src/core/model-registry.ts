@@ -26,6 +26,11 @@ import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { getAgentDir } from "../config.ts";
 import type { AuthStatus, AuthStorage } from "./auth-storage.ts";
+import {
+	getCuratedExtraModels,
+	getPresetProviderModels,
+	PRESET_PROVIDER_DISPLAY_NAMES,
+} from "./openai-compatible-presets.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
 import {
 	clearConfigValueCache,
@@ -188,6 +193,10 @@ const ProviderConfigSchema = Type.Object({
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
 	authHeader: Type.Optional(Type.Boolean()),
+	// When true, the API key is resolved from auth.json (set via `/login`) instead of
+	// `apiKey` here — so an OpenAI-compatible provider can define models without an
+	// inline key. Written by the "Add OpenAI-compatible endpoint" login flow.
+	login: Type.Optional(Type.Boolean()),
 	models: Type.Optional(Type.Array(ModelDefinitionSchema)),
 	modelOverrides: Type.Optional(Type.Record(Type.String(), ModelOverrideSchema)),
 });
@@ -323,6 +332,20 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 
 /** Clear the config value command cache. Exported for testing. */
 export const clearApiKeyCache = clearConfigValueCache;
+
+/**
+ * Providers hidden from the "available models" surface (the /model selector and
+ * any flow that lists usable models), even when auth is configured for them. The
+ * `@pit/ai` catalog still defines these providers — its types and provider-behavior
+ * tests depend on them — and `getAll()`/`find()` still resolve them, so models.json
+ * overrides keep working; they're just kept out of the picker to avoid flooding it.
+ */
+const HIDDEN_BUILTIN_PROVIDERS: ReadonlySet<string> = new Set(["openrouter"]);
+
+/** True when a provider's built-in models should be kept out of user-facing pickers. */
+export function isHiddenModelProvider(providerId: string): boolean {
+	return HIDDEN_BUILTIN_PROVIDERS.has(providerId);
+}
 
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
@@ -462,7 +485,20 @@ export class ModelRegistry {
 			// Keep built-in models even if custom models failed to load
 		}
 
-		const builtInModels = this.loadBuiltInModels(overrides, modelOverrides);
+		// Preset OpenAI-compatible providers (Z.ai GLM, Verboo, …) are treated as
+		// extra built-in models so they appear in /login and /model with no config.
+		// A models.json entry with the same provider/id still wins (via mergeCustomModels).
+		const builtInModels = [...this.loadBuiltInModels(overrides, modelOverrides), ...getPresetProviderModels()];
+
+		// Curated models for existing built-in providers that models.dev hasn't
+		// published yet (e.g. GLM-5.2 on OpenCode Go). Added only when the generated
+		// catalog doesn't already define them, so they don't duplicate once it catches up.
+		for (const extra of getCuratedExtraModels()) {
+			if (!builtInModels.some((model) => model.provider === extra.provider && model.id === extra.id)) {
+				builtInModels.push(extra);
+			}
+		}
+
 		let combined = this.mergeCustomModels(builtInModels, customModels);
 
 		// Let OAuth providers modify their models (e.g., update baseUrl)
@@ -610,8 +646,12 @@ export class ModelRegistry {
 				if (!providerConfig.baseUrl) {
 					throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
 				}
-				if (!providerConfig.apiKey) {
-					throw new Error(`Provider ${providerName}: "apiKey" is required when defining custom models.`);
+				// `login: true` defers auth to auth.json (set via `/login`), so an inline
+				// apiKey is not required in that case.
+				if (!providerConfig.apiKey && !providerConfig.login) {
+					throw new Error(
+						`Provider ${providerName}: "apiKey" is required when defining custom models (or set "login": true to use a key from /login).`,
+					);
 				}
 			}
 			// Built-in providers with custom models: baseUrl/apiKey/api are optional,
@@ -702,9 +742,10 @@ export class ModelRegistry {
 	/**
 	 * Get only models that have auth configured.
 	 * This is a fast check that doesn't refresh OAuth tokens.
+	 * Hidden providers (see HIDDEN_BUILTIN_PROVIDERS) are kept out of this surface.
 	 */
 	getAvailable(): Model<Api>[] {
-		return this.modelsList.filter((m) => this.hasConfiguredAuth(m));
+		return this.modelsList.filter((m) => !HIDDEN_BUILTIN_PROVIDERS.has(m.provider) && this.hasConfiguredAuth(m));
 	}
 
 	/**
@@ -847,8 +888,18 @@ export class ModelRegistry {
 			registeredProvider?.oauth?.name ??
 			oauthProvider?.name ??
 			BUILT_IN_PROVIDER_DISPLAY_NAMES[provider] ??
+			PRESET_PROVIDER_DISPLAY_NAMES[provider] ??
 			provider
 		);
+	}
+
+	/**
+	 * Path to the models.json this registry reads/writes, or undefined for
+	 * in-memory registries. Used by the OpenAI-compatible login flow to persist
+	 * a custom provider so it survives restarts.
+	 */
+	getModelsJsonPath(): string | undefined {
+		return this.modelsJsonPath;
 	}
 
 	/**

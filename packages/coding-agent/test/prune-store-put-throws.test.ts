@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@pit/agent-core";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { pruneOldToolOutputs } from "../src/core/compaction/compaction.ts";
 import { type DeferredOutputStore, setCurrentDeferredOutputStore } from "../src/core/deferred-output-store.ts";
 
@@ -22,16 +22,8 @@ function firstText(messages: AgentMessage[]): string {
 	return (messages[0] as unknown as { content: { text: string }[] }).content[0].text;
 }
 
-const prevFlag = process.env.PIT_DEFER_HISTORY;
-
-beforeEach(() => {
-	process.env.PIT_DEFER_HISTORY = "1";
-});
-
 afterEach(() => {
 	setCurrentDeferredOutputStore(undefined);
-	if (prevFlag === undefined) delete process.env.PIT_DEFER_HISTORY;
-	else process.env.PIT_DEFER_HISTORY = prevFlag;
 });
 
 /**
@@ -53,7 +45,7 @@ describe("pruneOldToolOutputs tolerates a failing deferred store", () => {
 		const big = "x".repeat(120_000); // > prune threshold so it defers
 		const messages = messagesWithToolOutput(big);
 
-		expect(() => pruneOldToolOutputs(messages)).not.toThrow();
+		expect(() => pruneOldToolOutputs(messages, undefined, undefined, true)).not.toThrow();
 		const text = firstText(messages);
 		// Degraded to an excerpt, not the deferred placeholder.
 		expect(text).not.toContain("recall_tool_output");

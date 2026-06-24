@@ -14,7 +14,7 @@
  * comes from settings (project preferred over global).
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	interpolateEnvVars,
@@ -107,6 +107,62 @@ export function loadMcpConfigFiles(cwd: string, agentDir: string): McpConfigFile
 		project: loadMcpConfigFile(mcpConfigFilePath("project", cwd, agentDir)),
 		local: loadMcpConfigFile(mcpConfigFilePath("local", cwd, agentDir)),
 	};
+}
+
+/**
+ * Persist a server's enabled/disabled state so the /mcp panel toggle survives a
+ * restart, mirroring `pit mcp enable|disable`. Edits the flag IN PLACE in the
+ * highest-precedence scope file that already defines the server (local → project
+ * → user) so the toggle isn't shadowed by a stronger layer. When the server is
+ * only defined in settings.json (no scope file), the resolved config is written
+ * as a full override into the user scope file. Best-effort: returns false on a
+ * write error rather than throwing into a UI handler.
+ */
+export function setMcpServerDisabled(
+	name: string,
+	disabled: boolean,
+	resolvedConfig: McpServerConfig,
+	cwd: string,
+	agentDir: string,
+): boolean {
+	const tryScope = (scope: McpConfigScope): boolean => {
+		const path = mcpConfigFilePath(scope, cwd, agentDir);
+		let text: string;
+		try {
+			text = readFileSync(path, "utf-8");
+		} catch {
+			return false; // file absent → server isn't defined here
+		}
+		let parsed: { mcpServers?: Record<string, McpServerConfig>; servers?: Record<string, McpServerConfig> };
+		try {
+			parsed = JSON.parse(text);
+		} catch {
+			return false;
+		}
+		const key = parsed.mcpServers ? "mcpServers" : parsed.servers ? "servers" : "mcpServers";
+		const servers = parsed.mcpServers ?? parsed.servers;
+		if (!servers || !servers[name]) return false;
+		if (disabled) servers[name].disabled = true;
+		else delete servers[name].disabled;
+		writeMcpConfig(path, { ...parsed, [key]: servers });
+		return true;
+	};
+	try {
+		if (tryScope("local") || tryScope("project") || tryScope("user")) return true;
+		// Settings-only server: write a full override into the user scope file.
+		const userPath = mcpConfigFilePath("user", cwd, agentDir);
+		const existing = loadMcpConfigFile(userPath);
+		existing[name] = { ...resolvedConfig, disabled };
+		if (!disabled) delete existing[name].disabled;
+		writeMcpConfig(userPath, { mcpServers: existing });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function writeMcpConfig(path: string, data: unknown): void {
+	writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
 }
 
 /**

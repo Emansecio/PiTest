@@ -97,13 +97,11 @@ describe("FooterComponent stats cache", () => {
 		const first = getMetricsLine(footer);
 		expect(first).toContain("↑1k");
 		expect(first).toContain("↓500");
-		expect(first).toContain("$0.010");
 
 		ctrl.push(2000, 1500, 0.05);
 		const second = getMetricsLine(footer);
 		expect(second).toContain("↑3k");
 		expect(second).toContain("↓2k");
-		expect(second).toContain("$0.060");
 	});
 
 	it("only walks the new tail on subsequent renders (incremental cache)", () => {
@@ -124,7 +122,6 @@ describe("FooterComponent stats cache", () => {
 		const second = getMetricsLine(footer);
 		expect(second).toContain("↑100");
 		expect(second).toContain("↓50");
-		expect(second).toContain("$0.001");
 	});
 
 	it("resets the cache when entries shrink (fork / clear / compaction replace)", () => {
@@ -141,7 +138,6 @@ describe("FooterComponent stats cache", () => {
 		const after = getMetricsLine(footer);
 		expect(after).toContain("↑1k");
 		expect(after).toContain("↓500");
-		expect(after).toContain("$0.010");
 	});
 
 	it("resets the cache on invalidate()", () => {
@@ -162,7 +158,6 @@ describe("FooterComponent stats cache", () => {
 		const after = getMetricsLine(footer);
 		expect(after).toContain("↑42");
 		expect(after).toContain("↓7");
-		expect(after).toContain("$0.002");
 	});
 
 	it("resets the cache on setSession() to a different session reference", () => {

@@ -687,6 +687,38 @@ const PRUNE_PROTECT_TURNS = 2;
 const PRUNE_HEAD_CHARS = 1500;
 const PRUNE_TAIL_CHARS = 800;
 
+/** Floor the adaptive per-output prune threshold approaches as the window fills. */
+const ADAPTIVE_PRUNE_MIN_THRESHOLD = 4_000;
+/** Occupancy at which the per-output threshold starts tightening below PRUNE_TOKEN_THRESHOLD. */
+const ADAPTIVE_PRUNE_START_OCCUPANCY = 0.5;
+/** Occupancy at/above which the threshold reaches ADAPTIVE_PRUNE_MIN_THRESHOLD. */
+const ADAPTIVE_PRUNE_FULL_OCCUPANCY = 0.9;
+
+/**
+ * Per-output prune threshold that tightens as the context window fills.
+ *
+ * The flat PRUNE_TOKEN_THRESHOLD (20k) is evaluated per output block, but read
+ * caps at ~15k tokens and bash at ~7k — so a *medium* tool output never crosses
+ * it on its own. A long session that accumulates dozens of medium reads/greps
+ * ("death by a thousand cuts") therefore reclaims nothing even as the window
+ * approaches full. This scales the threshold DOWN from 20k toward 4k between 50%
+ * and 90% occupancy, so medium outputs become prunable exactly when there is real
+ * pressure. At or below 50% occupancy it returns the flat 20k (byte-identical to
+ * the previous behaviour — no early over-pruning, no extra cache churn). The
+ * excerpt still keeps each output's head+tail shape and the on-disk file remains
+ * the source of truth, so this only ever upgrades a reclaim that respects the
+ * existing prune contract.
+ */
+export function adaptivePruneThreshold(contextTokens: number, contextWindow: number): number {
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return PRUNE_TOKEN_THRESHOLD;
+	const occupancy = contextTokens / contextWindow;
+	if (occupancy <= ADAPTIVE_PRUNE_START_OCCUPANCY) return PRUNE_TOKEN_THRESHOLD;
+	if (occupancy >= ADAPTIVE_PRUNE_FULL_OCCUPANCY) return ADAPTIVE_PRUNE_MIN_THRESHOLD;
+	const span = ADAPTIVE_PRUNE_FULL_OCCUPANCY - ADAPTIVE_PRUNE_START_OCCUPANCY;
+	const t = (occupancy - ADAPTIVE_PRUNE_START_OCCUPANCY) / span;
+	return Math.round(PRUNE_TOKEN_THRESHOLD - t * (PRUNE_TOKEN_THRESHOLD - ADAPTIVE_PRUNE_MIN_THRESHOLD));
+}
+
 /**
  * Shrink a large tool output to its head + tail, eliding the middle. Keeps the
  * output's *shape* for the summarizer — first/last grep matches, a file's header
@@ -715,8 +747,12 @@ function headTailExcerpt(text: string): string {
  *
  * Only tool results older than the last `protectTurns` user messages are
  * eligible. Tool results above `tokenThreshold` (estimated) are shrunk to a
- * head+tail excerpt (so the summarizer still sees the output's shape) — or,
- * when history deferral is enabled, persisted to disk with a recall placeholder.
+ * head+tail excerpt (so the reader still sees the output's shape). When `defer`
+ * is set (the live-context prune) AND a deferred-output store is open, the full
+ * text is ALSO persisted to disk and a `recall_tool_output` id is appended to the
+ * excerpt — a hybrid that keeps the shape inline while leaving the elided middle
+ * recoverable in full. Compaction-prep callers pass `defer=false` (the summarizer
+ * discards these messages, so a recall id would dangle).
  *
  * Mutates the passed messages and their text blocks in place. `getMessageFromEntry`
  * returns `entry.message` BY REFERENCE for `type === "message"` entries (the same
@@ -732,10 +768,75 @@ function headTailExcerpt(text: string): string {
 // recomputes exactly once for the new (small) value.
 const beforeTokensCache = new WeakMap<object, number>();
 
+/**
+ * Resource key for a `read` tool call: path plus offset/limit, so two reads of
+ * the SAME path+range collide while reads of different ranges (distinct slices of
+ * a file) stay separate. Returns undefined for a read with no usable path. Mirrors
+ * the path-alias set the read tool normalizes (`path` canonical; aliases kept for
+ * raw model args persisted before normalization).
+ */
+function readResourceKey(args: unknown): string | undefined {
+	if (typeof args !== "object" || args === null) return undefined;
+	const a = args as Record<string, unknown>;
+	let path: string | undefined;
+	for (const key of ["path", "file", "file_path", "filename"]) {
+		const v = a[key];
+		if (typeof v === "string" && v.length > 0) {
+			path = v;
+			break;
+		}
+	}
+	if (!path) return undefined;
+	const offset = typeof a.offset === "number" ? a.offset : "";
+	const limit = typeof a.limit === "number" ? a.limit : "";
+	return `${path}\u0000${offset}\u0000${limit}`;
+}
+
+/**
+ * Indices (in the prunable region, i.e. `< protectFromIndex`) of `read` tool
+ * results that a LATER read of the same path+range supersedes. The newer read
+ * reflects current disk state, so the older copy is a stale duplicate safe to
+ * collapse to head+tail even when it is below the size threshold — the common
+ * "read file → edit → read same file again" loop that otherwise keeps N full
+ * copies in context. The newest read (and any read inside the protected recent
+ * turns) is never marked. Disk stays the source of truth, so no information is
+ * lost that a re-read cannot recover.
+ */
+function buildSupersededReadIndices(messages: AgentMessage[], protectFromIndex: number): Set<number> {
+	const keyByCallId = new Map<string, string>();
+	for (const msg of messages) {
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		for (const block of msg.content) {
+			if (block.type !== "toolCall" || block.name !== "read") continue;
+			const key = readResourceKey(block.arguments);
+			if (key) keyByCallId.set(block.id, key);
+		}
+	}
+	const keyByIndex = new Map<number, string>();
+	const lastIndexByKey = new Map<string, number>();
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+		if (msg.role !== "toolResult" || msg.toolName !== "read") continue;
+		const key = keyByCallId.get(msg.toolCallId);
+		if (!key) continue;
+		keyByIndex.set(i, key);
+		const prev = lastIndexByKey.get(key);
+		if (prev === undefined || i > prev) lastIndexByKey.set(key, i);
+	}
+	const superseded = new Set<number>();
+	for (const [i, key] of keyByIndex) {
+		if (i >= protectFromIndex) continue;
+		const last = lastIndexByKey.get(key);
+		if (last !== undefined && last > i) superseded.add(i);
+	}
+	return superseded;
+}
+
 export function pruneOldToolOutputs(
 	messages: AgentMessage[],
 	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
 	protectTurns = PRUNE_PROTECT_TURNS,
+	defer = false,
 ): number {
 	// Find the index of the Nth-from-last user message to establish the protection boundary.
 	// If the window holds fewer than `protectTurns` user messages, the whole window IS the
@@ -756,7 +857,8 @@ export function pruneOldToolOutputs(
 
 	let prunedTokens = 0;
 
-	const store = isTruthyEnvFlag(process.env.PIT_DEFER_HISTORY) ? getCurrentDeferredOutputStore() : undefined;
+	const store = defer ? getCurrentDeferredOutputStore() : undefined;
+	const supersededReadIndices = buildSupersededReadIndices(messages, protectFromIndex);
 
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];
@@ -788,6 +890,7 @@ export function pruneOldToolOutputs(
 		if (msg.role !== "toolResult") continue;
 		if (!Array.isArray(msg.content)) continue;
 
+		const superseded = supersededReadIndices.has(i);
 		for (let b = 0; b < msg.content.length; b++) {
 			const block = msg.content[b];
 			if (block.type === "text" && block.text) {
@@ -805,17 +908,26 @@ export function pruneOldToolOutputs(
 							id = undefined;
 						}
 					}
-					if (id !== undefined) {
-						// The block collapses to a tiny placeholder — the full estimate is reclaimed.
-						prunedTokens += est;
-						(msg.content[b] as any).text =
-							`[Tool output deferred (~${est} tokens) — id=${id}. Retrieve with recall_tool_output({ id: "${id}" }) if needed.]`;
-					} else {
-						// No store, or the deferred write failed: keep the output's shape
-						// (head + tail) instead of discarding it. The excerpt still retains a
-						// non-trivial head+tail, so only the delta is actually reclaimed —
-						// mirror the mutation-args accounting (before - after) above.
-						const excerpt = headTailExcerpt(block.text);
+					// Hybrid: always keep the head+tail excerpt inline (so the reader still
+					// sees the output's shape) and, when the full text was stored, append the
+					// recall id so the elided middle is recoverable in full. Strictly better
+					// than a bare excerpt (adds a recovery path) and than a bare placeholder
+					// (keeps shape). Degrades to the plain excerpt when there is no store
+					// (compaction-prep / opt-out) or the deferred write failed.
+					const excerpt = headTailExcerpt(block.text);
+					const replacement =
+						id !== undefined
+							? `${excerpt}\n[Full output (~${est} tokens) deferred — recall_tool_output({ id: "${id}" }) returns it in full.]`
+							: excerpt;
+					(msg.content[b] as any).text = replacement;
+					prunedTokens += Math.max(0, est - estimateTextTokens(replacement, true));
+				} else if (superseded) {
+					// A stale duplicate of a file re-read later (below the size threshold).
+					// Collapse it to head+tail — the newer read carries current content and
+					// disk stays the source of truth. Never deferred (a recall id for stale
+					// content is pointless); headTailExcerpt no-ops when already small.
+					const excerpt = headTailExcerpt(block.text);
+					if (excerpt.length < block.text.length) {
 						(msg.content[b] as any).text = excerpt;
 						prunedTokens += Math.max(0, est - estimateTextTokens(excerpt, true));
 					}

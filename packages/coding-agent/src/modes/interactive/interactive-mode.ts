@@ -87,12 +87,20 @@ export function extractChromeCommand(text: string): { matched: boolean; rest: st
 import { getCurrentHindsightBank } from "../../core/hindsight/index.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
+import { isHiddenModelProvider } from "../../core/model-registry.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
 	type ModelRole,
 	resolveRole,
 } from "../../core/model-resolver.ts";
+import {
+	deriveProviderIdFromBaseUrl,
+	normalizeBaseUrl,
+	type ProbeResult,
+	persistOpenAICompatibleProviderToModelsJson,
+	probeOpenAICompatibleConnection,
+} from "../../core/openai-compatible-presets.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
@@ -134,6 +142,7 @@ import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { FusionLiveComponent, type FusionLiveMember } from "./components/fusion-live.ts";
+import { createGoalOverlay, type GoalOverlay } from "./components/goal-overlay.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
@@ -227,6 +236,12 @@ type CompactionQueuedMessage = {
 };
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
+
+// Grace window after an interrupt (Esc/Ctrl+C) before the TUI surfaces a
+// stuck-turn escalation. A clean abort settles in well under a frame; this is
+// long enough to never false-fire on a normal interrupt, short enough that a
+// genuine wedge gives feedback fast.
+const INTERRUPT_WATCHDOG_MS = 2000;
 
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
@@ -341,6 +356,10 @@ export class InteractiveMode {
 	private ctrlCHint: Text | undefined = undefined;
 	private ctrlCHintTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 	private lastEscapeTime = 0;
+	// Defense-in-depth for interrupt: if the turn doesn't settle within this grace
+	// window after Esc/Ctrl+C, surface a stuck-turn escalation instead of leaving
+	// the spinner counting silently. Cleared when the turn settles (agent_end).
+	private interruptWatchdogTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 	private anthropicSubscriptionWarningShown = false;
 
 	// Status line tracking (for mutating immediately-sequential status updates)
@@ -394,6 +413,9 @@ export class InteractiveMode {
 
 	// Live "above editor" todo overlay (auto-hides when there are no todos).
 	private todoOverlay: TodoOverlay | undefined;
+	// Live "above editor" goal panel (sits ABOVE the todo overlay; auto-hides
+	// when no goal is active; lingers briefly on complete then vanishes).
+	private goalOverlay: GoalOverlay | undefined;
 
 	// Guard so the cheatsheet hotkey toggles a single overlay (no stacking).
 	private cheatsheetOpen = false;
@@ -759,6 +781,9 @@ export class InteractiveMode {
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
+		// Goal overlay above the todo overlay: goal commands, todos obey.
+		this.goalOverlay = createGoalOverlay(this.session);
+		this.ui.addChild(this.goalOverlay);
 		this.todoOverlay = createTodoOverlay(this.session);
 		this.ui.addChild(this.todoOverlay);
 		this.renderWidgets(); // Initialize with default spacer
@@ -1282,6 +1307,7 @@ export class InteractiveMode {
 	private applyRuntimeSettings(): void {
 		this.footer.setSession(this.session);
 		this.todoOverlay?.setSession(this.session);
+		this.goalOverlay?.setSession(this.session);
 		// Repaint the live todo overlay the instant the list changes, rather than
 		// waiting for an incidental render (loader tick / tool event). Re-registered
 		// here so a session swap points the listener at the new session's manager.
@@ -2229,6 +2255,7 @@ export class InteractiveMode {
 			// its live strip + ticker explicitly when the whole task is stopped.
 			this.disposeFusionLive();
 			this.showStatus("Interrupted");
+			this.armInterruptWatchdog();
 			return;
 		}
 		const id = labelToId.get(picked);
@@ -2261,6 +2288,7 @@ export class InteractiveMode {
 					// would leak when the user aborts mid-run. Tear it down explicitly.
 					this.disposeFusionLive();
 					this.showStatus("Interrupted");
+					this.armInterruptWatchdog();
 				} else {
 					void this.promptInterruptChoice(interruptible);
 				}
@@ -2573,7 +2601,9 @@ export class InteractiveMode {
 
 	/**
 	 * `/goal` — autonomous goal mode. Subcommands: (none)=status, pause, resume,
-	 * clear, edit <obj>, --tokens <budget> <obj>, or a bare <objective> to start.
+	 * clear, edit <obj>, --tokens <budget> <obj> (raise an existing goal's budget
+	 * when no objective follows, else start with a budget), or a bare <objective>
+	 * to start.
 	 */
 	private async handleGoalCommand(args: string): Promise<void> {
 		const trimmed = args.trim();
@@ -2986,6 +3016,7 @@ export class InteractiveMode {
 
 			case "agent_end":
 				this.setTerminalProgress(false);
+				this.clearInterruptWatchdog();
 				this.disposeFusionLive();
 				if (this.loadingAnimation) {
 					this.loadingAnimation.stop();
@@ -3583,6 +3614,7 @@ export class InteractiveMode {
 			this.disposeFusionLive();
 			this.showStatus("Interrupted");
 			this.showCtrlCHint();
+			this.armInterruptWatchdog();
 			return;
 		}
 		this.clearEditor();
@@ -3608,6 +3640,38 @@ export class InteractiveMode {
 			this.statusContainer.removeChild(this.ctrlCHint);
 			this.ctrlCHint = undefined;
 			this.ui.requestRender();
+		}
+	}
+
+	/**
+	 * Defense-in-depth for interrupt. After Esc/Ctrl+C the turn normally settles
+	 * within a frame and `agent_end` stops the loader. If a wedged await keeps the
+	 * run "busy" past this grace window, the spinner would keep counting with no
+	 * feedback — the exact failure the user hit. The watchdog freezes the loader
+	 * and tells the user how to force-quit. It deliberately does NOT reset engine
+	 * state (no UI/engine split-brain): it only surfaces the stall. The root-cause
+	 * stream-teardown fix should make a real wedge unreachable; this is the net.
+	 */
+	private armInterruptWatchdog(): void {
+		this.clearInterruptWatchdog();
+		this.interruptWatchdogTimer = setTimeout(() => {
+			this.interruptWatchdogTimer = undefined;
+			if (!this.session.isBusy) return; // settled cleanly within the grace window
+			if (this.loadingAnimation) {
+				this.loadingAnimation.stop();
+				this.loadingAnimation = undefined;
+				this.statusContainer.clear();
+			}
+			this.showError(
+				`Interrupt didn't take effect — the turn appears stuck. Press ${keyText("app.clear")} twice to force-quit.`,
+			);
+		}, INTERRUPT_WATCHDOG_MS);
+	}
+
+	private clearInterruptWatchdog(): void {
+		if (this.interruptWatchdogTimer) {
+			clearTimeout(this.interruptWatchdogTimer);
+			this.interruptWatchdogTimer = undefined;
 		}
 	}
 
@@ -5024,6 +5088,9 @@ export class InteractiveMode {
 
 		const modelProviders = new Set(this.session.modelRegistry.getAll().map((model) => model.provider));
 		for (const providerId of modelProviders) {
+			if (isHiddenModelProvider(providerId)) {
+				continue;
+			}
 			if (!isApiKeyLoginProvider(providerId, oauthProviderIds)) {
 				continue;
 			}
@@ -5060,12 +5127,17 @@ export class InteractiveMode {
 	private showLoginAuthTypeSelector(): void {
 		const subscriptionLabel = "Use a subscription";
 		const apiKeyLabel = "Use an API key";
+		const openAICompatibleLabel = "Add OpenAI-compatible endpoint (custom URL + key)";
 		this.showSelector((done) => {
 			const selector = new ExtensionSelectorComponent(
 				"Select authentication method:",
-				[subscriptionLabel, apiKeyLabel],
+				[subscriptionLabel, apiKeyLabel, openAICompatibleLabel],
 				(option) => {
 					done();
+					if (option === openAICompatibleLabel) {
+						void this.showOpenAICompatibleLoginDialog();
+						return;
+					}
 					const authType = option === subscriptionLabel ? "oauth" : "api_key";
 					this.showLoginProviderSelector(authType);
 				},
@@ -5180,22 +5252,26 @@ export class InteractiveMode {
 		if (isUnknownModel(previousModel)) {
 			const availableModels = this.session.modelRegistry.getAvailable();
 			const providerModels = availableModels.filter((model) => model.provider === providerId);
-			if (!hasDefaultModelProvider(providerId)) {
-				selectionError = `${actionLabel}, but no default model is configured for provider "${providerId}". Use /model to select a model.`;
-			} else if (providerModels.length === 0) {
+			if (providerModels.length === 0) {
 				selectionError = `${actionLabel}, but no models are available for that provider. Use /model to select a model.`;
 			} else {
-				const defaultModelId = defaultModelPerProvider[providerId];
-				selectedModel = providerModels.find((model) => model.id === defaultModelId);
-				if (!selectedModel) {
+				// Prefer the provider's curated default; otherwise (presets, custom
+				// OpenAI-compatible providers) fall back to the first available model.
+				const defaultModelId = hasDefaultModelProvider(providerId)
+					? defaultModelPerProvider[providerId]
+					: undefined;
+				const candidate = defaultModelId
+					? providerModels.find((model) => model.id === defaultModelId)
+					: providerModels[0];
+				if (!candidate) {
 					selectionError = `${actionLabel}, but its default model "${defaultModelId}" is not available. Use /model to select a model.`;
 				} else {
 					try {
-						await this.session.setModel(selectedModel);
+						await this.session.setModel(candidate);
+						selectedModel = candidate;
 					} catch (error: unknown) {
-						selectedModel = undefined;
 						const errorMessage = errMsg(error);
-						selectionError = `${actionLabel}, but selecting its default model failed: ${errorMessage}. Use /model to select a model.`;
+						selectionError = `${actionLabel}, but selecting a model failed: ${errorMessage}. Use /model to select a model.`;
 					}
 				}
 			}
@@ -5247,15 +5323,179 @@ export class InteractiveMode {
 				throw new Error("API key cannot be empty.");
 			}
 
+			// For OpenAI-compatible providers (presets like Z.ai GLM/Verboo, or any
+			// provider whose model uses an openai-* API), verify the key right away.
+			// A clear rejection (401/403) aborts before persisting an unusable key.
+			const probe = await this.maybeProbeProviderApiKey(providerId, apiKey, dialog);
+			if (probe?.authRejected) {
+				restoreEditor();
+				this.showError(`API key for ${providerName} was rejected: ${probe.detail}`);
+				return;
+			}
+
 			this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
 
 			restoreEditor();
 			await this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel);
+			if (probe) {
+				this.showStatus(
+					probe.ok
+						? `${providerName} — connection test passed: ${probe.detail}`
+						: `${providerName} — saved, but connection test could not verify: ${probe.detail}`,
+				);
+			}
 		} catch (error: unknown) {
 			restoreEditor();
 			const errorMsg = errMsg(error);
 			if (errorMsg !== "Login cancelled") {
 				this.showError(`Failed to save API key for ${providerName}: ${errorMsg}`);
+			}
+		}
+	}
+
+	/**
+	 * Probe the API key against an OpenAI-compatible provider's endpoint right after
+	 * the user enters it. Returns undefined when a probe doesn't apply (no model,
+	 * non-http baseUrl, or a non-OpenAI API like anthropic-messages/google).
+	 */
+	private async maybeProbeProviderApiKey(
+		providerId: string,
+		apiKey: string,
+		dialog: LoginDialogComponent,
+	): Promise<ProbeResult | undefined> {
+		const model = this.session.modelRegistry.getAll().find((candidate) => candidate.provider === providerId);
+		if (!model?.baseUrl) {
+			return undefined;
+		}
+		if (!String(model.api).startsWith("openai")) {
+			return undefined;
+		}
+		if (!/^https?:\/\//i.test(model.baseUrl)) {
+			return undefined;
+		}
+		dialog.showBusy("Testing connection…");
+		return probeOpenAICompatibleConnection({ baseUrl: model.baseUrl, apiKey, model: model.id });
+	}
+
+	/**
+	 * Login flow for an arbitrary OpenAI-compatible endpoint: prompt for base URL,
+	 * model id, and API key; test the connection; then persist the provider to
+	 * models.json (key goes to auth.json) so it survives restarts and appears in
+	 * `/model`.
+	 */
+	private async showOpenAICompatibleLoginDialog(): Promise<void> {
+		const dialog = new LoginDialogComponent(
+			this.ui,
+			"openai-compatible",
+			() => {
+				// Completion handled below.
+			},
+			"OpenAI-compatible provider",
+			"Add OpenAI-compatible provider",
+		);
+
+		this.editorContainer.clear();
+		this.editorContainer.addChild(dialog);
+		this.ui.setFocus(dialog);
+		this.ui.requestRender();
+
+		const restoreEditor = () => {
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		};
+
+		try {
+			const baseUrlRaw = (
+				await dialog.showStepPrompt("Base URL (OpenAI-compatible):", {
+					placeholder: "https://api.z.ai/api/coding/paas/v4",
+				})
+			).trim();
+			if (!baseUrlRaw) {
+				throw new Error("Base URL cannot be empty.");
+			}
+			const baseUrl = normalizeBaseUrl(baseUrlRaw);
+			if (!/^https?:\/\//i.test(baseUrl)) {
+				throw new Error("Base URL must start with http:// or https://");
+			}
+
+			const modelId = (
+				await dialog.showStepPrompt("Model ID:", {
+					placeholder: "glm-5.2",
+					context: [`Base URL: ${baseUrl}`],
+				})
+			).trim();
+			if (!modelId) {
+				throw new Error("Model ID cannot be empty.");
+			}
+
+			const apiKey = (
+				await dialog.showStepPrompt("API key:", {
+					context: [`Base URL: ${baseUrl}`, `Model: ${modelId}`],
+				})
+			).trim();
+			if (!apiKey) {
+				throw new Error("API key cannot be empty.");
+			}
+
+			const displayName = (
+				await dialog.showStepPrompt("Display name (optional, Enter to skip):", {
+					placeholder: "My Provider",
+					context: [`Base URL: ${baseUrl}`, `Model: ${modelId}`],
+				})
+			).trim();
+
+			dialog.showBusy("Testing connection…");
+			const probe = await probeOpenAICompatibleConnection({ baseUrl, apiKey, model: modelId });
+			if (probe.authRejected) {
+				restoreEditor();
+				this.showError(`Not saved — ${probe.detail}`);
+				return;
+			}
+
+			const takenIds = new Set<string>(this.session.modelRegistry.getAll().map((model) => model.provider));
+			const providerId = deriveProviderIdFromBaseUrl(baseUrl, takenIds);
+			const providerName = displayName || providerId;
+
+			const modelsJsonPath = this.session.modelRegistry.getModelsJsonPath();
+			if (!modelsJsonPath) {
+				throw new Error("No models.json path is configured to persist the provider.");
+			}
+
+			persistOpenAICompatibleProviderToModelsJson(modelsJsonPath, providerId, {
+				name: providerName,
+				baseUrl,
+				api: "openai-completions",
+				models: [{ id: modelId, name: modelId }],
+			});
+			this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
+			this.session.modelRegistry.refresh();
+
+			restoreEditor();
+
+			const newModel = this.session.modelRegistry.find(providerId, modelId);
+			if (newModel) {
+				try {
+					await this.session.setModel(newModel);
+				} catch (error: unknown) {
+					this.showError(
+						`Provider added, but selecting the model failed: ${errMsg(error)}. Use /model to select.`,
+					);
+				}
+			}
+			await this.updateAvailableProviderCount();
+			this.refreshModelIndicators();
+
+			const verifyNote = probe.ok ? probe.detail : `connection unverified (${probe.detail})`;
+			this.showStatus(
+				`Added ${providerName} as ${providerId}/${modelId} — ${verifyNote}. Credentials saved to ${getAuthPath()}`,
+			);
+		} catch (error: unknown) {
+			restoreEditor();
+			const message = errMsg(error);
+			if (message !== "Login cancelled") {
+				this.showError(`Failed to add OpenAI-compatible provider: ${message}`);
 			}
 		}
 	}
@@ -6062,6 +6302,7 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 	stop(): void {
 		this.unregisterSignalHandlers();
 		this.setTerminalProgress(false);
+		this.clearInterruptWatchdog();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;

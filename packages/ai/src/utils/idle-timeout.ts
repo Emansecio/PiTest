@@ -172,6 +172,11 @@ export async function* iterateWithIdleTimeout<T>(
 			let result: IteratorResult<T>;
 			try {
 				const nextPromise = iterator.next();
+				// When idle/abort wins the race below we abandon this read. On a dead
+				// socket it may reject much later (or never) — attach a no-op catch so an
+				// abandoned rejection never surfaces as an unhandledRejection. Racing the
+				// original promise is unaffected (a promise can carry many handlers).
+				nextPromise.catch(() => {});
 				const idlePromise = new Promise<never>((_resolve, reject) => {
 					timer = setTimeout(() => {
 						recordDiagnostic({
@@ -209,8 +214,20 @@ export async function* iterateWithIdleTimeout<T>(
 		// Idle stall, abort, or an early `break` in the consumer: ask the underlying
 		// iterator to tear down (the SDK streams' return() aborts the request and frees
 		// the socket). Best-effort — never throw out of cleanup.
+		//
+		// CRITICAL: do NOT `await` return() here. By the async-iterator protocol,
+		// return() is queued behind any still-pending next(); on a frozen socket that
+		// next() never settles, so an awaited return() would block this finally
+		// forever — swallowing the idle/abort error before it reaches the caller and
+		// wedging the whole turn (the spinner counts up, ESC/Ctrl+C become no-ops
+		// because the run signal is already aborted). Fire-and-forget instead so the
+		// idle/abort rejection propagates immediately; the underlying request is torn
+		// down via its own abort signal regardless.
 		try {
-			await iterator.return?.();
+			const ret = iterator.return?.();
+			if (ret && typeof (ret as Promise<unknown>).then === "function") {
+				(ret as Promise<unknown>).then(undefined, () => {});
+			}
 		} catch {
 			// iterator may already be torn down
 		}

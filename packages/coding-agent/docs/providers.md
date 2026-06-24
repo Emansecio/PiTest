@@ -7,6 +7,7 @@ Pit supports subscription-based providers via OAuth and API key providers via en
 - [Subscriptions](#subscriptions)
 - [API Keys](#api-keys)
 - [Auth File](#auth-file)
+- [OpenAI-compatible Endpoints](#openai-compatible-endpoints)
 - [Cloud Providers](#cloud-providers)
 - [Custom Providers](#custom-providers)
 - [Resolution Order](#resolution-order)
@@ -109,6 +110,51 @@ The `key` field supports three formats:
   ```
 
 OAuth credentials are also stored here after `/login` and managed automatically.
+
+## OpenAI-compatible Endpoints
+
+`/login` can authenticate against any OpenAI-compatible endpoint (custom base URL + API key), and verifies the key right after you enter it.
+
+### Built-in presets
+
+Run `/login` → **Use an API key** and pick a ready-made provider — no config needed. The key is stored in `auth.json`; the base URL and models are built in.
+
+| Provider | `auth.json` key | Base URL | Models |
+|----------|------------------|----------|--------|
+| Z.ai GLM (Coding Plan) | `zai` | `https://api.z.ai/api/coding/paas/v4` | `glm-5.2`, `glm-4.7`, `glm-5-turbo` |
+| Verboo Code | `verboo` | `https://code.verboo.ai/v1` | `deepseek-v4-flash`, `qwen3.6-27b`, `@preset/glm4-7-flash` |
+
+Z.ai endpoint and model ids are from [docs.z.ai](https://docs.z.ai/devpack/tool/others). The plan also exposes an Anthropic-compatible endpoint at `https://api.z.ai/api/anthropic`. GLM reasoning models toggle thinking via the deepseek-style `thinking: { type }` field — override per model in `models.json` if your plan differs.
+
+> Verboo's exact base URL is not publicly documented; the preset uses the conventional `/v1` path. If it is wrong for your account, use **Add OpenAI-compatible endpoint** with the URL from your Verboo dashboard.
+
+### Add an arbitrary endpoint
+
+Run `/login` → **Add OpenAI-compatible endpoint (custom URL + key)**. You are prompted for the base URL, model id, API key, and an optional display name. Pit then:
+
+1. **Tests the connection** — `GET {baseUrl}/models` (no tokens), falling back to a 1-token `POST {baseUrl}/chat/completions`. An explicit `401`/`403` aborts before anything is saved.
+2. **Persists** the provider to `models.json` (with `"login": true`, so no inline key) and the API key to `auth.json`.
+3. **Selects** the new model, so it works immediately and survives restarts.
+
+A `"login": true` provider in `models.json` defines models without an inline `apiKey` — the key is resolved from `auth.json` via `/login` / `/logout`:
+
+```json
+{
+  "providers": {
+    "code-verboo": {
+      "name": "Verboo Code",
+      "baseUrl": "https://code.verboo.ai/v1",
+      "api": "openai-completions",
+      "login": true,
+      "models": [
+        { "id": "deepseek-v4-flash", "name": "deepseek-v4-flash", "reasoning": false,
+          "input": ["text"], "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+          "contextWindow": 1000000, "maxTokens": 32768 }
+      ]
+    }
+  }
+}
+```
 
 ## Cloud Providers
 

@@ -122,26 +122,15 @@ it("flags no-compact (warning) only when auto-compact is OFF — the abnormal st
 	expect(lines[2]).toContain("whatsapp: 3");
 });
 
-it("hides the cost segment under a subscription when cost rounds to zero", () => {
-	const footer = makeFooter({ usingOAuth: true });
-	const lines = footer.render(80).map(stripAnsi);
-	// No "$0.000 (sub)" noise on a flat subscription plan.
-	expect(lines[1]).not.toContain("$");
-	expect(lines[1]).not.toContain("(sub)");
-});
-
-it("shows the cost segment with the (sub) tag when a subscription accrued real cost", () => {
-	const footer = makeFooter({ usingOAuth: true, cost: 1.5 });
-	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[1]).toContain("$1.500");
-	expect(lines[1]).toContain("(sub)");
-});
-
-it("hides the cost segment when cost is below the rounding threshold", () => {
-	const footer = makeFooter({ cost: 0.0004 });
-	const lines = footer.render(80).map(stripAnsi);
-	// Would render as "$0.000" — drop it instead of showing a misleading zero.
-	expect(lines[1]).not.toContain("$");
+it("never renders a cost segment on the metrics line, even when real cost accrued", () => {
+	// Cost is intentionally kept off the footer base UI. It is still tracked
+	// internally (stats panel) — just not surfaced on the metrics line.
+	for (const opts of [{ usingOAuth: true, cost: 1.5 }, { usingOAuth: false, cost: 1.5 }, { cost: 0.0004 }]) {
+		const footer = makeFooter(opts);
+		const lines = footer.render(80).map(stripAnsi);
+		expect(lines[1]).not.toContain("$");
+		expect(lines[1]).not.toContain("(sub)");
+	}
 });
 
 it("renders a dim capacity-only CTX on a pristine session (no 0.0% noise)", () => {

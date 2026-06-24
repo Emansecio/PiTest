@@ -2,7 +2,7 @@
 
 Pit is a terminal coding agent. Monorepo packages: `@pit/ai` (provider/streaming
 layer), `@pit/tui` (terminal UI framework), `@pit/coding-agent` (the product),
-`@pit/agent` (agent loop core). The name is **Pit** — fix stray "Pi"/"pi-mono"
+`@pit/agent-core` (agent loop core, npm package; dir `packages/agent`). The name is **Pit** — fix stray "Pi"/"pi-mono"
 references when you touch a file that has them.
 
 Per-turn rules live in this file. Task-specific reference material lives in
@@ -101,6 +101,15 @@ If no browser tool is reachable, say so and report the work as visually unverifi
 - Never: `git reset --hard`, `git checkout .`, `git clean -fd`, `git stash` over
   uncommitted work that is not yours, `git commit --no-verify`, force push.
 - Do not commit unless asked.
+
+## Existing features & quality filters (review before suggesting new ones)
+
+Quality guards already shipped (all in `packages/coding-agent/src/core/built-ins/`):
+- Read guard, edit precondition, grounding firewall (symbol/import/path/pattern/bash), task rigor, permission mode, doom-loop & stagnation detectors, todo-first triage, learned-error guard, erasable-syntax preflight, destructive-command guard, patch audit, coordinator, MCP, hooks, memory.
+
+What does NOT exist (vaporware — don't propose fixes for it):
+- **Diff-limit extension**: ADR-0002 proposed, never implemented. No code shipped.
+- **`pi-` services**: extension names like `pi-autoresearch`, `pi-subagents`, `@tintinweb/pi-tasks` are real npm packages, not Pit internals.
 
 ## Project tool config
 
