@@ -71,25 +71,43 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 	try {
 		const inputBytes = new Uint8Array(inputBuffer);
 		const rawImage = photon.PhotonImage.new_from_byteslice(inputBytes);
-		image = applyExifOrientation(photon, rawImage, inputBytes);
-		if (image !== rawImage) rawImage.free();
+		image = rawImage;
 
-		const originalWidth = image.get_width();
-		const originalHeight = image.get_height();
+		// EXIF orientation is applied lazily, only on the resize path below.
+		// The within-limits fast path returns the original, untouched bytes, so
+		// applying orientation here would diverge: the reported dimensions would
+		// come from the oriented image while the returned bytes stayed
+		// un-oriented (and for orientations 2-4 the in-place flip would also be
+		// lost). Reading dimensions from the raw image keeps the fast path
+		// self-consistent with the bytes it returns.
+		const rawWidth = image.get_width();
+		const rawHeight = image.get_height();
 		const format = img.mimeType?.split("/")[1] ?? "png";
 
 		// Check if already within all limits (dimensions AND encoded size)
-		if (originalWidth <= opts.maxWidth && originalHeight <= opts.maxHeight && inputBase64Size < opts.maxBytes) {
+		if (rawWidth <= opts.maxWidth && rawHeight <= opts.maxHeight && inputBase64Size < opts.maxBytes) {
 			return {
 				data: img.data,
 				mimeType: img.mimeType ?? `image/${format}`,
-				originalWidth,
-				originalHeight,
-				width: originalWidth,
-				height: originalHeight,
+				originalWidth: rawWidth,
+				originalHeight: rawHeight,
+				width: rawWidth,
+				height: rawHeight,
 				wasResized: false,
 			};
 		}
+
+		// We are going to resize, so apply EXIF orientation now. Orientations
+		// 5-8 return a new image with swapped width/height (free the raw one);
+		// 2-4 mutate in-place. Re-read dimensions from the oriented image so the
+		// resize math and reported original dimensions match the bytes we encode.
+		const oriented = applyExifOrientation(photon, rawImage, inputBytes);
+		if (oriented !== rawImage) {
+			rawImage.free();
+			image = oriented;
+		}
+		const originalWidth = image.get_width();
+		const originalHeight = image.get_height();
 
 		// Calculate initial dimensions respecting max limits
 		let targetWidth = originalWidth;

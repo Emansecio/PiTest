@@ -9,10 +9,15 @@ import { access, readFile, stat } from "fs/promises";
 import { sliceSafe } from "../../utils/surrogate.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
-export function detectLineEnding(content: string): "\r\n" | "\n" {
+export function detectLineEnding(content: string): "\r\n" | "\n" | "\r" {
 	const crlfIdx = content.indexOf("\r\n");
 	const lfIdx = content.indexOf("\n");
-	if (lfIdx === -1) return "\n";
+	if (lfIdx === -1) {
+		// No standalone \n. A lone \r means a classic-Mac CR-only file; preserve it
+		// as a third ending so normalizeToLF/restoreLineEndings round-trips it
+		// instead of silently rewriting every separator to LF.
+		return content.indexOf("\r") === -1 ? "\n" : "\r";
+	}
 	if (crlfIdx === -1) return "\n";
 	return crlfIdx < lfIdx ? "\r\n" : "\n";
 }
@@ -21,8 +26,10 @@ export function normalizeToLF(text: string): string {
 	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-export function restoreLineEndings(text: string, ending: "\r\n" | "\n"): string {
-	return ending === "\r\n" ? text.replace(/\n/g, "\r\n") : text;
+export function restoreLineEndings(text: string, ending: "\r\n" | "\n" | "\r"): string {
+	if (ending === "\r\n") return text.replace(/\n/g, "\r\n");
+	if (ending === "\r") return text.replace(/\n/g, "\r");
+	return text;
 }
 
 /**

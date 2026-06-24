@@ -96,7 +96,11 @@ function decodeJwt(token: string): JwtPayload | null {
 		const parts = token.split(".");
 		if (parts.length !== 3) return null;
 		const payload = parts[1] ?? "";
-		const decoded = atob(payload);
+		// JWT segments are base64url; atob() only accepts standard base64 and
+		// throws "Invalid character" on '-'/'_'. Normalize before decoding.
+		const b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+		const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+		const decoded = atob(padded);
 		return JSON.parse(decoded) as JwtPayload;
 	} catch {
 		return null;

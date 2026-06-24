@@ -378,7 +378,13 @@ const MAX_STDERR_BYTES = 64 * 1024;
 
 export async function getOrCreateClient(config: ServerConfig, cwd: string, initTimeoutMs?: number): Promise<LspClient> {
 	registerExitHook();
-	const key = `${config.command}:${cwd}`;
+	// Key by what actually distinguishes the process, not just the raw command
+	// name. Two configs can share a command (e.g. one server and one linter both
+	// invoking the same binary) yet differ in resolvedCommand/args/initOptions;
+	// keying on `command` alone would make the second caller reuse the first
+	// server via the clients.get fast-path, yielding wrong diagnostics/caps.
+	const keyCommand = config.resolvedCommand ?? config.command;
+	const key = `${keyCommand}:${JSON.stringify(config.args ?? [])}:${JSON.stringify(config.initOptions ?? {})}:${cwd}`;
 
 	const existingClient = clients.get(key);
 	if (existingClient) {

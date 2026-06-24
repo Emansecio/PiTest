@@ -5,6 +5,8 @@
  * the rendered HTML with regex-based helpers. Output is capped at 4KB.
  */
 
+import { sliceSafe } from "../../utils/surrogate.ts";
+
 const MAX_BYTES = 4096;
 const FETCH_TIMEOUT_MS = 10_000;
 /**
@@ -23,7 +25,7 @@ export interface ExtractedContent {
 
 function cap(text: string, max: number = MAX_BYTES): string {
 	if (text.length <= max) return text;
-	return `${text.slice(0, max - 3)}...`;
+	return `${sliceSafe(text, 0, max - 3)}...`;
 }
 
 function decodeEntities(text: string): string {

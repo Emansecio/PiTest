@@ -6,6 +6,11 @@ interface StdoutTakeoverState {
 
 let stdoutTakeoverState: StdoutTakeoverState | undefined;
 
+function isBestEffortStreamError(err: Error): boolean {
+	const code = (err as NodeJS.ErrnoException).code;
+	return code === "EPIPE" || code === "ERR_STREAM_DESTROYED";
+}
+
 export function takeOverStdout(): void {
 	if (stdoutTakeoverState) {
 		return;
@@ -54,7 +59,7 @@ export async function flushRawStdout(): Promise<void> {
 	if (stdoutTakeoverState) {
 		await new Promise<void>((resolve, reject) => {
 			stdoutTakeoverState?.rawStdoutWrite("", (err) => {
-				if (err) reject(err);
+				if (err && !isBestEffortStreamError(err)) reject(err);
 				else resolve();
 			});
 		});
@@ -63,7 +68,7 @@ export async function flushRawStdout(): Promise<void> {
 
 	await new Promise<void>((resolve, reject) => {
 		process.stdout.write("", (err) => {
-			if (err) reject(err);
+			if (err && !isBestEffortStreamError(err)) reject(err);
 			else resolve();
 		});
 	});

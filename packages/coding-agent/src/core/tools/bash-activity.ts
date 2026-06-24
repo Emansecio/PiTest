@@ -92,6 +92,9 @@ const GIT_READONLY = new Set([
 // Hoisted so they are not re-created on every classification call.
 const DEV_NULL_REDIRECT_RE = /\d*>>?&?\s*\/dev\/null/g;
 const FD_DUP_RE = /\d*>&\d+/g;
+// Quoted strings and backslash-escaped '>' (e.g. `[ $x \> 5 ]`) are not
+// redirections; strip them so a quoted '>' does not taint a read-only command.
+const QUOTED_OR_ESCAPED_RE = /'[^']*'|"[^"]*"|\\>/g;
 const FILE_REDIRECT_RE = />>?\s*[^\s&|;>]/;
 const SEGMENT_SEP_RE = /&&|\|\||\||;/;
 const WHITESPACE_RE = /\s+/;
@@ -100,7 +103,10 @@ const ENV_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 export function classifyBashCommand(command: string): "navigation" | "action" {
 	// A write redirection to a real file is an effect. Strip /dev/null discards
 	// and fd dups (2>/dev/null, 2>&1) first so they are not mistaken for writes.
-	const cleaned = command.replace(DEV_NULL_REDIRECT_RE, " ").replace(FD_DUP_RE, " ");
+	const cleaned = command
+		.replace(QUOTED_OR_ESCAPED_RE, " ")
+		.replace(DEV_NULL_REDIRECT_RE, " ")
+		.replace(FD_DUP_RE, " ");
 	if (FILE_REDIRECT_RE.test(cleaned)) return "action";
 
 	for (const raw of command.split(SEGMENT_SEP_RE)) {

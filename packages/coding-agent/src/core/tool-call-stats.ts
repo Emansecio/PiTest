@@ -319,7 +319,7 @@ export class ToolCallStats {
 		for (let i = 0; i < limit; i++) {
 			const idx = (this.ringHead - 1 - i + this.sequenceWindow * 2) % this.sequenceWindow;
 			const entry = this.ringBuffer[idx]!;
-			keys[i] = `${entry.toolName} ${entry.argsFingerprint}`;
+			keys[i] = `${entry.toolName}\u0000${entry.argsFingerprint}`;
 		}
 		let best = none;
 		const maxPeriod = Math.min(REPEATING_PATTERN_MAX_PERIOD, Math.floor(limit / 2));
