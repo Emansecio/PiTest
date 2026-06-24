@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import { killProcessTree } from "../../utils/shell.ts";
+import { isHighSurrogate } from "../../utils/surrogate.ts";
 import { resolveToCwd } from "../tools/path-utils.ts";
 import {
 	ensureFileOpen,
@@ -151,7 +152,12 @@ function runSubprocess(command: string[], cwd: string, signal?: AbortSignal): Pr
 			if (capped) return;
 			out += decoder.decode(c, { stream: true });
 			if (out.length > MAX_OUTPUT_BYTES) {
-				out = out.slice(0, MAX_OUTPUT_BYTES);
+				// Avoid splitting a surrogate pair at the cut: if the last kept
+				// code unit is a lone high surrogate, drop it so the head never
+				// renders as U+FFFD.
+				const cut =
+					isHighSurrogate(out.charCodeAt(MAX_OUTPUT_BYTES - 1)) === true ? MAX_OUTPUT_BYTES - 1 : MAX_OUTPUT_BYTES;
+				out = out.slice(0, cut);
 				capped = true;
 			}
 		};

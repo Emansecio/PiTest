@@ -37,6 +37,7 @@ import { settleOrAbort } from "../utils/abort-race.ts";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
+import { sliceSafe } from "../utils/surrogate.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { type CacheStats, computeCacheStats } from "./cache-stats.js";
@@ -4583,7 +4584,7 @@ export class AgentSession {
 						},
 					});
 					const elapsedMs = Date.now() - started;
-					const err = r.ok ? undefined : (r.error ?? "failed").slice(0, 160);
+					const err = r.ok ? undefined : sliceSafe(r.error ?? "failed", 0, 160);
 					memberMetrics.set(index, {
 						elapsedMs,
 						chars: r.ok ? r.text.length : 0,
@@ -5662,7 +5663,7 @@ export class AgentSession {
 				return false;
 			}
 			const previous = this.model;
-			const reason = (message.errorMessage ?? "").slice(0, 80);
+			const reason = sliceSafe(message.errorMessage ?? "", 0, 80);
 			this._emit({
 				type: "auto_retry_start",
 				attempt: this._retryAttempt,

@@ -7,6 +7,7 @@
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
 	ALL_PROVIDERS,
@@ -81,7 +82,7 @@ function resolveProviders(
 
 function capBody(text: string, max: number): string {
 	if (text.length <= max) return text;
-	return `${text.slice(0, max - 3)}...`;
+	return `${sliceSafe(text, 0, max - 3)}...`;
 }
 
 // Cut a string to at most `max` UTF-16 code units without splitting a surrogate

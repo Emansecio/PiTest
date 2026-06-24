@@ -1003,6 +1003,23 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							details: { handle, async: true },
 						};
 					}
+					// Mirror prunePending's collectible() predicate: a prior spawn with the
+					// SAME `name` that finished (status==="done") but was never joined/polled
+					// (delivered===false — the DEFAULT, since async re-injection is off) still
+					// holds an unreachable result. Overwriting its `pending` entry would drop
+					// that output silently; reject so the caller collects it first.
+					if (existing && existing.status === "done" && !existing.delivered) {
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `task: a subagent named "${handle}" already finished but its result hasn't been collected. Read it with task({op:"join", handles:["${handle}"]}) (or op:"poll"), or pick a different name.`,
+								},
+							],
+							isError: true,
+							details: { handle, async: true },
+						};
+					}
 					const controller = new AbortController();
 					const entry: PendingTask = {
 						handle,

@@ -36,6 +36,15 @@ const normalizedTextCache = new WeakMap<SessionInfo, string>();
 // realistic patterns (which match well within this window).
 const REGEX_SEARCH_TEXT_CAP = 50_000;
 
+// Total wall-clock budget for executing a user-supplied regex across ALL
+// sessions in a single filtering pass. The per-session cap above bounds one
+// match, but with many large sessions the cumulative cost per keystroke is
+// N * cap and a pathological pattern can still backtrack for seconds, freezing
+// the TUI input/render loop. Once this budget is exhausted within a pass, the
+// remaining sessions skip the regex (treated as non-matching) so the loop
+// always returns promptly. Realistic patterns finish well within this window.
+const REGEX_FILTER_BUDGET_MS = 40;
+
 function getSessionSearchText(session: SessionInfo): string {
 	const cached = searchTextCache.get(session);
 	if (cached !== undefined) return cached;
@@ -138,11 +147,16 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
 	return { mode: "tokens", tokens, regex: null };
 }
 
-export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): MatchResult {
+export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery, regexDeadline?: number): MatchResult {
 	const text = getSessionSearchText(session);
 
 	if (parsed.mode === "regex") {
 		if (!parsed.regex) {
+			return { matches: false, score: 0 };
+		}
+		// Total-pass budget exhausted: skip the (potentially catastrophic) regex
+		// so the filtering loop returns promptly instead of freezing the TUI.
+		if (regexDeadline !== undefined && Date.now() > regexDeadline) {
 			return { matches: false, score: 0 };
 		}
 		const searchText = text.length > REGEX_SEARCH_TEXT_CAP ? text.slice(0, REGEX_SEARCH_TEXT_CAP) : text;
@@ -193,11 +207,16 @@ export function filterAndSortSessions(
 	const parsed = parseSearchQuery(query);
 	if (parsed.error) return [];
 
+	// Cap total regex execution time across the whole pass so a pathological
+	// user pattern can't synchronously freeze the TUI on every keystroke. Only
+	// meaningful in regex mode; token mode is bounded by fuzzyMatch.
+	const regexDeadline = parsed.mode === "regex" ? Date.now() + REGEX_FILTER_BUDGET_MS : undefined;
+
 	// Recent mode: filter only, keep incoming order.
 	if (sortMode === "recent") {
 		const filtered: SessionInfo[] = [];
 		for (const s of nameFiltered) {
-			const res = matchSession(s, parsed);
+			const res = matchSession(s, parsed, regexDeadline);
 			if (res.matches) filtered.push(s);
 		}
 		return filtered;
@@ -206,7 +225,7 @@ export function filterAndSortSessions(
 	// Relevance mode: sort by score, tie-break by modified desc.
 	const scored: { session: SessionInfo; score: number }[] = [];
 	for (const s of nameFiltered) {
-		const res = matchSession(s, parsed);
+		const res = matchSession(s, parsed, regexDeadline);
 		if (!res.matches) continue;
 		scored.push({ session: s, score: res.score });
 	}

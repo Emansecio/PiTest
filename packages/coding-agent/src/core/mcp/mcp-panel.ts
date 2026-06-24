@@ -158,7 +158,7 @@ export class McpPanelComponent extends Container {
 			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
 			this.renderList();
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
-			this.selectedIndex = Math.min(this.rows.length - 1, this.selectedIndex + 1);
+			this.selectedIndex = Math.max(0, Math.min(this.rows.length - 1, this.selectedIndex + 1));
 			this.renderList();
 		} else if (keyData === "r") {
 			this.runAction((name) => this.actions.reconnect(name));

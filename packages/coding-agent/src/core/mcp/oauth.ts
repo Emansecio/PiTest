@@ -277,7 +277,9 @@ export async function authenticateMcpServer(
 	const state = base64url(randomBytes(16));
 	// Start the loopback server first so the redirect_uri matches the port we listen on.
 	const callback = await startCallbackServer(state);
-	const redirectUri = `http://localhost:${callback.port}/callback`;
+	// Use 127.0.0.1 on both ends: the loopback server binds 127.0.0.1, and 'localhost'
+	// can resolve to ::1 (IPv6) first on dual-stack hosts -> browser hits a dead port.
+	const redirectUri = `http://127.0.0.1:${callback.port}/callback`;
 
 	let clientId: string;
 	let clientSecret: string | undefined;

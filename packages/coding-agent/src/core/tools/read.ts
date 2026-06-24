@@ -201,6 +201,9 @@ async function resolveDirectoryRead(
 	const header = `Directory ${displayPath} (${allLines.length} ${allLines.length === 1 ? "entry" : "entries"}):`;
 	if (offset !== undefined || limit !== undefined) {
 		const startLine = offset ? Math.max(0, offset - 1) : 0;
+		if (startLine >= allLines.length) {
+			return `${header}\n[offset ${offset} is beyond end of directory (${allLines.length} ${allLines.length === 1 ? "entry" : "entries"})]`;
+		}
 		const endLine = limit !== undefined ? Math.min(startLine + limit, allLines.length) : allLines.length;
 		return `${header}\n${allLines.slice(startLine, endLine).join("\n")}`;
 	}

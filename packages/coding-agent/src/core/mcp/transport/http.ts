@@ -11,6 +11,7 @@
  */
 
 import { recordDiagnostic } from "@pit/ai";
+import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import type { McpServerConfig } from "../types.ts";
 import { parseSseStream } from "./sse-parse.ts";
 import {
@@ -175,7 +176,9 @@ export class HttpTransport implements McpTransport {
 
 			if (!response.ok) {
 				const text = await response.text().catch(() => "");
-				throw new McpTransportError(`MCP ${this.name} ${method}: HTTP ${response.status} ${text.slice(0, 200)}`);
+				throw new McpTransportError(
+					`MCP ${this.name} ${method}: HTTP ${response.status} ${truncateWithEllipsis(text, 200)}`,
+				);
 			}
 
 			const contentType = response.headers.get("content-type") ?? "";

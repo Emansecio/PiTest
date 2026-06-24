@@ -24,7 +24,7 @@ export function buildInitialMessage({
 	stdinContent,
 }: InitialMessageInput): InitialMessageResult {
 	const parts: string[] = [];
-	if (stdinContent !== undefined) {
+	if (stdinContent !== undefined && stdinContent.length > 0) {
 		parts.push(stdinContent);
 	}
 	if (fileText) {

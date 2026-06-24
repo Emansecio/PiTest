@@ -406,7 +406,7 @@ export class ToolCallStats {
 		const collapsed = message.replace(RE_WHITESPACE, " ").replace(RE_DIGITS, "N").trim();
 		if (collapsed.length === 0) return undefined;
 		if (collapsed.length <= this.fingerprintLength) return collapsed;
-		return `${collapsed.slice(0, this.fingerprintLength)}\u2026`;
+		return `${sliceSafe(collapsed, 0, this.fingerprintLength)}\u2026`;
 	}
 }
 

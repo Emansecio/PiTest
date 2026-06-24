@@ -198,7 +198,7 @@ function findAnchor(
 		if (all.length > 0) {
 			const at = all.map((i) => i + 1);
 			throw new HashlineEditError(
-				{ kind: "not_found", which, editIndex, hash, nearby: all },
+				{ kind: "not_found", which, editIndex, hash, nearby: at },
 				`edits[${editIndex}].${which} ${hash} exists at line(s) ${at.join(", ")} but at/before the before_hash window (must start at line ${minStart + 1} or later); after_hash must come after before_hash. Swap the anchors or pick an after_hash further down.`,
 			);
 		}
