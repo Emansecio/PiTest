@@ -13,6 +13,7 @@
 		"clean": "npm run clean --workspaces",
 		"build": "node scripts/build-parallel.mjs",
 		"check": "node scripts/check-parallel.mjs",
+		"check:fast": "node scripts/check-parallel.mjs --no-vitest",
 		"check:fix": "biome check --write --error-on-warnings .",
 		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
 		"check:generated": "node scripts/check-generated-models.mjs",

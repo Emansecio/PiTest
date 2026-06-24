@@ -1,0 +1,14 @@
+#!/bin/sh
+
+# Full gate before anything reaches the remotes: the fast static checks PLUS the
+# complete vitest suite. The pre-commit hook intentionally runs only the fast
+# checks (~5s) to keep commits snappy; this is where the test suite actually gates,
+# right before code leaves the machine.
+echo "Running full check (lint, types, tests) before push..."
+npm run check
+if [ $? -ne 0 ]; then
+  echo "❌ Full check failed. Push aborted — fix the errors before pushing."
+  exit 1
+fi
+
+echo "✅ Pre-push checks passed!"

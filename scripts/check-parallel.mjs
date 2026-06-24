@@ -73,9 +73,14 @@ const fastChecks = [
 // skipped. Keeps the footer.test.ts-style assertions from silently rotting.
 const vitestTask = { name: "vitest", command: "npm run test -w @pit/coding-agent" };
 
+// `--no-vitest` (used by the pre-commit hook) runs ONLY the fast static checks so
+// commits stay ~5s. The full vitest suite still runs on pre-push and on a bare
+// `npm run check`. Keeps the per-commit cost low without losing the gate.
+const skipVitest = process.argv.includes("--no-vitest");
+
 const fastResults = await Promise.all(fastChecks.map((task) => run(task.name, task.command)));
-const vitestResult = await run(vitestTask.name, vitestTask.command);
-const results = [...fastResults, vitestResult];
+const vitestResult = skipVitest ? null : await run(vitestTask.name, vitestTask.command);
+const results = skipVitest ? fastResults : [...fastResults, vitestResult];
 for (const result of results) {
 	if (result.out.trim()) {
 		process.stdout.write(`\n=== ${result.name} ===\n${result.out}`);
