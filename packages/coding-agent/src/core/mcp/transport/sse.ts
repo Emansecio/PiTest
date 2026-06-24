@@ -277,7 +277,7 @@ export class SseTransport implements McpTransport {
 	async notify(message: JsonRpcNotification, signal?: AbortSignal): Promise<void> {
 		if (this.closed || !this.postUrl) return;
 		try {
-			await fetch(this.postUrl, {
+			const r = await fetch(this.postUrl, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
@@ -287,6 +287,9 @@ export class SseTransport implements McpTransport {
 				body: JSON.stringify(message),
 				signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
 			});
+			// Cancel the undrained response body so the socket is released back to
+			// the undici pool (same leak http.ts notify() guards against).
+			await r.body?.cancel().catch(() => {});
 		} catch {
 			/* non-fatal */
 		}

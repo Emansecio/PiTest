@@ -1,5 +1,6 @@
 import { performance } from "node:perf_hooks";
 import { type Component, SPINNER_FRAME_MS, SPINNER_FRAMES, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
+import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import { theme } from "../theme/theme.ts";
 
 /**
@@ -96,7 +97,7 @@ function activitySummary(entry: MemberEntry): string {
 /** Collapse whitespace and cap a thinking/text snippet to one short line. The render pass
  * truncates to the viewport width too; this just bounds what we store per entry. */
 function oneLine(text: string): string {
-	return text.replace(/\s+/g, " ").trim().slice(0, 200);
+	return truncateWithEllipsis(text.replace(/\s+/g, " ").trim(), 200);
 }
 
 /** The trailing status fragment for a member row. Uses if/return (no nested ternary).

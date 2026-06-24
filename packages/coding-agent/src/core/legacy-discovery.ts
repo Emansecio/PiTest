@@ -253,8 +253,10 @@ export function discoverLegacyResources(opts: DiscoverLegacyResourcesOptions): L
 	})();
 	while (true) {
 		const resolvedCurrent = resolve(currentDir);
-		if (userHome && resolvedCurrent === userHome) break;
 		ancestors.push(currentDir);
+		// Stop at the PARENT of home: scan home when it is the working directory,
+		// but exclude ancestors above $HOME from the walk.
+		if (userHome && resolvedCurrent === userHome) break;
 		if (currentDir === root) break;
 		const parentDir = resolve(currentDir, "..");
 		if (parentDir === currentDir) break;

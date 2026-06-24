@@ -62,6 +62,22 @@ async function getNodeApis(): Promise<NodeApis> {
 	return nodeApis;
 }
 
+/**
+ * Generate an independent random OAuth `state` (CSRF token), kept distinct from
+ * the PKCE `code_verifier`. The verifier is a secret used only in the token
+ * exchange; reusing it as `state` would leak it into the authorize URL and the
+ * redirect (browser history, Referer, proxy logs), defeating PKCE.
+ */
+function createState(): string {
+	const bytes = new Uint8Array(16);
+	crypto.getRandomValues(bytes);
+	let hex = "";
+	for (const byte of bytes) {
+		hex += byte.toString(16).padStart(2, "0");
+	}
+	return hex;
+}
+
 function parseAuthorizationInput(input: string): { code?: string; state?: string } {
 	const value = input.trim();
 	if (!value) return {};
@@ -287,7 +303,8 @@ export async function loginAnthropic(options: {
 	signal?: AbortSignal;
 }): Promise<OAuthCredentials> {
 	const { verifier, challenge } = await generatePKCE();
-	const server = await startCallbackServer(verifier);
+	const expectedState = createState();
+	const server = await startCallbackServer(expectedState);
 	const callbackTimeoutMs = parseCallbackTimeoutMs();
 
 	let code: string | undefined;
@@ -303,7 +320,7 @@ export async function loginAnthropic(options: {
 			scope: SCOPES,
 			code_challenge: challenge,
 			code_challenge_method: "S256",
-			state: verifier,
+			state: expectedState,
 		});
 
 		options.onAuth({
@@ -342,11 +359,11 @@ export async function loginAnthropic(options: {
 				redirectUriForExchange = REDIRECT_URI;
 			} else if (manualInput) {
 				const parsed = parseAuthorizationInput(manualInput);
-				if (parsed.state && parsed.state !== verifier) {
+				if (parsed.state && parsed.state !== expectedState) {
 					throw new Error("OAuth state mismatch");
 				}
 				code = parsed.code;
-				state = parsed.state ?? verifier;
+				state = parsed.state ?? expectedState;
 			}
 
 			if (!code) {
@@ -356,11 +373,11 @@ export async function loginAnthropic(options: {
 				}
 				if (manualInput) {
 					const parsed = parseAuthorizationInput(manualInput);
-					if (parsed.state && parsed.state !== verifier) {
+					if (parsed.state && parsed.state !== expectedState) {
 						throw new Error("OAuth state mismatch");
 					}
 					code = parsed.code;
-					state = parsed.state ?? verifier;
+					state = parsed.state ?? expectedState;
 				}
 			}
 		} else {
@@ -381,11 +398,11 @@ export async function loginAnthropic(options: {
 				placeholder: REDIRECT_URI,
 			});
 			const parsed = parseAuthorizationInput(input);
-			if (parsed.state && parsed.state !== verifier) {
+			if (parsed.state && parsed.state !== expectedState) {
 				throw new Error("OAuth state mismatch");
 			}
 			code = parsed.code;
-			state = parsed.state ?? verifier;
+			state = parsed.state ?? expectedState;
 		}
 
 		if (!code) {

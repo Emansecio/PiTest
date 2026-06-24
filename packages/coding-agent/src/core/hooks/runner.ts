@@ -82,6 +82,8 @@ export async function runHook(
 			return;
 		}
 
+		const stdoutChunks: Buffer[] = [];
+		const stderrChunks: Buffer[] = [];
 		let stdout = "";
 		let stderr = "";
 		let killed = false;
@@ -91,6 +93,12 @@ export async function runHook(
 		const finish = (exitCode: number, timedOut: boolean, rawError?: string) => {
 			if (resolved) return;
 			resolved = true;
+			// Decode the accumulated Buffers ONCE. Decoding per-chunk would split a
+			// multibyte UTF-8 sequence (emoji/CJK/PT-BR accent) that straddles two
+			// 'data' chunks into broken halves, corrupting reason/additionalContext
+			// before JSON.parse. Concat-then-decode reassembles the bytes correctly.
+			stdout = Buffer.concat(stdoutChunks).toString("utf8") + stdout;
+			stderr = Buffer.concat(stderrChunks).toString("utf8") + stderr;
 			if (timer) clearTimeout(timer);
 			// Do NOT clear killTimer here: on the timeout/abort paths kill() arms the
 			// SIGKILL escalation and finish() runs immediately after — clearing it would
@@ -159,21 +167,21 @@ export async function runHook(
 		const MAX_HOOK_OUTPUT_BYTES = 4 * 1024 * 1024;
 		let outputBytes = 0;
 		let outputCapped = false;
-		const appendCapped = (chunk: string, sink: "out" | "err") => {
+		const appendCapped = (chunk: Buffer, sink: "out" | "err") => {
 			if (outputCapped) return;
-			outputBytes += Buffer.byteLength(chunk);
-			if (sink === "out") stdout += chunk;
-			else stderr += chunk;
+			outputBytes += chunk.length;
+			if (sink === "out") stdoutChunks.push(chunk);
+			else stderrChunks.push(chunk);
 			if (outputBytes > MAX_HOOK_OUTPUT_BYTES) {
 				outputCapped = true;
 				kill();
 			}
 		};
 		proc.stdout?.on("data", (data) => {
-			appendCapped(data.toString(), "out");
+			appendCapped(data, "out");
 		});
 		proc.stderr?.on("data", (data) => {
-			appendCapped(data.toString(), "err");
+			appendCapped(data, "err");
 		});
 
 		proc.on("error", (err) => {

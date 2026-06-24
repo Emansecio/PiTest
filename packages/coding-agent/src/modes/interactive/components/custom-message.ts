@@ -4,6 +4,7 @@ import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text, TruncatedTe
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { FusionSummaryData, FusionSummarySynthesisItem } from "../../../core/fusion/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
+import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 
 /**
@@ -162,7 +163,7 @@ export class CustomMessageComponent extends Container {
 						`    ` +
 						theme.fg("error", `advisor ${i + 1} (${m.cli}) failed`) +
 						`  ` +
-						theme.fg("dim", m.error.slice(0, 200));
+						theme.fg("dim", truncateWithEllipsis(m.error, 200));
 					container.addChild(new TruncatedText(reason));
 				}
 			});

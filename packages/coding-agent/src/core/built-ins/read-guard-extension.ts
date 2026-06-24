@@ -273,6 +273,16 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 			const path = extractPathArg(event.input as Record<string, unknown>);
 			if (path === undefined) return undefined;
 			const abs = resolveToolPath(path, options.cwd);
+			// A post-compaction file lives only in postCompactStamps (readFiles was
+			// cleared at session_before_compact). The model's own successful edit/write
+			// is now the disk baseline — refresh the snapshot so a follow-up edit isn't
+			// read as external drift (the pre-edit stamp would no longer statMatch).
+			if (postCompactStamps.has(abs)) {
+				const restamp = stampFile(abs);
+				if (restamp) postCompactStamps.set(abs, restamp);
+				firedWriteWarnings.delete(abs);
+				return undefined;
+			}
 			if (!readFiles.has(abs)) return undefined;
 			readFiles.set(abs, stampFile(abs) ?? null);
 			firedWriteWarnings.delete(abs);

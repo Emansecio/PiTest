@@ -75,6 +75,41 @@ function cleanToken(token: string): string {
 	return t.replace(/[/\\]+$/, "");
 }
 
+/**
+ * Split an argument string into tokens, keeping single/double-quoted spans
+ * (including their spaces) together as one token so a quoted path with spaces
+ * surfaces as a single coherent target instead of garbled fragments.
+ */
+function tokenizeArgs(args: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let quote = "";
+	let started = false;
+	for (const ch of args) {
+		if (quote !== "") {
+			current += ch;
+			if (ch === quote) quote = "";
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			current += ch;
+			started = true;
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			if (started) tokens.push(current);
+			current = "";
+			started = false;
+			continue;
+		}
+		current += ch;
+		started = true;
+	}
+	if (started) tokens.push(current);
+	return tokens;
+}
+
 /** Last path segment of a cleaned token (its basename). */
 function basenameOf(path: string): string {
 	const i = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
@@ -91,7 +126,7 @@ function inspectRmSegment(segment: string): string | undefined {
 	// (sudo/env/…) stripped, so `rm` must be the actual command here.
 	const m = /^rm\s+(.+)$/i.exec(segment);
 	if (!m) return undefined;
-	const tokens = m[1].split(/\s+/).filter((t) => t.length > 0);
+	const tokens = tokenizeArgs(m[1]);
 
 	let recursive = false;
 	const targets: string[] = [];

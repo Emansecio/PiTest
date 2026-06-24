@@ -20,6 +20,7 @@ import {
 	ensureFileOpen,
 	getOrCreateClient,
 	killClient,
+	sendNotification,
 	sendRequest,
 	syncContent,
 	waitForProjectLoaded,
@@ -190,15 +191,14 @@ async function formatLocationWithContext(location: Location, cwd: string): Promi
 
 async function reloadServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
 	let output = `Restarted ${serverName}`;
-	const reloadMethods = ["rust-analyzer/reloadWorkspace", "workspace/didChangeConfiguration"];
-	for (const method of reloadMethods) {
-		try {
-			await sendRequest(client, method, method.includes("Configuration") ? { settings: {} } : null, signal);
-			output = `Reloaded ${serverName}`;
-			break;
-		} catch {
-			// Method not supported, try next.
-		}
+	// rust-analyzer/reloadWorkspace is a request (server responds); try it first.
+	try {
+		await sendRequest(client, "rust-analyzer/reloadWorkspace", null, signal);
+		output = `Reloaded ${serverName}`;
+	} catch {
+		// Method not supported. Fall back to a config-change notification, which
+		// is fire-and-forget per LSP (no id, no response) — never await as a request.
+		await sendNotification(client, "workspace/didChangeConfiguration", { settings: {} }).catch(() => {});
 	}
 	if (output.startsWith("Restarted")) killClient(client);
 	return output;
