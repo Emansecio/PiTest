@@ -12,7 +12,12 @@ const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url))
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
 const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
-const maxVitestForks = Math.max(2, Math.floor(cpus().length / 4));
+// Dono optou por mais velocidade aceitando o trade-off de uso de CPU: metade
+// dos cores em vez de um quarto. Em maquinas com muitos cores (ex: 28 -> 14
+// forks) corta o wall-clock; mantemos o floor de 2 e ficamos abaixo do total
+// de cores para o teardown (taskkill/AgentSession.dispose + processos spawned)
+// nao morrer de inanicao no Windows como acontecia ao usar todos os cores.
+const maxVitestForks = Math.max(2, Math.floor(cpus().length / 2));
 
 export default defineConfig({
 	test: {
@@ -45,6 +50,12 @@ export default defineConfig({
 		// the contributor has on their machine. Real usage opts in by default.
 		env: {
 			PIT_DISABLE_CLAUDE_CODE_SKILLS: "1",
+			// Same isolation for the OTHER legacy skill dirs (.codex/.cursor/.gemini
+			// skills/). Without this, a contributor who has e.g. ~/.codex/skills/*
+			// installed makes resource-loader's `noSkills` test (expects []) flake,
+			// since discoverLegacyResources walks the real HOME. Keeps the suite
+			// hermetic regardless of which legacy skills the machine has.
+			PIT_NO_LEGACY_SKILLS: "1",
 			// Force chalk to level 0 so diff/inverse highlight does not inject ANSI
 			// escapes into rendered text. Tests assert on plain substrings (e.g.
 			// `toContain("line 50 changed")`); a shell-exported FORCE_COLOR would
