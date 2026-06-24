@@ -964,7 +964,7 @@ export async function computeEditsDiffWithBaseCache(
 		let normalizedContent: string | undefined;
 		try {
 			const stats = await stat(absolutePath);
-			const key = `${absolutePath} ${stats.mtimeMs}`;
+			const key = `${absolutePath} ${stats.mtimeMs}`;
 			normalizedContent = getCachedBase(key);
 			if (normalizedContent === undefined) {
 				const rawContent = await readFile(absolutePath, "utf-8");

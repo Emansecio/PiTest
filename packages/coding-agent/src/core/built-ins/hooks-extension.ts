@@ -133,8 +133,10 @@ export function createHooksExtension(options: HooksExtensionOptions) {
 				// A block with no outputOverride would otherwise yield `content: undefined`,
 				// leaving the model with `isError: true` and no explanation. Surface the
 				// hook's reason by appending it to the original output (does not relax the guard).
-				if (newOutput === undefined && isError && isError !== event.isError && blockReason) {
-					const blockNote = `Blocked by PostToolUse hook: ${blockReason}`;
+				if (newOutput === undefined && isError && isError !== event.isError) {
+					const blockNote = blockReason
+						? `Blocked by PostToolUse hook: ${blockReason}`
+						: "Blocked by PostToolUse hook (no reason provided).";
 					newOutput = outputText ? `${outputText}\n\n${blockNote}` : blockNote;
 				}
 				if (newOutput !== undefined || isError !== event.isError) {

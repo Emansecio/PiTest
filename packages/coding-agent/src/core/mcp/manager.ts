@@ -270,7 +270,7 @@ export class McpManager {
 			// Re-initialize so the NEXT call finds a live session, then propagate
 			// the original failure. The call is never re-sent: it may have side
 			// effects, and a timed-out call may already have been applied.
-			if (entry.reconnectAttempts < this.maxReconnectAttempts) {
+			if (!entry.disabled && entry.reconnectAttempts < this.maxReconnectAttempts) {
 				entry.reconnectAttempts++;
 				try {
 					await entry.client.initialize(signal);

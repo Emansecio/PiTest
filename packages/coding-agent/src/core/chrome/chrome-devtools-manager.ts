@@ -360,7 +360,17 @@ export class ChromeDevtoolsManager {
 		// old document no longer applies — clear it so the next interaction re-waits
 		// for the new document's first frame.
 		const state = this.conns.get(this.selectedTarget.id);
-		if (state) state.inputReady = undefined;
+		if (state) {
+			state.inputReady = undefined;
+			// The ConnState is reused across a same-tab navigation (it's keyed by
+			// target.id, which doesn't change), so the old document's buffered
+			// console/network entries and cached bodies would otherwise bleed into
+			// reads for the new page. Drop them so reads reflect only the new document.
+			state.console.length = 0;
+			state.network.length = 0;
+			state.bodies.clear();
+			state.bodyBytes = 0;
+		}
 		await conn.send("Page.navigate", { url: input.url }, { signal });
 		// The cached target still carries the URL from selection time; report the
 		// page we just navigated to, not where the tab used to be.

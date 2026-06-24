@@ -8,6 +8,8 @@
  * Never returns partial lines (except bash tail truncation edge case).
  */
 
+import { sliceSafe } from "../../utils/surrogate.js";
+
 export const DEFAULT_MAX_LINES = 2000;
 export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
 // Safety-net ceiling applied generically in wrapToolDefinition to every tool
@@ -483,12 +485,12 @@ export function truncateLine(
 	// Head truncation: match is absent, near the start, or already visible in the
 	// leading slice. Keep the original behavior byte-for-byte.
 	if (matchStart === undefined || matchStart < 0 || matchStart < maxChars - TRUNCATE_WINDOW_MARGIN) {
-		return { text: `${line.slice(0, maxChars)}... [truncated]`, wasTruncated: true };
+		return { text: `${sliceSafe(line, 0, maxChars)}... [truncated]`, wasTruncated: true };
 	}
 	// Center the window on the match so the search term survives truncation.
 	const windowStart = Math.max(0, matchStart - TRUNCATE_WINDOW_MARGIN);
 	const windowEnd = Math.min(line.length, windowStart + maxChars);
 	const head = windowStart > 0 ? "…" : "";
 	const tail = windowEnd < line.length ? "… [truncated]" : "";
-	return { text: `${head}${line.slice(windowStart, windowEnd)}${tail}`, wasTruncated: true };
+	return { text: `${head}${sliceSafe(line, windowStart, windowEnd)}${tail}`, wasTruncated: true };
 }

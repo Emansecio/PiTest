@@ -4641,7 +4641,7 @@ export class AgentSession {
 							kind: NonNullable<FusionSummaryData["synthesis"]>[number]["kind"],
 							items: string[],
 						): void => {
-							for (const it of items) synthesisItems.push({ kind, text: it.slice(0, 200) });
+							for (const it of items) synthesisItems.push({ kind, text: sliceSafe(it, 0, 200) });
 						};
 						collect("consensus", analysis.consensus);
 						collect("contradiction", analysis.contradictions);
