@@ -523,19 +523,6 @@ export function createMcpExtension(options: McpExtensionOptions) {
 		pi.registerCommand("mcp", {
 			description: "Manage MCP servers: live status, reconnect, enable/disable.",
 			async handler(_args, ctx) {
-				// On-demand recovery: a server that blew the 10s connect budget at boot
-				// has no registered tools, so nothing ever re-triggers its connection
-				// (the lazy callTool reconnect needs an existing ToolDefinition). Retry
-				// any still-disconnected (and not deliberately disabled) server here, then
-				// register whatever came up. connectAll re-initializes each entry;
-				// already-connected servers are idempotent, and registerNewTools skips
-				// tools already registered, so boot-connected servers see identical behavior.
-				if (bootConnectPromise) {
-					await bootConnectPromise;
-				}
-				if (manager.getAllStates().some((s) => !s.connected && !s.disabled)) {
-					await connectAndRegister(AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
-				}
 				const states = manager.getAllStates();
 				if (states.length === 0) {
 					const msg = "No MCP servers configured.";
@@ -544,9 +531,26 @@ export function createMcpExtension(options: McpExtensionOptions) {
 					return;
 				}
 
+				// On-demand recovery: a server that blew the 10s connect budget at boot
+				// has no registered tools, so nothing ever re-triggers its connection
+				// (the lazy callTool reconnect needs an existing ToolDefinition). Retry
+				// any still-disconnected (and not deliberately disabled) server, then
+				// register whatever came up. connectAll re-initializes each entry;
+				// already-connected servers are idempotent, and registerNewTools skips
+				// tools already registered, so boot-connected servers see identical behavior.
+				const recover = async (): Promise<void> => {
+					if (bootConnectPromise) {
+						await bootConnectPromise;
+					}
+					if (manager.getAllStates().some((s) => !s.connected && !s.disabled)) {
+						await connectAndRegister(AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
+					}
+				};
+
 				// Interactive panel (live status + reconnect/enable/disable). Falls back
 				// to a plain text dump in non-UI contexts (RPC / print mode).
 				if (ctx.hasUI) {
+					let activePanel: McpPanelComponent | undefined;
 					try {
 						await ctx.ui.custom<void>(
 							(_tui, panelTheme, _kb, done) => {
@@ -555,18 +559,39 @@ export function createMcpExtension(options: McpExtensionOptions) {
 									toggle: toggleServer,
 									close: () => done(undefined),
 								});
+								activePanel = panel;
 								panelRefresh = () => panel.refresh();
+								// Run recovery in the BACKGROUND so the panel paints on the
+								// first frame instead of stalling behind two 10s connect
+								// budgets (the freeze that made `/mcp` look like a model turn
+								// and "open bugged"). Pending rows show "connecting…" and flip
+								// to their real status live via onStateChange → panelRefresh.
+								const pending = manager.getAllStates().filter((s) => !s.connected && !s.disabled);
+								if (pending.length > 0 || bootConnectPromise) {
+									for (const s of pending) panel.setBusy(s.name, true);
+									void recover()
+										.catch(() => {
+											// Per-server failures already surface as row.lastError.
+										})
+										.finally(() => {
+											for (const s of pending) activePanel?.setBusy(s.name, false);
+											activePanel?.refresh();
+										});
+								}
 								return panel;
 							},
 							{ overlay: true, overlayOptions: { width: "70%", maxHeight: "80%", anchor: "center" } },
 						);
 					} finally {
+						activePanel = undefined;
 						panelRefresh = undefined;
 					}
 					return;
 				}
 
-				const lines = states.map((s) => {
+				// Non-UI (RPC / print): block on recovery so the text dump is final.
+				await recover();
+				const lines = manager.getAllStates().map((s) => {
 					const deferred = shouldDeferMcpServer(s.tools.length, servers[s.name], options.settings);
 					const deferredSuffix = deferred ? " (deferred — discovered on demand)" : "";
 					const glyph = s.disabled ? "○" : s.connected ? "✓" : "✗";

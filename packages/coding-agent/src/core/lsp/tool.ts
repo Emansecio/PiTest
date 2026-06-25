@@ -24,6 +24,7 @@ import {
 	sendRequest,
 	syncContent,
 	waitForProjectLoaded,
+	withServerApplyEdit,
 } from "./client.ts";
 import { getServerForFile } from "./config.ts";
 import { applyWorkspaceEdit, comparePosition } from "./edits.ts";
@@ -55,6 +56,7 @@ import {
 	formatLocation,
 	formatPathRelativeToCwd,
 	formatWorkspaceEdit,
+	isPathInsideCwd,
 	readLocationContext,
 	resolveSymbolColumn,
 	symbolKindToName,
@@ -143,6 +145,8 @@ const LOCATION_CONTEXT_LINES = 1;
 const REFERENCE_CONTEXT_LIMIT = 50;
 const REFERENCES_RETRY_COUNT = 2;
 const REFERENCES_RETRY_DELAY_MS = 250;
+const CODE_ACTION_LIST_LIMIT = 50;
+const DOCUMENT_SYMBOL_LINE_LIMIT = 200;
 
 function clampTimeout(timeout: number | undefined): number {
 	const value = typeof timeout === "number" && Number.isFinite(timeout) ? Math.round(timeout) : 20;
@@ -176,11 +180,9 @@ function normalizeLocationResult(result: Location | Location[] | LocationLink | 
 
 async function formatLocationWithContext(location: Location, cwd: string): Promise<string> {
 	const header = `  ${formatLocation(location, cwd)}`;
-	const context = await readLocationContext(
-		uriToFile(location.uri),
-		location.range.start.line + 1,
-		LOCATION_CONTEXT_LINES,
-	);
+	const filePath = uriToFile(location.uri);
+	if (!isPathInsideCwd(filePath, cwd)) return header;
+	const context = await readLocationContext(filePath, location.range.start.line + 1, LOCATION_CONTEXT_LINES);
 	if (context.length === 0) return header;
 	return `${header}\n${context.map((lineText) => `    ${lineText}`).join("\n")}`;
 }
@@ -500,11 +502,13 @@ export function createLspToolDefinition(
 									(await sendRequest(client, "codeAction/resolve", item, signal)) as CodeAction,
 								applyWorkspaceEdit: async (edit) => applyWorkspaceEdit(edit, cwd),
 								executeCommand: async (commandItem) => {
-									await sendRequest(
-										client,
-										"workspace/executeCommand",
-										{ command: commandItem.command, arguments: commandItem.arguments ?? [] },
-										signal,
+									await withServerApplyEdit(client, () =>
+										sendRequest(
+											client,
+											"workspace/executeCommand",
+											{ command: commandItem.command, arguments: commandItem.arguments ?? [] },
+											signal,
+										),
 									);
 								},
 							});
@@ -524,8 +528,11 @@ export function createLspToolDefinition(
 							output = `Applied "${applied.title}":\n${summaryLines.join("\n")}`;
 							break;
 						}
-						const actionLines = result.map((item, index) => `  ${formatCodeAction(item, index)}`);
-						output = `${result.length} code action(s):\n${actionLines.join("\n")}`;
+						const visibleActions = result.slice(0, CODE_ACTION_LIST_LIMIT);
+						const actionLines = visibleActions.map((item, index) => `  ${formatCodeAction(item, index)}`);
+						const omitted = result.length - visibleActions.length;
+						const omittedLine = omitted > 0 ? `\n  ... ${omitted} additional code action(s) omitted` : "";
+						output = `${result.length} code action(s):\n${actionLines.join("\n")}${omittedLine}`;
 						break;
 					}
 
@@ -546,13 +553,19 @@ export function createLspToolDefinition(
 							const relPath = formatPathRelativeToCwd(targetFile, cwd);
 							if ("selectionRange" in result[0]) {
 								const lines = (result as DocumentSymbol[]).flatMap((s) => formatDocumentSymbol(s));
-								output = `Symbols in ${relPath}:\n${lines.join("\n")}`;
+								const visibleLines = lines.slice(0, DOCUMENT_SYMBOL_LINE_LIMIT);
+								const omitted = lines.length - visibleLines.length;
+								const omittedLine = omitted > 0 ? `\n... ${omitted} additional symbol line(s) omitted` : "";
+								output = `Symbols in ${relPath}:\n${visibleLines.join("\n")}${omittedLine}`;
 							} else {
 								const lines = (result as SymbolInformation[]).map((s) => {
 									const ln = s.location.range.start.line + 1;
 									return `[${symbolKindToName(s.kind)}] ${s.name} @ line ${ln}`;
 								});
-								output = `Symbols in ${relPath}:\n${lines.join("\n")}`;
+								const visibleLines = lines.slice(0, DOCUMENT_SYMBOL_LINE_LIMIT);
+								const omitted = lines.length - visibleLines.length;
+								const omittedLine = omitted > 0 ? `\n... ${omitted} additional symbol line(s) omitted` : "";
+								output = `Symbols in ${relPath}:\n${visibleLines.join("\n")}${omittedLine}`;
 							}
 						}
 						break;
@@ -619,7 +632,7 @@ export function createLspToolDefinition(
 								const errLines = tx.newErrors
 									.map(
 										(e) =>
-											`  ${formatDiagnostic(e.diagnostic, formatPathRelativeToCwd(uriToFile(e.uri), cwd))}`,
+											`  ${formatDiagnostic(e.diagnostic, formatPathRelativeToCwd(uriToFile(e.uri), cwd), cwd)}`,
 									)
 									.join("\n");
 								output = `Rename ROLLED BACK — it introduced ${tx.newErrors.length} new error(s):\n${errLines}\nThe workspace was restored to its pre-rename state.`;

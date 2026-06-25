@@ -71,3 +71,61 @@ describe("parseSseStream cancellation (#31)", () => {
 		expect(cancelled).toBe(false);
 	});
 });
+
+describe("parseSseStream framing (cursor-walk)", () => {
+	function streamFromChunks(chunks: string[]): ReadableStream<Uint8Array> {
+		const encoder = new TextEncoder();
+		let i = 0;
+		return new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (i < chunks.length) {
+					controller.enqueue(encoder.encode(chunks[i]!));
+					i++;
+				} else {
+					controller.close();
+				}
+			},
+		});
+	}
+
+	async function collect(chunks: string[]): Promise<SseEventLite[]> {
+		const out: SseEventLite[] = [];
+		for await (const ev of parseSseStream(streamFromChunks(chunks))) {
+			out.push({ event: ev.event, data: ev.data, id: ev.id });
+		}
+		return out;
+	}
+
+	it("parses multiple frames delivered in a single chunk", async () => {
+		const events = await collect(["data: a\n\ndata: b\n\ndata: c\n\n"]);
+		expect(events.map((e) => e.data)).toEqual(["a", "b", "c"]);
+	});
+
+	it("reassembles a frame split across chunk boundaries (mid-line)", async () => {
+		// The newline and even a single data line are split across reads — the cursor
+		// walk must carry the partial line in the buffer between reads.
+		const events = await collect(["event: mess", 'age\ndata: {"id', '":1,"x":2}\n', "\n"]);
+		expect(events).toEqual([{ event: "message", data: '{"id":1,"x":2}', id: undefined }]);
+	});
+
+	it("joins multi-line data and honors CRLF identically to LF", async () => {
+		const events = await collect(["data: line1\r\ndata: line2\r\n\r\n"]);
+		expect(events).toEqual([{ event: "message", data: "line1\nline2", id: undefined }]);
+	});
+
+	it("dispatches a final frame not terminated by a blank line on stream close", async () => {
+		const events = await collect(["data: tail\n"]);
+		expect(events.map((e) => e.data)).toEqual(["tail"]);
+	});
+
+	it("ignores comments/heartbeats and tracks id", async () => {
+		const events = await collect([": ping\nid: 7\nevent: note\ndata: hi\n\n"]);
+		expect(events).toEqual([{ event: "note", data: "hi", id: "7" }]);
+	});
+});
+
+interface SseEventLite {
+	event: string;
+	data: string;
+	id?: string;
+}

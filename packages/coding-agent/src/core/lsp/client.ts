@@ -316,6 +316,18 @@ async function handleConfigurationRequest(client: LspClient, message: LspJsonRpc
 
 async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequest): Promise<void> {
 	if (message.id === undefined || message.id === null) return;
+	if ((client.serverApplyEditDepth ?? 0) <= 0) {
+		await sendResponse(
+			client,
+			message.id,
+			{
+				applied: false,
+				failureReason: "workspace/applyEdit is only allowed during an explicit LSP apply operation",
+			},
+			"workspace/applyEdit",
+		);
+		return;
+	}
 	const params = message.params as { edit?: WorkspaceEdit };
 	if (!params?.edit) {
 		await sendResponse(
@@ -454,6 +466,7 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 			resolveProjectLoaded,
 			stderrBuffer: "",
 			exitCode: null,
+			serverApplyEditDepth: 0,
 		};
 		// NOTE: do NOT publish to `clients` yet — only after initialize+initialized
 		// complete (below). Publishing here would let a concurrent caller hit the
@@ -522,11 +535,7 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 		} catch (err) {
 			clients.delete(key);
 			clientLocks.delete(key);
-			try {
-				proc.kill();
-			} catch {
-				// ignore
-			}
+			killClientProcess(client);
 			throw err;
 		} finally {
 			clientLocks.delete(key);
@@ -833,6 +842,7 @@ export async function sendRequest(
 	timeout = setTimeout(() => {
 		if (client.pendingRequests.has(id)) {
 			client.pendingRequests.delete(id);
+			void sendNotification(client, "$/cancelRequest", { id }).catch(() => {});
 			cleanup();
 			reject(new Error(`LSP request ${method} timed out after ${timeoutMs}ms`));
 		}
@@ -873,6 +883,15 @@ export async function sendNotification(client: LspClient, method: string, params
 	const notification: LspJsonRpcNotification = { jsonrpc: "2.0", method, params };
 	client.lastActivity = Date.now();
 	await queueWriteMessage(client, notification);
+}
+
+export async function withServerApplyEdit<T>(client: LspClient, operation: () => Promise<T>): Promise<T> {
+	client.serverApplyEditDepth += 1;
+	try {
+		return await operation();
+	} finally {
+		client.serverApplyEditDepth -= 1;
+	}
 }
 
 /** Kill a client's process directly (used by `reload` cold-restart). */

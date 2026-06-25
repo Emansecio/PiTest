@@ -389,7 +389,7 @@ export class AssistantMessageComponent extends Container {
 						this.startThinkingBreath();
 						const label = this.hiddenThinkingLabel;
 						this.contentContainer.addChild({
-							render: () => {
+							render: (width: number) => {
 								// Floor the dark pole at the "dim" text token (#666) and clamp t's
 								// minimum so the breath's vale keeps ~3.0+ contrast on the dark
 								// bg instead of sinking into the decorative-border darkGray.
@@ -397,7 +397,11 @@ export class AssistantMessageComponent extends Container {
 								const c =
 									interpolateFg("dim", "thinkingText", breathT) ??
 									((t: string) => theme.fg("thinkingText", t));
-								return [` ${theme.italic(c(label))}`];
+								// The label is extension-settable and unbounded; a line wider
+								// than the terminal crashes the frame. Clamp to the available
+								// width (label sits flush at col 0, no leading margin beyond
+								// the single space), with an ellipsis so truncation is visible.
+								return [truncateToWidth(` ${theme.italic(c(label))}`, Math.max(1, width), "…")];
 							},
 							invalidate: () => {},
 						});

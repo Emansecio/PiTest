@@ -8,7 +8,15 @@
  * fully swallowed on any failure so it can never break a write.
  */
 
-import { getOrCreateClient, notifySaved, sendRequest, syncContent, waitForProjectLoaded } from "./client.ts";
+import * as fs from "node:fs/promises";
+import {
+	getOrCreateClient,
+	notifySaved,
+	refreshFile,
+	sendRequest,
+	syncContent,
+	waitForProjectLoaded,
+} from "./client.ts";
 import { getServersForFile } from "./config.ts";
 import { applyTextEditsToString } from "./edits.ts";
 import { getConfig, isProjectAwareLspServer } from "./manager.ts";
@@ -20,7 +28,7 @@ import {
 	formatDiagnosticsSummary,
 	formatPathRelativeToCwd,
 	sortDiagnostics,
-	waitForDiagnostics,
+	waitForDiagnosticsResult,
 } from "./utils.ts";
 
 // =============================================================================
@@ -144,14 +152,71 @@ export interface PostWriteDiagnostics {
 	baselineCompared: boolean;
 }
 
+export interface PreWriteDiagnosticsBaseline {
+	diagnostics: Diagnostic[];
+	fresh: boolean;
+}
+
 export interface PostWriteOptions {
 	timeoutMs?: number;
+	baseline?: PreWriteDiagnosticsBaseline;
+}
+
+export async function capturePreWriteDiagnostics(
+	absolutePath: string,
+	cwd: string,
+	signal?: AbortSignal,
+	options?: { timeoutMs?: number },
+): Promise<PreWriteDiagnosticsBaseline | undefined> {
+	if (!diagnosticsOnWrite) return undefined;
+
+	let servers: Array<[string, ServerConfig]>;
+	try {
+		servers = getServersForFile(getConfig(cwd), absolutePath);
+	} catch {
+		return undefined;
+	}
+	if (servers.length === 0) return undefined;
+
+	const exists = await fs
+		.access(absolutePath)
+		.then(() => true)
+		.catch(() => false);
+	if (!exists) return { diagnostics: [], fresh: true };
+
+	const uri = fileToUri(absolutePath);
+	const timeoutMs = options?.timeoutMs ?? DEFAULT_WAIT_MS;
+	const deadline = AbortSignal.timeout(timeoutMs);
+	const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
+	const all: Diagnostic[] = [];
+	let freshServerCount = 0;
+
+	await Promise.allSettled(
+		servers.map(async ([, serverConfig]) => {
+			const client = await getOrCreateClient(serverConfig, cwd);
+			if (isProjectAwareLspServer(serverConfig)) await waitForProjectLoaded(client, combined);
+			const minVersion = client.diagnosticsVersion;
+			await refreshFile(client, absolutePath, combined);
+			const expectedDocumentVersion = client.openFiles.get(uri)?.version;
+			const result = await waitForDiagnosticsResult(client, uri, {
+				timeoutMs,
+				signal: combined,
+				minVersion,
+				expectedDocumentVersion,
+			});
+			if (!result.fresh) return;
+			freshServerCount += 1;
+			all.push(...result.diagnostics);
+		}),
+	);
+
+	return { diagnostics: dedupeDiagnostics(all), fresh: freshServerCount > 0 };
 }
 
 /**
  * Collect post-write diagnostics for `absolutePath` after its content changed.
- * Returns undefined when disabled, no server handles the file, or anything goes
- * wrong. Never throws.
+ * Returns undefined when disabled, no server handles the file, diagnostics are
+ * stale, or anything goes wrong. Never throws.
  */
 export async function getPostWriteDiagnostics(
 	absolutePath: string,
@@ -161,6 +226,7 @@ export async function getPostWriteDiagnostics(
 	options?: PostWriteOptions,
 ): Promise<PostWriteDiagnostics | undefined> {
 	if (!diagnosticsOnWrite) return undefined;
+	if (options?.baseline && !options.baseline.fresh) return undefined;
 
 	let servers: Array<[string, ServerConfig]>;
 	try {
@@ -178,8 +244,8 @@ export async function getPostWriteDiagnostics(
 	const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
 
 	const all: Diagnostic[] = [];
-	const baseline: Diagnostic[] = [];
-	let baselineCompared = false;
+	const baseline = options?.baseline?.diagnostics ?? [];
+	let baselineCompared = options?.baseline?.fresh === true;
 	const serverNames: string[] = [];
 
 	await Promise.allSettled(
@@ -188,23 +254,26 @@ export async function getPostWriteDiagnostics(
 			if (isProjectAwareLspServer(serverConfig)) {
 				await waitForProjectLoaded(client, combined);
 			}
-			const existing = client.diagnostics.get(uri);
-			if (existing) {
-				baselineCompared = true;
-				baseline.push(...existing.diagnostics);
+			if (!baselineCompared) {
+				const existing = client.diagnostics.get(uri);
+				if (existing) {
+					baselineCompared = true;
+					baseline.push(...existing.diagnostics);
+				}
 			}
 			const minVersion = client.diagnosticsVersion;
 			await syncContent(client, absolutePath, content, combined);
 			const expectedDocumentVersion = client.openFiles.get(uri)?.version;
 			await notifySaved(client, absolutePath, combined);
-			const diagnostics = await waitForDiagnostics(client, uri, {
+			const result = await waitForDiagnosticsResult(client, uri, {
 				timeoutMs,
 				signal: combined,
 				minVersion,
 				expectedDocumentVersion,
 			});
+			if (!result.fresh) return;
 			serverNames.push(name);
-			all.push(...diagnostics);
+			all.push(...result.diagnostics);
 		}),
 	);
 
@@ -213,7 +282,9 @@ export async function getPostWriteDiagnostics(
 	// Deduplicate by range + message (different servers may report the same issue).
 	const unique = dedupeDiagnostics(all);
 	const baselineUnique = baselineCompared ? dedupeDiagnostics(baseline) : [];
-	const reportable = baselineCompared ? filterBaselineDiagnostics(unique, baselineUnique) : unique;
+	const reportable = (baselineCompared ? filterBaselineDiagnostics(unique, baselineUnique) : unique).filter(
+		(d) => (d.severity ?? 1) === 1,
+	);
 
 	if (reportable.length === 0) {
 		return {
@@ -226,7 +297,7 @@ export async function getPostWriteDiagnostics(
 	}
 
 	sortDiagnostics(reportable);
-	const messages = reportable.map((d) => formatDiagnostic(d, relPath)).slice(0, DIAGNOSTIC_MESSAGE_LIMIT);
+	const messages = reportable.map((d) => formatDiagnostic(d, relPath, cwd)).slice(0, DIAGNOSTIC_MESSAGE_LIMIT);
 	return {
 		server: serverNames.join(", "),
 		summary: formatDiagnosticsSummary(reportable),
@@ -249,11 +320,12 @@ export async function attachPostWriteDiagnostics<R extends { content: Array<{ ty
 	written: string | undefined,
 	cwd: string,
 	signal?: AbortSignal,
+	baseline?: PreWriteDiagnosticsBaseline,
 ): Promise<R> {
 	if (written === undefined) return result;
 	let diag: PostWriteDiagnostics | undefined;
 	try {
-		diag = await getPostWriteDiagnostics(absolutePath, written, cwd, signal);
+		diag = await getPostWriteDiagnostics(absolutePath, written, cwd, signal, { baseline });
 	} catch {
 		return result;
 	}

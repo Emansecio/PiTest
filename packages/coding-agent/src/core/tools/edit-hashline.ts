@@ -4,7 +4,7 @@ import { stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import type { ToolDefinition } from "../extensions/types.js";
-import { attachPostWriteDiagnostics } from "../lsp/writethrough.ts";
+import { attachPostWriteDiagnostics, capturePreWriteDiagnostics } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, PATH_KEY_ALIASES } from "./argument-prep.js";
 import { defaultEditOperations, type EditOperations, type EditToolDetails } from "./edit.ts";
@@ -229,6 +229,8 @@ export function createEditHashlineToolDefinition(
 			const absolutePath = resolveToCwd(path, cwd);
 
 			let __written: string | undefined;
+			const diagnosticsBaseline =
+				input.preview === true ? undefined : await capturePreWriteDiagnostics(absolutePath, cwd, signal);
 			const writeResult = await withFileMutationQueue(
 				absolutePath,
 				() =>
@@ -352,7 +354,7 @@ export function createEditHashlineToolDefinition(
 						})();
 					}),
 			);
-			return attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal);
+			return attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal, diagnosticsBaseline);
 		},
 		renderCall(args, theme, context) {
 			const component = getCallComponent(context.state, context.lastComponent);

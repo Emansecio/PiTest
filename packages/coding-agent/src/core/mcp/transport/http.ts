@@ -187,12 +187,22 @@ export class HttpTransport implements McpTransport {
 			}
 
 			const rawBody = await readBodyWithCap(response, `MCP ${this.name} ${method}`);
+			let parsed: JsonRpcResponse<T>;
 			try {
-				return JSON.parse(rawBody) as JsonRpcResponse<T>;
+				parsed = JSON.parse(rawBody) as JsonRpcResponse<T>;
 			} catch (error) {
 				const m = error instanceof Error ? error.message : String(error);
 				throw new McpTransportError(`MCP ${this.name} ${method}: invalid JSON response (${m})`);
 			}
+			// Correlate by id like the stdio/SSE paths do. A Streamable-HTTP POST is
+			// 1:1, but a buggy server that echoes a stale/wrong id must not have it
+			// accepted as THIS call's answer (silent request/response mismatch).
+			if (parsed && typeof parsed === "object" && "id" in parsed && parsed.id !== message.id) {
+				throw new McpTransportError(
+					`MCP ${this.name} ${method}: response id ${String((parsed as { id?: unknown }).id)} != request id ${String(message.id)}`,
+				);
+			}
+			return parsed;
 		} finally {
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", onAbort);

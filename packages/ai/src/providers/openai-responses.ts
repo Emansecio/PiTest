@@ -13,6 +13,7 @@ import type {
 	StreamOptions,
 } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
+import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { iterateWithIdleTimeout } from "../utils/idle-timeout.ts";
@@ -79,6 +80,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 	// Start async processing
 	(async () => {
 		const output: AssistantMessage = createInitialAssistantMessage(model);
+		let connectGuard: ConnectGuard | undefined;
 
 		try {
 			// Create OpenAI client
@@ -91,17 +93,26 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
 			}
+			// Guard the connect-phase await (time-to-headers + SDK retry/backoff) so a
+			// frozen connect can't wedge the turn past a user interrupt. See
+			// connect-guard.ts; the body loop is covered by iterateWithIdleTimeout.
+			connectGuard = createConnectGuard(options?.signal, options?.timeoutMs);
 			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
+				signal: connectGuard.signal,
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
 			};
-			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
+			const { data: openaiStream, response } = await connectGuard.settle(
+				client.responses.create(params, requestOptions).withResponse(),
+			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
 			await processResponsesStream(
-				iterateWithIdleTimeout(openaiStream, { idleMs: options?.idleTimeoutMs, signal: options?.signal }),
+				iterateWithIdleTimeout(openaiStream, {
+					idleMs: options?.idleTimeoutMs,
+					signal: connectGuard?.signal ?? options?.signal,
+				}),
 				output,
 				stream,
 				model,
@@ -129,6 +140,8 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			output.errorMessage = formatOpenAIResponsesError(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
+		} finally {
+			connectGuard?.dispose();
 		}
 	})();
 

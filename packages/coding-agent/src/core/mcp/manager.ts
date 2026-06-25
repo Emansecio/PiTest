@@ -246,8 +246,12 @@ export class McpManager {
 			const result = await entry.client.callTool(originalName, args, signal);
 			// A direct success proves the server healthy: clear any degraded state
 			// left by an earlier transport failure so future failures get their
-			// reconnect attempt back. Emit only on an actual transition.
-			if (!entry.connected || entry.reconnectAttempts > 0 || entry.lastError !== undefined) {
+			// reconnect attempt back. Emit only on an actual transition. Skip if a
+			// disable() landed during the await (it swapped in a fresh, unconnected
+			// client) — resurrecting connected=true here is split-brain (panel shows
+			// disabled while the flag says connected). The reconnect path below already
+			// guards on !entry.disabled for the same reason.
+			if (!entry.disabled && (!entry.connected || entry.reconnectAttempts > 0 || entry.lastError !== undefined)) {
 				entry.connected = true;
 				entry.lastError = undefined;
 				entry.reconnectAttempts = 0;

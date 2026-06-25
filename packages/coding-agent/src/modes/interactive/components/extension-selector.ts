@@ -3,7 +3,7 @@
  * Displays a list of string options with keyboard navigation.
  */
 
-import { Container, getKeybindings, Spacer, Text, type TUI } from "@pit/tui";
+import { Container, getKeybindings, Spacer, Text, TruncatedText, type TUI } from "@pit/tui";
 import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -84,7 +84,7 @@ export class ExtensionSelectorComponent extends Container {
 			const text = isSelected
 				? theme.fg("accent", "→ ") + theme.fg("accent", this.options[i])
 				: `  ${theme.fg("text", this.options[i])}`;
-			this.listContainer.addChild(new Text(text, 1, 0));
+			this.listContainer.addChild(new TruncatedText(text, 1, 0));
 		}
 	}
 

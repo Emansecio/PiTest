@@ -14,8 +14,9 @@
  * comes from settings (project preferred over global).
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { writeFileAtomicSync } from "../../utils/atomic-write.ts";
 import {
 	interpolateEnvVars,
 	resolveConfigValueUncached,
@@ -162,7 +163,10 @@ export function setMcpServerDisabled(
 }
 
 function writeMcpConfig(path: string, data: unknown): void {
-	writeFileSync(path, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
+	// Atomic (tmp + rename) like settings/lsp-edits/memory: a crash or a racing
+	// toggle mid-write must never truncate mcp.json — a corrupt file parses to {}
+	// and silently drops EVERY configured server on the next boot.
+	writeFileAtomicSync(path, `${JSON.stringify(data, null, 2)}\n`);
 }
 
 /**

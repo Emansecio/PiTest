@@ -10,6 +10,7 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.js"
 import { ensureTool } from "../../utils/tools-manager.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { prepareWithPathAliases } from "./argument-prep.js";
+import { type FffContentMatch, type FffSearchMode, fffSearch } from "./fff-search.js";
 import { resolveToCwd } from "./path-utils.js";
 import { getTextOutput, invalidArgText, nonEmptyDetails, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -136,6 +137,148 @@ const defaultGrepOperations: GrepOperations = {
 export interface GrepToolOptions {
 	/** Custom operations for grep. Default: local filesystem plus ripgrep */
 	operations?: GrepOperations;
+	/**
+	 * Search backend. `"rg"` spawns ripgrep per query. `"fff"` answers from a
+	 * warm in-memory index — content, files_with_matches, and count modes, over
+	 * the whole repo or a subdir/file inside cwd — falling back to `rg` for every
+	 * unsupported case (custom operations, glob, multiline, ignoreCase, path
+	 * outside cwd, `.git` scope, an unprovable-complete subdir scan, or the
+	 * native binary being absent). Behavior-identical to `rg` on its supported
+	 * subset; only faster.
+	 */
+	engine?: "rg" | "fff";
+}
+
+/** Map the grep tool's outputMode to the fff backend's mode name. */
+const FFF_MODE_BY_OUTPUT = {
+	content: "content",
+	files_with_matches: "files",
+	count: "count",
+} as const satisfies Record<"content" | "files_with_matches" | "count", FffSearchMode>;
+
+/** A content match in the shape buildContentOutput consumes (rg + fff share it). */
+interface ContentMatch {
+	filePath: string;
+	lineNumber: number;
+	lineText?: string;
+	matchStart?: number;
+}
+
+/**
+ * Format collected content matches into the grep tool's text output + details.
+ * Shared by the ripgrep streaming path and the fff backend so both produce
+ * byte-identical output (same per-line truncation, match-centred windows, and
+ * truncation/limit notices). Returns `"aborted"` if the abort signal fires
+ * mid-format (a slow/pluggable readFile backend must not run to completion).
+ */
+async function buildContentOutput(deps: {
+	matches: ContentMatch[];
+	contextValue: number;
+	effectiveLimit: number;
+	matchLimitReached: boolean;
+	formatPath: (filePath: string) => string;
+	getFileLines: (filePath: string) => Promise<string[]>;
+	isAborted: () => boolean;
+}): Promise<{ output: string; details: GrepToolDetails } | "aborted"> {
+	const { matches, contextValue, effectiveLimit, formatPath, getFileLines, isAborted } = deps;
+	let linesTruncated = false;
+	const outputLines: string[] = [];
+
+	const formatBlock = async (filePath: string, lineNumber: number, matchStart?: number): Promise<string[]> => {
+		const relativePath = formatPath(filePath);
+		const lines = await getFileLines(filePath);
+		if (!lines.length) return [`${relativePath}:${lineNumber}: (unable to read file)`];
+		const block: string[] = [];
+		const start = contextValue > 0 ? Math.max(1, lineNumber - contextValue) : lineNumber;
+		const end = contextValue > 0 ? Math.min(lines.length, lineNumber + contextValue) : lineNumber;
+		for (let current = start; current <= end; current++) {
+			const lineText = lines[current - 1] ?? "";
+			const sanitized = lineText.replace(/\r/g, "");
+			const isMatchLine = current === lineNumber;
+			const { text: truncatedText, wasTruncated } = truncateLine(
+				sanitized,
+				GREP_MAX_LINE_LENGTH,
+				isMatchLine ? matchStart : undefined,
+			);
+			if (wasTruncated) linesTruncated = true;
+			if (isMatchLine) block.push(`${relativePath}:${current}: ${truncatedText}`);
+			else block.push(`${relativePath}-${current}- ${truncatedText}`);
+		}
+		return block;
+	};
+
+	for (const match of matches) {
+		if (isAborted()) return "aborted";
+		if (contextValue === 0 && match.lineText !== undefined) {
+			const relativePath = formatPath(match.filePath);
+			const sanitized = match.lineText.replace(/\r\n/g, "\n").replace(/\r/g, "").replace(/\n$/, "");
+			const physicalLines = sanitized.split("\n");
+			for (let li = 0; li < physicalLines.length; li++) {
+				const { text: truncatedText, wasTruncated } = truncateLine(
+					physicalLines[li] ?? "",
+					GREP_MAX_LINE_LENGTH,
+					li === 0 ? match.matchStart : undefined,
+				);
+				if (wasTruncated) linesTruncated = true;
+				outputLines.push(`${relativePath}:${match.lineNumber + li}: ${truncatedText}`);
+			}
+		} else {
+			const block = await formatBlock(match.filePath, match.lineNumber, match.matchStart);
+			outputLines.push(...block);
+		}
+	}
+
+	const rawOutput = outputLines.join("\n");
+	const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+	let output = truncation.content;
+	const details: GrepToolDetails = {};
+	const notices: string[] = [];
+	if (deps.matchLimitReached) {
+		notices.push(
+			`${effectiveLimit} matches limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+		);
+		details.matchLimitReached = effectiveLimit;
+	}
+	if (truncation.truncated) {
+		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+		details.truncation = truncation;
+	}
+	if (linesTruncated) {
+		notices.push(`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`);
+		details.linesTruncated = true;
+	}
+	if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
+	return { output, details };
+}
+
+/**
+ * Format a locate-style line list (files_with_matches paths, or "path:count"
+ * rows) into the grep tool's output + details. Shared by the fff backend so its
+ * files/count output matches the ripgrep locate path's truncation + limit
+ * notices. The "files limit" wording mirrors rg's locate branch.
+ */
+function buildLocateOutput(
+	lines: string[],
+	effectiveLimit: number,
+	matchLimitReached: boolean,
+): { output: string; details: GrepToolDetails } {
+	const rawList = lines.join("\n");
+	const listTruncation = truncateHead(rawList, { maxLines: Number.MAX_SAFE_INTEGER });
+	let output = listTruncation.content;
+	const details: GrepToolDetails = {};
+	const notices: string[] = [];
+	if (matchLimitReached) {
+		notices.push(
+			`${effectiveLimit} files limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+		);
+		details.matchLimitReached = effectiveLimit;
+	}
+	if (listTruncation.truncated) {
+		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+		details.truncation = listTruncation;
+	}
+	if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
+	return { output, details };
 }
 
 function formatGrepCall(
@@ -199,6 +342,7 @@ export function createGrepToolDefinition(
 	options?: GrepToolOptions,
 ): ToolDefinition<typeof grepSchema, GrepToolDetails | undefined> {
 	const customOps = options?.operations;
+	const engine = options?.engine ?? "rg";
 	return {
 		name: "grep",
 		activity: "navigation",
@@ -319,6 +463,98 @@ export function createGrepToolDefinition(
 							}
 							return lines;
 						};
+
+						// fff backend: warm in-memory index. Engaged when opted in AND the
+						// query is within fff's supported subset — content/files/count modes,
+						// whole-repo OR a subdir/file inside cwd, no glob/multiline/ignoreCase/
+						// custom-ops/.git scope. Every excluded case, and any fff failure or
+						// unprovable-complete subdir scan, flows to ripgrep below (fffSearch
+						// returns null, never throws).
+						const fffMode = FFF_MODE_BY_OUTPUT[outputMode ?? "content"];
+						const relToCwd = path.relative(cwd, searchPath);
+						const withinCwd = relToCwd === "" || (!relToCwd.startsWith("..") && !path.isAbsolute(relToCwd));
+						const insideGitScope = /[\\/]\.git([\\/]|$)/.test(searchPath);
+						const fffEligible =
+							engine === "fff" &&
+							!customOps &&
+							!multiline &&
+							!ignoreCase &&
+							!glob &&
+							!insideGitScope &&
+							withinCwd;
+						if (fffEligible) {
+							const subPrefix = relToCwd === "" ? undefined : relToCwd.replace(/\\/g, "/");
+							const fffRes = await fffSearch({
+								basePath: cwd,
+								pattern,
+								mode: fffMode,
+								literal,
+								context: contextValue,
+								limit: effectiveLimit,
+								subPrefix,
+								subExact: subPrefix !== undefined && !isDirectory,
+							});
+							if (signal?.aborted) {
+								settle(() => reject(new Error("Operation aborted")));
+								return;
+							}
+							if (fffRes) {
+								const emitNoMatch = () =>
+									settle(() =>
+										resolve({ content: [{ type: "text", text: "No matches found" }], details: undefined }),
+									);
+								if (fffRes.mode === "content") {
+									if (fffRes.matches.length === 0) {
+										emitNoMatch();
+										return;
+									}
+									const mapped: ContentMatch[] = fffRes.matches.map((m: FffContentMatch) => ({
+										filePath: m.filePath,
+										lineNumber: m.lineNumber,
+										lineText: m.lineText,
+										matchStart: byteOffsetToCharIndex(m.lineText, m.col),
+									}));
+									const built = await buildContentOutput({
+										matches: mapped,
+										contextValue,
+										effectiveLimit,
+										matchLimitReached: fffRes.capped,
+										formatPath,
+										getFileLines,
+										isAborted: () => signal?.aborted ?? false,
+									});
+									if (built === "aborted") {
+										settle(() => reject(new Error("Operation aborted")));
+										return;
+									}
+									settle(() =>
+										resolve({
+											content: [{ type: "text", text: built.output }],
+											details: nonEmptyDetails(built.details),
+										}),
+									);
+									return;
+								}
+								// files_with_matches / count → locate-style line list.
+								const locateLines =
+									fffRes.mode === "files"
+										? fffRes.files.map((fp) => formatPath(fp))
+										: fffRes.counts.map((c) => `${formatPath(c.filePath)}:${c.count}`);
+								if (locateLines.length === 0) {
+									emitNoMatch();
+									return;
+								}
+								const locate = buildLocateOutput(locateLines, effectiveLimit, fffRes.capped);
+								settle(() =>
+									resolve({
+										content: [{ type: "text", text: locate.output }],
+										details: nonEmptyDetails(locate.details),
+									}),
+								);
+								return;
+							}
+							// fff unavailable/unsupported at runtime → fall through to ripgrep.
+						}
 
 						// --hidden is needed for dotfiles but also descends into .git/ (hundreds
 						// of junk matches per repo: packed-refs, hooks, logs). rg matches globs

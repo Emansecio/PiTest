@@ -6,7 +6,7 @@ import { type Static, Type } from "typebox";
 import { getLanguageFromPath, highlightCode } from "../../modes/interactive/theme/theme.js";
 import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
-import { attachPostWriteDiagnostics, maybeFormat } from "../lsp/writethrough.ts";
+import { attachPostWriteDiagnostics, capturePreWriteDiagnostics, maybeFormat } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { applyKeyAliases, PATH_KEY_ALIASES } from "./argument-prep.js";
@@ -286,6 +286,7 @@ export function createWriteToolDefinition(
 			}
 
 			let __written: string | undefined;
+			const diagnosticsBaseline = await capturePreWriteDiagnostics(absolutePath, cwd, signal);
 			const writeResult = await withFileMutationQueue(
 				absolutePath,
 				() =>
@@ -332,7 +333,14 @@ export function createWriteToolDefinition(
 						},
 					),
 			);
-			const diagResult = await attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal);
+			const diagResult = await attachPostWriteDiagnostics(
+				writeResult,
+				absolutePath,
+				__written,
+				cwd,
+				signal,
+				diagnosticsBaseline,
+			);
 			// New file / full overwrite: no prior content to diff against, so any
 			// elision placeholder in the written body is suspect — pass "" as base.
 			return attachOmissionWarning(diagResult, absolutePath, "", __written, cwd);

@@ -45,6 +45,7 @@ function makeClient(): { client: LspClient; writes: Written[]; resolvedProjectLo
 		},
 		stderrBuffer: "",
 		exitCode: null,
+		serverApplyEditDepth: 0,
 	} as unknown as LspClient;
 
 	return { client, writes, resolvedProjectLoaded: () => projectLoadedResolved };

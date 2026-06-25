@@ -51,6 +51,7 @@ import {
 	TUI,
 	visibleWidth,
 } from "@pit/tui";
+import chalk from "chalk";
 import { spawn } from "child_process";
 import { APP_NAME, APP_TITLE, getAgentDir, getAuthPath, getDebugLogPath, VERSION } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
@@ -91,6 +92,7 @@ import { isHiddenModelProvider } from "../../core/model-registry.ts";
 import {
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
+	MODEL_ROLES,
 	type ModelRole,
 	resolveRole,
 } from "../../core/model-resolver.ts";
@@ -392,6 +394,12 @@ export class InteractiveMode {
 	// `/model <role>`. Influences which fallback chain is consulted on
 	// Ctrl+P cycling and which model is restored on `/model role`.
 	private activeRole: ModelRole = "default";
+
+	// Last search term typed in the /model picker. Restored when the picker is
+	// reopened via the keybinding or a bare `/model` (no arg), so a multi-step
+	// model hunt doesn't reset to the full list each time. Session-only; a fresh
+	// session starts with an empty search.
+	private lastModelSearch = "";
 
 	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
@@ -2596,6 +2604,20 @@ export class InteractiveMode {
 			return true;
 		}
 
+		// Extension-registered commands (e.g. /mcp, and anything from pi.registerCommand)
+		// execute immediately via session.prompt → _tryExecuteExtensionCommand, which runs
+		// the command handler WITHOUT a model turn. Route them here — exactly like /model —
+		// so they behave as pure interface commands: no "Thinking…" loader is shown and
+		// nothing is sent to the model. While streaming or compacting we deliberately fall
+		// through (return false) so the submit handler's dedicated branches dispatch the
+		// command with the correct steer/queue semantics for those states.
+		if (!this.session.isStreaming && !this.session.isCompacting && this.isExtensionCommand(text)) {
+			this.editor.addToHistory?.(text);
+			this.editor.setText("");
+			await this.session.prompt(text);
+			return true;
+		}
+
 		return false;
 	}
 
@@ -4636,18 +4658,16 @@ export class InteractiveMode {
 		}
 
 		// `/model <role>` switches the active role for subsequent turns.
-		if (
-			searchTerm === "default" ||
-			searchTerm === "smol" ||
-			searchTerm === "slow" ||
-			searchTerm === "plan" ||
-			searchTerm === "commit"
-		) {
-			this.activeRole = searchTerm;
+		// MODEL_ROLES is the single source of truth; the cast is safe after the
+		// includes check and avoids a hardcoded ||-chain that would silently drift
+		// if a new role were added upstream.
+		if ((MODEL_ROLES as readonly string[]).includes(searchTerm)) {
+			const role = searchTerm as ModelRole;
+			this.activeRole = role;
 			const roleSettings = this.settingsManager.getModelRoleSettings();
 			const availableModels = this.session.modelRegistry.getAll();
 			const resolution = resolveRole({
-				role: searchTerm,
+				role,
 				availableModels,
 				settings: roleSettings,
 				cwd: this.sessionManager.getCwd(),
@@ -4657,12 +4677,12 @@ export class InteractiveMode {
 					await this.session.setModel(resolution.model);
 					this.session.setThinkingLevel(resolution.thinkingLevel);
 					this.refreshModelIndicators();
-					this.showStatus(`Role: ${searchTerm} -> ${resolution.model.provider}/${resolution.model.id}`);
+					this.showStatus(`Role: ${role} -> ${resolution.model.provider}/${resolution.model.id}`);
 				} catch (error) {
 					this.showError(errMsg(error));
 				}
 			} else {
-				this.showStatus(`Role: ${searchTerm} active (no model configured; using current)`);
+				this.showStatus(`Role: ${role} active (no model configured; using current)`);
 			}
 			return;
 		}
@@ -4693,7 +4713,13 @@ export class InteractiveMode {
 		this.session.modelRegistry.refresh();
 		try {
 			return await this.session.modelRegistry.getAvailable();
-		} catch {
+		} catch (error) {
+			// getAvailable() is a sync filter that essentially can't throw; if it
+			// does (unexpected internal/auth-storage failure), surface it so the
+			// degraded path (exact-match falls back to the selector, footer shows
+			// 0 providers) isn't silent. console.warn, not showError: this runs on
+			// the background footer-refresh path as well as user /model lookups.
+			console.warn(chalk.yellow(`Warning: model registry getAvailable() failed: ${errMsg(error)}`));
 			return [];
 		}
 	}
@@ -4800,6 +4826,10 @@ export class InteractiveMode {
 	}
 
 	private showModelSelector(initialSearchInput?: string): void {
+		// `/model <term>` passes an explicit term; a bare open (keybinding or
+		// `/model` with no arg) restores the last search so re-opening keeps the
+		// user's place instead of resetting to the full list.
+		const restoredSearch = initialSearchInput ?? this.lastModelSearch;
 		this.showSelector((done) => {
 			const selector = new ModelSelectorComponent(
 				this.ui,
@@ -4808,6 +4838,8 @@ export class InteractiveMode {
 				this.session.modelRegistry,
 				this.session.scopedModels,
 				async (model) => {
+					// Remember the search so the next open continues where this one left off.
+					this.lastModelSearch = selector.getSearchInput().getValue();
 					// Not folded into applyModel(): done() is interleaved between the
 					// indicator refresh and the status/warn/easter-egg tail, so the
 					// editor-restore ordering must stay exactly here.
@@ -4824,10 +4856,11 @@ export class InteractiveMode {
 					}
 				},
 				() => {
+					this.lastModelSearch = selector.getSearchInput().getValue();
 					done();
 					this.ui.requestRender();
 				},
-				initialSearchInput,
+				restoredSearch,
 			);
 			return { component: selector, focus: selector };
 		});

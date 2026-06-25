@@ -85,13 +85,13 @@ describe("lsp writethrough — post-write diagnostics", () => {
 		expect(second).not.toContain("Fix the error(s) below");
 	});
 
-	it("edit attaches LSP diagnostics (imperative framing on error) when enabled", async () => {
+	it("edit suppresses unchanged baseline diagnostics when enabled", async () => {
 		setDiagnosticsOnWrite(true);
 		writeFileSync(join(cwd, "b.txt"), "foo bar\n");
 		const out = await runEdit(cwd, "b.txt", "foo", "FOO");
 		expect(out).toContain("Successfully replaced 1 block(s)");
-		expect(out).toContain("Fix the error(s) below");
-		expect(out).toContain("fake diagnostic");
+		expect(out).not.toContain("Fix the error(s) below");
+		expect(out).not.toContain("fake diagnostic");
 		expect(readFileSync(join(cwd, "b.txt"), "utf-8")).toBe("FOO bar\n");
 	});
 

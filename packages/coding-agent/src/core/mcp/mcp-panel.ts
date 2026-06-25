@@ -97,6 +97,18 @@ export class McpPanelComponent extends Container {
 		);
 	}
 
+	/**
+	 * Mark/unmark a server as actively (re)connecting so its row shows
+	 * "connecting…" instead of its last settled status. Driven by the host while a
+	 * background connect is in flight (the panel opens immediately and these rows
+	 * flip to their real status via `refresh()` as `onStateChange` fires).
+	 */
+	setBusy(name: string, busy: boolean): void {
+		if (busy) this.busy.add(name);
+		else this.busy.delete(name);
+		this.renderList();
+	}
+
 	/** Re-read live state and redraw. Safe to call from the host on every state change. */
 	refresh(): void {
 		this.rows = this.getRows();

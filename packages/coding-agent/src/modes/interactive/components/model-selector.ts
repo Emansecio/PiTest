@@ -1,5 +1,15 @@
 import { type Model, modelsAreEqual } from "@pit/ai";
-import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Spacer, Text, type TUI } from "@pit/tui";
+import {
+	Container,
+	type Focusable,
+	fuzzyFilter,
+	getKeybindings,
+	Input,
+	Spacer,
+	Text,
+	TruncatedText,
+	type TUI,
+} from "@pit/tui";
 import type { ModelRegistry } from "../../../core/model-registry.ts";
 import type { SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
@@ -173,13 +183,25 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
 		const sorted = [...models];
-		// Sort: current model first, then by provider
+		const currentProvider = this.currentModel?.provider;
+		// Sort: current model first, then its provider's block contiguous, then by
+		// provider/id. Keeping the current model's provider block together (right
+		// after the pinned current model) means a provider group header never
+		// splits or duplicates when the current model belongs to a provider that
+		// would otherwise sort late (e.g. "zai") — its siblings stay with it
+		// instead of being pushed to the bottom of the list.
 		sorted.sort((a, b) => {
 			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
 			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
 			if (aIsCurrent && !bIsCurrent) return -1;
 			if (!aIsCurrent && bIsCurrent) return 1;
-			return a.provider.localeCompare(b.provider);
+			if (currentProvider !== undefined) {
+				const aInCurrent = a.provider === currentProvider;
+				const bInCurrent = b.provider === currentProvider;
+				if (aInCurrent !== bInCurrent) return aInCurrent ? -1 : 1;
+			}
+			if (a.provider !== b.provider) return a.provider.localeCompare(b.provider);
+			return a.id.localeCompare(b.id);
 		});
 		return sorted;
 	}
@@ -233,6 +255,15 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const item = this.filteredModels[i];
 			if (!item) continue;
 
+			// Provider group header: render when the previous item in the *full*
+			// filtered list belongs to a different provider. Checking i-1 (not
+			// startIndex-1) means a header never appears mid-group when the window
+			// is scrolled into the middle of a block — only at real boundaries.
+			const prev = i > 0 ? this.filteredModels[i - 1] : undefined;
+			if (!prev || prev.provider !== item.provider) {
+				this.listContainer.addChild(new Text(theme.fg("dim", `  ${item.provider}`), 0, 0));
+			}
+
 			const isSelected = i === this.selectedIndex;
 			const isCurrent = modelsAreEqual(this.currentModel, item.model);
 
@@ -250,7 +281,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				line = `${modelText} ${providerBadge}${checkmark}`;
 			}
 
-			this.listContainer.addChild(new Text(line, 0, 0));
+			this.listContainer.addChild(new TruncatedText(line, 0, 0));
 		}
 
 		// Add scroll indicator if needed
@@ -259,19 +290,28 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			this.listContainer.addChild(new Text(scrollInfo, 0, 0));
 		}
 
-		// Show error message or "no results" if empty
+		// Show "no results" only when there's truly nothing to list. A models.json
+		// error does NOT empty the list — built-in models still load (see
+		// loadModels), so we render them and surface the error as a banner below.
+		if (!this.errorMessage && this.filteredModels.length === 0) {
+			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
+		}
+
+		// Footer: model name of the current selection (when a list is showing).
+		if (this.filteredModels.length > 0) {
+			const selected = this.filteredModels[this.selectedIndex];
+			this.listContainer.addChild(new Spacer(1));
+			this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
+		}
+
+		// Error banner (models.json failed to parse, but built-ins still loaded).
+		// Shown last so it reads as a warning, not a replacement for the list.
 		if (this.errorMessage) {
-			// Show error in red
+			this.listContainer.addChild(new Spacer(1));
 			const errorLines = this.errorMessage.split("\n");
 			for (const line of errorLines) {
 				this.listContainer.addChild(new Text(theme.fg("error", line), 0, 0));
 			}
-		} else if (this.filteredModels.length === 0) {
-			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
-		} else {
-			const selected = this.filteredModels[this.selectedIndex];
-			this.listContainer.addChild(new Spacer(1));
-			this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
 		}
 	}
 

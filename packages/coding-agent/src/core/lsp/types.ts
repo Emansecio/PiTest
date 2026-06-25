@@ -373,6 +373,8 @@ export interface LspClient {
 	stderrBuffer: string;
 	/** Resolved exit info, populated when the process exits. */
 	exitCode: number | null;
+	/** Explicit operation scope that permits server-initiated workspace/applyEdit. */
+	serverApplyEditDepth: number;
 }
 
 // =============================================================================

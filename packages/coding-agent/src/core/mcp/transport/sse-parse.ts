@@ -49,7 +49,7 @@ export async function* parseSseStream(
 	// Track whether the stream drained naturally. If the consumer breaks out of
 	// the for-await early (e.g. Streamable-HTTP found its matching JSON-RPC
 	// response), the generator's `return()` runs `finally` while the body is only
-	// half-read; releaseLock() alone does NOT return the socket to the pool —
+	// half-read; releaseLock() alone does NOT return the socket to the pool --
 	// the connection leaks until GC/socket-timeout. Cancel the reader in that
 	// case so the underlying HTTP connection is released deterministically.
 	let drained = false;
@@ -66,17 +66,21 @@ export async function* parseSseStream(
 				await reader.cancel().catch(() => {});
 				throw new McpTransportError(`${label}: SSE frame too large (>${maxBytes} bytes without a frame boundary)`);
 			}
-			let newlineIndex = buffer.indexOf("\n");
+			// Walk with a cursor and slice ONCE per chunk, instead of re-slicing the
+			// whole remainder per line -- per-line slicing is O(lines * bytes) ~ O(B^2)
+			// on one large multi-line frame (stdio avoids this via coalesceChunks).
+			let pos = 0;
+			let newlineIndex = buffer.indexOf("\n", pos);
 			while (newlineIndex !== -1) {
 				// Strip an optional trailing \r so CRLF and LF frames parse identically.
-				let line = buffer.slice(0, newlineIndex);
+				let line = buffer.slice(pos, newlineIndex);
 				if (line.endsWith("\r")) line = line.slice(0, -1);
-				buffer = buffer.slice(newlineIndex + 1);
+				pos = newlineIndex + 1;
 				if (line === "") {
 					const ev = flush();
 					if (ev) yield ev;
 				} else if (line.startsWith(":")) {
-					// Comment / heartbeat — ignore.
+					// Comment / heartbeat -- ignore.
 				} else {
 					const colon = line.indexOf(":");
 					const field = colon === -1 ? line : line.slice(0, colon);
@@ -86,8 +90,10 @@ export async function* parseSseStream(
 					else if (field === "data") dataLines.push(val);
 					else if (field === "id") lastId = val;
 				}
-				newlineIndex = buffer.indexOf("\n");
+				newlineIndex = buffer.indexOf("\n", pos);
 			}
+			// Drop the consumed prefix; keep only the unterminated trailing frame.
+			if (pos > 0) buffer = buffer.slice(pos);
 		}
 		// A final frame not terminated by a blank line (stream closed) still dispatches.
 		const ev = flush();

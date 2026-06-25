@@ -67,6 +67,8 @@
 		}
 	},
 	"optionalDependencies": {
+		"@ast-grep/napi": "^0.44.0",
+		"@ff-labs/fff-node": "^0.9.6",
 		"@pituned/clipboard": "^0.3.6"
 	},
 	"devDependencies": {

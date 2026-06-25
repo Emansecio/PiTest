@@ -112,6 +112,32 @@ describe("preset providers in the model registry", () => {
 		expect(glm52[0]?.contextWindow).toBe(1_000_000); // opencode reports 1M for glm-5.2
 		expect(glm52[0]?.maxTokens).toBe(131_072); // opencode reports 128k (131072) max output for glm-5.2
 
+		// glm-5.2 only accepts two reasoning efforts ("high" and "max"), exposed as
+		// the xhigh map. off/minimal/low/medium are nulled-out so the menu offers
+		// just the two real modes (regression: previously Pi leaked all five).
+		expect(glm52[0]?.thinkingLevelMap).toEqual({
+			off: null,
+			minimal: null,
+			low: null,
+			medium: null,
+			high: "high",
+			xhigh: "max",
+		});
+		// The strict glm-5.2 backend rejects store/developer-role/max_completion_tokens
+		// and the auto-enabled `prompt_cache_retention: "24h"` — opt out of all of them.
+		const compat = glm52[0]?.compat as
+			| {
+					supportsLongCacheRetention?: boolean;
+					supportsStore?: boolean;
+					supportsDeveloperRole?: boolean;
+					maxTokensField?: string;
+			  }
+			| undefined;
+		expect(compat?.supportsLongCacheRetention).toBe(false);
+		expect(compat?.supportsStore).toBe(false);
+		expect(compat?.supportsDeveloperRole).toBe(false);
+		expect(compat?.maxTokensField).toBe("max_tokens");
+
 		// Gated by auth like every other opencode-go model.
 		expect(registry.getAvailable().some((m) => m.provider === "opencode-go" && m.id === "glm-5.2")).toBe(false);
 		authStorage.set("opencode-go", { type: "api_key", key: "k" });

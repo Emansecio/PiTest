@@ -316,7 +316,6 @@ export {
 	LoginDialogComponent,
 	ModelSelectorComponent,
 	OAuthSelectorComponent,
-	type RenderDiffOptions,
 	rawKeyHint,
 	renderDiff,
 	SessionSelectorComponent,

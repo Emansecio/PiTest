@@ -251,6 +251,35 @@ export interface ResolvedWebSearchSettings {
 }
 
 /**
+ * Grep tool backend. `"fff"` (default) answers `content` searches from a warm
+ * in-memory index (optional `@ff-labs/fff-node` native package) when available,
+ * falling back to ripgrep for every unsupported case or when the binary is
+ * absent. `"rg"` forces ripgrep per query. Behavior-identical to `rg` on its
+ * supported subset; the win is removing per-query spawn startup on large repos.
+ */
+export type GrepEngine = "rg" | "fff";
+export interface GrepSettings {
+	engine?: GrepEngine;
+}
+export interface ResolvedGrepSettings {
+	engine: GrepEngine;
+}
+
+/**
+ * ast_grep tool backend. `"napi"` (default) runs the ast-grep engine in-process
+ * via the optional `@ast-grep/napi` package for built-in languages, falling back
+ * to the `ast-grep` CLI for other languages / unsupported queries / when the
+ * package is absent. `"cli"` forces the CLI.
+ */
+export type AstGrepEngine = "napi" | "cli";
+export interface AstGrepSettings {
+	engine?: AstGrepEngine;
+}
+export interface ResolvedAstGrepSettings {
+	engine: AstGrepEngine;
+}
+
+/**
  * Eval tool configuration. On by default; opt out via `eval.enabled: false`.
  * When enabled, the `eval` tool is registered for coding bundles and the
  * session boots a persistent Python + JS kernel manager (one of each kernel
@@ -462,6 +491,17 @@ export interface Settings {
 	 * (env-key gated). Opt out with `webSearch.enabled: false`.
 	 */
 	webSearch?: WebSearchSettings;
+	/**
+	 * Grep tool backend. `"fff"` (default — warm in-memory index when the optional
+	 * native package is present; falls back to ripgrep otherwise) or `"rg"` to
+	 * force ripgrep per-query.
+	 */
+	grep?: GrepSettings;
+	/**
+	 * ast_grep tool backend. `"napi"` (default — in-process, no PATH dependency
+	 * for built-in languages) or `"cli"` to force the ast-grep CLI.
+	 */
+	astGrep?: AstGrepSettings;
 	/**
 	 * Eval tool. On by default; registers the `eval` tool and starts a
 	 * per-session persistent Python + JS kernel manager (spawned lazily on
@@ -1859,5 +1899,33 @@ export class SettingsManager {
 				typeof raw?.defaultProvider === "string" && raw.defaultProvider.length > 0 ? raw.defaultProvider : "auto",
 			providers,
 		};
+	}
+
+	/**
+	 * Resolve the grep backend. Defaults to `"fff"` (warm in-memory index) — it
+	 * is native + zero-config: when the optional `@ff-labs/fff-node` package or
+	 * its platform binary is absent, OR a query falls outside fff's supported
+	 * subset, the grep tool transparently falls back to ripgrep, so the default
+	 * is safe everywhere. Opt out with `grep.engine: "rg"` (or `PIT_GREP_ENGINE=rg`).
+	 * `PIT_GREP_ENGINE=fff|rg` overrides settings (env wins) for per-run toggling.
+	 */
+	getGrepSettings(): ResolvedGrepSettings {
+		const env = process.env.PIT_GREP_ENGINE;
+		if (env === "fff" || env === "rg") return { engine: env };
+		const raw = this.settings.grep?.engine;
+		return { engine: raw === "rg" ? "rg" : "fff" };
+	}
+
+	/**
+	 * Resolve the ast_grep backend. Defaults to `"napi"` (in-process, zero-config
+	 * for built-in languages; falls back to the CLI when unavailable/unsupported).
+	 * `PIT_ASTGREP_ENGINE=napi|cli` overrides settings. Opt out with
+	 * `astGrep.engine: "cli"`.
+	 */
+	getAstGrepSettings(): ResolvedAstGrepSettings {
+		const env = process.env.PIT_ASTGREP_ENGINE;
+		if (env === "napi" || env === "cli") return { engine: env };
+		const raw = this.settings.astGrep?.engine;
+		return { engine: raw === "cli" ? "cli" : "napi" };
 	}
 }

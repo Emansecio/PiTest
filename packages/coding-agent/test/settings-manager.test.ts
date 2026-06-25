@@ -405,4 +405,60 @@ describe("SettingsManager", () => {
 			expect(manager.getCompactionSettings().selfCorrection).toBe(false);
 		});
 	});
+
+	describe("getGrepSettings", () => {
+		const savedEnv = process.env.PIT_GREP_ENGINE;
+		afterEach(() => {
+			if (savedEnv === undefined) delete process.env.PIT_GREP_ENGINE;
+			else process.env.PIT_GREP_ENGINE = savedEnv;
+		});
+
+		it("defaults to fff (native, with rg fallback at runtime)", () => {
+			delete process.env.PIT_GREP_ENGINE;
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getGrepSettings().engine).toBe("fff");
+		});
+
+		it("honors grep.engine: rg opt-out from settings.json", () => {
+			delete process.env.PIT_GREP_ENGINE;
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ grep: { engine: "rg" } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getGrepSettings().engine).toBe("rg");
+		});
+
+		it("lets PIT_GREP_ENGINE env override settings.json", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ grep: { engine: "rg" } }));
+			process.env.PIT_GREP_ENGINE = "fff";
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getGrepSettings().engine).toBe("fff");
+		});
+	});
+
+	describe("getAstGrepSettings", () => {
+		const savedEnv = process.env.PIT_ASTGREP_ENGINE;
+		afterEach(() => {
+			if (savedEnv === undefined) delete process.env.PIT_ASTGREP_ENGINE;
+			else process.env.PIT_ASTGREP_ENGINE = savedEnv;
+		});
+
+		it("defaults to napi (in-process, with CLI fallback at runtime)", () => {
+			delete process.env.PIT_ASTGREP_ENGINE;
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getAstGrepSettings().engine).toBe("napi");
+		});
+
+		it("honors astGrep.engine: cli opt-out from settings.json", () => {
+			delete process.env.PIT_ASTGREP_ENGINE;
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ astGrep: { engine: "cli" } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getAstGrepSettings().engine).toBe("cli");
+		});
+
+		it("lets PIT_ASTGREP_ENGINE env override settings.json", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ astGrep: { engine: "cli" } }));
+			process.env.PIT_ASTGREP_ENGINE = "napi";
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getAstGrepSettings().engine).toBe("napi");
+		});
+	});
 });

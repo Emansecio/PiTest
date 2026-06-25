@@ -208,6 +208,18 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		// Pi's low/medium/high pass through verbatim; OpenRouter normalizes to Mercury's vocabulary.
 		mergeThinkingLevelMap(model, { off: null });
 	}
+	// GLM-5.2 on the OpenCode / OpenCode Go endpoints only accepts two reasoning
+	// efforts — "high" and "max" (exposed to Pi as xhigh). off/minimal/low/medium
+	// are not valid for this model and, when sent verbatim as reasoning_effort,
+	// make the strict glm-5.2 backend return HTTP 400. Collapse the menu to the
+	// two real modes; off is nulled-out so getSupportedThinkingLevels drops it.
+	if (
+		(model.provider === "opencode" || model.provider === "opencode-go") &&
+		model.id === "glm-5.2" &&
+		model.api === "openai-completions"
+	) {
+		mergeThinkingLevelMap(model, { off: null, minimal: null, low: null, medium: null, high: "high", xhigh: "max" });
+	}
 }
 
 async function fetchOpenRouterModels(): Promise<Model<any>[]> {
@@ -1385,6 +1397,28 @@ async function generateModels() {
 
 	for (const model of allModels) {
 		applyThinkingLevelMetadata(model);
+	}
+
+	// The glm-5.2 backend validates request fields strictly: it rejects the
+	// `prompt_cache_retention: "24h"` that detectCompat() auto-enables for
+	// opencode.ai URLs (glm-5.1 tolerates it; glm-5.2 returns HTTP 400), and it
+	// does not accept the OpenAI `store` param, the developer role, or
+	// `max_completion_tokens`. Opt out so requests stay within glm-5.2's schema.
+	// Runs after the manual glm-5.2 push (provider "opencode") above so every
+	// glm-5.2 entry — generated and hand-added — gets the same strict-compat.
+	for (const candidate of allModels) {
+		if (
+			(candidate.provider === "opencode" || candidate.provider === "opencode-go") &&
+			candidate.id === "glm-5.2"
+		) {
+			candidate.compat = {
+				...(candidate.compat ?? {}),
+				supportsStore: false,
+				supportsDeveloperRole: false,
+				maxTokensField: "max_tokens",
+				supportsLongCacheRetention: false,
+			};
+		}
 	}
 
 	// Group by provider and deduplicate by model ID

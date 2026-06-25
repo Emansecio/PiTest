@@ -14,6 +14,7 @@ import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import { killProcessTree } from "../../utils/shell.ts";
 import { isHighSurrogate } from "../../utils/surrogate.ts";
 import { resolveToCwd } from "../tools/path-utils.ts";
+import { formatSize, truncateHead } from "../tools/truncate.ts";
 import {
 	ensureFileOpen,
 	getOrCreateClient,
@@ -46,7 +47,7 @@ import {
 	type TextResult,
 	textResult,
 	uriToFile,
-	waitForDiagnostics,
+	waitForDiagnosticsResult,
 } from "./utils.ts";
 
 const SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3000;
@@ -54,6 +55,14 @@ const BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS = 400;
 const MAX_GLOB_DIAGNOSTIC_TARGETS = 20;
 const WORKSPACE_SYMBOL_LIMIT = 200;
 const MAX_RENAME_PAIRS = 1000;
+const LSP_JSON_OUTPUT_MAX_BYTES = 16 * 1024;
+const LSP_JSON_OUTPUT_MAX_LINES = 400;
+
+function capLspPayload(text: string, label: string): string {
+	const truncation = truncateHead(text, { maxBytes: LSP_JSON_OUTPUT_MAX_BYTES, maxLines: LSP_JSON_OUTPUT_MAX_LINES });
+	if (!truncation.truncated) return text;
+	return `${truncation.content}\n\n[${label} truncated at ${truncation.outputLines} of ${truncation.totalLines} lines (${formatSize(LSP_JSON_OUTPUT_MAX_BYTES)} limit); narrow the request]`;
+}
 
 // =============================================================================
 // Rename helpers
@@ -277,6 +286,8 @@ export async function runDiagnostics(
 		const uri = fileToUri(resolved);
 		const relPath = formatPathRelativeToCwd(resolved, cwd);
 		const allDiagnostics: Diagnostic[] = [];
+		const serverIssues: string[] = [];
+		let freshServerCount = 0;
 
 		for (const [serverName, serverConfig] of servers) {
 			allServerNames.add(serverName);
@@ -290,41 +301,63 @@ export async function runDiagnostics(
 				const minVersion = client.diagnosticsVersion;
 				await refreshFile(client, resolved, signal);
 				const expectedDocumentVersion = client.openFiles.get(uri)?.version;
-				const diagnostics = await waitForDiagnostics(client, uri, {
+				const result = await waitForDiagnosticsResult(client, uri, {
 					timeoutMs: diagnosticsWaitTimeoutMs,
 					signal,
 					minVersion,
 					expectedDocumentVersion,
 				});
-				allDiagnostics.push(...diagnostics);
+				if (!result.fresh) {
+					serverIssues.push(`${serverName}: no fresh diagnostics published`);
+					continue;
+				}
+				freshServerCount += 1;
+				allDiagnostics.push(...result.diagnostics);
 			} catch (err) {
 				if (signal?.aborted) throw err;
-				// Server failed; continue with others.
+				serverIssues.push(`${serverName}: ${err instanceof Error ? err.message : String(err)}`);
 			}
 		}
 
 		const uniqueDiagnostics = dedupeDiagnostics(allDiagnostics);
 		sortDiagnostics(uniqueDiagnostics);
+		const issueNote = serverIssues.length > 0 ? ` (${serverIssues.join("; ")})` : "";
 
 		if (!detailed && targets.length === 1) {
+			if (freshServerCount === 0) {
+				return textResult(
+					`Diagnostics unavailable for ${relPath}: ${serverIssues.join("; ") || "no fresh diagnostics"}`,
+					{
+						action,
+						serverName: Array.from(allServerNames).join(", "),
+						success: true,
+					},
+				);
+			}
 			if (uniqueDiagnostics.length === 0) {
-				return textResult("OK", { action, serverName: Array.from(allServerNames).join(", "), success: true });
+				return textResult(`OK${issueNote}`, {
+					action,
+					serverName: Array.from(allServerNames).join(", "),
+					success: true,
+				});
 			}
 			const summary = formatDiagnosticsSummary(uniqueDiagnostics);
-			const formatted = uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath));
-			return textResult(`${summary}:\n${formatGroupedDiagnosticMessages(formatted)}`, {
+			const formatted = uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath, cwd));
+			return textResult(`${summary}${issueNote}:\n${formatGroupedDiagnosticMessages(formatted)}`, {
 				action,
 				serverName: Array.from(allServerNames).join(", "),
 				success: true,
 			});
 		}
 
-		if (uniqueDiagnostics.length === 0) {
-			results.push(`${relPath}: no issues`);
+		if (freshServerCount === 0) {
+			results.push(`${relPath}: diagnostics unavailable${issueNote}`);
+		} else if (uniqueDiagnostics.length === 0) {
+			results.push(`${relPath}: no issues${issueNote}`);
 		} else {
 			const summary = formatDiagnosticsSummary(uniqueDiagnostics);
-			results.push(`${relPath}: ${summary}`);
-			results.push(formatGroupedDiagnosticMessages(uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath))));
+			results.push(`${relPath}: ${summary}${issueNote}`);
+			results.push(formatGroupedDiagnosticMessages(uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath, cwd))));
 		}
 	}
 
@@ -364,8 +397,9 @@ export async function runCapabilities(
 			const client = await getOrCreateClient(serverConfig, cwd);
 			responding.add(serverName);
 			const caps = client.serverCapabilities ?? {};
+			const capped = capLspPayload(JSON.stringify(caps, null, 2), `${serverName} capabilities`);
 			sections.push(`${serverName}:`);
-			sections.push(`  capabilities: ${JSON.stringify(caps, null, 2).split("\n").join("\n  ")}`);
+			sections.push(`  capabilities: ${capped.split("\n").join("\n  ")}`);
 		} catch (err) {
 			if (signal?.aborted) throw err;
 			sections.push(`${serverName}: failed to start (${err instanceof Error ? err.message : String(err)})`);
@@ -493,7 +527,7 @@ export async function rawRequest(
 				: typeof result === "string"
 					? result
 					: JSON.stringify(result, null, 2);
-		return textResult(`${chosenName} <- ${method}:\n${formatted}`, {
+		return textResult(`${chosenName} <- ${method}:\n${capLspPayload(formatted, method)}`, {
 			action,
 			serverName: chosenName,
 			success: true,

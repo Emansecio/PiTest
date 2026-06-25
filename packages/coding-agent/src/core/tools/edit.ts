@@ -6,7 +6,7 @@ import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
 import { writeFileAtomic } from "../../utils/atomic-write.ts";
 import type { ToolDefinition } from "../extensions/types.js";
-import { attachPostWriteDiagnostics } from "../lsp/writethrough.ts";
+import { attachPostWriteDiagnostics, capturePreWriteDiagnostics } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, EDIT_KEY_ALIASES, PATH_KEY_ALIASES } from "./argument-prep.js";
 import {
@@ -261,13 +261,11 @@ function formatEditCall(
 }
 
 function formatEditResult(
-	args: RenderableEditArgs | undefined,
 	preview: EditPreview | undefined,
 	result: EditToolResultLike,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
 	isError: boolean,
 ): string | undefined {
-	const rawPath = getFilePathArg(args);
 	const previewDiff = preview && !("error" in preview) ? preview.diff : undefined;
 	const previewError = preview && "error" in preview ? preview.error : undefined;
 	if (isError) {
@@ -283,7 +281,7 @@ function formatEditResult(
 
 	const resultDiff = result.details?.diff;
 	if (resultDiff && resultDiff !== previewDiff) {
-		return renderDiff(resultDiff, { filePath: rawPath ?? undefined });
+		return renderDiff(resultDiff);
 	}
 
 	return undefined;
@@ -347,6 +345,8 @@ export function createEditToolDefinition(
 			// vs original"). Set only on a real write, not on the preview path.
 			let __omissionBase: string | undefined;
 			let __omissionNew: string | undefined;
+			const diagnosticsBaseline =
+				input.preview === true ? undefined : await capturePreWriteDiagnostics(absolutePath, cwd, signal);
 			const writeResult = await withFileMutationQueue(
 				absolutePath,
 				() =>
@@ -530,7 +530,14 @@ export function createEditToolDefinition(
 						})();
 					}),
 			);
-			const diagResult = await attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal);
+			const diagResult = await attachPostWriteDiagnostics(
+				writeResult,
+				absolutePath,
+				__written,
+				cwd,
+				signal,
+				diagnosticsBaseline,
+			);
 			return attachOmissionWarning(diagResult, absolutePath, __omissionBase, __omissionNew, cwd);
 		},
 		renderCall(args, theme, context) {
@@ -605,7 +612,7 @@ export function createEditToolDefinition(
 				}
 			}
 
-			const output = formatEditResult(context.args, callComponent?.preview, typedResult, theme, context.isError);
+			const output = formatEditResult(callComponent?.preview, typedResult, theme, context.isError);
 			const component = (context.lastComponent as Container | undefined) ?? new Container();
 			component.clear();
 			if (!output) {

@@ -163,7 +163,12 @@ export function getPresetProviderModels(): Model<Api>[] {
  *
  * GLM-5.2 is live on the OpenCode Go endpoint today (confirmed via the opencode
  * CLI); cloned from glm-5.1@opencode-go (same endpoint and cost). The opencode
- * catalog reports a 1M context window for glm-5.2 (glm-5.1 was 200k).
+ * catalog reports a 1M context window for glm-5.2 (glm-5.1 was 200k). Kept in sync
+ * with the generated entry (see scripts/generate-models.ts): glm-5.2 only accepts
+ * two reasoning efforts — "high" and "max" (xhigh in Pi) — and rejects the
+ * OpenAI `store`/developer-role params, `max_completion_tokens`, and the
+ * `prompt_cache_retention: "24h"` flag that detectCompat() otherwise auto-enables
+ * for opencode.ai URLs, so it opts out of all of them.
  */
 export const CURATED_EXTRA_MODELS: readonly Model<Api>[] = [
 	{
@@ -173,16 +178,18 @@ export const CURATED_EXTRA_MODELS: readonly Model<Api>[] = [
 		provider: "opencode-go",
 		baseUrl: "https://opencode.ai/zen/go/v1",
 		reasoning: true,
-		thinkingLevelMap: undefined,
+		thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: "high", xhigh: "max" },
 		input: ["text"],
 		cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
 		contextWindow: 1_000_000,
 		maxTokens: 131_072,
 		headers: undefined,
-		// The glm-5.2 backend validates request fields strictly and rejects the
-		// `prompt_cache_retention: "24h"` that detectCompat() auto-enables for
-		// opencode.ai URLs (glm-5.1 tolerates it; glm-5.2 returns HTTP 400). Opt out.
-		compat: { supportsLongCacheRetention: false },
+		compat: {
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			maxTokensField: "max_tokens",
+			supportsLongCacheRetention: false,
+		},
 	} as Model<Api>,
 ];
 

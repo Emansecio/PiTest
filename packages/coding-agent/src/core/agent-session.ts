@@ -1129,6 +1129,8 @@ export class AgentSession {
 					edit_v2: { mtimeStore: this._fileMtimeStore },
 					write: { mtimeStore: this._fileMtimeStore },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					grep: { engine: this.settingsManager.getGrepSettings().engine },
+					ast_grep: { engine: this.settingsManager.getAstGrepSettings().engine },
 				}) as Record<string, ToolDefinition>;
 			} catch {
 				return;
@@ -5421,6 +5423,8 @@ export class AgentSession {
 					edit_v2: { mtimeStore: this._fileMtimeStore },
 					write: { mtimeStore: this._fileMtimeStore },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					grep: { engine: this.settingsManager.getGrepSettings().engine },
+					ast_grep: { engine: this.settingsManager.getAstGrepSettings().engine },
 					// Code-mode: inject the harness-routed dispatcher so a code-mode
 					// program's `tools.x()` calls pass through the same pipeline as a
 					// normal model tool call (anti-bypass). See _buildCodeModeDispatcher.

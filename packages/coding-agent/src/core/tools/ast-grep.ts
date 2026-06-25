@@ -5,6 +5,7 @@ import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { prepareWithPathAliases } from "./argument-prep.ts";
+import { astGrepNapiSearch, isNapiSupportedLang } from "./ast-grep-napi.ts";
 import { AST_GREP_INSTALL_HINT, isMissingBinaryError, parseJsonStream } from "./ast-grep-shared.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
@@ -46,9 +47,18 @@ export interface AstGrepToolDetails {
 export interface AstGrepToolOptions {
 	/** Override the binary path. Default: "ast-grep" on PATH. */
 	binaryPath?: string;
+	/**
+	 * Search backend. `"napi"` (default) runs the same Rust engine in-process via
+	 * `@ast-grep/napi` — no process spawn, no PATH dependency — for its supported
+	 * subset (built-in langs ts/tsx/js/html/css, no globs, no context), falling
+	 * back to the CLI for everything else or when the native package is absent.
+	 * `"cli"` forces the legacy `ast-grep` CLI for every query. Behavior-identical
+	 * on the supported subset.
+	 */
+	engine?: "napi" | "cli";
 }
 
-interface AstGrepMatch {
+export interface AstGrepMatch {
 	file?: string;
 	range?: {
 		start?: { line?: number; column?: number };
@@ -171,11 +181,12 @@ export function createAstGrepToolDefinition(
 	options?: AstGrepToolOptions,
 ): ToolDefinition<typeof astGrepSchema, AstGrepToolDetails | undefined> {
 	const binary = options?.binaryPath ?? "ast-grep";
+	const engine = options?.engine ?? "napi";
 	return {
 		name: "ast_grep",
 		activity: "navigation",
 		label: "ast_grep",
-		description: `Structural code search via ast-grep CLI. \`pattern\` is an ast-grep pattern (not regex), e.g. "console.log($X)". Use $METAVAR to capture nodes. Optionally pin language with \`lang\` (ts, tsx, js, py, rs, ...). Returns matches grouped by file with line:col locations. Use only for structural/AST patterns; for literal text or regex, \`grep\` is faster. Requires the ast-grep CLI to be installed and on PATH — the tool errors with "${AST_GREP_INSTALL_HINT}" if it is absent.`,
+		description: `Structural code search via ast-grep.\`pattern\` is an ast-grep pattern (not regex), e.g. "console.log($X)". Use $METAVAR to capture nodes. Optionally pin language with \`lang\` (ts, tsx, js, py, rs, ...). Returns matches grouped by file with line:col locations. Use only for structural/AST patterns; for literal text or regex, \`grep\` is faster. Runs in-process for built-in languages (ts/tsx/js/html/css); other languages (py, rs, go) use the ast-grep CLI, which must be on PATH — the tool errors with "${AST_GREP_INSTALL_HINT}" if it is absent.`,
 		promptSnippet: "Structural AST search (ast-grep). Patterns like console.log($X). Capture with $METAVAR.",
 		parameters: astGrepSchema,
 		prepareArguments: prepareWithPathAliases,
@@ -183,6 +194,38 @@ export function createAstGrepToolDefinition(
 			const { pattern, lang, path: searchPath, globs, context, limit } = input;
 			const target = resolveToCwd(searchPath || ".", cwd);
 			const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, limit ?? DEFAULT_LIMIT));
+
+			// Shared tail: cap, format, and shape the tool result the same way for
+			// both the napi backend and the CLI so output is identical.
+			const buildResult = (all: AstGrepMatch[]) => {
+				const matchLimitReached = all.length > effectiveLimit;
+				const capped = matchLimitReached ? all.slice(0, effectiveLimit) : all;
+				if (capped.length === 0) {
+					return { content: [{ type: "text" as const, text: "No matches found" }], details: { matchCount: 0 } };
+				}
+				let text = formatMatches(capped, cwd);
+				if (matchLimitReached) {
+					text += `\n\n[${effectiveLimit} matches limit reached. Use limit=${Math.min(MAX_LIMIT, effectiveLimit * 2)} or refine pattern]`;
+				}
+				return {
+					content: [{ type: "text" as const, text }],
+					details: { matchCount: capped.length, matchLimitReached },
+				};
+			};
+
+			// napi backend: in-process, no spawn, no PATH dependency. Engaged when
+			// opted in (default) AND the query is within napi's supported subset —
+			// a built-in language, no globs, no context. Everything else, and any
+			// napi failure (astGrepNapiSearch returns null, never throws), falls
+			// through to the CLI below.
+			const napiEligible =
+				engine === "napi" && isNapiSupportedLang(lang) && !(globs && globs.length > 0) && !(context && context > 0);
+			if (napiEligible && lang) {
+				const napiMatches = await astGrepNapiSearch({ pattern, lang, target });
+				if (signal?.aborted) throw new Error("Operation aborted");
+				if (napiMatches) return buildResult(napiMatches);
+				// null → unsupported/failed at runtime → fall through to the CLI.
+			}
 
 			const args: string[] = ["run", "--pattern", pattern];
 			if (lang) args.push("--lang", lang);
@@ -223,24 +266,7 @@ export function createAstGrepToolDefinition(
 			}
 
 			const all = parseJsonStream<AstGrepMatch>(res.stdout);
-			const matchLimitReached = all.length > effectiveLimit;
-			const capped = matchLimitReached ? all.slice(0, effectiveLimit) : all;
-
-			if (capped.length === 0) {
-				return {
-					content: [{ type: "text" as const, text: "No matches found" }],
-					details: { matchCount: 0 },
-				};
-			}
-
-			let text = formatMatches(capped, cwd);
-			if (matchLimitReached) {
-				text += `\n\n[${effectiveLimit} matches limit reached. Use limit=${Math.min(MAX_LIMIT, effectiveLimit * 2)} or refine pattern]`;
-			}
-			return {
-				content: [{ type: "text" as const, text }],
-				details: { matchCount: capped.length, matchLimitReached },
-			};
+			return buildResult(all);
 		},
 		renderCall(args, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);

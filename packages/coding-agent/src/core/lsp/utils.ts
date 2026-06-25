@@ -88,6 +88,12 @@ export function formatPathRelativeToCwd(filePath: string, cwd: string): string {
 	return rel.split(path.sep).join("/");
 }
 
+/** True when `filePath` resolves inside `cwd` (or equals it). */
+export function isPathInsideCwd(filePath: string, cwd: string): boolean {
+	const rel = path.relative(path.resolve(cwd), path.resolve(filePath));
+	return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
 // =============================================================================
 // Language ID Detection
 // =============================================================================
@@ -229,6 +235,7 @@ function stripDiagnosticNoise(message: string): string {
 }
 
 const DIAGNOSTIC_TAG_NAMES: Record<number, string> = { 1: "unnecessary", 2: "deprecated" };
+const MAX_RELATED_INFORMATION = 5;
 
 function formatDiagnosticTags(tags?: number[]): string {
 	if (!tags || tags.length === 0) return "";
@@ -250,13 +257,16 @@ export function formatDiagnostic(diagnostic: Diagnostic, filePath: string, cwd?:
 	const message = stripDiagnosticNoise(diagnostic.message);
 	let result = `${filePath}:${line}:${col} [${severity}] ${source}${message}${tags}${code}`;
 	if (diagnostic.relatedInformation && diagnostic.relatedInformation.length > 0) {
-		for (const related of diagnostic.relatedInformation) {
+		const visibleRelated = diagnostic.relatedInformation.slice(0, MAX_RELATED_INFORMATION);
+		for (const related of visibleRelated) {
 			const relFile = uriToFile(related.location.uri);
 			const relPath = cwd !== undefined ? formatPathRelativeToCwd(relFile, cwd) : relFile.replace(/\\/g, "/");
 			const relLine = related.location.range.start.line + 1;
 			const relCol = related.location.range.start.character + 1;
 			result += `\n  -> ${relPath}:${relLine}:${relCol} ${related.message}`;
 		}
+		const omitted = diagnostic.relatedInformation.length - visibleRelated.length;
+		if (omitted > 0) result += `\n  -> ${omitted} related location(s) omitted`;
 	}
 	return result;
 }
@@ -321,11 +331,16 @@ function getAcceptedDiagnostics(
  * Poll a client's published diagnostics for `uri` until they satisfy the version
  * constraints or `timeoutMs` elapses. Throws if the signal aborts.
  */
-export async function waitForDiagnostics(
+export interface WaitForDiagnosticsResult {
+	diagnostics: Diagnostic[];
+	fresh: boolean;
+}
+
+export async function waitForDiagnosticsResult(
 	client: LspClient,
 	uri: string,
 	options: WaitForDiagnosticsOptions = {},
-): Promise<Diagnostic[]> {
+): Promise<WaitForDiagnosticsResult> {
 	const { timeoutMs = 3000, signal, minVersion, expectedDocumentVersion, allowUnversioned = true } = options;
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
@@ -336,12 +351,21 @@ export async function waitForDiagnostics(
 			expectedDocumentVersion,
 			allowUnversioned,
 		);
-		if (diagnostics !== undefined && versionOk) return diagnostics;
+		if (diagnostics !== undefined && versionOk) return { diagnostics, fresh: true };
 		await sleep(100);
 	}
 	const versionOk = minVersion === undefined || client.diagnosticsVersion > minVersion;
-	if (!versionOk) return [];
-	return getAcceptedDiagnostics(client.diagnostics.get(uri), expectedDocumentVersion, allowUnversioned) ?? [];
+	const diagnostics = getAcceptedDiagnostics(client.diagnostics.get(uri), expectedDocumentVersion, allowUnversioned);
+	if (versionOk && diagnostics !== undefined) return { diagnostics, fresh: true };
+	return { diagnostics: [], fresh: false };
+}
+
+export async function waitForDiagnostics(
+	client: LspClient,
+	uri: string,
+	options: WaitForDiagnosticsOptions = {},
+): Promise<Diagnostic[]> {
+	return (await waitForDiagnosticsResult(client, uri, options)).diagnostics;
 }
 
 // =============================================================================
@@ -509,11 +533,7 @@ export async function applyCodeAction(
 
 const GLOB_PATTERN_CHARS = /[*?[{]/;
 
-export function hasGlobPattern(value: string): boolean {
-	return GLOB_PATTERN_CHARS.test(value);
-}
-
-export async function collectGlobMatches(
+async function collectGlobMatches(
 	pattern: string,
 	cwd: string,
 	maxMatches: number,
@@ -534,7 +554,7 @@ export async function resolveDiagnosticTargets(
 	cwd: string,
 	maxMatches: number,
 ): Promise<{ matches: string[]; truncated: boolean }> {
-	if (!hasGlobPattern(file)) {
+	if (!GLOB_PATTERN_CHARS.test(file)) {
 		return { matches: [file], truncated: false };
 	}
 	const resolved = path.isAbsolute(file) ? file : path.resolve(cwd, file);
