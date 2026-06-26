@@ -16,6 +16,7 @@
  */
 
 import { resolve as nodeResolve } from "node:path";
+import { stripNullishOptionalArgs } from "@pit/ai";
 import { expandPath } from "./path-utils.ts";
 
 /** Map of alias -> canonical key used by `applyKeyAliases`. */
@@ -204,6 +205,15 @@ export function prepareArgsForLooseSchema(input: unknown, inputSchema: unknown):
 			ensureClone();
 			out[key] = (coerced as Record<string, unknown>)[key];
 		}
+	}
+
+	// Drop optional null/{} placeholders the server's schema doesn't accept. The
+	// canonical TypeBox path does this in validateToolArguments; MCP/custom tools
+	// validate against their own raw schema and never reach it, so apply it here.
+	const stripped = stripNullishOptionalArgs(out, inputSchema);
+	if (stripped !== out) {
+		out = stripped;
+		mutated = true;
 	}
 
 	return mutated ? out : input;

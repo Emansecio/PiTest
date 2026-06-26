@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { Tool, ToolCall } from "../src/types.js";
-import { validateToolArguments } from "../src/utils/validation.js";
+import { stripNullishOptionalArgs, validateToolArguments } from "../src/utils/validation.js";
 
 function createToolCallWithPlainSchema(
 	schema: Tool["parameters"],
@@ -180,5 +180,68 @@ describe("validateToolArguments", () => {
 		})();
 		expect(error).toBeDefined();
 		expect(error).not.toContain("Did you mean");
+	});
+});
+
+describe("stripNullishOptionalArgs", () => {
+	const schema = {
+		type: "object",
+		properties: {
+			path: { type: "string" },
+			pattern: { type: "string" },
+			limit: { type: "number" },
+			options: { type: "object", properties: { deep: { type: "boolean" } } },
+			nullable: { type: ["string", "null"] },
+		},
+		required: ["path"],
+	};
+
+	it("drops an optional field whose value is null when the schema rejects null", () => {
+		expect(stripNullishOptionalArgs({ path: "a", pattern: null }, schema)).toEqual({ path: "a" });
+	});
+
+	it("drops an optional field whose value is an empty object placeholder", () => {
+		expect(stripNullishOptionalArgs({ path: "a", limit: {} }, schema)).toEqual({ path: "a" });
+	});
+
+	it("keeps null on a required field — dropping would only trade one error for another", () => {
+		expect(stripNullishOptionalArgs({ path: null, pattern: "x" }, schema)).toEqual({ path: null, pattern: "x" });
+	});
+
+	it("keeps null when the field's schema legitimately accepts null", () => {
+		expect(stripNullishOptionalArgs({ path: "a", nullable: null }, schema)).toEqual({ path: "a", nullable: null });
+	});
+
+	it("keeps an empty object when the field is typed as object", () => {
+		expect(stripNullishOptionalArgs({ path: "a", options: {} }, schema)).toEqual({ path: "a", options: {} });
+	});
+
+	it("ignores keys not declared in the schema (additionalProperties)", () => {
+		const input = { path: "a", extra: null };
+		expect(stripNullishOptionalArgs(input, schema)).toBe(input);
+	});
+
+	it("returns the same reference when nothing is dropped", () => {
+		const input = { path: "a", pattern: "x" };
+		expect(stripNullishOptionalArgs(input, schema)).toBe(input);
+	});
+
+	it("makes validateToolArguments accept a null optional by omission, not coercion to ''", () => {
+		const tool: Tool = {
+			name: "read",
+			description: "read",
+			parameters: {
+				type: "object",
+				properties: { path: { type: "string" }, pattern: { type: "string" } },
+				required: ["path"],
+			} as Tool["parameters"],
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "t1",
+			name: "read",
+			arguments: { path: "a", pattern: null },
+		};
+		expect(validateToolArguments(tool, toolCall)).toEqual({ path: "a" });
 	});
 });

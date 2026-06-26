@@ -6,6 +6,8 @@ export * from "./proxy.ts";
 // Proxy utilities
 // Tier 4 — post-hoc error hint registry
 export * from "./tool-error-hint-registry.ts";
+// Repair Node — opt-in feedback on auto-repaired args
+export * from "./tool-repair-note.ts";
 // Tool rewrite registry
 export * from "./tool-rewrite-registry.ts";
 // Types

@@ -14,6 +14,7 @@ import {
 	validateToolArguments,
 } from "@pit/ai";
 import { appendHintsToContent } from "./tool-error-hint-registry.ts";
+import { appendRepairNoteToContent, buildRepairNote } from "./tool-repair-note.ts";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -952,6 +953,10 @@ type PreparedToolCall = {
 	toolCall: AgentToolCall;
 	tool: AgentTool<any>;
 	args: unknown;
+	// Opt-in "Repair Node": a one-line note describing how the model's arguments
+	// were auto-repaired, appended to the SUCCESSFUL result so a weaker model
+	// learns the canonical shape. Only set when `config.emitRepairNotes` is on.
+	repairNote?: string;
 };
 
 type ImmediateToolCallOutcome = {
@@ -1146,11 +1151,16 @@ async function prepareToolCall(
 				skipHints: true,
 			};
 		}
+		// Repair Node (opt-in): compare what the model SENT against what actually
+		// runs (post alias/rewrite/coercion). A reportable difference becomes a
+		// note appended to the successful result below.
+		const repairNote = config.emitRepairNotes ? buildRepairNote(toolCall.arguments, validatedArgs) : undefined;
 		return {
 			kind: "prepared",
 			toolCall: activeToolCall,
 			tool,
 			args: validatedArgs,
+			repairNote,
 		};
 	} catch (error) {
 		return {
@@ -1257,6 +1267,12 @@ async function finalizeExecutedToolCall(
 	// add to a non-error result.
 	if (isError) {
 		result = await applyToolErrorHints(prepared.toolCall, result, config, emit);
+	} else if (prepared.repairNote) {
+		// Repair Node: surface the auto-repair on the successful result so a weaker
+		// model self-corrects next turn. Success-only — a failing call gets the
+		// richer Tier-4 hint instead. Runs before afterToolCall so a host override
+		// sees the annotated content.
+		result = { ...result, content: appendRepairNoteToContent(result.content, prepared.repairNote) };
 	}
 
 	if (config.afterToolCall) {

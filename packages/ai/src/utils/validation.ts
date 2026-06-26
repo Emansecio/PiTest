@@ -296,6 +296,70 @@ function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown
 	return nextValue;
 }
 
+/**
+ * True when `schema` (directly, or through a union/intersection branch, or by
+ * shape) admits a value of JSON `kind`. Used by {@link stripNullishOptionalArgs}
+ * so a field that legitimately accepts `null` (a nullable field) or `{}` (an
+ * object field) is never mistaken for a misplaced placeholder.
+ */
+function schemaAllowsKind(schema: JsonSchemaObject, kind: "null" | "object"): boolean {
+	if (getSchemaTypes(schema).includes(kind)) return true;
+	if (kind === "object" && (schema.properties !== undefined || schema.additionalProperties !== undefined)) {
+		return true;
+	}
+	if (kind === "null" && (schema as { nullable?: boolean }).nullable === true) return true;
+	for (const branch of [schema.anyOf, schema.oneOf, schema.allOf]) {
+		if (Array.isArray(branch) && branch.some((s) => isJsonSchemaObject(s) && schemaAllowsKind(s, kind))) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function isEmptyPlainObject(value: unknown): boolean {
+	return isRecord(value) && !Array.isArray(value) && Object.keys(value).length === 0;
+}
+
+/**
+ * Drop optional fields whose value is a misplaced placeholder — an explicit
+ * `null`, or an empty object `{}` — when the field's schema does NOT accept that
+ * kind. Weak models frequently emit `null`/`{}` for an optional argument they
+ * mean to omit; forwarding it trips strict validation (or, after coercion,
+ * silently becomes `""`/`0`). Omitting the key is the lossless fix.
+ *
+ * Conservative by construction:
+ *  - only touches keys DECLARED in `schema.properties` (never additionalProperties),
+ *  - never touches a REQUIRED key — dropping it just trades one error for another,
+ *  - never drops a value the field legitimately accepts (`null` for a nullable
+ *    field, `{}` for an object field): those are intentional.
+ *
+ * Pure: returns the same reference when nothing is dropped, otherwise a shallow
+ * clone without the dropped keys. No-op for non-object input or a schema without
+ * `properties`.
+ */
+export function stripNullishOptionalArgs<T>(args: T, schema: unknown): T {
+	if (!isRecord(args) || Array.isArray(args)) return args;
+	if (!isJsonSchemaObject(schema) || !schema.properties) return args;
+	const properties = schema.properties;
+	const requiredList = (schema as { required?: unknown }).required;
+	const required = new Set<string>(
+		Array.isArray(requiredList) ? requiredList.filter((k): k is string => typeof k === "string") : [],
+	);
+	let out: Record<string, unknown> | undefined;
+	for (const key of Object.keys(args)) {
+		const propSchema = properties[key];
+		if (!propSchema || required.has(key)) continue;
+		const value = args[key];
+		const drop =
+			(value === null && !schemaAllowsKind(propSchema, "null")) ||
+			(isEmptyPlainObject(value) && !schemaAllowsKind(propSchema, "object"));
+		if (!drop) continue;
+		if (!out) out = { ...args };
+		delete out[key];
+	}
+	return (out ?? args) as T;
+}
+
 function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
 	const key = schema as object;
 	const cached = validatorCache.get(key);
@@ -488,7 +552,11 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 		return toolCall.arguments;
 	}
 
-	const args = structuredClone(toolCall.arguments);
+	// Drop optional `null`/`{}` placeholders BEFORE coercion so they are omitted
+	// (the model's intent) rather than coerced to ""/0 by coercePrimitiveByType.
+	// Operates on the clone, so the echoed `toolCall.arguments` below still shows
+	// what the model actually sent.
+	const args = stripNullishOptionalArgs(structuredClone(toolCall.arguments), tool.parameters);
 	Value.Convert(tool.parameters, args);
 
 	if (!hasTypeBoxMetadata(tool.parameters) && isJsonSchemaObject(tool.parameters)) {

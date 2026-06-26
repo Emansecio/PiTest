@@ -368,6 +368,17 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * See {@link ToolErrorHintRegistry}.
 	 */
 	toolErrorHintRegistry?: ToolErrorHintRegistry;
+
+	/**
+	 * "Repair Node" gate (already resolved for this run). When true, a SUCCESSFUL
+	 * tool call whose arguments were silently auto-repaired (key alias, type
+	 * coercion, array-from-string) gets a one-line `[repair]` note appended to its
+	 * result describing the fix, so a weaker model emits the canonical shape next
+	 * turn instead of repeating the malformed one. The host decides the value
+	 * per-model (strong frontier models don't need the nudge; the note costs
+	 * context) — see `AgentOptions.emitRepairNotes`. See {@link buildRepairNote}.
+	 */
+	emitRepairNotes?: boolean;
 }
 
 /**

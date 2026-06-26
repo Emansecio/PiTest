@@ -127,6 +127,12 @@ export interface AgentOptions {
 	toolRewriteRegistry?: ToolRewriteRegistry;
 	/** Optional Tier 4 error-hint registry — see {@link AgentLoopConfig.toolErrorHintRegistry}. */
 	toolErrorHintRegistry?: ToolErrorHintRegistry;
+	/**
+	 * Opt-in Repair Node — see {@link AgentLoopConfig.emitRepairNotes}. Either a
+	 * static boolean, or a policy evaluated against the current model each run so
+	 * the gate auto-tracks a model change (fallback chain / `/model`).
+	 */
+	emitRepairNotes?: boolean | ((model: { provider: string }) => boolean);
 }
 
 class PendingMessageQueue {
@@ -217,6 +223,8 @@ export class Agent {
 	public toolRewriteRegistry?: ToolRewriteRegistry;
 	/** Optional Tier 4 error-hint registry — see {@link AgentOptions.toolErrorHintRegistry}. */
 	public toolErrorHintRegistry?: ToolErrorHintRegistry;
+	/** Opt-in Repair Node policy — see {@link AgentOptions.emitRepairNotes}. */
+	public emitRepairNotes?: boolean | ((model: { provider: string }) => boolean);
 
 	constructor(options: AgentOptions = {}) {
 		this._state = createMutableAgentState(options.initialState);
@@ -242,6 +250,7 @@ export class Agent {
 		this.ttsrMatcher = options.ttsrMatcher;
 		this.toolRewriteRegistry = options.toolRewriteRegistry;
 		this.toolErrorHintRegistry = options.toolErrorHintRegistry;
+		this.emitRepairNotes = options.emitRepairNotes;
 	}
 
 	/**
@@ -522,6 +531,10 @@ export class Agent {
 			ttsrMatcher: this.ttsrMatcher,
 			toolRewriteRegistry: this.toolRewriteRegistry,
 			toolErrorHintRegistry: this.toolErrorHintRegistry,
+			// Resolve the policy against the CURRENT model so a fallback/`/model`
+			// switch flips the gate on the next run without re-constructing the Agent.
+			emitRepairNotes:
+				typeof this.emitRepairNotes === "function" ? this.emitRepairNotes(this._state.model) : this.emitRepairNotes,
 		};
 	}
 

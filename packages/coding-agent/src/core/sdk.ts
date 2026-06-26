@@ -22,6 +22,7 @@ import { aggregateLearnedErrors, defaultLearnedErrorsDir } from "./learned-error
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { defaultModelPerProvider, findInitialModel } from "./model-resolver.ts";
+import { resolveEmitRepairNotes } from "./repair-note-policy.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
@@ -454,6 +455,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// creation. Static hint rules remain available from turn 1.
 			learnedErrorsProvider: loadLearnedErrorsSafe,
 		}),
+		// Repair Node: auto-enabled per current model — on for weak/open providers
+		// (DeepSeek/Qwen/Kimi/GLM via OpenAI-compat), off for native frontier
+		// (anthropic/google/openai/openai-codex). PIT_TOOL_REPAIR_NOTE forces it.
+		emitRepairNotes: resolveEmitRepairNotes,
 	});
 
 	// Restore messages if session has existing data
