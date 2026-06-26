@@ -650,7 +650,27 @@ export async function resolveSymbolColumn(filePath: string, line: number, symbol
 		const exactIndexes = findSymbolMatchIndexes(targetLine, symbol);
 		const fallbackIndexes = exactIndexes.length > 0 ? exactIndexes : findSymbolMatchIndexes(targetLine, symbol, true);
 		if (fallbackIndexes.length === 0) {
-			throw new Error(`Symbol "${symbol}" not found on line ${lineNumber}`);
+			// Stale-line recovery: the symbol moved since the model last read the file
+			// (the #1 grounding miss in line-based navigation). The whole file is
+			// already in `lines`, so scan a small window around the given line and, if
+			// the symbol is found nearby, point at the real line instead of dead-ending
+			// — best-first by proximity. No nearby match → message unchanged.
+			let nearbyLine = -1;
+			for (let d = 1; d <= 8 && nearbyLine < 0; d++) {
+				for (const candidate of [lineNumber - d, lineNumber + d]) {
+					if (candidate < 1 || candidate > lines.length) continue;
+					const lineText = lines[candidate - 1] ?? "";
+					if (
+						findSymbolMatchIndexes(lineText, symbol).length > 0 ||
+						findSymbolMatchIndexes(lineText, symbol, true).length > 0
+					) {
+						nearbyLine = candidate;
+						break;
+					}
+				}
+			}
+			const hint = nearbyLine > 0 ? `; found on line ${nearbyLine} — pass line=${nearbyLine}` : "";
+			throw new Error(`Symbol "${symbol}" not found on line ${lineNumber}${hint}`);
 		}
 		if (occurrence > fallbackIndexes.length) {
 			throw new Error(

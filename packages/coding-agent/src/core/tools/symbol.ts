@@ -1,5 +1,5 @@
 import type { AgentTool } from "@pit/agent-core";
-import { type ImageContent, recordDiagnostic, type TextContent } from "@pit/ai";
+import { type ImageContent, recordDiagnostic, suggestClosestN, type TextContent } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/promises";
@@ -368,7 +368,19 @@ export function createSymbolToolDefinition(
 			const declLines = findAllDeclarationLines(lines, name, kind);
 			const declLine = declLines[0] ?? -1;
 			if (declLine < 0) {
-				throw new Error(`Symbol "${name}" not found in ${path}. Try grep for cross-file lookup.`);
+				// Dead-end recovery: the file is already buffered, so enumerate its
+				// top-level declarations and suggest the closest name for a likely
+				// typo/casing miss — turning a 2-turn grep+re-read into a 1-turn
+				// self-correction (same affordance as edit-diff's "Closest candidate"
+				// and the grounding firewall's "Did you mean"). No close candidate →
+				// the message is byte-identical to before.
+				const candidates = listDeclarations(text, absolutePath).map((d) => d.name);
+				const suggestions =
+					candidates.length > 0
+						? suggestClosestN(name, candidates, { maxDistance: 3, prefixMinOverlap: 4 }, 5)
+						: [];
+				const didYouMean = suggestions.length > 0 ? ` Did you mean: ${suggestions.join(", ")}?` : "";
+				throw new Error(`Symbol "${name}" not found in ${path}.${didYouMean} Try grep for cross-file lookup.`);
 			}
 			let endLine: number;
 			if (kind === "indent") {

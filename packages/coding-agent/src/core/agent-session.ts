@@ -4062,6 +4062,13 @@ export class AgentSession {
 		customInstructions?: string;
 	}): Promise<CompactionResult> {
 		const { preparation, pathEntries, model, apiKey, headers, abortSignal, customInstructions } = options;
+		// Compaction summarises and drops transcript history. Forget the read de-dup
+		// records so a post-compaction re-read of the same (path, range) re-sends the
+		// full body, instead of "identical … already shown above" / a delta pointing
+		// at content that may have scrolled out of context. The LRU bound can't see
+		// compaction; this is the explicit reset, mirroring the read-guard's
+		// readFiles.clear() on session_before_compact.
+		this._readDedupeStore?.clear();
 		let extensionCompaction: CompactionResult | undefined;
 		let fromExtension = false;
 

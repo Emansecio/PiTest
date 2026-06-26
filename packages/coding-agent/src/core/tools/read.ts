@@ -73,6 +73,17 @@ export class ReadDedupeStore {
 		}
 		return prev?.hash === contentHash;
 	}
+	/**
+	 * Forget all remembered reads. Called on compaction: once the transcript is
+	 * summarised, a body previously suppressed/delta'd as "already shown above"
+	 * may have scrolled out of context, so the next read of the same (path, range)
+	 * must re-send it in full rather than reference content the model no longer has.
+	 * The LRU bound alone can't know about compaction; this is the explicit reset.
+	 * Mirrors the read-guard's readFiles.clear() on session_before_compact.
+	 */
+	clear(): void {
+		this.seen.clear();
+	}
 }
 
 function hashReadContent(text: string): string {

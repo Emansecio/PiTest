@@ -4,6 +4,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { killProcessTree } from "../../utils/shell.ts";
 import type { HookCommand, HookExecutionResult, HookPayload, HookResult } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -127,7 +128,14 @@ export async function runHook(
 				killTimer = setTimeout(() => {
 					if (!proc.killed) {
 						try {
-							proc.kill("SIGKILL");
+							// Reap the whole tree, not just the shell wrapper. With shell:true,
+							// `proc` is cmd.exe / sh -c, so a hook like `npm run typecheck`
+							// (shell -> node -> tsc) leaves node/tsc orphaned: proc.kill hits
+							// only the direct child (on Windows the signal does not propagate).
+							// killProcessTree (taskkill /F /T on Win, process-group kill on Unix)
+							// is the pattern every other subprocess in the codebase already uses.
+							if (proc.pid) killProcessTree(proc.pid);
+							else proc.kill("SIGKILL");
 						} catch {
 							/* ignore */
 						}

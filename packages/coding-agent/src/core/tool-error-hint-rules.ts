@@ -343,7 +343,7 @@ const editRules: ToolErrorHintRule[] = [
 		// appliesTo), so without this rule an edit ENOENT gets no recovery hint
 		// and the model retries the same dead path.
 		id: "edit-enoent-verify-path",
-		appliesTo: "edit",
+		appliesTo: ["edit", "edit_v2"],
 		matcher: ({ errorText }) =>
 			/could not edit file:.*error code:\s*ENOENT/i.test(errorText) ||
 			(/could not edit file:/i.test(errorText) && /\bENOENT\b/.test(errorText)),
@@ -359,7 +359,7 @@ const editRules: ToolErrorHintRule[] = [
 		// not one / the parent is missing (ENOTDIR). Retrying the same path is
 		// useless; the model must inspect the path shape first.
 		id: "edit-path-type",
-		appliesTo: "edit",
+		appliesTo: ["edit", "edit_v2"],
 		matcher: ({ errorText }) => /could not edit file:.*error code:\s*(EISDIR|ENOTDIR)/i.test(errorText),
 		hint: ({ call, errorText }) => {
 			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");
@@ -375,7 +375,7 @@ const editRules: ToolErrorHintRule[] = [
 		// lacks permission to write it. The model must not silently chmod it —
 		// surface the path to the user, who decides whether to grant access.
 		id: "edit-permission",
-		appliesTo: "edit",
+		appliesTo: ["edit", "edit_v2"],
 		matcher: ({ errorText }) => /could not edit file:.*error code:\s*(EACCES|EPERM)/i.test(errorText),
 		hint: ({ call }) => {
 			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");
@@ -389,7 +389,7 @@ const editRules: ToolErrorHintRule[] = [
 		// read in this session. ...`. The model must read first; this rule makes
 		// that explicit instead of letting it retry the blocked edit.
 		id: "edit-read-guard-not-read",
-		appliesTo: "edit",
+		appliesTo: ["edit", "edit_v2"],
 		matcher: ({ errorText }) =>
 			/read guard:.*has not been read in this session/i.test(errorText) ||
 			/has not been read in this session/i.test(errorText) ||
@@ -410,7 +410,7 @@ const editRules: ToolErrorHintRule[] = [
 		// preserves on `result.details.detail`; falls back to scraping the
 		// rendered message for older paths or when detail is absent.
 		id: "edit-hashline-anchor-stale",
-		appliesTo: "edit",
+		appliesTo: ["edit", "edit_v2"],
 		matcher: ({ result, errorText }) => {
 			const detail = getHashlineDetail(result);
 			if (detail && (detail.kind === "not_found" || detail.kind === "ambiguous")) return true;
