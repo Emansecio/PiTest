@@ -3,6 +3,32 @@ import type { TLocalizedValidationError } from "typebox/error";
 import { Value } from "typebox/value";
 import type { Tool, ToolCall } from "../types.ts";
 
+// The schema-validation error echoes the received arguments back to the model so
+// it can self-correct. For large-payload tools (write/edit/code/ast_edit) a
+// recoverable failure (extra key, stream corruption) would otherwise echo the
+// ENTIRE file/program — often re-sent right after, costing 2-3x tokens — while
+// the actionable parts (error path, "Did you mean", schema summary) need only the
+// KEYS, not the long values. Truncate only long string VALUES to head+tail,
+// preserving every key and the object structure. Splits on code points (Array.from)
+// so an astral char (emoji / CJK ext) is never cut into a lone surrogate.
+const ECHO_MAX_STRING_POINTS = 600;
+const ECHO_HEAD_POINTS = 420;
+const ECHO_TAIL_POINTS = 120;
+
+function truncateEchoedString(value: string): string {
+	const points = Array.from(value);
+	if (points.length <= ECHO_MAX_STRING_POINTS) return value;
+	const head = points.slice(0, ECHO_HEAD_POINTS).join("");
+	const tail = points.slice(points.length - ECHO_TAIL_POINTS).join("");
+	const omitted = points.length - ECHO_HEAD_POINTS - ECHO_TAIL_POINTS;
+	return `${head} …[${omitted} chars truncated]… ${tail}`;
+}
+
+/** JSON.stringify of args with long string VALUES truncated; keys/structure intact. */
+function formatEchoedArguments(args: unknown): string {
+	return JSON.stringify(args, (_key, value) => (typeof value === "string" ? truncateEchoedString(value) : value), 2);
+}
+
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
 const TYPEBOX_KIND = Symbol.for("TypeBox.Kind");
 
@@ -502,7 +528,7 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 	}
 
 	const extraKeyHint = formatExtraKeyHints(toolCall.arguments, tool.parameters);
-	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}${schemaSummary}${extraKeyHint}${emptyHint}\n\nReceived arguments:\n${JSON.stringify(toolCall.arguments, null, 2)}`;
+	const errorMessage = `Validation failed for tool "${toolCall.name}":\n${errors}${schemaSummary}${extraKeyHint}${emptyHint}\n\nReceived arguments:\n${formatEchoedArguments(toolCall.arguments)}`;
 
 	throw new Error(errorMessage);
 }

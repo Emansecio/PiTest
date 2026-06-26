@@ -170,6 +170,7 @@ import {
 	getCompactPathLabel,
 	getShortPath,
 } from "./display-utils.ts";
+import { classifyRetryReason } from "./retry-reason.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -3197,8 +3198,13 @@ export class InteractiveMode {
 				// Show retry indicator
 				this.statusContainer.clear();
 				this.retryCountdown?.dispose();
+				// Surface WHY we're retrying (rate-limit / overload / network / …) so the
+				// paused countdown isn't an opaque "is it stuck or just busy?". The reason
+				// rides on the event; an unclassifiable error keeps the wording unchanged.
+				const retryReason = classifyRetryReason(event.errorMessage);
+				const retryPrefix = retryReason ? `${retryReason} — ` : "";
 				const retryMessage = (seconds: number) =>
-					`Retrying (${event.attempt}/${event.maxAttempts}) in ${seconds}s… (${keyText("app.interrupt")} to cancel)`;
+					`${retryPrefix}Retrying (${event.attempt}/${event.maxAttempts}) in ${seconds}s… (${keyText("app.interrupt")} to cancel)`;
 				this.retryLoader = new Loader(
 					this.ui,
 					(spinner) => theme.fg("warning", spinner),

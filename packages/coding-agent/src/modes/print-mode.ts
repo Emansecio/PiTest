@@ -12,6 +12,25 @@ import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
 
 /**
+ * In `text` mode, stdout carries ONLY the final assistant text (the `-p` contract),
+ * so model-provenance events are otherwise invisible — a headless/CI run could
+ * consume output from a silently downgraded model (fallback) or after retries were
+ * exhausted, with no signal anywhere. This derives the stderr line to surface for
+ * such an event (stdout stays untouched). Returns undefined for events that should
+ * not be surfaced (incl. successful auto_retry_end). Pure + exported for testing.
+ */
+export function provenanceStderrLine(event: { type?: string; [k: string]: unknown }): string | undefined {
+	if (event.type === "fallback_warning") {
+		return `[fallback] model ${event.from} -> ${event.to} (${event.reason})`;
+	}
+	if (event.type === "auto_retry_end" && event.success === false) {
+		const tail = event.finalError ? `: ${event.finalError}` : "";
+		return `[retry] gave up after ${event.attempt} attempt(s)${tail}`;
+	}
+	return undefined;
+}
+
+/**
  * Options for print mode.
  */
 export interface PrintModeOptions {
@@ -108,7 +127,12 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe = session.subscribe((event) => {
 			if (mode === "json") {
 				writeRawStdout(`${JSON.stringify(event)}\n`);
+				return;
 			}
+			// text mode: surface model-provenance events on stderr (stdout stays the
+			// byte-identical `-p` contract), mirroring the diagnostics side-channel below.
+			const line = provenanceStderrLine(event);
+			if (line) process.stderr.write(`${line}\n`);
 		});
 	};
 
