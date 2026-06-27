@@ -275,6 +275,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
+	// Persist the resolved model as the default so the next fresh start
+	// reuses the same model instead of re-resolving from settings defaults
+	// (which may be stale or undefined). The explicit /model switch and
+	// cycleModel paths already call setDefaultModelAndProvider — this makes
+	// the startup path symmetrical.
+	if (model) {
+		settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+	}
+
 	let thinkingLevel = options.thinkingLevel;
 
 	// If session has data, restore thinking level from it

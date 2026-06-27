@@ -193,6 +193,24 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 }
 
 /**
+ * Providers that share a single upstream account / API key, so a credential
+ * stored (or overridden) under one id authenticates the others. OpenCode Zen
+ * and OpenCode Go are the same opencode.ai account on different endpoints — the
+ * per-model `baseUrl` differs but the bearer key is identical (env-api-keys maps
+ * both to OPENCODE_API_KEY). Without this, a `/login` to one leaves the other's
+ * models hidden from the picker even though the same key would work.
+ */
+const CREDENTIAL_ALIAS_GROUPS: ReadonlyArray<ReadonlySet<string>> = [new Set(["opencode", "opencode-go"])];
+
+/** Sibling provider ids that share credentials with `providerId` (excluding itself). */
+function getCredentialAliases(providerId: string): string[] {
+	for (const group of CREDENTIAL_ALIAS_GROUPS) {
+		if (group.has(providerId)) return [...group].filter((id) => id !== providerId);
+	}
+	return [];
+}
+
+/**
  * Credential storage backed by a JSON file.
  */
 export class AuthStorage {
@@ -342,6 +360,11 @@ export class AuthStorage {
 		if (this.data[provider]) return true;
 		if (getEnvApiKey(provider)) return true;
 		if (this.fallbackResolver?.(provider)) return true;
+		// Shared-account siblings (e.g. opencode ↔ opencode-go) authenticate each other.
+		for (const alias of getCredentialAliases(provider)) {
+			if (this.runtimeOverrides.has(alias)) return true;
+			if (this.data[alias]?.type === "api_key") return true;
+		}
 		return false;
 	}
 
@@ -364,6 +387,12 @@ export class AuthStorage {
 
 		if (this.fallbackResolver?.(provider)) {
 			return { configured: false, source: "fallback", label: "custom provider config" };
+		}
+
+		// Authenticated via a shared-account sibling (e.g. opencode ↔ opencode-go).
+		for (const alias of getCredentialAliases(provider)) {
+			if (this.runtimeOverrides.has(alias)) return { configured: false, source: "runtime", label: "--api-key" };
+			if (this.data[alias]?.type === "api_key") return { configured: true, source: "stored", label: `via ${alias}` };
 		}
 
 		return { configured: false };
@@ -502,9 +531,15 @@ export class AuthStorage {
 						return provider.getApiKey(updatedCred);
 					}
 
-					// Refresh truly failed - return undefined so model discovery skips this provider
-					// User can /login to re-authenticate (credentials preserved for retry)
-					return undefined;
+					// Refresh truly failed. Surface the auth failure to the active request
+					// instead of degrading to a misleading "missing API key" error.
+					if (
+						error instanceof Error &&
+						error.message.includes("Unable to update lock within the stale threshold")
+					) {
+						return undefined;
+					}
+					throw error;
 				}
 			} else {
 				// Token not expired, use current access token
@@ -515,6 +550,17 @@ export class AuthStorage {
 		// Fall back to environment variable
 		const envKey = getEnvApiKey(providerId);
 		if (envKey) return envKey;
+
+		// Shared-account siblings (opencode ↔ opencode-go use the same key): reuse a
+		// sibling's runtime/stored API key so a single /login covers both endpoints.
+		// Runs before the includeFallback guard so actual requests (which pass
+		// includeFallback:false) still resolve the shared key.
+		for (const alias of getCredentialAliases(providerId)) {
+			const runtimeAlias = this.runtimeOverrides.get(alias);
+			if (runtimeAlias) return runtimeAlias;
+			const aliasCred = this.data[alias];
+			if (aliasCred?.type === "api_key") return resolveConfigValue(aliasCred.key);
+		}
 
 		// Fall back to custom resolver (e.g., models.json custom providers)
 		if (options?.includeFallback !== false) {

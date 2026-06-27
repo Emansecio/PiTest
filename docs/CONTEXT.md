@@ -31,7 +31,7 @@ A *proposed* built-in extension (see [ADR-0002](adr/0002-diff-limit-pause.md), s
 A pattern where the model retries the same failing tool call repeatedly without changing approach. Detected by `ToolCallStats` via consecutive identical (toolName, argsFingerprint) entries in the ring buffer; a complementary repeating-pattern detector catches a multi-tool CYCLE repeated at the tail (e.g. `[read,edit,bash]` run four times) that the consecutive-identical check misses. The harness escalates: reminder (3x) → pause (5x) → abort (8x).
 
 ### Engineering Style
-Behavioral guidelines injected into the system prompt that bias the model toward surgical, minimal changes. Based on Karpathy guidelines: think before coding, simplicity first, surgical changes, goal-driven execution.
+Behavioral guidelines injected into the system prompt that bias the model toward surgical, minimal changes. Based on Karpathy guidelines plus a Ponytail-style solution ladder inside simplicity-first behavior: think before coding, identify root cause, prefer the smallest existing solution, surgical changes, goal-driven execution.
 
 ### Frequent Files Tracker
 An in-session data structure that counts per-file read/write/edit operations. Used to surface recently-touched files in the system prompt, keeping the model anchored to relevant context without requiring explicit re-statement.

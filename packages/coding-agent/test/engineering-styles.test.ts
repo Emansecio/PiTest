@@ -14,6 +14,9 @@ describe("getEngineeringStyleGuidelines", () => {
 		const joined = bullets.join("\n").toLowerCase();
 		expect(joined).toContain("assumption");
 		expect(joined).toContain("root cause");
+		expect(joined).toContain("standard library");
+		expect(joined).toContain("native platform");
+		expect(joined).toContain("already-installed dependency");
 		expect(joined).toContain("simplicity");
 		expect(joined).toContain("surgical");
 		expect(joined).toContain("verifiable");

@@ -1,12 +1,19 @@
 # Pit — Development Rules
 
+**This is the single source of truth for working in this repo.** `CLAUDE.md`,
+and any other assistant entry point, point HERE — there is no separate ruleset.
+If another doc seems to disagree, this file wins (and fix the drift).
+
 Pit is a terminal coding agent. Monorepo packages: `@pit/ai` (provider/streaming
 layer), `@pit/tui` (terminal UI framework), `@pit/coding-agent` (the product),
 `@pit/agent-core` (agent loop core, npm package; dir `packages/agent`). The name is **Pit** — fix stray "Pi"/"pi-mono"
 references when you touch a file that has them.
 
 Per-turn rules live in this file. Task-specific reference material lives in
-`docs/agents/` and is loaded on demand (pointers at the bottom).
+`docs/agents/` and is loaded on demand (pointers at the bottom). **Before proposing
+improvements, read [`docs/agents/already-built.md`](docs/agents/already-built.md)
+(what already ships) and [`docs/agents/prevention-layers.md`](docs/agents/prevention-layers.md)
+(the guard pipeline).**
 
 ## Style
 
@@ -104,11 +111,23 @@ If no browser tool is reachable, say so and report the work as visually unverifi
 
 ## Existing features & quality filters (review before suggesting new ones)
 
+**Before proposing ANY improvement, read [`docs/agents/already-built.md`](docs/agents/already-built.md).**
+It's the curated, anchored inventory of what already ships (token/context economy,
+the full tool set + native search backends, every quality guard, runtime robustness,
+error recovery, providers, subagents) — built specifically because agents keep
+re-proposing things that exist (caching, dedup, truncation, retry, "did you mean",
+process-tree kill, idle timeout…). It also has a **"Where the frontier actually is"**
+section: analyze from there. Litmus test: a suggestion to "add «basic mechanism» X"
+is almost certainly redundant — the valuable work is *measure*, *generalize*, or
+*resolve a trade-off*.
+
 Quality guards already shipped (all in `packages/coding-agent/src/core/built-ins/`):
 - Read guard, edit precondition, grounding firewall (symbol/import/path/pattern/bash), task rigor, permission mode, doom-loop & stagnation detectors, todo-first triage, learned-error guard, erasable-syntax preflight, destructive-command guard, patch audit, coordinator, MCP, hooks, memory.
+- These run inside a fixed layered pipeline (pre-model → pre-tool-call → post-tool-call → session). The execution order and where each guard fires is mapped in [`docs/agents/prevention-layers.md`](docs/agents/prevention-layers.md) — read it before adding/changing a guard so you place it in the right band and don't duplicate an existing layer.
 
 What does NOT exist (vaporware — don't propose fixes for it):
 - **Diff-limit extension**: ADR-0002 proposed, never implemented. No code shipped.
+- **scoped-models**: orphaned UI; the decision is to remove it, not extend it.
 - **`pi-` services**: extension names like `pi-autoresearch`, `pi-subagents`, `@tintinweb/pi-tasks` are real npm packages, not Pit internals.
 
 ## Project tool config
@@ -121,6 +140,8 @@ Full surface and quirks: `docs/agents/tools-and-config.md`.
 
 ## Project docs (load on demand)
 
+- `docs/agents/already-built.md` — **inventory of what already ships; read before proposing improvements.**
+- `docs/agents/prevention-layers.md` — **the layered guard pipeline (pre/post model & tool call), in execution order.**
 - `docs/RELEASING.md` — release process, CHANGELOG format, new-provider recipe.
 - `docs/agents/pr-workflow.md` — PR review/merge flow, comment hygiene.
 - `docs/agents/contribution-gate.md` — auto-gate workflows, `lgtm`/`lgtmi`, `pkg:*` labels.

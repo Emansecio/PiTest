@@ -12,7 +12,7 @@
           "path": "quickstart.md"
         },
         {
-          "title": "Using Pi",
+          "title": "Using Pit",
           "path": "usage.md"
         },
         {
@@ -57,7 +57,7 @@
           "path": "themes.md"
         },
         {
-          "title": "Pi Packages",
+          "title": "Pit Packages",
           "path": "packages.md"
         },
         {
@@ -67,14 +67,6 @@
         {
           "title": "Custom Providers",
           "path": "custom-provider.md"
-        },
-        {
-          "title": "Permissions",
-          "path": "permissions.md"
-        },
-        {
-          "title": "Hooks",
-          "path": "hooks.md"
         },
         {
           "title": "MCP servers",
@@ -91,6 +83,31 @@
         {
           "title": "Subagents",
           "path": "subagents.md"
+        },
+        {
+          "title": "Fusion mode",
+          "path": "fusion.md"
+        }
+      ]
+    },
+    {
+      "title": "Quality & Safety",
+      "items": [
+        {
+          "title": "Permissions",
+          "path": "permissions.md"
+        },
+        {
+          "title": "Hooks",
+          "path": "hooks.md"
+        },
+        {
+          "title": "Verification",
+          "path": "verification.md"
+        },
+        {
+          "title": "Goals",
+          "path": "goals.md"
         }
       ]
     },

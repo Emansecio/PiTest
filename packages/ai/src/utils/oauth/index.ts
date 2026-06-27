@@ -139,8 +139,9 @@ export async function getOAuthApiKey(
 	if (Date.now() >= creds.expires - OAUTH_REFRESH_BUFFER_MS) {
 		try {
 			creds = await provider.refreshToken(creds);
-		} catch (_error) {
-			throw new Error(`Failed to refresh OAuth token for ${providerId}`);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			throw new Error(`Failed to refresh OAuth token for ${providerId}: ${detail}`);
 		}
 	}
 

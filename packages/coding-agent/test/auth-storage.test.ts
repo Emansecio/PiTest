@@ -299,6 +299,38 @@ describe("AuthStorage", () => {
 	});
 
 	describe("oauth lock compromise handling", () => {
+		test("surfaces refresh failures instead of returning undefined", async () => {
+			const providerId = `test-oauth-refresh-failure-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			registerOAuthProvider({
+				id: providerId,
+				name: "Test OAuth Refresh Failure",
+				async login() {
+					throw new Error("Not used in this test");
+				},
+				async refreshToken() {
+					throw new Error("refresh rejected");
+				},
+				getApiKey(credentials) {
+					return `Bearer ${credentials.access}`;
+				},
+			});
+
+			writeAuthJson({
+				[providerId]: {
+					type: "oauth",
+					refresh: "refresh-token",
+					access: "expired-access-token",
+					expires: Date.now() - 10_000,
+				},
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+
+			await expect(authStorage.getApiKey(providerId)).rejects.toThrow(
+				`Failed to refresh OAuth token for ${providerId}: refresh rejected`,
+			);
+		});
+
 		test("returns undefined on compromised lock and allows a later retry", async () => {
 			const providerId = `test-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 			registerOAuthProvider({
@@ -477,6 +509,61 @@ describe("AuthStorage", () => {
 			const apiKey = await authStorage.getApiKey("anthropic");
 
 			expect(apiKey).toBe("stored-key");
+		});
+	});
+
+	describe("credential alias groups (opencode ↔ opencode-go)", () => {
+		let savedEnv: string | undefined;
+		beforeEach(() => {
+			savedEnv = process.env.OPENCODE_API_KEY;
+			delete process.env.OPENCODE_API_KEY;
+		});
+		afterEach(() => {
+			if (savedEnv === undefined) delete process.env.OPENCODE_API_KEY;
+			else process.env.OPENCODE_API_KEY = savedEnv;
+		});
+
+		test("login stored under opencode-go authenticates opencode (zen)", async () => {
+			authStorage = AuthStorage.inMemory({
+				"opencode-go": { type: "api_key", key: "oc-shared-key" },
+			});
+
+			expect(authStorage.hasAuth("opencode")).toBe(true);
+			expect(await authStorage.getApiKey("opencode")).toBe("oc-shared-key");
+			// Actual requests resolve auth with includeFallback:false — must still share.
+			expect(await authStorage.getApiKey("opencode", { includeFallback: false })).toBe("oc-shared-key");
+			expect(authStorage.getAuthStatus("opencode")).toEqual({
+				configured: true,
+				source: "stored",
+				label: "via opencode-go",
+			});
+		});
+
+		test("login stored under opencode authenticates opencode-go", async () => {
+			authStorage = AuthStorage.inMemory({
+				opencode: { type: "api_key", key: "oc-zen-key" },
+			});
+
+			expect(authStorage.hasAuth("opencode-go")).toBe(true);
+			expect(await authStorage.getApiKey("opencode-go")).toBe("oc-zen-key");
+		});
+
+		test("a provider's own credential wins over the sibling", async () => {
+			authStorage = AuthStorage.inMemory({
+				opencode: { type: "api_key", key: "oc-zen-key" },
+				"opencode-go": { type: "api_key", key: "oc-go-key" },
+			});
+
+			expect(await authStorage.getApiKey("opencode")).toBe("oc-zen-key");
+			expect(await authStorage.getApiKey("opencode-go")).toBe("oc-go-key");
+		});
+
+		test("unrelated provider is not authenticated by an opencode credential", () => {
+			authStorage = AuthStorage.inMemory({
+				"opencode-go": { type: "api_key", key: "oc-shared-key" },
+			});
+
+			expect(authStorage.hasAuth("anthropic")).toBe(false);
 		});
 	});
 });

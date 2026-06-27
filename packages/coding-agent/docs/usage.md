@@ -52,6 +52,11 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files |
 | `/hotkeys` | Show all keyboard shortcuts |
+| `/fusion` | Multi-model panel mode: brainstorm with multiple models, then synthesize |
+| `/memory` | Show resolved memory file paths and contents |
+| `/permission-mode <mode>` | Switch permission mode (`auto` or `plan`) mid-session |
+| `/mcp` | List configured MCP servers, connection state, and advertised tools |
+| `/goal` | Show active autonomous goal status, iterations, and budget usage |
 | `/quit` | Quit pit |
 
 ## Message Queue
@@ -160,12 +165,17 @@ cat README.md | pit -p "Summarize this text"
 
 | Option | Description |
 |--------|-------------|
+| Option | Description |
+|--------|-------------|
 | `--provider <name>` | Provider, such as `anthropic`, `openai`, or `google` |
 | `--model <pattern>` | Model pattern or ID; supports `provider/id` and optional `:<thinking>` |
 | `--api-key <key>` | API key, overriding environment variables |
 | `--thinking <level>` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `--models <patterns>` | Comma-separated patterns for Ctrl+P cycling |
 | `--list-models [search]` | List available models |
+| `--smol [model]` | Use the cheap sub-agent role (fast, low-cost model for fan-out) |
+| `--slow [model]` | Use the deep-reasoning role (high-thinking model for complex work) |
+| `--plan [model]` | Use the plan-mode read-only role |
 
 ### Session Options
 
@@ -186,7 +196,7 @@ cat README.md | pit -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Core built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `symbol`, `ask`, `todo`. Feature tools such as `lsp`, `debug`, `eval`, `web_search`, and the Chrome DevTools tools join the surface when their settings are enabled (most are on by default; see [Settings](settings.md)).
+Core built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `symbol`, `find_symbol`, `ask`, `todo`, `plan` (DAG-based structured plan), `calc` (arithmetic evaluator), `recipe` (task-runner abstraction), `repo_map` (project skeleton), `code` (code-mode VM), `ast_grep` (AST structural search), `ast_edit` (AST structural edit), `resolve` (stage/commit previews), `render_mermaid` (ASCII Mermaid diagrams), `inspect_image`, `search_skills`, `search_tool_bm25`, `recall_tool_output`, `goal_complete`, `message` (inter-agent messaging), `retain`/`recall`/`reflect`/`forget` (hindsight memory). Feature tools join the surface when their settings are enabled (most are on by default; see [Settings](settings.md)): `lsp`, `debug`, `eval`, `web_search`, `chrome_devtools_*` (8 tools), `preview`, `edit_v2` (hashline-based editing).
 
 ### Resource Options
 

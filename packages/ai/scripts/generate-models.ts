@@ -280,6 +280,21 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 	}
 }
 
+// The OpenCode Zen endpoints serve free/rotating models (the "-free" tier) that
+// models.dev tags as "deprecated". Fetch the live model list so those still-served
+// models survive the deprecated filter, while genuinely retired ones stay dropped.
+async function fetchOpenCodeLiveModelIds(url: string): Promise<Set<string>> {
+	try {
+		const response = await fetch(url);
+		const data = await response.json();
+		const ids = (data?.data ?? []).map((m: { id?: string }) => m.id).filter((id: unknown): id is string => typeof id === "string");
+		return new Set<string>(ids);
+	} catch (error) {
+		console.error(`Failed to fetch live OpenCode models from ${url}:`, error);
+		return new Set<string>();
+	}
+}
+
 async function loadModelsDevData(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from models.dev API...");
@@ -612,10 +627,14 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		for (const variant of opencodeVariants) {
 			if (!data[variant.key]?.models) continue;
 
+			const liveModelIds = await fetchOpenCodeLiveModelIds(`${variant.basePath}/v1/models`);
+
 			for (const [modelId, model] of Object.entries(data[variant.key].models)) {
 				const m = model as ModelsDevModel & { status?: string };
 				if (m.tool_call !== true) continue;
-				if (m.status === "deprecated") continue;
+				// Keep deprecated models that the live endpoint still serves (the "-free" tier);
+				// drop only those models.dev marks deprecated AND the endpoint no longer lists.
+				if (m.status === "deprecated" && !liveModelIds.has(modelId)) continue;
 
 				const npm = m.provider?.npm;
 				let api: Api;
@@ -643,23 +662,21 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				}
 
 				// Fix known mismatches between models.dev npm data and actual
-				// OpenCode Go endpoint behaviour. models.dev reports these models
-				// as @ai-sdk/anthropic, but the OpenCode Go endpoints either don't
-				// accept Anthropic SDK auth (MiniMax M2.7) or are served through
-				// the OpenAI-compatible /v1/chat/completions path (Qwen 3.5/3.6).
-				// Switch them to openai-completions so requests use Bearer auth
-				// and the standard /v1/chat/completions endpoint.
-				if (variant.provider === "opencode-go") {
-					if (modelId === "minimax-m2.7" || modelId === "minimax-m3") {
-						api = "openai-completions";
-						baseUrl = `${variant.basePath}/v1`;
-					}
-					if (modelId === "qwen3.5-plus" || modelId === "qwen3.6-plus") {
-						api = "openai-completions";
-						baseUrl = `${variant.basePath}/v1`;
-						// Qwen/DashScope uses enable_thinking at the top level.
-						compat = { ...(compat ?? {}), thinkingFormat: "qwen" };
-					}
+				// OpenCode endpoint behaviour. models.dev reports several of these
+				// as @ai-sdk/anthropic, but the endpoints either reject Anthropic SDK
+				// auth or are served through the OpenAI-compatible
+				// /v1/chat/completions path. MiniMax M2.7/M3 (incl. the -free tier)
+				// use the OpenAI-compatible path on every OpenCode endpoint; Qwen
+				// 3.5/3.6 only need the switch on Go (Zen serves Qwen via Anthropic).
+				if (modelId === "minimax-m2.7" || modelId === "minimax-m3" || modelId === "minimax-m3-free") {
+					api = "openai-completions";
+					baseUrl = `${variant.basePath}/v1`;
+				}
+				if (variant.provider === "opencode-go" && (modelId === "qwen3.5-plus" || modelId === "qwen3.6-plus")) {
+					api = "openai-completions";
+					baseUrl = `${variant.basePath}/v1`;
+					// Qwen/DashScope uses enable_thinking at the top level.
+					compat = { ...(compat ?? {}), thinkingFormat: "qwen" };
 				}
 
 				models.push({

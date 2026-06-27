@@ -1,4 +1,11 @@
 {
+  "enabledModels": ["claude-*", "cloudflare-workers-ai/*", "gmicloud/*"],
+  "modelRoles": {
+    "smol": {
+      "model": "GLM-5.2-FP8",
+      "thinkingLevel": "high"
+    }
+  },
   "_comment": "Project-local Pit settings. Merged OVER global settings (deep merge in settings-manager.ts). Only keys that diverge from resolver defaults belong here. See docs/agents/tools-and-config.md for the live shape and rationale.",
   "compaction": {
     "selfCorrection": false
