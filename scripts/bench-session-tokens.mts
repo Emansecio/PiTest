@@ -27,7 +27,13 @@ import {
 	proactivePruneFloor,
 	type WireToolSurface,
 } from "../packages/coding-agent/src/core/compaction/compaction.ts";
-import { serializeConversation, serializeConversationDelta } from "../packages/coding-agent/src/core/compaction/utils.ts";
+import {
+	estimateSummaryTrimSavedChars,
+	serializeConversation,
+	serializeConversationDelta,
+	trimSummaryProseAgainstOperations,
+	type OperationLists,
+} from "../packages/coding-agent/src/core/compaction/utils.ts";
 import { convertToLlm } from "../packages/coding-agent/src/core/messages.ts";
 import { buildSystemPrompt } from "../packages/coding-agent/src/core/system-prompt.ts";
 import { createAllTools } from "../packages/coding-agent/src/core/tools/index.ts";
@@ -438,6 +444,33 @@ console.log("\n--- K6 delta summarization input (2nd+ compact proxy) ---");
 for (const scenario of scenarios) {
 	measureSummarizationInput(scenario);
 }
+
+const C2_SAMPLE_LISTS: OperationLists = {
+	readFiles: ["src/core/agent-session.ts", "src/core/compaction/compaction.ts"],
+	modifiedFiles: ["packages/coding-agent/src/core/token-governor.ts"],
+	searches: ["recordFusion", "TokenBudgetGovernor"],
+	shellCmds: ["npm run check"],
+	mcpCalls: [],
+};
+const C2_SAMPLE_PROSE = [
+	"## Goal",
+	"Ship G12/C2/F3 context economy slices.",
+	"## Progress",
+	"### Done",
+	"- [x] read src/core/agent-session.ts",
+	"- src/core/compaction/compaction.ts",
+	"- `packages/coding-agent/src/core/token-governor.ts`",
+	"- recordFusion",
+	"- npm run check",
+	"- [x] wired fusion ledger",
+].join("\n");
+const c2TrimSaved = estimateSummaryTrimSavedChars(C2_SAMPLE_PROSE, C2_SAMPLE_LISTS);
+const c2After = trimSummaryProseAgainstOperations(C2_SAMPLE_PROSE, C2_SAMPLE_LISTS);
+console.log("\n--- C2 structured-primary trim (sample prose vs operations) ---");
+console.log(`sample_prose_chars:     ${C2_SAMPLE_PROSE.length}`);
+console.log(`after_trim_chars:       ${c2After.length} (-${Math.round((c2TrimSaved / C2_SAMPLE_PROSE.length) * 100)}%)`);
+console.log(`METRIC summary_trim_saved_chars=${c2TrimSaved}`);
+console.log(`METRIC summary_trim_saved_pct=${Math.round((c2TrimSaved / C2_SAMPLE_PROSE.length) * 100)}`);
 
 console.log(`\nMETRIC bench=session-tokens prefix_tokens=${wirePrefix.prefixTokens}`);
 console.log(`METRIC bench=session-tokens scenarios=${scenarios.join(",")}`);

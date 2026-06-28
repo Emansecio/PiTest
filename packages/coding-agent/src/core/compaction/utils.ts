@@ -324,6 +324,65 @@ export function formatFileOperations(arg1: string[] | OperationLists, modifiedFi
 	return `\n\n${sections.join("\n\n")}`;
 }
 
+/** Approximate chars per token for summary output trimming (matches bench scripts). */
+const SUMMARY_CHARS_PER_TOKEN = 3.7;
+
+/**
+ * Strip prose lines that duplicate structured operation lists (C2). File paths,
+ * searches, and shell commands are appended as XML via {@link formatFileOperations};
+ * repeating them in LLM prose wastes summarizer output tokens.
+ */
+export function trimSummaryProseAgainstOperations(summary: string, lists: OperationLists): string {
+	if (!summary.trim()) return summary;
+	const pathSet = new Set([...lists.readFiles, ...lists.modifiedFiles]);
+	const searchSet = new Set(lists.searches);
+	const shellSet = new Set(lists.shellCmds);
+	const mcpSet = new Set(lists.mcpCalls);
+
+	const out: string[] = [];
+	for (const line of summary.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) {
+			out.push(line);
+			continue;
+		}
+		const bullet = trimmed.replace(/^[-*]\s*(?:\[[xX ]\]\s*)?/, "").trim();
+		const candidates = [trimmed, bullet];
+		const backtick = trimmed.match(/^`([^`]+)`$/);
+		if (backtick) candidates.push(backtick[1]);
+		const bulletBacktick = bullet.match(/^`([^`]+)`$/);
+		if (bulletBacktick) candidates.push(bulletBacktick[1]);
+		let duplicate = false;
+		for (const c of candidates) {
+			if (pathSet.has(c) || searchSet.has(c) || shellSet.has(c) || mcpSet.has(c)) {
+				duplicate = true;
+				break;
+			}
+		}
+		if (!duplicate) {
+			for (const p of pathSet) {
+				if (bullet === p || (bullet.endsWith(p) && bullet.length - p.length <= 24)) {
+					duplicate = true;
+					break;
+				}
+			}
+		}
+		if (!duplicate) out.push(line);
+	}
+	return out.join("\n").replace(/\n{4,}/g, "\n\n\n");
+}
+
+/** Estimate summarizer output tokens saved by {@link trimSummaryProseAgainstOperations}. */
+export function estimateSummaryTrimSavedChars(before: string, lists: OperationLists): number {
+	const after = trimSummaryProseAgainstOperations(before, lists);
+	return Math.max(0, before.length - after.length);
+}
+
+/** Token estimate from char count (bench-aligned). */
+export function estimateCharsAsTokens(chars: number): number {
+	return Math.round(chars / SUMMARY_CHARS_PER_TOKEN);
+}
+
 // ============================================================================
 // Message Serialization
 // ============================================================================

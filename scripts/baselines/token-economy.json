@@ -1,0 +1,38 @@
+{
+	"version": 1,
+	"updated": "2026-06-28",
+	"comment": "Regression gate for scripts/check-token-bench.mjs. Exact keys are deterministic; min/max tolerate env drift (skills, prefix).",
+	"exact": {
+		"scenario=explore-heavy messages_only_tokens": 62631,
+		"scenario=explore-heavy prune_reclaimed_tokens": 32588,
+		"scenario=explore-heavy supersede_reclaimed_tokens": 32588,
+		"scenario=explore-heavy live_economy_reclaimed_tokens": 32588,
+		"scenario=edit-heavy messages_only_tokens": 57657,
+		"scenario=edit-heavy prune_reclaimed_tokens": 0,
+		"scenario=edit-heavy supersede_reclaimed_tokens": 0,
+		"scenario=edit-heavy live_economy_reclaimed_tokens": 56314,
+		"scenario=long-reasoning messages_only_tokens": 17830,
+		"scenario=long-reasoning prune_reclaimed_tokens": 12700,
+		"scenario=long-reasoning supersede_reclaimed_tokens": 12700,
+		"scenario=long-reasoning live_economy_reclaimed_tokens": 12700,
+		"scenario=explore-heavy serialize_prose_chars": 28989,
+		"scenario=explore-heavy serialize_delta_chars": 20343,
+		"scenario=edit-heavy serialize_prose_chars": 11388,
+		"scenario=edit-heavy serialize_delta_chars": 8238,
+		"scenario=long-reasoning serialize_prose_chars": 17416,
+		"scenario=long-reasoning serialize_delta_chars": 7158,
+		"wire_tool_desc_chars": 5814,
+		"wire_tool_param_chars": 11603
+	},
+	"min": {
+		"scenario=explore-heavy incremental_delta_saved_pct": 25,
+		"scenario=edit-heavy incremental_delta_saved_pct": 20,
+		"scenario=long-reasoning incremental_delta_saved_pct": 50,
+		"summary_trim_saved_chars": 80,
+		"summary_trim_saved_pct": 35
+	},
+	"max": {
+		"wire_prefix_tokens": 22000,
+		"bench=session-tokens prefix_tokens": 32000
+	}
+}

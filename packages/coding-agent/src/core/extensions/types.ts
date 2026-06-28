@@ -297,6 +297,8 @@ export interface ContextUsage {
 	budgetLimit?: number;
 	/** Portion of budgetSpent from subagents. */
 	subagentSpent?: number;
+	/** Portion of budgetSpent from Fusion stages (brief/panel/judge/verify/writer). */
+	fusionSpent?: number;
 }
 
 export interface CompactOptions {

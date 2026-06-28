@@ -2335,6 +2335,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 		return this._tokenGovernor.snapshot();
 	}
 
+	recordFusionSpend(tokens: number): void {
+		this._tokenGovernor.recordFusion(tokens);
+	}
+
 	private _activateGoalTool(active: boolean): void {
 		const names = new Set(this.getActiveToolNames());
 		if (active) names.add("goal_complete");
@@ -5276,12 +5280,15 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private applyBudgetFields(usage: ContextUsage | undefined): ContextUsage | undefined {
 		if (!usage) return undefined;
 		const snap = this._tokenGovernor.snapshot();
-		if (snap.budgetLimit === undefined && snap.subagentTokens === 0) return usage;
+		if (snap.budgetLimit === undefined && snap.subagentTokens === 0 && snap.fusionTokens === 0) {
+			return usage;
+		}
 		return {
 			...usage,
 			budgetSpent: snap.totalSpent,
 			budgetLimit: snap.budgetLimit,
 			subagentSpent: snap.subagentTokens,
+			fusionSpent: snap.fusionTokens,
 		};
 	}
 

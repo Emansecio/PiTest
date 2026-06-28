@@ -8,6 +8,7 @@ import {
 	extractFileOpsFromMessage,
 	formatFileOperations,
 	type OperationLists,
+	trimSummaryProseAgainstOperations,
 } from "../src/core/compaction/utils.js";
 
 function usage(): Usage {
@@ -216,6 +217,31 @@ describe("structured summary frame", () => {
 			expect(lists.searches.length).toBe(30);
 			expect(lists.searches).toContain("s-0");
 			expect(lists.searches).toContain("s-29");
+		});
+
+		it("trimSummaryProseAgainstOperations removes duplicate path/search lines (C2)", () => {
+			const lists: OperationLists = {
+				readFiles: ["src/foo.ts"],
+				modifiedFiles: ["src/bar.ts"],
+				searches: ["TODO"],
+				shellCmds: ["npm test"],
+				mcpCalls: [],
+			};
+			const before = [
+				"## Progress",
+				"### Done",
+				"- [x] read src/foo.ts",
+				"- src/foo.ts",
+				"- `src/bar.ts`",
+				"- TODO",
+				"- npm test",
+				"- [x] fixed the bug in handler",
+			].join("\n");
+			const after = trimSummaryProseAgainstOperations(before, lists);
+			expect(after).toContain("fixed the bug");
+			expect(after).not.toContain("src/foo.ts");
+			expect(after).not.toContain("src/bar.ts");
+			expect(after).not.toContain("npm test");
 		});
 
 		it("output stays sorted after the tail cap", () => {

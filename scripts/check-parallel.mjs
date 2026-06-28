@@ -60,6 +60,7 @@ const fastChecks = [
 	{ name: "browser-smoke", command: "node scripts/check-browser-smoke.mjs" },
 	{ name: "generated", command: "node scripts/check-generated-models.mjs" },
 	{ name: "surrogate-slice", command: "node scripts/check-surrogate-slice.mjs" },
+	{ name: "token-bench", command: "node scripts/check-token-bench.mjs" },
 ];
 
 // Vitest is the heavy task: it forks up to (cpu-count) workers and saturates

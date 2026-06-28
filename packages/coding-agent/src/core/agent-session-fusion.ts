@@ -9,6 +9,7 @@ import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
 import { awaitBackgroundCompaction, type CompactionController, checkCompaction } from "./agent-session-compaction.ts";
 import type { AgentSessionEvent } from "./agent-session-events.ts";
+import { estimateCharsAsTokens } from "./compaction/utils.ts";
 import { SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
 import { providerForCli, runPanelMember } from "./fusion/cli-runner.ts";
 import {
@@ -41,6 +42,21 @@ export interface FusionHost {
 	emit(event: AgentSessionEvent): void;
 	getRequiredRequestAuth(model: Model<any>): Promise<{ apiKey?: string; headers?: Record<string, string> }>;
 	setLastAssistantMessage(message: AssistantMessage): void;
+	/** F3: record Fusion-stage token spend into the unified budget ledger. */
+	recordFusionSpend?(tokens: number): void;
+}
+
+function recordFusionSpendTokens(host: FusionHost, tokens: number): void {
+	if (tokens > 0) host.recordFusionSpend?.(tokens);
+}
+
+function recordFusionUsage(host: FusionHost, usage: Usage | undefined): void {
+	if (!usage) return;
+	recordFusionSpendTokens(host, (usage.input ?? 0) + (usage.output ?? 0));
+}
+
+function recordFusionChars(host: FusionHost, promptChars: number, responseChars: number): void {
+	recordFusionSpendTokens(host, estimateCharsAsTokens(promptChars + responseChars));
 }
 
 export function assistantText(message: AssistantMessage): string {
@@ -147,6 +163,7 @@ export async function streamFusionWriter(
 		// Whatever the stream produced (or the error message it encoded) is finalized below.
 	}
 	const final = await stream.result();
+	recordFusionUsage(host, final.usage);
 	ensureStart(final);
 	host.agent.state.messages.push(final);
 	host.sessionManager.appendMessage(final);
@@ -191,6 +208,7 @@ export async function fusionVerify(
 					host.emit({ type: "fusion_verify_activity", turn: info.turn, tool: info.lastTool }),
 			},
 		);
+		if (result.usage) recordFusionSpendTokens(host, result.usage.totalTokens);
 		return result.value as VerificationReport | undefined;
 	} catch {
 		return undefined;
@@ -250,6 +268,7 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 					headers,
 					signal: fusionAbort.signal,
 				});
+				recordFusionUsage(host, briefOut.usage);
 				const brief = assistantText(briefOut).trim();
 				if (brief) advisorPrompt = brief;
 			} catch {
@@ -296,6 +315,7 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 					ok: r.ok,
 					error: err,
 				});
+				if (r.ok) recordFusionChars(host, advisorPrompt.length, r.text.length);
 				host.emit({
 					type: "fusion_member",
 					index,
@@ -318,6 +338,7 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 						headers,
 						signal: fusionAbort.signal,
 					});
+					recordFusionUsage(host, out.usage);
 					return parseJudgeOutput(assistantText(out));
 				};
 				let parsed = await judgeOnce();

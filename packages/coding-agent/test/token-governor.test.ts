@@ -37,4 +37,17 @@ describe("TokenBudgetGovernor", () => {
 		governor.recordMain(50_000);
 		expect(governor.evaluateSpawn().allowed).toBe(true);
 	});
+
+	it("records fusion spend separately and includes it in totalSpent", () => {
+		const goal = new GoalManager();
+		const governor = new TokenBudgetGovernor();
+		governor.bindGoal(goal);
+		goal.start("fusion turn", { tokenBudget: 50_000 });
+		governor.setBudget(50_000);
+		governor.recordMain(1000);
+		governor.recordFusion(2500);
+		expect(governor.snapshot().fusionTokens).toBe(2500);
+		expect(governor.totalSpent()).toBe(3500);
+		expect(goal.get()?.tokensUsed).toBe(3500);
+	});
 });

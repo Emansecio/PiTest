@@ -33,6 +33,7 @@ import {
 	type SummaryDetails,
 	serializeConversation,
 	serializeConversationDelta,
+	trimSummaryProseAgainstOperations,
 } from "./utils.ts";
 
 // ============================================================================
@@ -1259,7 +1260,9 @@ Use this EXACT format:
 - [Any data, examples, or references needed to continue]
 - [Or "(none)" if not applicable]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Keep each section concise. Preserve exact file paths, function names, and error messages.
+
+STRUCTURED-PRIMARY (output economy): File paths, searches, shell commands, and MCP calls are appended automatically as structured XML tags after your summary. Do NOT list them in prose — focus prose on intent, decisions, blockers, and next steps only. Keep each section to 1–3 bullets max.`;
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
@@ -1302,7 +1305,9 @@ Use this EXACT format:
 ## Critical Context
 - [Preserve important context, add new if needed]
 
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+Keep each section concise. Preserve exact file paths, function names, and error messages.
+
+STRUCTURED-PRIMARY (output economy): Do NOT duplicate file paths, searches, or shell commands in prose — they are appended as structured XML. Update intent/decisions/blockers only; 1–3 bullets per section.`;
 
 function createSummarizationOptions(
 	model: Model<any>,
@@ -1907,8 +1912,10 @@ export async function compact(
 		summary = await verifySummary(summary, model, maxTokens, apiKey, headers, signal, thinkingLevel, streamFn);
 	}
 
-	// Compute structured operation lists and append to summary (paths stripped of cwd)
 	const lists = computeOperationLists(fileOps, cwd);
+	if (!structuralOnly && !isTruthyEnvFlag(process.env.PIT_NO_COMPACT_SUMMARY_OUTPUT)) {
+		summary = trimSummaryProseAgainstOperations(summary, lists);
+	}
 	summary += formatFileOperations(lists);
 
 	if (!firstKeptEntryId) {

@@ -100,7 +100,7 @@
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
 | C1 | **PARTIAL** | Delta summarization | K6: 2ª+ compact usa `serializeConversationDelta` em `<conversation-delta>` (JSON compacto, sem thinking); gap residual: summarizer ainda gera prose completo (C2) |
-| C2 | **PARTIAL** | Structured-primary context | Digests/`formatFileOperations` existem; LLM ainda gera prose completo |
+| C2 | **PARTIAL** | Structured-primary context | K8: prompt STRUCTURED-PRIMARY + `trimSummaryProseAgainstOperations` pós-LLM; opt-out `PIT_NO_COMPACT_SUMMARY_OUTPUT`. Gap: summarizer ainda emite seções markdown completas |
 | C4 | **PARTIAL** | Self-correction gate mais fino | `VERIFY_MIN_INPUT_TOKENS=25000` existe; inflação ainda `length/4` |
 | C5 | **VALID** | Multipass coalescing | 2º `executeCompactionPipeline` síncrono possível (`agent-session-compaction.ts:456-477`) |
 | C6 | **VALID** | Branch skip gate | Sem skip por N entries / T tokens |
@@ -168,7 +168,7 @@
 |----|-----------|----------|-----------------|
 | F1 | **VALID** | Cap panel text antes judge/writer | `r.text` integral (`fusion/judge.ts`, `buildWriterContext`) |
 | F2 | **VALID** | Skip verify se `unsupportedClaims` vazio | Gated só por `settings.verify` |
-| F3 | **VALID** | Fusion token ledger | Chars/tempo sim; sem tokens synth+verify+writer |
+| F3 | **PARTIAL** | Fusion token ledger | K8: `recordFusionSpend` em brief/panel/judge/verify/writer; `fusionSpent` no footer. Gap: panel usa estimativa chars (CLI externo) |
 | F4 | **PARTIAL** | `enforceLimit` em todo `add()` | Limite é aplicado no `openBank`; gap é enforcement incremental após novas gravações |
 | F5 | **VALID** | BM25 min score no recall | `score > 0` aceita qualquer hit (`bank.ts:287`) |
 | F6 | **PARTIAL** | Subagent usage no footer | K7 expõe `subagentSpent` em `getContextUsage` quando budget ativo ou subagent spend > 0; sem breakdown por handle |
@@ -183,7 +183,7 @@
 
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
-| G1 | **PARTIAL** | Token budget governor unificado | K7: `TokenBudgetGovernor` unifica main+subagent → goal; gate spawn; footer via `getContextUsage`. Gap: fusion ledger (F3), persist subagent split on reload |
+| G1 | **PARTIAL** | Token budget governor unificado | K7+K8: main+subagent+fusion → goal; gate spawn; footer `budgetSpent`/`subagentSpent`/`fusionSpent`. Gap: persist subagent/fusion split on reload |
 | G2 | **VALID** | Auto-tighten prune em `instabilityTurn` | Warning TUI only (`interactive-mode.ts:5776`) |
 | G3 | **REMOVED** | — | K1 — `scripts/bench-session-tokens.mts` (3 cenários + METRIC) |
 | G4 | **VALID** | Bench fusion+coordinator | Sem cenário em `bench/scenarios/` |
@@ -194,7 +194,7 @@
 | G9 | **VALID** | Telemetria por tool na prune | Sem breakdown por `toolName` |
 | G10 | **VALID** | Dashboard `/economy` | Não existe |
 | G11 | **PARTIAL** | METRIC por mecanismo | `bench-prompt-size` + `bench-session-tokens` emitem METRIC por cenário; falta breakdown por mecanismo (prune/supersede/thinking-cap/wire) |
-| G12 | **VALID** | CI regression gate tokens | Não existe |
+| G12 | **REMOVED** | — | K8 — `scripts/check-token-bench.mjs` + `scripts/baselines/token-economy.json` no `npm run check` |
 
 ---
 
@@ -256,9 +256,10 @@
 | K5 | E1, E2, E6, E16 | Reduzir prefixo fixo: lazy schemas, tools breakpoint e dedupe/retrieval de context files — **shipped** |
 | K6 | C1 | Delta summarization (2nd+ compact JSON input) — **shipped** |
 | K7 | G1 | Token governor (unified ledger + spawn gate) — **shipped** |
-| K8 | — | Demais VALID por impacto medido |
+| K8 | G12, C2, F3 | CI token regression gate + structured-primary trim + fusion ledger — **shipped** |
+| K9 | — | Demais VALID por impacto medido |
 
-**Pendente imediato (roadmap):** G12 (CI regression gate tokens) → C2 structured-primary output → fusion token ledger (F3).
+**Pendente imediato (roadmap):** G11 (METRIC por mecanismo) → persist subagent/fusion split on reload → C2 JSON-primary summarizer output.
 
 **Gaps residuais dos itens K5 (ainda PARTIAL, não reabrir como VALID):** E1 API description stub (overlap E9), E2 bloco hash-keyed isolado, E6 recall BM25 do corpo completo.
 
