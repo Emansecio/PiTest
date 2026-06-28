@@ -7,7 +7,9 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { compactWireToolSurface } from "../packages/coding-agent/src/core/tool-wire-schema.ts";
 import { buildSystemPrompt } from "../packages/coding-agent/src/core/system-prompt.ts";
+import { loadProjectContextFiles } from "../packages/coding-agent/src/core/resource-loader.ts";
 import { createAllTools } from "../packages/coding-agent/src/core/tools/index.ts";
 
 const APPROX_CHARS_PER_TOKEN = 3.7;
@@ -16,15 +18,8 @@ const toToks = (chars: number) => Math.round(chars / APPROX_CHARS_PER_TOKEN);
 type ContextFile = { path: string; content: string };
 type Skill = { name: string; description: string; filePath: string; disableModelInvocation?: boolean };
 
-// Load AGENTS.md from repo if present — mirrors what the resource-loader
-// would inject as project_context for any real session in this cwd.
 function loadContextFiles(cwd: string): ContextFile[] {
-	const out: ContextFile[] = [];
-	for (const name of ["AGENTS.md", "CLAUDE.md"]) {
-		const p = join(cwd, name);
-		if (existsSync(p)) out.push({ path: p, content: readFileSync(p, "utf8") });
-	}
-	return out;
+	return loadProjectContextFiles({ cwd, agentDir: join(homedir(), ".pit", "agent") });
 }
 
 // Approximate the user's installed skill catalog by counting every SKILL.md
@@ -89,16 +84,28 @@ const skillsChars = visibleSkills.reduce(
 	0,
 );
 
-const toolBreakdown = tools.map((t) => ({
+const wireTools = tools.map((t) =>
+	compactWireToolSurface({
+		name: t.name,
+		description: (t as { promptSnippet?: string }).promptSnippet ?? t.description.split("\n")[0],
+		parameters: t.parameters,
+	}),
+);
+const toolBreakdown = tools.map((t, i) => ({
 	name: t.name,
 	descChars: t.description.length,
 	paramChars: JSON.stringify(t.parameters).length,
+	wireDescChars: wireTools[i].description.length,
+	wireParamChars: JSON.stringify(wireTools[i].parameters).length,
 }));
 const totalDescChars = toolBreakdown.reduce((n, b) => n + b.descChars, 0);
 const totalParamChars = toolBreakdown.reduce((n, b) => n + b.paramChars, 0);
+const totalWireDescChars = toolBreakdown.reduce((n, b) => n + b.wireDescChars, 0);
+const totalWireParamChars = toolBreakdown.reduce((n, b) => n + b.wireParamChars, 0);
 
 const sysChars = systemPrompt.length;
 const allChars = sysChars + totalDescChars + totalParamChars;
+const wirePrefixChars = sysChars + totalWireDescChars + totalWireParamChars;
 const contextFileNames = contextFiles.map((f) => f.path.split(/[\\/]/).pop()).join(", ") || "(none)";
 
 console.log(`\nsystem_prompt (final): ${sysChars} chars (~${toToks(sysChars)} toks)`);
@@ -106,8 +113,11 @@ console.log(`  - context files:     ${ctxChars} chars (${contextFileNames})`);
 console.log(`  - skills (${visibleSkills.length}):       ~${skillsChars} chars (estimated)`);
 console.log(`tool descriptions:     ${totalDescChars} chars (~${toToks(totalDescChars)} toks)`);
 console.log(`tool parameters:       ${totalParamChars} chars (~${toToks(totalParamChars)} toks)`);
+console.log(`wire tool desc:        ${totalWireDescChars} chars (~${toToks(totalWireDescChars)} toks)`);
+console.log(`wire tool params:      ${totalWireParamChars} chars (~${toToks(totalWireParamChars)} toks)`);
 console.log(`---`);
 console.log(`prompt prefix total:   ${allChars} chars (~${toToks(allChars)} toks)`);
+console.log(`wire prefix total:     ${wirePrefixChars} chars (~${toToks(wirePrefixChars)} toks)`);
 console.log(`\nper-tool:`);
 for (const b of toolBreakdown.sort((a, b) => b.descChars - a.descChars)) {
 	console.log(`  ${b.name.padEnd(8)} desc=${b.descChars} param=${b.paramChars}`);
@@ -121,3 +131,7 @@ console.log(`METRIC skills_chars=${skillsChars}`);
 console.log(`METRIC skills_visible=${visibleSkills.length}`);
 console.log(`METRIC tool_desc_chars=${totalDescChars}`);
 console.log(`METRIC tool_param_chars=${totalParamChars}`);
+console.log(`METRIC wire_prefix_chars=${wirePrefixChars}`);
+console.log(`METRIC wire_prefix_tokens=${toToks(wirePrefixChars)}`);
+console.log(`METRIC wire_tool_desc_chars=${totalWireDescChars}`);
+console.log(`METRIC wire_tool_param_chars=${totalWireParamChars}`);

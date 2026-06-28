@@ -973,8 +973,9 @@ export function buildParams(
 
 	if (context.tools && context.tools.length > 0) {
 		const compat = getAnthropicCompat(model);
+		const wireTools = [...context.tools].sort((a, b) => a.name.localeCompare(b.name));
 		params.tools = convertTools(
-			context.tools,
+			wireTools,
 			isOAuthToken,
 			compat.supportsEagerToolInputStreaming,
 			compat.supportsCacheControlOnTools ? cacheControl : undefined,
@@ -1254,7 +1255,9 @@ function convertTools(
 				properties: schema.properties ?? {},
 				required: schema.required ?? [],
 			},
-			...(cacheControl && index === tools.length - 1 ? { cache_control: cacheControl } : {}),
+			// Pin the tools block at the first entry (stable name-sorted order) so
+			// tool-surface churn does not move the cache breakpoint (E2).
+			...(cacheControl && index === 0 ? { cache_control: cacheControl } : {}),
 		};
 	});
 }

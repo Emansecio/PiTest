@@ -549,7 +549,8 @@ function buildParams(
 	}
 
 	if (context.tools && context.tools.length > 0) {
-		params.tools = convertTools(context.tools, compat);
+		const wireTools = [...context.tools].sort((a, b) => a.name.localeCompare(b.name));
+		params.tools = convertTools(wireTools, compat);
 	} else if (hasToolHistory(context.messages)) {
 		// Anthropic (via LiteLLM/proxy) requires tools param when conversation has tool_calls/tool_results
 		params.tools = [];
@@ -684,8 +685,8 @@ function addCacheControlToLastTool(
 		return;
 	}
 
-	const lastTool = tools[tools.length - 1] as ChatCompletionToolWithCacheControl;
-	lastTool.cache_control = cacheControl;
+	const firstTool = tools[0] as ChatCompletionToolWithCacheControl;
+	firstTool.cache_control = cacheControl;
 }
 
 function addCacheControlToInstructionMessage(

@@ -7,6 +7,7 @@ import { estimateWireTokens } from "../src/core/compaction/compaction.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { agentToolToWireSurface, compactWireToolSurface } from "../src/core/tool-wire-schema.js";
 import { createTestResourceLoader } from "./utilities.js";
 
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -79,9 +80,10 @@ function syncAgentMessages(session: AgentSession, sessionManager: SessionManager
 }
 
 function wirePercent(session: AgentSession): number {
+	const tools = session.agent.state.tools.map(agentToolToWireSurface).map(compactWireToolSurface);
 	const wire = estimateWireTokens(session.agent.state.messages, {
 		systemPromptChars: session.agent.state.systemPrompt.length,
-		tools: session.agent.state.tools,
+		tools,
 	});
 	return (wire.tokens / model.contextWindow!) * 100;
 }

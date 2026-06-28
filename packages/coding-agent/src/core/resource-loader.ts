@@ -12,6 +12,7 @@ export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { canonicalizePath, isLocalPath, isUnderPath } from "../utils/paths.ts";
+import { dedupePointerContextFiles, normalizeProjectContextFiles } from "./context-files.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.ts";
 import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.ts";
@@ -118,22 +119,22 @@ function resolvePromptInput(input: string | undefined, description: string): str
 	return input;
 }
 
-function loadContextFileFromDir(dir: string): { path: string; content: string } | null {
+function loadAllContextFilesFromDir(dir: string): Array<{ path: string; content: string }> {
 	const candidates = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
+	const out: Array<{ path: string; content: string }> = [];
 	for (const filename of candidates) {
 		const filePath = join(dir, filename);
-		if (existsSync(filePath)) {
-			try {
-				return {
-					path: filePath,
-					content: readFileSync(filePath, "utf-8"),
-				};
-			} catch (error) {
-				console.error(chalk.yellow(`Warning: Could not read ${filePath}: ${error}`));
-			}
+		if (!existsSync(filePath)) continue;
+		try {
+			out.push({
+				path: filePath,
+				content: readFileSync(filePath, "utf-8"),
+			});
+		} catch (error) {
+			console.error(chalk.yellow(`Warning: Could not read ${filePath}: ${error}`));
 		}
 	}
-	return null;
+	return out;
 }
 
 export function loadProjectContextFiles(options: {
@@ -148,8 +149,8 @@ export function loadProjectContextFiles(options: {
 	const contextFiles: Array<{ path: string; content: string }> = [];
 	const seenPaths = new Set<string>();
 
-	const globalContext = loadContextFileFromDir(resolvedAgentDir);
-	if (globalContext) {
+	for (const globalContext of dedupePointerContextFiles(loadAllContextFilesFromDir(resolvedAgentDir))) {
+		if (seenPaths.has(globalContext.path)) continue;
 		contextFiles.push(globalContext);
 		seenPaths.add(globalContext.path);
 	}
@@ -160,10 +161,11 @@ export function loadProjectContextFiles(options: {
 	const root = resolve("/");
 
 	while (true) {
-		const contextFile = loadContextFileFromDir(currentDir);
-		if (contextFile && !seenPaths.has(contextFile.path)) {
-			ancestorContextFiles.unshift(contextFile);
-			seenPaths.add(contextFile.path);
+		for (const contextFile of dedupePointerContextFiles(loadAllContextFilesFromDir(currentDir))) {
+			if (!seenPaths.has(contextFile.path)) {
+				ancestorContextFiles.unshift(contextFile);
+				seenPaths.add(contextFile.path);
+			}
 		}
 
 		if (currentDir === root) break;
@@ -196,7 +198,7 @@ export function loadProjectContextFiles(options: {
 		contextFiles.push(configContext);
 	}
 
-	return contextFiles;
+	return normalizeProjectContextFiles(contextFiles, resolvedCwd);
 }
 
 export interface DefaultResourceLoaderOptions {

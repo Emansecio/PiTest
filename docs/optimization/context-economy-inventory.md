@@ -146,9 +146,10 @@ supersedidos permanecem inteiros até compact.
 | E15 | **PARTIAL** | MCP defer mais agressivo | `shouldDeferMcpServer` ≥10 tools; servers pequenos eager |
 | E16 | **VALID** | Dedup/compactação de arquivos ponteiro (`AGENTS.md`/`CLAUDE.md`) | Loader pode carregar arquivos de contexto redundantes; bench local mostrou `AGENTS.md, CLAUDE.md` somando 10.272 chars (`resource-loader.ts:122,604-616`) |
 
-**Baseline medido em 2026-06-28:** `npx tsx scripts/bench-prompt-size.mts` →
-`prompt_prefix_tokens=25992`, `system_prompt_chars=50200`, `context_files_chars=10272`,
-`skills_chars=38688`, `tool_desc_chars=17832`, `tool_param_chars=28139`.
+**Baseline medido em 2026-06-28 (pós-K5):** `npx tsx scripts/bench-prompt-size.mts` →
+`wire_prefix_tokens=17814`, `prompt_prefix_tokens=25531`, `system_prompt_chars=48493`,
+`context_files_chars=8568`, `skills_chars=38688`, `wire_tool_desc_chars=5814`,
+`wire_tool_param_chars=11603` (full tool_desc/param: 17832 / 28139).
 
 ---
 
@@ -236,7 +237,7 @@ supersedidos permanecem inteiros até compact.
 | K2 | B1, B2, B6 | Wire estimate + presend com user pendente + footer wire — **shipped** |
 | K3 | A3, D2, A1′ | Arg elision live + supersede imediato + supersede abaixo do floor — **shipped** |
 | K4 | A4 | Cap thinking no contexto vivo — **shipped** |
-| K5 | E1, E2, E6, E16 | Reduzir prefixo fixo: lazy schemas, tools breakpoint e dedupe/retrieval de context files |
+| K5 | E1, E2, E6, E16 | Reduzir prefixo fixo: lazy schemas, tools breakpoint e dedupe/retrieval de context files — **shipped** |
 | K6 | C1 | Delta summarization (estreitar C2 se C1 resolver) |
 | K7 | G1 | Token governor |
 | K8 | — | Demais VALID por impacto medido |

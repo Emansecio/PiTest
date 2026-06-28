@@ -94,10 +94,10 @@ import {
 	estimateWireTokens,
 	generateBranchSummary,
 	proactivePruneFloor,
+	type WireToolSurface,
 } from "./compaction/index.ts";
 import { extractToolFileOp } from "./compaction/utils.js";
 import { buildAsyncDeliveryBody } from "./coordinator/async-delivery.ts";
-
 import { dapSessionManager } from "./dap/index.ts";
 import { debugVerifyContextPrompt, maybeRunDebugVerify } from "./debug-verify.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -187,7 +187,6 @@ import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader }
 import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
-
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { setCurrentTodoManager, type TodoItem, TodoManager, type TodoState } from "./todo/todo-manager.ts";
 import {
@@ -204,6 +203,7 @@ import {
 	setCurrentToolDiscoveryIndex,
 	type ToolDiscoveryIndex,
 } from "./tool-discovery.ts";
+import { agentToolToWireSurface, compactToolsForProviderContext, compactWireToolSurface } from "./tool-wire-schema.ts";
 
 import {
 	type BashBackgroundJob,
@@ -790,6 +790,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installContextPruneHook();
+		this._installWireToolEconomyHook();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -1367,6 +1368,22 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this.agent.transformContext = async (messages, signal) => {
 			const transformed = existingTransform ? await existingTransform(messages, signal) : messages;
 			return this._pruneContextForProvider(transformed);
+		};
+	}
+
+	private _wireToolsForEstimate(): WireToolSurface[] {
+		const surfaces = this.agent.state.tools.map(agentToolToWireSurface);
+		if (isTruthyEnvFlag(process.env.PIT_NO_LAZY_TOOL_SCHEMAS)) return surfaces;
+		return surfaces.map(compactWireToolSurface);
+	}
+
+	private _installWireToolEconomyHook(): void {
+		const baseStreamFn = this.agent.streamFn;
+		this.agent.streamFn = (model, context, options) => {
+			if (isTruthyEnvFlag(process.env.PIT_NO_LAZY_TOOL_SCHEMAS) || !context.tools?.length) {
+				return baseStreamFn(model, context, options);
+			}
+			return baseStreamFn(model, compactToolsForProviderContext(context), options);
 		};
 	}
 
@@ -3414,7 +3431,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 				lastAssistant &&
 				(await checkPresendOverflow(this.compaction, lastAssistant, {
 					systemPrompt: this.agent.state.systemPrompt,
-					tools: this.agent.state.tools,
+					tools: this._wireToolsForEstimate(),
 					pendingMessages: messages,
 				}))
 			) {
@@ -5277,7 +5294,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 				for (const message of this.messages) estimated += estimateTokens(message);
 				const wire = estimateWireTokens(this.messages, {
 					systemPromptChars: this.agent.state.systemPrompt.length,
-					tools: this.agent.state.tools,
+					tools: this._wireToolsForEstimate(),
 				});
 				return {
 					tokens: estimated,
@@ -5292,7 +5309,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		const estimate = estimateContextTokens(this.messages);
 		const wire = estimateWireTokens(this.messages, {
 			systemPromptChars: this.agent.state.systemPrompt.length,
-			tools: this.agent.state.tools,
+			tools: this._wireToolsForEstimate(),
 		});
 		const headline = wire.tokens;
 

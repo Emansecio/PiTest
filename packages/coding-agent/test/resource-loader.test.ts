@@ -304,7 +304,7 @@ Content`,
 			await loader.reload();
 
 			const { agentsFiles } = loader.getAgentsFiles();
-			expect(agentsFiles.some((f) => f.path.includes("AGENTS.md"))).toBe(true);
+			expect(agentsFiles.some((f) => f.path.toLowerCase().includes("agents.md"))).toBe(true);
 		});
 
 		it("should skip AGENTS.md and CLAUDE.md discovery when noContextFiles is true", async () => {
