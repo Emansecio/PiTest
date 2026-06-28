@@ -260,7 +260,7 @@
 | K9 | G11, G1 persist, G4 | Mechanism METRIC breakdown + goal `tokenSpendSplit` reload + `bench-fusion-tokens` — **shipped** |
 | K10 | F1, F2, E3, E4, C2 | Memory/hindsight hints on-demand, JSON summarizer, fusion panel cap + verify skip — **shipped** |
 
-**Pendente imediato (roadmap):** medir E3/E4 prefix savings (`bench-prompt-size` com MEMORY.md grande); F2 skip rate em turns reais; C2 JSON parse-fail fallback rate.
+**Pendente imediato (roadmap):** observar em produção as categorias `fusion.verify-skipped`, `compaction.summary-json-fallback`, `fusion.panel-char-estimate` (runtime diagnostics).
 
 **Gaps residuais dos itens K5 (ainda PARTIAL, não reabrir como VALID):** E1 API description stub (overlap E9), E2 bloco hash-keyed isolado, E6 recall BM25 do corpo completo.
 
@@ -302,7 +302,7 @@ Notas:
 | K3 edit-heavy live economy | 10–30% | edit-heavy −56314 toks (66.8% do wire) | **confirmado** (cenário sintético agressivo) |
 | K2 wire + presend (B1–B2) | 5–15% menos overflow | infra shipped; overflow rate não benchmarkado ainda | shipped, sem A/B |
 | K6 delta summarization input (C1) | 20–50% summarizer 3ª+ | long-reasoning incremental −55%; explore −29%; edit −25% | **confirmado** (input proxy) |
-| E3/E4 memory/hindsight on-demand | 10–30% prefix | shipped (hint-only default) | **medir** |
+| E3/E4 memory/hindsight on-demand | 10–30% prefix | bench: memory −95%, hindsight −86% (synthetic) | **confirmado** (fixture) |
 
 ---
 

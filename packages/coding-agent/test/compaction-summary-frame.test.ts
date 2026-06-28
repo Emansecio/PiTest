@@ -1,6 +1,16 @@
 import type { AgentMessage } from "@pit/agent-core";
 import type { AssistantMessage, Usage } from "@pit/ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+const { recordDiagnosticMock } = vi.hoisted(() => ({
+	recordDiagnosticMock: vi.fn(),
+}));
+
+vi.mock("@pit/ai", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@pit/ai")>();
+	return { ...actual, recordDiagnostic: recordDiagnosticMock };
+});
+
 import {
 	computeFileLists,
 	computeOperationLists,
@@ -62,6 +72,15 @@ describe("structured summary frame", () => {
 		expect(md).toContain("ship feature");
 		expect(md).toContain("[x] tests green");
 		expect(normalizeStructuredSummaryOutput(`\`\`\`json\n${json}\n\`\`\``)).toContain("## Next Steps");
+	});
+
+	it("normalizeStructuredSummaryOutput records diagnostic on JSON fallback (C2)", () => {
+		recordDiagnosticMock.mockClear();
+		const out = normalizeStructuredSummaryOutput("not json at all");
+		expect(out).toBe("not json at all");
+		expect(recordDiagnosticMock).toHaveBeenCalledWith(
+			expect.objectContaining({ category: "compaction.summary-json-fallback" }),
+		);
 	});
 	it("createFileOps initializes all operation buckets", () => {
 		const ops = createFileOps();

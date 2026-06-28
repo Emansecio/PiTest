@@ -158,14 +158,33 @@ export interface ClaudeStreamState {
 	result: string;
 	error: string;
 	sawResult: boolean;
+	tokens?: number;
 }
+
+type ClaudeUsage = {
+	input_tokens?: number;
+	output_tokens?: number;
+	cache_creation_input_tokens?: number;
+	cache_read_input_tokens?: number;
+};
 
 type ClaudeStreamEvent = {
 	type?: string;
 	is_error?: boolean;
 	result?: unknown;
+	usage?: ClaudeUsage;
 	message?: { content?: Array<{ type?: string; name?: unknown; text?: unknown; thinking?: unknown }> };
 };
+
+function usageTokensFromPayload(usage: ClaudeUsage | undefined): number | undefined {
+	if (!usage) return undefined;
+	const input = usage.input_tokens ?? 0;
+	const output = usage.output_tokens ?? 0;
+	const cacheCreate = usage.cache_creation_input_tokens ?? 0;
+	const cacheRead = usage.cache_read_input_tokens ?? 0;
+	const total = input + output + cacheCreate + cacheRead;
+	return total > 0 ? total : undefined;
+}
 
 /**
  * Fold one claude stream-json line into `state` and emit live activity. stream-json
@@ -187,6 +206,8 @@ export function applyClaudeStreamLine(
 	}
 	if (o.type === "result") {
 		state.sawResult = true;
+		const usageTokens = usageTokensFromPayload(o.usage);
+		if (usageTokens !== undefined) state.tokens = usageTokens;
 		const txt = typeof o.result === "string" ? o.result : "";
 		if (o.is_error === true) state.error = txt.trim();
 		else state.result = txt;
@@ -213,6 +234,7 @@ export function applyClaudeStreamLine(
  * text is read from the -o tmpfile, not the event stream). */
 export interface CodexStreamState {
 	error: string;
+	tokens?: number;
 }
 
 type CodexStreamEvent = {
@@ -220,6 +242,7 @@ type CodexStreamEvent = {
 	message?: unknown;
 	error?: { message?: unknown };
 	item?: { type?: string; tool_name?: unknown };
+	usage?: ClaudeUsage;
 };
 
 /** Map a codex item.type to a friendly tool label so the panel reads the same as
@@ -268,6 +291,11 @@ export function applyCodexStreamLine(
 		if (it === "reasoning") onProgress?.({ kind: "thinking" });
 		else if (it === "agent_message") onProgress?.({ kind: "writing" });
 		else onProgress?.({ kind: "tool", tool: codexToolName(it, o.item.tool_name) });
+		return;
+	}
+	if (o.type === "turn.completed") {
+		const usageTokens = usageTokensFromPayload(o.usage);
+		if (usageTokens !== undefined) state.tokens = usageTokens;
 		return;
 	}
 	if (o.type === "error" || o.type === "turn.failed") {
@@ -546,9 +574,11 @@ export function runPanelMember(member: PanelMember, opts: RunMemberOptions): Pro
 				finish({ member, ok: false, text: "", error: streamErr || stderrExcerpt || `exit ${code}` });
 				return;
 			}
+			const streamState = isCodex ? codexState : claudeState;
 			const text = isCodex ? readCodexOut(outFile) : claudeState.result;
 			if (text) {
-				finish({ member, ok: true, text });
+				const tokens = streamState.tokens;
+				finish({ member, ok: true, text, tokens });
 				return;
 			}
 			// Exit 0 but no text — a member may still have flagged an error in its stream.

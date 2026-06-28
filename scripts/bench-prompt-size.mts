@@ -7,9 +7,23 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { compactWireToolSurface } from "../packages/coding-agent/src/core/tool-wire-schema.ts";
-import { buildSystemPrompt } from "../packages/coding-agent/src/core/system-prompt.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openBank } from "../packages/coding-agent/src/core/hindsight/bank.ts";
+import {
+	formatHindsightHintForPrompt,
+	formatSessionSummariesForPrompt,
+	setCurrentHindsightBank,
+} from "../packages/coding-agent/src/core/hindsight/index.ts";
+import {
+	formatMemoryForPrompt,
+	formatMemoryHintForPrompt,
+	type MemoryFile,
+} from "../packages/coding-agent/src/core/memory/index.ts";
 import { loadProjectContextFiles } from "../packages/coding-agent/src/core/resource-loader.ts";
+import { buildSystemPrompt } from "../packages/coding-agent/src/core/system-prompt.ts";
+import { compactWireToolSurface } from "../packages/coding-agent/src/core/tool-wire-schema.ts";
 import { createAllTools } from "../packages/coding-agent/src/core/tools/index.ts";
 
 const APPROX_CHARS_PER_TOKEN = 3.7;
@@ -135,3 +149,50 @@ console.log(`METRIC wire_prefix_chars=${wirePrefixChars}`);
 console.log(`METRIC wire_prefix_tokens=${toToks(wirePrefixChars)}`);
 console.log(`METRIC wire_tool_desc_chars=${totalWireDescChars}`);
 console.log(`METRIC wire_tool_param_chars=${totalWireParamChars}`);
+
+// E3/E4 on-demand prefix savings (synthetic fixtures — deterministic gate).
+const MEMORY_BODY_CHARS = 12_000;
+const memoryFiles: MemoryFile[] = [
+	{
+		scope: "project",
+		path: join(process.cwd(), ".pit", "memory", "MEMORY.md"),
+		content: `${"convention line\n".repeat(Math.ceil(MEMORY_BODY_CHARS / 16))}# tail prefs`,
+	},
+];
+const memoryFullChars = formatMemoryForPrompt(memoryFiles).length;
+const memoryHintChars = formatMemoryHintForPrompt(memoryFiles, process.cwd()).length;
+const memorySavedChars = Math.max(0, memoryFullChars - memoryHintChars);
+const memorySavedPct = memoryFullChars > 0 ? Math.round((memorySavedChars / memoryFullChars) * 100) : 0;
+
+const hindsightDir = mkdtempSync(join(tmpdir(), "bench-hindsight-"));
+const hindsightBank = openBank(join(hindsightDir, "bank.jsonl"));
+for (let i = 0; i < 5; i++) {
+	hindsightBank.add({
+		kind: "session-summary",
+		body: `Prior session context block ${i}: ${"detail ".repeat(80)}`,
+		subject: `topic-${i}`,
+	});
+}
+setCurrentHindsightBank(hindsightBank);
+const hindsightFullChars = formatSessionSummariesForPrompt()?.length ?? 0;
+const hindsightHintChars = formatHindsightHintForPrompt()?.length ?? 0;
+setCurrentHindsightBank(undefined);
+rmSync(hindsightDir, { recursive: true, force: true });
+const hindsightSavedChars = Math.max(0, hindsightFullChars - hindsightHintChars);
+const hindsightSavedPct = hindsightFullChars > 0 ? Math.round((hindsightSavedChars / hindsightFullChars) * 100) : 0;
+
+console.log("\n--- E3/E4 on-demand prefix (synthetic) ---");
+console.log(`memory_full_chars:      ${memoryFullChars}`);
+console.log(`memory_hint_chars:      ${memoryHintChars}`);
+console.log(`memory_saved_chars:     ${memorySavedChars} (${memorySavedPct}%)`);
+console.log(`hindsight_full_chars:   ${hindsightFullChars}`);
+console.log(`hindsight_hint_chars:   ${hindsightHintChars}`);
+console.log(`hindsight_saved_chars:  ${hindsightSavedChars} (${hindsightSavedPct}%)`);
+console.log(`METRIC memory_full_chars=${memoryFullChars}`);
+console.log(`METRIC memory_hint_chars=${memoryHintChars}`);
+console.log(`METRIC memory_on_demand_saved_chars=${memorySavedChars}`);
+console.log(`METRIC memory_on_demand_saved_pct=${memorySavedPct}`);
+console.log(`METRIC hindsight_full_chars=${hindsightFullChars}`);
+console.log(`METRIC hindsight_hint_chars=${hindsightHintChars}`);
+console.log(`METRIC hindsight_on_demand_saved_chars=${hindsightSavedChars}`);
+console.log(`METRIC hindsight_on_demand_saved_pct=${hindsightSavedPct}`);

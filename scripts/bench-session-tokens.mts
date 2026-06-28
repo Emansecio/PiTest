@@ -29,6 +29,7 @@ import {
 } from "../packages/coding-agent/src/core/compaction/compaction.ts";
 import {
 	estimateSummaryTrimSavedChars,
+	formatStructuredSummaryMarkdown,
 	serializeConversation,
 	serializeConversationDelta,
 	trimSummaryProseAgainstOperations,
@@ -520,6 +521,50 @@ console.log(`sample_prose_chars:     ${C2_SAMPLE_PROSE.length}`);
 console.log(`after_trim_chars:       ${c2After.length} (-${Math.round((c2TrimSaved / C2_SAMPLE_PROSE.length) * 100)}%)`);
 console.log(`METRIC summary_trim_saved_chars=${c2TrimSaved}`);
 console.log(`METRIC summary_trim_saved_pct=${Math.round((c2TrimSaved / C2_SAMPLE_PROSE.length) * 100)}`);
+
+const C2_JSON_RAW = JSON.stringify({
+	goal: ["Ship context economy K10 gaps"],
+	constraints: ["no regressions"],
+	done: ["F1 panel cap", "F2 verify skip"],
+	inProgress: ["bench E3/E4"],
+	blocked: [],
+	keyDecisions: ["JSON-primary summarizer output"],
+	nextSteps: ["npm run check"],
+	criticalContext: [],
+});
+const c2JsonRendered = formatStructuredSummaryMarkdown(JSON.parse(C2_JSON_RAW));
+const C2_VERBOSE_MARKDOWN = [
+	"## Goal",
+	"- Ship context economy slices K8–K10 and close measurement gaps.",
+	"- Keep compaction quality while reducing summarizer output tokens.",
+	"## Constraints & Preferences",
+	"- Gate must stay green; no provider calls in benches.",
+	"## Progress",
+	"### Done",
+	"- [x] token governor and fusion ledger",
+	"- [x] structured-primary trim for file operations",
+	"### In Progress",
+	"- [ ] bench E3/E4 and C2 telemetry",
+	"### Blocked",
+	"- (none)",
+	"## Key Decisions",
+	"- **JSON-primary**: summarizer emits schema JSON, rendered to markdown post-parse.",
+	"## Next Steps",
+	"1. Run npm run check",
+	"2. Update baselines",
+	"## Critical Context",
+	"- Compaction utils: parseStructuredSummaryJson, formatStructuredSummaryMarkdown",
+].join("\n");
+const c2JsonSaved = Math.max(0, C2_VERBOSE_MARKDOWN.length - C2_JSON_RAW.length);
+const c2JsonSavedPct =
+	C2_VERBOSE_MARKDOWN.length > 0 ? Math.round((c2JsonSaved / C2_VERBOSE_MARKDOWN.length) * 100) : 0;
+console.log("\n--- C2 JSON-primary output (verbose markdown vs JSON raw) ---");
+console.log(`verbose_markdown_chars: ${C2_VERBOSE_MARKDOWN.length}`);
+console.log(`json_raw_chars:         ${C2_JSON_RAW.length}`);
+console.log(`json_rendered_chars:    ${c2JsonRendered.length}`);
+console.log(`METRIC summary_json_raw_chars=${C2_JSON_RAW.length}`);
+console.log(`METRIC summary_json_saved_chars=${c2JsonSaved}`);
+console.log(`METRIC summary_json_saved_pct=${c2JsonSavedPct}`);
 
 console.log(`\nMETRIC bench=session-tokens prefix_tokens=${wirePrefix.prefixTokens}`);
 console.log(`METRIC bench=session-tokens scenarios=${scenarios.join(",")}`);

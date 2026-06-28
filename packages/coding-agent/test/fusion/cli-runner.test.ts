@@ -138,7 +138,17 @@ describe("fusion cli-runner pure helpers", () => {
 			state,
 			on,
 		);
-		applyClaudeStreamLine(JSON.stringify({ type: "result", is_error: false, result: "final answer" }), state, on);
+		applyClaudeStreamLine(
+			JSON.stringify({
+				type: "result",
+				is_error: false,
+				result: "final answer",
+				usage: { input_tokens: 1200, output_tokens: 340 },
+			}),
+			state,
+			on,
+		);
+		expect(state.tokens).toBe(1540);
 		expect(seen).toEqual([{ kind: "thinking" }, { kind: "tool", tool: "Bash" }, { kind: "tool_result" }]);
 		expect(state.result).toBe("final answer");
 		expect(state.sawResult).toBe(true);

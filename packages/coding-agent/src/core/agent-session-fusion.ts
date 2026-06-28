@@ -315,7 +315,19 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 					ok: r.ok,
 					error: err,
 				});
-				if (r.ok) recordFusionChars(host, advisorPrompt.length, r.text.length);
+				if (r.ok) {
+					if (r.tokens && r.tokens > 0) {
+						recordFusionSpendTokens(host, r.tokens);
+					} else {
+						recordDiagnostic({
+							category: "fusion.panel-char-estimate",
+							level: "info",
+							source: "fusion.session",
+							context: { note: `${member.cli}:${member.model} chars=${r.text.length}` },
+						});
+						recordFusionChars(host, advisorPrompt.length, r.text.length);
+					}
+				}
 				host.emit({
 					type: "fusion_member",
 					index,

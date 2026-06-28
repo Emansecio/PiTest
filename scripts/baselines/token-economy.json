@@ -1,5 +1,5 @@
 {
-	"version": 3,
+	"version": 4,
 	"updated": "2026-06-28",
 	"comment": "Regression gate for scripts/check-token-bench.mjs. Exact keys are deterministic; min/max tolerate env drift (skills, prefix).",
 	"exact": {
@@ -40,14 +40,28 @@
 		"fusion_judge_tokens": 4594,
 		"fusion_verify_tokens": 14000,
 		"fusion_writer_tokens": 6081,
-		"fusion_total_tokens": 28284
+		"fusion_total_tokens": 28284,
+		"memory_full_chars": 12367,
+		"memory_hint_chars": 590,
+		"memory_on_demand_saved_chars": 11777,
+		"memory_on_demand_saved_pct": 95,
+		"hindsight_full_chars": 2289,
+		"hindsight_hint_chars": 311,
+		"hindsight_on_demand_saved_chars": 1978,
+		"hindsight_on_demand_saved_pct": 86,
+		"summary_json_raw_chars": 259,
+		"summary_json_saved_chars": 400,
+		"summary_json_saved_pct": 61
 	},
 	"min": {
 		"scenario=explore-heavy incremental_delta_saved_pct": 25,
 		"scenario=edit-heavy incremental_delta_saved_pct": 20,
 		"scenario=long-reasoning incremental_delta_saved_pct": 50,
 		"summary_trim_saved_chars": 80,
-		"summary_trim_saved_pct": 35
+		"summary_trim_saved_pct": 35,
+		"memory_on_demand_saved_pct": 80,
+		"hindsight_on_demand_saved_pct": 70,
+		"summary_json_saved_pct": 50
 	},
 	"max": {
 		"wire_prefix_tokens": 22000,

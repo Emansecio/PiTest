@@ -3,7 +3,7 @@
  */
 
 import type { AgentMessage } from "@pit/agent-core";
-import type { Message } from "@pit/ai";
+import { type Message, recordDiagnostic } from "@pit/ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { sliceSafe } from "../../utils/surrogate.ts";
@@ -852,6 +852,12 @@ export function formatStructuredSummaryMarkdown(payload: StructuredSummaryPayloa
 export function normalizeStructuredSummaryOutput(text: string): string {
 	const parsed = parseStructuredSummaryJson(text);
 	if (parsed.ok) return formatStructuredSummaryMarkdown(parsed.value);
+	recordDiagnostic({
+		category: "compaction.summary-json-fallback",
+		level: "warn",
+		source: "compaction.summarizer",
+		context: { note: `${parsed.error}; chars=${text.length}` },
+	});
 	return text;
 }
 

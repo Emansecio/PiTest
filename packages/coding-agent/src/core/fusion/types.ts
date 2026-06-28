@@ -11,6 +11,8 @@ export interface PanelResult {
 	ok: boolean;
 	text: string;
 	error?: string;
+	/** Total tokens when the member CLI reports usage (F3); absent → char estimate. */
+	tokens?: number;
 }
 
 export interface JudgeAnalysis {

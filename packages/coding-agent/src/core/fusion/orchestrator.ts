@@ -1,3 +1,4 @@
+import { recordDiagnostic } from "@pit/ai";
 import { shouldSkipFusionVerify } from "./judge.ts";
 import type { JudgeAnalysis, PanelMember, PanelResult, VerificationReport } from "./types.ts";
 
@@ -82,8 +83,19 @@ export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOut
 	// Verify stage: fact-check unsupported claims against the code (read-only). Skipped when the
 	// judge found nothing to fact-check (F2); still runs for a lone survivor (no judge). Fail-open.
 	let verification: VerificationReport | undefined;
-	if (deps.verify && !shouldSkipFusionVerify(analysis, judged)) {
-		verification = await deps.verify(deps.userPrompt, results, analysis);
+	if (deps.verify) {
+		if (shouldSkipFusionVerify(analysis, judged)) {
+			recordDiagnostic({
+				category: "fusion.verify-skipped",
+				level: "info",
+				source: "fusion.orchestrator",
+				context: {
+					note: `judged=${judged} unsupportedClaims=${analysis.unsupportedClaims.length}`,
+				},
+			});
+		} else {
+			verification = await deps.verify(deps.userPrompt, results, analysis);
+		}
 	}
 
 	const text = await deps.writer(deps.userPrompt, results, analysis, verification);

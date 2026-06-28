@@ -1,4 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+const { recordDiagnosticMock } = vi.hoisted(() => ({
+	recordDiagnosticMock: vi.fn(),
+}));
+
+vi.mock("@pit/ai", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("@pit/ai")>();
+	return { ...actual, recordDiagnostic: recordDiagnosticMock };
+});
+
 import { runFusionTurn } from "../../src/core/fusion/orchestrator.ts";
 import type { JudgeAnalysis, PanelMember, PanelResult, VerificationReport } from "../../src/core/fusion/types.ts";
 
@@ -159,6 +169,7 @@ describe("runFusionTurn", () => {
 	});
 
 	it("skips verify when judge ran but unsupportedClaims is empty (F2)", async () => {
+		recordDiagnosticMock.mockClear();
 		let verifyCalls = 0;
 		const out = await runFusionTurn({
 			userPrompt: "Q",
@@ -175,6 +186,7 @@ describe("runFusionTurn", () => {
 		expect(out.handled).toBe(true);
 		expect(verifyCalls).toBe(0);
 		expect(out.verification).toBeUndefined();
+		expect(recordDiagnosticMock).toHaveBeenCalledWith(expect.objectContaining({ category: "fusion.verify-skipped" }));
 	});
 
 	it("verifies the lone survivor even when the judge is skipped", async () => {
