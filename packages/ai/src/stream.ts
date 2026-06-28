@@ -1,7 +1,6 @@
-import "./providers/register-builtins.ts";
-
 import { getApiProvider } from "./api-registry.ts";
 import { type CredentialFailureReason, getCredentialPool } from "./credential-pool.ts";
+import { registerBuiltInApiProviders } from "./providers/register-builtins.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -14,6 +13,8 @@ import type {
 } from "./types.ts";
 
 export { getEnvApiKey } from "./env-api-keys.ts";
+
+registerBuiltInApiProviders();
 
 /**
  * Classify a provider error so the credential pool can cool down or

@@ -28,6 +28,7 @@ import type {
 } from "../types.ts";
 import { splitSystemPromptOnDynamic } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
+import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS, raceReadWithIdle } from "../utils/idle-timeout.ts";
@@ -480,6 +481,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 	(async () => {
 		const output: AssistantMessage = createInitialAssistantMessage(model);
 
+		let connectGuard: ConnectGuard | undefined;
 		try {
 			let client: Anthropic;
 			let isOAuth: boolean;
@@ -509,12 +511,15 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
 			}
+			connectGuard = createConnectGuard(options?.signal, options?.timeoutMs);
 			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
+				signal: connectGuard.signal,
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
 			};
-			const response = await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
+			const response = await connectGuard.settle(
+				client.messages.create({ ...params, stream: true }, requestOptions).asResponse(),
+			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -710,6 +715,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
+		} finally {
+			connectGuard?.dispose();
 		}
 	})();
 

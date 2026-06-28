@@ -5,14 +5,16 @@
 
 import { spawn } from "node:child_process";
 import { killProcessTree } from "../../utils/shell.ts";
+import { createRegexTestDeadline, isRegexBudgetExpired, testRegexWithinBudget } from "../regex-budget.ts";
 import type { HookCommand, HookExecutionResult, HookPayload, HookResult } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 const hookRegExpCache = new Map<string, RegExp | null>();
 
-function matchTool(matcher: string | undefined, toolName: string): boolean {
+function matchTool(matcher: string | undefined, toolName: string, deadlineMs: number): boolean {
 	if (!matcher) return true;
+	if (isRegexBudgetExpired(deadlineMs)) return false;
 	let re = hookRegExpCache.get(matcher);
 	if (re === undefined) {
 		try {
@@ -22,12 +24,16 @@ function matchTool(matcher: string | undefined, toolName: string): boolean {
 		}
 		hookRegExpCache.set(matcher, re);
 	}
-	return re ? re.test(toolName) : matcher === toolName;
+	if (!re) return matcher === toolName;
+	const matched = testRegexWithinBudget(re, toolName, deadlineMs);
+	if (matched === null) return false;
+	return matched;
 }
 
 export function selectHooks(hooks: readonly HookCommand[] | undefined, toolName: string): HookCommand[] {
 	if (!hooks || hooks.length === 0) return [];
-	return hooks.filter((hook) => matchTool(hook.matcher, toolName));
+	const deadline = createRegexTestDeadline();
+	return hooks.filter((hook) => matchTool(hook.matcher, toolName, deadline));
 }
 
 function parseHookOutput(stdout: string): HookResult | undefined {

@@ -11,6 +11,7 @@
  */
 
 import { isAbsolute, resolve } from "node:path";
+import { createRegexTestDeadline, testRegexWithinBudget } from "../regex-budget.ts";
 
 const globRegExpCache = new Map<string, RegExp>();
 const cmdRegExpCache = new Map<string, RegExp>();
@@ -90,10 +91,16 @@ export function findMatchingGlob<T extends { glob: string; tools?: string[]; rea
 	return undefined;
 }
 
+/** True when regex evaluation exceeded the wall-clock budget (fail-closed for deny). */
+export function wasRegexBudgetExceeded(deadlineMs: number): boolean {
+	return Date.now() > deadlineMs;
+}
+
 /** Returns the matching command rule or undefined. */
 export function findMatchingCommandRule<T extends { pattern: string; flags?: string; reason?: string }>(
 	rules: readonly T[],
 	command: string,
+	deadlineMs: number = createRegexTestDeadline(),
 ): T | undefined {
 	for (const rule of rules) {
 		const cacheKey = `${rule.pattern}\0${rule.flags ?? "i"}`;
@@ -106,11 +113,9 @@ export function findMatchingCommandRule<T extends { pattern: string; flags?: str
 			}
 			cmdRegExpCache.set(cacheKey, re);
 		}
-		// Reset lastIndex: a user-authored rule compiled with a `g`/`y` flag makes
-		// RegExp.test() stateful, so a cached regex could otherwise skip a match on
-		// a later call and silently leak a deny rule (fail-open on a security gate).
-		re.lastIndex = 0;
-		if (re.test(command)) return rule;
+		const matched = testRegexWithinBudget(re, command, deadlineMs);
+		if (matched === null) return undefined;
+		if (matched) return rule;
 	}
 	return undefined;
 }

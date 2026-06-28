@@ -171,6 +171,10 @@ interface ContentMatch {
  * truncation/limit notices). Returns `"aborted"` if the abort signal fires
  * mid-format (a slow/pluggable readFile backend must not run to completion).
  */
+function grepLineKey(filePath: string, lineNumber: number): string {
+	return `${filePath}\u0000${lineNumber}`;
+}
+
 async function buildContentOutput(deps: {
 	matches: ContentMatch[];
 	contextValue: number;
@@ -178,21 +182,31 @@ async function buildContentOutput(deps: {
 	matchLimitReached: boolean;
 	formatPath: (filePath: string) => string;
 	getFileLines: (filePath: string) => Promise<string[]>;
+	getLineText?: (filePath: string, lineNumber: number) => string | undefined;
 	isAborted: () => boolean;
 }): Promise<{ output: string; details: GrepToolDetails } | "aborted"> {
-	const { matches, contextValue, effectiveLimit, formatPath, getFileLines, isAborted } = deps;
+	const { matches, contextValue, effectiveLimit, formatPath, getFileLines, getLineText, isAborted } = deps;
 	let linesTruncated = false;
 	const outputLines: string[] = [];
 
 	const formatBlock = async (filePath: string, lineNumber: number, matchStart?: number): Promise<string[]> => {
 		const relativePath = formatPath(filePath);
-		const lines = await getFileLines(filePath);
-		if (!lines.length) return [`${relativePath}:${lineNumber}: (unable to read file)`];
-		const block: string[] = [];
 		const start = contextValue > 0 ? Math.max(1, lineNumber - contextValue) : lineNumber;
-		const end = contextValue > 0 ? Math.min(lines.length, lineNumber + contextValue) : lineNumber;
+		const end = contextValue > 0 ? lineNumber + contextValue : lineNumber;
+		let fileLines: string[] | null = null;
+		const resolveLineText = async (current: number): Promise<string | undefined> => {
+			const fromMap = getLineText?.(filePath, current);
+			if (fromMap !== undefined) return fromMap;
+			if (!fileLines) fileLines = await getFileLines(filePath);
+			if (!fileLines.length) return undefined;
+			return fileLines[current - 1];
+		};
+		const block: string[] = [];
 		for (let current = start; current <= end; current++) {
-			const lineText = lines[current - 1] ?? "";
+			const lineText = await resolveLineText(current);
+			if (lineText === undefined) {
+				return [`${relativePath}:${lineNumber}: (unable to read file)`];
+			}
 			const sanitized = lineText.replace(/\r/g, "");
 			const isMatchLine = current === lineNumber;
 			const { text: truncatedText, wasTruncated } = truncateLine(
@@ -571,6 +585,7 @@ export function createGrepToolDefinition(
 						// the model can find files without paying for every matching line.
 						if (mode === "content") {
 							args.push("--json", "--line-number");
+							if (contextValue > 0) args.push("-C", String(contextValue));
 							// Bound per-line bytes so a giant minified line doesn't spike the heap on
 							// JSON.parse. --max-columns-preview keeps a leading slice so the match line
 							// still renders (the output is truncated to GREP_MAX_LINE_LENGTH anyway).
@@ -596,7 +611,6 @@ export function createGrepToolDefinition(
 						let stderr = "";
 						let matchCount = 0;
 						let matchLimitReached = false;
-						let linesTruncated = false;
 						let aborted = false;
 						let killedDueToLimit = false;
 						const outputLines: string[] = [];
@@ -632,36 +646,6 @@ export function createGrepToolDefinition(
 							}
 						});
 
-						const formatBlock = async (
-							filePath: string,
-							lineNumber: number,
-							matchStart?: number,
-						): Promise<string[]> => {
-							const relativePath = formatPath(filePath);
-							const lines = await getFileLines(filePath);
-							if (!lines.length) return [`${relativePath}:${lineNumber}: (unable to read file)`];
-							const block: string[] = [];
-							const start = contextValue > 0 ? Math.max(1, lineNumber - contextValue) : lineNumber;
-							const end = contextValue > 0 ? Math.min(lines.length, lineNumber + contextValue) : lineNumber;
-							for (let current = start; current <= end; current++) {
-								const lineText = lines[current - 1] ?? "";
-								const sanitized = lineText.replace(/\r/g, "");
-								const isMatchLine = current === lineNumber;
-								// Truncate long lines so grep output stays compact. Center the
-								// window on the match for the match line so a high-column hit
-								// is not elided; context lines keep head truncation.
-								const { text: truncatedText, wasTruncated } = truncateLine(
-									sanitized,
-									GREP_MAX_LINE_LENGTH,
-									isMatchLine ? matchStart : undefined,
-								);
-								if (wasTruncated) linesTruncated = true;
-								if (isMatchLine) block.push(`${relativePath}:${current}: ${truncatedText}`);
-								else block.push(`${relativePath}-${current}- ${truncatedText}`);
-							}
-							return block;
-						};
-
 						// Collect matches during streaming, then format them after rg exits.
 						const matches: Array<{
 							filePath: string;
@@ -669,6 +653,7 @@ export function createGrepToolDefinition(
 							lineText?: string;
 							matchStart?: number;
 						}> = [];
+						const rgLineTextByKey = new Map<string, string>();
 						rl.on("line", (line) => {
 							if (mode !== "content") {
 								// files_with_matches / count: one rg line per file; limit caps files.
@@ -686,6 +671,14 @@ export function createGrepToolDefinition(
 								event = JSON.parse(line);
 							} catch {
 								return;
+							}
+							if (event.type === "match" || event.type === "context") {
+								const filePath = event.data?.path?.text;
+								const lineNumber = event.data?.line_number;
+								const lineText = event.data?.lines?.text;
+								if (filePath && typeof lineNumber === "number" && typeof lineText === "string") {
+									rgLineTextByKey.set(grepLineKey(filePath, lineNumber), lineText);
+								}
 							}
 							if (event.type === "match") {
 								matchCount++;
@@ -801,70 +794,29 @@ export function createGrepToolDefinition(
 									return;
 								}
 
-								// Format matches after streaming finishes so custom readFile() backends can be async.
-								for (const match of matches) {
-									// A late abort (ESC after rg already closed) can't be interrupted by
-									// onAbort — the child is gone and the listener was removed in cleanup().
-									// Re-check before each per-file read so a pluggable/slow readFile backend
-									// doesn't run every matched file to completion before the abort rejects.
-									if (aborted || signal?.aborted) {
-										settle(() => reject(new Error("Operation aborted")));
-										return;
-									}
-									if (contextValue === 0 && match.lineText !== undefined) {
-										const relativePath = formatPath(match.filePath);
-										const sanitized = match.lineText
-											.replace(/\r\n/g, "\n")
-											.replace(/\r/g, "")
-											.replace(/\n$/, "");
-										// A multiline match (multiline:true) carries a block spanning several
-										// physical lines in one event; line_number is only the first. Emit each
-										// physical line with its own `path:N:` prefix and per-line truncation so
-										// numbering stays correct and a long blob isn't sliced to one row.
-										const physicalLines = sanitized.split("\n");
-										for (let li = 0; li < physicalLines.length; li++) {
-											const { text: truncatedText, wasTruncated } = truncateLine(
-												physicalLines[li] ?? "",
-												GREP_MAX_LINE_LENGTH,
-												li === 0 ? match.matchStart : undefined,
-											);
-											if (wasTruncated) linesTruncated = true;
-											outputLines.push(`${relativePath}:${match.lineNumber + li}: ${truncatedText}`);
-										}
-									} else {
-										const block = await formatBlock(match.filePath, match.lineNumber, match.matchStart);
-										outputLines.push(...block);
-									}
+								const getRgLineText =
+									contextValue > 0 && rgLineTextByKey.size > 0
+										? (filePath: string, lineNumber: number) =>
+												rgLineTextByKey.get(grepLineKey(filePath, lineNumber))
+										: undefined;
+								const built = await buildContentOutput({
+									matches,
+									contextValue,
+									effectiveLimit,
+									matchLimitReached,
+									formatPath,
+									getFileLines,
+									getLineText: getRgLineText,
+									isAborted: () => aborted || (signal?.aborted ?? false),
+								});
+								if (built === "aborted") {
+									settle(() => reject(new Error("Operation aborted")));
+									return;
 								}
-
-								const rawOutput = outputLines.join("\n");
-								// Apply byte truncation. There is no line limit here because the match limit already capped rows.
-								const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-								let output = truncation.content;
-								const details: GrepToolDetails = {};
-								// Build actionable notices for truncation and match limits.
-								const notices: string[] = [];
-								if (matchLimitReached) {
-									notices.push(
-										`${effectiveLimit} matches limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
-									);
-									details.matchLimitReached = effectiveLimit;
-								}
-								if (truncation.truncated) {
-									notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-									details.truncation = truncation;
-								}
-								if (linesTruncated) {
-									notices.push(
-										`Some lines truncated to ${GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines`,
-									);
-									details.linesTruncated = true;
-								}
-								if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
 								settle(() =>
 									resolve({
-										content: [{ type: "text", text: output }],
-										details: nonEmptyDetails(details),
+										content: [{ type: "text", text: built.output }],
+										details: nonEmptyDetails(built.details),
 									}),
 								);
 							} catch (err) {

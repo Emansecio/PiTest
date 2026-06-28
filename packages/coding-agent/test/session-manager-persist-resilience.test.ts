@@ -2,7 +2,12 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type FileEntry, type SessionHeader, SessionManager } from "../src/core/session-manager.js";
+import {
+	type FileEntry,
+	resolveSessionSearchText,
+	type SessionHeader,
+	SessionManager,
+} from "../src/core/session-manager.js";
 
 function makeAssistantMessage(text: string) {
 	return {
@@ -113,7 +118,7 @@ describe("SessionManager _persist resilience (Fix 1)", () => {
 		expect(texts).toContain("assistant reply 2");
 	});
 
-	it("does not lose queued writes when the append throws (queue preserved)", () => {
+	it("does not lose queued writes when the append throws (queue preserved)", async () => {
 		const sessionFile = join(tempDir, "queue.jsonl");
 		const header: SessionHeader = {
 			type: "session",
@@ -125,8 +130,10 @@ describe("SessionManager _persist resilience (Fix 1)", () => {
 		writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, "utf8");
 
 		const mgr = SessionManager.open(sessionFile);
-		// Trigger the initial successful flush so subsequent persists take the delta
-		// branch (flushed=true).
+		// open() marks flushed=true for an on-disk header-only file, but the first
+		// assistant message must take the synchronous initial-flush path so later
+		// appends use the async delta queue we are testing.
+		(mgr as unknown as { flushed: boolean }).flushed = false;
 		mgr.appendMessage(makeAssistantMessage("first"));
 
 		// Seed a pending queued write (simulating an older async code path).
@@ -137,12 +144,14 @@ describe("SessionManager _persist resilience (Fix 1)", () => {
 		const brokenFile = join(tempDir, "nope-dir", "queue.jsonl");
 		(mgr as unknown as { sessionFile: string }).sessionFile = brokenFile;
 
-		expect(() => mgr.appendMessage(makeAssistantMessage("second"))).toThrow();
+		mgr.appendMessage(makeAssistantMessage("second"));
 
-		// The queued write must survive the failed append (not silently spliced away).
+		// The queued write must survive a failed async drain (not silently spliced away).
 		const queue = (mgr as unknown as { _writeQueue: string[] })._writeQueue;
-		expect(queue.length).toBe(1);
+		expect(queue.length).toBe(2);
 		expect(queue[0]).toBe(queued);
+		await expect(mgr.flushWrites()).rejects.toThrow();
+		expect((mgr as unknown as { _writeQueue: string[] })._writeQueue.length).toBeGreaterThan(0);
 	});
 });
 
@@ -259,9 +268,10 @@ describe("SessionManager.list size-guard (Fix 2)", () => {
 		const info = sessions[0];
 		expect(info.id).toBe("small-session");
 		expect(info.firstMessage).toBe("hello small world");
-		// Full path: body search index is populated.
-		expect(info.allMessagesText).toContain("hello small world");
-		expect(info.allMessagesText).toContain("a reply with searchable body");
+		// Search text is built lazily on first filter (not at list time).
+		const searchText = resolveSessionSearchText(info);
+		expect(searchText).toContain("hello small world");
+		expect(searchText).toContain("a reply with searchable body");
 		expect(info.messageCount).toBe(2);
 	});
 });

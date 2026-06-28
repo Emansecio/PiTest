@@ -21,6 +21,7 @@ import type {
 	ToolCall,
 } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
+import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { iterateWithIdleTimeout } from "../utils/idle-timeout.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -58,6 +59,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 	(async () => {
 		const output: AssistantMessage = createInitialAssistantMessage(model, "google-generative-ai" as Api);
 
+		let connectGuard: ConnectGuard | undefined;
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const client = createClient(model, apiKey, options?.headers);
@@ -66,12 +68,14 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
-			const googleStream = await client.models.generateContentStream(params);
+			connectGuard = createConnectGuard(options?.signal, options?.timeoutMs);
+			const googleStream = await connectGuard.settle(client.models.generateContentStream(params));
 
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
+			const seenToolCallIds = new Set<string>();
 
 			function finishCurrentBlock(): void {
 				if (!currentBlock) return;
@@ -157,11 +161,11 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 
 							// Generate unique ID if not provided or if it's a duplicate
 							const providedId = part.functionCall.id;
-							const needsNewId =
-								!providedId || output.content.some((b) => b.type === "toolCall" && b.id === providedId);
+							const needsNewId = !providedId || seenToolCallIds.has(providedId);
 							const toolCallId = needsNewId
 								? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`
 								: providedId;
+							seenToolCallIds.add(toolCallId);
 
 							const toolCall: ToolCall = {
 								type: "toolCall",
@@ -235,6 +239,8 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
+		} finally {
+			connectGuard?.dispose();
 		}
 	})();
 

@@ -598,8 +598,9 @@
           case 'ls':
             return `[ls: ${shortenPath(String(args.path || '.'))}]`;
           default: {
-            const argsStr = JSON.stringify(args).slice(0, 40);
-            return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? '...' : ''}]`;
+            const serialized = JSON.stringify(args);
+            const argsStr = serialized.slice(0, 40);
+            return `[${name}: ${argsStr}${serialized.length > 40 ? '...' : ''}]`;
           }
         }
       }

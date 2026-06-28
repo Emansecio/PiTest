@@ -31,7 +31,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { recordDiagnostic } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { extractEditOldTexts, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
@@ -60,18 +60,42 @@ function readFileContentSafe(absPath: string): string | undefined {
 	}
 }
 
-function stampFile(absPath: string): FileStamp | undefined {
+const STAMP_READ_CHUNK_BYTES = 64 * 1024;
+
+function hashFileSync(absPath: string): string {
+	const hash = createHash("sha256");
+	const fd = openSync(absPath, "r");
 	try {
-		const st = statSync(absPath);
-		const hash = createHash("sha1").update(readFileSync(absPath)).digest("hex");
-		return { mtimeMs: st.mtimeMs, size: st.size, hash };
-	} catch {
-		return undefined;
+		const buf = Buffer.alloc(STAMP_READ_CHUNK_BYTES);
+		while (true) {
+			const n = readSync(fd, buf, 0, buf.length, null);
+			if (n <= 0) break;
+			hash.update(buf.subarray(0, n));
+		}
+		return hash.digest("hex");
+	} finally {
+		closeSync(fd);
 	}
 }
 
 export function createReadGuardExtension(options: ReadGuardOptions) {
 	return (pi: ExtensionAPI) => {
+		const stampCache = new Map<string, FileStamp>();
+
+		function stampFile(absPath: string): FileStamp | undefined {
+			try {
+				const st = statSync(absPath);
+				const cached = stampCache.get(absPath);
+				if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+					return cached;
+				}
+				const stamp: FileStamp = { mtimeMs: st.mtimeMs, size: st.size, hash: hashFileSync(absPath) };
+				stampCache.set(absPath, stamp);
+				return stamp;
+			} catch {
+				return undefined;
+			}
+		}
 		// Maps an absolute path to its content stamp AT READ TIME (or null when the
 		// file couldn't be stamped). Membership = "read this session"; the stamp
 		// powers the intra-session drift guard below.

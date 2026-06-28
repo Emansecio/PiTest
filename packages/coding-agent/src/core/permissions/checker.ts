@@ -10,8 +10,9 @@
  * user-authored deny rules still apply.
  */
 
+import { createRegexTestDeadline } from "../regex-budget.ts";
 import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
-import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath } from "./matcher.ts";
+import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath, wasRegexBudgetExceeded } from "./matcher.ts";
 import {
 	BUILTIN_DANGEROUS_COMMANDS,
 	BUILTIN_SENSITIVE_PATHS,
@@ -150,7 +151,14 @@ export class PermissionChecker {
 			if (denyTarget) return denyReasonForPath(denyTarget);
 		}
 		if (action.type === "exec") {
-			const denyCmd = findMatchingCommandRule(this.resolvedDenyCommands(builtins), action.command);
+			const regexDeadline = createRegexTestDeadline();
+			const denyCmd = findMatchingCommandRule(this.resolvedDenyCommands(builtins), action.command, regexDeadline);
+			if (wasRegexBudgetExceeded(regexDeadline)) {
+				return {
+					decision: "deny",
+					reason: "Command permission check exceeded regex time budget (fail-closed).",
+				};
+			}
 			if (denyCmd) {
 				return {
 					decision: "deny",

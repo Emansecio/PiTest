@@ -126,6 +126,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe?.();
 		unsubscribe = session.subscribe((event) => {
 			if (mode === "json") {
+				// Skip streaming deltas — consumers only need completed messages and
+				// lifecycle events; serializing every partial update is O(tokens²).
+				if (event.type === "message_update") return;
 				writeRawStdout(`${JSON.stringify(event)}\n`);
 				return;
 			}

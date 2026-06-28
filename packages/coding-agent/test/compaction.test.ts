@@ -264,6 +264,18 @@ describe("computeDynamicReserve", () => {
 		expect(computeDynamicReserve(100_000, 30_000)).toBe(30_000);
 	});
 
+	it("caps reserve on tiny model windows so the threshold remains usable", () => {
+		expect(computeDynamicReserve(8_192, 16_384)).toBe(4_096);
+		expect(shouldCompact(3_000, 8_192, DEFAULT_COMPACTION_SETTINGS)).toBe(false);
+		expect(shouldCompact(5_000, 8_192, DEFAULT_COMPACTION_SETTINGS)).toBe(true);
+	});
+
+	it("does not compact when a model has no usable context window metadata", () => {
+		expect(computeDynamicReserve(0, 16_384)).toBe(0);
+		expect(shouldCompact(1, 0, DEFAULT_COMPACTION_SETTINGS)).toBe(false);
+		expect(shouldCompactSoft(1, 0, DEFAULT_COMPACTION_SETTINGS)).toBe(false);
+	});
+
 	it("keeps a 20k floor just above 200k where 2.5% is still small", () => {
 		// 2.5% of 200_001 ≈ 5000 < 20k → 20k floor. Continuous with the ≤200k branch.
 		expect(computeDynamicReserve(200_001, 16_384)).toBe(20_000);

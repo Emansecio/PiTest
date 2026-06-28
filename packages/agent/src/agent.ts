@@ -482,7 +482,9 @@ export class Agent {
 	private createContextSnapshot(): AgentContext {
 		return {
 			systemPrompt: this._state.systemPrompt,
-			messages: this._state.messages.slice(),
+			// Clone happens once in runAgentLoop/runAgentLoopContinue so runLoop
+			// mutations don't touch agent state.
+			messages: this._state.messages,
 			// Pass tools by reference: runLoop never mutates context.tools, and
 			// state.tools is always a fresh array (the setter clones on assign),
 			// so toolMapCache's WeakMap key stays stable across turns until tools

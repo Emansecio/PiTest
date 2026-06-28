@@ -12,6 +12,8 @@ const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url))
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
 const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
+const aiSrcModelsCompare = fileURLToPath(new URL("../ai/src/models-compare.ts", import.meta.url));
+const tuiSrcCore = fileURLToPath(new URL("../tui/src/core.ts", import.meta.url));
 // Dono optou por mais velocidade aceitando o trade-off de uso de CPU: metade
 // dos cores em vez de um quarto. Em maquinas com muitos cores (ex: 28 -> 14
 // forks) corta o wall-clock; mantemos o floor de 2 e ficamos abaixo do total
@@ -49,6 +51,10 @@ export default defineConfig({
 		// fixtures stay deterministic regardless of which Claude Code skills
 		// the contributor has on their machine. Real usage opts in by default.
 		env: {
+			// Cursor/agent shells often set TERM=dumb, which disables streaming reveal
+			// and thinking-breath animation via isReducedMotion() — hermetic tests
+			// need a normal terminal profile.
+			TERM: "xterm-256color",
 			PIT_DISABLE_CLAUDE_CODE_SKILLS: "1",
 			// Same isolation for the OTHER legacy skill dirs (.codex/.cursor/.gemini
 			// skills/). Without this, a contributor who has e.g. ~/.codex/skills/*
@@ -83,6 +89,8 @@ export default defineConfig({
 			{ find: /^@pit\/ai\/oauth$/, replacement: aiSrcOAuth },
 			{ find: /^@pit\/agent-core$/, replacement: agentSrcIndex },
 			{ find: /^@pit\/tui$/, replacement: tuiSrcIndex },
+			{ find: /^@pit\/tui\/core$/, replacement: tuiSrcCore },
+			{ find: /^@pit\/ai\/models-compare$/, replacement: aiSrcModelsCompare },
 		],
 	},
 });

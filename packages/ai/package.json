@@ -10,6 +10,10 @@
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
 		},
+		"./models-compare": {
+			"types": "./dist/models-compare.d.ts",
+			"import": "./dist/models-compare.js"
+		},
 		"./anthropic": {
 			"types": "./dist/providers/anthropic.d.ts",
 			"import": "./dist/providers/anthropic.js"

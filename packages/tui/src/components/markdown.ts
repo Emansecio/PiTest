@@ -157,6 +157,7 @@ export class Markdown implements Component {
 	}
 
 	setText(text: string): void {
+		if (text === this.text) return;
 		this.text = text;
 		this.invalidate();
 	}
@@ -985,17 +986,24 @@ export class Markdown implements Component {
 
 		const maxUnbrokenWordWidth = 30;
 
-		// Calculate natural column widths (what each column needs without constraints)
+		// Calculate natural column widths (what each column needs without constraints).
+		// Cache rendered cell text so the sizing pass isn't repeated during output.
 		const naturalWidths: number[] = [];
 		const minWordWidths: number[] = [];
+		const headerTexts: string[] = [];
 		for (let i = 0; i < numCols; i++) {
 			const headerText = this.renderInlineTokens(token.header[i].tokens || [], styleContext);
+			headerTexts[i] = headerText;
 			naturalWidths[i] = visibleWidth(headerText);
 			minWordWidths[i] = Math.max(1, this.getLongestWordWidth(headerText, maxUnbrokenWordWidth));
 		}
+		const rowTexts: string[][] = [];
 		for (const row of token.rows) {
+			const rowText: string[] = [];
+			rowTexts.push(rowText);
 			for (let i = 0; i < row.length; i++) {
 				const cellText = this.renderInlineTokens(row[i].tokens || [], styleContext);
+				rowText[i] = cellText;
 				naturalWidths[i] = Math.max(naturalWidths[i] || 0, visibleWidth(cellText));
 				minWordWidths[i] = Math.max(
 					minWordWidths[i] || 1,
@@ -1079,9 +1087,8 @@ export class Markdown implements Component {
 		lines.push(`┌─${topBorderCells.join("─┬─")}─┐`);
 
 		// Render header with wrapping
-		const headerCellLines: string[][] = token.header.map((cell, i) => {
-			const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-			return this.wrapCellText(text, columnWidths[i]);
+		const headerCellLines: string[][] = token.header.map((_cell, i) => {
+			return this.wrapCellText(headerTexts[i], columnWidths[i]);
 		});
 		const headerLineCount = Math.max(...headerCellLines.map((c) => c.length));
 
@@ -1101,10 +1108,8 @@ export class Markdown implements Component {
 
 		// Render rows with wrapping
 		for (let rowIndex = 0; rowIndex < token.rows.length; rowIndex++) {
-			const row = token.rows[rowIndex];
-			const rowCellLines: string[][] = row.map((cell, i) => {
-				const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-				return this.wrapCellText(text, columnWidths[i]);
+			const rowCellLines: string[][] = token.rows[rowIndex].map((_cell, i) => {
+				return this.wrapCellText(rowTexts[rowIndex][i], columnWidths[i]);
 			});
 			const rowLineCount = Math.max(...rowCellLines.map((c) => c.length));
 

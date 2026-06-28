@@ -1109,6 +1109,16 @@ export class TUI extends Container {
 		const cap = Math.min(TUI.RESET_CACHE_HARD_MAX, Math.max(TUI.RESET_CACHE_MIN, lines.length * 2));
 		const prevInput = this.resetInputCache;
 		const prevOutput = this.resetOutputCache;
+		if (prevInput.length === lines.length && prevOutput.length === lines.length) {
+			let allStable = true;
+			for (let i = 0; i < lines.length; i++) {
+				if (lines[i] !== prevInput[i]) {
+					allStable = false;
+					break;
+				}
+			}
+			if (allStable) return prevOutput;
+		}
 		// Rebuilt this frame so it can't drift from the array returned. Holds the
 		// pre-reset input (key for the pointer compare) and its post-reset output
 		// at each index, for next frame's reference fast path.

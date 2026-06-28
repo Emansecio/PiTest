@@ -1,6 +1,10 @@
 import type { AgentMessage } from "@pit/agent-core";
 import { describe, expect, it } from "vitest";
-import { adaptivePruneThreshold, pruneOldToolOutputs } from "../src/core/compaction/compaction.js";
+import {
+	adaptivePruneThreshold,
+	pressurePruneProtectTurns,
+	pruneOldToolOutputs,
+} from "../src/core/compaction/compaction.js";
 
 const PRUNE_TOKEN_THRESHOLD = 20_000;
 const ADAPTIVE_PRUNE_MIN_THRESHOLD = 4_000;
@@ -10,23 +14,31 @@ function bigBlob(head = "HEAD_MARKER", tail = "TAIL_MARKER"): string {
 	return `${head}\n${"filler line\n".repeat(800)}${tail}`;
 }
 
-function readCall(id: string, args: Record<string, unknown>): AgentMessage {
+function toolCall(name: string, id: string, args: Record<string, unknown>): AgentMessage {
 	return {
 		role: "assistant",
-		content: [{ type: "toolCall", id, name: "read", arguments: args }],
+		content: [{ type: "toolCall", id, name, arguments: args }],
 		timestamp: 1,
 	} as unknown as AgentMessage;
 }
 
-function readResult(toolCallId: string, text: string): AgentMessage {
+function toolResult(toolName: string, toolCallId: string, text: string): AgentMessage {
 	return {
 		role: "toolResult",
 		toolCallId,
-		toolName: "read",
+		toolName,
 		content: [{ type: "text", text }],
 		isError: false,
 		timestamp: 1,
 	} as unknown as AgentMessage;
+}
+
+function readCall(id: string, args: Record<string, unknown>): AgentMessage {
+	return toolCall("read", id, args);
+}
+
+function readResult(toolCallId: string, text: string): AgentMessage {
+	return toolResult("read", toolCallId, text);
 }
 
 function user(text: string): AgentMessage {
@@ -62,6 +74,19 @@ describe("adaptivePruneThreshold", () => {
 		expect(at60).toBeGreaterThan(at70);
 		expect(at70).toBeGreaterThan(at80);
 		expect(at80).toBeGreaterThan(ADAPTIVE_PRUNE_MIN_THRESHOLD);
+	});
+});
+
+describe("pressurePruneProtectTurns", () => {
+	it("reduces recent-turn protection under pressure on small-window models", () => {
+		expect(pressurePruneProtectTurns(80_000, 128_000)).toBe(2);
+		expect(pressurePruneProtectTurns(90_000, 128_000)).toBe(1);
+		expect(pressurePruneProtectTurns(103_000, 128_000)).toBe(0);
+	});
+
+	it("keeps large-window sessions conservative until very high pressure", () => {
+		expect(pressurePruneProtectTurns(300_000, 1_000_000)).toBe(2);
+		expect(pressurePruneProtectTurns(950_000, 1_000_000)).toBe(1);
 	});
 });
 
@@ -118,5 +143,40 @@ describe("pruneOldToolOutputs — superseded-read dedup", () => {
 		expect(reclaimed).toBe(0);
 		expect(textAt(messages, 1)).toBe(blobA);
 		expect(textAt(messages, 3)).toBe(blobB);
+	});
+
+	it("collapses older repeated grep output below the size threshold", () => {
+		const blob = bigBlob("GREP_HEAD", "GREP_TAIL");
+		const args = { pattern: "foo", path: "src" };
+		const messages = [
+			toolCall("grep", "g1", args),
+			toolResult("grep", "g1", blob),
+			toolCall("grep", "g2", { path: "src", pattern: "foo" }),
+			toolResult("grep", "g2", "fresh grep"),
+			user("a"),
+			user("b"),
+		];
+
+		const reclaimed = pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2);
+
+		expect(reclaimed).toBeGreaterThan(0);
+		expect(textAt(messages, 1)).toContain("GREP_HEAD");
+		expect(textAt(messages, 1)).toContain("GREP_TAIL");
+		expect(textAt(messages, 3)).toBe("fresh grep");
+	});
+
+	it("can prune current-turn large outputs when protection is explicitly relaxed", () => {
+		const big = `${"head\n"}${"x".repeat(90_000)}${"\ntail"}`;
+		const messages = [user("current"), toolResult("bash", "b1", big)];
+
+		const protectedReclaimed = pruneOldToolOutputs(messages, 1_000, 2);
+		expect(protectedReclaimed).toBe(0);
+		expect(textAt(messages, 1)).toBe(big);
+
+		const reclaimed = pruneOldToolOutputs(messages, 1_000, 0);
+		expect(reclaimed).toBeGreaterThan(0);
+		expect(textAt(messages, 1)).toContain("tokens elided");
+		expect(textAt(messages, 1)).toContain("head");
+		expect(textAt(messages, 1)).toContain("tail");
 	});
 });

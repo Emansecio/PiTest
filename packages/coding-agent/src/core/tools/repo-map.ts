@@ -4,7 +4,7 @@ import type { AgentTool } from "@pit/agent-core";
 import { Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.js";
 import { scanSourceFiles } from "./source-scan.js";
-import { listDeclarations } from "./symbol.js";
+import { listTopLevelDeclarations } from "./symbol.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
 const repoMapSchema = Type.Object(
@@ -51,7 +51,7 @@ export function createRepoMapToolDefinition(cwd: string): ToolDefinition<typeof 
 					const result = settled[i]!;
 					if (result.status !== "fulfilled") continue;
 					const file = batch[i]!;
-					const names = listDeclarations(result.value, file).map((d) => `${d.kind} ${d.name}:${d.line}`);
+					const names = listTopLevelDeclarations(result.value, file).map((d) => `${d.kind} ${d.name}:${d.line}`);
 					if (names.length === 0) continue;
 					const line = `${relative(cwd, file)}: ${names.join(", ")}`;
 					bytes += Buffer.byteLength(line, "utf8") + 1;

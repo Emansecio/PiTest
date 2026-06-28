@@ -15,6 +15,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { getCachedTsconfigPaths } from "./tsconfig-paths-cache.ts";
 
 /**
  * Strip `//` and block comments so JSONC configs (tsconfig, biome) parse.
@@ -187,7 +188,9 @@ export function findTsconfigPathsForFile(targetFile: string): TsconfigPathsResul
 	for (;;) {
 		for (const name of ["tsconfig.json", "jsconfig.json"]) {
 			const file = join(dir, name);
-			if (existsSync(file)) return resolvePathsFromConfig(file, 0, new Set());
+			if (existsSync(file)) {
+				return getCachedTsconfigPaths(file, () => resolvePathsFromConfig(file, 0, new Set()));
+			}
 		}
 		const parent = dirname(dir);
 		if (parent === dir) return undefined;

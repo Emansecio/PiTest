@@ -1,3 +1,4 @@
+import type { Dirent } from "node:fs";
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { access, readdir, stat } from "fs/promises";
@@ -157,54 +158,88 @@ export function createLsToolDefinition(
 							return;
 						}
 
-						// Read directory entries.
-						let entries: string[];
-						try {
-							entries = await ops.readdir(dirPath);
-						} catch (e: any) {
-							signal?.removeEventListener("abort", onAbort);
-							reject(new Error(`Cannot read directory: ${e.message}`));
-							return;
-						}
-
-						// Sort alphabetically, case-insensitive.
-						entries.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-
-						// Cap to limit before stat to avoid unnecessary syscalls.
 						let entryLimitReached = false;
-						if (entries.length > effectiveLimit) {
-							entries = entries.slice(0, effectiveLimit);
-							entryLimitReached = true;
-						}
-
-						// Stat entries in parallel for directory indicators.
-						const BATCH_SIZE = 64;
 						const results: string[] = [];
-						for (let batchStart = 0; batchStart < entries.length; batchStart += BATCH_SIZE) {
-							if (signal?.aborted) {
+						const formatDirent = async (dirent: Dirent): Promise<string> => {
+							const name = dirent.name;
+							if (dirent.isDirectory()) return `${name}/`;
+							if (dirent.isSymbolicLink()) {
+								const fullPath = nodePath.join(dirPath, name);
+								try {
+									const entryStat = await ops.stat(fullPath);
+									return name + (entryStat.isDirectory() ? "/" : "");
+								} catch {
+									return `${name}@`;
+								}
+							}
+							return name;
+						};
+
+						if (ops === defaultLsOperations) {
+							let dirents: Dirent[];
+							try {
+								dirents = await readdir(dirPath, { withFileTypes: true });
+							} catch (e: unknown) {
 								signal?.removeEventListener("abort", onAbort);
-								reject(new Error("Operation aborted"));
+								const message = e instanceof Error ? e.message : String(e);
+								reject(new Error(`Cannot read directory: ${message}`));
 								return;
 							}
-							const batch = entries.slice(batchStart, batchStart + BATCH_SIZE);
-							const settled = await Promise.allSettled(
-								batch.map(async (entry) => {
-									const fullPath = nodePath.join(dirPath, entry);
-									try {
-										const entryStat = await ops.stat(fullPath);
-										return entry + (entryStat.isDirectory() ? "/" : "");
-									} catch {
-										// stat follows symlinks, so a dangling link (or a no-permission
-										// entry) throws. Never drop it — the entry exists in the directory.
-										// Mark with `@` (the common cause is a broken symlink) instead of
-										// silently vanishing, which would make the listing look incomplete.
-										return `${entry}@`;
-									}
-								}),
-							);
-							for (const result of settled) {
-								if (result.status === "fulfilled") {
-									results.push(result.value);
+							dirents.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+							if (dirents.length > effectiveLimit) {
+								dirents = dirents.slice(0, effectiveLimit);
+								entryLimitReached = true;
+							}
+							const BATCH_SIZE = 64;
+							for (let batchStart = 0; batchStart < dirents.length; batchStart += BATCH_SIZE) {
+								if (signal?.aborted) {
+									signal?.removeEventListener("abort", onAbort);
+									reject(new Error("Operation aborted"));
+									return;
+								}
+								const batch = dirents.slice(batchStart, batchStart + BATCH_SIZE);
+								const settled = await Promise.allSettled(batch.map((d) => formatDirent(d)));
+								for (const result of settled) {
+									if (result.status === "fulfilled") results.push(result.value);
+								}
+							}
+						} else {
+							// Custom ops: fall back to name-only readdir + stat batches.
+							let entries: string[];
+							try {
+								entries = await ops.readdir(dirPath);
+							} catch (e: unknown) {
+								signal?.removeEventListener("abort", onAbort);
+								const message = e instanceof Error ? e.message : String(e);
+								reject(new Error(`Cannot read directory: ${message}`));
+								return;
+							}
+							entries.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+							if (entries.length > effectiveLimit) {
+								entries = entries.slice(0, effectiveLimit);
+								entryLimitReached = true;
+							}
+							const BATCH_SIZE = 64;
+							for (let batchStart = 0; batchStart < entries.length; batchStart += BATCH_SIZE) {
+								if (signal?.aborted) {
+									signal?.removeEventListener("abort", onAbort);
+									reject(new Error("Operation aborted"));
+									return;
+								}
+								const batch = entries.slice(batchStart, batchStart + BATCH_SIZE);
+								const settled = await Promise.allSettled(
+									batch.map(async (entry) => {
+										const fullPath = nodePath.join(dirPath, entry);
+										try {
+											const entryStat = await ops.stat(fullPath);
+											return entry + (entryStat.isDirectory() ? "/" : "");
+										} catch {
+											return `${entry}@`;
+										}
+									}),
+								);
+								for (const result of settled) {
+									if (result.status === "fulfilled") results.push(result.value);
 								}
 							}
 						}

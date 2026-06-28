@@ -1,5 +1,5 @@
 import { fuzzyMatch } from "@pit/tui";
-import type { SessionInfo } from "../../../core/session-manager.ts";
+import { resolveSessionSearchText, type SessionInfo } from "../../../core/session-manager.ts";
 
 export type SortMode = "threaded" | "recent" | "relevance";
 
@@ -48,7 +48,7 @@ const REGEX_FILTER_BUDGET_MS = 40;
 function getSessionSearchText(session: SessionInfo): string {
 	const cached = searchTextCache.get(session);
 	if (cached !== undefined) return cached;
-	const text = `${session.id} ${session.name ?? ""} ${session.allMessagesText} ${session.cwd}`;
+	const text = `${session.id} ${session.name ?? ""} ${resolveSessionSearchText(session)} ${session.cwd}`;
 	searchTextCache.set(session, text);
 	return text;
 }

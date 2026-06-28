@@ -1595,7 +1595,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1000000,
-			maxTokens: 384000,
+			maxTokens: 128000,
 		} satisfies Model<"openai-completions">,
 		"deepseek-v4-flash-free": {
 			id: "deepseek-v4-flash-free",
@@ -1633,7 +1633,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1000000,
-			maxTokens: 384000,
+			maxTokens: 128000,
 		} satisfies Model<"openai-completions">,
 		"gemini-3-flash": {
 			id: "gemini-3-flash",
@@ -2253,7 +2253,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1000000,
-			maxTokens: 384000,
+			maxTokens: 128000,
 		} satisfies Model<"openai-completions">,
 		"deepseek-v4-pro": {
 			id: "deepseek-v4-pro",
@@ -2272,7 +2272,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1000000,
-			maxTokens: 384000,
+			maxTokens: 128000,
 		} satisfies Model<"openai-completions">,
 		"glm-5": {
 			id: "glm-5",
@@ -3164,7 +3164,7 @@ export const MODELS = {
 			cost: {
 				input: 0.2288,
 				output: 0.3432,
-				cacheRead: 0,
+				cacheRead: 0.02288,
 				cacheWrite: 0,
 			},
 			contextWindow: 131072,
@@ -3204,7 +3204,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 65536,
+			maxTokens: 128000,
 		} satisfies Model<"openai-completions">,
 		"deepseek/deepseek-v4-pro": {
 			id: "deepseek/deepseek-v4-pro",
@@ -3223,7 +3223,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 384000,
+			maxTokens: 128000,
 		} satisfies Model<"openai-completions">,
 		"google/gemini-2.5-flash": {
 			id: "google/gemini-2.5-flash",
@@ -6172,7 +6172,7 @@ export const MODELS = {
 			input: ["text", "image"],
 			cost: {
 				input: 0.28850000000000003,
-				output: 3.17,
+				output: 2.65,
 				cacheRead: 0,
 				cacheWrite: 0,
 			},

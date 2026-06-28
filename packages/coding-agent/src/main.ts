@@ -7,8 +7,9 @@
 
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { type ImageContent, modelsAreEqual } from "@pit/ai";
-import { ProcessTerminal, setKeybindings, TUI } from "@pit/tui";
+import type { ImageContent } from "@pit/ai";
+import { modelsAreEqual } from "@pit/ai/models-compare";
+import { ProcessTerminal, setKeybindings, TUI } from "@pit/tui/core";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";

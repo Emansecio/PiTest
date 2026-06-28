@@ -5,7 +5,7 @@
  * and after compaction the session is reloaded.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@pit/ai";
@@ -16,8 +16,9 @@ import { convertToLlm } from "../messages.ts";
 import { MESSAGE_RELAY_CUSTOM_TYPE } from "../messaging/types.ts";
 import { getLivingRepoMap, livingRepoMapToDigests } from "../repo-map/living-index.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
+import { MUTATING_TOOL_NAMES } from "../stagnation.ts";
 import { crushJson } from "../tools/json-crush.ts";
-import { buildFileDigests, formatFileDigests } from "./file-digests.ts";
+import { buildFileDigests, formatFileDigests, MAX_DIGEST_BYTES } from "./file-digests.ts";
 import {
 	computeOperationLists,
 	createFileOps,
@@ -219,10 +220,13 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
  *   slack for estimation error before the model rejects on overflow.
  */
 export function computeDynamicReserve(contextWindow: number, configuredReserve: number): number {
-	if (contextWindow > 200_000) {
-		return Math.max(configuredReserve, 20_000, Math.ceil(contextWindow * 0.025));
-	}
-	return Math.max(configuredReserve, Math.floor(contextWindow * 0.1));
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return 0;
+	const rawReserve =
+		contextWindow > 200_000
+			? Math.max(configuredReserve, 20_000, Math.ceil(contextWindow * 0.025))
+			: Math.max(configuredReserve, Math.floor(contextWindow * 0.1));
+	const maxUsableReserve = Math.max(1, Math.floor(contextWindow * 0.5));
+	return Math.min(rawReserve, maxUsableReserve);
 }
 
 /**
@@ -279,6 +283,7 @@ export function shouldCompact(
 	lastCompactionDeficit = 0,
 ): boolean {
 	if (!settings.enabled) return false;
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return false;
 	const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
 	const threshold = contextWindow - reserve;
 	if (contextTokens <= threshold) return false;
@@ -299,6 +304,7 @@ export function shouldCompact(
  */
 export function shouldCompactSoft(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled) return false;
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return false;
 	const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
 	const hardThreshold = contextWindow - reserve;
 	if (contextTokens > hardThreshold) return false; // hard path owns this
@@ -349,8 +355,6 @@ function cachedArgsLength(args: unknown): number {
 	return JSON.stringify(args).length;
 }
 
-/** Tool calls whose result lands on disk, so their argument bodies are redundant once old. */
-const MUTATION_TOOL_NAMES = new Set(["write", "edit", "edit_v2", "ast_edit"]);
 /** Min length for a tool-call arg STRING value to be worth eliding (keeps paths/flags intact). */
 const TOOLCALL_ARG_VALUE_MARK_THRESHOLD = 200;
 
@@ -693,6 +697,27 @@ const ADAPTIVE_PRUNE_MIN_THRESHOLD = 4_000;
 const ADAPTIVE_PRUNE_START_OCCUPANCY = 0.5;
 /** Occupancy at/above which the threshold reaches ADAPTIVE_PRUNE_MIN_THRESHOLD. */
 const ADAPTIVE_PRUNE_FULL_OCCUPANCY = 0.9;
+const PRESSURE_PRUNE_SMALL_WINDOW = 200_000;
+const PRESSURE_PRUNE_ONE_TURN_OCCUPANCY = 0.65;
+const PRESSURE_PRUNE_CURRENT_TURN_OCCUPANCY = 0.8;
+const PRESSURE_PRUNE_LARGE_WINDOW_OCCUPANCY = 0.9;
+
+/**
+ * Number of recent turns protected from live-context pruning under pressure.
+ * Small-window models (DeepSeek/OpenRouter/GPT chat class) have little room for a
+ * two-turn grace period once they pass ~65%; above ~80%, huge current-turn tool
+ * outputs are still recoverable via recall_tool_output, so they can be excerpted.
+ */
+export function pressurePruneProtectTurns(contextTokens: number, contextWindow: number): number {
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return PRUNE_PROTECT_TURNS;
+	const occupancy = contextTokens / contextWindow;
+	if (contextWindow <= PRESSURE_PRUNE_SMALL_WINDOW) {
+		if (occupancy >= PRESSURE_PRUNE_CURRENT_TURN_OCCUPANCY) return 0;
+		if (occupancy >= PRESSURE_PRUNE_ONE_TURN_OCCUPANCY) return 1;
+		return PRUNE_PROTECT_TURNS;
+	}
+	return occupancy >= PRESSURE_PRUNE_LARGE_WINDOW_OCCUPANCY ? 1 : PRUNE_PROTECT_TURNS;
+}
 
 /**
  * Per-output prune threshold that tightens as the context window fills.
@@ -768,14 +793,27 @@ function headTailExcerpt(text: string): string {
 // recomputes exactly once for the new (small) value.
 const beforeTokensCache = new WeakMap<object, number>();
 
+const SUPERSEDED_TOOL_RESULT_NAMES = new Set(["read", "grep", "find", "ls", "symbol", "find_symbol"]);
+
+function stableStringify(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+	if (typeof value === "object" && value !== null) {
+		return `{${Object.keys(value as Record<string, unknown>)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${stableStringify((value as Record<string, unknown>)[key])}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "undefined";
+}
+
 /**
- * Resource key for a `read` tool call: path plus offset/limit, so two reads of
- * the SAME path+range collide while reads of different ranges (distinct slices of
- * a file) stay separate. Returns undefined for a read with no usable path. Mirrors
- * the path-alias set the read tool normalizes (`path` canonical; aliases kept for
- * raw model args persisted before normalization).
+ * Resource key for a tool call whose later identical result supersedes the old
+ * copy. `read` keeps its path/range aliases for persisted pre-normalization args;
+ * other deterministic navigation/search tools use a sorted argument fingerprint.
  */
-function readResourceKey(args: unknown): string | undefined {
+function supersededResourceKey(toolName: string, args: unknown): string | undefined {
+	if (!SUPERSEDED_TOOL_RESULT_NAMES.has(toolName)) return undefined;
+	if (toolName !== "read") return `${toolName}\u0000${stableStringify(args)}`;
 	if (typeof args !== "object" || args === null) return undefined;
 	const a = args as Record<string, unknown>;
 	let path: string | undefined;
@@ -789,26 +827,23 @@ function readResourceKey(args: unknown): string | undefined {
 	if (!path) return undefined;
 	const offset = typeof a.offset === "number" ? a.offset : "";
 	const limit = typeof a.limit === "number" ? a.limit : "";
-	return `${path}\u0000${offset}\u0000${limit}`;
+	return `${toolName}\u0000${path}\u0000${offset}\u0000${limit}`;
 }
 
 /**
- * Indices (in the prunable region, i.e. `< protectFromIndex`) of `read` tool
- * results that a LATER read of the same path+range supersedes. The newer read
- * reflects current disk state, so the older copy is a stale duplicate safe to
- * collapse to head+tail even when it is below the size threshold — the common
- * "read file → edit → read same file again" loop that otherwise keeps N full
- * copies in context. The newest read (and any read inside the protected recent
- * turns) is never marked. Disk stays the source of truth, so no information is
- * lost that a re-read cannot recover.
+ * Indices (in the prunable region, i.e. `< protectFromIndex`) of deterministic
+ * tool results that a later identical call supersedes. The newer result carries
+ * the current view, so the older copy is a stale duplicate safe to collapse to
+ * head+tail even when it is below the size threshold. The newest result (and any
+ * result inside the protected recent turns) is never marked.
  */
-function buildSupersededReadIndices(messages: AgentMessage[], protectFromIndex: number): Set<number> {
+function buildSupersededToolResultIndices(messages: AgentMessage[], protectFromIndex: number): Set<number> {
 	const keyByCallId = new Map<string, string>();
 	for (const msg of messages) {
 		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
 		for (const block of msg.content) {
-			if (block.type !== "toolCall" || block.name !== "read") continue;
-			const key = readResourceKey(block.arguments);
+			if (block.type !== "toolCall") continue;
+			const key = supersededResourceKey(block.name, block.arguments);
 			if (key) keyByCallId.set(block.id, key);
 		}
 	}
@@ -816,7 +851,7 @@ function buildSupersededReadIndices(messages: AgentMessage[], protectFromIndex: 
 	const lastIndexByKey = new Map<string, number>();
 	for (let i = 0; i < messages.length; i++) {
 		const msg = messages[i];
-		if (msg.role !== "toolResult" || msg.toolName !== "read") continue;
+		if (msg.role !== "toolResult" || !SUPERSEDED_TOOL_RESULT_NAMES.has(msg.toolName ?? "")) continue;
 		const key = keyByCallId.get(msg.toolCallId);
 		if (!key) continue;
 		keyByIndex.set(i, key);
@@ -832,33 +867,73 @@ function buildSupersededReadIndices(messages: AgentMessage[], protectFromIndex: 
 	return superseded;
 }
 
+function computePruneProtectFromIndex(messages: AgentMessage[], protectTurns: number): number {
+	let userCount = 0;
+	let protectFromIndex = protectTurns <= 0 ? messages.length : 0;
+	if (protectTurns > 0) {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			if (messages[i].role === "user") {
+				userCount++;
+				if (userCount >= protectTurns) {
+					protectFromIndex = i;
+					break;
+				}
+			}
+		}
+	}
+	return protectFromIndex;
+}
+
+/** Read-only pre-check: would pruneOldToolOutputs reclaim anything? */
+export function wouldPruneOldToolOutputs(
+	messages: AgentMessage[],
+	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
+	protectTurns = PRUNE_PROTECT_TURNS,
+): boolean {
+	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
+	const supersededReadIndices = buildSupersededToolResultIndices(messages, protectFromIndex);
+	for (let i = 0; i < protectFromIndex; i++) {
+		const msg = messages[i];
+		if (msg.role === "assistant" && Array.isArray(msg.content)) {
+			for (const block of msg.content) {
+				if (block.type !== "toolCall" || !MUTATING_TOOL_NAMES.has(block.name)) continue;
+				const argsRef =
+					typeof block.arguments === "object" && block.arguments !== null ? block.arguments : undefined;
+				let before = argsRef ? beforeTokensCache.get(argsRef) : undefined;
+				if (before === undefined) {
+					before = estimateTextTokens(JSON.stringify(block.arguments), true);
+				}
+				if (before > tokenThreshold && pruneToolCallArguments(block.arguments)) return true;
+			}
+			continue;
+		}
+		if (msg.role !== "toolResult" || !Array.isArray(msg.content)) continue;
+		const superseded = supersededReadIndices.has(i);
+		for (const block of msg.content) {
+			if (block.type !== "text" || !block.text) continue;
+			const est = estimateTextTokens(block.text, true);
+			if (est > tokenThreshold) return true;
+			if (superseded) {
+				const excerpt = headTailExcerpt(block.text);
+				if (excerpt.length < block.text.length) return true;
+			}
+		}
+	}
+	return false;
+}
+
 export function pruneOldToolOutputs(
 	messages: AgentMessage[],
 	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
 	protectTurns = PRUNE_PROTECT_TURNS,
 	defer = false,
 ): number {
-	// Find the index of the Nth-from-last user message to establish the protection boundary.
-	// If the window holds fewer than `protectTurns` user messages, the whole window IS the
-	// recent set the protect-turns guard is meant to shield, so protect it entirely (index 0)
-	// rather than leaving the boundary at messages.length, which would sweep every message —
-	// including the most-recent large tool outputs — the opposite of the intended behavior.
-	let userCount = 0;
-	let protectFromIndex = 0;
-	for (let i = messages.length - 1; i >= 0; i--) {
-		if (messages[i].role === "user") {
-			userCount++;
-			if (userCount >= protectTurns) {
-				protectFromIndex = i;
-				break;
-			}
-		}
-	}
+	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
 
 	let prunedTokens = 0;
 
 	const store = defer ? getCurrentDeferredOutputStore() : undefined;
-	const supersededReadIndices = buildSupersededReadIndices(messages, protectFromIndex);
+	const supersededReadIndices = buildSupersededToolResultIndices(messages, protectFromIndex);
 
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];
@@ -869,7 +944,7 @@ export function pruneOldToolOutputs(
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (let b = 0; b < msg.content.length; b++) {
 				const block = msg.content[b];
-				if (block.type !== "toolCall" || !MUTATION_TOOL_NAMES.has(block.name)) continue;
+				if (block.type !== "toolCall" || !MUTATING_TOOL_NAMES.has(block.name)) continue;
 				const argsRef =
 					typeof block.arguments === "object" && block.arguments !== null ? block.arguments : undefined;
 				let before = argsRef ? beforeTokensCache.get(argsRef) : undefined;
@@ -922,9 +997,9 @@ export function pruneOldToolOutputs(
 					(msg.content[b] as any).text = replacement;
 					prunedTokens += Math.max(0, est - estimateTextTokens(replacement, true));
 				} else if (superseded) {
-					// A stale duplicate of a file re-read later (below the size threshold).
-					// Collapse it to head+tail — the newer read carries current content and
-					// disk stays the source of truth. Never deferred (a recall id for stale
+					// A stale duplicate of a deterministic navigation/search result repeated
+					// later (below the size threshold). Collapse it to head+tail — the newer
+					// result carries the current view. Never deferred (a recall id for stale
 					// content is pointless); headTailExcerpt no-ops when already small.
 					const excerpt = headTailExcerpt(block.text);
 					if (excerpt.length < block.text.length) {
@@ -1351,8 +1426,9 @@ export function prepareCompaction(
 	pathEntries: SessionEntry[],
 	settings: CompactionSettings,
 	contextWindow?: number,
+	allowLatestCompaction = false,
 ): CompactionPreparation | undefined {
-	if (pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
+	if (!allowLatestCompaction && pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
 	}
 
@@ -1704,7 +1780,10 @@ export async function compact(
 			digestPaths,
 			async (p) => {
 				try {
-					return await readFile(isAbsolute(p) ? p : resolve(cwd ?? ".", p), { encoding: "utf8", signal });
+					const fullPath = isAbsolute(p) ? p : resolve(cwd ?? ".", p);
+					const st = await stat(fullPath);
+					if (st.size > MAX_DIGEST_BYTES) return null;
+					return await readFile(fullPath, { encoding: "utf8", signal });
 				} catch {
 					return null;
 				}

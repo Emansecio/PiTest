@@ -7,7 +7,6 @@
  */
 import * as undici from "undici";
 import { APP_NAME } from "./config.ts";
-import { main } from "./main.ts";
 
 process.title = APP_NAME;
 process.env.PIT_CODING_AGENT = "true";
@@ -24,4 +23,17 @@ undici.setGlobalDispatcher(new undici.EnvHttpProxyAgent({ allowH2: false, bodyTi
 // dispatcher without decompressing them, causing response.json() failures.
 undici.install?.();
 
-main(process.argv.slice(2));
+const cliArgs = process.argv.slice(2);
+
+async function runCli(): Promise<void> {
+	if (cliArgs.includes("--version") || cliArgs.includes("-V")) {
+		const { VERSION } = await import("./config.ts");
+		console.log(VERSION);
+		return;
+	}
+
+	const { main } = await import("./main.ts");
+	await main(cliArgs);
+}
+
+void runCli();

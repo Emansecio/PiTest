@@ -50,7 +50,9 @@ import { buildHarnessDispatcher, type CodeModeDispatcher } from "./code-mode/bri
 import {
 	adaptivePruneThreshold,
 	cloneToolResultMessagesForPrune,
+	pressurePruneProtectTurns,
 	pruneOldToolOutputs,
+	wouldPruneOldToolOutputs,
 } from "./compaction/compaction.ts";
 import {
 	type CompactionPreparation,
@@ -893,6 +895,7 @@ export class AgentSession {
 		// (session persistence, extensions, auto-compaction, retry logic)
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
+		this._installContextPruneHook();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -1400,6 +1403,14 @@ export class AgentSession {
 		};
 	}
 
+	private _installContextPruneHook(): void {
+		const existingTransform = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			const transformed = existingTransform ? await existingTransform(messages, signal) : messages;
+			return this._pruneContextForProvider(transformed);
+		};
+	}
+
 	// =========================================================================
 	// Event Subscription
 	// =========================================================================
@@ -1469,11 +1480,14 @@ export class AgentSession {
 			}
 		}
 
-		// Emit to extensions first
-		await this._emitExtensionEvent(event);
-
-		// Notify all listeners
-		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
+		const payload = event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event;
+		if (event.type === "message_update" || event.type === "tool_execution_update") {
+			// Extensions and TUI listeners are independent — don't serialize streaming on hook latency.
+			await Promise.all([this._emitExtensionEvent(event), Promise.resolve().then(() => this._emit(payload))]);
+		} else {
+			await this._emitExtensionEvent(event);
+			this._emit(payload);
+		}
 
 		// Handle session persistence
 		if (event.type === "message_end") {
@@ -3032,6 +3046,31 @@ export class AgentSession {
 	 * by `maxAttempts`. No-op when disabled, when nothing changed, when the turn
 	 * was aborted, or when no check command can be detected (gate stays inert).
 	 */
+	private _pruneContextForProvider(messages: AgentMessage[]): AgentMessage[] {
+		if (isTruthyEnvFlag(process.env.PIT_NO_PROACTIVE_PRUNE)) return messages;
+		const contextWindow = this.model?.contextWindow ?? 0;
+		const contextTokens = estimateContextTokens(messages).tokens;
+		const floorRaw = Number(process.env.PIT_PROACTIVE_PRUNE_FLOOR);
+		const floor = proactivePruneFloor(contextWindow, Number.isFinite(floorRaw) ? floorRaw : undefined);
+		if (contextTokens <= floor) return messages;
+
+		const threshold = adaptivePruneThreshold(contextTokens, contextWindow);
+		const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
+		if (!wouldPruneOldToolOutputs(messages, threshold, protectTurns)) return messages;
+		const copy = cloneToolResultMessagesForPrune(messages);
+		const reclaimed = pruneOldToolOutputs(copy, threshold, protectTurns, true);
+		recordDiagnostic({
+			category: "prune.proactive",
+			level: "info",
+			source: "agent-session.pruneContextForProvider",
+			context: {
+				bytes: reclaimed,
+				note: `ctx=${contextTokens}tok reclaimed=${reclaimed}tok protectTurns=${protectTurns}`,
+			},
+		});
+		return reclaimed > 0 ? copy : messages;
+	}
+
 	/**
 	 * Proactive prune (ON by default; PIT_NO_PROACTIVE_PRUNE=1 opts out): excerpt
 	 * old large tool outputs from the LIVE context once it crosses a conservative
@@ -3052,11 +3091,14 @@ export class AgentSession {
 		if (contextTokens <= floor) return;
 		// Tighten the per-output threshold as the window fills, so accumulated medium
 		// outputs (each below the flat 20k) still get reclaimed under real pressure.
-		const threshold = adaptivePruneThreshold(contextTokens, this.model?.contextWindow ?? 0);
+		const contextWindow = this.model?.contextWindow ?? 0;
+		const threshold = adaptivePruneThreshold(contextTokens, contextWindow);
+		const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
+		if (!wouldPruneOldToolOutputs(this.agent.state.messages, threshold, protectTurns)) return;
 		const copy = cloneToolResultMessagesForPrune(this.agent.state.messages);
 		// defer=true: persist the full text of large stale outputs to the deferred
 		// store (when open) and leave a recall_tool_output id on the inline excerpt.
-		const reclaimed = pruneOldToolOutputs(copy, threshold, undefined, true);
+		const reclaimed = pruneOldToolOutputs(copy, threshold, protectTurns, true);
 		// Telemetry: record EVERY run above the floor (including reclaimed=0), so
 		// /diagnostics can show whether the proactive prune is actually reclaiming
 		// tokens in real sessions or firing no-op — and, when it does reclaim, how
@@ -3066,7 +3108,10 @@ export class AgentSession {
 			category: "prune.proactive",
 			level: "info",
 			source: "agent-session.maybePruneStaleToolOutputs",
-			context: { bytes: reclaimed, note: `ctx=${contextTokens}tok reclaimed=${reclaimed}tok` },
+			context: {
+				bytes: reclaimed,
+				note: `ctx=${contextTokens}tok reclaimed=${reclaimed}tok protectTurns=${protectTurns}`,
+			},
 		});
 		if (reclaimed > 0) this.agent.state.messages = copy;
 	}
@@ -4975,7 +5020,12 @@ export class AgentSession {
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, settings, this.model?.contextWindow);
+			const preparation = prepareCompaction(
+				pathEntries,
+				settings,
+				this.model?.contextWindow,
+				reason === "threshold",
+			);
 			if (preparation) preparation.cwd = this._cwd;
 			if (!preparation) {
 				emitSilentEnd();
@@ -4993,6 +5043,31 @@ export class AgentSession {
 
 			this._emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 			this._lastCompactionDeficit = 0;
+
+			if (!willRetry && reason === "threshold") {
+				const contextWindow = this.model?.contextWindow ?? 0;
+				const contextTokens = estimateContextTokens(this.agent.state.messages).tokens;
+				if (
+					shouldCompact(contextTokens, contextWindow, settings, 0) ||
+					shouldCompactSoft(contextTokens, contextWindow, settings)
+				) {
+					const pathEntriesAfter = this.sessionManager.getBranch();
+					const preparationAfter = prepareCompaction(pathEntriesAfter, settings, contextWindow, true);
+					if (preparationAfter) {
+						this._emit({ type: "compaction_start", reason });
+						preparationAfter.cwd = this._cwd;
+						const resultAfter = await this._executeCompactionPipeline({
+							preparation: preparationAfter,
+							pathEntries: pathEntriesAfter,
+							model: this.model,
+							apiKey,
+							headers,
+							abortSignal: this._autoCompactionAbortController.signal,
+						});
+						this._emit({ type: "compaction_end", reason, result: resultAfter, aborted: false, willRetry });
+					}
+				}
+			}
 
 			if (willRetry) {
 				const messages = this.agent.state.messages;
@@ -5355,7 +5430,7 @@ export class AgentSession {
 	 */
 	private _buildCodeModeDispatcher(): CodeModeDispatcher {
 		const base = buildHarnessDispatcher({
-			getTool: (name) => this.agent.state.tools.find((t) => t.name === name),
+			getTool: (name) => this._toolRegistry.get(name),
 			toolRewriteRegistry: this.agent.toolRewriteRegistry,
 			toolErrorHintRegistry: this.agent.toolErrorHintRegistry,
 			beforeToolCall: (ctx, signal) =>

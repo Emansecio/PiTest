@@ -657,6 +657,49 @@ function extractTextContent(message: Message): string {
 		.join(" ");
 }
 
+/** Cap lazy search-text materialization (matches session-selector regex cap). */
+const SESSION_SEARCH_TEXT_CAP = 50_000;
+
+/**
+ * Resolve searchable message text for the session picker. When `allMessagesText`
+ * was skipped at list time, load and cache it on first filter.
+ */
+export function resolveSessionSearchText(session: SessionInfo): string {
+	if (session.allMessagesText.length > 0) return session.allMessagesText;
+	try {
+		const preStats = statSync(session.path);
+		if (preStats.size > SESSION_INFO_FULL_READ_MAX_BYTES) {
+			return "";
+		}
+		const content = readFileSync(session.path, "utf8");
+		const parts: string[] = [];
+		let total = 0;
+		for (const line of content.trim().split("\n")) {
+			if (!line.trim()) continue;
+			let entry: FileEntry;
+			try {
+				entry = JSON.parse(line) as FileEntry;
+			} catch {
+				continue;
+			}
+			if (entry.type !== "message") continue;
+			const message = (entry as SessionMessageEntry).message;
+			if (!isMessageWithContent(message)) continue;
+			if (message.role !== "user" && message.role !== "assistant") continue;
+			const text = extractTextContent(message);
+			if (!text) continue;
+			if (total + text.length > SESSION_SEARCH_TEXT_CAP) break;
+			parts.push(text);
+			total += text.length;
+		}
+		const built = parts.join(" ");
+		session.allMessagesText = built;
+		return built;
+	} catch {
+		return "";
+	}
+}
+
 function getLastActivityTime(entries: FileEntry[]): number | undefined {
 	let lastActivityTime: number | undefined;
 
@@ -706,68 +749,74 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		}
 
 		const content = await readFile(filePath, "utf8");
-		const entries: FileEntry[] = [];
-		const lines = content.trim().split("\n");
-
-		for (const line of lines) {
-			if (!line.trim()) continue;
-			try {
-				entries.push(JSON.parse(line) as FileEntry);
-			} catch {
-				// Skip malformed lines
-			}
-		}
-
-		if (entries.length === 0) return null;
-		const header = entries[0];
-		if (header.type !== "session") return null;
-
-		// Reuse the stat from the size-guard above — no second syscall needed.
-		const stats = preStats;
+		let header: SessionHeader | null = null;
 		let messageCount = 0;
 		let firstMessage = "";
-		const allMessages: string[] = [];
 		let name: string | undefined;
-
-		for (const entry of entries) {
-			// Extract session name (use latest, including explicit clears)
-			if (entry.type === "session_info") {
-				const infoEntry = entry as SessionInfoEntry;
-				name = infoEntry.name?.trim() || undefined;
+		let lastActivityTime: number | undefined;
+		let lineStart = 0;
+		while (lineStart < content.length) {
+			const lineEnd = content.indexOf("\n", lineStart);
+			const rawLine = lineEnd === -1 ? content.slice(lineStart) : content.slice(lineStart, lineEnd);
+			lineStart = lineEnd === -1 ? content.length : lineEnd + 1;
+			if (!rawLine.trim()) continue;
+			let entry: FileEntry;
+			try {
+				entry = JSON.parse(rawLine) as FileEntry;
+			} catch {
+				continue;
 			}
-
+			if (!header) {
+				if (entry.type !== "session") return null;
+				header = entry as SessionHeader;
+				continue;
+			}
+			if (entry.type === "session_info") {
+				name = (entry as SessionInfoEntry).name?.trim() || undefined;
+			}
 			if (entry.type !== "message") continue;
 			messageCount++;
-
 			const message = (entry as SessionMessageEntry).message;
 			if (!isMessageWithContent(message)) continue;
 			if (message.role !== "user" && message.role !== "assistant") continue;
-
+			const msgTimestamp = (message as { timestamp?: number }).timestamp;
+			if (typeof msgTimestamp === "number") {
+				lastActivityTime = Math.max(lastActivityTime ?? 0, msgTimestamp);
+			} else {
+				const entryTimestamp = (entry as SessionEntryBase).timestamp;
+				if (typeof entryTimestamp === "string") {
+					const t = new Date(entryTimestamp).getTime();
+					if (!Number.isNaN(t)) lastActivityTime = Math.max(lastActivityTime ?? 0, t);
+				}
+			}
 			const textContent = extractTextContent(message);
 			if (!textContent) continue;
-
-			allMessages.push(textContent);
-			if (!firstMessage && message.role === "user") {
-				firstMessage = textContent;
-			}
+			if (!firstMessage && message.role === "user") firstMessage = textContent;
 		}
 
-		const cwd = typeof (header as SessionHeader).cwd === "string" ? (header as SessionHeader).cwd : "";
-		const parentSessionPath = (header as SessionHeader).parentSession;
+		if (!header) return null;
 
-		const modified = getSessionModifiedDate(entries, header as SessionHeader, stats.mtime);
+		// Reuse the stat from the size-guard above — no second syscall needed.
+		const stats = preStats;
+		const cwd = typeof header.cwd === "string" ? header.cwd : "";
+		const parentSessionPath = header.parentSession;
+		const modified =
+			typeof lastActivityTime === "number" && lastActivityTime > 0
+				? new Date(lastActivityTime)
+				: getSessionModifiedDate([], header, stats.mtime);
 
 		return {
 			path: filePath,
-			id: (header as SessionHeader).id,
+			id: header.id,
 			cwd,
 			name,
 			parentSessionPath,
-			created: new Date((header as SessionHeader).timestamp),
+			created: new Date(header.timestamp),
 			modified,
 			messageCount,
 			firstMessage: firstMessage || "(no messages)",
-			allMessagesText: allMessages.join(" "),
+			// Built lazily by session-selector-search when the user filters.
+			allMessagesText: "",
 		};
 	} catch {
 		return null;
@@ -933,6 +982,29 @@ function appendWithRetry(file: string, data: string): void {
 				},
 			});
 			sleepSync(FS_RETRY_BACKOFF_MS[attempt + 1]);
+		}
+	}
+}
+
+async function appendWithRetryAsync(file: string, data: string): Promise<void> {
+	for (let attempt = 0; attempt < FS_RETRY_BACKOFF_MS.length; attempt++) {
+		try {
+			await appendFile(file, data);
+			return;
+		} catch (err) {
+			const last = attempt === FS_RETRY_BACKOFF_MS.length - 1;
+			if (last || !isTransientFsError(err)) throw err;
+			recordDiagnostic({
+				category: "io.retry",
+				level: "warn",
+				source: "session-manager.appendWithRetryAsync",
+				context: {
+					attempt: attempt + 1,
+					path: file,
+					note: (err as { code?: string } | null)?.code,
+				},
+			});
+			await new Promise((resolve) => setTimeout(resolve, FS_RETRY_BACKOFF_MS[attempt + 1]));
 		}
 	}
 }
@@ -1194,36 +1266,29 @@ export class SessionManager {
 		// no JSON metacharacters, so the written lines stay valid JSON. The live
 		// in-memory entries are left verbatim for the active turn.
 		const isInitialFlush = !this.flushed;
-		let batch: string;
 		if (isInitialFlush) {
-			batch = this.fileEntries.map((e) => `${redactForDisk(JSON.stringify(e))}\n`).join("");
-		} else {
-			batch = `${redactForDisk(JSON.stringify(entry))}\n`;
-		}
-		// If there are still queued async writes from older code paths, prepend
-		// them in order WITHOUT mutating the queue yet — a throwing append must
-		// leave both `flushed` and `_writeQueue` intact so the next attempt can
-		// rewrite the full batch (header + history) instead of silently dropping
-		// it. Mutate state only after the bytes are durable. Queued entries are
-		// already one-JSON-per-line, so redact each line independently here too.
-		if (this._writeQueue.length > 0) {
-			batch = this._writeQueue.map((line) => redactForDisk(line)).join("") + batch;
-		}
-		// Single appendFileSync of the COMPLETE batch = one write() syscall, so an
-		// entry is never split across appends. Cross-process concurrent appends to
-		// the same .jsonl (two `pit` on one session) could still interleave at the
-		// byte level — accepted as best-effort; a full cross-process lockfile is a
-		// follow-up. The retry absorbs transient AV/indexer locks on Windows; on
-		// final failure it throws with state kept safe for the next attempt.
-		appendWithRetry(this.sessionFile, batch);
-		// Append succeeded: now it is safe to commit the flushed flag and clear
-		// the queued writes we just persisted.
-		if (isInitialFlush) {
+			let batch = this.fileEntries.map((e) => `${redactForDisk(JSON.stringify(e))}\n`).join("");
+			// First durable write must stay synchronous — callers may list/re-open
+			// the session immediately after the first assistant message lands.
+			if (this._writeQueue.length > 0) {
+				batch = this._writeQueue.join("") + batch;
+			}
+			appendWithRetry(this.sessionFile, batch);
 			this.flushed = true;
-		}
-		if (this._writeQueue.length > 0) {
 			this._writeQueue.length = 0;
+			return;
 		}
+
+		const line = `${redactForDisk(JSON.stringify(entry))}\n`;
+		this._writeQueue.push(line);
+		void this._drainQueue().catch((err: unknown) => {
+			recordDiagnostic({
+				category: "io.retry",
+				level: "error",
+				source: "session-manager._persist.asyncDrain",
+				context: { note: err instanceof Error ? err.message : String(err) },
+			});
+		});
 	}
 
 	private async _drainQueue(): Promise<void> {
@@ -1236,10 +1301,10 @@ export class SessionManager {
 		}
 		const drainPromise = (async () => {
 			while (this._writeQueue.length > 0 && this.sessionFile) {
-				const batch = this._writeQueue.splice(0).join("");
-				// Disk-egress redaction (same JSON-safe guarantee as _persist's
-				// synchronous append path).
-				await appendFile(this.sessionFile, redactForDisk(batch));
+				const pending = this._writeQueue.length;
+				const batch = this._writeQueue.join("");
+				await appendWithRetryAsync(this.sessionFile, batch);
+				this._writeQueue.splice(0, pending);
 			}
 		})();
 		this._draining = drainPromise;

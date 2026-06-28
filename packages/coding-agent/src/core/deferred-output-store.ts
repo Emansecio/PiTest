@@ -19,17 +19,20 @@ export interface DeferredOutputStore {
 
 export function createDeferredOutputStore(): DeferredOutputStore {
 	const dir = mkdtempSync(join(tmpdir(), "pit-deferred-"));
+	const memory = new Map<string, string>();
 	let seq = 0;
 	return {
 		put(content) {
 			seq += 1;
 			const id = `d${seq}`;
-			writeFileSync(join(dir, `${id}.txt`), content, "utf8");
+			memory.set(id, content);
 			return id;
 		},
 		get(id) {
 			// Guard against path traversal: ids are `d<number>` only.
 			if (!/^d\d+$/.test(id)) return undefined;
+			const cached = memory.get(id);
+			if (cached !== undefined) return cached;
 			const path = join(dir, `${id}.txt`);
 			if (!existsSync(path)) return undefined;
 			try {
@@ -39,6 +42,15 @@ export function createDeferredOutputStore(): DeferredOutputStore {
 			}
 		},
 		dispose() {
+			// Batch disk mirror once at session end instead of per-put syscalls during compaction.
+			for (const [id, content] of memory) {
+				try {
+					writeFileSync(join(dir, `${id}.txt`), content, "utf8");
+				} catch {
+					// Best-effort disk mirror; recall always succeeded from memory during the session.
+				}
+			}
+			memory.clear();
 			try {
 				rmSync(dir, { recursive: true, force: true });
 			} catch {

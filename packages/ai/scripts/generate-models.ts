@@ -1181,7 +1181,7 @@ async function generateModels() {
 				cacheWrite: 0,
 			},
 			contextWindow: 1000000,
-			maxTokens: 384000,
+			maxTokens: 128000,
 			compat: deepseekCompat,
 		},
 		{
@@ -1199,7 +1199,7 @@ async function generateModels() {
 				cacheWrite: 0,
 			},
 			contextWindow: 1000000,
-			maxTokens: 384000,
+			maxTokens: 128000,
 			compat: deepseekCompat,
 		},
 	];
@@ -1217,6 +1217,7 @@ async function generateModels() {
 						}
 					: deepseekCompat),
 			};
+			candidate.maxTokens = 128000;
 			mergeThinkingLevelMap(candidate, DEEPSEEK_V4_THINKING_LEVEL_MAP);
 		}
 	}

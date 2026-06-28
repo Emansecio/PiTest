@@ -255,6 +255,13 @@ export interface DeclarationEntry {
 	kind: string;
 }
 
+/** Top-level outline entry without block-end parsing (repo_map hot path). */
+export interface OutlineDeclaration {
+	name: string;
+	line: number;
+	kind: string;
+}
+
 const MAX_DECLARATIONS = 400;
 
 // Top-level only (column 0). Capture group 1 = kind keyword, group 2 = name.
@@ -267,6 +274,27 @@ const INDENT_DECL_RE = /^(?:async\s+)?(def|class)\s+([A-Za-z_][\w]*)/;
  * line ranges. Shared primitive for outline / find_symbol / repo_map. Callers
  * MUST treat the result as a guide and read the body before editing.
  */
+/**
+ * Fast top-level declaration scan — no block-end walk. Use when only
+ * `kind name:line` is needed (repo_map); use listDeclarations for ranges.
+ */
+export function listTopLevelDeclarations(content: string, path: string): OutlineDeclaration[] {
+	const kind = detectKind(path);
+	if (kind === "unknown") return [];
+	const lines = content.split(/\r?\n/);
+	const re = kind === "brace" ? BRACE_DECL_RE : INDENT_DECL_RE;
+	const out: OutlineDeclaration[] = [];
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i]!;
+		if (/^\s/.test(line)) continue;
+		const m = re.exec(line);
+		if (!m) continue;
+		out.push({ kind: m[1]!, name: m[2]!, line: i + 1 });
+		if (out.length >= MAX_DECLARATIONS) break;
+	}
+	return out;
+}
+
 export function listDeclarations(content: string, path: string): DeclarationEntry[] {
 	const kind = detectKind(path);
 	if (kind === "unknown") return [];

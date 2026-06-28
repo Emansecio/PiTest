@@ -27,6 +27,7 @@ interface Pending {
 }
 
 const ENDPOINT_WAIT_MS = 15_000;
+const SSE_CONNECT_TIMEOUT_MS = 30_000;
 
 export class SseTransport implements McpTransport {
 	onNotification?: (method: string, params?: Record<string, unknown>) => void;
@@ -66,12 +67,15 @@ export class SseTransport implements McpTransport {
 		const onOuterAbort = () => controller.abort();
 		signal?.addEventListener("abort", onOuterAbort, { once: true });
 
+		const connectTimeout = AbortSignal.timeout(SSE_CONNECT_TIMEOUT_MS);
+		const fetchSignal = AbortSignal.any([controller.signal, connectTimeout]);
+
 		let response: Response;
 		try {
 			response = await fetch(this.config.url ?? "", {
 				method: "GET",
 				headers: { accept: "text/event-stream", ...(this.config.headers ?? {}) },
-				signal: controller.signal,
+				signal: fetchSignal,
 			});
 		} catch (error) {
 			signal?.removeEventListener("abort", onOuterAbort);
