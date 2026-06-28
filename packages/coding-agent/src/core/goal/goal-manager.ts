@@ -175,13 +175,37 @@ export class GoalManager {
 		if (summary) this.state.summary = summary.trim();
 	}
 
+	/** Bump iteration count without changing token spend (unified governor sets tokens). */
+	recordIteration(): void {
+		if (!this.state) return;
+		if (this.state.status === "complete" && this.state.iterations > (this.state.completedAtIteration ?? -1)) {
+			return;
+		}
+		this.state.iterations += 1;
+	}
+
+	/**
+	 * Set cumulative token spend from the unified {@link TokenBudgetGovernor}
+	 * (main + subagents + fusion). Re-evaluates budget_limited.
+	 */
+	syncTokensUsed(total: number): void {
+		if (!this.state) return;
+		if (this.state.status === "complete" && this.state.iterations > (this.state.completedAtIteration ?? -1)) {
+			return;
+		}
+		this.state.tokensUsed = Math.max(0, Math.round(total));
+		if (
+			this.state.status === "active" &&
+			this.state.tokenBudget !== undefined &&
+			this.state.tokensUsed >= this.state.tokenBudget
+		) {
+			this.state.status = "budget_limited";
+		}
+	}
+
 	/** Record a finished turn: bumps iterations + token usage, may exhaust budget. */
 	recordTurn(tokensDelta: number): void {
 		if (!this.state) return;
-		// A completed goal is no longer accruing work: once the completing turn has
-		// been counted, stop bumping iterations/tokens so post-completion turns don't
-		// inflate the goal's reported counters until the user clears it. The turn that
-		// fired goal_complete still counts (its recordTurn runs after complete()).
 		if (this.state.status === "complete" && this.state.iterations > (this.state.completedAtIteration ?? -1)) {
 			return;
 		}

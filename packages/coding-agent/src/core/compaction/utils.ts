@@ -331,6 +331,12 @@ export function formatFileOperations(arg1: string[] | OperationLists, modifiedFi
 /** Maximum characters for a tool result in serialized summaries. */
 const TOOL_RESULT_MAX_CHARS = 2000;
 
+/** Tighter tool-result cap for incremental (delta) summarization input. */
+const DELTA_TOOL_RESULT_MAX_CHARS = 1200;
+
+/** Max chars per string arg in delta JSON tool calls (edit oldText/newText). */
+const DELTA_ARG_STRING_MAX = 160;
+
 /**
  * Maximum characters for assistant thinking in serialized summaries. A head-only
  * cut amputated the conclusion — the decision the SUMMARIZATION prompt asks for
@@ -449,29 +455,35 @@ function getToolTarget(name: string, args: Record<string, unknown>): string | un
 /** Tools that break the dedup chain — their presence means prior ops on the same resource are semantically distinct. */
 const CHAIN_BREAKERS = new Set(["bash", "shell", "exec"]);
 
-/**
- * Serialize LLM messages to text for summarization.
- * This prevents the model from treating it as a conversation to continue.
- * Call convertToLlm() first to handle custom message types.
- *
- * Consecutive operations on the same resource are deduplicated: only the last
- * tool call + result per resource survives, unless a shell command or user
- * message intervenes (breaking the chain). Inspired by Ned's trim_context_summary.
- *
- * Tool results are truncated to keep the summarization request within
- * reasonable token budgets. Full content is not needed for summarization.
- */
-export function serializeConversation(messages: Message[]): string {
-	// First pass: collect parts with dedup metadata
-	interface Part {
-		text: string;
-		/** Resource key for tool calls/results that can be deduped. */
-		dedupKey?: string;
-		/** true if this part is a tool result associated with the preceding tool call. */
-		isToolResult?: boolean;
-	}
+type ConversationPartKind = "user" | "assistant" | "thinking" | "toolCall" | "toolResult";
 
-	const parts: Part[] = [];
+interface ConversationPart {
+	kind: ConversationPartKind;
+	/** Resource key for tool calls/results that can be deduped. */
+	dedupKey?: string;
+	/** true if this part is a tool result associated with the preceding tool call. */
+	isToolResult?: boolean;
+	userText?: string;
+	assistantText?: string;
+	thinkingText?: string;
+	toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
+	toolResult?: { name: string; text: string; isError: boolean };
+}
+
+function compactArgsForDelta(args: Record<string, unknown>): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(args)) {
+		if (typeof value === "string" && value.length > DELTA_ARG_STRING_MAX) {
+			out[key] = `${sliceSafe(value, 0, DELTA_ARG_STRING_MAX)}…`;
+		} else {
+			out[key] = value;
+		}
+	}
+	return out;
+}
+
+function collectConversationParts(messages: Message[], includeThinking: boolean): ConversationPart[] {
+	const parts: ConversationPart[] = [];
 	let lastToolTarget: string | undefined;
 	let hasChainBreaker = false;
 
@@ -485,13 +497,18 @@ export function serializeConversation(messages: Message[]): string {
 							.map((c) => c.text)
 							.join("");
 			if (content) {
-				parts.push({ text: `[User]: ${content}` });
+				parts.push({ kind: "user", userText: content });
 				hasChainBreaker = true;
 			}
 		} else if (msg.role === "assistant") {
 			const textParts: string[] = [];
 			const thinkingParts: string[] = [];
-			const toolCalls: { serialized: string; target: string | undefined; breaksChain: boolean }[] = [];
+			const toolCalls: Array<{
+				name: string;
+				args: Record<string, unknown>;
+				target: string | undefined;
+				breaksChain: boolean;
+			}> = [];
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
@@ -500,27 +517,21 @@ export function serializeConversation(messages: Message[]): string {
 					thinkingParts.push(block.thinking);
 				} else if (block.type === "toolCall") {
 					const args = block.arguments as Record<string, unknown>;
-					const argsStr = Object.entries(args)
-						.map(([k, v]) => {
-							const serialized = JSON.stringify(v);
-							return serialized.length <= 300 ? `${k}=${serialized}` : `${k}=${sliceSafe(serialized, 0, 300)}…`;
-						})
-						.join(", ");
 					toolCalls.push({
-						serialized: `${block.name}(${argsStr})`,
+						name: block.name,
+						args,
 						target: getToolTarget(block.name, args),
 						breaksChain: CHAIN_BREAKERS.has(block.name),
 					});
 				}
 			}
 
-			if (thinkingParts.length > 0) {
+			if (includeThinking && thinkingParts.length > 0) {
 				const joined = thinkingParts.join("\n");
-				const capped = capThinkingForContext(joined);
-				parts.push({ text: `[Assistant thinking]: ${capped}` });
+				parts.push({ kind: "thinking", thinkingText: capThinkingForContext(joined) });
 			}
 			if (textParts.length > 0) {
-				parts.push({ text: `[Assistant]: ${textParts.join("\n")}` });
+				parts.push({ kind: "assistant", assistantText: textParts.join("\n") });
 			}
 			if (toolCalls.length > 0) {
 				if (toolCalls.some((tc) => tc.breaksChain)) hasChainBreaker = true;
@@ -528,8 +539,9 @@ export function serializeConversation(messages: Message[]): string {
 				lastToolTarget = target;
 				const dedupKey = target && !hasChainBreaker ? target : undefined;
 				parts.push({
-					text: `[Assistant tool calls]: ${toolCalls.map((tc) => tc.serialized).join("; ")}`,
+					kind: "toolCall",
 					dedupKey,
+					toolCalls: toolCalls.map((tc) => ({ name: tc.name, args: tc.args })),
 				});
 				if (dedupKey) hasChainBreaker = false;
 			}
@@ -540,16 +552,24 @@ export function serializeConversation(messages: Message[]): string {
 				.join("");
 			if (content) {
 				parts.push({
-					text: `[Tool result]: ${truncateForSummary(content, TOOL_RESULT_MAX_CHARS)}`,
+					kind: "toolResult",
 					dedupKey: lastToolTarget && !hasChainBreaker ? lastToolTarget : undefined,
 					isToolResult: true,
+					toolResult: {
+						name: msg.toolName ?? "tool",
+						text: content,
+						isError: msg.isError === true,
+					},
 				});
 			}
 			lastToolTarget = undefined;
 		}
 	}
 
-	// Second pass: for each dedupKey, keep only the last occurrence pair (tool call + result)
+	return parts;
+}
+
+function dedupeConversationParts(parts: ConversationPart[]): ConversationPart[] {
 	const lastSeen = new Map<string, number>();
 	for (let i = parts.length - 1; i >= 0; i--) {
 		const key = parts[i].dedupKey;
@@ -558,27 +578,111 @@ export function serializeConversation(messages: Message[]): string {
 		}
 	}
 
-	const result: string[] = [];
+	const result: ConversationPart[] = [];
 	for (let i = 0; i < parts.length; i++) {
 		const part = parts[i];
 		const key = part.dedupKey;
 		if (key) {
 			const lastIdx = lastSeen.get(key)!;
 			if (part.isToolResult) {
-				// Tool result: keep if its preceding tool call was kept
 				const prevToolCallIdx = findPrecedingToolCall(parts, i);
 				if (prevToolCallIdx !== -1 && prevToolCallIdx >= lastSeen.get(parts[prevToolCallIdx].dedupKey ?? "")!) {
-					result.push(part.text);
+					result.push(part);
 				}
 			} else if (i >= lastIdx) {
-				result.push(part.text);
+				result.push(part);
 			}
 		} else {
-			result.push(part.text);
+			result.push(part);
 		}
 	}
+	return result;
+}
 
-	return result.join("\n\n");
+function renderConversationProse(parts: ConversationPart[]): string {
+	const lines: string[] = [];
+	for (const part of parts) {
+		if (part.kind === "user" && part.userText) {
+			lines.push(`[User]: ${part.userText}`);
+		} else if (part.kind === "thinking" && part.thinkingText) {
+			lines.push(`[Assistant thinking]: ${part.thinkingText}`);
+		} else if (part.kind === "assistant" && part.assistantText) {
+			lines.push(`[Assistant]: ${part.assistantText}`);
+		} else if (part.kind === "toolCall" && part.toolCalls) {
+			const serialized = part.toolCalls
+				.map((tc) => {
+					const argsStr = Object.entries(tc.args)
+						.map(([k, v]) => {
+							const encoded = JSON.stringify(v);
+							return encoded.length <= 300 ? `${k}=${encoded}` : `${k}=${sliceSafe(encoded, 0, 300)}…`;
+						})
+						.join(", ");
+					return `${tc.name}(${argsStr})`;
+				})
+				.join("; ");
+			lines.push(`[Assistant tool calls]: ${serialized}`);
+		} else if (part.kind === "toolResult" && part.toolResult) {
+			lines.push(`[Tool result]: ${truncateForSummary(part.toolResult.text, TOOL_RESULT_MAX_CHARS)}`);
+		}
+	}
+	return lines.join("\n\n");
+}
+
+type DeltaEvent =
+	| { k: "u"; t: string }
+	| { k: "a"; t: string }
+	| { k: "c"; n: string; a: Record<string, unknown> }
+	| { k: "r"; n: string; t: string; e?: 1 };
+
+function renderConversationDelta(parts: ConversationPart[]): string {
+	const events: DeltaEvent[] = [];
+	for (const part of parts) {
+		if (part.kind === "user" && part.userText) {
+			events.push({ k: "u", t: part.userText });
+		} else if (part.kind === "assistant" && part.assistantText) {
+			events.push({ k: "a", t: part.assistantText });
+		} else if (part.kind === "toolCall" && part.toolCalls) {
+			for (const tc of part.toolCalls) {
+				events.push({ k: "c", n: tc.name, a: compactArgsForDelta(tc.args) });
+			}
+		} else if (part.kind === "toolResult" && part.toolResult) {
+			const event: DeltaEvent = {
+				k: "r",
+				n: part.toolResult.name,
+				t: truncateForSummary(part.toolResult.text, DELTA_TOOL_RESULT_MAX_CHARS),
+			};
+			if (part.toolResult.isError) event.e = 1;
+			events.push(event);
+		}
+	}
+	return JSON.stringify(events);
+}
+
+/**
+ * Serialize LLM messages to text for summarization.
+ * This prevents the model from treating it as a conversation to continue.
+ * Call convertToLlm() first to handle custom message types.
+ *
+ * Consecutive operations on the same resource are deduplicated: only the last
+ * tool call + result per resource survives, unless a shell command or user
+ * message intervenes (breaking the chain). Inspired by Ned's trim_context_summary.
+ *
+ * Tool results are truncated to keep the summarization request within
+ * reasonable token budgets. Full content is not needed for summarization.
+ */
+export function serializeConversation(messages: Message[]): string {
+	const parts = collectConversationParts(messages, true);
+	return renderConversationProse(dedupeConversationParts(parts));
+}
+
+/**
+ * Compact JSON serialization for incremental (2nd+) compaction summarization.
+ * Omits thinking blocks and uses shorter keys/truncation — prior reasoning lives
+ * in `<previous-summary>`. Same resource dedup as {@link serializeConversation}.
+ */
+export function serializeConversationDelta(messages: Message[]): string {
+	const parts = collectConversationParts(messages, false);
+	return renderConversationDelta(dedupeConversationParts(parts));
 }
 
 function findPrecedingToolCall(parts: Array<{ dedupKey?: string; isToolResult?: boolean }>, resultIdx: number): number {

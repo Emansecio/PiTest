@@ -19,17 +19,18 @@
 | **REMOVED** | Falso positivo — já ships ou premissa factualmente errada |
 | **TRADEOFF** | Decisão de produto / A/B — não é “falta de código” |
 
-**Resumo pós-revisão**
+**Resumo pós-revisão** (atualizado pós-K5)
 
 | Veredicto | Contagem |
 |-----------|----------|
-| VALID | 54 |
-| PARTIAL | 23 |
+| VALID | 45 |
+| PARTIAL | 24 |
 | MERGED | 2 |
-| REMOVED | 5 |
+| REMOVED | 13 |
 | TRADEOFF (H1–H8) | 8 |
 | Linhas inventariadas ativas | 85 |
-| **Itens acionáveis distintos** | **77** (54 VALID + 23 PARTIAL) |
+| **Itens acionáveis distintos** | **69** (45 VALID + 24 PARTIAL) |
+| **K1–K6 shipped** | 8 slices (ver §K e §I) |
 
 ---
 
@@ -42,10 +43,12 @@
 | **D7** | **REMOVED** — defer no prune grava disco + excerpt inline; corpo completo só via `recall_tool_output` | `compaction.ts:978-996`; `recall-tool-output.ts` |
 | **D11** | **REMOVED** — echo cap já existe (`ECHO_MAX_STRING_POINTS = 600`) | `packages/ai/src/utils/validation.ts:22-37` |
 | **F10** | **REMOVED** — `lean` default **true** (`lean: raw?.lean !== false`) | `settings-manager.ts:328-329,1822` |
-
-**Substituição de A1 (gap real estreito):** ver **A1′** abaixo — supersede só dispara quando
-`contextTokens > proactivePruneFloor` (~64k ou 25% da janela); abaixo disso resultados
-supersedidos permanecem inteiros até compact.
+| **A1′** | **REMOVED** — K3: supersede abaixo do prune floor no send path | `agent-session.ts:2961-3017` (`applySupersedeOnly` quando `contextTokens ≤ floor`) |
+| **A4** (forma original) | **REMOVED** — K4: cap thinking no contexto vivo | `capThinkingForContext` + `applyOldThinkingCap` em `_pruneContextForProvider` |
+| **D2** | **REMOVED** — K3: supersede imediato pós-tool-call | `agent-session-live-prune.ts` (`applyLiveContextEconomyAfterToolSuccess`) |
+| **B1, B2, B6** | **REMOVED** — K2: wire estimate + presend com user pendente + footer wire | `estimateWireTokens`, `agent-session-compaction.ts`, `getContextUsage` |
+| **E16** | **REMOVED** — K5: dedupe de entry points ponteiro | `context-files.ts` + `resource-loader.ts` |
+| **G3** | **REMOVED** — K1: bench sintético de sessão | `scripts/bench-session-tokens.mts` |
 
 ---
 
@@ -53,7 +56,7 @@ supersedidos permanecem inteiros até compact.
 
 | ID | Fundido em | Motivo |
 |----|------------|--------|
-| **C3** | **A4** | Mesmo gap: cap de thinking só em `serializeConversation`, não no contexto vivo |
+| **C3** | **A4** | Mesmo gap (resolvido K4); cap thinking só em `serializeConversation` antes de K4 |
 | **D1** | **A3** | Mesmo gap: elision de args de mutação só na prune, não pós-sucesso no histórico |
 
 ---
@@ -62,10 +65,10 @@ supersedidos permanecem inteiros até compact.
 
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
-| A1′ | **VALID** | Supersede **abaixo do prune floor** | Colapsar superseded reads/greps mesmo quando `contextTokens ≤ proactivePruneFloor` (hoje noop em `_pruneContextForProvider:2902`) |
+| A1′ | **REMOVED** | — | K3 — ver Eliminados |
 | A2 | **PARTIAL** | Ampliar `SUPERSEDED_TOOL_RESULT_NAMES` de forma seletiva | `grep/find/ls/symbol/find_symbol` já estão cobertos; foco real é `ast_grep`, `lsp`, `repo_map`. `bash` só com allowlist/fingerprint |
-| A3 | **PARTIAL** | Elision pós-sucesso no histórico assistant | `pruneToolCallArguments` já elide na prune (`compaction.ts:944-962`); falta após tool success / fora do threshold |
-| A4 | **VALID** | Cap thinking no contexto vivo | `THINKING_MAX_CHARS=1500` só em `serializeConversation` (`utils.ts:340,508-511`) |
+| A3 | **PARTIAL** | Elision pós-sucesso no histórico assistant | K3 elide mutating tools live (`agent-session-live-prune.ts`); prune path já elide (`compaction.ts:944-962`). Gap residual: histórico antigo / tools fora da allowlist |
+| A4 | **REMOVED** | — | K4 — ver Eliminados |
 | A5 | **VALID** | Read dedupe pós-compact seletivo | `readDedupeStore?.clear()` incondicional em todo compact (`agent-session-compaction.ts:115`) |
 | A6 | **VALID** | Caps adaptativos read/grep/bash | `adaptivePruneThreshold` não liga aos `DEFAULT_MAX_*` das tools |
 | A7 | **PARTIAL** | Grep auto `files_with_matches` quando matches > N | Modo existe e a descrição já recomenda; falta auto-switch (modelo ignora hint) (`grep.ts:581`) |
@@ -79,12 +82,12 @@ supersedidos permanecem inteiros até compact.
 
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
-| B1 | **VALID** | `estimateWireTokens()` | Só `estimateContextTokens(messages)` — sem system/tools/user (`compaction.ts:183-210`) |
-| B2 | **VALID** | Presend com user pendente | Presend em `messages` **antes** de append user (`agent-session.ts:3248-3269`) |
+| B1 | **REMOVED** | — | K2 — `estimateWireTokens` em `compaction.ts` |
+| B2 | **REMOVED** | — | K2 — presend inclui user pendente |
 | B3 | **VALID** | Calibrated trailing fudge | Sem bias `providerInput − estimate` |
 | B4 | **VALID** | `PRESEND_OVERFLOW_RATIO` dinâmico | Constante 0.95 (`agent-session-compaction.ts:38`) |
 | B5 | **VALID** | Mid-turn presend em `agent-loop.ts` | Só `transformContext` antes de stream; sem presend (`agent-loop.ts:514-518`) |
-| B6 | **VALID** | Footer com wire estimate | `getContextUsage` = msgs only (`agent-session.ts:5179`) |
+| B6 | **REMOVED** | — | K2 — footer expõe `wireTokens` via `getContextUsage` |
 | B7 | **PARTIAL** | Fudge por densidade calibrado | Heurística dense/prose/CJK existe; sem calibração por histórico provider |
 | B8 | **VALID** | Reservar thinking budget no presend | Não implementado |
 | B9 | **VALID** | Presend entre tool rounds (~92%) | Distinto de B5 (threshold/ação); gap real |
@@ -96,7 +99,7 @@ supersedidos permanecem inteiros até compact.
 
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
-| C1 | **PARTIAL** | Delta summarization | 2ª+ compact usa `<previous-summary>` prose + serialize full (`compaction.ts:1092-1203`); sem delta JSON-only |
+| C1 | **PARTIAL** | Delta summarization | K6: 2ª+ compact usa `serializeConversationDelta` em `<conversation-delta>` (JSON compacto, sem thinking); gap residual: summarizer ainda gera prose completo (C2) |
 | C2 | **PARTIAL** | Structured-primary context | Digests/`formatFileOperations` existem; LLM ainda gera prose completo |
 | C4 | **PARTIAL** | Self-correction gate mais fino | `VERIFY_MIN_INPUT_TOKENS=25000` existe; inflação ainda `length/4` |
 | C5 | **VALID** | Multipass coalescing | 2º `executeCompactionPipeline` síncrono possível (`agent-session-compaction.ts:456-477`) |
@@ -114,7 +117,7 @@ supersedidos permanecem inteiros até compact.
 
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
-| D2 | **VALID** | Supersede **imediato** pós-tool-call | Diferente de A1′: colapsar no momento do result, não só no próximo LLM/prune |
+| D2 | **REMOVED** | — | K3 — ver Eliminados |
 | D3 | **PARTIAL** | Patch-audit mais enxuto | Não há cap explícito, mas a mensagem é checklist curto/fixo; baixo risco |
 | D5 | **VALID** | Read dedupe LRU maior | `READ_DEDUPE_WINDOW = 16` |
 | D6 | **VALID** | Delta read threshold tunável | Constantes fixas 1500 / 0.5 (`read.ts:94-96`) |
@@ -129,12 +132,12 @@ supersedidos permanecem inteiros até compact.
 
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
-| E1 | **PARTIAL** | Lazy schemas | **Já parcial:** tools ocultos/MCP-deferred fora do wire até ativar (`tool-discovery.ts`, `mcp-extension.ts`); ativos ainda mandam schema completo |
-| E2 | **PARTIAL** | Tools cache breakpoint separado | `cache_control` no último tool (`anthropic.ts:1257`); sem bloco hash-keyed isolado |
+| E1 | **PARTIAL** | Lazy schemas | K5: `compactToolSchemaForWire` no wire (`tool-wire-schema.ts`, opt-out `PIT_NO_LAZY_TOOL_SCHEMAS`). Gap residual: API `description` completa (ver E9) |
+| E2 | **PARTIAL** | Tools cache breakpoint separado | K5: tools sorted by name + `cache_control` no **primeiro** tool (`anthropic.ts`, `openai-completions.ts`). Gap residual: bloco hash-keyed isolado |
 | E3 | **VALID** | Memory recall gate | `MEMORY.md` inteiro no prefix (`memory/index.ts:79-84`) |
 | E4 | **VALID** | Hindsight on-demand | Summaries no prefix cacheável, não BM25 por turn |
 | E5 | **VALID** | Guideline tiers | Bloco único; karpathy opt-in, não tiered |
-| E6 | **VALID** | AGENTS.md retrieval | Arquivo inteiro em `<project_context>` |
+| E6 | **PARTIAL** | AGENTS.md retrieval | K5: head+tail + hint `read({ path })` acima de 8k chars (`context-files.ts`, opt-out `PIT_NO_CONTEXT_RETRIEVAL`). Gap residual: recall BM25/on-demand do corpo completo |
 | E7 | **PARTIAL** | Skills mais agressivo | Index mode existe; `SKILLS_FULL_LIMIT = 15` |
 | E8 | **VALID** | `setActiveTools` sem rebuild total | Sempre `_rebuildSystemPrompt(..., "tool-surface")` |
 | E9 | **PARTIAL** | Tool descriptions stub na API | System prompt já lista name/snippet; custo restante é schema + API `description` |
@@ -144,12 +147,18 @@ supersedidos permanecem inteiros até compact.
 | E13 | **VALID** | Frequent-files condicional | Emitido sempre que há dados; sem gate de ocupação |
 | E14 | **PARTIAL** | Dynamic suffix mínimo | Outlines capped 12 (`system-prompt.ts:135-164`); não single-line |
 | E15 | **PARTIAL** | MCP defer mais agressivo | `shouldDeferMcpServer` ≥10 tools; servers pequenos eager |
-| E16 | **VALID** | Dedup/compactação de arquivos ponteiro (`AGENTS.md`/`CLAUDE.md`) | Loader pode carregar arquivos de contexto redundantes; bench local mostrou `AGENTS.md, CLAUDE.md` somando 10.272 chars (`resource-loader.ts:122,604-616`) |
+| E16 | **REMOVED** | — | K5 — `context_files_chars=8568` (antes ~10.272 com AGENTS+CLAUDE duplicados) |
 
-**Baseline medido em 2026-06-28 (pós-K5):** `npx tsx scripts/bench-prompt-size.mts` →
-`wire_prefix_tokens=17814`, `prompt_prefix_tokens=25531`, `system_prompt_chars=48493`,
-`context_files_chars=8568`, `skills_chars=38688`, `wire_tool_desc_chars=5814`,
-`wire_tool_param_chars=11603` (full tool_desc/param: 17832 / 28139).
+**Baseline prefixo (pós-K5, PiTest, 2026-06-28):** `npx tsx scripts/bench-prompt-size.mts`
+
+| Métrica | Valor |
+|---------|-------|
+| `prompt_prefix_tokens` | 25531 |
+| `wire_prefix_tokens` | 17814 (−30% vs prompt) |
+| `context_files_chars` | 8568 |
+| `skills_chars` / visíveis | 38688 / 91 |
+| tool desc+param (full) | 4819 + 7605 toks |
+| tool desc+param (wire) | 1571 + 3136 toks |
 
 ---
 
@@ -162,9 +171,9 @@ supersedidos permanecem inteiros até compact.
 | F3 | **VALID** | Fusion token ledger | Chars/tempo sim; sem tokens synth+verify+writer |
 | F4 | **PARTIAL** | `enforceLimit` em todo `add()` | Limite é aplicado no `openBank`; gap é enforcement incremental após novas gravações |
 | F5 | **VALID** | BM25 min score no recall | `score > 0` aceita qualquer hit (`bank.ts:287`) |
-| F6 | **VALID** | Subagent usage no footer | `getContextUsage` ignora registry |
+| F6 | **PARTIAL** | Subagent usage no footer | K7 expõe `subagentSpent` em `getContextUsage` quando budget ativo ou subagent spend > 0; sem breakdown por handle |
 | F7 | **PARTIAL** | Abort subagents on dispose | Cada task tem `AbortController`; gap é abortar todos os controllers pendentes no dispose da sessão |
-| F8 | **VALID** | Pre-spawn vs `goal.tokenBudget` | Budget pós-turn; sem gate em spawn |
+| F8 | **PARTIAL** | Pre-spawn vs `goal.tokenBudget` | K7 gate em `task` run/spawn/resume quando budget esgotado; sem reserva estimada pré-spawn |
 | F9 | **VALID** | Fusion verify no registry pai | `new SubagentRegistry()` efêmero (`agent-session-fusion.ts:174`) |
 | F11 | **PARTIAL** | Hindsight cleanup fim subagent | `enforcePerScopeLimit` no open; sem hook fim-subagent |
 
@@ -174,9 +183,9 @@ supersedidos permanecem inteiros até compact.
 
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
-| G1 | **VALID** | Token budget governor unificado | Fragmentado (goal / subagent / fusion) |
+| G1 | **PARTIAL** | Token budget governor unificado | K7: `TokenBudgetGovernor` unifica main+subagent → goal; gate spawn; footer via `getContextUsage`. Gap: fusion ledger (F3), persist subagent split on reload |
 | G2 | **VALID** | Auto-tighten prune em `instabilityTurn` | Warning TUI only (`interactive-mode.ts:5776`) |
-| G3 | **VALID** | `bench-session-tokens.mts` | Não existe; só `bench-prompt-size.mts` |
+| G3 | **REMOVED** | — | K1 — `scripts/bench-session-tokens.mts` (3 cenários + METRIC) |
 | G4 | **VALID** | Bench fusion+coordinator | Sem cenário em `bench/scenarios/` |
 | G5 | **PARTIAL** | Export prefix-rebuild reasons | Já aparece no `/cache-status`; falta export estruturado para bench/diagnóstico automatizado |
 | G6 | **VALID** | A/B prune vs cache | Sem harness |
@@ -184,7 +193,7 @@ supersedidos permanecem inteiros até compact.
 | G8 | **VALID** | A/B self-correction | Sem harness |
 | G9 | **VALID** | Telemetria por tool na prune | Sem breakdown por `toolName` |
 | G10 | **VALID** | Dashboard `/economy` | Não existe |
-| G11 | **PARTIAL** | METRIC por mecanismo | `bench-prompt-size` emite METRIC; não por feature |
+| G11 | **PARTIAL** | METRIC por mecanismo | `bench-prompt-size` + `bench-session-tokens` emitem METRIC por cenário; falta breakdown por mecanismo (prune/supersede/thinking-cap/wire) |
 | G12 | **VALID** | CI regression gate tokens | Não existe |
 
 ---
@@ -197,8 +206,8 @@ supersedidos permanecem inteiros até compact.
 | H2 | TRADEOFF | frequentFiles no suffix | Suffix uncached por design (`system-prompt.ts:140-148`) |
 | H3 | TRADEOFF | Self-correction 2× summarizer | `selfCorrection` default true |
 | H4 | TRADEOFF | readDedupe clear on compact | Comportamento atual documentado em A5 |
-| H5 | TRADEOFF | Lazy schemas (E1) | Parcialmente mitigado por discovery/defer |
-| H6 | TRADEOFF | Thinking prune live (A4) | — |
+| H5 | TRADEOFF | Lazy schemas (E1) | K5 compacta wire; discovery/defer cobre ocultos — tradeoff qualidade de schema vs tokens |
+| H6 | TRADEOFF | Thinking prune live (A4) | K4 shipped; tradeoff fidelidade do raciocínio antigo vs custo |
 | H7 | TRADEOFF | Compaction agressiva vs qualidade | — |
 | H8 | TRADEOFF | Arg elision vs auditoria (A3) | — |
 
@@ -218,6 +227,13 @@ supersedidos permanecem inteiros até compact.
 10. `frequentFiles`, `proactivePruneFloor`  
 11. Fusion `lean` default true — **não F10**  
 12. Bash JSON-crush lê o output completo via `fullOutputPath` — **não D4**  
+13. **K1** — `bench-session-tokens.mts` (explore-heavy / edit-heavy / long-reasoning)  
+14. **K2** — `estimateWireTokens`, presend com user pendente, footer `wireTokens`  
+15. **K3** — supersede abaixo do floor + live supersede/arg-elision pós-tool (`agent-session-live-prune.ts`)  
+16. **K4** — thinking cap no contexto vivo (`capThinkingForContext`, opt-out `PIT_NO_THINKING_CAP`)  
+17. **K5** — lazy wire schemas (`tool-wire-schema.ts`), tools cache no primeiro sorted tool, context retrieval head+tail, dedupe AGENTS/CLAUDE (`context-files.ts`)  
+18. **K6** — delta summarization input (`serializeConversationDelta`, `<conversation-delta>`; opt-out `PIT_NO_DELTA_SUMMARIZATION`)  
+19. **K7** — `TokenBudgetGovernor`: main+subagent ledger, goal sync, spawn gate, `ContextUsage` budget fields  
 
 ---
 
@@ -238,36 +254,64 @@ supersedidos permanecem inteiros até compact.
 | K3 | A3, D2, A1′ | Arg elision live + supersede imediato + supersede abaixo do floor — **shipped** |
 | K4 | A4 | Cap thinking no contexto vivo — **shipped** |
 | K5 | E1, E2, E6, E16 | Reduzir prefixo fixo: lazy schemas, tools breakpoint e dedupe/retrieval de context files — **shipped** |
-| K6 | C1 | Delta summarization (estreitar C2 se C1 resolver) |
-| K7 | G1 | Token governor |
+| K6 | C1 | Delta summarization (2nd+ compact JSON input) — **shipped** |
+| K7 | G1 | Token governor (unified ledger + spawn gate) — **shipped** |
 | K8 | — | Demais VALID por impacto medido |
+
+**Pendente imediato (roadmap):** G12 (CI regression gate tokens) → C2 structured-primary output → fusion token ledger (F3).
+
+**Gaps residuais dos itens K5 (ainda PARTIAL, não reabrir como VALID):** E1 API description stub (overlap E9), E2 bloco hash-keyed isolado, E6 recall BM25 do corpo completo.
 
 ---
 
-## Baseline G3 (`bench-session-tokens.mts`, 2026-06-28)
+## Baseline sessão (`bench-session-tokens.mts`, 2026-06-28, pós-K5)
 
-Referência para regressão pós-K2/K3. Rodar: `npx tsx scripts/bench-session-tokens.mts`.
+Rodar: `npx tsx scripts/bench-session-tokens.mts` (ou `--scenario=long-reasoning`).
 
-| Cenário | messages_only | wire_estimate | after_prune | prune_reclaimed |
-|---------|---------------|---------------|-------------|-----------------|
+`prefix_tokens` compartilhado (sintético): **26704**.
+
+**K6 delta input (pós-K6, `bench-session-tokens.mts` seção `summarization-input`):**
+
+| Cenário | serialize_prose | serialize_delta | incremental_saved |
+|---------|-----------------|-----------------|-------------------|
+| explore-heavy | 28989 chars | 20343 (−30%) | −29% |
+| edit-heavy | 11388 | 8238 (−28%) | −25% |
+| long-reasoning | 17416 | 7158 (−59%) | −55% |
+
+| Cenário | messages_only | wire_estimate | after_live_economy | live_economy_reclaimed |
+|---------|---------------|---------------|--------------------|------------------------|
 | explore-heavy | 62631 | 89335 | 56747 | 32588 |
 | edit-heavy | 57657 | 84361 | 28057 | 56314 |
 | long-reasoning | 17830 | 44534 | 34058 | 12700 |
 
-`prefix_tokens` compartilhado: **26704**. Coluna `after_prune`/`reclaimed` pós-K3 = **`after_live_economy`** / **`live_economy_reclaimed`** no bench.
+Notas:
+- **long-reasoning:** reclaim 12700 = K4 thinking cap (wire 44534 → 34058).
+- **edit-heavy:** reclaim 56314 = K3/K4 combinados (arg elision + thinking cap); maior ganho dos 3 cenários.
+- **explore-heavy:** prune de tool outputs domina; live economy = after_prune neste cenário.
 
 ---
 
-## Estimativas (hipótese — só após G3)
+## Medido vs hipótese (pós-K5)
+
+| Cluster | Hipótese | Medido (2026-06-28) | Status |
+|---------|----------|---------------------|--------|
+| K5 prefix wire (E1/E2/E6/E16) | 10–30% custo fixo | `wire_prefix` 17814 vs `prompt_prefix` 25531 (−30%) | **confirmado** (PiTest) |
+| K4 thinking live (A4) | 10–40% em reasoning | long-reasoning −12700 toks (28.5%) | **confirmado** |
+| K3 edit-heavy live economy | 10–30% | edit-heavy −56314 toks (66.8% do wire) | **confirmado** (cenário sintético agressivo) |
+| K2 wire + presend (B1–B2) | 5–15% menos overflow | infra shipped; overflow rate não benchmarkado ainda | shipped, sem A/B |
+| K6 delta summarization input (C1) | 20–50% summarizer 3ª+ | long-reasoning incremental −55%; explore −29%; edit −25% | **confirmado** (input proxy) |
+| E3/E4 memory/hindsight on-demand | 10–30% prefix | — | **pendente** |
+
+---
+
+## Estimativas restantes (hipótese — pós-K5)
 
 | Cluster | Potencial | Confiança |
 |---------|-----------|-----------|
-| B1–B2 wire + presend | 5–15% menos overflow tardio | Alta |
-| E1/E3/E4/E6/E16 prefix retrieval | 10–30% custo fixo em sessões com MEMORY/AGENTS grandes | Média |
-| A4 thinking live | 10–40% transcript em reasoning high | Alta em sessões longas |
-| A3 arg elision live | 10–30% em edit-heavy | Alta |
-| A1′+D2 supersede | 5–20% exploratório | Média |
-| C1 delta summarization | 20–50% custo summarizer 3ª+ compact | Média |
+| C2 structured-primary summarizer output | 20–40% custo output summarizer | Média |
+| E3/E4 memory + hindsight on-demand | 10–30% prefix em sessões longas | Média |
+| A2 expandir supersede tools | 5–15% exploratório | Baixa–média |
+| G12 CI regression gate | evita regressão silenciosa | Alta (valor operacional) |
 
 ---
 
@@ -275,5 +319,6 @@ Referência para regressão pós-K2/K3. Rodar: `npx tsx scripts/bench-session-to
 
 - Auditoria inicial: 5 agentes paralelos (2026-06-28)  
 - Revisão código: 2 agentes + verificação manual (`_pruneContextForProvider`, `validation.ts`, `lean` default)  
-- Revalidação extra manual (2026-06-28): contagens corrigidas, D4 removido, E16 adicionado e baseline medido com `scripts/bench-prompt-size.mts`  
+- Revalidação extra manual (2026-06-28): contagens corrigidas, D4 removido, E16 adicionado  
+- Baselines pós-K5 (2026-06-28): `bench-prompt-size.mts` + `bench-session-tokens.mts` (3 cenários)  
 - Roadmap: [`pit-agent-performance-quality-roadmap.md`](./pit-agent-performance-quality-roadmap.md)

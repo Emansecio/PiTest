@@ -189,6 +189,7 @@ import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { setCurrentTodoManager, type TodoItem, TodoManager, type TodoState } from "./todo/todo-manager.ts";
+import { setCurrentTokenGovernor, TokenBudgetGovernor, type TokenBudgetSnapshot } from "./token-governor.ts";
 import {
 	extractErrorMessage,
 	fingerprintToolArgsExact,
@@ -668,6 +669,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// Autonomous goal state (the /goal command + goal_complete tool). Published
 	// via the module-level registry so the tool can reach it on demand.
 	private readonly _goal = new GoalManager();
+	private readonly _tokenGovernor = new TokenBudgetGovernor();
 	// Native todo list (the `todo` tool + /todos command + live overlay).
 	private readonly _todo = new TodoManager();
 	private readonly _plan = new PlanManager();
@@ -832,7 +834,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 
 		// Publish the goal manager and restore any persisted goal from the
 		// session file so `/reload` and reopening keep an unfinished goal.
+		this._tokenGovernor.bindGoal(this._goal);
 		setCurrentGoalManager(this._goal);
+		setCurrentTokenGovernor(this._tokenGovernor);
 		this._restoreGoalFromSession();
 
 		// Same for the todo list: publish it. Restore already happened above via
@@ -2290,6 +2294,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 	/** Start (or replace) the autonomous goal and surface the goal_complete tool. */
 	startGoal(objective: string, opts: { tokenBudget?: number } = {}): GoalSnapshot {
 		const snap = this._goal.start(objective, opts);
+		this._tokenGovernor.reset();
+		this._tokenGovernor.bindGoal(this._goal);
+		this._tokenGovernor.setBudget(opts.tokenBudget);
 		this._activateGoalTool(true);
 		this._persistGoal();
 		return snap;
@@ -2313,13 +2320,19 @@ export class AgentSession implements CompactionHost, FusionHost {
 	/** Raise the active goal's token budget (lifts a budget_limited goal). */
 	setGoalTokenBudget(tokenBudget: number): void {
 		this._goal.setTokenBudget(tokenBudget);
+		this._tokenGovernor.setBudget(tokenBudget);
 		this._persistGoal();
 	}
 
 	clearGoal(): void {
 		this._goal.clear();
+		this._tokenGovernor.reset();
 		this._activateGoalTool(false);
 		this._persistGoal();
+	}
+
+	getTokenBudgetSnapshot(): TokenBudgetSnapshot {
+		return this._tokenGovernor.snapshot();
 	}
 
 	private _activateGoalTool(active: boolean): void {
@@ -2335,7 +2348,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 		const m = message as { usage?: { input?: number; output?: number }; stopReason?: string } | undefined;
 		const usage = m?.usage;
 		const tokens = usage ? (usage.input ?? 0) + (usage.output ?? 0) : 0;
-		this._goal.recordTurn(tokens);
+		this._tokenGovernor.recordMain(tokens);
+		this._goal.recordIteration();
 		if (typeof m?.stopReason === "string") this._goal.onInterrupted(m.stopReason);
 		// Persist progress so token/iteration counts survive /reload. Status
 		// changes flush immediately; otherwise writes are throttled.
@@ -2458,6 +2472,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			}
 			if (latestGoal && latestGoal.status !== "complete") {
 				this._goal.restore(latestGoal);
+				this._tokenGovernor.restoreSpend(latestGoal.tokensUsed, latestGoal.tokenBudget);
 				this._activateGoalTool(true);
 			}
 			if (latestTodo) this._todo.restore(latestTodo);
@@ -5253,9 +5268,21 @@ export class AgentSession implements CompactionHost, FusionHost {
 		const key = `${this.sessionManager.getLeafId()}:${this.messages.length}:${contextWindow}:${this.agent.state.systemPrompt.length}:${this.agent.state.tools.length}`;
 		const cached = this._ctxUsageCache;
 		if (cached && cached.key === key) return cached.value;
-		const value = this.computeContextUsage(contextWindow);
+		const value = this.applyBudgetFields(this.computeContextUsage(contextWindow));
 		this._ctxUsageCache = { key, value };
 		return value;
+	}
+
+	private applyBudgetFields(usage: ContextUsage | undefined): ContextUsage | undefined {
+		if (!usage) return undefined;
+		const snap = this._tokenGovernor.snapshot();
+		if (snap.budgetLimit === undefined && snap.subagentTokens === 0) return usage;
+		return {
+			...usage,
+			budgetSpent: snap.totalSpent,
+			budgetLimit: snap.budgetLimit,
+			subagentSpent: snap.subagentTokens,
+		};
 	}
 
 	private computeContextUsage(contextWindow: number): ContextUsage | undefined {

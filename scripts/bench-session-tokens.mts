@@ -27,6 +27,8 @@ import {
 	proactivePruneFloor,
 	type WireToolSurface,
 } from "../packages/coding-agent/src/core/compaction/compaction.ts";
+import { serializeConversation, serializeConversationDelta } from "../packages/coding-agent/src/core/compaction/utils.ts";
+import { convertToLlm } from "../packages/coding-agent/src/core/messages.ts";
 import { buildSystemPrompt } from "../packages/coding-agent/src/core/system-prompt.ts";
 import { createAllTools } from "../packages/coding-agent/src/core/tools/index.ts";
 
@@ -396,6 +398,45 @@ console.log(`shared prefix_tokens: ${wirePrefix.prefixTokens}`);
 
 for (const scenario of scenarios) {
 	printScenarioMetrics(measureScenario(scenario, wirePrefix));
+}
+
+const SAMPLE_PREVIOUS_SUMMARY = [
+	"## Goal",
+	"Ship context economy slices K1–K5.",
+	"## Progress",
+	"### Done",
+	"- [x] Wire estimate and live prune",
+	"## Key Decisions",
+	"- **Delta path**: incremental compacts use JSON delta input",
+].join("\n");
+
+function measureSummarizationInput(name: ScenarioName): void {
+	const builders: Record<ScenarioName, () => AgentMessage[]> = {
+		"explore-heavy": buildExploreHeavyScenario,
+		"edit-heavy": buildEditHeavyScenario,
+		"long-reasoning": buildLongReasoningScenario,
+	};
+	const llm = convertToLlm(builders[name]());
+	const proseChars = serializeConversation(llm).length;
+	const deltaChars = serializeConversationDelta(llm).length;
+	const incrementalProsePrompt = proseChars + SAMPLE_PREVIOUS_SUMMARY.length + 800;
+	const incrementalDeltaPrompt = deltaChars + SAMPLE_PREVIOUS_SUMMARY.length + 900;
+	const savedChars = incrementalProsePrompt - incrementalDeltaPrompt;
+	const savedPct = Math.round((savedChars / incrementalProsePrompt) * 100);
+
+	console.log(`\n=== summarization-input:${name} ===`);
+	console.log(`serialize_prose_chars:  ${proseChars}`);
+	console.log(`serialize_delta_chars:  ${deltaChars} (-${Math.round(((proseChars - deltaChars) / proseChars) * 100)}% vs prose)`);
+	console.log(`incremental_prompt_prose: ~${toToks(incrementalProsePrompt)} toks`);
+	console.log(`incremental_prompt_delta: ~${toToks(incrementalDeltaPrompt)} toks (-${savedPct}% vs prose incremental)`);
+	console.log(`METRIC scenario=${name} serialize_prose_chars=${proseChars}`);
+	console.log(`METRIC scenario=${name} serialize_delta_chars=${deltaChars}`);
+	console.log(`METRIC scenario=${name} incremental_delta_saved_pct=${savedPct}`);
+}
+
+console.log("\n--- K6 delta summarization input (2nd+ compact proxy) ---");
+for (const scenario of scenarios) {
+	measureSummarizationInput(scenario);
 }
 
 console.log(`\nMETRIC bench=session-tokens prefix_tokens=${wirePrefix.prefixTokens}`);

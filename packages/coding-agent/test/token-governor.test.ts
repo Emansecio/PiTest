@@ -1,0 +1,40 @@
+import { describe, expect, it } from "vitest";
+import { GoalManager } from "../src/core/goal/goal-manager.ts";
+import { TokenBudgetGovernor } from "../src/core/token-governor.ts";
+
+describe("TokenBudgetGovernor", () => {
+	it("aggregates main and subagent spend into goal tokensUsed", () => {
+		const goal = new GoalManager();
+		const governor = new TokenBudgetGovernor();
+		governor.bindGoal(goal);
+		goal.start("ship it", { tokenBudget: 10_000 });
+		governor.setBudget(10_000);
+
+		governor.recordMain(3000);
+		goal.recordIteration();
+		expect(goal.get()?.tokensUsed).toBe(3000);
+
+		governor.recordSubagent({ inputTokens: 500, outputTokens: 500, totalTokens: 1000, costUsd: 0 });
+		expect(goal.get()?.tokensUsed).toBe(4000);
+		expect(governor.snapshot().subagentTokens).toBe(1000);
+	});
+
+	it("blocks spawn when budget is exhausted", () => {
+		const goal = new GoalManager();
+		const governor = new TokenBudgetGovernor();
+		governor.bindGoal(goal);
+		goal.start("x", { tokenBudget: 1000 });
+		governor.setBudget(1000);
+		governor.recordMain(1100);
+		goal.recordIteration();
+
+		expect(governor.evaluateSpawn().allowed).toBe(false);
+		expect(goal.get()?.status).toBe("budget_limited");
+	});
+
+	it("allows spawn when no budget is set", () => {
+		const governor = new TokenBudgetGovernor();
+		governor.recordMain(50_000);
+		expect(governor.evaluateSpawn().allowed).toBe(true);
+	});
+});

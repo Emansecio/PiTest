@@ -35,12 +35,13 @@ import {
 	saveResumeState,
 	spawnSubagent,
 } from "../coordinator/index.ts";
-import type { SpawnSubagentResult } from "../coordinator/types.ts";
+import type { SpawnSubagentResult, SubagentUsage } from "../coordinator/types.ts";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "../messaging/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { parseModelPattern } from "../model-resolver.ts";
 import type { Skill } from "../skills.ts";
+import type { TokenBudgetGovernor } from "../token-governor.ts";
 import { withAgentScope } from "../tools/hindsight-scope.ts";
 import { createMessageTool } from "../tools/message.ts";
 import { formatSize, truncateTail } from "../tools/truncate.ts";
@@ -417,6 +418,8 @@ export interface CoordinatorExtensionOptions {
 	onSubagentProgress?: (handle: string, info: { turn: number; lastTool?: string }) => void;
 	/** True when subagent memory should be scoped by agent type (default-on setting). */
 	isScopedHindsightEnabled?: () => boolean;
+	/** Unified token budget governor — gates spawn and records subagent spend. */
+	getTokenGovernor?: () => TokenBudgetGovernor | undefined;
 }
 
 function messagingPreamble(selfId: string, parentId: string | undefined): string {
@@ -552,6 +555,22 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		return capped.truncated
 			? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}; re-spawn with a narrower prompt or a result_schema if you need the elided part]`
 			: capped.content;
+	}
+
+	function spawnBudgetBlock(): TaskOpResult | undefined {
+		const governor = options.getTokenGovernor?.();
+		if (!governor) return undefined;
+		const gate = governor.evaluateSpawn();
+		if (gate.allowed) return undefined;
+		return {
+			content: [{ type: "text" as const, text: gate.reason ?? "Token budget blocks subagent spawn." }],
+			isError: true,
+			details: undefined,
+		};
+	}
+
+	function recordSubagentSpend(usage: SubagentUsage | undefined): void {
+		options.getTokenGovernor?.()?.recordSubagent(usage);
 	}
 
 	/** Caps a resume/continue body to the subagent output budget, appending a truncation note. */
@@ -912,6 +931,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						details: undefined,
 					};
 				}
+				const budgetBlocked = spawnBudgetBlock();
+				if (budgetBlocked) return budgetBlocked;
 				const agentType = p.type?.trim() ? agentTypeMap.get(p.type.trim()) : undefined;
 				if (p.type?.trim() && !agentType) {
 					return {
@@ -1066,6 +1087,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 									capturedAgent = agent;
 								},
 							});
+							recordSubagentSpend(result.usage);
 							// A drop that ended the turn on an error (without throwing) still
 							// leaves a resumable transcript — surface it as such, not "done".
 							if (capturedAgent && agentEndedWithError(capturedAgent) && !usedAutoWorktree) {
@@ -1163,6 +1185,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							messagingReady?.(agent);
 						},
 					});
+					recordSubagentSpend(result.usage);
 					const interrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
 					if (interrupted && capturedAgent && !usedAutoWorktree) {
 						await markResumable(runHandle, capturedAgent);
@@ -1280,6 +1303,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		try {
 			await acquireSlot(signal);
 			acquired = true;
+			const budgetBlocked = spawnBudgetBlock();
+			if (budgetBlocked) return budgetBlocked;
 			const result = await spawnSubagent(makeSpawnDeps(scopedChildTools, model), {
 				prompt: text,
 				initialMessages: seed,
@@ -1295,6 +1320,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					capturedAgent = agent;
 				},
 			});
+			recordSubagentSpend(result.usage);
 			if (capturedAgent && agentEndedWithError(capturedAgent)) {
 				// Still unfinished — keep the on-disk transcript (do NOT delete) so a
 				// later attempt can resume again, and persist the latest progress so the

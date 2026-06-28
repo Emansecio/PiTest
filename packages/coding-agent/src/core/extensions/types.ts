@@ -291,6 +291,12 @@ export interface ContextUsage {
 	 * LLM response confirms the exact size) rather than a provider-reported usage. The UI marks
 	 * it with a `~` so an estimate never reads as an authoritative figure. */
 	estimated?: boolean;
+	/** Unified session spend (main + subagents) when goal budget tracking is active. */
+	budgetSpent?: number;
+	/** Goal token budget ceiling, when set. */
+	budgetLimit?: number;
+	/** Portion of budgetSpent from subagents. */
+	subagentSpent?: number;
 }
 
 export interface CompactOptions {

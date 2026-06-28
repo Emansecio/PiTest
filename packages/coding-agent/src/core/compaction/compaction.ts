@@ -32,6 +32,7 @@ import {
 	SUMMARIZATION_SYSTEM_PROMPT,
 	type SummaryDetails,
 	serializeConversation,
+	serializeConversationDelta,
 } from "./utils.ts";
 
 // ============================================================================
@@ -1262,6 +1263,10 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
+When the new messages are inside <conversation-delta>, they are a compact JSON array of events:
+[{"k":"u","t":"user text"},{"k":"a","t":"assistant text"},{"k":"c","n":"toolName","a":{args}},{"k":"r","n":"toolName","t":"result excerpt","e":1}]
+Keys: u=user, a=assistant, c=tool call, r=tool result (e=1 only on error). Thinking is omitted — use <previous-summary> for prior reasoning.
+
 Update the existing structured summary with new information. RULES:
 - PRESERVE all existing information from the previous summary
 - ADD new progress, decisions, and context from the new messages
@@ -1362,13 +1367,20 @@ export async function generateSummary(
 		basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
 	}
 
-	// Serialize conversation to text so model doesn't try to continue it
+	// Serialize conversation so the model doesn't try to continue it.
 	// Convert to LLM messages first (handles custom types like bashExecution, custom, etc.)
 	const llmMessages = convertToLlm(currentMessages);
-	const conversationText = serializeConversation(llmMessages);
+	const useDeltaSerialization =
+		previousSummary !== undefined &&
+		previousSummary.length > 0 &&
+		!isTruthyEnvFlag(process.env.PIT_NO_DELTA_SUMMARIZATION);
+	const conversationText = useDeltaSerialization
+		? serializeConversationDelta(llmMessages)
+		: serializeConversation(llmMessages);
+	const conversationTag = useDeltaSerialization ? "conversation-delta" : "conversation";
 
 	// Build the prompt with conversation wrapped in tags
-	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
+	let promptText = `<${conversationTag}>\n${conversationText}\n</${conversationTag}>\n\n`;
 	if (previousSummary) {
 		promptText += `<previous-summary>\n${previousSummary}\n</previous-summary>\n\n`;
 	}

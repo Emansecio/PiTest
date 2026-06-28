@@ -21,6 +21,7 @@ import {
 	type PermissionMode,
 	type PermissionSettings,
 } from "../permissions/index.ts";
+import { getCurrentTokenGovernor } from "../token-governor.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createDestructiveCommandGuardExtension } from "./destructive-command-guard-extension.ts";
 import { bundleGroundingGuardFactories } from "./grounding-guard-registry.ts";
@@ -125,6 +126,7 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			onSubagentStart: options.onSubagentStart,
 			onSubagentProgress: options.onSubagentProgress,
 			isScopedHindsightEnabled: options.isScopedHindsightEnabled,
+			getTokenGovernor: () => getCurrentTokenGovernor(),
 		}),
 	];
 
