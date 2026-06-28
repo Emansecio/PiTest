@@ -20,6 +20,7 @@ import { MUTATING_TOOL_NAMES } from "../stagnation.ts";
 import { crushJson } from "../tools/json-crush.ts";
 import { buildFileDigests, formatFileDigests, MAX_DIGEST_BYTES } from "./file-digests.ts";
 import {
+	capThinkingForContext,
 	computeOperationLists,
 	createFileOps,
 	extractFileOpsFromMessage,
@@ -166,6 +167,62 @@ export interface ContextUsageEstimate {
 	usageTokens: number;
 	trailingTokens: number;
 	lastUsageIndex: number | null;
+}
+
+/** Minimal tool surface for wire-size estimation (name + API schema). */
+export interface WireToolSurface {
+	name: string;
+	description: string;
+	parameters: unknown;
+}
+
+export interface WireEstimateInput {
+	systemPromptChars: number;
+	tools: WireToolSurface[];
+	/** Messages not yet appended to session state (e.g. pending user turn). */
+	pendingMessages?: AgentMessage[];
+}
+
+export interface WireUsageEstimate extends ContextUsageEstimate {
+	/** Message-only portion (same as {@link ContextUsageEstimate.tokens}). */
+	messageTokens: number;
+	systemTokens: number;
+	toolTokens: number;
+	pendingTokens: number;
+}
+
+/** Estimate serialized tool-definition payload on the wire. */
+export function estimateToolSurfaceTokens(tools: WireToolSurface[]): number {
+	let denseChars = 0;
+	for (const tool of tools) {
+		denseChars += tool.name.length + tool.description.length + JSON.stringify(tool.parameters).length;
+	}
+	return Math.ceil(denseChars / CHARS_PER_TOKEN_DENSE);
+}
+
+/**
+ * Estimate full provider wire size: session messages + system prompt + tool
+ * schemas + any pending (not-yet-appended) messages.
+ */
+export function estimateWireTokens(messages: AgentMessage[], input: WireEstimateInput): WireUsageEstimate {
+	const messageEstimate = estimateContextTokens(messages);
+	let pendingTokens = 0;
+	if (input.pendingMessages) {
+		for (const message of input.pendingMessages) {
+			pendingTokens += estimateTokens(message);
+		}
+	}
+	const systemTokens = Math.ceil(input.systemPromptChars / CHARS_PER_TOKEN_PROSE);
+	const toolTokens = estimateToolSurfaceTokens(input.tools);
+	const tokens = messageEstimate.tokens + pendingTokens + systemTokens + toolTokens;
+	return {
+		...messageEstimate,
+		messageTokens: messageEstimate.tokens,
+		systemTokens,
+		toolTokens,
+		pendingTokens,
+		tokens,
+	};
 }
 
 function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
@@ -1015,6 +1072,118 @@ export function pruneOldToolOutputs(
 }
 
 /**
+ * Collapse superseded deterministic tool results to head+tail excerpts only.
+ * No large-output defer, no mutation-arg elision — minimal cache churn (A1′).
+ */
+export function applySupersedeOnly(messages: AgentMessage[], protectTurns = PRUNE_PROTECT_TURNS): number {
+	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
+	const supersededReadIndices = buildSupersededToolResultIndices(messages, protectFromIndex);
+	let prunedTokens = 0;
+
+	for (let i = 0; i < protectFromIndex; i++) {
+		if (!supersededReadIndices.has(i)) continue;
+		const msg = messages[i];
+		if (msg.role !== "toolResult" || !Array.isArray(msg.content)) continue;
+		for (let b = 0; b < msg.content.length; b++) {
+			const block = msg.content[b];
+			if (block.type !== "text" || !block.text) continue;
+			const est = estimateTextTokens(block.text, true);
+			const excerpt = headTailExcerpt(block.text);
+			if (excerpt.length < block.text.length) {
+				(msg.content[b] as { text: string }).text = excerpt;
+				prunedTokens += Math.max(0, est - estimateTextTokens(excerpt, true));
+			}
+		}
+	}
+
+	return prunedTokens;
+}
+
+/** Read-only: would {@link applySupersedeOnly} collapse any superseded result? */
+export function wouldApplySupersedeOnly(messages: AgentMessage[], protectTurns = PRUNE_PROTECT_TURNS): boolean {
+	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
+	const supersededReadIndices = buildSupersededToolResultIndices(messages, protectFromIndex);
+	for (const i of supersededReadIndices) {
+		const msg = messages[i];
+		if (msg.role !== "toolResult" || !Array.isArray(msg.content)) continue;
+		for (const block of msg.content) {
+			if (block.type !== "text" || !block.text) continue;
+			const excerpt = headTailExcerpt(block.text);
+			if (excerpt.length < block.text.length) return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Elide heavy mutation-tool arguments on the assistant toolCall block for
+ * `toolCallId` after a successful apply (A3). No occupancy threshold.
+ */
+/**
+ * Cap assistant thinking blocks older than `protectTurns` user turns (A4).
+ * Recent-turn reasoning stays intact for the model; stale blocks shrink on wire.
+ */
+export function applyOldThinkingCap(messages: AgentMessage[], protectTurns = PRUNE_PROTECT_TURNS): number {
+	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
+	let prunedTokens = 0;
+
+	for (let i = 0; i < protectFromIndex; i++) {
+		const msg = messages[i];
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		for (let b = 0; b < msg.content.length; b++) {
+			const block = msg.content[b];
+			if (block.type !== "thinking" || !block.thinking) continue;
+			const capped = capThinkingForContext(block.thinking);
+			if (capped.length >= block.thinking.length) continue;
+			const before = estimateTextTokens(block.thinking, true);
+			(msg.content[b] as { thinking: string }).thinking = capped;
+			const after = estimateTextTokens(capped, true);
+			prunedTokens += Math.max(0, before - after);
+		}
+	}
+
+	return prunedTokens;
+}
+
+/** Read-only: would {@link applyOldThinkingCap} shrink any thinking block? */
+export function wouldApplyOldThinkingCap(messages: AgentMessage[], protectTurns = PRUNE_PROTECT_TURNS): boolean {
+	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
+	for (let i = 0; i < protectFromIndex; i++) {
+		const msg = messages[i];
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		for (const block of msg.content) {
+			if (block.type !== "thinking" || !block.thinking) continue;
+			const capped = capThinkingForContext(block.thinking);
+			if (capped.length < block.thinking.length) return true;
+		}
+	}
+	return false;
+}
+
+export function elideMutatingToolCallArguments(messages: AgentMessage[], toolCallId: string): number {
+	for (const msg of messages) {
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		for (let b = 0; b < msg.content.length; b++) {
+			const block = msg.content[b];
+			if (block.type !== "toolCall" || block.id !== toolCallId) continue;
+			if (!MUTATING_TOOL_NAMES.has(block.name)) return 0;
+			const argsRef = typeof block.arguments === "object" && block.arguments !== null ? block.arguments : undefined;
+			let before = argsRef ? beforeTokensCache.get(argsRef) : undefined;
+			if (before === undefined) {
+				before = estimateTextTokens(JSON.stringify(block.arguments), true);
+				if (argsRef) beforeTokensCache.set(argsRef, before);
+			}
+			const result = pruneToolCallArguments(block.arguments);
+			if (!result) return 0;
+			(block as { arguments: unknown }).arguments = result.pruned;
+			const after = estimateTextTokens(JSON.stringify(result.pruned), true);
+			return Math.max(0, before - after);
+		}
+	}
+	return 0;
+}
+
+/**
  * Return a new message array where every `toolResult` message — and the
  * text-bearing content blocks inside it — is shallow-cloned, while all other
  * messages pass through by reference.
@@ -1045,7 +1214,9 @@ export function cloneToolResultMessagesForPrune(messages: AgentMessage[]): Agent
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			return {
 				...msg,
-				content: msg.content.map((block) => (block.type === "toolCall" ? { ...block } : block)),
+				content: msg.content.map((block) =>
+					block.type === "toolCall" || block.type === "thinking" ? { ...block } : block,
+				),
 			};
 		}
 		return msg;

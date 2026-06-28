@@ -2,6 +2,14 @@ import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { Value } from "typebox/value";
 import type { Tool, ToolCall } from "../types.ts";
+import {
+	coerceWithJsonSchema,
+	isEmptyPlainObject,
+	isJsonSchemaObject,
+	isRecord,
+	type JsonSchemaObject,
+	schemaAllowsKind,
+} from "./validation-coerce.ts";
 
 // The schema-validation error echoes the received arguments back to the model so
 // it can self-correct. For large-payload tools (write/edit/code/ast_edit) a
@@ -32,57 +40,8 @@ function formatEchoedArguments(args: unknown): string {
 const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
 const TYPEBOX_KIND = Symbol.for("TypeBox.Kind");
 
-interface JsonSchemaObject {
-	type?: string | string[];
-	properties?: Record<string, JsonSchemaObject>;
-	items?: JsonSchemaObject | JsonSchemaObject[];
-	additionalProperties?: boolean | JsonSchemaObject;
-	allOf?: JsonSchemaObject[];
-	anyOf?: JsonSchemaObject[];
-	oneOf?: JsonSchemaObject[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
-}
-
-function isJsonSchemaObject(value: unknown): value is JsonSchemaObject {
-	return isRecord(value);
-}
-
 function hasTypeBoxMetadata(schema: unknown): boolean {
 	return isRecord(schema) && Object.getOwnPropertySymbols(schema).includes(TYPEBOX_KIND);
-}
-
-function getSchemaTypes(schema: JsonSchemaObject): string[] {
-	if (typeof schema.type === "string") {
-		return [schema.type];
-	}
-	if (Array.isArray(schema.type)) {
-		return schema.type.filter((type): type is string => typeof type === "string");
-	}
-	return [];
-}
-
-function matchesJsonType(value: unknown, type: string): boolean {
-	switch (type) {
-		case "number":
-			return typeof value === "number";
-		case "integer":
-			return typeof value === "number" && Number.isInteger(value);
-		case "boolean":
-			return typeof value === "boolean";
-		case "string":
-			return typeof value === "string";
-		case "null":
-			return value === null;
-		case "array":
-			return Array.isArray(value);
-		case "object":
-			return isRecord(value) && !Array.isArray(value);
-		default:
-			return false;
-	}
 }
 
 function isValidatorSchema(value: unknown): value is Tool["parameters"] {
@@ -98,226 +57,6 @@ function getSubSchemaValidator(schema: JsonSchemaObject): ReturnType<typeof Comp
 	} catch {
 		return undefined;
 	}
-}
-
-/**
- * Union coercion order: numeric types are attempted before boolean so a numeric
- * string ("1"/"0") coerces to a number, not the boolean "1"->true / "0"->false
- * form (preserves e.g. ["boolean","number"] + "1" -> 1). Single-type schemas are
- * unaffected — the boolean "1"/"0" coercion only kicks in when boolean is the
- * sole type.
- */
-function coercionTypeRank(type: string): number {
-	return type === "number" || type === "integer" ? 0 : 1;
-}
-
-function coercePrimitiveByType(value: unknown, type: string): unknown {
-	switch (type) {
-		case "number": {
-			if (value === null) {
-				return 0;
-			}
-			if (typeof value === "string" && value.trim() !== "") {
-				const parsed = Number(value);
-				if (Number.isFinite(parsed)) {
-					return parsed;
-				}
-			}
-			if (typeof value === "boolean") {
-				return value ? 1 : 0;
-			}
-			return value;
-		}
-		case "integer": {
-			if (value === null) {
-				return 0;
-			}
-			if (typeof value === "string" && value.trim() !== "") {
-				const parsed = Number(value);
-				if (Number.isInteger(parsed)) {
-					return parsed;
-				}
-			}
-			if (typeof value === "boolean") {
-				return value ? 1 : 0;
-			}
-			return value;
-		}
-		case "boolean": {
-			if (value === null) {
-				return false;
-			}
-			if (typeof value === "string") {
-				if (value === "true" || value === "1") {
-					return true;
-				}
-				if (value === "false" || value === "0") {
-					return false;
-				}
-			}
-			if (typeof value === "number") {
-				if (value === 1) {
-					return true;
-				}
-				if (value === 0) {
-					return false;
-				}
-			}
-			return value;
-		}
-		case "string": {
-			if (value === null) {
-				return "";
-			}
-			if (typeof value === "number" || typeof value === "boolean") {
-				return String(value);
-			}
-			return value;
-		}
-		case "null": {
-			if (value === "" || value === 0 || value === false) {
-				return null;
-			}
-			return value;
-		}
-		default:
-			return value;
-	}
-}
-
-function applySchemaObjectCoercion(value: Record<string, unknown>, schema: JsonSchemaObject): void {
-	const properties = schema.properties;
-	const definedKeys = new Set<string>(properties ? Object.keys(properties) : []);
-
-	if (properties) {
-		for (const [key, propertySchema] of Object.entries(properties)) {
-			if (!(key in value)) {
-				continue;
-			}
-			value[key] = coerceWithJsonSchema(value[key], propertySchema);
-		}
-	}
-
-	if (schema.additionalProperties && isJsonSchemaObject(schema.additionalProperties)) {
-		for (const [key, propertyValue] of Object.entries(value)) {
-			if (definedKeys.has(key)) {
-				continue;
-			}
-			value[key] = coerceWithJsonSchema(propertyValue, schema.additionalProperties);
-		}
-	}
-}
-
-function applySchemaArrayCoercion(value: unknown[], schema: JsonSchemaObject): void {
-	if (Array.isArray(schema.items)) {
-		for (let index = 0; index < value.length; index++) {
-			const itemSchema = schema.items[index];
-			if (!itemSchema) {
-				continue;
-			}
-			value[index] = coerceWithJsonSchema(value[index], itemSchema);
-		}
-		return;
-	}
-
-	if (isJsonSchemaObject(schema.items)) {
-		for (let index = 0; index < value.length; index++) {
-			value[index] = coerceWithJsonSchema(value[index], schema.items);
-		}
-	}
-}
-
-function coerceWithUnionSchema(value: unknown, schemas: JsonSchemaObject[]): unknown {
-	for (const schema of schemas) {
-		const validator = getSubSchemaValidator(schema);
-		if (validator?.Check(value)) {
-			return value;
-		}
-	}
-	// Try coercion — clone once via structuredClone (faster than JSON round-trip).
-	const cloneSource = isPrimitive(value) ? null : value;
-	for (const schema of schemas) {
-		const candidate = cloneSource === null ? value : structuredClone(cloneSource);
-		const coerced = coerceWithJsonSchema(candidate, schema);
-		const validator = getSubSchemaValidator(schema);
-		if (validator?.Check(coerced)) {
-			return coerced;
-		}
-	}
-	return value;
-}
-
-function isPrimitive(value: unknown): boolean {
-	return value === null || typeof value !== "object";
-}
-
-function coerceWithJsonSchema(value: unknown, schema: JsonSchemaObject): unknown {
-	let nextValue = value;
-
-	if (Array.isArray(schema.allOf)) {
-		for (const nested of schema.allOf) {
-			nextValue = coerceWithJsonSchema(nextValue, nested);
-		}
-	}
-
-	if (Array.isArray(schema.anyOf)) {
-		nextValue = coerceWithUnionSchema(nextValue, schema.anyOf);
-	}
-
-	if (Array.isArray(schema.oneOf)) {
-		nextValue = coerceWithUnionSchema(nextValue, schema.oneOf);
-	}
-
-	const schemaTypes = getSchemaTypes(schema);
-	const matchesUnionMember =
-		schemaTypes.length > 1 && schemaTypes.some((schemaType) => matchesJsonType(nextValue, schemaType));
-	if (schemaTypes.length > 0 && !matchesUnionMember) {
-		const ordered =
-			schemaTypes.length > 1
-				? [...schemaTypes].sort((a, b) => coercionTypeRank(a) - coercionTypeRank(b))
-				: schemaTypes;
-		for (const schemaType of ordered) {
-			const candidate = coercePrimitiveByType(nextValue, schemaType);
-			if (candidate !== nextValue) {
-				nextValue = candidate;
-				break;
-			}
-		}
-	}
-
-	if (schemaTypes.includes("object") && isRecord(nextValue) && !Array.isArray(nextValue)) {
-		applySchemaObjectCoercion(nextValue, schema);
-	}
-
-	if (schemaTypes.includes("array") && Array.isArray(nextValue)) {
-		applySchemaArrayCoercion(nextValue, schema);
-	}
-
-	return nextValue;
-}
-
-/**
- * True when `schema` (directly, or through a union/intersection branch, or by
- * shape) admits a value of JSON `kind`. Used by {@link stripNullishOptionalArgs}
- * so a field that legitimately accepts `null` (a nullable field) or `{}` (an
- * object field) is never mistaken for a misplaced placeholder.
- */
-function schemaAllowsKind(schema: JsonSchemaObject, kind: "null" | "object"): boolean {
-	if (getSchemaTypes(schema).includes(kind)) return true;
-	if (kind === "object" && (schema.properties !== undefined || schema.additionalProperties !== undefined)) {
-		return true;
-	}
-	if (kind === "null" && (schema as { nullable?: boolean }).nullable === true) return true;
-	for (const branch of [schema.anyOf, schema.oneOf, schema.allOf]) {
-		if (Array.isArray(branch) && branch.some((s) => isJsonSchemaObject(s) && schemaAllowsKind(s, kind))) {
-			return true;
-		}
-	}
-	return false;
-}
-
-function isEmptyPlainObject(value: unknown): boolean {
-	return isRecord(value) && !Array.isArray(value) && Object.keys(value).length === 0;
 }
 
 /**
@@ -560,7 +299,7 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 	Value.Convert(tool.parameters, args);
 
 	if (!hasTypeBoxMetadata(tool.parameters) && isJsonSchemaObject(tool.parameters)) {
-		const coerced = coerceWithJsonSchema(args, tool.parameters);
+		const coerced = coerceWithJsonSchema(args, tool.parameters, getSubSchemaValidator);
 		if (coerced !== args) {
 			if (isRecord(args) && isRecord(coerced)) {
 				for (const key of Object.keys(args)) {

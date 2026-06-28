@@ -11,18 +11,15 @@
  * only wires the script reader + fuzzy matcher and harvests the command string.
  *
  * Session state: a fire-once set so an insistent model re-issuing the identical
- * blocked call runs it (advises, never wedges). The whole handler is wrapped in
- * try/catch because `emitToolCall` has no per-handler isolation and a throw out of
- * beforeToolCall would hard-block the call — fail-open is load-bearing. The
- * package.json scripts are read once and cached. Opt out with PIT_NO_BASH_GROUNDING.
+ * blocked call runs it (advises, never wedges). Opt out with PIT_NO_BASH_GROUNDING.
  */
 
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { recordDiagnostic, suggestClosest } from "@pit/ai";
+import { suggestClosest } from "@pit/ai";
 import { groundBashScript, isBashGroundingDisabled } from "../bash-grounding.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
-import { stableToolCallKey } from "./grounding-fire-once.ts";
+import { createFireOnceBlockGuard } from "./grounding-fire-once.ts";
 
 /** Read the `scripts` keys from the cwd's package.json. Any error -> [] (fail-open). */
 function readScriptsOf(cwd: string): string[] {
@@ -37,44 +34,29 @@ function readScriptsOf(cwd: string): string[] {
 	}
 }
 
-export function createBashGroundingExtension(options: { cwd: string }) {
-	return (pi: ExtensionAPI) => {
-		const fired = new Set<string>();
-		// Read + cache the cwd's package.json scripts once per session.
-		let scriptsCache: string[] | undefined;
-		const readScripts = (): string[] => {
-			if (scriptsCache === undefined) scriptsCache = readScriptsOf(options.cwd);
-			return scriptsCache;
-		};
-
-		pi.on("tool_call", (event) => {
-			try {
-				if (isBashGroundingDisabled()) return undefined;
-				if (event.toolName !== "bash") return undefined;
-
-				const input = event.input as Record<string, unknown>;
-				const command = input.command;
-				if (typeof command !== "string") return undefined;
-
-				const decision = groundBashScript({ command }, { readScripts, fuzzy: suggestClosest });
-				if (decision.action === "block") {
-					const key = stableToolCallKey(event.toolName, input);
-					if (fired.has(key)) return undefined; // already advised once -> let it run
-					fired.add(key);
-					recordDiagnostic({
-						category: "guard.bash-grounding",
-						level: "info",
-						source: "bash-grounding-extension",
-						context: { note: event.toolName },
-					});
-					return { block: true, reason: decision.message };
-				}
-				return undefined;
-			} catch {
-				// emitToolCall has no per-handler try/catch; a throw out of beforeToolCall
-				// would hard-block the call. Fail-open is the invariant -> swallow.
-				return undefined;
-			}
-		});
+export function createBashGroundingExtension(options: { cwd: string }): (pi: ExtensionAPI) => void {
+	let scriptsCache: string[] | undefined;
+	const readScripts = (): string[] => {
+		if (scriptsCache === undefined) scriptsCache = readScriptsOf(options.cwd);
+		return scriptsCache;
 	};
+
+	return createFireOnceBlockGuard({
+		category: "guard.bash-grounding",
+		source: "bash-grounding-extension",
+		decide(event) {
+			if (isBashGroundingDisabled()) return undefined;
+			if (event.toolName !== "bash") return undefined;
+
+			const input = event.input as Record<string, unknown>;
+			const command = input.command;
+			if (typeof command !== "string") return undefined;
+
+			const decision = groundBashScript({ command }, { readScripts, fuzzy: suggestClosest });
+			if (decision.action === "block") {
+				return { block: true, reason: decision.message };
+			}
+			return undefined;
+		},
+	});
 }

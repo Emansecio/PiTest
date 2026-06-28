@@ -962,51 +962,60 @@ function sleepSync(ms: number): void {
 // AV/indexer lock (EBUSY/EPERM/EACCES) can still bounce it. Retry a few times with
 // a short backoff; on the final failure the error propagates (the caller's state
 // is kept safe for a later retry by the flushed/_writeQueue invariants in _persist).
+function recordFsAppendRetry(source: string, file: string, attempt: number, err: unknown): void {
+	recordDiagnostic({
+		category: "io.retry",
+		level: "warn",
+		source,
+		context: {
+			attempt: attempt + 1,
+			path: file,
+			note: (err as { code?: string } | null)?.code,
+		},
+	});
+}
+
+function shouldRetryFsAppend(err: unknown, attempt: number): boolean {
+	const last = attempt === FS_RETRY_BACKOFF_MS.length - 1;
+	if (last || !isTransientFsError(err)) {
+		return false;
+	}
+	return true;
+}
+
 function appendWithRetry(file: string, data: string): void {
 	for (let attempt = 0; attempt < FS_RETRY_BACKOFF_MS.length; attempt++) {
 		try {
 			appendFileSync(file, data);
 			return;
 		} catch (err) {
-			const last = attempt === FS_RETRY_BACKOFF_MS.length - 1;
-			if (last || !isTransientFsError(err)) throw err;
-			// Observe-only: a transient FS lock bounced the append; we are about to retry.
-			recordDiagnostic({
-				category: "io.retry",
-				level: "warn",
-				source: "session-manager.appendWithRetry",
-				context: {
-					attempt: attempt + 1,
-					path: file,
-					note: (err as { code?: string } | null)?.code,
-				},
-			});
+			if (!shouldRetryFsAppend(err, attempt)) throw err;
+			recordFsAppendRetry("session-manager.appendWithRetry", file, attempt, err);
 			sleepSync(FS_RETRY_BACKOFF_MS[attempt + 1]);
 		}
 	}
 }
 
-async function appendWithRetryAsync(file: string, data: string): Promise<void> {
+async function withFsAppendRetry(
+	file: string,
+	data: string,
+	write: (targetFile: string, payload: string) => Promise<void>,
+	source: string,
+): Promise<void> {
 	for (let attempt = 0; attempt < FS_RETRY_BACKOFF_MS.length; attempt++) {
 		try {
-			await appendFile(file, data);
+			await write(file, data);
 			return;
 		} catch (err) {
-			const last = attempt === FS_RETRY_BACKOFF_MS.length - 1;
-			if (last || !isTransientFsError(err)) throw err;
-			recordDiagnostic({
-				category: "io.retry",
-				level: "warn",
-				source: "session-manager.appendWithRetryAsync",
-				context: {
-					attempt: attempt + 1,
-					path: file,
-					note: (err as { code?: string } | null)?.code,
-				},
-			});
+			if (!shouldRetryFsAppend(err, attempt)) throw err;
+			recordFsAppendRetry(source, file, attempt, err);
 			await new Promise((resolve) => setTimeout(resolve, FS_RETRY_BACKOFF_MS[attempt + 1]));
 		}
 	}
+}
+
+async function appendWithRetryAsync(file: string, data: string): Promise<void> {
+	await withFsAppendRetry(file, data, appendFile, "session-manager.appendWithRetryAsync");
 }
 
 // Atomic full-file rewrite: write to a sibling temp file, then rename over the

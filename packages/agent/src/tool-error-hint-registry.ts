@@ -24,6 +24,8 @@
  * its hint (we do not short-circuit); duplicate hint text is deduplicated.
  */
 
+import { appendAnnotatedLinesToContent } from "./append-annotated-content.ts";
+import { ruleAppliesTo } from "./tool-rule-utils.ts";
 import type { AgentToolCall, AgentToolResult } from "./types.ts";
 
 export interface ToolErrorHintMatchInput {
@@ -108,12 +110,6 @@ export class ToolErrorHintRegistry {
 	}
 }
 
-function ruleAppliesTo(rule: ToolErrorHintRule, toolName: string): boolean {
-	if (rule.appliesTo === "*") return true;
-	if (typeof rule.appliesTo === "string") return rule.appliesTo === toolName;
-	return rule.appliesTo.includes(toolName);
-}
-
 function extractErrorText(result: AgentToolResult<unknown>): string {
 	if (!result.content || !Array.isArray(result.content)) return "";
 	const parts: string[] = [];
@@ -139,23 +135,9 @@ export function appendHintsToContent(
 	hints: ToolErrorHintFired[],
 ): AgentToolResult<unknown>["content"] {
 	if (hints.length === 0) return content;
-	const blocks = Array.isArray(content) ? [...content] : [];
-	const hintLines = hints.map((h) => `[hint] ${h.hint}`);
-	const block = `\n\n${hintLines.join("\n")}`;
-
-	for (let i = blocks.length - 1; i >= 0; i--) {
-		const candidate = blocks[i];
-		if (candidate && candidate.type === "text" && typeof candidate.text === "string") {
-			if (candidate.text.includes(hintLines[0])) {
-				// First hint already present — assume idempotent re-entry; do not append.
-				return blocks;
-			}
-			blocks[i] = { ...candidate, text: `${candidate.text}${block}` };
-			return blocks;
-		}
-	}
-
-	// No text block to append to (e.g., image-only result). Push a fresh block.
-	blocks.push({ type: "text", text: block.trimStart() });
-	return blocks;
+	const hintLines = hints.map((h) => h.hint);
+	return appendAnnotatedLinesToContent(content, hintLines, {
+		prefix: "[hint] ",
+		idempotencyKey: `[hint] ${hintLines[0]}`,
+	});
 }

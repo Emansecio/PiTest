@@ -88,7 +88,19 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 export const HANDLER_SIDE_EFFECT_TAG = "__piSideEffect" as const;
 
 // Max time a before_agent_start handler may block TTFT before being skipped.
-const BEFORE_AGENT_START_TIMEOUT_MS = 5_000;
+const DEFAULT_BEFORE_AGENT_START_TIMEOUT_MS = 5_000;
+
+function resolveBeforeAgentStartTimeoutMs(): number {
+	const raw = process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS;
+	if (!raw) {
+		return DEFAULT_BEFORE_AGENT_START_TIMEOUT_MS;
+	}
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return DEFAULT_BEFORE_AGENT_START_TIMEOUT_MS;
+	}
+	return parsed;
+}
 
 type BuiltInKeyBindings = Partial<Record<KeyId, { keybinding: string; restrictOverride: boolean }>>;
 
@@ -1192,10 +1204,11 @@ export class ExtensionRunner {
 					// late rejection cannot surface as an unhandled promise rejection.
 					const handlerPromise = Promise.resolve(handler(event, ctx));
 					handlerPromise.catch(() => {});
+					const beforeAgentStartTimeoutMs = resolveBeforeAgentStartTimeoutMs();
 					const handlerResult = await Promise.race([
 						handlerPromise,
 						new Promise<typeof TIMED_OUT>((resolve) => {
-							timer = setTimeout(() => resolve(TIMED_OUT), BEFORE_AGENT_START_TIMEOUT_MS);
+							timer = setTimeout(() => resolve(TIMED_OUT), beforeAgentStartTimeoutMs);
 						}),
 					]);
 					if (timer !== undefined) clearTimeout(timer);
@@ -1204,7 +1217,7 @@ export class ExtensionRunner {
 						this.emitError({
 							extensionPath: ext.path,
 							event: "before_agent_start",
-							error: `Handler timed out after ${BEFORE_AGENT_START_TIMEOUT_MS}ms`,
+							error: `Handler timed out after ${beforeAgentStartTimeoutMs}ms`,
 						});
 						continue;
 					}

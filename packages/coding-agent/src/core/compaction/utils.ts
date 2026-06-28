@@ -8,6 +8,7 @@ import { sliceSafe } from "../../utils/surrogate.ts";
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "../messages.ts";
 import { redactForDisk } from "../secret-redactor.ts";
 import type { SessionEntry } from "../session-manager.ts";
+import { extractPathArg } from "../tools/argument-prep.ts";
 
 // ============================================================================
 // File Operation Tracking
@@ -79,6 +80,24 @@ export function mergeSummaryDetailsIntoFileOps(details: SummaryDetails, fileOps:
 
 export type FileToolOp = "read" | "write" | "edit";
 
+const FILE_TOOL_OPS: Record<string, FileToolOp> = {
+	read: "read",
+	write: "write",
+	edit: "edit",
+};
+
+const BASH_COMMAND_KEYS = ["command", "cmd"] as const;
+
+function pickBashCommand(args: Record<string, unknown>): string | undefined {
+	for (const key of BASH_COMMAND_KEYS) {
+		const value = args[key];
+		if (typeof value === "string" && value.length > 0) {
+			return value;
+		}
+	}
+	return undefined;
+}
+
 /**
  * Best-effort mapping from a (toolName, args) pair to a single file operation.
  * Returns undefined when the tool is not a file tool or when the path arg is
@@ -86,12 +105,11 @@ export type FileToolOp = "read" | "write" | "edit";
  * real-time frequent-files tracker so both observers stay in lockstep.
  */
 export function extractToolFileOp(toolName: string, args: unknown): { path: string; op: FileToolOp } | undefined {
-	const op: FileToolOp | undefined =
-		toolName === "read" ? "read" : toolName === "write" ? "write" : toolName === "edit" ? "edit" : undefined;
+	const op = FILE_TOOL_OPS[toolName];
 	if (!op) return undefined;
 	if (typeof args !== "object" || args === null) return undefined;
-	const path = (args as Record<string, unknown>).path;
-	if (typeof path !== "string" || path.length === 0) return undefined;
+	const path = extractPathArg(args as Record<string, unknown>);
+	if (path === undefined || path.length === 0) return undefined;
 	return { path, op };
 }
 
@@ -140,18 +158,15 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 
 		const args = (block.arguments as Record<string, unknown> | undefined) ?? {};
 		const name = block.name as string;
-		const path = typeof args.path === "string" ? args.path : undefined;
+		const fileOp = extractToolFileOp(name, args);
+		if (fileOp) {
+			if (fileOp.op === "read") addTo(fileOps.read, fileOp.path);
+			else if (fileOp.op === "write") addTo(fileOps.written, fileOp.path);
+			else addTo(fileOps.edited, fileOp.path);
+			continue;
+		}
 
 		switch (name) {
-			case "read":
-				if (path) addTo(fileOps.read, path);
-				continue;
-			case "write":
-				if (path) addTo(fileOps.written, path);
-				continue;
-			case "edit":
-				if (path) addTo(fileOps.edited, path);
-				continue;
 			case "grep":
 			case "glob":
 			case "search": {
@@ -168,8 +183,7 @@ export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOp
 			case "bash":
 			case "shell":
 			case "exec": {
-				const cmd =
-					typeof args.command === "string" ? args.command : typeof args.cmd === "string" ? args.cmd : undefined;
+				const cmd = pickBashCommand(args);
 				const preview = previewOpArg(cmd);
 				if (preview) addTo(fileOps.shellCmds, preview);
 				continue;
@@ -323,10 +337,19 @@ const TOOL_RESULT_MAX_CHARS = 2000;
  * ("Key Decisions") lives at the END of the reasoning. Use a head+tail excerpt so
  * the final decision survives.
  */
-const THINKING_MAX_CHARS = 1500;
+/** Max chars for assistant thinking in live context and serialized summaries. */
+export const THINKING_MAX_CHARS = 1500;
 
 /** Fraction of the truncation budget kept from the head; the remainder is kept from the tail. */
 const TRUNCATE_HEAD_FRACTION = 0.65;
+
+/**
+ * Cap assistant thinking to head+tail excerpt for wire/summarization (A4).
+ * Preserves the conclusion at the tail — decisions live at the end of reasoning.
+ */
+export function capThinkingForContext(text: string): string {
+	return truncateForSummary(text, THINKING_MAX_CHARS);
+}
 
 export interface HeadTailExcerptOptions {
 	/** Chars kept from the head before snapping to a line break. */
@@ -493,7 +516,7 @@ export function serializeConversation(messages: Message[]): string {
 
 			if (thinkingParts.length > 0) {
 				const joined = thinkingParts.join("\n");
-				const capped = truncateForSummary(joined, THINKING_MAX_CHARS);
+				const capped = capThinkingForContext(joined);
 				parts.push({ text: `[Assistant thinking]: ${capped}` });
 			}
 			if (textParts.length > 0) {

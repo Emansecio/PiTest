@@ -90,19 +90,22 @@ export function agentLoop(
  * via `convertToLlm`. If it doesn't, the LLM provider will reject the request.
  * This cannot be validated here since `convertToLlm` is only called once per turn.
  */
+function assertContinuableContext(context: AgentContext): void {
+	if (context.messages.length === 0) {
+		throw new Error("Cannot continue: no messages in context");
+	}
+	if (context.messages[context.messages.length - 1].role === "assistant") {
+		throw new Error("Cannot continue from message role: assistant");
+	}
+}
+
 export function agentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
-	if (context.messages.length === 0) {
-		throw new Error("Cannot continue: no messages in context");
-	}
-
-	if (context.messages[context.messages.length - 1].role === "assistant") {
-		throw new Error("Cannot continue from message role: assistant");
-	}
+	assertContinuableContext(context);
 
 	const stream = createAgentStream();
 
@@ -160,13 +163,7 @@ export async function runAgentLoopContinue(
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
 ): Promise<AgentMessage[]> {
-	if (context.messages.length === 0) {
-		throw new Error("Cannot continue: no messages in context");
-	}
-
-	if (context.messages[context.messages.length - 1].role === "assistant") {
-		throw new Error("Cannot continue from message role: assistant");
-	}
+	assertContinuableContext(context);
 
 	const newMessages: AgentMessage[] = [];
 	const currentContext: AgentContext = { ...context, messages: context.messages.slice() };
@@ -207,13 +204,13 @@ function makeZeroUsage() {
 // Assemble the canonical zero-usage error turn shared by every synthetic
 // failure path (sync-path rejection, TTSR-bail, turn-budget). Only the
 // `errorMessage` differs between call-sites; the rest of the shape is fixed.
-function buildErrorTurn(config: AgentLoopConfig, errorMessage: string): AssistantMessage {
+export function buildErrorTurn(model: AgentLoopConfig["model"], errorMessage: string): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text: "" }],
-		api: config.model.api,
-		provider: config.model.provider,
-		model: config.model.id,
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
 		stopReason: "error",
 		errorMessage,
 		timestamp: Date.now(),
@@ -223,7 +220,7 @@ function buildErrorTurn(config: AgentLoopConfig, errorMessage: string): Assistan
 
 function buildFailureMessage(config: AgentLoopConfig, err: unknown): AssistantMessage {
 	const errorMessage = err instanceof Error ? err.message : String(err);
-	return buildErrorTurn(config, errorMessage);
+	return buildErrorTurn(config.model, errorMessage);
 }
 
 /**
@@ -344,7 +341,7 @@ async function runLoop(
 				if (ttsrRetries >= MAX_TTSR_RETRIES_PER_TURN) {
 					// Bail: surface an aborted assistant message so the caller stops the turn.
 					message = buildErrorTurn(
-						config,
+						config.model,
 						`[stop: ttsr] TTSR: exceeded ${MAX_TTSR_RETRIES_PER_TURN} retries (rule "${response.ttsr.name}")`,
 					);
 					await emit({ type: "message_start", message });
@@ -443,7 +440,7 @@ async function runLoop(
  */
 function buildTurnBudgetMessage(config: AgentLoopConfig, maxTurns: number): AssistantMessage {
 	return buildErrorTurn(
-		config,
+		config.model,
 		`[stop: turn-budget] Reached the turn budget of ${maxTurns} turns in a single run; stopping to avoid an unbounded tool-call loop.`,
 	);
 }
@@ -475,6 +472,27 @@ function buildTTSRReminderMessage(info: TTSRMatchInfo): AgentMessage {
 		configurable: false,
 	});
 	return message as unknown as AgentMessage;
+}
+
+function rollbackPartialContext(context: AgentContext, addedPartial: boolean): void {
+	if (addedPartial) {
+		context.messages.pop();
+	}
+}
+
+async function publishFinalAssistantMessage(
+	context: AgentContext,
+	finalMessage: AssistantMessage,
+	addedPartial: boolean,
+	emit: AgentEventSink,
+): Promise<void> {
+	if (addedPartial) {
+		context.messages[context.messages.length - 1] = finalMessage;
+	} else {
+		context.messages.push(finalMessage);
+		await emit({ type: "message_start", message: { ...finalMessage } });
+	}
+	await emit({ type: "message_end", message: finalMessage });
 }
 
 /**
@@ -614,11 +632,8 @@ async function streamAssistantResponse(
 							await flushPendingDelta();
 						}
 						if (ttsrInterrupt) {
-							// Drop partial assistant message we pushed at "start".
-							if (addedPartial) {
-								context.messages.pop();
-								addedPartial = false;
-							}
+							rollbackPartialContext(context, addedPartial);
+							addedPartial = false;
 							return ttsrInterrupt;
 						}
 					}
@@ -646,21 +661,11 @@ async function streamAssistantResponse(
 				case "error": {
 					await flushPendingDelta();
 					if (ttsrInterrupt) {
-						if (addedPartial) {
-							context.messages.pop();
-						}
+						rollbackPartialContext(context, addedPartial);
 						return ttsrInterrupt;
 					}
 					const finalMessage = await response.result();
-					if (addedPartial) {
-						context.messages[context.messages.length - 1] = finalMessage;
-					} else {
-						context.messages.push(finalMessage);
-					}
-					if (!addedPartial) {
-						await emit({ type: "message_start", message: { ...finalMessage } });
-					}
-					await emit({ type: "message_end", message: finalMessage });
+					await publishFinalAssistantMessage(context, finalMessage, addedPartial, emit);
 					return finalMessage;
 				}
 			}
@@ -668,9 +673,7 @@ async function streamAssistantResponse(
 		await flushPendingDelta();
 
 		if (ttsrInterrupt) {
-			if (addedPartial) {
-				context.messages.pop();
-			}
+			rollbackPartialContext(context, addedPartial);
 			return ttsrInterrupt;
 		}
 
@@ -707,25 +710,13 @@ async function streamAssistantResponse(
 				source: "agent-loop.streamAssistantResponse",
 				context: { note: "stream ended without a terminal event" },
 			});
-			const errorTurn = buildErrorTurn(config, "Stream ended without a terminal event");
-			if (addedPartial) {
-				context.messages[context.messages.length - 1] = errorTurn;
-			} else {
-				context.messages.push(errorTurn);
-				await emit({ type: "message_start", message: { ...errorTurn } });
-			}
-			await emit({ type: "message_end", message: errorTurn });
+			const errorTurn = buildErrorTurn(config.model, "Stream ended without a terminal event");
+			await publishFinalAssistantMessage(context, errorTurn, addedPartial, emit);
 			return errorTurn;
 		}
 
 		const finalMessage = settled;
-		if (addedPartial) {
-			context.messages[context.messages.length - 1] = finalMessage;
-		} else {
-			context.messages.push(finalMessage);
-			await emit({ type: "message_start", message: { ...finalMessage } });
-		}
-		await emit({ type: "message_end", message: finalMessage });
+		await publishFinalAssistantMessage(context, finalMessage, addedPartial, emit);
 		return finalMessage;
 	} finally {
 		if (signal) signal.removeEventListener("abort", forwardAbort);
@@ -825,15 +816,7 @@ async function executeToolCallsSequential(
 		);
 		let finalized: FinalizedToolCallOutcome;
 		if (preparation.kind === "immediate") {
-			let result = preparation.result;
-			if (preparation.isError && !preparation.skipHints) {
-				result = await applyToolErrorHints(toolCall, result, config, emit);
-			}
-			finalized = {
-				toolCall,
-				result,
-				isError: preparation.isError,
-			};
+			finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
 		} else {
 			const executed = await executePreparedToolCall(preparation, signal, emit, config);
 			finalized = await finalizeExecutedToolCall(
@@ -899,15 +882,7 @@ async function executeToolCallsParallel(
 	const orderedFinalizedCalls = await Promise.all(
 		preparations.map(async ({ toolCall, preparation }) => {
 			if (preparation.kind === "immediate") {
-				let result = preparation.result;
-				if (preparation.isError && !preparation.skipHints) {
-					result = await applyToolErrorHints(toolCall, result, config, emit);
-				}
-				const finalized = {
-					toolCall,
-					result,
-					isError: preparation.isError,
-				} satisfies FinalizedToolCallOutcome;
+				const finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
 				await emitToolExecutionEnd(finalized, emit);
 				return finalized;
 			}
@@ -978,6 +953,23 @@ type FinalizedToolCallOutcome = {
 	result: AgentToolResult<any>;
 	isError: boolean;
 };
+
+async function finalizeImmediatePreparation(
+	toolCall: AgentToolCall,
+	preparation: ImmediateToolCallOutcome,
+	config: AgentLoopConfig,
+	emit: AgentEventSink,
+): Promise<FinalizedToolCallOutcome> {
+	let result = preparation.result;
+	if (preparation.isError && !preparation.skipHints) {
+		result = await applyToolErrorHints(toolCall, result, config, emit);
+	}
+	return {
+		toolCall,
+		result,
+		isError: preparation.isError,
+	};
+}
 
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
@@ -1142,14 +1134,6 @@ async function prepareToolCall(
 					isError: true,
 				};
 			}
-		}
-		if (signal?.aborted) {
-			return {
-				kind: "immediate",
-				result: createErrorToolResult("Operation aborted"),
-				isError: true,
-				skipHints: true,
-			};
 		}
 		// Repair Node (opt-in): compare what the model SENT against what actually
 		// runs (post alias/rewrite/coercion). A reportable difference becomes a

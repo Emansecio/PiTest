@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { routeMessage, shutdownAll } from "../../src/core/lsp/client.ts";
 import { applyWorkspaceEdit } from "../../src/core/lsp/edits.ts";
 import { createLspToolDefinition } from "../../src/core/lsp/tool.ts";
@@ -12,6 +12,22 @@ import { setDiagnosticsOnWrite, setFormatOnWrite } from "../../src/core/lsp/writ
 import { createWriteToolDefinition } from "../../src/core/tools/write.ts";
 
 const UNSAFE_SERVER = fileURLToPath(new URL("./unsafe-lsp-server.mjs", import.meta.url));
+
+const PREV_LSP_DIAG_WAIT = process.env.PIT_LSP_SINGLE_DIAGNOSTICS_WAIT_MS;
+
+beforeAll(() => {
+	// The stale-diagnostics case intentionally waits for a publish that never comes.
+	// Production default is 3s; 200ms is enough to prove the failure path in tests.
+	process.env.PIT_LSP_SINGLE_DIAGNOSTICS_WAIT_MS = "200";
+});
+
+afterAll(() => {
+	if (PREV_LSP_DIAG_WAIT === undefined) {
+		delete process.env.PIT_LSP_SINGLE_DIAGNOSTICS_WAIT_MS;
+	} else {
+		process.env.PIT_LSP_SINGLE_DIAGNOSTICS_WAIT_MS = PREV_LSP_DIAG_WAIT;
+	}
+});
 
 type ToolResult = { content: Array<{ type: string; text?: string }> };
 type WrittenRpc = { id?: number | string; result?: unknown; error?: unknown };

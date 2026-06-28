@@ -322,7 +322,10 @@ export class FooterComponent implements Component {
 		// pristine session shows only the capacity (`CTX 1M`, dim) — three zeros
 		// say nothing. Usage (input/output, cost, auto-compact) trails dim on the
 		// right.
-		const usedTokens = contextUsage?.tokens ?? 0;
+		const messageTokens = contextUsage?.tokens ?? 0;
+		const wireTokens = contextUsage?.wireTokens ?? messageTokens;
+		const wireDiverges = messageTokens > 0 && Math.abs(wireTokens - messageTokens) / messageTokens > 0.05;
+		const usedTokens = wireTokens;
 		const pristine = usedTokens === 0 && contextPercentValue === 0 && contextWindow > 0;
 		const ctxLabel = theme.fg("dim", "CTX");
 		const ctxColorize = theme.getContextUsageColor(contextPercentValue);
@@ -336,7 +339,10 @@ export class FooterComponent implements Component {
 			// A `~` marks a structural ESTIMATE (right after compaction, before the next response
 			// confirms the exact size) so it never reads as an authoritative figure.
 			const est = contextUsage?.estimated ? "~" : "";
-			const counts = `${theme.fg("muted", `${est}${formatTokens(usedTokens)}`)}${theme.fg("dim", `/${formatTokens(contextWindow)}`)}`;
+			let counts = `${theme.fg("muted", `${est}${formatTokens(usedTokens)}`)}${theme.fg("dim", `/${formatTokens(contextWindow)}`)}`;
+			if (wireDiverges) {
+				counts += `${theme.fg("dim", " · ")}${theme.fg("muted", `msgs ${est}${formatTokens(messageTokens)}`)}`;
+			}
 			ctxText = `${ctxLabel} ${est ? theme.fg("dim", "~") : ""}${percentLabel} ${theme.fg("dim", "·")} ${counts}`;
 		}
 

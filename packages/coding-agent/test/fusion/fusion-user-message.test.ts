@@ -2,6 +2,7 @@ import { Agent } from "@pit/agent-core";
 import { getModel } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.js";
+import { emitFusionUserMessage, emitSyntheticAssistant } from "../../src/core/agent-session-fusion.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import { ModelRegistry } from "../../src/core/model-registry.js";
 import { SessionManager } from "../../src/core/session-manager.js";
@@ -50,12 +51,8 @@ describe("Fusion turn persists the user message", () => {
 	it("lands a user message before the synthesized assistant reply, in order", () => {
 		const session = createSession();
 		try {
-			const s = session as unknown as {
-				_emitFusionUserMessage(text: string): void;
-				_emitSyntheticAssistant(text: string): void;
-			};
-			s._emitFusionUserMessage("explain the auth flow");
-			s._emitSyntheticAssistant("here is the synthesized answer");
+			emitFusionUserMessage(session, "explain the auth flow");
+			emitSyntheticAssistant(session, "here is the synthesized answer");
 
 			const roles = session.agent.state.messages.map((m) => m.role);
 			expect(roles).toEqual(["user", "assistant"]);
@@ -69,8 +66,7 @@ describe("Fusion turn persists the user message", () => {
 	it("does not start history with an assistant message (Anthropic alternation guard)", () => {
 		const session = createSession();
 		try {
-			const s = session as unknown as { _emitFusionUserMessage(text: string): void };
-			s._emitFusionUserMessage("first fusion prompt");
+			emitFusionUserMessage(session, "first fusion prompt");
 			expect(session.agent.state.messages[0]?.role).toBe("user");
 		} finally {
 			session.dispose();

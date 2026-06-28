@@ -9,6 +9,7 @@ import { Agent } from "@pit/agent-core";
 import { type AssistantMessage, getModel } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
+import * as compactionModule from "../src/core/agent-session-compaction.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -89,21 +90,14 @@ describe("pre-send overflow guard re-estimates after background compaction (#14)
 
 		// Simulate an in-flight predictive background compaction; awaiting it reduces
 		// the assembled context (flip the marker low).
-		(session as unknown as { _backgroundCompactionPromise?: Promise<unknown> })._backgroundCompactionPromise =
-			Promise.resolve();
-		vi.spyOn(
-			session as unknown as { _awaitBackgroundCompaction: () => Promise<void> },
-			"_awaitBackgroundCompaction",
-		).mockImplementation(async () => {
+		session.compaction.backgroundCompactionPromise = Promise.resolve().then(() => {
 			(stateMsg as unknown as { __assembled: number }).__assembled = low;
 		});
 
-		const runAutoCompactionSpy = vi
-			.spyOn(
-				session as unknown as { _runAutoCompaction: (r: string, w: boolean) => Promise<boolean> },
-				"_runAutoCompaction",
-			)
-			.mockResolvedValue(true);
+		const compactionStarts: string[] = [];
+		session.subscribe((event) => {
+			if (event.type === "compaction_start") compactionStarts.push(event.reason);
+		});
 
 		// The assistant message that triggers the check: usage well below threshold,
 		// so contextTokens < assembled (the guard's `assembled > contextTokens`).
@@ -125,15 +119,9 @@ describe("pre-send overflow guard re-estimates after background compaction (#14)
 			timestamp: Date.now(),
 		};
 
-		const checkCompaction = (
-			session as unknown as {
-				_checkCompaction: (m: AssistantMessage, skip?: boolean, bg?: boolean) => Promise<boolean>;
-			}
-		)._checkCompaction.bind(session);
-
-		await checkCompaction(trigger, true, false);
+		await compactionModule.checkCompaction(session.compaction, trigger, true, false);
 
 		// Re-estimate dropped below threshold => no redundant compaction.
-		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+		expect(compactionStarts).toHaveLength(0);
 	});
 });

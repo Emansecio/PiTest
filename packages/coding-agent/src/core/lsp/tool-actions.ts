@@ -50,8 +50,20 @@ import {
 	waitForDiagnosticsResult,
 } from "./utils.ts";
 
-const SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3000;
+const DEFAULT_SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS = 3000;
 const BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS = 400;
+
+function resolveSingleDiagnosticsWaitTimeoutMs(): number {
+	const raw = process.env.PIT_LSP_SINGLE_DIAGNOSTICS_WAIT_MS;
+	if (!raw) {
+		return DEFAULT_SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
+	}
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return DEFAULT_SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
+	}
+	return parsed;
+}
 const MAX_GLOB_DIAGNOSTIC_TARGETS = 20;
 const WORKSPACE_SYMBOL_LIMIT = 200;
 const MAX_RENAME_PAIRS = 1000;
@@ -266,7 +278,7 @@ export async function runDiagnostics(
 	const detailed = targets.length > 1 || truncatedGlobTargets;
 	const diagnosticsWaitTimeoutMs = detailed
 		? Math.min(BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000)
-		: Math.min(SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000);
+		: Math.min(resolveSingleDiagnosticsWaitTimeoutMs(), timeoutSec * 1000);
 	const results: string[] = [];
 	const allServerNames = new Set<string>();
 	if (truncatedGlobTargets) {

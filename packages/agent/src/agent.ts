@@ -8,7 +8,7 @@ import {
 	type ThinkingBudgets,
 	type Transport,
 } from "@pit/ai";
-import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+import { buildErrorTurn, runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import type { ToolErrorHintRegistry } from "./tool-error-hint-registry.ts";
 import type { ToolRewriteRegistry } from "./tool-rewrite-registry.ts";
 import type {
@@ -36,15 +36,6 @@ function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 		(message) => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
 	);
 }
-
-const EMPTY_USAGE = {
-	input: 0,
-	output: 0,
-	cacheRead: 0,
-	cacheWrite: 0,
-	totalTokens: 0,
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
 
 const DEFAULT_MODEL = {
 	id: "unknown",
@@ -566,16 +557,10 @@ export class Agent {
 	}
 
 	private async handleRunFailure(error: unknown, aborted: boolean): Promise<void> {
+		const errorMessage = error instanceof Error ? error.message : String(error);
 		const failureMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "" }],
-			api: this._state.model.api,
-			provider: this._state.model.provider,
-			model: this._state.model.id,
-			usage: EMPTY_USAGE,
+			...buildErrorTurn(this._state.model, errorMessage),
 			stopReason: aborted ? "aborted" : "error",
-			errorMessage: error instanceof Error ? error.message : String(error),
-			timestamp: Date.now(),
 		} satisfies AgentMessage;
 		// Each processEvents runs subscriber listeners (e.g. session persistence) that
 		// can throw — and this runs INSIDE runWithLifecycle's catch, so a throw here

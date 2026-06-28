@@ -16,10 +16,10 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { DefaultPackageManager } from "../src/core/package-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 
@@ -67,20 +67,47 @@ describe("DefaultPackageManager git sources (local-only mode)", () => {
 	let settingsManager: SettingsManager;
 	let packageManager: DefaultPackageManager;
 
+	// Shared v1 remote + installed clone — copied per test instead of init+commit+clone each time.
+	let suiteTemplateDir: string;
+	let templateRemoteDir: string;
+	let templateInstalledDir: string;
+	let templateInitialCommit: string;
+
 	// Git source that maps to our installed directory structure.
 	// Must use "git:" prefix so parseSource() treats it as a git source
 	// (bare "github.com/..." is not recognized as a git URL).
 	const gitSource = "git:github.com/test/extension";
+
+	beforeAll(() => {
+		suiteTemplateDir = mkdtempSync(join(tmpdir(), "git-update-suite-template-"));
+		templateRemoteDir = join(suiteTemplateDir, "remote");
+		templateInstalledDir = join(suiteTemplateDir, "installed");
+		mkdirSync(templateRemoteDir, { recursive: true });
+		initGitRepo(templateRemoteDir);
+		templateInitialCommit = createCommit(templateRemoteDir, "extension.ts", "// v1", "Initial commit");
+		git(["clone", templateRemoteDir, templateInstalledDir], suiteTemplateDir);
+		git(["config", "--local", "user.email", "test@test.com"], templateInstalledDir);
+		git(["config", "--local", "user.name", "Test"], templateInstalledDir);
+	});
+
+	afterAll(() => {
+		if (suiteTemplateDir && existsSync(suiteTemplateDir)) {
+			rmSync(suiteTemplateDir, { recursive: true, force: true });
+		}
+	});
+
+	function seedRemoteAndInstalledFromTemplate(): void {
+		cpSync(templateRemoteDir, remoteDir, { recursive: true });
+		mkdirSync(join(agentDir, "git", "github.com", "test"), { recursive: true });
+		cpSync(templateInstalledDir, installedDir, { recursive: true });
+	}
 
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `git-update-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		remoteDir = join(tempDir, "remote");
 		agentDir = join(tempDir, "agent");
-
-		// This matches the path structure: agentDir/git/<host>/<path>
 		installedDir = join(agentDir, "git", "github.com", "test", "extension");
-
 		mkdirSync(agentDir, { recursive: true });
 
 		settingsManager = SettingsManager.inMemory();
@@ -98,23 +125,11 @@ describe("DefaultPackageManager git sources (local-only mode)", () => {
 	});
 
 	/**
-	 * Sets up a "remote" repository and clones it to the installed directory.
-	 * This simulates a checkout that exists on disk from a previous install.
+	 * Seeds a v1 remote + installed checkout from the suite template.
 	 * @param sourceOverride Optional source string to use instead of gitSource (e.g., with @ref for pinned tests)
 	 */
 	function setupRemoteAndInstall(sourceOverride?: string): void {
-		// Create "remote" repository
-		mkdirSync(remoteDir, { recursive: true });
-		initGitRepo(remoteDir);
-		createCommit(remoteDir, "extension.ts", "// v1", "Initial commit");
-
-		// Clone to installed directory (simulating a prior install)
-		mkdirSync(join(agentDir, "git", "github.com", "test"), { recursive: true });
-		git(["clone", remoteDir, installedDir], tempDir);
-		git(["config", "--local", "user.email", "test@test.com"], installedDir);
-		git(["config", "--local", "user.name", "Test"], installedDir);
-
-		// Add to global packages so update() processes this source
+		seedRemoteAndInstalledFromTemplate();
 		settingsManager.setPackages([sourceOverride ?? gitSource]);
 	}
 
@@ -257,29 +272,15 @@ describe("DefaultPackageManager git sources (local-only mode)", () => {
 
 	describe("pinned sources", () => {
 		it("never updates a pinned git source (with @ref)", async () => {
-			// Create remote repo first to get the initial commit
-			mkdirSync(remoteDir, { recursive: true });
-			initGitRepo(remoteDir);
-			const initialCommit = createCommit(remoteDir, "extension.ts", "// v1", "Initial commit");
+			seedRemoteAndInstalledFromTemplate();
+			git(["checkout", templateInitialCommit], installedDir);
+			settingsManager.setPackages([`${gitSource}@${templateInitialCommit}`]);
 
-			// Install with pinned ref from the start - full clone to ensure commit is available
-			mkdirSync(join(agentDir, "git", "github.com", "test"), { recursive: true });
-			git(["clone", remoteDir, installedDir], tempDir);
-			git(["checkout", initialCommit], installedDir);
-			git(["config", "--local", "user.email", "test@test.com"], installedDir);
-			git(["config", "--local", "user.name", "Test"], installedDir);
-
-			// Add to global packages with pinned ref
-			settingsManager.setPackages([`${gitSource}@${initialCommit}`]);
-
-			// Add new commit to remote
 			createCommit(remoteDir, "extension.ts", "// v2", "Second commit");
 
-			// Update should be skipped for pinned sources
 			await packageManager.update();
 
-			// Should still be on initial commit
-			expect(getCurrentCommit(installedDir)).toBe(initialCommit);
+			expect(getCurrentCommit(installedDir)).toBe(templateInitialCommit);
 			expect(getFileContent(installedDir, "extension.ts")).toBe("// v1");
 		});
 	});

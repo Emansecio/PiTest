@@ -33,6 +33,7 @@ import type {
 	StreamOptions,
 } from "../types.ts";
 import { systemPromptWithoutDynamicMarker } from "../types.ts";
+import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts";
 import {
 	appendAssistantMessageDiagnostic,
 	createAssistantMessageDiagnostic,
@@ -42,6 +43,8 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS, IdleStreamTimeoutError, raceReadWithIdle } from "../utils/idle-timeout.ts";
 import { computeRetryDelay, isRetryableStatus, parseRetryAfter } from "../utils/retry-headers.ts";
+import { SseChunkBuffer } from "../utils/sse-chunk-reader.ts";
+import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	applyServiceTierPricing,
@@ -231,7 +234,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			// unset. maxRetries=0 means a single attempt (no retries), not an
 			// infinite loop — Math.max(0, ...) guards against negative input.
 			const maxRetries = Math.max(0, options?.maxRetries ?? MAX_RETRIES);
-			const connectTimeoutMs = options?.timeoutMs ?? 60_000;
+			const timeouts = resolveStreamTimeouts(options);
 			let response: Response | undefined;
 			let lastError: Error | undefined;
 
@@ -240,29 +243,17 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					throw new Error("Request was aborted");
 				}
 
-				// Fresh per-attempt connect controller: a connect-timeout (or user
-				// abort) on one attempt must not poison the next retry's fetch. The
-				// watchdog aborts only THIS attempt's controller; the user-abort
-				// listener is forwarded to it and removed in the per-attempt finally
-				// so there is no AbortSignal listener leak across retries.
-				const connectController = new AbortController();
-				const onUserAbort = () => connectController.abort();
-				options?.signal?.addEventListener("abort", onUserAbort, { once: true });
-				let connectTimer: ReturnType<typeof setTimeout> | undefined;
-
+				let attemptGuard: ConnectGuard | undefined;
 				try {
-					connectTimer = setTimeout(() => {
-						connectController.abort(
-							new Error(`Codex connect timeout after ${Math.round(connectTimeoutMs / 1000)}s`),
-						);
-					}, connectTimeoutMs);
-					response = await fetch(resolveCodexUrl(model.baseUrl), {
-						method: "POST",
-						headers: sseHeaders,
-						body: bodyJson,
-						signal: connectController.signal,
-					});
-					clearTimeout(connectTimer);
+					attemptGuard = createConnectGuard(options?.signal, timeouts.connectTimeoutMs);
+					response = await attemptGuard.settle(
+						fetch(resolveCodexUrl(model.baseUrl), {
+							method: "POST",
+							headers: sseHeaders,
+							body: bodyJson,
+							signal: attemptGuard.signal,
+						}),
+					);
 					await options?.onResponse?.(
 						{ status: response.status, headers: headersToRecord(response.headers) },
 						model,
@@ -310,10 +301,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					}
 					throw lastError;
 				} finally {
-					if (connectTimer !== undefined) {
-						clearTimeout(connectTimer);
-					}
-					options?.signal?.removeEventListener("abort", onUserAbort);
+					attemptGuard?.dispose();
 				}
 			}
 
@@ -572,9 +560,7 @@ async function* parseSSE(
 
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
-	let buffer = "";
-	let cursor = 0;
-	const COMPACT_THRESHOLD = 65536;
+	const chunks = new SseChunkBuffer();
 
 	try {
 		while (true) {
@@ -582,14 +568,14 @@ async function* parseSSE(
 			// read forever. User abort propagates as before via `signal`.
 			const { done, value } = await raceReadWithIdle(reader, { idleMs, signal });
 			if (done) break;
-			buffer += decoder.decode(value, { stream: true });
+			chunks.append(decoder.decode(value, { stream: true }));
 
 			// Cursor-based scan: advance through buffer without rewriting it on each
 			// chunk boundary. Compact only when prefix grows past the threshold.
-			let idx = buffer.indexOf("\n\n", cursor);
+			let idx = chunks.findFromCursor("\n\n");
 			while (idx !== -1) {
-				const chunk = buffer.slice(cursor, idx);
-				cursor = idx + 2;
+				const chunk = chunks.sliceFromCursor(idx);
+				chunks.advanceTo(idx + 2);
 
 				// Single-pass line scan over `chunk` (avoids split/filter/map
 				// allocating intermediate arrays + closures per delta). Same
@@ -616,13 +602,10 @@ async function* parseSSE(
 						}
 					}
 				}
-				idx = buffer.indexOf("\n\n", cursor);
+				idx = chunks.findFromCursor("\n\n");
 			}
 
-			if (cursor > COMPACT_THRESHOLD) {
-				buffer = buffer.slice(cursor);
-				cursor = 0;
-			}
+			chunks.compactIfNeeded();
 		}
 	} finally {
 		try {

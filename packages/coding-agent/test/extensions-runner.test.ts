@@ -807,11 +807,12 @@ describe("ExtensionRunner", () => {
 
 	describe("before_agent_start timeout", () => {
 		it("skips handler that exceeds timeout and emits error", async () => {
+			vi.stubEnv("PIT_EXTENSION_HOOK_TIMEOUT_MS", "200");
 			const extCode = `
 				export default function(pi) {
 					pi.on("before_agent_start", async () => {
-						// Hangs longer than the 5s timeout
-						await new Promise((r) => setTimeout(r, 15_000));
+						// Hangs longer than the test timeout (200ms)
+						await new Promise((r) => setTimeout(r, 2_000));
 						return { systemPrompt: "should not apply" };
 					});
 				}
@@ -828,15 +829,12 @@ describe("ExtensionRunner", () => {
 			const out = await runner.emitBeforeAgentStart("hello", undefined, "base", { cwd: tempDir });
 			const elapsed = performance.now() - t0;
 
-			// Should resolve around the 5s timeout, not 15s
-			expect(elapsed).toBeLessThan(8_000);
-			expect(elapsed).toBeGreaterThanOrEqual(4_000);
-			// Timed-out handler's systemPrompt not applied
+			expect(elapsed).toBeLessThan(1_000);
+			expect(elapsed).toBeGreaterThanOrEqual(150);
 			expect(out?.systemPrompt).toBeUndefined();
-			// Error reported
 			expect(errors.length).toBe(1);
 			expect(errors[0].error).toContain("timed out");
-		}, 15_000);
+		});
 
 		it("allows fast handlers through without delay", async () => {
 			const extCode = `

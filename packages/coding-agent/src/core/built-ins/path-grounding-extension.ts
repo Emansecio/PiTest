@@ -17,59 +17,43 @@
  */
 
 import { existsSync, readdirSync } from "node:fs";
-import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
+import { suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundPath, isPathGroundingDisabled, PATH_GROUNDING_DEFAULTS } from "../path-grounding.ts";
 import { extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
 import { expandPath } from "../tools/path-utils.ts";
-import { stableToolCallKey } from "./grounding-fire-once.ts";
+import { createFireOnceBlockGuard } from "./grounding-fire-once.ts";
 
-export function createPathGroundingExtension(options: { cwd: string }) {
-	return (pi: ExtensionAPI) => {
-		const fired = new Set<string>();
+export function createPathGroundingExtension(options: { cwd: string }): (pi: ExtensionAPI) => void {
+	return createFireOnceBlockGuard({
+		category: "guard.path-grounding",
+		source: "path-grounding-extension",
+		decide(event) {
+			if (isPathGroundingDisabled()) return undefined;
+			if (event.toolName !== "read" && event.toolName !== "edit") return undefined;
 
-		pi.on("tool_call", async (event) => {
-			try {
-				if (isPathGroundingDisabled()) return undefined;
-				// read/edit REFERENCE an existing file; write CREATES one (never grounded).
-				if (event.toolName !== "read" && event.toolName !== "edit") return undefined;
+			const input = event.input as Record<string, unknown>;
+			const path = extractPathArg(input);
+			if (path === undefined) return undefined;
 
-				const input = event.input as Record<string, unknown>;
-				const path = extractPathArg(input);
-				if (path === undefined) return undefined;
+			const decision = groundPath(
+				{ path },
+				{
+					resolve: (raw) => resolveToolPath(raw, options.cwd),
+					fileExists: (absPath) => existsSync(absPath),
+					listDir: (absDir) => readdirSync(absDir),
+					fuzzy: suggestClosest,
+					fuzzyN: suggestClosestN,
+					normalize: expandPath,
+					maxDistance: PATH_GROUNDING_DEFAULTS.maxDistance,
+					prefixMinOverlap: PATH_GROUNDING_DEFAULTS.prefixMinOverlap,
+				},
+			);
 
-				const decision = groundPath(
-					{ path },
-					{
-						resolve: (raw) => resolveToolPath(raw, options.cwd),
-						fileExists: (absPath) => existsSync(absPath),
-						listDir: (absDir) => readdirSync(absDir),
-						fuzzy: suggestClosest,
-						fuzzyN: suggestClosestN,
-						normalize: expandPath,
-						maxDistance: PATH_GROUNDING_DEFAULTS.maxDistance,
-						prefixMinOverlap: PATH_GROUNDING_DEFAULTS.prefixMinOverlap,
-					},
-				);
-
-				if (decision.action === "block") {
-					const key = stableToolCallKey(event.toolName, input);
-					if (fired.has(key)) return undefined; // already advised once -> let it run
-					fired.add(key);
-					recordDiagnostic({
-						category: "guard.path-grounding",
-						level: "info",
-						source: "path-grounding-extension",
-						context: { note: event.toolName },
-					});
-					return { block: true, reason: decision.message };
-				}
-				return undefined;
-			} catch {
-				// emitToolCall has no per-handler try/catch; a throw out of beforeToolCall
-				// would hard-block the call. Fail-open is the invariant -> swallow.
-				return undefined;
+			if (decision.action === "block") {
+				return { block: true, reason: decision.message };
 			}
-		});
-	};
+			return undefined;
+		},
+	});
 }

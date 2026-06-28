@@ -5,6 +5,7 @@ import { Agent } from "@pit/agent-core";
 import { type AssistantMessage, getModel } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
+import * as compactionModule from "../src/core/agent-session-compaction.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -106,49 +107,46 @@ describe("AgentSession pre-send overflow guard", () => {
 		};
 	}
 
-	function spyAutoCompaction() {
-		return vi
-			.spyOn(
-				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
-				},
-				"_runAutoCompaction",
-			)
-			.mockResolvedValue();
+	function compactionController() {
+		return session.compaction;
 	}
 
-	function checkCompaction(msg: AssistantMessage): Promise<void> {
-		return (
-			session as unknown as {
-				_checkCompaction: (m: AssistantMessage, skipAbortedCheck?: boolean) => Promise<void>;
-			}
-		)._checkCompaction.bind(session)(msg);
+	function compactionStarts(): string[] {
+		const starts: string[] = [];
+		session.subscribe((event) => {
+			if (event.type === "compaction_start") starts.push(event.reason);
+		});
+		return starts;
+	}
+
+	function checkCompaction(msg: AssistantMessage): Promise<boolean> {
+		return compactionModule.checkCompaction(compactionController(), msg);
 	}
 
 	it("forces compaction when the assembled payload nears the window ceiling", async () => {
 		const window = session.model!.contextWindow ?? 200_000;
 		mockState.assembledTokens = Math.floor(window * 0.97); // above the 0.95 guard ratio
-		const spy = spyAutoCompaction();
+		const starts = compactionStarts();
 		// usage of the last response is small — the normal threshold path (mocked off)
 		// wouldn't fire; only the trailing-aware guard catches the imminent overflow.
 		await checkCompaction(freshAssistant(1000));
-		expect(spy).toHaveBeenCalledWith("threshold", false);
+		expect(starts).toEqual(["threshold"]);
 	});
 
 	it("does not fire when the assembled payload is well under the ceiling", async () => {
 		const window = session.model!.contextWindow ?? 200_000;
 		mockState.assembledTokens = Math.floor(window * 0.5);
-		const spy = spyAutoCompaction();
+		const starts = compactionStarts();
 		await checkCompaction(freshAssistant(1000));
-		expect(spy).not.toHaveBeenCalled();
+		expect(starts).toHaveLength(0);
 	});
 
 	it("respects the PIT_NO_PRESEND_OVERFLOW_GUARD kill-switch", async () => {
 		process.env.PIT_NO_PRESEND_OVERFLOW_GUARD = "1";
 		const window = session.model!.contextWindow ?? 200_000;
 		mockState.assembledTokens = Math.floor(window * 0.97);
-		const spy = spyAutoCompaction();
+		const starts = compactionStarts();
 		await checkCompaction(freshAssistant(1000));
-		expect(spy).not.toHaveBeenCalled();
+		expect(starts).toHaveLength(0);
 	});
 });

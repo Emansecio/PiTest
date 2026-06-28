@@ -9,46 +9,27 @@
  * tool and translates the verdict.
  *
  * Session state: a fire-once set so an insistent model re-issuing the identical
- * blocked call runs it (advises, never wedges). The whole handler is wrapped in
- * try/catch because `emitToolCall` has no per-handler isolation and a throw out of
- * beforeToolCall would hard-block the call — fail-open is load-bearing. Opt out
- * with PIT_NO_PATTERN_GROUNDING.
+ * blocked call runs it (advises, never wedges). Opt out with PIT_NO_PATTERN_GROUNDING.
  */
 
-import { recordDiagnostic } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundPattern, isPatternGroundingDisabled } from "../pattern-grounding.ts";
-import { stableToolCallKey } from "./grounding-fire-once.ts";
+import { createFireOnceBlockGuard } from "./grounding-fire-once.ts";
 
-export function createPatternGroundingExtension() {
-	return (pi: ExtensionAPI) => {
-		const fired = new Set<string>();
+export function createPatternGroundingExtension(): (pi: ExtensionAPI) => void {
+	return createFireOnceBlockGuard({
+		category: "guard.pattern-grounding",
+		source: "pattern-grounding-extension",
+		decide(event) {
+			if (isPatternGroundingDisabled()) return undefined;
+			if (event.toolName !== "grep" && event.toolName !== "find") return undefined;
 
-		pi.on("tool_call", (event) => {
-			try {
-				if (isPatternGroundingDisabled()) return undefined;
-				if (event.toolName !== "grep" && event.toolName !== "find") return undefined;
-
-				const input = event.input as Record<string, unknown>;
-				const decision = groundPattern({ toolName: event.toolName, args: input });
-				if (decision.action === "block") {
-					const key = stableToolCallKey(event.toolName, input);
-					if (fired.has(key)) return undefined; // already advised once -> let it run
-					fired.add(key);
-					recordDiagnostic({
-						category: "guard.pattern-grounding",
-						level: "info",
-						source: "pattern-grounding-extension",
-						context: { note: event.toolName },
-					});
-					return { block: true, reason: decision.message };
-				}
-				return undefined;
-			} catch {
-				// emitToolCall has no per-handler try/catch; a throw out of beforeToolCall
-				// would hard-block the call. Fail-open is the invariant -> swallow.
-				return undefined;
+			const input = event.input as Record<string, unknown>;
+			const decision = groundPattern({ toolName: event.toolName, args: input });
+			if (decision.action === "block") {
+				return { block: true, reason: decision.message };
 			}
-		});
-	};
+			return undefined;
+		},
+	});
 }

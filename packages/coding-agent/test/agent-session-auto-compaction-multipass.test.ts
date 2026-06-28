@@ -5,6 +5,7 @@ import { Agent } from "@pit/agent-core";
 import { getModel } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
+import * as compactionModule from "../src/core/agent-session-compaction.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -72,20 +73,6 @@ describe("AgentSession auto-compaction multipass", () => {
 	});
 
 	it("runs one extra threshold compaction when the first pass still leaves soft pressure", async () => {
-		const executeSpy = vi
-			.spyOn(
-				session as unknown as {
-					_executeCompactionPipeline: (options: unknown) => Promise<{
-						summary: string;
-						firstKeptEntryId: string;
-						tokensBefore: number;
-						details: unknown;
-					}>;
-				},
-				"_executeCompactionPipeline",
-			)
-			.mockResolvedValue({ summary: "compacted", firstKeptEntryId: "entry-1", tokensBefore: 100, details: {} });
-
 		const events: Array<{ type: string; reason: string }> = [];
 		session.subscribe((event) => {
 			if (event.type === "compaction_start" || event.type === "compaction_end") {
@@ -93,15 +80,8 @@ describe("AgentSession auto-compaction multipass", () => {
 			}
 		});
 
-		const runAutoCompaction = (
-			session as unknown as {
-				_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
-			}
-		)._runAutoCompaction.bind(session);
+		await compactionModule.runAutoCompaction(session.compaction, "threshold", false);
 
-		await runAutoCompaction("threshold", false);
-
-		expect(executeSpy).toHaveBeenCalledTimes(2);
 		expect(events.filter((event) => event.type === "compaction_start")).toHaveLength(2);
 		expect(events.filter((event) => event.type === "compaction_end")).toHaveLength(2);
 	});

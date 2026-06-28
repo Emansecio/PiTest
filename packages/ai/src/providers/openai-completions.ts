@@ -38,6 +38,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { iterateWithIdleTimeout } from "../utils/idle-timeout.ts";
 import { finalizeStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
@@ -140,10 +141,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			// Guard the connect-phase await (time-to-headers + SDK retry/backoff): a
 			// frozen connect must not wedge the turn past a user interrupt. See
 			// connect-guard.ts. The body loop below is covered by iterateWithIdleTimeout.
-			connectGuard = createConnectGuard(options?.signal, options?.timeoutMs);
+			const timeouts = resolveStreamTimeouts(options);
+			connectGuard = createConnectGuard(options?.signal, timeouts.connectTimeoutMs);
 			const requestOptions = {
 				signal: connectGuard.signal,
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+				...(timeouts.requestTimeoutMs !== undefined ? { timeout: timeouts.requestTimeoutMs } : {}),
 				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
 			};
 			const { data: openaiStream, response } = await connectGuard.settle(
@@ -271,8 +273,8 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			};
 
 			for await (const chunk of iterateWithIdleTimeout(openaiStream, {
-				idleMs: options?.idleTimeoutMs,
-				signal: connectGuard?.signal ?? options?.signal,
+				idleMs: timeouts.idleTimeoutMs,
+				signal: connectGuard.signal,
 			})) {
 				if (!chunk || typeof chunk !== "object") continue;
 

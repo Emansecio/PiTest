@@ -34,6 +34,8 @@ import { headersToRecord } from "../utils/headers.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS, raceReadWithIdle } from "../utils/idle-timeout.ts";
 import { finalizeStreamingJson, parseJsonWithRepair } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { SseChunkBuffer } from "../utils/sse-chunk-reader.ts";
+import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { createInitialAssistantMessage, sanitizeToolCallId, stripStreamingScratch } from "./openai-responses-shared.ts";
@@ -357,9 +359,7 @@ async function* iterateSseMessages(
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
 	const state: SseDecoderState = { event: null, data: [], raw: [] };
-	let buffer = "";
-	let cursor = 0;
-	const COMPACT_THRESHOLD = 65536;
+	const chunks = new SseChunkBuffer();
 
 	try {
 		while (true) {
@@ -378,36 +378,33 @@ async function* iterateSseMessages(
 				break;
 			}
 
-			buffer += decoder.decode(value, { stream: true });
-			let consumed = consumeLineAt(buffer, cursor);
+			chunks.append(decoder.decode(value, { stream: true }));
+			let consumed = consumeLineAt(chunks.buffer, chunks.cursor);
 			while (consumed) {
-				cursor = consumed.nextCursor;
+				chunks.advanceTo(consumed.nextCursor);
 				const event = decodeSseLine(consumed.line, state);
 				if (event) {
 					yield event;
 				}
-				consumed = consumeLineAt(buffer, cursor);
+				consumed = consumeLineAt(chunks.buffer, chunks.cursor);
 			}
 
-			if (cursor > COMPACT_THRESHOLD) {
-				buffer = buffer.slice(cursor);
-				cursor = 0;
-			}
+			chunks.compactIfNeeded();
 		}
 
-		buffer += decoder.decode();
-		let consumed = consumeLineAt(buffer, cursor);
+		chunks.append(decoder.decode());
+		let consumed = consumeLineAt(chunks.buffer, chunks.cursor);
 		while (consumed) {
-			cursor = consumed.nextCursor;
+			chunks.advanceTo(consumed.nextCursor);
 			const event = decodeSseLine(consumed.line, state);
 			if (event) {
 				yield event;
 			}
-			consumed = consumeLineAt(buffer, cursor);
+			consumed = consumeLineAt(chunks.buffer, chunks.cursor);
 		}
 
-		if (cursor < buffer.length) {
-			const event = decodeSseLine(buffer.slice(cursor), state);
+		if (chunks.cursor < chunks.buffer.length) {
+			const event = decodeSseLine(chunks.sliceFromCursor(), state);
 			if (event) {
 				yield event;
 			}
@@ -511,10 +508,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			if (nextParams !== undefined) {
 				params = nextParams as MessageCreateParamsStreaming;
 			}
-			connectGuard = createConnectGuard(options?.signal, options?.timeoutMs);
+			const timeouts = resolveStreamTimeouts(options);
+			connectGuard = createConnectGuard(options?.signal, timeouts.connectTimeoutMs);
 			const requestOptions = {
 				signal: connectGuard.signal,
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+				...(timeouts.requestTimeoutMs !== undefined ? { timeout: timeouts.requestTimeoutMs } : {}),
 				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
 			};
 			const response = await connectGuard.settle(
@@ -529,7 +527,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			// Build O(1) reverse lookup for fromClaudeCodeName once before the loop.
 			const toolNameLookup = buildToolNameLookup(context.tools);
 
-			for await (const event of iterateAnthropicEvents(response, options?.signal, options?.idleTimeoutMs)) {
+			for await (const event of iterateAnthropicEvents(response, connectGuard.signal, timeouts.idleTimeoutMs)) {
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
 					// Capture initial token usage from message_start event

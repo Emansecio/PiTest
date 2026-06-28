@@ -280,10 +280,12 @@ export interface ExtensionUIContext {
 // ============================================================================
 
 export interface ContextUsage {
-	/** Estimated context tokens, or null if unknown (e.g. right after compaction, before next LLM response). */
+	/** Estimated message-history tokens (excludes system prompt and tool schemas). */
 	tokens: number | null;
+	/** Full wire estimate: messages + system prompt + tool schemas. Omitted when unknown. */
+	wireTokens?: number | null;
 	contextWindow: number;
-	/** Context usage as percentage of context window, or null if tokens is unknown. */
+	/** Context usage as percentage of context window (based on wireTokens when present). */
 	percent: number | null;
 	/** True when `tokens` is a STRUCTURAL estimate (right after compaction, before the next
 	 * LLM response confirms the exact size) rather than a provider-reported usage. The UI marks

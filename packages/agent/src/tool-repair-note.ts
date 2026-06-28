@@ -19,6 +19,7 @@
  * Pure and dependency-free so it stays trivially testable.
  */
 
+import { appendAnnotatedLinesToContent } from "./append-annotated-content.ts";
 import type { AgentToolResult } from "./types.ts";
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -100,8 +101,6 @@ export function buildRepairNote(sent: unknown, ran: unknown): string | undefined
 	);
 }
 
-const REPAIR_PREFIX = "[repair] ";
-
 /**
  * Append a repair note to a tool result's content. Mirrors
  * `appendHintsToContent`: attaches to the trailing text block (idempotent — a
@@ -112,16 +111,9 @@ export function appendRepairNoteToContent(
 	content: AgentToolResult<unknown>["content"],
 	note: string,
 ): AgentToolResult<unknown>["content"] {
-	const line = `${REPAIR_PREFIX}${note}`;
-	const blocks = Array.isArray(content) ? [...content] : [];
-	for (let i = blocks.length - 1; i >= 0; i--) {
-		const candidate = blocks[i];
-		if (candidate && candidate.type === "text" && typeof candidate.text === "string") {
-			if (candidate.text.includes(line)) return blocks;
-			blocks[i] = { ...candidate, text: `${candidate.text}\n\n${line}` };
-			return blocks;
-		}
-	}
-	blocks.push({ type: "text", text: line });
-	return blocks;
+	const line = `[repair] ${note}`;
+	return appendAnnotatedLinesToContent(content, [note], {
+		prefix: "[repair] ",
+		idempotencyKey: line,
+	});
 }

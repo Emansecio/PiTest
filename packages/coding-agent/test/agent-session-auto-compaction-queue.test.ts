@@ -5,6 +5,7 @@ import { Agent } from "@pit/agent-core";
 import { type AssistantMessage, getModel } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
+import * as compactionModule from "../src/core/agent-session-compaction.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
@@ -57,6 +58,10 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	// predictive background path disabled so behaviour is unchanged.
 	shouldCompactSoft: () => false,
 }));
+
+function compactionController(session: AgentSession): compactionModule.CompactionController {
+	return session.compaction;
+}
 
 describe("AgentSession auto-compaction queue resume", () => {
 	let session: AgentSession;
@@ -120,13 +125,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
-		const runAutoCompaction = (
-			session as unknown as {
-				_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
-			}
-		)._runAutoCompaction.bind(session);
-
-		await expect(runAutoCompaction("threshold", false)).resolves.toBe(true);
+		await expect(compactionModule.runAutoCompaction(compactionController(session), "threshold", false)).resolves.toBe(
+			true,
+		);
 
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
@@ -152,32 +153,22 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now(),
 		};
 
-		const runAutoCompactionSpy = vi
-			.spyOn(
-				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
-				},
-				"_runAutoCompaction",
-			)
-			.mockResolvedValue();
-
+		const compactionStarts: string[] = [];
 		const events: Array<{ type: string; reason: string; errorMessage?: string }> = [];
 		session.subscribe((event) => {
+			if (event.type === "compaction_start") {
+				compactionStarts.push(event.reason);
+			}
 			if (event.type === "compaction_end") {
 				events.push({ type: event.type, reason: event.reason, errorMessage: event.errorMessage });
 			}
 		});
 
-		const checkCompaction = (
-			session as unknown as {
-				_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<void>;
-			}
-		)._checkCompaction.bind(session);
+		const ctx = compactionController(session);
+		await compactionModule.checkCompaction(ctx, overflowMessage);
+		await compactionModule.checkCompaction(ctx, { ...overflowMessage, timestamp: Date.now() + 1 });
 
-		await checkCompaction(overflowMessage);
-		await checkCompaction({ ...overflowMessage, timestamp: Date.now() + 1 });
-
-		expect(runAutoCompactionSpy).toHaveBeenCalledTimes(1);
+		expect(compactionStarts).toEqual(["overflow"]);
 		expect(events).toContainEqual({
 			type: "compaction_end",
 			reason: "overflow",
@@ -223,24 +214,14 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now(),
 		});
 
-		const runAutoCompactionSpy = vi
-			.spyOn(
-				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
-				},
-				"_runAutoCompaction",
-			)
-			.mockResolvedValue();
+		const compactionStarts: string[] = [];
+		session.subscribe((event) => {
+			if (event.type === "compaction_start") compactionStarts.push(event.reason);
+		});
 
-		const checkCompaction = (
-			session as unknown as {
-				_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<void>;
-			}
-		)._checkCompaction.bind(session);
+		await compactionModule.checkCompaction(compactionController(session), staleAssistant, false);
 
-		await checkCompaction(staleAssistant, false);
-
-		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+		expect(compactionStarts).toHaveLength(0);
 	});
 
 	it("should trigger threshold compaction for error messages using last successful usage", async () => {
@@ -293,24 +274,14 @@ describe("AgentSession auto-compaction queue resume", () => {
 			errorAssistant,
 		];
 
-		const runAutoCompactionSpy = vi
-			.spyOn(
-				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
-				},
-				"_runAutoCompaction",
-			)
-			.mockResolvedValue();
+		const compactionStarts: string[] = [];
+		session.subscribe((event) => {
+			if (event.type === "compaction_start") compactionStarts.push(event.reason);
+		});
 
-		const checkCompaction = (
-			session as unknown as {
-				_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<void>;
-			}
-		)._checkCompaction.bind(session);
+		await compactionModule.checkCompaction(compactionController(session), errorAssistant);
 
-		await checkCompaction(errorAssistant);
-
-		expect(runAutoCompactionSpy).toHaveBeenCalledWith("threshold", false);
+		expect(compactionStarts).toEqual(["threshold"]);
 	});
 
 	it("should not trigger threshold compaction for error messages when no prior usage exists", async () => {
@@ -341,24 +312,14 @@ describe("AgentSession auto-compaction queue resume", () => {
 			errorAssistant,
 		];
 
-		const runAutoCompactionSpy = vi
-			.spyOn(
-				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
-				},
-				"_runAutoCompaction",
-			)
-			.mockResolvedValue();
+		const compactionStarts: string[] = [];
+		session.subscribe((event) => {
+			if (event.type === "compaction_start") compactionStarts.push(event.reason);
+		});
 
-		const checkCompaction = (
-			session as unknown as {
-				_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<void>;
-			}
-		)._checkCompaction.bind(session);
+		await compactionModule.checkCompaction(compactionController(session), errorAssistant);
 
-		await checkCompaction(errorAssistant);
-
-		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+		expect(compactionStarts).toHaveLength(0);
 	});
 
 	it("should not trigger threshold compaction for error messages when only kept pre-compaction usage exists", async () => {
@@ -422,24 +383,14 @@ describe("AgentSession auto-compaction queue resume", () => {
 			errorAssistant,
 		];
 
-		const runAutoCompactionSpy = vi
-			.spyOn(
-				session as unknown as {
-					_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<void>;
-				},
-				"_runAutoCompaction",
-			)
-			.mockResolvedValue();
+		const compactionStarts: string[] = [];
+		session.subscribe((event) => {
+			if (event.type === "compaction_start") compactionStarts.push(event.reason);
+		});
 
-		const checkCompaction = (
-			session as unknown as {
-				_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<void>;
-			}
-		)._checkCompaction.bind(session);
-
-		await checkCompaction(errorAssistant);
+		await compactionModule.checkCompaction(compactionController(session), errorAssistant);
 
 		// Should NOT compact because the only usage data is from a kept pre-compaction message
-		expect(runAutoCompactionSpy).not.toHaveBeenCalled();
+		expect(compactionStarts).toHaveLength(0);
 	});
 });

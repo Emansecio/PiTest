@@ -37,13 +37,10 @@ export default defineConfig({
 		hookTimeout: 120000,
 		poolOptions: {
 			forks: {
-				// Default forks one worker per core. With every core busy, the OS and
-				// the processes these tests SPAWN (tsx boots, git children, and the
-				// taskkill/AgentSession.dispose teardown) get starved and blow their
-				// per-hook deadline — which made a DIFFERENT teardown flake each full
-				// run on Windows. Use only a quarter of the cores for vitest workers so
-				// spawned work + the scheduler keep enough headroom during teardown.
-				// Floor of 2 for small CI boxes.
+				// Default forks one worker per core. With every core busy, spawned
+				// children (tsx boots, git, taskkill/AgentSession.dispose teardown)
+				// starve and blow hook deadlines on Windows. Use half the cores (floor 2)
+				// so teardown keeps headroom during the full suite.
 				maxForks: maxVitestForks,
 			},
 		},

@@ -208,12 +208,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	private getScopeText(): string {
 		const allText = this.scope === "all" ? theme.fg("accent", "all") : theme.fg("muted", "all");
-		const scopedText = this.scope === "scoped" ? theme.fg("accent", "scoped") : theme.fg("muted", "scoped");
-		return `${theme.fg("muted", "Scope: ")}${allText}${theme.fg("muted", " | ")}${scopedText}`;
+		const enabledText = this.scope === "scoped" ? theme.fg("accent", "enabled") : theme.fg("muted", "enabled");
+		return `${theme.fg("muted", "Scope: ")}${allText}${theme.fg("muted", " | ")}${enabledText}`;
 	}
 
 	private getScopeHintText(): string {
-		return keyHint("tui.input.tab", "scope") + theme.fg("muted", " (all/scoped)");
+		return keyHint("tui.input.tab", "scope") + theme.fg("muted", " (all/enabled)");
 	}
 
 	private setScope(scope: ModelScope): void {

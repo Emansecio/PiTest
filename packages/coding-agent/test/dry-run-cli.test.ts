@@ -1,31 +1,26 @@
 /**
- * E2E smoke for `pi --dry-run`.
+ * Dry-run contract tests.
  *
- * Spawns the CLI via `tsx src/cli.ts` with an isolated agent directory and
- * cwd so we don't read the developer's settings.json. Asserts the JSON
- * report shape, key checks, and exit code semantics.
- *
- * No model is configured so the report is expected to be "blocked" (no
- * model resolved) — the test asserts that as the canonical failure path.
- * Auth-less runs are exactly what users hit when they install Pi and try it
- * without setting up a provider yet.
- *
- * The test is skipped when the tsx binary cannot be located so external
- * builds (e.g. running tests against a published tarball) don't fail.
+ * Most cases call `buildDryRunReport` in-process via `createAgentSessionServices`
+ * (fast, no tsx spawn). One E2E smoke spawns the CLI to verify the full boot
+ * path still works end-to-end.
  */
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { sync as crossSpawnSync } from "cross-spawn";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildDryRunReport, formatReportJson, formatReportText } from "../src/cli/dry-run/index.js";
+import { createAgentSessionServices } from "../src/core/agent-session-services.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
+import type { Settings } from "../src/core/settings-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const CLI_ENTRY = path.join(PROJECT_ROOT, "src", "cli.ts");
 const TSX_BIN = path.resolve(PROJECT_ROOT, "../../node_modules/.bin/tsx");
-// tsx discovers tsconfig from the spawn cwd. The test cwd is a temp dir, so
-// without an explicit --tsconfig the `@pit/*` path aliases never apply and the
-// CLI crashes resolving `@pit/ai` to a (possibly absent) dist build.
 const TSCONFIG = path.resolve(PROJECT_ROOT, "../../tsconfig.json");
 
 function tsxAvailable(): boolean {
@@ -33,18 +28,6 @@ function tsxAvailable(): boolean {
 	return fs.existsSync(candidate) || fs.existsSync(TSX_BIN);
 }
 
-interface RunResult {
-	status: number;
-	stdout: string;
-	stderr: string;
-}
-
-/**
- * Strip every provider env var so the spawned CLI cannot resolve auth from
- * the developer's shell. Without this the test would inherit
- * ANTHROPIC_API_KEY / OPENAI_API_KEY / etc. and the "blocked" assertion
- * would fail because a model resolved successfully.
- */
 function cleanProviderEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	const cleaned = { ...env };
 	for (const key of Object.keys(cleaned)) {
@@ -59,7 +42,7 @@ function cleanProviderEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 	return cleaned;
 }
 
-function runCli(args: string[], cwd: string, agentDir: string): RunResult {
+function runCliSpawn(args: string[], cwd: string, agentDir: string): { status: number; stdout: string } {
 	const result = crossSpawnSync(TSX_BIN, ["--tsconfig", TSCONFIG, CLI_ENTRY, ...args], {
 		cwd,
 		env: {
@@ -68,48 +51,50 @@ function runCli(args: string[], cwd: string, agentDir: string): RunResult {
 			PIT_OFFLINE: "1",
 			PIT_SKIP_VERSION_CHECK: "1",
 			PIT_DRY_RUN: "1",
-			// Force a deterministic terminal width so wrapped output doesn't break
-			// substring assertions.
 			COLUMNS: "120",
-			// Disable colors so the text format includes no ANSI escapes.
 			NO_COLOR: "1",
 			FORCE_COLOR: "0",
 		},
 		encoding: "utf-8",
-		// 90s for the child (tsx transpile + full CLI boot). Comfortably above a
-		// cold boot (~seconds); the headroom is for a loaded/CI box. The vitest
-		// testTimeout (120s, set in beforeAll) stays above this so the child's own
-		// timeout is always the arbiter.
 		timeout: 90_000,
 	});
 	return {
 		status: typeof result.status === "number" ? result.status : -1,
 		stdout: result.stdout ?? "",
-		stderr: result.stderr ?? "",
 	};
 }
 
-describe("pi --dry-run (E2E)", () => {
-	const available = tsxAvailable();
-	const suite = available ? describe : describe.skip;
-	if (!available) {
-		// vitest still emits this describe so CI surfaces the skip.
-		console.warn(`[dry-run-cli] tsx not found at ${TSX_BIN} — skipping E2E.`);
-	}
+async function createDryRunServices(cwd: string, agentDir: string, settings: Partial<Settings> = {}) {
+	const settingsManager = SettingsManager.inMemory(settings);
+	const authStorage = AuthStorage.inMemory();
+	const modelRegistry = ModelRegistry.inMemory(authStorage);
+	return createAgentSessionServices({
+		cwd,
+		agentDir,
+		settingsManager,
+		authStorage,
+		modelRegistry,
+		disableBuiltInExtensions: true,
+		resourceLoaderOptions: {
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+		},
+	});
+}
 
+function dryRunExitCode(overallStatus: string): number {
+	return overallStatus === "blocked" ? 1 : 0;
+}
+
+describe("pi --dry-run", () => {
 	let tempDir: string;
 	let cwd: string;
 	let agentDir: string;
 
-	// Each `it` spawns a fresh `tsx` that transpiles + boots the whole CLI — a
-	// genuinely heavy E2E step. The crossSpawnSync below caps the child at 90s;
-	// give the vitest deadline clear headroom above that (120s) so the test is
-	// arbitrated by the child's own timeout, never killed mid-spawn by a tie with
-	// the global 60s testTimeout. A cold machine boots tsx in seconds; this only
-	// matters under heavy load/CI.
 	beforeAll(() => {
-		vi.setConfig({ testTimeout: 120_000, hookTimeout: 60_000 });
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dryrun-e2e-"));
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dryrun-"));
 		cwd = path.join(tempDir, "proj");
 		agentDir = path.join(tempDir, "agent");
 		fs.mkdirSync(cwd, { recursive: true });
@@ -124,85 +109,96 @@ describe("pi --dry-run (E2E)", () => {
 		}
 	});
 
-	suite("with no model configured", () => {
-		it("returns JSON with overallStatus=blocked and exit code 1", () => {
-			const result = runCli(["--dry-run", "json", "--no-extensions", "--no-skills"], cwd, agentDir);
-			expect(result.status).toBe(1);
-			const stdout = result.stdout.trim();
+	describe("in-process report builder", () => {
+		it("returns JSON with overallStatus=blocked when no model resolves", async () => {
+			const services = await createDryRunServices(cwd, agentDir);
+			const report = buildDryRunReport({
+				services,
+				resolvedModel: undefined,
+				resolvedToolNames: ["read", "bash"],
+			});
+			const stdout = formatReportJson(report).trim();
 			expect(stdout.length).toBeGreaterThan(0);
-			const report = JSON.parse(stdout) as {
+			const parsed = JSON.parse(stdout) as {
 				overallStatus: string;
 				cwd: string;
 				agentDir: string;
 				checks: Array<{ name: string; status: string; detail: string }>;
 			};
-			expect(report.overallStatus).toBe("blocked");
-			expect(report.cwd).toBe(cwd);
-			expect(report.checks.length).toBeGreaterThan(0);
-			const modelCheck = report.checks.find((c) => c.name === "Model & auth");
+			expect(dryRunExitCode(parsed.overallStatus)).toBe(1);
+			expect(parsed.overallStatus).toBe("blocked");
+			expect(parsed.cwd).toBe(cwd);
+			expect(parsed.checks.length).toBeGreaterThan(0);
+			const modelCheck = parsed.checks.find((c) => c.name === "Model & auth");
 			expect(modelCheck?.status).toBe("blocked");
-			// Detail mentions either "no model" (none resolved) or "missing api key" (placeholder model selected but auth absent).
 			const detail = modelCheck?.detail.toLowerCase() ?? "";
 			expect(detail.includes("no model") || detail.includes("missing api key")).toBe(true);
 		});
 
-		it("text format includes 'pi dry-run' header and tool list", () => {
-			const result = runCli(["--dry-run", "text", "--no-extensions", "--no-skills"], cwd, agentDir);
-			expect(result.status).toBe(1);
-			expect(result.stdout).toContain("pit dry-run");
-			expect(result.stdout).toContain("Model & auth");
-			expect(result.stdout).toContain("Permissions");
+		it("text format includes 'pit dry-run' header and tool list", async () => {
+			const services = await createDryRunServices(cwd, agentDir);
+			const report = buildDryRunReport({
+				services,
+				resolvedModel: undefined,
+				resolvedToolNames: ["read"],
+			});
+			const text = formatReportText(report);
+			expect(dryRunExitCode(report.overallStatus)).toBe(1);
+			expect(text).toContain("pit dry-run");
+			expect(text).toContain("Model & auth");
+			expect(text).toContain("Permissions");
 		});
-	});
 
-	suite("with permissions configured", () => {
-		it("includes the configured mode in the Permissions detail", () => {
-			const settings = {
+		it("includes the configured permission mode in the Permissions detail", async () => {
+			const services = await createDryRunServices(cwd, agentDir, {
 				permissions: {
 					mode: "plan",
 					denyPaths: [{ glob: "**/.env" }],
 				},
-			};
-			fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify(settings));
-			const result = runCli(["--dry-run", "json", "--no-extensions", "--no-skills"], cwd, agentDir);
-			const stdout = result.stdout.trim();
-			expect(stdout.length).toBeGreaterThan(0);
-			const report = JSON.parse(stdout) as {
-				checks: Array<{ name: string; detail: string }>;
-			};
+			});
+			const report = buildDryRunReport({
+				services,
+				resolvedModel: undefined,
+				resolvedToolNames: ["read"],
+			});
 			const permCheck = report.checks.find((c) => c.name === "Permissions");
 			expect(permCheck?.detail).toContain("mode=plan");
 			expect(permCheck?.detail).toContain("deny=1");
-			// Reset settings for following tests.
-			fs.unlinkSync(path.join(agentDir, "settings.json"));
 		});
-	});
 
-	suite("MCP servers in settings", () => {
-		it("lists configured MCP servers without making network calls", () => {
-			const settings = {
+		it("lists configured MCP servers without making network calls", async () => {
+			const services = await createDryRunServices(cwd, agentDir, {
 				mcp: {
 					servers: {
 						unreachable: { url: "http://127.0.0.1:1/never", timeoutMs: 1000 },
 					},
 				},
-			};
-			fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify(settings));
+			});
 			const t0 = Date.now();
-			const result = runCli(["--dry-run", "json", "--no-extensions", "--no-skills"], cwd, agentDir);
+			const report = buildDryRunReport({
+				services,
+				resolvedModel: undefined,
+				resolvedToolNames: ["read"],
+			});
 			const elapsedMs = Date.now() - t0;
-			// PIT_DRY_RUN=1 guards MCP connectAll so we should finish well under
-			// the 1s timeout that would otherwise apply.
-			expect(elapsedMs).toBeLessThan(15_000);
-			const stdout = result.stdout.trim();
-			expect(stdout.length).toBeGreaterThan(0);
-			const report = JSON.parse(stdout) as {
-				checks: Array<{ name: string; detail: string; items?: Array<{ label: string; value: string }> }>;
-			};
+			expect(elapsedMs).toBeLessThan(2_000);
 			const mcpCheck = report.checks.find((c) => c.name === "MCP servers");
 			expect(mcpCheck?.detail).toContain("1 configured");
 			expect(mcpCheck?.items?.[0].label).toBe("unreachable");
-			fs.unlinkSync(path.join(agentDir, "settings.json"));
+		});
+	});
+
+	const spawnSuite = tsxAvailable() ? describe : describe.skip;
+	if (!tsxAvailable()) {
+		console.warn(`[dry-run-cli] tsx not found at ${TSX_BIN} — skipping E2E smoke.`);
+	}
+
+	spawnSuite("E2E smoke (tsx spawn)", () => {
+		it("blocked dry-run exits 1 through the real CLI entry", () => {
+			const result = runCliSpawn(["--dry-run", "json", "--no-extensions", "--no-skills"], cwd, agentDir);
+			expect(result.status).toBe(1);
+			const report = JSON.parse(result.stdout.trim()) as { overallStatus: string };
+			expect(report.overallStatus).toBe("blocked");
 		});
 	});
 });

@@ -776,7 +776,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			};
 		}
 		resumable.delete(key);
-		void deleteResumeState(rcwd, key);
+		await deleteResumeState(rcwd, key);
 		const body = cappedBody(extractAssistantText(agent.state.messages));
 		return {
 			content: [{ type: "text" as const, text: body }],

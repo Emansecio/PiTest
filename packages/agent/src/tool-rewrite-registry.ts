@@ -27,6 +27,7 @@
  * match the same call.
  */
 
+import { ruleAppliesTo } from "./tool-rule-utils.ts";
 import type { AgentToolCall } from "./types.ts";
 
 /** Safety cap on the auto-rewrite chain length. */
@@ -130,10 +131,4 @@ export class ToolRewriteRegistry {
 		}
 		return undefined;
 	}
-}
-
-function ruleAppliesTo(rule: ToolRewriteRule, toolName: string): boolean {
-	if (rule.appliesTo === "*") return true;
-	if (typeof rule.appliesTo === "string") return rule.appliesTo === toolName;
-	return rule.appliesTo.includes(toolName);
 }

@@ -34,6 +34,20 @@ Edit directly or use `/settings` for common options.
 }
 ```
 
+#### Model selection (active, ring, overrides)
+
+Three layers work together:
+
+| Layer | How | Settings / flags |
+|-------|-----|------------------|
+| **Active model** | The model used for the next turn | `/model`, `defaultProvider` + `defaultModel` (or `defaultModelId` in older configs) |
+| **Cycling ring** | Models cycled with Ctrl+P / Shift+Ctrl+P | `enabledModels` in settings, or `--models` on the CLI. `/model` can filter **all** vs **enabled** with Tab |
+| **Path/role overrides** | Auto-switch by file path or role | `modelRoles` entries (`.model`, `.thinkingLevel`, `.paths`, `.fallbackChain`) |
+
+**Precedence for the initial model** (first turn): CLI `--provider` / `--model` → first entry in the enabled ring → `defaultModel` → first available provider model.
+
+See also [Model Cycling](#model-cycling) for `enabledModels` format.
+
 ### UI & Display
 
 | Setting | Type | Default | Description |

@@ -71,8 +71,8 @@ describe("eval kernel orphan child teardown", () => {
 				/timed out/,
 			);
 
-			// Give the OS a moment to reap the tree.
-			await sleep(1_500);
+			// Give the OS a moment to reap the tree (short — we only poll once).
+			await sleep(400);
 			const childPid = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
 			expect(Number.isFinite(childPid)).toBe(true);
 			expect(isAlive(childPid)).toBe(false);

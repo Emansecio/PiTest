@@ -3,6 +3,7 @@ import { type AssistantMessage, getModel, type Usage } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { estimateWireTokens } from "../src/core/compaction/compaction.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -77,6 +78,14 @@ function syncAgentMessages(session: AgentSession, sessionManager: SessionManager
 	session.agent.state.messages = sessionManager.buildSessionContext().messages;
 }
 
+function wirePercent(session: AgentSession): number {
+	const wire = estimateWireTokens(session.agent.state.messages, {
+		systemPromptChars: session.agent.state.systemPrompt.length,
+		tools: session.agent.state.tools,
+	});
+	return (wire.tokens / model.contextWindow!) * 100;
+}
+
 describe("AgentSession.getSessionStats", () => {
 	it("exposes the current context usage alongside token totals", () => {
 		const { session, sessionManager } = createSession();
@@ -89,8 +98,9 @@ describe("AgentSession.getSessionStats", () => {
 			const stats = session.getSessionStats();
 			expect(stats.contextUsage).toEqual(session.getContextUsage());
 			expect(stats.contextUsage?.tokens).toBe(200);
+			expect(stats.contextUsage?.wireTokens).toBeGreaterThan(200);
 			expect(stats.contextUsage?.contextWindow).toBe(model.contextWindow);
-			expect(stats.contextUsage?.percent).toBe((200 / model.contextWindow) * 100);
+			expect(stats.contextUsage?.percent).toBe(wirePercent(session));
 		} finally {
 			session.dispose();
 		}
@@ -143,7 +153,8 @@ describe("AgentSession.getSessionStats", () => {
 
 			const second = session.getContextUsage();
 			expect(second?.tokens).toBe(350);
-			expect(second?.percent).toBe((350 / model.contextWindow) * 100);
+			expect(second?.wireTokens).toBeGreaterThan(350);
+			expect(second?.percent).toBe(wirePercent(session));
 		} finally {
 			session.dispose();
 		}
@@ -166,7 +177,8 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.tokens.input).toBe(220_000);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBe(25_000);
-			expect(stats.contextUsage?.percent).toBe((25_000 / model.contextWindow) * 100);
+			expect(stats.contextUsage?.wireTokens).toBeGreaterThan(25_000);
+			expect(stats.contextUsage?.percent).toBe(wirePercent(session));
 		} finally {
 			session.dispose();
 		}

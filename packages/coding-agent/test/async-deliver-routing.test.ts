@@ -11,7 +11,7 @@ function fakeSession(opts: { busy: boolean }) {
 			return opts.busy;
 		},
 		_runAgentPrompt: runAgentPrompt,
-		_emit: emit,
+		emit,
 	} as unknown as AgentSession;
 	const deliver = (AgentSession.prototype as any)._deliverAsyncResult.bind(self);
 	return { deliver, followUp, runAgentPrompt, emit };

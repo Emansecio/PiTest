@@ -130,8 +130,14 @@ export interface StreamOptions {
 	/**
 	 * HTTP request timeout in milliseconds for providers/SDKs that support it.
 	 * For example, OpenAI and Anthropic SDK clients default to 10 minutes.
+	 * Also used as the connect-phase ceiling when `connectTimeoutMs` is unset.
 	 */
 	timeoutMs?: number;
+	/**
+	 * Connect-phase timeout in milliseconds (time-to-headers / handshake).
+	 * Falls back to `timeoutMs`, then the provider default connect ceiling.
+	 */
+	connectTimeoutMs?: number;
 	/**
 	 * Maximum retry attempts for providers/SDKs that support client-side retries.
 	 * For example, OpenAI and Anthropic SDK clients default to 2.

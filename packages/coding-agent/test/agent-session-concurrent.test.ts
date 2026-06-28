@@ -104,7 +104,7 @@ describe("AgentSession concurrent prompt guard", () => {
 						if (abortSignal?.aborted) {
 							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
 						} else {
-							setTimeout(checkAbort, 5);
+							setTimeout(checkAbort, 1);
 						}
 					};
 					checkAbort();
@@ -229,7 +229,7 @@ describe("AgentSession concurrent prompt guard", () => {
 						if (abortSignal?.aborted) {
 							stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") });
 						} else {
-							setTimeout(checkAbort, 5);
+							setTimeout(checkAbort, 1);
 						}
 					};
 					checkAbort();

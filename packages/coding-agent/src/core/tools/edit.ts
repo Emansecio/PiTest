@@ -228,10 +228,11 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 		return null;
 	}
 
-	const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : null;
-	if (!path) {
+	const rawPath = getFilePathArg(args);
+	if (rawPath === null || rawPath === "") {
 		return null;
 	}
+	const path = rawPath;
 
 	if (
 		Array.isArray(args.edits) &&

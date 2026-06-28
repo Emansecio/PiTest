@@ -21,22 +21,15 @@ import {
 	type PermissionMode,
 	type PermissionSettings,
 } from "../permissions/index.ts";
-import { createBashGroundingExtension } from "./bash-grounding-extension.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createDestructiveCommandGuardExtension } from "./destructive-command-guard-extension.ts";
-import { createEditPreconditionExtension } from "./edit-precondition-extension.ts";
-import { createErasableSyntaxPreconditionExtension } from "./erasable-syntax-precondition-extension.ts";
-import { createGroundingGuardExtension } from "./grounding-guard-extension.ts";
+import { bundleGroundingGuardFactories } from "./grounding-guard-registry.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
-import { createImportGroundingExtension } from "./import-grounding-extension.ts";
 import { createLearnedErrorGuardExtension } from "./learned-error-guard-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
 import { createMemoryExtension } from "./memory-extension.ts";
 import { createPatchAuditExtension } from "./patch-audit-extension.ts";
-import { createPathGroundingExtension } from "./path-grounding-extension.ts";
-import { createPatternGroundingExtension } from "./pattern-grounding-extension.ts";
 import { createPermissionsExtension } from "./permissions-extension.ts";
-import { createReadGuardExtension } from "./read-guard-extension.ts";
 import { createTaskRigorExtension } from "./task-rigor-extension.ts";
 
 export { createCoordinatorExtension } from "./coordinator-extension.ts";
@@ -99,51 +92,13 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// append concise rigor instructions. Model-agnostic, fail-open; opt out
 		// PIT_NO_TASK_RIGOR.
 		createTaskRigorExtension(),
-		createReadGuardExtension({ cwd: options.cwd }),
-		// Edit dry-run gate: re-uses computeEditsDiff to block an `edit` whose
-		// oldText won't match BEFORE it enters the mutation queue, with a
-		// copy-pasteable candidate hint. Runs after the read-guard so "not read"
-		// is reported first. Opt out with PIT_NO_EDIT_PRECONDITION.
-		createEditPreconditionExtension({ cwd: options.cwd }),
-		// Preventive cross-session guard: blocks a call whose exact args have failed
-		// repeatedly in prior sessions, before it fails again. Scoped to this
-		// session's agent dir so isolated runs never read the shared store. No-op
-		// when that store is empty or below threshold (fresh installs, tests).
-		createLearnedErrorGuardExtension({ dir: learnedErrorsDirFor(options.agentDir) }),
-		// Grounding guard: pre-exec, grounds a debug function-breakpoint name / lsp
-		// workspace-symbol query against the repo-map + LSP authority; auto-fixes a
-		// single dominant typo or blocks with candidates. After the learned-error
-		// guard so basic guards report first. Fail-open; opt out PIT_NO_GROUNDING_GUARD.
-		createGroundingGuardExtension({ cwd: options.cwd }),
-		// Import grounding: pre-exec, scans a write/edit's NEW content for RELATIVE
-		// import paths (./x, ../y) and blocks with close filename candidates when the
-		// target module doesn't resolve on disk. Block-only (never rewrites user code).
-		// After the symbol grounding-guard so basic guards report first. Fail-open;
-		// opt out PIT_NO_IMPORT_GROUNDING.
-		createImportGroundingExtension({ cwd: options.cwd }),
-		// Erasable-syntax preflight: pre-exec, blocks a write/edit whose NEW content
-		// adds emit-bearing TS (enum / namespace body / constructor parameter
-		// property) — but ONLY on projects whose tsconfig sets erasableSyntaxOnly, so
-		// it never mis-fires where enums are allowed. Catches the construct one round
-		// trip before the project `check` rejects it. Fail-open; opt out
-		// PIT_NO_ERASABLE_PREFLIGHT.
-		createErasableSyntaxPreconditionExtension({ cwd: options.cwd }),
-		// Path grounding: pre-exec, blocks a read/edit whose file path doesn't exist
-		// on disk with the close-named sibling from its directory. Block-only (never
-		// retargets to a real-but-wrong file). write is out of scope (it creates).
-		// Fail-open; opt out PIT_NO_PATH_GROUNDING.
-		createPathGroundingExtension({ cwd: options.cwd }),
-		// Pattern grounding: pre-exec, blocks a grep/find whose regex or glob is
-		// structurally malformed (unbalanced bracket/group/brace) — before grep
-		// errors post-spawn or a bad glob silently matches nothing. Block-only,
-		// fail-open; opt out PIT_NO_PATTERN_GROUNDING.
-		createPatternGroundingExtension(),
-		// Bash grounding: pre-exec, blocks a `npm/pnpm/yarn run <script>` whose script
-		// isn't defined in package.json but is a close typo of one that is (npm run
-		// biuld -> build) — before the runner spawns and fails with "Missing script".
-		// Only the explicit `run <script>` form. Block-only, fail-open; opt out
-		// PIT_NO_BASH_GROUNDING.
-		createBashGroundingExtension({ cwd: options.cwd }),
+		...bundleGroundingGuardFactories(options.cwd, [
+			// Preventive cross-session guard: blocks a call whose exact args have failed
+			// repeatedly in prior sessions, before it fails again. Scoped to this
+			// session's agent dir so isolated runs never read the shared store. No-op
+			// when that store is empty or below threshold (fresh installs, tests).
+			createLearnedErrorGuardExtension({ dir: learnedErrorsDirFor(options.agentDir) }),
+		]),
 		// Destructive-command guard: pre-exec, fire-once speed-bump for the MIDDLE tier
 		// of destruction the permission deny-floor (catastrophic `/`/`~` only) lets run
 		// under auto mode — `rm -rf ./src`, `git reset --hard`, `git clean -fd`,

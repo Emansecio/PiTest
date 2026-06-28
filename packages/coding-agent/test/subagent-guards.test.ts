@@ -2,6 +2,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	bundleGroundingGuardFactories,
+	subagentGroundingGuardFactories,
+} from "../src/core/built-ins/grounding-guard-registry.ts";
 import { areSubagentGuardsDisabled, createSubagentGuardChain } from "../src/core/built-ins/subagent-guards.ts";
 import type { ToolCallEvent } from "../src/core/extensions/types.ts";
 
@@ -52,6 +56,12 @@ describe("subagent guard chain", () => {
 		const decision = await chain.beforeToolCall(call("read", { path: join(dir, "config.jsno") }, "1"));
 		expect(decision?.block).toBe(true);
 		expect(decision?.reason).toMatch(/config\.json/);
+	});
+
+	it("exposes eight subagent-propagated guard factories in fixed order", () => {
+		expect(subagentGroundingGuardFactories("/tmp")).toHaveLength(8);
+		const withLearned = bundleGroundingGuardFactories("/tmp", [() => {}]);
+		expect(withLearned).toHaveLength(9);
 	});
 
 	it("parses the PIT_NO_SUBAGENT_GUARDS opt-out", () => {

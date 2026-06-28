@@ -170,6 +170,7 @@ import {
 	getCompactPathLabel,
 	getShortPath,
 } from "./display-utils.ts";
+import { dispatchSlashCommand, type SlashCommandHost } from "./interactive-slash-commands.ts";
 import { classifyRetryReason } from "./retry-reason.ts";
 import {
 	getAvailableThemes,
@@ -496,24 +497,6 @@ export class InteractiveMode {
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
 	private options: InteractiveModeOptions;
-
-	private static readonly _exactSlashCommands = new Map<string, (self: InteractiveMode) => void | Promise<void>>([
-		["/settings", (s) => s.showSettingsSelector()],
-		["/session", (s) => s.handleSessionCommand()],
-		["/cache-status", (s) => s.handleCacheStatusCommand()],
-		["/diagnostics", (s) => s.handleDiagnosticsCommand()],
-		["/help", (s) => s.handleHelpCommand()],
-		["/hotkeys", (s) => s.handleHotkeysCommand()],
-		["/login", (s) => s.showOAuthSelector("login")],
-		["/logout", (s) => s.showOAuthSelector("logout")],
-		["/new", (s) => s.handleClearCommand()],
-		["/reload", (s) => s.handleReloadCommand()],
-		["/debug", (s) => s.handleDebugCommand()],
-		["/arminsayshi", (s) => s.handleArminSaysHi()],
-		["/dementedelves", (s) => s.handleDementedDelves()],
-		["/resume", (s) => s.showSessionSelector()],
-		["/quit", (s) => s.shutdown()],
-	]);
 
 	// Convenience accessors
 	private get session(): AgentSession {
@@ -2512,16 +2495,6 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Strip a slash-command name from the front of the input and trim, e.g.
-	 * `_stripSlashArg("/goal pausar", "/goal") === "pausar"`. Replaces the
-	 * per-command `text.slice(<magic length>)` offsets that duplicated each
-	 * command name as a number and silently broke a character on rename.
-	 */
-	private static _stripSlashArg(text: string, command: string): string {
-		return text.slice(command.length).trim();
-	}
-
-	/**
 	 * Warn and recover when the user submits a "/command" that matches no known
 	 * command, instead of silently forwarding it to the model as a prompt. Only
 	 * fires for a clean "/word" token (letters/digits/_/:/-), so a path like
@@ -2548,78 +2521,45 @@ export class InteractiveMode {
 	 * exact-match commands use a lookup table.
 	 * @returns true if a command was handled
 	 */
+	private _slashCommandHost(): SlashCommandHost {
+		return {
+			clearEditor: () => {
+				this.editor.setText("");
+			},
+			handleModelCommand: (searchTerm) => this.handleModelCommand(searchTerm),
+			handleFusionCommand: () => this.handleFusionCommand(),
+			handleNameCommand: (line) => this.handleNameCommand(line),
+			handleCompactCommand: (instructions) => this.handleCompactCommand(instructions),
+			handleTTSRCommand: (args) => this.handleTTSRCommand(args),
+			handleHindsightCommand: (args) => this.handleHindsightCommand(args),
+			handleGoalCommand: (args) => this.handleGoalCommand(args),
+			showStatus: (line) => this.showStatus(line),
+			getTodoSummaryText: () => this.session.todoSummaryText(),
+			showSettingsSelector: () => this.showSettingsSelector(),
+			handleSessionCommand: () => this.handleSessionCommand(),
+			handleCacheStatusCommand: () => this.handleCacheStatusCommand(),
+			handleDiagnosticsCommand: () => this.handleDiagnosticsCommand(),
+			handleHelpCommand: () => this.handleHelpCommand(),
+			handleHotkeysCommand: () => this.handleHotkeysCommand(),
+			showOAuthSelector: (mode) => this.showOAuthSelector(mode),
+			handleClearCommand: () => this.handleClearCommand(),
+			handleReloadCommand: () => this.handleReloadCommand(),
+			handleDebugCommand: () => this.handleDebugCommand(),
+			handleArminSaysHi: () => this.handleArminSaysHi(),
+			handleDementedDelves: () => this.handleDementedDelves(),
+			showSessionSelector: () => this.showSessionSelector(),
+			shutdown: () => this.shutdown(),
+			isSessionBusy: () => this.session.isStreaming || this.session.isCompacting,
+			isExtensionCommand: (line) => this.isExtensionCommand(line),
+			addEditorHistory: (line) => {
+				this.editor.addToHistory?.(line);
+			},
+			promptExtensionCommand: (line) => this.session.prompt(line),
+		};
+	}
+
 	private async _dispatchSlashCommand(text: string): Promise<boolean> {
-		// Commands that accept arguments (need prefix matching)
-		if (text === "/model" || text.startsWith("/model ")) {
-			this.editor.setText("");
-			await this.handleModelCommand(
-				text.startsWith("/model ") ? InteractiveMode._stripSlashArg(text, "/model") : undefined,
-			);
-			return true;
-		}
-		if (text === "/fusion") {
-			this.editor.setText("");
-			await this.handleFusionCommand();
-			return true;
-		}
-		if (text === "/name" || text.startsWith("/name ")) {
-			this.handleNameCommand(text);
-			this.editor.setText("");
-			return true;
-		}
-		if (text === "/compact" || text.startsWith("/compact ")) {
-			this.editor.setText("");
-			await this.handleCompactCommand(
-				text.startsWith("/compact ") ? InteractiveMode._stripSlashArg(text, "/compact") : undefined,
-			);
-			return true;
-		}
-		if (text === "/ttsr" || text.startsWith("/ttsr ")) {
-			this.editor.setText("");
-			this.handleTTSRCommand(text === "/ttsr" ? "" : InteractiveMode._stripSlashArg(text, "/ttsr"));
-			return true;
-		}
-		if (text === "/hindsight" || text.startsWith("/hindsight ")) {
-			this.editor.setText("");
-			await this.handleHindsightCommand(
-				text === "/hindsight" ? "" : InteractiveMode._stripSlashArg(text, "/hindsight"),
-			);
-			return true;
-		}
-		if (text === "/goal" || text.startsWith("/goal ")) {
-			this.editor.setText("");
-			await this.handleGoalCommand(text === "/goal" ? "" : InteractiveMode._stripSlashArg(text, "/goal"));
-			return true;
-		}
-		if (text === "/todos") {
-			this.editor.setText("");
-			this.showStatus(this.session.todoSummaryText());
-			return true;
-		}
-
-		// Exact-match commands — dispatch via static table to avoid per-call closure allocation
-		const cmd = InteractiveMode._exactSlashCommands.get(text);
-		if (cmd) {
-			this.editor.setText("");
-			await cmd(this);
-			return true;
-		}
-
-		// Extension-registered commands (e.g. /mcp, and anything from pi.registerCommand)
-		// execute immediately via session.prompt → _tryExecuteExtensionCommand, which runs
-		// the command handler WITHOUT a model turn. Route them here — exactly like /model —
-		// so they behave as pure interface commands: no "Thinking…" loader is shown and
-		// nothing is sent to the model. While streaming or compacting we deliberately fall
-		// through (return false) so the submit handler's dedicated branches dispatch the
-		// command with the correct steer/queue semantics for those states.
-		if (!this.session.isStreaming && !this.session.isCompacting && this.isExtensionCommand(text)) {
-			this.editor.addToHistory?.(text);
-			this.editor.setText("");
-			await this.session.prompt(text);
-			return true;
-		}
-
-		return false;
+		return dispatchSlashCommand(this._slashCommandHost(), text);
 	}
 
 	/**

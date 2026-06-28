@@ -158,6 +158,11 @@ describe("extractToolFileOp", () => {
 		expect(extractToolFileOp("write", { path: "a.ts" })).toEqual({ path: "a.ts", op: "write" });
 	});
 
+	it("resolves path aliases the same way as argument-prep", () => {
+		expect(extractToolFileOp("read", { file_path: "b.ts" })).toEqual({ path: "b.ts", op: "read" });
+		expect(extractToolFileOp("edit", { filepath: "c.ts" })).toEqual({ path: "c.ts", op: "edit" });
+	});
+
 	it("returns undefined for non-file tools", () => {
 		expect(extractToolFileOp("bash", { command: "ls" })).toBeUndefined();
 		expect(extractToolFileOp("grep", { pattern: "x" })).toBeUndefined();

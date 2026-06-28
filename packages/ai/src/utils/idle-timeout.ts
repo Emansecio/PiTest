@@ -50,6 +50,13 @@ export interface RaceReadWithIdleOptions {
 	abortError?: () => Error;
 }
 
+export interface RaceWithIdleAndAbortOptions extends RaceReadWithIdleOptions {
+	/** Diagnostic source label for idle-timeout records. */
+	idleDiagnosticSource?: string;
+	/** Invoked when the idle timer wins, before rejecting. */
+	onIdle?: (idleMs: number) => void;
+}
+
 // Minimal structural type so this helper works with any ReadableStream reader
 // (Uint8Array bodies, mocks in tests) without importing DOM lib types.
 interface IdleTimeoutReader<T> {
@@ -59,6 +66,58 @@ interface IdleTimeoutReader<T> {
 
 function defaultAbortError(): Error {
 	return new Error("Request was aborted");
+}
+
+/**
+ * Race `promise` against an idle watchdog and an optional user abort signal.
+ * Shared primitive for {@link raceReadWithIdle} and {@link iterateWithIdleTimeout}.
+ */
+export async function raceWithIdleAndAbort<T>(promise: Promise<T>, options?: RaceWithIdleAndAbortOptions): Promise<T> {
+	const idleMs = options?.idleMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+	const signal = options?.signal;
+	const makeAbortError = options?.abortError ?? defaultAbortError;
+
+	if (signal?.aborted) {
+		throw makeAbortError();
+	}
+
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let onAbort: (() => void) | undefined;
+
+	try {
+		promise.catch(() => {});
+
+		const idlePromise = new Promise<never>((_resolve, reject) => {
+			timer = setTimeout(() => {
+				options?.onIdle?.(idleMs);
+				recordDiagnostic({
+					category: "stream.idle-timeout",
+					level: "warn",
+					source: options?.idleDiagnosticSource ?? "idle-timeout.raceWithIdleAndAbort",
+					context: { ms: idleMs },
+				});
+				reject(new IdleStreamTimeoutError(idleMs));
+			}, idleMs);
+		});
+
+		const racers: Array<Promise<T>> = [promise, idlePromise];
+		if (signal) {
+			const abortPromise = new Promise<never>((_resolve, reject) => {
+				onAbort = () => reject(makeAbortError());
+				signal.addEventListener("abort", onAbort, { once: true });
+			});
+			racers.push(abortPromise);
+		}
+
+		return await Promise.race(racers);
+	} finally {
+		if (timer !== undefined) {
+			clearTimeout(timer);
+		}
+		if (signal && onAbort) {
+			signal.removeEventListener("abort", onAbort);
+		}
+	}
 }
 
 /**
@@ -81,63 +140,13 @@ export async function raceReadWithIdle<T>(
 	reader: IdleTimeoutReader<T>,
 	options?: RaceReadWithIdleOptions,
 ): Promise<{ done: boolean; value?: T }> {
-	const idleMs = options?.idleMs ?? DEFAULT_IDLE_TIMEOUT_MS;
-	const signal = options?.signal;
-	const makeAbortError = options?.abortError ?? defaultAbortError;
-
-	// Fast path: already aborted before we even start the read.
-	if (signal?.aborted) {
-		throw makeAbortError();
-	}
-
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	let onAbort: (() => void) | undefined;
-
-	try {
-		const readPromise = reader.read();
-
-		const idlePromise = new Promise<never>((_resolve, reject) => {
-			timer = setTimeout(() => {
-				// Release the socket so the dead connection doesn't leak, then
-				// surface a retryable error. Cancel rejection is ignored: the
-				// reader may already be torn down.
-				reader.cancel(new IdleStreamTimeoutError(idleMs)).catch(() => {});
-				recordDiagnostic({
-					category: "stream.idle-timeout",
-					level: "warn",
-					source: "idle-timeout.raceReadWithIdle",
-					context: { ms: idleMs },
-				});
-				reject(new IdleStreamTimeoutError(idleMs));
-			}, idleMs);
-		});
-
-		// Mirror the pre-existing abort semantics: aborting rejects the race with
-		// the caller-supplied error, NOT the idle error, so the ESC path is
-		// unchanged. We do not cancel the reader here; the caller's finally
-		// (releaseLock / cancel) already owns abort teardown as it did before.
-		const abortPromise = new Promise<never>((_resolve, reject) => {
-			if (!signal) {
-				return;
-			}
-			onAbort = () => reject(makeAbortError());
-			signal.addEventListener("abort", onAbort, { once: true });
-		});
-
-		const racers: Array<Promise<{ done: boolean; value?: T }>> = [readPromise, idlePromise];
-		if (signal) {
-			racers.push(abortPromise);
-		}
-
-		return await Promise.race(racers);
-	} finally {
-		if (timer !== undefined) {
-			clearTimeout(timer);
-		}
-		if (signal && onAbort) {
-			signal.removeEventListener("abort", onAbort);
-		}
-	}
+	return raceWithIdleAndAbort(reader.read(), {
+		...options,
+		idleDiagnosticSource: "idle-timeout.raceReadWithIdle",
+		onIdle: (idleMs) => {
+			reader.cancel(new IdleStreamTimeoutError(idleMs)).catch(() => {});
+		},
+	});
 }
 
 /**
@@ -167,44 +176,12 @@ export async function* iterateWithIdleTimeout<T>(
 			if (signal?.aborted) {
 				throw makeAbortError();
 			}
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			let onAbort: (() => void) | undefined;
-			let result: IteratorResult<T>;
-			try {
-				const nextPromise = iterator.next();
-				// When idle/abort wins the race below we abandon this read. On a dead
-				// socket it may reject much later (or never) — attach a no-op catch so an
-				// abandoned rejection never surfaces as an unhandledRejection. Racing the
-				// original promise is unaffected (a promise can carry many handlers).
-				nextPromise.catch(() => {});
-				const idlePromise = new Promise<never>((_resolve, reject) => {
-					timer = setTimeout(() => {
-						recordDiagnostic({
-							category: "stream.idle-timeout",
-							level: "warn",
-							source: "idle-timeout.iterateWithIdleTimeout",
-							context: { ms: idleMs },
-						});
-						reject(new IdleStreamTimeoutError(idleMs));
-					}, idleMs);
-				});
-				const racers: Array<Promise<IteratorResult<T>>> = [nextPromise, idlePromise];
-				if (signal) {
-					const abortPromise = new Promise<never>((_resolve, reject) => {
-						onAbort = () => reject(makeAbortError());
-						signal.addEventListener("abort", onAbort, { once: true });
-					});
-					racers.push(abortPromise);
-				}
-				result = await Promise.race(racers);
-			} finally {
-				if (timer !== undefined) {
-					clearTimeout(timer);
-				}
-				if (signal && onAbort) {
-					signal.removeEventListener("abort", onAbort);
-				}
-			}
+			const result = await raceWithIdleAndAbort(iterator.next(), {
+				idleMs,
+				signal,
+				abortError: makeAbortError,
+				idleDiagnosticSource: "idle-timeout.iterateWithIdleTimeout",
+			});
 			if (result.done) {
 				return;
 			}

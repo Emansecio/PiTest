@@ -25,6 +25,7 @@ import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { iterateWithIdleTimeout } from "../utils/idle-timeout.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
 import type { GoogleThinkingLevel } from "./google-shared.ts";
 import {
 	convertMessages,
@@ -68,7 +69,8 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
-			connectGuard = createConnectGuard(options?.signal, options?.timeoutMs);
+			const timeouts = resolveStreamTimeouts(options);
+			connectGuard = createConnectGuard(options?.signal, timeouts.connectTimeoutMs);
 			const googleStream = await connectGuard.settle(client.models.generateContentStream(params));
 
 			stream.push({ type: "start", partial: output });
@@ -97,8 +99,8 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			}
 
 			for await (const chunk of iterateWithIdleTimeout(googleStream, {
-				idleMs: options?.idleTimeoutMs,
-				signal: options?.signal,
+				idleMs: timeouts.idleTimeoutMs,
+				signal: connectGuard.signal,
 			})) {
 				// @google/genai documents GenerateContentResponse.responseId as an output-only field
 				// used to identify each response. Keep the first non-empty one from the stream.
