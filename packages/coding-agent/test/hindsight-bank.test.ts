@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, test } from "vitest";
 import { type HindsightBank, openBank } from "../src/core/hindsight/bank.js";
+import {
+	formatHindsightHintForPrompt,
+	formatSessionSummariesForPrompt,
+	setCurrentHindsightBank,
+} from "../src/core/hindsight/index.js";
 
 let tmpRoot: string;
 
@@ -132,5 +137,21 @@ describe("HindsightBank", () => {
 	// TODO: enable once `enforceLimit` lands on HindsightBank.
 	test.skip("enforceLimit(N) keeps most-recent N", () => {
 		// enforceLimit is not yet present on the bank API; another agent will add it.
+	});
+});
+
+describe("hindsight prompt formatting (E4)", () => {
+	test("formatHindsightHintForPrompt indexes summaries without inlining bodies", () => {
+		const { bank } = freshBank();
+		bank.add({ kind: "session-summary", body: "secret prior context", subject: "auth work" });
+		setCurrentHindsightBank(bank);
+		const hint = formatHindsightHintForPrompt();
+		expect(hint).toContain("<hindsight_hint>");
+		expect(hint).toContain("recall({ query:");
+		expect(hint).toContain("auth work");
+		expect(hint).not.toContain("secret prior context");
+		const full = formatSessionSummariesForPrompt();
+		expect(full).toContain("secret prior context");
+		setCurrentHindsightBank(undefined);
 	});
 });

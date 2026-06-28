@@ -16,8 +16,9 @@
  */
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { writeFileAtomicSync } from "../../utils/atomic-write.ts";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import { redactForDisk } from "../secret-redactor.ts";
 
 export interface MemoryFile {
@@ -82,6 +83,41 @@ export function formatMemoryForPrompt(files: readonly MemoryFile[]): string {
 		(file) => `<memory_entry scope="${file.scope}" path="${file.path}">\n${file.content}\n</memory_entry>`,
 	);
 	return `\n\n<persistent_memory>\nLong-lived notes you maintain across sessions. Consult and apply these notes before acting; they override defaults and record durable preferences/gotchas. Update with the memory_append tool when you learn something durable.\n\n${sections.join("\n\n")}\n</persistent_memory>\n`;
+}
+
+const MEMORY_HINT_PREVIEW_CHARS = 200;
+
+function memoryReadHint(path: string, cwd?: string): string {
+	if (cwd === undefined) return path.replace(/\\/g, "/");
+	const rel = relative(resolve(cwd), resolve(path)).replace(/\\/g, "/");
+	return rel || basename(path);
+}
+
+/**
+ * On-demand memory prefix (E3): paths + short preview only; full bodies via read().
+ */
+export function formatMemoryHintForPrompt(files: readonly MemoryFile[], cwd?: string): string {
+	if (files.length === 0) return "";
+	const entries = files.map((file) => {
+		const lines = file.content.split("\n").length;
+		const preview =
+			file.content.length > MEMORY_HINT_PREVIEW_CHARS
+				? `${sliceSafe(file.content, 0, MEMORY_HINT_PREVIEW_CHARS).trimEnd()}…`
+				: file.content.trim();
+		const readPath = memoryReadHint(file.path, cwd);
+		return (
+			`- scope="${file.scope}" path="${file.path}" (${lines} lines, ${file.content.length} chars)\n` +
+			`  preview: ${preview}\n` +
+			`  recall: read({ path: "${readPath}" })`
+		);
+	});
+	return (
+		`\n\n<persistent_memory_hint>\n` +
+		"MEMORY.md files exist but are not inlined in the prefix (token economy). " +
+		"Read them with read({ path }) before acting when durable preferences or gotchas may apply. " +
+		"Append with memory_append.\n\n" +
+		`${entries.join("\n\n")}\n</persistent_memory_hint>\n`
+	);
 }
 
 export interface AppendMemoryOptions {

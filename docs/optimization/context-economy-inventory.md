@@ -100,7 +100,7 @@
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
 | C1 | **PARTIAL** | Delta summarization | K6: 2ª+ compact usa `serializeConversationDelta` em `<conversation-delta>` (JSON compacto, sem thinking); gap residual: summarizer ainda gera prose completo (C2) |
-| C2 | **PARTIAL** | Structured-primary context | K8: prompt STRUCTURED-PRIMARY + `trimSummaryProseAgainstOperations` pós-LLM; opt-out `PIT_NO_COMPACT_SUMMARY_OUTPUT`. Gap: summarizer ainda emite seções markdown completas |
+| C2 | **PARTIAL** | Structured-primary context | K8+K10: JSON-primary summarizer (`STRUCTURED_SUMMARY_SCHEMA`, `normalizeStructuredSummaryOutput`) + trim pós-parse; opt-out `PIT_NO_STRUCTURED_SUMMARY_OUTPUT` / `PIT_NO_COMPACT_SUMMARY_OUTPUT` |
 | C4 | **PARTIAL** | Self-correction gate mais fino | `VERIFY_MIN_INPUT_TOKENS=25000` existe; inflação ainda `length/4` |
 | C5 | **VALID** | Multipass coalescing | 2º `executeCompactionPipeline` síncrono possível (`agent-session-compaction.ts:456-477`) |
 | C6 | **VALID** | Branch skip gate | Sem skip por N entries / T tokens |
@@ -134,8 +134,8 @@
 |----|-----------|----------|-----------------|
 | E1 | **PARTIAL** | Lazy schemas | K5: `compactToolSchemaForWire` no wire (`tool-wire-schema.ts`, opt-out `PIT_NO_LAZY_TOOL_SCHEMAS`). Gap residual: API `description` completa (ver E9) |
 | E2 | **PARTIAL** | Tools cache breakpoint separado | K5: tools sorted by name + `cache_control` no **primeiro** tool (`anthropic.ts`, `openai-completions.ts`). Gap residual: bloco hash-keyed isolado |
-| E3 | **VALID** | Memory recall gate | `MEMORY.md` inteiro no prefix (`memory/index.ts:79-84`) |
-| E4 | **VALID** | Hindsight on-demand | Summaries no prefix cacheável, não BM25 por turn |
+| E3 | **PARTIAL** | Memory recall gate | K10: `formatMemoryHintForPrompt` (paths + preview + `read()` hint); opt-out `PIT_NO_MEMORY_ON_DEMAND` restaura inject completo |
+| E4 | **PARTIAL** | Hindsight on-demand | K10: `formatHindsightHintForPrompt` + `recall({ kinds: ["session-summary"] })`; opt-out `PIT_NO_HINDSIGHT_ON_DEMAND` |
 | E5 | **VALID** | Guideline tiers | Bloco único; karpathy opt-in, não tiered |
 | E6 | **PARTIAL** | AGENTS.md retrieval | K5: head+tail + hint `read({ path })` acima de 8k chars (`context-files.ts`, opt-out `PIT_NO_CONTEXT_RETRIEVAL`). Gap residual: recall BM25/on-demand do corpo completo |
 | E7 | **PARTIAL** | Skills mais agressivo | Index mode existe; `SKILLS_FULL_LIMIT = 15` |
@@ -166,8 +166,8 @@
 
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
-| F1 | **VALID** | Cap panel text antes judge/writer | `r.text` integral (`fusion/judge.ts`, `buildWriterContext`) |
-| F2 | **VALID** | Skip verify se `unsupportedClaims` vazio | Gated só por `settings.verify` |
+| F1 | **PARTIAL** | Cap panel text antes judge/writer | K10: `capPanelText` / `FUSION_PANEL_TEXT_MAX_CHARS=6000` em judge/writer/verifier builders; bench `bench-fusion-tokens.mts` |
+| F2 | **PARTIAL** | Skip verify se `unsupportedClaims` vazio | K10: `shouldSkipFusionVerify` em `orchestrator.ts` (lone survivor ainda verifica) |
 | F3 | **PARTIAL** | Fusion token ledger | K8: `recordFusionSpend` em brief/panel/judge/verify/writer; `fusionSpent` no footer. Gap: panel usa estimativa chars (CLI externo) |
 | F4 | **PARTIAL** | `enforceLimit` em todo `add()` | Limite é aplicado no `openBank`; gap é enforcement incremental após novas gravações |
 | F5 | **VALID** | BM25 min score no recall | `score > 0` aceita qualquer hit (`bank.ts:287`) |
@@ -258,9 +258,9 @@
 | K7 | G1 | Token governor (unified ledger + spawn gate) — **shipped** |
 | K8 | G12, C2, F3 | CI token regression gate + structured-primary trim + fusion ledger — **shipped** |
 | K9 | G11, G1 persist, G4 | Mechanism METRIC breakdown + goal `tokenSpendSplit` reload + `bench-fusion-tokens` — **shipped** |
-| K10 | — | Demais VALID por impacto medido (E3/E4, C2 JSON, F1/F2…) |
+| K10 | F1, F2, E3, E4, C2 | Memory/hindsight hints on-demand, JSON summarizer, fusion panel cap + verify skip — **shipped** |
 
-**Pendente imediato (roadmap):** K10a E3/E4 on-demand prefix → K10b C2 JSON-primary summarizer → K10c F1/F2 fusion caps.
+**Pendente imediato (roadmap):** medir E3/E4 prefix savings (`bench-prompt-size` com MEMORY.md grande); F2 skip rate em turns reais; C2 JSON parse-fail fallback rate.
 
 **Gaps residuais dos itens K5 (ainda PARTIAL, não reabrir como VALID):** E1 API description stub (overlap E9), E2 bloco hash-keyed isolado, E6 recall BM25 do corpo completo.
 
@@ -302,7 +302,7 @@ Notas:
 | K3 edit-heavy live economy | 10–30% | edit-heavy −56314 toks (66.8% do wire) | **confirmado** (cenário sintético agressivo) |
 | K2 wire + presend (B1–B2) | 5–15% menos overflow | infra shipped; overflow rate não benchmarkado ainda | shipped, sem A/B |
 | K6 delta summarization input (C1) | 20–50% summarizer 3ª+ | long-reasoning incremental −55%; explore −29%; edit −25% | **confirmado** (input proxy) |
-| E3/E4 memory/hindsight on-demand | 10–30% prefix | — | **pendente** |
+| E3/E4 memory/hindsight on-demand | 10–30% prefix | shipped (hint-only default) | **medir** |
 
 ---
 

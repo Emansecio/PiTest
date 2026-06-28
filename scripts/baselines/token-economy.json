@@ -1,5 +1,5 @@
 {
-	"version": 2,
+	"version": 3,
 	"updated": "2026-06-28",
 	"comment": "Regression gate for scripts/check-token-bench.mjs. Exact keys are deterministic; min/max tolerate env drift (skills, prefix).",
 	"exact": {
@@ -36,11 +36,11 @@
 		"wire_tool_desc_chars": 5814,
 		"wire_tool_param_chars": 11603,
 		"fusion_brief_tokens": 59,
-		"fusion_panel_tokens": 6768,
-		"fusion_judge_tokens": 7811,
+		"fusion_panel_tokens": 3550,
+		"fusion_judge_tokens": 4594,
 		"fusion_verify_tokens": 14000,
-		"fusion_writer_tokens": 9297,
-		"fusion_total_tokens": 37935
+		"fusion_writer_tokens": 6081,
+		"fusion_total_tokens": 28284
 	},
 	"min": {
 		"scenario=explore-heavy incremental_delta_saved_pct": 25,

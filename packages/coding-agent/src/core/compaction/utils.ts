@@ -4,6 +4,8 @@
 
 import type { AgentMessage } from "@pit/agent-core";
 import type { Message } from "@pit/ai";
+import { type Static, Type } from "typebox";
+import { Value } from "typebox/value";
 import { sliceSafe } from "../../utils/surrogate.ts";
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "../messages.ts";
 import { redactForDisk } from "../secret-redactor.ts";
@@ -759,6 +761,99 @@ function findPrecedingToolCall(parts: Array<{ dedupKey?: string; isToolResult?: 
 export const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant. Your task is to read a conversation between a user and an AI coding assistant, then produce a structured summary following the exact format specified.
 
 Do NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.`;
+
+const StringArray = Type.Array(Type.String());
+
+/** JSON payload for C2 structured-primary summarizer output. */
+export const STRUCTURED_SUMMARY_SCHEMA = Type.Object(
+	{
+		goal: StringArray,
+		constraints: StringArray,
+		done: StringArray,
+		inProgress: StringArray,
+		blocked: StringArray,
+		keyDecisions: StringArray,
+		nextSteps: StringArray,
+		criticalContext: StringArray,
+	},
+	{ additionalProperties: false },
+);
+
+export type StructuredSummaryPayload = Static<typeof STRUCTURED_SUMMARY_SCHEMA>;
+
+const SUMMARY_JSON_FENCE_RE = /```(?:json)?\s*([\s\S]*?)```/;
+
+export function parseStructuredSummaryJson(
+	text: string,
+): { ok: true; value: StructuredSummaryPayload } | { ok: false; error: string } {
+	const trimmed = text.trim();
+	const fenced = SUMMARY_JSON_FENCE_RE.exec(trimmed);
+	const candidate = (fenced ? fenced[1] : trimmed).trim();
+	if (!candidate) return { ok: false, error: "empty summary output" };
+	let value: unknown;
+	try {
+		value = JSON.parse(candidate);
+	} catch (err) {
+		return { ok: false, error: `json parse failed: ${err instanceof Error ? err.message : String(err)}` };
+	}
+	if (!Value.Check(STRUCTURED_SUMMARY_SCHEMA, value)) {
+		const issues = [...Value.Errors(STRUCTURED_SUMMARY_SCHEMA, value)]
+			.slice(0, 3)
+			.map((e) => `${e.instancePath || "/"}: ${e.message}`)
+			.join("; ");
+		return { ok: false, error: issues || "schema mismatch" };
+	}
+	return { ok: true, value: value as StructuredSummaryPayload };
+}
+
+function bulletLines(items: readonly string[], emptyFallback: string): string {
+	if (items.length === 0) return `- ${emptyFallback}`;
+	return items.map((item) => `- ${item}`).join("\n");
+}
+
+function numberedLines(items: readonly string[]): string {
+	if (items.length === 0) return "1. (none)";
+	return items.map((item, i) => `${i + 1}. ${item}`).join("\n");
+}
+
+/** Render a JSON summary payload into the legacy markdown checkpoint format. */
+export function formatStructuredSummaryMarkdown(payload: StructuredSummaryPayload): string {
+	const done = payload.done.map((item) => (item.startsWith("[x]") ? item : `[x] ${item}`));
+	const inProgress = payload.inProgress.map((item) => (item.startsWith("[ ]") ? item : `[ ] ${item}`));
+	return [
+		"## Goal",
+		bulletLines(payload.goal, "(none)"),
+		"",
+		"## Constraints & Preferences",
+		bulletLines(payload.constraints, "(none)"),
+		"",
+		"## Progress",
+		"### Done",
+		bulletLines(done, "(none)"),
+		"",
+		"### In Progress",
+		bulletLines(inProgress, "(none)"),
+		"",
+		"### Blocked",
+		bulletLines(payload.blocked, "(none)"),
+		"",
+		"## Key Decisions",
+		bulletLines(payload.keyDecisions, "(none)"),
+		"",
+		"## Next Steps",
+		numberedLines(payload.nextSteps),
+		"",
+		"## Critical Context",
+		bulletLines(payload.criticalContext, "(none)"),
+	].join("\n");
+}
+
+/** Parse JSON-primary summarizer output; fall back to raw markdown on failure. */
+export function normalizeStructuredSummaryOutput(text: string): string {
+	const parsed = parseStructuredSummaryJson(text);
+	if (parsed.ok) return formatStructuredSummaryMarkdown(parsed.value);
+	return text;
+}
 
 // ============================================================================
 // Entry to Message Conversion

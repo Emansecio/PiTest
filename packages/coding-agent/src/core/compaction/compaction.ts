@@ -29,6 +29,7 @@ import {
 	getMessageFromEntry as getMessageFromEntryShared,
 	headTailExcerpt as headTailExcerptShared,
 	mergeSummaryDetailsIntoFileOps,
+	normalizeStructuredSummaryOutput,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	type SummaryDetails,
 	serializeConversation,
@@ -1264,6 +1265,22 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 
 STRUCTURED-PRIMARY (output economy): File paths, searches, shell commands, and MCP calls are appended automatically as structured XML tags after your summary. Do NOT list them in prose — focus prose on intent, decisions, blockers, and next steps only. Keep each section to 1–3 bullets max.`;
 
+const SUMMARIZATION_JSON_PROMPT = `The messages above are a conversation to summarize. Produce a JSON context checkpoint another LLM will use to continue the work.
+
+Your final assistant message MUST be a single fenced \`\`\`json\`\`\` block matching this schema (no markdown sections, no prose outside the fence):
+{
+  "goal": ["string"],
+  "constraints": ["string"],
+  "done": ["completed items — omit [x] prefix"],
+  "inProgress": ["current work — omit [ ] prefix"],
+  "blocked": ["blockers or empty array"],
+  "keyDecisions": ["Decision: rationale"],
+  "nextSteps": ["ordered strings"],
+  "criticalContext": ["data/refs needed to continue or empty array"]
+}
+
+Keep each array to 1–3 items max. Do NOT list file paths, searches, shell commands, or MCP calls — they are appended as structured XML after parsing.`;
+
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
 When the new messages are inside <conversation-delta>, they are a compact JSON array of events:
@@ -1308,6 +1325,32 @@ Use this EXACT format:
 Keep each section concise. Preserve exact file paths, function names, and error messages.
 
 STRUCTURED-PRIMARY (output economy): Do NOT duplicate file paths, searches, or shell commands in prose — they are appended as structured XML. Update intent/decisions/blockers only; 1–3 bullets per section.`;
+
+const UPDATE_SUMMARIZATION_JSON_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
+
+When the new messages are inside <conversation-delta>, they are a compact JSON array of events:
+[{"k":"u","t":"user text"},{"k":"a","t":"assistant text"},{"k":"c","n":"toolName","a":{args}},{"k":"r","n":"toolName","t":"result excerpt","e":1}]
+Keys: u=user, a=assistant, c=tool call, r=tool result (e=1 only on error). Thinking is omitted — use <previous-summary> for prior reasoning.
+
+Merge new information into the checkpoint. PRESERVE prior goals/decisions unless obsolete; UPDATE progress and next steps.
+
+Your final assistant message MUST be a single fenced \`\`\`json\`\`\` block matching this schema (no markdown, no prose outside the fence):
+{
+  "goal": ["string"],
+  "constraints": ["string"],
+  "done": ["completed items"],
+  "inProgress": ["current work"],
+  "blocked": ["blockers"],
+  "keyDecisions": ["Decision: rationale"],
+  "nextSteps": ["ordered strings"],
+  "criticalContext": ["refs needed"]
+}
+
+Keep each array to 1–3 items. Do NOT list file paths, searches, or shell commands — appended as structured XML after parsing.`;
+
+function summarizationUsesJsonOutput(): boolean {
+	return !isTruthyEnvFlag(process.env.PIT_NO_STRUCTURED_SUMMARY_OUTPUT);
+}
 
 function createSummarizationOptions(
 	model: Model<any>,
@@ -1367,7 +1410,14 @@ export async function generateSummary(
 	const maxTokens = summarizationMaxTokens(model, reserveTokens, 0.8);
 
 	// Use update prompt if we have a previous summary, otherwise initial prompt
-	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
+	const useJson = summarizationUsesJsonOutput();
+	let basePrompt = previousSummary
+		? useJson
+			? UPDATE_SUMMARIZATION_JSON_PROMPT
+			: UPDATE_SUMMARIZATION_PROMPT
+		: useJson
+			? SUMMARIZATION_JSON_PROMPT
+			: SUMMARIZATION_PROMPT;
 	if (customInstructions) {
 		basePrompt = `${basePrompt}\n\nAdditional focus: ${customInstructions}`;
 	}
@@ -1498,7 +1548,8 @@ async function runSummarization(
 		throw new Error(`${errorLabel}: ${outcome.errorMessage || "Unknown error"}`);
 	}
 	// Both 'ok' and 'aborted' carry text; the original extracted text regardless of an aborted stopReason.
-	return outcome.text;
+	const raw = outcome.text;
+	return summarizationUsesJsonOutput() ? normalizeStructuredSummaryOutput(raw) : raw;
 }
 
 // ============================================================================

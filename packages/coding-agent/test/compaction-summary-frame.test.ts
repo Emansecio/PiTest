@@ -7,7 +7,10 @@ import {
 	createFileOps,
 	extractFileOpsFromMessage,
 	formatFileOperations,
+	formatStructuredSummaryMarkdown,
+	normalizeStructuredSummaryOutput,
 	type OperationLists,
+	parseStructuredSummaryJson,
 	trimSummaryProseAgainstOperations,
 } from "../src/core/compaction/utils.js";
 
@@ -40,6 +43,26 @@ function toolCall(name: string, args: Record<string, unknown>) {
 }
 
 describe("structured summary frame", () => {
+	it("parseStructuredSummaryJson + formatStructuredSummaryMarkdown (C2)", () => {
+		const json = JSON.stringify({
+			goal: ["ship feature"],
+			constraints: ["no regressions"],
+			done: ["tests green"],
+			inProgress: ["docs"],
+			blocked: [],
+			keyDecisions: ["JSON-primary: fewer output tokens"],
+			nextSteps: ["run check"],
+			criticalContext: [],
+		});
+		const parsed = parseStructuredSummaryJson(`\`\`\`json\n${json}\n\`\`\``);
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		const md = formatStructuredSummaryMarkdown(parsed.value);
+		expect(md).toContain("## Goal");
+		expect(md).toContain("ship feature");
+		expect(md).toContain("[x] tests green");
+		expect(normalizeStructuredSummaryOutput(`\`\`\`json\n${json}\n\`\`\``)).toContain("## Next Steps");
+	});
 	it("createFileOps initializes all operation buckets", () => {
 		const ops = createFileOps();
 		expect(ops.read.size).toBe(0);

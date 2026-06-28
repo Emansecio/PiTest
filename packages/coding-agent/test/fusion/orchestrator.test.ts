@@ -140,7 +140,7 @@ describe("runFusionTurn", () => {
 			runMember: async (m) => okResult(m, `ans-${m.cli}`),
 			runJudge: async () => {
 				order.push("judge");
-				return EMPTY_JUDGE;
+				return { ...EMPTY_JUDGE, unsupportedClaims: ["check this claim"] };
 			},
 			verify: async () => {
 				order.push("verify");
@@ -156,6 +156,25 @@ describe("runFusionTurn", () => {
 		expect(order).toEqual(["judge", "verify", "writer"]);
 		expect(writerVerification).toEqual(report);
 		expect(out.verification).toEqual(report);
+	});
+
+	it("skips verify when judge ran but unsupportedClaims is empty (F2)", async () => {
+		let verifyCalls = 0;
+		const out = await runFusionTurn({
+			userPrompt: "Q",
+			panel: PANEL,
+			staggerSameCliMs: 0,
+			runMember: async (m) => okResult(m, `ans-${m.cli}`),
+			runJudge: async () => EMPTY_JUDGE,
+			verify: async () => {
+				verifyCalls++;
+				return { findings: [] };
+			},
+			writer: async () => "FINAL",
+		});
+		expect(out.handled).toBe(true);
+		expect(verifyCalls).toBe(0);
+		expect(out.verification).toBeUndefined();
 	});
 
 	it("verifies the lone survivor even when the judge is skipped", async () => {

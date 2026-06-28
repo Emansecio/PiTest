@@ -2,7 +2,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { appendMemory, discoverMemoryFiles, formatMemoryForPrompt } from "../src/core/memory/index.js";
+import {
+	appendMemory,
+	discoverMemoryFiles,
+	formatMemoryForPrompt,
+	formatMemoryHintForPrompt,
+} from "../src/core/memory/index.js";
 
 describe("memory discovery + format + append", () => {
 	let tempDir: string;
@@ -52,6 +57,15 @@ describe("memory discovery + format + append", () => {
 
 	it("returns empty string for no memory files", () => {
 		expect(formatMemoryForPrompt([])).toBe("");
+	});
+
+	it("formatMemoryHintForPrompt emits on-demand hint without full body (E3)", () => {
+		const body = `${"padding ".repeat(40)}secret fact at end`;
+		const text = formatMemoryHintForPrompt([{ scope: "project", path: "/p/MEMORY.md", content: body }], cwd);
+		expect(text).toContain("<persistent_memory_hint>");
+		expect(text).toContain("read({ path:");
+		expect(text).not.toContain("secret fact at end");
+		expect(text).toContain("padding");
 	});
 
 	it("appendMemory creates project file with date stamp", () => {

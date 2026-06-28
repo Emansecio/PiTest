@@ -153,6 +153,7 @@ import { GoalManager, type GoalSnapshot, type GoalState, setCurrentGoalManager }
 import {
 	defaultBankPath,
 	ensureBankDir,
+	formatHindsightHintForPrompt,
 	formatSessionSummariesForPrompt,
 	getCurrentHindsightBank,
 	type HindsightBank,
@@ -162,7 +163,7 @@ import {
 import { defaultLearnedErrorsDir, type LearnedErrorEntry, persistSessionLearnedErrors } from "./learned-error-store.js";
 import { createLspManager, getCurrentLspManager, type LspManager, setCurrentLspManager } from "./lsp/manager.ts";
 import { setDiagnosticsOnWrite, setEnforceDiagnosticsOnWrite, setFormatOnWrite } from "./lsp/writethrough.ts";
-import { formatMemoryForPrompt } from "./memory/index.js";
+import { formatMemoryForPrompt, formatMemoryHintForPrompt } from "./memory/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import {
 	agentMessageBus,
@@ -2612,8 +2613,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
 		const memoryFiles = this._resourceLoader.getMemoryFiles();
 		const appendSections = [...loaderAppendSystemPrompt];
-		if (memoryFiles.length > 0) {
-			const memoryBlock = formatMemoryForPrompt(memoryFiles).trim();
+		if (memoryFiles.length > 0 && !this.settingsManager.getMemorySettings().disableInjection) {
+			const memoryOnDemand = !isTruthyEnvFlag(process.env.PIT_NO_MEMORY_ON_DEMAND);
+			const memoryBlock = (
+				memoryOnDemand ? formatMemoryHintForPrompt(memoryFiles, this._cwd) : formatMemoryForPrompt(memoryFiles)
+			).trim();
 			if (memoryBlock.length > 0) {
 				appendSections.push(memoryBlock);
 			}
@@ -2632,7 +2636,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// a compact mental model of prior sessions. Section is only emitted
 		// when the bank holds at least one session summary.
 		if (this._hindsightBank) {
-			const summaryBlock = formatSessionSummariesForPrompt();
+			const hindsightOnDemand = !isTruthyEnvFlag(process.env.PIT_NO_HINDSIGHT_ON_DEMAND);
+			const summaryBlock = hindsightOnDemand ? formatHindsightHintForPrompt() : formatSessionSummariesForPrompt();
 			if (summaryBlock) {
 				appendSections.push(summaryBlock);
 			}

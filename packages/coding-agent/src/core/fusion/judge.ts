@@ -1,7 +1,34 @@
 import type { Context, Message } from "@pit/ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import { headTailExcerpt } from "../compaction/utils.ts";
 import type { JudgeAnalysis, PanelResult, VerificationReport } from "./types.ts";
+
+/** Max chars of each advisor's panel text passed to judge/writer/verifier (F1). */
+export const FUSION_PANEL_TEXT_MAX_CHARS = 6000;
+
+export function capPanelText(text: string, maxChars = FUSION_PANEL_TEXT_MAX_CHARS): string {
+	if (text.length <= maxChars) return text;
+	const headBudget = Math.floor(maxChars * 0.6);
+	const tailBudget = maxChars - headBudget;
+	return headTailExcerpt(text, {
+		headBudget,
+		tailBudget,
+		snapWindow: 120,
+		marker: (elided) => `[... ${elided} chars of advisor output elided ...]`,
+	});
+}
+
+function formatPanelMemberText(result: PanelResult): string {
+	if (!result.ok) return `[failed: ${result.error ?? "unknown"}]`;
+	return capPanelText(result.text);
+}
+
+/** Skip the read-only verifier when the judge found no unsupported claims (F2). */
+export function shouldSkipFusionVerify(analysis: JudgeAnalysis, judged: boolean): boolean {
+	if (!judged) return false;
+	return analysis.unsupportedClaims.length === 0;
+}
 
 const WRITER_SYSTEM =
 	"You are the writer in a model-fusion pipeline. Using the judge's analysis and the verifier's " +
@@ -20,7 +47,10 @@ export function buildWriterContext(
 	history: Message[] = [],
 ): Context {
 	const ans = results
-		.map((r, i) => `### Member ${i + 1} (${r.member.cli}:${r.member.model})\n${r.ok ? r.text : "[failed]"}`)
+		.map(
+			(r, i) =>
+				`### Member ${i + 1} (${r.member.cli}:${r.member.model})\n${r.ok ? formatPanelMemberText(r) : "[failed]"}`,
+		)
 		.join("\n\n");
 	const a = JSON.stringify(analysis, null, 2);
 	const verifySection =
@@ -86,10 +116,7 @@ const JUDGE_SYSTEM =
 
 export function buildJudgeContext(userPrompt: string, results: PanelResult[]): Context {
 	const blocks = results
-		.map(
-			(r, i) =>
-				`### Panel member ${i + 1} (${r.member.cli}:${r.member.model})\n${r.ok ? r.text : `[failed: ${r.error ?? "unknown"}]`}`,
-		)
+		.map((r, i) => `### Panel member ${i + 1} (${r.member.cli}:${r.member.model})\n${formatPanelMemberText(r)}`)
 		.join("\n\n");
 	const content = `## Original task\n${userPrompt}\n\n## Panel answers\n${blocks}`;
 	return {
@@ -160,7 +187,10 @@ export type VerificationSchema = Static<typeof VERIFICATION_SCHEMA>;
  * flagged claims to check first. Runs with read-only tools to fact-check against the code. */
 export function buildVerifierPrompt(userPrompt: string, results: PanelResult[], analysis: JudgeAnalysis): string {
 	const ans = results
-		.map((r, i) => `### Advisor ${i + 1} (${r.member.cli}:${r.member.model})\n${r.ok ? r.text : "[failed]"}`)
+		.map(
+			(r, i) =>
+				`### Advisor ${i + 1} (${r.member.cli}:${r.member.model})\n${r.ok ? formatPanelMemberText(r) : "[failed]"}`,
+		)
 		.join("\n\n");
 	const flagged = [...analysis.unsupportedClaims, ...analysis.contradictions, ...analysis.uniqueInsights];
 	const checklist =

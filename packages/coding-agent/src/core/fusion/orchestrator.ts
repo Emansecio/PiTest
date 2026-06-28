@@ -1,3 +1,4 @@
+import { shouldSkipFusionVerify } from "./judge.ts";
 import type { JudgeAnalysis, PanelMember, PanelResult, VerificationReport } from "./types.ts";
 
 export interface FusionTurnDeps {
@@ -78,9 +79,12 @@ export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOut
 	const judged = survivors.length >= 2;
 	const analysis = judged ? await deps.runJudge(deps.userPrompt, results) : EMPTY_ANALYSIS;
 
-	// Verify stage: fact-check the surviving claims against the code (read-only). Fail-open —
-	// verify() swallows its own errors and returns undefined, so a bad pass never blocks the turn.
-	const verification = deps.verify ? await deps.verify(deps.userPrompt, results, analysis) : undefined;
+	// Verify stage: fact-check unsupported claims against the code (read-only). Skipped when the
+	// judge found nothing to fact-check (F2); still runs for a lone survivor (no judge). Fail-open.
+	let verification: VerificationReport | undefined;
+	if (deps.verify && !shouldSkipFusionVerify(analysis, judged)) {
+		verification = await deps.verify(deps.userPrompt, results, analysis);
+	}
 
 	const text = await deps.writer(deps.userPrompt, results, analysis, verification);
 	return { handled: true, text, analysis: judged ? analysis : undefined, results, verification };

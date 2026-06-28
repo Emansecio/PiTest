@@ -4,8 +4,11 @@ import {
 	buildJudgeContext,
 	buildVerifierPrompt,
 	buildWriterContext,
+	capPanelText,
+	FUSION_PANEL_TEXT_MAX_CHARS,
 	JUDGE_SCHEMA,
 	parseJudgeOutput,
+	shouldSkipFusionVerify,
 	VERIFICATION_SCHEMA,
 } from "../../src/core/fusion/judge.ts";
 
@@ -87,6 +90,29 @@ describe("fusion judge", () => {
 		const content = typeof only.content === "string" ? only.content : JSON.stringify(only.content);
 		expect(content).toContain("the task");
 		expect(content).toContain("panel answer");
+	});
+
+	it("caps long panel text in judge context (F1)", () => {
+		const long = "x".repeat(FUSION_PANEL_TEXT_MAX_CHARS + 500);
+		const ctx = buildJudgeContext("Q", [
+			{ member: { cli: "claude", model: "opus" }, ok: true, text: long },
+			{ member: { cli: "codex", model: "gpt" }, ok: true, text: "short" },
+		]);
+		const content = typeof ctx.messages[0].content === "string" ? ctx.messages[0].content : "";
+		expect(content).toContain("chars of advisor output elided");
+		expect(content).not.toContain("x".repeat(FUSION_PANEL_TEXT_MAX_CHARS + 100));
+		expect(content).toContain("short");
+	});
+
+	it("capPanelText returns text unchanged when within budget", () => {
+		expect(capPanelText("hello")).toBe("hello");
+	});
+
+	it("shouldSkipFusionVerify skips only after judge with empty unsupportedClaims (F2)", () => {
+		const empty = { ...EMPTY_ANALYSIS };
+		expect(shouldSkipFusionVerify(empty, true)).toBe(true);
+		expect(shouldSkipFusionVerify({ ...empty, unsupportedClaims: ["claim"] }, true)).toBe(false);
+		expect(shouldSkipFusionVerify(empty, false)).toBe(false);
 	});
 
 	it("buildWriterContext prepends prior conversation history before the task block", () => {
