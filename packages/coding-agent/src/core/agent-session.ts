@@ -2476,7 +2476,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			}
 			if (latestGoal && latestGoal.status !== "complete") {
 				this._goal.restore(latestGoal);
-				this._tokenGovernor.restoreSpend(latestGoal.tokensUsed, latestGoal.tokenBudget);
+				this._tokenGovernor.restoreSpend(latestGoal.tokensUsed, latestGoal.tokenBudget, latestGoal.tokenSpendSplit);
 				this._activateGoalTool(true);
 			}
 			if (latestTodo) this._todo.restore(latestTodo);

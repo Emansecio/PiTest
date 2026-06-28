@@ -50,4 +50,28 @@ describe("TokenBudgetGovernor", () => {
 		expect(governor.totalSpent()).toBe(3500);
 		expect(goal.get()?.tokensUsed).toBe(3500);
 	});
+
+	it("persists and restores token spend split on reload", () => {
+		const goal = new GoalManager();
+		const governor = new TokenBudgetGovernor();
+		governor.bindGoal(goal);
+		goal.start("reload", { tokenBudget: 20_000 });
+		governor.setBudget(20_000);
+		governor.recordMain(3000);
+		governor.recordSubagent({ inputTokens: 400, outputTokens: 600, totalTokens: 1000, costUsd: 0 });
+		governor.recordFusion(500);
+		expect(goal.get()?.tokenSpendSplit).toEqual({ main: 3000, subagent: 1000, fusion: 500 });
+
+		const persisted = goal.serialize();
+		const goal2 = new GoalManager();
+		const governor2 = new TokenBudgetGovernor();
+		goal2.restore(persisted);
+		governor2.restoreSpend(persisted!.tokensUsed, persisted!.tokenBudget, persisted!.tokenSpendSplit);
+		expect(governor2.snapshot()).toMatchObject({
+			mainTokens: 3000,
+			subagentTokens: 1000,
+			fusionTokens: 500,
+			totalSpent: 4500,
+		});
+	});
 });

@@ -6,7 +6,7 @@
  */
 
 import type { SubagentUsage } from "./coordinator/types.ts";
-import type { GoalManager } from "./goal/goal-manager.ts";
+import type { GoalManager, TokenSpendSplit } from "./goal/goal-manager.ts";
 
 export interface TokenBudgetSnapshot {
 	mainTokens: number;
@@ -45,11 +45,17 @@ export class TokenBudgetGovernor {
 		this.flushToGoal();
 	}
 
-	/** Rehydrate spend after session reload (subagent split is not persisted). */
-	restoreSpend(totalFromGoal: number, budget?: number): void {
-		this.mainTokens = Math.max(0, Math.round(totalFromGoal));
-		this.subagentTokens = 0;
-		this.fusionTokens = 0;
+	/** Rehydrate spend after session reload; uses persisted split when present. */
+	restoreSpend(totalFromGoal: number, budget?: number, split?: TokenSpendSplit): void {
+		if (split) {
+			this.mainTokens = Math.max(0, Math.round(split.main));
+			this.subagentTokens = Math.max(0, Math.round(split.subagent));
+			this.fusionTokens = Math.max(0, Math.round(split.fusion));
+		} else {
+			this.mainTokens = Math.max(0, Math.round(totalFromGoal));
+			this.subagentTokens = 0;
+			this.fusionTokens = 0;
+		}
 		this.budgetLimit = budget;
 	}
 
@@ -104,7 +110,12 @@ export class TokenBudgetGovernor {
 
 	private flushToGoal(): void {
 		if (!this.goalManager) return;
-		this.goalManager.syncTokensUsed(this.totalSpent());
+		const snap = this.snapshot();
+		this.goalManager.syncTokensUsed(snap.totalSpent, {
+			main: snap.mainTokens,
+			subagent: snap.subagentTokens,
+			fusion: snap.fusionTokens,
+		});
 	}
 }
 

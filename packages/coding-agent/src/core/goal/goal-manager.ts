@@ -12,6 +12,13 @@ import { sliceSafe } from "../../utils/surrogate.ts";
 
 export type GoalStatus = "active" | "paused" | "budget_limited" | "complete";
 
+/** Per-channel token spend persisted with the goal (K9b / G1). */
+export interface TokenSpendSplit {
+	main: number;
+	subagent: number;
+	fusion: number;
+}
+
 export interface GoalState {
 	id: string;
 	objective: string;
@@ -19,6 +26,8 @@ export interface GoalState {
 	/** Optional token budget; when exceeded the goal becomes budget_limited. */
 	tokenBudget?: number;
 	tokensUsed: number;
+	/** Optional ledger split when {@link TokenBudgetGovernor} is active. */
+	tokenSpendSplit?: TokenSpendSplit;
 	iterations: number;
 	/** Epoch ms when the goal started. */
 	startedAt: number;
@@ -188,12 +197,19 @@ export class GoalManager {
 	 * Set cumulative token spend from the unified {@link TokenBudgetGovernor}
 	 * (main + subagents + fusion). Re-evaluates budget_limited.
 	 */
-	syncTokensUsed(total: number): void {
+	syncTokensUsed(total: number, split?: TokenSpendSplit): void {
 		if (!this.state) return;
 		if (this.state.status === "complete" && this.state.iterations > (this.state.completedAtIteration ?? -1)) {
 			return;
 		}
 		this.state.tokensUsed = Math.max(0, Math.round(total));
+		if (split) {
+			this.state.tokenSpendSplit = {
+				main: Math.max(0, Math.round(split.main)),
+				subagent: Math.max(0, Math.round(split.subagent)),
+				fusion: Math.max(0, Math.round(split.fusion)),
+			};
+		}
 		if (
 			this.state.status === "active" &&
 			this.state.tokenBudget !== undefined &&

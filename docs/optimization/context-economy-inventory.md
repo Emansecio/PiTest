@@ -183,17 +183,17 @@
 
 | ID | Veredicto | Sugestão | Nota de revisão |
 |----|-----------|----------|-----------------|
-| G1 | **PARTIAL** | Token budget governor unificado | K7+K8: main+subagent+fusion → goal; gate spawn; footer `budgetSpent`/`subagentSpent`/`fusionSpent`. Gap: persist subagent/fusion split on reload |
+| G1 | **PARTIAL** | Token budget governor unificado | K7+K9b: main+subagent+fusion → goal + `tokenSpendSplit` persist/reload; gate spawn; footer splits. Gap: footer breakdown por handle (F6) |
 | G2 | **VALID** | Auto-tighten prune em `instabilityTurn` | Warning TUI only (`interactive-mode.ts:5776`) |
 | G3 | **REMOVED** | — | K1 — `scripts/bench-session-tokens.mts` (3 cenários + METRIC) |
-| G4 | **VALID** | Bench fusion+coordinator | Sem cenário em `bench/scenarios/` |
+| G4 | **PARTIAL** | Bench fusion+coordinator | K9c — `scripts/bench-fusion-tokens.mts` (synthetic stage model + gate); gap: turno real com CLI |
 | G5 | **PARTIAL** | Export prefix-rebuild reasons | Já aparece no `/cache-status`; falta export estruturado para bench/diagnóstico automatizado |
 | G6 | **VALID** | A/B prune vs cache | Sem harness |
 | G7 | **VALID** | A/B frequentFiles suffix | Sem harness |
 | G8 | **VALID** | A/B self-correction | Sem harness |
 | G9 | **VALID** | Telemetria por tool na prune | Sem breakdown por `toolName` |
 | G10 | **VALID** | Dashboard `/economy` | Não existe |
-| G11 | **PARTIAL** | METRIC por mecanismo | `bench-prompt-size` + `bench-session-tokens` emitem METRIC por cenário; falta breakdown por mecanismo (prune/supersede/thinking-cap/wire) |
+| G11 | **REMOVED** | — | K9a — `bench-session-tokens.mts` emite `mechanism=* reclaimed_tokens` (thinking_cap, prune_tool_output, supersede, arg_elision) |
 | G12 | **REMOVED** | — | K8 — `scripts/check-token-bench.mjs` + `scripts/baselines/token-economy.json` no `npm run check` |
 
 ---
@@ -257,9 +257,10 @@
 | K6 | C1 | Delta summarization (2nd+ compact JSON input) — **shipped** |
 | K7 | G1 | Token governor (unified ledger + spawn gate) — **shipped** |
 | K8 | G12, C2, F3 | CI token regression gate + structured-primary trim + fusion ledger — **shipped** |
-| K9 | — | Demais VALID por impacto medido |
+| K9 | G11, G1 persist, G4 | Mechanism METRIC breakdown + goal `tokenSpendSplit` reload + `bench-fusion-tokens` — **shipped** |
+| K10 | — | Demais VALID por impacto medido (E3/E4, C2 JSON, F1/F2…) |
 
-**Pendente imediato (roadmap):** G11 (METRIC por mecanismo) → persist subagent/fusion split on reload → C2 JSON-primary summarizer output.
+**Pendente imediato (roadmap):** K10a E3/E4 on-demand prefix → K10b C2 JSON-primary summarizer → K10c F1/F2 fusion caps.
 
 **Gaps residuais dos itens K5 (ainda PARTIAL, não reabrir como VALID):** E1 API description stub (overlap E9), E2 bloco hash-keyed isolado, E6 recall BM25 do corpo completo.
 

@@ -71,7 +71,8 @@ function checkRule(kind, key, expected, actual, failures) {
 
 const sessionOut = runBench("scripts/bench-session-tokens.mts");
 const promptOut = runBench("scripts/bench-prompt-size.mts");
-const metrics = parseMetrics(`${sessionOut}\n${promptOut}`);
+const fusionOut = runBench("scripts/bench-fusion-tokens.mts");
+const metrics = parseMetrics(`${sessionOut}\n${promptOut}\n${fusionOut}`);
 
 const failures = [];
 for (const [kind, rules] of Object.entries(baseline)) {

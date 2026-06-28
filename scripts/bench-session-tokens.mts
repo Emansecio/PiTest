@@ -49,6 +49,14 @@ type ScenarioName = "explore-heavy" | "edit-heavy" | "long-reasoning";
 type ContextFile = { path: string; content: string };
 type Skill = { name: string; description: string; filePath: string; disableModelInvocation?: boolean };
 
+/** Per-mechanism reclaim (G11) — each measured in isolation on a fresh clone. */
+type MechanismBreakdown = {
+	thinkingCapReclaimed: number;
+	pruneToolOutputReclaimed: number;
+	supersedeReclaimed: number;
+	argElisionReclaimed: number;
+};
+
 type ScenarioMetrics = {
 	scenario: ScenarioName;
 	messagesOnlyTokens: number;
@@ -61,7 +69,40 @@ type ScenarioMetrics = {
 	supersedeReclaimedTokens: number;
 	liveEconomyReclaimedTokens: number;
 	proactivePruneFloorTokens: number;
+	mechanisms: MechanismBreakdown;
 };
+
+function measureMechanismBreakdown(
+	source: AgentMessage[],
+	protectTurns: number,
+	pruneThreshold: number,
+): MechanismBreakdown {
+	const thinkingCopy = cloneToolResultMessagesForPrune(source);
+	const thinkingCapReclaimed = applyOldThinkingCap(thinkingCopy, protectTurns);
+
+	const pruneCopy = cloneToolResultMessagesForPrune(source);
+	const pruneToolOutputReclaimed = pruneOldToolOutputs(pruneCopy, pruneThreshold, protectTurns, false);
+
+	const supersedeCopy = cloneToolResultMessagesForPrune(source);
+	const supersedeReclaimed = applySupersedeOnly(supersedeCopy, PROTECT_TURNS);
+
+	const argCopy = cloneToolResultMessagesForPrune(source);
+	let argElisionReclaimed = 0;
+	for (const msg of argCopy) {
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		for (const block of msg.content) {
+			if (block.type !== "toolCall") continue;
+			argElisionReclaimed += elideMutatingToolCallArguments(argCopy, block.id);
+		}
+	}
+
+	return {
+		thinkingCapReclaimed,
+		pruneToolOutputReclaimed,
+		supersedeReclaimed,
+		argElisionReclaimed,
+	};
+}
 
 function parseScenarioArg(argv: string[]): ScenarioName | "all" {
 	for (const arg of argv) {
@@ -358,6 +399,8 @@ function measureScenario(name: ScenarioName, wirePrefix: WirePrefixSurface): Sce
 		tools: wirePrefix.tools,
 	}).tokens;
 
+	const mechanisms = measureMechanismBreakdown(source, protectTurns, pruneThreshold);
+
 	return {
 		scenario: name,
 		messagesOnlyTokens,
@@ -370,6 +413,7 @@ function measureScenario(name: ScenarioName, wirePrefix: WirePrefixSurface): Sce
 		supersedeReclaimedTokens: supersedeReclaimed,
 		liveEconomyReclaimedTokens: liveReclaimed,
 		proactivePruneFloorTokens: floor,
+		mechanisms,
 	};
 }
 
@@ -392,6 +436,11 @@ function printScenarioMetrics(m: ScenarioMetrics): void {
 	console.log(`METRIC scenario=${m.scenario} supersede_reclaimed_tokens=${m.supersedeReclaimedTokens}`);
 	console.log(`METRIC scenario=${m.scenario} after_live_economy_tokens=${m.afterLiveEconomyTokens}`);
 	console.log(`METRIC scenario=${m.scenario} live_economy_reclaimed_tokens=${m.liveEconomyReclaimedTokens}`);
+	const mk = m.mechanisms;
+	console.log(`METRIC scenario=${m.scenario} mechanism=thinking_cap reclaimed_tokens=${mk.thinkingCapReclaimed}`);
+	console.log(`METRIC scenario=${m.scenario} mechanism=prune_tool_output reclaimed_tokens=${mk.pruneToolOutputReclaimed}`);
+	console.log(`METRIC scenario=${m.scenario} mechanism=supersede reclaimed_tokens=${mk.supersedeReclaimed}`);
+	console.log(`METRIC scenario=${m.scenario} mechanism=arg_elision reclaimed_tokens=${mk.argElisionReclaimed}`);
 }
 
 const scenarioArg = parseScenarioArg(process.argv.slice(2));

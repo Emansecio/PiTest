@@ -18,6 +18,7 @@
 		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
 		"check:generated": "node scripts/check-generated-models.mjs",
 		"check:token-bench": "node scripts/check-token-bench.mjs",
+		"bench:fusion-tokens": "tsx scripts/bench-fusion-tokens.mts",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
 		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
 		"bench:tool-rewrites": "tsx scripts/bench-tool-rewrites.mts",
