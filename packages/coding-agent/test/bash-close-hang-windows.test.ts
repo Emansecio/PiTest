@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.js";
 import { createBashTool, createLocalBashOperations } from "../src/core/tools/bash.js";
@@ -77,11 +78,21 @@ describe.skipIf(process.platform !== "win32")("Windows child-process close handl
 		mkdirSync(testDir, { recursive: true });
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		// Windows releases the (grand)child's inherited stdio/file handles
 		// asynchronously after taskkill, so an immediate rmdir can hit EBUSY under
 		// full-suite load — retry while the handle drains instead of failing teardown.
-		rmSync(testDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+		let lastError: unknown;
+		for (let attempt = 0; attempt < 50; attempt++) {
+			try {
+				rmSync(testDir, { recursive: true, force: true });
+				return;
+			} catch (error) {
+				lastError = error;
+				await delay(100);
+			}
+		}
+		throw lastError;
 	});
 
 	it("executeBash resolves after the shell exits even if inherited stdio handles stay open", async () => {
