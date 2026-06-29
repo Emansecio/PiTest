@@ -12,9 +12,38 @@ import { theme } from "../theme/theme.ts";
 
 /** Cap on overlay rows; completed todos are hidden first when exceeded. */
 const OVERLAY_MAX_ROWS = 12;
+/** Progress bar width (visible block chars, excluding connector). */
+const PROGRESS_BAR_WIDTH = 12;
 
 function strike(text: string): string {
 	return `\x1b[9m${text}\x1b[29m`;
+}
+
+/** in_progress first, then pending, then completed — active work stays on top. */
+function sortTodosForDisplay(items: TodoItem[]): TodoItem[] {
+	const rank = (status: TodoItem["status"]): number => {
+		switch (status) {
+			case "in_progress":
+				return 0;
+			case "pending":
+				return 1;
+			default:
+				return 2;
+		}
+	};
+	return [...items].sort((a, b) => rank(a.status) - rank(b.status));
+}
+
+function renderProgressBar(done: number, total: number, width: number): string {
+	if (total <= 1) return "";
+	const barWidth = Math.min(PROGRESS_BAR_WIDTH, Math.max(4, width - CONNECTOR_WIDTH - 8));
+	const filled = Math.round((done / total) * barWidth);
+	const empty = barWidth - filled;
+	const filledPart = theme.fg("success", "█".repeat(filled));
+	const emptyPart = theme.fg("dim", "░".repeat(empty));
+	const pct = Math.round((done / total) * 100);
+	const label = `${done}/${total} · ${pct}%`;
+	return `${filledPart}${emptyPart} ${theme.fg("muted", label)}`;
 }
 
 export interface TodoOverlayData {
@@ -43,22 +72,22 @@ function renderRow(item: TodoItem, spinner: string, width: number): string {
 		}
 		case "in_progress": {
 			if (item.activeForm) {
-				// Reserve space for "  (activeForm)" suffix.
-				const suffixText = `  (${item.activeForm})`;
+				// Reserve space for " — activeForm" suffix.
+				const suffixText = ` — ${item.activeForm}`;
 				const suffixWidth = visibleWidth(suffixText);
 				const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH - suffixWidth);
 				const subject =
 					visibleWidth(item.subject) > subjectBudget
 						? truncateToWidth(item.subject, subjectBudget, "…")
 						: item.subject;
-				return `${theme.fg("warning", spinner)} ${subject}  ${theme.fg("dim", `(${item.activeForm})`)}`;
+				return `${theme.fg("warning", spinner)} ${theme.fg("accent", subject)}${theme.fg("dim", suffixText)}`;
 			}
 			const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH);
 			const subject =
 				visibleWidth(item.subject) > subjectBudget
 					? truncateToWidth(item.subject, subjectBudget, "…")
 					: item.subject;
-			return `${theme.fg("warning", spinner)} ${subject}`;
+			return `${theme.fg("warning", spinner)} ${theme.fg("accent", subject)}`;
 		}
 		default: {
 			const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH);
@@ -78,18 +107,26 @@ export function renderTodoOverlay(data: TodoOverlayData, width: number, spinner:
 	if (data.items.length === 0 || data.done === data.total) return [];
 
 	// Truncation: keep all non-completed; drop oldest completed first.
-	let rows = data.items;
+	let rows = sortTodosForDisplay(data.items);
 	let hiddenCompleted = 0;
 	if (rows.length > OVERLAY_MAX_ROWS) {
 		const completed = rows.filter((t) => t.status === "completed");
 		const active = rows.filter((t) => t.status !== "completed");
 		const keep = Math.max(0, OVERLAY_MAX_ROWS - active.length);
 		hiddenCompleted = Math.max(0, completed.length - keep);
-		rows = [...completed.slice(completed.length - keep), ...active];
+		rows = [...active, ...completed.slice(completed.length - keep)];
 	}
 
 	const lines: string[] = [];
-	lines.push(`${theme.fg("accent", "●")} ${theme.bold(`Todos (${data.done}/${data.total})`)}`);
+	const header = `${theme.fg("accent", "●")} ${theme.bold("Tasks")} ${theme.fg("dim", "—")} ${theme.fg("muted", `${data.done}/${data.total}`)}`;
+	lines.push(visibleWidth(header) > width ? truncateToWidth(header, width, "…") : header);
+
+	const progress = renderProgressBar(data.done, data.total, width);
+	if (progress) {
+		const progressLine = `${theme.fg("dim", "├─ ")}${progress}`;
+		lines.push(visibleWidth(progressLine) > width ? truncateToWidth(progressLine, width, "…") : progressLine);
+	}
+
 	rows.forEach((item, idx) => {
 		const isLast = idx === rows.length - 1 && hiddenCompleted === 0;
 		const connector = theme.fg("dim", isLast ? "└─ " : "├─ ");
@@ -97,7 +134,7 @@ export function renderTodoOverlay(data: TodoOverlayData, width: number, spinner:
 		lines.push(visibleWidth(row) > width ? truncateToWidth(row, width, "…") : row);
 	});
 	if (hiddenCompleted > 0) {
-		lines.push(theme.fg("dim", `└─ … ${hiddenCompleted} completed hidden`));
+		lines.push(theme.fg("dim", `└─ … ${hiddenCompleted} done hidden`));
 	}
 	return lines;
 }

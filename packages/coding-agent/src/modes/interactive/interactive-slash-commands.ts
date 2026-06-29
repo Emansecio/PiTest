@@ -22,6 +22,7 @@ export interface SlashCommandHost {
 	showOAuthSelector(mode: "login" | "logout"): void | Promise<void>;
 	handleClearCommand(): void | Promise<void>;
 	handleReloadCommand(): void | Promise<void>;
+	handleSkillsCommand(args: string): void | Promise<void>;
 	handleDebugCommand(): void | Promise<void>;
 	handleArminSaysHi(): void | Promise<void>;
 	handleDementedDelves(): void | Promise<void>;
@@ -53,6 +54,7 @@ export const DISPATCHED_SLASH_COMMAND_NAMES = [
 	"logout",
 	"new",
 	"reload",
+	"skills",
 	"debug",
 	"resume",
 	"quit",
@@ -119,6 +121,11 @@ export async function dispatchSlashCommand(host: SlashCommandHost, text: string)
 	if (text === "/todos") {
 		host.clearEditor();
 		host.showStatus(host.getTodoSummaryText());
+		return true;
+	}
+	if (text === "/skills" || text.startsWith("/skills ")) {
+		host.clearEditor();
+		await host.handleSkillsCommand(text === "/skills" ? "" : stripSlashArg(text, "/skills"));
 		return true;
 	}
 

@@ -17,6 +17,7 @@
 		"check:fix": "biome check --write --error-on-warnings .",
 		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
 		"check:generated": "node scripts/check-generated-models.mjs",
+		"check:dist-exports": "node scripts/check-dist-exports.mjs",
 		"check:token-bench": "node scripts/check-token-bench.mjs",
 		"bench:fusion-tokens": "tsx scripts/bench-fusion-tokens.mts",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",

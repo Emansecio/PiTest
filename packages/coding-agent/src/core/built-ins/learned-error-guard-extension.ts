@@ -54,7 +54,7 @@ export interface LearnedErrorGuardOptions {
 	 * tests; defaults to a disk scan of `dir`. Invoked lazily on the first tool
 	 * call, never at session creation.
 	 */
-	provider?: () => AggregatedLearnedError[];
+	provider?: () => AggregatedLearnedError[] | Promise<AggregatedLearnedError[]>;
 	/** Minimum cumulative occurrences before a pattern guards. Default: 3. */
 	minOccurrences?: number;
 	/** Minimum distinct sessions before a pattern guards. Default: 2. */
@@ -71,29 +71,23 @@ export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptio
 		if (options.enabled === false || isTruthyEnvFlag(process.env.PIT_NO_LEARNED_ERROR_GUARD)) return;
 		const minOccurrences = Math.max(2, options.minOccurrences ?? 3);
 		const minSessions = Math.max(1, options.minSessions ?? 2);
-		const provider =
-			options.provider ??
-			(() => {
-				try {
-					return aggregateLearnedErrors(options.dir ?? defaultLearnedErrorsDir());
-				} catch {
-					return [];
-				}
-			});
+		const loadAggregated = async (): Promise<AggregatedLearnedError[]> => {
+			if (options.provider) return options.provider();
+			try {
+				return await aggregateLearnedErrors(options.dir ?? defaultLearnedErrorsDir());
+			} catch {
+				return [];
+			}
+		};
 
 		// tool -> (sampleArgs fingerprint -> aggregated entry). Built lazily on the
 		// first tool call so session creation never pays the disk scan.
 		let index: Map<string, Map<string, AggregatedLearnedError>> | undefined;
+		let indexReady: Promise<void> | undefined;
 		const blocked = new Set<string>();
 
-		const buildIndex = (): Map<string, Map<string, AggregatedLearnedError>> => {
+		const buildIndex = (aggregated: AggregatedLearnedError[]): Map<string, Map<string, AggregatedLearnedError>> => {
 			const idx = new Map<string, Map<string, AggregatedLearnedError>>();
-			let aggregated: AggregatedLearnedError[];
-			try {
-				aggregated = provider();
-			} catch {
-				aggregated = [];
-			}
 			for (const entry of aggregated) {
 				if (entry.totalCount < minOccurrences || entry.sessionCount < minSessions) continue;
 				// Covered by a built-in Tier-4 rule already — its hint is better targeted.
@@ -109,8 +103,16 @@ export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptio
 			return idx;
 		};
 
-		pi.on("tool_call", (event) => {
-			if (index === undefined) index = buildIndex();
+		pi.on("tool_call", async (event) => {
+			if (index === undefined) {
+				if (!indexReady) {
+					indexReady = loadAggregated().then((aggregated) => {
+						index = buildIndex(aggregated);
+					});
+				}
+				await indexReady;
+			}
+			if (!index) return undefined;
 			const inner = index.get(event.toolName);
 			if (!inner || inner.size === 0) return undefined;
 			const fingerprint = fingerprintToolArgs(normaliseInput(event.input), SAMPLE_ARGS_FINGERPRINT_CHARS);

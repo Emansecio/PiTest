@@ -98,20 +98,15 @@ describe("model selector provider group headers", () => {
 		expect(betaHeaderIdx).toBeGreaterThanOrEqual(0);
 		expect(alphaHeaderIdx).toBeLessThan(betaHeaderIdx);
 
-		// Per-item provider badges are still present (headers augment, not replace).
-		expect(lines.some((line) => line.includes("[alpha]"))).toBe(true);
-		expect(lines.some((line) => line.includes("[beta]"))).toBe(true);
-
 		// The current model is the selected (→) line and sits under the alpha header.
 		const selectedLine = lines.find((line) => line.startsWith("→"));
-		expect(selectedLine).toContain("a1");
-		expect(selectedLine).toContain("[alpha]");
+		expect(selectedLine).toContain("Alpha One");
 
 		// Provider block is contiguous: a1, a2 (both alpha) come before b1 (beta),
 		// so a header never splits a provider's models.
-		const a1Idx = lines.findIndex((line) => line.includes("a1") && line.includes("[alpha]"));
-		const a2Idx = lines.findIndex((line) => line.includes("a2") && line.includes("[alpha]"));
-		const b1Idx = lines.findIndex((line) => line.includes("b1") && line.includes("[beta]"));
+		const a1Idx = lines.findIndex((line) => line.includes("Alpha One"));
+		const a2Idx = lines.findIndex((line) => line.includes("Alpha Two"));
+		const b1Idx = lines.findIndex((line) => line.includes("Beta One"));
 		expect(a1Idx).toBeLessThan(a2Idx);
 		expect(a2Idx).toBeLessThan(b1Idx);
 	});

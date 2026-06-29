@@ -1,4 +1,5 @@
 import { fuzzyMatch } from "@pit/tui";
+import { searchRegexWithinBudget } from "../../../core/regex-budget.ts";
 import { resolveSessionSearchText, type SessionInfo } from "../../../core/session-manager.ts";
 
 export type SortMode = "threaded" | "recent" | "relevance";
@@ -27,14 +28,6 @@ function normalizeWhitespaceLower(text: string): string {
 // objects, so stale text never leaks (and old entries are GC-eligible).
 const searchTextCache = new WeakMap<SessionInfo, string>();
 const normalizedTextCache = new WeakMap<SessionInfo, string>();
-
-// Cap the text length a user-supplied regex is executed against. Session
-// `allMessagesText` can be very large, and a pathological pattern (e.g.
-// `re:(a+)+$`) triggers catastrophic backtracking that synchronously freezes
-// the TUI input/render loop on every keystroke. Bounding the input length
-// keeps the worst-case match time linear-ish without changing results for
-// realistic patterns (which match well within this window).
-const REGEX_SEARCH_TEXT_CAP = 50_000;
 
 // Total wall-clock budget for executing a user-supplied regex across ALL
 // sessions in a single filtering pass. The per-session cap above bounds one
@@ -154,14 +147,11 @@ export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery, re
 		if (!parsed.regex) {
 			return { matches: false, score: 0 };
 		}
-		// Total-pass budget exhausted: skip the (potentially catastrophic) regex
-		// so the filtering loop returns promptly instead of freezing the TUI.
-		if (regexDeadline !== undefined && Date.now() > regexDeadline) {
+		if (regexDeadline === undefined) {
 			return { matches: false, score: 0 };
 		}
-		const searchText = text.length > REGEX_SEARCH_TEXT_CAP ? text.slice(0, REGEX_SEARCH_TEXT_CAP) : text;
-		const idx = searchText.search(parsed.regex);
-		if (idx < 0) return { matches: false, score: 0 };
+		const idx = searchRegexWithinBudget(parsed.regex, text, regexDeadline);
+		if (idx === null || idx < 0) return { matches: false, score: 0 };
 		return { matches: true, score: idx * 0.1 };
 	}
 

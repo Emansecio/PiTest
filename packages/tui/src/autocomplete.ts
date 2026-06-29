@@ -630,26 +630,28 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				return [];
 			}
 			const suggestions: AutocompleteItem[] = [];
+			const prefixLower = searchPrefix.toLowerCase();
+			const matched = entries.filter((entry) => entry.name.toLowerCase().startsWith(prefixLower));
 
-			for (const entry of entries) {
-				if (!entry.name.toLowerCase().startsWith(searchPrefix.toLowerCase())) {
-					continue;
-				}
-
-				// Check if entry is a directory (or a symlink pointing to a directory)
-				let isDirectory = entry.isDirectory();
-				if (!isDirectory && entry.isSymbolicLink()) {
-					try {
-						const fullPath = join(searchDir, entry.name);
-						isDirectory = (await stat(fullPath)).isDirectory();
-					} catch {
-						// Broken symlink or permission error - treat as file
+			const resolved = await Promise.all(
+				matched.map(async (entry) => {
+					let isDirectory = entry.isDirectory();
+					if (!isDirectory && entry.isSymbolicLink()) {
+						try {
+							const fullPath = join(searchDir, entry.name);
+							isDirectory = (await stat(fullPath)).isDirectory();
+						} catch {
+							// Broken symlink or permission error - treat as file
+						}
 					}
-				}
-				if (signal?.aborted) {
-					return [];
-				}
+					return { entry, isDirectory };
+				}),
+			);
+			if (signal?.aborted) {
+				return [];
+			}
 
+			for (const { entry, isDirectory } of resolved) {
 				let relativePath: string;
 				const name = entry.name;
 				const displayPrefix = rawPrefix;

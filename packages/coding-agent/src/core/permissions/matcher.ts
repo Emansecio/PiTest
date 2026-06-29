@@ -11,10 +11,12 @@
  */
 
 import { isAbsolute, resolve } from "node:path";
+import { LruMap } from "../lru-map.ts";
 import { createRegexTestDeadline, testRegexWithinBudget } from "../regex-budget.ts";
 
-const globRegExpCache = new Map<string, RegExp>();
-const cmdRegExpCache = new Map<string, RegExp>();
+const REGEXP_CACHE_CAP = 256;
+const globRegExpCache = new LruMap<string, RegExp>(REGEXP_CACHE_CAP);
+const cmdRegExpCache = new LruMap<string, RegExp>(REGEXP_CACHE_CAP);
 
 function normalizePathForMatch(path: string): string {
 	return path.replace(/\\/g, "/");

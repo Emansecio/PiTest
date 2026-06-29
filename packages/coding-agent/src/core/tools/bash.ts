@@ -19,6 +19,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
+import { isVerificationJobCommand } from "../verification/pending-checks.ts";
 import { summarizeTestRun } from "../verification/test-summary.ts";
 import { applyKeyAliases } from "./argument-prep.js";
 import { classifyBashCommand } from "./bash-activity.js";
@@ -1029,7 +1030,9 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 						// The agent tool consumes `promotedJobId` (surfaces the handle in the
 						// returned message), so it opts IN to auto-backgrounding. The user `!`
 						// path (bash-executor) does not read it and therefore leaves it OFF.
-						autoBackground: true,
+						// Verification commands (test/check/lint) must run to completion so pass/
+						// fail is known before handoff — never silently detach them.
+						autoBackground: !isVerificationJobCommand(command),
 						// Explicit `background: true` detaches right after startup instead of
 						// waiting out the auto-background threshold.
 						backgroundImmediate: background === true,

@@ -27,10 +27,28 @@ interface ScopedModelItem {
 	thinkingLevel?: string;
 }
 
-type ModelScope = "all" | "scoped";
+function modelKey(item: Pick<ModelItem, "provider" | "id">): string {
+	return `${item.provider}/${item.id}`;
+}
+
+/** Human-facing row label — prefer registry name when it adds information. */
+function modelRowLabel(model: Model<any>): string {
+	const name = model.name?.trim();
+	if (!name || name.toLowerCase() === model.id.toLowerCase()) return model.id;
+	return name;
+}
+
+function modelSearchText(item: ModelItem): string {
+	const name = item.model.name?.trim() ?? "";
+	return `${item.id} ${item.provider} ${name} ${item.provider}/${item.id}`;
+}
 
 /**
- * Component that renders a model selector with search
+ * Component that renders a model selector with search.
+ *
+ * When the session was started with `--models`, those entries form a pinned
+ * "cycle set" at the top (what Ctrl+P rotates through). The rest of the
+ * configured models follow in one searchable list — no all/scoped toggle.
  */
 export class ModelSelectorComponent extends Container implements Focusable {
 	private searchInput: Input;
@@ -46,7 +64,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 	private listContainer: Container;
 	private allModels: ModelItem[] = [];
-	private scopedModelItems: ModelItem[] = [];
+	private cycleModelItems: ModelItem[] = [];
+	private cycleKeySet = new Set<string>();
 	private activeModels: ModelItem[] = [];
 	private filteredModels: ModelItem[] = [];
 	private selectedIndex: number = 0;
@@ -58,9 +77,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private errorMessage?: string;
 	private tui: TUI;
 	private scopedModels: ReadonlyArray<ScopedModelItem>;
-	private scope: ModelScope = "all";
-	private scopeText?: Text;
-	private scopeHintText?: Text;
+	private headerHintText?: Text;
 
 	constructor(
 		tui: TUI,
@@ -79,7 +96,6 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.settingsManager = settingsManager;
 		this.modelRegistry = modelRegistry;
 		this.scopedModels = scopedModels;
-		this.scope = scopedModels.length > 0 ? "scoped" : "all";
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 
@@ -87,16 +103,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 
-		// Add hint about model filtering
-		if (scopedModels.length > 0) {
-			this.scopeText = new Text(this.getScopeText(), 0, 0);
-			this.addChild(this.scopeText);
-			this.scopeHintText = new Text(this.getScopeHintText(), 0, 0);
-			this.addChild(this.scopeHintText);
-		} else {
-			const hintText = "Only showing models from configured providers. Use /login to add providers.";
-			this.addChild(new Text(theme.fg("muted", hintText), 0, 0));
-		}
+		this.headerHintText = new Text(this.getHeaderHintText(), 0, 0);
+		this.addChild(this.headerHintText);
 		this.addChild(new Spacer(1));
 
 		// Create search input
@@ -135,6 +143,20 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		});
 	}
 
+	private getHeaderHintText(): string {
+		if (this.cycleModelItems.length > 0) {
+			const count = this.cycleModelItems.length;
+			const noun = count === 1 ? "model" : "models";
+			const cycleHint = keyHint("app.model.cycleForward", "cycles the set");
+			return (
+				`${theme.fg("accent", "●")} ${theme.bold("Cycle set")} ${theme.fg("dim", "—")} ` +
+				`${theme.fg("muted", `${count} ${noun}`)} ${theme.fg("dim", "·")} ${cycleHint}` +
+				`\n${theme.fg("muted", "Search below picks any configured model.")}`
+			);
+		}
+		return theme.fg("muted", "Only showing models from configured providers. Use /login to add providers.");
+	}
+
 	private async loadModels(): Promise<void> {
 		let models: ModelItem[];
 
@@ -157,10 +179,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			}));
 		} catch (error) {
 			this.allModels = [];
-			this.scopedModelItems = [];
+			this.cycleModelItems = [];
+			this.cycleKeySet = new Set();
 			this.activeModels = [];
 			this.filteredModels = [];
 			this.errorMessage = error instanceof Error ? error.message : String(error);
+			if (this.headerHintText) {
+				this.headerHintText.setText(this.getHeaderHintText());
+			}
 			return;
 		}
 
@@ -169,16 +195,22 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const refreshed = this.modelRegistry.find(scoped.model.provider, scoped.model.id);
 			return refreshed ? { ...scoped, model: refreshed } : scoped;
 		});
-		this.scopedModelItems = this.scopedModels.map((scoped) => ({
+		// Preserve --models order for the cycle set; append everything else sorted.
+		this.cycleModelItems = this.scopedModels.map((scoped) => ({
 			provider: scoped.model.provider,
 			id: scoped.model.id,
 			model: scoped.model,
 		}));
-		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
+		this.cycleKeySet = new Set(this.cycleModelItems.map(modelKey));
+		const otherModels = this.allModels.filter((item) => !this.cycleKeySet.has(modelKey(item)));
+		this.activeModels = [...this.cycleModelItems, ...otherModels];
 		this.filteredModels = this.activeModels;
 		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
 		this.selectedIndex =
 			currentIndex >= 0 ? currentIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+		if (this.headerHintText) {
+			this.headerHintText.setText(this.getHeaderHintText());
+		}
 	}
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
@@ -206,35 +238,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		return sorted;
 	}
 
-	private getScopeText(): string {
-		const allText = this.scope === "all" ? theme.fg("accent", "all") : theme.fg("muted", "all");
-		const enabledText = this.scope === "scoped" ? theme.fg("accent", "enabled") : theme.fg("muted", "enabled");
-		return `${theme.fg("muted", "Scope: ")}${allText}${theme.fg("muted", " | ")}${enabledText}`;
-	}
-
-	private getScopeHintText(): string {
-		return keyHint("tui.input.tab", "scope") + theme.fg("muted", " (all/enabled)");
-	}
-
-	private setScope(scope: ModelScope): void {
-		if (this.scope === scope) return;
-		this.scope = scope;
-		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
-		const currentIndex = this.activeModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
-		this.selectedIndex = currentIndex >= 0 ? currentIndex : 0;
-		this.filterModels(this.searchInput.getValue());
-		if (this.scopeText) {
-			this.scopeText.setText(this.getScopeText());
-		}
+	private isCycleModel(item: ModelItem): boolean {
+		return this.cycleKeySet.has(modelKey(item));
 	}
 
 	private filterModels(query: string): void {
 		this.filteredModels = query
-			? fuzzyFilter(
-					this.activeModels,
-					query,
-					({ id, provider }) => `${id} ${provider} ${provider}/${id} ${provider} ${id}`,
-				)
+			? fuzzyFilter(this.activeModels, query, (item) => modelSearchText(item))
 			: this.activeModels;
 		this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 		this.updateList();
@@ -255,30 +265,33 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const item = this.filteredModels[i];
 			if (!item) continue;
 
-			// Provider group header: render when the previous item in the *full*
-			// filtered list belongs to a different provider. Checking i-1 (not
-			// startIndex-1) means a header never appears mid-group when the window
-			// is scrolled into the middle of a block — only at real boundaries.
 			const prev = i > 0 ? this.filteredModels[i - 1] : undefined;
-			if (!prev || prev.provider !== item.provider) {
+			const inCycle = this.isCycleModel(item);
+			const prevInCycle = prev ? this.isCycleModel(prev) : false;
+
+			// Section headers: cycle set vs the rest of the catalog.
+			if (this.cycleModelItems.length > 0 && inCycle && !prevInCycle) {
+				this.listContainer.addChild(new Text(theme.fg("accent", "  ● Cycle set"), 0, 0));
+			}
+			if (this.cycleModelItems.length > 0 && !inCycle && prevInCycle) {
+				this.listContainer.addChild(new Text(theme.fg("dim", "  All models"), 0, 0));
+			}
+
+			// Provider group header: new provider or a section boundary (cycle ↔ all).
+			if (!prev || prev.provider !== item.provider || inCycle !== prevInCycle) {
 				this.listContainer.addChild(new Text(theme.fg("dim", `  ${item.provider}`), 0, 0));
 			}
 
 			const isSelected = i === this.selectedIndex;
 			const isCurrent = modelsAreEqual(this.currentModel, item.model);
+			const label = modelRowLabel(item.model);
+			const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
 
 			let line = "";
 			if (isSelected) {
-				const prefix = theme.fg("accent", "→ ");
-				const modelText = `${item.id}`;
-				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-				line = `${prefix + theme.fg("accent", modelText)} ${providerBadge}${checkmark}`;
+				line = `${theme.fg("accent", "→ ")}${theme.fg("accent", label)}${checkmark}`;
 			} else {
-				const modelText = `  ${item.id}`;
-				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-				line = `${modelText} ${providerBadge}${checkmark}`;
+				line = `  ${theme.fg("text", label)}${checkmark}`;
 			}
 
 			this.listContainer.addChild(new TruncatedText(line, 0, 0));
@@ -297,11 +310,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
 		}
 
-		// Footer: model name of the current selection (when a list is showing).
+		// Footer: technical id for the selection (provider header + row label stay human).
 		if (this.filteredModels.length > 0) {
 			const selected = this.filteredModels[this.selectedIndex];
 			this.listContainer.addChild(new Spacer(1));
-			this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
+			this.listContainer.addChild(new Text(theme.fg("dim", `  ${modelKey(selected)}`), 0, 0));
 		}
 
 		// Error banner (models.json failed to parse, but built-ins still loaded).
@@ -317,16 +330,6 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
-		if (kb.matches(keyData, "tui.input.tab")) {
-			if (this.scopedModelItems.length > 0) {
-				const nextScope: ModelScope = this.scope === "all" ? "scoped" : "all";
-				this.setScope(nextScope);
-				if (this.scopeHintText) {
-					this.scopeHintText.setText(this.getScopeHintText());
-				}
-			}
-			return;
-		}
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			if (this.filteredModels.length === 0) return;
@@ -350,7 +353,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		else if (kb.matches(keyData, "tui.select.cancel")) {
 			this.onCancelCallback();
 		}
-		// Pass everything else to search input
+		// Pass everything else to search input (Tab types into search — no scope toggle)
 		else {
 			this.searchInput.handleInput(keyData);
 			this.filterModels(this.searchInput.getValue());

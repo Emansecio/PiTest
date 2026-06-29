@@ -173,31 +173,42 @@ function invalidateScanCache(cwd: string): void {
 	scanCache.delete(cwd);
 }
 
+const SCAN_CONCURRENCY = 8;
+
+async function scanConflictFile(root: string, file: string): Promise<FileConflicts | null> {
+	let s: Stats;
+	try {
+		s = await stat(file);
+	} catch {
+		return null;
+	}
+	// Skip enormous files for safety.
+	if (s.size > 8 * 1024 * 1024) return null;
+	let buf: Buffer;
+	try {
+		buf = await readFile(file);
+	} catch {
+		return null;
+	}
+	if (looksBinary(buf)) return null;
+	const text = buf.toString("utf-8");
+	if (!text.includes("<<<<<<<")) return null;
+	const relPath = relative(root, file).split(sep).join("/");
+	return parseFileConflicts(file, relPath, text) ?? null;
+}
+
 async function scanConflictsRaw(cwd: string): Promise<FileConflicts[]> {
 	const root = cwd;
 	const files = await listFilesRecursively(root);
 	const results: FileConflicts[] = [];
-	for (const file of files) {
-		let s: Stats;
-		try {
-			s = await stat(file);
-		} catch {
-			continue;
+	for (let base = 0; base < files.length; base += SCAN_CONCURRENCY) {
+		const batch = files.slice(base, base + SCAN_CONCURRENCY);
+		const settled = await Promise.allSettled(batch.map((file) => scanConflictFile(root, file)));
+		for (const outcome of settled) {
+			if (outcome.status === "fulfilled" && outcome.value) {
+				results.push(outcome.value);
+			}
 		}
-		// Skip enormous files for safety.
-		if (s.size > 8 * 1024 * 1024) continue;
-		let buf: Buffer;
-		try {
-			buf = await readFile(file);
-		} catch {
-			continue;
-		}
-		if (looksBinary(buf)) continue;
-		const text = buf.toString("utf-8");
-		if (!text.includes("<<<<<<<")) continue;
-		const relPath = relative(root, file).split(sep).join("/");
-		const parsed = parseFileConflicts(file, relPath, text);
-		if (parsed) results.push(parsed);
 	}
 	// Stable order: by relative path so indices are deterministic across runs.
 	results.sort((a, b) => a.relPath.localeCompare(b.relPath));

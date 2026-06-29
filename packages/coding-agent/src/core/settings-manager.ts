@@ -4,6 +4,7 @@ import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { writeFileAtomicSync } from "../utils/atomic-write.ts";
+import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { expandTilde } from "../utils/paths.ts";
 import type { EngineeringStyle } from "./engineering-styles.ts";
 import type { HooksSettings } from "./hooks/types.ts";
@@ -89,6 +90,12 @@ export interface VerificationSettings {
 	visual?: boolean; // default: true — nudge to `preview` when a rendered artifact changed but was never viewed
 }
 
+export interface PendingChecksSettings {
+	enabled?: boolean;
+	maxWaitMs?: number;
+	maxFixAttempts?: number;
+}
+
 export interface TerminalSettings {
 	showImages?: boolean; // default: true (only relevant if terminal supports images)
 	imageWidthCells?: number; // default: 60 (preferred inline image width in terminal cells)
@@ -146,6 +153,24 @@ export interface TodoCadenceReminderSettings {
 	cooldownMs?: number; // default: 30000 — minimum gap between reminders
 }
 
+/**
+ * Live overthink guard — interrupts a stream when one thinking block exceeds a
+ * token estimate without any tool call. Complements the context thinking cap (K4).
+ */
+export interface OverthinkGuardSettings {
+	enabled?: boolean; // default: true (opt out with enabled: false)
+	/** Override threshold for all models. When unset, weak/strong defaults apply. */
+	tokenThreshold?: number;
+	/** Default for open/weak providers. Default: 1000 estimated tokens. */
+	weakTokenThreshold?: number;
+	/** Default for native frontier providers. Default: 2500 estimated tokens. */
+	strongTokenThreshold?: number;
+	/** Injections per turn before bailing. Default: 2. */
+	maxRetriesPerTurn?: number;
+	/** When unset, weak/open providers watch text_delta; frontier providers do not. */
+	watchTextDelta?: boolean;
+}
+
 export interface ToolFeedbackSettings {
 	errorReflection?: ErrorReflectionSettings;
 	doomLoopReminder?: DoomLoopReminderSettings;
@@ -153,6 +178,7 @@ export interface ToolFeedbackSettings {
 	crossErrorReminder?: CrossErrorReminderSettings;
 	failureBudget?: FailureBudgetSettings;
 	todoCadenceReminder?: TodoCadenceReminderSettings;
+	overthinkGuard?: OverthinkGuardSettings;
 }
 
 export interface FrequentFilesSettings {
@@ -224,6 +250,20 @@ export interface ToolDiscoverySettings {
 	enabled?: boolean;
 	alwaysActive?: string[];
 	hiddenByDefault?: string[];
+}
+
+/**
+ * Skill source discovery opt-outs persisted in settings.json. Equivalent to
+ * `PIT_NO_CLAUDE_CODE_SKILLS` / `PIT_NO_LEGACY_SKILLS` env flags when true.
+ */
+export interface SkillDiscoverySettings {
+	noClaudeCode?: boolean;
+	noLegacy?: boolean;
+}
+
+export interface ResolvedSkillDiscoverySettings {
+	noClaudeCode: boolean;
+	noLegacy: boolean;
 }
 
 export interface ResolvedToolDiscoverySettings {
@@ -384,6 +424,15 @@ export interface ResolvedChromeDevtoolsSettings {
 	userDataDir: string;
 }
 
+export interface ResolvedOverthinkGuardSettings {
+	enabled: boolean;
+	tokenThreshold?: number;
+	weakTokenThreshold: number;
+	strongTokenThreshold: number;
+	maxRetriesPerTurn: number;
+	watchTextDelta?: boolean;
+}
+
 export interface ResolvedToolFeedbackSettings {
 	errorReflection: { enabled: boolean };
 	doomLoopReminder: { enabled: boolean; threshold: number; cooldownMs: number };
@@ -391,6 +440,7 @@ export interface ResolvedToolFeedbackSettings {
 	crossErrorReminder: { enabled: boolean; threshold: number; cooldownMs: number };
 	failureBudget: { enabled: boolean; maxPerTurn: number };
 	todoCadenceReminder: { enabled: boolean; threshold: number; cooldownMs: number };
+	overthinkGuard: ResolvedOverthinkGuardSettings;
 }
 
 export interface WarningSettings {
@@ -430,6 +480,7 @@ export interface Settings {
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	verification?: VerificationSettings;
+	pendingChecks?: PendingChecksSettings;
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
@@ -485,6 +536,8 @@ export interface Settings {
 	 * on-demand via the `search_tool_bm25` tool. Opt out with `toolDiscovery.enabled: false`.
 	 */
 	toolDiscovery?: ToolDiscoverySettings;
+	/** Opt out of duplicate skill trees (~/.claude, legacy .codex/.gemini dirs). */
+	skillDiscovery?: SkillDiscoverySettings;
 	/**
 	 * Web search tool. On by default; the `web_search` tool is registered for
 	 * coding bundles and routes through the configured provider chain
@@ -1284,6 +1337,11 @@ export class SettingsManager {
 		const tc = tf?.todoCadenceReminder;
 		const tcThreshold = posInt(tc?.threshold, 3);
 		const tcCooldownMs = nonNegInt(tc?.cooldownMs, 30000);
+		const og = tf?.overthinkGuard;
+		const ogTokenThreshold = og?.tokenThreshold !== undefined ? posInt(og.tokenThreshold, 1000) : undefined;
+		const ogWeak = posInt(og?.weakTokenThreshold, 1000);
+		const ogStrong = posInt(og?.strongTokenThreshold, 2500);
+		const ogMaxRetries = posInt(og?.maxRetriesPerTurn, 2);
 		return {
 			errorReflection: { enabled: tf?.errorReflection?.enabled === true },
 			doomLoopReminder: {
@@ -1310,6 +1368,14 @@ export class SettingsManager {
 				enabled: tc?.enabled !== false,
 				threshold: tcThreshold,
 				cooldownMs: tcCooldownMs,
+			},
+			overthinkGuard: {
+				enabled: og?.enabled !== false,
+				tokenThreshold: ogTokenThreshold,
+				weakTokenThreshold: ogWeak,
+				strongTokenThreshold: ogStrong,
+				maxRetriesPerTurn: ogMaxRetries,
+				watchTextDelta: og?.watchTextDelta,
 			},
 		};
 	}
@@ -1357,6 +1423,16 @@ export class SettingsManager {
 			maxAttempts: Math.max(1, v?.maxAttempts ?? 2),
 			timeoutMs: Math.max(1000, v?.timeoutMs ?? 180_000),
 			visual: v?.visual ?? true,
+		};
+	}
+
+	getPendingChecksSettings(): { enabled: boolean; maxWaitMs: number; maxFixAttempts: number } {
+		const p = this.settings.pendingChecks;
+		const envOff = process.env.PIT_NO_PENDING_CHECKS === "1";
+		return {
+			enabled: envOff ? false : (p?.enabled ?? true),
+			maxWaitMs: Math.max(1000, p?.maxWaitMs ?? 900_000),
+			maxFixAttempts: Math.max(0, p?.maxFixAttempts ?? 2),
 		};
 	}
 
@@ -1770,6 +1846,28 @@ export class SettingsManager {
 			alwaysActive: Array.isArray(raw?.alwaysActive) ? [...raw.alwaysActive] : [],
 			hiddenByDefault: Array.isArray(raw?.hiddenByDefault) ? [...raw.hiddenByDefault] : [],
 		};
+	}
+
+	/**
+	 * Resolved skill discovery opt-outs. Settings flags OR canonical env kill
+	 * switches (`PIT_NO_CLAUDE_CODE_SKILLS`, `PIT_NO_LEGACY_SKILLS`).
+	 */
+	getSkillDiscoverySettings(): ResolvedSkillDiscoverySettings {
+		const raw = this.settings.skillDiscovery;
+		const noClaudeCode =
+			raw?.noClaudeCode === true ||
+			isTruthyEnvFlag(process.env.PIT_NO_CLAUDE_CODE_SKILLS) ||
+			isTruthyEnvFlag(process.env.PIT_DISABLE_CLAUDE_CODE_SKILLS);
+		const noLegacy = raw?.noLegacy === true || isTruthyEnvFlag(process.env.PIT_NO_LEGACY_SKILLS);
+		return { noClaudeCode, noLegacy };
+	}
+
+	setSkillDiscoveryNoClaudeCode(enabled: boolean): void {
+		this.setNested("skillDiscovery", "noClaudeCode", enabled);
+	}
+
+	setSkillDiscoveryNoLegacy(enabled: boolean): void {
+		this.setNested("skillDiscovery", "noLegacy", enabled);
 	}
 
 	/**

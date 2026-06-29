@@ -7,6 +7,7 @@ import {
 	Text,
 	type TUI,
 	truncateToWidth,
+	VirtualizedContainer,
 	visibleWidth,
 } from "@pit/tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
@@ -20,6 +21,7 @@ import { ReadingColumn } from "./reading-column.ts";
 // Period of the "Thinking…" breathing oscillation (dim ⇄ normal) while the model
 // is mid-thought with no answer yet.
 const THINKING_BREATH_MS = 1800;
+const THINKING_BREATH_BUCKETS = 8;
 
 // Streaming smoothing (on by default): instead of painting each provider burst
 // whole, the trailing block's text is revealed at a steady rate off the shared
@@ -78,6 +80,41 @@ interface BlockComponentCacheEntry {
 // per cluster (never splitting a combining mark or emoji ZWJ sequence).
 const FADE_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
+/** Memoized "Thinking…" label: stable array identity per breath bucket + width. */
+class ThinkingLabelComponent {
+	private cachedBucket = -1;
+	private cachedWidth = -1;
+	private cachedLines: string[] | null = null;
+	private readonly getLabel: () => string;
+	private readonly getBreathT: () => number;
+
+	constructor(getLabel: () => string, getBreathT: () => number) {
+		this.getLabel = getLabel;
+		this.getBreathT = getBreathT;
+	}
+
+	render(width: number): string[] {
+		const breathT = this.getBreathT();
+		const bucket = Math.floor(breathT * THINKING_BREATH_BUCKETS);
+		if (bucket === this.cachedBucket && width === this.cachedWidth && this.cachedLines !== null) {
+			return this.cachedLines;
+		}
+		const t = breathT < 0.15 ? 0.15 : breathT;
+		const c = interpolateFg("dim", "thinkingText", t) ?? ((text: string) => theme.fg("thinkingText", text));
+		const label = this.getLabel();
+		this.cachedBucket = bucket;
+		this.cachedWidth = width;
+		this.cachedLines = [truncateToWidth(` ${theme.italic(c(label))}`, Math.max(1, width), "…")];
+		return this.cachedLines;
+	}
+
+	invalidate(): void {
+		this.cachedBucket = -1;
+		this.cachedWidth = -1;
+		this.cachedLines = null;
+	}
+}
+
 /**
  * Recolor the trailing text of a rendered line as a bright→dim gradient, landing
  * on the real text edge (right padding is preserved untouched) and keeping the
@@ -112,7 +149,7 @@ export function fadeLineTail(line: string): string {
  * Component that renders a complete assistant message
  */
 export class AssistantMessageComponent extends Container {
-	private contentContainer: Container;
+	private contentContainer: VirtualizedContainer;
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
 	private hiddenThinkingLabel: string;
@@ -162,6 +199,15 @@ export class AssistantMessageComponent extends Container {
 	private breathUnsub: (() => void) | null = null;
 	private breathStart = 0;
 	private breathT = 0;
+	private breathBucket = -1;
+	private readonly thinkingLabel = new ThinkingLabelComponent(
+		() => this.hiddenThinkingLabel,
+		() => this.breathT,
+	);
+	// Fingerprint of the last built child-tree layout. When a stream delta only
+	// grows text inside existing blocks, patchContent() updates markdown in place
+	// instead of contentContainer.clear() + full rebuild.
+	private lastStructureKey = "";
 
 	constructor(
 		message?: AssistantMessage,
@@ -182,8 +228,8 @@ export class AssistantMessageComponent extends Container {
 		// >0 caps prose to that many columns; 0 / non-positive = full width (no cap).
 		this.readingColumns = readingColumns > 0 ? readingColumns : 0;
 
-		// Container for text/thinking content
-		this.contentContainer = new Container();
+		// Virtualized container: settled blocks above the tail skip re-render each frame.
+		this.contentContainer = new VirtualizedContainer();
 		this.addChild(this.contentContainer);
 
 		if (message) {
@@ -207,6 +253,7 @@ export class AssistantMessageComponent extends Container {
 
 	setHiddenThinkingLabel(label: string): void {
 		this.hiddenThinkingLabel = label;
+		this.thinkingLabel.invalidate();
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
@@ -305,7 +352,9 @@ export class AssistantMessageComponent extends Container {
 	updateContent(message: AssistantMessage): void {
 		this.lastMessage = message;
 		this.syncReveal(message);
-		this.rebuildContent();
+		if (!this.patchContentIfPossible()) {
+			this.rebuildContent();
+		}
 	}
 
 	/**
@@ -314,6 +363,84 @@ export class AssistantMessageComponent extends Container {
 	 * `revealedChars`). Pure with respect to the animation ticker — it never
 	 * subscribes or unsubscribes, so the ticker can call it every frame safely.
 	 */
+	/** Layout fingerprint: which blocks/spacers/footer children exist. Text growth
+	 * inside an unchanged layout skips clear()+rebuild via patchContent(). */
+	private computeStructureKey(message: AssistantMessage): string {
+		const parts: string[] = [
+			`n:${message.content.length}`,
+			`ht:${this.hideThinkingBlock ? 1 : 0}`,
+			`nar:${this.isNarration ? 1 : 0}`,
+			`sr:${message.stopReason ?? ""}`,
+		];
+		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
+		parts.push(`tc:${hasToolCalls ? 1 : 0}`);
+
+		let lastVisibleIndex = -1;
+		for (let i = 0; i < message.content.length; i++) {
+			const c = message.content[i];
+			if ((c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim())) {
+				lastVisibleIndex = i;
+			}
+		}
+		parts.push(`hv:${lastVisibleIndex >= 0 ? 1 : 0}`);
+
+		for (let i = 0; i < message.content.length; i++) {
+			const c = message.content[i];
+			if (c.type === "text" && c.text.trim()) {
+				parts.push(`${i}:text`);
+			} else if (c.type === "thinking" && c.thinking.trim()) {
+				if (!this.hideThinkingBlock) {
+					const hasAfter = i < lastVisibleIndex;
+					parts.push(`${i}:thinking${hasAfter ? ":sp" : ""}`);
+				} else {
+					const live = i === lastVisibleIndex && !!this.ui && !this.isDeliverable && !message.stopReason;
+					if (live) parts.push(`${i}:think-label`);
+				}
+			}
+		}
+
+		if (!hasToolCalls) {
+			if (message.stopReason === "aborted") parts.push("foot:abort");
+			else if (message.stopReason === "error") parts.push("foot:error");
+		}
+		return parts.join("|");
+	}
+
+	/** Update visible markdown blocks in place when the child-tree layout is unchanged. */
+	private patchContentIfPossible(): boolean {
+		const message = this.lastMessage;
+		if (!message || this.contentContainer.children.length === 0) return false;
+
+		const structureKey = this.computeStructureKey(message);
+		if (structureKey !== this.lastStructureKey) return false;
+
+		for (let i = 0; i < message.content.length; i++) {
+			const content = message.content[i];
+			if (content.type === "text" && content.text.trim()) {
+				const text = this.clampReveal(i, content.text.trim());
+				const entry = this.blockComponents[i];
+				if (!entry || entry.kind !== "text") return false;
+				entry.markdown.setText(text);
+				this.contentContainer.markChildStale(entry.component);
+			} else if (content.type === "thinking" && content.thinking.trim() && !this.hideThinkingBlock) {
+				const thinking = this.clampReveal(i, content.thinking.trim());
+				const entry = this.blockComponents[i];
+				if (!entry || entry.kind !== "thinking") return false;
+				entry.markdown.setText(thinking);
+				this.contentContainer.markChildStale(entry.component);
+			}
+		}
+
+		if (this.blockComponents.length > message.content.length) {
+			this.blockComponents.length = message.content.length;
+		}
+
+		this.hasToolCalls = message.content.some((c) => c.type === "toolCall");
+		this.decorateSource = null;
+		this.decorated = null;
+		return true;
+	}
+
 	private rebuildContent(): void {
 		const message = this.lastMessage;
 		if (!message) return;
@@ -387,24 +514,7 @@ export class AssistantMessageComponent extends Container {
 					if (live) {
 						sawLiveThinking = true;
 						this.startThinkingBreath();
-						const label = this.hiddenThinkingLabel;
-						this.contentContainer.addChild({
-							render: (width: number) => {
-								// Floor the dark pole at the "dim" text token (#666) and clamp t's
-								// minimum so the breath's vale keeps ~3.0+ contrast on the dark
-								// bg instead of sinking into the decorative-border darkGray.
-								const breathT = this.breathT < 0.15 ? 0.15 : this.breathT;
-								const c =
-									interpolateFg("dim", "thinkingText", breathT) ??
-									((t: string) => theme.fg("thinkingText", t));
-								// The label is extension-settable and unbounded; a line wider
-								// than the terminal crashes the frame. Clamp to the available
-								// width (label sits flush at col 0, no leading margin beyond
-								// the single space), with an ellipsis so truncation is visible.
-								return [truncateToWidth(` ${theme.italic(c(label))}`, Math.max(1, width), "…")];
-							},
-							invalidate: () => {},
-						});
+						this.contentContainer.addChild(this.thinkingLabel);
 					}
 					// Settled thinking blocks render nothing (see above); the footer working
 					// loader is the only live "Thinking…". No spacer either, so following
@@ -474,6 +584,8 @@ export class AssistantMessageComponent extends Container {
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
 			}
 		}
+
+		this.lastStructureKey = this.computeStructureKey(message);
 	}
 
 	/** Clamp a block's text to the reveal cursor when it is the block currently
@@ -590,10 +702,40 @@ export class AssistantMessageComponent extends Container {
 		// over a few frames instead of snapping; MIN keeps a slow drip moving.
 		const step = this.computeRevealStep(backlog, this.revealFrameCount(now));
 		this.revealedChars = Math.min(target, this.revealedChars + step);
-		this.rebuildContent();
+		if (!this.updateRevealTrailingBlock()) {
+			this.rebuildContent();
+		}
 		if (this.revealedChars >= target) {
 			this.pauseReveal();
 		}
+		return true;
+	}
+
+	/** Update only the trailing reveal block without clearing the content tree. */
+	private updateRevealTrailingBlock(): boolean {
+		const message = this.lastMessage;
+		if (!message || this.revealIndex < 0) return false;
+
+		const content = message.content[this.revealIndex];
+		if (!content) return false;
+
+		const entry = this.blockComponents[this.revealIndex];
+		if (!entry) return false;
+
+		let raw = "";
+		if (content.type === "text") {
+			raw = content.text.trim();
+		} else if (content.type === "thinking") {
+			raw = content.thinking.trim();
+		} else {
+			return false;
+		}
+
+		const text = this.clampReveal(this.revealIndex, raw);
+		entry.markdown.setText(text);
+		this.contentContainer.markChildStale(entry.component);
+		this.decorateSource = null;
+		this.decorated = null;
 		return true;
 	}
 
@@ -659,9 +801,15 @@ export class AssistantMessageComponent extends Container {
 			return;
 		}
 		this.breathStart = performance.now();
+		this.breathBucket = -1;
 		this.breathUnsub = this.ui.addAnimationCallback((now: number): boolean => {
 			const phase = ((now - this.breathStart) % THINKING_BREATH_MS) / THINKING_BREATH_MS;
 			this.breathT = (1 - Math.cos(phase * 2 * Math.PI)) / 2; // smooth 0→1→0
+			const bucket = Math.floor(this.breathT * THINKING_BREATH_BUCKETS);
+			if (bucket === this.breathBucket) {
+				return false;
+			}
+			this.breathBucket = bucket;
 			return true;
 		});
 	}

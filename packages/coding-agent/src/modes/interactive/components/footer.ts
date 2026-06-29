@@ -1,66 +1,9 @@
-import { basename, relative } from "node:path";
+import { getRuntimeDiagnostics } from "@pit/ai";
 import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
-import { sliceSafe } from "../../../utils/surrogate.ts";
-import { formatDisplayPath } from "../display-utils.ts";
+import { buildWorkspaceCwdLabels } from "../display-utils.ts";
 import { CONTEXT_USAGE_WARN_PERCENT, theme } from "../theme/theme.ts";
-
-/**
- * Hard cap on the rendered cwd label so a deep absolute path can never crowd out
- * the model name on the identity line. The mid-path ellipsis kicks in past this.
- */
-const MAX_PWD_WIDTH = 40;
-
-/**
- * Shorten a path by collapsing its MIDDLE, preserving the head (drive / leading
- * segments) and the tail (deepest dirs) — `C:\Users\…\interactive` reads far
- * better than a right-truncated `C:\Users\Use…`. Splits on both separators so it
- * works for Windows and POSIX paths; returns the input untouched when it already
- * fits or is too short to collapse meaningfully.
- */
-function ellipsizePathMiddle(p: string, maxWidth: number): string {
-	if (visibleWidth(p) <= maxWidth) return p;
-	const segments = p.split(/[\\/]+/).filter((s) => s.length > 0);
-	if (segments.length <= 2) {
-		// No interior segment to drop — fall back to a tail-preserving cut.
-		// sliceSafe (not raw .slice) so a cut landing inside a surrogate pair
-		// snaps off the boundary instead of emitting a lone surrogate / mojibake;
-		// byte-identical to .slice for ASCII paths (the common case).
-		return `…${sliceSafe(p, p.length - (maxWidth - 1))}`;
-	}
-	const sep = p.includes("\\") ? "\\" : "/";
-	const head = segments[0]!;
-	let tailCount = 1;
-	let candidate = `${head}${sep}…${sep}${segments.slice(segments.length - tailCount).join(sep)}`;
-	// Grow the tail (deepest dirs are the most useful) until adding one more would
-	// blow the budget — keeps as much context as fits without exceeding maxWidth.
-	while (tailCount + 1 < segments.length) {
-		const next = `${head}${sep}…${sep}${segments.slice(segments.length - (tailCount + 1)).join(sep)}`;
-		if (visibleWidth(next) > maxWidth) break;
-		candidate = next;
-		tailCount += 1;
-	}
-	return candidate;
-}
-
-/**
- * Compact a cwd for the identity line. Prefers a path RELATIVE to the git repo
- * root (`coding-agent` instead of the full absolute path), labelling the repo by
- * its basename so the project stays identifiable. Outside a repo, falls back to
- * the home-relative form with a mid-path ellipsis so both ends survive.
- */
-function compactCwd(cwd: string, repoDir: string | null): string {
-	if (repoDir) {
-		const rel = relative(repoDir, cwd);
-		if (rel === "") return basename(repoDir);
-		if (!rel.startsWith("..") && rel !== "." && !/^[A-Za-z]:/.test(rel)) {
-			const normalized = rel.split(/[\\/]+/).join("/");
-			return `${basename(repoDir)}/${normalized}`;
-		}
-	}
-	return ellipsizePathMiddle(formatDisplayPath(cwd), MAX_PWD_WIDTH);
-}
 
 /**
  * Sanitize text for display in a single-line status.
@@ -122,6 +65,16 @@ function formatContextPercent(percent: number): string {
 	return `${rounded}%`;
 }
 
+/** Compact context-fill gauge for the footer metrics line (approximate; percent stays exact). */
+const FOOTER_CTX_BAR_WIDTH = 6;
+
+function renderFooterContextBar(percent: number, colorize: (text: string) => string): string {
+	const clamped = Math.max(0, Math.min(100, percent));
+	const filled = clamped > 0 ? Math.max(1, Math.round((clamped / 100) * FOOTER_CTX_BAR_WIDTH)) : 0;
+	const empty = FOOTER_CTX_BAR_WIDTH - filled;
+	return `${colorize("█".repeat(filled))}${theme.fg("dim", "░".repeat(empty))}`;
+}
+
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 const KNOWN_THINKING_LEVELS: ReadonlySet<ThinkingLevel> = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
@@ -157,6 +110,8 @@ export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
+	/** Launcher cwd — compared against session cwd for shell/session divergence. */
+	private launchCwd: string;
 	private statsCacheLen = 0;
 	private statsCacheTotals: CumulativeTotals = {
 		input: 0,
@@ -165,20 +120,31 @@ export class FooterComponent implements Component {
 		cacheWrite: 0,
 		cost: 0,
 	};
-	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
+	private fusionLiveActive = false;
+	private renderCacheKey = "";
+	private renderCacheLines: string[] | null = null;
+	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider, launchCwd?: string) {
 		this.session = session;
 		this.footerData = footerData;
+		this.launchCwd = launchCwd ?? session.sessionManager.getCwd();
 	}
 
 	setSession(session: AgentSession): void {
 		if (this.session !== session) {
 			this.resetStatsCache();
+			this.renderCacheLines = null;
 		}
 		this.session = session;
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
 		this.autoCompactEnabled = enabled;
+	}
+
+	setFusionLiveActive(active: boolean): void {
+		if (this.fusionLiveActive === active) return;
+		this.fusionLiveActive = active;
+		this.renderCacheLines = null;
 	}
 
 	/**
@@ -188,6 +154,7 @@ export class FooterComponent implements Component {
 	 */
 	invalidate(): void {
 		this.resetStatsCache();
+		this.renderCacheLines = null;
 	}
 
 	/**
@@ -224,6 +191,10 @@ export class FooterComponent implements Component {
 		return this.statsCacheTotals;
 	}
 
+	private getOverthinkGuardCount(): number {
+		return getRuntimeDiagnostics().counters["stream.overthink-guard"]?.count ?? 0;
+	}
+
 	private getPermissionMode(): string | null {
 		// Coupled to the "permissions: <mode>" status string set by
 		// permissions-extension.ts; a format change there silently drops the mode.
@@ -250,6 +221,7 @@ export class FooterComponent implements Component {
 	 * and composeLeftRight width-bounds the line, so no clipping math here.
 	 */
 	private getFusionSegment(): string | null {
+		if (this.fusionLiveActive) return null;
 		if (this.session.orchestration !== "fusion") return null;
 		const panel = this.session.settingsManager.getFusionSettings().panel;
 		if (panel.length === 0) return "fusion: (no panel — /fusion)";
@@ -257,7 +229,58 @@ export class FooterComponent implements Component {
 		return `fusion: ${collapseAdjacent(labels)}`;
 	}
 
+	private buildRenderCacheKey(width: number): string {
+		const state = this.session.state;
+		const contextUsage = this.session.getContextUsage();
+		const entries = this.session.sessionManager.getEntries();
+		const goalStatus = this.session.goalStatusLine() ?? "";
+		const mode = this.getPermissionMode() ?? "";
+		const extensionStatuses = Array.from(this.footerData.getExtensionStatuses().entries())
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([k, v]) => `${k}:${v}`)
+			.join(";");
+		const tokens = contextUsage?.tokens ?? 0;
+		const percent = contextUsage?.percent ?? -1;
+		const wireTokens = contextUsage?.wireTokens ?? tokens;
+		const estimated = contextUsage?.estimated ? 1 : 0;
+		const modelId = state.model?.id ?? "";
+		const thinking = state.thinkingLevel;
+		const branch = this.footerData.getGitBranch() ?? "";
+		const cwd = this.session.sessionManager.getCwd();
+		const cwdLabels = buildWorkspaceCwdLabels(cwd, this.launchCwd, this.footerData.getRepoDir());
+		const sessionName = this.session.sessionManager.getSessionName() ?? "";
+		const overthinkGuardCount = this.getOverthinkGuardCount();
+		return [
+			width,
+			entries.length,
+			tokens,
+			wireTokens,
+			percent,
+			estimated,
+			goalStatus,
+			this.session.orchestration,
+			this.fusionLiveActive ? 1 : 0,
+			mode,
+			extensionStatuses,
+			modelId,
+			thinking,
+			branch,
+			cwd,
+			this.launchCwd,
+			cwdLabels.session,
+			cwdLabels.shellNote ?? "",
+			sessionName,
+			this.autoCompactEnabled ? 1 : 0,
+			overthinkGuardCount,
+		].join("|");
+	}
+
 	render(width: number): string[] {
+		const cacheKey = this.buildRenderCacheKey(width);
+		if (this.renderCacheLines !== null && cacheKey === this.renderCacheKey) {
+			return this.renderCacheLines;
+		}
+
 		const state = this.session.state;
 		const totals = this.getCumulativeTotals();
 
@@ -272,15 +295,17 @@ export class FooterComponent implements Component {
 		// without competing with the model name. The cwd is compacted (repo-relative
 		// when inside a git repo, mid-path ellipsis otherwise) so a deep absolute
 		// path never eats the model name on the right.
-		let pwd = compactCwd(this.session.sessionManager.getCwd(), this.footerData.getRepoDir());
+		const cwdLabels = buildWorkspaceCwdLabels(
+			this.session.sessionManager.getCwd(),
+			this.launchCwd,
+			this.footerData.getRepoDir(),
+		);
+		let pwd = cwdLabels.session;
 		const branch = this.footerData.getGitBranch();
 		if (branch) pwd = `${pwd} (${branch})`;
 		const sessionName = this.session.sessionManager.getSessionName();
 		if (sessionName) pwd = `${pwd} • ${sessionName}`;
-		// In the home dir with no project context (no branch, no session name) the
-		// label is a lone "~" that orients nothing and reads like a leftover
-		// glyph. Drop it — same rule the welcome box applies to its cwd row.
-		if (pwd === "~") pwd = "";
+		if (cwdLabels.shellNote) pwd = `${pwd} · ${cwdLabels.shellNote}`;
 
 		// Right: model • thinking-level — the model id is the single bright token
 		// of the line; the provider is secondary metadata (muted, no parens) and
@@ -316,12 +341,10 @@ export class FooterComponent implements Component {
 
 		// --- Metrics (line 2) ------------------------------------------------
 		// Context is the headline: flushed left, with COLOR carrying the state —
-		// `CTX 23% · 47k/200k`. The label is a stable dim field-name; the percent
-		// is the datum and escalates accent → warning → error as the window fills
-		// (no bar: a 5-cell meter can only lie next to a precise percent). A
-		// pristine session shows only the capacity (`CTX 1M`, dim) — three zeros
-		// say nothing. Usage (input/output, cost, auto-compact) trails dim on the
-		// right.
+		// `CTX ███░░░ 23% · 47k/200k`. The 6-cell bar is approximate; the percent
+		// beside it stays the exact datum and escalates accent → warning → error.
+		// A pristine session shows only the capacity (`CTX 200k`, dim) — three
+		// zeros say nothing. Usage (input/output, cost, auto-compact) trails dim.
 		const messageTokens = contextUsage?.tokens ?? 0;
 		const wireTokens = contextUsage?.wireTokens ?? messageTokens;
 		const wireDiverges = messageTokens > 0 && Math.abs(wireTokens - messageTokens) / messageTokens > 0.05;
@@ -336,6 +359,7 @@ export class FooterComponent implements Component {
 			ctxText = `${ctxLabel} ${theme.fg("dim", formatTokens(contextWindow))}`;
 		} else {
 			const percentLabel = ctxColorize(formatContextPercent(contextPercentValue));
+			const bar = renderFooterContextBar(contextPercentValue, ctxColorize);
 			// A `~` marks a structural ESTIMATE (right after compaction, before the next response
 			// confirms the exact size) so it never reads as an authoritative figure.
 			const est = contextUsage?.estimated ? "~" : "";
@@ -343,7 +367,7 @@ export class FooterComponent implements Component {
 			if (wireDiverges) {
 				counts += `${theme.fg("dim", " · ")}${theme.fg("muted", `msgs ${est}${formatTokens(messageTokens)}`)}`;
 			}
-			ctxText = `${ctxLabel} ${est ? theme.fg("dim", "~") : ""}${percentLabel} ${theme.fg("dim", "·")} ${counts}`;
+			ctxText = `${ctxLabel} ${bar} ${est ? theme.fg("dim", "~") : ""}${percentLabel} ${theme.fg("dim", "·")} ${counts}`;
 		}
 
 		// Group A — usage: `↑in ↓out` kept together on the right.
@@ -365,6 +389,10 @@ export class FooterComponent implements Component {
 		// The signal worth surfacing is the ABNORMAL state — when it's OFF the
 		// context can overflow without rescue — so flag only that, in warning.
 		if (!this.autoCompactEnabled) modeBits.push(theme.fg("warning", "no-compact"));
+		const overthinkGuardCount = this.getOverthinkGuardCount();
+		if (overthinkGuardCount > 0) {
+			modeBits.push(theme.fg("warning", `overthink ×${overthinkGuardCount}`));
+		}
 
 		// Goal status is ephemeral and actionable: render it bright (accent), not
 		// dim, so it stands out from the trailing usage metrics. Pre-colorized so it
@@ -431,6 +459,8 @@ export class FooterComponent implements Component {
 			lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "…")));
 		}
 
+		this.renderCacheKey = cacheKey;
+		this.renderCacheLines = lines;
 		return lines;
 	}
 }

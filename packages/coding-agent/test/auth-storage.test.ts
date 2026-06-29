@@ -242,7 +242,7 @@ describe("AuthStorage", () => {
 				expect(keyB).toBe("key-openai");
 			});
 
-			test("failed commands are cached (not retried)", async () => {
+			test("failed commands are not memoised (retried within TTL window)", async () => {
 				const counterFile = join(tempDir, "counter");
 				writeFileSync(counterFile, "0");
 
@@ -254,16 +254,14 @@ describe("AuthStorage", () => {
 
 				authStorage = AuthStorage.create(authJsonPath);
 
-				// Call multiple times - all should return undefined
 				const key1 = await authStorage.getApiKey("anthropic");
 				const key2 = await authStorage.getApiKey("anthropic");
 
 				expect(key1).toBeUndefined();
 				expect(key2).toBeUndefined();
 
-				// Command should have only run once despite failures
 				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
-				expect(count).toBe(1);
+				expect(count).toBe(2);
 			});
 
 			test("environment variables are not cached (changes are picked up)", async () => {

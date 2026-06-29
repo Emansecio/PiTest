@@ -8,7 +8,11 @@ import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, isUnderPath } from "../utils/paths.ts";
 import { truncateWithEllipsis } from "../utils/surrogate.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
+import { LruMap } from "./lru-map.ts";
 import { createMtimePrefixParseCache } from "./mtime-cache.ts";
+
+const SKILL_DIR_CACHE_CAP = 512;
+
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /** Max name length per spec */
@@ -55,7 +59,7 @@ function prefixIgnorePattern(line: string, prefix: string): string | null {
 // up independently by the file-level mtime cache in loadSkillFromFile, so the
 // walk still re-parses changed skill files. Returns null on stat/read failure
 // so callers fall through to their existing try/catch behavior.
-const dirEntriesCache = new Map<string, { mtimeMs: number; entries: Dirent<string>[] }>();
+const dirEntriesCache = new LruMap<string, { mtimeMs: number; entries: Dirent<string>[] }>(SKILL_DIR_CACHE_CAP);
 
 function readDirEntriesCached(dir: string): Dirent<string>[] {
 	const stat = statSync(dir);
@@ -66,7 +70,7 @@ function readDirEntriesCached(dir: string): Dirent<string>[] {
 	return entries;
 }
 
-const ignoreFileLinesCache = new Map<string, { mtimeMs: number; lines: string[] }>();
+const ignoreFileLinesCache = new LruMap<string, { mtimeMs: number; lines: string[] }>(SKILL_DIR_CACHE_CAP);
 
 function readIgnoreFileLines(ignorePath: string): string[] | null {
 	try {

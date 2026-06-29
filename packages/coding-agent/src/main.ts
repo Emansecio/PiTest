@@ -8,12 +8,11 @@
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@pit/ai";
-import { ProcessTerminal, setKeybindings, TUI } from "@pit/tui";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
-import { listModels } from "./cli/list-models.ts";
+
 import { APP_NAME, ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
 // Heavy mode-real-only graphs (agent-session-services pulls the full harness/SDK
 // graph, ~1s of module eval) are loaded lazily inside main()/helpers AFTER the
@@ -25,7 +24,7 @@ import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { ensureClaudeCodeVersionEnv } from "./core/claude-code-version.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
-import { KeybindingsManager } from "./core/keybindings.ts";
+
 import type { ModelRegistry } from "./core/model-registry.ts";
 import type { ModelRole, ScopedModel } from "./core/model-resolver.ts";
 import { flushRawStdout, restoreStdout, takeOverStdout, writeRawStdout } from "./core/output-guard.ts";
@@ -42,13 +41,31 @@ import { sweepStaleTempLogs } from "./core/temp-logs.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { handleMcpCommand } from "./mcp-cli.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
-import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.ts";
-import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isTruthyEnvFlag } from "./utils/env-flags.ts";
 import { isLocalPath } from "./utils/paths.ts";
 import { ensureWindowsUtf8Console } from "./utils/windows-console.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
+
+type ThemeModule = typeof import("./modes/interactive/theme/theme.ts");
+let themeModulePromise: Promise<ThemeModule> | undefined;
+
+function loadThemeModule(): Promise<ThemeModule> {
+	if (!themeModulePromise) {
+		themeModulePromise = import("./modes/interactive/theme/theme.ts");
+	}
+	return themeModulePromise;
+}
+
+async function initThemeLazy(themeName?: string, enableWatcher = false): Promise<void> {
+	const { initTheme } = await loadThemeModule();
+	initTheme(themeName, enableWatcher);
+}
+
+async function stopThemeWatcherLazy(): Promise<void> {
+	const { stopThemeWatcher } = await loadThemeModule();
+	stopThemeWatcher();
+}
 
 /**
  * Read all content from piped stdin.
@@ -298,7 +315,7 @@ async function createSessionManager(
 
 	if (parsed.resume) {
 		const { selectSession } = await import("./cli/session-picker.ts");
-		initTheme(settingsManager.getTheme(), true);
+		await initThemeLazy(settingsManager.getTheme(), true);
 		try {
 			const selectedPath = await selectSession(
 				(onProgress) => SessionManager.list(cwd, sessionDir, onProgress),
@@ -310,7 +327,7 @@ async function createSessionManager(
 			}
 			return SessionManager.open(selectedPath, sessionDir);
 		} finally {
-			stopThemeWatcher();
+			await stopThemeWatcherLazy();
 		}
 	}
 
@@ -475,7 +492,12 @@ async function promptForMissingSessionCwd(
 	issue: SessionCwdIssue,
 	settingsManager: SettingsManager,
 ): Promise<string | undefined> {
-	initTheme(settingsManager.getTheme());
+	const [{ ProcessTerminal, setKeybindings, TUI }, { ExtensionSelectorComponent }] = await Promise.all([
+		import("@pit/tui"),
+		import("./modes/interactive/components/extension-selector.ts"),
+	]);
+	await initThemeLazy(settingsManager.getTheme());
+	const { KeybindingsManager } = await import("./core/keybindings.ts");
 	setKeybindings(KeybindingsManager.create());
 
 	return new Promise((resolve) => {
@@ -770,6 +792,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (parsed.listModels !== undefined) {
+		const { listModels } = await import("./cli/list-models.ts");
 		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
 		await listModels(modelRegistry, searchPattern);
 		process.exit(0);
@@ -810,7 +833,9 @@ export async function main(args: string[], options?: MainOptions) {
 		stdinContent,
 	);
 	time("prepareInitialMessage");
-	initTheme(settingsManager.getTheme(), appMode === "interactive");
+	if (appMode === "interactive") {
+		await initThemeLazy(settingsManager.getTheme(), true);
+	}
 	time("initTheme");
 
 	// Show deprecation warnings in interactive mode
@@ -836,11 +861,12 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 
-	const { InteractiveMode, runPrintMode, runRpcMode } = await import("./modes/index.ts");
 	if (appMode === "rpc") {
+		const { runRpcMode } = await import("./modes/rpc/rpc-mode.ts");
 		printTimings();
 		await runRpcMode(runtime);
 	} else if (appMode === "interactive") {
+		const { InteractiveMode } = await import("./modes/interactive/interactive-mode.ts");
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,
 			modelFallbackMessage,
@@ -854,7 +880,7 @@ export async function main(args: string[], options?: MainOptions) {
 			time("interactiveMode.init");
 			printTimings();
 			interactiveMode.stop();
-			stopThemeWatcher();
+			await stopThemeWatcherLazy();
 			if (process.stdout.writableLength > 0) {
 				await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
 			}
@@ -873,6 +899,7 @@ export async function main(args: string[], options?: MainOptions) {
 			);
 			process.exit(1);
 		}
+		const { runPrintMode } = await import("./modes/print-mode.ts");
 		printTimings();
 		const exitCode = await runPrintMode(runtime, {
 			mode: toPrintOutputMode(appMode),
@@ -880,7 +907,7 @@ export async function main(args: string[], options?: MainOptions) {
 			initialMessage,
 			initialImages,
 		});
-		stopThemeWatcher();
+		await stopThemeWatcherLazy();
 		restoreStdout();
 		if (exitCode !== 0) {
 			process.exitCode = exitCode;

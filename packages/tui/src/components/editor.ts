@@ -258,6 +258,8 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 };
 
 const ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS = 20;
+const DEFAULT_AUTOCOMPLETE_DEBOUNCE_MS = 40;
+const HISTORY_SEARCH_DEBOUNCE_MS = 30;
 
 /**
  * Max time to wait for one autocomplete request (provider response) and for the
@@ -360,6 +362,17 @@ export class Editor implements Component, Focusable {
 	private wrapCache: Map<string, TextChunk[]> = new Map();
 	private wrapCacheWidth: number = -1;
 
+	// layoutText memo: skip word-wrap when the draft and cursor are unchanged
+	// (e.g. parent re-render on spinner tick while the editor draft is idle).
+	private layoutMemoWidth = -1;
+	private layoutMemoRevision = -1;
+	private layoutMemoCursorLine = -1;
+	private layoutMemoCursorCol = -1;
+	private layoutMemoLines: LayoutLine[] | null = null;
+	// Bumped on every buffer mutation so layout memo avoids lines.join("\n") on
+	// idle re-renders and uses O(line-count) fingerprinting instead of O(chars).
+	private bufferRevision = 0;
+
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
 
@@ -405,6 +418,7 @@ export class Editor implements Component, Focusable {
 	// until the user confirms a pick. null when not searching.
 	private historySearchList: SelectList | null = null;
 	private historySearchQuery: string = "";
+	private historySearchDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
 	// Preferred visual column for vertical cursor movement (sticky column)
 	private preferredVisualCol: number | null = null;
@@ -480,8 +494,32 @@ export class Editor implements Component, Focusable {
 
 	/** Drop the word-wrap memo (paste-validity changes alter segmentation). */
 	private invalidateWrapCache(): void {
+		this.bufferRevision++;
 		this.wrapCache.clear();
 		this.wrapCacheWidth = -1;
+	}
+
+	private touchBuffer(): void {
+		this.bufferRevision++;
+	}
+
+	private getLayoutLines(contentWidth: number): LayoutLine[] {
+		if (
+			this.layoutMemoLines &&
+			this.layoutMemoWidth === contentWidth &&
+			this.layoutMemoRevision === this.bufferRevision &&
+			this.layoutMemoCursorLine === this.state.cursorLine &&
+			this.layoutMemoCursorCol === this.state.cursorCol
+		) {
+			return this.layoutMemoLines;
+		}
+		const lines = this.layoutText(contentWidth);
+		this.layoutMemoWidth = contentWidth;
+		this.layoutMemoRevision = this.bufferRevision;
+		this.layoutMemoCursorLine = this.state.cursorLine;
+		this.layoutMemoCursorCol = this.state.cursorCol;
+		this.layoutMemoLines = lines;
+		return lines;
 	}
 
 	getPaddingX(): number {
@@ -582,6 +620,7 @@ export class Editor implements Component, Focusable {
 		// Reset scroll - render() will adjust to show cursor
 		this.scrollOffset = 0;
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -653,13 +692,13 @@ export class Editor implements Component, Focusable {
 		let layoutLines: LayoutLine[];
 		if (process.env.PIT_EDITOR_PERF) {
 			const t0 = performance.now();
-			layoutLines = this.layoutText(layoutWidth);
+			layoutLines = this.getLayoutLines(layoutWidth);
 			const dt = performance.now() - t0;
 			process.stderr.write(
 				`[editor-perf] layout ${dt.toFixed(3)}ms lines=${this.state.lines.length} w=${layoutWidth} cache=${this.wrapCache.size}\n`,
 			);
 		} else {
-			layoutLines = this.layoutText(layoutWidth);
+			layoutLines = this.getLayoutLines(layoutWidth);
 		}
 
 		// Calculate max visible lines: 30% of terminal height, minimum 5 lines
@@ -1003,6 +1042,7 @@ export class Editor implements Component, Focusable {
 					this.state.lines = result.lines;
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
+					this.touchBuffer();
 					this.cancelAutocomplete();
 					if (this.onChange) this.onChange(this.getText());
 				}
@@ -1024,6 +1064,7 @@ export class Editor implements Component, Focusable {
 					this.state.lines = result.lines;
 					this.state.cursorLine = result.cursorLine;
 					this.setCursorCol(result.cursorCol);
+					this.touchBuffer();
 
 					if (this.autocompletePrefix.startsWith("/")) {
 						this.cancelAutocomplete();
@@ -1418,6 +1459,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol((insertedLines[insertedLines.length - 1] || "").length);
 		}
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -1447,6 +1489,7 @@ export class Editor implements Component, Focusable {
 		this.state.lines[this.state.cursorLine] = before + char + after;
 		this.setCursorCol(this.state.cursorCol + char.length);
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -1576,6 +1619,7 @@ export class Editor implements Component, Focusable {
 		this.state.cursorLine++;
 		this.setCursorCol(0);
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -1650,6 +1694,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol(previousLine.length);
 		}
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -2362,6 +2407,7 @@ export class Editor implements Component, Focusable {
 		Object.assign(this.state, snapshot);
 		this.lastAction = null;
 		this.preferredVisualCol = null;
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -2379,6 +2425,7 @@ export class Editor implements Component, Focusable {
 		Object.assign(this.state, snapshot);
 		this.lastAction = null;
 		this.preferredVisualCol = null;
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -2591,7 +2638,15 @@ export class Editor implements Component, Focusable {
 		const currentLine = this.state.lines[this.state.cursorLine] || "";
 		const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 		const isSymbolAutocompleteContext = /(?:^|[ \t])(?:@(?:"[^"]*|[^\s]*)|#[^\s]*)$/.test(textBeforeCursor);
-		return isSymbolAutocompleteContext ? ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS : 0;
+		if (isSymbolAutocompleteContext) {
+			return ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS;
+		}
+		const isSlashContext = /(?:^|\s)\/[^\s]*$/.test(textBeforeCursor);
+		const isPathContext = /(?:^|\s)(?:~\/|\.\/|\.\.\/|\/|(?:[A-Za-z]:)?[\\/])[^\s]*$/.test(textBeforeCursor);
+		if (isSlashContext || isPathContext) {
+			return DEFAULT_AUTOCOMPLETE_DEBOUNCE_MS;
+		}
+		return DEFAULT_AUTOCOMPLETE_DEBOUNCE_MS;
 	}
 
 	private async runAutocompleteRequest(
@@ -2751,8 +2806,25 @@ export class Editor implements Component, Focusable {
 	}
 
 	private closeHistorySearch(): void {
+		if (this.historySearchDebounceTimer !== undefined) {
+			clearTimeout(this.historySearchDebounceTimer);
+			this.historySearchDebounceTimer = undefined;
+		}
 		this.historySearchList = null;
 		this.historySearchQuery = "";
+	}
+
+	private scheduleHistorySearchFilter(): void {
+		if (this.historySearchDebounceTimer !== undefined) {
+			clearTimeout(this.historySearchDebounceTimer);
+		}
+		this.historySearchDebounceTimer = setTimeout(() => {
+			this.historySearchDebounceTimer = undefined;
+			const list = this.historySearchList;
+			if (!list) return;
+			list.setFilter(this.historySearchQuery);
+			this.tui.requestRender();
+		}, HISTORY_SEARCH_DEBOUNCE_MS);
 	}
 
 	private applyHistorySearchSelection(item: SelectItem): void {
@@ -2793,7 +2865,7 @@ export class Editor implements Component, Focusable {
 		// Backspace narrows/widens the query.
 		if (kb.matches(data, "tui.editor.deleteCharBackward") || matchesKey(data, "shift+backspace")) {
 			this.historySearchQuery = this.historySearchQuery.slice(0, -1);
-			list.setFilter(this.historySearchQuery);
+			this.scheduleHistorySearchFilter();
 			return;
 		}
 
@@ -2801,7 +2873,7 @@ export class Editor implements Component, Focusable {
 		const printable = decodePrintableKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined);
 		if (printable !== undefined) {
 			this.historySearchQuery += printable;
-			list.setFilter(this.historySearchQuery);
+			this.scheduleHistorySearchFilter();
 		}
 		// Any other control key is swallowed while the overlay is open.
 	}

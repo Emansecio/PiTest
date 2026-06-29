@@ -104,6 +104,9 @@ export class Cheatsheet implements Component, Focusable {
 	public focused = false;
 	private theme: CheatsheetTheme;
 	private onClose: () => void;
+	private rows: CheatsheetRow[] | null = null;
+	private cachedWidth = -1;
+	private cachedLines: string[] | null = null;
 
 	constructor(theme: CheatsheetTheme, onClose: () => void) {
 		this.theme = theme;
@@ -111,11 +114,22 @@ export class Cheatsheet implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		// No cached state.
+		this.rows = null;
+		this.cachedWidth = -1;
+		this.cachedLines = null;
 	}
 
 	render(width: number): string[] {
-		return renderCheatsheet(buildCheatsheetRows(), width, this.theme);
+		if (this.cachedLines && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+		if (!this.rows) {
+			this.rows = buildCheatsheetRows();
+		}
+		const lines = renderCheatsheet(this.rows, width, this.theme);
+		this.cachedWidth = width;
+		this.cachedLines = lines;
+		return lines;
 	}
 
 	handleInput(data: string): void {

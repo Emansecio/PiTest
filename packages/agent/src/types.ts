@@ -11,6 +11,7 @@ import type {
 	ToolResultMessage,
 } from "@pit/ai";
 import type { Static, TSchema } from "typebox";
+import type { OverthinkGuardConfig } from "./overthink-guard.ts";
 import type { ToolErrorHintRegistry } from "./tool-error-hint-registry.ts";
 import type { ToolRewriteRegistry } from "./tool-rewrite-registry.ts";
 
@@ -348,6 +349,14 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the number of retries per turn to avoid pathological loops.
 	 */
 	ttsrMatcher?: TTSRMatcher;
+
+	/**
+	 * Live-stream guard against unbounded internal reasoning in one turn.
+	 * When a single thinking block exceeds `tokenThreshold` estimated tokens
+	 * without any tool call, the stream aborts and a `<system-reminder>` is
+	 * injected before the turn replays (capped by `maxRetriesPerTurn`).
+	 */
+	overthinkGuard?: OverthinkGuardConfig;
 
 	/**
 	 * Optional registry of programmatic tool-call corrections applied between

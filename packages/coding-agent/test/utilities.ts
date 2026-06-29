@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Agent } from "@pit/agent-core";
-import { getModel, type OAuthCredentials, type OAuthProvider } from "@pit/ai";
+import { getModel, type OAuthCredentials, type OAuthProviderId } from "@pit/ai";
 import { getOAuthApiKey } from "@pit/ai/oauth";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -92,7 +92,7 @@ export async function resolveApiKey(provider: string): Promise<string | undefine
 			}
 		}
 
-		const result = await getOAuthApiKey(provider as OAuthProvider, oauthCredentials);
+		const result = await getOAuthApiKey(provider as OAuthProviderId, oauthCredentials);
 		if (!result) return undefined;
 
 		// Save refreshed credentials back to auth.json

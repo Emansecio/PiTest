@@ -29,6 +29,14 @@ export type FetchLike = (
 
 const defaultFetch: FetchLike = (input, init) => fetch(input, init) as unknown as ReturnType<FetchLike>;
 
+const CDP_HTTP_TIMEOUT_MS = 5_000;
+
+function cdpFetchSignal(outer?: AbortSignal, timeoutMs = CDP_HTTP_TIMEOUT_MS): AbortSignal {
+	const timeout = AbortSignal.timeout(timeoutMs);
+	if (!outer) return timeout;
+	return AbortSignal.any([outer, timeout]);
+}
+
 /** List inspectable Chrome targets via the DevTools HTTP endpoint. */
 export async function listTargets(
 	host: string,
@@ -38,7 +46,7 @@ export async function listTargets(
 ): Promise<CdpTarget[]> {
 	let res: Awaited<ReturnType<FetchLike>>;
 	try {
-		res = await fetchImpl(`http://${host}:${port}/json`, { signal });
+		res = await fetchImpl(`http://${host}:${port}/json`, { signal: cdpFetchSignal(signal) });
 	} catch (err) {
 		throw new Error(
 			`Could not reach Chrome DevTools at ${host}:${port}. Start Chrome with ` +
@@ -60,9 +68,10 @@ export async function createTarget(
 ): Promise<CdpTarget> {
 	const endpoint = `http://${host}:${port}/json/new?${encodeURIComponent(url)}`;
 	// Chrome 111+ requires PUT; older builds accept GET. Try PUT, fall back to GET.
-	let res = await fetchImpl(endpoint, { method: "PUT", signal });
+	const createSignal = cdpFetchSignal(signal);
+	let res = await fetchImpl(endpoint, { method: "PUT", signal: createSignal });
 	if (!res.ok && (res.status === 405 || res.status === 501)) {
-		res = await fetchImpl(endpoint, { method: "GET", signal });
+		res = await fetchImpl(endpoint, { method: "GET", signal: createSignal });
 	}
 	if (!res.ok) throw new Error(`Could not open a new tab (HTTP ${res.status}).`);
 	const target = (await res.json()) as CdpTarget;
@@ -78,7 +87,9 @@ export async function closeTarget(
 	signal?: AbortSignal,
 	fetchImpl: FetchLike = defaultFetch,
 ): Promise<void> {
-	const res = await fetchImpl(`http://${host}:${port}/json/close/${encodeURIComponent(id)}`, { signal });
+	const res = await fetchImpl(`http://${host}:${port}/json/close/${encodeURIComponent(id)}`, {
+		signal: cdpFetchSignal(signal),
+	});
 	// Chrome returns 200 ("Target is closing") on success and 404 when the id is
 	// already gone — treat a missing target as already closed, anything else as an error.
 	if (!res.ok && res.status !== 404) throw new Error(`Could not close tab ${id} (HTTP ${res.status}).`);

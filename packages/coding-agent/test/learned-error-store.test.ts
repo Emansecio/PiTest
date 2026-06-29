@@ -64,7 +64,7 @@ describe("persistSessionLearnedErrors + aggregateLearnedErrors", () => {
 		};
 	}
 
-	it("writes one file per session and aggregates back correctly", () => {
+	it("writes one file per session and aggregates back correctly", async () => {
 		persistSessionLearnedErrors(dir, { sessionId: "s1", timestamp: "2026-05-28T01:00:00.000Z", cwd: "/x" }, [
 			sampleEntry({ count: 3, fingerprint: "fp-a" }),
 			sampleEntry({ count: 1, fingerprint: "fp-b" }),
@@ -73,7 +73,7 @@ describe("persistSessionLearnedErrors + aggregateLearnedErrors", () => {
 			sampleEntry({ count: 2, fingerprint: "fp-a" }),
 		]);
 
-		const aggregated = aggregateLearnedErrors(dir);
+		const aggregated = await aggregateLearnedErrors(dir);
 		expect(aggregated.length).toBe(2);
 		const a = aggregated.find((e) => e.fingerprint === "fp-a");
 		expect(a?.totalCount).toBe(5); // 3 + 2
@@ -83,25 +83,25 @@ describe("persistSessionLearnedErrors + aggregateLearnedErrors", () => {
 		expect(b?.sessionCount).toBe(1);
 	});
 
-	it("tracks matchedRuleIds across sessions", () => {
+	it("tracks matchedRuleIds across sessions", async () => {
 		persistSessionLearnedErrors(dir, { sessionId: "s1", timestamp: "2026-05-28T01:00:00.000Z", cwd: "/x" }, [
 			sampleEntry({ fingerprint: "fp", matchedRuleId: "rule-a" }),
 		]);
 		persistSessionLearnedErrors(dir, { sessionId: "s2", timestamp: "2026-05-28T02:00:00.000Z", cwd: "/x" }, [
 			sampleEntry({ fingerprint: "fp", matchedRuleId: "rule-b" }),
 		]);
-		const aggregated = aggregateLearnedErrors(dir);
+		const aggregated = await aggregateLearnedErrors(dir);
 		expect(aggregated[0].matchedRuleIds.sort()).toEqual(["rule-a", "rule-b"]);
 	});
 
-	it("uses the most recent session's sample text", () => {
+	it("uses the most recent session's sample text", async () => {
 		persistSessionLearnedErrors(dir, { sessionId: "old", timestamp: "2026-05-01T00:00:00.000Z", cwd: "/x" }, [
 			sampleEntry({ fingerprint: "fp", sampleErrorText: "OLD SAMPLE" }),
 		]);
 		persistSessionLearnedErrors(dir, { sessionId: "new", timestamp: "2026-05-28T00:00:00.000Z", cwd: "/x" }, [
 			sampleEntry({ fingerprint: "fp", sampleErrorText: "NEW SAMPLE" }),
 		]);
-		const aggregated = aggregateLearnedErrors(dir);
+		const aggregated = await aggregateLearnedErrors(dir);
 		expect(aggregated[0].sampleErrorText).toBe("NEW SAMPLE");
 	});
 
@@ -111,7 +111,7 @@ describe("persistSessionLearnedErrors + aggregateLearnedErrors", () => {
 		expect(files.length).toBe(0);
 	});
 
-	it("survives a corrupt JSONL line", () => {
+	it("survives a corrupt JSONL line", async () => {
 		writeFileSync(
 			join(dir, "corrupt.jsonl"),
 			[
@@ -120,23 +120,23 @@ describe("persistSessionLearnedErrors + aggregateLearnedErrors", () => {
 				JSON.stringify({ type: "entry", tool: "bash", fingerprint: "fp", count: 1, sampleErrorText: "ok" }),
 			].join("\n"),
 		);
-		const aggregated = aggregateLearnedErrors(dir);
+		const aggregated = await aggregateLearnedErrors(dir);
 		expect(aggregated.length).toBe(1);
 		expect(aggregated[0].fingerprint).toBe("fp");
 	});
 
-	it("returns empty when the directory does not exist", () => {
+	it("returns empty when the directory does not exist", async () => {
 		const missing = join(dir, "does-not-exist");
-		expect(aggregateLearnedErrors(missing)).toEqual([]);
+		expect(await aggregateLearnedErrors(missing)).toEqual([]);
 	});
 
-	it("sorts aggregated results by descending totalCount", () => {
+	it("sorts aggregated results by descending totalCount", async () => {
 		persistSessionLearnedErrors(dir, { sessionId: "s", timestamp: "t", cwd: "/" }, [
 			sampleEntry({ fingerprint: "low", count: 1 }),
 			sampleEntry({ fingerprint: "high", count: 10 }),
 			sampleEntry({ fingerprint: "mid", count: 5 }),
 		]);
-		const aggregated = aggregateLearnedErrors(dir);
+		const aggregated = await aggregateLearnedErrors(dir);
 		expect(aggregated.map((e) => e.fingerprint)).toEqual(["high", "mid", "low"]);
 	});
 });

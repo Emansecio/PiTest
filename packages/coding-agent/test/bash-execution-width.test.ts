@@ -58,6 +58,17 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 		}
 	});
 
+	it("reuses output children across streaming chunks", () => {
+		const { stub } = createTuiStub(100);
+		const component = new BashExecutionComponent("echo test", stub);
+		component.appendOutput("line one\n");
+		const container = (component as unknown as { contentContainer: { children: unknown[] } }).contentContainer;
+		const childCount = container.children.length;
+
+		component.appendOutput("line two\n");
+		expect(container.children.length).toBe(childCount);
+	});
+
 	it("re-computes lines when width changes between renders", () => {
 		const { stub } = createTuiStub(200);
 		const component = new BashExecutionComponent("echo hello", stub);

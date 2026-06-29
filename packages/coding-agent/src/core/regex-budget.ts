@@ -22,3 +22,14 @@ export function testRegexWithinBudget(re: RegExp, text: string, deadlineMs: numb
 	re.lastIndex = 0;
 	return re.test(haystack);
 }
+
+/**
+ * Like `testRegexWithinBudget`, but returns the match index for relevance scoring.
+ * `-1` = no match; `null` = budget exhausted before evaluation.
+ */
+export function searchRegexWithinBudget(re: RegExp, text: string, deadlineMs: number): number | null {
+	if (isRegexBudgetExpired(deadlineMs)) return null;
+	const haystack = text.length > REGEX_TEST_TEXT_CAP ? text.slice(0, REGEX_TEST_TEXT_CAP) : text;
+	re.lastIndex = 0;
+	return haystack.search(re);
+}

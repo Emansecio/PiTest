@@ -18,10 +18,14 @@
  *   PIT_LEARNED_ERRORS_DIR=/custom/path npx tsx scripts/learned-errors-report.mts
  */
 
-import { aggregateLearnedErrors, defaultLearnedErrorsDir } from "../packages/coding-agent/src/core/learned-error-store.ts";
+import {
+	type AggregatedLearnedError,
+	aggregateLearnedErrors,
+	defaultLearnedErrorsDir,
+} from "../packages/coding-agent/src/core/learned-error-store.ts";
 
 const dir = process.env.PIT_LEARNED_ERRORS_DIR ?? defaultLearnedErrorsDir();
-const aggregated = aggregateLearnedErrors(dir);
+const aggregated = await aggregateLearnedErrors(dir);
 
 if (aggregated.length === 0) {
 	console.log(`No learned-error data at ${dir}.`);
@@ -87,7 +91,7 @@ function truncate(text: string, max: number): string {
 	return `${text.slice(0, max)}\u2026`;
 }
 
-function skeletonFor(entry: ReturnType<typeof aggregateLearnedErrors>[number], n: number): string {
+function skeletonFor(entry: AggregatedLearnedError, n: number): string {
 	const escaped = entry.fingerprint.replace(/[/\\^$*+?.()|[\]{}]/g, "\\$&");
 	return [
 		`      {`,

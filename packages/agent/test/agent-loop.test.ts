@@ -9,6 +9,7 @@ import {
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.js";
+import { THINKING_CHARS_PER_TOKEN } from "../src/overthink-guard.js";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
 
 // Mock stream for testing - mimics MockAssistantStream
@@ -1518,6 +1519,106 @@ describe("agent loop rejection guard", () => {
 		expect(last.stopReason).toBe("error");
 		// the error reason is carried through, not swallowed.
 		expect(last.errorMessage).toMatch(/boom in convertToLlm/);
+	});
+
+	it("aborts overlong thinking mid-stream, injects a reminder, and retries the turn", async () => {
+		let streamCalls = 0;
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			overthinkGuard: { enabled: true, tokenThreshold: 10, maxRetriesPerTurn: 2 },
+		};
+		const streamFn = () => {
+			streamCalls++;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (streamCalls === 1) {
+					const partial = createAssistantMessage([{ type: "thinking", thinking: "" }]);
+					stream.push({ type: "start", partial });
+					stream.push({ type: "thinking_start", contentIndex: 0, partial });
+					const longThinking = "x".repeat(THINKING_CHARS_PER_TOKEN * 10);
+					stream.push({
+						type: "thinking_delta",
+						contentIndex: 0,
+						delta: longThinking,
+						partial: createAssistantMessage([{ type: "thinking", thinking: longThinking }]),
+					});
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "thinking", thinking: longThinking }]),
+					});
+					return;
+				}
+				const message = createAssistantMessage([{ type: "text", text: "acting now" }]);
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		const events: AgentEvent[] = [];
+		const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+		for await (const event of loop) events.push(event);
+		const messages = await loop.result();
+
+		expect(streamCalls).toBe(2);
+		const reminder = messages.find(
+			(m) => m.role === "user" && (m as { _overthink_injected?: boolean })._overthink_injected,
+		);
+		expect(reminder).toBeDefined();
+		const assistant = messages[messages.length - 1] as AssistantMessage;
+		expect(assistant.content[0]).toEqual({ type: "text", text: "acting now" });
+	});
+
+	it("aborts overlong plain-text reasoning mid-stream when watchTextDelta is on", async () => {
+		let streamCalls = 0;
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			overthinkGuard: { enabled: true, tokenThreshold: 10, maxRetriesPerTurn: 2, watchTextDelta: true },
+		};
+		const streamFn = () => {
+			streamCalls++;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (streamCalls === 1) {
+					const partial = createAssistantMessage([{ type: "text", text: "" }]);
+					stream.push({ type: "start", partial });
+					stream.push({ type: "text_start", contentIndex: 0, partial });
+					const longText = "x".repeat(THINKING_CHARS_PER_TOKEN * 10);
+					stream.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: longText,
+						partial: createAssistantMessage([{ type: "text", text: longText }]),
+					});
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: longText }]),
+					});
+					return;
+				}
+				const message = createAssistantMessage([{ type: "text", text: "acting now" }]);
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+		for await (const _ of loop) {
+			// consume
+		}
+		const messages = await loop.result();
+
+		expect(streamCalls).toBe(2);
+		expect(
+			messages.some((m) => m.role === "user" && (m as { _overthink_injected?: boolean })._overthink_injected),
+		).toBe(true);
 	});
 
 	it("agentLoopContinue: surfaces a terminal failure turn when convertToLlm throws", async () => {

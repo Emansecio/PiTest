@@ -10,7 +10,6 @@ import { time } from "./timings.js";
 
 export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 
-import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { canonicalizePath, isLocalPath, isUnderPath } from "../utils/paths.ts";
 import { dedupePointerContextFiles, normalizeProjectContextFiles } from "./context-files.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
@@ -539,8 +538,8 @@ export class DefaultResourceLoader implements ResourceLoader {
 		// (.claude/.cursor/.codex/.gemini skills/), leaving legacy rule files
 		// intact. Default-on: unset = identical behavior. The global
 		// --no-legacy-discovery still wins (already yields an empty skillDirs).
-		const legacySkillPaths =
-			this.noLegacyDiscovery || isTruthyEnvFlag(process.env.PIT_NO_LEGACY_SKILLS) ? [] : legacyResult.skillDirs;
+		const skillDiscovery = this.settingsManager.getSkillDiscoverySettings();
+		const legacySkillPaths = this.noLegacyDiscovery || skillDiscovery.noLegacy ? [] : legacyResult.skillDirs;
 		// `noSkills` drops ALL auto-discovery — both settings-enabled skills AND
 		// legacy skill dirs (.claude/.codex/.cursor/.gemini). Only EXPLICIT sources
 		// survive (CLI --skill, programmatic additionalSkillPaths). Previously
@@ -561,7 +560,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		// explicit skills win on name collisions (first-loaded wins). Suppressed
 		// by --no-skills; getClaudeCodeSkillsDir() itself applies the
 		// PIT_DISABLE_CLAUDE_CODE_SKILLS opt-out (returns null).
-		if (!this.noSkills) {
+		if (!this.noSkills && !skillDiscovery.noClaudeCode) {
 			const claudeSkillsDir = getClaudeCodeSkillsDir();
 			if (claudeSkillsDir && existsSync(claudeSkillsDir) && !skillPaths.includes(claudeSkillsDir)) {
 				skillPaths.push(claudeSkillsDir);

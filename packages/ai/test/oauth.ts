@@ -9,7 +9,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "f
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { getOAuthApiKey } from "../src/utils/oauth/index.js";
-import type { OAuthCredentials, OAuthProvider } from "../src/utils/oauth/types.js";
+import type { OAuthCredentials, OAuthProviderId } from "../src/utils/oauth/types.js";
 
 const AUTH_PATH = join(homedir(), ".pit", "agent", "auth.json");
 
@@ -76,7 +76,7 @@ export async function resolveApiKey(provider: string): Promise<string | undefine
 
 		let result: { newCredentials: OAuthCredentials; apiKey: string } | null = null;
 		try {
-			result = await getOAuthApiKey(provider as OAuthProvider, oauthCredentials);
+			result = await getOAuthApiKey(provider as OAuthProviderId, oauthCredentials);
 		} catch (e) {
 			console.log(JSON.stringify(e));
 		}

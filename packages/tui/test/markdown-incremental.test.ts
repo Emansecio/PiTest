@@ -174,6 +174,24 @@ describe("Markdown incremental lexation equivalence", () => {
 		);
 	});
 
+	it("defers syntax highlight on an open code fence until it closes", () => {
+		let highlightCalls = 0;
+		const theme = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string) => {
+				highlightCalls++;
+				return code.split("\n").map((line) => `HL:${line}`);
+			},
+		};
+		const md = new Markdown("```ts\nconst x = 1;\n", 0, 0, theme);
+		md.render(80);
+		assert.equal(highlightCalls, 0);
+
+		md.setText("```ts\nconst x = 1;\n```\n");
+		md.render(80);
+		assert.equal(highlightCalls, 1);
+	});
+
 	it("non-append edits reset cleanly and stay equivalent", () => {
 		// A shrink / divergence after streaming must not corrupt the incremental
 		// baseline: subsequent renders still match a fresh instance.

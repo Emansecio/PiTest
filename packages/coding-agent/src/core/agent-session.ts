@@ -702,6 +702,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private _turnFixSite: { file: string; line: number } | undefined;
 	private _inVerification = false;
 	private _verificationAbort: AbortController | undefined;
+	// Pending-checks drain: blocks handoff while background verification jobs settle.
+	private _inPendingChecksDrain = false;
+	private _pendingChecksAbort: AbortController | undefined;
 	// Visual definition-of-done tracking: did this prompt cycle change a rendered
 	// artifact, did the agent actually `preview` it, and the last such file.
 	private _turnTouchedVisual = false;
@@ -2869,7 +2872,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// Background-check guard: if the agent backgrounded a test/check, make sure it
 		// has finished and passed before the turn hands back — never report done or
 		// suggest a commit on a test that is still running (or already failed).
-		await this._guardPendingBackgroundChecks(options);
+		await this._awaitPendingChecksBeforeHandoff(options);
 
 		// Native verification gate: after a code-modifying turn, run the project
 		// check and re-inject failures so the agent self-corrects before "done".
@@ -2877,71 +2880,104 @@ export class AgentSession implements CompactionHost, FusionHost {
 	}
 
 	/**
-	 * Wait (bounded) for any test/check the agent backgrounded to settle, then
-	 * re-inject the outcome when it failed or is still running. Closes the
-	 * "reported done / suggested a commit while `npm run …` was still in flight"
-	 * gap: a long check is auto-promoted to a background job, so the turn can end
-	 * before its real exit code is known. No-op when nothing relevant is pending.
+	 * Drain background verification-class jobs before handoff. Polls until they
+	 * exit or `pendingChecks.maxWaitMs` elapses, then runs a bounded internal fix
+	 * loop while `isBusy` stays true. Independent of `verification.enabled`.
 	 */
-	private async _guardPendingBackgroundChecks(options?: PromptOptions): Promise<void> {
-		if (this._inVerification || this._userInterrupted || this._lastTurnAborted()) return;
-		const settings = this.settingsManager.getVerificationSettings();
+	private async _awaitPendingChecksBeforeHandoff(options?: PromptOptions): Promise<void> {
+		if (this._userInterrupted || this._lastTurnAborted()) return;
+		const settings = this.settingsManager.getPendingChecksSettings();
 		if (!settings.enabled) return;
-		const pending = pendingVerificationJobs(listBashBackgroundJobs());
-		if (pending.length === 0) return;
 
-		const ids = new Set(pending.map((j) => j.id));
-		const label = pending.length === 1 ? pending[0].command : `${pending.length} background checks`;
 		const abort = new AbortController();
-		this._verificationAbort = abort;
-		this._inVerification = true;
+		this._pendingChecksAbort = abort;
+		let fixes = 0;
+
 		try {
-			this.emit({ type: "verification", phase: "running", command: label, attempt: 1, maxAttempts: 1 });
-			const deadline = Date.now() + settings.timeoutMs;
-			while (Date.now() < deadline) {
+			while (true) {
 				if (abort.signal.aborted || this._userInterrupted) return;
-				if (listBashBackgroundJobs().every((j) => !ids.has(j.id) || j.exited)) break;
-				await new Promise<void>((res) => {
-					const onAbort = () => {
-						clearTimeout(t);
-						res();
-					};
-					const t = setTimeout(() => {
-						abort.signal.removeEventListener("abort", onAbort);
-						res();
-					}, 500);
-					abort.signal.addEventListener("abort", onAbort, { once: true });
+
+				const pending = pendingVerificationJobs(listBashBackgroundJobs());
+				if (pending.length === 0) return;
+
+				const ids = new Set(pending.map((j) => j.id));
+				const label = pending.length === 1 ? pending[0].command : `${pending.length} background checks`;
+				const startMs = Date.now();
+				const deadline = startMs + settings.maxWaitMs;
+
+				this._inPendingChecksDrain = true;
+				try {
+					while (Date.now() < deadline) {
+						if (abort.signal.aborted || this._userInterrupted) return;
+						this.emit({
+							type: "pending_check",
+							phase: "waiting",
+							command: label,
+							elapsedMs: Date.now() - startMs,
+						});
+						if (listBashBackgroundJobs().every((j) => !ids.has(j.id) || j.exited)) break;
+						await new Promise<void>((res) => {
+							const onAbort = () => {
+								clearTimeout(t);
+								res();
+							};
+							const t = setTimeout(() => {
+								abort.signal.removeEventListener("abort", onAbort);
+								res();
+							}, 500);
+							abort.signal.addEventListener("abort", onAbort, { once: true });
+						});
+					}
+				} finally {
+					this._inPendingChecksDrain = false;
+				}
+
+				if (abort.signal.aborted || this._userInterrupted) return;
+
+				const jobs = listBashBackgroundJobs().filter((j) => ids.has(j.id));
+				// An exited job whose exitCode stayed `null` (spawn error / waitForChildProcess
+				// rejection — see tools/bash.ts .catch) never actually succeeded, so it must
+				// count as a non-success, not a silent pass.
+				const failed = jobs.filter((j) => j.exited && j.exitCode !== 0);
+				const running = jobs.filter((j) => !j.exited);
+				if (failed.length === 0 && running.length === 0) {
+					this.emit({ type: "pending_check", phase: "passed", command: label });
+					continue;
+				}
+
+				const elapsedMs = Date.now() - startMs;
+				if (failed.length > 0) {
+					this.emit({
+						type: "pending_check",
+						phase: "failed",
+						command: label,
+						elapsedMs,
+						exitCode: failed[0]?.exitCode ?? undefined,
+						attempt: fixes + 1,
+						maxAttempts: settings.maxFixAttempts,
+					});
+				} else {
+					this.emit({
+						type: "pending_check",
+						phase: "timeout",
+						command: label,
+						elapsedMs,
+						attempt: fixes + 1,
+						maxAttempts: settings.maxFixAttempts,
+					});
+				}
+
+				if (fixes >= settings.maxFixAttempts) return;
+
+				fixes++;
+				await this._promptOnce(pendingChecksPrompt(failed, running), {
+					expandPromptTemplates: false,
+					source: options?.source,
 				});
 			}
-			if (abort.signal.aborted || this._userInterrupted) return;
-
-			const jobs = listBashBackgroundJobs().filter((j) => ids.has(j.id));
-			// An exited job whose exitCode stayed `null` (spawn error / waitForChildProcess
-			// rejection — see tools/bash.ts .catch) never actually succeeded, so it must
-			// count as a non-success, not a silent pass. Dropping the `!== null` clause
-			// folds those errored jobs into `failed` instead of falling through to `passed`.
-			const failed = jobs.filter((j) => j.exited && j.exitCode !== 0);
-			const running = jobs.filter((j) => !j.exited);
-			if (failed.length === 0 && running.length === 0) {
-				this.emit({ type: "verification", phase: "passed", command: label, attempt: 1, maxAttempts: 1 });
-				return;
-			}
-			this.emit({
-				type: "verification",
-				phase: "failed",
-				command: label,
-				attempt: 1,
-				maxAttempts: 1,
-				exitCode: failed[0]?.exitCode ?? undefined,
-				willRetry: false,
-			});
-			await this._promptOnce(pendingChecksPrompt(failed, running), {
-				expandPromptTemplates: false,
-				source: options?.source,
-			});
 		} finally {
-			this._inVerification = false;
-			this._verificationAbort = undefined;
+			this._inPendingChecksDrain = false;
+			this._pendingChecksAbort = undefined;
 		}
 	}
 
@@ -3778,7 +3814,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 	 */
 	get isBusy(): boolean {
 		return (
-			this.isStreaming || this.isBashRunning || this._inGoalContinuation || this._inVerification || this.isFusing
+			this.isStreaming ||
+			this.isBashRunning ||
+			this._inGoalContinuation ||
+			this._inVerification ||
+			this._inPendingChecksDrain ||
+			this.isFusing
 		);
 	}
 
@@ -3803,6 +3844,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 	interrupt(): void {
 		this._userInterrupted = true;
 		this.abortRetry();
+		this._pendingChecksAbort?.abort();
 		this._verificationAbort?.abort();
 		this.abortBash();
 		this.abortCompaction();

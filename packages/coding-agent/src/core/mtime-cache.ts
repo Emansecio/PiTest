@@ -1,4 +1,7 @@
 import { closeSync, openSync, readFileSync, readSync, statSync } from "fs";
+import { LruMap } from "./lru-map.ts";
+
+const MTIME_PARSE_CACHE_CAP = 512;
 
 /**
  * mtime-keyed parse cache for files that are re-read on every resource reload
@@ -10,7 +13,7 @@ import { closeSync, openSync, readFileSync, readSync, statSync } from "fs";
  * file (new mtime) is always re-parsed, so behavior is preserved.
  */
 export function createMtimeParseCache<T>(parse: (rawContent: string, filePath: string) => T) {
-	const cache = new Map<string, { mtimeMs: number; parsed: T }>();
+	const cache = new LruMap<string, { mtimeMs: number; parsed: T }>(MTIME_PARSE_CACHE_CAP);
 
 	return function read(filePath: string): T {
 		const stat = statSync(filePath);
@@ -63,7 +66,7 @@ export function createMtimePrefixParseCache<T>(
 	parse: (rawContent: string, filePath: string) => T,
 	options: MtimePrefixParseOptions,
 ) {
-	const cache = new Map<string, { mtimeMs: number; parsed: T }>();
+	const cache = new LruMap<string, { mtimeMs: number; parsed: T }>(MTIME_PARSE_CACHE_CAP);
 	const { prefixBytes, prefixIsSufficient } = options;
 
 	function readRaw(filePath: string, size: number): string {

@@ -24,6 +24,7 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "../config.ts";
@@ -136,7 +137,92 @@ export interface AggregatedLearnedError {
  * report. Skips corrupt lines silently — append-only stores are racy by
  * nature and partial last lines are common.
  */
-export function aggregateLearnedErrors(dir: string): AggregatedLearnedError[] {
+const LEARNED_ERROR_READ_CONCURRENCY = 8;
+
+export async function aggregateLearnedErrors(dir: string): Promise<AggregatedLearnedError[]> {
+	if (!existsSync(dir)) return [];
+	const byKey = new Map<string, AggregatedLearnedError & { sessionIds: Set<string>; latestTs: string }>();
+	const files = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+	for (let base = 0; base < files.length; base += LEARNED_ERROR_READ_CONCURRENCY) {
+		const batch = files.slice(base, base + LEARNED_ERROR_READ_CONCURRENCY);
+		const raws = await Promise.all(
+			batch.map(async (file) => {
+				try {
+					return await readFile(join(dir, file), "utf-8");
+				} catch {
+					return null;
+				}
+			}),
+		);
+		for (const raw of raws) {
+			if (!raw) continue;
+			ingestLearnedErrorFile(raw, byKey);
+		}
+	}
+	return finalizeAggregated(byKey);
+}
+
+function ingestLearnedErrorFile(
+	raw: string,
+	byKey: Map<string, AggregatedLearnedError & { sessionIds: Set<string>; latestTs: string }>,
+): void {
+	let sessionId = "";
+	let timestamp = "";
+	for (const line of raw.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		let parsed: { type?: string } & Record<string, unknown>;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			continue;
+		}
+		if (parsed.type === "manifest") {
+			sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : "";
+			timestamp = typeof parsed.timestamp === "string" ? parsed.timestamp : "";
+			continue;
+		}
+		if (parsed.type !== "entry") continue;
+		const entry = parsed as unknown as LearnedErrorEntry;
+		if (!entry.tool || !entry.fingerprint) continue;
+		const key = `${entry.tool}:${entry.fingerprint}`;
+		const bucket =
+			byKey.get(key) ??
+			({
+				tool: entry.tool,
+				fingerprint: entry.fingerprint,
+				totalCount: 0,
+				sessionCount: 0,
+				matchedRuleIds: [],
+				sampleErrorText: entry.sampleErrorText,
+				sampleArgs: entry.sampleArgs,
+				sessionIds: new Set<string>(),
+				latestTs: "",
+			} satisfies AggregatedLearnedError & { sessionIds: Set<string>; latestTs: string });
+		bucket.totalCount += entry.count;
+		if (sessionId) bucket.sessionIds.add(sessionId);
+		if (entry.matchedRuleId && !bucket.matchedRuleIds.includes(entry.matchedRuleId)) {
+			bucket.matchedRuleIds.push(entry.matchedRuleId);
+		}
+		if (timestamp > bucket.latestTs) {
+			bucket.latestTs = timestamp;
+			bucket.sampleErrorText = entry.sampleErrorText;
+			bucket.sampleArgs = entry.sampleArgs;
+		}
+		byKey.set(key, bucket);
+	}
+}
+
+function finalizeAggregated(
+	byKey: Map<string, AggregatedLearnedError & { sessionIds: Set<string>; latestTs: string }>,
+): AggregatedLearnedError[] {
+	return Array.from(byKey.values())
+		.map(({ sessionIds, latestTs: _ts, ...rest }) => ({ ...rest, sessionCount: sessionIds.size }))
+		.sort((a, b) => b.totalCount - a.totalCount);
+}
+
+/** Sequential fallback for sync callers (lazy hint registry before prefetch lands). */
+export function aggregateLearnedErrorsSync(dir: string): AggregatedLearnedError[] {
 	if (!existsSync(dir)) return [];
 	const byKey = new Map<string, AggregatedLearnedError & { sessionIds: Set<string>; latestTs: string }>();
 	const files = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
@@ -147,57 +233,9 @@ export function aggregateLearnedErrors(dir: string): AggregatedLearnedError[] {
 		} catch {
 			continue;
 		}
-		let sessionId = "";
-		let timestamp = "";
-		for (const line of raw.split("\n")) {
-			const trimmed = line.trim();
-			if (!trimmed) continue;
-			let parsed: { type?: string } & Record<string, unknown>;
-			try {
-				parsed = JSON.parse(trimmed);
-			} catch {
-				continue;
-			}
-			if (parsed.type === "manifest") {
-				sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId : "";
-				timestamp = typeof parsed.timestamp === "string" ? parsed.timestamp : "";
-				continue;
-			}
-			if (parsed.type !== "entry") continue;
-			const entry = parsed as unknown as LearnedErrorEntry;
-			if (!entry.tool || !entry.fingerprint) continue;
-			const key = `${entry.tool}:${entry.fingerprint}`;
-			const bucket =
-				byKey.get(key) ??
-				({
-					tool: entry.tool,
-					fingerprint: entry.fingerprint,
-					totalCount: 0,
-					sessionCount: 0,
-					matchedRuleIds: [],
-					sampleErrorText: entry.sampleErrorText,
-					sampleArgs: entry.sampleArgs,
-					sessionIds: new Set<string>(),
-					latestTs: "",
-				} satisfies AggregatedLearnedError & { sessionIds: Set<string>; latestTs: string });
-			bucket.totalCount += entry.count;
-			if (sessionId) bucket.sessionIds.add(sessionId);
-			if (entry.matchedRuleId && !bucket.matchedRuleIds.includes(entry.matchedRuleId)) {
-				bucket.matchedRuleIds.push(entry.matchedRuleId);
-			}
-			// Always overwrite the sample with the most recent session's data so
-			// the report and dynamic rules reflect current shapes, not stale ones.
-			if (timestamp > bucket.latestTs) {
-				bucket.latestTs = timestamp;
-				bucket.sampleErrorText = entry.sampleErrorText;
-				bucket.sampleArgs = entry.sampleArgs;
-			}
-			byKey.set(key, bucket);
-		}
+		ingestLearnedErrorFile(raw, byKey);
 	}
-	return Array.from(byKey.values())
-		.map(({ sessionIds, latestTs: _ts, ...rest }) => ({ ...rest, sessionCount: sessionIds.size }))
-		.sort((a, b) => b.totalCount - a.totalCount);
+	return finalizeAggregated(byKey);
 }
 
 const RE_WHITESPACE = /\s+/g;

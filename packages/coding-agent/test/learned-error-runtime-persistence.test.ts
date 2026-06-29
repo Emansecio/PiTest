@@ -94,7 +94,7 @@ describe("CR4 — learned-error runtime persistence", () => {
 		const file = join(learnedDir(), `${harness.session.sessionId}.jsonl`);
 		expect(existsSync(file)).toBe(true);
 
-		const aggregated = aggregateLearnedErrors(learnedDir());
+		const aggregated = await aggregateLearnedErrors(learnedDir());
 		expect(aggregated.length).toBe(1);
 		expect(aggregated[0].tool).toBe("boom");
 		expect(aggregated[0].sessionCount).toBe(1);
@@ -125,7 +125,7 @@ describe("CR4 — learned-error runtime persistence", () => {
 
 		// Both fingerprints accumulated, and re-writing the same sessionId did NOT
 		// inflate the per-file sessionCount.
-		const aggregated = aggregateLearnedErrors(learnedDir());
+		const aggregated = await aggregateLearnedErrors(learnedDir());
 		expect(aggregated.length).toBe(2);
 		for (const entry of aggregated) {
 			expect(entry.sessionCount).toBe(1);

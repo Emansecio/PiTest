@@ -43,6 +43,8 @@ interface ServerEntry {
 	reconnectAttempts: number;
 	/** Runtime on/off switch. A disabled server keeps its entry (so it stays listed) but is never connected. */
 	disabled: boolean;
+	/** Cached tool names for O(1) dispatch lookups; refreshed on connect and tools/list_changed. */
+	toolNames: Set<string>;
 }
 
 export class McpManager {
@@ -61,15 +63,20 @@ export class McpManager {
 			// be enabled at runtime; connectAll simply skips it.
 			const client = new McpClient(name, config);
 			// Runtime tools/list_changed → host re-registers the (possibly new) tools.
-			client.onToolsChanged = () => this.onToolsChanged?.(name);
-			this.entries.set(name, {
+			client.onToolsChanged = () => {
+				this.refreshToolNames(entry);
+				this.onToolsChanged?.(name);
+			};
+			const entry: ServerEntry = {
 				name,
 				config,
 				client,
 				connected: false,
 				reconnectAttempts: 0,
 				disabled: config.disabled ?? false,
-			});
+				toolNames: new Set(),
+			};
+			this.entries.set(name, entry);
 		}
 	}
 
@@ -133,6 +140,10 @@ export class McpManager {
 		return true;
 	}
 
+	private refreshToolNames(entry: ServerEntry): void {
+		entry.toolNames = new Set(entry.client.getTools().map((tool) => tool.name));
+	}
+
 	/** Connect every (enabled) server in parallel; failures are recorded per-server, not thrown. */
 	async connectAll(signal?: AbortSignal): Promise<void> {
 		await Promise.all(
@@ -144,8 +155,10 @@ export class McpManager {
 						entry.connected = true;
 						entry.lastError = undefined;
 						entry.reconnectAttempts = 0;
+						this.refreshToolNames(entry);
 					} catch (err) {
 						entry.connected = false;
+						entry.toolNames.clear();
 						entry.lastError = err instanceof Error ? err.message : String(err);
 					}
 					this.emit(entry);
@@ -167,8 +180,10 @@ export class McpManager {
 			await entry.client.initialize(signal);
 			entry.connected = true;
 			entry.lastError = undefined;
+			this.refreshToolNames(entry);
 		} catch (err) {
 			entry.connected = false;
+			entry.toolNames.clear();
 			entry.lastError = err instanceof Error ? err.message : String(err);
 		}
 		this.emit(entry);
@@ -198,7 +213,11 @@ export class McpManager {
 		entry.reconnectAttempts = 0;
 		entry.client.dispose();
 		entry.client = new McpClient(entry.name, entry.config);
-		entry.client.onToolsChanged = () => this.onToolsChanged?.(entry.name);
+		entry.toolNames.clear();
+		entry.client.onToolsChanged = () => {
+			this.refreshToolNames(entry);
+			this.onToolsChanged?.(entry.name);
+		};
 		this.emit(entry);
 		return this.getState(name);
 	}
@@ -281,7 +300,10 @@ export class McpManager {
 					entry.connected = true;
 					entry.lastError = undefined;
 					entry.reconnectAttempts = 0;
+					this.refreshToolNames(entry);
 				} catch (reconnectErr) {
+					// Keep toolNames — client.tools survives a failed re-handshake so the
+					// next call can still resolve dispatch while the transport recovers.
 					entry.lastError = reconnectErr instanceof Error ? reconnectErr.message : String(reconnectErr);
 				}
 				this.emit(entry);
@@ -296,7 +318,7 @@ export class McpManager {
 			if (!prefixedName.startsWith(prefix)) continue;
 			const originalName = prefixedName.slice(prefix.length);
 			if (!this.isAllowedTool(entry, originalName)) continue;
-			if (entry.client.getTools().some((t) => t.name === originalName)) {
+			if (entry.toolNames.has(originalName)) {
 				return { entry, originalName };
 			}
 		}

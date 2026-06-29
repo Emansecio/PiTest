@@ -59,6 +59,7 @@ const fastChecks = [
 	{ name: "tsgo", command: "tsgo --noEmit" },
 	{ name: "browser-smoke", command: "node scripts/check-browser-smoke.mjs" },
 	{ name: "generated", command: "node scripts/check-generated-models.mjs" },
+	{ name: "dist-exports", command: "node scripts/check-dist-exports.mjs" },
 	{ name: "surrogate-slice", command: "node scripts/check-surrogate-slice.mjs" },
 	{ name: "token-bench", command: "node scripts/check-token-bench.mjs" },
 ];

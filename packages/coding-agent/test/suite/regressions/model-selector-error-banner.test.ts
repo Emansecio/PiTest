@@ -68,7 +68,8 @@ describe("model selector error banner", () => {
 		const rendered = stripAnsi(selector.render(120).join("\n"));
 
 		// The list must still render an anthropic model…
-		expect(rendered).toContain("[anthropic]");
+		expect(rendered).toContain("anthropic");
+		expect(rendered).toMatch(/Claude|claude/);
 		// …AND the error must surface as a banner (regression: it used to replace the list).
 		expect(rendered).toContain("Invalid models.json schema");
 	});

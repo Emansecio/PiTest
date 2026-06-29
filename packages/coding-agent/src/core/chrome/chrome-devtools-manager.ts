@@ -74,6 +74,8 @@ interface ConnState {
 	conn: CdpConnectionLike;
 	console: ConsoleLine[];
 	network: NetworkEntry[];
+	/** O(1) lookup by requestId — entries are the same objects as in `network`. */
+	networkById: Map<string, NetworkEntry>;
 	// Proactively captured response bodies, keyed by requestId. CDP evicts bodies
 	// from its own buffer as new requests pile up (and on navigation), so a body
 	// fetched lazily by getResponseBody is often already gone. We snapshot text-ish
@@ -368,6 +370,7 @@ export class ChromeDevtoolsManager {
 			// reads for the new page. Drop them so reads reflect only the new document.
 			state.console.length = 0;
 			state.network.length = 0;
+			state.networkById.clear();
 			state.bodies.clear();
 			state.bodyBytes = 0;
 		}
@@ -726,7 +729,7 @@ export class ChromeDevtoolsManager {
 	 */
 	private async cacheBody(conn: CdpConnectionLike, state: ConnState, requestId: string | undefined): Promise<void> {
 		if (!requestId || state.bodies.has(requestId)) return;
-		const entry = state.network.find((e) => e.requestId === requestId);
+		const entry = state.networkById.get(requestId);
 		if (!entry || !isCacheableMime(entry.mimeType ?? "")) return;
 		if (conn.isClosed?.()) return;
 		try {
@@ -737,7 +740,7 @@ export class ChromeDevtoolsManager {
 			if (bytes === 0 || bytes > BODY_CACHE_PER_ENTRY) return;
 			// A late event for a request already dropped from the ring would leak its
 			// bytes (no eviction ever reclaims them), so only cache what's still buffered.
-			if (!state.network.some((e) => e.requestId === requestId)) return;
+			if (!state.networkById.has(requestId)) return;
 			state.bodies.set(requestId, { body, base64Encoded: false, bytes });
 			state.bodyBytes += bytes;
 			while (state.bodyBytes > BODY_CACHE_BUDGET) {
@@ -926,9 +929,29 @@ export class ChromeDevtoolsManager {
 		this.conns.delete(targetId);
 	}
 
+	private pushNetworkEntry(state: ConnState, entry: NetworkEntry): void {
+		state.network.push(entry);
+		state.networkById.set(entry.requestId, entry);
+		if (state.network.length > BUFFER_MAX) {
+			const removed = state.network.shift();
+			if (removed) {
+				state.networkById.delete(removed.requestId);
+				this.dropCachedBody(state, removed.requestId);
+			}
+		}
+	}
+
 	private async openConn(target: CdpTarget): Promise<CdpConnectionLike> {
 		const conn = this.connectFactory(target);
-		const state: ConnState = { conn, console: [], network: [], bodies: new Map(), bodyBytes: 0, unsubs: [] };
+		const state: ConnState = {
+			conn,
+			console: [],
+			network: [],
+			networkById: new Map(),
+			bodies: new Map(),
+			bodyBytes: 0,
+			unsubs: [],
+		};
 		this.conns.set(target.id, state);
 
 		const pushConsole = (line: ConsoleLine) => {
@@ -943,21 +966,15 @@ export class ChromeDevtoolsManager {
 				pushConsole({ level: p?.entry?.level ?? "info", text: p?.entry?.text ?? "" }),
 			),
 			conn.on("Network.requestWillBeSent", (p) => {
-				state.network.push({
+				this.pushNetworkEntry(state, {
 					requestId: p?.requestId,
 					method: p?.request?.method ?? "GET",
 					url: p?.request?.url ?? "",
 					...(p?.type ? { resourceType: p.type } : {}),
 				});
-				if (state.network.length > BUFFER_MAX) {
-					const removed = state.network.shift();
-					// Drop the evicted request's cached body too, so the body cache can
-					// never outlive its ring entry (and its bytes are reclaimed).
-					if (removed) this.dropCachedBody(state, removed.requestId);
-				}
 			}),
 			conn.on("Network.responseReceived", (p) => {
-				const entry = state.network.find((e) => e.requestId === p?.requestId);
+				const entry = state.networkById.get(p?.requestId);
 				if (entry) {
 					entry.status = p?.response?.status;
 					entry.mimeType = p?.response?.mimeType;

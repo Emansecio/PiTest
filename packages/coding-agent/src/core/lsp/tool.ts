@@ -601,26 +601,31 @@ export function createLspToolDefinition(
 								},
 								recheckDiagnostics: async (uris) => {
 									const out = new Map<string, Diagnostic[]>();
-									for (const u of uris) {
-										const file = uriToFile(u);
-										const minVersion = client.diagnosticsVersion;
-										let content: string;
-										try {
-											content = await readFile(file, "utf-8");
-										} catch {
-											continue;
-										}
-										await syncContent(client, file, content, signal);
-										const expectedDocumentVersion = client.openFiles.get(u)?.version;
-										out.set(
-											u,
-											await waitForDiagnostics(client, u, {
+									const outcomes = await Promise.allSettled(
+										uris.map(async (u) => {
+											const file = uriToFile(u);
+											const minVersion = client.diagnosticsVersion;
+											let content: string;
+											try {
+												content = await readFile(file, "utf-8");
+											} catch {
+												return null;
+											}
+											await syncContent(client, file, content, signal);
+											const expectedDocumentVersion = client.openFiles.get(u)?.version;
+											const diagnostics = await waitForDiagnostics(client, u, {
 												timeoutMs: 4000,
 												signal,
 												minVersion,
 												expectedDocumentVersion,
-											}),
-										);
+											});
+											return { uri: u, diagnostics };
+										}),
+									);
+									for (const outcome of outcomes) {
+										if (outcome.status === "fulfilled" && outcome.value) {
+											out.set(outcome.value.uri, outcome.value.diagnostics);
+										}
 									}
 									return out;
 								},

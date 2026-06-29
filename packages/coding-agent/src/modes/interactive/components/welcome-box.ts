@@ -11,8 +11,8 @@
  *
  * Layout (3 identity rows closed by one rule):
  *     █▀█ █ ▀█▀   coding agent in your terminal            v0.4.2
- *     █▀▀ █  █    ~/proj (main)
- *     ▀   ▀  ▀
+ *     █▀▀ █  █    ● Workspace — PiTest/src (main)
+ *     ▀   ▀  ▀    ├─ Resuming · session-name   (when applicable)
  *   ────────────────────────────────────────────────────────────
  *
  * The hint/tip line is rendered separately (below) so its expand toggle stays
@@ -22,8 +22,9 @@
 import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import { theme } from "../theme/theme.ts";
 
-// 3-row half-block wordmark for the default app name "pit". Each row is exactly
-// 9 visible columns wide (all U+2588/U+2580 + spaces are width-1).
+// 3-row half-block wordmark spelling P-I-T. Each row is exactly 9 visible columns
+// (U+2588/U+2580 + spaces are width-1). Wider/smoothed variants were tried and
+// misread as other letters — keep this compact pixel font.
 const WORDMARK_PIT: readonly string[] = ["█▀█ █ ▀█▀", "█▀▀ █  █ ", "▀   ▀  ▀ "];
 const WORDMARK_WIDTH = 9;
 
@@ -32,13 +33,40 @@ export interface WelcomeBoxData {
 	version: string;
 	/** One-line tagline, e.g. "coding agent in your terminal". */
 	tagline: string;
-	/** Display path of the cwd (already home-shortened). */
+	/** Display path of the session cwd (repo-relative or home-shortened). */
 	cwdDisplay: string;
+	/** `shell: …` when launcher cwd differs from session cwd. */
+	shellCwdNote?: string;
 	branch?: string;
 	/** When resuming, the session name to surface in place of the cwd. */
 	resumedSessionName?: string;
 	/** Color function for the wordmark (lets interactive-mode ease it in on mount). */
 	wordmarkColor?: (s: string) => string;
+}
+
+/** `● Workspace — PiTest/src (main) · shell: ~/pit` — always shown for orientation. */
+function formatWorkspaceLine(
+	cwdDisplay: string,
+	branch: string | undefined,
+	shellCwdNote: string | undefined,
+	width: number,
+): string {
+	let path =
+		branch !== undefined && branch !== ""
+			? `${theme.fg("accent", cwdDisplay)}${theme.fg("dim", ` (${branch})`)}`
+			: theme.fg("accent", cwdDisplay);
+	if (shellCwdNote) {
+		path = `${path}${theme.fg("dim", ` · ${shellCwdNote}`)}`;
+	}
+	const header = `${theme.fg("accent", "●")} ${theme.bold("Workspace")} ${theme.fg("dim", "—")} `;
+	const line = header + path;
+	return visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line;
+}
+
+function formatResumeLine(sessionName: string, width: number): string {
+	const body = theme.fg("muted", `Resuming · ${sessionName}`);
+	const line = `${theme.fg("dim", "├─ ")}${body}`;
+	return visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line;
 }
 
 /** Place `left` and `right` on one line `width` wide, right-aligning `right`. */
@@ -112,31 +140,29 @@ export class WelcomeBox implements Component {
 		// de-emphasis without making the reader squint.
 		const versionText = theme.fg("muted", `v${d.version}`);
 		const taglineText = theme.fg("muted", d.tagline);
-		const cwd = d.branch ? `${d.cwdDisplay} (${d.branch})` : d.cwdDisplay;
-		// In the home dir with no project context (`~`, no branch, no resumed
-		// session) the cwd line orients nothing — a lone "~" reads like a leftover
-		// placeholder. Drop it; the footer still carries the live cwd.
-		const homeWithoutContext = !d.resumedSessionName && !d.branch && d.cwdDisplay === "~";
-		let contextText: string;
-		if (d.resumedSessionName) {
-			contextText = theme.fg("muted", `Resuming · ${d.resumedSessionName}`);
-		} else if (homeWithoutContext) {
-			contextText = "";
-		} else {
-			contextText = theme.fg("muted", cwd);
-		}
-
 		const bodyW = this.bodyWidth(w, useWordmark);
+		const workspaceLine = formatWorkspaceLine(d.cwdDisplay, d.branch, d.shellCwdNote, bodyW);
+		const resumeLine = d.resumedSessionName ? formatResumeLine(d.resumedSessionName, bodyW) : "";
 		const bodies = useWordmark
 			? // The wordmark IS the name, so don't repeat "pit" as a text label.
-				[composeLeftRight(taglineText, versionText, bodyW), contextText, ""]
-			: [composeLeftRight(theme.bold(theme.fg("accent", d.appName)), versionText, bodyW), taglineText, contextText];
+				[composeLeftRight(taglineText, versionText, bodyW), workspaceLine, resumeLine]
+			: d.resumedSessionName
+				? [
+						composeLeftRight(theme.bold(theme.fg("accent", d.appName)), versionText, bodyW),
+						workspaceLine,
+						resumeLine,
+					]
+				: [
+						composeLeftRight(theme.bold(theme.fg("accent", d.appName)), versionText, bodyW),
+						taglineText,
+						workspaceLine,
+					];
 
 		const rows: string[] = [];
 		for (let i = 0; i < 3; i++) {
 			const body = bodies[i] ?? "";
 			if (useWordmark) {
-				const wm = wordmarkColor(WORDMARK_PIT[i]);
+				const wm = wordmarkColor(WORDMARK_PIT[i] ?? "");
 				rows.push(`  ${wm}   ${body}`);
 			} else {
 				rows.push(`  ${body}`);

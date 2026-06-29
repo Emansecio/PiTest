@@ -19,7 +19,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "f
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.ts";
-import { resolveConfigValue } from "./resolve-config-value.ts";
+import { resolveConfigValue, resolveConfigValueUncachedAsync } from "./resolve-config-value.ts";
 
 // Shared buffer backing Atomics.wait() for lock-retry sleeps. Yields the thread
 // instead of busy-spinning (mirrors SettingsManager's lock-retry strategy).
@@ -500,7 +500,7 @@ export class AuthStorage {
 		const cred = this.data[providerId];
 
 		if (cred?.type === "api_key") {
-			return resolveConfigValue(cred.key);
+			return await resolveConfigValueUncachedAsync(cred.key);
 		}
 
 		if (cred?.type === "oauth") {
@@ -559,7 +559,7 @@ export class AuthStorage {
 			const runtimeAlias = this.runtimeOverrides.get(alias);
 			if (runtimeAlias) return runtimeAlias;
 			const aliasCred = this.data[alias];
-			if (aliasCred?.type === "api_key") return resolveConfigValue(aliasCred.key);
+			if (aliasCred?.type === "api_key") return await resolveConfigValueUncachedAsync(aliasCred.key);
 		}
 
 		// Fall back to custom resolver (e.g., models.json custom providers)

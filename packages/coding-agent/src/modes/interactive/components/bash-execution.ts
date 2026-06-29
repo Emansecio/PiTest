@@ -64,6 +64,28 @@ export class BashExecutionComponent extends MessageShell {
 		},
 		invalidate: () => {},
 	};
+	// Persistent output children — patched on streaming chunks instead of
+	// contentContainer.clear() + re-add on every appendOutput().
+	private readonly outputExpandedText = new Text("", 0, 0);
+	private previewStyledInput = "";
+	private previewCachedWidth: number | undefined;
+	private previewCachedLines: string[] | undefined;
+	private readonly outputPreviewRenderer = {
+		render: (width: number): string[] => {
+			if (this.previewCachedWidth !== width) {
+				const result = truncateToVisualLines(this.previewStyledInput, PREVIEW_LINES, width, 0);
+				this.previewCachedLines = result.visualLines;
+				this.previewCachedWidth = width;
+			}
+			return this.previewCachedLines ?? [];
+		},
+		invalidate: () => {
+			this.previewCachedWidth = undefined;
+			this.previewCachedLines = undefined;
+		},
+	};
+	private readonly statusText = new Text("", 0, 0);
+	private lastLayoutKey = "";
 
 	constructor(command: string, ui: TUI, excludeFromContext = false) {
 		// Per Leva 2 (D3=yes): bash uses the unified shell instead of the
@@ -78,8 +100,6 @@ export class BashExecutionComponent extends MessageShell {
 		this.contentContainer = new Container();
 		this.addChild(this.contentContainer);
 
-		// NOTE: the command header is created in updateDisplay() (which clears the
-		// container on every render), so we do not build a duplicate one here.
 		const headerColor = excludeFromContext ? "dim" : "bashMode";
 
 		// Loader
@@ -169,6 +189,80 @@ export class BashExecutionComponent extends MessageShell {
 		this.updateDisplay();
 	}
 
+	private computeLayoutKey(availableLines: string[], hiddenLineCount: number, hasStatusText: boolean): string {
+		return [
+			this.status,
+			this.expanded ? "1" : "0",
+			availableLines.length > 0 ? "1" : "0",
+			String(hiddenLineCount),
+			hasStatusText ? "1" : "0",
+		].join("|");
+	}
+
+	private buildStatusText(availableLines: string[], hiddenLineCount: number): string {
+		const statusParts: string[] = [];
+
+		if (hiddenLineCount > 0) {
+			if (this.expanded) {
+				statusParts.push(`(${keyHint("app.tools.expand", "to collapse")})`);
+			} else {
+				statusParts.push(moreLinesTrailer(hiddenLineCount, expandKeyHint()));
+			}
+		}
+
+		if (this.status === "cancelled") {
+			statusParts.push(theme.fg("warning", "(cancelled)"));
+		} else if (this.status === "error") {
+			statusParts.push(theme.fg("error", `(exit ${this.exitCode})`));
+		}
+
+		const wasTruncated = this.truncationResult?.truncated || this.cachedContextTruncation?.truncated;
+		if (wasTruncated && this.fullOutputPath) {
+			statusParts.push(theme.fg("warning", `Output truncated. Full output: ${this.fullOutputPath}`));
+		}
+
+		if (statusParts.length === 0) return "";
+		const statusPrefix = availableLines.length > 0 ? "\n" : "";
+		return `${statusPrefix}${statusParts.join("\n")}`;
+	}
+
+	private patchDisplayContent(availableLines: string[]): void {
+		if (availableLines.length > 0) {
+			if (this.expanded) {
+				this.outputExpandedText.setText(this.cachedStyledExpanded);
+			} else {
+				this.previewStyledInput = this.cachedStyledPreview;
+				this.outputPreviewRenderer.invalidate();
+			}
+		}
+	}
+
+	private rebuildDisplayContent(availableLines: string[], hiddenLineCount: number): void {
+		this.contentContainer.clear();
+		this.contentContainer.addChild(this.headerRenderer);
+
+		if (availableLines.length > 0) {
+			if (this.expanded) {
+				this.outputExpandedText.setText(this.cachedStyledExpanded);
+				this.contentContainer.addChild(this.outputExpandedText);
+			} else {
+				this.previewStyledInput = this.cachedStyledPreview;
+				this.outputPreviewRenderer.invalidate();
+				this.contentContainer.addChild(this.outputPreviewRenderer);
+			}
+		}
+
+		if (this.status === "running") {
+			this.contentContainer.addChild(this.loader);
+		} else {
+			const statusBody = this.buildStatusText(availableLines, hiddenLineCount);
+			if (statusBody.length > 0) {
+				this.statusText.setText(statusBody);
+				this.contentContainer.addChild(this.statusText);
+			}
+		}
+	}
+
 	private updateDisplay(): void {
 		// Apply truncation for LLM context limits (same limits as bash tool).
 		// Cache by outputVersion: re-renders triggered by invalidate()/setExpanded
@@ -203,90 +297,20 @@ export class BashExecutionComponent extends MessageShell {
 			this.cachedStyledExpanded = this.cachedAvailableLines.map((line) => theme.fg("muted", line)).join("\n");
 		}
 
-		// Use cached derived data for the rest of the render
 		const availableLines = this.cachedAvailableLines;
-
-		// Apply preview truncation based on expanded state
 		const previewLogicalLines = availableLines.slice(-PREVIEW_LINES);
 		const hiddenLineCount = availableLines.length - previewLogicalLines.length;
+		const hasStatusText =
+			this.status !== "running" && this.buildStatusText(availableLines, hiddenLineCount).length > 0;
+		const layoutKey = this.computeLayoutKey(availableLines, hiddenLineCount, hasStatusText);
 
-		// Rebuild content container
-		this.contentContainer.clear();
-
-		// Command header — shell already provides the 1-col left inset via the
-		// gutter; no internal paddingX needed. Collapsed, a long command is clamped
-		// to a single visual row (horizontal clip via `…`, multi-line scripts folded
-		// into `(N earlier lines, …)`); ctrl+o expands to the full command. Mirrors
-		// the agent-issued bash tool's title clamp so user `!` commands don't wrap.
-		// headerRenderer is a persistent field — not re-allocated every call.
-		this.contentContainer.addChild(this.headerRenderer);
-
-		// Output
-		if (availableLines.length > 0) {
-			if (this.expanded) {
-				// Show all lines — use cached styled text (recomputed only when
-				// outputVersion changes, not on every invalidate()-triggered re-render).
-				this.contentContainer.addChild(new Text(this.cachedStyledExpanded, 0, 0));
-			} else {
-				// Use shared visual truncation utility with width-aware caching.
-				// cachedStyledPreview is stable across invalidate()-only re-renders so
-				// the closure captures a reference that doesn't change between them.
-				const styledInput = this.cachedStyledPreview;
-				let cachedWidth: number | undefined;
-				let cachedLines: string[] | undefined;
-				this.contentContainer.addChild({
-					render: (width: number) => {
-						if (cachedLines === undefined || cachedWidth !== width) {
-							const result = truncateToVisualLines(styledInput, PREVIEW_LINES, width, 0);
-							cachedLines = result.visualLines;
-							cachedWidth = width;
-						}
-						return cachedLines ?? [];
-					},
-					invalidate: () => {
-						cachedWidth = undefined;
-						cachedLines = undefined;
-					},
-				});
-			}
+		if (layoutKey === this.lastLayoutKey && this.contentContainer.children.length > 0) {
+			this.patchDisplayContent(availableLines);
+			return;
 		}
 
-		// Loader or status
-		if (this.status === "running") {
-			this.contentContainer.addChild(this.loader);
-		} else {
-			const statusParts: string[] = [];
-
-			// Show how many lines are hidden (collapsed preview)
-			if (hiddenLineCount > 0) {
-				if (this.expanded) {
-					statusParts.push(`(${keyHint("app.tools.expand", "to collapse")})`);
-				} else {
-					statusParts.push(moreLinesTrailer(hiddenLineCount, expandKeyHint()));
-				}
-			}
-
-			if (this.status === "cancelled") {
-				statusParts.push(theme.fg("warning", "(cancelled)"));
-			} else if (this.status === "error") {
-				statusParts.push(theme.fg("error", `(exit ${this.exitCode})`));
-			}
-
-			// Add truncation warning (context truncation, not preview truncation).
-			// cachedContextTruncation is always defined here: outputNeedsRefresh
-			// sets it on first call; subsequent calls leave it set from before.
-			const wasTruncated = this.truncationResult?.truncated || this.cachedContextTruncation?.truncated;
-			if (wasTruncated && this.fullOutputPath) {
-				statusParts.push(theme.fg("warning", `Output truncated. Full output: ${this.fullOutputPath}`));
-			}
-
-			if (statusParts.length > 0) {
-				// Hug the command line when there's no output above (avoids an orphan
-				// blank line); separate from the output only when it's present.
-				const statusPrefix = availableLines.length > 0 ? "\n" : "";
-				this.contentContainer.addChild(new Text(`${statusPrefix}${statusParts.join("\n")}`, 0, 0));
-			}
-		}
+		this.rebuildDisplayContent(availableLines, hiddenLineCount);
+		this.lastLayoutKey = layoutKey;
 	}
 
 	/**

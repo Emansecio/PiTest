@@ -259,7 +259,7 @@ export class ActivityLineComponent extends Container {
 		} else if (autoError) {
 			// Auto-shown error: render the full error body but cap the visible
 			// lines so a failure never floods the CLI — the rest is one ctrl+o away.
-			this.exec.setExpanded(true);
+			this.exec.setResultExpanded(true);
 			for (const l of capErrorPreview(this.exec.render(width - 2), width - 2)) lines.push(`  ${l}`);
 		}
 		if (cacheable) {

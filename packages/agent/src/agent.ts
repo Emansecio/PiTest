@@ -9,6 +9,7 @@ import {
 	type Transport,
 } from "@pit/ai";
 import { buildErrorTurn, runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+import type { OverthinkGuardConfig } from "./overthink-guard.ts";
 import type { ToolErrorHintRegistry } from "./tool-error-hint-registry.ts";
 import type { ToolRewriteRegistry } from "./tool-rewrite-registry.ts";
 import type {
@@ -111,6 +112,13 @@ export interface AgentOptions {
 	/** Time-Traveling Stream Rules matcher. Passed through to the loop config. */
 	ttsrMatcher?: TTSRMatcher;
 	/**
+	 * Live overthink guard policy, evaluated against the current model each run.
+	 */
+	getOverthinkGuard?: (
+		model: { provider: string; reasoning?: boolean },
+		thinkingLevel: import("./types.ts").ThinkingLevel | undefined,
+	) => OverthinkGuardConfig;
+	/**
 	 * Optional tool rewrite registry. Forwarded into the loop config so every
 	 * incoming tool call is run through it between argument preparation and
 	 * schema validation.
@@ -210,6 +218,8 @@ export class Agent {
 	public toolExecution: ToolExecutionMode;
 	/** Optional Time-Traveling Stream Rules matcher. */
 	public ttsrMatcher?: TTSRMatcher;
+	/** Live overthink guard policy — see {@link AgentOptions.getOverthinkGuard}. */
+	public getOverthinkGuard?: AgentOptions["getOverthinkGuard"];
 	/** Optional tool rewrite registry — see {@link AgentOptions.toolRewriteRegistry}. */
 	public toolRewriteRegistry?: ToolRewriteRegistry;
 	/** Optional Tier 4 error-hint registry — see {@link AgentOptions.toolErrorHintRegistry}. */
@@ -239,6 +249,7 @@ export class Agent {
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
 		this.toolExecution = options.toolExecution ?? "parallel";
 		this.ttsrMatcher = options.ttsrMatcher;
+		this.getOverthinkGuard = options.getOverthinkGuard;
 		this.toolRewriteRegistry = options.toolRewriteRegistry;
 		this.toolErrorHintRegistry = options.toolErrorHintRegistry;
 		this.emitRepairNotes = options.emitRepairNotes;
@@ -522,6 +533,7 @@ export class Agent {
 			getFollowUpMessages: async () => this.followUpQueue.drain(),
 			getPassiveMessages: async () => this.passiveQueue.drain(),
 			ttsrMatcher: this.ttsrMatcher,
+			overthinkGuard: this.getOverthinkGuard?.(this._state.model, this._state.thinkingLevel),
 			toolRewriteRegistry: this.toolRewriteRegistry,
 			toolErrorHintRegistry: this.toolErrorHintRegistry,
 			// Resolve the policy against the CURRENT model so a fallback/`/model`

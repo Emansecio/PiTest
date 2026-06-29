@@ -24,8 +24,14 @@ export class DiagnosticsBlockComponent extends MessageShell {
 	private expanded = false;
 	private readonly diagnostics: readonly ResourceDiagnostic[];
 	private readonly sourceInfos: Map<string, SourceInfo>;
+	private readonly collapsedSummary?: (diagnostics: readonly ResourceDiagnostic[]) => string;
 
-	constructor(label: string, diagnostics: readonly ResourceDiagnostic[], sourceInfos: Map<string, SourceInfo>) {
+	constructor(
+		label: string,
+		diagnostics: readonly ResourceDiagnostic[],
+		sourceInfos: Map<string, SourceInfo>,
+		options?: { collapsedSummary?: (diagnostics: readonly ResourceDiagnostic[]) => string },
+	) {
 		// First-impression de-noise: only genuine errors warrant the saturated
 		// diagnostics color on the gutter + bracketed label. Collisions/warnings
 		// (the common startup case) sit in `muted` so the welcome screen isn't
@@ -38,6 +44,7 @@ export class DiagnosticsBlockComponent extends MessageShell {
 		});
 		this.diagnostics = diagnostics;
 		this.sourceInfos = sourceInfos;
+		this.collapsedSummary = options?.collapsedSummary;
 		this.updateDisplay();
 	}
 
@@ -55,19 +62,24 @@ export class DiagnosticsBlockComponent extends MessageShell {
 			return;
 		}
 
-		let collisions = 0;
-		let warnings = 0;
-		let errors = 0;
-		for (const d of this.diagnostics) {
-			if (d.type === "collision") collisions++;
-			else if (d.type === "error") errors++;
-			else warnings++;
+		let summary: string;
+		if (this.collapsedSummary) {
+			summary = this.collapsedSummary(this.diagnostics);
+		} else {
+			let collisions = 0;
+			let warnings = 0;
+			let errors = 0;
+			for (const d of this.diagnostics) {
+				if (d.type === "collision") collisions++;
+				else if (d.type === "error") errors++;
+				else warnings++;
+			}
+			const parts: string[] = [];
+			if (collisions > 0) parts.push(`${collisions} ${collisions === 1 ? "collision" : "collisions"}`);
+			if (warnings > 0) parts.push(`${warnings} ${warnings === 1 ? "warning" : "warnings"}`);
+			if (errors > 0) parts.push(`${errors} ${errors === 1 ? "error" : "errors"}`);
+			summary = parts.length > 0 ? parts.join(" + ") : `${this.diagnostics.length} issues`;
 		}
-		const parts: string[] = [];
-		if (collisions > 0) parts.push(`${collisions} ${collisions === 1 ? "collision" : "collisions"}`);
-		if (warnings > 0) parts.push(`${warnings} ${warnings === 1 ? "warning" : "warnings"}`);
-		if (errors > 0) parts.push(`${errors} ${errors === 1 ? "error" : "errors"}`);
-		const summary = parts.length > 0 ? parts.join(" + ") : `${this.diagnostics.length} issues`;
 
 		const line = `${theme.fg("dim", summary)} ${theme.fg("dim", `(${keyText("app.tools.expand")} to expand)`)}`;
 		this.addChild(new Text(line, 0, 0));

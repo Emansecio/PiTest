@@ -33,10 +33,11 @@ describe("renderTodoOverlay", () => {
 			item(3, "Create DemoTodoRepository in Infrastructure", "in_progress", "Creating impl"),
 			item(4, "Write tests", "pending"),
 		]);
-		expect(out).toContain("Todos (2/4)");
+		expect(out).toContain("Tasks");
+		expect(out).toContain("2/4");
 		expect(out).toContain("✓");
 		expect(out).toContain("◐ Create DemoTodoRepository in Infrastructure");
-		expect(out).toContain("(Creating impl)");
+		expect(out).toContain("— Creating impl");
 		expect(out).toContain("○ Write tests");
 		expect(out).toMatch(/├─/);
 		expect(out).toMatch(/└─/);
@@ -54,7 +55,7 @@ describe("renderTodoOverlay", () => {
 		for (let i = 1; i <= 16; i++) items.push(item(i, `done ${i}`, "completed"));
 		items.push(item(17, "active", "pending"));
 		const out = overlay(items);
-		expect(out).toContain("completed hidden");
+		expect(out).toContain("done hidden");
 		expect(out).toContain("active");
 	});
 });
@@ -100,7 +101,7 @@ describe("renderTodoOverlay width safety", () => {
 		const joined = stripAnsi(lines.join("\n"));
 		expect(joined).toContain("⠏");
 		expect(joined).toContain("…");
-		expect(joined).toContain("Applying PROPOSAL.md corrections"); // activeForm preserved
+		expect(joined).toContain("— Applying PROPOSAL.md corrections"); // activeForm preserved
 	});
 
 	it("truncates an over-long completed subject (strike row also fits)", () => {

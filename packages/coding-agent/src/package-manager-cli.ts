@@ -1,4 +1,4 @@
-import { Markdown, type MarkdownTheme } from "@pit/tui";
+import type { MarkdownTheme } from "@pit/tui";
 import chalk from "chalk";
 import { selectConfig } from "./cli/config-selector.ts";
 import {
@@ -311,7 +311,7 @@ function printSelfUpdateFallback(command: SelfUpdateCommand): void {
 	console.error(chalk.dim(`If this keeps failing, run this command yourself: ${command.display}`));
 }
 
-function printSelfUpdateNote(note: string): void {
+async function printSelfUpdateNote(note: string): Promise<void> {
 	const trimmedNote = note.trim();
 	if (!trimmedNote) {
 		return;
@@ -320,6 +320,7 @@ function printSelfUpdateNote(note: string): void {
 	console.log();
 	console.log(chalk.bold(chalk.yellow("Update note")));
 	try {
+		const { Markdown } = await import("@pit/tui");
 		const width = Math.max(20, process.stdout.columns ?? 80);
 		const renderedLines = new Markdown(trimmedNote, 0, 0, SELF_UPDATE_NOTE_MARKDOWN_THEME)
 			.render(width)
@@ -563,7 +564,7 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						return true;
 					}
 					if (selfUpdatePlan.note) {
-						printSelfUpdateNote(selfUpdatePlan.note);
+						await printSelfUpdateNote(selfUpdatePlan.note);
 					}
 					try {
 						if (installMethod === "npm") {

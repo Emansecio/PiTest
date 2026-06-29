@@ -13,6 +13,7 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@pit/ai";
+import { buildOverthinkReminderMessage, type OverthinkGuardConfig, OverthinkTracker } from "./overthink-guard.ts";
 import { appendHintsToContent } from "./tool-error-hint-registry.ts";
 import { appendRepairNoteToContent, buildRepairNote } from "./tool-repair-note.ts";
 import type {
@@ -40,6 +41,15 @@ const DEFAULT_MAX_TURNS = 250;
 
 /** Sentinel returned by `streamAssistantResponse` when a TTSR rule fires. */
 type TTSRInterrupt = { ttsr: TTSRMatchInfo };
+
+/** Sentinel returned when live thinking exceeds the overthink guard threshold. */
+type OverthinkInterrupt = { overthink: { estimatedTokens: number; threshold: number } };
+
+type StreamInterrupt = TTSRInterrupt | OverthinkInterrupt;
+
+function isStreamInterrupt(response: AssistantMessage | StreamInterrupt): response is StreamInterrupt {
+	return "ttsr" in response || "overthink" in response;
+}
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
@@ -326,35 +336,64 @@ async function runLoop(
 				currentContext = { ...currentContext, tools: liveTools };
 			}
 
-			// Stream assistant response. May return a TTSR interrupt; in that case
-			// we inject a system-reminder and replay the same turn (capped by
-			// MAX_TTSR_RETRIES_PER_TURN).
+			// Stream assistant response. May return a TTSR or overthink interrupt; in
+			// that case we inject a system-reminder and replay the same turn (each
+			// guard has its own per-turn retry cap).
 			let message: AssistantMessage;
 			let ttsrRetries = 0;
+			let overthinkRetries = 0;
+			const overthinkGuard = config.overthinkGuard;
+			const overthinkMaxRetries = overthinkGuard?.enabled ? overthinkGuard.maxRetriesPerTurn : 0;
 			config.ttsrMatcher?.reset();
 			while (true) {
 				const response = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
-				if (!("ttsr" in response)) {
+				if (!isStreamInterrupt(response)) {
 					message = response;
 					break;
 				}
-				if (ttsrRetries >= MAX_TTSR_RETRIES_PER_TURN) {
-					// Bail: surface an aborted assistant message so the caller stops the turn.
+				if ("ttsr" in response) {
+					if (ttsrRetries >= MAX_TTSR_RETRIES_PER_TURN) {
+						message = buildErrorTurn(
+							config.model,
+							`[stop: ttsr] TTSR: exceeded ${MAX_TTSR_RETRIES_PER_TURN} retries (rule "${response.ttsr.name}")`,
+						);
+						await emit({ type: "message_start", message });
+						await emit({ type: "message_end", message });
+						break;
+					}
+					ttsrRetries++;
+					const reminder = buildTTSRReminderMessage(response.ttsr);
+					currentContext.messages.push(reminder);
+					newMessages.push(reminder);
+					await emit({ type: "message_start", message: reminder });
+					await emit({ type: "message_end", message: reminder });
+					config.ttsrMatcher?.reset();
+					continue;
+				}
+				if (overthinkRetries >= overthinkMaxRetries) {
 					message = buildErrorTurn(
 						config.model,
-						`[stop: ttsr] TTSR: exceeded ${MAX_TTSR_RETRIES_PER_TURN} retries (rule "${response.ttsr.name}")`,
+						`[stop: overthink] Exceeded ${overthinkMaxRetries} overthink guard retries (~${response.overthink.estimatedTokens} tokens, limit ~${response.overthink.threshold}).`,
 					);
 					await emit({ type: "message_start", message });
 					await emit({ type: "message_end", message });
 					break;
 				}
-				ttsrRetries++;
-				const reminder = buildTTSRReminderMessage(response.ttsr);
+				overthinkRetries++;
+				recordDiagnostic({
+					category: "stream.overthink-guard",
+					level: "info",
+					source: "agent-loop.streamAssistantResponse",
+					context: {
+						attempt: overthinkRetries,
+						note: `tokens~${response.overthink.estimatedTokens} threshold~${response.overthink.threshold}`,
+					},
+				});
+				const reminder = buildOverthinkReminderMessage(response.overthink);
 				currentContext.messages.push(reminder);
 				newMessages.push(reminder);
 				await emit({ type: "message_start", message: reminder });
 				await emit({ type: "message_end", message: reminder });
-				config.ttsrMatcher?.reset();
 			}
 			newMessages.push(message);
 
@@ -450,6 +489,13 @@ function buildTurnBudgetMessage(config: AgentLoopConfig, maxTurns: number): Assi
  * `_ttsr_injected` flag is read by the compaction pipeline to preserve the
  * reminder verbatim instead of summarizing it.
  */
+function resolveOverthinkGuard(config?: OverthinkGuardConfig): OverthinkGuardConfig {
+	if (!config) {
+		return { enabled: false, tokenThreshold: 0, maxRetriesPerTurn: 0 };
+	}
+	return config;
+}
+
 function buildTTSRReminderMessage(info: TTSRMatchInfo): AgentMessage {
 	const text = `<system-reminder>[TTSR:${info.name}] ${info.message}</system-reminder>`;
 	const message = {
@@ -510,7 +556,7 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
-): Promise<AssistantMessage | TTSRInterrupt> {
+): Promise<AssistantMessage | StreamInterrupt> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
 	if (config.transformContext) {
@@ -542,7 +588,11 @@ async function streamAssistantResponse(
 		if (signal.aborted) ttsrAbort.abort();
 		else signal.addEventListener("abort", forwardAbort, { once: true });
 	}
-	let ttsrInterrupt: TTSRInterrupt | undefined;
+	let streamInterrupt: StreamInterrupt | undefined;
+	const overthinkGuard = resolveOverthinkGuard(config.overthinkGuard);
+	const overthinkTracker = overthinkGuard.enabled
+		? new OverthinkTracker(overthinkGuard.watchTextDelta === true)
+		: undefined;
 
 	// Single cleanup point: every exit path (normal returns, TTSR interrupt, and
 	// — the case the per-return removals missed — an exception from streamFunction,
@@ -602,17 +652,33 @@ async function streamAssistantResponse(
 						// into "tool_args". thinking_delta is intentionally skipped — model
 						// internal reasoning is not user-visible and should not trigger
 						// hindsight rules.
-						if (config.ttsrMatcher && !ttsrInterrupt) {
-							const delta = (event as { delta?: string }).delta ?? "";
+						const delta = (event as { delta?: string }).delta ?? "";
+						if (config.ttsrMatcher && !streamInterrupt) {
 							let scope: "assistant_text" | "tool_args" | undefined;
 							if (event.type === "text_delta") scope = "assistant_text";
 							else if (event.type === "toolcall_delta") scope = "tool_args";
 							if (scope) {
 								const hit = config.ttsrMatcher.feed(delta, scope);
 								if (hit) {
-									ttsrInterrupt = { ttsr: { name: hit.name, message: hit.message } };
+									streamInterrupt = { ttsr: { name: hit.name, message: hit.message } };
 									ttsrAbort.abort();
 								}
+							}
+						}
+						if (overthinkTracker && !streamInterrupt) {
+							if (event.type === "thinking_delta") {
+								overthinkTracker.onThinkingDelta(event.contentIndex, delta);
+							} else if (event.type === "text_delta" && overthinkGuard.watchTextDelta) {
+								overthinkTracker.onTextDelta(event.contentIndex, delta);
+							}
+							if (overthinkTracker.shouldInterrupt(event.contentIndex, overthinkGuard.tokenThreshold)) {
+								streamInterrupt = {
+									overthink: {
+										estimatedTokens: overthinkTracker.getEstimatedTokens(event.contentIndex),
+										threshold: overthinkGuard.tokenThreshold,
+									},
+								};
+								ttsrAbort.abort();
 							}
 						}
 						// Accumulate into pending delta if same kind+index, else flush and start anew.
@@ -631,10 +697,10 @@ async function streamAssistantResponse(
 						if (performance.now() - lastEmitTime >= DELTA_THROTTLE_MS) {
 							await flushPendingDelta();
 						}
-						if (ttsrInterrupt) {
+						if (streamInterrupt) {
 							rollbackPartialContext(context, addedPartial);
 							addedPartial = false;
-							return ttsrInterrupt;
+							return streamInterrupt;
 						}
 					}
 					break;
@@ -645,6 +711,15 @@ async function streamAssistantResponse(
 				case "thinking_end":
 				case "toolcall_start":
 				case "toolcall_end":
+					if (overthinkTracker) {
+						if (event.type === "thinking_start") {
+							overthinkTracker.onThinkingStart(event.contentIndex);
+						} else if (event.type === "text_start" && overthinkGuard.watchTextDelta) {
+							overthinkTracker.onTextStart(event.contentIndex);
+						} else if (event.type === "toolcall_start") {
+							overthinkTracker.onToolCallStart();
+						}
+					}
 					await flushPendingDelta();
 					if (partialMessage) {
 						partialMessage = event.partial;
@@ -660,9 +735,9 @@ async function streamAssistantResponse(
 				case "done":
 				case "error": {
 					await flushPendingDelta();
-					if (ttsrInterrupt) {
+					if (streamInterrupt) {
 						rollbackPartialContext(context, addedPartial);
-						return ttsrInterrupt;
+						return streamInterrupt;
 					}
 					const finalMessage = await response.result();
 					await publishFinalAssistantMessage(context, finalMessage, addedPartial, emit);
@@ -672,9 +747,9 @@ async function streamAssistantResponse(
 		}
 		await flushPendingDelta();
 
-		if (ttsrInterrupt) {
+		if (streamInterrupt) {
 			rollbackPartialContext(context, addedPartial);
-			return ttsrInterrupt;
+			return streamInterrupt;
 		}
 
 		// Reaching here means the async iterator drained without the in-loop

@@ -169,6 +169,14 @@ export class FusionLiveComponent implements Component {
 	// ticker coalesce the frame away (mirrors Loader.refreshElapsed gating).
 	private lastFrameIdx = -1;
 	private lastElapsedKey = "";
+	private renderVersion = 0;
+	private renderCache: {
+		version: number;
+		width: number;
+		frameIdx: number;
+		elapsedKey: string;
+		lines: string[];
+	} | null = null;
 
 	constructor(ui: TUI) {
 		this.ui = ui;
@@ -182,6 +190,7 @@ export class FusionLiveComponent implements Component {
 	setSynth(synthId: string): void {
 		if (synthId === this.synthId) return;
 		this.synthId = synthId;
+		this.renderVersion++;
 		this.ui.requestRender();
 	}
 
@@ -191,6 +200,7 @@ export class FusionLiveComponent implements Component {
 	setStage(stage: FusionStage): void {
 		if (stage === this.stage) return;
 		this.stage = stage;
+		this.renderVersion++;
 		if (stage === "judge" && this.judgeStartedAt === 0) {
 			this.judgeStartedAt = Date.now();
 		}
@@ -219,6 +229,7 @@ export class FusionLiveComponent implements Component {
 				toolSummaryCache: null,
 			});
 		}
+		this.renderVersion++;
 		this.ui.requestRender();
 	}
 
@@ -254,6 +265,7 @@ export class FusionLiveComponent implements Component {
 			const snippet = oneLine(text);
 			if (snippet) entry.thought = snippet;
 		}
+		this.renderVersion++;
 		this.ui.requestRender();
 	}
 
@@ -266,18 +278,8 @@ export class FusionLiveComponent implements Component {
 			this.verifyToolCounts.set(tool, (this.verifyToolCounts.get(tool) ?? 0) + 1);
 			this.verifyToolSummaryCache = null;
 		}
+		this.renderVersion++;
 		this.ui.requestRender();
-	}
-
-	/**
-	 * Current spinner glyph, phase-locked to the shared UI cadence via the same
-	 * monotonic clock the Loader uses (`performance.now()` / SPINNER_FRAME_MS).
-	 * Deriving from the clock (not an internal counter) keeps this strip in step
-	 * with every other spinner on screen.
-	 */
-	private spinnerFrame(): string {
-		const idx = Math.floor(performance.now() / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
-		return SPINNER_FRAMES[idx]!;
 	}
 
 	/**
@@ -352,7 +354,19 @@ export class FusionLiveComponent implements Component {
 
 	render(width: number): string[] {
 		const now = Date.now();
-		const spinner = this.spinnerFrame();
+		const frameIdx = Math.floor(performance.now() / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
+		const elapsedKey = this.currentElapsedKey(now);
+		if (
+			this.renderCache &&
+			this.renderCache.version === this.renderVersion &&
+			this.renderCache.width === width &&
+			this.renderCache.frameIdx === frameIdx &&
+			this.renderCache.elapsedKey === elapsedKey
+		) {
+			return this.renderCache.lines;
+		}
+
+		const spinner = SPINNER_FRAMES[frameIdx]!;
 		const lines: string[] = [];
 
 		// Render rows in SLOT order (Map insertion can race with the same-cli stagger).
@@ -371,7 +385,6 @@ export class FusionLiveComponent implements Component {
 			header += `  ${theme.fg("dim", `→ synth ${this.synthId}`)}`;
 		}
 		lines.push(header);
-		lines.push("");
 
 		// Brief stage: the synth is drafting the advisor brief — no member rows yet.
 		if (this.stage === "brief") {
@@ -395,13 +408,12 @@ export class FusionLiveComponent implements Component {
 			const glyph = glyphFor(m.status, spinner);
 			const slot = theme.fg("dim", `${m.index + 1}`);
 			const name = this.padVisible(theme.fg("muted", `${m.cli}:${m.model}`), nameCol);
-			const tail = statusTail(entry, secs, now);
-			lines.push(`  ${glyph} ${slot}  ${name}  ${tail}`);
-			// "WHAT are they thinking": a dim, truncated sub-line with the latest thought/text
-			// snippet, only while the advisor is actively running.
+			let tail = statusTail(entry, secs, now);
 			if (m.status === "running" && entry.thought) {
-				lines.push(`       ${theme.fg("dim", `↳ ${entry.thought}`)}`);
+				const thoughtSnippet = truncateToWidth(entry.thought, Math.max(12, width - 24), theme.fg("dim", "…"));
+				tail = `${tail}  ${theme.fg("dim", thoughtSnippet)}`;
 			}
+			lines.push(`  ${glyph} ${slot}  ${name}  ${tail}`);
 		}
 
 		// Judge stage: the synthesizer reconciles the advisors. Name the synth so it
@@ -429,13 +441,14 @@ export class FusionLiveComponent implements Component {
 		// Every emitted line MUST be truncated to the viewport width with a dim
 		// ellipsis — the TUI render guard rejects any component line wider than
 		// `width`, and overflow would dangle an orphan ellipsis at the border.
-		return lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
+		const rendered = lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
+		this.renderCache = { version: this.renderVersion, width, frameIdx, elapsedKey, lines: rendered };
+		return rendered;
 	}
 
-	/** Component contract: drop any cached render state. This component composes
-	 * fresh lines every render() (no cache), so there is nothing to clear — but
-	 * the method must exist to satisfy the Component interface. */
-	invalidate(): void {}
+	invalidate(): void {
+		this.renderCache = null;
+	}
 
 	/** Unsubscribe from the shared animation ticker. Idempotent: safe to call
 	 * more than once (the second call is a no-op). */

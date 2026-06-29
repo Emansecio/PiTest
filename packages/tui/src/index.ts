@@ -118,3 +118,4 @@ export {
 } from "./tui.ts";
 // Utilities
 export { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.ts";
+export { DEFAULT_VIRTUALIZED_TAIL_LINE_BUDGET, VirtualizedContainer } from "./virtualized-container.ts";

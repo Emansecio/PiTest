@@ -18,10 +18,16 @@ import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
-import { aggregateLearnedErrors, defaultLearnedErrorsDir } from "./learned-error-store.ts";
+import {
+	type AggregatedLearnedError,
+	aggregateLearnedErrors,
+	aggregateLearnedErrorsSync,
+	defaultLearnedErrorsDir,
+} from "./learned-error-store.ts";
 import { convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { defaultModelPerProvider, findInitialModel } from "./model-resolver.ts";
+import { resolveOverthinkGuardForModel } from "./overthink-policy.ts";
 import { resolveEmitRepairNotes } from "./repair-note-policy.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
@@ -153,9 +159,18 @@ function getDefaultAgentDir(): string {
  * disk file must not block agent startup. Returns an empty array on any
  * failure, which makes the Tier 4 registry behave as if no warm data exists.
  */
-function loadLearnedErrorsSafe(): ReturnType<typeof aggregateLearnedErrors> {
+let learnedErrorsPrefetch: AggregatedLearnedError[] | undefined;
+
+void aggregateLearnedErrors(defaultLearnedErrorsDir())
+	.then((rows) => {
+		learnedErrorsPrefetch = rows;
+	})
+	.catch(() => {});
+
+function loadLearnedErrorsSafe(): AggregatedLearnedError[] {
+	if (learnedErrorsPrefetch) return learnedErrorsPrefetch;
 	try {
-		return aggregateLearnedErrors(defaultLearnedErrorsDir());
+		return aggregateLearnedErrorsSync(defaultLearnedErrorsDir());
 	} catch {
 		return [];
 	}
@@ -457,6 +472,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingBudgets: settingsManager.getThinkingBudgets(),
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 		ttsrMatcher: options.ttsrMatcher,
+		getOverthinkGuard: (model, thinkingLevel) =>
+			resolveOverthinkGuardForModel(
+				model as Model<"openai-responses">,
+				thinkingLevel,
+				settingsManager.getToolFeedbackSettings().overthinkGuard,
+			),
 		toolRewriteRegistry: createDefaultToolRewriteRegistry(),
 		toolErrorHintRegistry: createDefaultToolErrorHintRegistry({
 			// Lazy: defer the synchronous learned-error disk scan until the

@@ -2,6 +2,8 @@
 export * from "./agent.ts";
 // Loop functions
 export * from "./agent-loop.ts";
+// Live overthink guard — interrupt unbounded reasoning mid-stream
+export * from "./overthink-guard.ts";
 export * from "./proxy.ts";
 // Proxy utilities
 // Tier 4 — post-hoc error hint registry

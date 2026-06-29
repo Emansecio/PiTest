@@ -235,7 +235,7 @@ export class NavGroupComponent extends Container {
 			// failed call cannot flood the CLI — the rest is one ctrl+o away.
 			for (const e of this.execs) {
 				if (e.getActivityState() !== "error" || e.isAborted()) continue;
-				e.setExpanded(true);
+				e.setResultExpanded(true);
 				for (const l of capErrorPreview(e.render(width - 2), width - 2)) lines.push(`  ${l}`);
 			}
 		}

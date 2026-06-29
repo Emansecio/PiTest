@@ -54,6 +54,7 @@ export async function executeBashWithOperations(
 	options?: BashExecutorOptions,
 ): Promise<BashResult> {
 	const outputChunks: string[] = [];
+	let outputChunkHead = 0;
 	let outputBytes = 0;
 	const maxOutputBytes = BASH_MAX_BYTES * 2;
 
@@ -82,8 +83,8 @@ export async function executeBashWithOperations(
 			tempFilePath = undefined;
 			tempFileFailed = true;
 		});
-		for (const chunk of outputChunks) {
-			tempFileStream.write(chunk);
+		for (let i = outputChunkHead; i < outputChunks.length; i++) {
+			tempFileStream.write(outputChunks[i]);
 		}
 	};
 
@@ -107,9 +108,9 @@ export async function executeBashWithOperations(
 		// Keep rolling buffer
 		outputChunks.push(text);
 		outputBytes += Buffer.byteLength(text);
-		while (outputBytes > maxOutputBytes && outputChunks.length > 1) {
-			const removed = outputChunks.shift()!;
-			outputBytes -= Buffer.byteLength(removed);
+		while (outputBytes > maxOutputBytes && outputChunkHead < outputChunks.length - 1) {
+			outputBytes -= Buffer.byteLength(outputChunks[outputChunkHead]!);
+			outputChunkHead += 1;
 		}
 
 		// Stream to callback. Guard it: a throwing callback (e.g. injected by an
@@ -140,7 +141,7 @@ export async function executeBashWithOperations(
 				tempFileStream.write(tail);
 			}
 		}
-		const fullOutput = outputChunks.join("");
+		const fullOutput = outputChunks.slice(outputChunkHead).join("");
 		const truncationResult = truncateTail(fullOutput, { maxLines: BASH_MAX_LINES, maxBytes: BASH_MAX_BYTES });
 		if (truncationResult.truncated) {
 			ensureTempFile();

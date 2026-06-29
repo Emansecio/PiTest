@@ -59,6 +59,17 @@ markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
 });
 
+/** True when the buffer ends with an unclosed fenced code block (odd ``` count). */
+function hasOpenCodeFence(text: string): boolean {
+	let count = 0;
+	let idx = text.indexOf("```");
+	while (idx !== -1) {
+		count++;
+		idx = text.indexOf("```", idx + 3);
+	}
+	return count % 2 === 1;
+}
+
 /**
  * Default text styling for markdown content.
  * Applied to all text unless overridden by markdown formatting.
@@ -221,13 +232,33 @@ export class Markdown implements Component {
 		const nextTokenCache = new Map<string, string[]>();
 		const contentLines: string[] = [];
 
+		let deferHighlightCodeIdx = -1;
+		if (hasOpenCodeFence(normalizedText)) {
+			for (let j = tokens.length - 1; j >= 0; j--) {
+				if (tokens[j]?.type === "code") {
+					deferHighlightCodeIdx = j;
+					break;
+				}
+			}
+		}
+
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextTokenType = tokens[i + 1]?.type;
-			const cacheKey = `${width}\u0000${nextTokenType ?? ""}\u0000${token.raw}`;
+			const deferCodeHighlight = i === deferHighlightCodeIdx;
+			const cacheKey = `${width}\u0000${nextTokenType ?? ""}\u0000${deferCodeHighlight ? 1 : 0}\u0000${token.raw}`;
 			let tokenLines = prevTokenCache?.get(cacheKey) ?? nextTokenCache.get(cacheKey);
 			if (!tokenLines) {
-				tokenLines = this.buildTokenLines(token, contentWidth, width, nextTokenType, leftMargin, rightMargin, bgFn);
+				tokenLines = this.buildTokenLines(
+					token,
+					contentWidth,
+					width,
+					nextTokenType,
+					leftMargin,
+					rightMargin,
+					bgFn,
+					deferCodeHighlight,
+				);
 			}
 			nextTokenCache.set(cacheKey, tokenLines);
 			for (const line of tokenLines) {
@@ -415,8 +446,9 @@ export class Markdown implements Component {
 		leftMargin: string,
 		rightMargin: string,
 		bgFn: ((text: string) => string) | undefined,
+		deferCodeHighlight = false,
 	): string[] {
-		const renderedLines = this.renderToken(token, contentWidth, nextTokenType);
+		const renderedLines = this.renderToken(token, contentWidth, nextTokenType, undefined, 0, deferCodeHighlight);
 
 		// Wrap lines (NO padding, NO background yet)
 		const wrappedLines: string[] = [];
@@ -556,6 +588,7 @@ export class Markdown implements Component {
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
 		depth = 0,
+		deferCodeHighlight = false,
 	): string[] {
 		const lines: string[] = [];
 
@@ -624,7 +657,7 @@ export class Markdown implements Component {
 				if (typeof token.lang === "string" && token.lang.length > 0) {
 					lines.push(gutter + this.theme.codeBlockBorder(token.lang));
 				}
-				if (this.theme.highlightCode) {
+				if (this.theme.highlightCode && !deferCodeHighlight) {
 					const highlightedLines = this.theme.highlightCode(token.text, token.lang);
 					for (const hlLine of highlightedLines) {
 						lines.push(gutter + hlLine);

@@ -63,6 +63,19 @@ describe("loadEntriesFromFile", () => {
 		const entries = loadEntriesFromFile(file);
 		expect(entries).toHaveLength(2);
 	});
+
+	it("stream-loads oversized session files without a single giant string", () => {
+		const file = join(tempDir, "oversized.jsonl");
+		const header = '{"type":"session","id":"big","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n';
+		const message =
+			'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"tail","timestamp":1}}\n';
+		const padding = `${"x".repeat(8 * 1024 * 1024)}\n`;
+		writeFileSync(file, header + padding + message);
+		const entries = loadEntriesFromFile(file);
+		expect(entries).toHaveLength(2);
+		expect(entries[0].type).toBe("session");
+		expect(entries[1].type).toBe("message");
+	});
 });
 
 describe("findMostRecentSession", () => {

@@ -1,4 +1,5 @@
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { beforeAll, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.js";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
@@ -22,6 +23,8 @@ interface MakeFooterOptions {
 	thinkingLevel?: string;
 	/** Session cwd (defaults to a plain project path). */
 	cwd?: string;
+	/** Launcher cwd (defaults to session cwd). */
+	launchCwd?: string;
 	/** Git branch reported by the footer data provider. */
 	branch?: string;
 }
@@ -36,6 +39,7 @@ function makeFooter({
 	providerCount = 1,
 	thinkingLevel,
 	cwd = "C:/x",
+	launchCwd,
 	branch = "",
 }: MakeFooterOptions = {}): FooterComponent {
 	// A subscription tag needs a truthy model for isUsingOAuth(state.model).
@@ -89,7 +93,7 @@ function makeFooter({
 		onBranchChange: () => () => {},
 	};
 
-	const footer = new FooterComponent(session, footerData);
+	const footer = new FooterComponent(session, footerData, launchCwd ?? cwd);
 	footer.setAutoCompactEnabled(autoCompact);
 	return footer;
 }
@@ -141,16 +145,16 @@ it("renders a dim capacity-only CTX on a pristine session (no 0.0% noise)", () =
 	expect(lines[1]).not.toContain("0/200k");
 });
 
-it("renders whole-percent + counts once the context has usage (no meter bar)", () => {
+it("renders a mini bar, whole-percent, and counts once the context has usage", () => {
 	const footer = makeFooter({
 		usingOAuth: true,
 		contextUsage: { tokens: 46800, percent: 23.4, contextWindow: 200000 },
 	});
 	const lines = footer.render(80).map(stripAnsi);
-	// Color carries the state; the old 5-cell bar could only disagree with the
-	// precise percent next to it, so it is gone. No decimals in a gauge.
-	expect(lines[1]).toContain("CTX 23% · 47k/200k");
-	expect(lines[1]).not.toContain("▰");
+	expect(lines[1]).toContain("█");
+	expect(lines[1]).toContain("░");
+	expect(lines[1]).toContain("CTX");
+	expect(lines[1]).toContain("23% · 47k/200k");
 });
 
 it("marks a post-compaction structural estimate with a ~ (never reads as an exact figure)", () => {
@@ -159,7 +163,8 @@ it("marks a post-compaction structural estimate with a ~ (never reads as an exac
 		contextUsage: { tokens: 12000, percent: 6, contextWindow: 200000, estimated: true },
 	});
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[1]).toContain("CTX ~6% · ~12k/200k");
+	expect(lines[1]).toContain("~6% · ~12k/200k");
+	expect(lines[1]).toContain("█");
 });
 
 it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", () => {
@@ -168,28 +173,37 @@ it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", 
 		contextUsage: { tokens: 1500, percent: 0.8, contextWindow: 200000 },
 	});
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[1]).toContain("CTX 1% · 1.5k/200k");
+	expect(lines[1]).toContain("1% · 1.5k/200k");
+	expect(lines[1]).toContain("█");
 
 	const tiny = makeFooter({
 		usingOAuth: true,
 		contextUsage: { tokens: 600, percent: 0.3, contextWindow: 200000 },
 	});
 	const tinyLines = tiny.render(80).map(stripAnsi);
-	expect(tinyLines[1]).toContain("CTX <1% · 600/200k");
+	expect(tinyLines[1]).toContain("<1% · 600/200k");
+	expect(tinyLines[1]).toContain("█");
 });
 
-it("suppresses a lone ~ cwd label in the home dir with no project context", () => {
+it("shows ~ (home) in the footer when session cwd is the home directory", () => {
 	const footer = makeFooter({ cwd: homedir() });
 	const lines = footer.render(80).map(stripAnsi);
-	// No branch, no session name: the identity line must not open with a bare
-	// "~" — the right side (model) owns the line alone.
-	expect(lines[0].trimStart().startsWith("~")).toBe(false);
+	expect(lines[0]).toContain("~ (home)");
 });
 
-it("keeps the ~ cwd label when a branch gives it context", () => {
+it("keeps the home label when a branch gives it context", () => {
 	const footer = makeFooter({ cwd: homedir(), branch: "main" });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("~ (main)");
+	expect(lines[0]).toContain("~ (home) (main)");
+});
+
+it("shows shell cwd when launcher and session cwd diverge", () => {
+	const home = homedir();
+	const pit = join(home, "pit");
+	const footer = makeFooter({ cwd: home, launchCwd: pit });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines[0]).toContain("~ (home)");
+	expect(lines[0]).toContain("shell:");
 });
 
 it("shows the provider muted without parentheses when several providers are available", () => {

@@ -105,6 +105,18 @@ describe("assistant message streaming smoothing", () => {
 		expect(tui.animating).toBe(true);
 	});
 
+	it("patches the content tree in place when only trailing text grows", () => {
+		const comp = build(undefined, false);
+		comp.updateContent(textMsg("hello"));
+		const container = (comp as unknown as { contentContainer: { children: unknown[] } }).contentContainer;
+		const childCount = container.children.length;
+		expect(childCount).toBeGreaterThan(0);
+
+		comp.updateContent(textMsg("hello world streaming"));
+		expect(container.children.length).toBe(childCount);
+		expect(rendered(comp)).toContain("streaming");
+	});
+
 	it("flushes to full text the moment the message settles (stopReason set)", () => {
 		const tui = new ControllableTui();
 		const comp = build(tui, true);

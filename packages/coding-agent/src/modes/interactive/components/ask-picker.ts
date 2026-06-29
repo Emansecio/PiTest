@@ -23,11 +23,14 @@ import {
 } from "@pit/tui";
 import type { AskOptionsRequest } from "../../../core/user-input-bus.ts";
 import { theme as defaultTheme } from "../theme/theme.ts";
+import { renderSupplementaryContext } from "./context-display.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { HINT_SEPARATOR, keyText } from "./keybinding-hints.ts";
+import { HINT_SEPARATOR, keyText, selectionCursor } from "./keybinding-hints.ts";
 
-const RECOMMENDED_BADGE = " (recommended)";
-const FREEFORM_ROW_LABEL = "✎ Type a custom answer…";
+const RECOMMENDED_BADGE = " · recommended";
+const FREEFORM_ROW_LABEL = "Other — type custom answer…";
+const OPTION_DESC_INDENT = "      ";
+const COMMENT_PREFIX = "Note: ";
 
 export interface AskPickerResolveResult {
 	picked: string[];
@@ -89,6 +92,7 @@ class AskPicker implements Component, Focusable {
 	private commentInput: Input | null = null;
 	private commentText = "";
 	private settled = false;
+	private readonly border = new DynamicBorder();
 
 	constructor(
 		req: AskOptionsRequest,
@@ -236,9 +240,13 @@ class AskPicker implements Component, Focusable {
 	}
 
 	private renderHeader(width: number, lines: string[]): void {
-		if (this.req.header) {
-			lines.push(defaultTheme.fg("accent", truncateToWidth(`[${this.req.header}]`, width, "…")));
-		}
+		// Header matches the goal/todo overlay pattern: accent dot, bold label, em-dash, scope.
+		const scope = this.req.header?.trim();
+		const title = scope
+			? `${defaultTheme.fg("accent", "●")} ${defaultTheme.bold("Ask")} ${defaultTheme.fg("dim", "—")} ${scope}`
+			: `${defaultTheme.fg("accent", "●")} ${defaultTheme.bold("Ask")}`;
+		lines.push(visibleWidth(title) > width ? truncateToWidth(title, width, "…") : title);
+
 		// Inline pickers sit directly beneath the `ask` tool call line, which already
 		// renders the question — repeating it here is pure vertical duplication. An
 		// overlay covers the transcript, so it still needs to show the question.
@@ -246,24 +254,35 @@ class AskPicker implements Component, Focusable {
 		// and crashes TUI.doRender.
 		if ((this.req.displayMode ?? "inline") !== "inline") {
 			for (const line of wrapPlain(this.req.question, width)) {
-				lines.push(defaultTheme.bold(line));
+				lines.push(defaultTheme.fg("accent", defaultTheme.bold(line)));
 			}
 		}
 		if (this.req.context) {
-			for (const line of wrapPlain(this.req.context, width)) {
-				lines.push(defaultTheme.fg("dim", line));
-			}
+			lines.push(...renderSupplementaryContext(this.req.context, width));
 		}
-		lines.push(...new DynamicBorder().render(width));
+		lines.push(...this.border.render(width));
+	}
+
+	private checkboxPrefix(index: number): string {
+		if (!this.allowMultiple) return "";
+		const checked = this.checked.has(index);
+		const glyph = checked ? "☑" : "☐";
+		const color = checked ? defaultTheme.fg("success", glyph) : defaultTheme.fg("dim", glyph);
+		return `${color} `;
 	}
 
 	private renderList(width: number, lines: string[]): void {
+		if (this.options.length > 0) {
+			const countLabel = this.options.length === 1 ? "1 option" : `${this.options.length} options`;
+			lines.push(defaultTheme.fg("dim", countLabel));
+		}
+
 		for (let i = 0; i < this.options.length; i++) {
 			const opt = this.options[i];
 			if (!opt) continue;
 			const focused = i === this.index && this.mode === "list";
-			const cursor = focused ? "→ " : "  ";
-			const box = this.allowMultiple ? (this.checked.has(i) ? "[x] " : "[ ] ") : "";
+			const cursor = selectionCursor(focused);
+			const box = this.checkboxPrefix(i);
 			// Pre-color the badge (it marks the default pick) and reserve its width
 			// separately, so clamping the head never eats into it.
 			const badge = opt.recommended ? defaultTheme.fg("gutterToolSuccess", RECOMMENDED_BADGE) : "";
@@ -277,9 +296,8 @@ class AskPicker implements Component, Focusable {
 				// recommended row (focused by default) no longer loses its description to
 				// the badge eating the line width.
 				lines.push(row);
-				const indent = "    ";
-				for (const line of wrapPlain(desc, Math.max(10, width - indent.length))) {
-					lines.push(defaultTheme.fg("muted", `${indent}${line}`));
+				for (const line of wrapPlain(desc, Math.max(10, width - OPTION_DESC_INDENT.length))) {
+					lines.push(defaultTheme.fg("muted", `${OPTION_DESC_INDENT}${line}`));
 				}
 			} else if (desc) {
 				// Unfocused rows keep the description inline but clip with an ellipsis,
@@ -297,7 +315,7 @@ class AskPicker implements Component, Focusable {
 
 		if (this.allowFreeform) {
 			const active = this.index === this.freeformRow && this.mode === "list";
-			const head = `${active ? "→ " : "  "}${FREEFORM_ROW_LABEL}`;
+			const head = `${selectionCursor(active)}${FREEFORM_ROW_LABEL}`;
 			lines.push(active ? defaultTheme.fg("accent", head) : defaultTheme.fg("muted", head));
 		}
 	}
@@ -307,26 +325,28 @@ class AskPicker implements Component, Focusable {
 		this.renderHeader(width, lines);
 
 		if (this.mode === "freeform" && this.input) {
+			lines.push(defaultTheme.fg("dim", "Custom answer"));
 			this.input.focused = this.focused;
 			lines.push(...this.input.render(width));
-			lines.push(...new DynamicBorder().render(width));
-			lines.push(defaultTheme.fg("dim", "  enter to submit · esc to go back"));
+			lines.push(...this.border.render(width));
+			lines.push(defaultTheme.fg("dim", `  ${keyText("tui.select.confirm")} submit${HINT_SEPARATOR}esc back`));
 		} else {
 			this.renderList(width, lines);
 
 			if (this.allowComment && this.commentText.trim() && this.mode === "list") {
-				const preview = truncateToWidth(this.commentText.trim(), Math.max(10, width - 14), "");
-				lines.push(defaultTheme.fg("muted", `  ✎ comment: ${preview}`));
+				const prefix = `  ${COMMENT_PREFIX}`;
+				const preview = truncateToWidth(this.commentText.trim(), Math.max(10, width - visibleWidth(prefix)), "…");
+				lines.push(defaultTheme.fg("muted", prefix) + defaultTheme.fg("dim", preview));
 			}
 
 			if (this.mode === "comment" && this.commentInput) {
-				lines.push(...new DynamicBorder().render(width));
-				lines.push(defaultTheme.fg("dim", "  Comment:"));
+				lines.push(...this.border.render(width));
+				lines.push(defaultTheme.fg("dim", "Add a note (optional)"));
 				this.commentInput.focused = this.focused;
 				lines.push(...this.commentInput.render(width));
 			}
 
-			lines.push(...new DynamicBorder().render(width));
+			lines.push(...this.border.render(width));
 			lines.push(defaultTheme.fg("dim", `  ${this.hint()}`));
 		}
 

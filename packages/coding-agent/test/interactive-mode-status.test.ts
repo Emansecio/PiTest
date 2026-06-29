@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import { type AutocompleteProvider, CombinedAutocompleteProvider, Container } from "@pit/tui";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import type { ResourceDiagnostic } from "../src/core/diagnostics.js";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.js";
 import type { SourceInfo } from "../src/core/source-info.js";
 import * as displayUtils from "../src/modes/interactive/display-utils.js";
@@ -39,44 +40,35 @@ describe("InteractiveMode.showStatus", () => {
 		initTheme("dark");
 	});
 
-	test("coalesces immediately-sequential status messages", () => {
+	test("coalesces immediately-sequential status messages in statusContainer", () => {
 		const fakeThis: any = {
-			chatContainer: new Container(),
+			statusContainer: new Container(),
 			ui: { requestRender: vi.fn() },
-			lastStatusSpacer: undefined,
-			lastStatusText: undefined,
+			ephemeralStatusText: undefined,
 		};
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_ONE");
-		expect(fakeThis.chatContainer.children).toHaveLength(2);
-		expect(renderLastLine(fakeThis.chatContainer)).toContain("STATUS_ONE");
+		expect(fakeThis.statusContainer.children).toHaveLength(1);
+		expect(renderLastLine(fakeThis.statusContainer)).toContain("STATUS_ONE");
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_TWO");
 		// second status updates the previous line instead of appending
-		expect(fakeThis.chatContainer.children).toHaveLength(2);
-		expect(renderLastLine(fakeThis.chatContainer)).toContain("STATUS_TWO");
-		expect(renderLastLine(fakeThis.chatContainer)).not.toContain("STATUS_ONE");
+		expect(fakeThis.statusContainer.children).toHaveLength(1);
+		expect(renderLastLine(fakeThis.statusContainer)).toContain("STATUS_TWO");
+		expect(renderLastLine(fakeThis.statusContainer)).not.toContain("STATUS_ONE");
 	});
 
-	test("appends a new status line if something else was added in between", () => {
+	test("does not append status to the chat transcript", () => {
 		const fakeThis: any = {
+			statusContainer: new Container(),
 			chatContainer: new Container(),
 			ui: { requestRender: vi.fn() },
-			lastStatusSpacer: undefined,
-			lastStatusText: undefined,
+			ephemeralStatusText: undefined,
 		};
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_ONE");
-		expect(fakeThis.chatContainer.children).toHaveLength(2);
-
-		// Something else gets added to the chat in between status updates
-		fakeThis.chatContainer.addChild({ render: () => ["OTHER"], invalidate: () => {} });
-		expect(fakeThis.chatContainer.children).toHaveLength(3);
-
-		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_TWO");
-		// adds spacer + text
-		expect(fakeThis.chatContainer.children).toHaveLength(5);
-		expect(renderLastLine(fakeThis.chatContainer)).toContain("STATUS_TWO");
+		expect(fakeThis.chatContainer.children).toHaveLength(0);
+		expect(fakeThis.statusContainer.children).toHaveLength(1);
 	});
 });
 
@@ -299,7 +291,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 		contextFiles?: Array<{ path: string; content?: string }>;
 		extensions?: ExtensionFixture[];
 		skills?: Array<{ filePath: string; name: string }>;
-		skillDiagnostics?: Array<{ type: "warning" | "error" | "collision"; message: string }>;
+		skillDiagnostics?: ResourceDiagnostic[];
 		useRealScopeGroups?: boolean;
 	}) {
 		const fakeThis: any = {
@@ -484,7 +476,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		const output = renderAll(fakeThis.chatContainer);
-		expect(output).toContain("[Skills]");
+		expect(output).toContain("Skills");
+		expect(output).toContain("1 skill");
 		expect(output).toContain("commit");
 		expect(output).not.toContain("resource-list");
 	});
@@ -501,7 +494,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		const output = renderAll(fakeThis.chatContainer);
-		expect(output).toContain("[Skills]");
+		expect(output).toContain("Skills");
+		expect(output).toContain("1 skill");
 		expect(output).toContain("resource-list");
 		expect(output).not.toContain("commit");
 	});
@@ -519,7 +513,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		const output = renderAll(fakeThis.chatContainer);
-		expect(output).toContain("[Skills]");
+		expect(output).toContain("Skills");
+		expect(output).toContain("1 skill");
 		expect(output).toContain("resource-list");
 		expect(output).not.toContain("commit");
 	});
@@ -534,8 +529,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		const output = renderAll(fakeThis.chatContainer);
-		expect(output).toContain("[Extensions]");
+		const output = normalizeRenderedOutput(fakeThis.chatContainer);
+		expect(output).toContain("Extensions");
 		expect(output).toContain("answer.ts, btw.ts");
 		expect(output).not.toContain("extensions/answer.ts");
 	});
@@ -552,8 +547,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  @scope/pi-scoped, answer.ts, cli-extension.ts, HazAT/pi-interactive-subagents, HazAT/pi-interactive-subagents:subagents, local-index, pi-markdown-preview, user-index"`);
+"● Extensions — 8 extensions
+└─ @scope/pi-scoped, answer.ts, cli-extension.ts, HazAT/pi-interactive-subagents, HazAT/pi-interactive-subagents:subagents, local-index, pi-markdown-preview, user-index"`);
 	});
 
 	test("adds more parent folders until local extension labels are unique", () => {
@@ -598,8 +593,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  alpha/one, beta/one, gamma/one"`);
+"● Extensions — 3 extensions
+└─ alpha/one, beta/one, gamma/one"`);
 	});
 
 	test("strips index.ts from local extension label, showing parent dir", () => {
@@ -626,8 +621,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  plan-mode"`);
+"● Extensions — 1 extension
+└─ plan-mode"`);
 	});
 
 	test("strips index.js from local extension label, showing parent dir", () => {
@@ -654,8 +649,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  plan-mode"`);
+"● Extensions — 1 extension
+└─ plan-mode"`);
 	});
 
 	test("mixed single-file and subdirectory index.ts extensions strip index.ts", () => {
@@ -691,8 +686,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  plan-mode, webfetch.ts"`);
+"● Extensions — 2 extensions
+└─ plan-mode, webfetch.ts"`);
 	});
 
 	test("multiple index.ts with unique parent dirs need no disambiguation", () => {
@@ -728,8 +723,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  bar, foo"`);
+"● Extensions — 2 extensions
+└─ bar, foo"`);
 	});
 
 	test("multiple index.ts with same parent dir name disambiguated with grandparent", () => {
@@ -765,8 +760,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  alpha/tools, beta/tools"`);
+"● Extensions — 2 extensions
+└─ alpha/tools, beta/tools"`);
 	});
 
 	test("non-index file in subdirectory stays as filename", () => {
@@ -793,8 +788,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  main.ts"`);
+"● Extensions — 1 extension
+└─ main.ts"`);
 	});
 
 	test("package extensions still strip index.ts correctly (regression guard)", () => {
@@ -821,8 +816,8 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
-  pi-markdown-preview"`);
+"● Extensions — 1 extension
+└─ pi-markdown-preview"`);
 	});
 	test("captures mixed extension layouts in expanded output", () => {
 		const fakeThis = createShowLoadedResourcesThis({
@@ -837,7 +832,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		expect(normalizeRenderedOutput(fakeThis.chatContainer)).toMatchInlineSnapshot(`
-"[Extensions]
+"● Extensions — 8 extensions
   project
     /tmp/project/.pit/extensions/answer.ts
     /tmp/project/.pit/extensions/local-index
@@ -867,8 +862,9 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		const output = renderAll(fakeThis.chatContainer).replace(/\\/g, "/");
-		expect(output).toContain("[Context]");
+		const output = normalizeRenderedOutput(fakeThis.chatContainer);
+		expect(output).toContain("Context");
+		expect(output).toContain("2 files");
 		expect(output).toContain("~/.pit/agent/AGENTS.md, AGENTS.md");
 		expect(output).not.toContain(`${cwd.replace(/\\/g, "/")}/AGENTS.md`);
 	});
@@ -887,8 +883,9 @@ describe("InteractiveMode.showLoadedResources", () => {
 			force: false,
 		});
 
-		const output = renderAll(fakeThis.chatContainer).replace(/\\/g, "/");
-		expect(output).toContain("[Context]");
+		const output = normalizeRenderedOutput(fakeThis.chatContainer);
+		expect(output).toContain("Context");
+		expect(output).toContain("2 files");
 		expect(output).toContain("~/.pit/agent/AGENTS.md");
 		expect(output).toContain("~/Development/pi-mono/AGENTS.md");
 		expect(output).not.toContain("~/.pit/agent/AGENTS.md, AGENTS.md");
@@ -922,8 +919,36 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		const output = renderAll(fakeThis.chatContainer);
-		expect(output).toContain("[Skills: notices]");
-		expect(output).not.toContain("[Skills]");
+		expect(output).toContain("[Skills]");
+		expect(output).not.toContain("● Skills");
 		expect(output).not.toContain("[Skill conflicts]");
+	});
+
+	test("shows a one-line skills doctor hint on quiet startup when duplicates exist", () => {
+		const fakeThis = createShowLoadedResourcesThis({
+			quietStartup: true,
+			skills: [{ filePath: "/tmp/skill/SKILL.md", name: "commit" }],
+			skillDiagnostics: [
+				{
+					type: "collision",
+					message: "duplicate skill: commit",
+					collision: {
+						resourceType: "skill",
+						name: "commit",
+						winnerPath: "/tmp/skill/SKILL.md",
+						loserPath: "/tmp/.claude/skills/commit/SKILL.md",
+					},
+				},
+			],
+		});
+
+		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
+			force: false,
+			showDiagnosticsWhenQuiet: false,
+		});
+
+		const output = normalizeRenderedOutput(fakeThis.chatContainer);
+		expect(output).toBe("1 dup — /skills doctor");
+		expect(output).not.toContain("[Skills]");
 	});
 });

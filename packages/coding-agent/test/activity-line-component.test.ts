@@ -28,6 +28,7 @@ function execStub(over: Partial<ToolExecutionComponent>): ToolExecutionComponent
 	return {
 		setActivityChild() {},
 		setExpanded() {},
+		setResultExpanded() {},
 		getActivityState: () => "success",
 		isAborted: () => false,
 		getToolName: () => "edit",
@@ -49,11 +50,26 @@ describe("ActivityLineComponent", () => {
 		expect(out[0]).toContain("-2");
 		for (const l of out) expect(l).not.toContain("│");
 	});
-	it("auto-expands the exec body on a genuine error", () => {
+	it("auto-expands the exec body on a genuine error without full expand", () => {
+		let resultExpanded = false;
+		let fullyExpanded = false;
 		const c = new ActivityLineComponent(fakeTui());
-		c.setExec(execStub({ getActivityState: () => "error", isAborted: () => false }));
+		c.setExec(
+			execStub({
+				getActivityState: () => "error",
+				isAborted: () => false,
+				setExpanded: (v: boolean) => {
+					fullyExpanded = v;
+				},
+				setResultExpanded: (v: boolean) => {
+					resultExpanded = v;
+				},
+			}),
+		);
 		const out = c.render(120).map(stripAnsi);
 		expect(out.some((l) => l.includes("<exec body>"))).toBe(true);
+		expect(resultExpanded).toBe(true);
+		expect(fullyExpanded).toBe(false);
 	});
 	it("caps the auto-shown error body and folds the rest into an expand hint", () => {
 		const bodyLines = Array.from({ length: 25 }, (_, i) => `error line ${i + 1}`);

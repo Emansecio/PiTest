@@ -14,7 +14,7 @@ const BASE: WelcomeBoxData = {
 	appName: "pit",
 	version: "0.4.2",
 	tagline: "coding agent in your terminal",
-	cwdDisplay: "~/PiTest",
+	cwdDisplay: "PiTest",
 	branch: "main",
 };
 
@@ -28,7 +28,9 @@ describe("WelcomeBox", () => {
 		const plain = out.map(stripAnsi).join("\n");
 		expect(plain).toContain("v0.4.2");
 		expect(plain).toContain("coding agent in your terminal");
-		expect(plain).toContain("~/PiTest (main)");
+		expect(plain).toContain("Workspace");
+		expect(plain).toContain("PiTest");
+		expect(plain).toContain("(main)");
 		// The active model lives in the footer, not the welcome.
 		expect(plain).not.toContain("thinking");
 		// A single closing rule — no heavy top rule above the logo.
@@ -50,26 +52,46 @@ describe("WelcomeBox", () => {
 			.map(stripAnsi)
 			.join("\n");
 		expect(plain).toContain("Resuming · auth-refactor");
-		// The cwd row is replaced by the session name when resuming.
-		expect(plain).not.toContain("~/PiTest (main)");
+		expect(plain).toContain("Workspace");
+		expect(plain).toContain("PiTest");
 	});
 
-	it("suppresses a lone '~' cwd row in the home dir with no project context", () => {
-		const out = new WelcomeBox({ ...BASE, cwdDisplay: "~", branch: undefined }).render(80);
-		const plain = out.map(stripAnsi);
-		// No body row is just "~" (the row may carry the wordmark prefix + spaces).
-		expect(plain.some((l) => l.trimEnd().endsWith("~"))).toBe(false);
+	it("shows the home directory label even without branch context", () => {
+		const plain = new WelcomeBox({ ...BASE, cwdDisplay: "~ (home)", branch: undefined })
+			.render(80)
+			.map(stripAnsi)
+			.join("\n");
+		expect(plain).toContain("Workspace");
+		expect(plain).toContain("~ (home)");
 	});
 
 	it("still shows the cwd in home when a branch gives it context", () => {
-		const plain = new WelcomeBox({ ...BASE, cwdDisplay: "~", branch: "main" }).render(80).map(stripAnsi).join("\n");
-		expect(plain).toContain("~ (main)");
+		const plain = new WelcomeBox({ ...BASE, cwdDisplay: "~ (home)", branch: "main" })
+			.render(80)
+			.map(stripAnsi)
+			.join("\n");
+		expect(plain).toContain("Workspace");
+		expect(plain).toContain("~ (home)");
+		expect(plain).toContain("(main)");
+	});
+
+	it("shows shell cwd divergence on the workspace line", () => {
+		const plain = new WelcomeBox({
+			...BASE,
+			cwdDisplay: "~ (home)",
+			shellCwdNote: "shell: ~/pit",
+			branch: undefined,
+		})
+			.render(80)
+			.map(stripAnsi)
+			.join("\n");
+		expect(plain).toContain("shell: ~/pit");
 	});
 
 	it("drops the block wordmark for a custom app name", () => {
 		const plain = new WelcomeBox({ ...BASE, appName: "scout" }).render(80).map(stripAnsi).join("\n");
 		expect(plain).toContain("scout");
-		// The half-block wordmark only ships for the default "pit" name.
+		// The half-block PIT wordmark only ships for the default "pit" name.
 		expect(plain).not.toContain("█");
 	});
 });

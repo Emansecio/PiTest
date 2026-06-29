@@ -10,6 +10,7 @@
  * user-authored deny rules still apply.
  */
 
+import { LruMap } from "../lru-map.ts";
 import { createRegexTestDeadline } from "../regex-budget.ts";
 import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
 import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath, wasRegexBudgetExceeded } from "./matcher.ts";
@@ -66,7 +67,7 @@ export function matchesAnyToolRule(rules: readonly string[] | undefined, toolNam
 	return false;
 }
 
-const toolPatternCache = new Map<string, RegExp>();
+const toolPatternCache = new LruMap<string, RegExp>(256);
 function toolPatternToRegExp(pattern: string): RegExp {
 	let re = toolPatternCache.get(pattern);
 	if (!re) {

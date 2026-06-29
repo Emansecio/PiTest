@@ -301,9 +301,9 @@ export async function runDiagnostics(
 		const serverIssues: string[] = [];
 		let freshServerCount = 0;
 
-		for (const [serverName, serverConfig] of servers) {
-			allServerNames.add(serverName);
-			try {
+		const serverOutcomes = await Promise.allSettled(
+			servers.map(async ([serverName, serverConfig]) => {
+				allServerNames.add(serverName);
 				throwIfAborted(signal);
 				const client = await getOrCreateClient(serverConfig, cwd);
 				if (isProjectAwareLspServer(serverConfig)) {
@@ -319,16 +319,25 @@ export async function runDiagnostics(
 					minVersion,
 					expectedDocumentVersion,
 				});
-				if (!result.fresh) {
-					serverIssues.push(`${serverName}: no fresh diagnostics published`);
-					continue;
-				}
-				freshServerCount += 1;
-				allDiagnostics.push(...result.diagnostics);
-			} catch (err) {
-				if (signal?.aborted) throw err;
-				serverIssues.push(`${serverName}: ${err instanceof Error ? err.message : String(err)}`);
+				return { serverName, result };
+			}),
+		);
+		for (let i = 0; i < serverOutcomes.length; i++) {
+			const serverName = servers[i][0];
+			const outcome = serverOutcomes[i];
+			if (outcome.status === "rejected") {
+				if (signal?.aborted) throw outcome.reason;
+				const message = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+				serverIssues.push(`${serverName}: ${message}`);
+				continue;
 			}
+			const { result } = outcome.value;
+			if (!result.fresh) {
+				serverIssues.push(`${serverName}: no fresh diagnostics published`);
+				continue;
+			}
+			freshServerCount += 1;
+			allDiagnostics.push(...result.diagnostics);
 		}
 
 		const uniqueDiagnostics = dedupeDiagnostics(allDiagnostics);
@@ -403,19 +412,28 @@ export async function runCapabilities(
 	}
 	const sections: string[] = [];
 	const responding = new Set<string>();
-	for (const [serverName, serverConfig] of serverList) {
-		throwIfAborted(signal);
-		try {
+	const capabilityOutcomes = await Promise.allSettled(
+		serverList.map(async ([serverName, serverConfig]) => {
+			throwIfAborted(signal);
 			const client = await getOrCreateClient(serverConfig, cwd);
-			responding.add(serverName);
 			const caps = client.serverCapabilities ?? {};
 			const capped = capLspPayload(JSON.stringify(caps, null, 2), `${serverName} capabilities`);
-			sections.push(`${serverName}:`);
-			sections.push(`  capabilities: ${capped.split("\n").join("\n  ")}`);
-		} catch (err) {
-			if (signal?.aborted) throw err;
-			sections.push(`${serverName}: failed to start (${err instanceof Error ? err.message : String(err)})`);
+			return { serverName, capped };
+		}),
+	);
+	for (let i = 0; i < capabilityOutcomes.length; i++) {
+		const serverName = serverList[i][0];
+		const outcome = capabilityOutcomes[i];
+		if (outcome.status === "rejected") {
+			if (signal?.aborted) throw outcome.reason;
+			const message = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+			sections.push(`${serverName}: failed to start (${message})`);
+			continue;
 		}
+		const { capped } = outcome.value;
+		responding.add(serverName);
+		sections.push(`${serverName}:`);
+		sections.push(`  capabilities: ${capped.split("\n").join("\n  ")}`);
 	}
 	return textResult(sections.join("\n"), {
 		action,
@@ -443,19 +461,25 @@ export async function workspaceSymbols(
 	}
 	const aggregated: SymbolInformation[] = [];
 	const responding = new Set<string>();
-	for (const [serverName, serverConfig] of servers) {
-		throwIfAborted(signal);
-		try {
+	const symbolOutcomes = await Promise.allSettled(
+		servers.map(async ([serverName, serverConfig]) => {
+			throwIfAborted(signal);
 			const client = await getOrCreateClient(serverConfig, cwd);
 			const result = (await sendRequest(client, "workspace/symbol", { query: normalizedQuery }, signal)) as
 				| SymbolInformation[]
 				| null;
-			if (!result || result.length === 0) continue;
-			responding.add(serverName);
-			aggregated.push(...filterWorkspaceSymbols(result, normalizedQuery));
-		} catch (err) {
-			if (signal?.aborted) throw err;
+			return { serverName, result };
+		}),
+	);
+	for (const outcome of symbolOutcomes) {
+		if (outcome.status === "rejected") {
+			if (signal?.aborted) throw outcome.reason;
+			continue;
 		}
+		const { serverName, result } = outcome.value;
+		if (!result || result.length === 0) continue;
+		responding.add(serverName);
+		aggregated.push(...filterWorkspaceSymbols(result, normalizedQuery));
 	}
 	const deduped = dedupeWorkspaceSymbols(aggregated);
 	if (deduped.length === 0) {
@@ -603,9 +627,9 @@ export async function renameFile(
 	const perServerEdits: Array<{ serverName: string; edit: WorkspaceEdit }> = [];
 	const serverNotes: string[] = [];
 
-	for (const [serverName, serverConfig] of servers) {
-		throwIfAborted(signal);
-		try {
+	const renameOutcomes = await Promise.allSettled(
+		servers.map(async ([serverName, serverConfig]) => {
+			throwIfAborted(signal);
 			const client = await getOrCreateClient(serverConfig, cwd);
 			if (isProjectAwareLspServer(serverConfig)) await waitForProjectLoaded(client, signal);
 			const result = (await sendRequest(
@@ -614,14 +638,24 @@ export async function renameFile(
 				lspParams,
 				signal,
 			)) as WorkspaceEdit | null;
-			respondingServers.add(serverName);
-			if (result && (result.changes || result.documentChanges)) perServerEdits.push({ serverName, edit: result });
-		} catch (err) {
-			if (signal?.aborted) throw err;
+			return { serverName, result };
+		}),
+	);
+	for (let i = 0; i < renameOutcomes.length; i++) {
+		const serverName = servers[i][0];
+		const outcome = renameOutcomes[i];
+		if (outcome.status === "rejected") {
+			if (signal?.aborted) throw outcome.reason;
+			const err = outcome.reason;
 			if (!isMethodNotFoundError(err)) {
-				serverNotes.push(`  ${serverName}: ${err instanceof Error ? err.message : String(err)}`);
+				const message = err instanceof Error ? err.message : String(err);
+				serverNotes.push(`  ${serverName}: ${message}`);
 			}
+			continue;
 		}
+		const { result } = outcome.value;
+		respondingServers.add(serverName);
+		if (result && (result.changes || result.documentChanges)) perServerEdits.push({ serverName, edit: result });
 	}
 
 	const sourceLabel = formatPathRelativeToCwd(source, cwd);

@@ -3,7 +3,6 @@
  */
 
 import type { Api, Model } from "@pit/ai";
-import { fuzzyFilter } from "@pit/tui";
 import chalk from "chalk";
 import { formatNoModelsAvailableMessage } from "../core/auth-guidance.ts";
 import type { ModelRegistry } from "../core/model-registry.ts";
@@ -42,6 +41,7 @@ export async function listModels(modelRegistry: ModelRegistry, searchPattern?: s
 	// Apply fuzzy filter if search pattern provided
 	let filteredModels: Model<Api>[] = models;
 	if (searchPattern) {
+		const { fuzzyFilter } = await import("@pit/tui");
 		filteredModels = fuzzyFilter(models, searchPattern, (m) => `${m.provider} ${m.id}`);
 	}
 

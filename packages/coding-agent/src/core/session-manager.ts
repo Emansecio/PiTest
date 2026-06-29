@@ -465,9 +465,79 @@ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultA
 	return sessionDir;
 }
 
+// Sessions that ran for hours can reach hundreds of MB on disk. buildSessionInfo
+// (for the /resume picker) would read the whole .jsonl into a string AND
+// materialize every message into allMessagesText — multiplying that footprint and
+// risking OOM just to open the selector. Above this size we degrade to a bounded
+// head-read: enough for the card's firstMessage, but no full-body search index.
+const SESSION_INFO_FULL_READ_MAX_BYTES = 8 * 1024 * 1024;
+// How much of an oversized file to read for the header + first user message.
+const SESSION_INFO_HEAD_READ_BYTES = 64 * 1024;
+
+const SESSION_LOAD_CHUNK_BYTES = 256 * 1024;
+
+function pushEntryFromLine(line: string, entries: FileEntry[]): void {
+	if (!line.trim()) return;
+	const start = line.charCodeAt(0) <= 32 ? line.indexOf("{") : 0;
+	if (start < 0 || start >= line.length) return;
+	try {
+		entries.push(JSON.parse(line.slice(start)) as FileEntry);
+	} catch {
+		// Skip malformed lines
+	}
+}
+
+function validateSessionEntries(entries: FileEntry[]): FileEntry[] {
+	if (entries.length === 0) return entries;
+	const header = entries[0];
+	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
+		return [];
+	}
+	return entries;
+}
+
+/** Stream-parse oversized session files without materializing the whole file as one string. */
+function loadEntriesFromFileStreaming(filePath: string): FileEntry[] {
+	const entries: FileEntry[] = [];
+	const fd = openSync(filePath, "r");
+	try {
+		const fileSize = statSync(filePath).size;
+		const buffer = Buffer.alloc(SESSION_LOAD_CHUNK_BYTES);
+		let filePos = 0;
+		let leftover = "";
+		while (filePos < fileSize) {
+			const bytesRead = readSync(fd, buffer, 0, SESSION_LOAD_CHUNK_BYTES, filePos);
+			if (bytesRead <= 0) break;
+			filePos += bytesRead;
+			leftover += buffer.toString("utf8", 0, bytesRead);
+			let eol = leftover.indexOf("\n");
+			while (eol !== -1) {
+				pushEntryFromLine(leftover.slice(0, eol), entries);
+				leftover = leftover.slice(eol + 1);
+				eol = leftover.indexOf("\n");
+			}
+		}
+		pushEntryFromLine(leftover, entries);
+	} finally {
+		closeSync(fd);
+	}
+	return validateSessionEntries(entries);
+}
+
 /** Exported for testing */
 export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	if (!existsSync(filePath)) return [];
+
+	let fileSize = 0;
+	try {
+		fileSize = statSync(filePath).size;
+	} catch {
+		return [];
+	}
+
+	if (fileSize > SESSION_INFO_FULL_READ_MAX_BYTES) {
+		return loadEntriesFromFileStreaming(filePath);
+	}
 
 	const content = readFileSync(filePath, "utf8");
 	const entries: FileEntry[] = [];
@@ -478,26 +548,12 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 		let eol = content.indexOf("\n", pos);
 		if (eol === -1) eol = len;
 		if (eol > pos) {
-			const start = content.charCodeAt(pos) <= 32 ? content.indexOf("{", pos) : pos;
-			if (start >= pos && start < eol) {
-				try {
-					entries.push(JSON.parse(content.slice(start, eol)) as FileEntry);
-				} catch {
-					// Skip malformed lines
-				}
-			}
+			pushEntryFromLine(content.slice(pos, eol), entries);
 		}
 		pos = eol + 1;
 	}
 
-	// Validate session header
-	if (entries.length === 0) return entries;
-	const header = entries[0];
-	if (header.type !== "session" || typeof (header as any).id !== "string") {
-		return [];
-	}
-
-	return entries;
+	return validateSessionEntries(entries);
 }
 
 function isValidSessionFile(filePath: string): boolean {
@@ -517,15 +573,6 @@ function isValidSessionFile(filePath: string): boolean {
 		return false;
 	}
 }
-
-// Sessions that ran for hours can reach hundreds of MB on disk. buildSessionInfo
-// (for the /resume picker) would read the whole .jsonl into a string AND
-// materialize every message into allMessagesText — multiplying that footprint and
-// risking OOM just to open the selector. Above this size we degrade to a bounded
-// head-read: enough for the card's firstMessage, but no full-body search index.
-const SESSION_INFO_FULL_READ_MAX_BYTES = 8 * 1024 * 1024;
-// How much of an oversized file to read for the header + first user message.
-const SESSION_INFO_HEAD_READ_BYTES = 64 * 1024;
 
 /**
  * Bounded-read fallback for oversized session files. Reads only the first
@@ -754,6 +801,8 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		let firstMessage = "";
 		let name: string | undefined;
 		let lastActivityTime: number | undefined;
+		const searchTextParts: string[] = [];
+		let searchTextTotal = 0;
 		let lineStart = 0;
 		while (lineStart < content.length) {
 			const lineEnd = content.indexOf("\n", lineStart);
@@ -792,6 +841,18 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 			const textContent = extractTextContent(message);
 			if (!textContent) continue;
 			if (!firstMessage && message.role === "user") firstMessage = textContent;
+			if (searchTextTotal < SESSION_SEARCH_TEXT_CAP) {
+				if (searchTextTotal + textContent.length > SESSION_SEARCH_TEXT_CAP) {
+					const remaining = SESSION_SEARCH_TEXT_CAP - searchTextTotal;
+					if (remaining > 0) {
+						searchTextParts.push(textContent.slice(0, remaining));
+						searchTextTotal = SESSION_SEARCH_TEXT_CAP;
+					}
+				} else {
+					searchTextParts.push(textContent);
+					searchTextTotal += textContent.length;
+				}
+			}
 		}
 
 		if (!header) return null;
@@ -815,8 +876,7 @@ async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 			modified,
 			messageCount,
 			firstMessage: firstMessage || "(no messages)",
-			// Built lazily by session-selector-search when the user filters.
-			allMessagesText: "",
+			allMessagesText: searchTextParts.join(" "),
 		};
 	} catch {
 		return null;

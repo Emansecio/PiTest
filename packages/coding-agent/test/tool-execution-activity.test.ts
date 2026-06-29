@@ -63,6 +63,22 @@ describe("ToolExecutionComponent activity API", () => {
 		expect(c.getResultDetails()).toEqual({ diff: "+  1 a" });
 	});
 
+	test("resultExpanded shows error output without dumping the full bash command", () => {
+		const longTail = "npm run check";
+		const longCmd = `cd ${"x".repeat(120)} && ${longTail}`;
+		const c = new ToolExecutionComponent("bash", "t7", { command: longCmd }, {}, undefined, fakeTui(), process.cwd());
+		c.setActivityChild(true);
+		c.updateResult({
+			content: [{ type: "text", text: "ENOENT: missing file\n\nCommand exited with code 1" }],
+			isError: true,
+		});
+		c.setResultExpanded(true);
+		const plain = c.render(100).map(stripAnsi).join("\n");
+		expect(plain).toContain("ENOENT");
+		expect(plain).not.toContain(longCmd);
+		expect(plain).not.toContain("$ cd");
+	});
+
 	test("setActivityChild removes the gutter from rendered lines", () => {
 		const c = new ToolExecutionComponent(
 			"read",

@@ -286,6 +286,7 @@ class SessionList implements Component, Focusable {
 	public onRenameSession?: (sessionPath: string) => void;
 	public onError?: (message: string) => void;
 	private maxVisible: number = 10; // Max sessions visible (one line each)
+	private filterDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 
 	// Focusable implementation - propagate to searchInput for IME cursor positioning
 	private _focused = false;
@@ -340,6 +341,16 @@ class SessionList implements Component, Focusable {
 		this.allSessions = sessions;
 		this.showCwd = showCwd;
 		this.filterSessions(this.searchInput.getValue());
+	}
+
+	private scheduleFilterSessions(query: string): void {
+		if (this.filterDebounceTimer !== undefined) {
+			clearTimeout(this.filterDebounceTimer);
+		}
+		this.filterDebounceTimer = setTimeout(() => {
+			this.filterDebounceTimer = undefined;
+			this.filterSessions(query);
+		}, 75);
 	}
 
 	private filterSessions(query: string): void {
@@ -610,7 +621,7 @@ class SessionList implements Component, Focusable {
 		// Pass everything else to search input
 		else {
 			this.searchInput.handleInput(keyData);
-			this.filterSessions(this.searchInput.getValue());
+			this.scheduleFilterSessions(this.searchInput.getValue());
 		}
 	}
 }

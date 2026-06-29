@@ -436,6 +436,7 @@ export class TUI extends Container {
 	// each call so they can never drift from the array we return.
 	private resetInputCache: string[] = [];
 	private resetOutputCache: string[] = [];
+	private diffScanCountForTest = 0;
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
@@ -1173,6 +1174,10 @@ export class TUI extends Container {
 	 * observability: lets a regression guard assert the cache scales with the
 	 * transcript (so a long session keeps ~100% hit-rate instead of thrashing).
 	 */
+	getDiffScanCountForTest(): number {
+		return this.diffScanCountForTest;
+	}
+
 	getResetCacheSizeForTest(): number {
 		return this.resetCache.size;
 	}
@@ -1536,19 +1541,40 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Find first and last changed lines
+		// Find first and last changed lines. Fast path: steady-state spinner ticks
+		// usually mutate only the bottom line (bench + footer/editor tail); skip the
+		// O(N) forward scan when the prefix is byte-identical.
 		let firstChanged = -1;
 		let lastChanged = -1;
-		const maxLines = Math.max(newLines.length, this.previousLines.length);
-		for (let i = 0; i < maxLines; i++) {
-			const oldLine = i < this.previousLines.length ? this.previousLines[i] : "";
-			const newLine = i < newLines.length ? newLines[i] : "";
-
-			if (oldLine !== newLine) {
-				if (firstChanged === -1) {
-					firstChanged = i;
+		const prevLen = this.previousLines.length;
+		const newLen = newLines.length;
+		const maxLines = Math.max(newLen, prevLen);
+		this.diffScanCountForTest = 0;
+		if (prevLen === newLen && prevLen > 0 && this.previousLines[prevLen - 1] !== newLines[newLen - 1]) {
+			let onlyLastLine = true;
+			for (let i = 0; i < prevLen - 1; i++) {
+				this.diffScanCountForTest += 1;
+				if (this.previousLines[i] !== newLines[i]) {
+					onlyLastLine = false;
+					break;
 				}
-				lastChanged = i;
+			}
+			if (onlyLastLine) {
+				firstChanged = prevLen - 1;
+				lastChanged = prevLen - 1;
+			}
+		}
+		if (firstChanged === -1) {
+			for (let i = 0; i < maxLines; i++) {
+				this.diffScanCountForTest += 1;
+				const oldLine = i < prevLen ? this.previousLines[i] : "";
+				const newLine = i < newLen ? newLines[i] : "";
+				if (oldLine !== newLine) {
+					if (firstChanged === -1) {
+						firstChanged = i;
+					}
+					lastChanged = i;
+				}
 			}
 		}
 		const appendedLines = newLines.length > this.previousLines.length;

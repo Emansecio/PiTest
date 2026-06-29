@@ -368,22 +368,6 @@ function releaseSlot(): void {
 	if (next) next.wake();
 }
 
-/** @internal Test hooks for the module-scoped slot semaphore — not part of the public API. */
-export const __slotInternals = {
-	acquireSlot,
-	releaseSlot,
-	get activeSubagents() {
-		return activeSubagents;
-	},
-	get queueLength() {
-		return slotWaiters.length;
-	},
-	reset() {
-		activeSubagents = 0;
-		slotWaiters.length = 0;
-	},
-};
-
 export interface CoordinatorExtensionOptions {
 	modelRegistry: ModelRegistry;
 	/** Parent's permission checker — gates every subagent tool call (headless = ask→deny). */

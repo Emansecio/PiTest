@@ -88,24 +88,24 @@ describe("FusionLiveComponent", () => {
 		c.dispose();
 	});
 
-	it("shows a sub-line with WHAT the advisor is thinking/writing", () => {
+	it("inlines WHAT the advisor is thinking on the member row", () => {
 		const c = new FusionLiveComponent(fakeUi());
 		c.setStage("panel");
 		c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "running", elapsedMs: 0 });
 		c.recordActivity(0, "thinking", undefined, "Checking how auth tokens are refreshed in auth-storage");
 		const lines = c.render(200).map(stripAnsi);
-		expect(lines.some((l) => l.includes("↳") && l.includes("Checking how auth tokens are refreshed"))).toBe(true);
+		expect(lines.some((l) => l.includes("Checking how auth tokens are refreshed"))).toBe(true);
 		c.dispose();
 	});
 
-	it("drops the thought sub-line once the advisor is done", () => {
+	it("drops the inline thought once the advisor is done", () => {
 		const c = new FusionLiveComponent(fakeUi());
 		c.setStage("panel");
 		c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "running", elapsedMs: 0 });
 		c.recordActivity(0, "writing", undefined, "drafting the report");
 		c.upsertMember({ index: 0, cli: "claude", model: "opus", status: "done", elapsedMs: 1000, chars: 100 });
 		const lines = c.render(200).map(stripAnsi);
-		expect(lines.some((l) => l.includes("↳"))).toBe(false);
+		expect(lines.some((l) => l.includes("drafting the report"))).toBe(false);
 		c.dispose();
 	});
 

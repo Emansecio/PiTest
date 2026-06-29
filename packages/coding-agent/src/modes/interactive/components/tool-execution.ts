@@ -61,6 +61,8 @@ export class ToolExecutionComponent extends MessageShell {
 	private toolCallId: string;
 	private args: any;
 	private expanded = false;
+	/** Auto-shown error bodies expand the result only — not the call title. */
+	private resultExpanded = false;
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private isPartial = true;
@@ -89,6 +91,8 @@ export class ToolExecutionComponent extends MessageShell {
 	// hidden and its animations are owned by the parent line — skip the local
 	// gutter spinner/ease entirely.
 	private gutterAnimationsEnabled = true;
+	/** Parent activity row owns the compact call summary in its header. */
+	private activityChild = false;
 	// Memoized derived values read on the activity-group render hot path. Each is
 	// invalidated when its input changes (args / result), so a steady component
 	// costs O(1) per frame instead of re-scanning/re-classifying.
@@ -232,7 +236,7 @@ export class ToolExecutionComponent extends MessageShell {
 		}
 		const lines = output.split("\n");
 		const previewLines = SINGLE_LINE_PREVIEW_TOOLS.has(this.toolName) ? 1 : FALLBACK_RESULT_PREVIEW_LINES;
-		const maxLines = this.expanded ? lines.length : previewLines;
+		const maxLines = this.expanded || this.resultExpanded ? lines.length : previewLines;
 		const displayLines = lines.slice(0, maxLines);
 		const remaining = lines.length - maxLines;
 		let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
@@ -299,8 +303,16 @@ export class ToolExecutionComponent extends MessageShell {
 	}
 
 	setExpanded(expanded: boolean): void {
-		if (this.expanded === expanded) return;
+		if (this.expanded === expanded && this.resultExpanded === expanded) return;
 		this.expanded = expanded;
+		this.resultExpanded = expanded;
+		this.updateDisplay();
+	}
+
+	/** Expand only the result body (error auto-preview). Leaves the call title compact. */
+	setResultExpanded(expanded: boolean): void {
+		if (this.resultExpanded === expanded) return;
+		this.resultExpanded = expanded;
 		this.updateDisplay();
 	}
 
@@ -360,6 +372,7 @@ export class ToolExecutionComponent extends MessageShell {
 	/** Run as a child of an activity line/group: drop the gutter and let the
 	 * parent own the state icon + spinner. Idempotent. */
 	setActivityChild(on: boolean): void {
+		this.activityChild = on;
 		this.gutterAnimationsEnabled = !on;
 		this.setShellDisabled(on);
 		if (on) {
@@ -403,21 +416,28 @@ export class ToolExecutionComponent extends MessageShell {
 			const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox;
 			renderContainer.clear();
 
-			const callRenderer = this.getCallRenderer();
-			if (!callRenderer) {
-				renderContainer.addChild(this.createCallFallback());
-				hasContent = true;
-			} else {
-				try {
-					const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
-					this.callRendererComponent = component;
-					renderContainer.addChild(component);
-					hasContent = true;
-				} catch {
-					this.callRendererComponent = undefined;
+			// Activity rows already show a compact call summary in the header — skip
+			// the call title here unless the user fully expanded (ctrl+o).
+			const showCallTitle = !(this.activityChild && !this.expanded);
+			if (showCallTitle) {
+				const callRenderer = this.getCallRenderer();
+				if (!callRenderer) {
 					renderContainer.addChild(this.createCallFallback());
 					hasContent = true;
+				} else {
+					try {
+						const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
+						this.callRendererComponent = component;
+						renderContainer.addChild(component);
+						hasContent = true;
+					} catch {
+						this.callRendererComponent = undefined;
+						renderContainer.addChild(this.createCallFallback());
+						hasContent = true;
+					}
 				}
+			} else {
+				this.callRendererComponent = undefined;
 			}
 
 			if (this.result) {
@@ -432,7 +452,7 @@ export class ToolExecutionComponent extends MessageShell {
 					try {
 						const component = resultRenderer(
 							{ content: this.result.content as any, details: this.result.details },
-							{ expanded: this.expanded, isPartial: this.isPartial },
+							{ expanded: this.expanded || this.resultExpanded, isPartial: this.isPartial },
 							theme,
 							this.getRenderContext(this.resultRendererComponent),
 						);

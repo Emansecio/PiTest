@@ -125,18 +125,21 @@ export async function discoverAuthServer(mcpUrl: string, explicitAsUrl?: string)
 	}
 	asBases.push(origin);
 
+	const discoveryUrls: string[] = [];
 	for (const base of asBases) {
-		for (const wellKnown of ["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"]) {
-			const meta = await fetchJson(`${base}${wellKnown}`);
-			if (meta && typeof meta.authorization_endpoint === "string" && typeof meta.token_endpoint === "string") {
-				return {
-					authorization_endpoint: meta.authorization_endpoint,
-					token_endpoint: meta.token_endpoint,
-					registration_endpoint:
-						typeof meta.registration_endpoint === "string" ? meta.registration_endpoint : undefined,
-					scopes_supported: Array.isArray(meta.scopes_supported) ? (meta.scopes_supported as string[]) : undefined,
-				};
-			}
+		discoveryUrls.push(`${base}/.well-known/oauth-authorization-server`);
+		discoveryUrls.push(`${base}/.well-known/openid-configuration`);
+	}
+	const metas = await Promise.all(discoveryUrls.map((url) => fetchJson(url)));
+	for (const meta of metas) {
+		if (meta && typeof meta.authorization_endpoint === "string" && typeof meta.token_endpoint === "string") {
+			return {
+				authorization_endpoint: meta.authorization_endpoint,
+				token_endpoint: meta.token_endpoint,
+				registration_endpoint:
+					typeof meta.registration_endpoint === "string" ? meta.registration_endpoint : undefined,
+				scopes_supported: Array.isArray(meta.scopes_supported) ? (meta.scopes_supported as string[]) : undefined,
+			};
 		}
 	}
 	throw new Error(`Could not discover OAuth metadata for ${mcpUrl}`);

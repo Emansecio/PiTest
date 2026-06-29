@@ -151,18 +151,24 @@ describe("ask picker", () => {
 				context: "pick carefully",
 			}),
 		).render();
-		expect(out).toContain("[scope]");
+		expect(out).toContain("Ask");
+		expect(out).toContain("scope");
 		expect(out).toContain("Which one?");
 		expect(out).toContain("pick carefully");
-		expect(out).toContain("[ ] Alpha");
-		expect(out).toContain("Type a custom answer");
+		expect(out).toContain("Context");
+		expect(out).toMatch(/└─/);
+		expect(out).toContain("☐ Alpha");
+		expect(out).toContain("type custom answer");
 		expect(out).toContain("space to toggle");
 	});
 
 	it("inline mode omits the question (the ask call line already shows it) but keeps header, context and options", () => {
 		const out = drive(makeReq({ header: "scope", context: "pick carefully" })).render();
-		expect(out).toContain("[scope]");
+		expect(out).toContain("Ask");
+		expect(out).toContain("scope");
 		expect(out).toContain("pick carefully");
+		expect(out).toContain("Context");
+		expect(out).toMatch(/└─/);
 		expect(out).toContain("Alpha");
 		expect(out).not.toContain("Which one?");
 	});
@@ -185,6 +191,6 @@ describe("ask picker", () => {
 
 	it("renders the recommended badge", () => {
 		const out = drive(makeReq({ options: [{ label: "Alpha", recommended: true }, { label: "Beta" }] })).render();
-		expect(out).toContain("(recommended)");
+		expect(out).toContain("recommended");
 	});
 });

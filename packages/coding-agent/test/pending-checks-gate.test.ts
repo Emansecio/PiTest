@@ -17,6 +17,10 @@ import { createHarness, getUserTexts, type Harness } from "./suite/harness.js";
 const FAILED_MARKER = "has FAILED";
 const RUNNING_MARKER = "is STILL running";
 
+const pendingChecksOn = {
+	pendingChecks: { enabled: true, maxWaitMs: 5000, maxFixAttempts: 1 },
+};
+
 function bgJob(over: Partial<BashBackgroundJob>): BashBackgroundJob {
 	return {
 		id: "bg-1",
@@ -41,7 +45,7 @@ describe("background-check guard", () => {
 	});
 
 	it("waits for a running check, then re-injects its failure", async () => {
-		const harness = await createHarness({ settings: { verification: { command: null, timeoutMs: 5000 } } });
+		const harness = await createHarness({ settings: pendingChecksOn });
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage("All done — you can commit."),
@@ -63,7 +67,7 @@ describe("background-check guard", () => {
 
 		await harness.session.prompt("ship the feature");
 
-		const failed = harness.eventsOfType("verification").filter((e) => e.phase === "failed");
+		const failed = harness.eventsOfType("pending_check").filter((e) => e.phase === "failed");
 		expect(failed.length).toBe(1);
 		const texts = getUserTexts(harness);
 		expect(texts.some((t) => t.includes(FAILED_MARKER))).toBe(true);
@@ -72,7 +76,9 @@ describe("background-check guard", () => {
 	});
 
 	it("re-injects a 'still running' warning when the check never settles in time", async () => {
-		const harness = await createHarness({ settings: { verification: { command: null, timeoutMs: 1000 } } });
+		const harness = await createHarness({
+			settings: { pendingChecks: { enabled: true, maxWaitMs: 1000, maxFixAttempts: 1 } },
+		});
 		harnesses.push(harness);
 		harness.setResponses([
 			fauxAssistantMessage("Done — ready to commit."),
@@ -89,7 +95,7 @@ describe("background-check guard", () => {
 	});
 
 	it("stays silent when the backgrounded check finished green", async () => {
-		const harness = await createHarness({ settings: { verification: { command: null, timeoutMs: 5000 } } });
+		const harness = await createHarness({ settings: pendingChecksOn });
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("All done.")]);
 
@@ -102,13 +108,13 @@ describe("background-check guard", () => {
 
 		await harness.session.prompt("ship it");
 
-		const v = harness.eventsOfType("verification");
+		const v = harness.eventsOfType("pending_check");
 		expect(v.some((e) => e.phase === "passed")).toBe(true);
 		expect(getUserTexts(harness)).toEqual(["ship it"]);
 	});
 
 	it("ignores a backgrounded dev server (not a check)", async () => {
-		const harness = await createHarness({ settings: { verification: { command: null, timeoutMs: 5000 } } });
+		const harness = await createHarness({ settings: pendingChecksOn });
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("All done.")]);
 
@@ -116,7 +122,22 @@ describe("background-check guard", () => {
 
 		await harness.session.prompt("start the server");
 
-		expect(harness.eventsOfType("verification")).toEqual([]);
+		expect(harness.eventsOfType("pending_check")).toEqual([]);
 		expect(getUserTexts(harness)).toEqual(["start the server"]);
+	});
+
+	it("does nothing when pendingChecks.enabled is false", async () => {
+		const harness = await createHarness({
+			settings: { pendingChecks: { enabled: false } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("All done.")]);
+
+		_registerBashBackgroundJobForTest(bgJob({ id: "bg-11", command: "npm run check", exited: false }));
+
+		await harness.session.prompt("ship it");
+
+		expect(harness.eventsOfType("pending_check")).toEqual([]);
+		expect(getUserTexts(harness)).toEqual(["ship it"]);
 	});
 });

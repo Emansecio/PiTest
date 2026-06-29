@@ -186,7 +186,8 @@ describe("FooterComponent stats cache", () => {
 		// remains (segment-colored, so compare with ANSI stripped).
 		expect(line).not.toContain("↑");
 		expect(line).not.toContain("↓");
-		expect(stripAnsi(line)).toContain("CTX 12% · 25k/200k");
+		expect(stripAnsi(line)).toContain("12% · 25k/200k");
+		expect(stripAnsi(line)).toContain("█");
 	});
 });
 

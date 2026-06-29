@@ -10,7 +10,9 @@ import type { AggregatedLearnedError } from "../learned-error-store.ts";
 import { fingerprintToolArgs } from "../tool-call-stats.ts";
 import { createLearnedErrorGuardExtension } from "./learned-error-guard-extension.ts";
 
-type ToolCallHandler = (event: unknown) => { block?: boolean; reason?: string } | undefined;
+type ToolCallHandler = (
+	event: unknown,
+) => Promise<{ block?: boolean; reason?: string } | undefined> | { block?: boolean; reason?: string } | undefined;
 
 function mountExtension(options: Parameters<typeof createLearnedErrorGuardExtension>[0]) {
 	let handler: ToolCallHandler | undefined;
@@ -20,7 +22,8 @@ function mountExtension(options: Parameters<typeof createLearnedErrorGuardExtens
 		},
 	} as unknown as ExtensionAPI;
 	createLearnedErrorGuardExtension(options)(pi);
-	return (toolName: string, input: unknown) => handler?.({ type: "tool_call", toolCallId: "t1", toolName, input });
+	return async (toolName: string, input: unknown) =>
+		await handler?.({ type: "tool_call", toolCallId: "t1", toolName, input });
 }
 
 const BASH_ARGS = { command: "rg foo C:/x" };
@@ -40,53 +43,53 @@ function entry(overrides: Partial<AggregatedLearnedError> = {}): AggregatedLearn
 }
 
 describe("createLearnedErrorGuardExtension", () => {
-	it("blocks a call whose args match a recurring, uncovered failure", () => {
+	it("blocks a call whose args match a recurring, uncovered failure", async () => {
 		const call = mountExtension({ provider: () => [entry()] });
-		const result = call("bash", BASH_ARGS);
+		const result = await call("bash", BASH_ARGS);
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain("5×");
 		expect(result?.reason).toContain("3 prior sessions");
 	});
 
-	it("fires only once per pattern, then lets the retry through", () => {
+	it("fires only once per pattern, then lets the retry through", async () => {
 		const call = mountExtension({ provider: () => [entry()] });
-		expect(call("bash", BASH_ARGS)?.block).toBe(true);
-		expect(call("bash", BASH_ARGS)).toBeUndefined();
+		expect((await call("bash", BASH_ARGS))?.block).toBe(true);
+		expect(await call("bash", BASH_ARGS)).toBeUndefined();
 	});
 
-	it("does not block below the occurrence threshold", () => {
+	it("does not block below the occurrence threshold", async () => {
 		const call = mountExtension({ provider: () => [entry({ totalCount: 2 })] });
-		expect(call("bash", BASH_ARGS)).toBeUndefined();
+		expect(await call("bash", BASH_ARGS)).toBeUndefined();
 	});
 
-	it("does not block below the session threshold", () => {
+	it("does not block below the session threshold", async () => {
 		const call = mountExtension({ provider: () => [entry({ sessionCount: 1 })] });
-		expect(call("bash", BASH_ARGS)).toBeUndefined();
+		expect(await call("bash", BASH_ARGS)).toBeUndefined();
 	});
 
-	it("does not block a pattern already covered by a built-in rule", () => {
+	it("does not block a pattern already covered by a built-in rule", async () => {
 		const call = mountExtension({ provider: () => [entry({ matchedRuleIds: ["bash-path-mangled-backslashes"] })] });
-		expect(call("bash", BASH_ARGS)).toBeUndefined();
+		expect(await call("bash", BASH_ARGS)).toBeUndefined();
 	});
 
-	it("does not block a different tool or different args", () => {
+	it("does not block a different tool or different args", async () => {
 		const call = mountExtension({ provider: () => [entry()] });
-		expect(call("read", BASH_ARGS)).toBeUndefined();
-		expect(call("bash", { command: "rg bar D:/y" })).toBeUndefined();
+		expect(await call("read", BASH_ARGS)).toBeUndefined();
+		expect(await call("bash", { command: "rg bar D:/y" })).toBeUndefined();
 	});
 
-	it("is a no-op when disabled", () => {
+	it("is a no-op when disabled", async () => {
 		const call = mountExtension({ enabled: false, provider: () => [entry()] });
-		expect(call("bash", BASH_ARGS)).toBeUndefined();
+		expect(await call("bash", BASH_ARGS)).toBeUndefined();
 	});
 
-	it("matches across path-key aliases (file_path → path)", () => {
+	it("matches across path-key aliases (file_path → path)", async () => {
 		const canonical = { path: "/repo/a.ts" };
 		const aliasArgs = { file_path: "/repo/a.ts" };
 		const sample = fingerprintToolArgs(canonical, 160);
 		const call = mountExtension({
 			provider: () => [entry({ tool: "read", sampleArgs: sample })],
 		});
-		expect(call("read", aliasArgs)?.block).toBe(true);
+		expect((await call("read", aliasArgs))?.block).toBe(true);
 	});
 });

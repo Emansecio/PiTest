@@ -82,6 +82,15 @@ export type AgentSessionEvent =
 			exitCode?: number;
 			willRetry?: boolean;
 	  }
+	| {
+			type: "pending_check";
+			phase: "waiting" | "passed" | "failed" | "timeout";
+			command: string;
+			elapsedMs?: number;
+			exitCode?: number;
+			attempt?: number;
+			maxAttempts?: number;
+	  }
 	| { type: "visual_review"; file: string }
 	| { type: "subagent_start"; handle: string }
 	| { type: "subagent_progress"; handle: string; turn: number; lastTool?: string }

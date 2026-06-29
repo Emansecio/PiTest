@@ -36,6 +36,8 @@ function applyCompletion(
 async function flushAutocomplete(): Promise<void> {
 	await Promise.resolve();
 	await new Promise((resolve) => setImmediate(resolve));
+	// Default slash/path autocomplete debounce is 40ms.
+	await new Promise((resolve) => setTimeout(resolve, 45));
 }
 
 describe("Editor border rule", () => {

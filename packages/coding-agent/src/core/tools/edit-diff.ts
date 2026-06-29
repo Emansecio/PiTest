@@ -3,7 +3,7 @@
  * Used by both edit.ts (for execution) and tool-execution.ts (for preview rendering).
  */
 
-import * as Diff from "diff";
+import { diffLines } from "diff";
 import { constants } from "fs";
 import { access, readFile, stat } from "fs/promises";
 import { sliceSafe } from "../../utils/surrogate.ts";
@@ -711,7 +711,7 @@ export function generateDiffString(
 	newContent: string,
 	contextLines = 4,
 ): { diff: string; firstChangedLine: number | undefined } {
-	const parts = Diff.diffLines(oldContent, newContent);
+	const parts = diffLines(oldContent, newContent);
 	const output: string[] = [];
 
 	const oldLines = oldContent.split("\n");

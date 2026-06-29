@@ -10,16 +10,13 @@ import { getShellConfig } from "../utils/shell.ts";
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
 
-// Cache for shell command results (persists for process lifetime)
-const commandResultCache = new Map<string, string | undefined>();
-
-// Short-lived TTL memo for the "uncached" `!command` resolvers. The per-request
+// Short-lived TTL memo for `!command` resolvers. The per-request
 // auth path (model-registry.getApiKeyAndHeaders → apiKey + provider headers +
 // model headers, plus retries and overlapping turns) resolves the same handful
 // of commands repeatedly; without this each one spawned a fresh shell before
 // every model request, adding 50–200ms (Windows especially) to time-to-first-
-// token. Distinct from commandResultCache: bounded to configCommandTtlMs() so
-// rotating tokens stay fresh, and failures are never memoised (a flaky command
+// token. Bounded to configCommandTtlMs() so rotating tokens stay fresh, and
+// failures are never memoised (a flaky command
 // must not turn into a sticky auth outage).
 const ttlCommandCache = new Map<string, { value: string; expiresAt: number }>();
 const DEFAULT_CONFIG_COMMAND_TTL_MS = 30_000;
@@ -120,13 +117,7 @@ function executeCommandUncached(commandConfig: string): string | undefined {
 }
 
 function executeCommand(commandConfig: string): string | undefined {
-	if (commandResultCache.has(commandConfig)) {
-		return commandResultCache.get(commandConfig);
-	}
-
-	const result = executeCommandUncached(commandConfig);
-	commandResultCache.set(commandConfig, result);
-	return result;
+	return executeCommandUncached(commandConfig);
 }
 
 /**
@@ -185,8 +176,7 @@ async function executeWithDefaultShellAsync(command: string): Promise<string | u
 }
 
 /**
- * Async, non-blocking mirror of executeCommandUncached. Bypasses the
- * process-lifetime commandResultCache but consults the short-lived TTL memo
+ * Async, non-blocking mirror of executeCommandUncached. Consults the short-lived TTL memo
  * (ttlCommandCache) so the per-request auth path does not re-spawn the same
  * `!command` on every turn. Only successful (defined) results are memoised, and
  * only for configCommandTtlMs(); transient failures are never cached and
@@ -291,7 +281,6 @@ export async function resolveHeadersOrThrowAsync(
 
 /** Clear the config value command cache. Exported for testing. */
 export function clearConfigValueCache(): void {
-	commandResultCache.clear();
 	ttlCommandCache.clear();
 }
 

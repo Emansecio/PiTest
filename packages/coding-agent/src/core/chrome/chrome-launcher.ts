@@ -118,7 +118,9 @@ export async function waitForEndpoint(host: string, port: number, opts: WaitForE
 
 	for (let i = 0; i < attempts; i++) {
 		try {
-			const res = await fetchImpl(`http://${host}:${port}/json/version`, {});
+			const res = await fetchImpl(`http://${host}:${port}/json/version`, {
+				signal: AbortSignal.timeout(intervalMs),
+			});
 			if (res.ok) return true;
 		} catch {
 			// not up yet

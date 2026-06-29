@@ -1,10 +1,15 @@
 import * as os from "node:os";
 import * as path from "node:path";
+import { visibleWidth } from "@pit/tui";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
+import { sliceSafe } from "../../utils/surrogate.ts";
 import { theme } from "./theme/theme.ts";
+
+/** Hard cap on compact cwd labels so deep paths never crowd adjacent UI. */
+export const MAX_COMPACT_CWD_WIDTH = 40;
 
 export function formatDisplayPath(p: string): string {
 	const home = os.homedir();
@@ -12,6 +17,132 @@ export function formatDisplayPath(p: string): string {
 		return `~${p.slice(home.length)}`;
 	}
 	return p;
+}
+
+/**
+ * Shorten a path by collapsing its middle, preserving the head and tail.
+ * Splits on both separators (Windows and POSIX); returns the input when it
+ * already fits or is too short to collapse meaningfully.
+ */
+export function ellipsizePathMiddle(p: string, maxWidth: number): string {
+	if (visibleWidth(p) <= maxWidth) return p;
+	const segments = p.split(/[\\/]+/).filter((s) => s.length > 0);
+	if (segments.length <= 2) {
+		return `…${sliceSafe(p, p.length - (maxWidth - 1))}`;
+	}
+	const sep = p.includes("\\") ? "\\" : "/";
+	const head = segments[0]!;
+	let tailCount = 1;
+	let candidate = `${head}${sep}…${sep}${segments.slice(segments.length - tailCount).join(sep)}`;
+	while (tailCount + 1 < segments.length) {
+		const next = `${head}${sep}…${sep}${segments.slice(segments.length - (tailCount + 1)).join(sep)}`;
+		if (visibleWidth(next) > maxWidth) break;
+		candidate = next;
+		tailCount += 1;
+	}
+	return candidate;
+}
+
+/**
+ * Compact a cwd for identity lines (welcome, footer). Prefers a path relative to
+ * the git repo root (`PiTest/src/…` instead of `~/PiTest/src/…`). Outside a repo,
+ * falls back to home-relative form with a mid-path ellipsis.
+ */
+export function compactCwd(cwd: string, repoDir: string | null): string {
+	if (repoDir) {
+		const rel = path.relative(repoDir, cwd);
+		if (rel === "") return path.basename(repoDir);
+		if (!rel.startsWith("..") && rel !== "." && !/^[A-Za-z]:/.test(rel)) {
+			const normalized = rel.split(/[\\/]+/).join("/");
+			return `${path.basename(repoDir)}/${normalized}`;
+		}
+	}
+	return ellipsizePathMiddle(formatDisplayPath(cwd), MAX_COMPACT_CWD_WIDTH);
+}
+
+function isBareHomeLabel(label: string): boolean {
+	const trimmed = label.trim();
+	return trimmed === "~" || trimmed === "~/" || trimmed === "~\\";
+}
+
+export interface WorkspaceCwdLabels {
+	/** Session cwd, never empty and never a lone `~`. */
+	session: string;
+	/** `shell: …` when the launcher cwd differs from the session cwd. */
+	shellNote?: string;
+}
+
+/**
+ * Resolve a cwd for identity lines (welcome, footer). Never returns empty or a
+ * bare `~` — home alone reads as `~ (home)`, subpaths stay `~/proj`, repo-relative
+ * wins when inside a git root. Falls back to `fallbackCwd` when `cwd` is empty.
+ */
+export function resolveOrientingCwdLabel(cwd: string, repoDir: string | null, fallbackCwd?: string): string {
+	const raw = cwd.trim() || (fallbackCwd?.trim() ?? "");
+	if (!raw) return "?";
+
+	let label = compactCwd(raw, repoDir);
+	if (!label.trim() || isBareHomeLabel(label)) {
+		const home = os.homedir();
+		const resolved = path.resolve(raw);
+		if (resolved === home) {
+			label = "~ (home)";
+		} else {
+			const rel = formatDisplayPath(resolved);
+			if (!isBareHomeLabel(rel)) {
+				label = ellipsizePathMiddle(rel, MAX_COMPACT_CWD_WIDTH);
+			} else {
+				const base = path.basename(resolved);
+				label = base || "?";
+			}
+		}
+	}
+	return label;
+}
+
+/** Build welcome/footer cwd labels, surfacing shell vs session divergence. */
+export function buildWorkspaceCwdLabels(
+	sessionCwd: string,
+	launchCwd: string,
+	repoDir: string | null,
+): WorkspaceCwdLabels {
+	const session = resolveOrientingCwdLabel(sessionCwd, repoDir, launchCwd);
+	const sessionResolved = path.resolve(sessionCwd.trim() || launchCwd);
+	const launchResolved = path.resolve(launchCwd);
+	let shellNote: string | undefined;
+	if (sessionResolved !== launchResolved) {
+		const shellLabel = resolveOrientingCwdLabel(launchCwd, repoDir, launchCwd);
+		shellNote = `shell: ${shellLabel}`;
+	}
+	return { session, shellNote };
+}
+
+/** Actionable one-line summary for collapsed skill diagnostics. */
+export function formatSkillDiagnosticsSummary(diagnostics: readonly ResourceDiagnostic[]): string {
+	const collisionNames = new Set<string>();
+	let warnings = 0;
+	let errors = 0;
+	for (const d of diagnostics) {
+		if (d.type === "collision" && d.collision) {
+			collisionNames.add(d.collision.name);
+		} else if (d.type === "error") {
+			errors++;
+		} else {
+			warnings++;
+		}
+	}
+	const parts: string[] = [];
+	if (collisionNames.size > 0) {
+		const names = [...collisionNames].sort((a, b) => a.localeCompare(b));
+		const preview = names.slice(0, 3).join(", ");
+		const extra = names.length > 3 ? ` +${names.length - 3}` : "";
+		const noun = collisionNames.size === 1 ? "duplicate" : "duplicates";
+		parts.push(`${collisionNames.size} ${noun} (${preview}${extra})`);
+	}
+	if (warnings > 0) parts.push(`${warnings} ${warnings === 1 ? "warning" : "warnings"}`);
+	if (errors > 0) parts.push(`${errors} ${errors === 1 ? "error" : "errors"}`);
+	if (parts.length === 0) return `${diagnostics.length} issues`;
+	return parts.join(" · ");
 }
 
 export function formatExtensionDisplayPath(p: string): string {
