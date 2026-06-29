@@ -2,8 +2,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
-import { shutdownAll } from "../../src/core/lsp/client.ts";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { getOrCreateClient, shutdownAll } from "../../src/core/lsp/client.ts";
+import { getServersForFile } from "../../src/core/lsp/config.ts";
+import { getConfig } from "../../src/core/lsp/manager.ts";
 import {
 	setDiagnosticsOnWrite,
 	setEnforceDiagnosticsOnWrite,
@@ -46,9 +48,20 @@ async function runEdit(cwd: string, path: string, oldText: string, newText: stri
 describe("lsp writethrough — post-write diagnostics", () => {
 	const cwd = makeProject();
 
-	afterAll(async () => {
+	beforeAll(async () => {
+		const warmPath = join(cwd, "warm.txt");
+		writeFileSync(warmPath, "hello\n");
+		const servers = getServersForFile(getConfig(cwd), warmPath);
+		await Promise.all(servers.map(([, config]) => getOrCreateClient(config, cwd, 15_000)));
+	});
+
+	afterEach(() => {
 		setDiagnosticsOnWrite(false);
+		setEnforceDiagnosticsOnWrite(true);
 		setFormatOnWrite(false);
+	});
+
+	afterAll(async () => {
 		await shutdownAll();
 		rmSync(cwd, { recursive: true, force: true });
 	});
@@ -59,7 +72,6 @@ describe("lsp writethrough — post-write diagnostics", () => {
 		const out = await runWrite(cwd, "fmt.txt", "hello\n");
 		expect(out).toContain("(formatted)");
 		expect(readFileSync(join(cwd, "fmt.txt"), "utf-8")).toBe("/* fmt */ hello\n");
-		setFormatOnWrite(false);
 	});
 
 	it("write attaches LSP diagnostics (imperative framing on error) when enabled", async () => {
@@ -102,7 +114,6 @@ describe("lsp writethrough — post-write diagnostics", () => {
 		expect(out).toContain("LSP diagnostics");
 		expect(out).toContain("fake diagnostic");
 		expect(out).not.toContain("Fix the error(s) below");
-		setEnforceDiagnosticsOnWrite(true);
 	});
 
 	it("no diagnostics appended when disabled", async () => {
