@@ -186,6 +186,7 @@ import { expandPromptTemplate, type PromptTemplate, parseCommandArgs, substitute
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import type { BranchSummaryEntry, SessionManager } from "./session-manager.js";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.js";
+import { type RecoveryLevel, SessionRecoveryController } from "./session-recovery.ts";
 import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
@@ -207,14 +208,12 @@ import {
 	type ToolDiscoveryIndex,
 } from "./tool-discovery.ts";
 import { agentToolToWireSurface, compactToolsForProviderContext, compactWireToolSurface } from "./tool-wire-schema.ts";
-
 import {
 	type BashBackgroundJob,
 	type BashOperations,
 	createLocalBashOperations,
 	listBashBackgroundJobs,
 } from "./tools/bash.js";
-
 import { FileMtimeStore } from "./tools/file-mtime-store.ts";
 import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.js";
 import { ReadDedupeStore } from "./tools/read.js";
@@ -630,6 +629,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// number of in-flight tool calls and aggressively pruned on completion.
 	private readonly _toolCallArgsByCallId = new Map<string, unknown>();
 
+	// Reactive session recovery: lean by default, escalates on thrash signals.
+	private readonly _recovery: SessionRecoveryController;
 	// Per-session steering/reminder policy engine: owns the doom-loop / result-loop /
 	// repeating-pattern / cross-error / stagnation / todo-cadence / failure-budget
 	// detectors and their once-per-streak latches + the per-turn failure budget.
@@ -761,6 +762,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 				: new FileMtimeStore();
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
+		this._recovery = new SessionRecoveryController();
+
 		// Steering/reminder policy engine. Reads settings + the (already standalone)
 		// tool-call stats and todo manager, and posts steers/follow-ups via
 		// sendCustomMessage — it never reaches back into the session. Created here
@@ -771,6 +774,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			toolCallStats: this._toolCallStats,
 			todo: this._todo,
 			sendCustomMessage: this.sendCustomMessage.bind(this),
+			recovery: this._recovery,
 		});
 
 		// Size the frequent-files tracker from settings so an opt-in user with a
@@ -2275,6 +2279,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 		return this._goal.snapshot();
 	}
 
+	/** Current reactive recovery level (`lean` when disabled or no thrash yet). */
+	getRecoveryLevel(): RecoveryLevel {
+		return this._recovery.getLevel();
+	}
+
 	/** Compact statusline string for the footer (empty when no goal). */
 	goalStatusLine(): string {
 		// ⟳ marker when the agent is actively driving the goal (streaming a turn
@@ -3175,6 +3184,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		if (this._userInterrupted || this._lastTurnAborted()) return;
 		const settings = this.settingsManager.getVerificationSettings();
 		if (!settings.enabled) return;
+		const maxAttempts = this._recovery.getEffectiveVerificationMaxAttempts(settings.maxAttempts);
 
 		this._inVerification = true;
 		const abort = new AbortController();
@@ -3203,7 +3213,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 				// touched-file independent and re-resolve to the same string; keep the
 				// last good command if a retry resolves to null.
 				if (attempt > 1) command = this._resolveCheckCommand(settings.command) ?? command;
-				this.emit({ type: "verification", phase: "running", command, attempt, maxAttempts: settings.maxAttempts });
+				this.emit({ type: "verification", phase: "running", command, attempt, maxAttempts });
 				const result = await runCheckCommand(command, this._cwd, {
 					signal: abort.signal,
 					timeoutMs: settings.timeoutMs,
@@ -3215,8 +3225,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 						phase: "passed",
 						command,
 						attempt,
-						maxAttempts: settings.maxAttempts,
+						maxAttempts,
 					});
+					this._recovery.noteCleanTool();
 					// Debug-driven verify (additive, fail-open): on green, if a file this
 					// turn touched is a debuggable repro (pytest+debugpy / go test+dlv),
 					// launch it under the native DAP debugger and capture runtime state. A
@@ -3244,13 +3255,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 					}
 					return;
 				}
-				const willRetry = fixes < settings.maxAttempts;
+				const willRetry = fixes < maxAttempts;
 				this.emit({
 					type: "verification",
 					phase: "failed",
 					command,
 					attempt,
-					maxAttempts: settings.maxAttempts,
+					maxAttempts,
 					exitCode: result.exitCode,
 					willRetry,
 				});
@@ -3260,6 +3271,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 					// TERMINAL message (NOT the fix prompt): tell it the check is still
 					// failing and to summarize honestly instead of reporting success.
 					// One-shot: no loop re-entry, `fixes` is not incremented.
+					this._recovery.noteSignal("verification_exhausted");
+					this._steering.maybeInjectNarrationSteer();
 					await this._promptOnce(
 						verificationExhaustedPrompt(command, result, fixes, this._lastAssistantClaimedCompletion()),
 						{ expandPromptTemplates: false, source: options?.source },
@@ -3694,7 +3707,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 	 */
 	async sendCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: {
+			triggerTurn?: boolean;
+			deliverAs?: "steer" | "followUp" | "nextTurn";
+			/** Prepend to the steering queue so this steer drains before older ones. */
+			steerPriority?: boolean;
+		},
 	): Promise<void> {
 		const appMessage = {
 			role: "custom" as const,
@@ -3709,6 +3727,19 @@ export class AgentSession implements CompactionHost, FusionHost {
 		} else if (this.isStreaming) {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
+			} else if (options?.steerPriority) {
+				// Critical recovery steers must land in the live transcript immediately —
+				// the default one-at-a-time steering queue can starve them behind softer
+				// reminders when session recovery adds extra steers in the same turn.
+				this.agent.state.messages.push(appMessage);
+				this.sessionManager.appendCustomMessageEntry(
+					message.customType,
+					message.content,
+					message.display,
+					message.details,
+				);
+				this.emit({ type: "message_start", message: appMessage });
+				this.emit({ type: "message_end", message: appMessage });
 			} else {
 				this.agent.steer(appMessage);
 			}

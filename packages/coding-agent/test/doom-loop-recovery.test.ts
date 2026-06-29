@@ -72,14 +72,14 @@ describe("doom-loop Tier-3 structured recovery (CR6)", () => {
 
 		await harness.session.prompt("read the file");
 
-		// Recovery was offered first...
-		expect(customMessages(harness, "pi.doom-loop-recovery").length).toBe(1);
-		// ...then the relapse aborted at the climbing count (Tier-3 + 1).
+		// Recovery was offered first (strict budget → two steers before relapse abort).
+		expect(customMessages(harness, "pi.doom-loop-recovery").length).toBe(2);
+		// ...then relapse aborts one past the recovery budget (strict → budget 2 → abort at 8).
 		const abortMsg = harness.session.messages.find(
 			(m) => m.role === "assistant" && errorMessageOf(m).includes("Doom loop abort"),
 		);
 		expect(abortMsg).toBeDefined();
-		expect(errorMessageOf(abortMsg)).toContain("7 consecutive");
+		expect(errorMessageOf(abortMsg)).toContain("8 consecutive");
 		// The loop was cut short well before the 12 queued calls drained.
 		expect(harness.session.messages.filter((m) => m.role === "toolResult").length).toBeLessThan(12);
 	});

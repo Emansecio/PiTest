@@ -4,6 +4,11 @@ import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
 import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } from "./cross-error.js";
 import type { CustomMessage } from "./messages.js";
+import {
+	buildNarrationRecoverySteer,
+	type RecoverySignal,
+	type SessionRecoveryController,
+} from "./session-recovery.js";
 import type { SettingsManager } from "./settings-manager.js";
 import { buildStagnationReminder, classifyTurn, decideStagnationReminder, StagnationTracker } from "./stagnation.js";
 import type { TodoManager } from "./todo/todo-manager.ts";
@@ -26,12 +31,6 @@ import { extractErrorMessage, fingerprintToolArgsExact, type ToolCallStats } fro
 // tools is a strong "productive-looking loop" signal the same-call doom-loop misses.
 const REPEATING_PATTERN_THRESHOLD = 3;
 
-// Trailing run of identical ERROR results (args VARYING) before the result-only
-// thrash detector steers. Deliberately HIGHER than the args-keyed doom-loop
-// threshold (default 2) and error-only, so this softer no-abort signal stays
-// conservative and rarely false-fires. See _maybeInjectResultLoop.
-const RESULT_LOOP_THRESHOLD = 5;
-
 /**
  * Delivery callback the engine uses to inject steers/follow-ups. Mirrors
  * `AgentSession.sendCustomMessage` so the engine never reaches back into the
@@ -39,7 +38,11 @@ const RESULT_LOOP_THRESHOLD = 5;
  */
 type SendCustomMessage = (
 	message: Pick<CustomMessage, "customType" | "content" | "display" | "details">,
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: {
+		triggerTurn?: boolean;
+		deliverAs?: "steer" | "followUp" | "nextTurn";
+		steerPriority?: boolean;
+	},
 ) => Promise<void>;
 
 /** Collaborators the steering engine reads from (owned by the AgentSession). */
@@ -48,6 +51,7 @@ export interface TurnSteeringDeps {
 	toolCallStats: ToolCallStats;
 	todo: TodoManager;
 	sendCustomMessage: SendCustomMessage;
+	recovery: SessionRecoveryController;
 }
 
 /**
@@ -130,13 +134,44 @@ export class TurnSteeringEngine {
 	private _fireReminder(
 		customType: string,
 		content: string,
-		opts: { deliverAs: "steer" | "followUp"; display: boolean; label: string },
+		opts: { deliverAs: "steer" | "followUp"; display: boolean; label: string; steerPriority?: boolean },
 	): void {
+		const steerPriority =
+			opts.steerPriority ??
+			(customType === "pi.doom-loop-recovery" ||
+				customType === "pi.doom-loop-pause" ||
+				customType === "pi.result-loop-reminder" ||
+				customType === "pi.session-recovery-narration");
 		this.deps
-			.sendCustomMessage({ customType, content, display: opts.display }, { deliverAs: opts.deliverAs })
+			.sendCustomMessage(
+				{ customType, content, display: opts.display },
+				{
+					deliverAs: opts.deliverAs,
+					steerPriority: steerPriority && opts.deliverAs === "steer",
+				},
+			)
 			.catch((err: unknown) => {
 				process.stderr.write(`[pi] ${opts.label} delivery failed: ${err}\n`);
 			});
+	}
+
+	private _noteRecoverySignal(signal: RecoverySignal): void {
+		this.deps.recovery.noteSignal(signal);
+		this._maybeInjectNarrationSteer();
+	}
+
+	/** One-shot narration steer when session recovery first enters `guided`. */
+	maybeInjectNarrationSteer(): void {
+		if (!this.deps.recovery.consumeNarrationSteerPending()) return;
+		this._fireReminder("pi.session-recovery-narration", buildNarrationRecoverySteer(), {
+			deliverAs: "steer",
+			display: false,
+			label: "session-recovery narration",
+		});
+	}
+
+	private _maybeInjectNarrationSteer(): void {
+		this.maybeInjectNarrationSteer();
 	}
 
 	/**
@@ -167,19 +202,20 @@ export class TurnSteeringEngine {
 		// Tier2/Tier3 clamp above Tier1 so a configured threshold > 3 cannot invert the
 		// order (pause/abort firing before the soft reminder). Default (threshold=2) keeps
 		// the historical 2/4/6 cadence.
-		const TIER1_THRESHOLD = cfg.threshold ?? 2;
+		const TIER1_THRESHOLD = this.deps.recovery.getEffectiveTier1Threshold(cfg.threshold ?? 2);
 		const TIER2_THRESHOLD = Math.max(4, TIER1_THRESHOLD + 2);
 		const TIER3_THRESHOLD = Math.max(6, TIER1_THRESHOLD + 4);
-		// CR6: how many structured-recovery steers a single streak may receive at the
-		// Tier-3 threshold before the hard abort. 1 = one chance to course-correct,
-		// then the safety throw on relapse. Adjustable if recovery proves too eager.
-		const RECOVERY_LIMIT = 1;
+		const RECOVERY_LIMIT = this.deps.recovery.getDoomRecoveryLimit();
+		const identicalArgsStreak = this.deps.toolCallStats.getConsecutiveSimilarCount();
 
 		// CR5: result-only thrash signal — SEPARATE from the args-keyed ladder below
 		// and run on EVERY call (the ladder's early returns must not skip it). When the
 		// args ARE identical the ladder owns this point, so defer (pass that as active)
-		// to avoid a double-steer. Never aborts.
-		this._maybeInjectResultLoop(toolName, errorMessage, consecutiveCount >= TIER1_THRESHOLD);
+		// to avoid a double-steer. Never aborts. Use the identical-args streak — not
+		// `consecutiveCount >= TIER1` alone — so session recovery lowering TIER1 to 1
+		// does not silence result-loop on varying-args thrash (consecutiveCount stays 1).
+		const argsLadderActive = identicalArgsStreak > 1 && consecutiveCount >= TIER1_THRESHOLD;
+		this._maybeInjectResultLoop(toolName, errorMessage, argsLadderActive);
 
 		// A fresh or broken streak (a different tool+args just ran) clears which
 		// tiers have fired so the next genuine loop escalates from scratch.
@@ -220,6 +256,7 @@ export class TurnSteeringEngine {
 					display: true,
 					label: "doom-loop recovery",
 				});
+				this._noteRecoverySignal("doom_loop_tier3");
 				return;
 			}
 			// Relapsed after recovery: hard safety abort. Reset the recovery budget so a
@@ -256,6 +293,7 @@ export class TurnSteeringEngine {
 				display: true,
 				label: "doom-loop pause",
 			});
+			this._noteRecoverySignal("doom_loop_tier2");
 			return;
 		}
 
@@ -270,6 +308,7 @@ export class TurnSteeringEngine {
 			display: false,
 			label: "doom-loop reminder",
 		});
+		this._noteRecoverySignal("doom_loop_tier1");
 	}
 
 	/**
@@ -291,7 +330,8 @@ export class TurnSteeringEngine {
 		}
 		// The args-keyed ladder already owns an identical-call loop — don't stack two steers.
 		if (argsLadderActive) return;
-		if (count < RESULT_LOOP_THRESHOLD) return;
+		const resultThreshold = this.deps.recovery.getEffectiveResultLoopThreshold();
+		if (count < resultThreshold) return;
 		if (this._resultLoopFired) return;
 		this._resultLoopFired = true;
 		const summary = (errorMessage ?? "(no error text)").trim();
@@ -312,6 +352,7 @@ export class TurnSteeringEngine {
 			display: true,
 			label: "result-loop reminder",
 		});
+		this._noteRecoverySignal("result_loop");
 	}
 
 	/**
@@ -373,6 +414,7 @@ export class TurnSteeringEngine {
 			display: false,
 			label: "repeating-pattern reminder",
 		});
+		this._noteRecoverySignal("repeating_pattern");
 	}
 
 	/**
@@ -410,11 +452,13 @@ export class TurnSteeringEngine {
 			display: false,
 			label: "cross-error reminder",
 		});
+		this._noteRecoverySignal("cross_error");
 	}
 
 	/** Record a successful (non-error) tool call so the cross-error streak resets. */
 	observeToolSuccess(): void {
 		this._crossError.observeSuccess();
+		this.deps.recovery.noteCleanTool();
 	}
 
 	/**
@@ -459,6 +503,7 @@ export class TurnSteeringEngine {
 				display: true,
 				label: "stagnation pause",
 			});
+			this._noteRecoverySignal("stagnation_hard");
 			return;
 		}
 		const content = buildStagnationReminder({ count, paused: false });
@@ -556,14 +601,17 @@ export class TurnSteeringEngine {
 	 */
 	maybeInjectToolErrorReflection(toolName: string, args: unknown, result: unknown, attemptsLeft?: number): void {
 		const cfg = this.deps.settingsManager.getToolFeedbackSettings().errorReflection;
-		if (!decideErrorReflection({ enabled: cfg.enabled, isError: true })) return;
+		if (!this.deps.recovery.shouldEmitErrorReflection(cfg.enabled)) return;
+		if (!decideErrorReflection({ enabled: true, isError: true })) return;
 		const resultContent = (result as { content?: Array<{ type: string; text?: string }> } | undefined)?.content;
 		const errorMessage = extractErrorMessage(resultContent);
 		const content = buildToolErrorReflection({ toolName, args, errorMessage, attemptsLeft });
+		const asSteer = this.deps.recovery.deliverErrorReflectionAsSteer(cfg.enabled);
+		const deliverAs = asSteer ? "steer" : "followUp";
 		this.deps
 			.sendCustomMessage(
 				{ customType: "pi.tool-error-reflection", content, display: false },
-				{ deliverAs: "followUp" },
+				{ deliverAs, steerPriority: asSteer },
 			)
 			.catch(() => {
 				// Failure to inject a reflection must not break tool execution.
@@ -608,6 +656,7 @@ export class TurnSteeringEngine {
 			display: false,
 			label: "tool-failure-budget reminder",
 		});
+		this._noteRecoverySignal("failure_budget");
 	}
 
 	/**

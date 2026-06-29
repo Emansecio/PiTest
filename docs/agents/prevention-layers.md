@@ -55,6 +55,7 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 - **session_before_compact**: `read-guard` clear, `ReadDedupeStore.clear()`, hooks.
 - **session_start / session_shutdown**: permissions, mcp, hooks.
 - **Cross-cutting steering** (reminders, not blockers): doom-loop, stagnation, todo-cadence — nudge the model without vetoing.
+- **Session Recovery** (`session-recovery.ts` + `TurnSteeringEngine`): reactive scaffolding uplift. Every session starts **`lean`** (behavior-identical to the historical harness). When thrash signals fire (doom-loop tiers, result-loop, cross-error, failure-budget, repeating-pattern, verification exhausted, stagnation hard), the level rises **`guided` → `strict`**, enabling: error-reflection via **steer** (not stale `followUp`), tighter loop thresholds, +1/+2 verify `maxAttempts`, one-shot narration steer. Clean tool-success streaks de-escalate. **Not** model-tier classification — opt out `PIT_NO_SESSION_RECOVERY=1`. Telemetry: `quality.recovery`.
 
 ---
 

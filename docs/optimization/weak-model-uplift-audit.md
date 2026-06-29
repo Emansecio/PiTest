@@ -31,6 +31,13 @@ preventiva / camada corretiva-aprendizado / camada de steering-adaptatividade).
 > código) · `Implementável` · `Vale a pena` · `Prioridade` (Tier 1 fazer / Tier 2
 > ressalva / Tier 3 benchmark-first ou descartar).
 
+> **Atualização (2026-06-29) — Session Recovery shipped.** Uplift reativo por sessão
+> (`packages/coding-agent/src/core/session-recovery.ts`) substitui a fundação
+> **EE1/QW3** (`capabilityTier` + prompt por modelo). Sem classificar modelo: `lean`
+> default, escala `guided`/`strict` em thrash, desce em streak limpa. Itens **EE1**,
+> **QW3**, **ST4**, **QW1** (parcial — reflection via steer em guided+) rebaixados;
+> ver [`prevention-layers.md`](../agents/prevention-layers.md) Band D.
+
 ---
 
 ## Sumário executivo (visão por categoria + prioridade)

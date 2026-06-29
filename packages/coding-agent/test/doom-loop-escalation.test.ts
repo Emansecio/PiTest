@@ -45,9 +45,10 @@ describe("doom-loop escalation", () => {
 			(m) => m.role === "assistant" && errorMessageOf(m).includes("Doom loop abort"),
 		);
 		expect(abortMsg).toBeDefined();
-		// CR6: the first Tier-3 (count 6) now injects a recovery steer instead of
-		// aborting; the model ignores it and the 7th identical call relapses → abort.
-		expect(errorMessageOf(abortMsg)).toContain("7 consecutive");
+		// CR6: the first Tier-3 (count 6) injects a recovery steer instead of
+		// aborting; relapse aborts one past the recovery budget. Session recovery
+		// in `strict` raises the budget to 2, so abort lands at 8 (not 7).
+		expect(errorMessageOf(abortMsg)).toContain("8 consecutive");
 
 		// The loop was actually cut short — far fewer reads ran than were queued.
 		const reads = harness.session.messages.filter((m) => m.role === "toolResult").length;

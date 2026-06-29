@@ -2,6 +2,7 @@ import { getRuntimeDiagnostics } from "@pit/ai";
 import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+import type { RecoveryLevel } from "../../../core/session-recovery.ts";
 import { buildWorkspaceCwdLabels } from "../display-utils.ts";
 import { CONTEXT_USAGE_WARN_PERCENT, theme } from "../theme/theme.ts";
 
@@ -195,6 +196,19 @@ export class FooterComponent implements Component {
 		return getRuntimeDiagnostics().counters["stream.overthink-guard"]?.count ?? 0;
 	}
 
+	private getRecoveryLevel(): RecoveryLevel {
+		if (typeof this.session.getRecoveryLevel === "function") {
+			return this.session.getRecoveryLevel();
+		}
+		return "lean";
+	}
+
+	private getRecoverySegment(): string | null {
+		const level = this.getRecoveryLevel();
+		if (level === "lean") return null;
+		return `recovery:${level}`;
+	}
+
 	private getPermissionMode(): string | null {
 		// Coupled to the "permissions: <mode>" status string set by
 		// permissions-extension.ts; a format change there silently drops the mode.
@@ -250,6 +264,7 @@ export class FooterComponent implements Component {
 		const cwdLabels = buildWorkspaceCwdLabels(cwd, this.launchCwd, this.footerData.getRepoDir());
 		const sessionName = this.session.sessionManager.getSessionName() ?? "";
 		const overthinkGuardCount = this.getOverthinkGuardCount();
+		const recoveryLevel = this.getRecoveryLevel();
 		return [
 			width,
 			entries.length,
@@ -272,6 +287,7 @@ export class FooterComponent implements Component {
 			sessionName,
 			this.autoCompactEnabled ? 1 : 0,
 			overthinkGuardCount,
+			recoveryLevel,
 		].join("|");
 	}
 
@@ -392,6 +408,10 @@ export class FooterComponent implements Component {
 		const overthinkGuardCount = this.getOverthinkGuardCount();
 		if (overthinkGuardCount > 0) {
 			modeBits.push(theme.fg("warning", `overthink ×${overthinkGuardCount}`));
+		}
+		const recoverySegment = this.getRecoverySegment();
+		if (recoverySegment) {
+			modeBits.push(theme.fg("warning", recoverySegment));
 		}
 
 		// Goal status is ephemeral and actionable: render it bright (accent), not

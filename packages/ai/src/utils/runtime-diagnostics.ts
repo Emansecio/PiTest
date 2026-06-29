@@ -43,6 +43,7 @@ export type DiagnosticCategory =
 	| "prune.thinking-cap"
 	| "prune.live"
 	| "quality.rigor"
+	| "quality.recovery"
 	| "compaction.presend-overflow-guard"
 	| "fusion.member-failed"
 	| "fusion.judge-retry"

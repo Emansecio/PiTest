@@ -146,6 +146,11 @@ class PendingMessageQueue {
 		this.messages.push(message);
 	}
 
+	/** Prepend so the message drains before older queued steers (critical recovery). */
+	enqueueFront(message: AgentMessage): void {
+		this.messages.unshift(message);
+	}
+
 	hasItems(): boolean {
 		return this.messages.length > 0;
 	}
@@ -299,8 +304,12 @@ export class Agent {
 	}
 
 	/** Queue a message to be injected after the current assistant turn finishes. */
-	steer(message: AgentMessage): void {
-		this.steeringQueue.enqueue(message);
+	steer(message: AgentMessage, options?: { priority?: boolean }): void {
+		if (options?.priority) {
+			this.steeringQueue.enqueueFront(message);
+		} else {
+			this.steeringQueue.enqueue(message);
+		}
 	}
 
 	/** Queue a message to run only after the agent would otherwise stop. */
