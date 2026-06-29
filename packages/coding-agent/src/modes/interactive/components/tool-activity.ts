@@ -10,6 +10,34 @@ export type ToolActivity = "navigation" | "action";
  * forcing an expand for the common case. */
 export const ERROR_PREVIEW_LINES = 10;
 
+/** Max diff body lines auto-shown under a settled edit action line (grouped mode). */
+export const EDIT_SUCCESS_PREVIEW_LINES = 5;
+
+/** Max diff body lines when a tool row is fully expanded (grouped + legacy). */
+export const EDIT_EXPANDED_MAX_LINES = 40;
+
+const EDIT_FAMILY_TOOLS = new Set(["edit", "edit_v2", "ast_edit"]);
+
+export function isEditFamilyTool(toolName: string): boolean {
+	return EDIT_FAMILY_TOOLS.has(toolName);
+}
+
+export function hasEditDiff(details: { diff?: string } | undefined): boolean {
+	return typeof details?.diff === "string" && details.diff.length > 0;
+}
+
+/**
+ * Cap a diff body to `maxLines`, appending the standard expand trailer when
+ * lines were hidden. Mirrors {@link capErrorPreview}.
+ */
+export function capDiffPreview(lines: string[], width: number, maxLines: number): string[] {
+	if (lines.length <= maxLines) return lines;
+	const kept = lines.slice(0, maxLines);
+	const hidden = lines.length - kept.length;
+	kept.push(truncateToWidth(moreLinesTrailer(hidden, expandKeyHint()), width));
+	return kept;
+}
+
 /**
  * Canonical "more lines" trailer shown when a body is folded to a preview.
  * One format across every collapse site (tool result / bash / error preview):

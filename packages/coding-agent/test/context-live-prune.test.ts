@@ -132,6 +132,79 @@ describe("applyLiveContextEconomyAfterToolSuccess (D2 + A3)", () => {
 		expect(JSON.stringify(argsAt(outcome.messages, 0))).toContain("chars elided");
 	});
 
+	it("supersedes older lsp diagnostics output when the same file is rechecked", () => {
+		const blob = bigBlob();
+		const messages = [
+			toolCall("lsp", "l1", { action: "diagnostics", file: "foo.ts" }),
+			toolResult("lsp", "l1", blob),
+			toolCall("lsp", "l2", { action: "diagnostics", file: "foo.ts" }),
+			toolResult("lsp", "l2", "fresh diagnostics"),
+			user("a"),
+			user("b"),
+		];
+
+		const outcome = applyLiveContextEconomyAfterToolSuccess(
+			messages,
+			{ type: "toolCall", id: "l2", name: "lsp", arguments: { action: "diagnostics", file: "foo.ts" } },
+			false,
+			CONTEXT_WINDOW,
+		);
+
+		expect(outcome.supersedeReclaimed).toBeGreaterThan(0);
+		expect(textAt(outcome.messages, 1).length).toBeLessThan(blob.length);
+		expect(textAt(outcome.messages, 3)).toBe("fresh diagnostics");
+	});
+
+	it("does not supersede lsp rename results", () => {
+		const messages = [
+			toolCall("lsp", "r1", { action: "rename", file: "a.ts", line: 1, symbol: "foo", new_name: "bar" }),
+			toolResult("lsp", "r1", "Applied rename"),
+			toolCall("lsp", "r2", { action: "rename", file: "a.ts", line: 1, symbol: "foo", new_name: "bar" }),
+			toolResult("lsp", "r2", "Applied rename again"),
+			user("a"),
+			user("b"),
+		];
+
+		const outcome = applyLiveContextEconomyAfterToolSuccess(
+			messages,
+			{
+				type: "toolCall",
+				id: "r2",
+				name: "lsp",
+				arguments: { action: "rename", file: "a.ts", line: 1, symbol: "foo", new_name: "bar" },
+			},
+			false,
+			CONTEXT_WINDOW,
+		);
+
+		expect(outcome.supersedeReclaimed).toBe(0);
+		expect(textAt(outcome.messages, 1)).toBe("Applied rename");
+	});
+
+	it("skips live economy when isError is true (e.g. tool_result hook override)", () => {
+		const blob = bigBlob();
+		const messages = [
+			toolCall("read", "c1", { path: "foo.ts" }),
+			toolResult("read", "c1", blob),
+			toolCall("read", "c2", { path: "foo.ts" }),
+			toolResult("read", "c2", "fresh"),
+			user("a"),
+			user("b"),
+		];
+		const beforeLen = textAt(messages, 1).length;
+
+		const outcome = applyLiveContextEconomyAfterToolSuccess(
+			messages,
+			{ type: "toolCall", id: "c2", name: "read", arguments: { path: "foo.ts" } },
+			true,
+			CONTEXT_WINDOW,
+		);
+
+		expect(outcome.reclaimed).toBe(0);
+		expect(outcome.messages).toBe(messages);
+		expect(textAt(outcome.messages, 1).length).toBe(beforeLen);
+	});
+
 	it("respects PIT_NO_LIVE_ARG_ELISION", () => {
 		process.env.PIT_NO_LIVE_ARG_ELISION = "1";
 		const oldBody = "q".repeat(6000);

@@ -1,0 +1,23 @@
+{
+  "name": "get_proxy_http_history_regex",
+  "description": "Displays items matching a specified regex within the proxy HTTP history",
+  "inputSchema": {
+    "properties": {
+      "count": {
+        "type": "integer"
+      },
+      "offset": {
+        "type": "integer"
+      },
+      "regex": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "count",
+      "offset",
+      "regex"
+    ],
+    "type": "object"
+  }
+}

@@ -433,6 +433,8 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	showImages: boolean;
 	/** Whether the current result is an error. */
 	isError: boolean;
+	/** Wrapped by an activity line/group — edit renderers omit the duplicate header. */
+	activityChild: boolean;
 }
 
 /**

@@ -1489,6 +1489,7 @@ describe("openai-codex streaming", () => {
 	});
 
 	it("honors options.maxRetries as the SSE retry ceiling", async () => {
+		vi.useFakeTimers();
 		const token = mockToken();
 		let codexRequests = 0;
 
@@ -1525,11 +1526,13 @@ describe("openai-codex streaming", () => {
 		};
 
 		// maxRetries: 1 → 2 total attempts (initial + 1 retry).
-		const result = await streamOpenAICodexResponses(model, context, {
+		const resultPromise = streamOpenAICodexResponses(model, context, {
 			apiKey: token,
 			transport: "sse",
 			maxRetries: 1,
 		}).result();
+		await vi.advanceTimersByTimeAsync(0);
+		const result = await resultPromise;
 
 		expect(result.stopReason).toBe("error");
 		expect(codexRequests).toBe(2);

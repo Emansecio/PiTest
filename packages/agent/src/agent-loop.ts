@@ -780,7 +780,7 @@ async function streamAssistantResponse(
 			// Observe-only: the stream ended without a terminal event; record the
 			// fault so a misbehaving streamFn is detectable in production.
 			recordDiagnostic({
-				category: "stream.idle-timeout",
+				category: "stream.missing-terminal",
 				level: "warn",
 				source: "agent-loop.streamAssistantResponse",
 				context: { note: "stream ended without a terminal event" },

@@ -1,5 +1,6 @@
 import type { TUI } from "@pit/tui";
 import { beforeAll, describe, expect, test } from "vitest";
+import { createEditToolDefinition } from "../src/core/tools/edit.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
@@ -77,6 +78,39 @@ describe("ToolExecutionComponent activity API", () => {
 		expect(plain).toContain("ENOENT");
 		expect(plain).not.toContain(longCmd);
 		expect(plain).not.toContain("$ cd");
+	});
+
+	test("activityChild edit renders diff body without the duplicate edit header", async () => {
+		const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const dir = await mkdtemp(join(tmpdir(), "pit-edit-activity-"));
+		const filePath = join(dir, "sample.txt");
+		await writeFile(filePath, "alpha\nbeta\n", "utf8");
+		try {
+			const c = new ToolExecutionComponent(
+				"edit",
+				"t-edit-activity",
+				{ path: filePath, edits: [{ oldText: "beta", newText: "beta2" }] },
+				{},
+				createEditToolDefinition(process.cwd()),
+				fakeTui(),
+				process.cwd(),
+			);
+			c.setArgsComplete();
+			c.setActivityChild(true);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			c.updateResult({
+				content: [{ type: "text", text: `Successfully replaced 1 block(s) in ${filePath}.` }],
+				details: { diff: "-  2 beta\n+  2 beta2" },
+				isError: false,
+			});
+			const plain = c.render(100).map(stripAnsi).join("\n");
+			expect(plain).toContain("beta2");
+			expect(plain).not.toMatch(/\bedit\b.*sample\.txt/);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	test("setActivityChild removes the gutter from rendered lines", () => {

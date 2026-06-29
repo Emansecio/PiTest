@@ -27,6 +27,7 @@ export type DiagnosticLevel = "info" | "warn" | "error";
  */
 export type DiagnosticCategory =
 	| "stream.idle-timeout"
+	| "stream.missing-terminal"
 	| "stream.overthink-guard"
 	| "stream.backpressure"
 	| "net.connect-timeout"

@@ -161,6 +161,7 @@ import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
+import { reducedMotionLoaderIndicator } from "./components/spinner-ticker.ts";
 import { createTodoOverlay, type TodoOverlay } from "./components/todo-overlay.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
@@ -1551,7 +1552,7 @@ export class InteractiveMode {
 			workingPulsePalette(),
 			(text) => theme.fg("muted", text),
 			this.getWorkingLoaderMessage(),
-			this.workingIndicatorOptions,
+			reducedMotionLoaderIndicator(this.workingIndicatorOptions),
 		);
 		// Show a per-turn elapsed counter. A fresh loader is built at each
 		// agent_start (turn start) and lives until agent_end, so the clock
@@ -1576,6 +1577,21 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.clearStatusContainer();
+	}
+
+	/**
+	 * Whether the per-turn working loader should retire on `agent_end`.
+	 *
+	 * `Agent.isStreaming` stays true until awaited `agent_end` listeners settle
+	 * (`finishRun()` runs after us), so gating only on `session.isBusy` left
+	 * "Thinking…" stuck after every completed response. Keep the loader across
+	 * auto-retry (willRetry) and post-run orchestration that is not the agent
+	 * stream itself (goal drain, verification, pending checks, bash, fusion).
+	 */
+	private shouldRetireWorkingLoaderOnAgentEnd(willRetry: boolean): boolean {
+		if (willRetry) return false;
+		if (this.session.isStreaming) return true;
+		return !this.session.isBusy;
 	}
 
 	private ensureFusionLive(): void {
@@ -1622,7 +1638,7 @@ export class InteractiveMode {
 
 	private setWorkingIndicator(options?: LoaderIndicatorOptions): void {
 		this.workingIndicatorOptions = options;
-		this.loadingAnimation?.setIndicator(options);
+		this.loadingAnimation?.setIndicator(reducedMotionLoaderIndicator(options));
 		this.ui.requestRender();
 	}
 
@@ -2399,6 +2415,12 @@ export class InteractiveMode {
 				this.isBashMode = false;
 				this.updateEditorBorderColor();
 			} else if (!this.editor.getText().trim()) {
+				const goal = this.session.goalSnapshot();
+				if (goal?.status === "active" && !this.session.goalIsDriving()) {
+					this.session.pauseGoal();
+					this.showStatus(this.session.goalSummaryText());
+					return;
+				}
 				// Double-escape with empty editor triggers /tree, /fork, or nothing based on setting
 				const action = this.settingsManager.getDoubleEscapeAction();
 				if (action !== "none") {
@@ -2786,7 +2808,8 @@ export class InteractiveMode {
 	 */
 	private _startGoalSpinner(): void {
 		if (this._goalSpinnerUnsub) return;
-		if (this.session.goalSnapshot()?.status !== "active") return;
+		const goal = this.session.goalSnapshot();
+		if (goal?.status !== "active") return;
 		this._goalSpinnerBucket = -1;
 		this._goalSpinnerUnsub = this.ui.addAnimationCallback((now) => {
 			if (this.session.goalSnapshot()?.status !== "active") {
@@ -3101,12 +3124,8 @@ export class InteractiveMode {
 				this.setTerminalProgress(false);
 				this.clearInterruptWatchdog();
 				this.disposeFusionLive();
-				if (!this.session.isBusy) {
-					if (this.loadingAnimation) {
-						this.loadingAnimation.stop();
-						this.loadingAnimation = undefined;
-						this.clearStatusContainer();
-					}
+				if (this.shouldRetireWorkingLoaderOnAgentEnd(event.willRetry)) {
+					this.stopWorkingLoader();
 				}
 				if (this.streamingComponent) {
 					this.chatContainer.removeChild(this.streamingComponent);
@@ -3148,6 +3167,7 @@ export class InteractiveMode {
 					workingPulsePalette(),
 					(text) => theme.fg("muted", text),
 					label,
+					reducedMotionLoaderIndicator(),
 				);
 				this.statusContainer.addChild(this.autoCompactionLoader);
 				this.ui.requestRender();
@@ -3295,6 +3315,7 @@ export class InteractiveMode {
 					(spinner) => theme.fg("warning", spinner),
 					(text) => theme.fg("muted", text),
 					retryMessage(Math.ceil(event.delayMs / 1000)),
+					reducedMotionLoaderIndicator(),
 				);
 				this.retryCountdown = new CountdownTimer(
 					event.delayMs,
@@ -5076,6 +5097,7 @@ export class InteractiveMode {
 							workingPulsePalette(),
 							(text) => theme.fg("muted", text),
 							`Summarizing branch… (${keyText("app.interrupt")} to cancel)`,
+							reducedMotionLoaderIndicator(),
 						);
 						this.statusContainer.addChild(summaryLoader);
 						this.ui.requestRender();

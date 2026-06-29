@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.js";
-import { streamOpenAIResponses } from "../src/providers/openai-responses.js";
+import { __resetOpenAIResponsesClientCacheForTests, streamOpenAIResponses } from "../src/providers/openai-responses.js";
 import type { Model } from "../src/types.js";
 
 type CapturedHeaders = Headers | string[][] | Record<string, string | readonly string[]> | undefined;
@@ -53,6 +53,7 @@ async function captureOpenAIResponseHeaders(
 
 describe("openai-responses provider defaults", () => {
 	afterEach(() => {
+		__resetOpenAIResponsesClientCacheForTests();
 		vi.restoreAllMocks();
 	});
 
@@ -266,12 +267,12 @@ describe("openai-responses provider defaults", () => {
 			})}`,
 		].join("\n\n")}\n\n`;
 
-		vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			new Response(sse, {
+		vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+			return new Response(sse, {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },
-			}),
-		);
+			});
+		});
 
 		const stream = streamOpenAIResponses(
 			model,

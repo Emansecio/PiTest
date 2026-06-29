@@ -161,13 +161,13 @@ describe("bash auto-background: promote on threshold instead of kill", () => {
 			// De-flake (same race as the first promotion test): widen the window so the
 			// `echo marker-line` reliably lands before promotion under full-suite load.
 			// Still ≪ the 5s sleep, so promotion is what settles it.
-			process.env.PIT_BASH_AUTO_BACKGROUND_SECONDS = "1";
+			process.env.PIT_BASH_AUTO_BACKGROUND_SECONDS = "3";
 			const def = createBashToolDefinition(process.cwd());
 			const ctx = {} as Parameters<typeof def.execute>[4];
 			// No timeout arg => eligible. echo lands before promotion, sleep blocks.
 			const result = (await def.execute(
 				"call-bg",
-				{ command: "echo marker-line; sleep 5" },
+				{ command: "echo marker-line; sleep 10" },
 				undefined,
 				undefined,
 				ctx,

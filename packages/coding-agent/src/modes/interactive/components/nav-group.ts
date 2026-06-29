@@ -66,7 +66,7 @@ export class NavGroupComponent extends Container {
 		if (this.ticker) return;
 		this.ticker = createSpinnerTicker(
 			this.ui,
-			() => this.aggregateState() === "pending",
+			() => this.pendingFlagForTicker(),
 			(g) => {
 				this.spinnerGlyph = g;
 				if (g !== null) this.lastSpinnerGlyph = g;
@@ -74,7 +74,6 @@ export class NavGroupComponent extends Container {
 					this.ticker?.stop();
 					this.ticker = null;
 				}
-				this.ui.requestRender();
 			},
 		);
 	}
@@ -120,6 +119,13 @@ export class NavGroupComponent extends Container {
 		this.stateCache = null;
 		this.linesCache = null;
 		for (const e of this.execs) e.invalidate();
+	}
+
+	private pendingFlagForTicker(): boolean {
+		for (const e of this.execs) {
+			if (e.getActivityState() === "pending") return true;
+		}
+		return false;
 	}
 
 	private aggregateState(): GroupState {

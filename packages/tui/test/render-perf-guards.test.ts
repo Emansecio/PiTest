@@ -101,6 +101,50 @@ describe("render perf guards", () => {
 		// evict its own head every frame and cap the cache below N (0% hit-rate).
 		assert.ok(size >= N, `reset cache should hold the whole ${N}-line frame, held ${size}`);
 	});
+
+	it("uses the last-line-only diff fast path when only the bottom line changes (#C)", () => {
+		const terminal = new CollectTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const comp = new LinesComponent();
+		const N = 200;
+		comp.lines = Array.from({ length: N }, (_, i) => `line-${i} ${"x".repeat(16)}`);
+		tui.addChild(comp);
+
+		render(tui);
+
+		const tail = comp.lines.slice(0, N - 1);
+		comp.lines = [...tail, `${tail.at(-1) ?? ""} spinner`];
+
+		render(tui);
+
+		// Fast path: compare the N-1 unchanged prefix lines, then stop — no O(N) rescan.
+		assert.strictEqual(
+			tui.getDiffScanCountForTest(),
+			N - 1,
+			"last-line-only change should scan the prefix once (N-1 comparisons), not the full frame twice",
+		);
+	});
+
+	it("falls back to a full diff scan when a non-tail line changes (#C)", () => {
+		const terminal = new CollectTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const comp = new LinesComponent();
+		const N = 200;
+		comp.lines = Array.from({ length: N }, (_, i) => `line-${i} ${"x".repeat(16)}`);
+		tui.addChild(comp);
+
+		render(tui);
+
+		comp.lines = comp.lines.map((line, i) => (i === 0 ? `${line} changed` : line));
+
+		render(tui);
+
+		assert.strictEqual(
+			tui.getDiffScanCountForTest(),
+			N,
+			"non-tail change must walk the full frame (no last-line fast path)",
+		);
+	});
 });
 
 /**

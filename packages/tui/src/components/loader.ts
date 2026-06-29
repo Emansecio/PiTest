@@ -133,6 +133,7 @@ export class Loader extends Text {
 		}
 		this.lastElapsedSec = -1;
 		this.coloredElapsed = "";
+		this.subscribeAnimation();
 		this.updateDisplay();
 	}
 
@@ -210,9 +211,10 @@ export class Loader extends Text {
 
 	private subscribeAnimation(): void {
 		this.unsubscribeAnimation();
-		// A single-frame (or empty) indicator never animates, and the elapsed
-		// counter only ever rode the spinner interval — nothing to tick.
-		if (this.frames.length <= 1 || !this.ui) {
+		// Empty indicator: nothing to tick. A single frozen frame still needs the
+		// ticker when elapsed is enabled (reduced-motion working loader).
+		const needsTicker = this.frames.length > 1 || (this.frames.length === 1 && this.elapsedEnabled);
+		if (!needsTicker || !this.ui) {
 			return;
 		}
 		this.animationUnsub = this.ui.addAnimationCallback((now) => this.tick(now));

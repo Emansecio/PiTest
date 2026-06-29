@@ -43,6 +43,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS, IdleStreamTimeoutError, raceReadWithIdle } from "../utils/idle-timeout.ts";
 import { computeRetryDelay, isRetryableStatus, parseRetryAfter } from "../utils/retry-headers.ts";
+import { recordDiagnostic } from "../utils/runtime-diagnostics.ts";
 import { SseChunkBuffer } from "../utils/sse-chunk-reader.ts";
 import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -638,6 +639,8 @@ interface CachedWebSocketContinuationState {
 	lastRequestBody: RequestBody;
 	lastResponseId: string;
 	lastResponseItems: ResponseInput;
+	/** Length of input prefix verified equal to baseline on the last cache hit. */
+	verifiedPrefixLen?: number;
 }
 
 interface CachedWebSocketConnection {
@@ -1153,6 +1156,12 @@ async function* parseWebSocket(
 				// would otherwise leave this await pending forever — the turn hangs with no
 				// error and no retry. Treat prolonged silence as a dead socket and surface a
 				// retryable error so the normal retry/fallback path takes over.
+				recordDiagnostic({
+					category: "stream.idle-timeout",
+					level: "warn",
+					source: "openai-codex-responses.parseWebSocket",
+					context: { ms: idleMs, note: "websocket idle watchdog" },
+				});
 				pending = null;
 				failed = new IdleStreamTimeoutError(idleMs);
 				done = true;
@@ -1179,16 +1188,33 @@ function requestBodyWithoutInput(body: RequestBody): RequestBody {
 	return rest;
 }
 
+function responseInputItemEqual(a: unknown, b: unknown): boolean {
+	if (a === b) return true;
+	return JSON.stringify(a) === JSON.stringify(b);
+}
+
 function responseInputsEqual(a: ResponseInput | undefined, b: ResponseInput | undefined): boolean {
 	const aVal = a ?? [];
 	const bVal = b ?? [];
 	if (aVal.length !== bVal.length) return false;
-	if (aVal.length === 0) return true;
-	return JSON.stringify(aVal) === JSON.stringify(bVal);
+	for (let i = 0; i < aVal.length; i++) {
+		if (!responseInputItemEqual(aVal[i], bVal[i])) return false;
+	}
+	return true;
 }
 
 function requestBodiesMatchExceptInput(a: RequestBody, b: RequestBody): boolean {
-	return JSON.stringify(requestBodyWithoutInput(a)) === JSON.stringify(requestBodyWithoutInput(b));
+	const ra = requestBodyWithoutInput(a);
+	const rb = requestBodyWithoutInput(b);
+	const keysA = Object.keys(ra).sort();
+	const keysB = Object.keys(rb).sort();
+	if (keysA.length !== keysB.length) return false;
+	for (let i = 0; i < keysA.length; i++) {
+		if (keysA[i] !== keysB[i]) return false;
+		const key = keysA[i];
+		if (JSON.stringify(ra[key]) !== JSON.stringify(rb[key])) return false;
+	}
+	return true;
 }
 
 function getCachedWebSocketInputDelta(
@@ -1201,16 +1227,23 @@ function getCachedWebSocketInputDelta(
 
 	const currentInput = body.input ?? [];
 	const baseline = [...(continuation.lastRequestBody.input ?? []), ...continuation.lastResponseItems];
-	if (currentInput.length < baseline.length) {
+	const baselineLen = baseline.length;
+	if (currentInput.length < baselineLen) {
 		return undefined;
 	}
 
-	const prefix = currentInput.slice(0, baseline.length);
+	if (continuation.verifiedPrefixLen === baselineLen && currentInput.length === baselineLen) {
+		return undefined;
+	}
+
+	const prefix = currentInput.slice(0, baselineLen);
 	if (!responseInputsEqual(prefix, baseline)) {
+		continuation.verifiedPrefixLen = undefined;
 		return undefined;
 	}
+	continuation.verifiedPrefixLen = baselineLen;
 
-	return currentInput.slice(baseline.length);
+	return currentInput.slice(baselineLen);
 }
 
 function buildCachedWebSocketRequestBody(entry: CachedWebSocketConnection, body: RequestBody): RequestBody {

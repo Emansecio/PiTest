@@ -1,0 +1,13 @@
+{
+  "name": "generate_collaborator_payload",
+  "description": "Generates a Burp Collaborator payload URL for out-of-band (OOB) testing. Inject this payload into requests to detect server-side interactions (DNS lookups, HTTP requests, SMTP). Use get_collaborator_interactions with the returned payloadId to check for interactions.",
+  "inputSchema": {
+    "properties": {
+      "customData": {
+        "type": "string"
+      }
+    },
+    "required": [],
+    "type": "object"
+  }
+}

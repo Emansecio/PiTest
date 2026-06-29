@@ -16,10 +16,10 @@ export function isOfflineMode(): boolean {
 }
 
 /**
- * True when decorative motion should be suppressed: color breathing of the
- * spinner, settle color-eases, the icon crossfade, the "Thinking…" pulse, and
- * the streaming reveal all snap to their end state. The functional spinner glyph
- * keeps turning — only cosmetic animation stops. Opt-in via PIT_NO_MOTION /
+ * True when decorative motion should be suppressed: color breathing, settle
+ * color-eases, the icon crossfade, the "Thinking…" pulse, the streaming reveal,
+ * and live spinner glyphs all snap to a static frame (frame 0). Elapsed counters
+ * and per-second clocks keep updating. Opt-in via PIT_NO_MOTION /
  * PIT_REDUCED_MOTION, or a `TERM=dumb` terminal that can't render it cleanly.
  */
 export function isReducedMotion(): boolean {

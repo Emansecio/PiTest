@@ -8,6 +8,7 @@ Whatever document you entered through, the canonical chain is the same:
 
 - **[`AGENTS.md`](AGENTS.md)** — development rules, style, gate, git, TUI invariants. **The source of truth.**
 - **[`docs/agents/already-built.md`](docs/agents/already-built.md)** — inventory of what the Pit already ships. **Read before proposing any improvement** (agents repeatedly re-propose existing features: caching, dedup, truncation, retry, "did you mean", idle timeout…).
+- **[`docs/agents/cli-animations.md`](docs/agents/cli-animations.md)** — TUI motion subsystem (shared ticker, P7 spinners, eases, reduced motion, audit backlog).
 - **[`docs/agents/prevention-layers.md`](docs/agents/prevention-layers.md)** — the layered guard pipeline (pre-model, pre-tool-call, post-tool-call, session) that already catches model errors, in execution order.
 - **[`docs/CONTEXT.md`](docs/CONTEXT.md)** — domain glossary / project context.
 

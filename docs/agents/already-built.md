@@ -50,6 +50,24 @@ Each is a wired extension. Don't propose adding any of these:
 - **read-guard** (must `read` before edit; clears on compaction) · **edit-precondition** · **grounding firewall**: symbol/import/path/pattern/bash (`grounding-guard`/`import-grounding`/`path-grounding`/`pattern-grounding`/`bash-grounding` + `grounding-fire-once`) — pre-exec grounding of symbols/imports/paths/regex/globs/commands · **task-rigor** · **permissions** · **learned-error-guard** · **erasable-syntax-precondition** (tsgo `erasableSyntaxOnly` preflight) · **destructive-command-guard** (quote-aware) · **patch-audit** · **coordinator** + **subagent-guards** (subagent orchestration & guard propagation) · **mcp** · **hooks** · **memory**.
 - Loop/stagnation steering (doom-loop, stagnation, todo-cadence reminders) is wired in the session — don't propose "detect loops".
 
+## TUI motion & animation
+Already shipped — full audit + **implementation guide (difficulty & pitfalls)** in
+[`cli-animations.md`](cli-animations.md). Don't re-propose "unify spinners", "coalesce
+animation frames", or "add reduced motion" without reading it. Picking up backlog items
+A–G: read the **Implementation guide** section there first.
+
+- **Shared animation ticker** — `packages/tui/src/tui.ts` `addAnimationCallback`: one 16ms
+  loop, `performance.now()` phase-lock, dirty-coalesced `requestRender()`.
+- **Unified spinner identity (P7)** — `SPINNER_FRAMES` + `SPINNER_FRAME_MS` (80ms) in
+  `packages/tui/src/components/loader.ts`; tested in `spinner-cadence.test.ts`.
+- **Loader** — braille spinner + truecolor breathing pulse (`working-palette.ts`); elapsed
+  counter with pause while awaiting user input.
+- **Settle motion** — `ColorEase` (180ms smoothstep) + spinner→✓ crossfade on activity
+  lines, nav groups, tool gutters; streaming reveal + thinking breath on assistant messages.
+- **Reduced motion** — `PIT_NO_MOTION` / `PIT_REDUCED_MOTION` / `TERM=dumb` via
+  `isReducedMotion()` (`env-flags.ts`): cosmetic motion + spinner glyph snap to frame 0; elapsed still ticks.
+- **Leak guards** — `dispose()` on animated chat rows; `activity-ticker-leak.test.ts`.
+
 ## Runtime robustness
 - **idle-timeout** — `packages/ai/src/utils/idle-timeout.ts` (`raceReadWithIdle`, `iterateWithIdleTimeout`): stalled-stream watchdog on every provider; fire-and-forget teardown so abort/idle never wedges.
 - **connect-guard** — `packages/ai/src/utils/connect-guard.ts`: connect-phase timeout + instant abort for openai-compat providers (the deepseek/opencode wedge fix). Body loop already covered by idle-timeout.

@@ -245,7 +245,7 @@ describe("lsp tool — end-to-end against a fake server", () => {
 	});
 
 	it("code_actions lists available actions", async () => {
-		const out = await run(cwd, { action: "code_actions", file: "sample.txt", line: 1 });
+		const out = await run(cwd, { action: "code_actions", file: "sample.txt", line: 1, symbol: "hello" });
 		expect(out).toContain("Fix the fake diagnostic");
 	});
 
@@ -265,5 +265,22 @@ describe("lsp tool — end-to-end against a fake server", () => {
 	it("capabilities dumps server capabilities", async () => {
 		const out = await run(cwd, { action: "capabilities", file: "sample.txt" });
 		expect(out).toContain("hoverProvider");
+	});
+
+	it("requires line and symbol for project-aware hover", async () => {
+		const def = createLspToolDefinition(cwd);
+		const ctx = {} as Parameters<typeof def.execute>[4];
+		await expect(
+			def.execute("hover-missing", { action: "hover", file: "sample.txt", line: 1 }, undefined, undefined, ctx),
+		).rejects.toThrow(/symbol is required/);
+		await expect(
+			def.execute(
+				"hover-missing-line",
+				{ action: "hover", file: "sample.txt", symbol: "hello" },
+				undefined,
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow(/line is required/);
 	});
 });

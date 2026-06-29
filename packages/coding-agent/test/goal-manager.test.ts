@@ -1,5 +1,6 @@
+import { SPINNER_FRAMES } from "@pit/tui";
 import { describe, expect, it } from "vitest";
-import { GOAL_SPINNER_FRAMES, GoalManager, parseTokenBudget } from "../src/core/goal/goal-manager.js";
+import { GoalManager, parseTokenBudget } from "../src/core/goal/goal-manager.js";
 
 function makeManager(startMs = 0) {
 	let now = startMs;
@@ -162,8 +163,25 @@ describe("GoalManager lifecycle", () => {
 		advance(80);
 		const second = mgr.statusLine(true);
 		expect(first).not.toBe(second);
-		expect(GOAL_SPINNER_FRAMES.some((f) => first.endsWith(f))).toBe(true);
-		expect(GOAL_SPINNER_FRAMES.some((f) => second.endsWith(f))).toBe(true);
+		expect(SPINNER_FRAMES.some((f) => first.endsWith(f))).toBe(true);
+		expect(SPINNER_FRAMES.some((f) => second.endsWith(f))).toBe(true);
+	});
+
+	it("freezes the footer spinner under reduced motion", () => {
+		const prev = process.env.PIT_NO_MOTION;
+		process.env.PIT_NO_MOTION = "1";
+		try {
+			const { mgr, advance } = makeManager();
+			mgr.start("x", {});
+			const first = mgr.statusLine(true);
+			advance(160);
+			const second = mgr.statusLine(true);
+			expect(first).toBe(second);
+			expect(first.endsWith(SPINNER_FRAMES[0])).toBe(true);
+		} finally {
+			if (prev === undefined) delete process.env.PIT_NO_MOTION;
+			else process.env.PIT_NO_MOTION = prev;
+		}
 	});
 
 	it("includes the objective in the system prompt section and continuation", () => {

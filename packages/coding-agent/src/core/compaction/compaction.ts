@@ -12,6 +12,7 @@ import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } fro
 import { completeSimple } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
+import { lspSupersededResourceKey } from "../lsp/supersede.ts";
 import { convertToLlm } from "../messages.ts";
 import { MESSAGE_RELAY_CUSTOM_TYPE } from "../messaging/types.ts";
 import { getLivingRepoMap, livingRepoMapToDigests } from "../repo-map/living-index.ts";
@@ -750,6 +751,37 @@ const PRUNE_PROTECT_TURNS = 2;
 /** Chars of the head/tail kept when shrinking a large tool output (see headTailExcerpt). */
 const PRUNE_HEAD_CHARS = 1500;
 const PRUNE_TAIL_CHARS = 800;
+/** Text shorter than this cannot shrink via head+tail excerpt alone. */
+const PRUNE_MIN_SHRINK_CHARS = PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 64;
+
+/** Precomputed supersede scan shared across would* / apply* on the same turn. */
+export interface ContextPrunePlan {
+	protectFromIndex: number;
+	supersededIndices: Set<number>;
+}
+
+/** One O(n) walk producing protect window + supersede index for reuse. */
+export function planContextPrune(messages: AgentMessage[], protectTurns = PRUNE_PROTECT_TURNS): ContextPrunePlan {
+	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
+	return {
+		protectFromIndex,
+		supersededIndices: buildSupersededToolResultIndices(messages, protectFromIndex),
+	};
+}
+
+function resolveContextPrunePlan(
+	messages: AgentMessage[],
+	protectTurns: number,
+	plan: ContextPrunePlan | undefined,
+): ContextPrunePlan {
+	return plan ?? planContextPrune(messages, protectTurns);
+}
+
+function wouldShrinkViaHeadTail(text: string): boolean {
+	if (text.length <= PRUNE_MIN_SHRINK_CHARS) return false;
+	const excerpt = headTailExcerpt(text);
+	return excerpt.length < text.length;
+}
 
 /** Floor the adaptive per-output prune threshold approaches as the window fills. */
 const ADAPTIVE_PRUNE_MIN_THRESHOLD = 4_000;
@@ -853,7 +885,7 @@ function headTailExcerpt(text: string): string {
 // recomputes exactly once for the new (small) value.
 const beforeTokensCache = new WeakMap<object, number>();
 
-const SUPERSEDED_TOOL_RESULT_NAMES = new Set(["read", "grep", "find", "ls", "symbol", "find_symbol"]);
+const SUPERSEDED_TOOL_RESULT_NAMES = new Set(["read", "grep", "find", "ls", "symbol", "find_symbol", "lsp"]);
 
 function stableStringify(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
@@ -873,6 +905,7 @@ function stableStringify(value: unknown): string {
  */
 function supersededResourceKey(toolName: string, args: unknown): string | undefined {
 	if (!SUPERSEDED_TOOL_RESULT_NAMES.has(toolName)) return undefined;
+	if (toolName === "lsp") return lspSupersededResourceKey(args);
 	if (toolName !== "read") return `${toolName}\u0000${stableStringify(args)}`;
 	if (typeof args !== "object" || args === null) return undefined;
 	const a = args as Record<string, unknown>;
@@ -949,9 +982,13 @@ export function wouldPruneOldToolOutputs(
 	messages: AgentMessage[],
 	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
 	protectTurns = PRUNE_PROTECT_TURNS,
+	plan?: ContextPrunePlan,
 ): boolean {
-	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
-	const supersededReadIndices = buildSupersededToolResultIndices(messages, protectFromIndex);
+	const { protectFromIndex, supersededIndices: supersededReadIndices } = resolveContextPrunePlan(
+		messages,
+		protectTurns,
+		plan,
+	);
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
@@ -973,10 +1010,7 @@ export function wouldPruneOldToolOutputs(
 			if (block.type !== "text" || !block.text) continue;
 			const est = estimateTextTokens(block.text, true);
 			if (est > tokenThreshold) return true;
-			if (superseded) {
-				const excerpt = headTailExcerpt(block.text);
-				if (excerpt.length < block.text.length) return true;
-			}
+			if (superseded && wouldShrinkViaHeadTail(block.text)) return true;
 		}
 	}
 	return false;
@@ -987,13 +1021,17 @@ export function pruneOldToolOutputs(
 	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
 	protectTurns = PRUNE_PROTECT_TURNS,
 	defer = false,
+	plan?: ContextPrunePlan,
 ): number {
-	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
+	const { protectFromIndex, supersededIndices: supersededReadIndices } = resolveContextPrunePlan(
+		messages,
+		protectTurns,
+		plan,
+	);
 
 	let prunedTokens = 0;
 
 	const store = defer ? getCurrentDeferredOutputStore() : undefined;
-	const supersededReadIndices = buildSupersededToolResultIndices(messages, protectFromIndex);
 
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];
@@ -1078,9 +1116,16 @@ export function pruneOldToolOutputs(
  * Collapse superseded deterministic tool results to head+tail excerpts only.
  * No large-output defer, no mutation-arg elision — minimal cache churn (A1′).
  */
-export function applySupersedeOnly(messages: AgentMessage[], protectTurns = PRUNE_PROTECT_TURNS): number {
-	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
-	const supersededReadIndices = buildSupersededToolResultIndices(messages, protectFromIndex);
+export function applySupersedeOnly(
+	messages: AgentMessage[],
+	protectTurns = PRUNE_PROTECT_TURNS,
+	plan?: ContextPrunePlan,
+): number {
+	const { protectFromIndex, supersededIndices: supersededReadIndices } = resolveContextPrunePlan(
+		messages,
+		protectTurns,
+		plan,
+	);
 	let prunedTokens = 0;
 
 	for (let i = 0; i < protectFromIndex; i++) {
@@ -1103,16 +1148,18 @@ export function applySupersedeOnly(messages: AgentMessage[], protectTurns = PRUN
 }
 
 /** Read-only: would {@link applySupersedeOnly} collapse any superseded result? */
-export function wouldApplySupersedeOnly(messages: AgentMessage[], protectTurns = PRUNE_PROTECT_TURNS): boolean {
-	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
-	const supersededReadIndices = buildSupersededToolResultIndices(messages, protectFromIndex);
+export function wouldApplySupersedeOnly(
+	messages: AgentMessage[],
+	protectTurns = PRUNE_PROTECT_TURNS,
+	plan?: ContextPrunePlan,
+): boolean {
+	const { supersededIndices: supersededReadIndices } = resolveContextPrunePlan(messages, protectTurns, plan);
 	for (const i of supersededReadIndices) {
 		const msg = messages[i];
 		if (msg.role !== "toolResult" || !Array.isArray(msg.content)) continue;
 		for (const block of msg.content) {
 			if (block.type !== "text" || !block.text) continue;
-			const excerpt = headTailExcerpt(block.text);
-			if (excerpt.length < block.text.length) return true;
+			if (wouldShrinkViaHeadTail(block.text)) return true;
 		}
 	}
 	return false;

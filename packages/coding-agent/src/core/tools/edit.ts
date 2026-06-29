@@ -4,8 +4,9 @@ import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
+import { EDIT_EXPANDED_MAX_LINES } from "../../modes/interactive/components/tool-activity.ts";
 import { writeFileAtomic } from "../../utils/atomic-write.ts";
-import type { ToolDefinition } from "../extensions/types.js";
+import type { ToolDefinition, ToolRenderContext } from "../extensions/types.js";
 import { attachPostWriteDiagnostics, capturePreWriteDiagnostics } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, EDIT_KEY_ALIASES, PATH_KEY_ALIASES } from "./argument-prep.js";
@@ -21,7 +22,7 @@ import {
 	restoreLineEndings,
 	stripBom,
 } from "./edit-diff.ts";
-import { getEditHeaderBg, setEditPreview } from "./edit-preview-shared.ts";
+import { appendEditDiffBody, getEditHeaderBg, setEditPreview } from "./edit-preview-shared.ts";
 import type { FileMtimeStore } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { attachOmissionWarning } from "./lazy-omission-attach.ts";
@@ -292,28 +293,29 @@ function buildEditCallComponent(
 	component: EditCallRenderComponent,
 	args: RenderableEditArgs | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-	cwd?: string,
+	cwd: string | undefined,
+	context: ToolRenderContext<EditRenderState>,
 ): EditCallRenderComponent {
-	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
+	const activityChild = context.activityChild;
+	if (activityChild) {
+		component.setBgFn((text: string) => text);
+	} else {
+		component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
+	}
 	component.clear();
-	component.addChild(new Text(formatEditCall(args, theme, cwd), 0, 0));
+	if (!activityChild) {
+		component.addChild(new Text(formatEditCall(args, theme, cwd), 0, 0));
+	}
 
 	if (!component.preview) {
 		return component;
 	}
 
-	let body: string;
-	if ("error" in component.preview) {
-		body = theme.fg("error", component.preview.error);
-	} else if (component.renderedDiffKey === component.preview.diff && component.renderedDiffBody !== undefined) {
-		body = component.renderedDiffBody;
-	} else {
-		body = renderDiff(component.preview.diff);
-		component.renderedDiffKey = component.preview.diff;
-		component.renderedDiffBody = body;
+	let diffMaxLines: number | undefined;
+	if (!activityChild && context.expanded) {
+		diffMaxLines = EDIT_EXPANDED_MAX_LINES;
 	}
-	component.addChild(new Spacer(1));
-	component.addChild(new Text(body, 0, 0));
+	appendEditDiffBody(component, component, component.preview, theme, diffMaxLines);
 	return component;
 }
 
@@ -579,7 +581,7 @@ export function createEditToolDefinition(
 				});
 			}
 
-			return buildEditCallComponent(component, args, theme, context.cwd);
+			return buildEditCallComponent(component, args, theme, context.cwd, context);
 		},
 		renderResult(result, _options, theme, context) {
 			const callComponent = context.state.callComponent;
@@ -609,6 +611,7 @@ export function createEditToolDefinition(
 						context.args as RenderableEditArgs | undefined,
 						theme,
 						context.cwd,
+						context,
 					);
 				}
 			}

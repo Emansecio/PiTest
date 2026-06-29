@@ -14,6 +14,7 @@ import { theme } from "../theme/theme.ts";
 import { clampBashCommandRow } from "./bash-command-row.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 import { MessageShell } from "./message-shell.ts";
+import { reducedMotionLoaderIndicator } from "./spinner-ticker.ts";
 import { expandKeyHint, moreLinesTrailer } from "./tool-activity.ts";
 
 import { truncateToVisualLines } from "./visual-truncate.ts";
@@ -108,6 +109,7 @@ export class BashExecutionComponent extends MessageShell {
 			(spinner) => theme.fg(headerColor, spinner),
 			(text) => theme.fg("muted", text),
 			`Running… (${keyText("tui.select.cancel")} to cancel)`,
+			reducedMotionLoaderIndicator(),
 		);
 		this.contentContainer.addChild(this.loader);
 	}

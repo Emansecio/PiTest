@@ -952,3 +952,82 @@ describe("InteractiveMode.showLoadedResources", () => {
 		expect(output).not.toContain("[Skills]");
 	});
 });
+
+describe("InteractiveMode.onEscape goal pause", () => {
+	const runEscape = (fakeThis: any) => {
+		// Mirror the idle-goal branch from setupKeyHandlers without booting the full TUI.
+		if (fakeThis.session.isBusy) return;
+		if (fakeThis.isBashMode) return;
+		if (!fakeThis.editor.getText().trim()) {
+			const goal = fakeThis.session.goalSnapshot();
+			if (goal?.status === "active" && !fakeThis.session.goalIsDriving()) {
+				fakeThis.session.pauseGoal();
+				fakeThis.showStatus(fakeThis.session.goalSummaryText());
+			}
+		}
+	};
+
+	test("pauses an idle active goal when the editor is empty", () => {
+		const pauseGoal = vi.fn();
+		const goalSummaryText = vi.fn(() => "Goal paused");
+		const showStatus = vi.fn();
+		const fakeThis: any = {
+			session: {
+				isBusy: false,
+				goalSnapshot: () => ({ status: "active", objective: "test" }),
+				goalIsDriving: () => false,
+				pauseGoal,
+				goalSummaryText,
+			},
+			editor: { getText: () => "" },
+			isBashMode: false,
+			showStatus,
+		};
+
+		runEscape(fakeThis);
+
+		expect(pauseGoal).toHaveBeenCalledOnce();
+		expect(showStatus).toHaveBeenCalledWith("Goal paused");
+	});
+
+	test("does not pause when the goal is actively driving", () => {
+		const pauseGoal = vi.fn();
+		const fakeThis: any = {
+			session: {
+				isBusy: false,
+				goalSnapshot: () => ({ status: "active" }),
+				goalIsDriving: () => true,
+				pauseGoal,
+				goalSummaryText: () => "",
+			},
+			editor: { getText: () => "" },
+			isBashMode: false,
+			showStatus: vi.fn(),
+		};
+
+		runEscape(fakeThis);
+
+		expect(pauseGoal).not.toHaveBeenCalled();
+	});
+});
+
+describe("InteractiveMode.shouldRetireWorkingLoaderOnAgentEnd", () => {
+	const call = (session: { isBusy: boolean; isStreaming: boolean }, willRetry: boolean): boolean =>
+		(InteractiveMode as any).prototype.shouldRetireWorkingLoaderOnAgentEnd.call({ session }, willRetry);
+
+	test("retires when isStreaming is still true at agent_end (finishRun has not run yet)", () => {
+		expect(call({ isBusy: true, isStreaming: true }, false)).toBe(true);
+	});
+
+	test("keeps loader when auto-retry will immediately continue the run", () => {
+		expect(call({ isBusy: true, isStreaming: true }, true)).toBe(false);
+	});
+
+	test("keeps loader for post-run orchestration that is not the agent stream", () => {
+		expect(call({ isBusy: true, isStreaming: false }, false)).toBe(false);
+	});
+
+	test("retires when the session is fully idle", () => {
+		expect(call({ isBusy: false, isStreaming: false }, false)).toBe(true);
+	});
+});

@@ -65,6 +65,24 @@ function isBareHomeLabel(label: string): boolean {
 	return trimmed === "~" || trimmed === "~/" || trimmed === "~\\";
 }
 
+function pathsEqual(a: string, b: string): boolean {
+	const left = path.resolve(a);
+	const right = path.resolve(b);
+	if (process.platform === "win32") {
+		return left.toLowerCase() === right.toLowerCase();
+	}
+	return left === right;
+}
+
+/** Home cwd: show the profile folder name (e.g. `User (home)`), not a bare `~`. */
+function formatHomeDirectoryLabel(resolvedPath: string): string {
+	const base = path.basename(resolvedPath);
+	if (base && base !== "." && !isBareHomeLabel(base)) {
+		return `${base} (home)`;
+	}
+	return "~ (home)";
+}
+
 export interface WorkspaceCwdLabels {
 	/** Session cwd, never empty and never a lone `~`. */
 	session: string;
@@ -74,8 +92,9 @@ export interface WorkspaceCwdLabels {
 
 /**
  * Resolve a cwd for identity lines (welcome, footer). Never returns empty or a
- * bare `~` — home alone reads as `~ (home)`, subpaths stay `~/proj`, repo-relative
- * wins when inside a git root. Falls back to `fallbackCwd` when `cwd` is empty.
+ * bare `~` — home alone reads as `<basename> (home)` (e.g. `User (home)` on Windows),
+ * subpaths stay `~/proj`, repo-relative wins when inside a git root. Falls back to
+ * `fallbackCwd` when `cwd` is empty.
  */
 export function resolveOrientingCwdLabel(cwd: string, repoDir: string | null, fallbackCwd?: string): string {
 	const raw = cwd.trim() || (fallbackCwd?.trim() ?? "");
@@ -85,8 +104,8 @@ export function resolveOrientingCwdLabel(cwd: string, repoDir: string | null, fa
 	if (!label.trim() || isBareHomeLabel(label)) {
 		const home = os.homedir();
 		const resolved = path.resolve(raw);
-		if (resolved === home) {
-			label = "~ (home)";
+		if (pathsEqual(resolved, home)) {
+			label = formatHomeDirectoryLabel(resolved);
 		} else {
 			const rel = formatDisplayPath(resolved);
 			if (!isBareHomeLabel(rel)) {

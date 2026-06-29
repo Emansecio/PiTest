@@ -170,6 +170,16 @@ function levenshteinKey(a: string, b: string): number {
 	return prev[b.length];
 }
 
+function orderedNamePair(a: string, b: string): { longer: string; shorter: string } {
+	if (a.length >= b.length) return { longer: a, shorter: b };
+	return { longer: b, shorter: a };
+}
+
+/** True when `shorter` is a long-enough substring of `longer` (affix fallback). */
+function affixOverlapQualifies(longer: string, shorter: string, prefixMinOverlap: number): boolean {
+	return shorter.length >= prefixMinOverlap && longer.includes(shorter);
+}
+
 /**
  * "Did you mean X?" matcher shared across packages (key hints here, unknown-tool
  * hints in the agent loop). Scores candidates by Levenshtein distance, with an
@@ -201,13 +211,15 @@ export function suggestClosestN(
 	const scored: Array<{ name: string; score: number }> = [];
 	for (const candidate of candidates) {
 		const candidateLower = candidate.toLowerCase();
+		const lenDiff = Math.abs(lower.length - candidateLower.length);
+		const { longer, shorter } = orderedNamePair(lower, candidateLower);
+		if (lenDiff > options.maxDistance && !affixOverlapQualifies(longer, shorter, options.prefixMinOverlap)) {
+			continue;
+		}
 		const distance = levenshteinKey(lower, candidateLower);
 		let score = distance;
 		if (distance > options.maxDistance) {
-			const longer = lower.length >= candidateLower.length ? lower : candidateLower;
-			const shorter = lower.length >= candidateLower.length ? candidateLower : lower;
-			if (shorter.length < options.prefixMinOverlap) continue;
-			if (!longer.includes(shorter)) continue;
+			if (!affixOverlapQualifies(longer, shorter, options.prefixMinOverlap)) continue;
 			score = longer.length - shorter.length;
 		}
 		scored.push({ name: candidate, score });

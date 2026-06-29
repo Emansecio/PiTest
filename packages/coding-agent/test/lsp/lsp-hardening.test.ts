@@ -235,7 +235,7 @@ describe("lsp hardening", () => {
 		try {
 			writeFileSync(join(cwd, "stale.txt"), "NO_PUBLISH\n");
 			const out = await runLsp(cwd, { action: "diagnostics", file: "stale.txt" });
-			expect(out).toMatch(/unavailable|stale|no fresh/i);
+			expect(out).toMatch(/unavailable|stale|no fresh|Do not assume/i);
 			expect(out).not.toBe("OK");
 		} finally {
 			await shutdownAll().catch(() => {});

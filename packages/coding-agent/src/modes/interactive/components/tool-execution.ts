@@ -1,15 +1,5 @@
 import { performance } from "node:perf_hooks";
-import {
-	type Component,
-	Container,
-	getCapabilities,
-	Image,
-	SPINNER_FRAME_MS,
-	SPINNER_FRAMES,
-	Spacer,
-	Text,
-	type TUI,
-} from "@pit/tui";
+import { type Component, Container, getCapabilities, Image, SPINNER_FRAMES, Spacer, Text, type TUI } from "@pit/tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { allToolNames, createToolDefinition, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
@@ -19,7 +9,8 @@ import { interpolateFg } from "../theme/color-interpolation.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { summarizeArgsOneLine } from "./arg-summary.ts";
 import { MessageShell } from "./message-shell.ts";
-import { expandKeyHint, moreLinesTrailer, type ToolActivity } from "./tool-activity.ts";
+import { spinnerFrameIndexAt } from "./spinner-ticker.ts";
+import { expandKeyHint, isEditFamilyTool, moreLinesTrailer, type ToolActivity } from "./tool-activity.ts";
 
 // Cap for the no-custom-renderer result fallback. Tools without their own
 // renderResult (MCP tools, the coordinator/Task tool, extension tools) would
@@ -84,6 +75,7 @@ export class ToolExecutionComponent extends MessageShell {
 	private gutterState: GutterState = "pending";
 	private gutterEaseUnsub: (() => void) | null = null;
 	private gutterEaseStart = 0;
+	private gutterEaseProbe = "";
 	private gutterEaseTo: "success" | "error" = "success";
 	private runningSpinnerUnsub: (() => void) | null = null;
 	private runningSpinnerFrame = -1;
@@ -203,6 +195,7 @@ export class ToolExecutionComponent extends MessageShell {
 			expanded: this.expanded,
 			showImages: this.showImages,
 			isError: this.result?.isError ?? false,
+			activityChild: this.activityChild,
 		};
 	}
 
@@ -416,10 +409,11 @@ export class ToolExecutionComponent extends MessageShell {
 			const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox;
 			renderContainer.clear();
 
-			// Activity rows already show a compact call summary in the header — skip
-			// the call title here unless the user fully expanded (ctrl+o).
-			const showCallTitle = !(this.activityChild && !this.expanded);
-			if (showCallTitle) {
+			// Activity rows show a compact summary in the header. Skip the call
+			// renderer for non-edit tools while collapsed; edit family still runs
+			// renderCall (body-only via context.activityChild) for live/auto preview.
+			const showCallRenderer = !this.activityChild || this.expanded || isEditFamilyTool(this.toolName);
+			if (showCallRenderer) {
 				const callRenderer = this.getCallRenderer();
 				if (!callRenderer) {
 					renderContainer.addChild(this.createCallFallback());
@@ -579,6 +573,7 @@ export class ToolExecutionComponent extends MessageShell {
 		}
 		this.stopGutterEase();
 		this.gutterEaseTo = target;
+		this.gutterEaseProbe = "";
 		this.gutterEaseStart = performance.now();
 		this.gutterEaseUnsub = this.ui.addAnimationCallback((now) => this.gutterEaseTick(now));
 	}
@@ -589,11 +584,17 @@ export class ToolExecutionComponent extends MessageShell {
 		const raw = (now - this.gutterEaseStart) / GUTTER_EASE_MS;
 		const t = raw < 0 ? 0 : raw > 1 ? 1 : raw;
 		const eased = t * t * (3 - 2 * t); // smoothstep
-		this.setGutterColor(interpolateFg("gutterToolPending", to, eased) ?? this.toolGutterColor(target));
 		if (t >= 1) {
 			this.setGutterColor(this.toolGutterColor(target));
+			this.gutterEaseProbe = "";
 			this.stopGutterEase();
+			return true;
 		}
+		const colorFn = interpolateFg("gutterToolPending", to, eased) ?? this.toolGutterColor(target);
+		const probe = colorFn("█");
+		if (probe === this.gutterEaseProbe) return false;
+		this.gutterEaseProbe = probe;
+		this.setGutterColor(colorFn);
 		return true;
 	}
 
@@ -623,7 +624,7 @@ export class ToolExecutionComponent extends MessageShell {
 	}
 
 	private runningSpinnerTick(now: number): boolean {
-		const frame = Math.floor(now / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
+		const frame = spinnerFrameIndexAt(now);
 		if (frame === this.runningSpinnerFrame) return false;
 		this.runningSpinnerFrame = frame;
 		this.setGutterSpinner(SPINNER_FRAMES[frame]);

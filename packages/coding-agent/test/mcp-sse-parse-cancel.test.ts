@@ -10,6 +10,7 @@
  * non-drained exit path.
  */
 
+import { IdleStreamTimeoutError } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import { parseSseStream } from "../src/core/mcp/transport/sse-parse.js";
 
@@ -72,6 +73,30 @@ describe("parseSseStream cancellation (#31)", () => {
 	});
 });
 
+describe("parseSseStream idle timeout", () => {
+	it("cancels the stream when the body stalls past idleMs", async () => {
+		let cancelled = false;
+		const stream = new ReadableStream<Uint8Array>({
+			pull() {
+				// Never settle — half-open SSE body.
+				return new Promise(() => {});
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+
+		const start = Date.now();
+		await expect(async () => {
+			for await (const _ev of parseSseStream(stream, { idleMs: 50 })) {
+				// no events expected
+			}
+		}).rejects.toBeInstanceOf(IdleStreamTimeoutError);
+		expect(Date.now() - start).toBeLessThan(5000);
+		expect(cancelled).toBe(true);
+	});
+});
+
 describe("parseSseStream framing (cursor-walk)", () => {
 	function streamFromChunks(chunks: string[]): ReadableStream<Uint8Array> {
 		const encoder = new TextEncoder();
@@ -121,6 +146,32 @@ describe("parseSseStream framing (cursor-walk)", () => {
 	it("ignores comments/heartbeats and tracks id", async () => {
 		const events = await collect([": ping\nid: 7\nevent: note\ndata: hi\n\n"]);
 		expect(events).toEqual([{ event: "note", data: "hi", id: "7" }]);
+	});
+
+	it("flushes a UTF-8 sequence split across the final chunk boundary", async () => {
+		const encoder = new TextEncoder();
+		const full = encoder.encode("data: \u{1F600}\n\n");
+		const splitAt = full.length - 1;
+		let step = 0;
+		const stream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (step === 0) {
+					controller.enqueue(full.subarray(0, splitAt));
+					step = 1;
+					return;
+				}
+				if (step === 1) {
+					controller.enqueue(full.subarray(splitAt));
+					controller.close();
+					step = 2;
+				}
+			},
+		});
+		const events: SseEventLite[] = [];
+		for await (const ev of parseSseStream(stream)) {
+			events.push({ event: ev.event, data: ev.data, id: ev.id });
+		}
+		expect(events).toEqual([{ event: "message", data: "\u{1F600}", id: undefined }]);
 	});
 });
 

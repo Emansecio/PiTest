@@ -4,6 +4,7 @@ import type { GoalSnapshot } from "../src/core/goal/goal-manager.js";
 import {
 	createGoalOverlay,
 	GOAL_COMPLETE_LINGER_MS,
+	GOAL_COMPLETE_SOFT_EXIT_MS,
 	renderGoalOverlay,
 } from "../src/modes/interactive/components/goal-overlay.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -59,7 +60,7 @@ describe("renderGoalOverlay", () => {
 
 	it("shows an idle hint (no spinner) when continuing is false", () => {
 		const out = render(snapshot(), 100, false);
-		expect(out).toContain(`idle ${EM_DASH} Esc to pause`);
+		expect(out).toContain(`idle ${EM_DASH} Esc or /goal pause`);
 		expect(out).not.toContain("working");
 	});
 
@@ -88,6 +89,15 @@ describe("renderGoalOverlay", () => {
 		const snap = snapshot({ status: "complete", completedAt: 240_000 });
 		const out = render(snap, 100, false, SPINNER, 500);
 		expect(out).toContain("done");
+	});
+
+	it("prefixes the complete hint with ✓ during the soft-exit window (#F)", () => {
+		const snap = snapshot({ status: "complete", completedAt: 240_000, summary: "All tests green" });
+		const beforeSoft = render(snap, 100, false, SPINNER, GOAL_COMPLETE_LINGER_MS - GOAL_COMPLETE_SOFT_EXIT_MS - 50);
+		expect(beforeSoft).toContain("All tests green");
+		expect(beforeSoft).not.toContain("✓");
+		const soft = render(snap, 100, false, SPINNER, GOAL_COMPLETE_LINGER_MS - 100);
+		expect(soft).toContain("✓ All tests green");
 	});
 
 	it("renders the token budget as NN/NN when set, and just NN when unset", () => {
@@ -168,6 +178,25 @@ describe("GoalOverlayComponent auto-hide + session rebind", () => {
 		const lines = overlay.render(80);
 		expect(lines[0]).toBe("");
 		expect(lines.length).toBeGreaterThan(1);
+	});
+
+	it("reuses structural cache across spinner frames (elapsed ms alone does not force a full rebuild)", () => {
+		let nowMs = 5000;
+		const session = {
+			goalSnapshot: () => snapshot({ status: "active", elapsedMs: nowMs }),
+			goalIsDriving: () => true,
+		} as unknown as AgentSession;
+		const overlay = createGoalOverlay(session, () => nowMs);
+		const first = overlay.render(80);
+		nowMs = 5016;
+		const second = overlay.render(80);
+		expect(first[0]).toBe("");
+		expect(second[0]).toBe("");
+		expect(stripAnsi(first.join("\n"))).toContain("5s");
+		expect(stripAnsi(second.join("\n"))).toContain("5s");
+		expect(first[1]).toBe(second[1]);
+		expect(first[2]).toBe(second[2]);
+		expect(first[3]).toBe(second[3]);
 	});
 
 	it("rebinds to a new session via setSession and clears completeSeenAt", () => {

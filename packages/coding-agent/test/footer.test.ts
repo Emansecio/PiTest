@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { beforeAll, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.js";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
@@ -185,16 +185,18 @@ it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", 
 	expect(tinyLines[1]).toContain("█");
 });
 
-it("shows ~ (home) in the footer when session cwd is the home directory", () => {
-	const footer = makeFooter({ cwd: homedir() });
+it("shows the home profile folder in the footer when session cwd is the home directory", () => {
+	const home = homedir();
+	const footer = makeFooter({ cwd: home });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("~ (home)");
+	expect(lines[0]).toContain(`${basename(home)} (home)`);
 });
 
 it("keeps the home label when a branch gives it context", () => {
-	const footer = makeFooter({ cwd: homedir(), branch: "main" });
+	const home = homedir();
+	const footer = makeFooter({ cwd: home, branch: "main" });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("~ (home) (main)");
+	expect(lines[0]).toContain(`${basename(home)} (home) (main)`);
 });
 
 it("shows shell cwd when launcher and session cwd diverge", () => {
@@ -202,7 +204,7 @@ it("shows shell cwd when launcher and session cwd diverge", () => {
 	const pit = join(home, "pit");
 	const footer = makeFooter({ cwd: home, launchCwd: pit });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("~ (home)");
+	expect(lines[0]).toContain(`${basename(home)} (home)`);
 	expect(lines[0]).toContain("shell:");
 });
 

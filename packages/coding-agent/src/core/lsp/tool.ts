@@ -30,6 +30,7 @@ import { getServerForFile } from "./config.ts";
 import { applyWorkspaceEdit, comparePosition } from "./edits.ts";
 import { sleep, throwIfAborted } from "./internal.ts";
 import { getConfig, getLspServers, isProjectAwareLspServer } from "./manager.ts";
+import { assertProjectAwarePosition } from "./position-policy.ts";
 import { rawRequest, renameFile, runCapabilities, runDiagnostics, workspaceSymbols } from "./tool-actions.ts";
 import type {
 	CodeAction,
@@ -43,6 +44,7 @@ import type {
 	LspClient,
 	LspToolDetails,
 	Position,
+	Range,
 	SymbolInformation,
 	WorkspaceEdit,
 } from "./types.ts";
@@ -111,9 +113,17 @@ const lspSchema = Type.Object(
 				description: 'File path, glob (e.g. src/**/*.ts), or "*" for workspace scope; source path for rename_file.',
 			}),
 		),
-		line: Type.Optional(Type.Number({ description: "1-indexed line number for position-based actions." })),
+		line: Type.Optional(
+			Type.Number({
+				description:
+					"1-indexed line number. Required with symbol for project-aware definition/references/hover/rename/code_actions.",
+			}),
+		),
 		symbol: Type.Optional(
-			Type.String({ description: "Substring on the line to resolve the column. Append #N for the Nth occurrence." }),
+			Type.String({
+				description:
+					"Substring on the line to resolve the column (required on project-aware servers). Append #N for the Nth occurrence.",
+			}),
 		),
 		query: Type.Optional(
 			Type.String({
@@ -191,6 +201,45 @@ async function formatLocationWithContext(location: Location, cwd: string): Promi
 // Reload helper
 // =============================================================================
 
+interface PrepareRenameSuccess {
+	range: Range;
+	placeholder: string;
+}
+
+interface PrepareRenameFailure {
+	message: string;
+}
+
+async function resolveRenamePosition(
+	client: LspClient,
+	uri: string,
+	position: Position,
+	signal: AbortSignal,
+): Promise<Position> {
+	const renameProvider = client.serverCapabilities?.renameProvider;
+	if (!renameProvider) return position;
+	const supportsPrepare = typeof renameProvider === "object" && renameProvider.prepareProvider === true;
+	if (!supportsPrepare) return position;
+
+	const result = (await sendRequest(
+		client,
+		"textDocument/prepareRename",
+		{ textDocument: { uri }, position },
+		signal,
+	)) as PrepareRenameSuccess | PrepareRenameFailure | null;
+
+	if (!result) {
+		throw new Error("Rename not available at this position (prepareRename returned null)");
+	}
+	if ("message" in result && typeof result.message === "string") {
+		throw new Error(`Rename not available at this position: ${result.message}`);
+	}
+	if ("range" in result && result.range) {
+		return result.range.start;
+	}
+	return position;
+}
+
 async function reloadServer(client: LspClient, serverName: string, signal?: AbortSignal): Promise<string> {
 	let output = `Restarted ${serverName}`;
 	// rust-analyzer/reloadWorkspace is a request (server responds); try it first.
@@ -231,8 +280,8 @@ const LSP_DESCRIPTION = `Interacts with Language Server Protocol servers for cod
 
 <parameters>
 - file: File path, glob pattern (e.g. src/**/*.ts), or "*" for workspace scope. "*" routes diagnostics/symbols/reload to their workspace-wide form.
-- line: 1-indexed line number for position-based actions
-- symbol: Substring on the target line used to resolve the column. Append #N to pick the Nth occurrence (1-indexed) - e.g. foo#2.
+- line: 1-indexed line number. REQUIRED with symbol on project-aware servers for definition/type_definition/implementation/references/hover/rename/code_actions.
+- symbol: Substring on the target line used to resolve the column. REQUIRED on project-aware servers for those actions. Append #N to pick the Nth occurrence (1-indexed) - e.g. foo#2.
 - query: Symbol search query, code-action selector, or LSP method name when action=request
 - new_name: Required for rename (new identifier) and rename_file (destination path)
 - apply: Apply edits for rename/rename_file/code_actions (default true for rename/rename_file; list mode for code_actions unless true)
@@ -243,14 +292,15 @@ const LSP_DESCRIPTION = `Interacts with Language Server Protocol servers for cod
 <critical>
 - USE lsp for symbol-aware operations (rename, find references, go to definition/implementation, code actions) whenever a language server is available - it is safer and more accurate than text search.
 - NEVER perform cross-file renames with ast_edit, sed, or manual edits when lsp rename can do it. Text-based renames miss shadowing, re-exports, and usages in other files.
-- For project-aware references/rename/definition, pass symbol=<name> so the column resolves to the right identifier.
+- For project-aware definition/references/hover/rename/code_actions, ALWAYS pass both line=<n> and symbol=<name>. Omitting either guesses column 0 and returns wrong answers silently.
+- When diagnostics are unavailable, do not treat the file as clean — retry or read the file.
 </critical>`;
 
 const PROMPT_SNIPPET = "Query language servers for diagnostics, definitions, references, renames, and code actions.";
 const PROMPT_GUIDELINES = [
 	"Prefer lsp rename for cross-file symbol renames; it follows re-exports and aliases that text search misses.",
 	"Use lsp diagnostics after edits to catch type errors the way an IDE would.",
-	"For definition/references/rename, pass symbol=<name> (optionally symbol#N) so the column lands on the right token.",
+	"On project-aware servers, pass line=<n> and symbol=<name> (optionally symbol#N) for every position-based action — never rely on the default column.",
 ];
 
 // =============================================================================
@@ -351,22 +401,12 @@ export function createLspToolDefinition(
 				const targetFile = resolvedFile;
 				if (targetFile) await ensureFileOpen(client, targetFile, signal);
 
-				if (
-					targetFile &&
-					line !== undefined &&
-					!symbol &&
-					(action === "references" || action === "rename" || action === "definition") &&
-					isProjectAwareLspServer(serverConfig)
-				) {
-					throw new Error(
-						`symbol is required for project-aware ${action}; pass symbol=<name>, optionally symbol#N for repeated occurrences`,
-					);
-				}
+				assertProjectAwarePosition(action, { line, symbol }, serverConfig);
 
 				const uri = targetFile ? fileToUri(targetFile) : "";
 				const resolvedLine = line ?? 1;
 				const resolvedCharacter = targetFile ? await resolveSymbolColumn(targetFile, resolvedLine, symbol) : 0;
-				const position = { line: resolvedLine - 1, character: resolvedCharacter };
+				let position = { line: resolvedLine - 1, character: resolvedCharacter };
 
 				const crossFileActions = new Set([
 					"definition",
@@ -574,6 +614,9 @@ export function createLspToolDefinition(
 					case "rename": {
 						if (!new_name) {
 							throw new Error("new_name parameter required for rename");
+						}
+						if (isProjectAwareLspServer(serverConfig)) {
+							position = await resolveRenamePosition(client, uri, position, signal);
 						}
 						const result = (await sendRequest(
 							client,

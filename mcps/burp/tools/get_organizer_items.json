@@ -1,0 +1,19 @@
+{
+  "name": "get_organizer_items",
+  "description": "Displays items within the Organizer tab",
+  "inputSchema": {
+    "properties": {
+      "count": {
+        "type": "integer"
+      },
+      "offset": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "count",
+      "offset"
+    ],
+    "type": "object"
+  }
+}

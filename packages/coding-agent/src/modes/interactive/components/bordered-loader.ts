@@ -2,6 +2,7 @@ import { CancellableLoader, Container, Loader, Spacer, Text, type TUI } from "@p
 import type { Theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { reducedMotionLoaderIndicator } from "./spinner-ticker.ts";
 import { workingPulsePalette } from "./working-palette.ts";
 
 /** Loader wrapped with borders for extension UI */
@@ -15,11 +16,18 @@ export class BorderedLoader extends Container {
 		this.cancellable = options?.cancellable ?? true;
 		const borderColor = (s: string) => theme.fg("border", s);
 		this.addChild(new DynamicBorder(borderColor));
+		const indicator = reducedMotionLoaderIndicator();
 		if (this.cancellable) {
-			this.loader = new CancellableLoader(tui, workingPulsePalette(theme), (s) => theme.fg("muted", s), message);
+			this.loader = new CancellableLoader(
+				tui,
+				workingPulsePalette(theme),
+				(s) => theme.fg("muted", s),
+				message,
+				indicator,
+			);
 		} else {
 			this.signalController = new AbortController();
-			this.loader = new Loader(tui, workingPulsePalette(theme), (s) => theme.fg("muted", s), message);
+			this.loader = new Loader(tui, workingPulsePalette(theme), (s) => theme.fg("muted", s), message, indicator);
 		}
 		this.addChild(this.loader);
 		if (this.cancellable) {

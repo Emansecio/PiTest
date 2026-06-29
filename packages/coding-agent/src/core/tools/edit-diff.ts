@@ -218,6 +218,9 @@ export function reindentText(text: string, fromIndent: string, toIndent: string)
 	return lines.join("\n");
 }
 
+// Shared scan cap for Tier-3 indent-tolerant matching and near-miss diagnostics.
+const NEAR_MISS_MAX_CANDIDATE_WINDOWS = 4000;
+
 /**
  * Try to locate `oldText` inside `content` while ignoring leading whitespace
  * differences per line. Returns null when no unique match exists or when the
@@ -229,8 +232,8 @@ export function reindentText(text: string, fromIndent: string, toIndent: string)
  * in line with the surrounding block. If indentation already agrees on every
  * non-blank line we fall back to ("", "") (no rewrite).
  *
- * Complexity is O(L_content * L_oldText) in the worst case but bounded by
- * the size of the oldText line set.
+ * Complexity is O(L_content * L_oldText) in the worst case, capped at
+ * NEAR_MISS_MAX_CANDIDATE_WINDOWS window positions (same bound as near-miss).
  */
 export function indentTolerantFind(content: string, oldText: string): IndentMatchResult | null {
 	const contentLines = content.split("\n");
@@ -242,7 +245,10 @@ export function indentTolerantFind(content: string, oldText: string): IndentMatc
 
 	let match: { startLine: number; endLine: number; fromIndent: string; toIndent: string } | null = null;
 
-	for (let start = 0; start + oldLines.length <= contentLines.length; start++) {
+	const maxStart = Math.min(contentLines.length - oldLines.length + 1, NEAR_MISS_MAX_CANDIDATE_WINDOWS);
+	if (maxStart <= 0) return null;
+
+	for (let start = 0; start < maxStart; start++) {
 		const anchorLine = contentLines[start + oldAnchor];
 		if (anchorLine.trimStart() !== oldAnchorTrimmed) continue;
 
@@ -323,7 +329,6 @@ export function indentTolerantFind(content: string, oldText: string): IndentMatc
 // the first divergent line.
 
 const NEAR_MISS_MAX_BODY_CHARS = 200;
-const NEAR_MISS_MAX_CANDIDATE_WINDOWS = 4000;
 
 function truncateForDiagnostic(text: string): string {
 	const single = text.replace(/\n/g, "\\n");
@@ -510,10 +515,20 @@ function getNotFoundError(path: string, editIndex: number, totalEdits: number, h
 /** 1-based line numbers of the first `limit` non-overlapping occurrences of `needle`. */
 function findOccurrenceLines(content: string, needle: string, limit: number): number[] {
 	const out: number[] = [];
-	let from = content.indexOf(needle);
-	while (from !== -1 && out.length < limit) {
-		out.push(content.slice(0, from).split("\n").length);
-		from = content.indexOf(needle, from + needle.length);
+	let searchFrom = 0;
+	let line = 1;
+	let lineStart = 0;
+	while (out.length < limit) {
+		const hit = content.indexOf(needle, searchFrom);
+		if (hit === -1) break;
+		while (lineStart <= hit) {
+			const nl = content.indexOf("\n", lineStart);
+			if (nl === -1 || nl >= hit) break;
+			lineStart = nl + 1;
+			line++;
+		}
+		out.push(line);
+		searchFrom = hit + needle.length;
 	}
 	return out;
 }

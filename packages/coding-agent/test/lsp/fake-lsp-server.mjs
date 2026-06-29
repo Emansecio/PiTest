@@ -44,7 +44,7 @@ function handleInitialize(msg) {
 				typeDefinitionProvider: true,
 				implementationProvider: true,
 				referencesProvider: true,
-				renameProvider: true,
+				renameProvider: { prepareProvider: true },
 				documentSymbolProvider: true,
 				workspaceSymbolProvider: true,
 				codeActionProvider: true,
@@ -113,6 +113,18 @@ function handle(msg) {
 				],
 			});
 			return;
+		case "textDocument/prepareRename": {
+			const pos = msg.params?.position ?? { line: 0, character: 0 };
+			send({
+				jsonrpc: "2.0",
+				id: msg.id,
+				result: {
+					range: { start: pos, end: pos },
+					placeholder: "hello",
+				},
+			});
+			return;
+		}
 		case "textDocument/rename": {
 			const uri = msg.params.textDocument.uri;
 			const newName = msg.params.newName;

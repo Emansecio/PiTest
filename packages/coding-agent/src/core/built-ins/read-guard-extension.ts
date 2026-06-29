@@ -40,12 +40,13 @@ interface FileStamp {
 	mtimeMs: number;
 	size: number;
 	/**
-	 * Content hash. mtime+size alone miss an in-place edit that keeps the byte
+	 * Content hash (lazy). mtime+size alone miss an in-place edit that keeps the byte
 	 * count identical (another agent swapping a line for one of equal length);
 	 * the hash closes that drift window so a stale post-compaction snapshot can't
-	 * green-light an edit against changed content.
+	 * green-light an edit against changed content. Computed on first drift compare,
+	 * not on every read/stat.
 	 */
-	hash: string;
+	hash?: string;
 }
 
 export interface ReadGuardOptions {
@@ -82,6 +83,14 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 	return (pi: ExtensionAPI) => {
 		const stampCache = new Map<string, FileStamp>();
 
+		function ensureHash(absPath: string, stamp: FileStamp): string {
+			if (stamp.hash !== undefined) return stamp.hash;
+			const hash = hashFileSync(absPath);
+			stamp.hash = hash;
+			stampCache.set(absPath, stamp);
+			return hash;
+		}
+
 		function stampFile(absPath: string): FileStamp | undefined {
 			try {
 				const st = statSync(absPath);
@@ -89,12 +98,21 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 				if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
 					return cached;
 				}
-				const stamp: FileStamp = { mtimeMs: st.mtimeMs, size: st.size, hash: hashFileSync(absPath) };
+				const stamp: FileStamp = { mtimeMs: st.mtimeMs, size: st.size };
 				stampCache.set(absPath, stamp);
 				return stamp;
 			} catch {
 				return undefined;
 			}
+		}
+
+		function stampContentDiffers(absPath: string, a: FileStamp, b: FileStamp): boolean {
+			if (a.size !== b.size) return true;
+			return ensureHash(absPath, a) !== ensureHash(absPath, b);
+		}
+
+		function stampStatMatches(absPath: string, a: FileStamp, b: FileStamp): boolean {
+			return a.mtimeMs === b.mtimeMs && a.size === b.size && !stampContentDiffers(absPath, a, b);
 		}
 		// Maps an absolute path to its content stamp AT READ TIME (or null when the
 		// file couldn't be stamped). Membership = "read this session"; the stamp
@@ -151,9 +169,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 						const readStamp = readFiles.get(abs);
 						const current = stampFile(abs);
 						const drifted =
-							readStamp != null &&
-							current !== undefined &&
-							(current.hash !== readStamp.hash || current.size !== readStamp.size);
+							readStamp != null && current !== undefined && stampContentDiffers(abs, current, readStamp);
 						if (drifted && !firedWriteWarnings.has(abs)) {
 							firedWriteWarnings.add(abs);
 							recordDiagnostic({
@@ -188,11 +204,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 				const stamp = postCompactStamps.get(abs);
 				if (stamp !== undefined) {
 					const current = stampFile(abs);
-					const statMatches =
-						current &&
-						current.mtimeMs === stamp.mtimeMs &&
-						current.size === stamp.size &&
-						current.hash === stamp.hash;
+					const statMatches = current !== undefined && stampStatMatches(abs, current, stamp);
 					if (statMatches) {
 						// Unchanged since pre-compaction read. The model only carried the
 						// SUMMARY of this file across compaction (head+tail excerpt), so the
@@ -320,7 +332,10 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 		pi.on("session_before_compact", () => {
 			for (const abs of readFiles.keys()) {
 				const stamp = stampFile(abs);
-				if (stamp) postCompactStamps.set(abs, stamp);
+				if (stamp) {
+					ensureHash(abs, stamp);
+					postCompactStamps.set(abs, stamp);
+				}
 				// If stat fails (file deleted/permissions), we drop the entry —
 				// the model will have to re-read, which is correct.
 			}

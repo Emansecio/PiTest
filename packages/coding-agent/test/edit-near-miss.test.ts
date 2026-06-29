@@ -151,6 +151,13 @@ describe("indentTolerantFind", () => {
 		const oldText = "a\nb\n"; // missing blank line
 		expect(indentTolerantFind(content, oldText)).toBeNull();
 	});
+
+	it("returns null when the only indent-tolerant match is beyond the scan cap", () => {
+		const pad = Array.from({ length: 4000 }, (_, i) => `line${i}`).join("\n");
+		const content = `${pad}\nfunction foo() {\n\treturn 1;\n}\n`;
+		const oldText = ["function foo() {", "    return 1;", "}"].join("\n");
+		expect(indentTolerantFind(content, oldText)).toBeNull();
+	});
 });
 
 describe("reindentText", () => {

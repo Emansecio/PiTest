@@ -36,7 +36,14 @@ function isAlive(pid: number): boolean {
 	}
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+async function waitUntilNotAlive(pid: number, timeoutMs: number): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (!isAlive(pid)) return true;
+		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	return !isAlive(pid);
+}
 
 describe("eval kernel orphan child teardown", () => {
 	let kernel: EvalKernel | undefined;
@@ -71,11 +78,9 @@ describe("eval kernel orphan child teardown", () => {
 				/timed out/,
 			);
 
-			// Give the OS a moment to reap the tree (short — we only poll once).
-			await sleep(400);
 			const childPid = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
 			expect(Number.isFinite(childPid)).toBe(true);
-			expect(isAlive(childPid)).toBe(false);
+			await expect(waitUntilNotAlive(childPid, 5_000)).resolves.toBe(true);
 		},
 		20_000,
 	);

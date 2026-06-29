@@ -59,4 +59,34 @@ describe("createSpinnerTicker", () => {
 		t.stop();
 		expect(unsubbed()).toBe(true);
 	});
+
+	test("dirty callback alone schedules a render (onFrame must not call requestRender)", () => {
+		const loop = { cb: null as ((now: number) => boolean) | null };
+		let renders = 0;
+		const ui = {
+			requestRender() {
+				renders += 1;
+			},
+			addAnimationCallback(fn: (now: number) => boolean) {
+				loop.cb = fn;
+				return () => {
+					loop.cb = null;
+				};
+			},
+		} as unknown as TUI;
+		createSpinnerTicker(
+			ui,
+			() => true,
+			() => {},
+		);
+		if (!loop.cb) throw new Error("expected animation callback");
+		const tickCb = loop.cb;
+		// Mirror TUI.tickAnimations(): render only when a callback returns true.
+		if (tickCb(0)) renders += 1;
+		expect(renders).toBe(1);
+		if (tickCb(0)) renders += 1;
+		expect(renders).toBe(1);
+		if (tickCb(80)) renders += 1;
+		expect(renders).toBe(2);
+	});
 });

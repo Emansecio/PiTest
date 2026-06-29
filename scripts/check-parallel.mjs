@@ -1,18 +1,17 @@
 import { spawn } from "node:child_process";
 
-// Run the independent check tasks in parallel instead of chaining them with
-// &&. Output is buffered per task and printed in full (no truncation) so
-// errors stay readable. Exits non-zero if any task fails.
+// Overlapped parallel gate (wall-time tuned for Windows):
+//   Gate — biome + tsgo (~1.2s). Must pass before vitest starts.
+//   token-bench starts at t=0 in the background (~3s of tsx benches); it must
+//   not share a wave with vitest (fork/spawn tests fight the benches), but it
+//   finishes long before vitest ends so we overlap it with the gate + vitest
+//   instead of blocking vitest behind a full wave-1 barrier.
+//   Vitest — direct `npx vitest --run` from packages/coding-agent (~36s).
+//            Never share a wave with tsgo/biome (oversubscription flaked E2E).
+//   Smokes — lightweight scripts (~0.2s each), parallel with vitest only.
 //
-// Each task gets its own isolated spawn with its exit code captured
-// independently, so a vitest `exit 1` only fails that task — it never cancels
-// the others (the "exit 1 cancels the batch on Windows" issue is specific to
-// `&&`-chained shells, not this Promise.all fan-out).
+// Output is buffered per task and printed in full. Each task gets its own spawn.
 
-// Track live children so an interrupted runner (Ctrl-C, SIGTERM, a parent that
-// dies) reaps the whole spawned tree instead of orphaning it. On Windows,
-// killing the shell does NOT kill its descendants (npm -> vitest -> N forks), so
-// we taskkill the tree by pid; POSIX gets a direct kill signal.
 const activeChildren = new Set();
 
 function killTree(child) {
@@ -34,9 +33,14 @@ function shutdown(signal) {
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 
-function run(name, command) {
+function run(name, command, extraEnv = undefined) {
+	const started = Date.now();
 	return new Promise((resolve) => {
-		const child = spawn(command, { shell: true, stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn(command, {
+			shell: true,
+			stdio: ["ignore", "pipe", "pipe"],
+			env: extraEnv ? { ...process.env, ...extraEnv } : process.env,
+		});
 		activeChildren.add(child);
 		let out = "";
 		child.stdout.on("data", (chunk) => {
@@ -47,49 +51,182 @@ function run(name, command) {
 		});
 		child.on("close", (code) => {
 			activeChildren.delete(child);
-			resolve({ name, code: code ?? 1, out });
+			resolve({ name, code: code ?? 1, out, ms: Date.now() - started });
 		});
 	});
 }
 
-// The fast static checks. tsgo (~3s) and biome (~1s) are CPU-bound but brief;
-// the two smoke checks are trivial. These run concurrently with each other.
-const fastChecks = [
-	{ name: "biome", command: "biome check --error-on-warnings ." },
-	{ name: "tsgo", command: "tsgo --noEmit" },
+async function runWave(tasks) {
+	if (tasks.length === 0) return [];
+	return Promise.all(tasks.map((task) => run(task.name, task.command)));
+}
+
+const skipTsgo = process.argv.includes("--skip-tsgo") || process.env.CHECK_SKIP_TSGO === "1";
+const skipVitest = process.argv.includes("--no-vitest");
+const workspaceTests = process.argv.includes("--workspace-tests");
+const showTiming = process.env.CHECK_TIMING === "1";
+
+const gateTasks = [
+	{ name: "biome", command: "npx biome check --error-on-warnings ." },
+	...(skipTsgo ? [] : [{ name: "tsgo", command: "npx tsgo --noEmit" }]),
+];
+
+const tokenBenchTask = { name: "token-bench", command: "node scripts/check-token-bench.mjs" };
+const vitestTask = {
+	name: "vitest",
+	command: "npx vitest --run",
+	cwd: "packages/coding-agent",
+};
+
+const smokeTasks = [
 	{ name: "browser-smoke", command: "node scripts/check-browser-smoke.mjs" },
 	{ name: "generated", command: "node scripts/check-generated-models.mjs" },
 	{ name: "dist-exports", command: "node scripts/check-dist-exports.mjs" },
 	{ name: "surrogate-slice", command: "node scripts/check-surrogate-slice.mjs" },
-	{ name: "token-bench", command: "node scripts/check-token-bench.mjs" },
 ];
 
-// Vitest is the heavy task: it forks up to (cpu-count) workers and saturates
-// every core during its ~280s-CPU collect. Running it inside the SAME parallel
-// batch as tsgo/biome oversubscribes the machine — that contention is what made
-// timing-sensitive tests (real-timer polling, process-spawn E2E) flake on the
-// 30s deadline, even though the suite is rock-stable solo (~21s, 2495 green).
-// So: finish the fast checks first, then give vitest the machine to itself. Net
-// wall is LOWER than the old contended run AND deterministic. All tasks still
-// run (no early bail) so one failure never hides another, and the suite is never
-// skipped. Keeps the footer.test.ts-style assertions from silently rotting.
-const vitestTask = { name: "vitest", command: "npm run test -w @pit/coding-agent" };
+function runWithCwd(name, command, cwd) {
+	const started = Date.now();
+	return new Promise((resolve) => {
+		const child = spawn(command, { shell: true, cwd, stdio: ["ignore", "pipe", "pipe"] });
+		activeChildren.add(child);
+		let out = "";
+		child.stdout.on("data", (chunk) => {
+			out += chunk;
+		});
+		child.stderr.on("data", (chunk) => {
+			out += chunk;
+		});
+		child.on("close", (code) => {
+			activeChildren.delete(child);
+			resolve({ name, code: code ?? 1, out, ms: Date.now() - started });
+		});
+	});
+}
 
-// `--no-vitest` (used by the pre-commit hook) runs ONLY the fast static checks so
-// commits stay ~5s. The full vitest suite still runs on pre-push and on a bare
-// `npm run check`. Keeps the per-commit cost low without losing the gate.
-const skipVitest = process.argv.includes("--no-vitest");
+// Vitest on Windows often prints the final summary then keeps fork workers alive;
+// the parent shell never gets `close`. Once the summary shows all files passed,
+// reap the tree after a short grace period so the gate can finish.
+const VITEST_SUMMARY_PASSED_RE = /Test Files\s+\d+ passed/;
+const VITEST_SUMMARY_FAILED_RE = /\bFAIL\b|Test Files\s+.*\bfailed\b/;
 
-const fastResults = await Promise.all(fastChecks.map((task) => run(task.name, task.command)));
-const vitestResult = skipVitest ? null : await run(vitestTask.name, vitestTask.command);
-const results = skipVitest ? fastResults : [...fastResults, vitestResult];
+function runVitest(name, command, cwd) {
+	const started = Date.now();
+	return new Promise((resolve) => {
+		const child = spawn(command, { shell: true, cwd, stdio: ["ignore", "pipe", "pipe"] });
+		activeChildren.add(child);
+		let out = "";
+		let settled = false;
+		let reapTimer;
+
+		const finish = (code) => {
+			if (settled) return;
+			settled = true;
+			if (reapTimer) clearTimeout(reapTimer);
+			activeChildren.delete(child);
+			resolve({ name, code, out, ms: Date.now() - started });
+		};
+
+		const append = (chunk) => {
+			out += chunk;
+			if (settled || VITEST_SUMMARY_FAILED_RE.test(out)) return;
+			if (VITEST_SUMMARY_PASSED_RE.test(out) && reapTimer === undefined) {
+				reapTimer = setTimeout(() => {
+					if (!settled) {
+						killTree(child);
+						finish(0);
+					}
+				}, 2500);
+			}
+		};
+
+		child.stdout.on("data", append);
+		child.stderr.on("data", append);
+		child.on("close", (code) => finish(code ?? 1));
+	});
+}
+
+async function runTask(task) {
+	if (task.name === "vitest" && task.cwd) {
+		return runVitest(task.name, task.command, task.cwd);
+	}
+	if (task.cwd) {
+		return runWithCwd(task.name, task.command, task.cwd);
+	}
+	return run(task.name, task.command);
+}
+
+const gateStarted = Date.now();
+const tokenBenchPromise = run(tokenBenchTask.name, tokenBenchTask.command);
+
+const gateStartedAt = Date.now();
+const gateResults = await runWave(gateTasks);
+const gateMs = Date.now() - gateStartedAt;
+
+const gateFailed = gateResults.filter((result) => result.code !== 0);
+if (gateFailed.length > 0) {
+	for (const result of gateResults) {
+		if (result.out.trim()) {
+			process.stdout.write(`\n=== ${result.name} ===\n${result.out}`);
+		}
+	}
+	const tokenBenchResult = await tokenBenchPromise;
+	if (tokenBenchResult.out.trim()) {
+		process.stdout.write(`\n=== ${tokenBenchResult.name} ===\n${tokenBenchResult.out}`);
+	}
+	console.error(`\ncheck failed: ${gateFailed.map((result) => result.name).join(", ")}`);
+	process.exit(1);
+}
+
+const heavyStartedAt = Date.now();
+const workspaceTestTask = workspaceTests
+	? {
+			name: "workspace-tests",
+			command: process.env.CI
+				? "npm test --workspaces --if-present"
+				: "npm test --workspaces --if-present --parallel",
+			env: { PIT_AI_SKIP_LOCAL_AUTH: "1" },
+	}
+	: null;
+
+const heavyPromises = [
+	tokenBenchPromise,
+	...(skipVitest ? [] : [runTask(vitestTask)]),
+	...(workspaceTestTask ? [run(workspaceTestTask.name, workspaceTestTask.command, workspaceTestTask.env)] : []),
+	...smokeTasks.map((task) => run(task.name, task.command)),
+];
+const heavyResults = await Promise.all(heavyPromises);
+const heavyMs = Date.now() - heavyStartedAt;
+
+const results = [...gateResults, ...heavyResults];
 for (const result of results) {
 	if (result.out.trim()) {
 		process.stdout.write(`\n=== ${result.name} ===\n${result.out}`);
 	}
 }
+
 const failed = results.filter((result) => result.code !== 0);
 if (failed.length > 0) {
 	console.error(`\ncheck failed: ${failed.map((result) => result.name).join(", ")}`);
 	process.exit(1);
 }
+
+if (showTiming) {
+	const totalMs = Date.now() - gateStarted;
+	const vitestResult = results.find((r) => r.name === "vitest");
+	const smokeMs = smokeTasks.reduce((max, task) => {
+		const r = results.find((res) => res.name === task.name);
+		return Math.max(max, r?.ms ?? 0);
+	}, 0);
+	const parts = results.map((r) => `${r.name}=${r.ms}ms`).join(" ");
+	console.log(
+		`\ncheck timing: gate=${gateMs}ms heavy=${heavyMs}ms smokes=${smokeMs}ms total=${totalMs}ms (${parts})`,
+	);
+	if (vitestResult) {
+		console.log(`vitest wall: ${vitestResult.ms}ms`);
+	}
+}
+
+// Vitest (and occasional smoke children) can leave handles open on Windows;
+// exit explicitly once all tasks reported so `npm run check` does not hang.
+process.exit(0);

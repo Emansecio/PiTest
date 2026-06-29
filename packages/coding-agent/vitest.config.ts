@@ -14,12 +14,10 @@ const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta
 const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
 const aiSrcModelsCompare = fileURLToPath(new URL("../ai/src/models-compare.ts", import.meta.url));
 const tuiSrcCore = fileURLToPath(new URL("../tui/src/core.ts", import.meta.url));
-// Dono optou por mais velocidade aceitando o trade-off de uso de CPU: metade
-// dos cores em vez de um quarto. Em maquinas com muitos cores (ex: 28 -> 14
-// forks) corta o wall-clock; mantemos o floor de 2 e ficamos abaixo do total
-// de cores para o teardown (taskkill/AgentSession.dispose + processos spawned)
-// nao morrer de inanicao no Windows como acontecia ao usar todos os cores.
-const maxVitestForks = Math.max(2, Math.floor(cpus().length / 2));
+// Speed/headroom trade-off on Windows: cpus-4 forks (28 -> 24). Keeps a few
+// cores free for spawned children (tsx boots, git, taskkill/AgentSession
+// dispose teardown) while cutting collect/test wall vs the old cpus/2 default.
+const maxVitestForks = process.env.CI ? 2 : Math.max(2, cpus().length - 4);
 
 export default defineConfig({
 	test: {
@@ -37,10 +35,6 @@ export default defineConfig({
 		hookTimeout: 120000,
 		poolOptions: {
 			forks: {
-				// Default forks one worker per core. With every core busy, spawned
-				// children (tsx boots, git, taskkill/AgentSession.dispose teardown)
-				// starve and blow hook deadlines on Windows. Use half the cores (floor 2)
-				// so teardown keeps headroom during the full suite.
 				maxForks: maxVitestForks,
 			},
 		},

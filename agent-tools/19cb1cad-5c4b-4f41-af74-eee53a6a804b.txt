@@ -1,0 +1,1010 @@
+Running full check (lint, types, tests) before push...
+
+> pi-monorepo@0.0.8 check
+> node scripts/check-parallel.mjs
+
+
+=== biome ===
+Checked 1081 files in 535ms. No fixes applied.
+
+=== surrogate-slice ===
+surrogate-slice: clean (4 source roots)
+
+=== token-bench ===
+token-economy gate ok (20 exact, 5 min, 2 max)
+
+=== vitest ===
+
+> @pit/coding-agent@0.75.3 test
+> vitest --run
+
+
+ RUN  v3.2.4 C:/PiTest/packages/coding-agent
+
+piped-json-payload
+ ✓ test/config.test.ts (14 tests | 1 skipped) 2245ms
+   ✓ detectInstallMethod > self-updates npm installs from custom prefixes  382ms
+   ✓ detectInstallMethod > self-updates renamed packages from the current install prefix  405ms
+   ✓ detectInstallMethod > self-update respects configured npmCommand  403ms
+   ✓ detectInstallMethod > self-update treats empty npmCommand as unset  408ms
+   ✓ detectInstallMethod > quotes npm self-update display paths  392ms
+ ✓ test/footer-data-provider.test.ts (8 tests) 2283ms
+   ✓ FooterDataProvider reftable branch detection > does not notify listeners when reftable updates keep the same branch  520ms
+   ✓ FooterDataProvider reftable branch detection > debounces rapid reftable updates into a single async refresh  1189ms
+   ✓ FooterDataProvider reftable branch detection > updates the cached branch when the reftable directory changes  537ms
+ ✓ test/eval-kernel-runaway.test.ts (6 tests) 2321ms
+   ✓ eval kernel runaway guards > javascript: synchronous while(true){} is aborted by the vm timeout, not hung  1560ms
+ ✓ test/model-registry.test.ts (66 tests) 2389ms
+   ✓ ModelRegistry > API key resolution > request-time resolution > failed commands are retried  369ms
+   ✓ ModelRegistry > API key resolution > request-time resolution > getApiKeyAndHeaders re-resolves authHeader each request when the memo is disabled  340ms
+ ✓ test/doom-loop-recovery.test.ts (3 tests) 138ms
+ ✓ test/eval-kernel-orphan-tree.test.ts (1 test) 2940ms
+   ✓ eval kernel orphan child teardown > python: timeout kills child processes spawned by user code (no orphans)  2940ms
+ ✓ test/stdout-cleanliness.test.ts (2 tests) 3685ms
+   ✓ stdout cleanliness E2E smoke > keeps stdout empty for --mode json --help while routing help to stderr  3683ms
+ ✓ test/package-manager.test.ts (100 tests) 3852ms
+ ✓ test/auth-storage.test.ts (29 tests) 1911ms
+   ✓ AuthStorage > API key resolution > caching > clearConfigValueCache allows command to run again  396ms
+ ✓ test/compaction-structural-only.test.ts (7 tests) 808ms
+ ✓ test/resolve-config-value-ttl.test.ts (4 tests) 1345ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > clearConfigValueCache forces a fresh spawn  391ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > a TTL of 0 disables the memo (fresh every call)  403ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > never memoises a failing command (no sticky auth outage)  376ms
+ ✓ test/lsp/lsp-shutdown-warmup.test.ts (1 test) 1597ms
+   ✓ lsp shutdown vs in-flight warmup (#26) > shutdownClientsForCwd kills a server still mid-initialize  1596ms
+ ✓ test/git-update.test.ts (11 tests) 4655ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > does not advance past multiple remote commits  585ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > leaves a detached checkout (no upstream) untouched  515ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react when remote history is rewritten  488ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react when remote drops the installed commit  618ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react to a complete history rewrite  807ms
+   ✓ DefaultPackageManager git sources (local-only mode) > pinned sources > never updates a pinned git source (with @ref)  344ms
+   ✓ DefaultPackageManager git sources (local-only mode) > scope-aware update > does not create a project-scope install when source is only registered globally  303ms
+ ✓ test/bash-auto-background.test.ts (10 tests) 4121ms
+   ✓ bash auto-background: promote on threshold instead of kill > promotes a long command (no timeout) to a tracked background job, returning a handle + partial output  1034ms
+   ✓ bash auto-background: promote on threshold instead of kill > an explicit hard timeout is honored as a KILL (idle-real death), never promoted  538ms
+   ✓ bash auto-background: promote on threshold instead of kill > end-to-end through the bash tool: execute returns the 'promoted to background id=' message + partial output, no throw  1018ms
+   ✓ bash auto-background: promote on threshold instead of kill > WITHOUT autoBackground opt-in (the user `!` path), a long command is NOT silently detached — it runs to completion  657ms
+ ✓ test/suite/agent-session-runtime.test.ts (9 tests) 2397ms
+   ✓ AgentSessionRuntime characterization > emits session_before_switch and session_start for new and resume flows  413ms
+   ✓ AgentSessionRuntime characterization > updates the runtime session cwd on cross-cwd session replacement  383ms
+   ✓ AgentSessionRuntime characterization > restores model and thinking state from the destination session  409ms
+ ✓ test/pending-checks-gate.test.ts (4 tests) 2109ms
+   ✓ background-check guard > waits for a running check, then re-injects its failure  537ms
+   ✓ background-check guard > re-injects a 'still running' warning when the check never settles in time  1028ms
+   ✓ background-check guard > stays silent when the backgrounded check finished green  527ms
+ ✓ test/tool-discovery-default-surface.test.ts (9 tests) 1422ms
+ ✓ test/tools.test.ts (71 tests | 1 skipped) 2719ms
+   ✓ Coding Agent Tools > bash tool > should respect timeout  1278ms
+ ✓ test/verification.test.ts (21 tests) 1149ms
+   ✓ verification module > runCheckCommand > times out a hung command  671ms
+ ✓ test/verification-gate.test.ts (8 tests) 1247ms
+ ✓ test/suite/regressions/2791-fswatch-error-crash.test.ts (1 test) 1042ms
+   ✓ issue #2791 fs.watch error event crashes process > process should survive an error event on the theme FSWatcher  1041ms
+ ✓ test/bash-close-hang-windows.test.ts (2 tests) 1050ms
+   ✓ Windows child-process close handling > executeBash resolves after the shell exits even if inherited stdio handles stay open  529ms
+   ✓ Windows child-process close handling > bash tool resolves after the shell exits even if inherited stdio handles stay open  520ms
+ ✓ test/lsp/writethrough.test.ts (7 tests) 894ms
+   ✓ lsp writethrough — post-write diagnostics > does not re-append unchanged baseline diagnostics  326ms
+ ✓ test/package-command-paths.test.ts (10 tests) 951ms
+ ✓ test/lsp/lsp-hardening.test.ts (7 tests) 825ms
+   ✓ lsp hardening > does not return OK when diagnostics never publish a fresh result  317ms
+   ✓ lsp hardening > filters pre-existing diagnostics from post-write output  328ms
+ ✓ test/resource-loader.test.ts (20 tests) 3862ms
+   ✓ DefaultResourceLoader > noSkills option > should NOT load legacy skill dirs (.codex/.claude/…) when noSkills is true  434ms
+ ✓ test/dap/truncate-output.test.ts (5 tests) 758ms
+   ✓ truncateOutput — byte-identity vs reference > multi-byte UTF-8 crossing 1024-char slice boundaries matches the reference  533ms
+ ✓ test/find-grep-git-and-postfilter.test.ts (23 tests) 791ms
+stderr | test/hooks-extension.test.ts > hooks-extension lifecycle events > respects the PreCompact hook timeout
+[hook] PreCompact/node "C:\\Users\\User\\AppData\\Local\\Temp\\pi-hookext-slow-1782626695448.js": exit -1
+
+ ✓ test/hooks-extension.test.ts (8 tests) 649ms
+ ✓ test/agent-session-runtime-events.test.ts (4 tests) 864ms
+   ✓ AgentSessionRuntime session lifecycle events > emits session_before_switch and session_start for new and resume flows  367ms
+ ✓ test/dry-run-cli.test.ts (5 tests) 4667ms
+   ✓ pi --dry-run > E2E smoke (tsx spawn) > blocked dry-run exits 1 through the real CLI entry  4158ms
+ ✓ test/suite/regressions/2860-replaced-session-context.test.ts (3 tests) 831ms
+   ✓ regression #2860: replaced session callbacks > supports withSession for switchSession  360ms
+ ✓ test/extensions-runner.test.ts (35 tests) 708ms
+ ✓ test/ask-picker-dist-smoke.test.ts (1 test) 434ms
+   ✓ ask-picker compiled dist (src↔dist drift guard) > never renders a line wider than the terminal  433ms
+ ✓ test/suite/regressions/2781-skill-collision-precedence.test.ts (4 tests) 638ms
+ ✓ test/rpc-prompt-response-semantics.test.ts (3 tests) 644ms
+   ✓ RPC prompt response semantics > emits one success response when prompt is queued during streaming  356ms
+ ✓ test/resilience/eval-output-cap.resilience.test.ts (3 tests) 537ms
+ ✓ test/sdk-session-manager.test.ts (3 tests) 616ms
+ ✓ test/eval-kernel-cap-sentinel.test.ts (2 tests) 458ms
+ ✓ test/hooks-runner.test.ts (7 tests) 540ms
+ ✓ test/file-mutation-queue.test.ts (6 tests) 537ms
+ ✓ test/suite/tool-calling-eval/05-rewrite-registry.test.ts (14 tests) 522ms
+ ✓ test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts (3 tests) 584ms
+ ✓ test/agent-session-dynamic-tools.test.ts (3 tests) 582ms
+ ✓ test/agent-session-dynamic-provider.test.ts (3 tests) 598ms
+ ✓ test/bash-abort-during-startup.test.ts (2 tests) 514ms
+ ✓ test/skills.test.ts (34 tests) 433ms
+   ✓ skills > loadSkills with options > should expand ~ in skillPaths  376ms
+ ✓ test/code-mode.test.ts (7 tests) 460ms
+ ✓ test/resilience/bash-timeout-kill.resilience.test.ts (2 tests) 406ms
+   ✓ resilience: bash timeout → process.kill + observable diagnostic > (3) a command that blocks past its timeout is killed and records process.kill  308ms
+ ✓ test/dap/dap-client-socket.test.ts (2 tests) 395ms
+   ✓ DapClient socket-mode failure paths > kills the adapter process when the socket connect times out (no leak)  339ms
+ ✓ test/grep-fff-backend.test.ts (8 tests) 469ms
+ ✓ test/dap/dap-exited-outcome.test.ts (1 test) 338ms
+   ✓ DAP continue when 'exited' wins the race (#27) > reports terminated (not running) and surfaces the exit code  338ms
+ ✓ test/mcp-client.test.ts (23 tests) 364ms
+ ✓ test/recipe.test.ts (10 tests) 377ms
+ ✓ test/exec-command.test.ts (4 tests) 308ms
+ ✓ test/session-manager-durability.test.ts (6 tests) 293ms
+ ✓ test/agent-session-concurrent.test.ts (7 tests) 418ms
+ ✓ test/suite/agent-session-retry-events.test.ts (14 tests) 419ms
+ ✓ test/chrome-devtools-default-surface.test.ts (2 tests) 403ms
+ ✓ test/lsp/lsp-tool.test.ts (28 tests) 272ms
+ ✓ test/suite/regressions/2835-tools-allowlist-filters-extension-tools.test.ts (2 tests) 396ms
+ ✓ test/dap/debug.test.ts (10 tests) 254ms
+ ✓ test/suite/agent-session-prompt.test.ts (14 tests) 244ms
+ ✓ test/sdk-skills.test.ts (3 tests) 268ms
+ ✓ test/chrome-devtools-manager.test.ts (41 tests) 252ms
+ ✓ test/agent-session-retry.test.ts (7 tests) 266ms
+ ✓ test/extensions-discovery.test.ts (28 tests) 272ms
+ ✓ test/cdp-client.test.ts (17 tests) 177ms
+ ✓ test/suite/regressions/2753-reload-stale-resource-settings.test.ts (1 test) 220ms
+ ✓ test/test-harness.test.ts (15 tests) 275ms
+ ✓ test/suite/agent-session-compaction.test.ts (13 tests) 224ms
+ ✓ test/suite/tool-calling-eval/02-edit-near-miss-and-indent.test.ts (2 tests) 267ms
+ ✓ test/tool-execution-component.test.ts (36 tests) 235ms
+ ✓ test/suite/tool-calling-eval/01-edit-aliases.test.ts (2 tests) 247ms
+ ✓ test/syntax-highlight.test.ts (5 tests) 162ms
+ ✓ test/suite/agent-session-bash-persistence.test.ts (8 tests) 241ms
+ ✓ test/suite/regressions/3302-find-path-glob.test.ts (4 tests) 184ms
+ ✓ test/suite/tool-calling-eval/04-tool-call-stats.test.ts (1 test) 262ms
+ ✓ test/nav-group-component.test.ts (16 tests) 197ms
+ ✓ test/repo-map-byte-cap.test.ts (1 test) 188ms
+ ✓ test/suite/agent-session-queue.test.ts (13 tests) 216ms
+ ✓ test/mcp-stdio.test.ts (2 tests) 164ms
+ ✓ test/suite/agent-session-model-extension.test.ts (10 tests) 182ms
+ ✓ test/settings-manager.test.ts (29 tests) 161ms
+ ✓ test/activity-ticker-leak.test.ts (8 tests) 193ms
+ ✓ test/code-mode-tool.test.ts (4 tests) 124ms
+ ✓ test/dap/dap-stop-outcome-leak.test.ts (1 test) 112ms
+ ✓ test/visual-gate.test.ts (3 tests) 121ms
+ ✓ test/coordinator-parent-refs.test.ts (1 test) 138ms
+ ✓ test/extensions-input-event.test.ts (8 tests) 153ms
+ ✓ test/doom-loop-escalation.test.ts (4 tests) 133ms
+ ✓ test/resilience/persistence-ebusy.resilience.test.ts (2 tests) 96ms
+ ✓ test/image-processing.test.ts (9 tests) 104ms
+ ✓ test/tool-failure-budget.test.ts (6 tests) 136ms
+ ✓ test/agent-session-auto-compaction-queue.test.ts (6 tests) 137ms
+ ✓ test/edit-tool-no-full-redraw.test.ts (3 tests) 129ms
+ ✓ test/agent-session-stats.test.ts (4 tests) 67ms
+ ✓ test/result-loop.test.ts (2 tests) 68ms
+ ✓ test/compaction-modified-digests.test.ts (2 tests) 57ms
+ ✓ test/preview-server.test.ts (9 tests) 77ms
+ ✓ test/mtime-cache.test.ts (9 tests) 81ms
+ ✓ test/suite/regressions/3303-find-nested-gitignore.test.ts (2 tests) 92ms
+ ✓ test/learned-error-runtime-persistence.test.ts (4 tests) 121ms
+ ✓ test/suite/regressions/1717-2113-agent-session-event-settlement.test.ts (2 tests) 109ms
+ ✓ test/read-streaming.test.ts (11 tests) 66ms
+ ✓ test/session-manager/file-operations.test.ts (17 tests) 74ms
+ ✓ test/todo-cadence-integration.test.ts (3 tests) 91ms
+ ✓ test/compaction.test.ts (46 tests | 2 skipped) 57ms
+ ✓ test/suite/tool-discovery-activation.test.ts (3 tests) 81ms
+ ✓ test/suite/regressions/3616-settings-inmemory-reload.test.ts (3 tests) 87ms
+ ✓ test/legacy-discovery.test.ts (6 tests) 60ms
+ ✓ test/goal-auto-continue.test.ts (3 tests) 84ms
+ ✓ test/suite/tool-calling-eval/07-memory-leak-bounds.test.ts (3 tests) 96ms
+ ✓ test/lsp/route-message.test.ts (5 tests) 56ms
+ ✓ test/skill-args-expansion.test.ts (2 tests) 98ms
+ ✓ test/coordinator-spawn.test.ts (27 tests) 62ms
+ ✓ test/suite/agent-session-interrupt.test.ts (3 tests) 103ms
+ ✓ test/agent-session-presend-overflow.test.ts (3 tests) 119ms
+ ✓ test/agent-session-presend-wire.test.ts (2 tests) 97ms
+ ✓ test/project-config-context.test.ts (23 tests) 41ms
+ ✓ test/suite/tool-calling-eval/06-learned-error-isolation.test.ts (2 tests) 63ms
+ ✓ test/fusion/orchestrator.test.ts (7 tests) 49ms
+ ✓ test/resilience/crash-isolation.resilience.test.ts (2 tests) 66ms
+ ✓ test/session-info-modified-timestamp.test.ts (1 test) 42ms
+ ✓ test/todo-integration.test.ts (1 test) 53ms
+ ✓ test/todo-overlay.test.ts (8 tests) 29ms
+ ✓ test/suite/regressions/3317-network-connection-lost-retry.test.ts (1 test) 43ms
+ ✓ test/agent-session-frequent-files.test.ts (3 tests) 49ms
+ ✓ test/suite/tool-calling-eval/03-unknown-tool-suggestion.test.ts (1 test) 43ms
+ ✓ test/agent-session-listener-isolation.test.ts (1 test) 59ms
+ ✓ test/suite/regressions/3686-session-name-event.test.ts (2 tests) 39ms
+ ✓ test/session-manager-persist-resilience.test.ts (4 tests) 44ms
+ ✓ test/mcp-resources-prompts.test.ts (4 tests) 26ms
+ ✓ test/clipboard-image.test.ts (6 tests) 39ms
+ ✓ test/lazy-omission.test.ts (60 tests) 40ms
+ ✓ test/fusion/fusion-user-message.test.ts (2 tests) 37ms
+stdout | test/mcp-defer.test.ts > createMcpExtension registration wiring > registers tools for a server that missed the boot connect budget once it comes up
+✓ small (http://localhost:0/small)
+    tools: ping
+✓ late (http://localhost:0/big)
+    tools: later
+
+stdout | test/mcp-defer.test.ts > createMcpExtension registration wiring > leaves the active surface untouched for a boot-connected server with no deferral
+✓ small (http://localhost:0/small)
+    tools: ping
+
+ ✓ test/mcp-defer.test.ts (10 tests) 46ms
+ ✓ test/agent-session-auto-compaction-multipass.test.ts (1 test) 46ms
+ ✓ test/agent-types.test.ts (6 tests) 31ms
+ ✓ test/interactive-mode-status.test.ts (30 tests) 27ms
+ ✓ test/mcp-manager-emit-after-dispose.test.ts (1 test) 47ms
+ ✓ test/session-selector-path-delete.test.ts (7 tests) 37ms
+ ✓ test/suite/regressions/2023-queued-slash-command-followup.test.ts (1 test) 41ms
+ ✓ test/suite/regressions/3982-message-end-cost-override.test.ts (1 test) 42ms
+ ✓ test/messaging/bus.test.ts (18 tests) 28ms
+ ✓ test/url-schemes-conflict.test.ts (9 tests) 33ms
+ ✓ test/openai-compatible-presets.test.ts (12 tests) 43ms
+ ✓ test/abort-race.test.ts (6 tests) 28ms
+ ✓ test/activity-turn-snapshot.test.ts (2 tests) 29ms
+ ✓ test/settings-manager-bug.test.ts (4 tests) 30ms
+ ✓ test/goal-overlay.test.ts (13 tests) 36ms
+ ✓ test/suite/regressions/3688-tree-cancel-compacting.test.ts (1 test) 45ms
+ ✓ test/cache-prefix-diagnostics.test.ts (3 tests) 61ms
+ ✓ test/presend-overflow-reestimate.test.ts (1 test) 34ms
+ ✓ test/stale-read-warning.test.ts (8 tests) 31ms
+ ✓ test/coordinator-agent-types.test.ts (6 tests) 32ms
+ ✓ test/clipboard-image-bmp-conversion.test.ts (1 test) 34ms
+ ✓ test/suite/regressions/model-selector-provider-headers.test.ts (1 test) 30ms
+ ✓ test/messaging/agent-session-messaging.test.ts (1 test) 29ms
+ ✓ test/coordinator-resume-disk.test.ts (3 tests) 31ms
+ ✓ test/block-images.test.ts (8 tests) 30ms
+ ✓ test/tool-prepare-arguments.test.ts (22 tests) 33ms
+ ✓ test/memory-discovery.test.ts (7 tests) 26ms
+ ✓ test/edit-near-miss.test.ts (21 tests) 30ms
+ ✓ test/edit-diff-base-cache.test.ts (4 tests) 29ms
+ ✓ test/learned-error-store.test.ts (12 tests) 23ms
+ ✓ test/frequent-files.test.ts (29 tests) 28ms
+ ✓ test/activity-line-component.test.ts (17 tests) 25ms
+ ✓ test/mcp-tools.test.ts (8 tests) 19ms
+ ✓ test/clipboard.test.ts (5 tests) 14ms
+ ✓ test/agent-session-engineering-style.test.ts (2 tests) 36ms
+ ✓ test/messaging/message-tool.test.ts (8 tests) 20ms
+ ✓ test/dry-run.test.ts (5 tests) 21ms
+ ✓ test/assistant-message-smoothing.test.ts (11 tests) 25ms
+ ✓ test/fusion/fusion-live.test.ts (10 tests) 24ms
+ ✓ test/prompt-templates.test.ts (82 tests) 31ms
+ ✓ test/read-guard-extension.test.ts (13 tests) 31ms
+ ✓ test/assistant-message-deliverable.test.ts (11 tests) 24ms
+ ✓ test/footer-width.test.ts (2 tests) 22ms
+ ✓ test/mcp-cli.test.ts (9 tests) 28ms
+ ✓ test/truncate-to-width.test.ts (6 tests) 19ms
+ ✓ test/ast-grep-napi-backend.test.ts (5 tests) 26ms
+ ✓ test/json-crush-bash.test.ts (5 tests) 23ms
+ ✓ test/fusion/orchestration-facet.test.ts (1 test) 27ms
+ ✓ test/suite/regressions/model-selector-error-banner.test.ts (1 test) 22ms
+ ✓ test/ask-picker.test.ts (13 tests) 24ms
+ ✓ test/fusion/settings.test.ts (4 tests) 22ms
+ ✓ test/footer-stats-cache.test.ts (12 tests) 24ms
+ ✓ test/read-delta.test.ts (7 tests) 21ms
+ ✓ test/footer.test.ts (13 tests) 20ms
+ ✓ test/hindsight-bank.test.ts (11 tests | 2 skipped) 19ms
+ ✓ test/atomic-write.test.ts (4 tests) 18ms
+ ✓ test/erasable-syntax-precondition.test.ts (9 tests) 20ms
+ ✓ test/coordinator-scoped-hindsight.test.ts (3 tests) 22ms
+ ✓ test/dap/dap-client-transport-error.test.ts (1 test) 16ms
+ ✓ test/forget-tool.test.ts (9 tests) 16ms
+ ✓ test/hindsight-bank-scope.test.ts (6 tests) 17ms
+ ✓ test/recall-tool-output.test.ts (6 tests) 23ms
+ ✓ test/coordinator-resume.test.ts (4 tests) 24ms
+ ✓ test/oauth-selector.test.ts (6 tests) 20ms
+ ✓ test/tree-selector.test.ts (16 tests) 20ms
+ ✓ test/welcome-box.test.ts (11 tests) 18ms
+ ✓ test/tool-wire-schema.test.ts (3 tests) 12ms
+ ✓ test/assistant-message.test.ts (4 tests) 18ms
+ ✓ test/paths.test.ts (12 tests) 12ms
+ ✓ test/read-anchors-gate.test.ts (4 tests) 17ms
+ ✓ test/coordinator-async-reinject.test.ts (5 tests) 19ms
+ ✓ test/session-manager/tree-traversal.test.ts (30 tests) 24ms
+ ✓ test/import-grounding.test.ts (65 tests) 10ms
+ ✓ test/json-crush-read.test.ts (3 tests) 13ms
+ ✓ test/tool-execution-activity.test.ts (4 tests) 13ms
+ ✓ test/hindsight-bank-perscope.test.ts (2 tests) 10ms
+ ✓ test/frontmatter.test.ts (8 tests) 16ms
+ ✓ test/mcp-oauth-401.test.ts (1 test) 20ms
+ ✓ test/edit-tool-legacy-input.test.ts (12 tests) 16ms
+ ✓ test/token-savings.test.ts (9 tests) 20ms
+ ✓ test/version-check.test.ts (6 tests) 12ms
+ ✓ test/activity-spacing.test.ts (2 tests) 27ms
+ ✓ test/plan-mode-utils.test.ts (33 tests) 8ms
+ ✓ test/mcp-oauth.test.ts (6 tests) 15ms
+ ✓ test/deferred-output-store.test.ts (6 tests) 12ms
+ ✓ test/assistant-reading-width.test.ts (4 tests) 16ms
+ ✓ test/user-message.test.ts (4 tests) 16ms
+ ✓ test/mcp-sse-transport.test.ts (2 tests) 16ms
+ ✓ test/system-prompt.test.ts (20 tests) 16ms
+ ✓ test/messaging/responder.test.ts (7 tests) 9ms
+ ✓ test/package-manager-ssh.test.ts (8 tests) 17ms
+ ✓ test/grep-abort-during-setup.test.ts (2 tests) 12ms
+ ✓ test/edit-precondition-malformed.test.ts (3 tests) 9ms
+ ✓ test/t1-navigation-suggestions.test.ts (4 tests) 12ms
+ ✓ test/path-utils.test.ts (16 tests) 13ms
+ ✓ test/messaging/coordinator-messaging.test.ts (1 test) 9ms
+ ✓ test/session-manager/custom-session-id.test.ts (7 tests) 8ms
+ ✓ test/theme-export.test.ts (2 tests) 9ms
+ ✓ test/context-files.test.ts (5 tests) 13ms
+ ✓ test/compaction-summary-reasoning.test.ts (7 tests) 9ms
+ ✓ test/plan-tool.test.ts (17 tests) 10ms
+ ✓ test/mcp-config-files.test.ts (4 tests) 10ms
+ ✓ test/subagent-guards.test.ts (5 tests) 12ms
+ ✓ test/session-selector-rename.test.ts (3 tests) 16ms
+ ✓ test/mcp-sse-parse-cancel.test.ts (7 tests) 12ms
+ ✓ test/fusion/cli-runner.test.ts (25 tests) 11ms
+ ✓ test/living-repo-map.test.ts (12 tests) 13ms
+ ✓ test/read-directory.test.ts (5 tests) 12ms
+ ✓ test/message-shell.test.ts (25 tests) 13ms
+ ✓ test/prune-token-economy.test.ts (11 tests) 14ms
+ ✓ test/edit-v2-mtime-store.test.ts (1 test) 9ms
+ ✓ src/core/tool-error-hint-rules.test.ts (24 tests) 13ms
+ ✓ test/grounding-guard.test.ts (30 tests) 6ms
+ ✓ test/keybindings-migration.test.ts (3 tests) 13ms
+ ✓ test/image-resize-callers.test.ts (2 tests) 12ms
+ ✓ test/bash-execution-width.test.ts (3 tests) 10ms
+ ✓ test/coordinator-continue.test.ts (4 tests) 10ms
+ ✓ test/json-crush.test.ts (13 tests) 9ms
+ ✓ test/secret-redactor.test.ts (41 tests) 12ms
+ ✓ test/interactive-mode-ticker-leak.test.ts (3 tests) 11ms
+ ✓ test/watchpoint-bisect.test.ts (10 tests) 8ms
+ ✓ test/session-cwd.test.ts (3 tests) 9ms
+ ✓ test/web-search-retry.test.ts (3 tests) 9ms
+stdout | test/json-crush-bench.test.ts > json-crush token benchmark (phase 3 sizing) > reduces tokens vs the blind head-cut: gh api issues (array 400)
+[bench] gh api issues (array 400): 79KB | original 24549 tok | read head-cut(50KB) 15516 tok | crushed 427 tok | -98.3% vs original, -97.2% vs blind head-cut
+
+stdout | test/json-crush-bench.test.ts > json-crush token benchmark (phase 3 sizing) > reduces tokens vs the blind head-cut: kubectl pods (items[] 400)
+[bench] kubectl pods (items[] 400): 36KB | original 11435 tok | read head-cut(50KB) 11435 tok | crushed 251 tok | -97.8% vs original, -97.8% vs blind head-cut
+
+ ✓ test/json-crush-bench.test.ts (2 tests) 14ms
+ ✓ test/ansi-utils.test.ts (5 tests) 6ms
+ ✓ test/read-outline.test.ts (3 tests) 6ms
+ ✓ test/restore-sandbox-env.test.ts (3 tests) 12ms
+ ✓ test/tool-schema-no-accents.test.ts (65 tests) 5ms
+ ✓ test/todo-manager.test.ts (13 tests) 8ms
+ ✓ test/chrome-launcher.test.ts (10 tests) 6ms
+ ✓ test/find-symbol.test.ts (2 tests) 9ms
+ ✓ test/debug-verify.test.ts (13 tests) 10ms
+ ✓ test/resilience/stream-idle-timeout.resilience.test.ts (2 tests) 8ms
+ ✓ test/compaction-summary-frame.test.ts (17 tests) 9ms
+ ✓ test/prune-store-put-throws.test.ts (1 test) 10ms
+ ✓ test/hindsight-tools-scope.test.ts (8 tests) 9ms
+ ✓ test/session-manager/labels.test.ts (8 tests) 10ms
+ ✓ test/suite/regressions/4167-thinking-toggle-pending-tool-render.test.ts (2 tests) 12ms
+ ✓ test/footer-extension-status.test.ts (7 tests) 8ms
+ ✓ test/element-to-source.test.ts (10 tests) 8ms
+ ✓ test/spinner-cadence.test.ts (3 tests) 9ms
+ ✓ test/bash-command-row.test.ts (14 tests) 8ms
+ ✓ test/engineering-styles.test.ts (11 tests) 7ms
+ ✓ test/fusion/judge.test.ts (6 tests) 10ms
+ ✓ test/theme-detection.test.ts (7 tests) 8ms
+ ✓ test/args.test.ts (64 tests) 7ms
+ ✓ test/tool-call-feedback.test.ts (22 tests) 7ms
+ ✓ test/rpc-jsonl.test.ts (4 tests) 6ms
+ ✓ test/model-resolver.test.ts (31 tests) 6ms
+ ✓ test/git-ssh-url.test.ts (9 tests) 4ms
+ ✓ test/argument-prep.test.ts (23 tests) 7ms
+ ✓ test/permissions-checker.test.ts (41 tests) 7ms
+ ✓ test/erasable-syntax-grounding.test.ts (28 tests) 5ms
+ ✓ test/stagnation.test.ts (27 tests) 5ms
+ ✓ test/goal-manager.test.ts (17 tests) 5ms
+ ✓ test/destructive-command-guard.test.ts (16 tests) 7ms
+ ✓ test/tool-feedback-settings.test.ts (18 tests) 7ms
+ ✓ test/activity-stacker.test.ts (9 tests) 9ms
+ ✓ test/refactor-transaction.test.ts (16 tests) 6ms
+done
+ ✓ test/print-mode.test.ts (3 tests) 6ms
+ ✓ test/tool-call-stats.test.ts (25 tests) 7ms
+ ✓ test/session-manager/build-context.test.ts (14 tests) 7ms
+ ✓ test/tool-discovery.test.ts (15 tests) 7ms
+ ✓ test/task-rigor.test.ts (9 tests) 9ms
+ ✓ test/permissions-matcher.test.ts (12 tests) 5ms
+ ✓ test/json-crush-prune.test.ts (2 tests) 4ms
+ ✓ test/goal-complete-gate.test.ts (7 tests) 7ms
+ ✓ test/context-live-prune.test.ts (5 tests) 7ms
+ ✓ test/repo-map.test.ts (1 test) 7ms
+ ✓ test/path-grounding.test.ts (15 tests) 8ms
+ ✓ test/session-manager/save-entry.test.ts (1 test) 6ms
+ ✓ src/core/built-ins/learned-error-guard-extension.test.ts (8 tests) 4ms
+ ✓ test/bash-grounding.test.ts (10 tests) 5ms
+ ✓ test/chrome-devtools-tool.test.ts (8 tests) 8ms
+ ✓ test/repair-note-policy.test.ts (7 tests) 5ms
+ ✓ test/symbol-oom.test.ts (4 tests) 6ms
+ ✓ test/tool-call-stats-repeating-pattern.test.ts (9 tests) 5ms
+ ✓ test/theme-context-usage-color.test.ts (5 tests) 5ms
+ ✓ test/compaction-delta-serialize.test.ts (3 tests) 3ms
+ ✓ test/t1-edit-v2-error-hints.test.ts (4 tests) 4ms
+ ✓ test/interactive-mode-compaction.test.ts (1 test) 6ms
+ ✓ test/preview-queue.test.ts (7 tests) 6ms
+ ✓ test/list-declarations.test.ts (4 tests) 4ms
+ ✓ test/file-digests.test.ts (6 tests) 7ms
+ ✓ test/test-summary.test.ts (8 tests) 4ms
+ ✓ test/interactive-mode-anthropic-warning.test.ts (4 tests) 3ms
+ ✓ test/render-mermaid-caps.test.ts (3 tests) 5ms
+ ✓ test/tool-activity.test.ts (7 tests) 3ms
+ ✓ test/context-thinking-cap.test.ts (4 tests) 3ms
+ ✓ test/todo-cadence.test.ts (21 tests) 4ms
+ ✓ test/interactive-mode-suspend.test.ts (3 tests | 2 skipped) 5ms
+ ✓ test/t3-retry-reason.test.ts (5 tests) 4ms
+ ✓ test/failure-summary.test.ts (4 tests) 4ms
+ ✓ test/pending-checks.test.ts (5 tests) 4ms
+ ✓ test/patch-audit.test.ts (7 tests) 4ms
+ ✓ test/rpc-client-clone.test.ts (1 test) 4ms
+ ✓ test/cache-stats.test.ts (7 tests) 5ms
+ ✓ test/tool-activity-family.test.ts (22 tests) 5ms
+ ✓ test/session-selector-search.test.ts (11 tests) 4ms
+ ✓ test/dynamic-border.test.ts (5 tests) 6ms
+ ✓ test/pattern-grounding.test.ts (15 tests) 5ms
+ ✓ test/estimate-wire-tokens.test.ts (5 tests) 5ms
+ ✓ test/surrogate.test.ts (7 tests) 4ms
+ ✓ test/messaging/relay.test.ts (2 tests) 2ms
+ ✓ src/core/tool-rewrite-windows.test.ts (16 tests) 5ms
+ ✓ test/settings-tool-activity.test.ts (13 tests) 5ms
+ ✓ test/ask-tool.test.ts (8 tests) 4ms
+ ✓ test/code-mode-harness-dispatcher.test.ts (5 tests) 3ms
+ ✓ test/find-root-empty-line.test.ts (1 test) 3ms
+ ✓ test/export-html-whitespace.test.ts (3 tests) 4ms
+ ✓ test/compaction-token-estimate.test.ts (11 tests) 4ms
+ ✓ test/ttsr.test.ts (11 tests) 4ms
+ ✓ src/core/cross-error.test.ts (10 tests) 5ms
+ ✓ test/coordinator-registry.test.ts (10 tests) 4ms
+ ✓ src/modes/interactive/diagnostics-summary.test.ts (2 tests) 5ms
+ ✓ test/collapse-repeated-lines.test.ts (8 tests) 3ms
+ ✓ test/export-html-xss.test.ts (8 tests) 4ms
+ ✓ test/token-governor.test.ts (4 tests) 4ms
+ ✓ test/frequent-files-settings.test.ts (7 tests) 4ms
+ ✓ test/todo-tool.test.ts (5 tests) 6ms
+ ✓ test/slash-commands.test.ts (23 tests) 5ms
+ ✓ test/skills-index-mode.test.ts (2 tests) 3ms
+ ✓ test/hashline-crlf-newtext.test.ts (1 test) 4ms
+ ✓ test/color-ease.test.ts (3 tests) 4ms
+ ✓ test/regex-budget.test.ts (2 tests) 3ms
+ ✓ test/bash-cwd-tilde.test.ts (5 tests) 3ms
+ ✓ test/coordinator-depth.test.ts (7 tests) 3ms
+ ✓ test/calc-unary-exponent.test.ts (6 tests) 3ms
+ ✓ test/ls-broken-symlink.test.ts (1 test) 4ms
+ ✓ test/user-input-bus.test.ts (4 tests) 3ms
+ ✓ test/async-delivery.test.ts (3 tests) 2ms
+ ✓ test/compaction-serialization.test.ts (3 tests) 4ms
+ ✓ test/goal-complete-tool.test.ts (3 tests) 2ms
+ ✓ test/fusion/cycle.test.ts (1 test) 3ms
+ ✓ test/bash-activity.test.ts (6 tests) 5ms
+ ✓ test/compaction-extensions-example.test.ts (2 tests) 2ms
+ ✓ test/ask-schema-trim.test.ts (1 test) 3ms
+ ✓ test/trigger-compact-extension.test.ts (1 test) 5ms
+ ✓ test/hashline-after-before-error.test.ts (2 tests) 2ms
+ ✓ test/async-deliver-routing.test.ts (3 tests) 7ms
+ ✓ test/session-manager/migration.test.ts (2 tests) 2ms
+ ✓ test/spinner-ticker.test.ts (3 tests) 3ms
+ ✓ test/claude-code-version.test.ts (3 tests) 2ms
+ ✓ test/initial-message.test.ts (3 tests) 2ms
+ ✓ test/arg-summary.test.ts (3 tests) 2ms
+ ✓ test/chrome-inline-command.test.ts (7 tests) 4ms
+ ✓ test/export-html-skill-block.test.ts (4 tests) 3ms
+ ✓ test/assistant-message-visible-text.test.ts (3 tests) 3ms
+ ✓ test/t2-print-provenance.test.ts (4 tests) 2ms
+ ✓ test/pi-user-agent.test.ts (1 test) 3ms
+ ✓ test/messaging/settings.test.ts (2 tests) 3ms
+ ✓ test/lsp/wait-project-loaded-leak.test.ts (1 test) 2ms
+ ✓ test/bash-prepare-arguments.test.ts (4 tests) 4ms
+ ✓ test/boot-outline.test.ts (2 tests) 2ms
+ ↓ test/rpc.test.ts (14 tests | 14 skipped)
+ ✓ test/search-skills.test.ts (2 tests) 2ms
+ ↓ test/chrome-devtools-e2e.test.ts (4 tests | 4 skipped)
+ ✓ test/t1-read-dedupe-clear.test.ts (2 tests) 2ms
+ ↓ test/agent-session-branching.test.ts (3 tests | 3 skipped)
+ ↓ test/agent-session-compaction.test.ts (5 tests | 5 skipped)
+ ↓ test/agent-session-tree-navigation.test.ts (10 tests | 10 skipped)
+ ↓ test/compaction-extensions.test.ts (8 tests | 8 skipped)
+
+ Test Files  392 passed | 6 skipped (398)
+      Tests  3603 passed | 52 skipped (3655)
+   Start at  03:04:47
+   Duration  32.33s (transform 6.36s, setup 0ms, collect 254.70s, tests 88.85s, environment 67ms, prepare 35.25s)
+
+✅ Pre-push checks passed!
+To https://github.com/thiagovelsa/Pit.git
+   acb876f04..2c1bb0dd6  main -> main
+Running full check (lint, types, tests) before push...
+
+> pi-monorepo@0.0.8 check
+> node scripts/check-parallel.mjs
+
+
+=== biome ===
+Checked 1081 files in 524ms. No fixes applied.
+
+=== surrogate-slice ===
+surrogate-slice: clean (4 source roots)
+
+=== token-bench ===
+token-economy gate ok (20 exact, 5 min, 2 max)
+
+=== vitest ===
+
+> @pit/coding-agent@0.75.3 test
+> vitest --run
+
+
+ RUN  v3.2.4 C:/PiTest/packages/coding-agent
+
+piped-json-payload
+ ✓ test/footer-data-provider.test.ts (8 tests) 2265ms
+   ✓ FooterDataProvider reftable branch detection > does not notify listeners when reftable updates keep the same branch  519ms
+   ✓ FooterDataProvider reftable branch detection > debounces rapid reftable updates into a single async refresh  1179ms
+   ✓ FooterDataProvider reftable branch detection > updates the cached branch when the reftable directory changes  528ms
+ ✓ test/config.test.ts (14 tests | 1 skipped) 2259ms
+   ✓ detectInstallMethod > self-updates npm installs from custom prefixes  385ms
+   ✓ detectInstallMethod > self-updates renamed packages from the current install prefix  392ms
+   ✓ detectInstallMethod > self-update respects configured npmCommand  397ms
+   ✓ detectInstallMethod > self-update treats empty npmCommand as unset  435ms
+   ✓ detectInstallMethod > quotes npm self-update display paths  398ms
+ ✓ test/eval-kernel-runaway.test.ts (6 tests) 2336ms
+   ✓ eval kernel runaway guards > javascript: synchronous while(true){} is aborted by the vm timeout, not hung  1569ms
+ ✓ test/model-registry.test.ts (66 tests) 2455ms
+   ✓ ModelRegistry > API key resolution > request-time resolution > failed commands are retried  476ms
+ ✓ test/eval-kernel-orphan-tree.test.ts (1 test) 2947ms
+   ✓ eval kernel orphan child teardown > python: timeout kills child processes spawned by user code (no orphans)  2946ms
+ ✓ test/stdout-cleanliness.test.ts (2 tests) 3750ms
+   ✓ stdout cleanliness E2E smoke > keeps stdout empty for --mode json --help while routing help to stderr  3747ms
+ ✓ test/package-manager.test.ts (100 tests) 3722ms
+ ✓ test/lsp/lsp-shutdown-warmup.test.ts (1 test) 1584ms
+   ✓ lsp shutdown vs in-flight warmup (#26) > shutdownClientsForCwd kills a server still mid-initialize  1584ms
+ ✓ test/auth-storage.test.ts (29 tests) 1912ms
+   ✓ AuthStorage > API key resolution > caching > clearConfigValueCache allows command to run again  385ms
+ ✓ test/resolve-config-value-ttl.test.ts (4 tests) 1377ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > clearConfigValueCache forces a fresh spawn  358ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > a TTL of 0 disables the memo (fresh every call)  387ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > never memoises a failing command (no sticky auth outage)  450ms
+ ✓ test/git-update.test.ts (11 tests) 4703ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > does not pull new remote commits into the installed checkout  325ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > does not advance past multiple remote commits  557ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > leaves a detached checkout (no upstream) untouched  505ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react when remote history is rewritten  478ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react when remote drops the installed commit  640ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react to a complete history rewrite  818ms
+   ✓ DefaultPackageManager git sources (local-only mode) > pinned sources > never updates a pinned git source (with @ref)  372ms
+   ✓ DefaultPackageManager git sources (local-only mode) > scope-aware update > does not create a project-scope install when source is only registered globally  309ms
+ ✓ test/bash-auto-background.test.ts (10 tests) 4193ms
+   ✓ bash auto-background: promote on threshold instead of kill > promotes a long command (no timeout) to a tracked background job, returning a handle + partial output  1033ms
+   ✓ bash auto-background: promote on threshold instead of kill > an explicit hard timeout is honored as a KILL (idle-real death), never promoted  558ms
+   ✓ bash auto-background: promote on threshold instead of kill > end-to-end through the bash tool: execute returns the 'promoted to background id=' message + partial output, no throw  1022ms
+   ✓ bash auto-background: promote on threshold instead of kill > WITHOUT autoBackground opt-in (the user `!` path), a long command is NOT silently detached — it runs to completion  668ms
+ ✓ test/pending-checks-gate.test.ts (4 tests) 2149ms
+   ✓ background-check guard > waits for a running check, then re-injects its failure  561ms
+   ✓ background-check guard > re-injects a 'still running' warning when the check never settles in time  1043ms
+   ✓ background-check guard > stays silent when the backgrounded check finished green  529ms
+ ✓ test/verification.test.ts (21 tests) 1173ms
+   ✓ verification module > runCheckCommand > times out a hung command  676ms
+ ✓ test/suite/agent-session-runtime.test.ts (9 tests) 2355ms
+   ✓ AgentSessionRuntime characterization > emits session_before_switch and session_start for new and resume flows  380ms
+   ✓ AgentSessionRuntime characterization > updates the runtime session cwd on cross-cwd session replacement  381ms
+   ✓ AgentSessionRuntime characterization > restores model and thinking state from the destination session  395ms
+ ✓ test/suite/regressions/2791-fswatch-error-crash.test.ts (1 test) 1040ms
+   ✓ issue #2791 fs.watch error event crashes process > process should survive an error event on the theme FSWatcher  1038ms
+ ✓ test/tool-discovery-default-surface.test.ts (9 tests) 1500ms
+ ✓ test/tools.test.ts (71 tests | 1 skipped) 2671ms
+   ✓ Coding Agent Tools > bash tool > should respect timeout  1252ms
+ ✓ test/bash-close-hang-windows.test.ts (2 tests) 1080ms
+   ✓ Windows child-process close handling > executeBash resolves after the shell exits even if inherited stdio handles stay open  538ms
+   ✓ Windows child-process close handling > bash tool resolves after the shell exits even if inherited stdio handles stay open  541ms
+ ✓ test/verification-gate.test.ts (8 tests) 1242ms
+ ✓ test/package-command-paths.test.ts (10 tests) 896ms
+ ✓ test/lsp/writethrough.test.ts (7 tests) 924ms
+   ✓ lsp writethrough — post-write diagnostics > does not re-append unchanged baseline diagnostics  327ms
+stderr | test/hooks-extension.test.ts > hooks-extension lifecycle events > respects the PreCompact hook timeout
+[hook] PreCompact/node "C:\\Users\\User\\AppData\\Local\\Temp\\pi-hookext-slow-1782626735784.js": exit -1
+
+ ✓ test/hooks-extension.test.ts (8 tests) 657ms
+ ✓ test/resource-loader.test.ts (20 tests) 3800ms
+   ✓ DefaultResourceLoader > noSkills option > should NOT load legacy skill dirs (.codex/.claude/…) when noSkills is true  441ms
+ ✓ test/dap/truncate-output.test.ts (5 tests) 791ms
+   ✓ truncateOutput — byte-identity vs reference > multi-byte UTF-8 crossing 1024-char slice boundaries matches the reference  520ms
+ ✓ test/lsp/lsp-hardening.test.ts (7 tests) 818ms
+   ✓ lsp hardening > does not return OK when diagnostics never publish a fresh result  330ms
+   ✓ lsp hardening > filters pre-existing diagnostics from post-write output  315ms
+ ✓ test/compaction-structural-only.test.ts (7 tests) 835ms
+ ✓ test/find-grep-git-and-postfilter.test.ts (23 tests) 773ms
+ ✓ test/suite/regressions/2860-replaced-session-context.test.ts (3 tests) 885ms
+   ✓ regression #2860: replaced session callbacks > supports withSession for switchSession  420ms
+ ✓ test/agent-session-runtime-events.test.ts (4 tests) 893ms
+   ✓ AgentSessionRuntime session lifecycle events > emits session_before_switch and session_start for new and resume flows  367ms
+ ✓ test/hooks-runner.test.ts (7 tests) 512ms
+ ✓ test/dry-run-cli.test.ts (5 tests) 4760ms
+   ✓ pi --dry-run > E2E smoke (tsx spawn) > blocked dry-run exits 1 through the real CLI entry  4282ms
+ ✓ test/extensions-runner.test.ts (35 tests) 760ms
+ ✓ test/rpc-prompt-response-semantics.test.ts (3 tests) 661ms
+   ✓ RPC prompt response semantics > emits one success response when prompt is queued during streaming  359ms
+ ✓ test/resilience/eval-output-cap.resilience.test.ts (3 tests) 569ms
+ ✓ test/suite/regressions/2781-skill-collision-precedence.test.ts (4 tests) 664ms
+ ✓ test/file-mutation-queue.test.ts (6 tests) 540ms
+ ✓ test/agent-session-dynamic-provider.test.ts (3 tests) 586ms
+ ✓ test/sdk-session-manager.test.ts (3 tests) 661ms
+ ✓ test/ask-picker-dist-smoke.test.ts (1 test) 461ms
+   ✓ ask-picker compiled dist (src↔dist drift guard) > never renders a line wider than the terminal  460ms
+ ✓ test/grep-fff-backend.test.ts (8 tests) 444ms
+ ✓ test/bash-abort-during-startup.test.ts (2 tests) 501ms
+ ✓ test/code-mode.test.ts (7 tests) 451ms
+ ✓ test/skills.test.ts (34 tests) 430ms
+   ✓ skills > loadSkills with options > should expand ~ in skillPaths  378ms
+ ✓ test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts (3 tests) 597ms
+ ✓ test/eval-kernel-cap-sentinel.test.ts (2 tests) 458ms
+ ✓ test/suite/tool-calling-eval/05-rewrite-registry.test.ts (14 tests) 528ms
+ ✓ test/agent-session-dynamic-tools.test.ts (3 tests) 602ms
+ ✓ test/resilience/bash-timeout-kill.resilience.test.ts (2 tests) 417ms
+   ✓ resilience: bash timeout → process.kill + observable diagnostic > (3) a command that blocks past its timeout is killed and records process.kill  329ms
+ ✓ test/dap/dap-client-socket.test.ts (2 tests) 434ms
+   ✓ DapClient socket-mode failure paths > kills the adapter process when the socket connect times out (no leak)  373ms
+ ✓ test/exec-command.test.ts (4 tests) 328ms
+ ✓ test/dap/dap-exited-outcome.test.ts (1 test) 309ms
+   ✓ DAP continue when 'exited' wins the race (#27) > reports terminated (not running) and surfaces the exit code  309ms
+ ✓ test/session-manager-durability.test.ts (6 tests) 290ms
+ ✓ test/recipe.test.ts (10 tests) 362ms
+ ✓ test/mcp-client.test.ts (23 tests) 372ms
+ ✓ test/lsp/lsp-tool.test.ts (28 tests) 277ms
+ ✓ test/suite/agent-session-retry-events.test.ts (14 tests) 381ms
+ ✓ test/agent-session-concurrent.test.ts (7 tests) 430ms
+ ✓ test/chrome-devtools-default-surface.test.ts (2 tests) 399ms
+ ✓ test/suite/regressions/2835-tools-allowlist-filters-extension-tools.test.ts (2 tests) 402ms
+ ✓ test/chrome-devtools-manager.test.ts (41 tests) 248ms
+ ✓ test/dap/debug.test.ts (10 tests) 242ms
+ ✓ test/test-harness.test.ts (15 tests) 277ms
+ ✓ test/extensions-discovery.test.ts (28 tests) 296ms
+ ✓ test/sdk-skills.test.ts (3 tests) 282ms
+ ✓ test/suite/tool-calling-eval/02-edit-near-miss-and-indent.test.ts (2 tests) 242ms
+ ✓ test/tool-execution-component.test.ts (36 tests) 234ms
+ ✓ test/agent-session-retry.test.ts (7 tests) 290ms
+ ✓ test/suite/tool-calling-eval/04-tool-call-stats.test.ts (1 test) 235ms
+ ✓ test/suite/tool-calling-eval/01-edit-aliases.test.ts (2 tests) 251ms
+ ✓ test/suite/agent-session-prompt.test.ts (14 tests) 260ms
+ ✓ test/suite/agent-session-bash-persistence.test.ts (8 tests) 240ms
+ ✓ test/syntax-highlight.test.ts (5 tests) 176ms
+ ✓ test/repo-map-byte-cap.test.ts (1 test) 183ms
+ ✓ test/nav-group-component.test.ts (16 tests) 207ms
+ ✓ test/activity-ticker-leak.test.ts (8 tests) 174ms
+ ✓ test/suite/agent-session-compaction.test.ts (13 tests) 228ms
+ ✓ test/cdp-client.test.ts (17 tests) 190ms
+ ✓ test/suite/regressions/3302-find-path-glob.test.ts (4 tests) 168ms
+ ✓ test/suite/regressions/2753-reload-stale-resource-settings.test.ts (1 test) 263ms
+ ✓ test/settings-manager.test.ts (29 tests) 152ms
+ ✓ test/mcp-stdio.test.ts (2 tests) 168ms
+ ✓ test/suite/agent-session-queue.test.ts (13 tests) 233ms
+ ✓ test/code-mode-tool.test.ts (4 tests) 124ms
+ ✓ test/suite/agent-session-model-extension.test.ts (10 tests) 178ms
+ ✓ test/dap/dap-stop-outcome-leak.test.ts (1 test) 107ms
+ ✓ test/edit-tool-no-full-redraw.test.ts (3 tests) 111ms
+ ✓ test/image-processing.test.ts (9 tests) 114ms
+ ✓ test/extensions-input-event.test.ts (8 tests) 166ms
+ ✓ test/coordinator-parent-refs.test.ts (1 test) 149ms
+ ✓ test/doom-loop-recovery.test.ts (3 tests) 128ms
+ ✓ test/agent-session-auto-compaction-queue.test.ts (6 tests) 130ms
+ ✓ test/tool-failure-budget.test.ts (6 tests) 133ms
+ ✓ test/doom-loop-escalation.test.ts (4 tests) 143ms
+ ✓ test/learned-error-runtime-persistence.test.ts (4 tests) 110ms
+ ✓ test/visual-gate.test.ts (3 tests) 133ms
+ ✓ test/agent-session-presend-overflow.test.ts (3 tests) 87ms
+ ✓ test/mtime-cache.test.ts (9 tests) 82ms
+ ✓ test/suite/regressions/1717-2113-agent-session-event-settlement.test.ts (2 tests) 99ms
+ ✓ test/preview-server.test.ts (9 tests) 79ms
+ ✓ test/resilience/persistence-ebusy.resilience.test.ts (2 tests) 100ms
+ ✓ test/suite/regressions/3303-find-nested-gitignore.test.ts (2 tests) 91ms
+ ✓ test/suite/agent-session-interrupt.test.ts (3 tests) 77ms
+ ✓ test/session-manager/file-operations.test.ts (17 tests) 63ms
+ ✓ test/skill-args-expansion.test.ts (2 tests) 58ms
+ ✓ test/agent-session-presend-wire.test.ts (2 tests) 64ms
+ ✓ test/suite/tool-calling-eval/07-memory-leak-bounds.test.ts (3 tests) 80ms
+ ✓ test/legacy-discovery.test.ts (6 tests) 44ms
+ ✓ test/read-streaming.test.ts (11 tests) 78ms
+ ✓ test/todo-cadence-integration.test.ts (3 tests) 97ms
+ ✓ test/suite/regressions/3616-settings-inmemory-reload.test.ts (3 tests) 108ms
+ ✓ test/goal-auto-continue.test.ts (3 tests) 89ms
+ ✓ test/suite/tool-discovery-activation.test.ts (3 tests) 108ms
+ ✓ test/fusion/orchestrator.test.ts (7 tests) 50ms
+ ✓ test/result-loop.test.ts (2 tests) 68ms
+ ✓ test/coordinator-spawn.test.ts (27 tests) 61ms
+ ✓ test/agent-session-stats.test.ts (4 tests) 107ms
+ ✓ test/compaction-modified-digests.test.ts (2 tests) 85ms
+ ✓ test/lsp/route-message.test.ts (5 tests) 49ms
+ ✓ test/compaction.test.ts (46 tests | 2 skipped) 64ms
+ ✓ test/resilience/crash-isolation.resilience.test.ts (2 tests) 87ms
+ ✓ test/suite/tool-calling-eval/06-learned-error-isolation.test.ts (2 tests) 79ms
+ ✓ test/cache-prefix-diagnostics.test.ts (3 tests) 83ms
+ ✓ test/mcp-manager-emit-after-dispose.test.ts (1 test) 36ms
+stdout | test/mcp-defer.test.ts > createMcpExtension registration wiring > registers tools for a server that missed the boot connect budget once it comes up
+✓ small (http://localhost:0/small)
+    tools: ping
+✓ late (http://localhost:0/big)
+    tools: later
+
+stdout | test/mcp-defer.test.ts > createMcpExtension registration wiring > leaves the active surface untouched for a boot-connected server with no deferral
+✓ small (http://localhost:0/small)
+    tools: ping
+
+ ✓ test/mcp-defer.test.ts (10 tests) 30ms
+ ✓ test/session-manager-persist-resilience.test.ts (4 tests) 51ms
+ ✓ test/agent-session-listener-isolation.test.ts (1 test) 63ms
+ ✓ test/project-config-context.test.ts (23 tests) 44ms
+ ✓ test/openai-compatible-presets.test.ts (12 tests) 42ms
+ ✓ test/clipboard-image.test.ts (6 tests) 39ms
+ ✓ test/session-info-modified-timestamp.test.ts (1 test) 52ms
+ ✓ test/todo-integration.test.ts (1 test) 50ms
+ ✓ test/agent-session-frequent-files.test.ts (3 tests) 44ms
+ ✓ test/clipboard-image-bmp-conversion.test.ts (1 test) 28ms
+ ✓ test/agent-session-auto-compaction-multipass.test.ts (1 test) 42ms
+ ✓ test/suite/regressions/3688-tree-cancel-compacting.test.ts (1 test) 40ms
+ ✓ test/lazy-omission.test.ts (60 tests) 39ms
+ ✓ test/session-selector-path-delete.test.ts (7 tests) 38ms
+ ✓ test/suite/regressions/3317-network-connection-lost-retry.test.ts (1 test) 43ms
+ ✓ test/suite/tool-calling-eval/03-unknown-tool-suggestion.test.ts (1 test) 47ms
+ ✓ test/url-schemes-conflict.test.ts (9 tests) 42ms
+ ✓ test/goal-overlay.test.ts (13 tests) 39ms
+ ✓ test/suite/regressions/3982-message-end-cost-override.test.ts (1 test) 39ms
+ ✓ test/agent-types.test.ts (6 tests) 37ms
+ ✓ test/prompt-templates.test.ts (82 tests) 26ms
+ ✓ test/suite/regressions/2023-queued-slash-command-followup.test.ts (1 test) 44ms
+ ✓ test/read-guard-extension.test.ts (13 tests) 31ms
+ ✓ test/suite/regressions/3686-session-name-event.test.ts (2 tests) 49ms
+ ✓ test/tool-prepare-arguments.test.ts (22 tests) 32ms
+ ✓ test/stale-read-warning.test.ts (8 tests) 35ms
+ ✓ test/fusion/fusion-user-message.test.ts (2 tests) 37ms
+ ✓ test/coordinator-agent-types.test.ts (6 tests) 36ms
+ ✓ test/agent-session-engineering-style.test.ts (2 tests) 52ms
+ ✓ test/edit-diff-base-cache.test.ts (4 tests) 33ms
+ ✓ test/edit-near-miss.test.ts (21 tests) 32ms
+ ✓ test/abort-race.test.ts (6 tests) 30ms
+ ✓ test/presend-overflow-reestimate.test.ts (1 test) 33ms
+ ✓ test/coordinator-resume-disk.test.ts (3 tests) 32ms
+ ✓ test/block-images.test.ts (8 tests) 32ms
+ ✓ test/settings-manager-bug.test.ts (4 tests) 36ms
+ ✓ test/messaging/bus.test.ts (18 tests) 29ms
+ ✓ test/suite/regressions/model-selector-provider-headers.test.ts (1 test) 27ms
+ ✓ test/todo-overlay.test.ts (8 tests) 43ms
+ ✓ test/memory-discovery.test.ts (7 tests) 27ms
+ ✓ test/frequent-files.test.ts (29 tests) 31ms
+ ✓ test/activity-turn-snapshot.test.ts (2 tests) 36ms
+ ✓ test/mcp-cli.test.ts (9 tests) 26ms
+ ✓ test/activity-line-component.test.ts (17 tests) 27ms
+ ✓ test/ast-grep-napi-backend.test.ts (5 tests) 21ms
+ ✓ test/mcp-resources-prompts.test.ts (4 tests) 22ms
+ ✓ test/assistant-message-smoothing.test.ts (11 tests) 21ms
+ ✓ test/footer-stats-cache.test.ts (12 tests) 26ms
+ ✓ test/assistant-message-deliverable.test.ts (11 tests) 23ms
+ ✓ test/activity-spacing.test.ts (2 tests) 21ms
+ ✓ test/messaging/agent-session-messaging.test.ts (1 test) 34ms
+ ✓ test/learned-error-store.test.ts (12 tests) 24ms
+ ✓ test/ask-picker.test.ts (13 tests) 25ms
+ ✓ test/fusion/fusion-live.test.ts (10 tests) 22ms
+ ✓ test/coordinator-resume.test.ts (4 tests) 23ms
+ ✓ test/recall-tool-output.test.ts (6 tests) 17ms
+ ✓ test/interactive-mode-status.test.ts (30 tests) 38ms
+ ✓ test/fusion/settings.test.ts (4 tests) 25ms
+ ✓ test/messaging/message-tool.test.ts (8 tests) 22ms
+ ✓ test/json-crush-bash.test.ts (5 tests) 25ms
+ ✓ test/fusion/orchestration-facet.test.ts (1 test) 27ms
+ ✓ test/dry-run.test.ts (5 tests) 22ms
+ ✓ test/footer-width.test.ts (2 tests) 17ms
+ ✓ test/suite/regressions/model-selector-error-banner.test.ts (1 test) 18ms
+ ✓ test/read-delta.test.ts (7 tests) 23ms
+ ✓ test/hindsight-bank.test.ts (11 tests | 2 skipped) 22ms
+ ✓ test/token-savings.test.ts (9 tests) 17ms
+ ✓ test/coordinator-scoped-hindsight.test.ts (3 tests) 22ms
+ ✓ test/truncate-to-width.test.ts (6 tests) 21ms
+ ✓ test/mcp-oauth-401.test.ts (1 test) 20ms
+ ✓ test/atomic-write.test.ts (4 tests) 17ms
+ ✓ test/session-manager/tree-traversal.test.ts (30 tests) 20ms
+ ✓ test/erasable-syntax-precondition.test.ts (9 tests) 19ms
+ ✓ test/footer.test.ts (13 tests) 20ms
+ ✓ test/hindsight-bank-scope.test.ts (6 tests) 15ms
+ ✓ test/tree-selector.test.ts (16 tests) 19ms
+ ✓ test/mcp-tools.test.ts (8 tests) 27ms
+ ✓ test/assistant-message.test.ts (4 tests) 15ms
+ ✓ test/frontmatter.test.ts (8 tests) 11ms
+ ✓ test/welcome-box.test.ts (11 tests) 17ms
+ ✓ test/package-manager-ssh.test.ts (8 tests) 17ms
+ ✓ test/coordinator-async-reinject.test.ts (5 tests) 20ms
+ ✓ test/forget-tool.test.ts (9 tests) 22ms
+ ✓ test/read-anchors-gate.test.ts (4 tests) 19ms
+ ✓ test/user-message.test.ts (4 tests) 15ms
+ ✓ test/mcp-oauth.test.ts (6 tests) 17ms
+ ✓ test/dap/dap-client-transport-error.test.ts (1 test) 21ms
+ ✓ test/oauth-selector.test.ts (6 tests) 26ms
+ ✓ test/session-selector-rename.test.ts (3 tests) 13ms
+ ✓ test/clipboard.test.ts (5 tests) 26ms
+ ✓ test/mcp-sse-transport.test.ts (2 tests) 13ms
+ ✓ test/assistant-reading-width.test.ts (4 tests) 12ms
+ ✓ test/edit-tool-legacy-input.test.ts (12 tests) 16ms
+ ✓ test/path-utils.test.ts (16 tests) 12ms
+ ✓ test/keybindings-migration.test.ts (3 tests) 10ms
+ ✓ test/system-prompt.test.ts (20 tests) 19ms
+ ✓ test/version-check.test.ts (6 tests) 10ms
+ ✓ test/paths.test.ts (12 tests) 15ms
+ ✓ src/core/tool-error-hint-rules.test.ts (24 tests) 10ms
+stdout | test/json-crush-bench.test.ts > json-crush token benchmark (phase 3 sizing) > reduces tokens vs the blind head-cut: gh api issues (array 400)
+[bench] gh api issues (array 400): 79KB | original 24549 tok | read head-cut(50KB) 15516 tok | crushed 427 tok | -98.3% vs original, -97.2% vs blind head-cut
+
+stdout | test/json-crush-bench.test.ts > json-crush token benchmark (phase 3 sizing) > reduces tokens vs the blind head-cut: kubectl pods (items[] 400)
+[bench] kubectl pods (items[] 400): 36KB | original 11435 tok | read head-cut(50KB) 11435 tok | crushed 251 tok | -97.8% vs original, -97.8% vs blind head-cut
+
+ ✓ test/json-crush-bench.test.ts (2 tests) 14ms
+ ✓ test/prune-token-economy.test.ts (11 tests) 10ms
+ ✓ test/secret-redactor.test.ts (41 tests) 8ms
+ ✓ test/message-shell.test.ts (25 tests) 11ms
+ ✓ test/json-crush-read.test.ts (3 tests) 12ms
+ ✓ test/living-repo-map.test.ts (12 tests) 13ms
+ ✓ test/restore-sandbox-env.test.ts (3 tests) 10ms
+ ✓ test/mcp-sse-parse-cancel.test.ts (7 tests) 7ms
+ ✓ test/deferred-output-store.test.ts (6 tests) 13ms
+ ✓ test/tool-wire-schema.test.ts (3 tests) 11ms
+ ✓ test/grep-abort-during-setup.test.ts (2 tests) 15ms
+ ✓ test/image-resize-callers.test.ts (2 tests) 10ms
+ ✓ test/subagent-guards.test.ts (5 tests) 14ms
+ ✓ test/t1-navigation-suggestions.test.ts (4 tests) 11ms
+ ✓ test/tool-execution-activity.test.ts (4 tests) 12ms
+ ✓ test/mcp-config-files.test.ts (4 tests) 8ms
+ ✓ test/read-directory.test.ts (5 tests) 14ms
+ ✓ test/fusion/cli-runner.test.ts (25 tests) 13ms
+ ✓ test/hindsight-bank-perscope.test.ts (2 tests) 12ms
+ ✓ test/session-manager/labels.test.ts (8 tests) 9ms
+ ✓ test/context-files.test.ts (5 tests) 15ms
+ ✓ test/plan-tool.test.ts (17 tests) 9ms
+ ✓ test/debug-verify.test.ts (13 tests) 13ms
+ ✓ test/import-grounding.test.ts (65 tests) 15ms
+ ✓ test/fusion/judge.test.ts (6 tests) 9ms
+ ✓ test/web-search-retry.test.ts (3 tests) 7ms
+ ✓ test/bash-execution-width.test.ts (3 tests) 11ms
+ ✓ test/prune-store-put-throws.test.ts (1 test) 8ms
+ ✓ test/edit-precondition-malformed.test.ts (3 tests) 11ms
+ ✓ test/json-crush.test.ts (13 tests) 9ms
+ ✓ test/task-rigor.test.ts (9 tests) 8ms
+ ✓ test/hindsight-tools-scope.test.ts (8 tests) 7ms
+ ✓ test/messaging/responder.test.ts (7 tests) 9ms
+ ✓ test/coordinator-continue.test.ts (4 tests) 14ms
+ ✓ test/compaction-summary-frame.test.ts (17 tests) 7ms
+ ✓ test/suite/regressions/4167-thinking-toggle-pending-tool-render.test.ts (2 tests) 8ms
+ ✓ test/spinner-cadence.test.ts (3 tests) 10ms
+ ✓ test/plan-mode-utils.test.ts (33 tests) 9ms
+ ✓ test/find-symbol.test.ts (2 tests) 9ms
+ ✓ test/watchpoint-bisect.test.ts (10 tests) 7ms
+ ✓ test/interactive-mode-ticker-leak.test.ts (3 tests) 9ms
+ ✓ test/todo-manager.test.ts (13 tests) 6ms
+ ✓ test/theme-export.test.ts (2 tests) 10ms
+ ✓ test/messaging/coordinator-messaging.test.ts (1 test) 13ms
+ ✓ test/edit-v2-mtime-store.test.ts (1 test) 12ms
+ ✓ test/compaction-summary-reasoning.test.ts (7 tests) 10ms
+ ✓ test/footer-extension-status.test.ts (7 tests) 7ms
+ ✓ test/element-to-source.test.ts (10 tests) 8ms
+ ✓ test/bash-command-row.test.ts (14 tests) 10ms
+ ✓ test/destructive-command-guard.test.ts (16 tests) 4ms
+ ✓ test/resilience/stream-idle-timeout.resilience.test.ts (2 tests) 5ms
+ ✓ test/session-manager/custom-session-id.test.ts (7 tests) 9ms
+ ✓ test/theme-detection.test.ts (7 tests) 5ms
+ ✓ test/path-grounding.test.ts (15 tests) 7ms
+ ✓ test/activity-stacker.test.ts (9 tests) 9ms
+ ✓ test/tool-call-stats.test.ts (25 tests) 6ms
+ ✓ test/chrome-devtools-tool.test.ts (8 tests) 8ms
+ ✓ test/tool-call-feedback.test.ts (22 tests) 8ms
+ ✓ test/session-cwd.test.ts (3 tests) 12ms
+ ✓ test/argument-prep.test.ts (23 tests) 6ms
+ ✓ test/permissions-checker.test.ts (41 tests) 10ms
+ ✓ test/tool-feedback-settings.test.ts (18 tests) 7ms
+ ✓ test/tool-discovery.test.ts (15 tests) 7ms
+ ✓ test/context-live-prune.test.ts (5 tests) 6ms
+ ✓ test/ansi-utils.test.ts (5 tests) 8ms
+ ✓ test/refactor-transaction.test.ts (16 tests) 7ms
+ ✓ test/session-manager/build-context.test.ts (14 tests) 9ms
+ ✓ test/args.test.ts (64 tests) 7ms
+ ✓ test/rpc-jsonl.test.ts (4 tests) 4ms
+ ✓ test/engineering-styles.test.ts (11 tests) 8ms
+ ✓ test/file-digests.test.ts (6 tests) 4ms
+ ✓ test/grounding-guard.test.ts (30 tests) 9ms
+ ✓ test/repo-map.test.ts (1 test) 7ms
+ ✓ test/preview-queue.test.ts (7 tests) 6ms
+ ✓ test/chrome-launcher.test.ts (10 tests) 10ms
+ ✓ test/goal-complete-gate.test.ts (7 tests) 5ms
+ ✓ test/erasable-syntax-grounding.test.ts (28 tests) 5ms
+ ✓ test/pattern-grounding.test.ts (15 tests) 4ms
+ ✓ test/read-outline.test.ts (3 tests) 10ms
+ ✓ test/model-resolver.test.ts (31 tests) 10ms
+ ✓ test/dynamic-border.test.ts (5 tests) 4ms
+ ✓ test/symbol-oom.test.ts (4 tests) 6ms
+ ✓ test/todo-tool.test.ts (5 tests) 4ms
+done
+ ✓ test/print-mode.test.ts (3 tests) 6ms
+ ✓ test/session-manager/save-entry.test.ts (1 test) 5ms
+ ✓ src/core/cross-error.test.ts (10 tests) 6ms
+ ✓ test/slash-commands.test.ts (23 tests) 3ms
+ ✓ test/async-deliver-routing.test.ts (3 tests) 4ms
+ ✓ test/bash-grounding.test.ts (10 tests) 5ms
+ ✓ test/cache-stats.test.ts (7 tests) 6ms
+ ✓ src/core/tool-rewrite-windows.test.ts (16 tests) 3ms
+ ✓ test/repair-note-policy.test.ts (7 tests) 3ms
+ ✓ test/goal-manager.test.ts (17 tests) 6ms
+ ✓ test/permissions-matcher.test.ts (12 tests) 3ms
+ ✓ test/tool-call-stats-repeating-pattern.test.ts (9 tests) 5ms
+ ✓ test/settings-tool-activity.test.ts (13 tests) 5ms
+ ✓ test/bash-activity.test.ts (6 tests) 3ms
+ ✓ test/tool-activity-family.test.ts (22 tests) 7ms
+ ✓ test/trigger-compact-extension.test.ts (1 test) 5ms
+ ✓ test/surrogate.test.ts (7 tests) 4ms
+ ✓ test/theme-context-usage-color.test.ts (5 tests) 4ms
+ ✓ test/estimate-wire-tokens.test.ts (5 tests) 3ms
+ ✓ test/t3-retry-reason.test.ts (5 tests) 4ms
+ ✓ test/stagnation.test.ts (27 tests) 6ms
+ ✓ src/modes/interactive/diagnostics-summary.test.ts (2 tests) 3ms
+ ✓ test/git-ssh-url.test.ts (9 tests) 7ms
+ ✓ test/render-mermaid-caps.test.ts (3 tests) 6ms
+ ✓ test/export-html-whitespace.test.ts (3 tests) 3ms
+ ✓ test/failure-summary.test.ts (4 tests) 3ms
+ ✓ test/rpc-client-clone.test.ts (1 test) 4ms
+ ✓ test/tool-schema-no-accents.test.ts (65 tests) 6ms
+ ✓ test/interactive-mode-compaction.test.ts (1 test) 8ms
+ ✓ test/json-crush-prune.test.ts (2 tests) 5ms
+ ✓ test/color-ease.test.ts (3 tests) 5ms
+ ✓ test/frequent-files-settings.test.ts (7 tests) 3ms
+ ✓ test/compaction-serialization.test.ts (3 tests) 4ms
+ ✓ test/pending-checks.test.ts (5 tests) 4ms
+ ✓ test/patch-audit.test.ts (7 tests) 5ms
+ ✓ test/ttsr.test.ts (11 tests) 5ms
+ ✓ test/coordinator-registry.test.ts (10 tests) 6ms
+ ✓ test/ask-tool.test.ts (8 tests) 8ms
+ ✓ test/hashline-crlf-newtext.test.ts (1 test) 2ms
+ ✓ test/todo-cadence.test.ts (21 tests) 4ms
+ ✓ test/t1-edit-v2-error-hints.test.ts (4 tests) 5ms
+ ✓ test/session-selector-search.test.ts (11 tests) 7ms
+ ✓ test/token-governor.test.ts (4 tests) 2ms
+ ✓ src/core/built-ins/learned-error-guard-extension.test.ts (8 tests) 3ms
+ ✓ test/test-summary.test.ts (8 tests) 4ms
+ ✓ test/export-html-xss.test.ts (8 tests) 3ms
+ ✓ test/compaction-token-estimate.test.ts (11 tests) 5ms
+ ✓ test/interactive-mode-suspend.test.ts (3 tests | 2 skipped) 5ms
+ ✓ test/skills-index-mode.test.ts (2 tests) 4ms
+ ✓ test/user-input-bus.test.ts (4 tests) 3ms
+ ✓ test/list-declarations.test.ts (4 tests) 4ms
+ ✓ test/ask-schema-trim.test.ts (1 test) 3ms
+ ✓ test/bash-prepare-arguments.test.ts (4 tests) 2ms
+ ✓ test/ls-broken-symlink.test.ts (1 test) 3ms
+ ✓ test/messaging/settings.test.ts (2 tests) 2ms
+ ✓ test/calc-unary-exponent.test.ts (6 tests) 3ms
+ ✓ test/spinner-ticker.test.ts (3 tests) 4ms
+ ✓ test/export-html-skill-block.test.ts (4 tests) 3ms
+ ✓ test/pi-user-agent.test.ts (1 test) 3ms
+ ✓ test/context-thinking-cap.test.ts (4 tests) 3ms
+ ✓ test/code-mode-harness-dispatcher.test.ts (5 tests) 3ms
+ ✓ test/collapse-repeated-lines.test.ts (8 tests) 2ms
+ ✓ test/compaction-delta-serialize.test.ts (3 tests) 3ms
+ ✓ test/coordinator-depth.test.ts (7 tests) 3ms
+ ✓ test/regex-budget.test.ts (2 tests) 2ms
+ ✓ test/bash-cwd-tilde.test.ts (5 tests) 3ms
+ ✓ test/hashline-after-before-error.test.ts (2 tests) 4ms
+ ✓ test/fusion/cycle.test.ts (1 test) 2ms
+ ✓ test/claude-code-version.test.ts (3 tests) 4ms
+ ✓ test/messaging/relay.test.ts (2 tests) 2ms
+ ✓ test/initial-message.test.ts (3 tests) 2ms
+ ✓ test/tool-activity.test.ts (7 tests) 4ms
+ ✓ test/async-delivery.test.ts (3 tests) 3ms
+ ✓ test/arg-summary.test.ts (3 tests) 2ms
+ ✓ test/chrome-inline-command.test.ts (7 tests) 3ms
+ ✓ test/assistant-message-visible-text.test.ts (3 tests) 2ms
+ ✓ test/compaction-extensions-example.test.ts (2 tests) 3ms
+ ✓ test/find-root-empty-line.test.ts (1 test) 3ms
+ ✓ test/session-manager/migration.test.ts (2 tests) 2ms
+ ✓ test/search-skills.test.ts (2 tests) 3ms
+ ✓ test/lsp/wait-project-loaded-leak.test.ts (1 test) 2ms
+ ✓ test/goal-complete-tool.test.ts (3 tests) 2ms
+ ↓ test/rpc.test.ts (14 tests | 14 skipped)
+ ✓ test/t2-print-provenance.test.ts (4 tests) 2ms
+ ✓ test/interactive-mode-anthropic-warning.test.ts (4 tests) 3ms
+ ✓ test/boot-outline.test.ts (2 tests) 2ms
+ ↓ test/chrome-devtools-e2e.test.ts (4 tests | 4 skipped)
+ ✓ test/t1-read-dedupe-clear.test.ts (2 tests) 2ms
+ ↓ test/agent-session-branching.test.ts (3 tests | 3 skipped)
+ ↓ test/agent-session-compaction.test.ts (5 tests | 5 skipped)
+ ↓ test/agent-session-tree-navigation.test.ts (10 tests | 10 skipped)
+ ↓ test/compaction-extensions.test.ts (8 tests | 8 skipped)
+
+ Test Files  392 passed | 6 skipped (398)
+      Tests  3603 passed | 52 skipped (3655)
+   Start at  03:05:28
+   Duration  32.46s (transform 6.23s, setup 0ms, collect 255.94s, tests 89.54s, environment 65ms, prepare 35.42s)
+
+✅ Pre-push checks passed!
+To https://github.com/thiagovelsa/PiTuned.git
+   acb876f04..2c1bb0dd6  main -> main

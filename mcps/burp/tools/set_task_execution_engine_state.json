@@ -1,0 +1,15 @@
+{
+  "name": "set_task_execution_engine_state",
+  "description": "Sets the state of Burp's task execution engine (paused or unpaused)",
+  "inputSchema": {
+    "properties": {
+      "running": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "running"
+    ],
+    "type": "object"
+  }
+}

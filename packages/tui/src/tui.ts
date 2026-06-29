@@ -1468,19 +1468,19 @@ export class TUI extends Container {
 		const fullRender = (clearMode: "none" | "all" | "screen"): void => {
 			this.fullRedrawCount += 1;
 			const clear = clearMode !== "none";
-			let buffer = "\x1b[?2026h"; // Begin synchronized output
+			const parts: string[] = ["\x1b[?2026h"];
 			if (clear) {
-				buffer += this.deleteKittyImages(this.previousKittyImageIds);
+				parts.push(this.deleteKittyImages(this.previousKittyImageIds));
 				// Always clear the visible screen + home; only "all" also clears the
 				// scrollback so a height-only repaint preserves rollable history.
-				buffer += clearMode === "all" ? "\x1b[2J\x1b[H\x1b[3J" : "\x1b[2J\x1b[H";
+				parts.push(clearMode === "all" ? "\x1b[2J\x1b[H\x1b[3J" : "\x1b[2J\x1b[H");
 			}
 			for (let i = 0; i < newLines.length; i++) {
-				if (i > 0) buffer += "\r\n";
-				buffer += this.clampLineToWidth(newLines[i], i, width, newLines);
+				if (i > 0) parts.push("\r\n");
+				parts.push(this.clampLineToWidth(newLines[i], i, width, newLines));
 			}
-			buffer += "\x1b[?2026l"; // End synchronized output
-			this.terminal.write(buffer);
+			parts.push("\x1b[?2026l");
+			this.terminal.write(parts.join(""));
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
 			// Reset max lines when clearing, otherwise track growth
@@ -1654,18 +1654,18 @@ export class TUI extends Container {
 
 		// Render from first changed line to end
 		// Build buffer with all updates wrapped in synchronized output
-		let buffer = "\x1b[?2026h"; // Begin synchronized output
-		buffer += this.deleteChangedKittyImages(firstChanged, lastChanged);
+		const parts: string[] = ["\x1b[?2026h"];
+		parts.push(this.deleteChangedKittyImages(firstChanged, lastChanged));
 		const prevViewportBottom = prevViewportTop + height - 1;
 		const moveTargetRow = appendStart ? firstChanged - 1 : firstChanged;
 		if (moveTargetRow > prevViewportBottom) {
 			const currentScreenRow = Math.max(0, Math.min(height - 1, hardwareCursorRow - prevViewportTop));
 			const moveToBottom = height - 1 - currentScreenRow;
 			if (moveToBottom > 0) {
-				buffer += `\x1b[${moveToBottom}B`;
+				parts.push(`\x1b[${moveToBottom}B`);
 			}
 			const scroll = moveTargetRow - prevViewportBottom;
-			buffer += "\r\n".repeat(scroll);
+			parts.push("\r\n".repeat(scroll));
 			prevViewportTop += scroll;
 			viewportTop += scroll;
 			hardwareCursorRow = moveTargetRow;
@@ -1674,20 +1674,20 @@ export class TUI extends Container {
 		// Move cursor to first changed line (use hardwareCursorRow for actual position)
 		const lineDiff = computeLineDiff(moveTargetRow);
 		if (lineDiff > 0) {
-			buffer += `\x1b[${lineDiff}B`; // Move down
+			parts.push(`\x1b[${lineDiff}B`);
 		} else if (lineDiff < 0) {
-			buffer += `\x1b[${-lineDiff}A`; // Move up
+			parts.push(`\x1b[${-lineDiff}A`);
 		}
 
-		buffer += appendStart ? "\r\n" : "\r"; // Move to column 0
+		parts.push(appendStart ? "\r\n" : "\r");
 
 		// Only render changed lines (firstChanged to lastChanged), not all lines to end
 		// This reduces flicker when only a single line changes (e.g., spinner animation)
 		const renderEnd = Math.min(lastChanged, newLines.length - 1);
 		for (let i = firstChanged; i <= renderEnd; i++) {
-			if (i > firstChanged) buffer += "\r\n";
-			buffer += "\x1b[2K"; // Clear current line
-			buffer += this.clampLineToWidth(newLines[i], i, width, newLines);
+			if (i > firstChanged) parts.push("\r\n");
+			parts.push("\x1b[2K");
+			parts.push(this.clampLineToWidth(newLines[i], i, width, newLines));
 		}
 
 		// Track where cursor ended up after rendering
@@ -1698,18 +1698,19 @@ export class TUI extends Container {
 			// Move to end of new content first if we stopped before it
 			if (renderEnd < newLines.length - 1) {
 				const moveDown = newLines.length - 1 - renderEnd;
-				buffer += `\x1b[${moveDown}B`;
+				parts.push(`\x1b[${moveDown}B`);
 				finalCursorRow = newLines.length - 1;
 			}
 			const extraLines = this.previousLines.length - newLines.length;
 			for (let i = newLines.length; i < this.previousLines.length; i++) {
-				buffer += "\r\n\x1b[2K";
+				parts.push("\r\n\x1b[2K");
 			}
 			// Move cursor back to end of new content
-			buffer += `\x1b[${extraLines}A`;
+			parts.push(`\x1b[${extraLines}A`);
 		}
 
-		buffer += "\x1b[?2026l"; // End synchronized output
+		parts.push("\x1b[?2026l");
+		const buffer = parts.join("");
 
 		if (process.env.PIT_TUI_DEBUG === "1") {
 			const debugDir = "/tmp/tui";

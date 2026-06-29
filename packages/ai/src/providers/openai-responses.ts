@@ -174,6 +174,11 @@ export const streamSimpleOpenAIResponses: StreamFunction<"openai-responses", Sim
 // Keyed by full config (apiKey + baseURL + headers) so credentials/headers are never stale.
 const clientCache = createClientCache<OpenAI>();
 
+/** Test-only: clear the client cache so fetch mocks do not leak across cases. */
+export function __resetOpenAIResponsesClientCacheForTests(): void {
+	clientCache.clear();
+}
+
 function createClient(
 	model: Model<"openai-responses">,
 	apiKey?: string,

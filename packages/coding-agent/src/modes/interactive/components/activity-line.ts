@@ -5,7 +5,17 @@ import { type ThemeColor, theme } from "../theme/theme.ts";
 import { clampBashCommandRow } from "./bash-command-row.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
-import { capErrorPreview, diffStat, glyphFor, verbFor } from "./tool-activity.ts";
+import {
+	capDiffPreview,
+	capErrorPreview,
+	diffStat,
+	EDIT_EXPANDED_MAX_LINES,
+	EDIT_SUCCESS_PREVIEW_LINES,
+	glyphFor,
+	hasEditDiff,
+	isEditFamilyTool,
+	verbFor,
+} from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 /** Max width of a derived agent label (from the task prompt). */
@@ -41,12 +51,17 @@ export class ActivityLineComponent extends Container {
 	// children may animate or stream) always recompute.
 	private linesCache: string[] | null = null;
 	private linesCacheKey = "";
+	private liveEditBodyCache: string[] | null = null;
+	private liveEditBodyKey = "";
 	// Sequence number for an unnamed `task` agent (assigned by ActivityStacker,
 	// per turn). 0 = not a task / unassigned.
 	private taskOrdinal = 0;
 	// Count of identical consecutive actions folded into this one line. >1 renders
 	// a muted `×N` suffix (e.g. `Updated todos ×4`) instead of stacking N rows.
 	private count = 1;
+	// Accumulated diffstat across coalesced edits to the same target.
+	private statAdded = 0;
+	private statRemoved = 0;
 
 	constructor(ui: TUI) {
 		super();
@@ -58,10 +73,28 @@ export class ActivityLineComponent extends Container {
 		this.exec = exec;
 		this.taskOrdinal = taskOrdinal;
 		this.linesCache = null;
+		this.liveEditBodyCache = null;
 		this.targetCache = null;
+		this.statAdded = 0;
+		this.statRemoved = 0;
+		this.absorbDiffStat(exec);
 		exec.setActivityChild(true);
 		if (exec.getActivityState() === "pending") this.ensureTicker();
 		this.ui.requestRender();
+	}
+
+	private absorbDiffStat(exec: ToolExecutionComponent): void {
+		const { added, removed } = diffStat(exec.getResultDetails()?.diff);
+		this.statAdded += added;
+		this.statRemoved += removed;
+	}
+
+	/** Live diffstat for a single action; accumulated totals when coalesced (×N). */
+	private editDiffStat(): { added: number; removed: number } {
+		if (this.count > 1) {
+			return { added: this.statAdded, removed: this.statRemoved };
+		}
+		return diffStat(this.exec.getResultDetails()?.diff);
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -76,7 +109,13 @@ export class ActivityLineComponent extends Container {
 	 * for consecutive same-target actions so they collapse to one row. */
 	coalesce(exec: ToolExecutionComponent): void {
 		this.count += 1;
-		this.setExec(exec, this.taskOrdinal);
+		this.absorbDiffStat(exec);
+		this.linesCache = null;
+		this.targetCache = null;
+		this.exec = exec;
+		exec.setActivityChild(true);
+		if (exec.getActivityState() === "pending") this.ensureTicker();
+		this.ui.requestRender();
 	}
 
 	/** Stop every animation this line owns — its spinner ticker, the icon ease,
@@ -112,7 +151,6 @@ export class ActivityLineComponent extends Container {
 					this.ticker?.stop();
 					this.ticker = null;
 				}
-				this.ui.requestRender();
 			},
 		);
 	}
@@ -173,7 +211,7 @@ export class ActivityLineComponent extends Container {
 		// edit / write / ast_edit / edit_v2 and unknown action tools
 		const path = String(args.path ?? args.file_path ?? "");
 		let line = theme.fg("toolTitle", path);
-		const { added, removed } = diffStat(this.exec.getResultDetails()?.diff);
+		const { added, removed } = this.editDiffStat();
 		if (added || removed) {
 			// Show only the non-zero side(s): `+12` for a write, `-3` for a deletion,
 			// `+12 -3` for a real edit — no noisy `+0`/`-0` filler.
@@ -210,17 +248,22 @@ export class ActivityLineComponent extends Container {
 			}
 			this.prevState = state;
 		}
+		const name = this.exec.getToolName();
 		const pending = state === "pending";
 		const autoError = !this.expanded && state === "error" && !this.exec.isAborted();
+		const editFamily = isEditFamilyTool(name);
+		const autoEditPreview =
+			!this.expanded && state === "success" && editFamily && hasEditDiff(this.exec.getResultDetails());
+		const liveEditPreview = pending && editFamily;
+		const showEditBody = autoEditPreview || liveEditPreview;
 		// Serve the memo only on the settled, collapsed, animation-free path:
 		// pending (spinner live), an in-flight icon ease, and the body renders
-		// (expanded / auto error) must keep recomputing every frame.
-		const cacheable = !pending && !this.expanded && !autoError && !this.iconEase.active;
-		const cacheKey = `${width}|${state}|${this.count}`;
+		// (expanded / auto error / edit preview) must keep recomputing every frame.
+		const cacheable = !pending && !this.expanded && !autoError && !showEditBody && !this.iconEase.active;
+		const cacheKey = `${width}|${state}|${this.count}|${this.statAdded}|${this.statRemoved}`;
 		if (cacheable && this.linesCache !== null && this.linesCacheKey === cacheKey) {
 			return this.linesCache;
 		}
-		const name = this.exec.getToolName();
 		let label: string;
 		let target: string;
 		if (name === "task") {
@@ -253,14 +296,29 @@ export class ActivityLineComponent extends Container {
 		// width-free here, so the colorized header is clamped to `width` cells; the
 		// reticência is U+2026 (truncateToWidth's default).
 		const header = truncateToWidth(rawHeader, width);
+		const bodyWidth = width - 2;
 		const lines = [header];
 		if (this.expanded) {
-			for (const l of this.exec.render(width - 2)) lines.push(`  ${l}`);
+			const bodyLines = this.exec.render(bodyWidth);
+			const capped = editFamily ? capDiffPreview(bodyLines, bodyWidth, EDIT_EXPANDED_MAX_LINES) : bodyLines;
+			for (const l of capped) lines.push(`  ${l}`);
 		} else if (autoError) {
 			// Auto-shown error: render the full error body but cap the visible
 			// lines so a failure never floods the CLI — the rest is one ctrl+o away.
-			this.exec.setResultExpanded(true);
-			for (const l of capErrorPreview(this.exec.render(width - 2), width - 2)) lines.push(`  ${l}`);
+			this.exec.setResultExpanded?.(true);
+			for (const l of capErrorPreview(this.exec.render(bodyWidth), bodyWidth)) lines.push(`  ${l}`);
+		} else if (autoEditPreview) {
+			this.exec.setResultExpanded?.(true);
+			for (const l of capDiffPreview(this.exec.render(bodyWidth), bodyWidth, EDIT_SUCCESS_PREVIEW_LINES)) {
+				lines.push(`  ${l}`);
+			}
+		} else if (liveEditPreview) {
+			const bodyKey = `${this.exec.getActivityState()}|${String(this.exec.getArgs()?.path ?? "")}|${String(this.exec.getResultDetails() ?? "")}`;
+			if (this.liveEditBodyCache === null || this.liveEditBodyKey !== bodyKey) {
+				this.liveEditBodyCache = this.exec.render(bodyWidth);
+				this.liveEditBodyKey = bodyKey;
+			}
+			for (const l of this.liveEditBodyCache) lines.push(`  ${l}`);
 		}
 		if (cacheable) {
 			this.linesCache = lines;

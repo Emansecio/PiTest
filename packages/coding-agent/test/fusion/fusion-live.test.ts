@@ -1,4 +1,5 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { SPINNER_FRAME_MS } from "@pit/tui";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { FusionLiveComponent, type FusionLiveMember } from "../../src/modes/interactive/components/fusion-live.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
 
@@ -8,6 +9,27 @@ beforeAll(() => initTheme("dark"));
 // unsub) and requestRender. Cast through never so we don't depend on the full TUI.
 function fakeUi() {
 	return { addAnimationCallback: () => () => {}, requestRender: () => {} } as never;
+}
+
+/** Capture the animation callback FusionLive registers on construction. */
+function trackingUi(): { ui: never; tick: (now: number) => boolean } {
+	let cb: ((now: number) => boolean) | null = null;
+	const ui = {
+		addAnimationCallback(fn: (now: number) => boolean) {
+			cb = fn;
+			return () => {
+				cb = null;
+			};
+		},
+		requestRender: () => {},
+	} as never;
+	return {
+		ui,
+		tick: (now: number) => {
+			if (!cb) throw new Error("animation callback not registered");
+			return cb(now);
+		},
+	};
 }
 
 function stripAnsi(s: string): string {
@@ -149,6 +171,39 @@ describe("FusionLiveComponent", () => {
 		// No advisor rows yet at the brief stage.
 		expect(lines.some((l) => l.includes("claude:claude-opus-4-8"))).toBe(false);
 		c.dispose();
+	});
+
+	describe("animation tick coalescing (#G)", () => {
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		it("returns false when spinner frame and elapsed key are unchanged", () => {
+			vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+			const { ui, tick } = trackingUi();
+			const c = new FusionLiveComponent(ui);
+			c.setSynth("claude-opus-4-8");
+			// Brief stage: one spinner line, no running members — elapsed key is stable.
+
+			expect(tick(0)).toBe(true);
+			expect(tick(40)).toBe(false);
+			expect(tick(40)).toBe(false);
+
+			c.dispose();
+		});
+
+		it("returns true when the spinner frame bucket advances", () => {
+			vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+			const { ui, tick } = trackingUi();
+			const c = new FusionLiveComponent(ui);
+			c.setSynth("claude-opus-4-8");
+
+			expect(tick(0)).toBe(true);
+			expect(tick(SPINNER_FRAME_MS)).toBe(true);
+			expect(tick(SPINNER_FRAME_MS)).toBe(false);
+
+			c.dispose();
+		});
 	});
 
 	it("unsubscribes the animation ticker on dispose (idempotent, no leak)", () => {

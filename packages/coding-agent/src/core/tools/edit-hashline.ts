@@ -3,7 +3,8 @@ import { Box, Container, Spacer, Text } from "@pit/tui";
 import { stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
-import type { ToolDefinition } from "../extensions/types.js";
+import { EDIT_EXPANDED_MAX_LINES } from "../../modes/interactive/components/tool-activity.ts";
+import type { ToolDefinition, ToolRenderContext } from "../extensions/types.js";
 import { attachPostWriteDiagnostics, capturePreWriteDiagnostics } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, PATH_KEY_ALIASES } from "./argument-prep.js";
@@ -23,7 +24,7 @@ import {
 	type HashlineEdit,
 	HashlineEditError,
 } from "./edit-hashline-diff.ts";
-import { getEditHeaderBg, setEditPreview } from "./edit-preview-shared.ts";
+import { appendEditDiffBody, getEditHeaderBg, setEditPreview } from "./edit-preview-shared.ts";
 import type { FileMtimeStore } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
@@ -98,6 +99,8 @@ type CallComponent = Box & {
 	previewArgsKey?: string;
 	previewPending?: boolean;
 	settledError?: boolean;
+	renderedDiffKey?: string;
+	renderedDiffBody?: string;
 };
 
 function createCallComponent(): CallComponent {
@@ -106,6 +109,8 @@ function createCallComponent(): CallComponent {
 		previewArgsKey: undefined as string | undefined,
 		previewPending: false,
 		settledError: false,
+		renderedDiffKey: undefined as string | undefined,
+		renderedDiffBody: undefined as string | undefined,
 	});
 }
 
@@ -188,16 +193,25 @@ function buildCallComponent(
 	component: CallComponent,
 	args: RenderableArgs | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-	cwd?: string,
+	cwd: string | undefined,
+	context: ToolRenderContext<RenderState>,
 ): CallComponent {
-	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
+	const activityChild = context.activityChild;
+	if (activityChild) {
+		component.setBgFn((text: string) => text);
+	} else {
+		component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
+	}
 	component.clear();
-	component.addChild(new Text(formatCall(args, theme, cwd), 0, 0));
+	if (!activityChild) {
+		component.addChild(new Text(formatCall(args, theme, cwd), 0, 0));
+	}
 	if (component.preview) {
-		const body =
-			"error" in component.preview ? theme.fg("error", component.preview.error) : renderDiff(component.preview.diff);
-		component.addChild(new Spacer(1));
-		component.addChild(new Text(body, 0, 0));
+		let diffMaxLines: number | undefined;
+		if (!activityChild && context.expanded) {
+			diffMaxLines = EDIT_EXPANDED_MAX_LINES;
+		}
+		appendEditDiffBody(component, component, component.preview, theme, diffMaxLines);
 	}
 	return component;
 }
@@ -381,7 +395,7 @@ export function createEditHashlineToolDefinition(
 				});
 			}
 
-			return buildCallComponent(component, args as RenderableArgs | undefined, theme, context.cwd);
+			return buildCallComponent(component, args as RenderableArgs | undefined, theme, context.cwd, context);
 		},
 		renderResult(result, _options, theme, context) {
 			const callComponent = context.state.callComponent;
@@ -407,7 +421,13 @@ export function createEditHashlineToolDefinition(
 					changed = true;
 				}
 				if (changed) {
-					buildCallComponent(callComponent, context.args as RenderableArgs | undefined, theme, context.cwd);
+					buildCallComponent(
+						callComponent,
+						context.args as RenderableArgs | undefined,
+						theme,
+						context.cwd,
+						context,
+					);
 				}
 			}
 

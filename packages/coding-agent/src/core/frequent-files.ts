@@ -543,19 +543,46 @@ async function filterExisting(
 	return out;
 }
 
+const FREQ_STAT_CONCURRENCY = 48;
+
+async function statFilesParallel(paths: string[]): Promise<Array<{ path: string; mtimeMs: number }>> {
+	const out: Array<{ path: string; mtimeMs: number }> = [];
+	let next = 0;
+	const workers = Math.min(FREQ_STAT_CONCURRENCY, paths.length);
+	if (workers === 0) return out;
+	await Promise.all(
+		Array.from({ length: workers }, async () => {
+			while (true) {
+				const i = next++;
+				if (i >= paths.length) break;
+				const full = paths[i]!;
+				try {
+					const s = await stat(full);
+					out.push({ path: full, mtimeMs: s.mtimeMs });
+				} catch {
+					// Permission or vanish — skip silently.
+				}
+			}
+		}),
+	);
+	return out;
+}
+
 async function walkMtimeFallback(cwd: string, limit: number, signal: AbortSignal | undefined): Promise<FrequentFile[]> {
 	const collected: Array<{ path: string; mtimeMs: number }> = [];
 	const queue: string[] = [cwd];
+	let head = 0;
 	let visited = 0;
-	while (queue.length > 0 && visited < FREQ_FS_FALLBACK_MAX_ENTRIES) {
+	while (head < queue.length && visited < FREQ_FS_FALLBACK_MAX_ENTRIES) {
 		if (signal?.aborted) break;
-		const dir = queue.shift()!;
+		const dir = queue[head++]!;
 		let entries: import("node:fs").Dirent[];
 		try {
 			entries = await readdir(dir, { withFileTypes: true });
 		} catch {
 			continue;
 		}
+		const fileBatch: string[] = [];
 		for (const entry of entries) {
 			if (visited >= FREQ_FS_FALLBACK_MAX_ENTRIES) break;
 			visited++;
@@ -567,12 +594,11 @@ async function walkMtimeFallback(cwd: string, limit: number, signal: AbortSignal
 				continue;
 			}
 			if (!entry.isFile()) continue;
-			try {
-				const s = await stat(full);
-				collected.push({ path: full, mtimeMs: s.mtimeMs });
-			} catch {
-				// Permission or vanish — skip silently.
-			}
+			fileBatch.push(full);
+		}
+		if (fileBatch.length > 0) {
+			const stats = await statFilesParallel(fileBatch);
+			collected.push(...stats);
 		}
 	}
 	collected.sort((a, b) => b.mtimeMs - a.mtimeMs);

@@ -1,0 +1,15 @@
+{
+  "name": "url_decode",
+  "description": "URL decodes the input string",
+  "inputSchema": {
+    "properties": {
+      "content": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "content"
+    ],
+    "type": "object"
+  }
+}

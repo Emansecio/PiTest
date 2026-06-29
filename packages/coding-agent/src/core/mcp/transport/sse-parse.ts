@@ -9,6 +9,7 @@
  * stream from growing the buffer to OOM (mirrors the MCP HTTP body cap).
  */
 
+import { DEFAULT_IDLE_TIMEOUT_MS, raceReadWithIdle } from "@pit/ai";
 import { McpTransportError } from "./types.ts";
 
 export interface SseEvent {
@@ -21,12 +22,13 @@ const DEFAULT_MAX_SSE_BYTES = 25 * 1024 * 1024;
 
 export async function* parseSseStream(
 	stream: ReadableStream<Uint8Array>,
-	opts: { maxBytes?: number; signal?: AbortSignal; label?: string } = {},
+	opts: { maxBytes?: number; signal?: AbortSignal; label?: string; idleMs?: number } = {},
 ): AsyncGenerator<SseEvent> {
 	// Cap the UNFLUSHED buffer (one in-progress frame), not the cumulative byte
 	// count: a legitimate long-lived SSE channel streams far past any total cap,
 	// but a single frame with no terminating newline is the real OOM vector.
 	const maxBytes = opts.maxBytes ?? DEFAULT_MAX_SSE_BYTES;
+	const idleMs = opts.idleMs ?? DEFAULT_IDLE_TIMEOUT_MS;
 	const label = opts.label ?? "SSE";
 	const reader = stream.getReader();
 	const decoder = new TextDecoder();
@@ -55,13 +57,18 @@ export async function* parseSseStream(
 	let drained = false;
 	try {
 		while (true) {
-			const { done, value } = await reader.read();
+			const { done, value } = await raceReadWithIdle(reader, { idleMs, signal: opts.signal });
 			if (done) {
+				const tail = decoder.decode();
+				if (tail.length > 0) {
+					buffer += tail;
+				}
 				drained = true;
-				break;
+			} else if (!value) {
+				continue;
+			} else {
+				buffer += decoder.decode(value, { stream: true });
 			}
-			if (!value) continue;
-			buffer += decoder.decode(value, { stream: true });
 			if (buffer.length > maxBytes) {
 				await reader.cancel().catch(() => {});
 				throw new McpTransportError(`${label}: SSE frame too large (>${maxBytes} bytes without a frame boundary)`);
@@ -94,6 +101,7 @@ export async function* parseSseStream(
 			}
 			// Drop the consumed prefix; keep only the unterminated trailing frame.
 			if (pos > 0) buffer = buffer.slice(pos);
+			if (done) break;
 		}
 		// A final frame not terminated by a blank line (stream closed) still dispatches.
 		const ev = flush();

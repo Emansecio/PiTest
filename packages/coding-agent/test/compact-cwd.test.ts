@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { expect, it } from "vitest";
 import {
 	buildWorkspaceCwdLabels,
@@ -29,7 +29,8 @@ it("ellipsizePathMiddle preserves head and tail segments", () => {
 
 it("resolveOrientingCwdLabel never returns a bare ~", () => {
 	const home = homedir();
-	expect(resolveOrientingCwdLabel(home, null)).toBe("~ (home)");
+	const homeLabel = `${basename(home)} (home)`;
+	expect(resolveOrientingCwdLabel(home, null)).toBe(homeLabel);
 	expect(resolveOrientingCwdLabel(join(home, "pit"), null)).toMatch(/^~[\\/]pit$/);
 });
 
@@ -37,6 +38,6 @@ it("buildWorkspaceCwdLabels surfaces shell vs session divergence", () => {
 	const home = homedir();
 	const pit = join(home, "pit");
 	const labels = buildWorkspaceCwdLabels(home, pit, null);
-	expect(labels.session).toBe("~ (home)");
+	expect(labels.session).toBe(`${basename(home)} (home)`);
 	expect(labels.shellNote).toBe(`shell: ${resolveOrientingCwdLabel(pit, null)}`);
 });

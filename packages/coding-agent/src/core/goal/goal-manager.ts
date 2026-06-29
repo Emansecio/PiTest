@@ -8,6 +8,7 @@
  * the interactive mode owns continuation. Clocks/ids are injected for testing.
  */
 
+import { spinnerGlyphAt } from "../../modes/interactive/components/spinner-ticker.ts";
 import { sliceSafe } from "../../utils/surrogate.ts";
 
 export type GoalStatus = "active" | "paused" | "budget_limited" | "complete";
@@ -53,16 +54,6 @@ export interface GoalManagerOptions {
 }
 
 export const MAX_OBJECTIVE_CHARS = 4000;
-
-/** Braille spinner frames cycled in the statusline while a goal is being driven. */
-export const GOAL_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
-const SPINNER_INTERVAL_MS = 80;
-
-/** Time-based spinner frame so the indicator animates across footer renders. */
-function spinnerFrame(nowMs: number): string {
-	const idx = Math.floor(nowMs / SPINNER_INTERVAL_MS) % GOAL_SPINNER_FRAMES.length;
-	return GOAL_SPINNER_FRAMES[idx] ?? GOAL_SPINNER_FRAMES[0];
-}
 
 /** Parse a token budget string like "100000", "100k" or "1.5m". */
 export function parseTokenBudget(raw: string): number | undefined {
@@ -257,7 +248,7 @@ export class GoalManager {
 		switch (g.status) {
 			case "active": {
 				const body = budgetPart ?? formatElapsed(this.now() - g.startedAt);
-				return `🎯 active ${body}${continuing ? ` ${spinnerFrame(this.now())}` : ""}`;
+				return `🎯 active ${body}${continuing ? ` ${spinnerGlyphAt(this.now())}` : ""}`;
 			}
 			case "paused":
 				return "🎯 paused";

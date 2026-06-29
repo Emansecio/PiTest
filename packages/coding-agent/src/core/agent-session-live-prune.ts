@@ -11,11 +11,14 @@ import {
 	cloneToolResultMessagesForPrune,
 	elideMutatingToolCallArguments,
 	estimateContextTokens,
+	planContextPrune,
 	pressurePruneProtectTurns,
 	wouldApplySupersedeOnly,
 } from "./compaction/compaction.ts";
 
-const SUPERSEDED_TOOL_NAMES = new Set(["read", "grep", "find", "ls", "symbol", "find_symbol"]);
+import { isLspSupersedeEligible } from "./lsp/supersede.ts";
+
+const SUPERSEDED_TOOL_NAMES = new Set(["read", "grep", "find", "ls", "symbol", "find_symbol", "lsp"]);
 
 export interface LiveContextEconomyResult {
 	messages: AgentMessage[];
@@ -36,10 +39,12 @@ export function applyLiveContextEconomyAfterToolSuccess(
 
 	const contextTokens = estimateContextTokens(messages).tokens;
 	const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
+	const prunePlan = planContextPrune(messages, protectTurns);
 	const runSupersede =
 		!isTruthyEnvFlag(process.env.PIT_NO_LIVE_SUPERSEDE) &&
 		SUPERSEDED_TOOL_NAMES.has(toolCall.name) &&
-		wouldApplySupersedeOnly(messages, protectTurns);
+		(toolCall.name !== "lsp" || isLspSupersedeEligible(toolCall.arguments)) &&
+		wouldApplySupersedeOnly(messages, protectTurns, prunePlan);
 	const runArgElision =
 		!isTruthyEnvFlag(process.env.PIT_NO_LIVE_ARG_ELISION) && isMutatingToolCall(toolCall.name, toolCall.arguments);
 
@@ -52,7 +57,7 @@ export function applyLiveContextEconomyAfterToolSuccess(
 	let argElisionReclaimed = 0;
 
 	if (runSupersede) {
-		supersedeReclaimed = applySupersedeOnly(copy, protectTurns);
+		supersedeReclaimed = applySupersedeOnly(copy, protectTurns, prunePlan);
 	}
 	if (runArgElision) {
 		argElisionReclaimed = elideMutatingToolCallArguments(copy, toolCall.id);

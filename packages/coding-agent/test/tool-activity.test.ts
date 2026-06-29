@@ -1,5 +1,16 @@
-import { describe, expect, it, test } from "vitest";
-import { diffStat, nounFor, pluralizeNoun, verbFor } from "../src/modes/interactive/components/tool-activity.js";
+import { beforeAll, describe, expect, it, test } from "vitest";
+import {
+	capDiffPreview,
+	diffStat,
+	hasEditDiff,
+	isEditFamilyTool,
+	nounFor,
+	pluralizeNoun,
+	verbFor,
+} from "../src/modes/interactive/components/tool-activity.js";
+import { initTheme } from "../src/modes/interactive/theme/theme.js";
+
+beforeAll(() => initTheme("dark"));
 
 describe("nounFor", () => {
 	test("maps known tools (navigation and action), falls back to step", () => {
@@ -37,6 +48,36 @@ describe("verbFor", () => {
 	it("falls back to a neutral verb for unknown action tools", () => {
 		expect(verbFor("some_mcp_tool", false)).toBe("Ran");
 		expect(verbFor("some_mcp_tool", true)).toBe("Running");
+	});
+});
+
+describe("isEditFamilyTool", () => {
+	it("recognizes edit family tools", () => {
+		expect(isEditFamilyTool("edit")).toBe(true);
+		expect(isEditFamilyTool("edit_v2")).toBe(true);
+		expect(isEditFamilyTool("ast_edit")).toBe(true);
+		expect(isEditFamilyTool("bash")).toBe(false);
+	});
+});
+
+describe("hasEditDiff", () => {
+	it("is true only when details carry a non-empty diff string", () => {
+		expect(hasEditDiff({ diff: "+1 x" })).toBe(true);
+		expect(hasEditDiff({ diff: "" })).toBe(false);
+		expect(hasEditDiff(undefined)).toBe(false);
+	});
+});
+
+describe("capDiffPreview", () => {
+	it("keeps short bodies and folds long ones with an expand hint", () => {
+		const short = capDiffPreview(["a", "b"], 80, 5);
+		expect(short).toEqual(["a", "b"]);
+		const lines = Array.from({ length: 8 }, (_, i) => `line ${i}`);
+		const capped = capDiffPreview(lines, 120, 5);
+		expect(capped.length).toBe(6);
+		expect(capped[4]).toBe("line 4");
+		expect(capped[5]).toContain("+3 more lines");
+		expect(capped[5]).toContain("to expand");
 	});
 });
 

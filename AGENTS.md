@@ -141,6 +141,7 @@ Full surface and quirks: `docs/agents/tools-and-config.md`.
 ## Project docs (load on demand)
 
 - `docs/agents/already-built.md` — **inventory of what already ships; read before proposing improvements.**
+- `docs/agents/cli-animations.md` — **TUI motion subsystem: ticker, spinners, eases, reduced motion, improvement backlog.**
 - `docs/agents/prevention-layers.md` — **the layered guard pipeline (pre/post model & tool call), in execution order.**
 - `docs/RELEASING.md` — release process, CHANGELOG format, new-provider recipe.
 - `docs/agents/pr-workflow.md` — PR review/merge flow, comment hygiene.

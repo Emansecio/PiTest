@@ -9,16 +9,27 @@
  */
 
 import { performance } from "node:perf_hooks";
-import { type Component, SPINNER_FRAME_MS, SPINNER_FRAMES, truncateToWidth, visibleWidth } from "@pit/tui";
+import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { formatElapsed, formatTokens, type GoalSnapshot } from "../../../core/goal/goal-manager.ts";
 import { theme } from "../theme/theme.ts";
+import { spinnerGlyphAt } from "./spinner-ticker.ts";
 
 /** A completed goal lingers this long before the overlay auto-hides. */
 export const GOAL_COMPLETE_LINGER_MS = 4000;
+/** Final segment of the linger window: hint swaps to a static ✓ prefix. */
+export const GOAL_COMPLETE_SOFT_EXIT_MS = 400;
 
 // "├─ " or "└─ " = 3 visible chars, same geometry as the todo overlay.
 const CONNECTOR_WIDTH = 3;
+
+function fitWidth(text: string, width: number): string {
+	return visibleWidth(text) > width ? truncateToWidth(text, width, "…") : text;
+}
+
+function rowBudget(width: number): number {
+	return Math.max(4, width - CONNECTOR_WIDTH);
+}
 
 function statusWord(status: GoalSnapshot["status"]): string {
 	switch (status) {
@@ -46,40 +57,114 @@ function statusColorize(status: GoalSnapshot["status"]): (text: string) => strin
 	}
 }
 
-/**
- * Tail line content (uncolored) + colorizer for the last row. The spinner
- * glyph is passed in so the renderer stays pure — the component owns the clock.
- */
 function hintForStatus(
 	status: GoalSnapshot["status"],
 	continuing: boolean,
 	spinner: string,
 	summary: string | undefined,
+	completeAgeMs?: number,
 ): { text: string; colorize: (s: string) => string } {
 	switch (status) {
 		case "active":
 			if (continuing) return { text: `${spinner} working…`, colorize: (s) => theme.fg("accent", s) };
-			return { text: "idle — Esc to pause", colorize: (s) => theme.fg("muted", s) };
+			return { text: "idle — Esc or /goal pause", colorize: (s) => theme.fg("muted", s) };
 		case "paused":
 			return { text: "resume with /goal resume", colorize: (s) => theme.fg("warning", s) };
 		case "budget_limited":
 			return { text: "raise with /goal --tokens <n>", colorize: (s) => theme.fg("error", s) };
 		case "complete": {
-			const s = summary && summary.length > 0 ? summary : "done";
-			return { text: s, colorize: (str) => theme.fg("success", str) };
+			const base = summary && summary.length > 0 ? summary : "done";
+			const softExit =
+				completeAgeMs !== undefined && completeAgeMs > GOAL_COMPLETE_LINGER_MS - GOAL_COMPLETE_SOFT_EXIT_MS;
+			const text = softExit ? `✓ ${base}` : base;
+			return { text, colorize: (s) => theme.fg("success", s) };
 		}
 	}
+}
+
+function goalStructuralKey(snapshot: GoalSnapshot): string {
+	return `${snapshot.status}|${snapshot.iterations}|${snapshot.tokensUsed}|${snapshot.tokenBudget ?? ""}|${snapshot.objective}|${snapshot.summary ?? ""}`;
+}
+
+function buildGoalHeaderLine(snapshot: GoalSnapshot, width: number): string {
+	const word = statusColorize(snapshot.status)(statusWord(snapshot.status));
+	const header = `${theme.fg("accent", "●")} ${theme.bold("Goal")} ${theme.fg("dim", "—")} ${word}`;
+	return fitWidth(header, width);
+}
+
+function buildGoalObjectiveLine(snapshot: GoalSnapshot, width: number): string {
+	const budget = rowBudget(width);
+	const obj = fitWidth(snapshot.objective, budget);
+	return `${theme.fg("dim", "├─ ")}${obj}`;
+}
+
+function buildGoalMetricsLine(snapshot: GoalSnapshot, width: number): string {
+	const budget = rowBudget(width);
+	const budgetPart = snapshot.tokenBudget !== undefined ? `/${formatTokens(snapshot.tokenBudget)}` : "";
+	const metricsText = `iter ${snapshot.iterations} · tokens ${formatTokens(snapshot.tokensUsed)}${budgetPart} · ${formatElapsed(snapshot.elapsedMs)}`;
+	const metricsBody = fitWidth(metricsText, budget);
+	return `${theme.fg("dim", "├─ ")}${theme.fg("muted", metricsBody)}`;
+}
+
+function buildGoalHintLine(
+	snapshot: GoalSnapshot,
+	width: number,
+	continuing: boolean,
+	spinner: string,
+	completeAgeMs?: number,
+): string {
+	const hint = hintForStatus(snapshot.status, continuing, spinner, snapshot.summary, completeAgeMs);
+	const hintText = fitWidth(hint.text, rowBudget(width));
+	return `${theme.fg("dim", "└─ ")}${hint.colorize(hintText)}`;
+}
+
+interface GoalOverlayRenderCache {
+	structuralKey: string;
+	width: number;
+	continuing: boolean;
+	elapsedBucket: number;
+	headerLine: string;
+	objLine: string;
+	metricsLine: string;
+}
+
+function seedGoalOverlayCache(snapshot: GoalSnapshot, width: number, continuing: boolean): GoalOverlayRenderCache {
+	return {
+		structuralKey: goalStructuralKey(snapshot),
+		width,
+		continuing,
+		elapsedBucket: Math.floor(snapshot.elapsedMs / 1000),
+		headerLine: buildGoalHeaderLine(snapshot, width),
+		objLine: buildGoalObjectiveLine(snapshot, width),
+		metricsLine: buildGoalMetricsLine(snapshot, width),
+	};
+}
+
+function materializeGoalOverlayCache(
+	cache: GoalOverlayRenderCache,
+	snapshot: GoalSnapshot,
+	width: number,
+	continuing: boolean,
+	spinner: string,
+	completeAgeMs?: number,
+): string[] {
+	const elapsedBucket = Math.floor(snapshot.elapsedMs / 1000);
+	if (cache.elapsedBucket !== elapsedBucket) {
+		cache.elapsedBucket = elapsedBucket;
+		cache.metricsLine = buildGoalMetricsLine(snapshot, width);
+	}
+	return [
+		"",
+		cache.headerLine,
+		cache.objLine,
+		cache.metricsLine,
+		buildGoalHintLine(snapshot, width, continuing, spinner, completeAgeMs),
+	];
 }
 
 /**
  * Pure renderer. Returns [] when there is no goal, or when a completed goal
  * has lingered past `GOAL_COMPLETE_LINGER_MS` (signalled by `completeAgeMs`).
- *
- * Layout (4 lines):
- *   ● Goal — <status>
- *   ├─ <objective>
- *   ├─ iter N · tokens NN[ /NN] · <elapsed>
- *   └─ <hint>
  */
 export function renderGoalOverlay(
 	snapshot: GoalSnapshot | undefined,
@@ -92,66 +177,46 @@ export function renderGoalOverlay(
 	if (snapshot.status === "complete" && completeAgeMs !== undefined && completeAgeMs > GOAL_COMPLETE_LINGER_MS) {
 		return [];
 	}
-
-	const rowBudget = Math.max(4, width - CONNECTOR_WIDTH);
-
-	// Header: accent dot, bold "Goal", dim em-dash, status word in status color.
-	const word = statusColorize(snapshot.status)(statusWord(snapshot.status));
-	const header = `${theme.fg("accent", "●")} ${theme.bold("Goal")} ${theme.fg("dim", "—")} ${word}`;
-	const headerLine = visibleWidth(header) > width ? truncateToWidth(header, width, "…") : header;
-
-	// Objective (middle row).
-	const obj =
-		visibleWidth(snapshot.objective) > rowBudget
-			? truncateToWidth(snapshot.objective, rowBudget, "…")
-			: snapshot.objective;
-	const objLine = `${theme.fg("dim", "├─ ")}${obj}`;
-
-	// Metrics (middle row).
-	const budgetPart = snapshot.tokenBudget !== undefined ? `/${formatTokens(snapshot.tokenBudget)}` : "";
-	const metricsText = `iter ${snapshot.iterations} · tokens ${formatTokens(snapshot.tokensUsed)}${budgetPart} · ${formatElapsed(snapshot.elapsedMs)}`;
-	const metricsBody =
-		visibleWidth(metricsText) > rowBudget ? truncateToWidth(metricsText, rowBudget, "…") : metricsText;
-	const metricsLine = `${theme.fg("dim", "├─ ")}${theme.fg("muted", metricsBody)}`;
-
-	// Hint (last row, └─).
-	const hint = hintForStatus(snapshot.status, continuing, spinner, snapshot.summary);
-	const hintBudget = Math.max(4, rowBudget);
-	const hintText = visibleWidth(hint.text) > hintBudget ? truncateToWidth(hint.text, hintBudget, "…") : hint.text;
-	const hintLine = `${theme.fg("dim", "└─ ")}${hint.colorize(hintText)}`;
-
-	return [headerLine, objLine, metricsLine, hintLine];
+	const cache = seedGoalOverlayCache(snapshot, width, continuing);
+	return [
+		cache.headerLine,
+		cache.objLine,
+		cache.metricsLine,
+		buildGoalHintLine(snapshot, width, continuing, spinner, completeAgeMs),
+	];
 }
 
 class GoalOverlayComponent implements Component {
 	private session: AgentSession;
 	private readonly clock: () => number;
-	/** Epoch ms when the goal first read `complete`; reset on status change / session swap. */
 	private completeSeenAt: number | undefined;
+	private renderCache: GoalOverlayRenderCache | undefined;
 
-	// Same monotonic source as every other spinner so the overlay's glyph is
-	// phase-locked with the loader/tool/todo/footer spinners (P7).
 	constructor(session: AgentSession, clock: () => number = () => performance.now()) {
 		this.session = session;
 		this.clock = clock;
 	}
 
+	private clearOverlayState(): void {
+		this.completeSeenAt = undefined;
+		this.renderCache = undefined;
+	}
+
 	setSession(session: AgentSession): void {
 		this.session = session;
-		this.completeSeenAt = undefined;
+		this.clearOverlayState();
 	}
 
 	invalidate(): void {
-		this.completeSeenAt = undefined;
+		this.clearOverlayState();
 	}
 
 	render(width: number): string[] {
 		const snapshot = this.session.goalSnapshot();
 		if (!snapshot) {
-			this.completeSeenAt = undefined;
+			this.clearOverlayState();
 			return [];
 		}
-		// Track the moment we first saw `complete` so the renderer can age it.
 		if (snapshot.status === "complete") {
 			if (this.completeSeenAt === undefined) this.completeSeenAt = this.clock();
 		} else {
@@ -161,12 +226,19 @@ class GoalOverlayComponent implements Component {
 			snapshot.status === "complete" && this.completeSeenAt !== undefined
 				? this.clock() - this.completeSeenAt
 				: undefined;
+		if (snapshot.status === "complete" && completeAgeMs !== undefined && completeAgeMs > GOAL_COMPLETE_LINGER_MS) {
+			this.renderCache = undefined;
+			return [];
+		}
 		const continuing = this.session.goalIsDriving();
-		const frame = SPINNER_FRAMES[Math.floor(this.clock() / SPINNER_FRAME_MS) % SPINNER_FRAMES.length];
-		const lines = renderGoalOverlay(snapshot, width, continuing, frame ?? SPINNER_FRAMES[0], completeAgeMs);
-		// Leading blank line separates the overlay from the chat above it (same
-		// convention as the todo overlay).
-		return lines.length > 0 ? ["", ...lines] : [];
+		const spinner = spinnerGlyphAt(this.clock());
+		const structuralKey = goalStructuralKey(snapshot);
+		const cache = this.renderCache;
+		if (cache && cache.structuralKey === structuralKey && cache.width === width && cache.continuing === continuing) {
+			return materializeGoalOverlayCache(cache, snapshot, width, continuing, spinner, completeAgeMs);
+		}
+		this.renderCache = seedGoalOverlayCache(snapshot, width, continuing);
+		return materializeGoalOverlayCache(this.renderCache, snapshot, width, continuing, spinner, completeAgeMs);
 	}
 }
 

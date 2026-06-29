@@ -1,0 +1,19 @@
+{
+  "name": "get_scanner_issues",
+  "description": "Displays information about issues identified by the scanner",
+  "inputSchema": {
+    "properties": {
+      "count": {
+        "type": "integer"
+      },
+      "offset": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "count",
+      "offset"
+    ],
+    "type": "object"
+  }
+}

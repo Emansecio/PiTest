@@ -27,8 +27,7 @@ const BREATH_PHASES = 24;
  */
 export function workingPulsePalette(themeInstance: Theme = globalTheme): LoaderColorFn[] {
 	if (isReducedMotion()) {
-		// Reduced-motion: a single steady accent phase. The spinner glyph still turns;
-		// only its color stops breathing.
+		// Reduced-motion: steady accent on a frozen spinner frame (see spinner-ticker).
 		return [(s) => themeInstance.fg("accent", s)];
 	}
 	const gradient = breathingGradient(themeInstance);

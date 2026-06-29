@@ -1,4 +1,5 @@
-import { SPINNER_FRAME_MS, SPINNER_FRAMES, type TUI } from "@pit/tui";
+import { type LoaderIndicatorOptions, SPINNER_FRAME_MS, SPINNER_FRAMES, type TUI } from "@pit/tui";
+import { isReducedMotion } from "../../../utils/env-flags.ts";
 
 export interface SpinnerTicker {
 	/** Detach the animation callback. */
@@ -12,6 +13,28 @@ export interface SpinnerTicker {
  * ToolExecutionComponent's running spinner, but writes to a caller-owned sink
  * instead of the message-shell gutter.
  */
+/** Spinner frame index at `clockMs` (P7 cadence); frozen to 0 under reduced motion. */
+export function spinnerFrameIndexAt(clockMs: number): number {
+	if (isReducedMotion()) return 0;
+	return Math.floor(clockMs / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
+}
+
+/** Shared braille glyph at `clockMs`; frozen to frame 0 under reduced motion. */
+export function spinnerGlyphAt(clockMs: number): string {
+	return SPINNER_FRAMES[spinnerFrameIndexAt(clockMs)] ?? SPINNER_FRAMES[0];
+}
+
+/** Collapse animated loader indicators to a single frame when motion is reduced. */
+export function reducedMotionLoaderIndicator(options?: LoaderIndicatorOptions): LoaderIndicatorOptions | undefined {
+	if (!isReducedMotion()) return options;
+	const frames = options?.frames;
+	if (frames !== undefined) {
+		if (frames.length <= 1) return options;
+		return { ...options, frames: [frames[0]!] };
+	}
+	return { frames: [SPINNER_FRAMES[0]] };
+}
+
 export function createSpinnerTicker(
 	ui: TUI,
 	shouldSpin: () => boolean,
@@ -22,7 +45,7 @@ export function createSpinnerTicker(
 	const unsub = ui.addAnimationCallback((now: number) => {
 		if (shouldSpin()) {
 			cleared = false;
-			const f = Math.floor(now / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
+			const f = spinnerFrameIndexAt(now);
 			if (f === frame) return false;
 			frame = f;
 			onFrame(SPINNER_FRAMES[f]);

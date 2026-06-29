@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { ResourceDiagnostic } from "../src/core/diagnostics.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -113,7 +113,7 @@ describe("skills-doctor", () => {
 		expect(body).toContain("ignored");
 		expect(body).toContain("/skills doctor fix");
 		expect(body).toContain("launch pit from the project repo");
-		expect(body).toContain("~ (home)");
+		expect(body).toContain(`${basename(home)} (home)`);
 		expect(body).toContain("Ignored by tree");
 		expect(body).not.toContain("SKILL.md");
 	});

@@ -25,6 +25,7 @@ import {
 } from "./client.ts";
 import type { LspConfig } from "./config.ts";
 import { getServerForFile, getServersForFile } from "./config.ts";
+import { formatBatchDiagnosticsUnavailable, formatDiagnosticsUnavailableMessage } from "./diagnostics-copy.ts";
 import { applyTextEdits, flattenWorkspaceTextEdits, rangesOverlap } from "./edits.ts";
 import { log, throwIfAborted } from "./internal.ts";
 import { getLspServers, isProjectAwareLspServer } from "./manager.ts";
@@ -65,6 +66,24 @@ function resolveSingleDiagnosticsWaitTimeoutMs(): number {
 	return parsed;
 }
 const MAX_GLOB_DIAGNOSTIC_TARGETS = 20;
+const GLOB_DIAGNOSTIC_CONCURRENCY = 6;
+
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+	const out: R[] = new Array(items.length);
+	let next = 0;
+	const workers = Math.min(limit, items.length);
+	if (workers === 0) return out;
+	await Promise.all(
+		Array.from({ length: workers }, async () => {
+			while (true) {
+				const i = next++;
+				if (i >= items.length) break;
+				out[i] = await fn(items[i]!);
+			}
+		}),
+	);
+	return out;
+}
 const WORKSPACE_SYMBOL_LIMIT = 200;
 const MAX_RENAME_PAIRS = 1000;
 const LSP_JSON_OUTPUT_MAX_BYTES = 16 * 1024;
@@ -287,13 +306,12 @@ export async function runDiagnostics(
 		);
 	}
 
-	for (const target of targets) {
+	const processTarget = async (target: string): Promise<TextResult | string[]> => {
 		throwIfAborted(signal);
 		const resolved = resolveToCwd(target, cwd);
 		const servers = getServersForFile(config, resolved);
 		if (servers.length === 0) {
-			results.push(`${target}: No language server found`);
-			continue;
+			return [`${target}: No language server found`];
 		}
 		const uri = fileToUri(resolved);
 		const relPath = formatPathRelativeToCwd(resolved, cwd);
@@ -346,14 +364,11 @@ export async function runDiagnostics(
 
 		if (!detailed && targets.length === 1) {
 			if (freshServerCount === 0) {
-				return textResult(
-					`Diagnostics unavailable for ${relPath}: ${serverIssues.join("; ") || "no fresh diagnostics"}`,
-					{
-						action,
-						serverName: Array.from(allServerNames).join(", "),
-						success: true,
-					},
-				);
+				return textResult(formatDiagnosticsUnavailableMessage(relPath, serverIssues.join("; ")), {
+					action,
+					serverName: Array.from(allServerNames).join(", "),
+					success: true,
+				});
 			}
 			if (uniqueDiagnostics.length === 0) {
 				return textResult(`OK${issueNote}`, {
@@ -371,14 +386,30 @@ export async function runDiagnostics(
 			});
 		}
 
+		const batchLines: string[] = [];
 		if (freshServerCount === 0) {
-			results.push(`${relPath}: diagnostics unavailable${issueNote}`);
+			batchLines.push(formatBatchDiagnosticsUnavailable(relPath, issueNote));
 		} else if (uniqueDiagnostics.length === 0) {
-			results.push(`${relPath}: no issues${issueNote}`);
+			batchLines.push(`${relPath}: no issues${issueNote}`);
 		} else {
 			const summary = formatDiagnosticsSummary(uniqueDiagnostics);
-			results.push(`${relPath}: ${summary}${issueNote}`);
-			results.push(formatGroupedDiagnosticMessages(uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath, cwd))));
+			batchLines.push(`${relPath}: ${summary}${issueNote}`);
+			batchLines.push(
+				formatGroupedDiagnosticMessages(uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath, cwd))),
+			);
+		}
+		return batchLines;
+	};
+
+	if (!detailed && targets.length === 1) {
+		const single = await processTarget(targets[0]!);
+		if (!Array.isArray(single)) return single;
+		results.push(...single);
+	} else {
+		const batches = await mapWithConcurrency(targets, GLOB_DIAGNOSTIC_CONCURRENCY, processTarget);
+		for (const batch of batches) {
+			if (!Array.isArray(batch)) continue;
+			results.push(...batch);
 		}
 	}
 

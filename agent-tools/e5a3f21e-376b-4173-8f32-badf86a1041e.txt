@@ -1,0 +1,1226 @@
+
+> pi-monorepo@0.0.8 check
+> node scripts/check-parallel.mjs
+
+
+=== biome ===
+packages\ai\src\models-compare.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+    11 11 │   if (!a || !b) return false;
+    12 12 │   return a.id === b.id && a.provider === b.provider;
+    13    │ - }
+       13 │ + }
+       14 │ + 
+  
+
+packages\ai\src\stream.ts:1:1 assist/source/organizeImports  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × The imports and exports are not sorted.
+  
+  > 1 │ import { getApiProvider } from "./api-registry.ts";
+      │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    2 │ import { registerBuiltInApiProviders } from "./providers/register-builtins.ts";
+    3 │ 
+  
+  i Safe fix: Organize Imports (Biome)
+  
+      3   3 │   
+      4   4 │   registerBuiltInApiProviders();
+          5 │ + 
+      5   6 │   import { type CredentialFailureReason, getCredentialPool } from "./credential-pool.ts";
+      6   7 │   import type {
+  
+
+packages\coding-agent\src\core\compaction\compaction.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+     356  356 │   }
+     357  357 │   
+     358      │ - 
+     359  358 │   /** Min length for a tool-call arg STRING value to be worth eliding (keeps paths/flags intact). */
+     360  359 │   const TOOLCALL_ARG_VALUE_MARK_THRESHOLD = 200;
+  
+
+packages\coding-agent\src\core\compaction\file-digests.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+    62 62 │   if (signal?.aborted) break;
+    63 63 │   const batch = paths.slice(batchStart, batchStart + BATCH_SIZE);
+    64    │ - → → const·settled·=·await·Promise.allSettled(
+    65    │ - → → → batch.map((path)·=>·digestOnePath(path,·readContent,·signal,·preSeed)),
+    66    │ - → → );
+       64 │ + → → const·settled·=·await·Promise.allSettled(batch.map((path)·=>·digestOnePath(path,·readContent,·signal,·preSeed)));
+    67 65 │   for (const result of settled) {
+    68 66 │   if (result.status === "fulfilled" && result.value) {
+    ····· │ 
+    80 78 │   const body = entries.map(([path, syms]) => `  ${path}: ${syms}`).join("\n");
+    81 79 │   return `<file-digests>\n  (outline at compaction time — re-read for current content)\n${body}\n</file-digests>`;
+    82    │ - }
+       80 │ + }
+       81 │ + 
+  
+
+packages\coding-agent\src\core\hooks\runner.ts:6:1 assist/source/organizeImports  FIXABLE  ━━━━━━━━━━
+
+  × The imports and exports are not sorted.
+  
+    4 │  */
+    5 │ 
+  > 6 │ import { spawn } from "node:child_process";
+      │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    7 │ import { createRegexTestDeadline, isRegexBudgetExpired, testRegexWithinBudget } from "../regex-budget.ts";
+    8 │ import { killProcessTree } from "../../utils/shell.ts";
+  
+  i Safe fix: Organize Imports (Biome)
+  
+      5   5 │   
+      6   6 │   import { spawn } from "node:child_process";
+      7     │ - import·{·createRegexTestDeadline,·isRegexBudgetExpired,·testRegexWithinBudget·}·from·"../regex-budget.ts";
+      8     │ - import·{·killProcessTree·}·from·"../../utils/shell.ts";
+          7 │ + import·{·killProcessTree·}·from·"../../utils/shell.ts";
+          8 │ + import·{·createRegexTestDeadline,·isRegexBudgetExpired,·testRegexWithinBudget·}·from·"../regex-budget.ts";
+      9   9 │   import type { HookCommand, HookExecutionResult, HookPayload, HookResult } from "./types.ts";
+     10  10 │   
+  
+
+packages\coding-agent\src\core\permissions\checker.ts:13:1 assist/source/organizeImports  FIXABLE  ━━━━━━━━━━
+
+  × The imports and exports are not sorted.
+  
+    11 │  */
+    12 │ 
+  > 13 │ import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
+       │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    14 │ import { createRegexTestDeadline } from "../regex-budget.ts";
+    15 │ import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath, wasRegexBudgetExceeded } from "./matcher.ts";
+  
+  i Safe fix: Organize Imports (Biome)
+  
+     11  11 │    */
+     12  12 │   
+     13     │ - import·{·PATH_KEY_ALIASES·}·from·"../tools/argument-prep.ts";
+     14     │ - import·{·createRegexTestDeadline·}·from·"../regex-budget.ts";
+         13 │ + import·{·createRegexTestDeadline·}·from·"../regex-budget.ts";
+         14 │ + import·{·PATH_KEY_ALIASES·}·from·"../tools/argument-prep.ts";
+     15  15 │   import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath, wasRegexBudgetExceeded } from "./matcher.ts";
+     16  16 │   import {
+  
+
+packages\coding-agent\src\core\regex-budget.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+    22 22 │   re.lastIndex = 0;
+    23 23 │   return re.test(haystack);
+    24    │ - }
+       24 │ + }
+       25 │ + 
+  
+
+packages\coding-agent\src\core\tsconfig-paths-cache.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+    49 49 │   cache.clear();
+    50 50 │   keyOrder.length = 0;
+    51    │ - }
+       51 │ + }
+       52 │ + 
+  
+
+packages\coding-agent\src\modes\interactive\components\session-selector-search.ts:1:1 assist/source/organizeImports  FIXABLE  ━━━━━━━━━━
+
+  × The imports and exports are not sorted.
+  
+  > 1 │ import { fuzzyMatch } from "@pit/tui";
+      │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    2 │ import { type SessionInfo, resolveSessionSearchText } from "../../../core/session-manager.ts";
+    3 │ 
+  
+  i Safe fix: Organize Imports (Biome)
+  
+      1   1 │   import { fuzzyMatch } from "@pit/tui";
+      2     │ - import·{·type·SessionInfo,·resolveSessionSearchText·}·from·"../../../core/session-manager.ts";
+          2 │ + import·{·resolveSessionSearchText,·type·SessionInfo·}·from·"../../../core/session-manager.ts";
+      3   3 │   
+      4   4 │   export type SortMode = "threaded" | "recent" | "relevance";
+  
+
+packages\coding-agent\test\regex-budget.test.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+    14 14 │   expect(isRegexBudgetExpired(deadline)).toBe(false);
+    15 15 │   });
+    16    │ - });
+       16 │ + });
+       17 │ + 
+  
+
+packages\tui\src\core.ts:4:1 assist/source/organizeImports  FIXABLE  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × The imports and exports are not sorted.
+  
+    2 │  * Lightweight @pit/tui entry — terminal shell without Markdown/marked.
+    3 │  */
+  > 4 │ export { getKeybindings, setKeybindings, type Keybindings } from "./keybindings.ts";
+      │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    5 │ export { ProcessTerminal, type Terminal } from "./terminal.ts";
+    6 │ export { TUI } from "./tui.ts";
+  
+  i Safe fix: Organize Imports (Biome)
+  
+    2 2 │    * Lightweight @pit/tui entry — terminal shell without Markdown/marked.
+    3 3 │    */
+    4   │ - export·{·getKeybindings,·setKeybindings,·type·Keybindings·}·from·"./keybindings.ts";
+      4 │ + export·{·getKeybindings,·type·Keybindings,·setKeybindings·}·from·"./keybindings.ts";
+    5 5 │   export { ProcessTerminal, type Terminal } from "./terminal.t
+check failed: biome, tsgo, vitest
+s";
+    6 6 │   export { TUI } from "./tui.ts";
+  
+
+packages\tui\src\core.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+    4 4 │   export { getKeybindings, setKeybindings, type Keybindings } from "./keybindings.ts";
+    5 5 │   export { ProcessTerminal, type Terminal } from "./terminal.ts";
+    6   │ - export·{·TUI·}·from·"./tui.ts";
+      6 │ + export·{·TUI·}·from·"./tui.ts";
+      7 │ + 
+  
+
+Checked 1060 files in 443ms. No fixes applied.
+Found 12 errors.
+check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Some errors were emitted while running checks.
+  
+
+
+=== tsgo ===
+packages/coding-agent/src/core/session-manager.ts(1282,16): error TS2353: Object literal may only specify known properties, and 'error' does not exist in type 'DiagnosticContext'.
+packages/coding-agent/src/main.ts(12,54): error TS2307: Cannot find module '@pit/tui/core' or its corresponding type declarations.
+
+=== surrogate-slice ===
+surrogate-slice: clean (4 source roots)
+
+=== vitest ===
+
+> @pit/coding-agent@0.75.3 test
+> vitest --run
+
+
+ RUN  v3.2.4 C:/PiTest/packages/coding-agent
+
+ ❯ test/stdout-cleanliness.test.ts (2 tests | 2 failed) 1977ms
+   × stdout cleanliness in non-interactive modes > keeps stdout empty for --mode json --help while routing help to stderr 1014ms
+     → expected 'pit - AI coding assistant with read, …' to be '' // Object.is equality
+   × stdout cleanliness in non-interactive modes > keeps stdout empty for -p --help while routing help to stderr 962ms
+     → expected 'pit - AI coding assistant with read, …' to be '' // Object.is equality
+ ✓ test/footer-data-provider.test.ts (8 tests) 2258ms
+   ✓ FooterDataProvider reftable branch detection > does not notify listeners when reftable updates keep the same branch  517ms
+   ✓ FooterDataProvider reftable branch detection > debounces rapid reftable updates into a single async refresh  1179ms
+   ✓ FooterDataProvider reftable branch detection > updates the cached branch when the reftable directory changes  525ms
+ ✓ test/eval-kernel-runaway.test.ts (6 tests) 2260ms
+   ✓ eval kernel runaway guards > javascript: synchronous while(true){} is aborted by the vm timeout, not hung  1550ms
+ ✓ test/model-registry.test.ts (66 tests) 2298ms
+   ✓ ModelRegistry > API key resolution > request-time resolution > failed commands are retried  368ms
+ ✓ test/package-manager.test.ts (100 tests) 2985ms
+ ✓ test/resolve-config-value-ttl.test.ts (4 tests) 1161ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > clearConfigValueCache forces a fresh spawn  334ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > a TTL of 0 disables the memo (fresh every call)  327ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > never memoises a failing command (no sticky auth outage)  332ms
+ ✓ test/config.test.ts (14 tests | 1 skipped) 2006ms
+   ✓ detectInstallMethod > self-updates npm installs from custom prefixes  370ms
+   ✓ detectInstallMethod > self-updates renamed packages from the current install prefix  369ms
+   ✓ detectInstallMethod > self-update respects configured npmCommand  344ms
+   ✓ detectInstallMethod > self-update treats empty npmCommand as unset  322ms
+   ✓ detectInstallMethod > quotes npm self-update display paths  334ms
+ ✓ test/verification.test.ts (21 tests) 1050ms
+   ✓ verification module > runCheckCommand > times out a hung command  638ms
+ ✓ test/lsp/lsp-hardening.test.ts (7 tests) 3568ms
+   ✓ lsp hardening > does not return OK when diagnostics never publish a fresh result  3124ms
+   ✓ lsp hardening > filters pre-existing diagnostics from post-write output  310ms
+ ✓ test/eval-kernel-orphan-tree.test.ts (1 test) 4027ms
+   ✓ eval kernel orphan child teardown > python: timeout kills child processes spawned by user code (no orphans)  4026ms
+ ✓ test/suite/regressions/2791-fswatch-error-crash.test.ts (1 test) 872ms
+   ✓ issue #2791 fs.watch error event crashes process > process should survive an error event on the theme FSWatcher  871ms
+ ✓ test/auth-storage.test.ts (29 tests) 1807ms
+   ✓ AuthStorage > API key resolution > caching > clearConfigValueCache allows command to run again  332ms
+ ✓ test/lsp/lsp-shutdown-warmup.test.ts (1 test) 1586ms
+   ✓ lsp shutdown vs in-flight warmup (#26) > shutdownClientsForCwd kills a server still mid-initialize  1585ms
+ ✓ test/bash-auto-background.test.ts (10 tests) 4056ms
+   ✓ bash auto-background: promote on threshold instead of kill > promotes a long command (no timeout) to a tracked background job, returning a handle + partial output  1024ms
+   ✓ bash auto-background: promote on threshold instead of kill > an explicit hard timeout is honored as a KILL (idle-real death), never promoted  525ms
+   ✓ bash auto-background: promote on threshold instead of kill > end-to-end through the bash tool: execute returns the 'promoted to background id=' message + partial output, no throw  1012ms
+   ✓ bash auto-background: promote on threshold instead of kill > WITHOUT autoBackground opt-in (the user `!` path), a long command is NOT silently detached — it runs to completion  632ms
+ ✓ test/lsp/writethrough.test.ts (7 tests) 879ms
+   ✓ lsp writethrough — post-write diagnostics > does not re-append unchanged baseline diagnostics  328ms
+stderr | test/hooks-extension.test.ts > hooks-extension lifecycle events > respects the PreCompact hook timeout
+[hook] PreCompact/node "C:\\Users\\User\\AppData\\Local\\Temp\\pi-hookext-slow-1782603472909.js": exit -1
+
+ ✓ test/hooks-extension.test.ts (8 tests) 593ms
+ ✓ test/bash-close-hang-windows.test.ts (2 tests) 999ms
+   ✓ Windows child-process close handling > executeBash resolves after the shell exits even if inherited stdio handles stay open  483ms
+   ✓ Windows child-process close handling > bash tool resolves after the shell exits even if inherited stdio handles stay open  514ms
+ ✓ test/dap/truncate-output.test.ts (5 tests) 693ms
+   ✓ truncateOutput — byte-identity vs reference > multi-byte UTF-8 crossing 1024-char slice boundaries matches the reference  481ms
+ ✓ test/compaction-structural-only.test.ts (7 tests) 1248ms
+ ✓ test/find-grep-git-and-postfilter.test.ts (23 tests) 824ms
+ ✓ test/file-mutation-queue.test.ts (6 tests) 504ms
+ ✓ test/resilience/eval-output-cap.resilience.test.ts (3 tests) 577ms
+ ✓ test/hooks-runner.test.ts (7 tests) 567ms
+ ✓ test/ask-picker-dist-smoke.test.ts (1 test) 516ms
+   ✓ ask-picker compiled dist (src↔dist drift guard) > never renders a line wider than the terminal  514ms
+ ✓ test/skills.test.ts (34 tests) 448ms
+   ✓ skills > loadSkills with options > should expand ~ in skillPaths  386ms
+ ✓ test/code-mode.test.ts (7 tests) 436ms
+ ✓ test/dap/dap-client-socket.test.ts (2 tests) 407ms
+   ✓ DapClient socket-mode failure paths > kills the adapter process when the socket connect times out (no leak)  336ms
+ ✓ test/eval-kernel-cap-sentinel.test.ts (2 tests) 445ms
+ ✓ test/grep-fff-backend.test.ts (8 tests) 461ms
+ ✓ test/mcp-client.test.ts (23 tests) 367ms
+ ✓ test/bash-abort-during-startup.test.ts (2 tests) 485ms
+ ✓ test/recipe.test.ts (10 tests) 359ms
+ ✓ test/resilience/bash-timeout-kill.resilience.test.ts (2 tests) 404ms
+   ✓ resilience: bash timeout → process.kill + observable diagnostic > (3) a command that blocks past its timeout is killed and records process.kill  309ms
+ ✓ test/session-manager-durability.test.ts (6 tests) 298ms
+ ✓ test/exec-command.test.ts (4 tests) 294ms
+ ✓ test/lsp/lsp-tool.test.ts (28 tests) 271ms
+ ✓ test/chrome-devtools-manager.test.ts (41 tests) 249ms
+ ✓ test/dap/dap-exited-outcome.test.ts (1 test) 303ms
+   ✓ DAP continue when 'exited' wins the race (#27) > reports terminated (not running) and surfaces the exit code  302ms
+ ✓ test/dap/debug.test.ts (10 tests) 239ms
+ ✓ test/tool-execution-component.test.ts (36 tests) 225ms
+ ✓ test/cdp-client.test.ts (17 tests) 208ms
+ ✓ test/syntax-highlight.test.ts (5 tests) 141ms
+ ✓ test/repo-map-byte-cap.test.ts (1 test) 175ms
+ ✓ test/suite/regressions/3302-find-path-glob.test.ts (4 tests) 172ms
+ ✓ test/mcp-stdio.test.ts (2 tests) 138ms
+ ✓ test/nav-group-component.test.ts (16 tests) 174ms
+ ✓ test/settings-manager.test.ts (29 tests) 143ms
+ ✓ test/activity-ticker-leak.test.ts (8 tests) 164ms
+ ✓ test/image-processing.test.ts (9 tests) 79ms
+ ✓ test/code-mode-tool.test.ts (4 tests) 109ms
+ ✓ test/dap/dap-stop-outcome-leak.test.ts (1 test) 124ms
+ ✓ test/resilience/persistence-ebusy.resilience.test.ts (2 tests) 102ms
+ ✓ test/preview-server.test.ts (9 tests) 77ms
+ ✓ test/mtime-cache.test.ts (9 tests) 84ms
+ ✓ test/suite/regressions/3303-find-nested-gitignore.test.ts (2 tests) 100ms
+ ✓ test/session-manager/file-operations.test.ts (17 tests) 71ms
+ ✓ test/read-streaming.test.ts (11 tests) 65ms
+ ✓ test/edit-tool-no-full-redraw.test.ts (3 tests) 91ms
+ ✓ test/git-update.test.ts (11 tests) 12805ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > does not run git or modify the checkout when already up to date  887ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > does not pull new remote commits into the installed checkout  1125ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > does not advance past multiple remote commits  1517ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > leaves a detached checkout (no upstream) untouched  1460ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react when remote history is rewritten  1678ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react when remote drops the installed commit  1789ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react to a complete history rewrite  1961ms
+   ✓ DefaultPackageManager git sources (local-only mode) > pinned sources > never updates a pinned git source (with @ref)  1220ms
+   ✓ DefaultPackageManager git sources (local-only mode) > scope-aware update > does not create a project-scope install when source is only registered globally  1154ms
+ ✓ test/compaction-modified-digests.test.ts (2 tests) 86ms
+ ✓ test/legacy-discovery.test.ts (6 tests) 60ms
+ ✓ test/session-info-modified-timestamp.test.ts (1 test) 57ms
+ ✓ test/lsp/route-message.test.ts (5 tests) 53ms
+ ✓ test/clipboard-image.test.ts (6 tests) 65ms
+ ✓ test/todo-overlay.test.ts (8 tests) 51ms
+ ✓ test/fusion/orchestrator.test.ts (7 tests) 42ms
+ ✓ test/dry-run-cli.test.ts (4 tests) 14252ms
+   ✓ pi --dry-run (E2E) > with no model configured > returns JSON with overallStatus=blocked and exit code 1  3296ms
+   ✓ pi --dry-run (E2E) > with no model configured > text format includes 'pi dry-run' header and tool list  3430ms
+   ✓ pi --dry-run (E2E) > with permissions configured > includes the configured mode in the Permissions detail  3711ms
+   ✓ pi --dry-run (E2E) > MCP servers in settings > lists configured MCP servers without making network calls  3809ms
+ ✓ test/url-schemes-conflict.test.ts (9 tests) 41ms
+ ✓ test/compaction.test.ts (46 tests | 2 skipped) 66ms
+ ✓ test/activity-line-component.test.ts (17 tests) 29ms
+ ✓ test/coordinator-spawn.test.ts (27 tests) 48ms
+ ✓ test/project-config-context.test.ts (23 tests) 42ms
+ ✓ test/openai-compatible-presets.test.ts (12 tests) 38ms
+ ✓ test/session-selector-path-delete.test.ts (7 tests) 32ms
+ ✓ test/coordinator-agent-types.test.ts (6 tests) 29ms
+ ✓ test/mcp-resources-prompts.test.ts (4 tests) 25ms
+ ✓ test/frequent-files.test.ts (28 tests) 26ms
+ ✓ test/agent-types.test.ts (6 tests) 29ms
+ ✓ test/clipboard.test.ts (5 tests) 32ms
+ ❯ test/session-manager-persist-resilience.test.ts (4 tests | 2 failed) 56ms
+   ✓ SessionManager _persist resilience (Fix 1) > keeps flushed=false and rewrites the FULL batch when the initial append throws 9ms
+   × SessionManager _persist resilience (Fix 1) > does not lose queued writes when the append throws (queue preserved) 9ms
+     → expected [Function] to throw an error
+   ✓ SessionManager.list size-guard (Fix 2) > lists an oversized session via bounded head-read without materializing the whole body 34ms
+   × SessionManager.list size-guard (Fix 2) > reads normal-sized sessions fully (identical behavior, allMessagesText populated) 4ms
+     → expected '' to contain 'hello small world'
+ ✓ test/lazy-omission.test.ts (60 tests) 35ms
+ ✓ test/prompt-templates.test.ts (82 tests) 27ms
+ ✓ test/mcp-manager-emit-after-dispose.test.ts (1 test) 37ms
+ ✓ test/mcp-cli.test.ts (9 tests) 32ms
+ ✓ test/edit-diff-base-cache.test.ts (4 tests) 31ms
+ ✓ test/activity-turn-snapshot.test.ts (2 tests) 26ms
+ ✓ test/edit-near-miss.test.ts (21 tests) 23ms
+ ✓ test/block-images.test.ts (8 tests) 32ms
+ ✓ test/tool-prepare-arguments.test.ts (22 tests) 29ms
+ ✓ test/learned-error-store.test.ts (12 tests) 25ms
+ ✓ test/suite/regressions/model-selector-provider-headers.test.ts (1 test) 26ms
+ ✓ test/memory-discovery.test.ts (7 tests) 24ms
+ ✓ test/stale-read-warning.test.ts (8 tests) 31ms
+ ✓ test/settings-manager-bug.test.ts (4 tests) 30ms
+ ✓ test/goal-overlay.test.ts (13 tests) 28ms
+ ✓ test/ast-grep-napi-backend.test.ts (5 tests) 21ms
+ ✓ test/clipboard-image-bmp-conversion.test.ts (1 test) 29ms
+ ❯ test/assistant-message-deliverable.test.ts (11 tests | 1 failed) 22ms
+   ✓ deliverable marker > prepends a marker glyph to the first text line once marked 9ms
+   ✓ deliverable marker > is idempotent — calling markAsDeliverable twice still renders one glyph 3ms
+   ✓ deliverable marker > does nothing when the message has no visible text 1ms
+   ✓ deliverable marker > glyph does not appear before markAsDeliverable is called 0ms
+   ✓ narration dimming > dims prose without altering the text or adding a marker 1ms
+   ✓ narration dimming > does not dim the deliverable (markAsNarration is a no-op once deliverable) 1ms
+   × thinking breath lifecycle > breathes a live hidden-thinking label (no stopReason) 3ms
+     → expected 0 to be greater than 0
+   ✓ thinking breath lifecycle > does not breathe once the turn has settled/aborted (stopReason set) 0ms
+   ✓ hidden-thinking label visibility > renders no stale 'Thinking…' label for a settled hidden-thinking turn 0ms
+   ✓ hidden-thinking label visibility > hides the settled thinking trace itself (only the answer text shows) 1ms
+   ✓ hidden-thinking label visibility > still shows the live 'Thinking…' label while the turn is in flight 0ms
+ ✓ test/footer.test.ts (13 tests) 25ms
+ ✓ test/messaging/bus.test.ts (18 tests) 21ms
+ ❯ test/assistant-message-smoothing.test.ts (11 tests | 6 failed) 30ms
+   ✓ assistant message streaming smoothing > reveals everything immediately when smoothing is off 8ms
+   × assistant message streaming smoothing > clamps the trailing block on the first delta, then catches up via the ticker 9ms
+     → expected '\n START xxxxxxxxxxxxxxxxxxxxxxxxxxxx…' not to contain 'END'
+   × assistant message streaming smoothing > shows an initial prefix immediately instead of attaching a blank streaming block 1ms
+     → expected '\n START xxxxxxxxxxxxxxxxxxxxxxxxxxxx…' not to contain 'END'
+   × assistant message streaming smoothing > catches up proportionally after a delayed animation tick 2ms
+     → expected '\n START \n xxxxxxxxxxxxxxxxxxxxxxxxx…' not to contain 'END'
+   × assistant message streaming smoothing > does not retract visible text when another delta arrives after catching up 2ms
+     → expected '\n START xxxxxxxxxxxxxxxxxxxxxxxxxxxx…' not to contain 'END'
+   × assistant message streaming smoothing > flushes to full text the moment the message settles (stopReason set) 1ms
+     → expected '\n AAA zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz…' not to contain 'ZZZ'
+   ✓ assistant message streaming smoothing > is monotonic — the revealed prefix only grows across frames 0ms
+   × assistant message streaming smoothing > keeps the reveal correct while the wavefront edge is faded (#3) 1ms
+     → expected '\n HELLO wwwwwwwwwwwwwwwwwwwwwwwwwwww…' not to contain 'WORLD'
+   ✓ reveal edge fade (fadeLineTail) > preserves the visible text and width, only recoloring the tail 3ms
+   ✓ reveal edge fade (fadeLineTail) > fades the text edge, leaving right padding intact 0ms
+   ✓ reveal edge fade (fadeLineTail) > is a no-op on blank / padding-only lines 0ms
+ ✓ test/coordinator-resume-disk.test.ts (3 tests) 27ms
+ ✓ test/truncate-to-width.test.ts (6 tests) 20ms
+ ✓ test/messaging/message-tool.test.ts (8 tests) 30ms
+ ✓ test/fusion/fusion-live.test.ts (10 tests) 26ms
+ ✓ test/json-crush-bash.test.ts (5 tests) 23ms
+ ✓ test/read-delta.test.ts (7 tests) 20ms
+ ✓ test/hindsight-bank.test.ts (11 tests | 2 skipped) 21ms
+ ✓ test/erasable-syntax-precondition.test.ts (9 tests) 17ms
+ ✓ test/import-grounding.test.ts (65 tests) 10ms
+ ✓ test/ask-picker.test.ts (13 tests) 26ms
+stdout | test/mcp-defer.test.ts > createMcpExtension registration wiring > registers tools for a server that missed the boot connect budget once it comes up
+✓ small (http://localhost:0/small)
+    tools: ping
+✓ late (http://localhost:0/big)
+    tools: later
+
+stdout | test/mcp-defer.test.ts > createMcpExtension registration wiring > leaves the active surface untouched for a boot-connected server with no deferral
+✓ small (http://localhost:0/small)
+    tools: ping
+
+ ✓ test/mcp-defer.test.ts (10 tests) 24ms
+ ✓ test/token-savings.test.ts (9 tests) 19ms
+ ✓ test/footer-stats-cache.test.ts (12 tests) 23ms
+ ✓ test/grep-abort-during-setup.test.ts (2 tests) 20ms
+ ✓ test/forget-tool.test.ts (9 tests) 15ms
+ ✓ test/dap/dap-client-transport-error.test.ts (1 test) 17ms
+ ✓ test/hindsight-bank-scope.test.ts (6 tests) 15ms
+ ✓ test/atomic-write.test.ts (4 tests) 18ms
+ ✓ test/coordinator-scoped-hindsight.test.ts (3 tests) 19ms
+ ✓ test/mcp-tools.test.ts (8 tests) 22ms
+ ✓ test/read-guard-extension.test.ts (13 tests) 25ms
+ ✓ test/suite/regressions/model-selector-error-banner.test.ts (1 test) 18ms
+ ✓ test/mcp-oauth.test.ts (6 tests) 15ms
+ ✓ test/recall-tool-output.test.ts (6 tests) 16ms
+ ✓ test/read-anchors-gate.test.ts (4 tests) 16ms
+ ✓ test/footer-width.test.ts (2 tests) 16ms
+ ✓ test/coordinator-async-reinject.test.ts (5 tests) 13ms
+ ✓ test/edit-tool-legacy-input.test.ts (12 tests) 13ms
+ ✓ test/dry-run.test.ts (5 tests) 19ms
+ ✓ test/coordinator-resume.test.ts (4 tests) 15ms
+ ✓ test/fusion/settings.test.ts (4 tests) 21ms
+ ✓ test/welcome-box.test.ts (11 tests) 11ms
+ ✓ test/assistant-message.test.ts (4 tests) 18ms
+ ✓ test/activity-spacing.test.ts (2 tests) 19ms
+ ✓ test/tree-selector.test.ts (16 tests) 13ms
+ ✓ test/abort-race.test.ts (6 tests) 18ms
+ ✓ test/user-message.test.ts (4 tests) 12ms
+ ✓ test/system-prompt.test.ts (20 tests) 12ms
+ ✓ test/prune-token-economy.test.ts (11 tests) 11ms
+ ✓ test/secret-redactor.test.ts (41 tests) 8ms
+ ✓ test/tool-execution-activity.test.ts (4 tests) 15ms
+ ✓ test/json-crush-read.test.ts (3 tests) 10ms
+ ✓ test/mcp-oauth-401.test.ts (1 test) 13ms
+ ✓ test/living-repo-map.test.ts (12 tests) 12ms
+ ✓ test/mcp-sse-transport.test.ts (2 tests) 10ms
+ ✓ test/package-manager-ssh.test.ts (8 tests) 15ms
+ ✓ test/assistant-reading-width.test.ts (4 tests) 16ms
+ ✓ test/t1-navigation-suggestions.test.ts (4 tests) 8ms
+ ✓ test/paths.test.ts (12 tests) 12ms
+ ✓ test/frontmatter.test.ts (8 tests) 15ms
+ ✓ test/messaging/responder.test.ts (7 tests) 13ms
+ ✓ test/plan-mode-utils.test.ts (33 tests) 11ms
+ ✓ test/messaging/coordinator-messaging.test.ts (1 test) 9ms
+ ✓ test/session-selector-rename.test.ts (3 tests) 12ms
+ ✓ test/footer-extension-status.test.ts (7 tests) 6ms
+ ✓ test/version-check.test.ts (6 tests) 8ms
+ ✓ test/read-directory.test.ts (5 tests) 11ms
+ ✓ test/theme-export.test.ts (2 tests) 12ms
+ ✓ test/fusion/judge.test.ts (6 tests) 9ms
+ ✓ test/keybindings-migration.test.ts (3 tests) 12ms
+ ✓ test/path-utils.test.ts (16 tests) 13ms
+ ✓ test/hindsight-bank-perscope.test.ts (2 tests) 10ms
+ ✓ test/fusion/cli-runner.test.ts (25 tests) 12ms
+ ✓ test/edit-precondition-malformed.test.ts (3 tests) 8ms
+ ✓ test/coordinator-continue.test.ts (4 tests) 11ms
+ ✓ test/bash-command-row.test.ts (14 tests) 8ms
+ ✓ test/web-search-retry.test.ts (3 tests) 11ms
+stdout | test/json-crush-bench.test.ts > json-crush token benchmark (phase 3 sizing) > reduces tokens vs the blind head-cut: gh api issues (array 400)
+[bench] gh api issues (array 400): 79KB | original 24549 tok | read head-cut(50KB) 15516 tok | crushed 427 tok | -98.3% vs original, -97.2% vs blind head-cut
+
+stdout | test/json-crush-bench.test.ts > json-crush token benchmark (phase 3 sizing) > reduces tokens vs the blind head-cut: kubectl pods (items[] 400)
+[bench] kubectl pods (items[] 400): 36KB | original 11435 tok | read head-cut(50KB) 11435 tok | crushed 251 tok | -97.8% vs original, -97.8% vs blind head-cut
+
+ ✓ test/subagent-guards.test.ts (4 tests) 9ms
+ ✓ test/json-crush-bench.test.ts (2 tests) 8ms
+ ✓ test/hindsight-tools-scope.test.ts (8 tests) 7ms
+ ✓ test/activity-stacker.test.ts (9 tests) 12ms
+ ✓ test/spinner-cadence.test.ts (3 tests) 7ms
+ ✓ test/bash-execution-width.test.ts (3 tests) 12ms
+ ✓ test/session-manager/custom-session-id.test.ts (7 tests) 9ms
+ ✓ src/core/tool-error-hint-rules.test.ts (24 tests) 8ms
+ ✓ test/image-resize-callers.test.ts (2 tests) 9ms
+ ✓ test/json-crush.test.ts (13 tests) 12ms
+ ✓ test/message-shell.test.ts (25 tests) 15ms
+ ✓ test/refactor-transaction.test.ts (16 tests) 6ms
+ ✓ test/edit-v2-mtime-store.test.ts (1 test) 10ms
+ ✓ test/permissions-checker.test.ts (41 tests) 10ms
+ ✓ test/compaction-summary-reasoning.test.ts (7 tests) 9ms
+ ✓ test/read-outline.test.ts (3 tests) 6ms
+ ✓ test/mcp-sse-parse-cancel.test.ts (7 tests) 8ms
+ ✓ test/plan-tool.test.ts (17 tests) 8ms
+ ✓ test/prune-store-put-throws.test.ts (1 test) 7ms
+ ✓ test/task-rigor.test.ts (9 tests) 5ms
+ ✓ test/find-symbol.test.ts (2 tests) 7ms
+ ✓ test/element-to-source.test.ts (10 tests) 9ms
+ ✓ test/goal-manager.test.ts (17 tests) 6ms
+ ✓ test/mcp-config-files.test.ts (4 tests) 8ms
+ ✓ test/model-resolver.test.ts (31 tests) 6ms
+ ✓ test/erasable-syntax-grounding.test.ts (28 tests) 4ms
+ ✓ test/watchpoint-bisect.test.ts (10 tests) 7ms
+ ✓ test/todo-cadence.test.ts (21 tests) 4ms
+ ✓ test/restore-sandbox-env.test.ts (3 tests) 6ms
+ ✓ test/tool-call-stats.test.ts (25 tests) 7ms
+ ✓ test/debug-verify.test.ts (13 tests) 8ms
+ ✓ test/chrome-launcher.test.ts (10 tests) 5ms
+ ✓ test/render-mermaid-caps.test.ts (3 tests) 6ms
+ ✓ test/deferred-output-store.test.ts (6 tests) 9ms
+ ✓ test/todo-manager.test.ts (13 tests) 6ms
+ ✓ test/ansi-utils.test.ts (5 tests) 5ms
+ ✓ test/goal-complete-gate.test.ts (7 tests) 6ms
+ ✓ test/ask-tool.test.ts (8 tests) 5ms
+ ✓ test/session-manager/labels.test.ts (8 tests) 8ms
+ ✓ test/todo-tool.test.ts (5 tests) 4ms
+ ✓ test/grounding-guard.test.ts (30 tests) 8ms
+ ✓ test/destructive-command-guard.test.ts (16 tests) 4ms
+ ✓ test/resilience/stream-idle-timeout.resilience.test.ts (2 tests) 6ms
+ ✓ test/compaction-summary-frame.test.ts (16 tests) 6ms
+ ✓ test/engineering-styles.test.ts (11 tests) 9ms
+ ✓ test/args.test.ts (64 tests) 7ms
+ ✓ test/theme-context-usage-color.test.ts (5 tests) 4ms
+ ✓ test/compaction-token-estimate.test.ts (11 tests) 4ms
+ ✓ test/tool-call-feedback.test.ts (22 tests) 5ms
+ ✓ test/repo-map.test.ts (1 test) 6ms
+ ✓ test/preview-queue.test.ts (7 tests) 3ms
+ ✓ test/argument-prep.test.ts (23 tests) 5ms
+ ✓ test/patch-audit.test.ts (7 tests) 5ms
+ ✓ test/export-html-xss.test.ts (8 tests) 4ms
+ ✓ test/chrome-devtools-tool.test.ts (8 tests) 6ms
+done
+ ✓ test/print-mode.test.ts (3 tests) 5ms
+ ✓ test/tool-discovery.test.ts (15 tests) 6ms
+ ✓ test/tool-schema-no-accents.test.ts (65 tests) 5ms
+ ✓ test/theme-detection.test.ts (7 tests) 6ms
+ ✓ test/session-manager/build-context.test.ts (14 tests) 6ms
+ ✓ test/color-ease.test.ts (3 tests) 5ms
+ ✓ test/stagnation.test.ts (27 tests) 6ms
+ ✓ test/settings-tool-activity.test.ts (13 tests) 6ms
+ ✓ test/list-declarations.test.ts (4 tests) 4ms
+ ✓ test/trigger-compact-extension.test.ts (1 test) 3ms
+ ✓ test/rpc-jsonl.test.ts (4 tests) 4ms
+ ✓ test/ttsr.test.ts (11 tests) 4ms
+ ✓ test/test-summary.test.ts (8 tests) 5ms
+ ✓ test/repair-note-policy.test.ts (7 tests) 3ms
+ ✓ test/path-grounding.test.ts (15 tests) 8ms
+ ✓ test/coordinator-registry.test.ts (10 tests) 4ms
+ ✓ test/git-ssh-url.test.ts (9 tests) 4ms
+ ✓ test/symbol-oom.test.ts (4 tests) 4ms
+ ✓ test/pending-checks.test.ts (5 tests) 4ms
+ ✓ test/failure-summary.test.ts (4 tests) 4ms
+ ✓ test/session-manager/save-entry.test.ts (1 test) 4ms
+ ✓ test/session-selector-search.test.ts (11 tests) 4ms
+ ✓ test/pattern-grounding.test.ts (15 tests) 4ms
+ ✓ test/cache-stats.test.ts (7 tests) 4ms
+ ✓ test/ask-schema-trim.test.ts (1 test) 4ms
+ ✓ test/bash-grounding.test.ts (10 tests) 6ms
+ ✓ test/tool-activity-family.test.ts (22 tests) 5ms
+ ✓ test/spinner-ticker.test.ts (3 tests) 3ms
+ ✓ test/messaging/relay.test.ts (2 tests) 3ms
+ ✓ test/tool-call-stats-repeating-pattern.test.ts (9 tests) 5ms
+ ✓ test/rpc-client-clone.test.ts (1 test) 3ms
+ ✓ test/tool-feedback-settings.test.ts (18 tests) 4ms
+ ✓ test/bash-prepare-arguments.test.ts (4 tests) 4ms
+ ✓ test/dynamic-border.test.ts (5 tests) 5ms
+ ✓ test/t1-edit-v2-error-hints.test.ts (4 tests) 5ms
+ ✓ test/permissions-matcher.test.ts (12 tests) 4ms
+ ✓ test/user-input-bus.test.ts (4 tests) 4ms
+ ✓ src/modes/interactive/diagnostics-summary.test.ts (2 tests) 5ms
+ ✓ test/file-digests.test.ts (6 tests) 7ms
+ ✓ test/skills-index-mode.test.ts (2 tests) 3ms
+ ✓ test/frequent-files-settings.test.ts (7 tests) 3ms
+ ✓ src/core/cross-error.test.ts (10 tests) 3ms
+ ✓ test/hashline-crlf-newtext.test.ts (1 test) 2ms
+ ✓ test/find-root-empty-line.test.ts (1 test) 3ms
+ ✓ test/calc-unary-exponent.test.ts (6 tests) 4ms
+ ✓ test/session-manager/migration.test.ts (2 tests) 3ms
+ ✓ test/json-crush-prune.test.ts (2 tests) 4ms
+ ✓ test/bash-activity.test.ts (6 tests) 3ms
+ ✓ src/core/tool-rewrite-windows.test.ts (16 tests) 4ms
+ ✓ test/claude-code-version.test.ts (3 tests) 2ms
+ ✓ test/collapse-repeated-lines.test.ts (8 tests) 2ms
+ ✓ test/coordinator-depth.test.ts (7 tests) 3ms
+ ✓ test/ls-broken-symlink.test.ts (1 test) 4ms
+ ✓ test/export-html-whitespace.test.ts (3 tests) 3ms
+ ✓ test/arg-summary.test.ts (3 tests) 3ms
+ ✓ test/t3-retry-reason.test.ts (5 tests) 2ms
+ ✓ test/slash-commands.test.ts (23 tests) 3ms
+ ✓ test/code-mode-harness-dispatcher.test.ts (5 tests) 3ms
+ ✓ test/async-delivery.test.ts (3 tests) 3ms
+ ✓ src/core/built-ins/learned-error-guard-extension.test.ts (8 tests) 3ms
+ ✓ test/hashline-after-before-error.test.ts (2 tests) 3ms
+ ✓ test/search-skills.test.ts (2 tests) 2ms
+ ✓ test/initial-message.test.ts (3 tests) 2ms
+ ✓ test/messaging/settings.test.ts (2 tests) 2ms
+ ✓ test/surrogate.test.ts (7 tests) 3ms
+ ✓ test/export-html-skill-block.test.ts (4 tests) 2ms
+ ✓ test/tool-activity.test.ts (7 tests) 3ms
+ ✓ test/compaction-extensions-example.test.ts (2 tests) 2ms
+ ✓ test/goal-complete-tool.test.ts (3 tests) 3ms
+ ✓ test/compaction-serialization.test.ts (3 tests) 3ms
+ ✓ test/pi-user-agent.test.ts (1 test) 3ms
+ ✓ test/regex-budget.test.ts (2 tests) 2ms
+ ↓ test/rpc.test.ts (14 tests | 14 skipped)
+ ✓ test/lsp/wait-project-loaded-leak.test.ts (1 test) 2ms
+ ✓ test/boot-outline.test.ts (2 tests) 2ms
+ ✓ test/fusion/cycle.test.ts (1 test) 2ms
+ ✓ test/t2-print-provenance.test.ts (4 tests) 2ms
+ ✓ test/assistant-message-visible-text.test.ts (3 tests) 2ms
+ ✓ test/bash-cwd-tilde.test.ts (5 tests) 3ms
+ ✓ test/t1-read-dedupe-clear.test.ts (2 tests) 2ms
+ ↓ test/chrome-devtools-e2e.test.ts (4 tests | 4 skipped)
+
+⎯⎯⎯⎯⎯⎯ Failed Suites 87 ⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/agent-session-auto-compaction-multipass.test.ts [ test/agent-session-auto-compaction-multipass.test.ts ]
+ FAIL  test/agent-session-auto-compaction-queue.test.ts [ test/agent-session-auto-compaction-queue.test.ts ]
+ FAIL  test/agent-session-branching.test.ts [ test/agent-session-branching.test.ts ]
+ FAIL  test/agent-session-compaction.test.ts [ test/agent-session-compaction.test.ts ]
+ FAIL  test/agent-session-concurrent.test.ts [ test/agent-session-concurrent.test.ts ]
+ FAIL  test/agent-session-dynamic-provider.test.ts [ test/agent-session-dynamic-provider.test.ts ]
+ FAIL  test/agent-session-dynamic-tools.test.ts [ test/agent-session-dynamic-tools.test.ts ]
+ FAIL  test/agent-session-engineering-style.test.ts [ test/agent-session-engineering-style.test.ts ]
+ FAIL  test/agent-session-frequent-files.test.ts [ test/agent-session-frequent-files.test.ts ]
+ FAIL  test/agent-session-listener-isolation.test.ts [ test/agent-session-listener-isolation.test.ts ]
+ FAIL  test/agent-session-presend-overflow.test.ts [ test/agent-session-presend-overflow.test.ts ]
+ FAIL  test/agent-session-retry.test.ts [ test/agent-session-retry.test.ts ]
+ FAIL  test/agent-session-runtime-events.test.ts [ test/agent-session-runtime-events.test.ts ]
+ FAIL  test/agent-session-stats.test.ts [ test/agent-session-stats.test.ts ]
+ FAIL  test/agent-session-tree-navigation.test.ts [ test/agent-session-tree-navigation.test.ts ]
+ FAIL  test/async-deliver-routing.test.ts [ test/async-deliver-routing.test.ts ]
+ FAIL  test/cache-prefix-diagnostics.test.ts [ test/cache-prefix-diagnostics.test.ts ]
+ FAIL  test/chrome-devtools-default-surface.test.ts [ test/chrome-devtools-default-surface.test.ts ]
+ FAIL  test/chrome-inline-command.test.ts [ test/chrome-inline-command.test.ts ]
+ FAIL  test/compaction-extensions.test.ts [ test/compaction-extensions.test.ts ]
+ FAIL  test/coordinator-parent-refs.test.ts [ test/coordinator-parent-refs.test.ts ]
+ FAIL  test/doom-loop-escalation.test.ts [ test/doom-loop-escalation.test.ts ]
+ FAIL  test/doom-loop-recovery.test.ts [ test/doom-loop-recovery.test.ts ]
+ FAIL  test/extensions-discovery.test.ts [ test/extensions-discovery.test.ts ]
+ FAIL  test/extensions-input-event.test.ts [ test/extensions-input-event.test.ts ]
+ FAIL  test/extensions-runner.test.ts [ test/extensions-runner.test.ts ]
+ FAIL  test/goal-auto-continue.test.ts [ test/goal-auto-continue.test.ts ]
+ FAIL  test/interactive-mode-anthropic-warning.test.ts [ test/interactive-mode-anthropic-warning.test.ts ]
+ FAIL  test/interactive-mode-compaction.test.ts [ test/interactive-mode-compaction.test.ts ]
+ FAIL  test/interactive-mode-status.test.ts [ test/interactive-mode-status.test.ts ]
+ FAIL  test/interactive-mode-suspend.test.ts [ test/interactive-mode-suspend.test.ts ]
+ FAIL  test/interactive-mode-ticker-leak.test.ts [ test/interactive-mode-ticker-leak.test.ts ]
+ FAIL  test/learned-error-runtime-persistence.test.ts [ test/learned-error-runtime-persistence.test.ts ]
+ FAIL  test/oauth-selector.test.ts [ test/oauth-selector.test.ts ]
+ FAIL  test/package-command-paths.test.ts [ test/package-command-paths.test.ts ]
+ FAIL  test/pending-checks-gate.test.ts [ test/pending-checks-gate.test.ts ]
+ FAIL  test/presend-overflow-reestimate.test.ts [ test/presend-overflow-reestimate.test.ts ]
+ FAIL  test/resource-loader.test.ts [ test/resource-loader.test.ts ]
+ FAIL  test/result-loop.test.ts [ test/result-loop.test.ts ]
+ FAIL  test/rpc-prompt-response-semantics.test.ts [ test/rpc-prompt-response-semantics.test.ts ]
+ FAIL  test/sdk-session-manager.test.ts [ test/sdk-session-manager.test.ts ]
+ FAIL  test/sdk-skills.test.ts [ test/sdk-skills.test.ts ]
+ FAIL  test/session-cwd.test.ts [ test/session-cwd.test.ts ]
+ FAIL  test/skill-args-expansion.test.ts [ test/skill-args-expansion.test.ts ]
+ FAIL  test/test-harness.test.ts [ test/test-harness.test.ts ]
+ FAIL  test/todo-cadence-integration.test.ts [ test/todo-cadence-integration.test.ts ]
+ FAIL  test/todo-integration.test.ts [ test/todo-integration.test.ts ]
+ FAIL  test/tool-discovery-default-surface.test.ts [ test/tool-discovery-default-surface.test.ts ]
+ FAIL  test/tool-failure-budget.test.ts [ test/tool-failure-budget.test.ts ]
+ FAIL  test/tools.test.ts [ test/tools.test.ts ]
+ FAIL  test/verification-gate.test.ts [ test/verification-gate.test.ts ]
+ FAIL  test/visual-gate.test.ts [ test/visual-gate.test.ts ]
+ FAIL  test/fusion/fusion-user-message.test.ts [ test/fusion/fusion-user-message.test.ts ]
+ FAIL  test/fusion/orchestration-facet.test.ts [ test/fusion/orchestration-facet.test.ts ]
+ FAIL  test/messaging/agent-session-messaging.test.ts [ test/messaging/agent-session-messaging.test.ts ]
+ FAIL  test/resilience/crash-isolation.resilience.test.ts [ test/resilience/crash-isolation.resilience.test.ts ]
+ FAIL  test/session-manager/tree-traversal.test.ts [ test/session-manager/tree-traversal.test.ts ]
+ FAIL  test/suite/agent-session-bash-persistence.test.ts [ test/suite/agent-session-bash-persistence.test.ts ]
+ FAIL  test/suite/agent-session-compaction.test.ts [ test/suite/agent-session-compaction.test.ts ]
+ FAIL  test/suite/agent-session-interrupt.test.ts [ test/suite/agent-session-interrupt.test.ts ]
+ FAIL  test/suite/agent-session-model-extension.test.ts [ test/suite/agent-session-model-extension.test.ts ]
+ FAIL  test/suite/agent-session-prompt.test.ts [ test/suite/agent-session-prompt.test.ts ]
+ FAIL  test/suite/agent-session-queue.test.ts [ test/suite/agent-session-queue.test.ts ]
+ FAIL  test/suite/agent-session-retry-events.test.ts [ test/suite/agent-session-retry-events.test.ts ]
+ FAIL  test/suite/agent-session-runtime.test.ts [ test/suite/agent-session-runtime.test.ts ]
+ FAIL  test/suite/tool-discovery-activation.test.ts [ test/suite/tool-discovery-activation.test.ts ]
+ FAIL  test/suite/regressions/1717-2113-agent-session-event-settlement.test.ts [ test/suite/regressions/1717-2113-agent-session-event-settlement.test.ts ]
+ FAIL  test/suite/regressions/2023-queued-slash-command-followup.test.ts [ test/suite/regressions/2023-queued-slash-command-followup.test.ts ]
+ FAIL  test/suite/regressions/2753-reload-stale-resource-settings.test.ts [ test/suite/regressions/2753-reload-stale-resource-settings.test.ts ]
+ FAIL  test/suite/regressions/2781-skill-collision-precedence.test.ts [ test/suite/regressions/2781-skill-collision-precedence.test.ts ]
+ FAIL  test/suite/regressions/2835-tools-allowlist-filters-extension-tools.test.ts [ test/suite/regressions/2835-tools-allowlist-filters-extension-tools.test.ts ]
+ FAIL  test/suite/regressions/2860-replaced-session-context.test.ts [ test/suite/regressions/2860-replaced-session-context.test.ts ]
+ FAIL  test/suite/regressions/3217-scoped-model-order.test.ts [ test/suite/regressions/3217-scoped-model-order.test.ts ]
+ FAIL  test/suite/regressions/3317-network-connection-lost-retry.test.ts [ test/suite/regressions/3317-network-connection-lost-retry.test.ts ]
+ FAIL  test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts [ test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts ]
+ FAIL  test/suite/regressions/3616-settings-inmemory-reload.test.ts [ test/suite/regressions/3616-settings-inmemory-reload.test.ts ]
+ FAIL  test/suite/regressions/3686-session-name-event.test.ts [ test/suite/regressions/3686-session-name-event.test.ts ]
+ FAIL  test/suite/regressions/3688-tree-cancel-compacting.test.ts [ test/suite/regressions/3688-tree-cancel-compacting.test.ts ]
+ FAIL  test/suite/regressions/3982-message-end-cost-override.test.ts [ test/suite/regressions/3982-message-end-cost-override.test.ts ]
+ FAIL  test/suite/regressions/4167-thinking-toggle-pending-tool-render.test.ts [ test/suite/regressions/4167-thinking-toggle-pending-tool-render.test.ts ]
+ FAIL  test/suite/tool-calling-eval/01-edit-aliases.test.ts [ test/suite/tool-calling-eval/01-edit-aliases.test.ts ]
+ FAIL  test/suite/tool-calling-eval/02-edit-near-miss-and-indent.test.ts [ test/suite/tool-calling-eval/02-edit-near-miss-and-indent.test.ts ]
+ FAIL  test/suite/tool-calling-eval/03-unknown-tool-suggestion.test.ts [ test/suite/tool-calling-eval/03-unknown-tool-suggestion.test.ts ]
+ FAIL  test/suite/tool-calling-eval/04-tool-call-stats.test.ts [ test/suite/tool-calling-eval/04-tool-call-stats.test.ts ]
+ FAIL  test/suite/tool-calling-eval/05-rewrite-registry.test.ts [ test/suite/tool-calling-eval/05-rewrite-registry.test.ts ]
+ FAIL  test/suite/tool-calling-eval/06-learned-error-isolation.test.ts [ test/suite/tool-calling-eval/06-learned-error-isolation.test.ts ]
+ FAIL  test/suite/tool-calling-eval/07-memory-leak-bounds.test.ts [ test/suite/tool-calling-eval/07-memory-leak-bounds.test.ts ]
+Error: Cannot find package '@pit/ai/models-compare' imported from 'C:/PiTest/packages/coding-agent/src/main.ts'
+ ❯ src/main.ts:11:1
+      9| import { createInterface } from "node:readline";
+     10| import type { ImageContent } from "@pit/ai";
+     11| import { modelsAreEqual } from "@pit/ai/models-compare";
+       | ^
+     12| import { ProcessTerminal, setKeybindings, TUI } from "@pit/tui/core";
+     13| import chalk from "chalk";
+
+Caused by: Error: Failed to load url @pit/ai/models-compare (resolved id: @pit/ai/models-compare) in C:/PiTest/packages/coding-agent/src/main.ts. Does the file exist?
+ ❯ loadAndTransform ../../node_modules/vite/dist/node/chunks/config.js:22679:33
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/98]⎯
+
+
+⎯⎯⎯⎯⎯⎯ Failed Tests 11 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/assistant-message-deliverable.test.ts > thinking breath lifecycle > breathes a live hidden-thinking label (no stopReason)
+AssertionError: expected 0 to be greater than 0
+ ❯ test/assistant-message-deliverable.test.ts:117:21
+    115|   const c = new AssistantMessageComponent(undefined, true, undefined, …
+    116|   c.updateContent(thinkingMsg("pensando"));
+    117|   expect(counter.n).toBeGreaterThan(0); // breath ticker armed
+       |                     ^
+    118|  });
+    119| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/98]⎯
+
+ FAIL  test/assistant-message-smoothing.test.ts > assistant message streaming smoothing > clamps the trailing block on the first delta, then catches up via the ticker
+AssertionError: expected '\n START xxxxxxxxxxxxxxxxxxxxxxxxxxxx…' not to contain 'END'
+
+- Expected
++ Received
+
+- END
++
++  START xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx END 
+
+ ❯ test/assistant-message-smoothing.test.ts:54:30
+     52|   comp.updateContent(textMsg(`START ${"x".repeat(50)} END`));
+     53|   // First delta: an initial prefix is visible, with the ticker still …
+     54|   expect(rendered(comp)).not.toContain("END");
+       |                              ^
+     55|   expect(tui.animating).toBe(true);
+     56| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/98]⎯
+
+ FAIL  test/assistant-message-smoothing.test.ts > assistant message streaming smoothing > shows an initial prefix immediately instead of attaching a blank streaming block
+AssertionError: expected '\n START xxxxxxxxxxxxxxxxxxxxxxxxxxxx…' not to contain 'END'
+
+- Expected
++ Received
+
+- END
++
++  START xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx END 
+
+ ❯ test/assistant-message-smoothing.test.ts:73:21
+     71|   const first = rendered(comp);
+     72|   expect(first.length).toBeGreaterThan(0);
+     73|   expect(first).not.toContain("END");
+       |                     ^
+     74|   expect(tui.animating).toBe(true);
+     75|  });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/98]⎯
+
+ FAIL  test/assistant-message-smoothing.test.ts > assistant message streaming smoothing > catches up proportionally after a delayed animation tick
+AssertionError: expected '\n START \n xxxxxxxxxxxxxxxxxxxxxxxxx…' not to contain 'END'
+
+- Expected
++ Received
+
+- END
++
++  START 
++  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 
++  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 
++  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 
++  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 
++  xxxxxxxxxxxxxxxxxxxxxxxxxxxx END 
+
+ ❯ test/assistant-message-smoothing.test.ts:83:30
+     81|   comp.updateContent(textMsg(`START ${"x".repeat(500)} END`));
+     82|   tui.tick(16);
+     83|   expect(rendered(comp)).not.toContain("END");
+       |                              ^
+     84| 
+     85|   tui.tick(500);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/98]⎯
+
+ FAIL  test/assistant-message-smoothing.test.ts > assistant message streaming smoothing > does not retract visible text when another delta arrives after catching up
+AssertionError: expected '\n START xxxxxxxxxxxxxxxxxxxxxxxxxxxx…' not to contain 'END'
+
+- Expected
++ Received
+
+- END
++
++  START xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx 
++  yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy 
++  yy END 
+
+ ❯ test/assistant-message-smoothing.test.ts:104:30
+    102| 
+    103|   expect(rendered(comp)).toContain(firstText);
+    104|   expect(rendered(comp)).not.toContain("END");
+       |                              ^
+    105|   expect(tui.animating).toBe(true);
+    106|  });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/98]⎯
+
+ FAIL  test/assistant-message-smoothing.test.ts > assistant message streaming smoothing > flushes to full text the moment the message settles (stopReason set)
+AssertionError: expected '\n AAA zzzzzzzzzzzzzzzzzzzzzzzzzzzzzz…' not to contain 'ZZZ'
+
+- Expected
++ Received
+
+- ZZZ
++
++  AAA zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz ZZZ 
+
+ ❯ test/assistant-message-smoothing.test.ts:113:30
+    111| 
+    112|   comp.updateContent(textMsg(`AAA ${"z".repeat(40)} ZZZ`)); // live st…
+    113|   expect(rendered(comp)).not.toContain("ZZZ");
+       |                              ^
+    114| 
+    115|   comp.updateContent(textMsg(`AAA ${"z".repeat(40)} ZZZ`, "end_turn"))…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[7/98]⎯
+
+ FAIL  test/assistant-message-smoothing.test.ts > assistant message streaming smoothing > keeps the reveal correct while the wavefront edge is faded (#3)
+AssertionError: expected '\n HELLO wwwwwwwwwwwwwwwwwwwwwwwwwwww…' not to contain 'WORLD'
+
+- Expected
++ Received
+
+- WORLD
++
++  HELLO wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww WORLD 
+
+ ❯ test/assistant-message-smoothing.test.ts:143:30
+    141|   tui.tick(16); // one frame in: a few chars revealed, capped step
+    142|   const mid = comp.render(120).join("\n");
+    143|   expect(stripAnsi(mid)).not.toContain("WORLD"); // still revealing
+       |                              ^
+    144|   expect(mid).toContain("\x1b"); // colored output (markdown + edge fa…
+    145| 
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[8/98]⎯
+
+ FAIL  test/session-manager-persist-resilience.test.ts > SessionManager _persist resilience (Fix 1) > does not lose queued writes when the append throws (queue preserved)
+AssertionError: expected [Function] to throw an error
+ ❯ test/session-manager-persist-resilience.test.ts:140:67
+    138|   (mgr as unknown as { sessionFile: string }).sessionFile = brokenFile;
+    139| 
+    140|   expect(() => mgr.appendMessage(makeAssistantMessage("second"))).toTh…
+       |                                                                   ^
+    141| 
+    142|   // The queued write must survive the failed append (not silently spl…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[9/98]⎯
+
+ FAIL  test/session-manager-persist-resilience.test.ts > SessionManager.list size-guard (Fix 2) > reads normal-sized sessions fully (identical behavior, allMessagesText populated)
+AssertionError: expected '' to contain 'hello small world'
+
+- Expected
++ Received
+
+- hello small world
+
+ ❯ test/session-manager-persist-resilience.test.ts:263:32
+    261|   expect(info.firstMessage).toBe("hello small world");
+    262|   // Full path: body search index is populated.
+    263|   expect(info.allMessagesText).toContain("hello small world");
+       |                                ^
+    264|   expect(info.allMessagesText).toContain("a reply with searchable body…
+    265|   expect(info.messageCount).toBe(2);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[10/98]⎯
+
+ FAIL  test/stdout-cleanliness.test.ts > stdout cleanliness in non-interactive modes > keeps stdout empty for --mode json --help while routing help to stderr
+AssertionError: expected 'pit - AI coding assistant with read, …' to be '' // Object.is equality
+
+- Expected
++ Received
+
++ pit - AI coding assistant with read, bash, edit, write tools
++
++ Usage:
++   pit [options] [@files...] [messages...]
++
++ Commands:
++   pit install <source> [-l]     Install extension source and add to settings
++   pit remove <source> [-l]      Remove extension source from settings
++   pit uninstall <source> [-l]   Alias for remove
++   pit update [source|self|pi]   Update pit and installed extensions
++   pit list                      List installed extensions from settings
++   pit config                    Open TUI to enable/disable package resources
++   pit <command> --help          Show help for install/remove/uninstall/update/list
++
++ Options:
++   --provider <name>              Provider name
++   --model <pattern>              Model pattern or ID (supports "provider/id" and optional ":<thinking>")
++   --api-key <key>                API key (defaults to env vars)
++   --system-prompt <text>         System prompt (default: coding assistant prompt)
++   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
++   --mode <mode>                  Output mode: text (default), json, or rpc
++   --print, -p                    Non-interactive mode: process prompt and exit
++   --continue, -c                 Continue previous session
++   --resume, -r                   Select a session to resume
++   --session <path|id>            Use specific session file or partial UUID
++   --fork <path|id>               Fork specific session file or partial UUID into a new session
++   --session-dir <dir>            Directory for session storage and lookup
++   --no-session                   Don't save session (ephemeral)
++   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
++                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
++   --no-tools, -nt                Disable all tools by default (built-in and extension)
++   --no-builtin-tools, -nbt       Disable built-in tools by default but keep extension/custom tools enabled
++   --tools, -t <tools>            Comma-separated allowlist of tool names to enable
++                                  Applies to built-in, extension, and custom tools
++   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
++   --role <name>                  Run under a model role: default | smol | slow | plan | commit
++   --smol [model]                 Shortcut for --role smol (cheap subagent fan-out)
++                                  Optional [model] overrides the role's primary model for this turn
++                                  (e.g. --smol claude-sonnet-4-7 or --smol=claude-sonnet-4-7)
++   --slow [model]                 Shortcut for --role slow (deep reasoning); optional [model] override
++   --plan [model]                 Shortcut for --role plan (plan-mode model); optional [model] override
++                                  --smol/--slow/--plan are mutually exclusive; rightmost wins
++   --extension, -e <path>         Load an extension file (can be used multiple times)
++   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
++   --skill <path>                 Load a skill file or directory (can be used multiple times)
++   --no-skills, -ns               Disable skills discovery and loading
++   --prompt-template <path>       Load a prompt template file or directory (can be used multiple times)
++   --no-prompt-templates, -np     Disable prompt template discovery and loading
++   --theme <path>                 Load a theme file or directory (can be used multiple times)
++   --no-themes                    Disable theme discovery and loading
++   --no-context-files, -nc        Disable AGENTS.md and CLAUDE.md discovery and loading
++   --no-hashline-anchors          Disable hashline edit anchor block on full-file reads
++   --no-legacy-discovery          Disable discovery of legacy rule/skill files from other agents
++                                  (Cursor, Cline, Windsurf, Gemini, Copilot, VS Code, .claude/CLAUDE.md)
++   --export <file>                Export session file to HTML and exit
++   --list-models [search]         List available models (with optional fuzzy search)
++   --verbose                      Force verbose startup (overrides quietStartup setting)
++   --offline                      Disable startup network operations (same as PIT_OFFLINE=1)
++   --permission-mode <mode>       Permission mode: plan | auto (default = auto)
++   --dry-run [text|json]          Inspect resolved config/auth/tools/MCP and exit without running the agent
++   --help, -h                     Show this help
++   --version, -v                  Show version number
++
++ Extensions can register additional flags (e.g., --plan from plan-mode extension).
++
++ Examples:
++   # Interactive mode
++   pit
++
++   # Interactive mode with initial prompt
++   pit "List all .ts files in src/"
++
++   # Include files in initial message
++   pit @prompt.md @image.png "What color is the sky?"
++
++   # Non-interactive mode (process and exit)
++   pit -p "List all .ts files in src/"
++
++   # Multiple messages (interactive)
++   pit "Read package.json" "What dependencies do we have?"
++
++   # Continue previous session
++   pit --continue "What did we discuss?"
++
++   # Use different model
++   pit --provider openai --model gpt-4o-mini "Help me refactor this code"
++
++   # Use model with provider prefix (no --provider needed)
++   pit --model openai/gpt-4o "Help me refactor this code"
++
++   # Use model with thinking level shorthand
++   pit --model sonnet:high "Solve this complex problem"
++
++   # Limit model cycling to specific models
++   pit --models claude-sonnet,claude-haiku,gpt-4o
++
++   # Limit to a specific provider with glob pattern
++   pit --models "anthropic/*"
++
++   # Cycle models with fixed thinking levels
++   pit --models sonnet:high,haiku:low
++
++   # Start with a specific thinking level
++   pit --thinking high "Solve this complex problem"
++
++   # Read-only mode (no file modifications possible)
++   pit --tools read,grep,find,ls -p "Review the code in src/"
++
++   # Export a session file to HTML
++   pit --export ~/.pit/agent/sessions/--path--/session.jsonl
++   pit --export session.jsonl output.html
++
++ Environment Variables:
++   ANTHROPIC_API_KEY                - Anthropic Claude API key
++   ANTHROPIC_OAUTH_TOKEN            - Anthropic OAuth token (alternative to API key)
++   OPENAI_API_KEY                   - OpenAI GPT API key
++   GEMINI_API_KEY                   - Google Gemini API key
++   OPENROUTER_API_KEY               - OpenRouter API key
++   MINIMAX_API_KEY                  - MiniMax API key
++   OPENCODE_API_KEY                 - OpenCode Zen/OpenCode Go API key
++   KIMI_API_KEY                     - Kimi For Coding API key
++   XIAOMI_API_KEY                   - Xiaomi MiMo API key (api.xiaomimimo.com billing)
++   PIT_CODING_AGENT_DIR             - Config directory (default: ~/.pit/agent)
++   PIT_CODING_AGENT_SESSION_DIR     - Session storage directory (overridden by --session-dir)
++   PIT_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
++   PIT_OFFLINE                       - Disable startup network operations when set to 1/true/yes
++
++ Built-in Tool Names:
++   read   - Read file contents
++   bash   - Execute bash commands
++   edit   - Edit files with find/replace
++   write  - Write files (creates/overwrites)
++   grep   - Search file contents (read-only, off by default)
++   find   - Find files by glob pattern (read-only, off by default)
++   ls     - List directory contents (read-only, off by default)
++
++
+
+ ❯ test/stdout-cleanliness.test.ts:91:25
+     89| 
+     90|   expect(result.code).toBe(0);
+     91|   expect(result.stdout).toBe("");
+       |                         ^
+     92|   // Help text is emitted via console.log, which the output guard redi…
+     93|   // stderr in non-interactive modes. stdout must stay clean for JSON …
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[11/98]⎯
+
+ FAIL  test/stdout-cleanliness.test.ts > stdout cleanliness in non-interactive modes > keeps stdout empty for -p --help while routing help to stderr
+AssertionError: expected 'pit - AI coding assistant with read, …' to be '' // Object.is equality
+
+- Expected
++ Received
+
++ pit - AI coding assistant with read, bash, edit, write tools
++
++ Usage:
++   pit [options] [@files...] [messages...]
++
++ Commands:
++   pit install <source> [-l]     Install extension source and add to settings
++   pit remove <source> [-l]      Remove extension source from settings
++   pit uninstall <source> [-l]   Alias for remove
++   pit update [source|self|pi]   Update pit and installed extensions
++   pit list                      List installed extensions from settings
++   pit config                    Open TUI to enable/disable package resources
++   pit <command> --help          Show help for install/remove/uninstall/update/list
++
++ Options:
++   --provider <name>              Provider name
++   --model <pattern>              Model pattern or ID (supports "provider/id" and optional ":<thinking>")
++   --api-key <key>                API key (defaults to env vars)
++   --system-prompt <text>         System prompt (default: coding assistant prompt)
++   --append-system-prompt <text>  Append text or file contents to the system prompt (can be used multiple times)
++   --mode <mode>                  Output mode: text (default), json, or rpc
++   --print, -p                    Non-interactive mode: process prompt and exit
++   --continue, -c                 Continue previous session
++   --resume, -r                   Select a session to resume
++   --session <path|id>            Use specific session file or partial UUID
++   --fork <path|id>               Fork specific session file or partial UUID into a new session
++   --session-dir <dir>            Directory for session storage and lookup
++   --no-session                   Don't save session (ephemeral)
++   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
++                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
++   --no-tools, -nt                Disable all tools by default (built-in and extension)
++   --no-builtin-tools, -nbt       Disable built-in tools by default but keep extension/custom tools enabled
++   --tools, -t <tools>            Comma-separated allowlist of tool names to enable
++                                  Applies to built-in, extension, and custom tools
++   --thinking <level>             Set thinking level: off, minimal, low, medium, high, xhigh
++   --role <name>                  Run under a model role: default | smol | slow | plan | commit
++   --smol [model]                 Shortcut for --role smol (cheap subagent fan-out)
++                                  Optional [model] overrides the role's primary model for this turn
++                                  (e.g. --smol claude-sonnet-4-7 or --smol=claude-sonnet-4-7)
++   --slow [model]                 Shortcut for --role slow (deep reasoning); optional [model] override
++   --plan [model]                 Shortcut for --role plan (plan-mode model); optional [model] override
++                                  --smol/--slow/--plan are mutually exclusive; rightmost wins
++   --extension, -e <path>         Load an extension file (can be used multiple times)
++   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
++   --skill <path>                 Load a skill file or directory (can be used multiple times)
++   --no-skills, -ns               Disable skills discovery and loading
++   --prompt-template <path>       Load a prompt template file or directory (can be used multiple times)
++   --no-prompt-templates, -np     Disable prompt template discovery and loading
++   --theme <path>                 Load a theme file or directory (can be used multiple times)
++   --no-themes                    Disable theme discovery and loading
++   --no-context-files, -nc        Disable AGENTS.md and CLAUDE.md discovery and loading
++   --no-hashline-anchors          Disable hashline edit anchor block on full-file reads
++   --no-legacy-discovery          Disable discovery of legacy rule/skill files from other agents
++                                  (Cursor, Cline, Windsurf, Gemini, Copilot, VS Code, .claude/CLAUDE.md)
++   --export <file>                Export session file to HTML and exit
++   --list-models [search]         List available models (with optional fuzzy search)
++   --verbose                      Force verbose startup (overrides quietStartup setting)
++   --offline                      Disable startup network operations (same as PIT_OFFLINE=1)
++   --permission-mode <mode>       Permission mode: plan | auto (default = auto)
++   --dry-run [text|json]          Inspect resolved config/auth/tools/MCP and exit without running the agent
++   --help, -h                     Show this help
++   --version, -v                  Show version number
++
++ Extensions can register additional flags (e.g., --plan from plan-mode extension).
++
++ Examples:
++   # Interactive mode
++   pit
++
++   # Interactive mode with initial prompt
++   pit "List all .ts files in src/"
++
++   # Include files in initial message
++   pit @prompt.md @image.png "What color is the sky?"
++
++   # Non-interactive mode (process and exit)
++   pit -p "List all .ts files in src/"
++
++   # Multiple messages (interactive)
++   pit "Read package.json" "What dependencies do we have?"
++
++   # Continue previous session
++   pit --continue "What did we discuss?"
++
++   # Use different model
++   pit --provider openai --model gpt-4o-mini "Help me refactor this code"
++
++   # Use model with provider prefix (no --provider needed)
++   pit --model openai/gpt-4o "Help me refactor this code"
++
++   # Use model with thinking level shorthand
++   pit --model sonnet:high "Solve this complex problem"
++
++   # Limit model cycling to specific models
++   pit --models claude-sonnet,claude-haiku,gpt-4o
++
++   # Limit to a specific provider with glob pattern
++   pit --models "anthropic/*"
++
++   # Cycle models with fixed thinking levels
++   pit --models sonnet:high,haiku:low
++
++   # Start with a specific thinking level
++   pit --thinking high "Solve this complex problem"
++
++   # Read-only mode (no file modifications possible)
++   pit --tools read,grep,find,ls -p "Review the code in src/"
++
++   # Export a session file to HTML
++   pit --export ~/.pit/agent/sessions/--path--/session.jsonl
++   pit --export session.jsonl output.html
++
++ Environment Variables:
++   ANTHROPIC_API_KEY                - Anthropic Claude API key
++   ANTHROPIC_OAUTH_TOKEN            - Anthropic OAuth token (alternative to API key)
++   OPENAI_API_KEY                   - OpenAI GPT API key
++   GEMINI_API_KEY                   - Google Gemini API key
++   OPENROUTER_API_KEY               - OpenRouter API key
++   MINIMAX_API_KEY                  - MiniMax API key
++   OPENCODE_API_KEY                 - OpenCode Zen/OpenCode Go API key
++   KIMI_API_KEY                     - Kimi For Coding API key
++   XIAOMI_API_KEY                   - Xiaomi MiMo API key (api.xiaomimimo.com billing)
++   PIT_CODING_AGENT_DIR             - Config directory (default: ~/.pit/agent)
++   PIT_CODING_AGENT_SESSION_DIR     - Session storage directory (overridden by --session-dir)
++   PIT_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)
++   PIT_OFFLINE                       - Disable startup network operations when set to 1/true/yes
++
++ Built-in Tool Names:
++   read   - Read file contents
++   bash   - Execute bash commands
++   edit   - Edit files with find/replace
++   write  - Write files (creates/overwrites)
++   grep   - Search file contents (read-only, off by default)
++   find   - Find files by glob pattern (read-only, off by default)
++   ls     - List directory contents (read-only, off by default)
++
++
+
+ ❯ test/stdout-cleanliness.test.ts:101:25
+     99| 
+    100|   expect(result.code).toBe(0);
+    101|   expect(result.stdout).toBe("");
+       |                         ^
+    102|   // Help text is emitted via console.log, which the output guard redi…
+    103|   // stderr in print mode. stdout must stay clean for parsers piping o…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[12/98]⎯
+
+
+ Test Files  91 failed | 298 passed | 2 skipped (391)
+      Tests  11 failed | 3027 passed | 23 skipped (3061)
+   Start at  20:37:47
+   Duration  26.92s (transform 4.97s, setup 0ms, collect 102.64s, tests 77.47s, environment 61ms, prepare 31.44s)
+
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path C:\PiTest\packages\coding-agent
+npm error workspace @pit/coding-agent@0.75.3
+npm error location C:\PiTest\packages\coding-agent
+npm error command failed
+npm error command C:\WINDOWS\system32\cmd.exe /d /s /c vitest --run

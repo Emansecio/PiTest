@@ -152,19 +152,69 @@ describe("ActivityLineComponent", () => {
 	});
 });
 
+function bashStub() {
+	return execStub({
+		getToolName: () => "bash",
+		getArgs: () => ({ command: "npm test" }),
+		getResultDetails: () => undefined,
+	});
+}
+
+describe("ActivityLineComponent — edit preview", () => {
+	it("auto-shows up to five diff lines on a settled edit without expanding", () => {
+		const bodyLines = Array.from({ length: 12 }, (_, i) => `diff line ${i + 1}`);
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getResultDetails: () => ({ diff: "+1 a\n-1 b" }),
+				render: () => bodyLines,
+			}),
+		);
+		const out = c.render(120).map(stripAnsi);
+		expect(out[0]).toContain("Edited");
+		expect(out.length).toBe(1 + 5 + 1);
+		expect(out[1]).toContain("diff line 1");
+		expect(out[5]).toContain("diff line 5");
+		expect(out[6]).toContain("+7 more lines");
+	});
+
+	it("shows live diff body while an edit is still pending", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getActivityState: () => "pending",
+				render: () => ["+  1 streaming"],
+			}),
+		);
+		const out = c.render(120).map(stripAnsi);
+		expect(out[0]).toContain("Editing");
+		expect(out.some((l) => l.includes("streaming"))).toBe(true);
+	});
+
+	it("accumulates diffstat across coalesced edits", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(execStub({ getResultDetails: () => ({ diff: "+  1 a\n-  2 b" }) }));
+		c.coalesce(execStub({ getResultDetails: () => ({ diff: "+  3 c" }) }));
+		const head = c.render(120).map(stripAnsi)[0];
+		expect(head).toContain("×2");
+		expect(head).toContain("+2");
+		expect(head).toContain("-1");
+	});
+});
+
 describe("ActivityLineComponent — settled-line memoization", () => {
 	it("returns the same array instance across frames once settled and collapsed", () => {
 		const c = new ActivityLineComponent(fakeTui());
-		c.setExec(execStub({}));
+		c.setExec(bashStub());
 		const first = c.render(120);
 		const second = c.render(120);
 		expect(second).toBe(first);
-		expect(second.map(stripAnsi)[0]).toContain("Edited");
+		expect(second.map(stripAnsi)[0]).toContain("Ran");
 	});
 
 	it("recomputes when the width changes", () => {
 		const c = new ActivityLineComponent(fakeTui());
-		c.setExec(execStub({}));
+		c.setExec(bashStub());
 		const w120 = c.render(120);
 		const w80 = c.render(80);
 		expect(w80).not.toBe(w120);
@@ -185,12 +235,13 @@ describe("ActivityLineComponent — settled-line memoization", () => {
 		state = "success";
 		const s1 = c.render(120);
 		expect(s1.map(stripAnsi)[0]).toContain("Edited");
-		expect(c.render(120)).toBe(s1);
+		// Success with diff auto-preview keeps recomputing — no memo.
+		expect(c.render(120)).not.toBe(s1);
 	});
 
 	it("setExpanded busts the memo and the body recomputes every frame", () => {
 		const c = new ActivityLineComponent(fakeTui());
-		c.setExec(execStub({}));
+		c.setExec(bashStub());
 		const collapsed = c.render(120);
 		expect(c.render(120)).toBe(collapsed);
 
@@ -208,7 +259,14 @@ describe("ActivityLineComponent — settled-line memoization", () => {
 
 	it("invalidate() drops the memo and reassembles byte-identically", () => {
 		const c = new ActivityLineComponent(fakeTui());
-		c.setExec(execStub({ invalidate() {} }));
+		c.setExec(
+			execStub({
+				getToolName: () => "bash",
+				getArgs: () => ({ command: "npm test" }),
+				getResultDetails: () => undefined,
+				invalidate() {},
+			}),
+		);
 		const first = c.render(120);
 		c.invalidate();
 		const second = c.render(120);

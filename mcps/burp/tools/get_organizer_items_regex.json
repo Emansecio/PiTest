@@ -1,0 +1,23 @@
+{
+  "name": "get_organizer_items_regex",
+  "description": "Displays items matching a specified regex within the Organizer tab",
+  "inputSchema": {
+    "properties": {
+      "count": {
+        "type": "integer"
+      },
+      "offset": {
+        "type": "integer"
+      },
+      "regex": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "count",
+      "offset",
+      "regex"
+    ],
+    "type": "object"
+  }
+}

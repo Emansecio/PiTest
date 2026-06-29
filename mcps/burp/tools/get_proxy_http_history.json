@@ -1,0 +1,19 @@
+{
+  "name": "get_proxy_http_history",
+  "description": "Displays items within the proxy HTTP history",
+  "inputSchema": {
+    "properties": {
+      "count": {
+        "type": "integer"
+      },
+      "offset": {
+        "type": "integer"
+      }
+    },
+    "required": [
+      "count",
+      "offset"
+    ],
+    "type": "object"
+  }
+}

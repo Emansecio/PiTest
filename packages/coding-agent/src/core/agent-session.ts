@@ -79,6 +79,7 @@ import {
 	applyOldThinkingCap,
 	applySupersedeOnly,
 	cloneToolResultMessagesForPrune,
+	planContextPrune,
 	pressurePruneProtectTurns,
 	pruneOldToolOutputs,
 	wouldApplyOldThinkingCap,
@@ -1365,7 +1366,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 				: AgentSession._resolvedUndefined;
 
 			return extensionPromise.then((hookResult) => {
-				this._applyLiveContextEconomyAfterTool(toolCall, isError);
+				const effectiveError = hookResult?.isError ?? isError;
+				this._applyLiveContextEconomyAfterTool(toolCall, effectiveError);
 				return hookResult;
 			});
 		};
@@ -3015,14 +3017,15 @@ export class AgentSession implements CompactionHost, FusionHost {
 		let floor = 0;
 		let threshold = 0;
 
+		const prunePlan = planContextPrune(messages, protectTurns);
 		if (proactivePruneEnabled) {
 			const floorRaw = Number(process.env.PIT_PROACTIVE_PRUNE_FLOOR);
 			floor = proactivePruneFloor(contextWindow, Number.isFinite(floorRaw) ? floorRaw : undefined);
 			if (contextTokens <= floor) {
-				runSupersedeOnly = wouldApplySupersedeOnly(messages, protectTurns);
+				runSupersedeOnly = wouldApplySupersedeOnly(messages, protectTurns, prunePlan);
 			} else {
 				threshold = adaptivePruneThreshold(contextTokens, contextWindow);
-				runToolPrune = wouldPruneOldToolOutputs(messages, threshold, protectTurns);
+				runToolPrune = wouldPruneOldToolOutputs(messages, threshold, protectTurns, prunePlan);
 			}
 		}
 
@@ -3048,7 +3051,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 
 		if (runToolPrune) {
-			const toolReclaimed = pruneOldToolOutputs(copy, threshold, protectTurns, true);
+			const toolReclaimed = pruneOldToolOutputs(copy, threshold, protectTurns, true, prunePlan);
 			if (toolReclaimed > 0) {
 				reclaimed += toolReclaimed;
 				recordDiagnostic({
@@ -3062,7 +3065,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 				});
 			}
 		} else if (runSupersedeOnly) {
-			const supersedeReclaimed = applySupersedeOnly(copy, protectTurns);
+			const supersedeReclaimed = applySupersedeOnly(copy, protectTurns, prunePlan);
 			if (supersedeReclaimed > 0) {
 				reclaimed += supersedeReclaimed;
 				recordDiagnostic({

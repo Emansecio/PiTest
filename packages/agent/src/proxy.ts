@@ -8,10 +8,13 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	type Context,
+	DEFAULT_IDLE_TIMEOUT_MS,
 	EventStream,
 	type Model,
 	parseStreamingJson,
+	raceReadWithIdle,
 	type SimpleStreamOptions,
+	SseChunkBuffer,
 	type StopReason,
 	type ToolCall,
 } from "@pit/ai";
@@ -80,6 +83,8 @@ type ProxySerializableStreamOptions = Pick<
 export interface ProxyStreamOptions extends ProxySerializableStreamOptions {
 	/** Local abort signal for the proxy request */
 	signal?: AbortSignal;
+	/** Idle window before a stalled body read is treated as dead (default 120s). */
+	idleTimeoutMs?: number;
 	/** Auth token for the proxy server */
 	authToken: string;
 	/** Proxy server URL (e.g., "https://genai.example.com") */
@@ -195,25 +200,25 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 
 			reader = response.body!.getReader();
 			const decoder = new TextDecoder();
-			let buffer = "";
+			const chunks = new SseChunkBuffer();
 			let sawTerminal = false;
 
 			while (true) {
-				const { done, value } = await reader.read();
+				const { done, value } = await raceReadWithIdle(reader, {
+					idleMs: options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+					signal: options.signal,
+					abortError: () => new Error("Request aborted by user"),
+				});
 				if (done) break;
 
-				if (options.signal?.aborted) {
-					throw new Error("Request aborted by user");
-				}
-
-				buffer += decoder.decode(value, { stream: true });
+				chunks.append(decoder.decode(value, { stream: true }));
 
 				// Guard against a hostile/malformed 200 body that never emits a
 				// newline (e.g. one giant JSON blob, wrong content type, or raw
 				// bytes from a proxy bug). Without a cap, `buffer` accumulates every
 				// chunk for the full stream duration and OOMs the process. Treat an
 				// over-long unbroken buffer as a protocol error and stop reading.
-				if (buffer.length > MAX_STREAM_BUFFER_BYTES) {
+				if (chunks.buffer.length - chunks.cursor > MAX_STREAM_BUFFER_BYTES) {
 					finalizeOpenToolCalls(partial);
 					partial.stopReason = "error";
 					partial.errorMessage = "Proxy stream exceeded max line buffer";
@@ -222,11 +227,12 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 					break;
 				}
 
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-
 				let bufferOverflow = false;
-				for (const line of lines) {
+				let newlineIdx = chunks.findFromCursor("\n");
+				while (newlineIdx !== -1) {
+					const line = chunks.sliceFromCursor(newlineIdx);
+					chunks.advanceTo(newlineIdx + 1);
+					newlineIdx = chunks.findFromCursor("\n");
 					if (line.startsWith("data: ")) {
 						const data = line.slice(6).trim();
 						if (data) {
@@ -260,6 +266,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 						}
 					}
 				}
+				chunks.compactIfNeeded();
 				if (bufferOverflow) break;
 			}
 

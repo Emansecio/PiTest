@@ -1,34 +1,53 @@
 /**
  * G12 — CI regression gate for context-economy token benches.
  *
- * Runs bench-session-tokens + bench-prompt-size, parses METRIC lines, and
- * compares against scripts/baselines/token-economy.json.
+ * Runs bench-session-tokens + bench-prompt-size + bench-fusion-tokens in
+ * parallel, parses METRIC lines, and compares against
+ * scripts/baselines/token-economy.json.
  *
  * Usage: node scripts/check-token-bench.mjs
  */
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(here, "..");
 const baselinePath = join(here, "baselines", "token-economy.json");
 const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
 
+const BENCH_SCRIPTS = [
+	"scripts/bench-session-tokens.mts",
+	"scripts/bench-prompt-size.mts",
+	"scripts/bench-fusion-tokens.mts",
+];
+
 function runBench(script) {
-	const r = spawnSync("npx", ["tsx", script], {
-		cwd: join(here, ".."),
-		encoding: "utf8",
-		shell: true,
-		stdio: ["ignore", "pipe", "pipe"],
+	return new Promise((resolve, reject) => {
+		const child = spawn("node", ["--import", "tsx", script], {
+			cwd: repoRoot,
+			shell: true,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let out = "";
+		child.stdout.on("data", (chunk) => {
+			out += chunk;
+		});
+		child.stderr.on("data", (chunk) => {
+			out += chunk;
+		});
+		child.on("close", (code) => {
+			if (code !== 0) {
+				reject(new Error(`bench failed: ${script} (exit ${code})\n${out.slice(-4000)}`));
+				return;
+			}
+			resolve(out);
+		});
+		child.on("error", (err) => {
+			reject(err);
+		});
 	});
-	const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
-	if (r.status !== 0) {
-		console.error(`bench failed: ${script} (exit ${r.status})`);
-		console.error(out.slice(-4000));
-		process.exit(1);
-	}
-	return out;
 }
 
 function parseMetrics(output) {
@@ -69,10 +88,15 @@ function checkRule(kind, key, expected, actual, failures) {
 	}
 }
 
-const sessionOut = runBench("scripts/bench-session-tokens.mts");
-const promptOut = runBench("scripts/bench-prompt-size.mts");
-const fusionOut = runBench("scripts/bench-fusion-tokens.mts");
-const metrics = parseMetrics(`${sessionOut}\n${promptOut}\n${fusionOut}`);
+let benchOutputs;
+try {
+	benchOutputs = await Promise.all(BENCH_SCRIPTS.map((script) => runBench(script)));
+} catch (err) {
+	console.error(err instanceof Error ? err.message : String(err));
+	process.exit(1);
+}
+
+const metrics = parseMetrics(benchOutputs.join("\n"));
 
 const failures = [];
 for (const [kind, rules] of Object.entries(baseline)) {

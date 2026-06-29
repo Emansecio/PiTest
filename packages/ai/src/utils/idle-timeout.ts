@@ -72,6 +72,20 @@ function defaultAbortError(): Error {
  * Race `promise` against an idle watchdog and an optional user abort signal.
  * Shared primitive for {@link raceReadWithIdle} and {@link iterateWithIdleTimeout}.
  */
+const abortRaceBySignal = new WeakMap<AbortSignal, Promise<never>>();
+
+function sharedAbortRace(signal: AbortSignal, makeAbortError: () => Error): Promise<never> {
+	let race = abortRaceBySignal.get(signal);
+	if (!race) {
+		race = new Promise<never>((_resolve, reject) => {
+			const onAbort = () => reject(makeAbortError());
+			signal.addEventListener("abort", onAbort, { once: true });
+		});
+		abortRaceBySignal.set(signal, race);
+	}
+	return race;
+}
+
 export async function raceWithIdleAndAbort<T>(promise: Promise<T>, options?: RaceWithIdleAndAbortOptions): Promise<T> {
 	const idleMs = options?.idleMs ?? DEFAULT_IDLE_TIMEOUT_MS;
 	const signal = options?.signal;
@@ -82,7 +96,6 @@ export async function raceWithIdleAndAbort<T>(promise: Promise<T>, options?: Rac
 	}
 
 	let timer: ReturnType<typeof setTimeout> | undefined;
-	let onAbort: (() => void) | undefined;
 
 	try {
 		promise.catch(() => {});
@@ -102,20 +115,13 @@ export async function raceWithIdleAndAbort<T>(promise: Promise<T>, options?: Rac
 
 		const racers: Array<Promise<T>> = [promise, idlePromise];
 		if (signal) {
-			const abortPromise = new Promise<never>((_resolve, reject) => {
-				onAbort = () => reject(makeAbortError());
-				signal.addEventListener("abort", onAbort, { once: true });
-			});
-			racers.push(abortPromise);
+			racers.push(sharedAbortRace(signal, makeAbortError));
 		}
 
 		return await Promise.race(racers);
 	} finally {
 		if (timer !== undefined) {
 			clearTimeout(timer);
-		}
-		if (signal && onAbort) {
-			signal.removeEventListener("abort", onAbort);
 		}
 	}
 }
@@ -140,13 +146,17 @@ export async function raceReadWithIdle<T>(
 	reader: IdleTimeoutReader<T>,
 	options?: RaceReadWithIdleOptions,
 ): Promise<{ done: boolean; value?: T }> {
-	return raceWithIdleAndAbort(reader.read(), {
-		...options,
-		idleDiagnosticSource: "idle-timeout.raceReadWithIdle",
-		onIdle: (idleMs) => {
-			reader.cancel(new IdleStreamTimeoutError(idleMs)).catch(() => {});
-		},
-	});
+	try {
+		return await raceWithIdleAndAbort(reader.read(), {
+			...options,
+			idleDiagnosticSource: "idle-timeout.raceReadWithIdle",
+		});
+	} catch (err) {
+		if (err instanceof IdleStreamTimeoutError) {
+			await reader.cancel(err).catch(() => {});
+		}
+		throw err;
+	}
 }
 
 /**

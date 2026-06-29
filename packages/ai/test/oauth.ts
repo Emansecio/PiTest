@@ -55,6 +55,8 @@ function saveAuthStorage(storage: AuthStorage): void {
  *
  */
 export async function resolveApiKey(provider: string): Promise<string | undefined> {
+	if (process.env.PIT_AI_SKIP_LOCAL_AUTH === "1") return undefined;
+
 	const storage = loadAuthStorage();
 	const entry = storage[provider];
 

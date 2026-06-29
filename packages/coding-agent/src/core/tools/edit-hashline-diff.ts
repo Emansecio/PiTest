@@ -51,14 +51,27 @@ function hashWindow(lines: string[], start: number): string {
 export function computeAnchorIndex(content: string | string[]): Map<string, number[]> {
 	const lines = typeof content === "string" ? content.split("\n") : content;
 	const index = new Map<string, number[]>();
-	const last = lines.length - HASHLINE_WINDOW;
-	for (let i = 0; i <= last; i++) {
-		const h = hashWindow(lines, i);
-		const bucket = index.get(h);
-		if (bucket) bucket.push(i);
-		else index.set(h, [i]);
-	}
+	appendAnchorWindows(index, lines, 0);
 	return index;
+}
+
+function pruneAnchorIndexFrom(anchorIndex: Map<string, number[]>, fromLine: number): void {
+	for (const [hash, bucket] of anchorIndex) {
+		const kept = bucket.filter((lineIndex) => lineIndex < fromLine);
+		if (kept.length === 0) anchorIndex.delete(hash);
+		else anchorIndex.set(hash, kept);
+	}
+}
+
+function appendAnchorWindows(anchorIndex: Map<string, number[]>, lines: string[], fromLine: number): void {
+	const last = lines.length - HASHLINE_WINDOW;
+	const start = Math.max(0, fromLine);
+	for (let i = start; i <= last; i++) {
+		const h = hashWindow(lines, i);
+		const bucket = anchorIndex.get(h);
+		if (bucket) bucket.push(i);
+		else anchorIndex.set(h, [i]);
+	}
 }
 
 export const ANCHOR_DEFAULT_MAX_BYTES = 2048;
@@ -257,10 +270,10 @@ export function applyHashlineEdits(
 ): { newContent: string; appliedCount: number } {
 	let lines = content.split("\n");
 	let applied = 0;
+	const anchorIndex = computeAnchorIndex(lines);
 
 	for (let i = 0; i < edits.length; i++) {
 		const edit = edits[i];
-		const anchorIndex = computeAnchorIndex(lines);
 		const beforeStart = findAnchor(lines, edit.before_hash, i, "before_hash", 0, anchorIndex);
 		// after window must start strictly after the before window ends
 		const afterStart = findAnchor(
@@ -282,6 +295,9 @@ export function applyHashlineEdits(
 		const normalizedNewText = normalizeToLF(edit.new_text);
 		const replacement = normalizedNewText === "" ? [] : normalizedNewText.split("\n");
 		lines = [...lines.slice(0, replaceStart), ...replacement, ...lines.slice(replaceEnd)];
+		const rebuildFrom = Math.max(0, replaceStart - HASHLINE_WINDOW + 1);
+		pruneAnchorIndexFrom(anchorIndex, rebuildFrom);
+		appendAnchorWindows(anchorIndex, lines, rebuildFrom);
 		applied++;
 	}
 

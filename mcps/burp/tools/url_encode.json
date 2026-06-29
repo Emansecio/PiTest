@@ -1,0 +1,15 @@
+{
+  "name": "url_encode",
+  "description": "URL encodes the input string",
+  "inputSchema": {
+    "properties": {
+      "content": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "content"
+    ],
+    "type": "object"
+  }
+}

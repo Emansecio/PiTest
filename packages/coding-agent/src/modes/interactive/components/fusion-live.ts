@@ -1,7 +1,8 @@
 import { performance } from "node:perf_hooks";
-import { type Component, SPINNER_FRAME_MS, SPINNER_FRAMES, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
+import { type Component, SPINNER_FRAMES, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
 import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import { theme } from "../theme/theme.ts";
+import { spinnerFrameIndexAt } from "./spinner-ticker.ts";
 
 /**
  * One panel member in the live Fusion strip. The panel members are CLI
@@ -288,15 +289,26 @@ export class FusionLiveComponent implements Component {
 	 * member's (or the judge's) whole-second clock ticked. Returning `false`
 	 * otherwise lets the ticker drop the frame entirely (no wasted render).
 	 */
+	private hasAnimatedSpinnerContent(): boolean {
+		if (this.stage === "brief" || this.stage === "judge" || this.stage === "verify") return true;
+		for (const entry of this.members.values()) {
+			if (entry.member.status === "running") return true;
+		}
+		return false;
+	}
+
 	private tick(now: number): boolean {
 		// Spinner frame rides the monotonic clock the ticker hands us (same basis
 		// as spinnerFrame() → phase-locked with every other spinner). The elapsed
 		// counters are anchored to wall-clock starts (Date.now()), so the
 		// per-second fingerprint is computed against Date.now(), NOT the ticker's
 		// performance.now() — mixing the two bases would yield a garbage delta.
-		const frameIdx = Math.floor(now / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
+		const frameIdx = spinnerFrameIndexAt(now);
 		const elapsedKey = this.currentElapsedKey(Date.now());
 		if (frameIdx === this.lastFrameIdx && elapsedKey === this.lastElapsedKey) {
+			return false;
+		}
+		if (!this.hasAnimatedSpinnerContent() && elapsedKey === this.lastElapsedKey) {
 			return false;
 		}
 		this.lastFrameIdx = frameIdx;
@@ -354,7 +366,7 @@ export class FusionLiveComponent implements Component {
 
 	render(width: number): string[] {
 		const now = Date.now();
-		const frameIdx = Math.floor(performance.now() / SPINNER_FRAME_MS) % SPINNER_FRAMES.length;
+		const frameIdx = spinnerFrameIndexAt(performance.now());
 		const elapsedKey = this.currentElapsedKey(now);
 		if (
 			this.renderCache &&
@@ -392,7 +404,9 @@ export class FusionLiveComponent implements Component {
 			lines.push(
 				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId} · drafting the advisor brief`)}  ${theme.fg("dim", `${bs}s`)}`,
 			);
-			return lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
+			const rendered = lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
+			this.renderCache = { version: this.renderVersion, width, frameIdx, elapsedKey, lines: rendered };
+			return rendered;
 		}
 
 		// Name column width (visible) so the status tails line up. A leading slot

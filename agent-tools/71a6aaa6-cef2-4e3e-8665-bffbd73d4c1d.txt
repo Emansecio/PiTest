@@ -1,0 +1,696 @@
+
+> pi-monorepo@0.0.8 check
+> node scripts/check-parallel.mjs
+
+
+=== biome ===
+packages\ai\src\providers\anthropic.ts:1:1 assist/source/organizeImports  FIXABLE  ━━━━━━━━━━━━━━━━━
+
+  × The imports and exports are not sorted.
+  
+  > 1 │ import Anthropic from "@anthropic-ai/sdk";
+      │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    2 │ import type {
+    3 │ CacheControlEphemeral,
+  
+  i Safe fix: Organize Imports (Biome)
+  
+      29   29 │   import { splitSystemPromptOnDynamic } from "../types.ts";
+      30   30 │   import { createClientCache } from "../utils/client-cache.ts";
+      31      │ - import·{·AssistantMessageEventStream·}·from·"../utils/event-stream.ts";
+      32      │ - import·{·headersToRecord·}·from·"../utils/headers.ts";
+      33      │ - import·{·type·ConnectGuard,·createConnectGuard·}·from·"../utils/connect-guard.ts";
+           31 │ + import·{·type·ConnectGuard,·createConnectGuard·}·from·"../utils/connect-guard.ts";
+           32 │ + import·{·AssistantMessageEventStream·}·from·"../utils/event-stream.ts";
+           33 │ + import·{·headersToRecord·}·from·"../utils/headers.ts";
+      34   34 │   import { DEFAULT_IDLE_TIMEOUT_MS, raceReadWithIdle } from "../utils/idle-timeout.ts";
+      35   35 │   import { finalizeStreamingJson, parseJsonWithRepair } from "../utils/json-parse.ts";
+  
+
+packages\coding-agent\src\core\deferred-output-store.ts format ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+    67 67 │   export function getCurrentDeferredOutputStore(): DeferredOutputStore | undefined {
+    68 68 │   return currentStore;
+    69    │ - }
+       69 │ + }
+       70 │ + 
+  
+
+packages\coding-agent\src\core\tools\ls.ts:1:1 assist/source/organizeImports  FIXABLE  ━━━━━━━━━━━━━
+
+  × The imports and exports are not sorted.
+  
+  > 1 │ import type { AgentTool } from "@pit/agent-core";
+      │ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    2 │ import { Text } from "@pit/tui";
+    3 │ import type { Dirent } from "node:fs";
+  
+  i Safe fix: Organize Imports (Biome)
+  
+      1     │ - import·type·{·AgentTool·}·from·"@pit/agent-core";
+      2     │ - import·{·Text·}·from·"@pit/tui";
+      3     │ - import·type·{·Dirent·}·from·"node:fs";
+          1 │ + import·type·{·Dirent·}·from·"node:fs";
+          2 │ + import·type·{·AgentTool·}·from·"@pit/agent-core";
+          3 │ + import·{·Text·}·from·"@pit/tuiChecked 1060 files in 529ms. No fixes applied.
+Found 3 errors.
+";
+      4   4 │   import { access, readdir, stat } from "fs/promises";
+      5   5 │   import nodePath from "path";
+  
+
+check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Some errors were emitted while running checks.
+  
+
+
+check failed: biome, vitest
+
+=== surrogate-slice ===
+surrogate-slice: clean (4 source roots)
+
+=== vitest ===
+
+> @pit/coding-agent@0.75.3 test
+> vitest --run
+
+
+ RUN  v3.2.4 C:/PiTest/packages/coding-agent
+
+ ✓ test/footer-data-provider.test.ts (8 tests) 2289ms
+   ✓ FooterDataProvider reftable branch detection > does not notify listeners when reftable updates keep the same branch  532ms
+   ✓ FooterDataProvider reftable branch detection > debounces rapid reftable updates into a single async refresh  1191ms
+   ✓ FooterDataProvider reftable branch detection > updates the cached branch when the reftable directory changes  529ms
+ ✓ test/eval-kernel-runaway.test.ts (6 tests) 2298ms
+   ✓ eval kernel runaway guards > javascript: synchronous while(true){} is aborted by the vm timeout, not hung  1561ms
+ ✓ test/package-manager.test.ts (100 tests) 3567ms
+ ✓ test/config.test.ts (14 tests | 1 skipped) 1752ms
+   ✓ detectInstallMethod > self-updates npm installs from custom prefixes  306ms
+   ✓ detectInstallMethod > self-update treats empty npmCommand as unset  317ms
+   ✓ detectInstallMethod > quotes npm self-update display paths  336ms
+ ✓ test/eval-kernel-orphan-tree.test.ts (1 test) 4029ms
+   ✓ eval kernel orphan child teardown > python: timeout kills child processes spawned by user code (no orphans)  4028ms
+ ✓ test/lsp/lsp-hardening.test.ts (7 tests) 3624ms
+   ✓ lsp hardening > does not return OK when diagnostics never publish a fresh result  3136ms
+   ✓ lsp hardening > filters pre-existing diagnostics from post-write output  328ms
+ ✓ test/bash-auto-background.test.ts (10 tests) 4054ms
+   ✓ bash auto-background: promote on threshold instead of kill > promotes a long command (no timeout) to a tracked background job, returning a handle + partial output  1020ms
+   ✓ bash auto-background: promote on threshold instead of kill > an explicit hard timeout is honored as a KILL (idle-real death), never promoted  508ms
+   ✓ bash auto-background: promote on threshold instead of kill > end-to-end through the bash tool: execute returns the 'promoted to background id=' message + partial output, no throw  1022ms
+   ✓ bash auto-background: promote on threshold instead of kill > WITHOUT autoBackground opt-in (the user `!` path), a long command is NOT silently detached — it runs to completion  638ms
+ ✓ test/model-registry.test.ts (66 tests) 2074ms
+   ✓ ModelRegistry > API key resolution > request-time resolution > failed commands are retried  313ms
+   ✓ ModelRegistry > API key resolution > request-time resolution > getApiKeyAndHeaders re-resolves authHeader each request when the memo is disabled  307ms
+ ✓ test/pending-checks-gate.test.ts (4 tests) 2144ms
+   ✓ background-check guard > waits for a running check, then re-injects its failure  557ms
+   ✓ background-check guard > re-injects a 'still running' warning when the check never settles in time  1042ms
+   ✓ background-check guard > stays silent when the backgrounded check finished green  528ms
+ ✓ test/stdout-cleanliness.test.ts (2 tests) 6039ms
+   ✓ stdout cleanliness in non-interactive modes > keeps stdout empty for --mode json --help while routing help to stderr  3111ms
+   ✓ stdout cleanliness in non-interactive modes > keeps stdout empty for -p --help while routing help to stderr  2926ms
+ ❯ test/tools.test.ts (71 tests | 1 failed | 1 skipped) 2534ms
+   ✓ Coding Agent Tools > read tool > should read file contents that fit within limits 9ms
+   ✓ Coding Agent Tools > read tool > should handle non-existent files 3ms
+   ✓ Coding Agent Tools > read tool > should truncate files exceeding line limit 6ms
+   ✓ Coding Agent Tools > read tool > should truncate when byte limit exceeded 7ms
+   ✓ Coding Agent Tools > read tool > should handle offset parameter 3ms
+   ✓ Coding Agent Tools > read tool > should handle limit parameter 8ms
+   ✓ Coding Agent Tools > read tool > should handle offset + limit together 3ms
+   ✓ Coding Agent Tools > read tool > should show error when offset is beyond file length 3ms
+   ✓ Coding Agent Tools > read tool > should include truncation details when truncated 4ms
+   ✓ Coding Agent Tools > read tool > should detect image MIME type from file magic (not extension) 22ms
+   ✓ Coding Agent Tools > read tool > should treat files with image extension but non-image content as text 4ms
+   ✓ Coding Agent Tools > read tool > should not dump mojibake for binary files (NUL byte sniff) 5ms
+   ✓ Coding Agent Tools > read tool > should still read plain text files (no false-positive binary detection) 4ms
+   ✓ Coding Agent Tools > write tool > should write file contents 7ms
+   ✓ Coding Agent Tools > write tool > should create parent directories 6ms
+   ✓ Coding Agent Tools > edit tool > should replace text in file 7ms
+   ✓ Coding Agent Tools > edit tool > should fail if text not found 3ms
+   ✓ Coding Agent Tools > edit tool > should include ENOENT when the edit target does not exist 1ms
+   ✓ Coding Agent Tools > edit tool > should fail if text appears multiple times 3ms
+   ✓ Coding Agent Tools > edit tool > should replace multiple disjoint regions in one call 5ms
+   ✓ Coding Agent Tools > edit tool > should collapse large unchanged gaps in multi-edit diffs 6ms
+   ✓ Coding Agent Tools > edit tool > should match edits against the original file, not incrementally 4ms
+   ✓ Coding Agent Tools > edit tool > should fail when edits is empty 2ms
+   ✓ Coding Agent Tools > edit tool > should fail when multi-edit regions overlap 3ms
+   ✓ Coding Agent Tools > edit tool > should not partially apply edits when one edit fails 3ms
+   ✓ Coding Agent Tools > edit tool > should include EACCES for read-only files 3ms
+   ✓ Coding Agent Tools > edit tool > should include the original error message for unknown edit access errors 2ms
+   ✓ Coding Agent Tools > edit tool > should include ENOENT in diff preview for missing files 2ms
+   ↓ Coding Agent Tools > edit tool > should include EACCES in diff preview for unreadable files 2ms
+   ✓ Coding Agent Tools > bash tool > should execute simple commands 77ms
+   ✓ Coding Agent Tools > bash tool > should handle command errors 69ms
+   ✓ Coding Agent Tools > bash tool > should respect timeout  1238ms
+   ✓ Coding Agent Tools > bash tool > should include full output path for truncated timeout and abort errors 43ms
+   ✓ Coding Agent Tools > bash tool > should throw error when cwd does not exist 1ms
+   ✓ Coding Agent Tools > bash tool > should handle process spawn errors 4ms
+   ✓ Coding Agent Tools > bash tool > should pass shellPath through to shell resolution 2ms
+   ✓ Coding Agent Tools > bash tool > should prepend command prefix when configured 79ms
+   ✓ Coding Agent Tools > bash tool > should include output from both prefix and command 81ms
+   ✓ Coding Agent Tools > bash tool > should work without command prefix 80ms
+   ✓ Coding Agent Tools > bash tool > should coalesce streaming updates for chatty output 30ms
+   ✓ Coding Agent Tools > bash tool > should decode UTF-8 characters split across output chunks 1ms
+   ✓ Coding Agent Tools > bash tool > should expose local bash operations for extension reuse 88ms
+   ✓ Coding Agent Tools > bash tool > should preserve executeBash sanitization when using local bash operations 69ms
+   ✓ Coding Agent Tools > bash tool > should persist full output when truncation happens by line count only 99ms
+   ✓ Coding Agent Tools > bash tool > executeBash should persist full output when truncation happens by line count only 108ms
+   ✓ Coding Agent Tools > grep tool > should include filename when searching a single file 37ms
+   × Coding Agent Tools > grep tool > should respect global limit and include context lines 41ms
+     → expected 'context.txt:2: (unable to read file)\…' to contain 'context.txt-1- before'
+   ✓ Coding Agent Tools > grep tool > should treat flag-like patterns as search text (no --pre injection) 29ms
+   ✓ Coding Agent Tools > find tool > should include hidden files that are not gitignored 34ms
+   ✓ Coding Agent Tools > find tool > should respect .gitignore 36ms
+   ✓ Coding Agent Tools > find tool > should surface fd glob parse errors 32ms
+   ✓ Coding Agent Tools > find tool > should treat flag-like patterns as search text 38ms
+   ✓ Coding Agent Tools > ls tool > should list dotfiles and directories 4ms
+   ✓ edit tool fuzzy matching > should match text with trailing whitespace stripped 4ms
+   ✓ edit tool fuzzy matching > should match fullwidth punctuation in Chinese text 5ms
+   ✓ edit tool fuzzy matching > should match compatibility-equivalent Unicode forms 4ms
+   ✓ edit tool fuzzy matching > should match smart single quotes to ASCII quotes 4ms
+   ✓ edit tool fuzzy matching > should match smart double quotes to ASCII quotes 4ms
+   ✓ edit tool fuzzy matching > should match Unicode dashes to ASCII hyphen 4ms
+   ✓ edit tool fuzzy matching > should match non-breaking space to regular space 4ms
+   ✓ edit tool fuzzy matching > should prefer exact match over fuzzy match 4ms
+   ✓ edit tool fuzzy matching > should still fail when text is not found even with fuzzy matching 2ms
+   ✓ edit tool fuzzy matching > should detect duplicates after fuzzy normalization 2ms
+   ✓ edit tool fuzzy matching > should support fuzzy matching in multi-edit mode 4ms
+   ✓ edit tool fuzzy matching > should not normalize content OUTSIDE the matched region during a fuzzy edit 4ms
+   ✓ edit tool CRLF handling > should match LF oldText against CRLF file content 4ms
+   ✓ edit tool CRLF handling > should preserve CRLF line endings after edit 4ms
+   ✓ edit tool CRLF handling > should preserve LF line endings for LF files 4ms
+   ✓ edit tool CRLF handling > should detect duplicates across CRLF/LF variants 3ms
+   ✓ edit tool CRLF handling > should preserve UTF-8 BOM after edit 4ms
+   ✓ edit tool CRLF handling > should preserve CRLF line endings and BOM in multi-edit mode 4ms
+ ✓ test/auth-storage.test.ts (29 tests) 1712ms
+   ✓ AuthStorage > API key resolution > caching > clearConfigValueCache allows command to run again  309ms
+ ✓ test/resolve-config-value-ttl.test.ts (4 tests) 1161ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > clearConfigValueCache forces a fresh spawn  320ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > a TTL of 0 disables the memo (fresh every call)  335ms
+   ✓ resolveConfigValueUncachedAsync TTL memo > never memoises a failing command (no sticky auth outage)  341ms
+ ✓ test/agent-session-concurrent.test.ts (7 tests) 3031ms
+   ✓ AgentSession concurrent prompt guard > should allow steer() while streaming  2549ms
+ ✓ test/lsp/lsp-shutdown-warmup.test.ts (1 test) 1585ms
+   ✓ lsp shutdown vs in-flight warmup (#26) > shutdownClientsForCwd kills a server still mid-initialize  1584ms
+ ✓ test/suite/agent-session-runtime.test.ts (9 tests) 1549ms
+ ✓ test/tool-discovery-default-surface.test.ts (9 tests) 1250ms
+ ✓ test/compaction-structural-only.test.ts (7 tests) 1155ms
+ ✓ test/suite/regressions/2791-fswatch-error-crash.test.ts (1 test) 885ms
+   ✓ issue #2791 fs.watch error event crashes process > process should survive an error event on the theme FSWatcher  884ms
+ ✓ test/verification.test.ts (21 tests) 1089ms
+   ✓ verification module > runCheckCommand > times out a hung command  650ms
+ ✓ test/bash-close-hang-windows.test.ts (2 tests) 971ms
+   ✓ Windows child-process close handling > executeBash resolves after the shell exits even if inherited stdio handles stay open  503ms
+   ✓ Windows child-process close handling > bash tool resolves after the shell exits even if inherited stdio handles stay open  467ms
+ ✓ test/resource-loader.test.ts (20 tests) 4220ms
+   ✓ DefaultResourceLoader > noSkills option > should NOT load legacy skill dirs (.codex/.claude/…) when noSkills is true  504ms
+ ✓ test/lsp/writethrough.test.ts (7 tests) 887ms
+   ✓ lsp writethrough — post-write diagnostics > does not re-append unchanged baseline diagnostics  330ms
+ ✓ test/verification-gate.test.ts (8 tests) 1104ms
+ ✓ test/package-command-paths.test.ts (10 tests) 839ms
+ ❯ test/find-grep-git-and-postfilter.test.ts (23 tests | 1 failed) 812ms
+   ✓ find/grep .git exclusion and post-filter enumeration > find does not descend into .git but still sees other dotfiles 51ms
+   ✓ find/grep .git exclusion and post-filter enumeration > grep does not match inside .git but still matches dotfiles 57ms
+   ✓ find/grep .git exclusion and post-filter enumeration > grep rooted INSIDE .git still works (exclusion is search-root relative) 41ms
+   ✓ find/grep .git exclusion and post-filter enumeration > find post-filter pattern matches beyond the result-limit enumeration window 105ms
+   ✓ find/grep .git exclusion and post-filter enumeration > grep surfaces a malformed regex as an actionable error, not a false 'No matches found' 34ms
+   ✓ find/grep .git exclusion and post-filter enumeration > grep with literal:true matches text containing regex metacharacters 41ms
+   ✓ find/grep .git exclusion and post-filter enumeration > find with a backslash pattern and no matches hints at forward slashes 39ms
+   ✓ find/grep .git exclusion and post-filter enumeration > grep with a backslash glob and no matches hints at forward slashes 45ms
+   ✓ find/grep .git exclusion and post-filter enumeration > grep with context produces unchanged before/after lines for a normal file 51ms
+   ✓ grep outputMode + multiline (locate-cheaply / cross-line patterns) > files_with_matches returns only the matching file paths, no line content 50ms
+   ✓ grep outputMode + multiline (locate-cheaply / cross-line patterns) > count returns matches-per-file as 'path:count' 40ms
+   ✓ grep outputMode + multiline (locate-cheaply / cross-line patterns) > files_with_matches caps files by limit and notes it 33ms
+   ✓ grep outputMode + multiline (locate-cheaply / cross-line patterns) > multiline lets a pattern span line boundaries 69ms
+   ✓ grep outputMode + multiline (locate-cheaply / cross-line patterns) > a match in a very long (minified) line still renders via the column preview 50ms
+   ✓ grep outputMode + multiline (locate-cheaply / cross-line patterns) > multiline content mode prefixes each physical line with its own line number 31ms
+   ✓ grep OOM guard: oversized matched files are not buffered for context > stat-guard falls back to '(unable to read file)' instead of readFile when size exceeds the ceiling 36ms
+   × grep OOM guard: oversized matched files are not buffered for context > under-ceiling file still reads context normally (guard does not over-trigger) 40ms
+     → expected 'src/huge.min.js:1: (unable to read fi…' not to contain '(unable to read file)'
+   ✓ grep/find stderr accumulation is capped (no unbounded growth) > grep: accumulation never exceeds the 64KB ceiling under a flood 0ms
+   ✓ grep/find stderr accumulation is capped (no unbounded growth) > grep: keeps the HEAD so the first error line survives 0ms
+   ✓ grep/find stderr accumulation is capped (no unbounded growth) > grep: small stderr is passed through byte-identical (no cap behavior) 0ms
+   ✓ grep/find stderr accumulation is capped (no unbounded growth) > find: accumulation never exceeds the 64KB ceiling under a flood 0ms
+   ✓ grep/find stderr accumulation is capped (no unbounded growth) > find: keeps the HEAD so the first error line survives 0ms
+   ✓ grep/find stderr accumulation is capped (no unbounded growth) > find: small stderr is passed through byte-identical (no cap behavior) 0ms
+ ✓ test/dap/truncate-output.test.ts (5 tests) 772ms
+   ✓ truncateOutput — byte-identity vs reference > multi-byte UTF-8 crossing 1024-char slice boundaries matches the reference  519ms
+stderr | test/hooks-extension.test.ts > hooks-extension lifecycle events > respects the PreCompact hook timeout
+[hook] PreCompact/node "C:\\Users\\User\\AppData\\Local\\Temp\\pi-hookext-slow-1782604716829.js": exit -1
+
+ ✓ test/hooks-extension.test.ts (8 tests) 576ms
+ ✓ test/agent-session-runtime-events.test.ts (4 tests) 717ms
+   ✓ AgentSessionRuntime session lifecycle events > emits session_before_switch and session_start for new and resume flows  311ms
+ ✓ test/extensions-runner.test.ts (35 tests) 5666ms
+   ✓ ExtensionRunner > before_agent_start timeout > skips handler that exceeds timeout and emits error  5019ms
+ ✓ test/hooks-runner.test.ts (7 tests) 451ms
+ ✓ test/suite/regressions/2860-replaced-session-context.test.ts (3 tests) 822ms
+   ✓ regression #2860: replaced session callbacks > supports withSession for switchSession  404ms
+ ✓ test/sdk-session-manager.test.ts (3 tests) 608ms
+ ✓ test/resilience/eval-output-cap.resilience.test.ts (3 tests) 532ms
+ ✓ test/suite/regressions/2781-skill-collision-precedence.test.ts (4 tests) 658ms
+ ✓ test/rpc-prompt-response-semantics.test.ts (3 tests) 631ms
+   ✓ RPC prompt response semantics > emits one success response when prompt is queued during streaming  356ms
+ ✓ test/file-mutation-queue.test.ts (6 tests) 528ms
+ ✓ test/bash-abort-during-startup.test.ts (2 tests) 456ms
+ ✓ test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts (3 tests) 536ms
+ ✓ test/agent-session-dynamic-tools.test.ts (3 tests) 529ms
+ ✓ test/ask-picker-dist-smoke.test.ts (1 test) 457ms
+   ✓ ask-picker compiled dist (src↔dist drift guard) > never renders a line wider than the terminal  456ms
+ ✓ test/agent-session-dynamic-provider.test.ts (3 tests) 508ms
+ ✓ test/skills.test.ts (34 tests) 381ms
+   ✓ skills > loadSkills with options > should expand ~ in skillPaths  329ms
+ ✓ test/code-mode.test.ts (7 tests) 449ms
+ ✓ test/eval-kernel-cap-sentinel.test.ts (2 tests) 425ms
+ ✓ test/resilience/bash-timeout-kill.resilience.test.ts (2 tests) 376ms
+ ✓ test/grep-fff-backend.test.ts (8 tests) 409ms
+ ✓ test/dap/dap-client-socket.test.ts (2 tests) 402ms
+   ✓ DapClient socket-mode failure paths > kills the adapter process when the socket connect times out (no leak)  343ms
+ ✓ test/suite/tool-calling-eval/05-rewrite-registry.test.ts (14 tests) 541ms
+ ✓ test/mcp-client.test.ts (23 tests) 370ms
+ ✓ test/suite/agent-session-bash-persistence.test.ts (8 tests) 246ms
+ ✓ test/recipe.test.ts (10 tests) 317ms
+ ✓ test/exec-command.test.ts (4 tests) 310ms
+ ✓ test/session-manager-durability.test.ts (6 tests) 297ms
+ ✓ test/chrome-devtools-default-surface.test.ts (2 tests) 328ms
+ ✓ test/dap/dap-exited-outcome.test.ts (1 test) 284ms
+ ✓ test/suite/regressions/2835-tools-allowlist-filters-extension-tools.test.ts (2 tests) 348ms
+ ✓ test/suite/agent-session-retry-events.test.ts (14 tests) 410ms
+ ✓ test/agent-session-retry.test.ts (7 tests) 277ms
+ ✓ test/suite/tool-calling-eval/02-edit-near-miss-and-indent.test.ts (2 tests) 215ms
+ ✓ test/chrome-devtools-manager.test.ts (41 tests) 247ms
+ ✓ test/lsp/lsp-tool.test.ts (28 tests) 264ms
+ ✓ test/dap/debug.test.ts (10 tests) 218ms
+ ✓ test/git-update.test.ts (11 tests) 12398ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > does not run git or modify the checkout when already up to date  938ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > does not pull new remote commits into the installed checkout  1111ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > does not advance past multiple remote commits  1355ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() is a no-op for git sources > leaves a detached checkout (no upstream) untouched  1367ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react when remote history is rewritten  1431ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react when remote drops the installed commit  1727ms
+   ✓ DefaultPackageManager git sources (local-only mode) > update() ignores force-pushed remotes > does not react to a complete history rewrite  2083ms
+   ✓ DefaultPackageManager git sources (local-only mode) > pinned sources > never updates a pinned git source (with @ref)  1212ms
+   ✓ DefaultPackageManager git sources (local-only mode) > scope-aware update > does not create a project-scope install when source is only registered globally  1155ms
+ ✓ test/suite/agent-session-prompt.test.ts (14 tests) 275ms
+ ✓ test/test-harness.test.ts (15 tests) 259ms
+ ✓ test/extensions-discovery.test.ts (28 tests) 256ms
+ ✓ test/cdp-client.test.ts (17 tests) 213ms
+ ✓ test/dry-run-cli.test.ts (4 tests) 13447ms
+   ✓ pi --dry-run (E2E) > with no model configured > returns JSON with overallStatus=blocked and exit code 1  3117ms
+   ✓ pi --dry-run (E2E) > with no model configured > text format includes 'pi dry-run' header and tool list  2823ms
+   ✓ pi --dry-run (E2E) > with permissions configured > includes the configured mode in the Permissions detail  3656ms
+   ✓ pi --dry-run (E2E) > MCP servers in settings > lists configured MCP servers without making network calls  3846ms
+ ✓ test/syntax-highlight.test.ts (5 tests) 169ms
+ ✓ test/tool-execution-component.test.ts (36 tests) 208ms
+ ✓ test/suite/tool-calling-eval/01-edit-aliases.test.ts (2 tests) 222ms
+ ✓ test/sdk-skills.test.ts (3 tests) 277ms
+ ✓ test/suite/regressions/2753-reload-stale-resource-settings.test.ts (1 test) 222ms
+ ✓ test/suite/agent-session-queue.test.ts (13 tests) 201ms
+ ✓ test/suite/regressions/3302-find-path-glob.test.ts (4 tests) 159ms
+ ✓ test/repo-map-byte-cap.test.ts (1 test) 173ms
+ ✓ test/mcp-stdio.test.ts (2 tests) 134ms
+ ✓ test/nav-group-component.test.ts (16 tests) 190ms
+ ✓ test/suite/tool-calling-eval/04-tool-call-stats.test.ts (1 test) 200ms
+ ✓ test/suite/agent-session-compaction.test.ts (13 tests) 257ms
+ ✓ test/settings-manager.test.ts (29 tests) 137ms
+ ✓ test/activity-ticker-leak.test.ts (8 tests) 165ms
+ ✓ test/image-processing.test.ts (9 tests) 116ms
+ ✓ test/code-mode-tool.test.ts (4 tests) 133ms
+ ✓ test/suite/agent-session-model-extension.test.ts (10 tests) 196ms
+ ✓ test/dap/dap-stop-outcome-leak.test.ts (1 test) 116ms
+ ✓ test/mtime-cache.test.ts (9 tests) 77ms
+ ✓ test/coordinator-parent-refs.test.ts (1 test) 122ms
+ ✓ test/doom-loop-escalation.test.ts (4 tests) 112ms
+ ✓ test/extensions-input-event.test.ts (8 tests) 129ms
+ ✓ test/visual-gate.test.ts (3 tests) 117ms
+ ✓ test/agent-session-auto-compaction-queue.test.ts (6 tests) 107ms
+ ✓ test/resilience/persistence-ebusy.resilience.test.ts (2 tests) 99ms
+ ✓ test/edit-tool-no-full-redraw.test.ts (3 tests) 103ms
+ ✓ test/suite/regressions/3303-find-nested-gitignore.test.ts (2 tests) 83ms
+ ✓ test/tool-failure-budget.test.ts (6 tests) 118ms
+ ✓ test/preview-server.test.ts (9 tests) 70ms
+ ✓ test/suite/regressions/1717-2113-agent-session-event-settlement.test.ts (2 tests) 117ms
+ ✓ test/learned-error-runtime-persistence.test.ts (4 tests) 106ms
+ ✓ test/doom-loop-recovery.test.ts (3 tests) 101ms
+ ✓ test/compaction-modified-digests.test.ts (2 tests) 88ms
+ ✓ test/todo-cadence-integration.test.ts (3 tests) 76ms
+ ✓ test/read-streaming.test.ts (11 tests) 68ms
+ ✓ test/session-manager/file-operations.test.ts (17 tests) 56ms
+ ✓ test/suite/tool-discovery-activation.test.ts (3 tests) 75ms
+ ✓ test/suite/regressions/3616-settings-inmemory-reload.test.ts (3 tests) 65ms
+ ✓ test/suite/tool-calling-eval/07-memory-leak-bounds.test.ts (3 tests) 73ms
+ ✓ test/suite/agent-session-interrupt.test.ts (3 tests) 69ms
+ ✓ test/goal-auto-continue.test.ts (3 tests) 71ms
+ ✓ test/compaction.test.ts (46 tests | 2 skipped) 49ms
+ ✓ test/result-loop.test.ts (2 tests) 67ms
+ ✓ test/fusion/orchestrator.test.ts (7 tests) 47ms
+ ✓ test/suite/regressions/3217-scoped-model-order.test.ts (2 tests) 68ms
+ ✓ test/resilience/crash-isolation.resilience.test.ts (2 tests) 56ms
+ ✓ test/skill-args-expansion.test.ts (2 tests) 57ms
+ ✓ test/agent-session-presend-overflow.test.ts (3 tests) 64ms
+ ✓ test/lsp/route-message.test.ts (5 tests) 50ms
+ ✓ test/project-config-context.test.ts (23 tests) 40ms
+ ✓ test/legacy-discovery.test.ts (6 tests) 43ms
+ ✓ test/clipboard-image.test.ts (6 tests) 52ms
+ ✓ test/mcp-manager-emit-after-dispose.test.ts (1 test) 43ms
+ ✓ test/agent-session-stats.test.ts (4 tests) 53ms
+ ✓ test/suite/tool-calling-eval/06-learned-error-isolation.test.ts (2 tests) 51ms
+ ✓ test/session-manager-persist-resilience.test.ts (4 tests) 34ms
+ ✓ test/url-schemes-conflict.test.ts (9 tests) 36ms
+ ✓ test/todo-integration.test.ts (1 test) 40ms
+ ✓ test/session-info-modified-timestamp.test.ts (1 test) 40ms
+ ✓ test/coordinator-spawn.test.ts (27 tests) 49ms
+ ✓ test/agent-session-listener-isolation.test.ts (1 test) 53ms
+ ✓ test/suite/regressions/3317-network-connection-lost-retry.test.ts (1 test) 49ms
+ ✓ test/agent-session-frequent-files.test.ts (3 tests) 38ms
+ ✓ test/suite/regressions/3686-session-name-event.test.ts (2 tests) 38ms
+ ✓ test/cache-prefix-diagnostics.test.ts (3 tests) 45ms
+ ✓ test/clipboard-image-bmp-conversion.test.ts (1 test) 34ms
+ ✓ test/openai-compatible-presets.test.ts (12 tests) 41ms
+ ✓ test/suite/regressions/2023-queued-slash-command-followup.test.ts (1 test) 38ms
+ ✓ test/lazy-omission.test.ts (60 tests) 36ms
+ ✓ test/fusion/fusion-user-message.test.ts (2 tests) 38ms
+ ✓ test/activity-turn-snapshot.test.ts (2 tests) 32ms
+ ✓ test/ast-grep-napi-backend.test.ts (5 tests) 28ms
+ ✓ test/block-images.test.ts (8 tests) 27ms
+ ✓ test/suite/tool-calling-eval/03-unknown-tool-suggestion.test.ts (1 test) 45ms
+ ✓ test/interactive-mode-status.test.ts (30 tests) 32ms
+ ✓ test/todo-overlay.test.ts (8 tests) 29ms
+ ✓ test/session-selector-path-delete.test.ts (7 tests) 29ms
+ ✓ test/frequent-files.test.ts (28 tests) 34ms
+ ✓ test/stale-read-warning.test.ts (8 tests) 29ms
+ ✓ test/presend-overflow-reestimate.test.ts (1 test) 34ms
+ ✓ test/coordinator-agent-types.test.ts (6 tests) 41ms
+ ✓ test/suite/regressions/3982-message-end-cost-override.test.ts (1 test) 38ms
+ ✓ test/edit-diff-base-cache.test.ts (4 tests) 24ms
+ ✓ test/suite/regressions/model-selector-provider-headers.test.ts (1 test) 29ms
+ ✓ test/agent-types.test.ts (6 tests) 31ms
+ ✓ test/settings-manager-bug.test.ts (4 tests) 28ms
+stdout | test/mcp-defer.test.ts > createMcpExtension registration wiring > registers tools for a server that missed the boot connect budget once it comes up
+✓ small (http://localhost:0/small)
+    tools: ping
+✓ late (http://localhost:0/big)
+    tools: later
+
+stdout | test/mcp-defer.test.ts > createMcpExtension registration wiring > leaves the active surface untouched for a boot-connected server with no deferral
+✓ small (http://localhost:0/small)
+    tools: ping
+
+ ✓ test/mcp-defer.test.ts (10 tests) 38ms
+ ✓ test/agent-session-engineering-style.test.ts (2 tests) 32ms
+ ✓ test/agent-session-auto-compaction-multipass.test.ts (1 test) 31ms
+ ✓ test/abort-race.test.ts (6 tests) 30ms
+ ✓ test/memory-discovery.test.ts (7 tests) 18ms
+ ✓ test/tool-prepare-arguments.test.ts (22 tests) 31ms
+ ✓ test/edit-near-miss.test.ts (21 tests) 31ms
+ ✓ test/footer-width.test.ts (2 tests) 17ms
+ ✓ test/messaging/bus.test.ts (18 tests) 34ms
+ ✓ test/read-guard-extension.test.ts (13 tests) 28ms
+ ✓ test/coordinator-resume-disk.test.ts (3 tests) 25ms
+ ✓ test/goal-overlay.test.ts (13 tests) 27ms
+ ✓ test/mcp-resources-prompts.test.ts (4 tests) 37ms
+ ✓ test/assistant-message-smoothing.test.ts (11 tests) 20ms
+ ✓ test/footer-stats-cache.test.ts (12 tests) 20ms
+ ✓ test/messaging/agent-session-messaging.test.ts (1 test) 30ms
+ ✓ test/json-crush-bash.test.ts (5 tests) 24ms
+ ✓ test/prompt-templates.test.ts (82 tests) 31ms
+ ✓ test/activity-line-component.test.ts (17 tests) 30ms
+ ✓ test/footer.test.ts (13 tests) 22ms
+ ✓ test/learned-error-store.test.ts (12 tests) 23ms
+ ✓ test/suite/regressions/3688-tree-cancel-compacting.test.ts (1 test) 42ms
+ ✓ test/mcp-cli.test.ts (9 tests) 27ms
+ ✓ test/tree-selector.test.ts (16 tests) 14ms
+ ✓ test/read-delta.test.ts (7 tests) 22ms
+ ✓ test/mcp-tools.test.ts (8 tests) 18ms
+ ✓ test/ask-picker.test.ts (13 tests) 19ms
+ ✓ test/fusion/fusion-live.test.ts (10 tests) 26ms
+ ✓ test/fusion/orchestration-facet.test.ts (1 test) 22ms
+ ✓ test/dap/dap-client-transport-error.test.ts (1 test) 16ms
+ ✓ test/dry-run.test.ts (5 tests) 18ms
+ ✓ test/mcp-oauth.test.ts (6 tests) 19ms
+ ✓ test/coordinator-scoped-hindsight.test.ts (3 tests) 26ms
+ ✓ test/hindsight-bank-scope.test.ts (6 tests) 17ms
+ ✓ test/welcome-box.test.ts (11 tests) 14ms
+ ✓ test/assistant-message-deliverable.test.ts (11 tests) 20ms
+ ✓ test/hindsight-bank.test.ts (11 tests | 2 skipped) 21ms
+ ✓ test/atomic-write.test.ts (4 tests) 16ms
+ ✓ test/messaging/message-tool.test.ts (8 tests) 33ms
+ ✓ test/grep-abort-during-setup.test.ts (2 tests) 12ms
+ ✓ test/forget-tool.test.ts (9 tests) 20ms
+ ✓ test/assistant-reading-width.test.ts (4 tests) 12ms
+ ✓ test/truncate-to-width.test.ts (6 tests) 20ms
+ ✓ test/activity-spacing.test.ts (2 tests) 18ms
+ ✓ test/oauth-selector.test.ts (6 tests) 27ms
+ ✓ test/edit-tool-legacy-input.test.ts (12 tests) 20ms
+ ✓ test/session-manager/tree-traversal.test.ts (30 tests) 26ms
+ ✓ test/clipboard.test.ts (5 tests) 13ms
+ ✓ test/frontmatter.test.ts (8 tests) 16ms
+ ✓ test/recall-tool-output.test.ts (6 tests) 18ms
+ ✓ test/coordinator-resume.test.ts (4 tests) 28ms
+ ✓ test/coordinator-continue.test.ts (4 tests) 14ms
+ ✓ test/suite/regressions/model-selector-error-banner.test.ts (1 test) 20ms
+ ✓ test/mcp-oauth-401.test.ts (1 test) 16ms
+ ✓ test/token-savings.test.ts (9 tests) 20ms
+ ✓ test/fusion/cli-runner.test.ts (25 tests) 8ms
+ ✓ test/read-anchors-gate.test.ts (4 tests) 16ms
+ ✓ test/erasable-syntax-precondition.test.ts (9 tests) 17ms
+ ✓ test/assistant-message.test.ts (4 tests) 17ms
+ ✓ test/hindsight-bank-perscope.test.ts (2 tests) 10ms
+ ✓ test/paths.test.ts (12 tests) 15ms
+ ✓ test/plan-mode-utils.test.ts (33 tests) 10ms
+ ✓ test/json-crush.test.ts (13 tests) 11ms
+ ✓ test/fusion/settings.test.ts (4 tests) 23ms
+ ✓ test/user-message.test.ts (4 tests) 13ms
+ ✓ test/package-manager-ssh.test.ts (8 tests) 15ms
+ ✓ test/import-grounding.test.ts (65 tests) 11ms
+ ✓ test/mcp-sse-transport.test.ts (2 tests) 11ms
+ ✓ test/subagent-guards.test.ts (4 tests) 11ms
+ ✓ test/system-prompt.test.ts (20 tests) 13ms
+ ✓ test/message-shell.test.ts (25 tests) 9ms
+ ✓ test/footer-extension-status.test.ts (7 tests) 7ms
+ ✓ test/path-utils.test.ts (16 tests) 12ms
+ ✓ test/messaging/responder.test.ts (7 tests) 11ms
+ ✓ test/coordinator-async-reinject.test.ts (5 tests) 17ms
+ ✓ test/watchpoint-bisect.test.ts (10 tests) 7ms
+ ✓ test/bash-command-row.test.ts (14 tests) 10ms
+ ✓ test/tool-execution-activity.test.ts (4 tests) 12ms
+ ✓ test/living-repo-map.test.ts (12 tests) 12ms
+ ✓ test/mcp-sse-parse-cancel.test.ts (7 tests) 8ms
+ ✓ test/prune-token-economy.test.ts (11 tests) 8ms
+ ✓ test/session-selector-rename.test.ts (3 tests) 15ms
+ ✓ test/element-to-source.test.ts (10 tests) 8ms
+ ✓ test/read-directory.test.ts (5 tests) 14ms
+stdout | test/json-crush-bench.test.ts > json-crush token benchmark (phase 3 sizing) > reduces tokens vs the blind head-cut: gh api issues (array 400)
+[bench] gh api issues (array 400): 79KB | original 24549 tok | read head-cut(50KB) 15516 tok | crushed 427 tok | -98.3% vs original, -97.2% vs blind head-cut
+
+stdout | test/json-crush-bench.test.ts > json-crush token benchmark (phase 3 sizing) > reduces tokens vs the blind head-cut: kubectl pods (items[] 400)
+[bench] kubectl pods (items[] 400): 36KB | original 11435 tok | read head-cut(50KB) 11435 tok | crushed 251 tok | -97.8% vs original, -97.8% vs blind head-cut
+
+ ✓ test/json-crush-bench.test.ts (2 tests) 12ms
+ ✓ test/version-check.test.ts (6 tests) 9ms
+ ✓ test/image-resize-callers.test.ts (2 tests) 11ms
+ ✓ test/args.test.ts (64 tests) 8ms
+ ✓ test/t1-navigation-suggestions.test.ts (4 tests) 10ms
+ ✓ test/compaction-summary-reasoning.test.ts (7 tests) 10ms
+ ✓ test/ansi-utils.test.ts (5 tests) 8ms
+ ✓ test/session-manager/labels.test.ts (8 tests) 9ms
+ ✓ test/bash-execution-width.test.ts (3 tests) 8ms
+ ✓ test/session-cwd.test.ts (3 tests) 9ms
+ ✓ test/mcp-config-files.test.ts (4 tests) 8ms
+ ✓ test/json-crush-read.test.ts (3 tests) 16ms
+ ✓ test/keybindings-migration.test.ts (3 tests) 9ms
+ ✓ test/theme-export.test.ts (2 tests) 8ms
+ ✓ test/debug-verify.test.ts (13 tests) 12ms
+ ✓ test/compaction-summary-frame.test.ts (16 tests) 6ms
+ ✓ test/engineering-styles.test.ts (11 tests) 8ms
+ ✓ src/core/tool-error-hint-rules.test.ts (24 tests) 7ms
+ ✓ test/interactive-mode-ticker-leak.test.ts (3 tests) 9ms
+ ✓ test/hindsight-tools-scope.test.ts (8 tests) 6ms
+ ✓ test/secret-redactor.test.ts (41 tests) 10ms
+ ✓ test/deferred-output-store.test.ts (6 tests) 10ms
+ ✓ test/grounding-guard.test.ts (30 tests) 11ms
+ ✓ test/session-manager/custom-session-id.test.ts (7 tests) 7ms
+ ✓ test/permissions-checker.test.ts (41 tests) 8ms
+ ✓ test/tool-call-stats.test.ts (25 tests) 5ms
+ ✓ test/chrome-launcher.test.ts (10 tests) 6ms
+ ✓ test/edit-precondition-malformed.test.ts (3 tests) 8ms
+ ✓ test/erasable-syntax-grounding.test.ts (28 tests) 4ms
+ ✓ test/destructive-command-guard.test.ts (16 tests) 5ms
+ ✓ test/edit-v2-mtime-store.test.ts (1 test) 11ms
+ ✓ test/messaging/coordinator-messaging.test.ts (1 test) 8ms
+ ✓ test/goal-manager.test.ts (17 tests) 5ms
+ ✓ test/web-search-retry.test.ts (3 tests) 6ms
+ ✓ test/restore-sandbox-env.test.ts (3 tests) 9ms
+ ✓ test/prune-store-put-throws.test.ts (1 test) 7ms
+ ✓ test/tool-discovery.test.ts (15 tests) 6ms
+ ✓ test/read-outline.test.ts (3 tests) 6ms
+ ✓ test/tool-schema-no-accents.test.ts (65 tests) 6ms
+ ✓ test/find-symbol.test.ts (2 tests) 7ms
+ ✓ test/ask-tool.test.ts (8 tests) 6ms
+ ✓ test/activity-stacker.test.ts (9 tests) 9ms
+ ✓ test/session-manager/build-context.test.ts (14 tests) 6ms
+ ✓ test/spinner-cadence.test.ts (3 tests) 8ms
+ ✓ test/test-summary.test.ts (8 tests) 4ms
+ ✓ test/model-resolver.test.ts (31 tests) 9ms
+ ✓ test/coordinator-registry.test.ts (10 tests) 3ms
+ ✓ test/chrome-devtools-tool.test.ts (8 tests) 6ms
+ ✓ test/stagnation.test.ts (27 tests) 5ms
+ ✓ test/fusion/judge.test.ts (6 tests) 10ms
+ ✓ test/plan-tool.test.ts (17 tests) 7ms
+ ✓ test/theme-detection.test.ts (7 tests) 6ms
+ ✓ test/compaction-token-estimate.test.ts (11 tests) 5ms
+ ✓ test/patch-audit.test.ts (7 tests) 4ms
+ ✓ test/goal-complete-gate.test.ts (7 tests) 6ms
+ ✓ test/permissions-matcher.test.ts (12 tests) 4ms
+ ✓ test/argument-prep.test.ts (23 tests) 5ms
+ ✓ test/tool-activity-family.test.ts (22 tests) 6ms
+ ✓ test/resilience/stream-idle-timeout.resilience.test.ts (2 tests) 6ms
+ ✓ test/refactor-transaction.test.ts (16 tests) 5ms
+ ✓ test/user-input-bus.test.ts (4 tests) 5ms
+ ✓ test/ttsr.test.ts (11 tests) 5ms
+done
+ ✓ test/print-mode.test.ts (3 tests) 5ms
+ ✓ test/session-selector-search.test.ts (11 tests) 5ms
+ ✓ test/repo-map.test.ts (1 test) 5ms
+ ✓ test/suite/regressions/4167-thinking-toggle-pending-tool-render.test.ts (2 tests) 10ms
+ ✓ test/settings-tool-activity.test.ts (13 tests) 4ms
+ ✓ test/git-ssh-url.test.ts (9 tests) 6ms
+ ✓ test/task-rigor.test.ts (9 tests) 6ms
+ ✓ test/pending-checks.test.ts (5 tests) 4ms
+ ✓ test/session-manager/save-entry.test.ts (1 test) 5ms
+ ✓ test/rpc-jsonl.test.ts (4 tests) 7ms
+ ✓ test/hashline-after-before-error.test.ts (2 tests) 4ms
+ ✓ test/path-grounding.test.ts (15 tests) 5ms
+ ✓ test/collapse-repeated-lines.test.ts (8 tests) 2ms
+ ✓ test/todo-tool.test.ts (5 tests) 4ms
+ ✓ test/file-digests.test.ts (6 tests) 4ms
+ ✓ test/tool-call-stats-repeating-pattern.test.ts (9 tests) 3ms
+ ✓ test/frequent-files-settings.test.ts (7 tests) 3ms
+ ✓ test/theme-context-usage-color.test.ts (5 tests) 4ms
+ ✓ test/surrogate.test.ts (7 tests) 2ms
+ ✓ test/cache-stats.test.ts (7 tests) 4ms
+ ✓ test/todo-manager.test.ts (13 tests) 4ms
+ ✓ src/core/tool-rewrite-windows.test.ts (16 tests) 3ms
+ ✓ src/modes/interactive/diagnostics-summary.test.ts (2 tests) 3ms
+ ✓ test/tool-call-feedback.test.ts (22 tests) 5ms
+ ✓ test/preview-queue.test.ts (7 tests) 4ms
+ ✓ test/interactive-mode-compaction.test.ts (1 test) 5ms
+ ✓ src/core/cross-error.test.ts (10 tests) 5ms
+ ✓ test/pattern-grounding.test.ts (15 tests) 6ms
+ ✓ test/symbol-oom.test.ts (4 tests) 5ms
+ ✓ test/export-html-xss.test.ts (8 tests) 3ms
+ ✓ test/todo-cadence.test.ts (21 tests) 6ms
+ ✓ test/interactive-mode-suspend.test.ts (3 tests | 2 skipped) 5ms
+ ✓ test/bash-grounding.test.ts (10 tests) 5ms
+ ✓ test/list-declarations.test.ts (4 tests) 5ms
+ ✓ test/render-mermaid-caps.test.ts (3 tests) 5ms
+ ✓ test/code-mode-harness-dispatcher.test.ts (5 tests) 4ms
+ ✓ src/core/built-ins/learned-error-guard-extension.test.ts (8 tests) 3ms
+ ✓ test/goal-complete-tool.test.ts (3 tests) 2ms
+ ✓ test/repair-note-policy.test.ts (7 tests) 3ms
+ ✓ test/failure-summary.test.ts (4 tests) 4ms
+ ✓ test/dynamic-border.test.ts (5 tests) 4ms
+ ✓ test/export-html-whitespace.test.ts (3 tests) 3ms
+ ✓ test/claude-code-version.test.ts (3 tests) 2ms
+ ✓ test/rpc-client-clone.test.ts (1 test) 4ms
+ ✓ test/bash-activity.test.ts (6 tests) 3ms
+ ✓ test/trigger-compact-extension.test.ts (1 test) 3ms
+ ✓ test/tool-feedback-settings.test.ts (18 tests) 4ms
+ ✓ test/color-ease.test.ts (3 tests) 5ms
+ ✓ test/slash-commands.test.ts (23 tests) 3ms
+ ✓ test/spinner-ticker.test.ts (3 tests) 4ms
+ ✓ test/bash-prepare-arguments.test.ts (4 tests) 3ms
+ ✓ test/json-crush-prune.test.ts (2 tests) 5ms
+ ✓ test/t2-print-provenance.test.ts (4 tests) 2ms
+ ✓ test/find-root-empty-line.test.ts (1 test) 3ms
+ ✓ test/hashline-crlf-newtext.test.ts (1 test) 2ms
+ ✓ test/tool-activity.test.ts (7 tests) 3ms
+ ✓ test/ls-broken-symlink.test.ts (1 test) 4ms
+ ✓ test/t1-edit-v2-error-hints.test.ts (4 tests) 4ms
+ ✓ test/async-delivery.test.ts (3 tests) 2ms
+ ✓ test/bash-cwd-tilde.test.ts (5 tests) 2ms
+ ✓ test/initial-message.test.ts (3 tests) 3ms
+ ✓ test/messaging/relay.test.ts (2 tests) 3ms
+ ✓ test/t3-retry-reason.test.ts (5 tests) 4ms
+ ✓ test/async-deliver-routing.test.ts (3 tests) 5ms
+ ✓ test/calc-unary-exponent.test.ts (6 tests) 4ms
+ ✓ test/coordinator-depth.test.ts (7 tests) 4ms
+ ✓ test/ask-schema-trim.test.ts (1 test) 3ms
+ ✓ test/skills-index-mode.test.ts (2 tests) 3ms
+ ✓ test/compaction-serialization.test.ts (3 tests) 4ms
+ ✓ test/arg-summary.test.ts (3 tests) 3ms
+ ✓ test/export-html-skill-block.test.ts (4 tests) 2ms
+ ✓ test/regex-budget.test.ts (2 tests) 3ms
+ ✓ test/pi-user-agent.test.ts (1 test) 3ms
+ ✓ test/search-skills.test.ts (2 tests) 2ms
+ ✓ test/compaction-extensions-example.test.ts (2 tests) 3ms
+ ✓ test/fusion/cycle.test.ts (1 test) 3ms
+ ✓ test/messaging/settings.test.ts (2 tests) 3ms
+ ✓ test/lsp/wait-project-loaded-leak.test.ts (1 test) 2ms
+ ✓ test/session-manager/migration.test.ts (2 tests) 3ms
+ ✓ test/interactive-mode-anthropic-warning.test.ts (4 tests) 4ms
+ ✓ test/boot-outline.test.ts (2 tests) 2ms
+ ↓ test/rpc.test.ts (14 tests | 14 skipped)
+ ✓ test/assistant-message-visible-text.test.ts (3 tests) 2ms
+ ✓ test/t1-read-dedupe-clear.test.ts (2 tests) 3ms
+ ↓ test/chrome-devtools-e2e.test.ts (4 tests | 4 skipped)
+ ✓ test/chrome-inline-command.test.ts (7 tests) 4ms
+ ↓ test/agent-session-branching.test.ts (3 tests | 3 skipped)
+ ↓ test/agent-session-compaction.test.ts (5 tests | 5 skipped)
+ ↓ test/agent-session-tree-navigation.test.ts (10 tests | 10 skipped)
+ ↓ test/compaction-extensions.test.ts (8 tests | 8 skipped)
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  test/find-grep-git-and-postfilter.test.ts > grep OOM guard: oversized matched files are not buffered for context > under-ceiling file still reads context normally (guard does not over-trigger)
+AssertionError: expected 'src/huge.min.js:1: (unable to read fi…' not to contain '(unable to read file)'
+
+Expected: "(unable to read file)"
+Received: "src/huge.min.js:1: (unable to read file)"
+
+ ❯ test/find-grep-git-and-postfilter.test.ts:284:20
+    282|   const text = textOf(result);
+    283|   expect(text).toContain("huge.min.js");
+    284|   expect(text).not.toContain("(unable to read file)");
+       |                    ^
+    285|  });
+    286| });
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯
+
+ FAIL  test/tools.test.ts > Coding Agent Tools > grep tool > should respect global limit and include context lines
+AssertionError: expected 'context.txt:2: (unable to read file)\…' to contain 'context.txt-1- before'
+
+- Expected
++ Received
+
+- context.txt-1- before
++ context.txt:2: (unable to read file)
++
++ [1 matches limit reached. Use limit=2 for more, or refine pattern]
+
+ ❯ test/tools.test.ts:738:19
+    736| 
+    737|    const output = getTextOutput(result);
+    738|    expect(output).toContain("context.txt-1- before");
+       |                   ^
+    739|    expect(output).toContain("context.txt:2: match one");
+    740|    expect(output).toContain("context.txt-3- after");
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯
+
+
+ Test Files  2 failed | 383 passed | 6 skipped (391)
+      Tests  2 failed | 3568 passed | 52 skipped (3622)
+   Start at  20:58:27
+   Duration  31.85s (transform 6.41s, setup 0ms, collect 231.04s, tests 114.69s, environment 59ms, prepare 31.50s)
+
+npm error Lifecycle script `test` failed with error:
+npm error code 1
+npm error path C:\PiTest\packages\coding-agent
+npm error workspace @pit/coding-agent@0.75.3
+npm error location C:\PiTest\packages\coding-agent
+npm error command failed
+npm error command C:\WINDOWS\system32\cmd.exe /d /s /c vitest --run

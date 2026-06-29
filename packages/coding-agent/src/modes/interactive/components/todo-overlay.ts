@@ -5,21 +5,29 @@
  */
 
 import { performance } from "node:perf_hooks";
-import { type Component, SPINNER_FRAME_MS, SPINNER_FRAMES, truncateToWidth, visibleWidth } from "@pit/tui";
+import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { TodoItem } from "../../../core/todo/todo-manager.ts";
 import { theme } from "../theme/theme.ts";
+import { spinnerGlyphAt } from "./spinner-ticker.ts";
 
 /** Cap on overlay rows; completed todos are hidden first when exceeded. */
 const OVERLAY_MAX_ROWS = 12;
 /** Progress bar width (visible block chars, excluding connector). */
 const PROGRESS_BAR_WIDTH = 12;
+// CONNECTOR_WIDTH: "├─ " or "└─ " = 3 visible chars.
+const CONNECTOR_WIDTH = 3;
+// PREFIX_WIDTH: glyph + space inside the row ("⠏ " or "✓ " or "○ ") = 2 visible chars.
+const ROW_PREFIX_WIDTH = 2;
+
+function fitWidth(text: string, width: number): string {
+	return visibleWidth(text) > width ? truncateToWidth(text, width, "…") : text;
+}
 
 function strike(text: string): string {
 	return `\x1b[9m${text}\x1b[29m`;
 }
 
-/** in_progress first, then pending, then completed — active work stays on top. */
 function sortTodosForDisplay(items: TodoItem[]): TodoItem[] {
 	const rank = (status: TodoItem["status"]): number => {
 		switch (status) {
@@ -52,49 +60,105 @@ export interface TodoOverlayData {
 	total: number;
 }
 
-// CONNECTOR_WIDTH: "├─ " or "└─ " = 3 visible chars added by renderTodoOverlay.
-const CONNECTOR_WIDTH = 3;
-// PREFIX_WIDTH: glyph + space inside the row ("⠏ " or "✓ " or "○ ") = 2 visible chars.
-const ROW_PREFIX_WIDTH = 2;
+function todoOverlayDataKey(data: TodoOverlayData, sorted: TodoItem[]): string {
+	let key = `${data.done}/${data.total}`;
+	for (const item of sorted) {
+		key += `|${item.id}:${item.status}:${item.subject}:${item.activeForm ?? ""}`;
+	}
+	return key;
+}
+
+type TodoOverlayRow = { kind: "static"; line: string } | { kind: "spinner"; connector: string; item: TodoItem };
+
+interface TodoOverlayRenderCache {
+	dataKey: string;
+	width: number;
+	header: string[];
+	rows: TodoOverlayRow[];
+	footer?: string;
+}
+
+function truncateSubject(subject: string, budget: number): string {
+	return fitWidth(subject, Math.max(4, budget));
+}
+
+function materializeTodoOverlayCache(cache: TodoOverlayRenderCache, spinner: string, width: number): string[] {
+	const lines = [...cache.header];
+	for (const row of cache.rows) {
+		if (row.kind === "static") {
+			lines.push(row.line);
+			continue;
+		}
+		lines.push(fitWidth(row.connector + renderRow(row.item, spinner, width), width));
+	}
+	if (cache.footer) lines.push(cache.footer);
+	return lines;
+}
+
+function cappedDisplayRows(sorted: TodoItem[]): { rows: TodoItem[]; hiddenCompleted: number } {
+	const rows = sorted;
+	let hiddenCompleted = 0;
+	if (rows.length <= OVERLAY_MAX_ROWS) {
+		return { rows, hiddenCompleted };
+	}
+	const completed = rows.filter((t) => t.status === "completed");
+	const active = rows.filter((t) => t.status !== "completed");
+	const keep = Math.max(0, OVERLAY_MAX_ROWS - active.length);
+	hiddenCompleted = Math.max(0, completed.length - keep);
+	return { rows: [...active, ...completed.slice(completed.length - keep)], hiddenCompleted };
+}
+
+function buildTodoOverlayCache(
+	data: TodoOverlayData,
+	width: number,
+	dataKey: string,
+	sorted: TodoItem[],
+): TodoOverlayRenderCache {
+	const header: string[] = [];
+	const headerText = `${theme.fg("accent", "●")} ${theme.bold("Tasks")} ${theme.fg("dim", "—")} ${theme.fg("muted", `${data.done}/${data.total}`)}`;
+	header.push(fitWidth(headerText, width));
+
+	const progress = renderProgressBar(data.done, data.total, width);
+	if (progress) {
+		header.push(fitWidth(`${theme.fg("dim", "├─ ")}${progress}`, width));
+	}
+
+	const { rows: displayRows, hiddenCompleted } = cappedDisplayRows(sorted);
+	const rows: TodoOverlayRow[] = [];
+	displayRows.forEach((item, idx) => {
+		const isLast = idx === displayRows.length - 1 && hiddenCompleted === 0;
+		const connector = theme.fg("dim", isLast ? "└─ " : "├─ ");
+		if (item.status === "in_progress") {
+			rows.push({ kind: "spinner", connector, item });
+			return;
+		}
+		rows.push({ kind: "static", line: fitWidth(connector + renderRow(item, "", width), width) });
+	});
+
+	const footer = hiddenCompleted > 0 ? theme.fg("dim", `└─ … ${hiddenCompleted} done hidden`) : undefined;
+	return { dataKey, width, header, rows, footer };
+}
 
 function renderRow(item: TodoItem, spinner: string, width: number): string {
-	// Budget for text inside the row, after accounting for the connector prefix.
 	const rowBudget = Math.max(4, width - CONNECTOR_WIDTH);
 
 	switch (item.status) {
 		case "completed": {
-			const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH);
-			const subject =
-				visibleWidth(item.subject) > subjectBudget
-					? truncateToWidth(item.subject, subjectBudget, "…")
-					: item.subject;
+			const subject = truncateSubject(item.subject, rowBudget - ROW_PREFIX_WIDTH);
 			return `${theme.fg("success", "✓")} ${theme.fg("dim", strike(subject))}`;
 		}
 		case "in_progress": {
 			if (item.activeForm) {
-				// Reserve space for " — activeForm" suffix.
 				const suffixText = ` — ${item.activeForm}`;
 				const suffixWidth = visibleWidth(suffixText);
-				const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH - suffixWidth);
-				const subject =
-					visibleWidth(item.subject) > subjectBudget
-						? truncateToWidth(item.subject, subjectBudget, "…")
-						: item.subject;
+				const subject = truncateSubject(item.subject, rowBudget - ROW_PREFIX_WIDTH - suffixWidth);
 				return `${theme.fg("warning", spinner)} ${theme.fg("accent", subject)}${theme.fg("dim", suffixText)}`;
 			}
-			const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH);
-			const subject =
-				visibleWidth(item.subject) > subjectBudget
-					? truncateToWidth(item.subject, subjectBudget, "…")
-					: item.subject;
+			const subject = truncateSubject(item.subject, rowBudget - ROW_PREFIX_WIDTH);
 			return `${theme.fg("warning", spinner)} ${theme.fg("accent", subject)}`;
 		}
 		default: {
-			const subjectBudget = Math.max(4, rowBudget - ROW_PREFIX_WIDTH);
-			const subject =
-				visibleWidth(item.subject) > subjectBudget
-					? truncateToWidth(item.subject, subjectBudget, "…")
-					: item.subject;
+			const subject = truncateSubject(item.subject, rowBudget - ROW_PREFIX_WIDTH);
 			return `${theme.fg("muted", "○")} ${subject}`;
 		}
 	}
@@ -102,72 +166,44 @@ function renderRow(item: TodoItem, spinner: string, width: number): string {
 
 /** Pure renderer (testable): returns [] when there are no todos. */
 export function renderTodoOverlay(data: TodoOverlayData, width: number, spinner: string): string[] {
-	// Auto-hide when there are no todos OR every todo is done — the list vanishes
-	// once the work is complete instead of lingering as struck-through items.
 	if (data.items.length === 0 || data.done === data.total) return [];
-
-	// Truncation: keep all non-completed; drop oldest completed first.
-	let rows = sortTodosForDisplay(data.items);
-	let hiddenCompleted = 0;
-	if (rows.length > OVERLAY_MAX_ROWS) {
-		const completed = rows.filter((t) => t.status === "completed");
-		const active = rows.filter((t) => t.status !== "completed");
-		const keep = Math.max(0, OVERLAY_MAX_ROWS - active.length);
-		hiddenCompleted = Math.max(0, completed.length - keep);
-		rows = [...active, ...completed.slice(completed.length - keep)];
-	}
-
-	const lines: string[] = [];
-	const header = `${theme.fg("accent", "●")} ${theme.bold("Tasks")} ${theme.fg("dim", "—")} ${theme.fg("muted", `${data.done}/${data.total}`)}`;
-	lines.push(visibleWidth(header) > width ? truncateToWidth(header, width, "…") : header);
-
-	const progress = renderProgressBar(data.done, data.total, width);
-	if (progress) {
-		const progressLine = `${theme.fg("dim", "├─ ")}${progress}`;
-		lines.push(visibleWidth(progressLine) > width ? truncateToWidth(progressLine, width, "…") : progressLine);
-	}
-
-	rows.forEach((item, idx) => {
-		const isLast = idx === rows.length - 1 && hiddenCompleted === 0;
-		const connector = theme.fg("dim", isLast ? "└─ " : "├─ ");
-		const row = connector + renderRow(item, spinner, width);
-		lines.push(visibleWidth(row) > width ? truncateToWidth(row, width, "…") : row);
-	});
-	if (hiddenCompleted > 0) {
-		lines.push(theme.fg("dim", `└─ … ${hiddenCompleted} done hidden`));
-	}
-	return lines;
+	const sorted = sortTodosForDisplay(data.items);
+	const dataKey = todoOverlayDataKey(data, sorted);
+	return materializeTodoOverlayCache(buildTodoOverlayCache(data, width, dataKey, sorted), spinner, width);
 }
 
 class TodoOverlayComponent implements Component {
 	private session: AgentSession;
 	private readonly clock: () => number;
+	private renderCache: TodoOverlayRenderCache | undefined;
 
-	// Default clock is the same monotonic source the animation ticker feeds every
-	// other spinner (`performance.now()`), so when the overlay repaints during
-	// active work its half-moon frame is phase-locked with the loader/tool/goal
-	// spinners instead of running on a separate `Date.now()` epoch (P7).
 	constructor(session: AgentSession, clock: () => number = () => performance.now()) {
 		this.session = session;
 		this.clock = clock;
 	}
 
-	/** Rebind to the current session after a /new, fork, or session switch. */
 	setSession(session: AgentSession): void {
 		this.session = session;
+		this.renderCache = undefined;
 	}
 
 	invalidate(): void {
-		// No cached state.
+		this.renderCache = undefined;
 	}
 
 	render(width: number): string[] {
 		const data = this.session.todoForOverlay();
-		if (data.items.length === 0 || data.done === data.total) return [];
-		const frame = SPINNER_FRAMES[Math.floor(this.clock() / SPINNER_FRAME_MS) % SPINNER_FRAMES.length];
-		const lines = renderTodoOverlay(data, width, frame ?? SPINNER_FRAMES[0]);
-		// A leading blank line separates the overlay from the chat above it.
-		return lines.length > 0 ? ["", ...lines] : [];
+		if (data.items.length === 0 || data.done === data.total) {
+			this.renderCache = undefined;
+			return [];
+		}
+		const spinner = spinnerGlyphAt(this.clock());
+		const sorted = sortTodosForDisplay(data.items);
+		const dataKey = todoOverlayDataKey(data, sorted);
+		if (this.renderCache?.dataKey !== dataKey || this.renderCache.width !== width) {
+			this.renderCache = buildTodoOverlayCache(data, width, dataKey, sorted);
+		}
+		return ["", ...materializeTodoOverlayCache(this.renderCache, spinner, width)];
 	}
 }
 
