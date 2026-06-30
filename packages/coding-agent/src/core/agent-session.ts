@@ -150,7 +150,13 @@ import {
 } from "./frequent-files.js";
 import type { Orchestration } from "./fusion/types.ts";
 import { readGitBranch } from "./git-state.js";
-import { GoalManager, type GoalSnapshot, type GoalState, setCurrentGoalManager } from "./goal/goal-manager.ts";
+import {
+	GoalManager,
+	type GoalSnapshot,
+	type GoalState,
+	getCurrentGoalManager,
+	setCurrentGoalManager,
+} from "./goal/goal-manager.ts";
 import {
 	defaultBankPath,
 	ensureBankDir,
@@ -175,7 +181,7 @@ import {
 } from "./messaging/index.ts";
 import type { ModelRegistry } from "./model-registry.js";
 import { type RoleResolution, resolveRole } from "./model-resolver.js";
-import { PlanManager, type PlanState, setCurrentPlanManager } from "./plan/plan-manager.ts";
+import { getCurrentPlanManager, PlanManager, type PlanState, setCurrentPlanManager } from "./plan/plan-manager.ts";
 import {
 	createPreviewQueue,
 	getCurrentPreviewQueue,
@@ -191,8 +197,19 @@ import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
-import { setCurrentTodoManager, type TodoItem, TodoManager, type TodoState } from "./todo/todo-manager.ts";
-import { setCurrentTokenGovernor, TokenBudgetGovernor, type TokenBudgetSnapshot } from "./token-governor.ts";
+import {
+	getCurrentTodoManager,
+	setCurrentTodoManager,
+	type TodoItem,
+	TodoManager,
+	type TodoState,
+} from "./todo/todo-manager.ts";
+import {
+	getCurrentTokenGovernor,
+	setCurrentTokenGovernor,
+	TokenBudgetGovernor,
+	type TokenBudgetSnapshot,
+} from "./token-governor.ts";
 import {
 	extractErrorMessage,
 	fingerprintToolArgsExact,
@@ -227,6 +244,7 @@ import {
 	type CheckResult,
 	detectCheckCommand,
 	detectSyntaxFallbackCommand,
+	getCurrentVerificationProbe,
 	runCheckCommand,
 	setCurrentVerificationProbe,
 } from "./verification/verification.ts";
@@ -676,6 +694,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// Native todo list (the `todo` tool + /todos command + live overlay).
 	private readonly _todo = new TodoManager();
 	private readonly _plan = new PlanManager();
+	/** Published to goal_complete via setCurrentVerificationProbe; cleared on dispose. */
+	private _verificationProbe: (() => Promise<CheckResult | null>) | undefined;
 	// Chrome DevTools controller (the chrome_devtools_* tools + /chrome command).
 	private _chromeDevtools: ChromeDevtoolsManager | undefined;
 	// Guards against re-entering the goal auto-continuation loop from within a
@@ -854,7 +874,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 		setCurrentPlanManager(this._plan);
 
 		// Publish a one-shot project-check runner so goal_complete can refuse while red.
-		setCurrentVerificationProbe(() => this.runConfiguredCheck());
+		this._verificationProbe = () => this.runConfiguredCheck();
+		setCurrentVerificationProbe(this._verificationProbe);
 
 		// Chrome DevTools controller (endpoint from settings + env). Created
 		// regardless of enabled (cheap; connects lazily); tools only join the
@@ -2193,6 +2214,22 @@ export class AgentSession implements CompactionHost, FusionHost {
 			agentMessageBus.unregister(this._messagingId);
 			this._messagingId = undefined;
 		}
+		if (getCurrentGoalManager() === this._goal) {
+			setCurrentGoalManager(undefined);
+		}
+		if (getCurrentTokenGovernor() === this._tokenGovernor) {
+			setCurrentTokenGovernor(undefined);
+		}
+		if (getCurrentTodoManager() === this._todo) {
+			setCurrentTodoManager(undefined);
+		}
+		if (getCurrentPlanManager() === this._plan) {
+			setCurrentPlanManager(undefined);
+		}
+		if (getCurrentVerificationProbe() === this._verificationProbe) {
+			setCurrentVerificationProbe(undefined);
+		}
+		this._verificationProbe = undefined;
 		// Tear down any active debug session so adapters don't outlive the session.
 		if (this.settingsManager.getDebugSettings().enabled) {
 			void dapSessionManager.disposeAll().catch(() => {});
@@ -3159,8 +3196,17 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// active by the time this lands, _runAgentPrompt rejects — fall back to a
 		// follow-up so the result still rides (and is consumed by) that now-active
 		// run instead of being dropped as a passive message.
-		this._runAgentPrompt(message).catch(() => {
-			this.agent.followUp(message);
+		this._runAgentPrompt(message).catch((err) => {
+			if (this.isBusy) {
+				this.agent.followUp(message);
+				return;
+			}
+			recordDiagnostic({
+				category: "error.isolated",
+				level: "warn",
+				source: "agent-session._deliverAsyncResult",
+				context: { note: err instanceof Error ? err.message : String(err) },
+			});
 		});
 		return true;
 	}

@@ -8,9 +8,7 @@ Proposed — never implemented (was incorrectly marked Accepted).
 > `packages/coding-agent/src` returns 0 matches, and the built-in factory array
 > registers no diff guard. The "Implementation" paragraph below describes an
 > `afterToolCall` extension that does not exist; treat this ADR as a proposal,
-> not a record of shipped behavior. If revived, see item **PV2** of
-> `docs/optimization/weak-model-uplift-audit.md`: prefer a telemetry / diagnostic
-> -only signal over an interactive pause, which conflicts with the autonomous
+> not a record of shipped behavior. If revived, prefer a telemetry / diagnostic-only signal over an interactive pause, which conflicts with the autonomous
 > `/goal` flow.
 
 ## Context

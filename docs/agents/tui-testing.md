@@ -28,5 +28,4 @@ tmux kill-session -t pit-test
 
 > **Windows (no native tmux):** drive the real TUI via computer-use against a
 > pre-configured terminal, or run the tmux flow above under WSL. Headless render
-> checks (no TTY) go through `scripts/repro-startup-frame.mjs` and the
-> `@pit/tui` `VirtualTerminal` in tests.
+> checks (no TTY) go through the `@pit/tui` `VirtualTerminal` in tests.

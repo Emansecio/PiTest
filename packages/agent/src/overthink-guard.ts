@@ -126,13 +126,13 @@ export function buildOverthinkReminderMessage(info: OverthinkInterruptInfo): Age
 	};
 	Object.defineProperty(message, "_overthink_injected", {
 		value: true,
-		enumerable: true,
+		enumerable: false,
 		writable: false,
 		configurable: false,
 	});
 	Object.defineProperty(message, "_overthink_tokens", {
 		value: info.estimatedTokens,
-		enumerable: true,
+		enumerable: false,
 		writable: false,
 		configurable: false,
 	});

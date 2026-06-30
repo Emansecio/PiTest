@@ -1,8 +1,0 @@
-{
-  "name": "output_user_options",
-  "description": "Outputs current user-level configuration in JSON format. You can use this to determine the schema for available config options.",
-  "inputSchema": {
-    "properties": {},
-    "type": "object"
-  }
-}

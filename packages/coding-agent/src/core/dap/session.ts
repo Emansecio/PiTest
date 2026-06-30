@@ -1211,7 +1211,9 @@ export class DapSessionManager {
 			return { snapshot: buildSummary(session), state, timedOut: false };
 		} catch (error) {
 			if (signal?.aborted) throw error;
-			return { snapshot: buildSummary(session), state: "running", timedOut: session.status === "running" };
+			const state =
+				session.status === "stopped" ? "stopped" : session.status === "terminated" ? "terminated" : "running";
+			return { snapshot: buildSummary(session), state, timedOut: true };
 		}
 	}
 

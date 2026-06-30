@@ -24,6 +24,11 @@ packages/*/dist-firefox/
 *.swo
 *~
 
+# Cursor/agent runtime caches (never versioned)
+terminals/
+agent-tools/
+mcps/
+
 # Package specific
 .npm/
 coverage/

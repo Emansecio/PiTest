@@ -3128,9 +3128,13 @@ export class InteractiveMode {
 					this.stopWorkingLoader();
 				}
 				if (this.streamingComponent) {
+					this.streamingComponent.dispose();
 					this.chatContainer.removeChild(this.streamingComponent);
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
+				}
+				for (const component of this.pendingTools.values()) {
+					component.dispose();
 				}
 				this.pendingTools.clear();
 

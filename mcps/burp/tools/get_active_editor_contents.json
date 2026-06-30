@@ -1,8 +1,0 @@
-{
-  "name": "get_active_editor_contents",
-  "description": "Outputs the contents of the user's active message editor",
-  "inputSchema": {
-    "properties": {},
-    "type": "object"
-  }
-}

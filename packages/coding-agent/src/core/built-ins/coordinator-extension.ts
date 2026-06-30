@@ -360,7 +360,7 @@ function acquireSlot(signal?: AbortSignal, opts?: { bypassQueueCap?: boolean }):
 
 /** Release a run slot and wake the oldest live waiter, if any. */
 function releaseSlot(): void {
-	activeSubagents--;
+	if (activeSubagents > 0) activeSubagents--;
 	// Skip any already-settled waiters defensively (onAbort splices them out, so
 	// this is belt-and-suspenders); wake the first live one.
 	let next = slotWaiters.shift();

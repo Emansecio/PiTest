@@ -486,8 +486,8 @@ function buildTurnBudgetMessage(config: AgentLoopConfig, maxTurns: number): Assi
 
 /**
  * Build a synthetic user message carrying a TTSR reminder. The
- * `_ttsr_injected` flag is read by the compaction pipeline to preserve the
- * reminder verbatim instead of summarizing it.
+ * `_ttsr_injected` marker is non-enumerable so session JSONL persistence
+ * does not carry internal steering metadata.
  */
 function resolveOverthinkGuard(config?: OverthinkGuardConfig): OverthinkGuardConfig {
 	if (!config) {
@@ -507,13 +507,13 @@ function buildTTSRReminderMessage(info: TTSRMatchInfo): AgentMessage {
 	// consumers introspect this via a runtime cast.
 	Object.defineProperty(message, "_ttsr_injected", {
 		value: true,
-		enumerable: true,
+		enumerable: false,
 		writable: false,
 		configurable: false,
 	});
 	Object.defineProperty(message, "_ttsr_rule", {
 		value: info.name,
-		enumerable: true,
+		enumerable: false,
 		writable: false,
 		configurable: false,
 	});
@@ -893,16 +893,21 @@ async function executeToolCallsSequential(
 		if (preparation.kind === "immediate") {
 			finalized = await finalizeImmediatePreparation(toolCall, preparation, config, emit);
 		} else {
-			const executed = await executePreparedToolCall(preparation, signal, emit, config);
-			finalized = await finalizeExecutedToolCall(
-				currentContext,
-				assistantMessage,
-				preparation,
-				executed,
-				config,
-				signal,
-				emit,
-			);
+			const { signal: toolSignal, release } = makePerToolSignal(toolCall.id, signal, config);
+			try {
+				const executed = await executePreparedToolCall(preparation, toolSignal, emit, config);
+				finalized = await finalizeExecutedToolCall(
+					currentContext,
+					assistantMessage,
+					preparation,
+					executed,
+					config,
+					toolSignal,
+					emit,
+				);
+			} finally {
+				release();
+			}
 		}
 
 		await emitToolExecutionEnd(finalized, emit);

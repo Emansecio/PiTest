@@ -7,7 +7,7 @@ import {
 	type UserMessage,
 } from "@pit/ai";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { agentLoop, agentLoopContinue } from "../src/agent-loop.js";
 import { THINKING_CHARS_PER_TOKEN } from "../src/overthink-guard.js";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
@@ -1643,5 +1643,71 @@ describe("agent loop rejection guard", () => {
 		const last = messages[messages.length - 1] as AssistantMessage;
 		expect(last.stopReason).toBe("error");
 		expect(last.errorMessage).toMatch(/boom in continue/);
+	});
+
+	it("regression: per-tool abort works on the sequential execution path", async () => {
+		const toolAbortControllers = new Map<string, AbortController>();
+		let sawAbort = false;
+		const toolSchema = Type.Object({});
+		const hangTool: AgentTool<typeof toolSchema, undefined> = {
+			name: "hang",
+			label: "Hang",
+			description: "Blocks until per-tool abort",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			async execute(_toolCallId, _params, signal) {
+				await new Promise<void>((_resolve, reject) => {
+					if (signal?.aborted) {
+						sawAbort = true;
+						reject(new Error("aborted"));
+						return;
+					}
+					signal?.addEventListener(
+						"abort",
+						() => {
+							sawAbort = true;
+							reject(new Error("aborted"));
+						},
+						{ once: true },
+					);
+				});
+				return { content: [{ type: "text", text: "done" }], details: undefined };
+			},
+		};
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [hangTool],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			toolAbortControllers,
+		};
+
+		const stream = agentLoop([createUserMessage("hang")], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage(
+					[{ type: "toolCall", id: "tool-hang", name: "hang", arguments: {} }],
+					"toolUse",
+				);
+				mockStream.push({ type: "done", reason: "toolUse", message });
+			});
+			return mockStream;
+		});
+
+		const consume = (async () => {
+			for await (const _event of stream) {
+				// drain
+			}
+		})();
+
+		await vi.waitFor(() => expect(toolAbortControllers.has("tool-hang")).toBe(true));
+		toolAbortControllers.get("tool-hang")!.abort();
+
+		await consume;
+		expect(sawAbort).toBe(true);
 	});
 });

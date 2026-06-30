@@ -118,7 +118,7 @@ export async function execCommand(
 			}
 		};
 
-		const settle = (code: number) => {
+		const settle = async (code: number) => {
 			if (settled) return;
 			settled = true;
 			clearTimers();
@@ -136,6 +136,8 @@ export async function execCommand(
 					context: { note: "stdout/stderr truncated" },
 				});
 			}
+			await stdoutAcc.closeTempFile();
+			await stderrAcc.closeTempFile();
 			resolve({
 				stdout: stdoutSnap.content,
 				stderr: stderrSnap.content,
@@ -172,7 +174,7 @@ export async function execCommand(
 		// Wait for process termination without hanging on inherited stdio handles
 		// held open by detached descendants.
 		waitForChildProcess(proc)
-			.then((code) => settle(code ?? 0))
-			.catch((_err) => settle(1));
+			.then((code) => void settle(code ?? 0))
+			.catch((_err) => void settle(1));
 	});
 }

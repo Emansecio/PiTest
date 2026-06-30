@@ -924,6 +924,9 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		try {
 			await renameSession(target, next);
 			await this.refreshSessionsAfterMutation();
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.header.setStatusMessage({ type: "error", message: `Rename failed: ${message}` }, 5000);
 		} finally {
 			this.exitRenameMode();
 		}

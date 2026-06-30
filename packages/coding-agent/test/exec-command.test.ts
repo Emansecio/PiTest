@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { execCommand } from "../src/core/exec.js";
+import { OutputAccumulator } from "../src/core/tools/output-accumulator.js";
 import { BASH_MAX_BYTES } from "../src/core/tools/truncate.js";
 
 const NODE = process.execPath;
@@ -45,6 +46,23 @@ describe("execCommand output bounding", () => {
 		expect(result.stdout).toContain("LINE-0 ");
 		expect(result.stdout).toContain(`LINE-${lineCount - 1} `);
 		expect(result.stdout).toMatch(/elided/);
+	}, 20_000);
+
+	it("closes temp file streams after truncated output (no FD leak)", async () => {
+		const closeSpy = vi.spyOn(OutputAccumulator.prototype, "closeTempFile");
+		try {
+			const lineCount = 20_000;
+			await execCommand(
+				NODE,
+				nodeEval(
+					`for (let i = 0; i < ${lineCount}; i++) process.stdout.write('LINE-' + i + ' padding-padding-padding\\n');`,
+				),
+				process.cwd(),
+			);
+			expect(closeSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			closeSpy.mockRestore();
+		}
 	}, 20_000);
 
 	it("clears the SIGKILL escalation timer on normal settle (no orphan timer)", async () => {

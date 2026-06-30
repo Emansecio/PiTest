@@ -54,10 +54,12 @@ describe("OverthinkTracker", () => {
 });
 
 describe("buildOverthinkReminderMessage", () => {
-	it("marks the reminder for compaction preservation", () => {
+	it("marks the reminder with a non-enumerable runtime flag", () => {
 		const message = buildOverthinkReminderMessage({ estimatedTokens: 1200, threshold: 1000 });
 		expect(message.role).toBe("user");
 		expect((message as { _overthink_injected?: boolean })._overthink_injected).toBe(true);
+		expect(JSON.stringify(message)).not.toContain("_overthink_injected");
+		expect(JSON.stringify(message)).not.toContain("_overthink_tokens");
 		expect(message.role).toBe("user");
 		if (message.role !== "user") {
 			return;

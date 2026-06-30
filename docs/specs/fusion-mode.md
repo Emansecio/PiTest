@@ -204,10 +204,9 @@ response via the session's `_emit` path.
 
 ## 7. Grounded CLI invocations (validated on the target machine)
 
-Both CLIs are driven headless, read-only, with deterministic final-output capture. Pit
-already drives `claude` headless in `scripts/compare-harness.mts:135` (spawn with
-`shell: true` on win32, prompt via stdin, timeout) — the Fusion CLI runner reuses that
-pattern.
+Both CLIs are driven headless, read-only, with deterministic final-output capture. The
+`bench/` harness already drives `claude` headless (spawn with `shell: true` on win32, prompt
+via stdin, timeout) — the Fusion CLI runner reuses that pattern.
 
 **Panel A — codex** (`codex exec`, non-interactive):
 
@@ -232,14 +231,13 @@ claude -p --output-format json --permission-mode plan --model <model>
 - `--output-format json` — single JSON object with the final `result` (simpler than
   `stream-json` for capture; `stream-json` remains an option for live rendering in Tier 2).
 
-**Capture is asymmetric — do not copy `compare-harness` blindly.** That script only buffers
+**Capture is asymmetric — do not copy the bench harness spawn blindly.** That pattern only buffers
 **stdout**; `codex`'s final message goes to the `-o <tmpfile>`, *not* stdout. So the codex
 member is read from the **file** and the claude member from `JSON.parse(stdout).result`. Use a
 **unique tmpfile per member** (a `gpt ×2` self-fusion needs two distinct paths) and delete it
 in a `finally`.
 
-**Process-tree kill on Windows.** The reused spawn uses `shell: true` on win32
-(`compare-harness.mts:138`), so `child.kill()` kills the *shell* and orphans the `codex` /
+**Process-tree kill on Windows.** The reused spawn uses `shell: true` on win32, so `child.kill()` kills the *shell* and orphans the `codex` /
 `claude` grandchild. The runner must reap the tree — `taskkill /T /F /PID <pid>` on win32 (or
 spawn without a shell) — on both timeout and Esc.
 
@@ -418,7 +416,7 @@ intended price of the quality lift, and the reason Fusion is an explicit Mode th
    (today `permissionDisplayLabel`, `permissions-extension.ts:36`, renders permission only), in
    `permissions-extension.ts` / `keybindings.ts`.
 2. `core/fusion/cli-runner.ts` — drives `codex`/`claude` headless read-only (reusing the
-   `compare-harness.mts` spawn pattern), captures the final text, enforces timeout, degrades
+   `bench/` harness spawn pattern), captures the final text, enforces timeout, degrades
    gracefully.
 3. `core/fusion/orchestrator.ts` — fan-out → collect → judge (structured) → writer (stream);
    wired into `agent-session.prompt()` behind the orchestration flag.

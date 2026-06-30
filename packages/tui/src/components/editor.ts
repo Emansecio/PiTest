@@ -2663,61 +2663,68 @@ export class Editor implements Component, Focusable {
 	): Promise<void> {
 		if (!this.autocompleteProvider) return;
 
-		// Bound the provider call: if it hangs (Promise that never settles), abandon
-		// this request after the timeout instead of pinning the serialized chain.
-		// withTimeout yields undefined on timeout — distinct from a provider that
-		// resolves with no items — so we abort and bail without touching the UI.
-		const providerPromise = this.autocompleteProvider.getSuggestions(
-			this.state.lines,
-			this.state.cursorLine,
-			this.state.cursorCol,
-			{ signal: controller.signal, force: options.force },
-		);
-		const settled = await withTimeout(
-			providerPromise.then((value) => ({ value }) as const),
-			autocompleteTimeoutMs(),
-		);
-		if (settled === undefined) {
-			// Timed out: signal the (still-pending) provider to abort and stop here.
-			controller.abort();
-			if (this.autocompleteAbort === controller) this.autocompleteAbort = undefined;
-			return;
-		}
-		const suggestions = settled.value;
-
-		if (!this.isAutocompleteRequestCurrent(requestId, controller, snapshotText, snapshotLine, snapshotCol)) {
-			return;
-		}
-
-		this.autocompleteAbort = undefined;
-
-		if (!suggestions || !Array.isArray(suggestions.items) || suggestions.items.length === 0) {
-			this.cancelAutocomplete();
-			this.tui.requestRender();
-			return;
-		}
-
-		if (options.force && options.explicitTab && suggestions.items.length === 1) {
-			const item = suggestions.items[0]!;
-			this.pushUndoSnapshot();
-			this.lastAction = null;
-			const result = this.autocompleteProvider.applyCompletion(
+		try {
+			// Bound the provider call: if it hangs (Promise that never settles), abandon
+			// this request after the timeout instead of pinning the serialized chain.
+			// withTimeout yields undefined on timeout — distinct from a provider that
+			// resolves with no items — so we abort and bail without touching the UI.
+			const providerPromise = this.autocompleteProvider.getSuggestions(
 				this.state.lines,
 				this.state.cursorLine,
 				this.state.cursorCol,
-				item,
-				suggestions.prefix,
+				{ signal: controller.signal, force: options.force },
 			);
-			this.state.lines = result.lines;
-			this.state.cursorLine = result.cursorLine;
-			this.setCursorCol(result.cursorCol);
-			if (this.onChange) this.onChange(this.getText());
-			this.tui.requestRender();
-			return;
-		}
+			const settled = await withTimeout(
+				providerPromise.then((value) => ({ value }) as const),
+				autocompleteTimeoutMs(),
+			);
+			if (settled === undefined) {
+				// Timed out: signal the (still-pending) provider to abort and stop here.
+				controller.abort();
+				if (this.autocompleteAbort === controller) this.autocompleteAbort = undefined;
+				return;
+			}
+			const suggestions = settled.value;
 
-		this.applyAutocompleteSuggestions(suggestions, options.force ? "force" : "regular");
-		this.tui.requestRender();
+			if (!this.isAutocompleteRequestCurrent(requestId, controller, snapshotText, snapshotLine, snapshotCol)) {
+				return;
+			}
+
+			this.autocompleteAbort = undefined;
+
+			if (!suggestions || !Array.isArray(suggestions.items) || suggestions.items.length === 0) {
+				this.cancelAutocomplete();
+				this.tui.requestRender();
+				return;
+			}
+
+			if (options.force && options.explicitTab && suggestions.items.length === 1) {
+				const item = suggestions.items[0]!;
+				this.pushUndoSnapshot();
+				this.lastAction = null;
+				const result = this.autocompleteProvider.applyCompletion(
+					this.state.lines,
+					this.state.cursorLine,
+					this.state.cursorCol,
+					item,
+					suggestions.prefix,
+				);
+				this.state.lines = result.lines;
+				this.state.cursorLine = result.cursorLine;
+				this.setCursorCol(result.cursorCol);
+				if (this.onChange) this.onChange(this.getText());
+				this.tui.requestRender();
+				return;
+			}
+
+			this.applyAutocompleteSuggestions(suggestions, options.force ? "force" : "regular");
+			this.tui.requestRender();
+		} catch {
+			controller.abort();
+			if (this.autocompleteAbort === controller) this.autocompleteAbort = undefined;
+			this.cancelAutocomplete();
+			this.tui.requestRender();
+		}
 	}
 
 	private isAutocompleteRequestCurrent(

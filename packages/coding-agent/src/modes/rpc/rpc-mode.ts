@@ -379,7 +379,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "prompt": {
 				// Start prompt handling immediately, but emit the authoritative response only after
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
-				let preflightSucceeded = false;
 				void session
 					.prompt(command.message, {
 						images: command.images,
@@ -387,15 +386,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 						source: "rpc",
 						preflightResult: (didSucceed) => {
 							if (didSucceed) {
-								preflightSucceeded = true;
 								output(success(id, "prompt"));
 							}
 						},
 					})
 					.catch((e) => {
-						if (!preflightSucceeded) {
-							output(error(id, "prompt", e.message));
-						}
+						output(error(id, "prompt", e instanceof Error ? e.message : String(e)));
 					});
 				return undefined;
 			}
@@ -739,9 +735,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	};
 	process.stdin.on("end", onInputEnd);
 
+	let inputChain: Promise<void> = Promise.resolve();
+
 	detachInput = (() => {
 		const detachJsonl = attachJsonlLineReader(process.stdin, (line) => {
-			void handleInputLine(line);
+			inputChain = inputChain.then(() => handleInputLine(line));
 		});
 		return () => {
 			detachJsonl();
