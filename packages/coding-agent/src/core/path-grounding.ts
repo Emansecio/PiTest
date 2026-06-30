@@ -3,11 +3,13 @@
  *
  * PURE, decoupled pre-execution logic. When a tool REFERENCES a file that must
  * already exist (`read`, `edit`) but the path doesn't resolve on disk AND there
- * is a close-named sibling in the target directory, it returns:
+ * is missing on disk, it returns:
  *
  *   (1) the path resolves / nothing groundable        -> { action: "allow" }
- *   (2) the path is missing AND a close filename
- *       candidate exists in its directory             -> { action: "block", message }
+ *   (2) the path is missing AND the parent dir is
+ *       listable (provably absent)                    -> { action: "block", message }
+ *       — with close siblings when fuzzy finds them,
+ *         otherwise a find-by-basename hint (glob ** / name)
  *
  * This is the file-path sibling of the symbol- and import-grounding guards (same
  * fuzzy candidate engine), closing the symbol / import / path trio.
@@ -129,9 +131,10 @@ const GLOB_MAGIC = /[*?[\]{}]/;
  * basename — using the FULL basename WITH extension (config.json and config.yaml
  * are different files, unlike module specifiers where the extension is implicit).
  * The original directory prefix is re-attached so each suggestion is a usable path.
- * Returns [] when the dir can't be listed or nothing is close (caller -> allow).
+ * Returns `undefined` when the dir can't be listed (caller -> allow, fail-open).
+ * Returns `[]` when the dir is listable but nothing is close (caller -> block-missing).
  */
-function rankCandidates(rawPath: string, deps: PathGroundingDeps): string[] {
+function rankCandidates(rawPath: string, deps: PathGroundingDeps): string[] | undefined {
 	// Strip the `:line[:col]` suffix / expand ~/@ the SAME way the tool does before
 	// splitting, so `wanted` is the real basename (`uti.ts`, not `uti.ts:42`).
 	const expanded = deps.normalize ? deps.normalize(rawPath) : rawPath;
@@ -141,16 +144,15 @@ function rankCandidates(rawPath: string, deps: PathGroundingDeps): string[] {
 	const lastSlash = norm.lastIndexOf("/");
 	const dirPart = lastSlash >= 0 ? expanded.slice(0, lastSlash) : ".";
 	const wanted = norm.slice(lastSlash + 1);
-	if (wanted.length === 0) return [];
+	if (wanted.length === 0) return undefined;
 
 	const absDir = deps.resolve(dirPart);
 	let entries: string[];
 	try {
 		entries = deps.listDir(absDir);
 	} catch {
-		return [];
+		return undefined;
 	}
-	if (entries.length === 0) return [];
 
 	const pool = entries.filter((entry) => entry.length > 0 && entry !== wanted);
 	const prefix = lastSlash >= 0 ? expanded.slice(0, lastSlash + 1) : "";
@@ -183,6 +185,12 @@ function rankBasenames(wanted: string, pool: string[], deps: PathGroundingDeps):
 	return ranked;
 }
 
+function basenameOf(rawPath: string): string {
+	const norm = rawPath.replace(/\\/g, "/");
+	const lastSlash = norm.lastIndexOf("/");
+	return lastSlash >= 0 ? norm.slice(lastSlash + 1) : norm;
+}
+
 /** Block message in the established tool-error-hint tone (matches the other guards). */
 function formatBlockMessage(rawPath: string, candidates: string[]): string {
 	const list = candidates.join(", ");
@@ -190,6 +198,16 @@ function formatBlockMessage(rawPath: string, candidates: string[]): string {
 		`Path grounding (no read/edit attempted): "${rawPath}" does not exist on disk. ` +
 		`Did you mean: ${list}? Use the correct path, ` +
 		"or re-issue the identical call to run it anyway."
+	);
+}
+
+/** Block when the parent dir is listable but no close sibling exists (read-enoent-suggest-find tone). */
+function formatMissingMessage(rawPath: string): string {
+	const base = basenameOf(rawPath);
+	return (
+		`Path grounding (no read/edit attempted): "${rawPath}" does not exist on disk. ` +
+		`Locate it with \`find({pattern:"**/${base}"})\` — the path may be relative to a different cwd. ` +
+		"Re-issue the identical call to run it anyway."
 	);
 }
 
@@ -201,7 +219,7 @@ function formatBlockMessage(rawPath: string, candidates: string[]): string {
  * Ground a single file-path arg. Pure: all fs access is via injected deps.
  * Returns:
  *   - { action: "allow" }            — resolves / glob / empty / fail-open
- *   - { action: "block", message }   — missing path + close candidates
+ *   - { action: "block", message }   — missing path in a listable parent dir
  */
 export function groundPath(input: PathGroundingInput, deps: PathGroundingDeps): PathGroundingDecision {
 	try {
@@ -213,7 +231,8 @@ export function groundPath(input: PathGroundingInput, deps: PathGroundingDeps): 
 		if (deps.fileExists(deps.resolve(path))) return { action: "allow" };
 
 		const candidates = rankCandidates(path, deps);
-		if (candidates.length === 0) return { action: "allow" };
+		if (candidates === undefined) return { action: "allow" };
+		if (candidates.length === 0) return { action: "block", message: formatMissingMessage(path) };
 		return { action: "block", message: formatBlockMessage(path, candidates) };
 	} catch {
 		return { action: "allow" };

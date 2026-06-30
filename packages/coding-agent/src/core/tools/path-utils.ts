@@ -5,7 +5,7 @@ import { isAbsolute, resolve as resolvePath } from "node:path";
 // Matches a URL-like prefix (e.g. `pr://`, `conflict://`). Kept local so we
 // don't pull in the url-schemes module \u2014 these helpers are called from many
 // places that must stay independent of the scheme registry.
-const URL_SCHEME_RE = /^[a-z][a-z0-9+-]*:\/\//;
+export const URL_SCHEME_RE = /^[a-z][a-z0-9+-]*:\/\//;
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 const NARROW_NO_BREAK_SPACE = "\u202F";

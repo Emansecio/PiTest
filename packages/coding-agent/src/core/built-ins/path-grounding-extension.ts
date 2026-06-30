@@ -20,8 +20,8 @@ import { existsSync, readdirSync } from "node:fs";
 import { suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundPath, isPathGroundingDisabled, PATH_GROUNDING_DEFAULTS } from "../path-grounding.ts";
-import { extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
-import { expandPath } from "../tools/path-utils.ts";
+import { extractPathArg } from "../tools/argument-prep.ts";
+import { expandPath, resolveReadPath, URL_SCHEME_RE } from "../tools/path-utils.ts";
 import { createFireOnceBlockGuard } from "./grounding-fire-once.ts";
 
 export function createPathGroundingExtension(options: { cwd: string }): (pi: ExtensionAPI) => void {
@@ -35,11 +35,12 @@ export function createPathGroundingExtension(options: { cwd: string }): (pi: Ext
 			const input = event.input as Record<string, unknown>;
 			const path = extractPathArg(input);
 			if (path === undefined) return undefined;
+			if (URL_SCHEME_RE.test(path)) return undefined;
 
 			const decision = groundPath(
 				{ path },
 				{
-					resolve: (raw) => resolveToolPath(raw, options.cwd),
+					resolve: (raw) => resolveReadPath(raw, options.cwd),
 					fileExists: (absPath) => existsSync(absPath),
 					listDir: (absDir) => readdirSync(absDir),
 					fuzzy: suggestClosest,

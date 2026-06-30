@@ -1,7 +1,11 @@
 // suggestClosest from @pit/ai is the REAL fuzzy matcher used in production.
-import { resolve as resolvePath } from "node:path";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve as resolvePath } from "node:path";
 import { suggestClosest } from "@pit/ai";
 import { describe, expect, it } from "vitest";
+import { createPathGroundingExtension } from "../src/core/built-ins/path-grounding-extension.ts";
+import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 import {
 	groundPath,
 	isPathGroundingDisabled,
@@ -105,6 +109,35 @@ describe("groundPath — BLOCKS a missing path with a close candidate", () => {
 	});
 });
 
+describe("groundPath — BLOCKS a missing path with no close sibling (listable parent dir)", () => {
+	it("blocks when nothing in the dir is close (provably absent)", () => {
+		const decision = groundPath({ path: "./brandnewfile.ts" }, makeDeps([resolvePath(ROOT, "zzzzzzzz.ts")]));
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") {
+			expect(decision.message).toContain("find({pattern:");
+			expect(decision.message).toContain("brandnewfile.ts");
+			expect(decision.message).toMatch(/re-issue the identical call/i);
+		}
+	});
+
+	it("blocks when the parent dir is listable but empty", () => {
+		const decision = groundPath({ path: "./missing.ts" }, makeDeps([]));
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") {
+			expect(decision.message).toContain("find({pattern:");
+		}
+	});
+
+	it("does NOT match the affix-fallback (app.ts -> app.test.ts) — block-missing instead", () => {
+		const decision = groundPath({ path: "./app.ts" }, makeDeps([resolvePath(ROOT, "app.test.ts")]));
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") {
+			expect(decision.message).toContain("find({pattern:");
+			expect(decision.message).not.toContain("Did you mean");
+		}
+	});
+});
+
 describe("groundPath — FAIL-OPEN / out of scope", () => {
 	it("allows a glob/brace pattern (not a literal path)", () => {
 		const deps = makeDeps([resolvePath(ROOT, "utils.ts")]);
@@ -113,13 +146,16 @@ describe("groundPath — FAIL-OPEN / out of scope", () => {
 		expect(groundPath({ path: "./{a,b}.ts" }, deps)).toEqual({ action: "allow" });
 	});
 
-	it("allows a missing path when NOTHING in the dir is close (no wedge)", () => {
-		const decision = groundPath({ path: "./brandnewfile.ts" }, makeDeps([resolvePath(ROOT, "zzzzzzzz.ts")]));
+	it("allows when the parent dir cannot be listed — fail-open", () => {
+		const decision = groundPath(
+			{ path: "./missing/missing.ts" },
+			makeDeps([resolvePath(ROOT, "utils.ts")], {
+				listDir: () => {
+					throw new Error("ENOENT");
+				},
+			}),
+		);
 		expect(decision).toEqual({ action: "allow" });
-	});
-
-	it("allows when the dir cannot be listed (empty fs)", () => {
-		expect(groundPath({ path: "./missing.ts" }, makeDeps([]))).toEqual({ action: "allow" });
 	});
 
 	it("allows when listDir throws (fs unavailable) — fail-open", () => {
@@ -137,13 +173,6 @@ describe("groundPath — FAIL-OPEN / out of scope", () => {
 	it("allows on empty path", () => {
 		expect(groundPath({ path: "" }, makeDeps([]))).toEqual({ action: "allow" });
 	});
-
-	it("does NOT match the affix-fallback (app.ts -> app.test.ts) thanks to prefixMinOverlap floor", () => {
-		// `./app.ts` is missing; dir holds `app.test.ts`. Edit distance is large (>3);
-		// only the affix fallback could match, and prefixMinOverlap=64 disables it.
-		const decision = groundPath({ path: "./app.ts" }, makeDeps([resolvePath(ROOT, "app.test.ts")]));
-		expect(decision).toEqual({ action: "allow" });
-	});
 });
 
 describe("isPathGroundingDisabled — opt-out", () => {
@@ -153,5 +182,49 @@ describe("isPathGroundingDisabled — opt-out", () => {
 		expect(isPathGroundingDisabled({ PIT_NO_PATH_GROUNDING: "TRUE" })).toBe(true);
 		expect(isPathGroundingDisabled({ PIT_NO_PATH_GROUNDING: "yes" })).toBe(true);
 		expect(isPathGroundingDisabled({ PIT_NO_PATH_GROUNDING: "0" })).toBe(false);
+	});
+});
+
+describe("path-grounding extension — adapter wiring", () => {
+	type Handler = (event: { toolName: string; input: Record<string, unknown> }) => unknown;
+
+	function makeFakePi() {
+		const handlers = new Map<string, Handler[]>();
+		const api = {
+			on(event: string, handler: Handler) {
+				const list = handlers.get(event) ?? [];
+				list.push(handler);
+				handlers.set(event, list);
+			},
+		};
+		const fire = (event: string, payload: { toolName: string; input: Record<string, unknown> }): unknown => {
+			let result: unknown;
+			for (const handler of handlers.get(event) ?? []) {
+				const r = handler(payload);
+				if (r !== undefined && result === undefined) result = r;
+			}
+			return result;
+		};
+		return { api, fire };
+	}
+
+	it("allows URL-scheme paths without grounding (virtual resources)", () => {
+		const { api, fire } = makeFakePi();
+		createPathGroundingExtension({ cwd: ROOT })(api as unknown as ExtensionAPI);
+		expect(fire("tool_call", { toolName: "read", input: { path: "pr://1428" } })).toBeUndefined();
+	});
+
+	it("allows a path that exists only as an NFD variant (resolveReadPath)", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pit-path-ground-"));
+		try {
+			const nfdName = "cafe\u0301.txt".normalize("NFD");
+			writeFileSync(join(cwd, nfdName), "ok");
+			const nfcPath = join(cwd, "caf\u00e9.txt");
+			const { api, fire } = makeFakePi();
+			createPathGroundingExtension({ cwd })(api as unknown as ExtensionAPI);
+			expect(fire("tool_call", { toolName: "read", input: { path: nfcPath } })).toBeUndefined();
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 });
