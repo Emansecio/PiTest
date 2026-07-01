@@ -1,4 +1,6 @@
+import { basename } from "node:path";
 import { truncateToWidth } from "@pit/tui";
+import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
 
@@ -233,6 +235,46 @@ export function actionCoalesceKey(toolName: string, args: Record<string, unknown
 						? a.query
 						: "";
 	return `${toolName}|${target}`;
+}
+
+const WORKING_TARGET_MAX = 48;
+
+function workingTargetSnippet(toolName: string, args: Record<string, unknown>): string {
+	if (toolName === "bash") {
+		const cmd = String(args.command ?? "").trim();
+		if (!cmd) return "";
+		return truncateWithEllipsis(cmd.replace(/\s+/g, " "), WORKING_TARGET_MAX);
+	}
+	if (toolName === "web_search") {
+		const q = String(args.query ?? "").trim();
+		return q ? truncateWithEllipsis(q, WORKING_TARGET_MAX) : "";
+	}
+	let rawPath = "";
+	if (typeof args.path === "string") {
+		rawPath = args.path;
+	} else if (typeof args.file_path === "string") {
+		rawPath = args.file_path;
+	}
+	if (rawPath) {
+		const name = basename(rawPath.replace(/[\\/]+$/, ""));
+		return name ? truncateWithEllipsis(name, WORKING_TARGET_MAX) : "";
+	}
+	return "";
+}
+
+/** Label for the working loader while a tool executes. Uses verbFor + short target. */
+export function workingPhaseLabel(
+	toolName: string,
+	args: Record<string, unknown> | undefined,
+	pending: boolean,
+): string {
+	const verb = verbFor(toolName, pending);
+	const target = workingTargetSnippet(toolName, args ?? {});
+	if (target) return `${verb} ${target}…`;
+	if (verbFor("", pending) === verb && toolName !== "bash") {
+		return `${toolName}…`;
+	}
+	return `${verb}…`;
 }
 
 export function diffStat(diff: string | undefined): { added: number; removed: number } {

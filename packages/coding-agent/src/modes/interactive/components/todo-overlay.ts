@@ -9,6 +9,7 @@ import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { TodoItem } from "../../../core/todo/todo-manager.ts";
 import { theme } from "../theme/theme.ts";
+import { GAUGE_EMPTY, GAUGE_FILLED } from "./gauge-glyphs.ts";
 import { spinnerGlyphAt } from "./spinner-ticker.ts";
 
 /** Cap on overlay rows; completed todos are hidden first when exceeded. */
@@ -47,8 +48,8 @@ function renderProgressBar(done: number, total: number, width: number): string {
 	const barWidth = Math.min(PROGRESS_BAR_WIDTH, Math.max(4, width - CONNECTOR_WIDTH - 8));
 	const filled = Math.round((done / total) * barWidth);
 	const empty = barWidth - filled;
-	const filledPart = theme.fg("success", "█".repeat(filled));
-	const emptyPart = theme.fg("dim", "░".repeat(empty));
+	const filledPart = theme.fg("success", GAUGE_FILLED.repeat(filled));
+	const emptyPart = theme.fg("dim", GAUGE_EMPTY.repeat(empty));
 	const pct = Math.round((done / total) * 100);
 	const label = `${done}/${total} · ${pct}%`;
 	return `${filledPart}${emptyPart} ${theme.fg("muted", label)}`;

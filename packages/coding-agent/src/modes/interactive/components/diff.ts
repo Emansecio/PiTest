@@ -15,8 +15,15 @@ function emphasizeToken(value: string, color: ThemeColor): string {
 	return `\x1b[1m${theme.fg(color, value)}\x1b[22m${theme.getFgAnsi(color)}`;
 }
 
+function formatDiffLine(sign: "+" | "-" | " ", lineNum: string, body: string, lineColor: ThemeColor): string {
+	const trimmedNum = lineNum.trim();
+	const numRendered = trimmedNum.length > 0 ? theme.fg("dim", trimmedNum) : "";
+	const gap = numRendered ? " " : "";
+	const coloredBody = body.includes("\x1b[") ? body : theme.fg(lineColor, body);
+	return `${theme.fg(lineColor, sign)}${numRendered}${gap}${coloredBody}`;
+}
+
 /**
- * Parse diff line to extract prefix, line number, and content.
  * Format: "+123 content" or "-123 content" or " 123 content" or "     ..."
  */
 function parseDiffLine(line: string): { prefix: string; lineNum: string; content: string } | null {
@@ -124,24 +131,24 @@ export function renderDiff(diffText: string): string {
 					replaceTabs(added.content),
 				);
 
-				result.push(theme.fg("toolDiffRemoved", `-${removed.lineNum} ${removedLine}`));
-				result.push(theme.fg("toolDiffAdded", `+${added.lineNum} ${addedLine}`));
+				result.push(formatDiffLine("-", removed.lineNum, removedLine, "toolDiffRemoved"));
+				result.push(formatDiffLine("+", added.lineNum, addedLine, "toolDiffAdded"));
 			} else {
 				// Show all removed lines first, then all added lines
 				for (const removed of removedLines) {
-					result.push(theme.fg("toolDiffRemoved", `-${removed.lineNum} ${replaceTabs(removed.content)}`));
+					result.push(formatDiffLine("-", removed.lineNum, replaceTabs(removed.content), "toolDiffRemoved"));
 				}
 				for (const added of addedLines) {
-					result.push(theme.fg("toolDiffAdded", `+${added.lineNum} ${replaceTabs(added.content)}`));
+					result.push(formatDiffLine("+", added.lineNum, replaceTabs(added.content), "toolDiffAdded"));
 				}
 			}
 		} else if (parsed.prefix === "+") {
 			// Standalone added line
-			result.push(theme.fg("toolDiffAdded", `+${parsed.lineNum} ${replaceTabs(parsed.content)}`));
+			result.push(formatDiffLine("+", parsed.lineNum, replaceTabs(parsed.content), "toolDiffAdded"));
 			i++;
 		} else {
 			// Context line
-			result.push(theme.fg("toolDiffContext", ` ${parsed.lineNum} ${replaceTabs(parsed.content)}`));
+			result.push(formatDiffLine(" ", parsed.lineNum, replaceTabs(parsed.content), "toolDiffContext"));
 			i++;
 		}
 	}

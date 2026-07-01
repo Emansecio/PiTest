@@ -145,6 +145,8 @@ export interface CrossErrorReminderSettings {
 export interface FailureBudgetSettings {
 	enabled?: boolean; // default: true (opt out with enabled: false)
 	maxPerTurn?: number; // default: 3 — failures of one tool (by name) allowed in a turn before a forceful steer fires
+	/** Carry failure counts into the next turn with half-life decay. Default: true. */
+	carryover?: boolean;
 }
 
 export interface TodoCadenceReminderSettings {
@@ -438,7 +440,7 @@ export interface ResolvedToolFeedbackSettings {
 	doomLoopReminder: { enabled: boolean; threshold: number; cooldownMs: number };
 	stagnationReminder: { enabled: boolean; softThreshold: number; hardThreshold: number; cooldownMs: number };
 	crossErrorReminder: { enabled: boolean; threshold: number; cooldownMs: number };
-	failureBudget: { enabled: boolean; maxPerTurn: number };
+	failureBudget: { enabled: boolean; maxPerTurn: number; carryover: boolean };
 	todoCadenceReminder: { enabled: boolean; threshold: number; cooldownMs: number };
 	overthinkGuard: ResolvedOverthinkGuardSettings;
 }
@@ -499,8 +501,9 @@ export interface Settings {
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
+	cardPaddingX?: number; // Horizontal padding inside card frames (welcome + tool blocks) (default: 1)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
-	assistantReadingColumns?: number; // Reading-column cap (cols) for assistant prose; 0 = full width (default: 0)
+	assistantReadingColumns?: number; // Reading-column cap (cols) for assistant prose; default 100; 0 = full width
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	cursorBlink?: boolean; // Blink the input editor's block cursor while focused (default: true)
 	streamingSmoothing?: boolean; // Reveal streamed assistant text at a steady rate instead of in provider-sized bursts (default: true)
@@ -608,6 +611,13 @@ export interface ModelRoleSettings {
 		smol?: ModelRoleConfig;
 		slow?: ModelRoleConfig;
 		plan?: ModelRoleConfig;
+		/**
+		 * Internal compaction role: when configured, the summarization LLM call
+		 * routes here (faster/cheaper model) while thresholds stay on the session
+		 * model. Absent = summarization uses the session model (byte-identical to
+		 * the prior behavior). Not exposed as `--role compact` on the CLI.
+		 */
+		compact?: ModelRoleConfig;
 		commit?: ModelRoleConfig;
 	};
 	retry?: Pick<RetrySettings, "fallbackChains" | "cooldownMs">;
@@ -1363,6 +1373,7 @@ export class SettingsManager {
 			failureBudget: {
 				enabled: fb?.enabled !== false,
 				maxPerTurn: fbMaxPerTurn,
+				carryover: fb?.carryover !== false,
 			},
 			todoCadenceReminder: {
 				enabled: tc?.enabled !== false,
@@ -1682,6 +1693,16 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getCardPaddingX(): number {
+		return this.settings.cardPaddingX ?? 1;
+	}
+
+	setCardPaddingX(padding: number): void {
+		this.globalSettings.cardPaddingX = Math.max(0, Math.min(3, Math.floor(padding)));
+		this.markModified("cardPaddingX");
+		this.save();
+	}
+
 	getAutocompleteMaxVisible(): number {
 		return this.settings.autocompleteMaxVisible ?? 5;
 	}
@@ -1701,9 +1722,9 @@ export class SettingsManager {
 	 */
 	getAssistantReadingColumns(): number {
 		const raw = this.settings.assistantReadingColumns;
-		// Unset / 0 / non-positive = full width (no cap); else clamp to a readable band.
-		if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 0;
-		return clampInt(raw, 40, 200, 0);
+		if (typeof raw !== "number" || !Number.isFinite(raw)) return 100;
+		if (raw <= 0) return 0;
+		return clampInt(raw, 40, 200, 100);
 	}
 
 	setAssistantReadingColumns(columns: number): void {
@@ -2000,12 +2021,13 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Resolve the grep backend. Defaults to `"fff"` (warm in-memory index) — it
-	 * is native + zero-config: when the optional `@ff-labs/fff-node` package or
+	 * Resolve the grep/find backend. Defaults to `"fff"` (warm in-memory index) —
+	 * it is native + zero-config: when the optional `@ff-labs/fff-node` package or
 	 * its platform binary is absent, OR a query falls outside fff's supported
-	 * subset, the grep tool transparently falls back to ripgrep, so the default
-	 * is safe everywhere. Opt out with `grep.engine: "rg"` (or `PIT_GREP_ENGINE=rg`).
-	 * `PIT_GREP_ENGINE=fff|rg` overrides settings (env wins) for per-run toggling.
+	 * subset, grep transparently falls back to ripgrep and find falls back to fd,
+	 * so the default is safe everywhere. Opt out with `grep.engine: "rg"` (or
+	 * `PIT_GREP_ENGINE=rg`). `PIT_GREP_ENGINE=fff|rg` overrides settings (env wins)
+	 * for per-run toggling. The same engine switch governs both `grep` and `find`.
 	 */
 	getGrepSettings(): ResolvedGrepSettings {
 		const env = process.env.PIT_GREP_ENGINE;

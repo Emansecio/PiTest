@@ -122,6 +122,12 @@ export {
 	type RecallToolOptions,
 } from "./recall.ts";
 export {
+	createRecallHistoryDefinition,
+	createRecallHistoryTool,
+	type RecallHistoryDetails,
+	type RecallHistoryInput,
+} from "./recall-history.ts";
+export {
 	createRecallToolOutputDefinition,
 	createRecallToolOutputTool,
 	type RecallToolOutputDetails,
@@ -261,6 +267,7 @@ import { createPlanTool, createPlanToolDefinition, type PlanToolOptions } from "
 import { createPreviewTool, createPreviewToolDefinition } from "./preview.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createRecallTool, createRecallToolDefinition, type RecallToolOptions } from "./recall.ts";
+import { createRecallHistoryDefinition, createRecallHistoryTool } from "./recall-history.ts";
 import { createRecallToolOutputDefinition, createRecallToolOutputTool } from "./recall-tool-output.ts";
 import { createRecipeTool, createRecipeToolDefinition, type RecipeToolOptions } from "./recipe.ts";
 import { createReflectTool, createReflectToolDefinition, type ReflectToolOptions } from "./reflect.ts";
@@ -708,6 +715,13 @@ const TOOL_REGISTRY = {
 		readOnly: true,
 		coding: false,
 	},
+	recall_history: {
+		factory: createRecallHistoryTool,
+		definitionFactory: createRecallHistoryDefinition,
+		optionsKey: "recallHistory",
+		readOnly: true,
+		coding: false,
+	},
 } satisfies Record<string, ToolRegistryEntry>;
 
 export type ToolName = keyof typeof TOOL_REGISTRY;
@@ -838,6 +852,7 @@ export interface ToolsOptions {
 	chromeDevtools?: ChromeDevtoolsToolOptions & { enabled?: boolean };
 	hindsight?: { enabled?: boolean };
 	recallToolOutput?: Record<string, never>;
+	recallHistory?: Record<string, never>;
 	lsp?: LspToolOptions & { enabled?: boolean };
 	debug?: DebugToolOptions & { enabled?: boolean };
 }

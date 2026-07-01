@@ -32,6 +32,7 @@ import {
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.js";
 import type { HindsightBank } from "./hindsight/index.js";
 import type { ModelRegistry } from "./model-registry.ts";
+import { resolveRole } from "./model-resolver.ts";
 import type { CompactionEntry, SessionEntry, SessionManager } from "./session-manager.js";
 import { getLatestCompactionEntry } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
@@ -101,6 +102,66 @@ export function maybePruneStaleToolOutputs(ctx: CompactionController, contextTok
 	if (reclaimed > 0) ctx.host.agent.state.messages = copy;
 }
 
+/**
+ * Resolve the `compact` model role for the summarization LLM call. When
+ * `modelRoles.compact` is configured AND its auth resolves, the summarization
+ * routes to that (typically faster/cheaper) model with the role's thinking
+ * level. Otherwise — no role configured, role resolves to nothing, or auth
+ * fails — fail open to the session model + its already-fetched auth, so the
+ * compaction never breaks because of the role. Thresholds stay on the session
+ * model regardless (the caller computes them from `ctx.host.model`).
+ */
+export async function resolveCompactModel(
+	ctx: CompactionController,
+	sessionModel: Model<any>,
+	sessionAuth: { apiKey: string | undefined; headers: Record<string, string> | undefined },
+	sessionThinking: ThinkingLevel,
+): Promise<{
+	model: Model<any>;
+	apiKey: string | undefined;
+	headers: Record<string, string> | undefined;
+	thinkingLevel: ThinkingLevel;
+}> {
+	const fallback = {
+		model: sessionModel,
+		apiKey: sessionAuth.apiKey,
+		headers: sessionAuth.headers,
+		thinkingLevel: sessionThinking,
+	};
+	try {
+		const roleSettings = ctx.host.settingsManager.getModelRoleSettings();
+		if (!roleSettings.modelRoles?.compact) return fallback;
+		const availableModels = ctx.host.modelRegistry.getAll();
+		const resolved = resolveRole({
+			role: "compact",
+			availableModels,
+			settings: roleSettings,
+			cwd: ctx.host.cwd,
+		});
+		if (!resolved) return fallback;
+		let compactApiKey: string | undefined;
+		let compactHeaders: Record<string, string> | undefined;
+		if (ctx.host.agent.streamFn === streamSimple) {
+			const authResult = await ctx.host.modelRegistry.getApiKeyAndHeaders(resolved.model);
+			if (!authResult.ok || !authResult.apiKey) return fallback;
+			compactApiKey = authResult.apiKey;
+			compactHeaders = authResult.headers;
+		} else {
+			const auth = await ctx.host.getCompactionRequestAuth(resolved.model);
+			compactApiKey = auth.apiKey;
+			compactHeaders = auth.headers;
+		}
+		return {
+			model: resolved.model,
+			apiKey: compactApiKey,
+			headers: compactHeaders,
+			thinkingLevel: resolved.thinkingLevel,
+		};
+	} catch {
+		return fallback;
+	}
+}
+
 export async function executeCompactionPipeline(
 	ctx: CompactionController,
 	options: {
@@ -111,9 +172,12 @@ export async function executeCompactionPipeline(
 		headers: Record<string, string> | undefined;
 		abortSignal: AbortSignal;
 		customInstructions?: string;
+		/** Thinking level for the summarization call; defaults to the session's. */
+		thinkingLevel?: ThinkingLevel;
 	},
 ): Promise<CompactionResult> {
 	const { preparation, pathEntries, model, apiKey, headers, abortSignal, customInstructions } = options;
+	const thinkingLevel = options.thinkingLevel ?? ctx.host.thinkingLevel;
 	ctx.host.readDedupeStore?.clear();
 	let extensionCompaction: CompactionResult | undefined;
 	let fromExtension = false;
@@ -152,7 +216,7 @@ export async function executeCompactionPipeline(
 			headers,
 			customInstructions,
 			abortSignal,
-			ctx.host.thinkingLevel,
+			thinkingLevel,
 			ctx.host.agent.streamFn,
 		);
 		({ summary, firstKeptEntryId, tokensBefore, details } = result);
@@ -230,14 +294,19 @@ export async function compactSession(
 			throw new Error("Compaction cancelled");
 		}
 
+		// Route the summarization call to the `compact` role when configured;
+		// fail open to the session model otherwise. Thresholds stay on the session model.
+		const compactModel = await resolveCompactModel(ctx, ctx.host.model, { apiKey, headers }, ctx.host.thinkingLevel);
+
 		const compactionResult = await executeCompactionPipeline(ctx, {
 			preparation,
 			pathEntries,
-			model: ctx.host.model,
-			apiKey,
-			headers,
+			model: compactModel.model,
+			apiKey: compactModel.apiKey,
+			headers: compactModel.headers,
 			abortSignal: compactionAbort.signal,
 			customInstructions,
+			thinkingLevel: compactModel.thinkingLevel,
 		});
 
 		ctx.host.emit({
@@ -510,13 +579,19 @@ export async function runAutoCompaction(
 			return false;
 		}
 
+		// Route the summarization call to the `compact` role when configured;
+		// fail open to the session model otherwise. Thresholds above stay on the
+		// session model (`ctx.host.model`).
+		const compactModel = await resolveCompactModel(ctx, ctx.host.model, { apiKey, headers }, ctx.host.thinkingLevel);
+
 		const result = await executeCompactionPipeline(ctx, {
 			preparation,
 			pathEntries,
-			model: ctx.host.model,
-			apiKey,
-			headers,
+			model: compactModel.model,
+			apiKey: compactModel.apiKey,
+			headers: compactModel.headers,
 			abortSignal: autoAbort.signal,
+			thinkingLevel: compactModel.thinkingLevel,
 		});
 
 		ctx.host.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
@@ -537,10 +612,11 @@ export async function runAutoCompaction(
 					const resultAfter = await executeCompactionPipeline(ctx, {
 						preparation: preparationAfter,
 						pathEntries: pathEntriesAfter,
-						model: ctx.host.model,
-						apiKey,
-						headers,
+						model: compactModel.model,
+						apiKey: compactModel.apiKey,
+						headers: compactModel.headers,
 						abortSignal: autoAbort.signal,
+						thinkingLevel: compactModel.thinkingLevel,
 					});
 					ctx.host.emit({ type: "compaction_end", reason, result: resultAfter, aborted: false, willRetry });
 				}

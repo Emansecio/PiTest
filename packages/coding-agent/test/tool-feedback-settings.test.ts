@@ -124,10 +124,16 @@ describe("SettingsManager.getToolFeedbackSettings", () => {
 		expect(cfg.stagnationReminder.cooldownMs).toBe(30000);
 	});
 
-	it("defaults failureBudget to ON with maxPerTurn 3", () => {
+	it("defaults failureBudget to ON with maxPerTurn 3 and carryover", () => {
 		const cfg = SettingsManager.inMemory().getToolFeedbackSettings();
 		expect(cfg.failureBudget.enabled).toBe(true);
 		expect(cfg.failureBudget.maxPerTurn).toBe(3);
+		expect(cfg.failureBudget.carryover).toBe(true);
+	});
+
+	it("honors explicit opt-out for failureBudget carryover", () => {
+		const sm = SettingsManager.inMemory({ toolFeedback: { failureBudget: { carryover: false } } });
+		expect(sm.getToolFeedbackSettings().failureBudget.carryover).toBe(false);
 	});
 
 	it("honors explicit opt-out for failureBudget", () => {

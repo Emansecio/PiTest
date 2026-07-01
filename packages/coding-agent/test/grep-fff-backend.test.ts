@@ -25,6 +25,7 @@ async function runGrep(
 	args: {
 		pattern: string;
 		path?: string;
+		glob?: string;
 		ignoreCase?: boolean;
 		literal?: boolean;
 		outputMode?: "content" | "files_with_matches" | "count";
@@ -96,8 +97,7 @@ describe("grep fff backend", () => {
 		expect(fff).toEqual(["b.ts:1"]);
 	});
 
-	it.skipIf(!fffReady)("fff engine falls back to rg for ignoreCase (includes lowercase line)", async () => {
-		// ignoreCase is unsupported by the fff path → rg fallback. Must include a.ts:3.
+	it.skipIf(!fffReady)("fff engine matches rg with ignoreCase via warm index", async () => {
 		const rg = lineSet(await runGrep("rg", { pattern: "FooBarBaz", ignoreCase: true }));
 		const fff = lineSet(await runGrep("fff", { pattern: "FooBarBaz", ignoreCase: true }));
 		expect(fff).toEqual(rg);
@@ -136,5 +136,18 @@ describe("grep fff backend", () => {
 		);
 		expect(fff).toEqual(rg);
 		expect(fff).toEqual(["c.ts", "d.ts"]);
+	});
+
+	it.skipIf(!fffReady)("fff engine matches rg with a simple glob filter", async () => {
+		const rg = plainList(await runGrep("rg", { pattern: "FooBarBaz", glob: "*.ts" }));
+		const fff = plainList(await runGrep("fff", { pattern: "FooBarBaz", glob: "*.ts" }));
+		expect(fff).toEqual(rg);
+	});
+
+	it.skipIf(!fffReady)("fff engine matches rg when complex glob forces rg fallback", async () => {
+		const complexGlob = "!*.js";
+		const rg = plainList(await runGrep("rg", { pattern: "FooBarBaz", glob: complexGlob }));
+		const fff = plainList(await runGrep("fff", { pattern: "FooBarBaz", glob: complexGlob }));
+		expect(fff).toEqual(rg);
 	});
 });

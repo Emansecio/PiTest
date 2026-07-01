@@ -56,4 +56,20 @@ describe("Loader elapsed with frozen indicator", () => {
 		const text = loader.render(80).join("\n");
 		assert.match(text, /5s/);
 	});
+
+	it("appends a trailing suffix independent of setMessage", () => {
+		const t = trackingTui();
+		const loader = new Loader(
+			t.ui,
+			(s) => s,
+			(s) => s,
+			"Working…",
+			{ frames: ["⠋"] },
+		);
+		loader.setTrailingSuffix(" · hint");
+		loader.setMessage("Thinking…");
+		const text = loader.render(80).join("\n");
+		assert.match(text, /hint/);
+		assert.match(text, /Thinking/);
+	});
 });

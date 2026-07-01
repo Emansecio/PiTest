@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import type { AgentTool } from "@pit/agent-core";
+import type { AgentTool, AgentToolResult } from "@pit/agent-core";
 import { recordDiagnostic } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { spawn } from "child_process";
@@ -11,6 +11,7 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.js"
 import { ensureTool } from "../../utils/tools-manager.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { prepareWithPathAliases } from "./argument-prep.js";
+import { fffFindByGlob } from "./fff-search.js";
 import { resolveToCwd } from "./path-utils.js";
 import { getTextOutput, invalidArgText, nonEmptyDetails, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -75,6 +76,8 @@ const defaultFindOperations: FindOperations = {
 export interface FindToolOptions {
 	/** Custom operations for find. Default: local filesystem plus fd */
 	operations?: FindOperations;
+	/** Search backend. `"fff"` uses the warm in-memory index with fd fallback. */
+	engine?: "fd" | "fff";
 }
 
 function formatFindCall(
@@ -96,6 +99,113 @@ function formatFindCall(
 		text += theme.fg("toolOutput", ` (limit ${limit})`);
 	}
 	return text;
+}
+
+function finalizeFindResults(
+	relativized: string[],
+	effectiveLimit: number,
+	enumerationSaturated = false,
+): AgentToolResult<FindToolDetails | undefined> {
+	if (relativized.length === 0) {
+		return { content: [{ type: "text", text: "No files found matching pattern" }], details: undefined };
+	}
+	const resultLimitReached = relativized.length >= effectiveLimit;
+	const rawOutput = relativized.join("\n");
+	const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+	let resultOutput = truncation.content;
+	const details: FindToolDetails = {};
+	const notices: string[] = [];
+	if (resultLimitReached) {
+		notices.push(
+			`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+		);
+		details.resultLimitReached = effectiveLimit;
+	} else if (enumerationSaturated) {
+		notices.push(
+			`enumeration cap of ${FD_POST_FILTER_ENUM_CAP} files reached before filtering; matches may be missing — narrow the search directory`,
+		);
+	}
+	if (truncation.truncated) {
+		notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+		details.truncation = truncation;
+	}
+	if (notices.length > 0) {
+		resultOutput += `\n\n[${notices.join(". ")}]`;
+	}
+	return {
+		content: [{ type: "text", text: resultOutput }],
+		details: nonEmptyDetails(details),
+	};
+}
+
+function filterFffPathsForFind(
+	indexedPaths: string[],
+	pattern: string,
+	searchPath: string,
+	cwd: string,
+	effectiveLimit: number,
+): string[] {
+	const usePostFilter = pattern.includes("/");
+	const postMatcher = usePostFilter ? new Minimatch(pattern, { dot: true }) : null;
+	const basenameMatcher = usePostFilter ? null : new Minimatch(pattern, { dot: true, matchBase: true });
+	const relativized: string[] = [];
+	for (const relFromCwd of indexedPaths) {
+		const abs = path.resolve(cwd, relFromCwd);
+		const relativePath = path.relative(searchPath, abs);
+		if (relativePath.startsWith("..")) continue;
+		const posixPath = toPosixPath(relativePath);
+		if (postMatcher) {
+			if (!postMatcher.match(posixPath) && !postMatcher.match(posixPath.replace(/\/$/, ""))) continue;
+		} else if (basenameMatcher && !basenameMatcher.match(posixPath)) {
+			continue;
+		}
+		relativized.push(posixPath);
+		if (relativized.length >= effectiveLimit) break;
+	}
+	return relativized;
+}
+
+async function tryFindViaFff(
+	cwd: string,
+	searchPath: string,
+	pattern: string,
+	effectiveLimit: number,
+): Promise<AgentToolResult<FindToolDetails | undefined> | null> {
+	const relToCwd = path.relative(cwd, searchPath);
+	const withinCwd = relToCwd === "" || (!relToCwd.startsWith("..") && !path.isAbsolute(relToCwd));
+	if (!withinCwd) return null;
+	const subPrefix = relToCwd === "" ? undefined : relToCwd.replace(/\\/g, "/");
+	const usePostFilter = pattern.includes("/");
+	const globPattern = usePostFilter ? "*" : pattern;
+	const matched = await fffFindByGlob({
+		basePath: cwd,
+		pattern: globPattern,
+		subPrefix,
+		limit: usePostFilter ? FD_POST_FILTER_ENUM_CAP : effectiveLimit,
+	});
+	if (!matched) return null;
+	let relativized: string[];
+	if (usePostFilter) {
+		relativized = filterFffPathsForFind(matched, pattern, searchPath, cwd, effectiveLimit);
+	} else {
+		relativized = [];
+		for (const relFromCwd of matched) {
+			const abs = path.resolve(cwd, relFromCwd);
+			const relativePath = path.relative(searchPath, abs);
+			if (relativePath.startsWith("..")) continue;
+			relativized.push(toPosixPath(relativePath));
+			if (relativized.length >= effectiveLimit) break;
+		}
+	}
+	if (relativized.length === 0) {
+		const noMatch = pattern.includes("\\")
+			? `No files found matching pattern. Glob patterns use forward slashes; try: ${pattern.replace(/\\/g, "/")}`
+			: "No files found matching pattern";
+		return { content: [{ type: "text", text: noMatch }], details: undefined };
+	}
+	const enumerationSaturated =
+		usePostFilter && relativized.length < effectiveLimit && matched.length >= FD_POST_FILTER_ENUM_CAP;
+	return finalizeFindResults(relativized, effectiveLimit, enumerationSaturated);
 }
 
 function formatFindResult(
@@ -136,6 +246,7 @@ export function createFindToolDefinition(
 	options?: FindToolOptions,
 ): ToolDefinition<typeof findSchema, FindToolDetails | undefined> {
 	const customOps = options?.operations;
+	const engine = options?.engine ?? "fd";
 	return {
 		name: "find",
 		activity: "navigation",
@@ -239,6 +350,18 @@ export function createFindToolDefinition(
 								}),
 							);
 							return;
+						}
+
+						if (engine === "fff" && !customOps?.glob) {
+							const fffResult = await tryFindViaFff(cwd, searchPath, pattern, effectiveLimit);
+							if (signal?.aborted) {
+								settle(() => reject(new Error("Operation aborted")));
+								return;
+							}
+							if (fffResult) {
+								settle(() => resolve(fffResult));
+								return;
+							}
 						}
 
 						// Default implementation uses fd.
@@ -391,34 +514,8 @@ export function createFindToolDefinition(
 							const resultLimitReached = relativized.length >= effectiveLimit;
 							const enumerationSaturated =
 								usePostFilter && !resultLimitReached && enumeratedCount >= FD_POST_FILTER_ENUM_CAP;
-							const rawOutput = relativized.join("\n");
-							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-							let resultOutput = truncation.content;
-							const details: FindToolDetails = {};
-							const notices: string[] = [];
-							if (resultLimitReached) {
-								notices.push(
-									`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
-								);
-								details.resultLimitReached = effectiveLimit;
-							} else if (enumerationSaturated) {
-								notices.push(
-									`enumeration cap of ${FD_POST_FILTER_ENUM_CAP} files reached before filtering; matches may be missing — narrow the search directory`,
-								);
-							}
-							if (truncation.truncated) {
-								notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-								details.truncation = truncation;
-							}
-							if (notices.length > 0) {
-								resultOutput += `\n\n[${notices.join(". ")}]`;
-							}
-							settle(() =>
-								resolve({
-									content: [{ type: "text", text: resultOutput }],
-									details: nonEmptyDetails(details),
-								}),
-							);
+							settle(() => resolve(finalizeFindResults(relativized, effectiveLimit, enumerationSaturated)));
+							return;
 						});
 					} catch (e) {
 						if (signal?.aborted) {

@@ -174,9 +174,9 @@ describe("per-turn per-tool failure budget", () => {
 		expect(customMessages(harness, "pi.tool-failure-budget").length).toBe(0);
 	});
 
-	it("resets the budget on a new turn", async () => {
+	it("resets the budget on a new turn when carryover is disabled", async () => {
 		const harness = await createHarness({
-			settings: { toolFeedback: { failureBudget: { enabled: true, maxPerTurn: 3 } } },
+			settings: { toolFeedback: { failureBudget: { enabled: true, maxPerTurn: 3, carryover: false } } },
 			tools: [makeAlwaysFailTool("flaky")],
 		});
 		harnesses.push(harness);
@@ -200,6 +200,76 @@ describe("per-turn per-tool failure budget", () => {
 		await harness.session.prompt("turn two");
 		// Still exactly one budget steer total (turn 2 stayed under the reset budget).
 		expect(customMessages(harness, "pi.tool-failure-budget").length).toBe(1);
+	});
+
+	it("carries failure counts into the next turn with half-life decay", () => {
+		const session = makeBareSession({ enabled: true, maxPerTurn: 3, carryover: true });
+		try {
+			const internal = session as unknown as {
+				_steering: {
+					recordTurnToolFailure(name: string): { count: number };
+					resetTurnFailureBudget(): void;
+					_turnToolFailures: Map<string, number>;
+				};
+			};
+			internal._steering.recordTurnToolFailure("flaky");
+			internal._steering.recordTurnToolFailure("flaky");
+			internal._steering.recordTurnToolFailure("flaky");
+			expect(internal._steering._turnToolFailures.get("flaky")).toBe(3);
+			internal._steering.resetTurnFailureBudget();
+			expect(internal._steering._turnToolFailures.get("flaky")).toBe(1);
+			internal._steering.resetTurnFailureBudget();
+			expect(internal._steering._turnToolFailures.get("flaky")).toBeUndefined();
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("clears carryover for a tool after it succeeds", () => {
+		const session = makeBareSession({ enabled: true, maxPerTurn: 3, carryover: true });
+		try {
+			const internal = session as unknown as {
+				_steering: {
+					recordTurnToolFailure(name: string): void;
+					resetTurnFailureBudget(): void;
+					observeToolSuccess(toolName: string): void;
+					_turnToolFailures: Map<string, number>;
+				};
+			};
+			internal._steering.recordTurnToolFailure("flaky");
+			internal._steering.recordTurnToolFailure("flaky");
+			internal._steering.resetTurnFailureBudget();
+			expect(internal._steering._turnToolFailures.get("flaky")).toBe(1);
+			internal._steering.observeToolSuccess("flaky");
+			expect(internal._steering._turnToolFailures.get("flaky")).toBeUndefined();
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("fires sooner on the next turn when carryover is enabled", async () => {
+		const harness = await createHarness({
+			settings: { toolFeedback: { failureBudget: { enabled: true, maxPerTurn: 3, carryover: true } } },
+			tools: [makeAlwaysFailTool("flaky")],
+		});
+		harnesses.push(harness);
+
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("flaky", { n: 1 })], { stopReason: "toolUse" }),
+			fauxAssistantMessage([fauxToolCall("flaky", { n: 2 })], { stopReason: "toolUse" }),
+			fauxAssistantMessage([fauxToolCall("flaky", { n: 3 })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done turn 1"),
+		]);
+		await harness.session.prompt("turn one");
+		expect(customMessages(harness, "pi.tool-failure-budget").length).toBe(1);
+
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("flaky", { n: 10 })], { stopReason: "toolUse" }),
+			fauxAssistantMessage([fauxToolCall("flaky", { n: 11 })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done turn 2"),
+		]);
+		await harness.session.prompt("turn two");
+		expect(customMessages(harness, "pi.tool-failure-budget").length).toBe(2);
 	});
 
 	it("does not count a tool that succeeds (only failing calls increment the budget)", async () => {

@@ -21,6 +21,7 @@ const BENCH_SCRIPTS = [
 	"scripts/bench-session-tokens.mts",
 	"scripts/bench-prompt-size.mts",
 	"scripts/bench-fusion-tokens.mts",
+	"scripts/bench-compaction-fidelity.mts",
 ];
 
 function runBench(script) {

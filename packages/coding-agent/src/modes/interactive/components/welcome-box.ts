@@ -1,25 +1,23 @@
 /**
  * Welcome box: the framed identity block shown at startup.
  *
- * Pit-native framing = a single horizontal rule (─), not a 4-sided box: a side
- * `│` gutter forces exact per-line width math and risks the "Rendered line
- * exceeds terminal width" crash on narrow terminals, and a second full-width
- * rule above the logo is dead weight for a first impression — the whitespace
- * above does the framing, the one rule below closes the block. Every emitted
- * line is truncated to the viewport width (the TUI host enforces this for
- * custom components).
+ * Pit-native framing uses the shared {@link Card} primitive (`@pit/tui`) with
+ * `visibleWidth()` / `truncateToWidth()` on every composed line — 4-sided
+ * rounded frames are safe on narrow terminals.
  *
- * Layout (3 identity rows closed by one rule):
- *     █▀█ █ ▀█▀   coding agent in your terminal            v0.4.2
- *     █▀▀ █  █    ● Workspace — PiTest/src (main)
- *     ▀   ▀  ▀    ├─ Resuming · session-name   (when applicable)
- *   ────────────────────────────────────────────────────────────
+ * Layout (3 identity rows inside a card):
+ *   ╭──────────────────────────────────────────────────────────╮
+ *   │  █▀█ █ ▀█▀   coding agent in your terminal      v0.4.2  │
+ *   │  █▀▀ █  █    ● Workspace — PiTest/src (main)            │
+ *   │  ▀   ▀  ▀    ├─ Resuming · session-name   (when applicable)
+ *   ╰──────────────────────────────────────────────────────────╯
  *
  * The hint/tip line is rendered separately (below) so its expand toggle stays
  * owned by interactive-mode.
  */
 
-import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
+import { Card, type Component, truncateToWidth, visibleWidth } from "@pit/tui";
+import { wordmarkGradient } from "../theme/color-interpolation.ts";
 import { theme } from "../theme/theme.ts";
 
 // 3-row half-block wordmark spelling P-I-T. Each row is exactly 9 visible columns
@@ -42,6 +40,25 @@ export interface WelcomeBoxData {
 	resumedSessionName?: string;
 	/** Color function for the wordmark (lets interactive-mode ease it in on mount). */
 	wordmarkColor?: (s: string) => string;
+	/** Horizontal padding inside the card frame (default 1). */
+	cardPaddingX?: number;
+}
+
+/** Renders the inner identity rows at the width Card gives its child. */
+class WelcomeBoxBody implements Component {
+	private host: WelcomeBox;
+
+	constructor(host: WelcomeBox) {
+		this.host = host;
+	}
+
+	invalidate(): void {
+		// Body reads fresh from host each frame.
+	}
+
+	render(width: number): string[] {
+		return this.host.computeInnerRows(width);
+	}
 }
 
 /** `● Workspace — PiTest/src (main) · shell: ~/pit` — always shown for orientation. */
@@ -80,6 +97,8 @@ function composeLeftRight(left: string, right: string, width: number): string {
 
 export class WelcomeBox implements Component {
 	private data: WelcomeBoxData;
+	private card: Card;
+	private body: WelcomeBoxBody;
 	// Memoized output, keyed by (width, data reference). The data object is
 	// treated as immutable — setData swaps the reference, so a reference match
 	// plus equal width means byte-identical output. Theme changes are covered by
@@ -93,10 +112,20 @@ export class WelcomeBox implements Component {
 
 	constructor(data: WelcomeBoxData) {
 		this.data = data;
+		this.body = new WelcomeBoxBody(this);
+		this.card = new Card(
+			data.cardPaddingX ?? 1,
+			0,
+			(s) => theme.bg("cardBg", s),
+			(s) => theme.fg("borderMuted", s),
+		);
+		this.card.addChild(this.body);
 	}
 
 	setData(data: WelcomeBoxData): void {
 		this.data = data;
+		const paddingX = data.cardPaddingX ?? 1;
+		this.card.setPadding(paddingX, 0);
 		this.invalidate();
 	}
 
@@ -104,14 +133,18 @@ export class WelcomeBox implements Component {
 		this.cachedWidth = -1;
 		this.cachedData = null;
 		this.cachedLines = null;
+		this.card.invalidate();
 	}
 
 	render(width: number): string[] {
 		const cacheable = this.data.wordmarkColor === undefined;
+		if (!cacheable) {
+			this.card.invalidate();
+		}
 		if (cacheable && this.cachedLines !== null && this.cachedWidth === width && this.cachedData === this.data) {
 			return this.cachedLines;
 		}
-		const lines = this.computeRender(width);
+		const lines = this.card.render(Math.max(8, width));
 		if (cacheable) {
 			this.cachedWidth = width;
 			this.cachedData = this.data;
@@ -122,30 +155,19 @@ export class WelcomeBox implements Component {
 		return lines;
 	}
 
-	private computeRender(width: number): string[] {
+	computeInnerRows(width: number): string[] {
 		const w = Math.max(8, width);
 		const d = this.data;
-		// Muted hairline, not the saturated blue `border`: the welcome rule frames
-		// the identity block as quiet structure, matching the chat-flow rules.
-		const rule = theme.fg("borderMuted", "─".repeat(w));
 		const useWordmark = d.appName === "pit" && w >= WORDMARK_WIDTH + 24;
-		const wordmarkColor = d.wordmarkColor ?? ((s: string) => theme.fg("accent", s));
+		const wordmarkColor = d.wordmarkColor ?? wordmarkGradient;
 
-		// Right-hand body lines (three rows next to the wordmark). The active model
-		// is intentionally NOT shown here — it lives permanently in the footer, so
-		// repeating it would be redundant. The welcome carries identity
-		// (logo/tagline/version) + cwd orientation only.
-		// Tagline/version are secondary but must stay LEGIBLE: `muted` (one step
-		// up from `dim`, which sat at the edge of readability) keeps the
-		// de-emphasis without making the reader squint.
-		const versionText = theme.fg("muted", `v${d.version}`);
+		const versionText = theme.fg("dim", `v${d.version}`);
 		const taglineText = theme.fg("muted", d.tagline);
 		const bodyW = this.bodyWidth(w, useWordmark);
 		const workspaceLine = formatWorkspaceLine(d.cwdDisplay, d.branch, d.shellCwdNote, bodyW);
 		const resumeLine = d.resumedSessionName ? formatResumeLine(d.resumedSessionName, bodyW) : "";
 		const bodies = useWordmark
-			? // The wordmark IS the name, so don't repeat "pit" as a text label.
-				[composeLeftRight(taglineText, versionText, bodyW), workspaceLine, resumeLine]
+			? [composeLeftRight(taglineText, versionText, bodyW), workspaceLine, resumeLine]
 			: d.resumedSessionName
 				? [
 						composeLeftRight(theme.bold(theme.fg("accent", d.appName)), versionText, bodyW),
@@ -169,14 +191,10 @@ export class WelcomeBox implements Component {
 			}
 		}
 
-		// One rule only, below: it closes the identity block and separates it from
-		// the content underneath. The whitespace above the logo frames the top.
-		const out = [...rows, rule];
-		return out.map((line) => truncateToWidth(line, w));
+		return rows.map((line) => truncateToWidth(line, w));
 	}
 
 	private bodyWidth(width: number, useWordmark: boolean): number {
-		// Columns available to the right of the left gutter (+ wordmark, if shown).
 		const gutter = useWordmark ? 2 + WORDMARK_WIDTH + 3 : 2;
 		return Math.max(8, width - gutter);
 	}

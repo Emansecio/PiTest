@@ -101,7 +101,7 @@
 |----|-----------|----------|-----------------|
 | C1 | **PARTIAL** | Delta summarization | K6: 2ª+ compact usa `serializeConversationDelta` em `<conversation-delta>` (JSON compacto, sem thinking); gap residual: summarizer ainda gera prose completo (C2) |
 | C2 | **PARTIAL** | Structured-primary context | K8+K10: JSON-primary summarizer (`STRUCTURED_SUMMARY_SCHEMA`, `normalizeStructuredSummaryOutput`) + trim pós-parse; opt-out `PIT_NO_STRUCTURED_SUMMARY_OUTPUT` / `PIT_NO_COMPACT_SUMMARY_OUTPUT` |
-| C4 | **PARTIAL** | Self-correction gate mais fino | `VERIFY_MIN_INPUT_TOKENS=25000` existe; inflação ainda `length/4` |
+| C4 | **RESOLVED** | Self-correction gate mais fino | `VERIFY_MIN_INPUT_TOKENS=25000` existe; o passe agora entaila o summary contra a fonte (`buildVerificationSource` → `<conversation-delta>` + `<summary>` + regra anti-fabricação em `compaction.ts`); grounding determinístico de paths em `compaction/summary-grounding.ts` marca fabricações com `(unverified)`. Inflação ainda `length/4` (gate existente mantido) |
 | C5 | **VALID** | Multipass coalescing | 2º `executeCompactionPipeline` síncrono possível (`agent-session-compaction.ts:456-477`) |
 | C6 | **VALID** | Branch skip gate | Sem skip por N entries / T tokens |
 | C7 | **VALID** | Branch/tool parity | Branch `skipToolResults: true`; compaction inclui tool results |
@@ -190,7 +190,7 @@
 | G5 | **PARTIAL** | Export prefix-rebuild reasons | Já aparece no `/cache-status`; falta export estruturado para bench/diagnóstico automatizado |
 | G6 | **VALID** | A/B prune vs cache | Sem harness |
 | G7 | **VALID** | A/B frequentFiles suffix | Sem harness |
-| G8 | **VALID** | A/B self-correction | Sem harness |
+| G8 | **PARTIAL** | A/B self-correction | Régua determinística em `scripts/bench-compaction-fidelity.mts` (structural recall, fabricated-flagged, false-positive) com gate no `check-token-bench.mjs`; modo `--live` para A/B manual de `generateSummary`+`verifySummary`. Falta A/B automatizado com modelo real em CI |
 | G9 | **VALID** | Telemetria por tool na prune | Sem breakdown por `toolName` |
 | G10 | **VALID** | Dashboard `/economy` | Não existe |
 | G11 | **REMOVED** | — | K9a — `bench-session-tokens.mts` emite `mechanism=* reclaimed_tokens` (thinking_cap, prune_tool_output, supersede, arg_elision) |
@@ -259,6 +259,7 @@
 | K8 | G12, C2, F3 | CI token regression gate + structured-primary trim + fusion ledger — **shipped** |
 | K9 | G11, G1 persist, G4 | Mechanism METRIC breakdown + goal `tokenSpendSplit` reload + `bench-fusion-tokens` — **shipped** |
 | K10 | F1, F2, E3, E4, C2 | Memory/hindsight hints on-demand, JSON summarizer, fusion panel cap + verify skip — **shipped** |
+| K11 | C4, G8 | Anti-hallucinação da compactação: verify com fonte (`buildVerificationSource`), grounding determinístico (`summary-grounding.ts`), tool `recall_history` (`history-recall.ts`), role `compact` (`model-resolver.ts`), bench de fidelidade + gate CI (`bench-compaction-fidelity.mts`) — **shipped** |
 
 **Pendente imediato (roadmap):** observar em produção as categorias `fusion.verify-skipped`, `compaction.summary-json-fallback`, `fusion.panel-char-estimate` (runtime diagnostics).
 

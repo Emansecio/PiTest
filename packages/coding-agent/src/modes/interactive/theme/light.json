@@ -85,7 +85,10 @@
 		"gutterBash": "green",
 		"gutterDiagnostics": "gold",
 		"gutterUser": "cyanBlue",
-		"gutterCustom": "lavender"
+		"gutterCustom": "lavender",
+
+		"cardBg": "#ffffff",
+		"cardBorder": "borderMuted"
 	},
 	"export": {
 		"pageBg": "#f4f7f6",

@@ -15,6 +15,7 @@ import { createMtimeParseCache } from "../../../core/mtime-cache.ts";
 import type { SourceInfo } from "../../../core/source-info.ts";
 import { closeWatcher, watchWithErrorHandler } from "../../../utils/fs-watch.ts";
 import { highlight, supportsLanguage } from "../../../utils/syntax-highlight.ts";
+import { h1Gradient } from "./color-interpolation.ts";
 
 // ============================================================================
 // Types & Schema
@@ -174,7 +175,8 @@ export type ThemeBg =
 	| "customMessageBg"
 	| "toolPendingBg"
 	| "toolSuccessBg"
-	| "toolErrorBg";
+	| "toolErrorBg"
+	| "cardBg";
 
 type ColorMode = "truecolor" | "256color";
 
@@ -603,6 +605,7 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 		"toolPendingBg",
 		"toolSuccessBg",
 		"toolErrorBg",
+		"cardBg",
 	]);
 	for (const [key, value] of Object.entries(resolvedColors)) {
 		if (bgColorKeys.has(key)) {
@@ -1180,6 +1183,8 @@ export function getLanguageFromPath(filePath: string): string | undefined {
 export function getMarkdownTheme(): MarkdownTheme {
 	return {
 		heading: (text: string) => theme.fg("mdHeading", text),
+		heading1: (text: string) => theme.bold(theme.underline(h1Gradient(text))),
+		heading2: (text: string) => theme.fg("accent", "▎ ") + theme.fg("mdHeading", theme.bold(text)),
 		link: (text: string) => theme.fg("mdLink", text),
 		linkUrl: (text: string) => theme.fg("mdLinkUrl", text),
 		code: (text: string) => theme.fg("mdCode", text),
@@ -1228,7 +1233,7 @@ export function getSelectListTheme(): SelectListTheme {
 
 export function getEditorTheme(): EditorTheme {
 	return {
-		borderColor: (text: string) => theme.fg("borderMuted", text),
+		borderColor: (text: string) => theme.fg("border", text),
 		selectList: getSelectListTheme(),
 		// Slash commands (`/chrome`, …) render their leading token in blue,
 		// matching Claude Code's input. `border` resolves to the blue var in

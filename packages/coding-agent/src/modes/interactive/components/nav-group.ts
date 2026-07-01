@@ -1,5 +1,7 @@
 import { basename } from "node:path";
 import { Container, SPINNER_FRAMES, type TUI, truncateToWidth } from "@pit/tui";
+import { stripAnsi } from "../../../utils/ansi.ts";
+import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
@@ -199,13 +201,43 @@ export class NavGroupComponent extends Container {
 		return this.countEase.colorize("toolOutput", list);
 	}
 
+	private pendingTargetLabel(): string | null {
+		for (const e of this.execs) {
+			if (e.getActivityState() !== "pending") continue;
+			const name = e.getToolName();
+			const args = (e.getArgs() ?? {}) as Record<string, unknown>;
+			if (name === "read") {
+				const raw = typeof args.file_path === "string" ? args.file_path : "";
+				const nameOnly = basename(raw.replace(/[\\/]+$/, ""));
+				if (nameOnly) return nameOnly;
+			}
+			if (name === "grep" || name === "find" || name === "ast_grep") {
+				const pat = typeof args.pattern === "string" ? args.pattern : "";
+				if (pat) return truncateWithEllipsis(pat, 32);
+			}
+			return name;
+		}
+		return null;
+	}
+
 	private header(state: GroupState, width: number): string {
 		const verb = state === "pending" ? "Exploring" : "Explored";
+		const prefix = `${this.icon(state)} ${theme.bold(verb)} `;
+		let pendingSuffix = "";
+		let summaryBudget = Math.max(0, width);
+		if (state === "pending") {
+			const pending = this.pendingTargetLabel();
+			if (pending) {
+				pendingSuffix = theme.fg("muted", ` — ${pending}`);
+				summaryBudget = Math.max(0, summaryBudget - stripAnsi(pendingSuffix).length);
+			}
+		}
 		// Budget the summary against the space the icon + verb + two spaces consume,
 		// so the basename list truncates to the remaining cells rather than the full
 		// width. ANSI in the prefix is width-free, so measure the visible verb only.
-		const prefixCells = 1 /* icon */ + 1 /* space */ + verb.length + 1 /* space */;
-		return `${this.icon(state)} ${theme.bold(verb)} ${this.summary(Math.max(0, width - prefixCells))}`;
+		const prefixCells = stripAnsi(prefix).length;
+		summaryBudget = Math.max(0, summaryBudget - prefixCells);
+		return `${prefix}${this.summary(summaryBudget)}${pendingSuffix}`;
 	}
 
 	override render(width: number): string[] {

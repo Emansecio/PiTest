@@ -1370,4 +1370,16 @@ bar`,
 			);
 		});
 	});
+
+	describe("Heading 2 styling", () => {
+		it("uses heading2 theme when provided", () => {
+			const themeWithH2 = {
+				...defaultMarkdownTheme,
+				heading2: (text: string) => `H2:${text}`,
+			};
+			const markdown = new Markdown("## Section title", 0, 0, themeWithH2);
+			const plain = stripAnsi(markdown.render(80)[0]);
+			assert.ok(plain.includes("H2:Section title"));
+		});
+	});
 });

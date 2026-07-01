@@ -155,7 +155,11 @@ describe("AgentSession compaction characterization", () => {
 
 		const result = await harness.session.compact();
 
-		expect(result.summary).toBe("summary from custom stream");
+		// The custom streamFn's summary is used verbatim; the recall_history footer
+		// is appended (default-native, every compact that summarized a prose window).
+		expect(result.summary).toBe(
+			"summary from custom stream\n[Details from the summarized window are retrievable via recall_history({ query }).]",
+		);
 		// Compaction now runs a self-correction verification pass after the initial
 		// summary, so the custom streamFn is invoked twice (summary + verify).
 		expect(getStreamCallCount()).toBeGreaterThanOrEqual(1);

@@ -7,6 +7,7 @@ import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
+import { collapseAnnotatedBlocks } from "./annotated-block-collapse.ts";
 import { summarizeArgsOneLine } from "./arg-summary.ts";
 import { MessageShell } from "./message-shell.ts";
 import { spinnerFrameIndexAt } from "./spinner-ticker.ts";
@@ -36,6 +37,7 @@ type GutterState = "pending" | "success" | "error";
 export interface ToolExecutionOptions {
 	showImages?: boolean;
 	imageWidthCells?: number;
+	framePaddingX?: number;
 }
 
 export class ToolExecutionComponent extends MessageShell {
@@ -101,7 +103,10 @@ export class ToolExecutionComponent extends MessageShell {
 		cwd: string,
 	) {
 		super({
+			frame: true,
+			framePaddingX: options.framePaddingX,
 			gutterColor: (text: string) => theme.fg("gutterToolPending", text),
+			frameColor: (text: string) => theme.fg("borderMuted", text),
 		});
 		this.toolName = toolName;
 		this.toolCallId = toolCallId;
@@ -227,7 +232,15 @@ export class ToolExecutionComponent extends MessageShell {
 		if (!output) {
 			return null;
 		}
-		const lines = output.split("\n");
+		const displayOutput =
+			this.expanded || this.resultExpanded
+				? output
+				: collapseAnnotatedBlocks(output, {
+						expanded: false,
+						muted: (s) => theme.fg("muted", s),
+						expandHint: expandKeyHint(),
+					});
+		const lines = displayOutput.split("\n");
 		const previewLines = SINGLE_LINE_PREVIEW_TOOLS.has(this.toolName) ? 1 : FALLBACK_RESULT_PREVIEW_LINES;
 		const maxLines = this.expanded || this.resultExpanded ? lines.length : previewLines;
 		const displayLines = lines.slice(0, maxLines);

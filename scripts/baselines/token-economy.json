@@ -1,7 +1,7 @@
 {
-	"version": 4,
-	"updated": "2026-06-28",
-	"comment": "Regression gate for scripts/check-token-bench.mjs. Exact keys are deterministic; min/max tolerate env drift (skills, prefix).",
+	"version": 6,
+	"updated": "2026-07-01",
+	"comment": "Regression gate for scripts/check-token-bench.mjs. Exact keys are deterministic; min/max tolerate env drift (skills, prefix). v5 bumps wire_tool_param_chars for the plan tool's new `brief` field (plan-mode handoff). v6 adds bench-compaction-fidelity metrics (structural recall, fabricated-path flagging, false positives) and bumps wire_tool_desc_chars/wire_tool_param_chars for the new recall_history tool.",
 	"exact": {
 		"scenario=explore-heavy messages_only_tokens": 62631,
 		"scenario=explore-heavy prune_reclaimed_tokens": 32588,
@@ -33,8 +33,8 @@
 		"scenario=edit-heavy serialize_delta_chars": 8238,
 		"scenario=long-reasoning serialize_prose_chars": 17416,
 		"scenario=long-reasoning serialize_delta_chars": 7158,
-		"wire_tool_desc_chars": 5814,
-		"wire_tool_param_chars": 11603,
+		"wire_tool_desc_chars": 5934,
+		"wire_tool_param_chars": 11763,
 		"fusion_brief_tokens": 59,
 		"fusion_panel_tokens": 3550,
 		"fusion_judge_tokens": 4594,
@@ -51,7 +51,11 @@
 		"hindsight_on_demand_saved_pct": 86,
 		"summary_json_raw_chars": 259,
 		"summary_json_saved_chars": 400,
-		"summary_json_saved_pct": 61
+		"summary_json_saved_pct": 61,
+		"scenario=edit-heavy bench=compaction-fidelity fabricated_paths_flagged": 2,
+		"scenario=edit-heavy bench=compaction-fidelity ungrounded_false_positive": 0,
+		"scenario=explore-heavy bench=compaction-fidelity fabricated_paths_flagged": 2,
+		"scenario=explore-heavy bench=compaction-fidelity ungrounded_false_positive": 0
 	},
 	"min": {
 		"scenario=explore-heavy incremental_delta_saved_pct": 25,
@@ -61,7 +65,9 @@
 		"summary_trim_saved_pct": 35,
 		"memory_on_demand_saved_pct": 80,
 		"hindsight_on_demand_saved_pct": 70,
-		"summary_json_saved_pct": 50
+		"summary_json_saved_pct": 50,
+		"scenario=edit-heavy bench=compaction-fidelity structural_fact_recall_pct": 100,
+		"scenario=explore-heavy bench=compaction-fidelity structural_fact_recall_pct": 100
 	},
 	"max": {
 		"wire_prefix_tokens": 22000,

@@ -11,8 +11,15 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { ModelRoleConfig, ModelRoleSettings } from "./settings-manager.ts";
 
-/** Roles that map intent ("smol fan-out", "deep reasoning") to a concrete model + chain. */
-export const MODEL_ROLES = ["default", "smol", "slow", "plan", "commit"] as const;
+/**
+ * Roles that map intent ("smol fan-out", "deep reasoning") to a concrete model + chain.
+ *
+ * `compact` is an INTERNAL role: the compaction pipeline routes the summarization
+ * call to it when `modelRoles.compact` is configured, so a faster/cheaper model
+ * can summarize while the session model keeps running the turns. It is NOT a
+ * user-facing turn role (no `--role compact`); the user configures it in settings.
+ */
+export const MODEL_ROLES = ["default", "smol", "slow", "plan", "compact", "commit"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
 
 export interface RoleResolution {
@@ -716,5 +723,28 @@ function findDefaultModel(availableModels: Model<Api>[]): Model<Api> | undefined
 		const match = availableModels.find((m) => m.provider === provider && m.id === defaultId);
 		if (match) return match;
 	}
+	return undefined;
+}
+
+/**
+ * Decide which model role to adopt when the permission mode changes, so the
+ * host can swap to a stronger-reasoning model while planning and a cheaper one
+ * while executing. Pure function — no I/O, no settings read beyond the supplied
+ * role config — so it is unit-testable without a TUI or session.
+ *
+ *  - mode "plan" + a configured `plan` role → "plan"
+ *  - mode "auto" + the active role is still "plan" → "default" (restore; never
+ *    clobber a role the user picked manually mid-session)
+ *  - otherwise → undefined (no-op / fail-open)
+ *
+ * `planRoleConfig` is `settings.modelRoles?.plan`; pass undefined when absent.
+ */
+export function decideRoleForPermissionMode(
+	mode: "plan" | "auto",
+	activeRole: ModelRole,
+	planRoleConfig: ModelRoleConfig | undefined,
+): ModelRole | undefined {
+	if (mode === "plan" && planRoleConfig) return "plan";
+	if (mode === "auto" && activeRole === "plan") return "default";
 	return undefined;
 }

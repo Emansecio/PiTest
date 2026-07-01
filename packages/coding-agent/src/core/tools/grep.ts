@@ -10,7 +10,7 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.js"
 import { ensureTool } from "../../utils/tools-manager.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { prepareWithPathAliases } from "./argument-prep.js";
-import { type FffContentMatch, type FffSearchMode, fffSearch } from "./fff-search.js";
+import { type FffContentMatch, type FffSearchMode, fffSearch, isSimpleGrepGlob } from "./fff-search.js";
 import { resolveToCwd } from "./path-utils.js";
 import { getTextOutput, invalidArgText, nonEmptyDetails, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -480,20 +480,19 @@ export function createGrepToolDefinition(
 
 						// fff backend: warm in-memory index. Engaged when opted in AND the
 						// query is within fff's supported subset — content/files/count modes,
-						// whole-repo OR a subdir/file inside cwd, no glob/multiline/ignoreCase/
-						// custom-ops/.git scope. Every excluded case, and any fff failure or
-						// unprovable-complete subdir scan, flows to ripgrep below (fffSearch
-						// returns null, never throws).
+						// whole-repo OR a subdir/file inside cwd, simple glob / ignoreCase,
+						// no multiline/custom-ops/.git scope. Every excluded case, and any fff
+						// failure or unprovable-complete scoped scan, flows to ripgrep below.
 						const fffMode = FFF_MODE_BY_OUTPUT[outputMode ?? "content"];
 						const relToCwd = path.relative(cwd, searchPath);
 						const withinCwd = relToCwd === "" || (!relToCwd.startsWith("..") && !path.isAbsolute(relToCwd));
 						const insideGitScope = /[\\/]\.git([\\/]|$)/.test(searchPath);
+						const simpleGlob = isSimpleGrepGlob(glob);
 						const fffEligible =
 							engine === "fff" &&
 							!customOps &&
 							!multiline &&
-							!ignoreCase &&
-							!glob &&
+							(!glob || simpleGlob) &&
 							!insideGitScope &&
 							withinCwd;
 						if (fffEligible) {
@@ -507,6 +506,8 @@ export function createGrepToolDefinition(
 								limit: effectiveLimit,
 								subPrefix,
 								subExact: subPrefix !== undefined && !isDirectory,
+								ignoreCase,
+								globFilter: simpleGlob ? glob : undefined,
 							});
 							if (signal?.aborted) {
 								settle(() => reject(new Error("Operation aborted")));

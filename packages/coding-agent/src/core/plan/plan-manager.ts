@@ -48,6 +48,8 @@ export interface PlanStepInput {
 export interface PlanVersion {
 	version: number;
 	steps: PlanStep[];
+	/** Markdown context the executor needs (constraints, invariants, decisions). Optional; inherited by revise. */
+	brief?: string;
 }
 
 export interface PlanState {
@@ -57,6 +59,10 @@ export interface PlanState {
 const INTENT_MAX = 200;
 const ARTIFACT_MAX = 200;
 const VERIFY_MAX = 400;
+/** Cap for the plan `brief` (markdown context). Larger than per-step fields on purpose. */
+const BRIEF_MAX = 4000;
+/** Truncation target for the brief inside the per-turn system prompt section (token economy). */
+const BRIEF_PROMPT_MAX = 1500;
 
 function clamp(s: string, max: number): string {
 	return truncateWithEllipsis(s.trim(), max);
@@ -226,11 +232,13 @@ export class PlanManager {
 	/**
 	 * Create v1. Throws PlanValidationError on an invalid DAG. Calling propose on
 	 * an existing plan is treated as a fresh start (history cleared) — use
-	 * `revise` to keep history.
+	 * `revise` to keep history. The optional `brief` carries markdown context the
+	 * executor needs (constraints, invariants, key files read, decisions and why).
 	 */
-	propose(steps: PlanStepInput[]): PlanVersion {
+	propose(steps: PlanStepInput[], brief?: string): PlanVersion {
 		const normalized = validateSteps(steps);
-		this.versions = [{ version: 1, steps: normalized }];
+		const clampedBrief = brief?.trim() ? clamp(brief, BRIEF_MAX) : undefined;
+		this.versions = [{ version: 1, steps: normalized, brief: clampedBrief }];
 		this.dirty = true;
 		return cloneVersion(this.versions[0]);
 	}
@@ -238,12 +246,16 @@ export class PlanManager {
 	/**
 	 * Append vN+1 with a new step set, preserving all prior versions. If no plan
 	 * exists yet this behaves like `propose` (creates v1). Throws on an invalid
-	 * DAG, leaving the previous version intact.
+	 * DAG, leaving the previous version intact. When `brief` is omitted the
+	 * previous version's brief is inherited so the model does not lose context by
+	 * forgetting to re-pass it.
 	 */
-	revise(steps: PlanStepInput[]): PlanVersion {
+	revise(steps: PlanStepInput[], brief?: string): PlanVersion {
 		const normalized = validateSteps(steps);
+		const prev = this.versions[this.versions.length - 1];
+		const clampedBrief = brief?.trim() ? clamp(brief, BRIEF_MAX) : prev?.brief;
 		const nextVersion = this.currentVersion() + 1;
-		const version: PlanVersion = { version: nextVersion, steps: normalized };
+		const version: PlanVersion = { version: nextVersion, steps: normalized, brief: clampedBrief };
 		this.versions.push(version);
 		this.dirty = true;
 		return cloneVersion(version);
@@ -282,6 +294,9 @@ export class PlanManager {
 		if (!v) return "(no plan)";
 		const { done, total } = this.counts();
 		const lines = [`plan v${v.version} (${done}/${total} done)`];
+		if (v.brief) {
+			lines.push("brief:", v.brief);
+		}
 		const statusById = new Map(v.steps.map((s) => [s.id, s.status]));
 		for (const step of topoOrder(v.steps)) {
 			lines.push(renderStepLine(step, statusById));
@@ -318,6 +333,8 @@ export class PlanManager {
 					verifyCmd: s.verifyCmd ? String(s.verifyCmd) : undefined,
 					status: PLAN_STEP_STATUSES.includes(s.status) ? s.status : "pending",
 				})),
+				// Defensive: sessions persisted before `brief` existed restore fine.
+				brief: typeof v.brief === "string" ? v.brief : undefined,
 			}));
 	}
 
@@ -336,8 +353,15 @@ export class PlanManager {
 			"- Mark a step done with `plan step_done` the moment it is finished.",
 			"- Use `plan revise` to re-shape the DAG (adds a new version, keeps history); do not silently drift.",
 			"- Honor `dependsOn`: do not start a step before its dependencies are done.",
-			"Current plan (topological order):",
 		];
+		if (v.brief) {
+			const truncated = truncateWithEllipsis(v.brief, BRIEF_PROMPT_MAX);
+			lines.push("brief:", truncated);
+			if (truncated.length < v.brief.length) {
+				lines.push("(full brief: plan show)");
+			}
+		}
+		lines.push("Current plan (topological order):");
 		const statusById = new Map(v.steps.map((s) => [s.id, s.status]));
 		for (const step of topoOrder(v.steps)) lines.push(renderStepLine(step, statusById));
 		const readyNow = v.steps
@@ -361,7 +385,11 @@ function renderStepLine(step: PlanStep, statusById?: Map<string, PlanStepStatus>
 }
 
 function cloneVersion(v: PlanVersion): PlanVersion {
-	return { version: v.version, steps: v.steps.map((s) => ({ ...s, dependsOn: [...s.dependsOn] })) };
+	return {
+		version: v.version,
+		steps: v.steps.map((s) => ({ ...s, dependsOn: [...s.dependsOn] })),
+		brief: v.brief,
+	};
 }
 
 function diffVersions(prev: PlanVersion, cur: PlanVersion): string {

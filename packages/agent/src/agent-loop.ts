@@ -1132,6 +1132,18 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 	};
 }
 
+function stableArgsFingerprint(value: unknown): string {
+	if (Array.isArray(value)) {
+		return `[${value.map(stableArgsFingerprint).join(",")}]`;
+	}
+	if (typeof value === "object" && value !== null) {
+		const record = value as Record<string, unknown>;
+		const keys = Object.keys(record).sort();
+		return `{${keys.map((key) => `${JSON.stringify(key)}:${stableArgsFingerprint(record[key])}`).join(",")}}`;
+	}
+	return JSON.stringify(value);
+}
+
 async function prepareToolCall(
 	currentContext: AgentContext,
 	assistantMessage: AssistantMessage,
@@ -1188,13 +1200,14 @@ async function prepareToolCall(
 			}
 		}
 
-		const validatedArgs = validateToolArguments(tool, activeToolCall);
+		let finalArgs = validateToolArguments(tool, activeToolCall);
 		if (config.beforeToolCall) {
+			const argsFingerprintBefore = stableArgsFingerprint(finalArgs);
 			const beforeResult = await config.beforeToolCall(
 				{
 					assistantMessage,
 					toolCall: activeToolCall,
-					args: validatedArgs,
+					args: finalArgs,
 					context: currentContext,
 				},
 				signal,
@@ -1214,16 +1227,29 @@ async function prepareToolCall(
 					isError: true,
 				};
 			}
+			if (stableArgsFingerprint(finalArgs) !== argsFingerprintBefore) {
+				try {
+					finalArgs = validateToolArguments(tool, { ...activeToolCall, arguments: finalArgs });
+				} catch (revalidationError) {
+					const detail =
+						revalidationError instanceof Error ? revalidationError.message : String(revalidationError);
+					return {
+						kind: "immediate",
+						result: createErrorToolResult(`Tool arguments became invalid after a guard mutation: ${detail}`),
+						isError: true,
+					};
+				}
+			}
 		}
 		// Repair Node (opt-in): compare what the model SENT against what actually
 		// runs (post alias/rewrite/coercion). A reportable difference becomes a
 		// note appended to the successful result below.
-		const repairNote = config.emitRepairNotes ? buildRepairNote(toolCall.arguments, validatedArgs) : undefined;
+		const repairNote = config.emitRepairNotes ? buildRepairNote(toolCall.arguments, finalArgs) : undefined;
 		return {
 			kind: "prepared",
 			toolCall: activeToolCall,
 			tool,
-			args: validatedArgs,
+			args: finalArgs,
 			repairNote,
 		};
 	} catch (error) {

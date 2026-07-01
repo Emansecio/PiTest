@@ -55,6 +55,8 @@ export interface BuiltInExtensionsOptions {
 	getSkills?: () => import("../skills.ts").Skill[];
 	/** Audit hook for permission decisions (telemetry / logs). */
 	onPermissionDecision?: (info: { toolName: string; decision: "allow" | "deny"; reason?: string }) => void;
+	/** Fired after the permission mode changes (slash command, cycle key, or exit_plan approval). */
+	onPermissionModeChange?: (mode: PermissionMode) => void;
 	isMessagingEnabled?: () => boolean;
 	getParentMessagingId?: () => string | undefined;
 	getMessagingTimeoutMs?: () => number | undefined;
@@ -88,7 +90,12 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 	});
 
 	const factories: ExtensionFactory[] = [
-		createPermissionsExtension({ checker: permissionChecker, onDecision: options.onPermissionDecision }),
+		createPermissionsExtension({
+			cwd: options.cwd,
+			checker: permissionChecker,
+			onDecision: options.onPermissionDecision,
+			onModeChange: options.onPermissionModeChange,
+		}),
 		// Task rigor: before each turn, classify task risk from the prompt and
 		// append concise rigor instructions. Model-agnostic, fail-open; opt out
 		// PIT_NO_TASK_RIGOR.

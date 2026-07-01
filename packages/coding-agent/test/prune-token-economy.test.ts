@@ -165,6 +165,45 @@ describe("pruneOldToolOutputs — superseded-read dedup", () => {
 		expect(textAt(messages, 3)).toBe("fresh grep");
 	});
 
+	it("collapses an older identical bash output even when below the size threshold", () => {
+		const blob = bigBlob("BASH_HEAD", "BASH_TAIL");
+		const args = { command: "npm test", cwd: "." };
+		const messages = [
+			toolCall("bash", "b1", args),
+			toolResult("bash", "b1", blob),
+			toolCall("bash", "b2", { cwd: ".", command: "npm test" }),
+			toolResult("bash", "b2", "fresh bash"),
+			user("a"),
+			user("b"),
+		];
+
+		const reclaimed = pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2);
+
+		expect(reclaimed).toBeGreaterThan(0);
+		expect(textAt(messages, 1)).toContain("BASH_HEAD");
+		expect(textAt(messages, 1)).toContain("BASH_TAIL");
+		expect(textAt(messages, 3)).toBe("fresh bash");
+	});
+
+	it("does not supersede different bash commands", () => {
+		const blobA = bigBlob("CMD_A", "TAIL_A");
+		const blobB = bigBlob("CMD_B", "TAIL_B");
+		const messages = [
+			toolCall("bash", "b1", { command: "npm test" }),
+			toolResult("bash", "b1", blobA),
+			toolCall("bash", "b2", { command: "npm run check" }),
+			toolResult("bash", "b2", blobB),
+			user("a"),
+			user("b"),
+		];
+
+		const reclaimed = pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2);
+
+		expect(reclaimed).toBe(0);
+		expect(textAt(messages, 1)).toBe(blobA);
+		expect(textAt(messages, 3)).toBe(blobB);
+	});
+
 	it("can prune current-turn large outputs when protection is explicitly relaxed", () => {
 		const big = `${"head\n"}${"x".repeat(90_000)}${"\ntail"}`;
 		const messages = [user("current"), toolResult("bash", "b1", big)];

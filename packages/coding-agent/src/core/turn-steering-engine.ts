@@ -456,9 +456,12 @@ export class TurnSteeringEngine {
 	}
 
 	/** Record a successful (non-error) tool call so the cross-error streak resets. */
-	observeToolSuccess(): void {
+	observeToolSuccess(toolName?: string): void {
 		this._crossError.observeSuccess();
 		this.deps.recovery.noteCleanTool();
+		if (toolName) {
+			this._turnToolFailures.delete(toolName);
+		}
 	}
 
 	/**
@@ -663,9 +666,25 @@ export class TurnSteeringEngine {
 	 * Reset the per-turn, per-tool failure budget so each tool starts the turn with
 	 * a fresh allowance. Called at the top of each prompt cycle and re-armed before
 	 * every goal continuation so the budget is per model-attempt, not per goal.
+	 * When carryover is enabled, surviving counts decay by half instead of clearing.
 	 */
 	resetTurnFailureBudget(): void {
-		this._turnToolFailures.clear();
+		const cfg = this.deps.settingsManager.getToolFeedbackSettings().failureBudget;
+		if (!cfg.carryover) {
+			this._turnToolFailures.clear();
+		} else {
+			const decayed = new Map<string, number>();
+			for (const [toolName, count] of this._turnToolFailures) {
+				const next = Math.floor(count / 2);
+				if (next > 0) {
+					decayed.set(toolName, next);
+				}
+			}
+			this._turnToolFailures.clear();
+			for (const [toolName, count] of decayed) {
+				this._turnToolFailures.set(toolName, count);
+			}
+		}
 		this._turnFailureBudgetFired.clear();
 	}
 

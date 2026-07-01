@@ -11,6 +11,7 @@ export {
 // Components
 export { Box } from "./components/box.ts";
 export { CancellableLoader } from "./components/cancellable-loader.ts";
+export { Card } from "./components/card.ts";
 export {
 	buildCheatsheetRows,
 	Cheatsheet,
@@ -117,5 +118,5 @@ export {
 	TUI,
 } from "./tui.ts";
 // Utilities
-export { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.ts";
+export { getSegmenter, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "./utils.ts";
 export { DEFAULT_VIRTUALIZED_TAIL_LINE_BUDGET, VirtualizedContainer } from "./virtualized-container.ts";

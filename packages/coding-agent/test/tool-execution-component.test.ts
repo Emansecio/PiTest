@@ -908,4 +908,37 @@ describe("ToolExecutionComponent parity", () => {
 		expect(state.textComputeCount).toBe(2);
 		expect(state.skippedHint).toBe(10);
 	});
+
+	test("fallback renderer collapses multi-line [hint] blocks on tool errors", () => {
+		const component = new ToolExecutionComponent(
+			"mcp_tool",
+			"tool-hint-collapse",
+			{},
+			{},
+			createBaseToolDefinition("mcp_tool"),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{
+				content: [
+					{
+						type: "text",
+						text: "Tool failed\n\n[hint] first hint line\n[hint] second hint line",
+					},
+				],
+				details: {},
+				isError: true,
+			},
+			false,
+		);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("[hint] first hint line");
+		expect(rendered).not.toContain("second hint line");
+		expect(rendered).toMatch(/hint lines/i);
+
+		component.setResultExpanded(true);
+		const expanded = stripAnsi(component.render(120).join("\n"));
+		expect(expanded).toContain("second hint line");
+	});
 });

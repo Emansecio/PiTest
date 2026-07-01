@@ -79,6 +79,12 @@ export interface AgentSessionServices {
 	modelRegistry: ModelRegistry;
 	resourceLoader: ResourceLoader;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
+	/**
+	 * Bind a callback fired when the permission mode changes (slash command,
+	 * cycle key, or `exit_plan` approval). The interactive mode uses this to
+	 * swap model roles (plan↔default). No-op when nothing is bound (headless).
+	 */
+	bindPermissionModeChange?: (handler: (mode: import("./permissions/types.ts").PermissionMode) => void) => void;
 }
 
 function applyExtensionFlagValues(
@@ -162,6 +168,7 @@ export async function createAgentSessionServices(
 	const asyncDeliverRef: { current?: (handle: string, text: string, status: "done" | "error") => boolean } = {};
 	const subagentStartRef: { current?: (handle: string) => void } = {};
 	const subagentProgressRef: { current?: (handle: string, info: { turn: number; lastTool?: string }) => void } = {};
+	const permissionModeChangeRef: { current?: (mode: import("./permissions/types.ts").PermissionMode) => void } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
 	if (!options.disableBuiltInExtensions) {
@@ -184,6 +191,7 @@ export async function createAgentSessionServices(
 			onSubagentStart: (handle) => subagentStartRef.current?.(handle),
 			onSubagentProgress: (handle, info) => subagentProgressRef.current?.(handle, info),
 			isScopedHindsightEnabled: () => settingsManager.getHindsightSettings().scopedSubagents,
+			onPermissionModeChange: (mode) => permissionModeChangeRef.current?.(mode),
 		});
 		builtInFactories = bundle.factories;
 	}
@@ -252,6 +260,9 @@ export async function createAgentSessionServices(
 		modelRegistry,
 		resourceLoader,
 		diagnostics,
+		bindPermissionModeChange: (handler) => {
+			permissionModeChangeRef.current = handler;
+		},
 	};
 }
 

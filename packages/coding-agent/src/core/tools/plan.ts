@@ -42,6 +42,12 @@ const planSchema = Type.Object(
 		),
 		steps: Type.Optional(Type.Array(stepSchema, { description: "Step set for propose/revise (the DAG nodes)." })),
 		step_id: Type.Optional(Type.String({ description: "Step id for step_done." })),
+		brief: Type.Optional(
+			Type.String({
+				description:
+					"Markdown context the executor needs: constraints, invariants, key files read, decisions made and why. Inherited by revise when omitted. Used by exit_plan to present the plan.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -69,6 +75,18 @@ function toStepInputs(steps: PlanStepArg[] | undefined): PlanStepInput[] {
 	}));
 }
 
+/**
+ * Advisory (fail-open) note listing steps that have no `verify` check. Not an
+ * error: a plan without verify commands is still valid, but every code-changing
+ * step should carry one so completion is provable. Returns "" when all steps
+ * have verify (or there are none).
+ */
+function verifyMissingNote(steps: PlanStep[]): string {
+	const missing = steps.filter((s) => !s.verifyCmd || !s.verifyCmd.trim()).map((s) => s.id);
+	if (missing.length === 0) return "";
+	return `note: steps without verify: ${missing.join(", ")} — add a check that proves each step done`;
+}
+
 export function createPlanToolDefinition(
 	_cwd: string,
 	_options?: PlanToolOptions,
@@ -88,10 +106,11 @@ export function createPlanToolDefinition(
 		name: "plan",
 		label: "plan",
 		description:
-			"Maintain a structured plan as a DAG of steps (supersedes flat `todo` when steps have dependencies). Ops: propose (needs steps; creates v1), revise (needs steps; appends a new version keeping history), step_done (needs step_id), show (print the current DAG in topological order). Each step has id, intent, optional depends_on (ids), produces (artifact), verify (check). Cyclic or dangling depends_on are rejected.",
+			"Maintain a structured plan as a DAG of steps (supersedes flat `todo` when steps have dependencies). Ops: propose (needs steps; creates v1), revise (needs steps; appends a new version keeping history), step_done (needs step_id), show (print the current DAG in topological order). Each step has id, intent, optional depends_on (ids), produces (artifact), verify (check). Cyclic or dangling depends_on are rejected. The optional `brief` carries markdown context the executor needs and is shown by exit_plan.",
 		promptSnippet: "Plan multi-step work as a versioned DAG of dependent steps",
 		promptGuidelines: [
 			"When a multi-step task has real dependencies/artifacts, use `plan` (a DAG) instead of `todo` (a flat list); mark steps done as you go and `revise` to re-shape.",
+			"Fill `brief` with the context the executor needs (constraints, invariants, key files read, decisions and why); every code-changing step should have `produces` and `verify`.",
 		],
 		parameters: planSchema,
 		async execute(_toolCallId: string, input: PlanToolInput) {
@@ -101,9 +120,11 @@ export function createPlanToolDefinition(
 			switch (input.op) {
 				case "propose": {
 					try {
-						const version = mgr.propose(toStepInputs(input.steps));
+						const version = mgr.propose(toStepInputs(input.steps), input.brief);
+						const note = verifyMissingNote(version.steps);
+						const body = note ? `${mgr.render()}\n\n${note}` : mgr.render();
 						return {
-							content: [{ type: "text" as const, text: mgr.render() }],
+							content: [{ type: "text" as const, text: body }],
 							details: { op: "propose" as const, version: version.version, steps: version.steps },
 						};
 					} catch (error) {
@@ -113,9 +134,11 @@ export function createPlanToolDefinition(
 				}
 				case "revise": {
 					try {
-						const version = mgr.revise(toStepInputs(input.steps));
+						const version = mgr.revise(toStepInputs(input.steps), input.brief);
 						const diff = mgr.diffFromPrevious();
-						const body = diff ? `${mgr.render()}\n\nchanges:\n${diff}` : mgr.render();
+						const note = verifyMissingNote(version.steps);
+						let body = diff ? `${mgr.render()}\n\nchanges:\n${diff}` : mgr.render();
+						if (note) body += `\n\n${note}`;
 						return {
 							content: [{ type: "text" as const, text: body }],
 							details: { op: "revise" as const, version: version.version, steps: version.steps },

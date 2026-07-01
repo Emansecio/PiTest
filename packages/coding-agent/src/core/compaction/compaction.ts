@@ -20,6 +20,7 @@ import { buildSessionContext, type CompactionEntry, type SessionEntry } from "..
 import { MUTATING_TOOL_NAMES } from "../stagnation.ts";
 import { crushJson } from "../tools/json-crush.ts";
 import { buildFileDigests, formatFileDigests, MAX_DIGEST_BYTES } from "./file-digests.ts";
+import { groundSummaryPaths } from "./summary-grounding.ts";
 import {
 	capThinkingForContext,
 	computeOperationLists,
@@ -885,7 +886,7 @@ function headTailExcerpt(text: string): string {
 // recomputes exactly once for the new (small) value.
 const beforeTokensCache = new WeakMap<object, number>();
 
-const SUPERSEDED_TOOL_RESULT_NAMES = new Set(["read", "grep", "find", "ls", "symbol", "find_symbol", "lsp"]);
+const SUPERSEDED_TOOL_RESULT_NAMES = new Set(["read", "grep", "find", "ls", "symbol", "find_symbol", "lsp", "bash"]);
 
 function stableStringify(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
@@ -1603,18 +1604,65 @@ async function runSummarization(
 // Self-correction verification
 // ============================================================================
 
-const VERIFICATION_PROMPT = `Critically evaluate the context summary below. Did you omit any of the following from the original conversation?
+const VERIFICATION_PROMPT = `Critically evaluate the context summary below against the source conversation provided in <conversation-delta> above this prompt. Did you omit any of the following from that source?
 - Exact file paths or line numbers
 - Error messages or exception types
 - Function/variable names
 - User constraints or preferences
 - Key decisions and their rationale
 
-If anything is missing or could be more precise, produce a FINAL improved summary using the same format. Otherwise, repeat the summary exactly as-is.
+The <conversation-delta> block is a compact JSON array of events:
+[{"k":"u","t":"user text"},{"k":"a","t":"assistant text"},{"k":"c","n":"toolName","a":{args}},{"k":"r","n":"toolName","t":"result excerpt","e":1}]
+Keys: u=user, a=assistant, c=tool call, r=tool result (e=1 only on error). Thinking is omitted.
+
+Compare the summary against that source. If anything material is missing or imprecise, produce a FINAL improved summary using the same format.
+
+STRICT ANTI-FABRICATION RULE: only add facts that appear VERBATIM (or as a clear paraphrase) in the <conversation-delta> source. NEVER add file paths, function names, error messages, or claims that are not present in the source — that is fabrication, not correction. If nothing is missing, repeat the summary exactly as-is.
 
 <summary>
 {SUMMARY}
 </summary>`;
+
+/**
+ * Head/tail char budgets for the verification source excerpt. Large windows
+ * would otherwise blow the verifier request; the head keeps the earliest
+ * turns (goal, constraints, first decisions) and the tail keeps the most
+ * recent (current work, latest errors) — the two regions most likely to be
+ * silently dropped from a summary.
+ */
+const VERIFY_SOURCE_HEAD_BUDGET = 24_000;
+const VERIFY_SOURCE_TAIL_BUDGET = 8_000;
+
+/**
+ * Build a bounded, compact serialization of the compacted window for the
+ * self-correction verification pass. The verifier MUST see the source it is
+ * checking the summary against — without it the pass can only fabricate
+ * plausible additions, never detect real omissions (the prior prompt carried
+ * the summary alone).
+ *
+ * Uses {@link serializeConversationDelta} (compact JSON, thinking omitted) over
+ * the convertToLlm form of the (already pruned) messages, then bounds the
+ * result with a head+tail excerpt so a huge window cannot blow the verifier
+ * request. Turn-prefix messages (split-turn) are prepended to the main window
+ * so the verifier sees the full compacted span in source order.
+ */
+export function buildVerificationSource(
+	messagesToSummarize: AgentMessage[],
+	turnPrefixMessages: AgentMessage[],
+): string {
+	const main = serializeConversationDelta(convertToLlm(messagesToSummarize));
+	const prefix = turnPrefixMessages.length > 0 ? serializeConversationDelta(convertToLlm(turnPrefixMessages)) : "";
+	const combined = prefix ? `${prefix}\n${main}` : main;
+	if (combined.length <= VERIFY_SOURCE_HEAD_BUDGET + VERIFY_SOURCE_TAIL_BUDGET) {
+		return combined;
+	}
+	return headTailExcerptShared(combined, {
+		headBudget: VERIFY_SOURCE_HEAD_BUDGET,
+		tailBudget: VERIFY_SOURCE_TAIL_BUDGET,
+		snapWindow: 400,
+		marker: (elidedChars) => `[… ${elidedChars} characters elided …]`,
+	});
+}
 
 /**
  * Below this many summarized-input tokens, skip the self-correction pass. The
@@ -1634,12 +1682,16 @@ function sumMessageTokens(messages: AgentMessage[]): number {
 
 /**
  * Run a self-correction pass on a generated summary. A second LLM call
- * evaluates the summary for omissions and produces a corrected version.
+ * evaluates the summary for omissions against the source conversation and
+ * produces a corrected version. The {@link source} argument MUST be a
+ * serialization of the compacted window (see {@link buildVerificationSource});
+ * without it the pass can only fabricate additions, never detect omissions.
  * Falls back to the original if the corrected version inflates token count
  * by more than 10%.
  */
 async function verifySummary(
 	summary: string,
+	source: string,
 	model: Model<any>,
 	maxTokens: number,
 	apiKey: string | undefined,
@@ -1648,7 +1700,10 @@ async function verifySummary(
 	thinkingLevel: ThinkingLevel | undefined,
 	streamFn?: StreamFn,
 ): Promise<string> {
-	const promptText = VERIFICATION_PROMPT.replace("{SUMMARY}", summary);
+	const promptText = `<conversation-delta>\n${source}\n</conversation-delta>\n\n${VERIFICATION_PROMPT.replace(
+		"{SUMMARY}",
+		summary,
+	)}`;
 	const messages = [
 		{
 			role: "user" as const,
@@ -2007,12 +2062,30 @@ export async function compact(
 		sumMessageTokens(messagesToSummarize) + (isSplitTurn ? sumMessageTokens(turnPrefixMessages) : 0);
 	if (!structuralOnly && settings.selfCorrection !== false && verifyInputTokens >= VERIFY_MIN_INPUT_TOKENS) {
 		const maxTokens = summarizationMaxTokens(model, settings.reserveTokens, 0.8);
-		summary = await verifySummary(summary, model, maxTokens, apiKey, headers, signal, thinkingLevel, streamFn);
+		const verifySource = buildVerificationSource(messagesToSummarize, isSplitTurn ? turnPrefixMessages : []);
+		summary = await verifySummary(
+			summary,
+			verifySource,
+			model,
+			maxTokens,
+			apiKey,
+			headers,
+			signal,
+			thinkingLevel,
+			streamFn,
+		);
 	}
 
 	const lists = computeOperationLists(fileOps, cwd);
 	if (!structuralOnly && !isTruthyEnvFlag(process.env.PIT_NO_COMPACT_SUMMARY_OUTPUT)) {
 		summary = trimSummaryProseAgainstOperations(summary, lists);
+	}
+	// Deterministic grounding: annotate path tokens in the prose that are neither
+	// in the operation lists nor on disk with `(unverified)`. Runs before the
+	// structural frame (correct by construction) is appended, and is skipped for
+	// the structural-only header (no prose to ground). Zero-LLM, every provider.
+	if (!structuralOnly && !isTruthyEnvFlag(process.env.PIT_NO_SUMMARY_GROUNDING)) {
+		summary = groundSummaryPaths(summary, lists, cwd).summary;
 	}
 	summary += formatFileOperations(lists);
 
@@ -2083,6 +2156,14 @@ export async function compact(
 			details.fileDigests = digests;
 			summary += `\n${formatFileDigests(digests)}`;
 		}
+	}
+
+	// recall_history footer: announce that the summarized window is recoverable
+	// on demand. The tool answers gracefully when there is no compacted history,
+	// so the footer is unconditional (per default-native policy). Skipped for the
+	// structural-only header (no prose window was summarized) and on opt-out.
+	if (!structuralOnly && !isTruthyEnvFlag(process.env.PIT_NO_RECALL_HISTORY)) {
+		summary += "\n[Details from the summarized window are retrievable via recall_history({ query }).]";
 	}
 
 	return {

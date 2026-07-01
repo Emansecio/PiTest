@@ -47,6 +47,10 @@ function createMutableSession(opts?: {
 			getSessionName: () => "",
 			getCwd: () => opts?.cwd ?? "/tmp/project",
 		},
+		// Active session (non-zero percent + assistant entries) ⇒ a user turn
+		// has happened; include it so the footer reads as non-pristine and
+		// renders the full metrics line ("12% · 25k/200k"), not "CTX 200k".
+		messages: [{ role: "user", content: "hi", timestamp: 0 }],
 		getContextUsage: () => ({ contextWindow: 200_000, percent: opts?.contextPercent ?? 12.3, tokens: 24_600 }),
 		modelRegistry: { isUsingOAuth: () => false },
 		goalStatusLine: () => "",
@@ -187,7 +191,7 @@ describe("FooterComponent stats cache", () => {
 		expect(line).not.toContain("↑");
 		expect(line).not.toContain("↓");
 		expect(stripAnsi(line)).toContain("12% · 25k/200k");
-		expect(stripAnsi(line)).toContain("█");
+		expect(stripAnsi(line)).toContain("▰");
 	});
 });
 

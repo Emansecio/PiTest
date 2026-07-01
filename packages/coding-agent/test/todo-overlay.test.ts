@@ -41,6 +41,8 @@ describe("renderTodoOverlay", () => {
 		expect(out).toContain("○ Write tests");
 		expect(out).toMatch(/├─/);
 		expect(out).toMatch(/└─/);
+		expect(out).toContain("▰");
+		expect(out).not.toContain("█");
 	});
 
 	it("uses the supplied spinner frame for in_progress", () => {

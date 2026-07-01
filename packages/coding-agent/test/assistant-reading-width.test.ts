@@ -30,27 +30,24 @@ function proseComponent(readingColumns?: number): AssistantMessageComponent {
 }
 
 describe("assistant prose width", () => {
-	// The default used to cap prose at 88 cols; like Claude Code it should now use
-	// the whole terminal so wide windows aren't half-empty.
-	it("uses the full terminal width by default (no fixed reading-column cap)", () => {
-		expect(maxContentWidth(proseComponent().render(200))).toBeGreaterThan(88);
+	it("caps prose at the default reading width (~100 cols)", () => {
+		expect(maxContentWidth(proseComponent().render(200))).toBeLessThanOrEqual(100);
 	});
 
 	it("treats readingColumns=0 as full width (cap disabled)", () => {
-		expect(maxContentWidth(proseComponent(0).render(200))).toBeGreaterThan(88);
+		expect(maxContentWidth(proseComponent(0).render(200))).toBeGreaterThan(100);
 	});
 
 	it("still caps prose when a positive reading column is opted in", () => {
 		expect(maxContentWidth(proseComponent(80).render(200))).toBeLessThanOrEqual(80);
 	});
 
-	// Responsiveness: the same instance must reflow to whatever width it is given
-	// instead of freezing at a fixed cap above 88 (the old "not responsive" feel).
-	it("reflows prose to the terminal width on resize", () => {
+	it("reflows prose when the terminal is narrower than the reading cap", () => {
 		const c = proseComponent();
 		const wide = maxContentWidth(c.render(200));
-		const narrow = maxContentWidth(c.render(120));
-		expect(wide).toBeGreaterThan(narrow);
-		expect(narrow).toBeGreaterThan(100); // a 120-col terminal exceeds the old 88 cap
+		const narrow = maxContentWidth(c.render(80));
+		expect(wide).toBeLessThanOrEqual(100);
+		expect(narrow).toBeLessThanOrEqual(80);
+		expect(narrow).toBeLessThan(wide);
 	});
 });

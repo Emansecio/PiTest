@@ -351,19 +351,19 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
-	it("should execute mutated beforeToolCall args without revalidation", async () => {
+	it("should execute valid guard-mutated args after post-firewall revalidation", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
-		const executed: Array<string | number> = [];
-		const tool: AgentTool<typeof toolSchema, { value: string | number }> = {
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
 			name: "echo",
 			label: "Echo",
 			description: "Echo tool",
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
-				executed.push(params.value as string | number);
+				executed.push(params.value);
 				return {
-					content: [{ type: "text", text: `echoed: ${String(params.value)}` }],
-					details: { value: params.value as string | number },
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
 				};
 			},
 		};
@@ -380,8 +380,8 @@ describe("agentLoop with AgentMessage", () => {
 			model: createModel(),
 			convertToLlm: identityConverter,
 			beforeToolCall: async ({ args }) => {
-				const mutableArgs = args as { value: string | number };
-				mutableArgs.value = 123;
+				const mutableArgs = args as { value: string };
+				mutableArgs.value = "fixed-by-guard";
 				return undefined;
 			},
 		};
@@ -410,7 +410,78 @@ describe("agentLoop with AgentMessage", () => {
 			// consume
 		}
 
-		expect(executed).toEqual([123]);
+		expect(executed).toEqual(["fixed-by-guard"]);
+	});
+
+	it("should block execution when a guard mutation produces invalid args", async () => {
+		const toolSchema = Type.Object({ count: Type.Integer({ minimum: 1 }) });
+		const executed: number[] = [];
+		const tool: AgentTool<typeof toolSchema, { count: number }> = {
+			name: "counter",
+			label: "Counter",
+			description: "Counter tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.count);
+				return {
+					content: [{ type: "text", text: String(params.count) }],
+					details: { count: params.count },
+				};
+			},
+		};
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+
+		const userPrompt: AgentMessage = createUserMessage("count");
+
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			beforeToolCall: async ({ args }) => {
+				const mutableArgs = args as { count: number };
+				mutableArgs.count = 0;
+				return undefined;
+			},
+		};
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "tool-1", name: "counter", arguments: { count: 2 } }],
+						"toolUse",
+					);
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "done" }]);
+					stream.push({ type: "done", reason: "stop", message });
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		const events: AgentEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(executed).toEqual([]);
+		const toolEnd = events.find((e) => e.type === "tool_execution_end");
+		expect(toolEnd).toBeDefined();
+		if (toolEnd?.type === "tool_execution_end") {
+			expect(toolEnd.isError).toBe(true);
+			const text =
+				toolEnd.result.content.find((block: { type: string; text?: string }) => block.type === "text")?.text ?? "";
+			expect(text).toContain("Tool arguments became invalid after a guard mutation");
+		}
 	});
 
 	it("should prepare tool arguments for validation", async () => {

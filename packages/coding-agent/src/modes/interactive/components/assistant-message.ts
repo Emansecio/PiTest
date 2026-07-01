@@ -38,17 +38,14 @@ const REVEAL_FRAME_MS = 16;
 const REVEAL_FADE_COLUMNS = 6;
 
 /**
- * Default reading-column cap (in columns) for assistant prose. `0` means no cap:
- * prose uses the full terminal width and reflows on resize, matching Claude Code
- * so a wide window isn't left half-empty. A positive value re-enables a fixed
- * reading measure — long answers wrap at that width instead of running edge to
- * edge. Only assistant text/thinking is ever capped; tool output, bash, and code
- * blocks always keep full width. Overridable per-session via the
- * `assistantReadingColumns` setting (SettingsManager.getAssistantReadingColumns),
+ * Default reading-column cap (in columns) for assistant prose. A positive value
+ * wraps long answers at that measure instead of running edge to edge; tool
+ * output, bash, and code blocks are never capped. Overridable per-session via
+ * the `assistantReadingColumns` setting (SettingsManager.getAssistantReadingColumns),
  * threaded in through the constructor; this constant is the fallback when no
- * value is supplied.
+ * value is supplied. Set the setting to `0` for full-width prose.
  */
-const DEFAULT_ASSISTANT_READING_COLUMNS = 0;
+const DEFAULT_ASSISTANT_READING_COLUMNS = 100;
 
 // FTCS / OSC 133 semantic output zone. The assistant response is the "command
 // output": C (output start) … D;<exit> (finished). The user message carries the

@@ -50,6 +50,13 @@ describe("NavGroupComponent", () => {
 		expect(stripAnsi(g.render(120)[0])).toContain("Exploring");
 	});
 
+	test("shows pending read target in header", () => {
+		const g = new NavGroupComponent(fakeTui());
+		g.addCall(resolved(navExec("read", "1", { file_path: "src/other.ts" })));
+		g.addCall(navExec("read", "2", { file_path: "src/footer.ts" }));
+		expect(stripAnsi(g.render(120)[0])).toContain("footer.ts");
+	});
+
 	test("collapsed render is a single line with no gutter", () => {
 		const g = new NavGroupComponent(fakeTui());
 		g.addCall(resolved(navExec("read", "1", { file_path: "a" })));

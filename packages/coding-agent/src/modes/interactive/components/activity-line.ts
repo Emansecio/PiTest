@@ -20,6 +20,7 @@ import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 /** Max width of a derived agent label (from the task prompt). */
 const TASK_LABEL_MAX = 40;
+const SLOW_ACTION_ELAPSED_SEC = 4;
 
 type LineState = "pending" | "success" | "error";
 
@@ -62,6 +63,7 @@ export class ActivityLineComponent extends Container {
 	// Accumulated diffstat across coalesced edits to the same target.
 	private statAdded = 0;
 	private statRemoved = 0;
+	private execStartedAtMs = 0;
 
 	constructor(ui: TUI) {
 		super();
@@ -72,6 +74,7 @@ export class ActivityLineComponent extends Container {
 	setExec(exec: ToolExecutionComponent, taskOrdinal = 0): void {
 		this.exec = exec;
 		this.taskOrdinal = taskOrdinal;
+		this.execStartedAtMs = Date.now();
 		this.linesCache = null;
 		this.liveEditBodyCache = null;
 		this.targetCache = null;
@@ -109,6 +112,7 @@ export class ActivityLineComponent extends Container {
 	 * for consecutive same-target actions so they collapse to one row. */
 	coalesce(exec: ToolExecutionComponent): void {
 		this.count += 1;
+		this.execStartedAtMs = Date.now();
 		this.absorbDiffStat(exec);
 		this.linesCache = null;
 		this.targetCache = null;
@@ -291,11 +295,18 @@ export class ActivityLineComponent extends Container {
 		const rawHeader = stripAnsi(target).trim()
 			? `${this.icon(state)} ${glyph} ${theme.bold(label)} ${target}${countSuffix}`
 			: `${this.icon(state)} ${glyph} ${theme.bold(label)}${countSuffix}`;
+		let headerText = rawHeader;
+		if (pending) {
+			const elapsedSec = Math.floor((Date.now() - this.execStartedAtMs) / 1000);
+			if (elapsedSec >= SLOW_ACTION_ELAPSED_SEC) {
+				headerText += ` ${theme.fg("muted", `· ${elapsedSec}s`)}`;
+			}
+		}
 		// Cap the assembled header once so no branch (free-form agent label, MCP tool
 		// name, web_search query, edit path) can overflow the terminal width. ANSI is
 		// width-free here, so the colorized header is clamped to `width` cells; the
 		// reticência is U+2026 (truncateToWidth's default).
-		const header = truncateToWidth(rawHeader, width);
+		const header = truncateToWidth(headerText, width);
 		const bodyWidth = width - 2;
 		const lines = [header];
 		if (this.expanded) {

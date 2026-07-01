@@ -20,6 +20,7 @@ async function runPlan(input: {
 	op: "propose" | "revise" | "step_done" | "show";
 	steps?: StepArg[];
 	step_id?: string;
+	brief?: string;
 }) {
 	const def = createPlanToolDefinition("/tmp");
 	// plan ignores signal/onUpdate/ctx; pass placeholders to satisfy the signature.
@@ -214,5 +215,149 @@ describe("plan tool", () => {
 		expect(res.isError).toBeFalsy();
 		expect(res.content[0].text).toMatch(/No plan yet/);
 		expect(res.details.version).toBe(0);
+	});
+});
+
+describe("plan tool — brief", () => {
+	beforeEach(() => setCurrentPlanManager(new PlanManager()));
+	afterEach(() => setCurrentPlanManager(undefined));
+
+	it("propose stores the brief and render() shows it in full", async () => {
+		await runPlan({
+			op: "propose",
+			steps: [{ id: "s1", intent: "scaffold" }],
+			brief: "Constraints: keep public API stable. Key files: src/mod.ts.",
+		});
+		const shown = await runPlan({ op: "show" });
+		expect(shown.content[0].text).toContain("brief:");
+		expect(shown.content[0].text).toContain("keep public API stable");
+	});
+
+	it("revise without a new brief inherits the previous brief", async () => {
+		await runPlan({
+			op: "propose",
+			steps: [{ id: "s1", intent: "scaffold" }],
+			brief: "Inherited context.",
+		});
+		const revised = await runPlan({
+			op: "revise",
+			steps: [
+				{ id: "s1", intent: "scaffold" },
+				{ id: "s2", intent: "wire", depends_on: ["s1"] },
+			],
+		});
+		expect(revised.details.version).toBe(2);
+		const mgr = getCurrentPlanManager();
+		expect(mgr?.current()?.brief).toBe("Inherited context.");
+	});
+
+	it("revise with a new brief replaces the inherited one", async () => {
+		await runPlan({
+			op: "propose",
+			steps: [{ id: "s1", intent: "scaffold" }],
+			brief: "old context",
+		});
+		await runPlan({
+			op: "revise",
+			steps: [{ id: "s1", intent: "scaffold" }],
+			brief: "new context",
+		});
+		expect(getCurrentPlanManager()?.current()?.brief).toBe("new context");
+	});
+
+	it("clamps the brief at BRIEF_MAX (4000 chars)", () => {
+		const mgr = new PlanManager();
+		const long = "x".repeat(5000);
+		mgr.propose([{ id: "s1", intent: "scaffold" }], long);
+		expect(mgr.current()?.brief?.length).toBe(4000);
+	});
+
+	it("emits the brief truncated in the system prompt section with a full-brief hint", () => {
+		const mgr = new PlanManager();
+		const long = "y".repeat(2000);
+		mgr.propose([{ id: "s1", intent: "scaffold" }], long);
+		const section = mgr.systemPromptSection();
+		expect(section).toContain("brief:");
+		expect(section).toContain("(full brief: plan show)");
+		// Truncated body is present but shorter than the full brief.
+		expect(section).toContain("y".repeat(100));
+		expect(section.length).toBeLessThan(long.length + 1000);
+	});
+
+	it("emits the full brief in the system prompt section when under the truncation cap", () => {
+		const mgr = new PlanManager();
+		mgr.propose([{ id: "s1", intent: "scaffold" }], "short context");
+		const section = mgr.systemPromptSection();
+		expect(section).toContain("short context");
+		expect(section).not.toContain("(full brief: plan show)");
+	});
+
+	it("serialize/restore round-trips the brief", () => {
+		const mgr = new PlanManager();
+		mgr.propose([{ id: "s1", intent: "scaffold" }], "round-trip context");
+		const data = mgr.serialize();
+		const mgr2 = new PlanManager();
+		mgr2.restore(data);
+		expect(mgr2.current()?.brief).toBe("round-trip context");
+	});
+
+	it("restore of a pre-brief plan state does not throw", () => {
+		const legacy = {
+			versions: [
+				{
+					version: 1,
+					steps: [{ id: "s1", intent: "x", dependsOn: [], status: "pending" }],
+				},
+			],
+		};
+		const mgr = new PlanManager();
+		expect(() => mgr.restore(legacy as any)).not.toThrow();
+		expect(mgr.current()?.brief).toBeUndefined();
+		expect(mgr.current()?.steps.map((s) => s.id)).toEqual(["s1"]);
+	});
+});
+
+describe("plan tool — verify advisory note", () => {
+	beforeEach(() => setCurrentPlanManager(new PlanManager()));
+	afterEach(() => setCurrentPlanManager(undefined));
+
+	it("propose notes steps that lack verify", async () => {
+		const res = await runPlan({
+			op: "propose",
+			steps: [
+				{ id: "s1", intent: "scaffold", verify: "vitest" },
+				{ id: "s2", intent: "wire" },
+				{ id: "s3", intent: "docs" },
+			],
+		});
+		expect(res.isError).toBeFalsy();
+		expect(res.content[0].text).toContain("steps without verify");
+		expect(res.content[0].text).toContain("s2");
+		expect(res.content[0].text).toContain("s3");
+		expect(res.content[0].text).not.toMatch(/s1\b.*without/);
+	});
+
+	it("propose omits the note when every step has verify", async () => {
+		const res = await runPlan({
+			op: "propose",
+			steps: [
+				{ id: "s1", intent: "scaffold", verify: "vitest" },
+				{ id: "s2", intent: "wire", verify: "tsc --noEmit" },
+			],
+		});
+		expect(res.content[0].text).not.toContain("steps without verify");
+	});
+
+	it("revise appends the verify note after the diff", async () => {
+		await runPlan({ op: "propose", steps: [{ id: "s1", intent: "scaffold" }] });
+		const res = await runPlan({
+			op: "revise",
+			steps: [
+				{ id: "s1", intent: "scaffold" },
+				{ id: "s2", intent: "wire" },
+			],
+		});
+		expect(res.content[0].text).toContain("changes:");
+		expect(res.content[0].text).toContain("steps without verify");
 	});
 });

@@ -924,7 +924,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 		expect(output).not.toContain("[Skill conflicts]");
 	});
 
-	test("shows a one-line skills doctor hint on quiet startup when duplicates exist", () => {
+	test("does not show a skills doctor hint on quiet startup (use /skills doctor)", () => {
 		const fakeThis = createShowLoadedResourcesThis({
 			quietStartup: true,
 			skills: [{ filePath: "/tmp/skill/SKILL.md", name: "commit" }],
@@ -948,8 +948,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		const output = normalizeRenderedOutput(fakeThis.chatContainer);
-		expect(output).toBe("1 dup — /skills doctor");
-		expect(output).not.toContain("[Skills]");
+		expect(output).toBe("");
 	});
 });
 

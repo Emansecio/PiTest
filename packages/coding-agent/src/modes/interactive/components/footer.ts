@@ -1,10 +1,14 @@
 import { getRuntimeDiagnostics } from "@pit/ai";
-import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
+import { type Component, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import type { RecoveryLevel } from "../../../core/session-recovery.ts";
+import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { buildWorkspaceCwdLabels } from "../display-utils.ts";
+import { interpolateFg } from "../theme/color-interpolation.ts";
 import { CONTEXT_USAGE_WARN_PERCENT, theme } from "../theme/theme.ts";
+import { COLOR_EASE_MS } from "./color-ease.ts";
+import { GAUGE_EMPTY, GAUGE_FILLED } from "./gauge-glyphs.ts";
 
 /**
  * Sanitize text for display in a single-line status.
@@ -68,12 +72,23 @@ function formatContextPercent(percent: number): string {
 
 /** Compact context-fill gauge for the footer metrics line (approximate; percent stays exact). */
 const FOOTER_CTX_BAR_WIDTH = 6;
+const FILL_EASE_EPSILON = 0.01;
 
-function renderFooterContextBar(percent: number, colorize: (text: string) => string): string {
-	const clamped = Math.max(0, Math.min(100, percent));
-	const filled = clamped > 0 ? Math.max(1, Math.round((clamped / 100) * FOOTER_CTX_BAR_WIDTH)) : 0;
-	const empty = FOOTER_CTX_BAR_WIDTH - filled;
-	return `${colorize("█".repeat(filled))}${theme.fg("dim", "░".repeat(empty))}`;
+function renderFooterContextBar(displayedFill: number, colorize: (text: string) => string): string {
+	const clamped = Math.max(0, Math.min(FOOTER_CTX_BAR_WIDTH, displayedFill));
+	const full = Math.floor(clamped);
+	const frac = clamped - full;
+	let result = colorize(GAUGE_FILLED.repeat(full));
+	const hasPartial = frac > FILL_EASE_EPSILON && full < FOOTER_CTX_BAR_WIDTH;
+	if (hasPartial) {
+		const blend = interpolateFg("dim", "accent", frac);
+		result += blend ? blend(GAUGE_FILLED) : colorize(GAUGE_FILLED);
+	}
+	const empty = FOOTER_CTX_BAR_WIDTH - full - (hasPartial ? 1 : 0);
+	if (empty > 0) {
+		result += theme.fg("dim", GAUGE_EMPTY.repeat(empty));
+	}
+	return result;
 }
 
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -124,16 +139,27 @@ export class FooterComponent implements Component {
 	private fusionLiveActive = false;
 	private renderCacheKey = "";
 	private renderCacheLines: string[] | null = null;
-	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider, launchCwd?: string) {
+	private ui: TUI | undefined;
+	private displayedFill = 0;
+	private fillEaseFrom = 0;
+	private fillEaseTarget = 0;
+	private barTargetFill = -1;
+	private fillEaseStartAt = 0;
+	private fillEaseUnsub: (() => void) | null = null;
+	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider, launchCwd?: string, ui?: TUI) {
 		this.session = session;
 		this.footerData = footerData;
 		this.launchCwd = launchCwd ?? session.sessionManager.getCwd();
+		this.ui = ui;
 	}
 
 	setSession(session: AgentSession): void {
 		if (this.session !== session) {
 			this.resetStatsCache();
 			this.renderCacheLines = null;
+			this.stopFillEase();
+			this.displayedFill = 0;
+			this.barTargetFill = -1;
 		}
 		this.session = session;
 	}
@@ -163,7 +189,52 @@ export class FooterComponent implements Component {
 	 * Git watcher cleanup now handled by provider.
 	 */
 	dispose(): void {
+		this.stopFillEase();
 		// Git watcher cleanup handled by provider
+	}
+
+	private fillEaseActive(): boolean {
+		return this.fillEaseUnsub !== null;
+	}
+
+	private stopFillEase(): void {
+		if (this.fillEaseUnsub) {
+			this.fillEaseUnsub();
+			this.fillEaseUnsub = null;
+		}
+	}
+
+	private beginFillEase(target: number): void {
+		const clampedTarget = Math.max(0, Math.min(FOOTER_CTX_BAR_WIDTH, target));
+		if (!this.ui || isReducedMotion()) {
+			this.displayedFill = clampedTarget;
+			this.fillEaseTarget = clampedTarget;
+			return;
+		}
+		if (Math.abs(this.displayedFill - clampedTarget) < FILL_EASE_EPSILON) {
+			this.displayedFill = clampedTarget;
+			this.fillEaseTarget = clampedTarget;
+			return;
+		}
+		this.stopFillEase();
+		this.fillEaseFrom = this.displayedFill;
+		this.fillEaseTarget = clampedTarget;
+		this.fillEaseStartAt = performance.now();
+		this.renderCacheLines = null;
+		this.fillEaseUnsub = this.ui.addAnimationCallback((now) => this.fillEaseTick(now));
+	}
+
+	private fillEaseTick(now: number): boolean {
+		const raw = (now - this.fillEaseStartAt) / COLOR_EASE_MS;
+		const t = raw < 0 ? 0 : raw > 1 ? 1 : raw;
+		const eased = t * t * (3 - 2 * t);
+		this.displayedFill = this.fillEaseFrom + (this.fillEaseTarget - this.fillEaseFrom) * eased;
+		this.renderCacheLines = null;
+		if (t >= 1) {
+			this.displayedFill = this.fillEaseTarget;
+			this.stopFillEase();
+		}
+		return true;
 	}
 
 	private resetStatsCache(): void {
@@ -207,6 +278,20 @@ export class FooterComponent implements Component {
 		const level = this.getRecoveryLevel();
 		if (level === "lean") return null;
 		return `recovery:${level}`;
+	}
+
+	/**
+	 * A session is "pristine" while the user has not yet submitted a turn. The
+	 * system prompt + tool schema live in `agent.state.systemPrompt` / tools, NOT
+	 * in `messages`, so `messages` is genuinely empty on a fresh launch even
+	 * though `getContextUsage()` already reports ~18k wire tokens (system prompt
+	 * + tools). Keying `pristine` on `usedTokens === 0` (the old check) made the
+	 * footer empty-state collapse unreachable in real sessions — the system
+	 * prompt always pushes tokens above zero before the first turn.
+	 */
+	private hasUserTurn(): boolean {
+		const messages = this.session.messages;
+		return Array.isArray(messages) && messages.some((m) => (m as { role?: string }).role === "user");
 	}
 
 	private getPermissionMode(): string | null {
@@ -288,12 +373,13 @@ export class FooterComponent implements Component {
 			this.autoCompactEnabled ? 1 : 0,
 			overthinkGuardCount,
 			recoveryLevel,
+			this.hasUserTurn() ? 1 : 0,
 		].join("|");
 	}
 
 	render(width: number): string[] {
 		const cacheKey = this.buildRenderCacheKey(width);
-		if (this.renderCacheLines !== null && cacheKey === this.renderCacheKey) {
+		if (!this.fillEaseActive() && this.renderCacheLines !== null && cacheKey === this.renderCacheKey) {
 			return this.renderCacheLines;
 		}
 
@@ -345,6 +431,39 @@ export class FooterComponent implements Component {
 			};
 		}
 
+		const mode = this.getPermissionMode();
+		const overthinkGuardCount = this.getOverthinkGuardCount();
+		const recoverySegment = this.getRecoverySegment();
+		const goalStatus = this.session.goalStatusLine();
+		const fusionSegment = this.getFusionSegment();
+		const extensionStatuses = this.footerData.getExtensionStatuses();
+		const otherStatuses = Array.from(extensionStatuses.entries())
+			.filter(([k]) => k !== "permissions")
+			.sort(([a], [b]) => a.localeCompare(b));
+		const messageTokens = contextUsage?.tokens ?? 0;
+		const wireTokens = contextUsage?.wireTokens ?? messageTokens;
+		const usedTokens = wireTokens;
+		// Pristine = no user turn yet (system prompt + tools don't count). See
+		// hasUserTurn() for why token-zero is the wrong proxy here.
+		const pristine = !this.hasUserTurn() && contextWindow > 0;
+		const modeIsAbnormal =
+			mode === "no-rails" || !this.autoCompactEnabled || overthinkGuardCount > 0 || recoverySegment !== null;
+		const collapseLine2 =
+			pristine &&
+			!modeIsAbnormal &&
+			!fusionSegment &&
+			!goalStatus &&
+			otherStatuses.length === 0 &&
+			mode !== null &&
+			mode !== "no-rails";
+		let modeSuffix: { text: string; width: number } | undefined;
+		if (collapseLine2 && mode) {
+			modeSuffix = {
+				text: theme.fg("dim", ` • ${mode}`),
+				width: visibleWidth(` • ${mode}`),
+			};
+		}
+
 		const identityLine = composeLeftRight(pwd, identityRight, width, {
 			leftColor: (text) => theme.fg("muted", text),
 			// identityRight (provider + model) is the brightest row in the footer
@@ -353,7 +472,10 @@ export class FooterComponent implements Component {
 			rightColor: (text) => text,
 			ellipsis: theme.fg("muted", "…"),
 			protectedSuffix: thinkingChip,
+			protectedSuffix2: modeSuffix,
 		});
+
+		const lines = [identityLine];
 
 		// --- Metrics (line 2) ------------------------------------------------
 		// Context is the headline: flushed left, with COLOR carrying the state —
@@ -361,11 +483,24 @@ export class FooterComponent implements Component {
 		// beside it stays the exact datum and escalates accent → warning → error.
 		// A pristine session shows only the capacity (`CTX 200k`, dim) — three
 		// zeros say nothing. Usage (input/output, cost, auto-compact) trails dim.
-		const messageTokens = contextUsage?.tokens ?? 0;
-		const wireTokens = contextUsage?.wireTokens ?? messageTokens;
+		// When collapseLine2 is true the metrics row is omitted entirely — the
+		// permission mode rides on the identity line as a protected suffix.
+		if (collapseLine2) {
+			if (otherStatuses.length > 0) {
+				const statusLine = otherStatuses
+					.map(([, text]) => {
+						const sanitized = sanitizeStatusText(text);
+						return sanitized.includes("") ? sanitized : theme.fg("dim", sanitized);
+					})
+					.join(" ");
+				lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "…")));
+			}
+			this.renderCacheKey = cacheKey;
+			this.renderCacheLines = lines;
+			return lines;
+		}
+
 		const wireDiverges = messageTokens > 0 && Math.abs(wireTokens - messageTokens) / messageTokens > 0.05;
-		const usedTokens = wireTokens;
-		const pristine = usedTokens === 0 && contextPercentValue === 0 && contextWindow > 0;
 		const ctxLabel = theme.fg("dim", "CTX");
 		const ctxColorize = theme.getContextUsageColor(contextPercentValue);
 		let ctxText: string;
@@ -375,7 +510,13 @@ export class FooterComponent implements Component {
 			ctxText = `${ctxLabel} ${theme.fg("dim", formatTokens(contextWindow))}`;
 		} else {
 			const percentLabel = ctxColorize(formatContextPercent(contextPercentValue));
-			const bar = renderFooterContextBar(contextPercentValue, ctxColorize);
+			const barTarget =
+				contextPercentValue > 0 ? Math.max(1, Math.round((contextPercentValue / 100) * FOOTER_CTX_BAR_WIDTH)) : 0;
+			if (barTarget !== this.barTargetFill) {
+				this.barTargetFill = barTarget;
+				this.beginFillEase(barTarget);
+			}
+			const bar = renderFooterContextBar(this.displayedFill, ctxColorize);
 			// A `~` marks a structural ESTIMATE (right after compaction, before the next response
 			// confirms the exact size) so it never reads as an authoritative figure.
 			const est = contextUsage?.estimated ? "~" : "";
@@ -394,7 +535,6 @@ export class FooterComponent implements Component {
 		if (io.length) usageGroup.push(io.join(" "));
 
 		// Group B — session mode bits (permission / auto-compact).
-		const mode = this.getPermissionMode();
 		const modeBits: string[] = [];
 		// In fusion the orchestration status is `fusion · plan`, which getPermissionMode
 		// clips to just "fusion" — exactly what the `fusion: <members>` segment already
@@ -405,28 +545,16 @@ export class FooterComponent implements Component {
 		// The signal worth surfacing is the ABNORMAL state — when it's OFF the
 		// context can overflow without rescue — so flag only that, in warning.
 		if (!this.autoCompactEnabled) modeBits.push(theme.fg("warning", "no-compact"));
-		const overthinkGuardCount = this.getOverthinkGuardCount();
 		if (overthinkGuardCount > 0) {
 			modeBits.push(theme.fg("warning", `overthink ×${overthinkGuardCount}`));
 		}
-		const recoverySegment = this.getRecoverySegment();
 		if (recoverySegment) {
 			modeBits.push(theme.fg("warning", recoverySegment));
 		}
 
-		// Goal status is ephemeral and actionable: render it bright (accent), not
-		// dim, so it stands out from the trailing usage metrics. Pre-colorized so it
-		// survives the group's outer dim wrapper (its own reset re-opens dim after).
-		const goalStatus = this.session.goalStatusLine();
-
 		// Assemble groups. Intra-group items join with the light ` · `; the two
 		// semantic groups (usage vs. mode) join with a stronger `  •  ` so the line
 		// reads as two clusters instead of one undifferentiated run.
-		// Fusion panel indicator (orchestration === "fusion"): the two panel
-		// members + the synthesizer that judges/writes. Accent so it reads as an
-		// active-mode signal next to the dim usage metrics, not as a stat.
-		const fusionSegment = this.getFusionSegment();
-
 		const groups: string[] = [];
 		if (fusionSegment) groups.push(theme.fg("accent", fusionSegment));
 		if (usageGroup.length) groups.push(usageGroup.join(" · "));
@@ -450,7 +578,7 @@ export class FooterComponent implements Component {
 			ellipsis: theme.fg("dim", "…"),
 		});
 
-		const lines = [identityLine, metricsLine];
+		lines.push(metricsLine);
 
 		// --- No-rails alert --------------------------------------------------
 		// The dropped-floor permission state must never be silent: bold red, on its
@@ -462,10 +590,6 @@ export class FooterComponent implements Component {
 
 		// --- Extension statuses (line 3, optional) ---------------------------
 		// Exclude "permissions" — its mode is already surfaced on the metrics line.
-		const extensionStatuses = this.footerData.getExtensionStatuses();
-		const otherStatuses = Array.from(extensionStatuses.entries())
-			.filter(([k]) => k !== "permissions")
-			.sort(([a], [b]) => a.localeCompare(b));
 		if (otherStatuses.length > 0) {
 			// A permanent "ready" must not outshine the model name: statuses with no
 			// color of their own render dim. Pre-colorized ones (ESC present) pass
@@ -498,6 +622,8 @@ interface ComposeOptions {
 	 * visible width is passed separately (ANSI is width-free).
 	 */
 	protectedSuffix?: { text: string; width: number };
+	/** Second protected suffix appended after `protectedSuffix` (e.g. permission mode on idle collapse). */
+	protectedSuffix2?: { text: string; width: number };
 }
 
 /**
@@ -511,7 +637,8 @@ interface ComposeOptions {
  */
 function composeLeftRight(rawLeft: string, rawRight: string, width: number, options: ComposeOptions): string {
 	const suffix = options.protectedSuffix;
-	const suffixWidth = suffix ? suffix.width : 0;
+	const suffix2 = options.protectedSuffix2;
+	const suffixWidth = (suffix ? suffix.width : 0) + (suffix2 ? suffix2.width : 0);
 	const minPadding = visibleWidth(rawLeft) > 0 && (visibleWidth(rawRight) > 0 || suffixWidth > 0) ? 2 : 0;
 	let left = rawLeft;
 	let right = rawRight;
@@ -537,7 +664,9 @@ function composeLeftRight(rawLeft: string, rawRight: string, width: number, opti
 	}
 
 	const styledRight = options.rightColor(right);
-	const fullRight = suffix ? styledRight + suffix.text : styledRight;
+	let fullRight = styledRight;
+	if (suffix) fullRight += suffix.text;
+	if (suffix2) fullRight += suffix2.text;
 	const fullRightWidth = rightWidth + suffixWidth;
 	const padding = " ".repeat(Math.max(0, width - leftWidth - fullRightWidth));
 	const styledLeft = options.leftColor(left);

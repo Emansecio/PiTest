@@ -167,6 +167,7 @@ import {
 	openBank,
 	setCurrentHindsightBank,
 } from "./hindsight/index.js";
+import { getCurrentHistoryRecallSource, setCurrentHistoryRecallSource } from "./history-recall.ts";
 import { defaultLearnedErrorsDir, type LearnedErrorEntry, persistSessionLearnedErrors } from "./learned-error-store.js";
 import { createLspManager, getCurrentLspManager, type LspManager, setCurrentLspManager } from "./lsp/manager.ts";
 import { setDiagnosticsOnWrite, setEnforceDiagnosticsOnWrite, setFormatOnWrite } from "./lsp/writethrough.ts";
@@ -189,6 +190,7 @@ import {
 	setCurrentPreviewQueue,
 } from "./preview-queue.ts";
 import { expandPromptTemplate, type PromptTemplate, parseCommandArgs, substituteArgs } from "./prompt-templates.js";
+import { getLivingRepoMap } from "./repo-map/living-index.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import type { BranchSummaryEntry, SessionManager } from "./session-manager.js";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.js";
@@ -231,6 +233,7 @@ import {
 	createLocalBashOperations,
 	listBashBackgroundJobs,
 } from "./tools/bash.js";
+import { prewarmFffIndex } from "./tools/fff-search.ts";
 import { FileMtimeStore } from "./tools/file-mtime-store.ts";
 import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.js";
 import { ReadDedupeStore } from "./tools/read.js";
@@ -848,6 +851,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 
 		this._openHindsightBank();
 		this._openDeferredOutputStore();
+		this._publishHistoryRecallSource();
 
 		// Compute the repo-level "frequent files" index in the background. First
 		// turn may miss it; subsequent turns get the list in the system prompt's
@@ -855,6 +859,18 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// invalidates the cacheable prefix. Cheap: bounded by a 2s git timeout +
 		// a fallback fs walk.
 		this._kickoffFrequentFilesIndex();
+		// Background index prewarm targets real git worktrees only: ephemeral test
+		// temp dirs (no .git) would keep native scanners / cache writers busy and
+		// EBUSY follow-up rmSync on Windows (see living-index runGit comment).
+		const prewarmIndexes = existsSync(join(this._cwd, ".git"));
+		if (prewarmIndexes && this.settingsManager.getGrepSettings().engine === "fff") {
+			prewarmFffIndex(this._cwd);
+		}
+		if (prewarmIndexes) {
+			void getLivingRepoMap(this._cwd).catch(() => {
+				// best-effort prewarm; never block boot
+			});
+		}
 
 		// Publish a fresh preview queue for this session so mutation tools can
 		// stage previews and the `resolve` tool can commit/discard them.
@@ -1033,6 +1049,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			...on(s.getLspSettings().enabled, ["lsp"]),
 			...on(s.getDebugSettings().enabled, ["debug"]),
 			...on(!isTruthyEnvFlag(process.env.PIT_NO_DEFER_HISTORY), ["recall_tool_output"]),
+			...on(!isTruthyEnvFlag(process.env.PIT_NO_RECALL_HISTORY), ["recall_history"]),
 			...on(s.getChromeDevtoolsSettings().enabled, chromeFeatureToolNames),
 		];
 		const hidden = new Set(s.getToolDiscoverySettings().hiddenByDefault);
@@ -1080,6 +1097,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 					write: { mtimeStore: this._fileMtimeStore },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 					grep: { engine: this.settingsManager.getGrepSettings().engine },
+					find: {
+						engine: this.settingsManager.getGrepSettings().engine === "fff" ? "fff" : "fd",
+					},
 					ast_grep: { engine: this.settingsManager.getAstGrepSettings().engine },
 				}) as Record<string, ToolDefinition>;
 			} catch {
@@ -1180,6 +1200,18 @@ export class AgentSession implements CompactionHost, FusionHost {
 		} catch {
 			// Silent: a failure here should not crash the session.
 		}
+	}
+
+	/**
+	 * Publish the live session branch as the `recall_history` source so the tool
+	 * can BM25-search the compacted-away window. Default ON; opt out with
+	 * `PIT_NO_RECALL_HISTORY=1` (also keeps the tool off the active surface and
+	 * suppresses the summary footer). Reads the in-memory branch — no JSONL
+	 * re-read — and is cleared on dispose (mirrors the deferred-output registry).
+	 */
+	private _publishHistoryRecallSource(): void {
+		if (isTruthyEnvFlag(process.env.PIT_NO_RECALL_HISTORY)) return;
+		setCurrentHistoryRecallSource(() => this.sessionManager.getBranch());
 	}
 
 	/**
@@ -1804,7 +1836,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			this._steering.maybeInjectToolErrorReflection(event.toolName, args, event.result, budget?.attemptsLeft);
 			if (budget) this._steering.maybeInjectFailureBudget(event.toolName, budget.count, budget.max);
 		} else {
-			this._steering.observeToolSuccess();
+			this._steering.observeToolSuccess(event.toolName);
 			const fileOp = extractToolFileOp(event.toolName, args);
 			if (fileOp) {
 				this._frequentFiles.record(fileOp.path, fileOp.op);
@@ -2160,6 +2192,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 			setCurrentDeferredOutputStore(undefined);
 		}
 		this._deferredOutputStore = undefined;
+		// Clear the recall_history source if this session owns it.
+		if (getCurrentHistoryRecallSource() !== undefined) {
+			setCurrentHistoryRecallSource(undefined);
+		}
 		// Clear preview queue registry only if this session owns the current queue.
 		if (this._previewQueue && getCurrentPreviewQueue() === this._previewQueue) {
 			setCurrentPreviewQueue(undefined);
@@ -4613,6 +4649,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 					write: { mtimeStore: this._fileMtimeStore },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 					grep: { engine: this.settingsManager.getGrepSettings().engine },
+					find: {
+						engine: this.settingsManager.getGrepSettings().engine === "fff" ? "fff" : "fd",
+					},
 					ast_grep: { engine: this.settingsManager.getAstGrepSettings().engine },
 					// Code-mode: inject the harness-routed dispatcher so a code-mode
 					// program's `tools.x()` calls pass through the same pipeline as a

@@ -1,7 +1,8 @@
+import { Minimatch } from "minimatch";
 import path from "path";
 
 /**
- * Optional `fff` (Fast File Finder) backend for the grep tool.
+ * Optional `fff` (Fast File Finder) backend for the grep and find tools.
  *
  * `fff` keeps a warm, in-memory index of the repository and answers searches
  * from native Rust without spawning a process per query — measured at 18-27x
@@ -23,7 +24,7 @@ import path from "path";
  * Parity invariants baked in:
  * - `smartCase: false` always — `rg`'s default is case-sensitive, while fff's
  *   `smartCase` default would treat an all-lowercase query as case-INSENSITIVE.
- *   The grep tool routes `ignoreCase` queries to `rg`.
+ *   Case-insensitive queries use inline `(?i)` regex when routed through fff.
  * - Both silent caps are defeated by paginating with the cursor: fff's defaults
  *   (`pageSize` 50, `maxMatchesPerFile` 200) would under-report (58 of 796 for
  *   "AgentSession"); we page until the caller's limit is met or the result set
@@ -62,9 +63,21 @@ interface FffGrepOptions {
 	afterContext?: number;
 	cursor?: unknown | null;
 }
+interface FffGlobItem {
+	relativePath: string;
+}
+interface FffGlobResult {
+	items: FffGlobItem[];
+	totalMatched: number;
+}
+interface FffGlobOptions {
+	pageIndex?: number;
+	pageSize?: number;
+}
 interface FffFinder {
 	waitForScan: (timeoutMs: number) => Promise<unknown>;
 	grep: (pattern: string, options?: FffGrepOptions) => FffResult<FffGrepResult>;
+	glob: (pattern: string, options?: FffGlobOptions) => FffResult<FffGlobResult>;
 	destroy: () => void;
 }
 interface FffModule {
@@ -102,6 +115,65 @@ export interface FffSearchArgs {
 	 */
 	subPrefix?: string;
 	subExact?: boolean;
+	/** Case-insensitive search (regex `(?i)` prefix). */
+	ignoreCase?: boolean;
+	/** Simple single glob; client-side filter on repo-relative paths. */
+	globFilter?: string;
+}
+
+export interface FffFindByGlobArgs {
+	basePath: string;
+	pattern: string;
+	/** Repo-relative POSIX directory prefix to scope results. */
+	subPrefix?: string;
+	limit: number;
+}
+
+/**
+ * Find files by glob through the warm fff index (`finder.glob`). Returns null on
+ * failure, scan timeout, or unprovable scoped completeness.
+ */
+export async function fffFindByGlob(args: FffFindByGlobArgs): Promise<string[] | null> {
+	const mod = await loadModule();
+	if (!mod) return null;
+	try {
+		const entry = getFinder(mod, args.basePath);
+		if (!entry) return null;
+		const scanned = await entry.ready;
+		if (!scanned) return null;
+
+		const inScope = makeScopeFilter(args.subPrefix);
+		const scoped = Boolean(args.subPrefix);
+		const paths: string[] = [];
+		let pageIndex = 0;
+		let exhausted = false;
+
+		for (let page = 0; page < MAX_PAGES; page++) {
+			const res = entry.finder.glob(args.pattern, { pageIndex, pageSize: PAGE_SIZE });
+			if (!res.ok || !res.value) return null;
+
+			for (const item of res.value.items) {
+				const rel = toPosix(item.relativePath);
+				if (isGitInternalPath(rel)) continue;
+				if (!inScope(rel)) continue;
+				paths.push(rel);
+				if (paths.length >= args.limit) break;
+			}
+
+			if (paths.length >= args.limit) break;
+			const fetched = (pageIndex + 1) * PAGE_SIZE;
+			if (res.value.items.length === 0 || fetched >= res.value.totalMatched) {
+				exhausted = true;
+				break;
+			}
+			pageIndex += 1;
+		}
+
+		if (scoped && !exhausted && paths.length < args.limit) return null;
+		return paths;
+	} catch {
+		return null;
+	}
 }
 
 export type FffSearchResult =
@@ -152,6 +224,59 @@ function loadModule(): Promise<FffModule | null> {
 /** Whether the fff native backend can be loaded at all on this machine. */
 export async function isFffAvailable(): Promise<boolean> {
 	return (await loadModule()) !== null;
+}
+
+/** Start indexing `basePath` in the background; never throws. */
+export function prewarmFffIndex(basePath: string): void {
+	void loadModule()
+		.then((mod) => {
+			if (mod) getFinder(mod, basePath);
+		})
+		.catch(() => {
+			// fail-open
+		});
+}
+
+/** True when `glob` is safe to emulate client-side (single simple pattern). */
+export function isSimpleGrepGlob(glob: string | undefined): glob is string {
+	if (!glob) return false;
+	if (glob.startsWith("!")) return false;
+	if (glob.includes(",") || glob.includes("{") || glob.includes("}")) return false;
+	return true;
+}
+
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isGitInternalPath(relPosix: string): boolean {
+	return relPosix === ".git" || relPosix.startsWith(".git/") || relPosix.includes("/.git/");
+}
+
+function resolveFffGrepPattern(
+	pattern: string,
+	literal: boolean | undefined,
+	ignoreCase: boolean | undefined,
+): {
+	pattern: string;
+	mode: "plain" | "regex";
+} {
+	if (!ignoreCase) {
+		return { pattern, mode: literal ? "plain" : "regex" };
+	}
+	if (literal) {
+		return { pattern: `(?i)${escapeRegExp(pattern)}`, mode: "regex" };
+	}
+	return { pattern: `(?i)${pattern}`, mode: "regex" };
+}
+
+function makeGlobPathFilter(globFilter: string): (relPosix: string) => boolean {
+	const matcher = new Minimatch(globFilter, { dot: false });
+	return (relPosix: string) => {
+		if (matcher.match(relPosix)) return true;
+		const base = path.posix.basename(relPosix);
+		return matcher.match(base);
+	};
 }
 
 // basePath -> warm finder (lazily created, scanned once, reused across queries).
@@ -247,10 +372,12 @@ export async function fffSearch(args: FffSearchArgs): Promise<FffSearchResult | 
 		if (!scanned) return null;
 
 		const inScope = makeScopeFilter(args.subPrefix, args.subExact);
-		const scoped = Boolean(args.subPrefix);
+		const scoped = Boolean(args.subPrefix) || Boolean(args.globFilter);
+		const matchesGlob = args.globFilter ? makeGlobPathFilter(args.globFilter) : () => true;
 		const ctx = args.context && args.context > 0 ? args.context : 0;
 		// files mode wants one row per file; content/count want every match line.
 		const perFile = args.mode === "files" ? 1 : BIG_PER_FILE;
+		const grepPattern = resolveFffGrepPattern(args.pattern, args.literal, args.ignoreCase);
 
 		const contentMatches: FffContentMatch[] = [];
 		const fileOrder: string[] = [];
@@ -261,8 +388,8 @@ export async function fffSearch(args: FffSearchArgs): Promise<FffSearchResult | 
 		let capped = false;
 		let exhausted = false;
 		for (let page = 0; page < MAX_PAGES; page++) {
-			const res = entry.finder.grep(args.pattern, {
-				mode: args.literal ? "plain" : "regex",
+			const res = entry.finder.grep(grepPattern.pattern, {
+				mode: grepPattern.mode,
 				smartCase: false,
 				pageSize: PAGE_SIZE,
 				maxMatchesPerFile: perFile,
@@ -279,6 +406,7 @@ export async function fffSearch(args: FffSearchArgs): Promise<FffSearchResult | 
 				if (typeof it.lineNumber !== "number") continue;
 				const rel = toPosix(it.relativePath);
 				if (!inScope(rel)) continue;
+				if (!matchesGlob(rel)) continue;
 				const abs = path.resolve(args.basePath, it.relativePath);
 				if (args.mode === "content") {
 					contentMatches.push({

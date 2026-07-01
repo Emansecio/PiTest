@@ -27,6 +27,14 @@ interface MakeFooterOptions {
 	launchCwd?: string;
 	/** Git branch reported by the footer data provider. */
 	branch?: string;
+	/**
+	 * Number of user turns to simulate. Defaults to 1 when usage has accrued
+	 * (contextUsage provided or cost > 0) and 0 otherwise, so an "active"
+	 * session reads as non-pristine and a fresh one as pristine — mirroring the
+	 * real product, where the system prompt loads tokens before the first turn
+	 * but `messages` stays empty until the user submits.
+	 */
+	userTurns?: number;
 }
 
 function makeFooter({
@@ -41,6 +49,7 @@ function makeFooter({
 	cwd = "C:/x",
 	launchCwd,
 	branch = "",
+	userTurns,
 }: MakeFooterOptions = {}): FooterComponent {
 	// A subscription tag needs a truthy model for isUsingOAuth(state.model).
 	const needsModel = usingOAuth || providerCount > 1 || thinkingLevel !== undefined;
@@ -59,6 +68,11 @@ function makeFooter({
 					},
 				]
 			: [];
+	// Accrued usage (contextUsage provided or cost > 0) implies a turn happened,
+	// so simulate a user message — otherwise the footer's hasUserTurn() check
+	// would (wrongly, for these scenarios) read the session as pristine.
+	const turns = userTurns ?? (contextUsage != null || cost > 0 ? 1 : 0);
+	const messages = Array.from({ length: turns }, () => ({ role: "user", content: "hi", timestamp: 0 }));
 	const session: AgentSession = {
 		state: {
 			model,
@@ -69,6 +83,7 @@ function makeFooter({
 			getSessionName: () => "",
 			getCwd: () => cwd,
 		},
+		messages,
 		getContextUsage: () => contextUsage,
 		goalStatusLine: () => null,
 		modelRegistry: { isUsingOAuth: () => usingOAuth },
@@ -104,13 +119,66 @@ beforeAll(() => {
 
 it("shows the permission mode but no compact noise when auto-compact is on", () => {
 	// Auto-compact is the default-on state, so it must NOT render a permanent
-	// indicator — only the permission mode shows.
+	// indicator — only the permission mode shows. Without a model (contextWindow 0)
+	// the session is not pristine, so the metrics line still renders.
 	const footer = makeFooter({ permissions: "auto", autoCompact: true });
 	const lines = footer.render(80).map(stripAnsi);
 	expect(lines.length).toBe(2);
 	expect(lines[1]).toContain("auto"); // permission mode
 	expect(lines[1]).not.toContain("compact"); // default-on state is silent
 	expect(lines.some((l) => l.startsWith("permissions:"))).toBe(false);
+});
+
+it("collapses to one line on a pristine idle session with permission mode", () => {
+	const footer = makeFooter({ permissions: "auto", autoCompact: true, usingOAuth: true });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines.length).toBe(1);
+	expect(lines[0]).toContain("test-model");
+	expect(lines[0]).toContain("auto");
+	expect(lines.some((l) => l.trim() === "auto")).toBe(false);
+});
+
+it("collapses to one line with plan mode on a pristine session", () => {
+	const footer = makeFooter({ permissions: "plan", autoCompact: true, usingOAuth: true });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines.length).toBe(1);
+	expect(lines[0]).toContain("plan");
+});
+
+it("keeps the full two-line footer when context has accrued usage", () => {
+	const footer = makeFooter({
+		permissions: "auto",
+		autoCompact: true,
+		usingOAuth: true,
+		contextUsage: { tokens: 46800, percent: 23.4, contextWindow: 200000 },
+	});
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines.length).toBeGreaterThanOrEqual(2);
+	expect(lines[1]).toContain("CTX");
+	expect(lines[1]).toContain("23% · 47k/200k");
+});
+
+it("keeps the no-rails alert on its own line", () => {
+	const footer = makeFooter({ permissions: "no-rails", autoCompact: true, usingOAuth: true });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines.length).toBeGreaterThanOrEqual(2);
+	expect(lines.some((l) => l.includes("NO-RAILS"))).toBe(true);
+});
+
+it("does not collapse when auto-compact is off on an idle session", () => {
+	const footer = makeFooter({ permissions: "auto", autoCompact: false, usingOAuth: true });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines.length).toBe(2);
+	expect(lines[1]).toContain("no-compact");
+});
+
+it("keeps the thinking chip and permission mode on a narrow collapsed line", () => {
+	const footer = makeFooter({ thinkingLevel: "high", permissions: "auto", usingOAuth: true, autoCompact: true });
+	const lines = footer.render(30).map(stripAnsi);
+	expect(lines.length).toBe(1);
+	expect(lines[0]).toContain("✦ high");
+	expect(lines[0]).toContain("auto");
+	expect(lines[0]).toContain("…");
 });
 
 it("flags no-compact (warning) only when auto-compact is OFF — the abnormal state", () => {
@@ -151,8 +219,8 @@ it("renders a mini bar, whole-percent, and counts once the context has usage", (
 		contextUsage: { tokens: 46800, percent: 23.4, contextWindow: 200000 },
 	});
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[1]).toContain("█");
-	expect(lines[1]).toContain("░");
+	expect(lines[1]).toContain("▰");
+	expect(lines[1]).toContain("▱");
 	expect(lines[1]).toContain("CTX");
 	expect(lines[1]).toContain("23% · 47k/200k");
 });
@@ -164,7 +232,7 @@ it("marks a post-compaction structural estimate with a ~ (never reads as an exac
 	});
 	const lines = footer.render(80).map(stripAnsi);
 	expect(lines[1]).toContain("~6% · ~12k/200k");
-	expect(lines[1]).toContain("█");
+	expect(lines[1]).toContain("▰");
 });
 
 it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", () => {
@@ -174,7 +242,7 @@ it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", 
 	});
 	const lines = footer.render(80).map(stripAnsi);
 	expect(lines[1]).toContain("1% · 1.5k/200k");
-	expect(lines[1]).toContain("█");
+	expect(lines[1]).toContain("▰");
 
 	const tiny = makeFooter({
 		usingOAuth: true,
@@ -182,7 +250,7 @@ it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", 
 	});
 	const tinyLines = tiny.render(80).map(stripAnsi);
 	expect(tinyLines[1]).toContain("<1% · 600/200k");
-	expect(tinyLines[1]).toContain("█");
+	expect(tinyLines[1]).toContain("▰");
 });
 
 it("shows the home profile folder in the footer when session cwd is the home directory", () => {

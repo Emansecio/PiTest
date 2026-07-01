@@ -35,6 +35,7 @@ type RenderSessionContextThis = {
 	settingsManager: {
 		getShowImages(): boolean;
 		getImageWidthCells(): number;
+		getCardPaddingX(): number;
 		getToolActivity(): string;
 	};
 	activityStacker: { reset(): void; divide(): void; placeNavigation(c: unknown): void; placeAction(c: unknown): void };
@@ -67,6 +68,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		settingsManager: {
 			getShowImages: () => false,
 			getImageWidthCells: () => 60,
+			getCardPaddingX: () => 1,
 			getToolActivity: () => "legacy",
 		},
 		activityStacker: {

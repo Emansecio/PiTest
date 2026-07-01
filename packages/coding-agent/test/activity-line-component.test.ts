@@ -1,5 +1,5 @@
 import { resetCapabilitiesCache, setCapabilities } from "@pit/tui";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ActivityLineComponent } from "../src/modes/interactive/components/activity-line.ts";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -315,5 +315,14 @@ describe("ActivityLineComponent — agent labels", () => {
 		const head = c.render(120).map(stripAnsi)[0];
 		expect(head).toContain("some_mcp_tool");
 		expect(head).not.toContain("Ran");
+	});
+
+	it("shows elapsed suffix on slow pending actions", () => {
+		const now = vi.spyOn(Date, "now").mockReturnValue(0);
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(execStub({ getActivityState: () => "pending", getToolName: () => "bash" }));
+		now.mockReturnValue(5000);
+		expect(stripAnsi(c.render(120)[0])).toContain("· 5s");
+		now.mockRestore();
 	});
 });

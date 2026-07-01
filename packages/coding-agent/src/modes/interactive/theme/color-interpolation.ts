@@ -5,13 +5,77 @@
  * callers fall back to discrete theme colors instead.
  */
 
-import { getCapabilities } from "@pit/tui";
+import { getCapabilities, getSegmenter, visibleWidth } from "@pit/tui";
 import { theme as globalTheme, type Theme, type ThemeColor } from "./theme.ts";
 
 export interface Rgb {
 	r: number;
 	g: number;
 	b: number;
+}
+
+/**
+ * Apply a per-grapheme color function across plain text. `colorAt` receives the
+ * starting display column and total display width (`visibleWidth(text)`); each
+ * grapheme cluster is wrapped in a single color call so surrogate pairs and
+ * wide chars are never split.
+ */
+export function applyColumnGradient(
+	text: string,
+	colorAt: (col: number, cols: number) => (segment: string) => string,
+): string {
+	if (text.length === 0) return text;
+	const cols = visibleWidth(text);
+	if (cols === 0) return text;
+	let result = "";
+	let col = 0;
+	for (const { segment } of getSegmenter().segment(text)) {
+		const w = visibleWidth(segment);
+		if (w === 0) {
+			result += segment;
+			continue;
+		}
+		result += colorAt(col, cols)(segment);
+		col += w;
+	}
+	return result;
+}
+
+/** Bicolor fallback when truecolor interpolation is unavailable. */
+export function bicolorColumnColor(col: number, themeInstance: Theme = globalTheme): (segment: string) => string {
+	if (col % 2 === 1) {
+		return (segment: string) => themeInstance.fg("accent", segment);
+	}
+	return (segment: string) => themeInstance.fg("thinkingXhigh", segment);
+}
+
+/** Wordmark gradient: teal → lavender (truecolor) or accent/lavender bicolor. */
+export function wordmarkGradient(text: string, themeInstance: Theme = globalTheme): string {
+	return applyColumnGradient(text, (col, cols) => {
+		const t = cols <= 1 ? 0 : col / (cols - 1);
+		if (getCapabilities().trueColor) {
+			const grad = interpolateFg("accent", "thinkingXhigh", t, themeInstance);
+			if (grad) return grad;
+		}
+		return bicolorColumnColor(col, themeInstance);
+	});
+}
+
+/** H1 gradient: gold → tealBright → cyanBlue (stitched 2-stop) or bicolor fallback. */
+export function h1Gradient(text: string, themeInstance: Theme = globalTheme): string {
+	return applyColumnGradient(text, (col, cols) => {
+		const t = cols <= 1 ? 0 : col / (cols - 1);
+		if (getCapabilities().trueColor) {
+			if (t <= 0.5) {
+				const grad = interpolateFg("mdHeading", "borderAccent", t * 2, themeInstance);
+				if (grad) return grad;
+			} else {
+				const grad = interpolateFg("borderAccent", "border", (t - 0.5) * 2, themeInstance);
+				if (grad) return grad;
+			}
+		}
+		return bicolorColumnColor(col, themeInstance);
+	});
 }
 
 /** Parse a foreground SGR like `\x1b[38;2;r;g;bm` into RGB; undefined when it is

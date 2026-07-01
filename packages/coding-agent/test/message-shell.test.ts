@@ -3,6 +3,7 @@ import { Text } from "@pit/tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
 	MessageShell,
+	SHELL_FRAME_COLS,
 	SHELL_GUTTER_CHAR,
 	SHELL_GUTTER_COLS,
 } from "../src/modes/interactive/components/message-shell.ts";
@@ -321,6 +322,63 @@ describe("MessageShell — render memoization", () => {
 		const first = shell.render(40);
 		expect(first).toEqual([]);
 		expect(shell.render(40)).toBe(first);
+	});
+});
+
+describe("MessageShell — frame mode", () => {
+	it("wraps content in a rounded card and delegates at width - SHELL_FRAME_COLS", () => {
+		let observed = -1;
+		const probe: Component = {
+			render(width: number) {
+				observed = width;
+				return ["line one", "line two"];
+			},
+			invalidate() {},
+		};
+		const shell = new MessageShell({ frame: true, gutterColor: RED, frameColor: GREEN });
+		shell.addChild(probe);
+
+		const out = shell.render(40).map(stripAnsi);
+		expect(observed).toBe(40 - SHELL_FRAME_COLS);
+		expect(out[0]).toBe("");
+		expect(out[1]).toMatch(/^╭─+╮$/);
+		expect(out[out.length - 1]).toMatch(/^╰─+╯$/);
+		expect(out[2]).toMatch(/^│ line one +│$/);
+	});
+
+	it("framePaddingX: 0 delegates at width - 2 and omits inner space", () => {
+		let observed = -1;
+		const probe: Component = {
+			render(width: number) {
+				observed = width;
+				return ["line one"];
+			},
+			invalidate() {},
+		};
+		const shell = new MessageShell({ frame: true, framePaddingX: 0, gutterColor: RED, frameColor: GREEN });
+		shell.addChild(probe);
+
+		const out = shell.render(40).map(stripAnsi);
+		expect(observed).toBe(38);
+		expect(out[2]).toMatch(/^│line one +│$/);
+	});
+
+	it("places the gutter spinner in the top-left corner cell", () => {
+		const shell = new MessageShell({ frame: true, gutterColor: RED });
+		shell.addChild(new Canned(["body"]));
+		shell.setGutterSpinner("⠋");
+		const out = shell.render(40).map(stripAnsi);
+		expect(out[1]?.startsWith("⠋")).toBe(true);
+	});
+
+	it("setFrame busts the memo when toggling framed mode", () => {
+		const shell = new MessageShell({ gutterColor: RED });
+		shell.addChild(new StableChild(["body"]));
+		const guttered = shell.render(40);
+		shell.setFrame(true);
+		const framed = shell.render(40);
+		expect(framed).not.toBe(guttered);
+		expect(stripAnsi(framed[1] ?? "")).toMatch(/^╭/);
 	});
 });
 

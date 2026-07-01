@@ -91,6 +91,7 @@ import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.t
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { isHiddenModelProvider } from "../../core/model-registry.ts";
 import {
+	decideRoleForPermissionMode,
 	defaultModelPerProvider,
 	findExactModelReferenceMatch,
 	MODEL_ROLES,
@@ -163,6 +164,7 @@ import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { reducedMotionLoaderIndicator } from "./components/spinner-ticker.ts";
 import { createTodoOverlay, type TodoOverlay } from "./components/todo-overlay.ts";
+import { workingPhaseLabel } from "./components/tool-activity.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -189,7 +191,6 @@ import {
 	formatSkillsDoctorBrief,
 	formatSkillsDoctorFixResult,
 	formatSkillsDoctorReport,
-	formatSkillsQuietStartupHint,
 	planSkillsDoctorFix,
 	tallySkillDiagnostics,
 } from "./skills-doctor.ts";
@@ -360,6 +361,9 @@ export class InteractiveMode {
 	// normal turns keep their persistent working loader untouched.
 	private _fusionWriterLoaderActive = false;
 	private workingMessage: string | undefined = undefined;
+	private streamTextCharCount = 0;
+	private lastStreamRateSampleMs = 0;
+	private lastStreamRateCharCount = 0;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working…";
@@ -547,6 +551,17 @@ export class InteractiveMode {
 		this.runtimeHost.setRebindSession(async () => {
 			await this.rebindCurrentSession();
 		});
+		// Permission-mode changes (slash command, cycle key, or exit_plan
+		// approval) swap the model role: plan mode → "plan" role when configured,
+		// back to "default" on exit (never clobbering a role the user picked
+		// manually). Fail-open: no plan role configured → silent no-op.
+		this.runtimeHost.services.bindPermissionModeChange?.((mode) => {
+			const planConfig = this.settingsManager.getModelRoleSettings().modelRoles?.plan;
+			const role = decideRoleForPermissionMode(mode, this.activeRole, planConfig);
+			if (role) {
+				void this.applyModelRole(role, { silent: true });
+			}
+		});
 		this.version = VERSION;
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
@@ -570,7 +585,7 @@ export class InteractiveMode {
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
 		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd());
-		this.footer = new FooterComponent(this.session, this.footerDataProvider, this.launchCwd);
+		this.footer = new FooterComponent(this.session, this.footerDataProvider, this.launchCwd, this.ui);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 
 		// Load hide thinking block setting
@@ -1045,17 +1060,11 @@ export class InteractiveMode {
 	}): void {
 		const showListing = options?.force || this.options.verbose || !this.settingsManager.getQuietStartup();
 		const showDiagnostics = showListing || options?.showDiagnosticsWhenQuiet === true;
+		if (!showListing && !showDiagnostics) {
+			return;
+		}
+
 		const skillsResult = this.session.resourceLoader.getSkills();
-		const skillQuietHint =
-			!showListing && !showDiagnostics ? formatSkillsQuietStartupHint(skillsResult.diagnostics) : null;
-		if (!showListing && !showDiagnostics && !skillQuietHint) {
-			return;
-		}
-		if (skillQuietHint) {
-			this.chatContainer.addChild(new Spacer(1));
-			this.chatContainer.addChild(new Text(theme.fg("dim", skillQuietHint), 0, 0));
-			return;
-		}
 
 		const addLoadedSection = (
 			title: string,
@@ -1372,6 +1381,7 @@ export class InteractiveMode {
 			shellCwdNote: cwdLabels.shellNote,
 			branch: this.footerDataProvider.getGitBranch() ?? undefined,
 			resumedSessionName: isResumed ? this.sessionManager.getSessionName() : undefined,
+			cardPaddingX: this.settingsManager.getCardPaddingX(),
 		};
 	}
 
@@ -1546,6 +1556,44 @@ export class InteractiveMode {
 		this.loadingAnimation?.setMessage(label);
 	}
 
+	private resetStreamRateCounters(): void {
+		this.streamTextCharCount = 0;
+		this.lastStreamRateSampleMs = 0;
+		this.lastStreamRateCharCount = 0;
+	}
+
+	private countAssistantTextChars(message: AssistantMessage): number {
+		let n = 0;
+		for (const block of message.content) {
+			if (block.type === "text" && typeof block.text === "string") {
+				n += block.text.length;
+			}
+		}
+		return n;
+	}
+
+	private formatStreamThroughput(charsPerSec: number): string {
+		if (charsPerSec <= 0) return "";
+		if (charsPerSec < 1000) return `↓${charsPerSec}`;
+		return `↓${(charsPerSec / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+	}
+
+	private refreshLoaderTrailingSuffix(): void {
+		if (!this.loadingAnimation) return;
+		const interrupt = `${theme.fg("dim", ` · ${keyText("app.interrupt")} to interrupt`)}`;
+		let rate = "";
+		const now = Date.now();
+		if (this.lastStreamRateSampleMs > 0 && now - this.lastStreamRateSampleMs >= 1000) {
+			const delta = this.streamTextCharCount - this.lastStreamRateCharCount;
+			const secs = (now - this.lastStreamRateSampleMs) / 1000;
+			const cps = secs > 0 ? Math.round(delta / secs) : 0;
+			if (cps > 0) rate = theme.fg("dim", ` · ${this.formatStreamThroughput(cps)}`);
+			this.lastStreamRateSampleMs = now;
+			this.lastStreamRateCharCount = this.streamTextCharCount;
+		}
+		this.loadingAnimation.setTrailingSuffix(`${interrupt}${rate}`);
+	}
+
 	private createWorkingLoader(): Loader {
 		const loader = new Loader(
 			this.ui,
@@ -1558,6 +1606,10 @@ export class InteractiveMode {
 		// agent_start (turn start) and lives until agent_end, so the clock
 		// measures the whole turn rather than any single agent step.
 		loader.setElapsedEnabled(true);
+		this.resetStreamRateCounters();
+		this.lastStreamRateSampleMs = Date.now();
+		this.lastStreamRateCharCount = 0;
+		loader.setTrailingSuffix(`${theme.fg("dim", ` · ${keyText("app.interrupt")} to interrupt`)}`);
 		// If a prompt is open while the loader is (re)built, carry the paused/relabeled
 		// state onto the new instance so the clock stays frozen.
 		if (this.userInputPauseDepth > 0) {
@@ -1576,6 +1628,7 @@ export class InteractiveMode {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		this.resetStreamRateCounters();
 		this.clearStatusContainer();
 	}
 
@@ -1775,9 +1828,6 @@ export class InteractiveMode {
 		this.workingMessage = undefined;
 		this.workingVisible = true;
 		this.setWorkingIndicator();
-		if (this.loadingAnimation) {
-			this.loadingAnimation.setMessage(`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`);
-		}
 		this.setHiddenThinkingLabel();
 	}
 
@@ -3040,6 +3090,8 @@ export class InteractiveMode {
 							}
 						}
 					}
+					this.streamTextCharCount = this.countAssistantTextChars(this.streamingMessage);
+					this.refreshLoaderTrailingSuffix();
 					this.ui.requestRender();
 				}
 				break;
@@ -3091,7 +3143,7 @@ export class InteractiveMode {
 			case "tool_execution_start": {
 				const component = this._ensureToolComponent(event.toolName, event.toolCallId, event.args);
 				component.markExecutionStarted();
-				this.setWorkingPhase(`Running ${event.toolName}…`);
+				this.setWorkingPhase(workingPhaseLabel(event.toolName, event.args as Record<string, unknown>, true));
 				this.ui.requestRender();
 				break;
 			}
@@ -3402,6 +3454,7 @@ export class InteractiveMode {
 			{
 				showImages: this.settingsManager.getShowImages(),
 				imageWidthCells: this.settingsManager.getImageWidthCells(),
+				framePaddingX: this.settingsManager.getCardPaddingX(),
 			},
 			this.getRegisteredToolDefinition(toolName),
 			this.ui,
@@ -3626,6 +3679,7 @@ export class InteractiveMode {
 							{
 								showImages: this.settingsManager.getShowImages(),
 								imageWidthCells: this.settingsManager.getImageWidthCells(),
+								framePaddingX: this.settingsManager.getCardPaddingX(),
 							},
 							this.getRegisteredToolDefinition(content.name),
 							this.ui,
@@ -4782,28 +4836,7 @@ export class InteractiveMode {
 		// includes check and avoids a hardcoded ||-chain that would silently drift
 		// if a new role were added upstream.
 		if ((MODEL_ROLES as readonly string[]).includes(searchTerm)) {
-			const role = searchTerm as ModelRole;
-			this.activeRole = role;
-			const roleSettings = this.settingsManager.getModelRoleSettings();
-			const availableModels = this.session.modelRegistry.getAll();
-			const resolution = resolveRole({
-				role,
-				availableModels,
-				settings: roleSettings,
-				cwd: this.sessionManager.getCwd(),
-			});
-			if (resolution) {
-				try {
-					await this.session.setModel(resolution.model);
-					this.session.setThinkingLevel(resolution.thinkingLevel);
-					this.refreshModelIndicators();
-					this.showStatus(`Role: ${role} -> ${resolution.model.provider}/${resolution.model.id}`);
-				} catch (error) {
-					this.showError(errMsg(error));
-				}
-			} else {
-				this.showStatus(`Role: ${role} active (no model configured; using current)`);
-			}
+			await this.applyModelRole(searchTerm as ModelRole);
 			return;
 		}
 
@@ -4818,6 +4851,38 @@ export class InteractiveMode {
 		}
 
 		this.showModelSelector(searchTerm);
+	}
+
+	/**
+	 * Switch to a model role (resolveRole + setModel + thinking + indicators).
+	 * Shared by `/model <role>` and the permission-mode-change callback so the
+	 * two paths never drift. `showStatus` is suppressed when called from the
+	 * callback (silent swap) — the mode change itself already notifies.
+	 */
+	private async applyModelRole(role: ModelRole, opts?: { silent?: boolean }): Promise<void> {
+		this.activeRole = role;
+		const roleSettings = this.settingsManager.getModelRoleSettings();
+		const availableModels = this.session.modelRegistry.getAll();
+		const resolution = resolveRole({
+			role,
+			availableModels,
+			settings: roleSettings,
+			cwd: this.sessionManager.getCwd(),
+		});
+		if (resolution) {
+			try {
+				await this.session.setModel(resolution.model);
+				this.session.setThinkingLevel(resolution.thinkingLevel);
+				this.refreshModelIndicators();
+				if (!opts?.silent) {
+					this.showStatus(`Role: ${role} -> ${resolution.model.provider}/${resolution.model.id}`);
+				}
+			} catch (error) {
+				this.showError(errMsg(error));
+			}
+		} else if (!opts?.silent) {
+			this.showStatus(`Role: ${role} active (no model configured; using current)`);
+		}
 	}
 
 	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {

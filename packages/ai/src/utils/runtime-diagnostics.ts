@@ -51,6 +51,7 @@ export type DiagnosticCategory =
 	| "fusion.verify-skipped"
 	| "fusion.panel-char-estimate"
 	| "compaction.summary-json-fallback"
+	| "compaction.summary-ungrounded"
 	| "guard.grounding"
 	| "guard.import-grounding"
 	| "guard.path-grounding"

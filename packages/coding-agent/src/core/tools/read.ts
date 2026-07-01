@@ -8,6 +8,7 @@ import { constants, createReadStream } from "fs";
 import { access as fsAccess, readdir as fsReaddir, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { getReadmePath } from "../../config.js";
+import { collapseAnnotatedBlocks } from "../../modes/interactive/components/annotated-block-collapse.js";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.js";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.js";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.js";
@@ -526,6 +527,13 @@ function formatReadResult(
 		.map((line) => (lang ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line))))
 		.join("\n");
 	let text = body;
+	if (!options.expanded) {
+		text = collapseAnnotatedBlocks(text, {
+			expanded: false,
+			muted: (s) => theme.fg("muted", s),
+			expandHint: keyHint("app.tools.expand", "to expand"),
+		});
+	}
 	if (remaining > 0) {
 		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")})`;
 	}

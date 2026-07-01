@@ -14,6 +14,12 @@
  *     │  content goes here…
  *     └─ gutter (2 cols: char + space). Per-role color via theme.fg("gutter*").
  *
+ * With `frame: true`, tool blocks use a rounded card instead of the gutter:
+ *
+ *     ╭────────────────────────────────────╮
+ *     │  content goes here…
+ *     ╰────────────────────────────────────╯
+ *
  * For the first content line, an optional label is injected between gutter
  * and content:
  *
@@ -23,10 +29,11 @@
  * label, no spacer. Used by tool definitions with `renderShell:"self"` (built-
  * in `edit` / `edit-hashline` and extension tools that own their full UI).
  *
- * Width math: shell eats 2 columns. Children render at `width - 2`. The label
- * on the first line consumes additional columns from inside the content area,
- * not from the gutter — same semantic as injecting a `[label]  ` prefix in
- * front of the first child line.
+ * Width math: unframed shell eats 2 columns. Framed shell eats 2 + 2×padding
+ * (left/right borders plus inner padding each side; default padding 1 → 4 cols).
+ * Children render at `width - overhead`. The label on the first line consumes
+ * from inside the content area, not from the gutter — same semantic as
+ * injecting a `[label]  ` prefix in front of the first child line.
  *
  * The shell extends `Container` so subclasses can still pass `instanceof X`
  * checks in `interactive-mode.ts` (e.g. the `ToolExecutionComponent` ones for
@@ -40,6 +47,9 @@ export const SHELL_GUTTER_CHAR = "│";
 
 /** Number of columns the shell decoration consumes at the left edge. */
 export const SHELL_GUTTER_COLS = 2; // GUTTER_CHAR + space
+
+/** Columns consumed by a rounded frame at default inner padding (1 each side). */
+export const SHELL_FRAME_COLS = 4;
 
 export interface MessageShellOptions {
 	/**
@@ -66,6 +76,21 @@ export interface MessageShellOptions {
 	 * is harmless). Off by default.
 	 */
 	noLeadingGap?: boolean;
+	/**
+	 * When `true`, wrap child lines in a rounded card (`╭─╮` / `│` / `╰─╯`)
+	 * instead of the single-column gutter. Tool blocks opt in.
+	 */
+	frame?: boolean;
+	/**
+	 * Color for frame corners and rules when `frame` is true. Defaults to
+	 * `gutterColor` when omitted.
+	 */
+	frameColor?: (text: string) => string;
+	/**
+	 * Inner horizontal padding inside a framed shell (default 1). Only used when
+	 * `frame` is true.
+	 */
+	framePaddingX?: number;
 }
 
 const BOLD_OPEN = "\x1b[1m";
@@ -80,11 +105,15 @@ const identityColor = (text: string): string => text;
  */
 export class MessageShell extends Container {
 	private gutterColor: (text: string) => string;
+	private frameColor: (text: string) => string;
 	private label: string | undefined;
 	private shellDisabled: boolean;
 	private noLeadingGap: boolean;
+	private framed: boolean;
+	private framePad: number;
 	// One-column glyph shown in the gutter of the FIRST line instead of the static
-	// bar (e.g. a running spinner). Undefined keeps the steady `│`.
+	// bar (e.g. a running spinner). Undefined keeps the steady `│`. In framed
+	// mode the spinner replaces the top-left corner (`╭`).
 	private gutterSpinner: string | undefined;
 	// Memoized assembled output (leading blank + gutter + label). Children are
 	// still polled every frame — built-in components memoize internally and
@@ -102,9 +131,12 @@ export class MessageShell extends Container {
 	constructor(options: MessageShellOptions = {}) {
 		super();
 		this.gutterColor = options.gutterColor ?? identityColor;
+		this.frameColor = options.frameColor ?? options.gutterColor ?? identityColor;
 		this.label = options.label;
 		this.shellDisabled = options.shellDisabled ?? false;
 		this.noLeadingGap = options.noLeadingGap ?? false;
+		this.framed = options.frame ?? false;
+		this.framePad = options.framePaddingX ?? 1;
 	}
 
 	/**
@@ -164,6 +196,23 @@ export class MessageShell extends Container {
 		}
 	}
 
+	/** Toggle rounded card framing. No invalidate — same rationale as `setGutterColor`. */
+	setFrame(framed: boolean): void {
+		if (framed !== this.framed) {
+			this.framed = framed;
+			this.bustMemo();
+		}
+	}
+
+	/** Update inner horizontal padding for framed mode. No invalidate — busts memo directly. */
+	setFramePaddingX(padding: number): void {
+		const next = Math.max(0, Math.min(3, Math.floor(padding)));
+		if (next !== this.framePad) {
+			this.framePad = next;
+			this.bustMemo();
+		}
+	}
+
 	/** Drop the memoized framed output (next render reassembles). */
 	private bustMemo(): void {
 		this.memoChildOutputs = null;
@@ -175,6 +224,79 @@ export class MessageShell extends Container {
 		this.bustMemo();
 	}
 
+	private contentOverhead(): number {
+		return this.framed ? this.frameOverhead() : SHELL_GUTTER_COLS;
+	}
+
+	private frameOverhead(): number {
+		return 2 + this.framePad * 2;
+	}
+
+	private applyLabel(line: string): string {
+		if (this.label === undefined || this.label.length === 0) {
+			return line;
+		}
+		const labelText = `${BOLD_OPEN}${this.label}${BOLD_CLOSE}`;
+		return `${this.gutterColor(labelText)}  ${line}`;
+	}
+
+	private renderFramed(width: number, childLines: string[]): string[] {
+		const contentWidth = Math.max(1, width - this.frameOverhead());
+		const rule = "─".repeat(Math.max(0, width - 2));
+		const topLeft = this.gutterSpinner !== undefined ? this.gutterColor(this.gutterSpinner) : this.frameColor("╭");
+		const top = `${topLeft}${this.frameColor(rule)}${this.frameColor("╮")}`;
+		const bottom = this.frameColor(`╰${rule}╯`);
+		const side = this.frameColor("│");
+		const pad = " ".repeat(this.framePad);
+
+		const result: string[] = [];
+		if (!this.noLeadingGap) {
+			result.push("");
+		}
+		result.push(truncateToWidth(top, width));
+
+		for (let i = 0; i < childLines.length; i++) {
+			let line = childLines[i];
+			if (i === 0) {
+				line = this.applyLabel(line);
+			}
+			const inner = truncateToWidth(line, contentWidth);
+			const innerPad = " ".repeat(Math.max(0, contentWidth - visibleWidth(inner)));
+			const assembled = `${side}${pad}${inner}${innerPad}${pad}${side}`;
+			result.push(truncateToWidth(assembled, width));
+		}
+
+		result.push(truncateToWidth(bottom, width));
+		return result;
+	}
+
+	private renderGuttered(width: number, childLines: string[]): string[] {
+		const barGutter = this.gutterColor(SHELL_GUTTER_CHAR);
+		const headGutter = this.gutterSpinner !== undefined ? this.gutterColor(this.gutterSpinner) : barGutter;
+		const result: string[] = [];
+
+		if (!this.noLeadingGap) {
+			result.push("");
+		}
+
+		for (let i = 0; i < childLines.length; i++) {
+			let line = childLines[i];
+			const hasLabel = i === 0 && this.label !== undefined && this.label.length > 0;
+			if (hasLabel) {
+				line = this.applyLabel(line);
+			}
+			let assembled = `${i === 0 ? headGutter : barGutter} ${line}`;
+			if (hasLabel && visibleWidth(assembled) > width) {
+				assembled = assembled.replace(/ +$/, "");
+				if (visibleWidth(assembled) > width) {
+					assembled = truncateToWidth(assembled, width, "…");
+				}
+			}
+			result.push(assembled);
+		}
+		return result;
+	}
+
 	override render(width: number): string[] {
 		if (this.shellDisabled) {
 			// Passthrough: render children at full width with no decoration.
@@ -183,7 +305,7 @@ export class MessageShell extends Container {
 			return super.render(width);
 		}
 
-		const innerWidth = Math.max(1, width - SHELL_GUTTER_COLS);
+		const innerWidth = Math.max(1, width - this.contentOverhead());
 		const children = this.children;
 		const childOutputs = new Array<string[]>(children.length);
 		const prevOutputs = this.memoChildOutputs;
@@ -217,38 +339,10 @@ export class MessageShell extends Container {
 			// to "hide" a block by clearing its children, mirroring how
 			// ToolExecutionComponent already collapses empty render output.
 			result = [];
+		} else if (this.framed) {
+			result = this.renderFramed(width, childLines);
 		} else {
-			const barGutter = this.gutterColor(SHELL_GUTTER_CHAR);
-			// The first line may show a running spinner glyph in place of the bar.
-			const headGutter = this.gutterSpinner !== undefined ? this.gutterColor(this.gutterSpinner) : barGutter;
-			result = [];
-
-			if (!this.noLeadingGap) {
-				result.push("");
-			}
-
-			for (let i = 0; i < childLines.length; i++) {
-				let line = childLines[i];
-				const hasLabel = i === 0 && this.label !== undefined && this.label.length > 0;
-				if (hasLabel) {
-					const labelText = `${BOLD_OPEN}${this.label}${BOLD_CLOSE}`;
-					line = `${this.gutterColor(labelText)}  ${line}`;
-				}
-				let assembled = `${i === 0 ? headGutter : barGutter} ${line}`;
-				// Children render at innerWidth and components like Text pad their
-				// lines to full width with spaces — injecting the label in front
-				// pushes the first line past `width`, and the host's clamp would
-				// then dangle a lone `…` at the right border, far from the text.
-				// Trim the invisible padding first; only genuinely overflowing
-				// content earns an ellipsis, attached to where the text ends.
-				if (hasLabel && visibleWidth(assembled) > width) {
-					assembled = assembled.replace(/ +$/, "");
-					if (visibleWidth(assembled) > width) {
-						assembled = truncateToWidth(assembled, width, "…");
-					}
-				}
-				result.push(assembled);
-			}
+			result = this.renderGuttered(width, childLines);
 		}
 
 		this.memoWidth = width;

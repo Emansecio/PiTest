@@ -95,6 +95,10 @@ export interface DefaultTextStyle {
  */
 export interface MarkdownTheme {
 	heading: (text: string) => string;
+	/** Optional H1-specific styling (defaults to `heading` when omitted). */
+	heading1?: (text: string) => string;
+	/** Optional H2-specific styling (defaults to bold `heading` when omitted). */
+	heading2?: (text: string) => string;
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
 	code: (text: string) => string;
@@ -618,7 +622,11 @@ export class Markdown implements Component {
 				// restore heading styling after their own ANSI resets instead of falling back to
 				// the default text style.
 				let headingStyleFn: (text: string) => string;
-				if (headingLevel === 1) {
+				if (headingLevel === 1 && this.theme.heading1) {
+					headingStyleFn = (text: string) => this.theme.heading1!(text);
+				} else if (headingLevel === 2 && this.theme.heading2) {
+					headingStyleFn = (text: string) => this.theme.heading2!(text);
+				} else if (headingLevel === 1) {
 					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(this.theme.underline(text)));
 				} else {
 					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(text));

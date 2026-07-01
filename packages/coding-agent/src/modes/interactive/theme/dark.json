@@ -15,9 +15,9 @@
 		"borderMuted": "#2a3633",
 		"selectedBg": "#20302c",
 		"userMsgBg": "#16201d",
-		"toolPendingBg": "#18211f",
-		"toolSuccessBg": "#16241c",
-		"toolErrorBg": "#2a1d1a",
+		"toolPendingBg": "#1e2926",
+		"toolSuccessBg": "#1c2a20",
+		"toolErrorBg": "#33221e",
 		"customMsgBg": "#1c2330"
 	},
 	"colors": {
@@ -85,7 +85,10 @@
 		"gutterBash": "green",
 		"gutterDiagnostics": "gold",
 		"gutterUser": "cyanBlue",
-		"gutterCustom": "lavender"
+		"gutterCustom": "lavender",
+
+		"cardBg": "#121817",
+		"cardBorder": "borderMuted"
 	},
 	"export": {
 		"pageBg": "#0c1110",

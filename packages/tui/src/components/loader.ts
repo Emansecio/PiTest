@@ -76,6 +76,7 @@ export class Loader extends Text {
 	private startedAtMs = 0;
 	private lastElapsedSec = -1;
 	private coloredElapsed = "";
+	private coloredTrailingSuffix = "";
 	// When the turn blocks on the user (e.g. an `ask` picker is open), the clock
 	// is frozen rather than left running — the agent is waiting, not working, so
 	// counting that interval would misreport effort and pressure the user. The
@@ -117,6 +118,13 @@ export class Loader extends Text {
 
 	setMessage(message: string): void {
 		this.coloredMessage = this.messageColorFn(message);
+		this.updateDisplay();
+	}
+
+	setTrailingSuffix(suffix: string): void {
+		const next = suffix.length > 0 ? this.messageColorFn(suffix) : "";
+		if (next === this.coloredTrailingSuffix) return;
+		this.coloredTrailingSuffix = next;
 		this.updateDisplay();
 	}
 
@@ -284,7 +292,7 @@ export class Loader extends Text {
 		const paletteRow = this.coloredFrames[this.paletteIndex] ?? this.coloredFrames[0] ?? [];
 		const renderedFrame = paletteRow[this.currentFrame] ?? rawFrame;
 		const indicator = rawFrame.length > 0 ? `${renderedFrame} ` : "";
-		return `${indicator}${this.coloredMessage}${this.coloredElapsed}`;
+		return `${indicator}${this.coloredMessage}${this.coloredElapsed}${this.coloredTrailingSuffix}`;
 	}
 
 	/** Imperative repaint for non-tick changes (message/indicator/elapsed

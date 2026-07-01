@@ -33,9 +33,9 @@ describe("WelcomeBox", () => {
 		expect(plain).toContain("(main)");
 		// The active model lives in the footer, not the welcome.
 		expect(plain).not.toContain("thinking");
-		// A single closing rule — no heavy top rule above the logo.
-		expect(stripAnsi(out[out.length - 1])).toMatch(/^─+$/);
-		expect(stripAnsi(out[0])).not.toMatch(/^─+$/);
+		// Rounded card frame closes the identity block.
+		expect(stripAnsi(out[out.length - 1])).toMatch(/^╰─+╯$/);
+		expect(stripAnsi(out[0])).toMatch(/^╭─+╮$/);
 	});
 
 	it("never emits a line wider than the viewport, across widths", () => {

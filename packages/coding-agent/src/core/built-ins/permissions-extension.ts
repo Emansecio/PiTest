@@ -20,6 +20,7 @@
 
 import type { ExtensionAPI } from "../extensions/types.ts";
 import type { Orchestration } from "../fusion/types.ts";
+import { createExitPlanToolDefinition } from "../permissions/exit-plan-tool.ts";
 import {
 	describeToolAction,
 	normalizePermissionMode,
@@ -27,6 +28,7 @@ import {
 	type PermissionMode,
 	type PermissionSettings,
 } from "../permissions/index.ts";
+import { buildPlanModeSection } from "../permissions/plan-mode-prompt.ts";
 
 const STATUS_KEY = "permissions";
 
@@ -63,18 +65,41 @@ export function nextFusionCycleState(
 }
 
 export interface PermissionsExtensionOptions {
+	cwd: string;
 	checker: PermissionChecker;
 	/** Optional callback fired whenever a decision is made (for audit/logging). */
 	onDecision?: (info: { toolName: string; decision: "allow" | "deny"; reason?: string }) => void;
+	/** Fired after the permission mode changes (via /permission-mode, the cycle key, or exit_plan approval). Lets the host swap model roles etc. */
+	onModeChange?: (mode: PermissionMode) => void;
 }
 
 export function createPermissionsExtension(options: PermissionsExtensionOptions) {
 	return (pi: ExtensionAPI) => {
-		const { checker, onDecision } = options;
+		const { checker, onDecision, onModeChange } = options;
+		// Capture the last UI context seen so the exit_plan `onApproved` callback
+		// (which runs inside a tool execute() with no extension ctx) can still
+		// refresh the footer status. `let` in the closure, updated on session_start.
+		let lastUiCtx: { hasUI: boolean; ui: { setStatus: (key: string, value: string) => void } } | undefined;
+
+		const refreshStatus = (orchestration: Orchestration) => {
+			if (lastUiCtx?.hasUI) {
+				lastUiCtx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, orchestration)}`);
+			}
+		};
 
 		pi.on("session_start", (_event, ctx) => {
-			if (!ctx.hasUI) return;
-			ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, pi.getOrchestration())}`);
+			lastUiCtx = { hasUI: ctx.hasUI, ui: ctx.ui };
+			if (ctx.hasUI) {
+				ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, pi.getOrchestration())}`);
+			}
+		});
+
+		// Tell the model UP FRONT it is in plan mode so it researches + plans
+		// instead of fighting the permission layer. Pre-model band: appended after
+		// the system prompt's dynamic marker, so the cacheable prefix is preserved.
+		pi.on("before_agent_start", (event) => {
+			if (checker.mode !== "plan") return undefined;
+			return { systemPrompt: `${event.systemPrompt}\n\n${buildPlanModeSection()}` };
 		});
 
 		pi.on("tool_call", (event, _ctx) => {
@@ -109,6 +134,7 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 				checker.updateMode(mode);
 				ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, pi.getOrchestration())}`);
 				ctx.ui.notify(`Permission mode → ${mode}`, "info");
+				onModeChange?.(mode);
 			},
 		});
 
@@ -122,8 +148,26 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 				pi.setOrchestration(next.orchestration);
 				ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, next.orchestration)}`);
 				ctx.ui.notify(`Mode → ${next.orchestration === "fusion" ? "fusion · " : ""}${next.mode}`, "info");
+				onModeChange?.(next.mode);
 			},
 		});
+
+		// exit_plan: the model calls this to present its structured plan for user
+		// approval. On approval the checker flips to "auto" atomically (the model
+		// cannot change its own permission mode), the plan is written to a durable
+		// artifact, and onModeChange fires so the host can switch model roles. The
+		// tool stays registered in every mode; the plan-mode guard is internal so
+		// the tool surface stays stable across mode flips.
+		pi.registerTool(
+			createExitPlanToolDefinition({
+				cwd: options.cwd,
+				checker,
+				onApproved: () => {
+					refreshStatus(pi.getOrchestration());
+					onModeChange?.("auto");
+				},
+			}),
+		);
 	};
 }
 

@@ -21,6 +21,7 @@ Applied before/while talking to the model, not per tool call.
 | transformContext | before send | last hook to mutate the message list before the model sees it | `agent-loop.ts:497` |
 | compaction / pre-send overflow guard | before send | keeps context under the window; summarizes + prunes | `core/compaction/`, `_checkCompaction` (agent-session) |
 | system-prompt build | before send | lean + conditional; volatile data kept in the suffix after `SYSTEM_PROMPT_DYNAMIC_MARKER`, out of the cached prefix | `core/system-prompt.ts`, `packages/ai/src/types.ts` |
+| plan-mode prompt | before send (`before_agent_start`) | while permission mode is `plan`, the permissions extension appends a `<plan_mode>` section telling the model it is read-only and must research → build a DAG → call `exit_plan`; never invalidates the cached prefix | `core/built-ins/permissions-extension.ts`, `core/permissions/plan-mode-prompt.ts` |
 | prompt cache breakpoints | on send | 4 Anthropic breakpoints + stable OpenAI `prompt_cache_key` | `packages/ai/src/providers/anthropic.ts` |
 | connect-guard | during connect | connect-phase timeout + instant abort (anti-wedge) | `packages/ai/src/utils/connect-guard.ts` |
 | idle-timeout | during stream | stalled-body watchdog, retryable | `packages/ai/src/utils/idle-timeout.ts` |
@@ -33,7 +34,7 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 2. **prepareArguments** (`:1077`) — per-tool alias/path normalization (`~`/`@` expand, `:line` strip, JSON-string edit coercion). For **MCP/loose-schema** tools, `prepareArgsForLooseSchema` (`core/tools/argument-prep.ts`) is **schema-aware**: alias→canonical only when the server's own schema declares the canonical, JSON-string→array only for `array`-typed fields, and it drops optional `null`/`{}` placeholders the schema rejects (see `stripNullishOptionalArgs` below).
 3. **Tool-rewrite registry** (`:1085`) — `auto` rules silently rewrite args; `suggest`/`block` reject with an actionable error (`skipHints`).
 4. **validateToolArguments** (`:1114`) — TypeBox schema validation + primitive coercion + extra-key "Did you mean"; the echoed payload is capped (`packages/ai/src/utils/validation.ts`). Before coercion, **`stripNullishOptionalArgs`** drops optional fields whose value is a misplaced `null`/`{}` placeholder (a weak-model habit) so they are omitted rather than coerced to `""`/`0` — conservative: required keys and fields that legitimately accept null/object are left intact.
-5. **beforeToolCall / `tool_call` hooks** (`:1115`) — the **guard firewall**. Can BLOCK or auto-fix args; later handlers see earlier mutations and there is **no re-validation after mutation** (`extensions/types.ts:835`), so order (registration order) matters. Members (`core/built-ins/`):
+5. **beforeToolCall / `tool_call` hooks** (`:1115`) — the **guard firewall**. Can BLOCK or auto-fix args; later handlers see earlier mutations. After the firewall, args are **re-validated only when a handler mutated them** — invalid post-mutation args short-circuit with an actionable error instead of reaching execution (`agent-loop.ts` `prepareToolCall`). Members (`core/built-ins/`):
    - **permissions** — gate by permission mode.
    - **read-guard** — must `read` a file before editing it.
    - **edit-precondition** — file unchanged since last read (mtime).
@@ -54,14 +55,14 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 - **turn_start**: edit-precondition reset.
 - **session_before_compact**: `read-guard` clear, `ReadDedupeStore.clear()`, hooks.
 - **session_start / session_shutdown**: permissions, mcp, hooks.
-- **Cross-cutting steering** (reminders, not blockers): doom-loop, stagnation, todo-cadence — nudge the model without vetoing.
+- **Cross-cutting steering** (reminders, not blockers): doom-loop, stagnation, todo-cadence, failure-budget (per-turn cap with optional cross-turn carryover via half-life decay; opt out `toolFeedback.failureBudget.carryover: false`) — nudge the model without vetoing.
 - **Session Recovery** (`session-recovery.ts` + `TurnSteeringEngine`): reactive scaffolding uplift. Every session starts **`lean`** (behavior-identical to the historical harness). When thrash signals fire (doom-loop tiers, result-loop, cross-error, failure-budget, repeating-pattern, verification exhausted, stagnation hard), the level rises **`guided` → `strict`**, enabling: error-reflection via **steer** (not stale `followUp`), tighter loop thresholds, +1/+2 verify `maxAttempts`, one-shot narration steer. Clean tool-success streaks de-escalate. **Not** model-tier classification — opt out `PIT_NO_SESSION_RECOVERY=1`. Telemetry: `quality.recovery`.
 
 ---
 
 ## How to use this map
 - **Proposing a new check?** Place it in the right band first. A "validate args" idea → Band B already has rewrite + TypeBox. A "block dangerous X" → Band B firewall. A "warn after the fact" → Band C. If a band already covers it, the valuable move is to *strengthen the existing layer*, not add a parallel one.
-- **Ordering is load-bearing.** In Band B, rewrite runs before validation, validation before the firewall, and firewall handlers run in registration order with no re-validation after a mutation — a new `tool_call` guard must assume earlier guards may have already rewritten the args.
+- **Ordering is load-bearing.** In Band B, rewrite runs before validation, validation before the firewall, and firewall handlers run in registration order. If a handler mutates args, a conditional post-firewall re-validation runs before execution — a new `tool_call` guard must assume earlier guards may have already rewritten the args.
 - **Preventive vs corrective.** Band B stops the error before it happens (cheapest); Band C only repairs after. Prefer adding prevention in B over detection in C when both are possible.
 
 See the broader inventory in [`already-built.md`](already-built.md).

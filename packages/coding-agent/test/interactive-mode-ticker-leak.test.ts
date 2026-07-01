@@ -75,6 +75,7 @@ describe("renderSessionContext orphan-tool handling (resume path)", () => {
 				getToolActivity: () => "legacy", // non-grouped: exec is a direct child
 				getShowImages: () => false,
 				getImageWidthCells: () => 60,
+				getCardPaddingX: () => 1,
 			},
 			activityStacker: { reset: vi.fn(), divide: vi.fn(), placeCall: vi.fn() },
 			hideThinkingBlock: false,
