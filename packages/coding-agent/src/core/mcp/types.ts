@@ -85,6 +85,12 @@ export interface McpSettings {
 	defer?: "auto" | "always" | "never";
 	/** Tool-count threshold for `defer: "auto"` (default 10). A server with this many tools or more is deferred. */
 	deferThreshold?: number;
+	/**
+	 * Wall-clock budget (ms) for the startup connect pass before a still-connecting
+	 * server is skipped (it reconnects on demand later). Default 10000. Raise it for
+	 * slow network/SSH-tunneled servers so they are not silently dropped at boot.
+	 */
+	connectTimeoutMs?: number;
 }
 
 export interface McpToolSchema {

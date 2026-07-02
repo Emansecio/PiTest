@@ -73,12 +73,22 @@ export function buildNarrationRecoverySteer(): string {
 	].join("\n");
 }
 
+export function buildStrictNarrationRecoverySteer(): string {
+	return [
+		"<session-recovery-narration>",
+		"Recovery just tightened to strict: repeated thrash tripped the loop, verification, and failure-budget thresholds lower.",
+		"Stop and re-plan before the next tool call — restate the goal and try a concretely different approach; do not repeat the last failing action.",
+		"</session-recovery-narration>",
+	].join("\n");
+}
+
 export class SessionRecoveryController {
 	private _level: RecoveryLevel = "lean";
 	private readonly _rollingWeights: number[] = [];
 	private _totalThrashScore = 0;
 	private _cleanStreak = 0;
 	private _narrationSteerPending = false;
+	private _strictNarrationSteerPending = false;
 	private readonly _onLevelChange?: SessionRecoveryControllerOptions["onLevelChange"];
 
 	constructor(options: SessionRecoveryControllerOptions = {}) {
@@ -143,6 +153,12 @@ export class SessionRecoveryController {
 	consumeNarrationSteerPending(): boolean {
 		if (!this._narrationSteerPending) return false;
 		this._narrationSteerPending = false;
+		return true;
+	}
+
+	consumeStrictNarrationSteerPending(): boolean {
+		if (!this._strictNarrationSteerPending) return false;
+		this._strictNarrationSteerPending = false;
 		return true;
 	}
 
@@ -220,6 +236,12 @@ export class SessionRecoveryController {
 		});
 		if (from === "lean" && to === "guided") {
 			this._narrationSteerPending = true;
+		}
+		// Escalations move one step at a time, so guided->strict is its own
+		// transition and latches a distinct one-shot narration (mirrors the
+		// lean->guided latch above): tell the model recovery tightened and why.
+		if (from === "guided" && to === "strict") {
+			this._strictNarrationSteerPending = true;
 		}
 		this._onLevelChange?.(from, to, signal);
 	}

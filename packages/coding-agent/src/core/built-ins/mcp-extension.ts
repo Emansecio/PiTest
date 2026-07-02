@@ -102,11 +102,19 @@ export function shouldDeferMcpServer(
 	return toolCount >= threshold;
 }
 
-// Global budget for the session_start connect pass. The ExtensionRunner awaits
+// Default budget for the session_start connect pass. The ExtensionRunner awaits
 // session_start handlers, so without a budget a single hung server (TCP accept,
 // no response) stalls the whole boot for the full per-call timeouts (~55s in
 // series). Servers that come up later are covered by callTool's lazy reconnect.
-const CONNECT_ALL_BUDGET_MS = 10_000;
+// Override per-session via `mcp.connectTimeoutMs` (see resolveConnectBudgetMs).
+const DEFAULT_CONNECT_ALL_BUDGET_MS = 10_000;
+
+/** Resolve the startup connect budget from settings, defaulting to current behavior. */
+function resolveConnectBudgetMs(settings: McpSettings): number {
+	const raw = settings.connectTimeoutMs;
+	if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return DEFAULT_CONNECT_ALL_BUDGET_MS;
+	return Math.floor(raw);
+}
 
 export interface McpExtensionOptions {
 	settings: McpSettings;
@@ -124,6 +132,9 @@ export function createMcpExtension(options: McpExtensionOptions) {
 		if (Object.keys(servers).length === 0) {
 			return; // No MCP servers configured.
 		}
+
+		// Startup connect budget (configurable via `mcp.connectTimeoutMs`, default 10s).
+		const connectBudgetMs = resolveConnectBudgetMs(options.settings);
 
 		// Prefixed names already registered (eagerly or into the discovery index).
 		// Guards the late-registration path against re-registering tools that the
@@ -345,9 +356,24 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			const controller = new AbortController();
 			bootConnectController = controller;
 			bootConnectTimer = setTimeout(() => {
-				controller.abort(new Error(`MCP startup connect timed out after ${CONNECT_ALL_BUDGET_MS}ms`));
-			}, CONNECT_ALL_BUDGET_MS);
+				controller.abort(new Error(`MCP startup connect timed out after ${connectBudgetMs}ms`));
+			}, connectBudgetMs);
 			return controller.signal;
+		};
+
+		// Surface a one-line, session-visible notice for each server that missed the
+		// startup connect budget (so the model learns the server exists instead of it
+		// being silently dropped). Only fires when the boot pass was aborted by the
+		// budget timer; per-server errors during a completed pass surface via lastError.
+		const notifyBudgetSkips = (): void => {
+			const skipped = manager.getAllStates().filter((s) => !s.connected && !s.disabled);
+			for (const s of skipped) {
+				pi.sendMessage({
+					customType: "mcp.notice",
+					content: `MCP server "${s.name}" (${s.url}) was skipped: it did not connect within the ${connectBudgetMs}ms startup budget (mcp.connectTimeoutMs). It will connect on demand — run /mcp to retry.`,
+					display: true,
+				});
+			}
 		};
 
 		const startBootConnect = (): void => {
@@ -361,6 +387,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 						console.error(`[mcp] startup connect failed: ${err instanceof Error ? err.message : String(err)}`);
 					}
 				} finally {
+					if (signal.aborted) notifyBudgetSkips();
 					clearBootConnectTimer();
 					if (bootConnectController?.signal === signal) {
 						bootConnectController = undefined;
@@ -458,7 +485,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 		// pass uses so tools become callable immediately, and persists enable/disable
 		// so the choice survives a restart (mirrors `pit mcp enable|disable`).
 		const reconnectServer = async (name: string): Promise<void> => {
-			await manager.reconnect(name, AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
+			await manager.reconnect(name, AbortSignal.timeout(connectBudgetMs));
 			registeredServers.add(name);
 			const deferredCount = registerNewTools();
 			ensureDiscoveryActive(deferredCount);
@@ -467,7 +494,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 		};
 
 		const enableServer = async (name: string): Promise<void> => {
-			await manager.enable(name, AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
+			await manager.enable(name, AbortSignal.timeout(connectBudgetMs));
 			if (options.cwd && options.agentDir) {
 				setMcpServerDisabled(name, false, servers[name] ?? {}, options.cwd, options.agentDir);
 			}
@@ -543,7 +570,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 						await bootConnectPromise;
 					}
 					if (manager.getAllStates().some((s) => !s.connected && !s.disabled)) {
-						await connectAndRegister(AbortSignal.timeout(CONNECT_ALL_BUDGET_MS));
+						await connectAndRegister(AbortSignal.timeout(connectBudgetMs));
 					}
 				};
 

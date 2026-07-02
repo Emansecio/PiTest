@@ -288,6 +288,7 @@ Each entry: `{ command, matcher?, shell?, timeoutMs?, cwd?, name? }`. See [hooks
 | `mcp.servers.<name>.defer` | boolean | – | Per-server override of the global `defer` policy: `true` always defers this server's tools, `false` keeps them eager. |
 | `mcp.defer` | string | `"auto"` | When to keep MCP tool schemas off the active surface (deferred tools are pulled in on demand via `search_tool_bm25`): `"auto"` defers servers with `deferThreshold`+ tools, `"always"` defers every server, `"never"` registers everything eagerly. Requires tool discovery. |
 | `mcp.deferThreshold` | number | `10` | Tool-count threshold for `defer: "auto"`. |
+| `mcp.connectTimeoutMs` | number | `10000` | Wall-clock budget for the startup connect pass before a still-connecting server is skipped (it reconnects on demand via `/mcp`). Raise for slow network/SSH-tunneled servers. A skipped server emits a one-line session notice. |
 
 See [mcp.md](mcp.md) for protocol details and reconnect behavior.
 
@@ -407,6 +408,18 @@ The `search_tool_bm25` tool is always registered; these settings gate auto-seedi
 | `toolFeedback.crossErrorReminder.cooldownMs` | number | `30000` | Minimum gap between reminders |
 | `toolFeedback.failureBudget.enabled` | boolean | `true` | Inject a forceful steer when a single tool (by name) exhausts its per-turn failure budget |
 | `toolFeedback.failureBudget.maxPerTurn` | number | `3` | Failures of one tool (by name) allowed in a turn before the steer fires |
+| `toolFeedback.failureBudget.carryover` | boolean | `true` | Carry per-tool failure counts into the next turn with half-life decay instead of resetting them to zero |
+
+The **failure budget** tracks how many times each tool (keyed by name, regardless of
+arguments or error text) has failed in the current turn. Once a tool hits `maxPerTurn`
+failures, a forceful steer fires telling the model to stop hammering that tool and change
+approach. With `carryover` enabled (the default), the counts are not wiped between turns:
+at the start of each turn every surviving count decays by half (`floor(count/2)`, and any
+count that reaches zero is dropped). This means a tool that flailed recently still starts
+the next turn with reduced patience, while the pressure fades over a few clean turns. Set
+`toolFeedback.failureBudget.carryover: false` to reset the budget fully at every turn
+boundary — useful for CI/batch runs where each turn is effectively independent and you do
+not want failures from an earlier step to trigger an early escalation later.
 
 ### Engineering Style
 

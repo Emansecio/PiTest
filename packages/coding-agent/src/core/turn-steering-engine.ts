@@ -6,6 +6,7 @@ import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } 
 import type { CustomMessage } from "./messages.js";
 import {
 	buildNarrationRecoverySteer,
+	buildStrictNarrationRecoverySteer,
 	type RecoverySignal,
 	type SessionRecoveryController,
 } from "./session-recovery.js";
@@ -141,7 +142,8 @@ export class TurnSteeringEngine {
 			(customType === "pi.doom-loop-recovery" ||
 				customType === "pi.doom-loop-pause" ||
 				customType === "pi.result-loop-reminder" ||
-				customType === "pi.session-recovery-narration");
+				customType === "pi.session-recovery-narration" ||
+				customType === "pi.session-recovery-narration-strict");
 		this.deps
 			.sendCustomMessage(
 				{ customType, content, display: opts.display },
@@ -160,14 +162,27 @@ export class TurnSteeringEngine {
 		this._maybeInjectNarrationSteer();
 	}
 
-	/** One-shot narration steer when session recovery first enters `guided`. */
+	/**
+	 * One-shot narration steer on each recovery escalation: a "narrate your
+	 * reasoning" nudge when the session first enters `guided`, and a distinct
+	 * "recovery tightened, re-plan" nudge on guided->strict. Each latch fires once
+	 * per escalation (re-armed only by a fresh escalation after de-escalation).
+	 */
 	maybeInjectNarrationSteer(): void {
-		if (!this.deps.recovery.consumeNarrationSteerPending()) return;
-		this._fireReminder("pi.session-recovery-narration", buildNarrationRecoverySteer(), {
-			deliverAs: "steer",
-			display: false,
-			label: "session-recovery narration",
-		});
+		if (this.deps.recovery.consumeNarrationSteerPending()) {
+			this._fireReminder("pi.session-recovery-narration", buildNarrationRecoverySteer(), {
+				deliverAs: "steer",
+				display: false,
+				label: "session-recovery narration",
+			});
+		}
+		if (this.deps.recovery.consumeStrictNarrationSteerPending()) {
+			this._fireReminder("pi.session-recovery-narration-strict", buildStrictNarrationRecoverySteer(), {
+				deliverAs: "steer",
+				display: false,
+				label: "session-recovery strict narration",
+			});
+		}
 	}
 
 	private _maybeInjectNarrationSteer(): void {
@@ -673,6 +688,9 @@ export class TurnSteeringEngine {
 		if (!cfg.carryover) {
 			this._turnToolFailures.clear();
 		} else {
+			// Carryover decay rule: each surviving per-tool count halves at turn start
+			// (floor(count/2)); counts reaching 0 are dropped. So a tool's budget
+			// pressure fades over ~log2(count) clean turns instead of resetting hard.
 			const decayed = new Map<string, number>();
 			for (const [toolName, count] of this._turnToolFailures) {
 				const next = Math.floor(count / 2);

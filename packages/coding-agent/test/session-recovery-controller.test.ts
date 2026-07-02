@@ -70,6 +70,35 @@ describe("SessionRecoveryController", () => {
 		expect(ctrl.consumeNarrationSteerPending()).toBe(false);
 	});
 
+	it("sets a distinct one-shot strict narration steer on guided to strict", () => {
+		const ctrl = new SessionRecoveryController();
+		expect(ctrl.consumeStrictNarrationSteerPending()).toBe(false);
+		// lean -> guided: arms the guided narration only, not the strict one.
+		ctrl.noteSignal("result_loop");
+		expect(ctrl.getLevel()).toBe("guided");
+		expect(ctrl.consumeStrictNarrationSteerPending()).toBe(false);
+		expect(ctrl.consumeNarrationSteerPending()).toBe(true);
+		// guided -> strict: arms the strict narration exactly once.
+		ctrl.noteSignal("verification_exhausted");
+		expect(ctrl.getLevel()).toBe("strict");
+		expect(ctrl.consumeStrictNarrationSteerPending()).toBe(true);
+		expect(ctrl.consumeStrictNarrationSteerPending()).toBe(false);
+	});
+
+	it("re-arms the strict narration on a fresh guided to strict escalation", () => {
+		const ctrl = new SessionRecoveryController();
+		ctrl.noteSignal("result_loop"); // -> guided
+		ctrl.noteSignal("verification_exhausted"); // -> strict
+		expect(ctrl.consumeStrictNarrationSteerPending()).toBe(true);
+		// De-escalate strict -> guided (5 clean), then re-escalate to strict.
+		for (let i = 0; i < 5; i++) ctrl.noteCleanTool();
+		expect(ctrl.getLevel()).toBe("guided");
+		expect(ctrl.consumeStrictNarrationSteerPending()).toBe(false);
+		ctrl.noteSignal("verification_exhausted"); // guided -> strict again
+		expect(ctrl.getLevel()).toBe("strict");
+		expect(ctrl.consumeStrictNarrationSteerPending()).toBe(true);
+	});
+
 	it("PIT_NO_SESSION_RECOVERY keeps lean and ignores signals", () => {
 		process.env.PIT_NO_SESSION_RECOVERY = "1";
 		const ctrl = new SessionRecoveryController();
