@@ -2,8 +2,12 @@
 
 ## [Unreleased]
 
+## [0.75.4] - 2026-07-01
+
 ### Added
 
+- Added TUI UX micro-moves: working-loader trailing suffix (`esc to interrupt` + stream throughput), human working-phase labels, slow-action elapsed hints on activity lines, pending-target suffix on navigation groups, dim diff line numbers, shared `▰▱` gauge glyphs (footer + todo overlay), H2 markdown hierarchy with `▎` prefix, and a ~100-column default assistant reading width (`assistantReadingColumns: 0` restores full width).
+- Added plan-mode prompt/exit tools, `recall-history`, compaction `compact` model role and summary grounding, failure-budget carryover across turns, annotated block collapse for long tool output, and card framing for welcome/tool blocks.
 - Added cross-session persistence to the per-session frequent-files tracker. When `frequentFiles.enabled` is true, the top entries are written to `<cwd>/.pit/frequent-files.json` on session dispose (atomic tmp + rename) and hydrated on next session boot. Lets new sessions re-use the previous session's hot-file ranking instead of re-discovering it through repeated reads.
 - Added stat-snapshot survival to the built-in read-guard across compaction boundaries. On `session_before_compact` the guard now captures `(mtimeMs, size)` for each file the session has already read instead of dropping the read set wholesale. Post-compaction edits are allowed when the on-disk stat still matches the snapshot, and blocked with a "re-read it" reason when it drifted — eliminates forced re-reads of unchanged files while staying conservative against external mutations.
 - Added a unified `MessageShell` base class for chat-area blocks. Each block now renders with a single 1-column colored gutter at the left edge instead of mixing full-row backgrounds, border pairs, and bare text. Per-role gutter color comes from new theme keys: `gutterToolPending`/`gutterToolSuccess`/`gutterToolError`/`gutterBash`/`gutterDiagnostics`/`gutterUser`/`gutterCustom`. Tool definitions opting out via `renderShell:"self"` (built-in `edit` / `edit-hashline` plus extension tools) keep their custom framing untouched — the shell becomes a passthrough.

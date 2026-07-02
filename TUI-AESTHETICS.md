@@ -204,7 +204,7 @@ Rendered by `WelcomeBox` → `Card` → `computeInnerRows`
 
 ```
 ╭──────────────────────────────────────────────────────────╮
-│  █▀█ █ ▀█▀   coding agent in your terminal      v0.75.3  │
+│  █▀█ █ ▀█▀   coding agent in your terminal      v0.75.4  │
 │  █▀▀ █  █    ● Workspace — User (home)                   │
 │  ▀   ▀  ▀                                                │
 ╰──────────────────────────────────────────────────────────╯
@@ -214,7 +214,7 @@ Rendered by `WelcomeBox` → `Card` → `computeInnerRows`
   `welcome-box.ts:162`, `color-interpolation.ts:39-47`): teal → lavender in
   truecolor, `accent` / `thinkingXhigh` bicolor on 256-color. Still compact
   (3 rows of half-block pixels) but now earns its space inside a card frame.
-- Tagline `coding agent in your terminal` stays **`muted`**; version `v0.75.3`
+- Tagline `coding agent in your terminal` stays **`muted`**; version `v0.75.4`
   drops to **`dim`** (`welcome-box.ts:164`) — hierarchy fixed.
 - The workspace bullet `● Workspace — User (home)` remains accent-colored on
   row 2. The card frame ties the block together visually.

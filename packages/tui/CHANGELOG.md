@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.75.4] - 2026-07-01
+
+### Added
+
+- Added `Loader.setTrailingSuffix()` so working-loader hint/rate suffixes stay independent of the phase message.
+- Added optional `MarkdownTheme.heading2` styling hook.
+
 ### Changed
 
 - Removed the package-level development watch script now that the root TypeScript check validates strip-only-compatible sources.
