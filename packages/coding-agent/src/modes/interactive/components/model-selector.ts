@@ -196,7 +196,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			return refreshed ? { ...scoped, model: refreshed } : scoped;
 		});
 		// Preserve --models order for the cycle set; append everything else sorted.
-		this.cycleModelItems = this.scopedModels.map((scoped) => ({
+		const authedScoped = this.modelRegistry.filterScopedModels(this.scopedModels);
+		this.cycleModelItems = authedScoped.map((scoped) => ({
 			provider: scoped.model.provider,
 			id: scoped.model.id,
 			model: scoped.model,

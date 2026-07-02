@@ -25,7 +25,10 @@ function stripSchemaDescriptions(node: unknown): unknown {
 	const obj = node as Record<string, unknown>;
 	const out: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(obj)) {
-		if (key === "description" || key === "title" || key === "$comment") continue;
+		// Strip schema metadata only — never drop a property literally named
+		// "title" (e.g. exit_plan.title). JSON Schema `title` on object nodes is
+		// unused in our TypeBox tool schemas, so we do not strip it at all.
+		if (key === "description" || key === "$comment") continue;
 		out[key] = stripSchemaDescriptions(value);
 	}
 	return out;

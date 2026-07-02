@@ -17,6 +17,8 @@
  */
 
 import { Card, type Component, truncateToWidth, visibleWidth } from "@pit/tui";
+import type { GitDiffStats } from "../../../core/footer-data-provider.ts";
+import { formatGitBranchWithDiff } from "../display-utils.ts";
 import { wordmarkGradient } from "../theme/color-interpolation.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -36,6 +38,8 @@ export interface WelcomeBoxData {
 	/** `shell: …` when launcher cwd differs from session cwd. */
 	shellCwdNote?: string;
 	branch?: string;
+	/** Working-tree diff stats for branch suffix (optional). */
+	diffStats?: GitDiffStats | null;
 	/** When resuming, the session name to surface in place of the cwd. */
 	resumedSessionName?: string;
 	/** Color function for the wordmark (lets interactive-mode ease it in on mount). */
@@ -65,13 +69,15 @@ class WelcomeBoxBody implements Component {
 function formatWorkspaceLine(
 	cwdDisplay: string,
 	branch: string | undefined,
+	diffStats: GitDiffStats | null | undefined,
 	shellCwdNote: string | undefined,
 	width: number,
 ): string {
-	let path =
-		branch !== undefined && branch !== ""
-			? `${theme.fg("accent", cwdDisplay)}${theme.fg("dim", ` (${branch})`)}`
-			: theme.fg("accent", cwdDisplay);
+	let path = theme.fg("accent", cwdDisplay);
+	if (branch !== undefined && branch !== "") {
+		const branchLabel = formatGitBranchWithDiff(branch, diffStats);
+		path = `${path}${theme.fg("dim", " (")}${branchLabel}${theme.fg("dim", ")")}`;
+	}
 	if (shellCwdNote) {
 		path = `${path}${theme.fg("dim", ` · ${shellCwdNote}`)}`;
 	}
@@ -164,7 +170,7 @@ export class WelcomeBox implements Component {
 		const versionText = theme.fg("dim", `v${d.version}`);
 		const taglineText = theme.fg("muted", d.tagline);
 		const bodyW = this.bodyWidth(w, useWordmark);
-		const workspaceLine = formatWorkspaceLine(d.cwdDisplay, d.branch, d.shellCwdNote, bodyW);
+		const workspaceLine = formatWorkspaceLine(d.cwdDisplay, d.branch, d.diffStats, d.shellCwdNote, bodyW);
 		const resumeLine = d.resumedSessionName ? formatResumeLine(d.resumedSessionName, bodyW) : "";
 		const bodies = useWordmark
 			? [composeLeftRight(taglineText, versionText, bodyW), workspaceLine, resumeLine]

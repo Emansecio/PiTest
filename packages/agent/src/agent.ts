@@ -8,7 +8,7 @@ import {
 	type ThinkingBudgets,
 	type Transport,
 } from "@pit/ai";
-import { buildErrorTurn, runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
+import { buildErrorTurn, isStreamGuardAbortMessage, runAgentLoop, runAgentLoopContinue } from "./agent-loop.ts";
 import type { OverthinkGuardConfig } from "./overthink-guard.ts";
 import type { ToolErrorHintRegistry } from "./tool-error-hint-registry.ts";
 import type { ToolRewriteRegistry } from "./tool-rewrite-registry.ts";
@@ -632,7 +632,9 @@ export class Agent {
 
 			case "message_end":
 				this._state.streamingMessage = undefined;
-				this._state.messages.push(event.message);
+				if (!isStreamGuardAbortMessage(event.message)) {
+					this._state.messages.push(event.message);
+				}
 				break;
 
 			case "tool_execution_start":

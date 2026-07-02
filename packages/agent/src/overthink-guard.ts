@@ -112,6 +112,50 @@ export const DEFAULT_OVERTHINK_WEAK_TOKEN_THRESHOLD = 1000;
 export const DEFAULT_OVERTHINK_STRONG_TOKEN_THRESHOLD = 2500;
 export const DEFAULT_OVERTHINK_MAX_RETRIES_PER_TURN = 2;
 
+export const OVERTHINK_STEER_TEXT_MARKER = "<system-reminder>[overthink]";
+
+const OVERTHINK_TOKEN_REGEX = /exceeded ~(\d+) tokens \(limit ~(\d+)\)/;
+
+function getUserMessageText(message: AgentMessage): string {
+	if (message.role !== "user") {
+		return "";
+	}
+	const content = message.content;
+	if (typeof content === "string") {
+		return content;
+	}
+	return content
+		.filter((block): block is { type: "text"; text: string } => block.type === "text")
+		.map((block) => block.text)
+		.join("");
+}
+
+/** True for live (_overthink_injected) or JSONL-restored overthink steer messages. */
+export function isOverthinkSteerMessage(message: AgentMessage): boolean {
+	if (message.role !== "user") {
+		return false;
+	}
+	const tagged = message as { _overthink_injected?: boolean };
+	if (tagged._overthink_injected === true) {
+		return true;
+	}
+	return getUserMessageText(message).includes(OVERTHINK_STEER_TEXT_MARKER);
+}
+
+/** One-line TUI summary; the full system-reminder text stays in LLM context. */
+export function formatOverthinkSteerDisplayLine(message: AgentMessage): string {
+	const text = getUserMessageText(message);
+	const match = text.match(OVERTHINK_TOKEN_REGEX);
+	if (match) {
+		return `Reasoning exceeded ~${match[1]} tokens (limit ~${match[2]}). Model notified.`;
+	}
+	const tagged = message as { _overthink_tokens?: number };
+	if (tagged._overthink_tokens !== undefined) {
+		return `Reasoning exceeded ~${tagged._overthink_tokens} tokens. Model notified.`;
+	}
+	return "Reasoning limit exceeded. Model notified.";
+}
+
 export function buildOverthinkReminderMessage(info: OverthinkInterruptInfo): AgentMessage {
 	const text =
 		`<system-reminder>[overthink] Internal reasoning for this turn exceeded ~${info.estimatedTokens} tokens ` +

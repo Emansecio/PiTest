@@ -5,6 +5,8 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 let resolvedBranch = "main";
+let diffNumstatStdout = "";
+let statusPorcelainStdout = "";
 
 vi.mock("child_process", () => ({
 	execFile: vi.fn(
@@ -26,6 +28,14 @@ vi.mock("child_process", () => ({
 				);
 				return;
 			}
+			if (args[1] === "diff" && args[2] === "--numstat") {
+				setTimeout(() => callback(null, diffNumstatStdout, ""), 0);
+				return;
+			}
+			if (args[1] === "status" && args[2] === "--porcelain") {
+				setTimeout(() => callback(null, statusPorcelainStdout, ""), 0);
+				return;
+			}
 			setTimeout(() => callback(new Error("unsupported"), "", ""), 0);
 		},
 	),
@@ -33,11 +43,21 @@ vi.mock("child_process", () => ({
 		if (args[1] === "symbolic-ref") {
 			return { status: resolvedBranch ? 0 : 1, stdout: resolvedBranch ? `${resolvedBranch}\n` : "", stderr: "" };
 		}
+		if (args[1] === "diff" && args[2] === "--numstat") {
+			return { status: 0, stdout: diffNumstatStdout, stderr: "" };
+		}
+		if (args[1] === "status" && args[2] === "--porcelain") {
+			return { status: 0, stdout: statusPorcelainStdout, stderr: "" };
+		}
 		return { status: 1, stdout: "", stderr: "" };
 	}),
 }));
 
-import { FooterDataProvider } from "../src/core/footer-data-provider.js";
+import {
+	FooterDataProvider,
+	parseGitDiffNumstat,
+	parseGitStatusPorcelainFileCount,
+} from "../src/core/footer-data-provider.js";
 
 type WorktreeFixture = {
 	worktreeDir: string;
@@ -95,6 +115,8 @@ describe("FooterDataProvider reftable branch detection", () => {
 		originalCwd = process.cwd();
 		tempDir = mkdtempSync(join(tmpdir(), "footer-data-provider-"));
 		resolvedBranch = "main";
+		diffNumstatStdout = "";
+		statusPorcelainStdout = "";
 		vi.mocked(spawnSync).mockClear();
 		vi.mocked(execFile).mockClear();
 	});
@@ -197,15 +219,17 @@ describe("FooterDataProvider reftable branch detection", () => {
 		const provider = new FooterDataProvider(worktreeDir);
 		try {
 			expect(provider.getGitBranch()).toBe("main");
+			await new Promise((resolve) => setTimeout(resolve, 50));
 			vi.mocked(execFile).mockClear();
 
 			writeFileSync(join(reftableDir, "tables.list"), "1\n");
 			writeFileSync(join(reftableDir, "tables.list"), "2\n");
 			writeFileSync(join(reftableDir, "tables.list"), "3\n");
-			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1);
+			await waitFor(() => vi.mocked(execFile).mock.calls.some((call) => call[1]?.[1] === "symbolic-ref"));
 			await new Promise((resolve) => setTimeout(resolve, 650));
 
-			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+			const branchCalls = vi.mocked(execFile).mock.calls.filter((call) => call[1]?.[1] === "symbolic-ref");
+			expect(branchCalls.length).toBe(1);
 		} finally {
 			provider.dispose();
 		}
@@ -221,12 +245,15 @@ describe("FooterDataProvider reftable branch detection", () => {
 			resolvedBranch = "foo";
 			const onBranchChange = vi.fn();
 			provider.onBranchChange(onBranchChange);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			vi.mocked(execFile).mockClear();
 
 			writeFileSync(join(reftableDir, "tables.list"), "1\n");
-			await waitFor(() => vi.mocked(execFile).mock.calls.length === 1);
+			await waitFor(() => vi.mocked(execFile).mock.calls.some((call) => call[1]?.[1] === "symbolic-ref"));
 			await waitFor(() => provider.getGitBranch() === "foo");
 
-			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+			const branchCalls = vi.mocked(execFile).mock.calls.filter((call) => call[1]?.[1] === "symbolic-ref");
+			expect(branchCalls.length).toBe(1);
 			expect(provider.getGitBranch()).toBe("foo");
 			expect(onBranchChange).toHaveBeenCalledTimes(1);
 		} finally {
@@ -260,6 +287,103 @@ describe("FooterDataProvider reftable branch detection", () => {
 		} finally {
 			provider.dispose();
 			vi.useRealTimers();
+		}
+	});
+});
+
+describe("git diff stat parsing", () => {
+	it("parseGitDiffNumstat sums add/del and skips binary lines", () => {
+		const stdout = "12\t3\tfile.ts\n-\t-\tbinary.png\n5\t0\tother.ts\n";
+		expect(parseGitDiffNumstat(stdout)).toEqual({ insertions: 17, deletions: 3 });
+	});
+
+	it("parseGitStatusPorcelainFileCount counts non-empty lines", () => {
+		const stdout = " M file.ts\n?? new.ts\n\n";
+		expect(parseGitStatusPorcelainFileCount(stdout)).toBe(2);
+	});
+});
+
+describe("FooterDataProvider working-tree diff stats", () => {
+	let originalCwd: string;
+	let tempDir: string;
+
+	beforeEach(() => {
+		originalCwd = process.cwd();
+		tempDir = mkdtempSync(join(tmpdir(), "footer-data-provider-diff-"));
+		resolvedBranch = "main";
+		diffNumstatStdout = "12\t3\tfile.ts\n";
+		statusPorcelainStdout = " M file.ts\n";
+		vi.mocked(spawnSync).mockClear();
+		vi.mocked(execFile).mockClear();
+	});
+
+	afterEach(() => {
+		process.chdir(originalCwd);
+		if (tempDir && existsSync(tempDir)) {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns null outside a git repo", () => {
+		const outsideDir = join(tempDir, "outside");
+		mkdirSync(outsideDir, { recursive: true });
+		const provider = new FooterDataProvider(outsideDir);
+		try {
+			expect(provider.getGitDiffStats()).toBeNull();
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("returns sync diff stats on first read inside a repo", () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			expect(provider.getGitDiffStats()).toEqual({ files: 1, insertions: 12, deletions: 3 });
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("notifies onWorkingTreeChange when async refresh detects a change", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			expect(provider.getGitDiffStats()).toEqual({ files: 1, insertions: 12, deletions: 3 });
+			const onChange = vi.fn();
+			provider.onWorkingTreeChange(onChange);
+			diffNumstatStdout = "20\t1\tfile.ts\n";
+			statusPorcelainStdout = " M file.ts\n?? extra.ts\n";
+			provider.scheduleWorkingTreeRefresh();
+			await waitFor(() => onChange.mock.calls.length === 1);
+			expect(provider.getGitDiffStats()).toEqual({ files: 2, insertions: 20, deletions: 1 });
+			expect(provider.getGitDiffVersion()).toBeGreaterThan(0);
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("debounces rapid scheduleWorkingTreeRefresh calls", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			vi.mocked(execFile).mockClear();
+			const onChange = vi.fn();
+			provider.onWorkingTreeChange(onChange);
+			diffNumstatStdout = "1\t0\ta.ts\n";
+			provider.scheduleWorkingTreeRefresh();
+			provider.scheduleWorkingTreeRefresh();
+			provider.scheduleWorkingTreeRefresh();
+			await waitFor(() => vi.mocked(execFile).mock.calls.some((call) => call[1]?.[1] === "diff"));
+			await new Promise((resolve) => setTimeout(resolve, 650));
+			const diffCalls = vi.mocked(execFile).mock.calls.filter((call) => call[1]?.[1] === "diff");
+			expect(diffCalls.length).toBe(1);
+		} finally {
+			provider.dispose();
 		}
 	});
 });

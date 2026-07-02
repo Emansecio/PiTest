@@ -1509,6 +1509,37 @@ describe("ModelRegistry", () => {
 		});
 
 		describe("hidden providers (openrouter)", () => {
+			test("filterScopedModels keeps only entries with configured auth", () => {
+				writeModelsJson({
+					authed: providerConfig("https://authed.example.com", [{ id: "m1", name: "Authed One" }]),
+				});
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+				registry.refresh();
+				const authedModel = registry.find("authed", "m1");
+				const unauthedModel = {
+					id: "ghost",
+					name: "Ghost Model",
+					provider: "ghost-provider",
+					api: "openai-completions" as const,
+					baseUrl: "https://ghost.example.com/v1",
+					reasoning: false,
+					input: ["text"] as ("text" | "image")[],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 8192,
+				};
+				expect(authedModel).toBeDefined();
+				expect(registry.hasConfiguredAuth(authedModel!)).toBe(true);
+				expect(registry.hasConfiguredAuth(unauthedModel)).toBe(false);
+
+				const filtered = registry.filterScopedModels([
+					{ model: authedModel!, thinkingLevel: "off" },
+					{ model: unauthedModel, thinkingLevel: "high" },
+				]);
+				expect(filtered).toHaveLength(1);
+				expect(filtered[0]?.model.provider).toBe("authed");
+			});
+
 			test("openrouter is excluded from getAvailable even with auth, but stays in getAll/find", () => {
 				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 

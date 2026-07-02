@@ -27,6 +27,7 @@ interface MakeFooterOptions {
 	launchCwd?: string;
 	/** Git branch reported by the footer data provider. */
 	branch?: string;
+	diffStats?: { files: number; insertions: number; deletions: number } | null;
 	/**
 	 * Number of user turns to simulate. Defaults to 1 when usage has accrued
 	 * (contextUsage provided or cost > 0) and 0 otherwise, so an "active"
@@ -49,6 +50,7 @@ function makeFooter({
 	cwd = "C:/x",
 	launchCwd,
 	branch = "",
+	diffStats = null,
 	userTurns,
 }: MakeFooterOptions = {}): FooterComponent {
 	// A subscription tag needs a truthy model for isUsingOAuth(state.model).
@@ -101,11 +103,14 @@ function makeFooter({
 
 	const footerData: ReadonlyFooterDataProvider = {
 		getGitBranch: () => branch,
+		getGitDiffStats: () => diffStats,
+		getGitDiffVersion: () => 0,
 		getRepoDir: () => null,
 		getExtensionStatuses: () => statuses,
 		getStatusVersion: () => 0,
 		getAvailableProviderCount: () => providerCount,
 		onBranchChange: () => () => {},
+		onWorkingTreeChange: () => () => {},
 	};
 
 	const footer = new FooterComponent(session, footerData, launchCwd ?? cwd);
@@ -117,16 +122,74 @@ beforeAll(() => {
 	initTheme("dark");
 });
 
-it("shows the permission mode but no compact noise when auto-compact is on", () => {
-	// Auto-compact is the default-on state, so it must NOT render a permanent
-	// indicator — only the permission mode shows. Without a model (contextWindow 0)
-	// the session is not pristine, so the metrics line still renders.
-	const footer = makeFooter({ permissions: "auto", autoCompact: true });
+it("shows plan mode on metrics but hides default auto mode", () => {
+	const footer = makeFooter({
+		permissions: "plan",
+		autoCompact: true,
+		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
+	});
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines.length).toBe(2);
-	expect(lines[1]).toContain("auto"); // permission mode
-	expect(lines[1]).not.toContain("compact"); // default-on state is silent
-	expect(lines.some((l) => l.startsWith("permissions:"))).toBe(false);
+	expect(lines.some((l) => l.includes("plan"))).toBe(true);
+});
+
+it("hides auto on the metrics line when it is the default permission mode", () => {
+	const footer = makeFooter({
+		permissions: "auto",
+		autoCompact: true,
+		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
+	});
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines.length).toBeGreaterThanOrEqual(2);
+	expect(lines.slice(1).join("\n")).not.toContain("auto");
+});
+
+it("shows git diff stats in the identity line", () => {
+	const footer = makeFooter({
+		branch: "main",
+		diffStats: { files: 2, insertions: 12, deletions: 3 },
+		usingOAuth: true,
+	});
+	const plain = footer.render(80).map(stripAnsi).join("\n");
+	expect(plain).toContain("(main · +12 -3)");
+});
+
+it("stacks identity and metrics on narrow terminals", () => {
+	const footer = makeFooter({
+		permissions: "plan",
+		usingOAuth: true,
+		autoCompact: true,
+		contextUsage: { tokens: 47000, percent: 23, contextWindow: 200000 },
+	});
+	const lines = footer.render(40).map(stripAnsi);
+	expect(lines.length).toBeGreaterThanOrEqual(3);
+	expect(lines.some((l) => l.includes("test-model"))).toBe(true);
+	expect(lines.some((l) => l.includes("CTX"))).toBe(true);
+});
+
+it("stacks CTX and usage on medium-width terminals", () => {
+	const footer = makeFooter({
+		permissions: "plan",
+		usingOAuth: true,
+		autoCompact: true,
+		cost: 0.01,
+		contextUsage: { tokens: 47000, percent: 23, contextWindow: 200000 },
+	});
+	const lines = footer.render(60).map(stripAnsi);
+	const ctxLine = lines.find((line) => line.includes("CTX"));
+	expect(ctxLine).toBeDefined();
+	expect(ctxLine).not.toMatch(/↑/);
+	expect(lines.some((line) => line.includes("↑") || line.includes("plan"))).toBe(true);
+});
+
+it("composes CTX and usage on one metrics line when wide enough", () => {
+	const footer = makeFooter({
+		permissions: "plan",
+		autoCompact: true,
+		cost: 0.01,
+		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
+	});
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines.some((line) => line.includes("CTX") && line.includes("plan"))).toBe(true);
 });
 
 it("collapses to one line on a pristine idle session with permission mode", () => {
@@ -172,13 +235,10 @@ it("does not collapse when auto-compact is off on an idle session", () => {
 	expect(lines[1]).toContain("no-compact");
 });
 
-it("keeps the thinking chip and permission mode on a narrow collapsed line", () => {
+it("keeps the thinking chip on a narrow collapsed line", () => {
 	const footer = makeFooter({ thinkingLevel: "high", permissions: "auto", usingOAuth: true, autoCompact: true });
 	const lines = footer.render(30).map(stripAnsi);
-	expect(lines.length).toBe(1);
-	expect(lines[0]).toContain("✦ high");
-	expect(lines[0]).toContain("auto");
-	expect(lines[0]).toContain("…");
+	expect(lines.some((line) => line.includes("✦ high"))).toBe(true);
 });
 
 it("flags no-compact (warning) only when auto-compact is OFF — the abnormal state", () => {
@@ -292,11 +352,16 @@ it("renders the thinking level as a ✦ chip on reasoning models", () => {
 it("keeps the ✦ chip intact on a narrow line, truncating the model id instead", () => {
 	// At a tight width the right cluster must shrink the MODEL id (with ellipsis),
 	// never the protected `✦ high` chip — otherwise it clips to a dangling `✦`.
-	const footer = makeFooter({ thinkingLevel: "high", providerCount: 2 });
+	const footer = makeFooter({
+		thinkingLevel: "high",
+		providerCount: 2,
+		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
+	});
 	const lines = footer.render(30).map(stripAnsi);
-	expect(lines[0]).toContain("✦ high");
-	expect(lines[0]).not.toMatch(/✦$/); // no orphaned glyph at the line end
-	expect(lines[0]).toContain("…"); // the model id absorbed the squeeze
+	const modelLine = lines.find((line) => line.includes("✦ high")) ?? lines.join("\n");
+	expect(modelLine).toContain("✦ high");
+	expect(modelLine).not.toMatch(/✦$/);
+	expect(lines.some((line) => line.includes("…"))).toBe(true);
 });
 
 it("dims uncolored extension statuses but passes pre-colorized ones through", () => {

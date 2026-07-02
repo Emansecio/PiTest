@@ -12,6 +12,7 @@ export * from "./tool-error-hint-registry.ts";
 export * from "./tool-repair-note.ts";
 // Tool rewrite registry
 export * from "./tool-rewrite-registry.ts";
+export * from "./ttsr-steer.ts";
 // Types
 export * from "./types.ts";
 export { uuidv7 } from "./uuid.ts";

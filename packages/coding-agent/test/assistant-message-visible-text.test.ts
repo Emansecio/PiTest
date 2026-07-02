@@ -17,4 +17,13 @@ describe("messageHasVisibleContent", () => {
 		expect(messageHasVisibleContent({ content: [{ type: "text", text: "   " }] } as any, true)).toBe(false);
 		expect(messageHasVisibleContent({ content: [{ type: "toolCall", id: "1" }] } as any, true)).toBe(false);
 	});
+
+	test("error and aborted turns are visible even without text content", () => {
+		expect(
+			messageHasVisibleContent({ content: [{ type: "text", text: "" }], stopReason: "error" } as any, false),
+		).toBe(true);
+		expect(
+			messageHasVisibleContent({ content: [{ type: "text", text: "" }], stopReason: "aborted" } as any, false),
+		).toBe(true);
+	});
 });

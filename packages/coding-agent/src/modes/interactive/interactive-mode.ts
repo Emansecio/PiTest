@@ -6,7 +6,13 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@pit/agent-core";
+import {
+	type AgentMessage,
+	isOverthinkSteerMessage,
+	isStreamGuardAbortMessage,
+	isTtsrSteerMessage,
+	type ThinkingLevel,
+} from "@pit/agent-core";
 import {
 	type AssistantMessage,
 	type DiagnosticEvent,
@@ -159,6 +165,8 @@ import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./c
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
+import { OverthinkSteerMessageComponent } from "./components/overthink-steer-message.ts";
+import { PendingUserMessageComponent } from "./components/pending-user-message.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
@@ -167,6 +175,8 @@ import { createTodoOverlay, type TodoOverlay } from "./components/todo-overlay.t
 import { workingPhaseLabel } from "./components/tool-activity.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
+import { TtsrSteerMessageComponent } from "./components/ttsr-steer-message.ts";
+import { TurnDoneMessageComponent } from "./components/turn-done-message.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import { WelcomeBox, type WelcomeBoxData } from "./components/welcome-box.ts";
@@ -209,6 +219,7 @@ import {
 	Theme,
 	theme,
 } from "./theme/theme.ts";
+import { buildTurnDoneSnapshot } from "./turn-done-format.ts";
 
 /**
  * A structural rule for the chat transcript (e.g. hotkeys framing).
@@ -267,6 +278,9 @@ const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 // long enough to never false-fire on a normal interrupt, short enough that a
 // genuine wedge gives feedback fast.
 const INTERRUPT_WATCHDOG_MS = 2000;
+
+/** Tools that may change the working tree — refresh git diff stats after success. */
+const MUTATING_TOOLS_FOR_DIFF_REFRESH = new Set(["edit", "edit_v2", "write", "bash", "ast_edit", "code"]);
 
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
@@ -630,7 +644,7 @@ export class InteractiveMode {
 				// Get available models (scoped or from registry)
 				const models =
 					this.session.scopedModels.length > 0
-						? this.session.scopedModels.map((s) => s.model)
+						? this.session.modelRegistry.filterScopedModels(this.session.scopedModels).map((s) => s.model)
 						: this.session.modelRegistry.getAvailable();
 
 				if (models.length === 0) return null;
@@ -856,6 +870,10 @@ export class InteractiveMode {
 			this.refreshWelcomeBoxData();
 			this.ui.requestRender();
 		});
+		this.footerDataProvider.onWorkingTreeChange(() => {
+			this.refreshWelcomeBoxData();
+			this.ui.requestRender();
+		});
 
 		// Initialize available provider count for footer display
 		await this.updateAvailableProviderCount();
@@ -947,15 +965,12 @@ export class InteractiveMode {
 			}
 		}
 
-		// Main interactive loop
+		// Main interactive loop — keep the process alive and re-arm getUserInput
+		// after each submit. prompt() is dispatched from the editor onSubmit handler
+		// (same as steer/followUp paths) so a message is never dropped when
+		// onInputCallback is unset (startup gap, or a wedged await on the prior turn).
 		while (true) {
-			const userInput = await this.getUserInput();
-			try {
-				await this.session.prompt(userInput);
-			} catch (error: unknown) {
-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-				this.showError(errorMessage);
-			}
+			await this.getUserInput();
 		}
 	}
 
@@ -1380,6 +1395,7 @@ export class InteractiveMode {
 			cwdDisplay: cwdLabels.session,
 			shellCwdNote: cwdLabels.shellNote,
 			branch: this.footerDataProvider.getGitBranch() ?? undefined,
+			diffStats: this.footerDataProvider.getGitDiffStats(),
 			resumedSessionName: isResumed ? this.sessionManager.getSessionName() : undefined,
 			cardPaddingX: this.settingsManager.getCardPaddingX(),
 		};
@@ -1630,6 +1646,26 @@ export class InteractiveMode {
 		}
 		this.resetStreamRateCounters();
 		this.clearStatusContainer();
+	}
+
+	/** Tear down a live assistant stream block (overthink/TTSR mid-stream abort). */
+	private disposeActiveStreamingComponent(): void {
+		if (!this.streamingComponent) return;
+		this.streamingComponent.dispose();
+		if (this.streamingAttached) {
+			this.chatContainer.removeChild(this.streamingComponent);
+		}
+		this.streamingComponent = undefined;
+		this.streamingMessage = undefined;
+		this.streamingAttached = false;
+	}
+
+	/** Ephemeral turn-complete marker in the chat transcript (not persisted). */
+	private appendTurnDoneLine(snapshot: ReturnType<typeof buildTurnDoneSnapshot>): void {
+		const component = new TurnDoneMessageComponent(snapshot);
+		component.setNoLeadingGap(true);
+		this.chatContainer.addChild(new Spacer(1));
+		this.chatContainer.addChild(component);
 	}
 
 	/**
@@ -2671,10 +2707,16 @@ export class InteractiveMode {
 				this.ui.requestRender();
 			}
 
+			this.editor.addToHistory?.(text);
 			if (this.onInputCallback) {
 				this.onInputCallback(text);
 			}
-			this.editor.addToHistory?.(text);
+			try {
+				await this.session.prompt(text);
+			} catch (error: unknown) {
+				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+				this.showError(errorMessage);
+			}
 		};
 	}
 
@@ -3042,6 +3084,7 @@ export class InteractiveMode {
 							this._fusionWriterLoaderActive = false;
 							this.stopWorkingLoader();
 						}
+						this.disposeActiveStreamingComponent();
 						this.streamingComponent = new AssistantMessageComponent(
 							undefined,
 							this.hideThinkingBlock,
@@ -3098,6 +3141,10 @@ export class InteractiveMode {
 
 			case "message_end":
 				if (event.message.role === "user") break;
+				if (event.message.role === "assistant" && isStreamGuardAbortMessage(event.message)) {
+					this.disposeActiveStreamingComponent();
+					break;
+				}
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					let errorMessage: string | undefined;
@@ -3167,6 +3214,9 @@ export class InteractiveMode {
 					if (this.pendingTools.size === 0) {
 						this.setWorkingPhase("Thinking…");
 					}
+					if (!event.isError && MUTATING_TOOLS_FOR_DIFF_REFRESH.has(event.toolName)) {
+						this.footerDataProvider.scheduleWorkingTreeRefresh();
+					}
 					this.ui.requestRender();
 				}
 				break;
@@ -3177,14 +3227,15 @@ export class InteractiveMode {
 				this.clearInterruptWatchdog();
 				this.disposeFusionLive();
 				if (this.shouldRetireWorkingLoaderOnAgentEnd(event.willRetry)) {
+					const elapsedMs = this.loadingAnimation?.getElapsedMs() ?? 0;
 					this.stopWorkingLoader();
+					if (this.session.orchestration !== "fusion") {
+						this.appendTurnDoneLine(
+							buildTurnDoneSnapshot(event.messages, elapsedMs, this.session.getContextUsage() ?? undefined),
+						);
+					}
 				}
-				if (this.streamingComponent) {
-					this.streamingComponent.dispose();
-					this.chatContainer.removeChild(this.streamingComponent);
-					this.streamingComponent = undefined;
-					this.streamingMessage = undefined;
-				}
+				this.disposeActiveStreamingComponent();
 				for (const component of this.pendingTools.values()) {
 					component.dispose();
 				}
@@ -3576,6 +3627,16 @@ export class InteractiveMode {
 			case "user": {
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
+					if (isOverthinkSteerMessage(message)) {
+						this.disposeActiveStreamingComponent();
+						this.chatContainer.addChild(new OverthinkSteerMessageComponent(message));
+						break;
+					}
+					if (isTtsrSteerMessage(message)) {
+						this.disposeActiveStreamingComponent();
+						this.chatContainer.addChild(new TtsrSteerMessageComponent(message));
+						break;
+					}
 					// External `Spacer(1)` removed (Leva 2 Spacer cleanup).
 					// `UserMessageComponent` still wraps content in
 					// `Box(1,1, userMsgBg)` whose `paddingY=1` keeps a 1-row
@@ -4430,12 +4491,10 @@ export class InteractiveMode {
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
 			this.pendingMessagesContainer.addChild(new Spacer(1));
 			for (const message of steeringMessages) {
-				const text = theme.fg("dim", `Steering: ${message}`);
-				this.pendingMessagesContainer.addChild(new TruncatedText(text, 1, 0));
+				this.pendingMessagesContainer.addChild(new PendingUserMessageComponent("steer", message));
 			}
 			for (const message of followUpMessages) {
-				const text = theme.fg("dim", `Follow-up: ${message}`);
-				this.pendingMessagesContainer.addChild(new TruncatedText(text, 1, 0));
+				this.pendingMessagesContainer.addChild(new PendingUserMessageComponent("queued", message));
 			}
 			const dequeueHint = this.getAppKeyDisplay("app.message.dequeue");
 			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
@@ -4892,7 +4951,7 @@ export class InteractiveMode {
 
 	private async getModelCandidates(): Promise<Model<any>[]> {
 		if (this.session.scopedModels.length > 0) {
-			return this.session.scopedModels.map((scoped) => scoped.model);
+			return this.session.modelRegistry.filterScopedModels(this.session.scopedModels).map((scoped) => scoped.model);
 		}
 
 		this.session.modelRegistry.refresh();

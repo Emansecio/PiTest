@@ -830,6 +830,21 @@
       position: relative;
     }
 
+    /* Injected steers (overthink / TTSR) — one compact line, not the full system-reminder */
+    .steer-message {
+      background: var(--customMessageBg);
+      padding: var(--line-height);
+      border-radius: 4px;
+      color: var(--customMessageText);
+      font-size: 0.95em;
+    }
+
+    .steer-label,
+    .tree-steer {
+      color: var(--warning, var(--customMessageLabel));
+      font-weight: bold;
+    }
+
     /* Branch summary */
     .branch-summary {
       background: var(--customMessageBg);

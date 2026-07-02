@@ -24,7 +24,7 @@ import type {
 	AgentToolCall,
 	ThinkingLevel,
 } from "@pit/agent-core";
-import { setUnknownToolHintProvider } from "@pit/agent-core";
+import { isStreamGuardAbortMessage, setUnknownToolHintProvider } from "@pit/agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@pit/ai";
 import {
 	clampThinkingLevel,
@@ -1523,8 +1523,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 					event.message.role === "assistant" ||
 					event.message.role === "toolResult"
 				) {
-					// Regular LLM message - persist as SessionMessageEntry
-					this.sessionManager.appendMessage(event.message);
+					const skipPersist = event.message.role === "assistant" && isStreamGuardAbortMessage(event.message);
+					if (!skipPersist) {
+						this.sessionManager.appendMessage(event.message);
+					}
 				}
 				// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 			} catch (err) {

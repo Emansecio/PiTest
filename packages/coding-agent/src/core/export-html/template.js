@@ -329,6 +329,41 @@
         };
       }
 
+      const OVERTHINK_STEER_TEXT_MARKER = '<system-reminder>[overthink]';
+      const OVERTHINK_TOKEN_REGEX = /exceeded ~(\d+) tokens \(limit ~(\d+)\)/;
+      const TTSR_STEER_TEXT_MARKER = '<system-reminder>[TTSR:';
+      const TTSR_RULE_NAME_REGEX = /<system-reminder>\[TTSR:([^\]]+)\]/;
+
+      function formatOverthinkSteerDisplayLine(text) {
+        const match = text.match(OVERTHINK_TOKEN_REGEX);
+        if (match) {
+          return `Reasoning exceeded ~${match[1]} tokens (limit ~${match[2]}). Model notified.`;
+        }
+        return 'Reasoning limit exceeded. Model notified.';
+      }
+
+      function formatTtsrSteerDisplayLine(text) {
+        const match = text.match(TTSR_RULE_NAME_REGEX);
+        if (match) {
+          return `Rule "${match[1]}" matched. Model notified.`;
+        }
+        return 'Stream rule matched. Model notified.';
+      }
+
+      function getInjectedSteerDisplay(text) {
+        if (text.includes(OVERTHINK_STEER_TEXT_MARKER)) {
+          return { label: 'overthink', line: formatOverthinkSteerDisplayLine(text) };
+        }
+        if (text.includes(TTSR_STEER_TEXT_MARKER)) {
+          return { label: 'ttsr', line: formatTtsrSteerDisplayLine(text) };
+        }
+        return null;
+      }
+
+      function renderInjectedSteerHtml(entryDomId, copyBtnHtml, tsHtml, steer) {
+        return `<div class="steer-message" id="${entryDomId}">${copyBtnHtml}${tsHtml}<span class="steer-label">[${escapeHtml(steer.label)}]</span> ${escapeHtml(steer.line)}</div>`;
+      }
+
       function getSearchableText(entry, label) {
         const parts = [];
         if (label) parts.push(label);
@@ -638,6 +673,10 @@
                   treeHtml += ` · <span class="tree-role-user">user:</span> ${escapeHtml(truncate(normalize(skillBlock.userMessage)))}`;
                 }
                 return treeHtml;
+              }
+              const steer = getInjectedSteerDisplay(rawContent);
+              if (steer) {
+                return labelHtml + `<span class="tree-steer">[${escapeHtml(steer.label)}]</span> ${escapeHtml(truncate(normalize(steer.line)))}`;
               }
               const content = truncate(normalize(rawContent));
               return labelHtml + `<span class="tree-role-user">user:</span> ${escapeHtml(content)}`;
@@ -1203,6 +1242,11 @@
 
               html += '</div>';
               return html;
+            }
+
+            const steer = getInjectedSteerDisplay(text);
+            if (steer) {
+              return renderInjectedSteerHtml(entryDomId, copyBtnHtml, tsHtml, steer);
             }
 
             // No skill block - normal user message

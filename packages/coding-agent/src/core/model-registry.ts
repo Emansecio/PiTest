@@ -769,6 +769,11 @@ export class ModelRegistry {
 		);
 	}
 
+	/** Keep scoped (--models) entries whose provider has configured auth. */
+	filterScopedModels<T extends { model: Model<Api> }>(scoped: ReadonlyArray<T>): T[] {
+		return scoped.filter((entry) => this.hasConfiguredAuth(entry.model));
+	}
+
 	private getModelRequestKey(provider: string, modelId: string): string {
 		return `${provider}:${modelId}`;
 	}

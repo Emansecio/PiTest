@@ -72,4 +72,21 @@ describe("Loader elapsed with frozen indicator", () => {
 		assert.match(text, /hint/);
 		assert.match(text, /Thinking/);
 	});
+
+	it("getElapsedMs discounts paused intervals", () => {
+		const t = trackingTui();
+		const loader = new Loader(
+			t.ui,
+			(s) => s,
+			(s) => s,
+			"Working…",
+			{ frames: ["⠋"] },
+		);
+		loader.setElapsedEnabled(true);
+		const internal = loader as unknown as { startedAtMs: number; pausedAtMs: number };
+		internal.startedAtMs = Date.now() - 10_000;
+		loader.setElapsedPaused(true);
+		internal.pausedAtMs = Date.now() - 2_000;
+		assert.ok(loader.getElapsedMs() >= 7_900 && loader.getElapsedMs() <= 8_100);
+	});
 });

@@ -31,11 +31,14 @@ function makeSession(): AgentSession {
 function makeFooterData(): ReadonlyFooterDataProvider {
 	return {
 		getGitBranch: () => null,
+		getGitDiffStats: () => null,
+		getGitDiffVersion: () => 0,
 		getRepoDir: () => null,
 		getExtensionStatuses: () => new Map(),
 		getStatusVersion: () => 0,
 		getAvailableProviderCount: () => 1,
 		onBranchChange: () => () => {},
+		onWorkingTreeChange: () => () => {},
 	};
 }
 

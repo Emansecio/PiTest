@@ -163,6 +163,17 @@ export class Loader extends Text {
 		this.updateDisplay();
 	}
 
+	/** Elapsed milliseconds since the counter was enabled, discounting paused intervals. */
+	getElapsedMs(): number {
+		if (!this.elapsedEnabled || this.startedAtMs <= 0) {
+			return 0;
+		}
+		if (this.elapsedPaused) {
+			return Math.max(0, this.pausedAtMs - this.startedAtMs);
+		}
+		return Math.max(0, Date.now() - this.startedAtMs);
+	}
+
 	private static formatElapsed(totalSec: number): string {
 		if (totalSec < 60) return `${totalSec}s`;
 		if (totalSec < 3600) {

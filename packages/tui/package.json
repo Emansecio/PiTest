@@ -15,7 +15,7 @@
 		}
 	},
 	"scripts": {
-		"clean": "shx rm -rf dist",
+		"clean": "shx rm -rf dist .tsbuildinfo",
 		"build": "tsgo -p tsconfig.build.json",
 		"test": "node --test --import tsx --import ./test/_render-assert-setup.ts test/*.test.ts",
 		"bench:render": "node --import tsx test/render-transcript.bench.ts",

@@ -838,6 +838,12 @@ export class AssistantMessageComponent extends Container {
  * (hideThinkingBlock off). A thinking-only message under hidden-thinking returns
  * false, so the activity stacker can suppress it and keep folding tool calls. */
 export function messageHasVisibleContent(message: AssistantMessage, includeThinking: boolean): boolean {
+	// Error/aborted turns often carry only errorMessage (empty text content).
+	// Grouped tool-activity mode defers attach until visible content exists;
+	// without this guard those turns never reach the transcript.
+	if (message.stopReason === "error" || message.stopReason === "aborted") {
+		return true;
+	}
 	return message.content.some((c) => {
 		if (c.type === "text") return typeof c.text === "string" && c.text.trim().length > 0;
 		if (includeThinking && c.type === "thinking") {

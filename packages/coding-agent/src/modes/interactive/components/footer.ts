@@ -4,11 +4,33 @@ import type { AgentSession } from "../../../core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import type { RecoveryLevel } from "../../../core/session-recovery.ts";
 import { isReducedMotion } from "../../../utils/env-flags.ts";
-import { buildWorkspaceCwdLabels } from "../display-utils.ts";
+import { buildWorkspaceCwdLabels, formatGitBranchWithDiff } from "../display-utils.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { CONTEXT_USAGE_WARN_PERCENT, theme } from "../theme/theme.ts";
 import { COLOR_EASE_MS } from "./color-ease.ts";
 import { GAUGE_EMPTY, GAUGE_FILLED } from "./gauge-glyphs.ts";
+
+/** Minimum terminal width for single-line identity (pwd + model). */
+const FOOTER_IDENTITY_SINGLE_LINE_MIN = 48;
+
+/** Minimum width before metrics (CTX + usage) compose on one line. */
+const FOOTER_METRICS_COMPOSE_MIN = 72;
+
+function identityLineWouldOverflow(pwd: string, identityRight: string, width: number, suffixWidth: number): boolean {
+	const leftWidth = visibleWidth(pwd);
+	const rightWidth = visibleWidth(identityRight);
+	const minPadding = leftWidth > 0 && (rightWidth > 0 || suffixWidth > 0) ? 2 : 0;
+	if (leftWidth > width) return true;
+	return leftWidth + minPadding + rightWidth + suffixWidth > width;
+}
+
+function metricsLineWouldOverflow(ctxText: string, rightText: string, width: number): boolean {
+	const leftWidth = visibleWidth(ctxText);
+	const rightWidth = visibleWidth(rightText);
+	const minPadding = leftWidth > 0 && rightWidth > 0 ? 2 : 0;
+	if (leftWidth > width) return true;
+	return leftWidth + minPadding + rightWidth > width;
+}
 
 /**
  * Sanitize text for display in a single-line status.
@@ -345,6 +367,12 @@ export class FooterComponent implements Component {
 		const modelId = state.model?.id ?? "";
 		const thinking = state.thinkingLevel;
 		const branch = this.footerData.getGitBranch() ?? "";
+		const diffStats = this.footerData.getGitDiffStats();
+		const diffVersion = this.footerData.getGitDiffVersion();
+		const diffKey =
+			diffStats === null
+				? "none"
+				: `${diffStats.files}:${diffStats.insertions}:${diffStats.deletions}:${diffVersion}`;
 		const cwd = this.session.sessionManager.getCwd();
 		const cwdLabels = buildWorkspaceCwdLabels(cwd, this.launchCwd, this.footerData.getRepoDir());
 		const sessionName = this.session.sessionManager.getSessionName() ?? "";
@@ -365,6 +393,7 @@ export class FooterComponent implements Component {
 			modelId,
 			thinking,
 			branch,
+			diffKey,
 			cwd,
 			this.launchCwd,
 			cwdLabels.session,
@@ -402,12 +431,16 @@ export class FooterComponent implements Component {
 			this.launchCwd,
 			this.footerData.getRepoDir(),
 		);
-		let pwd = cwdLabels.session;
+		let pwd = theme.fg("muted", cwdLabels.session);
 		const branch = this.footerData.getGitBranch();
-		if (branch) pwd = `${pwd} (${branch})`;
+		const diffStats = this.footerData.getGitDiffStats();
+		if (branch) {
+			const branchLabel = formatGitBranchWithDiff(branch, diffStats);
+			pwd = `${pwd}${theme.fg("dim", " (")}${branchLabel}${theme.fg("dim", ")")}`;
+		}
 		const sessionName = this.session.sessionManager.getSessionName();
-		if (sessionName) pwd = `${pwd} • ${sessionName}`;
-		if (cwdLabels.shellNote) pwd = `${pwd} · ${cwdLabels.shellNote}`;
+		if (sessionName) pwd = `${pwd}${theme.fg("dim", ` • ${sessionName}`)}`;
+		if (cwdLabels.shellNote) pwd = `${pwd}${theme.fg("dim", ` · ${cwdLabels.shellNote}`)}`;
 
 		// Right: model • thinking-level — the model id is the single bright token
 		// of the line; the provider is secondary metadata (muted, no parens) and
@@ -464,18 +497,31 @@ export class FooterComponent implements Component {
 			};
 		}
 
-		const identityLine = composeLeftRight(pwd, identityRight, width, {
-			leftColor: (text) => theme.fg("muted", text),
-			// identityRight (provider + model) is the brightest row in the footer
-			// block on purpose — leave it as foreground. The chip arrives pre-colored
-			// via protectedSuffix.
-			rightColor: (text) => text,
+		const suffixWidth = (thinkingChip?.width ?? 0) + (modeSuffix?.width ?? 0);
+		const identityComposeOptions = {
+			leftColor: (text: string) => text,
+			rightColor: (text: string) => text,
 			ellipsis: theme.fg("muted", "…"),
 			protectedSuffix: thinkingChip,
 			protectedSuffix2: modeSuffix,
-		});
+		};
 
-		const lines = [identityLine];
+		const splitIdentity =
+			(!collapseLine2 && width < FOOTER_IDENTITY_SINGLE_LINE_MIN) ||
+			identityLineWouldOverflow(pwd, identityRight, width, suffixWidth);
+
+		const lines: string[] = [];
+		if (splitIdentity) {
+			lines.push(truncateToWidth(pwd, width, theme.fg("muted", "…")));
+			lines.push(
+				composeLeftRight("", identityRight, width, {
+					...identityComposeOptions,
+					leftColor: (text) => text,
+				}),
+			);
+		} else {
+			lines.push(composeLeftRight(pwd, identityRight, width, identityComposeOptions));
+		}
 
 		// --- Metrics (line 2) ------------------------------------------------
 		// Context is the headline: flushed left, with COLOR carrying the state —
@@ -500,7 +546,10 @@ export class FooterComponent implements Component {
 			return lines;
 		}
 
-		const wireDiverges = messageTokens > 0 && Math.abs(wireTokens - messageTokens) / messageTokens > 0.05;
+		const wireDiverges =
+			width >= FOOTER_IDENTITY_SINGLE_LINE_MIN &&
+			messageTokens > 0 &&
+			Math.abs(wireTokens - messageTokens) / messageTokens > 0.05;
 		const ctxLabel = theme.fg("dim", "CTX");
 		const ctxColorize = theme.getContextUsageColor(contextPercentValue);
 		let ctxText: string;
@@ -540,7 +589,9 @@ export class FooterComponent implements Component {
 		// clips to just "fusion" — exactly what the `fusion: <members>` segment already
 		// says. Fusion always rides plan-mode (read-only) in v1, so the bit carries no
 		// extra signal; drop it to avoid the duplicate "fusion" on the metrics line.
-		if (mode && mode !== "no-rails" && this.session.orchestration !== "fusion") modeBits.push(mode);
+		if (mode && mode !== "no-rails" && mode !== "auto" && this.session.orchestration !== "fusion") {
+			modeBits.push(mode);
+		}
 		// Auto-compact is on by default, so showing "compact" permanently is noise.
 		// The signal worth surfacing is the ABNORMAL state — when it's OFF the
 		// context can overflow without rescue — so flag only that, in warning.
@@ -566,19 +617,17 @@ export class FooterComponent implements Component {
 		// warning/error past the threshold. Add a terse textual nudge only when
 		// auto-compact is armed and we're past the warn band, colorized to match so
 		// it escalates with the number rather than shouting in plain text.
-		if (this.autoCompactEnabled && contextPercentValue > CONTEXT_USAGE_WARN_PERCENT) {
+		if (this.autoCompactEnabled && contextPercentValue > CONTEXT_USAGE_WARN_PERCENT && width >= 48) {
 			rightText = rightText ? `${rightText} ${ctxColorize("⚠ compact soon")}` : ctxColorize("⚠ compact soon");
 		}
 
-		const metricsLine = composeLeftRight(ctxText, rightText, width, {
-			// ctxText is pre-colorized per segment (dim label, state-colored
-			// percent) — pass it through untouched.
-			leftColor: (text) => text,
-			rightColor: (text) => theme.fg("dim", text),
-			ellipsis: theme.fg("dim", "…"),
-		});
-
-		lines.push(metricsLine);
+		lines.push(
+			...layoutMetricsLines(ctxText, rightText, width, {
+				leftColor: (text) => text,
+				rightColor: (text) => theme.fg("dim", text),
+				ellipsis: theme.fg("dim", "…"),
+			}),
+		);
 
 		// --- No-rails alert --------------------------------------------------
 		// The dropped-floor permission state must never be silent: bold red, on its
@@ -671,4 +720,27 @@ function composeLeftRight(rawLeft: string, rawRight: string, width: number, opti
 	const padding = " ".repeat(Math.max(0, width - leftWidth - fullRightWidth));
 	const styledLeft = options.leftColor(left);
 	return fullRightWidth > 0 ? styledLeft + padding + fullRight : styledLeft + padding;
+}
+
+function layoutMetricsLines(
+	ctxText: string,
+	rightText: string,
+	width: number,
+	composeOptions: Pick<ComposeOptions, "leftColor" | "rightColor" | "ellipsis">,
+): string[] {
+	const shouldStack = width < FOOTER_METRICS_COMPOSE_MIN || metricsLineWouldOverflow(ctxText, rightText, width);
+	if (shouldStack) {
+		const stacked = [truncateToWidth(ctxText, width, composeOptions.ellipsis)];
+		if (rightText) {
+			stacked.push(truncateToWidth(rightText, width, composeOptions.ellipsis));
+		}
+		return stacked;
+	}
+	return [
+		composeLeftRight(ctxText, rightText, width, {
+			leftColor: composeOptions.leftColor,
+			rightColor: composeOptions.rightColor,
+			ellipsis: composeOptions.ellipsis,
+		}),
+	];
 }

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
 	buildOverthinkReminderMessage,
 	estimateThinkingTokensFromChars,
+	formatOverthinkSteerDisplayLine,
+	isOverthinkSteerMessage,
 	OverthinkTracker,
 	THINKING_CHARS_PER_TOKEN,
 } from "../src/overthink-guard.js";
@@ -78,5 +80,61 @@ describe("estimateThinkingTokensFromChars", () => {
 		expect(estimateThinkingTokensFromChars(0)).toBe(0);
 		expect(estimateThinkingTokensFromChars(4)).toBe(1);
 		expect(estimateThinkingTokensFromChars(5)).toBe(2);
+	});
+});
+
+describe("isOverthinkSteerMessage", () => {
+	it("detects live messages via _overthink_injected", () => {
+		const message = buildOverthinkReminderMessage({ estimatedTokens: 1200, threshold: 1000 });
+		expect(isOverthinkSteerMessage(message)).toBe(true);
+	});
+
+	it("detects JSONL-restored messages via text marker", () => {
+		const message = {
+			role: "user" as const,
+			content: [
+				{
+					type: "text" as const,
+					text: "<system-reminder>[overthink] Internal reasoning for this turn exceeded ~1203 tokens (limit ~1000) without calling a tool.</system-reminder>",
+				},
+			],
+			timestamp: Date.now(),
+		};
+		expect(isOverthinkSteerMessage(message)).toBe(true);
+	});
+
+	it("returns false for normal user messages", () => {
+		expect(
+			isOverthinkSteerMessage({
+				role: "user",
+				content: [{ type: "text", text: "fix the bug in footer.ts" }],
+				timestamp: Date.now(),
+			}),
+		).toBe(false);
+	});
+});
+
+describe("formatOverthinkSteerDisplayLine", () => {
+	it("formats from reminder text", () => {
+		const message = buildOverthinkReminderMessage({ estimatedTokens: 1203, threshold: 1000 });
+		expect(formatOverthinkSteerDisplayLine(message)).toBe(
+			"Reasoning exceeded ~1203 tokens (limit ~1000). Model notified.",
+		);
+	});
+
+	it("formats restored JSONL text without runtime markers", () => {
+		const message = {
+			role: "user" as const,
+			content: [
+				{
+					type: "text" as const,
+					text: "<system-reminder>[overthink] Internal reasoning for this turn exceeded ~1003 tokens (limit ~1000) without calling a tool.</system-reminder>",
+				},
+			],
+			timestamp: Date.now(),
+		};
+		expect(formatOverthinkSteerDisplayLine(message)).toBe(
+			"Reasoning exceeded ~1003 tokens (limit ~1000). Model notified.",
+		);
 	});
 });

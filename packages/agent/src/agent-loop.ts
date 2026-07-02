@@ -526,6 +526,26 @@ function rollbackPartialContext(context: AgentContext, addedPartial: boolean): v
 	}
 }
 
+/** Non-enumerable marker: TUI/agent cleanup only — never persist or retain in context. */
+function markStreamGuardAbort(partialMessage: AssistantMessage): AssistantMessage {
+	const message = {
+		...partialMessage,
+		stopReason: "aborted" as const,
+		errorMessage: "Stream interrupted by guard",
+	};
+	Object.defineProperty(message, "_stream_guard_abort", {
+		value: true,
+		enumerable: false,
+		writable: false,
+		configurable: false,
+	});
+	return message as AssistantMessage;
+}
+
+export function isStreamGuardAbortMessage(message: AgentMessage): boolean {
+	return (message as { _stream_guard_abort?: boolean })._stream_guard_abort === true;
+}
+
 async function publishFinalAssistantMessage(
 	context: AgentContext,
 	finalMessage: AssistantMessage,
@@ -632,6 +652,16 @@ async function streamAssistantResponse(
 			lastEmitTime = performance.now();
 		};
 
+		const finalizeStreamInterrupt = async (): Promise<StreamInterrupt> => {
+			await flushPendingDelta();
+			if (partialMessage && addedPartial) {
+				rollbackPartialContext(context, addedPartial);
+				addedPartial = false;
+				await emit({ type: "message_end", message: markStreamGuardAbort(partialMessage) });
+			}
+			return streamInterrupt as StreamInterrupt;
+		};
+
 		for await (const event of response) {
 			switch (event.type) {
 				case "start":
@@ -698,9 +728,7 @@ async function streamAssistantResponse(
 							await flushPendingDelta();
 						}
 						if (streamInterrupt) {
-							rollbackPartialContext(context, addedPartial);
-							addedPartial = false;
-							return streamInterrupt;
+							return await finalizeStreamInterrupt();
 						}
 					}
 					break;
@@ -736,8 +764,7 @@ async function streamAssistantResponse(
 				case "error": {
 					await flushPendingDelta();
 					if (streamInterrupt) {
-						rollbackPartialContext(context, addedPartial);
-						return streamInterrupt;
+						return await finalizeStreamInterrupt();
 					}
 					const finalMessage = await response.result();
 					await publishFinalAssistantMessage(context, finalMessage, addedPartial, emit);
@@ -748,8 +775,7 @@ async function streamAssistantResponse(
 		await flushPendingDelta();
 
 		if (streamInterrupt) {
-			rollbackPartialContext(context, addedPartial);
-			return streamInterrupt;
+			return await finalizeStreamInterrupt();
 		}
 
 		// Reaching here means the async iterator drained without the in-loop

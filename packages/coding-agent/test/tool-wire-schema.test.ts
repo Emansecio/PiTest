@@ -23,6 +23,25 @@ describe("compactToolSchemaForWire (E1)", () => {
 		expect(compact.properties.path.type).toBe("string");
 		expect(compact.required).toEqual(["path"]);
 	});
+
+	it("preserves a property literally named title (exit_plan)", () => {
+		const schema = {
+			type: "object",
+			required: ["title"],
+			properties: {
+				title: { type: "string", description: "Plan title" },
+				summary: { type: "string", description: "Optional summary" },
+			},
+			additionalProperties: false,
+		};
+		const compact = compactToolSchemaForWire(schema) as {
+			properties: Record<string, { type?: string; description?: string }>;
+			required: string[];
+		};
+		expect(compact.properties.title).toEqual({ type: "string" });
+		expect(compact.properties.title.description).toBeUndefined();
+		expect(compact.required).toEqual(["title"]);
+	});
 });
 
 describe("compactWireToolSurface (E1)", () => {

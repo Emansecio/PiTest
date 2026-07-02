@@ -1,6 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { visibleWidth } from "@pit/tui";
+import type { GitDiffStats } from "../../core/footer-data-provider.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { parseGitUrl } from "../../utils/git.ts";
@@ -134,6 +135,52 @@ export function buildWorkspaceCwdLabels(
 		shellNote = `shell: ${shellLabel}`;
 	}
 	return { session, shellNote };
+}
+
+/** Plain-text git diff suffix for tests and stripAnsi assertions. */
+export function formatGitDiffSuffixPlain(stats: GitDiffStats | null | undefined): string {
+	if (!stats || (stats.files === 0 && stats.insertions === 0 && stats.deletions === 0)) {
+		return "";
+	}
+	if (stats.insertions > 0 || stats.deletions > 0) {
+		const parts: string[] = [];
+		if (stats.insertions > 0) parts.push(`+${stats.insertions}`);
+		if (stats.deletions > 0) parts.push(`-${stats.deletions}`);
+		return parts.join(" ");
+	}
+	if (stats.files > 0) {
+		return stats.files === 1 ? "1 file" : `${stats.files} files`;
+	}
+	return "";
+}
+
+/** Styled git diff suffix (+ green, - red) for identity lines. */
+export function formatGitDiffSuffixStyled(stats: GitDiffStats | null | undefined): string {
+	if (!stats || (stats.files === 0 && stats.insertions === 0 && stats.deletions === 0)) {
+		return "";
+	}
+	if (stats.insertions > 0 || stats.deletions > 0) {
+		const parts: string[] = [];
+		if (stats.insertions > 0) parts.push(theme.fg("gutterToolSuccess", `+${stats.insertions}`));
+		if (stats.deletions > 0) parts.push(theme.fg("gutterToolError", `-${stats.deletions}`));
+		return parts.join(" ");
+	}
+	if (stats.files > 0) {
+		const label = stats.files === 1 ? "1 file" : `${stats.files} files`;
+		return theme.fg("muted", label);
+	}
+	return "";
+}
+
+/** Branch label with optional working-tree diff suffix (`main · +12 -3`). */
+export function formatGitBranchWithDiff(
+	branch: string | null | undefined,
+	stats: GitDiffStats | null | undefined,
+): string {
+	if (!branch) return "";
+	const suffix = formatGitDiffSuffixStyled(stats);
+	if (!suffix) return branch;
+	return `${branch}${theme.fg("dim", " · ")}${suffix}`;
 }
 
 /** Actionable one-line summary for collapsed skill diagnostics. */

@@ -65,6 +65,8 @@ function createSession(options: {
 function createFooterData(providerCount: number): ReadonlyFooterDataProvider {
 	const provider = {
 		getGitBranch: () => "main",
+		getGitDiffStats: () => null,
+		getGitDiffVersion: () => 0,
 		getRepoDir: () => null,
 		getExtensionStatuses: () => new Map<string, string>(),
 		getStatusVersion: () => 0,
@@ -73,6 +75,7 @@ function createFooterData(providerCount: number): ReadonlyFooterDataProvider {
 			void callback;
 			return () => {};
 		},
+		onWorkingTreeChange: () => () => {},
 	};
 
 	return provider;
@@ -112,6 +115,28 @@ describe("FooterComponent width handling", () => {
 		});
 		const footer = new FooterComponent(session, createFooterData(2));
 
+		const lines = footer.render(width);
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
+	});
+
+	it("keeps all lines within width on very narrow terminals", () => {
+		const width = 30;
+		const session = createSession({
+			sessionName: "session",
+			modelId: "long-model-name",
+			reasoning: true,
+			thinkingLevel: "high",
+			usage: {
+				input: 12_345,
+				output: 6_789,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: { total: 1.234 },
+			},
+		});
+		const footer = new FooterComponent(session, createFooterData(2));
 		const lines = footer.render(width);
 		for (const line of lines) {
 			expect(visibleWidth(line)).toBeLessThanOrEqual(width);

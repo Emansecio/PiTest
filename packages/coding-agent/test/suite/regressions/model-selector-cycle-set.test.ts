@@ -107,4 +107,63 @@ describe("model selector cycle set", () => {
 		expect(lines.some((line) => line.includes("[beta]"))).toBe(false);
 		expect(lines.some((line) => line.includes("alpha/a1"))).toBe(true);
 	});
+
+	it("excludes scoped models without configured auth from the cycle set", async () => {
+		const modelsJsonPath = join(tempDir, "models.json");
+		writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({
+				providers: {
+					alpha: {
+						baseUrl: "https://alpha.example.com/v1",
+						apiKey: "k-alpha",
+						api: "openai-completions",
+						models: [{ id: "a1", name: "Alpha One" }],
+					},
+				},
+			}),
+		);
+
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+		registry.refresh();
+
+		const a1 = registry.find("alpha", "a1")!;
+		const unauthed = {
+			id: "ghost",
+			name: "Ghost Model",
+			provider: "ghost-provider",
+			api: "openai-completions" as const,
+			baseUrl: "https://ghost.example.com/v1",
+			reasoning: false,
+			input: ["text"] as ("text" | "image")[],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		};
+		expect(registry.hasConfiguredAuth(a1)).toBe(true);
+		expect(registry.hasConfiguredAuth(unauthed)).toBe(false);
+
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const selector = new ModelSelectorComponent(
+			createFakeTui(),
+			a1,
+			settingsManager,
+			registry,
+			[{ model: unauthed }, { model: a1 }],
+			() => {},
+			() => {},
+		);
+
+		await waitForAsyncRender();
+
+		const lines = stripAnsi(selector.render(120).join("\n"))
+			.split("\n")
+			.map((line) => line.trim());
+
+		expect(lines.some((line) => line.includes("Cycle set"))).toBe(true);
+		expect(lines.some((line) => line.includes("Alpha One"))).toBe(true);
+		expect(lines.some((line) => line.includes("Ghost Model"))).toBe(false);
+		expect(lines.some((line) => line.includes("ghost-provider"))).toBe(false);
+	});
 });

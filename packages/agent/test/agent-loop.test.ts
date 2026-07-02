@@ -1639,8 +1639,57 @@ describe("agent loop rejection guard", () => {
 			(m) => m.role === "user" && (m as { _overthink_injected?: boolean })._overthink_injected,
 		);
 		expect(reminder).toBeDefined();
+		expect(
+			messages.some((m) => m.role === "assistant" && (m as { _stream_guard_abort?: boolean })._stream_guard_abort),
+		).toBe(false);
 		const assistant = messages[messages.length - 1] as AssistantMessage;
 		expect(assistant.content[0]).toEqual({ type: "text", text: "acting now" });
+	});
+
+	it("emits message_end on overthink interrupt without retaining the partial assistant turn", async () => {
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			overthinkGuard: { enabled: true, tokenThreshold: 10, maxRetriesPerTurn: 2 },
+		};
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const partial = createAssistantMessage([{ type: "thinking", thinking: "" }]);
+				stream.push({ type: "start", partial });
+				stream.push({ type: "thinking_start", contentIndex: 0, partial });
+				const longThinking = "x".repeat(THINKING_CHARS_PER_TOKEN * 10);
+				stream.push({
+					type: "thinking_delta",
+					contentIndex: 0,
+					delta: longThinking,
+					partial: createAssistantMessage([{ type: "thinking", thinking: longThinking }]),
+				});
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "thinking", thinking: longThinking }]),
+				});
+			});
+			return stream;
+		};
+
+		const events: AgentEvent[] = [];
+		const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+		for await (const event of loop) events.push(event);
+		const messages = await loop.result();
+
+		const guardAbortEnds = events.filter(
+			(e) =>
+				e.type === "message_end" &&
+				e.message.role === "assistant" &&
+				(e.message as { _stream_guard_abort?: boolean })._stream_guard_abort,
+		);
+		expect(guardAbortEnds.length).toBeGreaterThan(0);
+		expect(
+			messages.some((m) => m.role === "assistant" && (m as { _stream_guard_abort?: boolean })._stream_guard_abort),
+		).toBe(false);
 	});
 
 	it("aborts overlong plain-text reasoning mid-stream when watchTextDelta is on", async () => {
