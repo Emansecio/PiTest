@@ -195,6 +195,23 @@ export const MODELS = {
 			contextWindow: 1000000,
 			maxTokens: 64000,
 		} satisfies Model<"anthropic-messages">,
+		"claude-sonnet-5": {
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 3,
+				output: 15,
+				cacheRead: 0.3,
+				cacheWrite: 3.75,
+			},
+			contextWindow: 1000000,
+			maxTokens: 64000,
+		} satisfies Model<"anthropic-messages">,
 	},
 	"google": {
 		"gemini-2.0-flash": {
@@ -1564,6 +1581,23 @@ export const MODELS = {
 		"claude-sonnet-4-6": {
 			id: "claude-sonnet-4-6",
 			name: "Claude Sonnet 4.6",
+			api: "anthropic-messages",
+			provider: "opencode",
+			baseUrl: "https://opencode.ai/zen",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 3,
+				output: 15,
+				cacheRead: 0.3,
+				cacheWrite: 3.75,
+			},
+			contextWindow: 1000000,
+			maxTokens: 64000,
+		} satisfies Model<"anthropic-messages">,
+		"claude-sonnet-5": {
+			id: "claude-sonnet-5",
+			name: "Claude Sonnet 5",
 			api: "anthropic-messages",
 			provider: "opencode",
 			baseUrl: "https://opencode.ai/zen",
