@@ -5,7 +5,7 @@
  * not-read / new-file / read-then-edit invariants.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
@@ -86,6 +86,41 @@ describe("read-guard — basic invariants", () => {
 		createReadGuardExtension({ cwd })(api);
 		fire("tool_call", toolCall("read", { path: "a.ts" }));
 		expect(fire("tool_call", toolCall("edit", { path: "a.ts", oldText: "hello", newText: "bye" }))).toBeUndefined();
+	});
+
+	it("matches a read THROUGH a symlink with an edit of its TARGET (canonical key)", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "target.ts"), "hello", "utf-8");
+		// Symlink creation can fail without privilege on Windows — skip if so.
+		try {
+			symlinkSync(join(cwd, "target.ts"), join(cwd, "link.ts"));
+		} catch {
+			return;
+		}
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		// Read via the symlink; edit the real target. Without canonicalization these
+		// resolve to different absolute keys and the edit false-blocks as "not read".
+		fire("tool_call", toolCall("read", { path: "link.ts" }));
+		expect(
+			fire("tool_call", toolCall("edit", { path: "target.ts", oldText: "hello", newText: "bye" })),
+		).toBeUndefined();
+	});
+
+	it("matches a read of the TARGET with an edit THROUGH its symlink (canonical key)", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "target.ts"), "hello", "utf-8");
+		try {
+			symlinkSync(join(cwd, "target.ts"), join(cwd, "link.ts"));
+		} catch {
+			return;
+		}
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		fire("tool_call", toolCall("read", { path: "target.ts" }));
+		expect(
+			fire("tool_call", toolCall("edit", { path: "link.ts", oldText: "hello", newText: "bye" })),
+		).toBeUndefined();
 	});
 });
 

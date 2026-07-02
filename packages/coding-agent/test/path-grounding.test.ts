@@ -12,6 +12,7 @@ import {
 	PATH_GROUNDING_DEFAULTS,
 	type PathGroundingDeps,
 } from "../src/core/path-grounding.ts";
+import { FS_CASE_INSENSITIVE, sameCanonicalName } from "../src/core/tools/path-utils.ts";
 
 const REAL_FUZZY = suggestClosest;
 
@@ -175,6 +176,35 @@ describe("groundPath — FAIL-OPEN / out of scope", () => {
 	});
 });
 
+describe("groundPath — case-insensitive existence (sameName)", () => {
+	// The fake fileExists is exact-path (case-sensitive), mirroring how a
+	// case-sensitive probe would miss a case-variant. With `sameName` folding
+	// (as the adapter wires on win32/darwin), the case-variant must resolve to
+	// ALLOW rather than a false block.
+	it("allows a case-variant of an existing file when sameName folds case", () => {
+		const deps = makeDeps([resolvePath(ROOT, "README.md")], {
+			sameName: (a, b) => a.toLowerCase() === b.toLowerCase(),
+		});
+		expect(groundPath({ path: "readme.md" }, deps)).toEqual({ action: "allow" });
+	});
+
+	it("does NOT suggest the same file back as a candidate when case folds", () => {
+		// dir has README.md; requesting readme.md must be allowed (same file), never
+		// blocked with a "did you mean README.md" against itself.
+		const deps = makeDeps([resolvePath(ROOT, "README.md"), resolvePath(ROOT, "app.ts")], {
+			sameName: (a, b) => a.toLowerCase() === b.toLowerCase(),
+		});
+		expect(groundPath({ path: "./readme.md" }, deps)).toEqual({ action: "allow" });
+	});
+
+	it("still BLOCKS a case-variant when sameName is strict (case-sensitive FS)", () => {
+		// Default deps (no sameName) => strict equality; a case-sensitive FS would
+		// genuinely not have the file, so a block is correct.
+		const decision = groundPath({ path: "readme.md" }, makeDeps([resolvePath(ROOT, "README.md")]));
+		expect(decision.action).toBe("block");
+	});
+});
+
 describe("isPathGroundingDisabled — opt-out", () => {
 	it("false when unset, true for 1/true/yes (case-insensitive)", () => {
 		expect(isPathGroundingDisabled({})).toBe(false);
@@ -212,6 +242,23 @@ describe("path-grounding extension — adapter wiring", () => {
 		const { api, fire } = makeFakePi();
 		createPathGroundingExtension({ cwd: ROOT })(api as unknown as ExtensionAPI);
 		expect(fire("tool_call", { toolName: "read", input: { path: "pr://1428" } })).toBeUndefined();
+	});
+
+	it("allows a case-variant of an existing file on case-insensitive platforms", () => {
+		// On win32/darwin `README.md` and `readme.md` are the SAME file — grounding
+		// must not block the case-variant. Guarded by platform: a case-sensitive FS
+		// (Linux CI) genuinely lacks the variant, so the guard would (correctly) block.
+		if (!FS_CASE_INSENSITIVE) return;
+		expect(sameCanonicalName("README.md", "readme.md")).toBe(true);
+		const cwd = mkdtempSync(join(tmpdir(), "pit-path-ground-case-"));
+		try {
+			writeFileSync(join(cwd, "README.md"), "ok");
+			const { api, fire } = makeFakePi();
+			createPathGroundingExtension({ cwd })(api as unknown as ExtensionAPI);
+			expect(fire("tool_call", { toolName: "read", input: { path: "readme.md" } })).toBeUndefined();
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
 	});
 
 	it("allows a path that exists only as an NFD variant (resolveReadPath)", () => {

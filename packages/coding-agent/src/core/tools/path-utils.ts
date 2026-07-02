@@ -1,6 +1,47 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, realpathSync } from "node:fs";
 import * as os from "node:os";
 import { isAbsolute, resolve as resolvePath } from "node:path";
+
+/**
+ * True on filesystems that are case-insensitive by default (Windows, macOS).
+ * Governs whether a path KEY is case-folded — never used to rewrite a path a
+ * tool actually operates on.
+ */
+export const FS_CASE_INSENSITIVE = process.platform === "win32" || process.platform === "darwin";
+
+/**
+ * Canonical map/set KEY for an already-resolved absolute path.
+ *
+ * Resolves symlinks via `fs.realpathSync.native` — so a `read` through a symlink
+ * and an `edit` of its target collapse to ONE key — and, on case-insensitive
+ * platforms (win32/darwin), lowercases the result so `README.md` and `readme.md`
+ * (the same file there) don't hash to two entries. On any error (the file
+ * doesn't exist yet, permissions) it falls back to the input, so a brand-new
+ * path still gets a stable key.
+ *
+ * KEY ONLY. Callers must never substitute this for the path the tool receives,
+ * nor surface it in a user-visible message: it is a normalized identity for
+ * map/set membership, not the real (case-/link-preserving) path.
+ */
+export function canonicalPathKey(absPath: string): string {
+	let real = absPath;
+	try {
+		real = realpathSync.native(absPath);
+	} catch {
+		// Non-existent / unreadable path — keep the resolved input as the key.
+	}
+	return FS_CASE_INSENSITIVE ? real.toLowerCase() : real;
+}
+
+/**
+ * Equality of two path components (basenames) as KEYS: case-insensitive on
+ * win32/darwin, exact elsewhere. Same "KEY only" caveat as {@link canonicalPathKey}
+ * — used to decide whether two directory entries denote the same file, never to
+ * rewrite either name.
+ */
+export function sameCanonicalName(a: string, b: string): boolean {
+	return FS_CASE_INSENSITIVE ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
 
 // Matches a URL-like prefix (e.g. `pr://`, `conflict://`). Kept local so we
 // don't pull in the url-schemes module \u2014 these helpers are called from many

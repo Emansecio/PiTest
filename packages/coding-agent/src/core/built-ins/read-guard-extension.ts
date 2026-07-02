@@ -35,6 +35,7 @@ import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { recordDiagnostic } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { extractEditOldTexts, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
+import { canonicalPathKey } from "../tools/path-utils.ts";
 
 interface FileStamp {
 	mtimeMs: number;
@@ -127,7 +128,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 			if (event.toolName === "read") {
 				const path = extractPathArg(event.input as Record<string, unknown>);
 				if (path !== undefined) {
-					const abs = resolveToolPath(path, options.cwd);
+					const abs = canonicalPathKey(resolveToolPath(path, options.cwd));
 					// Stamp at read time so a later write can detect the file drifting
 					// underneath the model (concurrent user edit / git checkout / another
 					// agent). null = unstampable -> drift check can't fire (fail-open).
@@ -143,7 +144,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 				const path = extractPathArg(event.input as Record<string, unknown>);
 				if (path === undefined) return undefined;
 
-				const abs = resolveToolPath(path, options.cwd);
+				const abs = canonicalPathKey(resolveToolPath(path, options.cwd));
 
 				// New files don't need a prior read. Probe existence with a
 				// single statSync instead of existsSync (+ a later statSync):
@@ -308,7 +309,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 			if (event.isError) return undefined;
 			const path = extractPathArg(event.input as Record<string, unknown>);
 			if (path === undefined) return undefined;
-			const abs = resolveToolPath(path, options.cwd);
+			const abs = canonicalPathKey(resolveToolPath(path, options.cwd));
 			// A post-compaction file lives only in postCompactStamps (readFiles was
 			// cleared at session_before_compact). The model's own successful edit/write
 			// is now the disk baseline — refresh the snapshot so a follow-up edit isn't

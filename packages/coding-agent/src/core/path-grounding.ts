@@ -92,6 +92,15 @@ export interface PathGroundingDeps {
 	 * block in exactly the case the guard exists to catch. Identity when omitted.
 	 */
 	normalize?: (rawPath: string) => string;
+	/**
+	 * OPTIONAL directory-entry equality used for existence + candidate dedup.
+	 * The adapter wires it to a case-insensitive comparison on win32/darwin so a
+	 * case-variant of an existing file (`README.md` vs `readme.md` — the SAME file
+	 * there) is treated as present and never suggested back as a "did you mean".
+	 * Defaults to strict `===` (correct on case-sensitive filesystems), so this is
+	 * a KEY-level comparison only and never rewrites either name.
+	 */
+	sameName?: (a: string, b: string) => boolean;
 	maxDistance: number;
 	prefixMinOverlap: number;
 }
@@ -126,15 +135,28 @@ const GLOB_MAGIC = /[*?[\]{}]/;
 // ============================================================================
 
 /**
+ * Result of scanning a missing path's parent directory.
+ *   - `undefined`            — the dir can't be listed (caller -> allow, fail-open)
+ *   - `{ exists: true }`     — an entry IS the wanted file under case-fold equality;
+ *                              on a case-insensitive FS the tool would accept it
+ *                              (caller -> allow)
+ *   - `{ candidates }`       — ranked close siblings (possibly `[]` -> block-missing)
+ */
+type CandidateScan = { exists: true } | { candidates: string[] };
+
+/**
  * Build the close-candidate list for a missing `rawPath`. We split off its parent
  * directory, list that dir, and fuzzy-rank the entries against the missing
  * basename — using the FULL basename WITH extension (config.json and config.yaml
  * are different files, unlike module specifiers where the extension is implicit).
  * The original directory prefix is re-attached so each suggestion is a usable path.
  * Returns `undefined` when the dir can't be listed (caller -> allow, fail-open).
- * Returns `[]` when the dir is listable but nothing is close (caller -> block-missing).
+ * Returns `{ exists: true }` when an entry matches the wanted basename under the
+ * case-fold equality (`deps.sameName`) — the file is really there, just cased
+ * differently. Returns `{ candidates: [] }` when the dir is listable but nothing
+ * is close (caller -> block-missing).
  */
-function rankCandidates(rawPath: string, deps: PathGroundingDeps): string[] | undefined {
+function rankCandidates(rawPath: string, deps: PathGroundingDeps): CandidateScan | undefined {
 	// Strip the `:line[:col]` suffix / expand ~/@ the SAME way the tool does before
 	// splitting, so `wanted` is the real basename (`uti.ts`, not `uti.ts:42`).
 	const expanded = deps.normalize ? deps.normalize(rawPath) : rawPath;
@@ -154,11 +176,19 @@ function rankCandidates(rawPath: string, deps: PathGroundingDeps): string[] | un
 		return undefined;
 	}
 
-	const pool = entries.filter((entry) => entry.length > 0 && entry !== wanted);
+	const sameName = deps.sameName ?? ((a, b) => a === b);
+	// If a listed entry IS the wanted file under case-fold equality, it exists on a
+	// case-insensitive FS (the tool would open it) — never block. Covers the case an
+	// exact-match `fileExists` (or a case-sensitive probe) missed. On a case-sensitive
+	// FS `sameName` is strict `===`, so this only fires for a genuine same-name entry
+	// that `deps.fileExists` should already have caught (harmless, still allow).
+	if (entries.some((entry) => entry.length > 0 && sameName(entry, wanted))) return { exists: true };
+
+	const pool = entries.filter((entry) => entry.length > 0 && !sameName(entry, wanted));
 	const prefix = lastSlash >= 0 ? expanded.slice(0, lastSlash + 1) : "";
 
 	const closest = rankBasenames(wanted, pool, deps);
-	return closest.map((name) => `${prefix}${name}`);
+	return { candidates: closest.map((name) => `${prefix}${name}`) };
 }
 
 /**
@@ -230,10 +260,11 @@ export function groundPath(input: PathGroundingInput, deps: PathGroundingDeps): 
 
 		if (deps.fileExists(deps.resolve(path))) return { action: "allow" };
 
-		const candidates = rankCandidates(path, deps);
-		if (candidates === undefined) return { action: "allow" };
-		if (candidates.length === 0) return { action: "block", message: formatMissingMessage(path) };
-		return { action: "block", message: formatBlockMessage(path, candidates) };
+		const scan = rankCandidates(path, deps);
+		if (scan === undefined) return { action: "allow" };
+		if ("exists" in scan) return { action: "allow" };
+		if (scan.candidates.length === 0) return { action: "block", message: formatMissingMessage(path) };
+		return { action: "block", message: formatBlockMessage(path, scan.candidates) };
 	} catch {
 		return { action: "allow" };
 	}

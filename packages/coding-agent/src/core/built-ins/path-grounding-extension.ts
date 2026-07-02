@@ -21,7 +21,7 @@ import { suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundPath, isPathGroundingDisabled, PATH_GROUNDING_DEFAULTS } from "../path-grounding.ts";
 import { extractPathArg } from "../tools/argument-prep.ts";
-import { expandPath, resolveReadPath, URL_SCHEME_RE } from "../tools/path-utils.ts";
+import { expandPath, resolveReadPath, sameCanonicalName, URL_SCHEME_RE } from "../tools/path-utils.ts";
 import { createFireOnceBlockGuard } from "./grounding-fire-once.ts";
 
 export function createPathGroundingExtension(options: { cwd: string }): (pi: ExtensionAPI) => void {
@@ -45,6 +45,9 @@ export function createPathGroundingExtension(options: { cwd: string }): (pi: Ext
 					listDir: (absDir) => readdirSync(absDir),
 					fuzzy: suggestClosest,
 					fuzzyN: suggestClosestN,
+					// Case-fold entry equality on win32/darwin so a case-variant of an
+					// existing file is treated as present, not blocked (KEY-level only).
+					sameName: sameCanonicalName,
 					normalize: expandPath,
 					maxDistance: PATH_GROUNDING_DEFAULTS.maxDistance,
 					prefixMinOverlap: PATH_GROUNDING_DEFAULTS.prefixMinOverlap,
