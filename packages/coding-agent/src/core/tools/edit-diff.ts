@@ -486,8 +486,16 @@ function indentBlock(text: string, prefix: string): string {
 		.join("\n");
 }
 
-/** Count non-overlapping occurrences of `needle` in `haystack`. */
-function countSubstring(haystack: string, needle: string): number {
+/**
+ * Count non-overlapping occurrences of `needle` in `haystack`.
+ *
+ * Exported so the import-grounding guard can mirror the edit tool's exact-match
+ * occurrence semantics (Tier 1 above) when it reconstructs post-edit content:
+ * both count occurrences the same way (non-overlapping, `indexOf`-advanced) so
+ * the guard agrees with the tool on when an `oldText` is unique / ambiguous /
+ * replace-all.
+ */
+export function countSubstring(haystack: string, needle: string): number {
 	if (needle.length === 0) return 0;
 	let count = 0;
 	let from = 0;

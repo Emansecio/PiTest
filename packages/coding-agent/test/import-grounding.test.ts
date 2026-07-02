@@ -382,6 +382,64 @@ describe("import-grounding edit reconstruction (surgical specifier swap — rein
 	});
 });
 
+describe("import-grounding edit reconstruction — occurrence semantics mirror the edit tool", () => {
+	// A UNIQUE oldText must behave exactly as before: expand the single line and
+	// splice newText in. The replaceAll flag is a no-op when there is one match.
+	it("unique oldText reconstructs the single line (unchanged; replaceAll is a no-op)", () => {
+		const file = `import { x } from "./old";\nconst y = 1;\n`;
+		expect(reconstructEditedRegion(file, "./old", "./renamed")).toBe(`import { x } from "./renamed";`);
+		expect(reconstructEditedRegion(file, "./old", "./renamed", true)).toBe(`import { x } from "./renamed";`);
+	});
+
+	// The BUG: when oldText appears twice, the old code took the FIRST indexOf and
+	// reconstructed that region — validating an import the model isn't editing (and
+	// that the edit tool would refuse to apply as ambiguous). Now it skips entirely.
+	it("ambiguous oldText (2 occurrences, no replaceAll) is SKIPPED, not first-match reconstructed", () => {
+		const file = `import { a } from "./alpha";\nconst z = 1;\nimport { b } from "./alpha";\n`;
+		const result = reconstructEditedRegion(file, "./alpha", "./bravo");
+		// Old buggy behavior reconstructed the FIRST occurrence's line — assert it's gone.
+		expect(result).not.toBe(`import { a } from "./bravo";`);
+		// New behavior: ambiguous edit contributes nothing (fail-open skip).
+		expect(result).toBe("");
+	});
+
+	// End-to-end: the second occurrence is the REAL edit site. The old code would
+	// have validated the FIRST region (here a broken specifier -> spurious block on
+	// a region the model never touched). Now the ambiguous edit yields no content,
+	// so groundImports sees nothing to block.
+	it("does not raise a wrong-region block for an ambiguous edit whose real site is the 2nd occurrence", () => {
+		const file = `import { a } from "./old";\nconst z = 1;\nimport { b } from "./old";\n`;
+		// Suppose the model's newText would typo the specifier (./nu ~ ./new). Because
+		// the match is ambiguous, the edit tool rejects it; the guard must not block.
+		const reconstructed = reconstructEditedRegion(file, "./old", "./nu");
+		expect(reconstructed).toBe("");
+		const decision = groundImports(
+			{ targetFile: TARGET, content: reconstructed || "" },
+			makeDeps([resolvePath(ROOT, "new.ts")]),
+		);
+		expect(decision).toEqual({ action: "allow" });
+	});
+
+	it("replaceAll reconstructs EVERY occurrence's line (joined by newlines)", () => {
+		const file = `import { a } from "./old";\nconst z = 1;\nimport { b } from "./old";\n`;
+		const result = reconstructEditedRegion(file, "./old", "./new", true);
+		expect(result).toBe(`import { a } from "./new";\nimport { b } from "./new";`);
+	});
+
+	// With replaceAll the specifier is swapped at every site, so a typo is still
+	// grounded — the guard reconstructs all occurrences and pass 1 catches it.
+	it("replaceAll: a typo'd specifier applied to all occurrences is still caught by groundImports", () => {
+		const file = `import { a } from "./utils";\nimport { b } from "./utils";\n`;
+		const reconstructed = reconstructEditedRegion(file, "./utils", "./utis", true);
+		const decision = groundImports(
+			{ targetFile: TARGET, content: reconstructed },
+			makeDeps([resolvePath(ROOT, "utils.ts")]),
+		);
+		expect(decision.action).toBe("block");
+		if (decision.action === "block") expect(decision.message).toContain("./utis");
+	});
+});
+
 describe("groundImports — named-export validation (pass 2)", () => {
 	const MATH = resolvePath(ROOT, "math.ts");
 

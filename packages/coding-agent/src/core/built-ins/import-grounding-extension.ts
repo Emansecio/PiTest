@@ -17,6 +17,11 @@
  * For a `write`, content = the full `content` arg (the complete new file body).
  * For an `edit`, there is no whole-file content at pre-exec, so content = the
  * concatenation of edits[].newText — where a newly-added import line appears.
+ * The reconstruction MIRRORS the edit tool's exact-match occurrence semantics
+ * (see edit-diff.ts, Tier 1): a UNIQUE oldText reconstructs its one line; an
+ * ambiguous oldText (multiple occurrences, no replaceAll) is one the edit tool
+ * will REJECT, so the guard skips it (fail-open) rather than validate the wrong
+ * region; a replaceAll edit reconstructs EVERY occurrence.
  *
  * Session state: a fire-once set so an insistent model re-issuing the identical
  * blocked call runs it (the guard advises, never wedges). The whole handler is
@@ -31,7 +36,8 @@ import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundImports, IMPORT_GROUNDING_DEFAULTS, isImportGroundingDisabled } from "../import-grounding.ts";
 import { findTsconfigPathsForFile } from "../project-config-context.ts";
-import { extractEdits, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
+import { coerceJsonArrayField, extractEdits, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
+import { countSubstring } from "../tools/edit-diff.ts";
 import { stableToolCallKey } from "./grounding-fire-once.ts";
 
 /** Aliases the write tool accepts for the content body (WRITE_KEY_ALIASES in write.ts). */
@@ -135,22 +141,74 @@ function collectKnownPackages(cwd: string): Set<string> {
 	return out;
 }
 
-/**
- * Reconstruct the full edited LINE so a surgical edit that swaps ONLY the
- * specifier (newText without the `import` keyword) still presents a complete
- * import statement to the regex. Find oldText in the file, expand to its whole
- * line, and apply newText in place. Falls back to the raw newText when the file
- * or oldText can't be located (fail-open — exported for tests).
- */
-export function reconstructEditedRegion(fileContent: string | undefined, oldText: string, newText: string): string {
-	if (fileContent === undefined) return newText;
-	const idx = fileContent.indexOf(oldText);
-	if (idx < 0) return newText;
+/** Expand the oldText match at `idx` to its whole line and splice newText in. */
+function reconstructOneOccurrence(fileContent: string, oldText: string, newText: string, idx: number): string {
 	const lineStart = fileContent.lastIndexOf("\n", idx) + 1;
 	const matchEnd = idx + oldText.length;
 	const nextNewline = fileContent.indexOf("\n", matchEnd);
 	const lineEnd = nextNewline < 0 ? fileContent.length : nextNewline;
 	return `${fileContent.slice(lineStart, idx)}${newText}${fileContent.slice(matchEnd, lineEnd)}`;
+}
+
+/**
+ * Reconstruct the full edited LINE(s) so a surgical edit that swaps ONLY the
+ * specifier (newText without the `import` keyword) still presents a complete
+ * import statement to the regex.
+ *
+ * The occurrence handling MIRRORS the edit tool's exact-match Tier 1
+ * (see applyEditsToNormalizedContent in edit-diff.ts) so the guard validates the
+ * SAME region the tool will actually edit — never a stale first-match guess:
+ *   - 0 occurrences: fall back to the raw newText (the tool would fuzzy-match or
+ *     error; either way there's no exact region to expand — fail-open).
+ *   - 1 occurrence: expand that one line and splice newText in.
+ *   - >1 occurrences, no replaceAll: the tool REJECTS this edit as ambiguous, so
+ *     validating any single region would be validating a region the model can't
+ *     even land. Return "" so this edit contributes nothing (fail-open skip).
+ *   - >1 occurrences, replaceAll: reconstruct EVERY occurrence's line (the tool
+ *     replaces them all), joined by newlines.
+ *
+ * Exported for tests.
+ */
+export function reconstructEditedRegion(
+	fileContent: string | undefined,
+	oldText: string,
+	newText: string,
+	replaceAll = false,
+): string {
+	if (fileContent === undefined) return newText;
+	const occurrences = countSubstring(fileContent, oldText);
+	if (occurrences === 0) return newText;
+	if (occurrences === 1) {
+		return reconstructOneOccurrence(fileContent, oldText, newText, fileContent.indexOf(oldText));
+	}
+	// Ambiguous exact match: the edit tool throws a duplicate error before applying,
+	// so the edit never lands — skip grounding rather than validate a wrong region.
+	if (!replaceAll) return "";
+	// replaceAll: every non-overlapping occurrence is replaced; reconstruct each.
+	const lines: string[] = [];
+	let from = 0;
+	for (;;) {
+		const idx = fileContent.indexOf(oldText, from);
+		if (idx < 0) break;
+		lines.push(reconstructOneOccurrence(fileContent, oldText, newText, idx));
+		from = idx + oldText.length;
+	}
+	return lines.join("\n");
+}
+
+/**
+ * Per-edit `replaceAll` flags aligned 1:1 with `extractEdits`' output order.
+ * `replaceAll` isn't cross-harness aliased (the edit schema owns the name), so we
+ * read it verbatim after the same JSON-string coercion extractEdits applies.
+ */
+function extractReplaceAllFlags(input: Record<string, unknown>): boolean[] {
+	const coerced = coerceJsonArrayField(input, "edits");
+	const edits = coerced.edits;
+	if (Array.isArray(edits)) {
+		return edits.map((e) => !!(e && typeof e === "object" && (e as Record<string, unknown>).replaceAll === true));
+	}
+	// Legacy flat single-edit shape.
+	return [coerced.replaceAll === true];
 }
 
 /** New content to scan: a write's full body, or an edit's reconstructed lines. */
@@ -164,8 +222,18 @@ function extractContent(toolName: string, input: Record<string, unknown>, target
 	}
 	const edits = extractEdits(input);
 	if (!edits) return undefined;
+	const replaceAllFlags = extractReplaceAllFlags(input);
 	const fileContent = readFileSafe(targetFile);
-	return edits.map((edit) => reconstructEditedRegion(fileContent, edit.oldText, edit.newText)).join("\n");
+	return (
+		edits
+			.map((edit, i) =>
+				reconstructEditedRegion(fileContent, edit.oldText, edit.newText, replaceAllFlags[i] === true),
+			)
+			// Drop the empty strings a skipped (ambiguous) edit contributes so a blank
+			// line never leaks into the scanned content.
+			.filter((part) => part.length > 0)
+			.join("\n")
+	);
 }
 
 export function createImportGroundingExtension(options: { cwd: string }) {
