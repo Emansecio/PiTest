@@ -19,7 +19,7 @@ const integrationTests = [
 	"test/dry-run-cli.test.ts",
 	"test/eval-kernel-*.test.ts",
 	"test/footer-data-provider.test.ts",
-	"test/git-update.test.ts",
+	"test/git-update-*.test.ts",
 	"test/resilience/**",
 	"test/stdout-cleanliness.test.ts",
 ];

@@ -179,12 +179,22 @@ if (gateFailed.length > 0) {
 }
 
 const heavyStartedAt = Date.now();
+// coding-agent is deliberately excluded when vitestTask runs: its suite already
+// executes as vitestTask in this same wave, so listing it here would run the
+// whole 400+ file suite twice. Enumerate the test-bearing workspaces explicitly
+// (npm has no --exclude for --workspaces, and no --parallel either — the sweep
+// is serial, which is fine since vitestTask overlaps it). With --no-vitest the
+// coding-agent workspace is added back so its tests still run exactly once.
+const workspaceTestWorkspaces = [
+	"packages/ai",
+	"packages/agent",
+	"packages/tui",
+	...(skipVitest ? ["packages/coding-agent"] : []),
+];
 const workspaceTestTask = workspaceTests
 	? {
 			name: "workspace-tests",
-			command: process.env.CI
-				? "npm test --workspaces --if-present"
-				: "npm test --workspaces --if-present --parallel",
+			command: `npm test ${workspaceTestWorkspaces.map((w) => `--workspace ${w}`).join(" ")} --if-present`,
 			env: { PIT_AI_SKIP_LOCAL_AUTH: "1" },
 	}
 	: null;

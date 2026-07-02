@@ -55,10 +55,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The check gate already runs `npx tsgo --noEmit` at the repo root, so no
+      # separate typecheck step is needed.
       - name: Check
         run: npm run check -- --workspace-tests
         env:
           CI: "1"
-
-      - name: Typecheck (root)
-        run: npx tsgo --noEmit
