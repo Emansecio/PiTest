@@ -1,9 +1,11 @@
 # Prevention layers — how the Pit catches model errors
 
-> Companion to [`already-built.md`](already-built.md) and the root [`AGENTS.md`](../../AGENTS.md).
+> Companion to [`already-built.md`](already-built.md).
 > Read this before proposing a new guard/validation: it shows the layered pipeline that
 > already wraps every model turn and every tool call, **in execution order**, so you can
 > see where an error is caught — and not re-propose a layer that exists.
+> Per-layer audit findings and the improvement backlog live in
+> [`prevention-layers-audit.md`](prevention-layers-audit.md).
 
 The Pit defends against model mistakes in **four bands**: around the model (per turn),
 **before** a tool runs (preventive — these block the wrong call), **after** a tool runs
@@ -19,7 +21,9 @@ Applied before/while talking to the model, not per tool call.
 | layer | when | what | anchor |
 |-|-|-|-|
 | transformContext | before send | last hook to mutate the message list before the model sees it | `agent-loop.ts:497` |
-| compaction / pre-send overflow guard | before send | keeps context under the window; summarizes + prunes | `core/compaction/`, `_checkCompaction` (agent-session) |
+| compaction / pre-send overflow guard | before send | keeps context under the window; summarizes + prunes. The presend phase fires at `assembled > window * 0.95` (`PRESEND_OVERFLOW_RATIO`) and **re-estimates after awaiting any in-flight background compaction** so it never double-compacts; opt out `PIT_NO_PRESEND_OVERFLOW_GUARD=1` | `core/compaction/`, `agent-session-compaction.ts:44,483` |
+| thinking cap | before send (compaction serialize) | trims stale assistant thinking blocks beyond the protected recent turns to head+tail (~1.5k chars) so old reasoning stops paying rent; opt out `PIT_NO_THINKING_CAP=1` | `capThinkingForContext` in `core/compaction/utils.ts`, applied `core/compaction/compaction.ts:1351` |
+| overthink guard | during stream | live thinking-delta tracker: one contiguous reasoning block past the per-model-tier token threshold (weak ~1000 / frontier ~2500) without a tool call aborts the stream and injects a reminder; max 2 retries/turn; `watchTextDelta` counts plain-text reasoning for open models; opt out `PIT_NO_OVERTHINK_GUARD=1` | `packages/agent/src/overthink-guard.ts`, `core/overthink-policy.ts` |
 | system-prompt build | before send | lean + conditional; volatile data kept in the suffix after `SYSTEM_PROMPT_DYNAMIC_MARKER`, out of the cached prefix | `core/system-prompt.ts`, `packages/ai/src/types.ts` |
 | plan-mode prompt | before send (`before_agent_start`) | while permission mode is `plan`, the permissions extension appends a `<plan_mode>` section telling the model it is read-only and must research → build a DAG → call `exit_plan`; never invalidates the cached prefix | `core/built-ins/permissions-extension.ts`, `core/permissions/plan-mode-prompt.ts` |
 | prompt cache breakpoints | on send | 4 Anthropic breakpoints + stable OpenAI `prompt_cache_key` | `packages/ai/src/providers/anthropic.ts` |
@@ -34,14 +38,13 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 2. **prepareArguments** (`:1077`) — per-tool alias/path normalization (`~`/`@` expand, `:line` strip, JSON-string edit coercion). For **MCP/loose-schema** tools, `prepareArgsForLooseSchema` (`core/tools/argument-prep.ts`) is **schema-aware**: alias→canonical only when the server's own schema declares the canonical, JSON-string→array only for `array`-typed fields, and it drops optional `null`/`{}` placeholders the schema rejects (see `stripNullishOptionalArgs` below).
 3. **Tool-rewrite registry** (`:1085`) — `auto` rules silently rewrite args; `suggest`/`block` reject with an actionable error (`skipHints`).
 4. **validateToolArguments** (`:1114`) — TypeBox schema validation + primitive coercion + extra-key "Did you mean"; the echoed payload is capped (`packages/ai/src/utils/validation.ts`). Before coercion, **`stripNullishOptionalArgs`** drops optional fields whose value is a misplaced `null`/`{}` placeholder (a weak-model habit) so they are omitted rather than coerced to `""`/`0` — conservative: required keys and fields that legitimately accept null/object are left intact.
-5. **beforeToolCall / `tool_call` hooks** (`:1115`) — the **guard firewall**. Can BLOCK or auto-fix args; later handlers see earlier mutations. After the firewall, args are **re-validated only when a handler mutated them** — invalid post-mutation args short-circuit with an actionable error instead of reaching execution (`agent-loop.ts` `prepareToolCall`). Members (`core/built-ins/`):
-   - **permissions** — gate by permission mode.
-   - **read-guard** — must `read` a file before editing it.
-   - **edit-precondition** — file unchanged since last read (mtime).
-   - **erasable-syntax-precondition** — tsgo `erasableSyntaxOnly` preflight on edits (no enum/namespace/param-properties/etc reaches disk).
-   - **destructive-command-guard** — quote-aware dangerous-bash block.
-   - **grounding firewall** (coordinated by `grounding-fire-once`): **symbol / import / path / pattern / bash** grounding — pre-exec verification of symbols, imports, paths, regex/globs, and commands against the real tree; auto-fix-or-block with fuzzy candidates.
-   - **learned-error-guard** — block a call that repeats a known past failure this session.
+5. **beforeToolCall / `tool_call` hooks** (`:1115`) — the **guard firewall**. Can BLOCK or auto-fix args; later handlers see earlier mutations. After the firewall, args are **re-validated only when a handler mutated them** — invalid post-mutation args short-circuit with an actionable error instead of reaching execution (`agent-loop.ts` `prepareToolCall`). Members **in registration order** (`core/built-ins/index.ts` + `grounding-guard-registry.ts` — this order is what a new guard must assume):
+   1. **permissions** — gate by permission mode.
+   2. **read-guard** — must `read` a file before editing it.
+   3. **edit-precondition** — file unchanged since last read (mtime); dry-run `computeEditsDiff` before execution.
+   4. **learned-error-guard** — block a call whose exact args failed repeatedly in prior sessions (inserted between edit-precondition and the grounding chain; parent-only, not propagated to subagents).
+   5. **grounding firewall** (coordinated by `grounding-fire-once`): **symbol → import → erasable-syntax → path → pattern → bash** — pre-exec verification of symbols, imports, paths, regex/globs, and `npm/pnpm/yarn run` scripts against the real tree; auto-fix-or-block with fuzzy candidates. The **erasable-syntax-precondition** (tsgo `erasableSyntaxOnly` preflight: no enum/namespace/param-properties reaches disk) runs *inside* this chain, between import- and path-grounding.
+   6. **destructive-command-guard** — quote-aware **fire-once speed bump** for the middle tier of destruction (`rm -rf ./src`, `git reset --hard`, `git clean -fd`, `git push --force`): blocks once with an impact note; **re-issuing the same command confirms and runs it**. It is NOT a hard block — the catastrophic `/`/`~` tier is hard-blocked by the permission deny-floor instead. Runs LAST, after all grounding guards. Known gaps: command substitution (`$(…)`, backticks) is not expanded, and patterns are bash-syntax only (no PowerShell).
 
 ## Band C — After a tool runs (CORRECTIVE — these catch/repair)
 1. **Tool-error-hint enrichment** (`agent-loop.ts:1221`, Tier 4) — runs **before** `afterToolCall` so a host override sees the enriched content. Appends recovery hints to error results (`core/tool-error-hint-rules.ts`): bash/read/edit/**edit_v2**, hashline-anchor-stale, ENOENT/path/permission/read-guard, navigation "Did you mean".
@@ -49,6 +52,8 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 2. **afterToolCall / `tool_result` hooks** (`:1262`) — can rewrite the result:
    - **patch-audit** — audits edit/write diffs.
    - **read-guard** — records file mtime post-read (feeds edit-precondition).
+3. **Verification gate** (turn end, `core/verification/verification.ts` + `_runVerificationGate` in `agent-session.ts`) — the heaviest corrective layer: a successful write/edit/edit_v2/ast_edit **arms** the gate (`armVerificationGate`, `agent-session-tool-end.ts`); after the turn ends, the session runs the project's check command (auto-detected: check → typecheck → lint → test scripts, falling back to local `tsc --noEmit`, then syntax-only checks on touched files). A failure is re-injected as a fix prompt for up to `verification.maxAttempts` rounds (recovery-adjusted, `agent-session.ts:3289`); when exhausted, a terminal message forbids reporting the task as done. Failures also feed `upsertLearnedErrorOnFailure`.
+4. **Pending-checks drain** (`core/verification/pending-checks.ts`, `_awaitPendingChecksBeforeHandoff` in `agent-session.ts`) — background verification-class bash jobs are tracked and drained before handoff, independent of `verification.enabled`: a still-running check blocks "done", a failed one is re-injected for fixes.
 
 ## Band D — Session / turn lifecycle
 - **before_agent_start**: task-rigor, mcp connect.
@@ -61,7 +66,7 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 ---
 
 ## How to use this map
-- **Proposing a new check?** Place it in the right band first. A "validate args" idea → Band B already has rewrite + TypeBox. A "block dangerous X" → Band B firewall. A "warn after the fact" → Band C. If a band already covers it, the valuable move is to *strengthen the existing layer*, not add a parallel one.
+- **Proposing a new check?** Place it in the right band first. A "validate args" idea → Band B already has rewrite + TypeBox. A "block dangerous X" → Band B firewall. A "warn after the fact" → Band C. A "run the tests/typecheck after edits" idea → Band C verification gate + pending-checks already do exactly that. If a band already covers it, the valuable move is to *strengthen the existing layer*, not add a parallel one.
 - **Ordering is load-bearing.** In Band B, rewrite runs before validation, validation before the firewall, and firewall handlers run in registration order. If a handler mutates args, a conditional post-firewall re-validation runs before execution — a new `tool_call` guard must assume earlier guards may have already rewritten the args.
 - **Preventive vs corrective.** Band B stops the error before it happens (cheapest); Band C only repairs after. Prefer adding prevention in B over detection in C when both are possible.
 
