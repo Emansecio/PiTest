@@ -144,15 +144,23 @@ core design. Mature layers where changes carry more risk than value.
 
 ## Prioritized backlog
 
-| # | item | band | effort | impact |
-|-|-|-|-|-|
-| 1 | ~~Fix the map: Band B order, speed-bump wording, add verification gate / overthink / thinking cap / presend re-estimate~~ **done 2026-07-02** | doc | trivial | high (doc is load-bearing) |
-| 2 | C1 — error hints for write/find/grep/ls | C | low | high |
-| 3 | B1 — destructive guard: substitution/`eval` as block reason + PowerShell vocabulary | B | low-med | high (Windows hosts) |
-| 4 | B2 — realpath + case-insensitive path comparison | B | low-med | medium |
-| 5 | A1 — transformContext timeout | A | low | medium |
-| 6 | D2 — narration on guided→strict | D | low | medium |
-| 7 | B4 — learned-error fingerprint normalization | B | medium | medium |
-| 8 | B3 — import-grounding reconstruction fidelity | B | medium | medium |
-| 9 | D1/D3 — failure-budget docs, MCP timeout config | D | trivial/low | low-med |
-| 10 | A2/A3 — configurable presend ratio / TTSR buffer, idle backoff | A | low | low |
+**Status: all 10 items implemented on 2026-07-02** (items 2-10 via parallel agent implementation,
+verified by the full check gate). Implementation notes below each item.
+
+| # | item | band | status |
+|-|-|-|-|
+| 1 | Fix the map: Band B order, speed-bump wording, add verification gate / overthink / thinking cap / presend re-estimate | doc | **done** |
+| 2 | C1 — error hints for write/find/grep/ls | C | **done** — 9 rules (`write-enoent-path-invalid`, `write-permission-denied`, `write-target-is-directory`, `find-search-path-not-found`, `find-invalid-glob`, `grep-search-path-not-found`, `grep-invalid-regex`, `ls-path-not-found`, `ls-not-a-directory`), matched against the tools' real error strings, with per-tool `disable*Rules` flags |
+| 3 | B1 — destructive guard: substitution/`eval` as block reason + PowerShell vocabulary | B | **done** — destructive-shaped segments with `$(…)`/backtick/`eval`/`sh -c` targets block-once as opaque; `Remove-Item -Recurse/-Force`, `rd /s`, `del /s`, glob `Clear-Content` recognized (incl. through `powershell -Command` wrappers) |
+| 3b | **deny-floor gap found during B1**: `BUILTIN_DANGEROUS_COMMANDS` had zero PowerShell/cmd catastrophic coverage — `Remove-Item -Recurse -Force C:\` had no hard block anywhere on Windows | B | **done** — drive-root/`/`/`~` Remove-Item, `rd /s`/`del /s` on drive roots, `Clear-Disk`/`Format-Volume`/`format X:` added to `permissions/types.ts` |
+| 4 | B2 — realpath + case-insensitive path comparison | B | **done** — `canonicalPathKey`/`sameCanonicalName` in `core/tools/path-utils.ts`; read-guard keys canonicalized, path-grounding case-folds on win32/darwin (keys only, user-visible paths untouched) |
+| 5 | A1 — transformContext timeout | A | **done** — 60s default, `PIT_TRANSFORM_CONTEXT_TIMEOUT_MS` override (0 disables); timeout THROWS (never silently skips a load-bearing transform) via the existing terminal-failure path |
+| 6 | D2 — narration on guided→strict | D | **done** — one-shot steer with distinct customType `pi.session-recovery-narration-strict`, latch re-arms per escalation |
+| 7 | B4 — learned-error fingerprint normalization | B | **done** — whitespace-run collapse, path-separator/drive-case folding; dual-index (exact + normalized) keeps every legacy on-disk fingerprint firing byte-for-byte, no store migration |
+| 8 | B3 — import-grounding reconstruction fidelity | B | **done** — mirrors the edit tool via shared `countSubstring`: ambiguous oldText → skip (fail-open, the edit errors anyway), `replaceAll` → all occurrences reconstructed |
+| 9 | D1/D3 — failure-budget docs, MCP timeout config | D | **done** — carryover half-life documented in `packages/coding-agent/docs/settings.md`; `mcp.connectTimeoutMs` setting + one-line `mcp.notice` message when a server is skipped by the budget |
+| 10 | A2/A3 — configurable presend ratio / TTSR buffer, idle backoff | A | **done** — `PIT_PRESEND_OVERFLOW_RATIO` (clamp [0.5, 0.99]), `PIT_TTSR_BUFFER_CHARS` (clamp [512, 65536]) + warn-once when a rule pattern exceeds the buffer; idle timeout ×1.5 per consecutive idle retry, cap 300s, reset on success |
+
+Remaining candidates NOT yet implemented (deliberately deferred, revisit on demand): A4 (marker
+diagnostic), B5 (array coercion parity for built-in tools), B6 (bash-grounding cache invalidation),
+C2 (tail-biased verification output), C3 (hint-rule fire telemetry), D4 (recovery level in UI).
