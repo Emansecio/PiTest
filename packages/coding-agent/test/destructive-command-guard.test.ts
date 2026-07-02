@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { createDestructiveCommandGuardExtension } from "../src/core/built-ins/destructive-command-guard-extension.ts";
 import { groundDestructiveCommand, isDestructiveCommandGuardDisabled } from "../src/core/destructive-command-guard.js";
+import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 
 function blocks(command: string): boolean {
 	return groundDestructiveCommand({ command }).action === "block";
@@ -9,6 +11,28 @@ function messageFor(command: string): string {
 	const d = groundDestructiveCommand({ command });
 	return d.action === "block" ? d.message : "";
 }
+
+type Handler = (event: any) => unknown;
+function makeFakePi() {
+	const handlers = new Map<string, Handler[]>();
+	const api = {
+		on(event: string, handler: Handler) {
+			const list = handlers.get(event) ?? [];
+			list.push(handler);
+			handlers.set(event, list);
+		},
+	} as unknown as ExtensionAPI;
+	const fire = (event: string, payload: any): any => {
+		let result: any;
+		for (const handler of handlers.get(event) ?? []) {
+			const r = handler(payload);
+			if (r !== undefined && result === undefined) result = r;
+		}
+		return result;
+	};
+	return { api, fire };
+}
+const bashCall = (command: string) => ({ toolName: "bash", input: { command } });
 
 describe("destructive-command-guard: rm -rf", () => {
 	it("blocks a recursive force delete of a non-regenerable path", () => {
@@ -106,5 +130,107 @@ describe("destructive-command-guard: invariants", () => {
 	it("opt-out flag is read from env", () => {
 		expect(isDestructiveCommandGuardDisabled({ PIT_NO_DESTRUCTIVE_GUARD: "1" } as NodeJS.ProcessEnv)).toBe(true);
 		expect(isDestructiveCommandGuardDisabled({} as NodeJS.ProcessEnv)).toBe(false);
+	});
+});
+
+describe("destructive-command-guard: command-substitution opacity", () => {
+	const OPAQUE: ReadonlyArray<[string, string]> = [
+		["rm -rf $(cat targets.txt)", "rm target via $()"],
+		["rm -rf `cat targets.txt`", "rm target via backticks"],
+		["rm -rf ./src/$(date +%s)", "rm target partly substituted"],
+		["eval rm -rf ./src", "eval-wrapped rm"],
+		['bash -c "rm -rf ./src"', "bash -c wrapped rm"],
+		["sh -c 'git reset --hard'", "sh -c wrapped git reset"],
+		["Remove-Item -Recurse -Force $(Get-Content list.txt)", "PowerShell Remove-Item substituted target"],
+	];
+	it.each(OPAQUE)("blocks %s (%s) with a substitution note", (command) => {
+		expect(blocks(command)).toBe(true);
+		expect(messageFor(command)).toMatch(/command substitution|eval\/bash -c/i);
+		expect(messageFor(command)).toMatch(/re-issue the identical call/i);
+	});
+
+	it("does NOT flag substitution in non-destructive commands", () => {
+		expect(blocks("echo $(date)")).toBe(false);
+		expect(blocks("echo `whoami`")).toBe(false);
+		expect(blocks("ls $(pwd)")).toBe(false);
+		expect(blocks('bash -c "npm run build"')).toBe(false);
+		expect(blocks("VERSION=$(node -p 1) npm publish")).toBe(false);
+	});
+
+	it("prefers the substitution note over a mangled target note (single clean impact)", () => {
+		const msg = messageFor("rm -rf $(cat list)");
+		expect(msg).toMatch(/command substitution/i);
+		expect(msg).not.toMatch(/recursive delete of/i);
+	});
+});
+
+describe("destructive-command-guard: PowerShell / cmd vocabulary", () => {
+	it("blocks Remove-Item with -Recurse and/or -Force on a non-trivial path", () => {
+		expect(blocks("Remove-Item -Recurse -Force .\\src")).toBe(true);
+		expect(blocks("Remove-Item -Recurse ./app")).toBe(true);
+		expect(blocks("Remove-Item -Force config.json")).toBe(true);
+		expect(blocks("Remove-Item -r -Path ./lib")).toBe(true);
+		expect(messageFor("Remove-Item -Recurse -Force .\\src")).toMatch(/src/);
+	});
+
+	it("recognizes PowerShell forms after a powershell -Command / pwsh -c wrapper", () => {
+		expect(blocks('powershell -Command "Remove-Item -Recurse -Force ./src"')).toBe(true);
+		expect(blocks("pwsh -c 'Remove-Item -Recurse -Force ./src'")).toBe(true);
+	});
+
+	it("allows a benign Remove-Item without -Recurse/-Force", () => {
+		expect(blocks("Remove-Item ./notes.txt")).toBe(false);
+		expect(blocks("Remove-Item -Path build.log")).toBe(false);
+	});
+
+	it("allows Remove-Item -Recurse -Force of regenerable dirs (no noise)", () => {
+		expect(blocks("Remove-Item -Recurse -Force node_modules")).toBe(false);
+		expect(blocks("Remove-Item -Recurse -Force ./dist")).toBe(false);
+	});
+
+	it("defers catastrophic drive-root / home targets to the permission deny-floor", () => {
+		expect(blocks("Remove-Item -Recurse -Force C:\\")).toBe(false);
+		expect(blocks("Remove-Item -Recurse -Force /")).toBe(false);
+		expect(blocks("Remove-Item -Recurse -Force ~")).toBe(false);
+	});
+
+	it("blocks rd /s and rmdir /s on a non-trivial path", () => {
+		expect(blocks("rd /s /q .\\src")).toBe(true);
+		expect(blocks("rmdir /s /q app")).toBe(true);
+		expect(blocks("rd /s /q .\\dist")).toBe(false);
+		expect(blocks("rd .\\src")).toBe(false); // no /s -> not recursive
+	});
+
+	it("blocks del /s /f /q on a non-trivial path", () => {
+		expect(blocks("del /s /f /q .\\logs")).toBe(true);
+		expect(blocks("del /s /q *.tmp")).toBe(true);
+		expect(blocks("del stale.log")).toBe(false); // no /s -> not recursive
+	});
+
+	it("blocks Clear-Content on a glob but allows a single file", () => {
+		expect(blocks("Clear-Content .\\logs\\*.log")).toBe(true);
+		expect(blocks("Clear-Content -Path *")).toBe(true);
+		expect(blocks("Clear-Content notes.txt")).toBe(false);
+	});
+});
+
+describe("destructive-command-guard extension: fire-once", () => {
+	it("blocks a destructive+substitution call once, then allows the identical re-issue", () => {
+		const { api, fire } = makeFakePi();
+		createDestructiveCommandGuardExtension()(api);
+		const first = fire("tool_call", bashCall("rm -rf $(cat targets.txt)"));
+		expect(first?.block).toBe(true);
+		expect(String(first?.reason)).toMatch(/command substitution/i);
+		// fire-once escape: re-issuing the identical command runs it.
+		expect(fire("tool_call", bashCall("rm -rf $(cat targets.txt)"))).toBeUndefined();
+	});
+
+	it("blocks a PowerShell Remove-Item once, then allows the identical re-issue", () => {
+		const { api, fire } = makeFakePi();
+		createDestructiveCommandGuardExtension()(api);
+		const first = fire("tool_call", bashCall("Remove-Item -Recurse -Force ./src"));
+		expect(first?.block).toBe(true);
+		// fire-once escape.
+		expect(fire("tool_call", bashCall("Remove-Item -Recurse -Force ./src"))).toBeUndefined();
 	});
 });

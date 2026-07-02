@@ -166,6 +166,21 @@ function basenameOf(path: string): string {
 }
 
 /**
+ * Catastrophic targets left to the permission deny-floor (root, home, a bare
+ * drive root like `C:\` which cleanToken reduces to `C:`, or a bare `*`). Matches
+ * the rm-segment posture: significant destruction is a speed-bump here, but the
+ * top tier is owned by `BUILTIN_DANGEROUS_COMMANDS`.
+ */
+function isCatastrophicTarget(target: string): boolean {
+	// cleanToken has already stripped any trailing `/` or `\`.
+	if (target === "") return true; // "/" or "\\"
+	if (target === "~") return true;
+	if (/^[A-Za-z]:$/.test(target)) return true; // drive root "C:\\" -> "C:"
+	if (target === "*") return true;
+	return false;
+}
+
+/**
  * Inspect a single `rm` segment. Returns an impact string when it is a recursive
  * delete of at least one NON-regenerable, non-catastrophic target; undefined
  * otherwise. `/` and `~` targets are left to the permission deny-floor.
@@ -226,6 +241,165 @@ const GIT_DESTRUCTIVE: ReadonlyArray<{ re: RegExp; impact: string }> = [
 	},
 ];
 
+/**
+ * PowerShell / cmd.exe recursive-delete vocabulary. Same middle-tier posture as
+ * the unix `rm -rf` path: recognized directly OR after a `powershell -Command` /
+ * `pwsh -c` wrapper (see stripPowershellWrapper), target-aware so regenerable and
+ * catastrophic (drive-root) targets are skipped exactly as for rm.
+ */
+function inspectRemoveItemSegment(segment: string): string | undefined {
+	// `Remove-Item` at a command-ish position (start, or after a wrapper's quote).
+	const m = /(?:^|[\s"'`])Remove-Item\s+(.+)$/i.exec(segment);
+	if (!m) return undefined;
+	const tokens = tokenizeArgs(m[1]);
+
+	let recurse = false;
+	let force = false;
+	let expectValue = false;
+	const targets: string[] = [];
+	for (const token of tokens) {
+		if (expectValue) {
+			targets.push(cleanToken(token));
+			expectValue = false;
+			continue;
+		}
+		if (token.startsWith("-")) {
+			if (/^-r(?:ec(?:urse?)?)?$/i.test(token)) recurse = true;
+			else if (/^-force$/i.test(token) || /^-f$/i.test(token)) force = true;
+			else if (/^-(?:path|literalpath|lp)$/i.test(token)) expectValue = true;
+			continue;
+		}
+		targets.push(cleanToken(token));
+	}
+	if (!recurse && !force) return undefined;
+
+	const risky: string[] = [];
+	for (const target of targets) {
+		if (target === "" || isCatastrophicTarget(target)) continue;
+		if (REGENERABLE_DIRS.has(basenameOf(target))) continue;
+		risky.push(target);
+	}
+	if (risky.length === 0) return undefined;
+	return `\`Remove-Item -Recurse -Force\` of ${risky.map((t) => `\`${t}\``).join(", ")} — PowerShell deletes these permanently (not sent to the Recycle Bin) and they are not recoverable without a backup or a prior git commit`;
+}
+
+/** cmd.exe recursive directory/file deletes: `rd /s`, `rmdir /s`, `del /s`. */
+function inspectWindowsShellDelete(segment: string): string | undefined {
+	const rd = /(?:^|[\s"'`])(rd|rmdir)\b(.*)$/i.exec(segment);
+	if (rd) {
+		const tokens = tokenizeArgs(rd[2].trim());
+		const flags = tokens.filter((t) => t.startsWith("/")).map((t) => t.toLowerCase());
+		if (!flags.includes("/s")) return undefined;
+		const risky = tokens
+			.filter((t) => !t.startsWith("/"))
+			.map(cleanToken)
+			.filter((t) => t !== "" && !isCatastrophicTarget(t) && !REGENERABLE_DIRS.has(basenameOf(t)));
+		if (risky.length === 0) return undefined;
+		return `\`${rd[1].toLowerCase()} /s\` recursively deletes ${risky.map((t) => `\`${t}\``).join(", ")} and everything under it (not sent to the Recycle Bin, not recoverable without a backup)`;
+	}
+	const del = /(?:^|[\s"'`])(?:del|erase)\b(.*)$/i.exec(segment);
+	if (del) {
+		const tokens = tokenizeArgs(del[1].trim());
+		const flags = tokens.filter((t) => t.startsWith("/")).map((t) => t.toLowerCase());
+		if (!flags.includes("/s")) return undefined; // require the recursive switch
+		const risky = tokens
+			.filter((t) => !t.startsWith("/"))
+			.map(cleanToken)
+			.filter((t) => t !== "" && !isCatastrophicTarget(t) && !REGENERABLE_DIRS.has(basenameOf(t)));
+		if (risky.length === 0) return undefined;
+		return `\`del /s\` recursively force-deletes files under ${risky.map((t) => `\`${t}\``).join(", ")} (not sent to the Recycle Bin, not recoverable without a backup)`;
+	}
+	return undefined;
+}
+
+/** `Clear-Content` (alias `clc`) that empties EVERY file matching a glob. */
+function inspectClearContentSegment(segment: string): string | undefined {
+	const m = /(?:^|[\s"'`])(?:Clear-Content|clc)\s+(.+)$/i.exec(segment);
+	if (!m) return undefined;
+	const tokens = tokenizeArgs(m[1]);
+	let expectValue = false;
+	const targets: string[] = [];
+	for (const token of tokens) {
+		if (expectValue) {
+			targets.push(cleanToken(token));
+			expectValue = false;
+			continue;
+		}
+		if (token.startsWith("-")) {
+			if (/^-(?:path|literalpath|lp|filter|include)$/i.test(token)) expectValue = true;
+			continue;
+		}
+		targets.push(cleanToken(token));
+	}
+	const globs = targets.filter((t) => /[*?[]/.test(t));
+	if (globs.length === 0) return undefined;
+	return `\`Clear-Content\` empties the contents of every file matching ${globs.map((t) => `\`${t}\``).join(", ")} irreversibly`;
+}
+
+/**
+ * Loose signatures for the destructive verbs we recognize, used ONLY to gate the
+ * command-substitution opacity check (never to block on their own). Kept tied to
+ * the specific verbs so a benign `echo $(date)` stays out of scope entirely.
+ */
+const DESTRUCTIVE_VERB_HINTS: readonly RegExp[] = [
+	/\brm\s+(?:\S+\s+)*-\S*r/i,
+	/\bgit\s+reset\b[^;&|]*--hard\b/i,
+	/\bgit\s+clean\b[^;&|]*\s-\S*f/i,
+	/\bgit\s+(?:checkout|restore)\b[^;&|]*(?:\s|--\s+)\.(?:\s|$|["'`])/i,
+	/\bgit\s+push\b[^;&|]*(?:--force\b|\s-\S*f\b)/i,
+	/\bRemove-Item\b[^;&|]*\s-(?:r(?:ec(?:urse?)?)?|force|f)\b/i,
+	/\b(?:rd|rmdir)\b[^;&|]*\s\/s\b/i,
+	/\b(?:del|erase)\b[^;&|]*\s\/s\b/i,
+	/\bClear-Content\b/i,
+];
+
+/** True when the segment is shaped like one of our destructive verbs. */
+function isDestructiveShaped(segment: string): boolean {
+	// Drop the SAFE `--force-with-lease` first so it never reads as a force-push.
+	const s = segment.replace(/--force-with-lease(?:=\S+)?/gi, "");
+	return DESTRUCTIVE_VERB_HINTS.some((re) => re.test(s));
+}
+
+/**
+ * True when the real target is hidden from the guard: command substitution
+ * (`$(…)` / backticks) anywhere in the segment, or the whole command wrapped in
+ * `eval` / `bash -c` / `sh -c` (a shell string we deliberately do NOT parse).
+ * `powershell -Command` / `pwsh -c` is NOT opaque — its body is inspected via
+ * stripPowershellWrapper.
+ */
+function hasOpaqueTarget(segment: string): boolean {
+	if (/\$\(/.test(segment) || segment.includes("`")) return true;
+	if (/^(?:eval\b|(?:ba|z)?sh\s+-\S*c\b|dash\s+-c\b)/i.test(segment.trim())) return true;
+	return false;
+}
+
+/**
+ * Command-substitution opacity: a destructive verb whose target the guard cannot
+ * see. We do NOT expand/evaluate the substitution — we block once so the caller
+ * confirms. Only fires when the segment is destructive-shaped, so a non-destructive
+ * `echo $(date)` passes untouched.
+ */
+function inspectOpaqueDestructive(segment: string): string | undefined {
+	if (!isDestructiveShaped(segment)) return undefined;
+	if (!hasOpaqueTarget(segment)) return undefined;
+	return "target contains command substitution ($(…)/backticks) or an eval/bash -c wrapper the guard cannot inspect";
+}
+
+/**
+ * Unwrap a `powershell -Command "…"` / `pwsh -c '…'` prefix to its inner command
+ * so the PowerShell (and any other) detectors can see the real verb. Returns the
+ * segment unchanged when there is no wrapper.
+ */
+function stripPowershellWrapper(segment: string): string {
+	const m = /^(?:pwsh|powershell(?:\.exe)?)\s+(?:-\S+\s+)*?-(?:c|command)\s+(.*)$/i.exec(segment.trim());
+	if (!m) return segment;
+	let inner = m[1].trim();
+	if ((inner.startsWith('"') && inner.endsWith('"')) || (inner.startsWith("'") && inner.endsWith("'"))) {
+		inner = inner.slice(1, -1);
+	}
+	return inner;
+}
+
 function formatBlock(impacts: string[]): string {
 	const body = impacts.length === 1 ? impacts[0] : impacts.map((s) => `(${s})`).join("; ");
 	return (
@@ -251,13 +425,30 @@ export function groundDestructiveCommand(input: DestructiveCommandInput): Destru
 			const segment = rawSegment.trim().replace(COMMAND_PREFIX, "");
 			if (segment.length === 0) continue;
 
-			const rm = inspectRmSegment(segment);
+			// Opacity FIRST: if the destructive target is hidden by command
+			// substitution or an eval/bash -c wrapper, block once and skip the
+			// target-aware detectors (which would only mangle the unreadable target).
+			const opaque = inspectOpaqueDestructive(segment);
+			if (opaque) {
+				impacts.push(opaque);
+				continue;
+			}
+
+			// Unwrap `powershell -Command "…"` so the inner command is inspected
+			// directly; identity for every non-PowerShell segment.
+			const inner = stripPowershellWrapper(segment);
+
+			const rm = inspectRmSegment(inner);
 			if (rm) impacts.push(rm);
+
+			const ps =
+				inspectRemoveItemSegment(inner) ?? inspectWindowsShellDelete(inner) ?? inspectClearContentSegment(inner);
+			if (ps) impacts.push(ps);
 
 			for (const { re, impact } of GIT_DESTRUCTIVE) {
 				// `--force-with-lease` is the SAFE force-push; drop it before the
 				// force-push detector so it never trips.
-				const haystack = impact.includes("push") ? segment.replace(/--force-with-lease(?:=\S+)?/gi, "") : segment;
+				const haystack = impact.includes("push") ? inner.replace(/--force-with-lease(?:=\S+)?/gi, "") : inner;
 				if (re.test(haystack)) impacts.push(impact);
 			}
 		}

@@ -93,4 +93,19 @@ export const BUILTIN_DANGEROUS_COMMANDS: readonly CommandRule[] = [
 	{ pattern: ":\\(\\)\\s*\\{\\s*:\\s*\\|\\s*:&\\s*\\};:", reason: "Fork bomb" },
 	{ pattern: "\\b(?:mkfs|dd\\s+if=.*of=/dev/)", reason: "Disk-destroying command" },
 	{ pattern: "\\bchmod\\s+-R\\s+777\\s+/", reason: "Recursive world-writable on root" },
+	// PowerShell/cmd catastrophic tier. Without these, `Remove-Item -Recurse -Force C:\`
+	// had no hard block anywhere on Windows (the middle-tier destructive guard only
+	// speed-bumps). Targets must be the FINAL token of the segment: a drive root
+	// (`C:`, `C:\`), `/`, or `~` — deeper paths like `C:\Temp\build` stay allowed.
+	{
+		pattern:
+			"\\b(?:remove-item|ri|rm)\\b(?=[^;&|]*\\s-(?:r(?:ec(?:urse)?)?|fo(?:rce)?)\\b)[^;&|]*\\s[\"']?(?:[a-z]:[\\\\/]{0,2}|/|~)[\"']?\\s*(?:$|[;&|])",
+		reason: "Recursive Remove-Item of a drive root, / or $HOME",
+	},
+	{
+		pattern: "\\b(?:rd|rmdir|del)\\b(?=[^;&|]*\\s/s\\b)[^;&|]*\\s[\"']?[a-z]:[\\\\/]{0,2}\\*?[\"']?\\s*(?:$|[;&|])",
+		reason: "Recursive delete of a drive root (cmd)",
+	},
+	{ pattern: "\\b(?:format-volume|clear-disk)\\b", reason: "Disk-destroying command (PowerShell)" },
+	{ pattern: "\\bformat\\s+[a-z]:(?:\\s|$)", reason: "Formatting a drive" },
 ];

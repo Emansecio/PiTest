@@ -29,6 +29,32 @@ describe("PermissionChecker — auto mode (guarded default)", () => {
 		expect(c.check({ type: "exec", toolName: "bash", command: "rm -rf /" }).decision).toBe("deny");
 	});
 
+	it("blocks the PowerShell/cmd catastrophic tier (drive roots, /, ~)", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		const deny = (command: string) =>
+			expect(c.check({ type: "exec", toolName: "bash", command }).decision, command).toBe("deny");
+		deny("Remove-Item -Recurse -Force C:\\");
+		deny("Remove-Item -Recurse -Force C:");
+		deny("Remove-Item -Recurse -Force /");
+		deny("Remove-Item -Recurse ~");
+		deny('powershell -Command "Remove-Item -Recurse -Force C:\\"');
+		deny("rd /s /q C:\\");
+		deny("del /s /f /q C:\\*");
+		deny("Clear-Disk -Number 0 -RemoveData");
+		deny("format C:");
+	});
+
+	it("allows non-catastrophic PowerShell/cmd deletes (middle tier is the speed bump's job)", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		const allow = (command: string) =>
+			expect(c.check({ type: "exec", toolName: "bash", command }).decision, command).toBe("allow");
+		allow("Remove-Item -Recurse -Force ./dist");
+		allow("Remove-Item -Recurse -Force C:\\Temp\\build");
+		allow("rd /s /q build");
+		allow("del /q C:\\Temp\\out.log");
+		allow("git format-patch -1");
+	});
+
 	it("allows ordinary commands", () => {
 		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
 		expect(c.check({ type: "exec", toolName: "bash", command: "npm test" }).decision).toBe("allow");
