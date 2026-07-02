@@ -24,6 +24,7 @@ describe("InteractiveMode turn done rendering", () => {
 			disposeFusionLive: vi.fn(),
 			shouldRetireWorkingLoaderOnAgentEnd,
 			loadingAnimation: { getElapsedMs: () => 12_000 },
+			getWorkingLoaderElapsedMs: Reflect.get(InteractiveMode.prototype, "getWorkingLoaderElapsedMs"),
 			stopWorkingLoader: vi.fn(),
 			session: {
 				orchestration: undefined,
@@ -58,6 +59,43 @@ describe("InteractiveMode turn done rendering", () => {
 		expect(added.some((child) => child instanceof TurnDoneMessageComponent)).toBe(true);
 	});
 
+	test("agent_end still cleans up when the loader does not expose elapsed time", async () => {
+		const fakeThis = {
+			isInitialized: true,
+			init: vi.fn(),
+			setTerminalProgress: vi.fn(),
+			clearInterruptWatchdog: vi.fn(),
+			disposeFusionLive: vi.fn(),
+			shouldRetireWorkingLoaderOnAgentEnd,
+			loadingAnimation: {},
+			getWorkingLoaderElapsedMs: Reflect.get(InteractiveMode.prototype, "getWorkingLoaderElapsedMs"),
+			stopWorkingLoader: vi.fn(),
+			session: {
+				orchestration: undefined,
+				getContextUsage: () => null,
+			},
+			disposeActiveStreamingComponent: vi.fn(),
+			pendingTools: { values: () => [], clear: vi.fn() },
+			settingsManager: { getToolActivity: () => "legacy" },
+			appendTurnDoneLine: vi.fn(),
+			chatContainer: {
+				addChild: vi.fn(),
+				removeChild: vi.fn(),
+			},
+			checkShutdownRequested: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		};
+
+		await handleEvent.call(fakeThis, {
+			type: "agent_end",
+			willRetry: false,
+			messages: [],
+		});
+
+		expect(fakeThis.stopWorkingLoader).toHaveBeenCalledOnce();
+		expect(fakeThis.appendTurnDoneLine).toHaveBeenCalledOnce();
+	});
+
 	test("agent_end skips turn done when willRetry is true", async () => {
 		const fakeThis = {
 			isInitialized: true,
@@ -67,6 +105,7 @@ describe("InteractiveMode turn done rendering", () => {
 			disposeFusionLive: vi.fn(),
 			shouldRetireWorkingLoaderOnAgentEnd,
 			loadingAnimation: { getElapsedMs: () => 1000 },
+			getWorkingLoaderElapsedMs: Reflect.get(InteractiveMode.prototype, "getWorkingLoaderElapsedMs"),
 			stopWorkingLoader: vi.fn(),
 			session: { orchestration: undefined, getContextUsage: () => null },
 			disposeActiveStreamingComponent: vi.fn(),
@@ -96,6 +135,7 @@ describe("InteractiveMode turn done rendering", () => {
 			disposeFusionLive: vi.fn(),
 			shouldRetireWorkingLoaderOnAgentEnd,
 			loadingAnimation: { getElapsedMs: () => 1000 },
+			getWorkingLoaderElapsedMs: Reflect.get(InteractiveMode.prototype, "getWorkingLoaderElapsedMs"),
 			stopWorkingLoader: vi.fn(),
 			session: { orchestration: "fusion", getContextUsage: () => null },
 			disposeActiveStreamingComponent: vi.fn(),

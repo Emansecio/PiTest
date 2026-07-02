@@ -1438,10 +1438,28 @@ export class AgentSession implements CompactionHost, FusionHost {
 		};
 	}
 
+	/**
+	 * Memoized per tools-array reference (the agent state setter always swaps the
+	 * reference; there are no in-place pushes) so the presend estimate reuses one
+	 * surfaces array — which in turn lets estimateToolSurfaceTokens cache the
+	 * schema stringify cost instead of paying it every turn. Both env-flag
+	 * variants are kept so tests toggling PIT_NO_LAZY_TOOL_SCHEMAS stay correct.
+	 */
+	private _wireToolSurfaceCache = new WeakMap<object, { full?: WireToolSurface[]; compact?: WireToolSurface[] }>();
+
 	private _wireToolsForEstimate(): WireToolSurface[] {
-		const surfaces = this.agent.state.tools.map(agentToolToWireSurface);
-		if (isTruthyEnvFlag(process.env.PIT_NO_LAZY_TOOL_SCHEMAS)) return surfaces;
-		return surfaces.map(compactWireToolSurface);
+		const tools = this.agent.state.tools;
+		let entry = this._wireToolSurfaceCache.get(tools);
+		if (!entry) {
+			entry = {};
+			this._wireToolSurfaceCache.set(tools, entry);
+		}
+		if (isTruthyEnvFlag(process.env.PIT_NO_LAZY_TOOL_SCHEMAS)) {
+			entry.full ??= tools.map(agentToolToWireSurface);
+			return entry.full;
+		}
+		entry.compact ??= tools.map(agentToolToWireSurface).map(compactWireToolSurface);
+		return entry.compact;
 	}
 
 	private _installWireToolEconomyHook(): void {

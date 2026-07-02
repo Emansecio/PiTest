@@ -545,8 +545,16 @@ function compactArgsForDelta(args: Record<string, unknown>): Record<string, unkn
 
 function collectConversationParts(messages: Message[], includeThinking: boolean): ConversationPart[] {
 	const parts: ConversationPart[] = [];
-	let lastToolTarget: string | undefined;
-	let hasChainBreaker = false;
+	// Dedup key of the most recent keyed tool call, reused by its result so the
+	// call+result pair share a key. Cleared after the result (or a chain breaker).
+	let lastToolKey: string | undefined;
+	// Chain generation. A chain breaker (user message or shell/exec call) bumps it,
+	// so same-resource operations on opposite sides of the breaker get DIFFERENT
+	// keys and are never deduped across it. Within one generation, repeated ops on a
+	// resource share a key and collapse to the last. (Previously a single boolean
+	// that latched `true` on the first user message and never reset, which disabled
+	// dedup for the rest of the window — see dedupeConversationParts.)
+	let chainGen = 0;
 
 	for (const msg of messages) {
 		if (msg.role === "user") {
@@ -559,7 +567,8 @@ function collectConversationParts(messages: Message[], includeThinking: boolean)
 							.join("");
 			if (content) {
 				parts.push({ kind: "user", userText: content });
-				hasChainBreaker = true;
+				chainGen++;
+				lastToolKey = undefined;
 			}
 		} else if (msg.role === "assistant") {
 			const textParts: string[] = [];
@@ -595,16 +604,20 @@ function collectConversationParts(messages: Message[], includeThinking: boolean)
 				parts.push({ kind: "assistant", assistantText: textParts.join("\n") });
 			}
 			if (toolCalls.length > 0) {
-				if (toolCalls.some((tc) => tc.breaksChain)) hasChainBreaker = true;
+				// Only a single-tool-call group targeting one resource can dedup; a
+				// shell/exec call carries no target and instead breaks the chain.
 				const target = toolCalls.length === 1 ? toolCalls[0].target : undefined;
-				lastToolTarget = target;
-				const dedupKey = target && !hasChainBreaker ? target : undefined;
+				const dedupKey = target ? `${target} ${chainGen}` : undefined;
+				lastToolKey = dedupKey;
 				parts.push({
 					kind: "toolCall",
 					dedupKey,
 					toolCalls: toolCalls.map((tc) => ({ name: tc.name, args: tc.args })),
 				});
-				if (dedupKey) hasChainBreaker = false;
+				if (toolCalls.some((tc) => tc.breaksChain)) {
+					chainGen++;
+					lastToolKey = undefined;
+				}
 			}
 		} else if (msg.role === "toolResult") {
 			const content = msg.content
@@ -614,7 +627,7 @@ function collectConversationParts(messages: Message[], includeThinking: boolean)
 			if (content) {
 				parts.push({
 					kind: "toolResult",
-					dedupKey: lastToolTarget && !hasChainBreaker ? lastToolTarget : undefined,
+					dedupKey: lastToolKey,
 					isToolResult: true,
 					toolResult: {
 						name: msg.toolName ?? "tool",
@@ -623,7 +636,7 @@ function collectConversationParts(messages: Message[], includeThinking: boolean)
 					},
 				});
 			}
-			lastToolTarget = undefined;
+			lastToolKey = undefined;
 		}
 	}
 
@@ -631,29 +644,32 @@ function collectConversationParts(messages: Message[], includeThinking: boolean)
 }
 
 function dedupeConversationParts(parts: ConversationPart[]): ConversationPart[] {
-	const lastSeen = new Map<string, number>();
-	for (let i = parts.length - 1; i >= 0; i--) {
-		const key = parts[i].dedupKey;
-		if (key && !lastSeen.has(key)) {
-			lastSeen.set(key, i);
-		}
+	// Per dedup key, the index of the LAST tool CALL carrying it. Results are
+	// excluded on purpose: a call and its result share a key, so keying off the
+	// result index (always greater than the call's) made every call fail its own
+	// `i >= last` test and dropped the whole pair.
+	const lastCallByKey = new Map<string, number>();
+	for (let i = 0; i < parts.length; i++) {
+		const part = parts[i];
+		if (part.dedupKey && !part.isToolResult) lastCallByKey.set(part.dedupKey, i);
 	}
 
 	const result: ConversationPart[] = [];
 	for (let i = 0; i < parts.length; i++) {
 		const part = parts[i];
 		const key = part.dedupKey;
-		if (key) {
-			const lastIdx = lastSeen.get(key)!;
-			if (part.isToolResult) {
-				const prevToolCallIdx = findPrecedingToolCall(parts, i);
-				if (prevToolCallIdx !== -1 && prevToolCallIdx >= lastSeen.get(parts[prevToolCallIdx].dedupKey ?? "")!) {
-					result.push(part);
-				}
-			} else if (i >= lastIdx) {
+		if (!key) {
+			result.push(part);
+			continue;
+		}
+		if (part.isToolResult) {
+			// Keep a result iff the call it belongs to is the surviving (last) call
+			// for that key; otherwise it is a stale duplicate dropped with its call.
+			const callIdx = findPrecedingToolCall(parts, i);
+			if (callIdx !== -1 && callIdx === lastCallByKey.get(parts[callIdx].dedupKey ?? "")) {
 				result.push(part);
 			}
-		} else {
+		} else if (i === lastCallByKey.get(key)) {
 			result.push(part);
 		}
 	}

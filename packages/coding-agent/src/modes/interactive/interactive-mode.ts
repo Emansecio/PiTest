@@ -1648,6 +1648,14 @@ export class InteractiveMode {
 		this.clearStatusContainer();
 	}
 
+	private getWorkingLoaderElapsedMs(): number {
+		const loader = this.loadingAnimation as { getElapsedMs?: unknown } | undefined;
+		if (typeof loader?.getElapsedMs !== "function") {
+			return 0;
+		}
+		return loader.getElapsedMs();
+	}
+
 	/** Tear down a live assistant stream block (overthink/TTSR mid-stream abort). */
 	private disposeActiveStreamingComponent(): void {
 		if (!this.streamingComponent) return;
@@ -3227,7 +3235,7 @@ export class InteractiveMode {
 				this.clearInterruptWatchdog();
 				this.disposeFusionLive();
 				if (this.shouldRetireWorkingLoaderOnAgentEnd(event.willRetry)) {
-					const elapsedMs = this.loadingAnimation?.getElapsedMs() ?? 0;
+					const elapsedMs = this.getWorkingLoaderElapsedMs();
 					this.stopWorkingLoader();
 					if (this.session.orchestration !== "fusion") {
 						this.appendTurnDoneLine(

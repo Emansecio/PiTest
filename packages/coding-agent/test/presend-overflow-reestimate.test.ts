@@ -19,7 +19,9 @@ import { createTestResourceLoader } from "./utilities.js";
 // Marker-driven estimate: tokens come from the last message carrying `__assembled`.
 vi.mock("../src/core/compaction/index.js", () => ({
 	calculateContextTokens: (usage: { totalTokens?: number }) => usage.totalTokens ?? 0,
+	adaptiveKeepRecentTokens: () => undefined,
 	collectEntriesForBranchSummary: () => ({ entries: [], commonAncestorId: null }),
+	sumMessageTokens: () => 0,
 	compact: async () => ({ summary: "compacted", firstKeptEntryId: "entry-1", tokensBefore: 100, details: {} }),
 	estimateContextTokens: (messages: Array<{ __assembled?: number }>) => {
 		for (let i = messages.length - 1; i >= 0; i--) {

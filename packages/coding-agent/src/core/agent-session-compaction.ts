@@ -12,12 +12,14 @@ import {
 	adaptivePruneThreshold,
 	cloneToolResultMessagesForPrune,
 	estimateWireTokens,
+	planContextPrune,
 	pressurePruneProtectTurns,
 	pruneOldToolOutputs,
 	type WireToolSurface,
 	wouldPruneOldToolOutputs,
 } from "./compaction/compaction.ts";
 import {
+	adaptiveKeepRecentTokens,
 	type CompactionPreparation,
 	type CompactionResult,
 	calculateContextTokens,
@@ -28,6 +30,7 @@ import {
 	proactivePruneFloor,
 	shouldCompact,
 	shouldCompactSoft,
+	sumMessageTokens,
 } from "./compaction/index.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.js";
 import type { HindsightBank } from "./hindsight/index.js";
@@ -87,9 +90,14 @@ export function maybePruneStaleToolOutputs(ctx: CompactionController, contextTok
 	const contextWindow = ctx.host.model?.contextWindow ?? 0;
 	const threshold = adaptivePruneThreshold(contextTokens, contextWindow);
 	const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
-	if (!wouldPruneOldToolOutputs(ctx.host.agent.state.messages, threshold, protectTurns)) return;
-	const copy = cloneToolResultMessagesForPrune(ctx.host.agent.state.messages);
-	const reclaimed = pruneOldToolOutputs(copy, threshold, protectTurns, true);
+	const messages = ctx.host.agent.state.messages;
+	// One plan shared by the would-check and the apply: indices stay valid on the
+	// clone because cloneToolResultMessagesForPrune preserves order and length
+	// (same pattern as _pruneContextForProvider).
+	const prunePlan = planContextPrune(messages, protectTurns);
+	if (!wouldPruneOldToolOutputs(messages, threshold, protectTurns, prunePlan)) return;
+	const copy = cloneToolResultMessagesForPrune(messages);
+	const reclaimed = pruneOldToolOutputs(copy, threshold, protectTurns, true, prunePlan);
 	recordDiagnostic({
 		category: "prune.proactive",
 		level: "info",
@@ -280,7 +288,13 @@ export async function compactSession(
 		const pathEntries = ctx.host.sessionManager.getBranch();
 		const settings = ctx.host.settingsManager.getCompactionSettings();
 
-		const preparation = prepareCompaction(pathEntries, settings, ctx.host.model?.contextWindow);
+		const preparation = prepareCompaction(
+			pathEntries,
+			settings,
+			ctx.host.model?.contextWindow,
+			false,
+			estimateContextTokens(ctx.host.agent.state.messages).tokens,
+		);
 		if (!preparation) {
 			const lastEntry = pathEntries[pathEntries.length - 1];
 			throw new Error(
@@ -561,11 +575,17 @@ export async function runAutoCompaction(
 		}
 
 		const pathEntries = ctx.host.sessionManager.getBranch();
+		// Adaptive cut: on windows where the default keep + summary would land back
+		// above the re-check threshold, shrink the keep so ONE pass suffices
+		// instead of paying a second full pipeline. undefined on normal windows.
+		const keepOverride = adaptiveKeepRecentTokens(ctx.host.model?.contextWindow ?? 0, settings);
 		const preparation = prepareCompaction(
 			pathEntries,
 			settings,
 			ctx.host.model?.contextWindow,
 			reason === "threshold",
+			estimateContextTokens(ctx.host.agent.state.messages).tokens,
+			keepOverride,
 		);
 		if (preparation) preparation.cwd = ctx.host.cwd;
 		if (!preparation) {
@@ -599,14 +619,34 @@ export async function runAutoCompaction(
 
 		if (!willRetry && reason === "threshold") {
 			const contextWindow = ctx.host.model?.contextWindow ?? 0;
-			const contextTokens = estimateContextTokens(ctx.host.agent.state.messages).tokens;
+			// Fallback second pass — rare after the adaptive cut above. The re-check
+			// MUST use the pure per-message estimate: the kept assistant messages
+			// still carry their PRE-compaction usage, so the usage-based
+			// estimateContextTokens reads as if nothing was compacted and re-fired
+			// this pass on nearly every threshold compaction (a systematic false
+			// positive costing 1-2 extra LLM calls each time).
+			const contextTokens = sumMessageTokens(ctx.host.agent.state.messages);
 			if (
 				shouldCompact(contextTokens, contextWindow, settings, 0) ||
 				shouldCompactSoft(contextTokens, contextWindow, settings)
 			) {
 				const pathEntriesAfter = ctx.host.sessionManager.getBranch();
-				const preparationAfter = prepareCompaction(pathEntriesAfter, settings, contextWindow, true);
-				if (preparationAfter) {
+				const preparationAfter = prepareCompaction(
+					pathEntriesAfter,
+					settings,
+					contextWindow,
+					true,
+					contextTokens,
+					keepOverride,
+				);
+				// Progress guard: without a summarizable span the pass would be a
+				// no-op that still pays the LLM calls (the previous compaction's kept
+				// window is already inside the retention budget).
+				const hasSummarizableSpan =
+					preparationAfter !== undefined &&
+					((preparationAfter.messagesToSummarize?.length ?? 0) > 0 ||
+						(preparationAfter.turnPrefixMessages?.length ?? 0) > 0);
+				if (preparationAfter && hasSummarizableSpan) {
 					ctx.host.emit({ type: "compaction_start", reason });
 					preparationAfter.cwd = ctx.host.cwd;
 					const resultAfter = await executeCompactionPipeline(ctx, {

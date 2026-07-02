@@ -1,10 +1,12 @@
 import type { AgentMessage } from "@pit/agent-core";
 import type { AssistantMessage, Usage } from "@pit/ai";
 import { getModel } from "@pit/ai";
-import { readFileSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	adaptiveKeepRecentTokens,
 	type CompactionPreparation,
 	type CompactionSettings,
 	calculateContextTokens,
@@ -14,13 +16,16 @@ import {
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
+	estimateToolSurfaceTokens,
 	findCutPoint,
 	getLastAssistantUsage,
+	planContextPrune,
 	prepareCompaction,
 	proactivePruneFloor,
 	pruneOldToolOutputs,
 	shouldCompact,
 	shouldCompactSoft,
+	wouldPruneOldToolOutputs,
 } from "../src/core/compaction/index.js";
 import { createDeferredOutputStore, setCurrentDeferredOutputStore } from "../src/core/deferred-output-store.js";
 import {
@@ -795,6 +800,268 @@ describe("pruneOldToolOutputs deferred-history mode", () => {
 });
 
 // ============================================================================
+// pruneOldToolOutputs — precomputed plan equivalence (maybePruneStaleToolOutputs path)
+// ============================================================================
+
+describe("pruneOldToolOutputs with precomputed plan", () => {
+	function planToolCall(name: string, id: string, args: Record<string, unknown>): AgentMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "toolCall", id, name, arguments: args }],
+			timestamp: Date.now(),
+		} as AgentMessage;
+	}
+
+	function planToolResult(toolName: string, toolCallId: string, text: string): AgentMessage {
+		return {
+			role: "toolResult",
+			toolCallId,
+			toolName,
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: Date.now(),
+		} as AgentMessage;
+	}
+
+	function buildPrunableMessages(): AgentMessage[] {
+		// Superseded read pair (below threshold, shrinks via head+tail) plus a
+		// giant tool result (above threshold), all before two protected turns.
+		const supersededBlob = `HEAD\n${"line\n".repeat(800)}TAIL`;
+		return [
+			planToolCall("read", "c1", { path: "src/foo.ts" }),
+			planToolResult("read", "c1", supersededBlob),
+			planToolCall("read", "c2", { path: "src/foo.ts" }),
+			planToolResult("read", "c2", "fresh"),
+			planToolCall("bash", "c3", { command: "npm test" }),
+			planToolResult("bash", "c3", "z".repeat(90_000)),
+			createUserMessage("turn one"),
+			createAssistantMessage("answer one"),
+			createUserMessage("turn two"),
+			createAssistantMessage("answer two"),
+		];
+	}
+
+	it("reclaims the same tokens and produces identical messages when the plan is computed on the original and applied to a clone", () => {
+		const original = buildPrunableMessages();
+		const protectTurns = 2;
+
+		// With plan (computed on the original, applied to the clone) — the
+		// maybePruneStaleToolOutputs pattern.
+		const plan = planContextPrune(original, protectTurns);
+		const cloneA = cloneToolResultMessagesForPrune(original);
+		const reclaimedA = pruneOldToolOutputs(cloneA, undefined, protectTurns, false, plan);
+
+		// Without plan (recomputed internally) — the previous behavior.
+		const cloneB = cloneToolResultMessagesForPrune(original);
+		const reclaimedB = pruneOldToolOutputs(cloneB, undefined, protectTurns, false);
+
+		expect(reclaimedA).toBeGreaterThan(0);
+		expect(reclaimedA).toBe(reclaimedB);
+		expect(JSON.stringify(cloneA)).toBe(JSON.stringify(cloneB));
+	});
+
+	it("wouldPruneOldToolOutputs agrees with and without a precomputed plan", () => {
+		const prunable = buildPrunableMessages();
+		const protectTurns = 2;
+		const plan = planContextPrune(prunable, protectTurns);
+		expect(wouldPruneOldToolOutputs(prunable, undefined, protectTurns, plan)).toBe(
+			wouldPruneOldToolOutputs(prunable, undefined, protectTurns),
+		);
+		expect(wouldPruneOldToolOutputs(prunable, undefined, protectTurns, plan)).toBe(true);
+
+		// Nothing prunable: everything sits inside the protected turns.
+		const clean: AgentMessage[] = [
+			createUserMessage("turn one"),
+			createAssistantMessage("answer one"),
+			createUserMessage("turn two"),
+			createAssistantMessage("answer two"),
+		];
+		const cleanPlan = planContextPrune(clean, protectTurns);
+		expect(wouldPruneOldToolOutputs(clean, undefined, protectTurns, cleanPlan)).toBe(
+			wouldPruneOldToolOutputs(clean, undefined, protectTurns),
+		);
+		expect(wouldPruneOldToolOutputs(clean, undefined, protectTurns, cleanPlan)).toBe(false);
+	});
+});
+
+// ============================================================================
+// Per-block dense-token cache — mutation must refresh the cached estimate
+// ============================================================================
+
+describe("dense-token block cache coherence", () => {
+	function makeToolResult(text: string): AgentMessage {
+		return {
+			role: "toolResult" as const,
+			content: [{ type: "text" as const, text }],
+			toolCallId: "tc-cache",
+			toolName: "bash",
+			isError: false,
+			timestamp: Date.now(),
+		} as any;
+	}
+
+	it("wouldPruneOldToolOutputs stops reporting prunable after the in-place prune shrinks the block", () => {
+		const messages: AgentMessage[] = [
+			makeToolResult("w".repeat(90_000)), // ~27k dense tokens, over the 20k threshold
+			createUserMessage("q1"),
+			createAssistantMessage("a1"),
+			createUserMessage("q2"),
+			createAssistantMessage("a2"),
+		];
+
+		// Read path caches the big estimate…
+		expect(wouldPruneOldToolOutputs(messages)).toBe(true);
+		// …the prune mutates the block in place (tests call it directly on the
+		// original array) and must REFRESH the cached estimate…
+		const reclaimed = pruneOldToolOutputs(messages);
+		expect(reclaimed).toBeGreaterThan(0);
+		// …so the next read reflects the excerpt, not a stale 27k figure.
+		expect(wouldPruneOldToolOutputs(messages)).toBe(false);
+	});
+
+	it("repeated read-only checks return consistent results (cache hit path)", () => {
+		const messages: AgentMessage[] = [
+			makeToolResult("v".repeat(90_000)),
+			createUserMessage("q1"),
+			createAssistantMessage("a1"),
+			createUserMessage("q2"),
+			createAssistantMessage("a2"),
+		];
+		expect(wouldPruneOldToolOutputs(messages)).toBe(true);
+		expect(wouldPruneOldToolOutputs(messages)).toBe(true);
+	});
+});
+
+// ============================================================================
+// estimateToolSurfaceTokens — memoized per surfaces-array reference
+// ============================================================================
+
+describe("estimateToolSurfaceTokens cache", () => {
+	it("returns the same estimate for repeated calls on the same array and for an equal-content copy", () => {
+		const tools = [
+			{
+				name: "read",
+				description: "Read a file from disk",
+				parameters: { type: "object", properties: { path: { type: "string" } } },
+			},
+			{
+				name: "bash",
+				description: "Run a shell command",
+				parameters: { type: "object", properties: { command: { type: "string" } } },
+			},
+		];
+		const first = estimateToolSurfaceTokens(tools);
+		expect(first).toBeGreaterThan(0);
+		expect(estimateToolSurfaceTokens(tools)).toBe(first); // cache hit
+		expect(estimateToolSurfaceTokens([...tools])).toBe(first); // fresh array, same content
+	});
+});
+
+// ============================================================================
+// adaptiveKeepRecentTokens — single-pass retention shrink under pressure
+// ============================================================================
+
+describe("adaptiveKeepRecentTokens", () => {
+	const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS }; // reserve 16384, keep 20000
+
+	it("is a no-op (undefined) on normal windows where one pass already lands below the target", () => {
+		expect(adaptiveKeepRecentTokens(200_000, settings)).toBeUndefined();
+		expect(adaptiveKeepRecentTokens(1_000_000, settings)).toBeUndefined();
+	});
+
+	it("shrinks the keep just enough on windows where keep + summary exceeds the soft target", () => {
+		// 64k window: reserve 16384, keep 20000, hard 47616, soft 27616 → keepMax 19616.
+		expect(adaptiveKeepRecentTokens(64_000, settings)).toBe(19_616);
+	});
+
+	it("falls back to the hard threshold and respects the floor on tiny windows", () => {
+		// 32k window: soft ≤ 0 → target = hard 15616 → keepMax 7616, floored at
+		// max(8000, 20000/2) = 10000.
+		expect(adaptiveKeepRecentTokens(32_000, settings)).toBe(10_000);
+	});
+
+	it("never raises the keep above the effective value (tiny configured keep)", () => {
+		const tinyKeep: CompactionSettings = { ...settings, keepRecentTokens: 4_000 };
+		// Floor (8000) exceeds the effective keep (4000) → no override rather than an increase.
+		expect(adaptiveKeepRecentTokens(24_000, tinyKeep)).toBeUndefined();
+	});
+
+	it("returns undefined for invalid windows", () => {
+		expect(adaptiveKeepRecentTokens(0, settings)).toBeUndefined();
+		expect(adaptiveKeepRecentTokens(Number.NaN, settings)).toBeUndefined();
+	});
+});
+
+// ============================================================================
+// prepareCompaction — keepRecentTokensOverride reaches findCutPoint
+// ============================================================================
+
+describe("prepareCompaction keepRecentTokensOverride", () => {
+	function buildTurnEntries(): SessionEntry[] {
+		const entries: SessionEntry[] = [];
+		for (let turn = 0; turn < 4; turn++) {
+			entries.push(
+				createMessageEntry(createUserMessage(`question ${turn}: ${"lorem ipsum dolor sit amet ".repeat(80)}`)),
+			);
+			entries.push(
+				createMessageEntry(createAssistantMessage(`answer ${turn}: ${"consectetur adipiscing elit ".repeat(80)}`)),
+			);
+		}
+		return entries;
+	}
+
+	it("uses the override instead of the window-scaled default", () => {
+		const entries = buildTurnEntries();
+		// Default keep (20k) swallows the whole ~4.5k-token fixture → nothing summarized.
+		const withDefault = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS, 200_000);
+		expect(withDefault).toBeTruthy();
+		expect(withDefault!.messagesToSummarize.length).toBe(0);
+
+		// A 100-token override cuts near the tail → older turns get summarized.
+		const withOverride = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS, 200_000, false, undefined, 100);
+		expect(withOverride).toBeTruthy();
+		expect(withOverride!.messagesToSummarize.length).toBeGreaterThan(0);
+		expect(withOverride!.firstKeptEntryId).not.toBe(withDefault!.firstKeptEntryId);
+	});
+
+	it("ignores an undefined override (legacy path byte-identical)", () => {
+		const entries = buildTurnEntries();
+		const a = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS, 200_000);
+		const b = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS, 200_000, false, undefined, undefined);
+		expect(b!.firstKeptEntryId).toBe(a!.firstKeptEntryId);
+		expect(b!.messagesToSummarize.length).toBe(a!.messagesToSummarize.length);
+	});
+});
+
+// ============================================================================
+// prepareCompaction — knownContextTokens skips the session-context rebuild
+// ============================================================================
+
+describe("prepareCompaction knownContextTokens", () => {
+	function buildEntries(): SessionEntry[] {
+		return [
+			createMessageEntry(createUserMessage("please do the thing")),
+			createMessageEntry(createAssistantMessage("doing the thing")),
+			createMessageEntry(createUserMessage("and another thing")),
+			createMessageEntry(createAssistantMessage("done with both")),
+		];
+	}
+
+	it("uses the caller-provided estimate as tokensBefore", () => {
+		const preparation = prepareCompaction(buildEntries(), DEFAULT_COMPACTION_SETTINGS, 200_000, false, 12_345);
+		expect(preparation).toBeTruthy();
+		expect(preparation!.tokensBefore).toBe(12_345);
+	});
+
+	it("falls back to the rebuilt-context estimate when not provided", () => {
+		const preparation = prepareCompaction(buildEntries(), DEFAULT_COMPACTION_SETTINGS, 200_000);
+		expect(preparation).toBeTruthy();
+		expect(preparation!.tokensBefore).toBeGreaterThan(0);
+		expect(preparation!.tokensBefore).not.toBe(12_345);
+	});
+});
+
+// ============================================================================
 // compact() must not mutate live message objects when pruning (clone-before-prune)
 // ============================================================================
 
@@ -919,6 +1186,138 @@ describe("compact() prune isolation", () => {
 		// Even though pruning ran before the failed LLM call, the live object is intact.
 		expect(liveBlock.text).toBe(bigText);
 		expect(liveBlock.text.length).toBe(90_000);
+	});
+});
+
+// ============================================================================
+// compact() — file digests collected concurrently with the summarization LLM
+// ============================================================================
+
+describe("compact() parallel file digests", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		process.env.PIT_NO_STRUCTURAL_COMPACTION = "1";
+		tmpDir = mkdtempSync(join(tmpdir(), "pit-digest-test-"));
+	});
+	afterEach(async () => {
+		delete process.env.PIT_NO_STRUCTURAL_COMPACTION;
+		// When compact() rejects before awaiting the digests, the abandoned digest
+		// promise may still hold a file/dir handle (Windows EBUSY). Retry with an
+		// ASYNC delay — a blocking retry would freeze the event loop and the
+		// pending I/O could never release the handle.
+		for (let attempt = 0; ; attempt++) {
+			try {
+				rmSync(tmpDir, { recursive: true, force: true });
+				return;
+			} catch (err) {
+				if (attempt >= 20) throw err;
+				await new Promise((resolve) => setTimeout(resolve, 100));
+			}
+		}
+	});
+
+	function fakeStreamFn(summaryText: string) {
+		const response: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: summaryText }],
+			usage: createMockUsage(10, 10),
+			stopReason: "stop",
+			timestamp: Date.now(),
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+		};
+		return (() => ({ result: async () => response })) as any;
+	}
+
+	function makePreparation(modifiedFile?: string): CompactionPreparation {
+		const fileOps = createFileOps();
+		if (modifiedFile) fileOps.edited.add(modifiedFile);
+		return {
+			firstKeptEntryId: "kept-id",
+			messagesToSummarize: [
+				createUserMessage("please refactor the module"),
+				createAssistantMessage("done, edited the file"),
+			],
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 50_000,
+			fileOps,
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, selfCorrection: false },
+			cwd: tmpDir,
+		};
+	}
+
+	it("still appends the digest section and details.fileDigests for modified files", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		writeFileSync(
+			join(tmpDir, "mod.ts"),
+			"export function alphaOne() { return 1; }\nexport function betaTwo() { return 2; }\n",
+		);
+
+		const result = await compact(
+			makePreparation("mod.ts"),
+			model,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			fakeStreamFn("## Goal\nfake summary"),
+		);
+
+		expect(result.summary).toContain("<file-digests>");
+		expect(result.summary).toContain("alphaOne");
+		const digests = (result.details as { fileDigests?: Record<string, string> }).fileDigests;
+		expect(digests).toBeTruthy();
+		expect(digests!["mod.ts"]).toContain("alphaOne");
+	});
+
+	it("rejects with the summarization error (no unhandled rejection) when the LLM fails while digests are in flight", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		writeFileSync(join(tmpDir, "mod.ts"), "export function gammaThree() { return 3; }\n");
+
+		// Digest collection starts before the summarizer call; the summarizer then
+		// rejects. compact() must surface the LLM error, and the in-flight digest
+		// promise must not turn into an unhandled rejection (vitest fails the run
+		// on unhandled errors).
+		const rejectingStreamFn = (() => ({
+			result: async () => {
+				throw new Error("network boom");
+			},
+		})) as any;
+
+		await expect(
+			compact(
+				makePreparation("mod.ts"),
+				model,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				rejectingStreamFn,
+			),
+		).rejects.toThrow("network boom");
+	});
+
+	it("skips all digest work when there are no touched files", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+
+		const result = await compact(
+			makePreparation(),
+			model,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			fakeStreamFn("## Goal\nfake summary"),
+		);
+
+		expect(result.summary).not.toContain("<file-digests>");
+		expect((result.details as { fileDigests?: Record<string, string> }).fileDigests).toBeUndefined();
 	});
 });
 

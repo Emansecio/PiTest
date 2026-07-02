@@ -24,7 +24,9 @@ vi.mock("../src/core/compaction/index.js", () => ({
 		cacheWrite: number;
 		totalTokens?: number;
 	}) => usage.totalTokens ?? usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+	adaptiveKeepRecentTokens: () => undefined,
 	collectEntriesForBranchSummary: () => ({ entries: [], commonAncestorId: null }),
+	sumMessageTokens: () => 0,
 	compact: async () => ({ summary: "compacted", firstKeptEntryId: "entry-1", tokensBefore: 100, details: {} }),
 	// Assembled payload estimate (usage + trailing). Driven by mockState so each
 	// test can simulate a large tool result landing after the last model response.

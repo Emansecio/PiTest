@@ -8,7 +8,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@pit/agent-core";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions, Usage } from "@pit/ai";
+import type { AssistantMessage, Context, Message, Model, SimpleStreamOptions, Usage } from "@pit/ai";
 import { completeSimple } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
@@ -196,13 +196,26 @@ export interface WireUsageEstimate extends ContextUsageEstimate {
 	pendingTokens: number;
 }
 
+/**
+ * Estimate of a tool-surface array, memoized by ARRAY reference. Tool schemas
+ * are static per session, yet this ran a JSON.stringify over every schema on
+ * every presend estimate. Callers that reuse the same surfaces array (see
+ * `_wireToolsForEstimate`) pay the stringify once; throwaway arrays miss and
+ * are GC'd with their entry.
+ */
+const toolSurfaceTokensCache = new WeakMap<object, number>();
+
 /** Estimate serialized tool-definition payload on the wire. */
 export function estimateToolSurfaceTokens(tools: WireToolSurface[]): number {
+	const cached = toolSurfaceTokensCache.get(tools);
+	if (cached !== undefined) return cached;
 	let denseChars = 0;
 	for (const tool of tools) {
 		denseChars += tool.name.length + tool.description.length + JSON.stringify(tool.parameters).length;
 	}
-	return Math.ceil(denseChars / CHARS_PER_TOKEN_DENSE);
+	const estimate = Math.ceil(denseChars / CHARS_PER_TOKEN_DENSE);
+	toolSurfaceTokensCache.set(tools, estimate);
+	return estimate;
 }
 
 /**
@@ -306,6 +319,40 @@ export function effectiveKeepRecentTokens(configured: number, contextWindow?: nu
 		return configured;
 	}
 	return Math.max(configured, Math.floor(contextWindow * 0.1));
+}
+
+/** Tokens assumed for the summary + structural frame a compaction inserts. */
+const COMPACTION_SUMMARY_TOKEN_BUDGET = 8_000;
+/** Never retain less verbatim recent context than this, whatever the pressure. */
+const ADAPTIVE_KEEP_MIN_FLOOR = 8_000;
+
+/**
+ * Adaptive verbatim-retention budget for a SINGLE compaction pass.
+ *
+ * The post-compaction context is ≈ kept-recent + summary. When that lands back
+ * above the re-check threshold (the soft threshold, or the hard one on windows
+ * too small for a positive soft band), runAutoCompaction used to run a SECOND
+ * full pipeline — 1-2 extra LLM calls. On small windows the default keep alone
+ * exceeds the target, so the second pass was structural, not incidental. This
+ * shrinks the keep so one pass suffices: keep ≤ target − summary budget,
+ * floored at max(8k, keepRecentTokens/2) so quality never collapses (the
+ * second pass remains as fallback when the floor wins). Returns undefined when
+ * no shrink is needed — normal windows are byte-identical to the legacy path.
+ */
+export function adaptiveKeepRecentTokens(contextWindow: number, settings: CompactionSettings): number | undefined {
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
+	const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
+	const effectiveKeep = effectiveKeepRecentTokens(settings.keepRecentTokens, contextWindow);
+	const hardThreshold = contextWindow - reserve;
+	const softThreshold = hardThreshold - effectiveKeep;
+	// Mirror the post-compaction re-check: shouldCompactSoft only fires with a
+	// positive soft threshold; otherwise the hard threshold is the bar.
+	const target = softThreshold > 0 ? softThreshold : hardThreshold;
+	const keepMax = target - COMPACTION_SUMMARY_TOKEN_BUDGET;
+	if (keepMax >= effectiveKeep) return undefined;
+	const floor = Math.max(ADAPTIVE_KEEP_MIN_FLOOR, Math.floor(settings.keepRecentTokens / 2));
+	const adapted = Math.min(effectiveKeep, Math.max(floor, keepMax));
+	return adapted < effectiveKeep ? adapted : undefined;
 }
 
 /** Absolute minimum floor for the proactive prune; below this the cache cost is not worth it. */
@@ -886,6 +933,23 @@ function headTailExcerpt(text: string): string {
 // recomputes exactly once for the new (small) value.
 const beforeTokensCache = new WeakMap<object, number>();
 
+// Memoize the dense-token estimate of a toolResult text block BY BLOCK OBJECT.
+// The would*/apply scans above the prune floor re-estimate the same old blocks
+// every turn — an O(chars of history) scan per turn without this. Block text
+// only changes via the in-place rewrites in pruneOldToolOutputs and
+// applySupersedeOnly, and BOTH update the entry with the post-rewrite estimate,
+// so a mutated block never serves a stale value. Cloned blocks (fresh objects
+// from cloneToolResultMessagesForPrune) simply miss and recompute.
+const denseTextTokensCache = new WeakMap<object, number>();
+
+function cachedDenseTextTokens(block: object, text: string): number {
+	const cached = denseTextTokensCache.get(block);
+	if (cached !== undefined) return cached;
+	const est = estimateTextTokens(text, true);
+	denseTextTokensCache.set(block, est);
+	return est;
+}
+
 const SUPERSEDED_TOOL_RESULT_NAMES = new Set(["read", "grep", "find", "ls", "symbol", "find_symbol", "lsp", "bash"]);
 
 function stableStringify(value: unknown): string {
@@ -925,40 +989,131 @@ function supersededResourceKey(toolName: string, args: unknown): string | undefi
 }
 
 /**
+ * Incremental supersede-scan state, keyed by the message ARRAY reference. The
+ * live-prune hook plans over `agent.state.messages` after every successful tool
+ * call; that array's reference is stable across a turn (the agent appends via
+ * `push`; the state setter only swaps the reference on reassignment, which is a
+ * rare prune/compaction event). Rebuilding the maps from scratch each call made
+ * the per-tool-call cost O(session) → O(session²) over a long session. Caching
+ * the scan and extending it over just the appended suffix makes it O(new
+ * messages) per call, with a full rebuild only on reference change.
+ *
+ * Staleness safety: prune mutations (pruneOldToolOutputs / applySupersedeOnly /
+ * elideMutatingToolCallArguments) operate on CLONED arrays that are then
+ * reassigned — the cached array is never mutated in place. And even if it were,
+ * they rewrite toolResult `block.text` and MUTATING tool-call `arguments`
+ * (write/edit — outside SUPERSEDED_TOOL_RESULT_NAMES), neither of which feeds
+ * `supersededResourceKey`. Same invariant family as `beforeTokensCache`.
+ */
+interface SupersedeScanState {
+	/** Messages [0, scannedLength) have been ingested into the maps below. */
+	scannedLength: number;
+	/**
+	 * toolCall id -> resource key. Calls of superseded-eligible tools whose key
+	 * is underivable (e.g. read without a path) store "" so their results are
+	 * skipped permanently instead of retried forever via `unkeyedResults`.
+	 */
+	keyByCallId: Map<string, string>;
+	keyByIndex: Map<number, string>;
+	lastIndexByKey: Map<string, number>;
+	/** Results whose toolCall was not yet seen — retried on each extension. */
+	unkeyedResults: Array<{ index: number; toolCallId: string }>;
+}
+
+const supersedeScanCache = new WeakMap<AgentMessage[], SupersedeScanState>();
+
+function createSupersedeScanState(): SupersedeScanState {
+	return {
+		scannedLength: 0,
+		keyByCallId: new Map(),
+		keyByIndex: new Map(),
+		lastIndexByKey: new Map(),
+		unkeyedResults: [],
+	};
+}
+
+function recordKeyedResult(state: SupersedeScanState, index: number, key: string): void {
+	state.keyByIndex.set(index, key);
+	const prev = state.lastIndexByKey.get(key);
+	if (prev === undefined || index > prev) state.lastIndexByKey.set(key, index);
+}
+
+/** Ingest messages[state.scannedLength ..] into the scan maps (one suffix pass). */
+function extendSupersedeScanState(state: SupersedeScanState, messages: AgentMessage[]): void {
+	// (1) Tool calls in the suffix — must land before the suffix's results are
+	// resolved, mirroring the full algorithm's call-pass-then-result-pass order.
+	for (let i = state.scannedLength; i < messages.length; i++) {
+		const msg = messages[i];
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		for (const block of msg.content) {
+			if (block.type !== "toolCall") continue;
+			const key = supersededResourceKey(block.name, block.arguments);
+			if (key) state.keyByCallId.set(block.id, key);
+			else if (SUPERSEDED_TOOL_RESULT_NAMES.has(block.name)) state.keyByCallId.set(block.id, "");
+		}
+	}
+	// (2) Tool results in the suffix.
+	for (let i = state.scannedLength; i < messages.length; i++) {
+		const msg = messages[i];
+		if (msg.role !== "toolResult" || !SUPERSEDED_TOOL_RESULT_NAMES.has(msg.toolName ?? "")) continue;
+		const key = state.keyByCallId.get(msg.toolCallId);
+		if (key === undefined) {
+			state.unkeyedResults.push({ index: i, toolCallId: msg.toolCallId });
+			continue;
+		}
+		if (key === "") continue; // known keyless call — never supersedes
+		recordKeyedResult(state, i, key);
+	}
+	// (3) Retry results whose call may have arrived in this (or any later)
+	// suffix. Keeps exact equivalence with the two full passes even when a
+	// result precedes its call in the array.
+	if (state.unkeyedResults.length > 0) {
+		const stillUnkeyed: SupersedeScanState["unkeyedResults"] = [];
+		for (const entry of state.unkeyedResults) {
+			const key = state.keyByCallId.get(entry.toolCallId);
+			if (key === undefined) stillUnkeyed.push(entry);
+			else if (key !== "") recordKeyedResult(state, entry.index, key);
+		}
+		state.unkeyedResults = stillUnkeyed;
+	}
+	state.scannedLength = messages.length;
+}
+
+/**
+ * Derivation over the scan state — recomputed on EVERY call (protectFromIndex
+ * varies per call, so the final Set must never be cached). Filter identical to
+ * the previous full algorithm; always returns a fresh Set.
+ */
+function deriveSupersededIndices(state: SupersedeScanState, protectFromIndex: number): Set<number> {
+	const superseded = new Set<number>();
+	for (const [i, key] of state.keyByIndex) {
+		if (i >= protectFromIndex) continue;
+		const last = state.lastIndexByKey.get(key);
+		if (last !== undefined && last > i) superseded.add(i);
+	}
+	return superseded;
+}
+
+/**
  * Indices (in the prunable region, i.e. `< protectFromIndex`) of deterministic
  * tool results that a later identical call supersedes. The newer result carries
  * the current view, so the older copy is a stale duplicate safe to collapse to
  * head+tail even when it is below the size threshold. The newest result (and any
  * result inside the protected recent turns) is never marked.
+ *
+ * The scan is incremental per array reference (see {@link SupersedeScanState}):
+ * a cache hit only ingests the appended suffix; a new/shrunk array rebuilds.
  */
 function buildSupersededToolResultIndices(messages: AgentMessage[], protectFromIndex: number): Set<number> {
-	const keyByCallId = new Map<string, string>();
-	for (const msg of messages) {
-		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
-		for (const block of msg.content) {
-			if (block.type !== "toolCall") continue;
-			const key = supersededResourceKey(block.name, block.arguments);
-			if (key) keyByCallId.set(block.id, key);
-		}
+	let state = supersedeScanCache.get(messages);
+	if (!state || messages.length < state.scannedLength) {
+		state = createSupersedeScanState();
+		supersedeScanCache.set(messages, state);
 	}
-	const keyByIndex = new Map<number, string>();
-	const lastIndexByKey = new Map<string, number>();
-	for (let i = 0; i < messages.length; i++) {
-		const msg = messages[i];
-		if (msg.role !== "toolResult" || !SUPERSEDED_TOOL_RESULT_NAMES.has(msg.toolName ?? "")) continue;
-		const key = keyByCallId.get(msg.toolCallId);
-		if (!key) continue;
-		keyByIndex.set(i, key);
-		const prev = lastIndexByKey.get(key);
-		if (prev === undefined || i > prev) lastIndexByKey.set(key, i);
+	if (messages.length > state.scannedLength) {
+		extendSupersedeScanState(state, messages);
 	}
-	const superseded = new Set<number>();
-	for (const [i, key] of keyByIndex) {
-		if (i >= protectFromIndex) continue;
-		const last = lastIndexByKey.get(key);
-		if (last !== undefined && last > i) superseded.add(i);
-	}
-	return superseded;
+	return deriveSupersededIndices(state, protectFromIndex);
 }
 
 function computePruneProtectFromIndex(messages: AgentMessage[], protectTurns: number): number {
@@ -1000,6 +1155,9 @@ export function wouldPruneOldToolOutputs(
 				let before = argsRef ? beforeTokensCache.get(argsRef) : undefined;
 				if (before === undefined) {
 					before = estimateTextTokens(JSON.stringify(block.arguments), true);
+					// Populate the cache on the read-only path too — this check runs every
+					// turn, and the stringify cost repeats until an apply happens otherwise.
+					if (argsRef) beforeTokensCache.set(argsRef, before);
 				}
 				if (before > tokenThreshold && pruneToolCallArguments(block.arguments)) return true;
 			}
@@ -1009,7 +1167,7 @@ export function wouldPruneOldToolOutputs(
 		const superseded = supersededReadIndices.has(i);
 		for (const block of msg.content) {
 			if (block.type !== "text" || !block.text) continue;
-			const est = estimateTextTokens(block.text, true);
+			const est = cachedDenseTextTokens(block, block.text);
 			if (est > tokenThreshold) return true;
 			if (superseded && wouldShrinkViaHeadTail(block.text)) return true;
 		}
@@ -1069,7 +1227,7 @@ export function pruneOldToolOutputs(
 			const block = msg.content[b];
 			if (block.type === "text" && block.text) {
 				// Tool outputs are dense (JSON/code), use dense divisor
-				const est = estimateTextTokens(block.text, true);
+				const est = cachedDenseTextTokens(block, block.text);
 				if (est > tokenThreshold) {
 					// store.put writes to disk (writeFileSync). A disk-full/permission error
 					// must degrade to the in-message head+tail excerpt rather than abort the
@@ -1094,7 +1252,9 @@ export function pruneOldToolOutputs(
 							? `${excerpt}\n[Full output (~${est} tokens) deferred — recall_tool_output({ id: "${id}" }) returns it in full.]`
 							: excerpt;
 					(msg.content[b] as any).text = replacement;
-					prunedTokens += Math.max(0, est - estimateTextTokens(replacement, true));
+					const after = estimateTextTokens(replacement, true);
+					denseTextTokensCache.set(block, after);
+					prunedTokens += Math.max(0, est - after);
 				} else if (superseded) {
 					// A stale duplicate of a deterministic navigation/search result repeated
 					// later (below the size threshold). Collapse it to head+tail — the newer
@@ -1103,7 +1263,9 @@ export function pruneOldToolOutputs(
 					const excerpt = headTailExcerpt(block.text);
 					if (excerpt.length < block.text.length) {
 						(msg.content[b] as any).text = excerpt;
-						prunedTokens += Math.max(0, est - estimateTextTokens(excerpt, true));
+						const after = estimateTextTokens(excerpt, true);
+						denseTextTokensCache.set(block, after);
+						prunedTokens += Math.max(0, est - after);
 					}
 				}
 			}
@@ -1136,11 +1298,13 @@ export function applySupersedeOnly(
 		for (let b = 0; b < msg.content.length; b++) {
 			const block = msg.content[b];
 			if (block.type !== "text" || !block.text) continue;
-			const est = estimateTextTokens(block.text, true);
+			const est = cachedDenseTextTokens(block, block.text);
 			const excerpt = headTailExcerpt(block.text);
 			if (excerpt.length < block.text.length) {
 				(msg.content[b] as { text: string }).text = excerpt;
-				prunedTokens += Math.max(0, est - estimateTextTokens(excerpt, true));
+				const after = estimateTextTokens(excerpt, true);
+				denseTextTokensCache.set(block, after);
+				prunedTokens += Math.max(0, est - after);
 			}
 		}
 	}
@@ -1400,6 +1564,37 @@ function summarizationUsesJsonOutput(): boolean {
 	return !isTruthyEnvFlag(process.env.PIT_NO_STRUCTURED_SUMMARY_OUTPUT);
 }
 
+/**
+ * Lazy memo of the two serialized views of an immutable message window:
+ * `llm` (convertToLlm) and `delta` (serializeConversationDelta over `llm`).
+ * generateSummary and buildVerificationSource both consume the SAME window;
+ * without the memo each recomputes convertToLlm + delta over identical
+ * messages. Getters are lazy so the structural-only path pays nothing.
+ *
+ * The window messages MUST be immutable for the object's lifetime — in
+ * compact() that means creating it AFTER pruneOldToolOutputs (which rewrites
+ * block.text in place).
+ */
+export interface SerializedWindow {
+	readonly llm: Message[];
+	readonly delta: string;
+}
+
+export function createSerializedWindow(messages: AgentMessage[]): SerializedWindow {
+	let llm: Message[] | undefined;
+	let delta: string | undefined;
+	return {
+		get llm(): Message[] {
+			llm ??= convertToLlm(messages);
+			return llm;
+		},
+		get delta(): string {
+			delta ??= serializeConversationDelta(this.llm);
+			return delta;
+		},
+	};
+}
+
 function createSummarizationOptions(
 	model: Model<any>,
 	maxTokens: number,
@@ -1454,6 +1649,7 @@ export async function generateSummary(
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
+	serialized?: SerializedWindow,
 ): Promise<string> {
 	const maxTokens = summarizationMaxTokens(model, reserveTokens, 0.8);
 
@@ -1472,14 +1668,15 @@ export async function generateSummary(
 
 	// Serialize conversation so the model doesn't try to continue it.
 	// Convert to LLM messages first (handles custom types like bashExecution, custom, etc.)
-	const llmMessages = convertToLlm(currentMessages);
+	// A precomputed SerializedWindow (from compact()) shares this work with the
+	// verification pass; the full-prose serialization is not memoized (no reuser).
 	const useDeltaSerialization =
 		previousSummary !== undefined &&
 		previousSummary.length > 0 &&
 		!isTruthyEnvFlag(process.env.PIT_NO_DELTA_SUMMARIZATION);
 	const conversationText = useDeltaSerialization
-		? serializeConversationDelta(llmMessages)
-		: serializeConversation(llmMessages);
+		? (serialized?.delta ?? serializeConversationDelta(convertToLlm(currentMessages)))
+		: serializeConversation(serialized?.llm ?? convertToLlm(currentMessages));
 	const conversationTag = useDeltaSerialization ? "conversation-delta" : "conversation";
 
 	// Build the prompt with conversation wrapped in tags
@@ -1649,9 +1846,12 @@ const VERIFY_SOURCE_TAIL_BUDGET = 8_000;
 export function buildVerificationSource(
 	messagesToSummarize: AgentMessage[],
 	turnPrefixMessages: AgentMessage[],
+	mainWindow?: SerializedWindow,
+	prefixWindow?: SerializedWindow,
 ): string {
-	const main = serializeConversationDelta(convertToLlm(messagesToSummarize));
-	const prefix = turnPrefixMessages.length > 0 ? serializeConversationDelta(convertToLlm(turnPrefixMessages)) : "";
+	const main = (mainWindow ?? createSerializedWindow(messagesToSummarize)).delta;
+	const prefix =
+		turnPrefixMessages.length > 0 ? (prefixWindow ?? createSerializedWindow(turnPrefixMessages)).delta : "";
 	const combined = prefix ? `${prefix}\n${main}` : main;
 	if (combined.length <= VERIFY_SOURCE_HEAD_BUDGET + VERIFY_SOURCE_TAIL_BUDGET) {
 		return combined;
@@ -1673,8 +1873,14 @@ export function buildVerificationSource(
  */
 const VERIFY_MIN_INPUT_TOKENS = 25_000;
 
-/** Sum content-aware token estimates across a message list. */
-function sumMessageTokens(messages: AgentMessage[]): number {
+/**
+ * Sum content-aware token estimates across a message list — a PURE estimate
+ * that never consults assistant `usage`. After a compaction the kept assistant
+ * messages still carry their pre-compaction usage, so the usage-based
+ * estimateContextTokens reads as if nothing was compacted; callers re-checking
+ * post-compaction pressure must use this instead.
+ */
+export function sumMessageTokens(messages: AgentMessage[]): number {
 	let total = 0;
 	for (const message of messages) total += estimateTokens(message);
 	return total;
@@ -1768,6 +1974,8 @@ export function prepareCompaction(
 	settings: CompactionSettings,
 	contextWindow?: number,
 	allowLatestCompaction = false,
+	knownContextTokens?: number,
+	keepRecentTokensOverride?: number,
 ): CompactionPreparation | undefined {
 	if (!allowLatestCompaction && pathEntries.length > 0 && pathEntries[pathEntries.length - 1].type === "compaction") {
 		return undefined;
@@ -1791,9 +1999,18 @@ export function prepareCompaction(
 	}
 	const boundaryEnd = pathEntries.length;
 
-	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
+	// tokensBefore is telemetry (CompactionEntry/compaction summary metadata).
+	// When the caller already holds a live-context estimate, reuse it instead of
+	// rebuilding the whole session context (an O(n) message materialization) just
+	// to re-derive the same number. The live estimate can run slightly lower than
+	// a rebuild when live pruning already elided old outputs — that is the more
+	// accurate wire-side figure anyway.
+	const tokensBefore = knownContextTokens ?? estimateContextTokens(buildSessionContext(pathEntries).messages).tokens;
 
-	const keepRecentTokens = effectiveKeepRecentTokens(settings.keepRecentTokens, contextWindow);
+	// An explicit override (adaptiveKeepRecentTokens under pressure) wins over the
+	// window-scaled default so a single pass can cut deep enough on small windows.
+	const keepRecentTokens =
+		keepRecentTokensOverride ?? effectiveKeepRecentTokens(settings.keepRecentTokens, contextWindow);
 	const cutPoint = findCutPoint(pathEntries, boundaryStart, boundaryEnd, keepRecentTokens);
 
 	// Get UUID of first kept entry
@@ -1951,6 +2168,61 @@ const STRUCTURAL_ONLY_HEADER = `## Goal
 - Tool operations on the listed files/searches/commands were applied. The retained recent context continues the work.`;
 
 /**
+ * Living-repo-map preseed + buildFileDigests over the touched files. Never
+ * called with an empty `digestPaths`. Extracted from compact() so the digest
+ * I/O (disk reads + symbol parse) can run CONCURRENTLY with the summarization
+ * LLM calls — the inputs depend only on the preparation's fileOps, not on the
+ * summary text.
+ */
+async function collectFileDigests(
+	digestPaths: string[],
+	cwd: string | undefined,
+	signal: AbortSignal | undefined,
+): Promise<Record<string, string>> {
+	// Living repo map: a git-anchored incremental symbol index. Project it onto the
+	// touched files and pass as a pre-seed so anything it already indexed is NOT
+	// re-read/re-parsed here — the digest becomes a cache READ. Fail-open: any
+	// failure leaves preSeed undefined and buildFileDigests rebuilds from disk
+	// (output is identical; only the cost differs).
+	let preSeed: Record<string, string> | undefined;
+	try {
+		const { map } = await getLivingRepoMap(cwd ?? ".");
+		const seed: Record<string, string> = {};
+		const relKeys = digestPaths.map((p) =>
+			relative(cwd ?? ".", isAbsolute(p) ? p : resolve(cwd ?? ".", p))
+				.split("\\")
+				.join("/"),
+		);
+		// Filter the living-repo-map projection to just the touched files so we don't
+		// materialize a digest string for every indexed file in the repo. The lookup
+		// keys (and resulting seed) are identical; only the intermediate dict shrinks.
+		const mapDigests = livingRepoMapToDigests(map, relKeys);
+		for (let i = 0; i < digestPaths.length; i++) {
+			const symbols = mapDigests[relKeys[i]];
+			if (symbols !== undefined) seed[digestPaths[i]] = symbols;
+		}
+		preSeed = seed;
+	} catch {
+		preSeed = undefined;
+	}
+	return buildFileDigests(
+		digestPaths,
+		async (p) => {
+			try {
+				const fullPath = isAbsolute(p) ? p : resolve(cwd ?? ".", p);
+				const st = await stat(fullPath);
+				if (st.size > MAX_DIGEST_BYTES) return null;
+				return await readFile(fullPath, { encoding: "utf8", signal });
+			} catch {
+				return null;
+			}
+		},
+		signal,
+		preSeed,
+	);
+}
+
+/**
  * Generate summaries for compaction using prepared data.
  * Returns CompactionResult - SessionManager adds uuid/parentUuid when saving.
  *
@@ -2001,6 +2273,32 @@ export async function compact(
 		pruneOldToolOutputs(turnPrefixMessages, pruneThreshold);
 	}
 
+	// Serialized views shared by the summarizer and the verification pass.
+	// Created AFTER the prune above — the prune rewrites block.text in place, and
+	// the memo must capture the pruned (final) window. One window per message
+	// list; never share across main/prefix.
+	const mainWindow = createSerializedWindow(messagesToSummarize);
+	const prefixWindow = isSplitTurn ? createSerializedWindow(turnPrefixMessages) : undefined;
+
+	// File digests kick off NOW so the disk reads + symbol parsing overlap the
+	// summarization LLM calls below; the result is awaited only after the verify
+	// pass. Reading at compaction start instead of after the LLM round-trips is
+	// equivalent: the session is disconnected/idle during compaction, so no tool
+	// writes land in between.
+	const lists = computeOperationLists(fileOps, cwd);
+	// Modified files are the artifact trail that summary prose silently drops, so
+	// they get digests by default; read-only files stay behind PIT_FILE_DIGESTS to
+	// bound prefix growth. The lists are disjoint (read AND modified surfaces only
+	// in modifiedFiles), so concatenating needs no dedup.
+	const digestPaths = isTruthyEnvFlag(process.env.PIT_FILE_DIGESTS)
+		? [...lists.modifiedFiles, ...lists.readFiles]
+		: lists.modifiedFiles;
+	const digestsPromise = digestPaths.length > 0 ? collectFileDigests(digestPaths, cwd, signal) : undefined;
+	// No-op branch so a summarization failure below cannot surface an unhandled
+	// rejection from the in-flight digests; the real `await digestsPromise` after
+	// the verify pass still observes (and rethrows) any digest error.
+	digestsPromise?.catch(() => {});
+
 	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
 
@@ -2027,6 +2325,7 @@ export async function compact(
 						previousSummary,
 						thinkingLevel,
 						streamFn,
+						mainWindow,
 					)
 				: Promise.resolve("No prior history."),
 			generateTurnPrefixSummary(
@@ -2038,6 +2337,7 @@ export async function compact(
 				signal,
 				thinkingLevel,
 				streamFn,
+				prefixWindow,
 			),
 		]);
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
@@ -2053,6 +2353,7 @@ export async function compact(
 			previousSummary,
 			thinkingLevel,
 			streamFn,
+			mainWindow,
 		);
 	}
 
@@ -2062,7 +2363,12 @@ export async function compact(
 		sumMessageTokens(messagesToSummarize) + (isSplitTurn ? sumMessageTokens(turnPrefixMessages) : 0);
 	if (!structuralOnly && settings.selfCorrection !== false && verifyInputTokens >= VERIFY_MIN_INPUT_TOKENS) {
 		const maxTokens = summarizationMaxTokens(model, settings.reserveTokens, 0.8);
-		const verifySource = buildVerificationSource(messagesToSummarize, isSplitTurn ? turnPrefixMessages : []);
+		const verifySource = buildVerificationSource(
+			messagesToSummarize,
+			isSplitTurn ? turnPrefixMessages : [],
+			mainWindow,
+			isSplitTurn ? prefixWindow : undefined,
+		);
 		summary = await verifySummary(
 			summary,
 			verifySource,
@@ -2076,7 +2382,6 @@ export async function compact(
 		);
 	}
 
-	const lists = computeOperationLists(fileOps, cwd);
 	if (!structuralOnly && !isTruthyEnvFlag(process.env.PIT_NO_COMPACT_SUMMARY_OUTPUT)) {
 		summary = trimSummaryProseAgainstOperations(summary, lists);
 	}
@@ -2103,55 +2408,10 @@ export async function compact(
 
 	// File digests: a symbol outline of touched files at compaction time, so the
 	// post-compaction model recalls the CURRENT shape of what it worked on without a
-	// re-read. Modified files are the artifact trail that summary prose silently
-	// drops, so they get digests by default; read-only files stay behind
-	// PIT_FILE_DIGESTS to bound prefix growth. The lists are disjoint (read AND
-	// modified surfaces only in modifiedFiles), so concatenating needs no dedup.
-	const digestPaths = isTruthyEnvFlag(process.env.PIT_FILE_DIGESTS)
-		? [...lists.modifiedFiles, ...lists.readFiles]
-		: lists.modifiedFiles;
-	if (digestPaths.length > 0) {
-		// Living repo map: a git-anchored incremental symbol index. Project it onto the
-		// touched files and pass as a pre-seed so anything it already indexed is NOT
-		// re-read/re-parsed here — the digest becomes a cache READ. Fail-open: any
-		// failure leaves preSeed undefined and buildFileDigests rebuilds from disk
-		// (output is identical; only the cost differs).
-		let preSeed: Record<string, string> | undefined;
-		try {
-			const { map } = await getLivingRepoMap(cwd ?? ".");
-			const seed: Record<string, string> = {};
-			const relKeys = digestPaths.map((p) =>
-				relative(cwd ?? ".", isAbsolute(p) ? p : resolve(cwd ?? ".", p))
-					.split("\\")
-					.join("/"),
-			);
-			// Filter the living-repo-map projection to just the touched files so we don't
-			// materialize a digest string for every indexed file in the repo. The lookup
-			// keys (and resulting seed) are identical; only the intermediate dict shrinks.
-			const mapDigests = livingRepoMapToDigests(map, relKeys);
-			for (let i = 0; i < digestPaths.length; i++) {
-				const symbols = mapDigests[relKeys[i]];
-				if (symbols !== undefined) seed[digestPaths[i]] = symbols;
-			}
-			preSeed = seed;
-		} catch {
-			preSeed = undefined;
-		}
-		const digests = await buildFileDigests(
-			digestPaths,
-			async (p) => {
-				try {
-					const fullPath = isAbsolute(p) ? p : resolve(cwd ?? ".", p);
-					const st = await stat(fullPath);
-					if (st.size > MAX_DIGEST_BYTES) return null;
-					return await readFile(fullPath, { encoding: "utf8", signal });
-				} catch {
-					return null;
-				}
-			},
-			signal,
-			preSeed,
-		);
+	// re-read. The collection was kicked off before the summarization LLM calls
+	// (see digestsPromise above); only the await lands here.
+	if (digestsPromise) {
+		const digests = await digestsPromise;
 		if (Object.keys(digests).length > 0) {
 			details.fileDigests = digests;
 			summary += `\n${formatFileDigests(digests)}`;
@@ -2186,9 +2446,10 @@ async function generateTurnPrefixSummary(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 	streamFn?: StreamFn,
+	serialized?: SerializedWindow,
 ): Promise<string> {
 	const maxTokens = summarizationMaxTokens(model, reserveTokens, 0.5); // Smaller budget for turn prefix
-	const llmMessages = convertToLlm(messages);
+	const llmMessages = serialized?.llm ?? convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${TURN_PREFIX_SUMMARIZATION_PROMPT}`;
 

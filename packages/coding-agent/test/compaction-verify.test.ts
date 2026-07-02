@@ -1,15 +1,30 @@
 import type { AgentMessage } from "@pit/agent-core";
 import type { AssistantMessage, Usage } from "@pit/ai";
 import { getModel } from "@pit/ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	buildVerificationSource,
 	type CompactionPreparation,
 	type CompactionSettings,
 	compact,
 	createFileOps,
+	createSerializedWindow,
 	DEFAULT_COMPACTION_SETTINGS,
 } from "../src/core/compaction/index.js";
+
+// Wrap convertToLlm with a pass-through counter so the SerializedWindow tests
+// can assert how many times compact() serializes a window. Behavior unchanged.
+const { convertToLlmSpy } = vi.hoisted(() => ({ convertToLlmSpy: { count: 0 } }));
+vi.mock("../src/core/messages.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/core/messages.js")>();
+	return {
+		...actual,
+		convertToLlm: (...args: Parameters<typeof actual.convertToLlm>) => {
+			convertToLlmSpy.count++;
+			return actual.convertToLlm(...args);
+		},
+	};
+});
 
 // ============================================================================
 // Helpers
@@ -270,5 +285,101 @@ describe("compact() self-correction verify pass", () => {
 		// The raw 90k body must NOT appear in full — the source is bounded.
 		expect(verifyPrompt.length).toBeLessThan(60_000);
 		expect(verifyPrompt).toContain("<conversation-delta>");
+	});
+});
+
+// ============================================================================
+// SerializedWindow — shared convertToLlm + delta between summarizer and verify
+// ============================================================================
+
+describe("SerializedWindow reuse", () => {
+	beforeEach(() => {
+		process.env.PIT_NO_STRUCTURAL_COMPACTION = "1";
+		process.env.PIT_NO_STRUCTURED_SUMMARY_OUTPUT = "1";
+		process.env.PIT_NO_COMPACT_SUMMARY_OUTPUT = "1";
+		convertToLlmSpy.count = 0;
+	});
+	afterEach(() => {
+		delete process.env.PIT_NO_STRUCTURAL_COMPACTION;
+		delete process.env.PIT_NO_STRUCTURED_SUMMARY_OUTPUT;
+		delete process.env.PIT_NO_COMPACT_SUMMARY_OUTPUT;
+	});
+
+	function cannedStreamFn(text: string): any {
+		return () => ({
+			result: async (): Promise<AssistantMessage> => ({
+				role: "assistant",
+				content: [{ type: "text", text }],
+				usage: createMockUsage(10, 10),
+				stopReason: "stop",
+				timestamp: Date.now(),
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+			}),
+		});
+	}
+
+	it("buildVerificationSource returns a byte-identical string with and without a precomputed window", () => {
+		const main = [
+			createUserMessage("Fix the verify pass in compaction.ts"),
+			createAssistantMessage("On it, reading the file first."),
+		];
+		const prefix = [createAssistantMessage("prefix turn text")];
+		const withoutWindow = buildVerificationSource(main, prefix);
+		const withWindow = buildVerificationSource(
+			main,
+			prefix,
+			createSerializedWindow(main),
+			createSerializedWindow(prefix),
+		);
+		expect(withWindow).toBe(withoutWindow);
+	});
+
+	it("memoizes: repeated access to .llm returns the same reference and serializes only once", () => {
+		const window = createSerializedWindow([createUserMessage("hello"), createAssistantMessage("world")]);
+		expect(convertToLlmSpy.count).toBe(0); // lazy — nothing computed yet
+		const first = window.llm;
+		expect(window.llm).toBe(first);
+		expect(window.delta).toBe(window.delta);
+		expect(convertToLlmSpy.count).toBe(1);
+	});
+
+	it("compact() serializes the window once on the incremental path with the verify pass active", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		// ~104k chars of prose -> ~26k tokens, crossing VERIFY_MIN_INPUT_TOKENS so
+		// the verify pass fires; previousSummary makes the summarizer use the delta.
+		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(2300);
+		const messagesToSummarize: AgentMessage[] = [
+			createUserMessage(bigProse),
+			createAssistantMessage("Reading compaction.ts now."),
+			createUserMessage("Continue the fix."),
+			createAssistantMessage("Done editing."),
+		];
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-id",
+			messagesToSummarize,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 50_000,
+			previousSummary: "## Goal\nprevious checkpoint",
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS },
+		};
+
+		convertToLlmSpy.count = 0;
+		await compact(
+			preparation,
+			model,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			cannedStreamFn("## Goal\nfake summary"),
+		);
+
+		// Summarizer (delta) + verify source share one SerializedWindow.
+		expect(convertToLlmSpy.count).toBe(1);
 	});
 });

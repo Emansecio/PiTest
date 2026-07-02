@@ -17,7 +17,9 @@ import { createTestResourceLoader } from "./utilities.js";
 
 vi.mock("../src/core/compaction/index.js", () => ({
 	calculateContextTokens: (usage: { totalTokens?: number; input?: number }) => usage.totalTokens ?? usage.input ?? 0,
+	adaptiveKeepRecentTokens: () => undefined,
 	collectEntriesForBranchSummary: () => ({ entries: [], commonAncestorId: null }),
+	sumMessageTokens: () => 0,
 	compact: async () => ({ summary: "compacted", firstKeptEntryId: "entry-1", tokensBefore: 100, details: {} }),
 	estimateContextTokens: () => ({
 		tokens: 1000,
