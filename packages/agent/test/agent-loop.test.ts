@@ -280,6 +280,88 @@ describe("agentLoop with AgentMessage", () => {
 		expect(convertedMessages.length).toBe(2);
 	});
 
+	it("fails the turn (never skips) when transformContext exceeds its timeout (A1)", async () => {
+		const prev = process.env.PIT_TRANSFORM_CONTEXT_TIMEOUT_MS;
+		process.env.PIT_TRANSFORM_CONTEXT_TIMEOUT_MS = "20";
+		try {
+			const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+			let streamCalled = false;
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				// Hung hook: never resolves.
+				transformContext: () => new Promise<AgentMessage[]>(() => {}),
+			};
+			const streamFn = () => {
+				streamCalled = true;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "hi" }]),
+					});
+				});
+				return stream;
+			};
+
+			const events: AgentEvent[] = [];
+			const stream = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+			for await (const event of stream) events.push(event);
+			const messages = await stream.result();
+
+			const last = messages[messages.length - 1] as AssistantMessage;
+			expect(last.stopReason).toBe("error");
+			expect(last.errorMessage).toMatch(/transformContext hook timed out after 20ms/i);
+			// Load-bearing transform: the model must NOT have been streamed with a
+			// context that skipped the (hung) transform.
+			expect(streamCalled).toBe(false);
+			expect(events.map((e) => e.type)).toContain("agent_end");
+		} finally {
+			if (prev === undefined) delete process.env.PIT_TRANSFORM_CONTEXT_TIMEOUT_MS;
+			else process.env.PIT_TRANSFORM_CONTEXT_TIMEOUT_MS = prev;
+		}
+	});
+
+	it("does not trip the transformContext timeout on a hook that completes in time (A1)", async () => {
+		const prev = process.env.PIT_TRANSFORM_CONTEXT_TIMEOUT_MS;
+		process.env.PIT_TRANSFORM_CONTEXT_TIMEOUT_MS = "200";
+		try {
+			const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				transformContext: async (messages) => {
+					await new Promise((r) => setTimeout(r, 5));
+					return messages;
+				},
+			};
+			const streamFn = () => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "ok" }]),
+					});
+				});
+				return stream;
+			};
+
+			const stream = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+			for await (const _ of stream) {
+				// consume
+			}
+			const messages = await stream.result();
+			const last = messages[messages.length - 1] as AssistantMessage;
+			expect(last.stopReason).toBe("stop");
+			expect(last.errorMessage).toBeUndefined();
+		} finally {
+			if (prev === undefined) delete process.env.PIT_TRANSFORM_CONTEXT_TIMEOUT_MS;
+			else process.env.PIT_TRANSFORM_CONTEXT_TIMEOUT_MS = prev;
+		}
+	});
+
 	it("should handle tool calls and results", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];

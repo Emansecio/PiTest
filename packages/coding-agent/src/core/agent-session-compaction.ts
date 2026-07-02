@@ -41,7 +41,25 @@ import { getLatestCompactionEntry } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import type { ReadDedupeStore } from "./tools/read.js";
 
-const PRESEND_OVERFLOW_RATIO = 0.95;
+/**
+ * Fraction of the context window at which the presend overflow guard trips.
+ * Override via PIT_PRESEND_OVERFLOW_RATIO; a numeric value is clamped into
+ * [0.5, 0.99] (below 0.5 compacts far too eagerly; above 0.99 lets a real
+ * overflow slip past the guard); a non-numeric value falls back to the default.
+ * Parsed once at load.
+ */
+const DEFAULT_PRESEND_OVERFLOW_RATIO = 0.95;
+
+export function parsePresendOverflowRatio(raw: string | undefined): number {
+	if (raw === undefined || raw === "") return DEFAULT_PRESEND_OVERFLOW_RATIO;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed)) return DEFAULT_PRESEND_OVERFLOW_RATIO;
+	return Math.min(0.99, Math.max(0.5, parsed));
+}
+
+const PRESEND_OVERFLOW_RATIO = parsePresendOverflowRatio(
+	typeof process !== "undefined" ? process.env.PIT_PRESEND_OVERFLOW_RATIO : undefined,
+);
 
 /** Stable session surface compaction reads; implemented by AgentSession. */
 export interface CompactionHost {

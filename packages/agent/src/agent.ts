@@ -108,6 +108,12 @@ export interface AgentOptions {
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
 	maxRetryDelayMs?: number;
+	/**
+	 * Body idle-timeout override forwarded to the stream function. Mutable so the
+	 * host can raise it per retry (see AgentSession's idle-timeout adaptive backoff);
+	 * undefined lets the stream function fall back to its configured default.
+	 */
+	idleTimeoutMs?: number;
 	toolExecution?: ToolExecutionMode;
 	/** Time-Traveling Stream Rules matcher. Passed through to the loop config. */
 	ttsrMatcher?: TTSRMatcher;
@@ -219,6 +225,8 @@ export class Agent {
 	public transport: Transport;
 	/** Optional cap for provider-requested retry delays. */
 	public maxRetryDelayMs?: number;
+	/** Body idle-timeout override forwarded to the stream function; see AgentOptions. */
+	public idleTimeoutMs?: number;
 	/** Tool execution strategy for assistant messages that contain multiple tool calls. */
 	public toolExecution: ToolExecutionMode;
 	/** Optional Time-Traveling Stream Rules matcher. */
@@ -252,6 +260,7 @@ export class Agent {
 		this.thinkingBudgets = options.thinkingBudgets;
 		this.transport = options.transport ?? "auto";
 		this.maxRetryDelayMs = options.maxRetryDelayMs;
+		this.idleTimeoutMs = options.idleTimeoutMs;
 		this.toolExecution = options.toolExecution ?? "parallel";
 		this.ttsrMatcher = options.ttsrMatcher;
 		this.getOverthinkGuard = options.getOverthinkGuard;
@@ -519,6 +528,7 @@ export class Agent {
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
+			idleTimeoutMs: this.idleTimeoutMs,
 			toolExecution: this.toolExecution,
 			toolAbortControllers: this.toolAbortControllers,
 			beforeToolCall: this.beforeToolCall,

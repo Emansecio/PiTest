@@ -342,6 +342,36 @@ describe("AgentSession retry", () => {
 		expect(internals._triedFallbackEntries.size).toBe(0);
 	});
 
+	it("scales the idle timeout on consecutive idle-timeout retries and resets otherwise (A3)", () => {
+		const created = createSession({ failCount: 0 });
+		const internals = created.session as unknown as {
+			_applyIdleTimeoutBackoff: (m: AssistantMessage) => void;
+			agent: { idleTimeoutMs?: number };
+		};
+		const idle = createAssistantMessage("", {
+			stopReason: "error",
+			errorMessage:
+				"Stream idle timeout: no data received for 120000ms (connection timed out, likely a dead socket)",
+		});
+
+		// Base idle window is the 120s default (no provider override configured).
+		internals._applyIdleTimeoutBackoff(idle);
+		expect(internals.agent.idleTimeoutMs).toBe(180_000); // 120000 * 1.5
+		internals._applyIdleTimeoutBackoff(idle);
+		expect(internals.agent.idleTimeoutMs).toBe(270_000); // 120000 * 1.5^2
+		internals._applyIdleTimeoutBackoff(idle);
+		expect(internals.agent.idleTimeoutMs).toBe(300_000); // 405000 capped at 300s
+
+		// A non-idle retryable error breaks the streak and restores the default window.
+		const overloaded = createAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" });
+		internals._applyIdleTimeoutBackoff(overloaded);
+		expect(internals.agent.idleTimeoutMs).toBeUndefined();
+
+		// Streak restarts from the base after the reset.
+		internals._applyIdleTimeoutBackoff(idle);
+		expect(internals.agent.idleTimeoutMs).toBe(180_000);
+	});
+
 	it("restores the primary model after a transient fallback instead of staying pinned", async () => {
 		// A fallback (e.g. after a 429) must be temporary: once a turn settles the
 		// session reverts to the primary model. Previously _fallbackOriginal was

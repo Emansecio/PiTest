@@ -43,8 +43,42 @@ export interface TTSRMatcher {
 	reset(): void;
 }
 
-/** Max characters retained per scope buffer. Older characters are dropped. */
-const ROLLING_BUFFER_CHARS = 2048;
+/**
+ * Max characters retained per scope buffer. Older characters are dropped.
+ * Override via PIT_TTSR_BUFFER_CHARS, clamped to [512, 65536]; a non-numeric
+ * value falls back to the default. Parsed once at load.
+ */
+const DEFAULT_ROLLING_BUFFER_CHARS = 2048;
+
+export function parseRollingBufferChars(raw: string | undefined): number {
+	if (raw === undefined || raw === "") return DEFAULT_ROLLING_BUFFER_CHARS;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed)) return DEFAULT_ROLLING_BUFFER_CHARS;
+	return Math.min(65536, Math.max(512, Math.floor(parsed)));
+}
+
+const ROLLING_BUFFER_CHARS = parseRollingBufferChars(
+	typeof process !== "undefined" ? process.env.PIT_TTSR_BUFFER_CHARS : undefined,
+);
+
+// Dev-facing guard, emitted at most once per process: a rule whose pattern source
+// is already longer than the rolling buffer can never match (the buffer drops the
+// oldest chars first), so the rule silently misses. Pattern length is a cheap lower
+// bound on the span the rule needs.
+let bufferSpanWarningEmitted = false;
+
+function warnIfRuleExceedsBuffer(rules: CompiledTTSRRule[]): void {
+	if (bufferSpanWarningEmitted) return;
+	for (const rule of rules) {
+		if (rule.originalSource.length > ROLLING_BUFFER_CHARS) {
+			bufferSpanWarningEmitted = true;
+			console.warn(
+				`TTSR: rule "${rule.name}" pattern is ${rule.originalSource.length} chars, longer than the rolling buffer (${ROLLING_BUFFER_CHARS} chars); it may never match. Raise PIT_TTSR_BUFFER_CHARS.`,
+			);
+			return;
+		}
+	}
+}
 
 /**
  * Compile a list of serialized rules. Disabled entries are dropped. Bad regex
@@ -82,6 +116,7 @@ export function compileRules(rules: TTSRRule[]): CompiledTTSRRule[] {
  * a tool-args match cannot bleed into assistant-text matches and vice versa.
  */
 export function createMatcher(rules: CompiledTTSRRule[]): TTSRMatcher {
+	warnIfRuleExceedsBuffer(rules);
 	let textBuffer = "";
 	let toolArgsBuffer = "";
 

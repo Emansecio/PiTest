@@ -32,6 +32,52 @@ import type {
 const MAX_TTSR_RETRIES_PER_TURN = 3;
 
 /**
+ * Idle cap on the `transformContext` hook — the only otherwise-unbounded await
+ * in the turn path. A hung hook wedges the whole turn (and the run) forever.
+ * Default 60s; override via PIT_TRANSFORM_CONTEXT_TIMEOUT_MS; 0 disables the cap.
+ * On timeout we THROW (never skip): a transform can be load-bearing, so silently
+ * dropping it could send an unsafe context to the model. The throw takes the same
+ * terminal-failure path as any transformContext rejection (see agentLoop's guard).
+ */
+const DEFAULT_TRANSFORM_CONTEXT_TIMEOUT_MS = 60_000;
+
+function resolveTransformContextTimeoutMs(): number {
+	const raw = typeof process !== "undefined" ? process.env.PIT_TRANSFORM_CONTEXT_TIMEOUT_MS : undefined;
+	if (raw === undefined || raw === "") return DEFAULT_TRANSFORM_CONTEXT_TIMEOUT_MS;
+	const parsed = Number(raw);
+	// Non-numeric or negative falls back to the default; 0 disables (call site).
+	if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_TRANSFORM_CONTEXT_TIMEOUT_MS;
+	return parsed;
+}
+
+/** Race a transformContext hook against its idle cap; reject (not skip) on timeout. */
+async function withTransformContextTimeout(
+	pending: Promise<AgentMessage[]>,
+	timeoutMs: number,
+): Promise<AgentMessage[]> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	// Swallow a late rejection from the hook after we've already timed out, so it
+	// never surfaces as an unhandled rejection.
+	pending.catch(() => {});
+	const timeout = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(() => {
+			reject(
+				new Error(
+					`transformContext hook timed out after ${timeoutMs}ms (set PIT_TRANSFORM_CONTEXT_TIMEOUT_MS to adjust, 0 to disable). The transform is load-bearing and was not skipped; failing the turn.`,
+				),
+			);
+		}, timeoutMs);
+		// Don't keep the event loop alive solely for this watchdog.
+		(timer as { unref?: () => void }).unref?.();
+	});
+	try {
+		return await Promise.race([pending, timeout]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
+/**
  * Default hard backstop on model turns per `runAgentLoop` invocation when a
  * caller does not set `config.maxTurns`. High enough to never bite a legitimate
  * task, finite enough to bound cost on a runaway loop the doom-loop detector
@@ -577,10 +623,13 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage | StreamInterrupt> {
-	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
+	// Apply context transform if configured (AgentMessage[] → AgentMessage[]).
+	// Bounded by an idle cap so a hung hook fails the turn instead of wedging it.
 	let messages = context.messages;
 	if (config.transformContext) {
-		messages = await config.transformContext(messages, signal);
+		const timeoutMs = resolveTransformContextTimeoutMs();
+		const pending = config.transformContext(messages, signal);
+		messages = timeoutMs === 0 ? await pending : await withTransformContextTimeout(pending, timeoutMs);
 	}
 
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])

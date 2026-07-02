@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
-import { compileRules, createMatcher, type TTSRRule } from "../src/core/ttsr.js";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { compileRules, createMatcher, parseRollingBufferChars, type TTSRRule } from "../src/core/ttsr.js";
 
 describe("compileRules", () => {
 	test("throws naming the bad rule when regex is invalid", () => {
@@ -84,5 +84,48 @@ describe("createMatcher", () => {
 		expect(m.feed("def", "assistant_text")).toBeUndefined();
 		// New full match still works
 		expect(m.feed("abcdef now", "assistant_text")?.name).toBe("split");
+	});
+});
+
+describe("parseRollingBufferChars (A2)", () => {
+	test("undefined / empty fall back to the 2048 default", () => {
+		expect(parseRollingBufferChars(undefined)).toBe(2048);
+		expect(parseRollingBufferChars("")).toBe(2048);
+	});
+
+	test("non-numeric falls back to the default", () => {
+		expect(parseRollingBufferChars("abc")).toBe(2048);
+		expect(parseRollingBufferChars("NaN")).toBe(2048);
+	});
+
+	test("clamps into [512, 65536]", () => {
+		expect(parseRollingBufferChars("100")).toBe(512);
+		expect(parseRollingBufferChars("999999")).toBe(65536);
+		expect(parseRollingBufferChars("512")).toBe(512);
+		expect(parseRollingBufferChars("65536")).toBe(65536);
+	});
+
+	test("accepts an in-range value and floors fractions", () => {
+		expect(parseRollingBufferChars("4096")).toBe(4096);
+		expect(parseRollingBufferChars("4096.9")).toBe(4096);
+	});
+});
+
+describe("createMatcher buffer-span guard (A2)", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	test("warns at most once when a rule pattern is longer than the rolling buffer", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		// Pattern source longer than the default 2048-char buffer: the rule can
+		// never match against the rolling window, so a dev-facing warning fires.
+		const longSource = "a".repeat(3000);
+		const rules = compileRules([{ name: "too-long", regex: longSource, message: "x" }]);
+		createMatcher(rules);
+		createMatcher(rules);
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn.mock.calls[0]![0]).toMatch(/too-long/);
+		expect(warn.mock.calls[0]![0]).toMatch(/PIT_TTSR_BUFFER_CHARS/);
 	});
 });

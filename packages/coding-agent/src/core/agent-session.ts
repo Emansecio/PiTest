@@ -29,6 +29,7 @@ import type { AssistantMessage, ImageContent, Message, Model, TextContent } from
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	DEFAULT_IDLE_TIMEOUT_MS,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	isEntryCooledDown,
@@ -505,6 +506,15 @@ const RETRYABLE_ERROR_RE =
  */
 const RETRY_MAX_DELAY_MS = 30_000;
 
+// Adaptive idle-timeout backoff: a consistently slow provider re-fires the same
+// idle timeout on every retry. Scale the body idle window ×1.5 per CONSECUTIVE
+// idle-timeout retry (capped) so a genuinely slow-but-alive stream gets more room
+// each attempt, then reset to the configured default on the next success.
+const IDLE_BACKOFF_FACTOR = 1.5;
+const IDLE_BACKOFF_MAX_MS = 300_000;
+// Matches IdleStreamTimeoutError's message ("Stream idle timeout ... timed out").
+const IDLE_TIMEOUT_ERROR_RE = /idle timeout|idlestreamtimeout/i;
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -546,6 +556,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// Retry state
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	// Count of CONSECUTIVE idle-timeout retries, driving the adaptive idle backoff.
+	// Reset to 0 on any non-idle retryable error and on a successful response.
+	private _idleTimeoutRetryCount = 0;
 	// Models in the active fallback chain that have already been tried this turn.
 	// Reset on successful assistant response and at every run boundary
 	// (_restoreFallbackModelIfActive) so an exhausted-chain run that ends in error
@@ -1573,6 +1586,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 						});
 						this._retryAttempt = 0;
 					}
+					// Reset the adaptive idle-timeout backoff: a clean response means the
+					// stream is healthy, so drop back to the configured idle window.
+					this._idleTimeoutRetryCount = 0;
+					this.agent.idleTimeoutMs = undefined;
 					// Reset the fallback chain so the next failure restarts from the
 					// primary. The captured primary model (_fallbackOriginal) is NOT
 					// cleared here — it is restored at the turn boundary in
@@ -4897,6 +4914,28 @@ export class AgentSession implements CompactionHost, FusionHost {
 	 *
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
+	/**
+	 * Adaptive idle-timeout backoff for the NEXT stream attempt. An idle-timeout
+	 * failure means the body stalled for the entire idle window; a consistently
+	 * slow provider would otherwise re-fire the same window on every retry. Scale
+	 * the forwarded idle window ×1.5 per consecutive idle-timeout retry (capped at
+	 * IDLE_BACKOFF_MAX_MS) so the retried stream inherits more room each time. Any
+	 * non-idle retryable error breaks the streak and restores the default window.
+	 * Called only once a retry is committed.
+	 */
+	private _applyIdleTimeoutBackoff(message: AssistantMessage): void {
+		if (!IDLE_TIMEOUT_ERROR_RE.test(message.errorMessage ?? "")) {
+			this._idleTimeoutRetryCount = 0;
+			this.agent.idleTimeoutMs = undefined;
+			return;
+		}
+		this._idleTimeoutRetryCount++;
+		const configured = this.settingsManager.getProviderRetrySettings().idleTimeoutMs;
+		const base = typeof configured === "number" && configured > 0 ? configured : DEFAULT_IDLE_TIMEOUT_MS;
+		const scaled = base * IDLE_BACKOFF_FACTOR ** this._idleTimeoutRetryCount;
+		this.agent.idleTimeoutMs = Math.round(Math.min(scaled, IDLE_BACKOFF_MAX_MS));
+	}
+
 	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled) {
@@ -4939,6 +4978,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 				this.agent.state.messages = messages.slice(0, -1);
 			}
 			await this._activateFallbackEntry(nextEntry, reason);
+			this._applyIdleTimeoutBackoff(message);
 			return true;
 		}
 
@@ -4988,6 +5028,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			this._retryAbortController = undefined;
 		}
 
+		this._applyIdleTimeoutBackoff(message);
 		return true;
 	}
 
