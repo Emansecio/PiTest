@@ -92,4 +92,50 @@ describe("createLearnedErrorGuardExtension", () => {
 		});
 		expect((await call("read", aliasArgs))?.block).toBe(true);
 	});
+
+	it("matches a whitespace-variant of the stored failure", async () => {
+		const stored = fingerprintToolArgs({ command: "rg foo bar" }, 160);
+		const call = mountExtension({
+			provider: () => [entry({ tool: "bash", sampleArgs: stored })],
+		});
+		// Extra runs of whitespace between the same tokens — formatting only.
+		expect((await call("bash", { command: "rg   foo    bar" }))?.block).toBe(true);
+	});
+
+	it("matches a path-separator / drive-case variant of the stored failure", async () => {
+		const stored = fingerprintToolArgs({ path: "C:\\repo\\a.ts" }, 160);
+		const call = mountExtension({
+			provider: () => [entry({ tool: "read", sampleArgs: stored })],
+		});
+		// Forward slashes + lowercase drive letter for the same file.
+		expect((await call("read", { path: "c:/repo/a.ts" }))?.block).toBe(true);
+	});
+
+	it("does NOT match a genuinely different path (no false positive)", async () => {
+		const stored = fingerprintToolArgs({ path: "C:\\repo\\a.ts" }, 160);
+		const call = mountExtension({
+			provider: () => [entry({ tool: "read", sampleArgs: stored })],
+		});
+		// Same folder, different file — content differs, not just formatting.
+		expect(await call("read", { path: "c:/repo/b.ts" })).toBeUndefined();
+	});
+
+	it("does NOT fold away non-formatting whitespace (x = 1 vs x=1 stay distinct)", async () => {
+		const stored = fingerprintToolArgs({ oldText: "const x = 1" }, 160);
+		const call = mountExtension({
+			provider: () => [entry({ tool: "edit", sampleArgs: stored })],
+		});
+		expect(await call("edit", { oldText: "const x=1" })).toBeUndefined();
+	});
+
+	it("still matches a legacy exact fingerprint byte-for-byte", async () => {
+		// A fingerprint written before normalisation existed — raw backslashes and
+		// uppercase drive letter. An identical live call must still fire via the
+		// exact-match path (backward compatibility).
+		const legacy = fingerprintToolArgs({ command: "type C:\\Temp\\LOG.txt" }, 160);
+		const call = mountExtension({
+			provider: () => [entry({ tool: "bash", sampleArgs: legacy })],
+		});
+		expect((await call("bash", { command: "type C:\\Temp\\LOG.txt" }))?.block).toBe(true);
+	});
 });

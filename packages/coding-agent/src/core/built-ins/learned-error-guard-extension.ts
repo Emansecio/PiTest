@@ -8,9 +8,13 @@
  * never costs a real failure again.
  *
  * Match is deliberately high-precision / low-recall: the live call's args
- * fingerprint must EQUAL the stored representative `sampleArgs`, the pattern must
+ * fingerprint must equal the stored representative `sampleArgs` — either its
+ * EXACT form (byte-for-byte, so existing on-disk fingerprints keep firing with
+ * zero regression) or its NORMALISED form (whitespace runs collapsed, path
+ * separators/drive-letter case folded), so a call that differs from the stored
+ * failure only in formatting still re-fires the lesson. The pattern must also
  * have recurred at least `minOccurrences` times across at least `minSessions`
- * sessions, and it must NOT already be covered by a built-in Tier-4 rule (those
+ * sessions, and must NOT already be covered by a built-in Tier-4 rule (those
  * carry a better-targeted hint). The guard fires at most ONCE per (tool, args)
  * per session: if the model genuinely intends the call, the immediate retry runs.
  *
@@ -27,6 +31,7 @@ import {
 	type AggregatedLearnedError,
 	aggregateLearnedErrors,
 	defaultLearnedErrorsDir,
+	normalizeArgsForFingerprint,
 } from "../learned-error-store.ts";
 import { fingerprintToolArgs } from "../tool-call-stats.ts";
 import { applyKeyAliases, EDIT_KEY_ALIASES, PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
@@ -66,6 +71,24 @@ function normaliseInput(input: unknown): unknown {
 	return applyKeyAliases(input as Record<string, unknown>, ALIASES);
 }
 
+/**
+ * Normalised fingerprint for a stored `sampleArgs`. `sampleArgs` is a
+ * `fingerprintToolArgs` JSON string, so we parse it back to an object, fold out
+ * formatting variance, and re-fingerprint — yielding the same key a live call
+ * with formatting-only differences would produce. Returns undefined when the
+ * stored fingerprint was length-capped (`…`) and no longer parses as JSON; the
+ * exact-match index entry still covers those, so no match is lost.
+ */
+function normalizeStoredSampleArgs(sampleArgs: string): string | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(sampleArgs);
+	} catch {
+		return undefined;
+	}
+	return fingerprintToolArgs(normalizeArgsForFingerprint(parsed), SAMPLE_ARGS_FINGERPRINT_CHARS);
+}
+
 export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptions = {}) {
 	return (pi: ExtensionAPI) => {
 		if (options.enabled === false || isTruthyEnvFlag(process.env.PIT_NO_LEARNED_ERROR_GUARD)) return;
@@ -98,7 +121,13 @@ export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptio
 					inner = new Map<string, AggregatedLearnedError>();
 					idx.set(entry.tool, inner);
 				}
-				inner.set(entry.sampleArgs, entry);
+				// Index under BOTH the exact stored fingerprint (byte-for-byte backward
+				// compatibility with fingerprints written before normalisation existed)
+				// and its normalised form (so formatting-variant live calls still match).
+				// First write wins so an entry never shadows an earlier one's exact key.
+				if (!inner.has(entry.sampleArgs)) inner.set(entry.sampleArgs, entry);
+				const normalised = normalizeStoredSampleArgs(entry.sampleArgs);
+				if (normalised && !inner.has(normalised)) inner.set(normalised, entry);
 			}
 			return idx;
 		};
@@ -115,8 +144,22 @@ export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptio
 			if (!index) return undefined;
 			const inner = index.get(event.toolName);
 			if (!inner || inner.size === 0) return undefined;
-			const fingerprint = fingerprintToolArgs(normaliseInput(event.input), SAMPLE_ARGS_FINGERPRINT_CHARS);
-			const entry = inner.get(fingerprint);
+			// Exact fingerprint first (cheap, and how legacy entries match). Only when
+			// it misses do we pay for normalisation and retry — so a store with no
+			// formatting-variant candidate for this tool costs one hash, not two.
+			const normalisedInput = normaliseInput(event.input);
+			let fingerprint = fingerprintToolArgs(normalisedInput, SAMPLE_ARGS_FINGERPRINT_CHARS);
+			let entry = inner.get(fingerprint);
+			if (!entry) {
+				const normalisedFingerprint = fingerprintToolArgs(
+					normalizeArgsForFingerprint(normalisedInput),
+					SAMPLE_ARGS_FINGERPRINT_CHARS,
+				);
+				if (normalisedFingerprint !== fingerprint) {
+					entry = inner.get(normalisedFingerprint);
+					fingerprint = normalisedFingerprint;
+				}
+			}
 			if (!entry) return undefined;
 			const key = `${event.toolName}:${fingerprint}`;
 			// Fire once per pattern per session — then let the model proceed if it

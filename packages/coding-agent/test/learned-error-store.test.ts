@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	aggregateLearnedErrors,
 	type LearnedErrorEntry,
+	normalizeArgsForFingerprint,
 	normalizeErrorFingerprint,
 	persistSessionLearnedErrors,
 	truncateErrorSample,
@@ -37,6 +38,44 @@ describe("normalizeErrorFingerprint", () => {
 		const result = normalizeErrorFingerprint(long, 50);
 		expect(result?.length).toBe(51); // 50 + ellipsis char
 		expect(result?.endsWith("\u2026")).toBe(true);
+	});
+});
+
+describe("normalizeArgsForFingerprint", () => {
+	it("collapses runs of whitespace and trims string values", () => {
+		expect(normalizeArgsForFingerprint({ command: "  rg   foo    bar  " })).toEqual({ command: "rg foo bar" });
+	});
+
+	it("folds path-separator style and drive-letter case in path-like values", () => {
+		expect(normalizeArgsForFingerprint({ path: "C:\\repo\\a.ts" })).toEqual({ path: "c:/repo/a.ts" });
+		// Already forward-slash / lowercase drive normalises to the same key.
+		expect(normalizeArgsForFingerprint({ path: "c:/repo/a.ts" })).toEqual({ path: "c:/repo/a.ts" });
+	});
+
+	it("is idempotent", () => {
+		const once = normalizeArgsForFingerprint({ command: "rg  foo C:\\x" });
+		expect(normalizeArgsForFingerprint(once)).toEqual(once);
+	});
+
+	it("does not fold non-formatting whitespace (x = 1 stays distinct from x=1)", () => {
+		expect(normalizeArgsForFingerprint({ oldText: "const x = 1" })).toEqual({ oldText: "const x = 1" });
+		expect(normalizeArgsForFingerprint({ oldText: "const x=1" })).toEqual({ oldText: "const x=1" });
+	});
+
+	it("keeps genuinely different paths distinct", () => {
+		expect(normalizeArgsForFingerprint({ path: "C:\\repo\\a.ts" })).not.toEqual(
+			normalizeArgsForFingerprint({ path: "C:\\repo\\b.ts" }),
+		);
+	});
+
+	it("recurses into arrays and nested objects, leaving non-strings untouched", () => {
+		expect(
+			normalizeArgsForFingerprint({ edits: [{ path: "A:\\x\\y" }], count: 3, flag: true, missing: null }),
+		).toEqual({ edits: [{ path: "a:/x/y" }], count: 3, flag: true, missing: null });
+	});
+
+	it("does not treat a plain drive-less string as a path", () => {
+		expect(normalizeArgsForFingerprint({ note: "See section 4" })).toEqual({ note: "See section 4" });
 	});
 });
 

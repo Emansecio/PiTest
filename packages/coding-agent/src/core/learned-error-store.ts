@@ -262,3 +262,59 @@ export function truncateErrorSample(text: string): string {
 	if (text.length <= SAMPLE_TEXT_MAX_CHARS) return text;
 	return `${sliceSafe(text, 0, SAMPLE_TEXT_MAX_CHARS)}\u2026`;
 }
+
+const RE_WS_RUN = /\s+/g;
+/** A value is "path-like" if it contains a separator or a `X:` drive prefix. */
+const RE_PATH_LIKE = /[/\\]|^[A-Za-z]:/;
+const RE_BACKSLASH = /\\/g;
+/** Drive letter immediately before a separator, not part of a longer token (e.g. a URL scheme). */
+const RE_DRIVE = /(?<![A-Za-z])([A-Za-z]):(?=\/)/g;
+
+/**
+ * Fold formatting-only variance out of a single string value so semantically
+ * identical arguments hash the same. Conservative by design \u2014 it only touches
+ * layout, never content:
+ *
+ *  - Runs of whitespace collapse to a single space, and the value is trimmed.
+ *    (`"a   b"` \u2192 `"a b"`.) NOTE: this does NOT strip whitespace between tokens,
+ *    so `"x = 1"` and `"x=1"` still differ \u2014 those are content, not formatting.
+ *  - Path-like values (containing a separator or a drive prefix) get backslashes
+ *    normalised to forward slashes and their drive letter lowercased, so
+ *    `"C:\\repo\\a.ts"` and `"c:/repo/a.ts"` collapse to one key.
+ *
+ * Genuinely different paths/commands never collide: only the separator style,
+ * drive-letter case, and whitespace runs are folded.
+ */
+function normalizeStringValue(value: string): string {
+	RE_WS_RUN.lastIndex = 0;
+	const collapsed = value.replace(RE_WS_RUN, " ").trim();
+	if (!RE_PATH_LIKE.test(collapsed)) return collapsed;
+	RE_DRIVE.lastIndex = 0;
+	return collapsed.replace(RE_BACKSLASH, "/").replace(RE_DRIVE, (_m, drive: string) => `${drive.toLowerCase()}:`);
+}
+
+/**
+ * Deep-normalise a tool-arguments value for fingerprint MATCHING. Recurses into
+ * arrays and objects (keys preserved \u2014 the fingerprinter sorts them) and applies
+ * {@link normalizeStringValue} to every string leaf. Non-string primitives pass
+ * through untouched.
+ *
+ * Used only at the guard's candidate-comparison layer: the live call's args and
+ * each stored `sampleArgs` are normalised through this before comparing, so
+ * whitespace- and path-separator-variant calls re-fire a learned lesson while
+ * genuinely different calls stay distinct. It never rewrites what gets persisted,
+ * so old on-disk fingerprints keep matching by their original exact form too.
+ */
+export function normalizeArgsForFingerprint(input: unknown): unknown {
+	if (typeof input === "string") return normalizeStringValue(input);
+	if (Array.isArray(input)) return input.map(normalizeArgsForFingerprint);
+	if (input !== null && typeof input === "object") {
+		const obj = input as Record<string, unknown>;
+		const out: Record<string, unknown> = {};
+		for (const key of Object.keys(obj)) {
+			out[key] = normalizeArgsForFingerprint(obj[key]);
+		}
+		return out;
+	}
+	return input;
+}
