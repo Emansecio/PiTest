@@ -442,6 +442,146 @@ const editRules: ToolErrorHintRule[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// write rules
+// ---------------------------------------------------------------------------
+
+const writeRules: ToolErrorHintRule[] = [
+	{
+		// write auto-creates parent directories (mkdir recursive) before writing,
+		// so a raw Node `ENOENT` here is NOT a plain missing-parent case — it means
+		// the resolved path is invalid (bad drive/root) or a component could not be
+		// created. Node fs errors carry the code as a message prefix, e.g.
+		// `ENOENT: no such file or directory, open '<path>'`.
+		id: "write-enoent-path-invalid",
+		appliesTo: "write",
+		matcher: ({ errorText }) => /\bENOENT\b/i.test(errorText) || /no such file or directory/i.test(errorText),
+		hint: () =>
+			"Write failed with ENOENT. write already creates parent dirs, so this usually means an invalid path (bad drive/root) or an unwritable component — inspect the parent with `ls({path:<parent>})` and re-check the path before retrying.",
+	},
+	{
+		// EACCES/EPERM from the atomic write or its mkdir. The process lacks
+		// permission; the model must not chmod silently — surface it to the user.
+		// Mirrors the bash/edit permission rules. Node fs messages read
+		// `EACCES: permission denied, open '<path>'` / `EPERM: operation not permitted`.
+		id: "write-permission-denied",
+		appliesTo: "write",
+		matcher: ({ errorText }) =>
+			/\b(EACCES|EPERM)\b/i.test(errorText) || /permission denied|operation not permitted/i.test(errorText),
+		hint: ({ call }) => {
+			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");
+			const target = path ?? "<path>";
+			return `Permission denied writing \`${target}\` (EACCES/EPERM). Report this path to the user and ask how to proceed — do not silently \`chmod\` or change ownership to force the write.`;
+		},
+	},
+	{
+		// EISDIR: the target path resolves to an existing directory. Node emits
+		// `EISDIR: illegal operation on a directory, open '<path>'`. Retrying the
+		// same path is useless — the model must point write at a file instead.
+		id: "write-target-is-directory",
+		appliesTo: "write",
+		matcher: ({ errorText }) => /\bEISDIR\b/i.test(errorText) || /illegal operation on a directory/i.test(errorText),
+		hint: ({ call }) => {
+			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");
+			const target = path ?? "<path>";
+			return `Write target \`${target}\` is a directory (EISDIR), not a file. Confirm with \`ls({path:"${target}"})\` and point write at a file path inside it instead of the directory.`;
+		},
+	},
+];
+
+// ---------------------------------------------------------------------------
+// find / grep / ls rules — the navigation tools
+// ---------------------------------------------------------------------------
+
+/** Shared hint for a missing search ROOT (find/grep): the pattern is fine, the dir is gone. */
+function searchPathNotFoundHint(args: unknown): string {
+	const path = getString(args, "path");
+	const where = path ? `\`${path}\`` : "the search directory";
+	return `Search directory ${where} does not exist. Verify it with \`ls({path:<parent>})\` or drop the \`path\` arg to search from cwd — the pattern is fine, the root is missing.`;
+}
+
+const findRules: ToolErrorHintRule[] = [
+	{
+		// find resolves a search root before running fd. Custom ops emit
+		// `Path not found: <dir>`; the default fd path surfaces fd's own stderr
+		// (`[fd error]: ... does not exist` / `... is not a directory`). In every
+		// case the search ROOT is bad, not the glob.
+		id: "find-search-path-not-found",
+		appliesTo: "find",
+		matcher: ({ errorText }) =>
+			/path not found:/i.test(errorText) ||
+			(/\[fd error\]/i.test(errorText) && /(does not exist|not a directory|no such file)/i.test(errorText)),
+		hint: ({ call }) => searchPathNotFoundHint(call.arguments),
+	},
+	{
+		// A malformed glob (unbalanced `[` / `{`) reaches fd raw for patterns with
+		// no `/` — path-containing patterns are post-filtered with minimatch and
+		// never hit fd's parser. fd/globset reports the parse failure on stderr,
+		// which find rejects verbatim.
+		id: "find-invalid-glob",
+		appliesTo: "find",
+		matcher: ({ errorText }) =>
+			/glob/i.test(errorText) && /(parse|unclosed|unexpected|invalid|unbalanced|unterminated)/i.test(errorText),
+		hint: () =>
+			"Invalid glob pattern. Balance or escape the special glob chars (`[ ] { }`), and note that find uses glob syntax with forward slashes — not regex. For a regex or content search, use the `grep` tool instead.",
+	},
+];
+
+const grepRules: ToolErrorHintRule[] = [
+	{
+		// grep stats the search root before spawning rg and emits
+		// `Path not found: <dir>` when that fails. Same class as find's — the root
+		// is missing, so retrying the pattern is pointless.
+		id: "grep-search-path-not-found",
+		appliesTo: "grep",
+		matcher: ({ errorText }) => /path not found:/i.test(errorText),
+		hint: ({ call }) => searchPathNotFoundHint(call.arguments),
+	},
+	{
+		// A regex-parse error means the PATTERN is malformed. grep's ripgrep path
+		// already enriches this with "set literal: true" guidance, so we only fire
+		// when that guidance is ABSENT (e.g. an alternate backend surfaced the raw
+		// rg/regex error) — otherwise the hint would merely repeat the error.
+		id: "grep-invalid-regex",
+		appliesTo: "grep",
+		matcher: ({ errorText }) =>
+			/regex parse error|invalid regex pattern/i.test(errorText) && !/literal:\s*true/i.test(errorText),
+		hint: () =>
+			"Regex parse error: the pattern has unbalanced or unescaped metacharacters (`( ) [ ] . * + ? | \\`). Escape them, or set `literal: true` to match the text verbatim.",
+	},
+];
+
+const lsRules: ToolErrorHintRule[] = [
+	{
+		// ls emits `Path not found: <dir>` from its pre-flight exists check, or a
+		// raw ENOENT from readdir. The directory itself is missing.
+		id: "ls-path-not-found",
+		appliesTo: "ls",
+		matcher: ({ errorText }) =>
+			/path not found:/i.test(errorText) ||
+			/\bENOENT\b/i.test(errorText) ||
+			/no such file or directory/i.test(errorText),
+		hint: ({ call }) => {
+			const path = getString(call.arguments, "path");
+			const base = path ? basenameOf(path) : "<name>";
+			return `Directory not found. List its parent with \`ls({path:<parent>})\` to check the name, or locate it with \`find({pattern:"**/${base}"})\`.`;
+		},
+	},
+	{
+		// ls emits `Not a directory: <path>` when stat resolves a non-directory, or
+		// a raw ENOTDIR (a mid-path component is a file). Pointing ls at a file, or
+		// through a file, never lists — the model must inspect the path shape.
+		id: "ls-not-a-directory",
+		appliesTo: "ls",
+		matcher: ({ errorText }) => /not a directory:/i.test(errorText) || /\bENOTDIR\b/i.test(errorText),
+		hint: ({ call }) => {
+			const path = getString(call.arguments, "path");
+			const target = path ? `\`${path}\`` : "that path";
+			return `${target} is a file, not a directory. Use \`read({path:...})\` to view a file, or \`ls\` the parent directory to see what's alongside it.`;
+		},
+	},
+];
+
+// ---------------------------------------------------------------------------
 // Generic rules — apply to ANY tool
 // ---------------------------------------------------------------------------
 
@@ -494,6 +634,14 @@ export interface ToolErrorHintRulesOptions {
 	disableReadRules?: boolean;
 	/** Disable edit hint rules. Default: enabled. */
 	disableEditRules?: boolean;
+	/** Disable write hint rules. Default: enabled. */
+	disableWriteRules?: boolean;
+	/** Disable find hint rules. Default: enabled. */
+	disableFindRules?: boolean;
+	/** Disable grep hint rules. Default: enabled. */
+	disableGrepRules?: boolean;
+	/** Disable ls hint rules. Default: enabled. */
+	disableLsRules?: boolean;
 	/** Disable generic cross-tool rules (schema maxlen, spawn ENOENT). Default: enabled. */
 	disableGenericRules?: boolean;
 	/** Extra rules to append. */
@@ -535,6 +683,10 @@ export function createDefaultToolErrorHintRegistry(options?: ToolErrorHintRulesO
 	if (!options?.disableBashRules) registry.addMany(bashRules);
 	if (!options?.disableReadRules) registry.addMany(readRules);
 	if (!options?.disableEditRules) registry.addMany(editRules);
+	if (!options?.disableWriteRules) registry.addMany(writeRules);
+	if (!options?.disableFindRules) registry.addMany(findRules);
+	if (!options?.disableGrepRules) registry.addMany(grepRules);
+	if (!options?.disableLsRules) registry.addMany(lsRules);
 	if (!options?.disableGenericRules) registry.addMany(genericRules);
 	if (options?.extraRules) registry.addMany(options.extraRules);
 	if (options?.learnedErrors && options.learnedErrors.length > 0) {
