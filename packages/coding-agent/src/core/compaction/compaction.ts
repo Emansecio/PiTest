@@ -232,7 +232,14 @@ export function estimateWireTokens(messages: AgentMessage[], input: WireEstimate
 	}
 	const systemTokens = Math.ceil(input.systemPromptChars / CHARS_PER_TOKEN_PROSE);
 	const toolTokens = estimateToolSurfaceTokens(input.tools);
-	const tokens = messageEstimate.tokens + pendingTokens + systemTokens + toolTokens;
+	// When the message estimate anchored on real provider usage, that usage already
+	// bills the WHOLE request — system prompt and tool schemas included — so adding
+	// them again would double-count ~5-30k tokens and fire the presend overflow
+	// guard early. Only the estimate-only path (no usage yet, e.g. first turn)
+	// still needs the explicit prefix sum. The fields stay populated either way so
+	// callers can inspect the prefix surface.
+	const anchoredOnUsage = messageEstimate.lastUsageIndex !== null;
+	const tokens = messageEstimate.tokens + pendingTokens + (anchoredOnUsage ? 0 : systemTokens + toolTokens);
 	return {
 		...messageEstimate,
 		messageTokens: messageEstimate.tokens,
@@ -473,15 +480,22 @@ const TOOLCALL_ARG_VALUE_MARK_THRESHOLD = 200;
  * the number of chars elided. Short values (paths, flags) pass through. Returns
  * undefined when nothing was large enough to prune. The original object is never
  * mutated — callers reassign the returned copy onto a cloned tool-call block.
+ *
+ * `failed` selects the marker: the default asserts the content landed on disk,
+ * which is a LIE for a rejected write/edit — the summarizer and the
+ * post-compaction model would inherit it. Callers that know the corresponding
+ * tool result errored must pass `failed=true` for the honest marker.
  */
-function pruneToolCallArguments(args: unknown): { pruned: unknown; saved: number } | undefined {
+function pruneToolCallArguments(args: unknown, failed = false): { pruned: unknown; saved: number } | undefined {
 	if (typeof args !== "object" || args === null) return undefined;
 	let saved = 0;
 	const walk = (value: unknown): unknown => {
 		if (typeof value === "string") {
 			if (value.length <= TOOLCALL_ARG_VALUE_MARK_THRESHOLD) return value;
 			saved += value.length;
-			return `[${value.length} chars elided — applied to disk; the file is the source of truth]`;
+			return failed
+				? `[${value.length} chars elided — the write FAILED; content was NOT applied to disk]`
+				: `[${value.length} chars elided — applied to disk; the file is the source of truth]`;
 		}
 		if (Array.isArray(value)) return value.map(walk);
 		if (typeof value === "object" && value !== null) {
@@ -1016,8 +1030,10 @@ interface SupersedeScanState {
 	keyByCallId: Map<string, string>;
 	keyByIndex: Map<number, string>;
 	lastIndexByKey: Map<string, number>;
+	/** Newest ERROR result index per key — protected from supersede collapse. */
+	lastErrorIndexByKey: Map<string, number>;
 	/** Results whose toolCall was not yet seen — retried on each extension. */
-	unkeyedResults: Array<{ index: number; toolCallId: string }>;
+	unkeyedResults: Array<{ index: number; toolCallId: string; isError: boolean }>;
 }
 
 const supersedeScanCache = new WeakMap<AgentMessage[], SupersedeScanState>();
@@ -1028,14 +1044,19 @@ function createSupersedeScanState(): SupersedeScanState {
 		keyByCallId: new Map(),
 		keyByIndex: new Map(),
 		lastIndexByKey: new Map(),
+		lastErrorIndexByKey: new Map(),
 		unkeyedResults: [],
 	};
 }
 
-function recordKeyedResult(state: SupersedeScanState, index: number, key: string): void {
+function recordKeyedResult(state: SupersedeScanState, index: number, key: string, isError: boolean): void {
 	state.keyByIndex.set(index, key);
 	const prev = state.lastIndexByKey.get(key);
 	if (prev === undefined || index > prev) state.lastIndexByKey.set(key, index);
+	if (isError) {
+		const prevError = state.lastErrorIndexByKey.get(key);
+		if (prevError === undefined || index > prevError) state.lastErrorIndexByKey.set(key, index);
+	}
 }
 
 /** Ingest messages[state.scannedLength ..] into the scan maps (one suffix pass). */
@@ -1058,11 +1079,11 @@ function extendSupersedeScanState(state: SupersedeScanState, messages: AgentMess
 		if (msg.role !== "toolResult" || !SUPERSEDED_TOOL_RESULT_NAMES.has(msg.toolName ?? "")) continue;
 		const key = state.keyByCallId.get(msg.toolCallId);
 		if (key === undefined) {
-			state.unkeyedResults.push({ index: i, toolCallId: msg.toolCallId });
+			state.unkeyedResults.push({ index: i, toolCallId: msg.toolCallId, isError: msg.isError === true });
 			continue;
 		}
 		if (key === "") continue; // known keyless call — never supersedes
-		recordKeyedResult(state, i, key);
+		recordKeyedResult(state, i, key, msg.isError === true);
 	}
 	// (3) Retry results whose call may have arrived in this (or any later)
 	// suffix. Keeps exact equivalence with the two full passes even when a
@@ -1072,7 +1093,7 @@ function extendSupersedeScanState(state: SupersedeScanState, messages: AgentMess
 		for (const entry of state.unkeyedResults) {
 			const key = state.keyByCallId.get(entry.toolCallId);
 			if (key === undefined) stillUnkeyed.push(entry);
-			else if (key !== "") recordKeyedResult(state, entry.index, key);
+			else if (key !== "") recordKeyedResult(state, entry.index, key, entry.isError);
 		}
 		state.unkeyedResults = stillUnkeyed;
 	}
@@ -1089,7 +1110,13 @@ function deriveSupersededIndices(state: SupersedeScanState, protectFromIndex: nu
 	for (const [i, key] of state.keyByIndex) {
 		if (i >= protectFromIndex) continue;
 		const last = state.lastIndexByKey.get(key);
-		if (last !== undefined && last > i) superseded.add(i);
+		if (last === undefined || last <= i) continue;
+		// Never collapse the NEWEST error result for a resource. A later retry
+		// supersedes the stale content, but the error itself (why the previous
+		// attempt failed) is often the most valuable context in the transcript.
+		// Older errors of the same resource still collapse.
+		if (state.lastErrorIndexByKey.get(key) === i) continue;
+		superseded.add(i);
 	}
 	return superseded;
 }
@@ -1131,6 +1158,20 @@ function computePruneProtectFromIndex(messages: AgentMessage[], protectTurns: nu
 		}
 	}
 	return protectFromIndex;
+}
+
+/**
+ * toolCallId -> isError over the toolResults in `messages`, so mutation-arg
+ * elision can pick the honest marker (a rejected write must not be labeled
+ * "applied to disk"). Calls with no result present map to absent (treated as
+ * not-failed — the optimistic marker, matching the pre-index behaviour).
+ */
+function buildToolCallErrorIndex(messages: AgentMessage[]): Map<string, boolean> {
+	const errorByCallId = new Map<string, boolean>();
+	for (const msg of messages) {
+		if (msg.role === "toolResult") errorByCallId.set(msg.toolCallId, msg.isError === true);
+	}
+	return errorByCallId;
 }
 
 /** Read-only pre-check: would pruneOldToolOutputs reclaim anything? */
@@ -1175,6 +1216,20 @@ export function wouldPruneOldToolOutputs(
 	return false;
 }
 
+/**
+ * Generic form of the recall placeholder appended to a deferred output's inline
+ * excerpt. The `recall_tool_output` tool description quotes this EXACT text so
+ * the model can correlate the placeholder it sees in context with the tool that
+ * resolves it — keep both in sync (enforced by a consistency test).
+ */
+export const DEFERRED_OUTPUT_PLACEHOLDER_FORMAT =
+	'[Full output (~N tokens) deferred — recall_tool_output({ id: "dN" }) returns it in full.]';
+
+/** Concrete recall placeholder for a deferred output (see the FORMAT constant). */
+export function formatDeferredOutputPlaceholder(tokens: number, id: string): string {
+	return `[Full output (~${tokens} tokens) deferred — recall_tool_output({ id: "${id}" }) returns it in full.]`;
+}
+
 export function pruneOldToolOutputs(
 	messages: AgentMessage[],
 	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
@@ -1191,6 +1246,7 @@ export function pruneOldToolOutputs(
 	let prunedTokens = 0;
 
 	const store = defer ? getCurrentDeferredOutputStore() : undefined;
+	const errorByCallId = buildToolCallErrorIndex(messages);
 
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];
@@ -1210,7 +1266,7 @@ export function pruneOldToolOutputs(
 					if (argsRef) beforeTokensCache.set(argsRef, before);
 				}
 				if (before <= tokenThreshold) continue;
-				const result = pruneToolCallArguments(block.arguments);
+				const result = pruneToolCallArguments(block.arguments, errorByCallId.get(block.id) === true);
 				if (result) {
 					(block as { arguments: unknown }).arguments = result.pruned;
 					const after = estimateTextTokens(JSON.stringify(result.pruned), true);
@@ -1229,9 +1285,10 @@ export function pruneOldToolOutputs(
 				// Tool outputs are dense (JSON/code), use dense divisor
 				const est = cachedDenseTextTokens(block, block.text);
 				if (est > tokenThreshold) {
-					// store.put writes to disk (writeFileSync). A disk-full/permission error
-					// must degrade to the in-message head+tail excerpt rather than abort the
-					// turn that awaits this prune.
+					// The store keeps outputs in memory and spills to disk above a memory
+					// cap; get() falls back to disk. A spill failure (disk full/permission)
+					// must degrade to the in-message head+tail excerpt rather than abort
+					// the turn that awaits this prune.
 					let id: string | undefined;
 					if (store) {
 						try {
@@ -1248,9 +1305,7 @@ export function pruneOldToolOutputs(
 					// (compaction-prep / opt-out) or the deferred write failed.
 					const excerpt = headTailExcerpt(block.text);
 					const replacement =
-						id !== undefined
-							? `${excerpt}\n[Full output (~${est} tokens) deferred — recall_tool_output({ id: "${id}" }) returns it in full.]`
-							: excerpt;
+						id !== undefined ? `${excerpt}\n${formatDeferredOutputPlaceholder(est, id)}` : excerpt;
 					(msg.content[b] as any).text = replacement;
 					const after = estimateTextTokens(replacement, true);
 					denseTextTokensCache.set(block, after);

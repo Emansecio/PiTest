@@ -1,7 +1,10 @@
 /**
  * `recall_tool_output` tool — retrieve the full text of a tool output that was
- * deferred out of context during compaction. The model uses the id from a
- * `[Tool output deferred … id=…]` placeholder to re-fetch on demand.
+ * deferred out of context during pruning/compaction. The model uses the id from a
+ * `[Full output (~N tokens) deferred — recall_tool_output({ id: "dN" }) returns it in full.]`
+ * placeholder to re-fetch on demand. The placeholder text is emitted by
+ * compaction.ts (DEFERRED_OUTPUT_PLACEHOLDER_FORMAT) — the description below must
+ * quote that exact format (enforced by a consistency test).
  */
 
 import type { AgentTool } from "@pit/agent-core";
@@ -33,7 +36,7 @@ export function createRecallToolOutputDefinition(
 		name: "recall_tool_output",
 		label: "recall_tool_output",
 		description:
-			"Retrieve the full text of a tool output that was deferred out of context during compaction. Use the id from a `[Tool output deferred … id=…]` placeholder.",
+			'Retrieve the full text of a tool output that was deferred out of context during pruning/compaction. Use the id from a `[Full output (~N tokens) deferred — recall_tool_output({ id: "dN" }) returns it in full.]` placeholder.',
 		promptSnippet: "Retrieve a tool output deferred during compaction by its id",
 		parameters: recallToolOutputSchema,
 		async execute(_toolCallId, input: RecallToolOutputInput) {

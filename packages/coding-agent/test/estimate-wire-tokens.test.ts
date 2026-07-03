@@ -44,25 +44,56 @@ describe("estimateToolSurfaceTokens", () => {
 	});
 });
 
+const WIRE_TOOLS = [
+	{
+		name: "read",
+		description: "Read a file from disk",
+		parameters: { type: "object", properties: { path: { type: "string" } } },
+	},
+];
+
 describe("estimateWireTokens", () => {
-	it("adds system and tool surface to the message estimate", () => {
-		const messages = [user("hi"), assistantWithUsage(500)];
-		const messagesOnly = estimateContextTokens(messages).tokens;
+	it("adds system and tool surface when no provider usage anchors the estimate", () => {
+		const messages = [user("hi"), user("there")];
+		const estimate = estimateContextTokens(messages);
+		expect(estimate.lastUsageIndex).toBeNull();
 		const wire = estimateWireTokens(messages, {
 			systemPromptChars: 4000,
-			tools: [
-				{
-					name: "read",
-					description: "Read a file from disk",
-					parameters: { type: "object", properties: { path: { type: "string" } } },
-				},
-			],
+			tools: WIRE_TOOLS,
 		});
-		expect(wire.messageTokens).toBe(messagesOnly);
+		expect(wire.messageTokens).toBe(estimate.tokens);
 		expect(wire.systemTokens).toBeGreaterThan(0);
 		expect(wire.toolTokens).toBeGreaterThan(0);
-		expect(wire.tokens).toBeGreaterThan(messagesOnly);
-		expect(wire.tokens).toBe(messagesOnly + wire.systemTokens + wire.toolTokens);
+		expect(wire.tokens).toBeGreaterThan(estimate.tokens);
+		expect(wire.tokens).toBe(estimate.tokens + wire.systemTokens + wire.toolTokens);
+	});
+
+	it("does NOT re-add system/tool tokens when anchored on provider usage (already billed there)", () => {
+		const messages = [user("hi"), assistantWithUsage(500)];
+		const estimate = estimateContextTokens(messages);
+		expect(estimate.lastUsageIndex).not.toBeNull();
+		const wire = estimateWireTokens(messages, {
+			systemPromptChars: 4000,
+			tools: WIRE_TOOLS,
+		});
+		// The prefix surface is still reported for inspection…
+		expect(wire.systemTokens).toBeGreaterThan(0);
+		expect(wire.toolTokens).toBeGreaterThan(0);
+		// …but the total must not double-count it: the provider usage covers the
+		// whole request (system prompt + tool schemas included).
+		expect(wire.tokens).toBe(estimate.tokens);
+	});
+
+	it("still adds pending messages on top of a usage-anchored estimate", () => {
+		const messages = [user("hi"), assistantWithUsage(500)];
+		const estimate = estimateContextTokens(messages);
+		const wire = estimateWireTokens(messages, {
+			systemPromptChars: 4000,
+			tools: WIRE_TOOLS,
+			pendingMessages: [user("z".repeat(8000))],
+		});
+		expect(wire.pendingTokens).toBeGreaterThan(1000);
+		expect(wire.tokens).toBe(estimate.tokens + wire.pendingTokens);
 	});
 
 	it("includes pending messages not yet in session state", () => {

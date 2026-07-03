@@ -2,6 +2,7 @@ import type { AgentMessage } from "@pit/agent-core";
 import { describe, expect, it } from "vitest";
 import {
 	adaptivePruneThreshold,
+	applySupersedeOnly,
 	pressurePruneProtectTurns,
 	pruneOldToolOutputs,
 } from "../src/core/compaction/compaction.js";
@@ -22,13 +23,13 @@ function toolCall(name: string, id: string, args: Record<string, unknown>): Agen
 	} as unknown as AgentMessage;
 }
 
-function toolResult(toolName: string, toolCallId: string, text: string): AgentMessage {
+function toolResult(toolName: string, toolCallId: string, text: string, isError = false): AgentMessage {
 	return {
 		role: "toolResult",
 		toolCallId,
 		toolName,
 		content: [{ type: "text", text }],
-		isError: false,
+		isError,
 		timestamp: 1,
 	} as unknown as AgentMessage;
 }
@@ -217,5 +218,112 @@ describe("pruneOldToolOutputs — superseded-read dedup", () => {
 		expect(textAt(messages, 1)).toContain("tokens elided");
 		expect(textAt(messages, 1)).toContain("head");
 		expect(textAt(messages, 1)).toContain("tail");
+	});
+});
+
+function elidedArg(messages: AgentMessage[], i: number, arg: string): string {
+	const block = (messages[i] as unknown as { content: Array<{ arguments: Record<string, string> }> }).content[0];
+	return block.arguments[arg];
+}
+
+describe("pruneOldToolOutputs — mutation-arg elision markers (failed vs applied)", () => {
+	const bigBody = "const x = 1;\n".repeat(1_000); // ~13k chars, well above a 1k-token threshold
+
+	it("uses the honest FAILED marker when the write's tool result errored", () => {
+		const messages = [
+			toolCall("write", "w1", { path: "foo.ts", content: bigBody }),
+			toolResult("write", "w1", "Error: EACCES: permission denied", true),
+			user("a"),
+			user("b"),
+		];
+
+		const reclaimed = pruneOldToolOutputs(messages, 1_000, 2);
+
+		expect(reclaimed).toBeGreaterThan(0);
+		const marker = elidedArg(messages, 0, "content");
+		expect(marker).toContain("the write FAILED");
+		expect(marker).toContain("NOT applied to disk");
+		expect(marker).not.toContain("the file is the source of truth");
+		// The error result itself is untouched.
+		expect(textAt(messages, 1)).toBe("Error: EACCES: permission denied");
+	});
+
+	it("keeps the applied-to-disk marker when the write succeeded", () => {
+		const messages = [
+			toolCall("write", "w1", { path: "foo.ts", content: bigBody }),
+			toolResult("write", "w1", "File written."),
+			user("a"),
+			user("b"),
+		];
+
+		const reclaimed = pruneOldToolOutputs(messages, 1_000, 2);
+
+		expect(reclaimed).toBeGreaterThan(0);
+		const marker = elidedArg(messages, 0, "content");
+		expect(marker).toContain("applied to disk; the file is the source of truth");
+		expect(marker).not.toContain("FAILED");
+	});
+});
+
+describe("supersede — the newest error result per resource is never collapsed", () => {
+	it("keeps a superseded ERROR result intact while a later retry succeeds", () => {
+		const errorBlob = bigBlob("ERROR_HEAD", "ERROR_TAIL");
+		const messages = [
+			readCall("c1", { path: "foo.ts" }),
+			toolResult("read", "c1", errorBlob, true),
+			readCall("c2", { path: "foo.ts" }),
+			readResult("c2", "fresh content"),
+			user("a"),
+			user("b"),
+		];
+
+		const reclaimed = pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2);
+
+		// The only supersede candidate is the newest error for this resource — protected.
+		expect(reclaimed).toBe(0);
+		expect(textAt(messages, 1)).toBe(errorBlob);
+		expect(textAt(messages, 3)).toBe("fresh content");
+	});
+
+	it("still collapses OLDER errors of the same resource, keeping only the newest error", () => {
+		const oldError = bigBlob("OLD_ERR_HEAD", "OLD_ERR_TAIL");
+		const newError = bigBlob("NEW_ERR_HEAD", "NEW_ERR_TAIL");
+		const messages = [
+			readCall("c1", { path: "foo.ts" }),
+			toolResult("read", "c1", oldError, true),
+			readCall("c2", { path: "foo.ts" }),
+			toolResult("read", "c2", newError, true),
+			readCall("c3", { path: "foo.ts" }),
+			readResult("c3", "fresh content"),
+			user("a"),
+			user("b"),
+		];
+
+		const reclaimed = pruneOldToolOutputs(messages, PRUNE_TOKEN_THRESHOLD, 2);
+
+		expect(reclaimed).toBeGreaterThan(0);
+		// Oldest error collapsed to head+tail…
+		expect(textAt(messages, 1).length).toBeLessThan(oldError.length);
+		expect(textAt(messages, 1)).toContain("OLD_ERR_HEAD");
+		// …but the newest error stays verbatim.
+		expect(textAt(messages, 3)).toBe(newError);
+		expect(textAt(messages, 5)).toBe("fresh content");
+	});
+
+	it("applySupersedeOnly honors the same protection", () => {
+		const errorBlob = bigBlob("ERROR_HEAD", "ERROR_TAIL");
+		const messages = [
+			readCall("c1", { path: "foo.ts" }),
+			toolResult("read", "c1", errorBlob, true),
+			readCall("c2", { path: "foo.ts" }),
+			readResult("c2", "fresh content"),
+			user("a"),
+			user("b"),
+		];
+
+		const reclaimed = applySupersedeOnly(messages, 2);
+
+		expect(reclaimed).toBe(0);
+		expect(textAt(messages, 1)).toBe(errorBlob);
 	});
 });

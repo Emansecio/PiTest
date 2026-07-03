@@ -1,5 +1,9 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+	DEFERRED_OUTPUT_PLACEHOLDER_FORMAT,
+	formatDeferredOutputPlaceholder,
+} from "../src/core/compaction/compaction.js";
 import { createDeferredOutputStore, setCurrentDeferredOutputStore } from "../src/core/deferred-output-store.js";
 import type { ToolDefinition } from "../src/core/extensions/types.js";
 import { createRecallToolOutputDefinition, createRecallToolOutputTool } from "../src/core/tools/recall-tool-output.js";
@@ -55,6 +59,20 @@ describe("recall_tool_output tool", () => {
 		const def = createRecallToolOutputDefinition(CWD);
 		expect(def.name).toBe("recall_tool_output");
 		expect(def.label).toBe("recall_tool_output");
+	});
+
+	it("tool description quotes the EXACT placeholder format the prune emits (M18)", () => {
+		const def = createRecallToolOutputDefinition(CWD);
+		expect(def.description).toContain(DEFERRED_OUTPUT_PLACEHOLDER_FORMAT);
+	});
+
+	it("the generic placeholder format matches the concrete emitter output", () => {
+		const concrete = formatDeferredOutputPlaceholder(1234, "d7");
+		const fromTemplate = DEFERRED_OUTPUT_PLACEHOLDER_FORMAT.replace("~N tokens", "~1234 tokens").replace(
+			'"dN"',
+			'"d7"',
+		);
+		expect(concrete).toBe(fromTemplate);
 	});
 
 	it("wrapped recall preserves HEAD and TAIL for a >64KB deferred output (head+tail, not head-only)", async () => {

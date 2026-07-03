@@ -100,7 +100,9 @@ describe("AgentSession.getSessionStats", () => {
 			const stats = session.getSessionStats();
 			expect(stats.contextUsage).toEqual(session.getContextUsage());
 			expect(stats.contextUsage?.tokens).toBe(200);
-			expect(stats.contextUsage?.wireTokens).toBeGreaterThan(200);
+			// Usage-anchored: provider usage already bills system prompt + tool
+			// schemas, so the wire estimate must NOT re-add them (no double-count).
+			expect(stats.contextUsage?.wireTokens).toBe(200);
 			expect(stats.contextUsage?.contextWindow).toBe(model.contextWindow);
 			expect(stats.contextUsage?.percent).toBe(wirePercent(session));
 		} finally {
@@ -155,7 +157,8 @@ describe("AgentSession.getSessionStats", () => {
 
 			const second = session.getContextUsage();
 			expect(second?.tokens).toBe(350);
-			expect(second?.wireTokens).toBeGreaterThan(350);
+			// Usage-anchored: no system/tool re-add on top of provider usage.
+			expect(second?.wireTokens).toBe(350);
 			expect(second?.percent).toBe(wirePercent(session));
 		} finally {
 			session.dispose();
@@ -179,7 +182,8 @@ describe("AgentSession.getSessionStats", () => {
 			expect(stats.tokens.input).toBe(220_000);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBe(25_000);
-			expect(stats.contextUsage?.wireTokens).toBeGreaterThan(25_000);
+			// Usage-anchored: no system/tool re-add on top of provider usage.
+			expect(stats.contextUsage?.wireTokens).toBe(25_000);
 			expect(stats.contextUsage?.percent).toBe(wirePercent(session));
 		} finally {
 			session.dispose();
