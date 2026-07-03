@@ -6212,6 +6212,36 @@ export class InteractiveMode {
 			info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}`;
 		}
 
+		const fixedCost = this.session.getFixedCostSurface();
+		const cacheStatsForFixed = this.session.getCacheStats();
+		const kFmt = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
+		const pctFmt = (r: number): string => `${Math.round(r * 100)}%`;
+		info += `\n${theme.bold("Fixed Cost")}\n`;
+		if (fixedCost) {
+			const sysDyn =
+				fixedCost.dynamicSystemTokens > 0
+					? ` (${kFmt(fixedCost.staticSystemTokens)} static + ${kFmt(fixedCost.dynamicSystemTokens)} dyn)`
+					: "";
+			info += `${theme.fg("dim", "System:")} ${kFmt(fixedCost.systemTokens)} tok${sysDyn} (est.)\n`;
+			info += `${theme.fg("dim", "Tools:")}  ${kFmt(fixedCost.toolTokens)} tok (est.)\n`;
+		} else {
+			info += `${theme.fg("muted", "— no request yet")}\n`;
+		}
+		if (cacheStatsForFixed.turns.length > 0) {
+			const stability =
+				cacheStatsForFixed.instabilityTurn !== null
+					? theme.fg("warning", `⚠ collapsed #${cacheStatsForFixed.instabilityTurn}`)
+					: cacheStatsForFixed.cacheObserved && cacheStatsForFixed.hitRate >= 0.5
+						? theme.fg("success", "stable")
+						: theme.fg("muted", "warming");
+			info += `${theme.fg("dim", "Prefix:")}  ${pctFmt(cacheStatsForFixed.hitRate)} hit  ${stability}\n`;
+			const prefixDiag = this.session.getCachePrefixDiagnostics();
+			if (prefixDiag.rebuilds > 0) {
+				const breakdown = prefixDiag.reasons.map((r) => `${r.reason} ×${r.count}`).join(", ");
+				info += `${theme.fg("dim", "Rewrites:")} ${prefixDiag.rebuilds}× (${breakdown})\n`;
+			}
+		}
+
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new Text(info, 1, 0));
 		this.ui.requestRender();

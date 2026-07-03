@@ -1,5 +1,11 @@
 import { Agent } from "@pit/agent-core";
-import { type AssistantMessage, getModel, type Usage } from "@pit/ai";
+import {
+	type AssistantMessage,
+	getModel,
+	SYSTEM_PROMPT_DYNAMIC_MARKER,
+	splitSystemPromptOnDynamic,
+	type Usage,
+} from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
@@ -185,6 +191,99 @@ describe("AgentSession.getSessionStats", () => {
 			// Usage-anchored: no system/tool re-add on top of provider usage.
 			expect(stats.contextUsage?.wireTokens).toBe(25_000);
 			expect(stats.contextUsage?.percent).toBe(wirePercent(session));
+		} finally {
+			session.dispose();
+		}
+	});
+});
+
+describe("AgentSession.getFixedCostSurface", () => {
+	it("returns null before the first LLM request", () => {
+		const { session } = createSession();
+		try {
+			// No messages at all — pre-first-turn.
+			expect(session.getFixedCostSurface()).toBeNull();
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("returns null when only user messages exist (no assistant turn yet)", () => {
+		const { session, sessionManager } = createSession();
+		try {
+			sessionManager.appendMessage(createUserMessage("hello", 1));
+			syncAgentMessages(session, sessionManager);
+			expect(session.getFixedCostSurface()).toBeNull();
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("returns systemTokens and toolTokens after the first assistant turn", () => {
+		const { session, sessionManager } = createSession();
+		try {
+			sessionManager.appendMessage(createUserMessage("hello", 1));
+			sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
+			syncAgentMessages(session, sessionManager);
+
+			const surface = session.getFixedCostSurface();
+			expect(surface).not.toBeNull();
+			expect(surface!.systemTokens).toBeGreaterThan(0);
+			// The constructed session rebuilds agent.state.systemPrompt with the real
+			// dynamic suffix (date/cwd behind the marker) — the marker-free initial
+			// prompt does not survive construction, so assert the getter's contract
+			// against the session's ACTUAL prompt: chars/4 per part, split on marker.
+			const prompt = session.agent.state.systemPrompt;
+			const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(prompt);
+			expect(surface!.staticSystemTokens).toBe(Math.ceil(staticPart.length / 4));
+			expect(surface!.dynamicSystemTokens).toBe(Math.ceil(dynamicPart.length / 4));
+			expect(surface!.systemTokens).toBe(Math.ceil(prompt.length / 4));
+			expect(surface!.toolTokens).toBeGreaterThanOrEqual(0);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("splits system tokens into static and dynamic when the dynamic marker is present", () => {
+		// Use the real SYSTEM_PROMPT_DYNAMIC_MARKER so splitSystemPromptOnDynamic fires.
+		const staticText = "Static prefix. ".repeat(50); // ~750 chars → staticSystemTokens > 0
+		const dynamicText = "Dynamic suffix. ".repeat(10); // ~150 chars → dynamicSystemTokens > 0
+		const settingsManager = SettingsManager.inMemory();
+		const sessionManager = SessionManager.inMemory();
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model,
+					systemPrompt: staticText + SYSTEM_PROMPT_DYNAMIC_MARKER + dynamicText,
+					tools: [],
+					thinkingLevel: "high",
+				},
+			}),
+			sessionManager,
+			settingsManager,
+			cwd: process.cwd(),
+			modelRegistry: ModelRegistry.inMemory(authStorage),
+			resourceLoader: createTestResourceLoader(),
+		});
+
+		try {
+			sessionManager.appendMessage(createUserMessage("hello", 1));
+			sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
+			syncAgentMessages(session, sessionManager);
+
+			const surface = session.getFixedCostSurface();
+			expect(surface).not.toBeNull();
+			// Both parts should be non-zero.
+			expect(surface!.staticSystemTokens).toBeGreaterThan(0);
+			expect(surface!.dynamicSystemTokens).toBeGreaterThan(0);
+			// Static part is ~5× longer so its token estimate should dominate.
+			expect(surface!.staticSystemTokens).toBeGreaterThan(surface!.dynamicSystemTokens);
+			// systemTokens is estimated from the full prompt length (including marker
+			// chars); just verify it's a non-zero positive integer.
+			expect(surface!.systemTokens).toBeGreaterThan(0);
 		} finally {
 			session.dispose();
 		}

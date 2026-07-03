@@ -5862,6 +5862,36 @@ export class AgentSession implements CompactionHost, FusionHost {
 		return computeCacheStats(this.state.messages);
 	}
 
+	/**
+	 * Fixed-cost surface for the most recent request: system prompt size broken into
+	 * cache-stable (static) and per-turn (dynamic) portions, plus tool schema tokens
+	 * on the wire. Values are structural estimates (chars/4 for prose, JSON chars/3.3
+	 * for schemas) — they do NOT come from provider-reported usage, but they stay
+	 * consistent regardless of which usage anchor is active.
+	 * Returns null before the first LLM request (system prompt / tools may be
+	 * partially initialised; estimates would not be meaningful to display).
+	 */
+	getFixedCostSurface(): {
+		staticSystemTokens: number;
+		dynamicSystemTokens: number;
+		systemTokens: number;
+		toolTokens: number;
+	} | null {
+		// Only meaningful once the session has received at least one LLM response.
+		const hasRequest = this.messages.some((m) => m.role === "assistant");
+		if (!hasRequest) return null;
+		const prompt = this.agent.state.systemPrompt;
+		const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(prompt);
+		const PROSE = 4; // chars-per-token for prose — mirrors compaction.ts CHARS_PER_TOKEN_PROSE
+		const staticSystemTokens = Math.ceil(staticPart.length / PROSE);
+		const dynamicSystemTokens = Math.ceil(dynamicPart.length / PROSE);
+		const wire = estimateWireTokens(this.messages, {
+			systemPromptChars: prompt.length,
+			tools: this._wireToolsForEstimate(),
+		});
+		return { staticSystemTokens, dynamicSystemTokens, systemTokens: wire.systemTokens, toolTokens: wire.toolTokens };
+	}
+
 	private _ctxUsageCache?: { key: string; value: ContextUsage | undefined };
 
 	getContextUsage(): ContextUsage | undefined {
