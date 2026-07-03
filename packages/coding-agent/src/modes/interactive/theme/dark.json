@@ -6,12 +6,13 @@
 		"tealBright": "#6fe0cf",
 		"cyanBlue": "#5aa7c4",
 		"green": "#8ad8a0",
+		"mint": "#86e6b2",
 		"coral": "#e08a72",
 		"gold": "#e0c07b",
 		"lavender": "#b89fe0",
 		"text": "#cdd6d3",
 		"muted": "#788a85",
-		"dim": "#54625e",
+		"dim": "#5f6f6a",
 		"borderMuted": "#2a3633",
 		"selectedBg": "#20302c",
 		"userMsgBg": "#16201d",
@@ -21,7 +22,7 @@
 		"customMsgBg": "#1c2330"
 	},
 	"colors": {
-		"accent": "teal",
+		"accent": "mint",
 		"border": "#4fb6c4",
 		"borderAccent": "tealBright",
 		"borderMuted": "borderMuted",
@@ -60,7 +61,7 @@
 		"toolDiffRemoved": "coral",
 		"toolDiffContext": "muted",
 
-		"syntaxComment": "#5a6e64",
+		"syntaxComment": "#6a7f74",
 		"syntaxKeyword": "#7fb2d9",
 		"syntaxFunction": "#d6c98a",
 		"syntaxVariable": "#a9d4e0",

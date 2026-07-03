@@ -6,12 +6,13 @@
 		"tealDeep": "#0f6e56",
 		"cyanBlue": "#2f7da0",
 		"green": "#3f9b54",
+		"mint": "#177a4f",
 		"coral": "#c0533a",
 		"gold": "#8a6d2a",
 		"lavender": "#6a4ba8",
 		"text": "#16201d",
 		"muted": "#5e706a",
-		"dim": "#88968f",
+		"dim": "#7a8781",
 		"borderMuted": "#c2ccc8",
 		"selectedBg": "#cfe0da",
 		"userMsgBg": "#eef3f1",
@@ -21,7 +22,7 @@
 		"customMsgBg": "#ece6f6"
 	},
 	"colors": {
-		"accent": "teal",
+		"accent": "mint",
 		"border": "cyanBlue",
 		"borderAccent": "tealDeep",
 		"borderMuted": "borderMuted",
