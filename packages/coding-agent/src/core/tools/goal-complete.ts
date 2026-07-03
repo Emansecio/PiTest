@@ -7,10 +7,12 @@
  */
 
 import type { AgentTool } from "@pit/agent-core";
+import { recordDiagnostic } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentGoalManager } from "../goal/goal-manager.ts";
+import { getCurrentSelfReviewFindings } from "../self-review.ts";
 import { summarizeCheckFailure } from "../verification/failure-summary.ts";
 import { pendingVerificationJobs } from "../verification/pending-checks.ts";
 import { getCurrentVerificationProbe } from "../verification/verification.ts";
@@ -98,6 +100,30 @@ export function createGoalCompleteToolDefinition(
 						details: { completed: false, objective: goal.objective },
 					};
 				}
+			}
+			// R9: a structured self-review (Band P / P4) of this cycle's high-risk diff
+			// found high-severity problems that were never resolved. Refuse completion
+			// with the concrete findings — same shape as the R7/R8 refusals above.
+			const reviewFindings = getCurrentSelfReviewFindings();
+			if (reviewFindings.length > 0) {
+				const list = reviewFindings
+					.map((f) => `  • [${f.file}] ${f.claim}\n    evidence: ${f.evidence}`)
+					.join("\n");
+				recordDiagnostic({
+					category: "quality.self-review",
+					level: "warn",
+					source: "goal-complete",
+					context: { ruleId: "review-blocked-done", note: `high findings=${reviewFindings.length}` },
+				});
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `Not completing the goal — a self-review of your changes found unresolved high-severity problems. Fix these (or explain why each is a false positive), then call goal_complete again:\n${list}`,
+						},
+					],
+					details: { completed: false, objective: goal.objective },
+				};
 			}
 			const summary = input.summary?.trim();
 			mgr.complete(summary);

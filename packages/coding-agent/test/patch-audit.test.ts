@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createPatchAuditExtension } from "../src/core/built-ins/patch-audit-extension.ts";
 import type { ExtensionAPI, ToolResultEvent, ToolResultEventResult } from "../src/core/extensions/types.ts";
 import { auditPatchResult, isPatchAuditDisabled } from "../src/core/patch-audit.ts";
+import { TurnRiskAccumulator } from "../src/core/turn-risk.ts";
 
 type ToolResultHandler = (event: ToolResultEvent) => ToolResultEventResult | undefined;
 
@@ -106,6 +107,74 @@ describe("auditPatchResult", () => {
 				isError: false,
 			}),
 		).toEqual({ action: "skip" });
+	});
+});
+
+describe("TurnRiskAccumulator", () => {
+	function editResult(added: number, removed: number, path = "a.ts") {
+		return { toolName: "edit", input: { path }, details: { diff: editDiff(added, removed) }, isError: false };
+	}
+
+	it("sums many sub-threshold edits into an aggregate high", () => {
+		const acc = new TurnRiskAccumulator();
+		// Five 30-changed-line edits: each individually LOW (< 40 medium), but the
+		// cycle total is 150 (>= 120) — the gap a per-patch scorer misses.
+		for (let i = 0; i < 5; i++) acc.add(editResult(20, 10, `file-${i}.ts`));
+		const totals = acc.getTotals();
+		expect(totals.mutations).toBe(5);
+		expect(totals.changedLines).toBe(150);
+		expect(totals.aggregateRisk).toBe("high");
+		// No single patch reached medium/high on its own.
+		expect(totals.maxPatchRisk).toBe("low");
+		expect(totals.touchedFiles).toHaveLength(5);
+	});
+
+	it("classifies a mid-size aggregate as medium", () => {
+		const acc = new TurnRiskAccumulator();
+		acc.add(editResult(20, 10)); // 30
+		acc.add(editResult(20, 10)); // +30 = 60 (>= 40 medium, < 120 high)
+		const totals = acc.getTotals();
+		expect(totals.changedLines).toBe(60);
+		expect(totals.aggregateRisk).toBe("medium");
+	});
+
+	it("tracks the highest single-patch risk independent of the aggregate", () => {
+		const acc = new TurnRiskAccumulator();
+		acc.add(editResult(80, 50)); // 130 changed lines in one patch → high
+		const totals = acc.getTotals();
+		expect(totals.maxPatchRisk).toBe("high");
+		expect(totals.aggregateRisk).toBe("high");
+	});
+
+	it("accumulates changed lines per file and ignores non-mutating results", () => {
+		const acc = new TurnRiskAccumulator();
+		acc.add(editResult(10, 5, "same.ts")); // 15
+		acc.add(editResult(4, 1, "same.ts")); // +5 = 20 on same.ts
+		// Errored + preview results contribute nothing.
+		acc.add({ toolName: "edit", input: { path: "err.ts" }, details: { diff: editDiff(50, 50) }, isError: true });
+		acc.add({
+			toolName: "write",
+			input: { path: "p.ts", content: "x\n".repeat(200), preview: true },
+			details: undefined,
+			isError: false,
+		});
+		const totals = acc.getTotals();
+		expect(totals.mutations).toBe(2);
+		expect(totals.touchedFiles).toEqual([{ path: "same.ts", changedLines: 20, diff: expect.any(String) }]);
+	});
+
+	it("resets all cycle state", () => {
+		const acc = new TurnRiskAccumulator();
+		acc.add(editResult(80, 60));
+		acc.reset();
+		const totals = acc.getTotals();
+		expect(totals).toEqual({
+			mutations: 0,
+			changedLines: 0,
+			aggregateRisk: "low",
+			maxPatchRisk: "low",
+			touchedFiles: [],
+		});
 	});
 });
 

@@ -33,9 +33,21 @@ export type PatchAuditDecision =
 			message: string;
 	  };
 
-const DEFAULT_MEDIUM_CHANGED_LINES = 40;
-const DEFAULT_HIGH_CHANGED_LINES = 120;
-const DEFAULT_HIGH_WRITE_LINES = 160;
+/** Line-count measurement of a single patch, before any risk classification. */
+export interface PatchMeasurement {
+	path: string | undefined;
+	addedLines: number;
+	removedLines: number;
+	changedLines: number;
+	/** Non-zero only for a full-file `write` (content lines); 0 for diff/edit patches. */
+	writeLines: number;
+	/** Unified diff text, when the tool result carried one (cheaply reusable downstream). */
+	diff: string | undefined;
+}
+
+export const DEFAULT_MEDIUM_CHANGED_LINES = 40;
+export const DEFAULT_HIGH_CHANGED_LINES = 120;
+export const DEFAULT_HIGH_WRITE_LINES = 160;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -102,13 +114,13 @@ function countEditInputLines(input: Record<string, unknown>): { addedLines: numb
 }
 
 function classifyRisk(
-	input: PatchAuditInput,
+	toolName: string,
 	changedLines: number,
 	writeLines: number,
 	options: Required<PatchAuditOptions>,
 ): { risk: PatchAuditRisk; reasons: string[] } {
 	const reasons: string[] = [];
-	if (input.toolName === "write" && writeLines >= options.highWriteLines) {
+	if (toolName === "write" && writeLines >= options.highWriteLines) {
 		reasons.push(`large write (${writeLines} lines)`);
 		return { risk: "high", reasons };
 	}
@@ -123,7 +135,7 @@ function classifyRisk(
 	return { risk: "low", reasons };
 }
 
-function resolveOptions(options: PatchAuditOptions | undefined): Required<PatchAuditOptions> {
+export function resolvePatchAuditOptions(options: PatchAuditOptions | undefined): Required<PatchAuditOptions> {
 	return {
 		mediumChangedLines: options?.mediumChangedLines ?? DEFAULT_MEDIUM_CHANGED_LINES,
 		highChangedLines: options?.highChangedLines ?? DEFAULT_HIGH_CHANGED_LINES,
@@ -131,13 +143,28 @@ function resolveOptions(options: PatchAuditOptions | undefined): Required<PatchA
 	};
 }
 
-export function isPatchAuditDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	return isTruthyEnvFlag(env.PIT_NO_PATCH_AUDIT);
+/**
+ * Classify a raw changed-line total against the medium/high thresholds. This is
+ * the SAME rubric `classifyRisk` uses for a single patch's diff — extracted so the
+ * per-turn aggregator (core/turn-risk.ts) can reuse the exact thresholds and close
+ * the documented gap where many small edits never trip `high` individually.
+ */
+export function classifyChangedLinesRisk(changedLines: number, options?: PatchAuditOptions): PatchAuditRisk {
+	const resolved = resolvePatchAuditOptions(options);
+	if (changedLines >= resolved.highChangedLines) return "high";
+	if (changedLines >= resolved.mediumChangedLines) return "medium";
+	return "low";
 }
 
-export function auditPatchResult(input: PatchAuditInput, options?: PatchAuditOptions): PatchAuditDecision {
-	if (input.isError) return { action: "skip" };
-	if (input.input.preview === true) return { action: "skip" };
+/**
+ * Pure line-count measurement of a single write/edit/diff-bearing patch, WITHOUT
+ * classifying its risk. Returns `undefined` for the same skip conditions as
+ * `auditPatchResult` (errors, previews, non-mutating results). Both the per-patch
+ * auditor and the per-turn aggregator build on this so they measure identically.
+ */
+export function measurePatch(input: PatchAuditInput): PatchMeasurement | undefined {
+	if (input.isError) return undefined;
+	if (input.input.preview === true) return undefined;
 
 	let addedLines = 0;
 	let removedLines = 0;
@@ -150,7 +177,7 @@ export function auditPatchResult(input: PatchAuditInput, options?: PatchAuditOpt
 		removedLines = counted.removedLines;
 	} else if (input.toolName === "write") {
 		const content = stringProperty(input.input, "content");
-		if (content === undefined) return { action: "skip" };
+		if (content === undefined) return undefined;
 		writeLines = countLogicalLines(content);
 		addedLines = writeLines;
 	} else if (input.toolName === "edit") {
@@ -158,21 +185,43 @@ export function auditPatchResult(input: PatchAuditInput, options?: PatchAuditOpt
 		addedLines = counted.addedLines;
 		removedLines = counted.removedLines;
 	} else {
-		return { action: "skip" };
+		return undefined;
 	}
 
-	const changedLines = addedLines + removedLines;
-	const resolvedOptions = resolveOptions(options);
-	const { risk, reasons } = classifyRisk(input, changedLines, writeLines, resolvedOptions);
+	return {
+		path: extractPath(input.input),
+		addedLines,
+		removedLines,
+		changedLines: addedLines + removedLines,
+		writeLines,
+		diff,
+	};
+}
+
+export function isPatchAuditDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	return isTruthyEnvFlag(env.PIT_NO_PATCH_AUDIT);
+}
+
+export function auditPatchResult(input: PatchAuditInput, options?: PatchAuditOptions): PatchAuditDecision {
+	const measurement = measurePatch(input);
+	if (measurement === undefined) return { action: "skip" };
+
+	const resolvedOptions = resolvePatchAuditOptions(options);
+	const { risk, reasons } = classifyRisk(
+		input.toolName,
+		measurement.changedLines,
+		measurement.writeLines,
+		resolvedOptions,
+	);
 	if (risk === "low") return { action: "skip" };
 
 	const audit: PatchAuditResult = {
 		risk,
 		toolName: input.toolName,
-		path: extractPath(input.input),
-		addedLines,
-		removedLines,
-		changedLines,
+		path: measurement.path,
+		addedLines: measurement.addedLines,
+		removedLines: measurement.removedLines,
+		changedLines: measurement.changedLines,
 		reasons,
 	};
 
@@ -189,13 +238,13 @@ export function auditPatchResult(input: PatchAuditInput, options?: PatchAuditOpt
  * skims past); kept short (3 / 5 items) so it never drowns the signal in context.
  * Both are model-agnostic — the item set depends on patch shape, not model tier.
  */
-const MEDIUM_RISK_CHECKLIST: readonly string[] = [
+export const MEDIUM_RISK_CHECKLIST: readonly string[] = [
 	"Every changed line traces to the request — no incidental refactor, reformat, or rename.",
 	"No leftovers: dead code, unused imports, debug logging, or stray TODOs.",
 	"Re-read the touched area and run the relevant check before reporting done.",
 ];
 
-const HIGH_RISK_CHECKLIST: readonly string[] = [
+export const HIGH_RISK_CHECKLIST: readonly string[] = [
 	"Every changed line traces to the request — no incidental refactor, reformat, or rename.",
 	"No leftovers: dead code, unused imports, debug logging, or stray TODOs.",
 	"Edge cases covered — empty, null, and error paths, not just the happy path.",
