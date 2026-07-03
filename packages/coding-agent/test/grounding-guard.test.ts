@@ -401,7 +401,7 @@ describe("groundToolCall — out-of-scope tools are ignored", () => {
 describe("repoMapToSymbolSet", () => {
 	it("flattens entries' symbols into a deduped set", () => {
 		const map: LivingRepoMap = {
-			version: 1,
+			version: 2,
 			lastIndexedCommit: "abc",
 			entries: [
 				{ path: "a.ts", symbols: ["foo", "bar"], mtimeMs: 1 },

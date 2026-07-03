@@ -41,10 +41,15 @@ import {
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { scanSourceFiles } from "../tools/source-scan.ts";
-import { listDeclarations } from "../tools/symbol.ts";
+import { listDeclarations, listTopLevelDeclarations } from "../tools/symbol.ts";
 
-/** Bump when the on-disk schema changes incompatibly. */
-const CACHE_VERSION = 1 as const;
+/**
+ * Bump when the on-disk schema changes incompatibly. v2 adds the optional
+ * per-symbol `decls` (kind+line) projection consumed by the Band P context
+ * composer; bumping invalidates v1 name-only caches so they reindex cleanly
+ * with the richer data instead of being read back without `decls`.
+ */
+export const CACHE_VERSION = 2 as const;
 
 /** Wall-clock cap on the `git diff` subprocess; deep histories must not stall. */
 const GIT_TIMEOUT_MS = 5000;
@@ -62,12 +67,29 @@ const MAX_INDEX_BYTES = 256 * 1024;
 /** Symbols kept per file — matches the file-digests cap so the map feeds it 1:1. */
 const MAX_SYMBOLS_PER_FILE = 12;
 
+/** One top-level declaration: name + kind keyword + 1-based line. */
+export interface RepoMapDecl {
+	name: string;
+	/** Declaration kind keyword (function/class/interface/const/def/…). */
+	kind: string;
+	/** 1-based line of the declaration. */
+	line: number;
+}
+
 /** One indexed file: relative path + its symbol names + the mtime we indexed at. */
 export interface RepoMapEntry {
 	/** cwd-relative, forward-slash-normalized path (stable across OSes). */
 	path: string;
 	/** Symbol names (capped), in declaration order. */
 	symbols: string[];
+	/**
+	 * Enriched projection (kind+line) of the same top-level declarations as
+	 * `symbols`, capped identically. Optional so a v1 cache / a deps harness that
+	 * omits `extractDeclarations` still round-trips; consumers (context composer)
+	 * fall back to `symbols` when absent. NOT flattened into the grounding name
+	 * pool — `repoMapToSymbolSet` reads `symbols` only.
+	 */
+	decls?: RepoMapDecl[];
 	/** Epoch ms of the file mtime when these symbols were extracted. 0 if unknown. */
 	mtimeMs: number;
 }
@@ -116,6 +138,14 @@ export interface LivingRepoMapDeps {
 	scan: (cwd: string) => Promise<string[]>;
 	/** Extract declaration names from file content. */
 	extractSymbols: (content: string, path: string) => string[];
+	/**
+	 * OPTIONAL enriched extractor: the same top-level declarations as
+	 * `extractSymbols` but carrying kind+line. When present, each indexed entry
+	 * gains a `decls` projection; when absent (e.g. a test harness that only
+	 * stubs `extractSymbols`), entries stay name-only and consumers degrade
+	 * gracefully. The default wires `listTopLevelDeclarations` (repo_map's extractor).
+	 */
+	extractDeclarations?: (content: string, path: string) => RepoMapDecl[];
 	/** Load the persisted cache, or undefined on any failure. */
 	loadCache: (cachepath: string) => LivingRepoMap | undefined;
 	/** Persist the cache atomically. Throws are swallowed by the caller. */
@@ -231,10 +261,40 @@ function defaultExtractSymbols(content: string, path: string): string[] {
 }
 
 /**
+ * Enriched extractor: reuse repo_map's `listTopLevelDeclarations` (kind+name+line,
+ * no block-end walk) and cap to the same budget as the name list so the two
+ * projections stay 1:1. No truncation sentinel here — `decls` is structured data,
+ * not a rendered outline.
+ */
+function defaultExtractDeclarations(content: string, path: string): RepoMapDecl[] {
+	return listTopLevelDeclarations(content, path)
+		.slice(0, MAX_SYMBOLS_PER_FILE)
+		.map((d) => ({ name: d.name, kind: d.kind, line: d.line }));
+}
+
+/**
  * Best-effort cache read. JSONL: line 0 is the header
  * `{version,lastIndexedCommit}`, each subsequent non-empty line is one
  * RepoMapEntry. A malformed line is skipped (advisory data, never load-bearing).
  */
+/**
+ * Validate + normalize a persisted `decls` array. Returns undefined when the
+ * field is absent or malformed (v1 caches, corrupt lines) so the entry stays
+ * name-only. Each element must carry a string name+kind and a finite line.
+ */
+function parseDecls(raw: unknown): RepoMapDecl[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const out: RepoMapDecl[] = [];
+	for (const d of raw) {
+		if (!d || typeof d !== "object") continue;
+		const c = d as Partial<RepoMapDecl>;
+		if (typeof c.name !== "string" || typeof c.kind !== "string") continue;
+		const line = typeof c.line === "number" && Number.isFinite(c.line) ? c.line : 0;
+		out.push({ name: c.name, kind: c.kind, line });
+	}
+	return out.length > 0 ? out : undefined;
+}
+
 export function loadRepoMapCache(cachePath: string): LivingRepoMap | undefined {
 	let raw: string;
 	try {
@@ -262,7 +322,10 @@ export function loadRepoMapCache(cachePath: string): LivingRepoMap | undefined {
 			const obj = JSON.parse(line) as Partial<RepoMapEntry>;
 			if (typeof obj.path !== "string" || !Array.isArray(obj.symbols)) continue;
 			const mtimeMs = typeof obj.mtimeMs === "number" && Number.isFinite(obj.mtimeMs) ? obj.mtimeMs : 0;
-			entries.push({ path: obj.path, symbols: obj.symbols.map(String), mtimeMs });
+			const decls = parseDecls(obj.decls);
+			const entry: RepoMapEntry = { path: obj.path, symbols: obj.symbols.map(String), mtimeMs };
+			if (decls) entry.decls = decls;
+			entries.push(entry);
 		} catch {
 			// Skip the corrupt line; partial caches still accelerate the rest.
 		}
@@ -307,6 +370,7 @@ export const defaultLivingRepoMapDeps: LivingRepoMapDeps = {
 	statMtime: defaultStatMtime,
 	scan: (cwd) => scanSourceFiles(cwd),
 	extractSymbols: defaultExtractSymbols,
+	extractDeclarations: defaultExtractDeclarations,
 	loadCache: loadRepoMapCache,
 	saveCache: saveRepoMapCache,
 	cachePath: defaultRepoMapCachePath,
@@ -325,7 +389,18 @@ function indexFile(cwd: string, relPath: string, deps: LivingRepoMapDeps): RepoM
 	if (content === null) return null;
 	const symbols = deps.extractSymbols(content, abs);
 	if (symbols.length === 0) return null;
-	return { path: toRelKey(cwd, relPath), symbols, mtimeMs };
+	const entry: RepoMapEntry = { path: toRelKey(cwd, relPath), symbols, mtimeMs };
+	// Enriched projection (kind+line) when the dep is wired. Best-effort: any
+	// throw degrades to the name-only entry (never breaks indexing).
+	if (deps.extractDeclarations) {
+		try {
+			const decls = deps.extractDeclarations(content, abs);
+			if (decls.length > 0) entry.decls = decls;
+		} catch {
+			// name-only fallback
+		}
+	}
+	return entry;
 }
 
 /** Build a fresh map from a full source-file walk (non-git / cold-start path). */

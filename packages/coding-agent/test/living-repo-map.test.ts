@@ -74,7 +74,7 @@ function makeDeps(opts: {
 describe("getLivingRepoMap — incremental git delta", () => {
 	it("reindexes ONLY the modified file, keeps the rest, persists new HEAD", async () => {
 		const cache: LivingRepoMap = {
-			version: 1,
+			version: 2,
 			lastIndexedCommit: "old-sha",
 			entries: [
 				{ path: "a.ts", symbols: ["aOld"], mtimeMs: 1 },
@@ -108,7 +108,7 @@ describe("getLivingRepoMap — incremental git delta", () => {
 
 	it("drops deleted files from the map", async () => {
 		const cache: LivingRepoMap = {
-			version: 1,
+			version: 2,
 			lastIndexedCommit: "old-sha",
 			entries: [
 				{ path: "a.ts", symbols: ["a"], mtimeMs: 1 },
@@ -130,7 +130,7 @@ describe("getLivingRepoMap — incremental git delta", () => {
 
 	it("handles a rename: old key dropped, destination indexed", async () => {
 		const cache: LivingRepoMap = {
-			version: 1,
+			version: 2,
 			lastIndexedCommit: "old-sha",
 			entries: [{ path: "old.ts", symbols: ["x"], mtimeMs: 1 }],
 		};
@@ -150,7 +150,7 @@ describe("getLivingRepoMap — incremental git delta", () => {
 
 	it("catches an uncommitted edit via mtime drift (not in the git diff)", async () => {
 		const cache: LivingRepoMap = {
-			version: 1,
+			version: 2,
 			lastIndexedCommit: "head-sha",
 			entries: [
 				{ path: "a.ts", symbols: ["aOld"], mtimeMs: 1 },
@@ -175,7 +175,7 @@ describe("getLivingRepoMap — incremental git delta", () => {
 
 	it("pure cache hit when nothing changed → mode cache-hit, zero reindex", async () => {
 		const cache: LivingRepoMap = {
-			version: 1,
+			version: 2,
 			lastIndexedCommit: "head-sha",
 			entries: [{ path: "a.ts", symbols: ["a"], mtimeMs: 5 }],
 		};
@@ -210,7 +210,7 @@ describe("getLivingRepoMap — degradation", () => {
 
 	it("git diff failure (rebased-away base) triggers a full rebuild at HEAD", async () => {
 		const cache: LivingRepoMap = {
-			version: 1,
+			version: 2,
 			lastIndexedCommit: "dangling-sha",
 			entries: [{ path: "a.ts", symbols: ["stale"], mtimeMs: 1 }],
 		};
@@ -229,7 +229,7 @@ describe("getLivingRepoMap — degradation", () => {
 
 	it("PIT_NO_LIVING_REPO_MAP forces a one-shot full scan with NO persistence", async () => {
 		const cache: LivingRepoMap = {
-			version: 1,
+			version: 2,
 			lastIndexedCommit: "old-sha",
 			entries: [{ path: "a.ts", symbols: ["a"], mtimeMs: 1 }],
 		};
@@ -257,7 +257,7 @@ describe("getLivingRepoMap — degradation", () => {
 		const { deps, parseCounts, saved } = makeDeps({
 			head: "new-sha",
 			diff: [{ status: "M", path: "a.ts" }],
-			cache: { version: 1, lastIndexedCommit: "", entries: [] }, // empty anchor
+			cache: { version: 2, lastIndexedCommit: "", entries: [] }, // empty anchor
 			files: { "a.ts": "a", "b.ts": "b" },
 		});
 		const result = await getLivingRepoMap(CWD, deps);
@@ -277,7 +277,7 @@ describe("cache round-trip + digest projection", () => {
 		try {
 			const cachePath = join(dir, ".pit", "repo-map.jsonl");
 			const map: LivingRepoMap = {
-				version: 1,
+				version: 2,
 				lastIndexedCommit: "sha123",
 				entries: [
 					{ path: "a.ts", symbols: ["f", "C"], mtimeMs: 10 },
@@ -306,7 +306,7 @@ describe("cache round-trip + digest projection", () => {
 			// Valid header, one good line, one garbage line.
 			writeFileSync(
 				cachePath,
-				`${JSON.stringify({ version: 1, lastIndexedCommit: "s" })}\n${JSON.stringify({ path: "ok.ts", symbols: ["x"], mtimeMs: 1 })}\n{not json\n`,
+				`${JSON.stringify({ version: 2, lastIndexedCommit: "s" })}\n${JSON.stringify({ path: "ok.ts", symbols: ["x"], mtimeMs: 1 })}\n{not json\n`,
 				"utf8",
 			);
 			const loaded = loadRepoMapCache(cachePath);
@@ -318,7 +318,7 @@ describe("cache round-trip + digest projection", () => {
 
 	it("livingRepoMapToDigests projects to the file-digests Record shape, filtered by path", () => {
 		const map: LivingRepoMap = {
-			version: 1,
+			version: 2,
 			lastIndexedCommit: "s",
 			entries: [
 				{ path: "a.ts", symbols: ["f", "C"], mtimeMs: 1 },
