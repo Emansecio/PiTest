@@ -1,12 +1,11 @@
 import type { AgentTool } from "@pit/agent-core";
-import { Box, Container, Spacer, Text } from "@pit/tui";
+import { type Box, Container, Spacer, Text } from "@pit/tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
-import { EDIT_EXPANDED_MAX_LINES } from "../../modes/interactive/components/tool-activity.ts";
 import { writeFileAtomic } from "../../utils/atomic-write.ts";
-import type { ToolDefinition, ToolRenderContext } from "../extensions/types.js";
+import type { ToolDefinition } from "../extensions/types.js";
 import { attachPostWriteDiagnostics, capturePreWriteDiagnostics } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, EDIT_KEY_ALIASES, PATH_KEY_ALIASES } from "./argument-prep.js";
@@ -22,12 +21,18 @@ import {
 	restoreLineEndings,
 	stripBom,
 } from "./edit-diff.ts";
-import { appendEditDiffBody, getEditHeaderBg, setEditPreview } from "./edit-preview-shared.ts";
-import type { FileMtimeStore } from "./file-mtime-store.ts";
+import {
+	buildEditToolCallComponent,
+	createEditCallComponentBase,
+	type EditDiffMemoTarget,
+	getOrCreateEditCallComponent,
+	setEditPreview,
+} from "./edit-preview-shared.ts";
+import { type FileMtimeStore, refreshFileMtime } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { attachOmissionWarning } from "./lazy-omission-attach.ts";
 import { resolveToCwd } from "./path-utils.ts";
-import { getFilePathArg, invalidArgText, shortenPath } from "./render-utils.ts";
+import { getFilePathArg } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 type EditPreview = EditDiffResult | EditDiffError;
@@ -183,45 +188,10 @@ type EditToolResultLike = {
 	details?: EditToolDetails;
 };
 
-type EditCallRenderComponent = Box & {
-	preview?: EditPreview;
-	previewArgsKey?: string;
-	previewPending?: boolean;
-	/** argsComplete at the most recent render — read when a dispatched diff resolves. */
-	lastArgsComplete?: boolean;
-	settledError?: boolean;
-	// Memoized `renderDiff` output keyed by the source diff string. `renderDiff`
-	// runs `Diff.diffWords` per changed line pair (O(n²) on large edits); since
-	// `buildEditCallComponent` re-runs on every args delta we cache the rendered
-	// body and only recompute when the underlying diff string changes.
-	renderedDiffKey?: string;
-	renderedDiffBody?: string;
-};
+type EditCallRenderComponent = Box & EditDiffMemoTarget & { lastArgsComplete?: boolean };
 
 function createEditCallRenderComponent(): EditCallRenderComponent {
-	return Object.assign(new Box(1, 1, (text: string) => text), {
-		preview: undefined as EditPreview | undefined,
-		previewArgsKey: undefined as string | undefined,
-		previewPending: false,
-		lastArgsComplete: false,
-		settledError: false,
-		renderedDiffKey: undefined as string | undefined,
-		renderedDiffBody: undefined as string | undefined,
-	});
-}
-
-function getEditCallRenderComponent(state: EditRenderState, lastComponent: unknown): EditCallRenderComponent {
-	if (lastComponent instanceof Box) {
-		const component = lastComponent as EditCallRenderComponent;
-		state.callComponent = component;
-		return component;
-	}
-	if (state.callComponent) {
-		return state.callComponent;
-	}
-	const component = createEditCallRenderComponent();
-	state.callComponent = component;
-	return component;
+	return Object.assign(createEditCallComponentBase(), { lastArgsComplete: false });
 }
 
 function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path: string; edits: Edit[] } | null {
@@ -248,18 +218,6 @@ function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path
 	}
 
 	return null;
-}
-
-function formatEditCall(
-	args: RenderableEditArgs | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-	cwd?: string,
-): string {
-	const invalidArg = invalidArgText(theme);
-	const rawPath = getFilePathArg(args);
-	const path = rawPath !== null ? shortenPath(rawPath, cwd) : null;
-	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
-	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
 }
 
 function formatEditResult(
@@ -289,36 +247,6 @@ function formatEditResult(
 	return undefined;
 }
 
-function buildEditCallComponent(
-	component: EditCallRenderComponent,
-	args: RenderableEditArgs | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-	cwd: string | undefined,
-	context: ToolRenderContext<EditRenderState>,
-): EditCallRenderComponent {
-	const activityChild = context.activityChild;
-	if (activityChild) {
-		component.setBgFn((text: string) => text);
-	} else {
-		component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
-	}
-	component.clear();
-	if (!activityChild) {
-		component.addChild(new Text(formatEditCall(args, theme, cwd), 0, 0));
-	}
-
-	if (!component.preview) {
-		return component;
-	}
-
-	let diffMaxLines: number | undefined;
-	if (!activityChild && context.expanded) {
-		diffMaxLines = EDIT_EXPANDED_MAX_LINES;
-	}
-	appendEditDiffBody(component, component, component.preview, theme, diffMaxLines);
-	return component;
-}
-
 export function createEditToolDefinition(
 	cwd: string,
 	options?: EditToolOptions,
@@ -329,7 +257,7 @@ export function createEditToolDefinition(
 		name: "edit",
 		label: "edit",
 		description:
-			'Edit one file by exact text replacement. Pass edits[] of {oldText,newText}; each oldText must match exactly one region in the ORIGINAL file. Multiple disjoint changes in same file → one call with multiple edits[]. File must be read first this session.\n\nWRONG: { "edits": [{ "oldText": "foo", "newText": "foo" }] }   // no-op, refused\nWRONG: { "edits": [{ "oldText": "x", "newText": "y" }] }       // ambiguous if multiple "x"\nRIGHT: { "edits": [{ "oldText": "function foo()", "newText": "function foo(x)" }] }   // unique anchor\n\nWHICH TOOL: Default tool for text edits. For very large files where output tokens matter, prefer `edit_v2` (content-hash anchors). For structural rewrites across multiple files, use `ast_edit`. To create a new file or fully replace one, use `write`.',
+			'Edit one file by exact text replacement. Pass edits[] of {oldText,newText}; each oldText must match exactly one region in the ORIGINAL file. Multiple disjoint changes in same file → one call with multiple edits[]. If the file changed on disk since your last read this session, the edit still applies to the current content, but the result carries a NOTE that content you were not shown may have moved — re-read if that happens (some embedders additionally enforce reading a file before editing it).\n\nWRONG: { "edits": [{ "oldText": "foo", "newText": "foo" }] }   // no-op, refused\nWRONG: { "edits": [{ "oldText": "x", "newText": "y" }] }       // ambiguous if multiple "x"\nRIGHT: { "edits": [{ "oldText": "function foo()", "newText": "function foo(x)" }] }   // unique anchor\n\nWHICH TOOL: Default tool for text edits. For very large files where output tokens matter, prefer `edit_v2` (content-hash anchors). For structural rewrites across multiple files, use `ast_edit`. To create a new file or fully replace one, use `write`.',
 		promptSnippet:
 			"Make precise file edits with exact text replacement, including multiple disjoint edits in one call",
 		promptGuidelines: [
@@ -396,6 +324,20 @@ export function createEditToolDefinition(
 									return;
 								}
 
+								// Snapshot the mtime this preview will be staged against (only
+								// needed when staging — see the preview branch below), so the
+								// eventual apply() (run later, from `resolve`) can detect the file
+								// changing between staging and commit and refuse to blindly
+								// overwrite it instead of silently discarding that change.
+								let stagedMtimeMs: number | undefined;
+								if (ops === defaultEditOperations && input.preview === true) {
+									try {
+										stagedMtimeMs = (await fsStat(absolutePath)).mtimeMs;
+									} catch {
+										// stat failed — staleness re-check at apply time is skipped, not fatal.
+									}
+								}
+
 								// Read the file.
 								const buffer = await ops.readFile(absolutePath);
 								const rawContent = buffer.toString("utf-8");
@@ -430,7 +372,18 @@ export function createEditToolDefinition(
 										kind: "edit",
 										path,
 										apply: async () => {
-											await ops.writeFile(absolutePath, finalContent);
+											await withFileMutationQueue(absolutePath, async () => {
+												if (ops === defaultEditOperations && stagedMtimeMs !== undefined) {
+													const curStat = await fsStat(absolutePath).catch(() => undefined);
+													if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
+														throw new Error(
+															`Cannot apply preview: ${path} changed on disk since this edit was staged. Re-run edit to recompute the diff against the current file.`,
+														);
+													}
+												}
+												await ops.writeFile(absolutePath, finalContent);
+												if (ops === defaultEditOperations) await refreshFileMtime(mtimeStore, absolutePath);
+											});
 										},
 										summary: {
 											description: `edit ${path}: ${edits.length} block(s)`,
@@ -544,7 +497,11 @@ export function createEditToolDefinition(
 			return attachOmissionWarning(diagResult, absolutePath, __omissionBase, __omissionNew, cwd);
 		},
 		renderCall(args, theme, context) {
-			const component = getEditCallRenderComponent(context.state, context.lastComponent);
+			const component = getOrCreateEditCallComponent(
+				context.state,
+				context.lastComponent,
+				createEditCallRenderComponent,
+			);
 			const previewInput = getRenderablePreviewInput(args as RenderableEditArgs | undefined);
 			const argsKey = previewInput
 				? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
@@ -560,7 +517,7 @@ export function createEditToolDefinition(
 			// Live diff: compute the preview as soon as a renderable input exists,
 			// not only once args finish streaming. The diff grows token-by-token as
 			// newText arrives (each delta changes argsKey, resetting + re-dispatching
-			// above). Rendering reuses the same setEditPreview/buildEditCallComponent
+			// above). Rendering reuses the same setEditPreview/buildEditToolCallComponent
 			// path as the final preview, so it's already width-safe.
 			component.lastArgsComplete = context.argsComplete;
 			if (previewInput && !component.preview && !component.previewPending) {
@@ -581,7 +538,14 @@ export function createEditToolDefinition(
 				});
 			}
 
-			return buildEditCallComponent(component, args, theme, context.cwd, context);
+			return buildEditToolCallComponent(
+				"edit",
+				component,
+				args as RenderableEditArgs | undefined,
+				theme,
+				context.cwd,
+				context,
+			);
 		},
 		renderResult(result, _options, theme, context) {
 			const callComponent = context.state.callComponent;
@@ -606,7 +570,8 @@ export function createEditToolDefinition(
 					changed = true;
 				}
 				if (changed) {
-					buildEditCallComponent(
+					buildEditToolCallComponent(
+						"edit",
 						callComponent,
 						context.args as RenderableEditArgs | undefined,
 						theme,

@@ -1,6 +1,6 @@
 import { accessSync, constants, realpathSync } from "node:fs";
 import * as os from "node:os";
-import { isAbsolute, resolve as resolvePath } from "node:path";
+import { isAbsolute, join as pathJoin, resolve as resolvePath } from "node:path";
 
 /**
  * True on filesystems that are case-insensitive by default (Windows, macOS).
@@ -104,7 +104,7 @@ export function expandPath(filePath: string): string {
 		return os.homedir();
 	}
 	if (normalized.startsWith("~/")) {
-		return os.homedir() + normalized.slice(1);
+		return pathJoin(os.homedir(), normalized.slice(2));
 	}
 	return normalized;
 }

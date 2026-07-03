@@ -1,34 +1,30 @@
 import type { AgentTool } from "@pit/agent-core";
-import { Box, Container, Spacer, Text } from "@pit/tui";
+import { type Box, Container, Spacer, Text } from "@pit/tui";
 import { stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
-import { EDIT_EXPANDED_MAX_LINES } from "../../modes/interactive/components/tool-activity.ts";
-import type { ToolDefinition, ToolRenderContext } from "../extensions/types.js";
+import type { ToolDefinition } from "../extensions/types.js";
 import { attachPostWriteDiagnostics, capturePreWriteDiagnostics } from "../lsp/writethrough.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { applyKeyAliases, coerceJsonArrayField, PATH_KEY_ALIASES } from "./argument-prep.js";
 import { defaultEditOperations, type EditOperations, type EditToolDetails } from "./edit.ts";
-import {
-	detectLineEnding,
-	type EditDiffError,
-	type EditDiffResult,
-	generateDiffString,
-	normalizeToLF,
-	restoreLineEndings,
-	stripBom,
-} from "./edit-diff.ts";
+import { detectLineEnding, generateDiffString, normalizeToLF, restoreLineEndings, stripBom } from "./edit-diff.ts";
 import {
 	applyHashlineEdits,
 	computeHashlineEditsDiff,
 	type HashlineEdit,
 	HashlineEditError,
 } from "./edit-hashline-diff.ts";
-import { appendEditDiffBody, getEditHeaderBg, setEditPreview } from "./edit-preview-shared.ts";
-import type { FileMtimeStore } from "./file-mtime-store.ts";
+import {
+	buildEditToolCallComponent,
+	createEditCallComponentBase,
+	type EditDiffMemoTarget,
+	getOrCreateEditCallComponent,
+	setEditPreview,
+} from "./edit-preview-shared.ts";
+import { type FileMtimeStore, refreshFileMtime } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
-import { getFilePathArg, invalidArgText, shortenPath } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const HEX8 = /^[0-9a-f]{8}$/;
@@ -71,62 +67,15 @@ export interface EditHashlineToolOptions {
 	mtimeStore?: FileMtimeStore;
 }
 
-/**
- * Record the file's post-write mtime in the shared store so edit_v2's own write
- * isn't later flagged as a stale external change by the next edit of this path.
- * Only meaningful against the real filesystem (default ops). Non-fatal.
- */
-async function refreshHashlineMtime(store: FileMtimeStore | undefined, absolutePath: string): Promise<void> {
-	if (!store) return;
-	try {
-		const st = await fsStat(absolutePath);
-		store.set(absolutePath, st.mtimeMs);
-	} catch {
-		// stat failed — non-fatal; the next read re-records it.
-	}
-}
-
 type RenderableArgs = {
 	path?: string;
 	file_path?: string;
 	edits?: HashlineEdit[];
 };
 
-type HashlineEditPreview = EditDiffResult | EditDiffError;
-
-type CallComponent = Box & {
-	preview?: HashlineEditPreview;
-	previewArgsKey?: string;
-	previewPending?: boolean;
-	settledError?: boolean;
-	renderedDiffKey?: string;
-	renderedDiffBody?: string;
-};
-
-function createCallComponent(): CallComponent {
-	return Object.assign(new Box(1, 1, (text: string) => text), {
-		preview: undefined as HashlineEditPreview | undefined,
-		previewArgsKey: undefined as string | undefined,
-		previewPending: false,
-		settledError: false,
-		renderedDiffKey: undefined as string | undefined,
-		renderedDiffBody: undefined as string | undefined,
-	});
-}
+type CallComponent = Box & EditDiffMemoTarget;
 
 type RenderState = { callComponent?: CallComponent };
-
-function getCallComponent(state: RenderState, lastComponent: unknown): CallComponent {
-	if (lastComponent instanceof Box) {
-		const component = lastComponent as CallComponent;
-		state.callComponent = component;
-		return component;
-	}
-	if (state.callComponent) return state.callComponent;
-	const component = createCallComponent();
-	state.callComponent = component;
-	return component;
-}
 
 function getRenderablePreviewInput(args: RenderableArgs | undefined): { path: string; edits: HashlineEdit[] } | null {
 	if (!args) return null;
@@ -177,45 +126,6 @@ function validateInput(input: EditHashlineToolInput): { path: string; edits: Has
 	return { path: input.path, edits: input.edits };
 }
 
-function formatCall(
-	args: RenderableArgs | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-	cwd?: string,
-): string {
-	const invalidArg = invalidArgText(theme);
-	const rawPath = getFilePathArg(args);
-	const path = rawPath !== null ? shortenPath(rawPath, cwd) : null;
-	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
-	return `${theme.fg("toolTitle", theme.bold("edit"))} ${pathDisplay}`;
-}
-
-function buildCallComponent(
-	component: CallComponent,
-	args: RenderableArgs | undefined,
-	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
-	cwd: string | undefined,
-	context: ToolRenderContext<RenderState>,
-): CallComponent {
-	const activityChild = context.activityChild;
-	if (activityChild) {
-		component.setBgFn((text: string) => text);
-	} else {
-		component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
-	}
-	component.clear();
-	if (!activityChild) {
-		component.addChild(new Text(formatCall(args, theme, cwd), 0, 0));
-	}
-	if (component.preview) {
-		let diffMaxLines: number | undefined;
-		if (!activityChild && context.expanded) {
-			diffMaxLines = EDIT_EXPANDED_MAX_LINES;
-		}
-		appendEditDiffBody(component, component, component.preview, theme, diffMaxLines);
-	}
-	return component;
-}
-
 export function createEditHashlineToolDefinition(
 	cwd: string,
 	options?: EditHashlineToolOptions,
@@ -233,7 +143,6 @@ export function createEditHashlineToolDefinition(
 			"new_text replaces only the lines strictly between the two anchor windows; the anchor windows themselves stay",
 			"Edits are applied sequentially — pick anchors that exist in the buffer AFTER prior edits in this call",
 			"On not_found/ambiguous error, re-read the file to refresh anchors instead of guessing",
-			"Use edit_v2 to lower output tokens on large files. For ordinary edits prefer edit; for structural multi-file rewrites use ast_edit.",
 		],
 		parameters: editHashlineSchema,
 		renderShell: "self",
@@ -276,6 +185,20 @@ export function createEditHashlineToolDefinition(
 								}
 								if (aborted) return;
 
+								// Snapshot the mtime this preview will be staged against (only
+								// needed when staging — see the preview branch below), so the
+								// eventual apply() (run later, from `resolve`) can detect the file
+								// changing between staging and commit and refuse to blindly
+								// overwrite it instead of silently discarding that change.
+								let stagedMtimeMs: number | undefined;
+								if (ops === defaultEditOperations && input.preview === true) {
+									try {
+										stagedMtimeMs = (await fsStat(absolutePath)).mtimeMs;
+									} catch {
+										// stat failed — staleness re-check at apply time is skipped, not fatal.
+									}
+								}
+
 								const buffer = await ops.readFile(absolutePath);
 								const rawContent = buffer.toString("utf-8");
 								if (aborted) return;
@@ -302,7 +225,11 @@ export function createEditHashlineToolDefinition(
 
 								if (baseContent === newContent) {
 									if (signal) signal.removeEventListener("abort", onAbort);
-									reject(new Error(`No changes made to ${path}. Hashline edits produced identical content.`));
+									reject(
+										new Error(
+											`No changes made to ${path}. Hashline edits produced identical content — new_text may already match what's between the anchors, or before_hash/after_hash may be anchored on the wrong side of the intended region. Re-read the file to confirm anchors before retrying.`,
+										),
+									);
 									return;
 								}
 
@@ -317,8 +244,18 @@ export function createEditHashlineToolDefinition(
 										kind: "edit_v2",
 										path,
 										apply: async () => {
-											await ops.writeFile(absolutePath, finalContent);
-											await refreshHashlineMtime(mtimeStore, absolutePath);
+											await withFileMutationQueue(absolutePath, async () => {
+												if (ops === defaultEditOperations && stagedMtimeMs !== undefined) {
+													const curStat = await fsStat(absolutePath).catch(() => undefined);
+													if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
+														throw new Error(
+															`Cannot apply preview: ${path} changed on disk since this edit was staged. Re-run edit_v2 to recompute the diff against the current file.`,
+														);
+													}
+												}
+												await ops.writeFile(absolutePath, finalContent);
+												if (ops === defaultEditOperations) await refreshFileMtime(mtimeStore, absolutePath);
+											});
 										},
 										summary: {
 											description: `edit_v2 ${path}: ${appliedCount} hashline edit(s)`,
@@ -342,21 +279,57 @@ export function createEditHashlineToolDefinition(
 									return;
 								}
 
+								// Stale-read note: if the file changed on disk since the model last
+								// read it this session, the edit still applies to the CURRENT content,
+								// but content the model wasn't shown may have moved — flag it.
+								let staleNote = "";
+								if (ops === defaultEditOperations && mtimeStore) {
+									const seenMtime = mtimeStore.get(absolutePath);
+									if (seenMtime !== undefined) {
+										try {
+											const curStat = await fsStat(absolutePath);
+											if (curStat.mtimeMs !== seenMtime) {
+												staleNote = ` NOTE: ${path} changed on disk since you last read it this session — the edit applied to the current file, but content you weren't shown may have moved; re-read if the result looks unexpected.`;
+											}
+										} catch {
+											// stat failed — non-fatal; skip the note.
+										}
+									}
+								}
+
 								await ops.writeFile(absolutePath, finalContent, signal);
 								// Committed (atomic rename): stop honoring abort so a late ESC can't
 								// reject a write that already landed (a pre-commit abort throws and is
-								// handled in the catch with the original file intact). Remove the
-								// listener BEFORE the best-effort mtime refresh below so a late ESC
-								// during that fsStat window can't reject an edit already on disk.
-								__written = finalContent;
+								// handled in the catch with the original file intact).
 								if (signal) signal.removeEventListener("abort", onAbort);
-								await refreshHashlineMtime(mtimeStore, absolutePath);
+
+								__written = finalContent;
+
+								// Cheap post-write integrity check (local FS only): confirm the byte
+								// count on disk matches what we wrote, catching a silent partial write
+								// / permission race that would otherwise leave the model believing a
+								// corrupt edit succeeded. Skipped for custom operations (e.g. SSH)
+								// where a local stat is meaningless. Shares the stat call with the
+								// mtime refresh below.
+								let integrityNote = "";
+								if (ops === defaultEditOperations) {
+									try {
+										const st = await fsStat(absolutePath);
+										const expected = Buffer.byteLength(finalContent, "utf-8");
+										if (st.size !== expected) {
+											integrityNote = ` WARNING: post-write size mismatch (expected ${expected} bytes, found ${st.size}). The write may be incomplete — re-read the file to confirm before relying on it.`;
+										}
+										if (mtimeStore) mtimeStore.set(absolutePath, st.mtimeMs);
+									} catch {
+										// stat failed — non-fatal; skip the note rather than fail the edit.
+									}
+								}
 
 								resolve({
 									content: [
 										{
 											type: "text",
-											text: `Successfully applied ${appliedCount} hashline edit(s) in ${path}.`,
+											text: `Successfully applied ${appliedCount} hashline edit(s) in ${path}.${integrityNote}${staleNote}`,
 										},
 									],
 									details: { diff: diffResult.diff, firstChangedLine: diffResult.firstChangedLine },
@@ -371,7 +344,11 @@ export function createEditHashlineToolDefinition(
 			return attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal, diagnosticsBaseline);
 		},
 		renderCall(args, theme, context) {
-			const component = getCallComponent(context.state, context.lastComponent);
+			const component = getOrCreateEditCallComponent(
+				context.state,
+				context.lastComponent,
+				createEditCallComponentBase,
+			);
 			const previewInput = getRenderablePreviewInput(args as RenderableArgs | undefined);
 			const argsKey = previewInput
 				? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
@@ -395,7 +372,14 @@ export function createEditHashlineToolDefinition(
 				});
 			}
 
-			return buildCallComponent(component, args as RenderableArgs | undefined, theme, context.cwd, context);
+			return buildEditToolCallComponent(
+				"edit_v2",
+				component,
+				args as RenderableArgs | undefined,
+				theme,
+				context.cwd,
+				context,
+			);
 		},
 		renderResult(result, _options, theme, context) {
 			const callComponent = context.state.callComponent;
@@ -421,7 +405,8 @@ export function createEditHashlineToolDefinition(
 					changed = true;
 				}
 				if (changed) {
-					buildCallComponent(
+					buildEditToolCallComponent(
+						"edit_v2",
 						callComponent,
 						context.args as RenderableArgs | undefined,
 						theme,

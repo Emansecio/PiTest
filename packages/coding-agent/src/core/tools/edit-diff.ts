@@ -330,6 +330,14 @@ export function indentTolerantFind(content: string, oldText: string): IndentMatc
 
 const NEAR_MISS_MAX_BODY_CHARS = 200;
 
+// Bound how much of a candidate window's verbatim text a not-found error
+// embeds. `windowSize` mirrors the failed oldText's line count, so without a
+// cap a large failed multi-hundred-line oldText balloons the error into
+// thousands of lines (each of up to `maxCandidates` candidates re-embeds the
+// full window). Keeps the truncateForDiagnostic "bounded output" spirit while
+// staying long enough to be copy-paste-useful for the common small-window case.
+const VERBATIM_SNIPPET_MAX_LINES = 40;
+
 function truncateForDiagnostic(text: string): string {
 	const single = text.replace(/\n/g, "\\n");
 	if (single.length <= NEAR_MISS_MAX_BODY_CHARS) return single;
@@ -451,7 +459,11 @@ export function buildCandidateMatches(
 			}
 		}
 		const divergenceLine = candidate.start + divergenceOffset + 1;
-		const verbatimSnippet = contentLines.slice(candidate.start, candidate.start + windowSize).join("\n");
+		const windowLines = contentLines.slice(candidate.start, candidate.start + windowSize);
+		const verbatimSnippet =
+			windowLines.length > VERBATIM_SNIPPET_MAX_LINES
+				? `${windowLines.slice(0, VERBATIM_SNIPPET_MAX_LINES).join("\n")}\n… (${windowLines.length - VERBATIM_SNIPPET_MAX_LINES} more line(s) omitted — re-read the file for the full region)`
+				: windowLines.join("\n");
 		return {
 			startLine: candidate.start + 1,
 			endLine: candidate.start + windowSize,

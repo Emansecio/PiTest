@@ -2,9 +2,11 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.js";
 import { FileMtimeStore } from "../src/core/tools/file-mtime-store.js";
 import { createReadToolDefinition } from "../src/core/tools/read.js";
+import { createWriteToolDefinition } from "../src/core/tools/write.js";
 
 let dir: string;
 
@@ -114,5 +116,53 @@ describe("edit stale-read warning", () => {
 		// second edit of the same path must not be flagged as a stale external change.
 		const r2 = await runEdit(store, file, "b = 2;", "b = 22;");
 		expect(r2.content[0]?.text).not.toMatch(/changed on disk/);
+	});
+});
+
+/**
+ * Regression for finding 6.1 in REVISAO-TOOLS-PIT.md: `write` never consulted
+ * `mtimeStore.get()` before overwriting — the "write" half of the contract
+ * documented in file-mtime-store.ts:2-10 was unimplemented. Mirrors edit's
+ * stale-read warning coverage above.
+ */
+describe("write stale-write warning", () => {
+	async function runWrite(store: FileMtimeStore, file: string, content: string): Promise<TextResult> {
+		const def = createWriteToolDefinition(dir, { mtimeStore: store });
+		const ctx = {} as ExtensionContext;
+		return (await def.execute(
+			"c",
+			{ path: file, content, preview: undefined },
+			undefined,
+			undefined,
+			ctx,
+		)) as TextResult;
+	}
+
+	it("warns when the file changed on disk since the recorded mtime", async () => {
+		const file = join(dir, "w.txt");
+		writeFileSync(file, "original\n", "utf8");
+		const store = new FileMtimeStore();
+		store.set(file, 1000); // deliberately stale baseline
+		const result = await runWrite(store, file, "overwritten\n");
+		expect(result.content[0]?.text).toMatch(/Successfully wrote/);
+		expect(result.content[0]?.text).toMatch(/changed on disk since you last observed it/);
+		expect(readFileSync(file, "utf8")).toBe("overwritten\n");
+	});
+
+	it("does not warn when the recorded mtime matches the current file", async () => {
+		const file = join(dir, "w2.txt");
+		writeFileSync(file, "original\n", "utf8");
+		const store = new FileMtimeStore();
+		store.set(file, statSync(file).mtimeMs);
+		const result = await runWrite(store, file, "overwritten\n");
+		expect(result.content[0]?.text).not.toMatch(/changed on disk/);
+	});
+
+	it("does not warn for a brand-new file with nothing recorded yet", async () => {
+		const file = join(dir, "new.txt");
+		const store = new FileMtimeStore();
+		const result = await runWrite(store, file, "hello\n");
+		expect(result.content[0]?.text).not.toMatch(/changed on disk/);
+		expect(readFileSync(file, "utf8")).toBe("hello\n");
 	});
 });

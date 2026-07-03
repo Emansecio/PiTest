@@ -1,7 +1,9 @@
-import { type Component, Spacer, Text } from "@pit/tui";
+import { Box, type Component, Spacer, Text } from "@pit/tui";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
-import { capDiffPreview } from "../../modes/interactive/components/tool-activity.ts";
+import { capDiffPreview, EDIT_EXPANDED_MAX_LINES } from "../../modes/interactive/components/tool-activity.ts";
+import type { ToolRenderContext } from "../extensions/types.js";
 import type { EditDiffError, EditDiffResult } from "./edit-diff.ts";
+import { getFilePathArg, invalidArgText, shortenPath } from "./render-utils.ts";
 
 /** Union of the two render-preview shapes shared by `edit` and `edit_v2`. */
 export type EditPreviewValue = EditDiffResult | EditDiffError;
@@ -21,6 +23,8 @@ export interface EditPreviewTarget {
 export interface EditDiffMemoTarget extends EditPreviewTarget {
 	renderedDiffKey?: string;
 	renderedDiffBody?: string;
+	/** Whether the settled (non-preview) tool result was an error. */
+	settledError?: boolean;
 }
 
 /**
@@ -127,4 +131,105 @@ export function appendEditDiffBody(
 	} else {
 		parent.addChild(new Text(body, 0, 0));
 	}
+}
+
+/**
+ * Base fields a new edit-family call render component starts with. Shared by
+ * `edit` and `edit_v2`; each tool's own `create*Component()` may layer extra
+ * fields on top (e.g. `edit`'s `lastArgsComplete`, used to gate its streaming
+ * live-preview while args are still arriving — that policy stays local to
+ * `edit.ts`, only the base shape is shared here).
+ */
+export function createEditCallComponentBase(): Box & EditDiffMemoTarget {
+	return Object.assign(new Box(1, 1, (text: string) => text), {
+		preview: undefined as EditPreviewValue | undefined,
+		previewArgsKey: undefined as string | undefined,
+		previewPending: false,
+		settledError: false,
+		renderedDiffKey: undefined as string | undefined,
+		renderedDiffBody: undefined as string | undefined,
+	});
+}
+
+/**
+ * Get-or-create the persisted call render component for an edit-family tool.
+ * Reuses `lastComponent` when the TUI already re-mounted it, otherwise reuses
+ * (or creates via `create`) the one held in `state`. Identical across `edit`
+ * and `edit_v2` — only `create` differs.
+ */
+export function getOrCreateEditCallComponent<TComponent extends Box>(
+	state: { callComponent?: TComponent },
+	lastComponent: unknown,
+	create: () => TComponent,
+): TComponent {
+	if (lastComponent instanceof Box) {
+		const component = lastComponent as TComponent;
+		state.callComponent = component;
+		return component;
+	}
+	if (state.callComponent) {
+		return state.callComponent;
+	}
+	const component = create();
+	state.callComponent = component;
+	return component;
+}
+
+/**
+ * Format an edit-family tool's call header: `<label> <path>`. `label` is the
+ * only thing that differs between `edit` and `edit_v2` — passing it in (rather
+ * than hardcoding "edit") is what keeps `edit_v2`'s header from mislabeling
+ * itself as "edit".
+ */
+export function formatEditToolCallHeader(
+	label: string,
+	args: { path?: unknown; file_path?: unknown } | undefined,
+	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	cwd?: string,
+): string {
+	const invalidArg = invalidArgText(theme);
+	const rawPath = getFilePathArg(args);
+	const path = rawPath !== null ? shortenPath(rawPath, cwd) : null;
+	const pathDisplay = path === null ? invalidArg : path ? theme.fg("accent", path) : theme.fg("toolOutput", "...");
+	return `${theme.fg("toolTitle", theme.bold(label))} ${pathDisplay}`;
+}
+
+/**
+ * Build (mutate + return) an edit-family call render component: header
+ * background, header text, and — once a preview exists — the diff/error body.
+ * Identical across `edit` and `edit_v2`; callers differ only in header
+ * `label` and in when they dispatch the preview compute (edit streams a live
+ * preview before args finish; edit_v2 waits for `argsComplete`) — that policy
+ * lives in each tool's own `renderCall`, upstream of this helper.
+ */
+export function buildEditToolCallComponent<
+	TComponent extends Box & EditDiffMemoTarget,
+	TArgs extends { path?: unknown; file_path?: unknown },
+>(
+	label: string,
+	component: TComponent,
+	args: TArgs | undefined,
+	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
+	cwd: string | undefined,
+	context: Pick<ToolRenderContext, "activityChild" | "expanded">,
+): TComponent {
+	const activityChild = context.activityChild;
+	if (activityChild) {
+		component.setBgFn((text: string) => text);
+	} else {
+		component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
+	}
+	component.clear();
+	if (!activityChild) {
+		component.addChild(new Text(formatEditToolCallHeader(label, args, theme, cwd), 0, 0));
+	}
+	if (!component.preview) {
+		return component;
+	}
+	let diffMaxLines: number | undefined;
+	if (!activityChild && context.expanded) {
+		diffMaxLines = EDIT_EXPANDED_MAX_LINES;
+	}
+	appendEditDiffBody(component, component, component.preview, theme, diffMaxLines);
+	return component;
 }

@@ -10,7 +10,7 @@ import { attachPostWriteDiagnostics, capturePreWriteDiagnostics, maybeFormat } f
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { getUrlSchemeRegistry } from "../url-schemes/index.ts";
 import { applyKeyAliases, PATH_KEY_ALIASES } from "./argument-prep.js";
-import type { FileMtimeStore } from "./file-mtime-store.ts";
+import { type FileMtimeStore, refreshFileMtime } from "./file-mtime-store.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.js";
 import { attachOmissionWarning } from "./lazy-omission-attach.ts";
 import { resolveToCwd } from "./path-utils.js";
@@ -82,17 +82,6 @@ export interface WriteToolOptions {
 	 * check doesn't flag our own write as an external change.
 	 */
 	mtimeStore?: FileMtimeStore;
-}
-
-/** Record the file's post-write mtime in the shared store. Non-fatal on failure. */
-async function refreshMtime(store: FileMtimeStore | undefined, absolutePath: string): Promise<void> {
-	if (!store) return;
-	try {
-		const st = await fsStat(absolutePath);
-		store.set(absolutePath, st.mtimeMs);
-	} catch {
-		// stat failed — non-fatal; the next read re-records it.
-	}
 }
 
 type WriteHighlightCache = {
@@ -230,7 +219,7 @@ export function createWriteToolDefinition(
 		name: "write",
 		label: "write",
 		description:
-			'Write content to a file. Creates the file if it doesn\'t exist, overwrites if it does. Automatically creates parent directories.\n\nWRONG: { "file_path": "foo.ts", "text": "..." }       // wrong key names\nRIGHT: { "path": "foo.ts", "content": "..." }\n\nCommon mistakes to avoid:\n- Using write to make small edits to an existing file — use "edit" instead (write overwrites the entire file).\n- Passing the content under "text"/"body"/"data" — the canonical key is "content".\n- Passing the path under "file_path"/"filename" — the canonical key is "path".\n- Forgetting trailing newline for files that conventionally end with one.',
+			'Write content to a file. Creates the file if it doesn\'t exist, overwrites if it does. Automatically creates parent directories.\n\nRIGHT: { "path": "foo.ts", "content": "..." }\n\n- Use write only for new files or full rewrites (use "edit" for small changes); include a trailing newline if the file convention expects one.',
 		promptSnippet: "Create or overwrite files",
 		promptGuidelines: ["Use write only for new files or complete rewrites."],
 		parameters: writeSchema,
@@ -252,7 +241,7 @@ export function createWriteToolDefinition(
 				}
 				await resolver.write(url, content, { cwd, signal });
 				return {
-					content: [{ type: "text" as const, text: `Successfully applied ${content.length} bytes to ${path}` }],
+					content: [{ type: "text" as const, text: `Successfully wrote ${content.length} bytes to ${path}.` }],
 					details: undefined,
 				};
 			}
@@ -263,17 +252,40 @@ export function createWriteToolDefinition(
 			const queue = getCurrentPreviewQueue();
 			if (preview === true && queue) {
 				if (signal?.aborted) throw new Error("Operation aborted");
+				// Snapshot the mtime this preview is staged against (undefined for a
+				// brand-new file — nothing to drift from), so apply() (run later, from
+				// `resolve`) can detect the file changing between staging and commit
+				// and refuse to blindly clobber it instead of silently discarding that
+				// external change.
+				let stagedMtimeMs: number | undefined;
+				if (ops === defaultWriteOperations) {
+					try {
+						stagedMtimeMs = (await fsStat(absolutePath)).mtimeMs;
+					} catch {
+						// File doesn't exist yet (or unreadable) — nothing to drift from.
+					}
+				}
 				const item = queue.add({
 					kind: "write",
 					path,
 					apply: async () => {
-						await ops.mkdir(dir);
-						// Format at commit exactly as the direct-write path does, so the bytes
-						// landed by a previewed write match a non-previewed one (no signal: the
-						// commit runs later in the resolve lifecycle, not the staging one).
-						const formatted = await maybeFormat(absolutePath, content, cwd);
-						await ops.writeFile(absolutePath, formatted.content);
-						await refreshMtime(mtimeStore, absolutePath);
+						await withFileMutationQueue(absolutePath, async () => {
+							if (ops === defaultWriteOperations && stagedMtimeMs !== undefined) {
+								const curStat = await fsStat(absolutePath).catch(() => undefined);
+								if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
+									throw new Error(
+										`Cannot apply preview: ${path} changed on disk since this write was staged. Re-run write to overwrite the current file, or use edit to merge changes.`,
+									);
+								}
+							}
+							await ops.mkdir(dir);
+							// Format at commit exactly as the direct-write path does, so the bytes
+							// landed by a previewed write match a non-previewed one (no signal: the
+							// commit runs later in the resolve lifecycle, not the staging one).
+							const formatted = await maybeFormat(absolutePath, content, cwd);
+							await ops.writeFile(absolutePath, formatted.content);
+							await refreshFileMtime(mtimeStore, absolutePath);
+						});
 					},
 					summary: {
 						description: `write ${path}: ${content.length} bytes`,
@@ -304,6 +316,26 @@ export function createWriteToolDefinition(
 							signal?.addEventListener("abort", onAbort, { once: true });
 							(async () => {
 								try {
+									// Stale-write note: if the file changed on disk since the model
+									// last observed it this session (a read, or one of our own prior
+									// write/edit commits), the overwrite still lands, but content the
+									// model wasn't shown is about to be discarded — flag it. Mirrors
+									// edit's staleNote; non-fatal, doesn't block the write.
+									let staleNote = "";
+									if (ops === defaultWriteOperations && mtimeStore) {
+										const seenMtime = mtimeStore.get(absolutePath);
+										if (seenMtime !== undefined) {
+											try {
+												const curStat = await fsStat(absolutePath);
+												if (curStat.mtimeMs !== seenMtime) {
+													staleNote = ` NOTE: ${path} changed on disk since you last observed it this session — the overwrite replaced content you weren't shown; re-read first if that wasn't intended.`;
+												}
+											} catch {
+												// stat failed (e.g. file doesn't exist yet) — no note.
+											}
+										}
+									}
+
 									// Create parent directories if needed.
 									await ops.mkdir(dir);
 									if (aborted) return;
@@ -314,13 +346,13 @@ export function createWriteToolDefinition(
 									// can't reject a write that already landed. A pre-commit abort
 									// throws from writeFile and is caught below with disk intact.
 									__written = formatted.content;
-									await refreshMtime(mtimeStore, absolutePath);
+									await refreshFileMtime(mtimeStore, absolutePath);
 									signal?.removeEventListener("abort", onAbort);
 									resolve({
 										content: [
 											{
 												type: "text",
-												text: `Successfully wrote ${formatted.content.length} bytes to ${path}${formatted.formatted ? " (formatted)" : ""}`,
+												text: `Successfully wrote ${formatted.content.length} bytes to ${path}${formatted.formatted ? " (formatted)" : ""}.${staleNote}`,
 											},
 										],
 										details: undefined,
