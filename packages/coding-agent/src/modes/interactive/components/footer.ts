@@ -443,20 +443,18 @@ export class FooterComponent implements Component {
 		if (cwdLabels.shellNote) pwd = `${pwd}${theme.fg("dim", ` · ${cwdLabels.shellNote}`)}`;
 
 		// Right: model • thinking-level — the model id is the single bright token
-		// of the line; the provider is secondary metadata (muted, no parens) and
-		// the thinking level renders as a small colored chip (`✦ high`).
+		// of the line (no provider prefix; the provider lives in /model) and the
+		// thinking level renders as a small colored chip (`✦ high`).
 		const modelName = state.model?.id || "no-model";
-		const showProvider = this.footerData.getAvailableProviderCount() > 1 && state.model;
-		const providerPrefix = showProvider ? theme.fg("muted", `${state.model!.provider} · `) : "";
 
 		// The thinking chip (`• ✦ high`) is a PROTECTED suffix: on a narrow terminal
-		// the model id is truncated (and the provider prefix dropped) before the
-		// chip is ever touched, so the level never clips to a dangling `✦`.
-		const identityRight = `${providerPrefix}${modelName}`;
+		// the model id is truncated before the chip is ever touched, so the level
+		// never clips to a dangling `✦`.
+		const identityRight = modelName;
 		let thinkingChip: { text: string; width: number } | undefined;
 		if (state.model?.reasoning) {
 			const level = asKnownThinkingLevel(state.thinkingLevel);
-			const levelLabel = level === "off" ? "thinking off" : `✦ ${level}`;
+			const levelLabel = level === "off" ? "Thinking off" : `✦ ${level[0].toUpperCase()}${level.slice(1)}`;
 			const colorize = theme.getThinkingBorderColor(level);
 			thinkingChip = {
 				text: `${theme.fg("muted", " • ")}${colorize(levelLabel)}`,

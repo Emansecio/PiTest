@@ -27,6 +27,11 @@ const SINGLE_LINE_PREVIEW_TOOLS = new Set<string>(["task"]);
 /** Duration of the gutter color fade when a tool settles pending → success/error (P5). */
 const GUTTER_EASE_MS = 180;
 
+/** Failure glyph for the framed header label (U+2717, width-1). Mirrors the
+ * activity line's error icon so a standalone tool card and a grouped activity row
+ * read the same failure mark. */
+const ICON_ERROR = "✗";
+
 /** Result text marking an aborted/interrupted tool (vs a real failure). Such
  * results must not auto-expand their captured output — the user chose to stop. */
 const ABORT_RESULT_RE = /\b(?:command|operation|request was|stream) aborted\b|\binterrupted\b/i;
@@ -394,6 +399,7 @@ export class ToolExecutionComponent extends MessageShell {
 		// pending → muted gray, success → green, error → red. The pending → final
 		// switch eases the color (P5) rather than snapping; see refreshGutterState.
 		this.refreshGutterState();
+		this.refreshErrorLabel();
 
 		let hasContent = false;
 		this.hideComponent = false;
@@ -518,6 +524,23 @@ export class ToolExecutionComponent extends MessageShell {
 		}
 
 		this.syncRunningSpinner();
+	}
+
+	/**
+	 * Flag a genuine failure in the framed card's header so a scan of the CLI can
+	 * spot it without decoding the gutter/corner color. Reuses the shell's existing
+	 * `label` mechanism (message-shell.ts:applyLabel), which paints the bold label
+	 * in the gutter color — already `gutterToolError` (coral) once the tool settles
+	 * to an error. `✗ error` rides on the first content line inside the frame, no
+	 * new layout math. Suppressed when this row is an activity child (the parent
+	 * ActivityLineComponent already renders a `✗` state icon) and on aborts (a user
+	 * interruption is not a failure — matches {@link isAborted}). Cleared otherwise
+	 * so a pending/success/aborted row carries no marker.
+	 */
+	private refreshErrorLabel(): void {
+		const failed =
+			this.gutterAnimationsEnabled && !this.isPartial && this.result?.isError === true && !this.isAborted();
+		this.setLabel(failed ? `${ICON_ERROR} error` : undefined);
 	}
 
 	private toolGutterColor(state: GutterState): (text: string) => string {

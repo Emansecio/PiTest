@@ -1490,7 +1490,7 @@ export class InteractiveMode {
 			// existing mechanics, demoted fully to dim so the examples lead the eye.
 			const tryLine =
 				theme.fg("dim", "Try ") +
-				theme.fg("muted", '"explain this codebase" · "fix the failing test" · "add a small feature"');
+				theme.fg("muted", "“explain this codebase” · “fix the failing test” · “add a small feature”");
 			const mechanics = theme.fg(
 				"dim",
 				`Describe a task to get started · ${formatKeyText("/")} commands · ${formatKeyText("!")} bash · drop files to attach`,

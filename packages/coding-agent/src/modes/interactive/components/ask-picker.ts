@@ -25,7 +25,7 @@ import type { AskOptionsRequest } from "../../../core/user-input-bus.ts";
 import { theme as defaultTheme } from "../theme/theme.ts";
 import { renderSupplementaryContext } from "./context-display.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { HINT_SEPARATOR, keyText, selectionCursor } from "./keybinding-hints.ts";
+import { checkboxGlyph, HINT_SEPARATOR, keyText, selectionCursor } from "./keybinding-hints.ts";
 
 const RECOMMENDED_BADGE = " · recommended";
 const FREEFORM_ROW_LABEL = "Other — type custom answer…";
@@ -266,7 +266,7 @@ class AskPicker implements Component, Focusable {
 	private checkboxPrefix(index: number): string {
 		if (!this.allowMultiple) return "";
 		const checked = this.checked.has(index);
-		const glyph = checked ? "☑" : "☐";
+		const glyph = checkboxGlyph(checked);
 		const color = checked ? defaultTheme.fg("success", glyph) : defaultTheme.fg("dim", glyph);
 		return `${color} `;
 	}

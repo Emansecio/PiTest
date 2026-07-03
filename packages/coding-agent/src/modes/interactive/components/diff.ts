@@ -16,11 +16,17 @@ function emphasizeToken(value: string, color: ThemeColor): string {
 }
 
 function formatDiffLine(sign: "+" | "-" | " ", lineNum: string, body: string, lineColor: ThemeColor): string {
-	const trimmedNum = lineNum.trim();
-	const numRendered = trimmedNum.length > 0 ? theme.fg("dim", trimmedNum) : "";
-	const gap = numRendered ? " " : "";
-	const coloredBody = body.includes("\x1b[") ? body : theme.fg(lineColor, body);
-	return `${theme.fg(lineColor, sign)}${numRendered}${gap}${coloredBody}`;
+	// Keep the padded width from generateDiffString so bodies stay column-aligned
+	// across digit-width boundaries in a hunk (99 → 100). The dim number column
+	// reads as a stable left gutter; the bold sign sits next to the content it
+	// marks. Raw bold codes (not chalk) to match emphasizeToken.
+	const numRendered = theme.fg("dim", lineNum);
+	const signRendered = sign === " " ? " " : `\x1b[1m${theme.fg(lineColor, sign)}\x1b[22m`;
+	// Always open the line color around the whole body: intra-line bodies carry
+	// emphasizeToken ANSI that re-asserts the line color after each token, but
+	// without this wrap the unchanged text BEFORE the first token stays untinted.
+	const coloredBody = theme.fg(lineColor, body);
+	return `${numRendered} ${signRendered} ${coloredBody}`;
 }
 
 /**
@@ -145,6 +151,11 @@ export function renderDiff(diffText: string): string {
 		} else if (parsed.prefix === "+") {
 			// Standalone added line
 			result.push(formatDiffLine("+", parsed.lineNum, replaceTabs(parsed.content), "toolDiffAdded"));
+			i++;
+		} else if (parsed.lineNum.trim() === "" && parsed.content === "...") {
+			// Hunk-skip marker (numberless "..." row from generateDiffString):
+			// a single dim ellipsis aligned to the body column.
+			result.push(`${parsed.lineNum}   ${theme.fg("dim", "…")}`);
 			i++;
 		} else {
 			// Context line

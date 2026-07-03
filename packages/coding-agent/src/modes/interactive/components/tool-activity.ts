@@ -42,14 +42,17 @@ export function capDiffPreview(lines: string[], width: number, maxLines: number)
 
 /**
  * Canonical "more lines" trailer shown when a body is folded to a preview.
- * One format across every collapse site (tool result / bash / error preview):
- * `… +N more lines (<key> to expand)`. `expandHint` is the already-styled key
- * text for the expand keybinding each site uses (dim key + muted words), so the
- * shortcut shown stays whatever that site binds. ANSI is width-free, so callers
- * may still clamp the result with truncateToWidth to honor the TUI invariant.
+ * One format across every collapse site (tool result / bash / error preview /
+ * annotated-hint block): `… +N <noun> (<key> to expand)`. `expandHint` is the
+ * already-styled key text for the expand keybinding each site uses (dim key; the
+ * ` to expand` words are appended here in muted). `noun` swaps the counter's
+ * subject so the same shape covers `more lines` (default), `hint lines`, and
+ * `earlier lines` — the three dialects the collapse sites used to diverge on.
+ * ANSI is width-free, so callers may still clamp the result with truncateToWidth
+ * to honor the TUI invariant.
  */
-export function moreLinesTrailer(n: number, expandHint: string): string {
-	return `${theme.fg("muted", `… +${n} more lines`)} (${expandHint}${theme.fg("muted", " to expand")})`;
+export function moreLinesTrailer(n: number, expandHint: string, noun = "more lines"): string {
+	return `${theme.fg("muted", `… +${n} ${noun}`)} (${expandHint}${theme.fg("muted", " to expand")})`;
 }
 
 /** Styled key text for the standard expand keybinding, used as the `expandHint`

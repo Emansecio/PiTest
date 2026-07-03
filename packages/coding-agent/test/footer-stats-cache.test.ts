@@ -276,10 +276,10 @@ describe("FooterComponent identity line", () => {
 		ctrl.push(100, 50, 0.001);
 
 		const identity = footer.render(200)[0];
-		expect(identity).toContain("high");
+		expect(identity).toContain("High");
 		// The level token must be inside an ANSI SGR (\x1b[...m) sequence
 		// distinct from the muted/dim wrappers used elsewhere on the line.
-		const idxHigh = identity.indexOf("high");
+		const idxHigh = identity.indexOf("High");
 		const slice = identity.slice(Math.max(0, idxHigh - 32), idxHigh);
 		expect(/\x1b\[[0-9;]+m/.test(slice)).toBe(true);
 	});
@@ -296,8 +296,8 @@ describe("FooterComponent identity line", () => {
 		const identity = footer.render(200)[0];
 		expect(identity).toContain("tiny");
 		// Non-reasoning models should NOT show a thinking-level token.
-		expect(identity).not.toContain("high");
-		expect(identity).not.toContain("thinking off");
+		expect(identity).not.toContain("High");
+		expect(identity).not.toContain("Thinking off");
 	});
 
 	it("normalizes an unknown thinkingLevel value to 'off' instead of throwing", () => {
@@ -311,6 +311,6 @@ describe("FooterComponent identity line", () => {
 
 		const identity = footer.render(200)[0];
 		expect(identity).toContain("tiny");
-		expect(identity).toContain("thinking off");
+		expect(identity).toContain("Thinking off");
 	});
 });

@@ -20,7 +20,7 @@ import type { PathMetadata, ResolvedPaths, ResolvedResource } from "../../../cor
 import type { PackageSource, SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { rawKeyHint } from "./keybinding-hints.ts";
+import { checkboxGlyph, rawKeyHint, selectionCursor } from "./keybinding-hints.ts";
 
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 
@@ -371,10 +371,13 @@ class ResourceList implements Component, Focusable {
 			} else {
 				// Resource item (cursor only on items)
 				const item = entry.item;
-				const cursor = isSelected ? "> " : "  ";
-				const checkbox = item.enabled ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]");
+				const cursor = selectionCursor(isSelected);
+				const glyph = checkboxGlyph(item.enabled);
+				// `☑`/`☐` are width-1 (the old `[x]`/`[ ]` were width-3); pad with two
+				// trailing spaces so the name column stays aligned across all rows.
+				const checkbox = item.enabled ? theme.fg("success", glyph) : theme.fg("dim", glyph);
 				const name = isSelected ? theme.bold(item.displayName) : item.displayName;
-				lines.push(truncateToWidth(`${cursor}    ${checkbox} ${name}`, width, "…"));
+				lines.push(truncateToWidth(`${cursor}    ${checkbox}   ${name}`, width, "…"));
 			}
 		}
 

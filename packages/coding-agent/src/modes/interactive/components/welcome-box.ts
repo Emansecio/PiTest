@@ -14,15 +14,15 @@
  *            ╚═╝      ╚═╝    ╚═╝
  *
  *        coding agent in your terminal · v0.4.2
- *          ● Workspace — PiTest/src (main)
+ *          ● Workspace · PiTest/src (main)
  *
  * 2. CARD (resumed sessions, custom app names, narrow viewports) — the compact
  *    framed block via the shared {@link Card} primitive (`@pit/tui`), with
  *    `visibleWidth()` / `truncateToWidth()` on every composed line:
  *
  *   ╭──────────────────────────────────────────────────────────╮
- *   │  █▀█ █ ▀█▀   coding agent in your terminal      v0.4.2  │
- *   │  █▀▀ █  █    ● Workspace — PiTest/src (main)            │
+ *   │  █▀█ █ ▀█▀   coding agent in your terminal · v0.4.2     │
+ *   │  █▀▀ █  █    ● Workspace · PiTest/src (main)            │
  *   │  ▀   ▀  ▀    ├─ Resuming · session-name   (when applicable)
  *   ╰──────────────────────────────────────────────────────────╯
  *
@@ -116,7 +116,7 @@ function formatWorkspaceLine(
 	if (shellCwdNote) {
 		path = `${path}${theme.fg("dim", ` · ${shellCwdNote}`)}`;
 	}
-	const header = `${theme.fg("accent", "●")} ${theme.bold("Workspace")} ${theme.fg("dim", "—")} `;
+	const header = `${theme.fg("accent", "●")} ${theme.bold("Workspace")} ${theme.fg("dim", "·")} `;
 	const line = header + path;
 	return visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line;
 }
@@ -233,8 +233,12 @@ export class WelcomeBox implements Component {
 		const bodyW = this.bodyWidth(w, useWordmark);
 		const workspaceLine = formatWorkspaceLine(d.cwdDisplay, d.branch, d.diffStats, d.shellCwdNote, bodyW);
 		const resumeLine = d.resumedSessionName ? formatResumeLine(d.resumedSessionName, bodyW) : "";
+		// Match the hero format (computeHeroRows): a single flush-left line
+		// `tagline · v<version>` — tagline muted, ` · v<version>` dim — instead of
+		// pinning the version to the right border, where it orphans in a wide card.
+		const taglineVersionLine = truncateToWidth(`${taglineText}${theme.fg("dim", ` · v${d.version}`)}`, bodyW, "…");
 		const bodies = useWordmark
-			? [composeLeftRight(taglineText, versionText, bodyW), workspaceLine, resumeLine]
+			? [taglineVersionLine, workspaceLine, resumeLine]
 			: d.resumedSessionName
 				? [
 						composeLeftRight(theme.bold(theme.fg("accent", d.appName)), versionText, bodyW),

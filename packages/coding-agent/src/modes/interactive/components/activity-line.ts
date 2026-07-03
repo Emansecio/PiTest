@@ -299,7 +299,11 @@ export class ActivityLineComponent extends Container {
 		if (pending) {
 			const elapsedSec = Math.floor((Date.now() - this.execStartedAtMs) / 1000);
 			if (elapsedSec >= SLOW_ACTION_ELAPSED_SEC) {
-				headerText += ` ${theme.fg("muted", `· ${elapsedSec}s`)}`;
+				// Slowness and aggregation (`×N`) carried opposite meaning in the same
+				// muted tint. Lift the slow-elapsed marker (the `·` and the number
+				// together) to `warning` so a lagging action reads distinctly from the
+				// muted `×N` count. (Audit 1.11.)
+				headerText += ` ${theme.fg("warning", `· ${elapsedSec}s`)}`;
 			}
 		}
 		// Cap the assembled header once so no branch (free-form agent label, MCP tool

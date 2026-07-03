@@ -1,11 +1,22 @@
+import { expandKeyHint, moreLinesTrailer } from "./tool-activity.ts";
+
 /** Prefixes appended to tool error results for LLM recovery (Tier-4 hints, repair notes). */
 const DEFAULT_ANNOTATED_PREFIXES = ["[hint] ", "[repair] "] as const;
 
 export interface CollapseAnnotatedBlocksOptions {
 	expanded: boolean;
-	/** Style the collapse trailer (typically theme.fg("muted", …)). */
+	/**
+	 * Style the collapse trailer. Retained for the option shape callers already
+	 * pass; the trailer itself now routes through {@link moreLinesTrailer}, which
+	 * owns the canonical muted styling, so this is no longer read for the folded
+	 * hint line.
+	 */
 	muted: (text: string) => string;
-	/** Shown in the trailer, e.g. "ctrl+o to expand". */
+	/**
+	 * Shown in the trailer, e.g. "ctrl+o to expand". Retained for the option shape;
+	 * the trailer's key hint now comes from {@link expandKeyHint} so the format
+	 * matches every other collapse site (`… +N hint lines (<key> to expand)`).
+	 */
 	expandHint: string;
 	prefixes?: readonly string[];
 }
@@ -31,7 +42,7 @@ export function collapseAnnotatedBlocks(text: string, opts: CollapseAnnotatedBlo
 	const hidden = block.length - 1;
 	const kept = lines.slice(0, start + 1);
 	if (hidden > 0) {
-		kept.push(opts.muted(`… (${hidden} hint lines, ${opts.expandHint})`));
+		kept.push(moreLinesTrailer(hidden, expandKeyHint(), "hint lines"));
 	}
 	return [...kept, ...lines.slice(end)].join("\n");
 }

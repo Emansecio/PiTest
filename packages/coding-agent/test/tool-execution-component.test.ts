@@ -71,6 +71,75 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain("custom result");
 	});
 
+	test("flags a genuine error in the framed header with a `✗ error` label (audit 1.3)", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderCall: () => new Text("custom call", 0, 0),
+			renderResult: () => new Text("boom", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-err",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+
+		// Pending / success carry no marker.
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("✗ error");
+		component.updateResult({ content: [{ type: "text", text: "ok" }], details: {}, isError: false }, false);
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("✗ error");
+
+		// A settled error surfaces the header marker on the framed card.
+		component.updateResult({ content: [{ type: "text", text: "boom" }], details: {}, isError: true }, false);
+		const rendered = stripAnsi(component.render(120).join("\n"));
+		expect(rendered).toContain("✗ error");
+	});
+
+	test("does not flag an aborted tool as an error (audit 1.3)", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderResult: () => new Text("stopped", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-abort",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{ content: [{ type: "text", text: "command aborted by user" }], details: {}, isError: true },
+			false,
+		);
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("✗ error");
+	});
+
+	test("suppresses the framed error label when rendered as an activity child (audit 1.3)", () => {
+		const toolDefinition: ToolDefinition = {
+			...createBaseToolDefinition(),
+			renderResult: () => new Text("boom", 0, 0),
+		};
+		const component = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-err-child",
+			{},
+			{},
+			toolDefinition,
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.setActivityChild(true);
+		component.updateResult({ content: [{ type: "text", text: "boom" }], details: {}, isError: true }, false);
+		// The parent ActivityLineComponent owns the `✗` state icon; the child's own
+		// shell is a passthrough and must not inject a duplicate header label.
+		expect(stripAnsi(component.render(120).join("\n"))).not.toContain("✗ error");
+	});
+
 	test("uses built-in rendering for built-in overrides without custom renderers", () => {
 		const overrideDefinition: ToolDefinition = {
 			...createBaseToolDefinition("edit"),

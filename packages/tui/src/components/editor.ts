@@ -688,7 +688,9 @@ export class Editor implements Component, Focusable {
 		// Pre-color the full-width rule with a single SGR pair instead of coloring
 		// each "─" and repeating the colored unit: the border color is uniform, so
 		// per-glyph coloring just bloats every repaint (~one escape pair per column).
-		const horizontalRule = this.borderColor("─".repeat(width));
+		// A rounded corner opens the top rule (`╭`); no right corner since there are
+		// no side borders. Width is unchanged — only the first glyph differs.
+		const horizontalRule = this.borderColor(`╭${"─".repeat(Math.max(0, width - 1))}`);
 
 		// Layout the text. Optional perf probe: set PIT_EDITOR_PERF=1 to log layout
 		// cost per render (use with a realistic multi-line / CJK draft to measure
@@ -740,7 +742,9 @@ export class Editor implements Component, Focusable {
 		if (this.jumpMode !== null) {
 			const arrow = this.jumpMode === "forward" ? "→" : "←";
 			const scrollSuffix = this.scrollOffset > 0 ? `↑ ${this.scrollOffset} more ` : "";
-			const indicator = `─── jump ${arrow} ${scrollSuffix}`;
+			// Open with the rounded corner `╭`; the indicator otherwise starts `─── `,
+			// so swapping the leading glyph keeps the visible width identical.
+			const indicator = `╭── jump ${arrow} ${scrollSuffix}`;
 			const remaining = width - visibleWidth(indicator);
 			if (remaining >= 0) {
 				result.push(this.borderColor(indicator + "─".repeat(remaining)));
@@ -748,7 +752,7 @@ export class Editor implements Component, Focusable {
 				result.push(this.borderColor(truncateToWidth(indicator, width)));
 			}
 		} else if (this.scrollOffset > 0) {
-			const indicator = `─── ↑ ${this.scrollOffset} more `;
+			const indicator = `╭── ↑ ${this.scrollOffset} more `;
 			const remaining = width - visibleWidth(indicator);
 			if (remaining >= 0) {
 				result.push(this.borderColor(indicator + "─".repeat(remaining)));
@@ -831,7 +835,8 @@ export class Editor implements Component, Focusable {
 		// collapses to a blank line, letting whitespace do the separating.
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
 		if (linesBelow > 0) {
-			const indicator = `─── ↓ ${linesBelow} more `;
+			// Rounded corner `╰` opens the bottom rule; same width as the old `─── `.
+			const indicator = `╰── ↓ ${linesBelow} more `;
 			const remaining = width - visibleWidth(indicator);
 			if (remaining >= 0) {
 				result.push(this.borderColor(indicator + "─".repeat(remaining)));

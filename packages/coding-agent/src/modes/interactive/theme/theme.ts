@@ -1190,6 +1190,7 @@ export function getMarkdownTheme(): MarkdownTheme {
 		code: (text: string) => theme.fg("mdCode", text),
 		codeBlock: (text: string) => theme.fg("mdCodeBlock", text),
 		codeBlockBorder: (text: string) => theme.fg("mdCodeBlockBorder", text),
+		codeBlockLang: (text: string) => theme.fg("dim", theme.bold(text)),
 		quote: (text: string) => theme.fg("mdQuote", text),
 		quoteBorder: (text: string) => theme.fg("mdQuoteBorder", text),
 		hr: (text: string) => theme.fg("mdHr", text),

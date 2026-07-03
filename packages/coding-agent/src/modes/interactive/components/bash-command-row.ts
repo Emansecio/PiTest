@@ -1,6 +1,7 @@
 import { truncateToWidth, visibleWidth } from "@pit/tui";
 import { theme } from "../theme/theme.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { expandKeyHint, moreLinesTrailer } from "./tool-activity.ts";
 
 /** Path length past which a leading `cd <path> &&` is shortened in the collapsed
  * row. Short paths are left verbatim. */
@@ -44,8 +45,9 @@ function stripLeadingCd(line: string): string {
  * Build a single visual row for a collapsed bash command title/header. A long
  * command is clipped horizontally (with `…`); multi-line scripts/heredocs show
  * only the first line. Anything hidden — extra command lines plus `extraHidden`
- * (e.g. skipped output lines) — folds into an inline `(N earlier lines, …to
- * expand)` hint; a purely horizontal clip shows a bare `(…to expand)`.
+ * (e.g. skipped output lines) — folds into an inline `… +N earlier lines (<key>
+ * to expand)` trailer (the canonical {@link moreLinesTrailer} shape); a purely
+ * horizontal clip shows a bare `(<key> to expand)`.
  *
  * Shared by the agent-issued `bash` tool title and the user `!` bash header so
  * both clamp identically.
@@ -82,12 +84,16 @@ export function clampBashCommandRow(opts: {
 	const hiddenLines = lines.length - 1 + extraHidden;
 	const suffixW = visibleWidth(suffix);
 	const horizontalClip = visibleWidth(cmd) + suffixW > width;
-	const hint =
-		hiddenLines > 0
-			? ` ${theme.fg("muted", `(${hiddenLines} earlier lines,`)} ${keyHint("app.tools.expand", "to expand")})`
-			: horizontalClip
-				? ` ${theme.fg("muted", "(")}${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`
-				: "";
+	// Folded hidden lines use the canonical trailer (`… +N earlier lines (<key> to
+	// expand)`), unifying with tool-result / error / hint collapse sites. A purely
+	// horizontal clip (nothing hidden vertically) keeps the bare affordance since
+	// there is no line count to report.
+	let hint = "";
+	if (hiddenLines > 0) {
+		hint = ` ${moreLinesTrailer(hiddenLines, expandKeyHint(), "earlier lines")}`;
+	} else if (horizontalClip) {
+		hint = ` ${theme.fg("muted", "(")}${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+	}
 	// Reserve room for the suffix + hint. At pathologically small widths where
 	// they don't even fit, drop both and just clip the command to the full width
 	// so the result is always a single row no wider than `width` (the hint/suffix

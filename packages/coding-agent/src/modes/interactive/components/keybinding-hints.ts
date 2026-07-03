@@ -58,3 +58,13 @@ export const HINT_SEPARATOR = " · ";
 export function selectionCursor(isSelected: boolean): string {
 	return isSelected ? theme.fg("accent", "→ ") : "  ";
 }
+
+/**
+ * Standard checkbox glyph for multi-select rows: `☑` when checked, `☐`
+ * otherwise. Both are width-1. Returned uncolored — call sites apply their own
+ * color (e.g. success for checked, dim for unchecked) so selectors stay
+ * consistent on the glyph while keeping their local palette.
+ */
+export function checkboxGlyph(checked: boolean): string {
+	return checked ? "☑" : "☐";
+}

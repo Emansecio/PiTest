@@ -78,7 +78,7 @@ export class DiagnosticsBlockComponent extends MessageShell {
 			if (collisions > 0) parts.push(`${collisions} ${collisions === 1 ? "collision" : "collisions"}`);
 			if (warnings > 0) parts.push(`${warnings} ${warnings === 1 ? "warning" : "warnings"}`);
 			if (errors > 0) parts.push(`${errors} ${errors === 1 ? "error" : "errors"}`);
-			summary = parts.length > 0 ? parts.join(" + ") : `${this.diagnostics.length} issues`;
+			summary = parts.length > 0 ? parts.join(" · ") : `${this.diagnostics.length} issues`;
 		}
 
 		const line = `${theme.fg("dim", summary)} ${theme.fg("dim", `(${keyText("app.tools.expand")} to expand)`)}`;

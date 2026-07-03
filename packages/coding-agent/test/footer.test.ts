@@ -17,7 +17,7 @@ interface MakeFooterOptions {
 	cost?: number;
 	/** Simulated context usage (null = unknown / fresh session). */
 	contextUsage?: { tokens: number; percent: number; contextWindow: number; estimated?: boolean } | null;
-	/** Providers visible to the registry (provider prefix shows when > 1). */
+	/** Providers visible to the registry (display shows the model id only). */
 	providerCount?: number;
 	/** Mark the model as a reasoning model with this thinking level. */
 	thinkingLevel?: string;
@@ -238,7 +238,7 @@ it("does not collapse when auto-compact is off on an idle session", () => {
 it("keeps the thinking chip on a narrow collapsed line", () => {
 	const footer = makeFooter({ thinkingLevel: "high", permissions: "auto", usingOAuth: true, autoCompact: true });
 	const lines = footer.render(30).map(stripAnsi);
-	expect(lines.some((line) => line.includes("✦ high"))).toBe(true);
+	expect(lines.some((line) => line.includes("✦ High"))).toBe(true);
 });
 
 it("flags no-compact (warning) only when auto-compact is OFF — the abnormal state", () => {
@@ -336,30 +336,31 @@ it("shows shell cwd when launcher and session cwd diverge", () => {
 	expect(lines[0]).toContain("shell:");
 });
 
-it("shows the provider muted without parentheses when several providers are available", () => {
+it("shows only the model id, never the provider, even with several providers available", () => {
 	const footer = makeFooter({ providerCount: 2 });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("anthropic · test-model");
-	expect(lines[0]).not.toContain("(anthropic)");
+	expect(lines[0]).toContain("test-model");
+	expect(lines[0]).not.toContain("anthropic");
 });
 
 it("renders the thinking level as a ✦ chip on reasoning models", () => {
 	const footer = makeFooter({ thinkingLevel: "high" });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("test-model • ✦ high");
+	expect(lines[0]).toContain("test-model • ✦ High");
 });
 
 it("keeps the ✦ chip intact on a narrow line, truncating the model id instead", () => {
 	// At a tight width the right cluster must shrink the MODEL id (with ellipsis),
-	// never the protected `✦ high` chip — otherwise it clips to a dangling `✦`.
+	// never the protected `✦ High` chip — otherwise it clips to a dangling `✦`.
 	const footer = makeFooter({
 		thinkingLevel: "high",
 		providerCount: 2,
 		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
 	});
-	const lines = footer.render(30).map(stripAnsi);
-	const modelLine = lines.find((line) => line.includes("✦ high")) ?? lines.join("\n");
-	expect(modelLine).toContain("✦ high");
+	// Width 16 < model id (10) + chip (9): the id must yield, the chip must not.
+	const lines = footer.render(16).map(stripAnsi);
+	const modelLine = lines.find((line) => line.includes("✦ High")) ?? lines.join("\n");
+	expect(modelLine).toContain("✦ High");
 	expect(modelLine).not.toMatch(/✦$/);
 	expect(lines.some((line) => line.includes("…"))).toBe(true);
 });
