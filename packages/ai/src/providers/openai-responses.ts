@@ -17,10 +17,12 @@ import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { iterateWithIdleTimeout } from "../utils/idle-timeout.ts";
+import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
+	applyDynamicPromptRelocation,
 	applyServiceTierPricing,
 	convertResponsesMessages,
 	convertResponsesTools,
@@ -228,7 +230,20 @@ function createClient(
 }
 
 function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
-	const messages = convertResponsesMessages(model, context, RESPONSES_TOOL_CALL_PROVIDERS);
+	const messages = convertResponsesMessages(model, context, RESPONSES_TOOL_CALL_PROVIDERS, {
+		includeSystemPrompt: false,
+	});
+	// Keep the system/developer message byte-stable across turns so the
+	// automatic prefix cache covers it plus the whole replayed history; the
+	// per-turn dynamic suffix rides the newest user message instead. See
+	// applyDynamicPromptRelocation (M1).
+	const { systemPromptText } = applyDynamicPromptRelocation(messages, context.systemPrompt);
+	if (systemPromptText) {
+		messages.unshift({
+			role: model.reasoning ? "developer" : "system",
+			content: sanitizeSurrogates(systemPromptText),
+		});
+	}
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const compat = getCompat(model);

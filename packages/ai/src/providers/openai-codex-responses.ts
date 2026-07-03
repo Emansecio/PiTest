@@ -32,7 +32,6 @@ import type {
 	StreamFunction,
 	StreamOptions,
 } from "../types.ts";
-import { systemPromptWithoutDynamicMarker } from "../types.ts";
 import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts";
 import {
 	appendAssistantMessageDiagnostic,
@@ -48,6 +47,7 @@ import { SseChunkBuffer } from "../utils/sse-chunk-reader.ts";
 import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
+	applyDynamicPromptRelocation,
 	applyServiceTierPricing,
 	convertResponsesMessages,
 	convertResponsesTools,
@@ -387,14 +387,22 @@ function buildRequestBody(
 	const messages = convertResponsesMessages(model, context, RESPONSES_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
 	});
+	// `instructions` is the first segment of the automatically cached prompt
+	// prefix, so it must stay byte-stable across turns; the per-turn dynamic
+	// suffix rides the newest user message as an <env> block instead (M1).
+	// Websocket-cached transport note: the env block moves between turns, so the
+	// client-side delta continuation falls back to a full-context send (input
+	// prefix mismatch in getCachedWebSocketInputDelta) — the same fallback that
+	// already fired when the churning `instructions` broke
+	// requestBodiesMatchExceptInput — but the server-side prefix cache now
+	// covers instructions + replayed history instead of missing at position 0.
+	const { systemPromptText } = applyDynamicPromptRelocation(messages, context.systemPrompt);
 
 	const body: RequestBody = {
 		model: model.id,
 		store: false,
 		stream: true,
-		instructions: context.systemPrompt
-			? systemPromptWithoutDynamicMarker(context.systemPrompt)
-			: "You are a helpful assistant.",
+		instructions: systemPromptText ?? "You are a helpful assistant.",
 		input: messages,
 		text: { verbosity: options?.textVerbosity || "low" },
 		include: ["reasoning.encrypted_content"],

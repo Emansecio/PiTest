@@ -28,14 +28,32 @@ export function splitSystemPromptOnDynamic(systemPrompt: string): {
 
 /**
  * Strip the dynamic marker, returning the prompt as one contiguous string.
- * Providers that do NOT split for cache_control (openai-completions, the
- * responses APIs, mistral) MUST send this — otherwise the literal NUL-wrapped
- * marker leaks into the model's system prompt.
+ * Fallback for providers (or payload shapes) that neither split for
+ * cache_control (Anthropic-style) nor relocate the dynamic suffix into the
+ * latest user message (automatic-prefix-cache routes) — the literal
+ * NUL-wrapped marker must never leak into the model's system prompt.
  */
 export function systemPromptWithoutDynamicMarker(systemPrompt: string): string {
 	const idx = systemPrompt.indexOf(SYSTEM_PROMPT_DYNAMIC_MARKER);
 	if (idx === -1) return systemPrompt;
 	return systemPrompt.slice(0, idx) + systemPrompt.slice(idx + SYSTEM_PROMPT_DYNAMIC_MARKER.length);
+}
+
+/**
+ * Wrap the dynamic system-prompt suffix in an `<env>` block for relocation
+ * into the most recent user message of a provider payload.
+ *
+ * Rationale: providers whose prompt caches are automatic prefix caches
+ * (OpenAI Responses/Completions, Gemini implicit caching) cannot pin a cache
+ * breakpoint before the dynamic suffix the way Anthropic's `cache_control`
+ * can. With the suffix embedded in the system prompt/instructions — the very
+ * first segment of the payload — any per-turn change diverges the cached
+ * prefix at position 0 and re-bills the entire conversation every turn.
+ * Moving the suffix to the end of the payload keeps system prompt + replayed
+ * history a stable, cacheable prefix; only the new tail is re-billed.
+ */
+export function formatDynamicPromptEnvBlock(dynamicPart: string): string {
+	return `<env>\n${dynamicPart}\n</env>`;
 }
 
 export type KnownApi =
@@ -413,7 +431,7 @@ export interface OpenAICompletionsCompat {
 	vercelGatewayRouting?: VercelGatewayRouting;
 	/** Whether the provider supports the `strict` field in tool definitions. Default: true. */
 	supportsStrictMode?: boolean;
-	/** Cache control convention for prompt caching. "anthropic" applies Anthropic-style `cache_control` markers to the system prompt, last tool definition, and last user/assistant text content. */
+	/** Cache control convention for prompt caching. "anthropic" applies Anthropic-style `cache_control` markers to the static prefix of the system prompt (split on SYSTEM_PROMPT_DYNAMIC_MARKER; the dynamic suffix is emitted as a second, unmarked text part), the last tool definition, and the last user/assistant text content. */
 	cacheControlFormat?: "anthropic";
 	/** Whether to send known session-affinity headers (`session_id`, `x-client-request-id`, `x-session-affinity`) from `options.sessionId` when caching is enabled. Default: false. */
 	sendSessionAffinityHeaders?: boolean;

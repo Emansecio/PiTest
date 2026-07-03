@@ -1255,9 +1255,14 @@ function convertTools(
 				properties: schema.properties ?? {},
 				required: schema.required ?? [],
 			},
-			// Pin the tools block at the first entry (stable name-sorted order) so
-			// tool-surface churn does not move the cache breakpoint (E2).
-			...(cacheControl && index === 0 ? { cache_control: cacheControl } : {}),
+			// Pin the breakpoint on the LAST tool: an Anthropic cache_control
+			// breakpoint caches the prefix up to and including its block, so the
+			// last entry covers the entire (name-sorted, stable) tool array even
+			// when downstream blocks (system prompt, messages) churn. On tools[0]
+			// it covered exactly one tool. Any change to the tool set invalidates
+			// the cache from the changed tool onward regardless of where the
+			// breakpoint sits, so "last" strictly dominates "first" (E2/M3).
+			...(cacheControl && index === tools.length - 1 ? { cache_control: cacheControl } : {}),
 		};
 	});
 }

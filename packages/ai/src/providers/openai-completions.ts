@@ -30,7 +30,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
-import { systemPromptWithoutDynamicMarker } from "../types.ts";
+import { formatDynamicPromptEnvBlock, splitSystemPromptOnDynamic, systemPromptWithoutDynamicMarker } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
 import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -557,7 +557,7 @@ function buildParams(
 	}
 
 	if (cacheControl) {
-		applyAnthropicCacheControl(messages, params.tools, cacheControl);
+		applyAnthropicCacheControl(messages, params.tools, cacheControl, context.systemPrompt);
 	}
 
 	if (options?.toolChoice) {
@@ -645,8 +645,9 @@ function applyAnthropicCacheControl(
 	messages: ChatCompletionMessageParam[],
 	tools: OpenAI.Chat.Completions.ChatCompletionTool[] | undefined,
 	cacheControl: OpenAICompatCacheControl,
+	systemPrompt: string | undefined,
 ): void {
-	addCacheControlToSystemPrompt(messages, cacheControl);
+	addCacheControlToSystemPrompt(messages, cacheControl, systemPrompt);
 	addCacheControlToLastTool(tools, cacheControl);
 	addCacheControlToLastConversationMessage(messages, cacheControl);
 }
@@ -654,9 +655,26 @@ function applyAnthropicCacheControl(
 function addCacheControlToSystemPrompt(
 	messages: ChatCompletionMessageParam[],
 	cacheControl: OpenAICompatCacheControl,
+	systemPrompt: string | undefined,
 ): void {
 	for (const message of messages) {
 		if (message.role === "system" || message.role === "developer") {
+			// Split the static (cacheable) prefix from the per-turn dynamic suffix
+			// on the marker and pin cache_control on the static part only, mirroring
+			// anthropic.ts buildParams. With the breakpoint on the WHOLE system
+			// message the dynamic suffix invalidated it on every turn, re-writing
+			// the full prefix at cache-write rates (M2). The wire text is identical:
+			// convertMessages emitted sanitize(static + dynamic); this re-emits
+			// sanitize(static) + sanitize(dynamic), and the marker boundary is ASCII
+			// so sanitizeSurrogates distributes over the split.
+			const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(systemPrompt ?? "");
+			if (staticPart.length > 0 && dynamicPart.length > 0) {
+				message.content = [
+					{ type: "text", text: sanitizeSurrogates(staticPart), cache_control: cacheControl },
+					{ type: "text", text: sanitizeSurrogates(dynamicPart) },
+				] as ChatCompletionTextPartWithCacheControl[];
+				return;
+			}
 			addCacheControlToInstructionMessage(message, cacheControl);
 			return;
 		}
@@ -685,8 +703,14 @@ function addCacheControlToLastTool(
 		return;
 	}
 
-	const firstTool = tools[0] as ChatCompletionToolWithCacheControl;
-	firstTool.cache_control = cacheControl;
+	// Anthropic cache_control semantics: a breakpoint caches the prefix up to
+	// and including its block, and tools precede system/messages in the prompt.
+	// The breakpoint must therefore sit on the LAST tool to cover the whole tool
+	// array (on tools[0] it covered exactly one tool — M3/Bug 4). Tool order is
+	// stabilized by callers (name-sorted in buildParams), so this stays put
+	// across turns; do not re-order tools here.
+	const lastTool = tools[tools.length - 1] as ChatCompletionToolWithCacheControl;
+	lastTool.cache_control = cacheControl;
 }
 
 function addCacheControlToInstructionMessage(
@@ -771,12 +795,18 @@ export function convertMessages(
 
 	const transformedMessages = transformMessages(context.messages, model, (id) => normalizeToolCallId(id));
 
+	let systemParamIndex = -1;
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
 		const role = useDeveloperRole ? "developer" : "system";
 		params.push({ role: role, content: sanitizeSurrogates(systemPromptWithoutDynamicMarker(context.systemPrompt)) });
+		systemParamIndex = params.length - 1;
 	}
 
+	// Index of the last param produced from a REAL user message (not tool
+	// results or synthetic bridge messages) — target for the dynamic-suffix
+	// relocation below.
+	let lastUserParamIndex = -1;
 	let lastRole: string | null = null;
 
 	for (let i = 0; i < transformedMessages.length; i++) {
@@ -796,6 +826,7 @@ export function convertMessages(
 					role: "user",
 					content: sanitizeSurrogates(msg.content),
 				});
+				lastUserParamIndex = params.length - 1;
 			} else {
 				const content: ChatCompletionContentPart[] = msg.content.map((item): ChatCompletionContentPart => {
 					if (item.type === "text") {
@@ -817,6 +848,7 @@ export function convertMessages(
 					role: "user",
 					content,
 				});
+				lastUserParamIndex = params.length - 1;
 			}
 		} else if (msg.role === "assistant") {
 			// Some providers don't accept null content, use empty string instead
@@ -982,6 +1014,34 @@ export function convertMessages(
 		}
 
 		lastRole = msg.role;
+	}
+
+	// M1 — provider-aware prompt-cache relocation for routes WITHOUT
+	// Anthropic-style cache_control. Those routes rely on automatic prefix
+	// caching (OpenAI prompt caching keyed by prompt_cache_key, DeepSeek/vLLM/
+	// llama.cpp prefix caches); the per-turn dynamic suffix embedded in the
+	// system message diverges the cached prefix at position 0 and re-bills the
+	// whole conversation every turn. Relocate it into an <env> block on the most
+	// recent user message so system prompt + history stay a stable prefix.
+	// Routes WITH cacheControlFormat "anthropic" pin an explicit breakpoint on
+	// the static prefix instead (addCacheControlToSystemPrompt) — relocating
+	// there would only churn the last-message breakpoint. No user message in the
+	// payload → keep the full stripped prompt in the system message (fallback).
+	// Providers with no cache at all see the same tokens, just relocated.
+	if (compat.cacheControlFormat !== "anthropic" && systemParamIndex !== -1 && lastUserParamIndex !== -1) {
+		const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(context.systemPrompt ?? "");
+		if (staticPart.length > 0 && dynamicPart.length > 0) {
+			params[systemParamIndex].content = sanitizeSurrogates(staticPart);
+			const target = params[lastUserParamIndex] as Extract<ChatCompletionMessageParam, { role: "user" }>;
+			const envText = sanitizeSurrogates(formatDynamicPromptEnvBlock(dynamicPart));
+			if (typeof target.content === "string") {
+				// Keep plain-string content plain: text-part arrays are not accepted
+				// by every openai-compatible server, so concatenate instead.
+				target.content = `${envText}\n\n${target.content}`;
+			} else {
+				target.content.unshift({ type: "text", text: envText } satisfies ChatCompletionContentPartText);
+			}
+		}
 	}
 
 	return params;

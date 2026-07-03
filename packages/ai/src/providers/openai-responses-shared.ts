@@ -27,7 +27,7 @@ import type {
 	ToolCall,
 	Usage,
 } from "../types.ts";
-import { systemPromptWithoutDynamicMarker } from "../types.ts";
+import { formatDynamicPromptEnvBlock, splitSystemPromptOnDynamic, systemPromptWithoutDynamicMarker } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { finalizeStreamingJson, parseStreamingJson } from "../utils/json-parse.ts";
@@ -219,6 +219,51 @@ export interface ConvertResponsesToolsOptions {
 // =============================================================================
 // Message conversion
 // =============================================================================
+
+/**
+ * M1 — provider-aware prompt-cache relocation for the Responses APIs.
+ *
+ * The Responses APIs cache automatically by prompt prefix (with
+ * prompt_cache_key/session affinity for routing). The system prompt — an
+ * `input` system/developer message here, the `instructions` field on the codex
+ * route — is the very first segment of that prefix, so a per-turn dynamic
+ * suffix embedded in it diverges the prefix at position 0 and re-bills the
+ * entire replayed history every turn. This helper moves the suffix into an
+ * `<env>` block prepended to the most recent user message in `input`, keeping
+ * system prompt + history a stable, cacheable prefix.
+ *
+ * Mutates only the freshly-built conversion output (never the caller's
+ * Context) and returns the system text the caller should send: the static
+ * prefix when relocation happened, otherwise the full marker-stripped prompt
+ * (fallback when the payload has no user message to carry the block, or when
+ * either half of the split is empty).
+ */
+export function applyDynamicPromptRelocation(
+	input: ResponseInput,
+	systemPrompt: string | undefined,
+): { systemPromptText: string | undefined } {
+	if (!systemPrompt) {
+		return { systemPromptText: undefined };
+	}
+	const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(systemPrompt);
+	if (staticPart.length > 0 && dynamicPart.length > 0) {
+		for (let i = input.length - 1; i >= 0; i--) {
+			const item = input[i] as { role?: string; content?: unknown };
+			// Real user messages only: tool results replay as `function_call_output`
+			// items (no role) and assistant history as role "assistant"/reasoning
+			// items, so role === "user" identifies exactly the user turns built by
+			// convertResponsesMessages (their content is always a fresh parts array).
+			if (item.role === "user" && Array.isArray(item.content)) {
+				(item.content as ResponseInputContent[]).unshift({
+					type: "input_text",
+					text: sanitizeSurrogates(formatDynamicPromptEnvBlock(dynamicPart)),
+				});
+				return { systemPromptText: staticPart };
+			}
+		}
+	}
+	return { systemPromptText: systemPromptWithoutDynamicMarker(systemPrompt) };
+}
 
 export function convertResponsesMessages<TApi extends Api>(
 	model: Model<TApi>,

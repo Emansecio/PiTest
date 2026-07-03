@@ -4,6 +4,7 @@
 
 import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
 import type { Context, ImageContent, Model, StopReason, TextContent, Tool } from "../types.ts";
+import { formatDynamicPromptEnvBlock } from "../types.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { transformMessages } from "./transform-messages.ts";
 
@@ -86,10 +87,59 @@ function supportsMultimodalFunctionResponse(modelId: string): boolean {
 }
 
 /**
+ * Result of {@link convertMessagesWithDynamicPrompt}.
+ */
+export interface GoogleMessagesConversion {
+	contents: Content[];
+	/** True when the dynamic suffix was relocated into the last real user turn. */
+	relocatedDynamicPrompt: boolean;
+}
+
+/**
  * Convert internal messages to Gemini Content[] format.
  */
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
+	return convertMessagesCore(model, context).contents;
+}
+
+/**
+ * M1 — provider-aware prompt-cache relocation for Gemini.
+ *
+ * Gemini's implicit cache is an automatic prefix cache and `systemInstruction`
+ * leads the prompt, so a per-turn dynamic suffix there diverges the cached
+ * prefix at position 0 and re-bills the whole history every turn (surfaced as
+ * cachedContentTokenCount dropping to 0). Relocate the suffix into an `<env>`
+ * block prepended to the most recent REAL user turn — function-response turns
+ * are role "user" on the wire but are never targeted, matching the conversion
+ * structure. When there is no real user turn (or the suffix is empty) nothing
+ * moves and the caller must keep the full stripped prompt in
+ * systemInstruction; `relocatedDynamicPrompt` reports which case applied.
+ * Mutates only freshly-built conversion output, never the caller's Context.
+ */
+export function convertMessagesWithDynamicPrompt<T extends GoogleApiType>(
+	model: Model<T>,
+	context: Context,
+	dynamicPromptSuffix: string,
+): GoogleMessagesConversion {
+	const { contents, lastRealUserIndex } = convertMessagesCore(model, context);
+	if (dynamicPromptSuffix.length === 0 || lastRealUserIndex === -1) {
+		return { contents, relocatedDynamicPrompt: false };
+	}
+	contents[lastRealUserIndex].parts?.unshift({
+		text: sanitizeSurrogates(formatDynamicPromptEnvBlock(dynamicPromptSuffix)),
+	});
+	return { contents, relocatedDynamicPrompt: true };
+}
+
+function convertMessagesCore<T extends GoogleApiType>(
+	model: Model<T>,
+	context: Context,
+): { contents: Content[]; lastRealUserIndex: number } {
 	const contents: Content[] = [];
+	// Index of the last content built from a REAL user message — tool-result
+	// turns (functionResponse / synthetic image turns) also carry role "user"
+	// on the wire but must not receive the relocated <env> block.
+	let lastRealUserIndex = -1;
 	const normalizeToolCallId = (id: string): string => {
 		if (!requiresToolCallId(model.id)) return id;
 		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
@@ -104,6 +154,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					role: "user",
 					parts: [{ text: sanitizeSurrogates(msg.content) }],
 				});
+				lastRealUserIndex = contents.length - 1;
 			} else {
 				const parts: Part[] = msg.content.map((item) => {
 					if (item.type === "text") {
@@ -122,6 +173,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					role: "user",
 					parts,
 				});
+				lastRealUserIndex = contents.length - 1;
 			}
 		} else if (msg.role === "assistant") {
 			const parts: Part[] = [];
@@ -231,7 +283,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 		}
 	}
 
-	return contents;
+	return { contents, lastRealUserIndex };
 }
 
 const JSON_SCHEMA_META_DECLARATIONS = new Set([

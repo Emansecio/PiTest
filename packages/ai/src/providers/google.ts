@@ -20,7 +20,7 @@ import type {
 	ThinkingLevel,
 	ToolCall,
 } from "../types.ts";
-import { systemPromptWithoutDynamicMarker } from "../types.ts";
+import { splitSystemPromptOnDynamic, systemPromptWithoutDynamicMarker } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
 import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -29,7 +29,7 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { resolveStreamTimeouts } from "../utils/stream-timeouts.ts";
 import type { GoogleThinkingLevel } from "./google-shared.ts";
 import {
-	convertMessages,
+	convertMessagesWithDynamicPrompt,
 	convertTools,
 	isThinkingPart,
 	mapStopReason,
@@ -318,7 +318,18 @@ export function buildParams(
 	context: Context,
 	options: GoogleOptions = {},
 ): GenerateContentParameters {
-	const contents = convertMessages(model, context);
+	// M1 — keep systemInstruction byte-stable across turns so Gemini's implicit
+	// prefix cache covers it plus the replayed history; the per-turn dynamic
+	// suffix rides the newest real user turn as an <env> block instead. Only
+	// relocate when a static prefix remains (an all-dynamic prompt gains
+	// nothing and would leave systemInstruction empty). No real user turn in
+	// the payload → fall back to the full marker-stripped prompt.
+	const { staticPart, dynamicPart } = splitSystemPromptOnDynamic(context.systemPrompt ?? "");
+	const { contents, relocatedDynamicPrompt } = convertMessagesWithDynamicPrompt(
+		model,
+		context,
+		staticPart.length > 0 ? dynamicPart : "",
+	);
 
 	const generationConfig: GenerateContentConfig = {};
 	if (options.temperature !== undefined) {
@@ -331,7 +342,9 @@ export function buildParams(
 	const config: GenerateContentConfig = {
 		...(Object.keys(generationConfig).length > 0 && generationConfig),
 		...(context.systemPrompt && {
-			systemInstruction: sanitizeSurrogates(systemPromptWithoutDynamicMarker(context.systemPrompt)),
+			systemInstruction: sanitizeSurrogates(
+				relocatedDynamicPrompt ? staticPart : systemPromptWithoutDynamicMarker(context.systemPrompt),
+			),
 		}),
 		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools) }),
 	};
