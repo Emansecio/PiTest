@@ -51,9 +51,13 @@ describe("formatKernelResult section-aware caps", () => {
 		expect(text).not.toContain("truncated to the last");
 	});
 
-	it("tail-keeps an oversized stdout and spills the full output to a temp file", async () => {
-		const lines: string[] = [];
-		for (let i = 0; i < 4000; i++) lines.push(`line-${String(i).padStart(6, "0")}-payloadpayloadpayload`);
+	it("tail-keeps an oversized NON-repeating stdout and spills the full output to a temp file", async () => {
+		// Distinct (non-collapsible) lines: alpha-encode the counter so there are no
+		// digit/hex tokens to fuzzy-merge — this exercises the byte cut, not N2 collapse.
+		const alpha = (n: number) => n.toString().replace(/[0-9]/g, (d) => "abcdefghij"[Number(d)]);
+		const lines: string[] = ["HEAD_SENTINEL_first_line"];
+		for (let i = 0; i < 4000; i++) lines.push(`entry-${alpha(i)}-payloadpayloadpayload`);
+		lines.push("TAIL_SENTINEL_last_line");
 		const stdout = lines.join("\n");
 		expect(Buffer.byteLength(stdout, "utf-8")).toBeGreaterThan(64 * 1024);
 
@@ -66,8 +70,10 @@ describe("formatKernelResult section-aware caps", () => {
 		});
 
 		// TAIL kept: the last line is present, the first line is gone.
-		expect(text).toContain("line-003999-");
-		expect(text).not.toContain("line-000000-");
+		expect(text).toContain("TAIL_SENTINEL_last_line");
+		expect(text).not.toContain("HEAD_SENTINEL_first_line");
+		// Distinct lines → no fuzzy collapse.
+		expect(text).not.toContain("similar)");
 		// error kept in full regardless.
 		expect(text).toContain("Error: failed at the end");
 		// Spill note points at a recoverable file.
@@ -78,9 +84,36 @@ describe("formatKernelResult section-aware caps", () => {
 
 		const full = await readFile(spill as string, "utf-8");
 		// The spill has the COMPLETE stdout (head included) plus the error section.
-		expect(full).toContain("line-000000-");
-		expect(full).toContain("line-003999-");
+		expect(full).toContain("HEAD_SENTINEL_first_line");
+		expect(full).toContain("TAIL_SENTINEL_last_line");
 		expect(full).toContain("Error: failed at the end");
+	});
+
+	it("collapses a runaway loop's similar stdout before the byte cut, error intact (N2.3)", async () => {
+		// 5000 lines that differ only in counters/timestamps — masked-equal, so they
+		// collapse to the first line + a "(×N similar)" marker instead of a tail cut.
+		const lines: string[] = [];
+		for (let i = 0; i < 5000; i++) lines.push(`processed record ${i} in ${i * 3}ms`);
+		const stdout = lines.join("\n");
+		expect(Buffer.byteLength(stdout, "utf-8")).toBeGreaterThan(64 * 1024);
+
+		const text = await formatKernelResult({
+			label: "lang=python",
+			stdout,
+			stderr: "",
+			error: "ValueError: exact error text 12345 must survive",
+			durationMs: 7,
+		});
+
+		// The whole wall collapsed to the first representative line + a similar-count marker.
+		expect(text).toContain("processed record 0 in 0ms … (×5000 similar)");
+		// Collapsed small → NOT truncated, NOT spilled.
+		expect(text).not.toContain("full output at");
+		expect(text).not.toContain("truncated to the last");
+		// The error section is never collapsed and never truncated — exact text survives.
+		expect(text).toContain("ValueError: exact error text 12345 must survive");
+		// Massive shrink.
+		expect(text.length).toBeLessThan(stdout.length / 50);
 	});
 
 	it("leaves small output untouched and inline (no spill, no truncation note)", async () => {

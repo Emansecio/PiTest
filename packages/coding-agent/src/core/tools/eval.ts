@@ -17,7 +17,7 @@ import type { EvalLang } from "../eval-kernel/types.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { withOutputCap, wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { formatSize, truncateTail } from "./truncate.ts";
+import { collapseRepeatedLines, formatSize, truncateTail } from "./truncate.ts";
 
 const evalSchema = Type.Object(
 	{
@@ -106,10 +106,19 @@ export async function formatKernelResult(input: KernelResultInput): Promise<stri
 	let anyTruncated = false;
 	const fullSections: string[] = [];
 	for (const { name, body, truncatable } of sections) {
+		// Spill keeps the RAW body (full, lossless recovery); the model-facing display
+		// is collapsed then tail-cut.
 		fullSections.push(`--- ${name} ---\n${body}`);
 		let display = body;
 		if (truncatable) {
-			const truncation = truncateTail(body, { maxBytes: KERNEL_SECTION_MAX_BYTES });
+			// Lossless-first: collapse identical/similar repeated lines BEFORE the byte
+			// cut, so a runaway loop's near-identical output shrinks without spending
+			// the tail budget on it. `error` (truncatable=false) is never collapsed —
+			// its exact text is load-bearing. collapseRepeatedLines returns `body`
+			// unchanged (same reference) when nothing collapses, so small outputs keep
+			// the inline one-line rendering below.
+			display = collapseRepeatedLines(body);
+			const truncation = truncateTail(display, { maxBytes: KERNEL_SECTION_MAX_BYTES });
 			if (truncation.truncated) {
 				anyTruncated = true;
 				display = truncation.content;

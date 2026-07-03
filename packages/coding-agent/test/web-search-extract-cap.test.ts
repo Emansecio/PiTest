@@ -39,8 +39,31 @@ describe("capExtractBody", () => {
 	});
 
 	it("treats a newline as a boundary (markdown extracts are line-structured)", () => {
-		const line = "- markdown bullet item with some words";
-		const text = Array.from({ length: 20 }, (_, i) => `${line} ${i}`).join("\n");
+		// Distinct wording per line (not a number-only difference) so the fuzzy
+		// line-collapse does not fire — this exercises the newline-boundary cut path.
+		const topics = [
+			"alpha",
+			"bravo",
+			"charlie",
+			"delta",
+			"echo",
+			"foxtrot",
+			"golf",
+			"hotel",
+			"india",
+			"juliet",
+			"kilo",
+			"lima",
+			"mike",
+			"november",
+			"oscar",
+			"papa",
+			"quebec",
+			"romeo",
+			"sierra",
+			"tango",
+		];
+		const text = topics.map((t) => `- markdown bullet about ${t} topic`).join("\n");
 		const body = capExtractBody(text, CAP);
 		expect(body.length).toBeLessThanOrEqual(CAP);
 		expect(body.endsWith("...")).toBe(true);

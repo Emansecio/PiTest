@@ -41,7 +41,64 @@ describe("collapseRepeatedLines", () => {
 	});
 
 	it("does not merge lines that differ only at the end", () => {
+		// "line " has only 5 literal chars after masking (< FUZZY_MIN_LITERAL_CHARS),
+		// so the number-only difference does NOT trigger a fuzzy collapse.
 		const input = ["line 1", "line 2", "line 3"].join("\n");
 		expect(collapseRepeatedLines(input)).toBe(input);
+	});
+});
+
+describe("collapseRepeatedLines fuzzy masking (N2)", () => {
+	it("collapses lines that differ only in counters/timestamps, keeping the first verbatim", () => {
+		const input = [
+			"start",
+			"[12:00:01] processed batch 1 of 900 (0%)",
+			"[12:00:02] processed batch 2 of 900 (1%)",
+			"[12:00:03] processed batch 3 of 900 (2%)",
+			"[12:00:04] processed batch 4 of 900 (3%)",
+			"done",
+		].join("\n");
+		const out = collapseRepeatedLines(input);
+		expect(out).toBe(["start", "[12:00:01] processed batch 1 of 900 (0%) … (×4 similar)", "done"].join("\n"));
+	});
+
+	it("uses the exact (×N) marker when the collapsed lines were byte-identical", () => {
+		const input = ["compiling…", "compiling…", "compiling…"].join("\n");
+		// No digits → masking is a no-op; identical lines keep the exact marker.
+		expect(collapseRepeatedLines(input)).toBe("compiling… … (×3)");
+	});
+
+	it("collapses long hex/uuid-only differences (hashes)", () => {
+		const input = [
+			"resolved dependency at a1b2c3d4e5f6a7b8",
+			"resolved dependency at 00ff00ff00ff00ff",
+			"resolved dependency at deadbeefdeadbeef",
+		].join("\n");
+		expect(collapseRepeatedLines(input)).toBe("resolved dependency at a1b2c3d4e5f6a7b8 … (×3 similar)");
+	});
+
+	it("does NOT fuzzy-collapse number-dominated lines with too little literal content (opt-out)", () => {
+		// Each masks to "#|#" — only 1 literal char, below FUZZY_MIN_LITERAL_CHARS.
+		const input = ["100|200", "300|400", "500|600"].join("\n");
+		expect(collapseRepeatedLines(input)).toBe(input);
+	});
+
+	it("is byte-identical for text with no exact or fuzzy repetition", () => {
+		const input = ["alpha started", "beta finished", "gamma pending", "delta queued"].join("\n");
+		expect(collapseRepeatedLines(input)).toBe(input);
+	});
+
+	it("does not fuzzy-merge short hex words (< 8 chars stay literal)", () => {
+		// "cafe"/"babe" are hex-looking but under the 8-char hex-token threshold, so
+		// they are compared literally and remain distinct.
+		const input = ["load cafe module here", "load babe module here", "load feed module here"].join("\n");
+		expect(collapseRepeatedLines(input)).toBe(input);
+	});
+
+	it("collapses a CI-runner wall (thousands → one line)", () => {
+		const rows: string[] = [];
+		for (let i = 0; i < 2000; i++) rows.push(`PASS suite/test_${i} (${i * 2}ms)`);
+		const out = collapseRepeatedLines(rows.join("\n"));
+		expect(out).toBe("PASS suite/test_0 (0ms) … (×2000 similar)");
 	});
 });

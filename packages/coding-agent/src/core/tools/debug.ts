@@ -36,7 +36,7 @@ import { formatPathRelativeToCwd } from "../lsp/utils.ts";
 import { formatWatchpointBisect, runWatchpointBisect, type WatchpointBisectDeps } from "../watchpoint-bisect.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, formatSize, truncateTail } from "./truncate.ts";
+import { collapseRepeatedLines, DEFAULT_MAX_BYTES, formatSize, truncateTail } from "./truncate.ts";
 
 /**
  * DAP debug actions that only read program state (no mutation, no execution).
@@ -897,12 +897,14 @@ export function createDebugToolDefinition(
 					details.snapshot = response.snapshot;
 					if (response.output.length === 0) return textResult("(no output captured)", details);
 					// Debug output is an unbounded temporal stream (a logging loop / progress
-					// spam can be megabytes). Cap it, keeping the TAIL — in a hang the most
-					// recent lines are the relevant ones. `details.output` mirrors exactly
-					// what the model sees (not the raw stream) — persisting the untruncated
-					// text in the session's kept history would scale with the same unbounded
-					// megabytes-scale log the cap below exists to avoid.
-					const truncation = truncateTail(response.output);
+					// spam can be megabytes). Collapse identical/similar repeated lines first
+					// (lossless-first — a logging loop's near-identical lines carry no extra
+					// signal), then cap keeping the TAIL — in a hang the most recent lines are
+					// the relevant ones. `details.output` mirrors exactly what the model sees
+					// (not the raw stream) — persisting the untruncated text in the session's
+					// kept history would scale with the same unbounded megabytes-scale log the
+					// cap below exists to avoid.
+					const truncation = truncateTail(collapseRepeatedLines(response.output));
 					const text = truncation.truncated
 						? `[debug output truncated to the last ${formatSize(DEFAULT_MAX_BYTES)} — most recent lines shown]\n${truncation.content}`
 						: truncation.content;

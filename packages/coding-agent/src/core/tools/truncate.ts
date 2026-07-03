@@ -146,23 +146,142 @@ export function formatSize(bytes: number): string {
 	return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
-/** Default: collapse a run of this many identical consecutive lines or more. */
+/** Default: collapse a run of this many identical/similar consecutive lines or more. */
 const DEFAULT_COLLAPSE_MIN_RUN = 3;
 
 /**
+ * Minimum length of a hex run masked as a single wildcard token (hashes, uuids
+ * without dashes, memory addresses). Shorter hex-looking words (e.g. "cafe") stay
+ * literal so ordinary text is never masked; only digit runs are masked at any
+ * length (timestamps, counters, percentages), which is where CI/test-runner noise
+ * lives.
+ */
+const HEX_TOKEN_MIN_LEN = 8;
+
+/**
+ * Fuzzy collapse only fires when the masked line still carries at least this many
+ * NON-masked (literal) characters. A line that masks down to almost nothing (e.g.
+ * "#|#") is pure shape with no shared meaning, so two such distinct rows must NOT
+ * be merged. Exact-identical lines collapse regardless of this floor — they carry
+ * no extra information at all.
+ */
+const FUZZY_MIN_LITERAL_CHARS = 8;
+
+function isAsciiDigit(code: number): boolean {
+	return code >= 48 && code <= 57; // 0-9
+}
+
+function isHexDigit(code: number): boolean {
+	return (code >= 48 && code <= 57) || (code >= 97 && code <= 102) || (code >= 65 && code <= 70); // 0-9 a-f A-F
+}
+
+/**
+ * If a masked token begins at `i` within `s[i,end)`, return its end index
+ * (exclusive); otherwise return `i` (no token — the char is literal). A masked
+ * token is a maximal run of hex chars of length >= HEX_TOKEN_MIN_LEN, or else a
+ * maximal run of ASCII digits (any length). Allocation-free mirror of
+ * `s.replace(/[0-9a-fA-F]{8,}/g,"#").replace(/[0-9]+/g,"#")`: the long-hex run
+ * wins when present, else the digit run.
+ */
+function maskedTokenEnd(s: string, i: number, end: number): number {
+	const code = s.charCodeAt(i);
+	if (isHexDigit(code)) {
+		let h = i;
+		while (h < end && isHexDigit(s.charCodeAt(h))) h++;
+		if (h - i >= HEX_TOKEN_MIN_LEN) return h;
+	}
+	if (isAsciiDigit(code)) {
+		let d = i;
+		while (d < end && isAsciiDigit(s.charCodeAt(d))) d++;
+		return d;
+	}
+	return i;
+}
+
+/** Compare two ranges (possibly across two strings) for byte equality, no slices. */
+function rangesEqual(sa: string, aStart: number, aEnd: number, sb: string, bStart: number, bEnd: number): boolean {
+	const aLen = aEnd - aStart;
+	if (aLen !== bEnd - bStart) return false;
+	for (let k = 0; k < aLen; k++) {
+		if (sa.charCodeAt(aStart + k) !== sb.charCodeAt(bStart + k)) return false;
+	}
+	return true;
+}
+
+/**
+ * Whether two ranges are equal after masking each digit/hex token to one wildcard.
+ * Two-pointer walk, no allocation: where both sides start a masked token, skip both
+ * tokens (they match regardless of the digits); a token on only one side, or a
+ * mismatched literal char, fails. Lets "req 12" and "req 987" compare equal.
+ */
+function maskedRangesEqual(
+	sa: string,
+	aStart: number,
+	aEnd: number,
+	sb: string,
+	bStart: number,
+	bEnd: number,
+): boolean {
+	let a = aStart;
+	let b = bStart;
+	while (a < aEnd && b < bEnd) {
+		const aTok = maskedTokenEnd(sa, a, aEnd);
+		const bTok = maskedTokenEnd(sb, b, bEnd);
+		const aIsTok = aTok > a;
+		const bIsTok = bTok > b;
+		if (aIsTok || bIsTok) {
+			if (!aIsTok || !bIsTok) return false;
+			a = aTok;
+			b = bTok;
+			continue;
+		}
+		if (sa.charCodeAt(a) !== sb.charCodeAt(b)) return false;
+		a++;
+		b++;
+	}
+	return a === aEnd && b === bEnd;
+}
+
+/** Count of literal (non-masked-token) chars in `s[start,end)`. */
+function nonMaskedCount(s: string, start: number, end: number): number {
+	let count = 0;
+	let i = start;
+	while (i < end) {
+		const tok = maskedTokenEnd(s, i, end);
+		if (tok > i) {
+			i = tok; // a masked token contributes no literal chars
+		} else {
+			count++;
+			i++;
+		}
+	}
+	return count;
+}
+
+/**
+ * Whether two consecutive lines belong to the same collapsible run: byte-identical
+ * (exact — always collapses), or masked-equal with enough shared literal content
+ * (fuzzy — see FUZZY_MIN_LITERAL_CHARS). Masked equality is transitive, so anchoring
+ * every member of a run to its first line matches a consecutive-pair walk.
+ */
+function linesConnected(sa: string, aStart: number, aEnd: number, sb: string, bStart: number, bEnd: number): boolean {
+	if (rangesEqual(sa, aStart, aEnd, sb, bStart, bEnd)) return true;
+	if (!maskedRangesEqual(sa, aStart, aEnd, sb, bStart, bEnd)) return false;
+	return nonMaskedCount(sa, aStart, aEnd) >= FUZZY_MIN_LITERAL_CHARS;
+}
+
+/**
  * Allocation-free scan for the presence of any run of `minRun` (or more)
- * identical consecutive lines, where "line" matches `text.split("\n")` exactly
+ * collapsible consecutive lines (exact-identical or fuzzy-similar — see
+ * {@link linesConnected}), where "line" matches `text.split("\n")` exactly
  * (newline-delimited segments, with a trailing empty segment for a trailing
  * newline). Returns true as soon as one such run is found, letting
  * `collapseRepeatedLines` skip the full split/array/join when nothing collapses.
- *
- * Equality is checked by comparing each newline-delimited segment against the
- * previous one via substring bounds — no per-line strings are allocated.
  */
 function hasCollapsibleRun(text: string, minRun: number): boolean {
 	const len = text.length;
 	// Start/end (exclusive) of the previous segment, and how many consecutive
-	// segments (including the previous one) have been identical so far.
+	// segments (including the previous one) have collapsed together so far.
 	let prevStart = 0;
 	let prevEnd = -1;
 	let hasPrev = false;
@@ -176,7 +295,7 @@ function hasCollapsibleRun(text: string, minRun: number): boolean {
 			continue;
 		}
 		const segEnd = i;
-		if (hasPrev && segmentsEqual(text, prevStart, prevEnd, segStart, segEnd)) {
+		if (hasPrev && linesConnected(text, prevStart, prevEnd, text, segStart, segEnd)) {
 			runLength++;
 			if (runLength >= minRun) return true;
 		} else {
@@ -191,39 +310,41 @@ function hasCollapsibleRun(text: string, minRun: number): boolean {
 	return false;
 }
 
-/** Compare two substrings of `text` for equality without allocating slices. */
-function segmentsEqual(text: string, aStart: number, aEnd: number, bStart: number, bEnd: number): boolean {
-	const aLen = aEnd - aStart;
-	if (aLen !== bEnd - bStart) return false;
-	for (let k = 0; k < aLen; k++) {
-		if (text.charCodeAt(aStart + k) !== text.charCodeAt(bStart + k)) return false;
-	}
-	return true;
-}
-
 /**
- * Collapse runs of identical consecutive lines to shrink verbose command output
- * before it reaches the LLM (repeated log/test/progress/warning lines). A run of
- * `minRun` or more identical lines becomes one line + a `… (×N)` count marker;
- * runs of blank lines collapse to a single blank line. Only CONSECUTIVE
- * identical lines are merged, so order and distinct content are preserved.
- * Command-agnostic and lossless-of-meaning (identical lines carry no extra info).
+ * Collapse runs of identical OR fuzzy-similar consecutive lines to shrink verbose
+ * command output before it reaches the LLM (repeated log/test/progress/warning
+ * lines). Lines are compared with numeric/hex tokens masked to a wildcard, so a
+ * CI/test wall that differs only in timestamps, counters, or percentages collapses
+ * too — a run of `minRun` or more becomes the FIRST line verbatim + a count marker
+ * (`… (×N)` when the lines were byte-identical, `… (×N similar)` when they differed
+ * only inside masked tokens). Runs of blank lines collapse to a single blank line.
+ * Only CONSECUTIVE lines are merged, so order and distinct content are preserved.
+ * Command-agnostic and upgrade-only: text with no collapsible run is byte-identical.
  */
 export function collapseRepeatedLines(text: string, minRun = DEFAULT_COLLAPSE_MIN_RUN): string {
 	if (!text || minRun < 2) return text;
-	// Fast path: scan for the first run of >= minRun identical consecutive lines
-	// without allocating. The common case (bash/check output with no collapsible
-	// run) returns the original string here, skipping the full split/array/join.
+	// Fast path: scan for the first collapsible run without allocating. The common
+	// case (bash/check output with no collapsible run) returns the original string
+	// here, skipping the full split/array/join.
 	if (!hasCollapsibleRun(text, minRun)) return text;
 	const lines = text.split("\n");
 	const out: string[] = [];
 	let i = 0;
 	while (i < lines.length) {
+		const anchor = lines[i];
 		let j = i + 1;
-		while (j < lines.length && lines[j] === lines[i]) j++;
+		let allExact = true;
+		while (j < lines.length && linesConnected(anchor, 0, anchor.length, lines[j], 0, lines[j].length)) {
+			if (lines[j] !== anchor) allExact = false;
+			j++;
+		}
 		const run = j - i;
 		if (run >= minRun) {
-			out.push(lines[i].trim() === "" ? "" : `${lines[i]} … (×${run})`);
+			if (anchor.trim() === "") {
+				out.push("");
+			} else {
+				out.push(allExact ? `${anchor} … (×${run})` : `${anchor} … (×${run} similar)`);
+			}
 		} else {
 			for (let k = i; k < j; k++) out.push(lines[k]);
 		}

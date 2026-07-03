@@ -101,7 +101,9 @@ describe("recall_tool_output tool", () => {
 		store.dispose();
 	});
 
-	it("a common wrapped tool still gets the 64KB HEAD-ONLY cap (no regression)", async () => {
+	it("a common wrapped tool gets the 64KB HEAD+TAIL net by default (keeps the tail — N1.3)", async () => {
+		// No store set here (afterEach cleared it), so the net cuts but does NOT defer.
+		setCurrentDeferredOutputStore(undefined);
 		const head = "COMMON_HEAD_SENTINEL\n";
 		const tail = "\nCOMMON_TAIL_SENTINEL";
 		const filler = `${"y".repeat(120)}\n`.repeat(1200); // ~145KB
@@ -121,11 +123,13 @@ describe("recall_tool_output tool", () => {
 		const text: string = result.content.find((b: any) => b.type === "text")?.text;
 
 		expect(text).toContain("COMMON_HEAD_SENTINEL");
-		// Head-only cap: the tail sentinel is dropped, and the head-only note (not the
-		// head+tail note) is used.
-		expect(text).not.toContain("COMMON_TAIL_SENTINEL");
-		expect(text).toContain("was truncated");
-		expect(text).not.toContain("truncated from the middle");
+		// Head+tail is the new default net: the decisive tail sentinel survives (a
+		// head-only cut would have dropped it), and the head+tail note is used.
+		expect(text).toContain("COMMON_TAIL_SENTINEL");
+		expect(text).toContain("kept head + tail");
+		expect(text).toContain("truncated from the middle");
+		// No store → no recall placeholder appended.
+		expect(text).not.toContain("recall_tool_output");
 		expect(Buffer.byteLength(text, "utf-8")).toBeLessThanOrEqual(64 * 1024 + 4096);
 	});
 });
