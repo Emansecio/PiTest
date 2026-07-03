@@ -9,7 +9,15 @@ import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, Context, Message, Model, SimpleStreamOptions, Usage } from "@pit/ai";
-import { completeSimple } from "@pit/ai";
+import {
+	CHARS_PER_TOKEN_DENSE,
+	CHARS_PER_TOKEN_PROSE,
+	completeSimple,
+	estimateStringTokens,
+	isDenseText,
+	recordTokenEstimateSample,
+	tokenEstimateFactor,
+} from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import { lspSupersededResourceKey } from "../lsp/supersede.ts";
@@ -183,6 +191,13 @@ export interface WireToolSurface {
 
 export interface WireEstimateInput {
 	systemPromptChars: number;
+	/**
+	 * Full system prompt text. When provided, the system portion is
+	 * density-classified (skills XML / project_context / tool guidelines are
+	 * dense, not prose) instead of assumed prose at /4 — M7. Callers that only
+	 * know the char count keep the legacy prose divisor.
+	 */
+	systemPromptText?: string;
 	tools: WireToolSurface[];
 	/** Messages not yet appended to session state (e.g. pending user turn). */
 	pendingMessages?: AgentMessage[];
@@ -219,27 +234,86 @@ export function estimateToolSurfaceTokens(tools: WireToolSurface[]): number {
 }
 
 /**
+ * One-slot memo for the system prompt token estimate. The prompt text is large
+ * (tens of kB) and stable across a turn; classifying it per presend would be an
+ * O(chars) rescan for the same answer. Reference/value equality on the string
+ * picks the slot; any change recomputes.
+ */
+let systemPromptTokensMemo: { text: string; tokens: number } | undefined;
+
+function systemPromptTokensFor(text: string): number {
+	const memo = systemPromptTokensMemo;
+	if (memo && memo.text === text) return memo.tokens;
+	const tokens = estimateTextTokens(text);
+	systemPromptTokensMemo = { text, tokens };
+	return tokens;
+}
+
+/**
+ * Usage anchors already fed to the calibration (M5), by assistant message
+ * object. The same anchor is re-estimated every presend/TUI frame; recording
+ * it once keeps the EMA from over-weighting a single (estimate, usage) pair.
+ */
+const calibrationRecordedAnchors = new WeakSet<AgentMessage>();
+
+/**
  * Estimate full provider wire size: session messages + system prompt + tool
  * schemas + any pending (not-yet-appended) messages.
+ *
+ * M5 — this is also where the online calibration LEARNS: when the estimate
+ * anchors on an assistant with real usage, the char-based estimate of the very
+ * span that usage bills (messages up to and including the anchor, plus system
+ * prompt and tool schemas) and `usage.totalTokens` are both known here. The
+ * pair feeds an EMA per model id; the resulting factor corrects ONLY the
+ * char-based portions (trailing, pending, unanchored spans) — never the real
+ * usage numbers. With no recorded pairs the factor is neutral 1.0 and every
+ * number below is byte-identical to the uncalibrated estimate.
  */
 export function estimateWireTokens(messages: AgentMessage[], input: WireEstimateInput): WireUsageEstimate {
 	const messageEstimate = estimateContextTokens(messages);
+	const anchoredOnUsage = messageEstimate.lastUsageIndex !== null;
+	const anchorModel = anchoredOnUsage
+		? (messages[messageEstimate.lastUsageIndex as number] as AssistantMessage).model
+		: undefined;
+	const factor = tokenEstimateFactor(anchorModel);
 	let pendingTokens = 0;
 	if (input.pendingMessages) {
 		for (const message of input.pendingMessages) {
 			pendingTokens += estimateTokens(message);
 		}
 	}
-	const systemTokens = Math.ceil(input.systemPromptChars / CHARS_PER_TOKEN_PROSE);
+	pendingTokens = Math.round(pendingTokens * factor);
+	// M7: classify the system prompt's real density when the text is available —
+	// skills XML, project_context, and tool guidelines are dense, not /4 prose.
+	const systemTokens =
+		input.systemPromptText !== undefined
+			? systemPromptTokensFor(input.systemPromptText)
+			: Math.ceil(input.systemPromptChars / CHARS_PER_TOKEN_PROSE);
 	const toolTokens = estimateToolSurfaceTokens(input.tools);
+	// M5 learning: record the (raw char estimate, real usage) pair for the span
+	// the anchor's usage bills — full request: prefix + messages[0..anchor].
+	// Raw (uncalibrated) estimates only, so the factor never feeds back into
+	// its own training signal. Once per anchor object (WeakSet dedupe).
+	if (anchoredOnUsage && anchorModel) {
+		const anchorIndex = messageEstimate.lastUsageIndex as number;
+		const anchor = messages[anchorIndex];
+		if (!calibrationRecordedAnchors.has(anchor)) {
+			calibrationRecordedAnchors.add(anchor);
+			let spanEstimate = systemTokens + toolTokens;
+			for (let i = 0; i <= anchorIndex; i++) {
+				spanEstimate += estimateTokens(messages[i]);
+			}
+			recordTokenEstimateSample(anchorModel, spanEstimate, messageEstimate.usageTokens);
+		}
+	}
 	// When the message estimate anchored on real provider usage, that usage already
 	// bills the WHOLE request — system prompt and tool schemas included — so adding
 	// them again would double-count ~5-30k tokens and fire the presend overflow
 	// guard early. Only the estimate-only path (no usage yet, e.g. first turn)
-	// still needs the explicit prefix sum. The fields stay populated either way so
-	// callers can inspect the prefix surface.
-	const anchoredOnUsage = messageEstimate.lastUsageIndex !== null;
-	const tokens = messageEstimate.tokens + pendingTokens + (anchoredOnUsage ? 0 : systemTokens + toolTokens);
+	// still needs the explicit prefix sum (calibrated: it is char-based). The
+	// fields stay populated either way so callers can inspect the prefix surface.
+	const tokens =
+		messageEstimate.tokens + pendingTokens + (anchoredOnUsage ? 0 : Math.round((systemTokens + toolTokens) * factor));
 	return {
 		...messageEstimate,
 		messageTokens: messageEstimate.tokens,
@@ -261,6 +335,12 @@ function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; in
 /**
  * Estimate context tokens from messages, using the last assistant usage when available.
  * If there are messages after the last usage, estimate their tokens with estimateTokens.
+ *
+ * M5 — char-based portions (the trailing span after the anchor, or the whole
+ * span when no usage anchors it) are multiplied by the per-model calibration
+ * factor learned from real usage (see estimateWireTokens). The anchored usage
+ * itself is NEVER scaled. Neutral 1.0 factor (no recorded pairs) reproduces
+ * the uncalibrated numbers exactly.
  */
 export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEstimate {
 	const usageInfo = getLastAssistantUsageInfo(messages);
@@ -270,6 +350,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 		for (const message of messages) {
 			estimated += estimateTokens(message);
 		}
+		estimated = Math.round(estimated * tokenEstimateFactor());
 		return {
 			tokens: estimated,
 			usageTokens: 0,
@@ -283,6 +364,9 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 	for (let i = usageInfo.index + 1; i < messages.length; i++) {
 		trailingTokens += estimateTokens(messages[i]);
 	}
+	trailingTokens = Math.round(
+		trailingTokens * tokenEstimateFactor((messages[usageInfo.index] as AssistantMessage).model),
+	);
 
 	return {
 		tokens: usageTokens + trailingTokens,
@@ -328,10 +412,61 @@ export function effectiveKeepRecentTokens(configured: number, contextWindow?: nu
 	return Math.max(configured, Math.floor(contextWindow * 0.1));
 }
 
-/** Tokens assumed for the summary + structural frame a compaction inserts. */
-const COMPACTION_SUMMARY_TOKEN_BUDGET = 8_000;
+/** Legacy flat floor for the assumed summary + structural frame a compaction inserts. */
+const COMPACTION_SUMMARY_TOKEN_BUDGET_FLOOR = 8_000;
 /** Never retain less verbatim recent context than this, whatever the pressure. */
 const ADAPTIVE_KEEP_MIN_FLOOR = 8_000;
+
+/**
+ * Tokens to budget for the summary + structural frame a compaction inserts (M8).
+ *
+ * The flat 8k systematically UNDER-estimated the real insertion: generateSummary
+ * caps output at 0.8×reserveTokens (see summarizationMaxTokens), and observed
+ * summaries reach ~13k once the structural frame + file digests ride along — so
+ * the post-compaction context landed back above the re-check threshold on small
+ * windows and the "rare" second LLM pass became structural. Derive the budget
+ * from the summarizer's REAL ceiling (0.8×reserve, floored at the legacy 8k so
+ * tiny configured reserves keep the old behaviour) and add the estimated
+ * structural frame when the caller knows it (the frame merges forward across
+ * compactions, so the previous compaction's persisted details predict it).
+ */
+export function compactionSummaryTokenBudget(settings: CompactionSettings, frameTokensEstimate?: number): number {
+	const summaryCeiling = Math.max(COMPACTION_SUMMARY_TOKEN_BUDGET_FLOOR, Math.ceil(settings.reserveTokens * 0.8));
+	const frame = Number.isFinite(frameTokensEstimate) ? Math.max(0, Math.floor(frameTokensEstimate as number)) : 0;
+	return summaryCeiling + frame;
+}
+
+/**
+ * Estimate the tokens of the structural frame (operation lists + file digests)
+ * the NEXT compaction will append, from a previous compaction entry's persisted
+ * `details`. The lists merge forward across compactions, so the previous frame
+ * is the best available predictor. Returns undefined when there is no usable
+ * signal (no previous compaction, empty/legacy details).
+ */
+export function estimateCompactionFrameTokens(details: unknown): number | undefined {
+	if (typeof details !== "object" || details === null) return undefined;
+	const d = details as CompactionDetails;
+	let chars = 0;
+	const addList = (arr: unknown): void => {
+		if (!Array.isArray(arr)) return;
+		for (const item of arr) {
+			if (typeof item === "string") chars += item.length + 1;
+		}
+	};
+	addList(d.readFiles);
+	addList(d.modifiedFiles);
+	addList(d.searches);
+	addList(d.shellCmds);
+	addList(d.mcpCalls);
+	if (typeof d.fileDigests === "object" && d.fileDigests !== null) {
+		for (const [path, digest] of Object.entries(d.fileDigests)) {
+			if (typeof digest === "string") chars += path.length + digest.length + 8;
+		}
+	}
+	if (chars === 0) return undefined;
+	// The frame is XML tags + paths/commands — dense by construction.
+	return Math.ceil(chars / CHARS_PER_TOKEN_DENSE);
+}
 
 /**
  * Adaptive verbatim-retention budget for a SINGLE compaction pass.
@@ -341,12 +476,18 @@ const ADAPTIVE_KEEP_MIN_FLOOR = 8_000;
  * too small for a positive soft band), runAutoCompaction used to run a SECOND
  * full pipeline — 1-2 extra LLM calls. On small windows the default keep alone
  * exceeds the target, so the second pass was structural, not incidental. This
- * shrinks the keep so one pass suffices: keep ≤ target − summary budget,
- * floored at max(8k, keepRecentTokens/2) so quality never collapses (the
- * second pass remains as fallback when the floor wins). Returns undefined when
- * no shrink is needed — normal windows are byte-identical to the legacy path.
+ * shrinks the keep so one pass suffices: keep ≤ target − summary budget (M8:
+ * derived from the real summarizer ceiling + previous frame estimate, no longer
+ * a flat 8k), floored at max(8k, keepRecentTokens/2) so quality never collapses
+ * (the second pass remains as fallback when the floor wins). Returns undefined
+ * when no shrink is needed — normal windows are byte-identical to the legacy
+ * path.
  */
-export function adaptiveKeepRecentTokens(contextWindow: number, settings: CompactionSettings): number | undefined {
+export function adaptiveKeepRecentTokens(
+	contextWindow: number,
+	settings: CompactionSettings,
+	frameTokensEstimate?: number,
+): number | undefined {
 	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return undefined;
 	const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
 	const effectiveKeep = effectiveKeepRecentTokens(settings.keepRecentTokens, contextWindow);
@@ -355,7 +496,7 @@ export function adaptiveKeepRecentTokens(contextWindow: number, settings: Compac
 	// Mirror the post-compaction re-check: shouldCompactSoft only fires with a
 	// positive soft threshold; otherwise the hard threshold is the bar.
 	const target = softThreshold > 0 ? softThreshold : hardThreshold;
-	const keepMax = target - COMPACTION_SUMMARY_TOKEN_BUDGET;
+	const keepMax = target - compactionSummaryTokenBudget(settings, frameTokensEstimate);
 	if (keepMax >= effectiveKeep) return undefined;
 	const floor = Math.max(ADAPTIVE_KEEP_MIN_FLOOR, Math.floor(settings.keepRecentTokens / 2));
 	const adapted = Math.min(effectiveKeep, Math.max(floor, keepMax));
@@ -436,17 +577,8 @@ export function shouldCompactSoft(contextTokens: number, contextWindow: number, 
 // Cut point detection
 // ============================================================================
 
-/** Chars-per-token ratios for content classification. */
-const CHARS_PER_TOKEN_PROSE = 4;
-const CHARS_PER_TOKEN_DENSE = 3.3;
-/**
- * Non-latin scripts (CJK, Cyrillic, emoji, …) cost far more BPE tokens per
- * char than ASCII — roughly 0.5–2 tok/char. When the non-ASCII code-point
- * fraction exceeds this threshold, fall back to a denser divisor so the
- * estimate isn't wildly low (which would mislead findCutPoint / pruning).
- */
-const CHARS_PER_TOKEN_NONLATIN = 2;
-const NONLATIN_FRACTION_THRESHOLD = 0.3;
+// Chars-per-token ratios and the density heuristic live in @pit/ai
+// token-estimate.ts (M7 single source of truth) — imported above.
 /** Token cost for an image block (kept as constant). */
 const IMAGE_TOKENS = 1200;
 
@@ -511,51 +643,12 @@ function pruneToolCallArguments(args: unknown, failed = false): { pruned: unknow
 }
 
 /**
- * Classify text as dense (code/JSON/tool-output) or prose.
- * Dense: non-alphanumeric non-space char fraction > 0.20,
- * OR structural symbol density > 0.05.
- */
-// Structural symbols counted by isDenseText, as char codes (precomputed once
-// instead of an indexOf-scan over the 14-char string per character).
-const STRUCTURAL_CODES = new Set<number>('{}[]()<>;:,="'.split("").map((c) => c.charCodeAt(0)));
-
-function isDenseText(text: string): boolean {
-	if (text.length === 0) return false;
-	let nonAlphaNum = 0;
-	let structural = 0;
-	for (let i = 0; i < text.length; i++) {
-		const cc = text.charCodeAt(i);
-		// not whitespace: space(32) tab(9) lf(10) cr(13)
-		if (cc !== 32 && cc !== 9 && cc !== 10 && cc !== 13) {
-			const isAlnum = (cc >= 48 && cc <= 57) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122);
-			if (!isAlnum) nonAlphaNum++;
-		}
-		if (STRUCTURAL_CODES.has(cc)) structural++;
-	}
-	return nonAlphaNum / text.length > 0.2 || structural / text.length > 0.05;
-}
-
-/**
  * Estimate tokens for a raw text string, classifying it as dense or prose.
- * Exported for use in pruneOldToolOutputs and tests.
+ * Exported for use in pruneOldToolOutputs and tests. Thin re-export of the
+ * shared heuristic in @pit/ai token-estimate.ts (M7 single source of truth).
  */
 export function estimateTextTokens(text: string, forceDense = false): number {
-	if (text.length === 0) return 0;
-	// Count non-ASCII code points (surrogate pairs counted once, so emoji = 1).
-	let nonAscii = 0;
-	let codePoints = 0;
-	for (const ch of text) {
-		codePoints++;
-		const cp = ch.codePointAt(0);
-		if (cp !== undefined && cp > 127) nonAscii++;
-	}
-	// Non-latin heavy text underestimates badly with the ASCII divisors; use a
-	// denser ratio so the estimate stays close to real BPE token cost.
-	if (codePoints > 0 && nonAscii / codePoints > NONLATIN_FRACTION_THRESHOLD) {
-		return Math.ceil(text.length / CHARS_PER_TOKEN_NONLATIN);
-	}
-	const dense = forceDense || isDenseText(text);
-	return Math.ceil(text.length / (dense ? CHARS_PER_TOKEN_DENSE : CHARS_PER_TOKEN_PROSE));
+	return estimateStringTokens(text, forceDense);
 }
 
 /** Count chars in a message, separated by density. Images stored as token count. */
@@ -1528,6 +1621,9 @@ Use this EXACT format:
 - [Any data, examples, or references needed to continue]
 - [Or "(none)" if not applicable]
 
+## Corrections (self-check)
+- [FINAL STEP: re-scan the conversation above for material facts the sections you just wrote omitted — exact file paths, error messages, function/variable names, user constraints, key decisions. List each omitted fact as one bullet, VERBATIM from the conversation. NEVER add facts that are not in the conversation. OMIT this entire section when nothing is missing.]
+
 Keep each section concise. Preserve exact file paths, function names, and error messages.
 
 STRUCTURED-PRIMARY (output economy): File paths, searches, shell commands, and MCP calls are appended automatically as structured XML tags after your summary. Do NOT list them in prose — focus prose on intent, decisions, blockers, and next steps only. Keep each section to 1–3 bullets max.`;
@@ -1543,10 +1639,13 @@ Your final assistant message MUST be a single fenced \`\`\`json\`\`\` block matc
   "blocked": ["blockers or empty array"],
   "keyDecisions": ["Decision: rationale"],
   "nextSteps": ["ordered strings"],
-  "criticalContext": ["data/refs needed to continue or empty array"]
+  "criticalContext": ["data/refs needed to continue or empty array"],
+  "corrections": ["material facts the fields above omitted — optional; empty when nothing is missing"]
 }
 
-Keep each array to 1–3 items max. Do NOT list file paths, searches, shell commands, or MCP calls — they are appended as structured XML after parsing.`;
+Keep each array to 1–3 items max. Do NOT list file paths, searches, shell commands, or MCP calls — they are appended as structured XML after parsing.
+
+SELF-CHECK (final step): before emitting, re-scan the conversation for omitted exact file paths, error messages, function/variable names, user constraints, or key decisions and put each in "corrections" VERBATIM from the source. NEVER invent facts; leave "corrections" empty when nothing is missing.`;
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
@@ -1589,6 +1688,9 @@ Use this EXACT format:
 ## Critical Context
 - [Preserve important context, add new if needed]
 
+## Corrections (self-check)
+- [FINAL STEP: re-scan the new messages for material facts the sections you just wrote omitted — exact file paths, error messages, function/variable names, user constraints, key decisions. List each omitted fact as one bullet, VERBATIM from the source. NEVER invent facts. OMIT this entire section when nothing is missing.]
+
 Keep each section concise. Preserve exact file paths, function names, and error messages.
 
 STRUCTURED-PRIMARY (output economy): Do NOT duplicate file paths, searches, or shell commands in prose — they are appended as structured XML. Update intent/decisions/blockers only; 1–3 bullets per section.`;
@@ -1610,10 +1712,13 @@ Your final assistant message MUST be a single fenced \`\`\`json\`\`\` block matc
   "blocked": ["blockers"],
   "keyDecisions": ["Decision: rationale"],
   "nextSteps": ["ordered strings"],
-  "criticalContext": ["refs needed"]
+  "criticalContext": ["refs needed"],
+  "corrections": ["material facts the fields above omitted — optional; empty when nothing is missing"]
 }
 
-Keep each array to 1–3 items. Do NOT list file paths, searches, or shell commands — appended as structured XML after parsing.`;
+Keep each array to 1–3 items. Do NOT list file paths, searches, or shell commands — appended as structured XML after parsing.
+
+SELF-CHECK (final step): before emitting, re-scan the new messages for omitted exact file paths, error messages, function/variable names, constraints, or key decisions and put each in "corrections" VERBATIM from the source. NEVER invent facts; leave "corrections" empty when nothing is missing.`;
 
 function summarizationUsesJsonOutput(): boolean {
 	return !isTruthyEnvFlag(process.env.PIT_NO_STRUCTURED_SUMMARY_OUTPUT);
@@ -1920,13 +2025,16 @@ export function buildVerificationSource(
 }
 
 /**
- * Below this many summarized-input tokens, skip the self-correction pass. The
- * verification is a SECOND full LLM call per compaction; on small or incremental
- * compactions there is little content to omit, so the omission risk it guards
- * against is low and the cost is not justified. Large first-time compactions
- * (where dropping a file path / error / decision is likely) still verify.
+ * Below this many summarized-input tokens, skip the SEPARATE self-correction
+ * LLM call. M15 raised this from 25k to 80k: the summarizer prompt now carries
+ * an inline self-check (the model reviews its own summary against the window
+ * and emits corrections in the same response — see the "Corrections
+ * (self-check)" section / `corrections` JSON field, merged deterministically),
+ * so every compaction gets a verification pass for free. Only very large
+ * windows — where the verify source excerpt still adds real signal over the
+ * single-call self-check — pay the second LLM call.
  */
-const VERIFY_MIN_INPUT_TOKENS = 25_000;
+const VERIFY_MIN_INPUT_TOKENS = 80_000;
 
 /**
  * Sum content-aware token estimates across a message list — a PURE estimate
@@ -1941,14 +2049,56 @@ export function sumMessageTokens(messages: AgentMessage[]): number {
 	return total;
 }
 
+/** Token-count runaway bound: reject corrections above this ratio regardless of grounding. */
+const VERIFY_INFLATION_HARD_LIMIT = 1.5;
+/** Inflation ratio above which a correction must be grounded in the source to be accepted. */
+const VERIFY_INFLATION_SOFT_LIMIT = 1.1;
+
+/** Path-like tokens (src/foo/bar.ts, module.py) — the facts a verifier legitimately adds. */
+const GROUNDABLE_PATH_RE = /[A-Za-z0-9_@][\w./-]*\.[A-Za-z]\w{0,7}/g;
+/** Backticked spans — identifiers/errors the verifier cites. */
+const GROUNDABLE_BACKTICK_RE = /`([^`\n]{4,120})`/g;
+
+/**
+ * True when at least one line the verifier ADDED to the summary cites a token
+ * (file path or backticked identifier/error) that appears VERBATIM in the
+ * verification source. This is the deterministic stand-in for "the correction
+ * fixes a material omission": a grounded added fact came from the window, not
+ * from fabrication, so oversize output is the correction working as intended.
+ */
+export function correctionCitesSource(original: string, corrected: string, source: string): boolean {
+	const originalLines = new Set(
+		original
+			.split("\n")
+			.map((line) => line.trim())
+			.filter(Boolean),
+	);
+	for (const rawLine of corrected.split("\n")) {
+		const line = rawLine.trim();
+		if (!line || originalLines.has(line)) continue;
+		for (const match of line.matchAll(GROUNDABLE_PATH_RE)) {
+			if (match[0].length >= 4 && source.includes(match[0])) return true;
+		}
+		for (const match of line.matchAll(GROUNDABLE_BACKTICK_RE)) {
+			if (source.includes(match[1])) return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Run a self-correction pass on a generated summary. A second LLM call
  * evaluates the summary for omissions against the source conversation and
  * produces a corrected version. The {@link source} argument MUST be a
  * serialization of the compacted window (see {@link buildVerificationSource});
  * without it the pass can only fabricate additions, never detect omissions.
- * Falls back to the original if the corrected version inflates token count
- * by more than 10%.
+ *
+ * Inflation gate (M15): the old blind ">10% → discard" threw away exactly the
+ * case where the verifier found material omissions — the paid second call was
+ * wasted. Oversize corrections are now ACCEPTED when they are grounded (an
+ * added line cites a path/identifier present verbatim in the source, see
+ * {@link correctionCitesSource}); ungrounded inflation still falls back to the
+ * original, as does any rewrite beyond {@link VERIFY_INFLATION_HARD_LIMIT}.
  */
 async function verifySummary(
 	summary: string,
@@ -1988,10 +2138,17 @@ async function verifySummary(
 		const corrected = extractTextFromResponse(response);
 		if (!corrected.trim()) return summary;
 
-		const originalTokens = Math.ceil(summary.length / 4);
-		const correctedTokens = Math.ceil(corrected.length / 4);
-		if (correctedTokens > originalTokens * 1.1) {
-			return summary;
+		const originalTokens = Math.ceil(summary.length / CHARS_PER_TOKEN_PROSE);
+		const correctedTokens = Math.ceil(corrected.length / CHARS_PER_TOKEN_PROSE);
+		if (correctedTokens > originalTokens * VERIFY_INFLATION_SOFT_LIMIT) {
+			// Grounded material corrections may legitimately exceed the soft limit;
+			// runaway rewrites and ungrounded inflation never survive.
+			if (
+				correctedTokens > originalTokens * VERIFY_INFLATION_HARD_LIMIT ||
+				!correctionCitesSource(summary, corrected, source)
+			) {
+				return summary;
+			}
 		}
 
 		return corrected;

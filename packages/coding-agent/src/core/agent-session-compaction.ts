@@ -11,6 +11,7 @@ import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import {
 	adaptivePruneThreshold,
 	cloneToolResultMessagesForPrune,
+	estimateCompactionFrameTokens,
 	estimateWireTokens,
 	planContextPrune,
 	pressurePruneProtectTurns,
@@ -83,11 +84,32 @@ export interface CompactionHost {
 	abort(): Promise<void>;
 }
 
+/** Wire prefix surface (system prompt + tool schemas) captured at presend time. */
+export interface PresendWireSurface {
+	systemPrompt: string;
+	tools: WireToolSurface[];
+}
+
 /** Mutable compaction state owned per session. */
 export class CompactionController {
 	readonly host: CompactionHost;
 	overflowRecoveryAttempted = false;
+	/**
+	 * Deficit (tokens over the hard threshold) at the last compaction trigger.
+	 * UNIT INVARIANT: always FULL-REQUEST tokens — the same space for every
+	 * writer. The presend guards measure the assembled wire (messages + system
+	 * prompt + tool schemas + pending); the threshold path uses provider usage,
+	 * which also bills the whole request. Never store a messages-only figure
+	 * here — mixing spaces made the hysteresis nonsensical at the boundary.
+	 */
 	lastCompactionDeficit = 0;
+	/**
+	 * Last wire prefix surface seen by checkPresendOverflow. Lets the internal
+	 * presend guard in checkCompaction measure in the SAME space (full wire)
+	 * instead of messages-only — before this the two guards compared different
+	 * quantities against the same ratio and never agreed at the boundary.
+	 */
+	lastWireSurface?: PresendWireSurface;
 	backgroundCompactionPromise?: Promise<unknown>;
 	compactionAbortController?: AbortController;
 	autoCompactionAbortController?: AbortController;
@@ -95,6 +117,23 @@ export class CompactionController {
 	constructor(host: CompactionHost) {
 		this.host = host;
 	}
+}
+
+/**
+ * Assembled full-wire estimate for the CURRENT session messages: wire space
+ * (messages + system prompt + tool schemas) when a presend surface is known,
+ * falling back to the messages-only estimate before the first presend (context
+ * is far from any threshold there, so the missing prefix cannot flip a guard).
+ * Shared by both presend guards so they agree at the boundary.
+ */
+function estimateAssembledTokens(ctx: CompactionController): number {
+	const surface = ctx.lastWireSurface;
+	if (!surface) return estimateContextTokens(ctx.host.agent.state.messages).tokens;
+	return estimateWireTokens(ctx.host.agent.state.messages, {
+		systemPromptChars: surface.systemPrompt.length,
+		systemPromptText: surface.systemPrompt,
+		tools: surface.tools,
+	}).tokens;
 }
 
 export function maybePruneStaleToolOutputs(ctx: CompactionController, contextTokens: number): void {
@@ -392,6 +431,10 @@ export async function checkPresendOverflow(
 		compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
 	if (assistantIsFromBeforeCompaction) return false;
 
+	// Remember the wire prefix surface so checkCompaction's internal guard can
+	// measure in the same (full-wire) space on the post-response path.
+	ctx.lastWireSurface = { systemPrompt: wireInput.systemPrompt, tools: wireInput.tools };
+
 	let contextTokens: number;
 	if (assistantMessage.stopReason === "error") {
 		contextTokens = estimateContextTokens(ctx.host.agent.state.messages).tokens;
@@ -401,6 +444,7 @@ export async function checkPresendOverflow(
 
 	let assembled = estimateWireTokens(ctx.host.agent.state.messages, {
 		systemPromptChars: wireInput.systemPrompt.length,
+		systemPromptText: wireInput.systemPrompt,
 		tools: wireInput.tools,
 		pendingMessages: wireInput.pendingMessages,
 	}).tokens;
@@ -410,6 +454,7 @@ export async function checkPresendOverflow(
 			await awaitBackgroundCompaction(ctx);
 			assembled = estimateWireTokens(ctx.host.agent.state.messages, {
 				systemPromptChars: wireInput.systemPrompt.length,
+				systemPromptText: wireInput.systemPrompt,
 				tools: wireInput.tools,
 				pendingMessages: wireInput.pendingMessages,
 			}).tokens;
@@ -504,11 +549,14 @@ export async function checkCompaction(
 		!ctx.host.isCompacting &&
 		!isTruthyEnvFlag(process.env.PIT_NO_PRESEND_OVERFLOW_GUARD)
 	) {
-		let assembled = estimateContextTokens(ctx.host.agent.state.messages).tokens;
+		// Unified space: same full-wire estimate as checkPresendOverflow (via the
+		// captured prefix surface), so the two guards agree at the boundary and
+		// lastCompactionDeficit stays in one unit.
+		let assembled = estimateAssembledTokens(ctx);
 		if (assembled > contextWindow * PRESEND_OVERFLOW_RATIO && assembled > contextTokens) {
 			if (ctx.backgroundCompactionPromise) {
 				await awaitBackgroundCompaction(ctx);
-				assembled = estimateContextTokens(ctx.host.agent.state.messages).tokens;
+				assembled = estimateAssembledTokens(ctx);
 			}
 			if (assembled > contextWindow * PRESEND_OVERFLOW_RATIO && !ctx.host.isCompacting) {
 				const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
@@ -596,7 +644,11 @@ export async function runAutoCompaction(
 		// Adaptive cut: on windows where the default keep + summary would land back
 		// above the re-check threshold, shrink the keep so ONE pass suffices
 		// instead of paying a second full pipeline. undefined on normal windows.
-		const keepOverride = adaptiveKeepRecentTokens(ctx.host.model?.contextWindow ?? 0, settings);
+		// M8: the summary budget derives from the real summarizer ceiling
+		// (0.8×reserve) plus the structural frame the previous compaction persisted
+		// (the frame merges forward, so it predicts the next one).
+		const frameTokens = estimateCompactionFrameTokens(getLatestCompactionEntry(pathEntries)?.details);
+		const keepOverride = adaptiveKeepRecentTokens(ctx.host.model?.contextWindow ?? 0, settings, frameTokens);
 		const preparation = prepareCompaction(
 			pathEntries,
 			settings,

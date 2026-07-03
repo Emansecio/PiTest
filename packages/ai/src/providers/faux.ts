@@ -1,4 +1,5 @@
 import { registerApiProvider, unregisterApiProviders } from "../api-registry.ts";
+import { CHARS_PER_TOKEN_PROSE } from "../token-estimate.ts";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
@@ -120,7 +121,9 @@ export interface FauxProviderRegistration {
 }
 
 function estimateTokens(text: string): number {
-	return Math.ceil(text.length / 4);
+	// Deterministic faux usage: everything counts as prose via the shared
+	// chars/token source of truth (see @pit/ai token-estimate.ts).
+	return Math.ceil(text.length / CHARS_PER_TOKEN_PROSE);
 }
 
 function randomId(prefix: string): string {

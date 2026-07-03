@@ -7,6 +7,7 @@ import {
 	type CompactionPreparation,
 	type CompactionSettings,
 	compact,
+	correctionCitesSource,
 	createFileOps,
 	createSerializedWindow,
 	DEFAULT_COMPACTION_SETTINGS,
@@ -178,10 +179,11 @@ describe("compact() self-correction verify pass", () => {
 
 	it("sends the verify pass a prompt with <conversation-delta> source AND <summary>, plus the anti-fabrication rule", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
-		// ~104k chars of prose -> ~26k tokens, crossing VERIFY_MIN_INPUT_TOKENS (25k)
-		// so the self-correction pass actually fires. User prose is not pruned and
-		// counts as prose (skips structural-only), so no env hacks beyond the defaults.
-		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(2300);
+		// ~420k chars of prose -> ~105k tokens, crossing VERIFY_MIN_INPUT_TOKENS
+		// (80k after M15 — the separate verify call now fires only on very large
+		// windows; smaller ones ride the in-prompt self-check). User prose is not
+		// pruned and counts as prose (skips structural-only).
+		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(7000);
 		const messagesToSummarize: AgentMessage[] = [
 			createUserMessage(bigProse),
 			createAssistantMessage("Reading compaction.ts now."),
@@ -223,9 +225,121 @@ describe("compact() self-correction verify pass", () => {
 		expect(verifyPrompt).toContain("fixing the compaction verify pass");
 	});
 
+	it("does NOT pay the separate verify call in the 25k-80k band (self-check rides the single call — M15)", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		// ~138k chars -> ~34.5k tokens: above the OLD 25k bar, below the new 80k one.
+		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(2300);
+		const messagesToSummarize: AgentMessage[] = [
+			createUserMessage(bigProse),
+			createAssistantMessage("Reading compaction.ts now."),
+		];
+
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept-id",
+			messagesToSummarize,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 50_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS },
+		};
+
+		const { streamFn, prompts } = capturingStreamFn(["## Goal\nfake summary"]);
+		await compact(preparation, model, undefined, undefined, undefined, undefined, undefined, streamFn);
+
+		// One LLM call only; the summarizer prompt itself carries the self-check.
+		expect(prompts.length).toBe(1);
+		expect(prompts[0]).toContain("self-check");
+	});
+
+	it("accepts an oversize verify correction when it is grounded in the source (>10% gate no longer blind)", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		process.env.PIT_NO_SUMMARY_GROUNDING = "1";
+		try {
+			const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(7000);
+			const messagesToSummarize: AgentMessage[] = [
+				createUserMessage(bigProse),
+				createAssistantMessage("Reading compaction.ts now."),
+			];
+			const preparation: CompactionPreparation = {
+				firstKeptEntryId: "kept-id",
+				messagesToSummarize,
+				turnPrefixMessages: [],
+				isSplitTurn: false,
+				tokensBefore: 50_000,
+				fileOps: createFileOps(),
+				settings: { ...DEFAULT_COMPACTION_SETTINGS },
+			};
+
+			const original = `## Goal\n${"steady summary body without any file mentions at all ".repeat(8)}`;
+			// >10% larger, and the added line cites compaction.ts — present verbatim
+			// in the verification source (the window prose mentions it).
+			const corrected = `${original}\n- Omitted: the fix targets compaction.ts verify pass\n${"grounded detail ".repeat(4)}`;
+			const { streamFn, prompts } = capturingStreamFn([original, corrected]);
+			const result = await compact(
+				preparation,
+				model,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				streamFn,
+			);
+
+			expect(prompts.length).toBe(2);
+			expect(result.summary).toContain("Omitted: the fix targets compaction.ts verify pass");
+		} finally {
+			delete process.env.PIT_NO_SUMMARY_GROUNDING;
+		}
+	});
+
+	it("still rejects oversize UNGROUNDED verify output (fabrication risk)", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		process.env.PIT_NO_SUMMARY_GROUNDING = "1";
+		try {
+			const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(7000);
+			const messagesToSummarize: AgentMessage[] = [
+				createUserMessage(bigProse),
+				createAssistantMessage("Reading compaction.ts now."),
+			];
+			const preparation: CompactionPreparation = {
+				firstKeptEntryId: "kept-id",
+				messagesToSummarize,
+				turnPrefixMessages: [],
+				isSplitTurn: false,
+				tokensBefore: 50_000,
+				fileOps: createFileOps(),
+				settings: { ...DEFAULT_COMPACTION_SETTINGS },
+			};
+
+			const original = `## Goal\n${"steady summary body without any file mentions at all ".repeat(8)}`;
+			// >10% larger but the additions cite nothing from the source — no paths,
+			// no backticked identifiers. Must fall back to the original.
+			const corrected = `${original}\n${"padding words with no citations anywhere ".repeat(5)}`;
+			const { streamFn, prompts } = capturingStreamFn([original, corrected]);
+			const result = await compact(
+				preparation,
+				model,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				streamFn,
+			);
+
+			expect(prompts.length).toBe(2);
+			expect(result.summary).not.toContain("padding words with no citations");
+			expect(result.summary).toContain("steady summary body");
+		} finally {
+			delete process.env.PIT_NO_SUMMARY_GROUNDING;
+		}
+	});
+
 	it("skips the verify pass when selfCorrection is disabled (only one LLM call)", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
-		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(2300);
+		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(7000);
 		const messagesToSummarize: AgentMessage[] = [
 			createUserMessage(bigProse),
 			createAssistantMessage("Reading compaction.ts now."),
@@ -256,9 +370,9 @@ describe("compact() self-correction verify pass", () => {
 		// A large tool result (would be ~27k dense tokens). The verify source must
 		// still be bounded by the head+tail excerpt, never the raw 90k body.
 		const bigToolResult = createToolResultMessage("Z".repeat(90_000));
-		// Add enough prose to cross VERIFY_MIN_INPUT_TOKENS after the prune caps the
-		// tool result down (prose is not pruned).
-		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(2300);
+		// Add enough prose to cross VERIFY_MIN_INPUT_TOKENS (80k) after the prune
+		// caps the tool result down (prose is not pruned).
+		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(7000);
 		const messagesToSummarize: AgentMessage[] = [
 			bigToolResult,
 			createUserMessage(bigProse),
@@ -285,6 +399,45 @@ describe("compact() self-correction verify pass", () => {
 		// The raw 90k body must NOT appear in full — the source is bounded.
 		expect(verifyPrompt.length).toBeLessThan(60_000);
 		expect(verifyPrompt).toContain("<conversation-delta>");
+	});
+});
+
+// ============================================================================
+// correctionCitesSource — deterministic grounding test for the inflation gate
+// ============================================================================
+
+describe("correctionCitesSource", () => {
+	const source =
+		"User asked to fix src/core/compaction/compaction.ts after `TypeError: source is undefined` was thrown.";
+
+	it("true when an added line cites a path present verbatim in the source", () => {
+		const original = "## Goal\n- Fix the bug";
+		const corrected = `${original}\n- Omitted: the file is src/core/compaction/compaction.ts`;
+		expect(correctionCitesSource(original, corrected, source)).toBe(true);
+	});
+
+	it("true when an added line cites a backticked identifier from the source", () => {
+		const original = "## Goal\n- Fix the bug";
+		const corrected = `${original}\n- Error was \`TypeError: source is undefined\``;
+		expect(correctionCitesSource(original, corrected, source)).toBe(true);
+	});
+
+	it("false when the additions cite nothing from the source", () => {
+		const original = "## Goal\n- Fix the bug";
+		const corrected = `${original}\n- More vague words about progress`;
+		expect(correctionCitesSource(original, corrected, source)).toBe(false);
+	});
+
+	it("false when the cited path does NOT appear in the source (fabrication)", () => {
+		const original = "## Goal\n- Fix the bug";
+		const corrected = `${original}\n- Touched src/fabricated/ghost.ts too`;
+		expect(correctionCitesSource(original, corrected, source)).toBe(false);
+	});
+
+	it("ignores lines already present in the original (only ADDED lines count)", () => {
+		const original = "## Goal\n- Fix src/core/compaction/compaction.ts";
+		const corrected = `${original}\n- New vague line`;
+		expect(correctionCitesSource(original, corrected, source)).toBe(false);
 	});
 });
 
@@ -347,9 +500,10 @@ describe("SerializedWindow reuse", () => {
 
 	it("compact() serializes the window once on the incremental path with the verify pass active", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
-		// ~104k chars of prose -> ~26k tokens, crossing VERIFY_MIN_INPUT_TOKENS so
-		// the verify pass fires; previousSummary makes the summarizer use the delta.
-		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(2300);
+		// ~420k chars of prose -> ~105k tokens, crossing VERIFY_MIN_INPUT_TOKENS
+		// (80k) so the verify pass fires; previousSummary makes the summarizer use
+		// the delta.
+		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(7000);
 		const messagesToSummarize: AgentMessage[] = [
 			createUserMessage(bigProse),
 			createAssistantMessage("Reading compaction.ts now."),

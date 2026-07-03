@@ -193,8 +193,8 @@ describe("self-correction gating by input size (#3)", () => {
 	});
 
 	it("runs the verification pass for large inputs (summary + verify)", async () => {
-		// ~120k chars of prose ≈ 30k tokens > VERIFY_MIN_INPUT_TOKENS (25k).
-		const bigText = "word ".repeat(24000);
+		// ~425k chars of prose ≈ 106k tokens > VERIFY_MIN_INPUT_TOKENS (80k, M15).
+		const bigText = "word ".repeat(85000);
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "entry-keep",
 			messagesToSummarize: [{ role: "user", content: bigText, timestamp: Date.now() }],
@@ -211,8 +211,27 @@ describe("self-correction gating by input size (#3)", () => {
 		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
 	});
 
-	it("never verifies when selfCorrection is disabled, regardless of size", async () => {
+	it("skips the separate verify call in the 25k-80k band (self-check rides the summary call — M15)", async () => {
+		// ~120k chars ≈ 30k tokens: above the old 25k bar, below the new 80k one.
 		const bigText = "word ".repeat(24000);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: [{ role: "user", content: bigText, timestamp: Date.now() }],
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 200000,
+			fileOps: baseFileOps(),
+			settings: { enabled: true, reserveTokens: 20000, keepRecentTokens: 20000, selfCorrection: true },
+		};
+
+		await compact(preparation, createModel(false), "test-key");
+
+		// Single call — the inline self-check replaced the second LLM call here.
+		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("never verifies when selfCorrection is disabled, regardless of size", async () => {
+		const bigText = "word ".repeat(85000);
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "entry-keep",
 			messagesToSummarize: [{ role: "user", content: bigText, timestamp: Date.now() }],

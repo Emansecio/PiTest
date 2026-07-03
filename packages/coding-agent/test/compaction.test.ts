@@ -12,9 +12,11 @@ import {
 	calculateContextTokens,
 	cloneToolResultMessagesForPrune,
 	compact,
+	compactionSummaryTokenBudget,
 	computeDynamicReserve,
 	createFileOps,
 	DEFAULT_COMPACTION_SETTINGS,
+	estimateCompactionFrameTokens,
 	estimateContextTokens,
 	estimateToolSurfaceTokens,
 	findCutPoint,
@@ -970,13 +972,21 @@ describe("adaptiveKeepRecentTokens", () => {
 	});
 
 	it("shrinks the keep just enough on windows where keep + summary exceeds the soft target", () => {
-		// 64k window: reserve 16384, keep 20000, hard 47616, soft 27616 → keepMax 19616.
-		expect(adaptiveKeepRecentTokens(64_000, settings)).toBe(19_616);
+		// 64k window: reserve 16384, keep 20000, hard 47616, soft 27616.
+		// M8 budget = max(8000, ceil(0.8×16384)) = 13108 → keepMax 27616-13108 = 14508.
+		// (Pre-M8 the flat 8k budget yielded 19616 — a keep that, with the real
+		// ~13k summary, landed back above the target and re-fired the pipeline.)
+		expect(adaptiveKeepRecentTokens(64_000, settings)).toBe(14_508);
+	});
+
+	it("subtracts the previous structural-frame estimate from the keep when provided (M8)", () => {
+		// Same 64k window with a 2000-token frame estimate → keepMax 12508.
+		expect(adaptiveKeepRecentTokens(64_000, settings, 2_000)).toBe(12_508);
 	});
 
 	it("falls back to the hard threshold and respects the floor on tiny windows", () => {
-		// 32k window: soft ≤ 0 → target = hard 15616 → keepMax 7616, floored at
-		// max(8000, 20000/2) = 10000.
+		// 32k window: soft ≤ 0 → target = hard 15616 → keepMax 15616-13108 = 2508,
+		// floored at max(8000, 20000/2) = 10000.
 		expect(adaptiveKeepRecentTokens(32_000, settings)).toBe(10_000);
 	});
 
@@ -989,6 +999,52 @@ describe("adaptiveKeepRecentTokens", () => {
 	it("returns undefined for invalid windows", () => {
 		expect(adaptiveKeepRecentTokens(0, settings)).toBeUndefined();
 		expect(adaptiveKeepRecentTokens(Number.NaN, settings)).toBeUndefined();
+	});
+});
+
+// ============================================================================
+// compactionSummaryTokenBudget / estimateCompactionFrameTokens — M8
+// ============================================================================
+
+describe("compactionSummaryTokenBudget (M8)", () => {
+	it("derives the budget from the real summarizer ceiling (0.8×reserve)", () => {
+		const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS }; // reserve 16384
+		expect(compactionSummaryTokenBudget(settings)).toBe(Math.ceil(16_384 * 0.8)); // 13108
+	});
+
+	it("floors at the legacy 8000 for tiny configured reserves", () => {
+		const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS, reserveTokens: 4_000 };
+		expect(compactionSummaryTokenBudget(settings)).toBe(8_000);
+	});
+
+	it("adds the structural frame estimate on top and ignores garbage values", () => {
+		const settings: CompactionSettings = { ...DEFAULT_COMPACTION_SETTINGS };
+		const base = compactionSummaryTokenBudget(settings);
+		expect(compactionSummaryTokenBudget(settings, 2_500)).toBe(base + 2_500);
+		expect(compactionSummaryTokenBudget(settings, Number.NaN)).toBe(base);
+		expect(compactionSummaryTokenBudget(settings, -50)).toBe(base);
+	});
+});
+
+describe("estimateCompactionFrameTokens (M8)", () => {
+	it("returns undefined without usable details", () => {
+		expect(estimateCompactionFrameTokens(undefined)).toBeUndefined();
+		expect(estimateCompactionFrameTokens(null)).toBeUndefined();
+		expect(estimateCompactionFrameTokens({})).toBeUndefined();
+		expect(estimateCompactionFrameTokens({ readFiles: [] })).toBeUndefined();
+	});
+
+	it("estimates dense tokens over operation lists and digests", () => {
+		const details = {
+			readFiles: ["src/a.ts", "src/b.ts"],
+			modifiedFiles: ["src/core/compaction/compaction.ts"],
+			searches: ["tokenEstimateFactor"],
+			fileDigests: { "src/a.ts": "fnA fnB classC" },
+		};
+		const tokens = estimateCompactionFrameTokens(details);
+		expect(tokens).toBeGreaterThan(0);
+		// Dense divisor: chars/3.3, so a rough lower bound holds.
+		expect(tokens).toBeGreaterThanOrEqual(Math.floor(("src/a.ts src/b.ts".length + 20) / 3.3));
 	});
 });
 

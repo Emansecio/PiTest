@@ -7,10 +7,11 @@
  * open models (GLM, Qwen, etc.) exhibit in multi-turn agent loops.
  */
 
+import { CHARS_PER_TOKEN_PROSE } from "@pit/ai";
 import type { AgentMessage } from "./types.ts";
 
-/** Char/token ratio aligned with `estimateTokens` in compaction (`ceil(len/4)`). */
-export const THINKING_CHARS_PER_TOKEN = 4;
+/** Char/token ratio for streamed reasoning — the shared prose divisor from @pit/ai token-estimate.ts. */
+export const THINKING_CHARS_PER_TOKEN = CHARS_PER_TOKEN_PROSE;
 
 export interface OverthinkGuardConfig {
 	enabled: boolean;

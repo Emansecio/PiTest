@@ -74,6 +74,50 @@ describe("structured summary frame", () => {
 		expect(normalizeStructuredSummaryOutput(`\`\`\`json\n${json}\n\`\`\``)).toContain("## Next Steps");
 	});
 
+	it("parses the optional corrections field and merges it as a self-check section (M15)", () => {
+		const json = JSON.stringify({
+			goal: ["ship feature"],
+			constraints: [],
+			done: [],
+			inProgress: [],
+			blocked: [],
+			keyDecisions: [],
+			nextSteps: [],
+			criticalContext: [],
+			corrections: ["Omitted error: TypeError in verifySummary", "Omitted path: src/core/compaction/compaction.ts"],
+		});
+		const parsed = parseStructuredSummaryJson(`\`\`\`json\n${json}\n\`\`\``);
+		expect(parsed.ok).toBe(true);
+		if (!parsed.ok) return;
+		const md = formatStructuredSummaryMarkdown(parsed.value);
+		expect(md).toContain("## Corrections (self-check)");
+		expect(md).toContain("- Omitted error: TypeError in verifySummary");
+		expect(md).toContain("- Omitted path: src/core/compaction/compaction.ts");
+	});
+
+	it("emits NO corrections section when the field is absent or empty (legacy output byte-identical)", () => {
+		const base = {
+			goal: ["g"],
+			constraints: [],
+			done: [],
+			inProgress: [],
+			blocked: [],
+			keyDecisions: [],
+			nextSteps: [],
+			criticalContext: [],
+		};
+		const withoutField = parseStructuredSummaryJson(JSON.stringify(base));
+		expect(withoutField.ok).toBe(true);
+		if (!withoutField.ok) return;
+		expect(formatStructuredSummaryMarkdown(withoutField.value)).not.toContain("Corrections");
+		const withEmpty = parseStructuredSummaryJson(JSON.stringify({ ...base, corrections: [] }));
+		expect(withEmpty.ok).toBe(true);
+		if (!withEmpty.ok) return;
+		expect(formatStructuredSummaryMarkdown(withEmpty.value)).toBe(
+			formatStructuredSummaryMarkdown(withoutField.value),
+		);
+	});
+
 	it("normalizeStructuredSummaryOutput records diagnostic on JSON fallback (C2)", () => {
 		recordDiagnosticMock.mockClear();
 		const out = normalizeStructuredSummaryOutput("not json at all");

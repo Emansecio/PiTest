@@ -3,7 +3,7 @@
  */
 
 import type { AgentMessage } from "@pit/agent-core";
-import { type Message, recordDiagnostic } from "@pit/ai";
+import { CHARS_PER_TOKEN_SERIALIZED_SUMMARY, type Message, recordDiagnostic } from "@pit/ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { sliceSafe } from "../../utils/surrogate.ts";
@@ -326,8 +326,14 @@ export function formatFileOperations(arg1: string[] | OperationLists, modifiedFi
 	return `\n\n${sections.join("\n\n")}`;
 }
 
-/** Approximate chars per token for summary output trimming (matches bench scripts). */
-const SUMMARY_CHARS_PER_TOKEN = 3.7;
+/**
+ * Approximate chars per token for summary output trimming (matches bench
+ * scripts). The 3.7 is DELIBERATE — summaries are prose interleaved with
+ * paths/identifiers, denser than pure prose (4) but lighter than code (3.3);
+ * the token-economy bench baselines are calibrated to it. Sourced from the
+ * shared @pit/ai token-estimate module (M7) so all ratios live in one place.
+ */
+const SUMMARY_CHARS_PER_TOKEN = CHARS_PER_TOKEN_SERIALIZED_SUMMARY;
 
 /**
  * Strip prose lines that duplicate structured operation lists (C2). File paths,
@@ -791,6 +797,13 @@ export const STRUCTURED_SUMMARY_SCHEMA = Type.Object(
 		keyDecisions: StringArray,
 		nextSteps: StringArray,
 		criticalContext: StringArray,
+		/**
+		 * M15 inline self-check: material facts the summarizer noticed it omitted
+		 * when re-scanning the window. Optional — older prompts (and models that
+		 * skip the field) parse unchanged; when present the corrections are merged
+		 * deterministically into the rendered markdown.
+		 */
+		corrections: Type.Optional(StringArray),
 	},
 	{ additionalProperties: false },
 );
@@ -836,7 +849,7 @@ function numberedLines(items: readonly string[]): string {
 export function formatStructuredSummaryMarkdown(payload: StructuredSummaryPayload): string {
 	const done = payload.done.map((item) => (item.startsWith("[x]") ? item : `[x] ${item}`));
 	const inProgress = payload.inProgress.map((item) => (item.startsWith("[ ]") ? item : `[ ] ${item}`));
-	return [
+	const sections = [
 		"## Goal",
 		bulletLines(payload.goal, "(none)"),
 		"",
@@ -861,7 +874,15 @@ export function formatStructuredSummaryMarkdown(payload: StructuredSummaryPayloa
 		"",
 		"## Critical Context",
 		bulletLines(payload.criticalContext, "(none)"),
-	].join("\n");
+	];
+	// M15 deterministic merge of the inline self-check: corrections render as
+	// their own section so downstream grounding/trim passes see them like any
+	// other summary prose. Absent/empty corrections keep the legacy output
+	// byte-identical.
+	if (payload.corrections && payload.corrections.length > 0) {
+		sections.push("", "## Corrections (self-check)", bulletLines(payload.corrections, "(none)"));
+	}
+	return sections.join("\n");
 }
 
 /** Parse JSON-primary summarizer output; fall back to raw markdown on failure. */
