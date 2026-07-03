@@ -1,4 +1,5 @@
 import { sliceSafe } from "../../utils/surrogate.ts";
+import { getCurrentSessionContract } from "../session-contract.ts";
 import { summarizeTestRun } from "./test-summary.ts";
 
 const MAX_FAILURE_LINES = 16;
@@ -20,6 +21,17 @@ const FAILURE_PATTERNS: RegExp[] = [
  * signal on an unrecognized toolchain.
  */
 export function summarizeCheckFailure(output: string, _command: string): string {
+	// Band P / P5 (conventions contract): every check failure in the harness flows
+	// through this one summarizer, so it is the single choke-point to distill the
+	// violated *rule* into a session constraint — without touching agent-session.ts
+	// (owned elsewhere). Fail-open and side-effect-only: it never changes the
+	// returned summary, no-ops when no session contract is registered (e.g. unit
+	// tests of this function), and dedupes an identical output internally.
+	try {
+		getCurrentSessionContract()?.ingestCheckFailure(output);
+	} catch {
+		// A contract-extraction fault must never break failure summarization.
+	}
 	const headline = summarizeTestRun(output)?.headline;
 	const seen = new Set<string>();
 	const hits: string[] = [];
