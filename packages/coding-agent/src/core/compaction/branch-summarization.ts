@@ -9,10 +9,11 @@ import type { AgentMessage } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
 import { convertToLlm } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
-import { estimateTokens, runSummarizationWithStatus } from "./compaction.ts";
+import { runSummarizationWithStatus } from "./compaction.ts";
 import {
 	computeOperationLists,
 	createFileOps,
+	estimateCharsAsTokens,
 	extractFileOpsFromMessage,
 	type FileOperations,
 	formatFileOperations,
@@ -20,6 +21,7 @@ import {
 	mergeSummaryDetailsIntoFileOps,
 	type SummaryDetails,
 	serializeConversation,
+	serializedMessageChars,
 } from "./utils.ts";
 
 // ============================================================================
@@ -146,6 +148,26 @@ export function collectEntriesForBranchSummary(
 // context is in the assistant's tool call), selected via { skipToolResults: true }.
 
 /**
+ * Estimate an entry's contribution to the branch-summary token budget over the
+ * SERIALIZED prose form the summary prompt actually consumes (M16).
+ *
+ * generateBranchSummary builds its prompt with {@link serializeConversation},
+ * which caps tool-call args, thinking, and tool-result text. The raw per-message
+ * token estimate charges the full uncapped length, so a single big write/edit
+ * body or long reasoning turn filled the window many times over its real prompt
+ * cost, and the window covered far less history than it could. Measuring the
+ * serialized length keeps the budget consistent with the prompt.
+ *
+ * Returns 0 for messages that don't serialize into the prompt (e.g. display-only
+ * inter-agent relays that {@link convertToLlm} drops).
+ */
+function estimateSerializedBranchTokens(message: AgentMessage): number {
+	const llm = convertToLlm([message]);
+	if (llm.length === 0) return 0;
+	return estimateCharsAsTokens(serializedMessageChars(llm[0]));
+}
+
+/**
  * Prepare entries for summarization with token budget.
  *
  * Walks entries from NEWEST to OLDEST, adding messages until we hit the token budget.
@@ -182,7 +204,10 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		// Extract file ops from assistant messages (tool calls)
 		extractFileOpsFromMessage(message, fileOps);
 
-		const tokens = estimateTokens(message);
+		// M16: budget each entry by its SERIALIZED size (the prompt caps tool-call
+		// args, thinking, and tool-result text) rather than the raw estimate, so the
+		// window covers the history it can actually afford, not the pre-cap bulk.
+		const tokens = estimateSerializedBranchTokens(message);
 
 		// Check budget before adding
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {

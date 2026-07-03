@@ -531,10 +531,12 @@ interface ConversationPart {
 	/** true if this part is a tool result associated with the preceding tool call. */
 	isToolResult?: boolean;
 	userText?: string;
+	/** N9: count of image blocks carried by a user message (rendered as `[image]` placeholders). */
+	imageCount?: number;
 	assistantText?: string;
 	thinkingText?: string;
 	toolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
-	toolResult?: { name: string; text: string; isError: boolean };
+	toolResult?: { name: string; text: string; isError: boolean; imageCount?: number };
 }
 
 function compactArgsForDelta(args: Record<string, unknown>): Record<string, unknown> {
@@ -564,15 +566,23 @@ function collectConversationParts(messages: Message[], includeThinking: boolean)
 
 	for (const msg of messages) {
 		if (msg.role === "user") {
-			const content =
-				typeof msg.content === "string"
-					? msg.content
-					: msg.content
-							.filter((c): c is { type: "text"; text: string } => c.type === "text")
-							.map((c) => c.text)
-							.join("");
-			if (content) {
-				parts.push({ kind: "user", userText: content });
+			let content: string;
+			let imageCount = 0;
+			if (typeof msg.content === "string") {
+				content = msg.content;
+			} else {
+				const textParts: string[] = [];
+				for (const c of msg.content) {
+					if (c.type === "text") textParts.push(c.text);
+					else if (c.type === "image") imageCount++;
+				}
+				content = textParts.join("");
+			}
+			// N9: a user turn that carried an image (e.g. a pasted screenshot) must
+			// leave a placeholder. An image-only message previously produced empty
+			// text and vanished entirely, taking any screenshot-based decision with it.
+			if (content || imageCount > 0) {
+				parts.push({ kind: "user", userText: content, imageCount });
 				chainGen++;
 				lastToolKey = undefined;
 			}
@@ -626,11 +636,17 @@ function collectConversationParts(messages: Message[], includeThinking: boolean)
 				}
 			}
 		} else if (msg.role === "toolResult") {
-			const content = msg.content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("");
-			if (content) {
+			const textParts: string[] = [];
+			let imageCount = 0;
+			for (const c of msg.content) {
+				if (c.type === "text") textParts.push(c.text);
+				else if (c.type === "image") imageCount++;
+			}
+			const content = textParts.join("");
+			// N9: keep a placeholder for image results (screenshots, inspect-image,
+			// chrome-devtools) so the summarizer still records they existed. An
+			// image-only result used to have empty text and be dropped whole.
+			if (content || imageCount > 0) {
 				parts.push({
 					kind: "toolResult",
 					dedupKey: lastToolKey,
@@ -639,6 +655,7 @@ function collectConversationParts(messages: Message[], includeThinking: boolean)
 						name: msg.toolName ?? "tool",
 						text: content,
 						isError: msg.isError === true,
+						imageCount,
 					},
 				});
 			}
@@ -685,8 +702,12 @@ function dedupeConversationParts(parts: ConversationPart[]): ConversationPart[] 
 function renderConversationProse(parts: ConversationPart[]): string {
 	const lines: string[] = [];
 	for (const part of parts) {
-		if (part.kind === "user" && part.userText) {
-			lines.push(`[User]: ${part.userText}`);
+		if (part.kind === "user" && (part.userText || part.imageCount)) {
+			// N9: user text (if any) followed by one `[image]` line per image block.
+			const segs: string[] = [];
+			if (part.userText) segs.push(`[User]: ${part.userText}`);
+			for (let i = 0; i < (part.imageCount ?? 0); i++) segs.push("[image]");
+			lines.push(segs.join("\n"));
 		} else if (part.kind === "thinking" && part.thinkingText) {
 			lines.push(`[Assistant thinking]: ${part.thinkingText}`);
 		} else if (part.kind === "assistant" && part.assistantText) {
@@ -705,7 +726,12 @@ function renderConversationProse(parts: ConversationPart[]): string {
 				.join("; ");
 			lines.push(`[Assistant tool calls]: ${serialized}`);
 		} else if (part.kind === "toolResult" && part.toolResult) {
-			lines.push(`[Tool result]: ${truncateForSummary(part.toolResult.text, TOOL_RESULT_MAX_CHARS)}`);
+			// N9: tool-result text (if any) plus one `[image from <tool>]` line per image.
+			const tr = part.toolResult;
+			const segs: string[] = [];
+			if (tr.text) segs.push(`[Tool result]: ${truncateForSummary(tr.text, TOOL_RESULT_MAX_CHARS)}`);
+			for (let i = 0; i < (tr.imageCount ?? 0); i++) segs.push(`[image from ${tr.name}]`);
+			if (segs.length > 0) lines.push(segs.join("\n"));
 		}
 	}
 	return lines.join("\n\n");
@@ -715,13 +741,17 @@ type DeltaEvent =
 	| { k: "u"; t: string }
 	| { k: "a"; t: string }
 	| { k: "c"; n: string; a: Record<string, unknown> }
-	| { k: "r"; n: string; t: string; e?: 1 };
+	| { k: "r"; n: string; t: string; e?: 1 }
+	// N9: image placeholder. `n` carries the source tool for tool-result images;
+	// user-message images omit it.
+	| { k: "img"; n?: string };
 
 function renderConversationDelta(parts: ConversationPart[]): string {
 	const events: DeltaEvent[] = [];
 	for (const part of parts) {
-		if (part.kind === "user" && part.userText) {
-			events.push({ k: "u", t: part.userText });
+		if (part.kind === "user") {
+			if (part.userText) events.push({ k: "u", t: part.userText });
+			for (let i = 0; i < (part.imageCount ?? 0); i++) events.push({ k: "img" });
 		} else if (part.kind === "assistant" && part.assistantText) {
 			events.push({ k: "a", t: part.assistantText });
 		} else if (part.kind === "toolCall" && part.toolCalls) {
@@ -729,13 +759,17 @@ function renderConversationDelta(parts: ConversationPart[]): string {
 				events.push({ k: "c", n: tc.name, a: compactArgsForDelta(tc.args) });
 			}
 		} else if (part.kind === "toolResult" && part.toolResult) {
-			const event: DeltaEvent = {
-				k: "r",
-				n: part.toolResult.name,
-				t: truncateForSummary(part.toolResult.text, DELTA_TOOL_RESULT_MAX_CHARS),
-			};
-			if (part.toolResult.isError) event.e = 1;
-			events.push(event);
+			const tr = part.toolResult;
+			if (tr.text) {
+				const event: DeltaEvent = {
+					k: "r",
+					n: tr.name,
+					t: truncateForSummary(tr.text, DELTA_TOOL_RESULT_MAX_CHARS),
+				};
+				if (tr.isError) event.e = 1;
+				events.push(event);
+			}
+			for (let i = 0; i < (tr.imageCount ?? 0); i++) events.push({ k: "img", n: tr.name });
 		}
 	}
 	return JSON.stringify(events);
@@ -766,6 +800,19 @@ export function serializeConversation(messages: Message[]): string {
 export function serializeConversationDelta(messages: Message[]): string {
 	const parts = collectConversationParts(messages, false);
 	return renderConversationDelta(dedupeConversationParts(parts));
+}
+
+/**
+ * Chars a single message contributes to a PROSE-serialized summary prompt (M16).
+ * {@link serializeConversation} caps tool-call args (~300 chars each), thinking
+ * (~1500), and tool-result text ({@link TOOL_RESULT_MAX_CHARS}), so for a message
+ * with a large write/edit body or long reasoning turn this is far smaller than its
+ * raw length. Branch summarization budgets entries by this serialized size — the
+ * exact form its prompt consumes — instead of the raw per-message token estimate,
+ * so one budget window covers materially more history.
+ */
+export function serializedMessageChars(message: Message): number {
+	return serializeConversation([message]).length;
 }
 
 function findPrecedingToolCall(parts: Array<{ dedupKey?: string; isToolResult?: boolean }>, resultIdx: number): number {
