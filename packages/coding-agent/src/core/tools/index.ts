@@ -1,25 +1,12 @@
-export { createLspTool, createLspToolDefinition, type LspToolInput, type LspToolOptions } from "../lsp/tool.ts";
-export {
-	type AskToolDetails,
-	type AskToolInput,
-	type AskToolOptions,
-	createAskTool,
-	createAskToolDefinition,
-} from "./ask.ts";
-export {
-	type AstEditToolDetails,
-	type AstEditToolInput,
-	type AstEditToolOptions,
-	createAstEditTool,
-	createAstEditToolDefinition,
-} from "./ast-edit.ts";
-export {
-	type AstGrepToolDetails,
-	type AstGrepToolInput,
-	type AstGrepToolOptions,
-	createAstGrepTool,
-	createAstGrepToolDefinition,
-} from "./ast-grep.ts";
+/**
+ * Public re-export surface for `./core/tools/index.ts`. Only families with a
+ * real consumer (repo-internal or, via `src/index.ts`, external SDK embedders)
+ * get a named export here — every other registry-only tool is reachable
+ * through the generic `createTool`/`createAllTools`/`createCodingTools`
+ * builders below instead of a dedicated `createXTool` export (verified
+ * zero-consumer repo-wide before trimming; see `src/index.ts`, the actual
+ * public surface, which re-exports a further subset of this list).
+ */
 export {
 	type BashOperations,
 	type BashSpawnContext,
@@ -32,21 +19,6 @@ export {
 	createLocalBashOperations,
 } from "./bash.ts";
 export {
-	type CalcToolDetails,
-	type CalcToolInput,
-	type CalcToolOptions,
-	createCalcTool,
-	createCalcToolDefinition,
-} from "./calc.ts";
-export {
-	type CodeModeToolDetails,
-	type CodeModeToolInput,
-	type CodeModeToolOptions,
-	createCodeModeTool,
-	createCodeModeToolDefinition,
-} from "./code-mode.ts";
-export { createDebugTool, createDebugToolDefinition, type DebugToolInput, type DebugToolOptions } from "./debug.ts";
-export {
 	createEditTool,
 	createEditToolDefinition,
 	type EditOperations,
@@ -54,19 +26,6 @@ export {
 	type EditToolInput,
 	type EditToolOptions,
 } from "./edit.ts";
-export {
-	createEditHashlineTool,
-	createEditHashlineToolDefinition,
-	type EditHashlineToolInput,
-	type EditHashlineToolOptions,
-} from "./edit-hashline.ts";
-export {
-	createEvalTool,
-	createEvalToolDefinition,
-	type EvalToolDetails,
-	type EvalToolInput,
-	type EvalToolOptions,
-} from "./eval.ts";
 export { withFileMutationQueue } from "./file-mutation-queue.ts";
 export {
 	createFindTool,
@@ -77,13 +36,6 @@ export {
 	type FindToolOptions,
 } from "./find.ts";
 export {
-	createForgetTool,
-	createForgetToolDefinition,
-	type ForgetToolDetails,
-	type ForgetToolInput,
-	type ForgetToolOptions,
-} from "./forget.ts";
-export {
 	createGrepTool,
 	createGrepToolDefinition,
 	type GrepOperations,
@@ -91,13 +43,6 @@ export {
 	type GrepToolInput,
 	type GrepToolOptions,
 } from "./grep.ts";
-export {
-	createInspectImageTool,
-	createInspectImageToolDefinition,
-	type InspectImageToolDetails,
-	type InspectImageToolInput,
-	type InspectImageToolOptions,
-} from "./inspect-image.ts";
 export {
 	createLsTool,
 	createLsToolDefinition,
@@ -115,75 +60,6 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
-	createRecallTool,
-	createRecallToolDefinition,
-	type RecallToolDetails,
-	type RecallToolInput,
-	type RecallToolOptions,
-} from "./recall.ts";
-export {
-	createRecallHistoryDefinition,
-	createRecallHistoryTool,
-	type RecallHistoryDetails,
-	type RecallHistoryInput,
-} from "./recall-history.ts";
-export {
-	createRecallToolOutputDefinition,
-	createRecallToolOutputTool,
-	type RecallToolOutputDetails,
-	type RecallToolOutputInput,
-} from "./recall-tool-output.ts";
-export {
-	createRecipeTool,
-	createRecipeToolDefinition,
-	type RecipeToolDetails,
-	type RecipeToolInput,
-	type RecipeToolOptions,
-} from "./recipe.ts";
-export {
-	createReflectTool,
-	createReflectToolDefinition,
-	type ReflectToolDetails,
-	type ReflectToolInput,
-	type ReflectToolOptions,
-} from "./reflect.ts";
-export {
-	createRenderMermaidTool,
-	createRenderMermaidToolDefinition,
-	type RenderMermaidToolDetails,
-	type RenderMermaidToolInput,
-	type RenderMermaidToolOptions,
-} from "./render-mermaid.ts";
-export {
-	createResolveTool,
-	createResolveToolDefinition,
-	type ResolveToolDetails,
-	type ResolveToolInput,
-	type ResolveToolOptions,
-} from "./resolve.ts";
-export {
-	createRetainTool,
-	createRetainToolDefinition,
-	type RetainToolDetails,
-	type RetainToolInput,
-	type RetainToolOptions,
-} from "./retain.ts";
-export {
-	createSearchToolBm25Definition,
-	createSearchToolBm25Tool,
-	type SearchToolBm25Details,
-	type SearchToolBm25Input,
-	type SearchToolBm25Options,
-} from "./search-tool-bm25.ts";
-export {
-	createSymbolTool,
-	createSymbolToolDefinition,
-	type SymbolOperations,
-	type SymbolToolDetails,
-	type SymbolToolInput,
-	type SymbolToolOptions,
-} from "./symbol.ts";
-export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
@@ -193,13 +69,6 @@ export {
 	truncateLine,
 	truncateTail,
 } from "./truncate.ts";
-export {
-	createWebSearchTool,
-	createWebSearchToolDefinition,
-	type WebSearchToolDetails,
-	type WebSearchToolInput,
-	type WebSearchToolOptions,
-} from "./web-search.ts";
 export {
 	createWriteTool,
 	createWriteToolDefinition,
@@ -211,12 +80,12 @@ export {
 import type { AgentTool } from "@pit/agent-core";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import { createLspTool, createLspToolDefinition, type LspToolOptions } from "../lsp/tool.ts";
-import { type AskToolOptions, createAskTool, createAskToolDefinition } from "./ask.ts";
-import { type AstEditToolOptions, createAstEditTool, createAstEditToolDefinition } from "./ast-edit.ts";
-import { type AstGrepToolOptions, createAstGrepTool, createAstGrepToolDefinition } from "./ast-grep.ts";
-import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
-import { type CalcToolOptions, createCalcTool, createCalcToolDefinition } from "./calc.ts";
+import { createLspToolDefinition, type LspToolOptions } from "../lsp/tool.ts";
+import { type AskToolOptions, createAskToolDefinition } from "./ask.ts";
+import { type AstEditToolOptions, createAstEditToolDefinition } from "./ast-edit.ts";
+import { type AstGrepToolOptions, createAstGrepToolDefinition } from "./ast-grep.ts";
+import { type BashToolOptions, createBashToolDefinition } from "./bash.ts";
+import { type CalcToolOptions, createCalcToolDefinition } from "./calc.ts";
 import {
 	type ChromeDevtoolsToolOptions,
 	createChromeClickToolDefinition,
@@ -239,61 +108,37 @@ import {
 	createChromeUploadFileToolDefinition,
 	createChromeWaitForToolDefinition,
 } from "./chrome-devtools.ts";
-import { type CodeModeToolOptions, createCodeModeTool, createCodeModeToolDefinition } from "./code-mode.ts";
-import { createDebugTool, createDebugToolDefinition, type DebugToolOptions } from "./debug.ts";
-import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
-import {
-	createEditHashlineTool,
-	createEditHashlineToolDefinition,
-	type EditHashlineToolOptions,
-} from "./edit-hashline.ts";
-import { createEvalTool, createEvalToolDefinition, type EvalToolOptions } from "./eval.ts";
-import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";
-import { createFindSymbolTool, createFindSymbolToolDefinition, type FindSymbolToolOptions } from "./find-symbol.ts";
-import { createForgetTool, createForgetToolDefinition, type ForgetToolOptions } from "./forget.ts";
-import {
-	createGoalCompleteTool,
-	createGoalCompleteToolDefinition,
-	type GoalCompleteToolOptions,
-} from "./goal-complete.ts";
-import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
-import {
-	createInspectImageTool,
-	createInspectImageToolDefinition,
-	type InspectImageToolOptions,
-} from "./inspect-image.ts";
-import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
-import { createPlanTool, createPlanToolDefinition, type PlanToolOptions } from "./plan.ts";
-import { createPreviewTool, createPreviewToolDefinition } from "./preview.ts";
-import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
-import { createRecallTool, createRecallToolDefinition, type RecallToolOptions } from "./recall.ts";
-import { createRecallHistoryDefinition, createRecallHistoryTool } from "./recall-history.ts";
-import { createRecallToolOutputDefinition, createRecallToolOutputTool } from "./recall-tool-output.ts";
-import { createRecipeTool, createRecipeToolDefinition, type RecipeToolOptions } from "./recipe.ts";
-import { createReflectTool, createReflectToolDefinition, type ReflectToolOptions } from "./reflect.ts";
-import {
-	createRenderMermaidTool,
-	createRenderMermaidToolDefinition,
-	type RenderMermaidToolOptions,
-} from "./render-mermaid.ts";
-import { createRepoMapTool, createRepoMapToolDefinition, type RepoMapToolOptions } from "./repo-map.ts";
-import { createResolveTool, createResolveToolDefinition, type ResolveToolOptions } from "./resolve.ts";
-import { createRetainTool, createRetainToolDefinition, type RetainToolOptions } from "./retain.ts";
-import {
-	createSearchSkillsTool,
-	createSearchSkillsToolDefinition,
-	type SearchSkillsToolOptions,
-} from "./search-skills.ts";
-import {
-	createSearchToolBm25Definition,
-	createSearchToolBm25Tool,
-	type SearchToolBm25Options,
-} from "./search-tool-bm25.ts";
-import { createSymbolTool, createSymbolToolDefinition, type SymbolToolOptions } from "./symbol.ts";
-import { createTodoTool, createTodoToolDefinition, type TodoToolOptions } from "./todo.ts";
+import { type CodeModeToolOptions, createCodeModeToolDefinition } from "./code-mode.ts";
+import { createDebugToolDefinition, type DebugToolOptions } from "./debug.ts";
+import { createEditToolDefinition, type EditToolOptions } from "./edit.ts";
+import { createEditHashlineToolDefinition, type EditHashlineToolOptions } from "./edit-hashline.ts";
+import { createEvalToolDefinition, type EvalToolOptions } from "./eval.ts";
+import { createFindToolDefinition, type FindToolOptions } from "./find.ts";
+import { createFindSymbolToolDefinition, type FindSymbolToolOptions } from "./find-symbol.ts";
+import { createForgetToolDefinition, type ForgetToolOptions } from "./forget.ts";
+import { createGoalCompleteToolDefinition, type GoalCompleteToolOptions } from "./goal-complete.ts";
+import { createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
+import { createInspectImageToolDefinition, type InspectImageToolOptions } from "./inspect-image.ts";
+import { createLsToolDefinition, type LsToolOptions } from "./ls.ts";
+import { createPlanToolDefinition, type PlanToolOptions } from "./plan.ts";
+import { createPreviewToolDefinition } from "./preview.ts";
+import { createReadToolDefinition, type ReadToolOptions } from "./read.ts";
+import { createRecallToolDefinition, type RecallToolOptions } from "./recall.ts";
+import { createRecallHistoryDefinition } from "./recall-history.ts";
+import { createRecallToolOutputDefinition } from "./recall-tool-output.ts";
+import { createRecipeToolDefinition, type RecipeToolOptions } from "./recipe.ts";
+import { createReflectToolDefinition, type ReflectToolOptions } from "./reflect.ts";
+import { createRenderMermaidToolDefinition, type RenderMermaidToolOptions } from "./render-mermaid.ts";
+import { createRepoMapToolDefinition, type RepoMapToolOptions } from "./repo-map.ts";
+import { createResolveToolDefinition, type ResolveToolOptions } from "./resolve.ts";
+import { createRetainToolDefinition, type RetainToolOptions } from "./retain.ts";
+import { createSearchSkillsToolDefinition, type SearchSkillsToolOptions } from "./search-skills.ts";
+import { createSearchToolBm25Definition, type SearchToolBm25Options } from "./search-tool-bm25.ts";
+import { createSymbolToolDefinition, type SymbolToolOptions } from "./symbol.ts";
+import { createTodoToolDefinition, type TodoToolOptions } from "./todo.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { createWebSearchTool, createWebSearchToolDefinition, type WebSearchToolOptions } from "./web-search.ts";
-import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
+import { createWebSearchToolDefinition, type WebSearchToolOptions } from "./web-search.ts";
+import { createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
@@ -311,10 +156,12 @@ type CodingGate =
 
 interface ToolRegistryEntry {
 	/**
-	 * Builds the executable tool. Optional: every built-in factory is exactly
-	 * `wrapToolDefinition(definitionFactory(cwd, options))`, so an entry may omit
-	 * this and let `buildTool` derive it from `definitionFactory` (used by the
-	 * chrome_devtools_* tools to drop their pass-through factory wrappers).
+	 * Builds the executable tool. Optional: every built-in factory was exactly
+	 * `wrapToolDefinition(definitionFactory(cwd, options))`, so every entry omits
+	 * this and lets `buildTool` derive it from `definitionFactory` instead of
+	 * repeating a one-line pass-through wrapper per tool. Kept as an escape
+	 * hatch for a future tool whose `AgentTool` factory needs to do more than
+	 * wrap the definition.
 	 */
 	factory?: (cwd: string, options?: any) => Tool;
 	/** Builds the lazy tool definition. */
@@ -350,140 +197,125 @@ interface ToolRegistryEntry {
  */
 const TOOL_REGISTRY = {
 	read: {
-		factory: createReadTool,
 		definitionFactory: createReadToolDefinition,
 		optionsKey: "read",
 		readOnly: true,
 		coding: "always",
 	},
 	bash: {
-		factory: createBashTool,
 		definitionFactory: createBashToolDefinition,
 		optionsKey: "bash",
 		readOnly: false,
 		coding: "always",
 	},
 	edit: {
-		factory: createEditTool,
 		definitionFactory: createEditToolDefinition,
 		optionsKey: "edit",
 		readOnly: false,
 		coding: "always",
 	},
 	edit_v2: {
-		factory: createEditHashlineTool,
 		definitionFactory: createEditHashlineToolDefinition,
 		optionsKey: "edit_v2",
 		readOnly: false,
 		coding: "always",
 	},
 	write: {
-		factory: createWriteTool,
 		definitionFactory: createWriteToolDefinition,
 		optionsKey: "write",
 		readOnly: false,
 		coding: "always",
 	},
 	grep: {
-		factory: createGrepTool,
 		definitionFactory: createGrepToolDefinition,
 		optionsKey: "grep",
 		readOnly: true,
-		coding: false,
+		// Aligned with the TUI's core surface (_defaultActiveToolNames), which has
+		// always included grep unconditionally — the SDK's createCodingTools was the
+		// one place a coding agent shipped without it.
+		coding: "always",
 	},
 	find: {
-		factory: createFindTool,
 		definitionFactory: createFindToolDefinition,
 		optionsKey: "find",
 		readOnly: true,
-		coding: false,
+		// Aligned with the TUI's core surface (_defaultActiveToolNames); see `grep`.
+		coding: "always",
 	},
 	ls: {
-		factory: createLsTool,
 		definitionFactory: createLsToolDefinition,
 		optionsKey: "ls",
 		readOnly: true,
-		coding: false,
+		// Aligned with the TUI's core surface (_defaultActiveToolNames); see `grep`.
+		coding: "always",
 	},
 	symbol: {
-		factory: createSymbolTool,
 		definitionFactory: createSymbolToolDefinition,
 		optionsKey: "symbol",
 		readOnly: true,
 		coding: "always",
 	},
 	find_symbol: {
-		factory: createFindSymbolTool,
 		definitionFactory: createFindSymbolToolDefinition,
 		optionsKey: "find_symbol",
 		readOnly: true,
 		coding: "always",
 	},
 	repo_map: {
-		factory: createRepoMapTool,
 		definitionFactory: createRepoMapToolDefinition,
 		optionsKey: "repo_map",
 		readOnly: true,
 		coding: false,
 	},
 	search_skills: {
-		factory: createSearchSkillsTool,
 		definitionFactory: createSearchSkillsToolDefinition,
 		optionsKey: "search_skills",
 		readOnly: true,
 		coding: "always",
 	},
 	ask: {
-		factory: createAskTool,
 		definitionFactory: createAskToolDefinition,
 		optionsKey: "ask",
 		readOnly: false,
 		coding: "always",
 	},
 	resolve: {
-		factory: createResolveTool,
 		definitionFactory: createResolveToolDefinition,
 		optionsKey: "resolve",
 		readOnly: false,
 		coding: "always",
 	},
 	search_tool_bm25: {
-		factory: createSearchToolBm25Tool,
 		definitionFactory: createSearchToolBm25Definition,
 		optionsKey: "searchToolBm25",
 		readOnly: false,
 		coding: "always",
 	},
 	ast_grep: {
-		factory: createAstGrepTool,
 		definitionFactory: createAstGrepToolDefinition,
 		optionsKey: "ast_grep",
 		readOnly: false,
 		coding: "always",
 	},
 	ast_edit: {
-		factory: createAstEditTool,
 		definitionFactory: createAstEditToolDefinition,
 		optionsKey: "ast_edit",
 		readOnly: false,
 		coding: "always",
 	},
 	web_search: {
-		factory: createWebSearchTool,
 		definitionFactory: createWebSearchToolDefinition,
 		optionsKey: "web_search",
 		readOnly: false,
 		coding: "webSearch",
 	},
 	eval: {
-		factory: createEvalTool,
 		definitionFactory: createEvalToolDefinition,
 		optionsKey: "eval",
 		readOnly: false,
 		coding: "eval",
 	},
 	code: {
-		factory: createCodeModeTool,
 		definitionFactory: createCodeModeToolDefinition,
 		optionsKey: "code",
 		readOnly: false,
@@ -494,63 +326,56 @@ const TOOL_REGISTRY = {
 		coding: "code",
 	},
 	retain: {
-		factory: createRetainTool,
 		definitionFactory: createRetainToolDefinition,
 		optionsKey: "retain",
 		readOnly: false,
 		coding: "hindsight",
 	},
 	recall: {
-		factory: createRecallTool,
 		definitionFactory: createRecallToolDefinition,
 		optionsKey: "recall",
-		readOnly: false,
+		// Pure read (bank search, no mutation) — belongs in the read-only surface.
+		readOnly: true,
 		coding: "hindsight",
 	},
 	reflect: {
-		factory: createReflectTool,
 		definitionFactory: createReflectToolDefinition,
 		optionsKey: "reflect",
-		readOnly: false,
+		// Pure read (bank digest, no mutation) — belongs in the read-only surface.
+		readOnly: true,
 		coding: "hindsight",
 	},
 	forget: {
-		factory: createForgetTool,
 		definitionFactory: createForgetToolDefinition,
 		optionsKey: "forget",
 		readOnly: false,
 		coding: "hindsight",
 	},
 	calc: {
-		factory: createCalcTool,
 		definitionFactory: createCalcToolDefinition,
 		optionsKey: "calc",
 		readOnly: false,
 		coding: "native",
 	},
 	recipe: {
-		factory: createRecipeTool,
 		definitionFactory: createRecipeToolDefinition,
 		optionsKey: "recipe",
 		readOnly: false,
 		coding: "native",
 	},
 	inspect_image: {
-		factory: createInspectImageTool,
 		definitionFactory: createInspectImageToolDefinition,
 		optionsKey: "inspect_image",
 		readOnly: false,
 		coding: "native",
 	},
 	render_mermaid: {
-		factory: createRenderMermaidTool,
 		definitionFactory: createRenderMermaidToolDefinition,
 		optionsKey: "render_mermaid",
 		readOnly: false,
 		coding: "native",
 	},
 	goal_complete: {
-		factory: createGoalCompleteTool,
 		definitionFactory: createGoalCompleteToolDefinition,
 		optionsKey: "goal_complete",
 		readOnly: false,
@@ -558,21 +383,18 @@ const TOOL_REGISTRY = {
 		coding: false,
 	},
 	todo: {
-		factory: createTodoTool,
 		definitionFactory: createTodoToolDefinition,
 		optionsKey: "todo",
 		readOnly: false,
 		coding: "always",
 	},
 	plan: {
-		factory: createPlanTool,
 		definitionFactory: createPlanToolDefinition,
 		optionsKey: "plan",
 		readOnly: false,
 		coding: "always",
 	},
 	lsp: {
-		factory: createLspTool,
 		definitionFactory: createLspToolDefinition,
 		optionsKey: "lsp",
 		// Has write-tier actions (rename, code_actions apply, rename_file).
@@ -580,7 +402,6 @@ const TOOL_REGISTRY = {
 		coding: "lsp",
 	},
 	debug: {
-		factory: createDebugTool,
 		definitionFactory: createDebugToolDefinition,
 		optionsKey: "debug",
 		// Exec-tier actions (launch/attach/continue/step/breakpoints).
@@ -702,21 +523,20 @@ const TOOL_REGISTRY = {
 		coding: "chromeDevtools",
 	},
 	preview: {
-		factory: createPreviewTool,
 		definitionFactory: createPreviewToolDefinition,
 		optionsKey: "chromeDevtools",
-		readOnly: true,
+		// Starts a local HTTP server + navigates the user's Chrome — a real side
+		// effect, not a read. Must NOT leak into createReadOnlyTools.
+		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	recall_tool_output: {
-		factory: createRecallToolOutputTool,
 		definitionFactory: createRecallToolOutputDefinition,
 		optionsKey: "recallToolOutput",
 		readOnly: true,
 		coding: false,
 	},
 	recall_history: {
-		factory: createRecallHistoryTool,
 		definitionFactory: createRecallHistoryDefinition,
 		optionsKey: "recallHistory",
 		readOnly: true,
@@ -730,11 +550,12 @@ export const allToolNames: Set<ToolName> = new Set(Object.keys(TOOL_REGISTRY) as
 
 /**
  * Uniformly-typed view of the registry. `satisfies` above preserves each
- * entry's precise factory types (great for inference), but that makes
- * `registry[name].factory` a union of 24 distinct signatures — calling it
- * would demand the intersection of every options type. Reading through this
- * widened `Record` view gives every entry the uniform `(cwd, options?) => Tool`
- * signature the generic builders below rely on.
+ * entry's precise `definitionFactory` type (great for inference), but that
+ * makes `registry[name].definitionFactory` a union of many distinct
+ * signatures — calling it would demand the intersection of every options
+ * type. Reading through this widened `Record` view gives every entry the
+ * uniform `(cwd, options?) => ToolDef` signature the generic builders below
+ * rely on.
  */
 const registry: Record<ToolName, ToolRegistryEntry> = TOOL_REGISTRY;
 
@@ -762,6 +583,16 @@ function toolNamesInOrder(): ToolName[] {
  */
 export const chromeFeatureToolNames: ToolName[] = toolNamesInOrder().filter(
 	(name) => registry[name].coding === "chromeDevtools",
+);
+
+/**
+ * The hindsight memory family (retain/recall/reflect/forget), derived from the
+ * registry so `hindsight-scope.ts`'s per-subagent scope rebinding stays in
+ * sync with the registry's `hindsight` gate instead of hardcoding the name
+ * list a second time.
+ */
+export const hindsightToolNames: ToolName[] = toolNamesInOrder().filter(
+	(name) => registry[name].coding === "hindsight",
 );
 
 /**
@@ -797,16 +628,26 @@ function codingGateOpen(gate: CodingGate, options?: ToolsOptions): boolean {
 			// agent-session._defaultActiveToolNames (code is gated on eval being on).
 			if (isTruthyEnvFlag(process.env.PIT_NO_CODE_MODE)) return false;
 			if (options?.eval?.enabled === false) return false;
+			// SDK-only tightening: without a harness-routed dispatcher the tool is a
+			// functional no-op (see code-mode.ts's "not wired" execute path) — the TUI
+			// never hits this gate at all (its own surface always injects one in
+			// _buildRuntime), so this only keeps a dispatcher-less SDK build from
+			// advertising a tool that can never actually run.
+			if (!options?.code?.dispatcher) return false;
 			return options?.code?.enabled !== false;
 	}
 }
 
 /**
- * Resolves the per-tool options object for a coding-surface build. `web_search`
- * merges its default provider from the gate config, matching legacy behavior;
- * every other tool just reads its `optionsKey` slot.
+ * Resolves the per-tool options object for ANY tool build path. `web_search`
+ * merges its default provider from the gate config (`options.webSearch`) on
+ * top of its own `options.web_search` slot; every other tool just reads its
+ * `optionsKey` slot. Shared by every builder — `createTool`,
+ * `createToolDefinition`, `createAllTools`/`createAllToolDefinitions` (which
+ * delegate to the two above) and `createCodingTools` — so the merge isn't
+ * SDK-coding-surface-only.
  */
-function codingToolOptions(name: ToolName, options?: ToolsOptions): unknown {
+function resolveToolOptions(name: ToolName, options?: ToolsOptions): unknown {
 	if (name === "web_search") {
 		return {
 			...(options?.web_search ?? {}),
@@ -860,13 +701,13 @@ export interface ToolsOptions {
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
 	const entry = registry[toolName];
 	if (!entry) throw new Error(`Unknown tool name: ${toolName}`);
-	return entry.definitionFactory(cwd, options?.[entry.optionsKey]);
+	return entry.definitionFactory(cwd, resolveToolOptions(toolName, options));
 }
 
 export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptions): Tool {
 	const entry = registry[toolName];
 	if (!entry) throw new Error(`Unknown tool name: ${toolName}`);
-	return buildTool(entry, cwd, options?.[entry.optionsKey]);
+	return buildTool(entry, cwd, resolveToolOptions(toolName, options));
 }
 
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
@@ -880,15 +721,24 @@ export function createCodingTools(cwd: string, options?: ToolsOptions): Tool[] {
 	for (const name of toolNamesInOrder()) {
 		const entry = registry[name];
 		if (entry.coding === false || !codingGateOpen(entry.coding, options)) continue;
-		tools.push(buildTool(entry, cwd, codingToolOptions(name, options)));
+		tools.push(buildTool(entry, cwd, resolveToolOptions(name, options)));
 	}
 	return tools;
 }
 
 export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[] {
-	return toolNamesInOrder()
-		.filter((name) => registry[name].readOnly)
-		.map((name) => createTool(name, cwd, options));
+	const tools: Tool[] = [];
+	for (const name of toolNamesInOrder()) {
+		const entry = registry[name];
+		// Mirror createCodingTools: a read-only tool still lives behind its coding
+		// gate (e.g. chrome_devtools_* need chromeDevtools.enabled) so a closed
+		// feature gate can't leak its tools into a read-only surface just because
+		// they happen to be non-mutating.
+		if (!entry.readOnly) continue;
+		if (entry.coding !== false && !codingGateOpen(entry.coding, options)) continue;
+		tools.push(buildTool(entry, cwd, resolveToolOptions(name, options)));
+	}
+	return tools;
 }
 
 export function createAllTools(cwd: string, options?: ToolsOptions): Record<ToolName, Tool> {

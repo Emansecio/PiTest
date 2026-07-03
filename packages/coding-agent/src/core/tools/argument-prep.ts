@@ -263,20 +263,25 @@ export function extractPathArg(input: Record<string, unknown>): string | undefin
 
 /**
  * Resolve a tool path argument against `cwd`, treating POSIX-absolute (`/…`) and
- * Windows drive-prefixed (`C:…`) paths as already absolute and everything else as
- * cwd-relative.
+ * Windows drive-absolute (`C:\…`/`C:/…`) paths as already absolute and everything
+ * else — including a bare Windows drive-relative prefix (`C:foo`, no separator
+ * after the colon, which Windows resolves against that drive's OWN current
+ * directory) — as cwd-relative.
  *
  * Runs `expandPath` first so the guards see the SAME normalization the tools do
  * (`~`/`@` expansion, unicode spaces, and a trailing `:line[:col]` suffix the
  * model copied from grep output) — otherwise a guard would resolve `~/x` or
  * `x.ts:42` to a different file than the tool and mis-fire. It intentionally
  * keeps its OWN absolute-path check (regex, not node's `isAbsolute`) rather than
- * routing through `resolveToCwd`, so `C:foo` stays treated as absolute and
- * `scheme://` URLs aren't special-cased here.
+ * routing through `resolveToCwd`, so `scheme://` URLs aren't special-cased here
+ * — but the regex itself is written to agree with `isAbsolute` on drive-relative
+ * paths: `C:foo` must resolve against `cwd` exactly like `resolveToCwd` (the
+ * tools' own resolver, which uses node's `isAbsolute`) does, or the guard tracks
+ * a different file than the tool actually touched.
  */
 export function resolveToolPath(filePath: string, cwd: string): string {
 	const expanded = expandPath(filePath);
-	if (expanded.startsWith("/") || /^[a-zA-Z]:/.test(expanded)) return expanded;
+	if (expanded.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(expanded)) return expanded;
 	return nodeResolve(cwd, expanded);
 }
 

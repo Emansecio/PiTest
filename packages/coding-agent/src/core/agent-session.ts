@@ -1184,10 +1184,19 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// gate also governs the auto-launched manager, so a discovered-while-off
 		// chrome tool would only fail) and the meta/infra tools the model must
 		// never pull in via discovery.
+		//
+		// `edit_v2` is deliberately NOT excluded here (unlike `resolve`,
+		// `goal_complete`): the edit/write/ast_edit tool descriptions actively tell
+		// the model "prefer edit_v2 for large files", but it is off the default
+		// active surface, so leaving it out of the discovery seed made it
+		// unreachable — not even the exact-name recovery hint in
+		// `buildHiddenToolHint` could find it. `resolve` doesn't need the same fix:
+		// it activates dynamically the moment a preview is staged (see
+		// `_reconcilePreviewActivation`), so it never needs discovery to become
+		// reachable.
 		const codingNames = new Set([
 			...this._defaultActiveToolNames(),
 			...chromeFeatureToolNames,
-			"edit_v2",
 			"resolve",
 			"goal_complete",
 			"recall_tool_output",
@@ -2025,6 +2034,33 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// (search_tool_bm25 with activate_top). Reconcile so it is callable next
 		// turn. Cheap no-op when nothing was activated.
 		this._reconcileDiscoveryActivations();
+		// A tool may have staged (edit/write/edit_v2/ast_edit with preview:true) or
+		// drained (resolve itself) the preview queue this turn. Mirror the
+		// goal_complete dynamic-activation pattern: `resolve` is off the default
+		// TUI surface, but must be reachable the instant there is something to
+		// commit — and dropped again once the queue is empty, so it doesn't
+		// linger as dead surface for the rest of the session.
+		this._reconcilePreviewActivation();
+	}
+
+	/**
+	 * Keep `resolve`'s presence on the active surface in sync with whether the
+	 * preview queue has staged items. Cheap no-op when the queue is absent or its
+	 * staged/active state already matches (the common case on every turn).
+	 */
+	private _reconcilePreviewActivation(): void {
+		const queue = this._previewQueue;
+		if (!queue) return;
+		const hasStaged = queue.count() > 0;
+		const isActive = this.getActiveToolNames().includes("resolve");
+		if (hasStaged === isActive) return;
+		const names = new Set(this.getActiveToolNames());
+		if (hasStaged) {
+			names.add("resolve");
+		} else {
+			names.delete("resolve");
+		}
+		this.setActiveToolsByName([...names]);
 	}
 
 	/**
@@ -3003,8 +3039,15 @@ export class AgentSession implements CompactionHost, FusionHost {
 			groundedContext: this._composeGroundedContext() || undefined,
 			// Stable per-session hidden-tool count (snapshotted after seeding) so the
 			// discovery nudge stays in the cacheable prefix without flipping as the
-			// live index mutates. Falls back to the global index only when 0.
-			hiddenToolCount: this._hiddenToolCountSnapshot > 0 ? this._hiddenToolCountSnapshot : undefined,
+			// live index mutates. Always passed explicitly (even when 0) rather than
+			// `undefined` — `buildSystemPrompt`'s `hiddenToolCount ?? ...` fallback
+			// reads the process-wide "current" discovery index (tool-discovery.ts),
+			// which is safe for a single in-process session but would leak another
+			// concurrently-running AgentSession's count into this one's prefix if we
+			// ever deferred to it here. `??` treats an explicit 0 the same as
+			// "no hidden tools", so this is behavior-neutral for the single-session
+			// case and only removes the cross-session ambiguity.
+			hiddenToolCount: this._hiddenToolCountSnapshot,
 		};
 		const prompt = buildSystemPrompt(this._baseSystemPromptOptions);
 		this._trackPrefixStability(prompt, reason);

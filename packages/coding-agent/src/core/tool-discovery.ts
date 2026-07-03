@@ -208,8 +208,23 @@ export function createToolDiscoveryIndex(): ToolDiscoveryIndex {
 			return true;
 		},
 		activate(name) {
+			// Idempotent: the doc is pulled out of `docs` on first activation, but
+			// callers legitimately re-activate the SAME name a second time and still
+			// expect the definition back — notably search_tool_bm25 activates a
+			// deferred tool, then agent-session._reconcileDiscoveryActivations calls
+			// activate() again to fetch the definition it registers as a custom tool.
+			// Serve those from the durable `activated` record instead of undefined.
+			const already = activated.get(name);
+			if (already) return already;
 			const doc = docs.get(name);
 			if (!doc) return undefined;
+			// Move the doc OUT of the hidden index — an activated tool must stop
+			// counting toward listHidden() (over-counting broke the count>0 nudge
+			// stability the pre-marker system-prompt snapshot relies on) and stop
+			// being a search() candidate (re-suggesting a tool that is already
+			// active). `activated` is the durable record of what got pulled in.
+			removeDocStats(doc);
+			docs.delete(name);
 			activated.set(name, doc.entry.definition);
 			return doc.entry.definition;
 		},
