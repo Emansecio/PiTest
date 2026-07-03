@@ -111,24 +111,39 @@ describe("chrome_devtools_read_console level filtering (6.3)", () => {
 	});
 });
 
-// --- 6.2 limit schema clamped to the real effective cap --------------------
+// --- 6.2/M20 limit schema clamped to the real effective cap -----------------
 
-describe("chrome_devtools text limit is clamped to the real cap (6.2)", () => {
-	it("advertises the 64KB tool-output ceiling, not a fictional 1M", () => {
+// get_text/get_network_body carry a DEDICATED 256KB head+tail wrapper cap
+// (same opt-in recall_tool_output uses), so the advertised schema maximum is
+// honest: it matches the byte ceiling the wrapper actually enforces instead of
+// promising 1M chars and head-cutting at the generic 64KB net.
+const GET_TEXT_CAP = 256 * 1024;
+
+describe("chrome_devtools text limit is clamped to the real cap (6.2/M20)", () => {
+	it("advertises the dedicated 256KB ceiling, not a fictional 1M", () => {
 		for (const def of [createChromeGetTextDefinition(), createChromeGetNetworkBodyDefinition()]) {
 			const limit = (def.parameters as any).properties.limit;
 			expect(limit.minimum).toBe(1);
-			expect(limit.maximum).toBe(TOOL_OUTPUT_HARD_CAP_BYTES);
+			expect(limit.maximum).toBe(GET_TEXT_CAP);
 			expect(limit.maximum).toBeLessThan(1_000_000);
+			// The schema promise must sit ABOVE the generic net it escapes…
+			expect(limit.maximum).toBeGreaterThan(TOOL_OUTPUT_HARD_CAP_BYTES);
+		}
+	});
+
+	it("backs the advertised limit with a matching head+tail wrapper cap", () => {
+		for (const def of [createChromeGetTextDefinition(), createChromeGetNetworkBodyDefinition()]) {
+			// …because the definition opts into the wrapper's dedicated ceiling.
+			expect((def as any).outputCap).toEqual({ maxBytes: GET_TEXT_CAP, mode: "headTail" });
 		}
 	});
 
 	it("clamps an over-cap limit at runtime so the output stays bounded", async () => {
-		const huge = "x".repeat(200_000);
+		const huge = "x".repeat(400_000);
 		setCurrentChromeDevtoolsManager(mockManager({ getPageText: vi.fn().mockResolvedValue(huge) }));
 		const res = await runExec(createChromeGetTextDefinition(), { limit: 1_000_000 });
 		const out = text(res);
-		expect(out.length).toBeLessThanOrEqual(TOOL_OUTPUT_HARD_CAP_BYTES + 200);
+		expect(out.length).toBeLessThanOrEqual(GET_TEXT_CAP + 200);
 		expect(out).toMatch(/truncated/);
 	});
 });

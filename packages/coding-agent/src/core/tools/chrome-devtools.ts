@@ -15,7 +15,7 @@ import type { ElementToSourceResult } from "../chrome/element-to-source.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.ts";
 import { getTextOutput } from "./render-utils.ts";
-import { TOOL_OUTPUT_HARD_CAP_BYTES } from "./truncate.ts";
+import { withOutputCap } from "./tool-definition-wrapper.ts";
 
 export interface ChromeDevtoolsToolOptions {}
 
@@ -91,11 +91,18 @@ function buildChromeTool<S extends TSchema>(spec: ChromeToolSpec<S>): ToolDefini
 // --- Schemas ---------------------------------------------------------------
 
 const GET_TEXT_DEFAULT_LIMIT = 20_000;
-// The generic tool-output wrapper hard-caps every text block at 64KB
-// (TOOL_OUTPUT_HARD_CAP_BYTES). A char limit above that is unreachable — the
-// wrapper would just re-truncate the output and stack a second, divergent note.
-// So the effective ceiling IS that cap; advertising 1M was a dead end.
-const GET_TEXT_MAX_LIMIT = TOOL_OUTPUT_HARD_CAP_BYTES;
+// Dedicated output ceiling for the two big text readers (get_text and
+// get_network_body), mirroring recall_tool_output's RECALL_OUTPUT_CAP_BYTES:
+// page text and API bodies are exactly the outputs whose useful signal often
+// exceeds the generic 64KB head-only net. Both definitions opt in via
+// withOutputCap (head+tail), so the wrapper bounds their BYTES at 256KB while
+// keeping head AND tail instead of head-cutting at 64KB with a second,
+// contradictory truncation note.
+const GET_TEXT_OUTPUT_CAP_BYTES = 256 * 1024;
+// Advertised `limit` ceiling (chars), kept equal to the byte cap so the schema
+// promise stays honest for ASCII-dominated text; multi-byte overflow is caught
+// by the SAME dedicated 256KB head+tail cap, never by a divergent second cut.
+const GET_TEXT_MAX_LIMIT = GET_TEXT_OUTPUT_CAP_BYTES;
 
 const emptySchema = Type.Object({}, { additionalProperties: false });
 const selectSchema = Type.Object(
@@ -189,7 +196,7 @@ const getTextSchema = Type.Object(
 	{
 		limit: Type.Optional(
 			Type.Number({
-				description: "Max characters to return (default 20000; capped at 64KB — the tool-output ceiling).",
+				description: "Max characters to return (default 20000; capped at 256KB — this tool's output ceiling).",
 				minimum: 1,
 				maximum: GET_TEXT_MAX_LIMIT,
 			}),
@@ -239,7 +246,8 @@ const networkBodySchema = Type.Object(
 		requestId: Type.String({ description: "Request id from chrome_devtools_read_network." }),
 		limit: Type.Optional(
 			Type.Number({
-				description: "Max characters of body to return (default 20000; capped at 64KB — the tool-output ceiling).",
+				description:
+					"Max characters of body to return (default 20000; capped at 256KB — this tool's output ceiling).",
 				minimum: 1,
 				maximum: GET_TEXT_MAX_LIMIT,
 			}),
@@ -456,22 +464,28 @@ export function createChromePressKeyDefinition(): ToolDefinition<typeof pressKey
 }
 
 export function createChromeGetTextDefinition(): ToolDefinition<typeof getTextSchema, ChromeToolDetails> {
-	return buildChromeTool({
-		name: "chrome_devtools_get_text",
-		activity: "navigation",
-		description: "Read the visible text of the selected page (cheaper than a screenshot for content checks).",
-		snippet: "Read the page text",
-		guidelines: ["Prefer this over screenshot when you only need the text content."],
-		schema: getTextSchema,
-		run: async (mgr, input, signal) => {
-			const text = await mgr.getPageText(signal);
-			const limit = Math.max(1, Math.min(GET_TEXT_MAX_LIMIT, input.limit ?? GET_TEXT_DEFAULT_LIMIT));
-			if (text.length <= limit) return textResult(text);
-			return textResult(
-				`${sliceSafe(text, 0, limit)}\n… [truncated ${text.length - limit} of ${text.length} chars]`,
-			);
-		},
-	});
+	// Dedicated 256KB head+tail output cap (same opt-in mechanism as
+	// recall_tool_output) so the advertised GET_TEXT_MAX_LIMIT is backed by the
+	// wrapper instead of being silently re-cut by the generic 64KB head-only net.
+	return withOutputCap(
+		buildChromeTool({
+			name: "chrome_devtools_get_text",
+			activity: "navigation",
+			description: "Read the visible text of the selected page (cheaper than a screenshot for content checks).",
+			snippet: "Read the page text",
+			guidelines: ["Prefer this over screenshot when you only need the text content."],
+			schema: getTextSchema,
+			run: async (mgr, input, signal) => {
+				const text = await mgr.getPageText(signal);
+				const limit = Math.max(1, Math.min(GET_TEXT_MAX_LIMIT, input.limit ?? GET_TEXT_DEFAULT_LIMIT));
+				if (text.length <= limit) return textResult(text);
+				return textResult(
+					`${sliceSafe(text, 0, limit)}\n… [truncated ${text.length - limit} of ${text.length} chars]`,
+				);
+			},
+		}),
+		{ maxBytes: GET_TEXT_OUTPUT_CAP_BYTES, mode: "headTail" },
+	);
 }
 
 export function createChromeWaitForDefinition(): ToolDefinition<typeof waitForSchema, ChromeToolDetails> {
@@ -561,39 +575,44 @@ export function createChromeSnapshotDefinition(): ToolDefinition<typeof snapshot
 }
 
 export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof networkBodySchema, ChromeToolDetails> {
-	return buildChromeTool({
-		name: "chrome_devtools_get_network_body",
-		activity: "navigation",
-		description:
-			"Fetch the response body of a request listed by chrome_devtools_read_network. Text/JSON/XML bodies are captured when the request finishes, so they stay readable for the page's lifetime even after Chrome would have evicted them.",
-		snippet: "Read a network response body",
-		guidelines: [
-			"Get the requestId from chrome_devtools_read_network first.",
-			"Binary, oversized, or script/style bodies are not cached and fall back to a live fetch — which can fail if Chrome already evicted them.",
-		],
-		schema: networkBodySchema,
-		run: async (mgr, input, signal) => {
-			const r = await mgr.getResponseBody(input.requestId, signal);
-			if (r.base64Encoded) {
-				return textResult(`(binary body, ${r.body.length} base64 chars — not shown)`);
-			}
-			const limit = Math.max(1, Math.min(GET_TEXT_MAX_LIMIT, input.limit ?? GET_TEXT_DEFAULT_LIMIT));
-			if (r.body.length <= limit) return textResult(r.body);
-			// Network bodies are JSON API responses far more often than not; prefer a
-			// structural crush (schema + head/tail samples) over a blind char-cut.
-			const crushed = maybeCrushJsonOutput({
-				text: r.body,
-				shouldAttempt: isJsonCrushEnabled(),
-				// A larger limit is a dead end (output is capped at 64KB regardless) and
-				// there is no offset param — point at extracting the one field you need.
-				recoveryHint: "Body exceeds the 64KB cap; read a specific field via chrome_devtools_evaluate.",
-			});
-			if (crushed !== undefined) return textResult(crushed);
-			return textResult(
-				`${sliceSafe(r.body, 0, limit)}\n… [truncated ${r.body.length - limit} of ${r.body.length} chars]`,
-			);
-		},
-	});
+	// Shares get_text's dedicated 256KB head+tail cap: it advertises the same
+	// GET_TEXT_MAX_LIMIT, so it must be backed by the same wrapper ceiling.
+	return withOutputCap(
+		buildChromeTool({
+			name: "chrome_devtools_get_network_body",
+			activity: "navigation",
+			description:
+				"Fetch the response body of a request listed by chrome_devtools_read_network. Text/JSON/XML bodies are captured when the request finishes, so they stay readable for the page's lifetime even after Chrome would have evicted them.",
+			snippet: "Read a network response body",
+			guidelines: [
+				"Get the requestId from chrome_devtools_read_network first.",
+				"Binary, oversized, or script/style bodies are not cached and fall back to a live fetch — which can fail if Chrome already evicted them.",
+			],
+			schema: networkBodySchema,
+			run: async (mgr, input, signal) => {
+				const r = await mgr.getResponseBody(input.requestId, signal);
+				if (r.base64Encoded) {
+					return textResult(`(binary body, ${r.body.length} base64 chars — not shown)`);
+				}
+				const limit = Math.max(1, Math.min(GET_TEXT_MAX_LIMIT, input.limit ?? GET_TEXT_DEFAULT_LIMIT));
+				if (r.body.length <= limit) return textResult(r.body);
+				// Network bodies are JSON API responses far more often than not; prefer a
+				// structural crush (schema + head/tail samples) over a blind char-cut.
+				const crushed = maybeCrushJsonOutput({
+					text: r.body,
+					shouldAttempt: isJsonCrushEnabled(),
+					// A larger limit is a dead end (output is capped at 256KB regardless) and
+					// there is no offset param — point at extracting the one field you need.
+					recoveryHint: "Body exceeds the 256KB cap; read a specific field via chrome_devtools_evaluate.",
+				});
+				if (crushed !== undefined) return textResult(crushed);
+				return textResult(
+					`${sliceSafe(r.body, 0, limit)}\n… [truncated ${r.body.length - limit} of ${r.body.length} chars]`,
+				);
+			},
+		}),
+		{ maxBytes: GET_TEXT_OUTPUT_CAP_BYTES, mode: "headTail" },
+	);
 }
 
 const elementToSourceSchema = Type.Object(

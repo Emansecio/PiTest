@@ -11,20 +11,85 @@
 import { sliceSafe } from "../../utils/surrogate.js";
 
 export const DEFAULT_MAX_LINES = 2000;
-export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
+
+// ---------------------------------------------------------------------------
+// Context-window-proportional byte caps.
+//
+// The three shared BYTE budgets below scale with the boot-time model's context
+// window: at or under a 200k-token window they keep their historical floors
+// (byte-identical to the old constants), then grow LINEARLY up to 2× the floor
+// at a 1M-token window (clamped there). Rationale: on a 1M window the 50KB read
+// cap truncates output the window could comfortably hold, while on small
+// windows the floors are already the right protection. Mirrors
+// `proactivePruneFloor`'s window-proportional pattern (compaction.ts), but is
+// configured ONCE at session init (AgentSession's constructor) because these
+// caps are imported as plain values by ~15 modules: the exports are mutable
+// (`let`) ES-module live bindings, so every importer reads the reconfigured
+// value at call time with zero call-site churn. Only byte caps scale — line
+// limits and the bash head sub-budget stay fixed (bytes are what track window
+// size; line counts track readability).
+//
+// Process-global by design: a later /model switch does not re-scale (same
+// convention as the session recovery thermostat seeded from the boot-time
+// model), and when several sessions share one process the last one constructed
+// wins — acceptable because every value stays within [floor, 2×floor].
+
+/** Context window (tokens) at or under which the byte caps keep their floors. */
+const CAP_SCALE_BASE_WINDOW = 200_000;
+/** Context window (tokens) at or over which the byte caps reach 2× the floor. */
+const CAP_SCALE_MAX_WINDOW = 1_000_000;
+
+const DEFAULT_MAX_BYTES_FLOOR = 50 * 1024; // 50KB
+const TOOL_OUTPUT_HARD_CAP_FLOOR = 64 * 1024; // 64KB
+const BASH_MAX_BYTES_FLOOR = 24 * 1024; // 24KB
+
+export let DEFAULT_MAX_BYTES = DEFAULT_MAX_BYTES_FLOOR;
 // Safety-net ceiling applied generically in wrapToolDefinition to every tool
-// result. Set well above the 50KB per-tool cap (read/grep/lsp/mcp use
+// result. Kept well above the per-tool cap (read/grep/lsp/mcp use
 // DEFAULT_MAX_BYTES) so tools that already truncate — and their own truncation
 // notes — are never re-cut; this only catches tool outputs with no cap of their
-// own (many extensions and some MCP returns).
-export const TOOL_OUTPUT_HARD_CAP_BYTES = 64 * 1024; // 64KB
+// own (many extensions and some MCP returns). Scales with the SAME factor as
+// DEFAULT_MAX_BYTES so the "sits above the per-tool cap" invariant holds at
+// every window size.
+export let TOOL_OUTPUT_HARD_CAP_BYTES = TOOL_OUTPUT_HARD_CAP_FLOOR;
+
+/**
+ * Linear cap scale for a model context window: 1 at ≤200k tokens (historical
+ * behavior), 2 at ≥1M, straight line in between. Exported for tests.
+ */
+export function truncationCapScale(contextWindow: number): number {
+	if (!Number.isFinite(contextWindow) || contextWindow <= CAP_SCALE_BASE_WINDOW) return 1;
+	const clamped = Math.min(contextWindow, CAP_SCALE_MAX_WINDOW);
+	return 1 + (clamped - CAP_SCALE_BASE_WINDOW) / (CAP_SCALE_MAX_WINDOW - CAP_SCALE_BASE_WINDOW);
+}
+
+/**
+ * Scale the shared byte caps for the given model context window. Deterministic
+ * from the floors — repeated calls never compound — and `contextWindow <= 0`
+ * (or a non-finite value) resets everything to the floors, which tests use to
+ * restore the historical defaults.
+ */
+export function configureTruncationCaps(options: { contextWindow: number }): void {
+	const scale = truncationCapScale(options.contextWindow);
+	DEFAULT_MAX_BYTES = Math.round(DEFAULT_MAX_BYTES_FLOOR * scale);
+	TOOL_OUTPUT_HARD_CAP_BYTES = Math.round(TOOL_OUTPUT_HARD_CAP_FLOOR * scale);
+	BASH_MAX_BYTES = Math.round(BASH_MAX_BYTES_FLOOR * scale);
+}
+
 // Dedicated, larger ceiling for `recall_tool_output`. A deferred output is only
 // stored when it exceeds the compaction prune threshold (~20k dense tokens ≈ 66KB
 // of text), so it is ALWAYS bigger than the generic 64KB hard cap — re-cutting it
 // head-only on recall would drop exactly the tail (final error/stack/status) the
 // model recalled it for. 256KB keeps the recalled excerpt large enough to carry
 // both head and tail while still bounding how much a single recall can re-inject.
+// Fixed: stays above the scaled hard cap even at its 128KB ceiling.
 export const RECALL_OUTPUT_CAP_BYTES = 256 * 1024; // 256KB
+// Ceiling for a THROWN tool error's message text (see wrapToolDefinition's
+// capThrownError): a throwing tool bypasses the resolved-result caps, and error
+// signal lives at both ends (message head, final stack frames), so the cap is
+// applied head+tail. Fixed — error text does not become more valuable on a
+// bigger window.
+export const ERROR_TEXT_CAP_BYTES = 16 * 1024; // 16KB
 export const GREP_MAX_LINE_LENGTH = 500; // Max chars per grep match line
 
 // Bash gets a tighter budget than file reads: command output (build/test logs,
@@ -32,7 +97,7 @@ export const GREP_MAX_LINE_LENGTH = 500; // Max chars per grep match line
 // Bash truncates from the tail (errors land at the end), so the cap mostly trims
 // verbose middles. Full output is always persisted to a temp file when truncated.
 export const BASH_MAX_LINES = 1000;
-export const BASH_MAX_BYTES = 24 * 1024; // 24KB
+export let BASH_MAX_BYTES = BASH_MAX_BYTES_FLOOR; // 24KB floor
 
 // Head budget for bash head+tail truncation: retain the first lines (the command and
 // early context) alongside the tail (where errors and summaries land), eliding only

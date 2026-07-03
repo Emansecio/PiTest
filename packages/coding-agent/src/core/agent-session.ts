@@ -257,6 +257,7 @@ import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.
 import { ReadDedupeStore } from "./tools/read.js";
 import { listDeclarations } from "./tools/symbol.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
+import { configureTruncationCaps } from "./tools/truncate.ts";
 import { TurnRiskAccumulator } from "./turn-risk.ts";
 import { TurnSteeringEngine } from "./turn-steering-engine.ts";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
@@ -849,6 +850,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// re-seed the start level — the thermostat is per-session and observe-only
 		// in Fase 0; behavior earned in-session dominates the prior anyway.
 		this._recovery = new SessionRecoveryController({ model: this.agent.state.model });
+
+		// The boot-time model also scales the shared tool-output byte caps
+		// (DEFAULT/BASH/hard-cap floors at ≤200k-token windows, up to 2× at 1M —
+		// see configureTruncationCaps). Must run before _buildRuntime below so
+		// tool descriptions advertise the scaled budgets. Same convention as the
+		// thermostat above: a later /model switch does not re-scale.
+		configureTruncationCaps({ contextWindow: this.agent.state.model?.contextWindow ?? 0 });
 
 		// Band P conventions contract (P5): session-scoped, reached by
 		// failure-summary (extraction) and system-prompt (injection) via the module

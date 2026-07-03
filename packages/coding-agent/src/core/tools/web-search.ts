@@ -18,8 +18,10 @@ import {
 	type SearchHit,
 	type SearchProvider,
 } from "../web-search/index.ts";
+import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.ts";
 import { getTextOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { collapseRepeatedLines } from "./truncate.ts";
 
 const PROVIDER_NAMES = ["auto", "brave", "tavily", "jina", "perplexity", "exa"] as const;
 const DEFAULT_LIMIT = 8;
@@ -80,9 +82,62 @@ function resolveProviders(
 	return { providers: [p], selected: explicit };
 }
 
-function capBody(text: string, max: number): string {
+/**
+ * Fraction of the cap below which a sentence-boundary cut degenerates (the last
+ * boundary sits too early, discarding most of the budget); under it we fall
+ * back to the raw char cut so a punctuation-free wall of text still yields a
+ * usefully sized excerpt.
+ */
+const EXTRACT_BOUNDARY_FLOOR = 0.6;
+
+/**
+ * Last sentence/line boundary in `window`, as an exclusive end index (0 when
+ * none). A `.`/`!`/`?` only counts when followed by whitespace (or the window
+ * end) so decimals and dotted identifiers ("3.14", "pkg.name") don't cut
+ * mid-token; a newline always counts (markdown extracts are line-structured).
+ */
+function lastSentenceBoundary(window: string): number {
+	for (let i = window.length - 1; i >= 0; i--) {
+		const c = window.charCodeAt(i);
+		if (c === 10 /* \n */) return i + 1;
+		if (c === 46 /* . */ || c === 33 /* ! */ || c === 63 /* ? */) {
+			const next = i + 1 < window.length ? window.charCodeAt(i + 1) : 32;
+			if (next === 32 || next === 10 || next === 9 || next === 13) return i + 1;
+		}
+	}
+	return 0;
+}
+
+/**
+ * Cap an extract body without leaving a mid-sentence stump. Upgrade-only
+ * (mirrors json-crush's design contract): text at or under the cap is returned
+ * byte-identical. Over the cap, in order:
+ *  1. JSON/NDJSON payloads (a raw API endpoint behind the URL) are structurally
+ *     crushed to schema + samples via the shared json-crush machinery.
+ *  2. Runs of identical lines are collapsed (HTML nav/footer/menu noise) —
+ *     lossless, and sometimes enough to fit the cap on its own.
+ *  3. The cut lands on the last sentence/line boundary before the cap, floored
+ *     at 60% of it; below the floor the old raw char cut applies unchanged.
+ *
+ * Exported for tests.
+ */
+export function capExtractBody(text: string, max: number): string {
 	if (text.length <= max) return text;
-	return `${sliceSafe(text, 0, max - 3)}...`;
+	const crushed = maybeCrushJsonOutput({
+		text,
+		shouldAttempt: isJsonCrushEnabled(),
+		recoveryHint: "Fetch the URL directly for the full payload.",
+		targetChars: max,
+	});
+	if (crushed !== undefined) return crushed;
+	const collapsed = collapseRepeatedLines(text);
+	if (collapsed.length <= max) return collapsed;
+	const window = sliceSafe(collapsed, 0, max - 3);
+	const boundary = lastSentenceBoundary(window);
+	if (boundary >= Math.floor(max * EXTRACT_BOUNDARY_FLOOR)) {
+		return `${window.slice(0, boundary).trimEnd()}...`;
+	}
+	return `${window}...`;
 }
 
 // Cut a string to at most `max` UTF-16 code units without splitting a surrogate
@@ -111,7 +166,7 @@ function formatHits(hits: SearchHit[], outcome: ChainOutcome, extracts: Map<stri
 		if (body) {
 			lines.push("");
 			lines.push("   --- extract ---");
-			for (const line of capBody(body, EXTRACT_BODY_CAP).split(/\r?\n/)) {
+			for (const line of capExtractBody(body, EXTRACT_BODY_CAP).split(/\r?\n/)) {
 				lines.push(`   ${line}`);
 			}
 			lines.push("   --- end ---");

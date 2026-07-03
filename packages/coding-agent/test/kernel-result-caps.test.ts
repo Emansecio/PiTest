@@ -14,8 +14,9 @@
 import { readFile, unlink } from "node:fs/promises";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { EVAL_OUTPUT_CAP_BYTES, formatKernelResult } from "../src/core/tools/eval.ts";
+import { formatKernelResult } from "../src/core/tools/eval.ts";
 import { wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
+import { ERROR_TEXT_CAP_BYTES } from "../src/core/tools/truncate.ts";
 
 const spilledPaths: string[] = [];
 
@@ -109,8 +110,15 @@ describe("wrapToolDefinition thrown-error cap", () => {
 		});
 	}
 
-	it("caps an oversized thrown-error message and marks it truncated", async () => {
-		const tool = throwingTool("Q".repeat(200 * 1024));
+	it("caps a 1MB thrown-error message at ~16KB, keeping head AND tail", async () => {
+		// Realistic giant-error shape: an opening message line, a wall of stack
+		// frames, and the decisive final line — 1MB total.
+		const head = "HEAD-SENTINEL: tool exploded";
+		const tail = "TAIL-SENTINEL: caused by ECONNRESET";
+		const frames = Array(24_000).fill("    at somewhere (/very/deep/module.ts:1:1)").join("\n");
+		const message = `${head}\n${frames}\n${tail}`;
+		expect(Buffer.byteLength(message, "utf-8")).toBeGreaterThan(1024 * 1024);
+		const tool = throwingTool(message);
 		let caught: unknown;
 		try {
 			await tool.execute("t1", {}, new AbortController().signal);
@@ -119,12 +127,79 @@ describe("wrapToolDefinition thrown-error cap", () => {
 		}
 		expect(caught).toBeInstanceOf(Error);
 		const e = caught as Error;
-		// Well under the raw 200KB, over the 64KB cap by only the marker text.
-		expect(Buffer.byteLength(e.message, "utf-8")).toBeLessThan(EVAL_OUTPUT_CAP_BYTES + 512);
+		// Down from 1MB to the dedicated 16KB error budget (+ marker slack).
+		expect(Buffer.byteLength(e.message, "utf-8")).toBeLessThan(ERROR_TEXT_CAP_BYTES + 512);
+		// Head+tail cut: both ends survive, the middle frames are elided.
+		expect(e.message).toContain(head);
+		expect(e.message).toContain(tail);
+		expect(e.message).toContain("truncated from the middle");
 		expect(e.message).toContain("[error text exceeded");
-		expect(e.message).toContain("truncated]");
+		expect(e.message).toContain("kept head + tail]");
 		// Stack preserved for local debugging.
 		expect(typeof e.stack).toBe("string");
+	});
+
+	it("keeps the tail of a single-line 1MB message (head snaps to whole lines)", async () => {
+		// A one-line payload (echoed minified JSON, etc.): truncateHead never
+		// returns partial lines, so the head half is empty — the size cap and the
+		// tail (where the decisive signal of an echoed payload ends) still hold.
+		const tool = throwingTool(`${"Q".repeat(1024 * 1024)}TAIL-SENTINEL`);
+		let caught: unknown;
+		try {
+			await tool.execute("t1b", {}, new AbortController().signal);
+		} catch (err) {
+			caught = err;
+		}
+		const e = caught as Error;
+		expect(Buffer.byteLength(e.message, "utf-8")).toBeLessThan(ERROR_TEXT_CAP_BYTES + 512);
+		expect(e.message).toContain("TAIL-SENTINEL");
+		expect(e.message).toContain("kept head + tail]");
+	});
+
+	it("preserves the error subclass and extra properties when capping", async () => {
+		class ToolFailure extends Error {
+			code = "E_BOOM";
+		}
+		const tool = wrapToolDefinition({
+			name: "boom-typed",
+			label: "boom-typed",
+			description: "throws a subclass",
+			parameters: Type.Object({}),
+			async execute() {
+				throw Object.assign(new ToolFailure("X".repeat(64 * 1024)), { code: "E_BOOM" });
+			},
+		});
+		let caught: unknown;
+		try {
+			await tool.execute("t3", {}, new AbortController().signal);
+		} catch (err) {
+			caught = err;
+		}
+		// The SAME object is rethrown with its message capped in place.
+		expect(caught).toBeInstanceOf(ToolFailure);
+		expect((caught as ToolFailure).code).toBe("E_BOOM");
+		expect(Buffer.byteLength((caught as Error).message, "utf-8")).toBeLessThan(ERROR_TEXT_CAP_BYTES + 512);
+	});
+
+	it("stringifies and caps a non-Error throw", async () => {
+		const tool = wrapToolDefinition({
+			name: "boom-string",
+			label: "boom-string",
+			description: "throws a raw string",
+			parameters: Type.Object({}),
+			async execute() {
+				throw "S".repeat(128 * 1024);
+			},
+		});
+		let caught: unknown;
+		try {
+			await tool.execute("t4", {}, new AbortController().signal);
+		} catch (err) {
+			caught = err;
+		}
+		expect(caught).toBeInstanceOf(Error);
+		expect(Buffer.byteLength((caught as Error).message, "utf-8")).toBeLessThan(ERROR_TEXT_CAP_BYTES + 512);
+		expect((caught as Error).message).toContain("[error text exceeded");
 	});
 
 	it("passes a small thrown error through unchanged", async () => {

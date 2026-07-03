@@ -1,7 +1,7 @@
 {
-	"version": 8,
+	"version": 9,
 	"updated": "2026-07-03",
-	"comment": "Regression gate for scripts/check-token-bench.mjs. Exact keys are deterministic; min/max tolerate env drift (skills, prefix). v6 adds bench-compaction-fidelity metrics (structural recall, fabricated-path flagging, false positives) and bumps wire_tool_desc_chars/wire_tool_param_chars for the new recall_history tool. v7 bumps explore-heavy/edit-heavy serialize_prose_chars/serialize_delta_chars for the richer compaction serialization (structural frame + incremental supersede scan). v8 bumps wire_tool_param_chars (+176) for the tools-review schema hardening (REVISAO-TOOLS-PIT.md): announced min/max bounds on grep/ast_grep/search_tool_bm25/chrome limits, recall.kinds closed enum, ask.timeout_ms — bought fewer model misfires; descriptions netted zero.",
+	"comment": "Regression gate for scripts/check-token-bench.mjs. Exact keys are deterministic; min/max tolerate env drift (skills, prefix). v7 bumps explore-heavy/edit-heavy serialize_prose_chars/serialize_delta_chars for the richer compaction serialization (structural frame + incremental supersede scan). v8 bumps wire_tool_param_chars (+176) for the tools-review schema hardening (REVISAO-TOOLS-PIT.md): announced min/max bounds on grep/ast_grep/search_tool_bm25/chrome limits, recall.kinds closed enum, ask.timeout_ms — bought fewer model misfires; descriptions netted zero. v9 bumps wire_tool_param_chars (+2) for AUDITORIA-ECONOMIA-TOKENS M20: chrome get_text/get_network_body schema maximum 65536→262144 (honest dedicated 256KB headTail cap replaces the false 1M promise re-cut by the 64KB net).",
 	"exact": {
 		"scenario=explore-heavy messages_only_tokens": 62631,
 		"scenario=explore-heavy prune_reclaimed_tokens": 32588,
@@ -34,7 +34,7 @@
 		"scenario=long-reasoning serialize_prose_chars": 17416,
 		"scenario=long-reasoning serialize_delta_chars": 7158,
 		"wire_tool_desc_chars": 5934,
-		"wire_tool_param_chars": 11939,
+		"wire_tool_param_chars": 11941,
 		"fusion_brief_tokens": 59,
 		"fusion_panel_tokens": 3550,
 		"fusion_judge_tokens": 4594,

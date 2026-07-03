@@ -1,6 +1,12 @@
 import type { AgentTool, AgentToolResult } from "@pit/agent-core";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
-import { formatSize, TOOL_OUTPUT_HARD_CAP_BYTES, truncateHead, truncateHeadTail } from "./truncate.ts";
+import {
+	ERROR_TEXT_CAP_BYTES,
+	formatSize,
+	TOOL_OUTPUT_HARD_CAP_BYTES,
+	truncateHead,
+	truncateHeadTail,
+} from "./truncate.ts";
 
 /**
  * Per-definition override for the generic output cap.
@@ -97,26 +103,32 @@ function capToolOutputBytes<TDetails>(
  * Mirror of {@link capToolOutputBytes} for a THROWN error: the safety net above
  * only runs on a resolved result, so a tool whose `execute` throws instead of
  * returning `isError: true` bypassed every cap — an oversized error message
- * (huge stack, echoed input) reached the model completely uncapped. Same cap,
- * same head/headTail mode, applied to the error's message text; the original
- * stack is preserved on the returned Error so local debugging is unaffected.
+ * (huge stack, echoed input) reached the model completely uncapped.
+ *
+ * Unlike the result cap, errors get a dedicated, deliberately tight budget
+ * (ERROR_TEXT_CAP_BYTES, 16KB) regardless of any per-tool `outputCap`: a
+ * raised result ceiling (e.g. recall's 256KB) signals valuable OUTPUT, not
+ * license for a 256KB error. Applied head+tail because an error's decisive
+ * signal sits at both ends (the message's opening line, the final stack
+ * frames). Only the agent loop's `err.message` read reaches the model, so the
+ * message is capped IN PLACE on the original error — type (subclasses), extra
+ * properties (`code`, …) and the stack all survive for local debugging.
  */
-function capThrownError(err: unknown, cap?: OutputCapConfig): Error {
+function capThrownError(err: unknown): Error {
 	const original = err instanceof Error ? err : new Error(String(err));
-	const maxBytes = cap?.maxBytes ?? TOOL_OUTPUT_HARD_CAP_BYTES;
-	const mode = cap?.mode ?? "head";
-	if (mode === "headTail") {
-		const ht = truncateHeadTail(original.message, { maxBytes });
-		if (!ht.truncated) return original;
-		const capped = new Error(`${ht.content}\n\n[error text exceeded ${formatSize(maxBytes)}; kept head + tail]`);
-		capped.stack = original.stack;
-		return capped;
+	const ht = truncateHeadTail(original.message, { maxBytes: ERROR_TEXT_CAP_BYTES });
+	if (!ht.truncated) return original;
+	const capped = `${ht.content}\n\n[error text exceeded ${formatSize(ERROR_TEXT_CAP_BYTES)}; kept head + tail]`;
+	try {
+		original.message = capped;
+		return original;
+	} catch {
+		// `message` can be a throwing setter on exotic custom errors — fall back
+		// to a fresh Error carrying the capped text and the original stack.
+		const fallback = new Error(capped);
+		fallback.stack = original.stack;
+		return fallback;
 	}
-	const truncation = truncateHead(original.message, { maxBytes, maxLines: Number.POSITIVE_INFINITY });
-	if (!truncation.truncated) return original;
-	const capped = new Error(`${truncation.content}\n\n[error text exceeded ${formatSize(maxBytes)} and was truncated]`);
-	capped.stack = original.stack;
-	return capped;
 }
 
 /**
@@ -154,7 +166,7 @@ export function wrapToolDefinition<TDetails = unknown>(
 					outputCap,
 				);
 			} catch (err) {
-				throw capThrownError(err, outputCap);
+				throw capThrownError(err);
 			}
 		},
 	};
