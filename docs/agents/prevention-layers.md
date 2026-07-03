@@ -63,22 +63,35 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 - **Cross-cutting steering** (reminders, not blockers): doom-loop, stagnation, todo-cadence, failure-budget (per-turn cap with optional cross-turn carryover via half-life decay; opt out `toolFeedback.failureBudget.carryover: false`) — nudge the model without vetoing.
 - **Session Recovery** (`session-recovery.ts` + `TurnSteeringEngine`): reactive scaffolding uplift. Every session starts **`lean`** (behavior-identical to the historical harness). When thrash signals fire (doom-loop tiers, result-loop, cross-error, failure-budget, repeating-pattern, verification exhausted, stagnation hard), the level rises **`guided` → `strict`**, enabling: error-reflection via **steer** (not stale `followUp`), tighter loop thresholds, +1/+2 verify `maxAttempts`, one-shot narration steer. Clean tool-success streaks de-escalate. **Not** model-tier classification — opt out `PIT_NO_SESSION_RECOVERY=1`. Telemetry: `quality.recovery`.
 
-## Band P — pre-generation conditioning (PLANNED — not yet built)
+## Band P — pre-generation conditioning (P0 ACTIVE observe-only; P1-P5 planned)
 
-> **Status: approved design, zero pillars implemented.** Do NOT rely on any layer below
-> existing at runtime, and do NOT build a parallel version of one — the design, decisions
-> and phased roadmap live in [`conditioning-band-study.md`](conditioning-band-study.md).
-> Each pillar flips to "active" here as its phase ships.
+> **Status: P0 shipped 2026-07-02 in observe-only mode; pillars P1-P5 are approved
+> design, not built.** Do NOT rely on P1-P5 existing at runtime, and do NOT build a
+> parallel version of one — the design, decisions and phased roadmap live in
+> [`conditioning-band-study.md`](conditioning-band-study.md). Each pillar flips to
+> "active" here as its phase ships.
 
 Where every band above reacts (validate the call, repair the result, correct the
 behavior), Band P shapes what the model sees and intends BEFORE it generates:
 
-- **P0 — supervision thermostat + efficacy telemetry** (Phase 0): per-session
-  supervision level (`assistido → padrão → leve`) earned by the model's observed output
-  signals (guard fires, verification failures), with asymmetric hysteresis and
-  per-session reset — no cross-session self-regulation, no model lists to maintain
-  (only fixed prior: native `anthropic`/`openai` start `leve`). Plus a durable
-  guard-fired→next-call-outcome telemetry sink.
+- **P0 — supervision thermostat + efficacy telemetry** (ACTIVE, observe-only):
+  per-session supervision level (`assistido → padrao → leve`) earned by the model's
+  observed output signals (guard blocks via the diagnostics channel, recovery thrash
+  signals), with the three anti-oscillation locks: asymmetric hysteresis (tighten on
+  one signal, loosen after a 5-clean streak), loosening gated to task boundaries
+  (`quality.rigor` per-prompt marker), per-session reset. No cross-session
+  self-regulation, no model lists to maintain — only fixed prior: native
+  `anthropic`/`openai` start `leve`. **Nothing consumes the level yet**; transitions
+  are emitted as `quality.supervision` diagnostics. `core/supervision-thermostat.ts`
+  (instantiated by `SessionRecoveryController`); opt out
+  `PIT_NO_SUPERVISION_THERMOSTAT=1`.
+  Telemetry: every diagnostic is persisted timestamped to
+  `<agentDir>/diagnostics/<sessionId>.jsonl` (`core/telemetry/diagnostics-sink.ts`,
+  learned-error-store file pattern, opt out `PIT_NO_TELEMETRY_SINK=1`), a
+  guard-fired→next-call-outcome correlator writes per-rule efficacy records
+  (`core/telemetry/guard-efficacy.ts`), a session summary (recovery snapshot,
+  verification tallies, cache stats) lands at dispose, and every `guard.*` emission
+  now carries a stable `ruleId` + `outcome` ("blocked"/"overridden").
 - **P1 — ground-truth injection**: real signatures/outlines of the symbols the turn
   will likely touch, injected via the two cache-neutral lanes (dynamic suffix +
   `context` event), token-capped by thermostat level (1200/800/400).

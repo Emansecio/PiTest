@@ -349,7 +349,10 @@ começa pela medição.
 
 ## 7. Roadmap faseado
 
-**Fase 0 — Medir antes de condicionar** (esforço: baixo-médio)
+**Fase 0 — Medir antes de condicionar** (esforço: baixo-médio) — **ENTREGUE 2026-07-02**
+(sink JSONL + correlacionador de eficácia + snapshot de sessão + termostato observe-only
+com transições em `quality.supervision`; `ruleId`/`outcome` normalizados nos 11 guards;
+timestamps no canal de diagnostics)
 Sink JSONL de diagnostics + normalização de `outcome`/`ruleId` nos guards +
 correlacionador guard→resultado + snapshot de sessão + **esqueleto do termostato**
 (níveis definidos, sinais ligados, transições gravadas no placar — ainda sem nenhum
