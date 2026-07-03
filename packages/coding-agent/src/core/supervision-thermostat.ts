@@ -180,7 +180,13 @@ export class SupervisionThermostat {
 		// Guard blocks (grounding/import/path/patch-audit/edit-precondition/...) are
 		// the primary tighten signal: a symbol/file the model invented or a stale
 		// oldText. Only the BLOCKED outcome qualifies (an overridden one is inert).
+		// Exception: the intent gate's "no plan yet" block is PROCEDURAL — the normal
+		// first step of a risky cycle, not evidence of a weak output — so it must not
+		// tighten (it would loop: gate blocks → tighten → stricter gate). Its
+		// plan-findings block (a hallucinated path in the plan) IS a quality signal
+		// and tightens like any other guard.
 		if (event.category.startsWith("guard.") && event.context?.outcome === "blocked") {
+			if (event.context?.ruleId === "intent-gate-no-plan") return;
 			this.noteSignal(event.category);
 			return;
 		}

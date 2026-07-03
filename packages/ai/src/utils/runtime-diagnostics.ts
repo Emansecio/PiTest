@@ -63,7 +63,11 @@ export type DiagnosticCategory =
 	| "guard.edit-precondition"
 	| "guard.erasable-syntax"
 	| "guard.read"
-	| "guard.learned-error";
+	| "guard.learned-error"
+	| "guard.intent-gate"
+	| "conditioning.context"
+	| "quality.contract"
+	| "quality.self-review";
 
 export interface DiagnosticContext {
 	/** Byte size involved (cap hit, payload, buffer depth). */
