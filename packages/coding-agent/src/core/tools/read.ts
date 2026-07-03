@@ -21,8 +21,9 @@ import { generateDiffString } from "./edit-diff.ts";
 import { formatAnchorsForRead } from "./edit-hashline-diff.ts";
 import type { FileMtimeStore } from "./file-mtime-store.ts";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.js";
-import { formatNotebookSource } from "./notebook-formatter.ts";
-import { resolveReadPath } from "./path-utils.js";
+import { resolveDirentKind } from "./ls.js";
+import { formatNotebookSource, NotebookOffsetOutOfBoundsError } from "./notebook-formatter.js";
+import { canonicalPathKey, resolveReadPath } from "./path-utils.js";
 import {
 	getFilePathArg,
 	getTextOutput,
@@ -173,7 +174,13 @@ const defaultReadOperations: ReadOperations = {
 	createByteStream: (path) => createReadStream(path),
 	readdir: async (path) => {
 		const ents = await fsReaddir(path, { withFileTypes: true });
-		return ents.map((e) => ({ name: e.name, isDirectory: e.isDirectory() }));
+		// Dirent.isDirectory() reflects the symlink itself, not its target — a
+		// symlink-to-directory was reported as a bare file with no "/" suffix,
+		// diverging from `ls`. Resolve through the shared helper so read's
+		// directory listing agrees with ls's symlink semantics instead of
+		// duplicating them.
+		const resolved = await Promise.all(ents.map((e) => resolveDirentKind(path, e)));
+		return resolved.map((r) => ({ name: r.broken ? `${r.name}@` : r.name, isDirectory: r.isDirectory }));
 	},
 };
 
@@ -570,12 +577,9 @@ export function createReadToolDefinition(
 		name: "read",
 		activity: "navigation",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.
+		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Set outline:true for a symbol outline (names + line ranges) instead of file content; path also accepts pr://, issue://, and conflict:// virtual schemes to pull a GitHub PR, issue, or merge-conflict directly.
 
 Common mistakes to avoid:
-- Passing a range like "1-50" — use { offset: 1, limit: 50 } instead.
-- Using "start_line"/"end_line" — the canonical fields are "offset" (1-indexed start line) and "limit" (line count).
-- Using "file_path" or "filename" — the canonical key is "path".
 - Calling read for a directory — use "ls" instead.
 - Calling read repeatedly with the same offset — increment offset by the previous limit.
 - Re-reading a file you have already read in this session unless it was modified — the previous result is still in context.`,
@@ -607,16 +611,31 @@ Common mistakes to avoid:
 					text = result.content ?? "";
 				}
 				// Apply line-wise offset/limit slicing.
-				if (offset !== undefined || limit !== undefined) {
-					const allLines = text.split("\n");
-					const startLine = offset ? Math.max(0, offset - 1) : 0;
-					if (startLine >= allLines.length) {
-						throw new Error(`Offset ${offset} is beyond end of resource (${allLines.length} lines total)`);
-					}
-					const endLine = limit !== undefined ? Math.min(startLine + limit, allLines.length) : allLines.length;
-					text = allLines.slice(startLine, endLine).join("\n");
+				const allLines = text.split("\n");
+				const startLine = offset ? Math.max(0, offset - 1) : 0;
+				if (startLine >= allLines.length) {
+					throw new Error(`Offset ${offset} is beyond end of resource (${allLines.length} lines total)`);
 				}
-				return { content: [{ type: "text", text } as TextContent], details: undefined };
+				const startLineDisplay = startLine + 1;
+				const totalLines = allLines.length;
+				const endLine = limit !== undefined ? Math.min(startLine + limit, allLines.length) : allLines.length;
+				text = allLines.slice(startLine, endLine).join("\n");
+				// Uncapped resource content (e.g. a large PR diff) previously bypassed every
+				// read budget and fell straight to the generic 64KB head-only net, which
+				// drops the tail with no recovery hint. Route through the same head cap +
+				// continuation hint the file-read path uses below.
+				const urlTruncation = truncateHead(text);
+				let outputText = urlTruncation.content;
+				if (urlTruncation.truncated) {
+					const endLineDisplay = startLineDisplay + urlTruncation.outputLines - 1;
+					const nextOffset = endLineDisplay + 1;
+					const suffix = urlTruncation.truncatedBy === "lines" ? "" : ` (${formatSize(DEFAULT_MAX_BYTES)} limit)`;
+					outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalLines}${suffix}. Use offset=${nextOffset} to continue.]`;
+				}
+				return {
+					content: [{ type: "text", text: outputText } as TextContent],
+					details: urlTruncation.truncated ? { truncation: urlTruncation } : undefined,
+				};
 			}
 			const absolutePath = resolveReadPath(path, cwd);
 			if (outline) {
@@ -641,12 +660,24 @@ Common mistakes to avoid:
 				}
 				const buffer = await ops.readFile(absolutePath);
 				const decls = listDeclarations(buffer.toString("utf-8"), absolutePath);
-				const body =
-					decls.length > 0
-						? decls.map((d) => `${d.name}  L${d.line}-${d.endLine}  [${d.kind}]`).join("\n")
+				const declLines = decls.map((d) => `${d.name}  L${d.line}-${d.endLine}  [${d.kind}]`);
+				const declBody =
+					declLines.length > 0
+						? declLines.join("\n")
 						: "(no top-level symbols detected — read the file or use grep)";
-				const text = `Outline of ${path} (heuristic — read the range before editing):\n${body}`;
-				return { content: [{ type: "text", text } as TextContent], details: undefined };
+				// listDeclarations already caps entry count, but bounding the rendered
+				// body too keeps outline on the same read-style budget as every other
+				// path — cheap insurance against a pathological file (e.g. very long
+				// identifiers) instead of relying solely on the generic 64KB net.
+				const outlineTruncation = truncateHead(declBody);
+				let text = `Outline of ${path} (heuristic — read the range before editing):\n${outlineTruncation.content}`;
+				if (outlineTruncation.truncated) {
+					text += `\n\n[Showing ${outlineTruncation.outputLines} of ${declLines.length} declarations (${formatSize(DEFAULT_MAX_BYTES)} limit). Read a specific range with offset/limit, or use grep to locate a symbol by name.]`;
+				}
+				return {
+					content: [{ type: "text", text } as TextContent],
+					details: outlineTruncation.truncated ? { truncation: outlineTruncation } : undefined,
+				};
 			}
 			return new Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }>(
 				(resolve, reject) => {
@@ -857,11 +888,32 @@ Common mistakes to avoid:
 												limit,
 												name: basename(absolutePath),
 											});
-											let outputText = formatted.text;
 											const startIndex = Math.max(0, (offset ?? 1) - 1);
 											const renderedEnd = startIndex + formatted.renderedCells;
+											let cellText = formatted.text;
 											if (renderedEnd < formatted.totalCells) {
-												outputText += `\n\n[Showing cells ${startIndex + 1}-${renderedEnd} of ${formatted.totalCells}. Use offset=${renderedEnd + 1} to continue.]`;
+												cellText += `\n\n[Showing cells ${startIndex + 1}-${renderedEnd} of ${formatted.totalCells}. Use offset=${renderedEnd + 1} to continue.]`;
+											}
+											// Cell sources/outputs are individually clipped, but a notebook with
+											// many cells can still blow past the read budget in aggregate — route
+											// through the same head cap + continuation hint every other read path
+											// uses instead of falling through to the generic 64KB net.
+											const notebookTruncation = truncateHead(cellText);
+											let outputText = notebookTruncation.content;
+											if (notebookTruncation.truncated) {
+												// Byte/line truncation can cut mid-cell; point the continuation at
+												// the last cell header that made it into the truncated output (safe
+												// to re-show — better a duplicate than a missed cell).
+												const cellHeaders = [...notebookTruncation.content.matchAll(/^═══ Cell (\d+) /gm)];
+												const lastShownCell =
+													cellHeaders.length > 0
+														? Number(cellHeaders[cellHeaders.length - 1][1])
+														: startIndex + 1;
+												const limitLabel =
+													notebookTruncation.truncatedBy === "lines"
+														? `${DEFAULT_MAX_LINES} lines`
+														: formatSize(DEFAULT_MAX_BYTES);
+												outputText += `\n\n[Notebook truncated at ${limitLabel} (showing up to cell ${lastShownCell} of ${formatted.totalCells}). Use offset=${lastShownCell} to continue.]`;
 											}
 											content = [{ type: "text", text: outputText }];
 											if (aborted) return;
@@ -871,10 +923,40 @@ Common mistakes to avoid:
 											if (mtimeStore && pendingMtime !== undefined) {
 												mtimeStore.set(absolutePath, pendingMtime);
 											}
+											// De-dup: a notebook re-read with identical (path, range) content this
+											// session is suppressed the same way the text path is below, so a
+											// repeat `read` of an unchanged notebook doesn't re-spend the same
+											// tokens. Bodies are never marked "clean" — cell-based paging doesn't
+											// produce the verbatim-file body a delta needs, so only suppression
+											// (not delta framing) applies here.
+											if (dedupeStore) {
+												const dedupeKey = `${canonicalPathKey(absolutePath)} ${offset ?? ""} ${limit ?? ""}`;
+												const rangeLabel =
+													offset !== undefined || limit !== undefined
+														? ` (offset ${offset ?? 1}${limit !== undefined ? `, limit ${limit}` : ""})`
+														: "";
+												const isDup = dedupeStore.record(
+													dedupeKey,
+													hashReadContent(outputText),
+													outputText,
+													false,
+												);
+												if (isDup) {
+													const shownLines = outputText.length === 0 ? 0 : outputText.split("\n").length;
+													outputText = `[read ${path}${rangeLabel}: identical to an earlier read this session — ${shownLines} line(s), unchanged and already shown above. Re-run read to re-expand if it has scrolled out of context.]`;
+													content = [{ type: "text", text: outputText }];
+												}
+											}
 											signal?.removeEventListener("abort", onAbort);
-											resolve({ content, details: undefined });
+											resolve({
+												content,
+												details: notebookTruncation.truncated
+													? { truncation: notebookTruncation }
+													: undefined,
+											});
 											return;
-										} catch {
+										} catch (err) {
+											if (err instanceof NotebookOffsetOutOfBoundsError) throw err;
 											// Fall through to the generic text path — better degraded than broken.
 										}
 									}
@@ -958,7 +1040,7 @@ Common mistakes to avoid:
 								// above". Bail before mutating shared session state.
 								if (aborted) return;
 								if (dedupeStore) {
-									const dedupeKey = `${absolutePath} ${offset ?? ""} ${limit ?? ""}`;
+									const dedupeKey = `${canonicalPathKey(absolutePath)} ${offset ?? ""} ${limit ?? ""}`;
 									const rangeLabel =
 										offset !== undefined || limit !== undefined
 											? ` (offset ${offset ?? 1}${limit !== undefined ? `, limit ${limit}` : ""})`

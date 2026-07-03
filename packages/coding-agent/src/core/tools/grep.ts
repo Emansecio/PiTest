@@ -10,7 +10,7 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.js"
 import { ensureTool } from "../../utils/tools-manager.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { prepareWithPathAliases } from "./argument-prep.js";
-import { type FffContentMatch, type FffSearchMode, fffSearch, isSimpleGrepGlob } from "./fff-search.js";
+import { capAppend, type FffContentMatch, type FffSearchMode, fffSearch, isSimpleGrepGlob } from "./fff-search.js";
 import { resolveToCwd } from "./path-utils.js";
 import { getTextOutput, invalidArgText, nonEmptyDetails, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -22,6 +22,12 @@ import {
 	truncateHead,
 	truncateLine,
 } from "./truncate.ts";
+
+const DEFAULT_LIMIT = 100;
+// Hard cap on `limit`: without one a single call could request effectively
+// unbounded matches, undermining the read-style pagination this tool relies
+// on. Mirrors ast_grep's DEFAULT_LIMIT/MAX_LIMIT pattern.
+const MAX_LIMIT = 1000;
 
 const grepSchema = Type.Object(
 	{
@@ -47,13 +53,18 @@ const grepSchema = Type.Object(
 					"What to return: 'content' = matching lines (default); 'files_with_matches' = just the file paths that match (cheapest — use to locate); 'count' = matches-per-file as 'path:count'. With files/count, 'limit' caps files and 'context' is ignored.",
 			}),
 		),
-		limit: Type.Optional(Type.Number({ description: "Maximum number of matches to return (default: 100)" })),
+		limit: Type.Optional(
+			Type.Number({
+				description: `Maximum number of matches to return (default: ${DEFAULT_LIMIT}, max ${MAX_LIMIT})`,
+				minimum: 1,
+				maximum: MAX_LIMIT,
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
 
 export type GrepToolInput = Static<typeof grepSchema>;
-const DEFAULT_LIMIT = 100;
 // OOM guard: rg skips files above this on the source side (--max-filesize) and
 // getFileLines refuses to buffer a matched file larger than this for context.
 // Matching a pattern inside a giant lockfile / .min.js / dump would otherwise
@@ -103,10 +114,11 @@ export function byteOffsetToCharIndex(text: string, byteOffset: number): number 
 	return len;
 }
 
-/** Append a stderr chunk while retaining at most the leading MAX_GREP_STDERR_BYTES. */
+/** Append a stderr chunk while retaining at most the leading MAX_GREP_STDERR_BYTES.
+ * Kept as its own export (not inlined) so grep's byte ceiling stays a fixed,
+ * testable 2-arg seam — exercised directly by find-grep-git-and-postfilter.test.ts. */
 export function appendCappedStderr(current: string, chunk: string): string {
-	if (current.length >= MAX_GREP_STDERR_BYTES) return current;
-	return (current + chunk).slice(0, MAX_GREP_STDERR_BYTES);
+	return capAppend(current, chunk, MAX_GREP_STDERR_BYTES);
 }
 
 export interface GrepToolDetails {
@@ -249,7 +261,7 @@ async function buildContentOutput(deps: {
 	const notices: string[] = [];
 	if (deps.matchLimitReached) {
 		notices.push(
-			`${effectiveLimit} matches limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+			`${effectiveLimit} matches limit reached. Use limit=${Math.min(MAX_LIMIT, effectiveLimit * 2)} for more, or refine pattern`,
 		);
 		details.matchLimitReached = effectiveLimit;
 	}
@@ -283,7 +295,7 @@ function buildLocateOutput(
 	const notices: string[] = [];
 	if (matchLimitReached) {
 		notices.push(
-			`${effectiveLimit} files limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+			`${effectiveLimit} files limit reached. Use limit=${Math.min(MAX_LIMIT, effectiveLimit * 2)} for more, or refine pattern`,
 		);
 		details.matchLimitReached = effectiveLimit;
 	}
@@ -436,7 +448,7 @@ export function createGrepToolDefinition(
 						}
 
 						const contextValue = context && context > 0 ? context : 0;
-						const effectiveLimit = Math.max(1, limit ?? DEFAULT_LIMIT);
+						const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, limit ?? DEFAULT_LIMIT));
 						const formatPath = (filePath: string): string => {
 							if (isDirectory) {
 								const relative = path.relative(searchPath, filePath);
@@ -578,7 +590,6 @@ export function createGrepToolDefinition(
 						// search inside .git — it would otherwise exclude everything. A
 						// user-supplied glob comes later and wins on conflict (rg's
 						// last-match-wins precedence).
-						const insideGitDir = /[\\/]\.git([\\/]|$)/.test(searchPath);
 						const mode = outputMode ?? "content";
 						const args: string[] = ["--color=never", "--hidden"];
 						// content streams structured matches; the locate-only modes let rg do the
@@ -600,7 +611,7 @@ export function createGrepToolDefinition(
 						}
 						// OOM/CPU guard: skip files above the ceiling at the rg source.
 						args.push("--max-filesize", MAX_GREP_FILE_SIZE_ARG);
-						if (!insideGitDir) args.push("--glob", "!**/.git/**");
+						if (!insideGitScope) args.push("--glob", "!**/.git/**");
 						if (ignoreCase) args.push("--ignore-case");
 						if (literal) args.push("--fixed-strings");
 						if (multiline) args.push("--multiline", "--multiline-dotall");
@@ -758,22 +769,11 @@ export function createGrepToolDefinition(
 											outputLines.push(parsed ? `${formatPath(parsed[1])}:${parsed[2]}` : clean);
 										}
 									}
-									const rawList = outputLines.join("\n");
-									const listTruncation = truncateHead(rawList, { maxLines: Number.MAX_SAFE_INTEGER });
-									let listOutput = listTruncation.content;
-									const listDetails: GrepToolDetails = {};
-									const listNotices: string[] = [];
-									if (matchLimitReached) {
-										listNotices.push(
-											`${effectiveLimit} files limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
-										);
-										listDetails.matchLimitReached = effectiveLimit;
-									}
-									if (listTruncation.truncated) {
-										listNotices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-										listDetails.truncation = listTruncation;
-									}
-									if (listNotices.length > 0) listOutput += `\n\n[${listNotices.join(". ")}]`;
+									const { output: listOutput, details: listDetails } = buildLocateOutput(
+										outputLines,
+										effectiveLimit,
+										matchLimitReached,
+									);
 									settle(() =>
 										resolve({
 											content: [{ type: "text", text: listOutput }],

@@ -55,6 +55,35 @@ const defaultLsOperations: LsOperations = {
 	readdir,
 };
 
+/**
+ * Resolve a single directory entry's display kind, following symlinks: a
+ * symlink-to-directory reports isDirectory:true (rendered "name/" by callers,
+ * matching a real directory), a symlink-to-file reports isDirectory:false
+ * (bare name, indistinguishable from a regular file — matches `ls -F`
+ * conventions), and a broken/unstattable symlink reports broken:true (callers
+ * render "name@"). Shared by ls's own listing and read's directory-read
+ * fallback so both surfaces agree on symlink semantics instead of
+ * duplicating the stat dance.
+ */
+export async function resolveDirentKind(
+	dirPath: string,
+	dirent: Dirent,
+	statFn: (absolutePath: string) => Promise<{ isDirectory: () => boolean }> = stat,
+): Promise<{ name: string; isDirectory: boolean; broken: boolean }> {
+	const name = dirent.name;
+	if (dirent.isDirectory()) return { name, isDirectory: true, broken: false };
+	if (dirent.isSymbolicLink()) {
+		const fullPath = nodePath.join(dirPath, name);
+		try {
+			const entryStat = await statFn(fullPath);
+			return { name, isDirectory: entryStat.isDirectory(), broken: false };
+		} catch {
+			return { name, isDirectory: false, broken: true };
+		}
+	}
+	return { name, isDirectory: false, broken: false };
+}
+
 export interface LsToolOptions {
 	/** Custom operations for directory listing. Default: local filesystem */
 	operations?: LsOperations;
@@ -161,18 +190,8 @@ export function createLsToolDefinition(
 						let entryLimitReached = false;
 						const results: string[] = [];
 						const formatDirent = async (dirent: Dirent): Promise<string> => {
-							const name = dirent.name;
-							if (dirent.isDirectory()) return `${name}/`;
-							if (dirent.isSymbolicLink()) {
-								const fullPath = nodePath.join(dirPath, name);
-								try {
-									const entryStat = await ops.stat(fullPath);
-									return name + (entryStat.isDirectory() ? "/" : "");
-								} catch {
-									return `${name}@`;
-								}
-							}
-							return name;
+							const { name, isDirectory, broken } = await resolveDirentKind(dirPath, dirent);
+							return broken ? `${name}@` : name + (isDirectory ? "/" : "");
 						};
 
 						if (ops === defaultLsOperations) {

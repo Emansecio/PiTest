@@ -232,6 +232,21 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("héllo wörld");
 			expect(output).not.toContain("[Binary file:");
 		});
+
+		it("should throw when an .ipynb offset is beyond the last cell (not a silent empty slice)", async () => {
+			const testFile = join(testDir, "notebook.ipynb");
+			const notebook = {
+				cells: [
+					{ cell_type: "code", source: ["print(1)"], outputs: [] },
+					{ cell_type: "markdown", source: ["# hi"] },
+				],
+			};
+			writeFileSync(testFile, JSON.stringify(notebook));
+
+			await expect(readTool.execute("test-call-notebook-1", { path: testFile, offset: 5 })).rejects.toThrow(
+				/Offset 5 is beyond end of notebook \(2 cells total\)/,
+			);
+		});
 	});
 
 	describe("write tool", () => {

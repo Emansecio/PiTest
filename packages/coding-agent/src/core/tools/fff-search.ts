@@ -36,6 +36,18 @@ import path from "path";
  *   null (fallback rg) rather than emit a silently-truncated subdir result.
  */
 
+/**
+ * Append a chunk to an accumulated string while retaining at most the leading
+ * `maxBytes`. Shared by grep/find's rg/fd stderr capture (each keeps its own
+ * byte ceiling) so a tree spewing permission/diagnostic warnings can't grow
+ * memory unbounded. Keeps the HEAD, not the tail: stderr is consumed once as
+ * the error message and the first line usually carries the actionable failure.
+ */
+export function capAppend(current: string, chunk: string, maxBytes: number): string {
+	if (current.length >= maxBytes) return current;
+	return (current + chunk).slice(0, maxBytes);
+}
+
 // ---- Minimal structural types for the optional package (avoid a hard type
 // dependency so tsgo/builds succeed on machines where the dep is absent). ----
 interface FffResult<T> {
@@ -270,8 +282,17 @@ function resolveFffGrepPattern(
 	return { pattern: `(?i)${pattern}`, mode: "regex" };
 }
 
-function makeGlobPathFilter(globFilter: string): (relPosix: string) => boolean {
-	const matcher = new Minimatch(globFilter, { dot: false });
+/** Exported for direct unit testing (see grep-fff-backend.test.ts): the
+ * native fff index itself excludes dot-files/dot-dirs unconditionally (no
+ * exposed InitOptions/GrepOptions toggle), so an end-to-end engine-parity
+ * test against a real dot-dir can never pass regardless of this filter —
+ * `dot:true` is verified here, at the seam it actually controls. */
+export function makeGlobPathFilter(globFilter: string): (relPosix: string) => boolean {
+	// dot:true matches the rg backend's `--hidden` flag and find's post-filter
+	// Minimatch instances (find.ts) — without it, a glob like "**/*.yml" silently
+	// dropped matches inside dot-dirs (.github/workflows/) that rg returns,
+	// breaking backend parity for the same query.
+	const matcher = new Minimatch(globFilter, { dot: true });
 	return (relPosix: string) => {
 		if (matcher.match(relPosix)) return true;
 		const base = path.posix.basename(relPosix);

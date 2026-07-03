@@ -11,7 +11,7 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.js"
 import { ensureTool } from "../../utils/tools-manager.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { prepareWithPathAliases } from "./argument-prep.js";
-import { fffFindByGlob } from "./fff-search.js";
+import { capAppend, fffFindByGlob } from "./fff-search.js";
 import { resolveToCwd } from "./path-utils.js";
 import { getTextOutput, invalidArgText, nonEmptyDetails, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -45,10 +45,11 @@ const FD_POST_FILTER_ENUM_CAP = 100_000;
 // carries the actionable failure.
 const MAX_FIND_STDERR_BYTES = 64 * 1024;
 
-/** Append a stderr chunk while retaining at most the leading MAX_FIND_STDERR_BYTES. */
+/** Append a stderr chunk while retaining at most the leading MAX_FIND_STDERR_BYTES.
+ * Kept as its own export (not inlined) so find's byte ceiling stays a fixed,
+ * testable 2-arg seam — exercised directly by find-grep-git-and-postfilter.test.ts. */
 export function appendCappedStderr(current: string, chunk: string): string {
-	if (current.length >= MAX_FIND_STDERR_BYTES) return current;
-	return (current + chunk).slice(0, MAX_FIND_STDERR_BYTES);
+	return capAppend(current, chunk, MAX_FIND_STDERR_BYTES);
 }
 
 export interface FindToolDetails {

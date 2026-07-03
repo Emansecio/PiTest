@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { createConflictSchemeResolver } from "../src/core/url-schemes/conflict.js";
 import { getUrlSchemeRegistry } from "../src/core/url-schemes/registry.js";
+import { createReadTool } from "../src/index.js";
 
 let workspace: string;
 const resolver = createConflictSchemeResolver();
@@ -148,5 +149,41 @@ describe("conflict:// write resolution", () => {
 		await expect(resolver.write!(new URL("conflict://*"), "custom resolution", { cwd: workspace })).rejects.toThrow(
 			/bulk/,
 		);
+	});
+});
+
+describe("conflict:// read via the read tool (URL-scheme truncation)", () => {
+	test("a conflict block exceeding the read line budget is truncated with a continuation hint", async () => {
+		const bigWorkspace = mkdtempSync(join(tmpdir(), "conflict-big-"));
+		try {
+			// 2500 "ours" lines pushes the formatted block past the read tool's
+			// 2000-line default budget, exercising the truncateHead + continuation
+			// hint path that URL-scheme reads previously bypassed entirely.
+			const oursLines = Array.from({ length: 2500 }, (_, i) => `ours line ${i + 1}`);
+			const bigContent = [
+				"before",
+				"<<<<<<< HEAD",
+				...oursLines,
+				"=======",
+				"theirs line",
+				">>>>>>> branch",
+				"after",
+				"",
+			].join("\n");
+			writeFileSync(join(bigWorkspace, "big.txt"), bigContent, "utf-8");
+
+			getUrlSchemeRegistry().register(resolver);
+			const readTool = createReadTool(bigWorkspace);
+			const result = (await readTool.execute("t-conflict-trunc", { path: "conflict://1" })) as {
+				content: Array<{ type: string; text?: string }>;
+			};
+			const text = result.content[0]?.text ?? "";
+
+			expect(text).toContain("ours line 1");
+			expect(text).not.toContain("ours line 2500");
+			expect(text).toMatch(/\[Showing lines 1-\d+ of \d+.*Use offset=\d+ to continue\.\]/);
+		} finally {
+			rmSync(bigWorkspace, { recursive: true, force: true });
+		}
 	});
 });

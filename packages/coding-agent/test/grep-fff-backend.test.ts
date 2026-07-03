@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { isFffAvailable } from "../src/core/tools/fff-search.ts";
+import { isFffAvailable, makeGlobPathFilter } from "../src/core/tools/fff-search.ts";
 import { createGrepToolDefinition } from "../src/core/tools/grep.ts";
 
 const fffReady = await isFffAvailable();
@@ -149,5 +149,20 @@ describe("grep fff backend", () => {
 		const rg = plainList(await runGrep("rg", { pattern: "FooBarBaz", glob: complexGlob }));
 		const fff = plainList(await runGrep("fff", { pattern: "FooBarBaz", glob: complexGlob }));
 		expect(fff).toEqual(rg);
+	});
+
+	it("makeGlobPathFilter matches dot-dirs like rg's --hidden (dot:true parity)", () => {
+		// The native fff index itself excludes dot-files/dot-dirs unconditionally
+		// (no exposed hidden-file option in InitOptions/GrepOptions/SearchOptions —
+		// verified directly against @ff-labs/fff-node: a dot-dir file is never
+		// indexed at all), so an end-to-end fff-vs-rg parity query against a real
+		// dot-dir can never observe a match regardless of any fix here. Verify the
+		// fix at the seam this repo actually controls instead: the client-side
+		// glob filter that emulates rg's `--glob`/`--hidden` behavior over fff's
+		// raw (already-filtered-by-the-index) results.
+		const matches = makeGlobPathFilter("**/*.yml");
+		expect(matches(".github/workflows/ci.yml")).toBe(true);
+		expect(matches("readme.yml")).toBe(true);
+		expect(matches(".github/workflows/ci.txt")).toBe(false);
 	});
 });
