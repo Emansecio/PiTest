@@ -9,6 +9,14 @@ import { headTailExcerpt } from "./compaction/utils.ts";
 /** Inline cap for project_context in the cacheable prefix; above → retrieval excerpt. */
 export const PROJECT_CONTEXT_INLINE_MAX_CHARS = 8000;
 
+/**
+ * Aggregate char cap for the entire project_context block (M25a).
+ * Files that would push the running total past this threshold are
+ * replaced by a 1-line read-pointer so the prompt stays bounded even
+ * when many large context files are installed.
+ */
+export const PROJECT_CONTEXT_AGGREGATE_MAX_CHARS = 16_000;
+
 function normalizePathKey(filePath: string): string {
 	return resolve(filePath).replace(/\\/g, "/").toLowerCase();
 }
@@ -82,6 +90,46 @@ function formatRetrievalExcerpt(content: string, filePath: string, cwd?: string)
 }
 
 /**
+ * Build a 1-line read-pointer for a file that is excluded from the inlined
+ * project_context block because the aggregate cap (M25a) has been reached.
+ * Follows the same read-hint style as {@link formatRetrievalExcerpt}.
+ */
+function formatAggregatePointer(file: { path: string; content: string }, cwd?: string): string {
+	const readPath =
+		cwd !== undefined
+			? relative(resolve(cwd), resolve(file.path)).replace(/\\/g, "/") || basename(file.path)
+			: file.path.replace(/\\/g, "/");
+	return `[Project context aggregate cap reached. Use read({ path: "${readPath}" }) to load this file (${file.content.length} chars).]`;
+}
+
+/**
+ * Enforce a total char budget across all project context files (M25a).
+ * Files are processed in the order they are provided. Once the cumulative
+ * char count of included files would exceed {@link PROJECT_CONTEXT_AGGREGATE_MAX_CHARS}
+ * the offending file — and every subsequent file — is reduced to a 1-line
+ * read-pointer so the model can still discover and load them on demand.
+ */
+export function applyAggregateContextCap(
+	files: Array<{ path: string; content: string }>,
+	cwd?: string,
+): Array<{ path: string; content: string }> {
+	let total = 0;
+	let capReached = false;
+	return files.map((file) => {
+		if (capReached) {
+			return { path: file.path, content: formatAggregatePointer(file, cwd) };
+		}
+		const next = total + file.content.length;
+		if (next > PROJECT_CONTEXT_AGGREGATE_MAX_CHARS) {
+			capReached = true;
+			return { path: file.path, content: formatAggregatePointer(file, cwd) };
+		}
+		total = next;
+		return file;
+	});
+}
+
+/**
  * Shrink oversized context files to a head+tail excerpt with a read hint (E6).
  */
 export function applyContextRetrievalMode(
@@ -112,5 +160,6 @@ export function normalizeProjectContextFiles(
 	}
 	const deduped = dedupePointerContextFiles(unique);
 	if (isTruthyEnvFlag(process.env.PIT_NO_CONTEXT_RETRIEVAL)) return deduped;
-	return applyContextRetrievalMode(deduped, cwd);
+	const excerpted = applyContextRetrievalMode(deduped, cwd);
+	return applyAggregateContextCap(excerpted, cwd);
 }

@@ -13,6 +13,11 @@ import type { PermissionSettings } from "./permissions/types.ts";
 
 const SETTINGS_LOCK_SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
 
+/** Default upper bound on hindsight bank size when the user has not configured one (M24). */
+const HINDSIGHT_DEFAULT_MAX_ENTRIES = 500;
+/** Default age cap (days) for hindsight bank entries when the user has not configured one (M24). */
+const HINDSIGHT_DEFAULT_PRUNE_OLDER_THAN_DAYS = 90;
+
 /**
  * Coerce `raw` to a finite, floored, strictly-positive integer; otherwise
  * return `fallback`. Extracted from the local `positive` helper that
@@ -235,8 +240,8 @@ export interface HindsightSettings {
 export interface ResolvedHindsightSettings {
 	enabled: boolean;
 	bankPath?: string;
-	maxEntries?: number;
-	pruneOlderThanDays?: number;
+	maxEntries: number;
+	pruneOlderThanDays: number;
 	scopedSubagents: boolean;
 	scopedSubagentsMaxEntriesPerScope: number;
 }
@@ -1828,13 +1833,13 @@ export class SettingsManager {
 		const maxEntries =
 			typeof raw?.maxEntries === "number" && Number.isFinite(raw.maxEntries) && raw.maxEntries > 0
 				? Math.floor(raw.maxEntries)
-				: undefined;
+				: HINDSIGHT_DEFAULT_MAX_ENTRIES;
 		const pruneOlderThanDays =
 			typeof raw?.pruneOlderThanDays === "number" &&
 			Number.isFinite(raw.pruneOlderThanDays) &&
 			raw.pruneOlderThanDays > 0
 				? raw.pruneOlderThanDays
-				: undefined;
+				: HINDSIGHT_DEFAULT_PRUNE_OLDER_THAN_DAYS;
 		const scopedSubagentsMaxEntriesPerScope =
 			typeof raw?.scopedSubagentsMaxEntriesPerScope === "number" &&
 			Number.isFinite(raw.scopedSubagentsMaxEntriesPerScope) &&

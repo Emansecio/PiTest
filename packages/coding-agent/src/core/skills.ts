@@ -430,6 +430,27 @@ function loadSkillFromFile(
  */
 export const SKILLS_FULL_LIMIT = 15;
 
+/**
+ * Character cap for the `<description>` of each "full" skill
+ * (the first {@link SKILLS_FULL_LIMIT} skills in the prompt, M25b).
+ * Truncation happens at a word boundary to avoid cutting mid-token.
+ */
+export const SKILLS_FULL_DESC_CAP = 300;
+
+/**
+ * Truncate `str` to at most `max` characters at a word boundary,
+ * appending an ellipsis when cut. Returns `str` unchanged when it
+ * already fits within `max`.
+ */
+function truncateDescAtWordBoundary(str: string, max: number): string {
+	if (str.length <= max) return str;
+	const budget = max - 1; // 1 char for the ellipsis
+	const cut = str.slice(0, budget);
+	const lastSpace = cut.lastIndexOf(" ");
+	const boundary = lastSpace > budget / 2 ? lastSpace : budget;
+	return `${str.slice(0, boundary).trimEnd()}…`;
+}
+
 function firstSentence(desc: string, max = 80): string {
 	const cut = desc.split(/(?<=[.!?])\s/)[0] ?? desc;
 	return truncateWithEllipsis(cut, max);
@@ -492,7 +513,9 @@ export function formatSkillsForPrompt(skills: Skill[], maxSkills = 100, cwd?: st
 		} else {
 			lines.push("  <skill>");
 			lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-			lines.push(`    <description>${escapeXml(skill.description)}</description>`);
+			lines.push(
+				`    <description>${escapeXml(truncateDescAtWordBoundary(skill.description, SKILLS_FULL_DESC_CAP))}</description>`,
+			);
 			lines.push(`    <location>${escapeXml(shortenPath(skill.filePath))}</location>`);
 			lines.push("  </skill>");
 		}
