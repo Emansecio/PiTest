@@ -383,7 +383,7 @@ export async function checkPresendOverflow(
 
 	const contextWindow = ctx.host.model?.contextWindow ?? 0;
 	if (contextWindow <= 0 || ctx.host.isCompacting) return false;
-	if (typeof process !== "undefined" && process.env.PIT_NO_PRESEND_OVERFLOW_GUARD === "1") {
+	if (isTruthyEnvFlag(process.env.PIT_NO_PRESEND_OVERFLOW_GUARD)) {
 		return false;
 	}
 
@@ -502,7 +502,7 @@ export async function checkCompaction(
 		!options?.skipPresendGuard &&
 		contextWindow > 0 &&
 		!ctx.host.isCompacting &&
-		!(typeof process !== "undefined" && process.env.PIT_NO_PRESEND_OVERFLOW_GUARD === "1")
+		!isTruthyEnvFlag(process.env.PIT_NO_PRESEND_OVERFLOW_GUARD)
 	) {
 		let assembled = estimateContextTokens(ctx.host.agent.state.messages).tokens;
 		if (assembled > contextWindow * PRESEND_OVERFLOW_RATIO && assembled > contextTokens) {
@@ -706,6 +706,10 @@ export async function runAutoCompaction(
 					? `Context overflow recovery failed: ${message}`
 					: `Auto-compaction failed: ${message}`,
 		});
+		// Transient failure (auth/network) must not leave a positive deficit that
+		// raises the re-trigger threshold — the context is already above it and the
+		// next turn should try again immediately.
+		ctx.lastCompactionDeficit = 0;
 		return false;
 	} finally {
 		ctx.autoCompactionAbortController = undefined;
