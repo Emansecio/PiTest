@@ -1,5 +1,13 @@
 /**
  * Live context economy applied to session messages after tool success (D2, A3).
+ *
+ * M12 — the supersede trigger has ONE source of truth: `wouldApplySupersedeOnly`
+ * over the incremental scan (cheap: suffix-only extension per call). The old
+ * local SUPERSEDED_TOOL_NAMES allowlist had drifted from the scan's own
+ * eligibility set (`bash` was scanned but never triggered live) and would have
+ * drifted again with M11 (a successful write/edit must fire the scan to
+ * invalidate stale reads of the file it changed). Any successful tool call may
+ * now trigger; the scan itself decides whether anything is collapsible.
  */
 
 import type { AgentMessage, AgentToolCall } from "@pit/agent-core";
@@ -15,10 +23,6 @@ import {
 	pressurePruneProtectTurns,
 	wouldApplySupersedeOnly,
 } from "./compaction/compaction.ts";
-
-import { isLspSupersedeEligible } from "./lsp/supersede.ts";
-
-const SUPERSEDED_TOOL_NAMES = new Set(["read", "grep", "find", "ls", "symbol", "find_symbol", "lsp"]);
 
 export interface LiveContextEconomyResult {
 	messages: AgentMessage[];
@@ -41,10 +45,7 @@ export function applyLiveContextEconomyAfterToolSuccess(
 	const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
 	const prunePlan = planContextPrune(messages, protectTurns);
 	const runSupersede =
-		!isTruthyEnvFlag(process.env.PIT_NO_LIVE_SUPERSEDE) &&
-		SUPERSEDED_TOOL_NAMES.has(toolCall.name) &&
-		(toolCall.name !== "lsp" || isLspSupersedeEligible(toolCall.arguments)) &&
-		wouldApplySupersedeOnly(messages, protectTurns, prunePlan);
+		!isTruthyEnvFlag(process.env.PIT_NO_LIVE_SUPERSEDE) && wouldApplySupersedeOnly(messages, protectTurns, prunePlan);
 	const runArgElision =
 		!isTruthyEnvFlag(process.env.PIT_NO_LIVE_ARG_ELISION) && isMutatingToolCall(toolCall.name, toolCall.arguments);
 

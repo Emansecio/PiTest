@@ -19,7 +19,7 @@ import {
 	tokenEstimateFactor,
 } from "@pit/ai";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
-import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
+import { type DeferredOutputStore, getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import { lspSupersededResourceKey } from "../lsp/supersede.ts";
 import { convertToLlm } from "../messages.ts";
 import { MESSAGE_RELAY_CUSTOM_TYPE } from "../messaging/types.ts";
@@ -27,6 +27,7 @@ import { getLivingRepoMap, livingRepoMapToDigests } from "../repo-map/living-ind
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
 import { MUTATING_TOOL_NAMES } from "../stagnation.ts";
 import { crushJson } from "../tools/json-crush.ts";
+import { FS_CASE_INSENSITIVE } from "../tools/path-utils.ts";
 import { buildFileDigests, formatFileDigests, MAX_DIGEST_BYTES } from "./file-digests.ts";
 import { groundSummaryPaths } from "./summary-grounding.ts";
 import {
@@ -579,14 +580,37 @@ export function shouldCompactSoft(contextTokens: number, contextWindow: number, 
 
 // Chars-per-token ratios and the density heuristic live in @pit/ai
 // token-estimate.ts (M7 single source of truth) — imported above.
-/** Token cost for an image block (kept as constant). */
-const IMAGE_TOKENS = 1200;
+/** Floor for an image block's token cost — the legacy flat estimate; typical screenshots stay here. */
+const IMAGE_TOKENS_MIN = 1200;
+/** Ceiling for an image block's token cost — providers downscale huge images, so cost saturates. */
+const IMAGE_TOKENS_MAX = 8_000;
+/** 4 base64 chars encode 3 raw bytes. */
+const BASE64_BYTES_PER_CHAR = 3 / 4;
+/**
+ * ~750 raw bytes per image token. HONEST PROXY: providers bill roughly
+ * (width×height)/750 pixels-per-token, but without decoding the image all we
+ * have is the encoded byte size, which grows with the same order as pixel count
+ * for typical screenshots. Large images therefore estimate higher than the old
+ * flat 1200 instead of being silently undercounted.
+ */
+const IMAGE_BYTES_PER_TOKEN = 750;
+
+/**
+ * Estimate an image block's token cost from its base64 payload size, clamped to
+ * [IMAGE_TOKENS_MIN, IMAGE_TOKENS_MAX]. Missing/odd payloads fall back to the
+ * legacy flat floor.
+ */
+export function imageBlockTokens(base64Data: unknown): number {
+	if (typeof base64Data !== "string" || base64Data.length === 0) return IMAGE_TOKENS_MIN;
+	const bytes = Math.ceil(base64Data.length * BASE64_BYTES_PER_CHAR);
+	return Math.min(IMAGE_TOKENS_MAX, Math.max(IMAGE_TOKENS_MIN, Math.ceil(bytes / IMAGE_BYTES_PER_TOKEN)));
+}
 
 /** Classified char counts for a message — imutável, logo cacheável. */
 interface MessageCharCounts {
 	dense: number;
 	prose: number;
-	images: number; // already in tokens (IMAGE_TOKENS per image)
+	images: number; // already in tokens (imageBlockTokens per image)
 }
 
 const charCountCache = new WeakMap<AgentMessage, MessageCharCounts>();
@@ -703,7 +727,7 @@ function countMessageChars(message: AgentMessage): MessageCharCounts {
 						counts.dense += block.text.length;
 					}
 					if (block.type === "image") {
-						counts.images += IMAGE_TOKENS;
+						counts.images += imageBlockTokens((block as { data?: unknown }).data);
 					}
 				}
 			}
@@ -729,7 +753,7 @@ function countMessageChars(message: AgentMessage): MessageCharCounts {
 /**
  * Estimate token count for a message using content-sensitive heuristics.
  * Dense content (code/JSON/tool output) uses ~3.3 chars/token;
- * prose uses ~4 chars/token. Images count as IMAGE_TOKENS each.
+ * prose uses ~4 chars/token. Images cost imageBlockTokens each (size-scaled).
  * Results are cached per message object (messages are immutable once created).
  */
 export function estimateTokens(message: AgentMessage): number {
@@ -909,18 +933,32 @@ const PRUNE_TAIL_CHARS = 800;
 /** Text shorter than this cannot shrink via head+tail excerpt alone. */
 const PRUNE_MIN_SHRINK_CHARS = PRUNE_HEAD_CHARS + PRUNE_TAIL_CHARS + 64;
 
+/** M11: why a read result was marked superseded — selects the collapse marker. */
+export interface SupersededMutationCause {
+	/** Path VERBATIM as the model passed it to the write/edit (never the normalized key). */
+	path: string;
+}
+
 /** Precomputed supersede scan shared across would* / apply* on the same turn. */
 export interface ContextPrunePlan {
 	protectFromIndex: number;
 	supersededIndices: Set<number>;
+	/**
+	 * M11 write-invalidation causes by superseded index. Entries exist only for
+	 * reads collapsed because a later write/edit changed their file; plain
+	 * duplicate/N4 supersedes use the default (marker-less) collapse.
+	 */
+	supersededMutationCauses: Map<number, SupersededMutationCause>;
 }
 
 /** One O(n) walk producing protect window + supersede index for reuse. */
 export function planContextPrune(messages: AgentMessage[], protectTurns = PRUNE_PROTECT_TURNS): ContextPrunePlan {
 	const protectFromIndex = computePruneProtectFromIndex(messages, protectTurns);
+	const derivation = buildSupersededToolResultIndices(messages, protectFromIndex);
 	return {
 		protectFromIndex,
-		supersededIndices: buildSupersededToolResultIndices(messages, protectFromIndex),
+		supersededIndices: derivation.indices,
+		supersededMutationCauses: derivation.mutationCauses,
 	};
 }
 
@@ -1071,28 +1109,58 @@ function stableStringify(value: unknown): string {
 }
 
 /**
+ * Pure normalization for path identity inside the supersede machine (M10).
+ *
+ * `foo.ts`, `./foo.ts`, `C:\repo\foo.ts` and `C:/REPO/FOO.TS` (Windows) must
+ * hash to ONE resource key, or duplicate reads slip past the dedup and write-
+ * invalidation misses its target. Absolutize via node:path.resolve, unify
+ * separators, and casefold on case-insensitive filesystems (win32/darwin, via
+ * the shared FS_CASE_INSENSITIVE flag). This is the PURE subset of
+ * `canonicalPathKey` (../tools/path-utils.ts): that helper additionally
+ * resolves symlinks through realpathSync.native — filesystem I/O this
+ * per-tool-call scan must not pay — so symlink aliases are deliberately NOT
+ * collapsed here. KEY ONLY: never surface this in a marker or tool arg.
+ */
+function normalizedPathKey(path: string): string {
+	const unified = resolve(path).split("\\").join("/");
+	return FS_CASE_INSENSITIVE ? unified.toLowerCase() : unified;
+}
+
+/** First string path-like argument (same aliases the read key accepted historically), or undefined. */
+function pathArgOf(args: unknown): string | undefined {
+	if (typeof args !== "object" || args === null) return undefined;
+	const a = args as Record<string, unknown>;
+	for (const key of ["path", "file", "file_path", "filename"]) {
+		const v = a[key];
+		if (typeof v === "string" && v.length > 0) return v;
+	}
+	return undefined;
+}
+
+const READ_KEY_PREFIX = "read\u0000";
+
+/** Normalized path component of a read resource key (see supersededResourceKey). */
+function readKeyPath(key: string): string {
+	return key.split("\u0000")[1] ?? "";
+}
+
+/**
  * Resource key for a tool call whose later identical result supersedes the old
- * copy. `read` keeps its path/range aliases for persisted pre-normalization args;
- * other deterministic navigation/search tools use a sorted argument fingerprint.
+ * copy. `read` keys on the NORMALIZED path (M10) + range, so spelling variants
+ * (relative/absolute, slash direction, case on Windows) collapse to one
+ * resource; other deterministic navigation/search tools use a sorted argument
+ * fingerprint.
  */
 function supersededResourceKey(toolName: string, args: unknown): string | undefined {
 	if (!SUPERSEDED_TOOL_RESULT_NAMES.has(toolName)) return undefined;
 	if (toolName === "lsp") return lspSupersededResourceKey(args);
 	if (toolName !== "read") return `${toolName}\u0000${stableStringify(args)}`;
-	if (typeof args !== "object" || args === null) return undefined;
-	const a = args as Record<string, unknown>;
-	let path: string | undefined;
-	for (const key of ["path", "file", "file_path", "filename"]) {
-		const v = a[key];
-		if (typeof v === "string" && v.length > 0) {
-			path = v;
-			break;
-		}
-	}
+	const path = pathArgOf(args);
 	if (!path) return undefined;
+	const a = args as Record<string, unknown>;
 	const offset = typeof a.offset === "number" ? a.offset : "";
 	const limit = typeof a.limit === "number" ? a.limit : "";
-	return `${toolName}\u0000${path}\u0000${offset}\u0000${limit}`;
+	return `${READ_KEY_PREFIX}${normalizedPathKey(path)}\u0000${offset}\u0000${limit}`;
 }
 
 /**
@@ -1108,9 +1176,11 @@ function supersededResourceKey(toolName: string, args: unknown): string | undefi
  * Staleness safety: prune mutations (pruneOldToolOutputs / applySupersedeOnly /
  * elideMutatingToolCallArguments) operate on CLONED arrays that are then
  * reassigned — the cached array is never mutated in place. And even if it were,
- * they rewrite toolResult `block.text` and MUTATING tool-call `arguments`
- * (write/edit — outside SUPERSEDED_TOOL_RESULT_NAMES), neither of which feeds
- * `supersededResourceKey`. Same invariant family as `beforeTokensCache`.
+ * they rewrite toolResult `block.text` and elide only LONG string values inside
+ * MUTATING tool-call `arguments` (write/edit) — short strings like the `path`
+ * the M11 index reads always survive elision — so neither rewrite changes what
+ * `supersededResourceKey`/`pathArgOf` derive. Same invariant family as
+ * `beforeTokensCache`.
  */
 interface SupersedeScanState {
 	/** Messages [0, scannedLength) have been ingested into the maps below. */
@@ -1127,6 +1197,22 @@ interface SupersedeScanState {
 	lastErrorIndexByKey: Map<string, number>;
 	/** Results whose toolCall was not yet seen — retried on each extension. */
 	unkeyedResults: Array<{ index: number; toolCallId: string; isError: boolean }>;
+	/**
+	 * M11: mutating (write/edit/…) call id -> call index + normalized path.
+	 * Calls whose args carry no derivable path store pathKey "" so their results
+	 * are skipped permanently (mirrors the keyByCallId "" sentinel).
+	 */
+	mutationCallById: Map<string, { callIndex: number; pathKey: string; displayPath: string }>;
+	/** M11: normalized path -> newest SUCCESSFUL mutation (verbatim path kept for the marker). */
+	lastMutationByPathKey: Map<string, { index: number; displayPath: string }>;
+	/** M11: successful mutation results whose call was not yet seen — retried like unkeyedResults. */
+	pendingMutationResults: Array<{ toolCallId: string }>;
+	/** N4: grep call id -> normalized `path` arg (single-file-scope candidate). */
+	grepPathKeyByCallId: Map<string, string>;
+	/** N4: grep result index -> normalized `path` arg of its call. */
+	grepPathKeyByIndex: Map<number, string>;
+	/** N4: normalized path -> newest successful FULL (no offset/limit) read result index. */
+	lastFullReadIndexByPathKey: Map<string, number>;
 }
 
 const supersedeScanCache = new WeakMap<AgentMessage[], SupersedeScanState>();
@@ -1139,7 +1225,23 @@ function createSupersedeScanState(): SupersedeScanState {
 		lastIndexByKey: new Map(),
 		lastErrorIndexByKey: new Map(),
 		unkeyedResults: [],
+		mutationCallById: new Map(),
+		lastMutationByPathKey: new Map(),
+		pendingMutationResults: [],
+		grepPathKeyByCallId: new Map(),
+		grepPathKeyByIndex: new Map(),
+		lastFullReadIndexByPathKey: new Map(),
 	};
+}
+
+/** NUL separator of resource keys, derived from the prefix to avoid re-typing the escape. */
+const KEY_SEP = READ_KEY_PREFIX.slice("read".length);
+
+/** True for a read key with neither offset nor limit — the FULL current file content (N4). */
+function isFullReadKey(key: string): boolean {
+	if (!key.startsWith(READ_KEY_PREFIX)) return false;
+	const parts = key.split(KEY_SEP); // ["read", pathKey, offset, limit]
+	return parts[2] === "" && parts[3] === "";
 }
 
 function recordKeyedResult(state: SupersedeScanState, index: number, key: string, isError: boolean): void {
@@ -1149,6 +1251,25 @@ function recordKeyedResult(state: SupersedeScanState, index: number, key: string
 	if (isError) {
 		const prevError = state.lastErrorIndexByKey.get(key);
 		if (prevError === undefined || index > prevError) state.lastErrorIndexByKey.set(key, index);
+	} else if (isFullReadKey(key)) {
+		// N4: a successful FULL read both proves the path is a file (reading a
+		// directory errors) and carries its complete current content — older greps
+		// scoped to exactly this file are covered by it.
+		const pathKey = readKeyPath(key);
+		const prevRead = state.lastFullReadIndexByPathKey.get(pathKey);
+		if (prevRead === undefined || index > prevRead) state.lastFullReadIndexByPathKey.set(pathKey, index);
+	}
+}
+
+/** M11: fold a SUCCESSFUL mutation call into the per-path invalidation index. */
+function recordSuccessfulMutation(
+	state: SupersedeScanState,
+	call: { callIndex: number; pathKey: string; displayPath: string },
+): void {
+	if (call.pathKey === "") return; // no derivable path — nothing to invalidate
+	const prev = state.lastMutationByPathKey.get(call.pathKey);
+	if (prev === undefined || call.callIndex > prev.index) {
+		state.lastMutationByPathKey.set(call.pathKey, { index: call.callIndex, displayPath: call.displayPath });
 	}
 }
 
@@ -1164,12 +1285,36 @@ function extendSupersedeScanState(state: SupersedeScanState, messages: AgentMess
 			const key = supersededResourceKey(block.name, block.arguments);
 			if (key) state.keyByCallId.set(block.id, key);
 			else if (SUPERSEDED_TOOL_RESULT_NAMES.has(block.name)) state.keyByCallId.set(block.id, "");
+			// N4: remember each grep's path arg — if that exact path is later read
+			// in FULL, the read covers (and refreshes) the grep's matches.
+			if (block.name === "grep") {
+				const grepPath = pathArgOf(block.arguments);
+				if (grepPath !== undefined) state.grepPathKeyByCallId.set(block.id, normalizedPathKey(grepPath));
+			}
+			// M11: index mutating calls by path; activation waits for the SUCCESS
+			// result (a rejected write never invalidates — the disk did not change).
+			if (MUTATING_TOOL_NAMES.has(block.name)) {
+				const mutPath = pathArgOf(block.arguments);
+				state.mutationCallById.set(block.id, {
+					callIndex: i,
+					pathKey: mutPath !== undefined ? normalizedPathKey(mutPath) : "",
+					displayPath: mutPath ?? "",
+				});
+			}
 		}
 	}
 	// (2) Tool results in the suffix.
 	for (let i = state.scannedLength; i < messages.length; i++) {
 		const msg = messages[i];
-		if (msg.role !== "toolResult" || !SUPERSEDED_TOOL_RESULT_NAMES.has(msg.toolName ?? "")) continue;
+		if (msg.role !== "toolResult") continue;
+		// M11: a successful mutation result activates write-invalidation for its path.
+		if (MUTATING_TOOL_NAMES.has(msg.toolName ?? "") && msg.isError !== true) {
+			const call = state.mutationCallById.get(msg.toolCallId);
+			if (call === undefined) state.pendingMutationResults.push({ toolCallId: msg.toolCallId });
+			else recordSuccessfulMutation(state, call);
+			continue;
+		}
+		if (!SUPERSEDED_TOOL_RESULT_NAMES.has(msg.toolName ?? "")) continue;
 		const key = state.keyByCallId.get(msg.toolCallId);
 		if (key === undefined) {
 			state.unkeyedResults.push({ index: i, toolCallId: msg.toolCallId, isError: msg.isError === true });
@@ -1177,6 +1322,8 @@ function extendSupersedeScanState(state: SupersedeScanState, messages: AgentMess
 		}
 		if (key === "") continue; // known keyless call — never supersedes
 		recordKeyedResult(state, i, key, msg.isError === true);
+		const grepScope = state.grepPathKeyByCallId.get(msg.toolCallId);
+		if (grepScope !== undefined) state.grepPathKeyByIndex.set(i, grepScope);
 	}
 	// (3) Retry results whose call may have arrived in this (or any later)
 	// suffix. Keeps exact equivalence with the two full passes even when a
@@ -1186,32 +1333,78 @@ function extendSupersedeScanState(state: SupersedeScanState, messages: AgentMess
 		for (const entry of state.unkeyedResults) {
 			const key = state.keyByCallId.get(entry.toolCallId);
 			if (key === undefined) stillUnkeyed.push(entry);
-			else if (key !== "") recordKeyedResult(state, entry.index, key, entry.isError);
+			else if (key !== "") {
+				recordKeyedResult(state, entry.index, key, entry.isError);
+				const grepScope = state.grepPathKeyByCallId.get(entry.toolCallId);
+				if (grepScope !== undefined) state.grepPathKeyByIndex.set(entry.index, grepScope);
+			}
 		}
 		state.unkeyedResults = stillUnkeyed;
+	}
+	// (3b) Same retry for successful mutation results that preceded their call.
+	if (state.pendingMutationResults.length > 0) {
+		const stillPending: SupersedeScanState["pendingMutationResults"] = [];
+		for (const entry of state.pendingMutationResults) {
+			const call = state.mutationCallById.get(entry.toolCallId);
+			if (call === undefined) stillPending.push(entry);
+			else recordSuccessfulMutation(state, call);
+		}
+		state.pendingMutationResults = stillPending;
 	}
 	state.scannedLength = messages.length;
 }
 
+/** Result of the supersede derivation: which indices collapse, and why (when it matters). */
+interface SupersededDerivation {
+	indices: Set<number>;
+	/** M11 write-invalidation entries only; duplicate/N4 supersedes carry no cause. */
+	mutationCauses: Map<number, SupersededMutationCause>;
+}
+
 /**
  * Derivation over the scan state — recomputed on EVERY call (protectFromIndex
- * varies per call, so the final Set must never be cached). Filter identical to
- * the previous full algorithm; always returns a fresh Set.
+ * varies per call, so the final Set must never be cached). Duplicate filter
+ * identical to the previous full algorithm, extended with M11 (a later
+ * successful write/edit of a read's file invalidates the read even without a
+ * re-read) and N4 (a later FULL read of file P covers older greps scoped to
+ * exactly P). Always returns fresh containers.
  */
-function deriveSupersededIndices(state: SupersedeScanState, protectFromIndex: number): Set<number> {
+function deriveSupersededIndices(state: SupersedeScanState, protectFromIndex: number): SupersededDerivation {
 	const superseded = new Set<number>();
+	const mutationCauses = new Map<number, SupersededMutationCause>();
 	for (const [i, key] of state.keyByIndex) {
 		if (i >= protectFromIndex) continue;
-		const last = state.lastIndexByKey.get(key);
-		if (last === undefined || last <= i) continue;
-		// Never collapse the NEWEST error result for a resource. A later retry
-		// supersedes the stale content, but the error itself (why the previous
-		// attempt failed) is often the most valuable context in the transcript.
-		// Older errors of the same resource still collapse.
+		// Never collapse the NEWEST error result for a resource. A later retry —
+		// or a later mutation/full read (M11/N4) — supersedes the stale content,
+		// but the error itself (why the previous attempt failed) is often the most
+		// valuable context in the transcript. Older errors still collapse.
 		if (state.lastErrorIndexByKey.get(key) === i) continue;
-		superseded.add(i);
+		const last = state.lastIndexByKey.get(key);
+		if (last !== undefined && last > i) {
+			superseded.add(i);
+			continue;
+		}
+		// M11: a read whose file was successfully written/edited AFTER this result
+		// contradicts the disk — the most dangerous class of stale context. Any
+		// range of the file is invalidated (the mutation may have moved lines).
+		if (key.startsWith(READ_KEY_PREFIX)) {
+			const mutation = state.lastMutationByPathKey.get(readKeyPath(key));
+			if (mutation !== undefined && mutation.index > i) {
+				superseded.add(i);
+				mutationCauses.set(i, { path: mutation.displayPath });
+				continue;
+			}
+		}
+		// N4: single-file grep covered by a later successful FULL read of the same
+		// file. Directory/multi-file greps never match: a path only enters the
+		// full-read map when a read of it succeeded, which fails for directories.
+		const grepScope = state.grepPathKeyByIndex.get(i);
+		if (grepScope !== undefined) {
+			const fullRead = state.lastFullReadIndexByPathKey.get(grepScope);
+			if (fullRead !== undefined && fullRead > i) superseded.add(i);
+		}
 	}
-	return superseded;
+	return { indices: superseded, mutationCauses };
 }
 
 /**
@@ -1224,7 +1417,7 @@ function deriveSupersededIndices(state: SupersedeScanState, protectFromIndex: nu
  * The scan is incremental per array reference (see {@link SupersedeScanState}):
  * a cache hit only ingests the appended suffix; a new/shrunk array rebuilds.
  */
-function buildSupersededToolResultIndices(messages: AgentMessage[], protectFromIndex: number): Set<number> {
+function buildSupersededToolResultIndices(messages: AgentMessage[], protectFromIndex: number): SupersededDerivation {
 	let state = supersedeScanCache.get(messages);
 	if (!state || messages.length < state.scannedLength) {
 		state = createSupersedeScanState();
@@ -1279,8 +1472,25 @@ export function wouldPruneOldToolOutputs(
 		protectTurns,
 		plan,
 	);
+	// N5 parity: user pastes only prune when a store is open (defer mandatory), so
+	// with no store they never make this pre-check fire. Resolved once per call.
+	const userPasteStore = getCurrentDeferredOutputStore();
+	const firstUserIndex = userPasteStore !== undefined ? firstUserMessageIndex(messages) : -1;
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];
+		if (msg.role === "user") {
+			if (userPasteStore === undefined || i === firstUserIndex) continue;
+			const content = (msg as { content: string | Array<{ type: string; text?: string }> }).content;
+			if (typeof content === "string") {
+				if (estimateTextTokens(content) > tokenThreshold && wouldShrinkViaHeadTail(content)) return true;
+			} else if (Array.isArray(content)) {
+				for (const block of content) {
+					if (block.type !== "text" || !block.text) continue;
+					if (estimateTextTokens(block.text) > tokenThreshold && wouldShrinkViaHeadTail(block.text)) return true;
+				}
+			}
+			continue;
+		}
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
 				if (block.type !== "toolCall" || !MUTATING_TOOL_NAMES.has(block.name)) continue;
@@ -1323,6 +1533,111 @@ export function formatDeferredOutputPlaceholder(tokens: number, id: string): str
 	return `[Full output (~${tokens} tokens) deferred — recall_tool_output({ id: "${id}" }) returns it in full.]`;
 }
 
+/** M11 collapse marker: names the mutated file so the model knows WHY the read is stale. */
+function formatMutationSupersededMarker(path: string): string {
+	return `[superseded: ${path} was modified by a later write/edit — re-read for current content]`;
+}
+
+/**
+ * Collapse one superseded toolResult text block to its head+tail excerpt.
+ *
+ * - M13: `bash` output is non-deterministic — unlike read/grep/ls it is NOT
+ *   reproducible by re-running, so a plain collapse is real information loss.
+ *   When a store is open the FULL text is deferred and the canonical recall
+ *   placeholder rides on the excerpt (~20 tokens); a store failure degrades to
+ *   the plain collapse and never aborts the prune.
+ * - M11: mutation-invalidated reads append a cause marker naming the mutated
+ *   path (verbatim as the model wrote it), telling the reader to re-read.
+ *
+ * Returns reclaimed tokens; 0 when the excerpt would not shrink the block (the
+ * marker/placeholder are never worth ADDING tokens to an already-small block).
+ */
+function collapseSupersededTextBlock(
+	block: { text: string },
+	toolName: string | undefined,
+	mutationCause: SupersededMutationCause | undefined,
+	store: DeferredOutputStore | undefined,
+): number {
+	const est = cachedDenseTextTokens(block, block.text);
+	const excerpt = headTailExcerpt(block.text);
+	if (excerpt.length >= block.text.length) return 0;
+	let replacement = excerpt;
+	if (toolName === "bash" && store !== undefined) {
+		try {
+			replacement += `\n${formatDeferredOutputPlaceholder(est, store.put(block.text))}`;
+		} catch {
+			// Deferred-store failure — keep the plain excerpt.
+		}
+	}
+	if (mutationCause !== undefined) {
+		replacement += `\n${formatMutationSupersededMarker(mutationCause.path)}`;
+	}
+	block.text = replacement;
+	const after = estimateTextTokens(replacement, true);
+	denseTextTokensCache.set(block, after);
+	return Math.max(0, est - after);
+}
+
+/** Index of the session's FIRST user message (the task statement) — never pruned by N5. */
+function firstUserMessageIndex(messages: AgentMessage[]): number {
+	for (let i = 0; i < messages.length; i++) {
+		if (messages[i].role === "user") return i;
+	}
+	return -1;
+}
+
+/**
+ * N5 — defer one oversized user text (pasted log/stack) to the store and return
+ * the head+tail excerpt + recall placeholder. Returns undefined when the text is
+ * below threshold, cannot shrink, or the store put failed: user input has NO
+ * on-disk source of truth to re-derive it from, so without a successful defer
+ * the paste must stay intact (never discardable, unlike tool outputs).
+ */
+function deferredUserPasteReplacement(
+	text: string,
+	tokenThreshold: number,
+	store: DeferredOutputStore,
+): { text: string; reclaimed: number } | undefined {
+	// User pastes are prose/code mixes — classify density instead of forcing dense.
+	const est = estimateTextTokens(text);
+	if (est <= tokenThreshold) return undefined;
+	const excerpt = headTailExcerpt(text);
+	if (excerpt.length >= text.length) return undefined;
+	let id: string;
+	try {
+		id = store.put(text);
+	} catch {
+		return undefined;
+	}
+	const replacement = `${excerpt}\n${formatDeferredOutputPlaceholder(est, id)}`;
+	return { text: replacement, reclaimed: Math.max(0, est - estimateTextTokens(replacement)) };
+}
+
+/**
+ * N5 — shrink oversized text blocks of an OLD user message. Handles both string
+ * content and text-block arrays. Mutates the (cloned) message in place and
+ * returns reclaimed tokens.
+ */
+function pruneUserPasteBlocks(msg: AgentMessage, tokenThreshold: number, store: DeferredOutputStore): number {
+	const content = (msg as { content: string | Array<{ type: string; text?: string }> }).content;
+	if (typeof content === "string") {
+		const result = deferredUserPasteReplacement(content, tokenThreshold, store);
+		if (result === undefined) return 0;
+		(msg as { content: string }).content = result.text;
+		return result.reclaimed;
+	}
+	if (!Array.isArray(content)) return 0;
+	let reclaimed = 0;
+	for (const block of content) {
+		if (block.type !== "text" || !block.text) continue;
+		const result = deferredUserPasteReplacement(block.text, tokenThreshold, store);
+		if (result === undefined) continue;
+		block.text = result.text;
+		reclaimed += result.reclaimed;
+	}
+	return reclaimed;
+}
+
 export function pruneOldToolOutputs(
 	messages: AgentMessage[],
 	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
@@ -1330,19 +1645,31 @@ export function pruneOldToolOutputs(
 	defer = false,
 	plan?: ContextPrunePlan,
 ): number {
-	const { protectFromIndex, supersededIndices: supersededReadIndices } = resolveContextPrunePlan(
-		messages,
-		protectTurns,
-		plan,
-	);
+	const {
+		protectFromIndex,
+		supersededIndices: supersededReadIndices,
+		supersededMutationCauses,
+	} = resolveContextPrunePlan(messages, protectTurns, plan);
 
 	let prunedTokens = 0;
 
 	const store = defer ? getCurrentDeferredOutputStore() : undefined;
 	const errorByCallId = buildToolCallErrorIndex(messages);
+	const firstUserIndex = firstUserMessageIndex(messages);
 
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];
+		// N5: pasted logs/stacks in OLD user messages can be 5-50k tokens. Above
+		// the same threshold, shrink to head+tail + recall id. The defer is
+		// MANDATORY (no store / failed put → paste stays intact — user input has
+		// no disk copy to re-derive). The FIRST user message of the session (the
+		// task statement) is never pruned.
+		if (msg.role === "user") {
+			if (store !== undefined && i !== firstUserIndex) {
+				prunedTokens += pruneUserPasteBlocks(msg, tokenThreshold, store);
+			}
+			continue;
+		}
 		// Assistant tool-call args for mutation tools (write/edit) carry the full
 		// file body / edit text. Once old, that body is redundant — the result
 		// already landed on disk — yet it stays in context at full cost every turn
@@ -1404,17 +1731,17 @@ export function pruneOldToolOutputs(
 					denseTextTokensCache.set(block, after);
 					prunedTokens += Math.max(0, est - after);
 				} else if (superseded) {
-					// A stale duplicate of a deterministic navigation/search result repeated
-					// later (below the size threshold). Collapse it to head+tail — the newer
-					// result carries the current view. Never deferred (a recall id for stale
-					// content is pointless); headTailExcerpt no-ops when already small.
-					const excerpt = headTailExcerpt(block.text);
-					if (excerpt.length < block.text.length) {
-						(msg.content[b] as any).text = excerpt;
-						const after = estimateTextTokens(excerpt, true);
-						denseTextTokensCache.set(block, after);
-						prunedTokens += Math.max(0, est - after);
-					}
+					// A stale result a later call supersedes (below the size threshold):
+					// duplicate read/grep/…, M11 write-invalidated read, or N4 grep covered
+					// by a full read. Collapse to head+tail — deterministic tools re-derive
+					// from disk; bash (non-reproducible) defers its full text when a store
+					// is open (M13); M11 collapses carry a cause marker.
+					prunedTokens += collapseSupersededTextBlock(
+						msg.content[b] as { text: string },
+						msg.toolName,
+						supersededMutationCauses.get(i),
+						store,
+					);
 				}
 			}
 		}
@@ -1426,18 +1753,22 @@ export function pruneOldToolOutputs(
 /**
  * Collapse superseded deterministic tool results to head+tail excerpts only.
  * No large-output defer, no mutation-arg elision — minimal cache churn (A1′).
+ * M13: a superseded `bash` result (non-reproducible output) additionally defers
+ * its full text to the session store when one is open — see
+ * {@link collapseSupersededTextBlock}.
  */
 export function applySupersedeOnly(
 	messages: AgentMessage[],
 	protectTurns = PRUNE_PROTECT_TURNS,
 	plan?: ContextPrunePlan,
 ): number {
-	const { protectFromIndex, supersededIndices: supersededReadIndices } = resolveContextPrunePlan(
-		messages,
-		protectTurns,
-		plan,
-	);
+	const {
+		protectFromIndex,
+		supersededIndices: supersededReadIndices,
+		supersededMutationCauses,
+	} = resolveContextPrunePlan(messages, protectTurns, plan);
 	let prunedTokens = 0;
+	const store = getCurrentDeferredOutputStore();
 
 	for (let i = 0; i < protectFromIndex; i++) {
 		if (!supersededReadIndices.has(i)) continue;
@@ -1446,14 +1777,12 @@ export function applySupersedeOnly(
 		for (let b = 0; b < msg.content.length; b++) {
 			const block = msg.content[b];
 			if (block.type !== "text" || !block.text) continue;
-			const est = cachedDenseTextTokens(block, block.text);
-			const excerpt = headTailExcerpt(block.text);
-			if (excerpt.length < block.text.length) {
-				(msg.content[b] as { text: string }).text = excerpt;
-				const after = estimateTextTokens(excerpt, true);
-				denseTextTokensCache.set(block, after);
-				prunedTokens += Math.max(0, est - after);
-			}
+			prunedTokens += collapseSupersededTextBlock(
+				block as { text: string },
+				msg.toolName,
+				supersededMutationCauses.get(i),
+				store,
+			);
 		}
 	}
 
@@ -1547,9 +1876,9 @@ export function elideMutatingToolCallArguments(messages: AgentMessage[], toolCal
 }
 
 /**
- * Return a new message array where every `toolResult` message — and the
- * text-bearing content blocks inside it — is shallow-cloned, while all other
- * messages pass through by reference.
+ * Return a new message array where every `toolResult`, assistant, and user
+ * message — and the text-bearing content blocks inside it — is shallow-cloned,
+ * while all other messages pass through by reference.
  *
  * `pruneOldToolOutputs` rewrites `block.text` in place. For `type === "message"`
  * entries, `getMessageFromEntry` hands back `entry.message` BY REFERENCE, so the
@@ -1581,6 +1910,20 @@ export function cloneToolResultMessagesForPrune(messages: AgentMessage[]): Agent
 					block.type === "toolCall" || block.type === "thinking" ? { ...block } : block,
 				),
 			};
+		}
+		// User messages: the N5 paste prune rewrites text blocks (or the whole
+		// string content) in place. Clone the text layer so the live session /
+		// branch entry.message stays byte-identical if the prune's consumer aborts.
+		// Fresh objects also sidestep the per-object charCountCache.
+		if (msg.role === "user") {
+			const content = (msg as { content: unknown }).content;
+			if (Array.isArray(content)) {
+				return {
+					...msg,
+					content: content.map((block) => (block?.type === "text" ? { ...block } : block)),
+				} as AgentMessage;
+			}
+			return { ...msg } as AgentMessage;
 		}
 		return msg;
 	});
