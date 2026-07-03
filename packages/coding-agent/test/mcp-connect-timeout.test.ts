@@ -135,11 +135,44 @@ describe("MCP startup connect budget (mcp.connectTimeoutMs)", () => {
 
 		const notice = harness.sentMessages.find((m) => m.customType === "mcp.notice");
 		expect(notice).toBeDefined();
-		expect(notice?.content).toContain("slow");
-		expect(notice?.content).toContain("20ms");
+		// Compact wording: names the server, rounds the sub-second budget up to 1s,
+		// points at /mcp, and drops the old url / "startup budget" / connectTimeoutMs noise.
+		expect(notice?.content).toContain(`"slow"`);
+		expect(notice?.content).toContain("did not connect within 1s");
+		expect(notice?.content).toContain("/mcp");
+		expect(notice?.content).not.toContain(SLOW_URL);
+		expect(notice?.content).not.toContain("startup budget");
+		expect(notice?.content).not.toContain("connectTimeoutMs");
 		expect(notice?.display).toBe(true);
 		// The slow server never registered any tools (it was skipped).
 		expect(harness.registeredTools.has("mcp__slow__ping")).toBe(false);
+
+		harness.fireSessionShutdown();
+	});
+
+	it("aggregates multiple skipped servers into a single notice", async () => {
+		const SLOW_URL_B = "http://localhost:0/slow-b";
+		installMcpFetch({
+			[SLOW_URL]: { delayMs: 60_000, tools: [{ name: "ping" }] },
+			[SLOW_URL_B]: { delayMs: 60_000, tools: [{ name: "pong" }] },
+		});
+		const harness = createFakePi();
+		createMcpExtension({
+			settings: { connectTimeoutMs: 20, servers: { slow: { url: SLOW_URL }, slowB: { url: SLOW_URL_B } } },
+		})(harness.pi);
+		await harness.fireSessionStart();
+
+		await waitFor(() => harness.sentMessages.some((m) => m.customType === "mcp.notice"));
+
+		const notices = harness.sentMessages.filter((m) => m.customType === "mcp.notice");
+		// One aggregated line — not one card per server.
+		expect(notices).toHaveLength(1);
+		const content = notices[0].content;
+		expect(content).toContain("2 servers waiting for on-demand connect");
+		expect(content).toContain("slow");
+		expect(content).toContain("slowB");
+		expect(content).toContain("/mcp");
+		expect(notices[0].display).toBe(true);
 
 		harness.fireSessionShutdown();
 	});

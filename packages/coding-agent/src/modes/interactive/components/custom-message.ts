@@ -21,6 +21,14 @@ const FUSION_FLOW_CUSTOM_TYPE = "pit.fusion-flow";
  */
 const FUSION_SUMMARY_CUSTOM_TYPE = "pit.fusion-summary";
 
+/**
+ * MCP startup-skip notice: emitted (one per server or aggregated) when a server
+ * misses the startup connect budget. Renders as a single muted line prefixed
+ * with a `◦` bullet — no box, no `[customType]` header, no spacer — so it reads
+ * as a quiet aside rather than the loud default custom-message card.
+ */
+const MCP_NOTICE_CUSTOM_TYPE = "mcp.notice";
+
 function labelForKind(kind: FusionSummarySynthesisItem["kind"]): string {
 	if (kind === "consensus") return "consensus";
 	if (kind === "contradiction") return "contradiction";
@@ -51,10 +59,13 @@ export class CustomMessageComponent extends Container {
 		this.customRenderer = customRenderer;
 		this.markdownTheme = markdownTheme;
 
-		// Fusion-flow and fusion-summary lines are compact timeline entries: no leading spacer.
-		const isFusionCompact =
-			message.customType === FUSION_FLOW_CUSTOM_TYPE || message.customType === FUSION_SUMMARY_CUSTOM_TYPE;
-		if (!isFusionCompact) {
+		// Fusion-flow, fusion-summary and mcp.notice lines are compact timeline
+		// entries: no leading spacer.
+		const isCompactLine =
+			message.customType === FUSION_FLOW_CUSTOM_TYPE ||
+			message.customType === FUSION_SUMMARY_CUSTOM_TYPE ||
+			message.customType === MCP_NOTICE_CUSTOM_TYPE;
+		if (!isCompactLine) {
 			this.addChild(new Spacer(1));
 		}
 
@@ -187,6 +198,15 @@ export class CustomMessageComponent extends Container {
 		if (this.message.customType === FUSION_FLOW_CUSTOM_TYPE) {
 			const line = this.extractText();
 			const component = new TruncatedText(theme.fg("muted", line));
+			this.customComponent = component;
+			this.addChild(component);
+			return;
+		}
+
+		// MCP startup-skip notice: a single muted line prefixed with a `◦` bullet,
+		// width-truncated, no box/header/spacer.
+		if (this.message.customType === MCP_NOTICE_CUSTOM_TYPE) {
+			const component = new TruncatedText(theme.fg("muted", `◦ ${this.extractText()}`));
 			this.customComponent = component;
 			this.addChild(component);
 			return;

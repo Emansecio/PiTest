@@ -361,19 +361,25 @@ export function createMcpExtension(options: McpExtensionOptions) {
 			return controller.signal;
 		};
 
-		// Surface a one-line, session-visible notice for each server that missed the
+		// Surface a compact, session-visible notice for the server(s) that missed the
 		// startup connect budget (so the model learns the server exists instead of it
-		// being silently dropped). Only fires when the boot pass was aborted by the
+		// being silently dropped). A single skip names the server; several are folded
+		// into one aggregated line. Only fires when the boot pass was aborted by the
 		// budget timer; per-server errors during a completed pass surface via lastError.
 		const notifyBudgetSkips = (): void => {
 			const skipped = manager.getAllStates().filter((s) => !s.connected && !s.disabled);
-			for (const s of skipped) {
-				pi.sendMessage({
-					customType: "mcp.notice",
-					content: `MCP server "${s.name}" (${s.url}) was skipped: it did not connect within the ${connectBudgetMs}ms startup budget (mcp.connectTimeoutMs). It will connect on demand — run /mcp to retry.`,
-					display: true,
-				});
-			}
+			if (skipped.length === 0) return;
+			// Round the budget to whole seconds for display; never show "0s" for a
+			// sub-second budget. Full command/url and per-server errors stay in /mcp.
+			const budgetSecs = Math.max(1, Math.round(connectBudgetMs / 1000));
+			// One server: name it directly. Several: aggregate into a single line so a
+			// batch of slow servers stays one quiet notice, not a wall of cards. Both
+			// stay self-explanatory for the model — the server exists and connects on demand.
+			const content =
+				skipped.length === 1
+					? `mcp: "${skipped[0].name}" did not connect within ${budgetSecs}s — will connect on demand · /mcp`
+					: `mcp: ${skipped.length} servers waiting for on-demand connect (${skipped.map((s) => s.name).join(", ")}) · /mcp`;
+			pi.sendMessage({ customType: "mcp.notice", content, display: true });
 		};
 
 		const startBootConnect = (): void => {
