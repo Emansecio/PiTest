@@ -188,11 +188,38 @@ type EditToolResultLike = {
 	details?: EditToolDetails;
 };
 
-type EditCallRenderComponent = Box & EditDiffMemoTarget & { lastArgsComplete?: boolean };
+type EditCallRenderComponent = Box &
+	EditDiffMemoTarget & {
+		lastArgsComplete?: boolean;
+		/** Reference identity of the last `args` object seen by renderCall, used to
+		 * skip re-serializing (`JSON.stringify`) an unchanged args object on
+		 * re-renders that aren't caused by a new streamed chunk (setExpanded, theme
+		 * invalidate, setShowImages, etc). `updateArgs` hands out a fresh object per
+		 * streamed chunk, so reference equality reliably detects "new chunk". */
+		lastArgsRef?: unknown;
+		/** The argsKey last computed from `lastArgsRef`, reused verbatim when the
+		 * args reference hasn't changed. */
+		lastArgsKey?: string;
+		/** Wall-clock time (`performance.now()`) of the last dispatched
+		 * `computeEditsDiffWithBaseCache` call, for throttling live-preview
+		 * recompute to ~10Hz during streaming. */
+		lastPreviewDispatchAt?: number;
+		/** argsKey that was actually dispatched for the in-flight/most recent
+		 * compute (as opposed to `previewArgsKey`, which only advances once a
+		 * result for that key has settled onto `component.preview`). Used both to
+		 * avoid redundant dispatches while a key is already in flight and to let a
+		 * resolution for a now-stale key still allow a fresh dispatch. */
+		dispatchedArgsKey?: string;
+	};
 
 function createEditCallRenderComponent(): EditCallRenderComponent {
 	return Object.assign(createEditCallComponentBase(), { lastArgsComplete: false });
 }
+
+/** Live-preview recompute is throttled to roughly this rate (ms) while args are
+ * still streaming, so a fast token stream doesn't re-dispatch a full-file diff
+ * on every chunk. The final args-complete render always bypasses the throttle. */
+const LIVE_PREVIEW_THROTTLE_MS = 100;
 
 function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path: string; edits: Edit[] } | null {
 	if (!args) {
@@ -502,35 +529,82 @@ export function createEditToolDefinition(
 				context.lastComponent,
 				createEditCallRenderComponent,
 			);
-			const previewInput = getRenderablePreviewInput(args as RenderableEditArgs | undefined);
-			const argsKey = previewInput
-				? JSON.stringify({ path: previewInput.path, edits: previewInput.edits })
-				: undefined;
 
-			if (component.previewArgsKey !== argsKey) {
+			// `updateArgs` hands out a brand-new args object per streamed chunk, but
+			// re-renders also happen for reasons unrelated to new args (setExpanded,
+			// a theme invalidate walking every edit in the transcript, setShowImages,
+			// etc). Skip the O(N) JSON.stringify of `edits` (dominated by the
+			// growing newText) on those by memoizing on args reference identity.
+			let argsKey: string | undefined;
+			if (component.lastArgsRef === args) {
+				argsKey = component.lastArgsKey;
+			} else {
+				const previewInput = getRenderablePreviewInput(args as RenderableEditArgs | undefined);
+				argsKey = previewInput ? JSON.stringify({ path: previewInput.path, edits: previewInput.edits }) : undefined;
+				component.lastArgsRef = args;
+				component.lastArgsKey = argsKey;
+			}
+
+			if (component.previewArgsKey !== argsKey && argsKey === undefined) {
+				// Args became non-renderable (e.g. malformed streamed input) — full
+				// reset, matching the pre-throttle behavior exactly.
 				component.preview = undefined;
 				component.previewArgsKey = argsKey;
+				component.dispatchedArgsKey = undefined;
 				component.previewPending = false;
 				component.settledError = false;
 			}
 
 			// Live diff: compute the preview as soon as a renderable input exists,
 			// not only once args finish streaming. The diff grows token-by-token as
-			// newText arrives (each delta changes argsKey, resetting + re-dispatching
-			// above). Rendering reuses the same setEditPreview/buildEditToolCallComponent
-			// path as the final preview, so it's already width-safe.
+			// newText arrives. Rendering reuses the same
+			// setEditPreview/buildEditToolCallComponent path as the final preview, so
+			// it's already width-safe.
+			//
+			// Recompute is throttled to ~10Hz (LIVE_PREVIEW_THROTTLE_MS) while args
+			// stream in, since each chunk would otherwise re-dispatch a full-file
+			// diff at chunk rate (~20-60Hz). While a recompute for a newer key is
+			// pending/throttled, the last successfully computed preview stays
+			// visible (stale-while-revalidate) instead of being cleared to avoid a
+			// flicker back to an empty body. `context.argsComplete` always bypasses
+			// the throttle so the final, correct diff appears immediately.
 			component.lastArgsComplete = context.argsComplete;
-			if (previewInput && !component.preview && !component.previewPending) {
+			const previewInput = getRenderablePreviewInput(args as RenderableEditArgs | undefined);
+			const keyChangedSinceDispatch = argsKey !== component.dispatchedArgsKey;
+			const now = performance.now();
+			const throttleElapsed =
+				component.lastPreviewDispatchAt === undefined ||
+				now - component.lastPreviewDispatchAt >= LIVE_PREVIEW_THROTTLE_MS;
+			if (
+				previewInput &&
+				argsKey !== undefined &&
+				!component.previewPending &&
+				keyChangedSinceDispatch &&
+				(throttleElapsed || context.argsComplete)
+			) {
 				component.previewPending = true;
+				component.dispatchedArgsKey = argsKey;
+				component.lastPreviewDispatchAt = now;
 				const requestKey = argsKey;
 				void computeEditsDiffWithBaseCache(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
-					if (component.previewArgsKey !== requestKey) return;
+					component.previewPending = false;
+					// A newer chunk may have been dispatched (or the input reset to
+					// non-renderable) since this compute started — a stale resolution
+					// must never clobber a newer one. Compare against the key this
+					// specific compute was dispatched for, not the component's latest
+					// dispatchedArgsKey (which may have moved on already).
+					if (component.dispatchedArgsKey !== requestKey) return;
 					// While args are still streaming, a partial oldText/newText may not
 					// match yet — swallow that transient error and let a later delta
 					// retry. Re-read the CURRENT argsComplete (not the value captured at
 					// dispatch) so an error that resolves AFTER args completed is shown.
 					if (!component.lastArgsComplete && "error" in preview) {
-						component.previewPending = false;
+						// Clear dispatchedArgsKey (rather than leaving it at requestKey) so
+						// a later render can re-dispatch for the SAME key — e.g. args never
+						// change again but argsComplete flips true, which must still get a
+						// chance to show the (now non-transient) error immediately rather
+						// than being permanently blocked by the "key unchanged" guard.
+						if (component.dispatchedArgsKey === requestKey) component.dispatchedArgsKey = undefined;
 						return;
 					}
 					setEditPreview(component, preview, requestKey);

@@ -59,15 +59,42 @@ markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
 });
 
-/** True when the buffer ends with an unclosed fenced code block (odd ``` count). */
-function hasOpenCodeFence(text: string): boolean {
+/** Result of scanning a text for ``` fence markers: total count plus the loop's exit state. */
+interface FenceScanState {
+	count: number;
+	// Position from which the next `indexOf("```", searchPos)` should resume. This
+	// is exactly the loop-internal cursor at the point the scan stopped (either
+	// last-match-index + 3, or the initial 0 if there was no match yet) — NOT
+	// text.length. Preserving this (rather than restarting at text.length) is what
+	// keeps a resumed scan's 3-byte skip alignment identical to a from-scratch scan.
+	searchPos: number;
+}
+
+/**
+ * Scan text for ``` fence markers starting at fromPos, continuing the loop
+ * invariant of hasOpenCodeFence: each match advances the cursor by 3 (the fence
+ * length) before searching again, never by more. Returns the total match count
+ * found in this scan plus the resulting resume cursor.
+ */
+function scanFences(text: string, fromPos: number): FenceScanState {
 	let count = 0;
-	let idx = text.indexOf("```");
+	let idx = text.indexOf("```", fromPos);
+	let searchPos = fromPos;
 	while (idx !== -1) {
 		count++;
-		idx = text.indexOf("```", idx + 3);
+		searchPos = idx + 3;
+		idx = text.indexOf("```", searchPos);
 	}
-	return count % 2 === 1;
+	return { count, searchPos };
+}
+
+/**
+ * True when the buffer ends with an unclosed fenced code block (odd ``` count).
+ * Exported for test use as the full-scan oracle that
+ * Markdown#hasOpenCodeFenceIncremental must always agree with.
+ */
+export function hasOpenCodeFence(text: string): boolean {
+	return scanFences(text, 0).count % 2 === 1;
 }
 
 /**
@@ -104,6 +131,8 @@ export interface MarkdownTheme {
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
 	codeBlockBorder: (text: string) => string;
+	/** Optional styling for the language label of a code block (defaults to `codeBlockBorder` when omitted). */
+	codeBlockLang?: (text: string) => string;
 	quote: (text: string) => string;
 	quoteBorder: (text: string) => string;
 	hr: (text: string) => string;
@@ -156,6 +185,50 @@ export class Markdown implements Component {
 	// path (vs a full re-lex). Exposed via _incrementalLexCount() for the
 	// equivalence suite to confirm the fast path is actually exercised.
 	private incrementalLexCount = 0;
+	// Table cell measurement cache: cellText (already-rendered, ANSI included) ->
+	// { natural: visibleWidth(cellText), minWord: getLongestWordWidth(cellText, 30) }.
+	// renderTable's maxUnbrokenWordWidth is always 30, so it is not part of the
+	// key. Keyed by rendered text (not raw token), so a hit is valid regardless
+	// of width/theme/token-identity churn. Like tokenLineCache, this is NOT
+	// cleared by invalidate() — invalidate() runs on every setText(), i.e. every
+	// streamed chunk, and the whole point of this cache is that ~99% of a
+	// table's cells are byte-identical chunk-to-chunk, so wiping it per-chunk
+	// would defeat the optimization entirely. It self-bounds via the size cap
+	// below instead.
+	private cellMeasureCache = new Map<string, { natural: number; minWord: number }>();
+	// Test-only counter: cellMeasureCache hits. Exposed via
+	// _cellMeasureCacheHitCount() so the table-caching regression test can
+	// confirm unchanged cells actually hit the cache on a re-render (vs merely
+	// producing the same output some other way).
+	private cellMeasureCacheHits = 0;
+	// Table cell wrap cache: `${columnWidth} ${cellText}` -> wrapTextWithAnsi(...)
+	// result. CONTRACT: callers must treat the returned array as read-only — it is
+	// shared across renders and mutating it would corrupt future cache hits.
+	// Same not-cleared-by-invalidate() reasoning as cellMeasureCache above.
+	private cellWrapCache = new Map<string, string[]>();
+	// Cache size above which we drop the whole cache rather than track LRU/size —
+	// real tables never approach this many distinct cell renders per session.
+	private static readonly MAX_CELL_CACHE_ENTRIES = 4096;
+	// Incremental open-code-fence state, tracked independently of the lex baseline
+	// (lastNormalizedText etc.) so it stays correct regardless of tokenLineCache/
+	// lex fallback ordering. lastFenceText is the exact string the count/searchPos
+	// describe; on an append we resume scanFences from lastFenceSearchPos instead
+	// of re-scanning the whole buffer. Any non-append change forces a full rescan.
+	private lastFenceText?: string;
+	private lastFenceCount = 0;
+	private lastFenceSearchPos = 0;
+	// Memoizes the tokenLineCache cacheKey per token OBJECT (not per raw string).
+	// tryIncrementalLex reuses stable-prefix token objects across renders, so the
+	// same object typically needs the same key rebuilt every render even though
+	// only token.raw (never mutated after lex) actually determines the bulk of
+	// the string — the (width, nextTokenType, deferCodeHighlight) triple is what
+	// changes. Recomputing the key string re-hashes token.raw (which can be many
+	// KB for a code block) on every render; caching it per-object means the raw
+	// is only ever concatenated+hashed once per distinct (token, width, next,
+	// defer) combination. A WeakMap needs no pruning/invalidate() clearing: it is
+	// keyed by object identity, dead tokens are GC'd with it, and the key format
+	// doesn't depend on theme (which invalidate() resets via tokenLineCache).
+	private tokenKeyCache = new WeakMap<Token, { width: number; next: string; defer: boolean; key: string }>();
 
 	constructor(
 		text: string,
@@ -237,7 +310,7 @@ export class Markdown implements Component {
 		const contentLines: string[] = [];
 
 		let deferHighlightCodeIdx = -1;
-		if (hasOpenCodeFence(normalizedText)) {
+		if (this.hasOpenCodeFenceIncremental(normalizedText)) {
 			for (let j = tokens.length - 1; j >= 0; j--) {
 				if (tokens[j]?.type === "code") {
 					deferHighlightCodeIdx = j;
@@ -250,7 +323,7 @@ export class Markdown implements Component {
 			const token = tokens[i];
 			const nextTokenType = tokens[i + 1]?.type;
 			const deferCodeHighlight = i === deferHighlightCodeIdx;
-			const cacheKey = `${width}\u0000${nextTokenType ?? ""}\u0000${deferCodeHighlight ? 1 : 0}\u0000${token.raw}`;
+			const cacheKey = this.getTokenCacheKey(token, width, nextTokenType, deferCodeHighlight);
 			let tokenLines = prevTokenCache?.get(cacheKey) ?? nextTokenCache.get(cacheKey);
 			if (!tokenLines) {
 				tokenLines = this.buildTokenLines(
@@ -295,6 +368,11 @@ export class Markdown implements Component {
 		return this.incrementalLexCount;
 	}
 
+	/** Test-only: cumulative cellMeasureCache hit count (see getCellMeasurements). */
+	_cellMeasureCacheHitCount(): number {
+		return this.cellMeasureCacheHits;
+	}
+
 	/**
 	 * Normalize this.text (tab → 3 spaces) reusing the previously normalized
 	 * prefix when the new text is an append of the last one. Tab expansion is a
@@ -313,6 +391,37 @@ export class Markdown implements Component {
 			return this.lastNormalizedText + delta.replace(/\t/g, "   ");
 		}
 		return this.text.replace(/\t/g, "   ");
+	}
+
+	/**
+	 * True when normalizedText ends with an unclosed fenced code block (odd ```
+	 * count), computed incrementally when possible.
+	 *
+	 * hasOpenCodeFence's `indexOf("```", idx+3)` loop is strictly left-to-right
+	 * and deterministic: once it has scanned a prefix, every match position and
+	 * the loop's resume cursor (searchPos) are fixed facts about that prefix that
+	 * cannot change no matter what text follows. So when normalizedText is an
+	 * append of the last text this was called with, we resume scanFences from the
+	 * saved searchPos over the (small) new suffix — the matches found are exactly
+	 * the ones a full scanFences(normalizedText, 0) would find, because the stable
+	 * prefix cannot retroactively gain or lose a match, and no match can start
+	 * before searchPos (the previous scan already proved no `\`\`\`` exists
+	 * between the prior cursor positions and searchPos). Any non-append change
+	 * (including a shrink, or a divergent edit) forces a full rescan.
+	 */
+	private hasOpenCodeFenceIncremental(normalizedText: string): boolean {
+		const last = this.lastFenceText;
+		let state: FenceScanState;
+		if (last !== undefined && normalizedText.startsWith(last) && normalizedText.length >= last.length) {
+			state = scanFences(normalizedText, this.lastFenceSearchPos);
+			state.count += this.lastFenceCount;
+		} else {
+			state = scanFences(normalizedText, 0);
+		}
+		this.lastFenceText = normalizedText;
+		this.lastFenceCount = state.count;
+		this.lastFenceSearchPos = state.searchPos;
+		return state.count % 2 === 1;
 	}
 
 	/**
@@ -435,6 +544,32 @@ export class Markdown implements Component {
 		}
 
 		return merged;
+	}
+
+	/**
+	 * Compute the tokenLineCache key for a token at a given (width,
+	 * nextTokenType, deferCodeHighlight), reusing a memoized key string per
+	 * token OBJECT when none of those three inputs changed since the last call
+	 * for that object. tryIncrementalLex keeps reusing the same token objects
+	 * across renders for the stable prefix, so this avoids re-concatenating (and
+	 * lazily re-hashing) token.raw — which can be many KB for a code block —
+	 * on every single render. The produced key string is byte-identical to the
+	 * inline template it replaces; only its construction is memoized.
+	 */
+	private getTokenCacheKey(
+		token: Token,
+		width: number,
+		nextTokenType: string | undefined,
+		deferCodeHighlight: boolean,
+	): string {
+		const next = nextTokenType ?? "";
+		const cached = this.tokenKeyCache.get(token);
+		if (cached && cached.width === width && cached.next === next && cached.defer === deferCodeHighlight) {
+			return cached.key;
+		}
+		const key = `${width}\u0000${next}\u0000${deferCodeHighlight ? 1 : 0}\u0000${token.raw}`;
+		this.tokenKeyCache.set(token, { width, next, defer: deferCodeHighlight, key });
+		return key;
 	}
 
 	/**
@@ -616,7 +751,6 @@ export class Markdown implements Component {
 		switch (token.type) {
 			case "heading": {
 				const headingLevel = token.depth;
-				const headingPrefix = `${"#".repeat(headingLevel)} `;
 
 				// Build a heading-specific style context so inline tokens (codespan, bold, etc.)
 				// restore heading styling after their own ANSI resets instead of falling back to
@@ -638,8 +772,9 @@ export class Markdown implements Component {
 				};
 
 				const headingText = this.renderInlineTokens(token.tokens || [], headingStyleContext);
-				const styledHeading = headingLevel >= 3 ? headingStyleFn(headingPrefix) + headingText : headingText;
-				lines.push(styledHeading);
+				// H3+ no longer leaks the literal "### " prefix; bold heading color + the
+				// H2 accent bar being absent is enough to distinguish levels.
+				lines.push(headingText);
 				if (nextTokenType && nextTokenType !== "space") {
 					this.pushBlockSpacing(lines); // Add spacing after headings (unless space token follows)
 				}
@@ -661,20 +796,26 @@ export class Markdown implements Component {
 				break;
 
 			case "code": {
+				// Gutter is the `│ ` border; codeBlockIndent is internal breathing room
+				// between the gutter and the content (default "  " → 2 columns). It applies
+				// to the language label too so the label lines up with the code.
 				const gutter = this.theme.codeBlockBorder("│ ");
+				const indent = this.theme.codeBlockIndent ?? "";
+				const prefix = gutter + indent;
 				if (typeof token.lang === "string" && token.lang.length > 0) {
-					lines.push(gutter + this.theme.codeBlockBorder(token.lang));
+					const langStyle = this.theme.codeBlockLang ?? this.theme.codeBlockBorder;
+					lines.push(prefix + langStyle(token.lang));
 				}
 				if (this.theme.highlightCode && !deferCodeHighlight) {
 					const highlightedLines = this.theme.highlightCode(token.text, token.lang);
 					for (const hlLine of highlightedLines) {
-						lines.push(gutter + hlLine);
+						lines.push(prefix + hlLine);
 					}
 				} else {
 					// Split code by newlines and style each line
 					const codeLines = token.text.split("\n");
 					for (const codeLine of codeLines) {
-						lines.push(gutter + this.theme.codeBlock(codeLine));
+						lines.push(prefix + this.theme.codeBlock(codeLine));
 					}
 				}
 				if (nextTokenType && nextTokenType !== "space") {
@@ -981,6 +1122,50 @@ export class Markdown implements Component {
 	}
 
 	/**
+	 * Look up (or compute + cache) a cell's natural visible width and its
+	 * longest-unbroken-word width (capped at maxUnbrokenWordWidth=30, the only
+	 * value ever passed here, so it is not part of the key). Keyed by the
+	 * already-rendered cellText, which fully determines both measurements.
+	 * During streaming, ~99% of a table's cells are byte-identical across
+	 * chunks, so this turns an O(R*C) re-measure per chunk into a cache hit.
+	 */
+	private getCellMeasurements(cellText: string): { natural: number; minWord: number } {
+		const cached = this.cellMeasureCache.get(cellText);
+		if (cached) {
+			this.cellMeasureCacheHits++;
+			return cached;
+		}
+		if (this.cellMeasureCache.size >= Markdown.MAX_CELL_CACHE_ENTRIES) {
+			this.cellMeasureCache.clear();
+		}
+		const measurements = {
+			natural: visibleWidth(cellText),
+			minWord: this.getLongestWordWidth(cellText, 30),
+		};
+		this.cellMeasureCache.set(cellText, measurements);
+		return measurements;
+	}
+
+	/**
+	 * Look up (or compute + cache) the wrapped lines for a cell at a given
+	 * column width. CONTRACT: the returned array is shared with the cache —
+	 * callers must never mutate it (push/sort/splice/etc.), only read it.
+	 */
+	private getCellWrapLines(cellText: string, columnWidth: number): string[] {
+		const key = `${columnWidth} ${cellText}`;
+		const cached = this.cellWrapCache.get(key);
+		if (cached) {
+			return cached;
+		}
+		if (this.cellWrapCache.size >= Markdown.MAX_CELL_CACHE_ENTRIES) {
+			this.cellWrapCache.clear();
+		}
+		const wrapped = this.wrapCellText(cellText, columnWidth);
+		this.cellWrapCache.set(key, wrapped);
+		return wrapped;
+	}
+
+	/**
 	 * Render a table with width-aware cell wrapping.
 	 * Cells that don't fit are wrapped to multiple lines.
 	 */
@@ -1025,8 +1210,6 @@ export class Markdown implements Component {
 			return fallbackLines;
 		}
 
-		const maxUnbrokenWordWidth = 30;
-
 		// Calculate natural column widths (what each column needs without constraints).
 		// Cache rendered cell text so the sizing pass isn't repeated during output.
 		const naturalWidths: number[] = [];
@@ -1035,8 +1218,9 @@ export class Markdown implements Component {
 		for (let i = 0; i < numCols; i++) {
 			const headerText = this.renderInlineTokens(token.header[i].tokens || [], styleContext);
 			headerTexts[i] = headerText;
-			naturalWidths[i] = visibleWidth(headerText);
-			minWordWidths[i] = Math.max(1, this.getLongestWordWidth(headerText, maxUnbrokenWordWidth));
+			const { natural, minWord } = this.getCellMeasurements(headerText);
+			naturalWidths[i] = natural;
+			minWordWidths[i] = Math.max(1, minWord);
 		}
 		const rowTexts: string[][] = [];
 		for (const row of token.rows) {
@@ -1045,11 +1229,9 @@ export class Markdown implements Component {
 			for (let i = 0; i < row.length; i++) {
 				const cellText = this.renderInlineTokens(row[i].tokens || [], styleContext);
 				rowText[i] = cellText;
-				naturalWidths[i] = Math.max(naturalWidths[i] || 0, visibleWidth(cellText));
-				minWordWidths[i] = Math.max(
-					minWordWidths[i] || 1,
-					this.getLongestWordWidth(cellText, maxUnbrokenWordWidth),
-				);
+				const { natural, minWord } = this.getCellMeasurements(cellText);
+				naturalWidths[i] = Math.max(naturalWidths[i] || 0, natural);
+				minWordWidths[i] = Math.max(minWordWidths[i] || 1, minWord);
 			}
 		}
 
@@ -1129,7 +1311,7 @@ export class Markdown implements Component {
 
 		// Render header with wrapping
 		const headerCellLines: string[][] = token.header.map((_cell, i) => {
-			return this.wrapCellText(headerTexts[i], columnWidths[i]);
+			return this.getCellWrapLines(headerTexts[i], columnWidths[i]);
 		});
 		const headerLineCount = Math.max(...headerCellLines.map((c) => c.length));
 
@@ -1150,7 +1332,7 @@ export class Markdown implements Component {
 		// Render rows with wrapping
 		for (let rowIndex = 0; rowIndex < token.rows.length; rowIndex++) {
 			const rowCellLines: string[][] = token.rows[rowIndex].map((_cell, i) => {
-				return this.wrapCellText(rowTexts[rowIndex][i], columnWidths[i]);
+				return this.getCellWrapLines(rowTexts[rowIndex][i], columnWidths[i]);
 			});
 			const rowLineCount = Math.max(...rowCellLines.map((c) => c.length));
 

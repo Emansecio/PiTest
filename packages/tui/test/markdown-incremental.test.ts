@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { Markdown } from "../src/components/markdown.js";
+import { hasOpenCodeFence, Markdown } from "../src/components/markdown.js";
 import { defaultMarkdownTheme } from "./test-themes.js";
 
 // Equivalence suite for incremental markdown lexation.
@@ -206,6 +206,158 @@ describe("Markdown incremental lexation equivalence", () => {
 
 		// Resume appending from the diverged text.
 		const resumed = `${diverged} appended`;
+		md.setText(resumed);
+		assert.deepStrictEqual(md.render(80), new Markdown(resumed, 0, 0, defaultMarkdownTheme).render(80));
+	});
+});
+
+// Regression suite for the two table-render perf caches (cellMeasureCache,
+// cellWrapCache) added alongside per-cell caching in renderTable. The
+// contract mirrors the lexation suite above: streaming (growing-text)
+// re-renders of a table must be byte-identical to a fresh component built on
+// the final text, and — since these caches exist purely for performance —
+// unchanged cells must actually hit the cache on the second render.
+describe("Markdown table cell cache", () => {
+	it("streamed table (2 renders, growing text) matches a fresh instance on the final text", () => {
+		const base = "Intro line.\n\n| Name | Role | Notes |\n| --- | --- | --- |\n| Alice | Eng | Works on the";
+		const grown = `${base} backend and also owns the deploy pipeline |\n| Bob | PM | Ships things |\n\nDone.`;
+
+		const persistent = new Markdown(base, 0, 0, defaultMarkdownTheme);
+		persistent.render(80); // first render: table only has the partial last cell/row
+		persistent.setText(grown);
+		const streamed = persistent.render(80);
+
+		const fresh = new Markdown(grown, 0, 0, defaultMarkdownTheme).render(80);
+		assert.deepStrictEqual(streamed, fresh);
+	});
+
+	it("streamed table equivalence across widths (mirrors assertStreamingEquivalence pattern)", () => {
+		const doc =
+			"Table follows:\n\n| Col A | Col B | Col C |\n| --- | --- | --- |\n| short | a somewhat longer cell value | x |\n| another row | y | z z z |\n\nDone.";
+		for (const width of [80, 40, 120]) {
+			const persistent = new Markdown("", 0, 0, defaultMarkdownTheme);
+			for (let cut = 1; cut <= doc.length; cut += 7) {
+				persistent.setText(doc.slice(0, cut));
+				const a = persistent.render(width);
+				const b = new Markdown(doc.slice(0, cut), 0, 0, defaultMarkdownTheme).render(width);
+				assert.deepStrictEqual(a, b, `mismatch at cut=${cut} width=${width}`);
+			}
+			persistent.setText(doc);
+			assert.deepStrictEqual(persistent.render(width), new Markdown(doc, 0, 0, defaultMarkdownTheme).render(width));
+		}
+	});
+
+	it("re-rendering a table with only the last cell changed hits the measurement cache", () => {
+		const before =
+			"| Name | Age | City |\n| --- | --- | --- |\n| Alice | 30 | NYC |\n| Bob | 25 | LA |\n| Carl | 40 | SF ";
+		const after = `${before}extra`; // only the last cell's text grows
+
+		const md = new Markdown(before, 0, 0, defaultMarkdownTheme);
+		md.render(80);
+		const hitsBefore = md._cellMeasureCacheHitCount();
+
+		md.setText(after);
+		md.render(80);
+		const hitsAfter = md._cellMeasureCacheHitCount();
+
+		assert.ok(
+			hitsAfter > hitsBefore,
+			`expected cellMeasureCache hits on unchanged cells (before=${hitsBefore}, after=${hitsAfter})`,
+		);
+	});
+
+	it("prunes the measurement cache once it exceeds the entry cap without corrupting output", () => {
+		// Build a wide table whose cells are all distinct, forcing the cache well
+		// past MAX_CELL_CACHE_ENTRIES (4096) so the clear()-on-overflow path runs.
+		const numRows = 600;
+		const header = "| A | B | C | D | E | F | G | H |";
+		const sep = "| --- | --- | --- | --- | --- | --- | --- | --- |";
+		const rows: string[] = [];
+		for (let r = 0; r < numRows; r++) {
+			const cells = Array.from({ length: 8 }, (_, c) => `r${r}c${c}`);
+			rows.push(`| ${cells.join(" | ")} |`);
+		}
+		const doc = [header, sep, ...rows].join("\n");
+
+		const md = new Markdown(doc, 0, 0, defaultMarkdownTheme);
+		const rendered = md.render(80);
+		const fresh = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(80);
+		assert.deepStrictEqual(rendered, fresh);
+
+		// Re-render (cache already warm/pruned from the render above) still
+		// matches — pruning must not leave the cache in a state that produces
+		// stale/wrong measurements on a subsequent render of the same table.
+		assert.deepStrictEqual(md.render(80), fresh);
+	});
+});
+
+// Regression suite for the incremental hasOpenCodeFence tracker. The oracle is
+// the exported free-function full-scan hasOpenCodeFence(); the persistent
+// Markdown instance's internal incremental tracker must always agree with it,
+// verified indirectly through code-highlight deferral behavior (the only
+// externally observable effect of hasOpenCodeFence) across pathological
+// backtick sequences.
+describe("Markdown incremental open-code-fence tracking", () => {
+	/**
+	 * Drive `doc` through every prefix length and assert a persistent instance
+	 * (setText per step, exercising the incremental fence tracker) defers code
+	 * highlighting identically to a fresh instance at each step — the fresh
+	 * instance's hasOpenCodeFence result is always a full scan, so agreement
+	 * proves the incremental tracker matches the oracle at every prefix.
+	 */
+	function assertFenceTrackingEquivalence(doc: string): void {
+		const persistent = new Markdown("", 0, 0, defaultMarkdownTheme);
+		for (let cut = 1; cut <= doc.length; cut++) {
+			const prefix = doc.slice(0, cut);
+			persistent.setText(prefix);
+			const a = persistent.render(80);
+			const b = new Markdown(prefix, 0, 0, defaultMarkdownTheme).render(80);
+			assert.deepStrictEqual(a, b, `mismatch at cut=${cut} for prefix=${JSON.stringify(prefix)}`);
+		}
+	}
+
+	it("agrees with the full-scan oracle across pathological consecutive-backtick appends", () => {
+		// Odd run of 5 backticks, then append one more backtick, then a language
+		// tag and close — exercises the searchPos 3-byte-skip alignment across
+		// awkward boundaries.
+		const doc = "text `````\nmore` text\n```ts\ncode here\n```\nafter";
+		assertFenceTrackingEquivalence(doc);
+	});
+
+	it("agrees with the full-scan oracle for normal fences opening and closing", () => {
+		const doc = "Intro\n\n```js\nconst a = 1;\n```\n\nMiddle\n\n```\nplain fence\n```\n\nEnd";
+		assertFenceTrackingEquivalence(doc);
+	});
+
+	it("agrees with the full-scan oracle when a fence never closes (stays open)", () => {
+		const doc = "Before\n\n```python\ndef f():\n    return 1\n";
+		assertFenceTrackingEquivalence(doc);
+	});
+
+	it("hasOpenCodeFence oracle: odd vs even backtick-triple counts", () => {
+		assert.strictEqual(hasOpenCodeFence(""), false);
+		assert.strictEqual(hasOpenCodeFence("```"), true);
+		assert.strictEqual(hasOpenCodeFence("``````"), false);
+		assert.strictEqual(hasOpenCodeFence("`````"), true); // 5 backticks: one ``` match, 2 chars left over
+		assert.strictEqual(hasOpenCodeFence("````````"), false); // 8 backticks: two ``` matches (skip-by-3 aligned)
+		assert.strictEqual(hasOpenCodeFence("``` ```"), false);
+		assert.strictEqual(hasOpenCodeFence("``` ``` ```"), true);
+	});
+
+	it("incremental tracker matches the oracle when fed the pathological doc in one shot after growing", () => {
+		// Directly exercise the non-monotonic internal state: grow, then jump to
+		// an unrelated (non-append) text, then resume appending — the tracker
+		// must fall back to a full scan on the non-append edit and stay correct.
+		const md = new Markdown("", 0, 0, defaultMarkdownTheme);
+		const grown = "`````" + "x";
+		md.setText(grown);
+		assert.deepStrictEqual(md.render(80), new Markdown(grown, 0, 0, defaultMarkdownTheme).render(80));
+
+		const diverged = "``` totally different ``` content ```";
+		md.setText(diverged);
+		assert.deepStrictEqual(md.render(80), new Markdown(diverged, 0, 0, defaultMarkdownTheme).render(80));
+
+		const resumed = `${diverged}\`\n\`\`\`ts\ncode\n`;
 		md.setText(resumed);
 		assert.deepStrictEqual(md.render(80), new Markdown(resumed, 0, 0, defaultMarkdownTheme).render(80));
 	});
