@@ -63,6 +63,36 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 - **Cross-cutting steering** (reminders, not blockers): doom-loop, stagnation, todo-cadence, failure-budget (per-turn cap with optional cross-turn carryover via half-life decay; opt out `toolFeedback.failureBudget.carryover: false`) — nudge the model without vetoing.
 - **Session Recovery** (`session-recovery.ts` + `TurnSteeringEngine`): reactive scaffolding uplift. Every session starts **`lean`** (behavior-identical to the historical harness). When thrash signals fire (doom-loop tiers, result-loop, cross-error, failure-budget, repeating-pattern, verification exhausted, stagnation hard), the level rises **`guided` → `strict`**, enabling: error-reflection via **steer** (not stale `followUp`), tighter loop thresholds, +1/+2 verify `maxAttempts`, one-shot narration steer. Clean tool-success streaks de-escalate. **Not** model-tier classification — opt out `PIT_NO_SESSION_RECOVERY=1`. Telemetry: `quality.recovery`.
 
+## Band P — pre-generation conditioning (PLANNED — not yet built)
+
+> **Status: approved design, zero pillars implemented.** Do NOT rely on any layer below
+> existing at runtime, and do NOT build a parallel version of one — the design, decisions
+> and phased roadmap live in [`conditioning-band-study.md`](conditioning-band-study.md).
+> Each pillar flips to "active" here as its phase ships.
+
+Where every band above reacts (validate the call, repair the result, correct the
+behavior), Band P shapes what the model sees and intends BEFORE it generates:
+
+- **P0 — supervision thermostat + efficacy telemetry** (Phase 0): per-session
+  supervision level (`assistido → padrão → leve`) earned by the model's observed output
+  signals (guard fires, verification failures), with asymmetric hysteresis and
+  per-session reset — no cross-session self-regulation, no model lists to maintain
+  (only fixed prior: native `anthropic`/`openai` start `leve`). Plus a durable
+  guard-fired→next-call-outcome telemetry sink.
+- **P1 — ground-truth injection**: real signatures/outlines of the symbols the turn
+  will likely touch, injected via the two cache-neutral lanes (dynamic suffix +
+  `context` event), token-capped by thermostat level (1200/800/400).
+- **P2 — intent gate**: risky tasks (task-rigor ≥ 2) require a micro-plan validated
+  against the real tree (pure `groundPath`/`checkExistence`) before the first edit —
+  blocks at protected levels, nudges at `leve`.
+- **P3 — exemplar anchoring**: 10-30 lines of the repo's analogous code injected next
+  to the edit site as a style reference (protected levels only).
+- **P4 — structured self-review**: large diffs (any level) and medium diffs (at
+  `assistido`) get a read-only review subagent (fusion-verify pattern) whose high
+  findings gate `goal_complete`.
+- **P5 — conventions contract**: verification failures distilled into standing
+  session constraints (cap 5, session-scoped in v1) re-injected via the dynamic suffix.
+
 ---
 
 ## How to use this map
