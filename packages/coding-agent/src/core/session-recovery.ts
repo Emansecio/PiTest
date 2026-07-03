@@ -10,6 +10,11 @@
 
 import { recordDiagnostic } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
+import {
+	SupervisionThermostat,
+	setCurrentSupervisionThermostat,
+	type ThermostatModelInfo,
+} from "./supervision-thermostat.ts";
 
 export type RecoveryLevel = "lean" | "guided" | "strict";
 
@@ -33,6 +38,13 @@ export interface RecoverySnapshot {
 
 export interface SessionRecoveryControllerOptions {
 	onLevelChange?: (from: RecoveryLevel, to: RecoveryLevel, signal?: RecoverySignal) => void;
+	/**
+	 * Active model, forwarded to the supervision thermostat so a native
+	 * anthropic/openai provider earns a lighter start level. Optional and
+	 * forward-compatible: the existing no-arg construction in agent-session keeps
+	 * a `padrao` start (the thermostat is observe-only in Fase 0, so this is inert).
+	 */
+	model?: ThermostatModelInfo;
 }
 
 /** Weight of each thrash signal toward escalation. */
@@ -90,9 +102,21 @@ export class SessionRecoveryController {
 	private _narrationSteerPending = false;
 	private _strictNarrationSteerPending = false;
 	private readonly _onLevelChange?: SessionRecoveryControllerOptions["onLevelChange"];
+	// Band P / P0a supervision thermostat. Instantiated alongside recovery (which
+	// already owns the session's hysteresis) so agent-session need not change. It is
+	// OBSERVE-ONLY in Fase 0: recovery notes signals/clean-tools into it, and it also
+	// subscribes to the diagnostics channel itself for guard blocks + task boundaries.
+	private readonly _thermostat: SupervisionThermostat;
 
 	constructor(options: SessionRecoveryControllerOptions = {}) {
 		this._onLevelChange = options.onLevelChange;
+		this._thermostat = new SupervisionThermostat({ model: options.model });
+		setCurrentSupervisionThermostat(this._thermostat);
+	}
+
+	/** The supervision thermostat co-located with this controller (Band P / P0a). */
+	getSupervisionThermostat(): SupervisionThermostat {
+		return this._thermostat;
 	}
 
 	getLevel(): RecoveryLevel {
@@ -112,6 +136,10 @@ export class SessionRecoveryController {
 	/** Thrash observed — resets the clean streak and may escalate the level. */
 	noteSignal(signal: RecoverySignal): void {
 		if (isSessionRecoveryDisabled()) return;
+		// Couple the supervision thermostat: every recovery thrash signal is a
+		// qualifying tighten signal (lock #1, tighten immediately). Guard blocks reach
+		// the thermostat separately via its own onDiagnostic subscription.
+		this._thermostat.noteSignal(signal);
 		const weight = SIGNAL_WEIGHT[signal];
 		this._cleanStreak = 0;
 		this._totalThrashScore += weight;
@@ -130,6 +158,8 @@ export class SessionRecoveryController {
 	/** Successful tool call — may de-escalate after a clean streak. */
 	noteCleanTool(): void {
 		if (isSessionRecoveryDisabled()) return;
+		// Feed the thermostat's clean streak too (it only loosens at a task boundary).
+		this._thermostat.noteCleanTool();
 		this._cleanStreak++;
 		const prev = this._level;
 		if (this._level === "strict") {
