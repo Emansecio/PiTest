@@ -71,7 +71,7 @@ export function createEditPreconditionExtension(options: EditPreconditionOptions
 					category: "guard.edit-precondition",
 					level: "info",
 					source: "edit-precondition-extension.malformedShape",
-					context: { path },
+					context: { path, outcome: "blocked", ruleId: "edits-malformed" },
 				});
 				return {
 					block: true,
@@ -94,7 +94,7 @@ export function createEditPreconditionExtension(options: EditPreconditionOptions
 					category: "guard.edit-precondition",
 					level: "info",
 					source: "edit-precondition-extension",
-					context: { path },
+					context: { path, outcome: "blocked", ruleId: "oldtext-mismatch" },
 				});
 				return {
 					block: true,

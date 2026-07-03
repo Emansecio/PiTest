@@ -22,6 +22,7 @@ export function createDestructiveCommandGuardExtension(): (pi: ExtensionAPI) => 
 	return createFireOnceBlockGuard({
 		category: "guard.destructive-command",
 		source: "destructive-command-guard-extension",
+		ruleId: "destructive-command",
 		decide(event) {
 			if (isDestructiveCommandGuardDisabled()) return undefined;
 			if (event.toolName !== "bash") return undefined;

@@ -300,6 +300,9 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 					// `note` carries the block KIND (path vs export) + the tool so the
 					// acceptance rate can be read per-kind from the diagnostics buffer.
 					const note = `${decision.kind}:${event.toolName}`;
+					// Stable per-kind rule id (path/export/bare/alias) so per-check efficacy
+					// is measurable downstream, not just the guard as a whole.
+					const ruleId = `import-${decision.kind}`;
 					if (fired.has(key)) {
 						// The model is OVERRIDING the fire-once advisory by re-issuing the
 						// identical call — record the acceptance so override-rate is
@@ -308,7 +311,7 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 							category: "guard.import-grounding",
 							level: "info",
 							source: "import-grounding-extension",
-							context: { note, outcome: "overridden" },
+							context: { note, outcome: "overridden", ruleId },
 						});
 						return undefined; // already advised once -> let it run
 					}
@@ -317,7 +320,7 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 						category: "guard.import-grounding",
 						level: "info",
 						source: "import-grounding-extension",
-						context: { note, outcome: "blocked" },
+						context: { note, outcome: "blocked", ruleId },
 					});
 					return { block: true, reason: decision.message };
 				}

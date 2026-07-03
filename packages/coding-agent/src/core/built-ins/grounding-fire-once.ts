@@ -22,6 +22,13 @@ export function stableToolCallKey(toolName: string, input: Record<string, unknow
 export interface FireOnceBlockGuardOptions {
 	category: DiagnosticCategory;
 	source: string;
+	/**
+	 * Stable, lowercase-kebab id of the single check this guard fires, recorded on
+	 * every emission so per-rule efficacy is measurable downstream (the category
+	 * alone only identifies the guard). These block-only guards each have exactly
+	 * one check, so one id per guard is sufficient.
+	 */
+	ruleId: string;
 	decide(event: ToolCallEvent): { block: true; reason: string } | undefined;
 }
 
@@ -40,13 +47,24 @@ export function createFireOnceBlockGuard(options: FireOnceBlockGuardOptions): (p
 
 				const input = event.input as Record<string, unknown>;
 				const key = stableToolCallKey(event.toolName, input);
-				if (fired.has(key)) return undefined;
+				if (fired.has(key)) {
+					// The model is OVERRIDING the fire-once advisory by re-issuing the
+					// identical call — record the acceptance so override-rate is measurable
+					// against the blocks below (same semantics as import/erasable/read).
+					recordDiagnostic({
+						category: options.category,
+						level: "info",
+						source: options.source,
+						context: { note: event.toolName, outcome: "overridden", ruleId: options.ruleId },
+					});
+					return undefined; // already advised once -> let it run
+				}
 				fired.add(key);
 				recordDiagnostic({
 					category: options.category,
 					level: "info",
 					source: options.source,
-					context: { note: event.toolName },
+					context: { note: event.toolName, outcome: "blocked", ruleId: options.ruleId },
 				});
 				return { block: true, reason: decision.reason } satisfies ToolCallEventResult;
 			} catch {

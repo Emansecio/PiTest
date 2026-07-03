@@ -44,6 +44,7 @@ export function createBashGroundingExtension(options: { cwd: string }): (pi: Ext
 	return createFireOnceBlockGuard({
 		category: "guard.bash-grounding",
 		source: "bash-grounding-extension",
+		ruleId: "script-not-found",
 		decide(event) {
 			if (isBashGroundingDisabled()) return undefined;
 			if (event.toolName !== "bash") return undefined;

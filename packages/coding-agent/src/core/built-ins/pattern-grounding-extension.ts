@@ -20,6 +20,7 @@ export function createPatternGroundingExtension(): (pi: ExtensionAPI) => void {
 	return createFireOnceBlockGuard({
 		category: "guard.pattern-grounding",
 		source: "pattern-grounding-extension",
+		ruleId: "malformed-pattern",
 		decide(event) {
 			if (isPatternGroundingDisabled()) return undefined;
 			if (event.toolName !== "grep" && event.toolName !== "find") return undefined;

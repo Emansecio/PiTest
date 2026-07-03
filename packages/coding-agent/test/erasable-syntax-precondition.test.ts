@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createErasableSyntaxPreconditionExtension } from "../src/core/built-ins/erasable-syntax-precondition-extension.ts";
 
@@ -79,10 +80,15 @@ describe("erasable-syntax precondition extension", () => {
 
 	it("fire-once: a re-issued identical blocked call is allowed through", async () => {
 		enableErasable();
+		resetRuntimeDiagnostics();
 		const handler = collectHandler(dir);
 		const input = { path: join(dir, "x.ts"), content: "enum E { A }" };
 		expect((await call(handler, "write", input))?.block).toBe(true);
 		expect(await call(handler, "write", input)).toBeUndefined();
+		// blocked-then-overridden, both tagged with the specific construct as ruleId.
+		const events = getRuntimeDiagnostics().recent.filter((e) => e.category === "guard.erasable-syntax");
+		expect(events.map((e) => e.context?.outcome)).toEqual(["blocked", "overridden"]);
+		expect(events.every((e) => e.context?.ruleId === "enum")).toBe(true);
 	});
 
 	it("blocks a nested ternary when biome enforces noNestedTernary", async () => {

@@ -30,6 +30,10 @@ export function createPatchAuditExtension() {
 					source: "patch-audit-extension",
 					context: {
 						path: decision.audit.path,
+						// Advisory only: this guard appends a self-review directive and never
+						// blocks, so there is no block/override to record — outcome stays absent.
+						// ruleId tags the risk tier that fired so per-tier volume is measurable.
+						ruleId: `patch-risk-${decision.audit.risk}`,
 						note: `${decision.audit.toolName} ${decision.audit.risk} ${decision.audit.changedLines} changed lines`,
 					},
 				});

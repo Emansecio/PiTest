@@ -164,13 +164,27 @@ export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptio
 			const key = `${event.toolName}:${fingerprint}`;
 			// Fire once per pattern per session — then let the model proceed if it
 			// truly means it, so the guard can never wedge a legitimate retry.
-			if (blocked.has(key)) return undefined;
+			if (blocked.has(key)) {
+				// The model is OVERRIDING the fire-once advisory by re-issuing the identical
+				// call — record the acceptance so override-rate is measurable vs the block.
+				recordDiagnostic({
+					category: "guard.learned-error",
+					level: "info",
+					source: "learned-error-guard-extension",
+					context: {
+						note: `${event.toolName} ${fingerprint}`,
+						outcome: "overridden",
+						ruleId: "known-failed-call",
+					},
+				});
+				return undefined;
+			}
 			blocked.add(key);
 			recordDiagnostic({
 				category: "guard.learned-error",
 				level: "info",
 				source: "learned-error-guard-extension",
-				context: { note: `${event.toolName} ${fingerprint}` },
+				context: { note: `${event.toolName} ${fingerprint}`, outcome: "blocked", ruleId: "known-failed-call" },
 			});
 			return {
 				block: true,

@@ -93,6 +93,9 @@ export function createErasableSyntaxPreconditionExtension(options: { cwd: string
 
 				const key = stableToolCallKey(event.toolName, input);
 				const note = `${finding.construct}:${event.toolName}`;
+				// The specific construct (enum/namespace/parameter-property/nested-ternary)
+				// is a stable, lowercase-kebab check id — key per-construct efficacy on it.
+				const ruleId = finding.construct;
 				if (fired.has(key)) {
 					// Model is OVERRIDING the fire-once advisory by re-issuing the identical
 					// call — record acceptance so override-rate is measurable, then let it run.
@@ -100,7 +103,7 @@ export function createErasableSyntaxPreconditionExtension(options: { cwd: string
 						category: "guard.erasable-syntax",
 						level: "info",
 						source: "erasable-syntax-precondition-extension",
-						context: { note, outcome: "overridden" },
+						context: { note, outcome: "overridden", ruleId },
 					});
 					return undefined;
 				}
@@ -109,7 +112,7 @@ export function createErasableSyntaxPreconditionExtension(options: { cwd: string
 					category: "guard.erasable-syntax",
 					level: "info",
 					source: "erasable-syntax-precondition-extension",
-					context: { note, outcome: "blocked" },
+					context: { note, outcome: "blocked", ruleId },
 				});
 				return {
 					block: true,

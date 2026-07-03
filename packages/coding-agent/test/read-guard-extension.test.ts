@@ -263,7 +263,9 @@ describe("read-guard — write-warning override telemetry (acceptance vs block)"
 		const blocked = snap.recent.find((e) => e.source === "read-guard-extension.intraSessionDrift");
 		const overridden = snap.recent.find((e) => e.source === "read-guard-extension.writeWarnOverridden");
 		expect(blocked?.context?.outcome).toBe("blocked");
+		expect(blocked?.context?.ruleId).toBe("write-drift-clobber");
 		expect(overridden?.context?.outcome).toBe("overridden");
+		expect(overridden?.context?.ruleId).toBe("write-drift-clobber");
 		expect(overridden?.context?.path).toBe("a.ts");
 		// Exactly one block + one override (no double-fire on the override path).
 		expect(readGuardSources().filter((s) => s === "read-guard-extension.writeWarnOverridden")).toHaveLength(1);
@@ -289,7 +291,9 @@ describe("read-guard — write-warning override telemetry (acceptance vs block)"
 		const blocked = snap.recent.find((e) => e.source === "read-guard-extension.postCompactWriteWarn");
 		const overridden = snap.recent.find((e) => e.source === "read-guard-extension.writeWarnOverridden");
 		expect(blocked?.context?.outcome).toBe("blocked");
+		expect(blocked?.context?.ruleId).toBe("postcompact-write-overwrite");
 		expect(overridden?.context?.outcome).toBe("overridden");
+		expect(overridden?.context?.ruleId).toBe("postcompact-write-overwrite");
 	});
 
 	it("does NOT record an override for a normal write to a read, undrifted file", () => {

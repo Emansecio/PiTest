@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createEditPreconditionExtension } from "../src/core/built-ins/edit-precondition-extension.ts";
 
@@ -31,6 +32,7 @@ describe("edit-precondition: malformed edits shape", () => {
 	it("blocks an existing-file edit whose `edits` can't be parsed (was fail-open)", async () => {
 		const file = join(dir, "a.ts");
 		writeFileSync(file, "hello\n");
+		resetRuntimeDiagnostics();
 		const handler = collectHandler(dir);
 		const decision = (await handler({
 			type: "tool_call",
@@ -40,6 +42,26 @@ describe("edit-precondition: malformed edits shape", () => {
 		})) as { block?: boolean; reason?: string } | undefined;
 		expect(decision?.block).toBe(true);
 		expect(decision?.reason).toMatch(/missing or malformed/i);
+		const diag = getRuntimeDiagnostics().recent.find((e) => e.category === "guard.edit-precondition");
+		expect(diag?.context?.outcome).toBe("blocked");
+		expect(diag?.context?.ruleId).toBe("edits-malformed");
+	});
+
+	it("blocks an edit whose oldText does not match and tags it oldtext-mismatch", async () => {
+		const file = join(dir, "c.ts");
+		writeFileSync(file, "hello world\n");
+		resetRuntimeDiagnostics();
+		const handler = collectHandler(dir);
+		const decision = (await handler({
+			type: "tool_call",
+			toolName: "edit",
+			toolCallId: "4",
+			input: { path: file, edits: [{ oldText: "nope-not-present", newText: "x" }] },
+		})) as { block?: boolean; reason?: string } | undefined;
+		expect(decision?.block).toBe(true);
+		const diag = getRuntimeDiagnostics().recent.find((e) => e.category === "guard.edit-precondition");
+		expect(diag?.context?.outcome).toBe("blocked");
+		expect(diag?.context?.ruleId).toBe("oldtext-mismatch");
 	});
 
 	it("passes a well-formed edit whose oldText matches (dry-run path, no block)", async () => {

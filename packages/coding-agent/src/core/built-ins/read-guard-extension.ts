@@ -177,7 +177,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								category: "guard.read",
 								level: "info",
 								source: "read-guard-extension.intraSessionDrift",
-								context: { path, outcome: "blocked" },
+								context: { path, outcome: "blocked", ruleId: "write-drift-clobber" },
 							});
 							return {
 								block: true,
@@ -195,7 +195,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								category: "guard.read",
 								level: "info",
 								source: "read-guard-extension.writeWarnOverridden",
-								context: { path, outcome: "overridden" },
+								context: { path, outcome: "overridden", ruleId: "write-drift-clobber" },
 							});
 						}
 					}
@@ -226,7 +226,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 										category: "guard.read",
 										level: "info",
 										source: "read-guard-extension.postCompactEditMismatch",
-										context: { path },
+										context: { path, outcome: "blocked", ruleId: "postcompact-edit-mismatch" },
 									});
 									return {
 										block: true,
@@ -246,7 +246,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								category: "guard.read",
 								level: "info",
 								source: "read-guard-extension.postCompactWriteWarn",
-								context: { path, outcome: "blocked" },
+								context: { path, outcome: "blocked", ruleId: "postcompact-write-overwrite" },
 							});
 							return {
 								block: true,
@@ -263,7 +263,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								category: "guard.read",
 								level: "info",
 								source: "read-guard-extension.writeWarnOverridden",
-								context: { path, outcome: "overridden" },
+								context: { path, outcome: "overridden", ruleId: "postcompact-write-overwrite" },
 							});
 						}
 						return undefined;
@@ -275,7 +275,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 						category: "guard.read",
 						level: "info",
 						source: "read-guard-extension.stampDrifted",
-						context: { path },
+						context: { path, outcome: "blocked", ruleId: "stamp-drifted" },
 					});
 					return {
 						block: true,
@@ -287,7 +287,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 					category: "guard.read",
 					level: "info",
 					source: "read-guard-extension.neverRead",
-					context: { path },
+					context: { path, outcome: "blocked", ruleId: "edit-never-read" },
 				});
 				return {
 					block: true,

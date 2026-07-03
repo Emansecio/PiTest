@@ -28,6 +28,7 @@ export function createPathGroundingExtension(options: { cwd: string }): (pi: Ext
 	return createFireOnceBlockGuard({
 		category: "guard.path-grounding",
 		source: "path-grounding-extension",
+		ruleId: "path-enoent",
 		decide(event) {
 			if (isPathGroundingDisabled()) return undefined;
 			if (event.toolName !== "read" && event.toolName !== "edit") return undefined;

@@ -2,7 +2,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
-import { suggestClosest } from "@pit/ai";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics, suggestClosest } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import { createPathGroundingExtension } from "../src/core/built-ins/path-grounding-extension.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
@@ -256,6 +256,27 @@ describe("path-grounding extension — adapter wiring", () => {
 			const { api, fire } = makeFakePi();
 			createPathGroundingExtension({ cwd })(api as unknown as ExtensionAPI);
 			expect(fire("tool_call", { toolName: "read", input: { path: "readme.md" } })).toBeUndefined();
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("records blocked then overridden diagnostics tagged with the path-enoent ruleId", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pit-path-ground-diag-"));
+		try {
+			writeFileSync(join(cwd, "utils.ts"), "ok");
+			resetRuntimeDiagnostics();
+			const { api, fire } = makeFakePi();
+			createPathGroundingExtension({ cwd })(api as unknown as ExtensionAPI);
+			const blocked = fire("tool_call", { toolName: "read", input: { path: "utis.ts" } }) as
+				| { block?: boolean }
+				| undefined;
+			expect(blocked?.block).toBe(true);
+			// Identical re-issue escapes the fire-once guard (override), and is recorded.
+			expect(fire("tool_call", { toolName: "read", input: { path: "utis.ts" } })).toBeUndefined();
+			const events = getRuntimeDiagnostics().recent.filter((e) => e.category === "guard.path-grounding");
+			expect(events.map((e) => e.context?.outcome)).toEqual(["blocked", "overridden"]);
+			expect(events.every((e) => e.context?.ruleId === "path-enoent")).toBe(true);
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}

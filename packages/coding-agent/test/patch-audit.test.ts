@@ -143,6 +143,9 @@ describe("createPatchAuditExtension", () => {
 		expect(diagnostic?.category).toBe("guard.patch-audit");
 		expect(diagnostic?.context?.path).toBe("a.ts");
 		expect(diagnostic?.context?.note).toContain("medium 50 changed lines");
+		// Advisory guard: risk-tier ruleId, and NO outcome (it never blocks/overrides).
+		expect(diagnostic?.context?.ruleId).toBe("patch-risk-medium");
+		expect(diagnostic?.context?.outcome).toBeUndefined();
 	});
 
 	it("does not append on failed tool results", () => {

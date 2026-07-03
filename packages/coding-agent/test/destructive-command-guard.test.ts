@@ -1,3 +1,4 @@
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import { createDestructiveCommandGuardExtension } from "../src/core/built-ins/destructive-command-guard-extension.ts";
 import { groundDestructiveCommand, isDestructiveCommandGuardDisabled } from "../src/core/destructive-command-guard.js";
@@ -232,5 +233,16 @@ describe("destructive-command-guard extension: fire-once", () => {
 		expect(first?.block).toBe(true);
 		// fire-once escape.
 		expect(fire("tool_call", bashCall("Remove-Item -Recurse -Force ./src"))).toBeUndefined();
+	});
+
+	it("records blocked then overridden diagnostics tagged with the destructive-command ruleId", () => {
+		resetRuntimeDiagnostics();
+		const { api, fire } = makeFakePi();
+		createDestructiveCommandGuardExtension()(api);
+		fire("tool_call", bashCall("rm -rf ./src"));
+		fire("tool_call", bashCall("rm -rf ./src")); // identical re-issue -> override
+		const events = getRuntimeDiagnostics().recent.filter((e) => e.category === "guard.destructive-command");
+		expect(events.map((e) => e.context?.outcome)).toEqual(["blocked", "overridden"]);
+		expect(events.every((e) => e.context?.ruleId === "destructive-command")).toBe(true);
 	});
 });

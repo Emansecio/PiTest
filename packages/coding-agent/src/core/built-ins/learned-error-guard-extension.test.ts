@@ -4,6 +4,7 @@
  * and assert the block decision, with a mocked aggregated-store provider.
  */
 
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "../extensions/index.js";
 import type { AggregatedLearnedError } from "../learned-error-store.ts";
@@ -55,6 +56,16 @@ describe("createLearnedErrorGuardExtension", () => {
 		const call = mountExtension({ provider: () => [entry()] });
 		expect((await call("bash", BASH_ARGS))?.block).toBe(true);
 		expect(await call("bash", BASH_ARGS)).toBeUndefined();
+	});
+
+	it("records blocked then overridden diagnostics tagged with the known-failed-call ruleId", async () => {
+		resetRuntimeDiagnostics();
+		const call = mountExtension({ provider: () => [entry()] });
+		expect((await call("bash", BASH_ARGS))?.block).toBe(true);
+		expect(await call("bash", BASH_ARGS)).toBeUndefined(); // fire-once escape -> override
+		const events = getRuntimeDiagnostics().recent.filter((e) => e.category === "guard.learned-error");
+		expect(events.map((e) => e.context?.outcome)).toEqual(["blocked", "overridden"]);
+		expect(events.every((e) => e.context?.ruleId === "known-failed-call")).toBe(true);
 	});
 
 	it("does not block below the occurrence threshold", async () => {

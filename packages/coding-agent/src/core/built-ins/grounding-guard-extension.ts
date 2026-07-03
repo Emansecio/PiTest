@@ -145,23 +145,38 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 				if (decision.action === "rewrite") {
 					// event.input is mutable in place; patch the corrected args and PASS.
 					Object.assign(input, decision.args);
+					// Auto-correction: the guard fired and transparently fixed a dominant
+					// typo, so the call PASSES. That is neither a block nor a fire-once
+					// override, and the outcome enum ("blocked"|"overridden") cannot express
+					// an auto-correct — leave outcome absent; ruleId still tags the check.
 					recordDiagnostic({
 						category: "guard.grounding",
 						level: "info",
 						source: "grounding-guard-extension",
-						context: { note: event.toolName },
+						context: { note: event.toolName, ruleId: "symbol-not-found" },
 					});
 					return undefined;
 				}
 				if (decision.action === "block") {
 					const key = stableToolCallKey(event.toolName, input);
-					if (fired.has(key)) return undefined; // already advised once -> let it run
+					if (fired.has(key)) {
+						// The model is OVERRIDING the fire-once advisory by re-issuing the
+						// identical call — record the acceptance so override-rate is measurable
+						// against the blocks below.
+						recordDiagnostic({
+							category: "guard.grounding",
+							level: "info",
+							source: "grounding-guard-extension",
+							context: { note: event.toolName, outcome: "overridden", ruleId: "symbol-not-found" },
+						});
+						return undefined; // already advised once -> let it run
+					}
 					fired.add(key);
 					recordDiagnostic({
 						category: "guard.grounding",
 						level: "info",
 						source: "grounding-guard-extension",
-						context: { note: event.toolName },
+						context: { note: event.toolName, outcome: "blocked", ruleId: "symbol-not-found" },
 					});
 					return { block: true, reason: decision.message };
 				}
