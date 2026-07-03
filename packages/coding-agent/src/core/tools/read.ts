@@ -36,26 +36,49 @@ import { listDeclarations } from "./symbol.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
 
-const READ_DEDUPE_WINDOW = 16;
+/**
+ * Aggregate byte budget for the de-dup store. Bounding by total retained bytes
+ * (rather than a fixed count of entries) lets many small reads stay remembered —
+ * re-reads are the most common pattern in long sessions — while a handful of
+ * large files can't pin the store's RAM. LRU eviction runs until the total fits.
+ */
+const READ_DEDUPE_MAX_BYTES = 512 * 1024;
+/**
+ * Secondary guard: a cap on entry COUNT so a flood of tiny reads can't grow the
+ * map's bookkeeping without bound even while under the byte budget. Generous
+ * relative to the old fixed window of 16 — the byte budget is the primary bound.
+ */
+const READ_DEDUPE_MAX_ENTRIES = 256;
 
 /**
  * Per-session de-dup of repeat reads. A read whose (path, range) was already
  * delivered THIS session with identical content has its body replaced by a short
  * marker instead of being re-sent verbatim. When the content CHANGED since the
  * earlier read (e.g. an edit between reads), the prior body is retained so the
- * caller can re-send only a diff instead of the whole file. LRU-bounded to the
- * most recent reads: an older one may have scrolled out of context (compaction),
- * so re-sending it in full is the safe default. Keyed by (path, range).
+ * caller can re-send only a diff instead of the whole file. Bounded by an
+ * aggregate BYTE budget (with a secondary entry-count guard): the least-recently
+ * used entries are evicted first — an older one may have scrolled out of context
+ * (compaction), so re-sending it in full is the safe default. Keyed by (path,
+ * range); a full-read entry (empty range) additionally lets a later range read of
+ * the same path be recognised as contained (see the read tool's containment path).
  */
 export class ReadDedupeStore {
-	private readonly seen = new Map<string, { hash: string; content: string; clean: boolean }>();
-	private readonly max: number;
-	constructor(max: number = READ_DEDUPE_WINDOW) {
-		this.max = Math.max(1, max);
+	private readonly seen = new Map<string, { hash: string; content: string; clean: boolean; bytes: number }>();
+	private readonly maxEntries: number;
+	private readonly maxBytes: number;
+	private totalBytes = 0;
+	constructor(maxEntries: number = READ_DEDUPE_MAX_ENTRIES, maxBytes: number = READ_DEDUPE_MAX_BYTES) {
+		this.maxEntries = Math.max(1, maxEntries);
+		this.maxBytes = Math.max(1, maxBytes);
 	}
-	/** Prior record for this key if still in the LRU window; does not affect recency. */
+	/**
+	 * Prior record for this key if still resident; does not affect recency. Returns
+	 * a projection without the internal byte-accounting field so callers see a
+	 * stable {hash, content, clean} shape.
+	 */
 	peek(key: string): { hash: string; content: string; clean: boolean } | undefined {
-		return this.seen.get(key);
+		const entry = this.seen.get(key);
+		return entry ? { hash: entry.hash, content: entry.content, clean: entry.clean } : undefined;
 	}
 	/**
 	 * Record this read and report whether it duplicates the most recent identical
@@ -66,14 +89,33 @@ export class ReadDedupeStore {
 	 */
 	record(key: string, contentHash: string, content: string, clean: boolean): boolean {
 		const prev = this.seen.get(key);
+		if (prev) this.totalBytes -= prev.bytes;
 		this.seen.delete(key);
-		this.seen.set(key, { hash: contentHash, content: clean ? content : "", clean });
-		while (this.seen.size > this.max) {
+		const stored = clean ? content : "";
+		// Charge the retained body plus the key/hash bookkeeping. `.length` (UTF-16
+		// code units) is a cheap, monotonic proxy for byte cost — exact enough for a
+		// soft budget and free of a second pass over the body.
+		const bytes = key.length + stored.length + contentHash.length;
+		this.seen.set(key, { hash: contentHash, content: stored, clean, bytes });
+		this.totalBytes += bytes;
+		this.evict();
+		return prev?.hash === contentHash;
+	}
+	/**
+	 * LRU-evict the oldest entries until BOTH bounds fit. Never evicts the entry
+	 * just inserted (the most-recent one): a single oversized read is tolerated
+	 * rather than leaving the store unable to suppress even its own immediate
+	 * repeat. `false negative is cheap, false positive is poisonous` — an evicted
+	 * entry only means a future read re-sends in full, never a wrong suppression.
+	 */
+	private evict(): void {
+		while ((this.seen.size > this.maxEntries || this.totalBytes > this.maxBytes) && this.seen.size > 1) {
 			const oldest = this.seen.keys().next().value;
 			if (oldest === undefined) break;
+			const entry = this.seen.get(oldest);
+			if (entry) this.totalBytes -= entry.bytes;
 			this.seen.delete(oldest);
 		}
-		return prev?.hash === contentHash;
 	}
 	/**
 	 * Forget all remembered reads. Called on compaction: once the transcript is
@@ -85,11 +127,23 @@ export class ReadDedupeStore {
 	 */
 	clear(): void {
 		this.seen.clear();
+		this.totalBytes = 0;
 	}
 }
 
 function hashReadContent(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * The de-dup store KEY for a read: canonical path plus its (offset, limit) range.
+ * A full read leaves both blank, so `readDedupeKey(key, undefined, undefined)` is
+ * the stable handle a later range read uses to find the full-read entry for the
+ * same file (containment). Kept in one place so the range and full keys can never
+ * drift apart.
+ */
+function readDedupeKey(canonicalKey: string, offset: number | undefined, limit: number | undefined): string {
+	return `${canonicalKey} ${offset ?? ""} ${limit ?? ""}`;
 }
 
 /** Below this size a re-read is cheap enough that delta framing isn't worth it. */
@@ -930,7 +984,7 @@ Common mistakes to avoid:
 											// produce the verbatim-file body a delta needs, so only suppression
 											// (not delta framing) applies here.
 											if (dedupeStore) {
-												const dedupeKey = `${canonicalPathKey(absolutePath)} ${offset ?? ""} ${limit ?? ""}`;
+												const dedupeKey = readDedupeKey(canonicalPathKey(absolutePath), offset, limit);
 												const rangeLabel =
 													offset !== undefined || limit !== undefined
 														? ` (offset ${offset ?? 1}${limit !== undefined ? `, limit ${limit}` : ""})`
@@ -1040,7 +1094,8 @@ Common mistakes to avoid:
 								// above". Bail before mutating shared session state.
 								if (aborted) return;
 								if (dedupeStore) {
-									const dedupeKey = `${canonicalPathKey(absolutePath)} ${offset ?? ""} ${limit ?? ""}`;
+									const canonicalKey = canonicalPathKey(absolutePath);
+									const dedupeKey = readDedupeKey(canonicalKey, offset, limit);
 									const rangeLabel =
 										offset !== undefined || limit !== undefined
 											? ` (offset ${offset ?? 1}${limit !== undefined ? `, limit ${limit}` : ""})`
@@ -1061,6 +1116,39 @@ Common mistakes to avoid:
 										if (delta !== undefined) {
 											outputText = `[read ${path}${rangeLabel}: changed since your earlier read this session — showing only the diff (you already have the previous version above; re-run read to re-expand the full current file):]\n\n${delta}`;
 											deltaApplied = true;
+										}
+									}
+								}
+								// Containment: when this is a RANGE read and the SAME file was FULLY read
+								// earlier this session, and that full body is still resident, compare this
+								// range's bytes to the matching slice of it. If they are byte-identical the
+								// model already has these exact lines above — replace the body with a marker
+								// pointing at the full read instead of re-spending the tokens. Exact slice
+								// equality (the "hash igual no trecho" signal, derived from the CURRENT
+								// on-disk read) is used, not mtime: any change within the range makes the
+								// slice differ, so a modified range never matches and is always re-sent in
+								// full. False negative (re-send) is cheap; suppressing changed content is
+								// poisonous. No range body is stored — this reuses the full read's body.
+								if (
+									dedupeStore &&
+									!dedupeSuppressed &&
+									!deltaApplied &&
+									(offset !== undefined || limit !== undefined)
+								) {
+									const containKey = canonicalPathKey(absolutePath);
+									const prevFull = dedupeStore.peek(readDedupeKey(containKey, undefined, undefined));
+									if (prevFull?.clean && selectedContent.length > 0) {
+										const fullLines = prevFull.content.split("\n");
+										const endIdx =
+											limit !== undefined ? Math.min(startLine + limit, fullLines.length) : fullLines.length;
+										if (
+											startLine < fullLines.length &&
+											fullLines.slice(startLine, endIdx).join("\n") === selectedContent
+										) {
+											const containRange = ` (offset ${offset ?? 1}${limit !== undefined ? `, limit ${limit}` : ""})`;
+											const endLineDisplay = startLineDisplay + selectedLines.length - 1;
+											outputText = `[read ${path}${containRange}: lines ${startLineDisplay}-${endLineDisplay} unchanged since the full read of ${path} earlier this session — see that output above. Re-run read to re-expand if it has scrolled out of context.]`;
+											dedupeSuppressed = true;
 										}
 									}
 								}
