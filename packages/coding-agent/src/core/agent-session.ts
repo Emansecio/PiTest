@@ -101,7 +101,9 @@ import {
 	type WireToolSurface,
 } from "./compaction/index.ts";
 import { extractToolFileOp } from "./compaction/utils.js";
+import { composeContext, isContextComposerDisabled } from "./conditioning/context-composer.ts";
 import { buildAsyncDeliveryBody } from "./coordinator/async-delivery.ts";
+import { SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
 import { dapSessionManager } from "./dap/index.ts";
 import { debugVerifyContextPrompt, maybeRunDebugVerify } from "./debug-verify.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
@@ -193,14 +195,24 @@ import {
 	setCurrentPreviewQueue,
 } from "./preview-queue.ts";
 import { expandPromptTemplate, type PromptTemplate, parseCommandArgs, substituteArgs } from "./prompt-templates.js";
-import { getLivingRepoMap } from "./repo-map/living-index.ts";
+import { getLivingRepoMap, type LivingRepoMap } from "./repo-map/living-index.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
+import {
+	clearCurrentSelfReviewFindings,
+	runSelfReviewLoop,
+	SELF_REVIEW_SCHEMA,
+	SELF_REVIEW_TIMEOUT_MS,
+	type SelfReviewResult,
+	type SelfReviewRunner,
+} from "./self-review.ts";
+import { getCurrentSessionContract, SessionContract, setCurrentSessionContract } from "./session-contract.ts";
 import type { BranchSummaryEntry, SessionManager } from "./session-manager.js";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.js";
 import { type RecoveryLevel, SessionRecoveryController } from "./session-recovery.ts";
 import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
+import { getCurrentSupervisionThermostat } from "./supervision-thermostat.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { DiagnosticsSink, defaultDiagnosticsDir, isTelemetrySinkDisabled } from "./telemetry/diagnostics-sink.ts";
 import { GuardEfficacyCorrelator } from "./telemetry/guard-efficacy.ts";
@@ -245,6 +257,7 @@ import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.
 import { ReadDedupeStore } from "./tools/read.js";
 import { listDeclarations } from "./tools/symbol.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
+import { TurnRiskAccumulator } from "./turn-risk.ts";
 import { TurnSteeringEngine } from "./turn-steering-engine.ts";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
 import { summarizeCheckFailure } from "./verification/failure-summary.ts";
@@ -658,6 +671,16 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private _frequentFilesIndex: FrequentFile[] = [];
 	private _hotFileOutlines: Array<{ path: string; symbols: string[] }> = [];
 	private _frequentFilesAbort: AbortController | undefined;
+
+	// Band P (P1/P3) context composer. The enriched living repo-map is cached from
+	// the boot prewarm (and refreshed opportunistically); the composed block is
+	// rebuilt per turn from the live prompt + most-recently-read file and rendered
+	// in the dynamic suffix (cache-neutral). All best-effort — undefined/empty just
+	// omits the block. Off entirely under PIT_NO_CONTEXT_COMPOSER.
+	private _livingRepoMap: LivingRepoMap | undefined;
+	private _composerPromptText = "";
+	private _composerLastReadPath: string | undefined;
+	private _composerLastReadContent: string | undefined;
 	// Promise returned by the in-flight `computeFrequentFiles` call. Tracked so
 	// `dispose()` can await it before returning, otherwise the spawned `git`
 	// child still holds the cwd and `rmSync(tempDir)` in tests fails with EBUSY.
@@ -678,6 +701,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// Session-wide verification-gate tally for the session-summary snapshot.
 	private _verificationAttemptsTotal = 0;
 	private _verificationFailuresTotal = 0;
+
+	// Band P / P4: per-prompt-cycle patch-risk aggregator. Sums changed lines across
+	// every successful write/edit this cycle so many small edits still trip the
+	// high-risk self-review (the gap a per-patch scorer misses). Reset each prompt.
+	private readonly _turnRisk = new TurnRiskAccumulator();
 
 	// Reactive session recovery: lean by default, escalates on thrash signals.
 	private readonly _recovery: SessionRecoveryController;
@@ -728,6 +756,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private readonly _plan = new PlanManager();
 	/** Published to goal_complete via setCurrentVerificationProbe; cleared on dispose. */
 	private _verificationProbe: (() => Promise<CheckResult | null>) | undefined;
+	/** Band P / P5 conventions contract; registry-published, released on dispose. */
+	private _sessionContract: SessionContract | undefined;
 	// Chrome DevTools controller (the chrome_devtools_* tools + /chrome command).
 	private _chromeDevtools: ChromeDevtoolsManager | undefined;
 	// Guards against re-entering the goal auto-continuation loop from within a
@@ -820,6 +850,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// in Fase 0; behavior earned in-session dominates the prior anyway.
 		this._recovery = new SessionRecoveryController({ model: this.agent.state.model });
 
+		// Band P conventions contract (P5): session-scoped, reached by
+		// failure-summary (extraction) and system-prompt (injection) via the module
+		// registry — without this registration the whole pillar is inert.
+		this._sessionContract = new SessionContract();
+		setCurrentSessionContract(this._sessionContract);
+
 		// Steering/reminder policy engine. Reads settings + the (already standalone)
 		// tool-call stats and todo manager, and posts steers/follow-ups via
 		// sendCustomMessage — it never reaches back into the session. Created here
@@ -901,9 +937,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			prewarmFffIndex(this._cwd);
 		}
 		if (prewarmIndexes) {
-			void getLivingRepoMap(this._cwd).catch(() => {
-				// best-effort prewarm; never block boot
-			});
+			void this._refreshLivingRepoMap();
 		}
 
 		// Publish a fresh preview queue for this session so mutation tools can
@@ -1308,6 +1342,72 @@ export class AgentSession implements CompactionHost, FusionHost {
 				}
 			});
 		this._frequentFilesPromise = promise;
+	}
+
+	/**
+	 * Band P: refresh the cached enriched living repo-map in the background, then
+	 * rebuild the system prompt so the next turn's context-composer block reflects
+	 * the current tree. Incremental + best-effort (any failure leaves the prior
+	 * map). No-op when the composer is disabled.
+	 */
+	private async _refreshLivingRepoMap(): Promise<void> {
+		try {
+			// Always warm the incremental repo-map cache (this is also the boot prewarm
+			// the composer inherited); capturing the map is harmless when disabled.
+			const result = await getLivingRepoMap(this._cwd);
+			this._livingRepoMap = result.map;
+			// Only the composer needs a rebuild; skip it when the composer is off.
+			if (isContextComposerDisabled()) return;
+			try {
+				this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames(), "context-composer-index");
+			} catch {
+				// Rebuild failure is non-fatal; the block simply lags a turn.
+			}
+		} catch {
+			// Map compute failure is non-fatal; composer degrades to no block.
+		}
+	}
+
+	/**
+	 * Band P: render the context-composer dynamic-suffix block for the current
+	 * turn (predicted-file outline + optional style exemplar), dosed by the
+	 * supervision thermostat level. Pure/synchronous over the cached map; returns
+	 * "" when disabled, no map, or no prediction (fail-open, zero cost).
+	 */
+	private _composeGroundedContext(): string {
+		if (isContextComposerDisabled()) return "";
+		const map = this._livingRepoMap;
+		if (!map || map.entries.length === 0) return "";
+		const level = getCurrentSupervisionThermostat()?.getLevel() ?? "padrao";
+		const ffCfg = this.settingsManager.getFrequentFilesSettings();
+		const frequentFiles = ffCfg.enabled
+			? this._frequentFiles.getTop({ topN: ffCfg.topN, minHits: ffCfg.minHits }).map((s) => s.path)
+			: [];
+		try {
+			const result = composeContext({
+				prompt: this._composerPromptText,
+				entries: map.entries,
+				level,
+				frequentFiles,
+				recentReadPath: this._composerLastReadPath,
+				recentReadContent: this._composerLastReadContent,
+				readFile: (rel) => this._readComposerFile(rel),
+			});
+			return result.block;
+		} catch {
+			return "";
+		}
+	}
+
+	/** Best-effort, size-capped file read for the style exemplar body. */
+	private _readComposerFile(relPath: string): string | null {
+		try {
+			const abs = isAbsolute(relPath) ? relPath : resolve(this._cwd, relPath);
+			const content = readFileSync(abs, "utf-8");
+			return content.length > 256 * 1024 ? content.slice(0, 256 * 1024) : content;
+		} catch {
+			return null;
+		}
 	}
 
 	/** Model registry for API key resolution and model discovery */
@@ -1901,9 +2001,24 @@ export class AgentSession implements CompactionHost, FusionHost {
 			const fileOp = extractToolFileOp(event.toolName, args);
 			if (fileOp) {
 				this._frequentFiles.record(fileOp.path, fileOp.op);
+				// Band P: the most-recently-read file is the edit-target signal for the
+				// context composer (import layer + style exemplar). Best-effort content
+				// capture for cheap import extraction; content failure just drops that layer.
+				if (fileOp.op === "read" && !isContextComposerDisabled()) {
+					this._composerLastReadPath = fileOp.path;
+					this._composerLastReadContent = this._readComposerFile(fileOp.path) ?? undefined;
+				}
 			}
 			armVerificationGate(this._verificationGate, event.toolName, args, {
 				result: event.result as { details?: { firstChangedLine?: number } },
+			});
+			// Band P / P4: fold this mutation into the per-cycle risk aggregate. No-op
+			// for non-mutating results (measurePatch returns undefined).
+			this._turnRisk.add({
+				toolName: event.toolName,
+				input: (args ?? {}) as Record<string, unknown>,
+				details: event.result?.details,
+				isError: false,
 			});
 		}
 		// A tool may have pulled a hidden tool into the active surface this turn
@@ -2387,6 +2502,15 @@ export class AgentSession implements CompactionHost, FusionHost {
 			setCurrentVerificationProbe(undefined);
 		}
 		this._verificationProbe = undefined;
+		// Band P / P4: drop any self-review findings so a torn-down session can't
+		// block a later goal_complete via the module-level R9 registry.
+		clearCurrentSelfReviewFindings();
+		// Band P / P5: release the conventions contract (identity-checked so a
+		// newer session's contract is never clobbered by a stale dispose).
+		if (getCurrentSessionContract() === this._sessionContract) {
+			setCurrentSessionContract(undefined);
+		}
+		this._sessionContract = undefined;
 		// Tear down any active debug session so adapters don't outlive the session.
 		if (this.settingsManager.getDebugSettings().enabled) {
 			void dapSessionManager.disposeAll().catch(() => {});
@@ -2874,6 +2998,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 			// Git branch — read synchronously from .git/HEAD on every rebuild
 			// (subprocess-free), rendered in the dynamic suffix only.
 			gitState: gitBranch ? { branch: gitBranch } : undefined,
+			// Band P (P1/P3) context-composer block — dynamic suffix only, recomputed
+			// per rebuild from the live prompt + cached living map (cache-neutral).
+			groundedContext: this._composeGroundedContext() || undefined,
 			// Stable per-session hidden-tool count (snapshotted after seeding) so the
 			// discovery nudge stays in the cacheable prefix without flipping as the
 			// live index mutates. Falls back to the global index only when 0.
@@ -3034,6 +3161,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._turnFixSite = undefined;
 		this._turnTouchedVisual = false;
 		this._turnUsedPreview = false;
+		// Band P / P4: fresh per-cycle risk aggregate, and drop any stale self-review
+		// findings from the previous cycle (they block goal_complete via R9).
+		this._turnRisk.reset();
+		clearCurrentSelfReviewFindings();
 		// Per-prompt reset for the todo-first safety net (the cadence tracker itself
 		// persists across the session, like _stagnation).
 		this._steering.resetPromptWorkActions();
@@ -3386,115 +3517,206 @@ export class AgentSession implements CompactionHost, FusionHost {
 		if (this._inVerification || !this._turnTouchedFiles) return;
 		if (this._userInterrupted || this._lastTurnAborted()) return;
 		const settings = this.settingsManager.getVerificationSettings();
-		if (!settings.enabled) return;
 		const maxAttempts = this._recovery.getEffectiveVerificationMaxAttempts(settings.maxAttempts);
 
 		this._inVerification = true;
 		const abort = new AbortController();
 		this._verificationAbort = abort;
 		try {
-			// Visual definition-of-done: a rendered artifact changed but was never
-			// viewed this turn — nudge the agent to render and review it (once).
-			if (settings.visual && this._turnTouchedVisual && !this._turnUsedPreview && this._lastVisualFile) {
-				this.emit({ type: "visual_review", file: this._lastVisualFile });
-				await this._promptOnce(visualNudgePrompt(this._lastVisualFile), {
-					expandPromptTemplates: false,
-					source: options?.source,
-				});
-				if (abort.signal.aborted) return;
+			// Check phase (visual nudge + project check + fix loop). Skipped entirely
+			// when verification is disabled — but the self-review below still runs,
+			// since P4 is independent of any check command (study §8, decision 6).
+			let fixesUsed = 0;
+			if (settings.enabled) {
+				const phase = await this._runVerificationCheckPhase(settings, maxAttempts, abort, options);
+				fixesUsed = phase.fixesUsed;
+				// A still-red check that spent the budget, or an abort, ends the turn
+				// here: the review shares that spent budget, and a broken check dominates.
+				if (phase.status === "exhausted" || phase.status === "aborted") return;
 			}
-
-			// Code check: run the project's check and re-inject failures to fix.
-			let command = this._resolveCheckCommand(settings.command);
-			if (!command) return;
-			let fixes = 0;
-			for (let attempt = 1; ; attempt++) {
-				// Re-resolve on each retry so the syntax-fallback tier picks up files the
-				// model edited WHILE fixing: that tier embeds the touched-file list, so a
-				// command frozen at gate entry would skip newly-touched files and pass a
-				// turn that still has a syntax error. The script/tsc tiers are
-				// touched-file independent and re-resolve to the same string; keep the
-				// last good command if a retry resolves to null.
-				if (attempt > 1) command = this._resolveCheckCommand(settings.command) ?? command;
-				this._verificationAttemptsTotal += 1;
-				this.emit({ type: "verification", phase: "running", command, attempt, maxAttempts });
-				const result = await runCheckCommand(command, this._cwd, {
-					signal: abort.signal,
-					timeoutMs: settings.timeoutMs,
-				});
-				if (abort.signal.aborted) return;
-				if (result.ok) {
-					this.emit({
-						type: "verification",
-						phase: "passed",
-						command,
-						attempt,
-						maxAttempts,
-					});
-					this._recovery.noteCleanTool();
-					// Debug-driven verify (additive, fail-open): on green, if a file this
-					// turn touched is a debuggable repro (pytest+debugpy / go test+dlv),
-					// launch it under the native DAP debugger and capture runtime state. A
-					// "suspect" verdict (a fixed variable still nullish at the fix site) is
-					// re-injected as context for the next turn. ANY failure / missing
-					// adapter / non-applicable repro → no-op (NEVER blocks the green gate).
-					if (!this._userInterrupted && !abort.signal.aborted && this._turnTouchedFilePaths.size > 0) {
-						try {
-							const snapshot = await maybeRunDebugVerify({
-								cwd: this._cwd,
-								touchedFiles: Array.from(this._turnTouchedFilePaths),
-								checkResult: result,
-								signal: abort.signal,
-								fixSite: this._turnFixSite,
-							});
-							if (snapshot?.verdict === "suspect" && !abort.signal.aborted && !this._userInterrupted) {
-								await this._promptOnce(debugVerifyContextPrompt(snapshot), {
-									expandPromptTemplates: false,
-									source: options?.source,
-								});
-							}
-						} catch {
-							// Fail-open absolute: debug-verify must never affect the passed result.
-						}
-					}
-					return;
-				}
-				const willRetry = fixes < maxAttempts;
-				this._verificationFailuresTotal += 1;
-				this.emit({
-					type: "verification",
-					phase: "failed",
-					command,
-					attempt,
-					maxAttempts,
-					exitCode: result.exitCode,
-					willRetry,
-				});
-				if (!willRetry) {
-					// Fix budget exhausted with the check still red. Don't end the turn
-					// silently — the model may have already claimed "done". Inject a single
-					// TERMINAL message (NOT the fix prompt): tell it the check is still
-					// failing and to summarize honestly instead of reporting success.
-					// One-shot: no loop re-entry, `fixes` is not incremented.
-					this._recovery.noteSignal("verification_exhausted");
-					this._steering.maybeInjectNarrationSteer();
-					await this._promptOnce(
-						verificationExhaustedPrompt(command, result, fixes, this._lastAssistantClaimedCompletion()),
-						{ expandPromptTemplates: false, source: options?.source },
-					);
-					return;
-				}
-				fixes++;
-				await this._promptOnce(verificationFixPrompt(command, result), {
-					expandPromptTemplates: false,
-					source: options?.source,
-				});
-				if (abort.signal.aborted) return;
-			}
+			if (this._userInterrupted || abort.signal.aborted) return;
+			// Self-review phase (P4): runs on a high-risk diff regardless of whether a
+			// check exists, SHARING the verification attempts budget so combined
+			// verification + review fixes never exceed maxAttempts.
+			await this._runSelfReviewPhase(maxAttempts, fixesUsed, abort, options);
 		} finally {
 			this._inVerification = false;
 			this._verificationAbort = undefined;
 		}
+	}
+
+	/**
+	 * Verification check phase: the visual-DoD nudge, then the project check + fix
+	 * loop. Extracted from `_runVerificationGate` so the self-review phase can run
+	 * afterward while SHARING the same fix budget. Returns how many fixes it consumed
+	 * and a status: `passed` (green), `exhausted` (still red, budget spent),
+	 * `aborted`, or `inert` (no check command). Only `passed`/`inert` let the review
+	 * proceed.
+	 */
+	private async _runVerificationCheckPhase(
+		settings: ReturnType<SettingsManager["getVerificationSettings"]>,
+		maxAttempts: number,
+		abort: AbortController,
+		options?: PromptOptions,
+	): Promise<{ fixesUsed: number; status: "passed" | "exhausted" | "aborted" | "inert" }> {
+		// Visual definition-of-done: a rendered artifact changed but was never
+		// viewed this turn — nudge the agent to render and review it (once).
+		if (settings.visual && this._turnTouchedVisual && !this._turnUsedPreview && this._lastVisualFile) {
+			this.emit({ type: "visual_review", file: this._lastVisualFile });
+			await this._promptOnce(visualNudgePrompt(this._lastVisualFile), {
+				expandPromptTemplates: false,
+				source: options?.source,
+			});
+			if (abort.signal.aborted) return { fixesUsed: 0, status: "aborted" };
+		}
+
+		// Code check: run the project's check and re-inject failures to fix.
+		let command = this._resolveCheckCommand(settings.command);
+		if (!command) return { fixesUsed: 0, status: "inert" };
+		let fixes = 0;
+		for (let attempt = 1; ; attempt++) {
+			// Re-resolve on each retry so the syntax-fallback tier picks up files the
+			// model edited WHILE fixing: that tier embeds the touched-file list, so a
+			// command frozen at gate entry would skip newly-touched files and pass a
+			// turn that still has a syntax error. The script/tsc tiers are
+			// touched-file independent and re-resolve to the same string; keep the
+			// last good command if a retry resolves to null.
+			if (attempt > 1) command = this._resolveCheckCommand(settings.command) ?? command;
+			this._verificationAttemptsTotal += 1;
+			this.emit({ type: "verification", phase: "running", command, attempt, maxAttempts });
+			const result = await runCheckCommand(command, this._cwd, {
+				signal: abort.signal,
+				timeoutMs: settings.timeoutMs,
+			});
+			if (abort.signal.aborted) return { fixesUsed: fixes, status: "aborted" };
+			if (result.ok) {
+				this.emit({ type: "verification", phase: "passed", command, attempt, maxAttempts });
+				this._recovery.noteCleanTool();
+				// Band P contract expiry: three consecutive passes without a constraint
+				// re-firing retire it (the TODO(band-p integration) line session-contract
+				// exports for exactly this spot — the only place a real PASS is observed).
+				getCurrentSessionContract()?.noteVerificationPass();
+				// Debug-driven verify (additive, fail-open): on green, if a file this
+				// turn touched is a debuggable repro (pytest+debugpy / go test+dlv),
+				// launch it under the native DAP debugger and capture runtime state. A
+				// "suspect" verdict (a fixed variable still nullish at the fix site) is
+				// re-injected as context for the next turn. ANY failure / missing
+				// adapter / non-applicable repro → no-op (NEVER blocks the green gate).
+				if (!this._userInterrupted && !abort.signal.aborted && this._turnTouchedFilePaths.size > 0) {
+					try {
+						const snapshot = await maybeRunDebugVerify({
+							cwd: this._cwd,
+							touchedFiles: Array.from(this._turnTouchedFilePaths),
+							checkResult: result,
+							signal: abort.signal,
+							fixSite: this._turnFixSite,
+						});
+						if (snapshot?.verdict === "suspect" && !abort.signal.aborted && !this._userInterrupted) {
+							await this._promptOnce(debugVerifyContextPrompt(snapshot), {
+								expandPromptTemplates: false,
+								source: options?.source,
+							});
+						}
+					} catch {
+						// Fail-open absolute: debug-verify must never affect the passed result.
+					}
+				}
+				return { fixesUsed: fixes, status: "passed" };
+			}
+			const willRetry = fixes < maxAttempts;
+			this._verificationFailuresTotal += 1;
+			this.emit({
+				type: "verification",
+				phase: "failed",
+				command,
+				attempt,
+				maxAttempts,
+				exitCode: result.exitCode,
+				willRetry,
+			});
+			if (!willRetry) {
+				// Fix budget exhausted with the check still red. Don't end the turn
+				// silently — the model may have already claimed "done". Inject a single
+				// TERMINAL message (NOT the fix prompt): tell it the check is still
+				// failing and to summarize honestly instead of reporting success.
+				// One-shot: no loop re-entry, `fixes` is not incremented.
+				this._recovery.noteSignal("verification_exhausted");
+				this._steering.maybeInjectNarrationSteer();
+				await this._promptOnce(
+					verificationExhaustedPrompt(command, result, fixes, this._lastAssistantClaimedCompletion()),
+					{ expandPromptTemplates: false, source: options?.source },
+				);
+				return { fixesUsed: fixes, status: "exhausted" };
+			}
+			fixes++;
+			await this._promptOnce(verificationFixPrompt(command, result), {
+				expandPromptTemplates: false,
+				source: options?.source,
+			});
+			if (abort.signal.aborted) return { fixesUsed: fixes, status: "aborted" };
+		}
+	}
+
+	/**
+	 * Self-review phase (Band P / P4). When this cycle's aggregate patch risk (or any
+	 * single patch) is HIGH — or MEDIUM at the `assistido` thermostat level — spawn a
+	 * read-only review subagent (mirroring fusion-verify), re-inject HIGH findings as
+	 * a fix prompt sharing the verification budget, and re-review until they clear or
+	 * the shared budget is spent. Unresolved HIGH findings stay registered so
+	 * goal_complete (R9) refuses. Fail-open throughout; a no-op unless a real trigger
+	 * fires (kill-switch `PIT_NO_SELF_REVIEW`, zero-mutation cycles skipped).
+	 */
+	private async _runSelfReviewPhase(
+		maxAttempts: number,
+		fixesAlreadyUsed: number,
+		abort: AbortController,
+		options?: PromptOptions,
+	): Promise<void> {
+		const totals = this._turnRisk.getTotals();
+		const level = getCurrentSupervisionThermostat()?.getLevel();
+		await runSelfReviewLoop({
+			totals,
+			level,
+			runner: this._selfReviewRunner(abort),
+			maxAttempts,
+			fixesAlreadyUsed,
+			injectFix: (prompt) => this._promptOnce(prompt, { expandPromptTemplates: false, source: options?.source }),
+			isAborted: () => abort.signal.aborted || this._userInterrupted,
+		});
+	}
+
+	/**
+	 * Build the concrete review runner: one read-only `spawnSubagent` pass in the
+	 * fusion-verify mould (read/grep/find/ls, maxTurns 6, strict SELF_REVIEW_SCHEMA).
+	 * Throws on schema mismatch / timeout / abort — `runSelfReviewLoop` treats a throw
+	 * as fail-open. Returns `{ findings: [] }` only when there is no usable model.
+	 */
+	private _selfReviewRunner(abort: AbortController): SelfReviewRunner {
+		return async (args) => {
+			const model = this.model;
+			if (!model) return { findings: [] };
+			const result = await spawnSubagent(
+				{
+					registry: new SubagentRegistry(),
+					model,
+					modelRegistry: this.modelRegistry,
+					availableTools: this.agent.state.tools as AgentTool[],
+					convertToLlm: (m) => m as never,
+				},
+				{
+					prompt: args.prompt,
+					systemPrompt: args.systemPrompt,
+					allowedTools: ["read", "grep", "find", "ls"],
+					resultSchema: SELF_REVIEW_SCHEMA,
+					cwd: this._cwd,
+					timeoutMs: SELF_REVIEW_TIMEOUT_MS,
+					maxTurns: 6,
+					thinkingLevel: "medium",
+					signal: abort.signal,
+				},
+			);
+			return (result.value as SelfReviewResult | undefined) ?? { findings: [] };
+		};
 	}
 
 	/**
@@ -3643,6 +3865,25 @@ export class AgentSession implements CompactionHost, FusionHost {
 				} finally {
 					this._flushPendingBashMessages();
 				}
+			}
+
+			// Band P: capture this turn's prompt and rebuild so the context-composer
+			// block (dynamic suffix, cache-neutral) reflects the current request
+			// before emitBeforeAgentStart hands the prompt to the provider. Fire a
+			// background map refresh so subsequent turns see this turn's edits.
+			if (!isContextComposerDisabled() && this._livingRepoMap) {
+				if (expandedText !== this._composerPromptText) {
+					this._composerPromptText = expandedText;
+					try {
+						this._baseSystemPrompt = this._rebuildSystemPrompt(
+							this.getActiveToolNames(),
+							"context-composer-turn",
+						);
+					} catch {
+						// Non-fatal: the block simply lags this turn.
+					}
+				}
+				void this._refreshLivingRepoMap();
 			}
 
 			// Build messages array (custom message if any, then user message)

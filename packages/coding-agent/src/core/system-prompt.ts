@@ -10,6 +10,7 @@ import {
 	formatFrequentFilesForPrompt,
 	formatFrequentFilesIndexForPrompt,
 } from "./frequent-files.ts";
+import { getCurrentSessionContract } from "./session-contract.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
 import { getCurrentToolDiscoveryIndex } from "./tool-discovery.ts";
 
@@ -77,6 +78,15 @@ export interface BuildSystemPromptOptions {
 	 * stale the moment the agent edits a file, which is worse than absent.
 	 */
 	gitState?: { branch: string };
+	/**
+	 * Band P (P1/P3) context-composer block: a token-budgeted `<grounded_context>`
+	 * outline (real symbols of the files the turn will likely touch) plus an
+	 * optional `<style_exemplar>`. Pre-rendered by `composeContext`. Rendered in
+	 * the dynamic suffix AFTER the cache marker (like frequent-files): it is
+	 * recomputed per turn from the live prompt + map, so it must NEVER touch the
+	 * cacheable prefix. Empty string / undefined → nothing emitted (fail-open).
+	 */
+	groundedContext?: string;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -95,6 +105,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		hotFileOutlines,
 		sessionFrequentFiles,
 		gitState,
+		groundedContext,
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
 	const resolvedHiddenToolCount = hiddenToolCount ?? getCurrentToolDiscoveryIndex()?.listHidden().length ?? 0;
@@ -162,6 +173,21 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		if (hotFileOutlines && hotFileOutlines.length > 0) {
 			const outlineBlock = formatHotFileOutlines(hotFileOutlines);
 			if (outlineBlock.length > 0) parts.push(`\n\n${outlineBlock}\n`);
+		}
+		// Band P context-composer block — dynamic suffix only (after the marker),
+		// so per-turn recomputation never re-bills the cached prefix.
+		if (groundedContext && groundedContext.length > 0) {
+			parts.push(`\n\n${groundedContext}\n`);
+		}
+		// Band P / P5 conventions contract — sibling dynamic-suffix slot. Read from
+		// the module registry directly (like getCurrentToolDiscoveryIndex above)
+		// rather than plumbed through options: the contract mutates as the session's
+		// checks fail, so it must live AFTER the cache marker, and reading the
+		// registry here avoids threading it through agent-session.ts (owned
+		// elsewhere). Rendered ONLY when constraints exist (empty string → nothing).
+		const sessionContractBlock = getCurrentSessionContract()?.renderPromptBlock() ?? "";
+		if (sessionContractBlock.length > 0) {
+			parts.push(`\n\n${sessionContractBlock}\n`);
 		}
 	};
 

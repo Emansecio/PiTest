@@ -63,18 +63,20 @@ Fixed order inside `prepareSingleToolCall` (`agent-loop.ts:1066+`). Each step ca
 - **Cross-cutting steering** (reminders, not blockers): doom-loop, stagnation, todo-cadence, failure-budget (per-turn cap with optional cross-turn carryover via half-life decay; opt out `toolFeedback.failureBudget.carryover: false`) — nudge the model without vetoing.
 - **Session Recovery** (`session-recovery.ts` + `TurnSteeringEngine`): reactive scaffolding uplift. Every session starts **`lean`** (behavior-identical to the historical harness). When thrash signals fire (doom-loop tiers, result-loop, cross-error, failure-budget, repeating-pattern, verification exhausted, stagnation hard), the level rises **`guided` → `strict`**, enabling: error-reflection via **steer** (not stale `followUp`), tighter loop thresholds, +1/+2 verify `maxAttempts`, one-shot narration steer. Clean tool-success streaks de-escalate. **Not** model-tier classification — opt out `PIT_NO_SESSION_RECOVERY=1`. Telemetry: `quality.recovery`.
 
-## Band P — pre-generation conditioning (P0 ACTIVE observe-only; P1-P5 planned)
+## Band P — pre-generation conditioning (ALL PILLARS ACTIVE)
 
-> **Status: P0 shipped 2026-07-02 in observe-only mode; pillars P1-P5 are approved
-> design, not built.** Do NOT rely on P1-P5 existing at runtime, and do NOT build a
-> parallel version of one — the design, decisions and phased roadmap live in
-> [`conditioning-band-study.md`](conditioning-band-study.md). Each pillar flips to
-> "active" here as its phase ships.
+> **Status: fully shipped 2026-07-03.** Design, decisions and rationale live in
+> [`conditioning-band-study.md`](conditioning-band-study.md). Every pillar is dosed by
+> the supervision thermostat level and has an individual kill-switch:
+> `PIT_NO_SUPERVISION_THERMOSTAT`, `PIT_NO_TELEMETRY_SINK`, `PIT_NO_CONTEXT_COMPOSER`,
+> `PIT_NO_STYLE_EXEMPLAR`, `PIT_NO_INTENT_GATE`, `PIT_NO_SELF_REVIEW`,
+> `PIT_NO_SESSION_CONTRACT`.
 
 Where every band above reacts (validate the call, repair the result, correct the
 behavior), Band P shapes what the model sees and intends BEFORE it generates:
 
-- **P0 — supervision thermostat + efficacy telemetry** (ACTIVE, observe-only):
+- **P0 — supervision thermostat + efficacy telemetry** (the dosing source — no longer
+  observe-only: P1-P4 consume the level):
   per-session supervision level (`assistido → padrao → leve`) earned by the model's
   observed output signals (guard blocks via the diagnostics channel, recovery thrash
   signals), with the three anti-oscillation locks: asymmetric hysteresis (tighten on
@@ -91,20 +93,32 @@ behavior), Band P shapes what the model sees and intends BEFORE it generates:
   guard-fired→next-call-outcome correlator writes per-rule efficacy records
   (`core/telemetry/guard-efficacy.ts`), a session summary (recovery snapshot,
   verification tallies, cache stats) lands at dispose, and every `guard.*` emission
-  now carries a stable `ruleId` + `outcome` ("blocked"/"overridden").
-- **P1 — ground-truth injection**: real signatures/outlines of the symbols the turn
-  will likely touch, injected via the two cache-neutral lanes (dynamic suffix +
-  `context` event), token-capped by thermostat level (1200/800/400).
-- **P2 — intent gate**: risky tasks (task-rigor ≥ 2) require a micro-plan validated
-  against the real tree (pure `groundPath`/`checkExistence`) before the first edit —
-  blocks at protected levels, nudges at `leve`.
-- **P3 — exemplar anchoring**: 10-30 lines of the repo's analogous code injected next
-  to the edit site as a style reference (protected levels only).
-- **P4 — structured self-review**: large diffs (any level) and medium diffs (at
-  `assistido`) get a read-only review subagent (fusion-verify pattern) whose high
-  findings gate `goal_complete`.
-- **P5 — conventions contract**: verification failures distilled into standing
-  session constraints (cap 5, session-scoped in v1) re-injected via the dynamic suffix.
+  carries a stable `ruleId` + `outcome` ("blocked"/"overridden"). The intent gate's
+  procedural `intent-gate-no-plan` block deliberately does NOT tighten the thermostat
+  (its `intent-gate-plan-findings` — a hallucinated path in a plan — does).
+- **P1 — ground-truth injection** (`core/conditioning/context-composer.ts`): layered
+  relevance predictor (prompt paths/symbols → imports of the last-read file → session
+  hot files) renders a `<grounded_context>` block — real top-level declarations with
+  kind+line from the enriched living repo-map — into the system-prompt dynamic suffix
+  (cache-neutral), token-capped by thermostat level (1200/800/400).
+- **P2 — intent gate** (`core/intent-gate.ts` + `built-ins/intent-gate-extension.ts`,
+  in the firewall between learned-error and the grounding chain): risky prompts
+  (task-rigor) require a `plan`-tool micro-plan validated against the real tree
+  (`groundPath` + repo-map symbol set, fuzzy candidates on findings) before the first
+  mutating call — blocks at protected levels (with an anti-lock degrade after 2
+  blocks/cycle), nudges at `leve`.
+- **P3 — exemplar anchoring** (inside the context composer): a `<style_exemplar>`
+  block with the head of the best same-directory/same-suffix neighbor of the file
+  being edited; `assistido`/`padrao` only, counted inside the P1 cap.
+- **P4 — structured self-review** (`core/self-review.ts` + `core/turn-risk.ts`):
+  per-cycle changed-line aggregate closes the many-small-edits gap; HIGH risk (any
+  level) or MEDIUM (at `assistido`) runs a read-only review subagent (schema-bound,
+  fusion-verify pattern) after the check phase, sharing the verification fix budget;
+  unresolved high findings re-inject fix prompts and block `goal_complete` (R9).
+- **P5 — conventions contract** (`core/session-contract.ts`): failed checks parsed
+  (biome rule ids, recurring TS codes, TS1294 special-case) into ≤5 standing session
+  constraints rendered as `<session_contract>` in the dynamic suffix; a constraint
+  expires after 3 consecutive verification passes without re-firing.
 
 ---
 

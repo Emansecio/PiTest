@@ -362,6 +362,13 @@ de qualquer pilar obedecê-las).
 salvou o call seguinte" sobre sessões reais; (b) as transições de nível do termostato,
 observadas passivamente, parecem certas — sem oscilação, apertando quando devia.*
 
+**Fases 1-3 — ENTREGUES 2026-07-03** (decisão do mantenedor: implementar tudo e validar
+durante o uso, já que o placar da Fase 0 instrumenta cada pilar desde a primeira sessão;
+kill-switch individual por pilar). Nota de integração: o bloqueio procedural
+`intent-gate-no-plan` foi excluído dos sinais de aperto do termostato — apertar porque o
+modelo ainda não escreveu o plano seria um loop injusto; `intent-gate-plan-findings`
+(caminho alucinado no plano) aperta normalmente.
+
 **Fase 1 — P1 mínimo + P5** (esforço: médio)
 Living-index com kind+line; injeção de outline dos alvos prováveis no sufixo dinâmico
 (evolução do `PIT_FREQ_OUTLINE`, ligada por padrão para tier ≤ mid); assinaturas LSP dos
