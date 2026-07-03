@@ -30,11 +30,13 @@ import {
 	clampThinkingLevel,
 	cleanupSessionResources,
 	DEFAULT_IDLE_TIMEOUT_MS,
+	getRuntimeDiagnostics,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	isEntryCooledDown,
 	markEntryCooldown,
 	modelsAreEqual,
+	onDiagnostic,
 	recordDiagnostic,
 	resetApiProviders,
 	splitSystemPromptOnDynamic,
@@ -200,6 +202,9 @@ import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import { DiagnosticsSink, defaultDiagnosticsDir, isTelemetrySinkDisabled } from "./telemetry/diagnostics-sink.ts";
+import { GuardEfficacyCorrelator } from "./telemetry/guard-efficacy.ts";
+import { buildSessionSummaryRecord } from "./telemetry/session-summary.ts";
 import {
 	getCurrentTodoManager,
 	setCurrentTodoManager,
@@ -663,6 +668,17 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// number of in-flight tool calls and aggressively pruned on completion.
 	private readonly _toolCallArgsByCallId = new Map<string, unknown>();
 
+	// Band P — Fase 0 telemetry. Durable per-session diagnostics sink + the
+	// guard→next-call efficacy correlator that feeds it. Both are best-effort and
+	// only wired for persisted sessions (see _initTelemetrySink); undefined means
+	// telemetry is off (in-memory session, or PIT_NO_TELEMETRY_SINK=1).
+	private _diagnosticsSink: DiagnosticsSink | undefined;
+	private _guardEfficacy: GuardEfficacyCorrelator | undefined;
+	private _guardEfficacyUnsub: (() => void) | undefined;
+	// Session-wide verification-gate tally for the session-summary snapshot.
+	private _verificationAttemptsTotal = 0;
+	private _verificationFailuresTotal = 0;
+
 	// Reactive session recovery: lean by default, escalates on thrash signals.
 	private readonly _recovery: SessionRecoveryController;
 	// Per-session steering/reminder policy engine: owns the doom-loop / result-loop /
@@ -798,7 +814,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 				: new FileMtimeStore();
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 
-		this._recovery = new SessionRecoveryController();
+		// The boot-time model decides the supervision thermostat's start level
+		// (native anthropic/openai start `leve`). A later /model switch does not
+		// re-seed the start level — the thermostat is per-session and observe-only
+		// in Fase 0; behavior earned in-session dominates the prior anyway.
+		this._recovery = new SessionRecoveryController({ model: this.agent.state.model });
 
 		// Steering/reminder policy engine. Reads settings + the (already standalone)
 		// tool-call stats and todo manager, and posts steers/follow-ups via
@@ -865,6 +885,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._openHindsightBank();
 		this._openDeferredOutputStore();
 		this._publishHistoryRecallSource();
+		this._initTelemetrySink();
 
 		// Compute the repo-level "frequent files" index in the background. First
 		// turn may miss it; subsequent turns get the list in the system prompt's
@@ -1832,6 +1853,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 			event.isError,
 			event.toolCallId,
 		);
+		// Band P Fase 0: reconcile any pending guard-fire for this tool with the
+		// call's outcome (fail-open; no-op when telemetry is off or nothing pending).
+		this._guardEfficacy?.onToolExecutionEnd(event.toolName, event.isError);
 		this._steering.maybeInjectDoomLoop(event.toolName, args, errorMessage);
 		// Complementary to the doom-loop above (same call repeated): detect a
 		// repeating MULTI-tool cycle [A,B,C]x3 of DIFFERENT tools. Runs after — if
@@ -2018,6 +2042,59 @@ export class AgentSession implements CompactionHost, FusionHost {
 	}
 
 	/**
+	 * Band P Fase 0: stand up the durable diagnostics sink + guard-efficacy
+	 * correlator for this session. Best-effort and observability-only, so it never
+	 * throws into boot. Skipped for in-memory sessions (same rationale as the
+	 * learned-error store: synthetic errors must not pollute the on-disk store) and
+	 * when PIT_NO_TELEMETRY_SINK=1.
+	 */
+	private _initTelemetrySink(): void {
+		if (isTelemetrySinkDisabled()) return;
+		if (!this.sessionManager.isPersisted()) return;
+		try {
+			const sink = new DiagnosticsSink(defaultDiagnosticsDir(), { sessionId: this.sessionId, cwd: this._cwd });
+			sink.start();
+			this._diagnosticsSink = sink;
+			// Correlator emits onto the same JSONL lane as the raw events.
+			const correlator = new GuardEfficacyCorrelator((record) => sink.writeRecord(record));
+			this._guardEfficacy = correlator;
+			this._guardEfficacyUnsub = onDiagnostic((event) => correlator.onDiagnostic(event));
+		} catch {
+			// Fail-open: telemetry must never break session boot.
+			this._diagnosticsSink = undefined;
+			this._guardEfficacy = undefined;
+		}
+	}
+
+	/**
+	 * Band P Fase 0: write the session-summary snapshot (recovery + verification
+	 * tally + diagnostics totals + cache totals) onto the diagnostics lane at
+	 * dispose. Cache stats are skipped if the transcript is unreachable. Best-effort.
+	 */
+	private _persistDiagnosticsSummary(): void {
+		const sink = this._diagnosticsSink;
+		if (!sink) return;
+		try {
+			let cache: CacheStats | undefined;
+			try {
+				cache = computeCacheStats(this.state.messages);
+			} catch {
+				cache = undefined;
+			}
+			sink.writeRecord(
+				buildSessionSummaryRecord({
+					recovery: this._recovery.getSnapshot(),
+					diagnostics: getRuntimeDiagnostics(),
+					verification: { attempts: this._verificationAttemptsTotal, failures: this._verificationFailuresTotal },
+					cache,
+				}),
+			);
+		} catch {
+			// Best-effort: never block dispose on telemetry.
+		}
+	}
+
+	/**
 	 * Append this session's learned-error fingerprints to a per-session JSONL
 	 * file under `~/.pit/agent/learned-errors/`. Best-effort: failures are
 	 * swallowed because the learned-error store is observability, not load-
@@ -2181,6 +2258,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// the before/after delta of the rewrite registry on real workloads.
 		this._maybeExportStats();
 		this._persistLearnedErrors();
+		// Band P Fase 0: snapshot the session outcome, then tear down the sink.
+		this._guardEfficacyUnsub?.();
+		this._guardEfficacyUnsub = undefined;
+		this._guardEfficacy = undefined;
+		this._persistDiagnosticsSummary();
+		this._diagnosticsSink?.dispose();
+		this._diagnosticsSink = undefined;
 
 		await this.sessionManager.flushWrites();
 		this._extensionRunner.invalidate(
@@ -3332,6 +3416,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 				// touched-file independent and re-resolve to the same string; keep the
 				// last good command if a retry resolves to null.
 				if (attempt > 1) command = this._resolveCheckCommand(settings.command) ?? command;
+				this._verificationAttemptsTotal += 1;
 				this.emit({ type: "verification", phase: "running", command, attempt, maxAttempts });
 				const result = await runCheckCommand(command, this._cwd, {
 					signal: abort.signal,
@@ -3375,6 +3460,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 					return;
 				}
 				const willRetry = fixes < maxAttempts;
+				this._verificationFailuresTotal += 1;
 				this.emit({
 					type: "verification",
 					phase: "failed",
