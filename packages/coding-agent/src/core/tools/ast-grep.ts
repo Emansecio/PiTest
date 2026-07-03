@@ -3,16 +3,43 @@ import * as nodePath from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { expandKeyHint, moreLinesTrailer } from "../../modes/interactive/components/tool-activity.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { prepareWithPathAliases } from "./argument-prep.ts";
 import { astGrepNapiSearch, isNapiSupportedLang } from "./ast-grep-napi.ts";
-import { AST_GREP_INSTALL_HINT, isMissingBinaryError, parseJsonStream } from "./ast-grep-shared.ts";
+import {
+	AST_GREP_INSTALL_HINT,
+	isMissingBinaryError,
+	noMatchesMessage,
+	parseJsonStream,
+	resolveAstGrepSpawnStrategy,
+} from "./ast-grep-shared.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
+
+// Extension → lang id, for the napi-supported subset only. The ast-grep CLI
+// already infers language per file from `target` when `--lang` is omitted
+// (so CLI-path args below are left untouched); this map exists solely to let
+// a specific single-file `path` become napi-eligible without an explicit
+// `lang`, so the schema's "Inferred from path when omitted" claim holds for
+// the napi fast-path too, not just the CLI fallback.
+const NAPI_EXT_TO_LANG: Record<string, string> = {
+	".ts": "ts",
+	".mts": "ts",
+	".cts": "ts",
+	".tsx": "tsx",
+	".js": "js",
+	".jsx": "js",
+	".mjs": "js",
+	".cjs": "js",
+	".html": "html",
+	".htm": "html",
+	".css": "css",
+};
 
 const astGrepSchema = Type.Object(
 	{
@@ -31,7 +58,11 @@ const astGrepSchema = Type.Object(
 		),
 		context: Type.Optional(Type.Number({ description: "Lines of context around each match (default: 0)." })),
 		limit: Type.Optional(
-			Type.Number({ description: `Max matches to return (default ${DEFAULT_LIMIT}, hard cap ${MAX_LIMIT}).` }),
+			Type.Number({
+				description: `Max matches to return (default ${DEFAULT_LIMIT}, hard cap ${MAX_LIMIT}).`,
+				minimum: 1,
+				maximum: MAX_LIMIT,
+			}),
 		),
 	},
 	{ additionalProperties: false },
@@ -137,7 +168,7 @@ function formatAstGrepResult(
 	const displayLines = lines.slice(0, maxLines);
 	const remaining = lines.length - maxLines;
 	let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
-	if (remaining > 0) text += `\n${theme.fg("muted", `... (${remaining} more lines)`)}`;
+	if (remaining > 0) text += `\n${moreLinesTrailer(remaining, expandKeyHint())}`;
 	return text;
 }
 
@@ -148,29 +179,35 @@ export function runAstGrep(
 	signal?: AbortSignal,
 ): Promise<{ code: number; stdout: string; stderr: string }> {
 	return new Promise((resolve, reject) => {
-		const child = execFile(binary, args, { cwd, signal, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
-			if (err) {
-				const e = err as NodeJS.ErrnoException & { code?: string | number };
-				if (isMissingBinaryError(err)) {
-					reject(Object.assign(new Error(AST_GREP_INSTALL_HINT), { __astGrepMissing: true }));
+		const strategy = resolveAstGrepSpawnStrategy(binary, args);
+		const child = execFile(
+			strategy.command,
+			strategy.args,
+			{ cwd, signal, maxBuffer: 64 * 1024 * 1024, shell: strategy.useShell, windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const e = err as NodeJS.ErrnoException & { code?: string | number };
+					if (isMissingBinaryError(err)) {
+						reject(Object.assign(new Error(AST_GREP_INSTALL_HINT), { __astGrepMissing: true }));
+						return;
+					}
+					// Output exceeded maxBuffer: the child was killed and stdout is partial.
+					// Surfacing the partial NDJSON as a complete result would silently truncate
+					// the match set, so reject explicitly and let the caller narrow the search.
+					if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || /maxBuffer/.test(err.message ?? "")) {
+						reject(
+							Object.assign(new Error("ast-grep output exceeded the buffer limit"), { __astGrepOverflow: true }),
+						);
+						return;
+					}
+					// Non-zero exit code: still resolve with stderr so callers can choose what to do.
+					const code = typeof e.code === "number" ? e.code : 1;
+					resolve({ code, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? String(err) });
 					return;
 				}
-				// Output exceeded maxBuffer: the child was killed and stdout is partial.
-				// Surfacing the partial NDJSON as a complete result would silently truncate
-				// the match set, so reject explicitly and let the caller narrow the search.
-				if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || /maxBuffer/.test(err.message ?? "")) {
-					reject(
-						Object.assign(new Error("ast-grep output exceeded the buffer limit"), { __astGrepOverflow: true }),
-					);
-					return;
-				}
-				// Non-zero exit code: still resolve with stderr so callers can choose what to do.
-				const code = typeof e.code === "number" ? e.code : 1;
-				resolve({ code, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? String(err) });
-				return;
-			}
-			resolve({ code: 0, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? "" });
-		});
+				resolve({ code: 0, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? "" });
+			},
+		);
 		// execFile already supports signal natively; nothing else to wire.
 		void child;
 	});
@@ -201,7 +238,10 @@ export function createAstGrepToolDefinition(
 				const matchLimitReached = all.length > effectiveLimit;
 				const capped = matchLimitReached ? all.slice(0, effectiveLimit) : all;
 				if (capped.length === 0) {
-					return { content: [{ type: "text" as const, text: "No matches found" }], details: { matchCount: 0 } };
+					return {
+						content: [{ type: "text" as const, text: noMatchesMessage(globs) }],
+						details: { matchCount: 0 },
+					};
 				}
 				let text = formatMatches(capped, cwd);
 				if (matchLimitReached) {
@@ -218,10 +258,18 @@ export function createAstGrepToolDefinition(
 			// a built-in language, no globs, no context. Everything else, and any
 			// napi failure (astGrepNapiSearch returns null, never throws), falls
 			// through to the CLI below.
+			// A specific single-file `path` whose extension maps to a napi built-in
+			// language becomes eligible even when `lang` is omitted — the CLI already
+			// infers per-file language from `target`, so this only widens the napi
+			// fast-path to match the schema's documented inference behavior.
+			const effectiveLang = lang ?? NAPI_EXT_TO_LANG[nodePath.extname(target).toLowerCase()];
 			const napiEligible =
-				engine === "napi" && isNapiSupportedLang(lang) && !(globs && globs.length > 0) && !(context && context > 0);
-			if (napiEligible && lang) {
-				const napiMatches = await astGrepNapiSearch({ pattern, lang, target });
+				engine === "napi" &&
+				isNapiSupportedLang(effectiveLang) &&
+				!(globs && globs.length > 0) &&
+				!(context && context > 0);
+			if (napiEligible && effectiveLang) {
+				const napiMatches = await astGrepNapiSearch({ pattern, lang: effectiveLang, target });
 				if (signal?.aborted) throw new Error("Operation aborted");
 				if (napiMatches) return buildResult(napiMatches);
 				// null → unsupported/failed at runtime → fall through to the CLI.

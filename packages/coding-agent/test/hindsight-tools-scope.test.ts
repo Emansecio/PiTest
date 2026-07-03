@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { HindsightBank } from "../src/core/hindsight/bank.ts";
 import { createForgetToolDefinition } from "../src/core/tools/forget.ts";
 import { withAgentScope } from "../src/core/tools/hindsight-scope.ts";
-import { createRecallToolDefinition } from "../src/core/tools/recall.ts";
+import { createRecallToolDefinition, type RecallToolInput } from "../src/core/tools/recall.ts";
 import { createRetainToolDefinition } from "../src/core/tools/retain.ts";
 
 function fakeBank(): HindsightBank {
@@ -58,6 +58,23 @@ describe("scoped hindsight tools", () => {
 		await def.execute("c", { query: "q", scope: "all" }, undefined, undefined, undefined as never);
 		const arg = (bank.search as ReturnType<typeof vi.fn>).mock.calls[0][0];
 		expect(arg.scopes).toBeUndefined();
+	});
+
+	it("recall echoes a typo'd/unknown kind instead of silently dropping it", async () => {
+		const bank = fakeBank();
+		const def = createRecallToolDefinition("/cwd", { bank });
+		const res = (await def.execute(
+			"c",
+			// The closed `kinds` enum rejects "decisions" at compile time; cast to
+			// simulate a model passing an out-of-enum value the runtime must handle.
+			{ query: "q", kinds: ["decisions"] as unknown as RecallToolInput["kinds"] },
+			undefined,
+			undefined,
+			undefined as never,
+		)) as { content: Array<{ text: string }> };
+		expect(res.content[0].text).toMatch(/ignored unknown kind/i);
+		expect(res.content[0].text).toContain("decisions");
+		expect(vi.mocked(bank.search).mock.calls[0][0].kinds).toBeUndefined();
 	});
 
 	it("scoped forget by subject cannot target another scope", async () => {

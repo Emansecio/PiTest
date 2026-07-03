@@ -106,7 +106,7 @@ export function createPlanToolDefinition(
 		name: "plan",
 		label: "plan",
 		description:
-			"Maintain a structured plan as a DAG of steps (supersedes flat `todo` when steps have dependencies). Ops: propose (needs steps; creates v1), revise (needs steps; appends a new version keeping history), step_done (needs step_id), show (print the current DAG in topological order). Each step has id, intent, optional depends_on (ids), produces (artifact), verify (check). Cyclic or dangling depends_on are rejected. The optional `brief` carries markdown context the executor needs and is shown by exit_plan.",
+			"Maintain a structured plan as a DAG of steps. Ops: propose (needs steps; creates v1), revise (needs steps; appends a new version keeping history), step_done (needs step_id), show (print the current DAG in topological order). Each step has id, intent, optional depends_on (ids), produces (artifact), verify (check). Cyclic or dangling depends_on are rejected. The optional `brief` carries markdown context the executor needs and is shown by exit_plan.",
 		promptSnippet: "Plan multi-step work as a versioned DAG of dependent steps",
 		promptGuidelines: [
 			"When a multi-step task has real dependencies/artifacts, use `plan` (a DAG) instead of `todo` (a flat list); mark steps done as you go and `revise` to re-shape.",

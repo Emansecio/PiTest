@@ -17,6 +17,7 @@ import {
 	type HindsightEntry,
 	type HindsightSearchResult,
 } from "../hindsight/index.ts";
+import { HINDSIGHT_BANK_ABSENT_MESSAGE, resolveScope } from "./hindsight-tool-shared.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -51,19 +52,6 @@ export interface ReflectToolOptions {
 	bank?: HindsightBank;
 	/** Bound agent scope; drives default scope filtering for this instance. */
 	agentScope?: string;
-}
-
-function resolveScope(
-	bound: string | undefined,
-	override: string | undefined,
-): { scopes?: (string | null)[]; boostScope?: string | null } {
-	const ov = override?.trim();
-	if (ov === "all") return {};
-	if (ov === "global") return { scopes: [null] };
-	if (ov && ov !== "own") return { scopes: [ov, null], boostScope: ov };
-	// default ("own" or unset): bound scope reads own+global; main reads all, global boosted.
-	if (bound) return { scopes: [bound, null], boostScope: bound };
-	return { boostScope: null };
 }
 
 function formatEntry(entry: HindsightEntry): string {
@@ -126,7 +114,7 @@ export function createReflectToolDefinition(
 					content: [
 						{
 							type: "text" as const,
-							text: "Hindsight bank is not enabled for this session.",
+							text: HINDSIGHT_BANK_ABSENT_MESSAGE,
 						},
 					],
 					details: { matchCount: 0, includedCount: 0, truncated: false },

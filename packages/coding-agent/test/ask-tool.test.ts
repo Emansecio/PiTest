@@ -130,4 +130,11 @@ describe("ask tool execute", () => {
 		expect(details.response).toEqual({ kind: "selection", selections: ["A"] });
 		expect(text(res)).toContain("no interactive input bound");
 	});
+
+	it("passes `timeout_ms` through to the input bus request", async () => {
+		const { bus, captured } = makeBus({ picked: ["A"] });
+		const def = createAskToolDefinition("/tmp", { bus });
+		await runExec(def, { question: "Pick", options: [{ label: "A" }], timeout_ms: 5000 });
+		expect(captured[0]?.timeout).toBe(5000);
+	});
 });

@@ -14,8 +14,12 @@ function freshBank(): HindsightBank {
 	return openBank(path);
 }
 
-async function runForget(bank: HindsightBank, input: { id?: string; subject?: string; tags?: string[] }) {
-	const def = createForgetToolDefinition("/tmp", { bank });
+async function runForget(
+	bank: HindsightBank,
+	input: { id?: string; subject?: string; tags?: string[] },
+	options?: { agentScope?: string },
+) {
+	const def = createForgetToolDefinition("/tmp", { bank, ...options });
 	// forget ignores signal/onUpdate/ctx; pass placeholders to satisfy the signature.
 	const result = await def.execute("test-call", input, undefined, undefined, undefined as never);
 	return result as { details: ForgetToolDetails; isError?: boolean; content: Array<{ text: string }> };
@@ -59,18 +63,19 @@ describe("forget tool", () => {
 		const b = bank.add({ kind: "fact", subject: "perf", body: "async persist" });
 		const res = await runForget(bank, { subject: "perf" });
 		expect(res.details.deleted).toBe(false);
+		expect(res.isError).toBe(true);
 		expect(res.details.candidates).toEqual([a.id, b.id]);
 		// nothing deleted
 		expect(bank.get(a.id)).toBeDefined();
 		expect(bank.get(b.id)).toBeDefined();
 	});
 
-	it("reports not-found for an unknown subject (no error flag)", async () => {
+	it("reports not-found for an unknown subject (flagged as an error — nothing was deleted)", async () => {
 		const bank = freshBank();
 		bank.add({ kind: "fact", subject: "known", body: "x" });
 		const res = await runForget(bank, { subject: "nope" });
 		expect(res.details.deleted).toBe(false);
-		expect(res.isError).toBeFalsy();
+		expect(res.isError).toBe(true);
 		expect(res.content[0].text).toMatch(/No hindsight entry found with subject/);
 	});
 
@@ -89,6 +94,7 @@ describe("forget tool", () => {
 		const b = bank.add({ kind: "fact", body: "b", tags: ["api", "extra"] });
 		const res = await runForget(bank, { tags: ["API"] });
 		expect(res.details.deleted).toBe(false);
+		expect(res.isError).toBe(true);
 		expect(res.details.candidates).toEqual([a.id, b.id]);
 	});
 
@@ -106,5 +112,31 @@ describe("forget tool", () => {
 		const res = await runForget(bank, {});
 		expect(res.isError).toBe(true);
 		expect(res.details.deleted).toBe(false);
+	});
+
+	it("scoped forget cannot delete a foreign-scope entry by id (reports not-found, nothing deleted)", async () => {
+		const bank = freshBank();
+		const foreign = bank.add({ kind: "fact", subject: "other-agent-fact", body: "x", agentScope: "explore" });
+		const res = await runForget(bank, { id: foreign.id }, { agentScope: "review" });
+		expect(res.details.deleted).toBe(false);
+		expect(res.isError).toBe(true);
+		expect(res.content[0].text).toMatch(/No hindsight entry found with id/);
+		expect(bank.get(foreign.id)).toBeDefined();
+	});
+
+	it("scoped forget deletes its own-scope entry by id", async () => {
+		const bank = freshBank();
+		const own = bank.add({ kind: "fact", subject: "own-fact", body: "x", agentScope: "review" });
+		const res = await runForget(bank, { id: own.id }, { agentScope: "review" });
+		expect(res.details.deleted).toBe(true);
+		expect(bank.get(own.id)).toBeUndefined();
+	});
+
+	it("scoped forget deletes a global (unscoped) entry by id", async () => {
+		const bank = freshBank();
+		const global = bank.add({ kind: "fact", subject: "global-fact", body: "x" });
+		const res = await runForget(bank, { id: global.id }, { agentScope: "review" });
+		expect(res.details.deleted).toBe(true);
+		expect(bank.get(global.id)).toBeUndefined();
 	});
 });

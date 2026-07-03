@@ -12,6 +12,7 @@ import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentHindsightBank, type HindsightBank, type HindsightEntry } from "../hindsight/index.ts";
+import { HINDSIGHT_BANK_ABSENT_MESSAGE } from "./hindsight-tool-shared.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -53,7 +54,7 @@ export interface ForgetToolDetails {
 export interface ForgetToolOptions {
 	/** Override the active bank (otherwise pulled from the module registry). */
 	bank?: HindsightBank;
-	/** Bound agent scope; fences subject/tags deletion to own + global entries. */
+	/** Bound agent scope; fences deletion (by id, subject, or tags) to own + global entries. */
 	agentScope?: string;
 }
 
@@ -91,7 +92,7 @@ export function createForgetToolDefinition(
 			const bank = options?.bank ?? getCurrentHindsightBank();
 			if (!bank) {
 				return textResult(
-					"Hindsight bank is not enabled for this session. Set `hindsight.enabled: true` in settings to use retain/recall/reflect/forget.",
+					HINDSIGHT_BANK_ABSENT_MESSAGE,
 					{ id: input.id, subject: input.subject, tags: input.tags, deleted: false },
 					true,
 				);
@@ -129,7 +130,7 @@ export function createForgetToolDefinition(
 				}
 				const criterion = describeFilter(subject, tags);
 				if (matches.length === 0) {
-					return textResult(`No hindsight entry found with ${criterion}`, { subject, tags, deleted: false });
+					return textResult(`No hindsight entry found with ${criterion}`, { subject, tags, deleted: false }, true);
 				}
 				if (matches.length > 1) {
 					const ids = matches.map((e) => e.id);
@@ -137,6 +138,7 @@ export function createForgetToolDefinition(
 					return textResult(
 						`${matches.length} hindsight entries match ${criterion}. Re-run forget with a specific id:\n${list}`,
 						{ subject, tags, deleted: false, candidates: ids },
+						true,
 					);
 				}
 				targetId = matches[0].id;
@@ -145,8 +147,17 @@ export function createForgetToolDefinition(
 
 			const id = targetId!;
 			const existing = resolvedEntry ?? bank.get(id);
-			if (!existing) {
-				return textResult(`No hindsight entry found with id: ${id}`, { id, subject, tags, deleted: false });
+			const scope = options?.agentScope;
+			// Fence delete-by-id the same way the subject/tags path fences its lookup: a
+			// scoped agent may only delete its own entries + global ones. Report as
+			// not-found (never "forbidden") so a foreign-scope entry's existence isn't leaked.
+			const foreignScope =
+				existing !== undefined &&
+				scope !== undefined &&
+				existing.agentScope !== undefined &&
+				existing.agentScope !== scope;
+			if (!existing || foreignScope) {
+				return textResult(`No hindsight entry found with id: ${id}`, { id, subject, tags, deleted: false }, true);
 			}
 
 			const deleted = bank.delete(id);
@@ -154,6 +165,7 @@ export function createForgetToolDefinition(
 			return textResult(
 				deleted ? `Forgot hindsight entry [id: ${id}]${label}.` : `No hindsight entry found with id: ${id}`,
 				{ id, subject, tags, deleted },
+				deleted ? undefined : true,
 			);
 		},
 		renderCall(args, theme, context) {

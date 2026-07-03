@@ -35,7 +35,9 @@ describe("todo tool", () => {
 	it("validates required fields per action", async () => {
 		setCurrentTodoManager(new TodoManager());
 		const def = createTodoToolDefinition("/tmp");
-		expect(((await runExec(def, { action: "create" })).details as TodoToolDetails).error).toContain("subject");
+		const createRes = await runExec(def, { action: "create" });
+		expect((createRes.details as TodoToolDetails).error).toContain("subject");
+		expect(createRes.isError).toBe(true);
 		expect(((await runExec(def, { action: "update" })).details as TodoToolDetails).error).toContain("id");
 		expect(((await runExec(def, { action: "delete" })).details as TodoToolDetails).error).toContain("id");
 	});

@@ -10,6 +10,7 @@ import { type Static, Type } from "typebox";
 import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentHindsightBank, type HindsightBank, type HindsightKind } from "../hindsight/index.ts";
+import { HINDSIGHT_BANK_ABSENT_MESSAGE } from "./hindsight-tool-shared.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -71,7 +72,7 @@ export function createRetainToolDefinition(
 					content: [
 						{
 							type: "text" as const,
-							text: "Hindsight bank is not enabled for this session. Set `hindsight.enabled: true` in settings to use retain/recall/reflect.",
+							text: HINDSIGHT_BANK_ABSENT_MESSAGE,
 						},
 					],
 					details: { kind, stored: false },

@@ -1,5 +1,8 @@
 import * as os from "node:os";
 import { getCapabilities, getImageDimensions, imageFallback, Text } from "@pit/tui";
+import { collapseAnnotatedBlocks } from "../../modes/interactive/components/annotated-block-collapse.ts";
+import { expandKeyHint, moreLinesTrailer } from "../../modes/interactive/components/tool-activity.ts";
+import type { ThemeColor } from "../../modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 
@@ -138,7 +141,14 @@ export function getTextOutput(
 	return output;
 }
 
-export function invalidArgText(theme: { fg: (name: any, text: string) => string }): string {
+/** Minimal theme shape every renderer in this module needs — just the
+ * foreground-color helper, typed against the real `ThemeColor` union so a
+ * bad color name is a compile error instead of `any`. */
+export interface ToolTheme {
+	fg: (name: ThemeColor, text: string) => string;
+}
+
+export function invalidArgText(theme: ToolTheme): string {
 	return theme.fg("error", "[invalid arg]");
 }
 
@@ -152,33 +162,78 @@ export function nonEmptyDetails<T extends object>(d: T): T | undefined {
  * single Text node threads its component through `context.lastComponent`; this
  * centralizes that `(lastComponent as Text) ?? new Text(...)` idiom.
  */
-export function reuseText(context: { lastComponent?: unknown }): Text {
+function reuseText(context: { lastComponent?: unknown }): Text {
 	return (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
 }
 
+/** Collapsed-preview line cap shared by every `renderResult: renderToolOutput`
+ * tool and (via {@link buildCappedToolOutput}) the TUI's no-custom-renderer
+ * result fallback in tool-execution.ts. */
+export const DEFAULT_RESULT_PREVIEW_LINES = 15;
+
 /**
- * Default tool-result renderer: dump the (trimmed) textual output into a single
- * Text node, prefixed with a blank line so the result detaches from the call
- * title, and render nothing when there is no output. This is the byte-identical
- * body that the hindsight, plan-adjacent, and utility tools all repeated inline
- * (reflect/recall/retain/resolve/eval/search_tool_bm25/recipe/inspect_image/
- * render_mermaid/recall_tool_output/goal_complete/forget). Tools whose body
- * differs (no leading newline, custom prefix, error-only) keep their own.
+ * Collapse raw tool-result text to a bounded preview unless `expanded`,
+ * folding consecutive `[hint]`/`[repair]` lines and appending the standard
+ * "N more lines (expand)" trailer when content is hidden. Returns null for
+ * empty output (callers render nothing in that case).
+ *
+ * This is the byte-identical logic tool-execution.ts's no-custom-renderer
+ * fallback already used (`ToolExecutionComponent.buildCappedOutput`) —
+ * extracted here so every `renderResult: renderToolOutput` tool gets the same
+ * collapsed-by-default safety net instead of dumping full output regardless
+ * of `options.expanded`.
+ */
+export function buildCappedToolOutput(
+	rawOutput: string,
+	expanded: boolean,
+	theme: ToolTheme,
+	previewLines: number = DEFAULT_RESULT_PREVIEW_LINES,
+): string | null {
+	const output = rawOutput.trim();
+	if (!output) return null;
+	const displayOutput = expanded
+		? output
+		: collapseAnnotatedBlocks(output, {
+				expanded: false,
+				muted: (s) => theme.fg("muted", s),
+				expandHint: expandKeyHint(),
+			});
+	const lines = displayOutput.split("\n");
+	const maxLines = expanded ? lines.length : previewLines;
+	const displayLines = lines.slice(0, maxLines);
+	const remaining = lines.length - maxLines;
+	let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
+	if (remaining > 0) {
+		text += `\n${moreLinesTrailer(remaining, expandKeyHint())}`;
+	}
+	return text;
+}
+
+/**
+ * Default tool-result renderer: collapse the (trimmed) textual output into a
+ * bounded preview unless `options.expanded`, in a single Text node prefixed
+ * with a blank line so the result detaches from the call title, and render
+ * nothing when there is no output. This is the shared body that the
+ * hindsight, plan-adjacent, and utility tools all reuse (reflect/recall/
+ * retain/resolve/eval/search_tool_bm25/recipe/inspect_image/render_mermaid/
+ * recall_tool_output/goal_complete/forget). Tools whose body differs (no
+ * leading newline, custom prefix, error-only) keep their own.
  *
  * Signature mirrors ToolDefinition.renderResult — (result, options, theme,
- * context) — so it drops straight into `renderResult: renderToolOutput`. The
- * `options` slot is unused. Loosely typed because it is shared across tools with
- * distinct param/detail schemas; only `content`, `showImages`, `lastComponent`,
- * and `theme.fg` are touched.
+ * context) — so it drops straight into `renderResult: renderToolOutput`.
+ * `options.expanded` gates the collapse: a custom renderer built on this
+ * helper is never LESS safe than having no renderer at all (the TUI's
+ * no-renderer fallback already collapses via {@link buildCappedToolOutput}).
  */
 export function renderToolOutput(
 	result: { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }> },
-	_options: unknown,
-	theme: { fg: (name: any, text: string) => string },
+	options: { expanded?: boolean } | undefined,
+	theme: ToolTheme,
 	context: { lastComponent?: unknown; showImages: boolean },
 ): Text {
 	const text = reuseText(context);
-	const output = getTextOutput(result, context.showImages).trim();
-	text.setText(output ? `\n${theme.fg("toolOutput", output)}` : "");
+	const output = getTextOutput(result, context.showImages);
+	const capped = buildCappedToolOutput(output, options?.expanded ?? false, theme);
+	text.setText(capped ? `\n${capped}` : "");
 	return text;
 }

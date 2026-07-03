@@ -17,6 +17,7 @@ import { type Static, Type } from "typebox";
 import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentUserInputBus, type UserInputBus } from "../user-input-bus.ts";
+import { applyKeyAliases } from "./argument-prep.ts";
 import { getTextOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -63,7 +64,7 @@ const askSchema = Type.Object(
 				description: "Let the user attach a freeform comment to their selection (toggled in the UI).",
 			}),
 		),
-		timeout: Type.Optional(
+		timeout_ms: Type.Optional(
 			Type.Number({
 				description: "Auto-dismiss after N milliseconds, falling back to the recommended (or first) option.",
 			}),
@@ -73,6 +74,14 @@ const askSchema = Type.Object(
 );
 
 export type AskToolInput = Static<typeof askSchema>;
+
+const ASK_KEY_ALIASES = { timeout: "timeout_ms" } as const;
+
+/** Accepts the legacy `timeout` key (pre-rename) as an alias for `timeout_ms`. */
+export function prepareAskArguments(input: unknown): AskToolInput {
+	if (!input || typeof input !== "object" || Array.isArray(input)) return input as AskToolInput;
+	return applyKeyAliases(input as Record<string, unknown>, ASK_KEY_ALIASES) as AskToolInput;
+}
 
 /** Structured outcome of an ask, mirroring pi-ask-user's response union. */
 export type AskResponse =
@@ -126,6 +135,7 @@ export function createAskToolDefinition(
 			"Set allowMultiple when several options can be picked together; set allowFreeform to also accept a typed answer.",
 		],
 		parameters: askSchema,
+		prepareArguments: prepareAskArguments,
 		async execute(toolCallId: string, input: AskToolInput) {
 			const question = input.question.trim();
 			const context = input.context?.trim() || undefined;
@@ -157,8 +167,8 @@ export function createAskToolDefinition(
 			const overlayToggleKey = "alt+o";
 			const commentToggleKey = "ctrl+g";
 			const timeout =
-				typeof input.timeout === "number" && Number.isFinite(input.timeout) && input.timeout > 0
-					? input.timeout
+				typeof input.timeout_ms === "number" && Number.isFinite(input.timeout_ms) && input.timeout_ms > 0
+					? input.timeout_ms
 					: undefined;
 
 			const recommendedLabel = normalizedOptions.find((o) => o.recommended)?.label;

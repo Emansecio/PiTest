@@ -14,18 +14,22 @@ import {
 	type HindsightKind,
 	type HindsightSearchResult,
 } from "../hindsight/index.ts";
+import { HINDSIGHT_BANK_ABSENT_MESSAGE, HINDSIGHT_KINDS, resolveScope } from "./hindsight-tool-shared.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const BODY_TRUNCATE = 400;
+const RECALL_MAX_LIMIT = 50;
 
 const recallSchema = Type.Object(
 	{
 		query: Type.String({ description: "Search query. Free-text; matches body, subject, and tags." }),
-		limit: Type.Optional(Type.Number({ description: "Max results to return. Default 10." })),
+		limit: Type.Optional(
+			Type.Number({ description: `Max results to return. Default 10, capped at ${RECALL_MAX_LIMIT}.` }),
+		),
 		kinds: Type.Optional(
-			Type.Array(Type.String(), {
-				description: "Filter by entry kinds: fact, decision, pattern, session-summary.",
+			Type.Array(Type.Enum(HINDSIGHT_KINDS), {
+				description: `Filter by entry kinds: ${HINDSIGHT_KINDS.join(", ")}. Unknown kinds are ignored (noted in the result text).`,
 			}),
 		),
 		scope: Type.Optional(
@@ -50,30 +54,18 @@ export interface RecallToolOptions {
 	agentScope?: string;
 }
 
-function resolveScope(
-	bound: string | undefined,
-	override: string | undefined,
-): { scopes?: (string | null)[]; boostScope?: string | null } {
-	const ov = override?.trim();
-	if (ov === "all") return {};
-	if (ov === "global") return { scopes: [null] };
-	if (ov && ov !== "own") return { scopes: [ov, null], boostScope: ov };
-	// default ("own" or unset): bound scope reads own+global; main reads all, global boosted.
-	if (bound) return { scopes: [bound, null], boostScope: bound };
-	return { boostScope: null };
-}
-
-const VALID_KINDS: ReadonlySet<HindsightKind> = new Set(["fact", "decision", "pattern", "session-summary"]);
-
-function coerceKinds(raw: string[] | undefined): HindsightKind[] | undefined {
-	if (!raw || raw.length === 0) return undefined;
-	const out: HindsightKind[] = [];
+function coerceKinds(raw: string[] | undefined): { kinds: HindsightKind[] | undefined; ignored: string[] } {
+	if (!raw || raw.length === 0) return { kinds: undefined, ignored: [] };
+	const kinds: HindsightKind[] = [];
+	const ignored: string[] = [];
 	for (const candidate of raw) {
-		if (VALID_KINDS.has(candidate as HindsightKind)) {
-			out.push(candidate as HindsightKind);
+		if ((HINDSIGHT_KINDS as readonly string[]).includes(candidate)) {
+			kinds.push(candidate as HindsightKind);
+		} else {
+			ignored.push(candidate);
 		}
 	}
-	return out.length > 0 ? out : undefined;
+	return { kinds: kinds.length > 0 ? kinds : undefined, ignored };
 }
 
 function formatResult(result: HindsightSearchResult): string {
@@ -111,7 +103,7 @@ export function createRecallToolDefinition(
 					content: [
 						{
 							type: "text" as const,
-							text: "Hindsight bank is not enabled for this session.",
+							text: HINDSIGHT_BANK_ABSENT_MESSAGE,
 						},
 					],
 					details: { matchCount: 0 },
@@ -119,8 +111,15 @@ export function createRecallToolDefinition(
 				};
 			}
 
-			const limit = typeof input.limit === "number" && input.limit > 0 ? Math.floor(input.limit) : 10;
-			const kinds = coerceKinds(input.kinds);
+			const limit =
+				typeof input.limit === "number" && input.limit > 0
+					? Math.min(Math.floor(input.limit), RECALL_MAX_LIMIT)
+					: 10;
+			const { kinds, ignored } = coerceKinds(input.kinds);
+			const ignoredNote =
+				ignored.length > 0
+					? `\n\n(ignored unknown kind${ignored.length === 1 ? "" : "s"}: ${ignored.join(", ")} — valid kinds are ${HINDSIGHT_KINDS.join(", ")})`
+					: "";
 			const { scopes, boostScope } = resolveScope(options?.agentScope, input.scope);
 			const results = bank.search({ query: input.query, limit, kinds, scopes, boostScope });
 			if (results.length === 0) {
@@ -128,14 +127,14 @@ export function createRecallToolDefinition(
 					content: [
 						{
 							type: "text" as const,
-							text: `No hindsight entries matched: ${input.query}`,
+							text: `No hindsight entries matched: ${input.query}${ignoredNote}`,
 						},
 					],
 					details: { matchCount: 0 },
 				};
 			}
 			const blocks = results.map(formatResult);
-			const text = `Found ${results.length} hindsight entr${results.length === 1 ? "y" : "ies"} for "${input.query}":\n\n${blocks.join("\n\n---\n\n")}`;
+			const text = `Found ${results.length} hindsight entr${results.length === 1 ? "y" : "ies"} for "${input.query}":\n\n${blocks.join("\n\n---\n\n")}${ignoredNote}`;
 			return {
 				content: [{ type: "text" as const, text }],
 				details: { matchCount: results.length },

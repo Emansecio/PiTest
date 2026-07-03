@@ -2,16 +2,15 @@ import { performance } from "node:perf_hooks";
 import { type Component, Container, getCapabilities, Image, SPINNER_FRAMES, Spacer, Text, type TUI } from "@pit/tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { allToolNames, createToolDefinition, type ToolName } from "../../../core/tools/index.ts";
-import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import { buildCappedToolOutput, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
-import { collapseAnnotatedBlocks } from "./annotated-block-collapse.ts";
 import { summarizeArgsOneLine } from "./arg-summary.ts";
 import { MessageShell } from "./message-shell.ts";
 import { spinnerFrameIndexAt } from "./spinner-ticker.ts";
-import { expandKeyHint, isEditFamilyTool, moreLinesTrailer, type ToolActivity } from "./tool-activity.ts";
+import { isEditFamilyTool, type ToolActivity } from "./tool-activity.ts";
 
 // Cap for the no-custom-renderer result fallback. Tools without their own
 // renderResult (MCP tools, the coordinator/Task tool, extension tools) would
@@ -228,28 +227,8 @@ export class ToolExecutionComponent extends MessageShell {
 	// no-renderer result fallback and formatToolExecution. Returns null when
 	// there is nothing to show.
 	private buildCappedOutput(rawOutput: string): string | null {
-		const output = rawOutput.trim();
-		if (!output) {
-			return null;
-		}
-		const displayOutput =
-			this.expanded || this.resultExpanded
-				? output
-				: collapseAnnotatedBlocks(output, {
-						expanded: false,
-						muted: (s) => theme.fg("muted", s),
-						expandHint: expandKeyHint(),
-					});
-		const lines = displayOutput.split("\n");
 		const previewLines = SINGLE_LINE_PREVIEW_TOOLS.has(this.toolName) ? 1 : FALLBACK_RESULT_PREVIEW_LINES;
-		const maxLines = this.expanded || this.resultExpanded ? lines.length : previewLines;
-		const displayLines = lines.slice(0, maxLines);
-		const remaining = lines.length - maxLines;
-		let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
-		if (remaining > 0) {
-			text += `\n${moreLinesTrailer(remaining, expandKeyHint())}`;
-		}
-		return text;
+		return buildCappedToolOutput(rawOutput, this.expanded || this.resultExpanded, theme, previewLines);
 	}
 
 	updateArgs(args: any): void {

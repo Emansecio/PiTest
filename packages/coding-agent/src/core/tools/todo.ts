@@ -59,6 +59,7 @@ export function createTodoToolDefinition(
 ): ToolDefinition<typeof todoSchema, TodoToolDetails> {
 	const fail = (action: TodoToolInput["action"], message: string) => ({
 		content: [{ type: "text" as const, text: message }],
+		isError: true as const,
 		details: { action, tasks: getCurrentTodoManager()?.list() ?? [], error: message },
 	});
 

@@ -3,10 +3,17 @@ import * as nodePath from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
+import { expandKeyHint, moreLinesTrailer } from "../../modes/interactive/components/tool-activity.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { getCurrentPreviewQueue } from "../preview-queue.ts";
 import { prepareWithPathAliases } from "./argument-prep.ts";
-import { AST_GREP_INSTALL_HINT, isMissingBinaryError, parseJsonStream } from "./ast-grep-shared.ts";
+import {
+	AST_GREP_INSTALL_HINT,
+	isMissingBinaryError,
+	noMatchesMessage,
+	parseJsonStream,
+	resolveAstGrepSpawnStrategy,
+} from "./ast-grep-shared.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -78,31 +85,37 @@ function execAstGrep(
 	signal?: AbortSignal,
 ): Promise<{ code: number; stdout: string; stderr: string; missing?: boolean; overflow?: boolean }> {
 	return new Promise((resolve) => {
-		execFile(binary, args, { cwd, signal, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
-			if (err) {
-				const e = err as NodeJS.ErrnoException & { code?: string | number };
-				if (isMissingBinaryError(err)) {
-					resolve({ code: -1, stdout: "", stderr: AST_GREP_INSTALL_HINT, missing: true });
+		const strategy = resolveAstGrepSpawnStrategy(binary, args);
+		execFile(
+			strategy.command,
+			strategy.args,
+			{ cwd, signal, maxBuffer: 64 * 1024 * 1024, shell: strategy.useShell, windowsHide: true },
+			(err, stdout, stderr) => {
+				if (err) {
+					const e = err as NodeJS.ErrnoException & { code?: string | number };
+					if (isMissingBinaryError(err)) {
+						resolve({ code: -1, stdout: "", stderr: AST_GREP_INSTALL_HINT, missing: true });
+						return;
+					}
+					// Output exceeded maxBuffer: the child was killed and stdout is partial.
+					// Surfacing the partial NDJSON as a normal result would silently truncate the
+					// match set (and the default path would still --update-all every match on disk
+					// while reporting an under-count), so flag it and let each call site error out.
+					if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || /maxBuffer/.test(err.message ?? "")) {
+						resolve({ code: -1, stdout: "", stderr: AST_EDIT_OVERFLOW_HINT, overflow: true });
+						return;
+					}
+					const code = typeof e.code === "number" ? e.code : 1;
+					resolve({
+						code,
+						stdout: stdout?.toString() ?? "",
+						stderr: stderr?.toString() ?? String(err),
+					});
 					return;
 				}
-				// Output exceeded maxBuffer: the child was killed and stdout is partial.
-				// Surfacing the partial NDJSON as a normal result would silently truncate the
-				// match set (and the default path would still --update-all every match on disk
-				// while reporting an under-count), so flag it and let each call site error out.
-				if (e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || /maxBuffer/.test(err.message ?? "")) {
-					resolve({ code: -1, stdout: "", stderr: AST_EDIT_OVERFLOW_HINT, overflow: true });
-					return;
-				}
-				const code = typeof e.code === "number" ? e.code : 1;
-				resolve({
-					code,
-					stdout: stdout?.toString() ?? "",
-					stderr: stderr?.toString() ?? String(err),
-				});
-				return;
-			}
-			resolve({ code: 0, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? "" });
-		});
+				resolve({ code: 0, stdout: stdout?.toString() ?? "", stderr: stderr?.toString() ?? "" });
+			},
+		);
 	});
 }
 
@@ -176,7 +189,7 @@ function formatAstEditResult(
 	const displayLines = lines.slice(0, maxLines);
 	const remaining = lines.length - maxLines;
 	let text = displayLines.map((line) => theme.fg("toolOutput", line)).join("\n");
-	if (remaining > 0) text += `\n${theme.fg("muted", `... (${remaining} more lines)`)}`;
+	if (remaining > 0) text += `\n${moreLinesTrailer(remaining, expandKeyHint())}`;
 	return text;
 }
 
@@ -184,19 +197,6 @@ function countFiles(matches: AstGrepRewriteMatch[]): number {
 	const set = new Set<string>();
 	for (const m of matches) if (m.file) set.add(m.file);
 	return set.size;
-}
-
-// Glob patterns are forward-slash only. A Windows-style backslash glob
-// (e.g. `src\**\*.ts`) is forwarded raw to ast-grep --globs, where "\" is a
-// glob escape — so it silently matches nothing and reports zero rewrites with
-// no hint about the separator. Enrich the empty message so the model can
-// self-correct, mirroring find.ts/grep.ts. The success path stays untouched.
-function noMatchesMessage(globs: string[] | undefined): string {
-	const offending = globs?.find((g) => g.includes("\\"));
-	if (offending !== undefined) {
-		return `No matches found. Glob patterns use forward slashes; try: ${offending.replace(/\\/g, "/")}`;
-	}
-	return "No matches found";
 }
 
 export function createAstEditToolDefinition(
@@ -248,6 +248,12 @@ export function createAstEditToolDefinition(
 					};
 				}
 				const matches = parseJsonStream<AstGrepRewriteMatch>(res.stdout);
+				if (matches.length === 0) {
+					return {
+						content: [{ type: "text" as const, text: noMatchesMessage(globs) }],
+						details: { replacementCount: 0, fileCount: 0 },
+					};
+				}
 				const text = formatRewritePreview(matches, cwd);
 				return {
 					content: [
@@ -261,8 +267,18 @@ export function createAstEditToolDefinition(
 			}
 
 			// Preview path: compute changes via JSON, stage in queue, apply on accept.
-			const queue = getCurrentPreviewQueue();
-			if (preview === true && queue) {
+			if (preview === true) {
+				const queue = getCurrentPreviewQueue();
+				if (!queue) {
+					// The model explicitly asked for a preview; falling through to the
+					// default --update-all path below would silently apply to disk
+					// instead. Mirror resolve.ts's no-queue message.
+					return {
+						content: [{ type: "text" as const, text: "No preview queue active." }],
+						isError: true,
+						details: undefined,
+					};
+				}
 				const args = [...baseArgs, "--json=stream", target];
 				const res = await execAstGrep(binary, args, cwd, signal);
 				if (res.missing) {

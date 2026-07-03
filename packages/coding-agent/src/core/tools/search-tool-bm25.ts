@@ -27,6 +27,8 @@ const searchToolBm25Schema = Type.Object(
 		limit: Type.Optional(
 			Type.Number({
 				description: `Max results to return. Default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}.`,
+				minimum: 1,
+				maximum: MAX_LIMIT,
 			}),
 		),
 		activate_top: Type.Optional(
@@ -70,11 +72,10 @@ export function createSearchToolBm25Definition(
 		activity: "navigation",
 		label: "search_tool_bm25",
 		description:
-			"Retrieve specialized tools that are NOT in the default tool surface. BM25-search a hidden tool index and (optionally) activate the top match so it becomes callable. Use when you need a capability that does not appear in the active tool list. This retrieves specialized/hidden TOOLS by capability — it is NOT code search (use `grep`) nor memory search (use `recall`).",
+			"Retrieve specialized tools that are NOT in the default tool surface. BM25-search a hidden tool index and optionally activate the top match (see `activate_top`). Use when you need a capability that does not appear in the active tool list. This retrieves specialized/hidden TOOLS by capability — it is NOT code search (use `grep`) nor memory search (use `recall`).",
 		promptSnippet: "BM25-search hidden tools and optionally activate the top match",
 		promptGuidelines: [
 			"Call only when the active tool list lacks a needed capability — describe the capability, not a tool name.",
-			"Set activate_top=true to immediately bring the best match into the active surface for follow-up calls.",
 			"Skip if the active tools already cover the task; this is a fallback, not the first move.",
 		],
 		parameters: searchToolBm25Schema,
