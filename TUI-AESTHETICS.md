@@ -218,19 +218,25 @@ Rendered by `WelcomeBox` → `computeHeroRows`
   a 6-row ANSI-shadow wordmark in the brand **neon-green → lime diagonal
   gradient** (`pitLogoGradient`, `color-interpolation.ts`). Truecolor only;
   256-color terminals get flat theme `success` green, light themes a deeper
-  green pair for contrast.
+  green pair for contrast. On mount the wordmark **ignites**: a one-shot ~500ms
+  smoothstep ease from `dim` up to a bright brand mid-tone, then hands off to
+  the full gradient (`startHeroIgnition`, skipped under reduced motion /
+  no-truecolor / resume).
 - Tagline stays **`muted`** with the version as a **`dim`** suffix on the same
   centered line; the accent-colored workspace bullet centers beneath.
 - Resumed sessions, custom app names and viewports **under 40 cols** fall back
   to the compact framed card (3-row teal → lavender wordmark via
   `wordmarkGradient`, `cardBg` + `cardPaddingX` intact) — resume line and all.
 
-### Hint block — essentials only (skills-doctor routed out)
-Below the hero, one essentials line from `updateEmptyStateHint`
-(`interactive-mode.ts`), **centered** under the wordmark via `CenteredText`
-(left-aligned `Text` on a rebranded app, matching the card fallback):
+### Hint block — example prompts lead, mechanics demoted
+Below the hero, two centered lines from `updateEmptyStateHint`
+(`interactive-mode.ts`) via `CenteredText` (left-aligned `Text` on a rebranded
+app, matching the card fallback):
 
-`Describe a task to get started · / commands · ! bash · drop files to attach`
+1. `Try "explain this codebase" · "fix the failing test" · "add a small feature"`
+   — concrete task invitations (muted), "Try" in dim.
+2. `Describe a task to get started · / commands · ! bash · drop files to attach`
+   — the mechanics line, fully dim so the examples lead the eye.
 
 - Calm, dotted separators — unchanged and still good.
 - **`2 dup — /skills doctor` no longer paints on quiet startup** (Move 1a).
@@ -254,9 +260,26 @@ their alerts.
 
 ### Initial-screen verdict (updated)
 The first screen is **materially more product-like** than before the moves:
-centered neon-green hero wordmark, fixed tagline/version hierarchy, no
-maintenance noise on quiet startup, brighter editor border, and a calm one-line
-footer. Remaining gaps: editor still not a padded card, placeholder still
+centered neon-green hero wordmark (with mount ignition), fixed tagline/version
+hierarchy, no maintenance noise on quiet startup, brighter editor border, and a
+calm one-line footer.
+
+### Polish round (2026-07, docs/tui-polish-study.md)
+- **Accent is `mint #86e6b2`** (was teal) — the "bridge" palette: UI rhymes with
+  the lime brand without hijacking success/diff semantics; `dim` and
+  `syntaxComment` raised to legible contrast (~3.6:1 / ~4.4:1).
+- **One heartbeat**: `HEARTBEAT_CYCLE_MS = 1800` (@pit/tui) drives the spinner
+  pulse AND the thinking-label breath in lockstep; the pulse kisses brand lime
+  at its peak (`working-palette.ts`).
+- **Label shimmer**: the working-loader phase label ("Thinking…") gets a soft
+  brightness band sweeping once per heartbeat (`shimmerColorAt` +
+  `Loader.setMessageColorAt`); flat muted under no-truecolor/reduced-motion.
+- **Working line** carries a live `↑ n tok` output-token chip beside the
+  interrupt hint and ↓rate.
+- **Turn rules**: a hairline `─` rule (borderMuted) precedes each user prompt
+  after the first (`turn-rule.ts`), in both live and rebuilt transcripts.
+- **mcp.notice is a quiet aside**: one muted `◦` line, aggregated across skipped
+  servers, instead of the default custom-message card. Remaining gaps: editor still not a padded card, placeholder still
 floats above the editor.
 
 ## Real gap vs deliberate trade-off

@@ -43,6 +43,7 @@ import {
 	type Component,
 	Container,
 	fuzzyFilter,
+	getCapabilities,
 	getKeybindings,
 	Loader,
 	type LoaderIndicatorOptions,
@@ -129,7 +130,7 @@ import {
 	type UserInputBus,
 } from "../../core/user-input-bus.ts";
 import { type ClipboardImage, readClipboardImage } from "../../utils/clipboard-image.ts";
-import { isOfflineMode } from "../../utils/env-flags.ts";
+import { isOfflineMode, isReducedMotion } from "../../utils/env-flags.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
@@ -178,6 +179,7 @@ import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TtsrSteerMessageComponent } from "./components/ttsr-steer-message.ts";
 import { TurnDoneMessageComponent } from "./components/turn-done-message.ts";
+import { TurnRule } from "./components/turn-rule.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import { WelcomeBox, type WelcomeBoxData } from "./components/welcome-box.ts";
@@ -205,6 +207,7 @@ import {
 	planSkillsDoctorFix,
 	tallySkillDiagnostics,
 } from "./skills-doctor.ts";
+import { lerpRgb, parseTrueColorFg, rgbFg, shimmerColorAt } from "./theme/color-interpolation.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -379,6 +382,11 @@ export class InteractiveMode {
 	private streamTextCharCount = 0;
 	private lastStreamRateSampleMs = 0;
 	private lastStreamRateCharCount = 0;
+	// Output tokens accrued in the CURRENT turn from assistant messages that have
+	// already finalized (their usage.output is only known at message_end). Reset to
+	// 0 at agent_start; the in-flight streaming message's partial usage is added on
+	// top at display time so the chip stays live. See refreshLoaderTrailingSuffix.
+	private turnOutputTokens = 0;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working…";
@@ -523,6 +531,11 @@ export class InteractiveMode {
 	// never expands, so toggling tool output mid-session can't make it flicker.
 	private welcomeBox: WelcomeBox | undefined = undefined;
 
+	// Unsubscribe for the one-shot hero-wordmark ignition ease (A3). Non-null only
+	// while the ease is running; cleared on completion and on stop() so a torn-down
+	// session never leaks the animation callback.
+	private heroIgnitionUnsub: (() => void) | null = null;
+
 	// Expansion state for the startup hint block, owned independently of
 	// toolOutputExpanded so a mid-session tool toggle does not resize the header.
 	private startupHeaderExpanded = false;
@@ -534,8 +547,11 @@ export class InteractiveMode {
 	/** process.cwd() at launcher start — compared against session cwd in the header/footer. */
 	private readonly launchCwd: string;
 
-	/** Shown in the chat area on a fresh session with no messages yet. */
-	private emptyStateHint: Text | CenteredText | undefined = undefined;
+	/** Shown in the chat area on a fresh session with no messages yet. On the
+	 * default brand this is a Container wrapping two centered lines (the "Try …"
+	 * examples + the demoted mechanics line); a rebranded app keeps a single
+	 * left-aligned Text. Added/removed as one unit. */
+	private emptyStateHint: Component | undefined = undefined;
 
 	// Custom header from extension (undefined = use built-in header)
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
@@ -751,6 +767,7 @@ export class InteractiveMode {
 		this.welcomeBox = new WelcomeBox(this.buildWelcomeBoxData());
 		this.headerContainer.addChild(new Spacer(1));
 		this.headerContainer.addChild(this.welcomeBox);
+		this.startHeroIgnition();
 
 		// Verbose startup hints + rotating tip — suppressed under quietStartup.
 		const isResumed = this.session.state.messages.length > 0;
@@ -1407,6 +1424,54 @@ export class InteractiveMode {
 		this.welcomeBox?.setData(this.buildWelcomeBoxData());
 	}
 
+	/**
+	 * A3 — one-shot "ignition" for the fresh-session hero wordmark: over ~500ms the
+	 * mark eases (smoothstep) from the theme `dim` color up to a bright brand-green
+	 * mid-tone, then hands off to the real neon→lime gradient. The mid-tone is the
+	 * midpoint of the gradient's neon/lime stops, so the last eased frame sits close
+	 * to the gradient's average and the handoff does not pop.
+	 *
+	 * While the ease runs, `wordmarkColor` is a time-varying closure, which makes
+	 * WelcomeBox bypass its memo and repaint every frame; on completion we restore
+	 * data WITHOUT `wordmarkColor` (re-enabling memoization) and unsubscribe. Skips
+	 * entirely under reduced motion, no-truecolor, resumed sessions, or a custom app
+	 * name (the hero only renders for "pit").
+	 */
+	private startHeroIgnition(): void {
+		const box = this.welcomeBox;
+		if (!box) return;
+		if (APP_NAME !== "pit") return;
+		if (this.session.state.messages.length > 0) return; // resumed
+		if (isReducedMotion() || !getCapabilities().trueColor) return;
+
+		const dim = parseTrueColorFg(theme.getFgAnsi("dim"));
+		if (!dim) return;
+		// Midpoint of the hero gradient stops (neon #39ff14 / lime #c9ff29).
+		const bright = { r: 129, g: 255, b: 31 };
+		const baseData = this.buildWelcomeBoxData();
+		const paintAt = (t: number) => rgbFg(lerpRgb(dim, bright, t));
+
+		const DURATION_MS = 500;
+		const start = performance.now();
+		// Seed the first frame at the dim end so the wordmark ignites up from dark
+		// rather than flashing the full gradient before the ease begins.
+		box.setData({ ...baseData, wordmarkColor: paintAt(0) });
+
+		this.heroIgnitionUnsub = this.ui.addAnimationCallback((now) => {
+			const raw = Math.min(1, Math.max(0, (now - start) / DURATION_MS));
+			if (raw >= 1) {
+				// Final handoff: drop wordmarkColor → memoized gradient render, unsubscribe.
+				box.setData(baseData);
+				this.heroIgnitionUnsub?.();
+				this.heroIgnitionUnsub = null;
+				return true;
+			}
+			const eased = raw * raw * (3 - 2 * raw); // smoothstep
+			box.setData({ ...baseData, wordmarkColor: paintAt(eased) });
+			return true;
+		});
+	}
+
 	private updateEmptyStateHint(): void {
 		const hasMessages = this.session.state.messages.length > 0;
 		if (hasMessages || !this.welcomeActive) {
@@ -1418,18 +1483,36 @@ export class InteractiveMode {
 		}
 		if (this.emptyStateHint) return;
 
-		const hint = [
-			theme.fg("muted", "Describe a task to get started"),
-			theme.fg("dim", " · "),
-			rawKeyHint("/", "commands"),
-			theme.fg("dim", " · "),
-			rawKeyHint("!", "bash"),
-			theme.fg("dim", " · "),
-			theme.fg("dim", "drop files to attach"),
-		].join("");
 		// Centered under the hero wordmark on the default brand; a rebranded app
 		// falls back to the left-aligned card, so the hint stays left too.
-		this.emptyStateHint = APP_NAME === "pit" ? new CenteredText(hint, 1) : new Text(hint, 0, 1);
+		if (APP_NAME === "pit") {
+			// Line 1: an invitation with three concrete example prompts. Line 2: the
+			// existing mechanics, demoted fully to dim so the examples lead the eye.
+			const tryLine =
+				theme.fg("dim", "Try ") +
+				theme.fg("muted", '"explain this codebase" · "fix the failing test" · "add a small feature"');
+			const mechanics = theme.fg(
+				"dim",
+				`Describe a task to get started · ${formatKeyText("/")} commands · ${formatKeyText("!")} bash · drop files to attach`,
+			);
+			const container = new Container();
+			container.addChild(new Spacer(1));
+			container.addChild(new CenteredText(tryLine));
+			container.addChild(new CenteredText(mechanics));
+			container.addChild(new Spacer(1));
+			this.emptyStateHint = container;
+		} else {
+			const hint = [
+				theme.fg("muted", "Describe a task to get started"),
+				theme.fg("dim", " · "),
+				rawKeyHint("/", "commands"),
+				theme.fg("dim", " · "),
+				rawKeyHint("!", "bash"),
+				theme.fg("dim", " · "),
+				theme.fg("dim", "drop files to attach"),
+			].join("");
+			this.emptyStateHint = new Text(hint, 0, 1);
+		}
 		this.chatContainer.addChild(this.emptyStateHint);
 	}
 
@@ -1598,9 +1681,25 @@ export class InteractiveMode {
 		return `↓${(charsPerSec / 1000).toFixed(1).replace(/\.0$/, "")}k`;
 	}
 
+	/** Compact token count for the working-line chip: 97, 1.2k, 10.8k, 3.4M. */
+	private formatTokenChip(count: number): string {
+		if (count < 1000) return count.toString();
+		if (count < 1_000_000) return `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+		return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+	}
+
+	/** Output tokens accrued this turn: finalized assistant messages plus whatever
+	 * the in-flight streaming message reports so far (partial until its own
+	 * message_end lands the final count). */
+	private currentTurnOutputTokens(): number {
+		return this.turnOutputTokens + (this.streamingMessage?.usage?.output ?? 0);
+	}
+
 	private refreshLoaderTrailingSuffix(): void {
 		if (!this.loadingAnimation) return;
 		const interrupt = `${theme.fg("dim", ` · ${keyText("app.interrupt")} to interrupt`)}`;
+		const outputTokens = this.currentTurnOutputTokens();
+		const tokens = outputTokens > 0 ? theme.fg("dim", ` · ↑ ${this.formatTokenChip(outputTokens)} tok`) : "";
 		let rate = "";
 		const now = Date.now();
 		if (this.lastStreamRateSampleMs > 0 && now - this.lastStreamRateSampleMs >= 1000) {
@@ -1611,7 +1710,7 @@ export class InteractiveMode {
 			this.lastStreamRateSampleMs = now;
 			this.lastStreamRateCharCount = this.streamTextCharCount;
 		}
-		this.loadingAnimation.setTrailingSuffix(`${interrupt}${rate}`);
+		this.loadingAnimation.setTrailingSuffix(`${interrupt}${tokens}${rate}`);
 	}
 
 	private createWorkingLoader(): Loader {
@@ -1622,6 +1721,9 @@ export class InteractiveMode {
 			this.getWorkingLoaderMessage(),
 			reducedMotionLoaderIndicator(this.workingIndicatorOptions),
 		);
+		// A1: paint the phase label with the shared heartbeat shimmer. shimmerColorAt
+		// self-fallbacks to a flat muted painter under no-truecolor / reduced motion.
+		loader.setMessageColorAt((text, now) => shimmerColorAt(now)(text));
 		// Show a per-turn elapsed counter. A fresh loader is built at each
 		// agent_start (turn start) and lives until agent_end, so the clock
 		// measures the whole turn rather than any single agent step.
@@ -2987,6 +3089,7 @@ export class InteractiveMode {
 				this.activityStacker.reset();
 				this.lastAssistantComponent = null;
 				this.turnAssistantComponents = [];
+				this.turnOutputTokens = 0;
 				this.streamingAttached = false;
 				this.setTerminalProgress(true);
 				this._cleanupRetryUI();
@@ -3192,6 +3295,9 @@ export class InteractiveMode {
 							this.turnAssistantComponents.push(this.streamingComponent);
 						}
 					}
+					// Fold this now-finalized message's output tokens into the turn total
+					// before clearing the streaming ref (currentTurnOutputTokens reads it).
+					this.turnOutputTokens += this.streamingMessage.usage?.output ?? 0;
 					this.streamingComponent = undefined;
 					this.streamingMessage = undefined;
 					this.footer.invalidate();
@@ -3589,6 +3695,16 @@ export class InteractiveMode {
 		this.ephemeralStatusText = undefined;
 	}
 
+	/** Insert a between-turns hairline rule before a user prompt, but only when the
+	 * chat already holds prior content — never before the first message. Works for
+	 * both the live and rebuild paths because both funnel through addMessageToChat
+	 * with a chatContainer that starts empty (fresh submit clears the empty-state
+	 * hint first; a rebuild clears the whole container). */
+	private maybeAddTurnRule(): void {
+		if (this.chatContainer.children.length === 0) return;
+		this.chatContainer.addChild(new TurnRule());
+	}
+
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
 		this.clearEphemeralStatus();
 		switch (message.role) {
@@ -3649,6 +3765,12 @@ export class InteractiveMode {
 						this.chatContainer.addChild(new TtsrSteerMessageComponent(message));
 						break;
 					}
+					// Z5: hairline rule between turns — before a real user prompt when the
+					// chat already holds prior content (never before the very first). Placed
+					// here so both the live message_start path and the history rebuild path
+					// (renderSessionContext → addMessageToChat) emit identical separators;
+					// mid-turn steers above return before reaching it.
+					this.maybeAddTurnRule();
 					// External `Spacer(1)` removed (Leva 2 Spacer cleanup).
 					// `UserMessageComponent` still wraps content in
 					// `Box(1,1, userMsgBg)` whose `paddingY=1` keeps a 1-row
@@ -6636,6 +6758,9 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 		this.unregisterSignalHandlers();
 		this.setTerminalProgress(false);
 		this.clearInterruptWatchdog();
+		// Drop the hero-ignition ticker if the ease is still mid-flight at teardown.
+		this.heroIgnitionUnsub?.();
+		this.heroIgnitionUnsub = null;
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
