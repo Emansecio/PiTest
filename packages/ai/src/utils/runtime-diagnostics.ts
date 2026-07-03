@@ -44,6 +44,7 @@ export type DiagnosticCategory =
 	| "prune.live"
 	| "quality.rigor"
 	| "quality.recovery"
+	| "quality.supervision"
 	| "compaction.presend-overflow-guard"
 	| "fusion.member-failed"
 	| "fusion.judge-retry"
@@ -81,6 +82,12 @@ export interface DiagnosticContext {
 	 * per guard from the diagnostics ring buffer.
 	 */
 	outcome?: "blocked" | "overridden";
+	/**
+	 * Stable identifier of the specific rule/check inside the guard that fired
+	 * (e.g. an error-hint rule id, a grounding check name). Enables per-rule
+	 * efficacy accounting downstream; the category alone only identifies the guard.
+	 */
+	ruleId?: string;
 	/** Free-form short note; keep it small, it is retained in the ring buffer. */
 	note?: string;
 }
@@ -102,14 +109,17 @@ export interface DiagnosticCounter {
 	lastContext?: DiagnosticContext;
 }
 
+/** A recorded event as stored/delivered: sequenced and wall-clock stamped. */
+export type RecordedDiagnosticEvent = DiagnosticEvent & { seq: number; ts: number };
+
 export interface DiagnosticSnapshot {
 	counters: Record<string, DiagnosticCounter>;
-	recent: Array<DiagnosticEvent & { seq: number }>;
+	recent: RecordedDiagnosticEvent[];
 	total: number;
 }
 
 /** Optional subscriber, e.g. a bridge that re-emits onto the agent-session bus. */
-export type DiagnosticListener = (event: DiagnosticEvent & { seq: number }) => void;
+export type DiagnosticListener = (event: RecordedDiagnosticEvent) => void;
 
 // Bounded so a long autonomous session can't grow this without limit. Mirrors
 // the kill-ring/learned-error cap style used elsewhere in the codebase.
@@ -117,7 +127,7 @@ const MAX_RECENT_EVENTS = 200;
 
 interface DiagnosticsState {
 	counters: Map<string, DiagnosticCounter>;
-	recent: Array<DiagnosticEvent & { seq: number }>;
+	recent: RecordedDiagnosticEvent[];
 	listeners: Set<DiagnosticListener>;
 	seq: number;
 }
@@ -144,7 +154,7 @@ function getState(): DiagnosticsState {
 export function recordDiagnostic(event: DiagnosticEvent): void {
 	const state = getState();
 	state.seq += 1;
-	const stamped = { ...event, seq: state.seq };
+	const stamped: RecordedDiagnosticEvent = { ...event, seq: state.seq, ts: Date.now() };
 
 	const existing = state.counters.get(event.category);
 	if (existing) {
