@@ -15,6 +15,7 @@ import type { ElementToSourceResult } from "../chrome/element-to-source.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.ts";
 import { getTextOutput } from "./render-utils.ts";
+import { TOOL_OUTPUT_HARD_CAP_BYTES } from "./truncate.ts";
 
 export interface ChromeDevtoolsToolOptions {}
 
@@ -24,13 +25,16 @@ export interface ChromeToolDetails {
 }
 
 type Content = TextContent | ImageContent;
-type ChromeResult = { content: Content[]; details: ChromeToolDetails };
+// `isError` is the flag the execution pipeline (and TUI) reads to treat a result
+// as a failure — mirrors how `plan`/`todo` mark their fail paths. `details.ok` is
+// kept purely for structured logging; nothing keys retry/loop-detection off it.
+type ChromeResult = { content: Content[]; details: ChromeToolDetails; isError?: boolean };
 
 function ok(content: Content[]): ChromeResult {
 	return { content, details: { ok: true } };
 }
 function fail(message: string): ChromeResult {
-	return { content: [{ type: "text", text: message }], details: { ok: false, error: message } };
+	return { content: [{ type: "text", text: message }], isError: true, details: { ok: false, error: message } };
 }
 function textResult(text: string): ChromeResult {
 	return ok([{ type: "text", text: text || "(empty)" }]);
@@ -86,6 +90,13 @@ function buildChromeTool<S extends TSchema>(spec: ChromeToolSpec<S>): ToolDefini
 
 // --- Schemas ---------------------------------------------------------------
 
+const GET_TEXT_DEFAULT_LIMIT = 20_000;
+// The generic tool-output wrapper hard-caps every text block at 64KB
+// (TOOL_OUTPUT_HARD_CAP_BYTES). A char limit above that is unreachable — the
+// wrapper would just re-truncate the output and stack a second, divergent note.
+// So the effective ceiling IS that cap; advertising 1M was a dead end.
+const GET_TEXT_MAX_LIMIT = TOOL_OUTPUT_HARD_CAP_BYTES;
+
 const emptySchema = Type.Object({}, { additionalProperties: false });
 const selectSchema = Type.Object(
 	{ id: Type.String({ description: "Target/page id from chrome_devtools_list_pages." }) },
@@ -119,7 +130,16 @@ const screenshotSchema = Type.Object(
 const consoleSchema = Type.Object(
 	{
 		limit: Type.Optional(Type.Number({ description: "Max lines to return (default 50)." })),
-		level: Type.Optional(Type.String({ description: "Filter by level, e.g. 'error', 'warning', 'log'." })),
+		// Free string, not a closed enum: the buffer mixes two CDP vocabularies
+		// (Runtime.consoleAPICalled `type` + Log.entryAdded `level`) so the produced
+		// set is open-ended (log, info, warning, error, debug, verbose, …). Matched
+		// case-insensitively; document the common values instead of risking a schema
+		// false-negative on a level CDP legitimately emits.
+		level: Type.Optional(
+			Type.String({
+				description: "Filter by level (case-insensitive): error, warning, info, log, debug, verbose.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -166,7 +186,15 @@ const pressKeySchema = Type.Object(
 	{ additionalProperties: false },
 );
 const getTextSchema = Type.Object(
-	{ limit: Type.Optional(Type.Number({ description: "Max characters to return (default 20000)." })) },
+	{
+		limit: Type.Optional(
+			Type.Number({
+				description: "Max characters to return (default 20000; capped at 64KB — the tool-output ceiling).",
+				minimum: 1,
+				maximum: GET_TEXT_MAX_LIMIT,
+			}),
+		),
+	},
 	{ additionalProperties: false },
 );
 const waitForSchema = Type.Object(
@@ -209,13 +237,16 @@ const snapshotSchema = Type.Object(
 const networkBodySchema = Type.Object(
 	{
 		requestId: Type.String({ description: "Request id from chrome_devtools_read_network." }),
-		limit: Type.Optional(Type.Number({ description: "Max characters of body to return (default 20000)." })),
+		limit: Type.Optional(
+			Type.Number({
+				description: "Max characters of body to return (default 20000; capped at 64KB — the tool-output ceiling).",
+				minimum: 1,
+				maximum: GET_TEXT_MAX_LIMIT,
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
-
-const GET_TEXT_DEFAULT_LIMIT = 20_000;
-const GET_TEXT_MAX_LIMIT = 1_000_000;
 
 // --- Tool definitions ------------------------------------------------------
 
@@ -331,7 +362,11 @@ export function createChromeReadConsoleDefinition(): ToolDefinition<typeof conso
 		guidelines: ["Filter by level (e.g. 'error') to focus on problems."],
 		schema: consoleSchema,
 		run: async (mgr, input) => {
-			const lines = mgr.readConsole({ limit: input.limit, level: input.level });
+			// CDP stores levels lowercase; normalize the filter so 'Error'/'WARNING'
+			// match instead of silently returning zero lines (the manager compares
+			// with a strict `===`).
+			const level = input.level?.toLowerCase();
+			const lines = mgr.readConsole({ limit: input.limit, level });
 			if (lines.length === 0) return textResult("No console messages.");
 			return textResult(lines.map((l) => `[${l.level}] ${l.text}`).join("\n"));
 		},
@@ -549,7 +584,9 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 			const crushed = maybeCrushJsonOutput({
 				text: r.body,
 				shouldAttempt: isJsonCrushEnabled(),
-				recoveryHint: "Re-fetch with a larger limit for any elided detail.",
+				// A larger limit is a dead end (output is capped at 64KB regardless) and
+				// there is no offset param — point at extracting the one field you need.
+				recoveryHint: "Body exceeds the 64KB cap; read a specific field via chrome_devtools_evaluate.",
 			});
 			if (crushed !== undefined) return textResult(crushed);
 			return textResult(

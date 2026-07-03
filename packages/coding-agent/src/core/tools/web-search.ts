@@ -140,12 +140,18 @@ export function createWebSearchToolDefinition(
 		],
 		parameters: webSearchSchema,
 		async execute(_toolCallId, input: WebSearchToolInput, signal) {
+			// `isError: true` is the flag the execution pipeline / TUI read to treat a
+			// result as a failure (mirrors plan/todo). Without it every error below
+			// looked like a successful empty search to retry / loop-detection.
+			const fail = (text: string, details: WebSearchToolDetails) => ({
+				content: [{ type: "text" as const, text }],
+				isError: true as const,
+				details,
+			});
+
 			const query = input.query.trim();
 			if (!query) {
-				return {
-					content: [{ type: "text" as const, text: "empty query" }],
-					details: { provider: "none", hits: 0 },
-				};
+				return fail("empty query", { provider: "none", hits: 0 });
 			}
 			const limit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(input.limit ?? DEFAULT_LIMIT)));
 
@@ -156,32 +162,21 @@ export function createWebSearchToolDefinition(
 				providers = resolved.providers;
 				selected = resolved.selected;
 			} catch (err) {
-				return {
-					content: [{ type: "text" as const, text: `web_search error: ${(err as Error).message}` }],
-					details: { provider: "none", hits: 0 },
-				};
+				return fail(`web_search error: ${(err as Error).message}`, { provider: "none", hits: 0 });
 			}
 
 			if (providers.length === 0) {
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: "web_search error: no providers configured. Set one of BRAVE_SEARCH_API_KEY, TAVILY_API_KEY, JINA_API_KEY, PERPLEXITY_API_KEY.",
-						},
-					],
-					details: { provider: "none", hits: 0 },
-				};
+				return fail(
+					"web_search error: no providers configured. Set one of BRAVE_SEARCH_API_KEY, TAVILY_API_KEY, JINA_API_KEY, PERPLEXITY_API_KEY.",
+					{ provider: "none", hits: 0 },
+				);
 			}
 
 			let outcome: ChainOutcome;
 			try {
 				outcome = await autoSearchChain(query, limit, providers, signal);
 			} catch (err) {
-				return {
-					content: [{ type: "text" as const, text: `web_search error: ${(err as Error).message}` }],
-					details: { provider: selected, hits: 0 },
-				};
+				return fail(`web_search error: ${(err as Error).message}`, { provider: selected, hits: 0 });
 			}
 
 			const extracts = new Map<string, string>();
