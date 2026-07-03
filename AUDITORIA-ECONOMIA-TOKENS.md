@@ -7,6 +7,18 @@
 
 ---
 
+> ## Status: IMPLEMENTADO (2026-07-03)
+>
+> Implementação em 5 waves de lanes paralelas com propriedade disjunta de arquivos, cada achado re-verificado na fonte antes da edição (portão de falso-positivo), gates completos entre waves (tsgo raiz + suíte inteira + token-bench).
+>
+> **Entregue:** os 7 bugs (M4, M6, M9, M17, M18, M23 + M3/Bug 4) · Pacote 2 completo (M1 relocação `<env>` do sufixo dinâmico nas rotas de prefix-cache automático, M2 split no formato-anthropic, M3 breakpoint na última tool) · Pacote 3 completo (M5 calibração EMA, M7 módulo `@pit/ai/token-estimate`, M8 budget dinâmico, M15 verify fundido, + unificação dos guards presend) · Pacote 4 completo (M10-M13, N4, N5) · higiene M14, M16, M19-M25 · novas funções N1, N2, N3, N6, N7, N8, N9, N10, N12 · `IMAGE_TOKENS` proporcional ao bloco. Baseline token-economy v9 (+2 chars, schemas honestos do M20); todos os demais benches fecharam com delta zero.
+>
+> **Falsos positivos encontrados na implementação:** o "doom-loop" do N8/§5.6 não usa `<system-reminder>` (tags próprias, `role:"custom"` — estruturalmente fora do prune de user messages; colapso restrito a overthink/TTSR, ancorado nas constantes dos geradores) · o rebuild-por-query do §5.7 já tinha cache WeakMap no hindsight bank (só o history-recall precisava).
+>
+> **Deferido com justificativa:** N11 trim-and-keep do overthink (mudança de ciclo de vida de stream com risco de regressão > ganho; requer prefill de assistant por provider) · N13 Gemini explicit caching (marcado exploratório na própria auditoria) · M8 segunda metade (truncar frame em vez de 2ª passada — não há API de rewrite de compaction entry; a causa estrutural da 2ª passada foi eliminada pela primeira metade) · M21 re-scale em `/model` switch (process-global por design, convenção do thermostat) · collapse fuzzy em `get_network_body` (corpo JSON: marcador `×N` quebraria o parse que o crush estrutural já cobre).
+
+---
+
 ## 1. Sumário executivo
 
 O Pit possui um sistema de economia de tokens **maduro e em camadas** — defesa em profundidade da fonte do output até o wire do provider. Os pontos fortes são reais: prefixo de system prompt bipartido e instrumentado, prune incremental sobre clones (preservando recall), deferral com recuperação sob demanda, sumarização com self-correction e grounding determinístico, e compressão de schemas no wire.

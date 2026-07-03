@@ -656,7 +656,7 @@ Optional knobs for power users. None require changes to work correctly — defau
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `PIT_SUBAGENT_MAX_DEPTH` | `1` | Maximum sub-agent nesting depth. `0` disables sub-agents entirely |
-| `PIT_SUBAGENT_MAX_BYTES` | `24576` (24 KB) | Byte cap on the output a sub-agent injects into the parent context (tail is kept; full output stays in-memory) |
+| `PIT_SUBAGENT_MAX_BYTES` | `4096` (4 KB) | Byte cap on the head+tail digest a sub-agent injects into the parent context; the integral output stays on the in-memory registry plus a redacted disk mirror, recoverable via `task({op:"read"})` |
 | `PIT_BASH_AUTO_BACKGROUND_SECONDS` | `60` | Bash commands that run longer than this are automatically promoted to background jobs instead of being killed. Set to `0` to disable auto-backgrounding |
 | `PIT_CODE_MODE_MAX_RESULT_BYTES` | `262144` (256 KB) | Byte cap on a single tool result re-injected into the code-mode VM |
 | `PIT_FREQ_OUTLINE` | off | Set to `1` to enable the boot-outline heuristic: a symbol outline of the hottest frequent-files is appended to the system prompt each session |
