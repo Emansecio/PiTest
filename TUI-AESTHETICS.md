@@ -198,32 +198,37 @@ The first-launch screen is the Pit's face. After Move 1 + Move 2 it reads as a
 **framed welcome card + hint line + accent-bordered editor + 2-line footer**.
 Anchored in code:
 
-### Header — wordmark card
-Rendered by `WelcomeBox` → `Card` → `computeInnerRows`
+### Header — centered hero (fresh sessions)
+Rendered by `WelcomeBox` → `computeHeroRows`
 ([`welcome-box.ts`](packages/coding-agent/src/modes/interactive/components/welcome-box.ts)):
 
 ```
-╭──────────────────────────────────────────────────────────╮
-│  █▀█ █ ▀█▀   coding agent in your terminal      v0.75.4  │
-│  █▀▀ █  █    ● Workspace — User (home)                   │
-│  ▀   ▀  ▀                                                │
-╰──────────────────────────────────────────────────────────╯
+                    ██████╗  ██╗ ████████╗
+                    ██╔══██╗ ██║ ╚══██╔══╝
+                    ██████╔╝ ██║    ██║
+                    ██╔═══╝  ██║    ██║
+                    ██║      ██║    ██║
+                    ╚═╝      ╚═╝    ╚═╝
+
+               coding agent in your terminal · v0.75.4
+                  ● Workspace — User (home)
 ```
 
-- The wordmark is a **column gradient** (`wordmarkGradient` at
-  `welcome-box.ts:162`, `color-interpolation.ts:39-47`): teal → lavender in
-  truecolor, `accent` / `thinkingXhigh` bicolor on 256-color. Still compact
-  (3 rows of half-block pixels) but now earns its space inside a card frame.
-- Tagline `coding agent in your terminal` stays **`muted`**; version `v0.75.4`
-  drops to **`dim`** (`welcome-box.ts:164`) — hierarchy fixed.
-- The workspace bullet `● Workspace — User (home)` remains accent-colored on
-  row 2. The card frame ties the block together visually.
-- `cardBg` + `cardPaddingX` (from settings, default `1`) give internal breathing
-  room without widening past `visibleWidth()`.
+- Fresh sessions on the default app name render a **borderless centered hero**:
+  a 6-row ANSI-shadow wordmark in the brand **neon-green → lime diagonal
+  gradient** (`pitLogoGradient`, `color-interpolation.ts`). Truecolor only;
+  256-color terminals get flat theme `success` green, light themes a deeper
+  green pair for contrast.
+- Tagline stays **`muted`** with the version as a **`dim`** suffix on the same
+  centered line; the accent-colored workspace bullet centers beneath.
+- Resumed sessions, custom app names and viewports **under 40 cols** fall back
+  to the compact framed card (3-row teal → lavender wordmark via
+  `wordmarkGradient`, `cardBg` + `cardPaddingX` intact) — resume line and all.
 
 ### Hint block — essentials only (skills-doctor routed out)
-Below the card, one essentials line from `updateEmptyStateHint`
-(`interactive-mode.ts:1393-1401`):
+Below the hero, one essentials line from `updateEmptyStateHint`
+(`interactive-mode.ts`), **centered** under the wordmark via `CenteredText`
+(left-aligned `Text` on a rebranded app, matching the card fallback):
 
 `Describe a task to get started · / commands · ! bash · drop files to attach`
 
@@ -249,8 +254,8 @@ their alerts.
 
 ### Initial-screen verdict (updated)
 The first screen is **materially more product-like** than before the moves:
-framed welcome hero, fixed tagline/version hierarchy, no maintenance noise on
-quiet startup, brighter editor border, gradient wordmark, and a calm one-line
+centered neon-green hero wordmark, fixed tagline/version hierarchy, no
+maintenance noise on quiet startup, brighter editor border, and a calm one-line
 footer. Remaining gaps: editor still not a padded card, placeholder still
 floats above the editor.
 

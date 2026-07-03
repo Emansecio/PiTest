@@ -1,11 +1,25 @@
 /**
- * Welcome box: the framed identity block shown at startup.
+ * Welcome box: the identity block shown at startup.
  *
- * Pit-native framing uses the shared {@link Card} primitive (`@pit/tui`) with
- * `visibleWidth()` / `truncateToWidth()` on every composed line — 4-sided
- * rounded frames are safe on narrow terminals.
+ * Two layouts:
  *
- * Layout (3 identity rows inside a card):
+ * 1. HERO (fresh sessions, `hero: true`, default app name, width ≥ 40) — a
+ *    borderless centered wordmark in the brand neon-green → lime gradient:
+ *
+ *            ██████╗  ██╗ ████████╗
+ *            ██╔══██╗ ██║ ╚══██╔══╝
+ *            ██████╔╝ ██║    ██║
+ *            ██╔═══╝  ██║    ██║
+ *            ██║      ██║    ██║
+ *            ╚═╝      ╚═╝    ╚═╝
+ *
+ *        coding agent in your terminal · v0.4.2
+ *          ● Workspace — PiTest/src (main)
+ *
+ * 2. CARD (resumed sessions, custom app names, narrow viewports) — the compact
+ *    framed block via the shared {@link Card} primitive (`@pit/tui`), with
+ *    `visibleWidth()` / `truncateToWidth()` on every composed line:
+ *
  *   ╭──────────────────────────────────────────────────────────╮
  *   │  █▀█ █ ▀█▀   coding agent in your terminal      v0.4.2  │
  *   │  █▀▀ █  █    ● Workspace — PiTest/src (main)            │
@@ -19,7 +33,7 @@
 import { Card, type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { GitDiffStats } from "../../../core/footer-data-provider.ts";
 import { formatGitBranchWithDiff } from "../display-utils.ts";
-import { wordmarkGradient } from "../theme/color-interpolation.ts";
+import { pitLogoGradient, wordmarkGradient } from "../theme/color-interpolation.ts";
 import { theme } from "../theme/theme.ts";
 
 // 3-row half-block wordmark spelling P-I-T. Each row is exactly 9 visible columns
@@ -27,6 +41,21 @@ import { theme } from "../theme/theme.ts";
 // misread as other letters — keep this compact pixel font.
 const WORDMARK_PIT: readonly string[] = ["█▀█ █ ▀█▀", "█▀▀ █  █ ", "▀   ▀  ▀ "];
 const WORDMARK_WIDTH = 9;
+
+// 6-row block wordmark (ANSI-shadow style) for the fresh-session hero. Unlike
+// the smoothed 3-row experiments, this figlet classic reads unambiguously as
+// P-I-T. Rows are right-trimmed; centering uses HERO_WIDTH so they stay
+// letter-aligned instead of drifting toward the middle.
+const HERO_PIT: readonly string[] = [
+	"██████╗  ██╗ ████████╗",
+	"██╔══██╗ ██║ ╚══██╔══╝",
+	"██████╔╝ ██║    ██║",
+	"██╔═══╝  ██║    ██║",
+	"██║      ██║    ██║",
+	"╚═╝      ╚═╝    ╚═╝",
+];
+const HERO_WIDTH = 22;
+const HERO_MIN_WIDTH = 40;
 
 export interface WelcomeBoxData {
 	appName: string;
@@ -46,6 +75,12 @@ export interface WelcomeBoxData {
 	wordmarkColor?: (s: string) => string;
 	/** Horizontal padding inside the card frame (default 1). */
 	cardPaddingX?: number;
+	/**
+	 * Borderless centered hero for fresh sessions. Only honored on the default
+	 * app name, without a resume line, and when the viewport fits it — every
+	 * other combination falls back to the compact card.
+	 */
+	hero?: boolean;
 }
 
 /** Renders the inner identity rows at the width Card gives its child. */
@@ -150,7 +185,8 @@ export class WelcomeBox implements Component {
 		if (cacheable && this.cachedLines !== null && this.cachedWidth === width && this.cachedData === this.data) {
 			return this.cachedLines;
 		}
-		const lines = this.card.render(Math.max(8, width));
+		const w = Math.max(8, width);
+		const lines = this.isHero(w) ? this.computeHeroRows(w) : this.card.render(w);
 		if (cacheable) {
 			this.cachedWidth = width;
 			this.cachedData = this.data;
@@ -159,6 +195,31 @@ export class WelcomeBox implements Component {
 			this.cachedLines = null;
 		}
 		return lines;
+	}
+
+	private isHero(width: number): boolean {
+		const d = this.data;
+		return d.hero === true && d.appName === "pit" && d.resumedSessionName === undefined && width >= HERO_MIN_WIDTH;
+	}
+
+	/** Borderless hero: centered block wordmark + tagline/version + workspace. */
+	private computeHeroRows(width: number): string[] {
+		const d = this.data;
+		const center = (line: string): string => {
+			const fit = visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line;
+			return " ".repeat(Math.max(0, Math.floor((width - visibleWidth(fit)) / 2))) + fit;
+		};
+		const logoPad = " ".repeat(Math.max(0, Math.floor((width - HERO_WIDTH) / 2)));
+		const rows: string[] = [];
+		for (let i = 0; i < HERO_PIT.length; i++) {
+			const raw = HERO_PIT[i] ?? "";
+			const colored = d.wordmarkColor ? d.wordmarkColor(raw) : pitLogoGradient(i, HERO_PIT.length)(raw);
+			rows.push(truncateToWidth(logoPad + colored, width));
+		}
+		rows.push("");
+		rows.push(center(`${theme.fg("muted", d.tagline)}${theme.fg("dim", ` · v${d.version}`)}`));
+		rows.push(center(formatWorkspaceLine(d.cwdDisplay, d.branch, d.diffStats, d.shellCwdNote, width)));
+		return rows;
 	}
 
 	computeInnerRows(width: number): string[] {

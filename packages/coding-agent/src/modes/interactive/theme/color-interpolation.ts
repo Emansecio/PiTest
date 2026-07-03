@@ -49,6 +49,48 @@ export function bicolorColumnColor(col: number, themeInstance: Theme = globalThe
 	return (segment: string) => themeInstance.fg("thinkingXhigh", segment);
 }
 
+/**
+ * PIT hero-logo gradient stops — brand green: neon → lime. Brand-fixed on
+ * purpose (not theme keys): the wordmark reads the same across custom themes.
+ * Light themes get deeper greens so the mark keeps contrast on white.
+ */
+const LOGO_NEON_DARK: Rgb = { r: 57, g: 255, b: 20 };
+const LOGO_LIME_DARK: Rgb = { r: 201, g: 255, b: 41 };
+const LOGO_NEON_LIGHT: Rgb = { r: 16, g: 138, b: 22 };
+const LOGO_LIME_LIGHT: Rgb = { r: 104, g: 146, b: 0 };
+
+/** Light text (high luminance) implies a dark terminal background. */
+function hasDarkBackground(themeInstance: Theme): boolean {
+	const text = parseTrueColorFg(themeInstance.getFgAnsi("text"));
+	if (!text) return true;
+	return (0.299 * text.r + 0.587 * text.g + 0.114 * text.b) / 255 >= 0.5;
+}
+
+/**
+ * Hero-wordmark gradient: neon green → lime blended across the letters. The
+ * ramp is diagonal — `row` shifts it so color flows top-left → bottom-right
+ * over the block glyphs. Truecolor only; 256-color terminals fall back to the
+ * theme's flat `success` green (banding through the color cube reads worse
+ * than a solid brand green).
+ */
+export function pitLogoGradient(
+	row: number,
+	rows: number,
+	themeInstance: Theme = globalTheme,
+): (text: string) => string {
+	return (text: string) => {
+		if (!getCapabilities().trueColor) return themeInstance.fg("success", text);
+		const dark = hasDarkBackground(themeInstance);
+		const from = dark ? LOGO_NEON_DARK : LOGO_NEON_LIGHT;
+		const to = dark ? LOGO_LIME_DARK : LOGO_LIME_LIGHT;
+		const rowBias = rows <= 1 ? 0 : (row / (rows - 1)) * 0.35;
+		return applyColumnGradient(text, (col, cols) => {
+			const colT = cols <= 1 ? 0 : col / (cols - 1);
+			return rgbFg(lerpRgb(from, to, colT * 0.65 + rowBias));
+		});
+	};
+}
+
 /** Wordmark gradient: teal → lavender (truecolor) or accent/lavender bicolor. */
 export function wordmarkGradient(text: string, themeInstance: Theme = globalTheme): string {
 	return applyColumnGradient(text, (col, cols) => {

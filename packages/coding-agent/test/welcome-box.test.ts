@@ -6,6 +6,7 @@
 
 import { visibleWidth } from "@pit/tui";
 import { beforeAll, describe, expect, it } from "vitest";
+import { CenteredText } from "../src/modes/interactive/components/centered-text.js";
 import { WelcomeBox, type WelcomeBoxData } from "../src/modes/interactive/components/welcome-box.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
@@ -17,6 +18,8 @@ const BASE: WelcomeBoxData = {
 	cwdDisplay: "PiTest",
 	branch: "main",
 };
+
+const HERO: WelcomeBoxData = { ...BASE, hero: true };
 
 describe("WelcomeBox", () => {
 	beforeAll(() => {
@@ -93,6 +96,71 @@ describe("WelcomeBox", () => {
 		expect(plain).toContain("scout");
 		// The half-block PIT wordmark only ships for the default "pit" name.
 		expect(plain).not.toContain("█");
+	});
+});
+
+describe("WelcomeBox — hero (fresh session)", () => {
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	it("renders the borderless centered hero with wordmark, tagline, version and workspace", () => {
+		const out = new WelcomeBox(HERO).render(80);
+		const plain = out.map(stripAnsi);
+		const joined = plain.join("\n");
+		expect(joined).toContain("██");
+		expect(joined).toContain("coding agent in your terminal · v0.4.2");
+		expect(joined).toContain("Workspace");
+		expect(joined).toContain("(main)");
+		// Borderless: no card frame in hero mode.
+		expect(joined).not.toContain("╭");
+		// Centered: the wordmark block starts well past the left margin at 80 cols.
+		expect(plain[0]).toMatch(/^ {20,}█/);
+	});
+
+	it("never emits a line wider than the viewport, across widths", () => {
+		for (const width of [120, 80, 60, 40, 39, 24, 12]) {
+			for (const line of new WelcomeBox(HERO).render(width)) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+		}
+	});
+
+	it("falls back to the compact card below the hero minimum width", () => {
+		const out = new WelcomeBox(HERO).render(39);
+		expect(stripAnsi(out[0])).toMatch(/^╭─+╮$/);
+	});
+
+	it("falls back to the compact card when resuming", () => {
+		const out = new WelcomeBox({ ...HERO, resumedSessionName: "auth-refactor" }).render(80);
+		expect(stripAnsi(out[0])).toMatch(/^╭─+╮$/);
+		expect(out.map(stripAnsi).join("\n")).toContain("Resuming · auth-refactor");
+	});
+
+	it("falls back to the compact card on a custom app name", () => {
+		const out = new WelcomeBox({ ...HERO, appName: "scout" }).render(80);
+		expect(stripAnsi(out[0])).toMatch(/^╭─+╮$/);
+	});
+
+	it("honors a wordmarkColor override on the hero wordmark", () => {
+		const out = new WelcomeBox({ ...HERO, wordmarkColor: (s) => `<<${s}>>` }).render(80);
+		expect(out[0]).toContain("<<");
+	});
+});
+
+describe("CenteredText", () => {
+	it("centers the line and honors paddingY", () => {
+		const out = new CenteredText("hello", 1).render(21);
+		expect(out).toEqual(["", "        hello", ""]);
+	});
+
+	it("never emits a line wider than the viewport, across widths", () => {
+		const text = "Describe a task to get started · / commands · ! bash · drop files to attach";
+		for (const width of [120, 80, 40, 12]) {
+			for (const line of new CenteredText(text, 1).render(width)) {
+				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+		}
 	});
 });
 

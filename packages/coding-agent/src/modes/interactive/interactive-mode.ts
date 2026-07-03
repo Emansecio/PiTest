@@ -140,6 +140,7 @@ import { createAskPicker } from "./components/ask-picker.ts";
 import { AssistantMessageComponent, messageHasVisibleContent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
+import { CenteredText } from "./components/centered-text.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import {
 	formatContextFilesHeader,
@@ -534,7 +535,7 @@ export class InteractiveMode {
 	private readonly launchCwd: string;
 
 	/** Shown in the chat area on a fresh session with no messages yet. */
-	private emptyStateHint: Text | undefined = undefined;
+	private emptyStateHint: Text | CenteredText | undefined = undefined;
 
 	// Custom header from extension (undefined = use built-in header)
 	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
@@ -1398,6 +1399,7 @@ export class InteractiveMode {
 			diffStats: this.footerDataProvider.getGitDiffStats(),
 			resumedSessionName: isResumed ? this.sessionManager.getSessionName() : undefined,
 			cardPaddingX: this.settingsManager.getCardPaddingX(),
+			hero: !isResumed,
 		};
 	}
 
@@ -1425,7 +1427,9 @@ export class InteractiveMode {
 			theme.fg("dim", " · "),
 			theme.fg("dim", "drop files to attach"),
 		].join("");
-		this.emptyStateHint = new Text(hint, 0, 1);
+		// Centered under the hero wordmark on the default brand; a rebranded app
+		// falls back to the left-aligned card, so the hint stays left too.
+		this.emptyStateHint = APP_NAME === "pit" ? new CenteredText(hint, 1) : new Text(hint, 0, 1);
 		this.chatContainer.addChild(this.emptyStateHint);
 	}
 
