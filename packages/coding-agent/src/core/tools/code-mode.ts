@@ -29,8 +29,9 @@ import { sliceSafe } from "../../utils/surrogate.ts";
 import { type CodeModeDispatcher, createCodeModeBridge } from "../code-mode/bridge.ts";
 import { getCurrentEvalKernelManager } from "../eval-kernel/index.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { EVAL_OUTPUT_CAP_BYTES, formatKernelResult } from "./eval.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
-import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { withOutputCap, wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const codeModeSchema = Type.Object(
 	{
@@ -83,31 +84,12 @@ function buildGuidelines(toolNames: string[]): string[] {
 		head,
 		"Each tools.<name>() returns the tool's text result as a string; print final answers with console.log. Wrap calls in try/catch — a failed tool call rejects that call only.",
 		"State does NOT persist across `code` calls; do everything for one workflow in a single program.",
+		"Shares its persistent JavaScript kernel process with `eval` (lang=javascript): an abort or timeout on either tool kills that kernel and silently wipes the other's persisted state too.",
 	];
 	if (toolNames.length > 0) {
 		lines.push(`Available in code-mode: ${toolNames.map((n) => `tools.${n}`).join(", ")}.`);
 	}
 	return lines;
-}
-
-function formatResult(stdout: string, stderr: string, error: string | undefined, durationMs: number): string {
-	const head = `[code-mode, dur=${durationMs}ms]`;
-	const parts: string[] = [head];
-	const sections: Array<[string, string]> = [];
-	if (stdout) sections.push(["stdout", stdout]);
-	if (stderr && stderr !== error) sections.push(["stderr", stderr]);
-	if (error) sections.push(["error", error]);
-	for (const [label, body] of sections) {
-		const oneLine = !body.includes("\n") && body.length <= 80;
-		if (oneLine) {
-			parts.push(`${label}: ${body}`);
-		} else {
-			parts.push(`--- ${label} ---`);
-			parts.push(body.replace(/\s+$/, ""));
-		}
-	}
-	if (sections.length === 0) parts.push("(no output)");
-	return parts.join("\n");
 }
 
 export function createCodeModeToolDefinition(
@@ -117,11 +99,11 @@ export function createCodeModeToolDefinition(
 	const dispatcher = options?.dispatcher;
 	const getActiveToolNames = options?.getActiveToolNames ?? (() => []);
 	const maxToolResultBytes = options?.maxToolResultBytes;
-	return {
+	const definition: ToolDefinition<typeof codeModeSchema, CodeModeToolDetails> = {
 		name: "code",
 		label: "code",
 		description:
-			"Run ONE JavaScript program that calls the agent's tools as `await tools.<name>(args)`. Use for multi-tool workflows (read/filter/compose over many results) to collapse N tool calls into a single turn — less latency and fewer tokens. Tool calls go through the same permission/safety pipeline as normal calls.",
+			"Run ONE JavaScript program that calls the agent's tools as `await tools.<name>(args)`. Use for multi-tool workflows (read/filter/compose over many results) to collapse N tool calls into a single turn — less latency and fewer tokens. Tool calls go through the same permission/safety pipeline as normal calls. Runs in the same persistent JavaScript kernel process as `eval` (lang=javascript) — aborting or timing out either tool tears down that shared kernel and wipes both tools' persisted JS state.",
 		promptSnippet:
 			"Write one JS program calling tools via `await tools.<name>(args)`; collapses N tool calls into one turn.",
 		// Live catalog: re-derive from the CURRENT active tool names at read time
@@ -172,8 +154,14 @@ export function createCodeModeToolDefinition(
 			);
 			try {
 				const result = await channel.runProgram(input.code, activeNames, input.timeout_ms, signal);
+				const text = await formatKernelResult({
+					label: "code-mode",
+					stdout: result.stdout,
+					stderr: result.stderr,
+					error: result.error,
+					durationMs: result.durationMs,
+				});
 				const hadError = Boolean(result.error);
-				const text = formatResult(result.stdout, result.stderr, result.error, result.durationMs);
 				return {
 					content: [{ type: "text" as const, text }],
 					isError: hadError,
@@ -200,6 +188,7 @@ export function createCodeModeToolDefinition(
 		},
 		renderResult: renderToolOutput,
 	};
+	return withOutputCap(definition, { maxBytes: EVAL_OUTPUT_CAP_BYTES, mode: "headTail" });
 }
 
 export function createCodeModeTool(cwd: string, options?: CodeModeToolOptions): AgentTool<typeof codeModeSchema> {

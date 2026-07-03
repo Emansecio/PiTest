@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
+import { recordDiagnostic } from "@pit/ai";
 import { spawn, spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 
@@ -116,6 +117,14 @@ function resolveShellConfig(customShellPath?: string): ShellConfig {
 	return { shell: "sh", args: ["-c"] };
 }
 
+// Cached for the lifetime of the process: PATH/env mutations that happen mid-session
+// (e.g. a tool installer prepending to PATH, or `config` writing a new PYTHONUTF8)
+// never reach subsequent bash children, only ones spawned before the first call here.
+// Deliberate — every `spawn(..., { env: getShellEnv() })` call site wants a stable,
+// cheap-to-read snapshot rather than paying the lookup+merge cost per command; the
+// env vars involved (bin dir on PATH, Python UTF-8 flags) are set once at startup in
+// practice. Revisit with an explicit invalidation hook if a future feature needs
+// live PATH changes to propagate to already-running sessions.
 let _cachedShellEnv: NodeJS.ProcessEnv | undefined;
 
 export function getShellEnv(): NodeJS.ProcessEnv {
@@ -172,6 +181,14 @@ export function killTrackedDetachedChildren(): void {
 	trackedDetachedChildPids.clear();
 }
 
+// Grace window for taskkill to actually remove the tree before we double-check
+// and fall back to a direct kill. taskkill is spawned fire-and-forget above (we
+// only listen for its own spawn 'error', never its exit code), so a silent
+// no-op — wrong PATH resolving a different taskkill, ERROR_ACCESS_DENIED, a pid
+// that was already a zombie — would otherwise go unnoticed by every caller that
+// assumes the tree is gone once this function returns.
+const KILL_VERIFY_DELAY_MS = 2_000;
+
 /**
  * Kill a process and all its children (cross-platform)
  */
@@ -189,6 +206,38 @@ export function killProcessTree(pid: number): void {
 			// fatal (uncaughtException). This runs on the kill/abort/shutdown paths, so a
 			// crash here would defeat the very recovery it's part of.
 			killer.on("error", () => {});
+			// Verify the target actually died; taskkill's own failure modes above are
+			// swallowed, so a caller (bash.ts's timeout/abort paths) relying on the
+			// process actually exiting could otherwise wait forever. Fall back to a
+			// direct kill if it's still around after a short grace window.
+			const verifyTimer = setTimeout(() => {
+				// Signal 0 sends nothing; it throws ESRCH once the pid is gone (verified on
+				// both POSIX and Windows — Node forwards signal 0 to a real existence check
+				// on Win32 too, unlike other signal numbers which unconditionally terminate).
+				let stillAlive = true;
+				try {
+					process.kill(pid, 0);
+				} catch {
+					stillAlive = false;
+				}
+				if (!stillAlive) return; // taskkill worked, or the process already exited on its own
+				try {
+					process.kill(pid);
+				} catch (err) {
+					// Double failure: taskkill AND the direct fallback both failed to remove
+					// the pid (permissions, a zombie the OS hasn't reaped, or a stale/reused
+					// pid handle). Callers that need a hard guarantee (bash.ts) arm their own
+					// grace-timeout backstop for exactly this case — surface it here too
+					// instead of swallowing so it is visible in diagnostics.
+					recordDiagnostic({
+						category: "process.kill",
+						level: "error",
+						source: "shell.killProcessTree.fallback",
+						context: { pid, note: err instanceof Error ? err.message : String(err) },
+					});
+				}
+			}, KILL_VERIFY_DELAY_MS);
+			verifyTimer.unref?.();
 		} catch {
 			// Ignore errors if taskkill fails
 		}

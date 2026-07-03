@@ -16,7 +16,6 @@ export interface EvalRequest {
 export interface EvalResult {
 	stdout: string;
 	stderr: string;
-	value?: string;
 	error?: string;
 	durationMs: number;
 }

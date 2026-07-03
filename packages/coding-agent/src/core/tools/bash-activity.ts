@@ -99,6 +99,12 @@ const FILE_REDIRECT_RE = />>?\s*[^\s&|;>]/;
 const SEGMENT_SEP_RE = /&&|\|\||\||;/;
 const WHITESPACE_RE = /\s+/;
 const ENV_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
+// `$(...)` or `` ` ` `` command substitution can smuggle an arbitrary (possibly
+// effectful) command inside an otherwise-readonly segment, e.g. `echo $(rm -rf
+// x)` — token-splitting only ever sees the outer `echo`. Detected, not parsed:
+// any segment containing either form taints conservatively rather than trying
+// to classify the substituted command.
+const COMMAND_SUBSTITUTION_RE = /\$\(|`/;
 
 export function classifyBashCommand(command: string): "navigation" | "action" {
 	// A write redirection to a real file is an effect. Strip /dev/null discards
@@ -112,6 +118,7 @@ export function classifyBashCommand(command: string): "navigation" | "action" {
 	for (const raw of command.split(SEGMENT_SEP_RE)) {
 		const seg = raw.trim();
 		if (!seg) continue;
+		if (COMMAND_SUBSTITUTION_RE.test(seg)) return "action";
 		// Drop leading VAR=value assignments (e.g. `FOO=bar cmd`).
 		const tokens = seg.split(WHITESPACE_RE).filter((t) => !ENV_ASSIGN_RE.test(t));
 		const cmd = tokens[0];

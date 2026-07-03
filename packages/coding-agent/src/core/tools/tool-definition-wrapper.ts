@@ -22,6 +22,19 @@ export interface OutputCapConfig {
 type WithOutputCap = { outputCap?: OutputCapConfig };
 
 /**
+ * Fields `wrapToolDefinition` passes through onto the returned AgentTool, beyond
+ * the formal AgentTool shape, purely so a later `createToolDefinitionFromAgentTool`
+ * round-trip (the SDK's `baseToolsOverride` path, see agent-session.ts) can
+ * recover them instead of silently reverting to the default 64KB head-only cap
+ * or the default "action" activity grouping. Not part of the public AgentTool
+ * contract — read defensively, never assumed present.
+ */
+interface ToolPassthrough {
+	outputCap?: OutputCapConfig;
+	activity?: ToolDefinition["activity"];
+}
+
+/**
  * Attach a custom output cap to a tool definition (opt-in to {@link capToolOutputBytes}).
  * Returns the same definition typed with the extra field so call sites stay clean
  * and the shared ToolDefinition interface does not need to know about it.
@@ -80,25 +93,75 @@ function capToolOutputBytes<TDetails>(
 	return changed ? { ...result, content: capped } : result;
 }
 
-/** Wrap a ToolDefinition into an AgentTool for the core runtime. */
+/**
+ * Mirror of {@link capToolOutputBytes} for a THROWN error: the safety net above
+ * only runs on a resolved result, so a tool whose `execute` throws instead of
+ * returning `isError: true` bypassed every cap — an oversized error message
+ * (huge stack, echoed input) reached the model completely uncapped. Same cap,
+ * same head/headTail mode, applied to the error's message text; the original
+ * stack is preserved on the returned Error so local debugging is unaffected.
+ */
+function capThrownError(err: unknown, cap?: OutputCapConfig): Error {
+	const original = err instanceof Error ? err : new Error(String(err));
+	const maxBytes = cap?.maxBytes ?? TOOL_OUTPUT_HARD_CAP_BYTES;
+	const mode = cap?.mode ?? "head";
+	if (mode === "headTail") {
+		const ht = truncateHeadTail(original.message, { maxBytes });
+		if (!ht.truncated) return original;
+		const capped = new Error(`${ht.content}\n\n[error text exceeded ${formatSize(maxBytes)}; kept head + tail]`);
+		capped.stack = original.stack;
+		return capped;
+	}
+	const truncation = truncateHead(original.message, { maxBytes, maxLines: Number.POSITIVE_INFINITY });
+	if (!truncation.truncated) return original;
+	const capped = new Error(`${truncation.content}\n\n[error text exceeded ${formatSize(maxBytes)} and was truncated]`);
+	capped.stack = original.stack;
+	return capped;
+}
+
+/**
+ * Wrap a ToolDefinition into an AgentTool for the core runtime.
+ *
+ * The declared return type stays `AgentTool<any, TDetails>` (not widened with
+ * `& ToolPassthrough`) deliberately: every `create*Tool()` across the registry
+ * assigns this call's result to a schema-specific `AgentTool<SomeSchema, ...>`,
+ * which relies on TypeScript's "same generic reference, compare type arguments"
+ * fast path to accept `TParams=any`. An intersection return type forces full
+ * structural expansion instead, which breaks that assignability everywhere
+ * (`prepareArguments`'s `Static<any>` resolves to a function returning
+ * `unknown`, not `any`, once expanded). `outputCap`/`activity` are instead
+ * attached to the returned object at runtime only, exactly like
+ * {@link withOutputCap} does for a `ToolDefinition` — invisible to the type
+ * checker, recoverable at runtime by `createToolDefinitionFromAgentTool`.
+ */
 export function wrapToolDefinition<TDetails = unknown>(
 	definition: ToolDefinition<any, TDetails>,
 	ctxFactory?: () => ExtensionContext,
 ): AgentTool<any, TDetails> {
 	const outputCap = (definition as WithOutputCap).outputCap;
-	return {
+	const activity = definition.activity;
+	const tool: AgentTool<any, TDetails> = {
 		name: definition.name,
 		label: definition.label,
 		description: definition.description,
 		parameters: definition.parameters,
 		prepareArguments: definition.prepareArguments,
 		executionMode: definition.executionMode,
-		execute: async (toolCallId, params, signal, onUpdate) =>
-			capToolOutputBytes(
-				await definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext),
-				outputCap,
-			),
+		execute: async (toolCallId, params, signal, onUpdate) => {
+			try {
+				return capToolOutputBytes(
+					await definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext),
+					outputCap,
+				);
+			} catch (err) {
+				throw capThrownError(err, outputCap);
+			}
+		},
 	};
+	const passthrough: ToolPassthrough = {};
+	if (outputCap) passthrough.outputCap = outputCap;
+	if (activity !== undefined) passthrough.activity = activity;
+	return Object.assign(tool, passthrough);
 }
 
 /** Wrap multiple ToolDefinitions into AgentTools for the core runtime. */
@@ -116,13 +179,21 @@ export function wrapToolDefinitions(
  * provides plain AgentTool overrides that do not include prompt metadata or renderers.
  */
 export function createToolDefinitionFromAgentTool(tool: AgentTool<any>): ToolDefinition<any, unknown> {
-	return {
+	// `tool` may carry `outputCap`/`activity` passthrough fields attached by
+	// wrapToolDefinition (see ToolPassthrough) even though the formal AgentTool
+	// type does not declare them — recover them here so a base-tool override
+	// round-tripped through this function keeps its cap/activity instead of
+	// silently reverting to the 64KB head-only / default-action behavior.
+	const passthrough = tool as AgentTool<any> & ToolPassthrough;
+	const definition: ToolDefinition<any, unknown> = {
 		name: tool.name,
 		label: tool.label,
 		description: tool.description,
-		parameters: tool.parameters as any,
+		parameters: tool.parameters,
 		prepareArguments: tool.prepareArguments,
 		executionMode: tool.executionMode,
+		activity: passthrough.activity,
 		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
 	};
+	return passthrough.outputCap ? withOutputCap(definition, passthrough.outputCap) : definition;
 }

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { AgentTool } from "@pit/agent-core";
@@ -212,6 +212,14 @@ const BASH_BG_RING_MAX_BYTES = 256 * 1024;
 // the registry can never leak unboundedly across a long session.
 const BASH_BG_MAX_JOBS = 32;
 
+// Backstop for a timeout/abort kill that never lands. killProcessTree's own
+// Windows verify+fallback (utils/shell.ts) gets ~2s to land a kill on its own;
+// this gives that headroom PLUS slack for the exit event to propagate before
+// giving up. If the child still hasn't exited by then (both taskkill and its
+// fallback failed — permissions, an unreapable zombie), stop waiting and
+// surface an explicit error instead of hanging the tool call forever.
+const BASH_KILL_GRACE_MS = 5_000;
+
 /**
  * A command promoted to the background after crossing the auto-background
  * threshold. Stays tracked via `trackDetachedChildPid` so the existing
@@ -319,6 +327,7 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 							context: { pid: child.pid },
 						});
 						if (child.pid) killProcessTree(child.pid);
+						armKillGrace(`Command timed out after ${timeout}s`);
 					}, timeout * 1000);
 				}
 
@@ -334,10 +343,29 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				const autoBgSeconds = autoBackground === true ? resolveAutoBackgroundSeconds() : 0;
 				let promoted: BashBackgroundJob | undefined;
 				let autoBgHandle: NodeJS.Timeout | undefined;
+				let killGraceHandle: NodeJS.Timeout | undefined;
 				const settled = { done: false };
 
 				const killTree = () => {
 					if (child.pid) killProcessTree(child.pid);
+				};
+
+				// Backstop for a kill (timeout or abort) that never lands. killProcessTree's
+				// own Windows verify+fallback (utils/shell.ts) gets ~2s to make the kill land
+				// on its own; BASH_KILL_GRACE_MS is bash's outer deadline for the process to
+				// actually exit. If BOTH taskkill and its fallback failed (permissions, an
+				// unreapable zombie), waitForChildProcess would otherwise wait forever —
+				// reject instead so the model gets an explicit error, not a hung tool call.
+				const armKillGrace = (reason: string) => {
+					clearTimeout(killGraceHandle);
+					killGraceHandle = setTimeout(() => {
+						reject(
+							new Error(
+								`${reason}, but the process (pid ${child.pid ?? "unknown"}) did not terminate after being killed`,
+							),
+						);
+					}, BASH_KILL_GRACE_MS);
+					killGraceHandle.unref?.();
 				};
 
 				// Handle abort signal by killing the entire process tree. Declared before
@@ -363,6 +391,7 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					settled.done = true;
 					if (autoBgHandle) clearTimeout(autoBgHandle);
 					killTree();
+					armKillGrace("Command was aborted");
 				};
 
 				const promoteToBackground = () => {
@@ -397,10 +426,22 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					child.stderr?.off("data", onData);
 					// Keep capturing output into a bounded ring buffer for later polling.
 					// The pre-promotion bytes already went to the caller via `onData`.
+					// Streaming decoder: a chunk boundary can split a multi-byte UTF-8
+					// sequence, and per-chunk `.toString("utf-8")` would render the split
+					// half as U+FFFD. `{ stream: true }` holds any incomplete trailing
+					// bytes for the next chunk instead.
+					const ringDecoder = new TextDecoder();
 					const appendRing = (data: Buffer) => {
-						job.ringBuffer += data.toString("utf-8");
-						if (job.ringBuffer.length > BASH_BG_RING_MAX_BYTES) {
-							job.ringBuffer = job.ringBuffer.slice(job.ringBuffer.length - BASH_BG_RING_MAX_BYTES);
+						job.ringBuffer += ringDecoder.decode(data, { stream: true });
+						// Byte-measured cap (BASH_BG_RING_MAX_BYTES is a byte budget, not a
+						// JS string length) and a code-point-safe cut: walk forward from the
+						// target boundary to the next UTF-8 lead byte so a slice never splits
+						// a multi-byte character (mirrors OutputAccumulator.trimTail).
+						const buf = Buffer.from(job.ringBuffer, "utf-8");
+						if (buf.length > BASH_BG_RING_MAX_BYTES) {
+							let start = buf.length - BASH_BG_RING_MAX_BYTES;
+							while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++;
+							job.ringBuffer = buf.subarray(start).toString("utf-8");
 							job.ringTruncated = true;
 						}
 					};
@@ -442,6 +483,7 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					.then((code) => {
 						if (timeoutHandle) clearTimeout(timeoutHandle);
 						if (autoBgHandle) clearTimeout(autoBgHandle);
+						clearTimeout(killGraceHandle);
 						// Already promoted: the foreground promise resolved on promotion.
 						// Just record the eventual exit on the job and stop tracking the pid.
 						if (promoted) {
@@ -466,6 +508,7 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					.catch((err) => {
 						if (timeoutHandle) clearTimeout(timeoutHandle);
 						if (autoBgHandle) clearTimeout(autoBgHandle);
+						clearTimeout(killGraceHandle);
 						if (promoted) {
 							promoted.exited = true;
 							if (child.pid) untrackDetachedChildPid(child.pid);
@@ -864,11 +907,20 @@ function rebuildBashResultRenderComponent(
  * undefined (caller keeps the normal formatted output) when not enabled, not
  * truncated, the temp file is unavailable, or the output is not JSON.
  */
+// Mirrors json-crush.ts's own MAX_PARSE_CHARS gate (5M chars) — that gate only
+// fires AFTER the caller has already read the whole file into memory as a JS
+// string, so a truncated command that spilled a multi-hundred-MB temp file
+// would transiently allocate the entire thing just to have json-crush throw it
+// away. stat() first and bail on the same threshold before ever reading.
+const CRUSH_MAX_SOURCE_BYTES = 5_000_000;
+
 async function crushBashJsonOutput(snapshot: OutputSnapshot): Promise<string | undefined> {
 	if (!isJsonCrushEnabled()) return undefined;
 	if (!snapshot.truncation.truncated || !snapshot.fullOutputPath) return undefined;
 	let full: string;
 	try {
+		const stats = await stat(snapshot.fullOutputPath);
+		if (stats.size > CRUSH_MAX_SOURCE_BYTES) return undefined;
 		full = await readFile(snapshot.fullOutputPath, "utf-8");
 	} catch {
 		return undefined;
@@ -1072,6 +1124,19 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 				}
 				if (exitCode !== 0 && exitCode !== null) {
 					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
+				}
+				if (exitCode === null) {
+					// Reached only when NOT promoted (handled above) and NOT our own
+					// timeout/abort (those already threw from the ops.exec() catch above).
+					// A null exit code here means the process died some other way — an
+					// external signal, the OS OOM killer, `kill -9` from outside pit — and
+					// returning it as a plain success would hide that the command never
+					// actually completed.
+					return {
+						content: [{ type: "text", text: appendStatus(outputText, "Command terminated by signal") }],
+						isError: true,
+						details,
+					};
 				}
 				return { content: [{ type: "text", text: outputText }], details };
 			} finally {

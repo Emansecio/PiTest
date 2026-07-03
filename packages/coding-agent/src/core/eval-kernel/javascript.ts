@@ -455,10 +455,14 @@ class JsKernel implements EvalKernel {
 				if (this.pending.has(id)) {
 					this.pending.delete(id);
 					call.cleanupAbort?.();
-					try {
-						proc.kill();
-					} catch {
-						// ignore
+					if (proc.pid) {
+						killProcessTree(proc.pid);
+					} else {
+						try {
+							proc.kill();
+						} catch {
+							// ignore
+						}
 					}
 					this.alive = false;
 					reject(new Error(`eval timed out after ${timeoutMs}ms`));
@@ -471,10 +475,14 @@ class JsKernel implements EvalKernel {
 						this.pending.delete(id);
 						if (call.timer) clearTimeout(call.timer);
 						call.cleanupAbort?.();
-						try {
-							proc.kill();
-						} catch {
-							// ignore
+						if (proc.pid) {
+							killProcessTree(proc.pid);
+						} else {
+							try {
+								proc.kill();
+							} catch {
+								// ignore
+							}
 						}
 						this.alive = false;
 						reject(new Error("aborted"));
@@ -550,10 +558,14 @@ class JsKernel implements EvalKernel {
 				if (this.pending.has(id)) {
 					this.pending.delete(id);
 					call.cleanupAbort?.();
-					try {
-						proc.kill();
-					} catch {
-						// ignore
+					if (proc.pid) {
+						killProcessTree(proc.pid);
+					} else {
+						try {
+							proc.kill();
+						} catch {
+							// ignore
+						}
 					}
 					this.alive = false;
 					reject(new Error(`code-mode timed out after ${effectiveTimeout}ms`));
@@ -568,10 +580,14 @@ class JsKernel implements EvalKernel {
 						call.cleanupAbort?.();
 						// Abort kills the kernel, which fails every in-flight tool call
 						// (and any other pending eval) — the whole vm is torn down.
-						try {
-							proc.kill();
-						} catch {
-							// ignore
+						if (proc.pid) {
+							killProcessTree(proc.pid);
+						} else {
+							try {
+								proc.kill();
+							} catch {
+								// ignore
+							}
 						}
 						this.alive = false;
 						reject(new Error("aborted"));
@@ -595,7 +611,11 @@ class JsKernel implements EvalKernel {
 		if (this.proc) {
 			try {
 				this.proc.stdin.end();
-				this.proc.kill();
+				if (this.proc.pid) {
+					killProcessTree(this.proc.pid);
+				} else {
+					this.proc.kill();
+				}
 			} catch {
 				// ignore
 			}

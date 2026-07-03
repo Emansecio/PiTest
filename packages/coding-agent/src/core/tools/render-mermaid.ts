@@ -85,8 +85,21 @@ const UNSUPPORTED_HEADERS = [
 	"C4Deployment",
 ];
 
+// One-line notice, not an echo: the model just sent `source` in this same tool
+// call, so reprinting the whole diagram back to it doubles tokens for zero new
+// information. Best-effort names the detected diagram type when it matches a
+// known-unsupported Mermaid kind; otherwise reports a generic parse failure.
 function fallback(source: string): string {
-	return `Mermaid renderer supports simple flowcharts only. Source preserved as a fenced code block:\n\n\`\`\`mermaid\n${source}\n\`\`\``;
+	const firstLine =
+		source
+			.split(/\r?\n/)
+			.find((l) => stripComment(l).trim().length > 0)
+			?.trim() ?? "";
+	const diagramType = UNSUPPORTED_HEADERS.find((u) => firstLine.toLowerCase().startsWith(u.toLowerCase()));
+	const reason = diagramType
+		? `diagram type "${diagramType}" is not supported`
+		: "the diagram is too complex or uses syntax outside this renderer's simple flowchart grammar";
+	return `Mermaid renderer supports simple flowcharts only (graph/flowchart TD|LR with [..]/(..)/{..} nodes and -->/--- edges); ${reason}. Source not echoed back — the model already has it.`;
 }
 
 function stripComment(line: string): string {
@@ -486,11 +499,11 @@ export function createRenderMermaidToolDefinition(
 		name: "render_mermaid",
 		label: "render_mermaid",
 		description:
-			"Render simple Mermaid flowcharts (graph TD/LR, flowchart TD/LR) as terminal ASCII art. Complex diagrams (sequence/state/class/etc.) fall back to a fenced code block.",
+			"Render simple Mermaid flowcharts (graph TD/LR, flowchart TD/LR) as terminal ASCII art. Complex or unsupported diagrams (sequence/state/class/etc.) report a short unsupported-type message instead of rendering.",
 		promptSnippet: "Render simple Mermaid flowcharts as ASCII.",
 		promptGuidelines: [
 			"Supports graph/flowchart TD or LR with node shapes [..], (..), {..} and --> / --- edges.",
-			"Anything beyond simple flowcharts is returned as a fenced mermaid block — that's intentional.",
+			"Anything beyond simple flowcharts reports a short unsupported message — it does not echo the source back.",
 			"Keep diagrams small; very wide graphs are split across lines.",
 		],
 		parameters: renderMermaidSchema,

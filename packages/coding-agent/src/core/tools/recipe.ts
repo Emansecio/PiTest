@@ -22,7 +22,8 @@ import { killProcessTree } from "../../utils/shell.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { needsWindowsShell, which } from "../lsp/internal.ts";
 import { renderToolOutput, str } from "./render-utils.ts";
-import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { withOutputCap, wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { formatSize, truncateTail } from "./truncate.ts";
 
 const recipeSchema = Type.Object(
 	{
@@ -324,6 +325,21 @@ function runRunner(
 	});
 }
 
+// Per-section tail-keep budget: a failing build/test target's decisive output
+// (the assertion, the compiler error, the final stack frame) is almost always
+// at the END of stdout/stderr, never the start. Truncating from the head (as
+// the wrapper's generic 64KB-head-only net would) keeps the banner and drops
+// exactly the failure. stdout and stderr are capped independently so a chatty
+// stdout can never starve stderr's tail out of the combined text.
+const RECIPE_SECTION_MAX_BYTES = 24 * 1024;
+
+// Overrides the wrapper's default 64KB head-only net with the same ceiling in
+// headTail mode: belt-and-suspenders alongside the per-section truncation
+// above — if the composed text (head banner + two tail-kept sections) still
+// exceeds this, the wrapper's own re-cut keeps head AND tail instead of
+// dropping the tail (where the failure lives) outright.
+const RECIPE_OUTPUT_CAP_BYTES = 64 * 1024;
+
 function formatOutput(runner: string, binary: string, args: string[], outcome: RunOutcome, durationMs: number): string {
 	const head = `[${runner}: ${binary} ${args.join(" ")}] exit=${outcome.exitCode} dur=${durationMs}ms${
 		outcome.timedOut ? " (timed out)" : ""
@@ -332,18 +348,27 @@ function formatOutput(runner: string, binary: string, args: string[], outcome: R
 	const sections: Array<[string, string]> = [];
 	if (outcome.stdout) sections.push(["stdout", outcome.stdout]);
 	if (outcome.stderr) sections.push(["stderr", outcome.stderr]);
-	for (const [label, body] of sections) {
-		const trimmed = body.replace(/\s+$/, "");
-		const oneLine = !trimmed.includes("\n") && trimmed.length <= 80;
+	let truncatedAny = false;
+	for (const [label, rawBody] of sections) {
+		const trimmed = rawBody.replace(/\s+$/, "");
+		const truncation = truncateTail(trimmed, { maxBytes: RECIPE_SECTION_MAX_BYTES });
+		const body = truncation.content;
+		if (truncation.truncated) truncatedAny = true;
+		const oneLine = !truncation.truncated && !body.includes("\n") && body.length <= 80;
 		if (oneLine) {
-			parts.push(`${label}: ${trimmed}`);
+			parts.push(`${label}: ${body}`);
 		} else {
 			parts.push(`--- ${label} ---`);
-			parts.push(trimmed);
+			parts.push(body);
 		}
 	}
 	if (sections.length === 0) {
 		parts.push("(no output)");
+	}
+	if (truncatedAny) {
+		parts.push(
+			`[stdout/stderr each truncated to the last ${formatSize(RECIPE_SECTION_MAX_BYTES)}; the tail — where a failure's assertion/stack usually lands — is kept]`,
+		);
 	}
 	return parts.join("\n");
 }
@@ -353,7 +378,7 @@ export function createRecipeToolDefinition(
 	options?: RecipeToolOptions,
 ): ToolDefinition<typeof recipeSchema, RecipeToolDetails | undefined> {
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-	return {
+	const definition: ToolDefinition<typeof recipeSchema, RecipeToolDetails | undefined> = {
 		name: "recipe",
 		activity: "navigation",
 		label: "recipe",
@@ -417,6 +442,7 @@ export function createRecipeToolDefinition(
 		},
 		renderResult: renderToolOutput,
 	};
+	return withOutputCap(definition, { maxBytes: RECIPE_OUTPUT_CAP_BYTES, mode: "headTail" });
 }
 
 export function createRecipeTool(cwd: string, options?: RecipeToolOptions): AgentTool<typeof recipeSchema> {

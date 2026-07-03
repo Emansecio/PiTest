@@ -829,7 +829,12 @@ export function createDebugToolDefinition(
 					);
 					details.snapshot = response.snapshot;
 					details.memoryAddress = response.address;
-					details.memoryData = response.data;
+					// `details` is kept in the session's persisted history — mirror what the
+					// wrapper caps the model text to rather than the raw base64 blob, whose
+					// size scales with the model-supplied (unbounded) `count`. Small reads
+					// (the common case) are unaffected.
+					const memoryDataBytes = response.data ? Buffer.byteLength(response.data, "base64") : 0;
+					details.memoryData = memoryDataBytes <= DEFAULT_MAX_BYTES ? response.data : undefined;
 					details.unreadableBytes = response.unreadableBytes;
 					return textResult(formatMemoryRead(response.address, response.data, response.unreadableBytes), details);
 				}
@@ -890,15 +895,18 @@ export function createDebugToolDefinition(
 				case "output": {
 					const response = dapSessionManager.getOutput();
 					details.snapshot = response.snapshot;
-					details.output = response.output;
 					if (response.output.length === 0) return textResult("(no output captured)", details);
 					// Debug output is an unbounded temporal stream (a logging loop / progress
 					// spam can be megabytes). Cap it, keeping the TAIL — in a hang the most
-					// recent lines are the relevant ones. The full text stays in details.output.
+					// recent lines are the relevant ones. `details.output` mirrors exactly
+					// what the model sees (not the raw stream) — persisting the untruncated
+					// text in the session's kept history would scale with the same unbounded
+					// megabytes-scale log the cap below exists to avoid.
 					const truncation = truncateTail(response.output);
 					const text = truncation.truncated
 						? `[debug output truncated to the last ${formatSize(DEFAULT_MAX_BYTES)} — most recent lines shown]\n${truncation.content}`
 						: truncation.content;
+					details.output = text;
 					return textResult(text, details);
 				}
 				case "terminate": {
