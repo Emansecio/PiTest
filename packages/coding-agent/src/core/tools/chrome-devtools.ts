@@ -16,6 +16,7 @@ import type { ToolDefinition } from "../extensions/types.ts";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.ts";
 import { getTextOutput } from "./render-utils.ts";
 import { withOutputCap } from "./tool-definition-wrapper.ts";
+import { collapseRepeatedLines } from "./truncate.ts";
 
 export interface ChromeDevtoolsToolOptions {}
 
@@ -476,7 +477,14 @@ export function createChromeGetTextDefinition(): ToolDefinition<typeof getTextSc
 			guidelines: ["Prefer this over screenshot when you only need the text content."],
 			schema: getTextSchema,
 			run: async (mgr, input, signal) => {
-				const text = await mgr.getPageText(signal);
+				// N2: collapse repeated consecutive lines (duplicated nav/sidebar/footer
+				// rows, list boilerplate) BEFORE the limit/cap, so the char budget is
+				// spent on content instead of chrome. Upgrade-only: page text with no
+				// repeated run is byte-identical (fast path returns the original), and the
+				// fuzzy `×N similar` collapse (masked numeric/hex tokens) rides along for
+				// free. Applied before the byte cap too, so a huge boilerplate-heavy page
+				// keeps more real signal under the same 256KB head+tail ceiling.
+				const text = collapseRepeatedLines(await mgr.getPageText(signal));
 				const limit = Math.max(1, Math.min(GET_TEXT_MAX_LIMIT, input.limit ?? GET_TEXT_DEFAULT_LIMIT));
 				if (text.length <= limit) return textResult(text);
 				return textResult(
@@ -596,6 +604,12 @@ export function createChromeGetNetworkBodyDefinition(): ToolDefinition<typeof ne
 				}
 				const limit = Math.max(1, Math.min(GET_TEXT_MAX_LIMIT, input.limit ?? GET_TEXT_DEFAULT_LIMIT));
 				if (r.body.length <= limit) return textResult(r.body);
+				// N2 note: collapseRepeatedLines is deliberately NOT applied to network
+				// bodies. They are JSON API responses far more often than not, and inserting
+				// a `… (×N)` marker into pretty-printed JSON breaks the parse — defeating the
+				// structural crush below (which would then fall back to a blind char-cut, a
+				// regression). The crush already handles repeated JSON array items
+				// structurally, so line collapse offers no upgrade here.
 				// Network bodies are JSON API responses far more often than not; prefer a
 				// structural crush (schema + head/tail samples) over a blind char-cut.
 				const crushed = maybeCrushJsonOutput({

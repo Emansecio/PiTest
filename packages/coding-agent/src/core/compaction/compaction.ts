@@ -8,6 +8,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@pit/agent-core";
+import { OVERTHINK_STEER_TEXT_MARKER, TTSR_STEER_TEXT_MARKER } from "@pit/agent-core";
 import type { AssistantMessage, Context, Message, Model, SimpleStreamOptions, Usage } from "@pit/ai";
 import {
 	CHARS_PER_TOKEN_DENSE,
@@ -1479,7 +1480,11 @@ export function wouldPruneOldToolOutputs(
 	for (let i = 0; i < protectFromIndex; i++) {
 		const msg = messages[i];
 		if (msg.role === "user") {
-			if (userPasteStore === undefined || i === firstUserIndex) continue;
+			if (i === firstUserIndex) continue;
+			// N8: a collapsible consumed steering reminder makes the prune worth running,
+			// independent of the deferred-output store (no defer needed — see above).
+			if (hasConsumedSteeringReminder(msg)) return true;
+			if (userPasteStore === undefined) continue;
 			const content = (msg as { content: string | Array<{ type: string; text?: string }> }).content;
 			if (typeof content === "string") {
 				if (estimateTextTokens(content) > tokenThreshold && wouldShrinkViaHeadTail(content)) return true;
@@ -1638,6 +1643,116 @@ function pruneUserPasteBlocks(msg: AgentMessage, tokenThreshold: number, store: 
 	return reclaimed;
 }
 
+// ============================================================================
+// N8 — Consumed steering-reminder collapse
+// ============================================================================
+
+/**
+ * Steering reminders the anti-waste guards inject as synthetic user messages.
+ * Each entry is a CONFIRMED generator of a `<system-reminder>…</system-reminder>`
+ * steering block that the guard re-emits on demand (overthink-guard.ts /
+ * ttsr-steer.ts in @pit/agent-core — the markers are imported from there as the
+ * single source of truth), so once the turn a reminder steered has scrolled out
+ * of the protected window the full text is dead weight: re-derivable, ~zero
+ * historical value.
+ *
+ * CONSERVATIVE by construction: only the two prefixes that OPEN a known steering
+ * block are matched. A bare `<system-reminder>` a hook or the user injected —
+ * which may carry load-bearing content — never matches, because every entry
+ * requires a specific steering prefix, not the generic tag.
+ */
+const STEERING_REMINDER_MATCHERS: ReadonlyArray<{ kind: string; prefix: string }> = [
+	{ kind: "overthink", prefix: OVERTHINK_STEER_TEXT_MARKER },
+	{ kind: "TTSR", prefix: TTSR_STEER_TEXT_MARKER },
+];
+
+const SYSTEM_REMINDER_CLOSE = "</system-reminder>";
+
+/**
+ * When `text` is ENTIRELY one consumed steering reminder (after trim), return its
+ * kind; otherwise undefined. "Entirely" = the trimmed text OPENS with a known
+ * steering prefix AND CLOSES with the sole `</system-reminder>` terminator. A
+ * MIXED block (reminder + user prose in the same block) never matches: trailing
+ * prose moves the close tag away from the end, and a second reminder/tag concat
+ * leaves more than one terminator — both rejected. Synthetic reminders are always
+ * a single self-contained block, so this recognizes them without false positives.
+ */
+function consumedSteeringReminderKind(text: string): string | undefined {
+	const trimmed = text.trim();
+	if (!trimmed.endsWith(SYSTEM_REMINDER_CLOSE)) return undefined;
+	// Exactly one terminator — reject concatenated/duplicated reminders so a block
+	// that carries extra content past the first reminder is left fully intact.
+	if (trimmed.indexOf(SYSTEM_REMINDER_CLOSE) !== trimmed.length - SYSTEM_REMINDER_CLOSE.length) return undefined;
+	for (const matcher of STEERING_REMINDER_MATCHERS) {
+		if (trimmed.startsWith(matcher.prefix)) return matcher.kind;
+	}
+	return undefined;
+}
+
+/** One-line replacement for a consumed steering reminder (no defer — synthetic). */
+function formatConsumedSteeringReminder(kind: string): string {
+	return `[steering reminder (${kind}) consumed]`;
+}
+
+/**
+ * N8 — collapse consumed steering reminders in an OLD user message to one line.
+ * Only blocks whose ENTIRE text is a single known steering reminder collapse;
+ * mixed blocks and unknown `<system-reminder>` content are left intact. No defer:
+ * the guard re-generates these on demand, so there is nothing to recover. Handles
+ * both the string and text-block-array content shapes (mutates the CLONED message
+ * in place, mirroring the N5 paste prune). Returns reclaimed tokens.
+ */
+function collapseConsumedSteeringReminders(msg: AgentMessage): number {
+	const content = (msg as { content: string | Array<{ type: string; text?: string }> }).content;
+	if (typeof content === "string") {
+		const kind = consumedSteeringReminderKind(content);
+		if (kind === undefined) return 0;
+		const replacement = formatConsumedSteeringReminder(kind);
+		const before = estimateTextTokens(content);
+		const after = estimateTextTokens(replacement);
+		if (after >= before) return 0;
+		(msg as { content: string }).content = replacement;
+		return before - after;
+	}
+	if (!Array.isArray(content)) return 0;
+	let reclaimed = 0;
+	for (const block of content) {
+		if (block.type !== "text" || !block.text) continue;
+		const kind = consumedSteeringReminderKind(block.text);
+		if (kind === undefined) continue;
+		const replacement = formatConsumedSteeringReminder(kind);
+		const before = estimateTextTokens(block.text);
+		const after = estimateTextTokens(replacement);
+		if (after >= before) continue;
+		block.text = replacement;
+		reclaimed += before - after;
+	}
+	return reclaimed;
+}
+
+/** Read-only counterpart: is there a collapsible consumed steering reminder? */
+function hasConsumedSteeringReminder(msg: AgentMessage): boolean {
+	const content = (msg as { content: string | Array<{ type: string; text?: string }> }).content;
+	if (typeof content === "string") {
+		const kind = consumedSteeringReminderKind(content);
+		return (
+			kind !== undefined && estimateTextTokens(formatConsumedSteeringReminder(kind)) < estimateTextTokens(content)
+		);
+	}
+	if (!Array.isArray(content)) return false;
+	for (const block of content) {
+		if (block.type !== "text" || !block.text) continue;
+		const kind = consumedSteeringReminderKind(block.text);
+		if (
+			kind !== undefined &&
+			estimateTextTokens(formatConsumedSteeringReminder(kind)) < estimateTextTokens(block.text)
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
 export function pruneOldToolOutputs(
 	messages: AgentMessage[],
 	tokenThreshold = PRUNE_TOKEN_THRESHOLD,
@@ -1665,8 +1780,17 @@ export function pruneOldToolOutputs(
 		// no disk copy to re-derive). The FIRST user message of the session (the
 		// task statement) is never pruned.
 		if (msg.role === "user") {
-			if (store !== undefined && i !== firstUserIndex) {
-				prunedTokens += pruneUserPasteBlocks(msg, tokenThreshold, store);
+			if (i !== firstUserIndex) {
+				// N8: collapse consumed steering reminders (overthink/TTSR) to one line
+				// BEFORE the N5 paste prune. Reminders are far below the paste threshold
+				// (a few hundred chars), so N5 never reaches them — that is why N8 exists
+				// — and they need no store: the guard re-emits them, nothing to recover.
+				prunedTokens += collapseConsumedSteeringReminders(msg);
+				// N5: pasted logs/stacks are defer-mandatory (user input has no on-disk
+				// source of truth), so they only prune when a store is open.
+				if (store !== undefined) {
+					prunedTokens += pruneUserPasteBlocks(msg, tokenThreshold, store);
+				}
 			}
 			continue;
 		}
