@@ -20,6 +20,7 @@ import type {
 	ThinkingLevel,
 	ToolCall,
 } from "../types.ts";
+import { systemPromptWithoutDynamicMarker } from "../types.ts";
 import { createClientCache } from "../utils/client-cache.ts";
 import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -312,7 +313,7 @@ function createClient(
 	return clientCache.getOrCreate(config, () => new GoogleGenAI(config));
 }
 
-function buildParams(
+export function buildParams(
 	model: Model<"google-generative-ai">,
 	context: Context,
 	options: GoogleOptions = {},
@@ -329,7 +330,9 @@ function buildParams(
 
 	const config: GenerateContentConfig = {
 		...(Object.keys(generationConfig).length > 0 && generationConfig),
-		...(context.systemPrompt && { systemInstruction: sanitizeSurrogates(context.systemPrompt) }),
+		...(context.systemPrompt && {
+			systemInstruction: sanitizeSurrogates(systemPromptWithoutDynamicMarker(context.systemPrompt)),
+		}),
 		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools) }),
 	};
 
