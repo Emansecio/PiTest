@@ -26,6 +26,7 @@ import { type Static, type TSchema, Type } from "typebox";
 import { isValidThinkingLevel } from "../../cli/args.ts";
 import {
 	type AgentTypeDef,
+	createSubagentOutputStore,
 	deleteResumeState,
 	extractAssistantText,
 	listResumeHandlesSync,
@@ -44,7 +45,7 @@ import type { Skill } from "../skills.ts";
 import type { TokenBudgetGovernor } from "../token-governor.ts";
 import { withAgentScope } from "../tools/hindsight-scope.ts";
 import { createMessageTool } from "../tools/message.ts";
-import { formatSize, truncateTail } from "../tools/truncate.ts";
+import { formatSize, RECALL_OUTPUT_CAP_BYTES, truncateHeadTail } from "../tools/truncate.ts";
 
 /** A subagent launched via `task({op:"spawn"})` — runs detached, collected later via poll/join. */
 interface PendingTask {
@@ -80,6 +81,15 @@ const worktreeSchema = Type.Union(
 	},
 );
 
+/**
+ * Op name for reading a settled subagent's integral output. Shared as a single
+ * constant so the schema literal (below), the tool description, and the recovery
+ * pointer text can never drift apart (lesson M18: placeholder + description +
+ * schema bound to one source of truth, guarded by a consistency test). Declared
+ * before `taskSchema` because the schema literal consumes it at module load.
+ */
+export const SUBAGENT_READ_OP = "read" as const;
+
 const taskSchema = Type.Object({
 	op: Type.Optional(
 		Type.Union(
@@ -92,10 +102,11 @@ const taskSchema = Type.Object({
 				Type.Literal("resume"),
 				Type.Literal("continue"),
 				Type.Literal("agents"),
+				Type.Literal(SUBAGENT_READ_OP),
 			],
 			{
 				description:
-					"run (default, blocking — returns the answer) | spawn (non-blocking — returns a handle so you can keep working) | poll (status of handles) | join (await handles and collect their outputs) | list (active + resumable subagents) | agents (list the reusable agent types loaded from .pit/agents) | resume (continue a subagent cut short by ESC or a network drop, by its `name`/handle, with its transcript intact; pass `prompt` to steer the continuation) | continue (ask a follow-up of a subagent that FINISHED successfully, by its `name`/handle, reusing its transcript; `prompt` required). Use spawn+join to fan out N independent tasks in parallel and gather them.",
+					"run (default, blocking — returns the answer) | spawn (non-blocking — returns a handle so you can keep working) | poll (status of handles) | join (await handles and collect their outputs) | list (active + resumable subagents) | agents (list the reusable agent types loaded from .pit/agents) | resume (continue a subagent cut short by ESC or a network drop, by its `name`/handle, with its transcript intact; pass `prompt` to steer the continuation) | continue (ask a follow-up of a subagent that FINISHED successfully, by its `name`/handle, reusing its transcript; `prompt` required) | read (fetch a settled subagent's INTEGRAL output by its `name`/handle — the join payload is only a small head+tail digest, so use this to recover the elided middle instead of re-spawning). Use spawn+join to fan out N independent tasks in parallel and gather them.",
 			},
 		),
 	),
@@ -217,21 +228,31 @@ export function resolveMaxSubagentDepth(env: NodeJS.ProcessEnv = process.env): n
 }
 
 /**
- * Default byte cap on a subagent's final output as it lands in the parent's
- * context. Without it, a verbose subagent (or a giant structured result) floods
- * the parent conversation. The tail is kept — the subagent's summary/conclusion
- * usually lands at the end — and the full output stays on the in-memory registry.
+ * Default byte cap on the DIGEST of a subagent's final output as it lands in the
+ * parent's context (N7). The parent no longer carries a 24KB tail permanently:
+ * it gets a small head+tail digest (4KB default) plus a pointer to recover the
+ * integral output via op:"read". The full text is persisted to disk (and stays
+ * on the in-memory registry) so nothing is lost. `PIT_SUBAGENT_MAX_BYTES` still
+ * overrides this inline cap — same env var, smaller default.
  */
-const DEFAULT_SUBAGENT_MAX_BYTES = 24 * 1024; // 24KB
-const SUBAGENT_MAX_LINES = 1000;
+const DEFAULT_SUBAGENT_DIGEST_BYTES = 4 * 1024; // 4KB
 
-/** Resolves the subagent output cap, honoring the `PIT_SUBAGENT_MAX_BYTES` override. */
+/** Resolves the inline digest cap, honoring the `PIT_SUBAGENT_MAX_BYTES` override. */
 export function resolveSubagentMaxBytes(env: NodeJS.ProcessEnv = process.env): number {
 	const raw = env.PIT_SUBAGENT_MAX_BYTES;
-	if (raw === undefined || raw.trim() === "") return DEFAULT_SUBAGENT_MAX_BYTES;
+	if (raw === undefined || raw.trim() === "") return DEFAULT_SUBAGENT_DIGEST_BYTES;
 	const parsed = Number.parseInt(raw, 10);
-	if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_SUBAGENT_MAX_BYTES;
+	if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_SUBAGENT_DIGEST_BYTES;
 	return parsed;
+}
+
+/**
+ * The recovery pointer appended to a truncated subagent digest. Cites
+ * {@link SUBAGENT_READ_OP} exactly so the model is told the precise op + handle
+ * to fetch the untruncated output. Exported for the M18 consistency test.
+ */
+export function subagentReadPointer(handle: string, totalBytes: number): string {
+	return `[digest only — full ${formatSize(totalBytes)} output persisted; recover it with task({op:"${SUBAGENT_READ_OP}", name:"${handle}"})]`;
 }
 
 /**
@@ -422,6 +443,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	const registry = new SubagentRegistry();
 	const maxDepth = resolveMaxSubagentDepth();
 	const maxOutputBytes = resolveSubagentMaxBytes();
+	// N7: full (integral) output of each settled subagent, persisted to disk so
+	// op:"read" can recover it after the inline digest. The registry stays the
+	// primary in-memory cache; this is the recovery + RAM-relief layer. Disposed
+	// on session teardown.
+	const outputStore = createSubagentOutputStore();
 	const scopedHindsightEnabled = () => {
 		if (process.env.PIT_NO_SCOPED_HINDSIGHT === "1") return false;
 		return options.isScopedHindsightEnabled?.() ?? true;
@@ -531,14 +557,73 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		return { model, thinkingLevel };
 	}
 
-	/** Formats a settled subagent result into the capped text the parent sees. */
-	function formatSpawnResult(result: SpawnSubagentResult, resultSchema: TSchema | undefined): string {
+	/**
+	 * The inline payload the parent sees for a settled subagent (N7): a head+tail
+	 * DIGEST of the full text capped at `maxOutputBytes` (4KB default), plus a
+	 * pointer citing op:"read" + the handle to recover the integral output. When
+	 * the text already fits the cap the digest IS the full output, so no pointer
+	 * is appended (nothing to recover). `readHandle` is the name the model passes
+	 * back to op:"read" — the same key the full output is persisted under.
+	 */
+	function digestWithPointer(rawText: string, readHandle: string): string {
+		const digest = truncateHeadTail(rawText, { maxBytes: maxOutputBytes });
+		if (!digest.truncated) return digest.content;
+		return `${digest.content}\n\n${subagentReadPointer(readHandle, digest.totalBytes)}`;
+	}
+
+	/** Formats a settled subagent result into the digest + recovery pointer the parent sees. */
+	function formatSpawnResult(
+		result: SpawnSubagentResult,
+		resultSchema: TSchema | undefined,
+		readHandle: string,
+	): string {
 		const rawText =
 			resultSchema && result.value !== undefined ? JSON.stringify(result.value, null, 2) : result.output;
-		const capped = truncateTail(rawText, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
-		return capped.truncated
-			? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}; re-spawn with a narrower prompt or a result_schema if you need the elided part]`
-			: capped.content;
+		return digestWithPointer(rawText, readHandle);
+	}
+
+	/**
+	 * op:"read" — return a settled subagent's INTEGRAL output by its handle. Prefers
+	 * the in-memory registry record (primary cache, keyed by taskName) and falls
+	 * back to the on-disk copy — which survives registry eviction and resume/
+	 * continue runs (those re-drive a live Agent and never write a registry record).
+	 *
+	 * The integral text is returned as-is; the task tool carries an `outputCap` of
+	 * RECALL_OUTPUT_CAP_BYTES (256KB, head+tail) so `wrapToolDefinition` bounds it at
+	 * the wrap layer exactly like `recall_tool_output` — a giant output can't flood
+	 * the parent, yet its head AND tail both survive (a head-only re-cut would drop
+	 * the tail the model recovered it for).
+	 */
+	function readOutput(handle: string | undefined): TaskOpResult {
+		const key = handle?.trim();
+		if (!key) {
+			return {
+				content: [
+					{ type: "text" as const, text: `task: ${SUBAGENT_READ_OP} needs \`name\` (the task handle to read).` },
+				],
+				isError: true,
+				details: undefined,
+			};
+		}
+		const record = registry.list().find((r) => r.taskName === key);
+		const full = record?.output ?? outputStore.get(key);
+		if (full === undefined) {
+			return {
+				content: [
+					{
+						type: "text" as const,
+						text: `task: no stored output for "${key}". Use op:"list" to see tracked subagents.`,
+					},
+				],
+				isError: true,
+				details: undefined,
+			};
+		}
+		return {
+			content: [{ type: "text" as const, text: full }],
+			isError: false,
+			details: { handle: key, bytes: Buffer.byteLength(full, "utf8") },
+		};
 	}
 
 	function spawnBudgetBlock(): TaskOpResult | undefined {
@@ -557,12 +642,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		options.getTokenGovernor?.()?.recordSubagent(usage);
 	}
 
-	/** Caps a resume/continue body to the subagent output budget, appending a truncation note. */
-	function cappedBody(output: string): string {
-		const capped = truncateTail(output, { maxBytes: maxOutputBytes, maxLines: SUBAGENT_MAX_LINES });
-		return capped.truncated
-			? `${capped.content}\n\n[subagent output truncated to ${formatSize(capped.outputBytes)} of ${formatSize(capped.totalBytes)}]`
-			: capped.content;
+	/**
+	 * Digests a resume/continue body to the inline budget with a recovery pointer,
+	 * and persists the integral output so op:"read" can recover it. resume/continue
+	 * re-drive a live Agent (no registry record), so the disk copy is the ONLY way
+	 * their full output stays retrievable.
+	 */
+	function cappedBody(output: string, readHandle: string): string {
+		outputStore.put(readHandle, output);
+		return digestWithPointer(output, readHandle);
 	}
 
 	/**
@@ -780,7 +868,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		}
 		resumable.delete(key);
 		await deleteResumeState(rcwd, key);
-		const body = cappedBody(extractAssistantText(agent.state.messages));
+		const body = cappedBody(extractAssistantText(agent.state.messages), key);
 		return {
 			content: [{ type: "text" as const, text: body }],
 			isError: false,
@@ -847,7 +935,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			cleanupAbort();
 			if (acquired) releaseSlot();
 		}
-		const body = cappedBody(extractAssistantText(agent.state.messages));
+		const body = cappedBody(extractAssistantText(agent.state.messages), key);
 		return {
 			content: [{ type: "text" as const, text: body }],
 			isError: false,
@@ -869,11 +957,19 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				"Spawn a focused subagent to complete an isolated sub-task and return its final answer. " +
 				"Use this to delegate research, file exploration, or repetitive checks without polluting the main conversation. " +
 				"Pass `result_schema` for structured output, or `worktree: true` to run in an isolated git worktree. " +
+				`The run/join payload is a compact head+tail digest; call op:"${SUBAGENT_READ_OP}" with the task's name to recover a settled subagent's integral output without re-spawning. ` +
 				"Scale the subagent's `model` to the sub-task's complexity (cheap for trivial fan-out, inherit the parent's for hard reasoning) — see the `model` field." +
 				(agentTypeSummary ? ` Reusable agent types (use the type field): ${agentTypeSummary}.` : ""),
 			promptSnippet:
 				"Spawn a subagent to handle an isolated sub-task. Supports structured output via result_schema and isolated git worktrees via worktree.",
 			parameters: taskSchema,
+			// op:"read" can return up to RECALL_OUTPUT_CAP_BYTES (256KB) of integral
+			// output. Without a per-tool cap, wrapToolDefinition's generic 64KB
+			// HEAD-ONLY safety net would re-cut a large read result and drop its tail.
+			// Mirror recall_tool_output: raise this tool's ceiling to 256KB and keep
+			// head + tail. Inert for every other op — their payloads (4KB digests,
+			// status lines) sit well under the cap.
+			outputCap: { maxBytes: RECALL_OUTPUT_CAP_BYTES, mode: "headTail" as const },
 			// `params` is typed `unknown`, not `TaskInput`: this tool flows through the
 			// shared `(depth) => AgentTool` factory, whose `execute` is contravariantly
 			// typed against the erased base schema. A narrower param breaks assignability.
@@ -883,6 +979,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 
 				if (op === "list") return listSubagents();
 				if (op === "agents") return listAgentTypes();
+				if (op === SUBAGENT_READ_OP) return readOutput(p.name ?? p.handles?.[0]);
 				if (op === "poll") return pollHandles(p.handles ?? []);
 				if (op === "join") return await joinHandles(p.handles ?? []);
 				if (op === "resume") return await resumeHandle(p.name ?? p.handles?.[0], p.prompt, signal);
@@ -1082,7 +1179,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								if (options.onAsyncComplete?.(handle, note, "error")) entry.delivered = true;
 							} else {
 								if (capturedAgent && !usedAutoWorktree) rememberContinuable(handle, capturedAgent);
-								entry.result = formatSpawnResult(result, resultSchema);
+								// Persist the integral output for op:"read" recovery, then keep only a digest inline.
+								outputStore.put(handle, result.output);
+								entry.result = formatSpawnResult(result, resultSchema, handle);
 								entry.status = "done";
 								if (options.onAsyncComplete?.(handle, entry.result, "done")) entry.delivered = true;
 							}
@@ -1179,7 +1278,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							rememberContinuable(runHandle, capturedAgent);
 						}
 					}
-					let text = formatSpawnResult(result, resultSchema);
+					// op:"read" recovers by the canonical (collision-resolved) taskName the
+					// result details surface, so persist and cite that same key.
+					const readHandle = result.record.taskName;
+					outputStore.put(readHandle, result.output);
+					let text = formatSpawnResult(result, resultSchema, readHandle);
 					if (interrupted) {
 						text = `${text}\n\n[subagent ended on an error turn — resume with task({op:"resume", name:"${runHandle}"})]`;
 					}
@@ -1334,7 +1437,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				};
 			}
 			await deleteResumeState(cwd, key);
-			const out = formatSpawnResult(result, undefined);
+			outputStore.put(key, result.output);
+			const out = formatSpawnResult(result, undefined, key);
 			return {
 				content: [{ type: "text" as const, text: out }],
 				isError: false,
@@ -1398,16 +1502,20 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					inflight.push(e.promise.catch(() => {}));
 				}
 			}
-			if (inflight.length === 0) return;
-			let graceTimer: ReturnType<typeof setTimeout> | undefined;
-			const grace = new Promise<void>((r) => {
-				graceTimer = setTimeout(r, 1500);
-			});
-			try {
-				await Promise.race([Promise.all(inflight), grace]);
-			} finally {
-				if (graceTimer !== undefined) clearTimeout(graceTimer);
+			if (inflight.length > 0) {
+				let graceTimer: ReturnType<typeof setTimeout> | undefined;
+				const grace = new Promise<void>((r) => {
+					graceTimer = setTimeout(r, 1500);
+				});
+				try {
+					await Promise.race([Promise.all(inflight), grace]);
+				} finally {
+					if (graceTimer !== undefined) clearTimeout(graceTimer);
+				}
 			}
+			// N7: remove the on-disk integral-output store (session temp dir). Best-effort;
+			// once the parent session is gone, op:"read" recovery is moot.
+			outputStore.dispose();
 		});
 	};
 }

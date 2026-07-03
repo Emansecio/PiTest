@@ -19,7 +19,13 @@ import { randomUUID } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { Agent, type AgentMessage, type AgentTool, type BeforeToolCallResult } from "@pit/agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	type AgentTool,
+	type BeforeToolCallResult,
+	type ThinkingLevel,
+} from "@pit/agent-core";
 import type { Model } from "@pit/ai";
 import { type Message, repairJson, streamSimple } from "@pit/ai";
 import type { TSchema } from "typebox";
@@ -46,6 +52,36 @@ const DEFAULT_SYSTEM_PROMPT =
  * per task via the `max_turns` tool param.
  */
 export const DEFAULT_MAX_TURNS = 50;
+
+/**
+ * Model-id substrings that mark a "small-class" model — the cheap/fast tiers
+ * (haiku, mini, nano, flash, lite) that a fan-out hands its trivial, mechanical
+ * work to (search, read, list, extract, classify). Matched case-insensitively
+ * against the model id. Kept as a named list so the bucket is auditable in one
+ * place rather than scattered across string checks.
+ */
+export const SMALL_CLASS_MODEL_MARKERS: readonly string[] = ["haiku", "mini", "nano", "flash", "lite"];
+
+/**
+ * Default reasoning level for a subagent, bucketed by the model it runs on.
+ *
+ * Rationale (auditoria §3.5/§5.8): subagents used to think at "medium"
+ * unconditionally — burning reasoning tokens on the trivial fan-out tasks that
+ * are deliberately routed to small/fast models. A small-class model is almost
+ * always given mechanical work, so it defaults to "low"; every other model keeps
+ * the historical "medium".
+ *
+ * The repo invariant that subagents ALWAYS think (never "off" — see the coercion
+ * in coordinator-extension's resolveSubModel and the "medium" fallback below) is
+ * preserved: the floor here is "low", not "off". An explicit per-task thinking
+ * override still wins over this default (see `spawnSubagent`, where
+ * `options.thinkingLevel` short-circuits this call).
+ */
+export function resolveSubagentThinking(model: Model<any> | undefined): ThinkingLevel {
+	const id = model?.id?.toLowerCase() ?? "";
+	if (SMALL_CLASS_MODEL_MARKERS.some((marker) => id.includes(marker))) return "low";
+	return "medium";
+}
 
 /** Coerce an AbortSignal `reason` into an Error for rejection. `controller.abort()`
  * may be called with an explanatory Error (turn cap / timeout / parent), a string,
@@ -270,8 +306,11 @@ export async function spawnSubagent(
 			systemPrompt,
 			// Heterogeneous spawn: a task may run on a cheaper model than the parent.
 			model: options.model ?? deps.model,
-			// Subagents always think (never "off") — default "medium", overridable per task.
-			thinkingLevel: options.thinkingLevel ?? "medium",
+			// Subagents always think (never "off"). An explicit per-task override wins;
+			// otherwise the level is bucketed by the model (small-class → "low",
+			// everything else → "medium") so trivial fan-out on a cheap model doesn't
+			// pay for medium reasoning. See resolveSubagentThinking (N10).
+			thinkingLevel: options.thinkingLevel ?? resolveSubagentThinking(options.model ?? deps.model),
 			// Forward the resolved turn cap so the loop's native backstop enforces it
 			// (it was inert before — every subagent ran at DEFAULT_MAX_TURNS=250).
 			maxTurns,

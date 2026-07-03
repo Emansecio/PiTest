@@ -1,4 +1,5 @@
 export { type AgentTypeDef, loadAgentTypes } from "./agent-types.ts";
+export { createSubagentOutputStore, type SubagentOutputStore } from "./output-store.ts";
 export { SubagentRegistry } from "./registry.ts";
 export {
 	deleteResumeState,
@@ -7,7 +8,13 @@ export {
 	type ResumeState,
 	saveResumeState,
 } from "./resume-store.ts";
-export { extractAssistantText, type SpawnSubagentDependencies, spawnSubagent } from "./spawn.ts";
+export {
+	extractAssistantText,
+	resolveSubagentThinking,
+	SMALL_CLASS_MODEL_MARKERS,
+	type SpawnSubagentDependencies,
+	spawnSubagent,
+} from "./spawn.ts";
 export type {
 	SpawnSubagentOptions,
 	SpawnSubagentResult,
