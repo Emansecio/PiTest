@@ -100,6 +100,19 @@ describe("HindsightBank", () => {
 		expect(readFileSync(path, "utf-8")).toBe("");
 	});
 
+	test("search recovers Portuguese entries from an unaccented query (N6)", () => {
+		const { bank } = freshBank();
+		bank.add({ kind: "fact", body: "A função de compactação preserva o histórico da sessão" });
+		bank.add({ kind: "fact", body: "the kitchen has new appliances installed today" });
+
+		// Query without diacritics still ranks the accented Portuguese entry first.
+		const results = bank.search({ query: "funcao compactacao" });
+		expect(results.length).toBeGreaterThan(0);
+		expect(results[0]!.entry.body).toContain("função de compactação");
+		// The matched snippet keeps its original accents (folding is length-preserving).
+		expect(results[0]!.matchedSnippet).toContain("função");
+	});
+
 	test("search respects kind filter", () => {
 		const { bank } = freshBank();
 		bank.add({ kind: "fact", body: "shared word marker here" });

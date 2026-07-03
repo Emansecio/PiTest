@@ -11,6 +11,7 @@
 
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { bm25Score, buildCorpus, computeDocStats, type DocStats, foldForSearch, tokenize } from "../search/bm25.ts";
 import type { HindsightEntry, HindsightKind, HindsightSearchOptions, HindsightSearchResult } from "./types.ts";
 
 export interface HindsightBank {
@@ -39,55 +40,10 @@ export interface OpenBankOptions {
 
 const SCOPE_BOOST = 1.25;
 
-const TOKEN_REGEX = /[a-z0-9_]+/g;
-const STOPWORDS = new Set([
-	"the",
-	"a",
-	"an",
-	"and",
-	"or",
-	"of",
-	"to",
-	"in",
-	"is",
-	"it",
-	"for",
-	"on",
-	"at",
-	"by",
-	"as",
-	"be",
-	"this",
-	"that",
-	"with",
-	"are",
-	"was",
-	"were",
-]);
-
-function tokenize(text: string): string[] {
-	const out: string[] = [];
-	const lower = text.toLowerCase();
-	const matches = lower.match(TOKEN_REGEX);
-	if (!matches) return out;
-	for (const tok of matches) {
-		if (tok.length < 2) continue;
-		if (STOPWORDS.has(tok)) continue;
-		out.push(tok);
-	}
-	return out;
-}
-
 function entryHaystack(entry: HindsightEntry): string {
 	const tags = entry.tags && entry.tags.length > 0 ? ` ${entry.tags.join(" ")}` : "";
 	const subject = entry.subject ? ` ${entry.subject}` : "";
 	return `${entry.body}${subject}${tags}`;
-}
-
-interface DocStats {
-	id: string;
-	length: number;
-	termFreq: Map<string, number>;
 }
 
 // Per-entry tokenization is the dominant cost of search() and only changes when
@@ -99,29 +55,14 @@ const docStatsCache = new WeakMap<HindsightEntry, DocStats>();
 function docStatsFor(entry: HindsightEntry): DocStats {
 	const cached = docStatsCache.get(entry);
 	if (cached) return cached;
-	const tokens = tokenize(entryHaystack(entry));
-	const termFreq = new Map<string, number>();
-	for (const tok of tokens) {
-		termFreq.set(tok, (termFreq.get(tok) ?? 0) + 1);
-	}
-	const stats: DocStats = { id: entry.id, length: tokens.length, termFreq };
+	const stats = computeDocStats(entryHaystack(entry));
 	docStatsCache.set(entry, stats);
 	return stats;
 }
 
 function buildDocStats(entries: HindsightEntry[]): { docs: DocStats[]; avgLen: number; df: Map<string, number> } {
-	const docs: DocStats[] = [];
-	const df = new Map<string, number>();
-	let total = 0;
-	for (const entry of entries) {
-		const doc = docStatsFor(entry);
-		for (const tok of doc.termFreq.keys()) {
-			df.set(tok, (df.get(tok) ?? 0) + 1);
-		}
-		docs.push(doc);
-		total += doc.length;
-	}
-	const avgLen = docs.length > 0 ? total / docs.length : 0;
+	const docs = entries.map(docStatsFor);
+	const { avgLen, df } = buildCorpus(docs);
 	return { docs, avgLen, df };
 }
 
@@ -132,40 +73,15 @@ interface SearchStats {
 	df: Map<string, number>;
 }
 
-/** Classic BM25 with k1=1.5, b=0.75. */
-function bm25Score(
-	queryTokens: string[],
-	doc: DocStats,
-	avgLen: number,
-	df: Map<string, number>,
-	totalDocs: number,
-): { score: number; bestTerm: string | undefined } {
-	const k1 = 1.5;
-	const b = 0.75;
-	let score = 0;
-	let bestTermScore = 0;
-	let bestTerm: string | undefined;
-	for (const term of queryTokens) {
-		const tf = doc.termFreq.get(term);
-		if (!tf) continue;
-		const dfTerm = df.get(term) ?? 0;
-		const idf = Math.log(1 + (totalDocs - dfTerm + 0.5) / (dfTerm + 0.5));
-		const norm = avgLen > 0 ? doc.length / avgLen : 1;
-		const denom = tf + k1 * (1 - b + b * norm);
-		const contribution = idf * ((tf * (k1 + 1)) / Math.max(denom, 1e-9));
-		score += contribution;
-		if (contribution > bestTermScore) {
-			bestTermScore = contribution;
-			bestTerm = term;
-		}
-	}
-	return { score, bestTerm };
-}
-
 function snippetAround(body: string, term: string | undefined, windowSize = 120): string | undefined {
 	if (!term) return undefined;
-	const lower = body.toLowerCase();
-	const idx = lower.indexOf(term);
+	// `term` is a folded token (diacritics stripped, lowercased), so match it
+	// against the folded body. For the common case — precomposed accents like
+	// "função" — folding is length-preserving, so the index maps 1:1 back onto
+	// the original `body` and the returned snippet keeps its accents. On ASCII
+	// this is identical to the previous `body.toLowerCase()`.
+	const folded = foldForSearch(body);
+	const idx = folded.indexOf(term);
 	if (idx === -1) return undefined;
 	const half = Math.floor(windowSize / 2);
 	const start = Math.max(0, idx - half);

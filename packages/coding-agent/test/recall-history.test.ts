@@ -1,10 +1,11 @@
 import type { AgentMessage } from "@pit/agent-core";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	collectDiscardedEntries,
 	searchDiscardedHistory,
 	setCurrentHistoryRecallSource,
 } from "../src/core/history-recall.js";
+import * as bm25 from "../src/core/search/bm25.js";
 import type { CompactionEntry, SessionEntry, SessionMessageEntry } from "../src/core/session-manager.js";
 import { createRecallHistoryDefinition } from "../src/core/tools/recall-history.js";
 
@@ -290,5 +291,71 @@ describe("recall_history tool", () => {
 	it("tool name and label are recall_history", () => {
 		expect(def().name).toBe("recall_history");
 		expect(def().label).toBe("recall_history");
+	});
+});
+
+describe("searchDiscardedHistory — Portuguese recall (N6)", () => {
+	beforeEach(resetCounter);
+
+	it("recovers accented Portuguese prose from an unaccented query (and vice-versa)", () => {
+		const pt = msgEntry(user("Implementamos a função de compactação para o histórico da sessão."));
+		const noise = msgEntry(assistantText("The kitchen renovation is finally complete."));
+		const kept = msgEntry(user("kept"));
+		const comp = compactionEntry(kept.id);
+		const discarded = collectDiscardedEntries([pt, noise, kept, comp]);
+
+		for (const query of ["função compactação", "funcao compactacao"]) {
+			const hits = searchDiscardedHistory(discarded, query, 5);
+			expect(hits.length).toBeGreaterThan(0);
+			expect(hits[0].entryId).toBe(pt.id);
+			expect(hits[0].snippet).toContain("compactação");
+		}
+	});
+
+	it("does not let Portuguese stopwords dominate the ranking", () => {
+		// The distinctive term is "grounding"; everything else is a PT stopword.
+		const target = msgEntry(user("O agente usa grounding para evitar alucinação."));
+		const filler = msgEntry(user("de da do que para com uma um os as em no na por"));
+		const kept = msgEntry(user("kept"));
+		const comp = compactionEntry(kept.id);
+		const discarded = collectDiscardedEntries([target, filler, kept, comp]);
+
+		// A query of only PT stopwords finds nothing (all stripped).
+		expect(searchDiscardedHistory(discarded, "de da do para com", 5)).toEqual([]);
+		// A content query ranks the entry with the real term first.
+		const hits = searchDiscardedHistory(discarded, "grounding alucinação", 5);
+		expect(hits.length).toBeGreaterThan(0);
+		expect(hits[0].entryId).toBe(target.id);
+	});
+
+	it("caches DocStats per entry object — no re-tokenization across queries", () => {
+		const pt = msgEntry(user("função de compactação recuperável no histórico"));
+		const kept = msgEntry(user("kept"));
+		const comp = compactionEntry(kept.id);
+		const discarded = collectDiscardedEntries([pt, kept, comp]);
+
+		const spy = vi.spyOn(bm25, "computeDocStats");
+		try {
+			searchDiscardedHistory(discarded, "compactação", 5);
+			const afterFirst = spy.mock.calls.length;
+			expect(afterFirst).toBeGreaterThan(0); // tokenized once on the cold pass
+			searchDiscardedHistory(discarded, "função", 5);
+			// Same entry objects ⇒ cache hit ⇒ no additional tokenization.
+			expect(spy.mock.calls.length).toBe(afterFirst);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("returns byte-identical results across repeated queries (cache correctness)", () => {
+		const a = msgEntry(user("A correção da função de verificação previne alucinação."));
+		const b = msgEntry(assistantText("Reading src/core/history-recall.ts first."));
+		const kept = msgEntry(user("kept"));
+		const comp = compactionEntry(kept.id);
+		const discarded = collectDiscardedEntries([a, b, kept, comp]);
+
+		const first = searchDiscardedHistory(discarded, "função verificação", 5);
+		const second = searchDiscardedHistory(discarded, "função verificação", 5);
+		expect(second).toEqual(first);
 	});
 });

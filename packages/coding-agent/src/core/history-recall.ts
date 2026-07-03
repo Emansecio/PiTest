@@ -17,6 +17,7 @@
 
 import type { AgentMessage } from "@pit/agent-core";
 import { sliceSafe, truncateWithEllipsis } from "../utils/surrogate.ts";
+import { bm25Score, buildCorpus, computeDocStats, type DocStats, tokenize } from "./search/bm25.ts";
 import { redactForDisk } from "./secret-redactor.ts";
 import { getLatestCompactionEntry, type SessionEntry, type SessionMessageEntry } from "./session-manager.ts";
 
@@ -123,94 +124,26 @@ function headTailExcerpt(text: string, max: number): string {
 }
 
 // ============================================================================
-// BM25 (k1=1.5, b=0.75) — inlined; no shared BM25 helper exists in the repo
+// Per-entry DocStats cache (BM25 tokenizer + scorer live in ./search/bm25.ts)
 // ============================================================================
 
-const TOKEN_REGEX = /[a-z0-9_]+/g;
-const STOPWORDS = new Set([
-	"the",
-	"a",
-	"an",
-	"and",
-	"or",
-	"of",
-	"to",
-	"in",
-	"is",
-	"it",
-	"for",
-	"on",
-	"at",
-	"by",
-	"as",
-	"be",
-	"this",
-	"that",
-	"with",
-	"are",
-	"was",
-	"were",
-]);
+// Tokenizing a discarded entry is the dominant cost of a search and its result
+// never changes: session entries are immutable objects (created once, never
+// mutated) and getBranch() hands back the same references from the id map, so
+// caching DocStats keyed by the entry object stays correct across queries. The
+// discarded set only grows across a session (each compaction pushes more
+// entries behind the window), so the cache never goes stale — it only warms.
+// Keyed by reference: if an entry object is ever recreated the cache simply
+// re-tokenizes it, which is correct by construction. WeakMap ⇒ entries GC'd
+// when the session drops them.
+const docStatsCache = new WeakMap<SessionMessageEntry, DocStats>();
 
-function tokenize(text: string): string[] {
-	const out: string[] = [];
-	const lower = text.toLowerCase();
-	const matches = lower.match(TOKEN_REGEX);
-	if (!matches) return out;
-	for (const tok of matches) {
-		if (tok.length < 2) continue;
-		if (STOPWORDS.has(tok)) continue;
-		out.push(tok);
-	}
-	return out;
-}
-
-interface DocStats {
-	index: number;
-	length: number;
-	termFreq: Map<string, number>;
-}
-
-function buildDocStats(texts: string[]): { docs: DocStats[]; avgLen: number; df: Map<string, number> } {
-	const docs: DocStats[] = [];
-	const df = new Map<string, number>();
-	let total = 0;
-	for (let i = 0; i < texts.length; i++) {
-		const tokens = tokenize(texts[i]);
-		const termFreq = new Map<string, number>();
-		for (const tok of tokens) {
-			termFreq.set(tok, (termFreq.get(tok) ?? 0) + 1);
-		}
-		for (const tok of termFreq.keys()) {
-			df.set(tok, (df.get(tok) ?? 0) + 1);
-		}
-		docs.push({ index: i, length: tokens.length, termFreq });
-		total += tokens.length;
-	}
-	const avgLen = docs.length > 0 ? total / docs.length : 0;
-	return { docs, avgLen, df };
-}
-
-function bm25Score(
-	queryTokens: string[],
-	doc: DocStats,
-	avgLen: number,
-	df: Map<string, number>,
-	totalDocs: number,
-): number {
-	const k1 = 1.5;
-	const b = 0.75;
-	let score = 0;
-	for (const term of queryTokens) {
-		const tf = doc.termFreq.get(term);
-		if (!tf) continue;
-		const dfTerm = df.get(term) ?? 0;
-		const idf = Math.log(1 + (totalDocs - dfTerm + 0.5) / (dfTerm + 0.5));
-		const norm = avgLen > 0 ? doc.length / avgLen : 1;
-		const denom = tf + k1 * (1 - b + b * norm);
-		score += idf * ((tf * (k1 + 1)) / Math.max(denom, 1e-9));
-	}
-	return score;
+function docStatsForEntry(entry: SessionMessageEntry): DocStats {
+	const cached = docStatsCache.get(entry);
+	if (cached) return cached;
+	const stats = computeDocStats(messageSearchText(entry.message));
+	docStatsCache.set(entry, stats);
+	return stats;
 }
 
 // ============================================================================
@@ -236,21 +169,25 @@ export function searchDiscardedHistory(entries: SessionMessageEntry[], query: st
 	const queryTokens = tokenize(query);
 	if (queryTokens.length === 0) return [];
 
-	const texts = entries.map((entry) => messageSearchText(entry.message));
-	const { docs, avgLen, df } = buildDocStats(texts);
+	// Per-entry DocStats come from the cache (tokenized once, reused across
+	// queries). df + avgLen are corpus-global and cheap, so recompute per query.
+	const docs = entries.map(docStatsForEntry);
+	const { avgLen, df } = buildCorpus(docs);
 
 	const scored: HistoryHit[] = [];
 	for (let i = 0; i < docs.length; i++) {
 		const doc = docs[i];
 		if (doc.length === 0) continue;
-		const score = bm25Score(queryTokens, doc, avgLen, df, docs.length);
+		const { score } = bm25Score(queryTokens, doc, avgLen, df, docs.length);
 		if (score <= 0) continue;
 		const entry = entries[i];
+		// Re-extract the raw text only for a matching entry (the snippet source);
+		// non-matches never pay for it, and matches are few (top-N).
 		scored.push({
 			entryId: entry.id,
 			timestamp: entry.timestamp,
 			role: entry.message.role,
-			snippet: redactForDisk(headTailExcerpt(texts[i], SNIPPET_MAX_CHARS)),
+			snippet: redactForDisk(headTailExcerpt(messageSearchText(entry.message), SNIPPET_MAX_CHARS)),
 			score,
 		});
 	}
