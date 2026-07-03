@@ -487,6 +487,15 @@ export interface AgentToolResult<T> {
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
 	 */
 	terminate?: boolean;
+	/**
+	 * Marks a RETURNED result as a failure (an alternative to throwing, for tools
+	 * that want to attach structured `details` to the failure). The loop folds it
+	 * into the loop-level error flag, so it drives the same machinery a thrown
+	 * error does: tool_execution_end, ToolResultMessage.isError (and the
+	 * provider's tool_result error marker), Tier-4 error hints, and the host's
+	 * afterToolCall failure accounting.
+	 */
+	isError?: boolean;
 }
 
 /** Callback used by tools to stream partial execution updates. */

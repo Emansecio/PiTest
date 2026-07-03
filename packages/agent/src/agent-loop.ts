@@ -1376,7 +1376,12 @@ async function executePreparedToolCall(
 			executeCtx,
 		);
 		await Promise.allSettled(pendingUpdates);
-		return { result, isError: false };
+		// A tool can fail by RETURNING `isError: true` instead of throwing (todo,
+		// plan, chrome_devtools, web_search, ...). Fold that into the loop-level
+		// flag — otherwise returned failures read as successes to error hints,
+		// doom-loop/failure budgets and the model-facing isError marker, while the
+		// TUI (which reads result.isError directly) shows the same call as failed.
+		return { result, isError: result.isError === true };
 	} catch (error) {
 		await Promise.allSettled(pendingUpdates);
 		// Generic convention: an error may attach a structured `detail` field
