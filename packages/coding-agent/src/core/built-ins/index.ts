@@ -26,6 +26,7 @@ import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createDestructiveCommandGuardExtension } from "./destructive-command-guard-extension.ts";
 import { bundleGroundingGuardFactories } from "./grounding-guard-registry.ts";
 import { createHooksExtension } from "./hooks-extension.ts";
+import { createIntentGateExtension } from "./intent-gate-extension.ts";
 import { createLearnedErrorGuardExtension } from "./learned-error-guard-extension.ts";
 import { createMcpExtension } from "./mcp-extension.ts";
 import { createMemoryExtension } from "./memory-extension.ts";
@@ -106,6 +107,16 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			// session's agent dir so isolated runs never read the shared store. No-op
 			// when that store is empty or below threshold (fresh installs, tests).
 			createLearnedErrorGuardExtension({ dir: learnedErrorsDirFor(options.agentDir) }),
+			// Intent gate (Band P / P2): on a risky prompt (thermostat level × task
+			// rigor), require a plan validated against the real tree before the first
+			// mutating call. Placed in the insertAfterEditPrecondition slot — AFTER
+			// read-guard / edit-precondition / learned-error (basic call-shape checks
+			// report first) and BEFORE the grounding chain (a "should you be editing
+			// yet" gate is coarser than per-arg symbol/path grounding, and short-circuits
+			// the cascade when it fires). Parent-only: it reads the session-global plan
+			// and thermostat registries, so it is never propagated to subagents.
+			// Fail-open; opt out PIT_NO_INTENT_GATE.
+			createIntentGateExtension({ cwd: options.cwd }),
 		]),
 		// Destructive-command guard: pre-exec, fire-once speed-bump for the MIDDLE tier
 		// of destruction the permission deny-floor (catastrophic `/`/`~` only) lets run
