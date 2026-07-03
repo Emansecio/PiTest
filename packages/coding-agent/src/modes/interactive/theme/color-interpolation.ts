@@ -5,7 +5,8 @@
  * callers fall back to discrete theme colors instead.
  */
 
-import { getCapabilities, getSegmenter, visibleWidth } from "@pit/tui";
+import { getCapabilities, getSegmenter, HEARTBEAT_CYCLE_MS, visibleWidth } from "@pit/tui";
+import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { theme as globalTheme, type Theme, type ThemeColor } from "./theme.ts";
 
 export interface Rgb {
@@ -160,4 +161,56 @@ export function interpolateFg(
 	const b = parseTrueColorFg(themeInstance.getFgAnsi(to));
 	if (!a || !b) return undefined;
 	return rgbFg(lerpRgb(a, b, t));
+}
+
+/** Width (display columns) of the shimmer's bright band. Soft-edged, so the
+ * effective glow is a little wider than this at low intensity. */
+const SHIMMER_BAND_COLUMNS = 6;
+/** How strongly the band center leans past `text` toward `accent` (kept subtle
+ * so the shimmer reads as a brightness sweep, not a color sweep). */
+const SHIMMER_ACCENT_KISS = 0.35;
+
+/**
+ * Time-aware label painter: text sits in the `muted` base with a soft brightness
+ * band (~{@link SHIMMER_BAND_COLUMNS} columns) that sweeps left→right once per
+ * `cycleMs` and wraps around. The band peaks toward the `text` color and kisses
+ * `accent` at its very center, with a raised-cosine falloff so its edges melt
+ * into the muted base instead of stepping. Only colors change — the visible
+ * characters and their width are untouched.
+ *
+ * Truecolor only: when the terminal lacks truecolor OR reduced motion is active,
+ * this returns a plain `(t) => theme.fg("muted", t)` painter with no sweep.
+ */
+export function shimmerColorAt(
+	now: number,
+	themeInstance: Theme = globalTheme,
+	cycleMs: number = HEARTBEAT_CYCLE_MS,
+): (text: string) => string {
+	const mutedOnly = (text: string) => themeInstance.fg("muted", text);
+	if (!getCapabilities().trueColor || isReducedMotion()) return mutedOnly;
+
+	const muted = parseTrueColorFg(themeInstance.getFgAnsi("muted"));
+	const text = parseTrueColorFg(themeInstance.getFgAnsi("text"));
+	const accent = parseTrueColorFg(themeInstance.getFgAnsi("accent"));
+	if (!muted || !text) return mutedOnly;
+
+	// Band center sweeps from just off the left edge to just off the right edge
+	// over one cycle, so it fully enters and exits; the next cycle wraps it back.
+	const period = cycleMs > 0 ? cycleMs : HEARTBEAT_CYCLE_MS;
+	const phase = (((now % period) + period) % period) / period;
+	const half = SHIMMER_BAND_COLUMNS / 2;
+
+	return (input: string) =>
+		applyColumnGradient(input, (_col, cols) => {
+			const center = phase * (cols + SHIMMER_BAND_COLUMNS) - half;
+			return (segment: string) => {
+				const dist = Math.abs(_col - center);
+				if (dist >= half) return themeInstance.fg("muted", segment);
+				// Raised cosine: 1 at the band center, 0 at its edges.
+				const w = (1 + Math.cos((dist / half) * Math.PI)) / 2;
+				let color = lerpRgb(muted, text, w);
+				if (accent) color = lerpRgb(color, accent, w * w * SHIMMER_ACCENT_KISS);
+				return rgbFg(color)(segment);
+			};
+		});
 }

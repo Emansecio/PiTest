@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@pit/ai";
 import {
 	Container,
+	HEARTBEAT_CYCLE_MS,
 	Markdown,
 	type MarkdownTheme,
 	Spacer,
@@ -19,8 +20,10 @@ import { ColorEase } from "./color-ease.ts";
 import { ReadingColumn } from "./reading-column.ts";
 
 // Period of the "Thinking…" breathing oscillation (dim ⇄ normal) while the model
-// is mid-thought with no answer yet.
-const THINKING_BREATH_MS = 1800;
+// is mid-thought with no answer yet. Shares the unified @pit/tui
+// HEARTBEAT_CYCLE_MS so the label breathes in lockstep with the working-loader
+// spinner pulse (both derive phase from the same monotonic clock).
+const THINKING_BREATH_MS = HEARTBEAT_CYCLE_MS;
 const THINKING_BREATH_BUCKETS = 8;
 
 // Streaming smoothing (on by default): instead of painting each provider burst

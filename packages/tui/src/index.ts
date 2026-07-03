@@ -23,6 +23,7 @@ export { Editor, type EditorOptions, type EditorTheme } from "./components/edito
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.ts";
 export { Input, type InputOptions } from "./components/input.ts";
 export {
+	HEARTBEAT_CYCLE_MS,
 	Loader,
 	type LoaderColorFn,
 	type LoaderIndicatorOptions,

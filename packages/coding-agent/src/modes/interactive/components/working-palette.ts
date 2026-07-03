@@ -1,6 +1,6 @@
 import { getCapabilities, type LoaderColorFn } from "@pit/tui";
 import { isReducedMotion } from "../../../utils/env-flags.ts";
-import { lerpRgb, parseTrueColorFg, rgbFg } from "../theme/color-interpolation.ts";
+import { lerpRgb, parseTrueColorFg, type Rgb, rgbFg } from "../theme/color-interpolation.ts";
 import { theme as globalTheme, type Theme } from "../theme/theme.ts";
 
 /**
@@ -8,6 +8,19 @@ import { theme as globalTheme, type Theme } from "../theme/theme.ts";
  * whole palette once per breath cycle, so more phases = smoother (not slower).
  */
 const BREATH_PHASES = 24;
+
+/**
+ * Brand lime (`#c9ff29`) — the bright end of the PIT hero-logo gradient. The
+ * breathing pulse blends its accent toward this at the raised-cosine peak so the
+ * spinner "touches" the brand at its brightest instant. Brand-fixed (not a theme
+ * key) on purpose, matching the wordmark.
+ */
+const BRAND_LIME: Rgb = { r: 201, g: 255, b: 41 };
+/** Phases either side of the peak (i≈0) that receive any brand blend. Keeps the
+ * kiss to the brightest ~2-3 of the 24 phases. */
+const BRAND_PEAK_SPAN = 3;
+/** Peak blend fraction toward {@link BRAND_LIME} at the exact brightest phase. */
+const BRAND_PEAK_BLEND = 0.25;
 
 /**
  * Spinner color pulse for every "work in progress" Loader.
@@ -73,7 +86,16 @@ function breathingGradient(themeInstance: Theme): LoaderColorFn[] | undefined {
 		// Raised cosine: 0 at accent, 1 at dim, back to 0 \u2014 eased at both ends so
 		// the pulse lingers at the poles instead of sliding through them linearly.
 		const t = (1 - Math.cos((i / BREATH_PHASES) * 2 * Math.PI)) / 2;
-		palette.push(rgbFg(lerpRgb(accent, dim, t)));
+		let color = lerpRgb(accent, dim, t);
+		// At the brightest (accent) pole \u2014 i\u22480, wrapping so late phases near i=24
+		// count too \u2014 kiss the accent toward the brand lime with a raised-cosine
+		// window, so the pulse just touches the brand at its peak and eases back.
+		const peakDist = Math.min(i, BREATH_PHASES - i);
+		if (peakDist < BRAND_PEAK_SPAN) {
+			const peak = (1 + Math.cos((peakDist / BRAND_PEAK_SPAN) * Math.PI)) / 2;
+			color = lerpRgb(color, BRAND_LIME, peak * BRAND_PEAK_BLEND);
+		}
+		palette.push(rgbFg(color));
 	}
 	return palette;
 }

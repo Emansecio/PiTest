@@ -30,12 +30,24 @@ export const SPINNER_FRAME_MS = 80;
 const DEFAULT_INTERVAL_MS = SPINNER_FRAME_MS;
 
 /**
+ * Unified heartbeat cycle (ms) for every decorative "breathing" oscillation in
+ * the UI — the spinner color pulse here and the assistant "Thinking…" label
+ * breath (see assistant-message.ts, which imports this). Every breath derives
+ * its phase from the *same* shared monotonic clock, so pinning them to one cycle
+ * length makes them rise and fall in lockstep instead of drifting against each
+ * other. ~1.8s is long enough to read as breathing, short enough to register as
+ * live.
+ */
+export const HEARTBEAT_CYCLE_MS = 1800;
+
+/**
  * Full breath cycle (ms) for the spinner color pulse. The palette is swept once
  * per cycle no matter how many phases it has, so a finer palette (e.g. the
- * truecolor breathing gradient) reads as smoother rather than slower. ~1.6s is
- * long enough to feel like breathing, short enough to register as live.
+ * truecolor breathing gradient) reads as smoother rather than slower. Aliased to
+ * the shared {@link HEARTBEAT_CYCLE_MS} so the spinner pulse and the "Thinking…"
+ * label breathe on one heartbeat.
  */
-const PULSE_CYCLE_MS = 1600;
+const PULSE_CYCLE_MS = HEARTBEAT_CYCLE_MS;
 
 /**
  * Loader component that updates with an optional spinning animation.
@@ -54,6 +66,13 @@ export class Loader extends Text {
 	private renderIndicatorVerbatim = false;
 	private spinnerPalette: LoaderColorFn[];
 	private messageColorFn: LoaderColorFn;
+	// Raw (uncolored) message text, kept so a time-aware color fn can repaint the
+	// label from scratch each frame (see setMessageColorAt / refreshMessageColor).
+	private message: string;
+	// Optional time-aware label color: when set, the message label is recolored
+	// every animation frame from `(text, now)` instead of the static messageColorFn.
+	// Backward compatible — null by default, so existing static callers are unchanged.
+	private messageColorAtFn: ((text: string, now: number) => string) | null = null;
 
 	// Pre-computed once per setIndicator()/setMessage() so the hot tick callback
 	// never calls into the color functions or re-allocates strings beyond the
@@ -98,6 +117,7 @@ export class Loader extends Text {
 		this.spinnerPalette = palette.length > 0 ? palette : [(s) => s];
 		this.messageColorFn = messageColorFn;
 
+		this.message = message;
 		this.coloredMessage = messageColorFn(message);
 		this.setIndicator(indicator);
 	}
@@ -117,7 +137,25 @@ export class Loader extends Text {
 	}
 
 	setMessage(message: string): void {
-		this.coloredMessage = this.messageColorFn(message);
+		this.message = message;
+		this.coloredMessage = this.messageColorAtFn
+			? this.messageColorAtFn(message, performance.now())
+			: this.messageColorFn(message);
+		this.updateDisplay();
+	}
+
+	/**
+	 * Opt into a time-aware label color: `fn(text, now)` is called every animation
+	 * frame to repaint the message label (e.g. a shimmer that sweeps across the
+	 * text). Distinct from the static `messageColorFn` passed to the constructor,
+	 * which still colors the elapsed counter and trailing suffix. Setting this
+	 * ensures the shared ticker is subscribed even for a single frozen indicator
+	 * frame, and invalidates the memoized label so the next frame repaints.
+	 */
+	setMessageColorAt(fn: (text: string, now: number) => string): void {
+		this.messageColorAtFn = fn;
+		this.coloredMessage = fn(this.message, performance.now());
+		this.subscribeAnimation();
 		this.updateDisplay();
 	}
 
@@ -210,6 +248,20 @@ export class Loader extends Text {
 		return true;
 	}
 
+	/**
+	 * Recolor the message label from the time-aware color fn for this frame. No-op
+	 * (returns false) when no time-aware fn is set, so static callers pay nothing.
+	 * Returns true only when the repainted label actually differs, so the ticker
+	 * coalesces frames where the color is visually unchanged.
+	 */
+	private refreshMessageColor(now: number): boolean {
+		if (!this.messageColorAtFn) return false;
+		const next = this.messageColorAtFn(this.message, now);
+		if (next === this.coloredMessage) return false;
+		this.coloredMessage = next;
+		return true;
+	}
+
 	setIndicator(indicator?: LoaderIndicatorOptions): void {
 		this.renderIndicatorVerbatim = indicator !== undefined;
 		this.frames = indicator?.frames !== undefined ? [...indicator.frames] : [...DEFAULT_FRAMES];
@@ -231,8 +283,11 @@ export class Loader extends Text {
 	private subscribeAnimation(): void {
 		this.unsubscribeAnimation();
 		// Empty indicator: nothing to tick. A single frozen frame still needs the
-		// ticker when elapsed is enabled (reduced-motion working loader).
-		const needsTicker = this.frames.length > 1 || (this.frames.length === 1 && this.elapsedEnabled);
+		// ticker when elapsed is enabled (reduced-motion working loader) or a
+		// time-aware label color is set (it repaints every frame).
+		const needsTicker =
+			this.frames.length > 1 ||
+			(this.frames.length === 1 && (this.elapsedEnabled || this.messageColorAtFn !== null));
 		if (!needsTicker || !this.ui) {
 			return;
 		}
@@ -284,7 +339,8 @@ export class Loader extends Text {
 		const frame = this.frameAt(now);
 		const paletteIndex = this.paletteAt(now);
 		const elapsedChanged = this.refreshElapsed();
-		if (frame === this.currentFrame && paletteIndex === this.paletteIndex && !elapsedChanged) {
+		const messageChanged = this.refreshMessageColor(now);
+		if (frame === this.currentFrame && paletteIndex === this.paletteIndex && !elapsedChanged && !messageChanged) {
 			return false;
 		}
 		this.currentFrame = frame;
