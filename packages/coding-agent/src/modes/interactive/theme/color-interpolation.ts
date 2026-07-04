@@ -7,7 +7,7 @@
 
 import { getCapabilities, getSegmenter, HEARTBEAT_CYCLE_MS, visibleWidth } from "@pit/tui";
 import { isReducedMotion } from "../../../utils/env-flags.ts";
-import { theme as globalTheme, type Theme, type ThemeColor } from "./theme.ts";
+import { theme as globalTheme, resolveThemeInstance, type Theme, type ThemeColor } from "./theme.ts";
 
 export interface Rgb {
 	r: number;
@@ -62,7 +62,7 @@ const LOGO_LIME_LIGHT: Rgb = { r: 104, g: 146, b: 0 };
 
 /** Light text (high luminance) implies a dark terminal background. */
 function hasDarkBackground(themeInstance: Theme): boolean {
-	const text = parseTrueColorFg(themeInstance.getFgAnsi("text"));
+	const text = getRgb(themeInstance, "text");
 	if (!text) return true;
 	return (0.299 * text.r + 0.587 * text.g + 0.114 * text.b) / 255 >= 0.5;
 }
@@ -129,6 +129,36 @@ export function parseTrueColorFg(ansi: string): Rgb | undefined {
 	return { r: Number(match[1]), g: Number(match[2]), b: Number(match[3]) };
 }
 
+/**
+ * Per-theme-instance cache of parsed RGB values. `parseTrueColorFg` regex-parses
+ * a constant ANSI string per (theme, color) — cheap once, but `interpolateFg`
+ * and `shimmerColorAt` call it per grapheme per frame during streaming fades
+ * (e.g. `fadeLineTail`), so it adds up. `null` marks "parsed, not truecolor"
+ * so that result is cached too instead of re-parsing every call.
+ *
+ * Keyed by the resolved real Theme instance, never the shared `theme` Proxy —
+ * see {@link resolveThemeInstance}. A theme switch always installs a brand-new
+ * Theme instance (initTheme/setTheme/setThemeInstance/hot-reload all construct
+ * fresh objects, never mutate the current one), so the cache invalidates for
+ * free: the new instance simply isn't in the WeakMap yet.
+ */
+const rgbCache = new WeakMap<Theme, Map<ThemeColor, Rgb | null>>();
+
+/** Cached `parseTrueColorFg(themeInstance.getFgAnsi(color))`. See {@link rgbCache}. */
+export function getRgb(themeInstance: Theme, color: ThemeColor): Rgb | undefined {
+	const instance = resolveThemeInstance(themeInstance);
+	let cache = rgbCache.get(instance);
+	if (!cache) {
+		cache = new Map();
+		rgbCache.set(instance, cache);
+	}
+	const cached = cache.get(color);
+	if (cached !== undefined) return cached === null ? undefined : cached;
+	const rgb = parseTrueColorFg(instance.getFgAnsi(color)) ?? null;
+	cache.set(color, rgb);
+	return rgb ?? undefined;
+}
+
 /** Linear RGB interpolation; `t` is clamped to [0,1]. */
 export function lerpRgb(a: Rgb, b: Rgb, t: number): Rgb {
 	const u = t < 0 ? 0 : t > 1 ? 1 : t;
@@ -157,8 +187,8 @@ export function interpolateFg(
 	themeInstance: Theme = globalTheme,
 ): ((text: string) => string) | undefined {
 	if (!getCapabilities().trueColor) return undefined;
-	const a = parseTrueColorFg(themeInstance.getFgAnsi(from));
-	const b = parseTrueColorFg(themeInstance.getFgAnsi(to));
+	const a = getRgb(themeInstance, from);
+	const b = getRgb(themeInstance, to);
 	if (!a || !b) return undefined;
 	return rgbFg(lerpRgb(a, b, t));
 }
@@ -169,6 +199,43 @@ const SHIMMER_BAND_COLUMNS = 6;
 /** How strongly the band center leans past `text` toward `accent` (kept subtle
  * so the shimmer reads as a brightness sweep, not a color sweep). */
 const SHIMMER_ACCENT_KISS = 0.35;
+
+/**
+ * Number of discrete intensity steps in the shimmer LUT (see
+ * {@link buildShimmerLut}). The raised-cosine falloff is a smooth curve; 32
+ * steps land well under the ~1 JND (just-noticeable-difference) threshold for
+ * terminal-rendered color ramps, so the quantization is imperceptible while
+ * cutting the per-grapheme cost to an array index.
+ */
+const SHIMMER_LUT_STEPS = 32;
+
+/** Cached per-theme-instance LUT of precomputed `\x1b[38;2;r;g;bm` prefixes,
+ * indexed by intensity bucket (0..{@link SHIMMER_LUT_STEPS}). Built once per
+ * real Theme instance (muted/text/accent are fixed for the instance's
+ * lifetime — Theme's color maps are populated once in its constructor and
+ * never mutated), so this is safe to cache forever per instance. Keyed like
+ * {@link rgbCache} — see {@link resolveThemeInstance}. */
+const shimmerLutCache = new WeakMap<Theme, string[]>();
+
+function buildShimmerLut(muted: Rgb, text: Rgb, accent: Rgb | undefined): string[] {
+	const lut: string[] = new Array(SHIMMER_LUT_STEPS + 1);
+	for (let i = 0; i <= SHIMMER_LUT_STEPS; i++) {
+		const w = i / SHIMMER_LUT_STEPS;
+		let color = lerpRgb(muted, text, w);
+		if (accent) color = lerpRgb(color, accent, w * w * SHIMMER_ACCENT_KISS);
+		lut[i] = `\x1b[38;2;${color.r};${color.g};${color.b}m`;
+	}
+	return lut;
+}
+
+function getShimmerLut(instance: Theme, muted: Rgb, text: Rgb, accent: Rgb | undefined): string[] {
+	let lut = shimmerLutCache.get(instance);
+	if (!lut) {
+		lut = buildShimmerLut(muted, text, accent);
+		shimmerLutCache.set(instance, lut);
+	}
+	return lut;
+}
 
 /**
  * Time-aware label painter: text sits in the `muted` base with a soft brightness
@@ -189,10 +256,16 @@ export function shimmerColorAt(
 	const mutedOnly = (text: string) => themeInstance.fg("muted", text);
 	if (!getCapabilities().trueColor || isReducedMotion()) return mutedOnly;
 
-	const muted = parseTrueColorFg(themeInstance.getFgAnsi("muted"));
-	const text = parseTrueColorFg(themeInstance.getFgAnsi("text"));
-	const accent = parseTrueColorFg(themeInstance.getFgAnsi("accent"));
+	const instance = resolveThemeInstance(themeInstance);
+	const muted = getRgb(instance, "muted");
+	const text = getRgb(instance, "text");
+	const accent = getRgb(instance, "accent");
 	if (!muted || !text) return mutedOnly;
+
+	// Precomputed per-instance LUT of ANSI prefixes by intensity bucket — see
+	// buildShimmerLut. Replaces a per-grapheme `lerpRgb` allocation + `rgbFg`
+	// closure with an array index + string concat.
+	const lut = getShimmerLut(instance, muted, text, accent);
 
 	// Band center sweeps from just off the left edge to just off the right edge
 	// over one cycle, so it fully enters and exits; the next cycle wraps it back.
@@ -208,9 +281,8 @@ export function shimmerColorAt(
 				if (dist >= half) return themeInstance.fg("muted", segment);
 				// Raised cosine: 1 at the band center, 0 at its edges.
 				const w = (1 + Math.cos((dist / half) * Math.PI)) / 2;
-				let color = lerpRgb(muted, text, w);
-				if (accent) color = lerpRgb(color, accent, w * w * SHIMMER_ACCENT_KISS);
-				return rgbFg(color)(segment);
+				const bucket = Math.round(w * SHIMMER_LUT_STEPS);
+				return `${lut[bucket]}${segment}\x1b[39m`;
 			};
 		});
 }

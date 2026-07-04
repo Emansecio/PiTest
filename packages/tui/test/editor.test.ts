@@ -4149,5 +4149,195 @@ describe("Editor component", () => {
 			assert.strictEqual(calls.length, 0, "no truncation => no callback");
 			assert.strictEqual(editor.getText(), "hello world");
 		});
+
+		it("handles the bracketed-paste end marker split across two chunks", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.handleInput("\x1b[200~hello world");
+			// "\x1b[201~" (6 chars) delivered as two separate handleInput chunks.
+			editor.handleInput("\x1b[20");
+			editor.handleInput("1~");
+			assert.strictEqual(editor.getText(), "hello world");
+		});
+
+		it("reconstructs a paste fed as many small, arbitrarily-split chunks (windowed end-marker search)", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.handleInput("\x1b[200~");
+			// Single line, under the marker threshold (<=1000 chars, <=10 lines) so
+			// the raw text lands verbatim instead of becoming a "[paste #N]" marker.
+			const payload = "abcdefghij".repeat(70); // 700 chars
+			let offset = 0;
+			while (offset < payload.length) {
+				const chunkLen = 1 + (offset % 7); // 1..7 chars per chunk, uneven on purpose
+				editor.handleInput(payload.slice(offset, offset + chunkLen));
+				offset += chunkLen;
+			}
+			// Split the end marker itself across two more chunks, right after the
+			// last content chunk — exercises the searchFrom window at the boundary.
+			editor.handleInput("\x1b[20");
+			editor.handleInput("1~");
+			assert.strictEqual(editor.getText(), payload);
+		});
+	});
+});
+
+describe("getText() memoization (bufferRevision cache)", () => {
+	it("reflects insert, newline, backspace and undo immediately (no stale cache)", () => {
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.handleInput("a");
+		assert.strictEqual(editor.getText(), "a");
+		editor.handleInput("b");
+		assert.strictEqual(editor.getText(), "ab");
+		editor.handleInput("\n"); // newline
+		assert.strictEqual(editor.getText(), "ab\n");
+		editor.handleInput("c");
+		assert.strictEqual(editor.getText(), "ab\nc");
+		editor.handleInput("\x7f"); // Backspace
+		assert.strictEqual(editor.getText(), "ab\n");
+		editor.handleInput("\x1b[45;5u"); // Ctrl+- (undo) restores the backspaced char
+		assert.strictEqual(editor.getText(), "ab\nc");
+		// Repeated calls with no intervening mutation must keep returning the
+		// same (cached) value, not drift or recompute into something stale.
+		assert.strictEqual(editor.getText(), "ab\nc");
+		assert.strictEqual(editor.getText(), "ab\nc");
+	});
+
+	it("reflects Ctrl+U/Ctrl+K/Ctrl+W/Alt+D/forward-delete/yank immediately (each must bump bufferRevision)", () => {
+		// These operations mutate this.state.lines directly; each one used to be
+		// missing the touchBuffer() bump that getText()'s revision cache relies
+		// on to know the buffer changed. This test would see a stale cached
+		// value if any of them regressed.
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		editor.setText("one two three"); // cursor at end (col 13)
+
+		editor.handleInput("\x15"); // Ctrl+U: delete to line start
+		assert.strictEqual(editor.getText(), "");
+
+		editor.handleInput("\x19"); // Ctrl+Y: yank back "one two three"
+		assert.strictEqual(editor.getText(), "one two three");
+
+		for (let i = 0; i < 5; i++) editor.handleInput("\x1b[D"); // Left x5 -> before "three"
+		editor.handleInput("\x0b"); // Ctrl+K: delete to line end ("three")
+		assert.strictEqual(editor.getText(), "one two ");
+
+		editor.handleInput("\x17"); // Ctrl+W: delete word backward ("two ", keeping the sep. space)
+		assert.strictEqual(editor.getText(), "one ");
+
+		editor.setText("alpha beta gamma");
+		editor.handleInput("\x01"); // Ctrl+A: start of line
+		editor.handleInput("\x1bd"); // Alt+D: delete word forward ("alpha")
+		assert.strictEqual(editor.getText(), " beta gamma");
+
+		editor.handleInput("\x1b[3~"); // Forward-delete the leading space
+		assert.strictEqual(editor.getText(), "beta gamma");
+	});
+
+	it("reflects the single-suggestion auto-applied Tab completion immediately", async () => {
+		// Exercises the runAutocompleteRequest branch (force + explicitTab +
+		// exactly one suggestion) that mutates state.lines directly.
+		const editor = new Editor(createTestTUI(), defaultEditorTheme);
+		const mockProvider: AutocompleteProvider = {
+			getSuggestions: async (lines, _cursorLine, cursorCol, options) => {
+				if (!options.force) return null;
+				const prefix = (lines[0] || "").slice(0, cursorCol);
+				return prefix === "Work" ? { items: [{ value: "Workspace/", label: "Workspace/" }], prefix: "Work" } : null;
+			},
+			applyCompletion,
+		};
+		editor.setAutocompleteProvider(mockProvider);
+		for (const ch of "Work") editor.handleInput(ch);
+		editor.handleInput("\t");
+		await flushAutocomplete();
+		assert.strictEqual(editor.getText(), "Workspace/");
+	});
+});
+
+describe("Structural layout / cursor-overlay memo (large buffers)", () => {
+	/** Multiple uniform-length lines so up/down/left/right round-trips land
+	 * exactly back where they started (no sticky-column/short-line edge cases). */
+	function bigMultilineText(numLines: number, lineLen: number): string {
+		const lines: string[] = [];
+		for (let i = 0; i < numLines; i++) {
+			lines.push(`line ${i}`.padEnd(10, "_") + "w".repeat(lineLen));
+		}
+		return lines.join("\n");
+	}
+
+	it("round-trips through Up/Down navigation without changing render output (~20KB buffer)", () => {
+		const cols = 60;
+		const editor = new Editor(createTestTUI(cols, 40), defaultEditorTheme);
+		const text = bigMultilineText(250, 80); // ~20-25KB, within the target degradation range
+		editor.setText(text);
+		const before = editor.render(cols);
+
+		for (let i = 0; i < 60; i++) editor.handleInput("\x1b[A"); // Up x60
+		for (let i = 0; i < 60; i++) editor.handleInput("\x1b[B"); // Down x60
+		const after = editor.render(cols);
+
+		assert.deepStrictEqual(after, before, "round-trip navigation must reproduce the exact same render output");
+	});
+
+	it("round-trips through Left/Right navigation across the whole buffer without changing render output", () => {
+		const cols = 50;
+		const editor = new Editor(createTestTUI(cols, 40), defaultEditorTheme);
+		const text = bigMultilineText(100, 60); // ~8KB
+		editor.setText(text);
+		const before = editor.render(cols);
+
+		const totalChars = text.length;
+		for (let i = 0; i < totalChars; i++) editor.handleInput("\x1b[D"); // Left all the way to (0,0)
+		for (let i = 0; i < totalChars; i++) editor.handleInput("\x1b[C"); // Right all the way back to the end
+		const after = editor.render(cols);
+
+		assert.deepStrictEqual(after, before);
+	});
+
+	it("shows exactly one active cursor highlight after each navigation step in a large buffer", () => {
+		const cols = 45;
+		const editor = new Editor(createTestTUI(cols, 60), defaultEditorTheme);
+		editor.setText(bigMultilineText(150, 90)); // ~15KB
+
+		const countCursorMarks = (rendered: string[]) => rendered.join("\n").split("\x1b[7m").length - 1;
+		assert.strictEqual(countCursorMarks(editor.render(cols)), 1, "initial render");
+
+		for (let i = 0; i < 80; i++) {
+			editor.handleInput(i % 2 === 0 ? "\x1b[A" : "\x1b[D");
+			const rendered = editor.render(cols);
+			assert.strictEqual(countCursorMarks(rendered), 1, `step ${i}: expected exactly one cursor highlight`);
+		}
+	});
+
+	it("PageUp/PageDown round-trip does not change render output (buildVisualLineMap memo)", () => {
+		const cols = 55;
+		const editor = new Editor(createTestTUI(cols, 20), defaultEditorTheme);
+		editor.setText(bigMultilineText(200, 70)); // ~18KB
+		const before = editor.render(cols);
+
+		editor.handleInput("\x1b[5~"); // PageUp
+		editor.handleInput("\x1b[5~"); // PageUp
+		editor.handleInput("\x1b[6~"); // PageDown
+		editor.handleInput("\x1b[6~"); // PageDown
+		const after = editor.render(cols);
+
+		assert.deepStrictEqual(after, before);
+	});
+
+	it("keeps exactly one cursor highlight after an edit interleaved with navigation (structural rebuild resets overlay bookkeeping)", () => {
+		const cols = 48;
+		const editor = new Editor(createTestTUI(cols, 30), defaultEditorTheme);
+		editor.setText(bigMultilineText(80, 65));
+
+		editor.handleInput("\x1b[A");
+		editor.handleInput("\x1b[A");
+		editor.handleInput("\x1b[D");
+		editor.handleInput("X"); // content edit mid-buffer -> bumps bufferRevision
+		const countCursorMarks = (rendered: string[]) => rendered.join("\n").split("\x1b[7m").length - 1;
+		const afterEdit = editor.render(cols);
+		assert.strictEqual(countCursorMarks(afterEdit), 1);
+		assert.ok(editor.getText().includes("X"));
+
+		editor.handleInput("\x1b[B");
+		editor.handleInput("\x1b[A"); // back to the edited line
+		const roundTrip = editor.render(cols);
+		assert.strictEqual(countCursorMarks(roundTrip), 1);
 	});
 });

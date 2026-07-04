@@ -82,10 +82,17 @@ export class Input implements Component, Focusable {
 
 		// If we're in a paste, buffer the data
 		if (this.isInPaste) {
-			// Check if this chunk contains the end marker
+			// Check if this chunk contains the end marker. Search only from near
+			// the previous tail: the end marker can't begin before
+			// (prevLen - (marker.length - 1)) without having already been found on
+			// a prior chunk, so re-scanning the whole accumulated buffer every
+			// chunk (O(n^2) over a byte-at-a-time paste) is wasted work. Mirrors
+			// the windowed search in stdin-buffer.ts.
+			const prevLen = this.pasteBuffer.length;
 			this.pasteBuffer += data;
 
-			const endIndex = this.pasteBuffer.indexOf("\x1b[201~");
+			const searchFrom = Math.max(0, prevLen - 5); // "\x1b[201~".length - 1 = 5
+			const endIndex = this.pasteBuffer.indexOf("\x1b[201~", searchFrom);
 			if (endIndex !== -1) {
 				// Extract the pasted content
 				const pasteContent = this.pasteBuffer.substring(0, endIndex);

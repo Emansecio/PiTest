@@ -24,6 +24,12 @@ export class VirtualizedContainer implements Component {
 	private childCaches: ChildRenderCache[] = [];
 	private flattenLines: string[] = [];
 	private staleIndices = new Set<number>();
+	// Per-child starting offset into flattenLines from the last flatten (full
+	// rebuild or prefix-reused — see render()/flattenFromIndex()). Always
+	// resized/recomputed in lockstep with childCaches (both only change together,
+	// in flattenCaches() or the structureChanged branch of render()), so its
+	// length always matches children.length whenever the incremental path runs.
+	private childOffsets: number[] = [];
 
 	constructor(tailLineBudget = DEFAULT_VIRTUALIZED_TAIL_LINE_BUDGET) {
 		this.tailLineBudget = tailLineBudget;
@@ -47,6 +53,7 @@ export class VirtualizedContainer implements Component {
 		this.children = [];
 		this.childCaches = [];
 		this.flattenLines = [];
+		this.childOffsets = [];
 		this.cacheWidth = -1;
 		this.staleIndices.clear();
 	}
@@ -85,6 +92,10 @@ export class VirtualizedContainer implements Component {
 		const hotStartIdx = this.findHotStartIndex(children);
 
 		let reusable = this.flattenLines.length > 0;
+		// First index whose rendered lines actually changed reference this frame
+		// (among the children we bothered to re-render — cold, non-stale children
+		// are skipped above and can't have changed). Left at -1 if nothing changed.
+		let minChangedIndex = -1;
 		for (let i = 0; i < children.length; i++) {
 			const inHotZone = i >= hotStartIdx;
 			const isStale = this.staleIndices.has(i);
@@ -95,6 +106,7 @@ export class VirtualizedContainer implements Component {
 			const prev = this.childCaches[i];
 			if (!prev || lines !== prev.lines) {
 				reusable = false;
+				if (minChangedIndex === -1) minChangedIndex = i;
 			}
 			this.childCaches[i] = { width, lines };
 			this.staleIndices.delete(i);
@@ -102,6 +114,16 @@ export class VirtualizedContainer implements Component {
 
 		if (reusable) {
 			return this.flattenLines;
+		}
+
+		// Prefix reuse: every child before minChangedIndex is either untouched
+		// (skipped above, still whatever it flattened to last frame) or was
+		// re-rendered but produced the same array reference — either way its
+		// contribution to flattenLines is byte-identical to last frame. Splice a
+		// slice() of that unchanged prefix with the current lines of every child
+		// from minChangedIndex onward instead of re-pushing the whole transcript.
+		if (minChangedIndex !== -1 && this.flattenLines.length > 0 && this.childOffsets.length === children.length) {
+			return this.flattenFromIndex(minChangedIndex);
 		}
 		return this.flattenCaches();
 	}
@@ -134,11 +156,37 @@ export class VirtualizedContainer implements Component {
 
 	private flattenCaches(): string[] {
 		const lines: string[] = [];
-		for (const cache of this.childCaches) {
-			const childLines = cache.lines;
+		const offsets = new Array<number>(this.childCaches.length);
+		for (let i = 0; i < this.childCaches.length; i++) {
+			offsets[i] = lines.length;
+			const childLines = this.childCaches[i].lines;
 			for (let j = 0; j < childLines.length; j++) {
 				lines.push(childLines[j]);
 			}
+		}
+		this.childOffsets = offsets;
+		this.flattenLines = lines;
+		return lines;
+	}
+
+	/**
+	 * Reuse the unchanged prefix of the last flatten (everything before
+	 * `fromIndex`, via slice()) and append the current lines of every child from
+	 * `fromIndex` onward. Always returns a new array, preserving the render()
+	 * memoization contract (parents detect a change by array identity).
+	 */
+	private flattenFromIndex(fromIndex: number): string[] {
+		const prefixLen = this.childOffsets[fromIndex] ?? 0;
+		const lines = this.flattenLines.slice(0, prefixLen);
+		const offsets = this.childOffsets;
+		let offset = prefixLen;
+		for (let i = fromIndex; i < this.childCaches.length; i++) {
+			offsets[i] = offset;
+			const childLines = this.childCaches[i].lines;
+			for (let j = 0; j < childLines.length; j++) {
+				lines.push(childLines[j]);
+			}
+			offset += childLines.length;
 		}
 		this.flattenLines = lines;
 		return lines;

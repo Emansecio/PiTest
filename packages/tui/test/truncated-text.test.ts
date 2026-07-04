@@ -135,4 +135,54 @@ describe("TruncatedText component", () => {
 		assert.ok(stripped.includes("…"));
 		assert.ok(!stripped.includes("Second line"));
 	});
+
+	// Memoization: TruncatedText re-renders every frame it's visible (per the
+	// Component contract in tui.ts), so it must return the SAME array instance
+	// when neither text nor width changed, and a NEW instance when either does
+	// — a parent Container/Box relies on reference identity to skip re-flatten
+	// work.
+	describe("render memoization", () => {
+		it("returns the same array reference across repeated renders with unchanged text/width", () => {
+			const text = new TruncatedText("Hello world", 1, 0);
+			const first = text.render(40);
+			const second = text.render(40);
+			assert.strictEqual(first, second);
+		});
+
+		it("returns a new array reference when width changes", () => {
+			const text = new TruncatedText("Hello world", 1, 0);
+			const first = text.render(40);
+			const second = text.render(20);
+			assert.notStrictEqual(first, second);
+		});
+
+		it("returns a new array reference after setText, and the same reference again once settled", () => {
+			const text = new TruncatedText("Hello world", 1, 0);
+			const first = text.render(40);
+			text.setText("Goodbye world");
+			const second = text.render(40);
+			assert.notStrictEqual(first, second);
+			assert.strictEqual(second[0], " Goodbye world ");
+
+			const third = text.render(40);
+			assert.strictEqual(second, third);
+		});
+
+		it("setText is a no-op (keeps the cache) when the text is unchanged", () => {
+			const text = new TruncatedText("Hello world", 1, 0);
+			const first = text.render(40);
+			text.setText("Hello world");
+			const second = text.render(40);
+			assert.strictEqual(first, second);
+		});
+
+		it("returns a new array reference after invalidate()", () => {
+			const text = new TruncatedText("Hello world", 1, 0);
+			const first = text.render(40);
+			text.invalidate();
+			const second = text.render(40);
+			assert.notStrictEqual(first, second);
+			assert.deepStrictEqual(first, second);
+		});
+	});
 });

@@ -249,9 +249,26 @@ export function calculateImageRows(
 	return calculateImageCellSize(imageDimensions, targetWidthCells, undefined, cellDimensions).rows;
 }
 
+// Only the fixed-size header needs decoding to read width/height — not the
+// full (possibly multi-MB) base64 payload. 64 base64 chars decode to 48
+// bytes, comfortably covering PNG's 24-byte IHDR window, GIF's 10-byte
+// logical screen descriptor, and every WEBP chunk variant (VP8/VP8L/VP8X top
+// out at 30 bytes read — see getWebpDimensions). Kept a multiple of 4 so the
+// decoded prefix's leading bytes are byte-for-byte identical to decoding the
+// full string (base64 decodes in 4-char/3-byte groups): this is not an
+// approximation, it reproduces the exact same header bytes the old
+// decode-everything code read, for both valid and truncated/invalid input.
+const HEADER_PROBE_BASE64_CHARS = 64;
+
+function probeHeaderBuffer(base64Data: string): Buffer {
+	const truncated =
+		base64Data.length > HEADER_PROBE_BASE64_CHARS ? base64Data.slice(0, HEADER_PROBE_BASE64_CHARS) : base64Data;
+	return Buffer.from(truncated, "base64");
+}
+
 export function getPngDimensions(base64Data: string): ImageDimensions | null {
 	try {
-		const buffer = Buffer.from(base64Data, "base64");
+		const buffer = probeHeaderBuffer(base64Data);
 
 		if (buffer.length < 24) {
 			return null;
@@ -317,7 +334,7 @@ export function getJpegDimensions(base64Data: string): ImageDimensions | null {
 
 export function getGifDimensions(base64Data: string): ImageDimensions | null {
 	try {
-		const buffer = Buffer.from(base64Data, "base64");
+		const buffer = probeHeaderBuffer(base64Data);
 
 		if (buffer.length < 10) {
 			return null;
@@ -339,7 +356,7 @@ export function getGifDimensions(base64Data: string): ImageDimensions | null {
 
 export function getWebpDimensions(base64Data: string): ImageDimensions | null {
 	try {
-		const buffer = Buffer.from(base64Data, "base64");
+		const buffer = probeHeaderBuffer(base64Data);
 
 		if (buffer.length < 30) {
 			return null;

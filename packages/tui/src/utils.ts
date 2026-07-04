@@ -34,11 +34,11 @@ const leadingNonPrintingRegex = /^[\p{Default_Ignorable_Code_Point}\p{Control}\p
 const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 
 // Cache for non-ASCII strings
-const WIDTH_CACHE_SIZE = 512;
+const WIDTH_CACHE_SIZE = 4096;
 // Skip caching very large strings: the key is the full input, so a multi-MB
-// line would be retained until FIFO-evicted (potentially gigabytes across 512
-// such entries). The width is still computed/returned for these — only the
-// cache write is skipped, so behavior is identical.
+// line would be retained until FIFO-evicted (potentially gigabytes across
+// WIDTH_CACHE_SIZE such entries). The width is still computed/returned for
+// these — only the cache write is skipped, so behavior is identical.
 const WIDTH_CACHE_MAX_KEY_LENGTH = 4096;
 const widthCache = new Map<string, number>();
 
@@ -52,12 +52,58 @@ function isPrintableAscii(str: string): boolean {
 	return true;
 }
 
+// Bounds for the "Latin fast path" (see isLatinFastPathEligible below).
+const LATIN_FAST_PATH_MIN = 0xa0;
+const LATIN_FAST_PATH_MAX = 0x2ff;
+const SOFT_HYPHEN = 0xad;
+
+/**
+ * Check whether every char code in `str` falls in [0x20..0x7E] ∪ [0xA0..0x2FF],
+ * excluding the soft hyphen (U+00AD, which is zero-width in terminals).
+ *
+ * When this holds, `str.length` (the UTF-16 code unit count) equals the
+ * string's visible terminal width, so callers can skip grapheme segmentation
+ * and the width cache entirely. This covers accented Latin text (e.g.
+ * Portuguese "ação", "café") in addition to plain ASCII. Correctness:
+ *
+ *  (a) Every codepoint here is <= 0x2FF, i.e. a single UTF-16 code unit (no
+ *      surrogate pairs), so `str.length` equals the codepoint count.
+ *  (b) Every codepoint in [0xA0..0x2FF] except 0xAD has East Asian Width
+ *      narrow/neutral: `get-east-asian-width`'s wide/fullwidth ranges only
+ *      start at U+1100 and U+3000 respectively, well above this range, and
+ *      ambiguous-width codepoints in this span are measured as width 1
+ *      (narrow) since `graphemeWidth` calls `eastAsianWidth` without
+ *      `ambiguousAsWide`. This covers Latin-1 Supplement, Latin Extended-A/B,
+ *      IPA Extensions, and Spacing Modifier Letters, and excludes emoji
+ *      entirely (`couldBeEmoji` only triggers at codepoints >= 0x2300, on
+ *      VS16 U+FE0F, or on multi-codepoint segments — all outside this range).
+ *  (c) No two chars in this range can fuse into a single (narrower) grapheme
+ *      cluster: combining marks (Unicode `Mark` category starts at U+0300),
+ *      ZWJ (U+200D), and VS16 (U+FE0F) are all outside [0xA0..0x2FF]. The
+ *      only Default_Ignorable_Code_Point in this span is U+00AD, which is
+ *      excluded explicitly; every other char is therefore its own width-1
+ *      grapheme cluster.
+ *  (d) \t (0x09) and ESC (0x1B) are excluded by construction (both < 0x20).
+ */
+function isLatinFastPathEligible(str: string): boolean {
+	for (let i = 0; i < str.length; i++) {
+		const code = str.charCodeAt(i);
+		if (code >= 0x20 && code <= 0x7e) continue;
+		if (code >= LATIN_FAST_PATH_MIN && code <= LATIN_FAST_PATH_MAX && code !== SOFT_HYPHEN) continue;
+		return false;
+	}
+	return true;
+}
+
 function truncateFragmentToWidth(text: string, maxWidth: number): { text: string; width: number } {
 	if (maxWidth <= 0 || text.length === 0) {
 		return { text: "", width: 0 };
 	}
 
-	if (isPrintableAscii(text)) {
+	// ASCII and Latin-fast-path chars are all width 1 / 1 code unit with no
+	// possible grapheme fusion (see isLatinFastPathEligible), so slicing by
+	// code unit is equivalent to slicing by column.
+	if (isPrintableAscii(text) || isLatinFastPathEligible(text)) {
 		const clipped = text.slice(0, maxWidth);
 		return { text: clipped, width: clipped.length };
 	}
@@ -210,6 +256,14 @@ export function visibleWidth(str: string): number {
 
 	// Fast path: pure ASCII printable
 	if (isPrintableAscii(str)) {
+		return str.length;
+	}
+
+	// Fast path: accented Latin text (Latin-1 Supplement, Latin Extended-A/B,
+	// IPA, Spacing Modifiers) — see isLatinFastPathEligible for the
+	// correctness argument. Checked before the cache lookup since a charCode
+	// loop is cheaper than a Map hash for typical line-length strings.
+	if (isLatinFastPathEligible(str)) {
 		return str.length;
 	}
 
@@ -910,7 +964,10 @@ export function truncateToWidth(text: string, maxWidth: number, ellipsis: string
 		return finalizeTruncatedResult("", 0, clippedEllipsis.text, clippedEllipsis.width, maxWidth, pad);
 	}
 
-	if (isPrintableAscii(text)) {
+	// ASCII and Latin-fast-path chars are all width 1 / 1 code unit with no
+	// possible grapheme fusion (see isLatinFastPathEligible), so slicing by
+	// code unit is equivalent to slicing by column.
+	if (isPrintableAscii(text) || isLatinFastPathEligible(text)) {
 		if (text.length <= maxWidth) {
 			return pad ? text + " ".repeat(maxWidth - text.length) : text;
 		}

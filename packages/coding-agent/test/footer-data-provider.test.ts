@@ -335,11 +335,34 @@ describe("FooterDataProvider working-tree diff stats", () => {
 		}
 	});
 
-	it("returns sync diff stats on first read inside a repo", () => {
+	it("returns null on first synchronous read and resolves once the async refresh lands", async () => {
 		const repoDir = createPlainRepo(tempDir);
 		process.chdir(repoDir);
 		const provider = new FooterDataProvider(repoDir);
 		try {
+			// First read must never block on a sync git spawn — the async refresh
+			// kicked off by the constructor hasn't resolved yet in the same tick.
+			expect(provider.getGitDiffStats()).toBeNull();
+			expect(vi.mocked(spawnSync)).not.toHaveBeenCalled();
+			await waitFor(() => provider.getGitDiffStats() !== null);
+			expect(provider.getGitDiffStats()).toEqual({ files: 1, insertions: 12, deletions: 3 });
+		} finally {
+			provider.dispose();
+		}
+	});
+
+	it("nudges the async refresh instead of spawning sync git when read again before it resolves", async () => {
+		const repoDir = createPlainRepo(tempDir);
+		process.chdir(repoDir);
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			// Reading it repeatedly before the constructor's async refresh resolves
+			// must not spawn additional git processes (coalesces via diffRefreshInFlight).
+			expect(provider.getGitDiffStats()).toBeNull();
+			expect(provider.getGitDiffStats()).toBeNull();
+			expect(provider.getGitDiffStats()).toBeNull();
+			expect(vi.mocked(spawnSync)).not.toHaveBeenCalled();
+			await waitFor(() => provider.getGitDiffStats() !== null);
 			expect(provider.getGitDiffStats()).toEqual({ files: 1, insertions: 12, deletions: 3 });
 		} finally {
 			provider.dispose();
@@ -351,6 +374,7 @@ describe("FooterDataProvider working-tree diff stats", () => {
 		process.chdir(repoDir);
 		const provider = new FooterDataProvider(repoDir);
 		try {
+			await waitFor(() => provider.getGitDiffStats() !== null);
 			expect(provider.getGitDiffStats()).toEqual({ files: 1, insertions: 12, deletions: 3 });
 			const onChange = vi.fn();
 			provider.onWorkingTreeChange(onChange);
@@ -384,6 +408,113 @@ describe("FooterDataProvider working-tree diff stats", () => {
 			expect(diffCalls.length).toBe(1);
 		} finally {
 			provider.dispose();
+		}
+	});
+});
+
+describe("FooterDataProvider adaptive diff poll backoff", () => {
+	let originalCwd: string;
+	let tempDir: string;
+
+	beforeEach(() => {
+		originalCwd = process.cwd();
+		tempDir = mkdtempSync(join(tmpdir(), "footer-data-provider-poll-"));
+		resolvedBranch = "main";
+		diffNumstatStdout = "12\t3\tfile.ts\n";
+		statusPorcelainStdout = " M file.ts\n";
+		vi.mocked(spawnSync).mockClear();
+		vi.mocked(execFile).mockClear();
+	});
+
+	afterEach(() => {
+		process.chdir(originalCwd);
+		if (tempDir && existsSync(tempDir)) {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("doubles the poll interval after 3 consecutive no-change polls, and again after 3 more", async () => {
+		vi.useFakeTimers();
+		try {
+			const repoDir = createPlainRepo(tempDir);
+			process.chdir(repoDir);
+			const provider = new FooterDataProvider(repoDir);
+			const internals = provider as unknown as { diffPollIntervalMs: number };
+			try {
+				// Let the constructor's initial async refresh settle before the poll chain starts.
+				await vi.advanceTimersByTimeAsync(10);
+				expect(internals.diffPollIntervalMs).toBe(5000);
+
+				// 3 consecutive polls with unchanged stats double the interval once (5s -> 10s).
+				// +50ms buffer per advance avoids exact-boundary flakiness in the fake-timer clock.
+				for (let i = 0; i < 3; i++) {
+					await vi.advanceTimersByTimeAsync(internals.diffPollIntervalMs + 50);
+				}
+				expect(internals.diffPollIntervalMs).toBe(10000);
+
+				// Another 3 quiet polls (now at the doubled cadence) double it again (10s -> 20s).
+				for (let i = 0; i < 3; i++) {
+					await vi.advanceTimersByTimeAsync(internals.diffPollIntervalMs + 50);
+				}
+				expect(internals.diffPollIntervalMs).toBe(20000);
+			} finally {
+				provider.dispose();
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("resets the poll interval to the base cadence when scheduleWorkingTreeRefresh is called", async () => {
+		vi.useFakeTimers();
+		try {
+			const repoDir = createPlainRepo(tempDir);
+			process.chdir(repoDir);
+			const provider = new FooterDataProvider(repoDir);
+			const internals = provider as unknown as { diffPollIntervalMs: number };
+			try {
+				await vi.advanceTimersByTimeAsync(10);
+				for (let i = 0; i < 3; i++) {
+					await vi.advanceTimersByTimeAsync(internals.diffPollIntervalMs);
+				}
+				expect(internals.diffPollIntervalMs).toBe(10000);
+
+				// A tool-triggered refresh means the working tree may be active again —
+				// the cadence snaps back to the base interval synchronously.
+				provider.scheduleWorkingTreeRefresh();
+				expect(internals.diffPollIntervalMs).toBe(5000);
+			} finally {
+				provider.dispose();
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("resets the poll interval once a poll actually observes a change", async () => {
+		vi.useFakeTimers();
+		try {
+			const repoDir = createPlainRepo(tempDir);
+			process.chdir(repoDir);
+			const provider = new FooterDataProvider(repoDir);
+			const internals = provider as unknown as { diffPollIntervalMs: number };
+			try {
+				await vi.advanceTimersByTimeAsync(10);
+				for (let i = 0; i < 3; i++) {
+					await vi.advanceTimersByTimeAsync(internals.diffPollIntervalMs);
+				}
+				expect(internals.diffPollIntervalMs).toBe(10000);
+
+				// The working tree changes right before the next poll fires.
+				diffNumstatStdout = "99\t1\tfile.ts\n";
+				statusPorcelainStdout = " M file.ts\n?? extra.ts\n";
+				await vi.advanceTimersByTimeAsync(internals.diffPollIntervalMs);
+				expect(internals.diffPollIntervalMs).toBe(5000);
+			} finally {
+				provider.dispose();
+			}
+		} finally {
+			vi.useRealTimers();
 		}
 	});
 });

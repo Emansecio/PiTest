@@ -387,6 +387,19 @@ export class InteractiveMode {
 	// 0 at agent_start; the in-flight streaming message's partial usage is added on
 	// top at display time so the chip stays live. See refreshLoaderTrailingSuffix.
 	private turnOutputTokens = 0;
+	// Memoized `· <key> to interrupt` suffix fragment (theme.fg() + keyText() both
+	// do real work — keybinding lookup, ANSI wrap). refreshLoaderTrailingSuffix runs
+	// once per message_update (potentially per streamed token), so recomputing this
+	// constant-per-turn fragment on every call was pure waste. Recomputed lazily and
+	// cached; invalidated on a live theme/keybindings change so a mid-turn edit isn't
+	// stuck stale (normal churn is once per turn, from createWorkingLoader).
+	private cachedLoaderInterruptSuffix: string | null = null;
+	// Last full trailing-suffix string actually pushed to the loader. Lets
+	// refreshLoaderTrailingSuffix skip the setTrailingSuffix() call (colorizes +
+	// diffs again internally) when the composed suffix is byte-identical to what's
+	// already showing — true for most ticks, since the token chip only changes in
+	// coarse steps and the rate segment resamples at most once a second.
+	private lastAppliedLoaderSuffix: string | undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working…";
@@ -1695,9 +1708,24 @@ export class InteractiveMode {
 		return this.turnOutputTokens + (this.streamingMessage?.usage?.output ?? 0);
 	}
 
+	/** Lazily computed, memoized `· <key> to interrupt` suffix fragment. See
+	 * `cachedLoaderInterruptSuffix` for why this is worth memoizing. */
+	private getLoaderInterruptSuffix(): string {
+		if (this.cachedLoaderInterruptSuffix === null) {
+			this.cachedLoaderInterruptSuffix = theme.fg("dim", ` · ${keyText("app.interrupt")} to interrupt`);
+		}
+		return this.cachedLoaderInterruptSuffix;
+	}
+
+	/** Drop the memoized interrupt suffix so the next read recomputes it —
+	 * called on a live theme or keybindings change. */
+	private invalidateLoaderInterruptSuffix(): void {
+		this.cachedLoaderInterruptSuffix = null;
+	}
+
 	private refreshLoaderTrailingSuffix(): void {
 		if (!this.loadingAnimation) return;
-		const interrupt = `${theme.fg("dim", ` · ${keyText("app.interrupt")} to interrupt`)}`;
+		const interrupt = this.getLoaderInterruptSuffix();
 		const outputTokens = this.currentTurnOutputTokens();
 		const tokens = outputTokens > 0 ? theme.fg("dim", ` · ↑ ${this.formatTokenChip(outputTokens)} tok`) : "";
 		let rate = "";
@@ -1710,7 +1738,14 @@ export class InteractiveMode {
 			this.lastStreamRateSampleMs = now;
 			this.lastStreamRateCharCount = this.streamTextCharCount;
 		}
-		this.loadingAnimation.setTrailingSuffix(`${interrupt}${tokens}${rate}`);
+		const suffix = `${interrupt}${tokens}${rate}`;
+		// Skip the Loader call entirely when nothing changed since the last applied
+		// suffix — most message_update ticks land between 1s rate samples, so tokens
+		// and rate are unchanged and this would just re-run theme.fg + Loader's own
+		// (re-colorize + string-compare) diff for an identical result.
+		if (suffix === this.lastAppliedLoaderSuffix) return;
+		this.lastAppliedLoaderSuffix = suffix;
+		this.loadingAnimation.setTrailingSuffix(suffix);
 	}
 
 	private createWorkingLoader(): Loader {
@@ -1731,7 +1766,9 @@ export class InteractiveMode {
 		this.resetStreamRateCounters();
 		this.lastStreamRateSampleMs = Date.now();
 		this.lastStreamRateCharCount = 0;
-		loader.setTrailingSuffix(`${theme.fg("dim", ` · ${keyText("app.interrupt")} to interrupt`)}`);
+		const interruptSuffix = this.getLoaderInterruptSuffix();
+		loader.setTrailingSuffix(interruptSuffix);
+		this.lastAppliedLoaderSuffix = interruptSuffix;
 		// If a prompt is open while the loader is (re)built, carry the paused/relabeled
 		// state onto the new instance so the clock stays frozen.
 		if (this.userInputPauseDepth > 0) {
@@ -4439,18 +4476,60 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	/**
+	 * Apply a hide/show-thinking-block change to the live chat without a full
+	 * rebuild. `rebuildChatFromMessages()` disposes every chat child and
+	 * re-parses markdown for the WHOLE session synchronously — fine for a
+	 * genuine structural change but wasteful busywork for a setting that
+	 * `AssistantMessageComponent.setHideThinkingBlock()` already knows how to
+	 * apply in place (it re-renders its own content from `lastMessage`).
+	 *
+	 * Grouped tool-activity mode is the one case that genuinely needs the
+	 * rebuild: `renderSessionContext()` decides whether a thinking-only message
+	 * gets its own bubble at all via `messageHasVisibleContent(message,
+	 * !hideThinkingBlock)` — toggling the setting can make bubbles appear/
+	 * disappear and shift tool-activity group boundaries, which an in-place
+	 * patch of existing components cannot reproduce (there is nothing to patch
+	 * for a bubble that was never created). Legacy mode always renders one
+	 * component per assistant message regardless of visibility, so patching in
+	 * place is safe there and skips the synchronous re-parse.
+	 */
+	private applyHideThinkingBlock(hidden: boolean): void {
+		if (this.settingsManager.getToolActivity() === "grouped") {
+			this.rebuildChatFromMessages();
+			return;
+		}
+		for (const child of this.chatContainer.children) {
+			if (child instanceof AssistantMessageComponent) {
+				child.setHideThinkingBlock(hidden);
+				this.chatContainer.markChildStale(child);
+			}
+		}
+		this.ui.requestRender();
+	}
+
 	private toggleThinkingBlockVisibility(): void {
 		this.hideThinkingBlock = !this.hideThinkingBlock;
 		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
 
-		// Rebuild chat from session messages (rebuildChatFromMessages disposes + clears).
-		this.rebuildChatFromMessages();
+		this.applyHideThinkingBlock(this.hideThinkingBlock);
 
-		// If streaming, re-add the streaming component with updated visibility and re-render
+		// If streaming, refresh the streaming component with updated visibility and
+		// re-render. Preserved from the rebuild path, with one guard: the re-attach
+		// only happens when the component is NOT already a chatContainer child. In
+		// grouped mode applyHideThinkingBlock ran rebuildChatFromMessages (container
+		// cleared → includes() is false → re-attach happens exactly as before); in
+		// legacy mode the container was patched in place and the streaming component
+		// is still attached from its message_start addChild — an unconditional
+		// addChild here would append a SECOND reference and duplicate the streaming
+		// message in the transcript for good (nothing removes the extra child).
+		// children.includes is O(n) but this is a user hotkey, not a hot path.
 		if (this.streamingComponent && this.streamingMessage) {
 			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
 			this.streamingComponent.updateContent(this.streamingMessage);
-			this.chatContainer.addChild(this.streamingComponent);
+			if (!this.chatContainer.children.includes(this.streamingComponent)) {
+				this.chatContainer.addChild(this.streamingComponent);
+			}
 		}
 
 		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
@@ -4934,6 +5013,7 @@ export class InteractiveMode {
 						const result = setTheme(themeName, true);
 						this.settingsManager.setTheme(themeName);
 						this.ui.invalidate();
+						this.invalidateLoaderInterruptSuffix();
 						if (!result.success) {
 							this.showError(`Failed to load theme "${themeName}": ${result.error}\nFell back to dark theme.`);
 						}
@@ -4942,19 +5022,14 @@ export class InteractiveMode {
 						const result = setTheme(themeName, true);
 						if (result.success) {
 							this.ui.invalidate();
+							this.invalidateLoaderInterruptSuffix();
 							this.ui.requestRender();
 						}
 					},
 					onHideThinkingBlockChange: (hidden) => {
 						this.hideThinkingBlock = hidden;
 						this.settingsManager.setHideThinkingBlock(hidden);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof AssistantMessageComponent) {
-								child.setHideThinkingBlock(hidden);
-							}
-						}
-						// rebuildChatFromMessages disposes + clears (avoids orphaned tickers).
-						this.rebuildChatFromMessages();
+						this.applyHideThinkingBlock(hidden);
 					},
 					onQuietStartupChange: (enabled) => {
 						this.settingsManager.setQuietStartup(enabled);
@@ -5411,6 +5486,11 @@ export class InteractiveMode {
 				},
 				initialSelectedId,
 				initialFilterMode,
+				// The debounced search-filter recompute (see TreeList.onFilterApplied)
+				// lands on a timer callback outside the input pipeline, so it needs an
+				// explicit repaint request — the same one the other tree-selector
+				// callbacks above already trigger for their own UI-affecting actions.
+				() => this.ui.requestRender(),
 			);
 			return { component: selector, focus: selector };
 		});
@@ -6076,6 +6156,9 @@ export class InteractiveMode {
 		try {
 			await this.session.reload();
 			this.keybindings.reload();
+			// Keybindings (and possibly the theme, below) just changed — drop the
+			// memoized loader interrupt-key suffix so the next render reflects them.
+			this.invalidateLoaderInterruptSuffix();
 			const activeHeader = this.customHeader ?? this.builtInHeader;
 			if (isExpandable(activeHeader)) {
 				activeHeader.setExpanded(this.toolOutputExpanded);

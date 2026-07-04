@@ -19,6 +19,13 @@ import {
 } from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
+// Shared, never-mutated empty id set returned by collectKittyImageIds on every
+// non-Kitty terminal (the overwhelming common case). Callers only ever read it
+// (iterate it in deleteKittyImages, or replace `previousKittyImageIds` wholesale
+// with a fresh return value) — nothing indexes into it and mutates in place, so
+// one shared instance is safe and skips a per-frame `new Set()` allocation plus
+// the O(total lines) scan that would otherwise fill it with nothing.
+const EMPTY_KITTY_IDS: Set<number> = new Set();
 const RENDER_FAULT_VISIBLE_MS = 5000;
 const RENDER_FAULT_MAX_MESSAGE_WIDTH = 240;
 const ANSI_ESCAPE_PATTERN = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)?|_[^\x07]*(?:\x07|\x1b\\)?|.)/g;
@@ -327,10 +334,18 @@ export class Container implements Component {
 	// cached array in place). When width, the child list, and every child's
 	// returned array reference all match last frame, the previously flattened
 	// output is byte-identical and is reused without re-pushing. assertComponentWidth
-	// still runs per child every frame (it is gated by PIT_RENDER_ASSERT).
+	// still runs per child every frame (it is gated by PIT_RENDER_ASSERT). When only
+	// a suffix of children changed (same width/child-count), render() reuses the
+	// unchanged prefix via slice() instead of rebuilding the whole array — see
+	// flattenCacheChildOffsets below.
 	private flattenCacheWidth = -1;
 	private flattenCacheChildOutputs: string[][] = [];
 	private flattenCacheLines: string[] = [];
+	// Per-child starting offset into flattenCacheLines from the last flatten
+	// (full rebuild or prefix-reused — see render()). Always resized/recomputed
+	// in lockstep with flattenCacheChildOutputs, so it is safe to index once
+	// `flattenCacheChildOutputs.length === children.length` holds.
+	private flattenCacheChildOffsets: number[] = [];
 
 	addChild(component: Component): void {
 		this.children.push(component);
@@ -356,7 +371,14 @@ export class Container implements Component {
 	render(width: number): string[] {
 		const children = this.children;
 		const childOutputs = new Array<string[]>(children.length);
-		let reusable = this.flattenCacheWidth === width && this.flattenCacheChildOutputs.length === children.length;
+		// sameShape: width and child count match last frame, so flattenCacheChildOffsets
+		// (computed against that same shape) is valid for prefix reuse below.
+		const sameShape = this.flattenCacheWidth === width && this.flattenCacheChildOutputs.length === children.length;
+		let reusable = sameShape;
+		// First index (in left-to-right scan order) whose child output array reference
+		// changed. Only meaningful when sameShape held for the whole scan, since the
+		// `reusable &&` guard below stops updating it the moment shape mismatches.
+		let minChangedIndex = -1;
 		for (let i = 0; i < children.length; i++) {
 			let childLines: string[];
 			try {
@@ -366,12 +388,44 @@ export class Container implements Component {
 			}
 			if (renderAssertEnabled) assertComponentWidth(children[i], childLines, width);
 			childOutputs[i] = childLines;
-			if (reusable && childLines !== this.flattenCacheChildOutputs[i]) reusable = false;
+			if (reusable && childLines !== this.flattenCacheChildOutputs[i]) {
+				reusable = false;
+				minChangedIndex = i;
+			}
 		}
 		if (reusable) return this.flattenCacheLines;
 
+		// Prefix reuse: every child before minChangedIndex produced byte-identical
+		// output to last frame (same width/child-count, and the scan above never
+		// flagged them), so splice the new tail onto a slice() of the unchanged
+		// prefix instead of re-pushing every child's lines. This is the dominant
+		// win during streaming, where typically only the last child (or line)
+		// changes per frame. Still returns a brand-new array (slice() + push),
+		// preserving the render() contract.
+		if (sameShape && minChangedIndex !== -1) {
+			const offset = this.flattenCacheChildOffsets[minChangedIndex] ?? 0;
+			const lines = this.flattenCacheLines.slice(0, offset);
+			const offsets = this.flattenCacheChildOffsets;
+			let cursor = offset;
+			for (let i = minChangedIndex; i < childOutputs.length; i++) {
+				offsets[i] = cursor;
+				const childLines = childOutputs[i];
+				for (let j = 0; j < childLines.length; j++) {
+					lines.push(childLines[j]);
+				}
+				cursor += childLines.length;
+			}
+			this.flattenCacheWidth = width;
+			this.flattenCacheChildOutputs = childOutputs;
+			this.flattenCacheLines = lines;
+			this.flattenCacheChildOffsets = offsets;
+			return lines;
+		}
+
 		const lines: string[] = [];
+		const offsets = new Array<number>(childOutputs.length);
 		for (let i = 0; i < childOutputs.length; i++) {
+			offsets[i] = lines.length;
 			const childLines = childOutputs[i];
 			for (let j = 0; j < childLines.length; j++) {
 				lines.push(childLines[j]);
@@ -380,6 +434,7 @@ export class Container implements Component {
 		this.flattenCacheWidth = width;
 		this.flattenCacheChildOutputs = childOutputs;
 		this.flattenCacheLines = lines;
+		this.flattenCacheChildOffsets = offsets;
 		return lines;
 	}
 }
@@ -401,6 +456,9 @@ export class TUI extends Container {
 	private renderRequested = false;
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
+	// Guards against registering more than one onDrain() callback per
+	// backpressure episode (see _doRenderCore); cleared when that callback fires.
+	private drainCallbackRegistered = false;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
 	// Shared animation ticker: a single timer drives every animated component
 	// (spinners, pulses) off one monotonic clock so their phases stay locked and a
@@ -436,7 +494,28 @@ export class TUI extends Container {
 	// each call so they can never drift from the array we return.
 	private resetInputCache: string[] = [];
 	private resetOutputCache: string[] = [];
+	// Double-buffer pool backing resetInputCache/resetOutputCache. Rebuilding
+	// nextInput/nextOutput used to allocate two N-length arrays on every frame
+	// where at least one line changed; instead we keep two (input, output) pairs
+	// and alternate between them, resizing (`.length =`) rather than allocating.
+	// nextInput never escapes this class, so its slot is always safe to reuse.
+	// nextOutput *is* returned and becomes `this.previousLines` — see the guard
+	// in applyLineResets before either slot is reused.
+	private resetBufferInputA: string[] = [];
+	private resetBufferOutputA: string[] = [];
+	private resetBufferInputB: string[] = [];
+	private resetBufferOutputB: string[] = [];
+	private resetBufferUseA = true;
 	private diffScanCountForTest = 0;
+	// Per-line memoization of visibleWidth(line), consumed by clampLineToWidth on
+	// both the full-redraw and differential paths. fullRender (triggered by a
+	// terminal resize) walks *every* rendered line through clampLineToWidth even
+	// though a resize never changes a line's content — without this memo that
+	// re-segments the whole transcript on every resize. FIFO-evicted with the
+	// same cap-scales-with-the-frame pattern as resetCache (see WIDTH_CACHE_MIN/
+	// WIDTH_CACHE_HARD_MAX below); keyed by line content (Map value equality), so
+	// a hit doesn't require object identity.
+	private readonly widthCache = new Map<string, number>();
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
@@ -704,7 +783,9 @@ export class TUI extends Container {
 				}
 				this.renderRequested = false;
 				this.lastRenderAt = performance.now();
-				this.doRender();
+				// force=true: a resize or an explicit hard-reset must always paint, even
+				// if stdout is currently backpressured (see _doRenderCore).
+				this.doRender(true);
 			});
 			return;
 		}
@@ -1098,6 +1179,11 @@ export class TUI extends Container {
 	private static readonly RESET_CACHE_MIN = 4096;
 	// Hard ceiling so the cache can't grow without bound on an enormous transcript.
 	private static readonly RESET_CACHE_HARD_MAX = 1 << 16; // 65536 lines
+	// Same floor/ceiling pattern as RESET_CACHE_MIN/RESET_CACHE_HARD_MAX, but for
+	// widthCache (see field comment above) — a separate Map with its own eviction
+	// bookkeeping so the two caches' hit-rates can't starve each other.
+	private static readonly WIDTH_CACHE_MIN = 4096;
+	private static readonly WIDTH_CACHE_HARD_MAX = 1 << 16;
 
 	private applyLineResets(lines: string[]): string[] {
 		const reset = TUI.SEGMENT_RESET;
@@ -1123,14 +1209,37 @@ export class TUI extends Container {
 		// Rebuilt this frame so it can't drift from the array returned. Holds the
 		// pre-reset input (key for the pointer compare) and its post-reset output
 		// at each index, for next frame's reference fast path.
-		const nextInput = new Array<string>(lines.length);
-		const nextOutput = new Array<string>(lines.length);
-		// Read-only over `lines`, write into the freshly allocated `nextOutput`
-		// (which is returned). Not mutating the input matters: the input may be a
-		// Container's memoized flatten array (see Container.render) — mutating it
-		// in place would corrupt that cache (double-applied resets, broken
-		// reference fast-path) on the next frame. nextOutput is allocated anyway
-		// for the reference cache, so returning it costs no extra array.
+		//
+		// Double-buffer pool: alternate between two (input, output) pairs across
+		// frames instead of allocating two fresh N-length arrays every time a line
+		// changed. nextInput never leaves this method, so its slot is always safe
+		// to reuse. nextOutput *is* returned and gets committed as `this.previousLines`
+		// at the end of a successful frame (see doRender) — but if a *later* step in
+		// this same frame throws, doRender's outer try/catch means previousLines is
+		// never committed even though resetOutputCache (and this pool) already moved
+		// on. A subsequent frame could then be offered the very buffer that is still
+		// aliased by the stale `this.previousLines`; mutating it in place here would
+		// corrupt the last committed screen state the next frame's diff depends on.
+		// Guard by falling back to a fresh allocation whenever the candidate output
+		// buffer is currently aliased (by previousLines, or by this frame's own
+		// prevOutput, which the loop below is still reading via prevOutput[i]) — the
+		// pool self-heals next frame once the stale alias is gone.
+		const useBufferA = this.resetBufferUseA;
+		this.resetBufferUseA = !useBufferA;
+		let nextInput = useBufferA ? this.resetBufferInputA : this.resetBufferInputB;
+		let nextOutput = useBufferA ? this.resetBufferOutputA : this.resetBufferOutputB;
+		if (nextOutput === this.previousLines || nextOutput === prevOutput) {
+			nextInput = new Array<string>(lines.length);
+			nextOutput = new Array<string>(lines.length);
+		} else {
+			nextInput.length = lines.length;
+			nextOutput.length = lines.length;
+		}
+		// Read-only over `lines`, write into `nextOutput` (which is returned). Not
+		// mutating the input matters: the input may be a Container's memoized
+		// flatten array (see Container.render) — mutating it in place would corrupt
+		// that cache (double-applied resets, broken reference fast-path) on the
+		// next frame.
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
 			// Same string object as this index last frame → reuse its reset output
@@ -1164,6 +1273,16 @@ export class TUI extends Container {
 			nextInput[i] = line;
 			nextOutput[i] = normalized;
 		}
+		// Store back into whichever slot was chosen (even if the guard above forced
+		// a fresh allocation this frame, replacing the stale aliased buffer heals
+		// the pool for the next frame).
+		if (useBufferA) {
+			this.resetBufferInputA = nextInput;
+			this.resetBufferOutputA = nextOutput;
+		} else {
+			this.resetBufferInputB = nextInput;
+			this.resetBufferOutputB = nextOutput;
+		}
 		this.resetInputCache = nextInput;
 		this.resetOutputCache = nextOutput;
 		return nextOutput;
@@ -1183,6 +1302,11 @@ export class TUI extends Container {
 	}
 
 	private collectKittyImageIds(lines: string[]): Set<number> {
+		// extractKittyImageIds already no-ops per line under this guard, but this
+		// still has to call it once per line and allocate a fresh Set every frame
+		// (called on every render — see fullRender/the diff paths below) just to
+		// discover it's empty. Skip straight to the shared empty set instead.
+		if (getCapabilities().images !== "kitty") return EMPTY_KITTY_IDS;
 		const ids = new Set<number>();
 		for (const line of lines) {
 			for (const id of extractKittyImageIds(line)) {
@@ -1201,6 +1325,10 @@ export class TUI extends Container {
 	}
 
 	private expandLastChangedForKittyImages(firstChanged: number, lastChanged: number): number {
+		// No Kitty images can exist in previousLines on a non-Kitty terminal (see
+		// extractKittyImageIds' guard), so the walk below can never find one to
+		// expand into — skip it and the per-line call entirely.
+		if (getCapabilities().images !== "kitty") return lastChanged;
 		let expandedLastChanged = lastChanged;
 		for (let i = firstChanged; i < this.previousLines.length; i++) {
 			if (extractKittyImageIds(this.previousLines[i]).length > 0) {
@@ -1212,6 +1340,9 @@ export class TUI extends Container {
 
 	private deleteChangedKittyImages(firstChanged: number, lastChanged: number): string {
 		if (firstChanged < 0 || lastChanged < firstChanged) return "";
+		// Same non-Kitty short-circuit as expandLastChangedForKittyImages: nothing
+		// in previousLines can hold a Kitty id, so skip the scan.
+		if (getCapabilities().images !== "kitty") return "";
 
 		const ids = new Set<number>();
 		const maxLine = Math.min(lastChanged, this.previousLines.length - 1);
@@ -1341,6 +1472,29 @@ export class TUI extends Container {
 		}
 	}
 
+	/** Memoized visibleWidth(line); see the widthCache field comment. */
+	private measureWidthCached(line: string, transcriptLen: number): number {
+		const cached = this.widthCache.get(line);
+		if (cached !== undefined) return cached;
+		const w = visibleWidth(line);
+		const cap = Math.min(TUI.WIDTH_CACHE_HARD_MAX, Math.max(TUI.WIDTH_CACHE_MIN, transcriptLen * 2));
+		if (this.widthCache.size >= cap) {
+			// FIFO eviction: drop the oldest insertion. Map iteration is insertion-ordered.
+			const oldest = this.widthCache.keys().next().value;
+			if (oldest !== undefined) this.widthCache.delete(oldest);
+		}
+		this.widthCache.set(line, w);
+		return w;
+	}
+
+	/**
+	 * Entries currently held in the per-line width cache. Test-only observability
+	 * mirroring getResetCacheSizeForTest().
+	 */
+	getWidthCacheSizeForTest(): number {
+		return this.widthCache.size;
+	}
+
 	/**
 	 * Last-resort width guard applied to every line just before it reaches the
 	 * terminal, on BOTH the differential and full-redraw paths, so neither can
@@ -1352,7 +1506,7 @@ export class TUI extends Container {
 	 * visible width).
 	 */
 	private clampLineToWidth(line: string, lineIndex: number, width: number, allLines: string[]): string {
-		if (isImageLine(line) || visibleWidth(line) <= width) return line;
+		if (isImageLine(line) || this.measureWidthCached(line, allLines.length) <= width) return line;
 		if (renderAssertEnabled) {
 			this.logRenderOverflow(lineIndex, line, width, allLines);
 			this.stop(); // Clean up terminal state before throwing.
@@ -1406,9 +1560,9 @@ export class TUI extends Container {
 		return [truncateToWidth(`! ${label}${count}: ${this.renderFault.message}`, width, "…")];
 	}
 
-	private doRender(): void {
+	private doRender(force = false): void {
 		try {
-			this._doRenderCore();
+			this._doRenderCore(force);
 		} catch (error) {
 			// doRender runs from a nextTick/timer callback, so a throw from any
 			// component render() (markdown, an extension overlay, compositeOverlays)
@@ -1420,8 +1574,26 @@ export class TUI extends Container {
 		}
 	}
 
-	private _doRenderCore(): void {
+	private _doRenderCore(force = false): void {
 		if (this.stopped) return;
+		// Backpressure: skip producing/writing a new frame while stdout's buffer is
+		// full (a slow consumer — SSH, a piped terminal — would otherwise let frames
+		// queue up in process RAM with nothing to bound them). Nothing is lost by
+		// skipping: every frame derives from current state, so the next render
+		// (triggered here once the stream drains) paints whatever is current then.
+		// `force` (resize / requestRender(true)) always bypasses this — those need
+		// to paint immediately regardless of backpressure.
+		if (!force && this.terminal.isBackpressured?.()) {
+			this.renderRequested = true;
+			if (!this.drainCallbackRegistered) {
+				this.drainCallbackRegistered = true;
+				this.terminal.onDrain?.(() => {
+					this.drainCallbackRegistered = false;
+					this.requestRender();
+				});
+			}
+			return;
+		}
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
 		const widthChanged = this.previousWidth !== 0 && this.previousWidth !== width;

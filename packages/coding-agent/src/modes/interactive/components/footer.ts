@@ -1,10 +1,11 @@
 import { getRuntimeDiagnostics } from "@pit/ai";
 import { type Component, type TUI, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
+import type { ContextUsage } from "../../../core/extensions/index.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import type { RecoveryLevel } from "../../../core/session-recovery.ts";
 import { isReducedMotion } from "../../../utils/env-flags.ts";
-import { buildWorkspaceCwdLabels, formatGitBranchWithDiff } from "../display-utils.ts";
+import { buildWorkspaceCwdLabels, formatGitBranchWithDiff, type WorkspaceCwdLabels } from "../display-utils.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { CONTEXT_USAGE_WARN_PERCENT, theme } from "../theme/theme.ts";
 import { COLOR_EASE_MS } from "./color-ease.ts";
@@ -161,6 +162,19 @@ export class FooterComponent implements Component {
 	private fusionLiveActive = false;
 	private renderCacheKey = "";
 	private renderCacheLines: string[] | null = null;
+	// Per-frame memoization for buildRenderCacheKey()'s expensive-ish fields, so a
+	// cache MISS doesn't redo the same work twice (once for the key, once in the
+	// render() body) and a cache HIT doesn't redo it at all. Each is invalidated by
+	// its own version/identity check rather than time, so staleness is impossible:
+	// a stale version key simply recomputes on the next read.
+	private cachedExtensionStatusesVersion = -1;
+	private cachedExtensionStatusesSerialized = "";
+	private cachedCwdLabelsKey = "";
+	private cachedCwdLabels: WorkspaceCwdLabels | null = null;
+	// Set at the end of buildRenderCacheKey() and read back by render() a few lines
+	// later in the SAME call (render() always calls buildRenderCacheKey() first) —
+	// never read across frames, so there is no staleness window.
+	private lastContextUsageForRender: ContextUsage | undefined;
 	private ui: TUI | undefined;
 	private displayedFill = 0;
 	private fillEaseFrom = 0;
@@ -350,16 +364,48 @@ export class FooterComponent implements Component {
 		return `fusion: ${collapseAdjacent(labels)}`;
 	}
 
-	private buildRenderCacheKey(width: number): string {
-		const state = this.session.state;
-		const contextUsage = this.session.getContextUsage();
-		const entries = this.session.sessionManager.getEntries();
-		const goalStatus = this.session.goalStatusLine() ?? "";
-		const mode = this.getPermissionMode() ?? "";
-		const extensionStatuses = Array.from(this.footerData.getExtensionStatuses().entries())
+	/** Extension-status map serialized + sorted for the cache key, memoized by
+	 * `getStatusVersion()` (bumped on every status mutation) so an unrelated
+	 * render (no status change) skips the Array.from/sort/map/join every frame. */
+	private getSerializedExtensionStatuses(): string {
+		const version = this.footerData.getStatusVersion();
+		if (version === this.cachedExtensionStatusesVersion) {
+			return this.cachedExtensionStatusesSerialized;
+		}
+		const serialized = Array.from(this.footerData.getExtensionStatuses().entries())
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([k, v]) => `${k}:${v}`)
 			.join(";");
+		this.cachedExtensionStatusesVersion = version;
+		this.cachedExtensionStatusesSerialized = serialized;
+		return serialized;
+	}
+
+	/** cwd/shell labels, memoized by the (cwd, launchCwd, repoDir) tuple that fully
+	 * determines them — buildWorkspaceCwdLabels() does path.resolve/relative work
+	 * that is pure waste to redo every frame while the session cwd hasn't moved.
+	 * Shared by buildRenderCacheKey() and render() so a cache MISS computes it once. */
+	private getCwdLabels(): WorkspaceCwdLabels {
+		const cwd = this.session.sessionManager.getCwd();
+		const repoDir = this.footerData.getRepoDir();
+		const key = `${cwd}\u0000${this.launchCwd}\u0000${repoDir ?? ""}`;
+		if (this.cachedCwdLabels !== null && key === this.cachedCwdLabelsKey) {
+			return this.cachedCwdLabels;
+		}
+		const labels = buildWorkspaceCwdLabels(cwd, this.launchCwd, repoDir);
+		this.cachedCwdLabelsKey = key;
+		this.cachedCwdLabels = labels;
+		return labels;
+	}
+
+	private buildRenderCacheKey(width: number): string {
+		const state = this.session.state;
+		const contextUsage = this.session.getContextUsage();
+		this.lastContextUsageForRender = contextUsage;
+		const entries = this.session.sessionManager.getEntries();
+		const goalStatus = this.session.goalStatusLine() ?? "";
+		const mode = this.getPermissionMode() ?? "";
+		const extensionStatuses = this.getSerializedExtensionStatuses();
 		const tokens = contextUsage?.tokens ?? 0;
 		const percent = contextUsage?.percent ?? -1;
 		const wireTokens = contextUsage?.wireTokens ?? tokens;
@@ -374,7 +420,7 @@ export class FooterComponent implements Component {
 				? "none"
 				: `${diffStats.files}:${diffStats.insertions}:${diffStats.deletions}:${diffVersion}`;
 		const cwd = this.session.sessionManager.getCwd();
-		const cwdLabels = buildWorkspaceCwdLabels(cwd, this.launchCwd, this.footerData.getRepoDir());
+		const cwdLabels = this.getCwdLabels();
 		const sessionName = this.session.sessionManager.getSessionName() ?? "";
 		const overthinkGuardCount = this.getOverthinkGuardCount();
 		const recoveryLevel = this.getRecoveryLevel();
@@ -415,8 +461,10 @@ export class FooterComponent implements Component {
 		const state = this.session.state;
 		const totals = this.getCumulativeTotals();
 
-		// Context usage from session (handles compaction correctly).
-		const contextUsage = this.session.getContextUsage();
+		// Context usage from session (handles compaction correctly). Reuses the value
+		// buildRenderCacheKey() just computed above (this render() call is always
+		// preceded by that call, immediately, with no code in between).
+		const contextUsage = this.lastContextUsageForRender;
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
@@ -426,11 +474,7 @@ export class FooterComponent implements Component {
 		// without competing with the model name. The cwd is compacted (repo-relative
 		// when inside a git repo, mid-path ellipsis otherwise) so a deep absolute
 		// path never eats the model name on the right.
-		const cwdLabels = buildWorkspaceCwdLabels(
-			this.session.sessionManager.getCwd(),
-			this.launchCwd,
-			this.footerData.getRepoDir(),
-		);
+		const cwdLabels = this.getCwdLabels();
 		let pwd = theme.fg("muted", cwdLabels.session);
 		const branch = this.footerData.getGitBranch();
 		const diffStats = this.footerData.getGitDiffStats();

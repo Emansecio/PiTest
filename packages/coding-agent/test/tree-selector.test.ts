@@ -1,5 +1,5 @@
 import { setKeybindings } from "@pit/tui";
-import { beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type {
 	ModelChangeEntry,
@@ -272,20 +272,85 @@ describe("TreeSelectorComponent", () => {
 			const list = selector.getTreeList();
 			expect(list.getSelectedNode()?.entry.id).toBe("asst-2");
 
-			// Type a search that matches only the ancestor user-1
-			for (const ch of "zebra") {
-				selector.handleInput(ch);
+			// Search-query edits are debounced (~75ms) to coalesce rapid keystrokes
+			// into a single recompute — advance past the window before asserting.
+			vi.useFakeTimers();
+			try {
+				// Type a search that matches only the ancestor user-1
+				for (const ch of "zebra") {
+					selector.handleInput(ch);
+				}
+				vi.advanceTimersByTime(100);
+
+				// Only user-1 remains visible; selection walked up the parent chain to it
+				expect(list.getSelectedNode()?.entry.id).toBe("user-1");
+				const render = list.render(200).join("\n");
+				expect(render).toContain("(1/1)");
+				expect(render).toContain("zebra start");
+
+				// Clearing the search restores the full tree and re-anchors on user-1
+				selector.handleInput("\x1b");
+				expect(list.getSelectedNode()?.entry.id).toBe("user-1");
+			} finally {
+				vi.useRealTimers();
 			}
+		});
+	});
 
-			// Only user-1 remains visible; selection walked up the parent chain to it
-			expect(list.getSelectedNode()?.entry.id).toBe("user-1");
-			const render = list.render(200).join("\n");
-			expect(render).toContain("(1/1)");
-			expect(render).toContain("zebra start");
+	describe("debounced filter apply callback (onFilterApplied)", () => {
+		// TreeList.onFilterApplied lets the search-filter debounce (~75ms) notify its
+		// owner to repaint once the timer callback lands outside the input pipeline —
+		// see scheduleApplyFilter() in tree-selector.ts.
+		function buildSimpleSelector() {
+			const entries = [userMessage("user-1", null, "hello"), assistantMessage("asst-1", "user-1", "hi")];
+			const tree = buildTree(entries);
+			return new TreeSelectorComponent(
+				tree,
+				"asst-1",
+				24,
+				() => {},
+				() => {},
+			);
+		}
 
-			// Clearing the search restores the full tree and re-anchors on user-1
-			selector.handleInput("\x1b");
-			expect(list.getSelectedNode()?.entry.id).toBe("user-1");
+		test("fires exactly once after the debounce timer elapses for a pending filter", () => {
+			const selector = buildSimpleSelector();
+			const list = selector.getTreeList();
+			const onFilterApplied = vi.fn();
+			list.onFilterApplied = onFilterApplied;
+
+			vi.useFakeTimers();
+			try {
+				selector.handleInput("h"); // schedules a debounced applyFilter
+				expect(onFilterApplied).not.toHaveBeenCalled();
+
+				vi.advanceTimersByTime(100);
+
+				expect(onFilterApplied).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		test("does not fire when navigation flushes the pending filter synchronously first", () => {
+			const selector = buildSimpleSelector();
+			const list = selector.getTreeList();
+			const onFilterApplied = vi.fn();
+			list.onFilterApplied = onFilterApplied;
+
+			vi.useFakeTimers();
+			try {
+				selector.handleInput("h"); // schedules a debounced applyFilter
+				// Navigation flushes the pending filter synchronously (flushPendingFilter),
+				// clearing the timer before it would otherwise fire.
+				selector.handleInput("\x1b[B"); // DOWN
+
+				vi.advanceTimersByTime(100);
+
+				expect(onFilterApplied).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 	});
 

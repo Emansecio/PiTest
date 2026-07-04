@@ -104,6 +104,17 @@ export class Loader extends Text {
 	private elapsedPaused = false;
 	private pausedAtMs = 0;
 
+	// Wraps the inner Text's rendered lines with a leading blank line. The
+	// loader stays visible for the whole streaming turn, so re-allocating this
+	// wrapper array every frame — even when the inner Text returned its cached
+	// array unchanged — would force the root Container to re-flatten the whole
+	// transcript each frame (see Component.render's memoization contract in
+	// tui.ts). Cache the wrapper keyed on the inner array's *reference*: as long
+	// as Text.render(width) keeps returning the same instance, hand back the
+	// same wrapped instance too.
+	private wrappedInnerRef: string[] | null = null;
+	private wrappedLines: string[] | null = null;
+
 	constructor(
 		ui: TUI,
 		spinnerColor: LoaderColorFn | LoaderColorFn[],
@@ -123,7 +134,20 @@ export class Loader extends Text {
 	}
 
 	render(width: number): string[] {
-		return ["", ...super.render(width)];
+		const inner = super.render(width);
+		if (this.wrappedLines !== null && this.wrappedInnerRef === inner) {
+			return this.wrappedLines;
+		}
+		const wrapped = ["", ...inner];
+		this.wrappedInnerRef = inner;
+		this.wrappedLines = wrapped;
+		return wrapped;
+	}
+
+	invalidate(): void {
+		super.invalidate();
+		this.wrappedInnerRef = null;
+		this.wrappedLines = null;
 	}
 
 	start(): void {

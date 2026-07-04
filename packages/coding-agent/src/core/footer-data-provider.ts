@@ -127,6 +127,10 @@ export class FooterDataProvider {
 	private cwd: string;
 	private static readonly WATCH_DEBOUNCE_MS = 500;
 	private static readonly DIFF_POLL_MS = 5000;
+	/** Adaptive poll ceiling — an idle repo backs all the way off to once a minute. */
+	private static readonly DIFF_POLL_MAX_MS = 60_000;
+	/** Consecutive no-change polls before the interval doubles. */
+	private static readonly DIFF_POLL_BACKOFF_THRESHOLD = 3;
 
 	private extensionStatuses = new Map<string, string>();
 	private statusVersion = 0;
@@ -144,7 +148,12 @@ export class FooterDataProvider {
 	private availableProviderCount = 0;
 	private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 	private diffRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-	private diffPollTimer: ReturnType<typeof setInterval> | null = null;
+	private diffPollTimer: ReturnType<typeof setTimeout> | null = null;
+	// Current adaptive poll cadence and how many consecutive polls came back with
+	// unchanged stats. Reset to the base cadence by resetDiffPollBackoff() whenever
+	// something suggests the working tree may be active again.
+	private diffPollIntervalMs = FooterDataProvider.DIFF_POLL_MS;
+	private diffPollNoChangeStreak = 0;
 	private gitWatcherRetryTimer: ReturnType<typeof setTimeout> | null = null;
 	private refreshInFlight = false;
 	private refreshPending = false;
@@ -194,11 +203,25 @@ export class FooterDataProvider {
 		return () => this.branchChangeCallbacks.delete(callback);
 	}
 
-	/** Working-tree diff stats, null when cwd is outside a git repo. */
+	/**
+	 * Working-tree diff stats, null when cwd is outside a git repo OR the async
+	 * refresh (kicked off by the constructor / setCwd()) hasn't resolved yet.
+	 *
+	 * This used to fall back to a synchronous `git diff` + `git status` spawn (two
+	 * blocking processes) the first time it was read before that async refresh
+	 * landed — reachable from the very first footer render, which can race the
+	 * constructor's async work and block the event loop at startup. Returning null
+	 * and nudging the async refresh along is a few hundred ms of "no diff chip yet"
+	 * on a cold start, which is a fine trade for never blocking the render loop.
+	 */
 	getGitDiffStats(): GitDiffStats | null {
 		if (!this.gitPaths) return null;
 		if (this.cachedDiffStats === undefined) {
-			this.cachedDiffStats = this.resolveGitDiffStatsSync();
+			// Already in flight from the constructor/setCwd() in the common case;
+			// this is a no-op nudge (refreshGitDiffStatsAsync() coalesces via
+			// diffRefreshInFlight/diffRefreshPending) rather than a duplicate spawn.
+			void this.refreshGitDiffStatsAsync();
+			return null;
 		}
 		return this.cachedDiffStats;
 	}
@@ -279,7 +302,7 @@ export class FooterDataProvider {
 			this.diffRefreshTimer = null;
 		}
 		if (this.diffPollTimer) {
-			clearInterval(this.diffPollTimer);
+			clearTimeout(this.diffPollTimer);
 			this.diffPollTimer = null;
 		}
 		this.clearGitWatchers();
@@ -297,6 +320,9 @@ export class FooterDataProvider {
 
 	private scheduleRefresh(): void {
 		if (this.disposed || this.refreshTimer) return;
+		// A HEAD/reftable watcher firing means the repo is active — snap the diff
+		// poll cadence back to the base interval (see resetDiffPollBackoff()).
+		this.resetDiffPollBackoff();
 		if (this.refreshInFlight) {
 			this.refreshPending = true;
 			return;
@@ -367,28 +393,6 @@ export class FooterDataProvider {
 		}
 	}
 
-	private resolveGitDiffStatsSync(): GitDiffStats | null {
-		if (!this.gitPaths) return null;
-		const repoDir = this.gitPaths.repoDir;
-		const numstat = spawnSync("git", ["--no-optional-locks", "diff", "--numstat", "HEAD"], {
-			cwd: repoDir,
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		});
-		const porcelain = spawnSync("git", ["--no-optional-locks", "status", "--porcelain", "-u", "normal"], {
-			cwd: repoDir,
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		});
-		if (numstat.status !== 0 && porcelain.status !== 0) {
-			return null;
-		}
-		const { insertions, deletions } =
-			numstat.status === 0 ? parseGitDiffNumstat(numstat.stdout) : { insertions: 0, deletions: 0 };
-		const files = porcelain.status === 0 ? parseGitStatusPorcelainFileCount(porcelain.stdout) : 0;
-		return { files, insertions, deletions };
-	}
-
 	private resolveGitDiffStatsAsync(repoDir: string): Promise<GitDiffStats | null> {
 		return new Promise((resolvePromise) => {
 			execFile(
@@ -419,6 +423,10 @@ export class FooterDataProvider {
 
 	private scheduleDiffRefresh(): void {
 		if (this.disposed || this.diffRefreshTimer) return;
+		// An index-watcher event or an explicit scheduleWorkingTreeRefresh() (tool
+		// callback) both mean the working tree may be active again — snap the poll
+		// cadence back to the base interval (see resetDiffPollBackoff()).
+		this.resetDiffPollBackoff();
 		if (this.diffRefreshInFlight) {
 			this.diffRefreshPending = true;
 			return;
@@ -459,15 +467,67 @@ export class FooterDataProvider {
 	}
 
 	private startDiffPoll(): void {
+		this.diffPollIntervalMs = FooterDataProvider.DIFF_POLL_MS;
+		this.diffPollNoChangeStreak = 0;
+		this.scheduleNextDiffPoll();
+	}
+
+	/**
+	 * Reset the adaptive diff-poll cadence to the base interval and reschedule the
+	 * next poll from now. Called whenever something suggests the working tree may
+	 * be active again: a git watcher firing (scheduleRefresh/scheduleDiffRefresh)
+	 * or an explicit scheduleWorkingTreeRefresh() from a tool callback (which
+	 * itself funnels through scheduleDiffRefresh()). A change actually observed by
+	 * runDiffPoll() also resets it, from within runDiffPoll() directly.
+	 */
+	private resetDiffPollBackoff(): void {
+		this.diffPollIntervalMs = FooterDataProvider.DIFF_POLL_MS;
+		this.diffPollNoChangeStreak = 0;
+		this.scheduleNextDiffPoll();
+	}
+
+	private scheduleNextDiffPoll(): void {
 		if (this.diffPollTimer) {
-			clearInterval(this.diffPollTimer);
+			clearTimeout(this.diffPollTimer);
 			this.diffPollTimer = null;
 		}
 		if (this.disposed || !this.gitPaths) return;
-		this.diffPollTimer = setInterval(() => {
-			if (this.disposed) return;
-			this.scheduleDiffRefresh();
-		}, FooterDataProvider.DIFF_POLL_MS);
+		this.diffPollTimer = setTimeout(() => {
+			this.diffPollTimer = null;
+			void this.runDiffPoll();
+		}, this.diffPollIntervalMs);
+		this.diffPollTimer.unref?.();
+	}
+
+	/**
+	 * Own-clock poll tick: asks git directly (bypassing the watcher debounce —
+	 * there is no burst to coalesce on our own timer) and adapts the cadence based
+	 * on whether anything changed. `DIFF_POLL_BACKOFF_THRESHOLD` consecutive quiet
+	 * polls double the interval (capped at `DIFF_POLL_MAX_MS`), so an idle session
+	 * spawns git less and less often over time; any observed change — or an
+	 * external reset trigger, see resetDiffPollBackoff() — snaps back to the base
+	 * cadence. Note: if a refresh triggered by a watcher happens to already be in
+	 * flight when this fires, refreshGitDiffStatsAsync() coalesces into it (via
+	 * diffRefreshPending) and returns immediately without new data yet — this poll
+	 * then reads "no change" for this cycle, which is harmless (just delays the
+	 * backoff by one tick).
+	 */
+	private async runDiffPoll(): Promise<void> {
+		if (this.disposed || !this.gitPaths) return;
+		const versionBefore = this.diffStatsVersion;
+		await this.refreshGitDiffStatsAsync();
+		if (this.disposed) return;
+		if (this.diffStatsVersion === versionBefore) {
+			this.diffPollNoChangeStreak++;
+			if (this.diffPollNoChangeStreak >= FooterDataProvider.DIFF_POLL_BACKOFF_THRESHOLD) {
+				this.diffPollIntervalMs = Math.min(this.diffPollIntervalMs * 2, FooterDataProvider.DIFF_POLL_MAX_MS);
+				this.diffPollNoChangeStreak = 0;
+			}
+		} else {
+			this.diffPollIntervalMs = FooterDataProvider.DIFF_POLL_MS;
+			this.diffPollNoChangeStreak = 0;
+		}
+		this.scheduleNextDiffPoll();
 	}
 
 	private clearGitWatchers(): void {

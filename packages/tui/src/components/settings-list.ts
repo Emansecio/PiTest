@@ -46,6 +46,13 @@ export class SettingsList implements Component {
 	private submenuComponent: Component | null = null;
 	private submenuItemIndex: number | null = null;
 
+	// Alignment column width, derived from `items` labels. Recomputing this
+	// with Math.max(...spread) on every render() is an O(items) allocation
+	// (spread materializes an intermediate array) that reruns on every frame
+	// the list is visible even though labels never change between renders.
+	// Cached lazily and invalidated only when `items` itself changes.
+	private maxLabelWidthCache: number | null = null;
+
 	constructor(
 		items: SettingItem[],
 		maxVisible: number,
@@ -75,7 +82,21 @@ export class SettingsList implements Component {
 	}
 
 	invalidate(): void {
+		this.maxLabelWidthCache = null;
 		this.submenuComponent?.invalidate?.();
+	}
+
+	/** Max label width across `items`, clamped to 30 and memoized until `items` changes. */
+	private getMaxLabelWidth(): number {
+		if (this.maxLabelWidthCache === null) {
+			let max = 0;
+			for (const item of this.items) {
+				const w = visibleWidth(item.label);
+				if (w > max) max = w;
+			}
+			this.maxLabelWidthCache = Math.min(30, max);
+		}
+		return this.maxLabelWidthCache;
 	}
 
 	render(width: number): string[] {
@@ -118,7 +139,7 @@ export class SettingsList implements Component {
 		const endIndex = Math.min(startIndex + this.maxVisible, displayItems.length);
 
 		// Calculate max label width for alignment
-		const maxLabelWidth = Math.min(30, Math.max(...this.items.map((item) => visibleWidth(item.label))));
+		const maxLabelWidth = this.getMaxLabelWidth();
 
 		// Render visible items
 		for (let i = startIndex; i < endIndex; i++) {

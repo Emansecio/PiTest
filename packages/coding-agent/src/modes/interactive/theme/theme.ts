@@ -771,15 +771,58 @@ export function getDefaultTheme(): string {
 // Use globalThis to share theme across module loaders (tsx + jiti in dev mode)
 const THEME_KEY = Symbol.for("@pit/coding-agent:theme");
 
+// Per-instance cache of bound methods for the `theme` Proxy below. Every
+// `theme.fg(...)` call was paying two Proxy traps: one for the `.fg` property
+// access, and a second, hidden one for every `this.something` access inside
+// the method body — because `theme.fg(...)` invokes `fg` with `this` set to
+// the Proxy itself (property access `a.b` binds `this` to `a`), not to the
+// real Theme instance. Binding the returned function to the real instance
+// (`v.bind(t)`) makes `this` inside the method the concrete Theme, so its
+// internal field/method access no longer round-trips through the trap.
+// Keyed by the real instance (never the Proxy) so a theme switch — which
+// always swaps in a brand-new Theme object (see setGlobalTheme call sites
+// below; none of them mutate an existing instance) — naturally lands on a
+// fresh, empty cache entry instead of serving stale bound methods.
+const boundMethodCache = new WeakMap<Theme, Map<string | symbol, unknown>>();
+
 // Export theme as a getter that reads from globalThis
 // This ensures all module instances (tsx, jiti) see the same theme
 export const theme: Theme = new Proxy({} as Theme, {
 	get(_target, prop) {
 		const t = (globalThis as Record<symbol, Theme>)[THEME_KEY];
 		if (!t) throw new Error("Theme not initialized. Call initTheme() first.");
-		return (t as unknown as Record<string | symbol, unknown>)[prop];
+		const value = (t as unknown as Record<string | symbol, unknown>)[prop];
+		if (typeof value !== "function") return value;
+		let cache = boundMethodCache.get(t);
+		if (!cache) {
+			cache = new Map();
+			boundMethodCache.set(t, cache);
+		}
+		let bound = cache.get(prop);
+		if (bound === undefined) {
+			bound = value.bind(t);
+			cache.set(prop, bound);
+		}
+		return bound;
 	},
 });
+
+/**
+ * Resolve a `Theme` reference to the concrete instance it points at. Plain
+ * `Theme` instances are returned unchanged; the shared `theme` Proxy above is
+ * resolved to whatever real instance currently lives behind `THEME_KEY`.
+ *
+ * Callers that key caches by theme identity (color-interpolation's RGB / LUT
+ * caches) need this: the Proxy's own object identity never changes across
+ * theme switches — only the instance behind it does — so keying a WeakMap by
+ * the Proxy directly would never invalidate on theme change.
+ */
+export function resolveThemeInstance(t: Theme): Theme {
+	if (t !== theme) return t;
+	const real = (globalThis as Record<symbol, Theme>)[THEME_KEY];
+	if (!real) throw new Error("Theme not initialized. Call initTheme() first.");
+	return real;
+}
 
 function setGlobalTheme(t: Theme): void {
 	(globalThis as Record<symbol, Theme>)[THEME_KEY] = t;

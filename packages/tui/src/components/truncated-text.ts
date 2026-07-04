@@ -9,17 +9,42 @@ export class TruncatedText implements Component {
 	private paddingX: number;
 	private paddingY: number;
 
+	// Cache for rendered output, memoized by (text, width) — mirrors Text's
+	// cache (see text.ts). TruncatedText re-renders every frame it's visible
+	// (per the Component memoization contract in tui.ts), so without this the
+	// indexOf/substring/truncateToWidth work (including grapheme segmentation
+	// for non-ASCII text) reran and allocated a fresh array on every frame even
+	// when nothing changed.
+	private cachedText?: string;
+	private cachedWidth?: number;
+	private cachedLines?: string[];
+
 	constructor(text: string, paddingX: number = 0, paddingY: number = 0) {
 		this.text = text;
 		this.paddingX = paddingX;
 		this.paddingY = paddingY;
 	}
 
+	/** Update the displayed text, reallocating the cache only when it actually changes. */
+	setText(text: string): void {
+		if (text === this.text) return;
+		this.text = text;
+		this.cachedText = undefined;
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
+	}
+
 	invalidate(): void {
-		// No cached state to invalidate currently
+		this.cachedText = undefined;
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
 	}
 
 	render(width: number): string[] {
+		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+
 		const result: string[] = [];
 
 		// Add vertical padding above (blank lines — the renderer owns clearing,
@@ -52,6 +77,10 @@ export class TruncatedText implements Component {
 		for (let i = 0; i < this.paddingY; i++) {
 			result.push("");
 		}
+
+		this.cachedText = this.text;
+		this.cachedWidth = width;
+		this.cachedLines = result;
 
 		return result;
 	}

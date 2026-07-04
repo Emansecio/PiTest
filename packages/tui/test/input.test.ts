@@ -639,5 +639,30 @@ describe("Input component", () => {
 			assert.strictEqual(calls.length, 0, "no truncation => no callback");
 			assert.strictEqual(input.getValue(), "hello world");
 		});
+
+		it("handles the bracketed-paste end marker split across two chunks", () => {
+			const input = new Input();
+			input.handleInput("\x1b[200~hello world");
+			// "\x1b[201~" (6 chars) delivered as two separate handleInput chunks.
+			input.handleInput("\x1b[20");
+			input.handleInput("1~");
+			assert.strictEqual(input.getValue(), "hello world");
+		});
+
+		it("reconstructs a paste fed as many small, arbitrarily-split chunks (windowed end-marker search)", () => {
+			const input = new Input();
+			input.handleInput("\x1b[200~");
+			const payload = "abcdefghij".repeat(2000); // 20,000 chars
+			let offset = 0;
+			while (offset < payload.length) {
+				const chunkLen = 1 + (offset % 7); // 1..7 chars per chunk, uneven on purpose
+				input.handleInput(payload.slice(offset, offset + chunkLen));
+				offset += chunkLen;
+			}
+			// Split the end marker itself across two more chunks.
+			input.handleInput("\x1b[20");
+			input.handleInput("1~");
+			assert.strictEqual(input.getValue(), payload);
+		});
 	});
 });

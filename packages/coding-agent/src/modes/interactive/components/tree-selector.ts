@@ -65,10 +65,30 @@ class TreeList implements Component {
 	private visibleChildrenMap: Map<string | null, string[]> = new Map();
 	private lastSelectedId: string | null = null;
 	private foldedNodes: Set<string> = new Set();
+	// Lowercased searchable text per node, memoized by node identity. getTree()
+	// (session-manager.ts) returns a fresh SessionTreeNode graph on every tree
+	// reload/reopen, so entries auto-invalidate: stale nodes become unreachable
+	// and GC-eligible instead of leaking across selector opens. The one in-place
+	// mutation within a single open — updateNodeLabel() — evicts its own node's
+	// entry below, since the label feeds getSearchableText().
+	private searchTextCache = new WeakMap<SessionTreeNode, string>();
+	// Debounce state for search-query edits (see handleInput's char/backspace
+	// branches): coalesces rapid keystrokes into a single applyFilter() recompute
+	// instead of re-scanning every node's searchable text per keystroke.
+	private static readonly SEARCH_DEBOUNCE_MS = 75;
+	private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+	private searchFilterPending = false;
 
 	public onSelect?: (entryId: string) => void;
 	public onCancel?: () => void;
 	public onLabelEdit?: (entryId: string, currentLabel: string | undefined) => void;
+	/** Invoked after a debounced applyFilter() lands outside the input pipeline, so the
+	 * owner can schedule a repaint. The synchronous filter paths (flushPendingFilter and
+	 * the direct filter-mode branches in handleInput) don't need this: their applyFilter()
+	 * runs inside handleInput, so the TUI's post-handleInput requestRender already covers
+	 * them. Only the setTimeout callback in scheduleApplyFilter fires after handleInput has
+	 * returned, so only it needs to explicitly ask for a repaint. */
+	public onFilterApplied?: () => void;
 
 	constructor(
 		tree: SessionTreeNode[],
@@ -325,7 +345,7 @@ class TreeList implements Component {
 
 			// Apply search filter
 			if (searchTokens.length > 0) {
-				const nodeText = this.getSearchableText(flatNode.node).toLowerCase();
+				const nodeText = this.getSearchableTextCached(flatNode.node);
 				return searchTokens.every((token) => nodeText.includes(token));
 			}
 
@@ -544,6 +564,15 @@ class TreeList implements Component {
 		return parts.join(" ");
 	}
 
+	/** Lowercased searchable text for `node`, memoized (see `searchTextCache`). */
+	private getSearchableTextCached(node: SessionTreeNode): string {
+		const cached = this.searchTextCache.get(node);
+		if (cached !== undefined) return cached;
+		const text = this.getSearchableText(node).toLowerCase();
+		this.searchTextCache.set(node, text);
+		return text;
+	}
+
 	invalidate(): void {}
 
 	getSearchQuery(): string {
@@ -559,6 +588,9 @@ class TreeList implements Component {
 			if (flatNode.node.entry.id === entryId) {
 				flatNode.node.label = label;
 				flatNode.node.labelTimestamp = label ? (labelTimestamp ?? new Date().toISOString()) : undefined;
+				// The label feeds getSearchableText() — evict so the next search
+				// reflects it instead of a stale memoized entry (see searchTextCache).
+				this.searchTextCache.delete(flatNode.node);
 				break;
 			}
 		}
@@ -882,13 +914,55 @@ class TreeList implements Component {
 		}
 	}
 
+	/** Debounce a searchQuery-driven applyFilter() recompute (see SEARCH_DEBOUNCE_MS). */
+	private scheduleApplyFilter(): void {
+		this.searchFilterPending = true;
+		if (this.searchDebounceTimer !== null) {
+			clearTimeout(this.searchDebounceTimer);
+		}
+		this.searchDebounceTimer = setTimeout(() => {
+			this.searchDebounceTimer = null;
+			this.searchFilterPending = false;
+			this.applyFilter();
+			// This runs on a timer callback, outside handleInput's call stack, so there's
+			// no post-handleInput requestRender to rely on — ask the owner to repaint.
+			this.onFilterApplied?.();
+		}, TreeList.SEARCH_DEBOUNCE_MS);
+	}
+
+	/** Cancel a pending debounced filter without applying it — used right before a
+	 * caller is about to call applyFilter() itself (e.g. clearing the search),
+	 * so the stale timer doesn't fire a redundant recompute afterward. */
+	private cancelPendingFilter(): void {
+		if (this.searchDebounceTimer !== null) {
+			clearTimeout(this.searchDebounceTimer);
+			this.searchDebounceTimer = null;
+		}
+		this.searchFilterPending = false;
+	}
+
+	/** Apply a pending debounced filter synchronously, so navigation/selection
+	 * never acts on a list that's stale relative to the last keystroke. */
+	private flushPendingFilter(): void {
+		if (this.searchDebounceTimer === null) return;
+		clearTimeout(this.searchDebounceTimer);
+		this.searchDebounceTimer = null;
+		if (this.searchFilterPending) {
+			this.searchFilterPending = false;
+			this.applyFilter();
+		}
+	}
+
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up")) {
+			this.flushPendingFilter();
 			this.selectedIndex = this.selectedIndex === 0 ? this.filteredNodes.length - 1 : this.selectedIndex - 1;
 		} else if (kb.matches(keyData, "tui.select.down")) {
+			this.flushPendingFilter();
 			this.selectedIndex = this.selectedIndex === this.filteredNodes.length - 1 ? 0 : this.selectedIndex + 1;
 		} else if (kb.matches(keyData, "app.tree.foldOrUp")) {
+			this.flushPendingFilter();
 			const currentId = this.filteredNodes[this.selectedIndex]?.node.entry.id;
 			if (currentId && this.isFoldable(currentId) && !this.foldedNodes.has(currentId)) {
 				this.foldedNodes.add(currentId);
@@ -897,6 +971,7 @@ class TreeList implements Component {
 				this.selectedIndex = this.findBranchSegmentStart("up");
 			}
 		} else if (kb.matches(keyData, "app.tree.unfoldOrDown")) {
+			this.flushPendingFilter();
 			const currentId = this.filteredNodes[this.selectedIndex]?.node.entry.id;
 			if (currentId && this.foldedNodes.has(currentId)) {
 				this.foldedNodes.delete(currentId);
@@ -906,17 +981,21 @@ class TreeList implements Component {
 			}
 		} else if (kb.matches(keyData, "tui.editor.cursorLeft") || kb.matches(keyData, "tui.select.pageUp")) {
 			// Page up
+			this.flushPendingFilter();
 			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisibleLines);
 		} else if (kb.matches(keyData, "tui.editor.cursorRight") || kb.matches(keyData, "tui.select.pageDown")) {
 			// Page down
+			this.flushPendingFilter();
 			this.selectedIndex = Math.min(this.filteredNodes.length - 1, this.selectedIndex + this.maxVisibleLines);
 		} else if (kb.matches(keyData, "tui.select.confirm")) {
+			this.flushPendingFilter();
 			const selected = this.filteredNodes[this.selectedIndex];
 			if (selected && this.onSelect) {
 				this.onSelect(selected.node.entry.id);
 			}
 		} else if (kb.matches(keyData, "tui.select.cancel")) {
 			if (this.searchQuery) {
+				this.cancelPendingFilter();
 				this.searchQuery = "";
 				this.foldedNodes.clear();
 				this.applyFilter();
@@ -925,31 +1004,37 @@ class TreeList implements Component {
 			}
 		} else if (kb.matches(keyData, "app.tree.filter.default")) {
 			// Direct filter: default
+			this.cancelPendingFilter();
 			this.filterMode = "default";
 			this.foldedNodes.clear();
 			this.applyFilter();
 		} else if (kb.matches(keyData, "app.tree.filter.noTools")) {
 			// Toggle filter: no-tools ↔ default
+			this.cancelPendingFilter();
 			this.filterMode = this.filterMode === "no-tools" ? "default" : "no-tools";
 			this.foldedNodes.clear();
 			this.applyFilter();
 		} else if (kb.matches(keyData, "app.tree.filter.userOnly")) {
 			// Toggle filter: user-only ↔ default
+			this.cancelPendingFilter();
 			this.filterMode = this.filterMode === "user-only" ? "default" : "user-only";
 			this.foldedNodes.clear();
 			this.applyFilter();
 		} else if (kb.matches(keyData, "app.tree.filter.labeledOnly")) {
 			// Toggle filter: labeled-only ↔ default
+			this.cancelPendingFilter();
 			this.filterMode = this.filterMode === "labeled-only" ? "default" : "labeled-only";
 			this.foldedNodes.clear();
 			this.applyFilter();
 		} else if (kb.matches(keyData, "app.tree.filter.all")) {
 			// Toggle filter: all ↔ default
+			this.cancelPendingFilter();
 			this.filterMode = this.filterMode === "all" ? "default" : "all";
 			this.foldedNodes.clear();
 			this.applyFilter();
 		} else if (kb.matches(keyData, "app.tree.filter.cycleBackward")) {
 			// Cycle filter backwards
+			this.cancelPendingFilter();
 			const modes: FilterMode[] = ["default", "no-tools", "user-only", "labeled-only", "all"];
 			const currentIndex = modes.indexOf(this.filterMode);
 			this.filterMode = modes[(currentIndex - 1 + modes.length) % modes.length];
@@ -957,6 +1042,7 @@ class TreeList implements Component {
 			this.applyFilter();
 		} else if (kb.matches(keyData, "app.tree.filter.cycleForward")) {
 			// Cycle filter forwards: default → no-tools → user-only → labeled-only → all → default
+			this.cancelPendingFilter();
 			const modes: FilterMode[] = ["default", "no-tools", "user-only", "labeled-only", "all"];
 			const currentIndex = modes.indexOf(this.filterMode);
 			this.filterMode = modes[(currentIndex + 1) % modes.length];
@@ -966,9 +1052,10 @@ class TreeList implements Component {
 			if (this.searchQuery.length > 0) {
 				this.searchQuery = this.searchQuery.slice(0, -1);
 				this.foldedNodes.clear();
-				this.applyFilter();
+				this.scheduleApplyFilter();
 			}
 		} else if (kb.matches(keyData, "app.tree.editLabel")) {
+			this.flushPendingFilter();
 			const selected = this.filteredNodes[this.selectedIndex];
 			if (selected && this.onLabelEdit) {
 				this.onLabelEdit(selected.node.entry.id, selected.node.label);
@@ -983,7 +1070,7 @@ class TreeList implements Component {
 			if (!hasControlChars && keyData.length > 0) {
 				this.searchQuery += keyData;
 				this.foldedNodes.clear();
-				this.applyFilter();
+				this.scheduleApplyFilter();
 			}
 		}
 	}
@@ -1148,6 +1235,11 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		onLabelChange?: (entryId: string, label: string | undefined) => void,
 		initialSelectedId?: string,
 		initialFilterMode?: FilterMode,
+		// Trailing/optional so existing call sites (and tests) that only pass the first
+		// five args keep working unchanged. Fires after a debounced search-filter recompute
+		// lands outside the input pipeline (see TreeList.onFilterApplied) — the owner is
+		// expected to forward this to its TUI's requestRender().
+		onFilterApplied?: () => void,
 	) {
 		super();
 
@@ -1158,6 +1250,7 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		this.treeList.onSelect = onSelect;
 		this.treeList.onCancel = onCancel;
 		this.treeList.onLabelEdit = (entryId, currentLabel) => this.showLabelInput(entryId, currentLabel);
+		this.treeList.onFilterApplied = onFilterApplied;
 
 		this.treeContainer = new Container();
 		this.treeContainer.addChild(this.treeList);

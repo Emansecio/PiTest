@@ -366,16 +366,44 @@ export class Editor implements Component, Focusable {
 	private wrapCache: Map<string, TextChunk[]> = new Map();
 	private wrapCacheWidth: number = -1;
 
-	// layoutText memo: skip word-wrap when the draft and cursor are unchanged
-	// (e.g. parent re-render on spinner tick while the editor draft is idle).
-	private layoutMemoWidth = -1;
-	private layoutMemoRevision = -1;
-	private layoutMemoCursorLine = -1;
-	private layoutMemoCursorCol = -1;
-	private layoutMemoLines: LayoutLine[] | null = null;
-	// Bumped on every buffer mutation so layout memo avoids lines.join("\n") on
-	// idle re-renders and uses O(line-count) fingerprinting instead of O(chars).
+	// Structural layout memo: the LayoutLine array with cursor markers cleared
+	// (hasCursor: false everywhere). Depends only on (bufferRevision, width) —
+	// NOT on cursor position — so arrow-key movement never re-wraps/re-segments
+	// the buffer. `structuralLineMeta[i]` gives the slot range in
+	// `structuralLayoutLines` for logical line i (see getLayoutLines/
+	// applyCursorOverlay). Rebuilt only when content or width changes.
+	private structuralLayoutLines: LayoutLine[] | null = null;
+	private structuralLineMeta: Array<{ start: number; wrapped: boolean }> = [];
+	private structuralLayoutWidth = -1;
+	private structuralLayoutRevision = -1;
+
+	// Cursor overlay bookkeeping: the single LayoutLine slot (index into
+	// structuralLayoutLines) that currently carries hasCursor/cursorPos, and the
+	// (cursorLine, cursorCol) it reflects. A cursor-only move (no content/width
+	// change) clears just that slot and sets the new one — O(chunks of the old
+	// + new cursor line), not O(all lines).
+	private overlaySlotIndex = -1;
+	private overlayCursorLine = -1;
+	private overlayCursorCol = -1;
+
+	// Bumped on every buffer mutation (see touchBuffer/invalidateWrapCache) so
+	// memoized derivations (getText, structural layout, visual-line map) can
+	// detect "nothing changed" in O(1) instead of O(chars)/O(lines).
 	private bufferRevision = 0;
+
+	// getText() memo: this.state.lines.join("\n") is O(buffer) and is called on
+	// every keystroke's onChange plus twice per autocomplete round-trip. Cache
+	// the joined text keyed by bufferRevision so repeated calls within the same
+	// mutation (or idle re-renders) are O(1).
+	private textCache = "";
+	private textCacheRevision = -1;
+
+	// buildVisualLineMap() memo: the map depends only on (bufferRevision, width),
+	// never on cursor position, so ↑/↓/PageUp/PageDown navigation (which calls it
+	// on every keystroke) reuses the cached map instead of re-wrapping all lines.
+	private visualLineMapCache: Array<{ logicalLine: number; startCol: number; length: number }> | null = null;
+	private visualLineMapWidth = -1;
+	private visualLineMapRevision = -1;
 
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
@@ -507,22 +535,75 @@ export class Editor implements Component, Focusable {
 		this.bufferRevision++;
 	}
 
+	/**
+	 * Layout lines for render(), memoized in two layers:
+	 *  - Structural layout (text/width/wrap boundaries) depends only on
+	 *    (bufferRevision, width). Rebuilding it re-wraps every logical line, so
+	 *    it's skipped entirely when neither content nor width changed.
+	 *  - Cursor overlay (which slot has hasCursor/cursorPos) is applied on top,
+	 *    touching only the previous and new cursor line's slots — never a full
+	 *    re-scan of the buffer, so arrow-key movement is O(1)-ish regardless of
+	 *    buffer size.
+	 *
+	 * The empty-editor case (single empty line) is a fixed invariant — cursor is
+	 * always (0,0) — so it's cached structurally with hasCursor baked in and
+	 * never touches the overlay bookkeeping below.
+	 */
 	private getLayoutLines(contentWidth: number): LayoutLine[] {
-		if (
-			this.layoutMemoLines &&
-			this.layoutMemoWidth === contentWidth &&
-			this.layoutMemoRevision === this.bufferRevision &&
-			this.layoutMemoCursorLine === this.state.cursorLine &&
-			this.layoutMemoCursorCol === this.state.cursorCol
-		) {
-			return this.layoutMemoLines;
+		if (this.isEditorEmpty()) {
+			if (
+				!this.structuralLayoutLines ||
+				this.structuralLayoutWidth !== contentWidth ||
+				this.structuralLayoutRevision !== this.bufferRevision
+			) {
+				this.structuralLayoutLines = [{ text: "", visibleWidth: 0, hasCursor: true, cursorPos: 0 }];
+				this.structuralLineMeta = [];
+				this.structuralLayoutWidth = contentWidth;
+				this.structuralLayoutRevision = this.bufferRevision;
+			}
+			return this.structuralLayoutLines;
 		}
-		const lines = this.layoutText(contentWidth);
-		this.layoutMemoWidth = contentWidth;
-		this.layoutMemoRevision = this.bufferRevision;
-		this.layoutMemoCursorLine = this.state.cursorLine;
-		this.layoutMemoCursorCol = this.state.cursorCol;
-		this.layoutMemoLines = lines;
+
+		const structuralChanged =
+			!this.structuralLayoutLines ||
+			this.structuralLayoutWidth !== contentWidth ||
+			this.structuralLayoutRevision !== this.bufferRevision;
+
+		if (structuralChanged) {
+			const { lines, meta } = this.buildStructuralLayout(contentWidth);
+			this.structuralLayoutLines = lines;
+			this.structuralLineMeta = meta;
+			this.structuralLayoutWidth = contentWidth;
+			this.structuralLayoutRevision = this.bufferRevision;
+			// The new array starts with hasCursor:false everywhere; force the
+			// overlay below to (re)apply against it.
+			this.overlaySlotIndex = -1;
+			this.overlayCursorLine = -1;
+			this.overlayCursorCol = -1;
+		}
+
+		// Guaranteed non-null: either it was already set (structuralChanged was
+		// false) or the branch above just assigned it.
+		const lines = this.structuralLayoutLines!;
+		if (this.overlayCursorLine === this.state.cursorLine && this.overlayCursorCol === this.state.cursorCol) {
+			return lines;
+		}
+
+		// Clear the previously-applied cursor slot (if any), then apply the new one.
+		if (this.overlaySlotIndex >= 0) {
+			const prev = lines[this.overlaySlotIndex];
+			if (prev) {
+				prev.hasCursor = false;
+				prev.cursorPos = undefined;
+			}
+		}
+		this.overlaySlotIndex = this.applyCursorOverlay(
+			lines,
+			this.structuralLineMeta[this.state.cursorLine],
+			contentWidth,
+		);
+		this.overlayCursorLine = this.state.cursorLine;
+		this.overlayCursorCol = this.state.cursorCol;
 		return lines;
 	}
 
@@ -644,6 +725,13 @@ export class Editor implements Component, Focusable {
 	 */
 	private paintPrefixVisible(s: string, maxCols: number, colorFn: (t: string) => string): string {
 		if (maxCols <= 0) return s;
+		// Segment the whole string once up front instead of re-slicing and
+		// re-segmenting the remainder on every grapheme (that was O(n^2) on the
+		// painted prefix: each iteration re-scanned from i to the end). Grapheme
+		// boundary rules only look at local context, so segmenting from 0 and
+		// reading off the boundary at index i agrees with segmenting from i.
+		const segments = [...this.segment(s)];
+		let segIdx = 0;
 		let out = "";
 		let run = "";
 		let cols = 0;
@@ -655,6 +743,8 @@ export class Editor implements Component, Focusable {
 			}
 		};
 		while (i < s.length && cols < maxCols) {
+			// Skip segments consumed by a previous ANSI run or otherwise behind i.
+			while (segIdx < segments.length && segments[segIdx]!.index < i) segIdx++;
 			const esc = extractAnsiCode(s, i);
 			if (esc) {
 				flushRun();
@@ -662,12 +752,14 @@ export class Editor implements Component, Focusable {
 				i += esc.length;
 				continue;
 			}
-			const grapheme = this.segment(s.slice(i))[Symbol.iterator]().next().value?.segment ?? s[i];
+			const seg = segIdx < segments.length ? segments[segIdx] : undefined;
+			const grapheme = seg && seg.index === i ? seg.segment : s[i]!;
 			const w = visibleWidth(grapheme);
 			if (cols + w > maxCols) break; // never split a wide glyph across the boundary
 			run += grapheme;
 			cols += w;
 			i += grapheme.length;
+			segIdx++;
 		}
 		flushRun();
 		return out + s.slice(i);
@@ -967,8 +1059,15 @@ export class Editor implements Component, Focusable {
 		}
 
 		if (this.isInPaste) {
+			// Search only from near the previous tail: the end marker can't begin
+			// before (prevLen - (marker.length - 1)) without having already been
+			// found on a prior chunk, so re-scanning the whole accumulated buffer
+			// every chunk (O(n^2) over a byte-at-a-time paste) is wasted work.
+			// Mirrors the windowed search in stdin-buffer.ts.
+			const prevLen = this.pasteBuffer.length;
 			this.pasteBuffer += data;
-			const endIndex = this.pasteBuffer.indexOf("\x1b[201~");
+			const searchFrom = Math.max(0, prevLen - 5); // "\x1b[201~".length - 1 = 5
+			const endIndex = this.pasteBuffer.indexOf("\x1b[201~", searchFrom);
 			if (endIndex !== -1) {
 				const pasteContent = this.pasteBuffer.substring(0, endIndex);
 				if (pasteContent.length > 0) {
@@ -1266,101 +1365,118 @@ export class Editor implements Component, Focusable {
 		}
 	}
 
-	private layoutText(contentWidth: number): LayoutLine[] {
+	/**
+	 * Build the cursor-independent layout: for each logical line, either a
+	 * single fitting entry or its word-wrapped chunks, all with hasCursor:false.
+	 * Callers (getLayoutLines) overlay the cursor afterwards. Assumes the
+	 * editor is non-empty — the empty-editor case is handled separately since
+	 * it's a fixed invariant that doesn't need the overlay machinery.
+	 *
+	 * `meta[i]` records where logical line i's entries start in the returned
+	 * array (and whether it wrapped into multiple entries), so the overlay can
+	 * jump straight to the cursor's line without scanning the whole buffer.
+	 */
+	private buildStructuralLayout(contentWidth: number): {
+		lines: LayoutLine[];
+		meta: Array<{ start: number; wrapped: boolean }>;
+	} {
 		const layoutLines: LayoutLine[] = [];
+		const meta: Array<{ start: number; wrapped: boolean }> = [];
 
-		if (this.state.lines.length === 0 || (this.state.lines.length === 1 && this.state.lines[0] === "")) {
-			// Empty editor
-			layoutLines.push({
-				text: "",
-				visibleWidth: 0,
-				hasCursor: true,
-				cursorPos: 0,
-			});
-			return layoutLines;
-		}
-
-		// Process each logical line
 		for (let i = 0; i < this.state.lines.length; i++) {
 			const line = this.state.lines[i] || "";
-			const isCurrentLine = i === this.state.cursorLine;
 			const lineVisibleWidth = visibleWidth(line);
+			const start = layoutLines.length;
 
 			if (lineVisibleWidth <= contentWidth) {
-				// Line fits in one layout line
-				if (isCurrentLine) {
-					layoutLines.push({
-						text: line,
-						visibleWidth: lineVisibleWidth,
-						hasCursor: true,
-						cursorPos: this.state.cursorCol,
-					});
-				} else {
-					layoutLines.push({
-						text: line,
-						visibleWidth: lineVisibleWidth,
-						hasCursor: false,
-					});
-				}
+				layoutLines.push({ text: line, visibleWidth: lineVisibleWidth, hasCursor: false });
+				meta.push({ start, wrapped: false });
 			} else {
 				// Line needs wrapping - use word-aware wrapping
 				const chunks = this.wrapLineCached(line, contentWidth);
-
-				for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
-					const chunk = chunks[chunkIndex];
-					if (!chunk) continue;
-
-					const cursorPos = this.state.cursorCol;
-					const isLastChunk = chunkIndex === chunks.length - 1;
-
-					// Determine if cursor is in this chunk
-					// For word-wrapped chunks, we need to handle the case where
-					// cursor might be in trimmed whitespace at end of chunk
-					let hasCursorInChunk = false;
-					let adjustedCursorPos = 0;
-
-					if (isCurrentLine) {
-						if (isLastChunk) {
-							// Last chunk: cursor belongs here if >= startIndex
-							hasCursorInChunk = cursorPos >= chunk.startIndex;
-							adjustedCursorPos = cursorPos - chunk.startIndex;
-						} else {
-							// Non-last chunk: cursor belongs here if in range [startIndex, endIndex)
-							// But we need to handle the visual position in the trimmed text
-							hasCursorInChunk = cursorPos >= chunk.startIndex && cursorPos < chunk.endIndex;
-							if (hasCursorInChunk) {
-								adjustedCursorPos = cursorPos - chunk.startIndex;
-								// Clamp to text length (in case cursor was in trimmed whitespace)
-								if (adjustedCursorPos > chunk.text.length) {
-									adjustedCursorPos = chunk.text.length;
-								}
-							}
-						}
-					}
-
-					if (hasCursorInChunk) {
-						layoutLines.push({
-							text: chunk.text,
-							visibleWidth: chunk.width,
-							hasCursor: true,
-							cursorPos: adjustedCursorPos,
-						});
-					} else {
-						layoutLines.push({
-							text: chunk.text,
-							visibleWidth: chunk.width,
-							hasCursor: false,
-						});
-					}
+				for (const chunk of chunks) {
+					layoutLines.push({ text: chunk.text, visibleWidth: chunk.width, hasCursor: false });
 				}
+				meta.push({ start, wrapped: true });
 			}
 		}
 
-		return layoutLines;
+		return { lines: layoutLines, meta };
+	}
+
+	/**
+	 * Apply the current cursor position onto one logical line's slot(s) in an
+	 * already-built structural layout, mutating the affected LayoutLine entry
+	 * in place. Returns the absolute index of the entry that now carries the
+	 * cursor (or -1 if the line has no entries, which shouldn't happen).
+	 *
+	 * The chunk-matching logic mirrors the previous single-pass layoutText()
+	 * exactly (same isLastChunk / startIndex / endIndex comparisons), just
+	 * scoped to only the current cursor's logical line instead of every line.
+	 */
+	private applyCursorOverlay(
+		lines: LayoutLine[],
+		lineMeta: { start: number; wrapped: boolean } | undefined,
+		contentWidth: number,
+	): number {
+		if (!lineMeta) return -1;
+		const cursorLineIdx = this.state.cursorLine;
+		const cursorPos = this.state.cursorCol;
+
+		if (!lineMeta.wrapped) {
+			const entry = lines[lineMeta.start];
+			if (!entry) return -1;
+			entry.hasCursor = true;
+			entry.cursorPos = cursorPos;
+			return lineMeta.start;
+		}
+
+		const line = this.state.lines[cursorLineIdx] || "";
+		const chunks = this.wrapLineCached(line, contentWidth);
+
+		for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+			const chunk = chunks[chunkIndex];
+			if (!chunk) continue;
+			const isLastChunk = chunkIndex === chunks.length - 1;
+
+			let hasCursorInChunk: boolean;
+			let adjustedCursorPos = 0;
+			if (isLastChunk) {
+				// Last chunk: cursor belongs here if >= startIndex
+				hasCursorInChunk = cursorPos >= chunk.startIndex;
+				adjustedCursorPos = cursorPos - chunk.startIndex;
+			} else {
+				// Non-last chunk: cursor belongs here if in range [startIndex, endIndex)
+				// But we need to handle the visual position in the trimmed text
+				hasCursorInChunk = cursorPos >= chunk.startIndex && cursorPos < chunk.endIndex;
+				if (hasCursorInChunk) {
+					adjustedCursorPos = cursorPos - chunk.startIndex;
+					// Clamp to text length (in case cursor was in trimmed whitespace)
+					if (adjustedCursorPos > chunk.text.length) {
+						adjustedCursorPos = chunk.text.length;
+					}
+				}
+			}
+
+			if (hasCursorInChunk) {
+				const slot = lineMeta.start + chunkIndex;
+				const entry = lines[slot];
+				if (!entry) return -1;
+				entry.hasCursor = true;
+				entry.cursorPos = adjustedCursorPos;
+				return slot;
+			}
+		}
+
+		return -1;
 	}
 
 	getText(): string {
-		return this.state.lines.join("\n");
+		if (this.textCacheRevision !== this.bufferRevision) {
+			this.textCache = this.state.lines.join("\n");
+			this.textCacheRevision = this.bufferRevision;
+		}
+		return this.textCache;
 	}
 
 	private expandPasteMarkers(text: string): string {
@@ -1916,6 +2032,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol(previousLine.length);
 		}
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -1948,6 +2065,7 @@ export class Editor implements Component, Focusable {
 			this.state.lines.splice(this.state.cursorLine + 1, 1);
 		}
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -1993,6 +2111,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol(newCol);
 		}
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -2038,6 +2157,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol(newCol);
 		}
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -2073,6 +2193,7 @@ export class Editor implements Component, Focusable {
 			this.state.lines.splice(this.state.cursorLine + 1, 1);
 		}
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -2100,8 +2221,21 @@ export class Editor implements Component, Focusable {
 	 * - logicalLine: index into this.state.lines
 	 * - startCol: starting column in the logical line
 	 * - length: length of this visual line segment
+	 *
+	 * Memoized by (bufferRevision, width): the map never depends on cursor
+	 * position, so ↑/↓/PageUp/PageDown (which call this on every keystroke)
+	 * reuse the cached map instead of re-wrapping every logical line. Callers
+	 * only read the returned array, never mutate it.
 	 */
 	private buildVisualLineMap(width: number): Array<{ logicalLine: number; startCol: number; length: number }> {
+		if (
+			this.visualLineMapCache &&
+			this.visualLineMapWidth === width &&
+			this.visualLineMapRevision === this.bufferRevision
+		) {
+			return this.visualLineMapCache;
+		}
+
 		const visualLines: Array<{ logicalLine: number; startCol: number; length: number }> = [];
 
 		for (let i = 0; i < this.state.lines.length; i++) {
@@ -2125,6 +2259,9 @@ export class Editor implements Component, Focusable {
 			}
 		}
 
+		this.visualLineMapCache = visualLines;
+		this.visualLineMapWidth = width;
+		this.visualLineMapRevision = this.bufferRevision;
 		return visualLines;
 	}
 
@@ -2349,6 +2486,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol((lines[lines.length - 1] || "").length);
 		}
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -2391,6 +2529,7 @@ export class Editor implements Component, Focusable {
 			this.setCursorCol(startCol);
 		}
 
+		this.touchBuffer();
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
@@ -2717,6 +2856,7 @@ export class Editor implements Component, Focusable {
 				this.state.lines = result.lines;
 				this.state.cursorLine = result.cursorLine;
 				this.setCursorCol(result.cursorCol);
+				this.touchBuffer();
 				if (this.onChange) this.onChange(this.getText());
 				this.tui.requestRender();
 				return;

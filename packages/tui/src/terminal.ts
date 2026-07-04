@@ -62,6 +62,21 @@ export interface Terminal {
 
 	// Progress indicator (OSC 9;4)
 	setProgress(active: boolean): void;
+
+	/**
+	 * Whether the underlying output stream currently has a full write buffer
+	 * (the last write() call returned false). Optional so existing test mocks
+	 * that never implement backpressure keep compiling — TUI treats a missing
+	 * implementation as "never backpressured".
+	 */
+	isBackpressured?(): boolean;
+
+	/**
+	 * Register a callback invoked once the underlying stream drains (fires at
+	 * most once per registration; re-register for the next backpressure
+	 * episode). Optional for the same reason as isBackpressured().
+	 */
+	onDrain?(cb: () => void): void;
 }
 
 /**
@@ -78,6 +93,15 @@ export class ProcessTerminal implements Terminal {
 	private kittyFallbackTimer?: ReturnType<typeof setTimeout>;
 	private _kittyProtocolActive = false;
 	private _modifyOtherKeysActive = false;
+	// Backpressure tracking: set when process.stdout.write() reports its internal
+	// buffer is full, cleared on the stream's "drain" event. TUI polls
+	// isBackpressured() at the top of each render and skips producing/writing a
+	// new frame while it's true, instead registering an onDrain callback — so a
+	// slow consumer (SSH, a piped terminal) can't make frames queue up in process
+	// RAM unbounded.
+	private backpressured = false;
+	private drainCallbacks = new Set<() => void>();
+	private drainListener?: () => void;
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
@@ -129,6 +153,18 @@ export class ProcessTerminal implements Terminal {
 			(this.resizeDebounceTimer as { unref?: () => void }).unref?.();
 		};
 		process.stdout.on("resize", this.resizeListener);
+
+		// Track stdout backpressure for the lifetime of this session; removed in
+		// stop(). One listener regardless of how many onDrain() callbacks are
+		// pending — each "drain" event flushes and clears all of them.
+		this.drainListener = () => {
+			this.backpressured = false;
+			if (this.drainCallbacks.size === 0) return;
+			const callbacks = Array.from(this.drainCallbacks);
+			this.drainCallbacks.clear();
+			for (const cb of callbacks) cb();
+		};
+		process.stdout.on("drain", this.drainListener);
 
 		// Refresh terminal dimensions - they may be stale after suspend/resume
 		// (SIGWINCH is lost while process is stopped). Unix only.
@@ -347,6 +383,12 @@ export class ProcessTerminal implements Terminal {
 			this.resizeListener = undefined;
 		}
 		this.resizeHandler = undefined;
+		if (this.drainListener) {
+			process.stdout.removeListener("drain", this.drainListener);
+			this.drainListener = undefined;
+		}
+		this.backpressured = false;
+		this.drainCallbacks.clear();
 
 		// Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
 		// re-interpreted after raw mode is disabled. This fixes a race condition
@@ -360,7 +402,8 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	write(data: string): void {
-		process.stdout.write(data);
+		const ok = process.stdout.write(data);
+		if (!ok) this.backpressured = true;
 		if (this.writeLogPath) {
 			try {
 				fs.appendFileSync(this.writeLogPath, data, { encoding: "utf8" });
@@ -368,6 +411,14 @@ export class ProcessTerminal implements Terminal {
 				// Ignore logging errors
 			}
 		}
+	}
+
+	isBackpressured(): boolean {
+		return this.backpressured;
+	}
+
+	onDrain(cb: () => void): void {
+		this.drainCallbacks.add(cb);
 	}
 
 	get columns(): number {
