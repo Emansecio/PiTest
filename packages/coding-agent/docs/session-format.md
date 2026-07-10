@@ -257,6 +257,8 @@ Extension state persistence. Does NOT participate in LLM context.
 
 Use `customType` to identify your extension's entries on reload.
 
+Built-in `customType` values restored on session load include `goal`, `todo`, `plan`, and `orchestration` (`{ orchestration: "solo" | "fusion" }` — Fusion facet; defaults to `"solo"` when absent).
+
 ### CustomMessageEntry
 
 Extension-injected messages that DO participate in LLM context.

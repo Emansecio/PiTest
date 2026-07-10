@@ -56,4 +56,22 @@ describe("buildSessionSummaryRecord", () => {
 		// The per-turn array must not leak into the compact summary.
 		expect(record.cache).not.toHaveProperty("turns");
 	});
+
+	it("includes cachePrefix when rebuilds > 0 and omits when zero", () => {
+		const withRebuilds = buildSessionSummaryRecord({
+			recovery,
+			diagnostics,
+			cachePrefix: { rebuilds: 2, reasons: [{ reason: "skills", count: 2 }] },
+		});
+		expect(withRebuilds.cachePrefix).toEqual({
+			rebuilds: 2,
+			reasons: [{ reason: "skills", count: 2 }],
+		});
+		const zero = buildSessionSummaryRecord({
+			recovery,
+			diagnostics,
+			cachePrefix: { rebuilds: 0, reasons: [] },
+		});
+		expect(zero.cachePrefix).toBeUndefined();
+	});
 });

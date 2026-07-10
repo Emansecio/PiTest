@@ -11,6 +11,7 @@
 import { recordDiagnostic } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import {
+	getCurrentSupervisionThermostat,
 	SupervisionThermostat,
 	setCurrentSupervisionThermostat,
 	type ThermostatModelInfo,
@@ -110,6 +111,8 @@ export class SessionRecoveryController {
 
 	constructor(options: SessionRecoveryControllerOptions = {}) {
 		this._onLevelChange = options.onLevelChange;
+		// Guard-efficacy records are observational only: a later successful tool
+		// call does not prove that the preceding guard was a false positive.
 		this._thermostat = new SupervisionThermostat({ model: options.model });
 		setCurrentSupervisionThermostat(this._thermostat);
 	}
@@ -117,6 +120,14 @@ export class SessionRecoveryController {
 	/** The supervision thermostat co-located with this controller (Band P / P0a). */
 	getSupervisionThermostat(): SupervisionThermostat {
 		return this._thermostat;
+	}
+
+	/** Release the diagnostics listener and this session's global handle. */
+	dispose(): void {
+		this._thermostat.dispose();
+		if (getCurrentSupervisionThermostat() === this._thermostat) {
+			setCurrentSupervisionThermostat(undefined);
+		}
 	}
 
 	getLevel(): RecoveryLevel {

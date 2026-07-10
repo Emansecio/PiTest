@@ -20,6 +20,7 @@ const BASH_FLOOR = 24 * 1024;
 afterEach(() => {
 	// contextWindow <= 0 resets to the floors (documented contract).
 	configureTruncationCaps({ contextWindow: 0 });
+	truncate.refreshOccupancyTruncationCaps(null);
 });
 
 describe("truncationCapScale", () => {
@@ -87,5 +88,31 @@ describe("configureTruncationCaps", () => {
 		const scaled = truncate.truncateHead(content, { maxLines: Number.POSITIVE_INFINITY });
 		// The same content fits inside the doubled default budget.
 		expect(scaled.truncated).toBe(false);
+	});
+});
+
+describe("occupancyCapScale / refreshOccupancyTruncationCaps", () => {
+	it("keeps full caps at ≤50% occupancy and floors at ≥90%", () => {
+		expect(truncate.occupancyCapScale(0.4)).toBe(1);
+		expect(truncate.occupancyCapScale(0.5)).toBe(1);
+		expect(truncate.occupancyCapScale(0.9)).toBe(0.25);
+		expect(truncate.occupancyCapScale(0.99)).toBe(0.25);
+	});
+
+	it("tightens truncateHead defaults when occupancy is high", () => {
+		configureTruncationCaps({ contextWindow: 200_000 });
+		truncate.refreshOccupancyTruncationCaps({ percent: 40 });
+		expect(truncate.effectiveDefaultMaxBytes()).toBe(DEFAULT_FLOOR);
+
+		truncate.refreshOccupancyTruncationCaps({ percent: 90 });
+		expect(truncate.effectiveDefaultMaxBytes()).toBe(Math.round(DEFAULT_FLOOR * 0.25));
+
+		const content = "z".repeat(Math.round(DEFAULT_FLOOR * 0.5));
+		const tight = truncate.truncateHead(content, { maxLines: Number.POSITIVE_INFINITY });
+		expect(tight.truncated).toBe(true);
+
+		truncate.refreshOccupancyTruncationCaps({ percent: 40 });
+		const loose = truncate.truncateHead(content, { maxLines: Number.POSITIVE_INFINITY });
+		expect(loose.truncated).toBe(false);
 	});
 });

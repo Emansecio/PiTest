@@ -7,9 +7,18 @@
 
 import type { AgentMessage } from "@pit/agent-core";
 import type { Model } from "@pit/ai";
+import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
 import { convertToLlm } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
-import { runSummarizationWithStatus } from "./compaction.ts";
+import {
+	buildVerificationSource,
+	runSummarizationWithStatus,
+	sumMessageTokens,
+	summarizationMaxTokens,
+	VERIFY_MIN_INPUT_TOKENS,
+	verifySummary,
+} from "./compaction.ts";
+import { groundSummaryPaths } from "./summary-grounding.ts";
 import {
 	computeOperationLists,
 	createFileOps,
@@ -81,6 +90,8 @@ export interface GenerateBranchSummaryOptions {
 	reserveTokens?: number;
 	/** Working directory — used to strip path prefixes in summaries, saving tokens. */
 	cwd?: string;
+	/** When false, skip the extra verification LLM pass (default true, mirrors compaction.selfCorrection). */
+	selfCorrection?: boolean;
 }
 
 // ============================================================================
@@ -336,11 +347,41 @@ export async function generateBranchSummary(
 		return { error: outcome.errorMessage || "Summarization failed" };
 	}
 
-	// Prepend preamble to provide context about the branch summary
-	let summary = BRANCH_SUMMARY_PREAMBLE + outcome.text;
-
-	// Compute structured operation lists and append to summary (paths stripped of cwd)
+	// C7/E16: reuse compaction's verify + grounding passes on the generated prose
+	// before deterministic framing (preamble + operation lists). Fail-open — a
+	// thrown verify/ground must not break tree navigation.
 	const lists = computeOperationLists(fileOps, options.cwd);
+	let prose = outcome.text;
+	const originalProse = prose;
+	try {
+		const verifyInputTokens = sumMessageTokens(messages);
+		const selfCorrection = options.selfCorrection !== false;
+		if (selfCorrection && verifyInputTokens >= VERIFY_MIN_INPUT_TOKENS) {
+			const verifySource = buildVerificationSource(messages, []);
+			const verifyMaxTokens = summarizationMaxTokens(model, reserveTokens, 0.8);
+			prose = await verifySummary(
+				prose,
+				verifySource,
+				model,
+				verifyMaxTokens,
+				apiKey,
+				headers,
+				signal,
+				undefined,
+				undefined,
+			);
+		}
+		if (!isTruthyEnvFlag(process.env.PIT_NO_SUMMARY_GROUNDING)) {
+			prose = groundSummaryPaths(prose, lists, options.cwd).summary;
+		}
+	} catch {
+		prose = originalProse;
+	}
+
+	// Prepend preamble to provide context about the branch summary
+	let summary = BRANCH_SUMMARY_PREAMBLE + prose;
+
+	// Append structured operation lists (paths stripped of cwd)
 	summary += formatFileOperations(lists);
 
 	const result: BranchSummaryResult = {

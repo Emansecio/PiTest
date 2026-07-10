@@ -2,6 +2,7 @@ import type { Component, TUI } from "@pit/tui";
 import { beforeAll, describe, expect, it, test } from "vitest";
 import { ActivityStacker } from "../src/modes/interactive/activity-stacker.js";
 import { ActivityLineComponent } from "../src/modes/interactive/components/activity-line.js";
+import { BashGroupComponent } from "../src/modes/interactive/components/bash-group.js";
 import { NavGroupComponent } from "../src/modes/interactive/components/nav-group.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -41,6 +42,13 @@ function todoExec() {
 }
 function taskExec() {
 	return makeExec({ getActivityFamily: () => "action", getToolName: () => "task", getArgs: () => ({}) });
+}
+function bashExec(command: string) {
+	return makeExec({
+		getActivityFamily: () => "action",
+		getToolName: () => "bash",
+		getArgs: () => ({ command }),
+	});
 }
 
 describe("ActivityStacker", () => {
@@ -132,6 +140,29 @@ describe("ActivityStacker", () => {
 		s.placeCall(taskExec());
 		s.placeCall(taskExec());
 		expect(added.filter((c) => c instanceof ActivityLineComponent).length).toBe(2);
+	});
+
+	it("consecutive bash calls fold into one BashGroup", () => {
+		const added: Component[] = [];
+		const s = new ActivityStacker(fakeTui(), (c) => added.push(c));
+		s.placeCall(bashExec("git status"));
+		s.placeCall(bashExec("grep foo ."));
+		s.placeCall(bashExec("npm test"));
+		expect(added.length).toBe(1);
+		expect(added[0]).toBeInstanceOf(BashGroupComponent);
+	});
+
+	it("a non-bash action closes the open BashGroup", () => {
+		const added: Component[] = [];
+		const s = new ActivityStacker(fakeTui(), (c) => added.push(c));
+		s.placeCall(bashExec("git status"));
+		s.placeCall(actionExec());
+		s.placeCall(bashExec("npm test"));
+		expect(added.map((c) => c.constructor.name)).toEqual([
+			"BashGroupComponent",
+			"ActivityLineComponent",
+			"BashGroupComponent",
+		]);
 	});
 
 	it("ask/resolve are not placed in the activity stream", () => {

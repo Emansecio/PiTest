@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -101,6 +101,18 @@ describe("preset providers in the model registry", () => {
 		authStorage.set("code-verboo", { type: "api_key", key: "k" });
 		registry.refresh();
 		expect(registry.getAvailable().some((m) => m.provider === "code-verboo")).toBe(true);
+	});
+
+	test("preserves a JSONC models file by accepting comments and trailing commas", () => {
+		writeFileSync(modelsJsonPath, '{\n  // local settings\n  "providers": {},\n}\n');
+		persistOpenAICompatibleProviderToModelsJson(modelsJsonPath, "jsonc-provider", {
+			name: "JSONC Provider",
+			baseUrl: "https://example.test/v1",
+			api: "openai-completions",
+			models: [{ id: "model-a" }],
+		});
+		const written = JSON.parse(readFileSync(modelsJsonPath, "utf-8")) as { providers: Record<string, unknown> };
+		expect(written.providers["jsonc-provider"]).toBeDefined();
 	});
 
 	test("injects curated GLM-5.2 into the built-in opencode-go provider (once, gated by auth)", () => {

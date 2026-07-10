@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@pit/agent-core";
+import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyLiveContextEconomyAfterToolSuccess } from "../src/core/agent-session-live-prune.js";
 import {
@@ -91,6 +92,7 @@ describe("applyLiveContextEconomyAfterToolSuccess (D2 + A3)", () => {
 	afterEach(() => {
 		delete process.env.PIT_NO_LIVE_SUPERSEDE;
 		delete process.env.PIT_NO_LIVE_ARG_ELISION;
+		resetRuntimeDiagnostics();
 	});
 
 	it("supersedes older read output when a duplicate read succeeds", () => {
@@ -113,6 +115,34 @@ describe("applyLiveContextEconomyAfterToolSuccess (D2 + A3)", () => {
 
 		expect(outcome.supersedeReclaimed).toBeGreaterThan(0);
 		expect(textAt(outcome.messages, 1).length).toBeLessThan(blob.length);
+	});
+
+	it("records structured prune.live diagnostics with toolName and reclaimedTokens", () => {
+		const blob = bigBlob();
+		const messages = [
+			toolCall("read", "c1", { path: "foo.ts" }),
+			toolResult("read", "c1", blob),
+			toolCall("read", "c2", { path: "foo.ts" }),
+			toolResult("read", "c2", "fresh"),
+			user("a"),
+			user("b"),
+		];
+
+		const outcome = applyLiveContextEconomyAfterToolSuccess(
+			messages,
+			{ type: "toolCall", id: "c2", name: "read", arguments: { path: "foo.ts" } },
+			false,
+			CONTEXT_WINDOW,
+		);
+
+		expect(outcome.reclaimed).toBeGreaterThan(0);
+		const snap = getRuntimeDiagnostics();
+		const live = snap.counters["prune.live"];
+		expect(live?.count).toBeGreaterThanOrEqual(1);
+		expect(live?.lastContext?.toolName).toBe("read");
+		expect(live?.lastContext?.mechanism).toBe("supersede");
+		expect(live?.lastContext?.reclaimedTokens).toBe(outcome.reclaimed);
+		expect(live?.lastContext?.bytes).toBe(outcome.reclaimed);
 	});
 
 	it("elides edit args on successful mutating tool without waiting for prune threshold", () => {

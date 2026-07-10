@@ -1,6 +1,6 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@pit/tui";
 import { getSelectListTheme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 const SHOW_IMAGES_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -8,7 +8,7 @@ const SHOW_IMAGES_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 };
 
 /**
- * Component that renders a show images selector with borders
+ * Component that renders a show images selector with a rounded card frame
  */
 export class ShowImagesSelectorComponent extends Container {
 	private selectList: SelectList;
@@ -21,13 +21,8 @@ export class ShowImagesSelectorComponent extends Container {
 			{ value: "no", label: "No", description: "Show text placeholder instead" },
 		];
 
-		// Add top border
-		this.addChild(new DynamicBorder());
-
-		// Create selector
+		const card = new SelectorCard();
 		this.selectList = new SelectList(items, 5, getSelectListTheme(), SHOW_IMAGES_SELECT_LIST_LAYOUT);
-
-		// Preselect current value
 		this.selectList.setSelectedIndex(currentValue ? 0 : 1);
 
 		this.selectList.onSelect = (item) => {
@@ -38,10 +33,8 @@ export class ShowImagesSelectorComponent extends Container {
 			onCancel();
 		};
 
-		this.addChild(this.selectList);
-
-		// Add bottom border
-		this.addChild(new DynamicBorder());
+		card.addChild(this.selectList);
+		this.addChild(card);
 	}
 
 	getSelectList(): SelectList {

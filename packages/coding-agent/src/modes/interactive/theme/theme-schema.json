@@ -86,13 +86,16 @@
 				"thinkingHigh",
 				"thinkingXhigh",
 				"bashMode",
+				"planMode",
 				"gutterToolPending",
 				"gutterToolSuccess",
 				"gutterToolError",
 				"gutterBash",
 				"gutterDiagnostics",
 				"gutterUser",
-				"gutterCustom"
+				"gutterCustom",
+				"cardBg",
+				"cardBorder"
 			],
 			"properties": {
 				"accent": {
@@ -299,6 +302,10 @@
 					"$ref": "#/$defs/colorValue",
 					"description": "Editor border color in bash mode"
 				},
+				"planMode": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Editor border and footer chip color in plan permission mode"
+				},
 				"gutterToolPending": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Left-edge gutter color for tool execution blocks while pending"
@@ -326,6 +333,14 @@
 				"gutterCustom": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Left-edge gutter color for compaction / branch / skill / custom messages"
+				},
+				"cardBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Background fill for rounded cards (welcome, selector overlays)"
+				},
+				"cardBorder": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Border color for rounded cards (welcome, selector overlays)"
 				}
 			},
 			"additionalProperties": false

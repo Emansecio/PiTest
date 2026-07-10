@@ -103,7 +103,13 @@ export function createErasableSyntaxPreconditionExtension(options: { cwd: string
 						category: "guard.erasable-syntax",
 						level: "info",
 						source: "erasable-syntax-precondition-extension",
-						context: { note, outcome: "overridden", ruleId },
+						context: {
+							note,
+							outcome: "overridden",
+							ruleId,
+							toolName: event.toolName,
+							toolCallId: event.toolCallId,
+						},
 					});
 					return undefined;
 				}
@@ -112,7 +118,7 @@ export function createErasableSyntaxPreconditionExtension(options: { cwd: string
 					category: "guard.erasable-syntax",
 					level: "info",
 					source: "erasable-syntax-precondition-extension",
-					context: { note, outcome: "blocked", ruleId },
+					context: { note, outcome: "blocked", ruleId, toolName: event.toolName, toolCallId: event.toolCallId },
 				});
 				return {
 					block: true,

@@ -266,7 +266,7 @@ export const streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleSt
 	}
 
 	const clampedReasoning = clampThinkingLevel(model, options.reasoning);
-	const effort = (clampedReasoning === "off" ? "high" : clampedReasoning) as ClampedThinkingLevel;
+	const effort = toClampedThinkingLevel(clampedReasoning);
 	const googleModel = model as Model<"google-generative-ai">;
 
 	if (isGemini3ProModel(googleModel) || isGemini3FlashModel(googleModel) || isGemma4Model(googleModel)) {
@@ -388,7 +388,13 @@ export function buildParams(
 	return params;
 }
 
-type ClampedThinkingLevel = Exclude<ThinkingLevel, "xhigh">;
+/** Levels that map to Google thinking budgets / thinkingLevel enums. */
+type ClampedThinkingLevel = "minimal" | "low" | "medium" | "high";
+
+function toClampedThinkingLevel(level: ThinkingLevel | "off"): ClampedThinkingLevel {
+	if (level === "off" || level === "xhigh" || level === "max" || level === "ultra") return "high";
+	return level;
+}
 
 function isGemma4Model(model: Model<"google-generative-ai">): boolean {
 	return /gemma-?4/.test(model.id.toLowerCase());

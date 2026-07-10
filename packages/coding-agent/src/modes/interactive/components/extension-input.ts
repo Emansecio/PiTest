@@ -5,8 +5,8 @@
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@pit/tui";
 import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 export interface ExtensionInputOptions {
 	tui?: TUI;
@@ -33,7 +33,7 @@ export class ExtensionInputComponent extends Container implements Focusable {
 
 	constructor(
 		title: string,
-		_placeholder: string | undefined,
+		placeholder: string | undefined,
 		onSubmit: (value: string) => void,
 		onCancel: () => void,
 		opts?: ExtensionInputOptions,
@@ -44,12 +44,12 @@ export class ExtensionInputComponent extends Container implements Focusable {
 		this.onCancelCallback = onCancel;
 		this.baseTitle = title;
 
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
+		const card = new SelectorCard();
+		card.addChild(new Spacer(1));
 
 		this.titleText = new Text(theme.fg("accent", title), 1, 0);
-		this.addChild(this.titleText);
-		this.addChild(new Spacer(1));
+		card.addChild(this.titleText);
+		card.addChild(new Spacer(1));
 
 		if (opts?.timeout && opts.timeout > 0 && opts.tui) {
 			this.countdown = new CountdownTimer(
@@ -60,14 +60,17 @@ export class ExtensionInputComponent extends Container implements Focusable {
 			);
 		}
 
-		this.input = new Input();
-		this.addChild(this.input);
-		this.addChild(new Spacer(1));
-		this.addChild(
+		this.input = new Input({
+			placeholder,
+			placeholderColor: (t) => theme.fg("dim", t),
+		});
+		card.addChild(this.input);
+		card.addChild(new Spacer(1));
+		card.addChild(
 			new Text(`${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`, 1, 0),
 		);
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		card.addChild(new Spacer(1));
+		this.addChild(card);
 	}
 
 	handleInput(keyData: string): void {

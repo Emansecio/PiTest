@@ -2,6 +2,7 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Card } from "../src/components/card.js";
 import { Text } from "../src/components/text.js";
+import { Container } from "../src/tui.js";
 import { visibleWidth } from "../src/utils.js";
 
 describe("Card", () => {
@@ -28,6 +29,23 @@ describe("Card", () => {
 		assert.strictEqual(card.render(40), first);
 		card.invalidate();
 		assert.notStrictEqual(card.render(40), first);
+	});
+
+	it("busts the frame cache when a nested Container's children change", () => {
+		const card = new Card(1, 0);
+		const list = new Container();
+		list.addChild(new Text("alpha"));
+		card.addChild(list);
+
+		const first = card.render(40);
+		assert.ok(first.some((line) => line.includes("alpha")));
+
+		list.clear();
+		list.addChild(new Text("beta"));
+		const second = card.render(40);
+		assert.notStrictEqual(second, first);
+		assert.ok(second.some((line) => line.includes("beta")));
+		assert.ok(!second.some((line) => line.includes("alpha")));
 	});
 
 	it("returns top and bottom only when empty", () => {

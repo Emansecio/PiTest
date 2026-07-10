@@ -44,8 +44,13 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 	};
 }
 
-function clampReasoning(effort: ThinkingLevel | undefined): Exclude<ThinkingLevel, "xhigh"> | undefined {
-	return effort === "xhigh" ? "high" : effort;
+/** Budget keys only support the classic 4 levels; map opt-in extremes to high. */
+type BudgetThinkingLevel = "minimal" | "low" | "medium" | "high";
+
+function clampReasoning(effort: ThinkingLevel | undefined): BudgetThinkingLevel | undefined {
+	if (!effort) return undefined;
+	if (effort === "xhigh" || effort === "max" || effort === "ultra") return "high";
+	return effort;
 }
 
 export function adjustMaxTokensForThinking(

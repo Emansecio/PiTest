@@ -12,8 +12,9 @@ export type ToolActivity = "navigation" | "action";
  * forcing an expand for the common case. */
 export const ERROR_PREVIEW_LINES = 10;
 
-/** Max diff body lines auto-shown under a settled edit action line (grouped mode). */
-export const EDIT_SUCCESS_PREVIEW_LINES = 5;
+/** Tighter cap for auto-shown errors inside the activity stream (grouped nav /
+ * bash / action lines). Keeps a burst of tool calls scannable. */
+export const ACTIVITY_ERROR_PREVIEW_LINES = 4;
 
 /** Max diff body lines when a tool row is fully expanded (grouped + legacy). */
 export const EDIT_EXPANDED_MAX_LINES = 40;
@@ -67,9 +68,9 @@ export function expandKeyHint(): string {
  * `width` is the cell budget of each body line (already inset by the caller);
  * the trailer is clamped to it so the TUI width invariant holds.
  */
-export function capErrorPreview(lines: string[], width: number): string[] {
-	if (lines.length <= ERROR_PREVIEW_LINES) return lines;
-	const kept = lines.slice(0, ERROR_PREVIEW_LINES);
+export function capErrorPreview(lines: string[], width: number, maxLines: number = ERROR_PREVIEW_LINES): string[] {
+	if (lines.length <= maxLines) return lines;
+	const kept = lines.slice(0, maxLines);
 	const hidden = lines.length - kept.length;
 	kept.push(truncateToWidth(moreLinesTrailer(hidden, expandKeyHint()), width));
 	return kept;
@@ -159,6 +160,30 @@ export function verbFor(toolName: string, pending: boolean): string {
 	return pending ? v.pending : v.done;
 }
 
+/**
+ * Parse MCP-style tool names (`server__tool` or `server.tool`) into server +
+ * short tool for activity headers. Returns null for built-in / plain names.
+ */
+export function parseMcpToolName(toolName: string): { server: string; tool: string } | null {
+	const name = toolName.trim();
+	if (!name) return null;
+	const dunder = name.indexOf("__");
+	if (dunder > 0 && dunder < name.length - 2) {
+		return { server: name.slice(0, dunder), tool: name.slice(dunder + 2) };
+	}
+	// Single-dot server.tool (not file paths / versions): require both sides non-empty
+	// and no extra dots after the first separator.
+	const dot = name.indexOf(".");
+	if (dot > 0 && dot < name.length - 1 && !name.includes("/") && !name.includes("\\")) {
+		const server = name.slice(0, dot);
+		const tool = name.slice(dot + 1);
+		if (server && tool && !tool.includes(".")) {
+			return { server, tool };
+		}
+	}
+	return null;
+}
+
 /** Per-tool-type glyph rendered between the state icon and the label so the
  * action family (edit / run / search / read / …) is legible at a glance. Every
  * glyph here is verified width-1 (one terminal cell) so it never shifts the
@@ -202,11 +227,11 @@ const TOOL_GLYPH_COLOR: Record<string, ThemeColor> = {
 };
 
 /** Neutral fallback glyph for tools without a mapped type glyph (MCP/unknown). */
-const FALLBACK_GLYPH = "·";
+const FALLBACK_GLYPH = "◈";
 
 /**
  * Colorized, width-1 type glyph for a tool, tinted by family. Falls back to a
- * muted neutral dot for unmapped tools so every activity line keeps a stable
+ * muted MCP diamond for unmapped tools so every activity line keeps a stable
  * `<state> <glyph> <label>` shape. The returned string is exactly one visible
  * cell wide (ANSI is width-free), preserving the TUI width invariant.
  */
@@ -214,6 +239,13 @@ export function glyphFor(toolName: string): string {
 	const glyph = TOOL_GLYPH[toolName];
 	if (glyph === undefined) return theme.fg("muted", FALLBACK_GLYPH);
 	return theme.fg(TOOL_GLYPH_COLOR[toolName] ?? "muted", glyph);
+}
+
+/** Colored `server shortName` target for MCP activity headers when no path target exists. */
+export function mcpActivityTarget(toolName: string): string {
+	const parsed = parseMcpToolName(toolName);
+	if (!parsed) return "";
+	return `${theme.fg("muted", parsed.server)} ${theme.fg("toolTitle", parsed.tool)}`;
 }
 
 /**
@@ -242,7 +274,8 @@ export function actionCoalesceKey(toolName: string, args: Record<string, unknown
 
 const WORKING_TARGET_MAX = 48;
 
-function workingTargetSnippet(toolName: string, args: Record<string, unknown>): string {
+/** Compact target for activity headers and the working loader (basename for paths). */
+export function activityTargetLabel(toolName: string, args: Record<string, unknown>): string {
 	if (toolName === "bash") {
 		const cmd = String(args.command ?? "").trim();
 		if (!cmd) return "";
@@ -272,7 +305,7 @@ export function workingPhaseLabel(
 	pending: boolean,
 ): string {
 	const verb = verbFor(toolName, pending);
-	const target = workingTargetSnippet(toolName, args ?? {});
+	const target = activityTargetLabel(toolName, args ?? {});
 	if (target) return `${verb} ${target}…`;
 	if (verbFor("", pending) === verb && toolName !== "bash") {
 		return `${toolName}…`;

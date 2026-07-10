@@ -3,8 +3,8 @@ import { createWriteStream, type WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
+	effectiveDefaultMaxBytes,
 	formatSize,
 	type TruncationResult,
 	truncateHead,
@@ -81,7 +81,7 @@ export class OutputAccumulator {
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
-		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+		this.maxBytes = options.maxBytes ?? effectiveDefaultMaxBytes();
 		this.maxRollingBytes = Math.max(this.maxBytes * 2, 1);
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
 		this.headLineLimit = Math.max(0, options.headLines ?? 0);

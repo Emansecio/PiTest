@@ -9,6 +9,13 @@ export interface TaskRigor {
 	reasons: string[];
 }
 
+/** Cleared at the start of each emitBeforeAgentStart so handlers share one classify. */
+let turnRigorCache: Map<string, TaskRigor> | undefined;
+
+export function clearTaskRigorTurnCache(): void {
+	turnRigorCache = undefined;
+}
+
 const ACTION_PATTERN =
 	/\b(implement|fix|change|add|remove|update|edit|create|patch|wire|debug|review|refactor|migrate|rename|implementar|corrigir|corrija|alterar|adicionar|remover|atualizar|editar|criar|crie|mexer|ajustar|revisar|refatorar|migrar|renomear)\b/i;
 
@@ -53,25 +60,26 @@ export function classifyTaskRigor(prompt: string): TaskRigor {
 	const normalized = prompt.trim();
 	if (normalized.length === 0) return { risk: "simple", rigor: 0, reasons: ["empty prompt"] };
 
+	if (!turnRigorCache) turnRigorCache = new Map();
+	const cached = turnRigorCache.get(normalized);
+	if (cached) return cached;
+
 	const hasAction = ACTION_PATTERN.test(normalized);
 	const reasons = highReasons(normalized);
+	let result: TaskRigor;
 	if (hasAction && reasons.length > 0) {
-		return { risk: "high", rigor: 3, reasons };
+		result = { risk: "high", rigor: 3, reasons };
+	} else if (hasAction && MEDIUM_PATTERN.test(normalized)) {
+		result = { risk: "medium", rigor: 2, reasons: ["code-affecting action"] };
+	} else if (hasAction && DOCS_PATTERN.test(normalized)) {
+		result = { risk: "low", rigor: 1, reasons: ["documentation/text action"] };
+	} else if (hasAction) {
+		result = { risk: "medium", rigor: 2, reasons: ["mutating action"] };
+	} else {
+		result = { risk: "simple", rigor: 0, reasons: ["read-only or answer-only prompt"] };
 	}
-
-	if (hasAction && MEDIUM_PATTERN.test(normalized)) {
-		return { risk: "medium", rigor: 2, reasons: ["code-affecting action"] };
-	}
-
-	if (hasAction && DOCS_PATTERN.test(normalized)) {
-		return { risk: "low", rigor: 1, reasons: ["documentation/text action"] };
-	}
-
-	if (hasAction) {
-		return { risk: "medium", rigor: 2, reasons: ["mutating action"] };
-	}
-
-	return { risk: "simple", rigor: 0, reasons: ["read-only or answer-only prompt"] };
+	turnRigorCache.set(normalized, result);
+	return result;
 }
 
 export function formatTaskRigorPrompt(rigor: TaskRigor): string {

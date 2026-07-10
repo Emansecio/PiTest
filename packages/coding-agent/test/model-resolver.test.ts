@@ -6,6 +6,7 @@ import {
 	parseModelPattern,
 	resolveCliModel,
 } from "../src/core/model-resolver.js";
+import { getCuratedExtraModels } from "../src/core/openai-compatible-presets.js";
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
@@ -439,10 +440,19 @@ describe("default model selection", () => {
 describe("defaultModelPerProvider sanity", () => {
 	// Guards against a default drifting to a model id that no longer exists in the
 	// registry (e.g. the Opus 4.7 -> 4.8 staleness): every per-provider default
-	// must resolve to a real model.
+	// must resolve to a real model (built-in catalog or curated extras like xai).
 	test("every provider default exists in the model registry", () => {
+		const curatedByProvider = new Map<string, string[]>();
+		for (const model of getCuratedExtraModels()) {
+			const list = curatedByProvider.get(model.provider) ?? [];
+			list.push(model.id);
+			curatedByProvider.set(model.provider, list);
+		}
 		for (const [provider, modelId] of Object.entries(defaultModelPerProvider)) {
-			const ids = getModels(provider as KnownProvider).map((m) => m.id);
+			const ids = [
+				...getModels(provider as KnownProvider).map((m) => m.id),
+				...(curatedByProvider.get(provider) ?? []),
+			];
 			expect(ids, `default for "${provider}" (${modelId}) must exist in the registry`).toContain(modelId);
 		}
 	});

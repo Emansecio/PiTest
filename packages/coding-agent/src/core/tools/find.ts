@@ -15,7 +15,14 @@ import { capAppend, fffFindByGlob } from "./fff-search.js";
 import { resolveToCwd } from "./path-utils.js";
 import { getTextOutput, invalidArgText, nonEmptyDetails, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
+import {
+	DEFAULT_MAX_BYTES,
+	effectiveDefaultMaxBytes,
+	formatSize,
+	getOccupancyScale,
+	type TruncationResult,
+	truncateHead,
+} from "./truncate.js";
 
 function toPosixPath(value: string): string {
 	return value.split(path.sep).join("/");
@@ -27,14 +34,26 @@ const findSchema = Type.Object(
 			description: "Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'",
 		}),
 		path: Type.Optional(Type.String({ description: "Directory to search in (default: current directory)" })),
-		limit: Type.Optional(Type.Number({ description: "Maximum number of results (default: 1000)" })),
+		limit: Type.Optional(
+			Type.Number({
+				description: "Maximum number of results (default scales with context occupancy, ceiling 500)",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
 
 export type FindToolInput = Static<typeof findSchema>;
 
-const DEFAULT_LIMIT = 1000;
+/** Hard ceiling for the occupancy-scaled default; explicit model `limit` is not scaled. */
+export const FIND_DEFAULT_LIMIT_CEILING = 500;
+/** Minimum default retained when occupancy scales the find limit down. */
+export const FIND_DEFAULT_LIMIT_FLOOR = 100;
+
+/** Effective default result limit after occupancy scaling (explicit `limit` bypasses this). */
+export function effectiveFindDefaultLimit(): number {
+	return Math.max(FIND_DEFAULT_LIMIT_FLOOR, Math.round(FIND_DEFAULT_LIMIT_CEILING * getOccupancyScale()));
+}
 // Enumeration ceiling for the post-filter path: fd's --max-results caps the
 // ENUMERATION (pre-minimatch), not the matches, so it must sit far above any
 // realistic result limit or real matches get silently dropped in large trees.
@@ -252,7 +271,7 @@ export function createFindToolDefinition(
 		name: "find",
 		activity: "navigation",
 		label: "find",
-		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Finds files by name/glob. Do NOT use \`grep\` to locate files by name; grep searches contents.`,
+		description: `Search for files by glob pattern. Returns matching file paths relative to the search directory. Respects .gitignore. Output is truncated to ${effectiveFindDefaultLimit()} results by default (up to ${FIND_DEFAULT_LIMIT_CEILING}, scales down under high context occupancy) or ${Math.round(effectiveDefaultMaxBytes() / 1024)}KB (whichever is hit first). Finds files by name/glob. Do NOT use \`grep\` to locate files by name; grep searches contents.`,
 		promptSnippet: "Find files by glob pattern (respects .gitignore)",
 		parameters: findSchema,
 		prepareArguments: prepareWithPathAliases,
@@ -287,7 +306,7 @@ export function createFindToolDefinition(
 				(async () => {
 					try {
 						const searchPath = resolveToCwd(searchDir || ".", cwd);
-						const effectiveLimit = limit ?? DEFAULT_LIMIT;
+						const effectiveLimit = limit ?? effectiveFindDefaultLimit();
 						const ops = customOps ?? defaultFindOperations;
 
 						// If custom operations provide glob(), use that instead of fd.

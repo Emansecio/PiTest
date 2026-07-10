@@ -1,6 +1,8 @@
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@pit/ai";
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { Agent } from "../src/index.js";
+import type { AgentTool, PrepareNextTurnContext } from "../src/types.js";
 
 // Mock stream that mimics AssistantMessageEventStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -490,6 +492,58 @@ describe("Agent", () => {
 
 		await agent.prompt("hello again");
 		expect(receivedSessionId).toBe("session-def");
+	});
+
+	it("forwards prepareNextTurn context from the agent loop", async () => {
+		const echoSchema = Type.Object({ value: Type.String() });
+		const echoTool: AgentTool<typeof echoSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: echoSchema,
+			async execute(_toolCallId, params) {
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+		let receivedContext: PrepareNextTurnContext | undefined;
+		let llmCalls = 0;
+		const agent = new Agent({
+			initialState: { tools: [echoTool] },
+			prepareNextTurn: async (turnContext) => {
+				if (turnContext.toolResults.length > 0 && !receivedContext) {
+					receivedContext = turnContext;
+				}
+				return undefined;
+			},
+			streamFn: () => {
+				llmCalls++;
+				const stream = new MockAssistantStream();
+				const message =
+					llmCalls === 1
+						? ({
+								...createAssistantMessage(""),
+								content: [{ type: "toolCall", id: "tc-echo", name: "echo", arguments: { value: "hi" } }],
+								stopReason: "toolUse",
+							} as AssistantMessage)
+						: createAssistantMessage("done");
+				queueMicrotask(() => stream.push({ type: "done", reason: "stop", message }));
+				return stream;
+			},
+		});
+
+		await agent.prompt("echo hi");
+
+		expect(receivedContext).toBeDefined();
+		expect(receivedContext?.message.content).toEqual([
+			{ type: "toolCall", id: "tc-echo", name: "echo", arguments: { value: "hi" } },
+		]);
+		expect(receivedContext?.toolResults).toHaveLength(1);
+		expect(receivedContext?.toolResults[0]?.toolCallId).toBe("tc-echo");
+		expect(receivedContext?.context.messages.length).toBeGreaterThan(0);
+		expect(receivedContext?.newMessages.length).toBeGreaterThan(0);
 	});
 });
 

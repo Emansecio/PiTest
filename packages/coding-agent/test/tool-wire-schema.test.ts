@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	compactToolSchemaForWire,
 	compactWireToolSurface,
+	LAZY_TOOL_DESCRIPTION_MAX_CHARS,
 	sortToolsForWireCache,
 } from "../src/core/tool-wire-schema.js";
 
@@ -53,6 +54,19 @@ describe("compactWireToolSurface (E1)", () => {
 		});
 		expect(out.description).toBe("Read a file");
 		expect(out.description).not.toContain("Long body");
+	});
+
+	it("truncates long first-line descriptions to the wire stub budget (T01)", () => {
+		expect(LAZY_TOOL_DESCRIPTION_MAX_CHARS).toBe(40);
+		const long = "Structural code search via ast-grep with metavariables and language pins for large repos";
+		const out = compactWireToolSurface({
+			name: "ast_grep",
+			description: long,
+			parameters: { type: "object", properties: {} },
+		});
+		expect(out.description.length).toBeLessThanOrEqual(LAZY_TOOL_DESCRIPTION_MAX_CHARS);
+		expect(out.description.endsWith("…")).toBe(true);
+		expect(out.description).not.toBe(long);
 	});
 });
 

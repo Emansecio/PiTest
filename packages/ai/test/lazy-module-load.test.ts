@@ -93,4 +93,21 @@ describe("lazy provider module loading", () => {
 
 		expect(result.loadedSpecifiers).toEqual(["@anthropic-ai/sdk"]);
 	});
+
+	it("prewarmProviderModule loads the matching SDK and is idempotent", () => {
+		const result = runProbe(`
+			await mod.prewarmProviderModule("anthropic-messages");
+			await mod.prewarmProviderModule("anthropic-messages");
+		`);
+
+		expect(result.loadedSpecifiers).toEqual(["@anthropic-ai/sdk"]);
+	});
+
+	it("prewarmProviderModule is a no-op for unknown APIs", () => {
+		const result = runProbe(`
+			await mod.prewarmProviderModule("custom-unknown-api");
+		`);
+
+		expect(result.loadedSpecifiers).toEqual([]);
+	});
 });

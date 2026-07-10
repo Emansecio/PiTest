@@ -184,12 +184,14 @@ Response:
     "sessionName": "my-feature-work",
     "autoCompactionEnabled": true,
     "messageCount": 5,
-    "pendingMessageCount": 0
+    "pendingMessageCount": 0,
+    "orchestration": "solo",
+    "permissionMode": "auto"
   }
 }
 ```
 
-The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set.
+The `model` field is a full [Model](#model) object or `null`. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `orchestration` is `"solo"` or `"fusion"`. `permissionMode` is the live mode from the session permission checker (`"auto"` or `"plan"`), not a stale settings snapshot.
 
 #### get_messages
 
@@ -560,6 +562,79 @@ Response:
 }
 ```
 
+#### export_jsonl
+
+Export session to a JSONL file.
+
+```json
+{"type": "export_jsonl"}
+```
+
+With custom path:
+```json
+{"type": "export_jsonl", "outputPath": "/tmp/session.jsonl"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "export_jsonl",
+  "success": true,
+  "data": {"path": "/tmp/session.jsonl"}
+}
+```
+
+#### import
+
+Import a session from a JSONL transcript file, replacing the current session (same lifecycle as `switch_session`). Can be cancelled by a `session_before_switch` extension handler. Fails with an error response if `inputPath` does not exist.
+
+```json
+{"type": "import", "inputPath": "/path/to/session.jsonl"}
+```
+
+Optional `cwdOverride` rebinds the session cwd after import:
+
+```json
+{"type": "import", "inputPath": "/path/to/session.jsonl", "cwdOverride": "/other/project"}
+```
+
+Response:
+```json
+{"type": "response", "command": "import", "success": true, "data": {"cancelled": false}}
+```
+
+#### navigate_tree
+
+Navigate the session tree to a target entry id. Extension handlers for `session_before_tree` can cancel. When `summarize` is `true`, the agent may call the LLM to summarize the abandoned path (cost and latency).
+
+```json
+{"type": "navigate_tree", "targetId": "entry-abc"}
+```
+
+With options:
+```json
+{
+  "type": "navigate_tree",
+  "targetId": "entry-abc",
+  "summarize": true,
+  "customInstructions": "Focus on decisions",
+  "label": "backtrack"
+}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "navigate_tree",
+  "success": true,
+  "data": {"cancelled": false, "aborted": false, "editorText": "..."}
+}
+```
+
+`editorText` is present when navigation restores draft text for the editor. `aborted` is set when the user/agent aborted mid-summary.
+
 #### switch_session
 
 Load a different session file. Can be cancelled by a `session_before_switch` extension event handler.
@@ -741,25 +816,57 @@ Each command has:
 
 Events are streamed to stdout as JSON lines during agent operation. Events do NOT include an `id` field (only responses do).
 
+RPC mode forwards every `AgentSessionEvent` from `session.subscribe()` without filtering. The canonical type union lives in [`src/core/agent-session-events.ts`](../src/core/agent-session-events.ts). `extension_error` is the one exception: it is emitted on stdout via the extension `onError` hook, not through the session bus.
+
+**Print JSON mode differs:** `pit --mode json` (single-shot print mode) drops `message_update` events to avoid O(tokens²) serialization overhead. RPC clients receive all streaming deltas. See [JSON mode](json.md).
+
 ### Event Types
 
 | Event | Description |
 |-------|-------------|
+| **Agent lifecycle** | |
 | `agent_start` | Agent begins processing |
-| `agent_end` | Agent completes (includes all generated messages) |
+| `agent_end` | Agent completes; includes `messages` and `willRetry` |
 | `turn_start` | New turn begins |
-| `turn_end` | Turn completes (includes assistant message and tool results) |
+| `turn_end` | Turn completes (assistant message + tool results) |
+| **Message lifecycle** | |
 | `message_start` | Message begins |
 | `message_update` | Streaming update (text/thinking/toolcall deltas) |
 | `message_end` | Message completes |
+| **Tool execution** | |
 | `tool_execution_start` | Tool begins execution |
 | `tool_execution_update` | Tool execution progress (streaming output) |
 | `tool_execution_end` | Tool completes |
+| **Tool registry** | |
+| `tool_call_rewritten` | Registry rewrote tool args before execution |
+| `tool_call_rejected` | Registry blocked a tool call |
+| `tool_error_hint_applied` | Recovery hints attached to a failed tool result |
+| **Queue & compaction** | |
 | `queue_update` | Pending steering/follow-up queue changed |
 | `compaction_start` | Compaction begins |
 | `compaction_end` | Compaction completes |
+| **Retry & fallback** | |
 | `auto_retry_start` | Auto-retry begins (after transient error) |
 | `auto_retry_end` | Auto-retry completes (success or final failure) |
+| `fallback_warning` | Active model switched to a fallback chain entry |
+| **Session state** | |
+| `session_info_changed` | Session display name changed |
+| `thinking_level_changed` | Thinking level changed |
+| `orchestration_changed` | Orchestration facet changed (`solo` ↔ `fusion`) |
+| **Fusion** (when orchestration is `"fusion"`) | |
+| `fusion_stage` | Pipeline stage: `brief`, `panel`, `verify`, `judge`, or `writer` |
+| `fusion_member` | Panel member status update |
+| `fusion_member_activity` | Live panel member activity (thinking, writing, tool) |
+| `fusion_verify_activity` | Verify subagent turn progress |
+| **Subagent** | |
+| `subagent_start` | Background subagent started |
+| `subagent_progress` | Subagent turn progress |
+| `subagent_complete` | Subagent finished (`status`: `done` or `error`) |
+| **Goal pipeline** | |
+| `verification` | Project check command running/passed/failed |
+| `pending_check` | Background bash job drain |
+| `visual_review` | Visual definition-of-done nudge |
+| **Extensions** | |
 | `extension_error` | Extension threw an error |
 
 ### agent_start
@@ -772,12 +879,13 @@ Emitted when the agent begins processing a prompt.
 
 ### agent_end
 
-Emitted when the agent completes. Contains all messages generated during this run.
+Emitted when the agent completes. Contains all messages generated during this run. `willRetry` is `true` when a transient error triggered an automatic retry that will run after this event.
 
 ```json
 {
   "type": "agent_end",
-  "messages": [...]
+  "messages": [...],
+  "willRetry": false
 }
 ```
 
@@ -970,7 +1078,7 @@ On final failure (max retries exceeded):
 
 ### extension_error
 
-Emitted when an extension throws an error.
+Emitted when an extension throws an error. Delivered via the RPC extension `onError` hook (not the session event bus).
 
 ```json
 {
@@ -979,6 +1087,102 @@ Emitted when an extension throws an error.
   "event": "tool_call",
   "error": "Error message..."
 }
+```
+
+### subagent_start / subagent_progress / subagent_complete
+
+Emitted during background subagent (`Task` tool) execution.
+
+```json
+{"type": "subagent_start", "handle": "t1"}
+{"type": "subagent_progress", "handle": "t1", "turn": 2, "lastTool": "grep"}
+{"type": "subagent_complete", "handle": "t1", "status": "done", "turns": 3, "totalTokens": 1200}
+```
+
+`lastTool` and the `subagent_complete` token fields are optional.
+
+### fusion_stage / fusion_member / fusion_member_activity / fusion_verify_activity
+
+Emitted during fusion orchestration turns (`orchestration: "fusion"` in `get_state`). These surface pipeline progress for headless clients.
+
+```json
+{"type": "fusion_stage", "stage": "panel", "synthId": "claude-sonnet-4-20250514"}
+```
+
+```json
+{
+  "type": "fusion_member",
+  "index": 0,
+  "cli": "claude",
+  "model": "claude-opus-4-8",
+  "status": "running",
+  "elapsedMs": 4200,
+  "timeoutMs": 120000,
+  "idleTimeoutMs": 30000
+}
+```
+
+`fusion_member` also emits with `status: "done"` or `"failed"` (optional `chars`, `error`).
+
+```json
+{"type": "fusion_member_activity", "index": 0, "kind": "tool", "tool": "grep"}
+{"type": "fusion_verify_activity", "turn": 2, "tool": "read"}
+```
+
+`fusion_member_activity` `kind` is `thinking`, `writing`, `tool`, or `tool_result`. Optional `text` carries a snippet for thinking/writing events.
+
+### fallback_warning
+
+Emitted when the session swaps to a fallback model after a retryable error.
+
+```json
+{
+  "type": "fallback_warning",
+  "from": "anthropic/claude-sonnet-4-20250514",
+  "to": "openai/gpt-4.1",
+  "reason": "retryable error"
+}
+```
+
+### session_info_changed / thinking_level_changed / orchestration_changed
+
+State-change notifications (also reflected in `get_state`).
+
+```json
+{"type": "session_info_changed", "name": "my-feature-work"}
+{"type": "thinking_level_changed", "level": "high"}
+{"type": "orchestration_changed", "orchestration": "fusion"}
+```
+
+### verification / pending_check / visual_review
+
+Emitted during the goal/verification pipeline after a turn (when configured).
+
+```json
+{"type": "verification", "phase": "running", "command": "npm test", "attempt": 1, "maxAttempts": 3}
+{"type": "verification", "phase": "passed", "command": "npm test", "attempt": 1, "maxAttempts": 3}
+{"type": "verification", "phase": "failed", "command": "npm test", "attempt": 2, "maxAttempts": 3, "exitCode": 1, "willRetry": true}
+```
+
+```json
+{"type": "pending_check", "phase": "waiting", "command": "npm run build", "elapsedMs": 1500}
+{"type": "pending_check", "phase": "passed", "command": "npm run build"}
+```
+
+`pending_check` `phase` is also `failed` or `timeout`.
+
+```json
+{"type": "visual_review", "file": "src/App.tsx"}
+```
+
+### tool_call_rewritten / tool_call_rejected / tool_error_hint_applied
+
+Emitted by the tool rewrite/error-hint registries during tool execution.
+
+```json
+{"type": "tool_call_rewritten", "toolCallId": "call_abc", "toolName": "bash", "ruleIds": ["r1"], "args": {"command": "ls"}}
+{"type": "tool_call_rejected", "toolCallId": "call_abc", "toolName": "bash", "ruleId": "r2", "error": "Blocked by policy"}
+{"type": "tool_error_hint_applied", "toolCallId": "call_abc", "toolName": "bash", "hints": [{"ruleId": "h1", "hint": "Try quoting the path"}]}
 ```
 
 ## Extension UI Protocol
@@ -1200,8 +1404,9 @@ Parse errors:
 ## Types
 
 Source files:
+- [`src/core/agent-session-events.ts`](../src/core/agent-session-events.ts) - `AgentSessionEvent` (canonical event union for RPC/print JSON)
 - [`packages/ai/src/types.ts`](../../ai/src/types.ts) - `Model`, `UserMessage`, `AssistantMessage`, `ToolResultMessage`
-- [`packages/agent/src/types.ts`](../../agent/src/types.ts) - `AgentMessage`, `AgentEvent`
+- [`packages/agent/src/types.ts`](../../agent/src/types.ts) - `AgentMessage`, `AgentEvent` (base events)
 - [`src/core/messages.ts`](../src/core/messages.ts) - `BashExecutionMessage`
 - [`src/modes/rpc/rpc-types.ts`](../src/modes/rpc/rpc-types.ts) - RPC command/response types, extension UI request/response types
 

@@ -4,7 +4,7 @@ import { KillRing } from "../kill-ring.ts";
 import { computeWordDeletion, computeWordMoveColumn, decodeBracketedPasteCsiU } from "../text-edit-core.ts";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
-import { getSegmenter, isWhitespaceChar, sliceByColumn, visibleWidth } from "../utils.ts";
+import { getSegmenter, isWhitespaceChar, sliceByColumn, truncateToWidth, visibleWidth } from "../utils.ts";
 
 const segmenter = getSegmenter();
 
@@ -29,6 +29,13 @@ export interface InputOptions {
 	 * length actually inserted.
 	 */
 	onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
+	/**
+	 * Optional dim hint shown when the field is empty (behind the cursor).
+	 * Cleared as soon as the value is non-empty.
+	 */
+	placeholder?: string;
+	/** Color for the empty-field placeholder (defaults to identity / terminal fg). */
+	placeholderColor?: (text: string) => string;
 }
 
 /**
@@ -40,9 +47,21 @@ export class Input implements Component, Focusable {
 	public onSubmit?: (value: string) => void;
 	public onEscape?: () => void;
 	private onPasteTruncated?: (info: { originalBytes: number; keptBytes: number }) => void;
+	private placeholder?: string;
+	private placeholderColor?: (text: string) => string;
 
 	constructor(options: InputOptions = {}) {
 		this.onPasteTruncated = options.onPasteTruncated;
+		this.placeholder = options.placeholder;
+		this.placeholderColor = options.placeholderColor;
+	}
+
+	setPlaceholder(text?: string): void {
+		this.placeholder = text;
+	}
+
+	getPlaceholder(): string | undefined {
+		return this.placeholder;
 	}
 
 	/** Focusable interface - set by TUI when focus changes */
@@ -453,6 +472,20 @@ export class Input implements Component, Focusable {
 
 		if (availableWidth <= 0) {
 			return [prompt];
+		}
+
+		// Empty-field placeholder: reverse-video space cursor, then full dim hint
+		// (do not reverse the first letter of the placeholder — that looked like
+		// the hint was sitting outside a one-character "box").
+		if (this.value.length === 0 && this.placeholder) {
+			const colorize = this.placeholderColor ?? ((t: string) => t);
+			const marker = this.focused ? CURSOR_MARKER : "";
+			const cursor = this.focused ? "\x1b[7m \x1b[27m" : " ";
+			const hintBudget = Math.max(0, availableWidth - 1);
+			const truncated = hintBudget > 0 ? truncateToWidth(this.placeholder, hintBudget, "…") : "";
+			const body = marker + cursor + (truncated ? colorize(truncated) : "");
+			const pad = " ".repeat(Math.max(0, availableWidth - (1 + visibleWidth(truncated))));
+			return [`${prompt}${body}${pad}`];
 		}
 
 		let visibleText = "";

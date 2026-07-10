@@ -187,4 +187,24 @@ describe("SelectList", () => {
 		assert.ok(rendered[0].includes("…"));
 		assert.equal(visibleIndexOf(rendered[0], "first"), visibleIndexOf(rendered[1], "second"));
 	});
+
+	it("pads the selected row and applies selectedBg when provided", () => {
+		const items = [
+			{ value: "one", label: "one" },
+			{ value: "two", label: "two" },
+		];
+		const marker = "\x1b[48;2;1;2;3m";
+		const themeWithBg = {
+			...testTheme,
+			selectedBg: (text: string) => `${marker}${text}\x1b[49m`,
+		};
+
+		const list = new SelectList(items, 5, themeWithBg);
+		const rendered = list.render(40);
+		const selected = rendered[0];
+
+		assert.ok(selected.includes(marker), "selected row should use selectedBg");
+		assert.equal(visibleWidth(selected.replace(/\x1b\[[0-9;]*m/g, "")), 40);
+		assert.ok(!rendered[1].includes(marker), "unselected row should not use selectedBg");
+	});
 });

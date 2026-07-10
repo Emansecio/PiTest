@@ -70,8 +70,8 @@
 | A3 | **PARTIAL** | Elision pós-sucesso no histórico assistant | K3 elide mutating tools live (`agent-session-live-prune.ts`); prune path já elide (`compaction.ts:944-962`). Gap residual: histórico antigo / tools fora da allowlist |
 | A4 | **REMOVED** | — | K4 — ver Eliminados |
 | A5 | **VALID** | Read dedupe pós-compact seletivo | `readDedupeStore?.clear()` incondicional em todo compact (`agent-session-compaction.ts:115`) |
-| A6 | **VALID** | Caps adaptativos read/grep/bash | `adaptivePruneThreshold` não liga aos `DEFAULT_MAX_*` das tools |
-| A7 | **PARTIAL** | Grep auto `files_with_matches` quando matches > N | Modo existe e a descrição já recomenda; falta auto-switch (modelo ignora hint) (`grep.ts:581`) |
+| A6 | **SHIPPED** | Caps adaptativos read/grep/bash | `occupancyCapScale` + `refreshOccupancyTruncationCaps` no wrapper; opt-out `PIT_NO_OCCUPANCY_CAPS` |
+| A7 | **SHIPPED** | Grep auto `files_with_matches` quando matches > N | Threshold 25 quando `outputMode` omitido; opt-out `PIT_NO_GREP_AUTO_FILES` (`grep.ts`) |
 | A8 | **VALID** | MCP output profiles (crush por servidor) | Wrapper uniforme 64KB (`tool-definition-wrapper.ts`) |
 | A9 | **PARTIAL** | Cap em mensagens de grounding guard | Real principalmente no bash grounding (`bash-grounding.ts:82-86`); outros guards já têm top-N parcial, mas sem cap final de mensagem |
 | A10 | **VALID** | `find` default menor / occupancy-scaled | `DEFAULT_LIMIT = 1000` (`find.ts:36`) |
@@ -89,7 +89,7 @@
 | B5 | **VALID** | Mid-turn presend em `agent-loop.ts` | Só `transformContext` antes de stream; sem presend (`agent-loop.ts:514-518`) |
 | B6 | **REMOVED** | — | K2 — footer expõe `wireTokens` via `getContextUsage` |
 | B7 | **PARTIAL** | Fudge por densidade calibrado | Heurística dense/prose/CJK existe; sem calibração por histórico provider |
-| B8 | **VALID** | Reservar thinking budget no presend | Não implementado |
+| B8 | **SHIPPED** | Reservar thinking budget no presend | `resolveThinkingHeadroom` em `checkPresendOverflow` / checkCompaction; não infla `estimateWireTokens` UI |
 | B9 | **VALID** | Presend entre tool rounds (~92%) | Distinto de B5 (threshold/ação); gap real |
 | B10 | **PARTIAL** | Kill-switch granular por estágio | `PIT_NO_PRESEND_OVERFLOW_GUARD` global (`agent-session-compaction.ts:335`) |
 

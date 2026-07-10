@@ -10,7 +10,7 @@ export default defineConfig({
 		testTimeout: 30000, // 30 seconds for API calls
 		poolOptions: {
 			forks: {
-				maxForks: process.env.CI ? 2 : undefined,
+				maxForks: process.env.CI ? 3 : undefined,
 			},
 		},
 	},

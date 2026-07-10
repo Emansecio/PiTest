@@ -1,5 +1,13 @@
 // Core session management
 
+// Dry-run preflight for embedders (same report as `pit --dry-run`)
+export {
+	type BuildDryRunReportOptions,
+	buildDryRunReport,
+	type DryRunCheck,
+	type DryRunReport,
+	type DryRunStatus,
+} from "./cli/dry-run/index.ts";
 // Config paths
 export { getAgentDir, VERSION } from "./config.ts";
 export {

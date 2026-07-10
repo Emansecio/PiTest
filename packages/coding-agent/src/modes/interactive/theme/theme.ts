@@ -91,6 +91,8 @@ const ThemeJsonSchema = Type.Object({
 		thinkingXhigh: ColorValueSchema,
 		// Bash Mode (1 color)
 		bashMode: ColorValueSchema,
+		// Plan permission mode (editor border + footer chip)
+		planMode: ColorValueSchema,
 		// Message Shell Gutters (5 colors) — see message-shell.ts. Assistant +
 		// user have no key here: assistant uses the default fg, user reuses
 		// `border` until it gains a dedicated key in a later batch.
@@ -101,6 +103,9 @@ const ThemeJsonSchema = Type.Object({
 		gutterDiagnostics: ColorValueSchema,
 		gutterUser: ColorValueSchema,
 		gutterCustom: ColorValueSchema,
+		// Card chrome (welcome + selector overlays)
+		cardBg: ColorValueSchema,
+		cardBorder: ColorValueSchema,
 	}),
 	export: Type.Optional(
 		Type.Object({
@@ -161,13 +166,15 @@ export type ThemeColor =
 	| "thinkingHigh"
 	| "thinkingXhigh"
 	| "bashMode"
+	| "planMode"
 	| "gutterToolPending"
 	| "gutterToolSuccess"
 	| "gutterToolError"
 	| "gutterBash"
 	| "gutterDiagnostics"
 	| "gutterUser"
-	| "gutterCustom";
+	| "gutterCustom"
+	| "cardBorder";
 
 export type ThemeBg =
 	| "selectedBg"
@@ -417,10 +424,14 @@ export class Theme {
 		return this.mode;
 	}
 
-	getThinkingBorderColor(level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"): (str: string) => string {
+	getThinkingBorderColor(
+		level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra",
+	): (str: string) => string {
 		// Map thinking levels to dedicated theme colors. The level names map 1:1 to
 		// `thinking<Cap(level)>` ThemeColor keys; fall back to `thinkingOff`.
-		const key = `thinking${level[0].toUpperCase()}${level.slice(1)}` as ThemeColor;
+		// max/ultra reuse the xhigh palette until dedicated theme keys exist.
+		const paletteLevel = level === "max" || level === "ultra" ? "xhigh" : level;
+		const key = `thinking${paletteLevel[0].toUpperCase()}${paletteLevel.slice(1)}` as ThemeColor;
 		const color: ThemeColor = this.fgColors.has(key) ? key : "thinkingOff";
 		return (str: string) => this.fg(color, str);
 	}
@@ -447,6 +458,10 @@ export class Theme {
 
 	getBashModeBorderColor(): (str: string) => string {
 		return (str: string) => this.fg("bashMode", str);
+	}
+
+	getPlanModeBorderColor(): (str: string) => string {
+		return (str: string) => this.fg("planMode", str);
 	}
 }
 
@@ -1272,6 +1287,7 @@ export function getSelectListTheme(): SelectListTheme {
 		description: (text: string) => theme.fg("muted", text),
 		scrollInfo: (text: string) => theme.fg("muted", text),
 		noMatch: (text: string) => theme.fg("muted", text),
+		selectedBg: (text: string) => theme.bg("selectedBg", text),
 	};
 }
 
@@ -1283,6 +1299,7 @@ export function getEditorTheme(): EditorTheme {
 		// matching Claude Code's input. `border` resolves to the blue var in
 		// both built-in themes.
 		commandColor: (text: string) => theme.fg("border", text),
+		placeholderColor: (t) => theme.fg("dim", t),
 	};
 }
 
@@ -1293,5 +1310,6 @@ export function getSettingsListTheme(): SettingsListTheme {
 		description: (text: string) => theme.fg("dim", text),
 		cursor: theme.fg("accent", "→ "),
 		hint: (text: string) => theme.fg("dim", text),
+		selectedBg: (text: string) => theme.bg("selectedBg", text),
 	};
 }

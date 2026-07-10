@@ -1,8 +1,9 @@
 # Variáveis de ambiente — economia de tokens
 
-> Fonte: **AUDITORIA-ECONOMIA-TOKENS.md §3.6**, verificada em 2026-07-03.
-> Cada variável foi confirmada por grep no repositório; nenhuma da lista original
-> foi removida e nenhuma variável nova foi encontrada fora do inventário.
+> Fonte: **reports/AUDITORIA-ECONOMIA-TOKENS.md §3.6**, verificada em 2026-07-03;
+> revalidada na wave cirúrgica T02–T06 (2026-07-09) com flags adicionais
+> (`PIT_NO_HINDSIGHT_ON_DEMAND`, `PIT_NO_CONTEXT_RETRIEVAL`, `PIT_TTSR_BUFFER_CHARS`,
+> `PIT_FREQ_OUTLINE`) e correção de `PIT_NARRATION` para `isTruthyEnvFlag`.
 
 As variáveis abaixo permitem ajustar ou desativar mecanismos do pipeline de economia
 de tokens do `@pit/coding-agent`. A convenção padrão é `isTruthyEnvFlag` (aceita
@@ -11,7 +12,13 @@ coluna **Convenção truthy**.
 
 | Variável | Efeito | Default | Onde é lida (arquivo:linha) | Convenção truthy |
 |---|---|---|---|---|
-| `PIT_PRESEND_OVERFLOW_RATIO` | Fração da janela de contexto em que o guard pré-envio dispara compactação. Aceita `0.5`–`0.99`; valores fora do intervalo são clampados; valor não numérico usa o default. | `0.95` | `agent-session-compaction.ts:61` | numérica (parse via `Number`) |
+| `PIT_PRESEND_OVERFLOW_RATIO` | Teto (ceiling) da fração da janela em que o guard pré-envio dispara compactação. Aceita `0.5`–`0.99`. Em runtime o ratio efetivo aperta dinamicamente até `0.88` conforme ocupação wire (50%→90%) e trailing tool-share (T10). | `0.95` | `agent-session-compaction.ts` | numérica (parse via `Number`) |
+| `PIT_NO_DYNAMIC_PRESEND_RATIO` | Desativa o aperto dinâmico do ratio presend; usa só `PIT_PRESEND_OVERFLOW_RATIO` / default. | OFF | `agent-session-compaction.ts` | `isTruthyEnvFlag` |
+| `PIT_NO_READ_DEDUPE_PRUNE` | Desativa o prune seletivo do `ReadDedupeStore` após compactação (T09). | OFF | `agent-session-compaction.ts` | `isTruthyEnvFlag` |
+| `PIT_MID_TURN_PRESSURE_RATIO` | Fração da janela em que o alívio mid-turn (entre tool rounds) dispara prune-only. Mais cedo que o presend; sem compactação LLM. Aceita `0.5`–`0.99`. | `0.92` | `agent-session-compaction.ts` | numérica |
+| `PIT_NO_MID_TURN_PRESSURE_GUARD` | Desativa o alívio mid-turn de pressão de wire entre tool rounds. | OFF | `agent-session-compaction.ts` | `isTruthyEnvFlag` |
+| `PIT_NO_COMPACT_SIBLING_DEFAULT` | Desativa o default zero-config que roteia summarização de compactação para um sibling small-class do mesmo provider (haiku/mini/nano/flash/lite). | OFF | `agent-session-compaction.ts` | `isTruthyEnvFlag` |
+| `PIT_EXTENSION_HOOK_TIMEOUT_MS` | Timeout por handler de `before_agent_start` (ms). Handlers lentos são skipados (fail-open). | `1000` | `extensions/runner.ts` | numérica |
 | `PIT_NO_PRESEND_OVERFLOW_GUARD` | Desativa o guard que compacta antes de enviar mensagem quando o payload estimado excede `PRESEND_OVERFLOW_RATIO × janela`. | OFF | `agent-session-compaction.ts:386,505` | `isTruthyEnvFlag` |
 | `PIT_NO_PROACTIVE_PRUNE` | Desativa o pruning proativo de saídas de ferramentas antigas enquanto o contexto está acima do floor. | OFF | `agent-session-compaction.ts:101` · `agent-session.ts:3390` | `isTruthyEnvFlag` |
 | `PIT_PROACTIVE_PRUNE_FLOOR` | Limite mínimo de tokens (absoluto) abaixo do qual o pruning proativo não age. Override numérico; se ausente usa `max(64 000, janela × 0.25)`. | `max(64 000, janela × 0.25)` | `agent-session-compaction.ts:102` · `agent-session.ts:3399` | numérica |
@@ -37,8 +44,15 @@ coluna **Convenção truthy**.
 | `PIT_NO_CONTEXT_COMPOSER` | Desativa o bloco de contexto dinâmico inteiro (outline do projeto P1 + exemplar de estilo P3). | OFF | `conditioning/context-composer.ts:380,447` | `isTruthyEnvFlag` |
 | `PIT_NO_STYLE_EXEMPLAR` | Desativa apenas o exemplar de estilo (P3) no context-composer; o outline (P1) continua ativo. | OFF | `conditioning/context-composer.ts:412` | `isTruthyEnvFlag` |
 | `PIT_NO_OVERTHINK_GUARD` | Desativa o guard de overthink (interrompe ciclos de raciocínio sem progresso que inflariam os tokens de saída). | OFF | `overthink-policy.ts:27` | `isTruthyEnvFlag` |
+| `PIT_NO_GREP_AUTO_FILES` | Desativa o auto-switch de `grep` para `files_with_matches` quando `outputMode` é omitido e o número de matches excede o threshold (25). | OFF | `tools/grep.ts` | `isTruthyEnvFlag` |
+| `PIT_NO_OCCUPANCY_CAPS` | Desativa o aperto dos caps de truncamento (read/grep/bash) conforme a ocupação do contexto sobe (50%→90%). Caps de boot (`configureTruncationCaps`) continuam ativos. | OFF | `tools/truncate.ts` | `isTruthyEnvFlag` |
 | `PIT_NO_MEMORY_ON_DEMAND` | Desativa a recuperação de memória sob demanda (hindsight bank consultado antes de cada turno). | OFF | `agent-session.ts:2985` | `isTruthyEnvFlag` |
-| `PIT_NARRATION` | Opt-in: habilita modo narração (system prompt verboso, melhor para demonstrações/leitura humana; aumenta tokens de saída). | OFF | `system-prompt.ts:332` | `=== "1"` (anomalia — usa comparação literal, não `isTruthyEnvFlag`) |
+| `PIT_NO_HINDSIGHT_ON_DEMAND` | Desativa o hint on-demand do hindsight bank (restaura injeção completa vs hint curto). | OFF | `agent-session.ts:3133` | `isTruthyEnvFlag` |
+| `PIT_NO_CONTEXT_RETRIEVAL` | Desativa o retrieval head+tail de `project_context` (mantém só ponteiros/dedupe). | OFF | `context-files.ts:162` | `isTruthyEnvFlag` |
+| `PIT_TTSR_BUFFER_CHARS` | Tamanho do buffer rolling do TTSR (chars). Aceita `512`–`65536`; valor não numérico usa o default. | `2048` | `ttsr.ts:53–61` | numérica |
+| `PIT_FREQ_OUTLINE` | Opt-in: inclui outlines de símbolos dos hot files no dynamic suffix do system prompt. | OFF | `agent-session.ts:1335` · `system-prompt.ts:62` | `isTruthyEnvFlag` |
+| `PIT_NO_FUNCTIONAL_WEB` | Desativa o gate nativo de DoD funcional web (navigate/a11y/click/fill/console). | OFF | `verification/functional-web.ts` | `isTruthyEnvFlag` |
+| `PIT_NARRATION` | Opt-in: habilita modo narração no system prompt (aceita `"1"`, `"true"`, `"yes"`). | OFF | `system-prompt.ts` | `isTruthyEnvFlag` |
 | `PIT_ASYNC_REINJECT` | Opt-in (legado): reinjetar automaticamente o resultado de subagentes `spawn` no chat quando o resultado chega assíncrono. Comportamento padrão atual notifica sem reinjetar. | OFF | `agent-session.ts:3516` | `isTruthyEnvFlag` |
 
 ---
@@ -57,12 +71,12 @@ PIT_NO_PRESEND_OVERFLOW_GUARD=1 pit
 PIT_PRESEND_OVERFLOW_RATIO=0.85 pit   # dispara mais cedo (contexto < 85 %)
 ```
 
-**Anomalias de convenção detectadas:**
-
-| Variável | Arquivo | Problema |
-|---|---|---|
-| `PIT_NARRATION` | `system-prompt.ts:332` | Usa `=== "1"` em vez de `isTruthyEnvFlag` — `"true"` e `"yes"` **não** ativam esta flag |
+**Caps de tools / ocupação:** o default do `find` (sem `limit` explícito) usa
+`FIND_DEFAULT_LIMIT_CEILING = 500` e floor `100`, escalado por
+`getOccupancyScale()` (`tools/find.ts`). Opt-out do scaling geral:
+`PIT_NO_OCCUPANCY_CAPS`.
 
 > A variável `PIT_NO_PRESEND_OVERFLOW_GUARD` também usava `=== "1"` em
 > `agent-session-compaction.ts` (linhas 386 e 505) — corrigida para
 > `isTruthyEnvFlag` no commit referente à AUDITORIA-ECONOMIA-TOKENS M23.
+> `PIT_NARRATION` foi alinhada a `isTruthyEnvFlag` na wave cirúrgica T06 (2026-07).

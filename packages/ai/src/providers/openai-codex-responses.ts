@@ -82,7 +82,7 @@ const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 // ============================================================================
 
 export interface OpenAICodexResponsesOptions extends StreamOptions {
-	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 	reasoningSummary?: "auto" | "concise" | "detailed" | "off" | "on" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	textVerbosity?: "low" | "medium" | "high";
@@ -369,7 +369,11 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 function clampReasoningEffort(modelId: string, effort: string): string {
 	const id = modelId.includes("/") ? modelId.split("/").pop()! : modelId;
 	if (
-		(id.startsWith("gpt-5.2") || id.startsWith("gpt-5.3") || id.startsWith("gpt-5.4") || id.startsWith("gpt-5.5")) &&
+		(id.startsWith("gpt-5.2") ||
+			id.startsWith("gpt-5.3") ||
+			id.startsWith("gpt-5.4") ||
+			id.startsWith("gpt-5.5") ||
+			id.startsWith("gpt-5.6")) &&
 		effort === "minimal"
 	) {
 		return "low";

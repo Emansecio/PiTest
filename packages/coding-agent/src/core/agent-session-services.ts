@@ -7,7 +7,7 @@ import { bundleBuiltInExtensions } from "./built-ins/index.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { composeMcpSettings, loadMcpConfigFiles } from "./mcp/config-files.ts";
 import { ModelRegistry } from "./model-registry.ts";
-import type { PermissionMode } from "./permissions/index.ts";
+import { normalizePermissionMode, PermissionChecker, type PermissionMode } from "./permissions/index.ts";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.ts";
 import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
@@ -79,6 +79,11 @@ export interface AgentSessionServices {
 	modelRegistry: ModelRegistry;
 	resourceLoader: ResourceLoader;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
+	/**
+	 * Live permission checker (same instance the permissions extension mutates).
+	 * Used by RPC `get_state` so `permissionMode` stays accurate mid-session.
+	 */
+	permissionChecker: PermissionChecker;
 	/**
 	 * Bind a callback fired when the permission mode changes (slash command,
 	 * cycle key, or `exit_plan` approval). The interactive mode uses this to
@@ -171,12 +176,16 @@ export async function createAgentSessionServices(
 	const permissionModeChangeRef: { current?: (mode: import("./permissions/types.ts").PermissionMode) => void } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
+	const permissionSettings = settingsManager.getPermissionSettings();
+	const effectivePermissionMode: PermissionMode =
+		options.permissionModeOverride ?? normalizePermissionMode(permissionSettings.mode) ?? "auto";
+	let permissionChecker: PermissionChecker;
 	if (!options.disableBuiltInExtensions) {
 		const bundle = bundleBuiltInExtensions({
 			cwd,
 			agentDir,
 			modelRegistry,
-			permissions: settingsManager.getPermissionSettings(),
+			permissions: permissionSettings,
 			permissionModeOverride: options.permissionModeOverride,
 			hooks: settingsManager.getHooksSettings(),
 			mcp: composeMcpSettings(settingsManager.getMcpSettingsLayered(), loadMcpConfigFiles(cwd, agentDir)),
@@ -194,6 +203,14 @@ export async function createAgentSessionServices(
 			onPermissionModeChange: (mode) => permissionModeChangeRef.current?.(mode),
 		});
 		builtInFactories = bundle.factories;
+		permissionChecker = bundle.permissionChecker;
+	} else {
+		// Headless/tests without built-ins still expose a live mode for get_state.
+		permissionChecker = new PermissionChecker({
+			cwd,
+			mode: effectivePermissionMode,
+			settings: permissionSettings,
+		});
 	}
 
 	const userFactories = options.resourceLoaderOptions?.extensionFactories ?? [];
@@ -260,6 +277,7 @@ export async function createAgentSessionServices(
 		modelRegistry,
 		resourceLoader,
 		diagnostics,
+		permissionChecker,
 		bindPermissionModeChange: (handler) => {
 			permissionModeChangeRef.current = handler;
 		},

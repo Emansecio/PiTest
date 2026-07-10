@@ -175,6 +175,8 @@ export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptio
 						note: `${event.toolName} ${fingerprint}`,
 						outcome: "overridden",
 						ruleId: "known-failed-call",
+						toolName: event.toolName,
+						toolCallId: event.toolCallId,
 					},
 				});
 				return undefined;
@@ -184,7 +186,13 @@ export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptio
 				category: "guard.learned-error",
 				level: "info",
 				source: "learned-error-guard-extension",
-				context: { note: `${event.toolName} ${fingerprint}`, outcome: "blocked", ruleId: "known-failed-call" },
+				context: {
+					note: `${event.toolName} ${fingerprint}`,
+					outcome: "blocked",
+					ruleId: "known-failed-call",
+					toolName: event.toolName,
+					toolCallId: event.toolCallId,
+				},
 			});
 			return {
 				block: true,

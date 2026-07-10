@@ -52,7 +52,9 @@ describe("visual definition-of-done gate", () => {
 	});
 
 	it("does not nudge when verification.visual is disabled", async () => {
-		const harness = await createHarness({ settings: { verification: { visual: false } } });
+		const harness = await createHarness({
+			settings: { verification: { visual: false, functionalWeb: false } },
+		});
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "page.html");
 		harness.setResponses([

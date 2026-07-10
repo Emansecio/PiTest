@@ -117,18 +117,38 @@ export class ReadDedupeStore {
 			this.seen.delete(oldest);
 		}
 	}
-	/**
-	 * Forget all remembered reads. Called on compaction: once the transcript is
-	 * summarised, a body previously suppressed/delta'd as "already shown above"
-	 * may have scrolled out of context, so the next read of the same (path, range)
-	 * must re-send it in full rather than reference content the model no longer has.
-	 * The LRU bound alone can't know about compaction; this is the explicit reset.
-	 * Mirrors the read-guard's readFiles.clear() on session_before_compact.
-	 */
+	/** Forget all remembered reads (explicit reset only). */
 	clear(): void {
 		this.seen.clear();
 		this.totalBytes = 0;
 	}
+
+	/**
+	 * Drop entries whose canonical path is outside `keepCanonicalPaths`, or whose
+	 * path is marked stale by `isStale` (T09). Used after compaction so re-reads of
+	 * summary-anchored, unchanged files still dedupe while orphaned paths free RAM.
+	 * Empty keep-set is a no-op (extension compaction without file lists).
+	 */
+	pruneExcept(keepCanonicalPaths: Set<string>, isStale?: (canonicalPath: string) => boolean): void {
+		if (keepCanonicalPaths.size === 0) return;
+		for (const key of [...this.seen.keys()]) {
+			const path = pathFromDedupeKey(key);
+			if (!keepCanonicalPaths.has(path) || isStale?.(path)) {
+				const entry = this.seen.get(key);
+				if (entry) this.totalBytes -= entry.bytes;
+				this.seen.delete(key);
+			}
+		}
+	}
+}
+
+/** Canonical path component of a {@link readDedupeKey} (everything before the range suffix). */
+export function pathFromDedupeKey(key: string): string {
+	const lastSpace = key.lastIndexOf(" ");
+	if (lastSpace < 0) return key;
+	const beforeLimit = key.lastIndexOf(" ", lastSpace - 1);
+	if (beforeLimit < 0) return key.slice(0, lastSpace);
+	return key.slice(0, beforeLimit);
 }
 
 function hashReadContent(text: string): string {

@@ -1,6 +1,6 @@
 import type { ThinkingLevel } from "@pit/agent-core";
 import { type Api, type Model, streamSimple } from "@pit/ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CompactionController, resolveCompactModel } from "../src/core/agent-session-compaction.js";
 import { resolveRole } from "../src/core/model-resolver.js";
 import type { ModelRoleSettings } from "../src/core/settings-manager.js";
@@ -105,12 +105,43 @@ describe("resolveCompactModel — fail-open routing", () => {
 		expect(result.thinkingLevel).toBe("low");
 	});
 
-	it("falls back to the session model when no compact role is configured", async () => {
-		const ctx = makeCtx({ roleSettings: roleSettings() });
+	it("falls back to the session model when no compact role is configured and no sibling exists", async () => {
+		const host = {
+			cwd: "/repo",
+			settingsManager: { getModelRoleSettings: () => roleSettings() },
+			modelRegistry: {
+				getAll: () => [sessionModel], // no haiku sibling
+				getApiKeyAndHeaders: async (m: Model<any>) => ({
+					ok: true,
+					apiKey: `key-${m.id}`,
+					headers: { "x-model": m.id },
+				}),
+			},
+			agent: { streamFn: streamSimple },
+			getCompactionRequestAuth: async (m: Model<any>) => ({ apiKey: `key-${m.id}`, headers: { "x-model": m.id } }),
+		};
+		const ctx = new CompactionController(host as unknown as CompactionController["host"]);
 		const result = await resolveCompactModel(ctx, sessionModel, sessionAuth, sessionThinking);
 		expect(result.model.id).toBe("claude-opus-4-8");
 		expect(result.apiKey).toBe("key-session");
 		expect(result.thinkingLevel).toBe("high");
+	});
+
+	it("routes to a same-provider small-class sibling when no compact role is configured", async () => {
+		const ctx = makeCtx({ roleSettings: roleSettings() });
+		const result = await resolveCompactModel(ctx, sessionModel, sessionAuth, sessionThinking);
+		expect(result.model.id).toBe("claude-haiku-4-5");
+		expect(result.apiKey).toBe("key-claude-haiku-4-5");
+		expect(result.thinkingLevel).toBe("low");
+	});
+
+	it("skips sibling default when PIT_NO_COMPACT_SIBLING_DEFAULT is set", async () => {
+		vi.stubEnv("PIT_NO_COMPACT_SIBLING_DEFAULT", "1");
+		const ctx = makeCtx({ roleSettings: roleSettings() });
+		const result = await resolveCompactModel(ctx, sessionModel, sessionAuth, sessionThinking);
+		expect(result.model.id).toBe("claude-opus-4-8");
+		expect(result.thinkingLevel).toBe("high");
+		vi.unstubAllEnvs();
 	});
 
 	it("falls back to the session model when the compact role resolves to nothing", async () => {
@@ -131,8 +162,10 @@ describe("resolveCompactModel — fail-open routing", () => {
 	});
 
 	it("uses the session thinking level when falling back", async () => {
+		vi.stubEnv("PIT_NO_COMPACT_SIBLING_DEFAULT", "1");
 		const ctx = makeCtx({ roleSettings: roleSettings() });
 		const result = await resolveCompactModel(ctx, sessionModel, sessionAuth, "medium");
 		expect(result.thinkingLevel).toBe("medium");
+		vi.unstubAllEnvs();
 	});
 });

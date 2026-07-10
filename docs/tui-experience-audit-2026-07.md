@@ -1,6 +1,6 @@
 # Auditoria de experiência e design do Pit TUI — 2026-07-03
 
-> Sucessora de [`TUI-AESTHETICS.md`](../TUI-AESTHETICS.md) (Moves 0–5 shipped) e
+> Sucessora de [`TUI-AESTHETICS.md`](reports/TUI-AESTHETICS.md) (Moves 0–5 shipped) e
 > [`tui-ux-micro-moves-plan.md`](agents/tui-ux-micro-moves-plan.md) (itens 1–9,
 > quase todos shipped). Produzida por 4 lanes paralelas com ownership disjunto
 > (chrome / conversa / tools / overlays+tema); toda evidência `file:line` abaixo

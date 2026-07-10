@@ -34,3 +34,48 @@ describe("prepareAskArguments — legacy timeout alias", () => {
 		expect(prepareAskArguments(undefined)).toBe(undefined);
 	});
 });
+
+describe("prepareAskArguments — JSON-stringified options", () => {
+	it("parses options from a JSON string", () => {
+		const options = [{ label: "Yes" }, { label: "No", recommended: true }];
+		expect(
+			prepareAskArguments({
+				question: "Proceed?",
+				options: JSON.stringify(options),
+			}),
+		).toEqual({
+			question: "Proceed?",
+			options,
+		});
+	});
+
+	it("leaves options alone when the string is not valid JSON", () => {
+		const input = { question: "Proceed?", options: "not json" };
+		expect(prepareAskArguments(input)).toEqual(input);
+	});
+
+	it("leaves options alone when JSON parses to a non-array", () => {
+		const input = { question: "Proceed?", options: JSON.stringify({ label: "Yes" }) };
+		expect(prepareAskArguments(input)).toEqual(input);
+	});
+
+	it("keeps the same reference when options is already an array", () => {
+		const input = { question: "Proceed?", options: [{ label: "Yes" }] };
+		expect(prepareAskArguments(input)).toBe(input);
+	});
+
+	it("composes timeout alias with options coercion", () => {
+		const options = [{ label: "A" }];
+		expect(
+			prepareAskArguments({
+				question: "Pick",
+				timeout: 3000,
+				options: JSON.stringify(options),
+			}),
+		).toEqual({
+			question: "Pick",
+			timeout_ms: 3000,
+			options,
+		});
+	});
+});

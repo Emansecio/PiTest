@@ -29,9 +29,9 @@ export function summarizeArgsOneLine(args: unknown, maxLen = FALLBACK_CALL_SUMMA
 		else val = "{…}";
 		const part = `${k}: ${val.replace(/\s+/g, " ").trim()}`;
 		parts.push(part);
-		joinedLen += (parts.length > 1 ? 2 : 0) + part.length;
+		joinedLen += (parts.length > 1 ? 1 : 0) + part.length;
 		// Stop once we already overflow — no point formatting the tail.
 		if (joinedLen >= maxLen) break;
 	}
-	return clamp(parts.join("  "));
+	return clamp(parts.join(" "));
 }

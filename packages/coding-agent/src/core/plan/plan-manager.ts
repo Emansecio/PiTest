@@ -54,15 +54,26 @@ export interface PlanVersion {
 
 export interface PlanState {
 	versions: PlanVersion[];
+	/**
+	 * When true, per-turn `<plan>` injection is suppressed (all steps done).
+	 * `plan show` / session entry / `.pit/plans/` artifacts still work for recall.
+	 * Cleared by a fresh `propose` / `revise`.
+	 */
+	archived?: boolean;
 }
 
 const INTENT_MAX = 200;
+const STEP_ID_MAX = 120;
 const ARTIFACT_MAX = 200;
 const VERIFY_MAX = 400;
 /** Cap for the plan `brief` (markdown context). Larger than per-step fields on purpose. */
 const BRIEF_MAX = 4000;
 /** Truncation target for the brief inside the per-turn system prompt section (token economy). */
 const BRIEF_PROMPT_MAX = 1500;
+/** Hard cap for steps accepted into one active plan. */
+const MAX_PLAN_STEPS = 64;
+/** Maximum characters injected by an active plan on each model turn. */
+const PLAN_PROMPT_MAX = 6000;
 
 function clamp(s: string, max: number): string {
 	return truncateWithEllipsis(s.trim(), max);
@@ -81,12 +92,16 @@ function validateSteps(rawSteps: PlanStepInput[]): PlanStep[] {
 	if (!Array.isArray(rawSteps) || rawSteps.length === 0) {
 		throw new PlanValidationError("A plan needs at least one step.");
 	}
+	if (rawSteps.length > MAX_PLAN_STEPS) {
+		throw new PlanValidationError(`A plan supports at most ${MAX_PLAN_STEPS} steps.`);
+	}
 
 	const steps: PlanStep[] = [];
 	const ids = new Set<string>();
 	for (const raw of rawSteps) {
 		const id = typeof raw.id === "string" ? raw.id.trim() : "";
 		if (!id) throw new PlanValidationError("Every step needs a non-empty `id`.");
+		if (id.length > STEP_ID_MAX) throw new PlanValidationError(`Step id exceeds ${STEP_ID_MAX} characters.`);
 		if (ids.has(id)) throw new PlanValidationError(`Duplicate step id: ${id}.`);
 		ids.add(id);
 		const intent = typeof raw.intent === "string" ? raw.intent.trim() : "";
@@ -205,10 +220,17 @@ const STATUS_GLYPH: Record<PlanStepStatus, string> = {
 export class PlanManager {
 	private versions: PlanVersion[] = [];
 	private dirty = false;
+	/** True when all steps are done — suppresses per-turn `<plan>` injection. */
+	private archived = false;
 
 	/** Whether any plan has been proposed yet. */
 	isEmpty(): boolean {
 		return this.versions.length === 0;
+	}
+
+	/** Whether the plan is archived (complete; no prompt injection). */
+	isArchived(): boolean {
+		return this.archived;
 	}
 
 	/** Consume the dirty flag — true since the last call if the plan changed (for persistence). */
@@ -239,7 +261,9 @@ export class PlanManager {
 		const normalized = validateSteps(steps);
 		const clampedBrief = brief?.trim() ? clamp(brief, BRIEF_MAX) : undefined;
 		this.versions = [{ version: 1, steps: normalized, brief: clampedBrief }];
+		this.archived = false;
 		this.dirty = true;
+		this.maybeArchiveIfComplete();
 		return cloneVersion(this.versions[0]);
 	}
 
@@ -257,7 +281,9 @@ export class PlanManager {
 		const nextVersion = this.currentVersion() + 1;
 		const version: PlanVersion = { version: nextVersion, steps: normalized, brief: clampedBrief };
 		this.versions.push(version);
+		this.archived = false;
 		this.dirty = true;
+		this.maybeArchiveIfComplete();
 		return cloneVersion(version);
 	}
 
@@ -273,7 +299,16 @@ export class PlanManager {
 		if (!step) return undefined;
 		step.status = "done";
 		this.dirty = true;
+		this.maybeArchiveIfComplete();
 		return { ...step };
+	}
+
+	/** Archive when every step on the current version is done (total > 0). */
+	private maybeArchiveIfComplete(): void {
+		const { done, total } = this.counts();
+		if (total > 0 && done === total) {
+			this.archived = true;
+		}
 	}
 
 	/** {done,total} for the current version. */
@@ -313,37 +348,45 @@ export class PlanManager {
 	}
 
 	serialize(): PlanState {
-		return { versions: this.versions.map(cloneVersion) };
+		return { versions: this.versions.map(cloneVersion), archived: this.archived || undefined };
 	}
 
 	restore(data: PlanState | undefined): void {
 		if (!data || !Array.isArray(data.versions)) {
 			this.versions = [];
+			this.archived = false;
 			return;
 		}
-		this.versions = data.versions
-			.filter((v) => v && Array.isArray(v.steps))
-			.map((v) => ({
-				version: typeof v.version === "number" ? v.version : 1,
-				steps: v.steps.map((s) => ({
-					id: String(s.id),
-					intent: String(s.intent),
-					dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn.map(String) : [],
-					producesArtifact: s.producesArtifact ? String(s.producesArtifact) : undefined,
-					verifyCmd: s.verifyCmd ? String(s.verifyCmd) : undefined,
-					status: PLAN_STEP_STATUSES.includes(s.status) ? s.status : "pending",
-				})),
-				// Defensive: sessions persisted before `brief` existed restore fine.
-				brief: typeof v.brief === "string" ? v.brief : undefined,
-			}));
+		const restored: PlanVersion[] = [];
+		for (const version of data.versions) {
+			if (!version || !Array.isArray(version.steps)) continue;
+			try {
+				restored.push({
+					version: typeof version.version === "number" ? version.version : 1,
+					steps: validateSteps(version.steps),
+					brief: typeof version.brief === "string" ? clamp(version.brief, BRIEF_MAX) : undefined,
+				});
+			} catch {
+				// A corrupt persisted revision must not create an unbounded prompt.
+			}
+		}
+		this.versions = restored;
+		if (typeof data.archived === "boolean") {
+			this.archived = data.archived;
+		} else {
+			this.archived = false;
+			this.maybeArchiveIfComplete();
+		}
 	}
 
 	/**
-	 * Section injected into the system prompt while a plan exists, so the active
-	 * DAG survives history compaction verbatim (mirrors TodoManager). Empty when
-	 * no plan has been proposed.
+	 * Per-turn system-prompt injection. Empty when no plan OR when archived
+	 * (all steps done) — stops paying tokens for a finished DAG. Use `plan show`
+	 * / session entry / `.pit/plans/` for recall. Compaction survival still holds
+	 * while the plan is active (mirrors TodoManager).
 	 */
 	systemPromptSection(): string {
+		if (this.archived) return "";
 		const v = this.versions[this.versions.length - 1];
 		if (!v) return "";
 		const { done, total } = this.counts();
@@ -363,13 +406,30 @@ export class PlanManager {
 		}
 		lines.push("Current plan (topological order):");
 		const statusById = new Map(v.steps.map((s) => [s.id, s.status]));
-		for (const step of topoOrder(v.steps)) lines.push(renderStepLine(step, statusById));
+		let omittedSteps = 0;
+		for (const step of topoOrder(v.steps)) {
+			const line = renderStepLine(step, statusById);
+			if (lines.join("\n").length + line.length + 1 > PLAN_PROMPT_MAX) {
+				omittedSteps++;
+				continue;
+			}
+			lines.push(line);
+		}
+		if (omittedSteps > 0) lines.push(`(${omittedSteps} steps omitted; use plan show)`);
 		const readyNow = v.steps
 			.filter((s) => s.status === "pending" && s.dependsOn.every((d) => statusById.get(d) === "done"))
 			.map((s) => s.id);
-		if (readyNow.length > 0) lines.push(`Ready now: ${readyNow.join(", ")}`);
+		if (readyNow.length > 0) {
+			const readyLine = `Ready now: ${readyNow.join(", ")}`;
+			if (lines.join("\n").length + readyLine.length + "\n</plan>".length <= PLAN_PROMPT_MAX) {
+				lines.push(readyLine);
+			}
+		}
 		lines.push("</plan>");
-		return lines.join("\n");
+		const section = lines.join("\n");
+		return section.length <= PLAN_PROMPT_MAX
+			? section
+			: `${section.slice(0, PLAN_PROMPT_MAX - "\n</plan>".length - 1)}â€¦\n</plan>`;
 	}
 }
 

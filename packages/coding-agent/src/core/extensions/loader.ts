@@ -28,7 +28,7 @@ import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
-import { HANDLER_SIDE_EFFECT_TAG } from "./runner.ts";
+import { HANDLER_MESSAGE_INJECTOR_TAG, HANDLER_SIDE_EFFECT_TAG } from "./runner.ts";
 import type {
 	Extension,
 	ExtensionAPI,
@@ -227,6 +227,11 @@ function createExtensionAPI(
 
 		markSideEffect<F extends (...args: any[]) => any>(handler: F): F {
 			(handler as unknown as Record<string, unknown>)[HANDLER_SIDE_EFFECT_TAG] = true;
+			return handler;
+		},
+
+		markMessageInjector<F extends (...args: any[]) => any>(handler: F): F {
+			(handler as unknown as Record<string, unknown>)[HANDLER_MESSAGE_INJECTOR_TAG] = true;
 			return handler;
 		},
 
@@ -609,21 +614,26 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const runtime = createExtensionRuntime();
 	const piTiming = process.env.PIT_TIMING === "1";
 
+	// Normalize every path through preferPrecompiledSibling so callers that pass
+	// raw `.ts` (resource-loader, explicit CLI paths, local package sources) still
+	// pick up a fresher sibling `.js` and skip jiti.
+	const normalizedPaths = paths.map((p) => preferPrecompiledSibling(resolvePath(p, cwd)));
+
 	// Split: pre-compiled .js can load in parallel (I/O-bound native import);
 	// .ts must stay serial to avoid jiti cache contention.
 	const jsEntries: Array<{ index: number; path: string }> = [];
 	const tsEntries: Array<{ index: number; path: string }> = [];
-	for (let i = 0; i < paths.length; i++) {
-		const resolved = resolvePath(paths[i], cwd);
+	for (let i = 0; i < normalizedPaths.length; i++) {
+		const resolved = normalizedPaths[i]!;
 		if (!isBunBinary && resolved.endsWith(".js")) {
-			jsEntries.push({ index: i, path: paths[i] });
+			jsEntries.push({ index: i, path: resolved });
 		} else {
-			tsEntries.push({ index: i, path: paths[i] });
+			tsEntries.push({ index: i, path: resolved });
 		}
 	}
 
 	// Parallel batch for .js extensions
-	const results = new Array<{ extension: Extension | null; error: string | null }>(paths.length);
+	const results = new Array<{ extension: Extension | null; error: string | null }>(normalizedPaths.length);
 	if (jsEntries.length > 0) {
 		const t0 = piTiming ? Date.now() : 0;
 		const jsResults = await Promise.all(
@@ -654,10 +664,10 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	}
 
 	// Collect in original order to preserve registration priority
-	for (let i = 0; i < paths.length; i++) {
-		const { extension, error } = results[i];
+	for (let i = 0; i < normalizedPaths.length; i++) {
+		const { extension, error } = results[i]!;
 		if (error) {
-			errors.push({ path: paths[i], error });
+			errors.push({ path: normalizedPaths[i]!, error });
 			continue;
 		}
 		if (extension) extensions.push(extension);
@@ -790,9 +800,39 @@ function discoverExtensionsInDir(dir: string): string[] {
 		for (const entry of entries) {
 			const entryPath = path.join(dir, entry.name);
 
-			// 1. Direct files: *.ts or *.js
+			// 1. Direct files: *.ts or *.js — prefer fresher precompiled sibling and
+			// skip the loser so foo.ts+foo.js never load twice after precompile.
 			if ((entry.isFile() || entry.isSymbolicLink()) && isExtensionFile(entry.name)) {
-				discovered.push(entryPath);
+				if (entry.name.endsWith(".ts") && !entry.name.endsWith(".d.ts")) {
+					const jsPath = `${entryPath.slice(0, -3)}.js`;
+					if (fs.existsSync(jsPath)) {
+						try {
+							const tsStat = fs.statSync(entryPath);
+							const jsStat = fs.statSync(jsPath);
+							if (jsStat.mtimeMs >= tsStat.mtimeMs) {
+								// JS sibling wins; it will be discovered on its own iteration.
+								continue;
+							}
+						} catch {
+							/* fall through */
+						}
+					}
+				} else if (entry.name.endsWith(".js")) {
+					const tsPath = `${entryPath.slice(0, -3)}.ts`;
+					if (fs.existsSync(tsPath)) {
+						try {
+							const tsStat = fs.statSync(tsPath);
+							const jsStat = fs.statSync(entryPath);
+							if (jsStat.mtimeMs < tsStat.mtimeMs) {
+								// TS sibling is newer; it will win on its iteration.
+								continue;
+							}
+						} catch {
+							/* fall through */
+						}
+					}
+				}
+				discovered.push(preferPrecompiledSibling(entryPath));
 				continue;
 			}
 

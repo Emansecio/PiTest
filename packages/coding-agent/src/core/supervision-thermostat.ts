@@ -55,6 +55,13 @@ export interface SupervisionThermostatOptions {
 	 * from the process-global diagnostics ring.
 	 */
 	subscribeDiagnostics?: boolean;
+	/**
+	 * Wave E15: guard categories whose cross-session efficacy marks them as nuisance
+	 * tighten signals (high post-block success rate). Loaded from the diagnostics
+	 * sink at session boot by `SessionRecoveryController`; blocked diagnostics for
+	 * these guards do NOT call `noteSignal` (fail-open when unset).
+	 */
+	efficacySkipTightenGuards?: ReadonlySet<string>;
 	onLevelChange?: (from: SupervisionLevel, to: SupervisionLevel, signal: string) => void;
 }
 
@@ -105,12 +112,14 @@ export class SupervisionThermostat {
 	private _level: SupervisionLevel;
 	private _cleanStreak = 0;
 	private readonly _disabled: boolean;
+	private readonly _efficacySkipTightenGuards: ReadonlySet<string>;
 	private readonly _onLevelChange?: SupervisionThermostatOptions["onLevelChange"];
 	private _unsubscribe?: () => void;
 
 	constructor(options: SupervisionThermostatOptions = {}) {
 		this._startLevel = computeStartLevel(options.model);
 		this._level = this._startLevel;
+		this._efficacySkipTightenGuards = options.efficacySkipTightenGuards ?? new Set();
 		this._onLevelChange = options.onLevelChange;
 		// Kill-switch is decided ONCE, at construction: fail-open means no
 		// subscription and no state movement for the life of this instance.
@@ -187,6 +196,9 @@ export class SupervisionThermostat {
 		// and tightens like any other guard.
 		if (event.category.startsWith("guard.") && event.context?.outcome === "blocked") {
 			if (event.context?.ruleId === "intent-gate-no-plan") return;
+			// E15: skip tighten for guards whose efficacy history shows mostly
+			// successful retries after block — weak supervision evidence.
+			if (this._efficacySkipTightenGuards.has(event.category)) return;
 			this.noteSignal(event.category);
 			return;
 		}

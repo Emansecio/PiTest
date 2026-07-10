@@ -4,13 +4,16 @@ import { Box } from "./box.ts";
 
 type RenderCache = {
 	width: number;
-	childSig: string;
+	/** Exact array reference returned by {@link Box.render} last time. */
+	boxLinesRef: string[];
 	lines: string[];
 };
 
 /**
  * Rounded card frame (`╭─╮` / `│` / `╰─╯`) with internal padding via {@link Box}.
- * Width-keyed memo matches {@link DynamicBorder} in coding-agent.
+ * Memo keys on width + the Box output array identity (Box itself memoizes by
+ * child render refs), so nested mutations that change a child's output bust
+ * this cache without requiring a direct addChild/clear on the Card.
  */
 export class Card implements Component {
 	private box: Box;
@@ -66,28 +69,25 @@ export class Card implements Component {
 		this.box.invalidate();
 	}
 
-	private childSignature(): string {
-		// Box has no stable child-id API; width-only memo is enough when children
-		// call invalidate() on mutation (same contract as Box.render).
-		return String(this.box.children.length);
-	}
-
 	render(width: number): string[] {
 		const innerWidth = Math.max(1, width - 2);
-		const childSig = this.childSignature();
+		// Always ask Box first — its child-ref memo detects nested mutations
+		// (e.g. a list Container that clear()+addChild()s). Keying only on
+		// direct child *count* would keep a stale framed snapshot while the
+		// list inside changed (model/oauth/extension selectors).
+		const boxLines = this.box.render(innerWidth);
 		const cache = this.cache;
-		if (cache && cache.width === width && cache.childSig === childSig) {
+		if (cache && cache.width === width && cache.boxLinesRef === boxLines) {
 			return cache.lines;
 		}
 
 		const rule = "─".repeat(innerWidth);
 		const top = truncateToWidth(this.borderColor(`╭${rule}╮`), width);
 		const bottom = truncateToWidth(this.borderColor(`╰${rule}╯`), width);
-		const boxLines = this.box.render(innerWidth);
 
 		if (boxLines.length === 0) {
 			const lines = [top, bottom];
-			this.cache = { width, childSig, lines };
+			this.cache = { width, boxLinesRef: boxLines, lines };
 			return lines;
 		}
 
@@ -99,7 +99,7 @@ export class Card implements Component {
 		}
 		lines.push(bottom);
 
-		this.cache = { width, childSig, lines };
+		this.cache = { width, boxLinesRef: boxLines, lines };
 		return lines;
 	}
 }

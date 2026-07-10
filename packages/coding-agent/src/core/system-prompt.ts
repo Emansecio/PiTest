@@ -4,6 +4,7 @@
 
 import { SYSTEM_PROMPT_DYNAMIC_MARKER } from "@pit/ai";
 import { getDocsPath, getExamplesPath, getReadmePath } from "../config.ts";
+import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import {
 	type FrequentFile,
 	type FrequentFileStat,
@@ -87,6 +88,12 @@ export interface BuildSystemPromptOptions {
 	 * cacheable prefix. Empty string / undefined → nothing emitted (fail-open).
 	 */
 	groundedContext?: string;
+	/**
+	 * Wire/context occupancy percent from `getContextUsage()`. When ≥ 50, omit
+	 * `frequent_files` / hot-file outlines (model already has those paths in
+	 * transcript). `undefined` keeps legacy behavior (emit when data exists).
+	 */
+	contextOccupancyPercent?: number;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -106,13 +113,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		sessionFrequentFiles,
 		gitState,
 		groundedContext,
+		contextOccupancyPercent,
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
 	const resolvedHiddenToolCount = hiddenToolCount ?? getCurrentToolDiscoveryIndex()?.listHidden().length ?? 0;
-	const hiddenToolsNudge =
-		resolvedHiddenToolCount > 0
-			? '\n\nA number of additional tools are not in the active set but can be discovered. Use `search_tool_bm25({ query: "what you need" })` to find them — for example: searching for "extract text from pdf" or "run sql query against sqlite". Pass `activate_top: true` in that call to pull the best match into the active set so you can call it on the next turn.'
-			: "";
 
 	const now = new Date();
 	const year = now.getFullYear();
@@ -158,21 +162,26 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		// <frequent_files> section is emitted: the session tracker (what THIS
 		// session actually touched) wins over the boot index once it has data.
 		// See agent-session._kickoffFrequentFilesIndex.
-		const sessionBlock =
-			sessionFrequentFiles && sessionFrequentFiles.length > 0
-				? formatFrequentFilesForPrompt(sessionFrequentFiles)
-				: "";
-		const indexBlock =
-			sessionBlock.length === 0 && frequentFiles && frequentFiles.length > 0
-				? formatFrequentFilesIndexForPrompt(frequentFiles)
-				: "";
-		const frequentFilesBlock = sessionBlock.length > 0 ? sessionBlock : indexBlock;
-		if (frequentFilesBlock.length > 0) {
-			parts.push(`\n\n${frequentFilesBlock}\n`);
-		}
-		if (hotFileOutlines && hotFileOutlines.length > 0) {
-			const outlineBlock = formatHotFileOutlines(hotFileOutlines);
-			if (outlineBlock.length > 0) parts.push(`\n\n${outlineBlock}\n`);
+		// Under high occupancy the model already saw these paths in-transcript;
+		// skip the dynamic suffix block to save wire tokens (T02).
+		const emitFrequentFiles = contextOccupancyPercent === undefined || contextOccupancyPercent < 50;
+		if (emitFrequentFiles) {
+			const sessionBlock =
+				sessionFrequentFiles && sessionFrequentFiles.length > 0
+					? formatFrequentFilesForPrompt(sessionFrequentFiles)
+					: "";
+			const indexBlock =
+				sessionBlock.length === 0 && frequentFiles && frequentFiles.length > 0
+					? formatFrequentFilesIndexForPrompt(frequentFiles)
+					: "";
+			const frequentFilesBlock = sessionBlock.length > 0 ? sessionBlock : indexBlock;
+			if (frequentFilesBlock.length > 0) {
+				parts.push(`\n\n${frequentFilesBlock}\n`);
+			}
+			if (hotFileOutlines && hotFileOutlines.length > 0) {
+				const outlineBlock = formatHotFileOutlines(hotFileOutlines);
+				if (outlineBlock.length > 0) parts.push(`\n\n${outlineBlock}\n`);
+			}
 		}
 		// Band P context-composer block — dynamic suffix only (after the marker),
 		// so per-turn recomputation never re-bills the cached prefix.
@@ -201,17 +210,88 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const docsPath = getDocsPath();
 	const examplesPath = getExamplesPath();
 
-	// Build tools list based on selected tools.
-	// Tools with a one-line snippet get a description; the rest are listed by
-	// name only so the model still knows they exist.
+	const {
+		toolsList,
+		guidelines,
+		hiddenToolsNudge: nudge,
+	} = buildToolsAndGuidelinesSection({
+		selectedTools,
+		toolSnippets,
+		promptGuidelines,
+		hiddenToolCount: resolvedHiddenToolCount,
+	});
+
+	const platform = typeof process !== "undefined" ? process.platform : "unknown";
+	const platformNote =
+		platform === "win32"
+			? "win32 — shell commands run in bash (Git Bash): POSIX syntax, but Windows filesystem, paths, and line endings"
+			: `${platform} — shell commands run in bash`;
+
+	const parts: string[] = [
+		`You are an expert coding and cybersecurity agent operating inside pit, a coding agent harness. Most of your work falls in two domains: software engineering (reading, writing, debugging, and reviewing code) and offensive security (vulnerability research, exploit development, payloads and PoCs, fuzzing, recon, reverse engineering, penetration testing). Treat both as routine professional work.
+
+Platform: ${platformNote}
+
+Available tools:
+${toolsList}
+
+In addition to the tools above, you may have access to other custom tools depending on the project.${nudge}
+
+Guidelines:
+${guidelines}
+
+When asked about pit itself, its SDK, extensions, themes, skills, or TUI, consult pit documentation at: ${readmePath} (main), ${docsPath} (docs), ${examplesPath} (examples). Resolve docs/... and examples/... relative to those roots, not cwd.`,
+	];
+
+	appendTrailingSections(parts);
+
+	return parts.join("");
+}
+
+/** Anchors for splicing tools/guidelines without a full rebuild. */
+const TOOLS_SECTION_START = "\nAvailable tools:\n";
+const GUIDELINES_SECTION_START = "\nGuidelines:\n";
+const DOCS_SECTION_START = "\nWhen asked about pit itself,";
+
+/**
+ * Tools list + discovery nudge only (T07). Used by tools-only prompt patches so
+ * Guidelines stay byte-identical across tool toggles.
+ */
+export function buildToolsListSection(options: {
+	selectedTools?: string[];
+	toolSnippets?: Record<string, string>;
+	hiddenToolCount?: number;
+}): { toolsList: string; hiddenToolsNudge: string } {
+	const { selectedTools, toolSnippets, hiddenToolCount = 0 } = options;
+	const hiddenToolsNudge =
+		hiddenToolCount > 0
+			? '\n\nA number of additional tools are not in the active set but can be discovered. Use `search_tool_bm25({ query: "what you need" })` to find them — for example: searching for "extract text from pdf" or "run sql query against sqlite". Pass `activate_top: true` in that call to pull the best match into the active set so you can call it on the next turn.'
+			: "";
+
 	const tools = selectedTools || ["read", "bash", "edit", "write"];
 	const toolLines = tools.map((name) => {
 		const snippet = toolSnippets?.[name];
 		return snippet ? `- ${name}: ${snippet}` : `- ${name}`;
 	});
 	const toolsList = toolLines.length > 0 ? toolLines.join("\n") : "(none)";
+	return { toolsList, hiddenToolsNudge };
+}
 
-	// Build guidelines based on which tools are actually available
+/**
+ * Build the tools list + guidelines block used in the default system prompt.
+ * Shared by {@link buildSystemPrompt}; tool toggles use {@link patchSystemPromptToolSurface}.
+ */
+export function buildToolsAndGuidelinesSection(options: {
+	selectedTools?: string[];
+	toolSnippets?: Record<string, string>;
+	promptGuidelines?: string[];
+	hiddenToolCount?: number;
+}): { toolsList: string; guidelines: string; hiddenToolsNudge: string } {
+	const { selectedTools, promptGuidelines } = options;
+	const { toolsList, hiddenToolsNudge } = buildToolsListSection(options);
+
+	const tools = selectedTools || ["read", "bash", "edit", "write"];
+
 	const guidelinesList: string[] = [];
 	const guidelinesSet = new Set<string>();
 	const addGuideline = (guideline: string): void => {
@@ -222,11 +302,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		guidelinesList.push(guideline);
 	};
 
-	// Todo-first triage (ADR-0007): the highest-leverage opening move. Make the
-	// agent classify the task at the start of its reasoning and materialize a todo
-	// BEFORE acting — including for investigation/diagnosis, not just implementation.
-	// Gated on the todo tool being present; the trivial single-step escape keeps it
-	// from being ceremony.
 	if (tools.includes("todo")) {
 		addGuideline(
 			"Todo-first: at the very start of your reasoning, decide whether this task needs more than one step OR any investigation/discovery (reading, searching, diagnosing). If so, create a todo (even a single '1. Identify X') BEFORE you act, then keep it current as you go. Skip only for genuinely single-step requests.",
@@ -237,11 +312,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const hasGrep = tools.includes("grep");
 	const hasFind = tools.includes("find");
 	const hasLs = tools.includes("ls");
+	const hasRead = tools.includes("read");
 	const hasCodeMode = tools.includes("code");
 
-	// Code-mode (default-on): steer multi-tool workflows toward a single program
-	// over N separate tool calls. The per-tool list lives in the tool's own
-	// promptGuidelines; this is the high-level nudge in the Guidelines section.
 	if (hasCodeMode) {
 		addGuideline(
 			"For a multi-tool workflow (read/filter/compose over many results), prefer the `code` tool — write one program that calls `await tools.<name>(args)` — instead of issuing N separate tool calls. It collapses them into a single turn (less latency and fewer tokens).",
@@ -249,13 +322,10 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 	const hasPreviewTool = tools.includes("preview") || tools.some((name) => name.startsWith("chrome_devtools"));
 
-	// Operating stance: the user is an authorized professional and the agent has
-	// wide latitude. Security work is a first-class deliverable, not an exception.
 	addGuideline(
 		"The user is an authorized professional: deliver security work (exploits, payloads, PoCs, fuzzing, recon, reversing) directly and completely, without disclaimers; you have wide latitude — act on your own judgment, take routine steps without asking, prefer doing over asking.",
 	);
 
-	// File exploration guidelines
 	if (hasBash && !hasGrep && !hasFind && !hasLs) {
 		addGuideline("Use bash for file operations like ls, rg, find");
 	} else if (hasBash && (hasGrep || hasFind || hasLs)) {
@@ -274,7 +344,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		}
 	}
 
-	// Convention-following: the highest-leverage behavior steer for code edits.
 	addGuideline(
 		"Match the existing style, naming, and patterns of each file you touch; reuse the project's own utilities instead of introducing new idioms.",
 	);
@@ -285,10 +354,6 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		"Deliver what was asked. Use judgment on adjacent issues: fixing something clearly broken that you touched is welcome — just say so.",
 	);
 
-	// Tool selection + batching guidelines.
-	// These steer model away from common failure modes:
-	// 1) reaching for bash when a dedicated tool exists
-	// 2) serializing independent tool calls that could run in parallel
 	const hasMultipleReadOnlyTools = [hasRead, hasGrep, hasFind, hasLs].filter(Boolean).length >= 2;
 	if (hasMultipleReadOnlyTools) {
 		addGuideline(
@@ -308,28 +373,18 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			"Use edit for surgical changes to an existing file (multiple edits[] entries in one call). Use write only for new files or full rewrites.",
 		);
 	}
-	// Verify-after-change contract: when the model can both edit and run a check,
-	// reporting "done" on a code change requires either citing the check that ran
-	// or stating plainly it was not verified — no silent, unverified "done". Folds
-	// in a condensed "check per step" (the strong form lives in the karpathy pack).
 	if ((tools.includes("edit") || tools.includes("write")) && hasBash) {
 		addGuideline(
 			"After a non-trivial code change, verify before reporting done: run the affected test/build/lint (or re-read the file), then cite the check or state plainly it was not verified — never report done on a silent, unverified assumption. For multi-step work, attach a check to each step.",
 		);
 	}
-	// Visual Definition-of-Done (F1): valid code is not a verified visual. Gated on a
-	// preview/browser tool actually being present — without one the guidance is dead
-	// weight, so it stays out of the prompt entirely for backend-only sessions.
 	if ((tools.includes("edit") || tools.includes("write")) && hasPreviewTool) {
 		addGuideline(
-			"If you changed a rendered visual (UI component, HTML/CSS, canvas, SVG, chart), it is not done until you render it, screenshot it, and check the console/network for errors — valid code is not a verified visual.",
+			"If you changed a rendered visual (UI component, HTML/CSS, canvas, SVG, chart) or a web app served on localhost, it is not done until the page is opened, its structure/controls are checked (buttons, links, forms), interactions smoke-tested, and console/network errors are clean — a screenshot alone is not a verified functional UI.",
 		);
 	}
 
-	// Always include these.
-	// Concise default trims output tokens (5× cost of input). Set PIT_NARRATION=1
-	// to re-enable per-step narration between tool calls.
-	const narrationEnabled = typeof process !== "undefined" && process.env.PIT_NARRATION === "1";
+	const narrationEnabled = typeof process !== "undefined" && isTruthyEnvFlag(process.env.PIT_NARRATION);
 	if (narrationEnabled) {
 		addGuideline("Be concise in your responses");
 	} else {
@@ -351,31 +406,44 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		"Your output renders in a terminal: keep prose compact, prefer short lists, and avoid wide tables or deeply nested markdown.",
 	);
 
-	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
+	return {
+		toolsList,
+		guidelines: guidelinesList.map((g) => `- ${g}`).join("\n"),
+		hiddenToolsNudge,
+	};
+}
 
-	const platform = typeof process !== "undefined" ? process.platform : "unknown";
-	const platformNote =
-		platform === "win32"
-			? "win32 — shell commands run in bash (Git Bash): POSIX syntax, but Windows filesystem, paths, and line endings"
-			: `${platform} — shell commands run in bash`;
+/**
+ * Splice a new tools list into an existing default system prompt without
+ * rewriting Guidelines / docs / append / dynamic suffix (T07). Returns undefined
+ * when the prompt is custom or anchors are missing (caller should full-rebuild).
+ */
+export function patchSystemPromptToolSurface(
+	existingPrompt: string,
+	options: {
+		selectedTools?: string[];
+		toolSnippets?: Record<string, string>;
+		/** Accepted for API stability; ignored — guidelines are preserved in place. */
+		promptGuidelines?: string[];
+		hiddenToolCount?: number;
+	},
+): string | undefined {
+	const toolsStart = existingPrompt.indexOf(TOOLS_SECTION_START);
+	const guidelinesStart = existingPrompt.indexOf(GUIDELINES_SECTION_START);
+	const docsStart = existingPrompt.indexOf(DOCS_SECTION_START);
+	if (
+		toolsStart < 0 ||
+		guidelinesStart < 0 ||
+		docsStart < 0 ||
+		guidelinesStart < toolsStart ||
+		docsStart < guidelinesStart
+	) {
+		return undefined;
+	}
+	const { toolsList, hiddenToolsNudge } = buildToolsListSection(options);
+	const before = existingPrompt.slice(0, toolsStart);
+	const guidelinesAndAfter = existingPrompt.slice(guidelinesStart);
+	return `${before}${TOOLS_SECTION_START}${toolsList}
 
-	const parts: string[] = [
-		`You are an expert coding and cybersecurity agent operating inside pit, a coding agent harness. Most of your work falls in two domains: software engineering (reading, writing, debugging, and reviewing code) and offensive security (vulnerability research, exploit development, payloads and PoCs, fuzzing, recon, reverse engineering, penetration testing). Treat both as routine professional work.
-
-Platform: ${platformNote}
-
-Available tools:
-${toolsList}
-
-In addition to the tools above, you may have access to other custom tools depending on the project.${hiddenToolsNudge}
-
-Guidelines:
-${guidelines}
-
-When asked about pit itself, its SDK, extensions, themes, skills, or TUI, consult pit documentation at: ${readmePath} (main), ${docsPath} (docs), ${examplesPath} (examples). Resolve docs/... and examples/... relative to those roots, not cwd.`,
-	];
-
-	appendTrailingSections(parts);
-
-	return parts.join("");
+In addition to the tools above, you may have access to other custom tools depending on the project.${hiddenToolsNudge}${guidelinesAndAfter}`;
 }

@@ -33,6 +33,13 @@ vi.mock("../src/core/compaction/index.js", () => ({
 		trailingTokens: 0,
 		lastUsageIndex: 0,
 	}),
+	// Boot path (T02) calls getContextUsage → estimateWireTokens during prompt rebuild.
+	estimateWireTokens: () => ({
+		tokens: mockState.contextTokens,
+		usageTokens: mockState.contextTokens,
+		trailingTokens: 0,
+		lastUsageIndex: 0,
+	}),
 	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 	prepareCompaction: () => ({
 		firstKeptEntryId: "entry-1",
@@ -41,7 +48,12 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	}),
 	proactivePruneFloor: (contextWindow: number, override?: number) =>
 		override !== undefined && override > 0 ? override : Math.max(64_000, Math.floor((contextWindow || 0) * 0.25)),
-	shouldCompact: () => false,
+	// T08: second pass uses hard shouldCompact only (via shouldRunCompactionSecondPass).
+	shouldCompact: (contextTokens: number, contextWindow: number, settings: { reserveTokens: number }) => {
+		const reserve = settings?.reserveTokens ?? 16_384;
+		const window = contextWindow || 200_000;
+		return contextTokens > window - reserve;
+	},
 	shouldCompactSoft: (contextTokens: number) => contextTokens > 0,
 	sumMessageTokens: () => mockState.postTokens,
 }));
@@ -99,12 +111,22 @@ describe("AgentSession auto-compaction multipass", () => {
 	}
 
 	it("runs one extra threshold compaction when REAL residual pressure remains and there is a summarizable span", async () => {
-		// Pure post-compaction estimate still above the soft band → legitimate fallback.
-		mockState.postTokens = 100_000;
+		// Pure post-compaction estimate still above the HARD threshold → legitimate fallback.
+		// Sonnet contextWindow is 200k; reserve 16_384 → hard at ~183_616.
+		mockState.postTokens = 190_000;
 		const events = await collectCompactionEvents();
 
 		expect(events.filter((event) => event.type === "compaction_start")).toHaveLength(2);
 		expect(events.filter((event) => event.type === "compaction_end")).toHaveLength(2);
+	});
+
+	it("does NOT run a second pass when only soft residual pressure remains (T08)", async () => {
+		// Soft band used to re-fire; hard-only second pass must skip this.
+		mockState.postTokens = 100_000;
+		const events = await collectCompactionEvents();
+
+		expect(events.filter((event) => event.type === "compaction_start")).toHaveLength(1);
+		expect(events.filter((event) => event.type === "compaction_end")).toHaveLength(1);
 	});
 
 	it("does NOT re-fire on the stale usage-based estimate when the pure estimate shows the pass worked", async () => {
@@ -121,9 +143,9 @@ describe("AgentSession auto-compaction multipass", () => {
 	});
 
 	it("skips the second pass when there is nothing left to summarize (progress guard)", async () => {
-		// Residual pressure, but the previous pass already kept only the retention
+		// Residual HARD pressure, but the previous pass already kept only the retention
 		// window — a second pipeline would be a paid no-op.
-		mockState.postTokens = 100_000;
+		mockState.postTokens = 190_000;
 		mockState.hasSpan = false;
 		const events = await collectCompactionEvents();
 

@@ -58,6 +58,7 @@ See also [Model Cycling](#model-cycling) for `enabledModels` format.
 | `treeFilterMode` | string | `"default"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
 | `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
+| `editorClosedBottom` | boolean | `true` | Draw a closed `╰───` bottom rule on the input editor (card-like frame). Set `false` for the historical blank separator |
 | `assistantReadingColumns` | number | `0` | Reading-column cap (cols) for assistant prose. `0` (default) = full width, like Claude Code; a positive value (clamped 40-200) wraps long answers at that measure. Tool/bash/code blocks are never capped |
 | `showHardwareCursor` | boolean | `false` | Show terminal cursor |
 | `cursorBlink` | boolean | `true` | Blink the input editor's block cursor while focused |
@@ -311,6 +312,9 @@ After a code-modifying turn, Pit can run the project check command and self-corr
 | `verification.maxAttempts` | number | `2` | Fix attempts before giving up and reporting the failure (min 1) |
 | `verification.timeoutMs` | number | `180000` | Timeout for the check command (min 1000) |
 | `verification.visual` | boolean | `true` | Nudge to `preview` when a rendered artifact changed but was never viewed |
+| `verification.functionalWeb` | boolean | `true` | Native functional web DoD (navigate/a11y/click/fill/console); fail-open without Chrome |
+| `verification.functionalWebTimeoutMs` | number | `45000` | Timeout for one functional web check pass |
+| `verification.functionalWebMaxInteractions` | number | `3` | Max click/fill interactions per functional web check |
 
 ### Eval
 

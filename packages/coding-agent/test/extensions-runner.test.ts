@@ -606,6 +606,43 @@ describe("ExtensionRunner", () => {
 				systemPrompt: "base\nfirst\nsecond",
 			});
 		});
+
+		it("logs per-handler timing breakdown when PIT_TIMING=1", async () => {
+			vi.stubEnv("PIT_TIMING", "1");
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_agent_start", async () => {
+						await new Promise((r) => setTimeout(r, 10));
+						return { systemPrompt: "timed" };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "timing-start.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+
+			const stderrSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+			await runner.emitBeforeAgentStart("hello", undefined, "base", { cwd: tempDir });
+
+			const lines = stderrSpy.mock.calls.map((call) => String(call[0]));
+			expect(lines.some((line) => line.includes("timing-start.ts: handler[0]") && line.includes("status=ok"))).toBe(
+				true,
+			);
+			expect(
+				lines.some(
+					(line) =>
+						line.includes("METRIC emit_before_agent_start_ms=") &&
+						line.includes("handlers=1") &&
+						line.includes("timeouts=0") &&
+						line.includes("prompt_modified=1"),
+				),
+			).toBe(true);
+
+			stderrSpy.mockRestore();
+		});
 	});
 
 	describe("tool_result chaining", () => {
@@ -927,6 +964,42 @@ describe("ExtensionRunner", () => {
 			expect(out.mutated).toBe(true);
 			// Parallel side-effects + serial mutating: well under 200ms (serial
 			// would be ~100ms side-effect alone + mutating).
+			expect(elapsed).toBeLessThan(150);
+			expect(elapsed).toBeGreaterThanOrEqual(40);
+		});
+
+		it("emitContext runs side-effect handlers in parallel and mutating serial", async () => {
+			const code = `
+				export default function(pi) {
+					pi.on("context", pi.markSideEffect(async () => {
+						await new Promise((r) => setTimeout(r, 50));
+					}));
+					pi.on("context", pi.markSideEffect(async () => {
+						await new Promise((r) => setTimeout(r, 50));
+					}));
+					pi.on("context", async (event) => {
+						return {
+							messages: [
+								...event.messages,
+								{ role: "user", content: "injected", timestamp: Date.now() },
+							],
+						};
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "context-split.ts"), code);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+
+			const input = [{ role: "user" as const, content: "hi", timestamp: 1 }];
+			const t0 = performance.now();
+			const out = await runner.emitContext(input);
+			const elapsed = performance.now() - t0;
+
+			expect(out).toHaveLength(2);
+			expect(out[0]).toEqual(input[0]);
+			expect(out[1]).toMatchObject({ role: "user", content: "injected" });
 			expect(elapsed).toBeLessThan(150);
 			expect(elapsed).toBeGreaterThanOrEqual(40);
 		});

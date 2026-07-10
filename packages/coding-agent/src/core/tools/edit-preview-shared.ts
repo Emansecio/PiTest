@@ -25,6 +25,8 @@ export interface EditDiffMemoTarget extends EditPreviewTarget {
 	renderedDiffBody?: string;
 	/** Whether the settled (non-preview) tool result was an error. */
 	settledError?: boolean;
+	/** True once `renderResult` has applied the final diff/error — blocks late async preview updates. */
+	previewSettled?: boolean;
 }
 
 /**
@@ -73,15 +75,24 @@ export function getEditHeaderBg(
 	return (text: string) => theme.bg("toolPendingBg", text);
 }
 
-function resolveEditDiffBody(component: EditDiffMemoTarget, preview: EditPreviewValue): string {
+function diffMemoKey(path: string | undefined, diff: string): string {
+	return `${path ?? ""}\0${diff}`;
+}
+
+function resolveEditDiffBody(
+	component: EditDiffMemoTarget,
+	preview: EditPreviewValue,
+	path: string | undefined,
+): string {
 	if ("error" in preview) {
 		return "";
 	}
-	if (component.renderedDiffKey === preview.diff && component.renderedDiffBody !== undefined) {
+	const key = diffMemoKey(path, preview.diff);
+	if (component.renderedDiffKey === key && component.renderedDiffBody !== undefined) {
 		return component.renderedDiffBody;
 	}
-	const body = renderDiff(preview.diff);
-	component.renderedDiffKey = preview.diff;
+	const body = renderDiff(preview.diff, { path });
+	component.renderedDiffKey = key;
 	component.renderedDiffBody = body;
 	return body;
 }
@@ -118,13 +129,14 @@ export function appendEditDiffBody(
 	preview: EditPreviewValue,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
 	diffMaxLines: number | undefined,
+	path?: string,
 ): void {
 	if ("error" in preview) {
 		parent.addChild(new Spacer(1));
 		parent.addChild(new Text(theme.fg("error", preview.error), 0, 0));
 		return;
 	}
-	const body = resolveEditDiffBody(component, preview);
+	const body = resolveEditDiffBody(component, preview, path);
 	parent.addChild(new Spacer(1));
 	if (diffMaxLines !== undefined) {
 		parent.addChild(new EditDiffBodyText(body, diffMaxLines));
@@ -146,6 +158,7 @@ export function createEditCallComponentBase(): Box & EditDiffMemoTarget {
 		previewArgsKey: undefined as string | undefined,
 		previewPending: false,
 		settledError: false,
+		previewSettled: false,
 		renderedDiffKey: undefined as string | undefined,
 		renderedDiffBody: undefined as string | undefined,
 	});
@@ -230,6 +243,7 @@ export function buildEditToolCallComponent<
 	if (!activityChild && context.expanded) {
 		diffMaxLines = EDIT_EXPANDED_MAX_LINES;
 	}
-	appendEditDiffBody(component, component, component.preview, theme, diffMaxLines);
+	const path = getFilePathArg(args) ?? undefined;
+	appendEditDiffBody(component, component, component.preview, theme, diffMaxLines, path);
 	return component;
 }

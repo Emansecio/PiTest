@@ -443,24 +443,32 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 			if (fusionAbort.signal.aborted || host.userInterrupted) {
 				return true;
 			}
+			const bothThrottled = outcome.degraded === "both-throttled";
 			recordDiagnostic({
 				category: "fusion.degraded",
 				level: "warn",
 				source: "fusion.session",
-				context: { note: `both-failed:solo ${model.id}` },
+				context: { note: `${bothThrottled ? "both-throttled" : "both-failed"}:solo ${model.id}` },
 			});
 			const summaryMembers = buildSummaryMembers();
 			emitFusionSummary(host, {
 				members: summaryMembers,
-				degraded: "both-failed",
+				degraded: bothThrottled ? "both-throttled" : "both-failed",
 				synthId: model.id,
 			});
-			const reasons = [...new Set(summaryMembers.map((m) => m.error).filter((e): e is string => Boolean(e)))];
-			const why = reasons.length === 1 ? ` (${reasons[0]})` : "";
-			emitFusionNote(
-				host,
-				`Both Fusion advisors failed${why} — answering directly with ${model.id} (the synthesizer).`,
-			);
+			if (bothThrottled) {
+				emitFusionNote(
+					host,
+					`Both Fusion advisors were rate-limited — answering directly with ${model.id} (the synthesizer).`,
+				);
+			} else {
+				const reasons = [...new Set(summaryMembers.map((m) => m.error).filter((e): e is string => Boolean(e)))];
+				const why = reasons.length === 1 ? ` (${reasons[0]})` : "";
+				emitFusionNote(
+					host,
+					`Both Fusion advisors failed${why} — answering directly with ${model.id} (the synthesizer).`,
+				);
+			}
 			return false;
 		}
 		return true;

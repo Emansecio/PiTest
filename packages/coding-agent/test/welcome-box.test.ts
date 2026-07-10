@@ -41,6 +41,15 @@ describe("WelcomeBox", () => {
 		expect(stripAnsi(out[0])).toMatch(/^╭─+╮$/);
 	});
 
+	it("applies paddingY=1 inside the card at width 80 (>= 60)", () => {
+		const out = new WelcomeBox(BASE).render(80).map(stripAnsi);
+		// Top border, then a blank padded row, then content.
+		expect(out[0]).toMatch(/^╭─+╮$/);
+		expect(out[1]).toMatch(/^│\s*│$/);
+		expect(out[out.length - 1]).toMatch(/^╰─+╯$/);
+		expect(out[out.length - 2]).toMatch(/^│\s*│$/);
+	});
+
 	it("never emits a line wider than the viewport, across widths", () => {
 		for (const width of [120, 80, 60, 40, 24, 12]) {
 			for (const line of new WelcomeBox(BASE).render(width)) {

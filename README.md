@@ -65,7 +65,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.m
 ```bash
 npm install          # Install all dependencies
 npm run build        # Build all packages
-npm run check        # Lint, typecheck, smoke checks, and coding-agent tests
+npm run check        # Full gate: lint, typecheck, smoke checks, and coding-agent tests
+npm run check:fast   # Fast unit subset (excludes E2E: chrome, dap, eval-kernel, resilience)
 ./test.sh            # Run tests (skips LLM-dependent tests without API keys)
 ./pi-test.sh         # Run Pit from sources (can be run from any directory)
 ```

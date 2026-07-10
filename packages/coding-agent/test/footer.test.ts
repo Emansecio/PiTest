@@ -36,6 +36,8 @@ interface MakeFooterOptions {
 	 * but `messages` stays empty until the user submits.
 	 */
 	userTurns?: number;
+	/** Footer density; tests default to full so extension-status assertions stay valid. */
+	density?: "calm" | "full";
 }
 
 function makeFooter({
@@ -52,6 +54,7 @@ function makeFooter({
 	branch = "",
 	diffStats = null,
 	userTurns,
+	density = "full",
 }: MakeFooterOptions = {}): FooterComponent {
 	// A subscription tag needs a truthy model for isUsingOAuth(state.model).
 	const needsModel = usingOAuth || providerCount > 1 || thinkingLevel !== undefined;
@@ -115,11 +118,58 @@ function makeFooter({
 
 	const footer = new FooterComponent(session, footerData, launchCwd ?? cwd);
 	footer.setAutoCompactEnabled(autoCompact);
+	footer.setDensity(density);
 	return footer;
 }
 
 beforeAll(() => {
 	initTheme("dark");
+});
+
+it("calm density omits extension status wall but keeps no-rails", () => {
+	const footer = makeFooter({
+		permissions: "no-rails",
+		autoCompact: true,
+		extra: new Map([["whatsapp", "whatsapp: 3"]]),
+		density: "calm",
+		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
+	});
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines.some((l) => l.includes("NO-RAILS"))).toBe(true);
+	expect(lines.some((l) => l.includes("whatsapp"))).toBe(false);
+});
+
+it("calm density shows a +N chip for hidden extension statuses", () => {
+	const footer = makeFooter({
+		permissions: "auto",
+		autoCompact: true,
+		extra: new Map([
+			["whatsapp", "whatsapp: 3"],
+			["mcp", "mcp: ready"],
+		]),
+		density: "calm",
+		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
+	});
+	const plain = footer.render(80).map(stripAnsi).join("\n");
+	expect(plain).toContain("+2");
+	expect(plain).not.toContain("whatsapp");
+	expect(plain).not.toContain("mcp: ready");
+});
+
+it("full density expands extension statuses and omits the +N chip", () => {
+	const footer = makeFooter({
+		permissions: "auto",
+		autoCompact: true,
+		extra: new Map([
+			["whatsapp", "whatsapp: 3"],
+			["mcp", "mcp: ready"],
+		]),
+		density: "full",
+		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
+	});
+	const plain = footer.render(80).map(stripAnsi).join("\n");
+	expect(plain).toContain("whatsapp");
+	expect(plain).not.toContain("+2");
 });
 
 it("shows plan mode on metrics but hides default auto mode", () => {

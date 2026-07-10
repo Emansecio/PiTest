@@ -40,6 +40,33 @@ async function flushAutocomplete(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 45));
 }
 
+describe("Editor placeholder", () => {
+	const placeholderTheme: EditorTheme = {
+		...defaultEditorTheme,
+		placeholderColor: (s: string) => `<PH>${s}</PH>`,
+	};
+
+	it("shows placeholder text when the editor is empty", () => {
+		const editor = new Editor(createTestTUI(80, 24), placeholderTheme);
+		editor.setPlaceholder("Describe a task…");
+		const raw = editor.render(80)[1]!;
+		// Cursor is a reverse-video space; full placeholder follows in dim.
+		// Strip ANSI + PH markers so the hint is contiguous for the assertion.
+		const plain = stripVTControlCharacters(raw).replace(/<\/?PH>/g, "");
+		assert.ok(plain.includes("Describe a task…"), `expected placeholder, got: ${JSON.stringify(plain)}`);
+		assert.ok(raw.includes("<PH>"), "placeholder should be colorized");
+	});
+
+	it("clears the placeholder when the user types", () => {
+		const editor = new Editor(createTestTUI(80, 24), placeholderTheme);
+		editor.setPlaceholder("Describe a task…");
+		editor.handleInput("h");
+		const plain = stripVTControlCharacters(editor.render(80)[1]!).replace(/<\/?PH>/g, "");
+		assert.ok(!plain.includes("Describe a task…"), "placeholder must disappear after typing");
+		assert.ok(plain.includes("h"), "typed character should be visible");
+	});
+});
+
 describe("Editor border rule", () => {
 	it("colors the full-width rule with a single SGR pair, not one per column", () => {
 		const editor = new Editor(createTestTUI(80, 24), defaultEditorTheme);
@@ -52,6 +79,24 @@ describe("Editor border rule", () => {
 		assert.strictEqual(spans, 1, `border rule should be colored once, got ${spans} color spans`);
 		// And it is still a full-width run of "─".
 		assert.strictEqual(visibleWidth(top.replace(/<\/?C>/g, "")), 80);
+	});
+
+	it("keeps a blank bottom separator by default when not scrolled", () => {
+		const editor = new Editor(createTestTUI(40, 24), defaultEditorTheme);
+		editor.setText("hi");
+		const lines = editor.render(40);
+		const bottom = lines[lines.length - 1];
+		assert.strictEqual(bottom, "");
+		assert.ok(!bottom.includes("╰"));
+	});
+
+	it("draws a closed ╰ bottom rule when closedBottom is true", () => {
+		const editor = new Editor(createTestTUI(40, 24), defaultEditorTheme, { closedBottom: true });
+		editor.setText("hi");
+		const lines = editor.render(40);
+		const bottom = stripVTControlCharacters(lines[lines.length - 1] ?? "");
+		assert.ok(bottom.startsWith("╰"), `expected closed bottom rule, got: ${JSON.stringify(bottom)}`);
+		assert.strictEqual(visibleWidth(bottom), 40);
 	});
 });
 

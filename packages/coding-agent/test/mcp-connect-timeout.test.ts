@@ -88,6 +88,12 @@ function createFakePi() {
 		on(event: string, handler: (event: unknown, ctx: unknown) => unknown) {
 			handlers.set(event, handler);
 		},
+		markSideEffect<F>(handler: F): F {
+			return handler;
+		},
+		markMessageInjector<F>(handler: F): F {
+			return handler;
+		},
 		registerTool(tool: ToolDefinition) {
 			registeredTools.set(tool.name, tool);
 		},

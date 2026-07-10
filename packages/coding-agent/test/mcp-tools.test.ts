@@ -3,11 +3,18 @@
  * text budget applied when flattening an McpCallToolResult into content blocks.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { McpManager } from "../src/core/mcp/manager.js";
-import { capMcpText, wrapMcpToolAsDefinition } from "../src/core/mcp/tools.js";
+import { capMcpText, resolveMcpCapBytes, wrapMcpToolAsDefinition } from "../src/core/mcp/tools.js";
 import type { McpCallToolResult } from "../src/core/mcp/types.js";
-import { DEFAULT_MAX_BYTES } from "../src/core/tools/truncate.js";
+import {
+	configureTruncationCaps,
+	DEFAULT_MAX_BYTES,
+	refreshOccupancyTruncationCaps,
+} from "../src/core/tools/truncate.js";
+
+const BROWSER_CAP = 24 * 1024;
+const FILESYSTEM_CAP = 96 * 1024;
 
 // Minimal manager stub: the wrapper's execute path only ever calls callTool, so
 // a single-method fake exercises the real flattenMcpContent aggregation.
@@ -17,11 +24,16 @@ function managerReturning(result: McpCallToolResult): McpManager {
 	} as unknown as McpManager;
 }
 
-function runTool(result: McpCallToolResult) {
-	const def = wrapMcpToolAsDefinition(managerReturning(result), "mcp__test__big", {
-		name: "big",
-		inputSchema: { type: "object" },
-	});
+function runTool(result: McpCallToolResult, serverName = "test") {
+	const def = wrapMcpToolAsDefinition(
+		managerReturning(result),
+		"mcp__test__big",
+		{
+			name: "big",
+			inputSchema: { type: "object" },
+		},
+		serverName,
+	);
 	// execute ignores onUpdate/ctx; pass throwaways to satisfy the signature.
 	return def.execute("call-1", {}, undefined, undefined, {} as never);
 }
@@ -30,11 +42,60 @@ function utf8Bytes(s: string): number {
 	return Buffer.byteLength(s, "utf8");
 }
 
+describe("resolveMcpCapBytes server heuristic", () => {
+	afterEach(() => {
+		configureTruncationCaps({ contextWindow: 0 });
+		refreshOccupancyTruncationCaps(null);
+	});
+
+	it("uses DEFAULT_MAX_BYTES for unknown servers", () => {
+		expect(resolveMcpCapBytes()).toBe(DEFAULT_MAX_BYTES);
+		expect(resolveMcpCapBytes("notion")).toBe(DEFAULT_MAX_BYTES);
+		expect(resolveMcpCapBytes("github")).toBe(DEFAULT_MAX_BYTES);
+	});
+
+	it("applies the 24KB browser cap for browser-family server names", () => {
+		for (const name of ["chrome", "cursor-ide-browser", "playwright", "puppeteer", "devtools"]) {
+			expect(resolveMcpCapBytes(name)).toBe(BROWSER_CAP);
+		}
+	});
+
+	it("applies the 96KB filesystem cap for filesystem-family server names", () => {
+		for (const name of ["filesystem", "project-fs", "memory", "sqlite", "user-sqlite"]) {
+			expect(resolveMcpCapBytes(name)).toBe(FILESYSTEM_CAP);
+		}
+	});
+
+	it("prefers the filesystem cap when both patterns could match", () => {
+		expect(resolveMcpCapBytes("browser-memory")).toBe(FILESYSTEM_CAP);
+	});
+
+	it("scales heuristic caps with occupancy", () => {
+		refreshOccupancyTruncationCaps({ percent: 90 });
+		expect(resolveMcpCapBytes("chrome")).toBe(Math.round(BROWSER_CAP * 0.25));
+		expect(resolveMcpCapBytes("filesystem")).toBe(Math.round(FILESYSTEM_CAP * 0.25));
+		expect(resolveMcpCapBytes("notion")).toBe(Math.round(DEFAULT_MAX_BYTES * 0.25));
+	});
+});
+
 describe("flattenMcpContent aggregate budget", () => {
 	it("passes a single small block through intact (byte-identical)", async () => {
 		const res = await runTool({ content: [{ type: "text", text: "pong" }] });
 		expect((res as { isError?: boolean }).isError).toBe(false);
 		expect(res.content).toEqual([{ type: "text", text: "pong" }]);
+	});
+
+	it("uses the browser cap for browser-family servers in aggregate budgeting", async () => {
+		const cap = resolveMcpCapBytes("playwright");
+		const big = "x".repeat(30 * 1024);
+		const blocks = Array.from({ length: 10 }, () => ({ type: "text" as const, text: big }));
+		const res = await runTool({ content: blocks }, "playwright");
+
+		const totalTextBytes = res.content
+			.filter((b): b is { type: "text"; text: string } => b.type === "text")
+			.reduce((sum, b) => sum + utf8Bytes(b.text), 0);
+
+		expect(totalTextBytes).toBeLessThanOrEqual(cap + 512);
 	});
 
 	it("caps total text output near DEFAULT_MAX_BYTES across many large blocks", async () => {

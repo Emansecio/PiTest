@@ -314,7 +314,7 @@ Optional knobs for power users. None require changes to work correctly — defau
 | `PIT_CODE_MODE_MAX_RESULT_BYTES` | `262144` (256 KB) | Byte cap on a single tool result re-injected into the code-mode VM |
 | `PIT_FREQ_OUTLINE` | off | Set to `1` to enable the boot-outline heuristic: a symbol outline of the hottest frequent-files is appended to the system prompt each session |
 | `PIT_ASYNC_REINJECT` | off | Set to `1` to auto-inject each async (`task` `op:"spawn"`) subagent result into the chat when it settles. Off by default (Claude Code parity): collect results via `op:"join"`/`op:"poll"` instead |
-| `PIT_NARRATION` | off | Set to `1` to enable verbose narration in the system prompt (increases output tokens ~5×) |
+| `PIT_NARRATION` | off | Set to `1`, `true`, or `yes` to enable verbose narration in the system prompt (increases output tokens ~5×) |
 | `PIT_PROACTIVE_PRUNE` | off | Set to `1` to proactively excerpt old large tool outputs from the live context once it crosses the floor below. Protects the 2 most recent turns |
 | `PIT_PROACTIVE_PRUNE_FLOOR` | `64000` | Token floor below which proactive pruning is skipped (only used when `PIT_PROACTIVE_PRUNE=1`) |
 | `PIT_KEY_COOLDOWN_MS` | `300000` | Milliseconds a rate-limited API key stays on cool-down before being retried |

@@ -4,8 +4,11 @@
 import { createJiti } from "jiti/static";
 import { performance } from "node:perf_hooks";
 
-import { pathToFileURL } from "node:url";
-const rawTarget = process.argv[2] ?? "C:/Users/User/.pit/agent/npm/node_modules/pi-autoresearch/extensions/pi-autoresearch/index.js";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const defaultFixture = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "extension-load-smoke", "index.js");
+const rawTarget = process.argv[2] ?? defaultFixture;
 const target = pathToFileURL(rawTarget).href;
 
 console.log(`target: ${target}\n`);

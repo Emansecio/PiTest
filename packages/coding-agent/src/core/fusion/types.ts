@@ -72,7 +72,7 @@ export interface FusionSummaryVerification {
 export interface FusionSummaryData {
 	members: FusionSummaryMember[];
 	judge?: FusionSummaryJudge;
-	degraded: "none" | "solo-synth" | "both-failed";
+	degraded: "none" | "solo-synth" | "both-failed" | "both-throttled";
 	synthId: string;
 	synthesis?: FusionSummarySynthesisItem[];
 	/** Present when the verify stage ran — counts by verdict for the summary line. */

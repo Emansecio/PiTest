@@ -17,7 +17,7 @@ import { type Static, Type } from "typebox";
 import { truncateWithEllipsis } from "../../utils/surrogate.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentUserInputBus, type UserInputBus } from "../user-input-bus.ts";
-import { applyKeyAliases } from "./argument-prep.ts";
+import { applyKeyAliases, coerceJsonArrayField } from "./argument-prep.ts";
 import { getTextOutput, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -77,10 +77,12 @@ export type AskToolInput = Static<typeof askSchema>;
 
 const ASK_KEY_ALIASES = { timeout: "timeout_ms" } as const;
 
-/** Accepts the legacy `timeout` key (pre-rename) as an alias for `timeout_ms`. */
+/** Normalize legacy aliases and JSON-stringified `options` before schema validation. */
 export function prepareAskArguments(input: unknown): AskToolInput {
 	if (!input || typeof input !== "object" || Array.isArray(input)) return input as AskToolInput;
-	return applyKeyAliases(input as Record<string, unknown>, ASK_KEY_ALIASES) as AskToolInput;
+	let args = applyKeyAliases(input as Record<string, unknown>, ASK_KEY_ALIASES);
+	args = coerceJsonArrayField(args, "options");
+	return args as AskToolInput;
 }
 
 /** Structured outcome of an ask, mirroring pi-ask-user's response union. */

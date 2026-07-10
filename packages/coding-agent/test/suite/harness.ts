@@ -18,6 +18,7 @@ import { SessionManager } from "../../src/core/session-manager.js";
 import type { Settings } from "../../src/core/settings-manager.js";
 import { SettingsManager } from "../../src/core/settings-manager.js";
 import type { ExtensionFactory, ResourceLoader } from "../../src/index.js";
+import { settleOrAbort } from "../../src/utils/abort-race.js";
 import {
 	type CreateTestExtensionsResultInput,
 	createTestExtensionsResult,
@@ -142,7 +143,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			if (!runner?.hasHandlers("before_provider_request")) {
 				return payload;
 			}
-			return runner.emitBeforeProviderRequest(payload);
+			return settleOrAbort(runner.emitBeforeProviderRequest(payload), agent.signal);
 		},
 		onResponse: async (response) => {
 			const runner = extensionRunnerRef.current;

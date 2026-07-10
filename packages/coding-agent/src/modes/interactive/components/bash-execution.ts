@@ -103,14 +103,16 @@ export class BashExecutionComponent extends MessageShell {
 
 		const headerColor = excludeFromContext ? "dim" : "bashMode";
 
-		// Loader
+		// Loader — cancel hint lives in the trailing suffix (same idiom as the
+		// working loader), so the body stays a clean status label (U02).
 		this.loader = new Loader(
 			ui,
 			(spinner) => theme.fg(headerColor, spinner),
 			(text) => theme.fg("muted", text),
-			`Running… (${keyText("tui.select.cancel")} to cancel)`,
+			"Running…",
 			reducedMotionLoaderIndicator(),
 		);
+		this.loader.setTrailingSuffix(` ·${keyText("tui.select.cancel")} to cancel`);
 		this.contentContainer.addChild(this.loader);
 	}
 

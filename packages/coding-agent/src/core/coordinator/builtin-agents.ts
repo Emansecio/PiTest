@@ -41,9 +41,10 @@ export const BUILT_IN_AGENT_TYPES: AgentTypeDef[] = [
 	},
 	{
 		name: "general",
-		description: "General-purpose subagent — completes an isolated sub-task with full tools.",
+		description: "General-purpose subagent — completes an isolated sub-task with a curated general-purpose tool set.",
 		systemPrompt:
 			"You are a general-purpose subagent. Complete the assigned isolated sub-task end to end and return a self-contained result the caller can act on without further context. Use whatever tools the task requires.",
+		tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "ast_grep", "symbol"],
 		source: "builtin",
 	},
 ];

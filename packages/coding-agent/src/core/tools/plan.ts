@@ -15,6 +15,7 @@ import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { getCurrentPlanManager, type PlanStep, type PlanStepInput, PlanValidationError } from "../plan/plan-manager.ts";
+import { coerceJsonArrayField } from "./argument-prep.ts";
 import { getTextOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -54,6 +55,12 @@ const planSchema = Type.Object(
 
 export type PlanToolInput = Static<typeof planSchema>;
 type PlanStepArg = Static<typeof stepSchema>;
+
+/** Coerce JSON-stringified `steps` arrays before schema validation. */
+export function preparePlanArguments(input: unknown): PlanToolInput {
+	if (!input || typeof input !== "object" || Array.isArray(input)) return input as PlanToolInput;
+	return coerceJsonArrayField(input as Record<string, unknown>, "steps") as PlanToolInput;
+}
 
 export interface PlanToolDetails {
 	op: PlanToolInput["op"];
@@ -113,6 +120,7 @@ export function createPlanToolDefinition(
 			"Fill `brief` with the context the executor needs (constraints, invariants, key files read, decisions and why); every code-changing step should have `produces` and `verify`.",
 		],
 		parameters: planSchema,
+		prepareArguments: preparePlanArguments,
 		async execute(_toolCallId: string, input: PlanToolInput) {
 			const mgr = getCurrentPlanManager();
 			if (!mgr) return fail(input.op, "Plan is unavailable in this session.");

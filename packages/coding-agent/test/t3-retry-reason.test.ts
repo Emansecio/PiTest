@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { classifyRetryReason } from "../src/modes/interactive/retry-reason.ts";
+import { classifyRetryReason, isThrottleError } from "../src/modes/interactive/retry-reason.ts";
 
 describe("T3 #7: classifyRetryReason", () => {
 	it("classifies rate limit", () => {
@@ -34,5 +34,20 @@ describe("T3 #7: classifyRetryReason", () => {
 		expect(classifyRetryReason("some unusual provider message")).toBeUndefined();
 		expect(classifyRetryReason("")).toBeUndefined();
 		expect(classifyRetryReason(undefined)).toBeUndefined();
+	});
+});
+
+describe("isThrottleError (Fusion §12)", () => {
+	it("detects throttle patterns", () => {
+		expect(isThrottleError("HTTP 429: rate limit exceeded")).toBe(true);
+		expect(isThrottleError("request throttled")).toBe(true);
+		expect(isThrottleError("overloaded_error: server is busy")).toBe(true);
+		expect(isThrottleError("too many requests")).toBe(true);
+	});
+
+	it("rejects non-throttle failures", () => {
+		expect(isThrottleError("not logged in")).toBe(false);
+		expect(isThrottleError("Request timed out after 60s")).toBe(false);
+		expect(isThrottleError(undefined)).toBe(false);
 	});
 });

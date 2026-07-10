@@ -9,6 +9,15 @@
  * Ordered most-specific-first. Display-only: a mislabel is cosmetic, never
  * affects backoff or the retry itself.
  */
+/** True when a member error looks like correlated provider throttling (Fusion §12). */
+export function isThrottleError(errorMessage: string | undefined): boolean {
+	if (!errorMessage) return false;
+	const m = errorMessage.toLowerCase();
+	if (/\b429\b|rate.?limit|throttl|overloaded/.test(m)) return true;
+	const reason = classifyRetryReason(errorMessage);
+	return reason === "Rate limited" || reason === "Overloaded";
+}
+
 export function classifyRetryReason(errorMessage: string | undefined): string | undefined {
 	if (!errorMessage) return undefined;
 	const m = errorMessage.toLowerCase();

@@ -1,4 +1,5 @@
 import { recordDiagnostic } from "@pit/ai";
+import { isThrottleError } from "../../modes/interactive/retry-reason.ts";
 import { shouldSkipFusionVerify } from "./judge.ts";
 import type { JudgeAnalysis, PanelMember, PanelResult, VerificationReport } from "./types.ts";
 
@@ -33,7 +34,12 @@ export interface FusionTurnOutcome {
 	analysis?: JudgeAnalysis;
 	results?: PanelResult[];
 	verification?: VerificationReport;
+	/** Set when both members failed after a coordinated throttle retry (§12). */
+	degraded?: "both-throttled";
 }
+
+/** Short backoff before one coordinated retry when both panel members throttle together. */
+export const BOTH_THROTTLED_RETRY_BACKOFF_MS = 1500;
 
 export const delay = (ms: number, signal?: AbortSignal): Promise<void> =>
 	new Promise<void>((resolve) => {
@@ -59,9 +65,12 @@ const EMPTY_ANALYSIS: JudgeAnalysis = {
 	unsupportedClaims: [],
 };
 
-export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOutcome> {
-	const { panel, staggerSameCliMs, signal } = deps;
+function allMembersFailedThrottle(results: PanelResult[]): boolean {
+	return results.length > 0 && results.every((r) => !r.ok && isThrottleError(r.error));
+}
 
+async function launchPanelMembers(deps: FusionTurnDeps): Promise<PanelResult[]> {
+	const { panel, staggerSameCliMs, signal } = deps;
 	// Fan-out in parallel; stagger any later same-CLI member to dodge correlated throttling.
 	const launches = panel.map(async (member, i) => {
 		const hasEarlierSameCli = panel.slice(0, i).filter((m) => m.cli === member.cli).length > 0;
@@ -70,10 +79,37 @@ export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOut
 		if (signal?.aborted) return { member, ok: false, text: "", error: "aborted" };
 		return deps.runMember(member);
 	});
-	const results = await Promise.all(launches);
+	return Promise.all(launches);
+}
 
-	const survivors = results.filter((r) => r.ok);
-	if (survivors.length === 0) return { handled: false, text: "" };
+export async function runFusionTurn(deps: FusionTurnDeps): Promise<FusionTurnOutcome> {
+	const { signal } = deps;
+
+	let results = await launchPanelMembers(deps);
+	let survivors = results.filter((r) => r.ok);
+
+	// §12: one coordinated retry when both members failed with throttle errors.
+	if (survivors.length === 0 && allMembersFailedThrottle(results)) {
+		recordDiagnostic({
+			category: "fusion.both-throttled-retry",
+			level: "info",
+			source: "fusion.orchestrator",
+			context: { note: `backoffMs=${BOTH_THROTTLED_RETRY_BACKOFF_MS}` },
+		});
+		await delay(BOTH_THROTTLED_RETRY_BACKOFF_MS, signal);
+		if (!signal?.aborted) {
+			results = await launchPanelMembers(deps);
+			survivors = results.filter((r) => r.ok);
+		}
+	}
+
+	if (survivors.length === 0) {
+		return {
+			handled: false,
+			text: "",
+			degraded: allMembersFailedThrottle(results) ? "both-throttled" : undefined,
+		};
+	}
 
 	// Single survivor: skip the judge (degenerate over [1 real + 1 failed]); the verifier still
 	// fact-checks the lone advisor, and the writer synthesizes/streams.

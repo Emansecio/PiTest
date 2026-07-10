@@ -311,7 +311,13 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 							category: "guard.import-grounding",
 							level: "info",
 							source: "import-grounding-extension",
-							context: { note, outcome: "overridden", ruleId },
+							context: {
+								note,
+								outcome: "overridden",
+								ruleId,
+								toolName: event.toolName,
+								toolCallId: event.toolCallId,
+							},
 						});
 						return undefined; // already advised once -> let it run
 					}
@@ -320,7 +326,7 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 						category: "guard.import-grounding",
 						level: "info",
 						source: "import-grounding-extension",
-						context: { note, outcome: "blocked", ruleId },
+						context: { note, outcome: "blocked", ruleId, toolName: event.toolName, toolCallId: event.toolCallId },
 					});
 					return { block: true, reason: decision.message };
 				}

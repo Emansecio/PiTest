@@ -8,7 +8,13 @@ import { Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { prepareArgsForLooseSchema } from "../tools/argument-prep.ts";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "../tools/json-crush.ts";
-import { collapseRepeatedLines, DEFAULT_MAX_BYTES, formatSize, truncateHead } from "../tools/truncate.ts";
+import {
+	collapseRepeatedLines,
+	DEFAULT_MAX_BYTES,
+	formatSize,
+	getOccupancyScale,
+	truncateHead,
+} from "../tools/truncate.ts";
 import type { McpManager } from "./manager.ts";
 import type { McpCallToolResult, McpToolSchema } from "./types.ts";
 
@@ -35,6 +41,32 @@ interface FlattenedContent {
 	isError: boolean;
 }
 
+/** Per-server output ceiling for browser/devtools MCP servers (verbose DOM/network logs). */
+const MCP_CAP_BROWSER_BYTES = 24 * 1024;
+/** Per-server output ceiling for filesystem/memory/sqlite MCP servers (larger payloads). */
+const MCP_CAP_FILESYSTEM_BYTES = 96 * 1024;
+
+const MCP_CAP_BROWSER_SERVER = /chrome|browser|playwright|puppeteer|devtools/i;
+const MCP_CAP_FILESYSTEM_SERVER = /filesystem|fs|memory|sqlite/i;
+
+/**
+ * Resolve the byte budget for MCP text output from the server name. Default
+ * follows {@link DEFAULT_MAX_BYTES} (context-window scaled at boot); known
+ * server families get fixed floors (24KB browser, 96KB filesystem). Occupancy
+ * scaling is applied on top so a full context window tightens every MCP cap.
+ */
+export function resolveMcpCapBytes(serverName?: string): number {
+	let baseCap: number;
+	if (serverName && MCP_CAP_FILESYSTEM_SERVER.test(serverName)) {
+		baseCap = MCP_CAP_FILESYSTEM_BYTES;
+	} else if (serverName && MCP_CAP_BROWSER_SERVER.test(serverName)) {
+		baseCap = MCP_CAP_BROWSER_BYTES;
+	} else {
+		baseCap = DEFAULT_MAX_BYTES;
+	}
+	return Math.max(1, Math.round(baseCap * getOccupancyScale()));
+}
+
 /**
  * Cap an MCP text block before it enters the context. MCP is the only tool-output
  * surface without a built-in ceiling — a single large return (page fetch, SQL
@@ -45,9 +77,10 @@ interface FlattenedContent {
  * network logs), so when the output overflows, prefer a structural crush
  * (schema + head/tail samples) over a blind head-cut — exactly like bash/read.
  */
-export function capMcpText(text: string): string {
+export function capMcpText(text: string, serverName?: string): string {
+	const maxBytes = resolveMcpCapBytes(serverName);
 	const collapsed = collapseRepeatedLines(text);
-	const truncation = truncateHead(collapsed, { maxBytes: DEFAULT_MAX_BYTES });
+	const truncation = truncateHead(collapsed, { maxBytes });
 	if (!truncation.truncated) return collapsed;
 	const crushed = maybeCrushJsonOutput({
 		text: collapsed,
@@ -55,24 +88,25 @@ export function capMcpText(text: string): string {
 		recoveryHint: "Refine the query to fetch any elided detail.",
 	});
 	if (crushed !== undefined) return crushed;
-	return `${truncation.content}\n\n[MCP output truncated: ${formatSize(DEFAULT_MAX_BYTES)} limit, ${truncation.totalLines} lines total — refine the query for the rest]`;
+	return `${truncation.content}\n\n[MCP output truncated: ${formatSize(maxBytes)} limit, ${truncation.totalLines} lines total — refine the query for the rest]`;
 }
 
 /**
  * Flatten an MCP tool result into Pi content blocks under an AGGREGATE text
  * budget. Each text/resource block is first capped per-block by capMcpText, but
  * MCP results can carry many blocks; without a shared ceiling, N text blocks
- * would inject N × DEFAULT_MAX_BYTES verbatim (the only tool surface that could
- * blow past the per-tool cap). We debit each capped block's size from a single
- * DEFAULT_MAX_BYTES budget; once it is spent the remaining text/resource blocks
- * are dropped and replaced by one elision marker. The first text/resource block
+ * would inject N × cap verbatim (the only tool surface that could blow past the
+ * per-tool cap). We debit each capped block's size from a single server-aware
+ * budget; once it is spent the remaining text/resource blocks are dropped and
+ * replaced by one elision marker. The first text/resource block
  * is always emitted (so the common single-block case is byte-identical), and
  * images never count against the text budget nor get elided.
  */
-function flattenMcpContent(result: McpCallToolResult): FlattenedContent {
+function flattenMcpContent(result: McpCallToolResult, serverName?: string): FlattenedContent {
 	const isError = result.isError ?? false;
 	const blocks: FlattenedContent["content"] = [];
-	let remaining = DEFAULT_MAX_BYTES;
+	const aggregateBudget = resolveMcpCapBytes(serverName);
+	let remaining = aggregateBudget;
 	let emittedText = false;
 	let elidedCount = 0;
 	let elidedBytes = 0;
@@ -83,9 +117,9 @@ function flattenMcpContent(result: McpCallToolResult): FlattenedContent {
 		}
 		let text: string | null = null;
 		if (block.type === "text") {
-			text = capMcpText(block.text);
+			text = capMcpText(block.text, serverName);
 		} else if (block.type === "resource" && block.resource.text) {
-			text = capMcpText(`[Resource ${block.resource.uri}]\n${block.resource.text}`);
+			text = capMcpText(`[Resource ${block.resource.uri}]\n${block.resource.text}`, serverName);
 		}
 		if (text === null) continue;
 		const size = Buffer.byteLength(text, "utf8");
@@ -116,7 +150,7 @@ function flattenMcpContent(result: McpCallToolResult): FlattenedContent {
 			serialized = String(result.structuredContent);
 		}
 		if (serialized !== undefined) {
-			blocks.push({ type: "text", text: capMcpText(serialized) });
+			blocks.push({ type: "text", text: capMcpText(serialized, serverName) });
 		}
 	}
 	if (blocks.length === 0) {
@@ -129,6 +163,7 @@ export function wrapMcpToolAsDefinition(
 	manager: McpManager,
 	prefixedName: string,
 	schema: McpToolSchema,
+	serverName: string,
 ): ToolDefinition {
 	const description = schema.description?.trim().length ? schema.description.trim() : `MCP tool ${schema.name}`;
 	const params = compileMcpSchema(schema.inputSchema);
@@ -143,7 +178,7 @@ export function wrapMcpToolAsDefinition(
 			const argRecord = (providedArgs ?? {}) as Record<string, unknown>;
 			try {
 				const result = await manager.callTool(prefixedName, argRecord, signal);
-				const { content, isError } = flattenMcpContent(result);
+				const { content, isError } = flattenMcpContent(result, serverName);
 				return { content, isError, details: undefined };
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);

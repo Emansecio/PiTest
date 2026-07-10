@@ -512,7 +512,9 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should respect timeout", async () => {
-			await expect(bashTool.execute("test-call-10", { command: "sleep 5", timeout: 1 })).rejects.toThrow(
+			// timeout is rounded to whole seconds (normalizeBashTimeout); sleep must
+			// outrun it so the hard-kill path fires instead of a clean exit.
+			await expect(bashTool.execute("test-call-10", { command: "sleep 3", timeout: 1 })).rejects.toThrow(
 				/timed out/i,
 			);
 		});

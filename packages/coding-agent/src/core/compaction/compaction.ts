@@ -398,6 +398,31 @@ export function computeDynamicReserve(contextWindow: number, configuredReserve: 
 }
 
 /**
+ * Tokens to reserve for the *next* assistant thinking block before send.
+ * Mirrors `@pit/ai` `adjustMaxTokensForThinking` defaults so presend compaction
+ * fires before a reasoning-heavy turn overflows. Does NOT inflate
+ * `estimateWireTokens` (UI % stays message/wire-only).
+ *
+ * Returns 0 when thinking is off or the model has no reasoning capability.
+ */
+export function resolveThinkingHeadroom(
+	model: { reasoning?: boolean } | undefined,
+	thinkingLevel: ThinkingLevel | "off" | undefined,
+	customBudgets?: { minimal?: number; low?: number; medium?: number; high?: number },
+): number {
+	if (!model?.reasoning) return 0;
+	if (!thinkingLevel || thinkingLevel === "off") return 0;
+	const defaults = { minimal: 1024, low: 2048, medium: 8192, high: 16384 };
+	const budgets = { ...defaults, ...customBudgets };
+	// Effort-only levels (xhigh/max/ultra) have no token budget of their own;
+	// reserve the high budget so presend compaction still leaves headroom.
+	if (thinkingLevel === "xhigh" || thinkingLevel === "max" || thinkingLevel === "ultra") {
+		return budgets.high;
+	}
+	return budgets[thinkingLevel] ?? budgets.medium;
+}
+
+/**
  * Effective verbatim-retention budget for findCutPoint.
  *
  * The configured `keepRecentTokens` (default 20k) is a flat floor. On a large
@@ -1096,7 +1121,18 @@ function cachedDenseTextTokens(block: object, text: string): number {
 	return est;
 }
 
-const SUPERSEDED_TOOL_RESULT_NAMES = new Set(["read", "grep", "find", "ls", "symbol", "find_symbol", "lsp", "bash"]);
+const SUPERSEDED_TOOL_RESULT_NAMES = new Set([
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"symbol",
+	"find_symbol",
+	"lsp",
+	"bash",
+	"ast_grep",
+	"repo_map",
+]);
 
 function stableStringify(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
@@ -2254,7 +2290,7 @@ async function completeSummarization(
  * Token ceiling for a summarization LLM call: a fraction of the reserve, clamped
  * to the model's own output limit (unbounded when the model reports none).
  */
-function summarizationMaxTokens(model: Model<any>, reserveTokens: number, fraction: number): number {
+export function summarizationMaxTokens(model: Model<any>, reserveTokens: number, fraction: number): number {
 	return Math.min(
 		Math.floor(fraction * reserveTokens),
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
@@ -2501,7 +2537,7 @@ export function buildVerificationSource(
  * windows — where the verify source excerpt still adds real signal over the
  * single-call self-check — pay the second LLM call.
  */
-const VERIFY_MIN_INPUT_TOKENS = 80_000;
+export const VERIFY_MIN_INPUT_TOKENS = 80_000;
 
 /**
  * Sum content-aware token estimates across a message list — a PURE estimate
@@ -2567,7 +2603,7 @@ export function correctionCitesSource(original: string, corrected: string, sourc
  * {@link correctionCitesSource}); ungrounded inflation still falls back to the
  * original, as does any rewrite beyond {@link VERIFY_INFLATION_HARD_LIMIT}.
  */
-async function verifySummary(
+export async function verifySummary(
 	summary: string,
 	source: string,
 	model: Model<any>,
@@ -2973,105 +3009,110 @@ export async function compact(
 		? [...lists.modifiedFiles, ...lists.readFiles]
 		: lists.modifiedFiles;
 	const digestsPromise = digestPaths.length > 0 ? collectFileDigests(digestPaths, cwd, signal) : undefined;
-	// No-op branch so a summarization failure below cannot surface an unhandled
-	// rejection from the in-flight digests; the real `await digestsPromise` after
-	// the verify pass still observes (and rethrows) any digest error.
-	digestsPromise?.catch(() => {});
 
 	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
+	let structuralOnly: boolean;
 
-	// Structural-only fast path: when the compacted window is a pure burst of tool
-	// I/O with no explanatory prose, the deterministic operation lists + digests
-	// (appended below) already capture everything a summary could. Skip the
-	// summarizer LLM and its self-correction pass. Disabled by
-	// PIT_NO_STRUCTURAL_COMPACTION=1 and never taken for incremental compactions
-	// (see shouldUseStructuralOnly).
-	const structuralOnly = shouldUseStructuralOnly(messagesToSummarize, turnPrefixMessages, previousSummary);
-	if (structuralOnly) {
-		summary = STRUCTURAL_ONLY_HEADER;
-	} else if (isSplitTurn && turnPrefixMessages.length > 0) {
-		const [historyResult, turnPrefixResult] = await Promise.all([
-			messagesToSummarize.length > 0
-				? generateSummary(
-						messagesToSummarize,
-						model,
-						settings.reserveTokens,
-						apiKey,
-						headers,
-						signal,
-						customInstructions,
-						previousSummary,
-						thinkingLevel,
-						streamFn,
-						mainWindow,
-					)
-				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(
-				turnPrefixMessages,
+	try {
+		// Structural-only fast path: when the compacted window is a pure burst of tool
+		// I/O with no explanatory prose, the deterministic operation lists + digests
+		// (appended below) already capture everything a summary could. Skip the
+		// summarizer LLM and its self-correction pass. Disabled by
+		// PIT_NO_STRUCTURAL_COMPACTION=1 and never taken for incremental compactions
+		// (see shouldUseStructuralOnly).
+		structuralOnly = shouldUseStructuralOnly(messagesToSummarize, turnPrefixMessages, previousSummary);
+		if (structuralOnly) {
+			summary = STRUCTURAL_ONLY_HEADER;
+		} else if (isSplitTurn && turnPrefixMessages.length > 0) {
+			const [historyResult, turnPrefixResult] = await Promise.all([
+				messagesToSummarize.length > 0
+					? generateSummary(
+							messagesToSummarize,
+							model,
+							settings.reserveTokens,
+							apiKey,
+							headers,
+							signal,
+							customInstructions,
+							previousSummary,
+							thinkingLevel,
+							streamFn,
+							mainWindow,
+						)
+					: Promise.resolve("No prior history."),
+				generateTurnPrefixSummary(
+					turnPrefixMessages,
+					model,
+					settings.reserveTokens,
+					apiKey,
+					headers,
+					signal,
+					thinkingLevel,
+					streamFn,
+					prefixWindow,
+				),
+			]);
+			summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
+		} else {
+			summary = await generateSummary(
+				messagesToSummarize,
 				model,
 				settings.reserveTokens,
 				apiKey,
 				headers,
 				signal,
+				customInstructions,
+				previousSummary,
 				thinkingLevel,
 				streamFn,
-				prefixWindow,
-			),
-		]);
-		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
-	} else {
-		summary = await generateSummary(
-			messagesToSummarize,
-			model,
-			settings.reserveTokens,
-			apiKey,
-			headers,
-			signal,
-			customInstructions,
-			previousSummary,
-			thinkingLevel,
-			streamFn,
-			mainWindow,
-		);
-	}
+				mainWindow,
+			);
+		}
 
-	// Self-correction: verify summary for omitted details. Gated by input size —
-	// small/incremental compactions skip the second LLM call (low omission risk).
-	const verifyInputTokens =
-		sumMessageTokens(messagesToSummarize) + (isSplitTurn ? sumMessageTokens(turnPrefixMessages) : 0);
-	if (!structuralOnly && settings.selfCorrection !== false && verifyInputTokens >= VERIFY_MIN_INPUT_TOKENS) {
-		const maxTokens = summarizationMaxTokens(model, settings.reserveTokens, 0.8);
-		const verifySource = buildVerificationSource(
-			messagesToSummarize,
-			isSplitTurn ? turnPrefixMessages : [],
-			mainWindow,
-			isSplitTurn ? prefixWindow : undefined,
-		);
-		summary = await verifySummary(
-			summary,
-			verifySource,
-			model,
-			maxTokens,
-			apiKey,
-			headers,
-			signal,
-			thinkingLevel,
-			streamFn,
-		);
-	}
+		// Self-correction: verify summary for omitted details. Gated by input size —
+		// small/incremental compactions skip the second LLM call (low omission risk).
+		const verifyInputTokens =
+			sumMessageTokens(messagesToSummarize) + (isSplitTurn ? sumMessageTokens(turnPrefixMessages) : 0);
+		if (!structuralOnly && settings.selfCorrection !== false && verifyInputTokens >= VERIFY_MIN_INPUT_TOKENS) {
+			const maxTokens = summarizationMaxTokens(model, settings.reserveTokens, 0.8);
+			const verifySource = buildVerificationSource(
+				messagesToSummarize,
+				isSplitTurn ? turnPrefixMessages : [],
+				mainWindow,
+				isSplitTurn ? prefixWindow : undefined,
+			);
+			summary = await verifySummary(
+				summary,
+				verifySource,
+				model,
+				maxTokens,
+				apiKey,
+				headers,
+				signal,
+				thinkingLevel,
+				streamFn,
+			);
+		}
 
-	if (!structuralOnly && !isTruthyEnvFlag(process.env.PIT_NO_COMPACT_SUMMARY_OUTPUT)) {
-		summary = trimSummaryProseAgainstOperations(summary, lists);
+		if (!structuralOnly && !isTruthyEnvFlag(process.env.PIT_NO_COMPACT_SUMMARY_OUTPUT)) {
+			summary = trimSummaryProseAgainstOperations(summary, lists);
+		}
+		// Deterministic grounding: annotate path tokens in the prose that are neither
+		// in the operation lists nor on disk with `(unverified)`. Runs before the
+		// structural frame (correct by construction) is appended, and is skipped for
+		// the structural-only header (no prose to ground). Zero-LLM, every provider.
+		if (!structuralOnly && !isTruthyEnvFlag(process.env.PIT_NO_SUMMARY_GROUNDING)) {
+			summary = groundSummaryPaths(summary, lists, cwd).summary;
+		}
+		summary += formatFileOperations(lists);
+	} catch (err) {
+		// Summarization failed before digests were awaited — attach a no-op so the
+		// in-flight digests don't surface an unhandled rejection. Digest errors still
+		// propagate via the await below when summarization succeeds.
+		digestsPromise?.catch(() => {});
+		throw err;
 	}
-	// Deterministic grounding: annotate path tokens in the prose that are neither
-	// in the operation lists nor on disk with `(unverified)`. Runs before the
-	// structural frame (correct by construction) is appended, and is skipped for
-	// the structural-only header (no prose to ground). Zero-LLM, every provider.
-	if (!structuralOnly && !isTruthyEnvFlag(process.env.PIT_NO_SUMMARY_GROUNDING)) {
-		summary = groundSummaryPaths(summary, lists, cwd).summary;
-	}
-	summary += formatFileOperations(lists);
 
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no UUID - session may need migration");

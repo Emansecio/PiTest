@@ -17,7 +17,7 @@ const tuiSrcCore = fileURLToPath(new URL("../tui/src/core.ts", import.meta.url))
 // Speed/headroom trade-off on Windows: cpus-4 forks (28 -> 24). Keeps a few
 // cores free for spawned children (tsx boots, git, taskkill/AgentSession
 // dispose teardown) while cutting collect/test wall vs the old cpus/2 default.
-const maxVitestForks = process.env.CI ? 2 : Math.max(2, cpus().length - 4);
+const maxVitestForks = process.env.CI ? 3 : Math.max(2, cpus().length - 4);
 
 export default defineConfig({
 	test: {

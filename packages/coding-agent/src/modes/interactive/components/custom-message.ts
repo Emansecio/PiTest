@@ -29,6 +29,42 @@ const FUSION_SUMMARY_CUSTOM_TYPE = "pit.fusion-summary";
  */
 const MCP_NOTICE_CUSTOM_TYPE = "mcp.notice";
 
+/**
+ * Permission deny (plan mode / deny rules): one warning `◦` line so the user
+ * sees mode/rule blocking, not only a failed tool row.
+ */
+const PERMISSION_BLOCKED_CUSTOM_TYPE = "pit.permission-blocked";
+
+/**
+ * Doom-loop tier-2 pause and tier-3 recovery steers are user-visible (`display:
+ * true`) but the steer body is long XML-ish guidance for the model. Render a
+ * single muted `◦` timeline line (tool + count) — no purple box, no
+ * `[pi.doom-loop-*]` header. Tier-1 (`pi.doom-loop-reminder`) stays
+ * `display: false` and never reaches this component.
+ */
+const DOOM_LOOP_PAUSE_CUSTOM_TYPE = "pi.doom-loop-pause";
+const DOOM_LOOP_RECOVERY_CUSTOM_TYPE = "pi.doom-loop-recovery";
+
+function extractDoomLoopToolName(text: string): string | undefined {
+	const match = text.match(/calls? to `([^`]+)`/);
+	return match?.[1];
+}
+
+function extractDoomLoopCount(text: string): number | undefined {
+	const match = text.match(/made (\d+) (?:consecutive )?identical calls/) ?? text.match(/repeated (\d+) calls to/);
+	return match ? Number(match[1]) : undefined;
+}
+
+function formatDoomLoopCompactLine(customType: string, text: string): string {
+	const tool = extractDoomLoopToolName(text) ?? "tool";
+	const count = extractDoomLoopCount(text);
+	const countPart = count !== undefined ? `${count}× ` : "";
+	if (customType === DOOM_LOOP_PAUSE_CUSTOM_TYPE) {
+		return `◦ doom-loop pause · ${countPart}\`${tool}\` — switch strategy`;
+	}
+	return `◦ doom-loop recovery · ${countPart}\`${tool}\` — rethink approach`;
+}
+
 function labelForKind(kind: FusionSummarySynthesisItem["kind"]): string {
 	if (kind === "consensus") return "consensus";
 	if (kind === "contradiction") return "contradiction";
@@ -44,7 +80,8 @@ function labelForKind(kind: FusionSummarySynthesisItem["kind"]): string {
 export class CustomMessageComponent extends Container {
 	private message: CustomMessage<unknown>;
 	private customRenderer?: MessageRenderer;
-	private box: Box;
+	/** Lazy-init: only constructed on the default (non-compact) render path. */
+	private box?: Box;
 	private customComponent?: Component;
 	private markdownTheme: MarkdownTheme;
 	private _expanded = false;
@@ -59,18 +96,17 @@ export class CustomMessageComponent extends Container {
 		this.customRenderer = customRenderer;
 		this.markdownTheme = markdownTheme;
 
-		// Fusion-flow, fusion-summary and mcp.notice lines are compact timeline
-		// entries: no leading spacer.
+		// Fusion-flow, fusion-summary, mcp.notice and doom-loop tier-2/3 lines are
+		// compact timeline entries: no leading spacer.
 		const isCompactLine =
 			message.customType === FUSION_FLOW_CUSTOM_TYPE ||
 			message.customType === FUSION_SUMMARY_CUSTOM_TYPE ||
-			message.customType === MCP_NOTICE_CUSTOM_TYPE;
+			message.customType === MCP_NOTICE_CUSTOM_TYPE ||
+			message.customType === DOOM_LOOP_PAUSE_CUSTOM_TYPE ||
+			message.customType === DOOM_LOOP_RECOVERY_CUSTOM_TYPE;
 		if (!isCompactLine) {
 			this.addChild(new Spacer(1));
 		}
-
-		// Create box with purple background (used for default rendering)
-		this.box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
 
 		this.rebuild();
 	}
@@ -93,7 +129,9 @@ export class CustomMessageComponent extends Container {
 			this.removeChild(this.customComponent);
 			this.customComponent = undefined;
 		}
-		this.removeChild(this.box);
+		if (this.box) {
+			this.removeChild(this.box);
+		}
 
 		// Fusion-summary: structured JSON payload → multi-line coloured timeline block.
 		if (this.message.customType === FUSION_SUMMARY_CUSTOM_TYPE) {
@@ -157,6 +195,8 @@ export class CustomMessageComponent extends Container {
 				mainLine += theme.fg("muted", " → ") + theme.fg("warning", "solo-synth");
 			} else if (data.degraded === "both-failed") {
 				mainLine += theme.fg("muted", " → ") + theme.fg("error", "both failed");
+			} else if (data.degraded === "both-throttled") {
+				mainLine += theme.fg("muted", " → ") + theme.fg("warning", "both throttled");
 			}
 
 			// Synthesizer id.
@@ -212,6 +252,26 @@ export class CustomMessageComponent extends Container {
 			return;
 		}
 
+		// Permission blocked: warning (not error) — mode/rule, not a tool crash.
+		if (this.message.customType === PERMISSION_BLOCKED_CUSTOM_TYPE) {
+			const component = new TruncatedText(theme.fg("warning", `◦ ${this.extractText()}`));
+			this.customComponent = component;
+			this.addChild(component);
+			return;
+		}
+
+		// Doom-loop tier-2 pause / tier-3 recovery: one muted `◦` summary line.
+		if (
+			this.message.customType === DOOM_LOOP_PAUSE_CUSTOM_TYPE ||
+			this.message.customType === DOOM_LOOP_RECOVERY_CUSTOM_TYPE
+		) {
+			const line = formatDoomLoopCompactLine(this.message.customType, this.extractText());
+			const component = new TruncatedText(theme.fg("muted", line));
+			this.customComponent = component;
+			this.addChild(component);
+			return;
+		}
+
 		// Try custom renderer first - it handles its own styling
 		if (this.customRenderer) {
 			try {
@@ -227,7 +287,10 @@ export class CustomMessageComponent extends Container {
 			}
 		}
 
-		// Default rendering uses our box
+		// Default rendering uses our box (lazy-init — compact paths never need it)
+		if (!this.box) {
+			this.box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
+		}
 		this.addChild(this.box);
 		this.box.clear();
 

@@ -6,21 +6,24 @@ import { clampBashCommandRow } from "./bash-command-row.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
 import {
+	ACTIVITY_ERROR_PREVIEW_LINES,
+	activityTargetLabel,
 	capDiffPreview,
 	capErrorPreview,
 	diffStat,
 	EDIT_EXPANDED_MAX_LINES,
-	EDIT_SUCCESS_PREVIEW_LINES,
 	glyphFor,
-	hasEditDiff,
 	isEditFamilyTool,
+	mcpActivityTarget,
+	parseMcpToolName,
 	verbFor,
 } from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 /** Max width of a derived agent label (from the task prompt). */
 const TASK_LABEL_MAX = 40;
-const SLOW_ACTION_ELAPSED_SEC = 4;
+/** Seconds of pending work before showing `· Ns` on activity/group headers. */
+export const SLOW_ACTION_ELAPSED_SEC = 4;
 
 type LineState = "pending" | "success" | "error";
 
@@ -52,8 +55,6 @@ export class ActivityLineComponent extends Container {
 	// children may animate or stream) always recompute.
 	private linesCache: string[] | null = null;
 	private linesCacheKey = "";
-	private liveEditBodyCache: string[] | null = null;
-	private liveEditBodyKey = "";
 	// Sequence number for an unnamed `task` agent (assigned by ActivityStacker,
 	// per turn). 0 = not a task / unassigned.
 	private taskOrdinal = 0;
@@ -76,7 +77,6 @@ export class ActivityLineComponent extends Container {
 		this.taskOrdinal = taskOrdinal;
 		this.execStartedAtMs = Date.now();
 		this.linesCache = null;
-		this.liveEditBodyCache = null;
 		this.targetCache = null;
 		this.statAdded = 0;
 		this.statRemoved = 0;
@@ -207,13 +207,16 @@ export class ActivityLineComponent extends Container {
 				// verbatim command stays available on expand.
 				prefix: false,
 				elideCd: true,
+				stripEcho: true,
+				suppressExpandHint: true,
 			});
 		}
 		if (name === "web_search") {
 			return theme.fg("toolTitle", String(args.query ?? ""));
 		}
-		// edit / write / ast_edit / edit_v2 and unknown action tools
-		const path = String(args.path ?? args.file_path ?? "");
+		// edit / write / ast_edit / edit_v2 and unknown action tools — basename only
+		// in the header; the full path stays in the expanded diff (ctrl+o).
+		const path = activityTargetLabel(name, args) || String(args.path ?? args.file_path ?? "");
 		let line = theme.fg("toolTitle", path);
 		const { added, removed } = this.editDiffStat();
 		if (added || removed) {
@@ -256,14 +259,10 @@ export class ActivityLineComponent extends Container {
 		const pending = state === "pending";
 		const autoError = !this.expanded && state === "error" && !this.exec.isAborted();
 		const editFamily = isEditFamilyTool(name);
-		const autoEditPreview =
-			!this.expanded && state === "success" && editFamily && hasEditDiff(this.exec.getResultDetails());
-		const liveEditPreview = pending && editFamily;
-		const showEditBody = autoEditPreview || liveEditPreview;
 		// Serve the memo only on the settled, collapsed, animation-free path:
 		// pending (spinner live), an in-flight icon ease, and the body renders
-		// (expanded / auto error / edit preview) must keep recomputing every frame.
-		const cacheable = !pending && !this.expanded && !autoError && !showEditBody && !this.iconEase.active;
+		// (expanded / auto error) must keep recomputing every frame.
+		const cacheable = !pending && !this.expanded && !autoError && !this.iconEase.active;
 		const cacheKey = `${width}|${state}|${this.count}|${this.statAdded}|${this.statRemoved}`;
 		if (cacheable && this.linesCache !== null && this.linesCacheKey === cacheKey) {
 			return this.linesCache;
@@ -279,9 +278,13 @@ export class ActivityLineComponent extends Container {
 		} else {
 			label = verbFor(name, pending);
 			target = this.target(width);
-			// Unknown/MCP action with no extractable target → use the tool name as
-			// the label instead of a bare fallback verb ("Ran") with nothing after it.
-			if (label === verbFor("", pending) && name !== "bash" && !stripAnsi(target).trim()) {
+			// MCP-style names: keep Ran/Running + server/tool target instead of a bare
+			// `server__tool` label that scans poorly in a long activity stack.
+			if (!stripAnsi(target).trim() && parseMcpToolName(name)) {
+				target = mcpActivityTarget(name);
+			} else if (label === verbFor("", pending) && name !== "bash" && !stripAnsi(target).trim()) {
+				// Unknown action with no extractable target → use the tool name as
+				// the label instead of a bare fallback verb ("Ran") with nothing after it.
 				label = name;
 				target = "";
 			}
@@ -321,19 +324,9 @@ export class ActivityLineComponent extends Container {
 			// Auto-shown error: render the full error body but cap the visible
 			// lines so a failure never floods the CLI — the rest is one ctrl+o away.
 			this.exec.setResultExpanded?.(true);
-			for (const l of capErrorPreview(this.exec.render(bodyWidth), bodyWidth)) lines.push(`  ${l}`);
-		} else if (autoEditPreview) {
-			this.exec.setResultExpanded?.(true);
-			for (const l of capDiffPreview(this.exec.render(bodyWidth), bodyWidth, EDIT_SUCCESS_PREVIEW_LINES)) {
+			for (const l of capErrorPreview(this.exec.render(bodyWidth), bodyWidth, ACTIVITY_ERROR_PREVIEW_LINES)) {
 				lines.push(`  ${l}`);
 			}
-		} else if (liveEditPreview) {
-			const bodyKey = `${this.exec.getActivityState()}|${String(this.exec.getArgs()?.path ?? "")}|${String(this.exec.getResultDetails() ?? "")}`;
-			if (this.liveEditBodyCache === null || this.liveEditBodyKey !== bodyKey) {
-				this.liveEditBodyCache = this.exec.render(bodyWidth);
-				this.liveEditBodyKey = bodyKey;
-			}
-			for (const l of this.liveEditBodyCache) lines.push(`  ${l}`);
 		}
 		if (cacheable) {
 			this.linesCache = lines;

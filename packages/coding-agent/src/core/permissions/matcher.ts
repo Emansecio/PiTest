@@ -7,7 +7,8 @@
  *  - `?` matches a single non-separator char
  *  - Other chars match literally
  *
- * Matches are case-insensitive on Windows, case-sensitive elsewhere.
+ * Matches are case-insensitive on Windows and macOS (APFS is typically
+ * case-insensitive), case-sensitive on Linux and other platforms.
  */
 
 import { isAbsolute, resolve } from "node:path";
@@ -59,7 +60,7 @@ export function globToRegExp(pattern: string): RegExp {
 		regex += c;
 		i++;
 	}
-	const flags = process.platform === "win32" ? "i" : "";
+	const flags = process.platform === "win32" || process.platform === "darwin" ? "i" : "";
 	const re = new RegExp(`^${regex}$`, flags);
 	globRegExpCache.set(pattern, re);
 	return re;

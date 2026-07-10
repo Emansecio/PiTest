@@ -69,7 +69,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	};
 
 	const registerSignalHandlers = (): void => {
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
+		const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
 		if (process.platform !== "win32") {
 			signals.push("SIGHUP");
 		}
@@ -78,7 +78,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			const handler = () => {
 				killTrackedDetachedChildren();
 				void disposeRuntime().finally(() => {
-					process.exit(signal === "SIGHUP" ? 129 : 143);
+					const code = signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143;
+					process.exit(code);
 				});
 			};
 			process.on(signal, handler);

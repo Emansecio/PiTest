@@ -438,7 +438,7 @@ export function createEditHashlineToolDefinition(
 
 			if (resultDiff && resultDiff !== previewDiff) {
 				component.addChild(new Spacer(1));
-				component.addChild(new Text(renderDiff(resultDiff), 1, 0));
+				component.addChild(new Text(renderDiff(resultDiff, { path: previewInput?.path }), 1, 0));
 			}
 			return component;
 		},

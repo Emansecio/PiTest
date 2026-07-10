@@ -54,6 +54,14 @@ describe("theme Proxy bound-method cache (perf)", () => {
 });
 
 describe("getRgb cache", () => {
+	beforeAll(() => {
+		// getRgb only resolves truecolor SGR; CI/Windows often report 256-color.
+		setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+	});
+	afterAll(() => {
+		resetCapabilitiesCache();
+	});
+
 	it("caches the parsed Rgb object per theme instance (same reference on repeat calls)", () => {
 		const dark = getThemeByName("dark");
 		expect(dark).toBeDefined();

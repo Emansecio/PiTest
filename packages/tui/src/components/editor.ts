@@ -242,11 +242,21 @@ export interface EditorTheme {
 	 * slash command (e.g. `/chrome`). Omit to leave the command text uncolored.
 	 */
 	commandColor?: (str: string) => string;
+	/** Optional: colorize the empty-editor placeholder hint. */
+	placeholderColor?: (text: string) => string;
 }
 
 export interface EditorOptions {
 	paddingX?: number;
 	autocompleteMaxVisible?: number;
+	/** Dim hint shown when the buffer is empty (cleared as soon as the user types). */
+	placeholder?: string;
+	/**
+	 * When true, always draw a closed bottom rule (`╰───`) even with no scroll
+	 * overflow. Default false keeps the historical blank separator so consumers
+	 * that have not opted in stay unchanged.
+	 */
+	closedBottom?: boolean;
 	/**
 	 * Called when a paste exceeds MAX_PASTE_BYTES and is truncated. The editor has
 	 * no warning surface of its own, so the consumer plumbs this to its own warning
@@ -352,6 +362,7 @@ export class Editor implements Component, Focusable {
 	protected tui: TUI;
 	private theme: EditorTheme;
 	private paddingX: number = 0;
+	private placeholder?: string;
 
 	// Store last render width for cursor navigation
 	private lastWidth: number = 80;
@@ -475,6 +486,7 @@ export class Editor implements Component, Focusable {
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
 	public disableSubmit: boolean = false;
+	private closedBottom: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
 		this.tui = tui;
@@ -484,6 +496,8 @@ export class Editor implements Component, Focusable {
 		this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
 		const maxVisible = options.autocompleteMaxVisible ?? 5;
 		this.autocompleteMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
+		this.placeholder = options.placeholder;
+		this.closedBottom = options.closedBottom === true;
 		this.onPasteTruncated = options.onPasteTruncated;
 	}
 
@@ -629,6 +643,17 @@ export class Editor implements Component, Focusable {
 			this.autocompleteMaxVisible = newMaxVisible;
 			this.tui.requestRender();
 		}
+	}
+
+	setPlaceholder(text?: string): void {
+		if (this.placeholder !== text) {
+			this.placeholder = text;
+			this.tui.requestRender();
+		}
+	}
+
+	getPlaceholder(): string | undefined {
+		return this.placeholder;
 	}
 
 	setAutocompleteProvider(provider: AutocompleteProvider): void {
@@ -873,8 +898,31 @@ export class Editor implements Component, Focusable {
 			let lineVisibleWidth = layoutLine.visibleWidth;
 			let cursorInPadding = false;
 
-			// Add cursor if this line has it
-			if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
+			// Empty-editor placeholder: dim hint behind the cursor at pos 0. Cleared
+			// as soon as the buffer has content (isEditorEmpty is false).
+			const showPlaceholder =
+				this.isEditorEmpty() &&
+				!!this.placeholder &&
+				visibleIndex === 0 &&
+				this.scrollOffset === 0 &&
+				layoutLine.hasCursor;
+
+			if (showPlaceholder) {
+				// Cursor is a reverse-video space at col 0; the full placeholder
+				// follows in dim. Eating the first grapheme of the hint with reverse
+				// video made "D" look like a selection box and "escribe a task…"
+				// look like overflow outside it.
+				const colorize = this.theme.placeholderColor ?? ((t: string) => t);
+				const marker = emitCursorMarker ? CURSOR_MARKER : "";
+				const blinkOff = this.cursorBlinkEnabled && !this.cursorBlinkVisible;
+				const cursor = blinkOff ? " " : "\x1b[7m \x1b[0m";
+				// Reserve 1 col for the cursor so the hint never overflows contentWidth.
+				const hintBudget = Math.max(0, contentWidth - 1);
+				const truncated = hintBudget > 0 ? truncateToWidth(this.placeholder!, hintBudget) : "";
+				displayText = marker + cursor + (truncated ? colorize(truncated) : "");
+				lineVisibleWidth = 1 + visibleWidth(truncated);
+			} else if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
+				// Add cursor if this line has it
 				const before = displayText.slice(0, layoutLine.cursorPos);
 				const after = displayText.slice(layoutLine.cursorPos);
 
@@ -922,9 +970,10 @@ export class Editor implements Component, Focusable {
 
 		// Bottom edge. A second full-width rule directly above the footer was pure
 		// weight — the top rule already separates the chat from the input, and the
-		// footer below carries its own structure. So the bottom rule renders ONLY
-		// when it carries information (`↓ N more` scroll indicator); otherwise it
-		// collapses to a blank line, letting whitespace do the separating.
+		// footer below carries its own structure. So by default the bottom rule
+		// renders ONLY when it carries information (`↓ N more` scroll indicator);
+		// otherwise it collapses to a blank line. Opt-in `closedBottom` always
+		// closes the frame with `╰───` for a card-like input area.
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
 		if (linesBelow > 0) {
 			// Rounded corner `╰` opens the bottom rule; same width as the old `─── `.
@@ -935,6 +984,8 @@ export class Editor implements Component, Focusable {
 			} else {
 				result.push(this.borderColor(truncateToWidth(indicator, width)));
 			}
+		} else if (this.closedBottom) {
+			result.push(this.borderColor(`╰${"─".repeat(Math.max(0, width - 1))}`));
 		} else {
 			result.push("");
 		}

@@ -12,8 +12,8 @@ describe("PendingUserMessageComponent", () => {
 	it("renders steer and queued labels", () => {
 		const steer = new PendingUserMessageComponent("steer", "fix the footer");
 		const queued = new PendingUserMessageComponent("queued", "then run tests");
-		expect(steer.render(80).map(stripAnsi).join("\n")).toContain("[steer]");
-		expect(queued.render(80).map(stripAnsi).join("\n")).toContain("[queued]");
+		expect(steer.render(80).map(stripAnsi).join("\n")).toContain("▸ steer");
+		expect(queued.render(80).map(stripAnsi).join("\n")).toContain("◷ queued");
 		expect(steer.render(80).map(stripAnsi).join("\n")).toContain("fix the footer");
 		expect(queued.render(80).map(stripAnsi).join("\n")).toContain("then run tests");
 	});

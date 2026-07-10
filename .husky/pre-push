@@ -1,9 +1,8 @@
 #!/bin/sh
 
-# Full gate before anything reaches the remotes: the fast static checks PLUS the
-# complete vitest suite. The pre-commit hook intentionally runs only the fast
-# checks (~5s) to keep commits snappy; this is where the test suite actually gates,
-# right before code leaves the machine.
+# Full gate before anything reaches the remotes: static checks PLUS the complete
+# vitest suite. Pre-commit runs only `check:static` (~5s); this is where the
+# test suite actually gates, right before code leaves the machine.
 echo "Running full check (lint, types, tests) before push..."
 npm run check
 if [ $? -ne 0 ]; then

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Pre-compile TypeScript sources of installed pi packages to JavaScript,
- * so the loader can skip jiti transpilation on every startup.
+ * Pre-compile TypeScript sources of installed pi packages AND local extension
+ * dirs to JavaScript, so the loader can skip jiti transpilation on every startup.
  *
  * What it does:
  *   1. Walks ~/.pit/agent/npm/node_modules for pi packages
@@ -9,13 +9,16 @@
  *   2. Reads package.json#pi.extensions (list of dirs/files relative to package root)
  *   3. For each .ts file in those paths, emits a sibling .js via esbuild
  *   4. Skips packages that already ship .js (dist-style)
+ *   5. Also walks ~/.pit/agent/extensions/ and <cwd>/.pit/extensions/ (flat .ts
+ *      files and nested dirs) — same mtime / --force / --clean contract
  *
  * Safe to re-run. Pass --force to overwrite existing .js outputs.
  * Pass --clean to delete generated .js files instead.
+ * Pass --cwd <path> to set the project root for `.pit/extensions` (default: process.cwd()).
  */
 
 import { build } from "esbuild";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -24,21 +27,27 @@ const FORCE = process.argv.includes("--force");
 const CLEAN = process.argv.includes("--clean");
 const VERBOSE = process.argv.includes("--verbose");
 
+function argValue(flag) {
+	const i = process.argv.indexOf(flag);
+	if (i < 0 || i + 1 >= process.argv.length) return undefined;
+	return process.argv[i + 1];
+}
+
+const PROJECT_CWD = resolve(argValue("--cwd") ?? process.cwd());
+
 // Respect PIT_CODING_AGENT_DIR (and PIT_NPM_DIR override) so this script
 // works regardless of where the user's pi agent dir lives.
 const AGENT_DIR = process.env.PIT_CODING_AGENT_DIR
 	? process.env.PIT_CODING_AGENT_DIR.replace(/^~(?=$|\/|\\)/, homedir())
 	: join(homedir(), ".pit", "agent");
 const NPM_DIR = process.env.PIT_NPM_DIR ?? join(AGENT_DIR, "npm", "node_modules");
-
-if (!existsSync(NPM_DIR)) {
-	console.error(`Pi npm dir not found: ${NPM_DIR}`);
-	process.exit(1);
-}
+const AGENT_EXTENSIONS_DIR = join(AGENT_DIR, "extensions");
+const PROJECT_EXTENSIONS_DIR = join(PROJECT_CWD, ".pit", "extensions");
 
 /** Find pi packages (those with a `pi` field in package.json). */
 function findPiPackages(root) {
 	const found = [];
+	if (!existsSync(root)) return found;
 	for (const entry of readdirSync(root, { withFileTypes: true })) {
 		if (!entry.isDirectory()) continue;
 		const dir = join(root, entry.name);
@@ -154,11 +163,11 @@ function rewriteTsImportSpecifiers(jsPath) {
 	}
 	let rewritten = src
 		// import ... from "./x.ts" | "../x.tsx"
-		.replace(/(from\s*["'])(\.{1,2}\/[^"']+?)\.tsx?(["'])/g, '$1$2.js$3')
+		.replace(/(from\s*["'])(\.{1,2}\/[^"']+?)\.tsx?(["'])/g, "$1$2.js$3")
 		// import("./x.ts")
-		.replace(/(import\(\s*["'])(\.{1,2}\/[^"']+?)\.tsx?(["']\s*\))/g, '$1$2.js$3')
+		.replace(/(import\(\s*["'])(\.{1,2}\/[^"']+?)\.tsx?(["']\s*\))/g, "$1$2.js$3")
 		// export ... from "./x.ts"
-		.replace(/(export\s*(?:\*|\{[^}]*\})\s*from\s*["'])(\.{1,2}\/[^"']+?)\.tsx?(["'])/g, '$1$2.js$3');
+		.replace(/(export\s*(?:\*|\{[^}]*\})\s*from\s*["'])(\.{1,2}\/[^"']+?)\.tsx?(["'])/g, "$1$2.js$3");
 	// Rewrite legacy @pituned/* aliases to the canonical @pit/*
 	// scope so Node ESM resolves them via node_modules without needing the
 	// coding-agent jiti alias map.
@@ -181,21 +190,10 @@ function cleanFile(tsPath) {
 	return false;
 }
 
-async function processPackage(pkgInfo) {
-	const { dir, pkg } = pkgInfo;
-	const extensions = pkg.pi?.extensions ?? [];
-	if (!Array.isArray(extensions) || extensions.length === 0) {
-		return { name: pkg.name, files: 0, skipped: 0, ms: 0 };
-	}
-	const allTs = [];
-	for (const ext of extensions) {
-		const files = collectTsFiles(dir, ext);
-		allTs.push(...files);
-	}
+async function processTsList(label, allTs, baseDir) {
 	if (allTs.length === 0) {
-		return { name: pkg.name, files: 0, skipped: 0, ms: 0 };
+		return { name: label, files: 0, skipped: 0, cleaned: 0, ms: 0 };
 	}
-
 	const start = performance.now();
 	let compiled = 0;
 	let skipped = 0;
@@ -208,30 +206,67 @@ async function processPackage(pkgInfo) {
 			if (r.skipped) skipped++;
 			else {
 				compiled++;
-				if (VERBOSE) console.log(`  + ${relative(dir, r.jsPath)}`);
+				if (VERBOSE) console.log(`  + ${relative(baseDir, r.jsPath)}`);
 			}
 		}
 	}
 	const ms = performance.now() - start;
-	return { name: pkg.name, files: compiled, skipped, cleaned, ms };
+	return { name: label, files: compiled, skipped, cleaned, ms };
+}
+
+async function processPackage(pkgInfo) {
+	const { dir, pkg } = pkgInfo;
+	const extensions = pkg.pi?.extensions ?? [];
+	if (!Array.isArray(extensions) || extensions.length === 0) {
+		return { name: pkg.name, files: 0, skipped: 0, ms: 0 };
+	}
+	const allTs = [];
+	for (const ext of extensions) {
+		const files = collectTsFiles(dir, ext);
+		allTs.push(...files);
+	}
+	return processTsList(pkg.name, allTs, dir);
+}
+
+/** Flat / nested local extension dirs (agent + project `.pit/extensions`). */
+async function processLocalExtensionsDir(dir, label) {
+	if (!existsSync(dir)) {
+		return { name: label, files: 0, skipped: 0, cleaned: 0, ms: 0 };
+	}
+	const allTs = walkTsFiles(dir);
+	return processTsList(label, allTs, dir);
 }
 
 const t0 = performance.now();
 const packages = findPiPackages(NPM_DIR);
-console.log(`${CLEAN ? "Cleaning" : "Pre-compiling"} ${packages.length} pi packages from ${NPM_DIR}\n`);
+if (existsSync(NPM_DIR)) {
+	console.log(`${CLEAN ? "Cleaning" : "Pre-compiling"} ${packages.length} pi packages from ${NPM_DIR}\n`);
+} else {
+	console.log(`Pi npm dir not found (${NPM_DIR}) — skipping package precompile; continuing with local extensions.\n`);
+}
 
 let totalCompiled = 0;
 let totalSkipped = 0;
 let totalCleaned = 0;
-for (const p of packages) {
-	const r = await processPackage(p);
-	if (r.files === 0 && r.skipped === 0 && !r.cleaned) continue;
+
+function accumulate(r) {
+	if (r.files === 0 && r.skipped === 0 && !r.cleaned) return;
 	totalCompiled += r.files ?? 0;
 	totalSkipped += r.skipped ?? 0;
 	totalCleaned += r.cleaned ?? 0;
 	const tag = CLEAN ? `cleaned=${r.cleaned}` : `compiled=${r.files} skipped=${r.skipped}`;
-	console.log(`  ${r.name.padEnd(40)} ${tag} (${r.ms.toFixed(0)}ms)`);
+	console.log(`  ${String(r.name).padEnd(40)} ${tag} (${r.ms.toFixed(0)}ms)`);
 }
 
+for (const p of packages) {
+	accumulate(await processPackage(p));
+}
+
+console.log(`\nLocal extension dirs:`);
+accumulate(await processLocalExtensionsDir(AGENT_EXTENSIONS_DIR, `agent:${AGENT_EXTENSIONS_DIR}`));
+accumulate(await processLocalExtensionsDir(PROJECT_EXTENSIONS_DIR, `project:${PROJECT_EXTENSIONS_DIR}`));
+
 const totalMs = performance.now() - t0;
-console.log(`\nTotal: ${CLEAN ? `cleaned=${totalCleaned}` : `compiled=${totalCompiled} skipped=${totalSkipped}`} in ${totalMs.toFixed(0)}ms`);
+console.log(
+	`\nTotal: ${CLEAN ? `cleaned=${totalCleaned}` : `compiled=${totalCompiled} skipped=${totalSkipped}`} in ${totalMs.toFixed(0)}ms`,
+);

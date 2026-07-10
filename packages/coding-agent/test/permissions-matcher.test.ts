@@ -40,6 +40,17 @@ describe("permissions/matcher: globToRegExp", () => {
 		expect(matchGlob("a+b/c.ts", "a+b/c.ts")).toBe(true);
 		expect(matchGlob("a+b/c.ts", "axb/cxts")).toBe(false);
 	});
+
+	it.runIf(process.platform === "win32" || process.platform === "darwin")(
+		"matches case-insensitively on Windows and macOS",
+		() => {
+			expect(matchGlob("**/.env", "/proj/.ENV")).toBe(true);
+		},
+	);
+
+	it.runIf(process.platform === "linux")("matches case-sensitively on Linux", () => {
+		expect(matchGlob("**/.env", "/proj/.ENV")).toBe(false);
+	});
 });
 
 describe("permissions/matcher: findMatchingGlob", () => {

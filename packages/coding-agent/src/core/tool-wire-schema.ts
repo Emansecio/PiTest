@@ -10,7 +10,8 @@ import type { Context, Tool } from "@pit/ai";
 import { truncateWithEllipsis } from "../utils/surrogate.ts";
 import type { WireToolSurface } from "./compaction/compaction.ts";
 
-const LAZY_TOOL_DESCRIPTION_MAX_CHARS = 120;
+/** Max chars for tool descriptions on the provider wire (T01 — was 120). */
+export const LAZY_TOOL_DESCRIPTION_MAX_CHARS = 40;
 
 function firstLine(text: string): string {
 	const line = text.split("\n")[0]?.trim() ?? "";

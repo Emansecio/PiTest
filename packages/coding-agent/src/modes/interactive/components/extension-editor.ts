@@ -20,8 +20,8 @@ import {
 import { APP_NAME } from "../../../config.ts";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
 import { getEditorTheme, theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 type EditorSpawnPlan = {
 	command: string;
@@ -91,13 +91,12 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		this.onSubmitCallback = onSubmit;
 		this.onCancelCallback = onCancel;
 
-		// Add top border
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
+		const card = new SelectorCard();
+		card.addChild(new Spacer(1));
 
 		// Add title
-		this.addChild(new Text(theme.fg("accent", title), 1, 0));
-		this.addChild(new Spacer(1));
+		card.addChild(new Text(theme.fg("accent", title), 1, 0));
+		card.addChild(new Spacer(1));
 
 		// Create editor
 		this.editor = new Editor(tui, getEditorTheme(), options);
@@ -108,9 +107,9 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		this.editor.onSubmit = (text: string) => {
 			this.onSubmitCallback(text);
 		};
-		this.addChild(this.editor);
+		card.addChild(this.editor);
 
-		this.addChild(new Spacer(1));
+		card.addChild(new Spacer(1));
 
 		// Add hint
 		const hasExternalEditor = !!(process.env.VISUAL || process.env.EDITOR);
@@ -121,12 +120,10 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 			"  " +
 			keyHint("tui.select.cancel", "cancel") +
 			(hasExternalEditor ? `  ${keyHint("app.editor.external", "external editor")}` : "");
-		this.addChild(new Text(hint, 1, 0));
+		card.addChild(new Text(hint, 1, 0));
 
-		this.addChild(new Spacer(1));
-
-		// Add bottom border
-		this.addChild(new DynamicBorder());
+		card.addChild(new Spacer(1));
+		this.addChild(card);
 	}
 
 	handleInput(keyData: string): void {

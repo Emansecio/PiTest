@@ -124,6 +124,20 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].path).toContain("index.ts");
 	});
 
+	it("prefers flat foo.js when its mtime is >= foo.ts sibling", async () => {
+		fs.writeFileSync(path.join(extensionsDir, "foo.ts"), extensionCode);
+		fs.writeFileSync(path.join(extensionsDir, "foo.js"), extensionCode);
+		const jsPath = path.join(extensionsDir, "foo.js");
+		const future = new Date(Date.now() + 1000);
+		fs.utimesSync(jsPath, future, future);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions).toHaveLength(1);
+		expect(result.extensions[0].path).toContain("foo.js");
+	});
+
 	it("discovers subdirectory with package.json pi field", async () => {
 		const subdir = path.join(extensionsDir, "my-package");
 		const srcDir = path.join(subdir, "src");

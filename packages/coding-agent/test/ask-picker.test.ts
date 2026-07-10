@@ -159,7 +159,19 @@ describe("ask picker", () => {
 		expect(out).toMatch(/└─/);
 		expect(out).toContain("☐ Alpha");
 		expect(out).toContain("type custom answer");
-		expect(out).toContain("space to toggle");
+		expect(out).toContain("space toggle");
+		expect(out).toContain("↑↓ navigate");
+		expect(out).toContain("close");
+	});
+
+	it("single-select hint uses navigate/select/close labels", () => {
+		const out = drive(makeReq({})).render();
+		expect(out).toContain("↑↓ navigate");
+		expect(out).toMatch(/\bselect\b/);
+		expect(out).toMatch(/\bclose\b/);
+		expect(out).not.toContain("↑↓ move");
+		expect(out).not.toContain("to choose");
+		expect(out).not.toContain("to cancel");
 	});
 
 	it("inline mode omits the question (the ask call line already shows it) but keeps header, context and options", () => {
@@ -192,5 +204,37 @@ describe("ask picker", () => {
 	it("renders the recommended badge", () => {
 		const out = drive(makeReq({ options: [{ label: "Alpha", recommended: true }, { label: "Beta" }] })).render();
 		expect(out).toContain("recommended");
+	});
+
+	it("paints selectedBg on the focused option row (U01)", () => {
+		let result: AskPickerResolveResult | null = null;
+		const { component } = createAskPicker(makeReq({}), (r) => {
+			result = r;
+		});
+		void result;
+		const raw = component.render(80).join("\n");
+		// paintSelectedRow applies theme.bg("selectedBg", …) → CSI 48;…
+		expect(raw).toMatch(/\x1b\[48;/);
+		expect(stripAnsi(raw)).toContain("Alpha");
+	});
+
+	it("hard-breaks long URL tokens across lines (T01)", () => {
+		const url = `https://example.com/${"a".repeat(80)}`;
+		const width = 40;
+		const { component } = createAskPicker(
+			makeReq({
+				question: `See ${url}`,
+				displayMode: "overlay",
+			}),
+			() => {},
+		);
+		const lines = component.render(width);
+		for (const line of lines) {
+			expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
+		const plain = stripAnsi(lines.join("\n"));
+		// URL must appear across more than one content line (not a single truncated row).
+		const urlFragments = plain.split("\n").filter((l) => l.includes("example.com") || l.includes("aaa"));
+		expect(urlFragments.length).toBeGreaterThanOrEqual(2);
 	});
 });

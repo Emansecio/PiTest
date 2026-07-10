@@ -17,28 +17,32 @@ import { SettingsManager } from "../src/core/settings-manager.js";
 import { createTestResourceLoader } from "./utilities.js";
 
 // Marker-driven estimate: tokens come from the last message carrying `__assembled`.
-vi.mock("../src/core/compaction/index.js", () => ({
-	calculateContextTokens: (usage: { totalTokens?: number }) => usage.totalTokens ?? 0,
-	adaptiveKeepRecentTokens: () => undefined,
-	collectEntriesForBranchSummary: () => ({ entries: [], commonAncestorId: null }),
-	sumMessageTokens: () => 0,
-	compact: async () => ({ summary: "compacted", firstKeptEntryId: "entry-1", tokensBefore: 100, details: {} }),
-	estimateContextTokens: (messages: Array<{ __assembled?: number }>) => {
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const a = messages[i]?.__assembled;
-			if (typeof a === "number") return { tokens: a, usageTokens: a, trailingTokens: 0, lastUsageIndex: i };
-		}
-		return { tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null };
-	},
-	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
-	prepareCompaction: () => ({ dummy: true }),
-	// Only the pre-send overflow guard matters here; keep the threshold path inert.
-	shouldCompact: () => false,
-	computeDynamicReserve: (_w: number, r: number) => r,
-	proactivePruneFloor: (contextWindow: number, override?: number) =>
-		override !== undefined && override > 0 ? override : Math.max(64_000, Math.floor((contextWindow || 0) * 0.25)),
-	shouldCompactSoft: () => false,
-}));
+vi.mock("../src/core/compaction/index.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/core/compaction/index.js")>();
+	return {
+		...actual,
+		calculateContextTokens: (usage: { totalTokens?: number }) => usage.totalTokens ?? 0,
+		adaptiveKeepRecentTokens: () => undefined,
+		collectEntriesForBranchSummary: () => ({ entries: [], commonAncestorId: null }),
+		sumMessageTokens: () => 0,
+		compact: async () => ({ summary: "compacted", firstKeptEntryId: "entry-1", tokensBefore: 100, details: {} }),
+		estimateContextTokens: (messages: Array<{ __assembled?: number }>) => {
+			for (let i = messages.length - 1; i >= 0; i--) {
+				const a = messages[i]?.__assembled;
+				if (typeof a === "number") return { tokens: a, usageTokens: a, trailingTokens: 0, lastUsageIndex: i };
+			}
+			return { tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null };
+		},
+		generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
+		prepareCompaction: () => ({ dummy: true }),
+		// Only the pre-send overflow guard matters here; keep the threshold path inert.
+		shouldCompact: () => false,
+		computeDynamicReserve: (_w: number, r: number) => r,
+		proactivePruneFloor: (contextWindow: number, override?: number) =>
+			override !== undefined && override > 0 ? override : Math.max(64_000, Math.floor((contextWindow || 0) * 0.25)),
+		shouldCompactSoft: () => false,
+	};
+});
 
 describe("pre-send overflow guard re-estimates after background compaction (#14)", () => {
 	let session: AgentSession;

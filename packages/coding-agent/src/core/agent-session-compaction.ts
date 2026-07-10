@@ -2,6 +2,7 @@
  * Compaction pipeline extracted from AgentSession (move-only).
  */
 
+import { statSync } from "node:fs";
 import type { Agent, AgentMessage, ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage, Model } from "@pit/ai";
 import { isContextOverflow, recordDiagnostic, streamSimple } from "@pit/ai";
@@ -10,12 +11,14 @@ import type { AgentSessionEvent } from "./agent-session-events.ts";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import {
 	adaptivePruneThreshold,
+	type CompactionSettings,
 	cloneToolResultMessagesForPrune,
 	estimateCompactionFrameTokens,
 	estimateWireTokens,
 	planContextPrune,
 	pressurePruneProtectTurns,
 	pruneOldToolOutputs,
+	resolveThinkingHeadroom,
 	type WireToolSurface,
 	wouldPruneOldToolOutputs,
 } from "./compaction/compaction.ts";
@@ -36,11 +39,26 @@ import {
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.js";
 import type { HindsightBank } from "./hindsight/index.js";
 import type { ModelRegistry } from "./model-registry.ts";
-import { resolveRole } from "./model-resolver.ts";
+import { resolveCompactSibling, resolveRole } from "./model-resolver.ts";
 import type { CompactionEntry, SessionEntry, SessionManager } from "./session-manager.js";
 import { getLatestCompactionEntry } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
+import type { FileMtimeStore } from "./tools/file-mtime-store.ts";
+import { canonicalPathKey, resolveReadPath } from "./tools/path-utils.ts";
 import type { ReadDedupeStore } from "./tools/read.js";
+
+/**
+ * Whether `runAutoCompaction` should pay a second LLM summarization pass after
+ * a successful threshold compaction (T08 / C5). Soft threshold alone must NOT
+ * re-fire — that was a systematic false positive after adaptive keep.
+ */
+export function shouldRunCompactionSecondPass(
+	contextTokens: number,
+	contextWindow: number,
+	settings: CompactionSettings,
+): boolean {
+	return shouldCompact(contextTokens, contextWindow, settings, 0);
+}
 
 /**
  * Fraction of the context window at which the presend overflow guard trips.
@@ -62,6 +80,70 @@ const PRESEND_OVERFLOW_RATIO = parsePresendOverflowRatio(
 	typeof process !== "undefined" ? process.env.PIT_PRESEND_OVERFLOW_RATIO : undefined,
 );
 
+/** Floor for dynamic tightening (T10); env baseRatio is the ceiling. */
+const PRESEND_RATIO_FLOOR = 0.88;
+const PRESEND_RATIO_OCC_START = 0.5;
+const PRESEND_RATIO_OCC_FULL = 0.9;
+const PRESEND_TRAILING_START = 0.1;
+const PRESEND_TRAILING_FULL = 0.4;
+const PRESEND_DENSITY_MAX_TIGHTEN = 0.03;
+
+/**
+ * Dynamic presend overflow ratio (T10). `baseRatio` (from env / default 0.95) is
+ * the ceiling; occupancy 50%→90% and trailing tool-share tighten toward 0.88.
+ * Opt-out: `PIT_NO_DYNAMIC_PRESEND_RATIO=1`.
+ */
+export function resolveDynamicPresendOverflowRatio(input: {
+	baseRatio: number;
+	pressure: number;
+	contextWindow: number;
+	trailingTokens: number;
+	assembled: number;
+}): number {
+	const { baseRatio, pressure, contextWindow, trailingTokens, assembled } = input;
+	if (isTruthyEnvFlag(process.env.PIT_NO_DYNAMIC_PRESEND_RATIO)) return baseRatio;
+	const floor = Math.min(baseRatio, PRESEND_RATIO_FLOOR);
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return baseRatio;
+
+	const occupancy = pressure / contextWindow;
+	let occTighten = 0;
+	if (occupancy > PRESEND_RATIO_OCC_START) {
+		const t = Math.min(1, (occupancy - PRESEND_RATIO_OCC_START) / (PRESEND_RATIO_OCC_FULL - PRESEND_RATIO_OCC_START));
+		occTighten = t * (baseRatio - floor);
+	}
+
+	const trailingShare = trailingTokens / Math.max(1, assembled);
+	let densityTighten = 0;
+	if (trailingShare > PRESEND_TRAILING_START) {
+		const t = Math.min(
+			1,
+			(trailingShare - PRESEND_TRAILING_START) / (PRESEND_TRAILING_FULL - PRESEND_TRAILING_START),
+		);
+		densityTighten = t * PRESEND_DENSITY_MAX_TIGHTEN;
+	}
+
+	return Math.max(floor, baseRatio - occTighten - densityTighten);
+}
+
+/**
+ * Fraction of the context window at which mid-turn (between tool rounds) wire
+ * pressure triggers prune-only relief. Lower than PRESEND_OVERFLOW_RATIO so we
+ * act earlier without running LLM compaction mid-stream.
+ * Override via PIT_MID_TURN_PRESSURE_RATIO (clamped [0.5, 0.99]).
+ */
+const DEFAULT_MID_TURN_PRESSURE_RATIO = 0.92;
+
+export function parseMidTurnPressureRatio(raw: string | undefined): number {
+	if (raw === undefined || raw === "") return DEFAULT_MID_TURN_PRESSURE_RATIO;
+	const parsed = Number(raw);
+	if (!Number.isFinite(parsed)) return DEFAULT_MID_TURN_PRESSURE_RATIO;
+	return Math.min(0.99, Math.max(0.5, parsed));
+}
+
+const MID_TURN_PRESSURE_RATIO = parseMidTurnPressureRatio(
+	typeof process !== "undefined" ? process.env.PIT_MID_TURN_PRESSURE_RATIO : undefined,
+);
+
 /** Stable session surface compaction reads; implemented by AgentSession. */
 export interface CompactionHost {
 	readonly sessionId: string;
@@ -74,6 +156,7 @@ export interface CompactionHost {
 	readonly modelRegistry: ModelRegistry;
 	readonly hindsightBank: HindsightBank | undefined;
 	readonly readDedupeStore: ReadDedupeStore | undefined;
+	readonly fileMtimeStore?: FileMtimeStore | undefined;
 	readonly cwd: string;
 	readonly isCompacting: boolean;
 	readonly isStreaming: boolean;
@@ -167,14 +250,96 @@ export function maybePruneStaleToolOutputs(ctx: CompactionController, contextTok
 	if (reclaimed > 0) ctx.host.agent.state.messages = copy;
 }
 
+export interface MidTurnWirePressureInput {
+	systemPrompt: string;
+	tools: WireToolSurface[];
+	thinkingLevel: ThinkingLevel;
+	thinkingBudgets?: ReturnType<SettingsManager["getThinkingBudgets"]>;
+	/** Override ratio for tests; defaults to PIT_MID_TURN_PRESSURE_RATIO / 0.92. */
+	ratio?: number;
+}
+
 /**
- * Resolve the `compact` model role for the summarization LLM call. When
- * `modelRoles.compact` is configured AND its auth resolves, the summarization
- * routes to that (typically faster/cheaper) model with the role's thinking
- * level. Otherwise — no role configured, role resolves to nothing, or auth
- * fails — fail open to the session model + its already-fetched auth, so the
- * compaction never breaks because of the role. Thresholds stay on the session
- * model regardless (the caller computes them from `ctx.host.model`).
+ * Read-only full-wire pressure check for between-tool-round relief (B9).
+ * Does NOT run LLM compaction — callers use {@link applyMidTurnPressureRelief}.
+ */
+export function measureMidTurnWirePressure(
+	messages: AgentMessage[],
+	model: Model<any> | undefined,
+	input: MidTurnWirePressureInput,
+): { assembled: number; pressure: number; contextWindow: number; tripped: boolean } {
+	const contextWindow = model?.contextWindow ?? 0;
+	if (contextWindow <= 0 || isTruthyEnvFlag(process.env.PIT_NO_MID_TURN_PRESSURE_GUARD)) {
+		return { assembled: 0, pressure: 0, contextWindow, tripped: false };
+	}
+	const assembled = estimateWireTokens(messages, {
+		systemPromptChars: input.systemPrompt.length,
+		systemPromptText: input.systemPrompt,
+		tools: input.tools,
+	}).tokens;
+	const thinkingHeadroom = resolveThinkingHeadroom(model, input.thinkingLevel, input.thinkingBudgets);
+	const pressure = assembled + thinkingHeadroom;
+	const ratio = input.ratio ?? MID_TURN_PRESSURE_RATIO;
+	return {
+		assembled,
+		pressure,
+		contextWindow,
+		tripped: pressure > contextWindow * ratio,
+	};
+}
+
+/**
+ * Prune-only mid-turn relief on a message array (no LLM compaction, no host mutation).
+ * Same threshold logic as {@link maybePruneStaleToolOutputs}.
+ */
+export function applyMidTurnPressureRelief(
+	messages: AgentMessage[],
+	contextWindow: number,
+): { messages: AgentMessage[]; reclaimed: number } {
+	if (
+		isTruthyEnvFlag(process.env.PIT_NO_PROACTIVE_PRUNE) ||
+		isTruthyEnvFlag(process.env.PIT_NO_MID_TURN_PRESSURE_GUARD)
+	) {
+		return { messages, reclaimed: 0 };
+	}
+	const contextTokens = estimateContextTokens(messages).tokens;
+	const floorRaw = Number(process.env.PIT_PROACTIVE_PRUNE_FLOOR);
+	const floor = proactivePruneFloor(contextWindow, Number.isFinite(floorRaw) ? floorRaw : undefined);
+	if (contextTokens <= floor) return { messages, reclaimed: 0 };
+	const threshold = adaptivePruneThreshold(contextTokens, contextWindow);
+	const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
+	const prunePlan = planContextPrune(messages, protectTurns);
+	if (!wouldPruneOldToolOutputs(messages, threshold, protectTurns, prunePlan)) {
+		return { messages, reclaimed: 0 };
+	}
+	const copy = cloneToolResultMessagesForPrune(messages);
+	const reclaimed = pruneOldToolOutputs(copy, threshold, protectTurns, true, prunePlan);
+	if (reclaimed > 0) {
+		recordDiagnostic({
+			category: "prune.mid-turn-pressure",
+			level: "info",
+			source: "agent-session.applyMidTurnPressureRelief",
+			context: {
+				bytes: reclaimed,
+				note: `ctx=${contextTokens}tok reclaimed=${reclaimed}tok protectTurns=${protectTurns}`,
+			},
+		});
+		return { messages: copy, reclaimed };
+	}
+	return { messages, reclaimed: 0 };
+}
+
+/**
+ * Resolve the `compact` model role for the summarization LLM call.
+ *
+ * Priority:
+ * 1. Explicit `modelRoles.compact` when configured and auth resolves.
+ * 2. Same-provider small-class sibling (haiku/mini/nano/flash/lite) when auth
+ *    resolves — zero-config default so compaction does not burn the session model.
+ * 3. Fail open to the session model + its already-fetched auth.
+ *
+ * Opt out of (2) with `PIT_NO_COMPACT_SIBLING_DEFAULT=1`. Thresholds stay on the
+ * session model regardless (the caller computes them from `ctx.host.model`).
  */
 export async function resolveCompactModel(
 	ctx: CompactionController,
@@ -195,32 +360,45 @@ export async function resolveCompactModel(
 	};
 	try {
 		const roleSettings = ctx.host.settingsManager.getModelRoleSettings();
-		if (!roleSettings.modelRoles?.compact) return fallback;
 		const availableModels = ctx.host.modelRegistry.getAll();
-		const resolved = resolveRole({
-			role: "compact",
-			availableModels,
-			settings: roleSettings,
-			cwd: ctx.host.cwd,
-		});
-		if (!resolved) return fallback;
+		let candidate: { model: Model<any>; thinkingLevel: ThinkingLevel } | undefined;
+
+		if (roleSettings.modelRoles?.compact) {
+			const resolved = resolveRole({
+				role: "compact",
+				availableModels,
+				settings: roleSettings,
+				cwd: ctx.host.cwd,
+			});
+			if (resolved) {
+				candidate = { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			}
+		} else if (!isTruthyEnvFlag(process.env.PIT_NO_COMPACT_SIBLING_DEFAULT)) {
+			const sibling = resolveCompactSibling(sessionModel, availableModels);
+			if (sibling) {
+				candidate = { model: sibling, thinkingLevel: "low" };
+			}
+		}
+
+		if (!candidate) return fallback;
+
 		let compactApiKey: string | undefined;
 		let compactHeaders: Record<string, string> | undefined;
 		if (ctx.host.agent.streamFn === streamSimple) {
-			const authResult = await ctx.host.modelRegistry.getApiKeyAndHeaders(resolved.model);
+			const authResult = await ctx.host.modelRegistry.getApiKeyAndHeaders(candidate.model);
 			if (!authResult.ok || !authResult.apiKey) return fallback;
 			compactApiKey = authResult.apiKey;
 			compactHeaders = authResult.headers;
 		} else {
-			const auth = await ctx.host.getCompactionRequestAuth(resolved.model);
+			const auth = await ctx.host.getCompactionRequestAuth(candidate.model);
 			compactApiKey = auth.apiKey;
 			compactHeaders = auth.headers;
 		}
 		return {
-			model: resolved.model,
+			model: candidate.model,
 			apiKey: compactApiKey,
 			headers: compactHeaders,
-			thinkingLevel: resolved.thinkingLevel,
+			thinkingLevel: candidate.thinkingLevel,
 		};
 	} catch {
 		return fallback;
@@ -243,7 +421,6 @@ export async function executeCompactionPipeline(
 ): Promise<CompactionResult> {
 	const { preparation, pathEntries, model, apiKey, headers, abortSignal, customInstructions } = options;
 	const thinkingLevel = options.thinkingLevel ?? ctx.host.thinkingLevel;
-	ctx.host.readDedupeStore?.clear();
 	let extensionCompaction: CompactionResult | undefined;
 	let fromExtension = false;
 
@@ -323,7 +500,50 @@ export async function executeCompactionPipeline(
 		}
 	}
 
+	pruneReadDedupeAfterCompaction(ctx, details);
+
 	return { summary, firstKeptEntryId, tokensBefore, details };
+}
+
+/**
+ * After compaction, drop ReadDedupeStore entries for paths not anchored in the
+ * summary frame (or whose mtime drifted). Empty keep-set → no-op (T09).
+ */
+export function pruneReadDedupeAfterCompaction(ctx: CompactionController, details: unknown): void {
+	if (isTruthyEnvFlag(process.env.PIT_NO_READ_DEDUPE_PRUNE)) return;
+	const store = ctx.host.readDedupeStore;
+	if (!store) return;
+
+	const d = details as
+		| {
+				readFiles?: string[];
+				modifiedFiles?: string[];
+				fileDigests?: Record<string, string>;
+		  }
+		| undefined
+		| null;
+	if (!d || typeof d !== "object") return;
+
+	const relPaths = [
+		...(Array.isArray(d.readFiles) ? d.readFiles : []),
+		...(Array.isArray(d.modifiedFiles) ? d.modifiedFiles : []),
+		...(d.fileDigests && typeof d.fileDigests === "object" ? Object.keys(d.fileDigests) : []),
+	].filter((p): p is string => typeof p === "string" && p.length > 0);
+
+	if (relPaths.length === 0) return;
+
+	const keep = new Set(relPaths.map((p) => canonicalPathKey(resolveReadPath(p, ctx.host.cwd))));
+	const mtimeStore = ctx.host.fileMtimeStore;
+	store.pruneExcept(keep, (canonicalPath) => {
+		if (!mtimeStore) return false;
+		const recorded = mtimeStore.get(canonicalPath);
+		if (recorded === undefined) return true;
+		try {
+			return statSync(canonicalPath).mtimeMs !== recorded;
+		} catch {
+			return true;
+		}
+	});
 }
 
 export async function compactSession(
@@ -442,33 +662,57 @@ export async function checkPresendOverflow(
 		contextTokens = calculateContextTokens(assistantMessage.usage);
 	}
 
-	let assembled = estimateWireTokens(ctx.host.agent.state.messages, {
+	const wireEstimate = estimateWireTokens(ctx.host.agent.state.messages, {
 		systemPromptChars: wireInput.systemPrompt.length,
 		systemPromptText: wireInput.systemPrompt,
 		tools: wireInput.tools,
 		pendingMessages: wireInput.pendingMessages,
-	}).tokens;
+	});
+	let assembled = wireEstimate.tokens;
 
-	if (assembled > contextWindow * PRESEND_OVERFLOW_RATIO && assembled > contextTokens) {
+	const thinkingHeadroom = resolveThinkingHeadroom(
+		ctx.host.model,
+		ctx.host.thinkingLevel,
+		ctx.host.settingsManager.getThinkingBudgets(),
+	);
+	const pressure = assembled + thinkingHeadroom;
+	const effectiveRatio = resolveDynamicPresendOverflowRatio({
+		baseRatio: PRESEND_OVERFLOW_RATIO,
+		pressure,
+		contextWindow,
+		trailingTokens: wireEstimate.trailingTokens,
+		assembled,
+	});
+
+	if (pressure > contextWindow * effectiveRatio && assembled > contextTokens) {
 		if (ctx.backgroundCompactionPromise) {
 			await awaitBackgroundCompaction(ctx);
-			assembled = estimateWireTokens(ctx.host.agent.state.messages, {
+			const reEstimate = estimateWireTokens(ctx.host.agent.state.messages, {
 				systemPromptChars: wireInput.systemPrompt.length,
 				systemPromptText: wireInput.systemPrompt,
 				tools: wireInput.tools,
 				pendingMessages: wireInput.pendingMessages,
-			}).tokens;
+			});
+			assembled = reEstimate.tokens;
 		}
-		if (assembled > contextWindow * PRESEND_OVERFLOW_RATIO && !ctx.host.isCompacting) {
+		const pressureAfter = assembled + thinkingHeadroom;
+		const ratioAfter = resolveDynamicPresendOverflowRatio({
+			baseRatio: PRESEND_OVERFLOW_RATIO,
+			pressure: pressureAfter,
+			contextWindow,
+			trailingTokens: wireEstimate.trailingTokens,
+			assembled,
+		});
+		if (pressureAfter > contextWindow * ratioAfter && !ctx.host.isCompacting) {
 			const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
-			ctx.lastCompactionDeficit = assembled - (contextWindow - reserve);
+			ctx.lastCompactionDeficit = pressureAfter - (contextWindow - reserve);
 			recordDiagnostic({
 				category: "compaction.presend-overflow-guard",
 				level: "warn",
 				source: "agent-session.checkPresendOverflow",
 				context: {
 					bytes: assembled,
-					note: `window=${contextWindow} wire pending=${wireInput.pendingMessages.length}`,
+					note: `window=${contextWindow} wire pending=${wireInput.pendingMessages.length} thinkingHeadroom=${thinkingHeadroom} effectiveRatio=${ratioAfter.toFixed(3)}`,
 				},
 			});
 			return await runAutoCompaction(ctx, "threshold", false);
@@ -553,19 +797,44 @@ export async function checkCompaction(
 		// captured prefix surface), so the two guards agree at the boundary and
 		// lastCompactionDeficit stays in one unit.
 		let assembled = estimateAssembledTokens(ctx);
-		if (assembled > contextWindow * PRESEND_OVERFLOW_RATIO && assembled > contextTokens) {
+		const trailingTokens = estimateContextTokens(ctx.host.agent.state.messages).trailingTokens;
+		const thinkingHeadroom = resolveThinkingHeadroom(
+			ctx.host.model,
+			ctx.host.thinkingLevel,
+			ctx.host.settingsManager.getThinkingBudgets(),
+		);
+		const pressure = assembled + thinkingHeadroom;
+		const effectiveRatio = resolveDynamicPresendOverflowRatio({
+			baseRatio: PRESEND_OVERFLOW_RATIO,
+			pressure,
+			contextWindow,
+			trailingTokens,
+			assembled,
+		});
+		if (pressure > contextWindow * effectiveRatio && assembled > contextTokens) {
 			if (ctx.backgroundCompactionPromise) {
 				await awaitBackgroundCompaction(ctx);
 				assembled = estimateAssembledTokens(ctx);
 			}
-			if (assembled > contextWindow * PRESEND_OVERFLOW_RATIO && !ctx.host.isCompacting) {
+			const pressureAfter = assembled + thinkingHeadroom;
+			const ratioAfter = resolveDynamicPresendOverflowRatio({
+				baseRatio: PRESEND_OVERFLOW_RATIO,
+				pressure: pressureAfter,
+				contextWindow,
+				trailingTokens,
+				assembled,
+			});
+			if (pressureAfter > contextWindow * ratioAfter && !ctx.host.isCompacting) {
 				const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
-				ctx.lastCompactionDeficit = assembled - (contextWindow - reserve);
+				ctx.lastCompactionDeficit = pressureAfter - (contextWindow - reserve);
 				recordDiagnostic({
 					category: "compaction.presend-overflow-guard",
 					level: "warn",
 					source: "agent-session._checkCompaction",
-					context: { bytes: assembled, note: `window=${contextWindow}` },
+					context: {
+						bytes: assembled,
+						note: `window=${contextWindow} thinkingHeadroom=${thinkingHeadroom} effectiveRatio=${ratioAfter.toFixed(3)}`,
+					},
 				});
 				return await runAutoCompaction(ctx, "threshold", false);
 			}
@@ -574,8 +843,15 @@ export async function checkCompaction(
 	if (shouldCompact(contextTokens, contextWindow, settings, ctx.lastCompactionDeficit)) {
 		if (ctx.backgroundCompactionPromise) await awaitBackgroundCompaction(ctx);
 		if (ctx.host.isCompacting) return false;
+		// P01: lastAssistant.usage can be stale after predictive background compaction
+		// finished during the user's read time (promise already cleared in finally).
+		// Re-check with a live message estimate before paying for a sync LLM compact.
+		const freshTokens = estimateContextTokens(ctx.host.agent.state.messages).tokens;
+		if (!shouldCompact(freshTokens, contextWindow, settings, ctx.lastCompactionDeficit)) {
+			return false;
+		}
 		const reserve = computeDynamicReserve(contextWindow, settings.reserveTokens);
-		ctx.lastCompactionDeficit = contextTokens - (contextWindow - reserve);
+		ctx.lastCompactionDeficit = freshTokens - (contextWindow - reserve);
 		return await runAutoCompaction(ctx, "threshold", false);
 	}
 
@@ -696,10 +972,7 @@ export async function runAutoCompaction(
 			// this pass on nearly every threshold compaction (a systematic false
 			// positive costing 1-2 extra LLM calls each time).
 			const contextTokens = sumMessageTokens(ctx.host.agent.state.messages);
-			if (
-				shouldCompact(contextTokens, contextWindow, settings, 0) ||
-				shouldCompactSoft(contextTokens, contextWindow, settings)
-			) {
+			if (shouldRunCompactionSecondPass(contextTokens, contextWindow, settings)) {
 				const pathEntriesAfter = ctx.host.sessionManager.getBranch();
 				const preparationAfter = prepareCompaction(
 					pathEntriesAfter,

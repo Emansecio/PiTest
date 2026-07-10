@@ -96,7 +96,7 @@ export function createReadResourceTool(manager: McpManager): ToolDefinition {
 				const blocks: Array<{ type: "text"; text: string }> = [];
 				for (const c of result.contents ?? []) {
 					if (typeof c.text === "string") {
-						blocks.push({ type: "text", text: capMcpText(`[${c.uri}]\n${c.text}`) });
+						blocks.push({ type: "text", text: capMcpText(`[${c.uri}]\n${c.text}`, server) });
 					} else if (typeof c.blob === "string") {
 						blocks.push({
 							type: "text",

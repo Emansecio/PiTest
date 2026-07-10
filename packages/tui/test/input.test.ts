@@ -4,6 +4,29 @@ import { Input } from "../src/components/input.js";
 import { visibleWidth } from "../src/utils.js";
 
 describe("Input component", () => {
+	describe("placeholder", () => {
+		it("shows placeholder text when the input is empty", () => {
+			const input = new Input({
+				placeholder: "e.g., sk-…",
+				placeholderColor: (s) => `<PH>${s}</PH>`,
+			});
+			input.focused = true;
+			const [line] = input.render(40);
+			// Strip SGR + OSC cursor marker; full placeholder is colorized (cursor is space).
+			const plain = (line ?? "").replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b_[^\x07]*\x07/g, "");
+			assert.ok(plain.includes("e.g., sk-…"), `expected placeholder, got: ${JSON.stringify(plain)}`);
+			assert.ok(line?.includes("<PH>"), "placeholder should be colorized");
+		});
+
+		it("clears the placeholder when the user types", () => {
+			const input = new Input({ placeholder: "e.g., sk-…" });
+			input.handleInput("a");
+			const [line] = input.render(40);
+			const plain = line?.replace(/\x1b\[[0-9;]*m/g, "") ?? "";
+			assert.ok(!plain.includes("e.g., sk-…"), "placeholder must disappear after typing");
+		});
+	});
+
 	it("submits value including backslash on Enter", () => {
 		const input = new Input();
 		let submitted: string | undefined;

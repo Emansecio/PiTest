@@ -8,6 +8,7 @@
  * Never returns partial lines (except bash tail truncation edge case).
  */
 
+import { isTruthyEnvFlag } from "../../utils/env-flags.js";
 import { sliceSafe } from "../../utils/surrogate.js";
 
 export const DEFAULT_MAX_LINES = 2000;
@@ -74,6 +75,88 @@ export function configureTruncationCaps(options: { contextWindow: number }): voi
 	DEFAULT_MAX_BYTES = Math.round(DEFAULT_MAX_BYTES_FLOOR * scale);
 	TOOL_OUTPUT_HARD_CAP_BYTES = Math.round(TOOL_OUTPUT_HARD_CAP_FLOOR * scale);
 	BASH_MAX_BYTES = Math.round(BASH_MAX_BYTES_FLOOR * scale);
+	// Occupancy scale is applied on top of these boot floors; reset to full
+	// until the next tool call refreshes from getContextUsage().
+	_occupancyScale = 1;
+}
+
+/** Occupancy at which live truncation caps start tightening (mirrors prune). */
+const OCCUPANCY_CAP_START = 0.5;
+/** Occupancy at/above which caps reach the floor fraction. */
+const OCCUPANCY_CAP_FULL = 0.9;
+/** Minimum fraction of the boot-scaled cap retained under high occupancy. */
+const OCCUPANCY_CAP_FLOOR_FRACTION = 0.25;
+
+/**
+ * Scale factor for live tool-output byte caps given context occupancy.
+ * 1.0 at ≤50% fill; linear down to {@link OCCUPANCY_CAP_FLOOR_FRACTION} at ≥90%.
+ * Exported for tests. Does not mutate boot floors — callers multiply.
+ */
+export function occupancyCapScale(occupancy: number): number {
+	if (!Number.isFinite(occupancy) || occupancy <= OCCUPANCY_CAP_START) return 1;
+	if (occupancy >= OCCUPANCY_CAP_FULL) return OCCUPANCY_CAP_FLOOR_FRACTION;
+	const span = OCCUPANCY_CAP_FULL - OCCUPANCY_CAP_START;
+	const t = (occupancy - OCCUPANCY_CAP_START) / span;
+	return 1 - t * (1 - OCCUPANCY_CAP_FLOOR_FRACTION);
+}
+
+/** Current occupancy multiplier applied on top of boot-scaled caps (1 = full). */
+let _occupancyScale = 1;
+
+/**
+ * Refresh the live occupancy multiplier from context usage. Called before each
+ * tool execute so read/grep/bash see tighter caps as the window fills — without
+ * mutating the boot floors permanently (multi-session safe: last refresh wins
+ * per call, same convention as configureTruncationCaps).
+ */
+export function refreshOccupancyTruncationCaps(
+	usage:
+		| {
+				percent?: number | null;
+				tokens?: number | null;
+				contextWindow?: number | null;
+		  }
+		| null
+		| undefined,
+): void {
+	if (isTruthyEnvFlag(process.env.PIT_NO_OCCUPANCY_CAPS)) {
+		_occupancyScale = 1;
+		return;
+	}
+	if (!usage) {
+		_occupancyScale = 1;
+		return;
+	}
+	let occupancy: number;
+	if (typeof usage.percent === "number" && Number.isFinite(usage.percent)) {
+		occupancy = usage.percent / 100;
+	} else if (typeof usage.tokens === "number" && typeof usage.contextWindow === "number" && usage.contextWindow > 0) {
+		occupancy = usage.tokens / usage.contextWindow;
+	} else {
+		_occupancyScale = 1;
+		return;
+	}
+	_occupancyScale = occupancyCapScale(occupancy);
+}
+
+/** Current occupancy multiplier applied on top of boot-scaled caps (1 = full). */
+export function getOccupancyScale(): number {
+	return _occupancyScale;
+}
+
+/** Effective DEFAULT_MAX_BYTES after occupancy scaling (for call sites / notices). */
+export function effectiveDefaultMaxBytes(): number {
+	return Math.max(1, Math.round(DEFAULT_MAX_BYTES * _occupancyScale));
+}
+
+/** Effective BASH_MAX_BYTES after occupancy scaling. */
+export function effectiveBashMaxBytes(): number {
+	return Math.max(1, Math.round(BASH_MAX_BYTES * _occupancyScale));
+}
+
+/** Effective hard-cap after occupancy scaling (wrapper safety net). */
+export function effectiveToolOutputHardCapBytes(): number {
+	return Math.max(1, Math.round(TOOL_OUTPUT_HARD_CAP_BYTES * _occupancyScale));
 }
 
 // Dedicated, larger ceiling for `recall_tool_output`. A deferred output is only
@@ -436,7 +519,7 @@ function tryNoTruncation(content: string, maxLines: number, maxBytes: number): T
  */
 export function truncateHead(content: string, options: TruncationOptions = {}): TruncationResult {
 	const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
-	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+	const maxBytes = options.maxBytes ?? effectiveDefaultMaxBytes();
 
 	const fastPath = tryNoTruncation(content, maxLines, maxBytes);
 	if (fastPath) return fastPath;
@@ -511,7 +594,7 @@ export function truncateHead(content: string, options: TruncationOptions = {}): 
  */
 export function truncateTail(content: string, options: TruncationOptions = {}): TruncationResult {
 	const maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
-	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+	const maxBytes = options.maxBytes ?? effectiveDefaultMaxBytes();
 
 	const fastPath = tryNoTruncation(content, maxLines, maxBytes);
 	if (fastPath) return fastPath;
@@ -597,7 +680,7 @@ export function truncateHeadTail(
 	content: string,
 	options: { maxBytes?: number; headFraction?: number } = {},
 ): HeadTailTruncationResult {
-	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+	const maxBytes = options.maxBytes ?? effectiveDefaultMaxBytes();
 	const headFraction = options.headFraction ?? 0.5;
 
 	const fastPath = tryNoTruncation(content, Number.POSITIVE_INFINITY, maxBytes);

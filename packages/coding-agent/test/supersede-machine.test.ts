@@ -346,6 +346,104 @@ describe("M12 — live trigger delegates to wouldApplySupersedeOnly (no separate
 });
 
 // ============================================================================
+// T11 — ast_grep / repo_map join the supersede allowlist
+// ============================================================================
+
+describe("T11 — ast_grep and repo_map supersede identical prior results", () => {
+	it("collapses an older ast_grep result when the same query succeeds again", () => {
+		const blob = bigBlob("AST_HEAD", "AST_TAIL");
+		const args = { pattern: "console.log($X)", lang: "ts", path: "src" };
+		const messages = [
+			toolCall("ast_grep", "a1", args),
+			toolResult("ast_grep", "a1", blob),
+			toolCall("ast_grep", "a2", args),
+			toolResult("ast_grep", "a2", "fresh matches"),
+			user("a"),
+			user("b"),
+		];
+
+		const outcome = applyLiveContextEconomyAfterToolSuccess(
+			messages,
+			{ type: "toolCall", id: "a2", name: "ast_grep", arguments: args },
+			false,
+			CONTEXT_WINDOW,
+		);
+
+		expect(outcome.supersedeReclaimed).toBeGreaterThan(0);
+		expect(textAt(outcome.messages, 1).length).toBeLessThan(blob.length);
+		expect(textAt(outcome.messages, 3)).toBe("fresh matches");
+	});
+
+	it("collapses an older repo_map result when the same path is remapped", () => {
+		const blob = bigBlob("MAP_HEAD", "MAP_TAIL");
+		const args = { path: "packages/coding-agent", max_files: 200 };
+		const messages = [
+			toolCall("repo_map", "r1", args),
+			toolResult("repo_map", "r1", blob),
+			toolCall("repo_map", "r2", args),
+			toolResult("repo_map", "r2", "fresh map"),
+			user("a"),
+			user("b"),
+		];
+
+		const outcome = applyLiveContextEconomyAfterToolSuccess(
+			messages,
+			{ type: "toolCall", id: "r2", name: "repo_map", arguments: args },
+			false,
+			CONTEXT_WINDOW,
+		);
+
+		expect(outcome.supersedeReclaimed).toBeGreaterThan(0);
+		expect(textAt(outcome.messages, 1).length).toBeLessThan(blob.length);
+		expect(textAt(outcome.messages, 3)).toBe("fresh map");
+	});
+
+	it("does not supersede ast_grep results with different patterns", () => {
+		const blob = bigBlob("AST_HEAD", "AST_TAIL");
+		const messages = [
+			toolCall("ast_grep", "a1", { pattern: "console.log($X)", lang: "ts" }),
+			toolResult("ast_grep", "a1", blob),
+			toolCall("ast_grep", "a2", { pattern: "throw $E", lang: "ts" }),
+			toolResult("ast_grep", "a2", "other matches"),
+			user("a"),
+			user("b"),
+		];
+
+		const outcome = applyLiveContextEconomyAfterToolSuccess(
+			messages,
+			{ type: "toolCall", id: "a2", name: "ast_grep", arguments: { pattern: "throw $E", lang: "ts" } },
+			false,
+			CONTEXT_WINDOW,
+		);
+
+		expect(outcome.supersedeReclaimed).toBe(0);
+		expect(textAt(outcome.messages, 1)).toBe(blob);
+	});
+
+	it("does not supersede repo_map results with different paths", () => {
+		const blob = bigBlob("MAP_HEAD", "MAP_TAIL");
+		const messages = [
+			toolCall("repo_map", "r1", { path: "packages/a" }),
+			toolResult("repo_map", "r1", blob),
+			toolCall("repo_map", "r2", { path: "packages/b" }),
+			toolResult("repo_map", "r2", "other map"),
+			user("a"),
+			user("b"),
+		];
+
+		const outcome = applyLiveContextEconomyAfterToolSuccess(
+			messages,
+			{ type: "toolCall", id: "r2", name: "repo_map", arguments: { path: "packages/b" } },
+			false,
+			CONTEXT_WINDOW,
+		);
+
+		expect(outcome.supersedeReclaimed).toBe(0);
+		expect(textAt(outcome.messages, 1)).toBe(blob);
+	});
+});
+
+// ============================================================================
 // M13 — bash supersede collapse defers the full output
 // ============================================================================
 

@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { getRuntimeDiagnostics, resetRuntimeDiagnostics, suggestClosest, suggestClosestN } from "@pit/ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIntentGateExtension } from "../src/core/built-ins/intent-gate-extension.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 import { type IntentGateDeps, intentGateDose, validatePlan } from "../src/core/intent-gate.ts";
@@ -46,7 +46,11 @@ function makeTree(files: Record<string, string>): string {
 	return root;
 }
 
-function makeDeps(cwd: string, symbolSet?: Set<string>): IntentGateDeps {
+function makeDeps(
+	cwd: string,
+	symbolSet?: Set<string>,
+	symbolResolve?: IntentGateDeps["symbolResolve"],
+): IntentGateDeps {
 	return {
 		resolve: (raw) => resolveReadPath(raw, cwd),
 		fileExists: (p) => existsSync(p),
@@ -56,6 +60,7 @@ function makeDeps(cwd: string, symbolSet?: Set<string>): IntentGateDeps {
 		normalize: expandPath,
 		sameName: sameCanonicalName,
 		symbolSet,
+		symbolResolve,
 	};
 }
 
@@ -194,11 +199,57 @@ describe("validatePlan — path grounding against the real tree", () => {
 		expect(validatePlan(version, makeDeps(cwd))).toHaveLength(0);
 	});
 
-	it("symbols fail-open in v1: a repo-map miss never yields a finding", () => {
+	it("symbols fail-open when no resolver is wired (repo-map miss)", () => {
 		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
 		const version = new PlanManager().propose([{ id: "s1", intent: "update the SomeMadeUpSymbol handler" }]);
-		// symbolSet without the symbol -> miss -> fail-open (no resolver in v1).
 		expect(validatePlan(version, makeDeps(cwd, new Set(["OtherThing"])))).toHaveLength(0);
+	});
+
+	it("symbolResolve HIT allows (exact name in LSP pool)", () => {
+		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
+		const version = new PlanManager().propose([{ id: "s1", intent: "update the calculateTotal handler" }]);
+		const findings = validatePlan(
+			version,
+			makeDeps(cwd, new Set(["OtherThing"]), () => ["calculateTotal", "formatPrice"]),
+		);
+		expect(findings).toHaveLength(0);
+	});
+
+	it("symbolResolve MISS with fuzzy candidates yields a warn finding", () => {
+		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
+		const version = new PlanManager().propose([{ id: "s1", intent: "update the calculateTotl handler" }]);
+		const findings = validatePlan(
+			version,
+			makeDeps(cwd, undefined, () => ["calculateTotal", "formatPrice"]),
+		);
+		expect(findings).toHaveLength(1);
+		expect(findings[0].kind).toBe("symbol");
+		expect(findings[0].severity).toBe("warn");
+		expect(findings[0].candidates).toContain("calculateTotal");
+	});
+
+	it("symbolResolve returning undefined (LSP unavailable) fails open", () => {
+		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
+		const version = new PlanManager().propose([{ id: "s1", intent: "update the TotallyMadeUp handler" }]);
+		expect(
+			validatePlan(
+				version,
+				makeDeps(cwd, new Set(["OtherThing"]), () => undefined),
+			),
+		).toHaveLength(0);
+	});
+
+	it("a throw in symbolResolve fails open", () => {
+		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
+		const version = new PlanManager().propose([{ id: "s1", intent: "update the TotallyMadeUp handler" }]);
+		expect(
+			validatePlan(
+				version,
+				makeDeps(cwd, undefined, () => {
+					throw new Error("LSP crashed");
+				}),
+			),
+		).toHaveLength(0);
 	});
 });
 
@@ -364,5 +415,125 @@ describe("intent-gate extension — enforcement", () => {
 		await fire("before_agent_start", { prompt: RIGOR2_PROMPT });
 		expect(await fire("tool_call", call("read", { path: "a.ts" }))).toBeUndefined();
 		expect(await fire("tool_call", call("grep", { pattern: "x" }))).toBeUndefined();
+	});
+});
+
+// ===========================================================================
+// Extension: LSP symbolResolve wiring (mocked)
+// ===========================================================================
+
+type FakeLspServerEntry = [string, { command: string; args: string[] }];
+
+const lspMocks = vi.hoisted(() => ({
+	getLspServers: vi.fn((): FakeLspServerEntry[] => [["typescript", { command: "fake-lsp", args: [] }]]),
+	getOrCreateClient: vi.fn(async () => ({ id: "fake-client" })),
+	sendRequest: vi.fn(),
+}));
+
+vi.mock("../src/core/lsp/manager.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/core/lsp/manager.ts")>();
+	return {
+		...actual,
+		getConfig: () => ({ servers: { typescript: { command: "fake-lsp", args: [] } } }),
+		getLspServers: lspMocks.getLspServers,
+	};
+});
+
+vi.mock("../src/core/lsp/client.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../src/core/lsp/client.ts")>();
+	return {
+		...actual,
+		getOrCreateClient: lspMocks.getOrCreateClient,
+		sendRequest: lspMocks.sendRequest,
+	};
+});
+
+describe("intent-gate extension — LSP symbolResolve", () => {
+	beforeEach(() => {
+		lspMocks.getLspServers.mockClear();
+		lspMocks.getOrCreateClient.mockClear();
+		lspMocks.sendRequest.mockReset();
+		lspMocks.getLspServers.mockReturnValue([["typescript", { command: "fake-lsp", args: [] }]]);
+		lspMocks.getOrCreateClient.mockResolvedValue({ id: "fake-client" });
+	});
+
+	it("blocks with symbol candidates when LSP confirms a typo", async () => {
+		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
+		setCurrentSupervisionThermostat(assistidoThermostat());
+		const plan = new PlanManager();
+		// "calculateTot" is a substring of "calculateTotal" so filterWorkspaceSymbols keeps it.
+		plan.propose([{ id: "s1", intent: "update the calculateTot handler" }]);
+		setCurrentPlanManager(plan);
+
+		lspMocks.sendRequest.mockResolvedValue([
+			{ name: "calculateTotal", kind: 12, location: { uri: "file:///a.ts", range: {} } },
+			{ name: "formatPrice", kind: 12, location: { uri: "file:///b.ts", range: {} } },
+		]);
+
+		const { api, fire } = makeFakePi();
+		createIntentGateExtension({ cwd })(api);
+		await fire("before_agent_start", { prompt: RIGOR2_PROMPT });
+
+		const first = await fire("tool_call", call("edit", { path: "src/util/helper.ts", oldText: "1", newText: "2" }));
+		expect(first?.block).toBe(true);
+		expect(String(first?.reason)).toContain("calculateTotal");
+		expect(lspMocks.sendRequest).toHaveBeenCalled();
+	});
+
+	it("opens the gate when LSP confirms the symbol exists", async () => {
+		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
+		setCurrentSupervisionThermostat(assistidoThermostat());
+		const plan = new PlanManager();
+		plan.propose([{ id: "s1", intent: "update the calculateTotal handler" }]);
+		setCurrentPlanManager(plan);
+
+		lspMocks.sendRequest.mockResolvedValue([
+			{ name: "calculateTotal", kind: 12, location: { uri: "file:///a.ts", range: {} } },
+		]);
+
+		const { api, fire } = makeFakePi();
+		createIntentGateExtension({ cwd })(api);
+		await fire("before_agent_start", { prompt: RIGOR2_PROMPT });
+
+		expect(
+			await fire("tool_call", call("edit", { path: "src/util/helper.ts", oldText: "1", newText: "2" })),
+		).toBeUndefined();
+	});
+
+	it("fails open when LSP sendRequest throws", async () => {
+		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
+		setCurrentSupervisionThermostat(assistidoThermostat());
+		const plan = new PlanManager();
+		plan.propose([{ id: "s1", intent: "update the TotallyMadeUp handler" }]);
+		setCurrentPlanManager(plan);
+
+		lspMocks.sendRequest.mockRejectedValue(new Error("LSP timeout"));
+
+		const { api, fire } = makeFakePi();
+		createIntentGateExtension({ cwd })(api);
+		await fire("before_agent_start", { prompt: RIGOR2_PROMPT });
+
+		expect(
+			await fire("tool_call", call("edit", { path: "src/util/helper.ts", oldText: "1", newText: "2" })),
+		).toBeUndefined();
+	});
+
+	it("fails open when no LSP servers are configured", async () => {
+		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
+		setCurrentSupervisionThermostat(assistidoThermostat());
+		const plan = new PlanManager();
+		plan.propose([{ id: "s1", intent: "update the TotallyMadeUp handler" }]);
+		setCurrentPlanManager(plan);
+
+		lspMocks.getLspServers.mockReturnValue([]);
+
+		const { api, fire } = makeFakePi();
+		createIntentGateExtension({ cwd })(api);
+		await fire("before_agent_start", { prompt: RIGOR2_PROMPT });
+
+		expect(
+			await fire("tool_call", call("edit", { path: "src/util/helper.ts", oldText: "1", newText: "2" })),
+		).toBeUndefined();
+		expect(lspMocks.sendRequest).not.toHaveBeenCalled();
 	});
 });

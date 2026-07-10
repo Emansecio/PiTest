@@ -12,8 +12,9 @@ import {
 import type { SessionTreeNode } from "../../../core/session-manager.ts";
 import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
-import { HINT_SEPARATOR, keyHint, keyText, selectionCursor } from "./keybinding-hints.ts";
+import { HINT_SEPARATOR, keyHint, keyText, scrollPositionHint, selectionCursor } from "./keybinding-hints.ts";
+import { paintSelectedRow } from "./selectable-row.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -704,19 +705,19 @@ class TreeList implements Component {
 					: "";
 			const content = this.getEntryDisplayText(flatNode.node, isSelected);
 
-			let line = cursor + theme.fg("dim", prefix) + foldMarker + pathMarker + label + labelTimestamp + content;
-			if (isSelected) {
-				line = theme.bg("selectedBg", line);
-			}
-			lines.push(truncateToWidth(line, width));
+			lines.push(
+				paintSelectedRow(
+					cursor + theme.fg("dim", prefix) + foldMarker + pathMarker + label + labelTimestamp + content,
+					width,
+					isSelected,
+				),
+			);
 		}
 
-		lines.push(
-			truncateToWidth(
-				theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredNodes.length})${this.getStatusLabels()}`),
-				width,
-			),
-		);
+		const scrollBase = scrollPositionHint(this.selectedIndex, this.filteredNodes.length, startIndex, endIndex, {
+			alwaysShow: true,
+		});
+		lines.push(truncateToWidth(theme.fg("muted", `${scrollBase}${this.getStatusLabels()}`), width));
 
 		return lines;
 	}
@@ -1258,8 +1259,8 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		this.labelInputContainer = new Container();
 
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold("  Session Tree"), 1, 0));
+		const card = new SelectorCard();
+		card.addChild(new Text(theme.bold("  Session Tree"), 1, 0));
 		const filterKeys = [
 			keyText("app.tree.filter.default"),
 			keyText("app.tree.filter.noTools"),
@@ -1269,7 +1270,7 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		].join("/");
 		const cycleKeys = `${keyText("app.tree.filter.cycleForward")}/${keyText("app.tree.filter.cycleBackward")}`;
 		const branchKeys = `${keyText("app.tree.foldOrUp")}/${keyText("app.tree.unfoldOrDown")}`;
-		this.addChild(
+		card.addChild(
 			new TruncatedText(
 				theme.fg(
 					"muted",
@@ -1279,13 +1280,12 @@ export class TreeSelectorComponent extends Container implements Focusable {
 				0,
 			),
 		);
-		this.addChild(new SearchLine(this.treeList));
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
-		this.addChild(this.treeContainer);
-		this.addChild(this.labelInputContainer);
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		card.addChild(new SearchLine(this.treeList));
+		card.addChild(new Spacer(1));
+		card.addChild(this.treeContainer);
+		card.addChild(this.labelInputContainer);
+		card.addChild(new Spacer(1));
+		this.addChild(card);
 
 		if (tree.length === 0) {
 			setTimeout(() => onCancel(), 100);

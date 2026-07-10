@@ -45,3 +45,50 @@ describe("CustomMessageComponent — mcp.notice", () => {
 		expect(lines.length).toBeGreaterThan(1);
 	});
 });
+
+const DOOM_LOOP_BODY =
+	"<doom-loop-reminder>\n" +
+	"You have made 4 consecutive identical calls to `read`. This indicates you are not making progress.\n" +
+	"</doom-loop-reminder>";
+
+describe("CustomMessageComponent — pi.doom-loop-pause", () => {
+	it("renders tier-2 pause as a single muted ◦ line, no box, no label", () => {
+		initTheme("dark");
+		const content = `${DOOM_LOOP_BODY}\n\nYou have made 4 identical calls without progress. Do NOT repeat this call again.`;
+		const lines = new CustomMessageComponent(makeMessage("pi.doom-loop-pause", content)).render(120);
+		const plain = lines.map(stripAnsi);
+		const nonEmpty = plain.filter((l) => l.trim().length > 0);
+
+		expect(lines).toHaveLength(1);
+		expect(nonEmpty).toHaveLength(1);
+		expect(plain[0]).toContain("◦");
+		expect(plain[0]).toContain("doom-loop pause");
+		expect(plain[0]).toContain("4×");
+		expect(plain[0]).toContain("`read`");
+		expect(plain.join("\n")).not.toContain("[pi.doom-loop-pause]");
+		expect(plain.join("\n")).not.toContain("<doom-loop-reminder>");
+	});
+});
+
+describe("CustomMessageComponent — pi.doom-loop-recovery", () => {
+	it("renders tier-3 recovery as a single muted ◦ line, no box, no label", () => {
+		initTheme("dark");
+		const content =
+			"<doom-loop-reminder>\n" +
+			"You have made 6 consecutive identical calls to `bash`. This indicates you are not making progress.\n" +
+			"</doom-loop-reminder>\n\n" +
+			"You have repeated 6 calls to `bash` with no progress. STOP repeating this call.";
+		const lines = new CustomMessageComponent(makeMessage("pi.doom-loop-recovery", content)).render(120);
+		const plain = lines.map(stripAnsi);
+		const nonEmpty = plain.filter((l) => l.trim().length > 0);
+
+		expect(lines).toHaveLength(1);
+		expect(nonEmpty).toHaveLength(1);
+		expect(plain[0]).toContain("◦");
+		expect(plain[0]).toContain("doom-loop recovery");
+		expect(plain[0]).toContain("6×");
+		expect(plain[0]).toContain("`bash`");
+		expect(plain.join("\n")).not.toContain("[pi.doom-loop-recovery]");
+		expect(plain.join("\n")).not.toContain("STOP repeating");
+	});
+});

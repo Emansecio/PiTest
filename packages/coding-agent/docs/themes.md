@@ -234,6 +234,7 @@ Editor border colors indicating thinking level (visual hierarchy from subtle to 
 | Token | Purpose |
 |-------|---------|
 | `bashMode` | Editor border in bash mode (`!` prefix) |
+| `planMode` | Editor border + footer chip in plan permission mode |
 
 ### HTML Export (optional)
 

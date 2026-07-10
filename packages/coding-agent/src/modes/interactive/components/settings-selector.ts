@@ -13,8 +13,8 @@ import {
 } from "@pit/tui";
 import type { WarningSettings } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
 import { HINT_SEPARATOR, keyDisplayText, keyHint } from "./keybinding-hints.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -27,7 +27,9 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	low: "Light reasoning (~2k tokens)",
 	medium: "Moderate reasoning (~8k tokens)",
 	high: "Deep reasoning (~16k tokens)",
-	xhigh: "Maximum reasoning (~32k tokens)",
+	xhigh: "Extra-high reasoning (~32k tokens)",
+	max: "Maximum reasoning depth for the hardest problems",
+	ultra: "Ultra mode — multi-agent acceleration beyond max",
 };
 
 export interface SettingsConfig {
@@ -434,8 +436,7 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
-		// Add borders
-		this.addChild(new DynamicBorder());
+		const card = new SelectorCard();
 
 		this.settingsList = new SettingsList(
 			items,
@@ -505,8 +506,8 @@ export class SettingsSelectorComponent extends Container {
 			{ enableSearch: true },
 		);
 
-		this.addChild(this.settingsList);
-		this.addChild(new DynamicBorder());
+		card.addChild(this.settingsList);
+		this.addChild(card);
 	}
 
 	getSettingsList(): SettingsList {

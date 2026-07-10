@@ -89,4 +89,37 @@ describe("createSpinnerTicker", () => {
 		if (tickCb(80)) renders += 1;
 		expect(renders).toBe(2);
 	});
+
+	test("under reduced motion, dirty once per second so elapsed can advance (M0)", () => {
+		const prev = process.env.PIT_REDUCED_MOTION;
+		process.env.PIT_REDUCED_MOTION = "1";
+		try {
+			const loop = { cb: null as ((now: number) => boolean) | null };
+			const ui = {
+				addAnimationCallback(fn: (now: number) => boolean) {
+					loop.cb = fn;
+					return () => {
+						loop.cb = null;
+					};
+				},
+			} as unknown as TUI;
+			let dirtyCount = 0;
+			createSpinnerTicker(
+				ui,
+				() => true,
+				() => {},
+			);
+			if (!loop.cb) throw new Error("expected animation callback");
+			const tickCb = loop.cb;
+			if (tickCb(0)) dirtyCount += 1;
+			if (tickCb(100)) dirtyCount += 1; // same second — no dirty
+			if (tickCb(1000)) dirtyCount += 1;
+			if (tickCb(1500)) dirtyCount += 1; // same second — no dirty
+			if (tickCb(2000)) dirtyCount += 1;
+			expect(dirtyCount).toBeGreaterThanOrEqual(3);
+		} finally {
+			if (prev === undefined) delete process.env.PIT_REDUCED_MOTION;
+			else process.env.PIT_REDUCED_MOTION = prev;
+		}
+	});
 });

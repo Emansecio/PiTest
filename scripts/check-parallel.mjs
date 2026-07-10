@@ -63,6 +63,7 @@ async function runWave(tasks) {
 
 const skipTsgo = process.argv.includes("--skip-tsgo") || process.env.CHECK_SKIP_TSGO === "1";
 const skipVitest = process.argv.includes("--no-vitest");
+const vitestUnit = process.argv.includes("--vitest-unit");
 const workspaceTests = process.argv.includes("--workspace-tests");
 const showTiming = process.env.CHECK_TIMING === "1";
 
@@ -74,7 +75,9 @@ const gateTasks = [
 const tokenBenchTask = { name: "token-bench", command: "node scripts/check-token-bench.mjs" };
 const vitestTask = {
 	name: "vitest",
-	command: "npx vitest --run",
+	command: vitestUnit
+		? "npx vitest --config vitest.unit.config.ts --run"
+		: "npx vitest --run",
 	cwd: "packages/coding-agent",
 };
 
@@ -83,6 +86,8 @@ const smokeTasks = [
 	{ name: "generated", command: "node scripts/check-generated-models.mjs" },
 	{ name: "dist-exports", command: "node scripts/check-dist-exports.mjs" },
 	{ name: "surrogate-slice", command: "node scripts/check-surrogate-slice.mjs" },
+	{ name: "bench-selftest", command: "npx tsx bench/selftest.mts" },
+	{ name: "extension-load", command: "node scripts/check-extension-load.mjs" },
 ];
 
 function runWithCwd(name, command, cwd) {
@@ -182,27 +187,27 @@ const heavyStartedAt = Date.now();
 // coding-agent is deliberately excluded when vitestTask runs: its suite already
 // executes as vitestTask in this same wave, so listing it here would run the
 // whole 400+ file suite twice. Enumerate the test-bearing workspaces explicitly
-// (npm has no --exclude for --workspaces, and no --parallel either — the sweep
-// is serial, which is fine since vitestTask overlaps it). With --no-vitest the
-// coding-agent workspace is added back so its tests still run exactly once.
+// and run each package in parallel (npm workspaces test is otherwise serial).
+// With --no-vitest the coding-agent workspace is added back so its tests still
+// run exactly once.
 const workspaceTestWorkspaces = [
 	"packages/ai",
 	"packages/agent",
 	"packages/tui",
 	...(skipVitest ? ["packages/coding-agent"] : []),
 ];
-const workspaceTestTask = workspaceTests
-	? {
-			name: "workspace-tests",
-			command: `npm test ${workspaceTestWorkspaces.map((w) => `--workspace ${w}`).join(" ")} --if-present`,
-			env: { PIT_AI_SKIP_LOCAL_AUTH: "1" },
-	}
-	: null;
+const workspaceTestPromises = workspaceTests
+	? workspaceTestWorkspaces.map((workspace) => {
+			const name = `workspace-tests:${workspace.replace(/^packages\//, "")}`;
+			const env = workspace === "packages/ai" ? { PIT_AI_SKIP_LOCAL_AUTH: "1" } : undefined;
+			return run(name, `npm test --workspace ${workspace} --if-present`, env);
+		})
+	: [];
 
 const heavyPromises = [
 	tokenBenchPromise,
 	...(skipVitest ? [] : [runTask(vitestTask)]),
-	...(workspaceTestTask ? [run(workspaceTestTask.name, workspaceTestTask.command, workspaceTestTask.env)] : []),
+	...workspaceTestPromises,
 	...smokeTasks.map((task) => run(task.name, task.command)),
 ];
 const heavyResults = await Promise.all(heavyPromises);
@@ -234,6 +239,12 @@ if (showTiming) {
 	);
 	if (vitestResult) {
 		console.log(`vitest wall: ${vitestResult.ms}ms`);
+	}
+	if (vitestResult && vitestResult.code === 0) {
+		const slow = await run("slow-tests", "node scripts/report-slow-tests.mjs");
+		if (slow.out.trim()) {
+			process.stdout.write(`\n=== ${slow.name} ===\n${slow.out}`);
+		}
 	}
 }
 

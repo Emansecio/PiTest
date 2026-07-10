@@ -227,7 +227,15 @@ describe("Markdown component", () => {
 
 			const lines = markdown.render(24).map((line) => stripAnsi(line).trimEnd());
 
-			assert.deepStrictEqual(lines, ["- │ ts", "  │ alpha beta gamma", "  delta epsilon zeta"]);
+			// List prefix is "- " (2 cols); code frame spans the remaining item width (22).
+			const rule = "─".repeat(20);
+			assert.deepStrictEqual(lines, [
+				`- ╭${rule}╮`,
+				"  │ ts",
+				"  │ alpha beta gamma",
+				"  delta epsilon zeta",
+				`  ╰${rule}╯`,
+			]);
 		});
 	});
 
@@ -708,14 +716,14 @@ again, hello world`,
 			const lines = markdown.render(80);
 			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
 
-			// No literal ``` fences are emitted; the code block renders with a "│ " gutter.
+			// No literal ``` fences are emitted; the code block renders with a framed "│ " gutter.
 			assert.ok(!plainLines.some((line) => line.includes("```")), "Should not emit literal ``` fences");
 
-			// Find the last gutter (code) line, then assert exactly one blank line before the next content.
-			const lastGutterIndex = plainLines.map((line) => line.startsWith("│ ")).lastIndexOf(true);
-			assert.ok(lastGutterIndex !== -1, "Should have a code gutter line");
+			// Find the bottom frame line, then assert exactly one blank line before the next content.
+			const bottomFrameIndex = plainLines.findIndex((line) => line.startsWith("╰") && line.endsWith("╯"));
+			assert.ok(bottomFrameIndex !== -1, "Should have a code block bottom frame");
 
-			const afterCode = plainLines.slice(lastGutterIndex + 1);
+			const afterCode = plainLines.slice(bottomFrameIndex + 1);
 			const emptyLineCount = afterCode.findIndex((line) => line !== "");
 
 			assert.strictEqual(
@@ -740,7 +748,15 @@ code block
 
 more text`,
 			];
-			const expectedLines = ["hello this is text", "", "│ code block", "", "more text"];
+			const expectedLines = [
+				"hello this is text",
+				"",
+				`╭${"─".repeat(78)}╮`,
+				"│ code block",
+				`╰${"─".repeat(78)}╯`,
+				"",
+				"more text",
+			];
 
 			for (const text of cases) {
 				const markdown = new Markdown(text, 0, 0, defaultMarkdownTheme);
@@ -773,7 +789,7 @@ more text`,
 	});
 
 	describe("Code block gutter rendering", () => {
-		it("should render code blocks with a '│ ' gutter, no ``` fences, and a language label", () => {
+		it("should render code blocks with a frame, '│ ' gutter, no ``` fences, and a language label", () => {
 			const markdown = new Markdown("```python\nprint('hi')\nx = 1\n```", 0, 0, defaultMarkdownTheme);
 
 			const lines = markdown.render(40);
@@ -785,9 +801,8 @@ more text`,
 				`Should not emit fences: ${JSON.stringify(plainLines)}`,
 			);
 
-			// Language label line first, then each code line, all prefixed with the gutter.
-			const gutterLines = plainLines.filter((line) => line.startsWith("│ "));
-			assert.deepStrictEqual(gutterLines, ["│ python", "│ print('hi')", "│ x = 1"]);
+			const rule = "─".repeat(38);
+			assert.deepStrictEqual(plainLines, [`╭${rule}╮`, "│ python", "│ print('hi')", "│ x = 1", `╰${rule}╯`]);
 		});
 
 		it("should omit the language label line when no language is given", () => {
@@ -796,8 +811,8 @@ more text`,
 			const lines = markdown.render(40);
 			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
 
-			const gutterLines = plainLines.filter((line) => line.startsWith("│ "));
-			assert.deepStrictEqual(gutterLines, ["│ plain code"]);
+			const rule = "─".repeat(38);
+			assert.deepStrictEqual(plainLines, [`╭${rule}╮`, "│ plain code", `╰${rule}╯`]);
 		});
 	});
 

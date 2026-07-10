@@ -25,6 +25,8 @@ export interface SettingsListTheme {
 	description: (text: string) => string;
 	cursor: string;
 	hint: (text: string) => string;
+	/** Optional full-row background for the selected item. */
+	selectedBg?: (text: string) => string;
 }
 
 export interface SettingsListOptions {
@@ -161,12 +163,20 @@ export class SettingsList implements Component {
 
 			const valueText = this.theme.value(truncateToWidth(item.currentValue, valueMaxWidth, ""), isSelected);
 
-			lines.push(truncateToWidth(prefix + labelText + separator + valueText, width));
+			let row = truncateToWidth(prefix + labelText + separator + valueText, width);
+			if (isSelected && this.theme.selectedBg) {
+				const padded = row + " ".repeat(Math.max(0, width - visibleWidth(row)));
+				row = this.theme.selectedBg(padded);
+			}
+			lines.push(row);
 		}
 
-		// Add scroll indicator if needed
+		// Add scroll indicators if needed. ↑ shows items exist above the visible
+		// window, ↓ shows items exist below — both on the same themed count line.
 		if (startIndex > 0 || endIndex < displayItems.length) {
-			const scrollText = `  (${this.selectedIndex + 1}/${displayItems.length})`;
+			const up = startIndex > 0 ? "↑" : " ";
+			const down = endIndex < displayItems.length ? "↓" : " ";
+			const scrollText = `  ${up}${down} (${this.selectedIndex + 1}/${displayItems.length})`;
 			lines.push(this.theme.hint(truncateToWidth(scrollText, width - 2, "")));
 		}
 

@@ -56,6 +56,7 @@ Never use `__dirname` directly for package assets.
 
 ```bash
 ./test.sh                         # Run non-LLM tests (no API keys needed)
+./test.ps1                        # Same hermetic gate on Windows (PowerShell)
 npm test                          # Run all tests
 npm test -- test/specific.test.ts # Run specific test
 ```

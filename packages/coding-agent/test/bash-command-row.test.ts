@@ -155,4 +155,47 @@ describe("clampBashCommandRow", () => {
 		);
 		expect(row).toBe("grep -rn foo .");
 	});
+
+	it("strips leading diagnostic echo banners under stripEcho:true", () => {
+		const row = stripAnsi(
+			clampBashCommandRow({
+				command: 'echo "=== branch/status ===" && git status --short',
+				width: 80,
+				colorKey: "toolTitle",
+				prefix: false,
+				stripEcho: true,
+			}),
+		);
+		expect(row).toBe("git status --short");
+		expect(row).not.toContain("===");
+	});
+
+	it("chains stripEcho with elideCd for probe commands", () => {
+		const row = stripAnsi(
+			clampBashCommandRow({
+				command: 'echo "=== grep ===" && cd C:/PiTest && grep -rIn foo .',
+				width: 80,
+				colorKey: "toolTitle",
+				prefix: false,
+				stripEcho: true,
+				elideCd: true,
+			}),
+		);
+		expect(row).toBe("grep -rIn foo .");
+	});
+
+	it("omits inline expand hints when suppressExpandHint:true", () => {
+		const long = `grep -rIn "github" --exclude-dir=.git --exclude-dir=.claude . | grep -v "CHANGELOG.md" | wc -l`;
+		const row = stripAnsi(
+			clampBashCommandRow({
+				command: long,
+				width: 40,
+				colorKey: "toolTitle",
+				prefix: false,
+				suppressExpandHint: true,
+			}),
+		);
+		expect(row).toContain("…");
+		expect(row).not.toContain("to expand");
+	});
 });

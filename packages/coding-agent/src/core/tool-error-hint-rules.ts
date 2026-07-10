@@ -582,6 +582,73 @@ const lsRules: ToolErrorHintRule[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// lsp rules — language-server navigation / diagnostics
+// ---------------------------------------------------------------------------
+
+const lspRules: ToolErrorHintRule[] = [
+	{
+		// No server is mapped to this file extension, or the configured server
+		// binary is missing / crashed on launch (spawn ENOENT, early exit).
+		id: "lsp-server-unavailable",
+		appliesTo: "lsp",
+		matcher: ({ errorText }) =>
+			/no language server found for this action/i.test(errorText) ||
+			/lsp server exited/i.test(errorText) ||
+			/failed to initialize lsp/i.test(errorText) ||
+			(/lsp error on/i.test(errorText) &&
+				/(spawn\s+\S+\s+enoent|command not found|not recognized)/i.test(errorText)),
+		hint: ({ errorText }) => {
+			if (/no language server found/i.test(errorText)) {
+				return "No LSP server is mapped to this file type. Check `.pit/lsp.json` for the extension→server mapping — or use `read`/`grep`/`symbol` for navigation.";
+			}
+			return "Language server binary failed to start (missing from PATH or crashed). Install the server for this language and verify the `command` in LSP config — or use `grep`/`read`/`symbol` instead.";
+		},
+	},
+	{
+		// resolveSymbolColumn / ensureFileOpen surfaces `File not found: <path>`
+		// (wrapped as `LSP error on <server>: File not found: ...`).
+		id: "lsp-file-not-found",
+		appliesTo: "lsp",
+		matcher: ({ errorText }) => /file not found:/i.test(errorText),
+		hint: ({ call }) => {
+			const file = getString(call.arguments, "file");
+			const base = file ? basenameOf(file) : "<basename>";
+			return `LSP target file not found. Locate it with \`find({pattern:"**/${base}"})\` or verify the \`file\` path is relative to cwd — stale paths after renames are a common cause.`;
+		},
+	},
+];
+
+// ---------------------------------------------------------------------------
+// ast_edit rules — structural rewrites via ast-grep CLI
+// ---------------------------------------------------------------------------
+
+const astEditRules: ToolErrorHintRule[] = [
+	{
+		// ast-edit.ts surfaces AST_GREP_INSTALL_HINT verbatim when execFile
+		// cannot spawn the binary (ENOENT / EINVAL / cmd not recognized).
+		id: "ast-edit-cli-missing",
+		appliesTo: "ast_edit",
+		matcher: ({ errorText }) => /ast-grep cli not installed/i.test(errorText),
+		hint: () =>
+			"ast-grep is not on PATH. Install it (see the error URL) or use `edit`/`grep` for text-level changes that do not need AST-aware rewrites.",
+	},
+	{
+		// ast-grep rejects unparseable pattern/rewrite before scanning.
+		// Typical stderr: "Cannot parse query as a valid pattern", "Multiple AST
+		// nodes are detected", or "pattern fails to parse". Do NOT fire on the
+		// missing-CLI path — that has its own rule above.
+		id: "ast-edit-pattern-parse",
+		appliesTo: "ast_edit",
+		matcher: ({ errorText }) =>
+			/cannot parse (?:query as a )?a valid pattern|pattern fails to parse|multiple ast nodes|fails to parse or contains error|pattern has error/i.test(
+				errorText,
+			) && !/ast-grep cli not installed/i.test(errorText),
+		hint: () =>
+			"ast-grep could not parse `pattern`/`rewrite` as valid code for the chosen `lang` — patterns must be syntactically valid snippets (use `$META` captures), not regex. Try a smaller complete expression or use `edit` for literal text.",
+	},
+];
+
+// ---------------------------------------------------------------------------
 // Generic rules — apply to ANY tool
 // ---------------------------------------------------------------------------
 
@@ -642,6 +709,10 @@ export interface ToolErrorHintRulesOptions {
 	disableGrepRules?: boolean;
 	/** Disable ls hint rules. Default: enabled. */
 	disableLsRules?: boolean;
+	/** Disable lsp hint rules. Default: enabled. */
+	disableLspRules?: boolean;
+	/** Disable ast_edit hint rules. Default: enabled. */
+	disableAstEditRules?: boolean;
 	/** Disable generic cross-tool rules (schema maxlen, spawn ENOENT). Default: enabled. */
 	disableGenericRules?: boolean;
 	/** Extra rules to append. */
@@ -687,6 +758,8 @@ export function createDefaultToolErrorHintRegistry(options?: ToolErrorHintRulesO
 	if (!options?.disableFindRules) registry.addMany(findRules);
 	if (!options?.disableGrepRules) registry.addMany(grepRules);
 	if (!options?.disableLsRules) registry.addMany(lsRules);
+	if (!options?.disableLspRules) registry.addMany(lspRules);
+	if (!options?.disableAstEditRules) registry.addMany(astEditRules);
 	if (!options?.disableGenericRules) registry.addMany(genericRules);
 	if (options?.extraRules) registry.addMany(options.extraRules);
 	if (options?.learnedErrors && options.learnedErrors.length > 0) {

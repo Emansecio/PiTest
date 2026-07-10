@@ -78,6 +78,21 @@ describe("HindsightBank", () => {
 		expect(bank.search({ query: "zzzqqq_no_overlap_word" })).toEqual([]);
 	});
 
+	test("search filters results below the BM25 score floor", () => {
+		const { bank } = freshBank();
+		// Saturate the corpus with a shared term so idf collapses and scores stay << 0.15.
+		for (let i = 0; i < 50; i++) {
+			bank.add({ kind: "fact", body: `entry ${i} mentions sharedtok filler content` });
+		}
+		expect(bank.search({ query: "sharedtok", limit: 10 })).toEqual([]);
+
+		// A distinctive match on a single entry should clear the floor.
+		bank.add({ kind: "fact", body: "zephyrquantum pipeline handles authentication tokens" });
+		const strong = bank.search({ query: "zephyrquantum authentication", limit: 5 });
+		expect(strong.length).toBeGreaterThan(0);
+		expect(strong[0]!.entry.body).toContain("zephyrquantum");
+	});
+
 	test("delete removes from in-memory + rewrites file", () => {
 		const { bank, path } = freshBank();
 		const a = bank.add({ kind: "fact", body: "keep this entry around" });
@@ -147,9 +162,17 @@ describe("HindsightBank", () => {
 		// pruneOlderThan is not yet present on the bank API; another agent will add it.
 	});
 
-	// TODO: enable once `enforceLimit` lands on HindsightBank.
-	test.skip("enforceLimit(N) keeps most-recent N", () => {
-		// enforceLimit is not yet present on the bank API; another agent will add it.
+	test("enforceLimit on add keeps at most N entries (evicts oldest)", async () => {
+		const path = freshBankPath();
+		const bank = openBank(path, { maxEntries: 2 });
+		bank.add({ kind: "fact", body: "a", subject: "a" });
+		await new Promise((r) => setTimeout(r, 5));
+		bank.add({ kind: "fact", body: "b", subject: "b" });
+		await new Promise((r) => setTimeout(r, 5));
+		bank.add({ kind: "fact", body: "c", subject: "c" });
+		const all = bank.all();
+		expect(all).toHaveLength(2);
+		expect(all.map((e) => e.subject).sort()).toEqual(["b", "c"]);
 	});
 });
 

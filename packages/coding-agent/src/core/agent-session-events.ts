@@ -92,6 +92,15 @@ export type AgentSessionEvent =
 			maxAttempts?: number;
 	  }
 	| { type: "visual_review"; file: string }
+	| {
+			type: "functional_web";
+			phase: "running" | "passed" | "failed" | "skipped";
+			url?: string;
+			attempt: number;
+			maxAttempts: number;
+			reason?: string;
+			willRetry?: boolean;
+	  }
 	| { type: "subagent_start"; handle: string }
 	| { type: "subagent_progress"; handle: string; turn: number; lastTool?: string }
 	| { type: "subagent_complete"; handle: string; status: "done" | "error"; turns?: number; totalTokens?: number };

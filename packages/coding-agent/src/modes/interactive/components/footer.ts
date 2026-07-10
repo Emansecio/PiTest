@@ -95,6 +95,8 @@ function formatContextPercent(percent: number): string {
 
 /** Compact context-fill gauge for the footer metrics line (approximate; percent stays exact). */
 const FOOTER_CTX_BAR_WIDTH = 6;
+
+export type FooterDensity = "calm" | "full";
 const FILL_EASE_EPSILON = 0.01;
 
 function renderFooterContextBar(displayedFill: number, colorize: (text: string) => string): string {
@@ -160,6 +162,7 @@ export class FooterComponent implements Component {
 		cost: 0,
 	};
 	private fusionLiveActive = false;
+	private density: FooterDensity = "calm";
 	private renderCacheKey = "";
 	private renderCacheLines: string[] | null = null;
 	// Per-frame memoization for buildRenderCacheKey()'s expensive-ish fields, so a
@@ -207,6 +210,12 @@ export class FooterComponent implements Component {
 	setFusionLiveActive(active: boolean): void {
 		if (this.fusionLiveActive === active) return;
 		this.fusionLiveActive = active;
+		this.renderCacheLines = null;
+	}
+
+	setDensity(density: FooterDensity): void {
+		if (this.density === density) return;
+		this.density = density;
 		this.renderCacheLines = null;
 	}
 
@@ -426,6 +435,8 @@ export class FooterComponent implements Component {
 		const recoveryLevel = this.getRecoveryLevel();
 		return [
 			width,
+			this.density,
+
 			entries.length,
 			tokens,
 			wireTokens,
@@ -515,6 +526,7 @@ export class FooterComponent implements Component {
 		const otherStatuses = Array.from(extensionStatuses.entries())
 			.filter(([k]) => k !== "permissions")
 			.sort(([a], [b]) => a.localeCompare(b));
+		const calm = this.density === "calm";
 		const messageTokens = contextUsage?.tokens ?? 0;
 		const wireTokens = contextUsage?.wireTokens ?? messageTokens;
 		const usedTokens = wireTokens;
@@ -574,7 +586,7 @@ export class FooterComponent implements Component {
 		// When collapseLine2 is true the metrics row is omitted entirely — the
 		// permission mode rides on the identity line as a protected suffix.
 		if (collapseLine2) {
-			if (otherStatuses.length > 0) {
+			if (!calm && otherStatuses.length > 0) {
 				const statusLine = otherStatuses
 					.map(([, text]) => {
 						const sanitized = sanitizeStatusText(text);
@@ -589,6 +601,7 @@ export class FooterComponent implements Component {
 		}
 
 		const wireDiverges =
+			!calm &&
 			width >= FOOTER_IDENTITY_SINGLE_LINE_MIN &&
 			messageTokens > 0 &&
 			Math.abs(wireTokens - messageTokens) / messageTokens > 0.05;
@@ -649,10 +662,17 @@ export class FooterComponent implements Component {
 		// semantic groups (usage vs. mode) join with a stronger `  •  ` so the line
 		// reads as two clusters instead of one undifferentiated run.
 		const groups: string[] = [];
-		if (fusionSegment) groups.push(theme.fg("accent", fusionSegment));
+		// Calm: skip long fusion: members string (still on identity mode chip when relevant).
+		if (fusionSegment && !calm) groups.push(theme.fg("accent", fusionSegment));
 		if (usageGroup.length) groups.push(usageGroup.join(" · "));
 		if (goalStatus) groups.push(theme.fg("accent", goalStatus));
 		if (modeBits.length) groups.push(modeBits.join(" · "));
+		// Calm progressive disclosure: fusion + extension statuses stay hidden, but
+		// a dim +N chip signals that more detail exists under footerDensity=full.
+		if (calm) {
+			const hiddenCount = (fusionSegment ? 1 : 0) + otherStatuses.length;
+			if (hiddenCount > 0) groups.push(theme.fg("dim", `+${hiddenCount}`));
+		}
 		let rightText = groups.join("  •  ");
 
 		// #2 — context-pressure signal is COLOR-first: the ctx number already turns
@@ -681,7 +701,8 @@ export class FooterComponent implements Component {
 
 		// --- Extension statuses (line 3, optional) ---------------------------
 		// Exclude "permissions" — its mode is already surfaced on the metrics line.
-		if (otherStatuses.length > 0) {
+		// Calm omits the extension status wall (power noise); full keeps it.
+		if (!calm && otherStatuses.length > 0) {
 			// A permanent "ready" must not outshine the model name: statuses with no
 			// color of their own render dim. Pre-colorized ones (ESC present) pass
 			// through untouched — the extension chose its emphasis deliberately.

@@ -5,7 +5,7 @@
 > por vez**, rode testes do lote, depois `npm run check`. Não mude constantes de
 > motion (`SPINNER_FRAME_MS`, `REVEAL_*`, etc.) — ver Non-goals.
 >
-> **Contexto:** complementa [`TUI-AESTHETICS.md`](../../TUI-AESTHETICS.md) (Moves 0–5
+> **Contexto:** complementa [`TUI-AESTHETICS.md`](../reports/TUI-AESTHETICS.md) (Moves 0–5
 > já shipped) e [`cli-animations.md`](cli-animations.md) (motion subsystem).
 > Inventário do que já existe: [`already-built.md`](already-built.md).
 
@@ -18,7 +18,7 @@ implementar; se o código já mudou, adapte o plano em vez de duplicar.
 
 | # | Problema | Veredito | Evidência (abrir e confirmar) |
 |---|----------|----------|-------------------------------|
-| **1** | Loader sem sinal de vazão durante streaming longo | **Real** | [`loader.ts`](../../packages/tui/src/components/loader.ts) L282–287: `composeDisplayText()` = spinner + message + elapsed — **sem** suffix de throughput. [`interactive-mode.ts`](../../packages/coding-agent/src/modes/interactive/interactive-mode.ts) trata `message_update` (L3028) mas **não** alimenta o loader. [`TUI-AESTHETICS.md`](../../TUI-AESTHETICS.md) lista explicitamente: "No token-rate / streaming-progress hint". |
+| **1** | Loader sem sinal de vazão durante streaming longo | **Real** | [`loader.ts`](../../packages/tui/src/components/loader.ts) L282–287: `composeDisplayText()` = spinner + message + elapsed — **sem** suffix de throughput. [`interactive-mode.ts`](../../packages/coding-agent/src/modes/interactive/interactive-mode.ts) trata `message_update` (L3028) mas **não** alimenta o loader. [`TUI-AESTHETICS.md`](../reports/TUI-AESTHETICS.md) lista explicitamente: "No token-rate / streaming-progress hint". |
 | **2** | Fase do loader expõe nomes internos de tool | **Real** | [`interactive-mode.ts`](../../packages/coding-agent/src/modes/interactive/interactive-mode.ts) L3100: ``setWorkingPhase(`Running ${event.toolName}…`)`` → usuário vê `Running edit_v2…`. [`tool-activity.ts`](../../packages/coding-agent/src/modes/interactive/components/tool-activity.ts) já exporta `verbFor()` (L152) — **não usado** no call site. |
 | **3** | Hint `(esc to interrupt)` some no turno normal | **Real** | Hint no loader só em [`resetExtensionUI`](../../packages/coding-agent/src/modes/interactive/interactive-mode.ts) L1785 (reset de extensão). `setWorkingPhase` (L1549–1552) chama `setMessage(label)` e **substitui** a mensagem. `createWorkingLoader` (L1555) usa `getWorkingLoaderMessage()` **sem** hint. |
 | **4** | Activity line sem elapsed em ações lentas | **Real** | [`activity-line.ts`](../../packages/coding-agent/src/modes/interactive/components/activity-line.ts): **zero** ocorrências de `startedAt`, `Date.now`, `performance.now`. Header pending recomputa todo frame (`cacheable` exclui pending, L262). |

@@ -1,8 +1,13 @@
 import type { AssistantMessage } from "@pit/ai";
 import { type TUI, visibleWidth } from "@pit/tui";
 import { beforeAll, describe, expect, it } from "vitest";
-import { AssistantMessageComponent, fadeLineTail } from "../src/modes/interactive/components/assistant-message.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import {
+	AssistantMessageComponent,
+	appendRevealCaret,
+	discreteFadeTailColorize,
+	fadeLineTail,
+} from "../src/modes/interactive/components/assistant-message.js";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
 
 // A TUI test double that captures animation callbacks so the test can drive the
@@ -37,6 +42,11 @@ function rendered(comp: AssistantMessageComponent): string {
 describe("assistant message streaming smoothing", () => {
 	beforeAll(() => {
 		initTheme("dark");
+		// Reveal smoothing is suppressed when TERM=dumb (isReducedMotion). Pin a
+		// capable TERM so these tests exercise the wavefront path in any shell.
+		process.env.TERM = "xterm-256color";
+		delete process.env.PIT_NO_MOTION;
+		delete process.env.PIT_REDUCED_MOTION;
 	});
 
 	it("reveals everything immediately when smoothing is off", () => {
@@ -145,6 +155,32 @@ describe("assistant message streaming smoothing", () => {
 		expect(rendered(comp).length).toBeGreaterThanOrEqual(prev);
 	});
 
+	it("holds the reveal cursor at zero while streamVisible is false, then streams on attach", () => {
+		const tui = new ControllableTui();
+		const comp = build(tui, true);
+		comp.setStreamVisible(false);
+		comp.updateContent(textMsg(`START ${"x".repeat(120)} END`));
+		expect(rendered(comp)).not.toContain("START");
+		expect(tui.animating).toBe(false);
+
+		comp.setStreamVisible(true);
+		const first = rendered(comp);
+		expect(first).toContain("START");
+		expect(first).not.toContain("END");
+		expect(tui.animating).toBe(true);
+	});
+
+	it("snaps small provider deltas through immediately instead of clamping them", () => {
+		const tui = new ControllableTui();
+		const comp = build(tui, true);
+		comp.updateContent(textMsg("Hello"));
+		let guard = 0;
+		while (tui.animating && guard++ < 100) tui.tick(16);
+		expect(rendered(comp)).toContain("Hello");
+		comp.updateContent(textMsg("Hello world"));
+		expect(rendered(comp)).toContain("world");
+	});
+
 	it("keeps the reveal correct while the wavefront edge is faded (#3)", () => {
 		const tui = new ControllableTui();
 		const comp = build(tui, true);
@@ -164,6 +200,11 @@ describe("assistant message streaming smoothing", () => {
 describe("reveal edge fade (fadeLineTail)", () => {
 	beforeAll(() => {
 		initTheme("dark");
+		// Reveal smoothing is suppressed when TERM=dumb (isReducedMotion). Pin a
+		// capable TERM so these tests exercise the wavefront path in any shell.
+		process.env.TERM = "xterm-256color";
+		delete process.env.PIT_NO_MOTION;
+		delete process.env.PIT_REDUCED_MOTION;
 	});
 
 	it("preserves the visible text and width, only recoloring the tail", () => {
@@ -185,5 +226,66 @@ describe("reveal edge fade (fadeLineTail)", () => {
 	it("is a no-op on blank / padding-only lines", () => {
 		expect(fadeLineTail("     ")).toBe("     ");
 		expect(fadeLineTail("")).toBe("");
+	});
+
+	it("discrete 256-color ramp uses text → muted → dim stops", () => {
+		const textAnsi = theme.getFgAnsi("text");
+		const mutedAnsi = theme.getFgAnsi("muted");
+		const dimAnsi = theme.getFgAnsi("dim");
+		expect(discreteFadeTailColorize(0)("a")).toContain(textAnsi);
+		expect(discreteFadeTailColorize(0.5)("a")).toContain(mutedAnsi);
+		expect(discreteFadeTailColorize(1)("a")).toContain(dimAnsi);
+		expect(discreteFadeTailColorize(0)("a")).not.toBe(discreteFadeTailColorize(1)("a"));
+	});
+});
+
+describe("reveal caret (appendRevealCaret)", () => {
+	beforeAll(() => {
+		initTheme("dark");
+		// Reveal smoothing is suppressed when TERM=dumb (isReducedMotion). Pin a
+		// capable TERM so these tests exercise the wavefront path in any shell.
+		process.env.TERM = "xterm-256color";
+		delete process.env.PIT_NO_MOTION;
+		delete process.env.PIT_REDUCED_MOTION;
+	});
+
+	it("appends a dim block caret at the content edge", () => {
+		const out = appendRevealCaret("hello");
+		expect(stripAnsi(out)).toBe("hello▌");
+		expect(out).toContain("▌");
+	});
+
+	it("consumes one pad column so padded width stays stable", () => {
+		const padded = `short${" ".repeat(5)}`;
+		const out = appendRevealCaret(padded);
+		expect(visibleWidth(out)).toBe(visibleWidth(padded));
+		expect(stripAnsi(out)).toContain("▌");
+	});
+});
+
+describe("reveal caret on live stream", () => {
+	beforeAll(() => {
+		initTheme("dark");
+		// Reveal smoothing is suppressed when TERM=dumb (isReducedMotion). Pin a
+		// capable TERM so these tests exercise the wavefront path in any shell.
+		process.env.TERM = "xterm-256color";
+		delete process.env.PIT_NO_MOTION;
+		delete process.env.PIT_REDUCED_MOTION;
+	});
+
+	it("shows ▌ while revealing and drops it once settled", () => {
+		const tui = new ControllableTui();
+		const comp = build(tui, true);
+		const long = `HELLO ${"y".repeat(40)} WORLD`;
+		comp.updateContent(textMsg(long));
+		const mid = comp.render(120).join("\n");
+		expect(mid).toContain("▌");
+
+		let guard = 0;
+		while (tui.animating && guard++ < 1000) tui.tick(guard * 16);
+		comp.updateContent(textMsg(long, "stop"));
+		const settled = comp.render(120).join("\n");
+		expect(settled).not.toContain("▌");
+		expect(stripAnsi(settled)).toContain("WORLD");
 	});
 });

@@ -93,6 +93,12 @@ export interface VerificationSettings {
 	maxAttempts?: number; // default: 2 — fix attempts before giving up and reporting the failure to the user
 	timeoutMs?: number; // default: 180000
 	visual?: boolean; // default: true — nudge to `preview` when a rendered artifact changed but was never viewed
+	/** Native functional web DoD (navigate/a11y/click/fill/console). Default true. */
+	functionalWeb?: boolean;
+	/** Wall-clock budget for one functional web check pass. Default 45000. */
+	functionalWebTimeoutMs?: number;
+	/** Max click/fill interactions per functional web check. Default 3. */
+	functionalWebMaxInteractions?: number;
 }
 
 export interface PendingChecksSettings {
@@ -478,7 +484,7 @@ export type PackageSource =
 export interface Settings {
 	defaultProvider?: string;
 	defaultModel?: string;
-	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -491,6 +497,25 @@ export interface Settings {
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
+	/**
+	 * Footer metrics density. `"calm"` (default) hides wire-vs-msgs, extension
+	 * status noise, and other power-only segments while still showing abnormal
+	 * safety chips (no-rails, no-compact, overthink, recovery). `"full"` keeps
+	 * the legacy dense footer.
+	 */
+	footerDensity?: "calm" | "full";
+	/**
+	 * Draw a closed `╰───` bottom rule on the input editor. Default true
+	 * (card-like frame). Set false for the historical blank separator.
+	 */
+	editorClosedBottom?: boolean;
+	/**
+	 * One-shot onboarding flags (persisted so tips do not reappear every session).
+	 */
+	onboarding?: {
+		/** True after the post-first-turn power-shortcuts tip was shown. */
+		powerTipShown?: boolean;
+	};
 	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
 	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
@@ -505,7 +530,7 @@ export interface Settings {
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
-	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
+	editorPaddingX?: number; // Horizontal padding for input editor (default: 1)
 	cardPaddingX?: number; // Horizontal padding inside card frames (welcome + tool blocks) (default: 1)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
 	assistantReadingColumns?: number; // Reading-column cap (cols) for assistant prose; default 100; 0 = full width
@@ -603,7 +628,7 @@ export interface ModelRoleConfig {
 	/** Primary model pattern, e.g. "anthropic/claude-opus-4-7" or "sonnet:high". */
 	model: string;
 	/** Optional default thinking level for this role. */
-	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+	thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 	/** Per-path overrides — glob keys matched against cwd; closest match wins. */
 	paths?: Record<string, string>;
 	/** Inline fallback chain (used when `retry.fallbackChains[role]` is absent). */
@@ -1227,11 +1252,11 @@ export class SettingsManager {
 		this.setTopLevel("theme", theme);
 	}
 
-	getDefaultThinkingLevel(): "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | undefined {
+	getDefaultThinkingLevel(): "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | undefined {
 		return this.settings.defaultThinkingLevel;
 	}
 
-	setDefaultThinkingLevel(level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"): void {
+	setDefaultThinkingLevel(level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"): void {
 		this.setTopLevel("defaultThinkingLevel", level);
 	}
 
@@ -1431,6 +1456,9 @@ export class SettingsManager {
 		maxAttempts: number;
 		timeoutMs: number;
 		visual: boolean;
+		functionalWeb: boolean;
+		functionalWebTimeoutMs: number;
+		functionalWebMaxInteractions: number;
 	} {
 		const v = this.settings.verification;
 		return {
@@ -1439,6 +1467,9 @@ export class SettingsManager {
 			maxAttempts: Math.max(1, v?.maxAttempts ?? 2),
 			timeoutMs: Math.max(1000, v?.timeoutMs ?? 180_000),
 			visual: v?.visual ?? true,
+			functionalWeb: v?.functionalWeb ?? true,
+			functionalWebTimeoutMs: Math.max(5_000, v?.functionalWebTimeoutMs ?? 45_000),
+			functionalWebMaxInteractions: Math.max(1, v?.functionalWebMaxInteractions ?? 3),
 		};
 	}
 
@@ -1488,6 +1519,33 @@ export class SettingsManager {
 
 	setQuietStartup(quiet: boolean): void {
 		this.setTopLevel("quietStartup", quiet);
+	}
+
+	/** Footer density: calm (default) or full power-user layout. */
+	getFooterDensity(): "calm" | "full" {
+		return this.settings.footerDensity === "full" ? "full" : "calm";
+	}
+
+	setFooterDensity(density: "calm" | "full"): void {
+		this.setTopLevel("footerDensity", density);
+	}
+
+	/** Closed bottom rule on the input editor. Default true (card-like frame). */
+	getEditorClosedBottom(): boolean {
+		return this.settings.editorClosedBottom !== false;
+	}
+
+	setEditorClosedBottom(closed: boolean): void {
+		this.setTopLevel("editorClosedBottom", closed);
+	}
+
+	getPowerTipShown(): boolean {
+		return this.settings.onboarding?.powerTipShown === true;
+	}
+
+	setPowerTipShown(shown: boolean): void {
+		const prev = this.settings.onboarding ?? {};
+		this.setTopLevel("onboarding", { ...prev, powerTipShown: shown });
 	}
 
 	getShellCommandPrefix(): string | undefined {
@@ -1689,7 +1747,9 @@ export class SettingsManager {
 	}
 
 	getEditorPaddingX(): number {
-		return this.settings.editorPaddingX ?? 0;
+		// Default 1 so typed text / placeholder sit inset under the top rule and
+		// read as "inside" the editor rather than flush against the terminal edge.
+		return this.settings.editorPaddingX ?? 1;
 	}
 
 	setEditorPaddingX(padding: number): void {

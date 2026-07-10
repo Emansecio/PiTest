@@ -31,6 +31,12 @@ export interface CacheSummary {
 	cacheObserved: boolean;
 }
 
+/** Prompt-cache prefix rebuild diagnostics (live TUI `/stats` already shows these). */
+export interface CachePrefixSummary {
+	rebuilds: number;
+	reasons: Array<{ reason: string; count: number }>;
+}
+
 export interface SessionSummaryRecord {
 	type: "session-summary";
 	ts: number;
@@ -40,6 +46,8 @@ export interface SessionSummaryRecord {
 	diagnostics: { total: number; counters: Record<string, number> };
 	/** Present only when the transcript was reachable to compute cache stats. */
 	cache?: CacheSummary;
+	/** Present when the session rebuilt the static cache prefix at least once. */
+	cachePrefix?: CachePrefixSummary;
 }
 
 export interface SessionSummaryInput {
@@ -47,6 +55,7 @@ export interface SessionSummaryInput {
 	diagnostics: DiagnosticSnapshot;
 	verification?: VerificationSummary;
 	cache?: CacheStats;
+	cachePrefix?: CachePrefixSummary;
 }
 
 /** Build the flat session-summary record from the gathered session signals. */
@@ -72,6 +81,9 @@ export function buildSessionSummaryRecord(input: SessionSummaryInput): SessionSu
 			instabilityTurn: input.cache.instabilityTurn,
 			cacheObserved: input.cache.cacheObserved,
 		};
+	}
+	if (input.cachePrefix && input.cachePrefix.rebuilds > 0) {
+		record.cachePrefix = input.cachePrefix;
 	}
 	return record;
 }

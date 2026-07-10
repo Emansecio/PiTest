@@ -6,6 +6,7 @@ import {
 	getCredentialPool,
 	type Message,
 	type Model,
+	prewarmProviderModule,
 	registerProviderCredentials,
 	reportCredentialFailure,
 	reportCredentialSuccess,
@@ -290,6 +291,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
+	// Warm the active provider module during idle boot so the first prompt
+	// does not pay the dynamic-import tax (P06).
+	if (model) {
+		prewarmProviderModule(model.api);
+	}
+
 	// Persist the resolved model as the default so the next fresh start
 	// reuses the same model instead of re-resolving from settings defaults
 	// (which may be stale or undefined). The explicit /model switch and
@@ -445,7 +452,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (!runner?.hasHandlers("before_provider_request")) {
 				return payload;
 			}
-			return runner.emitBeforeProviderRequest(payload);
+			// Race against the run signal so a wedged BPR handler cannot block Esc
+			// (same pattern as transformContext below).
+			return settleOrAbort(runner.emitBeforeProviderRequest(payload), agent.signal);
 		},
 		onResponse: async (response, _model) => {
 			const runner = extensionRunnerRef.current;

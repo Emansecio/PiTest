@@ -5,14 +5,24 @@
  * for OAuth-based providers:
  * - Anthropic (Claude Pro/Max)
  * - OpenAI Codex (ChatGPT OAuth)
+ * - xAI Grok (SuperGrok / X Premium+)
  */
 
 // Anthropic
 export { anthropicOAuthProvider, loginAnthropic, refreshAnthropicToken } from "./anthropic.ts";
 // OpenAI Codex (ChatGPT OAuth)
 export { loginOpenAICodex, openaiCodexOAuthProvider, refreshOpenAICodexToken } from "./openai-codex.ts";
-
 export * from "./types.ts";
+// xAI Grok (SuperGrok / X Premium+)
+export {
+	buildXaiAuthorizeUrl,
+	loginXai,
+	pollXaiDeviceCodeToken,
+	refreshXaiToken,
+	XAI_OAUTH_CLIENT_ID,
+	XAI_OAUTH_MODELS,
+	xaiOAuthProvider,
+} from "./xai.ts";
 
 // ============================================================================
 // Provider Registry
@@ -21,8 +31,13 @@ export * from "./types.ts";
 import { anthropicOAuthProvider } from "./anthropic.ts";
 import { openaiCodexOAuthProvider } from "./openai-codex.ts";
 import type { OAuthCredentials, OAuthProviderId, OAuthProviderInterface } from "./types.ts";
+import { xaiOAuthProvider } from "./xai.ts";
 
-const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [anthropicOAuthProvider, openaiCodexOAuthProvider];
+const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
+	anthropicOAuthProvider,
+	openaiCodexOAuthProvider,
+	xaiOAuthProvider,
+];
 
 /**
  * Proactive refresh window: refresh a token this many ms before its `expires`

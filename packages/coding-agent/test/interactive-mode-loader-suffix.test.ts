@@ -3,6 +3,7 @@ import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { stripAnsi } from "../src/utils/ansi.js";
 
 beforeAll(() => {
 	initTheme("dark");
@@ -28,24 +29,17 @@ describe("InteractiveMode.refreshLoaderTrailingSuffix", () => {
 		this: Record<string, unknown>,
 		count: number,
 	) => string;
-	const formatStreamThroughput = Reflect.get(InteractiveMode.prototype, "formatStreamThroughput") as (
-		this: Record<string, unknown>,
-		cps: number,
-	) => string;
 
-	function makeFakeThis(outputTokens: number) {
+	function makeFakeThis(outputTokens: number, streamTextCharCount = 0) {
 		const setTrailingSuffix = vi.fn();
 		return {
 			loadingAnimation: { setTrailingSuffix },
 			currentTurnOutputTokens: () => outputTokens,
 			formatTokenChip,
-			formatStreamThroughput,
 			getLoaderInterruptSuffix,
 			cachedLoaderInterruptSuffix: null as string | null,
 			lastAppliedLoaderSuffix: undefined as string | undefined,
-			lastStreamRateSampleMs: 0,
-			lastStreamRateCharCount: 0,
-			streamTextCharCount: 0,
+			streamTextCharCount,
 			setTrailingSuffix,
 		};
 	}
@@ -66,8 +60,6 @@ describe("InteractiveMode.refreshLoaderTrailingSuffix", () => {
 		refreshLoaderTrailingSuffix.call(fakeThis);
 		expect(fakeThis.setTrailingSuffix).toHaveBeenCalledTimes(1);
 
-		// Same output tokens, no rate sample due (lastStreamRateSampleMs stayed 0)
-		// -> the composed suffix is byte-identical to the one already applied.
 		refreshLoaderTrailingSuffix.call(fakeThis);
 		refreshLoaderTrailingSuffix.call(fakeThis);
 		expect(fakeThis.setTrailingSuffix).toHaveBeenCalledTimes(1);
@@ -82,9 +74,28 @@ describe("InteractiveMode.refreshLoaderTrailingSuffix", () => {
 		refreshLoaderTrailingSuffix.call(fakeThis);
 		expect(fakeThis.setTrailingSuffix).toHaveBeenCalledTimes(2);
 
-		// And skips again once settled at the new value.
 		refreshLoaderTrailingSuffix.call(fakeThis);
 		expect(fakeThis.setTrailingSuffix).toHaveBeenCalledTimes(2);
+	});
+
+	test("includes accumulated stream chars as a ↓ chip", () => {
+		const fakeThis = makeFakeThis(0, 1200);
+		refreshLoaderTrailingSuffix.call(fakeThis);
+		expect(fakeThis.setTrailingSuffix).toHaveBeenCalledTimes(1);
+		const suffix = stripAnsi(String(fakeThis.setTrailingSuffix.mock.calls[0][0]));
+		expect(suffix).toContain("↓1.2k");
+	});
+
+	test("calls setTrailingSuffix again when stream char count changes", () => {
+		const fakeThis = makeFakeThis(0, 100);
+		refreshLoaderTrailingSuffix.call(fakeThis);
+		expect(fakeThis.setTrailingSuffix).toHaveBeenCalledTimes(1);
+
+		fakeThis.streamTextCharCount = 2500;
+		refreshLoaderTrailingSuffix.call(fakeThis);
+		expect(fakeThis.setTrailingSuffix).toHaveBeenCalledTimes(2);
+		const suffix = stripAnsi(String(fakeThis.setTrailingSuffix.mock.calls[1][0]));
+		expect(suffix).toContain("↓2.5k");
 	});
 
 	test("memoizes the interrupt suffix fragment across calls", () => {

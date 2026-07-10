@@ -24,13 +24,29 @@ import {
 import type { AskOptionsRequest } from "../../../core/user-input-bus.ts";
 import { theme as defaultTheme } from "../theme/theme.ts";
 import { renderSupplementaryContext } from "./context-display.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
-import { checkboxGlyph, HINT_SEPARATOR, keyText, selectionCursor } from "./keybinding-hints.ts";
+import {
+	checkboxGlyph,
+	HINT_SEPARATOR,
+	keyText,
+	LIST_CLOSE_LABEL,
+	LIST_NAVIGATE_LABEL,
+	LIST_SELECT_LABEL,
+	selectionCursor,
+} from "./keybinding-hints.ts";
+import { paintSelectedRow } from "./selectable-row.ts";
 
 const RECOMMENDED_BADGE = " · recommended";
 const FREEFORM_ROW_LABEL = "Other — type custom answer…";
 const OPTION_DESC_INDENT = "      ";
 const COMMENT_PREFIX = "Note: ";
+
+function cardTopBorder(width: number): string {
+	return defaultTheme.fg("cardBorder", `╭${"─".repeat(Math.max(0, width - 2))}╮`);
+}
+
+function cardBottomBorder(width: number): string {
+	return defaultTheme.fg("cardBorder", `╰${"─".repeat(Math.max(0, width - 2))}╯`);
+}
 
 export interface AskPickerResolveResult {
 	picked: string[];
@@ -47,10 +63,29 @@ export interface AskPickerHooks {
 function wrapPlain(text: string, width: number): string[] {
 	if (width <= 0) return [text];
 	const out: string[] = [];
+	const pushHardBroken = (token: string): void => {
+		let rest = token;
+		while (visibleWidth(rest) > width) {
+			const chunk = truncateToWidth(rest, width, "");
+			if (!chunk) break;
+			out.push(chunk);
+			// Drop the visible prefix we just emitted (ANSI-free path for ask text).
+			rest = rest.slice(chunk.length);
+		}
+		if (rest) out.push(rest);
+	};
 	for (const rawLine of text.split("\n")) {
 		let line = "";
 		for (const word of rawLine.split(/\s+/)) {
 			if (!word) continue;
+			if (visibleWidth(word) > width) {
+				if (line) {
+					out.push(line);
+					line = "";
+				}
+				pushHardBroken(word);
+				continue;
+			}
 			if (line === "") {
 				line = word;
 			} else if (visibleWidth(`${line} ${word}`) <= width) {
@@ -60,7 +95,7 @@ function wrapPlain(text: string, width: number): string[] {
 				line = word;
 			}
 		}
-		out.push(line);
+		if (line) out.push(line);
 	}
 	return out;
 }
@@ -92,7 +127,6 @@ class AskPicker implements Component, Focusable {
 	private commentInput: Input | null = null;
 	private commentText = "";
 	private settled = false;
-	private readonly border = new DynamicBorder();
 
 	constructor(
 		req: AskOptionsRequest,
@@ -253,14 +287,16 @@ class AskPicker implements Component, Focusable {
 		// Wrap it (never push raw) or a long single-line question overflows `width`
 		// and crashes TUI.doRender.
 		if ((this.req.displayMode ?? "inline") !== "inline") {
+			// Overlay covers the transcript — question is the primary read; bold text
+			// (not accent-on-everything) so options still own the accent scan.
 			for (const line of wrapPlain(this.req.question, width)) {
-				lines.push(defaultTheme.fg("accent", defaultTheme.bold(line)));
+				lines.push(defaultTheme.bold(defaultTheme.fg("text", line)));
 			}
 		}
 		if (this.req.context) {
 			lines.push(...renderSupplementaryContext(this.req.context, width));
 		}
-		lines.push(...this.border.render(width));
+		lines.push(cardTopBorder(width));
 	}
 
 	private checkboxPrefix(index: number): string {
@@ -285,10 +321,12 @@ class AskPicker implements Component, Focusable {
 			const box = this.checkboxPrefix(i);
 			// Pre-color the badge (it marks the default pick) and reserve its width
 			// separately, so clamping the head never eats into it.
-			const badge = opt.recommended ? defaultTheme.fg("gutterToolSuccess", RECOMMENDED_BADGE) : "";
+			const badge = opt.recommended ? defaultTheme.fg("success", defaultTheme.bold(RECOMMENDED_BADGE)) : "";
+			const labelText = opt.recommended ? defaultTheme.bold(opt.label) : opt.label;
 			const head =
-				truncateToWidth(`${cursor}${box}${opt.label}`, Math.max(0, width - visibleWidth(badge)), "…") + badge;
-			const row = focused ? defaultTheme.fg("accent", head) : head;
+				truncateToWidth(`${cursor}${box}${labelText}`, Math.max(0, width - visibleWidth(badge)), "…") + badge;
+			// U01: full-width selectedBg on the focused row (same idiom as other selectors).
+			const row = paintSelectedRow(focused ? defaultTheme.fg("accent", head) : head, width, focused);
 			const desc = opt.description?.replace(/\s+/g, " ").trim();
 			if (focused && desc) {
 				// Detail pane: the focused option shows its full description wrapped and
@@ -316,7 +354,8 @@ class AskPicker implements Component, Focusable {
 		if (this.allowFreeform) {
 			const active = this.index === this.freeformRow && this.mode === "list";
 			const head = `${selectionCursor(active)}${FREEFORM_ROW_LABEL}`;
-			lines.push(active ? defaultTheme.fg("accent", head) : defaultTheme.fg("muted", head));
+			const styled = active ? defaultTheme.fg("accent", head) : defaultTheme.fg("muted", head);
+			lines.push(paintSelectedRow(styled, width, active));
 		}
 	}
 
@@ -328,7 +367,7 @@ class AskPicker implements Component, Focusable {
 			lines.push(defaultTheme.fg("dim", "Custom answer"));
 			this.input.focused = this.focused;
 			lines.push(...this.input.render(width));
-			lines.push(...this.border.render(width));
+			lines.push(""); // spacing instead of full-width ─ rule (U01)
 			lines.push(defaultTheme.fg("dim", `  ${keyText("tui.select.confirm")} submit${HINT_SEPARATOR}esc back`));
 		} else {
 			this.renderList(width, lines);
@@ -340,13 +379,13 @@ class AskPicker implements Component, Focusable {
 			}
 
 			if (this.mode === "comment" && this.commentInput) {
-				lines.push(...this.border.render(width));
+				lines.push(""); // spacing instead of full-width ─ rule (U01)
 				lines.push(defaultTheme.fg("dim", "Add a note (optional)"));
 				this.commentInput.focused = this.focused;
 				lines.push(...this.commentInput.render(width));
 			}
 
-			lines.push(...this.border.render(width));
+			lines.push(cardBottomBorder(width));
 			lines.push(defaultTheme.fg("dim", `  ${this.hint()}`));
 		}
 
@@ -361,13 +400,17 @@ class AskPicker implements Component, Focusable {
 		const confirm = keyText("tui.select.confirm");
 		const cancel = keyText("tui.select.cancel");
 		if (this.mode === "comment") {
-			return `${confirm} or ${this.commentToggleKey} to save${HINT_SEPARATOR}${cancel} to cancel`;
+			return `${confirm} or ${this.commentToggleKey} to save${HINT_SEPARATOR}${cancel} ${LIST_CLOSE_LABEL}`;
 		}
-		const parts = ["↑↓ move"];
-		if (this.allowMultiple) parts.push("space to toggle", `${confirm} to confirm`);
-		else parts.push(`${confirm} to choose`);
+		// Canonical shape shared with selectors: navigate · confirm select · cancel close
+		const parts = [
+			LIST_NAVIGATE_LABEL,
+			this.allowMultiple
+				? `space toggle${HINT_SEPARATOR}${confirm} ${LIST_SELECT_LABEL}`
+				: `${confirm} ${LIST_SELECT_LABEL}`,
+		];
 		if (this.allowComment) parts.push(`${this.commentToggleKey} comment`);
-		parts.push(`${cancel} to cancel`);
+		parts.push(`${cancel} ${LIST_CLOSE_LABEL}`);
 		return parts.join(HINT_SEPARATOR);
 	}
 }

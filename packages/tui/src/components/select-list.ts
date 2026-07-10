@@ -59,6 +59,8 @@ export interface SelectListTheme {
 	description: (text: string) => string;
 	scrollInfo: (text: string) => string;
 	noMatch: (text: string) => string;
+	/** Optional full-row background for the selected item. */
+	selectedBg?: (text: string) => string;
 }
 
 export interface SelectListTruncatePrimaryContext {
@@ -233,7 +235,10 @@ export class SelectList implements Component {
 			if (remainingWidth > MIN_DESCRIPTION_WIDTH) {
 				const truncatedDesc = truncateToWidth(descriptionSingleLine, remainingWidth, "");
 				if (isSelected) {
-					return this.theme.selectedText(`${prefix}${truncatedValue}${spacing}${truncatedDesc}`);
+					return this.paintSelected(
+						this.theme.selectedText(`${prefix}${truncatedValue}${spacing}${truncatedDesc}`),
+						width,
+					);
 				}
 
 				const descText = this.theme.description(spacing + truncatedDesc);
@@ -244,10 +249,19 @@ export class SelectList implements Component {
 		const maxWidth = width - prefixWidth - 2;
 		const truncatedValue = this.truncatePrimary(item, isSelected, maxWidth, maxWidth);
 		if (isSelected) {
-			return this.theme.selectedText(`${prefix}${truncatedValue}`);
+			return this.paintSelected(this.theme.selectedText(`${prefix}${truncatedValue}`), width);
 		}
 
 		return prefix + truncatedValue;
+	}
+
+	/** Pad selected row to width and apply optional selectedBg. */
+	private paintSelected(line: string, width: number): string {
+		if (!this.theme.selectedBg) {
+			return line;
+		}
+		const padded = line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+		return this.theme.selectedBg(padded);
 	}
 
 	private getPrimaryColumnWidth(): number {

@@ -163,7 +163,14 @@ import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { FusionLiveComponent, type FusionLiveMember } from "./components/fusion-live.ts";
 import { createGoalOverlay, type GoalOverlay } from "./components/goal-overlay.ts";
-import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
+import {
+	formatKeyText,
+	HINT_SEPARATOR,
+	keyDisplayText,
+	keyHint,
+	keyText,
+	rawKeyHint,
+} from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
@@ -197,6 +204,7 @@ import {
 	getCompactPathLabel,
 	getShortPath,
 } from "./display-utils.ts";
+import { EphemeralStatusController, type EphemeralStatusKind } from "./ephemeral-status.ts";
 import { dispatchSlashCommand, type SlashCommandHost } from "./interactive-slash-commands.ts";
 import { classifyRetryReason } from "./retry-reason.ts";
 import {
@@ -380,8 +388,6 @@ export class InteractiveMode {
 	private _fusionWriterLoaderActive = false;
 	private workingMessage: string | undefined = undefined;
 	private streamTextCharCount = 0;
-	private lastStreamRateSampleMs = 0;
-	private lastStreamRateCharCount = 0;
 	// Output tokens accrued in the CURRENT turn from assistant messages that have
 	// already finalized (their usage.output is only known at message_end). Reset to
 	// 0 at agent_start; the in-flight streaming message's partial usage is added on
@@ -397,8 +403,8 @@ export class InteractiveMode {
 	// Last full trailing-suffix string actually pushed to the loader. Lets
 	// refreshLoaderTrailingSuffix skip the setTrailingSuffix() call (colorizes +
 	// diffs again internally) when the composed suffix is byte-identical to what's
-	// already showing — true for most ticks, since the token chip only changes in
-	// coarse steps and the rate segment resamples at most once a second.
+	// already showing — true for most ticks, since the token/char chips only change
+	// in coarse steps (formatTokenChip).
 	private lastAppliedLoaderSuffix: string | undefined;
 	private workingVisible = true;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
@@ -428,6 +434,9 @@ export class InteractiveMode {
 
 	// Ephemeral status above the editor (statusContainer). Not part of the transcript.
 	private ephemeralStatusText: Text | undefined = undefined;
+	/** Color used by the next/current info toast (preserves showStatus color overrides). */
+	private ephemeralPaintColor: (text: string) => string = (text) => theme.fg("dim", text);
+	private ephemeralStatus!: EphemeralStatusController;
 
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
@@ -455,6 +464,8 @@ export class InteractiveMode {
 	// `/model <role>`. Influences which fallback chain is consulted on
 	// Ctrl+P cycling and which model is restored on `/model role`.
 	private activeRole: ModelRole = "default";
+	/** Role active before entering plan mode; restored on exit when still on "plan". */
+	private roleBeforePlan: ModelRole | undefined;
 
 	// Last search term typed in the /model picker. Restored when the picker is
 	// reopened via the keybinding or a bare `/model` (no arg), so a multi-step
@@ -479,6 +490,9 @@ export class InteractiveMode {
 	// Last animation-phase bucket the goal spinner requested a render for; gates
 	// out the ~60fps ticks that would not change the (80ms) spinner frame.
 	private _goalSpinnerBucket = -1;
+
+	/** Permission mode is plan — drives editor border + footer chip (not model role). */
+	private isPlanPermissionMode = false;
 
 	// Live "above editor" todo overlay (auto-hides when there are no todos).
 	private todoOverlay: TodoOverlay | undefined;
@@ -597,14 +611,23 @@ export class InteractiveMode {
 		});
 		// Permission-mode changes (slash command, cycle key, or exit_plan
 		// approval) swap the model role: plan mode → "plan" role when configured,
-		// back to "default" on exit (never clobbering a role the user picked
-		// manually). Fail-open: no plan role configured → silent no-op.
+		// back to the pre-plan role (or "default") on exit — never clobbering a
+		// role the user picked manually mid-plan. Fail-open: no plan role
+		// configured → silent no-op.
 		this.runtimeHost.services.bindPermissionModeChange?.((mode) => {
+			this.isPlanPermissionMode = mode === "plan";
+			if (mode === "plan" && this.activeRole !== "plan") {
+				this.roleBeforePlan = this.activeRole;
+			}
 			const planConfig = this.settingsManager.getModelRoleSettings().modelRoles?.plan;
-			const role = decideRoleForPermissionMode(mode, this.activeRole, planConfig);
+			const role = decideRoleForPermissionMode(mode, this.activeRole, planConfig, this.roleBeforePlan);
 			if (role) {
 				void this.applyModelRole(role, { silent: true });
 			}
+			if (mode === "auto") {
+				this.roleBeforePlan = undefined;
+			}
+			this.refreshModelIndicators();
 		});
 		this.version = VERSION;
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
@@ -614,6 +637,10 @@ export class InteractiveMode {
 		this.activityStacker = new ActivityStacker(this.ui, (component) => this.chatContainer.addChild(component));
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		this.ephemeralStatus = new EphemeralStatusController({
+			paint: (message, kind) => this.paintEphemeralStatus(message, kind),
+			clear: () => this.removeEphemeralStatusLine(),
+		});
 		this.widgetContainerAbove = new Container();
 		this.widgetContainerBelow = new Container();
 		this.keybindings = KeybindingsManager.create();
@@ -623,14 +650,17 @@ export class InteractiveMode {
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
+			closedBottom: this.settingsManager.getEditorClosedBottom(),
 			onPasteTruncated: (info) => this._onPasteTruncated(info),
 		});
+		this.defaultEditor.setPlaceholder("Describe a task…");
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
 		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd());
 		this.footer = new FooterComponent(this.session, this.footerDataProvider, this.launchCwd, this.ui);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
+		this.footer.setDensity(this.settingsManager.getFooterDensity());
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -815,7 +845,7 @@ export class InteractiveMode {
 				rawKeyHint("/", "commands"),
 				rawKeyHint("!", "bash"),
 				hint("app.tools.expand", "more"),
-			].join(theme.fg("muted", "   ·   "));
+			].join(theme.fg("muted", HINT_SEPARATOR));
 			const startupTips = [
 				"drag files into the terminal to attach them",
 				`${keyText("app.model.cycleForward")} cycles models · ${keyText("app.model.select")} picks one`,
@@ -1498,15 +1528,14 @@ export class InteractiveMode {
 
 		// Centered under the hero wordmark on the default brand; a rebranded app
 		// falls back to the left-aligned card, so the hint stays left too.
+		// The "Describe a task…" invitation lives in the editor placeholder now.
 		if (APP_NAME === "pit") {
-			// Line 1: an invitation with three concrete example prompts. Line 2: the
-			// existing mechanics, demoted fully to dim so the examples lead the eye.
 			const tryLine =
 				theme.fg("dim", "Try ") +
 				theme.fg("muted", "“explain this codebase” · “fix the failing test” · “add a small feature”");
 			const mechanics = theme.fg(
 				"dim",
-				`Describe a task to get started · ${formatKeyText("/")} commands · ${formatKeyText("!")} bash · drop files to attach`,
+				`${formatKeyText("/")} commands · ${formatKeyText("!")} bash · drop files to attach`,
 			);
 			const container = new Container();
 			container.addChild(new Spacer(1));
@@ -1516,8 +1545,6 @@ export class InteractiveMode {
 			this.emptyStateHint = container;
 		} else {
 			const hint = [
-				theme.fg("muted", "Describe a task to get started"),
-				theme.fg("dim", " · "),
 				rawKeyHint("/", "commands"),
 				theme.fg("dim", " · "),
 				rawKeyHint("!", "bash"),
@@ -1538,6 +1565,7 @@ export class InteractiveMode {
 		// here so a session swap points the listener at the new session's manager.
 		this.session.setTodoChangeListener(() => this.ui.requestRender());
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
+		this.footer.setDensity(this.settingsManager.getFooterDensity());
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
@@ -1674,8 +1702,6 @@ export class InteractiveMode {
 
 	private resetStreamRateCounters(): void {
 		this.streamTextCharCount = 0;
-		this.lastStreamRateSampleMs = 0;
-		this.lastStreamRateCharCount = 0;
 	}
 
 	private countAssistantTextChars(message: AssistantMessage): number {
@@ -1688,13 +1714,7 @@ export class InteractiveMode {
 		return n;
 	}
 
-	private formatStreamThroughput(charsPerSec: number): string {
-		if (charsPerSec <= 0) return "";
-		if (charsPerSec < 1000) return `↓${charsPerSec}`;
-		return `↓${(charsPerSec / 1000).toFixed(1).replace(/\.0$/, "")}k`;
-	}
-
-	/** Compact token count for the working-line chip: 97, 1.2k, 10.8k, 3.4M. */
+	/** Compact count for working-line chips: 97, 1.2k, 10.8k, 3.4M. */
 	private formatTokenChip(count: number): string {
 		if (count < 1000) return count.toString();
 		if (count < 1_000_000) return `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
@@ -1708,11 +1728,17 @@ export class InteractiveMode {
 		return this.turnOutputTokens + (this.streamingMessage?.usage?.output ?? 0);
 	}
 
-	/** Lazily computed, memoized `· <key> to interrupt` suffix fragment. See
+	/** Dim separator between working-loader meta chips (elapsed is separate). */
+	private static readonly LOADER_META_SEP = " ·";
+
+	/** Lazily computed, memoized `·<key> to interrupt` suffix fragment. See
 	 * `cachedLoaderInterruptSuffix` for why this is worth memoizing. */
 	private getLoaderInterruptSuffix(): string {
 		if (this.cachedLoaderInterruptSuffix === null) {
-			this.cachedLoaderInterruptSuffix = theme.fg("dim", ` · ${keyText("app.interrupt")} to interrupt`);
+			this.cachedLoaderInterruptSuffix = theme.fg(
+				"dim",
+				`${InteractiveMode.LOADER_META_SEP}${keyText("app.interrupt")} to interrupt`,
+			);
 		}
 		return this.cachedLoaderInterruptSuffix;
 	}
@@ -1727,22 +1753,15 @@ export class InteractiveMode {
 		if (!this.loadingAnimation) return;
 		const interrupt = this.getLoaderInterruptSuffix();
 		const outputTokens = this.currentTurnOutputTokens();
-		const tokens = outputTokens > 0 ? theme.fg("dim", ` · ↑ ${this.formatTokenChip(outputTokens)} tok`) : "";
-		let rate = "";
-		const now = Date.now();
-		if (this.lastStreamRateSampleMs > 0 && now - this.lastStreamRateSampleMs >= 1000) {
-			const delta = this.streamTextCharCount - this.lastStreamRateCharCount;
-			const secs = (now - this.lastStreamRateSampleMs) / 1000;
-			const cps = secs > 0 ? Math.round(delta / secs) : 0;
-			if (cps > 0) rate = theme.fg("dim", ` · ${this.formatStreamThroughput(cps)}`);
-			this.lastStreamRateSampleMs = now;
-			this.lastStreamRateCharCount = this.streamTextCharCount;
-		}
-		const suffix = `${interrupt}${tokens}${rate}`;
+		const sep = InteractiveMode.LOADER_META_SEP;
+		const tokens = outputTokens > 0 ? theme.fg("dim", `${sep}↑${this.formatTokenChip(outputTokens)}`) : "";
+		const streamChars =
+			this.streamTextCharCount > 0
+				? theme.fg("dim", `${sep}↓${this.formatTokenChip(this.streamTextCharCount)}`)
+				: "";
+		const suffix = `${interrupt}${tokens}${streamChars}`;
 		// Skip the Loader call entirely when nothing changed since the last applied
-		// suffix — most message_update ticks land between 1s rate samples, so tokens
-		// and rate are unchanged and this would just re-run theme.fg + Loader's own
-		// (re-colorize + string-compare) diff for an identical result.
+		// suffix — most message_update ticks land on an unchanged chip string.
 		if (suffix === this.lastAppliedLoaderSuffix) return;
 		this.lastAppliedLoaderSuffix = suffix;
 		this.loadingAnimation.setTrailingSuffix(suffix);
@@ -1764,8 +1783,6 @@ export class InteractiveMode {
 		// measures the whole turn rather than any single agent step.
 		loader.setElapsedEnabled(true);
 		this.resetStreamRateCounters();
-		this.lastStreamRateSampleMs = Date.now();
-		this.lastStreamRateCharCount = 0;
 		const interruptSuffix = this.getLoaderInterruptSuffix();
 		loader.setTrailingSuffix(interruptSuffix);
 		this.lastAppliedLoaderSuffix = interruptSuffix;
@@ -3245,8 +3262,15 @@ export class InteractiveMode {
 							this.ui,
 							this.settingsManager.getStreamingSmoothing(),
 							this.settingsManager.getAssistantReadingColumns(),
+							this.session.thinkingLevel,
 						);
 						this.streamingMessage = event.message;
+						// Grouped mode defers chat attach until visible prose exists.
+						// Keep the reveal cursor frozen until then so text cannot catch
+						// up off-screen and dump on first paint.
+						if (this.settingsManager.getToolActivity() === "grouped") {
+							this.streamingComponent.setStreamVisible(false);
+						}
 						this.streamingComponent.updateContent(this.streamingMessage);
 						// Grouped mode: defer attaching the message block until it has
 						// visible content. A thinking-only message that only runs tools
@@ -3406,6 +3430,10 @@ export class InteractiveMode {
 					}
 				}
 
+				if (!event.willRetry) {
+					this.maybeShowPowerTip();
+				}
+
 				await this.checkShutdownRequested();
 
 				this.ui.requestRender();
@@ -3484,14 +3512,54 @@ export class InteractiveMode {
 				break;
 			}
 
+			case "functional_web": {
+				this.setTerminalProgress(event.phase === "running");
+				if (event.phase === "running") {
+					const label =
+						event.attempt > 1
+							? `Functional web check${event.url ? ` (${event.url})` : ""} — attempt ${event.attempt}…`
+							: `Functional web check${event.url ? ` (${event.url})` : ""}…`;
+					this.showStatus(label);
+					if (this.workingVisible && !this.loadingAnimation) {
+						this.clearStatusContainer();
+						this.loadingAnimation = this.createWorkingLoader();
+						this.statusContainer.addChild(this.loadingAnimation);
+					}
+					this.setWorkingPhase(label);
+				} else if (event.phase === "passed") {
+					this.showStatus(`✓ Functional web check passed${event.url ? ` — ${event.url}` : ""}`, (text) =>
+						theme.fg("success", text),
+					);
+				} else if (event.phase === "skipped") {
+					// Silent skip in TUI — fail-open paths (no Chrome / not web) should not alarm.
+				} else if (event.willRetry) {
+					this.showStatus(`✗ Functional web check failed — fixing…`, (text) => theme.fg("warning", text));
+				} else {
+					this.showError(
+						`✗ Functional web check still failing after ${event.maxAttempts} fix attempt(s) — reported unverified.`,
+					);
+				}
+				this.ui.requestRender();
+				break;
+			}
+
 			case "verification": {
 				this.setTerminalProgress(event.phase === "running");
 				if (event.phase === "running") {
-					this.showStatus(
+					const label =
 						event.attempt > 1
 							? `Verifying (${event.command}) — attempt ${event.attempt}…`
-							: `Verifying (${event.command})…`,
-					);
+							: `Verifying (${event.command})…`;
+					this.showStatus(label);
+					// Bridge the post-turn gap like Fusion's "Synthesizing…" path: keep the
+					// working loader alive with an accurate phase so the UI doesn't look
+					// frozen on "Thinking…" while npm test / tsc runs.
+					if (this.workingVisible && !this.loadingAnimation) {
+						this.clearStatusContainer();
+						this.loadingAnimation = this.createWorkingLoader();
+						this.statusContainer.addChild(this.loadingAnimation);
+					}
+					this.setWorkingPhase(label);
 				} else if (event.phase === "passed") {
 					this.showStatus(`✓ Verified — ${event.command} passed`, (text) => theme.fg("success", text));
 				} else if (event.willRetry) {
@@ -3622,6 +3690,7 @@ export class InteractiveMode {
 		if (this.streamingAttached || !this.streamingComponent || !this.streamingMessage) return;
 		if (!messageHasVisibleContent(this.streamingMessage, !this.hideThinkingBlock)) return;
 		this.activityStacker.divide();
+		this.streamingComponent.setStreamVisible(true);
 		this.chatContainer.addChild(this.streamingComponent);
 		this.streamingAttached = true;
 	}
@@ -3707,29 +3776,66 @@ export class InteractiveMode {
 	 * Show ephemeral status above the editor (statusContainer), not in the transcript.
 	 *
 	 * Back-to-back calls update the same line instead of stacking rows.
+	 * Info/custom-colored lines auto-dismiss after a short TTL (see
+	 * {@link EphemeralStatusController}); errors stay sticky until clear.
 	 */
 	private showStatus(message: string, color: (text: string) => string = (text) => theme.fg("dim", text)): void {
+		this.ephemeralPaintColor = color;
+		this.ephemeralStatus.show(message, "info");
+	}
+
+	private paintEphemeralStatus(message: string, kind: EphemeralStatusKind): void {
+		let color = this.ephemeralPaintColor;
+		let text = message;
+		if (kind === "error") {
+			color = (s) => theme.fg("error", s);
+			if (!text.startsWith("✗") && !text.startsWith("Error")) {
+				text = `✗ ${text}`;
+			}
+		} else if (kind === "warning") {
+			color = (s) => theme.fg("warning", s);
+		}
 		if (this.ephemeralStatusText) {
-			this.ephemeralStatusText.setText(color(message));
+			this.ephemeralStatusText.setText(color(text));
 			this.ui.requestRender();
 			return;
 		}
+		const line = new Text(color(text), 1, 0);
+		this.ephemeralStatusText = line;
+		this.statusContainer.addChild(line);
+		this.ui.requestRender();
+	}
 
-		const text = new Text(color(message), 1, 0);
-		this.ephemeralStatusText = text;
-		this.statusContainer.addChild(text);
+	private removeEphemeralStatusLine(): void {
+		if (!this.ephemeralStatusText) return;
+		this.statusContainer.removeChild(this.ephemeralStatusText);
+		this.ephemeralStatusText = undefined;
 		this.ui.requestRender();
 	}
 
 	private clearEphemeralStatus(): void {
-		if (!this.ephemeralStatusText) return;
-		this.statusContainer.removeChild(this.ephemeralStatusText);
-		this.ephemeralStatusText = undefined;
+		this.ephemeralStatus.clear();
 	}
 
 	private clearStatusContainer(): void {
+		// Container wipe already drops the Text child — dispose timers without
+		// a second removeChild.
+		this.ephemeralStatus.dispose();
 		this.statusContainer.clear();
 		this.ephemeralStatusText = undefined;
+	}
+
+	/**
+	 * One-shot tip after the first completed turn (quiet startup skips).
+	 * Persists immediately so a crash mid-toast never re-shows it.
+	 */
+	private maybeShowPowerTip(): void {
+		if (this.settingsManager.getQuietStartup()) return;
+		if (this.settingsManager.getPowerTipShown()) return;
+		this.settingsManager.setPowerTipShown(true);
+		const cheatsheet = keyText("tui.help.cheatsheet");
+		const interrupt = keyText("app.interrupt");
+		this.showStatus(`tip: ${cheatsheet} shortcuts · /model · ${interrupt} interrupts`);
 	}
 
 	/** Insert a between-turns hairline rule before a user prompt, but only when the
@@ -3850,6 +3956,7 @@ export class InteractiveMode {
 					undefined,
 					false,
 					this.settingsManager.getAssistantReadingColumns(),
+					this.session.thinkingLevel,
 				);
 				this.chatContainer.addChild(assistantComponent);
 				if (messageHasVisibleContent(message, false)) {
@@ -4322,11 +4429,14 @@ export class InteractiveMode {
 			// Bash mode keeps its colored rule — that's a MODE signal (you're about
 			// to run a shell command), not decoration.
 			this.editor.borderColor = theme.getBashModeBorderColor();
+		} else if (this.isPlanPermissionMode) {
+			// Plan permission mode: read-only scaffold — same "MODE signal" rationale
+			// as bash, distinct color so it is not confused with model role "plan".
+			this.editor.borderColor = theme.getPlanModeBorderColor();
 		} else {
-			// Neutral hairline. The thinking level no longer tints the editor frame:
-			// it already rides permanently in the footer as the `✦ <level>` chip, so
-			// a saturated full-width rule just repeated that signal across 200 columns.
-			this.editor.borderColor = (str: string) => theme.fg("borderMuted", str);
+			// Idle focus: match getEditorTheme().borderColor (`border`) so the primary
+			// control stays visible. Thinking level stays on the footer ✦ chip only.
+			this.editor.borderColor = (str: string) => theme.fg("border", str);
 		}
 		this.ui.requestRender();
 	}
@@ -4358,9 +4468,24 @@ export class InteractiveMode {
 		if (newLevel === undefined) {
 			this.showStatus("Current model does not support thinking");
 		} else {
+			this.applyThinkingLevel(newLevel);
 			this.refreshModelIndicators();
 			this.showStatus(`Thinking level: ${newLevel}`);
 		}
+	}
+
+	/** Propagate thinking level to live assistant bubbles (gutter tint). */
+	private applyThinkingLevel(level: ThinkingLevel): void {
+		for (const child of this.chatContainer.children) {
+			if (child instanceof AssistantMessageComponent) {
+				child.setThinkingLevel(level);
+				this.chatContainer.markChildStale(child);
+			}
+		}
+		if (this.streamingComponent) {
+			this.streamingComponent.setThinkingLevel(level);
+		}
+		this.ui.requestRender();
 	}
 
 	/**
@@ -4387,6 +4512,7 @@ export class InteractiveMode {
 				const next = roleChain[nextIdx];
 				await this.session.setModel(next.model);
 				this.session.setThinkingLevel(next.thinkingLevel);
+				this.applyThinkingLevel(next.thinkingLevel);
 				this.refreshModelIndicators();
 				const thinkingStr =
 					next.model.reasoning && next.thinkingLevel !== "off" ? ` (thinking: ${next.thinkingLevel})` : "";
@@ -4400,6 +4526,7 @@ export class InteractiveMode {
 				const msg = this.session.scopedModels.length > 0 ? "Only one model in scope" : "Only one model available";
 				this.showStatus(msg);
 			} else {
+				this.applyThinkingLevel(result.thinkingLevel);
 				this.refreshModelIndicators();
 				const thinkingStr =
 					result.model.reasoning && result.thinkingLevel !== "off" ? ` (thinking: ${result.thinkingLevel})` : "";
@@ -4471,6 +4598,7 @@ export class InteractiveMode {
 		for (const child of this.chatContainer.children) {
 			if (isExpandable(child)) {
 				child.setExpanded(expanded);
+				this.chatContainer.markChildStale(child);
 			}
 		}
 		this.ui.requestRender();
@@ -4495,7 +4623,14 @@ export class InteractiveMode {
 	 * place is safe there and skips the synchronous re-parse.
 	 */
 	private applyHideThinkingBlock(hidden: boolean): void {
-		if (this.settingsManager.getToolActivity() === "grouped") {
+		// Grouped mode only needs a full rebuild when a thinking-only message would
+		// appear/disappear as its own bubble (messageHasVisibleContent boundary).
+		// When every assistant message already has visible text, in-place patch is safe
+		// and avoids re-parsing the whole transcript on a hotkey.
+		if (
+			this.settingsManager.getToolActivity() === "grouped" &&
+			sessionHasThinkingOnlyAssistant(this.session.state.messages)
+		) {
 			this.rebuildChatFromMessages();
 			return;
 		}
@@ -4974,16 +5109,20 @@ export class InteractiveMode {
 						for (const child of this.chatContainer.children) {
 							if (child instanceof ToolExecutionComponent) {
 								child.setShowImages(enabled);
+								this.chatContainer.markChildStale(child);
 							}
 						}
+						this.ui.requestRender();
 					},
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
 							if (child instanceof ToolExecutionComponent) {
 								child.setImageWidthCells(width);
+								this.chatContainer.markChildStale(child);
 							}
 						}
+						this.ui.requestRender();
 					},
 					onAutoResizeImagesChange: (enabled) => {
 						this.settingsManager.setImageAutoResize(enabled);
@@ -5007,6 +5146,7 @@ export class InteractiveMode {
 					},
 					onThinkingLevelChange: (level) => {
 						this.session.setThinkingLevel(level);
+						this.applyThinkingLevel(level);
 						this.refreshModelIndicators();
 					},
 					onThemeChange: (themeName) => {
@@ -5141,6 +5281,7 @@ export class InteractiveMode {
 			try {
 				await this.session.setModel(resolution.model);
 				this.session.setThinkingLevel(resolution.thinkingLevel);
+				this.applyThinkingLevel(resolution.thinkingLevel);
 				this.refreshModelIndicators();
 				if (!opts?.silent) {
 					this.showStatus(`Role: ${role} -> ${resolution.model.provider}/${resolution.model.id}`);
@@ -6871,6 +7012,7 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 		this.unregisterSignalHandlers();
 		this.setTerminalProgress(false);
 		this.clearInterruptWatchdog();
+		this.ephemeralStatus.dispose();
 		// Drop the hero-ignition ticker if the ease is still mid-flight at teardown.
 		this.heroIgnitionUnsub?.();
 		this.heroIgnitionUnsub = null;
@@ -6893,4 +7035,30 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 			this.isInitialized = false;
 		}
 	}
+}
+
+/**
+ * True when any assistant message has thinking content but no text — toggling
+ * hide-thinking in grouped mode changes whether that message gets a bubble.
+ */
+export function sessionHasThinkingOnlyAssistant(messages: ReadonlyArray<unknown>): boolean {
+	for (const raw of messages) {
+		if (!raw || typeof raw !== "object") continue;
+		const message = raw as { role?: string; content?: unknown };
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		let hasText = false;
+		let hasThinking = false;
+		for (const block of message.content) {
+			if (!block || typeof block !== "object") continue;
+			const c = block as { type?: string; text?: string; thinking?: string };
+			if (c.type === "text" && typeof c.text === "string" && c.text.trim().length > 0) {
+				hasText = true;
+			}
+			if (c.type === "thinking" && typeof c.thinking === "string" && c.thinking.trim().length > 0) {
+				hasThinking = true;
+			}
+		}
+		if (hasThinking && !hasText) return true;
+	}
+	return false;
 }

@@ -1,9 +1,13 @@
 /**
  * Single source of truth for the grounding guard chain propagated to subagents.
  *
- * Parent-only guards (learned-error, destructive-command, patch-audit, etc.)
- * are inserted by bundleBuiltInExtensions between edit-precondition and
+ * Parent-only guards (destructive-command, patch-audit, intent-gate, etc.) are
+ * inserted by bundleBuiltInExtensions between edit-precondition and
  * grounding-guard, or after bash-grounding — not part of this list.
+ * Learned-error is registered on the subagent chain in createSubagentGuardChain
+ * (same factory as the parent insert). Destructive speed-bump is also registered
+ * separately in createSubagentGuardChain (ADR-0006 middle tier) so the parent
+ * does not double-register it.
  */
 
 import type { ExtensionAPI } from "../extensions/index.js";

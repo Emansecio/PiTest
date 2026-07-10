@@ -113,4 +113,19 @@ describe("BashExecutionComponent width handling (#2569)", () => {
 		const expanded = stripAnsi(component.render(width).join("\n"));
 		expect(expanded).toContain("wc -l");
 	});
+
+	it("puts cancel hint in trailing suffix, not the loader message body (U02)", () => {
+		const { stub } = createTuiStub(100);
+		const component = new BashExecutionComponent("echo hi", stub);
+		const loader = (component as unknown as { loader: { message: string; coloredTrailingSuffix: string } }).loader;
+
+		// Raw message stays a clean status label.
+		expect(loader.message).toBe("Running…");
+		expect(loader.message).not.toContain("cancel");
+
+		// Cancel hint is applied via setTrailingSuffix (messageColorFn wraps it).
+		const suffixPlain = stripAnsi(loader.coloredTrailingSuffix);
+		expect(suffixPlain).toContain("to cancel");
+		expect(suffixPlain).toMatch(/·/);
+	});
 });

@@ -51,6 +51,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	"opencode-go": "kimi-k2.6",
 	"kimi-coding": "kimi-for-coding",
 	xiaomi: "mimo-v2.5-pro",
+	xai: "grok-4.5",
 };
 
 export interface ScopedModel {
@@ -310,6 +311,35 @@ function resolvePatternToEntry(
 	});
 	if (!model) return undefined;
 	return { model, thinkingLevel: thinkingLevel ?? fallbackThinking };
+}
+
+/**
+ * Model-id substrings that mark a cheap/fast tier (haiku, mini, nano, flash, lite).
+ * Used for zero-config compact-role sibling routing — same provider only.
+ * Kept local (not imported from coordinator) so model-resolver stays free of
+ * coordinator coupling; keep in sync with SMALL_CLASS_MODEL_MARKERS there.
+ */
+const COMPACT_SIBLING_MARKERS: readonly string[] = ["haiku", "mini", "nano", "flash", "lite"];
+
+/**
+ * Pick a same-provider small-class sibling of the session model for compaction
+ * summarization. Returns undefined when the session model is already small-class,
+ * or no sibling exists on that provider. Auth is NOT checked here — callers must
+ * fail-open when the sibling has no credentials.
+ */
+export function resolveCompactSibling(sessionModel: Model<Api>, availableModels: Model<Api>[]): Model<Api> | undefined {
+	const sessionId = sessionModel.id.toLowerCase();
+	if (COMPACT_SIBLING_MARKERS.some((m) => sessionId.includes(m))) return undefined;
+	const siblings = availableModels.filter(
+		(m) =>
+			m.provider === sessionModel.provider &&
+			m.id !== sessionModel.id &&
+			COMPACT_SIBLING_MARKERS.some((marker) => m.id.toLowerCase().includes(marker)),
+	);
+	if (siblings.length === 0) return undefined;
+	// Prefer the cheapest sibling when cost metadata is present; otherwise first match.
+	siblings.sort((a, b) => (a.cost?.input ?? Number.POSITIVE_INFINITY) - (b.cost?.input ?? Number.POSITIVE_INFINITY));
+	return siblings[0];
 }
 
 /**
@@ -733,18 +763,21 @@ function findDefaultModel(availableModels: Model<Api>[]): Model<Api> | undefined
  * role config — so it is unit-testable without a TUI or session.
  *
  *  - mode "plan" + a configured `plan` role → "plan"
- *  - mode "auto" + the active role is still "plan" → "default" (restore; never
- *    clobber a role the user picked manually mid-session)
+ *  - mode "auto" + the active role is still "plan" → `roleBeforePlan` when
+ *    provided, else "default" (never clobber a role the user picked manually
+ *    mid-session — that path returns undefined because activeRole !== "plan")
  *  - otherwise → undefined (no-op / fail-open)
  *
  * `planRoleConfig` is `settings.modelRoles?.plan`; pass undefined when absent.
+ * `roleBeforePlan` is the role that was active before entering plan mode.
  */
 export function decideRoleForPermissionMode(
 	mode: "plan" | "auto",
 	activeRole: ModelRole,
 	planRoleConfig: ModelRoleConfig | undefined,
+	roleBeforePlan?: ModelRole,
 ): ModelRole | undefined {
 	if (mode === "plan" && planRoleConfig) return "plan";
-	if (mode === "auto" && activeRole === "plan") return "default";
+	if (mode === "auto" && activeRole === "plan") return roleBeforePlan ?? "default";
 	return undefined;
 }

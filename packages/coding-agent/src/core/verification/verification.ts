@@ -12,6 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { delimiter, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { waitForChildProcess } from "../../utils/child-process.ts";
+import { killProcessTree } from "../../utils/shell.ts";
 import { getAvailableAdapters } from "../dap/config.ts";
 
 /**
@@ -43,6 +44,8 @@ const CHECK_SCRIPT_PREFERENCE = ["check", "typecheck", "type-check", "lint", "te
 
 /** Cap captured output so a noisy check can't blow up memory or the prompt. */
 const MAX_OUTPUT_BYTES = 64_000;
+/** Do not let a failed Windows tree-kill turn a verification timeout into a hang. */
+const KILL_SETTLE_GRACE_MS = 3_000;
 
 export interface CheckResult {
 	ok: boolean;
@@ -287,21 +290,15 @@ export async function runCheckCommand(
 	proc.stderr?.on("data", (chunk: Buffer) => append(stderrDecoder.write(chunk)));
 
 	let killTimer: NodeJS.Timeout | undefined;
+	let forceSettleTimer: NodeJS.Timeout | undefined;
+	let forceSettle: ((code: number) => void) | undefined;
 	const kill = () => {
 		const pid = proc.pid;
 		try {
 			if (process.platform === "win32" && pid !== undefined) {
-				// `shell:true` runs cmd.exe; killing it leaves the real child alive.
-				// taskkill /T tears down the whole process tree.
-				const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
-					stdio: "ignore",
-					windowsHide: true,
-				});
-				// If taskkill can't start (PATH without System32, renamed/missing binary) the
-				// failure arrives as an async 'error' event; without a listener Node makes it
-				// fatal (uncaughtException). This runs on the timeout/abort recovery path, so a
-				// crash here would defeat the very kill it's performing.
-				killer.on("error", () => {});
+				// `shell:true` runs cmd.exe; use the shared tree killer so descendants
+				// receive both taskkill and its direct-kill fallback.
+				killProcessTree(pid);
 			} else if (pid !== undefined) {
 				process.kill(-pid, "SIGKILL"); // negative pid → kill the process group
 			} else {
@@ -313,8 +310,21 @@ export async function runCheckCommand(
 			} catch {}
 		}
 	};
+	const armForceSettle = () => {
+		if (forceSettleTimer) return;
+		forceSettleTimer = setTimeout(() => {
+			// The tree-kill is best effort, but this API's timeout must be a hard
+			// wall-clock boundary even if Windows refuses to reap a descendant.
+			proc.stdout?.destroy();
+			proc.stderr?.destroy();
+			forceSettle?.(1);
+		}, KILL_SETTLE_GRACE_MS);
+	};
 
-	const onAbort = () => kill();
+	const onAbort = () => {
+		kill();
+		armForceSettle();
+	};
 	if (opts?.signal) {
 		if (opts.signal.aborted) kill();
 		else opts.signal.addEventListener("abort", onAbort, { once: true });
@@ -323,16 +333,25 @@ export async function runCheckCommand(
 		killTimer = setTimeout(() => {
 			timedOut = true;
 			kill();
+			armForceSettle();
 		}, opts.timeoutMs);
 	}
 
 	let exitCode: number;
 	try {
-		exitCode = (await waitForChildProcess(proc)) ?? 1;
+		const childExit = waitForChildProcess(proc).then(
+			(code) => code ?? 1,
+			() => 1,
+		);
+		const forcedExit = new Promise<number>((resolve) => {
+			forceSettle = resolve;
+		});
+		exitCode = await Promise.race([childExit, forcedExit]);
 	} catch {
 		exitCode = 1;
 	} finally {
 		if (killTimer) clearTimeout(killTimer);
+		if (forceSettleTimer) clearTimeout(forceSettleTimer);
 		opts?.signal?.removeEventListener("abort", onAbort);
 	}
 

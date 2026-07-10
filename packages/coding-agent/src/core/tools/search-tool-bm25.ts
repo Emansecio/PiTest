@@ -7,6 +7,7 @@
  */
 
 import type { AgentTool } from "@pit/agent-core";
+import { suggestClosest } from "@pit/ai";
 import { Text } from "@pit/tui";
 import { type Static, Type } from "typebox";
 import { truncateWithEllipsis } from "../../utils/surrogate.ts";
@@ -18,6 +19,9 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 15;
 const ACTIVATION_SCORE_FLOOR = 0.1;
+/** Same thresholds as buildHiddenToolHint in tool-discovery.ts. */
+const ZERO_RESULT_HINT_MAX_DISTANCE = 3;
+const ZERO_RESULT_HINT_PREFIX_MIN_OVERLAP = 3;
 
 const searchToolBm25Schema = Type.Object(
 	{
@@ -91,7 +95,13 @@ export function createSearchToolBm25Definition(
 			details.matches = results.map((r) => ({ name: r.entry.name, score: r.score }));
 
 			if (results.length === 0) {
-				return textResult(`No hidden tool matches for query: "${input.query}".`, details);
+				const names = index.listHidden().map((h) => h.name);
+				const close = suggestClosest(input.query, names, {
+					maxDistance: ZERO_RESULT_HINT_MAX_DISTANCE,
+					prefixMinOverlap: ZERO_RESULT_HINT_PREFIX_MIN_OVERLAP,
+				});
+				const hint = close ? ` Did you mean "${close}"?` : "";
+				return textResult(`No hidden tool matches for query: "${input.query}".${hint}`, details);
 			}
 
 			const header = `Top ${results.length} tool match${results.length === 1 ? "" : "es"} for query: "${input.query}"`;

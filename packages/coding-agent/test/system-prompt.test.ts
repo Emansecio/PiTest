@@ -1,5 +1,5 @@
 import { splitSystemPromptOnDynamic } from "@pit/ai";
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { buildSystemPrompt } from "../src/core/system-prompt.js";
 
 describe("buildSystemPrompt", () => {
@@ -156,7 +156,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("valid code is not a verified visual");
+			expect(prompt).toContain("a screenshot alone is not a verified functional UI");
 		});
 
 		test("included with a chrome_devtools tool as the visual surface", () => {
@@ -167,7 +167,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).toContain("valid code is not a verified visual");
+			expect(prompt).toContain("a screenshot alone is not a verified functional UI");
 		});
 
 		test("omitted when edit/write exist but no preview/browser tool is reachable", () => {
@@ -178,7 +178,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).not.toContain("valid code is not a verified visual");
+			expect(prompt).not.toContain("a screenshot alone is not a verified functional UI");
 		});
 
 		test("omitted in a read-only session even when a preview tool is present", () => {
@@ -189,7 +189,7 @@ describe("buildSystemPrompt", () => {
 				cwd: process.cwd(),
 			});
 
-			expect(prompt).not.toContain("valid code is not a verified visual");
+			expect(prompt).not.toContain("a screenshot alone is not a verified functional UI");
 		});
 	});
 
@@ -246,6 +246,75 @@ describe("buildSystemPrompt", () => {
 			// cached prefix. Identical prefixes prove the late arrival is cache-free.
 			expect(withIndex).toBe(withoutIndex);
 		});
+
+		test("omits frequent_files when context occupancy is at or above 50%", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+				frequentFiles: freqFiles,
+				contextOccupancyPercent: 60,
+			});
+			expect(prompt).not.toContain("<frequent_files>");
+		});
+
+		test("emits frequent_files when context occupancy is below 50%", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+				frequentFiles: freqFiles,
+				contextOccupancyPercent: 40,
+			});
+			expect(prompt).toContain("<frequent_files>");
+			expect(prompt).toContain("src/a.ts");
+		});
+
+		test("omits hotFileOutlines when context occupancy is at or above 50%", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: ["read"],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+				hotFileOutlines: [{ path: "src/a.ts", symbols: ["foo", "bar"] }],
+				contextOccupancyPercent: 50,
+			});
+			expect(prompt).not.toContain("<frequent_files_outline>");
+		});
+	});
+
+	describe("PIT_NARRATION", () => {
+		const prev = process.env.PIT_NARRATION;
+		afterEach(() => {
+			if (prev === undefined) delete process.env.PIT_NARRATION;
+			else process.env.PIT_NARRATION = prev;
+		});
+
+		const base = {
+			selectedTools: [] as string[],
+			contextFiles: [] as [],
+			skills: [] as [],
+			cwd: process.cwd(),
+		};
+
+		test("default guideline suppresses narration between tool calls", () => {
+			delete process.env.PIT_NARRATION;
+			const prompt = buildSystemPrompt(base);
+			expect(prompt).toContain("Respond only when the task is done or a question is asked");
+			expect(prompt).not.toContain("Be concise in your responses");
+		});
+
+		test.each(["1", "true", "yes", "TRUE", "Yes"] as const)(
+			"enables narration guideline when PIT_NARRATION=%s",
+			(value) => {
+				process.env.PIT_NARRATION = value;
+				const prompt = buildSystemPrompt(base);
+				expect(prompt).toContain("Be concise in your responses");
+				expect(prompt).not.toContain("Respond only when the task is done or a question is asked");
+			},
+		);
 	});
 
 	describe("git state placement (prompt-cache stability)", () => {

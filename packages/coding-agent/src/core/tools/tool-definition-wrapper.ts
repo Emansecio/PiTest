@@ -4,8 +4,9 @@ import { getCurrentDeferredOutputStore } from "../deferred-output-store.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import {
 	ERROR_TEXT_CAP_BYTES,
+	effectiveToolOutputHardCapBytes,
 	formatSize,
-	TOOL_OUTPUT_HARD_CAP_BYTES,
+	refreshOccupancyTruncationCaps,
 	truncateHead,
 	truncateHeadTail,
 } from "./truncate.ts";
@@ -100,7 +101,7 @@ function capToolOutputBytes<TDetails>(
 ): AgentToolResult<TDetails> {
 	const content = result?.content;
 	if (!Array.isArray(content)) return result;
-	const maxBytes = cap?.maxBytes ?? TOOL_OUTPUT_HARD_CAP_BYTES;
+	const maxBytes = cap?.maxBytes ?? effectiveToolOutputHardCapBytes();
 	const mode = cap?.mode ?? "headTail";
 	let changed = false;
 	const capped = content.map((block) => {
@@ -196,8 +197,10 @@ export function wrapToolDefinition<TDetails = unknown>(
 		executionMode: definition.executionMode,
 		execute: async (toolCallId, params, signal, onUpdate) => {
 			try {
+				const ctx = ctxFactory?.() as ExtensionContext | undefined;
+				refreshOccupancyTruncationCaps(ctx?.getContextUsage?.());
 				return capToolOutputBytes(
-					await definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext),
+					await definition.execute(toolCallId, params, signal, onUpdate, ctx as ExtensionContext),
 					outputCap,
 				);
 			} catch (err) {

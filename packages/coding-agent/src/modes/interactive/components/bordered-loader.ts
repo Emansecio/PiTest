@@ -1,7 +1,7 @@
 import { CancellableLoader, Container, Loader, Spacer, Text, type TUI } from "@pit/tui";
 import type { Theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { SelectorCard } from "./selector-card.ts";
 import { reducedMotionLoaderIndicator } from "./spinner-ticker.ts";
 import { workingPulsePalette } from "./working-palette.ts";
 
@@ -14,8 +14,7 @@ export class BorderedLoader extends Container {
 	constructor(tui: TUI, theme: Theme, message: string, options?: { cancellable?: boolean }) {
 		super();
 		this.cancellable = options?.cancellable ?? true;
-		const borderColor = (s: string) => theme.fg("border", s);
-		this.addChild(new DynamicBorder(borderColor));
+		const card = new SelectorCard(1, 0, (s) => theme.fg("border", s));
 		const indicator = reducedMotionLoaderIndicator();
 		if (this.cancellable) {
 			this.loader = new CancellableLoader(
@@ -29,13 +28,13 @@ export class BorderedLoader extends Container {
 			this.signalController = new AbortController();
 			this.loader = new Loader(tui, workingPulsePalette(theme), (s) => theme.fg("muted", s), message, indicator);
 		}
-		this.addChild(this.loader);
+		card.addChild(this.loader);
 		if (this.cancellable) {
-			this.addChild(new Spacer(1));
-			this.addChild(new Text(keyHint("tui.select.cancel", "cancel"), 1, 0));
+			card.addChild(new Spacer(1));
+			card.addChild(new Text(keyHint("tui.select.cancel", "cancel"), 1, 0));
 		}
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder(borderColor));
+		card.addChild(new Spacer(1));
+		this.addChild(card);
 	}
 
 	get signal(): AbortSignal {

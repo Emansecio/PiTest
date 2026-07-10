@@ -1,20 +1,11 @@
 import { type Model, modelsAreEqual } from "@pit/ai";
-import {
-	Container,
-	type Focusable,
-	fuzzyFilter,
-	getKeybindings,
-	Input,
-	Spacer,
-	Text,
-	TruncatedText,
-	type TUI,
-} from "@pit/tui";
+import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Spacer, Text, type TUI } from "@pit/tui";
 import type { ModelRegistry } from "../../../core/model-registry.ts";
 import type { SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint } from "./keybinding-hints.ts";
+import { keyHint, selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
+import { SelectableRow } from "./selectable-row.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 interface ModelItem {
 	provider: string;
@@ -99,13 +90,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 
-		// Add top border
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
+		const card = new SelectorCard();
+		card.addChild(new Spacer(1));
 
 		this.headerHintText = new Text(this.getHeaderHintText(), 0, 0);
-		this.addChild(this.headerHintText);
-		this.addChild(new Spacer(1));
+		card.addChild(this.headerHintText);
+		card.addChild(new Spacer(1));
 
 		// Create search input
 		this.searchInput = new Input();
@@ -118,18 +108,16 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				this.handleSelect(this.filteredModels[this.selectedIndex].model);
 			}
 		};
-		this.addChild(this.searchInput);
+		card.addChild(this.searchInput);
 
-		this.addChild(new Spacer(1));
+		card.addChild(new Spacer(1));
 
 		// Create list container
 		this.listContainer = new Container();
-		this.addChild(this.listContainer);
+		card.addChild(this.listContainer);
 
-		this.addChild(new Spacer(1));
-
-		// Add bottom border
-		this.addChild(new DynamicBorder());
+		card.addChild(new Spacer(1));
+		this.addChild(card);
 
 		// Load models and do initial render
 		this.loadModels().then(() => {
@@ -287,21 +275,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const isCurrent = modelsAreEqual(this.currentModel, item.model);
 			const label = modelRowLabel(item.model);
 			const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-
-			let line = "";
-			if (isSelected) {
-				line = `${theme.fg("accent", "→ ")}${theme.fg("accent", label)}${checkmark}`;
-			} else {
-				line = `  ${theme.fg("text", label)}${checkmark}`;
-			}
-
-			this.listContainer.addChild(new TruncatedText(line, 0, 0));
+			const cursor = selectionCursor(isSelected);
+			const name = isSelected ? theme.fg("accent", label) : theme.fg("text", label);
+			this.listContainer.addChild(new SelectableRow(`${cursor}${name}${checkmark}`, isSelected));
 		}
 
-		// Add scroll indicator if needed
-		if (startIndex > 0 || endIndex < this.filteredModels.length) {
-			const scrollInfo = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredModels.length})`);
-			this.listContainer.addChild(new Text(scrollInfo, 0, 0));
+		const scrollHint = themedScrollPositionHint(this.selectedIndex, this.filteredModels.length, startIndex, endIndex);
+		if (scrollHint) {
+			this.listContainer.addChild(new Text(scrollHint, 0, 0));
 		}
 
 		// Show "no results" only when there's truly nothing to list. A models.json

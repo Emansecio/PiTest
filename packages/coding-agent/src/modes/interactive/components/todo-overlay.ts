@@ -9,7 +9,7 @@ import { type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import type { TodoItem } from "../../../core/todo/todo-manager.ts";
 import { theme } from "../theme/theme.ts";
-import { GAUGE_EMPTY, GAUGE_FILLED } from "./gauge-glyphs.ts";
+import { resolveGaugeGlyphs } from "./gauge-glyphs.ts";
 import { spinnerGlyphAt } from "./spinner-ticker.ts";
 
 /** Cap on overlay rows; completed todos are hidden first when exceeded. */
@@ -45,6 +45,7 @@ function sortTodosForDisplay(items: TodoItem[]): TodoItem[] {
 
 function renderProgressBar(done: number, total: number, width: number): string {
 	if (total <= 1) return "";
+	const { filled: GAUGE_FILLED, empty: GAUGE_EMPTY } = resolveGaugeGlyphs();
 	const barWidth = Math.min(PROGRESS_BAR_WIDTH, Math.max(4, width - CONNECTOR_WIDTH - 8));
 	const filled = Math.round((done / total) * barWidth);
 	const empty = barWidth - filled;

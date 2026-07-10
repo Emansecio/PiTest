@@ -23,12 +23,17 @@ import type { Orchestration } from "../fusion/types.ts";
 import { createExitPlanToolDefinition } from "../permissions/exit-plan-tool.ts";
 import {
 	describeToolAction,
+	formatPermissionBlockedContent,
+	humanModeNotifyLabel,
 	normalizePermissionMode,
 	type PermissionChecker,
 	type PermissionMode,
 	type PermissionSettings,
 } from "../permissions/index.ts";
 import { buildPlanModeSection } from "../permissions/plan-mode-prompt.ts";
+
+/** Transcript custom-type for compact permission-deny lines (see custom-message.ts). */
+export const PERMISSION_BLOCKED_CUSTOM_TYPE = "pit.permission-blocked";
 
 const STATUS_KEY = "permissions";
 
@@ -105,13 +110,22 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 		pi.on("tool_call", (event, _ctx) => {
 			const action = describeToolAction(event.toolName, event.input);
 			const decision = checker.check(action);
+			const reason = "reason" in decision ? decision.reason : undefined;
 			onDecision?.({
 				toolName: event.toolName,
 				decision: decision.decision,
-				reason: "reason" in decision ? decision.reason : undefined,
+				reason,
 			});
 
 			if (decision.decision === "deny") {
+				// Quiet one-line transcript notice so vibecoders see *why* (mode/rule),
+				// not only a failed tool row. Model still gets the block reason.
+				const content = formatPermissionBlockedContent(event.toolName, reason, checker.mode);
+				pi.sendMessage({
+					customType: PERMISSION_BLOCKED_CUSTOM_TYPE,
+					content,
+					display: true,
+				});
 				return { block: true, reason: decision.reason };
 			}
 			return undefined;
@@ -132,8 +146,9 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 					return;
 				}
 				checker.updateMode(mode);
-				ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, pi.getOrchestration())}`);
-				ctx.ui.notify(`Permission mode → ${mode}`, "info");
+				const orch = pi.getOrchestration();
+				ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, orch)}`);
+				ctx.ui.notify(humanModeNotifyLabel(orch, mode), "info");
 				onModeChange?.(mode);
 			},
 		});
@@ -147,7 +162,7 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 				checker.updateMode(next.mode);
 				pi.setOrchestration(next.orchestration);
 				ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, next.orchestration)}`);
-				ctx.ui.notify(`Mode → ${next.orchestration === "fusion" ? "fusion · " : ""}${next.mode}`, "info");
+				ctx.ui.notify(humanModeNotifyLabel(next.orchestration, next.mode), "info");
 				onModeChange?.(next.mode);
 			},
 		});

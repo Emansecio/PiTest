@@ -1,7 +1,7 @@
 import type { ThinkingLevel } from "@pit/agent-core";
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@pit/tui";
 import { getSelectListTheme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 const THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -14,11 +14,13 @@ const LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	low: "Light reasoning (~2k tokens)",
 	medium: "Moderate reasoning (~8k tokens)",
 	high: "Deep reasoning (~16k tokens)",
-	xhigh: "Maximum reasoning (~32k tokens)",
+	xhigh: "Extra-high reasoning (~32k tokens)",
+	max: "Maximum reasoning depth for the hardest problems",
+	ultra: "Ultra mode — multi-agent acceleration beyond max",
 };
 
 /**
- * Component that renders a thinking level selector with borders
+ * Component that renders a thinking level selector with a rounded card frame
  */
 export class ThinkingSelectorComponent extends Container {
 	private selectList: SelectList;
@@ -37,10 +39,7 @@ export class ThinkingSelectorComponent extends Container {
 			description: LEVEL_DESCRIPTIONS[level],
 		}));
 
-		// Add top border
-		this.addChild(new DynamicBorder());
-
-		// Create selector
+		const card = new SelectorCard();
 		this.selectList = new SelectList(
 			thinkingLevels,
 			thinkingLevels.length,
@@ -48,7 +47,6 @@ export class ThinkingSelectorComponent extends Container {
 			THINKING_SELECT_LIST_LAYOUT,
 		);
 
-		// Preselect current level
 		const currentIndex = thinkingLevels.findIndex((item) => item.value === currentLevel);
 		if (currentIndex !== -1) {
 			this.selectList.setSelectedIndex(currentIndex);
@@ -62,10 +60,8 @@ export class ThinkingSelectorComponent extends Container {
 			onCancel();
 		};
 
-		this.addChild(this.selectList);
-
-		// Add bottom border
-		this.addChild(new DynamicBorder());
+		card.addChild(this.selectList);
+		this.addChild(card);
 	}
 
 	getSelectList(): SelectList {

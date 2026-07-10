@@ -39,6 +39,8 @@ export interface OpenBankOptions {
 }
 
 const SCOPE_BOOST = 1.25;
+/** Minimum BM25 score for recall results — filters noisy near-misses (tool BM25 uses 0.1 for activation). */
+const HINDSIGHT_MIN_SCORE = 0.15;
 
 function entryHaystack(entry: HindsightEntry): string {
 	const tags = entry.tags && entry.tags.length > 0 ? ` ${entry.tags.join(" ")}` : "";
@@ -130,6 +132,9 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 	const byId = new Map<string, HindsightEntry>();
 	for (const entry of entries) byId.set(entry.id, entry);
 	const searchStatsCache = new Map<string, SearchStats>();
+	const maxEntries = opts && typeof opts.maxEntries === "number" && opts.maxEntries > 0 ? opts.maxEntries : undefined;
+	const perScopeMax =
+		opts && typeof opts.perScopeMax === "number" && opts.perScopeMax > 0 ? opts.perScopeMax : undefined;
 
 	function invalidateSearchStats(): void {
 		searchStatsCache.clear();
@@ -166,6 +171,9 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 			invalidateSearchStats();
 			const line = `${JSON.stringify(entry)}\n`;
 			appendFileSync(filePath, line, "utf-8");
+			// Keep bank bounded during long sessions (limits previously only ran at open).
+			if (perScopeMax !== undefined) bank.enforcePerScopeLimit(perScopeMax);
+			if (maxEntries !== undefined) bank.enforceLimit(maxEntries);
 			return entry;
 		},
 
@@ -200,7 +208,7 @@ export function openBank(filePath: string, opts?: OpenBankOptions): HindsightBan
 				const doc = stats.docs[i];
 				if (!doc) continue;
 				const { score, bestTerm } = bm25Score(queryTokens, doc, stats.avgLen, stats.df, stats.entries.length);
-				if (score <= 0) continue;
+				if (score <= HINDSIGHT_MIN_SCORE) continue;
 				scored.push({
 					entry,
 					score,

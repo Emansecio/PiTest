@@ -33,6 +33,7 @@ import {
 	BASH_MAX_BYTES,
 	BASH_MAX_LINES,
 	collapseRepeatedLines,
+	effectiveBashMaxBytes,
 	formatSize,
 	type TruncationResult,
 } from "./truncate.js";
@@ -967,7 +968,7 @@ Returns stdout and stderr, truncated to the last ${BASH_MAX_LINES} lines or ${BA
 			const output = new OutputAccumulator({
 				tempFilePrefix: "pi-bash",
 				maxLines: BASH_MAX_LINES,
-				maxBytes: BASH_MAX_BYTES,
+				maxBytes: effectiveBashMaxBytes(),
 				headLines: BASH_HEAD_MAX_LINES,
 				headBytes: BASH_HEAD_MAX_BYTES,
 			});

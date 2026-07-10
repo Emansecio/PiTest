@@ -412,6 +412,47 @@ export class RpcClient {
 	}
 
 	/**
+	 * Export session to JSONL.
+	 */
+	async exportJsonl(outputPath?: string): Promise<{ path: string }> {
+		const response = await this.send({ type: "export_jsonl", outputPath });
+		return this.getData(response);
+	}
+
+	/**
+	 * Import a session from a JSONL transcript file (replaces the current session).
+	 * @returns Object with `cancelled: true` if an extension cancelled the import
+	 */
+	async import(inputPath: string, cwdOverride?: string): Promise<{ cancelled: boolean }> {
+		const response = await this.send({ type: "import", inputPath, cwdOverride });
+		return this.getData(response);
+	}
+
+	/**
+	 * Navigate the session tree to a target entry.
+	 * When `summarize` is true, may call the LLM to summarize the abandoned path (cost/latency).
+	 */
+	async navigateTree(
+		targetId: string,
+		options?: {
+			summarize?: boolean;
+			customInstructions?: string;
+			replaceInstructions?: boolean;
+			label?: string;
+		},
+	): Promise<{ cancelled: boolean; aborted?: boolean; editorText?: string }> {
+		const response = await this.send({
+			type: "navigate_tree",
+			targetId,
+			summarize: options?.summarize,
+			customInstructions: options?.customInstructions,
+			replaceInstructions: options?.replaceInstructions,
+			label: options?.label,
+		});
+		return this.getData(response);
+	}
+
+	/**
 	 * Switch to a different session file.
 	 * @returns Object with `cancelled: true` if an extension cancelled the switch
 	 */

@@ -3,11 +3,11 @@ import { summarizeArgsOneLine } from "../src/modes/interactive/components/arg-su
 
 describe("summarizeArgsOneLine", () => {
 	test("formats scalar object entries as key: value", () => {
-		expect(summarizeArgsOneLine({ path: "a.ts", count: 3 })).toBe("path: a.ts  count: 3");
+		expect(summarizeArgsOneLine({ path: "a.ts", count: 3 })).toBe("path: a.ts count: 3");
 	});
 
 	test("collapses arrays and objects", () => {
-		expect(summarizeArgsOneLine({ items: [1, 2], nested: { a: 1 } })).toBe("items: [2]  nested: {…}");
+		expect(summarizeArgsOneLine({ items: [1, 2], nested: { a: 1 } })).toBe("items: [2] nested: {…}");
 	});
 
 	test("clamps long strings with an ellipsis", () => {

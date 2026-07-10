@@ -29,3 +29,15 @@ tmux kill-session -t pit-test
 > **Windows (no native tmux):** drive the real TUI via computer-use against a
 > pre-configured terminal, or run the tmux flow above under WSL. Headless render
 > checks (no TTY) go through the `@pit/tui` `VirtualTerminal` in tests.
+
+## Visual gate
+
+`npm run check` (biome + tsgo + vitest) is necessary but **not sufficient** for
+TUI visual changes. Layout, truncation, and theme tokens need a render pass at
+real terminal widths:
+
+- Exercise **60** and **140** columns (narrow card / wide hero and list paths).
+- Prefer `@pit/tui` `VirtualTerminal` in unit tests for hermetic width asserts;
+  use tmux (or WSL) when you need a live session.
+- For theme/token changes, spot-check **dark and light** so dim/muted/accent
+  contrast does not regress in either palette.

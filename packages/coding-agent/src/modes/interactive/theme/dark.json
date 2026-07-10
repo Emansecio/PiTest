@@ -53,7 +53,7 @@
 		"mdCodeBlock": "#9fd6b8",
 		"mdCodeBlockBorder": "#4fb6c4",
 		"mdQuote": "muted",
-		"mdQuoteBorder": "muted",
+		"mdQuoteBorder": "borderMuted",
 		"mdHr": "muted",
 		"mdListBullet": "teal",
 
@@ -79,6 +79,7 @@
 		"thinkingXhigh": "lavender",
 
 		"bashMode": "green",
+		"planMode": "gold",
 
 		"gutterToolPending": "muted",
 		"gutterToolSuccess": "green",

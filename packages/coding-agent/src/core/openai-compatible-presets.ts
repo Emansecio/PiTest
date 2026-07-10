@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { Api, Model } from "@pit/ai";
 import { writeFileAtomicSync } from "../utils/atomic-write.ts";
+import { parseJsonc } from "../utils/jsonc.ts";
 import { truncateWithEllipsis } from "../utils/surrogate.ts";
 
 /** OpenAI-completions compat flags for a preset model. */
@@ -190,6 +191,45 @@ export const CURATED_EXTRA_MODELS: readonly Model<Api>[] = [
 			maxTokensField: "max_tokens",
 			supportsLongCacheRetention: false,
 		},
+	} as Model<Api>,
+	// xAI Grok — SuperGrok / X Premium+ OAuth (and XAI_API_KEY for grok-4.5).
+	// Catalog aligned with Grok CLI `~/.grok/models_cache.json` + docs.x.ai (Jul 2026).
+	{
+		id: "grok-4.5",
+		name: "Grok 4.5",
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "https://api.x.ai/v1",
+		reasoning: true,
+		thinkingLevelMap: { off: null, low: "low", medium: "medium", high: "high" },
+		input: ["text", "image"],
+		cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+		contextWindow: 500_000,
+		maxTokens: 64_000,
+	} as Model<Api>,
+	{
+		id: "grok-composer-2.5-fast",
+		name: "Composer 2.5",
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "https://cli-chat-proxy.grok.com/v1",
+		reasoning: false,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 64_000,
+	} as Model<Api>,
+	{
+		id: "grok-build-0.1",
+		name: "Grok Build 0.1",
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "https://api.x.ai/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 256_000,
+		maxTokens: 64_000,
 	} as Model<Api>,
 ];
 
@@ -394,10 +434,10 @@ export function persistOpenAICompatibleProviderToModelsJson(
 		const raw = readFileSync(modelsJsonPath, "utf-8").trim();
 		if (raw) {
 			try {
-				root = JSON.parse(raw) as { providers?: Record<string, unknown> };
+				root = parseJsonc(raw) as { providers?: Record<string, unknown> };
 			} catch (error) {
 				throw new Error(
-					`models.json is not plain JSON (comments/trailing commas?); edit it manually to add "${providerId}". ${
+					`models.json could not be parsed; edit it manually to add "${providerId}". ${
 						error instanceof Error ? error.message : String(error)
 					}`,
 				);

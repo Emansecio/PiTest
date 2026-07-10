@@ -1156,9 +1156,10 @@ export interface ExtensionAPI {
 	/**
 	 * Tag a handler as side-effect-only — declares it will NOT mutate the event
 	 * payload nor return a non-undefined value to influence subsequent handlers.
-	 * Currently the runner uses this for `before_provider_request`: tagged
-	 * handlers run in parallel via Promise.all; untagged handlers stay serial
-	 * (their return value can replace the payload, so order matters).
+	 * Currently the runner uses this for `before_provider_request` and
+	 * `before_agent_start`: tagged handlers run in parallel via Promise.all;
+	 * untagged handlers stay serial (their return value can replace the payload /
+	 * system prompt, so order matters).
 	 *
 	 * Returns the same handler reference for ergonomic chaining:
 	 *
@@ -1167,6 +1168,13 @@ export interface ExtensionAPI {
 	 *   }));
 	 */
 	markSideEffect<F extends (...args: any[]) => any>(handler: F): F;
+
+	/**
+	 * Tag a `before_agent_start` handler that only injects messages (no systemPrompt
+	 * mutation). These run in parallel after serial system-prompt mutators, so
+	 * MCP @-mention expansion and similar lookups overlap instead of stacking.
+	 */
+	markMessageInjector<F extends (...args: any[]) => any>(handler: F): F;
 
 	// =========================================================================
 	// Tool Registration

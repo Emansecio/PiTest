@@ -2,6 +2,7 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
+import { basename } from "node:path";
 import type { AgentMessage } from "@pit/agent-core";
 import type { ImageContent, Model } from "@pit/ai";
 import type { KeyId } from "@pit/tui";
@@ -11,6 +12,7 @@ import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
+import { clearTaskRigorTurnCache } from "../task-rigor.ts";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -86,9 +88,14 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
  * loader's PIT_SIDE_EFFECT_EXTENSIONS env-driven tagger.
  */
 export const HANDLER_SIDE_EFFECT_TAG = "__piSideEffect" as const;
+/** Tag for before_agent_start handlers that only inject messages (parallel-safe). */
+export const HANDLER_MESSAGE_INJECTOR_TAG = "__piMessageInjector" as const;
 
 // Max time a before_agent_start handler may block TTFT before being skipped.
-const DEFAULT_BEFORE_AGENT_START_TIMEOUT_MS = 5_000;
+// Lowered from 5s → 1s so hung extension hooks fail-open faster; override via
+// PIT_EXTENSION_HOOK_TIMEOUT_MS. MCP @-mention expansion aligns its internal
+// AbortSignal to this budget.
+const DEFAULT_BEFORE_AGENT_START_TIMEOUT_MS = 1_000;
 
 function resolveBeforeAgentStartTimeoutMs(): number {
 	const raw = process.env.PIT_EXTENSION_HOOK_TIMEOUT_MS;
@@ -100,6 +107,14 @@ function resolveBeforeAgentStartTimeoutMs(): number {
 		return DEFAULT_BEFORE_AGENT_START_TIMEOUT_MS;
 	}
 	return parsed;
+}
+
+/** Short label for per-extension timing logs (built-in/inline vs file path). */
+function extensionTimingLabel(extensionPath: string): string {
+	if (extensionPath.startsWith("<") && extensionPath.endsWith(">")) {
+		return extensionPath.slice(1, -1);
+	}
+	return basename(extensionPath);
 }
 
 type BuiltInKeyBindings = Partial<Record<KeyId, { keybinding: string; restrictOverride: boolean }>>;
@@ -286,6 +301,12 @@ export class ExtensionRunner {
 				mutating: Array<{ ext: Extension; handler: (...args: unknown[]) => Promise<unknown> }>;
 		  }
 		| undefined;
+	private _cachedContextPartition:
+		| {
+				sideEffect: Array<{ ext: Extension; handler: (...args: unknown[]) => Promise<unknown> }>;
+				mutating: Array<{ ext: Extension; handler: (...args: unknown[]) => Promise<unknown> }>;
+		  }
+		| undefined;
 
 	constructor(
 		extensions: Extension[],
@@ -449,6 +470,7 @@ export class ExtensionRunner {
 		this._cachedCommands = undefined;
 		this._cachedCommandLookup = undefined;
 		this._cachedBprPartition = undefined;
+		this._cachedContextPartition = undefined;
 		// Hot cache of "does any extension handle event X". Omitting it here let a
 		// handler registered via a late api.on() stay invisible after an earlier
 		// emit cached `false` for that event.
@@ -1023,53 +1045,94 @@ export class ExtensionRunner {
 	 * Returns input unchanged when no handler is registered (sdk's
 	 * transformContext fires per turn).
 	 *
+	 * Side-effect handlers (tagged via `pi.markSideEffect()`) run in parallel;
+	 * untagged handlers run serially because their return value can replace
+	 * `messages` (P03).
+	 *
 	 * Handler contract: do not mutate `event.messages` in place; return
 	 * `{ messages: newArray }` to modify.
 	 */
 	async emitContext(messages: AgentMessage[]): Promise<AgentMessage[]> {
 		if (!this.hasHandlers("context")) return messages;
+		const partition = this.getContextPartition();
+		if (partition.sideEffect.length === 0 && partition.mutating.length === 0) {
+			return messages;
+		}
+
 		const piTiming = process.env.PIT_TIMING === "1";
 		const t0 = piTiming ? performance.now() : 0;
 		const ctx = this.createContext();
 		let currentMessages = messages;
-		let handlerCount = 0;
 		let mutated = false;
+		const handlerCount = partition.sideEffect.length + partition.mutating.length;
 
-		for (const ext of this.extensions) {
-			const handlers = ext.handlers.get("context");
-			if (!handlers || handlers.length === 0) continue;
+		const runHandler = async (
+			ext: Extension,
+			handler: (...args: unknown[]) => Promise<unknown>,
+			eventMessages: AgentMessage[],
+		): Promise<ContextEventResult | undefined> => {
+			try {
+				const event: ContextEvent = { type: "context", messages: eventMessages };
+				return (await handler(event, ctx)) as ContextEventResult | undefined;
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				const stack = err instanceof Error ? err.stack : undefined;
+				this.emitError({
+					extensionPath: ext.path,
+					event: "context",
+					error: message,
+					stack,
+				});
+				return undefined;
+			}
+		};
 
-			for (const handler of handlers) {
-				handlerCount++;
-				try {
-					const event: ContextEvent = { type: "context", messages: currentMessages };
-					const handlerResult = await handler(event, ctx);
+		// Observe-only handlers first (parallel). They see the pre-mutation snapshot.
+		if (partition.sideEffect.length > 0) {
+			await Promise.all(partition.sideEffect.map(({ ext, handler }) => runHandler(ext, handler, currentMessages)));
+		}
 
-					if (handlerResult && (handlerResult as ContextEventResult).messages) {
-						currentMessages = (handlerResult as ContextEventResult).messages!;
-						mutated = true;
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitError({
-						extensionPath: ext.path,
-						event: "context",
-						error: message,
-						stack,
-					});
-				}
+		const tSideEffect = piTiming ? performance.now() : 0;
+
+		for (const { ext, handler } of partition.mutating) {
+			const handlerResult = await runHandler(ext, handler, currentMessages);
+			if (handlerResult?.messages) {
+				currentMessages = handlerResult.messages;
+				mutated = true;
 			}
 		}
 
 		if (piTiming) {
 			const total = performance.now() - t0;
+			const sideEffectMs = tSideEffect - t0;
+			const mutatingMs = performance.now() - tSideEffect;
 			console.error(
-				`  [perf] METRIC emit_context_ms=${total.toFixed(1)} handlers=${handlerCount} mutated=${mutated ? 1 : 0} msgs=${messages.length}`,
+				`  [perf] METRIC emit_context_ms=${total.toFixed(1)} side_effect_ms=${sideEffectMs.toFixed(1)} mutating_ms=${mutatingMs.toFixed(1)} se_n=${partition.sideEffect.length} mut_n=${partition.mutating.length} handlers=${handlerCount} mutated=${mutated ? 1 : 0} msgs=${messages.length}`,
 			);
 		}
 
 		return currentMessages;
+	}
+
+	private getContextPartition(): NonNullable<ExtensionRunner["_cachedContextPartition"]> {
+		if (this._cachedContextPartition !== undefined) return this._cachedContextPartition;
+		type HandlerFn = (...args: unknown[]) => Promise<unknown>;
+		const sideEffect: Array<{ ext: Extension; handler: HandlerFn }> = [];
+		const mutating: Array<{ ext: Extension; handler: HandlerFn }> = [];
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("context");
+			if (!handlers || handlers.length === 0) continue;
+			for (const handler of handlers) {
+				const entry = { ext, handler: handler as HandlerFn };
+				if ((handler as unknown as Record<string, unknown>)[HANDLER_SIDE_EFFECT_TAG] === true) {
+					sideEffect.push(entry);
+				} else {
+					mutating.push(entry);
+				}
+			}
+		}
+		this._cachedContextPartition = { sideEffect, mutating };
+		return this._cachedContextPartition;
 	}
 
 	/**
@@ -1181,73 +1244,113 @@ export class ExtensionRunner {
 		let systemPromptModified = false;
 		const piTiming = process.env.PIT_TIMING === "1";
 		const t0 = piTiming ? performance.now() : 0;
+		let handlerCount = 0;
+		let timeoutCount = 0;
+		const beforeAgentStartTimeoutMs = resolveBeforeAgentStartTimeoutMs();
 
+		// Turn-scoped rigor cache so task-rigor + intent-gate share one classify.
+		clearTaskRigorTurnCache();
+
+		type BasEntry = { ext: Extension; handler: (...args: unknown[]) => unknown; handlerIdx: number };
+		const serial: BasEntry[] = [];
+		const parallel: BasEntry[] = [];
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_agent_start");
 			if (!handlers || handlers.length === 0) continue;
+			for (let handlerIdx = 0; handlerIdx < handlers.length; handlerIdx++) {
+				const handler = handlers[handlerIdx]!;
+				const tags = handler as unknown as Record<string, unknown>;
+				const entry: BasEntry = { ext, handler, handlerIdx };
+				if (tags[HANDLER_SIDE_EFFECT_TAG] === true || tags[HANDLER_MESSAGE_INJECTOR_TAG] === true) {
+					parallel.push(entry);
+				} else {
+					serial.push(entry);
+				}
+			}
+		}
 
-			for (const handler of handlers) {
-				try {
-					const event: BeforeAgentStartEvent = {
-						type: "before_agent_start",
-						prompt,
-						images,
-						systemPrompt: currentSystemPrompt,
-						systemPromptOptions,
-					};
-					const TIMED_OUT = Symbol();
-					let timer: ReturnType<typeof setTimeout> | undefined;
-					// Normalize to a promise so a synchronous return is handled
-					// identically by the race below (a resolved value passes through
-					// Promise.race the same way). If the timeout wins the race, this
-					// promise is dropped while still pending; attach a no-op catch so a
-					// late rejection cannot surface as an unhandled promise rejection.
-					const handlerPromise = Promise.resolve(handler(event, ctx));
-					handlerPromise.catch(() => {});
-					const beforeAgentStartTimeoutMs = resolveBeforeAgentStartTimeoutMs();
-					const handlerResult = await Promise.race([
-						handlerPromise,
-						new Promise<typeof TIMED_OUT>((resolve) => {
-							timer = setTimeout(() => resolve(TIMED_OUT), beforeAgentStartTimeoutMs);
-						}),
-					]);
-					if (timer !== undefined) clearTimeout(timer);
+		const runOne = async (
+			entry: BasEntry,
+			eventSystemPrompt: string,
+		): Promise<BeforeAgentStartEventResult | undefined> => {
+			const { ext, handler, handlerIdx } = entry;
+			const handlerT0 = piTiming ? performance.now() : 0;
+			let handlerStatus: "ok" | "timeout" | "error" = "ok";
+			handlerCount++;
+			try {
+				const event: BeforeAgentStartEvent = {
+					type: "before_agent_start",
+					prompt,
+					images,
+					systemPrompt: eventSystemPrompt,
+					systemPromptOptions,
+				};
+				const TIMED_OUT = Symbol();
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				const handlerPromise = Promise.resolve(handler(event, ctx));
+				handlerPromise.catch(() => {});
+				const handlerResult = await Promise.race([
+					handlerPromise,
+					new Promise<typeof TIMED_OUT>((resolve) => {
+						timer = setTimeout(() => resolve(TIMED_OUT), beforeAgentStartTimeoutMs);
+					}),
+				]);
+				if (timer !== undefined) clearTimeout(timer);
 
-					if (handlerResult === TIMED_OUT) {
-						this.emitError({
-							extensionPath: ext.path,
-							event: "before_agent_start",
-							error: `Handler timed out after ${beforeAgentStartTimeoutMs}ms`,
-						});
-						continue;
-					}
-
-					if (handlerResult) {
-						const result = handlerResult as BeforeAgentStartEventResult;
-						if (result.message) {
-							messages.push(result.message);
-						}
-						if (result.systemPrompt !== undefined) {
-							currentSystemPrompt = result.systemPrompt;
-							systemPromptModified = true;
-						}
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
+				if (handlerResult === TIMED_OUT) {
+					handlerStatus = "timeout";
+					timeoutCount++;
 					this.emitError({
 						extensionPath: ext.path,
 						event: "before_agent_start",
-						error: message,
-						stack,
+						error: `Handler timed out after ${beforeAgentStartTimeoutMs}ms`,
 					});
+					return undefined;
 				}
+				return handlerResult as BeforeAgentStartEventResult | undefined;
+			} catch (err) {
+				handlerStatus = "error";
+				const message = err instanceof Error ? err.message : String(err);
+				const stack = err instanceof Error ? err.stack : undefined;
+				this.emitError({
+					extensionPath: ext.path,
+					event: "before_agent_start",
+					error: message,
+					stack,
+				});
+				return undefined;
+			} finally {
+				if (piTiming) {
+					const handlerMs = performance.now() - handlerT0;
+					console.error(
+						`  [perf]   ${extensionTimingLabel(ext.path)}: handler[${handlerIdx}] ms=${handlerMs.toFixed(1)} status=${handlerStatus}`,
+					);
+				}
+			}
+		};
+
+		// Phase A: serial system-prompt mutators (order = registration order).
+		for (const entry of serial) {
+			const result = await runOne(entry, currentSystemPrompt);
+			if (result?.message) messages.push(result.message);
+			if (result?.systemPrompt !== undefined) {
+				currentSystemPrompt = result.systemPrompt;
+				systemPromptModified = true;
+			}
+		}
+
+		// Phase B: parallel side-effect + message-injector handlers.
+		if (parallel.length > 0) {
+			const parallelResults = await Promise.all(parallel.map((entry) => runOne(entry, currentSystemPrompt)));
+			for (const result of parallelResults) {
+				if (result?.message) messages.push(result.message);
+				// Parallel handlers must not mutate systemPrompt; ignore if they do.
 			}
 		}
 
 		if (piTiming) {
 			console.error(
-				`  [perf] METRIC emit_before_agent_start_ms=${(performance.now() - t0).toFixed(1)} extensions=${this.extensions.length}`,
+				`  [perf] METRIC emit_before_agent_start_ms=${(performance.now() - t0).toFixed(1)} extensions=${this.extensions.length} handlers=${handlerCount} timeouts=${timeoutCount} msgs=${messages.length} prompt_modified=${systemPromptModified ? 1 : 0} serial=${serial.length} parallel=${parallel.length}`,
 			);
 		}
 

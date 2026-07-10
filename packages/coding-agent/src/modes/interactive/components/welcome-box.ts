@@ -158,7 +158,7 @@ export class WelcomeBox implements Component {
 			data.cardPaddingX ?? 1,
 			0,
 			(s) => theme.bg("cardBg", s),
-			(s) => theme.fg("borderMuted", s),
+			(s) => theme.fg("cardBorder", s),
 		);
 		this.card.addChild(this.body);
 	}
@@ -186,7 +186,14 @@ export class WelcomeBox implements Component {
 			return this.cachedLines;
 		}
 		const w = Math.max(8, width);
-		const lines = this.isHero(w) ? this.computeHeroRows(w) : this.card.render(w);
+		let lines: string[];
+		if (this.isHero(w)) {
+			lines = this.computeHeroRows(w);
+		} else {
+			const paddingX = this.data.cardPaddingX ?? 1;
+			this.card.setPadding(paddingX, w >= 60 ? 1 : 0);
+			lines = this.card.render(w);
+		}
 		if (cacheable) {
 			this.cachedWidth = width;
 			this.cachedData = this.data;
@@ -218,7 +225,10 @@ export class WelcomeBox implements Component {
 		}
 		rows.push("");
 		rows.push(center(`${theme.fg("muted", d.tagline)}${theme.fg("dim", ` · v${d.version}`)}`));
-		rows.push(center(formatWorkspaceLine(d.cwdDisplay, d.branch, d.diffStats, d.shellCwdNote, width)));
+		// Align workspace to the wordmark column (not viewport-center) so it
+		// does not float away on wide terminals (W01).
+		const workspace = formatWorkspaceLine(d.cwdDisplay, d.branch, d.diffStats, d.shellCwdNote, width);
+		rows.push(truncateToWidth(logoPad + workspace, width));
 		return rows;
 	}
 
@@ -256,7 +266,7 @@ export class WelcomeBox implements Component {
 			const body = bodies[i] ?? "";
 			if (useWordmark) {
 				const wm = wordmarkColor(WORDMARK_PIT[i] ?? "");
-				rows.push(`  ${wm}   ${body}`);
+				rows.push(`  ${wm} ${body}`);
 			} else {
 				rows.push(`  ${body}`);
 			}
@@ -266,7 +276,7 @@ export class WelcomeBox implements Component {
 	}
 
 	private bodyWidth(width: number, useWordmark: boolean): number {
-		const gutter = useWordmark ? 2 + WORDMARK_WIDTH + 3 : 2;
+		const gutter = useWordmark ? 2 + WORDMARK_WIDTH + 1 : 2;
 		return Math.max(8, width - gutter);
 	}
 }

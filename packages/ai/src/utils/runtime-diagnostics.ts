@@ -42,6 +42,7 @@ export type DiagnosticCategory =
 	| "prune.supersede-only"
 	| "prune.thinking-cap"
 	| "prune.live"
+	| "prune.mid-turn-pressure"
 	| "quality.rigor"
 	| "quality.recovery"
 	| "quality.supervision"
@@ -51,6 +52,7 @@ export type DiagnosticCategory =
 	| "fusion.degraded"
 	| "fusion.verify-skipped"
 	| "fusion.panel-char-estimate"
+	| "fusion.both-throttled-retry"
 	| "compaction.summary-json-fallback"
 	| "compaction.summary-ungrounded"
 	| "guard.grounding"
@@ -94,6 +96,20 @@ export interface DiagnosticContext {
 	ruleId?: string;
 	/** Free-form short note; keep it small, it is retained in the ring buffer. */
 	note?: string;
+	/** Tool name when the diagnostic is scoped to one tool call (e.g. prune.live). */
+	toolName?: string;
+	/** Opaque id for the exact tool call that produced this diagnostic. */
+	toolCallId?: string;
+	/**
+	 * Mechanism that produced the diagnostic (e.g. `supersede`, `arg_elision`,
+	 * `supersede+arg_elision`, `turn-end`). Kept as a short stable string.
+	 */
+	mechanism?: string;
+	/**
+	 * Tokens/bytes reclaimed by a prune path. Same numeric semantics as `bytes`
+	 * for live prune today; typed so aggregators need not parse `note`.
+	 */
+	reclaimedTokens?: number;
 }
 
 export interface DiagnosticEvent {

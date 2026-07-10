@@ -19,8 +19,9 @@ import { CONFIG_DIR_NAME } from "../../../config.ts";
 import type { PathMetadata, ResolvedPaths, ResolvedResource } from "../../../core/package-manager.ts";
 import type { PackageSource, SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
-import { checkboxGlyph, rawKeyHint, selectionCursor } from "./keybinding-hints.ts";
+import { checkboxGlyph, rawKeyHint, selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
+import { paintSelectedRow } from "./selectable-row.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 
@@ -377,16 +378,19 @@ class ResourceList implements Component, Focusable {
 				// trailing spaces so the name column stays aligned across all rows.
 				const checkbox = item.enabled ? theme.fg("success", glyph) : theme.fg("dim", glyph);
 				const name = isSelected ? theme.bold(item.displayName) : item.displayName;
-				lines.push(truncateToWidth(`${cursor}    ${checkbox}   ${name}`, width, "…"));
+				lines.push(paintSelectedRow(`${cursor}    ${checkbox}   ${name}`, width, isSelected));
 			}
 		}
 
-		// Scroll indicator
-		if (startIndex > 0 || endIndex < this.filteredItems.length) {
-			const itemCount = this.filteredItems.filter((e) => e.type === "item").length;
-			const currentItemIndex =
-				this.filteredItems.slice(0, this.selectedIndex).filter((e) => e.type === "item").length + 1;
-			lines.push(theme.fg("dim", `  (${currentItemIndex}/${itemCount})`));
+		const itemCount = this.filteredItems.filter((e) => e.type === "item").length;
+		const currentItemIndex =
+			this.filteredItems.slice(0, this.selectedIndex).filter((e) => e.type === "item").length + 1;
+		const scrollHint = themedScrollPositionHint(this.selectedIndex, this.filteredItems.length, startIndex, endIndex, {
+			displayCurrent: currentItemIndex,
+			displayTotal: itemCount,
+		});
+		if (scrollHint) {
+			lines.push(scrollHint);
 		}
 
 		return lines;
@@ -608,21 +612,20 @@ export class ConfigSelectorComponent extends Container implements Focusable {
 
 		// Add header
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
-		this.addChild(new ConfigSelectorHeader());
-		this.addChild(new Spacer(1));
+		const card = new SelectorCard();
+		card.addChild(new Spacer(1));
+		card.addChild(new ConfigSelectorHeader());
+		card.addChild(new Spacer(1));
 
 		// Resource list
 		this.resourceList = new ResourceList(groups, settingsManager, cwd, agentDir, terminalHeight);
 		this.resourceList.onCancel = onClose;
 		this.resourceList.onExit = onExit;
 		this.resourceList.onToggle = () => requestRender();
-		this.addChild(this.resourceList);
+		card.addChild(this.resourceList);
 
-		// Bottom border
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		card.addChild(new Spacer(1));
+		this.addChild(card);
 	}
 
 	getResourceList(): ResourceList {

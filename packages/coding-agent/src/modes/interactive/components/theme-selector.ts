@@ -1,6 +1,6 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@pit/tui";
 import { getAvailableThemes, getSelectListTheme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 const THEME_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -23,7 +23,6 @@ export class ThemeSelectorComponent extends Container {
 		super();
 		this.onPreview = onPreview;
 
-		// Get available themes and create select items
 		const themes = getAvailableThemes();
 		const themeItems: SelectItem[] = themes.map((name) => ({
 			value: name,
@@ -31,13 +30,9 @@ export class ThemeSelectorComponent extends Container {
 			description: name === currentTheme ? "(current)" : undefined,
 		}));
 
-		// Add top border
-		this.addChild(new DynamicBorder());
-
-		// Create selector
+		const card = new SelectorCard();
 		this.selectList = new SelectList(themeItems, 10, getSelectListTheme(), THEME_SELECT_LIST_LAYOUT);
 
-		// Preselect current theme
 		const currentIndex = themes.indexOf(currentTheme);
 		if (currentIndex !== -1) {
 			this.selectList.setSelectedIndex(currentIndex);
@@ -55,10 +50,8 @@ export class ThemeSelectorComponent extends Container {
 			this.onPreview(item.value);
 		};
 
-		this.addChild(this.selectList);
-
-		// Add bottom border
-		this.addChild(new DynamicBorder());
+		card.addChild(this.selectList);
+		this.addChild(card);
 	}
 
 	getSelectList(): SelectList {

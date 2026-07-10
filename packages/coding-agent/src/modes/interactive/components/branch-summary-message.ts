@@ -3,13 +3,14 @@ import type { BranchSummaryMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
 import { MessageShell } from "./message-shell.ts";
+import { systemMessageLabel } from "./system-message-glyphs.ts";
 
 /**
  * Component that renders a branch summary with collapsed / expanded state.
  *
- * Layout (Leva 2): unified `MessageShell` with the `[branch]` bracket label
- * and a purple (`gutterCustom`) gutter — same chrome as compaction summaries
- * so the two related "summary" idioms stay visually consistent.
+ * Layout (Leva 2): unified `MessageShell` with a glyph + `branch` label and a
+ * purple (`gutterCustom`) gutter — same chrome as compaction summaries so the
+ * two related "summary" idioms stay visually consistent.
  */
 export class BranchSummaryMessageComponent extends MessageShell {
 	private expanded = false;
@@ -19,7 +20,7 @@ export class BranchSummaryMessageComponent extends MessageShell {
 	constructor(message: BranchSummaryMessage, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
 		super({
 			gutterColor: (text: string) => theme.fg("gutterCustom", text),
-			label: "[branch]",
+			label: systemMessageLabel("branch"),
 		});
 		this.message = message;
 		this.markdownTheme = markdownTheme;

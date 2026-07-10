@@ -1,5 +1,7 @@
+import type { ThinkingLevel } from "@pit/agent-core";
 import type { AssistantMessage } from "@pit/ai";
 import {
+	type Component,
 	Container,
 	HEARTBEAT_CYCLE_MS,
 	Markdown,
@@ -17,6 +19,7 @@ import { sliceSafe } from "../../../utils/surrogate.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { ColorEase } from "./color-ease.ts";
+import { MessageShell, SHELL_GUTTER_CHAR } from "./message-shell.ts";
 import { ReadingColumn } from "./reading-column.ts";
 
 // Period of the "Thinking…" breathing oscillation (dim ⇄ normal) while the model
@@ -24,7 +27,7 @@ import { ReadingColumn } from "./reading-column.ts";
 // HEARTBEAT_CYCLE_MS so the label breathes in lockstep with the working-loader
 // spinner pulse (both derive phase from the same monotonic clock).
 const THINKING_BREATH_MS = HEARTBEAT_CYCLE_MS;
-const THINKING_BREATH_BUCKETS = 8;
+const THINKING_BREATH_BUCKETS = 16;
 
 // Streaming smoothing (on by default): instead of painting each provider burst
 // whole, the trailing block's text is revealed at a steady rate off the shared
@@ -36,6 +39,12 @@ const REVEAL_CATCHUP_FRAMES = 8; // ~130ms to absorb a burst at 60fps
 const REVEAL_MIN_STEP = 1;
 const REVEAL_MAX_STEP = 48; // ~3000 cps at 62fps — above any model's emit rate
 const REVEAL_FRAME_MS = 16;
+/**
+ * Provider deltas at or below this size render immediately (single-token snappy).
+ * Larger bursts ease in via the ticker — was 80, which snapped multi-word chunks
+ * and made streaming read as blocks instead of a smooth wavefront.
+ */
+const REVEAL_SNAP_THROUGH_CHARS = 12;
 // Width (cols) of the dim→bright gradient drawn at the reveal wavefront so freshly
 // revealed text materializes softly instead of popping in at full brightness.
 const REVEAL_FADE_COLUMNS = 6;
@@ -73,7 +82,8 @@ const OSC133_OUTPUT_START = "\x1b]133;C\x07"; // FTCS C: command output start
 interface BlockComponentCacheEntry {
 	kind: "text" | "thinking";
 	markdown: Markdown;
-	component: ReadingColumn;
+	/** ReadingColumn for text; MessageShell(ReadingColumn) for visible thinking. */
+	component: Component;
 }
 
 // Grapheme-aware splitter for the reveal-edge fade, so the gradient is applied
@@ -87,10 +97,12 @@ class ThinkingLabelComponent {
 	private cachedLines: string[] | null = null;
 	private readonly getLabel: () => string;
 	private readonly getBreathT: () => number;
+	private readonly getGutterColor: () => (text: string) => string;
 
-	constructor(getLabel: () => string, getBreathT: () => number) {
+	constructor(getLabel: () => string, getBreathT: () => number, getGutterColor: () => (text: string) => string) {
 		this.getLabel = getLabel;
 		this.getBreathT = getBreathT;
+		this.getGutterColor = getGutterColor;
 	}
 
 	render(width: number): string[] {
@@ -102,9 +114,10 @@ class ThinkingLabelComponent {
 		const t = breathT < 0.15 ? 0.15 : breathT;
 		const c = interpolateFg("dim", "thinkingText", t) ?? ((text: string) => theme.fg("thinkingText", text));
 		const label = this.getLabel();
+		const gutter = this.getGutterColor()(SHELL_GUTTER_CHAR);
 		this.cachedBucket = bucket;
 		this.cachedWidth = width;
-		this.cachedLines = [truncateToWidth(` ${theme.italic(c(label))}`, Math.max(1, width), "…")];
+		this.cachedLines = [truncateToWidth(`${gutter} ${theme.italic(c(label))}`, Math.max(1, width), "…")];
 		return this.cachedLines;
 	}
 
@@ -116,12 +129,26 @@ class ThinkingLabelComponent {
 }
 
 /**
+ * Discrete bright→dim ramp for terminals without truecolor. Three theme stops
+ * so the wavefront still reads as a soft materialize instead of a flat dim snap.
+ */
+export function discreteFadeTailColorize(t: number): (s: string) => string {
+	if (t < 1 / 3) return (s: string) => theme.fg("text", s);
+	if (t < 2 / 3) return (s: string) => theme.fg("muted", s);
+	return (s: string) => theme.fg("dim", s);
+}
+
+function fadeTailColorize(t: number): (s: string) => string {
+	return interpolateFg("text", "dim", t) ?? discreteFadeTailColorize(t);
+}
+
+/**
  * Recolor the trailing text of a rendered line as a bright→dim gradient, landing
  * on the real text edge (right padding is preserved untouched) and keeping the
  * line's visible characters and width identical — only colors change, so callers
  * that strip ANSI see no difference. The newest (rightmost) graphemes are dimmest,
- * easing up to full brightness toward the settled text on the left. Falls back to a
- * flat dim on non-truecolor terminals (interpolateFg returns undefined there).
+ * easing up to full brightness toward the settled text on the left. Truecolor uses
+ * interpolateFg; 256-color falls back to a text→muted→dim discrete ramp.
  */
 export function fadeLineTail(line: string): string {
 	const totalCols = visibleWidth(line);
@@ -138,11 +165,28 @@ export function fadeLineTail(line: string): string {
 	let tail = "";
 	for (let i = 0; i < tailG.length; i++) {
 		const t = tailG.length <= 1 ? 1 : i / (tailG.length - 1); // left bright → right dim
-		const colorize = interpolateFg("text", "dim", t) ?? ((s: string) => theme.fg("dim", s));
-		tail += colorize(tailG[i]);
+		tail += fadeTailColorize(t)(tailG[i]);
 	}
 	const pad = " ".repeat(Math.max(0, totalCols - contentCols));
 	return `${head}\x1b[0m${tail}${pad}`;
+}
+
+/** Dim block caret at the reveal wavefront, inserted before trailing padding.
+ * When padding exists, one pad column is consumed so the line width stays stable. */
+export function appendRevealCaret(line: string): string {
+	const totalCols = visibleWidth(line);
+	if (totalCols === 0) return `${theme.fg("dim", "▌")}`;
+	const plain = stripAnsi(line);
+	const trimmed = plain.replace(/\s+$/, "");
+	const contentCols = visibleWidth(trimmed);
+	if (contentCols === 0) return line;
+	const padCols = Math.max(0, totalCols - contentCols);
+	const caret = theme.fg("dim", "▌");
+	const withoutPad = truncateToWidth(line, contentCols, "");
+	if (padCols > 0) {
+		return `${withoutPad}${caret}${" ".repeat(padCols - 1)}`;
+	}
+	return `${withoutPad}${caret}`;
 }
 
 /**
@@ -151,6 +195,7 @@ export function fadeLineTail(line: string): string {
 export class AssistantMessageComponent extends Container {
 	private contentContainer: VirtualizedContainer;
 	private hideThinkingBlock: boolean;
+	private thinkingLevel: ThinkingLevel;
 	private markdownTheme: MarkdownTheme;
 	private hiddenThinkingLabel: string;
 	private lastMessage?: AssistantMessage;
@@ -173,6 +218,10 @@ export class AssistantMessageComponent extends Container {
 	private lastRevealTarget = 0;
 	private lastRevealTickAt = 0;
 	private revealUnsub: (() => void) | null = null;
+	// False while a live stream block exists but grouped mode has not yet attached
+	// it to the chat (thinking-only / pre-text). Prevents invisible reveal catch-up
+	// and keeps clampReveal from dumping the full buffer on first paint.
+	private streamVisible = true;
 	// Decorated-output memo keyed by the Container's returned array reference plus
 	// the dynamic-decoration inputs (deliverable flag + exit code). Container.render
 	// is memoized and hands back the same array instance while no child changed
@@ -203,6 +252,7 @@ export class AssistantMessageComponent extends Container {
 	private readonly thinkingLabel = new ThinkingLabelComponent(
 		() => this.hiddenThinkingLabel,
 		() => this.breathT,
+		() => theme.getThinkingBorderColor(this.thinkingLevel),
 	);
 	// Fingerprint of the last built child-tree layout. When a stream delta only
 	// grows text inside existing blocks, patchContent() updates markdown in place
@@ -217,10 +267,12 @@ export class AssistantMessageComponent extends Container {
 		ui?: TUI,
 		smoothing = false,
 		readingColumns: number = DEFAULT_ASSISTANT_READING_COLUMNS,
+		thinkingLevel: ThinkingLevel = "off",
 	) {
 		super();
 
 		this.hideThinkingBlock = hideThinkingBlock;
+		this.thinkingLevel = thinkingLevel;
 		this.markdownTheme = markdownTheme;
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.ui = ui;
@@ -251,12 +303,41 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	setThinkingLevel(level: ThinkingLevel): void {
+		if (level === this.thinkingLevel) return;
+		this.thinkingLevel = level;
+		this.thinkingLabel.invalidate();
+		// Bust thinking-block shells so gutter color refreshes; text blocks stay.
+		for (let i = 0; i < this.blockComponents.length; i++) {
+			const entry = this.blockComponents[i];
+			if (entry?.kind === "thinking") {
+				this.blockComponents[i] = undefined;
+			}
+		}
+		this.lastStructureKey = "";
+		if (this.lastMessage) {
+			this.updateContent(this.lastMessage);
+		}
+	}
+
 	setHiddenThinkingLabel(label: string): void {
 		this.hiddenThinkingLabel = label;
 		this.thinkingLabel.invalidate();
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
+	}
+
+	/** Toggle whether this live stream is mounted in the chat. Grouped tool-activity
+	 * mode defers attach until the message has visible prose; while detached the
+	 * reveal cursor stays at zero so text does not catch up off-screen. */
+	setStreamVisible(visible: boolean): void {
+		if (this.streamVisible === visible) return;
+		this.streamVisible = visible;
+		if (this.lastMessage) {
+			this.updateContent(this.lastMessage);
+		}
+		this.ui?.requestRender();
 	}
 
 	/** True when neither per-frame decoration is live, so the decorated output is
@@ -369,6 +450,7 @@ export class AssistantMessageComponent extends Container {
 		const parts: string[] = [
 			`n:${message.content.length}`,
 			`ht:${this.hideThinkingBlock ? 1 : 0}`,
+			`tl:${this.thinkingLevel}`,
 			`nar:${this.isNarration ? 1 : 0}`,
 			`sr:${message.stopReason ?? ""}`,
 		];
@@ -520,20 +602,29 @@ export class AssistantMessageComponent extends Container {
 					// loader is the only live "Thinking…". No spacer either, so following
 					// content (the assistant's text/answer) stays flush.
 				} else {
-					// Thinking traces in thinkingText color, italic
+					// Thinking traces in thinkingText color, italic, with a level-tinted gutter
 					const thinking = this.clampReveal(i, content.thinking.trim());
 					let entry = this.blockComponents[i];
 					if (entry?.kind === "thinking") {
 						entry.markdown.setText(thinking);
+						if (entry.component instanceof MessageShell) {
+							entry.component.setGutterColor(theme.getThinkingBorderColor(this.thinkingLevel));
+						}
 					} else {
 						const markdown = new Markdown(thinking, 1, 0, this.markdownTheme, {
 							color: (text: string) => theme.fg("thinkingText", text),
 							italic: true,
 						});
+						const column = new ReadingColumn(markdown, this.readingColumns);
+						const shell = new MessageShell({
+							gutterColor: theme.getThinkingBorderColor(this.thinkingLevel),
+							noLeadingGap: true,
+						});
+						shell.addChild(column);
 						entry = {
 							kind: "thinking",
 							markdown,
-							component: new ReadingColumn(markdown, this.readingColumns),
+							component: shell,
 						};
 						this.blockComponents[i] = entry;
 					}
@@ -596,15 +687,15 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/** Fade the wavefront line's trailing edge while the trailing block is still
-	 * revealing, so freshly revealed text eases in. No-op when smoothing is off or
-	 * the block is fully shown; only recolors — never alters the visible characters. */
+	 * revealing, and plant a dim caret at the live edge. No-op when smoothing is
+	 * off or the block is fully shown. */
 	private applyRevealEdgeFade(lines: string[]): void {
 		if (!this.smoothing || this.revealIndex < 0 || !this.lastMessage) return;
 		const target = this.blockTextLength(this.lastMessage, this.revealIndex);
 		if (this.revealedChars >= target) return; // settled — no live edge to fade
 		for (let i = lines.length - 1; i >= 0; i--) {
 			if (visibleWidth(lines[i]) > 0) {
-				lines[i] = fadeLineTail(lines[i]);
+				lines[i] = appendRevealCaret(fadeLineTail(lines[i]));
 				return;
 			}
 		}
@@ -644,6 +735,12 @@ export class AssistantMessageComponent extends Container {
 			this.stopReveal();
 			return;
 		}
+		if (!this.streamVisible) {
+			this.revealIndex = idx;
+			if (this.revealedChars === Number.POSITIVE_INFINITY) this.revealedChars = 0;
+			this.pauseReveal();
+			return;
+		}
 		const newRevealBlock = idx !== this.revealIndex;
 		if (idx !== this.revealIndex) {
 			// A new trailing block started: reveal it from scratch. Earlier blocks
@@ -654,6 +751,12 @@ export class AssistantMessageComponent extends Container {
 			this.lastRevealTickAt = 0;
 		}
 		const target = this.blockTextLength(message, idx);
+		const burst = Math.max(0, target - this.lastRevealTarget);
+		// Incremental small deltas (typical token cadence) pass through immediately;
+		// the first paint of a block and large bursts still ease in over a few frames.
+		if (burst > 0 && burst <= REVEAL_SNAP_THROUGH_CHARS && !newRevealBlock) {
+			this.revealedChars = Math.max(this.revealedChars, target);
+		}
 		const caughtUpBeforeThisDelta = !newRevealBlock && this.revealedChars >= this.lastRevealTarget;
 		if ((newRevealBlock || caughtUpBeforeThisDelta) && this.revealedChars < target) {
 			this.revealedChars = Math.min(

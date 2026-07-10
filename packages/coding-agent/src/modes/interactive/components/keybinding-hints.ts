@@ -50,6 +50,11 @@ export function rawKeyHint(key: string, description: string): string {
 /** Standard separator between inline key hints, shared across all selectors. */
 export const HINT_SEPARATOR = " · ";
 
+/** Shared list-navigation hint labels (selectors, ask-picker, etc.). */
+export const LIST_NAVIGATE_LABEL = "↑↓ navigate";
+export const LIST_SELECT_LABEL = "select";
+export const LIST_CLOSE_LABEL = "close";
+
 /**
  * Standard cursor prefix for selectable list rows: an accent arrow when the row
  * is selected, two spaces otherwise. Single source so every selector renders the
@@ -67,4 +72,47 @@ export function selectionCursor(isSelected: boolean): string {
  */
 export function checkboxGlyph(checked: boolean): string {
 	return checked ? "☑" : "☐";
+}
+
+/**
+ * Scroll position line matching `@pit/tui` SelectList: `  ↑↓ (i/n)`.
+ * `↑`/`↓` appear only when items exist above/below the visible window.
+ * Returns `""` when the full list fits, unless `alwaysShow` is set (tree).
+ */
+export function scrollPositionHint(
+	selectedIndex: number,
+	total: number,
+	startIndex: number,
+	endIndex: number,
+	options?: {
+		alwaysShow?: boolean;
+		/** 1-based position override (e.g. config counts items, not group headers). */
+		displayCurrent?: number;
+		displayTotal?: number;
+	},
+): string {
+	if (total <= 0) return "";
+	const canScroll = startIndex > 0 || endIndex < total;
+	if (!canScroll && !options?.alwaysShow) return "";
+	const up = startIndex > 0 ? "↑" : " ";
+	const down = endIndex < total ? "↓" : " ";
+	const current = options?.displayCurrent ?? selectedIndex + 1;
+	const tot = options?.displayTotal ?? total;
+	return `  ${up}${down} (${current}/${tot})`;
+}
+
+/** Muted themed scroll hint, or `""` when nothing to show. */
+export function themedScrollPositionHint(
+	selectedIndex: number,
+	total: number,
+	startIndex: number,
+	endIndex: number,
+	options?: {
+		alwaysShow?: boolean;
+		displayCurrent?: number;
+		displayTotal?: number;
+	},
+): string {
+	const raw = scrollPositionHint(selectedIndex, total, startIndex, endIndex, options);
+	return raw ? theme.fg("muted", raw) : "";
 }

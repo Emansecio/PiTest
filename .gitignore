@@ -28,6 +28,7 @@ packages/*/dist-firefox/
 terminals/
 agent-tools/
 mcps/
+.pi-subagents/
 
 # Package specific
 .npm/
@@ -62,6 +63,9 @@ collect.sh
 RELATORIO-*.md
 pkglist.txt
 *.pre-cleanup.bak
+
+# Downloaded/attached binary artifacts (never commit)
+*.zip
 
 # Generated thumbnail cache (hyperframes presentation)
 hyperframes-pit-presentation/.thumbnails/

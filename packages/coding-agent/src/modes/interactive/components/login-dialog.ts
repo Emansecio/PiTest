@@ -2,8 +2,8 @@ import { getOAuthProviders } from "@pit/ai/oauth";
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@pit/tui";
 import { spawn } from "child_process";
 import { theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 /**
  * Login dialog component - replaces editor during OAuth login flow
@@ -42,18 +42,19 @@ export class LoginDialogComponent extends Container implements Focusable {
 		const providerName = providerNameOverride || providerInfo?.name || providerId;
 		const title = titleOverride ?? `Login to ${providerName}`;
 
-		// Top border
-		this.addChild(new DynamicBorder());
+		const card = new SelectorCard();
 
 		// Title
-		this.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
+		card.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
 
 		// Dynamic content area
 		this.contentContainer = new Container();
-		this.addChild(this.contentContainer);
+		card.addChild(this.contentContainer);
 
-		// Input (always present, used when needed)
-		this.input = new Input();
+		// Input (always present, used when needed). Placeholder set per-prompt.
+		this.input = new Input({
+			placeholderColor: (t) => theme.fg("dim", t),
+		});
 		this.input.onSubmit = () => {
 			if (this.inputResolver) {
 				this.inputResolver(this.input.getValue());
@@ -65,8 +66,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 			this.cancel();
 		};
 
-		// Bottom border
-		this.addChild(new DynamicBorder());
+		this.addChild(card);
 	}
 
 	get signal(): AbortSignal {
@@ -150,9 +150,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	showPrompt(message: string, placeholder?: string): Promise<string> {
 		this.contentContainer.addChild(new Spacer(1));
 		this.contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
-		if (placeholder) {
-			this.contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${placeholder}`), 1, 0));
-		}
+		this.input.setPlaceholder(placeholder);
 		this.contentContainer.addChild(this.input);
 		this.contentContainer.addChild(
 			new Text(
@@ -187,9 +185,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 			this.contentContainer.addChild(new Spacer(1));
 		}
 		this.contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
-		if (options?.placeholder) {
-			this.contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${options.placeholder}`), 1, 0));
-		}
+		this.input.setPlaceholder(options?.placeholder);
 		this.contentContainer.addChild(this.input);
 		this.contentContainer.addChild(
 			new Text(

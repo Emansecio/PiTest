@@ -18,8 +18,9 @@ import type { SessionInfo, SessionListProgress } from "../../../core/session-man
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { formatDisplayPath } from "../display-utils.ts";
 import { theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, keyText, selectionCursor } from "./keybinding-hints.ts";
+import { keyHint, keyText, selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
+import { paintSelectedRow } from "./selectable-row.ts";
+import { SelectorCard } from "./selector-card.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
@@ -285,8 +286,13 @@ class SessionList implements Component, Focusable {
 	public onDeleteSession?: (sessionPath: string) => Promise<void>;
 	public onRenameSession?: (sessionPath: string) => void;
 	public onError?: (message: string) => void;
+	/** Invoked after a debounced filterSessions() lands outside handleInput, so the
+	 * owner can schedule a repaint. Synchronous filter paths (flushPendingFilter and
+	 * direct filterSessions in handleInput) don't need this. */
+	public onFilterApplied?: () => void;
 	private maxVisible: number = 10; // Max sessions visible (one line each)
 	private filterDebounceTimer: ReturnType<typeof setTimeout> | undefined;
+	private filterPending = false;
 
 	// Focusable implementation - propagate to searchInput for IME cursor positioning
 	private _focused = false;
@@ -344,13 +350,28 @@ class SessionList implements Component, Focusable {
 	}
 
 	private scheduleFilterSessions(query: string): void {
+		this.filterPending = true;
 		if (this.filterDebounceTimer !== undefined) {
 			clearTimeout(this.filterDebounceTimer);
 		}
 		this.filterDebounceTimer = setTimeout(() => {
 			this.filterDebounceTimer = undefined;
+			this.filterPending = false;
 			this.filterSessions(query);
+			this.onFilterApplied?.();
 		}, 75);
+	}
+
+	/** Apply a pending debounced filter synchronously, so navigation/selection
+	 * never acts on a list that's stale relative to the last keystroke. */
+	private flushPendingFilter(): void {
+		if (this.filterDebounceTimer === undefined) return;
+		clearTimeout(this.filterDebounceTimer);
+		this.filterDebounceTimer = undefined;
+		if (this.filterPending) {
+			this.filterPending = false;
+			this.filterSessions(this.searchInput.getValue());
+		}
 	}
 
 	private filterSessions(query: string): void {
@@ -491,18 +512,18 @@ class SessionList implements Component, Focusable {
 			const spacing = Math.max(1, width - leftWidth - visibleWidth(rightPart));
 			const styledRight = theme.fg(isConfirmingDelete ? "error" : "dim", rightPart);
 
-			let line = leftPart + " ".repeat(spacing) + styledRight;
-			if (isSelected) {
-				line = theme.bg("selectedBg", line);
-			}
-			lines.push(truncateToWidth(line, width));
+			lines.push(paintSelectedRow(leftPart + " ".repeat(spacing) + styledRight, width, isSelected));
 		}
 
 		// Add scroll indicator if needed
-		if (startIndex > 0 || endIndex < this.filteredSessions.length) {
-			const scrollText = `  (${this.selectedIndex + 1}/${this.filteredSessions.length})`;
-			const scrollInfo = theme.fg("muted", truncateToWidth(scrollText, width, ""));
-			lines.push(scrollInfo);
+		const scrollHint = themedScrollPositionHint(
+			this.selectedIndex,
+			this.filteredSessions.length,
+			startIndex,
+			endIndex,
+		);
+		if (scrollHint) {
+			lines.push(truncateToWidth(scrollHint, width, ""));
 		}
 
 		return lines;
@@ -591,22 +612,27 @@ class SessionList implements Component, Focusable {
 
 		// Up arrow
 		if (kb.matches(keyData, "tui.select.up")) {
+			this.flushPendingFilter();
 			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
 		}
 		// Down arrow
 		else if (kb.matches(keyData, "tui.select.down")) {
+			this.flushPendingFilter();
 			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + 1);
 		}
 		// Page up - jump up by maxVisible items
 		else if (kb.matches(keyData, "tui.select.pageUp")) {
+			this.flushPendingFilter();
 			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisible);
 		}
 		// Page down - jump down by maxVisible items
 		else if (kb.matches(keyData, "tui.select.pageDown")) {
+			this.flushPendingFilter();
 			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + this.maxVisible);
 		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {
+			this.flushPendingFilter();
 			const selected = this.filteredSessions[this.selectedIndex];
 			if (selected && this.onSelect) {
 				this.onSelect(selected.session.path);
@@ -743,16 +769,16 @@ export class SessionSelectorComponent extends Container implements Focusable {
 
 	private buildBaseLayout(content: Component, options?: { showHeader?: boolean }): void {
 		this.clear();
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
-		this.addChild(new Spacer(1));
+		const card = new SelectorCard(1, 0, (s) => theme.fg("accent", s));
+		card.addChild(new Spacer(1));
 		if (options?.showHeader ?? true) {
-			this.addChild(this.header);
-			this.addChild(new Spacer(1));
+			card.addChild(this.header);
+			card.addChild(new Spacer(1));
 		}
-		this.addChild(content);
+		card.addChild(content);
+		card.addChild(new Spacer(1));
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder((s) => theme.fg("accent", s)));
+		this.addChild(card);
 	}
 
 	constructor(
@@ -790,6 +816,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			this.keybindings,
 			currentSessionFilePath,
 		);
+		this.sessionList.onFilterApplied = () => this.requestRender();
 
 		this.buildBaseLayout(this.sessionList);
 

@@ -17,12 +17,17 @@ describe("decideRoleForPermissionMode", () => {
 		expect(decideRoleForPermissionMode("plan", "default", undefined)).toBeUndefined();
 	});
 
-	it("leaving plan mode restores 'default' only when still on the plan role", () => {
+	it("leaving plan mode restores 'default' when no pre-plan role was snapshotted", () => {
 		expect(decideRoleForPermissionMode("auto", "plan", planConfig)).toBe("default");
 	});
 
+	it("leaving plan mode restores the pre-plan role when snapshotted", () => {
+		expect(decideRoleForPermissionMode("auto", "plan", planConfig, "smol")).toBe("smol");
+		expect(decideRoleForPermissionMode("auto", "plan", planConfig, "slow")).toBe("slow");
+	});
+
 	it("leaving plan mode does not clobber a role the user picked manually", () => {
-		expect(decideRoleForPermissionMode("auto", "smol", planConfig)).toBeUndefined();
+		expect(decideRoleForPermissionMode("auto", "smol", planConfig, "default")).toBeUndefined();
 		expect(decideRoleForPermissionMode("auto", "slow", planConfig)).toBeUndefined();
 	});
 

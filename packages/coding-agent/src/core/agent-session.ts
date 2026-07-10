@@ -37,6 +37,7 @@ import {
 	markEntryCooldown,
 	modelsAreEqual,
 	onDiagnostic,
+	prewarmProviderModule,
 	recordDiagnostic,
 	resetApiProviders,
 	splitSystemPromptOnDynamic,
@@ -49,12 +50,15 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { sleep } from "../utils/sleep.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
 import {
+	applyMidTurnPressureRelief,
 	awaitBackgroundCompaction,
 	CompactionController,
 	type CompactionHost,
 	checkCompaction,
 	checkPresendOverflow,
 	compactSession,
+	measureMidTurnWirePressure,
+	resolveCompactModel,
 } from "./agent-session-compaction.ts";
 import {
 	type AgentSessionEvent,
@@ -62,7 +66,10 @@ import {
 	type AgentSessionEventListener,
 } from "./agent-session-events.ts";
 import { type FusionHost, runFusionSessionTurn } from "./agent-session-fusion.ts";
-import { applyLiveContextEconomyAfterToolSuccess } from "./agent-session-live-prune.ts";
+import {
+	applyLightContextEconomyAtTurnEnd,
+	applyLiveContextEconomyAfterToolSuccess,
+} from "./agent-session-live-prune.ts";
 import {
 	armVerificationGate,
 	upsertLearnedErrorOnFailure,
@@ -213,7 +220,7 @@ import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { getCurrentSupervisionThermostat } from "./supervision-thermostat.ts";
-import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
+import { type BuildSystemPromptOptions, buildSystemPrompt, patchSystemPromptToolSurface } from "./system-prompt.js";
 import { DiagnosticsSink, defaultDiagnosticsDir, isTelemetrySinkDisabled } from "./telemetry/diagnostics-sink.ts";
 import { GuardEfficacyCorrelator } from "./telemetry/guard-efficacy.ts";
 import { buildSessionSummaryRecord } from "./telemetry/session-summary.ts";
@@ -262,6 +269,7 @@ import { TurnRiskAccumulator } from "./turn-risk.ts";
 import { TurnSteeringEngine } from "./turn-steering-engine.ts";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
 import { summarizeCheckFailure } from "./verification/failure-summary.ts";
+import { functionalWebFixPrompt, runFunctionalWebCheck } from "./verification/functional-web.ts";
 import { pendingVerificationJobs } from "./verification/pending-checks.ts";
 import {
 	type CheckResult,
@@ -513,6 +521,9 @@ interface ToolDefinitionEntry {
 
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
+
+/** Minimum abandoned-branch entries before `/tree` pays for an LLM summary. */
+const BRANCH_SUMMARY_MIN_ENTRIES = 3;
 
 // Hoisted so it isn't recompiled on every error message checked for retry.
 const RETRYABLE_ERROR_RE =
@@ -901,6 +912,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._unsubscribeAgent = this.agent.subscribe(this._handleAgentEvent);
 		this._installAgentToolHooks();
 		this._installContextPruneHook();
+		this._installPrepareNextTurnHook();
 		this._installWireToolEconomyHook();
 
 		this._buildRuntime({
@@ -1486,6 +1498,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 		return this._readDedupeStore;
 	}
 
+	get fileMtimeStore(): FileMtimeStore | undefined {
+		return this._fileMtimeStore;
+	}
+
 	get fusionAbort(): AbortController | undefined {
 		return this._fusionAbort;
 	}
@@ -1584,8 +1600,105 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private _installContextPruneHook(): void {
 		const existingTransform = this.agent.transformContext;
 		this.agent.transformContext = async (messages, signal) => {
+			// P02: skip re-running extension emitContext + prune when the transcript
+			// identity is unchanged between tool rounds of the same turn.
+			const key = this._ctxPruneCacheKey(messages);
+			const cached = this._ctxPruneCache;
+			if (cached && cached.key === key) {
+				return cached.value;
+			}
 			const transformed = existingTransform ? await existingTransform(messages, signal) : messages;
-			return this._pruneContextForProvider(transformed);
+			const pruned = this._pruneContextForProvider(transformed);
+			this._ctxPruneCache = { key, value: pruned };
+			return pruned;
+		};
+	}
+
+	/** Identity key for transformContext/prune memoization (P02). */
+	private _ctxPruneCacheKey(messages: AgentMessage[]): string {
+		const last = messages.length > 0 ? messages[messages.length - 1] : undefined;
+		const lastStamp =
+			last && typeof last === "object" && "timestamp" in last && typeof last.timestamp === "number"
+				? last.timestamp
+				: 0;
+		const lastRole = last && typeof last === "object" && "role" in last ? String(last.role) : "";
+		const contextWindow = this.model?.contextWindow ?? 0;
+		// Env kill-switches affect prune decisions; include so toggling mid-session
+		// (tests) does not serve a stale pruned array.
+		const flags = [
+			isTruthyEnvFlag(process.env.PIT_NO_THINKING_CAP) ? "1" : "0",
+			isTruthyEnvFlag(process.env.PIT_NO_PROACTIVE_PRUNE) ? "1" : "0",
+			process.env.PIT_PROACTIVE_PRUNE_FLOOR ?? "",
+		].join(",");
+		return `${messages.length}:${lastRole}:${lastStamp}:${contextWindow}:${this.thinkingLevel}:${flags}`;
+	}
+
+	private _invalidateCtxCaches(): void {
+		this._ctxUsageCache = undefined;
+		this._ctxPruneCache = undefined;
+	}
+
+	/**
+	 * Turn-boundary light economy (supersede + mutating-arg elision) plus
+	 * prune-only mid-turn wire pressure relief (B9). Proactive thinking-cap
+	 * stays in transformContext; LLM compaction/abort are intentionally not
+	 * hooked here (product policy since v0.17.0).
+	 */
+	private _installPrepareNextTurnHook(): void {
+		this.agent.prepareNextTurn = (turnContext) => {
+			// Defensive: a throw here runs inside the agent loop after a successful
+			// assistant turn and becomes a synthetic error message ("Cannot read
+			// properties of undefined (reading 'messages')"). Never fail the turn
+			// for light economy bookkeeping.
+			try {
+				const messages = turnContext?.context?.messages;
+				const toolResults = turnContext?.toolResults ?? [];
+				if (!messages) return undefined;
+
+				const contextWindow = this.model?.contextWindow ?? 0;
+				let nextMessages = messages;
+				let reclaimed = 0;
+
+				const light = applyLightContextEconomyAtTurnEnd(nextMessages, toolResults, contextWindow);
+				if (light.reclaimed > 0) {
+					nextMessages = light.messages;
+					reclaimed += light.reclaimed;
+				}
+
+				// Mid-turn wire pressure (between tool rounds): prune-only when
+				// assembled+thinking exceeds ~92% of the window. No LLM compaction.
+				const pressure = measureMidTurnWirePressure(nextMessages, this.model, {
+					systemPrompt: this.agent.state.systemPrompt ?? this._baseSystemPrompt,
+					tools: this._wireToolsForEstimate(),
+					thinkingLevel: this.thinkingLevel,
+					thinkingBudgets: this.settingsManager.getThinkingBudgets(),
+				});
+				if (pressure.tripped) {
+					const relief = applyMidTurnPressureRelief(nextMessages, contextWindow);
+					if (relief.reclaimed > 0) {
+						nextMessages = relief.messages;
+						reclaimed += relief.reclaimed;
+					}
+				}
+
+				if (reclaimed <= 0) return undefined;
+				this.agent.state.messages = nextMessages;
+				this._invalidateCtxCaches();
+				return {
+					context: {
+						...turnContext.context,
+						messages: nextMessages,
+					},
+				};
+			} catch (err) {
+				recordDiagnostic({
+					category: "error.isolated",
+					level: "warn",
+					source: "agent-session.prepareNextTurn",
+					context: { note: err instanceof Error ? err.message : String(err) },
+				});
+				return undefined;
+			}
 		};
 	}
 
@@ -1972,7 +2085,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		);
 		// Band P Fase 0: reconcile any pending guard-fire for this tool with the
 		// call's outcome (fail-open; no-op when telemetry is off or nothing pending).
-		this._guardEfficacy?.onToolExecutionEnd(event.toolName, event.isError);
+		this._guardEfficacy?.onToolExecutionEnd(event.toolName, event.toolCallId, event.isError);
 		this._steering.maybeInjectDoomLoop(event.toolName, args, errorMessage);
 		// Complementary to the doom-loop above (same call repeated): detect a
 		// repeating MULTI-tool cycle [A,B,C]x3 of DIFFERENT tools. Runs after — if
@@ -2246,6 +2359,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 					diagnostics: getRuntimeDiagnostics(),
 					verification: { attempts: this._verificationAttemptsTotal, failures: this._verificationFailuresTotal },
 					cache,
+					cachePrefix: this.getCachePrefixDiagnostics(),
 				}),
 			);
 		} catch {
@@ -2424,6 +2538,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._persistDiagnosticsSummary();
 		this._diagnosticsSink?.dispose();
 		this._diagnosticsSink = undefined;
+		this._recovery.dispose();
 
 		await this.sessionManager.flushWrites();
 		this._extensionRunner.invalidate(
@@ -2836,11 +2951,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 			let latestGoal: GoalState | undefined;
 			let latestTodo: TodoState | undefined;
 			let latestPlan: PlanState | undefined;
+			let latestOrchestration: Orchestration | undefined;
 			for (const e of this.sessionManager.getEntries()) {
 				const entry = e as {
 					type?: string;
 					customType?: string;
-					data?: GoalState | TodoState | PlanState | null;
+					data?: GoalState | TodoState | PlanState | { orchestration?: Orchestration } | null;
 				};
 				if (entry.type !== "custom") continue;
 				if (entry.customType === "goal") {
@@ -2849,6 +2965,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 					latestTodo = (entry.data as TodoState | null) ?? undefined;
 				} else if (entry.customType === "plan") {
 					latestPlan = (entry.data as PlanState | null) ?? undefined;
+				} else if (entry.customType === "orchestration") {
+					const data = entry.data as { orchestration?: Orchestration } | null;
+					if (data?.orchestration === "solo" || data?.orchestration === "fusion") {
+						latestOrchestration = data.orchestration;
+					}
 				}
 			}
 			if (latestGoal && latestGoal.status !== "complete") {
@@ -2858,6 +2979,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			}
 			if (latestTodo) this._todo.restore(latestTodo);
 			if (latestPlan) this._plan.restore(latestPlan);
+			if (latestOrchestration) this._orchestration = latestOrchestration;
 		} catch {
 			// Best-effort restore; ignore malformed/legacy entries.
 		}
@@ -2866,7 +2988,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 	/**
 	 * Set active tools by name.
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
-	 * Also rebuilds the system prompt to reflect the new tool set.
+	 * Preferentially patches the tools/guidelines surface in-place (keeps
+	 * append/context/skills/dynamic suffix intact); falls back to a full rebuild
+	 * when the prompt is custom or anchors are missing.
 	 * Changes take effect on the next agent turn.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
@@ -2881,7 +3005,46 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 		this.agent.state.tools = tools;
 
-		// Rebuild base system prompt with new tool set
+		const toolSnippets: Record<string, string> = {};
+		const promptGuidelines: string[] = [];
+		for (const name of validToolNames) {
+			const snippet = this._toolPromptSnippets.get(name);
+			if (snippet) toolSnippets[name] = snippet;
+			const toolGuidelines = this._toolPromptGuidelines.get(name);
+			if (toolGuidelines) promptGuidelines.push(...toolGuidelines);
+		}
+		promptGuidelines.push(...getEngineeringStyleGuidelines(this.settingsManager.getEngineeringStyle()));
+
+		// Skills block is gated on `read`; flipping its presence needs a full rebuild
+		// so the skills section stays consistent with the tools list (T07).
+		const prevHadRead = (this._baseSystemPromptOptions?.selectedTools ?? []).includes("read");
+		const nextHasRead = validToolNames.includes("read");
+		const readPresenceFlipped = prevHadRead !== nextHasRead;
+
+		const patched =
+			!readPresenceFlipped && this._baseSystemPrompt
+				? patchSystemPromptToolSurface(this._baseSystemPrompt, {
+						selectedTools: validToolNames,
+						toolSnippets,
+						hiddenToolCount: this._hiddenToolCountSnapshot ?? 0,
+					})
+				: undefined;
+
+		if (patched) {
+			this._baseSystemPrompt = patched;
+			if (this._baseSystemPromptOptions) {
+				this._baseSystemPromptOptions = {
+					...this._baseSystemPromptOptions,
+					selectedTools: validToolNames,
+					toolSnippets,
+					promptGuidelines,
+				};
+			}
+			this._trackPrefixStability(patched, "tool-surface");
+			this.agent.state.systemPrompt = this._baseSystemPrompt;
+			return;
+		}
+
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames, "tool-surface");
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
@@ -3045,6 +3208,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 			// Band P (P1/P3) context-composer block — dynamic suffix only, recomputed
 			// per rebuild from the live prompt + cached living map (cache-neutral).
 			groundedContext: this._composeGroundedContext() || undefined,
+			// Gate frequent_files / outlines when wire occupancy is high (T02).
+			contextOccupancyPercent: this.getContextUsage()?.percent ?? undefined,
 			// Stable per-session hidden-tool count (snapshotted after seeding) so the
 			// discovery nudge stays in the cacheable prefix without flipping as the
 			// live index mutates. Always passed explicitly (even when 0) rather than
@@ -3385,7 +3550,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		);
 		if (outcome.reclaimed > 0) {
 			this.agent.state.messages = outcome.messages;
-			this._ctxUsageCache = undefined;
+			this._invalidateCtxCaches();
 		}
 	}
 
@@ -3597,12 +3762,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 	}
 
 	/**
-	 * Verification check phase: the visual-DoD nudge, then the project check + fix
-	 * loop. Extracted from `_runVerificationGate` so the self-review phase can run
-	 * afterward while SHARING the same fix budget. Returns how many fixes it consumed
-	 * and a status: `passed` (green), `exhausted` (still red, budget spent),
-	 * `aborted`, or `inert` (no check command). Only `passed`/`inert` let the review
-	 * proceed.
+	 * Verification check phase: visual nudge, native functional web DoD, then the
+	 * project check + fix loop. Extracted from `_runVerificationGate` so the
+	 * self-review phase can run afterward while SHARING the same fix budget.
+	 * Returns how many fixes it consumed and a status: `passed` (green),
+	 * `exhausted` (still red, budget spent), `aborted`, or `inert` (no check
+	 * command and no functional-web failure). Only `passed`/`inert` let the
+	 * review proceed.
 	 */
 	private async _runVerificationCheckPhase(
 		settings: ReturnType<SettingsManager["getVerificationSettings"]>,
@@ -3621,10 +3787,20 @@ export class AgentSession implements CompactionHost, FusionHost {
 			if (abort.signal.aborted) return { fixesUsed: 0, status: "aborted" };
 		}
 
+		let fixes = 0;
+
+		// Native functional web DoD (navigate / a11y / click / fill / console).
+		// Shares maxAttempts with the project check + self-review below.
+		if (settings.functionalWeb) {
+			const fw = await this._runFunctionalWebPhase(settings, maxAttempts, fixes, abort, options);
+			fixes = fw.fixesUsed;
+			if (fw.status === "aborted") return { fixesUsed: fixes, status: "aborted" };
+			if (fw.status === "exhausted") return { fixesUsed: fixes, status: "exhausted" };
+		}
+
 		// Code check: run the project's check and re-inject failures to fix.
 		let command = this._resolveCheckCommand(settings.command);
-		if (!command) return { fixesUsed: 0, status: "inert" };
-		let fixes = 0;
+		if (!command) return { fixesUsed: fixes, status: fixes > 0 ? "passed" : "inert" };
 		for (let attempt = 1; ; attempt++) {
 			// Re-resolve on each retry so the syntax-fallback tier picks up files the
 			// model edited WHILE fixing: that tier embeds the touched-file list, so a
@@ -3701,6 +3877,108 @@ export class AgentSession implements CompactionHost, FusionHost {
 			}
 			fixes++;
 			await this._promptOnce(verificationFixPrompt(command, result), {
+				expandPromptTemplates: false,
+				source: options?.source,
+			});
+			if (abort.signal.aborted) return { fixesUsed: fixes, status: "aborted" };
+		}
+	}
+
+	/**
+	 * Native functional web DoD loop. Shares `fixesAlreadyUsed` / `maxAttempts`
+	 * with the project check. Fail-open skips (no Chrome / not web / no URL) do
+	 * not consume budget.
+	 */
+	private async _runFunctionalWebPhase(
+		settings: ReturnType<SettingsManager["getVerificationSettings"]>,
+		maxAttempts: number,
+		fixesAlreadyUsed: number,
+		abort: AbortController,
+		options?: PromptOptions,
+	): Promise<{ fixesUsed: number; status: "passed" | "exhausted" | "aborted" | "skipped" }> {
+		// Tools surface may be off while the manager singleton still exists — treat
+		// chromeDevtools.enabled:false as chrome_unavailable (fail-open skip).
+		if (!this.settingsManager.getChromeDevtoolsSettings().enabled) {
+			this.emit({
+				type: "functional_web",
+				phase: "skipped",
+				attempt: 1,
+				maxAttempts,
+				reason: "chrome_unavailable",
+			});
+			return { fixesUsed: fixesAlreadyUsed, status: "skipped" };
+		}
+
+		let fixes = fixesAlreadyUsed;
+		for (let attempt = 1; ; attempt++) {
+			if (abort.signal.aborted || this._userInterrupted) {
+				return { fixesUsed: fixes, status: "aborted" };
+			}
+			this.emit({
+				type: "functional_web",
+				phase: "running",
+				attempt,
+				maxAttempts,
+			});
+			const result = await runFunctionalWebCheck({
+				cwd: this._cwd,
+				mgr: getCurrentChromeDevtoolsManager(),
+				lastVisualFile: this._lastVisualFile,
+				touchedVisual: this._turnTouchedVisual,
+				backgroundJobs: listBashBackgroundJobs(),
+				maxInteractions: settings.functionalWebMaxInteractions,
+				timeoutMs: settings.functionalWebTimeoutMs,
+				signal: abort.signal,
+			});
+			if (abort.signal.aborted) return { fixesUsed: fixes, status: "aborted" };
+
+			if (result.status === "skipped") {
+				this.emit({
+					type: "functional_web",
+					phase: "skipped",
+					url: result.url,
+					attempt,
+					maxAttempts,
+					reason: result.reason,
+				});
+				return { fixesUsed: fixes, status: "skipped" };
+			}
+
+			if (result.status === "passed") {
+				this._turnUsedPreview = true;
+				this.emit({
+					type: "functional_web",
+					phase: "passed",
+					url: result.url,
+					attempt,
+					maxAttempts,
+				});
+				return { fixesUsed: fixes, status: "passed" };
+			}
+
+			const willRetry = fixes < maxAttempts;
+			this.emit({
+				type: "functional_web",
+				phase: "failed",
+				url: result.url,
+				attempt,
+				maxAttempts,
+				willRetry,
+			});
+			if (!willRetry) {
+				this._recovery.noteSignal("verification_exhausted");
+				await this._promptOnce(
+					[
+						functionalWebFixPrompt(result),
+						"",
+						`Fix budget exhausted after ${fixes} attempt(s). Summarize honestly — do NOT report the UI as verified.`,
+					].join("\n"),
+					{ expandPromptTemplates: false, source: options?.source },
+				);
+				return { fixesUsed: fixes, status: "exhausted" };
+			}
+			fixes++;
+			await this._promptOnce(functionalWebFixPrompt(result), {
 				expandPromptTemplates: false,
 				source: options?.source,
 			});
@@ -4023,6 +4301,14 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 
 		if (!messages) {
+			return;
+		}
+
+		// Esc during preflight (compaction / before_agent_start / presend) must not
+		// start the provider run — interrupt() already aborted the signal, but the
+		// async _promptOnce path can still reach here.
+		if (this._userInterrupted || this.agent.signal?.aborted) {
+			preflightResult?.(false);
 			return;
 		}
 
@@ -4404,6 +4690,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 		source: "set" | "cycle" | "restore",
 	): Promise<void> {
 		if (modelsAreEqual(previousModel, nextModel)) return;
+		// Warm the new provider module off the hot path (P06). Covers set/cycle/fallback.
+		prewarmProviderModule(nextModel.api);
 		await this._extensionRunner.emit({
 			type: "model_select",
 			model: nextModel,
@@ -4452,11 +4740,15 @@ export class AgentSession implements CompactionHost, FusionHost {
 		if (scopedModels.length <= 1) return undefined;
 
 		const currentModel = this.model;
-		let currentIndex = scopedModels.findIndex((sm) => modelsAreEqual(sm.model, currentModel));
+		const currentIndex = scopedModels.findIndex((sm) => modelsAreEqual(sm.model, currentModel));
 
-		if (currentIndex === -1) currentIndex = 0;
 		const len = scopedModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
+		let nextIndex: number;
+		if (currentIndex === -1) {
+			nextIndex = direction === "forward" ? 0 : len - 1;
+		} else {
+			nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
+		}
 		const next = scopedModels[nextIndex];
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
 
@@ -4481,11 +4773,15 @@ export class AgentSession implements CompactionHost, FusionHost {
 		if (availableModels.length <= 1) return undefined;
 
 		const currentModel = this.model;
-		let currentIndex = availableModels.findIndex((m) => modelsAreEqual(m, currentModel));
+		const currentIndex = availableModels.findIndex((m) => modelsAreEqual(m, currentModel));
 
-		if (currentIndex === -1) currentIndex = 0;
 		const len = availableModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
+		let nextIndex: number;
+		if (currentIndex === -1) {
+			nextIndex = direction === "forward" ? 0 : len - 1;
+		} else {
+			nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
+		}
 		const nextModel = availableModels[nextIndex];
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
@@ -4541,7 +4837,16 @@ export class AgentSession implements CompactionHost, FusionHost {
 	setOrchestration(orchestration: Orchestration): void {
 		if (orchestration === this._orchestration) return;
 		this._orchestration = orchestration;
+		this._persistOrchestration();
 		this.emit({ type: "orchestration_changed", orchestration });
+	}
+
+	private _persistOrchestration(): void {
+		try {
+			this.sessionManager.appendCustomEntry("orchestration", { orchestration: this._orchestration });
+		} catch {
+			// Persistence is best-effort; a write failure must not break the session.
+		}
 	}
 
 	/**
@@ -5648,21 +5953,30 @@ export class AgentSession implements CompactionHost, FusionHost {
 				}
 			}
 
-			// Run default summarizer if needed
+			// Run default summarizer if needed (skip tiny abandoned paths — C6).
 			let summaryText: string | undefined;
 			let summaryDetails: unknown;
-			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
-				const model = this.model!;
-				const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+			if (options.summarize && entriesToSummarize.length >= BRANCH_SUMMARY_MIN_ENTRIES && !extensionSummary) {
+				const sessionModel = this.model!;
+				const sessionAuth = await this._getRequiredRequestAuth(sessionModel);
+				const compact = await resolveCompactModel(
+					this.compaction,
+					sessionModel,
+					{ apiKey: sessionAuth.apiKey, headers: sessionAuth.headers },
+					this.thinkingLevel,
+				);
 				const branchSummarySettings = this.settingsManager.getBranchSummarySettings();
+				const compactionSettings = this.settingsManager.getCompactionSettings();
 				const result = await generateBranchSummary(entriesToSummarize, {
-					model,
-					apiKey,
-					headers,
+					model: compact.model,
+					apiKey: compact.apiKey ?? sessionAuth.apiKey,
+					headers: compact.headers ?? sessionAuth.headers,
 					signal: this._branchSummaryAbortController.signal,
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
+					cwd: this.sessionManager.getCwd(),
+					selfCorrection: compactionSettings.selfCorrection,
 				});
 				if (result.aborted) {
 					return { cancelled: true, aborted: true };
@@ -5893,6 +6207,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 	}
 
 	private _ctxUsageCache?: { key: string; value: ContextUsage | undefined };
+	private _ctxPruneCache?: { key: string; value: AgentMessage[] };
 
 	getContextUsage(): ContextUsage | undefined {
 		const model = this.model;

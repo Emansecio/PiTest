@@ -45,7 +45,7 @@ describe("ActivityLineComponent", () => {
 		c.setExec(execStub({}));
 		const out = c.render(120).map(stripAnsi);
 		expect(out[0]).toContain("Edited");
-		expect(out[0]).toContain("server/foo.ts");
+		expect(out[0]).toContain("foo.ts");
 		expect(out[0]).toContain("+1");
 		expect(out[0]).toContain("-2");
 		for (const l of out) expect(l).not.toContain("│");
@@ -82,11 +82,11 @@ describe("ActivityLineComponent", () => {
 			}),
 		);
 		const out = c.render(120).map(stripAnsi);
-		// header + ERROR_PREVIEW_LINES + 1 hint line
-		expect(out.length).toBe(1 + 10 + 1);
-		expect(out.some((l) => l.includes("error line 10"))).toBe(true);
-		expect(out.some((l) => l.includes("error line 11"))).toBe(false);
-		expect(out[out.length - 1]).toContain("+15 more lines");
+		// header + ACTIVITY_ERROR_PREVIEW_LINES + 1 hint line
+		expect(out.length).toBe(1 + 4 + 1);
+		expect(out.some((l) => l.includes("error line 4"))).toBe(true);
+		expect(out.some((l) => l.includes("error line 5"))).toBe(false);
+		expect(out[out.length - 1]).toContain("+21 more lines");
 		expect(out[out.length - 1]).toContain("to expand");
 	});
 	it("renders the full error body when explicitly expanded", () => {
@@ -161,7 +161,7 @@ function bashStub() {
 }
 
 describe("ActivityLineComponent — edit preview", () => {
-	it("auto-shows up to five diff lines on a settled edit without expanding", () => {
+	it("shows only the header on a settled edit until expanded", () => {
 		const bodyLines = Array.from({ length: 12 }, (_, i) => `diff line ${i + 1}`);
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(
@@ -172,13 +172,27 @@ describe("ActivityLineComponent — edit preview", () => {
 		);
 		const out = c.render(120).map(stripAnsi);
 		expect(out[0]).toContain("Edited");
-		expect(out.length).toBe(1 + 5 + 1);
-		expect(out[1]).toContain("diff line 1");
-		expect(out[5]).toContain("diff line 5");
-		expect(out[6]).toContain("+7 more lines");
+		expect(out).toHaveLength(1);
+		expect(out.some((l) => l.includes("diff line"))).toBe(false);
 	});
 
-	it("shows live diff body while an edit is still pending", () => {
+	it("shows the diff body only when explicitly expanded", () => {
+		const bodyLines = Array.from({ length: 12 }, (_, i) => `diff line ${i + 1}`);
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getResultDetails: () => ({ diff: "+1 a\n-1 b" }),
+				render: () => bodyLines,
+			}),
+		);
+		c.setExpanded(true);
+		const out = c.render(120).map(stripAnsi);
+		expect(out[0]).toContain("Edited");
+		expect(out[1]).toContain("diff line 1");
+		expect(out.some((l) => l.includes("diff line 12"))).toBe(true);
+	});
+
+	it("keeps a pending edit header-only without streaming diff noise", () => {
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(
 			execStub({
@@ -188,7 +202,21 @@ describe("ActivityLineComponent — edit preview", () => {
 		);
 		const out = c.render(120).map(stripAnsi);
 		expect(out[0]).toContain("Editing");
-		expect(out.some((l) => l.includes("streaming"))).toBe(true);
+		expect(out).toHaveLength(1);
+	});
+
+	it("uses basename instead of a long absolute path in the header", () => {
+		const c = new ActivityLineComponent(fakeTui());
+		c.setExec(
+			execStub({
+				getArgs: () => ({
+					path: "C:/Users/User/Desktop/Pastas Essenciais/Ideias/Glide/tools/browser-tools.ts",
+				}),
+			}),
+		);
+		const head = c.render(120).map(stripAnsi)[0];
+		expect(head).toContain("browser-tools.ts");
+		expect(head).not.toContain("Pastas Essenciais");
 	});
 
 	it("accumulates diffstat across coalesced edits", () => {
@@ -235,8 +263,7 @@ describe("ActivityLineComponent — settled-line memoization", () => {
 		state = "success";
 		const s1 = c.render(120);
 		expect(s1.map(stripAnsi)[0]).toContain("Edited");
-		// Success with diff auto-preview keeps recomputing — no memo.
-		expect(c.render(120)).not.toBe(s1);
+		expect(c.render(120)).toBe(s1);
 	});
 
 	it("setExpanded busts the memo and the body recomputes every frame", () => {

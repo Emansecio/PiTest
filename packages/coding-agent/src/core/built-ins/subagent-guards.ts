@@ -14,10 +14,14 @@
  * handler), this re-runs the SAME guard factories against a minimal
  * {@link ExtensionAPI} shim that only collects their `tool_call` / `tool_result`
  * handlers, then exposes them as plain before/after hooks the subagent's `Agent`
- * can call directly. The permission extension and the host extensions
- * (coordinator/mcp/hooks/memory/learned-error) — which need a full bound runtime
- * — are intentionally excluded; the subagent already enforces permission in its
- * own beforeToolCall.
+ * can call directly. The permission extension and host extensions
+ * (coordinator/mcp/hooks/memory) — which need a full bound runtime — are
+ * intentionally excluded; the subagent already enforces permission in its own
+ * beforeToolCall. Learned-error IS included (same factory as the parent, disk
+ * store via `dir` / default agent dir). The middle-tier destructive-command
+ * speed-bump IS included (ADR-0006) so bash on a `general` subagent gets the
+ * same fire-once bump as the parent; catastrophic deny-floor still comes from
+ * the shared permissionChecker.
  *
  * Each chain is instantiated PER SPAWN, so its session state (read-stamp set,
  * fire-once sets) is isolated to that subagent. Every guard already reads its own
@@ -28,7 +32,10 @@
 
 import type { ExtensionAPI } from "../extensions/index.js";
 import type { ToolCallEvent, ToolCallEventResult, ToolResultEvent } from "../extensions/types.ts";
+import { defaultLearnedErrorsDir } from "../learned-error-store.ts";
+import { createDestructiveCommandGuardExtension } from "./destructive-command-guard-extension.ts";
 import { registerSubagentGroundingGuards } from "./grounding-guard-registry.ts";
+import { createLearnedErrorGuardExtension, type LearnedErrorGuardOptions } from "./learned-error-guard-extension.ts";
 
 type CollectedHandler = (event: unknown, ctx: unknown) => unknown;
 
@@ -37,6 +44,17 @@ export interface SubagentGuardChain {
 	beforeToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined>;
 	/** Run the post-execution handlers (e.g. read-guard re-stamp). Never throws. */
 	afterToolCall(event: ToolResultEvent): Promise<void>;
+}
+
+export interface CreateSubagentGuardChainOptions {
+	cwd: string;
+	/**
+	 * Learned-errors store directory. Defaults to {@link defaultLearnedErrorsDir}
+	 * (same global store the parent uses when not test-isolated).
+	 */
+	learnedErrorsDir?: string;
+	/** Injected for tests — forwarded to {@link createLearnedErrorGuardExtension}. */
+	learnedErrorProvider?: LearnedErrorGuardOptions["provider"];
 }
 
 /** Opt-out: PIT_NO_SUBAGENT_GUARDS disables propagating the grounding guards to subagents. */
@@ -51,7 +69,7 @@ export function areSubagentGuardsDisabled(env: NodeJS.ProcessEnv = process.env):
  * Build a per-subagent guard chain. The factories register their handlers
  * against the shim synchronously; the returned hooks replay them in order.
  */
-export function createSubagentGuardChain(options: { cwd: string }): SubagentGuardChain {
+export function createSubagentGuardChain(options: CreateSubagentGuardChainOptions): SubagentGuardChain {
 	const toolCallHandlers: CollectedHandler[] = [];
 	const toolResultHandlers: CollectedHandler[] = [];
 
@@ -66,6 +84,13 @@ export function createSubagentGuardChain(options: { cwd: string }): SubagentGuar
 	} as unknown as ExtensionAPI;
 
 	registerSubagentGroundingGuards(options.cwd, shim);
+	// ADR-0006 middle tier — registered here (not in subagentGroundingGuardFactories)
+	// so the parent bundle does not double-register the same factory.
+	createDestructiveCommandGuardExtension()(shim);
+	createLearnedErrorGuardExtension({
+		dir: options.learnedErrorsDir ?? defaultLearnedErrorsDir(),
+		provider: options.learnedErrorProvider,
+	})(shim);
 
 	return {
 		async beforeToolCall(event) {
@@ -85,7 +110,7 @@ export function createSubagentGuardChain(options: { cwd: string }): SubagentGuar
 				try {
 					await handler(event, undefined);
 				} catch {
-					// Best-effort: re-stamp / bookkeeping failures are non-fatal.
+					// Fail-open: post-exec bookkeeping must not break the subagent.
 				}
 			}
 		},

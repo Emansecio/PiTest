@@ -83,7 +83,10 @@ function hintForStatus(
 }
 
 function goalStructuralKey(snapshot: GoalSnapshot): string {
-	return `${snapshot.status}|${snapshot.iterations}|${snapshot.tokensUsed}|${snapshot.tokenBudget ?? ""}|${snapshot.objective}|${snapshot.summary ?? ""}`;
+	const split = snapshot.tokenSpendSplit
+		? `${snapshot.tokenSpendSplit.main}/${snapshot.tokenSpendSplit.subagent}/${snapshot.tokenSpendSplit.fusion}`
+		: "";
+	return `${snapshot.status}|${snapshot.iterations}|${snapshot.tokensUsed}|${snapshot.tokenBudget ?? ""}|${split}|${snapshot.objective}|${snapshot.summary ?? ""}`;
 }
 
 function buildGoalHeaderLine(snapshot: GoalSnapshot, width: number): string {
@@ -101,7 +104,18 @@ function buildGoalObjectiveLine(snapshot: GoalSnapshot, width: number): string {
 function buildGoalMetricsLine(snapshot: GoalSnapshot, width: number): string {
 	const budget = rowBudget(width);
 	const budgetPart = snapshot.tokenBudget !== undefined ? `/${formatTokens(snapshot.tokenBudget)}` : "";
-	const metricsText = `iter ${snapshot.iterations} · tokens ${formatTokens(snapshot.tokensUsed)}${budgetPart} · ${formatElapsed(snapshot.elapsedMs)}`;
+	const split = snapshot.tokenSpendSplit;
+	const splitPart = split
+		? ` · ${formatTokens(split.main)}/${formatTokens(split.subagent)}/${formatTokens(split.fusion)}`
+		: "";
+	const nearBudget =
+		snapshot.tokenBudget !== undefined &&
+		snapshot.tokenBudget > 0 &&
+		(snapshot.status === "active" || snapshot.status === "paused") &&
+		snapshot.tokensUsed / snapshot.tokenBudget >= 0.8
+			? " · ~80% budget"
+			: "";
+	const metricsText = `iter ${snapshot.iterations} · tokens ${formatTokens(snapshot.tokensUsed)}${budgetPart}${splitPart}${nearBudget} · ${formatElapsed(snapshot.elapsedMs)}`;
 	const metricsBody = fitWidth(metricsText, budget);
 	return `${theme.fg("dim", "├─ ")}${theme.fg("muted", metricsBody)}`;
 }

@@ -42,6 +42,29 @@ function stripLeadingCd(line: string): string {
 }
 
 /**
+ * Strip one or more leading `echo <label> &&` diagnostic prefixes agents often
+ * prepend before the real command (`echo "=== status ===" && git status …`).
+ * Only the collapsed activity title is touched — expand still shows verbatim.
+ */
+function stripLeadingEcho(line: string): string {
+	let current = line;
+	while (true) {
+		const m = current.match(/^echo\s+(?:"[^"]*"|'[^']*'|[^\s&]+)\s*&&\s*(.+)$/);
+		if (!m) break;
+		current = m[1] ?? current;
+	}
+	return current;
+}
+
+/** Prepare the first line of a command for a collapsed activity/bash row. */
+function prepareBashHead(firstLine: string, opts: { elideCd?: boolean; stripEcho?: boolean }): string {
+	let head = firstLine;
+	if (opts.stripEcho) head = stripLeadingEcho(head);
+	if (opts.elideCd) return stripLeadingCd(head);
+	return collapseCdPrefix(head);
+}
+
+/**
  * Build a single visual row for a collapsed bash command title/header. A long
  * command is clipped horizontally (with `…`); multi-line scripts/heredocs show
  * only the first line. Anything hidden — extra command lines plus `extraHidden`
@@ -73,13 +96,23 @@ export function clampBashCommandRow(opts: {
 	 * boilerplate only eats width before the command that matters. Default false.
 	 */
 	elideCd?: boolean;
+	/**
+	 * Strip leading `echo <label> &&` diagnostic prefixes before display. Used by
+	 * activity rows where agents label probe commands with banner echoes.
+	 */
+	stripEcho?: boolean;
+	/**
+	 * Omit inline expand hints. Activity rows are already expandable via ctrl+o on
+	 * the whole line — a per-command `(ctrl+o to expand)` suffix reads as noise.
+	 */
+	suppressExpandHint?: boolean;
 }): string {
 	const { command, width, colorKey } = opts;
 	const extraHidden = opts.extraHidden ?? 0;
 	const suffix = opts.suffix ?? "";
 	const lines = command.split("\n");
 	const firstLine = lines[0] ?? "";
-	const head = opts.elideCd ? stripLeadingCd(firstLine) : collapseCdPrefix(firstLine);
+	const head = prepareBashHead(firstLine, { elideCd: opts.elideCd, stripEcho: opts.stripEcho });
 	const cmd = theme.fg(colorKey, theme.bold(opts.prefix === false ? head : `$ ${head}`));
 	const hiddenLines = lines.length - 1 + extraHidden;
 	const suffixW = visibleWidth(suffix);
@@ -87,12 +120,15 @@ export function clampBashCommandRow(opts: {
 	// Folded hidden lines use the canonical trailer (`… +N earlier lines (<key> to
 	// expand)`), unifying with tool-result / error / hint collapse sites. A purely
 	// horizontal clip (nothing hidden vertically) keeps the bare affordance since
-	// there is no line count to report.
+	// there is no line count to report. Activity rows suppress both — the line
+	// itself is the expand target.
 	let hint = "";
-	if (hiddenLines > 0) {
-		hint = ` ${moreLinesTrailer(hiddenLines, expandKeyHint(), "earlier lines")}`;
-	} else if (horizontalClip) {
-		hint = ` ${theme.fg("muted", "(")}${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+	if (!opts.suppressExpandHint) {
+		if (hiddenLines > 0) {
+			hint = ` ${moreLinesTrailer(hiddenLines, expandKeyHint(), "earlier lines")}`;
+		} else if (horizontalClip) {
+			hint = ` ${theme.fg("muted", "(")}${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+		}
 	}
 	// Reserve room for the suffix + hint. At pathologically small widths where
 	// they don't even fit, drop both and just clip the command to the full width

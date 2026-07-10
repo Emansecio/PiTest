@@ -74,6 +74,87 @@ describe("runFusionTurn", () => {
 			writer: async () => "unused",
 		});
 		expect(out.handled).toBe(false);
+		expect(out.degraded).toBeUndefined();
+	});
+
+	it("retries once when both members throttle, then succeeds on retry", async () => {
+		let calls = 0;
+		const out = await runFusionTurn({
+			userPrompt: "Q",
+			panel: PANEL,
+			staggerSameCliMs: 0,
+			runMember: async (m) => {
+				calls++;
+				if (calls <= 2) return { member: m, ok: false, text: "", error: "HTTP 429: rate limit" };
+				return okResult(m, `ans-${m.cli}`);
+			},
+			runJudge: async () => EMPTY_JUDGE,
+			writer: async (_p, results) => `FINAL(${results.filter((r) => r.ok).length})`,
+		});
+		expect(out.handled).toBe(true);
+		expect(out.text).toBe("FINAL(2)");
+		expect(calls).toBe(4);
+		expect(recordDiagnosticMock).toHaveBeenCalledWith(
+			expect.objectContaining({ category: "fusion.both-throttled-retry" }),
+		);
+	});
+
+	it("marks both-throttled when coordinated retry still fails with throttle errors", async () => {
+		const out = await runFusionTurn({
+			userPrompt: "Q",
+			panel: PANEL,
+			staggerSameCliMs: 0,
+			runMember: async (m) => ({ member: m, ok: false, text: "", error: "overloaded: server busy" }),
+			runJudge: async () => EMPTY_JUDGE,
+			writer: async () => "unused",
+		});
+		expect(out.handled).toBe(false);
+		expect(out.degraded).toBe("both-throttled");
+	});
+
+	it("does not retry when both fail but only one is a throttle error", async () => {
+		recordDiagnosticMock.mockClear();
+		let calls = 0;
+		const out = await runFusionTurn({
+			userPrompt: "Q",
+			panel: PANEL,
+			staggerSameCliMs: 0,
+			runMember: async (m) => {
+				calls++;
+				return m.cli === "codex"
+					? { member: m, ok: false, text: "", error: "HTTP 429: rate limit" }
+					: { member: m, ok: false, text: "", error: "not logged in" };
+			},
+			runJudge: async () => EMPTY_JUDGE,
+			writer: async () => "unused",
+		});
+		expect(out.handled).toBe(false);
+		expect(out.degraded).toBeUndefined();
+		expect(calls).toBe(2);
+		expect(recordDiagnosticMock).not.toHaveBeenCalledWith(
+			expect.objectContaining({ category: "fusion.both-throttled-retry" }),
+		);
+	});
+
+	it("uses stagger on the coordinated throttle retry", async () => {
+		const sameCliPanel: PanelMember[] = [
+			{ cli: "claude", model: "opus" },
+			{ cli: "claude", model: "haiku" },
+		];
+		let calls = 0;
+		const out = await runFusionTurn({
+			userPrompt: "Q",
+			panel: sameCliPanel,
+			staggerSameCliMs: 5,
+			runMember: async (m) => {
+				calls++;
+				return { member: m, ok: false, text: "", error: "throttled" };
+			},
+			runJudge: async () => EMPTY_JUDGE,
+			writer: async () => "unused",
+		});
+		expect(out.degraded).toBe("both-throttled");
+		expect(calls).toBe(4);
 	});
 
 	it("skips runMember for a pre-aborted same-cli member (i>0) and marks it failed", async () => {

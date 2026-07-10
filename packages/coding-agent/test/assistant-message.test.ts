@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@pit/ai";
 import { describe, expect, test } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
+import { stripAnsi } from "../src/utils/ansi.js";
 
 const OSC133_PROMPT_START = "\x1b]133;A\x07"; // FTCS A: prompt — belongs to the user, not here
 const OSC133_PROMPT_END = "\x1b]133;B\x07"; // FTCS B: command entered — user only
@@ -94,5 +95,50 @@ describe("AssistantMessageComponent", () => {
 		expect(rendered.includes(OSC133_OUTPUT_START)).toBe(false);
 		expect(rendered.includes(OSC133_OUTPUT_END_PREFIX)).toBe(false);
 		expect(rendered.includes(OSC133_PROMPT_START)).toBe(false);
+	});
+
+	test("wraps visible thinking in a MessageShell gutter tinted by thinking level", () => {
+		initTheme("dark");
+
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "thinking", thinking: "pondering the void" }]),
+			false,
+			undefined,
+			"Thinking…",
+			undefined,
+			false,
+			100,
+			"high",
+		);
+		const lines = component.render(60);
+		const plain = lines.map(stripAnsi).join("\n");
+		expect(plain).toContain("│");
+		expect(plain).toContain("pondering the void");
+		// Gutter mode (not framed): no rounded card corners
+		expect(plain).not.toContain("╭");
+	});
+
+	test("prefixes hidden Thinking… label with a thinking-level gutter glyph", () => {
+		initTheme("dark");
+
+		const fakeUi = {
+			addAnimationCallback: () => () => {},
+			requestRender: () => {},
+		} as unknown as import("@pit/tui").TUI;
+
+		const message = createAssistantMessage([{ type: "thinking", thinking: "still thinking" }]);
+		message.stopReason = undefined as unknown as AssistantMessage["stopReason"];
+		const component = new AssistantMessageComponent(
+			message,
+			true,
+			undefined,
+			"Thinking…",
+			fakeUi,
+			false,
+			100,
+			"medium",
+		);
+		const plain = component.render(40).map(stripAnsi).join("\n");
+		expect(plain).toMatch(/│\s*Thinking/);
 	});
 });

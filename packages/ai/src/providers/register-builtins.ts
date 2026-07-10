@@ -230,6 +230,29 @@ export const streamSimpleOpenAICompletions = createLazySimpleStream(loadOpenAICo
 export const streamOpenAIResponses = createLazyStream(loadOpenAIResponsesProviderModule);
 export const streamSimpleOpenAIResponses = createLazySimpleStream(loadOpenAIResponsesProviderModule);
 
+/**
+ * Fire-and-forget warm of the lazy provider module for `api`.
+ * Safe to call repeatedly — loaders memoize the import promise.
+ * Unknown / custom APIs resolve immediately (no built-in module to warm).
+ * Returns the load promise so callers/tests can await if needed.
+ */
+export function prewarmProviderModule(api: Api): Promise<void> {
+	switch (api) {
+		case "anthropic-messages":
+			return loadAnthropicProviderModule().then(() => undefined);
+		case "google-generative-ai":
+			return loadGoogleProviderModule().then(() => undefined);
+		case "openai-codex-responses":
+			return loadOpenAICodexResponsesProviderModule().then(() => undefined);
+		case "openai-completions":
+			return loadOpenAICompletionsProviderModule().then(() => undefined);
+		case "openai-responses":
+			return loadOpenAIResponsesProviderModule().then(() => undefined);
+		default:
+			return Promise.resolve();
+	}
+}
+
 export function registerBuiltInApiProviders(): void {
 	registerApiProvider({
 		api: "anthropic-messages",

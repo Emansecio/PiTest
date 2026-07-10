@@ -72,6 +72,16 @@ describe("read-guard — basic invariants", () => {
 		expect(String(r?.reason)).toContain("has not been read");
 	});
 
+	it("blocks edit_v2 on a file that was never read this session", () => {
+		const cwd = makeDir();
+		writeFileSync(join(cwd, "a.ts"), "x", "utf-8");
+		const { api, fire } = makeFakePi();
+		createReadGuardExtension({ cwd })(api);
+		const r = fire("tool_call", toolCall("edit_v2", { path: "a.ts", edits: [] }));
+		expect(r?.block).toBe(true);
+		expect(String(r?.reason)).toContain("has not been read");
+	});
+
 	it("allows a write to a NEW file (does not exist on disk)", () => {
 		const cwd = makeDir();
 		const { api, fire } = makeFakePi();

@@ -474,7 +474,20 @@ async function runLoop(
 				context: currentContext,
 				newMessages,
 			};
-			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
+			// prepareNextTurn is bookkeeping (context economy). A throw must not
+			// convert a successful assistant turn into a synthetic error turn.
+			let nextTurnSnapshot: Awaited<ReturnType<NonNullable<AgentLoopConfig["prepareNextTurn"]>>> | undefined;
+			try {
+				nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
+			} catch (err) {
+				recordDiagnostic({
+					category: "error.isolated",
+					level: "warn",
+					source: "agent-loop.prepareNextTurn",
+					context: { note: err instanceof Error ? err.message : String(err) },
+				});
+				nextTurnSnapshot = undefined;
+			}
 			if (nextTurnSnapshot) {
 				currentContext = nextTurnSnapshot.context ?? currentContext;
 				let nextReasoning = config.reasoning;

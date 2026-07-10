@@ -1,7 +1,7 @@
 /**
  * Built-in read-guard extension.
  *
- * Blocks `edit` and `write` tool calls on files that have not been read in the
+ * Blocks `edit`, `edit_v2`, and `write` tool calls on files that have not been read in the
  * current session. Prevents the model from generating diffs against
  * hallucinated file content.
  *
@@ -140,7 +140,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 				return undefined;
 			}
 
-			if (event.toolName === "edit" || event.toolName === "write") {
+			if (event.toolName === "edit" || event.toolName === "edit_v2" || event.toolName === "write") {
 				const path = extractPathArg(event.input as Record<string, unknown>);
 				if (path === undefined) return undefined;
 
@@ -177,7 +177,13 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								category: "guard.read",
 								level: "info",
 								source: "read-guard-extension.intraSessionDrift",
-								context: { path, outcome: "blocked", ruleId: "write-drift-clobber" },
+								context: {
+									path,
+									outcome: "blocked",
+									ruleId: "write-drift-clobber",
+									toolName: event.toolName,
+									toolCallId: event.toolCallId,
+								},
 							});
 							return {
 								block: true,
@@ -195,7 +201,13 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								category: "guard.read",
 								level: "info",
 								source: "read-guard-extension.writeWarnOverridden",
-								context: { path, outcome: "overridden", ruleId: "write-drift-clobber" },
+								context: {
+									path,
+									outcome: "overridden",
+									ruleId: "write-drift-clobber",
+									toolName: event.toolName,
+									toolCallId: event.toolCallId,
+								},
 							});
 						}
 					}
@@ -226,7 +238,13 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 										category: "guard.read",
 										level: "info",
 										source: "read-guard-extension.postCompactEditMismatch",
-										context: { path, outcome: "blocked", ruleId: "postcompact-edit-mismatch" },
+										context: {
+											path,
+											outcome: "blocked",
+											ruleId: "postcompact-edit-mismatch",
+											toolName: event.toolName,
+											toolCallId: event.toolCallId,
+										},
 									});
 									return {
 										block: true,
@@ -246,7 +264,13 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								category: "guard.read",
 								level: "info",
 								source: "read-guard-extension.postCompactWriteWarn",
-								context: { path, outcome: "blocked", ruleId: "postcompact-write-overwrite" },
+								context: {
+									path,
+									outcome: "blocked",
+									ruleId: "postcompact-write-overwrite",
+									toolName: event.toolName,
+									toolCallId: event.toolCallId,
+								},
 							});
 							return {
 								block: true,
@@ -263,7 +287,13 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 								category: "guard.read",
 								level: "info",
 								source: "read-guard-extension.writeWarnOverridden",
-								context: { path, outcome: "overridden", ruleId: "postcompact-write-overwrite" },
+								context: {
+									path,
+									outcome: "overridden",
+									ruleId: "postcompact-write-overwrite",
+									toolName: event.toolName,
+									toolCallId: event.toolCallId,
+								},
 							});
 						}
 						return undefined;
@@ -275,7 +305,13 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 						category: "guard.read",
 						level: "info",
 						source: "read-guard-extension.stampDrifted",
-						context: { path, outcome: "blocked", ruleId: "stamp-drifted" },
+						context: {
+							path,
+							outcome: "blocked",
+							ruleId: "stamp-drifted",
+							toolName: event.toolName,
+							toolCallId: event.toolCallId,
+						},
 					});
 					return {
 						block: true,
@@ -287,7 +323,13 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 					category: "guard.read",
 					level: "info",
 					source: "read-guard-extension.neverRead",
-					context: { path, outcome: "blocked", ruleId: "edit-never-read" },
+					context: {
+						path,
+						outcome: "blocked",
+						ruleId: "edit-never-read",
+						toolName: event.toolName,
+						toolCallId: event.toolCallId,
+					},
 				});
 				return {
 					block: true,
@@ -305,7 +347,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 		// untracked (its first edit still requires the normal read), preserving the
 		// existing new-file contract.
 		pi.on("tool_result", (event) => {
-			if (event.toolName !== "write" && event.toolName !== "edit") return undefined;
+			if (event.toolName !== "write" && event.toolName !== "edit" && event.toolName !== "edit_v2") return undefined;
 			if (event.isError) return undefined;
 			const path = extractPathArg(event.input as Record<string, unknown>);
 			if (path === undefined) return undefined;

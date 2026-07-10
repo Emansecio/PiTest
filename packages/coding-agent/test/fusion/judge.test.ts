@@ -69,6 +69,30 @@ describe("fusion judge", () => {
 		expect(parseJudgeOutput('```json\n{"consensus":"notarray"}\n```').ok).toBe(false);
 	});
 
+	it("recovers judge JSON with raw control chars via repairJson", () => {
+		// Raw newline inside a string is invalid JSON; repairJson escapes it.
+		const broken = [
+			"{",
+			'  "consensus": ["line1',
+			'line2"],',
+			'  "contradictions": [],',
+			'  "partialCoverage": [],',
+			'  "uniqueInsights": [],',
+			'  "blindSpots": [],',
+			'  "unsupportedClaims": []',
+			"}",
+		].join("\n");
+		const parsed = parseJudgeOutput(`\`\`\`json\n${broken}\n\`\`\``);
+		expect(parsed.ok).toBe(true);
+		if (parsed.ok) {
+			expect(parsed.value.consensus).toEqual(["line1\nline2"]);
+		}
+	});
+
+	it("still rejects unrecoverable judge garbage after repairJson", () => {
+		expect(parseJudgeOutput("{not json at all").ok).toBe(false);
+	});
+
 	const EMPTY_ANALYSIS = {
 		consensus: [],
 		contradictions: [],

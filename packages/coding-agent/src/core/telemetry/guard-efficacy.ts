@@ -16,23 +16,6 @@
 
 import type { RecordedDiagnosticEvent } from "@pit/ai";
 
-/** Tools whose names may appear in a guard diagnostic's note/context. */
-const KNOWN_TOOLS = new Set([
-	"read",
-	"write",
-	"edit",
-	"edit_v2",
-	"multiedit",
-	"apply_patch",
-	"str_replace",
-	"bash",
-	"grep",
-	"find",
-	"ls",
-	"symbol",
-	"lsp",
-]);
-
 /** Default cap on distinct tools tracked at once (anti-OOM; oldest evicted). */
 const DEFAULT_MAX_PENDING = 32;
 
@@ -41,6 +24,7 @@ interface PendingGuardFire {
 	guard: string;
 	ruleId?: string;
 	outcome: "blocked" | "overridden";
+	toolCallId: string;
 	ts: number;
 }
 
@@ -61,13 +45,12 @@ export interface GuardEfficacyRecord {
  * undefined when no tool can be identified — the fire is then simply not
  * correlated (fail-open, never guessed).
  */
-export function inferToolFromDiagnostic(event: RecordedDiagnosticEvent): string | undefined {
-	const note = event.context?.note;
-	if (!note) return undefined;
-	for (const token of note.toLowerCase().split(/[^a-z0-9_]+/)) {
-		if (KNOWN_TOOLS.has(token)) return token;
-	}
-	return undefined;
+export function getToolCallFromDiagnostic(
+	event: RecordedDiagnosticEvent,
+): { toolName: string; toolCallId: string } | undefined {
+	const toolName = event.context?.toolName;
+	const toolCallId = event.context?.toolCallId;
+	return toolName && toolCallId ? { toolName, toolCallId } : undefined;
 }
 
 export class GuardEfficacyCorrelator {
@@ -85,18 +68,25 @@ export class GuardEfficacyCorrelator {
 		if (!event.category.startsWith("guard.")) return;
 		const outcome = event.context?.outcome;
 		if (outcome !== "blocked" && outcome !== "overridden") return;
-		const tool = inferToolFromDiagnostic(event);
+		const tool = getToolCallFromDiagnostic(event);
 		if (!tool) return;
 		// Keep only the most recent fire per tool; re-inserting refreshes recency.
-		this.pending.delete(tool);
-		this.pending.set(tool, { guard: event.category, ruleId: event.context?.ruleId, outcome, ts: event.ts });
+		this.pending.delete(tool.toolName);
+		this.pending.set(tool.toolName, {
+			guard: event.category,
+			ruleId: event.context?.ruleId,
+			outcome,
+			toolCallId: tool.toolCallId,
+			ts: event.ts,
+		});
 		this.enforceCap();
 	}
 
 	/** Reconcile a finished tool call against any pending guard-fire for that tool. */
-	onToolExecutionEnd(toolName: string, isError: boolean): void {
+	onToolExecutionEnd(toolName: string, toolCallId: string, isError: boolean): void {
 		const fire = this.pending.get(toolName);
 		if (!fire) return;
+		if (fire.toolCallId === toolCallId) return;
 		this.pending.delete(toolName);
 		try {
 			this.emit({

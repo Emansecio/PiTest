@@ -1,7 +1,9 @@
 import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Spacer, TruncatedText } from "@pit/tui";
 import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.ts";
 import { theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
+import { selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
+import { SelectableRow } from "./selectable-row.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 export type AuthSelectorProvider = {
 	id: string;
@@ -53,14 +55,13 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 
-		// Add top border
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
+		const card = new SelectorCard();
+		card.addChild(new Spacer(1));
 
 		// Add title
 		const title = mode === "login" ? "Select provider to configure:" : "Select provider to logout:";
-		this.addChild(new TruncatedText(theme.fg("accent", theme.bold(title)), 1, 0));
-		this.addChild(new Spacer(1));
+		card.addChild(new TruncatedText(theme.fg("accent", theme.bold(title)), 1, 0));
+		card.addChild(new Spacer(1));
 
 		this.searchInput = new Input();
 		this.searchInput.onSubmit = () => {
@@ -69,17 +70,15 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 				this.onSelectCallback(selectedProvider.id);
 			}
 		};
-		this.addChild(this.searchInput);
-		this.addChild(new Spacer(1));
+		card.addChild(this.searchInput);
+		card.addChild(new Spacer(1));
 
 		// Create list container
 		this.listContainer = new Container();
-		this.addChild(this.listContainer);
+		card.addChild(this.listContainer);
 
-		this.addChild(new Spacer(1));
-
-		// Add bottom border
-		this.addChild(new DynamicBorder());
+		card.addChild(new Spacer(1));
+		this.addChild(card);
 
 		// Initial render
 		this.filterProviders("");
@@ -108,24 +107,20 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			if (!provider) continue;
 
 			const isSelected = i === this.selectedIndex;
-
 			const statusIndicator = this.formatStatusIndicator(provider);
-			let line = "";
-			if (isSelected) {
-				const prefix = theme.fg("accent", "→ ");
-				const text = theme.fg("accent", provider.name);
-				line = prefix + text + statusIndicator;
-			} else {
-				const text = `  ${theme.fg("text", provider.name)}`;
-				line = text + statusIndicator;
-			}
-
-			this.listContainer.addChild(new TruncatedText(line, 1, 0));
+			const cursor = selectionCursor(isSelected);
+			const name = isSelected ? theme.fg("accent", provider.name) : theme.fg("text", provider.name);
+			this.listContainer.addChild(new SelectableRow(`${cursor}${name}${statusIndicator}`, isSelected, 1));
 		}
 
-		if (startIndex > 0 || endIndex < this.filteredProviders.length) {
-			const scrollInfo = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredProviders.length})`);
-			this.listContainer.addChild(new TruncatedText(scrollInfo, 1, 0));
+		const scrollHint = themedScrollPositionHint(
+			this.selectedIndex,
+			this.filteredProviders.length,
+			startIndex,
+			endIndex,
+		);
+		if (scrollHint) {
+			this.listContainer.addChild(new TruncatedText(scrollHint, 1, 0));
 		}
 
 		// Show "no providers" if empty

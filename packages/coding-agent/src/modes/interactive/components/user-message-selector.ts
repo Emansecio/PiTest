@@ -1,6 +1,7 @@
 import { type Component, Container, getKeybindings, Spacer, Text, truncateToWidth } from "@pit/tui";
 import { theme } from "../theme/theme.ts";
-import { DynamicBorder } from "./dynamic-border.ts";
+import { selectionCursor, themedScrollPositionHint } from "./keybinding-hints.ts";
+import { SelectorCard } from "./selector-card.ts";
 
 interface UserMessageItem {
 	id: string; // Entry ID in the session
@@ -53,26 +54,26 @@ class UserMessageList implements Component {
 			// Normalize message to single line
 			const normalizedMessage = message.text.replace(/\n/g, " ").trim();
 
-			// First line: cursor + message
-			const cursor = isSelected ? theme.fg("accent", "→ ") : "  ";
+			// First line: cursor + message — pad + selectedBg when focused
+			const cursor = selectionCursor(isSelected);
 			const maxMsgWidth = width - 2; // Account for cursor (2 chars)
-			const truncatedMsg = truncateToWidth(normalizedMessage, maxMsgWidth);
-			const messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
-
+			const truncatedMsg = truncateToWidth(normalizedMessage, maxMsgWidth, "…", isSelected);
+			let messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
+			if (isSelected) {
+				messageLine = theme.bg("selectedBg", messageLine);
+			}
 			lines.push(messageLine);
 
 			// Second line: metadata (position in history)
 			const position = i + 1;
 			const metadata = `  Message ${position} of ${this.messages.length}`;
-			const metadataLine = theme.fg("muted", metadata);
-			lines.push(metadataLine);
+			lines.push(theme.fg("muted", metadata));
 			lines.push(""); // Blank line between messages
 		}
 
-		// Add scroll indicator if needed
-		if (startIndex > 0 || endIndex < this.messages.length) {
-			const scrollInfo = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.messages.length})`);
-			lines.push(scrollInfo);
+		const scrollHint = themedScrollPositionHint(this.selectedIndex, this.messages.length, startIndex, endIndex);
+		if (scrollHint) {
+			lines.push(scrollHint);
 		}
 
 		return lines;
@@ -129,19 +130,18 @@ export class UserMessageSelectorComponent extends Container {
 			),
 		);
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
-		this.addChild(new Spacer(1));
+
+		const card = new SelectorCard();
+		card.addChild(new Spacer(1));
 
 		// Create message list
 		this.messageList = new UserMessageList(messages, initialSelectedId);
 		this.messageList.onSelect = onSelect;
 		this.messageList.onCancel = onCancel;
 
-		this.addChild(this.messageList);
-
-		// Add bottom border
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
+		card.addChild(this.messageList);
+		card.addChild(new Spacer(1));
+		this.addChild(card);
 
 		// Auto-cancel if no messages
 		if (messages.length === 0) {

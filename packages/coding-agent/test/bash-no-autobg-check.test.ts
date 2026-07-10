@@ -30,7 +30,7 @@ describe("verification commands and auto-background policy", () => {
 
 	beforeEach(() => {
 		_resetBashBackgroundJobsForTest();
-		process.env.PIT_BASH_AUTO_BACKGROUND_SECONDS = "2";
+		process.env.PIT_BASH_AUTO_BACKGROUND_SECONDS = "0.15";
 	});
 
 	afterEach(() => {
@@ -48,13 +48,13 @@ describe("verification commands and auto-background policy", () => {
 	it.skipIf(!BASH_AVAILABLE)(
 		"agent bash path disables autoBackground for verification commands — no promotion before exit",
 		async () => {
-			// Command label is a check; spawnHook substitutes a 5s node sleep so the
-			// test does not run the real `npm run check`. Threshold is 2s — if
+			// Command label is a check; spawnHook substitutes a short node sleep so the
+			// test does not run the real `npm run check`. Threshold is 150ms — if
 			// autoBackground were on, promotion would fire before the sleep ends.
 			const def = createBashToolDefinition(process.cwd(), {
 				spawnHook: (ctx) => ({
 					...ctx,
-					command: 'node -e "setTimeout(()=>process.exit(0), 5000)"',
+					command: 'node -e "setTimeout(()=>process.exit(0), 400)"',
 				}),
 			});
 			const ctx = {} as Parameters<typeof def.execute>[4];
@@ -63,8 +63,8 @@ describe("verification commands and auto-background policy", () => {
 				content: Array<{ type: string; text?: string }>;
 			};
 
-			// Waited for the full sleep (not promoted at 2s).
-			expect(Date.now() - start).toBeGreaterThanOrEqual(4_000);
+			// Waited for the full sleep (not promoted at 150ms).
+			expect(Date.now() - start).toBeGreaterThanOrEqual(300);
 			const text = result.content[0]?.text ?? "";
 			expect(text).not.toMatch(/promoted to background id=/i);
 			expect(listBashBackgroundJobs()).toHaveLength(0);

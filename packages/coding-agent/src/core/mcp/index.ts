@@ -1,6 +1,6 @@
 export { McpClient, McpHttpClient } from "./client.ts";
 export { McpManager, type McpManagerOptions } from "./manager.ts";
-export { capMcpText, wrapMcpToolAsDefinition } from "./tools.ts";
+export { capMcpText, resolveMcpCapBytes, wrapMcpToolAsDefinition } from "./tools.ts";
 export {
 	createTransport,
 	inferTransportKind,

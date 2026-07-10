@@ -71,7 +71,13 @@ export function createEditPreconditionExtension(options: EditPreconditionOptions
 					category: "guard.edit-precondition",
 					level: "info",
 					source: "edit-precondition-extension.malformedShape",
-					context: { path, outcome: "blocked", ruleId: "edits-malformed" },
+					context: {
+						path,
+						outcome: "blocked",
+						ruleId: "edits-malformed",
+						toolName: event.toolName,
+						toolCallId: event.toolCallId,
+					},
 				});
 				return {
 					block: true,
@@ -82,10 +88,14 @@ export function createEditPreconditionExtension(options: EditPreconditionOptions
 				};
 			}
 
+			// Reserve before awaiting the dry-run so sibling handlers cannot both
+			// validate pre-batch contents for the same file.
+			editedThisTurn.add(abs);
 			let diff: Awaited<ReturnType<typeof computeEditsDiff>>;
 			try {
 				diff = await computeEditsDiff(path, edits, options.cwd);
 			} catch {
+				editedThisTurn.delete(abs);
 				return undefined;
 			}
 
@@ -94,7 +104,13 @@ export function createEditPreconditionExtension(options: EditPreconditionOptions
 					category: "guard.edit-precondition",
 					level: "info",
 					source: "edit-precondition-extension",
-					context: { path, outcome: "blocked", ruleId: "oldtext-mismatch" },
+					context: {
+						path,
+						outcome: "blocked",
+						ruleId: "oldtext-mismatch",
+						toolName: event.toolName,
+						toolCallId: event.toolCallId,
+					},
 				});
 				return {
 					block: true,
@@ -102,9 +118,8 @@ export function createEditPreconditionExtension(options: EditPreconditionOptions
 				};
 			}
 
-			// Dry-run matched: the real edit will land. Mark the path so a dependent
-			// follow-up edit this turn isn't gated against stale pre-batch content.
-			editedThisTurn.add(abs);
+			// The early reservation keeps dependent sibling edits from being checked
+			// against stale pre-batch content.
 			return undefined;
 		});
 	};

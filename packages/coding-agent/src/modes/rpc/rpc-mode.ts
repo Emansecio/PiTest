@@ -12,7 +12,7 @@
  */
 
 import * as crypto from "node:crypto";
-import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -349,7 +349,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	};
 
 	const registerSignalHandlers = (): void => {
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
+		const signals: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
 		if (process.platform !== "win32") {
 			signals.push("SIGHUP");
 		}
@@ -357,7 +357,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		for (const signal of signals) {
 			const handler = () => {
 				killTrackedDetachedChildren();
-				void shutdown(signal === "SIGHUP" ? 129 : 143);
+				const code = signal === "SIGINT" ? 130 : signal === "SIGHUP" ? 129 : 143;
+				void shutdown(code);
 			};
 			process.on(signal, handler);
 			signalCleanupHandlers.push(() => process.off(signal, handler));
@@ -438,6 +439,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
+					orchestration: session.orchestration,
+					permissionMode: runtimeHost.services.permissionChecker.mode,
 				};
 				return success(id, "get_state", state);
 			}
@@ -554,6 +557,39 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "export_html": {
 				const path = await session.exportToHtml(command.outputPath);
 				return success(id, "export_html", { path });
+			}
+
+			case "export_jsonl": {
+				const path = session.exportToJsonl(command.outputPath);
+				return success(id, "export_jsonl", { path });
+			}
+
+			case "import": {
+				try {
+					const result = await runtimeHost.importFromJsonl(command.inputPath, command.cwdOverride);
+					if (!result.cancelled) {
+						await rebindSession();
+					}
+					return success(id, "import", result);
+				} catch (e) {
+					const message =
+						e instanceof SessionImportFileNotFoundError ? e.message : e instanceof Error ? e.message : String(e);
+					return error(id, "import", message);
+				}
+			}
+
+			case "navigate_tree": {
+				const result = await session.navigateTree(command.targetId, {
+					summarize: command.summarize,
+					customInstructions: command.customInstructions,
+					replaceInstructions: command.replaceInstructions,
+					label: command.label,
+				});
+				return success(id, "navigate_tree", {
+					cancelled: result.cancelled,
+					aborted: result.aborted,
+					editorText: result.editorText,
+				});
 			}
 
 			case "switch_session": {

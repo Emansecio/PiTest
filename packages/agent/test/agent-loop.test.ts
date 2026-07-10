@@ -1091,6 +1091,45 @@ describe("agentLoop with AgentMessage", () => {
 		expect(parallelObserved).toBe(true);
 	});
 
+	it("isolates prepareNextTurn throws so a successful turn is not converted to an error", async () => {
+		const context: AgentContext = {
+			systemPrompt: "test",
+			messages: [],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareNextTurn: () => {
+				throw new Error("Cannot read properties of undefined (reading 'messages')");
+			},
+		};
+
+		const stream = agentLoop([createUserMessage("hi")], context, config, undefined, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				mockStream.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "hello" }]),
+				});
+			});
+			return mockStream;
+		});
+
+		const events = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const assistants = events.filter((e) => e.type === "message_end" && e.message.role === "assistant");
+		expect(assistants.length).toBe(1);
+		expect((assistants[0] as { message: { stopReason: string; errorMessage?: string } }).message.stopReason).toBe(
+			"stop",
+		);
+		expect((assistants[0] as { message: { errorMessage?: string } }).message.errorMessage).toBeUndefined();
+	});
+
 	it("should use prepareNextTurn snapshot before continuing", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {

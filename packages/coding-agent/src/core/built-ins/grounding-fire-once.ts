@@ -55,7 +55,13 @@ export function createFireOnceBlockGuard(options: FireOnceBlockGuardOptions): (p
 						category: options.category,
 						level: "info",
 						source: options.source,
-						context: { note: event.toolName, outcome: "overridden", ruleId: options.ruleId },
+						context: {
+							note: event.toolName,
+							outcome: "overridden",
+							ruleId: options.ruleId,
+							toolName: event.toolName,
+							toolCallId: event.toolCallId,
+						},
 					});
 					return undefined; // already advised once -> let it run
 				}
@@ -64,7 +70,13 @@ export function createFireOnceBlockGuard(options: FireOnceBlockGuardOptions): (p
 					category: options.category,
 					level: "info",
 					source: options.source,
-					context: { note: event.toolName, outcome: "blocked", ruleId: options.ruleId },
+					context: {
+						note: event.toolName,
+						outcome: "blocked",
+						ruleId: options.ruleId,
+						toolName: event.toolName,
+						toolCallId: event.toolCallId,
+					},
 				});
 				return { block: true, reason: decision.reason } satisfies ToolCallEventResult;
 			} catch {

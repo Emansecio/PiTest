@@ -7,6 +7,7 @@ import { readFile, stat } from "fs/promises";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
+import { isTruthyEnvFlag } from "../../utils/env-flags.js";
 import { ensureTool } from "../../utils/tools-manager.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { prepareWithPathAliases } from "./argument-prep.js";
@@ -28,6 +29,9 @@ const DEFAULT_LIMIT = 100;
 // unbounded matches, undermining the read-style pagination this tool relies
 // on. Mirrors ast_grep's DEFAULT_LIMIT/MAX_LIMIT pattern.
 const MAX_LIMIT = 1000;
+/** When outputMode is omitted and match count exceeds this, auto-switch to files_with_matches. */
+const GREP_AUTO_FILES_THRESHOLD = 25;
+const AUTO_SWITCH_NOTICE = "Auto-switched to files_with_matches — use outputMode:'content' to force lines";
 
 const grepSchema = Type.Object(
 	{
@@ -287,12 +291,13 @@ function buildLocateOutput(
 	lines: string[],
 	effectiveLimit: number,
 	matchLimitReached: boolean,
+	extraNotices: string[] = [],
 ): { output: string; details: GrepToolDetails } {
 	const rawList = lines.join("\n");
 	const listTruncation = truncateHead(rawList, { maxLines: Number.MAX_SAFE_INTEGER });
 	let output = listTruncation.content;
 	const details: GrepToolDetails = {};
-	const notices: string[] = [];
+	const notices: string[] = [...extraNotices];
 	if (matchLimitReached) {
 		notices.push(
 			`${effectiveLimit} files limit reached. Use limit=${Math.min(MAX_LIMIT, effectiveLimit * 2)} for more, or refine pattern`,
@@ -449,6 +454,7 @@ export function createGrepToolDefinition(
 
 						const contextValue = context && context > 0 ? context : 0;
 						const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, limit ?? DEFAULT_LIMIT));
+						const autoFiles = outputMode === undefined && !isTruthyEnvFlag(process.env.PIT_NO_GREP_AUTO_FILES);
 						const formatPath = (filePath: string): string => {
 							if (isDirectory) {
 								const relative = path.relative(searchPath, filePath);
@@ -495,6 +501,12 @@ export function createGrepToolDefinition(
 						// whole-repo OR a subdir/file inside cwd, simple glob / ignoreCase,
 						// no multiline/custom-ops/.git scope. Every excluded case, and any fff
 						// failure or unprovable-complete scoped scan, flows to ripgrep below.
+						// When autoFiles is on, probe with a content limit just past the
+						// auto-switch threshold so we can decide locate vs content without
+						// pulling the full DEFAULT_LIMIT of lines.
+						const fffContentLimit = autoFiles
+							? Math.min(effectiveLimit, GREP_AUTO_FILES_THRESHOLD + 1)
+							: effectiveLimit;
 						const fffMode = FFF_MODE_BY_OUTPUT[outputMode ?? "content"];
 						const relToCwd = path.relative(cwd, searchPath);
 						const withinCwd = relToCwd === "" || (!relToCwd.startsWith("..") && !path.isAbsolute(relToCwd));
@@ -515,7 +527,7 @@ export function createGrepToolDefinition(
 								mode: fffMode,
 								literal,
 								context: contextValue,
-								limit: effectiveLimit,
+								limit: fffMode === "content" ? fffContentLimit : effectiveLimit,
 								subPrefix,
 								subExact: subPrefix !== undefined && !isDirectory,
 								ignoreCase,
@@ -533,6 +545,30 @@ export function createGrepToolDefinition(
 								if (fffRes.mode === "content") {
 									if (fffRes.matches.length === 0) {
 										emitNoMatch();
+										return;
+									}
+									if (autoFiles && fffRes.matches.length > GREP_AUTO_FILES_THRESHOLD) {
+										const seen = new Set<string>();
+										const locateLines: string[] = [];
+										for (const m of fffRes.matches) {
+											const p = formatPath(m.filePath);
+											if (seen.has(p)) continue;
+											seen.add(p);
+											locateLines.push(p);
+											if (locateLines.length >= effectiveLimit) break;
+										}
+										const locate = buildLocateOutput(
+											locateLines,
+											effectiveLimit,
+											locateLines.length >= effectiveLimit || fffRes.capped,
+											[AUTO_SWITCH_NOTICE],
+										);
+										settle(() =>
+											resolve({
+												content: [{ type: "text", text: locate.output }],
+												details: nonEmptyDetails(locate.details),
+											}),
+										);
 										return;
 									}
 									const mapped: ContentMatch[] = fffRes.matches.map((m: FffContentMatch) => ({
@@ -625,6 +661,7 @@ export function createGrepToolDefinition(
 						let matchLimitReached = false;
 						let aborted = false;
 						let killedDueToLimit = false;
+						let autoSwitched = false;
 						const outputLines: string[] = [];
 						// Raw rg lines for the files_with_matches / count modes (one per file).
 						const plainLines: string[] = [];
@@ -708,6 +745,12 @@ export function createGrepToolDefinition(
 										: undefined;
 								if (filePath && typeof lineNumber === "number")
 									matches.push({ filePath, lineNumber, lineText, matchStart });
+								if (autoFiles && matchCount > GREP_AUTO_FILES_THRESHOLD) {
+									autoSwitched = true;
+									matchLimitReached = true;
+									stopChild(true);
+									return;
+								}
 								if (matchCount >= effectiveLimit) {
 									matchLimitReached = true;
 									stopChild(true);
@@ -792,6 +835,31 @@ export function createGrepToolDefinition(
 										? `No matches found. Glob patterns use forward slashes; try: ${glob.replace(/\\/g, "/")}`
 										: "No matches found";
 									settle(() => resolve({ content: [{ type: "text", text: noMatch }], details: undefined }));
+									return;
+								}
+
+								if (autoSwitched) {
+									const seen = new Set<string>();
+									const locateLines: string[] = [];
+									for (const m of matches) {
+										const p = formatPath(m.filePath);
+										if (seen.has(p)) continue;
+										seen.add(p);
+										locateLines.push(p);
+										if (locateLines.length >= effectiveLimit) break;
+									}
+									const locate = buildLocateOutput(
+										locateLines,
+										effectiveLimit,
+										locateLines.length >= effectiveLimit,
+										[AUTO_SWITCH_NOTICE],
+									);
+									settle(() =>
+										resolve({
+											content: [{ type: "text", text: locate.output }],
+											details: nonEmptyDetails(locate.details),
+										}),
+									);
 									return;
 								}
 

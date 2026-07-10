@@ -3,11 +3,10 @@
 # Get list of staged files before running check
 STAGED_FILES=$(git diff --cached --name-only)
 
-# Fast static checks only (tsgo + biome + browser-smoke + generated + surrogate,
-# ~5s). The full vitest suite runs on pre-push and via `npm run check`, so commits
-# stay fast while nothing broken reaches the remotes.
-echo "Running fast checks (lint, types, smoke)..."
-npm run check:fast
+# Static checks only (tsgo + biome + smokes, ~5s). Unit/full vitest run on
+# pre-push via `npm run check` and locally via `npm run check:fast`.
+echo "Running static checks (lint, types, smoke)..."
+npm run check:static
 if [ $? -ne 0 ]; then
   echo "❌ Checks failed. Please fix the errors before committing."
   exit 1

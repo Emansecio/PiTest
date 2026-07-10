@@ -64,6 +64,21 @@ describe("renderGoalOverlay", () => {
 		expect(out).not.toContain("working");
 	});
 
+	it("shows token spend split and ~80% budget when near the limit", () => {
+		const out = render(
+			snapshot({
+				tokensUsed: 85_000,
+				tokenBudget: 100_000,
+				tokenSpendSplit: { main: 50_000, subagent: 30_000, fusion: 5_000 },
+			}),
+			120,
+			true,
+		);
+		expect(out).toContain("50k/30k/5k");
+		expect(out).toContain("~80% budget");
+		expect(out).toContain("85k/100k");
+	});
+
 	it("shows a resume hint when paused", () => {
 		const out = render(snapshot({ status: "paused" }), 100, false);
 		expect(out).toContain("paused");

@@ -133,6 +133,45 @@ describe("PlanManager (DAG)", () => {
 		expect(section).toContain("scaffold the module");
 		expect(section).toContain("step_done");
 	});
+
+	it("rejects oversized plans and bounds prompt injection", () => {
+		const mgr = new PlanManager();
+		const steps = Array.from({ length: 65 }, (_, i) => ({ id: `s${i}`, intent: "work" }));
+		expect(() => mgr.propose(steps)).toThrow(/at most 64 steps/);
+		mgr.propose(Array.from({ length: 64 }, (_, i) => ({ id: `s${i}`, intent: "x".repeat(200) })));
+		expect(mgr.systemPromptSection().length).toBeLessThanOrEqual(6000);
+	});
+
+	it("archives when all steps are done and stops prompt injection", () => {
+		const mgr = new PlanManager();
+		mgr.propose([
+			{ id: "a", intent: "one" },
+			{ id: "b", intent: "two", dependsOn: ["a"] },
+		]);
+		expect(mgr.systemPromptSection()).toContain("<plan>");
+		expect(mgr.isArchived()).toBe(false);
+		mgr.stepDone("a");
+		expect(mgr.systemPromptSection()).toContain("<plan>");
+		mgr.stepDone("b");
+		expect(mgr.isArchived()).toBe(true);
+		expect(mgr.systemPromptSection()).toBe("");
+		expect(mgr.render()).toContain("2/2 done");
+		expect(mgr.serialize().archived).toBe(true);
+	});
+
+	it("restores archived flag and keeps injection off until a fresh propose", () => {
+		const mgr = new PlanManager();
+		mgr.propose([{ id: "a", intent: "done already", status: "done" }]);
+		expect(mgr.isArchived()).toBe(true);
+		const data = mgr.serialize();
+		const mgr2 = new PlanManager();
+		mgr2.restore(data);
+		expect(mgr2.isArchived()).toBe(true);
+		expect(mgr2.systemPromptSection()).toBe("");
+		mgr2.propose([{ id: "x", intent: "new work" }]);
+		expect(mgr2.isArchived()).toBe(false);
+		expect(mgr2.systemPromptSection()).toContain("<plan>");
+	});
 });
 
 describe("plan tool", () => {

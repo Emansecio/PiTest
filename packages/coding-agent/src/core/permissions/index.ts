@@ -6,6 +6,7 @@ export {
 	matchGlob,
 	normalizeTargetPath,
 } from "./matcher.ts";
+export { formatPermissionBlockedContent, humanModeNotifyLabel } from "./mode-labels.ts";
 export type {
 	CommandRule,
 	PathRule,

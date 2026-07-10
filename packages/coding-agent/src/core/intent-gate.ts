@@ -24,10 +24,11 @@
  *   - Two-tier path finding: parent dir exists but the file doesn't → WARN with
  *     fuzzy sibling candidates ("did you mean src/util/helper.ts?"); the parent
  *     dir itself is missing → BLOCK-level (the mental model is off, not a typo).
- *   - FAIL-OPEN symbols. Symbol names are checked repo-map-only for v1: a HIT in
- *     the lossy index confirms existence; a MISS is inconclusive (the index caps
- *     ~12 symbols/file) so it FAILS OPEN and never produces a finding. An optional
- *     `symbolResolve` (LSP) is the future authority; when absent, misses are silent.
+ *   - FAIL-OPEN symbols. Symbol names are checked repo-map-first: a HIT in the
+ *     lossy index confirms existence; a MISS is inconclusive (the index caps
+ *     ~12 symbols/file). An optional `symbolResolve` (LSP, wired in the extension)
+ *     is the authority when available; when it returns undefined (unavailable) or
+ *     throws, misses stay silent (FAIL-OPEN).
  */
 
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
@@ -333,8 +334,22 @@ function validatePathToken(stepId: string, token: string, deps: IntentGateDeps):
 	return { stepId, kind: "path", token, severity: "warn", candidates, message };
 }
 
+/** Collect deduped symbol tokens from every step intent in `version`. */
+export function collectPlanSymbolTokens(version: PlanVersion): string[] {
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const step of version.steps) {
+		for (const token of extractSymbolTokens(step.intent)) {
+			if (seen.has(token)) continue;
+			seen.add(token);
+			out.push(token);
+		}
+	}
+	return out;
+}
+
 // ============================================================================
-// Symbol validation (repo-map-only, FAIL-OPEN in v1)
+// Symbol validation (repo-map fast-path + optional LSP authority)
 // ============================================================================
 
 function validateSymbolToken(stepId: string, token: string, deps: IntentGateDeps): IntentGateFinding | undefined {

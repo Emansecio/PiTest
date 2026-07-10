@@ -1,20 +1,27 @@
-import { Box, Markdown, type MarkdownTheme, Text } from "@pit/tui";
+import { Markdown, type MarkdownTheme, Text } from "@pit/tui";
 import type { ParsedSkillBlock } from "../../../core/agent-session.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
+import { MessageShell } from "./message-shell.ts";
+import { systemMessageLabel } from "./system-message-glyphs.ts";
 
 /**
- * Component that renders a skill invocation message with collapsed/expanded state.
- * Uses same background color as custom messages for visual consistency.
- * Only renders the skill block itself - user message is rendered separately.
+ * Skill invocation with collapsed / expanded state.
+ *
+ * Layout (Leva 2): same `MessageShell` chrome as compaction/branch summaries —
+ * purple (`gutterCustom`) gutter + glyph + `skill` label. The previous solid
+ * `customMessageBg` Box is gone so skills don't look like a different product.
  */
-export class SkillInvocationMessageComponent extends Box {
+export class SkillInvocationMessageComponent extends MessageShell {
 	private expanded = false;
 	private skillBlock: ParsedSkillBlock;
 	private markdownTheme: MarkdownTheme;
 
 	constructor(skillBlock: ParsedSkillBlock, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
-		super(1, 0, (t) => theme.bg("customMessageBg", t));
+		super({
+			gutterColor: (text: string) => theme.fg("gutterCustom", text),
+			label: systemMessageLabel("skill"),
+		});
 		this.skillBlock = skillBlock;
 		this.markdownTheme = markdownTheme;
 		this.updateDisplay();
@@ -32,27 +39,14 @@ export class SkillInvocationMessageComponent extends Box {
 
 	private updateDisplay(): void {
 		this.clear();
-		// Collapsed blocks pack tight; expanded ones get vertical breathing room
-		// so the markdown header and body don't fight the background.
-		this.setPadding(1, this.expanded ? 1 : 0);
 
 		if (this.expanded) {
-			// Expanded: label + skill name header + full content
-			const label = theme.fg("customMessageLabel", `\x1b[1m[skill]\x1b[22m`);
-			this.addChild(new Text(label, 0, 0));
 			const header = `**${this.skillBlock.name}**\n\n`;
-			this.addChild(
-				new Markdown(header + this.skillBlock.content, 0, 0, this.markdownTheme, {
-					color: (text: string) => theme.fg("customMessageText", text),
-				}),
-			);
+			this.addChild(new Markdown(header + this.skillBlock.content, 0, 0, this.markdownTheme));
 		} else {
-			// Collapsed: single line - [skill] name (hint to expand)
-			const line =
-				theme.fg("customMessageLabel", `\x1b[1m[skill]\x1b[22m `) +
-				theme.fg("customMessageText", this.skillBlock.name) +
-				theme.fg("dim", ` (${keyText("app.tools.expand")} to expand)`);
-			this.addChild(new Text(line, 0, 0));
+			this.addChild(
+				new Text(`${this.skillBlock.name} ${theme.fg("dim", `(${keyText("app.tools.expand")} to expand)`)}`, 0, 0),
+			);
 		}
 	}
 }

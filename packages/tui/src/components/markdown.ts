@@ -796,12 +796,13 @@ export class Markdown implements Component {
 				break;
 
 			case "code": {
-				// Gutter is the `│ ` border; codeBlockIndent is internal breathing room
-				// between the gutter and the content (default "  " → 2 columns). It applies
-				// to the language label too so the label lines up with the code.
+				// Full-width frame around the guttered body. Top/bottom rules span the
+				// markdown render width; lang and code lines keep the existing `│ ` gutter.
 				const gutter = this.theme.codeBlockBorder("│ ");
 				const indent = this.theme.codeBlockIndent ?? "";
 				const prefix = gutter + indent;
+				const rule = "─".repeat(Math.max(0, width - 2));
+				lines.push(this.theme.codeBlockBorder(`╭${rule}╮`));
 				if (typeof token.lang === "string" && token.lang.length > 0) {
 					const langStyle = this.theme.codeBlockLang ?? this.theme.codeBlockBorder;
 					lines.push(prefix + langStyle(token.lang));
@@ -818,6 +819,7 @@ export class Markdown implements Component {
 						lines.push(prefix + this.theme.codeBlock(codeLine));
 					}
 				}
+				lines.push(this.theme.codeBlockBorder(`╰${rule}╯`));
 				if (nextTokenType && nextTokenType !== "space") {
 					this.pushBlockSpacing(lines); // Add spacing after code blocks (unless space token follows)
 				}

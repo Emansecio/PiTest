@@ -9,4 +9,5 @@ export const BUILT_IN_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 	"openai-codex": "OpenAI Codex",
 	openrouter: "OpenRouter",
 	xiaomi: "Xiaomi MiMo",
+	xai: "xAI Grok",
 };

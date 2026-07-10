@@ -42,6 +42,8 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		expect(state.model?.id).toBe("claude-sonnet-4-5");
 		expect(state.isStreaming).toBe(false);
 		expect(state.messageCount).toBe(0);
+		expect(state.orchestration).toBe("solo");
+		expect(state.permissionMode).toMatch(/^(auto|plan)$/);
 	}, 60000);
 
 	test("should save messages to session file", async () => {

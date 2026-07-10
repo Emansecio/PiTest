@@ -24,6 +24,7 @@ import type {
 	AgentTool,
 	BeforeToolCallContext,
 	BeforeToolCallResult,
+	PrepareNextTurnContext,
 	QueueMode,
 	StreamFn,
 	ToolExecutionMode,
@@ -100,7 +101,7 @@ export interface AgentOptions {
 	beforeToolCall?: (context: BeforeToolCallContext, signal?: AbortSignal) => Promise<BeforeToolCallResult | undefined>;
 	afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>;
 	prepareNextTurn?: (
-		signal?: AbortSignal,
+		context: PrepareNextTurnContext,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	steeringMode?: QueueMode;
 	followUpMode?: QueueMode;
@@ -137,7 +138,7 @@ export interface AgentOptions {
 	 * static boolean, or a policy evaluated against the current model each run so
 	 * the gate auto-tracks a model change (fallback chain / `/model`).
 	 */
-	emitRepairNotes?: boolean | ((model: { provider: string }) => boolean);
+	emitRepairNotes?: boolean | ((model: { provider: string; id?: string }) => boolean);
 }
 
 class PendingMessageQueue {
@@ -214,7 +215,7 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined>;
 	public prepareNextTurn?: (
-		signal?: AbortSignal,
+		context: PrepareNextTurnContext,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
 	/** Session identifier forwarded to providers for cache-aware backends. */
@@ -238,7 +239,7 @@ export class Agent {
 	/** Optional Tier 4 error-hint registry — see {@link AgentOptions.toolErrorHintRegistry}. */
 	public toolErrorHintRegistry?: ToolErrorHintRegistry;
 	/** Opt-in Repair Node policy — see {@link AgentOptions.emitRepairNotes}. */
-	public emitRepairNotes?: boolean | ((model: { provider: string }) => boolean);
+	public emitRepairNotes?: boolean | ((model: { provider: string; id?: string }) => boolean);
 
 	constructor(options: AgentOptions = {}) {
 		this._state = createMutableAgentState(options.initialState);
@@ -533,7 +534,9 @@ export class Agent {
 			toolAbortControllers: this.toolAbortControllers,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
-			prepareNextTurn: this.prepareNextTurn ? async () => await this.prepareNextTurn?.(this.signal) : undefined,
+			prepareNextTurn: this.prepareNextTurn
+				? async (nextTurnContext) => await this.prepareNextTurn?.(nextTurnContext)
+				: undefined,
 			// Re-read the live tool surface each turn so a tool activated mid-run
 			// (e.g. search_tool_bm25) is callable on the next turn of the same run,
 			// not just the next run. Returns the current array reference; the loop

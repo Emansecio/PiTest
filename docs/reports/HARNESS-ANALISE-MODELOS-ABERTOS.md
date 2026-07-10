@@ -5,7 +5,7 @@
 > `harnessbetter.md`) com o que o Pit já implementa nativamente, e mapeando
 > todas as funções pré/pós edição/execução de ferramentas que existem hoje.
 >
-> Fontes canônicas internas: [`AGENTS.md`](AGENTS.md),
+> Fontes canônicas internas: [`AGENTS.md`](../../AGENTS.md),
 > [`docs/agents/already-built.md`](docs/agents/already-built.md),
 > [`docs/agents/prevention-layers.md`](docs/agents/prevention-layers.md).
 > Âncoras `file:line` verificadas no codebase.
@@ -323,7 +323,7 @@ sem inventar mecanismo novo:
 
 ## Referências internas
 
-- [`AGENTS.md`](AGENTS.md) — regras, style, gate, git, TUI invariants.
+- [`AGENTS.md`](../../AGENTS.md) — regras, style, gate, git, TUI invariants.
 - [`docs/agents/already-built.md`](docs/agents/already-built.md) — inventário do que já existe.
 - [`docs/agents/prevention-layers.md`](docs/agents/prevention-layers.md) — pipeline de guards em ordem de execução.
 - [`docs/agents/cli-animations.md`](docs/agents/cli-animations.md) — subsistema de motion do TUI.

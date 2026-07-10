@@ -221,6 +221,16 @@ function createEditCallRenderComponent(): EditCallRenderComponent {
  * on every chunk. The final args-complete render always bypasses the throttle. */
 const LIVE_PREVIEW_THROTTLE_MS = 100;
 
+function extractPathFromArgsKey(argsKey: string | undefined): string | undefined {
+	if (argsKey === undefined) return undefined;
+	try {
+		const parsed = JSON.parse(argsKey) as { path?: unknown };
+		return typeof parsed.path === "string" ? parsed.path : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function getRenderablePreviewInput(args: RenderableEditArgs | undefined): { path: string; edits: Edit[] } | null {
 	if (!args) {
 		return null;
@@ -252,6 +262,7 @@ function formatEditResult(
 	result: EditToolResultLike,
 	theme: typeof import("../../modes/interactive/theme/theme.ts").theme,
 	isError: boolean,
+	path?: string,
 ): string | undefined {
 	const previewDiff = preview && !("error" in preview) ? preview.diff : undefined;
 	const previewError = preview && "error" in preview ? preview.error : undefined;
@@ -268,7 +279,7 @@ function formatEditResult(
 
 	const resultDiff = result.details?.diff;
 	if (resultDiff && resultDiff !== previewDiff) {
-		return renderDiff(resultDiff);
+		return renderDiff(resultDiff, { path });
 	}
 
 	return undefined;
@@ -553,6 +564,20 @@ export function createEditToolDefinition(
 				component.dispatchedArgsKey = undefined;
 				component.previewPending = false;
 				component.settledError = false;
+				component.previewSettled = false;
+			} else {
+				const previewPath =
+					extractPathFromArgsKey(component.previewArgsKey) ?? extractPathFromArgsKey(component.dispatchedArgsKey);
+				const streamPath = extractPathFromArgsKey(argsKey);
+				if (previewPath !== undefined && streamPath !== undefined && previewPath !== streamPath) {
+					// Path switched mid-stream — clear stale preview from the previous file.
+					component.preview = undefined;
+					component.previewArgsKey = argsKey;
+					component.dispatchedArgsKey = undefined;
+					component.previewPending = false;
+					component.settledError = false;
+					component.previewSettled = false;
+				}
 			}
 
 			// Live diff: compute the preview as soon as a renderable input exists,
@@ -588,6 +613,7 @@ export function createEditToolDefinition(
 				const requestKey = argsKey;
 				void computeEditsDiffWithBaseCache(previewInput.path, previewInput.edits, context.cwd).then((preview) => {
 					component.previewPending = false;
+					if (component.previewSettled) return;
 					// A newer chunk may have been dispatched (or the input reset to
 					// non-renderable) since this compute started — a stale resolution
 					// must never clobber a newer one. Compare against the key this
@@ -631,6 +657,7 @@ export function createEditToolDefinition(
 			const resultDiff = !context.isError ? typedResult.details?.diff : undefined;
 			let changed = false;
 			if (callComponent) {
+				callComponent.previewSettled = true;
 				if (typeof resultDiff === "string") {
 					changed =
 						setEditPreview(
@@ -655,7 +682,13 @@ export function createEditToolDefinition(
 				}
 			}
 
-			const output = formatEditResult(callComponent?.preview, typedResult, theme, context.isError);
+			const output = formatEditResult(
+				callComponent?.preview,
+				typedResult,
+				theme,
+				context.isError,
+				previewInput?.path,
+			);
 			const component = (context.lastComponent as Container | undefined) ?? new Container();
 			component.clear();
 			if (!output) {

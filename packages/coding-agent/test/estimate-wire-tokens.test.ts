@@ -208,3 +208,26 @@ describe("estimate calibration wiring (M5)", () => {
 		expect(estimate.tokens).toBe(Math.round(raw * 1.5));
 	});
 });
+
+describe("resolveThinkingHeadroom", () => {
+	it("returns 0 when thinking is off or model has no reasoning", async () => {
+		const { resolveThinkingHeadroom } = await import("../src/core/compaction/compaction.js");
+		expect(resolveThinkingHeadroom({ reasoning: true }, "off")).toBe(0);
+		expect(resolveThinkingHeadroom({ reasoning: false }, "high")).toBe(0);
+		expect(resolveThinkingHeadroom(undefined, "high")).toBe(0);
+	});
+
+	it("mirrors @pit/ai default budgets for reasoning models", async () => {
+		const { resolveThinkingHeadroom } = await import("../src/core/compaction/compaction.js");
+		expect(resolveThinkingHeadroom({ reasoning: true }, "minimal")).toBe(1024);
+		expect(resolveThinkingHeadroom({ reasoning: true }, "low")).toBe(2048);
+		expect(resolveThinkingHeadroom({ reasoning: true }, "medium")).toBe(8192);
+		expect(resolveThinkingHeadroom({ reasoning: true }, "high")).toBe(16384);
+		expect(resolveThinkingHeadroom({ reasoning: true }, "xhigh")).toBe(16384);
+	});
+
+	it("respects custom thinkingBudgets overrides", async () => {
+		const { resolveThinkingHeadroom } = await import("../src/core/compaction/compaction.js");
+		expect(resolveThinkingHeadroom({ reasoning: true }, "high", { high: 9000 })).toBe(9000);
+	});
+});

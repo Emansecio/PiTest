@@ -167,7 +167,13 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 							category: "guard.grounding",
 							level: "info",
 							source: "grounding-guard-extension",
-							context: { note: event.toolName, outcome: "overridden", ruleId: "symbol-not-found" },
+							context: {
+								note: event.toolName,
+								outcome: "overridden",
+								ruleId: "symbol-not-found",
+								toolName: event.toolName,
+								toolCallId: event.toolCallId,
+							},
 						});
 						return undefined; // already advised once -> let it run
 					}
@@ -176,7 +182,13 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 						category: "guard.grounding",
 						level: "info",
 						source: "grounding-guard-extension",
-						context: { note: event.toolName, outcome: "blocked", ruleId: "symbol-not-found" },
+						context: {
+							note: event.toolName,
+							outcome: "blocked",
+							ruleId: "symbol-not-found",
+							toolName: event.toolName,
+							toolCallId: event.toolCallId,
+						},
 					});
 					return { block: true, reason: decision.message };
 				}

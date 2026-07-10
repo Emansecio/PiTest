@@ -42,18 +42,39 @@ export function createSpinnerTicker(
 ): SpinnerTicker {
 	let frame = -1;
 	let cleared = true;
+	// Under reduced motion the glyph is frozen, but activity/nav/bash elapsed
+	// suffixes (`· Ns`) are computed in render(). Emit dirty once per second so
+	// those clocks keep advancing (M0).
+	let lastElapsedSec = -1;
 	const unsub = ui.addAnimationCallback((now: number) => {
 		if (shouldSpin()) {
 			cleared = false;
+			if (isReducedMotion()) {
+				const sec = Math.floor(now / 1000);
+				const glyph = SPINNER_FRAMES[0]!;
+				if (frame !== 0) {
+					frame = 0;
+					lastElapsedSec = sec;
+					onFrame(glyph);
+					return true;
+				}
+				if (sec !== lastElapsedSec) {
+					lastElapsedSec = sec;
+					onFrame(glyph);
+					return true;
+				}
+				return false;
+			}
 			const f = spinnerFrameIndexAt(now);
 			if (f === frame) return false;
 			frame = f;
-			onFrame(SPINNER_FRAMES[f]);
+			onFrame(SPINNER_FRAMES[f]!);
 			return true;
 		}
 		if (!cleared) {
 			cleared = true;
 			frame = -1;
+			lastElapsedSec = -1;
 			onFrame(null);
 			return true;
 		}

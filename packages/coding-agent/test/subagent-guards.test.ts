@@ -58,6 +58,47 @@ describe("subagent guard chain", () => {
 		expect(decision?.reason).toMatch(/config\.json/);
 	});
 
+	it("blocks a middle-tier destructive bash once, then allows identical re-issue", async () => {
+		const chain = createSubagentGuardChain({ cwd: dir });
+		const first = await chain.beforeToolCall(call("bash", { command: "rm -rf ./src" }, "d1"));
+		expect(first?.block).toBe(true);
+		expect(first?.reason).toMatch(/re-issue/i);
+		const second = await chain.beforeToolCall(call("bash", { command: "rm -rf ./src" }, "d1"));
+		expect(second).toBeUndefined();
+	});
+
+	it("does not speed-bump catastrophic rm -rf / (deny-floor owns that tier)", async () => {
+		const chain = createSubagentGuardChain({ cwd: dir });
+		const decision = await chain.beforeToolCall(call("bash", { command: "rm -rf /" }, "cat"));
+		expect(decision).toBeUndefined();
+	});
+
+	it("blocks a call matching a recurring learned-error fingerprint (parity with parent)", async () => {
+		const { fingerprintToolArgs } = await import("../src/core/tool-call-stats.ts");
+		const bashArgs = { command: "rg foo C:/x" };
+		const sampleArgs = fingerprintToolArgs(bashArgs, 160);
+		const chain = createSubagentGuardChain({
+			cwd: dir,
+			learnedErrorProvider: () => [
+				{
+					tool: "bash",
+					fingerprint: "rg: C:/x: No such file or directory N",
+					totalCount: 5,
+					sessionCount: 3,
+					matchedRuleIds: [],
+					sampleErrorText: "rg: C:/x: No such file or directory",
+					sampleArgs,
+				},
+			],
+		});
+		const first = await chain.beforeToolCall(call("bash", bashArgs, "le1"));
+		expect(first?.block).toBe(true);
+		expect(first?.reason).toMatch(/Learned-error guard/i);
+		// Fire-once per (tool, args) per chain — immediate retry is allowed.
+		const second = await chain.beforeToolCall(call("bash", bashArgs, "le1"));
+		expect(second).toBeUndefined();
+	});
+
 	it("exposes eight subagent-propagated guard factories in fixed order", () => {
 		expect(subagentGroundingGuardFactories("/tmp")).toHaveLength(8);
 		const withLearned = bundleGroundingGuardFactories("/tmp", [() => {}]);

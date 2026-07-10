@@ -36,7 +36,10 @@ Code change
     "command": null,
     "maxAttempts": 2,
     "timeoutMs": 180000,
-    "visual": true
+    "visual": true,
+    "functionalWeb": true,
+    "functionalWebTimeoutMs": 45000,
+    "functionalWebMaxInteractions": 3
   }
 }
 ```
@@ -45,9 +48,12 @@ Code change
 |-------|------|---------|-------------|
 | `enabled` | boolean | `true` | Run the verification gate after code-modifying turns. |
 | `command` | string or null | `null` | Check command to run. `null` auto-detects from `package.json` scripts. |
-| `maxAttempts` | number | `2` | Fix attempts before giving up and reporting the failure (min 1). |
+| `maxAttempts` | number | `2` | Fix attempts before giving up and reporting the failure (min 1). Shared across project check, functional web, and self-review. |
 | `timeoutMs` | number | `180000` | Timeout for the check command (min 1000). |
 | `visual` | boolean | `true` | Nudge to `preview` when a rendered artifact changed but was never viewed. |
+| `functionalWeb` | boolean | `true` | Native functional web DoD: open localhost/preview, a11y structure, smoke clicks/fills, console/network. Fail-open without Chrome. |
+| `functionalWebTimeoutMs` | number | `45000` | Wall-clock budget for one functional web check pass. |
+| `functionalWebMaxInteractions` | number | `3` | Max click/fill interactions per functional web check. |
 
 ## Auto-detection
 
@@ -89,6 +95,25 @@ When `visual: true` and a turn modifies rendered artifacts (HTML, CSS, SVG,
 UI components), Pit nudges the model to use the `preview` tool to visually
 verify the result. This catches layout, styling, and rendering issues that
 static checks miss. See the [preview tool](preview.md) for details.
+
+## Functional web DoD
+
+When `functionalWeb: true` (default), after the visual nudge Pit runs a **native**
+browser check (no LLM in the loop) for web projects or visual artifacts:
+
+1. Resolve a local URL (touched HTML via ephemeral preview server, or a live
+   `localhost`/`127.0.0.1` from a background `dev`/`start` job, or a probed port).
+2. Navigate + settle, capture a screenshot for evidence.
+3. Accessibility snapshot — require headings/landmarks and interactive controls.
+4. Smoke interactions — up to `functionalWebMaxInteractions` safe clicks and at
+   most one non-destructive fill (skips password/payment/delete controls).
+5. Assert URL or visible text changed when interactions ran (soft signal).
+6. Fail on console errors and network status ≥ 400.
+
+Failures re-inject a fix prompt and share `maxAttempts` with the project check
+and self-review. Without Chrome, or when the cwd is not a web project / no local
+URL can be resolved, the check **skips** (fail-open). Kill-switch:
+`PIT_NO_FUNCTIONAL_WEB=1`.
 
 ## Pending background checks
 

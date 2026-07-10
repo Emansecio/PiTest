@@ -3,9 +3,10 @@ import { Container, SPINNER_FRAMES, type TUI, truncateToWidth } from "@pit/tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
+import { SLOW_ACTION_ELAPSED_SEC } from "./activity-line.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
-import { capErrorPreview, nounFor, pluralizeNoun } from "./tool-activity.ts";
+import { ACTIVITY_ERROR_PREVIEW_LINES, capErrorPreview, nounFor, pluralizeNoun } from "./tool-activity.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 type GroupState = "pending" | "success" | "error";
@@ -50,6 +51,8 @@ export class NavGroupComponent extends Container {
 	private linesCacheKey = "";
 	private ticker: SpinnerTicker | null = null;
 	private prevState: GroupState | null = null;
+	/** Wall-clock when the group last became pending (for slow-elapsed suffix). */
+	private groupStartedAtMs = Date.now();
 	private readonly iconEase: ColorEase;
 	// Brief brighten of the counter each time a call is folded in (live increment).
 	private readonly countEase: ColorEase;
@@ -81,6 +84,7 @@ export class NavGroupComponent extends Container {
 	}
 
 	addCall(exec: ToolExecutionComponent): void {
+		const wasPending = this.pendingFlagForTicker();
 		exec.setActivityChild(true);
 		this.execs.push(exec);
 		this.countsCache = null;
@@ -89,7 +93,10 @@ export class NavGroupComponent extends Container {
 		// Brighten the counter from full-bright back to its steady muted tone so a
 		// freshly-folded call reads as motion without a layout shift.
 		this.countEase.begin("text", "toolOutput");
-		if (this.aggregateState() === "pending") this.ensureTicker();
+		if (this.aggregateState() === "pending") {
+			if (!wasPending) this.groupStartedAtMs = Date.now();
+			this.ensureTicker();
+		}
 		this.ui.requestRender();
 	}
 
@@ -224,6 +231,7 @@ export class NavGroupComponent extends Container {
 		const verb = state === "pending" ? "Exploring" : "Explored";
 		const prefix = `${this.icon(state)} ${theme.bold(verb)} `;
 		let pendingSuffix = "";
+		let elapsedSuffix = "";
 		let summaryBudget = Math.max(0, width);
 		if (state === "pending") {
 			const pending = this.pendingTargetLabel();
@@ -231,13 +239,18 @@ export class NavGroupComponent extends Container {
 				pendingSuffix = theme.fg("muted", ` — ${pending}`);
 				summaryBudget = Math.max(0, summaryBudget - stripAnsi(pendingSuffix).length);
 			}
+			const elapsedSec = Math.floor((Date.now() - this.groupStartedAtMs) / 1000);
+			if (elapsedSec >= SLOW_ACTION_ELAPSED_SEC) {
+				elapsedSuffix = ` ${theme.fg("warning", `· ${elapsedSec}s`)}`;
+				summaryBudget = Math.max(0, summaryBudget - stripAnsi(elapsedSuffix).length);
+			}
 		}
 		// Budget the summary against the space the icon + verb + two spaces consume,
 		// so the basename list truncates to the remaining cells rather than the full
 		// width. ANSI in the prefix is width-free, so measure the visible verb only.
 		const prefixCells = stripAnsi(prefix).length;
 		summaryBudget = Math.max(0, summaryBudget - prefixCells);
-		return `${prefix}${this.summary(summaryBudget)}${pendingSuffix}`;
+		return `${prefix}${this.summary(summaryBudget)}${pendingSuffix}${elapsedSuffix}`;
 	}
 
 	override render(width: number): string[] {
@@ -274,7 +287,9 @@ export class NavGroupComponent extends Container {
 			for (const e of this.execs) {
 				if (e.getActivityState() !== "error" || e.isAborted()) continue;
 				e.setResultExpanded(true);
-				for (const l of capErrorPreview(e.render(width - 2), width - 2)) lines.push(`  ${l}`);
+				for (const l of capErrorPreview(e.render(width - 2), width - 2, ACTIVITY_ERROR_PREVIEW_LINES)) {
+					lines.push(`  ${l}`);
+				}
 			}
 		}
 		if (cacheable) {
