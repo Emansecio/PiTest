@@ -6,6 +6,7 @@ import type { ResourceDiagnostic } from "../src/core/diagnostics.js";
 import type { AutocompleteProviderFactory } from "../src/core/extensions/types.js";
 import type { SourceInfo } from "../src/core/source-info.js";
 import * as displayUtils from "../src/modes/interactive/display-utils.js";
+import { EphemeralStatusController } from "../src/modes/interactive/ephemeral-status.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
@@ -34,6 +35,21 @@ type ExtensionFixture = {
 	sourceInfo?: SourceInfo;
 };
 
+function makeEphemeralStatusFakeThis(options?: { chatContainer?: Container }): any {
+	const fakeThis: any = {
+		statusContainer: new Container(),
+		chatContainer: options?.chatContainer ?? new Container(),
+		ui: { requestRender: vi.fn() },
+		ephemeralStatusText: undefined,
+		ephemeralPaintColor: (text: string) => text,
+	};
+	fakeThis.ephemeralStatus = new EphemeralStatusController({
+		paint: (message, kind) => (InteractiveMode as any).prototype.paintEphemeralStatus.call(fakeThis, message, kind),
+		clear: () => (InteractiveMode as any).prototype.removeEphemeralStatusLine.call(fakeThis),
+	});
+	return fakeThis;
+}
+
 describe("InteractiveMode.showStatus", () => {
 	beforeAll(() => {
 		// showStatus uses the global theme instance
@@ -41,11 +57,7 @@ describe("InteractiveMode.showStatus", () => {
 	});
 
 	test("coalesces immediately-sequential status messages in statusContainer", () => {
-		const fakeThis: any = {
-			statusContainer: new Container(),
-			ui: { requestRender: vi.fn() },
-			ephemeralStatusText: undefined,
-		};
+		const fakeThis = makeEphemeralStatusFakeThis();
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_ONE");
 		expect(fakeThis.statusContainer.children).toHaveLength(1);
@@ -59,15 +71,11 @@ describe("InteractiveMode.showStatus", () => {
 	});
 
 	test("does not append status to the chat transcript", () => {
-		const fakeThis: any = {
-			statusContainer: new Container(),
-			chatContainer: new Container(),
-			ui: { requestRender: vi.fn() },
-			ephemeralStatusText: undefined,
-		};
+		const chatContainer = new Container();
+		const fakeThis = makeEphemeralStatusFakeThis({ chatContainer });
 
 		(InteractiveMode as any).prototype.showStatus.call(fakeThis, "STATUS_ONE");
-		expect(fakeThis.chatContainer.children).toHaveLength(0);
+		expect(chatContainer.children).toHaveLength(0);
 		expect(fakeThis.statusContainer.children).toHaveLength(1);
 	});
 });
@@ -77,11 +85,12 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		const builtInHeader = { setExpanded: vi.fn() };
 		const customHeader = { setExpanded: vi.fn() };
 		const chatChild = { setExpanded: vi.fn() };
+		const markChildStale = vi.fn();
 		const fakeThis: any = {
 			toolOutputExpanded: false,
 			customHeader,
 			builtInHeader,
-			chatContainer: { children: [chatChild] },
+			chatContainer: { children: [chatChild], markChildStale },
 			ui: { requestRender: vi.fn() },
 		};
 
@@ -94,6 +103,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 		// tool toggle can never resize/flicker the welcome screen.
 		expect(builtInHeader.setExpanded).not.toHaveBeenCalled();
 		expect(chatChild.setExpanded).toHaveBeenCalledWith(true);
+		expect(markChildStale).toHaveBeenCalledWith(chatChild);
 		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
 	});
 });

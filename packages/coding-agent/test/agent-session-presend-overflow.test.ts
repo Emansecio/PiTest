@@ -36,6 +36,16 @@ vi.mock("../src/core/compaction/index.js", () => ({
 		trailingTokens: 0,
 		lastUsageIndex: 0,
 	}),
+	estimateWireTokens: () => ({
+		tokens: mockState.assembledTokens,
+		usageTokens: mockState.assembledTokens,
+		trailingTokens: 0,
+		lastUsageIndex: 0,
+		messageTokens: mockState.assembledTokens,
+		systemTokens: 0,
+		toolTokens: 0,
+		pendingTokens: 0,
+	}),
 	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 	prepareCompaction: () => ({ dummy: true }),
 	// Force the normal threshold path to NEVER fire, so only the pre-send guard can

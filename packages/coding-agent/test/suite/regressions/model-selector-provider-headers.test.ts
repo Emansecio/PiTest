@@ -91,15 +91,16 @@ describe("model selector provider group headers", () => {
 			.split("\n")
 			.map((line) => line.trim());
 
-		// Provider headers render as bare provider ids (no brackets).
-		const alphaHeaderIdx = lines.indexOf("alpha");
-		const betaHeaderIdx = lines.indexOf("beta");
+		// Provider headers render as dim provider ids inside the SelectorCard frame.
+		const stripCardFrame = (line: string) => line.replaceAll("│", "").trim();
+		const alphaHeaderIdx = lines.findIndex((line) => stripCardFrame(line) === "alpha");
+		const betaHeaderIdx = lines.findIndex((line) => stripCardFrame(line) === "beta");
 		expect(alphaHeaderIdx).toBeGreaterThanOrEqual(0);
 		expect(betaHeaderIdx).toBeGreaterThanOrEqual(0);
 		expect(alphaHeaderIdx).toBeLessThan(betaHeaderIdx);
 
 		// The current model is the selected (→) line and sits under the alpha header.
-		const selectedLine = lines.find((line) => line.startsWith("→"));
+		const selectedLine = lines.find((line) => line.includes("→"));
 		expect(selectedLine).toContain("Alpha One");
 
 		// Provider block is contiguous: a1, a2 (both alpha) come before b1 (beta),

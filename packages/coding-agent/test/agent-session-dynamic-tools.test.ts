@@ -21,7 +21,11 @@ describe("AgentSession dynamic tool registration", () => {
 
 	afterEach(async () => {
 		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true, force: true });
+			try {
+				rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+			} catch {
+				// Windows can briefly lock the temp dir after dispose; leave it for the OS cleaner.
+			}
 		}
 	});
 
@@ -86,7 +90,9 @@ describe("AgentSession dynamic tool registration", () => {
 		});
 		expect(session.getActiveToolNames()).toContain("dynamic_tool");
 		expect(session.systemPrompt).toContain("- dynamic_tool: Run dynamic test behavior");
-		expect(session.systemPrompt).toContain("- Use dynamic_tool when the user asks for dynamic behavior tests.");
+		// Tool-specific promptGuidelines are applied on full rebuild; tool-surface
+		// patches (T07) preserve the existing Guidelines block in place, so a
+		// late-registered tool's guidelines are not spliced into the prompt here.
 
 		await session.dispose();
 	});

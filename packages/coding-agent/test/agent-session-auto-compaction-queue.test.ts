@@ -47,6 +47,41 @@ vi.mock("../src/core/compaction/index.js", () => ({
 		}
 		return { tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null };
 	},
+	estimateWireTokens: (
+		messages: Array<{
+			role: string;
+			usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number };
+			stopReason?: string;
+		}>,
+	) => {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg.role === "assistant" && msg.stopReason !== "error" && msg.stopReason !== "aborted" && msg.usage) {
+				const tokens =
+					msg.usage.totalTokens ?? msg.usage.input + msg.usage.output + msg.usage.cacheRead + msg.usage.cacheWrite;
+				return {
+					tokens,
+					usageTokens: tokens,
+					trailingTokens: 0,
+					lastUsageIndex: i,
+					messageTokens: tokens,
+					systemTokens: 0,
+					toolTokens: 0,
+					pendingTokens: 0,
+				};
+			}
+		}
+		return {
+			tokens: 0,
+			usageTokens: 0,
+			trailingTokens: 0,
+			lastUsageIndex: null,
+			messageTokens: 0,
+			systemTokens: 0,
+			toolTokens: 0,
+			pendingTokens: 0,
+		};
+	},
 	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 	prepareCompaction: () => ({ dummy: true }),
 	shouldCompact: (

@@ -33,6 +33,33 @@ vi.mock("../src/core/compaction/index.js", async (importOriginal) => {
 			}
 			return { tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null };
 		},
+		estimateWireTokens: (messages: Array<{ __assembled?: number }>) => {
+			for (let i = messages.length - 1; i >= 0; i--) {
+				const a = messages[i]?.__assembled;
+				if (typeof a === "number") {
+					return {
+						tokens: a,
+						usageTokens: a,
+						trailingTokens: 0,
+						lastUsageIndex: i,
+						messageTokens: a,
+						systemTokens: 0,
+						toolTokens: 0,
+						pendingTokens: 0,
+					};
+				}
+			}
+			return {
+				tokens: 0,
+				usageTokens: 0,
+				trailingTokens: 0,
+				lastUsageIndex: null,
+				messageTokens: 0,
+				systemTokens: 0,
+				toolTokens: 0,
+				pendingTokens: 0,
+			};
+		},
 		generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 		prepareCompaction: () => ({ dummy: true }),
 		// Only the pre-send overflow guard matters here; keep the threshold path inert.

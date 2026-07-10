@@ -94,14 +94,15 @@ describe("model selector cycle set", () => {
 		expect(lines).not.toContain("Scope:");
 		expect(lines).not.toContain("all | enabled");
 
-		const cycleHeaderIdx = lines.findIndex((line) => line.includes("Cycle set"));
-		const allHeaderIdx = lines.indexOf("All models");
+		// SelectorCard frames list rows; section headers are substring matches, not bare lines.
+		const cycleSectionIdx = lines.findIndex((line) => line.includes("● Cycle set"));
+		const allHeaderIdx = lines.findIndex((line) => line.includes("All models"));
 		const b1Idx = lines.findIndex((line) => line.includes("Beta One"));
 		const a2Idx = lines.findIndex((line) => line.includes("Alpha Two"));
 
-		expect(cycleHeaderIdx).toBeGreaterThanOrEqual(0);
-		expect(allHeaderIdx).toBeGreaterThan(cycleHeaderIdx);
-		expect(b1Idx).toBeGreaterThan(cycleHeaderIdx);
+		expect(cycleSectionIdx).toBeGreaterThanOrEqual(0);
+		expect(allHeaderIdx).toBeGreaterThan(cycleSectionIdx);
+		expect(b1Idx).toBeGreaterThan(cycleSectionIdx);
 		expect(b1Idx).toBeLessThan(allHeaderIdx);
 		expect(a2Idx).toBeGreaterThan(allHeaderIdx);
 		expect(lines.some((line) => line.includes("[beta]"))).toBe(false);

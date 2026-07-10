@@ -44,8 +44,8 @@ function metricsLineWouldOverflow(ctxText: string, rightText: string, width: num
  * this channel, and earlier sanitisers were stripping just the ESC byte and
  * leaving the `[…m` parameter strings as visible literal text in the footer.
  */
-function sanitizeStatusText(text: string): string {
-	return text
+function sanitizeStatusText(text: string | undefined): string {
+	return (text ?? "")
 		.replace(/[\r\n\t]+/g, " ")
 		.replace(/[\u0000-\u001a\u001c-\u001f\u007f]/g, "")
 		.replace(/\s+/g, " ")

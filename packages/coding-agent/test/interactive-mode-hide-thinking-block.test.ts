@@ -61,7 +61,7 @@ describe("InteractiveMode.applyHideThinkingBlock", () => {
 		expect(markChildStale).not.toHaveBeenCalled();
 	});
 
-	test("grouped mode falls back to a full rebuild instead of patching in place", () => {
+	test("grouped mode falls back to a full rebuild when thinking-only assistants exist", () => {
 		const child = new AssistantMessageComponent();
 		const setHideThinkingBlockSpy = vi.spyOn(child, "setHideThinkingBlock");
 		const markChildStale = vi.fn();
@@ -70,6 +70,11 @@ describe("InteractiveMode.applyHideThinkingBlock", () => {
 
 		const fakeThis = {
 			settingsManager: { getToolActivity: () => "grouped" },
+			session: {
+				state: {
+					messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "hmm" }] }],
+				},
+			},
 			chatContainer: { children: [child], markChildStale },
 			rebuildChatFromMessages,
 			ui: { requestRender },
@@ -82,6 +87,41 @@ describe("InteractiveMode.applyHideThinkingBlock", () => {
 		expect(setHideThinkingBlockSpy).not.toHaveBeenCalled();
 		expect(markChildStale).not.toHaveBeenCalled();
 		expect(requestRender).not.toHaveBeenCalled();
+	});
+
+	test("grouped mode patches in place when every assistant message has visible text", () => {
+		const child = new AssistantMessageComponent();
+		const setHideThinkingBlockSpy = vi.spyOn(child, "setHideThinkingBlock");
+		const markChildStale = vi.fn();
+		const rebuildChatFromMessages = vi.fn();
+		const requestRender = vi.fn();
+
+		const fakeThis = {
+			settingsManager: { getToolActivity: () => "grouped" },
+			session: {
+				state: {
+					messages: [
+						{
+							role: "assistant",
+							content: [
+								{ type: "thinking", thinking: "hmm" },
+								{ type: "text", text: "answer" },
+							],
+						},
+					],
+				},
+			},
+			chatContainer: { children: [child], markChildStale },
+			rebuildChatFromMessages,
+			ui: { requestRender },
+		};
+
+		applyHideThinkingBlock.call(fakeThis, true);
+
+		expect(rebuildChatFromMessages).not.toHaveBeenCalled();
+		expect(setHideThinkingBlockSpy).toHaveBeenCalledExactlyOnceWith(true);
+		expect(markChildStale).toHaveBeenCalledExactlyOnceWith(child);
+		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 });
 

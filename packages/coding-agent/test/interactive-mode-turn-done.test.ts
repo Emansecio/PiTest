@@ -39,6 +39,7 @@ describe("InteractiveMode turn done rendering", () => {
 				removeChild: vi.fn(),
 			},
 			checkShutdownRequested: vi.fn(),
+			maybeShowPowerTip: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};
 
@@ -83,6 +84,7 @@ describe("InteractiveMode turn done rendering", () => {
 				removeChild: vi.fn(),
 			},
 			checkShutdownRequested: vi.fn(),
+			maybeShowPowerTip: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};
 
@@ -114,6 +116,7 @@ describe("InteractiveMode turn done rendering", () => {
 			appendTurnDoneLine: vi.fn(),
 			chatContainer: { addChild: vi.fn(), removeChild: vi.fn() },
 			checkShutdownRequested: vi.fn(),
+			maybeShowPowerTip: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};
 
@@ -144,6 +147,7 @@ describe("InteractiveMode turn done rendering", () => {
 			appendTurnDoneLine: vi.fn(),
 			chatContainer: { addChild: vi.fn(), removeChild: vi.fn() },
 			checkShutdownRequested: vi.fn(),
+			maybeShowPowerTip: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};
 

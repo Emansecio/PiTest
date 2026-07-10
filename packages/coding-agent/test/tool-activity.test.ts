@@ -15,8 +15,8 @@ import { stripAnsi } from "../src/utils/ansi.js";
 beforeAll(() => initTheme("dark"));
 
 describe("glyphFor", () => {
-	it("uses ▪ as the fallback glyph for unmapped tools", () => {
-		expect(stripAnsi(glyphFor("some_mcp_tool"))).toBe("▪");
+	it("uses ◈ as the fallback glyph for unmapped tools", () => {
+		expect(stripAnsi(glyphFor("some_mcp_tool"))).toBe("◈");
 	});
 });
 

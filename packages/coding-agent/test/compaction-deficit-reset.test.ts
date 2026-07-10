@@ -33,6 +33,16 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	},
 	computeDynamicReserve: (_contextWindow: number, configuredReserve: number) => configuredReserve,
 	estimateContextTokens: () => ({ tokens: 0, usageTokens: 0, trailingTokens: 0, lastUsageIndex: null }),
+	estimateWireTokens: () => ({
+		tokens: 0,
+		usageTokens: 0,
+		trailingTokens: 0,
+		lastUsageIndex: null,
+		messageTokens: 0,
+		systemTokens: 0,
+		toolTokens: 0,
+		pendingTokens: 0,
+	}),
 	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 	prepareCompaction: () => ({
 		firstKeptEntryId: "entry-1",

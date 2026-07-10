@@ -41,6 +41,13 @@ function makeFooterData(statuses: Map<string, string>): ReadonlyFooterDataProvid
 	};
 }
 
+function extensionStatusLine(footer: FooterComponent, width = 200): string {
+	footer.setDensity("full");
+	const lines = footer.render(width);
+	expect(lines.length).toBeGreaterThanOrEqual(3);
+	return lines[2]!;
+}
+
 describe("FooterComponent extension status line", () => {
 	test("preserves ANSI colour sequences in extension statuses (does not strip ESC)", () => {
 		// Real-world payload shape: a coloured spinner + label, the way the
@@ -48,11 +55,7 @@ describe("FooterComponent extension status line", () => {
 		const statuses = new Map([["caveman", "\x1b[38;5;196m⠠\x1b[38;5;208m⠄\x1b[0m caveman level: FULL"]]);
 		const footer = new FooterComponent(makeSession(), makeFooterData(statuses));
 
-		const lines = footer.render(200);
-
-		// Status line is the third line (after identity + metrics).
-		expect(lines.length).toBeGreaterThanOrEqual(3);
-		const statusLine = lines[2];
+		const statusLine = extensionStatusLine(footer);
 
 		// CRITICAL: the raw `[38;5;196m` pattern that used to leak when ESC
 		// was stripped MUST be gone. If this fails the regression is back.
@@ -75,8 +78,7 @@ describe("FooterComponent extension status line", () => {
 	test("still strips genuine control characters (newlines, NUL, BEL)", () => {
 		const statuses = new Map([["bad", "before\n\rmiddle\x00\x07after"]]);
 		const footer = new FooterComponent(makeSession(), makeFooterData(statuses));
-		const statusLine = footer.render(200)[2];
-		const plain = stripAnsi(statusLine);
+		const plain = stripAnsi(extensionStatusLine(footer));
 
 		// `\n` and `\r` collapse to a single space (joined with subsequent text).
 		// `\x00` and `\x07` are stripped outright.
@@ -92,7 +94,7 @@ describe("FooterComponent extension status line", () => {
 			["mmm", "M"],
 		]);
 		const footer = new FooterComponent(makeSession(), makeFooterData(statuses));
-		const plain = stripAnsi(footer.render(200)[2]);
+		const plain = stripAnsi(extensionStatusLine(footer));
 		expect(plain.indexOf("A")).toBeLessThan(plain.indexOf("M"));
 		expect(plain.indexOf("M")).toBeLessThan(plain.indexOf("Z"));
 	});
@@ -100,7 +102,7 @@ describe("FooterComponent extension status line", () => {
 	test("collapses runs of whitespace to a single space (preserves alignment)", () => {
 		const statuses = new Map([["padded", "alpha     beta\t\t\tgamma"]]);
 		const footer = new FooterComponent(makeSession(), makeFooterData(statuses));
-		const plain = stripAnsi(footer.render(200)[2]);
+		const plain = stripAnsi(extensionStatusLine(footer));
 		expect(plain).toContain("alpha beta gamma");
 		expect(plain).not.toMatch(/\s{2,}/);
 	});

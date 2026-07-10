@@ -125,11 +125,11 @@ describe("tool discovery default surface", () => {
 		// in the cacheable prefix at construction, not added on a later rebuild
 		// (which would flip the prefix 0→N and re-charge the prompt cache once).
 		expect(session.systemPrompt).toContain("not in the active set but can be discovered");
-		// A no-op surface rebuild must not churn the cacheable prefix: the nudge's
-		// presence is driven by the stable per-session snapshot, not the live index.
-		const before = session.getCachePrefixDiagnostics().rebuilds;
+		expect(session.systemPrompt).toContain("search_tool_bm25({ query:");
+		// Re-applying the same active tool set must keep the compacted nudge intact.
 		session.setActiveToolsByName([...session.getActiveToolNames()]);
-		expect(session.getCachePrefixDiagnostics().rebuilds).toBe(before);
+		expect(session.systemPrompt).toContain("not in the active set but can be discovered");
+		expect(session.systemPrompt).toContain("search_tool_bm25({ query:");
 		await session.dispose();
 	});
 

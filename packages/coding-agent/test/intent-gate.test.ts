@@ -79,6 +79,9 @@ function makeFakePi() {
 			list.push(handler);
 			handlers.set(event, list);
 		},
+		markSideEffect<F>(handler: F): F {
+			return handler;
+		},
 		sendMessage(message: { content: string }, options?: { deliverAs?: string }) {
 			steers.push({ content: message.content, deliverAs: options?.deliverAs });
 		},
