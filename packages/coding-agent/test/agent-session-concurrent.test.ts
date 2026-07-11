@@ -293,6 +293,12 @@ describe("AgentSession concurrent prompt guard", () => {
 		await session.abort();
 		await firstPrompt.catch(() => {});
 
+		// Abort ends the run without auto-draining steering (UI restores the queue to
+		// the editor). Explicit continue delivers queued steering — same path as a
+		// user re-submitting after Esc.
+		if (session.agent.hasQueuedMessages()) {
+			await session.agent.continue();
+		}
 		await vi.waitFor(() => {
 			expect(sawSteeringMessage).toBe(true);
 		});
