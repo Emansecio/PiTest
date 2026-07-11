@@ -5,19 +5,31 @@
  */
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@pit/ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHarness, getUserTexts, type Harness } from "./suite/harness.js";
 
-// No package.json in the harness temp dir → no code check command, so these
-// tests isolate the visual nudge from the code-check loop.
+// Isolate the visual nudge from sibling verification phases that can hang under
+// full-suite load (functional-web Chrome probes, self-review subagent up to 90s).
+const VISUAL_ONLY = {
+	verification: { visual: true, functionalWeb: false },
+} as const;
+
 describe("visual definition-of-done gate", () => {
 	const harnesses: Harness[] = [];
+	const prevSelfReview = process.env.PIT_NO_SELF_REVIEW;
+
+	beforeEach(() => {
+		process.env.PIT_NO_SELF_REVIEW = "1";
+	});
+
 	afterEach(async () => {
 		while (harnesses.length > 0) await harnesses.pop()?.cleanup();
+		if (prevSelfReview === undefined) delete process.env.PIT_NO_SELF_REVIEW;
+		else process.env.PIT_NO_SELF_REVIEW = prevSelfReview;
 	});
 
 	it("nudges to preview when a visual file changed but was never viewed", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ settings: { ...VISUAL_ONLY } });
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "App.tsx");
 		harness.setResponses([
@@ -38,7 +50,7 @@ describe("visual definition-of-done gate", () => {
 	});
 
 	it("does not nudge for a non-visual file", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ settings: { ...VISUAL_ONLY } });
 		harnesses.push(harness);
 		const file = join(harness.tempDir, "notes.txt");
 		harness.setResponses([
