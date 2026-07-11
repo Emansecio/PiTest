@@ -12,6 +12,10 @@ function fakeSession(opts: { busy: boolean }) {
 		},
 		_runAgentPrompt: runAgentPrompt,
 		emit,
+		_emitSubagentComplete(handle: string, status: "done" | "error", meta?: { turns?: number; totalTokens?: number }) {
+			emit({ type: "subagent_complete", handle, status, turns: meta?.turns, totalTokens: meta?.totalTokens });
+		},
+		_disposed: false,
 	} as unknown as AgentSession;
 	const deliver = (AgentSession.prototype as any)._deliverAsyncResult.bind(self);
 	return { deliver, followUp, runAgentPrompt, emit };

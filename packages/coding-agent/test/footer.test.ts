@@ -31,7 +31,7 @@ interface MakeFooterOptions {
 	/**
 	 * Number of user turns to simulate. Defaults to 1 when usage has accrued
 	 * (contextUsage provided or cost > 0) and 0 otherwise, so an "active"
-	 * session reads as non-pristine and a fresh one as pristine  mirroring the
+	 * session reads as non-pristine and a fresh one as pristine — mirroring the
 	 * real product, where the system prompt loads tokens before the first turn
 	 * but `messages` stays empty until the user submits.
 	 */
@@ -74,7 +74,7 @@ function makeFooter({
 				]
 			: [];
 	// Accrued usage (contextUsage provided or cost > 0) implies a turn happened,
-	// so simulate a user message  otherwise the footer's hasUserTurn() check
+	// so simulate a user message — otherwise the footer's hasUserTurn() check
 	// would (wrongly, for these scenarios) read the session as pristine.
 	const turns = userTurns ?? (contextUsage != null || cost > 0 ? 1 : 0);
 	const messages = Array.from({ length: turns }, () => ({ role: "user", content: "hi", timestamp: 0 }));
@@ -200,7 +200,7 @@ it("shows git diff stats in the identity line", () => {
 		usingOAuth: true,
 	});
 	const plain = footer.render(80).map(stripAnsi).join("\n");
-	expect(plain).toContain("(main  +12 -3)");
+	expect(plain).toContain("(main · +12 -3)");
 });
 
 it("stacks identity and metrics on narrow terminals", () => {
@@ -227,8 +227,8 @@ it("stacks CTX and usage on medium-width terminals", () => {
 	const lines = footer.render(60).map(stripAnsi);
 	const ctxLine = lines.find((line) => line.includes("CTX"));
 	expect(ctxLine).toBeDefined();
-	expect(ctxLine).not.toMatch(/?/);
-	expect(lines.some((line) => line.includes("?") || line.includes("plan"))).toBe(true);
+	expect(ctxLine).not.toMatch(/↑/);
+	expect(lines.some((line) => line.includes("↑") || line.includes("plan"))).toBe(true);
 });
 
 it("composes CTX and usage on one metrics line when wide enough", () => {
@@ -268,7 +268,7 @@ it("keeps the full two-line footer when context has accrued usage", () => {
 	const lines = footer.render(80).map(stripAnsi);
 	expect(lines.length).toBeGreaterThanOrEqual(2);
 	expect(lines[1]).toContain("CTX");
-	expect(lines[1]).toContain("23%  47k/200k");
+	expect(lines[1]).toContain("23% · 47k/200k");
 });
 
 it("keeps the no-rails alert on its own line", () => {
@@ -288,10 +288,10 @@ it("does not collapse when auto-compact is off on an idle session", () => {
 it("keeps the thinking chip on a narrow collapsed line", () => {
 	const footer = makeFooter({ thinkingLevel: "high", permissions: "auto", usingOAuth: true, autoCompact: true });
 	const lines = footer.render(30).map(stripAnsi);
-	expect(lines.some((line) => line.includes("? High"))).toBe(true);
+	expect(lines.some((line) => line.includes("✦ High"))).toBe(true);
 });
 
-it("flags no-compact (warning) only when auto-compact is OFF  the abnormal state", () => {
+it("flags no-compact (warning) only when auto-compact is OFF — the abnormal state", () => {
 	const footer = makeFooter({
 		permissions: "plan",
 		autoCompact: false,
@@ -306,7 +306,7 @@ it("flags no-compact (warning) only when auto-compact is OFF  the abnormal state
 
 it("never renders a cost segment on the metrics line, even when real cost accrued", () => {
 	// Cost is intentionally kept off the footer base UI. It is still tracked
-	// internally (stats panel)  just not surfaced on the metrics line.
+	// internally (stats panel) — just not surfaced on the metrics line.
 	for (const opts of [{ usingOAuth: true, cost: 1.5 }, { usingOAuth: false, cost: 1.5 }, { cost: 0.0004 }]) {
 		const footer = makeFooter(opts);
 		const lines = footer.render(80).map(stripAnsi);
@@ -329,10 +329,10 @@ it("renders a mini bar, whole-percent, and counts once the context has usage", (
 		contextUsage: { tokens: 46800, percent: 23.4, contextWindow: 200000 },
 	});
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[1]).toContain("?");
-	expect(lines[1]).toContain("?");
+	expect(lines[1]).toContain("▰");
+	expect(lines[1]).toContain("▱");
 	expect(lines[1]).toContain("CTX");
-	expect(lines[1]).toContain("23%  47k/200k");
+	expect(lines[1]).toContain("23% · 47k/200k");
 });
 
 it("marks a post-compaction structural estimate with a ~ (never reads as an exact figure)", () => {
@@ -341,8 +341,8 @@ it("marks a post-compaction structural estimate with a ~ (never reads as an exac
 		contextUsage: { tokens: 12000, percent: 6, contextWindow: 200000, estimated: true },
 	});
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[1]).toContain("~6%  ~12k/200k");
-	expect(lines[1]).toContain("?");
+	expect(lines[1]).toContain("~6% · ~12k/200k");
+	expect(lines[1]).toContain("▰");
 });
 
 it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", () => {
@@ -351,16 +351,16 @@ it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", 
 		contextUsage: { tokens: 1500, percent: 0.8, contextWindow: 200000 },
 	});
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[1]).toContain("1%  1.5k/200k");
-	expect(lines[1]).toContain("?");
+	expect(lines[1]).toContain("1% · 1.5k/200k");
+	expect(lines[1]).toContain("▰");
 
 	const tiny = makeFooter({
 		usingOAuth: true,
 		contextUsage: { tokens: 600, percent: 0.3, contextWindow: 200000 },
 	});
 	const tinyLines = tiny.render(80).map(stripAnsi);
-	expect(tinyLines[1]).toContain("<1%  600/200k");
-	expect(tinyLines[1]).toContain("?");
+	expect(tinyLines[1]).toContain("<1% · 600/200k");
+	expect(tinyLines[1]).toContain("▰");
 });
 
 it("shows the home profile folder in the footer when session cwd is the home directory", () => {
@@ -393,15 +393,15 @@ it("shows only the model id, never the provider, even with several providers ava
 	expect(lines[0]).not.toContain("anthropic");
 });
 
-it("renders the thinking level as a ? chip on reasoning models", () => {
+it("renders the thinking level as a ✦ chip on reasoning models", () => {
 	const footer = makeFooter({ thinkingLevel: "high" });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("test-model  ? High");
+	expect(lines[0]).toContain("test-model • ✦ High");
 });
 
-it("keeps the ? chip intact on a narrow line, truncating the model id instead", () => {
+it("keeps the ✦ chip intact on a narrow line, truncating the model id instead", () => {
 	// At a tight width the right cluster must shrink the MODEL id (with ellipsis),
-	// never the protected `? High` chip  otherwise it clips to a dangling `?`.
+	// never the protected `✦ High` chip — otherwise it clips to a dangling `✦`.
 	const footer = makeFooter({
 		thinkingLevel: "high",
 		providerCount: 2,
@@ -409,10 +409,10 @@ it("keeps the ? chip intact on a narrow line, truncating the model id instead", 
 	});
 	// Width 16 < model id (10) + chip (9): the id must yield, the chip must not.
 	const lines = footer.render(16).map(stripAnsi);
-	const modelLine = lines.find((line) => line.includes("? High")) ?? lines.join("\n");
-	expect(modelLine).toContain("? High");
-	expect(modelLine).not.toMatch(/?$/);
-	expect(lines.some((line) => line.includes(""))).toBe(true);
+	const modelLine = lines.find((line) => line.includes("✦ High")) ?? lines.join("\n");
+	expect(modelLine).toContain("✦ High");
+	expect(modelLine).not.toMatch(/✦$/);
+	expect(lines.some((line) => line.includes("…"))).toBe(true);
 });
 
 it("dims uncolored extension statuses but passes pre-colorized ones through", () => {

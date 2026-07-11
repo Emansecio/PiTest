@@ -46,13 +46,13 @@ describe("SessionInfo.modified", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("uses last user/assistant message timestamp instead of file mtime", async () => {
+	it("uses file mtime for listing (bounded session info)", async () => {
 		const filePath = join(tmpdir(), `pi-session-${Date.now()}-modified.jsonl`);
 		createSessionFile(filePath);
 
 		const before = await stat(filePath);
 		// Ensure the file mtime can differ from our message timestamp even on coarse filesystems.
-		await new Promise((r) => setTimeout(r, 10));
+		await new Promise((r) => setTimeout(r, 20));
 
 		const mgr = SessionManager.open(filePath);
 		const msgTime = Date.now();
@@ -74,10 +74,14 @@ describe("SessionInfo.modified", () => {
 			timestamp: msgTime,
 		});
 
+		const after = await stat(filePath);
 		const sessions = await SessionManager.list("/tmp", dirname(filePath));
 		const s = sessions.find((x) => x.path === filePath);
 		expect(s).toBeDefined();
-		expect(s!.modified.getTime()).toBe(msgTime);
-		expect(s!.modified.getTime()).not.toBe(before.mtime.getTime());
+		// Listing is bounded and uses mtime, not a full scan of message timestamps.
+		// Allow a small delta: list() re-stats independently of this test's `after`.
+		expect(Math.abs(s!.modified.getTime() - after.mtime.getTime())).toBeLessThan(1000);
+		expect(s!.modified.getTime()).toBeGreaterThanOrEqual(before.mtime.getTime());
+		expect(s!.modified.getTime()).toBeGreaterThanOrEqual(msgTime - 1000);
 	});
 });
