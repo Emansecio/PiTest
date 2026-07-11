@@ -15,7 +15,7 @@ import {
 	type TextContent,
 } from "@pit/ai";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -293,7 +293,9 @@ describe("AgentSession concurrent prompt guard", () => {
 		await session.abort();
 		await firstPrompt.catch(() => {});
 
-		expect(sawSteeringMessage).toBe(true);
+		await vi.waitFor(() => {
+			expect(sawSteeringMessage).toBe(true);
+		});
 	});
 
 	it("should allow prompt() after previous completes", async () => {

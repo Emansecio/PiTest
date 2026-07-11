@@ -140,13 +140,14 @@ describe("SessionManager _persist resilience (Fix 1)", () => {
 		const queued = `${JSON.stringify({ type: "custom", customType: "queued", id: "q1", parentId: null, timestamp: new Date().toISOString() })}\n`;
 		(mgr as unknown as { _writeQueue: string[] })._writeQueue.push(queued);
 
-		// Break the file path so the next append (which must prepend the queue) throws.
+		// Break the file path so the next sync append throws (ENOENT is non-transient).
 		const brokenFile = join(tempDir, "nope-dir", "queue.jsonl");
 		(mgr as unknown as { sessionFile: string }).sessionFile = brokenFile;
 
-		mgr.appendMessage(makeAssistantMessage("second"));
+		expect(() => mgr.appendMessage(makeAssistantMessage("second"))).toThrow(/ENOENT|no such file/i);
 
-		// The queued write must survive a failed async drain (not silently spliced away).
+		// Failed sync flush must not clear the queue — both the seeded line and the
+		// new entry remain for a later successful flushWrites/retry.
 		const queue = (mgr as unknown as { _writeQueue: string[] })._writeQueue;
 		expect(queue.length).toBe(2);
 		expect(queue[0]).toBe(queued);
