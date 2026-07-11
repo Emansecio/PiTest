@@ -115,3 +115,33 @@ export async function withFileMutationQueue<T>(
 		}
 	}
 }
+
+/**
+ * Serialize mutations across multiple files, acquiring per-file queues in
+ * lexicographic key order to avoid deadlock when two multi-file ops overlap
+ * (A locks foo then bar; B locks bar then foo).
+ *
+ * Empty `filePaths` runs `fn` immediately (no queue). Duplicate paths collapse
+ * to one queue slot.
+ */
+export async function withFileMutationQueues<T>(
+	filePaths: readonly string[],
+	fn: () => Promise<T>,
+	timeoutMs: number = FILE_MUTATION_TIMEOUT_MS,
+): Promise<T> {
+	if (filePaths.length === 0) return fn();
+	const byKey = new Map<string, string>();
+	for (const filePath of filePaths) {
+		const key = getMutationQueueKey(filePath);
+		if (!byKey.has(key)) byKey.set(key, filePath);
+	}
+	const ordered = [...byKey.entries()]
+		.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+		.map(([, path]) => path);
+
+	const runAt = async (index: number): Promise<T> => {
+		if (index >= ordered.length) return fn();
+		return withFileMutationQueue(ordered[index], () => runAt(index + 1), timeoutMs);
+	};
+	return runAt(0);
+}

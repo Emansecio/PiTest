@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { findChromeBinary, launchChrome, waitForEndpoint } from "../src/core/chrome/chrome-launcher.js";
+import {
+	findChromeBinary,
+	isOwnedEndpoint,
+	launchChrome,
+	parseDevToolsActivePort,
+	readDevToolsActivePort,
+	waitForEndpoint,
+	waitForOwnedProfile,
+} from "../src/core/chrome/chrome-launcher.js";
 
 describe("findChromeBinary", () => {
 	it("honors the PIT_CHROME_DEVTOOLS_BINARY override", () => {
@@ -62,7 +70,7 @@ describe("launchChrome", () => {
 		const mkdir = vi.fn();
 		const pid = launchChrome({
 			binary: "/bin/chrome",
-			port: 9222,
+			port: 0,
 			userDataDir: "/data/chrome",
 			spawnImpl: spawnImpl as any,
 			mkdir,
@@ -75,9 +83,108 @@ describe("launchChrome", () => {
 		expect(child.on).toHaveBeenCalledWith("error", expect.any(Function));
 		const [bin, args, options] = spawnImpl.mock.calls[0]!;
 		expect(bin).toBe("/bin/chrome");
-		expect(args).toContain("--remote-debugging-port=9222");
+		expect(args).toContain("--remote-debugging-port=0");
 		expect(args).toContain("--user-data-dir=/data/chrome");
 		expect(options).toMatchObject({ detached: true, stdio: "ignore" });
+	});
+});
+
+describe("DevToolsActivePort ownership", () => {
+	it("parses port + browser path from the Chrome profile file", () => {
+		expect(parseDevToolsActivePort("36638\n/devtools/browser/abc-123\n")).toEqual({
+			port: 36638,
+			browserPath: "/devtools/browser/abc-123",
+		});
+		expect(parseDevToolsActivePort("bogus\n/x")).toBeUndefined();
+		expect(parseDevToolsActivePort("")).toBeUndefined();
+	});
+
+	it("reads DevToolsActivePort from the user-data-dir", () => {
+		const readFile = vi.fn().mockReturnValue("9225\n/devtools/browser/owned\n");
+		expect(readDevToolsActivePort("/profile", { readFile })).toEqual({
+			port: 9225,
+			browserPath: "/devtools/browser/owned",
+		});
+		expect(readFile).toHaveBeenCalledWith(expect.stringMatching(/DevToolsActivePort$/), "utf8");
+		expect(
+			readDevToolsActivePort("/missing", {
+				readFile: () => {
+					throw new Error("ENOENT");
+				},
+			}),
+		).toBeUndefined();
+	});
+
+	it("isOwnedEndpoint requires the live /json/version WS path to match", async () => {
+		const fetchImpl = vi.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: async () => ({
+				webSocketDebuggerUrl: "ws://127.0.0.1:9225/devtools/browser/owned",
+			}),
+		});
+		expect(await isOwnedEndpoint("127.0.0.1", 9225, "/devtools/browser/owned", { fetchImpl })).toBe(true);
+		expect(await isOwnedEndpoint("127.0.0.1", 9225, "/devtools/browser/other", { fetchImpl })).toBe(false);
+	});
+
+	it("isOwnedEndpoint composes caller signal with a 2s timeout", async () => {
+		const fetchImpl = vi.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: async () => ({
+				webSocketDebuggerUrl: "ws://127.0.0.1:9225/devtools/browser/owned",
+			}),
+		});
+		const caller = new AbortController();
+		await isOwnedEndpoint("127.0.0.1", 9225, "/devtools/browser/owned", {
+			fetchImpl,
+			signal: caller.signal,
+		});
+		const init = fetchImpl.mock.calls[0]?.[1] as { signal?: AbortSignal };
+		expect(init?.signal).toBeDefined();
+		expect(init!.signal!.aborted).toBe(false);
+		caller.abort();
+		expect(init!.signal!.aborted).toBe(true);
+	});
+
+	it("waitForOwnedProfile resolves once the file appears and the endpoint matches", async () => {
+		let tick = 0;
+		const readFile = vi.fn().mockImplementation(() => {
+			tick += 1;
+			if (tick < 2) throw new Error("ENOENT");
+			return "9333\n/devtools/browser/live\n";
+		});
+		const fetchImpl = vi.fn().mockResolvedValue({
+			ok: true,
+			status: 200,
+			json: async () => ({
+				webSocketDebuggerUrl: "ws://127.0.0.1:9333/devtools/browser/live",
+			}),
+		});
+		const owned = await waitForOwnedProfile("127.0.0.1", "/profile", {
+			readFile,
+			fetchImpl,
+			sleep: async () => {},
+			timeoutMs: 1000,
+			intervalMs: 10,
+		});
+		expect(owned).toEqual({ port: 9333, browserPath: "/devtools/browser/live" });
+	});
+
+	it("waitForOwnedProfile returns undefined immediately when the signal aborts", async () => {
+		const ctrl = new AbortController();
+		ctrl.abort();
+		const owned = await waitForOwnedProfile("127.0.0.1", "/profile", {
+			readFile: () => {
+				throw new Error("ENOENT");
+			},
+			fetchImpl: vi.fn(),
+			sleep: async () => {},
+			timeoutMs: 10_000,
+			intervalMs: 250,
+			signal: ctrl.signal,
+		});
+		expect(owned).toBeUndefined();
 	});
 });
 

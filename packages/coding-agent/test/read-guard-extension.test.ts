@@ -10,7 +10,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getRuntimeDiagnostics, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { createReadGuardExtension } from "../src/core/built-ins/read-guard-extension.ts";
+import {
+	createReadGuardExtension,
+	formatReadGuardPath,
+	formatReadGuardReason,
+} from "../src/core/built-ins/read-guard-extension.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 
 type Handler = (event: any) => unknown;
@@ -61,6 +65,26 @@ const toolResult = (toolName: string, input: Record<string, unknown>, isError = 
 	isError,
 });
 
+describe("formatReadGuardPath / formatReadGuardReason", () => {
+	it("prefers cwd-relative paths and one-line never-read reasons", () => {
+		const cwd = process.platform === "win32" ? "C:\\proj" : "/proj";
+		const abs = process.platform === "win32" ? "C:\\proj\\skills\\x\\_snd.txt" : "/proj/skills/x/_snd.txt";
+		expect(formatReadGuardPath(abs, cwd)).toBe("skills/x/_snd.txt");
+		expect(formatReadGuardReason("never-read", abs, cwd)).toBe(
+			'Read guard: unread "skills/x/_snd.txt" — read it first.',
+		);
+	});
+
+	it("falls back to basename when outside cwd", () => {
+		const cwd = process.platform === "win32" ? "C:\\proj" : "/proj";
+		const abs =
+			process.platform === "win32"
+				? "C:\\Users\\User\\.claude\\skills\\whatsapp\\scripts\\_snd.txt"
+				: "/Users/User/.claude/skills/whatsapp/scripts/_snd.txt";
+		expect(formatReadGuardPath(abs, cwd)).toBe("_snd.txt");
+	});
+});
+
 describe("read-guard — basic invariants", () => {
 	it("blocks an edit/write on a file that was never read this session", () => {
 		const cwd = makeDir();
@@ -69,7 +93,10 @@ describe("read-guard — basic invariants", () => {
 		createReadGuardExtension({ cwd })(api);
 		const r = fire("tool_call", toolCall("write", { path: "a.ts", content: "y" }));
 		expect(r?.block).toBe(true);
-		expect(String(r?.reason)).toContain("has not been read");
+		expect(String(r?.reason)).toMatch(/unread/i);
+		expect(String(r?.reason)).not.toMatch(/confirm its current content/i);
+		expect(String(r?.reason)).toContain("a.ts");
+		expect(String(r?.reason)).not.toMatch(/[A-Z]:\\/);
 	});
 
 	it("blocks edit_v2 on a file that was never read this session", () => {
@@ -79,7 +106,8 @@ describe("read-guard — basic invariants", () => {
 		createReadGuardExtension({ cwd })(api);
 		const r = fire("tool_call", toolCall("edit_v2", { path: "a.ts", edits: [] }));
 		expect(r?.block).toBe(true);
-		expect(String(r?.reason)).toContain("has not been read");
+		expect(String(r?.reason)).toMatch(/unread/i);
+		expect(String(r?.reason)).not.toMatch(/confirm its current content/i);
 	});
 
 	it("allows a write to a NEW file (does not exist on disk)", () => {
@@ -155,7 +183,7 @@ describe("read-guard — intra-session drift guard (WRITE only)", () => {
 
 		const first = fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }));
 		expect(first?.block).toBe(true);
-		expect(String(first?.reason)).toContain("changed on disk since you read it");
+		expect(String(first?.reason)).toContain("changed on disk");
 
 		// fire-once escape: re-issuing the identical write runs it.
 		expect(fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }))).toBeUndefined();
@@ -202,7 +230,7 @@ describe("read-guard — post-compaction WRITE warning (the reinforcement)", () 
 
 		const first = fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }));
 		expect(first?.block).toBe(true);
-		expect(String(first?.reason)).toContain("OVERWRITE");
+		expect(String(first?.reason)).toMatch(/post-compact|overwrite/i);
 
 		// fire-once escape: re-issuing the identical write runs it.
 		const second = fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }));
@@ -235,7 +263,7 @@ describe("read-guard — post-compaction WRITE warning (the reinforcement)", () 
 
 		const r = fire("tool_call", toolCall("write", { path: "a.ts", content: "export const x = 2;\n" }));
 		expect(r?.block).toBe(true);
-		expect(String(r?.reason)).toContain("changed since");
+		expect(String(r?.reason)).toMatch(/stale/i);
 	});
 });
 

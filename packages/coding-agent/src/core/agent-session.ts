@@ -15,15 +15,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import type {
-	Agent,
-	AgentEvent,
-	AgentMessage,
-	AgentState,
-	AgentTool,
-	AgentToolCall,
-	ThinkingLevel,
-} from "@pit/agent-core";
+import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
 import { isStreamGuardAbortMessage, setUnknownToolHintProvider } from "@pit/agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@pit/ai";
 import {
@@ -47,6 +39,7 @@ import { theme } from "../modes/interactive/theme/theme.ts";
 import { settleOrAbort } from "../utils/abort-race.ts";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
+import { requireOptional } from "../utils/optional-require.ts";
 import { sleep } from "../utils/sleep.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
 import {
@@ -66,10 +59,7 @@ import {
 	type AgentSessionEventListener,
 } from "./agent-session-events.ts";
 import { type FusionHost, runFusionSessionTurn } from "./agent-session-fusion.ts";
-import {
-	applyLightContextEconomyAtTurnEnd,
-	applyLiveContextEconomyAfterToolSuccess,
-} from "./agent-session-live-prune.ts";
+import { applyLightContextEconomyAtTurnEnd } from "./agent-session-live-prune.ts";
 import {
 	armVerificationGate,
 	upsertLearnedErrorOnFailure,
@@ -78,17 +68,14 @@ import {
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { type CacheStats, computeCacheStats } from "./cache-stats.js";
-import {
-	ChromeDevtoolsManager,
-	getCurrentChromeDevtoolsManager,
-	setCurrentChromeDevtoolsManager,
-} from "./chrome/chrome-devtools-manager.ts";
+import type { ChromeDevtoolsManager } from "./chrome/chrome-devtools-manager.ts";
 import { buildHarnessDispatcher, type CodeModeDispatcher } from "./code-mode/bridge.ts";
 import {
 	adaptivePruneThreshold,
 	applyOldThinkingCap,
 	applySupersedeOnly,
 	cloneToolResultMessagesForPrune,
+	elideAllMutatingToolCallArguments,
 	planContextPrune,
 	pressurePruneProtectTurns,
 	pruneOldToolOutputs,
@@ -111,7 +98,6 @@ import { extractToolFileOp } from "./compaction/utils.js";
 import { composeContext, isContextComposerDisabled } from "./conditioning/context-composer.ts";
 import { buildAsyncDeliveryBody } from "./coordinator/async-delivery.ts";
 import { SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
-import { dapSessionManager } from "./dap/index.ts";
 import { debugVerifyContextPrompt, maybeRunDebugVerify } from "./debug-verify.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import {
@@ -181,8 +167,7 @@ import {
 } from "./hindsight/index.js";
 import { getCurrentHistoryRecallSource, setCurrentHistoryRecallSource } from "./history-recall.ts";
 import { defaultLearnedErrorsDir, type LearnedErrorEntry, persistSessionLearnedErrors } from "./learned-error-store.js";
-import { createLspManager, getCurrentLspManager, type LspManager, setCurrentLspManager } from "./lsp/manager.ts";
-import { setDiagnosticsOnWrite, setEnforceDiagnosticsOnWrite, setFormatOnWrite } from "./lsp/writethrough.ts";
+import type { LspManager } from "./lsp/manager.ts";
 import { formatMemoryForPrompt, formatMemoryHintForPrompt } from "./memory/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import {
@@ -194,6 +179,7 @@ import {
 } from "./messaging/index.ts";
 import type { ModelRegistry } from "./model-registry.js";
 import { type RoleResolution, resolveRole } from "./model-resolver.js";
+import { describeToolAction } from "./permissions/index.ts";
 import { getCurrentPlanManager, PlanManager, type PlanState, setCurrentPlanManager } from "./plan/plan-manager.ts";
 import {
 	createPreviewQueue,
@@ -219,6 +205,7 @@ import { type RecoveryLevel, SessionRecoveryController } from "./session-recover
 import type { SettingsManager } from "./settings-manager.js";
 import type { SlashCommandInfo } from "./slash-commands.js";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
+import { MUTATING_TOOL_NAMES } from "./stagnation.ts";
 import { getCurrentSupervisionThermostat } from "./supervision-thermostat.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt, patchSystemPromptToolSurface } from "./system-prompt.js";
 import { DiagnosticsSink, defaultDiagnosticsDir, isTelemetrySinkDisabled } from "./telemetry/diagnostics-sink.ts";
@@ -258,7 +245,7 @@ import {
 	createLocalBashOperations,
 	listBashBackgroundJobs,
 } from "./tools/bash.js";
-import { prewarmFffIndex } from "./tools/fff-search.ts";
+import { isGitWorkTree, prewarmFffIndex } from "./tools/fff-search.ts";
 import { FileMtimeStore } from "./tools/file-mtime-store.ts";
 import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.js";
 import { ReadDedupeStore } from "./tools/read.js";
@@ -321,6 +308,8 @@ export interface AgentSessionConfig {
 	sessionStartEvent?: SessionStartEvent;
 	/** When true, suppress the hashline-anchor block normally appended to full-file reads. */
 	disableHashlineAnchors?: boolean;
+	/** Optional permission checker for Fusion verify / subagent policy (from services). */
+	permissionChecker?: import("./permissions/index.ts").PermissionChecker;
 }
 
 export interface ExtensionBindings {
@@ -616,6 +605,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private _allowedToolNames?: Set<string>;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _disableHashlineAnchors: boolean;
+	/** Optional; wired from AgentSessionServices for Fusion verify policy. */
+	readonly permissionChecker: import("./permissions/index.ts").PermissionChecker | undefined;
 	private readonly _readDedupeStore: ReadDedupeStore | undefined;
 	private readonly _fileMtimeStore: FileMtimeStore | undefined;
 	private _sessionStartEvent: SessionStartEvent;
@@ -772,6 +763,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private _sessionContract: SessionContract | undefined;
 	// Chrome DevTools controller (the chrome_devtools_* tools + /chrome command).
 	private _chromeDevtools: ChromeDevtoolsManager | undefined;
+	/** Module that constructed `_chromeDevtools` (same singleton registry for dispose). */
+	private _chromeManagerMod: typeof import("./chrome/chrome-devtools-manager.ts") | undefined;
 	// Guards against re-entering the goal auto-continuation loop from within a
 	// continuation prompt.
 	private _inGoalContinuation = false;
@@ -784,6 +777,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// re-dispatching the agent after the user cancels mid-task — without it, Esc
 	// only aborts the current turn and the orchestration loop immediately restarts.
 	private _userInterrupted = false;
+	/** Wired from coordinator: abort all detached op:"spawn" subagents on Esc. */
+	_abortDetachedSubagents: (() => void) | undefined;
 	// Native verification gate: `_turnTouchedFiles` arms it (set when a file tool
 	// writes/edits this prompt cycle), `_inVerification` guards re-entry, and
 	// `_verificationAbort` cancels an in-flight check on interrupt/dispose.
@@ -824,6 +819,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// kernels themselves are spawned lazily on first use by the manager.
 	private _evalKernelManager: EvalKernelManager | undefined;
 	private _lspManager: LspManager | undefined;
+	/** Module that constructed `_lspManager` (same singleton registry for dispose). */
+	private _lspManagerMod: typeof import("./lsp/manager.ts") | undefined;
+	/** Writethrough setters module — only loaded when LSP is enabled. */
+	private _lspWritethroughMod: typeof import("./lsp/writethrough.ts") | undefined;
+	/** One-shot LSP startup notices for interactive UI (e.g. missing tsserver). */
+	private _lspStartupWarnings: string[] = [];
 	private _messagingId?: string;
 	private _unsubMessagingActivity?: () => void;
 
@@ -844,6 +845,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._disableHashlineAnchors = config.disableHashlineAnchors ?? false;
+		this.permissionChecker = config.permissionChecker;
 		// Per-session de-dup of identical repeat reads. On by default; PIT_READ_DEDUPE=0
 		// disables. Content-hashed + LRU-bounded, so edited or long-ago reads re-send.
 		this._readDedupeStore =
@@ -953,7 +955,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// temp dirs (no .git) would keep native scanners / cache writers busy and
 		// EBUSY follow-up rmSync on Windows (see living-index runGit comment).
 		const prewarmIndexes = existsSync(join(this._cwd, ".git"));
-		if (prewarmIndexes && this.settingsManager.getGrepSettings().engine === "fff") {
+		if (prewarmIndexes && this.settingsManager.getGrepSettings().engine === "fff" && isGitWorkTree(this._cwd)) {
 			prewarmFffIndex(this._cwd);
 		}
 		if (prewarmIndexes) {
@@ -981,18 +983,24 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._verificationProbe = () => this.runConfiguredCheck();
 		setCurrentVerificationProbe(this._verificationProbe);
 
-		// Chrome DevTools controller (endpoint from settings + env). Created
-		// regardless of enabled (cheap; connects lazily); tools only join the
-		// surface when chromeDevtools.enabled. Published for the tools to reach.
+		// Chrome DevTools controller (endpoint from settings + env). Only constructed
+		// when chromeDevtools.enabled — tools join the surface on the same gate.
 		const cdpCfg = this.settingsManager.getChromeDevtoolsSettings();
-		this._chromeDevtools = new ChromeDevtoolsManager({
-			host: cdpCfg.host,
-			port: cdpCfg.debugPort,
-			launchBrowser: cdpCfg.launchBrowser,
-			userDataDir: cdpCfg.userDataDir,
-			binaryPath: cdpCfg.binaryPath,
-		});
-		setCurrentChromeDevtoolsManager(this._chromeDevtools);
+		if (cdpCfg.enabled) {
+			const chromeMod = requireOptional<typeof import("./chrome/chrome-devtools-manager.ts")>(
+				import.meta.url,
+				"./chrome/chrome-devtools-manager.ts",
+			);
+			this._chromeManagerMod = chromeMod;
+			this._chromeDevtools = new chromeMod.ChromeDevtoolsManager({
+				host: cdpCfg.host,
+				port: cdpCfg.debugPort,
+				launchBrowser: cdpCfg.launchBrowser,
+				userDataDir: cdpCfg.userDataDir,
+				binaryPath: cdpCfg.binaryPath,
+			});
+			chromeMod.setCurrentChromeDevtoolsManager(this._chromeDevtools);
+		}
 
 		// Publish a fresh tool discovery index so the `search_tool_bm25` tool
 		// can BM25-search hidden tools. Auto-seeding of hidden entries is gated
@@ -1029,19 +1037,34 @@ export class AgentSession implements CompactionHost, FusionHost {
 			setCurrentEvalKernelManager(this._evalKernelManager);
 		}
 
-		// Publish the LSP manager when enabled. Language servers cold-start on the
-		// first `lsp` call (or via manager.warmup()); the manager owns teardown so
-		// servers don't outlive the session.
+		// Publish the LSP manager when enabled. Warmup is fire-and-forget so boot
+		// stays non-blocking; first `lsp` call still cold-starts any server that
+		// failed or was skipped. The manager owns teardown so servers don't outlive
+		// the session. Writethrough setters live behind the same gate so disabled
+		// sessions never pull the LSP writethrough module.
 		const lspSettings = this.settingsManager.getLspSettings();
 		if (lspSettings.enabled) {
-			this._lspManager = createLspManager(this._cwd);
-			setCurrentLspManager(this._lspManager);
+			const lspManagerMod = requireOptional<typeof import("./lsp/manager.ts")>(import.meta.url, "./lsp/manager.ts");
+			const lspConfigMod = requireOptional<typeof import("./lsp/config.ts")>(import.meta.url, "./lsp/config.ts");
+			const writethroughMod = requireOptional<typeof import("./lsp/writethrough.ts")>(
+				import.meta.url,
+				"./lsp/writethrough.ts",
+			);
+			this._lspManagerMod = lspManagerMod;
+			this._lspWritethroughMod = writethroughMod;
+			this._lspManager = lspManagerMod.createLspManager(this._cwd);
+			lspManagerMod.setCurrentLspManager(this._lspManager);
+			void this._lspManager.warmup().catch(() => {
+				/* errors already logged in warmupLspServers */
+			});
+			const tsWarning = lspConfigMod.typescriptLspMissingWarning(this._cwd);
+			if (tsWarning) this._lspStartupWarnings.push(tsWarning);
+			// Gate post-write LSP diagnostics (writethrough) for this session: errors
+			// from a write/edit are attached to the tool result, IDE-style.
+			writethroughMod.setDiagnosticsOnWrite(lspSettings.diagnosticsOnWrite);
+			writethroughMod.setEnforceDiagnosticsOnWrite(lspSettings.diagnosticsOnWrite);
+			writethroughMod.setFormatOnWrite(lspSettings.formatOnWrite);
 		}
-		// Gate post-write LSP diagnostics (writethrough) for this session: errors
-		// from a write/edit are attached to the tool result, IDE-style.
-		setDiagnosticsOnWrite(lspSettings.enabled && lspSettings.diagnosticsOnWrite);
-		setEnforceDiagnosticsOnWrite(lspSettings.enabled && lspSettings.diagnosticsOnWrite);
-		setFormatOnWrite(lspSettings.enabled && lspSettings.formatOnWrite);
 
 		// Register this session on the inter-agent message bus as the addressable
 		// parent ("Main") so subagents can message it mid-execution. Replies are
@@ -1087,6 +1110,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 		} catch {
 			// A relay render failure must never affect messaging or the run.
 		}
+	}
+
+	/** Startup notices for the interactive UI (e.g. missing TypeScript language server). */
+	getLspStartupWarnings(): readonly string[] {
+		return this._lspStartupWarnings;
 	}
 
 	/**
@@ -1189,6 +1217,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 						engine: this.settingsManager.getGrepSettings().engine === "fff" ? "fff" : "fd",
 					},
 					ast_grep: { engine: this.settingsManager.getAstGrepSettings().engine },
+					chromeDevtools: { enabled: this.settingsManager.getChromeDevtoolsSettings().enabled },
+					lsp: { enabled: this.settingsManager.getLspSettings().enabled },
+					debug: { enabled: this.settingsManager.getDebugSettings().enabled },
 				}) as Record<string, ToolDefinition>;
 			} catch {
 				return;
@@ -1522,6 +1553,37 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._lastAssistantMessage = message;
 	}
 
+	/**
+	 * Solo-equivalent context-economy preflight before Fusion stages.
+	 * Joins background compact, runs hard-threshold compact, then presend overflow
+	 * with the pending user text. Skips `agent.continue()` so Fusion owns the turn.
+	 */
+	async prepareFusionContextEconomy(pendingUserText: string): Promise<void> {
+		await awaitBackgroundCompaction(this.compaction);
+		const lastAssistant = this._findLastAssistantMessage();
+		if (!lastAssistant) return;
+
+		await checkCompaction(this.compaction, lastAssistant, false, false, { skipPresendGuard: true });
+
+		const assistantAfter = this._findLastAssistantMessage() ?? lastAssistant;
+		const pendingMessages: AgentMessage[] = [
+			{
+				role: "user",
+				content: [{ type: "text", text: pendingUserText }],
+				timestamp: Date.now(),
+			},
+		];
+		await checkPresendOverflow(this.compaction, assistantAfter, {
+			systemPrompt: this.agent.state.systemPrompt ?? "",
+			tools: this._wireToolsForEstimate(),
+			pendingMessages,
+		});
+	}
+
+	evaluateFusionBudget(): import("./token-governor.ts").SpawnBudgetDecision {
+		return this._tokenGovernor.evaluateSpawn();
+	}
+
 	disconnectFromAgent(): void {
 		this._disconnectFromAgent();
 	}
@@ -1541,7 +1603,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private static readonly _resolvedUndefined = Promise.resolve(undefined);
 
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = ({ toolCall, args }, signal) => {
+		this.agent.beforeToolCall = async ({ toolCall, args, argsMutation }, signal) => {
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return AgentSession._resolvedUndefined;
@@ -1549,20 +1611,40 @@ export class AgentSession implements CompactionHost, FusionHost {
 
 			// Race against the run signal so a tool_call handler parked on slow IO
 			// can't wedge the turn — Esc/abort always unblocks the loop (settleOrAbort).
-			return settleOrAbort(
-				runner.emitToolCall({
-					type: "tool_call",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					input: args as Record<string, unknown>,
-				}),
-				signal,
-			).catch((err) => {
+			// `args` is Proxy-tracked by agent-loop: in-place rewrites (Object.assign on
+			// event.input) flip argsMutation so the second stableArgsFingerprint runs
+			// only when a handler actually rewrote args.
+			try {
+				const result = await settleOrAbort(
+					runner.emitToolCall({
+						type: "tool_call",
+						toolName: toolCall.name,
+						toolCallId: toolCall.id,
+						input: args as Record<string, unknown>,
+					}),
+					signal,
+				);
+				if (result?.block) return result;
+				// Permissions run early in emitToolCall; grounding/hooks may rewrite
+				// args afterwards. Re-check the deny floor on the final args.
+				if (argsMutation?.mutated && this.permissionChecker) {
+					const decision = this.permissionChecker.check(
+						describeToolAction(toolCall.name, args as Record<string, unknown>),
+					);
+					if (decision.decision === "deny") {
+						return {
+							block: true,
+							reason: decision.reason ?? `Tool "${toolCall.name}" is denied by permission policy.`,
+						};
+					}
+				}
+				return result;
+			} catch (err) {
 				if (err instanceof Error) {
 					throw err;
 				}
 				throw new Error(`Extension failed, blocking execution: ${String(err)}`);
-			});
+			}
 		};
 
 		this.agent.afterToolCall = ({ toolCall, args, result, isError }, signal) => {
@@ -1589,11 +1671,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 					})
 				: AgentSession._resolvedUndefined;
 
-			return extensionPromise.then((hookResult) => {
-				const effectiveError = hookResult?.isError ?? isError;
-				this._applyLiveContextEconomyAfterTool(toolCall, effectiveError);
-				return hookResult;
-			});
+			// Wire-only: live prune no longer mutates agent.state.messages here.
+			// prepareNextTurn + transformContext/_pruneContextForProvider apply
+			// supersede/arg-elision on wire clones; JSONL stays intact.
+			return extensionPromise;
 		};
 	}
 
@@ -1628,6 +1709,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		const flags = [
 			isTruthyEnvFlag(process.env.PIT_NO_THINKING_CAP) ? "1" : "0",
 			isTruthyEnvFlag(process.env.PIT_NO_PROACTIVE_PRUNE) ? "1" : "0",
+			isTruthyEnvFlag(process.env.PIT_NO_LIVE_ARG_ELISION) ? "1" : "0",
 			process.env.PIT_PROACTIVE_PRUNE_FLOOR ?? "",
 		].join(",");
 		return `${messages.length}:${lastRole}:${lastStamp}:${contextWindow}:${this.thinkingLevel}:${flags}`;
@@ -1643,6 +1725,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 	 * prune-only mid-turn wire pressure relief (B9). Proactive thinking-cap
 	 * stays in transformContext; LLM compaction/abort are intentionally not
 	 * hooked here (product policy since v0.17.0).
+	 *
+	 * Wire-only: updates the in-turn loop snapshot via return value; never
+	 * mutates agent.state.messages (JSONL / canonical transcript stay intact).
 	 */
 	private _installPrepareNextTurnHook(): void {
 		this.agent.prepareNextTurn = (turnContext) => {
@@ -1659,11 +1744,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 				let nextMessages = messages;
 				let reclaimed = 0;
 
-				const light = toolResults.some((result) => !result.isError)
-					? // Live prune already ran supersede/arg-elision after each
-						// successful tool; skip the duplicate O(N) plan+estimate here.
-						{ messages: nextMessages, reclaimed: 0 }
-					: applyLightContextEconomyAtTurnEnd(nextMessages, toolResults, contextWindow);
+				// Always run light economy: live prune no longer mutates state after
+				// each tool, so this is the in-turn path for supersede/arg-elision.
+				const light = applyLightContextEconomyAtTurnEnd(nextMessages, toolResults, contextWindow);
 				if (light.reclaimed > 0) {
 					nextMessages = light.messages;
 					reclaimed += light.reclaimed;
@@ -1686,7 +1769,6 @@ export class AgentSession implements CompactionHost, FusionHost {
 				}
 
 				if (reclaimed <= 0) return undefined;
-				this.agent.state.messages = nextMessages;
 				this._invalidateCtxCaches();
 				return {
 					context: {
@@ -2603,10 +2685,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// Tear down Chrome DevTools connections.
 		if (this._chromeDevtools) {
 			this._chromeDevtools.dispose();
-			if (getCurrentChromeDevtoolsManager() === this._chromeDevtools) {
-				setCurrentChromeDevtoolsManager(undefined);
+			const chromeMod = this._chromeManagerMod;
+			if (chromeMod && chromeMod.getCurrentChromeDevtoolsManager() === this._chromeDevtools) {
+				chromeMod.setCurrentChromeDevtoolsManager(undefined);
 			}
 			this._chromeDevtools = undefined;
+			this._chromeManagerMod = undefined;
 		}
 		// Clear tool discovery index registry only if this session owns it.
 		if (this._toolDiscoveryIndex && getCurrentToolDiscoveryIndex() === this._toolDiscoveryIndex) {
@@ -2630,8 +2714,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 		// Tear down LSP servers owned by this session.
 		if (this._lspManager) {
-			if (getCurrentLspManager() === this._lspManager) {
-				setCurrentLspManager(undefined);
+			const lspManagerMod = this._lspManagerMod;
+			if (lspManagerMod && lspManagerMod.getCurrentLspManager() === this._lspManager) {
+				lspManagerMod.setCurrentLspManager(undefined);
 			}
 			try {
 				await this._lspManager.dispose();
@@ -2639,9 +2724,14 @@ export class AgentSession implements CompactionHost, FusionHost {
 				// ignore
 			}
 			this._lspManager = undefined;
+			this._lspManagerMod = undefined;
+			const writethroughMod = this._lspWritethroughMod;
+			if (writethroughMod) {
+				writethroughMod.setDiagnosticsOnWrite(false);
+				writethroughMod.setFormatOnWrite(false);
+				this._lspWritethroughMod = undefined;
+			}
 		}
-		setDiagnosticsOnWrite(false);
-		setFormatOnWrite(false);
 		// Leave the message bus so a stale Main can't receive routed messages.
 		this._unsubMessagingActivity?.();
 		this._unsubMessagingActivity = undefined;
@@ -2676,6 +2766,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._sessionContract = undefined;
 		// Tear down any active debug session so adapters don't outlive the session.
 		if (this.settingsManager.getDebugSettings().enabled) {
+			const { dapSessionManager } = await import("./dap/index.ts");
 			void dapSessionManager.disposeAll().catch(() => {});
 		}
 	}
@@ -3398,41 +3489,47 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// continuation loop and the verification gate.
 		if (this._inGoalContinuation) return;
 
-		// Goal auto-continuation. Guarded so a continuation prompt (or a steer
-		// arriving mid-loop) never spawns a nested loop, and stopped immediately
-		// when the user interrupts (Esc) so the task doesn't restart itself.
-		if (!this._userInterrupted && this._goal.shouldAutoContinue()) {
-			this._inGoalContinuation = true;
-			try {
-				let iterations = 0;
-				const maxIterations = this.settingsManager.getGoalMaxAutoIterations();
-				while (!this._userInterrupted && this._goal.shouldAutoContinue()) {
-					if (iterations++ >= maxIterations) {
-						this.pauseGoal();
-						this._emitGoalCapNote(maxIterations);
-						break;
+		try {
+			// Goal auto-continuation. Guarded so a continuation prompt (or a steer
+			// arriving mid-loop) never spawns a nested loop, and stopped immediately
+			// when the user interrupts (Esc) so the task doesn't restart itself.
+			if (!this._userInterrupted && this._goal.shouldAutoContinue()) {
+				this._inGoalContinuation = true;
+				try {
+					let iterations = 0;
+					const maxIterations = this.settingsManager.getGoalMaxAutoIterations();
+					while (!this._userInterrupted && this._goal.shouldAutoContinue()) {
+						if (iterations++ >= maxIterations) {
+							this.pauseGoal();
+							this._emitGoalCapNote(maxIterations);
+							break;
+						}
+						// Re-arm the per-attempt failure budget so each continuation gets a
+						// fresh allowance instead of sharing 3 failures across the whole goal.
+						this._resetTurnFailureBudget();
+						await this._promptOnce(this._goal.continuationPrompt(), {
+							expandPromptTemplates: false,
+							source: options?.source,
+						});
 					}
-					// Re-arm the per-attempt failure budget so each continuation gets a
-					// fresh allowance instead of sharing 3 failures across the whole goal.
-					this._resetTurnFailureBudget();
-					await this._promptOnce(this._goal.continuationPrompt(), {
-						expandPromptTemplates: false,
-						source: options?.source,
-					});
+				} finally {
+					this._inGoalContinuation = false;
 				}
-			} finally {
-				this._inGoalContinuation = false;
 			}
+
+			// Background-check guard: if the agent backgrounded a test/check, make sure it
+			// has finished and passed before the turn hands back — never report done or
+			// suggest a commit on a test that is still running (or already failed).
+			await this._awaitPendingChecksBeforeHandoff(options);
+
+			// Native verification gate: after a code-modifying turn, run the project
+			// check and re-inject failures so the agent self-corrects before "done".
+			await this._runVerificationGate(options);
+		} finally {
+			// UI settles the working loader / deferred turn-done on this event. Emitted
+			// only from the outer prompt() owner (not re-entrant continuation calls).
+			this.emit({ type: "prompt_end" });
 		}
-
-		// Background-check guard: if the agent backgrounded a test/check, make sure it
-		// has finished and passed before the turn hands back — never report done or
-		// suggest a commit on a test that is still running (or already failed).
-		await this._awaitPendingChecksBeforeHandoff(options);
-
-		// Native verification gate: after a code-modifying turn, run the project
-		// check and re-inject failures so the agent self-corrects before "done".
-		await this._runVerificationGate(options);
 	}
 
 	/**
@@ -3537,27 +3634,6 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 	}
 
-	/**
-	 * Verification gate — the "test what you built, then fix it" loop. After a
-	 * turn that modified files, run the project's check command; on failure,
-	 * re-inject the output as a continuation prompt so the agent fixes it, bounded
-	 * by `maxAttempts`. No-op when disabled, when nothing changed, when the turn
-	 * was aborted, or when no check command can be detected (gate stays inert).
-	 */
-	private _applyLiveContextEconomyAfterTool(toolCall: AgentToolCall, isError: boolean): void {
-		const contextWindow = this.model?.contextWindow ?? 0;
-		const outcome = applyLiveContextEconomyAfterToolSuccess(
-			this.agent.state.messages,
-			toolCall,
-			isError,
-			contextWindow,
-		);
-		if (outcome.reclaimed > 0) {
-			this.agent.state.messages = outcome.messages;
-			this._invalidateCtxCaches();
-		}
-	}
-
 	private _pruneContextForProvider(messages: AgentMessage[]): AgentMessage[] {
 		const contextWindow = this.model?.contextWindow ?? 0;
 		const contextTokens = estimateContextTokens(messages).tokens;
@@ -3565,6 +3641,22 @@ export class AgentSession implements CompactionHost, FusionHost {
 		const runThinkingCap =
 			!isTruthyEnvFlag(process.env.PIT_NO_THINKING_CAP) && wouldApplyOldThinkingCap(messages, protectTurns);
 		const proactivePruneEnabled = !isTruthyEnvFlag(process.env.PIT_NO_PROACTIVE_PRUNE);
+		const runArgElision =
+			!isTruthyEnvFlag(process.env.PIT_NO_LIVE_ARG_ELISION) &&
+			messages.some(
+				(msg) =>
+					msg.role === "assistant" &&
+					Array.isArray(msg.content) &&
+					msg.content.some(
+						(block) =>
+							typeof block === "object" &&
+							block !== null &&
+							"type" in block &&
+							block.type === "toolCall" &&
+							"name" in block &&
+							MUTATING_TOOL_NAMES.has(String(block.name)),
+					),
+			);
 
 		let runToolPrune = false;
 		let runSupersedeOnly = false;
@@ -3583,7 +3675,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			}
 		}
 
-		if (!runThinkingCap && !runToolPrune && !runSupersedeOnly) return messages;
+		if (!runThinkingCap && !runToolPrune && !runSupersedeOnly && !runArgElision) return messages;
 
 		const copy = cloneToolResultMessagesForPrune(messages);
 		let reclaimed = 0;
@@ -3634,6 +3726,24 @@ export class AgentSession implements CompactionHost, FusionHost {
 			}
 		}
 
+		if (runArgElision) {
+			const argReclaimed = elideAllMutatingToolCallArguments(copy);
+			if (argReclaimed > 0) {
+				reclaimed += argReclaimed;
+				recordDiagnostic({
+					category: "prune.live",
+					level: "info",
+					source: "agent-session.pruneContextForProvider",
+					context: {
+						bytes: argReclaimed,
+						reclaimedTokens: argReclaimed,
+						mechanism: "arg_elision",
+						note: `wire arg-elision reclaimed=${argReclaimed}`,
+					},
+				});
+			}
+		}
+
 		return reclaimed > 0 ? copy : messages;
 	}
 
@@ -3652,6 +3762,24 @@ export class AgentSession implements CompactionHost, FusionHost {
 	 */
 	_emitSubagentProgress(handle: string, info: { turn: number; lastTool?: string }): void {
 		this.emit({ type: "subagent_progress", handle, turn: info.turn, lastTool: info.lastTool });
+	}
+
+	/**
+	 * Emit a terminal `subagent_complete` for a blocking or async subagent so the
+	 * TUI can show turns/tokens. @internal Wired from agent-session-services.
+	 */
+	_emitSubagentComplete(
+		handle: string,
+		status: "done" | "error",
+		meta?: { turns?: number; totalTokens?: number },
+	): void {
+		this.emit({
+			type: "subagent_complete",
+			handle,
+			status,
+			turns: meta?.turns,
+			totalTokens: meta?.totalTokens,
+		});
 	}
 
 	/**
@@ -3682,12 +3810,17 @@ export class AgentSession implements CompactionHost, FusionHost {
 	 * handle delivered and poll/join won't repeat it); false otherwise (the
 	 * default — result stays collectible via join/poll).
 	 */
-	_deliverAsyncResult(handle: string, text: string, status: "done" | "error"): boolean {
+	_deliverAsyncResult(
+		handle: string,
+		text: string,
+		status: "done" | "error",
+		meta?: { turns?: number; totalTokens?: number },
+	): boolean {
 		// Session torn down: an orphaned subagent settled late. Drop it without mutating
 		// dead state. Return true so the coordinator marks the handle delivered (poll/join
 		// won't repeat) — there is no live session left to collect it from anyway.
 		if (this._disposed) return true;
-		this.emit({ type: "subagent_complete", handle, status });
+		this._emitSubagentComplete(handle, status, meta);
 		// Default: no auto re-injection (Claude Code parity). Collect via join/poll.
 		// PIT_ASYNC_REINJECT opts back into the legacy auto-delivery below.
 		if (!isTruthyEnvFlag(process.env.PIT_ASYNC_REINJECT)) return false;
@@ -3733,6 +3866,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 		return detectSyntaxFallbackCommand(this._cwd, Array.from(this._turnTouchedFilePaths));
 	}
 
+	/**
+	 * Verification gate — the "test what you built, then fix it" loop. After a
+	 * turn that modified files, run the project's check command; on failure,
+	 * re-inject the output as a continuation prompt so the agent fixes it, bounded
+	 * by `maxAttempts`. No-op when disabled, when nothing changed, when the turn
+	 * was aborted, or when no check command can be detected (gate stays inert).
+	 */
 	private async _runVerificationGate(options?: PromptOptions): Promise<void> {
 		if (this._inVerification || !this._turnTouchedFiles) return;
 		if (this._userInterrupted || this._lastTurnAborted()) return;
@@ -3926,7 +4066,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			});
 			const result = await runFunctionalWebCheck({
 				cwd: this._cwd,
-				mgr: getCurrentChromeDevtoolsManager(),
+				mgr: this._chromeDevtools,
 				lastVisualFile: this._lastVisualFile,
 				touchedVisual: this._turnTouchedVisual,
 				backgroundJobs: listBashBackgroundJobs(),
@@ -4101,9 +4241,16 @@ export class AgentSession implements CompactionHost, FusionHost {
 				}
 			}
 
+			// Merge out-of-band attachments before Fusion so clipboard images ride along.
+			let currentImages = options?.images;
+			if (this._attachedImages.length > 0) {
+				currentImages = currentImages ? [...currentImages, ...this._attachedImages] : [...this._attachedImages];
+				this._attachedImages = [];
+			}
+
 			// Fusion·Plan: route the turn to the panel+synthesizer unless it can't run (then fall through to solo).
 			if (this._orchestration === "fusion" && !text.startsWith("/")) {
-				const handled = await runFusionSessionTurn(this, text);
+				const handled = await runFusionSessionTurn(this, text, currentImages);
 				if (handled) {
 					preflightResult?.(true);
 					return;
@@ -4112,13 +4259,6 @@ export class AgentSession implements CompactionHost, FusionHost {
 
 			// Emit input event for extension interception (before skill/template expansion)
 			let currentText = text;
-			let currentImages = options?.images;
-			// Merge any out-of-band attachments (clipboard paste etc.) into this turn,
-			// then clear the buffer so they ride along exactly once.
-			if (this._attachedImages.length > 0) {
-				currentImages = currentImages ? [...currentImages, ...this._attachedImages] : [...this._attachedImages];
-				this._attachedImages = [];
-			}
 			if (this._extensionRunner.hasHandlers("input")) {
 				const inputResult = await this._extensionRunner.emitInput(
 					currentText,
@@ -4276,7 +4416,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 			if (todoSection) {
 				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${todoSection}`;
 			}
-			const planSection = this._plan.systemPromptSection();
+			const planSection = this._plan.systemPromptSection({
+				permissionMode: this.permissionChecker?.mode,
+			});
 			if (planSection) {
 				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${planSection}`;
 			}
@@ -4645,6 +4787,23 @@ export class AgentSession implements CompactionHost, FusionHost {
 	}
 
 	/**
+	 * True when post-agent work is in flight OR about to start after `agent_end`.
+	 * The interactive UI uses this so it does not flash "done" and retire the
+	 * working loader before verification / pending-checks / goal continuation run.
+	 */
+	get hasPendingPostTurnWork(): boolean {
+		if (this._inVerification || this._inPendingChecksDrain || this._inGoalContinuation) return true;
+		if (this._userInterrupted) return false;
+		// Predictive: `agent_end` fires before the flags above flip.
+		if (this._turnTouchedFiles) return true;
+		const pending = this.settingsManager.getPendingChecksSettings();
+		if (pending.enabled && pendingVerificationJobs(listBashBackgroundJobs()).length > 0) {
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * True while a Fusion turn (panel fan-out + judge + writer) is in flight. Folded into
 	 * isBusy so the Esc handler routes a keypress to interrupt() (which calls abortFusion())
 	 * instead of falling through to editor/double-Esc behavior — the Fusion turn returns
@@ -4671,6 +4830,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this.abortCompaction();
 		this.abortBranchSummary();
 		this.abortFusion();
+		// ESC cancels detached op:"spawn" subagents too (session_shutdown already does;
+		// turn-end must NOT — they are meant to outlive a normal turn).
+		this._abortDetachedSubagents?.();
 		this.agent.abort();
 	}
 
@@ -5254,6 +5416,17 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 		this._toolPromptSnippets = nextSnippets;
 		this._toolPromptGuidelines = nextGuidelines;
+		// Keep plan-mode sideEffect lookup in sync with the live tool registry
+		// (extension tools default to opaque via registerTool).
+		if (this.permissionChecker) {
+			const sideEffects: Array<[string, import("./permissions/side-effect.ts").ToolSideEffect]> = [];
+			for (const { definition } of definitionRegistry.values()) {
+				if (definition.sideEffect !== undefined) {
+					sideEffects.push([definition.name, definition.sideEffect]);
+				}
+			}
+			this.permissionChecker.setToolSideEffects(sideEffects);
+		}
 		const runner = this._extensionRunner;
 		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
 		const wrappedBuiltInTools = wrapRegisteredTools(builtinEntries, runner);
@@ -5387,6 +5560,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 					search_skills: {
 						getSkills: () => this._resourceLoader.getSkills().skills,
 					},
+					chromeDevtools: { enabled: this.settingsManager.getChromeDevtoolsSettings().enabled },
+					lsp: { enabled: this.settingsManager.getLspSettings().enabled },
+					debug: { enabled: this.settingsManager.getDebugSettings().enabled },
 				});
 
 		this._baseToolDefinitions = new Map(
@@ -5431,6 +5607,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 		const previousFlagValues = this._extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
 		await this.settingsManager.reload();
+		// LSP config may have changed on disk alongside settings — drop the mtime cache.
+		this._lspManagerMod?.invalidateConfig(this._cwd);
 		resetApiProviders();
 		await this._resourceLoader.reload();
 		this._buildRuntime({

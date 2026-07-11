@@ -88,8 +88,9 @@ export const BUILTIN_SENSITIVE_PATHS: readonly PathRule[] = [
 ];
 
 export const BUILTIN_DANGEROUS_COMMANDS: readonly CommandRule[] = [
-	{ pattern: "\\brm\\s+(?:-[a-zA-Z]*r[a-zA-Z]*\\s+)+/(?:\\s|$)", reason: "Recursive rm of /" },
-	{ pattern: "\\brm\\s+(?:-[a-zA-Z]*r[a-zA-Z]*\\s+)+~(?:/|\\s|$)", reason: "Recursive rm of $HOME" },
+	// Bounded quantifiers only — validateSafeRegex rejects consecutive `*`/`+`.
+	{ pattern: "\\brm\\s+-[a-zA-Z]{0,8}r[a-zA-Z]{0,8}\\s+/(?:\\s|$)", reason: "Recursive rm of /" },
+	{ pattern: "\\brm\\s+-[a-zA-Z]{0,8}r[a-zA-Z]{0,8}\\s+~(?:/|\\s|$)", reason: "Recursive rm of $HOME" },
 	{ pattern: ":\\(\\)\\s*\\{\\s*:\\s*\\|\\s*:&\\s*\\};:", reason: "Fork bomb" },
 	{ pattern: "\\b(?:mkfs|dd\\s+if=.*of=/dev/)", reason: "Disk-destroying command" },
 	{ pattern: "\\bchmod\\s+-R\\s+777\\s+/", reason: "Recursive world-writable on root" },

@@ -7,6 +7,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { minimatch } from "minimatch";
 import { parse as parseYaml } from "yaml";
 import DEFAULTS from "./defaults.ts";
@@ -169,11 +170,18 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
 	return false;
 }
 
+const PYTHON_MARKERS = ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"];
+
+/** Project-local bin dirs to probe (Unix + Windows Python Scripts). */
 const LOCAL_BIN_PATHS: Array<{ markers: string[]; binDir: string }> = [
 	{ markers: ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"], binDir: "node_modules/.bin" },
-	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: ".venv/bin" },
-	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: "venv/bin" },
-	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: ".env/bin" },
+	{ markers: PYTHON_MARKERS, binDir: ".venv/bin" },
+	{ markers: PYTHON_MARKERS, binDir: "venv/bin" },
+	{ markers: PYTHON_MARKERS, binDir: ".env/bin" },
+	// Windows venvs put executables under Scripts/, not bin/.
+	{ markers: PYTHON_MARKERS, binDir: ".venv/Scripts" },
+	{ markers: PYTHON_MARKERS, binDir: "venv/Scripts" },
+	{ markers: PYTHON_MARKERS, binDir: ".env/Scripts" },
 	{ markers: ["Gemfile", "Gemfile.lock"], binDir: "vendor/bundle/bin" },
 	{ markers: ["Gemfile", "Gemfile.lock"], binDir: "bin" },
 	{ markers: ["go.mod", "go.sum"], binDir: "bin" },
@@ -195,8 +203,28 @@ function resolveLocalCommand(basePath: string): string | null {
 	return null;
 }
 
-/** Resolve a command to an executable path: project-local bins first, then $PATH. */
-export function resolveCommand(command: string, cwd: string): string | null {
+/**
+ * Absolute path to `@pit/coding-agent`'s package root (src/ or dist/ → ../..).
+ * Used so optionalDeps like typescript-language-server resolve even when the
+ * user's project cwd does not install them.
+ */
+export function getCodingAgentPackageRoot(): string {
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	// src/core/lsp or dist/core/lsp → package root
+	return path.resolve(here, "../../..");
+}
+
+/** Resolve a command under a specific package's node_modules/.bin. */
+export function resolvePackageBinCommand(command: string, packageRoot: string): string | null {
+	return resolveLocalCommand(path.join(packageRoot, "node_modules", ".bin", command));
+}
+
+/** Resolve a command to an executable path: project-local bins, Pit package bins, then $PATH. */
+export function resolveCommand(
+	command: string,
+	cwd: string,
+	packageRoots: string[] = [getCodingAgentPackageRoot(), path.resolve(getCodingAgentPackageRoot(), "../..")],
+): string | null {
 	for (const { markers, binDir } of LOCAL_BIN_PATHS) {
 		if (hasRootMarkers(cwd, markers)) {
 			const localPath = path.join(cwd, binDir, command);
@@ -204,7 +232,42 @@ export function resolveCommand(command: string, cwd: string): string | null {
 			if (resolvedLocalPath) return resolvedLocalPath;
 		}
 	}
+	for (const root of packageRoots) {
+		const fromPackage = resolvePackageBinCommand(command, root);
+		if (fromPackage) return fromPackage;
+	}
 	return which(command);
+}
+
+const TS_PROJECT_MARKERS = ["package.json", "tsconfig.json", "jsconfig.json"];
+const TS_FILE_TYPES = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
+
+/** True when cwd looks like a JS/TS project (package.json or ts/jsconfig). */
+export function hasTypescriptProjectMarkers(cwd: string): boolean {
+	return hasRootMarkers(cwd, TS_PROJECT_MARKERS);
+}
+
+/**
+ * True when the project has TS markers but no non-linter LSP server that
+ * handles TypeScript/JavaScript files was auto-detected (e.g. only biome).
+ */
+export function missingTypescriptLsp(config: LspConfig, cwd: string): boolean {
+	if (!hasTypescriptProjectMarkers(cwd)) return false;
+	for (const server of Object.values(config.servers)) {
+		if (server.isLinter) continue;
+		if (server.fileTypes.some((ft) => TS_FILE_TYPES.has(ft.toLowerCase()))) return false;
+	}
+	return true;
+}
+
+/** One-line startup warning when a TS project has no TypeScript language server. */
+export function typescriptLspMissingWarning(cwd: string, config?: LspConfig): string | undefined {
+	const cfg = config ?? loadConfig(cwd);
+	if (!missingTypescriptLsp(cfg, cwd)) return undefined;
+	return (
+		"No TypeScript language server detected (only linters like biome/eslint, or none). " +
+		"Install typescript-language-server (bundled as an optional dependency of Pit) or add it to PATH / lsp.json."
+	);
 }
 
 // =============================================================================
@@ -213,7 +276,7 @@ export function resolveCommand(command: string, cwd: string): string | null {
 
 const CONFIG_FILENAMES = ["lsp.json", ".lsp.json", "lsp.yaml", ".lsp.yaml", "lsp.yml", ".lsp.yml"];
 
-function getConfigSources(cwd: string): string[] {
+export function getConfigSources(cwd: string): string[] {
 	const sources: string[] = [];
 	// 1. Project root (highest priority)
 	for (const filename of CONFIG_FILENAMES) sources.push(path.join(cwd, filename));
@@ -229,6 +292,22 @@ function getConfigSources(cwd: string): string[] {
 	// 4. User home root (lowest priority)
 	for (const filename of CONFIG_FILENAMES) sources.push(path.join(home, filename));
 	return sources;
+}
+
+/**
+ * Snapshot mtimes for every LSP config source path.
+ * Missing files are recorded as `null` so create/delete also invalidates the cache.
+ */
+export function readLspConfigSourceMtimes(cwd: string): Map<string, number | null> {
+	const mtimes = new Map<string, number | null>();
+	for (const source of getConfigSources(cwd)) {
+		try {
+			mtimes.set(source, fs.statSync(source).mtimeMs);
+		} catch {
+			mtimes.set(source, null);
+		}
+	}
+	return mtimes;
 }
 
 /**

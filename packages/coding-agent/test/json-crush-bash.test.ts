@@ -95,4 +95,23 @@ describe("executeBashWithOperations output budget (user `!` command)", () => {
 		// Collapsed: the 50 raw repetitions are gone (one marker line remains).
 		expect(res.output.split("\n").length).toBeLessThan(50);
 	});
+
+	it("survives a flood of small chunks with a bounded rolling buffer", async () => {
+		// Many tiny onData pushes force the rolling head to advance and compact via splice.
+		const ops: BashOperations = {
+			exec: async (_command, _cwd, { onData }) => {
+				for (let i = 0; i < 8_000; i++) {
+					onData(Buffer.from(`chunk-${i} padding\n`, "utf-8"));
+				}
+				return { exitCode: 0 };
+			},
+		};
+		const started = performance.now();
+		const res = await executeBashWithOperations("flood", process.cwd(), ops);
+		expect(performance.now() - started).toBeLessThan(5_000);
+		expect(res.truncated).toBe(true);
+		// Tail survives (possibly collapsed into a similarity marker); head is gone.
+		expect(res.output).toMatch(/chunk-7\d{3}/);
+		expect(res.output).not.toContain("chunk-0\n");
+	});
 });

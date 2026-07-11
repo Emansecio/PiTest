@@ -25,16 +25,17 @@
  *
  * Session state: a fire-once set so an insistent model re-issuing the identical
  * blocked call runs it (the guard advises, never wedges). The whole handler is
- * wrapped in try/catch because `emitToolCall` has no per-handler isolation and a
- * throw out of beforeToolCall would hard-block the call — fail-open is
+ * wrapped in try/catch as defense-in-depth (emitToolCall already isolates
+ * per-handler throws) so a guard bug never hard-blocks — fail-open is
  * load-bearing. Opt out with PIT_NO_IMPORT_GROUNDING.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { groundImports, IMPORT_GROUNDING_DEFAULTS, isImportGroundingDisabled } from "../import-grounding.ts";
+import { createMtimeParseCache } from "../mtime-cache.ts";
 import { findTsconfigPathsForFile } from "../project-config-context.ts";
 import { coerceJsonArrayField, extractEdits, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
 import { countSubstring } from "../tools/edit-diff.ts";
@@ -46,20 +47,28 @@ const CONTENT_KEYS = ["content", "text", "body", "data"] as const;
 /** Manifest fields whose KEYS name packages the project may legitimately import. */
 const DEP_FIELDS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
 
+const readCachedFile = createMtimeParseCache((raw) => raw);
+
 function readFileSafe(absPath: string): string | undefined {
 	try {
-		return readFileSync(absPath, "utf-8");
+		return readCachedFile(absPath);
 	} catch {
 		return undefined;
 	}
 }
 
-function readJsonSafe(absPath: string): Record<string, unknown> | undefined {
-	const raw = readFileSafe(absPath);
-	if (raw === undefined) return undefined;
+const readCachedJson = createMtimeParseCache((raw): Record<string, unknown> | undefined => {
 	try {
 		const parsed = JSON.parse(raw);
 		return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
+	} catch {
+		return undefined;
+	}
+});
+
+function readJsonSafe(absPath: string): Record<string, unknown> | undefined {
+	try {
+		return readCachedJson(absPath);
 	} catch {
 		return undefined;
 	}
@@ -332,8 +341,7 @@ export function createImportGroundingExtension(options: { cwd: string }) {
 				}
 				return undefined;
 			} catch {
-				// emitToolCall has no per-handler try/catch; a throw out of beforeToolCall
-				// would hard-block the call. Fail-open is the invariant -> swallow.
+				// Defense-in-depth: emitToolCall already isolates per-handler throws.
 				return undefined;
 			}
 		});

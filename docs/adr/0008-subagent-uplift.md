@@ -12,7 +12,7 @@ built-in curados, sem continuação conversacional de um subagente são, sem obs
 ao vivo, sem cap de concorrência e sem accounting de tokens por subagente.
 
 ## Decision
-Implementados 5 dos 6 gaps (o #6 ficou de fora — ver abaixo):
+Implementados os 6 gaps:
 
 |-|-|
 | Gap | Decisão |
@@ -22,15 +22,12 @@ Implementados 5 dos 6 gaps (o #6 ficou de fora — ver abaixo):
 | Cap de concorrência | Semáforo module-scoped `MAX_CONCURRENCY` (`PIT_SUBAGENT_MAX_CONCURRENCY`, default 4) envolvendo spawn/run; tempo de fila NÃO conta no timeout. |
 | Token accounting | `SubagentRecord.usage`/`SpawnSubagentResult.usage` acumulados de `message.usage` por turno; surface em `op:list` e no `subagent_complete` (turns/tokens). |
 | UI | Cautelosa: só enriquece status lines existentes (start/progress muted, complete com `· N turns · N tok`). Sem overlay/componente novo. |
+| #6 Retry de transporte | **Implementado:** uma retentativa em `spawnSubagent` quando a falha é de transporte (5xx/overloaded/network) **antes** de progresso útil; não retrya timeout, turn-cap, nem ESC/abort. |
 
 ## Considered Options (rejeitadas / adiadas)
-- **#6 Retry automático em falha — ADIADO.** Re-executar um subagente perde os turnos já
-  feitos (estado in-memory), e abort por turn-cap/timeout não deve ser retryado. O `op:resume`
-  manual já cobre queda/ESC. Backlog: retry só de erro de transporte (5xx) antes do 1º turno.
+- **Retry após o 1º turno / de turn-cap/timeout** — rejeitado; `op:resume` manual cobre queda/ESC após progresso.
 - **Streaming de cada tool-call do subagente** — rejeitado por exagero/custo; o progresso
   por turno já dá o sinal "vivo" sem inundar a TUI.
-- **Mudar a assinatura de `onAsyncComplete` para carregar turns/tokens no complete async** —
-  evitado (atravessa 3 camadas); os campos são opcionais e a UI degrada graciosamente.
 
 ## Consequences
 - **Positivo:** paridade de produto com o CC nos eixos visíveis; zero-config via built-ins;

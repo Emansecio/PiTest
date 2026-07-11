@@ -2,7 +2,12 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { findMostRecentSession, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.js";
+import {
+	findMostRecentSession,
+	loadEntriesFromFile,
+	resolveSessionSearchText,
+	SessionManager,
+} from "../../src/core/session-manager.js";
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
@@ -217,5 +222,39 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		const sm2 = SessionManager.open(corruptedFile, tempDir);
 		expect(sm2.getSessionId()).toBe(sessionId);
 		expect(sm2.getHeader()?.type).toBe("session");
+	});
+});
+
+describe("SessionManager.list always bounded", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `session-list-bounded-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("defers allMessagesText to resolveSessionSearchText for normal-sized files", async () => {
+		const file = join(tempDir, "2026-01-01T00-00-00-000Z_normal.jsonl");
+		writeFileSync(
+			file,
+			'{"type":"session","id":"n1","version":3,"timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
+				'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"find me later","timestamp":1}}\n' +
+				'{"type":"message","id":"2","parentId":"1","timestamp":"2025-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"assistant body"}],"timestamp":2}}\n',
+		);
+
+		const sessions = await SessionManager.list("/tmp", tempDir);
+		expect(sessions).toHaveLength(1);
+		expect(sessions[0].firstMessage).toBe("find me later");
+		expect(sessions[0].allMessagesText).toBe("");
+		expect(sessions[0].messageCount).toBe(0);
+
+		const search = resolveSessionSearchText(sessions[0]);
+		expect(search).toContain("find me later");
+		expect(search).toContain("assistant body");
+		expect(sessions[0].allMessagesText).toContain("find me later");
 	});
 });

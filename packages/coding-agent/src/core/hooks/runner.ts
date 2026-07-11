@@ -5,7 +5,12 @@
 
 import { spawn } from "node:child_process";
 import { killProcessTree } from "../../utils/shell.ts";
-import { createRegexTestDeadline, isRegexBudgetExpired, testRegexWithinBudget } from "../regex-budget.ts";
+import {
+	createRegexTestDeadline,
+	isRegexBudgetExpired,
+	testRegexWithinBudget,
+	validateSafeRegex,
+} from "../regex-budget.ts";
 import type { HookCommand, HookExecutionResult, HookPayload, HookResult } from "./types.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -18,6 +23,7 @@ function matchTool(matcher: string | undefined, toolName: string, deadlineMs: nu
 	let re = hookRegExpCache.get(matcher);
 	if (re === undefined) {
 		try {
+			validateSafeRegex(matcher);
 			re = new RegExp(`^(?:${matcher})$`, "i");
 		} catch {
 			re = null;

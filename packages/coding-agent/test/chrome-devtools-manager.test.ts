@@ -518,45 +518,74 @@ describe("ChromeDevtoolsManager readNetwork filters", () => {
 });
 
 describe("ChromeDevtoolsManager.ensureBrowser", () => {
-	it("reconnects without launching when Chrome is already up", async () => {
+	it("reconnects to our profile without launching when DevToolsActivePort matches", async () => {
 		const launch = vi.fn();
 		const mgr = new ChromeDevtoolsManager({
 			host: "h",
 			port: 9222,
 			launchBrowser: true,
-			userDataDir: "/d",
+			userDataDir: "/profile",
 			list: async () => [],
 			launch,
 			findBinary: () => "/bin/chrome",
-			waitReady: async () => true,
+			readActivePort: () => ({ port: 9333, browserPath: "/devtools/browser/owned" }),
+			isOwned: async () => true,
+			waitOwned: async () => undefined,
 		});
 		const res = await mgr.ensureBrowser();
 		expect(res.launched).toBe(false);
 		expect(launch).not.toHaveBeenCalled();
+		expect(mgr.endpoint()).toBe("h:9333");
 	});
 
-	it("launches Chrome when the port is unreachable", async () => {
+	it("does not attach to a foreign Chrome that merely answers on debugPort", async () => {
 		const launch = vi.fn();
-		let up = false;
+		let ownedLive = false;
 		const mgr = new ChromeDevtoolsManager({
 			host: "h",
 			port: 9222,
 			launchBrowser: true,
 			userDataDir: "/profile",
 			list: async () => {
-				if (!up) throw new Error("unreachable");
-				return [];
+				// Foreign Chrome on 9222 would make a naive reachable() succeed.
+				return [{ id: "foreign", type: "page", title: "x", url: "https://example.com" }];
 			},
 			launch: (o) => {
-				up = true;
 				launch(o);
+				ownedLive = true;
 			},
 			findBinary: () => "/bin/chrome",
-			waitReady: async () => true,
+			readActivePort: () => undefined,
+			isOwned: async () => false,
+			waitOwned: async () => (ownedLive ? { port: 9444, browserPath: "/devtools/browser/new" } : undefined),
 		});
 		const res = await mgr.ensureBrowser();
 		expect(res.launched).toBe(true);
-		expect(launch).toHaveBeenCalledWith({ binary: "/bin/chrome", port: 9222, userDataDir: "/profile" });
+		expect(launch).toHaveBeenCalledWith({ binary: "/bin/chrome", port: 0, userDataDir: "/profile" });
+		expect(mgr.endpoint()).toBe("h:9444");
+		expect(mgr.wasLaunchedHere()).toBe(true);
+	});
+
+	it("launches with ephemeral port 0 when our profile is not live", async () => {
+		const launch = vi.fn();
+		const mgr = new ChromeDevtoolsManager({
+			host: "h",
+			port: 9222,
+			launchBrowser: true,
+			userDataDir: "/profile",
+			list: async () => {
+				throw new Error("unreachable");
+			},
+			launch,
+			findBinary: () => "/bin/chrome",
+			readActivePort: () => undefined,
+			isOwned: async () => false,
+			waitOwned: async () => ({ port: 9555, browserPath: "/devtools/browser/x" }),
+		});
+		const res = await mgr.ensureBrowser();
+		expect(res.launched).toBe(true);
+		expect(launch).toHaveBeenCalledWith({ binary: "/bin/chrome", port: 0, userDataDir: "/profile" });
+		expect(mgr.endpoint()).toBe("h:9555");
 		expect(mgr.wasLaunchedHere()).toBe(true);
 	});
 
@@ -570,11 +599,31 @@ describe("ChromeDevtoolsManager.ensureBrowser", () => {
 				throw new Error("unreachable");
 			},
 			findBinary: () => undefined,
+			readActivePort: () => undefined,
+			isOwned: async () => false,
 		});
 		await expect(mgr.ensureBrowser()).rejects.toThrow(/Chrome was not found/);
 	});
 
-	it("does not launch when launchBrowser is off (surfaces the unreachable error)", async () => {
+	it("attach-only mode (launchBrowser off) uses configured host:port", async () => {
+		const launch = vi.fn();
+		const list = vi.fn(async () => [] as Array<{ id: string; type: string; title: string; url: string }>);
+		const mgr = new ChromeDevtoolsManager({
+			host: "h",
+			port: 9222,
+			launchBrowser: false,
+			list,
+			launch,
+			findBinary: () => "/bin/chrome",
+		});
+		const res = await mgr.ensureBrowser();
+		expect(res.launched).toBe(false);
+		expect(list).toHaveBeenCalled();
+		expect(launch).not.toHaveBeenCalled();
+		expect(mgr.endpoint()).toBe("h:9222");
+	});
+
+	it("attach-only mode surfaces the unreachable error", async () => {
 		const launch = vi.fn();
 		const mgr = new ChromeDevtoolsManager({
 			host: "h",

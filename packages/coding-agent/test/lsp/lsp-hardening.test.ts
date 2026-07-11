@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { LruMap } from "../../src/core/lru-map.ts";
 import { routeMessage, shutdownAll } from "../../src/core/lsp/client.ts";
 import { applyWorkspaceEdit } from "../../src/core/lsp/edits.ts";
 import { createLspToolDefinition } from "../../src/core/lsp/tool.ts";
@@ -86,7 +87,7 @@ function makeApplyEditClient(cwd: string, writes: WrittenRpc[]): LspClient {
 		requestId: 0,
 		diagnostics: new Map(),
 		diagnosticsVersion: 0,
-		openFiles: new Map(),
+		openFiles: new LruMap(64),
 		pendingRequests: new Map(),
 		messageBuffer: Buffer.alloc(0),
 		pendingChunks: [],

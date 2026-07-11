@@ -432,6 +432,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					isStreaming: session.isStreaming,
 					isCompacting: session.isCompacting,
 					steeringMode: session.steeringMode,
+					queueMode: session.steeringMode,
 					followUpMode: session.followUpMode,
 					sessionFile: session.sessionFile,
 					sessionId: session.sessionId,
@@ -496,6 +497,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "set_steering_mode": {
 				session.setSteeringMode(command.mode);
 				return success(id, "set_steering_mode");
+			}
+
+			case "set_queue_mode": {
+				session.setSteeringMode(command.mode);
+				return success(id, "set_queue_mode");
 			}
 
 			case "set_follow_up_mode": {

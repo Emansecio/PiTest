@@ -11,7 +11,7 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.js"
 import { ensureTool } from "../../utils/tools-manager.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { prepareWithPathAliases } from "./argument-prep.js";
-import { capAppend, fffFindByGlob } from "./fff-search.js";
+import { capAppend, fffFindByGlob, isGitWorkTree } from "./fff-search.js";
 import { resolveToCwd } from "./path-utils.js";
 import { getTextOutput, invalidArgText, nonEmptyDetails, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -96,7 +96,8 @@ const defaultFindOperations: FindOperations = {
 export interface FindToolOptions {
 	/** Custom operations for find. Default: local filesystem plus fd */
 	operations?: FindOperations;
-	/** Search backend. `"fff"` uses the warm in-memory index with fd fallback. */
+	/** Search backend. `"fff"` uses the warm in-memory index with fd fallback
+	 * (git work tree required — outside git, falls through to fd). */
 	engine?: "fd" | "fff";
 }
 
@@ -191,6 +192,9 @@ async function tryFindViaFff(
 	pattern: string,
 	effectiveLimit: number,
 ): Promise<AgentToolResult<FindToolDetails | undefined> | null> {
+	// Outside a git work tree fff drops dotfiles and its watcher goes stale —
+	// fall through to fd (which matches --hidden + live tree semantics).
+	if (!isGitWorkTree(cwd)) return null;
 	const relToCwd = path.relative(cwd, searchPath);
 	const withinCwd = relToCwd === "" || (!relToCwd.startsWith("..") && !path.isAbsolute(relToCwd));
 	if (!withinCwd) return null;

@@ -5,8 +5,9 @@
  * latency on the first `lsp` call in interactive sessions.
  */
 
+import { recordDiagnostic } from "@pit/ai";
 import { getOrCreateClient, setIdleTimeout, shutdownClientsForCwd, WARMUP_TIMEOUT_MS } from "./client.ts";
-import { type LspConfig, loadConfig } from "./config.ts";
+import { type LspConfig, loadConfig, readLspConfigSourceMtimes } from "./config.ts";
 import { log } from "./internal.ts";
 import type { ServerConfig } from "./types.ts";
 
@@ -14,20 +15,35 @@ import type { ServerConfig } from "./types.ts";
 // Config Cache
 // =============================================================================
 
-const configCache = new Map<string, LspConfig>();
+interface CachedLspConfig {
+	config: LspConfig;
+	mtimes: Map<string, number | null>;
+}
 
-/** Load + cache LSP config for a cwd, applying its idle-timeout setting. */
-export function getConfig(cwd: string): LspConfig {
-	let config = configCache.get(cwd);
-	if (!config) {
-		config = loadConfig(cwd);
-		setIdleTimeout(config.idleTimeoutMs);
-		configCache.set(cwd, config);
+const configCache = new Map<string, CachedLspConfig>();
+
+function mtimesEqual(a: Map<string, number | null>, b: Map<string, number | null>): boolean {
+	if (a.size !== b.size) return false;
+	for (const [key, value] of b) {
+		if (a.get(key) !== value) return false;
 	}
+	return true;
+}
+
+/** Load + cache LSP config for a cwd, applying its idle-timeout setting. Reloads when any config source mtime changes. */
+export function getConfig(cwd: string): LspConfig {
+	const currentMtimes = readLspConfigSourceMtimes(cwd);
+	const cached = configCache.get(cwd);
+	if (cached && mtimesEqual(cached.mtimes, currentMtimes)) {
+		return cached.config;
+	}
+	const config = loadConfig(cwd);
+	setIdleTimeout(config.idleTimeoutMs);
+	configCache.set(cwd, { config, mtimes: currentMtimes });
 	return config;
 }
 
-/** Drop a cached config (e.g. when config files change). */
+/** Drop a cached config (e.g. when config files change or session settings reload). */
 export function invalidateConfig(cwd: string): void {
 	configCache.delete(cwd);
 }
@@ -133,7 +149,28 @@ export function createLspManager(cwd: string): LspManager {
 
 let currentManager: LspManager | undefined;
 
+/**
+ * Publish the session LSP manager. Process-global singleton (same pattern as
+ * chrome / eval-kernel). Overwriting a live manager without clearing first is a
+ * hazard — concurrent sessions can steal each other's clients — so we record a
+ * diagnostic when that happens. Dispose paths must only clear when `===`.
+ */
 export function setCurrentLspManager(manager: LspManager | undefined): void {
+	if (manager !== undefined && currentManager !== undefined && currentManager !== manager) {
+		recordDiagnostic({
+			category: "lsp.manager-overwrite",
+			level: "warn",
+			source: "lsp.manager-overwrite",
+			context: {
+				note: `Replacing live LspManager (cwd=${currentManager.cwd}) with another (cwd=${manager.cwd})`,
+				path: manager.cwd,
+			},
+		});
+		log.warn("setCurrentLspManager overwrote a live manager", {
+			previousCwd: currentManager.cwd,
+			nextCwd: manager.cwd,
+		});
+	}
 	currentManager = manager;
 }
 

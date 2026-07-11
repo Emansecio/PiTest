@@ -111,3 +111,69 @@ describe("lazy provider module loading", () => {
 		expect(result.loadedSpecifiers).toEqual([]);
 	});
 });
+
+describe("lazy models.generated loading", () => {
+	it("does not load models.generated when importing the root barrel", () => {
+		const script = `
+			import { registerHooks } from "node:module";
+			const loaded = [];
+			registerHooks({
+				resolve(specifier, context, nextResolve) {
+					// Match models.generated but not image-models.generated
+					if (/(^|[\\\\/])models\\.generated\\./.test(specifier) || specifier === "./models.generated.ts" || specifier === "./models.generated.js") {
+						loaded.push(specifier);
+					}
+					return nextResolve(specifier, context);
+				},
+			});
+			await import(${JSON.stringify(aiEntryUrl)});
+			console.log(JSON.stringify({ loaded }));
+		`;
+		const result = spawnSync(process.execPath, ["--import", tsxLoader, "--input-type=module", "--eval", script], {
+			cwd: packageRoot,
+			encoding: "utf8",
+		});
+		if (result.status !== 0) {
+			throw new Error(`Probe failed\n${result.stdout}\n${result.stderr}`);
+		}
+		const lastLine = result.stdout
+			.split(/\r?\n/)
+			.map((l) => l.trim())
+			.filter(Boolean)
+			.at(-1);
+		const parsed = JSON.parse(lastLine!) as { loaded: string[] };
+		expect(parsed.loaded).toEqual([]);
+	});
+
+	it("loads models.generated on first getModel call", () => {
+		const script = `
+			import { registerHooks } from "node:module";
+			const loaded = [];
+			registerHooks({
+				resolve(specifier, context, nextResolve) {
+					if (/(^|[\\\\/])models\\.generated\\./.test(specifier) || specifier === "./models.generated.ts" || specifier === "./models.generated.js") {
+						loaded.push(specifier);
+					}
+					return nextResolve(specifier, context);
+				},
+			});
+			const mod = await import(${JSON.stringify(aiEntryUrl)});
+			mod.getModel("openai", "gpt-4o");
+			console.log(JSON.stringify({ loaded: [...new Set(loaded)] }));
+		`;
+		const result = spawnSync(process.execPath, ["--import", tsxLoader, "--input-type=module", "--eval", script], {
+			cwd: packageRoot,
+			encoding: "utf8",
+		});
+		if (result.status !== 0) {
+			throw new Error(`Probe failed\n${result.stdout}\n${result.stderr}`);
+		}
+		const lastLine = result.stdout
+			.split(/\r?\n/)
+			.map((l) => l.trim())
+			.filter(Boolean)
+			.at(-1);
+		const parsed = JSON.parse(lastLine!) as { loaded: string[] };
+		expect(parsed.loaded.length).toBeGreaterThan(0);
+	});
+});

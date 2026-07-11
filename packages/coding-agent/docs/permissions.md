@@ -66,15 +66,16 @@ Switch mid-session with the `/permission-mode <mode>` slash command.
 Within a single check the order is:
 
 1. `denyTools[name]` → **deny** (every mode)
-2. **plan** only: write / exec / mutating tool → **deny** (read-only)
-3. `allowTools[name]` → **allow** (skips remaining checks)
-4. `denyPaths` (reads in `plan`; reads + writes in `auto`) and
+2. **plan** only: write / exec / mutating / unclassified `type:"tool"` → **deny** (read-only)
+3. **plan** only: `mcp__*` → **deny** always (MCP cannot be opted in via `allowTools`; leave plan mode to use MCP)
+4. `allowTools[name]` → **allow** (skips remaining checks; in plan this can reopen sensitive reads or non-MCP custom tools already past step 2)
+5. `denyPaths` (reads in `plan`; reads + writes in `auto`) and
    `denyCommands` (exec in `auto`), including the built-in defaults
    unless the floor is off → **deny**
-5. `allowPaths` → **allow**
-6. Otherwise → **allow**
+6. `allowPaths` → **allow**
+7. Otherwise → **allow**
 
-The built-in floor (the defaults in step 4) is active in `plan`/`auto` and off
+The built-in floor (the defaults in step 5) is active in `plan`/`auto` and off
 in any mode with `disableBuiltinDefaults: true`.
 
 ### Built-in defaults

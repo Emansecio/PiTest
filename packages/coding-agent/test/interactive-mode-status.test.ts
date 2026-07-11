@@ -1021,22 +1021,28 @@ describe("InteractiveMode.onEscape goal pause", () => {
 });
 
 describe("InteractiveMode.shouldRetireWorkingLoaderOnAgentEnd", () => {
-	const call = (session: { isBusy: boolean; isStreaming: boolean }, willRetry: boolean): boolean =>
-		(InteractiveMode as any).prototype.shouldRetireWorkingLoaderOnAgentEnd.call({ session }, willRetry);
+	const call = (
+		session: { isBusy: boolean; isStreaming: boolean; hasPendingPostTurnWork?: boolean },
+		willRetry: boolean,
+	): boolean => (InteractiveMode as any).prototype.shouldRetireWorkingLoaderOnAgentEnd.call({ session }, willRetry);
 
 	test("retires when isStreaming is still true at agent_end (finishRun has not run yet)", () => {
-		expect(call({ isBusy: true, isStreaming: true }, false)).toBe(true);
+		expect(call({ isBusy: true, isStreaming: true, hasPendingPostTurnWork: false }, false)).toBe(true);
 	});
 
 	test("keeps loader when auto-retry will immediately continue the run", () => {
-		expect(call({ isBusy: true, isStreaming: true }, true)).toBe(false);
+		expect(call({ isBusy: true, isStreaming: true, hasPendingPostTurnWork: false }, true)).toBe(false);
 	});
 
 	test("keeps loader for post-run orchestration that is not the agent stream", () => {
-		expect(call({ isBusy: true, isStreaming: false }, false)).toBe(false);
+		expect(call({ isBusy: true, isStreaming: false, hasPendingPostTurnWork: false }, false)).toBe(false);
+	});
+
+	test("keeps loader when post-turn gates (verification / pending checks) will run", () => {
+		expect(call({ isBusy: true, isStreaming: true, hasPendingPostTurnWork: true }, false)).toBe(false);
 	});
 
 	test("retires when the session is fully idle", () => {
-		expect(call({ isBusy: false, isStreaming: false }, false)).toBe(true);
+		expect(call({ isBusy: false, isStreaming: false, hasPendingPostTurnWork: false }, false)).toBe(true);
 	});
 });

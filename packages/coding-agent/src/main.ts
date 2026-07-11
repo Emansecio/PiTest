@@ -624,6 +624,17 @@ export async function main(args: string[], options?: MainOptions) {
 	const cwd = process.cwd();
 	const agentDir = getAgentDir();
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
+	if (parsed.profile === "minimal") {
+		startupSettingsManager.applyOverrides({
+			eval: { enabled: false },
+			lsp: { enabled: false },
+			debug: { enabled: false },
+			chromeDevtools: { enabled: false },
+			hindsight: { enabled: false },
+			webSearch: { enabled: false },
+			agentMessaging: { enabled: false },
+		});
+	}
 	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
 
 	// Decide the final runtime cwd before creating cwd-bound runtime services.

@@ -82,10 +82,10 @@ describe("recall_tool_output tool", () => {
 		// large filler that must be elided. The tail carries the decisive signal.
 		const head = "HEAD_SENTINEL_START\n";
 		const tail = "\nTAIL_SENTINEL_END__error: boom at line 42";
-		// Exceed the dedicated 256KB recall cap so the middle is actually elided.
+		// Exceed the dedicated 96KB recall cap so the middle is actually elided.
 		const filler = `${"x".repeat(120)}\n`.repeat(3000); // ~363KB of middle
 		const full = head + filler + tail;
-		expect(Buffer.byteLength(full, "utf-8")).toBeGreaterThan(256 * 1024);
+		expect(Buffer.byteLength(full, "utf-8")).toBeGreaterThan(96 * 1024);
 		const id = store.put(full);
 
 		const tool = createRecallToolOutputTool(CWD);
@@ -96,8 +96,8 @@ describe("recall_tool_output tool", () => {
 		// The decisive proof: head-only truncation would DROP this. It must survive.
 		expect(text).toContain("TAIL_SENTINEL_END__error: boom at line 42");
 		expect(text).toContain("truncated from the middle");
-		// And the recall must still fit within its dedicated 256KB cap.
-		expect(Buffer.byteLength(text, "utf-8")).toBeLessThanOrEqual(256 * 1024 + 4096);
+		// And the recall must still fit within its dedicated 96KB cap.
+		expect(Buffer.byteLength(text, "utf-8")).toBeLessThanOrEqual(96 * 1024 + 4096);
 		store.dispose();
 	});
 

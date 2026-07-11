@@ -28,7 +28,11 @@ function collectDescriptions(node: unknown, path: string, out: Array<{ path: str
 }
 
 describe("tool schema descriptions stay ASCII (no accented letters)", () => {
-	const defs = createAllToolDefinitions(process.cwd());
+	const defs = createAllToolDefinitions(process.cwd(), {
+		chromeDevtools: { enabled: true },
+		lsp: { enabled: true },
+		debug: { enabled: true },
+	});
 
 	for (const [name, def] of Object.entries(defs)) {
 		it(`${name}: tool + parameter descriptions are ASCII-only`, () => {
@@ -55,7 +59,11 @@ describe("tool schema descriptions stay ASCII (no accented letters)", () => {
 // small. These assertions lock the encoding AND the exact value set per field, so
 // a regression back to anyOf — or a dropped/added value — fails loudly.
 describe("string-literal schema fields use Type.Enum (compact, not anyOf)", () => {
-	const defs = createAllToolDefinitions(process.cwd());
+	const defs = createAllToolDefinitions(process.cwd(), {
+		chromeDevtools: { enabled: true },
+		lsp: { enabled: true },
+		debug: { enabled: true },
+	});
 
 	function enumOf(parameters: unknown, field: string): unknown {
 		const props = (parameters as { properties?: Record<string, unknown> }).properties ?? {};

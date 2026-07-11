@@ -140,19 +140,60 @@ describe("SessionManager _persist resilience (Fix 1)", () => {
 		const queued = `${JSON.stringify({ type: "custom", customType: "queued", id: "q1", parentId: null, timestamp: new Date().toISOString() })}\n`;
 		(mgr as unknown as { _writeQueue: string[] })._writeQueue.push(queued);
 
-		// Break the file path so the next sync append throws (ENOENT is non-transient).
+		// Break the file path so the next async drain throws (ENOENT is non-transient).
 		const brokenFile = join(tempDir, "nope-dir", "queue.jsonl");
 		(mgr as unknown as { sessionFile: string }).sessionFile = brokenFile;
 
-		expect(() => mgr.appendMessage(makeAssistantMessage("second"))).toThrow(/ENOENT|no such file/i);
+		// Subsequent appends enqueue + drain async — they must not throw synchronously.
+		expect(() => mgr.appendMessage(makeAssistantMessage("second"))).not.toThrow();
 
-		// Failed sync flush must not clear the queue — both the seeded line and the
+		// Failed async flush must not clear the queue — both the seeded line and the
 		// new entry remain for a later successful flushWrites/retry.
+		await expect(mgr.flushWrites()).rejects.toThrow(/ENOENT|no such file/i);
 		const queue = (mgr as unknown as { _writeQueue: string[] })._writeQueue;
-		expect(queue.length).toBe(2);
-		expect(queue[0]).toBe(queued);
-		await expect(mgr.flushWrites()).rejects.toThrow();
-		expect((mgr as unknown as { _writeQueue: string[] })._writeQueue.length).toBeGreaterThan(0);
+		expect(queue.length).toBeGreaterThan(0);
+		expect(queue.some((line) => line === queued || line.includes('"second"') || line.includes("assistant"))).toBe(
+			true,
+		);
+	});
+
+	it("routes post-initial appends through async drain (durable after flushWrites)", async () => {
+		const sessionFile = join(tempDir, "async-drain.jsonl");
+		const header: SessionHeader = {
+			type: "session",
+			id: "async-drain-session",
+			version: 3,
+			timestamp: new Date(0).toISOString(),
+			cwd: "/tmp",
+		};
+		writeFileSync(sessionFile, `${JSON.stringify(header)}\n`, "utf8");
+
+		const mgr = SessionManager.open(sessionFile);
+		(mgr as unknown as { flushed: boolean }).flushed = false;
+		mgr.appendMessage(makeAssistantMessage("first"));
+
+		mgr.appendMessage(makeAssistantMessage("second"));
+		mgr.appendMessage(makeAssistantMessage("third"));
+		// Drain may already be in flight; flushWrites waits for the queue to clear.
+		await mgr.flushWrites();
+		expect((mgr as unknown as { _writeQueue: string[] })._writeQueue.length).toBe(0);
+
+		const entries = readEntries(sessionFile);
+		const texts = entries
+			.filter((e): e is Extract<FileEntry, { type: "message" }> => e.type === "message")
+			.map((e) => {
+				const m = e.message as { content: unknown };
+				if (Array.isArray(m.content)) {
+					return m.content
+						.filter((b: { type?: string }) => b.type === "text")
+						.map((b: { text?: string }) => b.text ?? "")
+						.join("");
+				}
+				return "";
+			});
+		expect(texts).toContain("first");
+		expect(texts).toContain("second");
+		expect(texts).toContain("third");
 	});
 });
 
@@ -235,7 +276,7 @@ describe("SessionManager.list size-guard (Fix 2)", () => {
 		expect(info.allMessagesText).not.toContain(marker);
 	});
 
-	it("reads normal-sized sessions fully (identical behavior, allMessagesText populated)", async () => {
+	it("lists normal-sized sessions via bounded head-read (search text deferred)", async () => {
 		const sessionFile = join(tempDir, "2026-01-02T00-00-00-000Z_small.jsonl");
 		const header: SessionHeader = {
 			type: "session",
@@ -269,10 +310,12 @@ describe("SessionManager.list size-guard (Fix 2)", () => {
 		const info = sessions[0];
 		expect(info.id).toBe("small-session");
 		expect(info.firstMessage).toBe("hello small world");
+		// List path is always bounded: no full-body index at list time.
+		expect(info.allMessagesText).toBe("");
+		expect(info.messageCount).toBe(0);
 		// Search text is built lazily on first filter (not at list time).
 		const searchText = resolveSessionSearchText(info);
 		expect(searchText).toContain("hello small world");
 		expect(searchText).toContain("a reply with searchable body");
-		expect(info.messageCount).toBe(2);
 	});
 });

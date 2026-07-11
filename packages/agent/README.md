@@ -108,7 +108,9 @@ In parallel mode, tool completion events follow tool completion order, but persi
 
 The mode can be set globally via `toolExecution` in the agent config, or per-tool via `executionMode` on `AgentTool`. If any tool call in a batch targets a tool with `executionMode: "sequential"`, the entire batch executes sequentially regardless of the global setting.
 
-The `beforeToolCall` hook runs after `tool_execution_start` and validated argument parsing. It can block execution. The `afterToolCall` hook runs after tool execution finishes and before `tool_execution_end` and final tool result message events are emitted.
+The `beforeToolCall` hook runs after `tool_execution_start` and validated argument parsing. It can block execution. In-place mutations of `args` are tracked (`markArgsMutated` / Proxy); the loop re-runs schema validation on the post-mutation args and turns invalid shapes into error tool results. Prefer returning schema-valid args. The `afterToolCall` hook runs after tool execution finishes and before `tool_execution_end` and final tool result message events are emitted.
+
+Agent `ThinkingLevel` includes `"off"`. At the `@pit/ai` boundary use `toProviderReasoning(level)` (or map `"off"` → `undefined`) — provider `reasoning` does not accept `"off"`.
 
 Tools can also return `terminate: true` to hint that the automatic follow-up LLM call should be skipped. The loop only stops early when every finalized tool result in that batch sets `terminate: true`. Mixed batches continue normally.
 
@@ -172,7 +174,9 @@ const agent = new Agent({
   // Convert AgentMessage[] to LLM Message[] (required for custom message types)
   convertToLlm: (messages) => messages.filter(...),
 
-  // Transform context before convertToLlm (for pruning, compaction)
+  // Transform context before convertToLlm (for pruning, compaction).
+  // Hard timeout via PIT_TRANSFORM_CONTEXT_TIMEOUT_MS (default 60000; 0 disables).
+  // Timeout fails the turn — it does not skip the transform.
   transformContext: async (messages, signal) => pruneOldMessages(messages),
 
   // Steering mode: "one-at-a-time" (default) or "all"

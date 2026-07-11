@@ -70,4 +70,17 @@ describe("fusion settings", () => {
 		expect(f.panel).toHaveLength(2);
 		expect(f.panel[0]).toEqual({ cli: "claude", model: "opus" });
 	});
+
+	it("patches verify/brief via setFusionFlags without clearing the panel", () => {
+		const sm = SettingsManager.create(projectDir, agentDir);
+		sm.setFusionPanel([
+			{ cli: "claude", model: "opus" },
+			{ cli: "codex", model: "gpt-4o" },
+		]);
+		sm.setFusionFlags({ verify: false, brief: false });
+		const f = sm.getFusionSettings();
+		expect(f.panel).toHaveLength(2);
+		expect(f.verify).toBe(false);
+		expect(f.brief).toBe(false);
+	});
 });

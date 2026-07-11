@@ -12,6 +12,7 @@ import { getRuntimeDiagnostics, resetRuntimeDiagnostics, suggestClosest, suggest
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIntentGateExtension } from "../src/core/built-ins/intent-gate-extension.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
+import type { SymbolNameSet } from "../src/core/grounding-guard.ts";
 import { type IntentGateDeps, intentGateDose, validatePlan } from "../src/core/intent-gate.ts";
 import { PlanManager, setCurrentPlanManager } from "../src/core/plan/plan-manager.ts";
 import { SupervisionThermostat, setCurrentSupervisionThermostat } from "../src/core/supervision-thermostat.ts";
@@ -46,9 +47,14 @@ function makeTree(files: Record<string, string>): string {
 	return root;
 }
 
+/** Build a SymbolNameSet from original-cased names. */
+function symbols(...names: string[]): SymbolNameSet {
+	return { names: new Set(names), lowerSet: new Set(names.map((n) => n.toLowerCase())) };
+}
+
 function makeDeps(
 	cwd: string,
-	symbolSet?: Set<string>,
+	symbolSet?: SymbolNameSet,
 	symbolResolve?: IntentGateDeps["symbolResolve"],
 ): IntentGateDeps {
 	return {
@@ -205,7 +211,23 @@ describe("validatePlan — path grounding against the real tree", () => {
 	it("symbols fail-open when no resolver is wired (repo-map miss)", () => {
 		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
 		const version = new PlanManager().propose([{ id: "s1", intent: "update the SomeMadeUpSymbol handler" }]);
-		expect(validatePlan(version, makeDeps(cwd, new Set(["OtherThing"])))).toHaveLength(0);
+		expect(validatePlan(version, makeDeps(cwd, symbols("OtherThing")))).toHaveLength(0);
+	});
+
+	it("symbolSet lowerSet HIT is case-insensitive and skips symbolResolve", () => {
+		const cwd = makeTree({ "src/util/helper.ts": "export const x = 1;\n" });
+		// CamelCase token extracted; lowerSet membership is case-insensitive.
+		const version = new PlanManager().propose([{ id: "s1", intent: "update the CalculateTotal handler" }]);
+		let resolveCalls = 0;
+		const findings = validatePlan(
+			version,
+			makeDeps(cwd, symbols("calculateTotal"), () => {
+				resolveCalls++;
+				return [];
+			}),
+		);
+		expect(findings).toHaveLength(0);
+		expect(resolveCalls).toBe(0);
 	});
 
 	it("symbolResolve HIT allows (exact name in LSP pool)", () => {
@@ -213,7 +235,7 @@ describe("validatePlan — path grounding against the real tree", () => {
 		const version = new PlanManager().propose([{ id: "s1", intent: "update the calculateTotal handler" }]);
 		const findings = validatePlan(
 			version,
-			makeDeps(cwd, new Set(["OtherThing"]), () => ["calculateTotal", "formatPrice"]),
+			makeDeps(cwd, symbols("OtherThing"), () => ["calculateTotal", "formatPrice"]),
 		);
 		expect(findings).toHaveLength(0);
 	});
@@ -237,7 +259,7 @@ describe("validatePlan — path grounding against the real tree", () => {
 		expect(
 			validatePlan(
 				version,
-				makeDeps(cwd, new Set(["OtherThing"]), () => undefined),
+				makeDeps(cwd, symbols("OtherThing"), () => undefined),
 			),
 		).toHaveLength(0);
 	});

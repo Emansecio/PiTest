@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 import { recordDiagnostic } from "@pit/ai";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import { killProcessTree } from "../../utils/shell.ts";
+import { LruMap } from "../lru-map.ts";
 import { applyWorkspaceEdit } from "./edits.ts";
 import { coalesceChunks } from "./frame-chunks.ts";
 import {
@@ -33,7 +34,10 @@ import type {
 	ServerConfig,
 	WorkspaceEdit,
 } from "./types.ts";
-import { detectLanguageId, fileToUri } from "./utils.ts";
+import { detectLanguageId, fileToUri, uriToFile } from "./utils.ts";
+
+/** Cap retained open documents per LSP client (LRU eviction via closeFile). */
+export const OPEN_FILES_LRU_CAP = 64;
 
 // =============================================================================
 // Client State
@@ -454,7 +458,7 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 			requestId: 0,
 			diagnostics: new Map(),
 			diagnosticsVersion: 0,
-			openFiles: new Map(),
+			openFiles: new LruMap(OPEN_FILES_LRU_CAP),
 			pendingRequests: new Map(),
 			messageBuffer: Buffer.alloc(0),
 			pendingChunks: [],
@@ -550,7 +554,8 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 	throwIfAborted(signal);
 	const uri = fileToUri(filePath);
 	const lockKey = `${client.name}:${uri}`;
-	if (client.openFiles.has(uri)) return;
+	// Touch LRU recency when already open.
+	if (client.openFiles.get(uri)) return;
 
 	// Atomically chain onto any in-flight op for this uri so concurrent callers
 	// serialize on one promise chain. Acquisition (read prev + set op) must be
@@ -563,7 +568,8 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 			// Signal-unaware body: it runs to completion for whoever chained it so
 			// later callers in the chain observe a consistent server state. Each
 			// caller aborts its own *wait* via untilAborted below.
-			if (client.openFiles.has(uri)) return;
+			if (client.openFiles.get(uri)) return;
+			await evictOpenFilesIfNeeded(client, uri);
 			let content: string;
 			try {
 				content = await fs.readFile(filePath, "utf-8");
@@ -586,6 +592,58 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
 		// Only clear the lock if it's still ours; a later caller may have already
 		// chained its own op and replaced the map entry.
 		if (fileOperationLocks.get(lockKey) === op) fileOperationLocks.delete(lockKey);
+	}
+}
+
+/**
+ * Close a document on the server: didClose + drop openFiles/diagnostics entries.
+ * Serialized via fileOperationLocks (same as ensureFileOpen / syncContent).
+ */
+export async function closeFile(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
+	throwIfAborted(signal);
+	const uri = fileToUri(filePath);
+	const lockKey = `${client.name}:${uri}`;
+	if (!client.openFiles.has(uri)) {
+		client.diagnostics.delete(uri);
+		return;
+	}
+
+	const prev = fileOperationLocks.get(lockKey) ?? Promise.resolve();
+	const op = prev
+		.catch(() => {})
+		.then(async () => {
+			if (!client.openFiles.has(uri)) {
+				client.diagnostics.delete(uri);
+				return;
+			}
+			try {
+				await sendNotification(client, "textDocument/didClose", { textDocument: { uri } });
+			} finally {
+				// Always drop local state so LRU eviction cannot spin if didClose fails.
+				client.openFiles.delete(uri);
+				client.diagnostics.delete(uri);
+				client.lastActivity = Date.now();
+			}
+		});
+
+	fileOperationLocks.set(lockKey, op);
+	try {
+		await untilAborted(signal, () => op);
+	} finally {
+		if (fileOperationLocks.get(lockKey) === op) fileOperationLocks.delete(lockKey);
+	}
+}
+
+/** Evict least-recently-used open docs until under the LRU cap (excluding `keepUri`). */
+async function evictOpenFilesIfNeeded(client: LspClient, keepUri: string): Promise<void> {
+	while (client.openFiles.size >= OPEN_FILES_LRU_CAP) {
+		const oldest = client.openFiles.peekOldestKey();
+		if (oldest === undefined) break;
+		if (oldest === keepUri) {
+			// Only the keep uri remains at/over cap — nothing safe to evict.
+			break;
+		}
+		await closeFile(client, uriToFile(oldest));
 	}
 }
 
@@ -639,6 +697,7 @@ export async function syncContent(
 			client.diagnostics.delete(uri);
 			const info = client.openFiles.get(uri);
 			if (!info) {
+				await evictOpenFilesIfNeeded(client, uri);
 				const languageId = detectLanguageId(filePath);
 				await sendNotification(client, "textDocument/didOpen", {
 					textDocument: { uri, languageId, version: 1, text: content },
@@ -696,6 +755,7 @@ export async function refreshFile(client: LspClient, filePath: string, signal?: 
 					if (isEnoent(err)) return;
 					throw err;
 				}
+				await evictOpenFilesIfNeeded(client, uri);
 				const languageId = detectLanguageId(filePath);
 				await sendNotification(client, "textDocument/didOpen", {
 					textDocument: { uri, languageId, version: 1, text: openText },

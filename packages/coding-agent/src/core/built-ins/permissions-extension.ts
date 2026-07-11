@@ -76,11 +76,15 @@ export interface PermissionsExtensionOptions {
 	onDecision?: (info: { toolName: string; decision: "allow" | "deny"; reason?: string }) => void;
 	/** Fired after the permission mode changes (via /permission-mode, the cycle key, or exit_plan approval). Lets the host swap model roles etc. */
 	onModeChange?: (mode: PermissionMode) => void;
+	/** True when Fusion panel has ≥2 advisors configured. Gates Alt+P into Fusion. */
+	isFusionPanelReady?: () => boolean;
+	/** Open `/fusion` setup when the user cycles into Fusion without a panel. */
+	onFusionNeedsSetup?: () => void;
 }
 
 export function createPermissionsExtension(options: PermissionsExtensionOptions) {
 	return (pi: ExtensionAPI) => {
-		const { checker, onDecision, onModeChange } = options;
+		const { checker, onDecision, onModeChange, isFusionPanelReady, onFusionNeedsSetup } = options;
 		// Capture the last UI context seen so the exit_plan `onApproved` callback
 		// (which runs inside a tool execute() with no extension ctx) can still
 		// refresh the footer status. `let` in the closure, updated on session_start.
@@ -159,6 +163,12 @@ export function createPermissionsExtension(options: PermissionsExtensionOptions)
 			async handler(_args, ctx) {
 				const current = pi.getOrchestration();
 				const next = nextFusionCycleState(current, checker.mode);
+				// Don't enter Fusion with an empty panel — nudge into /fusion setup instead.
+				if (next.orchestration === "fusion" && isFusionPanelReady && !isFusionPanelReady()) {
+					ctx.ui.notify("Fusion needs two advisors — opening /fusion", "warning");
+					onFusionNeedsSetup?.();
+					return;
+				}
 				checker.updateMode(next.mode);
 				pi.setOrchestration(next.orchestration);
 				ctx.ui.setStatus(STATUS_KEY, `permissions: ${modeDisplayLabel(checker, next.orchestration)}`);

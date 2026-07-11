@@ -385,14 +385,15 @@ const editRules: ToolErrorHintRule[] = [
 	},
 	{
 		// Read-guard block: editing a file that was never read this session.
-		// read-guard-extension.ts emits `Read guard: file "<p>" has not been
-		// read in this session. ...`. The model must read first; this rule makes
+		// read-guard-extension.ts emits `Read guard: unread "<p>" — read it first.`
+		// (and related one-liners). The model must read first; this rule makes
 		// that explicit instead of letting it retry the blocked edit.
 		id: "edit-read-guard-not-read",
 		appliesTo: ["edit", "edit_v2"],
 		matcher: ({ errorText }) =>
-			/read guard:.*has not been read in this session/i.test(errorText) ||
-			/has not been read in this session/i.test(errorText) ||
+			/read guard:\s*unread\b/i.test(errorText) ||
+			/read guard:.*has not been read/i.test(errorText) ||
+			/read guard:\s*stale\b/i.test(errorText) ||
 			/changed since it was last read/i.test(errorText),
 		hint: ({ call }) => {
 			const path = getString(call.arguments, "path") ?? getString(call.arguments, "file_path");

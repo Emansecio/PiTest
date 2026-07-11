@@ -61,8 +61,6 @@ Events match `AgentSessionEvent` in [`src/core/agent-session-events.ts`](../src/
 | `pending_check` | yes | Background job drain |
 | `visual_review` | yes | Visual DoD nudge |
 
-`fusion_phase` appears in the type union but is **not emitted** by the runtime (reserved; no-op).
-
 For field-level examples of fusion, subagent, and goal-pipeline events, see [RPC mode — Events](rpc.md#events).
 
 ## Message Types

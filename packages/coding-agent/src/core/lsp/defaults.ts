@@ -60,7 +60,7 @@ const LSP_DEFAULTS = {
 		"fileTypes": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
 		"rootMarkers": ["package.json", "tsconfig.json", "jsconfig.json"],
 		"initOptions": {
-			"hostInfo": "omp-coding-agent",
+			"hostInfo": "pit",
 			"preferences": {
 				"includeInlayParameterNameHints": "all",
 				"includeInlayVariableTypeHints": true,

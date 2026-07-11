@@ -125,8 +125,7 @@ export function createErasableSyntaxPreconditionExtension(options: { cwd: string
 					reason: `TS preflight (no write attempted): ${finding.hint}`,
 				};
 			} catch {
-				// emitToolCall has no per-handler try/catch; a throw out of beforeToolCall
-				// would hard-block the call. Fail-open is the invariant -> swallow.
+				// Defense-in-depth: emitToolCall already isolates per-handler throws.
 				return undefined;
 			}
 		});

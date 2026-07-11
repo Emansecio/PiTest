@@ -58,15 +58,32 @@ export interface BuiltInExtensionsOptions {
 	onPermissionDecision?: (info: { toolName: string; decision: "allow" | "deny"; reason?: string }) => void;
 	/** Fired after the permission mode changes (slash command, cycle key, or exit_plan approval). */
 	onPermissionModeChange?: (mode: PermissionMode) => void;
+	/** True when Fusion panel has ≥2 advisors. Gates Alt+P into Fusion. */
+	isFusionPanelReady?: () => boolean;
+	/** Open `/fusion` when the user cycles into Fusion without a configured panel. */
+	onFusionNeedsSetup?: () => void;
 	isMessagingEnabled?: () => boolean;
 	getParentMessagingId?: () => string | undefined;
 	getMessagingTimeoutMs?: () => number | undefined;
 	/** Forwarded to the coordinator extension: fires when an async (op:"spawn") subagent settles. Returns true if re-injected. */
-	onAsyncComplete?: (handle: string, text: string, status: "done" | "error") => boolean;
+	onAsyncComplete?: (
+		handle: string,
+		text: string,
+		status: "done" | "error",
+		meta?: { turns?: number; totalTokens?: number },
+	) => boolean;
 	/** Forwarded to the coordinator: fires once when a subagent (run or spawn) starts. */
 	onSubagentStart?: (handle: string) => void;
 	/** Forwarded to the coordinator: fires once per finished subagent turn (live progress). */
 	onSubagentProgress?: (handle: string, info: { turn: number; lastTool?: string }) => void;
+	/** Forwarded to the coordinator: fires when a blocking run/resume/continue settles. */
+	onSubagentComplete?: (
+		handle: string,
+		status: "done" | "error",
+		meta?: { turns?: number; totalTokens?: number },
+	) => void;
+	/** Called once with a function that aborts all detached spawns (wired to session.interrupt). */
+	registerAbortDetached?: (abortFn: () => void) => void;
 	/** Forwarded to the coordinator: true when subagent memory should be scoped by agent type. */
 	isScopedHindsightEnabled?: () => boolean;
 }
@@ -96,6 +113,8 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			checker: permissionChecker,
 			onDecision: options.onPermissionDecision,
 			onModeChange: options.onPermissionModeChange,
+			isFusionPanelReady: options.isFusionPanelReady,
+			onFusionNeedsSetup: options.onFusionNeedsSetup,
 		}),
 		// Task rigor: before each turn, classify task risk from the prompt and
 		// append concise rigor instructions. Model-agnostic, fail-open; opt out
@@ -143,6 +162,8 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			onAsyncComplete: options.onAsyncComplete,
 			onSubagentStart: options.onSubagentStart,
 			onSubagentProgress: options.onSubagentProgress,
+			onSubagentComplete: options.onSubagentComplete,
+			registerAbortDetached: options.registerAbortDetached,
 			isScopedHindsightEnabled: options.isScopedHindsightEnabled,
 			getTokenGovernor: () => getCurrentTokenGovernor(),
 		}),

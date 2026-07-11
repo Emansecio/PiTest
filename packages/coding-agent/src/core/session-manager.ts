@@ -16,7 +16,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "fs";
-import { appendFile, readdir, readFile, stat } from "fs/promises";
+import { appendFile, readdir, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import {
@@ -403,7 +403,13 @@ export function buildSessionContext(
 
 	const appendMessage = (entry: SessionEntry) => {
 		if (entry.type === "message") {
-			messages.push(entry.message);
+			const msg = entry.message;
+			// Compat: unmigrated JSONL may still carry role "hookMessage" (pre-v3).
+			if (msg && typeof msg === "object" && (msg as { role?: string }).role === "hookMessage") {
+				messages.push({ ...(msg as object), role: "custom" } as AgentMessage);
+			} else {
+				messages.push(msg);
+			}
 		} else if (entry.type === "custom_message") {
 			messages.push(
 				deriveCachedMessage(entry, () =>
@@ -453,12 +459,58 @@ export function buildSessionContext(
 }
 
 /**
+ * Encode a cwd into the on-disk session-bucket directory name under
+ * `~/.pit/agent/sessions/`. Exported for tests and for read-side probes that
+ * must not mkdir.
+ */
+export function encodeSessionDirName(cwd: string): string {
+	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+}
+
+/**
+ * Session-bucket path for a cwd without creating the directory.
+ */
+export function sessionDirForCwd(cwd: string, agentDir: string = getDefaultAgentDir()): string {
+	return join(agentDir, "sessions", encodeSessionDirName(cwd));
+}
+
+/**
+ * Stable key for comparing session cwds. Resolves to absolute form; on Windows
+ * lowercases so `C:\Work` and `c:\work` count as the same project folder.
+ */
+export function normalizeCwdKey(cwd: string): string {
+	const resolved = resolve(cwd);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/** True when a session header cwd belongs to the execution folder. */
+export function sessionMatchesCwd(sessionCwd: string | undefined, targetCwd: string): boolean {
+	if (!sessionCwd) return true; // legacy / missing header cwd — keep in the bucket
+	return normalizeCwdKey(sessionCwd) === normalizeCwdKey(targetCwd);
+}
+
+/**
+ * Temp / ephemeral session buckets (PIT_TMP_DIR, OS temp, mkdtemp under .pit/tmp).
+ * Excluded from listAll so the resume picker doesn't scan tens of thousands of
+ * throwaway dirs created by short-lived agent runs.
+ */
+export function isEphemeralSessionDirName(name: string): boolean {
+	const n = name.toLowerCase();
+	return (
+		n.includes(".pit-tmp-") ||
+		n.includes("-pit-tmp-") ||
+		n.includes("-tmp-pi-") ||
+		n.includes("-appdata-local-temp-") ||
+		n.includes("-appdata-local-tmp-")
+	);
+}
+
+/**
  * Compute the default session directory for a cwd.
  * Encodes cwd into a safe directory name under ~/.pit/agent/sessions/.
  */
 export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
-	const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-	const sessionDir = join(agentDir, "sessions", safePath);
+	const sessionDir = sessionDirForCwd(cwd, agentDir);
 	if (!existsSync(sessionDir)) {
 		mkdirSync(sessionDir, { recursive: true });
 	}
@@ -466,10 +518,9 @@ export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultA
 }
 
 // Sessions that ran for hours can reach hundreds of MB on disk. buildSessionInfo
-// (for the /resume picker) would read the whole .jsonl into a string AND
-// materialize every message into allMessagesText — multiplying that footprint and
-// risking OOM just to open the selector. Above this size we degrade to a bounded
-// head-read: enough for the card's firstMessage, but no full-body search index.
+// (for the /resume picker) always uses a bounded head-read so listing never
+// materializes the full .jsonl or allMessagesText. Lazy search text still refuses
+// to full-read above this size (see resolveSessionSearchText).
 const SESSION_INFO_FULL_READ_MAX_BYTES = 8 * 1024 * 1024;
 // How much of an oversized file to read for the header + first user message.
 const SESSION_INFO_HEAD_READ_BYTES = 64 * 1024;
@@ -747,137 +798,12 @@ export function resolveSessionSearchText(session: SessionInfo): string {
 	}
 }
 
-function getLastActivityTime(entries: FileEntry[]): number | undefined {
-	let lastActivityTime: number | undefined;
-
-	for (const entry of entries) {
-		if (entry.type !== "message") continue;
-
-		const message = (entry as SessionMessageEntry).message;
-		if (!isMessageWithContent(message)) continue;
-		if (message.role !== "user" && message.role !== "assistant") continue;
-
-		const msgTimestamp = (message as { timestamp?: number }).timestamp;
-		if (typeof msgTimestamp === "number") {
-			lastActivityTime = Math.max(lastActivityTime ?? 0, msgTimestamp);
-			continue;
-		}
-
-		const entryTimestamp = (entry as SessionEntryBase).timestamp;
-		if (typeof entryTimestamp === "string") {
-			const t = new Date(entryTimestamp).getTime();
-			if (!Number.isNaN(t)) {
-				lastActivityTime = Math.max(lastActivityTime ?? 0, t);
-			}
-		}
-	}
-
-	return lastActivityTime;
-}
-
-function getSessionModifiedDate(entries: FileEntry[], header: SessionHeader, statsMtime: Date): Date {
-	const lastActivityTime = getLastActivityTime(entries);
-	if (typeof lastActivityTime === "number" && lastActivityTime > 0) {
-		return new Date(lastActivityTime);
-	}
-
-	const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
-	return !Number.isNaN(headerTime) ? new Date(headerTime) : statsMtime;
-}
-
 async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	try {
-		// Size-guard: stat before reading. Oversized sessions degrade to a
-		// bounded head-read so opening the picker can't OOM on a multi-hundred-MB
-		// file. Small/normal sessions take the identical full-read path below.
+		// Always bounded: listing never full-reads the .jsonl. Search text is
+		// deferred to resolveSessionSearchText on first filter.
 		const preStats = await stat(filePath);
-		if (preStats.size > SESSION_INFO_FULL_READ_MAX_BYTES) {
-			return buildSessionInfoBounded(filePath, preStats);
-		}
-
-		const content = await readFile(filePath, "utf8");
-		let header: SessionHeader | null = null;
-		let messageCount = 0;
-		let firstMessage = "";
-		let name: string | undefined;
-		let lastActivityTime: number | undefined;
-		const searchTextParts: string[] = [];
-		let searchTextTotal = 0;
-		let lineStart = 0;
-		while (lineStart < content.length) {
-			const lineEnd = content.indexOf("\n", lineStart);
-			const rawLine = lineEnd === -1 ? content.slice(lineStart) : content.slice(lineStart, lineEnd);
-			lineStart = lineEnd === -1 ? content.length : lineEnd + 1;
-			if (!rawLine.trim()) continue;
-			let entry: FileEntry;
-			try {
-				entry = JSON.parse(rawLine) as FileEntry;
-			} catch {
-				continue;
-			}
-			if (!header) {
-				if (entry.type !== "session") return null;
-				header = entry as SessionHeader;
-				continue;
-			}
-			if (entry.type === "session_info") {
-				name = (entry as SessionInfoEntry).name?.trim() || undefined;
-			}
-			if (entry.type !== "message") continue;
-			messageCount++;
-			const message = (entry as SessionMessageEntry).message;
-			if (!isMessageWithContent(message)) continue;
-			if (message.role !== "user" && message.role !== "assistant") continue;
-			const msgTimestamp = (message as { timestamp?: number }).timestamp;
-			if (typeof msgTimestamp === "number") {
-				lastActivityTime = Math.max(lastActivityTime ?? 0, msgTimestamp);
-			} else {
-				const entryTimestamp = (entry as SessionEntryBase).timestamp;
-				if (typeof entryTimestamp === "string") {
-					const t = new Date(entryTimestamp).getTime();
-					if (!Number.isNaN(t)) lastActivityTime = Math.max(lastActivityTime ?? 0, t);
-				}
-			}
-			const textContent = extractTextContent(message);
-			if (!textContent) continue;
-			if (!firstMessage && message.role === "user") firstMessage = textContent;
-			if (searchTextTotal < SESSION_SEARCH_TEXT_CAP) {
-				if (searchTextTotal + textContent.length > SESSION_SEARCH_TEXT_CAP) {
-					const remaining = SESSION_SEARCH_TEXT_CAP - searchTextTotal;
-					if (remaining > 0) {
-						searchTextParts.push(textContent.slice(0, remaining));
-						searchTextTotal = SESSION_SEARCH_TEXT_CAP;
-					}
-				} else {
-					searchTextParts.push(textContent);
-					searchTextTotal += textContent.length;
-				}
-			}
-		}
-
-		if (!header) return null;
-
-		// Reuse the stat from the size-guard above — no second syscall needed.
-		const stats = preStats;
-		const cwd = typeof header.cwd === "string" ? header.cwd : "";
-		const parentSessionPath = header.parentSession;
-		const modified =
-			typeof lastActivityTime === "number" && lastActivityTime > 0
-				? new Date(lastActivityTime)
-				: getSessionModifiedDate([], header, stats.mtime);
-
-		return {
-			path: filePath,
-			id: header.id,
-			cwd,
-			name,
-			parentSessionPath,
-			created: new Date(header.timestamp),
-			modified,
-			messageCount,
-			firstMessage: firstMessage || "(no messages)",
-			allMessagesText: searchTextParts.join(" "),
-		};
+		return buildSessionInfoBounded(filePath, preStats);
 	} catch {
 		return null;
 	}
@@ -921,7 +847,9 @@ async function buildSessionInfosWithConcurrency(
 			startNext();
 		}
 		if (inFlight.size > 0) {
-			await Promise.race(inFlight);
+			// Snapshot to an array: Promise.race([]) never settles, and mutating the
+			// Set while race iterates is undefined territory across engines.
+			await Promise.race([...inFlight]);
 		}
 	}
 
@@ -957,7 +885,7 @@ async function listSessionFilesFromDirsWithConcurrency(dirs: string[]): Promise<
 			startNext();
 		}
 		if (inFlight.size > 0) {
-			await Promise.race(inFlight);
+			await Promise.race([...inFlight]);
 		}
 	}
 
@@ -979,6 +907,7 @@ async function listSessionsFromDir(
 		const dirEntries = await readdir(dir);
 		const files = dirEntries.filter((f) => f.endsWith(".jsonl")).map((f) => join(dir, f));
 		const total = progressTotal ?? files.length;
+		onProgress?.(progressOffset, total);
 
 		let loaded = 0;
 		const results = await buildSessionInfosWithConcurrency(files, () => {
@@ -995,6 +924,37 @@ async function listSessionsFromDir(
 	}
 
 	return sessions;
+}
+
+/**
+ * Directories to scan for "current folder" sessions: the explicit sessionDir
+ * (if any), the default encoding for cwd, and on Windows the lowercased
+ * encoding so casing variants of the same folder still resolve.
+ * Only existing dirs are returned (no mkdir).
+ */
+function collectSessionDirsForCwd(cwd: string, sessionDir?: string): string[] {
+	const dirs: string[] = [];
+	const seen = new Set<string>();
+	const add = (dir: string | undefined) => {
+		if (!dir || seen.has(dir) || !existsSync(dir)) return;
+		seen.add(dir);
+		dirs.push(dir);
+	};
+
+	if (sessionDir) {
+		add(sessionDir);
+	}
+	add(sessionDirForCwd(cwd));
+	if (process.platform === "win32") {
+		add(sessionDirForCwd(resolve(cwd)));
+		add(sessionDirForCwd(resolve(cwd).toLowerCase()));
+	}
+	// If nothing exists yet, fall back to the default creator so a brand-new
+	// project still gets a bucket (and an empty list) instead of a hard miss.
+	if (dirs.length === 0) {
+		add(sessionDir || getDefaultSessionDir(cwd));
+	}
+	return dirs;
 }
 
 // On Windows, AV scanners / indexers hold a transient handle on a just-written
@@ -1051,7 +1011,8 @@ function appendWithRetry(file: string, data: string): void {
 		} catch (err) {
 			if (!shouldRetryFsAppend(err, attempt)) throw err;
 			recordFsAppendRetry("session-manager.appendWithRetry", file, attempt, err);
-			sleepSync(FS_RETRY_BACKOFF_MS[attempt + 1]);
+			// No Atomics.wait on the sync path — retries are immediate. Sustained
+			// contention uses the async drain (setTimeout backoff) after initial flush.
 		}
 	}
 }
@@ -1320,10 +1281,10 @@ export class SessionManager {
 			}
 		}
 
-		// Build the batch up front, but write synchronously. Callers that list
-		// or re-open the session immediately after appendMessage rely on the
-		// new entry being durable on disk. The previous async-debounced write
-		// optimization broke that invariant; keep the batching but flush sync.
+		// Build the batch up front. The first durable write stays synchronous —
+		// callers may list/re-open the session immediately after the first
+		// assistant message lands. Subsequent deltas drain asynchronously via
+		// _drainQueue (flushWrites() at turn/dispose boundaries restores durability).
 		// Redact credentials on the disk-egress boundary only, PER PHYSICAL LINE.
 		// The private-key pattern's `[\s\S]*?` body matches across literal `\n`, so
 		// scrubbing the joined multi-line batch would let a BEGIN armor in one entry
@@ -1350,12 +1311,17 @@ export class SessionManager {
 
 		const line = `${redactForDisk(JSON.stringify(entry))}\n`;
 		this._writeQueue.push(line);
-		// Subsequent entries used to drain asynchronously, which left a crash window
-		// where in-memory fileEntries were ahead of on-disk JSONL. Flush synchronously
-		// so appendMessage stays durable (same invariant as the initial flush above).
-		const batch = this._writeQueue.join("");
-		appendWithRetry(this.sessionFile, batch);
-		this._writeQueue.length = 0;
+		void this._drainQueue().catch((err) => {
+			recordDiagnostic({
+				category: "io.retry",
+				level: "warn",
+				source: "session-manager._persist.drain",
+				context: {
+					path: this.sessionFile,
+					note: err instanceof Error ? err.message : String(err),
+				},
+			});
+		});
 	}
 
 	private async _drainQueue(): Promise<void> {
@@ -1954,20 +1920,37 @@ export class SessionManager {
 	}
 
 	/**
-	 * List all sessions for a directory.
-	 * @param cwd Working directory (used to compute default session directory)
+	 * List sessions for the execution folder (`cwd`).
+	 *
+	 * Scans the project session bucket (and Windows casing variants of that
+	 * bucket), then keeps only sessions whose header `cwd` matches the folder
+	 * where the agent is running. That way a shared `--session-dir` or a
+	 * differently-cased path still surfaces the right project sessions.
+	 *
+	 * @param cwd Working directory (used to compute default session directory + filter)
 	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pit/agent/sessions/<encoded-cwd>/).
 	 * @param onProgress Optional callback for progress updates (loaded, total)
 	 */
 	static async list(cwd: string, sessionDir?: string, onProgress?: SessionListProgress): Promise<SessionInfo[]> {
-		const dir = sessionDir ?? getDefaultSessionDir(cwd);
-		const sessions = await listSessionsFromDir(dir, onProgress);
+		const dirs = collectSessionDirsForCwd(cwd, sessionDir);
+		const byPath = new Map<string, SessionInfo>();
+
+		for (const dir of dirs) {
+			const batch = await listSessionsFromDir(dir, onProgress);
+			for (const session of batch) {
+				if (!sessionMatchesCwd(session.cwd, cwd)) continue;
+				byPath.set(session.path, session);
+			}
+		}
+
+		const sessions = [...byPath.values()];
 		sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 		return sessions;
 	}
 
 	/**
 	 * List all sessions across all project directories.
+	 * Skips ephemeral/temp session buckets (see {@link isEphemeralSessionDirName}).
 	 * @param onProgress Optional callback for progress updates (loaded, total)
 	 */
 	static async listAll(onProgress?: SessionListProgress): Promise<SessionInfo[]> {
@@ -1978,11 +1961,19 @@ export class SessionManager {
 				return [];
 			}
 			const entries = await readdir(sessionsDir, { withFileTypes: true });
-			const dirs = entries.filter((e) => e.isDirectory()).map((e) => join(sessionsDir, e.name));
+			const dirs = entries
+				.filter((e) => e.isDirectory() && !isEphemeralSessionDirName(e.name))
+				.map((e) => join(sessionsDir, e.name));
+
+			// Directory scan can dominate on large corpora (tens of thousands of
+			// project dirs). Surface indeterminate progress so the picker isn't
+			// stuck on a blank "Loading …" with no counters.
+			onProgress?.(0, Math.max(1, dirs.length));
 
 			// Count total files first for accurate progress.
 			const dirFiles = await listSessionFilesFromDirsWithConcurrency(dirs);
 			const totalFiles = dirFiles.reduce((sum, files) => sum + files.length, 0);
+			onProgress?.(0, totalFiles);
 
 			// Process all files with progress tracking
 			let loaded = 0;

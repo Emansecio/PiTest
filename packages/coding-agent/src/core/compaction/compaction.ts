@@ -2035,6 +2035,19 @@ export function elideMutatingToolCallArguments(messages: AgentMessage[], toolCal
 	return 0;
 }
 
+/** Wire-path: elide long args on every mutating toolCall in the array (idempotent). */
+export function elideAllMutatingToolCallArguments(messages: AgentMessage[]): number {
+	let total = 0;
+	for (const msg of messages) {
+		if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+		for (const block of msg.content) {
+			if (block.type !== "toolCall" || !MUTATING_TOOL_NAMES.has(block.name)) continue;
+			total += elideMutatingToolCallArguments(messages, block.id);
+		}
+	}
+	return total;
+}
+
 /**
  * Return a new message array where every `toolResult`, assistant, and user
  * message — and the text-bearing content blocks inside it — is shallow-cloned,

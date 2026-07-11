@@ -71,11 +71,17 @@ interface ReferenceTarget {
 // ============================================================================
 
 /**
- * Confirm a symbol name against the LOSSY repo-map index. Returns the flattened
- * set of indexed symbol names; the guard treats membership as existence
- * (fast-path) and absence as "ask the LSP", never as "block".
+ * Flattened repo-map symbol index: original-cased `names` for fuzzy pools, and
+ * `lowerSet` for O(1) case-insensitive membership.
  */
-export type IndexLookup = () => Promise<Set<string>>;
+export type SymbolNameSet = { names: Set<string>; lowerSet: Set<string> };
+
+/**
+ * Confirm a symbol name against the LOSSY repo-map index. Returns the flattened
+ * symbol sets; the guard treats lowerSet membership as existence (fast-path)
+ * and absence as "ask the LSP", never as "block".
+ */
+export type IndexLookup = () => Promise<SymbolNameSet>;
 
 /**
  * Authoritative resolution via the LSP (workspace/symbol). Returns the names the
@@ -112,7 +118,7 @@ export type FuzzyClosestN = (
 ) => string[];
 
 export interface GroundingGuardDeps {
-	/** Fast-path: flattened symbol-name set from the repo-map. */
+	/** Fast-path: flattened symbol sets from the repo-map (`names` + `lowerSet`). */
 	indexLookup: IndexLookup;
 	/** Authoritative fallback: LSP workspace/symbol resolution. Optional infra. */
 	lspResolve?: LspResolve;
@@ -248,22 +254,20 @@ async function checkExistence(name: string, deps: GroundingGuardDeps): Promise<E
 	const candidates: string[] = [];
 
 	// --- Fast-path: lossy repo-map index ---------------------------------------
-	let indexNames: Set<string>;
+	let index: SymbolNameSet;
 	try {
-		indexNames = await deps.indexLookup();
+		index = await deps.indexLookup();
 	} catch {
 		// Index unavailable: cannot use the fast-path, but the LSP may still
 		// resolve. Treat as an empty index (not a failure) and continue.
-		indexNames = new Set<string>();
+		index = { names: new Set<string>(), lowerSet: new Set<string>() };
 	}
-	// Case-insensitive existence — matches the LSP exact-match and the fuzzy layer,
-	// so a case-variant hit short-circuits here instead of slipping to a silent
-	// case rewrite downstream. The original-cased names still feed the fuzzy pool.
-	const loweredName = name.toLowerCase();
-	for (const candidate of indexNames) {
-		if (candidate.toLowerCase() === loweredName) return { exists: true, candidates: [] };
-		candidates.push(candidate);
-	}
+	// Case-insensitive existence via precomputed lowerSet — O(1). Matches the LSP
+	// exact-match and the fuzzy layer, so a case-variant hit short-circuits here
+	// instead of slipping to a silent case rewrite downstream. Original-cased
+	// names still feed the fuzzy pool on a miss.
+	if (index.lowerSet.has(name.toLowerCase())) return { exists: true, candidates: [] };
+	for (const candidate of index.names) candidates.push(candidate);
 
 	// --- Authority: LSP workspace/symbol ---------------------------------------
 	if (deps.lspResolve === undefined) {
@@ -409,13 +413,17 @@ export async function groundToolCall(
 // Real-default dep builders (used by the wire; injectable for tests)
 // ============================================================================
 
-/** Flatten a living-repo-map into a symbol-name set (the index fast-path pool). */
-export function repoMapToSymbolSet(map: LivingRepoMap): Set<string> {
+/** Flatten a living-repo-map into symbol sets (O(1) lowerSet + original names). */
+export function repoMapToSymbolSet(map: LivingRepoMap): SymbolNameSet {
 	const names = new Set<string>();
+	const lowerSet = new Set<string>();
 	for (const entry of map.entries as RepoMapEntry[]) {
-		for (const symbol of entry.symbols) names.add(symbol);
+		for (const symbol of entry.symbols) {
+			names.add(symbol);
+			lowerSet.add(symbol.toLowerCase());
+		}
 	}
-	return names;
+	return { names, lowerSet };
 }
 
 /** Default fuzzy threshold/overlap constants, exported so the wire stays in sync. */

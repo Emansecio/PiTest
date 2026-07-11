@@ -32,7 +32,7 @@ import type {
 	StreamFunction,
 	StreamOptions,
 } from "../types.ts";
-import { type ConnectGuard, createConnectGuard } from "../utils/connect-guard.ts";
+import { type ConnectGuard, createConnectGuard, DEFAULT_CONNECT_TIMEOUT_MS } from "../utils/connect-guard.ts";
 import {
 	appendAssistantMessageDiagnostic,
 	createAssistantMessageDiagnostic,
@@ -844,7 +844,12 @@ function scheduleSessionWebSocketExpiry(sessionId: string, entry: CachedWebSocke
 	}, SESSION_WEBSOCKET_CACHE_TTL_MS);
 }
 
-async function connectWebSocket(url: string, headers: Headers, signal?: AbortSignal): Promise<WebSocketLike> {
+async function connectWebSocket(
+	url: string,
+	headers: Headers,
+	signal?: AbortSignal,
+	connectTimeoutMs: number = DEFAULT_CONNECT_TIMEOUT_MS,
+): Promise<WebSocketLike> {
 	const WebSocketCtor = await getWebSocketConstructor();
 	if (!WebSocketCtor) {
 		throw new Error("WebSocket transport is not available in this runtime");
@@ -856,6 +861,7 @@ async function connectWebSocket(url: string, headers: Headers, signal?: AbortSig
 	return new Promise<WebSocketLike>((resolve, reject) => {
 		let settled = false;
 		let socket: WebSocketLike;
+		let connectTimer: ReturnType<typeof setTimeout> | undefined;
 
 		try {
 			socket = new WebSocketCtor(url, { headers: wsHeaders });
@@ -891,8 +897,19 @@ async function connectWebSocket(url: string, headers: Headers, signal?: AbortSig
 			socket.close(1000, "aborted");
 			reject(new Error("Request was aborted"));
 		};
+		const onConnectTimeout = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			socket.close(1000, "connect_timeout");
+			reject(new Error("WebSocket connect timed out"));
+		};
 
 		const cleanup = () => {
+			if (connectTimer !== undefined) {
+				clearTimeout(connectTimer);
+				connectTimer = undefined;
+			}
 			socket.removeEventListener("open", onOpen);
 			socket.removeEventListener("error", onError);
 			socket.removeEventListener("close", onClose);
@@ -903,6 +920,9 @@ async function connectWebSocket(url: string, headers: Headers, signal?: AbortSig
 		socket.addEventListener("error", onError);
 		socket.addEventListener("close", onClose);
 		signal?.addEventListener("abort", onAbort);
+		if (connectTimeoutMs > 0) {
+			connectTimer = setTimeout(onConnectTimeout, connectTimeoutMs);
+		}
 	});
 }
 
@@ -911,6 +931,7 @@ async function acquireWebSocket(
 	headers: Headers,
 	sessionId: string | undefined,
 	signal?: AbortSignal,
+	connectTimeoutMs: number = DEFAULT_CONNECT_TIMEOUT_MS,
 ): Promise<{
 	socket: WebSocketLike;
 	entry?: CachedWebSocketConnection;
@@ -918,7 +939,7 @@ async function acquireWebSocket(
 	release: (options?: { keep?: boolean }) => void;
 }> {
 	if (!sessionId) {
-		const socket = await connectWebSocket(url, headers, signal);
+		const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs);
 		return {
 			socket,
 			reused: false,
@@ -954,7 +975,7 @@ async function acquireWebSocket(
 			};
 		}
 		if (cached.busy) {
-			const socket = await connectWebSocket(url, headers, signal);
+			const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs);
 			return {
 				socket,
 				reused: false,
@@ -969,7 +990,7 @@ async function acquireWebSocket(
 		}
 	}
 
-	const socket = await connectWebSocket(url, headers, signal);
+	const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs);
 	const entry: CachedWebSocketConnection = { socket, busy: true };
 	websocketSessionCache.set(sessionId, entry);
 	return {
@@ -1200,9 +1221,57 @@ function requestBodyWithoutInput(body: RequestBody): RequestBody {
 	return rest;
 }
 
+function shallowContentEqual(a: unknown, b: unknown): boolean {
+	if (a === b) return true;
+	if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		const left = a[i];
+		const right = b[i];
+		if (left === right) continue;
+		if (typeof left !== "object" || left === null || typeof right !== "object" || right === null) {
+			return false;
+		}
+		const lo = left as Record<string, unknown>;
+		const ro = right as Record<string, unknown>;
+		const keys = Object.keys(lo);
+		if (keys.length !== Object.keys(ro).length) return false;
+		for (const key of keys) {
+			if (!(key in ro)) return false;
+			const lv = lo[key];
+			const rv = ro[key];
+			if (lv === rv) continue;
+			// One more level for empty arrays like annotations: [] on rebuilt messages.
+			if (Array.isArray(lv) && Array.isArray(rv)) {
+				if (lv.length !== rv.length) return false;
+				for (let j = 0; j < lv.length; j++) {
+					if (lv[j] !== rv[j]) return false;
+				}
+				continue;
+			}
+			return false;
+		}
+	}
+	return true;
+}
+
 function responseInputItemEqual(a: unknown, b: unknown): boolean {
 	if (a === b) return true;
-	return JSON.stringify(a) === JSON.stringify(b);
+	if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) return false;
+	const ao = a as Record<string, unknown>;
+	const bo = b as Record<string, unknown>;
+	// Structural compare on known ResponseInput fields — avoid JSON.stringify of
+	// large nested payloads on every websocket-cached continuation probe.
+	if (ao.type !== bo.type || ao.id !== bo.id || ao.role !== bo.role) return false;
+	if (!shallowContentEqual(ao.content, bo.content)) return false;
+	for (const key of Object.keys(ao)) {
+		if (key === "type" || key === "id" || key === "role" || key === "content") continue;
+		if (!(key in bo) || ao[key] !== bo[key]) return false;
+	}
+	for (const key of Object.keys(bo)) {
+		if (key === "type" || key === "id" || key === "role" || key === "content") continue;
+		if (!(key in ao)) return false;
+	}
+	return true;
 }
 
 function responseInputsEqual(a: ResponseInput | undefined, b: ResponseInput | undefined): boolean {
@@ -1304,7 +1373,14 @@ async function processWebSocketStream(
 	onStart: () => void,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
-	const { socket, entry, reused, release } = await acquireWebSocket(url, headers, options?.sessionId, options?.signal);
+	const timeouts = resolveStreamTimeouts(options);
+	const { socket, entry, reused, release } = await acquireWebSocket(
+		url,
+		headers,
+		options?.sessionId,
+		options?.signal,
+		timeouts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS,
+	);
 	// keepConnection drives release({ keep }) in finally. The try spans EVERY use
 	// of the acquired connection (stats prep + body build + send + stream) so that
 	// any throw or abort between acquire and stream end still routes through

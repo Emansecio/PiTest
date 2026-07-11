@@ -110,6 +110,8 @@ the LLM as `mcp__github__search_issues`. Override the prefix via `toolPrefix`.
 
 Permission rules (`permissions.allowTools` / `denyTools`) accept `*`/`?` globs, so
 a whole server can be gated at once: `"allowTools": ["mcp__github__*"]`.
+In **plan** mode, MCP tools are always denied (read-only); `allowTools` cannot
+opt them back in — switch to auto mode to use MCP.
 
 ## Resources and prompts
 

@@ -14,6 +14,10 @@ try {
 		format: "esm",
 		logLevel: "silent",
 		outfile: outputPath,
+		// Lazy model catalogs use createRequire (Node-only); keep the smoke check
+		// focused on accidental Node imports in the browser graph, not Node APIs
+		// that remain behind ensureRegistry() and never run in the browser entry.
+		external: ["node:module"],
 	});
 	process.exit(0);
 } catch (error) {

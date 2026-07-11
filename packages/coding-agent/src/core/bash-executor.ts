@@ -105,12 +105,16 @@ export async function executeBashWithOperations(
 			tempFileStream.write(text);
 		}
 
-		// Keep rolling buffer
+		// Keep rolling buffer; compact discarded head so chunks are GC-eligible.
 		outputChunks.push(text);
 		outputBytes += Buffer.byteLength(text);
 		while (outputBytes > maxOutputBytes && outputChunkHead < outputChunks.length - 1) {
 			outputBytes -= Buffer.byteLength(outputChunks[outputChunkHead]!);
 			outputChunkHead += 1;
+		}
+		if (outputChunkHead > 64 || outputChunkHead * 2 > outputChunks.length) {
+			outputChunks.splice(0, outputChunkHead);
+			outputChunkHead = 0;
 		}
 
 		// Stream to callback. Guard it: a throwing callback (e.g. injected by an

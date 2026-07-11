@@ -56,7 +56,7 @@ describe("coordinator N7 digest + op:read", () => {
 			| undefined;
 		ext({
 			registerTool: (def: { name: string }) => {
-				taskDef = def as never;
+				if (def.name === "task") taskDef = def as never;
 			},
 		} as never);
 		if (!taskDef) throw new Error("task tool not registered");
@@ -128,13 +128,13 @@ describe("coordinator N7 digest + op:read", () => {
 		expect(task.description).toContain(`op:"${SUBAGENT_READ_OP}"`);
 	});
 
-	it("task tool carries a 256KB head+tail outputCap so read survives the generic net", () => {
+	it("task tool carries a 96KB head+tail outputCap so read survives the generic net", () => {
 		const task = buildTask([fauxAssistantMessage("ok")]);
-		// Mirrors recall_tool_output: the wrap layer caps op:"read" at 256KB head+tail
+		// Mirrors recall_tool_output: the wrap layer caps op:"read" at 96KB head+tail
 		// instead of the generic 64KB head-only net, so a large recovered output keeps
 		// both ends.
 		expect(task.outputCap?.mode).toBe("headTail");
-		expect(task.outputCap?.maxBytes).toBe(256 * 1024);
+		expect(task.outputCap?.maxBytes).toBe(96 * 1024);
 	});
 
 	it("PIT_SUBAGENT_MAX_BYTES still overrides the (now smaller, 4KB) inline cap", () => {

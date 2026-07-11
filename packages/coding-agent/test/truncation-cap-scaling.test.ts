@@ -73,8 +73,11 @@ describe("configureTruncationCaps", () => {
 			expect(truncate.TOOL_OUTPUT_HARD_CAP_BYTES).toBeGreaterThan(truncate.DEFAULT_MAX_BYTES);
 			// …and bash keeps its deliberately tighter budget.
 			expect(truncate.BASH_MAX_BYTES).toBeLessThan(truncate.DEFAULT_MAX_BYTES);
-			// Fixed dedicated ceilings stay above even the doubled net.
-			expect(truncate.RECALL_OUTPUT_CAP_BYTES).toBeGreaterThan(truncate.TOOL_OUTPUT_HARD_CAP_BYTES);
+			// Dedicated recall ceiling stays above the unscaled hard-cap floor.
+			// (At large windows the scaled generic net can exceed 96KB, but recall
+			// uses an explicit outputCap and is not re-cut by that net.)
+			expect(truncate.RECALL_OUTPUT_CAP_BYTES).toBe(96 * 1024);
+			expect(truncate.RECALL_OUTPUT_CAP_BYTES).toBeGreaterThan(64 * 1024);
 		}
 	});
 

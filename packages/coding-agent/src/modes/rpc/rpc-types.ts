@@ -40,6 +40,8 @@ export type RpcCommand =
 
 	// Queue modes
 	| { id?: string; type: "set_steering_mode"; mode: "all" | "one-at-a-time" }
+	/** @deprecated Use set_steering_mode. */
+	| { id?: string; type: "set_queue_mode"; mode: "all" | "one-at-a-time" }
 	| { id?: string; type: "set_follow_up_mode"; mode: "all" | "one-at-a-time" }
 
 	// Compaction
@@ -107,6 +109,8 @@ export interface RpcSessionState {
 	isStreaming: boolean;
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
+	/** @deprecated Mirror of steeringMode for one-release RPC compat. */
+	queueMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
 	sessionFile?: string;
 	sessionId: string;
@@ -171,6 +175,7 @@ export type RpcResponse =
 
 	// Queue modes
 	| { id?: string; type: "response"; command: "set_steering_mode"; success: true }
+	| { id?: string; type: "response"; command: "set_queue_mode"; success: true }
 	| { id?: string; type: "response"; command: "set_follow_up_mode"; success: true }
 
 	// Compaction

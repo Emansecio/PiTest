@@ -47,6 +47,7 @@ export function createMemoryExtension(options: MemoryExtensionOptions) {
 				"Append a single durable note to MEMORY.md. Use sparingly for facts that should survive across sessions: conventions, user preferences, project gotchas, or stable architectural decisions. Never store ephemeral state, transient task progress, or anything derivable from git history. The entry is dated automatically.",
 			promptSnippet: "Append a durable, cross-session note to MEMORY.md (scope: project | global).",
 			parameters: makeMemoryAppendSchema(configDirName),
+			sideEffect: "workspace",
 			async execute(_id, { scope, entry, heading }: MemoryAppendInput) {
 				const result = appendMemory({
 					scope,

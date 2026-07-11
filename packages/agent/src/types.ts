@@ -93,8 +93,15 @@ export interface BeforeToolCallContext {
 	args: unknown;
 	/** Current agent context at the time the tool call is prepared. */
 	context: AgentContext;
+	/**
+	 * Mutable box set by the loop. Mark `mutated = true` (or call `markArgsMutated`)
+	 * when rewriting `args` in place so the loop revalidates. Top-level property
+	 * writes on `args` are also auto-tracked via a Proxy.
+	 */
+	argsMutation?: { mutated: boolean };
+	/** Convenience: sets `argsMutation.mutated = true`. */
+	markArgsMutated?: () => void;
 }
-
 /** Context passed to `afterToolCall`. */
 export interface AfterToolCallContext {
 	/** The assistant message that requested the tool call. */
@@ -264,6 +271,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	getSteeringMessages?: () => Promise<AgentMessage[]>;
 
 	/**
+	 * @deprecated Use {@link getSteeringMessages}. Accepted as a one-release compat alias.
+	 */
+	getQueuedMessages?: () => Promise<AgentMessage[]>;
+
+	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
 	 *
 	 * Called when the agent has no more tool calls and no steering messages.
@@ -411,6 +423,15 @@ export interface TTSRMatchInfo {
  * Use model thinking-level metadata from @pit/ai to detect support for a concrete model.
  */
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+
+/**
+ * Map agent ThinkingLevel (includes `"off"`) to the provider-facing reasoning
+ * level used by `@pit/ai` StreamOptions (`undefined` disables reasoning).
+ */
+export function toProviderReasoning(level: ThinkingLevel | undefined): Exclude<ThinkingLevel, "off"> | undefined {
+	if (level === undefined || level === "off") return undefined;
+	return level;
+}
 
 /**
  * Extensible interface for custom app messages.

@@ -4,6 +4,33 @@ export const REGEX_TEST_BUDGET_MS = 40;
 /** Cap haystack length before regex.test to bound worst-case backtracking. */
 export const REGEX_TEST_TEXT_CAP = 10_000;
 
+/** Max pattern length accepted by {@link validateSafeRegex}. */
+export const SAFE_REGEX_MAX_LENGTH = 200;
+
+/**
+ * Reject patterns that are likely ReDoS vectors before compiling.
+ * No RE2 dependency — heuristic only (length, nested quantifiers, consecutive unbounded).
+ */
+export function validateSafeRegex(source: string): void {
+	if (source.length > SAFE_REGEX_MAX_LENGTH) {
+		throw new Error(`Regex too long (max ${SAFE_REGEX_MAX_LENGTH} characters)`);
+	}
+	// Nested quantifiers: (a+)+, (.*)*, (?:foo+)*, ([abc]+)+, etc.
+	if (
+		/\((?:[^()\\]|\\.)*[+*]\)[+*?]/.test(source) ||
+		/\((?:[^()\\]|\\.)*[+*]\)\{[\d,]+\}/.test(source) ||
+		/\(\?(?:[:!=]|<[=!]?)(?:[^()\\]|\\.)*[+*]\)[+*?{]/.test(source)
+	) {
+		throw new Error("Unsafe regex: nested quantifiers");
+	}
+	// Consecutive unbounded quantifiers: .*.*, a+b+, \w*\w*, [a-z]+[0-9]+, {2,}{3,}
+	const unbounded = String.raw`(?:\*|\+|\{(?:\d+)?,\s*\})`;
+	const atom = String.raw`(?:\\.|\[(?:[^\]\\]|\\.)*\]|\((?:[^()\\]|\\.)*\)|[^\\()[\]{}|*+?])`;
+	if (new RegExp(`${atom}${unbounded}\\??${atom}${unbounded}`).test(source)) {
+		throw new Error("Unsafe regex: consecutive unbounded quantifiers");
+	}
+}
+
 export function createRegexTestDeadline(): number {
 	return Date.now() + REGEX_TEST_BUDGET_MS;
 }

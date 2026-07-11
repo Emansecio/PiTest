@@ -14,6 +14,7 @@ import { LruMap } from "../lru-map.ts";
 import { createRegexTestDeadline } from "../regex-budget.ts";
 import { PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
 import { findMatchingCommandRule, findMatchingGlob, normalizeTargetPath, wasRegexBudgetExceeded } from "./matcher.ts";
+import { EXTENSION_TOOL_SIDE_EFFECTS, isPlanBlockingSideEffect, type ToolSideEffect } from "./side-effect.ts";
 import {
 	BUILTIN_DANGEROUS_COMMANDS,
 	BUILTIN_SENSITIVE_PATHS,
@@ -24,28 +25,6 @@ import {
 	type PermissionMode,
 	type PermissionSettings,
 } from "./types.ts";
-
-/**
- * Built-in tools considered mutating for the purpose of mode "plan". Used by the
- * defensive `type: "tool"` branch in `checkPlan`; the primary classification
- * happens in `describeToolAction`, which maps these to `write`/`exec` directly.
- * Keep in sync with the write/exec cases in `describeToolAction` below.
- */
-const MUTATING_TOOLS = new Set([
-	"bash",
-	"edit",
-	"edit_v2",
-	"write",
-	"eval",
-	"debug",
-	"ast_edit",
-	"code",
-	"recipe",
-	"retain",
-	"forget",
-	"resolve",
-	"preview",
-]);
 
 /** `lsp` actions that mutate the workspace (rename a symbol/file). */
 const LSP_WRITE_ACTIONS = new Set(["rename", "rename_file"]);
@@ -62,10 +41,80 @@ const CHROME_EFFECT_OPS = new Set([
 	"upload_file",
 ]);
 
+/**
+ * Fallback side-effect map for built-in tools when the session has not yet
+ * refreshed the checker's lookup. Mirrors TOOL_REGISTRY.sideEffect — keep in
+ * sync (tested). Primary classification for write/exec still happens in
+ * `describeToolAction`.
+ */
+export const BUILTIN_TOOL_SIDE_EFFECTS: Readonly<Record<string, ToolSideEffect>> = {
+	read: "none",
+	bash: "exec",
+	edit: "workspace",
+	edit_v2: "workspace",
+	write: "workspace",
+	grep: "none",
+	find: "none",
+	ls: "none",
+	symbol: "none",
+	find_symbol: "none",
+	repo_map: "none",
+	search_skills: "none",
+	ask: "none",
+	resolve: "agent",
+	search_tool_bm25: "none",
+	ast_grep: "none",
+	ast_edit: "workspace",
+	web_search: "none",
+	eval: "exec",
+	code: "exec",
+	retain: "agent",
+	recall: "none",
+	reflect: "none",
+	forget: "agent",
+	calc: "none",
+	recipe: "exec",
+	inspect_image: "none",
+	render_mermaid: "none",
+	goal_complete: "agent",
+	todo: "none",
+	plan: "none",
+	lsp: "none", // dual-mode: mutating actions classified as write in describeToolAction
+	debug: "exec",
+	chrome_devtools_list_pages: "none",
+	chrome_devtools_select_page: "none",
+	chrome_devtools_navigate: "workspace",
+	chrome_devtools_close_page: "workspace",
+	chrome_devtools_evaluate: "exec",
+	chrome_devtools_screenshot: "none",
+	chrome_devtools_read_console: "none",
+	chrome_devtools_read_network: "none",
+	chrome_devtools_click: "workspace",
+	chrome_devtools_fill: "workspace",
+	chrome_devtools_press_key: "workspace",
+	chrome_devtools_get_text: "none",
+	chrome_devtools_wait_for: "none",
+	chrome_devtools_hover: "workspace",
+	chrome_devtools_select_option: "workspace",
+	chrome_devtools_upload_file: "workspace",
+	chrome_devtools_snapshot: "none",
+	chrome_devtools_get_network_body: "none",
+	chrome_devtools_element_to_source: "none",
+	preview: "exec",
+	recall_tool_output: "none",
+	recall_history: "none",
+	...EXTENSION_TOOL_SIDE_EFFECTS,
+};
+
 export interface PermissionContext {
 	cwd: string;
 	mode: PermissionMode;
 	settings: PermissionSettings;
+	/**
+	 * Optional live lookup (session tool registry). Falls back to
+	 * {@link BUILTIN_TOOL_SIDE_EFFECTS} when a name is missing.
+	 */
+	getSideEffect?: (toolName: string) => ToolSideEffect | undefined;
 }
 
 /**
@@ -98,6 +147,8 @@ function toolPatternToRegExp(pattern: string): RegExp {
 
 export class PermissionChecker {
 	private ctx: PermissionContext;
+	/** Session-refreshed side-effect overrides (extension tools, opaque defaults). */
+	private sideEffectOverrides = new Map<string, ToolSideEffect>();
 
 	constructor(ctx: PermissionContext) {
 		this.ctx = ctx;
@@ -117,6 +168,23 @@ export class PermissionChecker {
 
 	updateSettings(settings: PermissionSettings): void {
 		this.ctx = { ...this.ctx, settings };
+	}
+
+	/**
+	 * Replace the live side-effect lookup from the session tool registry.
+	 * Names not listed still fall back to {@link BUILTIN_TOOL_SIDE_EFFECTS}.
+	 */
+	setToolSideEffects(entries: Iterable<readonly [string, ToolSideEffect]>): void {
+		this.sideEffectOverrides = new Map(entries);
+	}
+
+	/** Resolve side-effect class for a tool name (overrides → ctx → builtins). */
+	resolveSideEffect(toolName: string): ToolSideEffect | undefined {
+		const overridden = this.sideEffectOverrides.get(toolName);
+		if (overridden !== undefined) return overridden;
+		const fromCtx = this.ctx.getSideEffect?.(toolName);
+		if (fromCtx !== undefined) return fromCtx;
+		return BUILTIN_TOOL_SIDE_EFFECTS[toolName];
 	}
 
 	/**
@@ -192,28 +260,29 @@ export class PermissionChecker {
 
 	/** Read-only mode: block mutations, still apply read deny/allow rules. */
 	private checkPlan(action: PermissionAction): PermissionDecision {
-		if (
-			action.type === "write" ||
-			action.type === "exec" ||
-			(action.type === "tool" && MUTATING_TOOLS.has(action.toolName))
-		) {
+		if (action.type === "write" || action.type === "exec") {
 			return { decision: "deny", reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.` };
+		}
+
+		// MCP is always denied in plan — allowTools cannot opt in (external servers
+		// may mutate; leave plan mode to use them).
+		if (action.type === "tool" && action.toolName.startsWith("mcp__")) {
+			return {
+				decision: "deny",
+				reason: `Plan mode blocks MCP tools (they may mutate). Switch to auto mode to use "${action.toolName}".`,
+			};
+		}
+
+		if (action.type === "tool") {
+			const sideEffect = this.resolveSideEffect(action.toolName);
+			// Unclassified tools are treated as opaque (fail-closed).
+			if (sideEffect === undefined || isPlanBlockingSideEffect(sideEffect)) {
+				return { decision: "deny", reason: `Plan mode is read-only — tool "${action.toolName}" is blocked.` };
+			}
 		}
 
 		if (matchesAnyToolRule(this.ctx.settings.allowTools, action.toolName)) {
 			return { decision: "allow" };
-		}
-
-		// Default-deny opaque external tools (MCP) in plan mode: a `type:"tool"`
-		// action whose name is `mcp__*` is an external server we cannot prove is
-		// read-only, so it could mutate. Built-in read-only `type:"tool"` actions
-		// (lsp navigation, chrome read ops) are NOT mcp__-prefixed and stay allowed.
-		// The allowTools check above is the explicit opt-in escape hatch.
-		if (action.type === "tool" && action.toolName.startsWith("mcp__")) {
-			return {
-				decision: "deny",
-				reason: `Plan mode blocks MCP tools by default (they may mutate). Add "${action.toolName}" (or a glob) to allowTools to permit it.`,
-			};
 		}
 
 		if (action.type === "read") {
@@ -290,12 +359,16 @@ export function describeToolAction(toolName: string, input: Record<string, unkno
 		case "recipe":
 		case "preview":
 			return { type: "exec", toolName, command: "" };
-		// Memory / discovery mutators: opaque `tool` actions that still mutate agent
-		// state. Listed in MUTATING_TOOLS so plan mode blocks them via the defensive
-		// branch even if classification drifts.
+		// Memory / discovery / coordinator mutators: opaque `tool` actions gated by
+		// sideEffect (agent/workspace) in checkPlan.
 		case "retain":
 		case "forget":
 		case "resolve":
+		case "task":
+		case "parallel":
+		case "fanout":
+		case "goal_complete":
+		case "memory_append":
 			return { type: "tool", toolName, args: input };
 		// `lsp` is dual-mode: only the workspace-mutating actions are writes. Read
 		// actions (diagnostics, definition, hover, list-only code_actions, …) stay

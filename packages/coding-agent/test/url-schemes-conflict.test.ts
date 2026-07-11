@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { createConflictSchemeResolver } from "../src/core/url-schemes/conflict.js";
+import {
+	CONFLICT_SCAN_FILE_CAP,
+	createConflictSchemeResolver,
+	listConflictScanFiles,
+} from "../src/core/url-schemes/conflict.js";
 import { getUrlSchemeRegistry } from "../src/core/url-schemes/registry.js";
 import { createReadTool } from "../src/index.js";
 
@@ -184,6 +188,23 @@ describe("conflict:// read via the read tool (URL-scheme truncation)", () => {
 			expect(text).toMatch(/\[Showing lines 1-\d+ of \d+.*Use offset=\d+ to continue\.\]/);
 		} finally {
 			rmSync(bigWorkspace, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("conflict:// scan caps", () => {
+	test("listConflictScanFiles stops at the hard file cap", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "conflict-cap-"));
+		try {
+			const cap = 25;
+			for (let i = 0; i < cap + 40; i++) {
+				writeFileSync(join(dir, `f${i}.txt`), "x\n", "utf-8");
+			}
+			const listed = await listConflictScanFiles(dir, cap);
+			expect(listed.length).toBe(cap);
+			expect(CONFLICT_SCAN_FILE_CAP).toBe(10_000);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });

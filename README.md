@@ -18,6 +18,10 @@
 
 # Pit Agent Harness Mono Repo
 
+## Requirements
+
+- **Node.js `>=22.19.0`** (enforced via `engines` in all `@pit/*` packages)
+
 This is the home of the Pit agent harness project including our self extensible coding agent.
 
 * **[@pit/coding-agent](packages/coding-agent)**: Interactive coding agent CLI

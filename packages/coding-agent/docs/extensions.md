@@ -684,7 +684,7 @@ In the default parallel tool execution mode, sibling tool calls from the same as
 Behavior guarantees:
 - Mutations to `event.input` affect the actual tool execution
 - Later `tool_call` handlers see mutations made by earlier handlers
-- No re-validation is performed after your mutation
+- After mutations, the agent-loop re-runs schema validation (fingerprint-based). Invalid post-mutation args become an error tool result — keep rewritten args schema-valid
 - Return values from `tool_call` only control blocking via `{ block: true, reason?: string }`
 
 ```typescript

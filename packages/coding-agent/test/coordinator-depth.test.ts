@@ -4,8 +4,8 @@
  * These exercise the pure helpers that bound nesting — `resolveMaxSubagentDepth`
  * (env parsing) and `buildSubagentToolCatalog` (catalog rewriting) — without
  * spinning up a real Agent. The guard's contract: a subagent never inherits the
- * parent's `task` tool, and only receives a depth-incremented copy while it is
- * still within the nesting budget.
+ * parent's coordinator tools, and only receives depth-incremented copies while it
+ * is still within the nesting budget.
  */
 
 import type { AgentTool } from "@pit/agent-core";
@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
 	buildSubagentToolCatalog,
 	COORDINATOR_TOOL_BRAND,
+	COORDINATOR_TOOL_NAMES,
 	resolveMaxSubagentDepth,
 } from "../src/core/built-ins/coordinator-extension.js";
 
@@ -25,10 +26,17 @@ function tool(name: string, depth?: number, coordinator = false): AgentTool {
 		parameters: Type.Object({}),
 		execute: async () => ({ content: [], details: depth === undefined ? {} : { depth } }),
 	};
-	// Coordinator tools are stripped by brand, not name — stamp it like the real factory does.
 	if (coordinator) (t as { [COORDINATOR_TOOL_BRAND]?: boolean })[COORDINATOR_TOOL_BRAND] = true;
 	return t;
 }
+
+describe("COORDINATOR_TOOL_NAMES", () => {
+	it("includes task, parallel, and fanout", () => {
+		expect(COORDINATOR_TOOL_NAMES.has("task")).toBe(true);
+		expect(COORDINATOR_TOOL_NAMES.has("parallel")).toBe(true);
+		expect(COORDINATOR_TOOL_NAMES.has("fanout")).toBe(true);
+	});
+});
 
 describe("resolveMaxSubagentDepth", () => {
 	it("defaults to 1 when unset or blank", () => {
@@ -49,31 +57,38 @@ describe("resolveMaxSubagentDepth", () => {
 });
 
 describe("buildSubagentToolCatalog (recursion depth guard)", () => {
-	const parent: AgentTool[] = [tool("read"), tool("bash"), tool("task", undefined, true)];
-	const make = (d: number) => tool("task", d, true);
+	const parent: AgentTool[] = [
+		tool("read"),
+		tool("bash"),
+		tool("task", undefined, true),
+		tool("parallel", undefined, true),
+		tool("fanout", undefined, true),
+	];
+	const make = (d: number) => [tool("task", d, true), tool("parallel", d, true), tool("fanout", d, true)];
 
-	it("always strips the parent's coordinator tool", () => {
-		// Budget exhausted: the child gets the parent's non-task tools only.
+	it("always strips all parent coordinator tools", () => {
 		const catalog = buildSubagentToolCatalog(parent, 5, 5, make);
 		expect(catalog.map((t) => t.name)).toEqual(["read", "bash"]);
 	});
 
-	it("re-adds exactly one depth-incremented coordinator tool while within budget", () => {
-		const catalog = buildSubagentToolCatalog(parent, 1, 2, make); // 1 < 2
-		expect(catalog.filter((t) => t.name === "task")).toHaveLength(1);
-		expect(catalog.map((t) => t.name)).toEqual(["read", "bash", "task"]);
+	it("re-adds depth-incremented coordinator tools while within budget", () => {
+		const catalog = buildSubagentToolCatalog(parent, 1, 2, make);
+		expect(catalog.map((t) => t.name)).toEqual(["read", "bash", "task", "parallel", "fanout"]);
 	});
 
-	it("the re-added tool carries the child depth (not the parent's)", async () => {
+	it("the re-added tools carry the child depth (not the parent's)", async () => {
 		const catalog = buildSubagentToolCatalog(parent, 1, 5, make);
-		const taskTool = catalog.find((t) => t.name === "task");
-		const result = await taskTool?.execute("id", {}, undefined);
-		expect((result?.details as { depth: number }).depth).toBe(1);
+		for (const name of ["task", "parallel", "fanout"]) {
+			const coordTool = catalog.find((t) => t.name === name);
+			const result = await coordTool?.execute("id", {}, undefined);
+			expect((result?.details as { depth: number }).depth).toBe(1);
+		}
 	});
 
-	it("withholds the coordinator tool at the nesting limit (default budget = 1)", () => {
-		// A subagent at depth 1 (spawned by the parent at depth 0) cannot nest.
-		const catalog = buildSubagentToolCatalog(parent, 1, 1, make); // 1 < 1 is false
-		expect(catalog.some((t) => t.name === "task")).toBe(false);
+	it("withholds all coordinator tools at the nesting limit (default budget = 1)", () => {
+		const catalog = buildSubagentToolCatalog(parent, 1, 1, make);
+		for (const name of COORDINATOR_TOOL_NAMES) {
+			expect(catalog.some((t) => t.name === name)).toBe(false);
+		}
 	});
 });

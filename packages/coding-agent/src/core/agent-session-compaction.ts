@@ -237,23 +237,19 @@ export function maybePruneStaleToolOutputs(ctx: CompactionController, contextTok
 	const threshold = adaptivePruneThreshold(contextTokens, contextWindow);
 	const protectTurns = pressurePruneProtectTurns(contextTokens, contextWindow);
 	const messages = ctx.host.agent.state.messages;
-	// One plan shared by the would-check and the apply: indices stay valid on the
-	// clone because cloneToolResultMessagesForPrune preserves order and length
-	// (same pattern as _pruneContextForProvider).
 	const prunePlan = planContextPrune(messages, protectTurns);
 	if (!wouldPruneOldToolOutputs(messages, threshold, protectTurns, prunePlan)) return;
-	const copy = cloneToolResultMessagesForPrune(messages);
-	const reclaimed = pruneOldToolOutputs(copy, threshold, protectTurns, true, prunePlan);
+	// Wire-only: do not mutate agent.state.messages. Presend transformContext applies
+	// pruneOldToolOutputs on a clone; JSONL / canonical state stay intact.
 	recordDiagnostic({
 		category: "prune.proactive",
 		level: "info",
 		source: "agent-session.maybePruneStaleToolOutputs",
 		context: {
-			bytes: reclaimed,
-			note: `ctx=${contextTokens}tok reclaimed=${reclaimed}tok protectTurns=${protectTurns}`,
+			bytes: 0,
+			note: `ctx=${contextTokens}tok protectTurns=${protectTurns} wireOnly=deferred`,
 		},
 	});
-	if (reclaimed > 0) ctx.host.agent.state.messages = copy;
 }
 
 export interface MidTurnWirePressureInput {

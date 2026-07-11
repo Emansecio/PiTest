@@ -5,16 +5,23 @@ sub-task and returns its final answer as a string. The subagent reuses the
 parent's model, auth, and tool catalog (filtered) but runs in an in-memory
 session, so its turns never persist to the parent's session file.
 
+Sibling tools **`parallel`** and **`fanout`** (same coordinator extension) cover
+explicit fan-out and the scout → N reviewers → worker pattern.
+
 ## When to use it
 
 - **Decomposing**: break a large task into independent probes that can run in
   separate contexts.
 - **Fanning out**: `spawn` N subagents non-blocking, keep working, then `join`
-  to gather them all in parallel.
+  to gather them all in parallel — or call `parallel` / `fanout` for structured
+  multi-agent flows.
 - **Restricting**: run a query with a narrow toolset (e.g. only `read` and
   `grep`) so the subagent can't mutate anything and its system prompt stays small.
 - **Repeating**: ask the same question against multiple inputs without
   polluting the main conversation.
+- **Gating**: pass `acceptance` so a judge and/or shell check must pass before
+  the result is treated as verified (on exhaustion the last output is still
+  returned, flagged).
 
 ## Tool signature
 
@@ -26,8 +33,10 @@ session, so its turns never persist to the parent's session file.
 | `spawn` | Non-blocking — launch detached and return a `handle`. Collect the result later with `join` (or check `poll`); see [async delegation](#async-delegation). |
 | `poll` | Non-blocking status of the given `handles`. |
 | `join` | Await the given `handles` and collect their outputs. |
-| `list` | List tracked subagents, live async handles, and resumable (interrupted) ones. |
+| `list` | List tracked subagents, live async handles, resumable (interrupted), and continuable (finished) ones. |
 | `resume` | Continue a subagent cut short by ESC or a network drop, by its `name`/handle, transcript intact. |
+| `continue` | Follow-up prompt on a **successfully finished** subagent (same live Agent / transcript). |
+| `read` | Recover the **integral** output for a handle when the inline digest was truncated. |
 | `agents` | List the reusable agent types loaded from `.pit/agents/`. |
 
 ```jsonc
@@ -39,44 +48,54 @@ task({
   model:         "haiku",                     // optional; scale to sub-task complexity. Omit to inherit parent.
   thinking_level:"medium",                    // optional; minimal|low|medium|high|xhigh
   allowed_tools: ["read", "grep", "find"],    // optional; omit to inherit the parent's FULL catalog (costly)
-  max_turns:     25,                          // optional, default 25
+  max_turns:     50,                          // optional, default 50
   system_prompt: "Optional override for the subagent's system prompt",
   result_schema: { type: "object", properties: { findings: { type: "array" } } }, // optional structured output
+  acceptance:    { criteria: "List every unused import with file path", check: "npm test", max_attempts: 2 },
   worktree:      true,                        // optional; run in an isolated, auto-cleaned git worktree
   inherit_skills:false,                       // optional; append the parent's skills to the subagent prompt
   timeout_ms:    120000                       // optional wall-clock timeout
 })
 ```
 
-`run`/`resume` return the subagent's final assistant message as text. Tool
+`run`/`resume`/`continue` return the subagent's final assistant message as text. Tool
 calls and intermediate output are not surfaced to the parent — only the final
-answer. When `result_schema` is set, the final message is parsed and validated
+answer (as a **digest** when large; see caps below). When `result_schema` is set, the final message is parsed and validated
 against it and the structured value is returned.
+
+## Caps (defaults — override via env)
+
+| Axis | Default | Env |
+|------|---------|-----|
+| Nesting depth | `1` (subagents cannot spawn subagents) | `PIT_SUBAGENT_MAX_DEPTH` |
+| Concurrency | `4` live runs | `PIT_SUBAGENT_MAX_CONCURRENCY` |
+| Inline digest | `4 KB` head+tail; full text via `op:"read"` | `PIT_SUBAGENT_MAX_BYTES` |
+| Continuable / resumable memory | FIFO `8` live Agents | (fixed) |
+| Max turns | `50` | per-call `max_turns` |
 
 ## Inspection
 
 Every spawned subagent is recorded on an in-memory registry, including
 status (`pending`, `running`, `completed`, `failed`, `cancelled`), turn
 count, and any error. Records are kept in memory only and are discarded on
-session shutdown.
+session shutdown. `op:"list"` also shows continuable handles (for `op:"continue"`).
 
 ## Constraints
 
-- Subagents **always think**: thinking defaults to `medium` and `off` is coerced
-  to `medium`. Pass `thinking_level` to override per task.
-- Recursion is bounded by nesting depth, not by tool catalog. The default
-  `PIT_SUBAGENT_MAX_DEPTH` is `1`: a subagent never inherits the parent's `task`
-  tool verbatim (that would let it recurse forever through the shared registry),
-  and only receives a fresh, depth-incremented `task` tool while still within the
-  budget. At the cap the tool is withheld entirely. Set `PIT_SUBAGENT_MAX_DEPTH=0`
+- Subagents **always think**: thinking defaults to model-bucketed `low`/`medium` and `off` is coerced
+  to a thinking level. Pass `thinking_level` to override per task.
+- Recursion is bounded by nesting depth. The default
+  `PIT_SUBAGENT_MAX_DEPTH` is `1`: a subagent never inherits the parent's coordinator tools
+  (`task` / `parallel` / `fanout`) verbatim, and only receives depth-incremented copies while within the
+  budget. At the cap those tools are withheld entirely. Set `PIT_SUBAGENT_MAX_DEPTH=0`
   to disable subagents. (Coordinator tools are stripped by an internal brand, not
-  by name, so a user tool also named `task` can't break the guard.)
-- The output a subagent injects into the parent is capped (`PIT_SUBAGENT_MAX_BYTES`,
-  default 24 KB; tail kept). The full output stays on the in-memory registry.
-- Cancellation: when the parent agent's turn is aborted, the in-flight
-  subagent receives the same `AbortSignal` and the registry status flips to
-  `cancelled`. An aborted/dropped run that left a usable transcript becomes
-  **resumable** (see below).
+  by name.)
+- The output a subagent injects into the parent is a digest (`PIT_SUBAGENT_MAX_BYTES`,
+  default 4 KB head+tail) plus a pointer; recover the full text with `task({op:"read", name})`.
+- Cancellation: when the parent is interrupted (Esc), in-flight **blocking** and **detached**
+  subagents are aborted. A normal turn end does **not** abort detached `spawn` tasks.
+  An aborted/dropped run that left a usable transcript becomes
+  **resumable** (see below). Worktree `cleanup:"auto"` runs are not resumable/continuable.
 
 ## Agent types (`.pit/agents/`)
 
@@ -85,7 +104,8 @@ with optional frontmatter (`name`, `description`, `tools`, `model`, `thinking`)
 plus a body (the system prompt) defines a type spawnable by name via
 `task({ type: "<name>" })`. Any field set explicitly on the call overrides the
 type's default. Discovery: `<cwd>/.pit/agents/*.md` (project) shadows
-`~/.pit/agents/*.md` (user) on name collision. `task({ op: "agents" })` lists the
+`~/.pit/agents/*.md` (user) on name collision. Built-ins (`explore`, `plan`,
+`review`, `general`) load first. `task({ op: "agents" })` lists the
 loaded types.
 
 ## Async delegation
@@ -98,6 +118,9 @@ Claude Code: spawn N tasks, then `join` them and summarize, with no mid-turn
 interruptions. Set `PIT_ASYNC_REINJECT=1` to opt into the legacy behavior where
 each settled result is auto-injected into the chat.
 
+Detached spawns also join the inter-agent message bus (when messaging is enabled)
+and share the same concurrency / queue caps as blocking runs.
+
 ## Inter-agent messaging
 
 When messaging is enabled (default), parallel subagents get a `message` tool and
@@ -106,7 +129,7 @@ a coordination preamble. `message({ op: "list" })` shows who is online;
 and returns the reply synchronously — so a subagent blocked on something another
 agent owns can ask instead of guessing.
 
-## Resume
+## Resume / continue
 
 A subagent interrupted by ESC or ended by a network drop (its last turn stopped
 with `error`/`aborted`) is kept **resumable**, addressed by its `name`/handle.
@@ -117,10 +140,30 @@ partial transcript to `<cwd>/.pit/subagents/<handle>.json`, so a resume survives
 a Pit restart. (A subagent whose auto-cleanup worktree was removed on settle
 can't be resumed — use `worktree: { cleanup: "keep" }` if you need that.)
 
+A **successfully finished** subagent (no auto-cleanup worktree) stays
+**continuable** (FIFO cap 8): `task({ op: "continue", name, prompt })` sends a
+follow-up on the same live Agent.
+
+Transport failures (5xx / overloaded / network) **before useful progress** get
+one automatic retry inside `spawnSubagent`; after that, use `resume`.
+
+## Acceptance / parallel / fanout
+
+- **`acceptance`** on `task` (and parallel/fanout worker entries): optional
+  `criteria` (judge subagent) and/or `check` (shell, exit 0). Retries up to
+  `max_attempts` (default 2); on exhaustion returns the last output flagged
+  (`isError: false`, `details.gate.passed: false`).
+- **`parallel({ tasks, concurrency? })`**: run an explicit list concurrently
+  (`allSettled` semantics).
+- **`fanout({ scout, reviewer, worker, concurrency? })`**: scout lists
+  `targets`, reviewers run per target (`{{target}}` in the template), then
+  worker consumes the reviews (optional acceptance on the worker).
+
 ## Programmatic access
 
 Use `spawnSubagent` from `core/coordinator/index.ts` to run a subagent
 without the built-in tool wrapper. The function takes a `SubagentRegistry`,
 a parent model + tool list, and returns `{ record, output, value?, worktreePath? }`
 (`value` is the parsed structured result when a `resultSchema` was passed;
-`worktreePath` is set when a worktree was created).
+`worktreePath` is set when a worktree was created). Higher-level helpers:
+`runWithAcceptance`, `spawnAll`, `runFanout`.

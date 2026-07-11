@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { Minimatch } from "minimatch";
 import path from "path";
 
@@ -14,6 +15,13 @@ import path from "path";
  * field exposes no `require` entry — so `createRequire` cannot reach it) and
  * cached. A platform without the prebuilt native binary degrades to `rg`
  * instead of crashing: any load failure marks the backend unavailable.
+ *
+ * Git work tree required: outside a git repo, fff's index silently drops
+ * dotfiles/dot-dirs and its FS watcher does not pick up new files. Callers
+ * (grep/find) must gate on {@link isGitWorkTree} so those cases hit rg/fd.
+ * Inside a git work tree, fff indexes hidden paths (parity with rg) and the
+ * watcher stays fresh. Finders are created with `aiMode: true` (upstream
+ * agent/MCP recommendation).
  *
  * Supported here (all validated for PARITY against `rg` on the real repo):
  * - `content`, `files` (files_with_matches), and `count` output modes.
@@ -93,7 +101,7 @@ interface FffFinder {
 	destroy: () => void;
 }
 interface FffModule {
-	FileFinder: { create: (init: { basePath: string }) => FffResult<FffFinder> };
+	FileFinder: { create: (init: { basePath: string; aiMode?: boolean }) => FffResult<FffFinder> };
 }
 
 /** A single content match in the same shape the grep tool's rg path collects. */
@@ -238,6 +246,21 @@ export async function isFffAvailable(): Promise<boolean> {
 	return (await loadModule()) !== null;
 }
 
+/**
+ * True when `dir` is inside a git work tree (walks parents for `.git` file or
+ * directory). Used to gate the fff backend: outside git, fff drops dotfiles and
+ * its watcher goes stale — callers must fall back to rg/fd.
+ */
+export function isGitWorkTree(dir: string): boolean {
+	let current = path.resolve(dir);
+	while (true) {
+		if (existsSync(path.join(current, ".git"))) return true;
+		const parent = path.dirname(current);
+		if (parent === current) return false;
+		current = parent;
+	}
+}
+
 /** Start indexing `basePath` in the background; never throws. */
 export function prewarmFffIndex(basePath: string): void {
 	void loadModule()
@@ -283,10 +306,9 @@ function resolveFffGrepPattern(
 }
 
 /** Exported for direct unit testing (see grep-fff-backend.test.ts): the
- * native fff index itself excludes dot-files/dot-dirs unconditionally (no
- * exposed InitOptions/GrepOptions toggle), so an end-to-end engine-parity
- * test against a real dot-dir can never pass regardless of this filter —
- * `dot:true` is verified here, at the seam it actually controls. */
+ * client-side glob filter that emulates rg's `--glob` over fff results. Inside
+ * a git work tree fff indexes dot-dirs; this matcher must still accept them
+ * (`dot:true`) so a glob like `**.yml` under `.github/workflows/` still hits. */
 export function makeGlobPathFilter(globFilter: string): (relPosix: string) => boolean {
 	// dot:true matches the rg backend's `--hidden` flag and find's post-filter
 	// Minimatch instances (find.ts) — without it, a glob like "**/*.yml" silently
@@ -353,7 +375,7 @@ function getFinder(mod: FffModule, basePath: string): FinderEntry | null {
 		existing.lastUsed = ++useClock;
 		return existing;
 	}
-	const created = mod.FileFinder.create({ basePath });
+	const created = mod.FileFinder.create({ basePath, aiMode: true });
 	if (!created.ok || !created.value) return null;
 	const finder = created.value;
 	const ready = finder

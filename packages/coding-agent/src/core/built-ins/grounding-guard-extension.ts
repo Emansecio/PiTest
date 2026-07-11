@@ -12,9 +12,9 @@
  * Session state added here: a short-lived symbol-set cache (so a burst of
  * groundable calls doesn't re-scan/re-run git per call) and a fire-once set (an
  * insistent model re-issuing the identical blocked call runs it — the guard
- * advises, never wedges). The whole handler is wrapped in try/catch because
- * `emitToolCall` has no per-handler isolation and a throw out of beforeToolCall
- * would hard-block the call — fail-open is load-bearing. Opt out with
+ * advises, never wedges). The whole handler is wrapped in try/catch as
+ * defense-in-depth (emitToolCall already isolates per-handler throws) so a
+ * guard bug never hard-blocks — fail-open is load-bearing. Opt out with
  * PIT_NO_GROUNDING_GUARD.
  */
 
@@ -60,18 +60,18 @@ const LSP_CACHE_MAX = 128;
 export function createGroundingGuardExtension(options: { cwd: string }) {
 	return (pi: ExtensionAPI) => {
 		const fired = new Set<string>();
-		let indexCache: { at: number; names: Set<string> } | undefined;
+		let indexCache: { at: number; set: Awaited<ReturnType<typeof repoMapToSymbolSet>> } | undefined;
 		const lspCache = new Map<string, { at: number; names: string[] | undefined }>();
 
 		// Fast-path pool: flattened symbol names from the living repo-map, memoised
 		// for a short window to amortise the git delta + disk read across a burst.
 		const indexLookup: GroundingGuardDeps["indexLookup"] = async () => {
 			const now = Date.now();
-			if (indexCache && now - indexCache.at < INDEX_CACHE_TTL_MS) return indexCache.names;
+			if (indexCache && now - indexCache.at < INDEX_CACHE_TTL_MS) return indexCache.set;
 			const { map } = await getLivingRepoMap(options.cwd);
-			const names = repoMapToSymbolSet(map);
-			indexCache = { at: now, names };
-			return names;
+			const set = repoMapToSymbolSet(map);
+			indexCache = { at: now, set };
+			return set;
 		};
 
 		// Authority: LSP workspace/symbol across every server IN PARALLEL under a
@@ -194,8 +194,8 @@ export function createGroundingGuardExtension(options: { cwd: string }) {
 				}
 				return undefined;
 			} catch {
-				// emitToolCall has no per-handler try/catch; a throw out of beforeToolCall
-				// would hard-block the call. Fail-open is the invariant -> swallow.
+				// Per-handler try/catch in emitToolCall already swallows throws; this
+				// inner catch is defense-in-depth so a guard bug never hard-blocks.
 				return undefined;
 			}
 		});

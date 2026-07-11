@@ -63,7 +63,8 @@ export class DiagnosticsSink {
 	private readonly meta: DiagnosticsSinkMeta;
 	private readonly flushIntervalMs: number;
 	private readonly path: string;
-	private readonly buffer: string[] = [];
+	/** Buffered records — stringified only on {@link flush}, not on enqueue. */
+	private readonly buffer: object[] = [];
 	private manifestWritten = false;
 	private flushTimer: ReturnType<typeof setInterval> | undefined;
 	private unsubscribe: (() => void) | undefined;
@@ -100,23 +101,17 @@ export class DiagnosticsSink {
 
 	private enqueue(record: object): void {
 		if (this.disposed) return;
-		let line: string;
-		try {
-			line = JSON.stringify(record);
-		} catch {
-			// A record that will not serialise is dropped, never thrown.
-			return;
-		}
-		this.buffer.push(line);
+		this.buffer.push(record);
 		if (this.buffer.length > MAX_BUFFERED_LINES) {
 			this.buffer.splice(0, this.buffer.length - MAX_BUFFERED_LINES);
 		}
 	}
 
 	/**
-	 * Flush buffered lines to disk. Writes the manifest as the very first line of a
-	 * fresh file and prunes old session files once, then appends. On any failure the
-	 * buffer is retained for the next attempt (fail-open, no throw).
+	 * Flush buffered records to disk. Stringifies here (not on enqueue). Writes the
+	 * manifest as the very first line of a fresh file and prunes old session files
+	 * once, then appends. On any failure the buffer is retained for the next attempt
+	 * (fail-open, no throw). Unserialisable records are dropped.
 	 */
 	flush(): void {
 		if (this.buffer.length === 0) return;
@@ -134,7 +129,18 @@ export class DiagnosticsSink {
 					}),
 				);
 			}
-			lines.push(...this.buffer);
+			for (const record of this.buffer) {
+				try {
+					lines.push(JSON.stringify(record));
+				} catch {
+					// A record that will not serialise is dropped, never thrown.
+				}
+			}
+			// Nothing to write beyond an already-written manifest → clear and exit.
+			if (lines.length === 0) {
+				this.buffer.length = 0;
+				return;
+			}
 			appendFileSync(this.path, `${lines.join("\n")}\n`);
 			this.buffer.length = 0;
 			if (writingManifest) {

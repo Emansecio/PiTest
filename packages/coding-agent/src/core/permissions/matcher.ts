@@ -13,11 +13,14 @@
 
 import { isAbsolute, resolve } from "node:path";
 import { LruMap } from "../lru-map.ts";
-import { createRegexTestDeadline, testRegexWithinBudget } from "../regex-budget.ts";
+import { createRegexTestDeadline, testRegexWithinBudget, validateSafeRegex } from "../regex-budget.ts";
 
 const REGEXP_CACHE_CAP = 256;
 const globRegExpCache = new LruMap<string, RegExp>(REGEXP_CACHE_CAP);
 const cmdRegExpCache = new LruMap<string, RegExp>(REGEXP_CACHE_CAP);
+
+/** Max `**` segments allowed in a permission glob (ReDoS / complexity cap). */
+export const GLOB_MAX_DOUBLE_STAR = 3;
 
 function normalizePathForMatch(path: string): string {
 	return path.replace(/\\/g, "/");
@@ -30,10 +33,15 @@ export function globToRegExp(pattern: string): RegExp {
 	const normalized = pattern.replace(/\\/g, "/");
 	let regex = "";
 	let i = 0;
+	let doubleStarCount = 0;
 	while (i < normalized.length) {
 		const c = normalized[i];
 		if (c === "*") {
 			if (normalized[i + 1] === "*") {
+				doubleStarCount += 1;
+				if (doubleStarCount > GLOB_MAX_DOUBLE_STAR) {
+					throw new Error(`Glob pattern has too many ** segments (max ${GLOB_MAX_DOUBLE_STAR})`);
+				}
 				// `**` — match anything including `/`
 				regex += ".*";
 				i += 2;
@@ -68,8 +76,13 @@ export function globToRegExp(pattern: string): RegExp {
 
 /** Returns true if `path` (any string) matches the glob. */
 export function matchGlob(pattern: string, path: string): boolean {
-	const re = globToRegExp(pattern);
-	return re.test(normalizePathForMatch(path));
+	try {
+		const re = globToRegExp(pattern);
+		const matched = testRegexWithinBudget(re, normalizePathForMatch(path), createRegexTestDeadline());
+		return matched === true;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -110,6 +123,7 @@ export function findMatchingCommandRule<T extends { pattern: string; flags?: str
 		let re = cmdRegExpCache.get(cacheKey);
 		if (!re) {
 			try {
+				validateSafeRegex(rule.pattern);
 				re = new RegExp(rule.pattern, rule.flags ?? "i");
 			} catch {
 				continue;

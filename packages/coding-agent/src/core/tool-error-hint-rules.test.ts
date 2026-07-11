@@ -5,7 +5,7 @@
  * and asserts the matching rule fires with an actionable hint. Error strings
  * are copied verbatim from:
  *   - edit.ts / edit-diff.ts   : `Could not edit file: <p>. Error code: ENOENT.`
- *   - read-guard-extension.ts  : `Read guard: file "<p>" has not been read ...`
+ *   - read-guard-extension.ts  : `Read guard: unread "<p>" — read it first.`
  *   - edit-hashline-diff.ts    : `edits[N].before_hash <h> not found. ...`
  *                                `edits[N].after_hash <h> is ambiguous (matches lines ...)`
  */
@@ -60,8 +60,7 @@ describe("edit-scoped tool-error hints (#6)", () => {
 	});
 
 	it("fires edit-read-guard-not-read on the real read-guard block reason", () => {
-		const err =
-			'Read guard: file "src/app.ts" has not been read in this session. Read it first to confirm its current content before editing.';
+		const err = 'Read guard: unread "src/app.ts" — read it first.';
 		const c = call("edit", { path: "src/app.ts", edits: [{ oldText: "a", newText: "b" }] });
 		const ids = hintIdsFor(c, err);
 		expect(ids).toContain("edit-read-guard-not-read");
@@ -69,8 +68,14 @@ describe("edit-scoped tool-error hints (#6)", () => {
 	});
 
 	it("fires edit-read-guard-not-read on the stale post-compaction guard reason", () => {
+		const err = 'Read guard: stale "src/app.ts" — re-read, then retry.';
+		const c = call("edit", { path: "src/app.ts", edits: [{ oldText: "a", newText: "b" }] });
+		expect(hintIdsFor(c, err)).toContain("edit-read-guard-not-read");
+	});
+
+	it("still matches legacy read-guard wording", () => {
 		const err =
-			'Read guard: file "src/app.ts" changed since it was last read (pre-compaction snapshot stale). Read it again to confirm current content before editing.';
+			'Read guard: file "src/app.ts" has not been read in this session. Read it first to confirm its current content before editing.';
 		const c = call("edit", { path: "src/app.ts", edits: [{ oldText: "a", newText: "b" }] });
 		expect(hintIdsFor(c, err)).toContain("edit-read-guard-not-read");
 	});

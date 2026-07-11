@@ -10,6 +10,7 @@ import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { agentLoop, agentLoopContinue, runAgentLoop } from "../src/agent-loop.js";
 import { THINKING_CHARS_PER_TOKEN } from "../src/overthink-guard.js";
+import * as stableArgsFingerprintMod from "../src/stable-args-fingerprint.js";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
 
 // Mock stream for testing - mimics MockAssistantStream
@@ -493,6 +494,68 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(executed).toEqual(["fixed-by-guard"]);
+	});
+
+	it("fingerprints args only once when beforeToolCall does not mutate", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+
+		const userPrompt: AgentMessage = createUserMessage("echo something");
+		const fingerprintSpy = vi.spyOn(stableArgsFingerprintMod, "stableArgsFingerprint");
+
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => undefined,
+		};
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+						"toolUse",
+					);
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "done" }]);
+					stream.push({ type: "done", reason: "stop", message });
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(executed).toEqual(["hello"]);
+		// No-op beforeToolCall: only the pre-hook fingerprint runs (no second compare).
+		expect(fingerprintSpy).toHaveBeenCalledTimes(1);
+		fingerprintSpy.mockRestore();
 	});
 
 	it("should block execution when a guard mutation produces invalid args", async () => {
@@ -2177,5 +2240,133 @@ describe("P04 message_update fire-and-forget", () => {
 		expect(order.at(-1)).toBe("end");
 		expect(order.filter((x) => x === "update").length).toBeGreaterThan(0);
 		expect(order.indexOf("end")).toBeGreaterThan(order.lastIndexOf("update"));
+	});
+
+	it("aborts on TTSR mid-stream, injects a reminder, and retries the turn", async () => {
+		let streamCalls = 0;
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			ttsrMatcher: {
+				reset: vi.fn(),
+				feed(chunk, scope) {
+					if (scope === "assistant_text" && chunk.includes("sorry")) {
+						return { name: "no-apology", message: "Do not apologize." };
+					}
+				},
+			},
+		};
+		const streamFn = () => {
+			streamCalls++;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (streamCalls === 1) {
+					const partial = createAssistantMessage([{ type: "text", text: "" }]);
+					stream.push({ type: "start", partial });
+					stream.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "sorry about that",
+						partial: createAssistantMessage([{ type: "text", text: "sorry about that" }]),
+					});
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "sorry about that" }]),
+					});
+					return;
+				}
+				const message = createAssistantMessage([{ type: "text", text: "ok" }]);
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+
+		const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+		for await (const _event of loop) {
+			/* drain */
+		}
+		const messages = await loop.result();
+
+		expect(streamCalls).toBe(2);
+		const reminder = messages.find((m) => m.role === "user" && (m as { _ttsr_injected?: boolean })._ttsr_injected);
+		expect(reminder).toBeDefined();
+		const assistant = messages[messages.length - 1] as AssistantMessage;
+		expect(assistant.content[0]).toEqual({ type: "text", text: "ok" });
+	});
+
+	it("stops with [stop: ttsr] after exceeding TTSR retries", async () => {
+		let streamCalls = 0;
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			ttsrMatcher: {
+				reset: vi.fn(),
+				feed(_chunk, scope) {
+					if (scope === "assistant_text") {
+						return { name: "no-apology", message: "Do not apologize." };
+					}
+				},
+			},
+		};
+		const streamFn = () => {
+			streamCalls++;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const partial = createAssistantMessage([{ type: "text", text: "" }]);
+				stream.push({ type: "start", partial });
+				stream.push({
+					type: "text_delta",
+					contentIndex: 0,
+					delta: "sorry",
+					partial: createAssistantMessage([{ type: "text", text: "sorry" }]),
+				});
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: createAssistantMessage([{ type: "text", text: "sorry" }]),
+				});
+			});
+			return stream;
+		};
+
+		const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+		for await (const _event of loop) {
+			/* drain */
+		}
+		const messages = await loop.result();
+		expect(streamCalls).toBe(4); // 3 retries + final error turn still streams once more? Actually: initial + 3 retries = 4, then error without another stream
+		const last = messages[messages.length - 1] as AssistantMessage;
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toMatch(/\[stop: ttsr\]/);
+	});
+
+	it("synthesizes an error turn when the stream ends without a terminal event", async () => {
+		const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const partial = createAssistantMessage([{ type: "text", text: "partial" }]);
+				stream.push({ type: "start", partial });
+				stream.end();
+			});
+			return stream;
+		};
+
+		const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+		for await (const _event of loop) {
+			/* drain */
+		}
+		const messages = await loop.result();
+		const last = messages[messages.length - 1] as AssistantMessage;
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toMatch(/Stream ended without a terminal event/);
 	});
 });

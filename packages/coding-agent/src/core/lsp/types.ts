@@ -6,6 +6,7 @@
  */
 
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import type { LruMap } from "../lru-map.ts";
 
 // =============================================================================
 // Tool Details
@@ -353,7 +354,8 @@ export interface LspClient {
 	requestId: number;
 	diagnostics: Map<string, PublishedDiagnostics>;
 	diagnosticsVersion: number;
-	openFiles: Map<string, OpenFile>;
+	/** Open documents keyed by URI; capped via LRU in the client (see closeFile). */
+	openFiles: LruMap<string, OpenFile>;
 	pendingRequests: Map<number, PendingRequest>;
 	messageBuffer: Buffer;
 	/** Raw chunks awaiting coalesce into `messageBuffer` (avoids per-chunk O(B²) concat). */

@@ -6,6 +6,7 @@ import type { FusionSummaryData, FusionSummarySynthesisItem } from "../../../cor
 import type { CustomMessage } from "../../../core/messages.ts";
 import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { keyText } from "./keybinding-hints.ts";
 
 /**
  * Fusion flow lines (panel dispatch / member results / judge / writer) render
@@ -133,7 +134,8 @@ export class CustomMessageComponent extends Container {
 			this.removeChild(this.box);
 		}
 
-		// Fusion-summary: structured JSON payload → multi-line coloured timeline block.
+		// Fusion-summary: structured JSON payload → compact one-liner when collapsed,
+		// multi-line coloured timeline when expanded (Ctrl+O / app.tools.expand).
 		if (this.message.customType === FUSION_SUMMARY_CUSTOM_TYPE) {
 			let data: FusionSummaryData;
 			try {
@@ -148,10 +150,34 @@ export class CustomMessageComponent extends Container {
 
 			const container = new Container();
 
-			// --- Main line -------------------------------------------------------
 			// Member badges: ✓ (success) or ✗ (error) per member.
 			const badges = data.members.map((m) => theme.fg(m.ok ? "success" : "error", m.ok ? "✓" : "✗")).join("");
 
+			// Collapsed: short line + expand hint. Expanded: full judge/verify/synth detail.
+			if (!this._expanded) {
+				const nOk = data.members.filter((m) => m.ok).length;
+				const nFail = data.members.length - nOk;
+				let compact = `  ${badges}${theme.fg("muted", "  fusion  ")}${theme.fg("muted", `${nOk} ok`)}`;
+				if (nFail > 0) compact += theme.fg("error", ` · ${nFail} failed`);
+				if (data.judge) {
+					const j = data.judge;
+					const bits: string[] = [];
+					if (j.consensus > 0) bits.push(`${j.consensus}✓`);
+					if (j.contradictions > 0) bits.push(`${j.contradictions}≠`);
+					if (bits.length) compact += theme.fg("dim", ` · ${bits.join(" ")}`);
+				}
+				if (data.degraded) {
+					compact += theme.fg("warning", ` · ${data.degraded}`);
+				}
+				compact += theme.fg("dim", ` → ${data.synthId}`);
+				compact += ` ${theme.fg("dim", `(${keyText("app.tools.expand")} to expand)`)}`;
+				container.addChild(new TruncatedText(compact));
+				this.customComponent = container;
+				this.addChild(container);
+				return;
+			}
+
+			// --- Expanded main line ---------------------------------------------
 			// Per-advisor elapsed (rounded to seconds), joined by ·. A leading slot
 			// number disambiguates identical members (self-fusion of the same model).
 			const memberParts = data.members.map((m, i) => {
@@ -201,6 +227,7 @@ export class CustomMessageComponent extends Container {
 
 			// Synthesizer id.
 			mainLine += theme.fg("muted", ` → ${data.synthId}`);
+			mainLine += ` ${theme.fg("dim", `(${keyText("app.tools.expand")} to collapse)`)}`;
 
 			container.addChild(new TruncatedText(mainLine));
 

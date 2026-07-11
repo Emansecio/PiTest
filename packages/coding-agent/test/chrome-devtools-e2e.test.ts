@@ -1,7 +1,8 @@
 /**
  * Real-Chrome E2E for the chrome_devtools_* surface. Gated behind
  * PIT_CHROME_E2E=1 because it launches an actual Chrome (dedicated profile,
- * port 9224) — the default suite must stay hermetic and fast.
+ * ephemeral DevTools port via DevToolsActivePort) — the default suite must
+ * stay hermetic and fast.
  *
  *   PIT_CHROME_E2E=1 npx vitest --run test/chrome-devtools-e2e.test.ts
  *
@@ -83,7 +84,9 @@ suite("chrome_devtools real-Chrome E2E (PIT_CHROME_E2E=1)", () => {
 	});
 
 	afterAll(async () => {
+		const effectivePort = Number(mgr?.endpoint().split(":")[1] ?? CHROME_PORT);
 		mgr?.dispose();
+		killPort(effectivePort);
 		killPort(CHROME_PORT);
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 		fs.rmSync(uploadFile, { force: true });

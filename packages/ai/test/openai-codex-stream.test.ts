@@ -1710,4 +1710,67 @@ describe("openai-codex streaming", () => {
 		expect(connectTimerDelays).toContain(5_000);
 		expect(connectTimerDelays).not.toContain(60_000);
 	});
+
+	it("times out a hung WebSocket connect and falls back to SSE", async () => {
+		vi.useFakeTimers();
+		const token = mockToken();
+		const encoder = new TextEncoder();
+		const sse = buildSSEPayload({ status: "completed" });
+
+		class HangWebSocket {
+			addEventListener(_type: string, _listener: (event: unknown) => void): void {
+				// Never fires open/error/close — models a half-open upgrade.
+			}
+			removeEventListener(): void {}
+			send(): void {}
+			close(): void {}
+		}
+		vi.stubGlobal("WebSocket", HangWebSocket);
+
+		const fetchMock = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (!url.includes("/codex/responses")) {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			return new Response(
+				new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(encoder.encode(sse));
+						controller.close();
+					},
+				}),
+				{ status: 200, headers: { "content-type": "text/event-stream" } },
+			);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const resultPromise = streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			transport: "auto",
+			timeoutMs: 1_000,
+			maxRetries: 0,
+		}).result();
+
+		await vi.advanceTimersByTimeAsync(1_000);
+		const result = await resultPromise;
+		expect(result.stopReason).toBe("stop");
+		expect(fetchMock).toHaveBeenCalled();
+	});
 });

@@ -39,6 +39,8 @@ const RECOMMENDED_BADGE = " · recommended";
 const FREEFORM_ROW_LABEL = "Other — type custom answer…";
 const OPTION_DESC_INDENT = "      ";
 const COMMENT_PREFIX = "Note: ";
+/** Max option rows rendered at once; window centers on the selected index. */
+const MAX_VISIBLE_OPTIONS = 12;
 
 function cardTopBorder(width: number): string {
 	return defaultTheme.fg("cardBorder", `╭${"─".repeat(Math.max(0, width - 2))}╮`);
@@ -313,7 +315,20 @@ class AskPicker implements Component, Focusable {
 			lines.push(defaultTheme.fg("dim", countLabel));
 		}
 
-		for (let i = 0; i < this.options.length; i++) {
+		const optionCount = this.options.length;
+		let startIndex = 0;
+		let endIndex = optionCount;
+		if (optionCount > MAX_VISIBLE_OPTIONS) {
+			// Center the window on the selected option (freeform row → last option).
+			const selectedOptionIndex = this.index < optionCount ? this.index : Math.max(0, optionCount - 1);
+			startIndex = Math.max(
+				0,
+				Math.min(selectedOptionIndex - Math.floor(MAX_VISIBLE_OPTIONS / 2), optionCount - MAX_VISIBLE_OPTIONS),
+			);
+			endIndex = Math.min(startIndex + MAX_VISIBLE_OPTIONS, optionCount);
+		}
+
+		for (let i = startIndex; i < endIndex; i++) {
 			const opt = this.options[i];
 			if (!opt) continue;
 			const focused = i === this.index && this.mode === "list";
@@ -349,6 +364,13 @@ class AskPicker implements Component, Focusable {
 			} else {
 				lines.push(row);
 			}
+		}
+
+		if (startIndex > 0 || endIndex < optionCount) {
+			const up = startIndex > 0 ? "↑" : " ";
+			const down = endIndex < optionCount ? "↓" : " ";
+			const scrollText = `  ${up}${down} (${this.index + 1}/${this.rowCount})`;
+			lines.push(defaultTheme.fg("dim", truncateToWidth(scrollText, width, "")));
 		}
 
 		if (this.allowFreeform) {

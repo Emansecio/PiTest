@@ -254,11 +254,33 @@ export async function runFunctionalWebCheck(options: FunctionalWebCheckOptions):
 	let interactionsAttempted = 0;
 
 	try {
+		if (signal.aborted) {
+			return { status: "skipped", findings: [], reason: "aborted" };
+		}
 		const resolveUrl = options.resolveUrl ?? resolveFunctionalWebUrl;
-		resolved = await resolveUrl({
-			cwd: options.cwd,
-			lastVisualFile: options.lastVisualFile,
-			backgroundJobs: options.backgroundJobs,
+		// URL resolution has no built-in abort; race it so Esc/timeout unblocks
+		// even when probing ports or starting a preview server hangs.
+		resolved = await new Promise<ResolvedTarget | null>((resolve, reject) => {
+			const onAbort = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+			if (signal.aborted) {
+				onAbort();
+				return;
+			}
+			signal.addEventListener("abort", onAbort, { once: true });
+			void resolveUrl({
+				cwd: options.cwd,
+				lastVisualFile: options.lastVisualFile,
+				backgroundJobs: options.backgroundJobs,
+			}).then(
+				(value) => {
+					signal.removeEventListener("abort", onAbort);
+					resolve(value);
+				},
+				(err) => {
+					signal.removeEventListener("abort", onAbort);
+					reject(err);
+				},
+			);
 		});
 		if (!resolved || !isAllowedFunctionalWebUrl(resolved.url)) {
 			await resolved?.server?.close();

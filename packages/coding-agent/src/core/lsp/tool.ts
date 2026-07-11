@@ -11,6 +11,7 @@ import { readFile } from "node:fs/promises";
 import type { AgentTool } from "@pit/agent-core";
 import { type Static, Type } from "typebox";
 import { writeFileAtomic } from "../../utils/atomic-write.ts";
+import { mapWithConcurrency } from "../../utils/map-with-concurrency.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { runRenameTransaction } from "../refactor-transaction.ts";
 import { resolveToCwd } from "../tools/path-utils.ts";
@@ -71,6 +72,9 @@ import {
 // =============================================================================
 // Schema
 // =============================================================================
+
+/** Cap concurrent file reads when formatting many LSP locations / rechecking diagnostics. */
+const LSP_LOCATION_CONCURRENCY = 4;
 
 const LSP_ACTIONS = [
 	"diagnostics",
@@ -444,7 +448,9 @@ export function createLspToolDefinition(
 						if (locations.length === 0) {
 							output = `No ${label} found`;
 						} else {
-							const lines = await Promise.all(locations.map((loc) => formatLocationWithContext(loc, cwd)));
+							const lines = await mapWithConcurrency(locations, LSP_LOCATION_CONCURRENCY, (loc) =>
+								formatLocationWithContext(loc, cwd),
+							);
 							output = `Found ${locations.length} ${label}(s):\n${lines.join("\n")}`;
 						}
 						break;
@@ -471,8 +477,8 @@ export function createLspToolDefinition(
 						} else {
 							const contextual = result.slice(0, REFERENCE_CONTEXT_LIMIT);
 							const plain = result.slice(REFERENCE_CONTEXT_LIMIT);
-							const contextualLines = await Promise.all(
-								contextual.map((loc) => formatLocationWithContext(loc, cwd)),
+							const contextualLines = await mapWithConcurrency(contextual, LSP_LOCATION_CONCURRENCY, (loc) =>
+								formatLocationWithContext(loc, cwd),
 							);
 							const plainLines = plain.map((loc) => `  ${formatLocation(loc, cwd)}`);
 							const lines = plainLines.length
@@ -644,8 +650,8 @@ export function createLspToolDefinition(
 								},
 								recheckDiagnostics: async (uris) => {
 									const out = new Map<string, Diagnostic[]>();
-									const outcomes = await Promise.allSettled(
-										uris.map(async (u) => {
+									const outcomes = await mapWithConcurrency(uris, LSP_LOCATION_CONCURRENCY, async (u) => {
+										try {
 											const file = uriToFile(u);
 											const minVersion = client.diagnosticsVersion;
 											let content: string;
@@ -663,12 +669,13 @@ export function createLspToolDefinition(
 												expectedDocumentVersion,
 											});
 											return { uri: u, diagnostics };
-										}),
-									);
-									for (const outcome of outcomes) {
-										if (outcome.status === "fulfilled" && outcome.value) {
-											out.set(outcome.value.uri, outcome.value.diagnostics);
+										} catch {
+											// Match prior Promise.allSettled: one URI failure must not abort the rest.
+											return null;
 										}
+									});
+									for (const value of outcomes) {
+										if (value) out.set(value.uri, value.diagnostics);
 									}
 									return out;
 								},

@@ -42,4 +42,9 @@ export class LruMap<K, V> {
 	get size(): number {
 		return this.map.size;
 	}
+
+	/** Least-recently-used key (insertion-order head), or undefined if empty. */
+	peekOldestKey(): K | undefined {
+		return this.map.keys().next().value;
+	}
 }

@@ -75,7 +75,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
-import { detectCliAsync, inferCli } from "../../core/fusion/cli-runner.ts";
+import { detectCliAsync } from "../../core/fusion/cli-runner.ts";
 import { formatElapsed, parseTokenBudget } from "../../core/goal/goal-manager.ts";
 import { sliceSafe } from "../../utils/surrogate.ts";
 
@@ -93,6 +93,7 @@ export function extractChromeCommand(text: string): { matched: boolean; rest: st
 	return { matched: true, rest };
 }
 
+import { modeDisplayLabel } from "../../core/built-ins/permissions-extension.ts";
 import { getCurrentHindsightBank } from "../../core/hindsight/index.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
@@ -113,6 +114,7 @@ import {
 	probeOpenAICompatibleConnection,
 } from "../../core/openai-compatible-presets.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
+import { humanModeNotifyLabel } from "../../core/permissions/mode-labels.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -162,6 +164,7 @@ import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { FusionLiveComponent, type FusionLiveMember } from "./components/fusion-live.ts";
+import { FusionSetupComponent } from "./components/fusion-setup.ts";
 import { createGoalOverlay, type GoalOverlay } from "./components/goal-overlay.ts";
 import {
 	formatKeyText,
@@ -381,9 +384,9 @@ export class InteractiveMode {
 	// cache the result per CLI so /fusion runs the probe at most once per CLI per
 	// session instead of re-spawning on every invocation.
 	private readonly _cliDetectCache = new Map<string, boolean>();
-	// Set when the Fusion writer stage shows its bridging "Synthesizing…" loader.
-	// The Fusion turn never emits agent_end, so nothing else would stop that loader;
-	// the writer's own message_start consumes this flag to tear it down. Scoped so
+	// Set when Fusion is in the writer stage (compact strip kept until message_start).
+	// The Fusion turn never emits agent_end, so nothing else would clear this flag;
+	// the writer's own message_start consumes it to tear the strip down. Scoped so
 	// normal turns keep their persistent working loader untouched.
 	private _fusionWriterLoaderActive = false;
 	private workingMessage: string | undefined = undefined;
@@ -428,8 +431,10 @@ export class InteractiveMode {
 	private lastEscapeTime = 0;
 	// Defense-in-depth for interrupt: if the turn doesn't settle within this grace
 	// window after Esc/Ctrl+C, surface a stuck-turn escalation instead of leaving
-	// the spinner counting silently. Cleared when the turn settles (agent_end).
+	// the spinner counting silently. Cleared when the turn settles (agent_end / prompt_end).
 	private interruptWatchdogTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+	/** Turn-done line deferred until post-turn gates finish (`prompt_end`). */
+	private deferredTurnDone: ReturnType<typeof buildTurnDoneSnapshot> | null = null;
 	private anthropicSubscriptionWarningShown = false;
 
 	// Ephemeral status above the editor (statusContainer). Not part of the transcript.
@@ -628,6 +633,9 @@ export class InteractiveMode {
 				this.roleBeforePlan = undefined;
 			}
 			this.refreshModelIndicators();
+		});
+		this.runtimeHost.services.bindFusionNeedsSetup?.(() => {
+			void this.handleFusionCommand();
 		});
 		this.version = VERSION;
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
@@ -849,6 +857,7 @@ export class InteractiveMode {
 			const startupTips = [
 				"drag files into the terminal to attach them",
 				`${keyText("app.model.cycleForward")} cycles models · ${keyText("app.model.select")} picks one`,
+				`/fusion pairs two advisors · ${keyText("app.permission.cycle")} cycles plan/auto/fusion`,
 				`ask "how does ${APP_NAME} work?" — it can explain and extend itself`,
 				`${keyText("app.editor.external")} opens your editor for long prompts`,
 				`${keyText("app.thinking.cycle")} cycles the thinking level`,
@@ -1001,6 +1010,10 @@ export class InteractiveMode {
 
 		if (modelFallbackMessage) {
 			this.showWarning(modelFallbackMessage);
+		}
+
+		for (const warning of this.session.getLspStartupWarnings()) {
+			this.showWarning(warning);
 		}
 
 		void this.maybeWarnAboutAnthropicSubscriptionAuth();
@@ -1847,8 +1860,26 @@ export class InteractiveMode {
 	 */
 	private shouldRetireWorkingLoaderOnAgentEnd(willRetry: boolean): boolean {
 		if (willRetry) return false;
+		// Post-turn gates start AFTER agent_end; retiring here flashed "done" and
+		// then spun up "Functional web check…" / npm verify again — and Esc could
+		// not clear that spinner when the gate settled faster than the watchdog.
+		if (this.session.hasPendingPostTurnWork) return false;
 		if (this.session.isStreaming) return true;
 		return !this.session.isBusy;
+	}
+
+	/** Stop the working loader and flush a deferred turn-done line, if any. */
+	private settleWorkingLoaderAfterPrompt(): void {
+		this.clearInterruptWatchdog();
+		const deferred = this.deferredTurnDone;
+		this.deferredTurnDone = null;
+		if (this.loadingAnimation) {
+			this.stopWorkingLoader();
+		}
+		if (deferred && this.session.orchestration !== "fusion") {
+			this.appendTurnDoneLine(deferred);
+		}
+		this.ui.requestRender();
 	}
 
 	private ensureFusionLive(): void {
@@ -1867,14 +1898,12 @@ export class InteractiveMode {
 			this.footer.setFusionLiveActive(false);
 			this.clearStatusContainer();
 		}
-		// If the Fusion writer's bridging "Synthesizing…" loader is the active one,
-		// retire it too. By the writer stage the strip is already gone, so the block
-		// above is a no-op; this covers the interrupt path (Esc aborts the writer, so
-		// its message_start never fires to clear the loader). Scoped by the flag so a
-		// normal turn's working loader is never touched here.
+		// If Fusion was mid-writer (compact strip still up), clear the flag on dispose
+		// so an interrupt (Esc) that never reaches message_start doesn't leave a stale
+		// writer-active state. Scoped by the flag so a normal turn's working loader is
+		// never touched here.
 		if (this._fusionWriterLoaderActive) {
 			this._fusionWriterLoaderActive = false;
-			this.stopWorkingLoader();
 		}
 	}
 
@@ -2626,6 +2655,8 @@ export class InteractiveMode {
 			// Same as the bare-Esc path: a Fusion turn has no agent_end, so dispose
 			// its live strip + ticker explicitly when the whole task is stopped.
 			this.disposeFusionLive();
+			this.deferredTurnDone = null;
+			this.stopWorkingLoader();
 			this.showStatus("Interrupted");
 			this.armInterruptWatchdog();
 			return;
@@ -2659,6 +2690,11 @@ export class InteractiveMode {
 					// A Fusion turn returns before agent_end, so its live strip + ticker
 					// would leak when the user aborts mid-run. Tear it down explicitly.
 					this.disposeFusionLive();
+					// showStatus alone does not stop the working loader — without this,
+					// Esc during verification left "Functional web check…" spinning after
+					// the gate aborted (watchdog no-ops once isBusy clears).
+					this.deferredTurnDone = null;
+					this.stopWorkingLoader();
 					this.showStatus("Interrupted");
 					this.armInterruptWatchdog();
 				} else {
@@ -3139,6 +3175,7 @@ export class InteractiveMode {
 				// strip from the aborted Fusion run would be orphaned in the status band
 				// (the Fusion turn returns before agent_end). Idempotent.
 				this.disposeFusionLive();
+				this.deferredTurnDone = null;
 				this.pendingTools.clear();
 				this.activityStacker.reset();
 				this.lastAssistantComponent = null;
@@ -3174,10 +3211,6 @@ export class InteractiveMode {
 				this.refreshModelIndicators();
 				break;
 
-			case "fusion_phase":
-				this.setWorkingPhase(event.label);
-				break;
-
 			case "fusion_member": {
 				this.ensureFusionLive();
 				const member: FusionLiveMember = {
@@ -3207,21 +3240,11 @@ export class InteractiveMode {
 
 			case "fusion_stage":
 				if (event.stage === "writer") {
-					// The judge has handed off; the panel strip retires here and the
-					// writer streams into the transcript. Bridge the gap with a working
-					// loader so the UI doesn't look frozen on a slow synthesizer between
-					// the strip going away and the writer's first token. Build the loader
-					// directly: the Fusion turn bypasses agent.run(), so isStreaming is
-					// false and setWorkingVisible's streaming-gated path wouldn't create
-					// one. The writer's message_start retires it via _fusionWriterLoaderActive.
-					this.disposeFusionLive();
-					this.workingVisible = true;
-					if (!this.loadingAnimation) {
-						this.clearStatusContainer();
-						this.loadingAnimation = this.createWorkingLoader();
-						this.statusContainer.addChild(this.loadingAnimation);
-					}
-					this.setWorkingPhase("Synthesizing…");
+					// Keep the Fusion strip with a compact synthesizing header so the
+					// hand-off stays in-context (no swap to a generic loader).
+					this.ensureFusionLive();
+					this.fusionLive?.setSynth(event.synthId);
+					this.fusionLive?.setStage("writer");
 					this._fusionWriterLoaderActive = true;
 					this.ui.requestRender();
 				} else {
@@ -3245,13 +3268,12 @@ export class InteractiveMode {
 						this.updatePendingMessagesDisplay();
 						break;
 					case "assistant":
-						// Fusion writer hand-off: the bridging "Synthesizing…" loader set at
-						// fusion_stage:writer has no agent_end to clear it, so retire it here —
-						// the moment the writer's stream owns the frame — before the streaming
-						// block attaches. Flag-gated so normal turns keep their working loader.
+						// Fusion writer hand-off: retire the compact Fusion strip the moment
+						// the writer's stream owns the frame. Flag-gated so normal turns keep
+						// their working loader.
 						if (this._fusionWriterLoaderActive) {
 							this._fusionWriterLoaderActive = false;
-							this.stopWorkingLoader();
+							this.disposeFusionLive();
 						}
 						this.disposeActiveStreamingComponent();
 						this.streamingComponent = new AssistantMessageComponent(
@@ -3408,11 +3430,20 @@ export class InteractiveMode {
 				if (this.shouldRetireWorkingLoaderOnAgentEnd(event.willRetry)) {
 					const elapsedMs = this.getWorkingLoaderElapsedMs();
 					this.stopWorkingLoader();
+					this.deferredTurnDone = null;
 					if (this.session.orchestration !== "fusion") {
 						this.appendTurnDoneLine(
 							buildTurnDoneSnapshot(event.messages, elapsedMs, this.session.getContextUsage() ?? undefined),
 						);
 					}
+				} else if (!event.willRetry && this.session.orchestration !== "fusion") {
+					// Defer the done line until prompt_end so verification / pending
+					// checks don't flash "done" under a still-running spinner.
+					this.deferredTurnDone = buildTurnDoneSnapshot(
+						event.messages,
+						this.getWorkingLoaderElapsedMs(),
+						this.session.getContextUsage() ?? undefined,
+					);
 				}
 				this.disposeActiveStreamingComponent();
 				for (const component of this.pendingTools.values()) {
@@ -3437,6 +3468,10 @@ export class InteractiveMode {
 				await this.checkShutdownRequested();
 
 				this.ui.requestRender();
+				break;
+
+			case "prompt_end":
+				this.settleWorkingLoaderAfterPrompt();
 				break;
 
 			case "compaction_start": {
@@ -3519,7 +3554,6 @@ export class InteractiveMode {
 						event.attempt > 1
 							? `Functional web check${event.url ? ` (${event.url})` : ""} — attempt ${event.attempt}…`
 							: `Functional web check${event.url ? ` (${event.url})` : ""}…`;
-					this.showStatus(label);
 					if (this.workingVisible && !this.loadingAnimation) {
 						this.clearStatusContainer();
 						this.loadingAnimation = this.createWorkingLoader();
@@ -3527,14 +3561,14 @@ export class InteractiveMode {
 					}
 					this.setWorkingPhase(label);
 				} else if (event.phase === "passed") {
-					this.showStatus(`✓ Functional web check passed${event.url ? ` — ${event.url}` : ""}`, (text) =>
-						theme.fg("success", text),
-					);
+					this.setWorkingPhase(`✓ Functional web check passed${event.url ? ` — ${event.url}` : ""}`);
 				} else if (event.phase === "skipped") {
 					// Silent skip in TUI — fail-open paths (no Chrome / not web) should not alarm.
+					// Keep the loader; prompt_end retires it with the deferred turn-done line.
 				} else if (event.willRetry) {
-					this.showStatus(`✗ Functional web check failed — fixing…`, (text) => theme.fg("warning", text));
+					this.setWorkingPhase("✗ Functional web check failed — fixing…");
 				} else {
+					this.stopWorkingLoader();
 					this.showError(
 						`✗ Functional web check still failing after ${event.maxAttempts} fix attempt(s) — reported unverified.`,
 					);
@@ -3550,7 +3584,6 @@ export class InteractiveMode {
 						event.attempt > 1
 							? `Verifying (${event.command}) — attempt ${event.attempt}…`
 							: `Verifying (${event.command})…`;
-					this.showStatus(label);
 					// Bridge the post-turn gap like Fusion's "Synthesizing…" path: keep the
 					// working loader alive with an accurate phase so the UI doesn't look
 					// frozen on "Thinking…" while npm test / tsc runs.
@@ -3561,12 +3594,11 @@ export class InteractiveMode {
 					}
 					this.setWorkingPhase(label);
 				} else if (event.phase === "passed") {
-					this.showStatus(`✓ Verified — ${event.command} passed`, (text) => theme.fg("success", text));
+					this.setWorkingPhase(`✓ Verified — ${event.command} passed`);
 				} else if (event.willRetry) {
-					this.showStatus(`✗ ${event.command} failed (exit ${event.exitCode ?? "?"}) — fixing…`, (text) =>
-						theme.fg("warning", text),
-					);
+					this.setWorkingPhase(`✗ ${event.command} failed (exit ${event.exitCode ?? "?"}) — fixing…`);
 				} else {
+					this.stopWorkingLoader();
 					this.showError(
 						`✗ ${event.command} still failing after ${event.maxAttempts} fix attempt(s) — reported unverified.`,
 					);
@@ -3819,7 +3851,13 @@ export class InteractiveMode {
 
 	private clearStatusContainer(): void {
 		// Container wipe already drops the Text child — dispose timers without
-		// a second removeChild.
+		// a second removeChild. Also drop the loader ref: clear() removes it from
+		// the tree but does not stop its ticker; leaving the ref set blocked
+		// recreate paths and left Esc/status updates fighting an orphan spinner.
+		if (this.loadingAnimation) {
+			this.loadingAnimation.stop();
+			this.loadingAnimation = undefined;
+		}
 		this.ephemeralStatus.dispose();
 		this.statusContainer.clear();
 		this.ephemeralStatusText = undefined;
@@ -4147,6 +4185,8 @@ export class InteractiveMode {
 			this.restoreQueuedMessagesToEditor();
 			this.session.interrupt();
 			this.disposeFusionLive();
+			this.deferredTurnDone = null;
+			this.stopWorkingLoader();
 			this.showStatus("Interrupted");
 			this.showCtrlCHint();
 			this.armInterruptWatchdog();
@@ -5098,6 +5138,8 @@ export class InteractiveMode {
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
 					warnings: this.settingsManager.getWarnings(),
+					fusionVerify: this.settingsManager.getFusionSettings().verify,
+					fusionBrief: this.settingsManager.getFusionSettings().brief,
 				},
 				{
 					onAutoCompactChange: (enabled) => {
@@ -5161,7 +5203,9 @@ export class InteractiveMode {
 					onThemePreview: (themeName) => {
 						const result = setTheme(themeName, true);
 						if (result.success) {
-							this.ui.invalidate();
+							// Preview: skip full ui.invalidate() (cascades all children).
+							// Clear markdown cache + loader suffix and request a differential render.
+							this._cachedMarkdownTheme = undefined;
 							this.invalidateLoaderInterruptSuffix();
 							this.ui.requestRender();
 						}
@@ -5207,6 +5251,12 @@ export class InteractiveMode {
 					},
 					onWarningsChange: (warnings) => {
 						this.settingsManager.setWarnings(warnings);
+					},
+					onFusionVerifyChange: (enabled) => {
+						this.settingsManager.setFusionFlags({ verify: enabled });
+					},
+					onFusionBriefChange: (enabled) => {
+						this.settingsManager.setFusionFlags({ brief: enabled });
 					},
 					onCancel: () => {
 						done();
@@ -5376,7 +5426,9 @@ export class InteractiveMode {
 		if (await this.detectCliCached("codex")) clis.push("codex");
 		if (await this.detectCliCached("claude")) clis.push("claude");
 		if (clis.length === 0) {
-			this.showError("Fusion needs the codex and/or claude CLI on PATH.");
+			this.showError(
+				"Fusion needs the codex and/or claude CLI on PATH. Install at least one, then run /fusion again.",
+			);
 			return;
 		}
 		const providers = new Set<string>();
@@ -5384,39 +5436,51 @@ export class InteractiveMode {
 		if (clis.includes("codex")) providers.add("openai-codex");
 		const candidates = this.session.modelRegistry.getAll().filter((m) => providers.has(m.provider));
 		if (candidates.length === 0) {
-			this.showError("No installed-CLI models available for Fusion.");
+			const missing = clis.map((c) => (c === "claude" ? "anthropic" : "openai-codex")).join(" / ");
+			this.showError(
+				`No installed-CLI models available for Fusion (${missing}). Use /login to add providers, then /fusion.`,
+			);
 			return;
 		}
-		const labels = candidates.map((m) => `${m.id}  (${inferCli(m.provider)})`);
 
-		// The active session model is the synthesizer: it judges both panel answers
-		// and writes the merged result. Surface that in the selector titles so the
-		// panel picks read as "two advisors", not "two models that answer".
 		const synthId = this.session.model?.id ?? "active model";
-		const pickA = await this.showExtensionSelector(
-			`Fusion · slot A — pick advisor (your active model ${synthId} judges & writes)`,
-			labels,
-		);
-		if (pickA === undefined) return;
-		const pickB = await this.showExtensionSelector(
-			`Fusion · slot B — pick advisor (your active model ${synthId} judges & writes)`,
-			labels,
-		);
-		if (pickB === undefined) return;
+		const fusion = this.settingsManager.getFusionSettings();
 
-		const modelA = candidates[labels.indexOf(pickA)];
-		const modelB = candidates[labels.indexOf(pickB)];
-		const cliA = inferCli(modelA.provider);
-		const cliB = inferCli(modelB.provider);
-		if (cliA === undefined || cliB === undefined) {
-			this.showError("Selected model is not driven by an installed CLI.");
-			return;
-		}
-		this.settingsManager.setFusionPanel([
-			{ cli: cliA, model: modelA.id },
-			{ cli: cliB, model: modelB.id },
-		]);
-		this.showStatus(`Fusion: ${modelA.id} + ${modelB.id} → judged/written by ${synthId}`);
+		this.showSelector((done) => {
+			const selector = new FusionSetupComponent(
+				this.ui,
+				synthId,
+				candidates,
+				{ verify: fusion.verify, brief: fusion.brief, panel: fusion.panel },
+				(result) => {
+					this.settingsManager.setFusionPanel([
+						{ cli: result.advisors[0].cli, model: result.advisors[0].model.id },
+						{ cli: result.advisors[1].cli, model: result.advisors[1].model.id },
+					]);
+					this.settingsManager.setFusionFlags({ verify: result.verify, brief: result.brief });
+					// Match Alt+P Fusion·Plan: activate orchestration + plan (read-only) mode.
+					this.runtimeHost.services.permissionChecker.updateMode("plan");
+					this.session.setOrchestration("fusion");
+					// updateMode alone does not fire bindPermissionModeChange — notify so
+					// role swap / editor border / isPlanPermissionMode stay in sync.
+					this.runtimeHost.services.notifyPermissionModeChange?.("plan");
+					this.setExtensionStatus(
+						"permissions",
+						`permissions: ${modeDisplayLabel(this.runtimeHost.services.permissionChecker, "fusion")}`,
+					);
+					this.refreshModelIndicators();
+					done();
+					const a = result.advisors[0].model.id;
+					const b = result.advisors[1].model.id;
+					this.showStatus(`${humanModeNotifyLabel("fusion", "plan")} · synth: ${synthId} · advisors: ${a} + ${b}`);
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
 	}
 
 	private showModelSelector(initialSearchInput?: string): void {
@@ -5668,7 +5732,7 @@ export class InteractiveMode {
 
 				this.sessionManager.getSessionFile(),
 			);
-			return { component: selector, focus: selector };
+			return { component: selector, focus: selector.getSessionList() };
 		});
 	}
 

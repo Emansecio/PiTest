@@ -272,11 +272,24 @@ export class PlanManager {
 	 * exists yet this behaves like `propose` (creates v1). Throws on an invalid
 	 * DAG, leaving the previous version intact. When `brief` is omitted the
 	 * previous version's brief is inherited so the model does not lose context by
-	 * forgetting to re-pass it.
+	 * forgetting to re-pass it. Steps that keep the same `id` and were `done`
+	 * inherit that status unless the caller passes an explicit `status`.
 	 */
 	revise(steps: PlanStepInput[], brief?: string): PlanVersion {
 		const normalized = validateSteps(steps);
 		const prev = this.versions[this.versions.length - 1];
+		if (prev) {
+			const prevById = new Map(prev.steps.map((s) => [s.id, s]));
+			const explicitStatus = new Set(
+				steps.filter((s) => s.status !== undefined).map((s) => (typeof s.id === "string" ? s.id.trim() : "")),
+			);
+			for (const step of normalized) {
+				if (explicitStatus.has(step.id)) continue;
+				if (prevById.get(step.id)?.status === "done") {
+					step.status = "done";
+				}
+			}
+		}
 		const clampedBrief = brief?.trim() ? clamp(brief, BRIEF_MAX) : prev?.brief;
 		const nextVersion = this.currentVersion() + 1;
 		const version: PlanVersion = { version: nextVersion, steps: normalized, brief: clampedBrief };
@@ -290,13 +303,19 @@ export class PlanManager {
 	/**
 	 * Mark a step done IN PLACE on the current version (no new version — status
 	 * progress is not a re-plan). Returns the updated step or undefined if the id
-	 * is unknown / no plan exists.
+	 * is unknown / no plan exists. Throws PlanValidationError when `dependsOn`
+	 * are not all done.
 	 */
 	stepDone(id: string): PlanStep | undefined {
 		const v = this.versions[this.versions.length - 1];
 		if (!v) return undefined;
 		const step = v.steps.find((s) => s.id === id);
 		if (!step) return undefined;
+		const statusById = new Map(v.steps.map((s) => [s.id, s.status]));
+		const unmet = step.dependsOn.filter((d) => statusById.get(d) !== "done");
+		if (unmet.length > 0) {
+			throw new PlanValidationError(`Cannot mark step ${id} done: unmet dependsOn: ${unmet.join(", ")}.`);
+		}
 		step.status = "done";
 		this.dirty = true;
 		this.maybeArchiveIfComplete();
@@ -384,19 +403,31 @@ export class PlanManager {
 	 * (all steps done) — stops paying tokens for a finished DAG. Use `plan show`
 	 * / session entry / `.pit/plans/` for recall. Compaction survival still holds
 	 * while the plan is active (mirrors TodoManager).
+	 *
+	 * When `permissionMode` is `"plan"`, wording is planning/read-only so it does
+	 * not conflict with the `<plan_mode>` READ-ONLY section.
 	 */
-	systemPromptSection(): string {
+	systemPromptSection(opts?: { permissionMode?: "plan" | "auto" }): string {
 		if (this.archived) return "";
 		const v = this.versions[this.versions.length - 1];
 		if (!v) return "";
 		const { done, total } = this.counts();
-		const lines = [
-			"<plan>",
-			`You are executing a structured plan (v${v.version}, ${done}/${total} steps done). Keep it current with the \`plan\` tool:`,
-			"- Mark a step done with `plan step_done` the moment it is finished.",
-			"- Use `plan revise` to re-shape the DAG (adds a new version, keeps history); do not silently drift.",
-			"- Honor `dependsOn`: do not start a step before its dependencies are done.",
-		];
+		const planning = opts?.permissionMode === "plan";
+		const lines = planning
+			? [
+					"<plan>",
+					`You are refining a structured plan (v${v.version}, ${done}/${total} steps). The session is READ-ONLY — do not execute edits. Keep the DAG current with the \`plan\` tool:`,
+					"- Use `plan revise` to re-shape the DAG as understanding improves; do not silently drift.",
+					"- Honor `dependsOn` when ordering steps.",
+					"- When ready, present for approval with `exit_plan`.",
+				]
+			: [
+					"<plan>",
+					`You are executing a structured plan (v${v.version}, ${done}/${total} steps done). Keep it current with the \`plan\` tool:`,
+					"- Mark a step done with `plan step_done` the moment it is finished.",
+					"- Use `plan revise` to re-shape the DAG (adds a new version, keeps history); do not silently drift.",
+					"- Honor `dependsOn`: do not start a step before its dependencies are done.",
+				];
 		if (v.brief) {
 			const truncated = truncateWithEllipsis(v.brief, BRIEF_PROMPT_MAX);
 			lines.push("brief:", truncated);
@@ -429,7 +460,7 @@ export class PlanManager {
 		const section = lines.join("\n");
 		return section.length <= PLAN_PROMPT_MAX
 			? section
-			: `${section.slice(0, PLAN_PROMPT_MAX - "\n</plan>".length - 1)}â€¦\n</plan>`;
+			: `${truncateWithEllipsis(section, PLAN_PROMPT_MAX - "\n</plan>".length)}\n</plan>`;
 	}
 }
 

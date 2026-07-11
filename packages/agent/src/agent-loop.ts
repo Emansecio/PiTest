@@ -14,6 +14,7 @@ import {
 	validateToolArguments,
 } from "@pit/ai";
 import { buildOverthinkReminderMessage, type OverthinkGuardConfig, OverthinkTracker } from "./overthink-guard.ts";
+import { stableArgsFingerprint } from "./stable-args-fingerprint.ts";
 import { appendHintsToContent } from "./tool-error-hint-registry.ts";
 import { appendRepairNoteToContent, buildRepairNote } from "./tool-repair-note.ts";
 import type {
@@ -323,7 +324,11 @@ async function runLoop(
 	const maxTurns = initialConfig.maxTurns ?? DEFAULT_MAX_TURNS;
 	let turnCount = 0;
 	// Check for steering messages at start (user may have typed while waiting)
-	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
+	const drainSteering = async (): Promise<AgentMessage[]> => {
+		const getSteering = config.getSteeringMessages ?? config.getQueuedMessages;
+		return (await getSteering?.()) || [];
+	};
+	let pendingMessages: AgentMessage[] = await drainSteering();
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
@@ -518,7 +523,7 @@ async function runLoop(
 				return;
 			}
 
-			pendingMessages = (await config.getSteeringMessages?.()) || [];
+			pendingMessages = await drainSteering();
 		}
 
 		// Agent would stop here. Check for follow-up messages.
@@ -1267,16 +1272,18 @@ function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall)
 	};
 }
 
-function stableArgsFingerprint(value: unknown): string {
-	if (Array.isArray(value)) {
-		return `[${value.map(stableArgsFingerprint).join(",")}]`;
-	}
-	if (typeof value === "object" && value !== null) {
-		const record = value as Record<string, unknown>;
-		const keys = Object.keys(record).sort();
-		return `{${keys.map((key) => `${JSON.stringify(key)}:${stableArgsFingerprint(record[key])}`).join(",")}}`;
-	}
-	return JSON.stringify(value);
+function trackArgsMutation<T>(args: T, onMutate: () => void): T {
+	if (args === null || typeof args !== "object") return args;
+	return new Proxy(args as object, {
+		set(target, prop, value, receiver) {
+			onMutate();
+			return Reflect.set(target, prop, value, receiver);
+		},
+		deleteProperty(target, prop) {
+			onMutate();
+			return Reflect.deleteProperty(target, prop);
+		},
+	}) as T;
 }
 
 async function prepareToolCall(
@@ -1337,13 +1344,19 @@ async function prepareToolCall(
 
 		let finalArgs = validateToolArguments(tool, activeToolCall);
 		if (config.beforeToolCall) {
+			const argsMutation = { mutated: false };
+			const markArgsMutated = () => {
+				argsMutation.mutated = true;
+			};
 			const argsFingerprintBefore = stableArgsFingerprint(finalArgs);
 			const beforeResult = await config.beforeToolCall(
 				{
 					assistantMessage,
 					toolCall: activeToolCall,
-					args: finalArgs,
+					args: trackArgsMutation(finalArgs, markArgsMutated),
 					context: currentContext,
+					argsMutation,
+					markArgsMutated,
 				},
 				signal,
 			);
@@ -1362,7 +1375,8 @@ async function prepareToolCall(
 					isError: true,
 				};
 			}
-			if (stableArgsFingerprint(finalArgs) !== argsFingerprintBefore) {
+			// Skip the second fingerprint on the no-op path (most tool calls).
+			if (argsMutation.mutated && stableArgsFingerprint(finalArgs) !== argsFingerprintBefore) {
 				try {
 					finalArgs = validateToolArguments(tool, { ...activeToolCall, arguments: finalArgs });
 				} catch (revalidationError) {

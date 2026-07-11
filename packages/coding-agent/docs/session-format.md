@@ -24,7 +24,7 @@ Sessions have a version field in the header:
 - **Version 2**: Tree structure with `id`/`parentId` linking
 - **Version 3**: Renamed `hookMessage` role to `custom` (extensions unification)
 
-Existing sessions are automatically migrated to the current version (v3) when loaded.
+Existing sessions are automatically migrated to the current version (v3) when loaded via `SessionManager` (file rewrite). External JSONL parsers that read files without Pit should treat `role: "hookMessage"` as an alias of `custom` until `version >= 3`. `buildSessionContext` also normalizes `hookMessage` → `custom` on the read path.
 
 ## Source Files
 

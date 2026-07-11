@@ -41,6 +41,13 @@ const DEVICE_CODE_MIN_INTERVAL_MS = 1_000;
 const DEVICE_CODE_SLOW_DOWN_INCREMENT_MS = 5_000;
 const DEVICE_CODE_DEFAULT_EXPIRES_MS = 5 * 60 * 1000;
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3_000;
+/** Hard timeout for every xAI OAuth fetch (compose with caller signal when present). */
+const XAI_FETCH_TIMEOUT_MS = 30_000;
+
+function xaiFetchSignal(caller?: AbortSignal): AbortSignal {
+	const timeout = AbortSignal.timeout(XAI_FETCH_TIMEOUT_MS);
+	return caller ? AbortSignal.any([caller, timeout]) : timeout;
+}
 
 /** Public console / Chat Completions API (Grok 4.5, API keys, SuperGrok OAuth). */
 const XAI_API_BASE = "https://api.x.ai/v1";
@@ -125,7 +132,7 @@ export function buildXaiAuthorizeUrl(pkce: { challenge: string }, state: string,
 	return `${AUTHORIZE_URL}?${params.toString()}`;
 }
 
-async function exchangeAuthorizationCode(code: string, verifier: string): Promise<TokenResult> {
+async function exchangeAuthorizationCode(code: string, verifier: string, signal?: AbortSignal): Promise<TokenResult> {
 	const response = await fetch(TOKEN_URL, {
 		method: "POST",
 		headers: authHeaders(),
@@ -136,6 +143,7 @@ async function exchangeAuthorizationCode(code: string, verifier: string): Promis
 			client_id: XAI_OAUTH_CLIENT_ID,
 			code_verifier: verifier,
 		}).toString(),
+		signal: xaiFetchSignal(signal),
 	});
 	if (!response.ok) {
 		const detail = await response.text().catch(() => "");
@@ -152,7 +160,7 @@ async function exchangeAuthorizationCode(code: string, verifier: string): Promis
 	}
 }
 
-async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
+async function refreshAccessToken(refreshToken: string, signal?: AbortSignal): Promise<TokenResult> {
 	const response = await fetch(TOKEN_URL, {
 		method: "POST",
 		headers: authHeaders(),
@@ -161,6 +169,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
 			refresh_token: refreshToken,
 			client_id: XAI_OAUTH_CLIENT_ID,
 		}).toString(),
+		signal: xaiFetchSignal(signal),
 	});
 	if (!response.ok) {
 		const detail = await response.text().catch(() => "");
@@ -174,7 +183,7 @@ async function refreshAccessToken(refreshToken: string): Promise<TokenResult> {
 	}
 }
 
-export async function requestXaiDeviceCode(): Promise<DeviceCodeResponse> {
+export async function requestXaiDeviceCode(signal?: AbortSignal): Promise<DeviceCodeResponse> {
 	const response = await fetch(DEVICE_AUTHORIZATION_URL, {
 		method: "POST",
 		headers: authHeaders(),
@@ -182,6 +191,7 @@ export async function requestXaiDeviceCode(): Promise<DeviceCodeResponse> {
 			client_id: XAI_OAUTH_CLIENT_ID,
 			scope: SCOPE,
 		}).toString(),
+		signal: xaiFetchSignal(signal),
 	});
 	if (!response.ok) {
 		const detail = await response.text().catch(() => "");
@@ -217,6 +227,7 @@ export async function pollXaiDeviceCodeToken(
 				client_id: XAI_OAUTH_CLIENT_ID,
 				device_code: device.device_code,
 			}).toString(),
+			signal: xaiFetchSignal(options.signal),
 		});
 		if (response.ok) {
 			const tokens = (await response.json()) as TokenResponse;
@@ -434,7 +445,7 @@ async function loginXaiBrowser(callbacks: OAuthLoginCallbacks): Promise<OAuthCre
 		if (!code) throw new Error("Missing authorization code");
 		if (callbacks.signal?.aborted) throw new Error("Login cancelled");
 
-		const tokenResult = await exchangeAuthorizationCode(code, pkce.verifier);
+		const tokenResult = await exchangeAuthorizationCode(code, pkce.verifier, callbacks.signal);
 		if (tokenResult.type !== "success") throw new Error(tokenResult.message);
 		return {
 			access: tokenResult.access,
@@ -448,7 +459,7 @@ async function loginXaiBrowser(callbacks: OAuthLoginCallbacks): Promise<OAuthCre
 
 async function loginXaiDevice(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
 	callbacks.onProgress?.("Requesting device code from xAI…");
-	const device = await requestXaiDeviceCode();
+	const device = await requestXaiDeviceCode(callbacks.signal);
 	const browserUrl = device.verification_uri_complete ?? device.verification_uri;
 	callbacks.onAuth({
 		url: browserUrl,
@@ -527,8 +538,8 @@ export async function loginXai(callbacks: OAuthLoginCallbacks): Promise<OAuthCre
 	return loginXaiBrowser(callbacks);
 }
 
-export async function refreshXaiToken(refreshToken: string): Promise<OAuthCredentials> {
-	const result = await refreshAccessToken(refreshToken);
+export async function refreshXaiToken(refreshToken: string, signal?: AbortSignal): Promise<OAuthCredentials> {
+	const result = await refreshAccessToken(refreshToken, signal);
 	if (result.type !== "success") throw new Error(result.message);
 	return {
 		access: result.access,

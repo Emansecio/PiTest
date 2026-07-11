@@ -24,7 +24,6 @@ export type AgentSessionEvent =
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "orchestration_changed"; orchestration: Orchestration }
-	| { type: "fusion_phase"; label: string }
 	| {
 			type: "fusion_member";
 			/** Panel slot (0-based). Distinguishes identical members in a self-fusion
@@ -103,7 +102,9 @@ export type AgentSessionEvent =
 	  }
 	| { type: "subagent_start"; handle: string }
 	| { type: "subagent_progress"; handle: string; turn: number; lastTool?: string }
-	| { type: "subagent_complete"; handle: string; status: "done" | "error"; turns?: number; totalTokens?: number };
+	| { type: "subagent_complete"; handle: string; status: "done" | "error"; turns?: number; totalTokens?: number }
+	/** Fired when `prompt()` finishes post-turn gates (verification / pending checks / goal loop). */
+	| { type: "prompt_end" };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;

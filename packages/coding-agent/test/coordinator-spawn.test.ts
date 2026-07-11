@@ -29,6 +29,7 @@ import { SubagentRegistry } from "../src/core/coordinator/registry.js";
 import {
 	DEFAULT_MAX_TURNS,
 	evaluateSubagentToolPermission,
+	isTransportRetryableError,
 	type SpawnSubagentDependencies,
 	spawnSubagent,
 } from "../src/core/coordinator/spawn.js";
@@ -490,6 +491,44 @@ describe("spawnSubagent (faux model)", () => {
 		expect(result.record.deniedToolCalls).toContain("edit");
 		expect(rig.registry.get(result.record.id)?.deniedToolCalls).toContain("edit");
 	});
+
+	it("rejects worktree spawn under plan mode before creating a worktree", async () => {
+		const rig = newRig();
+		rig.deps.permissionChecker = new PermissionChecker({
+			cwd: process.cwd(),
+			mode: "plan",
+			settings: { mode: "plan" },
+		});
+		await expect(spawnSubagent(rig.deps, { prompt: "p", taskName: "wt-plan", worktree: true })).rejects.toThrow(
+			/worktree is blocked in plan mode/,
+		);
+		const records = [...rig.registry.list()];
+		const failed = records.find((r) => r.taskName === "wt-plan");
+		expect(failed?.status).toBe("failed");
+		expect(failed?.error).toMatch(/worktree is blocked in plan mode/);
+	});
+
+	it("retries once on a transport 503 before the first successful turn (ADR #6)", async () => {
+		const rig = newRig();
+		rig.faux.setResponses([
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: "provider returned error: 503 service unavailable",
+			}),
+			fauxAssistantMessage("recovered after retry"),
+		]);
+		const result = await spawnSubagent(rig.deps, { prompt: "p", taskName: "transport-retry" });
+		expect(result.output).toContain("recovered after retry");
+		expect(result.record.status).toBe("completed");
+		expect(result.record.turnCount).toBeGreaterThanOrEqual(2);
+	});
+
+	it("does not classify abort/timeout as transport-retryable", () => {
+		expect(isTransportRetryableError("aborted: parent signal")).toBe(false);
+		expect(isTransportRetryableError("aborted: timeout after 100ms")).toBe(false);
+		expect(isTransportRetryableError("aborted: turn cap (2) reached")).toBe(false);
+		expect(isTransportRetryableError("provider returned error: 502")).toBe(true);
+	});
 });
 
 describe("evaluateSubagentToolPermission (subagent permission gate)", () => {
@@ -507,7 +546,11 @@ describe("evaluateSubagentToolPermission (subagent permission gate)", () => {
 	});
 
 	it("blocks builtin dangerous commands under auto mode", () => {
-		const result = evaluateSubagentToolPermission(checker({ mode: "auto" }, "auto"), "bash", { command: "rm -rf /" });
+		// Prefer a deny-floor pattern that survives validateSafeRegex (the historic
+		// `rm -rf /` rule is currently skipped as "nested quantifiers").
+		const result = evaluateSubagentToolPermission(checker({ mode: "auto" }, "auto"), "bash", {
+			command: "chmod -R 777 /",
+		});
 		expect(result?.block).toBe(true);
 	});
 

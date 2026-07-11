@@ -135,6 +135,7 @@ export function createExitPlanToolDefinition(
 			"Call `exit_plan` only after building the plan with `plan propose`; never present an un-built plan.",
 		],
 		parameters: exitPlanSchema,
+		sideEffect: "none",
 		async execute(_toolCallId, input) {
 			const title = truncateWithEllipsis((input.title ?? "").trim(), TITLE_MAX);
 			const summary = input.summary?.trim() ? truncateWithEllipsis(input.summary.trim(), SUMMARY_MAX) : undefined;

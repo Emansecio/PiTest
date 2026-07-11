@@ -25,10 +25,11 @@ coluna **Convenção truthy**.
 | `PIT_NO_PROACTIVE_PRUNE` | Desativa o pruning proativo de saídas de ferramentas antigas enquanto o contexto está acima do floor. | OFF | `agent-session-compaction.ts:101` · `agent-session.ts:3390` | `isTruthyEnvFlag` |
 | `PIT_PROACTIVE_PRUNE_FLOOR` | Limite mínimo de tokens (absoluto) abaixo do qual o pruning proativo não age. Override numérico; se ausente usa `max(64 000, janela × 0.25)`. | `max(64 000, janela × 0.25)` | `agent-session-compaction.ts:102` · `agent-session.ts:3399` | numérica |
 | `PIT_NO_LIVE_SUPERSEDE` | Desativa a supressão em tempo real de resultados de ferramentas antigas ainda em streaming quando a mesma ferramenta retorna um resultado mais recente. | OFF | `agent-session-live-prune.ts:44` | `isTruthyEnvFlag` |
-| `PIT_NO_LIVE_ARG_ELISION` | Desativa a elision de argumentos de chamadas de ferramentas mutantes durante streaming (reduz tokens de saída visíveis). | OFF | `agent-session-live-prune.ts:49` | `isTruthyEnvFlag` |
+| `PIT_NO_LIVE_ARG_ELISION` | Desativa a elision de argumentos de chamadas de ferramentas mutantes no wire (`_pruneContextForProvider` / prepareNextTurn). | OFF | `agent-session.ts` · `agent-session-live-prune.ts` | `isTruthyEnvFlag` |
 | `PIT_NO_THINKING_CAP` | Desativa o cap dinâmico de tokens de raciocínio estendido (`thinking`) quando o contexto está sob pressão. | OFF | `agent-session.ts:3389` | `isTruthyEnvFlag` |
 | `PIT_NO_DEFER_HISTORY` | Desativa o diferimento do histórico de chamadas de ferramentas (`recall_tool_output`) — ferramentas de recall de saída de ferramentas são removidas do catálogo. | OFF | `agent-session.ts:1119,1272` | `isTruthyEnvFlag` |
 | `PIT_NO_RECALL_HISTORY` | Desativa o recall de histórico de conversa (`recall_history`) — ferramenta de recall de turnos é removida do catálogo. | OFF | `agent-session.ts:1120,1290` · `compaction/compaction.ts:2425` | `isTruthyEnvFlag` |
+| `PIT_TRANSFORM_CONTEXT_TIMEOUT_MS` | Timeout (ms) do hook `transformContext` no agent-loop. Timeout **falha o turn** (não skip). `0` desativa o timeout. | `60000` | `packages/agent/src/agent-loop.ts` | numérica (`0` = off) |
 | `PIT_NO_STRUCTURED_SUMMARY_OUTPUT` | Força o resumo de compactação a ser texto simples em vez de saída estruturada (JSON/XML). | OFF | `compaction/compaction.ts:1619` | `isTruthyEnvFlag` |
 | `PIT_NO_DELTA_SUMMARIZATION` | Desativa a sumarização delta (resumo incremental de apenas o span novo desde a última compactação), forçando resumo completo. | OFF | `compaction/compaction.ts:1731` | `isTruthyEnvFlag` |
 | `PIT_NO_STRUCTURAL_COMPACTION` | Força o caminho sempre-LLM na compactação, desativando o atalho de compactação estrutural (sem chamada LLM) para sessões pequenas. | OFF | `compaction/compaction.ts:2212` | `isTruthyEnvFlag` |
@@ -55,11 +56,13 @@ coluna **Convenção truthy**.
 | `PIT_FREQ_OUTLINE` | Opt-in: inclui outlines de símbolos dos hot files no dynamic suffix do system prompt. | OFF | `agent-session.ts:1335` · `system-prompt.ts:62` | `isTruthyEnvFlag` |
 | `PIT_NO_FUNCTIONAL_WEB` | Desativa o gate nativo de DoD funcional web (navigate/a11y/click/fill/console). | OFF | `verification/functional-web.ts` | `isTruthyEnvFlag` |
 | `PIT_NARRATION` | Opt-in: habilita modo narração no system prompt (aceita `"1"`, `"true"`, `"yes"`). | OFF | `system-prompt.ts` | `isTruthyEnvFlag` |
-| `PIT_ASYNC_REINJECT` | Opt-in (legado): reinjetar automaticamente o resultado de subagentes `spawn` no chat quando o resultado chega assíncrono. Comportamento padrão atual notifica sem reinjetar. | OFF | `agent-session.ts:3516` | `isTruthyEnvFlag` |
+| `PIT_ASYNC_REINJECT` | Opt-in (legado): reinjetar automaticamente o resultado de subagentes `spawn` no chat quando o resultado chega assíncrono. Comportamento padrão atual notifica sem reinjetar. Esc do pai aborta spawns detached; fim normal do turno não. | OFF | `agent-session.ts` (`_deliverAsyncResult` / `interrupt`) | `isTruthyEnvFlag` |
 
 ---
 
 ## Notas de uso
+
+**Cap de `recall_tool_output`:** `RECALL_OUTPUT_CAP_BYTES` = 96KB (head+tail). Um único recall não deve dominar a janela; a íntegra permanece no deferred store.
 
 **Para desativar um guard em sessão única:**
 
@@ -77,6 +80,21 @@ PIT_PRESEND_OVERFLOW_RATIO=0.85 pit   # dispara mais cedo (contexto < 85 %)
 `FIND_DEFAULT_LIMIT_CEILING = 500` e floor `100`, escalado por
 `getOccupancyScale()` (`tools/find.ts`). Opt-out do scaling geral:
 `PIT_NO_OCCUPANCY_CAPS`.
+
+### Search backends (não são economia de tokens, mas `PIT_*`)
+
+| Variável | Efeito | Default | Onde é lida | Convenção |
+|---|---|---|---|---|
+| `PIT_GREP_ENGINE` | Backend de `grep`/`find`: `fff` (índice warm) ou `rg` (força ripgrep + fd). Fora de um git work tree, `fff` cai automaticamente para rg/fd. | `fff` (via settings) | `settings-manager.ts` `getGrepSettings` | `fff` \| `rg` |
+| `PIT_ASTGREP_ENGINE` | Backend de `ast_grep`: `napi` (in-process) ou `cli`. | `napi` | `settings-manager.ts` `getAstGrepSettings` | `napi` \| `cli` |
+| `PIT_LSP_SINGLE_DIAGNOSTICS_WAIT_MS` | Timeout (ms) ao esperar diagnostics de um único arquivo no tool `lsp` (ação diagnostics). Valores ≤0 ou inválidos caem no default. | `3000` | `lsp/tool-actions.ts` `resolveSingleDiagnosticsWaitTimeoutMs` | inteiro positivo |
+
+### TUI debug (não são economia de tokens, mas `PIT_*`)
+
+| Variável | Efeito | Default | Onde é lida | Convenção |
+|---|---|---|---|---|
+| `PIT_TUI_DEBUG` | Grava logs de render do TUI em `/tmp/tui/` com **metadata only** (contagens de linhas, `firstChanged`, `buffer.length`, etc.) — sem `JSON.stringify` do frame completo. | OFF | `packages/tui/src/tui.ts` | `"1"` |
+| `PIT_TUI_DEBUG_FULL` | Com `PIT_TUI_DEBUG=1`, inclui dump completo de `newLines` / `previousLines` / `buffer` (sem pretty-print). Caro no hot path — só para diagnóstico. | OFF | `packages/tui/src/tui.ts` | `"1"` |
 
 > A variável `PIT_NO_PRESEND_OVERFLOW_GUARD` também usava `=== "1"` em
 > `agent-session-compaction.ts` (linhas 386 e 505) — corrigida para

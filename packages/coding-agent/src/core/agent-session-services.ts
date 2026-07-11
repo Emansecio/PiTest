@@ -90,6 +90,16 @@ export interface AgentSessionServices {
 	 * swap model roles (plan↔default). No-op when nothing is bound (headless).
 	 */
 	bindPermissionModeChange?: (handler: (mode: import("./permissions/types.ts").PermissionMode) => void) => void;
+	/**
+	 * Notify the bound permission-mode-change handler (e.g. after Fusion setup
+	 * calls `permissionChecker.updateMode` outside the permissions extension).
+	 */
+	notifyPermissionModeChange?: (mode: import("./permissions/types.ts").PermissionMode) => void;
+	/**
+	 * Bind a callback that opens `/fusion` setup when Alt+P would enter Fusion
+	 * without a configured panel. No-op when unbound (headless).
+	 */
+	bindFusionNeedsSetup?: (handler: () => void) => void;
 }
 
 function applyExtensionFlagValues(
@@ -170,10 +180,22 @@ export async function createAgentSessionServices(
 	const parentModelRef: { current?: () => import("@pit/ai").Model<any> | undefined } = {};
 	const availableToolsRef: { current?: () => import("@pit/agent-core").AgentTool[] } = {};
 	const parentMessagingIdRef: { current?: string } = {};
-	const asyncDeliverRef: { current?: (handle: string, text: string, status: "done" | "error") => boolean } = {};
+	const asyncDeliverRef: {
+		current?: (
+			handle: string,
+			text: string,
+			status: "done" | "error",
+			meta?: { turns?: number; totalTokens?: number },
+		) => boolean;
+	} = {};
 	const subagentStartRef: { current?: (handle: string) => void } = {};
 	const subagentProgressRef: { current?: (handle: string, info: { turn: number; lastTool?: string }) => void } = {};
+	const subagentCompleteRef: {
+		current?: (handle: string, status: "done" | "error", meta?: { turns?: number; totalTokens?: number }) => void;
+	} = {};
+	const abortDetachedRef: { current?: (abortFn: () => void) => void } = {};
 	const permissionModeChangeRef: { current?: (mode: import("./permissions/types.ts").PermissionMode) => void } = {};
+	const fusionNeedsSetupRef: { current?: () => void } = {};
 
 	let builtInFactories: import("./extensions/types.ts").ExtensionFactory[] = [];
 	const permissionSettings = settingsManager.getPermissionSettings();
@@ -196,11 +218,16 @@ export async function createAgentSessionServices(
 			isMessagingEnabled: () => settingsManager.getAgentMessagingSettings().enabled,
 			getParentMessagingId: () => parentMessagingIdRef.current,
 			getMessagingTimeoutMs: () => settingsManager.getAgentMessagingSettings().timeoutMs,
-			onAsyncComplete: (handle, text, status) => asyncDeliverRef.current?.(handle, text, status) ?? false,
+			onAsyncComplete: (handle, text, status, meta) =>
+				asyncDeliverRef.current?.(handle, text, status, meta) ?? false,
 			onSubagentStart: (handle) => subagentStartRef.current?.(handle),
 			onSubagentProgress: (handle, info) => subagentProgressRef.current?.(handle, info),
+			onSubagentComplete: (handle, status, meta) => subagentCompleteRef.current?.(handle, status, meta),
+			registerAbortDetached: (abortFn) => abortDetachedRef.current?.(abortFn),
 			isScopedHindsightEnabled: () => settingsManager.getHindsightSettings().scopedSubagents,
 			onPermissionModeChange: (mode) => permissionModeChangeRef.current?.(mode),
+			isFusionPanelReady: () => settingsManager.getFusionSettings().panel.length >= 2,
+			onFusionNeedsSetup: () => fusionNeedsSetupRef.current?.(),
 		});
 		builtInFactories = bundle.factories;
 		permissionChecker = bundle.permissionChecker;
@@ -239,18 +266,40 @@ export async function createAgentSessionServices(
 				getModel: () => import("@pit/ai").Model<any> | undefined,
 				getTools: () => import("@pit/agent-core").AgentTool[],
 				messagingId: string | undefined,
-				deliverAsync: (handle: string, text: string, status: "done" | "error") => boolean,
+				deliverAsync: (
+					handle: string,
+					text: string,
+					status: "done" | "error",
+					meta?: { turns?: number; totalTokens?: number },
+				) => boolean,
 				emitSubStart: (handle: string) => void,
 				emitSubProgress: (handle: string, info: { turn: number; lastTool?: string }) => void,
+				emitSubComplete: (
+					handle: string,
+					status: "done" | "error",
+					meta?: { turns?: number; totalTokens?: number },
+				) => void,
+				registerAbortDetached: (abortFn: () => void) => void,
 			) => void;
 		}
-	).__bindBuiltInRefs = (getModel, getTools, messagingId, deliverAsync, emitSubStart, emitSubProgress) => {
+	).__bindBuiltInRefs = (
+		getModel,
+		getTools,
+		messagingId,
+		deliverAsync,
+		emitSubStart,
+		emitSubProgress,
+		emitSubComplete,
+		registerAbortDetached,
+	) => {
 		parentModelRef.current = getModel;
 		availableToolsRef.current = getTools;
 		parentMessagingIdRef.current = messagingId;
 		asyncDeliverRef.current = deliverAsync;
 		subagentStartRef.current = emitSubStart;
 		subagentProgressRef.current = emitSubProgress;
+		subagentCompleteRef.current = emitSubComplete;
+		abortDetachedRef.current = registerAbortDetached;
 	};
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
@@ -280,6 +329,12 @@ export async function createAgentSessionServices(
 		permissionChecker,
 		bindPermissionModeChange: (handler) => {
 			permissionModeChangeRef.current = handler;
+		},
+		notifyPermissionModeChange: (mode) => {
+			permissionModeChangeRef.current?.(mode);
+		},
+		bindFusionNeedsSetup: (handler) => {
+			fusionNeedsSetupRef.current = handler;
 		},
 	};
 }
@@ -332,6 +387,7 @@ export async function createAgentSessionFromServices(
 		sessionStartEvent: options.sessionStartEvent,
 		disableHashlineAnchors: options.disableHashlineAnchors,
 		ttsrMatcher,
+		permissionChecker: options.services.permissionChecker,
 	});
 
 	const bind = (
@@ -340,9 +396,20 @@ export async function createAgentSessionFromServices(
 				getModel: () => import("@pit/ai").Model<any> | undefined,
 				getTools: () => import("@pit/agent-core").AgentTool[],
 				messagingId: string | undefined,
-				deliverAsync: (handle: string, text: string, status: "done" | "error") => boolean,
+				deliverAsync: (
+					handle: string,
+					text: string,
+					status: "done" | "error",
+					meta?: { turns?: number; totalTokens?: number },
+				) => boolean,
 				emitSubStart: (handle: string) => void,
 				emitSubProgress: (handle: string, info: { turn: number; lastTool?: string }) => void,
+				emitSubComplete: (
+					handle: string,
+					status: "done" | "error",
+					meta?: { turns?: number; totalTokens?: number },
+				) => void,
+				registerAbortDetached: (abortFn: () => void) => void,
 			) => void;
 		}
 	).__bindBuiltInRefs;
@@ -351,9 +418,13 @@ export async function createAgentSessionFromServices(
 			() => result.session.model,
 			() => result.session.agent.state.tools as import("@pit/agent-core").AgentTool[],
 			result.session.messagingId,
-			(handle, text, status) => result.session._deliverAsyncResult(handle, text, status),
+			(handle, text, status, meta) => result.session._deliverAsyncResult(handle, text, status, meta),
 			(handle) => result.session._emitSubagentStart(handle),
 			(handle, info) => result.session._emitSubagentProgress(handle, info),
+			(handle, status, meta) => result.session._emitSubagentComplete(handle, status, meta),
+			(abortFn) => {
+				result.session._abortDetachedSubagents = abortFn;
+			},
 		);
 	}
 

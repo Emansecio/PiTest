@@ -26,7 +26,7 @@ export {
 	type EditToolInput,
 	type EditToolOptions,
 } from "./edit.ts";
-export { withFileMutationQueue } from "./file-mutation-queue.ts";
+export { withFileMutationQueue, withFileMutationQueues } from "./file-mutation-queue.ts";
 export {
 	createFindTool,
 	createFindToolDefinition,
@@ -79,37 +79,18 @@ export {
 
 import type { AgentTool } from "@pit/agent-core";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
+import { requireOptional } from "../../utils/optional-require.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import { createLspToolDefinition, type LspToolOptions } from "../lsp/tool.ts";
+import type { LspToolOptions } from "../lsp/tool.ts";
+import { BUILTIN_TOOL_SIDE_EFFECTS } from "../permissions/checker.ts";
 import { type AskToolOptions, createAskToolDefinition } from "./ask.ts";
 import { type AstEditToolOptions, createAstEditToolDefinition } from "./ast-edit.ts";
 import { type AstGrepToolOptions, createAstGrepToolDefinition } from "./ast-grep.ts";
 import { type BashToolOptions, createBashToolDefinition } from "./bash.ts";
 import { type CalcToolOptions, createCalcToolDefinition } from "./calc.ts";
-import {
-	type ChromeDevtoolsToolOptions,
-	createChromeClickToolDefinition,
-	createChromeClosePageToolDefinition,
-	createChromeElementToSourceToolDefinition,
-	createChromeEvaluateToolDefinition,
-	createChromeFillToolDefinition,
-	createChromeGetNetworkBodyToolDefinition,
-	createChromeGetTextToolDefinition,
-	createChromeHoverToolDefinition,
-	createChromeListPagesToolDefinition,
-	createChromeNavigateToolDefinition,
-	createChromePressKeyToolDefinition,
-	createChromeReadConsoleToolDefinition,
-	createChromeReadNetworkToolDefinition,
-	createChromeScreenshotToolDefinition,
-	createChromeSelectOptionToolDefinition,
-	createChromeSelectPageToolDefinition,
-	createChromeSnapshotToolDefinition,
-	createChromeUploadFileToolDefinition,
-	createChromeWaitForToolDefinition,
-} from "./chrome-devtools.ts";
+import type { ChromeDevtoolsToolOptions } from "./chrome-devtools.ts";
 import { type CodeModeToolOptions, createCodeModeToolDefinition } from "./code-mode.ts";
-import { createDebugToolDefinition, type DebugToolOptions } from "./debug.ts";
+import type { DebugToolOptions } from "./debug.ts";
 import { createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import { createEditHashlineToolDefinition, type EditHashlineToolOptions } from "./edit-hashline.ts";
 import { createEvalToolDefinition, type EvalToolOptions } from "./eval.ts";
@@ -121,7 +102,6 @@ import { createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import { createInspectImageToolDefinition, type InspectImageToolOptions } from "./inspect-image.ts";
 import { createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createPlanToolDefinition, type PlanToolOptions } from "./plan.ts";
-import { createPreviewToolDefinition } from "./preview.ts";
 import { createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createRecallToolDefinition, type RecallToolOptions } from "./recall.ts";
 import { createRecallHistoryDefinition } from "./recall-history.ts";
@@ -139,6 +119,34 @@ import { createTodoToolDefinition, type TodoToolOptions } from "./todo.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { createWebSearchToolDefinition, type WebSearchToolOptions } from "./web-search.ts";
 import { createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
+
+type ChromeMod = typeof import("./chrome-devtools.ts");
+let chromeMod: ChromeMod | undefined;
+function loadChrome(): ChromeMod {
+	if (!chromeMod) chromeMod = requireOptional<ChromeMod>(import.meta.url, "./chrome-devtools.ts");
+	return chromeMod;
+}
+
+type LspToolMod = typeof import("../lsp/tool.ts");
+let lspToolMod: LspToolMod | undefined;
+function loadLspTool(): LspToolMod {
+	if (!lspToolMod) lspToolMod = requireOptional<LspToolMod>(import.meta.url, "../lsp/tool.ts");
+	return lspToolMod;
+}
+
+type DebugMod = typeof import("./debug.ts");
+let debugMod: DebugMod | undefined;
+function loadDebug(): DebugMod {
+	if (!debugMod) debugMod = requireOptional<DebugMod>(import.meta.url, "./debug.ts");
+	return debugMod;
+}
+
+type PreviewMod = typeof import("./preview.ts");
+let previewMod: PreviewMod | undefined;
+function loadPreview(): PreviewMod {
+	if (!previewMod) previewMod = requireOptional<PreviewMod>(import.meta.url, "./preview.ts");
+	return previewMod;
+}
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
@@ -395,135 +403,135 @@ const TOOL_REGISTRY = {
 		coding: "always",
 	},
 	lsp: {
-		definitionFactory: createLspToolDefinition,
+		definitionFactory: (cwd, opts) => loadLspTool().createLspToolDefinition(cwd, opts),
 		optionsKey: "lsp",
 		// Has write-tier actions (rename, code_actions apply, rename_file).
 		readOnly: false,
 		coding: "lsp",
 	},
 	debug: {
-		definitionFactory: createDebugToolDefinition,
+		definitionFactory: (cwd, opts) => loadDebug().createDebugToolDefinition(cwd, opts),
 		optionsKey: "debug",
 		// Exec-tier actions (launch/attach/continue/step/breakpoints).
 		readOnly: false,
 		coding: "debug",
 	},
 	chrome_devtools_list_pages: {
-		definitionFactory: createChromeListPagesToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeListPagesToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_select_page: {
-		definitionFactory: createChromeSelectPageToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeSelectPageToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_navigate: {
-		definitionFactory: createChromeNavigateToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeNavigateToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_close_page: {
-		definitionFactory: createChromeClosePageToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeClosePageToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_evaluate: {
-		definitionFactory: createChromeEvaluateToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeEvaluateToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_screenshot: {
-		definitionFactory: createChromeScreenshotToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeScreenshotToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_read_console: {
-		definitionFactory: createChromeReadConsoleToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeReadConsoleToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_read_network: {
-		definitionFactory: createChromeReadNetworkToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeReadNetworkToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_click: {
-		definitionFactory: createChromeClickToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeClickToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_fill: {
-		definitionFactory: createChromeFillToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeFillToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_press_key: {
-		definitionFactory: createChromePressKeyToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromePressKeyToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_get_text: {
-		definitionFactory: createChromeGetTextToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeGetTextToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_wait_for: {
-		definitionFactory: createChromeWaitForToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeWaitForToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_hover: {
-		definitionFactory: createChromeHoverToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeHoverToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_select_option: {
-		definitionFactory: createChromeSelectOptionToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeSelectOptionToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_upload_file: {
-		definitionFactory: createChromeUploadFileToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeUploadFileToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: false,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_snapshot: {
-		definitionFactory: createChromeSnapshotToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeSnapshotToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_get_network_body: {
-		definitionFactory: createChromeGetNetworkBodyToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeGetNetworkBodyToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	chrome_devtools_element_to_source: {
-		definitionFactory: createChromeElementToSourceToolDefinition,
+		definitionFactory: (cwd, opts) => loadChrome().createChromeElementToSourceToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		readOnly: true,
 		coding: "chromeDevtools",
 	},
 	preview: {
-		definitionFactory: createPreviewToolDefinition,
+		definitionFactory: (cwd, opts) => loadPreview().createPreviewToolDefinition(cwd, opts),
 		optionsKey: "chromeDevtools",
 		// Starts a local HTTP server + navigates the user's Chrome — a real side
 		// effect, not a read. Must NOT leak into createReadOnlyTools.
@@ -701,7 +709,10 @@ export interface ToolsOptions {
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
 	const entry = registry[toolName];
 	if (!entry) throw new Error(`Unknown tool name: ${toolName}`);
-	return entry.definitionFactory(cwd, resolveToolOptions(toolName, options));
+	const def = entry.definitionFactory(cwd, resolveToolOptions(toolName, options));
+	if (def.sideEffect !== undefined) return def;
+	const sideEffect = BUILTIN_TOOL_SIDE_EFFECTS[toolName];
+	return sideEffect !== undefined ? { ...def, sideEffect } : def;
 }
 
 export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptions): Tool {
@@ -712,7 +723,15 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 
 export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): Record<ToolName, ToolDef> {
 	return Object.fromEntries(
-		toolNamesInOrder().map((name) => [name, createToolDefinition(name, cwd, options)]),
+		toolNamesInOrder()
+			.filter((name) => {
+				const gate = registry[name].coding;
+				if (gate === "chromeDevtools" || gate === "lsp" || gate === "debug") {
+					return codingGateOpen(gate, options);
+				}
+				return true;
+			})
+			.map((name) => [name, createToolDefinition(name, cwd, options)]),
 	) as Record<ToolName, ToolDef>;
 }
 

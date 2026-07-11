@@ -12,7 +12,13 @@
  *    builder, not just createCodingTools.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createAllTools, createCodingTools, createReadOnlyTools, createTool } from "../src/core/tools/index.js";
+import {
+	createAllToolDefinitions,
+	createAllTools,
+	createCodingTools,
+	createReadOnlyTools,
+	createTool,
+} from "../src/core/tools/index.js";
 
 const CWD = process.cwd();
 
@@ -108,5 +114,30 @@ describe("web_search defaultProvider merge is shared across every builder", () =
 			undefined as never,
 		)) as { details?: { provider?: string } };
 		expect(res.details?.provider).toBe("brave");
+	});
+});
+
+describe("createAllToolDefinitions skips gated-off optional families", () => {
+	it("omits chrome_devtools_*/preview when chromeDevtools is not enabled", () => {
+		const names = Object.keys(createAllToolDefinitions(CWD, { chromeDevtools: { enabled: false } }));
+		expect(names.some((n) => n.startsWith("chrome_devtools"))).toBe(false);
+		expect(names).not.toContain("preview");
+	});
+
+	it("includes chrome tools once chromeDevtools is enabled", () => {
+		const names = Object.keys(createAllToolDefinitions(CWD, { chromeDevtools: { enabled: true } }));
+		expect(names).toContain("chrome_devtools_list_pages");
+		expect(names).toContain("preview");
+	});
+
+	it("omits lsp/debug when their gates are closed", () => {
+		const names = Object.keys(
+			createAllToolDefinitions(CWD, {
+				lsp: { enabled: false },
+				debug: { enabled: false },
+			}),
+		);
+		expect(names).not.toContain("lsp");
+		expect(names).not.toContain("debug");
 	});
 });

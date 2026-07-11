@@ -22,4 +22,13 @@ describe("LruMap", () => {
 		expect(cache.get("a")).toBe(1);
 		expect(cache.has("b")).toBe(false);
 	});
+
+	it("peekOldestKey returns the least-recent key", () => {
+		const cache = new LruMap<string, number>(3);
+		cache.set("a", 1);
+		cache.set("b", 2);
+		expect(cache.peekOldestKey()).toBe("a");
+		cache.get("a");
+		expect(cache.peekOldestKey()).toBe("b");
+	});
 });

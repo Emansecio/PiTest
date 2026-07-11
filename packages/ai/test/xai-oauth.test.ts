@@ -80,6 +80,36 @@ describe("xAI Grok OAuth provider", () => {
 		expect(creds.refresh).toBe("refresh-tok");
 		expect(creds.expires).toBeGreaterThan(Date.now());
 		expect(fetchMock).toHaveBeenCalledTimes(2);
+		const init = fetchMock.mock.calls[0]?.[1] as { signal?: AbortSignal };
+		expect(init?.signal).toBeDefined();
+	});
+
+	it("pollXaiDeviceCodeToken composes caller abort with fetch timeout", async () => {
+		const fetchMock = vi.fn().mockResolvedValue({
+			ok: true,
+			json: async () => ({
+				access_token: "a",
+				refresh_token: "r",
+				expires_in: 60,
+			}),
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		const ac = new AbortController();
+		await pollXaiDeviceCodeToken(
+			{
+				device_code: "dev",
+				user_code: "ABCD",
+				verification_uri: "https://auth.x.ai/device",
+				expires_in: 120,
+				interval: 1,
+			},
+			{ sleep: async () => {}, signal: ac.signal },
+		);
+		const init = fetchMock.mock.calls[0]?.[1] as { signal?: AbortSignal };
+		expect(init?.signal).toBeDefined();
+		expect(init!.signal!.aborted).toBe(false);
+		ac.abort();
+		expect(init!.signal!.aborted).toBe(true);
 	});
 
 	it("login via device path when onSelect picks device", async () => {

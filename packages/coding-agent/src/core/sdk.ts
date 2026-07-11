@@ -106,6 +106,8 @@ export interface CreateAgentSessionOptions {
 	 * `settingsManager.getTTSRRules()` in `main.ts` and passed in here.
 	 */
 	ttsrMatcher?: import("@pit/agent-core").TTSRMatcher;
+	/** Optional permission checker for Fusion verify / subagent policy. */
+	permissionChecker?: import("./permissions/index.ts").PermissionChecker;
 }
 
 /** Result from createAgentSession */
@@ -528,6 +530,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
 		disableHashlineAnchors: options.disableHashlineAnchors,
+		permissionChecker: options.permissionChecker,
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

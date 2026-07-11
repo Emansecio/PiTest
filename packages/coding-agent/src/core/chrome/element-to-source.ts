@@ -119,11 +119,13 @@ export async function resolveElementToSource(
 
 	// Enable the domains we use, ON-DEMAND (never throws — a target that lacks one
 	// of these still lets the later call fail soft into a degraded result).
-	await enableDomain(send, "DOM.enable", signal);
-	await enableDomain(send, "DOMDebugger.enable", signal);
-	// Debugger.enable streams scriptParsed events and is what makes scriptId →
-	// source resolvable; if it is unavailable we still return transpiled positions.
-	await enableDomain(send, "Debugger.enable", signal);
+	await Promise.all([
+		enableDomain(send, "DOM.enable", signal),
+		enableDomain(send, "DOMDebugger.enable", signal),
+		// Debugger.enable streams scriptParsed events and is what makes scriptId →
+		// source resolvable; if it is unavailable we still return transpiled positions.
+		enableDomain(send, "Debugger.enable", signal),
+	]);
 
 	const objectId = await resolveObjectId(send, selector, signal);
 	if (!objectId) {

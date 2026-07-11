@@ -69,7 +69,8 @@ export type DiagnosticCategory =
 	| "guard.intent-gate"
 	| "conditioning.context"
 	| "quality.contract"
-	| "quality.self-review";
+	| "quality.self-review"
+	| "lsp.manager-overwrite";
 
 export interface DiagnosticContext {
 	/** Byte size involved (cap hit, payload, buffer depth). */

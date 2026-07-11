@@ -78,10 +78,12 @@ export interface IntentGateDeps {
 	/** Optional case-fold entry equality (sameCanonicalName on win32/darwin). */
 	sameName?: (a: string, b: string) => boolean;
 	/**
-	 * Repo-map symbol fast-path (lossy). A case-insensitive HIT confirms a symbol
-	 * exists; a MISS is inconclusive and FAILS OPEN. Optional — omitted = no fast-path.
+	 * Repo-map symbol fast-path (lossy). A case-insensitive HIT via `lowerSet`
+	 * confirms a symbol exists; a MISS is inconclusive and FAILS OPEN.
+	 * Optional — omitted = no fast-path. `names` is unused here (fuzzy pools come
+	 * from `symbolResolve`); accepted so callers can pass `repoMapToSymbolSet` as-is.
 	 */
-	symbolSet?: Set<string>;
+	symbolSet?: { names: Set<string>; lowerSet: Set<string> };
 	/**
 	 * Future authority for symbol absence (LSP workspace/symbol). Returns the names
 	 * the server knows for a query, or undefined when unavailable (FAIL-OPEN). When
@@ -353,13 +355,8 @@ export function collectPlanSymbolTokens(version: PlanVersion): string[] {
 // ============================================================================
 
 function validateSymbolToken(stepId: string, token: string, deps: IntentGateDeps): IntentGateFinding | undefined {
-	// Fast-path: a HIT in the lossy repo-map index confirms existence.
-	if (deps.symbolSet) {
-		const lowered = token.toLowerCase();
-		for (const known of deps.symbolSet) {
-			if (known.toLowerCase() === lowered) return undefined;
-		}
-	}
+	// Fast-path: a HIT in the lossy repo-map index confirms existence (O(1)).
+	if (deps.symbolSet?.lowerSet.has(token.toLowerCase())) return undefined;
 	// Miss. Without an authoritative resolver we CANNOT prove absence (the index is
 	// lossy, ~12 symbols/file) -> FAIL-OPEN (v1 always lands here).
 	if (deps.symbolResolve === undefined) return undefined;

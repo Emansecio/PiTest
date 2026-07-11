@@ -37,8 +37,9 @@
 
 import { existsSync, readdirSync } from "node:fs";
 import { recordDiagnostic, suggestClosest, suggestClosestN } from "@pit/ai";
+import { mapWithConcurrency } from "../../utils/map-with-concurrency.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
-import { repoMapToSymbolSet } from "../grounding-guard.ts";
+import { repoMapToSymbolSet, type SymbolNameSet } from "../grounding-guard.ts";
 import {
 	collectPlanSymbolTokens,
 	formatIntentGateFindings,
@@ -66,6 +67,10 @@ const MAX_BLOCKS_PER_CYCLE = 2;
 
 /** Per-server LSP ceiling: the intent gate must not stall a mutating tool call. */
 const WORKSPACE_SYMBOL_TIMEOUT_MS = 400;
+/** Cap concurrent workspace/symbol fan-out across configured LSP servers. */
+const LSP_SERVER_CONCURRENCY = 4;
+/** Cap concurrent plan-token LSP lookups. */
+const LSP_TOKEN_CONCURRENCY = 6;
 /** Reuse workspace/symbol answers within this window across plan validations in one cycle. */
 const LSP_CACHE_TTL_MS = 5000;
 const LSP_CACHE_MAX = 128;
@@ -85,7 +90,7 @@ export function createIntentGateExtension(options: { cwd: string }): (pi: Extens
 		let nudged = false;
 		// The repo-map symbol set is fetched at most once per cycle, lazily, the first
 		// time a plan is validated (cheap: living-index is incremental/cached).
-		let symbolSet: Set<string> | undefined;
+		let symbolSet: SymbolNameSet | undefined;
 		let symbolFetched = false;
 		const lspCache = new Map<string, { at: number; names: string[] | undefined }>();
 
@@ -124,24 +129,22 @@ export function createIntentGateExtension(options: { cwd: string }): (pi: Extens
 
 			const servers = getLspServers(getConfig(options.cwd));
 			if (servers.length === 0) return undefined;
-			const perServer = await Promise.all(
-				servers.map(async ([, serverConfig]) => {
-					try {
-						const client = await getOrCreateClient(serverConfig, options.cwd, WORKSPACE_SYMBOL_TIMEOUT_MS);
-						const res = (await sendRequest(
-							client,
-							"workspace/symbol",
-							{ query },
-							undefined,
-							WORKSPACE_SYMBOL_TIMEOUT_MS,
-						)) as SymbolInformation[] | null;
-						const names = res ? filterWorkspaceSymbols(res, query).map((sym) => sym.name) : [];
-						return { answered: true, names };
-					} catch {
-						return { answered: false, names: [] as string[] };
-					}
-				}),
-			);
+			const perServer = await mapWithConcurrency(servers, LSP_SERVER_CONCURRENCY, async ([, serverConfig]) => {
+				try {
+					const client = await getOrCreateClient(serverConfig, options.cwd, WORKSPACE_SYMBOL_TIMEOUT_MS);
+					const res = (await sendRequest(
+						client,
+						"workspace/symbol",
+						{ query },
+						undefined,
+						WORKSPACE_SYMBOL_TIMEOUT_MS,
+					)) as SymbolInformation[] | null;
+					const names = res ? filterWorkspaceSymbols(res, query).map((sym) => sym.name) : [];
+					return { answered: true, names };
+				} catch {
+					return { answered: false, names: [] as string[] };
+				}
+			});
 			const names = perServer.some((r) => r.answered) ? perServer.flatMap((r) => r.names) : undefined;
 
 			if (lspCache.size >= LSP_CACHE_MAX) {
@@ -166,11 +169,9 @@ export function createIntentGateExtension(options: { cwd: string }): (pi: Extens
 			const symbolLspResults = new Map<string, string[] | undefined>();
 			if (version) {
 				const tokens = collectPlanSymbolTokens(version);
-				await Promise.all(
-					tokens.map(async (token) => {
-						symbolLspResults.set(token, await resolveSymbolViaLsp(token));
-					}),
-				);
+				await mapWithConcurrency(tokens, LSP_TOKEN_CONCURRENCY, async (token) => {
+					symbolLspResults.set(token, await resolveSymbolViaLsp(token));
+				});
 			}
 			return {
 				resolve: (raw) => resolveReadPath(raw, options.cwd),

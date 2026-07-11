@@ -21,12 +21,16 @@ import type { Dirent, Stats } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 import { writeFileAtomic } from "../../utils/atomic-write.ts";
+import { LruMap } from "../lru-map.ts";
 import type { UrlContext, UrlReadResult, UrlSchemeResolver } from "./registry.ts";
 
 const CONFLICT_START = /^<{7}(?:\s|$)/;
 const CONFLICT_BASE = /^\|{7}(?:\s|$)/;
 const CONFLICT_MID = /^={7}\s*$/;
 const CONFLICT_END = /^>{7}(?:\s|$)/;
+
+/** Hard cap on working-tree files enumerated for conflict:// scans. */
+export const CONFLICT_SCAN_FILE_CAP = 10_000;
 
 const IGNORED_DIRS = new Set([
 	".git",
@@ -64,7 +68,7 @@ interface FileConflicts {
 	blocks: ConflictBlock[];
 }
 
-async function listFilesRecursively(root: string): Promise<string[]> {
+async function listFilesRecursively(root: string, maxFiles = CONFLICT_SCAN_FILE_CAP): Promise<string[]> {
 	const out: string[] = [];
 	const stack: string[] = [root];
 	while (stack.length > 0) {
@@ -76,6 +80,7 @@ async function listFilesRecursively(root: string): Promise<string[]> {
 			continue;
 		}
 		for (const entry of entries) {
+			if (out.length >= maxFiles) return out;
 			if (entry.name.startsWith(".") && IGNORED_DIRS.has(entry.name)) continue;
 			const full = join(dir, entry.name);
 			if (entry.isDirectory()) {
@@ -87,6 +92,11 @@ async function listFilesRecursively(root: string): Promise<string[]> {
 		}
 	}
 	return out;
+}
+
+/** @internal Exported for unit tests (file-cap behavior). */
+export async function listConflictScanFiles(root: string, maxFiles = CONFLICT_SCAN_FILE_CAP): Promise<string[]> {
+	return listFilesRecursively(root, maxFiles);
 }
 
 function looksBinary(buf: Buffer): boolean {
@@ -164,10 +174,11 @@ function hadDiff3Marker(lines: string[], start: number, end: number): boolean {
 	return false;
 }
 
-// 5-second TTL memoize per cwd. Read paths reuse the cached scan; write paths
-// invalidate before reading to ensure correctness against on-disk mutations.
+// 5-second TTL memoize per cwd (LRU-capped). Read paths reuse the cached scan;
+// write paths invalidate before reading to ensure correctness against on-disk mutations.
 const SCAN_TTL_MS = 5000;
-const scanCache = new Map<string, { at: number; results: FileConflicts[] }>();
+const SCAN_CACHE_CAP = 8;
+const scanCache = new LruMap<string, { at: number; results: FileConflicts[] }>(SCAN_CACHE_CAP);
 
 function invalidateScanCache(cwd: string): void {
 	scanCache.delete(cwd);
@@ -218,7 +229,10 @@ async function scanConflictsRaw(cwd: string): Promise<FileConflicts[]> {
 async function scanConflicts(cwd: string): Promise<FileConflicts[]> {
 	const cached = scanCache.get(cwd);
 	const now = Date.now();
-	if (cached && now - cached.at < SCAN_TTL_MS) return cached.results;
+	if (cached) {
+		if (now - cached.at < SCAN_TTL_MS) return cached.results;
+		scanCache.delete(cwd);
+	}
 	const results = await scanConflictsRaw(cwd);
 	scanCache.set(cwd, { at: now, results });
 	return results;

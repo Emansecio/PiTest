@@ -4,11 +4,14 @@
  * override, legacy PI_CHROME_DEVTOOLS_BINARY still honored for one release);
  * launch spawns Chrome detached so it survives the Pit process
  * (the user opted to leave the browser open); readiness is a poll of
- * `/json/version`. Everything is injectable for tests.
+ * `/json/version`. Ownership of an auto-launched browser is proven via the
+ * profile's `DevToolsActivePort` file (Chrome only writes it for ephemeral
+ * `--remote-debugging-port=0`), never by "something answered on 9222".
+ * Everything is injectable for tests.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FetchLike } from "./cdp-client.ts";
 
@@ -73,6 +76,12 @@ export function findChromeBinary(opts: FindChromeOptions = {}): string | undefin
 
 export interface LaunchChromeOptions {
 	binary: string;
+	/**
+	 * Remote-debugging port. Use `0` when auto-launching so Chrome picks an
+	 * ephemeral port and writes `DevToolsActivePort` into `userDataDir` (the
+	 * ownership fingerprint). A fixed port does not write that file on modern
+	 * Chrome and must not be treated as "ours" just because it answers.
+	 */
 	port: number;
 	userDataDir: string;
 	spawnImpl?: (command: string, args: string[], options: Record<string, unknown>) => ChildProcess;
@@ -106,6 +115,24 @@ export interface WaitForEndpointOptions {
 	intervalMs?: number;
 	fetchImpl?: FetchLike;
 	sleep?: (ms: number) => Promise<void>;
+	/** When aborted, polling stops immediately (Esc / verification cancel). */
+	signal?: AbortSignal;
+}
+
+function sleepAbortable(ms: number, sleep: (ms: number) => Promise<void>, signal?: AbortSignal): Promise<void> {
+	if (!signal) return sleep(ms);
+	if (signal.aborted) return Promise.resolve();
+	return new Promise<void>((resolve) => {
+		const onAbort = () => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		void sleep(ms).then(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		});
+	});
 }
 
 /** Poll the DevTools HTTP endpoint until it responds, or until timeout. */
@@ -117,15 +144,137 @@ export async function waitForEndpoint(host: string, port: number, opts: WaitForE
 	const attempts = Math.max(1, Math.ceil(timeoutMs / intervalMs));
 
 	for (let i = 0; i < attempts; i++) {
+		if (opts.signal?.aborted) return false;
 		try {
 			const res = await fetchImpl(`http://${host}:${port}/json/version`, {
-				signal: AbortSignal.timeout(intervalMs),
+				signal: opts.signal
+					? AbortSignal.any([opts.signal, AbortSignal.timeout(intervalMs)])
+					: AbortSignal.timeout(intervalMs),
 			});
 			if (res.ok) return true;
 		} catch {
-			// not up yet
+			// not up yet / aborted
 		}
-		await sleep(intervalMs);
+		if (opts.signal?.aborted) return false;
+		await sleepAbortable(intervalMs, sleep, opts.signal);
 	}
 	return false;
+}
+
+// ---------------------------------------------------------------------------
+// Profile ownership (DevToolsActivePort)
+// ---------------------------------------------------------------------------
+
+/** Port + browser-level WS path Chrome writes into the profile for automation. */
+export interface DevToolsActivePort {
+	port: number;
+	/** e.g. `/devtools/browser/<guid>` — must match `/json/version`'s WS URL. */
+	browserPath: string;
+}
+
+const DEVTOOLS_ACTIVE_PORT_FILE = "DevToolsActivePort";
+
+/** Parse the two-line `DevToolsActivePort` file contents. */
+export function parseDevToolsActivePort(content: string): DevToolsActivePort | undefined {
+	const lines = content
+		.split(/\r?\n/)
+		.map((l) => l.trim())
+		.filter(Boolean);
+	if (lines.length < 2) return undefined;
+	const port = Number(lines[0]);
+	const browserPath = lines[1]!;
+	if (!Number.isInteger(port) || port <= 0 || port > 65535) return undefined;
+	if (!browserPath.startsWith("/")) return undefined;
+	return { port, browserPath };
+}
+
+export interface ReadDevToolsActivePortOptions {
+	readFile?: (path: string, encoding: "utf8") => string;
+}
+
+/** Read + parse `userDataDir/DevToolsActivePort`, or undefined if missing/invalid. */
+export function readDevToolsActivePort(
+	userDataDir: string,
+	opts: ReadDevToolsActivePortOptions = {},
+): DevToolsActivePort | undefined {
+	if (!userDataDir) return undefined;
+	const readFile = opts.readFile ?? ((p, enc) => readFileSync(p, enc));
+	try {
+		return parseDevToolsActivePort(readFile(join(userDataDir, DEVTOOLS_ACTIVE_PORT_FILE), "utf8"));
+	} catch {
+		return undefined;
+	}
+}
+
+export interface OwnedEndpointOptions {
+	fetchImpl?: FetchLike;
+	signal?: AbortSignal;
+}
+
+/**
+ * True when `host:port` is live AND `/json/version`'s browser WS path matches
+ * the path from our profile's `DevToolsActivePort`. A foreign Chrome that
+ * reused the port fails the path check (different browser GUID).
+ */
+export async function isOwnedEndpoint(
+	host: string,
+	port: number,
+	browserPath: string,
+	opts: OwnedEndpointOptions = {},
+): Promise<boolean> {
+	const fetchImpl = opts.fetchImpl ?? defaultFetch;
+	try {
+		const timeout = AbortSignal.timeout(2_000);
+		const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
+		const res = await fetchImpl(`http://${host}:${port}/json/version`, { signal });
+		if (!res.ok) return false;
+		const data = (await res.json()) as { webSocketDebuggerUrl?: unknown };
+		const ws = data?.webSocketDebuggerUrl;
+		if (typeof ws !== "string" || !ws) return false;
+		// Match path suffix so host/port formatting in the URL cannot false-negative.
+		try {
+			const pathname = new URL(ws).pathname;
+			return pathname === browserPath || pathname.endsWith(browserPath);
+		} catch {
+			return ws.endsWith(browserPath);
+		}
+	} catch {
+		return false;
+	}
+}
+
+export interface WaitForOwnedProfileOptions extends WaitForEndpointOptions {
+	readFile?: (path: string, encoding: "utf8") => string;
+}
+
+/**
+ * After launching with `--remote-debugging-port=0`, poll until the profile's
+ * `DevToolsActivePort` appears and the endpoint's browser WS path matches.
+ */
+export async function waitForOwnedProfile(
+	host: string,
+	userDataDir: string,
+	opts: WaitForOwnedProfileOptions = {},
+): Promise<DevToolsActivePort | undefined> {
+	const timeoutMs = opts.timeoutMs ?? 15_000;
+	const intervalMs = opts.intervalMs ?? 250;
+	const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+	const attempts = Math.max(1, Math.ceil(timeoutMs / intervalMs));
+
+	for (let i = 0; i < attempts; i++) {
+		if (opts.signal?.aborted) return undefined;
+		const active = readDevToolsActivePort(userDataDir, { readFile: opts.readFile });
+		if (
+			active &&
+			(await isOwnedEndpoint(host, active.port, active.browserPath, {
+				fetchImpl: opts.fetchImpl,
+				signal: opts.signal,
+			}))
+		) {
+			return active;
+		}
+		if (opts.signal?.aborted) return undefined;
+		await sleepAbortable(intervalMs, sleep, opts.signal);
+	}
+	return undefined;
 }

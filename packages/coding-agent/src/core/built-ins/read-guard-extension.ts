@@ -32,6 +32,7 @@
 
 import { createHash } from "node:crypto";
 import { closeSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import { recordDiagnostic } from "@pit/ai";
 import type { ExtensionAPI } from "../extensions/index.js";
 import { extractEditOldTexts, extractPathArg, resolveToolPath } from "../tools/argument-prep.ts";
@@ -52,6 +53,44 @@ interface FileStamp {
 
 export interface ReadGuardOptions {
 	cwd: string;
+}
+
+/**
+ * Short path for read-guard block reasons (UI + model). Prefer cwd-relative;
+ * fall back to basename so absolute Windows paths don't wrap the transcript.
+ */
+export function formatReadGuardPath(path: string, cwd: string): string {
+	const trimmed = path.trim();
+	if (!trimmed) return path;
+	try {
+		const abs = isAbsolute(trimmed) ? resolve(trimmed) : resolve(cwd, trimmed);
+		const rel = relative(resolve(cwd), abs);
+		if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+			return rel.replace(/\\/g, "/");
+		}
+		return basename(abs) || trimmed;
+	} catch {
+		return basename(trimmed) || trimmed;
+	}
+}
+
+type ReadGuardKind = "never-read" | "stale" | "write-drift" | "postcompact-edit" | "postcompact-write";
+
+/** One-line block reason — keeps the transcript scannable; model still has full path in tool args. */
+export function formatReadGuardReason(kind: ReadGuardKind, path: string, cwd: string): string {
+	const p = formatReadGuardPath(path, cwd);
+	switch (kind) {
+		case "never-read":
+			return `Read guard: unread "${p}" — read it first.`;
+		case "stale":
+			return `Read guard: stale "${p}" — re-read, then retry.`;
+		case "write-drift":
+			return `Read guard: "${p}" changed on disk — re-read, or re-issue write to overwrite.`;
+		case "postcompact-edit":
+			return `Read guard: "${p}" post-compact mismatch — re-read exact region, then edit.`;
+		case "postcompact-write":
+			return `Read guard: "${p}" post-compact — re-read before overwrite, or re-issue write.`;
+	}
 }
 
 function readFileContentSafe(absPath: string): string | undefined {
@@ -109,7 +148,13 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 
 		function stampContentDiffers(absPath: string, a: FileStamp, b: FileStamp): boolean {
 			if (a.size !== b.size) return true;
-			return ensureHash(absPath, a) !== ensureHash(absPath, b);
+			// Both missing hash: stats-only until background compact hashing finishes.
+			if (a.hash === undefined && b.hash === undefined) return false;
+			if (a.hash !== undefined && b.hash !== undefined) return a.hash !== b.hash;
+			// One stamp already captured content at stamp-time; hash the other from disk now.
+			const known = a.hash !== undefined ? a : b;
+			const other = a.hash !== undefined ? b : a;
+			return known.hash !== ensureHash(absPath, other);
 		}
 
 		function stampStatMatches(absPath: string, a: FileStamp, b: FileStamp): boolean {
@@ -187,7 +232,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 							});
 							return {
 								block: true,
-								reason: `Read guard: file "${path}" changed on disk since you read it this session — a write would OVERWRITE that change. Read it again to confirm current content, or re-issue the identical write to overwrite anyway.`,
+								reason: formatReadGuardReason("write-drift", path, options.cwd),
 							};
 						}
 						// A write that reaches here with a pending intra-session-drift
@@ -248,7 +293,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 									});
 									return {
 										block: true,
-										reason: `Read guard: "${path}" was only summarized across compaction, and an edit oldText does not match the file verbatim. Read the region again to confirm exact current content before editing (avoids a fuzzy-match corruption).`,
+										reason: formatReadGuardReason("postcompact-edit", path, options.cwd),
 									};
 								}
 							}
@@ -274,7 +319,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 							});
 							return {
 								block: true,
-								reason: `Read guard: "${path}" was only summarized across compaction and a write would OVERWRITE its full content from that lossy summary. Read it again to confirm what you're replacing, or re-issue the identical write to overwrite anyway.`,
+								reason: formatReadGuardReason("postcompact-write", path, options.cwd),
 							};
 						}
 						// A write that reaches here with a pending post-compaction warning
@@ -315,7 +360,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 					});
 					return {
 						block: true,
-						reason: `Read guard: file "${path}" changed since it was last read (pre-compaction snapshot stale). Read it again to confirm current content before editing.`,
+						reason: formatReadGuardReason("stale", path, options.cwd),
 					};
 				}
 
@@ -333,7 +378,7 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 				});
 				return {
 					block: true,
-					reason: `Read guard: file "${path}" has not been read in this session. Read it first to confirm its current content before editing.`,
+					reason: formatReadGuardReason("never-read", path, options.cwd),
 				};
 			}
 
@@ -371,18 +416,33 @@ export function createReadGuardExtension(options: ReadGuardOptions) {
 		// On compaction, migrate the in-memory read set to a stat snapshot. The
 		// model loses the verbatim content (it only sees the summary) but if the
 		// file on disk has not drifted by the time it tries to edit, we can
-		// still trust the snapshot it carried into context.
+		// still trust the snapshot it carried into context. Hashing is deferred
+		// to setImmediate so compact doesn't block the event loop on N full-file
+		// SHA-256 passes; stampContentDiffers falls back to mtime+size until ready.
 		pi.on("session_before_compact", () => {
+			const pendingHash: Array<{ abs: string; stamp: FileStamp }> = [];
 			for (const abs of readFiles.keys()) {
 				const stamp = stampFile(abs);
 				if (stamp) {
-					ensureHash(abs, stamp);
 					postCompactStamps.set(abs, stamp);
+					if (stamp.hash === undefined) pendingHash.push({ abs, stamp });
 				}
 				// If stat fails (file deleted/permissions), we drop the entry —
 				// the model will have to re-read, which is correct.
 			}
 			readFiles.clear();
+			if (pendingHash.length > 0) {
+				setImmediate(() => {
+					for (const { abs, stamp } of pendingHash) {
+						if (postCompactStamps.get(abs) !== stamp) continue;
+						try {
+							ensureHash(abs, stamp);
+						} catch {
+							// Best-effort; drift compare stays stats-only without a hash.
+						}
+					}
+				});
+			}
 		});
 	};
 }

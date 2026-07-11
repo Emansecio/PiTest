@@ -132,6 +132,44 @@ describe("PlanManager (DAG)", () => {
 		expect(section).toContain("<plan>");
 		expect(section).toContain("scaffold the module");
 		expect(section).toContain("step_done");
+		expect(section).toContain("executing");
+	});
+
+	it("uses planning wording under permission mode plan", () => {
+		const mgr = new PlanManager();
+		mgr.propose([{ id: "a", intent: "research" }]);
+		const section = mgr.systemPromptSection({ permissionMode: "plan" });
+		expect(section).toContain("refining");
+		expect(section).toContain("READ-ONLY");
+		expect(section).not.toContain("You are executing");
+		expect(section).toContain("exit_plan");
+	});
+
+	it("revise preserves done status for matching step ids", () => {
+		const mgr = new PlanManager();
+		mgr.propose([
+			{ id: "a", intent: "one" },
+			{ id: "b", intent: "two", dependsOn: ["a"] },
+		]);
+		mgr.stepDone("a");
+		mgr.revise([
+			{ id: "a", intent: "one (clarified)" },
+			{ id: "b", intent: "two", dependsOn: ["a"] },
+			{ id: "c", intent: "three", dependsOn: ["b"] },
+		]);
+		expect(mgr.current()?.steps.find((s) => s.id === "a")?.status).toBe("done");
+		expect(mgr.current()?.steps.find((s) => s.id === "b")?.status).toBe("pending");
+		expect(mgr.currentVersion()).toBe(2);
+	});
+
+	it("stepDone rejects unmet dependsOn", () => {
+		const mgr = new PlanManager();
+		mgr.propose([
+			{ id: "a", intent: "one" },
+			{ id: "b", intent: "two", dependsOn: ["a"] },
+		]);
+		expect(() => mgr.stepDone("b")).toThrow(/unmet dependsOn/);
+		expect(mgr.current()?.steps.find((s) => s.id === "b")?.status).toBe("pending");
 	});
 
 	it("rejects oversized plans and bounds prompt injection", () => {
@@ -225,6 +263,39 @@ describe("plan tool", () => {
 		const res = await runPlan({ op: "step_done", step_id: "ghost" });
 		expect(res.isError).toBe(true);
 		expect(res.content[0].text).toMatch(/No step with id ghost/);
+	});
+
+	it("step_done with unmet dependsOn is an error", async () => {
+		await runPlan({
+			op: "propose",
+			steps: [
+				{ id: "s1", intent: "first" },
+				{ id: "s2", intent: "second", depends_on: ["s1"] },
+			],
+		});
+		const res = await runPlan({ op: "step_done", step_id: "s2" });
+		expect(res.isError).toBe(true);
+		expect(res.content[0].text).toMatch(/unmet dependsOn/);
+	});
+
+	it("revise after step_done keeps done status on matching ids", async () => {
+		await runPlan({
+			op: "propose",
+			steps: [
+				{ id: "s1", intent: "first" },
+				{ id: "s2", intent: "second", depends_on: ["s1"] },
+			],
+		});
+		await runPlan({ op: "step_done", step_id: "s1" });
+		const revised = await runPlan({
+			op: "revise",
+			steps: [
+				{ id: "s1", intent: "first clarified" },
+				{ id: "s2", intent: "second", depends_on: ["s1"] },
+			],
+		});
+		expect(revised.isError).toBeFalsy();
+		expect(revised.details.steps.find((s) => s.id === "s1")?.status).toBe("done");
 	});
 
 	it("propose with a cycle is a clean error, not a throw", async () => {

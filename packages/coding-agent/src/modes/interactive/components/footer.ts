@@ -99,6 +99,21 @@ const FOOTER_CTX_BAR_WIDTH = 6;
 export type FooterDensity = "calm" | "full";
 const FILL_EASE_EPSILON = 0.01;
 
+/**
+ * Quantized visual fingerprint of the CTX bar for a fill level. Dirty-coalesce
+ * fillEaseTick against this so sub-cell float noise does not bust the render cache
+ * or schedule a TUI repaint (mirrors Loader.tick).
+ *
+ * Packs full cells + whether a partial cell is shown (frac > FILL_EASE_EPSILON).
+ */
+function footerFillFingerprint(fill: number): number {
+	const clamped = Math.max(0, Math.min(FOOTER_CTX_BAR_WIDTH, fill));
+	const full = Math.floor(clamped);
+	const frac = clamped - full;
+	const hasPartial = frac > FILL_EASE_EPSILON && full < FOOTER_CTX_BAR_WIDTH ? 1 : 0;
+	return full * (FOOTER_CTX_BAR_WIDTH + 1) + hasPartial;
+}
+
 function renderFooterContextBar(displayedFill: number, colorize: (text: string) => string): string {
 	const clamped = Math.max(0, Math.min(FOOTER_CTX_BAR_WIDTH, displayedFill));
 	const full = Math.floor(clamped);
@@ -185,6 +200,8 @@ export class FooterComponent implements Component {
 	private barTargetFill = -1;
 	private fillEaseStartAt = 0;
 	private fillEaseUnsub: (() => void) | null = null;
+	/** Last quantized bar fingerprint; fillEaseTick returns false when unchanged. */
+	private lastFillFingerprint = Number.NaN;
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider, launchCwd?: string, ui?: TUI) {
 		this.session = session;
 		this.footerData = footerData;
@@ -199,6 +216,7 @@ export class FooterComponent implements Component {
 			this.stopFillEase();
 			this.displayedFill = 0;
 			this.barTargetFill = -1;
+			this.lastFillFingerprint = Number.NaN;
 		}
 		this.session = session;
 	}
@@ -254,31 +272,43 @@ export class FooterComponent implements Component {
 		if (!this.ui || isReducedMotion()) {
 			this.displayedFill = clampedTarget;
 			this.fillEaseTarget = clampedTarget;
+			this.lastFillFingerprint = footerFillFingerprint(clampedTarget);
 			return;
 		}
 		if (Math.abs(this.displayedFill - clampedTarget) < FILL_EASE_EPSILON) {
 			this.displayedFill = clampedTarget;
 			this.fillEaseTarget = clampedTarget;
+			this.lastFillFingerprint = footerFillFingerprint(clampedTarget);
 			return;
 		}
 		this.stopFillEase();
 		this.fillEaseFrom = this.displayedFill;
 		this.fillEaseTarget = clampedTarget;
 		this.fillEaseStartAt = performance.now();
+		this.lastFillFingerprint = footerFillFingerprint(this.displayedFill);
 		this.renderCacheLines = null;
 		this.fillEaseUnsub = this.ui.addAnimationCallback((now) => this.fillEaseTick(now));
 	}
 
+	/**
+	 * One fill-ease step. Returns dirty only when the quantized bar fingerprint
+	 * changes (full cells / partial segment); mirrors Loader.tick coalescing.
+	 */
 	private fillEaseTick(now: number): boolean {
 		const raw = (now - this.fillEaseStartAt) / COLOR_EASE_MS;
 		const t = raw < 0 ? 0 : raw > 1 ? 1 : raw;
 		const eased = t * t * (3 - 2 * t);
 		this.displayedFill = this.fillEaseFrom + (this.fillEaseTarget - this.fillEaseFrom) * eased;
-		this.renderCacheLines = null;
 		if (t >= 1) {
 			this.displayedFill = this.fillEaseTarget;
 			this.stopFillEase();
 		}
+		const fingerprint = footerFillFingerprint(this.displayedFill);
+		if (fingerprint === this.lastFillFingerprint) {
+			return false;
+		}
+		this.lastFillFingerprint = fingerprint;
+		this.renderCacheLines = null;
 		return true;
 	}
 

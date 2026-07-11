@@ -139,7 +139,7 @@ export type DebugToolInput = Static<typeof debugSchema>;
 export type DebugAction = DebugToolInput["action"];
 export interface DebugToolOptions {}
 
-interface DebugToolDetails {
+export interface DebugToolDetails {
 	action: DebugAction;
 	success: boolean;
 	snapshot?: DapSessionSummary;

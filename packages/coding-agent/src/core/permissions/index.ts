@@ -1,4 +1,4 @@
-export { describeToolAction, PermissionChecker } from "./checker.ts";
+export { BUILTIN_TOOL_SIDE_EFFECTS, describeToolAction, PermissionChecker } from "./checker.ts";
 export {
 	findMatchingCommandRule,
 	findMatchingGlob,
@@ -7,6 +7,12 @@ export {
 	normalizeTargetPath,
 } from "./matcher.ts";
 export { formatPermissionBlockedContent, humanModeNotifyLabel } from "./mode-labels.ts";
+export {
+	DEFAULT_REGISTER_TOOL_SIDE_EFFECT,
+	EXTENSION_TOOL_SIDE_EFFECTS,
+	isPlanBlockingSideEffect,
+	type ToolSideEffect,
+} from "./side-effect.ts";
 export type {
 	CommandRule,
 	PathRule,

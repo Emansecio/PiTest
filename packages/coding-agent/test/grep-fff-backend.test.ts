@@ -4,15 +4,19 @@
  * for every unsupported case. These tests assert PARITY (same file:line set) on
  * a fixture repo, not just that fff returns quickly.
  *
+ * The fff warm path requires a git work tree (outside git, fff drops dotfiles
+ * and goes stale — Pit gates to rg). Fixtures below `git init` for that reason.
+ *
  * The fff cases skip when the native binary is unavailable on this platform so
  * the suite stays green on machines without the optional dependency installed.
  */
 
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { isFffAvailable, makeGlobPathFilter } from "../src/core/tools/fff-search.ts";
+import { isFffAvailable, isGitWorkTree, makeGlobPathFilter } from "../src/core/tools/fff-search.ts";
 import { createGrepToolDefinition } from "../src/core/tools/grep.ts";
 
 const fffReady = await isFffAvailable();
@@ -21,6 +25,7 @@ const ctx = {} as Parameters<ReturnType<typeof createGrepToolDefinition>["execut
 let root: string;
 
 async function runGrep(
+	cwd: string,
 	engine: "rg" | "fff",
 	args: {
 		pattern: string;
@@ -31,7 +36,7 @@ async function runGrep(
 		outputMode?: "content" | "files_with_matches" | "count";
 	},
 ): Promise<string> {
-	const def = createGrepToolDefinition(root, { engine });
+	const def = createGrepToolDefinition(cwd, { engine });
 	const res = (await def.execute("t", args, undefined, undefined, ctx)) as {
 		content: Array<{ type: string; text?: string }>;
 	};
@@ -60,6 +65,7 @@ function lineSet(output: string): string[] {
 beforeAll(() => {
 	root = mkdtempSync(path.join(tmpdir(), "grep-fff-"));
 	mkdirSync(path.join(root, "sub"), { recursive: true });
+	mkdirSync(path.join(root, ".github", "workflows"), { recursive: true });
 	// "FooBarBaz" appears on 4 lines (mixed positions); one line has the
 	// lowercase "foobarbaz" which must NOT match a case-sensitive search.
 	writeFileSync(
@@ -70,6 +76,9 @@ beforeAll(() => {
 	writeFileSync(path.join(root, "sub", "c.ts"), "export { FooBarBaz };\n");
 	// Second subdir file with 2 matches, for count + multi-file subdir coverage.
 	writeFileSync(path.join(root, "sub", "d.ts"), ["const FooBarBaz = 2;", "use(FooBarBaz);"].join("\n"));
+	writeFileSync(path.join(root, ".github", "workflows", "ci.yml"), "name: FooBarBaz\n");
+	// fff warm path is gated on a git work tree (dotfile + watcher parity).
+	execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
 });
 
 afterAll(() => {
@@ -77,51 +86,75 @@ afterAll(() => {
 });
 
 describe("grep fff backend", () => {
+	it("isGitWorkTree detects the fixture repo and rejects a plain temp dir", () => {
+		expect(isGitWorkTree(root)).toBe(true);
+		const plain = mkdtempSync(path.join(tmpdir(), "grep-fff-nongit-"));
+		try {
+			expect(isGitWorkTree(plain)).toBe(false);
+		} finally {
+			rmSync(plain, { recursive: true, force: true });
+		}
+	});
+
 	it("rg engine (default) finds case-sensitive matches, excluding the lowercase line", async () => {
-		const set = lineSet(await runGrep("rg", { pattern: "FooBarBaz" }));
-		expect(set).toEqual(["a.ts:1", "a.ts:2", "b.ts:1", "sub/c.ts:1", "sub/d.ts:1", "sub/d.ts:2"]);
+		const set = lineSet(await runGrep(root, "rg", { pattern: "FooBarBaz" }));
+		expect(set).toEqual([
+			".github/workflows/ci.yml:1",
+			"a.ts:1",
+			"a.ts:2",
+			"b.ts:1",
+			"sub/c.ts:1",
+			"sub/d.ts:1",
+			"sub/d.ts:2",
+		]);
 	});
 
 	it.skipIf(!fffReady)("fff engine matches rg exactly (case-sensitive parity)", async () => {
-		const rg = lineSet(await runGrep("rg", { pattern: "FooBarBaz" }));
-		const fff = lineSet(await runGrep("fff", { pattern: "FooBarBaz" }));
+		const rg = lineSet(await runGrep(root, "rg", { pattern: "FooBarBaz" }));
+		const fff = lineSet(await runGrep(root, "fff", { pattern: "FooBarBaz" }));
 		expect(fff).toEqual(rg);
 		// smartCase:false parity — the lowercase line must NOT appear.
 		expect(fff).not.toContain("a.ts:3");
 	});
 
+	it.skipIf(!fffReady)("fff engine matches rg on .github dot-dir content", async () => {
+		const rg = lineSet(await runGrep(root, "rg", { pattern: "FooBarBaz", path: ".github" }));
+		const fff = lineSet(await runGrep(root, "fff", { pattern: "FooBarBaz", path: ".github" }));
+		expect(fff).toEqual(rg);
+		expect(fff).toEqual(["workflows/ci.yml:1"]);
+	});
+
 	it.skipIf(!fffReady)("fff engine matches rg exactly (literal mode parity)", async () => {
-		const rg = lineSet(await runGrep("rg", { pattern: "FooBarBaz()", literal: true }));
-		const fff = lineSet(await runGrep("fff", { pattern: "FooBarBaz()", literal: true }));
+		const rg = lineSet(await runGrep(root, "rg", { pattern: "FooBarBaz()", literal: true }));
+		const fff = lineSet(await runGrep(root, "fff", { pattern: "FooBarBaz()", literal: true }));
 		expect(fff).toEqual(rg);
 		expect(fff).toEqual(["b.ts:1"]);
 	});
 
 	it.skipIf(!fffReady)("fff engine matches rg with ignoreCase via warm index", async () => {
-		const rg = lineSet(await runGrep("rg", { pattern: "FooBarBaz", ignoreCase: true }));
-		const fff = lineSet(await runGrep("fff", { pattern: "FooBarBaz", ignoreCase: true }));
+		const rg = lineSet(await runGrep(root, "rg", { pattern: "FooBarBaz", ignoreCase: true }));
+		const fff = lineSet(await runGrep(root, "fff", { pattern: "FooBarBaz", ignoreCase: true }));
 		expect(fff).toEqual(rg);
 		expect(fff).toContain("a.ts:3");
 	});
 
 	it.skipIf(!fffReady)("fff engine handles files_with_matches with parity", async () => {
-		const rg = plainList(await runGrep("rg", { pattern: "FooBarBaz", outputMode: "files_with_matches" }));
-		const fff = plainList(await runGrep("fff", { pattern: "FooBarBaz", outputMode: "files_with_matches" }));
+		const rg = plainList(await runGrep(root, "rg", { pattern: "FooBarBaz", outputMode: "files_with_matches" }));
+		const fff = plainList(await runGrep(root, "fff", { pattern: "FooBarBaz", outputMode: "files_with_matches" }));
 		expect(fff).toEqual(rg);
-		expect(fff).toEqual(["a.ts", "b.ts", "sub/c.ts", "sub/d.ts"]);
+		expect(fff).toEqual([".github/workflows/ci.yml", "a.ts", "b.ts", "sub/c.ts", "sub/d.ts"]);
 	});
 
 	it.skipIf(!fffReady)("fff engine handles count mode with parity", async () => {
-		const rg = plainList(await runGrep("rg", { pattern: "FooBarBaz", outputMode: "count" }));
-		const fff = plainList(await runGrep("fff", { pattern: "FooBarBaz", outputMode: "count" }));
+		const rg = plainList(await runGrep(root, "rg", { pattern: "FooBarBaz", outputMode: "count" }));
+		const fff = plainList(await runGrep(root, "fff", { pattern: "FooBarBaz", outputMode: "count" }));
 		expect(fff).toEqual(rg);
-		// a.ts:2, b.ts:1, c.ts:1, d.ts:2 (counts per file).
-		expect(fff).toEqual(["a.ts:2", "b.ts:1", "sub/c.ts:1", "sub/d.ts:2"].sort());
+		expect(fff).toEqual([".github/workflows/ci.yml:1", "a.ts:2", "b.ts:1", "sub/c.ts:1", "sub/d.ts:2"].sort());
 	});
 
 	it.skipIf(!fffReady)("fff engine scopes a subdir content search with parity", async () => {
-		const rg = lineSet(await runGrep("rg", { pattern: "FooBarBaz", path: "sub" }));
-		const fff = lineSet(await runGrep("fff", { pattern: "FooBarBaz", path: "sub" }));
+		const rg = lineSet(await runGrep(root, "rg", { pattern: "FooBarBaz", path: "sub" }));
+		const fff = lineSet(await runGrep(root, "fff", { pattern: "FooBarBaz", path: "sub" }));
 		expect(fff).toEqual(rg);
 		// paths are relative to the searched subdir; only sub/* files appear.
 		expect(fff).toEqual(["c.ts:1", "d.ts:1", "d.ts:2"]);
@@ -129,37 +162,49 @@ describe("grep fff backend", () => {
 
 	it.skipIf(!fffReady)("fff engine scopes a subdir files_with_matches search with parity", async () => {
 		const rg = plainList(
-			await runGrep("rg", { pattern: "FooBarBaz", path: "sub", outputMode: "files_with_matches" }),
+			await runGrep(root, "rg", { pattern: "FooBarBaz", path: "sub", outputMode: "files_with_matches" }),
 		);
 		const fff = plainList(
-			await runGrep("fff", { pattern: "FooBarBaz", path: "sub", outputMode: "files_with_matches" }),
+			await runGrep(root, "fff", { pattern: "FooBarBaz", path: "sub", outputMode: "files_with_matches" }),
 		);
 		expect(fff).toEqual(rg);
 		expect(fff).toEqual(["c.ts", "d.ts"]);
 	});
 
 	it.skipIf(!fffReady)("fff engine matches rg with a simple glob filter", async () => {
-		const rg = plainList(await runGrep("rg", { pattern: "FooBarBaz", glob: "*.ts" }));
-		const fff = plainList(await runGrep("fff", { pattern: "FooBarBaz", glob: "*.ts" }));
+		const rg = plainList(await runGrep(root, "rg", { pattern: "FooBarBaz", glob: "*.ts" }));
+		const fff = plainList(await runGrep(root, "fff", { pattern: "FooBarBaz", glob: "*.ts" }));
 		expect(fff).toEqual(rg);
 	});
 
 	it.skipIf(!fffReady)("fff engine matches rg when complex glob forces rg fallback", async () => {
 		const complexGlob = "!*.js";
-		const rg = plainList(await runGrep("rg", { pattern: "FooBarBaz", glob: complexGlob }));
-		const fff = plainList(await runGrep("fff", { pattern: "FooBarBaz", glob: complexGlob }));
+		const rg = plainList(await runGrep(root, "rg", { pattern: "FooBarBaz", glob: complexGlob }));
+		const fff = plainList(await runGrep(root, "fff", { pattern: "FooBarBaz", glob: complexGlob }));
 		expect(fff).toEqual(rg);
 	});
 
+	it.skipIf(!fffReady)("fff engine falls back to rg outside a git work tree (dotfile parity)", async () => {
+		// Without git, raw fff would miss .hidden.ts; the gate must force rg so
+		// engine:"fff" still matches engine:"rg" on hidden paths.
+		const plain = mkdtempSync(path.join(tmpdir(), "grep-fff-nongit-"));
+		try {
+			writeFileSync(path.join(plain, "visible.ts"), 'const x = "HiddenMarker";\n');
+			writeFileSync(path.join(plain, ".hidden.ts"), 'const x = "HiddenMarker";\n');
+			expect(isGitWorkTree(plain)).toBe(false);
+			const rg = lineSet(await runGrep(plain, "rg", { pattern: "HiddenMarker" }));
+			const fff = lineSet(await runGrep(plain, "fff", { pattern: "HiddenMarker" }));
+			expect(fff).toEqual(rg);
+			expect(fff).toContain(".hidden.ts:1");
+			expect(fff).toContain("visible.ts:1");
+		} finally {
+			rmSync(plain, { recursive: true, force: true });
+		}
+	});
+
 	it("makeGlobPathFilter matches dot-dirs like rg's --hidden (dot:true parity)", () => {
-		// The native fff index itself excludes dot-files/dot-dirs unconditionally
-		// (no exposed hidden-file option in InitOptions/GrepOptions/SearchOptions —
-		// verified directly against @ff-labs/fff-node: a dot-dir file is never
-		// indexed at all), so an end-to-end fff-vs-rg parity query against a real
-		// dot-dir can never observe a match regardless of any fix here. Verify the
-		// fix at the seam this repo actually controls instead: the client-side
-		// glob filter that emulates rg's `--glob`/`--hidden` behavior over fff's
-		// raw (already-filtered-by-the-index) results.
+		// Inside a git work tree fff indexes dot-dirs; the client-side glob filter
+		// must still accept them so `**/*.yml` keeps `.github/workflows/` hits.
 		const matches = makeGlobPathFilter("**/*.yml");
 		expect(matches(".github/workflows/ci.yml")).toBe(true);
 		expect(matches("readme.yml")).toBe(true);

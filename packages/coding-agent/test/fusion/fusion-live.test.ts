@@ -206,6 +206,27 @@ describe("FusionLiveComponent", () => {
 		});
 	});
 
+	it("keeps a compact synthesizing header on writer stage (no member rows)", () => {
+		const c = new FusionLiveComponent(fakeUi());
+		c.setSynth("claude-opus-4-8");
+		c.setStage("panel");
+		c.upsertMember({
+			index: 0,
+			cli: "claude",
+			model: "opus",
+			status: "done",
+			elapsedMs: 12000,
+			chars: 100,
+		});
+		c.setStage("writer");
+		const lines = c.render(120).map(stripAnsi);
+		expect(lines.some((l) => l.includes("Fusion") && l.includes("synthesizing"))).toBe(true);
+		expect(lines.some((l) => l.includes("writing final answer"))).toBe(true);
+		// Compact: no advisor member rows during writer.
+		expect(lines.every((l) => !l.includes("claude:opus"))).toBe(true);
+		c.dispose();
+	});
+
 	it("unsubscribes the animation ticker on dispose (idempotent, no leak)", () => {
 		let unsubbed = 0;
 		const ui = { addAnimationCallback: () => () => unsubbed++, requestRender: () => {} } as never;

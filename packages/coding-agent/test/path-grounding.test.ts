@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join, resolve as resolvePath } from "node:path";
 import { getRuntimeDiagnostics, resetRuntimeDiagnostics, suggestClosest } from "@pit/ai";
 import { describe, expect, it } from "vitest";
-import { createPathGroundingExtension } from "../src/core/built-ins/path-grounding-extension.ts";
+import {
+	createPathGroundingExtension,
+	createPathGroundingFsCache,
+} from "../src/core/built-ins/path-grounding-extension.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 import {
 	groundPath,
@@ -294,5 +297,43 @@ describe("path-grounding extension — adapter wiring", () => {
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("path-grounding FS TTL cache", () => {
+	it("reuses existsSync results within TTL and refreshes after expiry", () => {
+		let now = 1_000;
+		let existsCalls = 0;
+		const cache = createPathGroundingFsCache(2000, () => now, {
+			existsSync: () => {
+				existsCalls += 1;
+				return true;
+			},
+			readdirSync: () => [],
+		});
+		expect(cache.fileExists("/a")).toBe(true);
+		expect(cache.fileExists("/a")).toBe(true);
+		expect(existsCalls).toBe(1);
+		now += 2_001;
+		expect(cache.fileExists("/a")).toBe(true);
+		expect(existsCalls).toBe(2);
+	});
+
+	it("reuses readdirSync results within TTL", () => {
+		let now = 5_000;
+		let dirCalls = 0;
+		const cache = createPathGroundingFsCache(2000, () => now, {
+			existsSync: () => false,
+			readdirSync: () => {
+				dirCalls += 1;
+				return ["utils.ts"];
+			},
+		});
+		expect(cache.listDir("/proj")).toEqual(["utils.ts"]);
+		expect(cache.listDir("/proj")).toEqual(["utils.ts"]);
+		expect(dirCalls).toBe(1);
+		now += 2_001;
+		expect(cache.listDir("/proj")).toEqual(["utils.ts"]);
+		expect(dirCalls).toBe(2);
 	});
 });

@@ -26,9 +26,13 @@ describe("InteractiveMode turn done rendering", () => {
 			loadingAnimation: { getElapsedMs: () => 12_000 },
 			getWorkingLoaderElapsedMs: Reflect.get(InteractiveMode.prototype, "getWorkingLoaderElapsedMs"),
 			stopWorkingLoader: vi.fn(),
+			deferredTurnDone: null,
 			session: {
 				orchestration: undefined,
 				getContextUsage: () => ({ percent: 18, estimated: false }),
+				isStreaming: true,
+				isBusy: true,
+				hasPendingPostTurnWork: false,
 			},
 			disposeActiveStreamingComponent: vi.fn(),
 			pendingTools: { values: () => [], clear: vi.fn() },
@@ -58,6 +62,78 @@ describe("InteractiveMode turn done rendering", () => {
 
 		expect(added.some((child) => child instanceof Spacer)).toBe(true);
 		expect(added.some((child) => child instanceof TurnDoneMessageComponent)).toBe(true);
+	});
+
+	test("agent_end defers turn-done when post-turn gates will run", async () => {
+		const fakeThis = {
+			isInitialized: true,
+			init: vi.fn(),
+			setTerminalProgress: vi.fn(),
+			clearInterruptWatchdog: vi.fn(),
+			disposeFusionLive: vi.fn(),
+			shouldRetireWorkingLoaderOnAgentEnd,
+			loadingAnimation: { getElapsedMs: () => 12_000 },
+			getWorkingLoaderElapsedMs: Reflect.get(InteractiveMode.prototype, "getWorkingLoaderElapsedMs"),
+			stopWorkingLoader: vi.fn(),
+			deferredTurnDone: null as unknown,
+			session: {
+				orchestration: undefined,
+				getContextUsage: () => ({ percent: 18, estimated: false }),
+				isStreaming: true,
+				isBusy: true,
+				hasPendingPostTurnWork: true,
+			},
+			disposeActiveStreamingComponent: vi.fn(),
+			pendingTools: { values: () => [], clear: vi.fn() },
+			settingsManager: { getToolActivity: () => "legacy" },
+			appendTurnDoneLine: vi.fn(),
+			chatContainer: { addChild: vi.fn(), removeChild: vi.fn() },
+			checkShutdownRequested: vi.fn(),
+			maybeShowPowerTip: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		};
+
+		await handleEvent.call(fakeThis, {
+			type: "agent_end",
+			willRetry: false,
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "done" }],
+					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+					stopReason: "stop",
+				},
+			],
+		});
+
+		expect(fakeThis.stopWorkingLoader).not.toHaveBeenCalled();
+		expect(fakeThis.appendTurnDoneLine).not.toHaveBeenCalled();
+		expect(fakeThis.deferredTurnDone).not.toBeNull();
+	});
+
+	test("prompt_end retires the loader and flushes deferred turn-done", async () => {
+		const added: unknown[] = [];
+		const deferred = { kind: "turn-done" };
+		const fakeThis = {
+			isInitialized: true,
+			init: vi.fn(),
+			settleWorkingLoaderAfterPrompt: Reflect.get(InteractiveMode.prototype, "settleWorkingLoaderAfterPrompt"),
+			clearInterruptWatchdog: vi.fn(),
+			deferredTurnDone: deferred,
+			loadingAnimation: { stop: vi.fn() },
+			stopWorkingLoader: vi.fn(function (this: { loadingAnimation: unknown }) {
+				this.loadingAnimation = undefined;
+			}),
+			session: { orchestration: undefined },
+			appendTurnDoneLine: vi.fn((snapshot: unknown) => added.push(snapshot)),
+			ui: { requestRender: vi.fn() },
+		};
+
+		await handleEvent.call(fakeThis, { type: "prompt_end" });
+
+		expect(fakeThis.stopWorkingLoader).toHaveBeenCalledOnce();
+		expect(fakeThis.appendTurnDoneLine).toHaveBeenCalledWith(deferred);
+		expect(fakeThis.deferredTurnDone).toBeNull();
 	});
 
 	test("agent_end still cleans up when the loader does not expose elapsed time", async () => {

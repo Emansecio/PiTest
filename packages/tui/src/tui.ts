@@ -1938,9 +1938,8 @@ export class TUI extends Container {
 
 		if (process.env.PIT_TUI_DEBUG === "1") {
 			const debugDir = "/tmp/tui";
-			fs.mkdirSync(debugDir, { recursive: true });
 			const debugPath = path.join(debugDir, `render-${Date.now()}-${Math.random().toString(36).slice(2)}.log`);
-			const debugData = [
+			const metaLines = [
 				`firstChanged: ${firstChanged}`,
 				`viewportTop: ${viewportTop}`,
 				`cursorRow: ${this.cursorRow}`,
@@ -1952,17 +1951,26 @@ export class TUI extends Container {
 				`cursorPos: ${JSON.stringify(cursorPos)}`,
 				`newLines.length: ${newLines.length}`,
 				`previousLines.length: ${this.previousLines.length}`,
-				"",
-				"=== newLines ===",
-				JSON.stringify(newLines, null, 2),
-				"",
-				"=== previousLines ===",
-				JSON.stringify(this.previousLines, null, 2),
-				"",
-				"=== buffer ===",
-				JSON.stringify(buffer),
-			].join("\n");
-			fs.writeFileSync(debugPath, debugData);
+				`buffer.length: ${buffer.length}`,
+			];
+			// Full frame dump only when explicitly requested — stringify of every
+			// line is expensive on the render hot path.
+			const debugData =
+				process.env.PIT_TUI_DEBUG_FULL === "1"
+					? [
+							...metaLines,
+							"",
+							"=== newLines ===",
+							JSON.stringify(newLines),
+							"",
+							"=== previousLines ===",
+							JSON.stringify(this.previousLines),
+							"",
+							"=== buffer ===",
+							JSON.stringify(buffer),
+						].join("\n")
+					: metaLines.join("\n");
+			void fs.promises.mkdir(debugDir, { recursive: true }).then(() => fs.promises.writeFile(debugPath, debugData));
 		}
 
 		// Write entire buffer at once

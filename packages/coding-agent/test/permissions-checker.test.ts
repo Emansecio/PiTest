@@ -219,6 +219,42 @@ describe("PermissionChecker — plan mode blocks side-effecting tools", () => {
 		expect(c.check(describeToolAction("todo", { action: "list" })).decision).toBe("allow");
 		expect(c.check(describeToolAction("ask", { question: "ok?" })).decision).toBe("allow");
 	});
+
+	it("blocks task/parallel/fanout/memory_append (agent/workspace sideEffect)", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check(describeToolAction("task", { prompt: "x" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("parallel", { tasks: [] })).decision).toBe("deny");
+		expect(c.check(describeToolAction("fanout", {})).decision).toBe("deny");
+		expect(c.check(describeToolAction("memory_append", { scope: "project", entry: "x" })).decision).toBe("deny");
+	});
+
+	it("allows exit_plan in plan mode (sideEffect none)", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check(describeToolAction("exit_plan", { title: "t" })).decision).toBe("allow");
+	});
+
+	it("blocks opaque extension tools via setToolSideEffects", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		c.setToolSideEffects([["custom_mutator", "opaque"]]);
+		expect(c.check(describeToolAction("custom_mutator", { x: 1 })).decision).toBe("deny");
+	});
+
+	it("re-check after args rewrite catches denyPaths (.env)", () => {
+		// Session contract: permissions may allow first, then a tool_call handler
+		// rewrites args; the host re-runs check on the final args.
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		const args: Record<string, unknown> = { path: "src/ok.ts", content: "x" };
+		expect(c.check(describeToolAction("write", args)).decision).toBe("allow");
+		Object.assign(args, { path: ".env" });
+		expect(c.check(describeToolAction("write", args)).decision).toBe("deny");
+	});
+});
+
+describe("PermissionChecker — auto allows task", () => {
+	it("allows task in auto mode", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		expect(c.check(describeToolAction("task", { prompt: "x" })).decision).toBe("allow");
+	});
 });
 
 describe("PermissionChecker — plan mode default-denies opaque MCP tools", () => {
@@ -226,20 +262,19 @@ describe("PermissionChecker — plan mode default-denies opaque MCP tools", () =
 		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
 		const decision = c.check(describeToolAction("mcp__github__create_issue", { title: "x" }));
 		expect(decision.decision).toBe("deny");
-		// The deny reason tells the model how to allow it.
 		const reason = decision.decision === "deny" ? decision.reason : "";
-		expect(reason).toContain("allowTools");
+		expect(reason).toContain("auto mode");
 	});
 
-	it("allows an MCP tool that matches an allowTools glob (opt-in read-only)", () => {
+	it("denies MCP tools even when allowTools matches (no opt-in in plan)", () => {
 		const c = new PermissionChecker({ cwd, mode: "plan", settings: { allowTools: ["mcp__foo__*"] } });
-		expect(c.check(describeToolAction("mcp__foo__list_files", { dir: "." })).decision).toBe("allow");
-		expect(c.check(describeToolAction("mcp__foo__create", { name: "x" })).decision).toBe("allow");
+		expect(c.check(describeToolAction("mcp__foo__list_files", { dir: "." })).decision).toBe("deny");
+		expect(c.check(describeToolAction("mcp__foo__create", { name: "x" })).decision).toBe("deny");
 	});
 
-	it("denies a non-allowlisted MCP tool even when a different MCP glob is allowed (fail-safe)", () => {
-		const c = new PermissionChecker({ cwd, mode: "plan", settings: { allowTools: ["mcp__foo__*"] } });
-		expect(c.check(describeToolAction("mcp__bar__write", { name: "x" })).decision).toBe("deny");
+	it("denies unclassified type:tool actions (fail-closed)", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check({ type: "tool", toolName: "totally_unknown_ext", args: {} }).decision).toBe("deny");
 	});
 
 	it("leaves native read-only tools (read/grep) and read-only lsp/chrome unaffected", () => {

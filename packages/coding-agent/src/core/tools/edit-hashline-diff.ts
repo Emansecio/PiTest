@@ -98,24 +98,29 @@ export function formatAnchorsForRead(
 	}
 
 	let stride = initialStride;
-	let body = renderAnchorBlock(lines, last, stride);
+	// Precompute every window hash once; stride doubling only resamples the array.
+	const windowHashes: string[] = new Array(last + 1);
+	for (let i = 0; i <= last; i++) {
+		windowHashes[i] = hashWindow(lines, i);
+	}
+	let body = renderAnchorBlock(windowHashes, last, stride);
 	while (Buffer.byteLength(body, "utf-8") > maxBytes) {
 		const nextStride = stride * 2;
 		if (nextStride > last + 1) {
 			return "# anchors omitted: file too large for inline anchor block";
 		}
 		stride = nextStride;
-		body = renderAnchorBlock(lines, last, stride);
+		body = renderAnchorBlock(windowHashes, last, stride);
 	}
 	return body;
 }
 
-function renderAnchorBlock(lines: string[], last: number, stride: number): string {
+function renderAnchorBlock(windowHashes: string[], last: number, stride: number): string {
 	const out: string[] = [
 		`# anchors (${HASHLINE_WINDOW}-line windows, sha256[0:${HASHLINE_HASH_LEN}], stride=${stride})`,
 	];
 	for (let i = 0; i <= last; i += stride) {
-		out.push(`# L${i + 1} ${hashWindow(lines, i)}`);
+		out.push(`# L${i + 1} ${windowHashes[i]}`);
 	}
 	return out.join("\n");
 }
@@ -140,9 +145,13 @@ export function interleaveAnchorsIntoLines(content: string, opts?: { stride?: nu
 	return out.join("\n");
 }
 
-/** sha256 hash per line, truncated to HASHLINE_HASH_LEN. */
-function computeLineHashes(lines: string[]): string[] {
-	return lines.map((line) => createHash("sha256").update(line).digest("hex").slice(0, HASHLINE_HASH_LEN));
+/** sha256 hash per line, truncated to HASHLINE_HASH_LEN — lazy per index. */
+function lineHashAt(lines: string[], cache: Map<number, string>, i: number): string {
+	let h = cache.get(i);
+	if (h !== undefined) return h;
+	h = createHash("sha256").update(lines[i]!).digest("hex").slice(0, HASHLINE_HASH_LEN);
+	cache.set(i, h);
+	return h;
 }
 
 function nearbyLineNumbers(
@@ -154,27 +163,30 @@ function nearbyLineNumbers(
 	// Walk windows and score 2-of-3 line-hash agreement against the union of
 	// line-hashes from windows that fully matched `hash`. If no window matches
 	// fully, fall back to windows whose hash shares a 2-hex prefix with `hash`.
-	const lineHashes = computeLineHashes(lines);
+	const lineHashCache = new Map<number, string>();
 	const last = lines.length - HASHLINE_WINDOW;
 	if (last < 0) return [];
 
 	const fullMatchLineHashes = new Set<string>();
 	const prefixMatchLineHashes = new Set<string>();
 	const prefix = hash.slice(0, 2);
+	const candidateStarts = new Set<number>();
 
 	// Reuse precomputed window hashes instead of re-hashing every window.
 	for (const [wh, positions] of precomputedIndex) {
 		if (wh === hash) {
 			for (const i of positions) {
-				fullMatchLineHashes.add(lineHashes[i]);
-				if (i + 1 < lineHashes.length) fullMatchLineHashes.add(lineHashes[i + 1]);
-				if (i + 2 < lineHashes.length) fullMatchLineHashes.add(lineHashes[i + 2]);
+				candidateStarts.add(i);
+				fullMatchLineHashes.add(lineHashAt(lines, lineHashCache, i));
+				if (i + 1 < lines.length) fullMatchLineHashes.add(lineHashAt(lines, lineHashCache, i + 1));
+				if (i + 2 < lines.length) fullMatchLineHashes.add(lineHashAt(lines, lineHashCache, i + 2));
 			}
 		} else if (wh.startsWith(prefix)) {
 			for (const i of positions) {
-				prefixMatchLineHashes.add(lineHashes[i]);
-				if (i + 1 < lineHashes.length) prefixMatchLineHashes.add(lineHashes[i + 1]);
-				if (i + 2 < lineHashes.length) prefixMatchLineHashes.add(lineHashes[i + 2]);
+				candidateStarts.add(i);
+				prefixMatchLineHashes.add(lineHashAt(lines, lineHashCache, i));
+				if (i + 1 < lines.length) prefixMatchLineHashes.add(lineHashAt(lines, lineHashCache, i + 1));
+				if (i + 2 < lines.length) prefixMatchLineHashes.add(lineHashAt(lines, lineHashCache, i + 2));
 			}
 		}
 	}
@@ -182,12 +194,21 @@ function nearbyLineNumbers(
 	const refSet = fullMatchLineHashes.size > 0 ? fullMatchLineHashes : prefixMatchLineHashes;
 	if (refSet.size === 0) return [];
 
+	// Score windows near matched buckets (and a small radius) instead of every line.
+	const scoreStarts = new Set<number>();
+	for (const i of candidateStarts) {
+		for (let d = -HASHLINE_WINDOW; d <= HASHLINE_WINDOW; d++) {
+			const j = i + d;
+			if (j >= 0 && j <= last) scoreStarts.add(j);
+		}
+	}
+
 	const ranked: Array<{ line: number; score: number }> = [];
-	for (let i = 0; i <= last; i++) {
+	for (const i of scoreStarts) {
 		let score = 0;
-		if (refSet.has(lineHashes[i])) score++;
-		if (refSet.has(lineHashes[i + 1])) score++;
-		if (refSet.has(lineHashes[i + 2])) score++;
+		if (refSet.has(lineHashAt(lines, lineHashCache, i))) score++;
+		if (i + 1 < lines.length && refSet.has(lineHashAt(lines, lineHashCache, i + 1))) score++;
+		if (i + 2 < lines.length && refSet.has(lineHashAt(lines, lineHashCache, i + 2))) score++;
 		if (score >= 2) ranked.push({ line: i + 1, score });
 	}
 	ranked.sort((a, b) => b.score - a.score || a.line - b.line);

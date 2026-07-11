@@ -65,6 +65,12 @@ export interface Args {
 	smol?: boolean | string;
 	slow?: boolean | string;
 	plan?: boolean | string;
+	/**
+	 * Session tool-surface profile. `minimal` disables default-on heavy tools
+	 * (eval, lsp, debug, chrome, hindsight, webSearch, agentMessaging) via
+	 * settings overrides — does not change package defaults for other sessions.
+	 */
+	profile?: "minimal";
 }
 
 const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
@@ -120,6 +126,16 @@ export function parseArgs(args: string[]): Args {
 			result.models = args[++i].split(",").map((s) => s.trim());
 		} else if (arg === "--no-tools" || arg === "-nt") {
 			result.noTools = true;
+		} else if (arg === "--profile" && i + 1 < args.length) {
+			const profile = args[++i];
+			if (profile === "minimal") {
+				result.profile = "minimal";
+			} else {
+				result.diagnostics.push({
+					type: "warning",
+					message: `Unknown profile "${profile}". Valid values: minimal`,
+				});
+			}
 		} else if (arg === "--no-builtin-tools" || arg === "-nbt") {
 			result.noBuiltinTools = true;
 		} else if ((arg === "--tools" || arg === "-t") && i + 1 < args.length) {
@@ -335,6 +351,8 @@ ${chalk.bold("Options:")}
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
                                  Supports globs (anthropic/*, *sonnet*) and fuzzy matching
   --no-tools, -nt                Disable all tools by default (built-in and extension)
+  --profile minimal              Disable default-on heavy tools for this session
+                                 (eval, lsp, debug, chromeDevtools, hindsight, webSearch, agentMessaging)
   --no-builtin-tools, -nbt       Disable built-in tools by default but keep extension/custom tools enabled
   --tools, -t <tools>            Comma-separated allowlist of tool names to enable
                                  Applies to built-in, extension, and custom tools
@@ -344,7 +362,9 @@ ${chalk.bold("Options:")}
                                  Optional [model] overrides the role's primary model for this turn
                                  (e.g. --smol claude-sonnet-4-7 or --smol=claude-sonnet-4-7)
   --slow [model]                 Shortcut for --role slow (deep reasoning); optional [model] override
-  --plan [model]                 Shortcut for --role plan (plan-mode model); optional [model] override
+  --plan [model]                 Shortcut for --role plan (model role only — does NOT
+                                 enable read-only permission mode; use --permission-mode plan
+                                 for that). Optional [model] override.
                                  --smol/--slow/--plan are mutually exclusive; rightmost wins
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)

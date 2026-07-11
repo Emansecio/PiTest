@@ -237,4 +237,34 @@ describe("ask picker", () => {
 		const urlFragments = plain.split("\n").filter((l) => l.includes("example.com") || l.includes("aaa"));
 		expect(urlFragments.length).toBeGreaterThanOrEqual(2);
 	});
+
+	it("windows long option lists to maxVisible rows with a scroll hint", () => {
+		const options = Array.from({ length: 30 }, (_, i) => ({ label: `Option-${i + 1}` }));
+		const { component } = createAskPicker(makeReq({ options }), () => {});
+		const lines = component.render(80);
+		const plain = stripAnsi(lines.join("\n"));
+		const optionLines = plain.split("\n").filter((l) => /Option-\d+/.test(l));
+		expect(optionLines.length).toBeLessThanOrEqual(12);
+		expect(optionLines.length).toBeGreaterThan(0);
+		// Total render stays bounded well below one-line-per-option.
+		expect(lines.length).toBeLessThan(30);
+		expect(plain).toMatch(/[↑ ][↓ ] \(\d+\/30\)/);
+		// Default selection is index 0 → window shows Option-1 and hides the tail.
+		expect(plain).toContain("Option-1");
+		expect(plain).not.toContain("Option-30");
+	});
+
+	it("scrolls the option window to keep the selection visible", () => {
+		const options = Array.from({ length: 30 }, (_, i) => ({ label: `Option-${i + 1}` }));
+		const p = drive(makeReq({ options }));
+		for (let i = 0; i < 20; i++) p.send(DOWN);
+		const plain = p.render();
+		const labels = plain.split("\n").flatMap((l) => {
+			const m = l.match(/Option-(\d+)/);
+			return m ? [Number(m[1])] : [];
+		});
+		expect(labels).toContain(21);
+		expect(labels).not.toContain(1);
+		expect(plain).toMatch(/↑↓ \(21\/30\)/);
+	});
 });

@@ -119,4 +119,18 @@ describe("DiagnosticsSink", () => {
 		expect(files).toContain("fresh.jsonl");
 		expect(statSync(join(dir, "fresh.jsonl")).isFile()).toBe(true);
 	});
+
+	it("defers JSON.stringify until flush and drops unserialisable records", () => {
+		const sink = makeSink("s7");
+		sink.start();
+		const circular: Record<string, unknown> = { type: "bad" };
+		circular.self = circular;
+		sink.writeRecord(circular);
+		sink.writeRecord({ type: "efficacy", guard: "guard.read", outcome: "ok", ts: 1 });
+		sink.flush();
+
+		const lines = readLines("s7");
+		expect(lines.find((l) => l.type === "efficacy")).toMatchObject({ guard: "guard.read" });
+		expect(lines.some((l) => l.type === "bad")).toBe(false);
+	});
 });

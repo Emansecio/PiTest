@@ -25,19 +25,29 @@ import type { Model } from "@pit/ai";
 import { type Static, type TSchema, Type } from "typebox";
 import { isValidThinkingLevel } from "../../cli/args.ts";
 import {
+	brandCoordinatorTool,
+	COORDINATOR_TOOL_BRAND,
+	COORDINATOR_TOOL_NAMES,
+	isCoordinatorTool,
+} from "../coordinator/brand.ts";
+import {
 	type AgentTypeDef,
 	createSubagentOutputStore,
 	deleteResumeState,
 	extractAssistantText,
+	type GateDetails,
 	listResumeHandlesSync,
 	loadAgentTypes,
 	loadResumeState,
+	runFanout,
+	runWithAcceptance,
 	SubagentRegistry,
 	saveResumeState,
+	spawnAll,
 	spawnSubagent,
 } from "../coordinator/index.ts";
 import type { SpawnSubagentResult, SubagentUsage } from "../coordinator/types.ts";
-import type { ExtensionAPI } from "../extensions/types.ts";
+import type { ExtensionAPI, ToolDefinition } from "../extensions/types.ts";
 import { agentMessageBus, makeAgentDelivery, makeAgentResponder } from "../messaging/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { parseModelPattern } from "../model-resolver.ts";
@@ -52,12 +62,14 @@ interface PendingTask {
 	handle: string;
 	status: "running" | "done" | "error";
 	promise: Promise<void>;
-	/** Abort controller for the detached run, so session teardown can stop it. */
+	/** Abort controller for the detached run, so session teardown / Esc can stop it. */
 	controller: AbortController;
 	result?: string;
 	error?: string;
 	/** True once the result was re-injected into the chat, so poll/join don't repeat the payload. */
 	delivered?: boolean;
+	turns?: number;
+	totalTokens?: number;
 }
 
 /** Shared result shape for every `task` op so the inferred tool `details` type unifies. */
@@ -175,25 +187,27 @@ const taskSchema = Type.Object({
 	),
 	worktree: Type.Optional(worktreeSchema),
 	timeout_ms: Type.Optional(Type.Number({ description: "Hard wall-clock timeout for the subagent in ms." })),
+	acceptance: Type.Optional(
+		Type.Object({
+			criteria: Type.Optional(
+				Type.String({ description: "Semantic acceptance bar, judged by a fresh judge subagent." }),
+			),
+			check: Type.Optional(
+				Type.String({ description: "Shell command; passes iff exit code 0 (permission-gated)." }),
+			),
+			max_attempts: Type.Optional(Type.Number({ description: "Worker attempts including the first; default 2." })),
+		}),
+	),
 });
 
 type TaskInput = Static<typeof taskSchema>;
 
-/** Name of the coordinator-spawned tool. Stripped/rebuilt per nesting level. */
+/** Name of the coordinator-spawned task tool. Stripped/rebuilt per nesting level. */
 const TASK_TOOL_NAME = "task";
+const PARALLEL_TOOL_NAME = "parallel";
+const FANOUT_TOOL_NAME = "fanout";
 
-/**
- * Brand stamped on every coordinator-spawned tool. The recursion guard strips
- * tools by this brand rather than by name, so a rename of `TASK_TOOL_NAME` — or
- * a user tool that happens to also be named `"task"` — can never break the
- * guard or strip the wrong tool.
- */
-export const COORDINATOR_TOOL_BRAND: unique symbol = Symbol("pit.coordinatorTool");
-
-/** True when `tool` is a coordinator-spawned `task` tool (carries the brand). */
-function isCoordinatorTool(tool: AgentTool): boolean {
-	return (tool as { [COORDINATOR_TOOL_BRAND]?: boolean })[COORDINATOR_TOOL_BRAND] === true;
-}
+export { COORDINATOR_TOOL_BRAND, COORDINATOR_TOOL_NAMES, isCoordinatorTool };
 
 /**
  * True when a settled subagent's last turn failed or was aborted — i.e. it
@@ -269,11 +283,11 @@ export function buildSubagentToolCatalog(
 	parentTools: readonly AgentTool[],
 	childDepth: number,
 	maxDepth: number,
-	makeCoordinatorTool: (depth: number) => AgentTool,
+	makeCoordinatorTools: (depth: number) => AgentTool[],
 ): AgentTool[] {
 	const base = parentTools.filter((tool) => !isCoordinatorTool(tool));
 	if (childDepth < maxDepth) {
-		return [...base, makeCoordinatorTool(childDepth)];
+		return [...base, ...makeCoordinatorTools(childDepth)];
 	}
 	return base;
 }
@@ -416,11 +430,24 @@ export interface CoordinatorExtensionOptions {
 	 * PIT_ASYNC_REINJECT it re-injects the result into the chat (returns true), so
 	 * poll/join won't repeat it. Absent → spawn stays poll-only.
 	 */
-	onAsyncComplete?: (handle: string, text: string, status: "done" | "error") => boolean;
+	onAsyncComplete?: (
+		handle: string,
+		text: string,
+		status: "done" | "error",
+		meta?: { turns?: number; totalTokens?: number },
+	) => boolean;
 	/** Fired just before a subagent (run or spawn) starts, so the parent can surface it as live. */
 	onSubagentStart?: (handle: string) => void;
 	/** Fired once per finished subagent turn with coarse progress (turn N, last tool). */
 	onSubagentProgress?: (handle: string, info: { turn: number; lastTool?: string }) => void;
+	/** Fired when a blocking run/resume/continue settles (turns/tokens for the TUI). */
+	onSubagentComplete?: (
+		handle: string,
+		status: "done" | "error",
+		meta?: { turns?: number; totalTokens?: number },
+	) => void;
+	/** Called once with a function that aborts all detached op:"spawn" controllers (Esc). */
+	registerAbortDetached?: (abortFn: () => void) => void;
 	/** True when subagent memory should be scoped by agent type (default-on setting). */
 	isScopedHindsightEnabled?: () => boolean;
 	/** Unified token budget governor — gates spawn and records subagent spend. */
@@ -501,6 +528,34 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		}
 	}
 
+	function completeMetaFromUsage(
+		turns: number | undefined,
+		usage: SubagentUsage | undefined,
+	): { turns?: number; totalTokens?: number } {
+		return {
+			turns,
+			totalTokens: usage?.totalTokens,
+		};
+	}
+
+	function emitBlockingComplete(
+		handle: string,
+		status: "done" | "error",
+		turns?: number,
+		usage?: SubagentUsage,
+	): void {
+		options.onSubagentComplete?.(handle, status, completeMetaFromUsage(turns, usage));
+	}
+
+	function abortAllPending(reason = "aborted: parent interrupt"): void {
+		for (const e of pending.values()) {
+			if (e.status === "running") {
+				e.controller.abort(new Error(reason));
+			}
+		}
+	}
+	options.registerAbortDetached?.(() => abortAllPending());
+
 	// Mirror continuable's cap so an interrupted-run map can't grow unbounded over a
 	// long session: each entry pins a live Agent + its full transcript. Disk-based
 	// resume still works for evicted handles (markResumable persists to disk too).
@@ -568,7 +623,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	function digestWithPointer(rawText: string, readHandle: string): string {
 		const digest = truncateHeadTail(rawText, { maxBytes: maxOutputBytes });
 		if (!digest.truncated) return digest.content;
-		return `${digest.content}\n\n${subagentReadPointer(readHandle, digest.totalBytes)}`;
+		return `${digest.content}\n\n${subagentReadPointer(readHandle, digest.totalBytes)} (inline digest capped at ${formatSize(maxOutputBytes)}; FIFO continue/resume memory holds at most ${CONTINUABLE_MAX} live Agents)`;
 	}
 
 	/** Formats a settled subagent result into the digest + recovery pointer the parent sees. */
@@ -589,7 +644,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	 * continue runs (those re-drive a live Agent and never write a registry record).
 	 *
 	 * The integral text is returned as-is; the task tool carries an `outputCap` of
-	 * RECALL_OUTPUT_CAP_BYTES (256KB, head+tail) so `wrapToolDefinition` bounds it at
+	 * RECALL_OUTPUT_CAP_BYTES (96KB, head+tail) so `wrapToolDefinition` bounds it at
 	 * the wrap layer exactly like `recall_tool_output` — a giant output can't flood
 	 * the parent, yet its head AND tail both survive (a head-only re-cut would drop
 	 * the tail the model recovered it for).
@@ -707,6 +762,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		if (resumeLines.length > 0) {
 			sections.push(`Resumable (interrupted — continue with op:"resume"):\n${resumeLines.join("\n")}`);
 		}
+		const continueLines = [...continuable.keys()].map((h) => `- ${h}`);
+		if (continueLines.length > 0) {
+			sections.push(
+				`Continuable (follow-up with op:"continue"; FIFO cap ${CONTINUABLE_MAX}):\n${continueLines.join("\n")}`,
+			);
+		}
 		const totalTokens = records.reduce((sum, r) => sum + (r.usage ? r.usage.totalTokens : 0), 0);
 		sections.push(
 			`Slots (process-wide): active=${activeSubagents}, queued=${slotWaiters.length}; totalTokens=${totalTokens}`,
@@ -718,6 +779,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				subagents: records.length,
 				asyncHandles: pending.size,
 				resumable: resumable.size + diskHandles.length,
+				continuable: continuable.size,
 				// active/queued are process-wide (module-scoped slot budget shared across coordinator instances).
 				active: activeSubagents,
 				queued: slotWaiters.length,
@@ -949,10 +1011,9 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	 * receives a depth-incremented copy.
 	 */
 	function makeTaskTool(depth: number) {
-		return {
+		return brandCoordinatorTool({
 			name: TASK_TOOL_NAME,
 			label: TASK_TOOL_NAME,
-			[COORDINATOR_TOOL_BRAND]: true,
 			description:
 				"Spawn a focused subagent to complete an isolated sub-task and return its final answer. " +
 				"Use this to delegate research, file exploration, or repetitive checks without polluting the main conversation. " +
@@ -963,10 +1024,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 			promptSnippet:
 				"Spawn a subagent to handle an isolated sub-task. Supports structured output via result_schema and isolated git worktrees via worktree.",
 			parameters: taskSchema,
-			// op:"read" can return up to RECALL_OUTPUT_CAP_BYTES (256KB) of integral
+			sideEffect: "agent",
+			// op:"read" can return up to RECALL_OUTPUT_CAP_BYTES (96KB) of integral
 			// output. Without a per-tool cap, wrapToolDefinition's generic 64KB
 			// HEAD-ONLY safety net would re-cut a large read result and drop its tail.
-			// Mirror recall_tool_output: raise this tool's ceiling to 256KB and keep
+			// Mirror recall_tool_output: raise this tool's ceiling to 96KB and keep
 			// head + tail. Inert for every other op — their payloads (4KB digests,
 			// status lines) sit well under the cap.
 			outputCap: { maxBytes: RECALL_OUTPUT_CAP_BYTES, mode: "headTail" as const },
@@ -996,6 +1058,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					worktree,
 					timeout_ms,
 					inherit_skills,
+					acceptance,
 				} = p;
 				if (!prompt || !prompt.trim()) {
 					return {
@@ -1065,7 +1128,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					});
 				};
 				const baseChildTools = withAgentScope(
-					buildSubagentToolCatalog(options.getAvailableTools(), childDepth, maxDepth, makeTaskTool),
+					buildSubagentToolCatalog(options.getAvailableTools(), childDepth, maxDepth, makeCoordinatorTools),
 					hindsightScope,
 					cwd,
 					autoAddMemory,
@@ -1081,9 +1144,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						(worktree as { cleanup?: string }).cleanup !== "keep");
 
 				// Non-blocking spawn: launch detached, return a handle, and let the
-				// parent keep working. Async tasks skip the messaging bus (they are
-				// fire-and-collect, not interactive) and run on their own controller
-				// so they outlive the spawning turn.
+				// parent keep working. Runs on its own controller so it outlives the
+				// spawning turn (but Esc / session_shutdown still abort it).
 				if (op === "spawn") {
 					const handle = name?.trim() ? name.trim() : `task-${++asyncTaskCounter}`;
 					// Dedup the handle: a second spawn reusing the SAME `name` while the
@@ -1133,22 +1195,37 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					};
 					// Capture the live Agent so a drop/abort leaves a resumable transcript.
 					let capturedAgent: Agent | undefined;
+					const messagingOn = options.isMessagingEnabled?.() ?? false;
+					let spawnMessagingId: string | undefined;
+					let spawnChildTools = baseChildTools;
+					let spawnSystemPromptSuffix: string | undefined;
+					let spawnMessagingReady: ((agent: Agent) => void) | undefined;
+					if (messagingOn) {
+						const parentId = options.getParentMessagingId?.();
+						const selfId = agentMessageBus.reserve(name ?? handle, { kind: "sub", parentId });
+						spawnMessagingId = selfId;
+						const timeoutMs = options.getMessagingTimeoutMs?.();
+						spawnChildTools = [...baseChildTools, createMessageTool(cwd, { selfId, timeoutMs })];
+						spawnSystemPromptSuffix = messagingPreamble(selfId, parentId);
+						spawnMessagingReady = (agent) => {
+							agentMessageBus.attachResponder(selfId, makeAgentResponder(agent));
+							agentMessageBus.attachDelivery(selfId, makeAgentDelivery(agent));
+						};
+					}
 					entry.promise = (async () => {
 						// Queue past the concurrency cap before doing any work; queue time is
-						// not counted against the task timeout. Detached spawns are
-						// fire-and-forget: they bypass the queue cap (no turn signal to
-						// surface a rejection to a user) and never pass the subagent
-						// controller as an acquire-abort signal. The acquire lives INSIDE
-						// the try so any rejection is caught below (status="error" +
-						// onAsyncComplete) instead of escaping the IIFE as an
+						// not counted against the task timeout. Detached spawns respect the
+						// same queue cap as blocking runs (no unbounded waiters). The acquire
+						// lives INSIDE the try so any rejection is caught below (status="error"
+						// + onAsyncComplete) instead of escaping the IIFE as an
 						// unhandledRejection that would orphan the handle. `acquired`
 						// gates the finally so a failed acquire never underflows the slot.
 						let acquired = false;
 						try {
-							await acquireSlot(undefined, { bypassQueueCap: true });
+							await acquireSlot(controller.signal);
 							acquired = true;
 							options.onSubagentStart?.(handle);
-							const result = await spawnSubagent(makeSpawnDeps(baseChildTools, model), {
+							const result = await spawnSubagent(makeSpawnDeps(spawnChildTools, model), {
 								prompt,
 								model: subModel,
 								thinkingLevel: subThinking,
@@ -1163,12 +1240,17 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								cwd,
 								depth: childDepth,
 								inheritSkills: inherit_skills,
+								systemPromptSuffix: spawnSystemPromptSuffix,
 								onSubagentEvent: (info) => options.onSubagentProgress?.(handle, info),
 								onAgentReady: (agent) => {
 									capturedAgent = agent;
+									spawnMessagingReady?.(agent);
 								},
 							});
 							recordSubagentSpend(result.usage);
+							const meta = completeMetaFromUsage(result.record.turnCount, result.usage);
+							entry.turns = meta.turns;
+							entry.totalTokens = meta.totalTokens;
 							// A drop that ended the turn on an error (without throwing) still
 							// leaves a resumable transcript — surface it as such, not "done".
 							if (capturedAgent && agentEndedWithError(capturedAgent) && !usedAutoWorktree) {
@@ -1176,14 +1258,14 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 								entry.status = "error";
 								entry.error = "interrupted (resumable)";
 								const note = `Subagent '${handle}' was interrupted before finishing — resume with task({op:"resume", name:"${handle}"}).`;
-								if (options.onAsyncComplete?.(handle, note, "error")) entry.delivered = true;
+								if (options.onAsyncComplete?.(handle, note, "error", meta)) entry.delivered = true;
 							} else {
 								if (capturedAgent && !usedAutoWorktree) rememberContinuable(handle, capturedAgent);
 								// Persist the integral output for op:"read" recovery, then keep only a digest inline.
 								outputStore.put(handle, result.output);
 								entry.result = formatSpawnResult(result, resultSchema, handle);
 								entry.status = "done";
-								if (options.onAsyncComplete?.(handle, entry.result, "done")) entry.delivered = true;
+								if (options.onAsyncComplete?.(handle, entry.result, "done", meta)) entry.delivered = true;
 							}
 						} catch (err) {
 							entry.error = err instanceof Error ? err.message : String(err);
@@ -1191,22 +1273,32 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							if (capturedAgent && !usedAutoWorktree) await markResumable(handle, capturedAgent);
 							const suffix =
 								capturedAgent && !usedAutoWorktree ? ` Resume with task({op:"resume", name:"${handle}"}).` : "";
-							if (options.onAsyncComplete?.(handle, `${entry.error}${suffix}`, "error")) entry.delivered = true;
+							if (
+								options.onAsyncComplete?.(handle, `${entry.error}${suffix}`, "error", {
+									turns: entry.turns,
+									totalTokens: entry.totalTokens,
+								})
+							)
+								entry.delivered = true;
 						} finally {
+							if (spawnMessagingId) agentMessageBus.unregister(spawnMessagingId);
 							if (acquired) releaseSlot();
 						}
 					})();
 					pending.set(handle, entry);
 					prunePending();
+					const worktreeNote = usedAutoWorktree
+						? " Note: worktree cleanup:auto — this spawn is not resumable/continuable after settle."
+						: "";
 					return {
 						content: [
 							{
 								type: "text" as const,
-								text: `Spawned subagent '${handle}' (non-blocking). Keep working, then collect its result with task({op:"join", handles:["${handle}"]}) — results are NOT auto-delivered, so you must join (or poll) to read them. Check status anytime with task({op:"poll", handles:["${handle}"]}).`,
+								text: `Spawned subagent '${handle}' (non-blocking). Keep working, then collect its result with task({op:"join", handles:["${handle}"]}) — results are NOT auto-delivered, so you must join (or poll) to read them. Check status anytime with task({op:"poll", handles:["${handle}"]}).${worktreeNote}`,
 							},
 						],
 						isError: false,
-						details: { handle, async: true, depth: childDepth },
+						details: { handle, async: true, depth: childDepth, usedAutoWorktree },
 					};
 				}
 
@@ -1246,7 +1338,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					await acquireSlot(signal);
 					acquired = true;
 					options.onSubagentStart?.(runHandle);
-					const result = await spawnSubagent(makeSpawnDeps(childTools, model), {
+					const spawnOpts = {
 						prompt,
 						model: subModel,
 						thinkingLevel: subThinking,
@@ -1262,13 +1354,19 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 						depth: childDepth,
 						inheritSkills: inherit_skills,
 						systemPromptSuffix,
-						onSubagentEvent: (info) => options.onSubagentProgress?.(runHandle, info),
-						onAgentReady: (agent) => {
+						onSubagentEvent: (info: { turn: number; lastTool?: string }) =>
+							options.onSubagentProgress?.(runHandle, info),
+						onAgentReady: (agent: Agent) => {
 							capturedAgent = agent;
 							messagingReady?.(agent);
 						},
-					});
-					recordSubagentSpend(result.usage);
+					};
+					const hasGate = !!(acceptance?.criteria || acceptance?.check);
+					const gated = hasGate
+						? await runWithAcceptance(makeSpawnDeps(childTools, model), spawnOpts, acceptance)
+						: undefined;
+					const result = gated?.result ?? (await spawnSubagent(makeSpawnDeps(childTools, model), spawnOpts));
+					recordSubagentSpend(result.usage ?? gated?.usage);
 					const interrupted = !!capturedAgent && agentEndedWithError(capturedAgent);
 					if (interrupted && capturedAgent && !usedAutoWorktree) {
 						await markResumable(runHandle, capturedAgent);
@@ -1282,10 +1380,15 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					// result details surface, so persist and cite that same key.
 					const readHandle = result.record.taskName;
 					outputStore.put(readHandle, result.output);
-					let text = formatSpawnResult(result, resultSchema, readHandle);
+					let text = gated ? gated.text : formatSpawnResult(result, resultSchema, readHandle);
+					const gateDetails: GateDetails | undefined = gated?.gate;
 					if (interrupted) {
 						text = `${text}\n\n[subagent ended on an error turn — resume with task({op:"resume", name:"${runHandle}"})]`;
 					}
+					if (usedAutoWorktree) {
+						text = `${text}\n\n[not resumable/continuable — worktree cleanup:auto]`;
+					}
+					emitBlockingComplete(runHandle, interrupted ? "error" : "done", result.record.turnCount, result.usage);
 					return {
 						content: [{ type: "text" as const, text }],
 						isError: interrupted,
@@ -1297,6 +1400,8 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 							worktreePath: result.worktreePath,
 							hasStructuredValue: result.value !== undefined,
 							deniedToolCalls: result.record.deniedToolCalls,
+							usedAutoWorktree,
+							...(gateDetails ? { gate: gateDetails } : {}),
 						},
 					};
 				} catch (err) {
@@ -1304,6 +1409,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					if (capturedAgent && !usedAutoWorktree) await markResumable(runHandle, capturedAgent);
 					const hint =
 						capturedAgent && !usedAutoWorktree ? ` Resume with task({op:"resume", name:"${runHandle}"}).` : "";
+					emitBlockingComplete(runHandle, "error");
 					return {
 						content: [{ type: "text" as const, text: `Subagent failed: ${message}${hint}` }],
 						isError: true,
@@ -1319,7 +1425,213 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 					if (acquired) releaseSlot();
 				}
 			},
-		};
+		});
+	}
+
+	const acceptanceFieldSchema = Type.Object({
+		criteria: Type.Optional(Type.String()),
+		check: Type.Optional(Type.String()),
+		max_attempts: Type.Optional(Type.Number()),
+	});
+
+	const parallelTaskSchema = Type.Object({
+		name: Type.Optional(Type.String()),
+		prompt: Type.String(),
+		allowed_tools: Type.Optional(Type.Array(Type.String())),
+		result_schema: Type.Optional(Type.Unknown()),
+		acceptance: Type.Optional(acceptanceFieldSchema),
+	});
+
+	const parallelSchema = Type.Object({
+		tasks: Type.Array(parallelTaskSchema),
+		concurrency: Type.Optional(Type.Number()),
+	});
+
+	const fanoutStageSchema = Type.Object({
+		prompt: Type.String(),
+		allowed_tools: Type.Optional(Type.Array(Type.String())),
+		result_schema: Type.Optional(Type.Unknown()),
+		acceptance: Type.Optional(acceptanceFieldSchema),
+	});
+
+	const fanoutReviewerSchema = Type.Object({
+		prompt_template: Type.String({ description: "Prompt template with {{target}} placeholder." }),
+		allowed_tools: Type.Optional(Type.Array(Type.String())),
+	});
+
+	const fanoutSchema = Type.Object({
+		scout: fanoutStageSchema,
+		reviewer: fanoutReviewerSchema,
+		worker: fanoutStageSchema,
+		concurrency: Type.Optional(Type.Number()),
+	});
+
+	function makeParallelTool(depth: number) {
+		return brandCoordinatorTool({
+			name: PARALLEL_TOOL_NAME,
+			label: PARALLEL_TOOL_NAME,
+			description:
+				"Run multiple subagent tasks concurrently and collect all results. " +
+				"Each task may carry its own acceptance gate. Partial failures are isolated — " +
+				"one task's error does not abort the others.",
+			parameters: parallelSchema,
+			sideEffect: "agent",
+			async execute(_id: string, params: unknown, signal?: AbortSignal): Promise<TaskOpResult> {
+				const p = params as Static<typeof parallelSchema>;
+				if (!p.tasks?.length) {
+					return {
+						content: [{ type: "text" as const, text: "parallel: `tasks` array is required." }],
+						isError: true,
+						details: undefined,
+					};
+				}
+				const model = options.getParentModel();
+				if (!model) {
+					return {
+						content: [{ type: "text" as const, text: "No model available for subagent." }],
+						isError: true,
+						details: undefined,
+					};
+				}
+				const budgetBlocked = spawnBudgetBlock();
+				if (budgetBlocked) return budgetBlocked;
+				const childDepth = depth + 1;
+				const cwd = options.getCwd ? options.getCwd() : process.cwd();
+				const childTools = buildSubagentToolCatalog(
+					options.getAvailableTools(),
+					childDepth,
+					maxDepth,
+					makeCoordinatorTools,
+				);
+				const { model: subModel, thinkingLevel: subThinking } = await resolveSubModel(undefined, undefined);
+				let acquired = false;
+				try {
+					await acquireSlot(signal);
+					acquired = true;
+					const tasks = p.tasks.map((t) => ({
+						...t,
+						result_schema: coerceResultSchema(t.result_schema),
+					}));
+					const results = await spawnAll(makeSpawnDeps(childTools, model), tasks, {
+						concurrency: p.concurrency,
+						base: {
+							model: subModel,
+							thinkingLevel: subThinking,
+							cwd,
+							depth: childDepth,
+							signal,
+						},
+					});
+					return {
+						content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }],
+						isError: false,
+						details: { results, depth: childDepth },
+					};
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					return {
+						content: [{ type: "text" as const, text: `parallel failed: ${message}` }],
+						isError: true,
+						details: undefined,
+					};
+				} finally {
+					if (acquired) releaseSlot();
+				}
+			},
+		});
+	}
+
+	function makeFanoutTool(depth: number) {
+		return brandCoordinatorTool({
+			name: FANOUT_TOOL_NAME,
+			label: FANOUT_TOOL_NAME,
+			description:
+				"Orchestrate scout → N reviewers → worker in one call. " +
+				"The scout determines how many reviewers run; each reviewer prompt uses {{target}} substitution. " +
+				"The worker receives collected reviews and may carry an acceptance gate.",
+			parameters: fanoutSchema,
+			sideEffect: "agent",
+			async execute(_id: string, params: unknown, signal?: AbortSignal): Promise<TaskOpResult> {
+				const p = params as Static<typeof fanoutSchema>;
+				const model = options.getParentModel();
+				if (!model) {
+					return {
+						content: [{ type: "text" as const, text: "No model available for subagent." }],
+						isError: true,
+						details: undefined,
+					};
+				}
+				const budgetBlocked = spawnBudgetBlock();
+				if (budgetBlocked) return budgetBlocked;
+				const childDepth = depth + 1;
+				const cwd = options.getCwd ? options.getCwd() : process.cwd();
+				const childTools = buildSubagentToolCatalog(
+					options.getAvailableTools(),
+					childDepth,
+					maxDepth,
+					makeCoordinatorTools,
+				);
+				const { model: subModel, thinkingLevel: subThinking } = await resolveSubModel(undefined, undefined);
+				let acquired = false;
+				try {
+					await acquireSlot(signal);
+					acquired = true;
+					const fanoutResult = await runFanout(
+						makeSpawnDeps(childTools, model),
+						{
+							scout: {
+								prompt: p.scout.prompt,
+								allowed_tools: p.scout.allowed_tools,
+								result_schema: coerceResultSchema(p.scout.result_schema),
+							},
+							reviewer: {
+								prompt_template: p.reviewer.prompt_template,
+								allowed_tools: p.reviewer.allowed_tools,
+							},
+							worker: {
+								prompt: p.worker.prompt,
+								allowed_tools: p.worker.allowed_tools,
+								result_schema: coerceResultSchema(p.worker.result_schema),
+								acceptance: p.worker.acceptance,
+							},
+							concurrency: p.concurrency,
+						},
+						{
+							depth,
+							cwd,
+							model: subModel,
+							thinkingLevel: subThinking,
+							signal,
+						},
+					);
+					recordSubagentSpend(fanoutResult.worker_output.usage);
+					const payload = {
+						targets: fanoutResult.targets,
+						reviews: fanoutResult.reviews,
+						worker_output: fanoutResult.worker_output.text,
+						gate: fanoutResult.gate,
+					};
+					return {
+						content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+						isError: fanoutResult.worker_output.isError,
+						details: { ...payload, depth: childDepth },
+					};
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					return {
+						content: [{ type: "text" as const, text: `fanout failed: ${message}` }],
+						isError: true,
+						details: undefined,
+					};
+				} finally {
+					if (acquired) releaseSlot();
+				}
+			},
+		});
+	}
+
+	function makeCoordinatorTools(childDepth: number): AgentTool[] {
+		return [makeTaskTool(childDepth), makeParallelTool(childDepth), makeFanoutTool(childDepth)];
 	}
 
 	/**
@@ -1371,7 +1683,12 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 		if (tail && tail.role === "assistant" && (tail.stopReason === "error" || tail.stopReason === "aborted")) {
 			seed.pop();
 		}
-		const childTools = buildSubagentToolCatalog(options.getAvailableTools(), state.depth, maxDepth, makeTaskTool);
+		const childTools = buildSubagentToolCatalog(
+			options.getAvailableTools(),
+			state.depth,
+			maxDepth,
+			makeCoordinatorTools,
+		);
 		const scopedChildTools =
 			process.env.PIT_NO_SCOPED_HINDSIGHT === "1"
 				? childTools
@@ -1488,7 +1805,11 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 	}
 
 	return (pi: ExtensionAPI) => {
-		pi.registerTool(makeTaskTool(0));
+		for (const tool of makeCoordinatorTools(0)) {
+			// Definitions are built for registerTool; brandCoordinatorTool keeps the
+			// same shape while the subagent catalog treats them as AgentTools.
+			pi.registerTool(tool as unknown as ToolDefinition);
+		}
 		// On session teardown (/new, /fork, switchSession, /quit) abort any detached
 		// spawns so they stop burning tokens and writing to a now-orphaned worktree.
 		// Worktree paths are UUID-unique (no cross-session corruption), so after a short

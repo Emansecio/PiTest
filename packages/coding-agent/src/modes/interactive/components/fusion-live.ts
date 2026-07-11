@@ -5,11 +5,11 @@ import { theme } from "../theme/theme.ts";
 import { spinnerFrameIndexAt } from "./spinner-ticker.ts";
 
 /**
- * One panel member in the live Fusion strip. The panel members are CLI
- * subprocesses run in BATCH (no incremental stream), so the only live signal
- * we can surface is a per-member spinner + elapsed clock while it runs, then a
- * frozen done/failed line with the byte count (or the error). `elapsedMs` is
- * the source of truth ONLY once the member is `done`/`failed` (frozen at that
+ * One panel member in the live Fusion strip. Panel members are CLI subprocesses
+ * that emit stream-json progress (tools/thinking/text) while running; the strip
+ * shows a per-member spinner + elapsed clock, live activity, then a frozen
+ * done/failed line with the byte count (or the error). `elapsedMs` is the
+ * source of truth ONLY once the member is `done`/`failed` (frozen at that
  * instant); while `running`, the component derives elapsed live from the
  * captured start time so the clock keeps counting up between renders.
  */
@@ -159,6 +159,8 @@ export class FusionLiveComponent implements Component {
 	// Captured when the strip enters the "verify" stage (0 = not yet), so the verify
 	// line counts up honestly from when the read-only fact-check began.
 	private verifyStartedAt = 0;
+	// Captured when the strip enters the "writer" stage (0 = not yet).
+	private writerStartedAt = 0;
 	// Verify-stage live activity (read-only verifier subagent): the turn it just finished +
 	// a per-(last-tool) tally, so the verify line reads "turn N · read 2 · grep 1" instead of an
 	// opaque clock. A fresh strip is built per Fusion turn, so no mid-life reset is needed.
@@ -207,6 +209,9 @@ export class FusionLiveComponent implements Component {
 		}
 		if (stage === "verify" && this.verifyStartedAt === 0) {
 			this.verifyStartedAt = Date.now();
+		}
+		if (stage === "writer" && this.writerStartedAt === 0) {
+			this.writerStartedAt = Date.now();
 		}
 		this.ui.requestRender();
 	}
@@ -290,7 +295,9 @@ export class FusionLiveComponent implements Component {
 	 * otherwise lets the ticker drop the frame entirely (no wasted render).
 	 */
 	private hasAnimatedSpinnerContent(): boolean {
-		if (this.stage === "brief" || this.stage === "judge" || this.stage === "verify") return true;
+		if (this.stage === "brief" || this.stage === "judge" || this.stage === "verify" || this.stage === "writer") {
+			return true;
+		}
 		for (const entry of this.members.values()) {
 			if (entry.member.status === "running") return true;
 		}
@@ -339,6 +346,9 @@ export class FusionLiveComponent implements Component {
 		}
 		if (this.stage === "brief" && this.briefStartedAt > 0) {
 			key += `b${Math.floor((wallNow - this.briefStartedAt) / 1000)}`;
+		}
+		if (this.stage === "writer" && this.writerStartedAt > 0) {
+			key += `w${Math.floor((wallNow - this.writerStartedAt) / 1000)}`;
 		}
 		return key;
 	}
@@ -392,11 +402,25 @@ export class FusionLiveComponent implements Component {
 		if (this.stage === "brief") stageWord = "preparing brief";
 		else if (this.stage === "panel") stageWord = `${n} advisor${n === 1 ? "" : "s"} (read-only)`;
 		else if (this.stage === "verify") stageWord = "verifying claims";
+		else if (this.stage === "judge") stageWord = "judging";
 		let header = `  ${theme.fg("accent", "Fusion")}  ${theme.fg("muted", stageWord)}`;
 		if (this.synthId) {
 			header += `  ${theme.fg("dim", `→ synth ${this.synthId}`)}`;
 		}
 		lines.push(header);
+
+		// Writer stage: compact header only — advisors are done; the synth streams
+		// into the transcript. Keep the Fusion identity visible instead of swapping
+		// to a generic "Synthesizing…" loader.
+		if (this.stage === "writer") {
+			const ws = this.writerStartedAt > 0 ? Math.max(0, Math.floor((now - this.writerStartedAt) / 1000)) : 0;
+			lines.push(
+				`  ${theme.fg("accent", spinner)} ${theme.fg("muted", `synth ${this.synthId} · writing final answer`)}  ${theme.fg("dim", `${ws}s`)}`,
+			);
+			const rendered = lines.map((line) => truncateToWidth(line, width, theme.fg("dim", "…")));
+			this.renderCache = { version: this.renderVersion, width, frameIdx, elapsedKey, lines: rendered };
+			return rendered;
+		}
 
 		// Brief stage: the synth is drafting the advisor brief — no member rows yet.
 		if (this.stage === "brief") {

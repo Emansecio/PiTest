@@ -8,6 +8,7 @@ import {
 	_realpathCacheSizeForTest,
 	_resetRealpathCacheForTest,
 	withFileMutationQueue,
+	withFileMutationQueues,
 } from "../src/core/tools/file-mutation-queue.js";
 import { createWriteTool } from "../src/core/tools/write.js";
 
@@ -90,7 +91,38 @@ describe("withFileMutationQueue", () => {
 		expect(order.indexOf("b:start")).toBeLessThan(order.indexOf("b:end"));
 		expect(order.indexOf("b:start")).toBeLessThan(order.indexOf("a:end"));
 	});
+});
 
+describe("withFileMutationQueues", () => {
+	it("serializes overlapping multi-file ops in lexicographic lock order", async () => {
+		const order: string[] = [];
+		const pathA = "/tmp/file-mutation-queues-a";
+		const pathB = "/tmp/file-mutation-queues-b";
+
+		const first = withFileMutationQueues([pathB, pathA], async () => {
+			order.push("first:start");
+			await delay(30);
+			order.push("first:end");
+		});
+		const second = withFileMutationQueues([pathA, pathB], async () => {
+			order.push("second:start");
+			order.push("second:end");
+		});
+
+		await Promise.all([first, second]);
+		expect(order).toEqual(["first:start", "first:end", "second:start", "second:end"]);
+	});
+
+	it("runs immediately when path list is empty", async () => {
+		let ran = false;
+		await withFileMutationQueues([], async () => {
+			ran = true;
+		});
+		expect(ran).toBe(true);
+	});
+});
+
+describe("withFileMutationQueue (continued)", () => {
 	it("uses the same queue for symlink aliases", async () => {
 		const dir = await createTempDir();
 		const targetPath = join(dir, "target.txt");

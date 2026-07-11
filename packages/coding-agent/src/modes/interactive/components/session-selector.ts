@@ -133,7 +133,8 @@ class SessionSelectorHeader implements Component {
 		let scopeText: string;
 		if (this.loading) {
 			const progressText = this.loadProgress ? `${this.loadProgress.loaded}/${this.loadProgress.total}` : "…";
-			scopeText = `${theme.fg("muted", "○ Current Folder | ")}${theme.fg("accent", `Loading ${progressText}`)}`;
+			const scopeLabel = this.scope === "current" ? "Current Folder" : "All";
+			scopeText = theme.fg("accent", `Loading ${scopeLabel} ${progressText}`);
 		} else if (this.scope === "current") {
 			scopeText = `${theme.fg("accent", "◉ Current Folder")}${theme.fg("muted", " | ○ All")}`;
 		} else {
@@ -197,6 +198,9 @@ interface FlatSessionNode {
 /**
  * Build a tree structure from sessions based on parentSessionPath.
  * Returns root nodes sorted by modified date (descending).
+ *
+ * Self-parents and parent cycles are treated as roots so sessions stay visible
+ * and flatten/sort cannot infinite-loop on a cyclic child graph.
  */
 function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
 	const byPath = new Map<string, SessionTreeNode>();
@@ -207,27 +211,50 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
 	}
 
 	const roots: SessionTreeNode[] = [];
+	const parentOf = new Map<string, string>();
 
 	for (const session of sessions) {
 		const sessionPath = canonicalizePath(session.path) ?? session.path;
 		const node = byPath.get(sessionPath)!;
 		const parentPath = canonicalizePath(session.parentSessionPath);
 
-		if (parentPath && byPath.has(parentPath)) {
-			byPath.get(parentPath)!.children.push(node);
-		} else {
+		if (!parentPath || parentPath === sessionPath || !byPath.has(parentPath)) {
 			roots.push(node);
+			continue;
 		}
+
+		// Walk existing parent links; if attaching would close a cycle, keep as root.
+		let cursor: string | undefined = parentPath;
+		let cyclic = false;
+		const seen = new Set<string>([sessionPath]);
+		while (cursor) {
+			if (seen.has(cursor)) {
+				cyclic = true;
+				break;
+			}
+			seen.add(cursor);
+			cursor = parentOf.get(cursor);
+		}
+		if (cyclic) {
+			roots.push(node);
+			continue;
+		}
+
+		parentOf.set(sessionPath, parentPath);
+		byPath.get(parentPath)!.children.push(node);
 	}
 
-	// Sort children and roots by modified date (descending)
-	const sortNodes = (nodes: SessionTreeNode[]): void => {
+	// Sort children and roots by modified date (descending). visited guards
+	// against any residual child-graph cycle from duplicate path collisions.
+	const sortNodes = (nodes: SessionTreeNode[], visited: Set<SessionTreeNode>): void => {
 		nodes.sort((a, b) => b.session.modified.getTime() - a.session.modified.getTime());
 		for (const node of nodes) {
-			sortNodes(node.children);
+			if (visited.has(node)) continue;
+			visited.add(node);
+			sortNodes(node.children, visited);
 		}
 	};
-	sortNodes(roots);
+	sortNodes(roots, new Set());
 
 	return roots;
 }
@@ -237,8 +264,11 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
  */
 function flattenSessionTree(roots: SessionTreeNode[]): FlatSessionNode[] {
 	const result: FlatSessionNode[] = [];
+	const visited = new Set<SessionTreeNode>();
 
 	const walk = (node: SessionTreeNode, depth: number, ancestorContinues: boolean[], isLast: boolean): void => {
+		if (visited.has(node)) return;
+		visited.add(node);
 		result.push({ session: node.session, depth, isLast, ancestorContinues });
 
 		for (let i = 0; i < node.children.length; i++) {
@@ -654,6 +684,28 @@ class SessionList implements Component, Focusable {
 
 type SessionsLoader = (onProgress?: SessionListProgress) => Promise<SessionInfo[]>;
 
+/** Fail-safe so a hung SessionManager.list / listAll cannot leave the picker on Loading forever. */
+const SESSION_LIST_LOAD_TIMEOUT_MS = 20_000;
+
+function withSessionListTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+	return new Promise<T>((resolve, reject) => {
+		const timer = setTimeout(() => {
+			reject(new Error(`${label} timed out after ${SESSION_LIST_LOAD_TIMEOUT_MS / 1000}s`));
+		}, SESSION_LIST_LOAD_TIMEOUT_MS);
+		timer.unref?.();
+		promise.then(
+			(value) => {
+				clearTimeout(timer);
+				resolve(value);
+			},
+			(err) => {
+				clearTimeout(timer);
+				reject(err);
+			},
+		);
+	});
+}
+
 /**
  * Delete a session file, trying the `trash` CLI first, then falling back to unlink
  */
@@ -982,10 +1034,20 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			this.requestRender();
 		};
 
+		const clearLoadingFlags = () => {
+			if (scope === "current") {
+				this.currentLoading = false;
+			} else {
+				this.allLoading = false;
+			}
+		};
+
 		try {
-			const sessions = await (scope === "current"
-				? this.currentSessionsLoader(onProgress)
-				: this.allSessionsLoader(onProgress));
+			const label = scope === "current" ? "Session list (current folder)" : "Session list (all)";
+			const sessions = await withSessionListTimeout(
+				scope === "current" ? this.currentSessionsLoader(onProgress) : this.allSessionsLoader(onProgress),
+				label,
+			);
 
 			// A newer load for the same scope superseded this one: bail before
 			// touching shared state so the stale result can't overwrite it
@@ -994,11 +1056,11 @@ export class SessionSelectorComponent extends Container implements Focusable {
 
 			if (scope === "current") {
 				this.currentSessions = sessions;
-				this.currentLoading = false;
 			} else {
 				this.allSessions = sessions;
-				this.allLoading = false;
 			}
+
+			clearLoadingFlags();
 
 			if (scope !== this.scope) return;
 
@@ -1014,11 +1076,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			// state to the newer load instead of clobbering them.
 			if (isStaleSeq()) return;
 
-			if (scope === "current") {
-				this.currentLoading = false;
-			} else {
-				this.allLoading = false;
-			}
+			clearLoadingFlags();
 
 			if (scope !== this.scope) return;
 

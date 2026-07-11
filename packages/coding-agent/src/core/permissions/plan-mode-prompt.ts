@@ -16,7 +16,7 @@
 /**
  * The `<plan_mode>` block appended to the system prompt while plan mode active.
  * Keep these invariants in the text: blocked-tools warning, numbered workflow,
- * brief/produces/verify requirement, and the obligation to call `exit_plan`.
+ * brief/produces/verify guidance, and the obligation to call `exit_plan`.
  */
 export function buildPlanModeSection(): string {
 	return [
@@ -26,7 +26,7 @@ export function buildPlanModeSection(): string {
 		"Workflow you MUST follow:",
 		"1. Research with read-only tools (read, grep, find, ls, symbol, lsp navigation).",
 		"2. Read files IN FULL before planning changes to them.",
-		"3. Build the plan with the `plan` tool (`propose`, then `revise` as understanding improves). Fill `brief` with context the executor needs (constraints, invariants, key files read, decisions and why). Every step that changes code MUST have `produces` (artifact) and `verify` (command that proves it done).",
+		"3. Build the plan with the `plan` tool (`propose`, then `revise` as understanding improves). Fill `brief` with context the executor needs (constraints, invariants, key files read, decisions and why). Every step that changes code SHOULD have `produces` (artifact) and `verify` (command that proves it done).",
 		"4. When the plan is complete, call `exit_plan` to present it for user approval. Never just stop responding with an un-presented plan.",
 		"Do NOT write code blocks as a substitute for edits; describe the change in the plan step instead.",
 		"</plan_mode>",

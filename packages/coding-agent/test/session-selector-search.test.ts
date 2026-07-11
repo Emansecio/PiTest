@@ -174,6 +174,13 @@ describe("session selector search", () => {
 		expect(result).toEqual([]);
 	});
 
+	it("rejects unsafe re: patterns (nested quantifiers)", () => {
+		const parsed = parseSearchQuery("re:(a+)+");
+		expect(parsed.mode).toBe("regex");
+		expect(parsed.regex).toBeNull();
+		expect(parsed.error).toMatch(/nested|Unsafe/i);
+	});
+
 	describe("name filter", () => {
 		const sessions: SessionInfo[] = [
 			makeSession({

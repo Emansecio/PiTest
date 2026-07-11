@@ -92,6 +92,25 @@ function toAbortError(reason: unknown): Error {
 	return new Error("aborted");
 }
 
+/**
+ * Transport / provider failures eligible for a single pre-progress retry (ADR-0008 #6).
+ * Mirrors AgentSession's RETRYABLE_ERROR_RE but excludes timeout/abort (caller must
+ * not auto-retry those — use resume).
+ */
+const TRANSPORT_RETRYABLE_RE =
+	/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|529|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|terminated|retry delay/i;
+
+const TRANSPORT_RETRY_BACKOFF_MS = 400;
+
+export function isTransportRetryableError(message: string): boolean {
+	if (/aborted|timed? out|timeout|turn cap/i.test(message)) return false;
+	return TRANSPORT_RETRYABLE_RE.test(message);
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Build the schema instruction appended to a subagent's system prompt when a
  * `resultSchema` is set. The schema is SERIALIZED into the prompt (not merely
  * referenced) so the model emits the exact property names and value types — without
@@ -245,6 +264,18 @@ export async function spawnSubagent(
 
 	let worktree: WorktreeHandle | undefined;
 	if (worktreeSpec) {
+		// Defense-in-depth: plan mode is read-only; creating a git worktree mutates
+		// the filesystem. The `task` tool is already blocked via sideEffect, but
+		// direct spawn callers must not bypass that invariant.
+		if (deps.permissionChecker?.mode === "plan") {
+			const message = "worktree is blocked in plan mode (read-only)";
+			deps.registry.update(record.id, {
+				status: "failed",
+				endedAt: Date.now(),
+				error: message,
+			});
+			throw new Error(message);
+		}
 		try {
 			worktree = await createWorktree(parentCwd, taskName, worktreeSpec);
 		} catch (err) {
@@ -322,7 +353,7 @@ export async function spawnSubagent(
 		// Gate every subagent tool call through the parent's permission policy.
 		// Without this, the subagent's raw Agent loop would bypass the parent's
 		// permissions extension entirely (deny rules, plan-mode mutation blocks).
-		beforeToolCall: async ({ toolCall, args }) => {
+		beforeToolCall: async ({ toolCall, args, argsMutation }) => {
 			if (checker) {
 				const decision = evaluateSubagentToolPermission(
 					checker,
@@ -347,6 +378,19 @@ export async function spawnSubagent(
 					input: (args ?? {}) as Record<string, unknown>,
 				} as ToolCallEvent);
 				if (guardDecision?.block) return guardDecision;
+			}
+			// Guards may rewrite args after the first permission allow — re-check.
+			if (checker && argsMutation?.mutated) {
+				const decision = evaluateSubagentToolPermission(
+					checker,
+					toolCall.name,
+					(args ?? {}) as Record<string, unknown>,
+				);
+				if (decision?.block) {
+					deniedToolCalls.push(toolCall.name);
+					deps.registry.update(record.id, { deniedToolCalls: [...deniedToolCalls] });
+					return decision;
+				}
 			}
 			return undefined;
 		},
@@ -449,17 +493,83 @@ export async function spawnSubagent(
 
 	try {
 		const promptText = options.prompt;
-		runPromise = agent.prompt(promptText);
-		const promise = runPromise;
-		const aborted = new Promise<void>((_, reject) => {
-			const fail = () => reject(toAbortError(controller.signal.reason));
-			if (controller.signal.aborted) {
-				fail();
-				return;
+		const racePrompt = async () => {
+			runPromise = agent.prompt(promptText);
+			const promise = runPromise;
+			const aborted = new Promise<void>((_, reject) => {
+				const fail = () => reject(toAbortError(controller.signal.reason));
+				if (controller.signal.aborted) {
+					fail();
+					return;
+				}
+				controller.signal.addEventListener("abort", fail, { once: true });
+			});
+			await Promise.race([promise, aborted]);
+		};
+
+		try {
+			await racePrompt();
+		} catch (err) {
+			// ADR #6: one transport retry before any turn completed.
+			const msg = err instanceof Error ? err.message : String(err);
+			if (turnCount === 0 && !controller.signal.aborted && isTransportRetryableError(msg)) {
+				await sleep(TRANSPORT_RETRY_BACKOFF_MS);
+				if (!controller.signal.aborted) await racePrompt();
+				else throw err;
+			} else {
+				throw err;
 			}
-			controller.signal.addEventListener("abort", fail, { once: true });
-		});
-		await Promise.race([promise, aborted]);
+		}
+
+		// Soft failure path: first turn ended with a transport error (no throw).
+		// The transcript ends on an assistant error turn, so re-drive via followUp +
+		// continue (prompt() alone would append another user turn but continue is the
+		// documented path when the last message is already an assistant).
+		{
+			const messages = agent.state.messages;
+			const last = messages[messages.length - 1] as AgentMessage | undefined;
+			const errMsg =
+				(last && last.role === "assistant" && last.stopReason === "error" && last.errorMessage) ||
+				agent.state.errorMessage ||
+				"";
+			const hasToolCall =
+				!!last &&
+				last.role === "assistant" &&
+				Array.isArray(last.content) &&
+				last.content.some((b) => b.type === "toolCall");
+			if (
+				turnCount <= 1 &&
+				errMsg &&
+				!hasToolCall &&
+				!controller.signal.aborted &&
+				isTransportRetryableError(errMsg)
+			) {
+				await sleep(TRANSPORT_RETRY_BACKOFF_MS);
+				if (!controller.signal.aborted) {
+					agent.followUp({
+						role: "user",
+						content: [
+							{
+								type: "text",
+								text: "Your previous attempt failed due to a transient provider/transport error. Retry the same task and deliver the final answer.",
+							},
+						],
+						timestamp: Date.now(),
+					});
+					runPromise = agent.continue();
+					const promise = runPromise;
+					const aborted = new Promise<void>((_, reject) => {
+						const fail = () => reject(toAbortError(controller.signal.reason));
+						if (controller.signal.aborted) {
+							fail();
+							return;
+						}
+						controller.signal.addEventListener("abort", fail, { once: true });
+					});
+					await Promise.race([promise, aborted]);
+				}
+			}
+		}
 
 		const output = extractAssistantText(agent.state.messages);
 		let value: unknown | undefined;

@@ -31,6 +31,11 @@ describe("permissions/matcher: globToRegExp", () => {
 		expect(matchGlob("**/.env*", "/proj/.env.production")).toBe(true);
 	});
 
+	it("rejects more than three ** segments", () => {
+		expect(() => globToRegExp("**/a/**/b/**/c/**/d")).toThrow(/\*\*/);
+		expect(matchGlob("**/a/**/b/**/c/**/d", "a/b/c/d")).toBe(false);
+	});
+
 	it("`**/foo` matches both nested and top-level foo", () => {
 		expect(matchGlob("**/foo", "foo")).toBe(true);
 		expect(matchGlob("**/foo", "a/b/foo")).toBe(true);
@@ -98,5 +103,10 @@ describe("permissions/matcher: findMatchingCommandRule", () => {
 
 	it("ignores invalid regex without crashing", () => {
 		expect(findMatchingCommandRule([{ pattern: "(" }], "anything")).toBeUndefined();
+	});
+
+	it("ignores unsafe ReDoS patterns", () => {
+		expect(findMatchingCommandRule([{ pattern: "(a+)+" }], "aaaaaaaa")).toBeUndefined();
+		expect(findMatchingCommandRule([{ pattern: ".*.*" }], "xx")).toBeUndefined();
 	});
 });

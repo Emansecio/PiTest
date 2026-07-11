@@ -11,7 +11,14 @@ import { isTruthyEnvFlag } from "../../utils/env-flags.js";
 import { ensureTool } from "../../utils/tools-manager.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { prepareWithPathAliases } from "./argument-prep.js";
-import { capAppend, type FffContentMatch, type FffSearchMode, fffSearch, isSimpleGrepGlob } from "./fff-search.js";
+import {
+	capAppend,
+	type FffContentMatch,
+	type FffSearchMode,
+	fffSearch,
+	isGitWorkTree,
+	isSimpleGrepGlob,
+} from "./fff-search.js";
 import { resolveToCwd } from "./path-utils.js";
 import { getTextOutput, invalidArgText, nonEmptyDetails, shortenPath, str } from "./render-utils.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
@@ -157,10 +164,11 @@ export interface GrepToolOptions {
 	 * Search backend. `"rg"` spawns ripgrep per query. `"fff"` answers from a
 	 * warm in-memory index — content, files_with_matches, and count modes, over
 	 * the whole repo or a subdir/file inside cwd — falling back to `rg` for every
-	 * unsupported case (custom operations, glob, multiline, ignoreCase, path
-	 * outside cwd, `.git` scope, an unprovable-complete subdir scan, or the
-	 * native binary being absent). Behavior-identical to `rg` on its supported
-	 * subset; only faster.
+	 * unsupported case (custom operations, complex glob, multiline, path outside
+	 * cwd, `.git` scope, non-git work tree, an unprovable-complete subdir scan,
+	 * or the native binary being absent). Simple `glob` and `ignoreCase` stay on
+	 * the warm path. Behavior-identical to `rg` on its supported subset; only
+	 * faster.
 	 */
 	engine?: "rg" | "fff";
 }
@@ -499,7 +507,8 @@ export function createGrepToolDefinition(
 						// fff backend: warm in-memory index. Engaged when opted in AND the
 						// query is within fff's supported subset — content/files/count modes,
 						// whole-repo OR a subdir/file inside cwd, simple glob / ignoreCase,
-						// no multiline/custom-ops/.git scope. Every excluded case, and any fff
+						// git work tree (fff drops dotfiles + goes stale outside git), no
+						// multiline/custom-ops/.git scope. Every excluded case, and any fff
 						// failure or unprovable-complete scoped scan, flows to ripgrep below.
 						// When autoFiles is on, probe with a content limit just past the
 						// auto-switch threshold so we can decide locate vs content without
@@ -518,7 +527,8 @@ export function createGrepToolDefinition(
 							!multiline &&
 							(!glob || simpleGlob) &&
 							!insideGitScope &&
-							withinCwd;
+							withinCwd &&
+							isGitWorkTree(cwd);
 						if (fffEligible) {
 							const subPrefix = relToCwd === "" ? undefined : relToCwd.replace(/\\/g, "/");
 							const fffRes = await fffSearch({

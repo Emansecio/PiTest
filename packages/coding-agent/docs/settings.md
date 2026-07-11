@@ -91,10 +91,12 @@ Set `PIT_SKIP_VERSION_CHECK=1` to disable the Pit version update check. Use `--o
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `compaction.enabled` | boolean | `true` | Enable auto-compaction |
-| `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
-| `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.enabled` | boolean | `true` | Enable auto-compaction (threshold, soft/background, presend, overflow recovery) |
+| `compaction.reserveTokens` | number | `16384` | Base tokens reserved for the next LLM response. **Effective reserve** scales with the model window via `computeDynamicReserve`: ≥10% of window on ≤200k contexts, and max(configured, 20k, 2.5% of window) above 200k |
+| `compaction.keepRecentTokens` | number | `20000` | Base recent tokens kept verbatim (not summarized). **Effective keep** scales to ~10% of the window on large contexts (`effectiveKeepRecentTokens`) |
 | `compaction.selfCorrection` | boolean | `true` | Extra verification LLM pass after summarization |
+
+Auto-compaction also uses prune-only paths (proactive / mid-turn / live supersede) that do not call the summarizer. See [Compaction](compaction.md) for the full layer stack and `PIT_*` kill-switches in [token-economy-tuning.md](../../../docs/token-economy-tuning.md).
 
 ```json
 {
@@ -105,6 +107,23 @@ Set `PIT_SKIP_VERSION_CHECK=1` to disable the Pit version update check. Use `--o
   }
 }
 ```
+
+#### `modelRoles.compact`
+
+When set, the **summarization** LLM call routes to this role (typically a cheaper/faster sibling) while thresholds and wire estimates still use the session model. Absent = summarization uses the session model. Not exposed as `--role compact` on the CLI.
+
+```json
+{
+  "modelRoles": {
+    "compact": {
+      "model": "anthropic/claude-haiku-4-5",
+      "thinkingLevel": "off"
+    }
+  }
+}
+```
+
+By default (no `modelRoles.compact`), Pit may still pick a small-class sibling for compaction unless `PIT_NO_COMPACT_SIBLING_DEFAULT=1`.
 
 ### Branch Summary
 
@@ -148,6 +167,26 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 | `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
 | `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
 | `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, or `"auto"` |
+
+Legacy keys `queueMode` and `websockets` are still accepted on load: `queueMode` migrates to `steeringMode` (and `followUpMode` when absent), and `websockets: true|false` migrates to `transport: "websocket"|"sse"`. Migrated files are written back to disk on load.
+
+### Minimal tool surface
+
+Default-on tools (eval, lsp, debug, chromeDevtools, hindsight, webSearch, agentMessaging) can be disabled for CI/air-gapped sessions without changing package defaults:
+
+```json
+{
+  "eval": { "enabled": false },
+  "lsp": { "enabled": false },
+  "debug": { "enabled": false },
+  "chromeDevtools": { "enabled": false },
+  "hindsight": { "enabled": false },
+  "webSearch": { "enabled": false },
+  "agentMessaging": { "enabled": false }
+}
+```
+
+Or pass `--profile minimal` on the CLI for the same session overrides.
 
 ### Terminal & Images
 
@@ -322,13 +361,72 @@ After a code-modifying turn, Pit can run the project check command and self-corr
 |---------|------|---------|-------------|
 | `eval.enabled` | boolean | `true` | Register the `eval` tool. The session boots a persistent Python + JS kernel manager; each kernel is spawned lazily on first use |
 
+### Fusion
+
+Multi-model panel (advisors) + synthesizer (active `/model`). See [Fusion](fusion.md).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `fusion.panel` | array | `[]` | Up to two `{ cli, model }` advisors (`cli`: `"claude"` \| `"codex"`) |
+| `fusion.timeoutMs` | number | `600000` | Hard wall-clock cap per panel member (ms) |
+| `fusion.idleTimeoutMs` | number | `90000` | Idle-output kill for a stuck panel member (ms) |
+| `fusion.staggerSameCliMs` | number | `400` | Delay before launching a second same-CLI member |
+| `fusion.verify` | boolean | `true` | Read-only verify pass for unsupported claims before the writer |
+| `fusion.verifyTimeoutMs` | number | `60000` | Wall-clock cap for the verify subagent |
+| `fusion.lean` | boolean | `true` | Lean panel CLIs (skip user hooks/skills/MCP where supported) |
+| `fusion.brief` | boolean | `true` | Synthesizer brief rewrite before advisors |
+| `fusion.showSynthesis` | boolean | `false` | Include judge analysis items in the Fusion summary UI |
+
+```json
+{
+  "fusion": {
+    "panel": [
+      { "cli": "claude", "model": "claude-sonnet-4-6" },
+      { "cli": "codex", "model": "gpt-4o" }
+    ],
+    "staggerSameCliMs": 400,
+    "verify": true
+  }
+}
+```
+
+`/fusion` opens a unified setup screen (searchable advisors + verify/brief toggles)
+and activates Fusion orchestration. **Alt+P** cycles into Fusion·Plan when the
+panel is ready; otherwise it opens `/fusion`. The same verify/brief flags are
+also in `/settings`. Kill-switch: `PIT_NO_FUSION=1`.
+
+### Grep / Find backend
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `grep.engine` | string | `"fff"` | `"fff"` uses the warm in-memory `@ff-labs/fff-node` index for `grep` and `find` (falls back to ripgrep / fd when unavailable or unsupported). `"rg"` forces ripgrep for grep and fd for find. Outside a git work tree, `fff` always falls back — the native index drops dotfiles and goes stale without git |
+
+The env var `PIT_GREP_ENGINE=fff\|rg` overrides settings (env wins). The same switch governs both `grep` and `find`.
+
 ### LSP
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `lsp.enabled` | boolean | `true` | Register the `lsp` tool; language servers cold-start on first use |
-| `lsp.diagnosticsOnWrite` | boolean | `true` | Attach LSP diagnostics to write/edit results |
+| `lsp.enabled` | boolean | `true` | Register the `lsp` tool; language servers warm up in the background at session start (still cold-start on first use if warmup failed) |
+| `lsp.diagnosticsOnWrite` | boolean | `true` | Attach LSP diagnostics to write/edit results (writethrough) |
 | `lsp.formatOnWrite` | boolean | `false` | Format files via the language server before writing them |
+
+Server discovery and overrides live in standalone `lsp.json` / `.lsp.json` / `lsp.yaml` files (not in `settings.json`). Search order (highest priority first):
+
+1. Project root (`./lsp.json`, …)
+2. Project config dirs (`.pit/`, `.claude/`)
+3. User dirs (`~/.pit/agent/`, `~/.pit/`, `~/.claude/`)
+4. User home root
+
+Override files merge server entries lowest-to-highest priority. When no overrides disable a server, Pit auto-detects by intersecting built-in defaults with project root markers and a resolvable binary (project `node_modules/.bin` / venv bins, then Pit's own optionalDeps bins, then `$PATH`).
+
+Optional top-level field:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `idleTimeoutMs` | number | unset (disabled) | Shut down idle LSP clients after this many ms of inactivity |
+
+Multiple servers can match one file type. Non-linter servers (e.g. `typescript`) are preferred for type intelligence; linters (`biome`, `eslint`) still contribute diagnostics. See [LSP](lsp.md) for auto-detect, Windows bins, TypeScript optional dependency, and the process-global manager singleton.
 
 ### Debug (DAP)
 
@@ -341,12 +439,12 @@ After a code-modifying turn, Pit can run the project check command and self-corr
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `chromeDevtools.enabled` | boolean | `true` | Register the `chrome_devtools_*` tools |
-| `chromeDevtools.debugPort` | number | `9222` | Chrome remote-debugging port |
+| `chromeDevtools.debugPort` | number | `9222` | Attach port when `launchBrowser` is `false`. Auto-launch ignores this and uses an ephemeral port written to the profile's `DevToolsActivePort` |
 | `chromeDevtools.host` | string | `"127.0.0.1"` | Chrome remote-debugging host |
-| `chromeDevtools.launchBrowser` | boolean | `true` | Auto-launch Chrome into a dedicated persistent profile when not reachable |
+| `chromeDevtools.launchBrowser` | boolean | `true` | Auto-launch Chrome into a dedicated persistent profile (`<agentDir>/chrome-data`). Ownership is proven via `DevToolsActivePort` — Pit will not attach to a foreign Chrome that merely answers on `debugPort`. Set `false` to attach to `host:debugPort` instead |
 | `chromeDevtools.binaryPath` | string | - | Chrome binary path override |
 
-The env vars `PIT_CHROME_DEVTOOLS_HOST`, `PIT_CHROME_DEVTOOLS_PORT`, and `PIT_CHROME_DEVTOOLS_BINARY` win over settings (the legacy `PI_*` names are still read as a fallback).
+The env vars `PIT_CHROME_DEVTOOLS_HOST`, `PIT_CHROME_DEVTOOLS_PORT`, and `PIT_CHROME_DEVTOOLS_BINARY` win over settings (the legacy `PI_*` names are still read as a fallback). `PIT_CHROME_DEVTOOLS_PORT` only applies in attach mode (`launchBrowser: false`).
 
 ### Web Search
 

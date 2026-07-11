@@ -857,23 +857,25 @@ export class SettingsManager {
 	/** Create an in-memory SettingsManager (no file I/O) */
 	static inMemory(settings: Partial<Settings> = {}): SettingsManager {
 		const storage = new InMemorySettingsStorage();
-		const initialSettings = SettingsManager.migrateSettings(structuredClone(settings) as Record<string, unknown>);
+		const initialSettings = SettingsManager.migrateSettings(
+			structuredClone(settings) as Record<string, unknown>,
+		).settings;
 		storage.withLock("global", () => JSON.stringify(initialSettings, null, 2));
 		return SettingsManager.fromStorage(storage);
 	}
 
 	private static loadFromStorage(storage: SettingsStorage, scope: SettingsScope): Settings {
-		let content: string | undefined;
+		let migratedSettings: Settings | undefined;
 		storage.withLock(scope, (current) => {
-			content = current;
-			return undefined;
+			if (!current) {
+				return undefined;
+			}
+			const parsed = JSON.parse(current) as Record<string, unknown>;
+			const { settings, migrated } = SettingsManager.migrateSettings(parsed);
+			migratedSettings = settings;
+			return migrated ? JSON.stringify(settings, null, 2) : undefined;
 		});
-
-		if (!content) {
-			return {};
-		}
-		const settings = JSON.parse(content);
-		return SettingsManager.migrateSettings(settings);
+		return migratedSettings ?? {};
 	}
 
 	private static tryLoadFromStorage(
@@ -887,18 +889,29 @@ export class SettingsManager {
 		}
 	}
 
-	/** Migrate old settings format to new format */
-	private static migrateSettings(settings: Record<string, unknown>): Settings {
-		// Migrate queueMode -> steeringMode
-		if ("queueMode" in settings && !("steeringMode" in settings)) {
-			settings.steeringMode = settings.queueMode;
+	/** Migrate old settings format to new format. Returns whether disk keys changed. */
+	private static migrateSettings(settings: Record<string, unknown>): { settings: Settings; migrated: boolean } {
+		let migrated = false;
+
+		// Migrate queueMode -> steeringMode (+ followUpMode when absent)
+		if ("queueMode" in settings) {
+			if (!("steeringMode" in settings)) {
+				settings.steeringMode = settings.queueMode;
+				migrated = true;
+			}
+			if (!("followUpMode" in settings)) {
+				settings.followUpMode = settings.queueMode;
+				migrated = true;
+			}
 			delete settings.queueMode;
+			migrated = true;
 		}
 
 		// Migrate legacy websockets boolean -> transport enum
 		if (!("transport" in settings) && typeof settings.websockets === "boolean") {
 			settings.transport = settings.websockets ? "websocket" : "sse";
 			delete settings.websockets;
+			migrated = true;
 		}
 
 		// Migrate old skills object format to new array format
@@ -920,6 +933,7 @@ export class SettingsManager {
 			} else {
 				delete settings.skills;
 			}
+			migrated = true;
 		}
 
 		// Migrate retry.maxDelayMs -> retry.provider.maxRetryDelayMs
@@ -942,11 +956,15 @@ export class SettingsManager {
 					...(providerSettings ?? {}),
 					maxRetryDelayMs: retrySettings.maxDelayMs,
 				};
+				migrated = true;
 			}
-			delete retrySettings.maxDelayMs;
+			if ("maxDelayMs" in retrySettings) {
+				delete retrySettings.maxDelayMs;
+				migrated = true;
+			}
 		}
 
-		return settings as Settings;
+		return { settings: settings as Settings, migrated };
 	}
 
 	getGlobalSettings(): Settings {
@@ -1101,7 +1119,7 @@ export class SettingsManager {
 	): void {
 		this.storage.withLock(scope, (current) => {
 			const currentFileSettings = current
-				? SettingsManager.migrateSettings(JSON.parse(current) as Record<string, unknown>)
+				? SettingsManager.migrateSettings(JSON.parse(current) as Record<string, unknown>).settings
 				: {};
 			const mergedSettings: Settings = { ...currentFileSettings };
 			for (const field of modifiedFields) {
@@ -2014,6 +2032,11 @@ export class SettingsManager {
 		this.setTopLevel("fusion", { ...this.globalSettings.fusion, panel: panel.slice(0, 2) });
 	}
 
+	/** Patch Fusion boolean flags (verify / brief / lean / showSynthesis) without touching the panel. */
+	setFusionFlags(flags: Partial<Pick<FusionSettings, "verify" | "brief" | "lean" | "showSynthesis">>): void {
+		this.setTopLevel("fusion", { ...this.globalSettings.fusion, ...flags });
+	}
+
 	/**
 	 * Resolve debug settings. Default ON: the `debug` tool joins the active
 	 * surface so the agent can drive a DAP debugger when it needs live program
@@ -2039,11 +2062,13 @@ export class SettingsManager {
 
 	getChromeDevtoolsSettings(): ResolvedChromeDevtoolsSettings {
 		const raw = this.settings.chromeDevtools;
-		// Default ON: the chrome_devtools_* tools are registered. They connect to a
-		// Chrome started with --remote-debugging-port and fail with a clear hint
-		// when it is not reachable. Opt out via `chromeDevtools.enabled: false`.
-		// Env overrides (PIT_CHROME_DEVTOOLS_HOST/PORT) win over settings.
-		// Legacy PI_* names are still read as a fallback for one release.
+		// Default ON: the chrome_devtools_* tools are registered. Auto-launch
+		// (default) owns a dedicated profile via DevToolsActivePort / ephemeral
+		// port — it will not attach to a foreign Chrome on debugPort. Opt out of
+		// the tools via `chromeDevtools.enabled: false`; attach to a fixed
+		// host:port with `launchBrowser: false`.
+		// Env overrides (PIT_CHROME_DEVTOOLS_HOST/PORT) win over settings for
+		// attach-mode targeting. Legacy PI_* names are still read as a fallback.
 		const envHost = process.env.PIT_CHROME_DEVTOOLS_HOST || process.env.PI_CHROME_DEVTOOLS_HOST;
 		const envPort = process.env.PIT_CHROME_DEVTOOLS_PORT || process.env.PI_CHROME_DEVTOOLS_PORT;
 		const port = envPort && Number.isFinite(Number(envPort)) ? Number(envPort) : (raw?.debugPort ?? 9222);

@@ -50,6 +50,7 @@ import type { Orchestration } from "../fusion/types.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { CustomMessage } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import type { ToolSideEffect } from "../permissions/side-effect.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -469,6 +470,19 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	executionMode?: ToolExecutionMode;
 
 	/**
+	 * Side-effect class for plan-mode gating (and docs).
+	 * - "none": read-only / session bookkeeping safe in plan (todo, ask, …)
+	 * - "workspace": mutates files on disk
+	 * - "agent": mutates agent/session state (memory, retain, task, …)
+	 * - "exec": runs code/shell
+	 * - "opaque": unknown external surface (default for `registerTool` when omitted)
+	 *
+	 * Plan mode blocks workspace/agent/exec/opaque on the defensive `type:"tool"`
+	 * path; write/exec classifications from `describeToolAction` still apply first.
+	 */
+	sideEffect?: ToolSideEffect;
+
+	/**
 	 * UI activity family for the interactive TUI's grouped tool rendering.
 	 * - "navigation": passive read-only orientation (read/grep/ls/…); collapses
 	 *   into an aggregated NavGroup line.
@@ -845,7 +859,9 @@ export interface CustomToolCallEvent extends ToolCallEventBase {
  *
  * `event.input` is mutable. Mutate it in place to patch tool arguments before execution.
  * Later `tool_call` handlers see earlier mutations. If any handler mutates args, the
- * agent loop re-validates them before execution; invalid post-mutation args block the call.
+ * agent loop re-validates them against the TypeBox schema before execution, and the
+ * session re-checks PermissionChecker on the final args (deny floor / plan mode) so a
+ * post-permission rewrite cannot bypass path or command rules.
  */
 export type ToolCallEvent =
 	| BashToolCallEvent

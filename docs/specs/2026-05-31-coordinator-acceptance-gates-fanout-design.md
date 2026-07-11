@@ -1,9 +1,9 @@
-> **Status:** Shipped — commits 7629073d, f8dc43e2, 4cf9ab8b (coordinator fan-out + acceptance gates). Historical record of a delivered feature.
+> **Status:** Shipped — acceptance gates (`task.acceptance`), `parallel`, and `fanout` are implemented in `packages/coding-agent/src/core/coordinator/` and registered by `coordinator-extension.ts`. Concurrency default is `PIT_SUBAGENT_MAX_CONCURRENCY=4` (not 5).
 
 # Design: Acceptance Gates + Dynamic Fanout for the Subagent Coordinator
 
 Date: 2026-05-31
-Status: Approved (pending spec review)
+Status: Shipped
 Area: `packages/coding-agent/src/core/coordinator` + `built-ins/coordinator-extension.ts`
 
 ## Goal
@@ -169,7 +169,7 @@ Scout, reviewers, worker, and judge are all spawned subagents → depth+1.
 ## Caps (independent axes)
 
 - **Depth** (vertical nesting): `maxDepth`, default 1 (`PIT_SUBAGENT_MAX_DEPTH`).
-- **Concurrency** (horizontal breadth): default 5
+- **Concurrency** (horizontal breadth): default 4
   (`PIT_SUBAGENT_MAX_CONCURRENCY`).
 
 Both have safe defaults; neither requires configuration.
@@ -218,7 +218,7 @@ rig). Faux-model tests script judge/scout/worker responses; no network.
 ## Defaults assumed (overridable)
 
 - `max_attempts` default 2.
-- `concurrency` default 5 (`PIT_SUBAGENT_MAX_CONCURRENCY`).
+- `concurrency` default 4 (`PIT_SUBAGENT_MAX_CONCURRENCY`).
 - `{{target}}` templating via string replace.
 - Partial failures are non-aborting (`allSettled`).
 

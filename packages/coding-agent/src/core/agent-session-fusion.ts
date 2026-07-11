@@ -7,7 +7,7 @@ import type { AssistantMessage, Context, ImageContent, Message, Model, TextConte
 import { completeSimple, recordDiagnostic, streamSimple } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
-import { awaitBackgroundCompaction, type CompactionController, checkCompaction } from "./agent-session-compaction.ts";
+import { type CompactionController, checkCompaction } from "./agent-session-compaction.ts";
 import type { AgentSessionEvent } from "./agent-session-events.ts";
 import { estimateCharsAsTokens } from "./compaction/utils.ts";
 import { SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
@@ -24,8 +24,10 @@ import {
 import { runFusionTurn } from "./fusion/orchestrator.ts";
 import type { FusionSummaryData, JudgeAnalysis, PanelResult, VerificationReport } from "./fusion/types.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import type { PermissionChecker } from "./permissions/index.ts";
 import type { SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
+import type { SpawnBudgetDecision } from "./token-governor.ts";
 
 /** Stable session surface fusion reads; implemented by AgentSession. */
 export interface FusionHost {
@@ -44,6 +46,17 @@ export interface FusionHost {
 	setLastAssistantMessage(message: AssistantMessage): void;
 	/** F3: record Fusion-stage token spend into the unified budget ledger. */
 	recordFusionSpend?(tokens: number): void;
+	/**
+	 * Solo-equivalent context-economy preflight before Fusion stages: join any
+	 * background compact, hard-threshold compact, then presend overflow with the
+	 * pending user text in the wire estimate. Does not `agent.continue()` — that
+	 * would start a solo turn before the panel.
+	 */
+	prepareFusionContextEconomy(pendingUserText: string): Promise<void>;
+	/** Gate expensive Fusion stages when a goal token budget is exhausted. */
+	evaluateFusionBudget(): SpawnBudgetDecision;
+	/** Session permission checker for the verify subagent (optional in tests). */
+	readonly permissionChecker?: PermissionChecker;
 }
 
 function recordFusionSpendTokens(host: FusionHost, tokens: number): void {
@@ -193,6 +206,7 @@ export async function fusionVerify(
 				modelRegistry: host.modelRegistry,
 				availableTools: host.agent.state.tools as AgentTool[],
 				convertToLlm: (m) => m as never,
+				permissionChecker: host.permissionChecker,
 			},
 			{
 				prompt: buildVerifierPrompt(userPrompt, results, analysis),
@@ -215,7 +229,7 @@ export async function fusionVerify(
 	}
 }
 
-export async function runFusionSessionTurn(host: FusionHost, text: string): Promise<boolean> {
+export async function runFusionSessionTurn(host: FusionHost, text: string, images?: ImageContent[]): Promise<boolean> {
 	if (isTruthyEnvFlag(process.env.PIT_NO_FUSION)) return false;
 	const model = host.model;
 	if (!model) return false;
@@ -228,7 +242,12 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 		);
 		return false;
 	}
-	await awaitBackgroundCompaction(host.compaction);
+	await host.prepareFusionContextEconomy(text);
+	const budget = host.evaluateFusionBudget();
+	if (!budget.allowed) {
+		emitSyntheticAssistant(host, budget.reason ?? "Goal token budget exhausted — Fusion panel skipped.");
+		return true;
+	}
 	const { apiKey, headers } = await host.getRequiredRequestAuth(model);
 	const cliTokens = new Map<string, string | undefined>();
 	for (const cli of new Set(settings.panel.map((m) => m.cli))) {
@@ -254,6 +273,13 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 			};
 		});
 	const synthesisItems: NonNullable<FusionSummaryData["synthesis"]> = [];
+	let userMessageEmitted = false;
+	const persistInterruptedTranscript = (): void => {
+		if (userMessageEmitted) return;
+		emitFusionUserMessage(host, text, images);
+		userMessageEmitted = true;
+		emitFusionNote(host, "Fusion interrupted.");
+	};
 	try {
 		host.setFusionAbort(new AbortController());
 		const fusionAbort = host.fusionAbort;
@@ -274,7 +300,10 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 			} catch {
 				// keep advisorPrompt = text
 			}
-			if (fusionAbort.signal.aborted) return true;
+			if (fusionAbort.signal.aborted) {
+				persistInterruptedTranscript();
+				return true;
+			}
 		}
 		host.emit({ type: "fusion_stage", stage: "panel", synthId: model.id });
 		const outcome = await runFusionTurn({
@@ -363,6 +392,12 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 					});
 					parsed = await judgeOnce();
 				}
+				if (!parsed.ok) {
+					emitFusionNote(
+						host,
+						"Fusion judge could not parse structured output — synthesizing without judge analysis.",
+					);
+				}
 				const analysis = parsed.ok
 					? parsed.value
 					: {
@@ -392,7 +427,8 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 				? (userPrompt, results, analysis) => fusionVerify(host, userPrompt, results, analysis, model)
 				: undefined,
 			writer: async (userPrompt, results, analysis, verification) => {
-				emitFusionUserMessage(host, userPrompt);
+				emitFusionUserMessage(host, userPrompt, images);
+				userMessageEmitted = true;
 				host.emit({ type: "fusion_stage", stage: "writer", synthId: model.id });
 				const hasJudge =
 					analysis.consensus.length > 0 ||
@@ -441,6 +477,7 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 		});
 		if (!outcome.handled) {
 			if (fusionAbort.signal.aborted || host.userInterrupted) {
+				persistInterruptedTranscript();
 				return true;
 			}
 			const bothThrottled = outcome.degraded === "both-throttled";
@@ -471,8 +508,15 @@ export async function runFusionSessionTurn(host: FusionHost, text: string): Prom
 			}
 			return false;
 		}
+		if (fusionAbort.signal.aborted || host.userInterrupted) {
+			persistInterruptedTranscript();
+		}
 		return true;
 	} catch {
+		if (host.fusionAbort?.signal.aborted || host.userInterrupted) {
+			persistInterruptedTranscript();
+			return true;
+		}
 		return false;
 	} finally {
 		host.setFusionAbort(undefined);

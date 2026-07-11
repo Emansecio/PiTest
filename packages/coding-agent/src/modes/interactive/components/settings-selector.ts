@@ -56,6 +56,8 @@ export interface SettingsConfig {
 	clearOnShrink: boolean;
 	showTerminalProgress: boolean;
 	warnings: WarningSettings;
+	fusionVerify: boolean;
+	fusionBrief: boolean;
 }
 
 export interface SettingsCallbacks {
@@ -81,6 +83,8 @@ export interface SettingsCallbacks {
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onShowTerminalProgressChange: (enabled: boolean) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
+	onFusionVerifyChange: (enabled: boolean) => void;
+	onFusionBriefChange: (enabled: boolean) => void;
 	onCancel: () => void;
 }
 
@@ -254,6 +258,20 @@ export class SettingsSelectorComponent extends Container {
 				label: "Quiet startup",
 				description: "Disable verbose printing at startup",
 				currentValue: config.quietStartup ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "fusion-verify",
+				label: "Fusion verify",
+				description: "Fact-check advisor claims against the code before the writer (Fusion mode)",
+				currentValue: config.fusionVerify ? "true" : "false",
+				values: ["true", "false"],
+			},
+			{
+				id: "fusion-brief",
+				label: "Fusion brief",
+				description: "Synthesizer rewrites the prompt for advisors before the panel (Fusion mode)",
+				currentValue: config.fusionBrief ? "true" : "false",
 				values: ["true", "false"],
 			},
 			{
@@ -476,6 +494,12 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "quiet-startup":
 						callbacks.onQuietStartupChange(newValue === "true");
+						break;
+					case "fusion-verify":
+						callbacks.onFusionVerifyChange(newValue === "true");
+						break;
+					case "fusion-brief":
+						callbacks.onFusionBriefChange(newValue === "true");
 						break;
 					case "double-escape-action":
 						callbacks.onDoubleEscapeActionChange(newValue as "fork" | "tree" | "none");

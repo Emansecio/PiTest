@@ -11,11 +11,13 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { writeFileAtomic } from "../../utils/atomic-write.ts";
+import { mapWithConcurrency } from "../../utils/map-with-concurrency.ts";
 import { killProcessTree } from "../../utils/shell.ts";
 import { isHighSurrogate } from "../../utils/surrogate.ts";
 import { resolveToCwd } from "../tools/path-utils.ts";
 import { formatSize, truncateHead } from "../tools/truncate.ts";
 import {
+	closeFile,
 	ensureFileOpen,
 	getOrCreateClient,
 	refreshFile,
@@ -30,7 +32,7 @@ import { applyTextEdits, flattenWorkspaceTextEdits, rangesOverlap } from "./edit
 import { log, throwIfAborted } from "./internal.ts";
 import { getLspServers, isProjectAwareLspServer } from "./manager.ts";
 import type { LspToolInput } from "./tool.ts";
-import type { Diagnostic, ServerConfig, SymbolInformation, TextEdit, WorkspaceEdit } from "./types.ts";
+import type { Diagnostic, LspClient, ServerConfig, SymbolInformation, TextEdit, WorkspaceEdit } from "./types.ts";
 import {
 	dedupeDiagnostics,
 	dedupeWorkspaceSymbols,
@@ -67,23 +69,6 @@ function resolveSingleDiagnosticsWaitTimeoutMs(): number {
 }
 const MAX_GLOB_DIAGNOSTIC_TARGETS = 20;
 const GLOB_DIAGNOSTIC_CONCURRENCY = 6;
-
-async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-	const out: R[] = new Array(items.length);
-	let next = 0;
-	const workers = Math.min(limit, items.length);
-	if (workers === 0) return out;
-	await Promise.all(
-		Array.from({ length: workers }, async () => {
-			while (true) {
-				const i = next++;
-				if (i >= items.length) break;
-				out[i] = await fn(items[i]!);
-			}
-		}),
-	);
-	return out;
-}
 const WORKSPACE_SYMBOL_LIMIT = 200;
 const MAX_RENAME_PAIRS = 1000;
 const LSP_JSON_OUTPUT_MAX_BYTES = 16 * 1024;
@@ -295,6 +280,7 @@ export async function runDiagnostics(
 	}
 
 	const detailed = targets.length > 1 || truncatedGlobTargets;
+	const closeOpenedAfter = detailed;
 	const diagnosticsWaitTimeoutMs = detailed
 		? Math.min(BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000)
 		: Math.min(resolveSingleDiagnosticsWaitTimeoutMs(), timeoutSec * 1000);
@@ -318,87 +304,98 @@ export async function runDiagnostics(
 		const allDiagnostics: Diagnostic[] = [];
 		const serverIssues: string[] = [];
 		let freshServerCount = 0;
+		const openedForCall: Array<{ client: LspClient; path: string }> = [];
 
-		const serverOutcomes = await Promise.allSettled(
-			servers.map(async ([serverName, serverConfig]) => {
-				allServerNames.add(serverName);
-				throwIfAborted(signal);
-				const client = await getOrCreateClient(serverConfig, cwd);
-				if (isProjectAwareLspServer(serverConfig)) {
-					await waitForProjectLoaded(client, signal);
+		try {
+			const serverOutcomes = await Promise.allSettled(
+				servers.map(async ([serverName, serverConfig]) => {
+					allServerNames.add(serverName);
 					throwIfAborted(signal);
-				}
-				const minVersion = client.diagnosticsVersion;
-				await refreshFile(client, resolved, signal);
-				const expectedDocumentVersion = client.openFiles.get(uri)?.version;
-				const result = await waitForDiagnosticsResult(client, uri, {
-					timeoutMs: diagnosticsWaitTimeoutMs,
-					signal,
-					minVersion,
-					expectedDocumentVersion,
-				});
-				return { serverName, result };
-			}),
-		);
-		for (let i = 0; i < serverOutcomes.length; i++) {
-			const serverName = servers[i][0];
-			const outcome = serverOutcomes[i];
-			if (outcome.status === "rejected") {
-				if (signal?.aborted) throw outcome.reason;
-				const message = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
-				serverIssues.push(`${serverName}: ${message}`);
-				continue;
-			}
-			const { result } = outcome.value;
-			if (!result.fresh) {
-				serverIssues.push(`${serverName}: no fresh diagnostics published`);
-				continue;
-			}
-			freshServerCount += 1;
-			allDiagnostics.push(...result.diagnostics);
-		}
-
-		const uniqueDiagnostics = dedupeDiagnostics(allDiagnostics);
-		sortDiagnostics(uniqueDiagnostics);
-		const issueNote = serverIssues.length > 0 ? ` (${serverIssues.join("; ")})` : "";
-
-		if (!detailed && targets.length === 1) {
-			if (freshServerCount === 0) {
-				return textResult(formatDiagnosticsUnavailableMessage(relPath, serverIssues.join("; ")), {
-					action,
-					serverName: Array.from(allServerNames).join(", "),
-					success: true,
-				});
-			}
-			if (uniqueDiagnostics.length === 0) {
-				return textResult(`OK${issueNote}`, {
-					action,
-					serverName: Array.from(allServerNames).join(", "),
-					success: true,
-				});
-			}
-			const summary = formatDiagnosticsSummary(uniqueDiagnostics);
-			const formatted = uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath, cwd));
-			return textResult(`${summary}${issueNote}:\n${formatGroupedDiagnosticMessages(formatted)}`, {
-				action,
-				serverName: Array.from(allServerNames).join(", "),
-				success: true,
-			});
-		}
-
-		const batchLines: string[] = [];
-		if (freshServerCount === 0) {
-			batchLines.push(formatBatchDiagnosticsUnavailable(relPath, issueNote));
-		} else if (uniqueDiagnostics.length === 0) {
-			batchLines.push(`${relPath}: no issues${issueNote}`);
-		} else {
-			const summary = formatDiagnosticsSummary(uniqueDiagnostics);
-			batchLines.push(`${relPath}: ${summary}${issueNote}`);
-			batchLines.push(
-				formatGroupedDiagnosticMessages(uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath, cwd))),
+					const client = await getOrCreateClient(serverConfig, cwd);
+					if (isProjectAwareLspServer(serverConfig)) {
+						await waitForProjectLoaded(client, signal);
+						throwIfAborted(signal);
+					}
+					const wasOpen = client.openFiles.has(uri);
+					const minVersion = client.diagnosticsVersion;
+					await refreshFile(client, resolved, signal);
+					if (closeOpenedAfter && !wasOpen && client.openFiles.has(uri)) {
+						openedForCall.push({ client, path: resolved });
+					}
+					const expectedDocumentVersion = client.openFiles.get(uri)?.version;
+					const result = await waitForDiagnosticsResult(client, uri, {
+						timeoutMs: diagnosticsWaitTimeoutMs,
+						signal,
+						minVersion,
+						expectedDocumentVersion,
+					});
+					return { serverName, result };
+				}),
 			);
+			for (let i = 0; i < serverOutcomes.length; i++) {
+				const serverName = servers[i][0];
+				const outcome = serverOutcomes[i];
+				if (outcome.status === "rejected") {
+					if (signal?.aborted) throw outcome.reason;
+					const message = outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason);
+					serverIssues.push(`${serverName}: ${message}`);
+					continue;
+				}
+				const { result } = outcome.value;
+				if (!result.fresh) {
+					serverIssues.push(`${serverName}: no fresh diagnostics published`);
+					continue;
+				}
+				freshServerCount += 1;
+				allDiagnostics.push(...result.diagnostics);
+			}
+
+			const uniqueDiagnostics = dedupeDiagnostics(allDiagnostics);
+			sortDiagnostics(uniqueDiagnostics);
+			const issueNote = serverIssues.length > 0 ? ` (${serverIssues.join("; ")})` : "";
+
+			if (!detailed && targets.length === 1) {
+				if (freshServerCount === 0) {
+					return textResult(formatDiagnosticsUnavailableMessage(relPath, serverIssues.join("; ")), {
+						action,
+						serverName: Array.from(allServerNames).join(", "),
+						success: true,
+					});
+				}
+				if (uniqueDiagnostics.length === 0) {
+					return textResult(`OK${issueNote}`, {
+						action,
+						serverName: Array.from(allServerNames).join(", "),
+						success: true,
+					});
+				}
+				const summary = formatDiagnosticsSummary(uniqueDiagnostics);
+				const formatted = uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath, cwd));
+				return textResult(`${summary}${issueNote}:\n${formatGroupedDiagnosticMessages(formatted)}`, {
+					action,
+					serverName: Array.from(allServerNames).join(", "),
+					success: true,
+				});
+			}
+
+			const batchLines: string[] = [];
+			if (freshServerCount === 0) {
+				batchLines.push(formatBatchDiagnosticsUnavailable(relPath, issueNote));
+			} else if (uniqueDiagnostics.length === 0) {
+				batchLines.push(`${relPath}: no issues${issueNote}`);
+			} else {
+				const summary = formatDiagnosticsSummary(uniqueDiagnostics);
+				batchLines.push(`${relPath}: ${summary}${issueNote}`);
+				batchLines.push(
+					formatGroupedDiagnosticMessages(uniqueDiagnostics.map((d) => formatDiagnostic(d, relPath, cwd))),
+				);
+			}
+			return batchLines;
+		} finally {
+			if (closeOpenedAfter && openedForCall.length > 0) {
+				await Promise.allSettled(openedForCall.map(({ client, path: p }) => closeFile(client, p, signal)));
+			}
 		}
-		return batchLines;
 	};
 
 	if (!detailed && targets.length === 1) {

@@ -5,9 +5,10 @@
  * targetId, the currently selected page, and ring buffers of console/network
  * events per connection. Connects to a reachable Chrome (started with
  * --remote-debugging-port) and can open a NEW tab via the DevTools HTTP
- * endpoint. When `launchBrowser` is set (the default), it auto-launches Chrome
- * into a dedicated persistent profile if the debug port is unreachable;
- * otherwise it only attaches to an already-running instance. Published via a
+ * endpoint. When `launchBrowser` is set (the default), ownership is proven via
+ * the dedicated profile's `DevToolsActivePort` (ephemeral port 0) — never by
+ * "something answered on debugPort". With `launchBrowser: false`, attaches to
+ * the configured host:port (power-user escape hatch). Published via a
  * module-level registry (mirrors goal/todo/preview-queue).
  */
 
@@ -21,7 +22,14 @@ import {
 	createTarget as defaultCreateTarget,
 	listTargets as defaultListTargets,
 } from "./cdp-client.ts";
-import { findChromeBinary, launchChrome, waitForEndpoint } from "./chrome-launcher.ts";
+import {
+	type DevToolsActivePort,
+	findChromeBinary,
+	isOwnedEndpoint,
+	launchChrome,
+	readDevToolsActivePort,
+	waitForOwnedProfile,
+} from "./chrome-launcher.ts";
 import { type ElementToSourceResult, resolveElementToSource } from "./element-to-source.ts";
 
 export interface CdpConnectionLike {
@@ -53,8 +61,13 @@ export interface NetworkEntry {
 
 export interface ChromeDevtoolsDeps {
 	host: string;
+	/**
+	 * Preferred debug port. Used as the attach target when `launchBrowser` is
+	 * false. Ignored for ownership when auto-launch is on (ephemeral port +
+	 * `DevToolsActivePort` instead).
+	 */
 	port: number;
-	/** Auto-launch Chrome when the debug port is not reachable. */
+	/** Auto-launch Chrome into `userDataDir` when our profile is not live. */
 	launchBrowser?: boolean;
 	/** Dedicated, persistent profile dir for the launched Chrome. */
 	userDataDir?: string;
@@ -67,7 +80,9 @@ export interface ChromeDevtoolsDeps {
 	// Injectable launcher pieces (tests).
 	findBinary?: () => string | undefined;
 	launch?: (opts: { binary: string; port: number; userDataDir: string }) => void;
-	waitReady?: (host: string, port: number) => Promise<boolean>;
+	readActivePort?: () => DevToolsActivePort | undefined;
+	isOwned?: (host: string, port: number, browserPath: string, signal?: AbortSignal) => Promise<boolean>;
+	waitOwned?: (host: string, userDataDir: string, signal?: AbortSignal) => Promise<DevToolsActivePort | undefined>;
 }
 
 interface ConnState {
@@ -241,7 +256,8 @@ function remoteArgsToText(args: unknown): string {
 
 export class ChromeDevtoolsManager {
 	private readonly host: string;
-	private readonly port: number;
+	/** Effective CDP port — updated after owned-profile discover / reconnect. */
+	private port: number;
 	private readonly list: (signal?: AbortSignal) => Promise<CdpTarget[]>;
 	private readonly create: (url: string, signal?: AbortSignal) => Promise<CdpTarget>;
 	private readonly closeTargetImpl: (id: string, signal?: AbortSignal) => Promise<void>;
@@ -251,7 +267,18 @@ export class ChromeDevtoolsManager {
 	private readonly binaryPath: string | undefined;
 	private readonly findBinary: () => string | undefined;
 	private readonly launch: (opts: { binary: string; port: number; userDataDir: string }) => void;
-	private readonly waitReady: (host: string, port: number) => Promise<boolean>;
+	private readonly readActivePort: () => DevToolsActivePort | undefined;
+	private readonly isOwned: (
+		host: string,
+		port: number,
+		browserPath: string,
+		signal?: AbortSignal,
+	) => Promise<boolean>;
+	private readonly waitOwned: (
+		host: string,
+		userDataDir: string,
+		signal?: AbortSignal,
+	) => Promise<DevToolsActivePort | undefined>;
 
 	private selectedTarget: CdpTarget | undefined;
 	private readonly conns = new Map<string, ConnState>();
@@ -273,51 +300,90 @@ export class ChromeDevtoolsManager {
 		this.connectFactory = deps.connect ?? ((target) => new CdpConnection(target.webSocketDebuggerUrl ?? ""));
 		this.findBinary = deps.findBinary ?? (() => findChromeBinary());
 		this.launch = deps.launch ?? ((opts) => void launchChrome(opts));
-		this.waitReady = deps.waitReady ?? ((host, port) => waitForEndpoint(host, port));
+		this.readActivePort = deps.readActivePort ?? (() => readDevToolsActivePort(this.userDataDir));
+		this.isOwned =
+			deps.isOwned ?? ((host, port, browserPath, signal) => isOwnedEndpoint(host, port, browserPath, { signal }));
+		this.waitOwned =
+			deps.waitOwned ?? ((host, userDataDir, signal) => waitForOwnedProfile(host, userDataDir, { signal }));
 	}
 
 	/**
-	 * Make sure a Chrome with the debug port is reachable: reconnect if one is
-	 * already up, otherwise auto-launch (when enabled). Idempotent — concurrent
-	 * callers share one ensure. Returns whether a browser was launched.
+	 * Make sure an owned Chrome is reachable: reconnect to our profile when
+	 * `DevToolsActivePort` matches a live endpoint, otherwise auto-launch
+	 * (when enabled) with an ephemeral port. Idempotent — concurrent callers
+	 * share one ensure. Returns whether a browser was launched.
 	 */
 	async ensureBrowser(signal?: AbortSignal): Promise<{ launched: boolean }> {
-		if (this.ensurePromise) return this.ensurePromise;
-		this.ensurePromise = this.doEnsure(signal).finally(() => {
-			this.ensurePromise = undefined;
+		if (signal?.aborted) {
+			throw new DOMException("The operation was aborted.", "AbortError");
+		}
+		if (!this.ensurePromise) {
+			this.ensurePromise = this.doEnsure(signal).finally(() => {
+				this.ensurePromise = undefined;
+			});
+		}
+		if (!signal) return this.ensurePromise;
+		// Race the shared ensure with this caller's abort so Esc unblocks waiters
+		// even when the in-flight ensure was started under a different signal.
+		return new Promise<{ launched: boolean }>((resolve, reject) => {
+			const onAbort = () => reject(new DOMException("The operation was aborted.", "AbortError"));
+			signal.addEventListener("abort", onAbort, { once: true });
+			this.ensurePromise!.then(
+				(value) => {
+					signal.removeEventListener("abort", onAbort);
+					resolve(value);
+				},
+				(err) => {
+					signal.removeEventListener("abort", onAbort);
+					reject(err);
+				},
+			);
 		});
-		return this.ensurePromise;
 	}
 
 	private async doEnsure(signal?: AbortSignal): Promise<{ launched: boolean }> {
-		if (await this.reachable(signal)) return { launched: false };
-		if (!this.launchBrowser) {
-			// Surface the standard "start Chrome / unreachable" error.
-			await this.list(signal);
-			return { launched: false };
+		if (this.launchBrowser) {
+			if (await this.tryReconnectOwned(signal)) return { launched: false };
+			const binary = this.binaryPath || this.findBinary();
+			if (!binary) {
+				throw new Error(
+					"Chrome was not found. Install Chrome, or set chromeDevtools.binaryPath / PIT_CHROME_DEVTOOLS_BINARY.",
+				);
+			}
+			if (!this.userDataDir) {
+				throw new Error("chromeDevtools userDataDir is required when launchBrowser is enabled.");
+			}
+			if (signal?.aborted) {
+				throw new DOMException("The operation was aborted.", "AbortError");
+			}
+			// Port 0 → Chrome writes DevToolsActivePort (fixed ports do not).
+			this.launch({ binary, port: 0, userDataDir: this.userDataDir });
+			const owned = await this.waitOwned(this.host, this.userDataDir, signal);
+			if (signal?.aborted) {
+				throw new DOMException("The operation was aborted.", "AbortError");
+			}
+			if (!owned) {
+				throw new Error(
+					`Launched Chrome but the profile at ${this.userDataDir} did not publish a live DevToolsActivePort in time. ` +
+						"If another Chrome is using this profile, close it and retry; or set chromeDevtools.launchBrowser: false to attach to a fixed host:port.",
+				);
+			}
+			this.port = owned.port;
+			this.launchedHere = true;
+			return { launched: true };
 		}
-		const binary = this.binaryPath || this.findBinary();
-		if (!binary) {
-			throw new Error(
-				"Chrome was not found. Install Chrome, or set chromeDevtools.binaryPath / PIT_CHROME_DEVTOOLS_BINARY.",
-			);
-		}
-		this.launch({ binary, port: this.port, userDataDir: this.userDataDir });
-		const ready = await this.waitReady(this.host, this.port);
-		if (!ready) {
-			throw new Error(`Launched Chrome but the debug port ${this.port} did not open in time.`);
-		}
-		this.launchedHere = true;
-		return { launched: true };
+		// Attach-any escape hatch: configured host:port only (no ownership check).
+		await this.list(signal);
+		return { launched: false };
 	}
 
-	private async reachable(signal?: AbortSignal): Promise<boolean> {
-		try {
-			await this.list(signal);
-			return true;
-		} catch {
-			return false;
-		}
+	/** Reconnect when our profile's DevToolsActivePort points at a live matching endpoint. */
+	private async tryReconnectOwned(signal?: AbortSignal): Promise<boolean> {
+		const active = this.readActivePort();
+		if (!active) return false;
+		if (!(await this.isOwned(this.host, active.port, active.browserPath, signal))) return false;
+		this.port = active.port;
+		return true;
 	}
 
 	wasLaunchedHere(): boolean {
@@ -998,8 +1064,8 @@ export class ChromeDevtoolsManager {
 		// Enable the domains we buffer + need; tolerate individual failures. Network
 		// gets enlarged buffers so a body we did not proactively cache still survives
 		// a live getResponseBody fetch on a busy page.
-		for (const domain of ["Page", "Runtime", "Log", "Network"]) {
-			try {
+		await Promise.allSettled(
+			(["Page", "Runtime", "Log", "Network"] as const).map(async (domain) => {
 				const params =
 					domain === "Network"
 						? {
@@ -1008,10 +1074,8 @@ export class ChromeDevtoolsManager {
 							}
 						: {};
 				await conn.send(`${domain}.enable`, params);
-			} catch {
-				// A domain may be unavailable for some target types; keep going.
-			}
-		}
+			}),
+		);
 		return conn;
 	}
 }

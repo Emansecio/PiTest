@@ -4,6 +4,8 @@ Pit is a minimal terminal coding harness. It is designed to stay small at the co
 
 ## Quick start
 
+Requires **Node.js >=22.19.0**.
+
 On linux or mac you can install Pit with curl:
 
 ```bash
@@ -40,6 +42,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Using Pit](usage.md) - interactive mode, slash commands, context files, and CLI reference.
 - [Providers](providers.md) - subscription and API-key setup for built-in providers.
 - [Settings](settings.md) - global and project settings.
+- [LSP](lsp.md) - language servers, auto-detect, and writethrough.
 - [Keybindings](keybindings.md) - default shortcuts and custom keybindings.
 - [Sessions](sessions.md) - session management, branching, and tree navigation.
 - [Compaction](compaction.md) - context compaction and branch summarization.

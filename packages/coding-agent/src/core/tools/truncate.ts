@@ -163,10 +163,13 @@ export function effectiveToolOutputHardCapBytes(): number {
 // stored when it exceeds the compaction prune threshold (~20k dense tokens ≈ 66KB
 // of text), so it is ALWAYS bigger than the generic 64KB hard cap — re-cutting it
 // head-only on recall would drop exactly the tail (final error/stack/status) the
-// model recalled it for. 256KB keeps the recalled excerpt large enough to carry
-// both head and tail while still bounding how much a single recall can re-inject.
-// Fixed: stays above the scaled hard cap even at its 128KB ceiling.
-export const RECALL_OUTPUT_CAP_BYTES = 256 * 1024; // 256KB
+// model recalled it for. 96KB keeps the recalled excerpt large enough to carry
+// both head and tail while bounding how much a single recall can re-inject
+// (~24K tokens worst case) so one recall cannot dominate the context window.
+// Fixed: stays above the scaled hard cap even at its 128KB ceiling when scaled
+// hard caps are lower; when hard cap is at 128KB floor, recall remains the
+// intentional higher ceiling for deferred outputs only.
+export const RECALL_OUTPUT_CAP_BYTES = 96 * 1024; // 96KB
 // Ceiling for a THROWN tool error's message text (see wrapToolDefinition's
 // capThrownError): a throwing tool bypasses the resolved-result caps, and error
 // signal lives at both ends (message head, final stack frames), so the cap is
@@ -603,7 +606,7 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 	const lines = content.split("\n");
 	const totalLines = lines.length;
 
-	// Work backwards from the end
+	// Work backwards from the end. Push then reverse once — unshift-in-loop is O(n²).
 	const outputLinesArr: string[] = [];
 	let outputBytesCount = 0;
 	let truncatedBy: "lines" | "bytes" = "lines";
@@ -619,16 +622,18 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 			// take the end of the line (partial)
 			if (outputLinesArr.length === 0) {
 				const truncatedLine = truncateStringToBytesFromEnd(line, maxBytes);
-				outputLinesArr.unshift(truncatedLine);
+				outputLinesArr.push(truncatedLine);
 				outputBytesCount = utf8ByteLength(truncatedLine);
 				lastLinePartial = true;
 			}
 			break;
 		}
 
-		outputLinesArr.unshift(line);
+		outputLinesArr.push(line);
 		outputBytesCount += lineBytes;
 	}
+
+	outputLinesArr.reverse();
 
 	// If we exited due to line limit
 	if (outputLinesArr.length >= maxLines && outputBytesCount <= maxBytes) {

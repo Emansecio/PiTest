@@ -304,6 +304,16 @@ export class Agent {
 		return this.steeringQueue.mode;
 	}
 
+	/** @deprecated Use {@link steeringMode}. */
+	set queueMode(mode: QueueMode) {
+		this.steeringMode = mode;
+	}
+
+	/** @deprecated Use {@link steeringMode}. */
+	get queueMode(): QueueMode {
+		return this.steeringMode;
+	}
+
 	/** Controls how queued follow-up messages are drained. */
 	set followUpMode(mode: QueueMode) {
 		this.followUpQueue.mode = mode;

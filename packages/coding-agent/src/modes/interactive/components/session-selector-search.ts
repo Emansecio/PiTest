@@ -1,5 +1,5 @@
 import { fuzzyMatch } from "@pit/tui";
-import { searchRegexWithinBudget } from "../../../core/regex-budget.ts";
+import { searchRegexWithinBudget, validateSafeRegex } from "../../../core/regex-budget.ts";
 import { resolveSessionSearchText, type SessionInfo } from "../../../core/session-manager.ts";
 
 export type SortMode = "threaded" | "recent" | "relevance";
@@ -76,6 +76,7 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
 			return { mode: "regex", tokens: [], regex: null, error: "Empty regex" };
 		}
 		try {
+			validateSafeRegex(pattern);
 			return { mode: "regex", tokens: [], regex: new RegExp(pattern, "i") };
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);

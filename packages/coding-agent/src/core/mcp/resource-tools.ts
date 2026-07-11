@@ -8,9 +8,12 @@
  */
 
 import { Type } from "typebox";
+import { mapWithConcurrency } from "../../utils/map-with-concurrency.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { McpManager } from "./manager.ts";
 import { capMcpText } from "./tools.ts";
+
+const LIST_RESOURCES_CONCURRENCY = 4;
 
 export function createListResourcesTool(manager: McpManager): ToolDefinition {
 	return {
@@ -39,25 +42,28 @@ export function createListResourcesTool(manager: McpManager): ToolDefinition {
 					details: undefined,
 				};
 			}
-			const lines: string[] = [];
-			for (const { name, client } of clients) {
+			const perClient = await mapWithConcurrency(clients, LIST_RESOURCES_CONCURRENCY, async ({ name, client }) => {
+				const lines: string[] = [];
 				let resources: Awaited<ReturnType<typeof client.listResources>>;
 				try {
 					resources = await client.listResources(signal);
 				} catch (err) {
 					lines.push(`[${name}] error: ${err instanceof Error ? err.message : String(err)}`);
-					continue;
+					return lines;
 				}
 				if (resources.length === 0) {
 					lines.push(`[${name}] (no resources)`);
-					continue;
+					return lines;
 				}
 				for (const r of resources) {
 					const desc = r.description ? ` — ${r.description}` : "";
 					const label = r.name ? ` (${r.name})` : "";
 					lines.push(`[${name}] ${r.uri}${label}${desc}`);
 				}
-			}
+				return lines;
+			});
+			// mapWithConcurrency preserves client order; flatten in that order.
+			const lines = perClient.flat();
 			return { content: [{ type: "text", text: capMcpText(lines.join("\n")) }], isError: false, details: undefined };
 		},
 	};

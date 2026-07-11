@@ -21,12 +21,14 @@ import * as _bundledTypebox from "typebox";
 import * as _bundledTypeboxCompile from "typebox/compile";
 import * as _bundledTypeboxValue from "typebox/value";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
-// NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
-// avoiding a circular dependency. Extensions can import from @pit/coding-agent.
+// Bun binary: static import so the full package is bundled into VIRTUAL_MODULES.
+// Node/dev: jiti aliases resolve `@pit/coding-agent` to `extension-api` (slim).
+// NOTE: loader exports are NOT re-exported from index.ts (avoids circular deps).
 import * as _bundledPiCodingAgent from "../../index.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
+import { DEFAULT_REGISTER_TOOL_SIDE_EFFECT } from "../permissions/side-effect.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
 import { HANDLER_MESSAGE_INJECTOR_TAG, HANDLER_SIDE_EFFECT_TAG } from "./runner.ts";
 import type {
@@ -73,7 +75,9 @@ function getAliases(): Record<string, string> {
 	if (_aliases) return _aliases;
 
 	const __dirname = path.dirname(fileURLToPath(import.meta.url));
-	const packageIndex = path.resolve(__dirname, "../..", "index.js");
+	// Node: slim extension surface (avoids agent-session + full tools registry).
+	// Bun binary uses VIRTUAL_MODULES with the full package index instead.
+	const extensionApiEntry = path.resolve(__dirname, "../..", "extension-api.js");
 
 	const typeboxEntry = require.resolve("typebox");
 	const typeboxCompileEntry = require.resolve("typebox/compile");
@@ -88,7 +92,7 @@ function getAliases(): Record<string, string> {
 		return fileURLToPath(import.meta.resolve(specifier));
 	};
 
-	const piCodingAgentEntry = packageIndex;
+	const piCodingAgentEntry = extensionApiEntry;
 	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/dist/index.js", "@pit/agent-core");
 	const piTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "@pit/tui");
 	const piAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "@pit/ai");
@@ -237,8 +241,13 @@ function createExtensionAPI(
 
 		registerTool(tool: ToolDefinition): void {
 			runtime.assertActive();
-			extension.tools.set(tool.name, {
-				definition: tool,
+			// Fail-closed for plan mode: undeclared extension tools are opaque
+			// (may mutate). Built-ins and intentional plan-safe tools set sideEffect
+			// explicitly (e.g. exit_plan: "none").
+			const definition =
+				tool.sideEffect === undefined ? { ...tool, sideEffect: DEFAULT_REGISTER_TOOL_SIDE_EFFECT } : tool;
+			extension.tools.set(definition.name, {
+				definition,
 				sourceInfo: extension.sourceInfo,
 			});
 			runtime.refreshTools();

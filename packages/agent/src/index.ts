@@ -5,6 +5,7 @@ export * from "./agent-loop.ts";
 // Live overthink guard — interrupt unbounded reasoning mid-stream
 export * from "./overthink-guard.ts";
 export * from "./proxy.ts";
+export * from "./stable-args-fingerprint.ts";
 // Proxy utilities
 // Tier 4 — post-hoc error hint registry
 export * from "./tool-error-hint-registry.ts";

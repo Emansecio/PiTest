@@ -36,7 +36,7 @@ describe("subagent guard chain", () => {
 
 		const decision = await chain.beforeToolCall(call("write", { path: file, content: "{}" }, "w"));
 		expect(decision?.block).toBe(true);
-		expect(decision?.reason).toMatch(/has not been read/i);
+		expect(decision?.reason).toMatch(/unread/i);
 	});
 
 	it("allows the write once the file is read in the same chain", async () => {

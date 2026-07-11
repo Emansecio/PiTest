@@ -86,4 +86,13 @@ describe("coordinator op:continue", () => {
 		expect(isErr(res)).toBe(true);
 		expect(textOf(res)).toContain("no continuable subagent");
 	});
+
+	it('op:"list" surfaces continuable handles after a successful run', async () => {
+		const task = buildTask([fauxAssistantMessage("first answer"), fauxAssistantMessage("follow-up")]);
+		await exec(task, { op: "run", name: "listed", prompt: "go" });
+		const list = await exec(task, { op: "list" });
+		expect(isErr(list)).toBe(false);
+		expect(textOf(list)).toMatch(/Continuable[\s\S]*listed/);
+		expect((list as { details?: { continuable?: number } }).details?.continuable).toBeGreaterThanOrEqual(1);
+	});
 });

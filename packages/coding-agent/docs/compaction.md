@@ -26,15 +26,23 @@ Both use the same structured summary format and track file operations cumulative
 
 ### When It Triggers
 
-Auto-compaction triggers when:
+Auto-compaction is a **stack of layers**, not a single threshold check:
 
-```
-contextTokens > contextWindow - reserveTokens
-```
+| Layer | Trigger | Uses LLM summarizer? |
+|-------|---------|----------------------|
+| **Hard threshold** | `contextTokens > contextWindow − effectiveReserve` (+ ~8k hysteresis) | Yes (sync) |
+| **Soft / predictive background** | Approaching the hard threshold (~1× `keepRecentTokens` early) at end of turn | Yes (async; joined before the next prompt) |
+| **Presend overflow** | Full wire estimate (messages + system prompt + tool schemas + pending user + thinking headroom) exceeds a dynamic ratio (~0.95 → ~0.88 under pressure) | Yes |
+| **Overflow recovery** | Provider context-overflow error on the same model | Yes (+ one retry) |
+| **Mid-turn pressure** | Wire pressure between tool rounds (~92% of window) | No (prune-only) |
+| **Proactive / live supersede** | Above proactive floor, or after successful tools with obsolete reads/greps | No (prune-only) |
+| **Manual** | `/compact [instructions]` or RPC `compact` | Yes (aborts any in-flight stream) |
 
-By default, `reserveTokens` is 16384 tokens (configurable in `~/.pit/agent/settings.json` or `<project-dir>/.pit/settings.json`). This leaves room for the LLM's response.
+By default, `reserveTokens` is 16384 and `keepRecentTokens` is 20000 (configurable in `~/.pit/agent/settings.json` or `<project-dir>/.pit/settings.json`). Both scale with large context windows — see [Settings → Compaction](settings.md#compaction).
 
-You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
+**Fusion mode** runs the same background join + hard threshold + presend preflight before panel/judge/writer stages (it does not start a solo `agent.continue()` after compacting).
+
+Tunables and kill-switches (`PIT_PRESEND_OVERFLOW_RATIO`, `PIT_NO_MID_TURN_PRESSURE_GUARD`, `PIT_NO_PROACTIVE_PRUNE`, …) are listed in [token-economy-tuning.md](../../../docs/token-economy-tuning.md).
 
 ### How It Works
 

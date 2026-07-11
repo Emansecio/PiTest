@@ -1,8 +1,8 @@
 /**
- * `plan` tool — a STRUCTURED, versionable plan: a DAG of steps that supersedes
- * the flat-string `todo` list. Action-based; reaches the active PlanManager
- * through the module-level registry (see plan/plan-manager.ts). Default-on, so
- * the model can shape a real dependency graph up front.
+ * `plan` tool — a STRUCTURED, versionable plan: a DAG of steps for long,
+ * multi-phase work with dependencies and verify hints. Secondary to the flat
+ * `todo` list (ADR-0007 / CONTEXT.md): use plan when deps/verification matter,
+ * not for everyday task tracking.
  *
  * Compaction: the active plan is reconstructed verbatim on demand via
  * `op:"show"`, and PlanManager.systemPromptSection() re-emits it per-turn, so
@@ -116,7 +116,7 @@ export function createPlanToolDefinition(
 			"Maintain a structured plan as a DAG of steps. Ops: propose (needs steps; creates v1), revise (needs steps; appends a new version keeping history), step_done (needs step_id), show (print the current DAG in topological order). Each step has id, intent, optional depends_on (ids), produces (artifact), verify (check). Cyclic or dangling depends_on are rejected. The optional `brief` carries markdown context the executor needs and is shown by exit_plan.",
 		promptSnippet: "Plan multi-step work as a versioned DAG of dependent steps",
 		promptGuidelines: [
-			"When a multi-step task has real dependencies/artifacts, use `plan` (a DAG) instead of `todo` (a flat list); mark steps done as you go and `revise` to re-shape.",
+			"When a multi-step task has real dependencies/artifacts, prefer `plan` (a DAG) over `todo` (a flat list); mark steps done as you go and `revise` to re-shape. Todo remains the everyday tracker (ADR-0007).",
 			"Fill `brief` with the context the executor needs (constraints, invariants, key files read, decisions and why); every code-changing step should have `produces` and `verify`.",
 		],
 		parameters: planSchema,
@@ -158,12 +158,17 @@ export function createPlanToolDefinition(
 				}
 				case "step_done": {
 					if (!input.step_id?.trim()) return fail("step_done", "step_done requires a `step_id`.");
-					const step = mgr.stepDone(input.step_id);
-					if (!step) return fail("step_done", `No step with id ${input.step_id} in the current plan.`);
-					return {
-						content: [{ type: "text" as const, text: mgr.render() }],
-						details: { op: "step_done" as const, ...snapshot() },
-					};
+					try {
+						const step = mgr.stepDone(input.step_id);
+						if (!step) return fail("step_done", `No step with id ${input.step_id} in the current plan.`);
+						return {
+							content: [{ type: "text" as const, text: mgr.render() }],
+							details: { op: "step_done" as const, ...snapshot() },
+						};
+					} catch (error) {
+						if (error instanceof PlanValidationError) return fail("step_done", error.message);
+						throw error;
+					}
 				}
 				default: {
 					// show — reconstruct the current DAG verbatim (compaction-safe).
