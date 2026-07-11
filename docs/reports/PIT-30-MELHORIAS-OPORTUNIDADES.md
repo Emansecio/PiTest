@@ -68,7 +68,7 @@ e **prioridade** estimada.
 - [x] P03 — `emitContext` side-effects parallel (`markSideEffect`)
 - [x] P06 — `prewarmProviderModule` no boot / model switch
 - [~] P05 — já nativo via `PIT_CONFIG_COMMAND_TTL_MS` (30s) em `!command` auth
-- [ ] P04 — deferred (async `message_update` / ordering TUI)
+- [x] P04 — async ordered `message_update` (fire-and-forget chain; await at boundaries)
 
 ## Status da Wave U — UI/UX A+B (2026-07)
 
@@ -554,7 +554,7 @@ Classificar handlers de context como `mutate` (serial) vs `observe` (parallel), 
 
 ### P04 — Emit assíncrono de `message_update` no agent loop
 
-**Status:** deferred (risco de ordering TUI)
+**Status:** feito (promise chain ordenada; drain antes de `message_end`)
 
 | Campo | Detalhe |
 |-------|---------|
@@ -563,18 +563,18 @@ Classificar handlers de context como `mutate` (serial) vs `observe` (parallel), 
 
 **Onde**
 
-- `packages/agent/src/agent-loop.ts` — `flushPendingDelta()` **await** `emit({ type: "message_update" })` (L705–718, L786–790).
-- Coalescing a 16ms (~60fps) já existe (L693+).
+- `packages/agent/src/agent-loop.ts` — `flushPendingDelta()` enfileira `message_update` numa promise chain sem await no iterator SSE; `flushAndDrainMessageUpdates()` antes de boundaries / `message_end`.
+- Coalescing a 16ms (~60fps) permanece.
 
 **Por quê**
 
-Listener lento (extensão, persistência) bloqueia consumo do SSE iterator → backlog no `EventStream` (warning 50k events). Perceived stutter no TUI mesmo com coalescing.
+Listener lento (extensão, TUI) bloqueava consumo do SSE iterator → backlog no `EventStream`.
 
 **O quê**
 
-Fire-and-forget para `message_update`; manter `await` em `message_end` / `turn_end` para ordering e persistência. Backpressure opcional se fila > N.
+Fire-and-forget ordenado para deltas `message_update`; manter await em `message_end` / boundaries após drenar a chain.
 
-**Impacto estimado:** streaming mais fluido; risco médio de ordering.
+**Impacto estimado:** streaming mais fluido; ordem TUI preservada.
 
 ---
 
@@ -900,7 +900,8 @@ T01, T04, P01, P02, U01, O01
 T07, T08, T02, T11, P03, P05, U02, U03
 
 ### Sprint 3 — estrutural / benchmark-gated
-T12, T13, T14, T09, T10, P04, P06, A01–A04, U04, U05
+T12, T13, T14, T09, T10, P06, A01–A04, U04, U05
+(P04 feito — async ordered `message_update`)
 
 ---
 

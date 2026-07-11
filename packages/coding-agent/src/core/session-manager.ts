@@ -1350,14 +1350,12 @@ export class SessionManager {
 
 		const line = `${redactForDisk(JSON.stringify(entry))}\n`;
 		this._writeQueue.push(line);
-		void this._drainQueue().catch((err: unknown) => {
-			recordDiagnostic({
-				category: "io.retry",
-				level: "error",
-				source: "session-manager._persist.asyncDrain",
-				context: { note: err instanceof Error ? err.message : String(err) },
-			});
-		});
+		// Subsequent entries used to drain asynchronously, which left a crash window
+		// where in-memory fileEntries were ahead of on-disk JSONL. Flush synchronously
+		// so appendMessage stays durable (same invariant as the initial flush above).
+		const batch = this._writeQueue.join("");
+		appendWithRetry(this.sessionFile, batch);
+		this._writeQueue.length = 0;
 	}
 
 	private async _drainQueue(): Promise<void> {

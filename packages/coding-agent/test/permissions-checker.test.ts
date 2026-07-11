@@ -200,6 +200,25 @@ describe("PermissionChecker — plan mode blocks side-effecting tools", () => {
 		expect(c.check(describeToolAction("chrome_devtools_navigate", { url: "http://x" })).decision).toBe("deny");
 		expect(c.check(describeToolAction("chrome_devtools_screenshot", {})).decision).toBe("allow");
 	});
+
+	it("blocks edit_v2, ast_edit, code, recipe, retain, forget, resolve, preview", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check(describeToolAction("edit_v2", { path: "a.ts", old: "x", new: "y" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("ast_edit", { path: "a.ts", pattern: "x" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("code", { code: "1" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("recipe", { name: "x" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("retain", { content: "x" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("forget", { id: "x" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("resolve", { query: "x" })).decision).toBe("deny");
+		expect(c.check(describeToolAction("preview", { path: "." })).decision).toBe("deny");
+	});
+
+	it("still allows plan/todo/ask in plan mode", () => {
+		const c = new PermissionChecker({ cwd, mode: "plan", settings: {} });
+		expect(c.check(describeToolAction("plan", { action: "propose" })).decision).toBe("allow");
+		expect(c.check(describeToolAction("todo", { action: "list" })).decision).toBe("allow");
+		expect(c.check(describeToolAction("ask", { question: "ok?" })).decision).toBe("allow");
+	});
 });
 
 describe("PermissionChecker — plan mode default-denies opaque MCP tools", () => {

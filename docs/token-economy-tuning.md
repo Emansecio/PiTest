@@ -18,7 +18,9 @@ coluna **Convenção truthy**.
 | `PIT_MID_TURN_PRESSURE_RATIO` | Fração da janela em que o alívio mid-turn (entre tool rounds) dispara prune-only. Mais cedo que o presend; sem compactação LLM. Aceita `0.5`–`0.99`. | `0.92` | `agent-session-compaction.ts` | numérica |
 | `PIT_NO_MID_TURN_PRESSURE_GUARD` | Desativa o alívio mid-turn de pressão de wire entre tool rounds. | OFF | `agent-session-compaction.ts` | `isTruthyEnvFlag` |
 | `PIT_NO_COMPACT_SIBLING_DEFAULT` | Desativa o default zero-config que roteia summarização de compactação para um sibling small-class do mesmo provider (haiku/mini/nano/flash/lite). | OFF | `agent-session-compaction.ts` | `isTruthyEnvFlag` |
-| `PIT_EXTENSION_HOOK_TIMEOUT_MS` | Timeout por handler de `before_agent_start` (ms). Handlers lentos são skipados (fail-open). | `1000` | `extensions/runner.ts` | numérica |
+| `PIT_EXTENSION_HOOK_TIMEOUT_MS` | Timeout por handler de `before_agent_start` (ms). Handlers lentos são skipados (fail-open); o `ctx.signal` do handler é abortado no timeout. | `1000` | `extensions/runner.ts` | numérica |
+| `PIT_EVENT_STREAM_WARN_DEPTH` | Watermark de warn do backlog do `EventStream` (eventos enfileirados). `<=0` desativa. | `50000` | `packages/ai/src/utils/event-stream.ts` | numérica |
+| `PIT_EVENT_STREAM_MAX_DEPTH` | Teto duro do backlog do `EventStream`; ao exceder, `push()` lança erro. `<=0` desativa. | `100000` | `packages/ai/src/utils/event-stream.ts` | numérica |
 | `PIT_NO_PRESEND_OVERFLOW_GUARD` | Desativa o guard que compacta antes de enviar mensagem quando o payload estimado excede `PRESEND_OVERFLOW_RATIO × janela`. | OFF | `agent-session-compaction.ts:386,505` | `isTruthyEnvFlag` |
 | `PIT_NO_PROACTIVE_PRUNE` | Desativa o pruning proativo de saídas de ferramentas antigas enquanto o contexto está acima do floor. | OFF | `agent-session-compaction.ts:101` · `agent-session.ts:3390` | `isTruthyEnvFlag` |
 | `PIT_PROACTIVE_PRUNE_FLOOR` | Limite mínimo de tokens (absoluto) abaixo do qual o pruning proativo não age. Override numérico; se ausente usa `max(64 000, janela × 0.25)`. | `max(64 000, janela × 0.25)` | `agent-session-compaction.ts:102` · `agent-session.ts:3399` | numérica |

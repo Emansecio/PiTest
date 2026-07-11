@@ -29,8 +29,23 @@ import {
  * Built-in tools considered mutating for the purpose of mode "plan". Used by the
  * defensive `type: "tool"` branch in `checkPlan`; the primary classification
  * happens in `describeToolAction`, which maps these to `write`/`exec` directly.
+ * Keep in sync with the write/exec cases in `describeToolAction` below.
  */
-const MUTATING_TOOLS = new Set(["bash", "edit", "write", "eval", "debug"]);
+const MUTATING_TOOLS = new Set([
+	"bash",
+	"edit",
+	"edit_v2",
+	"write",
+	"eval",
+	"debug",
+	"ast_edit",
+	"code",
+	"recipe",
+	"retain",
+	"forget",
+	"resolve",
+	"preview",
+]);
 
 /** `lsp` actions that mutate the workspace (rename a symbol/file). */
 const LSP_WRITE_ACTIONS = new Set(["rename", "rename_file"]);
@@ -251,7 +266,9 @@ export function describeToolAction(toolName: string, input: Record<string, unkno
 			const paths = collectPathFields(input, ["directory"]);
 			return { type: "read", toolName, paths };
 		}
-		case "edit": {
+		case "edit":
+		case "edit_v2":
+		case "ast_edit": {
 			const paths = collectPathFields(input);
 			return { type: "write", toolName, paths };
 		}
@@ -263,13 +280,23 @@ export function describeToolAction(toolName: string, input: Record<string, unkno
 			const command = typeof input.command === "string" ? input.command : "";
 			return { type: "exec", toolName, command };
 		}
-		// Code-execution tools: classified as `exec` so plan mode (read-only) blocks
-		// them. The command body is left empty — plan blocks on the action type alone,
-		// and auto-mode deny rules target shell command lines, not code/program bodies,
-		// so auto behavior is unchanged.
+		// Code-execution / recipe / preview tools: classified as `exec` so plan mode
+		// (read-only) blocks them. The command body is left empty — plan blocks on the
+		// action type alone, and auto-mode deny rules target shell command lines, not
+		// code/program bodies, so auto behavior is unchanged.
 		case "eval":
 		case "debug":
+		case "code":
+		case "recipe":
+		case "preview":
 			return { type: "exec", toolName, command: "" };
+		// Memory / discovery mutators: opaque `tool` actions that still mutate agent
+		// state. Listed in MUTATING_TOOLS so plan mode blocks them via the defensive
+		// branch even if classification drifts.
+		case "retain":
+		case "forget":
+		case "resolve":
+			return { type: "tool", toolName, args: input };
 		// `lsp` is dual-mode: only the workspace-mutating actions are writes. Read
 		// actions (diagnostics, definition, hover, list-only code_actions, …) stay
 		// `tool` so auto behavior is unchanged and plan still allows read-only navigation.

@@ -445,6 +445,10 @@ export class Container implements Component {
 export class TUI extends Container {
 	public terminal: Terminal;
 	private previousLines: string[] = [];
+	/** Alternating scratch buffers for CURSOR_MARKER stripping (avoids O(N) alloc + keeps previousLines intact). */
+	private cursorStripScratchA: string[] = [];
+	private cursorStripScratchB: string[] = [];
+	private cursorStripUseA = true;
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;
 	private previousHeight = 0;
@@ -507,6 +511,9 @@ export class TUI extends Container {
 	private resetBufferOutputB: string[] = [];
 	private resetBufferUseA = true;
 	private diffScanCountForTest = 0;
+	/** First index whose pre-reset line changed this frame (from applyLineResets). */
+	private resetFirstDirty = 0;
+	private static readonly FULL_RENDER_CHUNK_LINES = 2000;
 	// Per-line memoization of visibleWidth(line), consumed by clampLineToWidth on
 	// both the full-redraw and differential paths. fullRender (triggered by a
 	// terminal resize) walks *every* rendered line through clampLineToWidth even
@@ -1196,15 +1203,15 @@ export class TUI extends Container {
 		const cap = Math.min(TUI.RESET_CACHE_HARD_MAX, Math.max(TUI.RESET_CACHE_MIN, lines.length * 2));
 		const prevInput = this.resetInputCache;
 		const prevOutput = this.resetOutputCache;
+		let firstDirty = 0;
 		if (prevInput.length === lines.length && prevOutput.length === lines.length) {
-			let allStable = true;
-			for (let i = 0; i < lines.length; i++) {
-				if (lines[i] !== prevInput[i]) {
-					allStable = false;
-					break;
-				}
+			while (firstDirty < lines.length && lines[firstDirty] === prevInput[firstDirty]) {
+				firstDirty++;
 			}
-			if (allStable) return prevOutput;
+			if (firstDirty === lines.length) {
+				this.resetFirstDirty = firstDirty;
+				return prevOutput;
+			}
 		}
 		// Rebuilt this frame so it can't drift from the array returned. Holds the
 		// pre-reset input (key for the pointer compare) and its post-reset output
@@ -1235,19 +1242,24 @@ export class TUI extends Container {
 			nextInput.length = lines.length;
 			nextOutput.length = lines.length;
 		}
+		// Stable prefix: copy reset outputs from last frame (pointer-identical lines).
+		for (let i = 0; i < firstDirty; i++) {
+			nextInput[i] = lines[i]!;
+			nextOutput[i] = prevOutput[i]!;
+		}
 		// Read-only over `lines`, write into `nextOutput` (which is returned). Not
 		// mutating the input matters: the input may be a Container's memoized
 		// flatten array (see Container.render) — mutating it in place would corrupt
 		// that cache (double-applied resets, broken reference fast-path) on the
 		// next frame.
-		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
+		for (let i = firstDirty; i < lines.length; i++) {
+			const line = lines[i]!;
 			// Same string object as this index last frame → reuse its reset output
 			// verbatim (pointer compare, no full-string hash). Byte-identical to the
 			// Map path, including the isImageLine "leave untouched" case where the
 			// stored output equals the input.
 			if (line === prevInput[i] && i < prevOutput.length) {
-				const out = prevOutput[i];
+				const out = prevOutput[i]!;
 				nextInput[i] = line;
 				nextOutput[i] = out;
 				continue;
@@ -1285,6 +1297,7 @@ export class TUI extends Container {
 		}
 		this.resetInputCache = nextInput;
 		this.resetOutputCache = nextOutput;
+		this.resetFirstDirty = firstDirty;
 		return nextOutput;
 	}
 
@@ -1428,15 +1441,21 @@ export class TUI extends Container {
 				const beforeMarker = line.slice(0, markerIndex);
 				const col = visibleWidth(beforeMarker);
 
-				// Strip marker into a copy rather than mutating in place: `lines` may be a
-				// Container's memoized flatten array (see Container.render). Mutating it would
-				// strip the marker from the cached line permanently, so a later frame that
-				// reuses the cache would no longer find the marker and would lose the cursor.
-				// Marker-found is the rare focused-input path, so the copy is not on the hot path.
-				const out = lines.slice();
-				out[row] = line.slice(0, markerIndex) + line.slice(markerIndex + CURSOR_MARKER.length);
+				// Strip marker into a scratch copy rather than mutating in place: `lines`
+				// may be a Container's memoized flatten array (see Container.render).
+				// Alternate two scratch buffers so we never overwrite `previousLines`
+				// while the differential path still needs it.
+				const scratch = this.cursorStripUseA ? this.cursorStripScratchA : this.cursorStripScratchB;
+				this.cursorStripUseA = !this.cursorStripUseA;
+				if (scratch.length !== lines.length) {
+					scratch.length = lines.length;
+				}
+				for (let i = 0; i < lines.length; i++) {
+					scratch[i] = lines[i]!;
+				}
+				scratch[row] = line.slice(0, markerIndex) + line.slice(markerIndex + CURSOR_MARKER.length);
 
-				return { pos: { row, col }, lines: out };
+				return { pos: { row, col }, lines: scratch };
 			}
 		}
 		return { pos: null, lines };
@@ -1640,19 +1659,26 @@ export class TUI extends Container {
 		const fullRender = (clearMode: "none" | "all" | "screen"): void => {
 			this.fullRedrawCount += 1;
 			const clear = clearMode !== "none";
-			const parts: string[] = ["\x1b[?2026h"];
+			const chunkLines = TUI.FULL_RENDER_CHUNK_LINES;
+			// Write in chunks so a 20k-line resize never builds one multi-MB string.
+			// Sync (no setImmediate) to avoid re-entrancy into the render loop.
+			this.terminal.write("\x1b[?2026h");
 			if (clear) {
-				parts.push(this.deleteKittyImages(this.previousKittyImageIds));
+				this.terminal.write(this.deleteKittyImages(this.previousKittyImageIds));
 				// Always clear the visible screen + home; only "all" also clears the
 				// scrollback so a height-only repaint preserves rollable history.
-				parts.push(clearMode === "all" ? "\x1b[2J\x1b[H\x1b[3J" : "\x1b[2J\x1b[H");
+				this.terminal.write(clearMode === "all" ? "\x1b[2J\x1b[H\x1b[3J" : "\x1b[2J\x1b[H");
 			}
-			for (let i = 0; i < newLines.length; i++) {
-				if (i > 0) parts.push("\r\n");
-				parts.push(this.clampLineToWidth(newLines[i], i, width, newLines));
+			for (let start = 0; start < newLines.length; start += chunkLines) {
+				const end = Math.min(start + chunkLines, newLines.length);
+				const parts: string[] = [];
+				for (let i = start; i < end; i++) {
+					if (i > 0) parts.push("\r\n");
+					parts.push(this.clampLineToWidth(newLines[i], i, width, newLines));
+				}
+				this.terminal.write(parts.join(""));
 			}
-			parts.push("\x1b[?2026l");
-			this.terminal.write(parts.join(""));
+			this.terminal.write("\x1b[?2026l");
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
 			// Reset max lines when clearing, otherwise track growth
@@ -1713,16 +1739,24 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Find first and last changed lines. Fast path: steady-state spinner ticks
-		// usually mutate only the bottom line (bench + footer/editor tail); skip the
-		// O(N) forward scan when the prefix is byte-identical.
+		// Find first and last changed lines. Prefer resetFirstDirty from
+		// applyLineResets so spinner/tail ticks skip an O(N) prefix scan.
 		let firstChanged = -1;
 		let lastChanged = -1;
 		const prevLen = this.previousLines.length;
 		const newLen = newLines.length;
 		const maxLines = Math.max(newLen, prevLen);
+		const resetDirty = this.resetFirstDirty;
 		this.diffScanCountForTest = 0;
-		if (prevLen === newLen && prevLen > 0 && this.previousLines[prevLen - 1] !== newLines[newLen - 1]) {
+		if (
+			prevLen === newLen &&
+			prevLen > 0 &&
+			resetDirty === newLen - 1 &&
+			this.previousLines[prevLen - 1] !== newLines[newLen - 1]
+		) {
+			firstChanged = prevLen - 1;
+			lastChanged = prevLen - 1;
+		} else if (prevLen === newLen && prevLen > 0 && this.previousLines[prevLen - 1] !== newLines[newLen - 1]) {
 			let onlyLastLine = true;
 			for (let i = 0; i < prevLen - 1; i++) {
 				this.diffScanCountForTest += 1;
@@ -1737,15 +1771,33 @@ export class TUI extends Container {
 			}
 		}
 		if (firstChanged === -1) {
-			for (let i = 0; i < maxLines; i++) {
+			const scanFrom = Math.min(Math.max(0, resetDirty), maxLines);
+			for (let i = scanFrom; i < maxLines; i++) {
 				this.diffScanCountForTest += 1;
 				const oldLine = i < prevLen ? this.previousLines[i] : "";
 				const newLine = i < newLen ? newLines[i] : "";
 				if (oldLine !== newLine) {
-					if (firstChanged === -1) {
-						firstChanged = i;
+					firstChanged = i;
+					break;
+				}
+			}
+			// Prefix before scanFrom is known-stable from applyLineResets when
+			// lengths match; if scanFrom > 0 and nothing differed after, treat as
+			// no change unless lengths differ (handled by appendedLines below).
+			if (firstChanged === -1 && scanFrom > 0 && prevLen === newLen) {
+				// nothing changed after the known-dirty index — no-op frame
+			} else if (firstChanged === -1 && scanFrom > 0 && prevLen !== newLen) {
+				firstChanged = scanFrom;
+			}
+			if (firstChanged !== -1) {
+				for (let i = maxLines - 1; i >= firstChanged; i--) {
+					this.diffScanCountForTest += 1;
+					const oldLine = i < prevLen ? this.previousLines[i] : "";
+					const newLine = i < newLen ? newLines[i] : "";
+					if (oldLine !== newLine) {
+						lastChanged = i;
+						break;
 					}
-					lastChanged = i;
 				}
 			}
 		}

@@ -435,15 +435,28 @@ export function fingerprintToolArgs(args: unknown, maxChars = 200): string {
  * `git log … <ref>` bash commands, or two long `node -e` scripts) do NOT
  * collapse into the same bucket and trigger a false consecutive-loop streak. The
  * hash also keeps the ring-buffer key small regardless of argument size.
+ *
+ * WeakMap identity cache: when the same args object is fingerprinted again
+ * (common on retries / stats paths), skip the full stringify+hash.
  */
+const exactArgsFingerprintCache = new WeakMap<object, string>();
+
 export function fingerprintToolArgsExact(args: unknown): string {
+	if (typeof args === "object" && args !== null) {
+		const cached = exactArgsFingerprintCache.get(args as object);
+		if (cached !== undefined) return cached;
+	}
 	let serialized: string;
 	try {
 		serialized = stableStringify(args, Number.POSITIVE_INFINITY);
 	} catch {
 		serialized = String(args);
 	}
-	return hashString(serialized);
+	const hash = hashString(serialized);
+	if (typeof args === "object" && args !== null) {
+		exactArgsFingerprintCache.set(args as object, hash);
+	}
+	return hash;
 }
 
 /**

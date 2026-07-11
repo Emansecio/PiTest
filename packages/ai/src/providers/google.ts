@@ -79,6 +79,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
 			const seenToolCallIds = new Set<string>();
+			let hasFinishReason = false;
 
 			function finishCurrentBlock(): void {
 				if (!currentBlock) return;
@@ -192,6 +193,7 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 				}
 
 				if (candidate?.finishReason) {
+					hasFinishReason = true;
 					output.stopReason = mapStopReason(candidate.finishReason);
 					if (output.content.some((b) => b.type === "toolCall")) {
 						output.stopReason = "toolUse";
@@ -229,6 +231,9 @@ export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions>
 
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error("An unknown error occurred");
+			}
+			if (!hasFinishReason) {
+				throw new Error("Stream ended without finishReason");
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });

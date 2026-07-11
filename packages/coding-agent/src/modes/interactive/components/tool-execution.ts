@@ -96,6 +96,8 @@ export class ToolExecutionComponent extends MessageShell {
 	// costs O(1) per frame instead of re-scanning/re-classifying.
 	private activityFamilyCache: ToolActivity | null = null;
 	private abortedCache: boolean | null = null;
+	/** When unchanged, partial result updates patch the result renderer in place. */
+	private lastStructuralKey = "";
 
 	constructor(
 		toolName: string,
@@ -239,17 +241,43 @@ export class ToolExecutionComponent extends MessageShell {
 	updateArgs(args: any): void {
 		this.args = args;
 		this.activityFamilyCache = null;
+		// Prefer in-place call-renderer refresh (same component via lastComponent)
+		// so args streaming does not clear()+rebuild the whole tool subtree.
+		if (
+			this.lastStructuralKey !== "" &&
+			this.callRendererComponent &&
+			this.hasRendererDefinition() &&
+			(!this.activityChild || this.expanded || isEditFamilyTool(this.toolName))
+		) {
+			const callRenderer = this.getCallRenderer();
+			if (callRenderer) {
+				try {
+					const prev = this.callRendererComponent;
+					const component = callRenderer(this.args, theme, this.getRenderContext(prev));
+					if (component === prev) {
+						this.callRendererComponent = component;
+						this.refreshGutterState();
+						return;
+					}
+				} catch {
+					// Fall through to full rebuild.
+				}
+			}
+		}
+		this.lastStructuralKey = "";
 		this.updateDisplay();
 	}
 
 	markExecutionStarted(): void {
 		this.executionStarted = true;
+		this.lastStructuralKey = "";
 		this.updateDisplay();
 		this.ui.requestRender();
 	}
 
 	setArgsComplete(): void {
 		this.argsComplete = true;
+		this.lastStructuralKey = "";
 		this.updateDisplay();
 		this.ui.requestRender();
 	}
@@ -405,58 +433,106 @@ export class ToolExecutionComponent extends MessageShell {
 		this.hideComponent = false;
 		if (this.hasRendererDefinition()) {
 			const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox;
-			renderContainer.clear();
-
 			// Activity rows show a compact summary in the header. Skip the call
 			// renderer for non-edit tools while collapsed; edit family still runs
 			// renderCall (body-only via context.activityChild) for live/auto preview.
 			const showCallRenderer = !this.activityChild || this.expanded || isEditFamilyTool(this.toolName);
-			if (showCallRenderer) {
-				const callRenderer = this.getCallRenderer();
-				if (!callRenderer) {
-					renderContainer.addChild(this.createCallFallback());
-					hasContent = true;
-				} else {
-					try {
-						const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
-						this.callRendererComponent = component;
+			const structuralKey = [
+				this.toolName,
+				this.expanded ? "1" : "0",
+				this.resultExpanded ? "1" : "0",
+				this.activityChild ? "1" : "0",
+				showCallRenderer ? "1" : "0",
+				this.result ? "1" : "0",
+				this.argsComplete ? "1" : "0",
+				this.executionStarted ? "1" : "0",
+			].join(":");
+
+			const resultRenderer = this.getResultRenderer();
+			const canPatchResult =
+				structuralKey === this.lastStructuralKey &&
+				!!this.result &&
+				!!resultRenderer &&
+				!!this.resultRendererComponent &&
+				renderContainer.children.length > 0;
+
+			if (canPatchResult) {
+				try {
+					const prev = this.resultRendererComponent!;
+					const component = resultRenderer!(
+						{ content: this.result!.content as any, details: this.result!.details },
+						{ expanded: this.expanded || this.resultExpanded, isPartial: this.isPartial },
+						theme,
+						this.getRenderContext(prev),
+					);
+					this.resultRendererComponent = component;
+					if (component !== prev) {
+						renderContainer.removeChild(prev);
 						renderContainer.addChild(component);
-						hasContent = true;
-					} catch {
-						this.callRendererComponent = undefined;
-						renderContainer.addChild(this.createCallFallback());
-						hasContent = true;
 					}
+					hasContent = true;
+				} catch {
+					this.resultRendererComponent = undefined;
+					this.lastStructuralKey = "";
+					// Fall through to full rebuild below.
 				}
-			} else {
-				this.callRendererComponent = undefined;
 			}
 
-			if (this.result) {
-				const resultRenderer = this.getResultRenderer();
-				if (!resultRenderer) {
-					const component = this.createResultFallback();
-					if (component) {
-						renderContainer.addChild(component);
+			if (!canPatchResult || this.lastStructuralKey === "") {
+				this.lastStructuralKey = structuralKey;
+				renderContainer.clear();
+
+				if (showCallRenderer) {
+					const callRenderer = this.getCallRenderer();
+					if (!callRenderer) {
+						renderContainer.addChild(this.createCallFallback());
 						hasContent = true;
+					} else {
+						try {
+							const component = callRenderer(
+								this.args,
+								theme,
+								this.getRenderContext(this.callRendererComponent),
+							);
+							this.callRendererComponent = component;
+							renderContainer.addChild(component);
+							hasContent = true;
+						} catch {
+							this.callRendererComponent = undefined;
+							renderContainer.addChild(this.createCallFallback());
+							hasContent = true;
+						}
 					}
 				} else {
-					try {
-						const component = resultRenderer(
-							{ content: this.result.content as any, details: this.result.details },
-							{ expanded: this.expanded || this.resultExpanded, isPartial: this.isPartial },
-							theme,
-							this.getRenderContext(this.resultRendererComponent),
-						);
-						this.resultRendererComponent = component;
-						renderContainer.addChild(component);
-						hasContent = true;
-					} catch {
-						this.resultRendererComponent = undefined;
+					this.callRendererComponent = undefined;
+				}
+
+				if (this.result) {
+					const fullResultRenderer = this.getResultRenderer();
+					if (!fullResultRenderer) {
 						const component = this.createResultFallback();
 						if (component) {
 							renderContainer.addChild(component);
 							hasContent = true;
+						}
+					} else {
+						try {
+							const component = fullResultRenderer(
+								{ content: this.result.content as any, details: this.result.details },
+								{ expanded: this.expanded || this.resultExpanded, isPartial: this.isPartial },
+								theme,
+								this.getRenderContext(this.resultRendererComponent),
+							);
+							this.resultRendererComponent = component;
+							renderContainer.addChild(component);
+							hasContent = true;
+						} catch {
+							this.resultRendererComponent = undefined;
+							const component = this.createResultFallback();
+							if (component) {
+								renderContainer.addChild(component);
+								hasContent = true;
+							}
 						}
 					}
 				}

@@ -14,6 +14,8 @@ import {
 	type CompactionSettings,
 	cloneToolResultMessagesForPrune,
 	estimateCompactionFrameTokens,
+	estimateTextTokens,
+	estimateToolSurfaceTokens,
 	estimateWireTokens,
 	planContextPrune,
 	pressurePruneProtectTurns,
@@ -209,14 +211,18 @@ export class CompactionController {
  * is far from any threshold there, so the missing prefix cannot flip a guard).
  * Shared by both presend guards so they agree at the boundary.
  */
-function estimateAssembledTokens(ctx: CompactionController): number {
+function estimateAssembledTokens(ctx: CompactionController): { tokens: number; trailingTokens: number } {
 	const surface = ctx.lastWireSurface;
-	if (!surface) return estimateContextTokens(ctx.host.agent.state.messages).tokens;
-	return estimateWireTokens(ctx.host.agent.state.messages, {
+	if (!surface) {
+		const estimate = estimateContextTokens(ctx.host.agent.state.messages);
+		return { tokens: estimate.tokens, trailingTokens: estimate.trailingTokens };
+	}
+	const estimate = estimateWireTokens(ctx.host.agent.state.messages, {
 		systemPromptChars: surface.systemPrompt.length,
 		systemPromptText: surface.systemPrompt,
 		tools: surface.tools,
-	}).tokens;
+	});
+	return { tokens: estimate.tokens, trailingTokens: estimate.trailingTokens };
 }
 
 export function maybePruneStaleToolOutputs(ctx: CompactionController, contextTokens: number): void {
@@ -262,6 +268,9 @@ export interface MidTurnWirePressureInput {
 /**
  * Read-only full-wire pressure check for between-tool-round relief (B9).
  * Does NOT run LLM compaction — callers use {@link applyMidTurnPressureRelief}.
+ *
+ * Cheap early-exit: when a conservative upper bound is still under the ratio
+ * threshold, skip {@link estimateWireTokens} (avoids calibration span walk).
  */
 export function measureMidTurnWirePressure(
 	messages: AgentMessage[],
@@ -272,19 +281,34 @@ export function measureMidTurnWirePressure(
 	if (contextWindow <= 0 || isTruthyEnvFlag(process.env.PIT_NO_MID_TURN_PRESSURE_GUARD)) {
 		return { assembled: 0, pressure: 0, contextWindow, tripped: false };
 	}
+	const ratio = input.ratio ?? MID_TURN_PRESSURE_RATIO;
+	const threshold = contextWindow * ratio;
+	const thinkingHeadroom = resolveThinkingHeadroom(model, input.thinkingLevel, input.thinkingBudgets);
+	const ctxEstimate = estimateContextTokens(messages);
+	const anchored = ctxEstimate.lastUsageIndex !== null;
+	const upperAssembled = anchored
+		? ctxEstimate.tokens
+		: ctxEstimate.tokens + estimateTextTokens(input.systemPrompt) + estimateToolSurfaceTokens(input.tools);
+	const upperPressure = upperAssembled + thinkingHeadroom;
+	if (upperPressure <= threshold) {
+		return {
+			assembled: upperAssembled,
+			pressure: upperPressure,
+			contextWindow,
+			tripped: false,
+		};
+	}
 	const assembled = estimateWireTokens(messages, {
 		systemPromptChars: input.systemPrompt.length,
 		systemPromptText: input.systemPrompt,
 		tools: input.tools,
 	}).tokens;
-	const thinkingHeadroom = resolveThinkingHeadroom(model, input.thinkingLevel, input.thinkingBudgets);
 	const pressure = assembled + thinkingHeadroom;
-	const ratio = input.ratio ?? MID_TURN_PRESSURE_RATIO;
 	return {
 		assembled,
 		pressure,
 		contextWindow,
-		tripped: pressure > contextWindow * ratio,
+		tripped: pressure > threshold,
 	};
 }
 
@@ -685,6 +709,7 @@ export async function checkPresendOverflow(
 	});
 
 	if (pressure > contextWindow * effectiveRatio && assembled > contextTokens) {
+		let trailingTokensAfter = wireEstimate.trailingTokens;
 		if (ctx.backgroundCompactionPromise) {
 			await awaitBackgroundCompaction(ctx);
 			const reEstimate = estimateWireTokens(ctx.host.agent.state.messages, {
@@ -694,13 +719,14 @@ export async function checkPresendOverflow(
 				pendingMessages: wireInput.pendingMessages,
 			});
 			assembled = reEstimate.tokens;
+			trailingTokensAfter = reEstimate.trailingTokens;
 		}
 		const pressureAfter = assembled + thinkingHeadroom;
 		const ratioAfter = resolveDynamicPresendOverflowRatio({
 			baseRatio: PRESEND_OVERFLOW_RATIO,
 			pressure: pressureAfter,
 			contextWindow,
-			trailingTokens: wireEstimate.trailingTokens,
+			trailingTokens: trailingTokensAfter,
 			assembled,
 		});
 		if (pressureAfter > contextWindow * ratioAfter && !ctx.host.isCompacting) {
@@ -796,8 +822,9 @@ export async function checkCompaction(
 		// Unified space: same full-wire estimate as checkPresendOverflow (via the
 		// captured prefix surface), so the two guards agree at the boundary and
 		// lastCompactionDeficit stays in one unit.
-		let assembled = estimateAssembledTokens(ctx);
-		const trailingTokens = estimateContextTokens(ctx.host.agent.state.messages).trailingTokens;
+		let assembledEstimate = estimateAssembledTokens(ctx);
+		let assembled = assembledEstimate.tokens;
+		const trailingTokens = assembledEstimate.trailingTokens;
 		const thinkingHeadroom = resolveThinkingHeadroom(
 			ctx.host.model,
 			ctx.host.thinkingLevel,
@@ -812,16 +839,19 @@ export async function checkCompaction(
 			assembled,
 		});
 		if (pressure > contextWindow * effectiveRatio && assembled > contextTokens) {
+			let trailingTokensAfter = trailingTokens;
 			if (ctx.backgroundCompactionPromise) {
 				await awaitBackgroundCompaction(ctx);
-				assembled = estimateAssembledTokens(ctx);
+				assembledEstimate = estimateAssembledTokens(ctx);
+				assembled = assembledEstimate.tokens;
+				trailingTokensAfter = assembledEstimate.trailingTokens;
 			}
 			const pressureAfter = assembled + thinkingHeadroom;
 			const ratioAfter = resolveDynamicPresendOverflowRatio({
 				baseRatio: PRESEND_OVERFLOW_RATIO,
 				pressure: pressureAfter,
 				contextWindow,
-				trailingTokens,
+				trailingTokens: trailingTokensAfter,
 				assembled,
 			});
 			if (pressureAfter > contextWindow * ratioAfter && !ctx.host.isCompacting) {

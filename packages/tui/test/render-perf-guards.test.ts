@@ -117,11 +117,12 @@ describe("render perf guards", () => {
 
 		render(tui);
 
-		// Fast path: compare the N-1 unchanged prefix lines, then stop — no O(N) rescan.
+		// Fast path: resetFirstDirty already proved only the last line changed —
+		// zero prefix comparisons (O(1)), not N-1.
 		assert.strictEqual(
 			tui.getDiffScanCountForTest(),
-			N - 1,
-			"last-line-only change should scan the prefix once (N-1 comparisons), not the full frame twice",
+			0,
+			"last-line-only change should skip the prefix scan via resetFirstDirty",
 		);
 	});
 
@@ -141,8 +142,8 @@ describe("render perf guards", () => {
 
 		assert.strictEqual(
 			tui.getDiffScanCountForTest(),
-			N,
-			"non-tail change must walk the full frame (no last-line fast path)",
+			N + 1,
+			"non-tail change uses two-pointer scan (find first from start, last from end), not last-line fast path",
 		);
 	});
 });

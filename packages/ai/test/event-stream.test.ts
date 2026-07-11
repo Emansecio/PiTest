@@ -139,18 +139,26 @@ describe("EventStream cursor dequeue", () => {
 });
 
 describe("EventStream backlog observability guard", () => {
-	const prev = process.env.PIT_EVENT_STREAM_WARN_DEPTH;
+	const prevWarn = process.env.PIT_EVENT_STREAM_WARN_DEPTH;
+	const prevMax = process.env.PIT_EVENT_STREAM_MAX_DEPTH;
 	let warnSpy: ReturnType<typeof vi.spyOn>;
 
 	beforeEach(() => {
 		warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		// Default hard max would trip the warn-depth tests that buffer 25–1000 events.
+		process.env.PIT_EVENT_STREAM_MAX_DEPTH = "0";
 	});
 	afterEach(() => {
 		warnSpy.mockRestore();
-		if (prev === undefined) {
+		if (prevWarn === undefined) {
 			delete process.env.PIT_EVENT_STREAM_WARN_DEPTH;
 		} else {
-			process.env.PIT_EVENT_STREAM_WARN_DEPTH = prev;
+			process.env.PIT_EVENT_STREAM_WARN_DEPTH = prevWarn;
+		}
+		if (prevMax === undefined) {
+			delete process.env.PIT_EVENT_STREAM_MAX_DEPTH;
+		} else {
+			process.env.PIT_EVENT_STREAM_MAX_DEPTH = prevMax;
 		}
 	});
 
@@ -193,6 +201,16 @@ describe("EventStream backlog observability guard", () => {
 			s.push({ n: i });
 		}
 		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it("(8b) hard max throws once the unconsumed backlog crosses the ceiling", () => {
+		process.env.PIT_EVENT_STREAM_WARN_DEPTH = "0";
+		process.env.PIT_EVENT_STREAM_MAX_DEPTH = "10";
+		const s = makeStream();
+		for (let i = 0; i < 9; i++) {
+			s.push({ n: i });
+		}
+		expect(() => s.push({ n: 9 })).toThrow(/backlog exceeded 10/);
 	});
 
 	it("(9) a keeping-up consumer (waiter present) never trips the guard", async () => {

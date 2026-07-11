@@ -22,7 +22,7 @@ export function buildPlanModeSection(): string {
 	return [
 		"<plan_mode>",
 		"Plan mode is ACTIVE: this session is READ-ONLY.",
-		"- Mutating tools (edit, write, bash, eval, debug, MCP tools) are BLOCKED at the permission layer. Do not attempt them; do not promise edits.",
+		"- Mutating tools (edit, edit_v2, write, bash, eval, debug, ast_edit, code, recipe, retain, forget, resolve, preview, MCP tools) are BLOCKED at the permission layer. Do not attempt them; do not promise edits.",
 		"Workflow you MUST follow:",
 		"1. Research with read-only tools (read, grep, find, ls, symbol, lsp navigation).",
 		"2. Read files IN FULL before planning changes to them.",

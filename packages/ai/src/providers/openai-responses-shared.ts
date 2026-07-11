@@ -470,6 +470,7 @@ export async function processResponsesStream<TApi extends Api>(
 	let currentBlock: ThinkingContent | TextContent | (ToolCall & { partialJson: string }) | null = null;
 	const blocks = output.content;
 	const blockIndex = () => blocks.length - 1;
+	let sawTerminalEvent = false;
 
 	for await (const event of openaiStream) {
 		if (event.type === "response.created") {
@@ -673,6 +674,7 @@ export async function processResponsesStream<TApi extends Api>(
 				stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
 			}
 		} else if (event.type === "response.completed") {
+			sawTerminalEvent = true;
 			const response = event.response;
 			if (response?.id) {
 				output.responseId = response.id;
@@ -704,6 +706,7 @@ export async function processResponsesStream<TApi extends Api>(
 		} else if (event.type === "error") {
 			throw new Error(`Error Code ${event.code}: ${event.message}`);
 		} else if (event.type === "response.failed") {
+			sawTerminalEvent = true;
 			const error = event.response?.error;
 			const details = event.response?.incomplete_details;
 			let msg: string;
@@ -716,6 +719,10 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 			throw new Error(msg);
 		}
+	}
+
+	if (!sawTerminalEvent) {
+		throw new Error("Stream ended without response.completed");
 	}
 }
 

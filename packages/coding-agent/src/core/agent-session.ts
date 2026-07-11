@@ -1659,7 +1659,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 				let nextMessages = messages;
 				let reclaimed = 0;
 
-				const light = applyLightContextEconomyAtTurnEnd(nextMessages, toolResults, contextWindow);
+				const light = toolResults.some((result) => !result.isError)
+					? // Live prune already ran supersede/arg-elision after each
+						// successful tool; skip the duplicate O(N) plan+estimate here.
+						{ messages: nextMessages, reclaimed: 0 }
+					: applyLightContextEconomyAtTurnEnd(nextMessages, toolResults, contextWindow);
 				if (light.reclaimed > 0) {
 					nextMessages = light.messages;
 					reclaimed += light.reclaimed;

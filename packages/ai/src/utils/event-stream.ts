@@ -10,12 +10,24 @@ import { recordDiagnostic } from "./runtime-diagnostics.ts";
 // slow-consumer regression is detectable in production without changing
 // semantics. Override via PIT_EVENT_STREAM_WARN_DEPTH (<=0 disables).
 const DEFAULT_BACKLOG_WARN_DEPTH = 50000;
+// Hard ceiling: once crossed, push() throws so the producer fails into its
+// error path instead of buffering without bound. Override via
+// PIT_EVENT_STREAM_MAX_DEPTH (<=0 disables the hard cap).
+const DEFAULT_BACKLOG_HARD_MAX = 100000;
 
 function resolveBacklogWarnDepth(): number {
 	const raw = process.env.PIT_EVENT_STREAM_WARN_DEPTH;
 	if (raw === undefined) return DEFAULT_BACKLOG_WARN_DEPTH;
 	const parsed = Number.parseInt(raw, 10);
 	if (Number.isNaN(parsed)) return DEFAULT_BACKLOG_WARN_DEPTH;
+	return parsed;
+}
+
+function resolveBacklogHardMax(): number {
+	const raw = process.env.PIT_EVENT_STREAM_MAX_DEPTH;
+	if (raw === undefined) return DEFAULT_BACKLOG_HARD_MAX;
+	const parsed = Number.parseInt(raw, 10);
+	if (Number.isNaN(parsed)) return DEFAULT_BACKLOG_HARD_MAX;
 	return parsed;
 }
 
@@ -33,6 +45,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	private warnedBacklog = false;
 	// Resolved once at construction; reading env per-push would be wasteful.
 	private backlogWarnDepth = resolveBacklogWarnDepth();
+	private backlogHardMax = resolveBacklogHardMax();
 
 	constructor(isComplete: (event: T) => boolean, extractResult: (event: T) => R) {
 		this.isComplete = isComplete;
@@ -57,7 +70,6 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		} else {
 			this.queue.push(event);
 			// Live backlog = queued entries not yet consumed by the cursor.
-			// Observability only: never drops, blocks, or coalesces events.
 			const depth = this.queue.length - this.head;
 			if (!this.warnedBacklog && depth >= this.backlogWarnDepth && this.backlogWarnDepth > 0) {
 				this.warnedBacklog = true;
@@ -70,6 +82,18 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 				console.warn(
 					`[EventStream] backlog reached ${depth} events (consumer slower than producer); ` +
 						"events are buffered, not dropped. Set PIT_EVENT_STREAM_WARN_DEPTH to tune.",
+				);
+			}
+			if (this.backlogHardMax > 0 && depth >= this.backlogHardMax) {
+				recordDiagnostic({
+					category: "stream.backpressure",
+					level: "error",
+					source: "event-stream.push",
+					context: { note: "hard-cap", bytes: depth },
+				});
+				throw new Error(
+					`EventStream backlog exceeded ${this.backlogHardMax} events (consumer slower than producer). ` +
+						"Set PIT_EVENT_STREAM_MAX_DEPTH to tune (<=0 disables).",
 				);
 			}
 		}

@@ -8,7 +8,7 @@ import {
 } from "@pit/ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
-import { agentLoop, agentLoopContinue } from "../src/agent-loop.js";
+import { agentLoop, agentLoopContinue, runAgentLoop } from "../src/agent-loop.js";
 import { THINKING_CHARS_PER_TOKEN } from "../src/overthink-guard.js";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.js";
 
@@ -1927,14 +1927,22 @@ describe("agent loop rejection guard", () => {
 			toolAbortControllers,
 		};
 
+		let streamCalls = 0;
 		const stream = agentLoop([createUserMessage("hang")], context, config, undefined, () => {
 			const mockStream = new MockAssistantStream();
+			const call = ++streamCalls;
 			queueMicrotask(() => {
-				const message = createAssistantMessage(
-					[{ type: "toolCall", id: "tool-hang", name: "hang", arguments: {} }],
-					"toolUse",
-				);
-				mockStream.push({ type: "done", reason: "toolUse", message });
+				if (call === 1) {
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "tool-hang", name: "hang", arguments: {} }],
+						"toolUse",
+					);
+					mockStream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					// After the aborted tool result, the loop may request another turn.
+					const message = createAssistantMessage([{ type: "text", text: "stopped" }], "stop");
+					mockStream.push({ type: "done", reason: "stop", message });
+				}
 			});
 			return mockStream;
 		});
@@ -1950,5 +1958,224 @@ describe("agent loop rejection guard", () => {
 
 		await consume;
 		expect(sawAbort).toBe(true);
+	});
+
+	it("sequential abort synthesizes Operation aborted results for remaining tool calls", async () => {
+		const toolSchema = Type.Object({});
+		let firstStarted = false;
+		const slowTool: AgentTool<typeof toolSchema, undefined> = {
+			name: "slow",
+			label: "Slow",
+			description: "First tool; abort mid-batch after it starts",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			async execute(_toolCallId, _params, signal) {
+				firstStarted = true;
+				await new Promise<void>((_resolve, reject) => {
+					signal?.addEventListener(
+						"abort",
+						() => {
+							reject(new Error("aborted"));
+						},
+						{ once: true },
+					);
+				});
+				return { content: [{ type: "text", text: "done" }], details: undefined };
+			},
+		};
+		const secondTool: AgentTool<typeof toolSchema, undefined> = {
+			name: "second",
+			label: "Second",
+			description: "Must still get a synthetic aborted result",
+			parameters: toolSchema,
+			executionMode: "sequential",
+			async execute() {
+				return { content: [{ type: "text", text: "should-not-run" }], details: undefined };
+			},
+		};
+
+		const runAbort = new AbortController();
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [slowTool, secondTool],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			toolExecution: "sequential",
+		};
+
+		const stream = agentLoop([createUserMessage("go")], context, config, runAbort.signal, () => {
+			const mockStream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage(
+					[
+						{ type: "toolCall", id: "tc-1", name: "slow", arguments: {} },
+						{ type: "toolCall", id: "tc-2", name: "second", arguments: {} },
+					],
+					"toolUse",
+				);
+				mockStream.push({ type: "done", reason: "toolUse", message });
+			});
+			return mockStream;
+		});
+
+		const toolResults: Array<{ toolCallId: string; isError?: boolean; content: unknown }> = [];
+		const consume = (async () => {
+			for await (const event of stream) {
+				if (event.type === "message_end" && event.message.role === "toolResult") {
+					toolResults.push({
+						toolCallId: event.message.toolCallId,
+						isError: event.message.isError,
+						content: event.message.content,
+					});
+				}
+			}
+		})();
+
+		await vi.waitFor(() => expect(firstStarted).toBe(true));
+		runAbort.abort();
+		await consume;
+
+		expect(toolResults.map((r) => r.toolCallId).sort()).toEqual(["tc-1", "tc-2"]);
+		const second = toolResults.find((r) => r.toolCallId === "tc-2");
+		expect(second?.isError).toBe(true);
+		expect(JSON.stringify(second?.content)).toContain("Operation aborted");
+	});
+});
+
+describe("P04 message_update fire-and-forget", () => {
+	it("keeps draining the provider stream while a message_update listener is slow", async () => {
+		const context: AgentContext = {
+			systemPrompt: "s",
+			messages: [],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+
+		let releaseFirstUpdate!: () => void;
+		const firstUpdateParked = new Promise<void>((resolve) => {
+			releaseFirstUpdate = resolve;
+		});
+		let firstUpdateStarted = false;
+		let updatesFinished = 0;
+		let messageEndSeen = false;
+		let streamedPartial: AssistantMessage | undefined;
+
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				streamedPartial = createAssistantMessage([{ type: "text", text: "" }]);
+				stream.push({ type: "start", partial: streamedPartial });
+				// Distinct contentIndex forces a flush per delta (no coalesce).
+				for (let i = 0; i < 8; i++) {
+					const text = "x".repeat(i + 1);
+					streamedPartial.content = [{ type: "text", text }];
+					stream.push({
+						type: "text_delta",
+						contentIndex: i,
+						delta: "x",
+						partial: streamedPartial,
+					});
+				}
+				const final = createAssistantMessage([{ type: "text", text: "xxxxxxxx" }]);
+				stream.push({ type: "done", reason: "stop", message: final });
+			});
+			return stream;
+		};
+
+		const loopPromise = runAgentLoop(
+			[createUserMessage("hi")],
+			context,
+			config,
+			async (event) => {
+				if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+					if (!firstUpdateStarted) {
+						firstUpdateStarted = true;
+						await firstUpdateParked;
+					}
+					updatesFinished++;
+					expect(messageEndSeen).toBe(false);
+				}
+				if (event.type === "message_end" && event.message.role === "assistant") {
+					messageEndSeen = true;
+					expect(updatesFinished).toBeGreaterThan(0);
+				}
+			},
+			undefined,
+			streamFn,
+		);
+
+		await vi.waitFor(() => expect(firstUpdateStarted).toBe(true));
+		// While the first update is parked, the loop must keep applying provider
+		// deltas onto the shared partial (P04: emit is not awaited on the hot path).
+		// Observe the streamFn partial — runAgentLoop copies context.messages.
+		await vi.waitFor(() => {
+			const block = streamedPartial?.content.find((b) => b.type === "text");
+			expect(block && block.type === "text" ? block.text.length : 0).toBe(8);
+		});
+		releaseFirstUpdate();
+		await loopPromise;
+
+		expect(messageEndSeen).toBe(true);
+		expect(updatesFinished).toBeGreaterThan(0);
+	});
+
+	it("drains all message_update emits before message_end", async () => {
+		const context: AgentContext = {
+			systemPrompt: "s",
+			messages: [],
+			tools: [],
+		};
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+		const order: string[] = [];
+
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const partial = createAssistantMessage([{ type: "text", text: "" }]);
+				stream.push({ type: "start", partial });
+				for (let i = 0; i < 5; i++) {
+					partial.content = [{ type: "text", text: "x".repeat(i + 1) }];
+					stream.push({
+						type: "text_delta",
+						contentIndex: i,
+						delta: "x",
+						partial,
+					});
+				}
+				const final = createAssistantMessage([{ type: "text", text: "xxxxx" }]);
+				stream.push({ type: "done", reason: "stop", message: final });
+			});
+			return stream;
+		};
+
+		await runAgentLoop(
+			[createUserMessage("hi")],
+			context,
+			config,
+			async (event) => {
+				if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+					await new Promise((r) => setTimeout(r, 5));
+					order.push("update");
+				}
+				if (event.type === "message_end" && event.message.role === "assistant") {
+					order.push("end");
+				}
+			},
+			undefined,
+			streamFn,
+		);
+
+		expect(order.at(-1)).toBe("end");
+		expect(order.filter((x) => x === "update").length).toBeGreaterThan(0);
+		expect(order.indexOf("end")).toBeGreaterThan(order.lastIndexOf("update"));
 	});
 });

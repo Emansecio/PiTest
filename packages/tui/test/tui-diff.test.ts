@@ -53,6 +53,6 @@ describe("TUI differential render", () => {
 		spinner.setText("⠙ Working…");
 		doRender(tui);
 		const scanCount = (tui as unknown as { getDiffScanCountForTest(): number }).getDiffScanCountForTest();
-		assert.ok(scanCount <= n, `expected fast-path prefix scan, got ${scanCount} for N=${n}`);
+		assert.ok(scanCount <= 1, `expected O(1) last-line fast path via resetFirstDirty, got ${scanCount} for N=${n}`);
 	});
 });

@@ -1287,7 +1287,24 @@ export class ExtensionRunner {
 				};
 				const TIMED_OUT = Symbol();
 				let timer: ReturnType<typeof setTimeout> | undefined;
-				const handlerPromise = Promise.resolve(handler(event, ctx));
+				// Cooperative cancel: abort a handler-local signal on timeout so
+				// well-behaved hooks stop work; late resolves are ignored.
+				const timeoutAbort = new AbortController();
+				const parentSignal = ctx.signal;
+				const combinedSignal = parentSignal
+					? AbortSignal.any([parentSignal, timeoutAbort.signal])
+					: timeoutAbort.signal;
+				const handlerCtx = Object.defineProperties({}, Object.getOwnPropertyDescriptors(ctx)) as ExtensionContext;
+				Object.defineProperty(handlerCtx, "signal", {
+					configurable: true,
+					enumerable: true,
+					get: () => combinedSignal,
+				});
+				let timedOut = false;
+				const handlerPromise = Promise.resolve(handler(event, handlerCtx)).then((result) => {
+					if (timedOut) return undefined;
+					return result;
+				});
 				handlerPromise.catch(() => {});
 				const handlerResult = await Promise.race([
 					handlerPromise,
@@ -1298,6 +1315,8 @@ export class ExtensionRunner {
 				if (timer !== undefined) clearTimeout(timer);
 
 				if (handlerResult === TIMED_OUT) {
+					timedOut = true;
+					timeoutAbort.abort();
 					handlerStatus = "timeout";
 					timeoutCount++;
 					this.emitError({

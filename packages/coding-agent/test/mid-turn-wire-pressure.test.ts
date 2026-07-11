@@ -34,4 +34,28 @@ describe("mid-turn wire pressure", () => {
 		expect(out.reclaimed).toBe(0);
 		expect(out.messages).toBe(messages);
 	});
+
+	it("early-exits as not tripped when far below the ratio threshold", () => {
+		const model = { contextWindow: 200_000 } as any;
+		const result = measureMidTurnWirePressure([], model, {
+			systemPrompt: "short",
+			tools: [],
+			thinkingLevel: "off",
+			ratio: 0.92,
+		});
+		expect(result.tripped).toBe(false);
+		expect(result.pressure).toBeLessThan(200_000 * 0.92);
+	});
+
+	it("trips when unanchored wire estimate exceeds a low ratio", () => {
+		const model = { contextWindow: 1_000 } as any;
+		const result = measureMidTurnWirePressure([], model, {
+			systemPrompt: "x".repeat(20_000),
+			tools: [],
+			thinkingLevel: "off",
+			ratio: 0.5,
+		});
+		expect(result.tripped).toBe(true);
+		expect(result.assembled).toBeGreaterThan(500);
+	});
 });

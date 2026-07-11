@@ -458,7 +458,7 @@ async function runLoop(
 			if (toolCalls.length > 0) {
 				const executedToolBatch = await executeToolCalls(currentContext, message, toolCalls, config, signal, emit);
 				toolResults.push(...executedToolBatch.messages);
-				hasMoreToolCalls = !executedToolBatch.terminate;
+				hasMoreToolCalls = !executedToolBatch.terminate && !signal?.aborted;
 
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
@@ -467,6 +467,11 @@ async function runLoop(
 			}
 
 			await emit({ type: "turn_end", message, toolResults });
+
+			if (signal?.aborted) {
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
 
 			const nextTurnContext = {
 				message,
@@ -702,20 +707,39 @@ async function streamAssistantResponse(
 		let lastEmitTime = 0;
 		const DELTA_THROTTLE_MS = 16;
 
-		const flushPendingDelta = async () => {
+		// P04: serialize message_update emits on an ordered promise chain so a slow
+		// listener cannot stall the SSE iterator, while still draining before
+		// message_end / lifecycle boundaries (ordering preserved for TUI).
+		let messageUpdateTail: Promise<void> = Promise.resolve();
+		const enqueueMessageUpdate = (work: () => Promise<void>) => {
+			messageUpdateTail = messageUpdateTail.then(work).catch(() => {});
+		};
+		const drainMessageUpdates = async () => {
+			await messageUpdateTail;
+		};
+
+		const flushPendingDelta = () => {
 			if (!pendingDelta || !partialMessage) return;
 			const e = pendingDelta;
+			const message = { ...partialMessage };
 			pendingDelta = undefined;
-			await emit({
-				type: "message_update",
-				assistantMessageEvent: e as any,
-				message: { ...partialMessage },
+			enqueueMessageUpdate(async () => {
+				await emit({
+					type: "message_update",
+					assistantMessageEvent: e as any,
+					message,
+				});
 			});
 			lastEmitTime = performance.now();
 		};
 
+		const flushAndDrainMessageUpdates = async () => {
+			flushPendingDelta();
+			await drainMessageUpdates();
+		};
+
 		const finalizeStreamInterrupt = async (): Promise<StreamInterrupt> => {
-			await flushPendingDelta();
+			await flushAndDrainMessageUpdates();
 			if (partialMessage && addedPartial) {
 				rollbackPartialContext(context, addedPartial);
 				addedPartial = false;
@@ -783,11 +807,11 @@ async function streamAssistantResponse(
 							// every coalesced chunk (type+contentIndex already match).
 							pendingDelta.delta += event.delta;
 						} else {
-							await flushPendingDelta();
+							flushPendingDelta();
 							pendingDelta = { ...event } as DeltaEvent;
 						}
 						if (performance.now() - lastEmitTime >= DELTA_THROTTLE_MS) {
-							await flushPendingDelta();
+							flushPendingDelta();
 						}
 						if (streamInterrupt) {
 							return await finalizeStreamInterrupt();
@@ -810,7 +834,9 @@ async function streamAssistantResponse(
 							overthinkTracker.onToolCallStart();
 						}
 					}
-					await flushPendingDelta();
+					// Drain coalesced deltas before the boundary update so TUI sees
+					// ordered message_update events, then await the boundary itself.
+					await flushAndDrainMessageUpdates();
 					if (partialMessage) {
 						partialMessage = event.partial;
 						context.messages[context.messages.length - 1] = partialMessage;
@@ -824,7 +850,7 @@ async function streamAssistantResponse(
 
 				case "done":
 				case "error": {
-					await flushPendingDelta();
+					await flushAndDrainMessageUpdates();
 					if (streamInterrupt) {
 						return await finalizeStreamInterrupt();
 					}
@@ -834,7 +860,7 @@ async function streamAssistantResponse(
 				}
 			}
 		}
-		await flushPendingDelta();
+		await flushAndDrainMessageUpdates();
 
 		if (streamInterrupt) {
 			return await finalizeStreamInterrupt();
@@ -1005,6 +1031,27 @@ async function executeToolCallsSequential(
 		messages.push(toolResultMessage);
 
 		if (signal?.aborted) {
+			// Provider APIs require a tool result per tool call. Synthesize aborted
+			// results for any remaining calls so the transcript stays consistent.
+			const remaining = toolCalls.slice(finalizedCalls.length);
+			for (const skipped of remaining) {
+				await emit({
+					type: "tool_execution_start",
+					toolCallId: skipped.id,
+					toolName: skipped.name,
+					args: skipped.arguments,
+				});
+				const aborted: FinalizedToolCallOutcome = {
+					toolCall: skipped,
+					result: createErrorToolResult("Operation aborted"),
+					isError: true,
+				};
+				await emitToolExecutionEnd(aborted, emit);
+				const abortedMessage = createToolResultMessage(aborted);
+				await emitToolResultMessage(abortedMessage, emit);
+				finalizedCalls.push(aborted);
+				messages.push(abortedMessage);
+			}
 			break;
 		}
 	}
