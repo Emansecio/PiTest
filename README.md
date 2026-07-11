@@ -1,80 +1,70 @@
-<p align="center">
-  <a href="https://pit.dev">
-    <img alt="Pit logo" src="https://pit.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-</p>
-<p align="center">
-  <a href="https://pit.dev">pit.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+# Pit
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
+**Pit** is a fork of [Pi](https://github.com/earendil-works/pi) ([pi.dev](https://pi.dev)) — a minimal, self-extensible coding-agent harness for the terminal.
 
----
+This repository is maintained at [Emansecio/Pit](https://github.com/Emansecio/Pit). Upstream Pi remains the original project; Pit builds on that foundation with its own package names (`@pit/*`), CLI (`pit`), config dir (`.pit`), and product direction.
 
-# Pit Agent Harness Mono Repo
+> **Upstream:** [earendil-works/pi](https://github.com/earendil-works/pi) · **Site (upstream):** [pi.dev](https://pi.dev)
 
-## Requirements
+## What you get
 
-- **Node.js `>=22.19.0`** (enforced via `engines` in all `@pit/*` packages)
-
-This is the home of the Pit agent harness project including our self extensible coding agent.
-
-* **[@pit/coding-agent](packages/coding-agent)**: Interactive coding agent CLI
-* **[@pit/agent-core](packages/agent)**: Agent runtime with tool calling and state management
-* **[@pit/ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
-
-To learn more about Pit:
-
-* [Visit pit.dev](https://pit.dev), the project website with demos
-* [Read the documentation](https://pit.dev/docs/latest), but you can also ask the agent to explain itself
-
-## Share your OSS coding agent sessions
-
-If you use Pit or other coding agents for open source work, please share your sessions.
-
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
-
-For the full explanation, see [this post on X](https://x.com/pitunedgames/status/2037811643774652911).
-
-To publish sessions, use [`pituned/pi-share-hf`](https://github.com/pituned/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
-
-You can also watch [this video](https://x.com/pitunedgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
-
-I regularly publish my own `pi-mono` work sessions here:
-
-- [pitunedgames/pi-mono on Hugging Face](https://huggingface.co/datasets/pitunedgames/pi-mono)
-
-## All Packages
+Interactive coding agent CLI plus the shared libraries behind it:
 
 | Package | Description |
 |---------|-------------|
-| **[@pit/ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
-| **[@pit/agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@pit/coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
-| **[@pit/tui](packages/tui)** | Terminal UI library with differential rendering |
+| **[@pit/coding-agent](packages/coding-agent)** | Interactive coding agent CLI (`pit`) |
+| **[@pit/agent-core](packages/agent)** | Agent runtime: tool calling and state management |
+| **[@pit/ai](packages/ai)** | Unified multi-provider LLM API |
+| **[@pit/tui](packages/tui)** | Terminal UI with differential rendering |
 
-For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
+Pit keeps Pi’s extension model (TypeScript extensions, skills, prompt templates, themes, packages) and adds fork-specific work such as **Fusion** (multi-model panel + synthesis), stronger **permission / plan** gating, **LSP** integration, and related session/UX hardening. Domain terms are defined in [CONTEXT.md](CONTEXT.md).
 
-## Contributing
+## Requirements
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).
+- **Node.js `>=22.19.0`** (enforced via `engines` in `@pit/*` packages)
+
+## Quick start
+
+```bash
+npm install -g @pit/coding-agent
+```
+
+Then in a project directory:
+
+```bash
+pit
+```
+
+Authenticate with `/login` for subscription providers, or set a provider API key (for example `ANTHROPIC_API_KEY`) before starting.
+
+Package docs live under [`packages/coding-agent/docs/`](packages/coding-agent/docs/index.md).
 
 ## Development
 
 ```bash
 npm install          # Install all dependencies
 npm run build        # Build all packages
-npm run check        # Full gate: lint, typecheck, smoke checks, and coding-agent tests
-npm run check:fast   # Fast unit subset (excludes E2E: chrome, dap, eval-kernel, resilience)
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run Pit from sources (can be run from any directory)
+npm run check        # Full gate: lint, typecheck, smoke checks, and tests
+npm run check:fast   # Fast unit subset (excludes heavy E2E suites)
+./test.sh            # Hermetic tests (Windows: ./test.ps1)
+./pi-test.sh         # Run Pit from sources (from any directory)
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [AGENTS.md](AGENTS.md).
+
+## Relationship to Pi
+
+| | Pi (upstream) | Pit (this fork) |
+|--|---------------|-----------------|
+| Repo | [earendil-works/pi](https://github.com/earendil-works/pi) | [Emansecio/Pit](https://github.com/Emansecio/Pit) |
+| npm scope | `@earendil-works/pi-*` | `@pit/*` |
+| CLI | `pi` | `pit` |
+| Config | `.pi` | `.pit` |
+
+Bug reports and features that belong in upstream Pi should go to the [Pi repository](https://github.com/earendil-works/pi). Changes specific to this fork belong here.
 
 ## License
 
-MIT
+MIT — same license family as upstream Pi.
