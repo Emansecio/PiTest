@@ -1,11 +1,30 @@
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { beforeAll, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.js";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
 import { FooterComponent } from "../src/modes/interactive/components/footer.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
+
+const motionEnv = {
+	TERM: process.env.TERM,
+	PIT_NO_MOTION: process.env.PIT_NO_MOTION,
+	PIT_REDUCED_MOTION: process.env.PIT_REDUCED_MOTION,
+};
+
+beforeEach(() => {
+	process.env.TERM = "xterm-256color";
+	delete process.env.PIT_NO_MOTION;
+	delete process.env.PIT_REDUCED_MOTION;
+});
+
+afterEach(() => {
+	for (const [key, value] of Object.entries(motionEnv)) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+});
 
 interface MakeFooterOptions {
 	permissions?: string | null;
@@ -432,7 +451,6 @@ it("dims uncolored extension statuses but passes pre-colorized ones through", ()
 });
 
 it("fillEaseTick coalesces frames when the quantized bar fingerprint is unchanged", () => {
-	delete process.env.PIT_REDUCED_MOTION;
 	// Mutable holder avoids TS control-flow narrowing of a let-bound callback to `never`.
 	const anim: { tick: ((now: number) => boolean) | null } = { tick: null };
 	const ui = {

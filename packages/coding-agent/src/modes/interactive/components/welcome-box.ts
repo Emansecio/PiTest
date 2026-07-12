@@ -12,15 +12,18 @@
  *            ██       ██     ██
  *            ██      ████    ██
  *
- *        coding agent in your terminal · v0.4.2
- *          ● Workspace · PiTest/src (main)
+ *        Coding agent in your terminal · v0.4.2
+ *
+ *    The hero deliberately carries NO workspace line: on a fresh session the
+ *    footer identity line (cwd + branch + shell note) is visible on the same
+ *    screen, so repeating it here was pure noise.
  *
  * 2. CARD (resumed sessions, custom app names, narrow viewports) — the compact
  *    framed block via the shared {@link Card} primitive (`@pit/tui`), with
  *    `visibleWidth()` / `truncateToWidth()` on every composed line:
  *
  *   ╭──────────────────────────────────────────────────────────╮
- *   │  █▀█ █ ▀█▀   coding agent in your terminal · v0.4.2     │
+ *   │  █▀█ █ ▀█▀   Coding agent in your terminal · v0.4.2     │
  *   │  █▀▀ █  █    ● Workspace · PiTest/src (main)            │
  *   │  ▀   ▀  ▀    ├─ Resuming · session-name   (when applicable)
  *   ╰──────────────────────────────────────────────────────────╯
@@ -60,7 +63,7 @@ const HERO_MIN_WIDTH = 40;
 export interface WelcomeBoxData {
 	appName: string;
 	version: string;
-	/** One-line tagline, e.g. "coding agent in your terminal". */
+	/** One-line tagline, e.g. "Coding agent in your terminal". */
 	tagline: string;
 	/** Display path of the session cwd (repo-relative or home-shortened). */
 	cwdDisplay: string;
@@ -100,7 +103,7 @@ class WelcomeBoxBody implements Component {
 	}
 }
 
-/** `● Workspace — PiTest/src (main) · shell: ~/pit` — always shown for orientation. */
+/** `● Workspace — PiTest/src (main) · shell: ~/pit` — card layout only; the hero defers to the footer. */
 function formatWorkspaceLine(
 	cwdDisplay: string,
 	branch: string | undefined,
@@ -209,7 +212,9 @@ export class WelcomeBox implements Component {
 		return d.hero === true && d.appName === "pit" && d.resumedSessionName === undefined && width >= HERO_MIN_WIDTH;
 	}
 
-	/** Borderless hero: centered block wordmark + tagline/version + workspace. */
+	/** Borderless hero: centered block wordmark + tagline/version. The workspace
+	 * line is intentionally absent — the footer identity line already shows
+	 * cwd/branch/shell-note on the same fresh-session screen. */
 	private computeHeroRows(width: number): string[] {
 		const d = this.data;
 		const center = (line: string): string => {
@@ -225,10 +230,6 @@ export class WelcomeBox implements Component {
 		}
 		rows.push("");
 		rows.push(center(`${theme.fg("muted", d.tagline)}${theme.fg("dim", ` · v${d.version}`)}`));
-		// Align workspace to the wordmark column (not viewport-center) so it
-		// does not float away on wide terminals (W01).
-		const workspace = formatWorkspaceLine(d.cwdDisplay, d.branch, d.diffStats, d.shellCwdNote, width);
-		rows.push(truncateToWidth(logoPad + workspace, width));
 		return rows;
 	}
 

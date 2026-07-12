@@ -41,6 +41,8 @@ export interface Keybindings {
 	"tui.select.down": true;
 	"tui.select.pageUp": true;
 	"tui.select.pageDown": true;
+	"tui.select.home": true;
+	"tui.select.end": true;
 	"tui.select.confirm": true;
 	"tui.select.cancel": true;
 }
@@ -133,6 +135,8 @@ export const TUI_KEYBINDINGS = {
 		defaultKeys: "pageDown",
 		description: "Selection page down",
 	},
+	"tui.select.home": { defaultKeys: "home", description: "Selection to first item" },
+	"tui.select.end": { defaultKeys: "end", description: "Selection to last item" },
 	"tui.select.confirm": { defaultKeys: "enter", description: "Confirm selection" },
 	"tui.select.cancel": {
 		defaultKeys: ["escape", "ctrl+c"],

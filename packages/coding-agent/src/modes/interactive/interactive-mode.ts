@@ -143,7 +143,6 @@ import { createAskPicker } from "./components/ask-picker.ts";
 import { AssistantMessageComponent, messageHasVisibleContent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
-import { CenteredText } from "./components/centered-text.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import {
 	formatContextFilesHeader,
@@ -208,6 +207,7 @@ import {
 	getShortPath,
 } from "./display-utils.ts";
 import { EphemeralStatusController, type EphemeralStatusKind } from "./ephemeral-status.ts";
+import { runGoalDialog } from "./goal-dialog.ts";
 import { dispatchSlashCommand, type SlashCommandHost } from "./interactive-slash-commands.ts";
 import { classifyRetryReason } from "./retry-reason.ts";
 import {
@@ -580,9 +580,9 @@ export class InteractiveMode {
 	private readonly launchCwd: string;
 
 	/** Shown in the chat area on a fresh session with no messages yet. On the
-	 * default brand this is a Container wrapping two centered lines (the "Try …"
-	 * examples + the demoted mechanics line); a rebranded app keeps a single
-	 * left-aligned Text. Added/removed as one unit. */
+	 * default brand this is just a Spacer (the hero carries the welcome; hints
+	 * were decluttered away); a rebranded app keeps a single left-aligned
+	 * mechanics Text. Added/removed as one unit. */
 	private emptyStateHint: Component | undefined = undefined;
 
 	// Custom header from extension (undefined = use built-in header)
@@ -811,10 +811,12 @@ export class InteractiveMode {
 		// Add header container as first child
 		this.ui.addChild(this.headerContainer);
 
-		// Framed identity block: logo + cwd orientation. The product's face, so it
-		// renders even under quietStartup; quiet only silences the verbose hint/tip
-		// block below. Static (never expands), so a mid-session tool toggle cannot
-		// resize it. The active model is NOT shown here — the footer owns it.
+		// Identity block: hero wordmark on fresh sessions (logo + tagline only —
+		// cwd/branch orientation lives in the footer), framed card with the
+		// workspace line on resume/rebrand. The product's face, so it renders even
+		// under quietStartup; quiet only silences the verbose hint/tip block below.
+		// Static (never expands), so a mid-session tool toggle cannot resize it.
+		// The active model is NOT shown here — the footer owns it.
 		this.welcomeBox = new WelcomeBox(this.buildWelcomeBoxData());
 		this.headerContainer.addChild(new Spacer(1));
 		this.headerContainer.addChild(this.welcomeBox);
@@ -1465,7 +1467,7 @@ export class InteractiveMode {
 		return {
 			appName: APP_NAME,
 			version: this.version,
-			tagline: "coding agent in your terminal",
+			tagline: "Coding agent in your terminal",
 			cwdDisplay: cwdLabels.session,
 			shellCwdNote: cwdLabels.shellNote,
 			branch: this.footerDataProvider.getGitBranch() ?? undefined,
@@ -1542,23 +1544,14 @@ export class InteractiveMode {
 		}
 		if (this.emptyStateHint) return;
 
-		// Centered under the hero wordmark on the default brand; a rebranded app
-		// falls back to the left-aligned card, so the hint stays left too.
-		// The "Describe a task…" invitation lives in the editor placeholder now.
+		// The default brand paints NO empty-state hint (2026-07 declutter): the
+		// "Try …" example line and the mechanics line both read as noise under
+		// the hero, and the "Describe a task…" invitation already lives in the
+		// editor placeholder. A lone Spacer keeps the hero → editor rhythm and
+		// disappears with the first message like the old hint did. A rebranded
+		// app keeps its compact left-aligned mechanics line (no hero there).
 		if (APP_NAME === "pit") {
-			const tryLine =
-				theme.fg("dim", "Try ") +
-				theme.fg("muted", "“explain this codebase” · “fix the failing test” · “add a small feature”");
-			const mechanics = theme.fg(
-				"dim",
-				`${formatKeyText("/")} commands · ${formatKeyText("!")} bash · drop files to attach`,
-			);
-			const container = new Container();
-			container.addChild(new Spacer(1));
-			container.addChild(new CenteredText(tryLine));
-			container.addChild(new CenteredText(mechanics));
-			container.addChild(new Spacer(1));
-			this.emptyStateHint = container;
+			this.emptyStateHint = new Spacer(1);
 		} else {
 			const hint = [
 				rawKeyHint("/", "commands"),
@@ -2997,20 +2990,25 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * `/goal` — autonomous goal mode. Subcommands: (none)=status, pause, resume,
-	 * clear, edit <obj>, --tokens <budget> <obj> (raise an existing goal's budget
-	 * when no objective follows, else start with a budget), or a bare <objective>
-	 * to start.
+	 * `/goal` — autonomous goal mode. A bare `/goal` opens the interactive panel
+	 * (objective input when no goal exists, action picker otherwise — mirrors the
+	 * Claude Code `/goal` UI command). Typed subcommands remain for muscle
+	 * memory/scripts: status, pause, resume, clear, edit <obj>, --tokens
+	 * <budget> <obj> (raise an existing goal's budget when no objective follows,
+	 * else start with a budget), or a bare <objective> to start.
 	 */
 	private async handleGoalCommand(args: string): Promise<void> {
 		const trimmed = args.trim();
 		if (trimmed === "") {
-			this.showStatus(this.session.goalSummaryText());
+			await this.showGoalPanel();
 			return;
 		}
 		const parts = trimmed.split(/\s+/);
 		const sub = parts[0] ?? "";
 		switch (sub) {
+			case "status":
+				this.showStatus(this.session.goalSummaryText());
+				return;
 			case "pause":
 				this.session.pauseGoal();
 				this.showStatus(this.session.goalSummaryText());
@@ -3096,6 +3094,38 @@ export class InteractiveMode {
 		this.showStatus(`🎯 Goal started${budgetLabel}: ${objective}`);
 		this._startGoalSpinner();
 		await this.session.prompt(objective);
+	}
+
+	/**
+	 * The interactive `/goal` panel (no-args path). Flow lives in
+	 * goal-dialog.ts; this only binds the host to the live session/UI.
+	 */
+	private showGoalPanel(): Promise<void> {
+		return runGoalDialog({
+			goalSnapshot: () => this.session.goalSnapshot(),
+			goalSummaryText: () => this.session.goalSummaryText(),
+			goalShouldAutoContinue: () => this.session.goalShouldAutoContinue(),
+			startGoal: (objective, opts) => void this.session.startGoal(objective, opts),
+			editGoal: (objective) => this.session.editGoal(objective),
+			pauseGoal: () => this.session.pauseGoal(),
+			resumeGoal: () => this.session.resumeGoal(),
+			clearGoal: () => this.session.clearGoal(),
+			setGoalTokenBudget: (tokenBudget) => this.session.setGoalTokenBudget(tokenBudget),
+			promptInput: (title, placeholder) => this.showExtensionInput(title, placeholder),
+			pickOption: async (question, options) => {
+				const answer = await this.userInputBus.askOptions({
+					question,
+					header: "goal",
+					options,
+					source: { toolName: "goal" },
+				});
+				return answer.cancelled || answer.picked.length === 0 ? undefined : answer.picked[0];
+			},
+			showStatus: (text) => this.showStatus(text),
+			showWarning: (text) => this.showWarning(text),
+			startGoalSpinner: () => this._startGoalSpinner(),
+			prompt: (text, opts) => this.session.prompt(text, opts),
+		});
 	}
 
 	/**
@@ -5753,6 +5783,7 @@ export class InteractiveMode {
 				},
 
 				this.sessionManager.getSessionFile(),
+				this.ui,
 			);
 			return { component: selector, focus: selector.getSessionList() };
 		});

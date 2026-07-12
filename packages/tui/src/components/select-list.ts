@@ -1,6 +1,6 @@
 import { fuzzyFilter } from "../fuzzy.ts";
 import { getKeybindings, type Keybinding } from "../keybindings.ts";
-import type { KeyId } from "../keys.ts";
+import { type KeyId, matchesKey } from "../keys.ts";
 import type { Component } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
 
@@ -83,6 +83,23 @@ export interface SelectListLayoutOptions {
 	 * SelectList consumers (model / session / theme pickers) stay uncluttered.
 	 */
 	showKeyHints?: boolean;
+	/**
+	 * Message shown when the filter matches nothing. Defaults to "No matches".
+	 * Exposed because the noun varies by consumer — a command palette wants "No
+	 * matching commands" while a theme / thinking picker wants "No matches". The
+	 * two-space indent used by every other row is applied for us, so pass the
+	 * bare text.
+	 */
+	emptyText?: string;
+	/**
+	 * Opt-in digit quick-select. When true and the filtered list has ≤ 9 items,
+	 * pressing "1".."9" jumps to that item AND confirms it (same as onSelect), and
+	 * each visible row gains a dim ordinal prefix ("1", "2", …) so the mapping is
+	 * discoverable. With more than 9 items the feature is inert — digits fall
+	 * through and no ordinals are drawn — because single digits can no longer name
+	 * every item unambiguously. Off by default to keep existing pickers unchanged.
+	 */
+	digitSelect?: boolean;
 }
 
 export class SelectList implements Component {
@@ -119,6 +136,16 @@ export class SelectList implements Component {
 		this.selectedIndex = Math.max(0, Math.min(index, this.filteredItems.length - 1));
 	}
 
+	/**
+	 * Resize the visible window at runtime so consumers can adapt to terminal
+	 * height. Clamped to a floor of 3 so the scroll math (which centers the
+	 * selection with Math.floor(maxVisible / 2)) always has room to show context
+	 * above and below the cursor. The constructor param remains the initial value.
+	 */
+	setMaxVisible(n: number): void {
+		this.maxVisible = Math.max(3, Math.floor(n));
+	}
+
 	invalidate(): void {
 		this.cachedColumnWidth = undefined;
 	}
@@ -128,11 +155,14 @@ export class SelectList implements Component {
 
 		// If no items match filter, show message
 		if (this.filteredItems.length === 0) {
-			lines.push(this.theme.noMatch("  No matching commands"));
+			lines.push(this.theme.noMatch(`  ${this.layout.emptyText ?? "No matches"}`));
 			return lines;
 		}
 
 		const primaryColumnWidth = this.getPrimaryColumnWidth();
+		// Ordinals are only shown (and digits only actionable) when opt-in digit
+		// select is on and the list is short enough for single digits to be unique.
+		const showOrdinals = this.digitSelectActive();
 
 		// Calculate visible range with scrolling
 		const startIndex = Math.max(
@@ -148,7 +178,10 @@ export class SelectList implements Component {
 
 			const isSelected = i === this.selectedIndex;
 			const descriptionSingleLine = item.description ? normalizeToSingleLine(item.description) : undefined;
-			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth));
+			// Ordinal reflects the 1-based position in the filtered list so it lines
+			// up with the digit that selects it, independent of the scroll window.
+			const ordinal = showOrdinals ? i + 1 : undefined;
+			lines.push(this.renderItem(item, isSelected, width, descriptionSingleLine, primaryColumnWidth, ordinal));
 		}
 
 		// Add scroll indicators if needed. ↑ shows items exist above the visible
@@ -198,6 +231,37 @@ export class SelectList implements Component {
 			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
 			this.notifySelectionChange();
 		}
+		// Page up - jump one window toward the top, clamped (no wrap). Unlike the
+		// single-step arrows, paging past the edge simply parks at the boundary.
+		else if (kb.matches(keyData, "tui.select.pageUp")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex = Math.max(0, this.selectedIndex - this.maxVisible);
+			this.notifySelectionChange();
+		}
+		// Page down - jump one window toward the bottom, clamped (no wrap).
+		else if (kb.matches(keyData, "tui.select.pageDown")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex = Math.min(this.filteredItems.length - 1, this.selectedIndex + this.maxVisible);
+			this.notifySelectionChange();
+		}
+		// Home - jump to the first item.
+		else if (kb.matches(keyData, "tui.select.home")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex = 0;
+			this.notifySelectionChange();
+		}
+		// End - jump to the last item.
+		else if (kb.matches(keyData, "tui.select.end")) {
+			if (this.filteredItems.length === 0) return;
+			this.selectedIndex = this.filteredItems.length - 1;
+			this.notifySelectionChange();
+		}
+		// Digit quick-select (opt-in): "1".."9" jumps to and confirms that item.
+		// Guarded so digits fall through untouched when the feature is off or the
+		// list is too long for a unique mapping.
+		else if (this.tryDigitSelect(keyData)) {
+			// handled inside tryDigitSelect
+		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {
 			const selectedItem = this.filteredItems[this.selectedIndex];
@@ -213,14 +277,50 @@ export class SelectList implements Component {
 		}
 	}
 
+	/**
+	 * Whether digit quick-select is currently live: opt-in flag on, and few enough
+	 * filtered items that single digits "1".."9" map uniquely. Centralized so the
+	 * render (ordinals) and input (selection) paths agree on exactly one condition.
+	 */
+	private digitSelectActive(): boolean {
+		return Boolean(this.layout.digitSelect) && this.filteredItems.length > 0 && this.filteredItems.length <= 9;
+	}
+
+	/**
+	 * If digit quick-select is live and keyData is a digit naming a current item,
+	 * select and confirm it. Returns true when it consumed the key so the caller
+	 * can stop; false lets the key fall through (feature off, too many items, or a
+	 * non-digit / out-of-range digit).
+	 */
+	private tryDigitSelect(keyData: string): boolean {
+		if (!this.digitSelectActive()) return false;
+		for (let n = 1; n <= this.filteredItems.length; n++) {
+			if (matchesKey(keyData, String(n) as KeyId)) {
+				this.selectedIndex = n - 1;
+				const item = this.filteredItems[this.selectedIndex];
+				if (item && this.onSelect) this.onSelect(item);
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private renderItem(
 		item: SelectItem,
 		isSelected: boolean,
 		width: number,
 		descriptionSingleLine: string | undefined,
 		primaryColumnWidth: number,
+		ordinal?: number,
 	): string {
-		const prefix = isSelected ? "→ " : "  ";
+		const arrow = isSelected ? "→ " : "  ";
+		// The ordinal sits between the arrow and the label. Its plain form ("1 ")
+		// drives all width math; the display form dims it on unselected rows, while
+		// selected rows are wrapped whole by selectedText/selectedBg below and so
+		// use the plain form to avoid nested styling.
+		const ordinalPlain = ordinal !== undefined ? `${ordinal} ` : "";
+		const prefix = arrow + ordinalPlain;
+		const prefixDisplay = isSelected || !ordinalPlain ? prefix : arrow + this.theme.description(ordinalPlain);
 		const prefixWidth = visibleWidth(prefix);
 
 		if (descriptionSingleLine && width > 40) {
@@ -242,7 +342,7 @@ export class SelectList implements Component {
 				}
 
 				const descText = this.theme.description(spacing + truncatedDesc);
-				return prefix + truncatedValue + descText;
+				return prefixDisplay + truncatedValue + descText;
 			}
 		}
 
@@ -252,7 +352,7 @@ export class SelectList implements Component {
 			return this.paintSelected(this.theme.selectedText(`${prefix}${truncatedValue}`), width);
 		}
 
-		return prefix + truncatedValue;
+		return prefixDisplay + truncatedValue;
 	}
 
 	/** Pad selected row to width and apply optional selectedBg. */

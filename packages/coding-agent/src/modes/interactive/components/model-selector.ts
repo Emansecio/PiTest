@@ -35,6 +35,65 @@ function modelSearchText(item: ModelItem): string {
 }
 
 /**
+ * OpenCode exposes two endpoints — Zen (`opencode`, https://opencode.ai/zen/v1)
+ * and Go (`opencode-go`, https://opencode.ai/zen/go/v1) — that share one API key
+ * (OPENCODE_API_KEY), so both surface together and their overlapping model ids
+ * (deepseek-v4-flash, glm-5.2, …) would each appear twice in the picker. Collapse
+ * the pair: for any id present on both, keep the Zen entry and drop the Go
+ * duplicate. Zen is preferred as the primary/larger catalog; Go's unique models
+ * (minimax-m3, mimo-v2-pro, qwen3.7-max, …) are untouched. A Go model is only
+ * dropped when the same id is actually present under Zen in `models`, so a Go-only
+ * auth setup (no Zen entries) still shows every Go model. This is a display-only
+ * collapse — the registry still resolves `opencode-go/<id>` via find(), so saved
+ * defaults and explicit `--models` refs keep working.
+ */
+export function dedupeOpencodeEndpoints(models: ModelItem[]): ModelItem[] {
+	const zenIds = new Set<string>();
+	for (const item of models) {
+		if (item.provider === "opencode") zenIds.add(item.id);
+	}
+	if (zenIds.size === 0) return models;
+	return models.filter((item) => !(item.provider === "opencode-go" && zenIds.has(item.id)));
+}
+
+const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max));
+
+/**
+ * Compact token count for the detail line: 200000 → "200k", 1000000 → "1M".
+ * A trailing `.0` is noise, so fractional steps only render a non-zero digit.
+ * (footer.ts has an equivalent private helper; kept local since it isn't exported.)
+ */
+function formatTokens(count: number): string {
+	if (count < 1000) return count.toString();
+	if (count < 10000) return `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+	if (count < 1000000) return `${Math.round(count / 1000)}k`;
+	if (count < 10000000) return `${(count / 1000000).toFixed(1).replace(/\.0$/, "")}M`;
+	return `${Math.round(count / 1000000)}M`;
+}
+
+/** Price with sensible precision: 3 → "3", 0.25 → "0.25", 1.5 → "1.5". */
+function formatPrice(value: number): string {
+	return String(Math.round(value * 100) / 100);
+}
+
+/**
+ * One-line, plain (untinted) detail summary for the highlighted model:
+ * `provider/id · <ctx> ctx · ✦ reasoning · $<in>/$<out> per MTok`.
+ * Any segment whose data is missing/zero is omitted rather than printed as
+ * "undefined/0". Exported for direct unit testing.
+ */
+export function formatModelDetailLine(model: Model<any>): string {
+	const segments: string[] = [`${model.provider}/${model.id}`];
+	const ctx = model.contextWindow ?? 0;
+	if (ctx > 0) segments.push(`${formatTokens(ctx)} ctx`);
+	if (model.reasoning) segments.push("✦ reasoning");
+	const input = model.cost?.input ?? 0;
+	const output = model.cost?.output ?? 0;
+	if (input > 0 || output > 0) segments.push(`$${formatPrice(input)}/$${formatPrice(output)} per MTok`);
+	return segments.join(" · ");
+}
+
+/**
  * Component that renders a model selector with search.
  *
  * When the session was started with `--models`, those entries form a pinned
@@ -160,11 +219,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		// Load available models (built-in models still work even if models.json failed)
 		try {
 			const availableModels = await this.modelRegistry.getAvailable();
-			models = availableModels.map((model: Model<any>) => ({
-				provider: model.provider,
-				id: model.id,
-				model,
-			}));
+			models = dedupeOpencodeEndpoints(
+				availableModels.map((model: Model<any>) => ({
+					provider: model.provider,
+					id: model.id,
+					model,
+				})),
+			);
 		} catch (error) {
 			this.allModels = [];
 			this.cycleModelItems = [];
@@ -239,10 +300,22 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.updateList();
 	}
 
+	/**
+	 * Visible-window size for the list. Adapts to terminal height the same way
+	 * SelectorShell does — `clamp(rows - 12, 5, 15)` leaves room for card chrome,
+	 * header, search box and the detail/scroll lines — and falls back to 10 when
+	 * no terminal height is available. Recomputed per updateList so resizes stick.
+	 */
+	private computeMaxVisible(): number {
+		const rows = this.tui.terminal?.rows;
+		if (typeof rows === "number" && rows > 0) return clamp(rows - 12, 5, 15);
+		return 10;
+	}
+
 	private updateList(): void {
 		this.listContainer.clear();
 
-		const maxVisible = 10;
+		const maxVisible = this.computeMaxVisible();
 		const startIndex = Math.max(
 			0,
 			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredModels.length - maxVisible),
@@ -267,8 +340,12 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			}
 
 			// Provider group header: new provider or a section boundary (cycle ↔ all).
+			// Use the human display name ("OpenCode Zen", "OpenCode Go") rather than the
+			// raw id — otherwise two endpoints that share models read as cryptic
+			// `opencode` / `opencode-go` headers over identical rows.
 			if (!prev || prev.provider !== item.provider || inCycle !== prevInCycle) {
-				this.listContainer.addChild(new Text(theme.fg("dim", `  ${item.provider}`), 0, 0));
+				const providerLabel = this.modelRegistry.getProviderDisplayName(item.provider);
+				this.listContainer.addChild(new Text(theme.fg("dim", `  ${providerLabel}`), 0, 0));
 			}
 
 			const isSelected = i === this.selectedIndex;
@@ -292,11 +369,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
 		}
 
-		// Footer: technical id for the selection (provider header + row label stay human).
+		// Footer: one dim detail line for the selection — provider/id plus context
+		// window, reasoning capability and per-MTok pricing where those exist
+		// (provider header + row label stay human). Added as a Text child, which
+		// wraps rather than overflows, so it stays width-safe.
 		if (this.filteredModels.length > 0) {
 			const selected = this.filteredModels[this.selectedIndex];
 			this.listContainer.addChild(new Spacer(1));
-			this.listContainer.addChild(new Text(theme.fg("dim", `  ${modelKey(selected)}`), 0, 0));
+			this.listContainer.addChild(new Text(theme.fg("dim", `  ${formatModelDetailLine(selected.model)}`), 0, 0));
 		}
 
 		// Error banner (models.json failed to parse, but built-ins still loaded).
@@ -324,6 +404,30 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			this.selectedIndex = this.selectedIndex === this.filteredModels.length - 1 ? 0 : this.selectedIndex + 1;
 			this.updateList();
 		}
+		// Page up - jump one window toward the top, clamped (no wrap).
+		else if (kb.matches(keyData, "tui.select.pageUp")) {
+			if (this.filteredModels.length === 0) return;
+			this.selectedIndex = Math.max(0, this.selectedIndex - this.computeMaxVisible());
+			this.updateList();
+		}
+		// Page down - jump one window toward the bottom, clamped (no wrap).
+		else if (kb.matches(keyData, "tui.select.pageDown")) {
+			if (this.filteredModels.length === 0) return;
+			this.selectedIndex = Math.min(this.filteredModels.length - 1, this.selectedIndex + this.computeMaxVisible());
+			this.updateList();
+		}
+		// Home - jump to the first filtered item.
+		else if (kb.matches(keyData, "tui.select.home")) {
+			if (this.filteredModels.length === 0) return;
+			this.selectedIndex = 0;
+			this.updateList();
+		}
+		// End - jump to the last filtered item.
+		else if (kb.matches(keyData, "tui.select.end")) {
+			if (this.filteredModels.length === 0) return;
+			this.selectedIndex = this.filteredModels.length - 1;
+			this.updateList();
+		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {
 			const selectedModel = this.filteredModels[this.selectedIndex];
@@ -331,8 +435,16 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				this.handleSelect(selectedModel.model);
 			}
 		}
-		// Escape or Ctrl+C
+		// Escape or Ctrl+C. Two-step when searching: a non-empty search is cleared
+		// first (re-filter + re-render), and only a second Esc (empty search) closes.
+		// Mirrors SelectorShell so every selector behaves uniformly.
 		else if (kb.matches(keyData, "tui.select.cancel")) {
+			if (this.searchInput.getValue().length > 0) {
+				this.searchInput.setValue("");
+				this.filterModels("");
+				this.tui.requestRender();
+				return;
+			}
 			this.onCancelCallback();
 		}
 		// Pass everything else to search input (Tab types into search — no scope toggle)
@@ -350,5 +462,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	getSearchInput(): Input {
 		return this.searchInput;
+	}
+
+	/** Currently highlighted model, or undefined when the filtered list is empty. */
+	getSelectedModel(): Model<any> | undefined {
+		return this.filteredModels[this.selectedIndex]?.model;
 	}
 }

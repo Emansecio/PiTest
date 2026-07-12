@@ -1,11 +1,14 @@
 import type { ThinkingLevel } from "@pit/agent-core";
-import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@pit/tui";
-import { getSelectListTheme } from "../theme/theme.ts";
-import { SelectorCard } from "./selector-card.ts";
+import { Container, type Focusable, type SelectItem, SelectList, type SelectListLayoutOptions } from "@pit/tui";
+import { getSelectListTheme, theme } from "../theme/theme.ts";
+import { SelectorShell } from "./selector-shell.ts";
 
 const THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: 32,
+	emptyText: "No matching options",
+	// Short list: keys 1–9 jump to and confirm a level, with dim ordinal prefixes.
+	digitSelect: true,
 };
 
 const LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
@@ -20,10 +23,20 @@ const LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 };
 
 /**
- * Component that renders a thinking level selector with a rounded card frame
+ * Component that renders a thinking level selector with a rounded card frame. No
+ * search (the list is short); digit quick-select is enabled and the current
+ * level is marked with a green ✓.
  */
-export class ThinkingSelectorComponent extends Container {
+export class ThinkingSelectorComponent extends Container implements Focusable {
 	private selectList: SelectList;
+	private shell: SelectorShell;
+
+	get focused(): boolean {
+		return this.shell.focused;
+	}
+	set focused(value: boolean) {
+		this.shell.focused = value;
+	}
 
 	constructor(
 		currentLevel: ThinkingLevel,
@@ -35,11 +48,11 @@ export class ThinkingSelectorComponent extends Container {
 
 		const thinkingLevels: SelectItem[] = availableLevels.map((level) => ({
 			value: level,
-			label: level,
+			// Green ✓ marks the level that was active when the selector opened.
+			label: level === currentLevel ? `${level}${theme.fg("success", " ✓")}` : level,
 			description: LEVEL_DESCRIPTIONS[level],
 		}));
 
-		const card = new SelectorCard();
 		this.selectList = new SelectList(
 			thinkingLevels,
 			thinkingLevels.length,
@@ -47,7 +60,7 @@ export class ThinkingSelectorComponent extends Container {
 			THINKING_SELECT_LIST_LAYOUT,
 		);
 
-		const currentIndex = thinkingLevels.findIndex((item) => item.value === currentLevel);
+		const currentIndex = availableLevels.findIndex((level) => level === currentLevel);
 		if (currentIndex !== -1) {
 			this.selectList.setSelectedIndex(currentIndex);
 		}
@@ -55,13 +68,20 @@ export class ThinkingSelectorComponent extends Container {
 		this.selectList.onSelect = (item) => {
 			onSelect(item.value as ThinkingLevel);
 		};
-
 		this.selectList.onCancel = () => {
 			onCancel();
 		};
 
-		card.addChild(this.selectList);
-		this.addChild(card);
+		this.shell = new SelectorShell(this.selectList, {
+			title: "Thinking level",
+			search: false,
+			onCancel,
+		});
+		this.addChild(this.shell);
+	}
+
+	handleInput(keyData: string): void {
+		this.shell.handleInput(keyData);
 	}
 
 	getSelectList(): SelectList {

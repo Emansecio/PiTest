@@ -10,6 +10,7 @@ import {
 	Input,
 	Spacer,
 	Text,
+	type TUI,
 	truncateToWidth,
 	visibleWidth,
 } from "@pit/tui";
@@ -24,6 +25,8 @@ import { SelectorCard } from "./selector-card.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
+
+const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max));
 
 function formatSessionDate(date: Date): string {
 	const now = new Date();
@@ -146,37 +149,37 @@ class SessionSelectorHeader implements Component {
 		const left = truncateToWidth(leftText, availableLeft, "");
 		const spacing = Math.max(0, width - visibleWidth(left) - visibleWidth(rightText));
 
-		// Build hint lines - changes based on state (all branches truncate to width)
-		let hintLine1: string;
-		let hintLine2: string;
+		const titleLine = `${left}${" ".repeat(spacing)}${rightText}`;
+
+		// Transient states (delete confirmation, status/error) own the hint row; the
+		// default browsing state renders a single consolidated dim key-hint line
+		// (post de-clutter pass — previously two permanent hint lines).
+		let hintLine: string;
 		if (this.confirmingDeletePath !== null) {
 			const confirmHint = `Delete session? ${keyHint("tui.select.confirm", "confirm")} · ${keyHint("tui.select.cancel", "cancel")}`;
-			hintLine1 = theme.fg("error", truncateToWidth(confirmHint, width, "…"));
-			hintLine2 = "";
+			hintLine = theme.fg("error", truncateToWidth(confirmHint, width, "…"));
 		} else if (this.statusMessage) {
 			const color = this.statusMessage.type === "error" ? "error" : "accent";
-			hintLine1 = theme.fg(color, truncateToWidth(this.statusMessage.message, width, "…"));
-			hintLine2 = "";
+			hintLine = theme.fg(color, truncateToWidth(this.statusMessage.message, width, "…"));
 		} else {
 			const pathState = this.showPath ? "(on)" : "(off)";
 			const sep = theme.fg("muted", " · ");
-			const hint1 =
-				keyHint("tui.input.tab", "scope") + sep + theme.fg("muted", 're:<pattern> regex · "phrase" exact');
-			const hint2Parts = [
+			const parts = [
+				keyHint("tui.input.tab", "scope"),
 				keyHint("app.session.toggleSort", "sort"),
 				keyHint("app.session.toggleNamedFilter", "named"),
 				keyHint("app.session.delete", "delete"),
 				keyHint("app.session.togglePath", `path ${pathState}`),
 			];
 			if (this.showRenameHint) {
-				hint2Parts.push(keyHint("app.session.rename", "rename"));
+				parts.push(keyHint("app.session.rename", "rename"));
 			}
-			const hint2 = hint2Parts.join(sep);
-			hintLine1 = truncateToWidth(hint1, width, "…");
-			hintLine2 = truncateToWidth(hint2, width, "…");
+			// Search-syntax help trails the keys so a narrow terminal truncates it first.
+			parts.push(theme.fg("muted", 're:<pattern> regex · "phrase" exact'));
+			hintLine = truncateToWidth(parts.join(sep), width, "…");
 		}
 
-		return [`${left}${" ".repeat(spacing)}${rightText}`, hintLine1, hintLine2];
+		return [titleLine, hintLine];
 	}
 }
 
@@ -377,6 +380,11 @@ class SessionList implements Component, Focusable {
 		this.allSessions = sessions;
 		this.showCwd = showCwd;
 		this.filterSessions(this.searchInput.getValue());
+	}
+
+	/** Adaptive visible-row count (see SessionSelectorComponent's `tui` param). */
+	setMaxVisible(maxVisible: number): void {
+		this.maxVisible = maxVisible;
 	}
 
 	private scheduleFilterSessions(query: string): void {
@@ -660,6 +668,16 @@ class SessionList implements Component, Focusable {
 			this.flushPendingFilter();
 			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + this.maxVisible);
 		}
+		// Home - jump to first item (clamped, no wrap)
+		else if (kb.matches(keyData, "tui.select.home")) {
+			this.flushPendingFilter();
+			this.selectedIndex = 0;
+		}
+		// End - jump to last item (clamped, no wrap)
+		else if (kb.matches(keyData, "tui.select.end")) {
+			this.flushPendingFilter();
+			this.selectedIndex = Math.max(0, this.filteredSessions.length - 1);
+		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {
 			this.flushPendingFilter();
@@ -668,9 +686,17 @@ class SessionList implements Component, Focusable {
 				this.onSelect(selected.session.path);
 			}
 		}
-		// Escape - cancel
+		// Escape - two-step in the normal browsing state: a non-empty search is
+		// cleared first, and only a second Esc (empty search) cancels/closes.
+		// (Delete-confirmation and rename-mode Escapes are intercepted earlier and
+		// never reach here.)
 		else if (kb.matches(keyData, "tui.select.cancel")) {
-			if (this.onCancel) {
+			if (this.searchInput.getValue().length > 0) {
+				this.flushPendingFilter();
+				this.searchInput.setValue("");
+				this.filterSessions("");
+				this.onFilterApplied?.();
+			} else if (this.onCancel) {
 				this.onCancel();
 			}
 		}
@@ -846,6 +872,10 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			keybindings?: KeybindingsManager;
 		},
 		currentSessionFilePath?: string,
+		// Trailing/optional (theme-selector precedent): when provided, the visible-row
+		// window adapts to terminal height. Existing call sites/tests that omit it keep
+		// the hardcoded fallback.
+		tui?: TUI,
 	) {
 		super();
 		this.keybindings = options?.keybindings ?? KeybindingsManager.create();
@@ -869,6 +899,12 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			currentSessionFilePath,
 		);
 		this.sessionList.onFilterApplied = () => this.requestRender();
+
+		// Adaptive height: size the window to the terminal, clamped, falling back to
+		// SessionList's built-in constant when no TUI is reachable.
+		if (tui) {
+			this.sessionList.setMaxVisible(clamp(tui.terminal.rows - 12, 5, 15));
+		}
 
 		this.buildBaseLayout(this.sessionList);
 

@@ -14,7 +14,7 @@ import { stripAnsi } from "../src/utils/ansi.js";
 const BASE: WelcomeBoxData = {
 	appName: "pit",
 	version: "0.4.2",
-	tagline: "coding agent in your terminal",
+	tagline: "Coding agent in your terminal",
 	cwdDisplay: "PiTest",
 	branch: "main",
 };
@@ -30,7 +30,7 @@ describe("WelcomeBox", () => {
 		const out = new WelcomeBox(BASE).render(80);
 		const plain = out.map(stripAnsi).join("\n");
 		expect(plain).toContain("v0.4.2");
-		expect(plain).toContain("coding agent in your terminal");
+		expect(plain).toContain("Coding agent in your terminal");
 		expect(plain).toContain("Workspace");
 		expect(plain).toContain("PiTest");
 		expect(plain).toContain("(main)");
@@ -113,14 +113,16 @@ describe("WelcomeBox — hero (fresh session)", () => {
 		initTheme("dark");
 	});
 
-	it("renders the borderless centered hero with wordmark, tagline, version and workspace", () => {
+	it("renders the borderless centered hero with wordmark, tagline and version only", () => {
 		const out = new WelcomeBox(HERO).render(80);
 		const plain = out.map(stripAnsi);
 		const joined = plain.join("\n");
 		expect(joined).toContain("██");
-		expect(joined).toContain("coding agent in your terminal · v0.4.2");
-		expect(joined).toContain("Workspace");
-		expect(joined).toContain("(main)");
+		expect(joined).toContain("Coding agent in your terminal · v0.4.2");
+		// No workspace line in the hero — the footer identity line already shows
+		// cwd/branch on the same fresh-session screen, so repeating it was noise.
+		expect(joined).not.toContain("Workspace");
+		expect(joined).not.toContain("(main)");
 		// Borderless: no card frame in hero mode.
 		expect(joined).not.toContain("╭");
 		// Centered: the wordmark block starts well past the left margin at 80 cols.

@@ -988,6 +988,14 @@ class TreeList implements Component {
 			// Page down
 			this.flushPendingFilter();
 			this.selectedIndex = Math.min(this.filteredNodes.length - 1, this.selectedIndex + this.maxVisibleLines);
+		} else if (kb.matches(keyData, "tui.select.home")) {
+			// Home - jump to first entry (clamped, no wrap)
+			this.flushPendingFilter();
+			this.selectedIndex = 0;
+		} else if (kb.matches(keyData, "tui.select.end")) {
+			// End - jump to last entry (clamped, no wrap)
+			this.flushPendingFilter();
+			this.selectedIndex = Math.max(0, this.filteredNodes.length - 1);
 		} else if (kb.matches(keyData, "tui.select.confirm")) {
 			this.flushPendingFilter();
 			const selected = this.filteredNodes[this.selectedIndex];

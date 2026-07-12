@@ -1,24 +1,36 @@
-import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@pit/tui";
-import { getAvailableThemes, getSelectListTheme } from "../theme/theme.ts";
-import { SelectorCard } from "./selector-card.ts";
+import { Container, type Focusable, type Input, type SelectItem, SelectList, type SelectListLayoutOptions, type TUI } from "@pit/tui";
+import { getAvailableThemes, getSelectListTheme, theme } from "../theme/theme.ts";
+import { SelectorShell } from "./selector-shell.ts";
 
 const THEME_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
 	maxPrimaryColumnWidth: 32,
+	emptyText: "No matching themes",
 };
 
 /**
- * Component that renders a theme selector
+ * Component that renders a theme selector: a fuzzy search over theme names with
+ * live preview (onSelectionChange → onPreview), preselecting the current theme
+ * and marking it with a green ✓.
  */
-export class ThemeSelectorComponent extends Container {
+export class ThemeSelectorComponent extends Container implements Focusable {
 	private selectList: SelectList;
+	private shell: SelectorShell;
 	private onPreview: (themeName: string) => void;
+
+	get focused(): boolean {
+		return this.shell.focused;
+	}
+	set focused(value: boolean) {
+		this.shell.focused = value;
+	}
 
 	constructor(
 		currentTheme: string,
 		onSelect: (themeName: string) => void,
 		onCancel: () => void,
 		onPreview: (themeName: string) => void,
+		tui?: TUI,
 	) {
 		super();
 		this.onPreview = onPreview;
@@ -26,11 +38,10 @@ export class ThemeSelectorComponent extends Container {
 		const themes = getAvailableThemes();
 		const themeItems: SelectItem[] = themes.map((name) => ({
 			value: name,
-			label: name,
-			description: name === currentTheme ? "(current)" : undefined,
+			// Green ✓ marks the theme that was active when the selector opened.
+			label: name === currentTheme ? `${name}${theme.fg("success", " ✓")}` : name,
 		}));
 
-		const card = new SelectorCard();
 		this.selectList = new SelectList(themeItems, 10, getSelectListTheme(), THEME_SELECT_LIST_LAYOUT);
 
 		const currentIndex = themes.indexOf(currentTheme);
@@ -41,20 +52,31 @@ export class ThemeSelectorComponent extends Container {
 		this.selectList.onSelect = (item) => {
 			onSelect(item.value);
 		};
-
 		this.selectList.onCancel = () => {
 			onCancel();
 		};
-
 		this.selectList.onSelectionChange = (item) => {
 			this.onPreview(item.value);
 		};
 
-		card.addChild(this.selectList);
-		this.addChild(card);
+		this.shell = new SelectorShell(this.selectList, {
+			title: "Theme",
+			search: true,
+			onCancel,
+			tui,
+		});
+		this.addChild(this.shell);
+	}
+
+	handleInput(keyData: string): void {
+		this.shell.handleInput(keyData);
 	}
 
 	getSelectList(): SelectList {
 		return this.selectList;
+	}
+
+	getSearchInput(): Input | undefined {
+		return this.shell.getSearchInput();
 	}
 }

@@ -728,6 +728,52 @@ describe("TreeSelectorComponent", () => {
 			expect(list.getSelectedNode()?.entry.id).toBe("asst-3a");
 		});
 
+		test("home/end/page jump to first/last entry, clamped (no wrap)", () => {
+			const HOME = "\x1b[H";
+			const END = "\x1b[F";
+			const PAGE_UP = "\x1b[5~";
+			const PAGE_DOWN = "\x1b[6~";
+
+			// Linear chain of six visible entries.
+			const entries: SessionEntry[] = [
+				userMessage("user-1", null, "one"),
+				assistantMessage("asst-1", "user-1", "two"),
+				userMessage("user-2", "asst-1", "three"),
+				assistantMessage("asst-2", "user-2", "four"),
+				userMessage("user-3", "asst-2", "five"),
+				assistantMessage("asst-3", "user-3", "six"),
+			];
+			const tree = buildTree(entries);
+			const selector = new TreeSelectorComponent(
+				tree,
+				"asst-3",
+				24,
+				() => {},
+				() => {},
+			);
+			const list = selector.getTreeList();
+
+			// Home → first entry, idempotent (no wrap to the bottom).
+			selector.handleInput(HOME);
+			expect(list.getSelectedNode()?.entry.id).toBe("user-1");
+			selector.handleInput(HOME);
+			expect(list.getSelectedNode()?.entry.id).toBe("user-1");
+
+			// Page up from the top stays clamped at the first entry.
+			selector.handleInput(PAGE_UP);
+			expect(list.getSelectedNode()?.entry.id).toBe("user-1");
+
+			// End → last entry, idempotent (no wrap to the top).
+			selector.handleInput(END);
+			expect(list.getSelectedNode()?.entry.id).toBe("asst-3");
+			selector.handleInput(END);
+			expect(list.getSelectedNode()?.entry.id).toBe("asst-3");
+
+			// Page down from the bottom stays clamped at the last entry.
+			selector.handleInput(PAGE_DOWN);
+			expect(list.getSelectedNode()?.entry.id).toBe("asst-3");
+		});
+
 		test("filter mode change resets fold state", () => {
 			const tree = buildBranchingTree();
 			const selector = new TreeSelectorComponent(
