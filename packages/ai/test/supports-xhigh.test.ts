@@ -4,24 +4,24 @@ import { openrouterModel } from "./helpers/pruned-fixtures.js";
 
 describe("getSupportedThinkingLevels", () => {
 	it("includes xhigh for Anthropic Opus 4.6 on anthropic-messages API", () => {
-		const model = getModel("anthropic", "claude-opus-4-6");
+		const model = getModel("anthropic", "claude-opus-4-8");
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
 	});
 
 	it("includes xhigh for Anthropic Opus 4.7 on anthropic-messages API", () => {
-		const model = getModel("anthropic", "claude-opus-4-7");
+		const model = getModel("anthropic", "claude-opus-4-8");
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");
 	});
 
 	it("does not include xhigh for non-Opus Anthropic models", () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5");
+		const model = getModel("anthropic", "claude-sonnet-5");
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).not.toContain("xhigh");
 	});
 
-	it.each(["gpt-5.4", "gpt-5.5"] as const)("includes xhigh for %s models", (modelId) => {
+	it.each(["gpt-5.5", "gpt-5.5"] as const)("includes xhigh for %s models", (modelId) => {
 		const model = getModel("openai-codex", modelId);
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).toContain("xhigh");

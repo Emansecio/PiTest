@@ -55,7 +55,7 @@ function createAssistantMessage(text: string): AssistantMessage {
 		timestamp: Date.now(),
 		api: "anthropic-messages",
 		provider: "anthropic",
-		model: "claude-sonnet-4-5",
+		model: "claude-sonnet-5",
 	};
 }
 
@@ -170,7 +170,7 @@ describe("compact() self-correction verify pass", () => {
 				timestamp: Date.now(),
 				api: "anthropic-messages",
 				provider: "anthropic",
-				model: "claude-sonnet-4-5",
+				model: "claude-sonnet-5",
 			};
 			return { result: async () => response };
 		};
@@ -178,7 +178,7 @@ describe("compact() self-correction verify pass", () => {
 	}
 
 	it("sends the verify pass a prompt with <conversation-delta> source AND <summary>, plus the anti-fabrication rule", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		// ~420k chars of prose -> ~105k tokens, crossing VERIFY_MIN_INPUT_TOKENS
 		// (80k after M15 — the separate verify call now fires only on very large
 		// windows; smaller ones ride the in-prompt self-check). User prose is not
@@ -226,7 +226,7 @@ describe("compact() self-correction verify pass", () => {
 	});
 
 	it("does NOT pay the separate verify call in the 25k-80k band (self-check rides the single call — M15)", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		// ~138k chars -> ~34.5k tokens: above the OLD 25k bar, below the new 80k one.
 		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(2300);
 		const messagesToSummarize: AgentMessage[] = [
@@ -253,7 +253,7 @@ describe("compact() self-correction verify pass", () => {
 	});
 
 	it("accepts an oversize verify correction when it is grounded in the source (>10% gate no longer blind)", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		process.env.PIT_NO_SUMMARY_GROUNDING = "1";
 		try {
 			const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(7000);
@@ -295,7 +295,7 @@ describe("compact() self-correction verify pass", () => {
 	});
 
 	it("still rejects oversize UNGROUNDED verify output (fabrication risk)", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		process.env.PIT_NO_SUMMARY_GROUNDING = "1";
 		try {
 			const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(7000);
@@ -338,7 +338,7 @@ describe("compact() self-correction verify pass", () => {
 	});
 
 	it("skips the verify pass when selfCorrection is disabled (only one LLM call)", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const bigProse = "We are fixing the compaction verify pass in compaction.ts. ".repeat(7000);
 		const messagesToSummarize: AgentMessage[] = [
 			createUserMessage(bigProse),
@@ -366,7 +366,7 @@ describe("compact() self-correction verify pass", () => {
 	});
 
 	it("does not feed tool-result bodies into the verify source verbatim (delta caps + excerpt bound)", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		// A large tool result (would be ~27k dense tokens). The verify source must
 		// still be bounded by the head+tail excerpt, never the raw 90k body.
 		const bigToolResult = createToolResultMessage("Z".repeat(90_000));
@@ -468,7 +468,7 @@ describe("SerializedWindow reuse", () => {
 				timestamp: Date.now(),
 				api: "anthropic-messages",
 				provider: "anthropic",
-				model: "claude-sonnet-4-5",
+				model: "claude-sonnet-5",
 			}),
 		});
 	}
@@ -499,7 +499,7 @@ describe("SerializedWindow reuse", () => {
 	});
 
 	it("compact() serializes the window once on the incremental path with the verify pass active", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		// ~420k chars of prose -> ~105k tokens, crossing VERIFY_MIN_INPUT_TOKENS
 		// (80k) so the verify pass fires; previousSummary makes the summarizer use
 		// the delta.

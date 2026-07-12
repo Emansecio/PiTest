@@ -69,7 +69,7 @@ async function testImmediateAbort<TApi extends Api>(llm: Model<TApi>, options: S
 
 describe("AI Providers Abort Tests", () => {
 	describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("Anthropic Provider Abort", () => {
-		const llm = getModel("anthropic", "claude-opus-4-5");
+		const llm = getModel("anthropic", "claude-opus-4-8");
 
 		it("should abort mid-stream", { retry: 3 }, async () => {
 			await testAbortSignal(llm, { thinkingEnabled: true, thinkingBudgetTokens: 2048 });

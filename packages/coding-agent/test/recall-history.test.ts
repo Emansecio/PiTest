@@ -67,7 +67,7 @@ function assistantToolCall(name: string, id: string, args: Record<string, unknow
 		timestamp: Date.now(),
 		api: "anthropic-messages",
 		provider: "anthropic",
-		model: "claude-sonnet-4-5",
+		model: "claude-sonnet-5",
 	} as AgentMessage;
 }
 
@@ -98,7 +98,7 @@ function assistantText(text: string): AgentMessage {
 		timestamp: Date.now(),
 		api: "anthropic-messages",
 		provider: "anthropic",
-		model: "claude-sonnet-4-5",
+		model: "claude-sonnet-5",
 	} as AgentMessage;
 }
 

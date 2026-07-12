@@ -65,7 +65,7 @@ describe("presend guard space unification", () => {
 		tempDir = join(tmpdir(), `pi-guard-unification-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const agent = new Agent({ initialState: { model, systemPrompt: "Test", tools: [] } });
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);

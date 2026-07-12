@@ -38,7 +38,7 @@ function assistantMsg(text: string): AgentMessage {
 		timestamp: 1,
 		api: "anthropic-messages",
 		provider: "anthropic",
-		model: "claude-sonnet-4-5",
+		model: "claude-sonnet-5",
 	} as AgentMessage;
 }
 
@@ -52,7 +52,7 @@ function fakeStreamFn(summaryText: string) {
 		timestamp: 1,
 		api: "anthropic-messages",
 		provider: "anthropic",
-		model: "claude-sonnet-4-5",
+		model: "claude-sonnet-5",
 	};
 	return (() => ({ result: async () => response })) as any;
 }
@@ -85,7 +85,7 @@ describe("compaction digests modified files by default", () => {
 
 	it("includes a symbol digest for a modified file without PIT_FILE_DIGESTS", async () => {
 		writeFileSync(join(dir, "mod.ts"), "export function touched() {}\nexport class Shape {}\n");
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const fileOps = createFileOps();
 		fileOps.edited.add("mod.ts");
 
@@ -112,7 +112,7 @@ describe("compaction digests modified files by default", () => {
 
 	it("does not digest read-only files by default (those stay behind the flag)", async () => {
 		writeFileSync(join(dir, "ro.ts"), "export function readOnlyThing() {}\n");
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const fileOps = createFileOps();
 		fileOps.read.add("ro.ts");
 

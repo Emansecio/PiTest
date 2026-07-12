@@ -362,7 +362,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("Anthropic OAuth Provider (claude-opus-4-6 with adaptive thinking)", () => {
-		const model = getModel("anthropic", "claude-opus-4-6");
+		const model = getModel("anthropic", "claude-opus-4-8");
 
 		it.skipIf(!anthropicOAuthToken)("should complete basic text generation", { retry: 3 }, async () => {
 			await basicTextGeneration(model, { apiKey: anthropicOAuthToken });
@@ -398,7 +398,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("OpenAI Codex Provider (gpt-5.4)", () => {
-		const llm = getModel("openai-codex", "gpt-5.4");
+		const llm = getModel("openai-codex", "gpt-5.5");
 
 		it.skipIf(!openaiCodexToken)("should complete basic text generation", { retry: 3 }, async () => {
 			await basicTextGeneration(llm, { apiKey: openaiCodexToken });

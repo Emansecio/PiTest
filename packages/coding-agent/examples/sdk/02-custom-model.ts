@@ -12,7 +12,7 @@ const authStorage = AuthStorage.create();
 const modelRegistry = ModelRegistry.create(authStorage);
 
 // Option 1: Find a specific built-in model by provider/id
-const opus = getModel("anthropic", "claude-opus-4-5");
+const opus = getModel("anthropic", "claude-opus-4-8");
 if (opus) {
 	console.log(`Found model: ${opus.provider}/${opus.id}`);
 }

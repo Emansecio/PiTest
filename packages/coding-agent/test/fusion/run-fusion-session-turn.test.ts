@@ -16,7 +16,7 @@ const { completeSimpleMock, streamSimpleMock } = vi.hoisted(() => ({
 			content: [{ type: "text", text: "ok" }],
 			api: "anthropic-messages",
 			provider: "anthropic",
-			model: "claude-sonnet-4-5",
+			model: "claude-sonnet-5",
 			usage: {
 				input: 1,
 				output: 1,
@@ -51,7 +51,7 @@ import { ModelRegistry } from "../../src/core/model-registry.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
+const model = getModel("anthropic", "claude-sonnet-5")!;
 
 function messageText(message: unknown): string {
 	const content = (message as { content?: unknown }).content;

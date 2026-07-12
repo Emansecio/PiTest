@@ -77,7 +77,7 @@ function createAssistantMessage(text: string, usage?: Usage): AssistantMessage {
 		timestamp: Date.now(),
 		api: "anthropic-messages",
 		provider: "anthropic",
-		model: "claude-sonnet-4-5",
+		model: "claude-sonnet-5",
 	};
 }
 
@@ -446,7 +446,7 @@ describe("buildSessionContext", () => {
 		const loaded = buildSessionContext(entries);
 		expect(loaded.messages.length).toBe(4);
 		expect(loaded.thinkingLevel).toBe("off");
-		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
+		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-5" });
 	});
 
 	it("should handle single compaction", () => {
@@ -515,7 +515,7 @@ describe("buildSessionContext", () => {
 
 		const loaded = buildSessionContext(entries);
 		// model_change is later overwritten by assistant message's model info
-		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
+		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-5" });
 		expect(loaded.thinkingLevel).toBe("high");
 	});
 });
@@ -623,7 +623,7 @@ describe("Large session fixture", () => {
 describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 	it("should generate a compaction result for the large session", async () => {
 		const entries = loadLargeSessionEntries();
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 
 		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
 		expect(preparation).toBeDefined();
@@ -644,7 +644,7 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 	it("should produce valid session after compaction", async () => {
 		const entries = loadLargeSessionEntries();
 		const loaded = buildSessionContext(entries);
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 
 		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
 		expect(preparation).toBeDefined();
@@ -714,7 +714,7 @@ describe("pruneOldToolOutputs deferred-history mode", () => {
 			timestamp: Date.now(),
 			api: "anthropic-messages",
 			provider: "anthropic",
-			model: "claude-sonnet-4-5",
+			model: "claude-sonnet-5",
 		} as any;
 
 		// Two old tool-result messages before protected turns
@@ -759,7 +759,7 @@ describe("pruneOldToolOutputs deferred-history mode", () => {
 			timestamp: Date.now(),
 			api: "anthropic-messages",
 			provider: "anthropic",
-			model: "claude-sonnet-4-5",
+			model: "claude-sonnet-5",
 		} as any;
 
 		const toolResult = makeToolResultMessage(bigText);
@@ -1155,13 +1155,13 @@ describe("compact() prune isolation", () => {
 			timestamp: Date.now(),
 			api: "anthropic-messages",
 			provider: "anthropic",
-			model: "claude-sonnet-4-5",
+			model: "claude-sonnet-5",
 		};
 		return (() => ({ result: async () => response })) as any;
 	}
 
 	it("prunes a clone, leaving the original live toolResult message unmutated on success", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const bigText = "x".repeat(90_000); // ~27k dense tokens, well over the prune threshold
 
 		// toolResult sits BEFORE two user turns so it is outside the protection window.
@@ -1207,7 +1207,7 @@ describe("compact() prune isolation", () => {
 	});
 
 	it("leaves the live toolResult unmutated even when summarization aborts after pruning", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const bigText = "z".repeat(90_000);
 
 		const liveToolResult = makeToolResult(bigText);
@@ -1282,7 +1282,7 @@ describe("compact() parallel file digests", () => {
 			timestamp: Date.now(),
 			api: "anthropic-messages",
 			provider: "anthropic",
-			model: "claude-sonnet-4-5",
+			model: "claude-sonnet-5",
 		};
 		return (() => ({ result: async () => response })) as any;
 	}
@@ -1306,7 +1306,7 @@ describe("compact() parallel file digests", () => {
 	}
 
 	it("still appends the digest section and details.fileDigests for modified files", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		writeFileSync(
 			join(tmpDir, "mod.ts"),
 			"export function alphaOne() { return 1; }\nexport function betaTwo() { return 2; }\n",
@@ -1331,7 +1331,7 @@ describe("compact() parallel file digests", () => {
 	});
 
 	it("rejects with the summarization error (no unhandled rejection) when the LLM fails while digests are in flight", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		writeFileSync(join(tmpDir, "mod.ts"), "export function gammaThree() { return 3; }\n");
 
 		// Digest collection starts before the summarizer call; the summarizer then
@@ -1359,7 +1359,7 @@ describe("compact() parallel file digests", () => {
 	});
 
 	it("skips all digest work when there are no touched files", async () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 
 		const result = await compact(
 			makePreparation(),
@@ -1409,7 +1409,7 @@ describe("pruneOldToolOutputs — mutation tool-call args", () => {
 			timestamp: Date.now(),
 			api: "anthropic-messages",
 			provider: "anthropic",
-			model: "claude-sonnet-4-5",
+			model: "claude-sonnet-5",
 		} as any;
 	}
 

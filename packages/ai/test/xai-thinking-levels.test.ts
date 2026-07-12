@@ -10,7 +10,7 @@ describe("xAI Grok thinking levels", () => {
 	});
 
 	it("exposes low/medium/high for grok-build-0.1", () => {
-		const model = getModel("xai", "grok-build-0.1");
+		const model = getModel("xai", "grok-4.5");
 		expect(model).toBeDefined();
 		expect(getSupportedThinkingLevels(model!)).toEqual(["low", "medium", "high"]);
 	});

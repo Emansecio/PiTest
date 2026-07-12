@@ -69,7 +69,7 @@ describe("AgentSession auto-compaction multipass", () => {
 		mockState.postTokens = 0;
 		mockState.hasSpan = true;
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const agent = new Agent({ initialState: { model, systemPrompt: "Test", tools: [] } });
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);

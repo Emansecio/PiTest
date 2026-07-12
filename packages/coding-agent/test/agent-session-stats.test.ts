@@ -16,7 +16,7 @@ import { SettingsManager } from "../src/core/settings-manager.js";
 import { agentToolToWireSurface, compactWireToolSurface } from "../src/core/tool-wire-schema.js";
 import { createTestResourceLoader } from "./utilities.js";
 
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
+const model = getModel("anthropic", "claude-sonnet-5")!;
 
 function createUsage(totalTokens: number): Usage {
 	return {

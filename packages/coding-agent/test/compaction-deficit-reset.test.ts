@@ -81,7 +81,7 @@ describe("compaction deficit reset on transient failure (M14)", () => {
 		mkdirSync(tempDir, { recursive: true });
 		mockState.compactShouldThrow = true;
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const agent = new Agent({ initialState: { model, systemPrompt: "Test", tools: [] } });
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);

@@ -8,7 +8,7 @@ import {
 	TodoCadenceTracker,
 } from "../src/core/todo-cadence.js";
 
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
+const model = getModel("anthropic", "claude-sonnet-5")!;
 
 function assistantWithToolCalls(calls: Array<{ id: string; name: string }>): AssistantMessage {
 	return {

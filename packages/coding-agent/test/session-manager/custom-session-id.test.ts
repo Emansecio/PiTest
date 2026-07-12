@@ -83,7 +83,7 @@ describe("SessionManager.newSession with custom id", () => {
 						content: [{ type: "text", text: "hello" }],
 						api: "openai-responses",
 						provider: "openai",
-						model: "gpt-5.4",
+						model: "gpt-5.5",
 						usage: {
 							input: 0,
 							output: 0,

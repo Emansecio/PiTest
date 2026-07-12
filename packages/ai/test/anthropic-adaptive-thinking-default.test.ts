@@ -4,12 +4,12 @@ import { defaultSupportsAdaptiveThinking } from "../src/providers/anthropic.js";
 describe("defaultSupportsAdaptiveThinking", () => {
 	it("returns true for current adaptive models (Opus 4.6+, Sonnet 4.6+)", () => {
 		for (const id of [
-			"claude-opus-4-6",
-			"claude-opus-4-7",
+			"claude-opus-4-8",
+			"claude-opus-4-8",
 			"claude-opus-4-8",
 			"claude-opus-4.8",
 			"claude-opus-4-8-20260101",
-			"claude-sonnet-4-6",
+			"claude-sonnet-5",
 			"claude-sonnet-4-6-20250514",
 		]) {
 			expect(defaultSupportsAdaptiveThinking(id)).toBe(true);

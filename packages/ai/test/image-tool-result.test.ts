@@ -218,7 +218,7 @@ describe("Tool Results with Images", () => {
 	// =========================================================================
 
 	describe("Anthropic OAuth Provider (claude-sonnet-4-5)", () => {
-		const model = getModel("anthropic", "claude-sonnet-4-5");
+		const model = getModel("anthropic", "claude-sonnet-5");
 
 		it.skipIf(!anthropicOAuthToken)(
 			"should handle tool result with only image",

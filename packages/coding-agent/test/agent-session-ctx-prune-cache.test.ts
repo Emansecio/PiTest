@@ -9,7 +9,7 @@ import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createTestResourceLoader } from "./utilities.js";
 
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
+const model = getModel("anthropic", "claude-sonnet-5")!;
 
 describe("AgentSession transformContext prune memoization (P02)", () => {
 	it("reuses pruned result when transcript identity is unchanged", async () => {

@@ -28,7 +28,7 @@ vi.mock("../../src/core/coordinator/index.ts", async (importOriginal) => {
 	};
 });
 
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
+const model = getModel("anthropic", "claude-sonnet-5")!;
 
 const emptyAnalysis: JudgeAnalysis = {
 	consensus: [],

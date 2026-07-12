@@ -78,7 +78,7 @@ describe("pre-send overflow guard re-estimates after background compaction (#14)
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-presend-reestimate-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const agent = new Agent({ initialState: { model, systemPrompt: "Test", tools: [] } });
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);

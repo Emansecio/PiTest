@@ -52,7 +52,7 @@ interface ProviderModelPair {
 
 const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	// Anthropic
-	{ provider: "anthropic", model: "claude-sonnet-4-5", label: "anthropic-claude-sonnet-4-5" },
+	{ provider: "anthropic", model: "claude-sonnet-5", label: "anthropic-claude-sonnet-4-5" },
 	// Google
 	{ provider: "google", model: "gemini-3-flash-preview", label: "google-gemini-3-flash-preview" },
 	// OpenAI
@@ -71,7 +71,7 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	{ provider: "minimax", model: "MiniMax-M2.7", label: "minimax-m2.7" },
 	// OpenCode Zen
 	{ provider: "opencode", model: "big-pickle", label: "zen-big-pickle" },
-	{ provider: "opencode", model: "claude-sonnet-4-5", label: "zen-claude-sonnet-4-5" },
+	{ provider: "opencode", model: "claude-sonnet-5", label: "zen-claude-sonnet-4-5" },
 	{ provider: "opencode", model: "gemini-3-flash", label: "zen-gemini-3-flash" },
 	{ provider: "opencode", model: "glm-4.7-free", label: "zen-glm-4.7-free" },
 	{ provider: "opencode", model: "gpt-5.2-codex", label: "zen-gpt-5.2-codex" },

@@ -22,7 +22,7 @@ import { type Settings, SettingsManager } from "../src/core/settings-manager.js"
 import { createHarness, type Harness } from "./suite/harness.js";
 import { createTestResourceLoader } from "./utilities.js";
 
-const ANY_MODEL = getModel("anthropic", "claude-sonnet-4-5")!;
+const ANY_MODEL = getModel("anthropic", "claude-sonnet-5")!;
 
 /** A tool that always fails (the agent loop marks a THROW as isError), with a
  * DISTINCT message per call so neither the doom-loop (needs identical result)

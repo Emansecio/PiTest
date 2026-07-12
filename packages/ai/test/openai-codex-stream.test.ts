@@ -585,7 +585,7 @@ describe("openai-codex streaming", () => {
 		expect(requestedReasoning).toEqual({ effort: expectedEffort, summary: "auto" });
 	});
 
-	it.each(["gpt-5.3-codex", "gpt-5.4", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
+	it.each(["gpt-5.5", "gpt-5.5", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])(
 		"clamps %s minimal reasoning effort to low",
 		async (modelId) => {
 			const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));

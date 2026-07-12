@@ -11,7 +11,7 @@ import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { createTestResourceLoader } from "./utilities.js";
 
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
+const model = getModel("anthropic", "claude-sonnet-5")!;
 
 /** Empty temp cwd so boot does not hydrate <repo>/.pit/frequent-files.json. */
 function createSession(settingsManager: SettingsManager) {

@@ -66,7 +66,7 @@ describe("AgentSession pre-send overflow guard", () => {
 		tempDir = join(tmpdir(), `pi-presend-overflow-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const agent = new Agent({ initialState: { model, systemPrompt: "Test", tools: [] } });
 
 		sessionManager = SessionManager.inMemory();

@@ -68,7 +68,7 @@ describe("AgentSession listener isolation", () => {
 	}, 60_000);
 
 	function createSession(): AgentSession {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getModel("anthropic", "claude-sonnet-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: "Test", tools: [] },

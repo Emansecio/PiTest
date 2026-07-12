@@ -11,9 +11,9 @@ import type { Model } from "../../src/types.js";
 /** gpt-5.x ids that map thinking "off" to the explicit "none" reasoning effort. */
 const OPENAI_RESPONSES_NONE_REASONING = new Set([
 	"gpt-5.1",
-	"gpt-5.2",
-	"gpt-5.3-codex",
-	"gpt-5.4",
+	"gpt-5.5",
+	"gpt-5.5",
+	"gpt-5.5",
 	"gpt-5.4-mini",
 	"gpt-5.4-nano",
 	"gpt-5.5",
@@ -22,9 +22,9 @@ const OPENAI_RESPONSES_NONE_REASONING = new Set([
 /** Mirrors supportsOpenAiXhigh() in scripts/generate-models.ts. */
 function supportsOpenAiXhigh(id: string): boolean {
 	return (
-		id.includes("gpt-5.2") ||
+		id.includes("gpt-5.5") ||
 		id.includes("gpt-5.3") ||
-		id.includes("gpt-5.4") ||
+		id.includes("gpt-5.5") ||
 		id.includes("gpt-5.5") ||
 		id.includes("gpt-5.6")
 	);

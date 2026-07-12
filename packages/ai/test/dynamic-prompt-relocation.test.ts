@@ -17,7 +17,7 @@ function makeAssistantMessage(overrides: Partial<AssistantMessage>): AssistantMe
 		content: [{ type: "text", text: "Previous reply" }],
 		api: "openai-responses",
 		provider: "openai",
-		model: "gpt-5.2",
+		model: "gpt-5.5",
 		usage: {
 			input: 0,
 			output: 0,
@@ -72,7 +72,7 @@ interface CapturedResponsesParams {
 
 function makeResponsesModel(): Model<"openai-responses"> {
 	return {
-		id: "gpt-5.2",
+		id: "gpt-5.5",
 		name: "GPT-5.2",
 		api: "openai-responses",
 		provider: "openai",

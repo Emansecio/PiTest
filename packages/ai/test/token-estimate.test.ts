@@ -32,7 +32,7 @@ describe("chars-per-token constants (M7 single source of truth)", () => {
 		expect(charsPerToken("nonlatin")).toBe(CHARS_PER_TOKEN_NONLATIN);
 		expect(charsPerToken("serialized-summary")).toBe(CHARS_PER_TOKEN_SERIALIZED_SUMMARY);
 		// API is model-ready, but no per-family table exists yet: same answer.
-		expect(charsPerToken("prose", "claude-opus-4-6")).toBe(charsPerToken("prose"));
+		expect(charsPerToken("prose", "claude-opus-4-8")).toBe(charsPerToken("prose"));
 	});
 });
 

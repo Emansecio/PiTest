@@ -8,7 +8,7 @@ import {
 	StagnationTracker,
 } from "../src/core/stagnation.js";
 
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
+const model = getModel("anthropic", "claude-sonnet-5")!;
 
 function assistantWithToolCalls(
 	calls: Array<{ id: string; name: string; arguments?: Record<string, unknown> }>,

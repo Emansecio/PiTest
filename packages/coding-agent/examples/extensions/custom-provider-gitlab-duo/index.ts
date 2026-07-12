@@ -58,7 +58,7 @@ interface GitLabModel {
 export const MODELS: GitLabModel[] = [
 	// Anthropic
 	{
-		id: "claude-opus-4-5-20251101",
+		id: "claude-opus-4-8",
 		name: "Claude Opus 4.5",
 		backend: "anthropic",
 		baseUrl: ANTHROPIC_PROXY_URL,
@@ -69,7 +69,7 @@ export const MODELS: GitLabModel[] = [
 		maxTokens: 32000,
 	},
 	{
-		id: "claude-sonnet-4-5-20250929",
+		id: "claude-sonnet-5",
 		name: "Claude Sonnet 4.5",
 		backend: "anthropic",
 		baseUrl: ANTHROPIC_PROXY_URL,
@@ -80,7 +80,7 @@ export const MODELS: GitLabModel[] = [
 		maxTokens: 16384,
 	},
 	{
-		id: "claude-haiku-4-5-20251001",
+		id: "claude-haiku-4-5",
 		name: "Claude Haiku 4.5",
 		backend: "anthropic",
 		baseUrl: ANTHROPIC_PROXY_URL,

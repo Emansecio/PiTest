@@ -1505,6 +1505,29 @@ async function generateModels() {
 		if (REMOVED_PROVIDERS.has(allModels[i].provider)) allModels.splice(i, 1);
 	}
 
+	// Individual models intentionally cut from a KEPT provider (personal/local
+	// use). Keyed by `${provider}::${id}`. Runs after any manual model injection
+	// above, so hand-added entries are removed too. To re-enable one, drop its
+	// key from this set.
+	const REMOVED_MODELS = new Set([
+		"xai::grok-build-0.1",
+		"openai-codex::gpt-5.2",
+		"openai-codex::gpt-5.3-codex",
+		"openai-codex::gpt-5.3-codex-spark",
+		"openai-codex::gpt-5.4",
+		"anthropic::claude-opus-4-5",
+		"anthropic::claude-opus-4-5-20251101",
+		"anthropic::claude-opus-4-6",
+		"anthropic::claude-opus-4-7",
+		"anthropic::claude-sonnet-4-5",
+		"anthropic::claude-sonnet-4-5-20250929",
+		"anthropic::claude-sonnet-4-6",
+		"anthropic::claude-haiku-4-5-20251001",
+	]);
+	for (let i = allModels.length - 1; i >= 0; i--) {
+		if (REMOVED_MODELS.has(`${allModels[i].provider}::${allModels[i].id}`)) allModels.splice(i, 1);
+	}
+
 	for (const model of allModels) {
 		applyThinkingLevelMetadata(model);
 	}

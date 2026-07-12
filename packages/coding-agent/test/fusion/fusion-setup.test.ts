@@ -33,7 +33,7 @@ function fakeUi() {
 
 describe("modelRowLabel", () => {
 	it("prefers a distinct registry name", () => {
-		expect(modelRowLabel(fakeModel("claude-sonnet-4-6", "anthropic", "Claude Sonnet 4.6"))).toBe("Claude Sonnet 4.6");
+		expect(modelRowLabel(fakeModel("claude-sonnet-5", "anthropic", "Claude Sonnet 4.6"))).toBe("Claude Sonnet 4.6");
 	});
 
 	it("falls back to id when name matches", () => {
@@ -46,7 +46,7 @@ describe("FusionSetupComponent", () => {
 		const c = new FusionSetupComponent(
 			fakeUi(),
 			"claude-opus-4-8",
-			[fakeModel("claude-sonnet-4-6", "anthropic", "Claude Sonnet 4.6"), fakeModel("gpt-4o", "openai-codex")],
+			[fakeModel("claude-sonnet-5", "anthropic", "Claude Sonnet 4.6"), fakeModel("gpt-4o", "openai-codex")],
 			{ verify: true, brief: true },
 			() => {},
 			() => {},
@@ -63,7 +63,7 @@ describe("FusionSetupComponent", () => {
 	it("completes after picking two advisors and reports toggles", () => {
 		const onComplete = vi.fn();
 		const models = [
-			fakeModel("claude-sonnet-4-6", "anthropic", "Claude Sonnet 4.6"),
+			fakeModel("claude-sonnet-5", "anthropic", "Claude Sonnet 4.6"),
 			fakeModel("gpt-4o", "openai-codex"),
 		];
 		const c = new FusionSetupComponent(
@@ -96,7 +96,7 @@ describe("FusionSetupComponent", () => {
 		const c = new FusionSetupComponent(
 			fakeUi(),
 			"opus",
-			[fakeModel("claude-sonnet-4-6", "anthropic", "Claude Sonnet 4.6"), fakeModel("gpt-4o", "openai-codex")],
+			[fakeModel("claude-sonnet-5", "anthropic", "Claude Sonnet 4.6"), fakeModel("gpt-4o", "openai-codex")],
 			{ verify: true, brief: true },
 			() => {},
 			() => {},

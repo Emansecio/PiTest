@@ -42,7 +42,7 @@ function assistantText(text: string): AgentMessage {
 		timestamp: 1,
 		api: "anthropic-messages",
 		provider: "anthropic",
-		model: "claude-sonnet-4-5",
+		model: "claude-sonnet-5",
 	} as AgentMessage;
 }
 
@@ -56,7 +56,7 @@ function assistantToolCall(name: string, args: unknown): AgentMessage {
 		timestamp: 1,
 		api: "anthropic-messages",
 		provider: "anthropic",
-		model: "claude-sonnet-4-5",
+		model: "claude-sonnet-5",
 	} as AgentMessage;
 }
 
@@ -93,7 +93,7 @@ function countingStreamFn(summaryText: string): { streamFn: any; calls: () => nu
 		timestamp: 1,
 		api: "anthropic-messages",
 		provider: "anthropic",
-		model: "claude-sonnet-4-5",
+		model: "claude-sonnet-5",
 	};
 	const streamFn = (() => {
 		calls++;
@@ -123,7 +123,7 @@ function preparation(
 }
 
 describe("structural-only compaction (#7)", () => {
-	const model = getModel("anthropic", "claude-sonnet-4-5")!;
+	const model = getModel("anthropic", "claude-sonnet-5")!;
 
 	afterEach(() => {
 		delete process.env.PIT_NO_STRUCTURAL_COMPACTION;

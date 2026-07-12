@@ -136,7 +136,7 @@ describe("M3 - cache breakpoint sits on the LAST tool", () => {
 
 	it("anthropic: only the last name-sorted tool carries cache_control", () => {
 		const model: Model<"anthropic-messages"> = {
-			id: "claude-sonnet-4-5",
+			id: "claude-sonnet-5",
 			name: "Claude Sonnet",
 			api: "anthropic-messages",
 			provider: "anthropic",
