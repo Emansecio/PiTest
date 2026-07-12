@@ -297,6 +297,11 @@ const INTERRUPT_WATCHDOG_MS = 2000;
 /** Tools that may change the working tree — refresh git diff stats after success. */
 const MUTATING_TOOLS_FOR_DIFF_REFRESH = new Set(["edit", "edit_v2", "write", "bash", "ast_edit", "code"]);
 
+// Theme preview cycles fast (holding an arrow key in the settings selector) —
+// debounce the full transcript recolor so each keystroke doesn't pay for a
+// full ui.invalidate() cascade.
+const THEME_PREVIEW_INVALIDATE_MS = 90;
+
 function isDeadTerminalError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) {
 		return false;
@@ -1117,6 +1122,33 @@ export class InteractiveMode {
 
 	private _cachedMarkdownTheme?: MarkdownTheme;
 	private _cachedCodeBlockIndent?: string;
+	private _themePreviewInvalidateTimer?: ReturnType<typeof setTimeout>;
+
+	/**
+	 * Apply a theme for live preview (settings selector cycling through
+	 * themes). Cheap surfaces (markdown cache, loader suffix, editor border)
+	 * update immediately; the full transcript recolor (`ui.invalidate()`,
+	 * which cascades all children) is debounced so holding an arrow key
+	 * through the theme list doesn't pay a full invalidate per keystroke.
+	 */
+	private previewTheme(themeName: string): void {
+		const result = setTheme(themeName, true);
+		if (!result.success) return;
+		// Cheap, immediate surfaces (same set the old preview path touched):
+		this._cachedMarkdownTheme = undefined;
+		this.invalidateLoaderInterruptSuffix();
+		this.updateEditorBorderColor();
+		this.ui.requestRender();
+		// Full transcript recolor is debounced: holding an arrow key through the
+		// theme list must not pay a full invalidate per keystroke.
+		if (this._themePreviewInvalidateTimer) clearTimeout(this._themePreviewInvalidateTimer);
+		this._themePreviewInvalidateTimer = setTimeout(() => {
+			this._themePreviewInvalidateTimer = undefined;
+			this.ui.invalidate();
+			this.ui.requestRender();
+		}, THEME_PREVIEW_INVALIDATE_MS);
+		(this._themePreviewInvalidateTimer as { unref?: () => void }).unref?.();
+	}
 
 	private getMarkdownThemeWithSettings(): MarkdownTheme {
 		// The base markdown theme is "live": every entry is a closure over the
@@ -5253,14 +5285,7 @@ export class InteractiveMode {
 						}
 					},
 					onThemePreview: (themeName) => {
-						const result = setTheme(themeName, true);
-						if (result.success) {
-							// Preview: skip full ui.invalidate() (cascades all children).
-							// Clear markdown cache + loader suffix and request a differential render.
-							this._cachedMarkdownTheme = undefined;
-							this.invalidateLoaderInterruptSuffix();
-							this.ui.requestRender();
-						}
+						this.previewTheme(themeName);
 					},
 					onHideThinkingBlockChange: (hidden) => {
 						this.hideThinkingBlock = hidden;
@@ -7129,6 +7154,10 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 		this.unregisterSignalHandlers();
 		this.setTerminalProgress(false);
 		this.clearInterruptWatchdog();
+		if (this._themePreviewInvalidateTimer) {
+			clearTimeout(this._themePreviewInvalidateTimer);
+			this._themePreviewInvalidateTimer = undefined;
+		}
 		this.ephemeralStatus.dispose();
 		// Drop the hero-ignition ticker if the ease is still mid-flight at teardown.
 		this.heroIgnitionUnsub?.();
