@@ -229,6 +229,22 @@ export class Markdown implements Component {
 	// keyed by object identity, dead tokens are GC'd with it, and the key format
 	// doesn't depend on theme (which invalidate() resets via tokenLineCache).
 	private tokenKeyCache = new WeakMap<Token, { width: number; next: string; defer: boolean; key: string }>();
+	// Per-line memo for the open-code-fence body while highlight.js is deferred
+	// (see deferCodeHighlight in renderToken's "code" case): keyed by
+	// `${contentWidth} ${codeLine}` -> the FINAL (styled + wrapped) lines for
+	// that source line. The fence body is append-only until it closes, so each
+	// earlier line's styled+wrapped output is stable across streamed deltas —
+	// without this, the code branch below (plus buildTokenLines' wrap pass)
+	// would re-style and re-wrap the whole accumulated body every frame: O(L)
+	// per frame, O(L^2) over a fence of L lines. Cleared whenever no fence is
+	// open in the current render (see render()'s deferHighlightCodeIdx check)
+	// to bound memory and because a later, different fence's lines shouldn't
+	// collide with stale entries. Never consulted on the closed-fence
+	// (highlightCode) path, so the optimization can only affect intermediate
+	// streaming frames, never the final rendered output. If code-line wrap
+	// logic ever gains new inputs (e.g. a soft-wrap indicator), fold them
+	// into the key.
+	private deferredCodeLineCache = new Map<string, string[]>();
 
 	constructor(
 		text: string,
@@ -317,6 +333,11 @@ export class Markdown implements Component {
 					break;
 				}
 			}
+		}
+		// No open fence this render: nothing can hit deferredCodeLineCache, so
+		// drop it (covers the fence closing and the buffer resetting to new text).
+		if (deferHighlightCodeIdx === -1 && this.deferredCodeLineCache.size > 0) {
+			this.deferredCodeLineCache.clear();
 		}
 
 		for (let i = 0; i < tokens.length; i++) {
@@ -589,14 +610,27 @@ export class Markdown implements Component {
 	): string[] {
 		const renderedLines = this.renderToken(token, contentWidth, nextTokenType, undefined, 0, deferCodeHighlight);
 
-		// Wrap lines (NO padding, NO background yet)
+		// Wrap lines (NO padding, NO background yet). While a code fence is open
+		// (deferCodeHighlight), renderToken's "code" case already wraps every line
+		// it emits (border/rule lines are always exactly contentWidth already; the
+		// lang line and each code line are wrapped there, memoized per source line)
+		// — skip this pass entirely so we don't re-wrap the whole accumulated body
+		// on every streamed frame. deferCodeHighlight is only ever true for the
+		// single top-level "code" token being streamed (see render()'s
+		// deferHighlightCodeIdx), so this can't affect neighboring/sibling tokens.
 		const wrappedLines: string[] = [];
-		for (const line of renderedLines) {
-			if (isImageLine(line)) {
+		if (deferCodeHighlight) {
+			for (const line of renderedLines) {
 				wrappedLines.push(line);
-			} else {
-				for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
-					wrappedLines.push(wrappedLine);
+			}
+		} else {
+			for (const line of renderedLines) {
+				if (isImageLine(line)) {
+					wrappedLines.push(line);
+				} else {
+					for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
+						wrappedLines.push(wrappedLine);
+					}
 				}
 			}
 		}
@@ -805,15 +839,50 @@ export class Markdown implements Component {
 				lines.push(this.theme.codeBlockBorder(`╭${rule}╮`));
 				if (typeof token.lang === "string" && token.lang.length > 0) {
 					const langStyle = this.theme.codeBlockLang ?? this.theme.codeBlockBorder;
-					lines.push(prefix + langStyle(token.lang));
+					const langLine = prefix + langStyle(token.lang);
+					if (deferCodeHighlight) {
+						// buildTokenLines skips its own wrap pass for this token while the
+						// fence is open, so wrap eagerly here. Cheap (at most one lang line
+						// per render) — not worth memoizing.
+						for (const wrappedLine of wrapTextWithAnsi(langLine, width)) {
+							lines.push(wrappedLine);
+						}
+					} else {
+						lines.push(langLine);
+					}
 				}
 				if (this.theme.highlightCode && !deferCodeHighlight) {
 					const highlightedLines = this.theme.highlightCode(token.text, token.lang);
 					for (const hlLine of highlightedLines) {
 						lines.push(prefix + hlLine);
 					}
+				} else if (deferCodeHighlight) {
+					// The fence is open: defer highlight.js and split code by newlines,
+					// styling + wrapping each line, memoized per (contentWidth, codeLine).
+					// The body is append-only until the fence closes, so an earlier line's
+					// styled+wrapped output never changes as later lines stream in. `width`
+					// here IS contentWidth (see buildTokenLines' call above).
+					// buildTokenLines skips its own wrap pass whenever deferCodeHighlight is
+					// true, so this branch must fully wrap before pushing (unlike the plain
+					// non-deferred split/style branch below, which leaves wrapping to
+					// buildTokenLines as before).
+					const codeLines = token.text.split("\n");
+					for (const codeLine of codeLines) {
+						const cacheKey = `${width} ${codeLine}`;
+						let wrapped = this.deferredCodeLineCache.get(cacheKey);
+						if (!wrapped) {
+							const styled = prefix + this.theme.codeBlock(codeLine);
+							wrapped = wrapTextWithAnsi(styled, width);
+							this.deferredCodeLineCache.set(cacheKey, wrapped);
+						}
+						for (const wrappedLine of wrapped) {
+							lines.push(wrappedLine);
+						}
+					}
 				} else {
-					// Split code by newlines and style each line
+					// No highlightCode theme configured at all (and no fence is being
+					// deferred): split code by newlines and style each line. Wrapping is
+					// left to buildTokenLines, same as before this change.
 					const codeLines = token.text.split("\n");
 					for (const codeLine of codeLines) {
 						lines.push(prefix + this.theme.codeBlock(codeLine));

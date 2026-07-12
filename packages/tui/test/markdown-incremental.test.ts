@@ -362,3 +362,103 @@ describe("Markdown incremental open-code-fence tracking", () => {
 		assert.deepStrictEqual(md.render(80), new Markdown(resumed, 0, 0, defaultMarkdownTheme).render(80));
 	});
 });
+
+// Regression suite for deferredCodeLineCache (per-source-line memo of
+// style+wrap for the open-code-fence body while highlight.js is deferred).
+// The contract mirrors the lexation suite above: streamed renders of an open
+// fence must be byte-identical to a fresh instance at every delta, closing
+// the fence must be unaffected (never consults the memo), and the memo must
+// actually eliminate the O(L^2) re-style/re-wrap work during streaming.
+describe("Markdown open-fence code body memoization (perf)", () => {
+	/** Build a fenced code block with `lineCount` lines, some wide enough to
+	 * force word-wrap and some containing CJK/emoji, to exercise the
+	 * style+wrap memo under the trickiest width/visible-width interactions. */
+	function makeFenceDoc(lineCount: number): string {
+		const lines: string[] = [];
+		for (let i = 0; i < lineCount; i++) {
+			if (i % 7 === 0) {
+				lines.push(
+					`const s${i} = "日本語のテキスト行 🎉 emoji and CJK padding to force wrap on line ${i} of the block";`,
+				);
+			} else if (i % 5 === 0) {
+				lines.push(
+					`const longLine${i} = "a deliberately long ascii line meant to exceed the render width and force word wrap logic on line ${i}";`,
+				);
+			} else {
+				lines.push(`const x${i} = ${i};`);
+			}
+		}
+		return `Intro line.\n\n\`\`\`ts\n${lines.join("\n")}\n\`\`\`\n\nOutro line.`;
+	}
+
+	it("streaming a wide, CJK/emoji-laden open fence matches a fresh instance at every delta and width", () => {
+		const doc = makeFenceDoc(50);
+		assertStreamingEquivalence(doc, [80, 40]);
+	});
+
+	it("render after the fence closes is byte-identical to a fresh instance, with highlight intact", () => {
+		const doc = makeFenceDoc(20);
+		// Everything up to (not including) the closing "```" — the fence is still
+		// open for every prefix of `openPart`.
+		const closeMarker = "\n```\n\nOutro line.";
+		const closeIdx = doc.indexOf(closeMarker);
+		assert.ok(closeIdx > 0, "test fixture must contain the closing fence marker");
+		const openPart = doc.slice(0, closeIdx);
+
+		let highlightCalls = 0;
+		const theme = {
+			...defaultMarkdownTheme,
+			highlightCode: (code: string) => {
+				highlightCalls++;
+				return code.split("\n").map((line) => `HL:${line}`);
+			},
+		};
+
+		const persistent = new Markdown("", 0, 0, theme);
+		for (let cut = 1; cut <= openPart.length; cut += 5) {
+			persistent.setText(openPart.slice(0, cut));
+			persistent.render(80);
+		}
+		// Fence is open for every prefix above; highlight must not have run yet.
+		assert.equal(highlightCalls, 0);
+
+		persistent.setText(doc);
+		const streamedFinal = persistent.render(80);
+		// The closed-fence path (highlightCode) ran exactly once for the streamed
+		// instance's final render, proving the open-fence memo never leaks into —
+		// or is consulted for — the final rendered output.
+		assert.equal(highlightCalls, 1);
+
+		const fresh = new Markdown(doc, 0, 0, theme).render(80);
+		assert.deepStrictEqual(streamedFinal, fresh);
+		// The fresh instance also ran highlightCode once for the same final text.
+		assert.equal(highlightCalls, 2);
+	});
+
+	it("per-line style calls stay O(L), not O(L^2), while streaming a 40-line open fence in 40 deltas", () => {
+		const L = 40;
+		let codeBlockCalls = 0;
+		const theme = {
+			...defaultMarkdownTheme,
+			codeBlock: (text: string) => {
+				codeBlockCalls++;
+				return defaultMarkdownTheme.codeBlock(text);
+			},
+		};
+
+		const md = new Markdown("```ts\n", 0, 0, theme);
+		md.render(80);
+		let text = "```ts\n";
+		for (let i = 0; i < L; i++) {
+			text += `const x${i} = ${i};\n`;
+			md.setText(text);
+			md.render(80);
+		}
+
+		// O(L) would land near L (one style call per newly-appended line, plus a
+		// little slack for the re-processed trailing partial line each frame).
+		// O(L^2) would land near L*(L+1)/2 (~820 for L=40). Give generous slack
+		// while still clearly separating the two regimes.
+		assert.ok(codeBlockCalls < 4 * L, `expected O(L) codeBlock calls (< ${4 * L}), got ${codeBlockCalls} for L=${L}`);
+	});
+});
