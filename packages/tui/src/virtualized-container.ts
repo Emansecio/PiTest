@@ -4,6 +4,7 @@ import type { Component } from "./tui.ts";
 export const DEFAULT_VIRTUALIZED_TAIL_LINE_BUDGET = 200;
 
 type ChildRenderCache = {
+	component: Component;
 	width: number;
 	lines: string[];
 };
@@ -79,13 +80,16 @@ export class VirtualizedContainer implements Component {
 
 	render(width: number): string[] {
 		const children = this.children;
-		const structureChanged = width !== this.cacheWidth || this.childCaches.length !== children.length;
+		const grewByAppend =
+			width === this.cacheWidth && children.length > this.childCaches.length && this.cachedPrefixMatches(children);
+		const structureChanged =
+			!grewByAppend && (width !== this.cacheWidth || this.childCaches.length !== children.length);
 		if (structureChanged) {
 			this.cacheWidth = width;
 			this.childCaches = new Array(children.length);
 			for (let i = 0; i < children.length; i++) {
 				const lines = renderChild(children[i], width);
-				this.childCaches[i] = { width, lines };
+				this.childCaches[i] = { component: children[i], width, lines };
 			}
 			this.staleIndices.clear();
 			return this.flattenCaches();
@@ -110,7 +114,7 @@ export class VirtualizedContainer implements Component {
 				reusable = false;
 				if (minChangedIndex === -1) minChangedIndex = i;
 			}
-			this.childCaches[i] = { width, lines };
+			this.childCaches[i] = { component: children[i], width, lines };
 			this.staleIndices.delete(i);
 		}
 
@@ -124,10 +128,25 @@ export class VirtualizedContainer implements Component {
 		// contribution to flattenLines is byte-identical to last frame. Splice a
 		// slice() of that unchanged prefix with the current lines of every child
 		// from minChangedIndex onward instead of re-pushing the whole transcript.
-		if (minChangedIndex !== -1 && this.flattenLines.length > 0 && this.childOffsets.length === children.length) {
+		if (minChangedIndex !== -1 && this.flattenLines.length > 0 && this.childOffsets.length >= minChangedIndex) {
 			return this.flattenFromIndex(minChangedIndex);
 		}
 		return this.flattenCaches();
+	}
+
+	/**
+	 * True iff every already-cached child (index < this.childCaches.length)
+	 * is still the same component instance at that index in `children`. Guards
+	 * the append fast-path against a middle-insertion or external mutation of
+	 * `children` masquerading as a pure length-grew-by-append.
+	 */
+	private cachedPrefixMatches(children: Component[]): boolean {
+		for (let i = 0; i < this.childCaches.length; i++) {
+			if (this.childCaches[i].component !== children[i]) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private findHotStartIndex(children: Component[]): number {
@@ -178,7 +197,8 @@ export class VirtualizedContainer implements Component {
 	 * memoization contract (parents detect a change by array identity).
 	 */
 	private flattenFromIndex(fromIndex: number): string[] {
-		const prefixLen = this.childOffsets[fromIndex] ?? 0;
+		const prefixLen =
+			fromIndex < this.childOffsets.length ? (this.childOffsets[fromIndex] ?? 0) : this.flattenLines.length;
 		const lines = this.flattenLines.slice(0, prefixLen);
 		const offsets = this.childOffsets;
 		let offset = prefixLen;
