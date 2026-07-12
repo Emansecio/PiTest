@@ -45,6 +45,8 @@ export class VirtualizedContainer implements Component {
 		if (index !== -1) {
 			this.children.splice(index, 1);
 			this.childCaches.splice(index, 1);
+			this.flattenLines = [];
+			this.childOffsets = [];
 			this.rebuildStaleIndicesAfterRemoval(index);
 		}
 	}

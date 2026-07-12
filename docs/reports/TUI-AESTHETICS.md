@@ -203,15 +203,13 @@ Rendered by `WelcomeBox` → `computeHeroRows`
 ([`welcome-box.ts`](packages/coding-agent/src/modes/interactive/components/welcome-box.ts)):
 
 ```
-                    ██████╗  ██╗ ████████╗
-                    ██╔══██╗ ██║ ╚══██╔══╝
-                    ██████╔╝ ██║    ██║
-                    ██╔═══╝  ██║    ██║
-                    ██║      ██║    ██║
-                    ╚═╝      ╚═╝    ╚═╝
+                    ██████  ████  ██████
+                    ██  ██   ██     ██
+                    ██████   ██     ██
+                    ██       ██     ██
+                    ██      ████    ██
 
-               coding agent in your terminal · v0.75.4
-                  ● Workspace — User (home)
+               Coding agent in your terminal · v0.75.4
 ```
 
 - Fresh sessions on the default app name render a **borderless centered hero**:
@@ -223,26 +221,28 @@ Rendered by `WelcomeBox` → `computeHeroRows`
   the full gradient (`startHeroIgnition`, skipped under reduced motion /
   no-truecolor / resume).
 - Tagline stays **`muted`** with the version as a **`dim`** suffix on the same
-  centered line; the accent-colored workspace bullet centers beneath.
+  centered line. The workspace bullet was **removed from the hero** (2026-07
+  declutter pass): the footer identity line shows cwd/branch/shell-note on the
+  same fresh-session screen, so the hero copy was a straight duplicate. The
+  compact card keeps its workspace line.
 - Resumed sessions, custom app names and viewports **under 40 cols** fall back
   to the compact framed card (3-row teal → lavender wordmark via
   `wordmarkGradient`, `cardBg` + `cardPaddingX` intact) — resume line and all.
 
-### Hint block — example prompts lead, mechanics demoted
-Below the hero, two centered lines from `updateEmptyStateHint`
-(`interactive-mode.ts`) via `CenteredText` (left-aligned `Text` on a rebranded
-app, matching the card fallback):
+### Hint block — gone on the default brand
+`updateEmptyStateHint` (`interactive-mode.ts`) paints **no hint at all** under
+the hero since the 2026-07 declutter pass — just a Spacer for rhythm. Both old
+lines were removed:
 
-1. `Try "explain this codebase" · "fix the failing test" · "add a small feature"`
-   — concrete task invitations (muted), "Try" in dim.
-2. `Describe a task to get started · / commands · ! bash · drop files to attach`
-   — the mechanics line, fully dim so the examples lead the eye.
+- The `Try "explain this codebase" · …` examples line read as clutter under the
+  hero; the `Describe a task…` invitation lives in the editor placeholder.
+- The **mechanics line** (`/ commands · ! bash · drop files to attach`)
+  duplicated the startup essentials hint (`/ commands · ! bash · ⌃O more`) and
+  the expanded shortcut list, and "drop files" survives in the rotating tips.
 
-- Calm, dotted separators — unchanged and still good.
-- **`2 dup — /skills doctor` no longer paints on quiet startup** (Move 1a).
-  The hint is available via `/skills doctor`; it is not part of the welcome
-  paint. **Still deferred:** moving `Describe a task…` into the editor as a
-  real placeholder (no `@pit/tui` editor placeholder API yet).
+A rebranded app (no hero) keeps its compact left-aligned mechanics line.
+**`2 dup — /skills doctor` no longer paints on quiet startup** (Move 1a). The
+hint is available via `/skills doctor`; it is not part of the welcome paint.
 
 ### Editor — accent border, still single-line frame
 The editor border is now **`border`** (`theme.ts:1235`, cyan-blue) instead of

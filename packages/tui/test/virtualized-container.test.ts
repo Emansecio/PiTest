@@ -24,6 +24,19 @@ class CountingText implements Component {
 	invalidate(): void {}
 }
 
+class StableText implements Component {
+	private lines: string[] | undefined;
+
+	constructor(private readonly text: string) {}
+
+	render(width: number): string[] {
+		if (!this.lines) {
+			this.lines = [this.text.padEnd(Math.min(width, this.text.length + 1))];
+		}
+		return this.lines;
+	}
+}
+
 describe("VirtualizedContainer", () => {
 	it("re-renders only the tail slice on steady-state frames", () => {
 		const container = new VirtualizedContainer(1);
@@ -81,5 +94,20 @@ describe("VirtualizedContainer", () => {
 		assert.equal(a.renderCount, 2);
 		assert.equal(b.renderCount, 2);
 		assert.equal(c.renderCount, 2);
+	});
+
+	it("removes a child from the flattened output after the first render", () => {
+		const container = new VirtualizedContainer();
+		const a = new StableText("a");
+		const b = new StableText("b");
+		const c = new StableText("c");
+		container.addChild(a);
+		container.addChild(b);
+		container.addChild(c);
+
+		assert.deepEqual(container.render(20), ["a ", "b ", "c "]);
+		container.removeChild(b);
+
+		assert.deepEqual(container.render(20), ["a ", "c "]);
 	});
 });

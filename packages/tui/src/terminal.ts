@@ -403,7 +403,15 @@ export class ProcessTerminal implements Terminal {
 
 	write(data: string): void {
 		const ok = process.stdout.write(data);
-		if (!ok) this.backpressured = true;
+		// A false return means the stream's highWaterMark was crossed. On a
+		// SYNCHRONOUS stream — a Windows console, or any regular file — the bytes are
+		// already flushed by the time write() returns: writableLength is 0 and no
+		// 'drain' event will ever fire. Honoring backpressure there would wedge the
+		// flag at true forever (nothing clears it but 'drain'), so _doRenderCore would
+		// skip every non-forced frame and the UI would freeze while state kept
+		// updating. Only treat it as real backpressure when bytes are still buffered
+		// (an async pipe/socket — SSH), where 'drain' is guaranteed to come.
+		if (!ok && process.stdout.writableLength > 0) this.backpressured = true;
 		if (this.writeLogPath) {
 			try {
 				fs.appendFileSync(this.writeLogPath, data, { encoding: "utf8" });
