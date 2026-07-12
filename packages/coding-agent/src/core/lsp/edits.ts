@@ -90,12 +90,24 @@ async function resolveSafeWorkspaceUri(uri: string, cwd: string, label: string):
 export function applyTextEditsToString(content: string, edits: TextEdit[]): string {
 	const lines = content.split("\n");
 
-	const sortedEdits = [...edits].sort((a, b) => {
-		if (a.range.start.line !== b.range.start.line) {
-			return b.range.start.line - a.range.start.line;
-		}
-		return b.range.start.character - a.range.start.character;
-	});
+	// Bottom-up application; ties on start position break by array index
+	// DESCENDING: applying the later-array edit first leaves the earlier-array
+	// text in front, which is the order LSP 3.17 mandates for multiple inserts
+	// at the same position ("the order in the array defines the order in the
+	// resulting text"). A plain stable sort would apply earlier-array first and
+	// end up with the inserts reversed.
+	const sortedEdits = edits
+		.map((edit, index) => ({ edit, index }))
+		.sort((a, b) => {
+			if (a.edit.range.start.line !== b.edit.range.start.line) {
+				return b.edit.range.start.line - a.edit.range.start.line;
+			}
+			if (a.edit.range.start.character !== b.edit.range.start.character) {
+				return b.edit.range.start.character - a.edit.range.start.character;
+			}
+			return b.index - a.index;
+		})
+		.map((entry) => entry.edit);
 
 	for (const edit of sortedEdits) {
 		validateEditRange(edit.range, lines);

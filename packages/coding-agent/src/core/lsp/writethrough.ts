@@ -244,8 +244,11 @@ export async function getPostWriteDiagnostics(
 	const combined = signal ? AbortSignal.any([signal, deadline]) : deadline;
 
 	const all: Diagnostic[] = [];
-	const baseline = options?.baseline?.diagnostics ?? [];
-	let baselineCompared = options?.baseline?.fresh === true;
+	// Copy: the fallback below pushes into this array, and mutating the caller's
+	// baseline object would corrupt it for any reuse.
+	const baseline = [...(options?.baseline?.diagnostics ?? [])];
+	const baselineWasProvided = options?.baseline?.fresh === true;
+	let baselineCompared = baselineWasProvided;
 	const serverNames: string[] = [];
 
 	await Promise.allSettled(
@@ -254,7 +257,11 @@ export async function getPostWriteDiagnostics(
 			if (isProjectAwareLspServer(serverConfig)) {
 				await waitForProjectLoaded(client, combined);
 			}
-			if (!baselineCompared) {
+			// No fresh caller-provided baseline: EVERY server contributes its own
+			// previously-published diagnostics. Gating on the shared mutable flag
+			// here would let only the first server contribute, and the others' old
+			// diagnostics would then be re-reported as "new".
+			if (!baselineWasProvided) {
 				const existing = client.diagnostics.get(uri);
 				if (existing) {
 					baselineCompared = true;

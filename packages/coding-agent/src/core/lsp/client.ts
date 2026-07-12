@@ -34,7 +34,7 @@ import type {
 	ServerConfig,
 	WorkspaceEdit,
 } from "./types.ts";
-import { detectLanguageId, fileToUri, uriToFile } from "./utils.ts";
+import { canonicalUriKey, detectLanguageId, fileToUri, uriToFile } from "./utils.ts";
 
 /** Cap retained open documents per LSP client (LRU eviction via closeFile). */
 export const OPEN_FILES_LRU_CAP = 64;
@@ -275,7 +275,11 @@ export async function routeMessage(
 		const notification = message as LspJsonRpcNotification;
 		if (notification.method === "textDocument/publishDiagnostics" && notification.params) {
 			const params = notification.params as PublishDiagnosticsParams;
-			client.diagnostics.set(params.uri, {
+			// Store under the canonical URI key: every lookup (waitForDiagnostics,
+			// code_actions context, writethrough) queries with fileToUri output, and
+			// a server that re-normalizes URIs (lowercase drive / %3A on Windows)
+			// would otherwise publish under a key no lookup ever hits.
+			client.diagnostics.set(canonicalUriKey(params.uri), {
 				diagnostics: params.diagnostics,
 				version: params.version ?? null,
 			});
@@ -419,6 +423,12 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 	const existingLock = clientLocks.get(key);
 	if (existingLock) return existingLock;
 
+	// Assigned right after the IIFE below is created; the ownership guards inside
+	// (onExit / catch / finally) only run after real async work, so they always
+	// observe the assigned value. A `let` (not a direct clientPromise reference)
+	// avoids a TDZ ReferenceError if anything before the first await throws
+	// synchronously.
+	let selfLock: Promise<LspClient> | undefined;
 	const clientPromise = (async () => {
 		const command = config.resolvedCommand ?? config.command;
 		const args = config.args ?? [];
@@ -488,8 +498,13 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 
 		const onExit = (code: number | null) => {
 			client.exitCode = code;
-			clients.delete(key);
-			clientLocks.delete(key);
+			// Only drop registry entries that still belong to THIS client. A stale
+			// exit (a crash landing after this client was already shut down and a
+			// replacement began warming under the same key) must not evict the newer
+			// client or its in-flight warmup lock — that would let a third caller
+			// spawn a duplicate server and leak the replacement.
+			if (clients.get(key) === client) clients.delete(key);
+			if (clientLocks.get(key) === selfLock) clientLocks.delete(key);
 			client.resolveProjectLoaded();
 			if (client.pendingRequests.size > 0) {
 				const stderr = client.stderrBuffer
@@ -537,12 +552,13 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 			clients.set(key, client);
 			return client;
 		} catch (err) {
-			clients.delete(key);
-			clientLocks.delete(key);
+			// Same ownership guard as onExit: never evict a newer client/lock that
+			// replaced this failed attempt under the same key.
+			if (clients.get(key) === client) clients.delete(key);
 			killClientProcess(client);
 			throw err;
 		} finally {
-			clientLocks.delete(key);
+			if (clientLocks.get(key) === selfLock) clientLocks.delete(key);
 		}
 	})();
 

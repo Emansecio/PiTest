@@ -55,11 +55,28 @@ function encodeUriPath(forwardSlashPath: string): string {
 
 /** Convert a file path to a file:// URI. Handles Windows drive letters. */
 export function fileToUri(filePath: string): string {
-	const resolved = path.resolve(filePath);
+	let resolved = path.resolve(filePath);
 	if (process.platform === "win32") {
+		// Canonical (uppercase) drive-letter case, so URIs built from any path
+		// spelling produce the same string — these URIs are used as map keys and
+		// compared for equality (see canonicalUriKey).
+		if (/^[a-z]:/.test(resolved)) resolved = resolved[0].toUpperCase() + resolved.slice(1);
 		return `file:///${encodeUriPath(resolved.replace(/\\/g, "/"))}`;
 	}
 	return `file://${encodeUriPath(resolved)}`;
+}
+
+/**
+ * Canonical form of a file:// URI for map keys and equality checks. Servers may
+ * re-normalize the URIs we send them (lowercase drive letter, `:` → `%3A`,
+ * redundant percent-encoding) and echo that form back in publishDiagnostics /
+ * locations; comparing those against our own fileToUri output by raw string
+ * would silently miss. Round-tripping through uriToFile → fileToUri collapses
+ * every spelling to the client's canonical one. Non-file URIs pass through.
+ */
+export function canonicalUriKey(uri: string): string {
+	if (!uri.startsWith("file://")) return uri;
+	return fileToUri(uriToFile(uri));
 }
 
 /** Convert a file:// URI back to a file path. Handles Windows drive letters. */

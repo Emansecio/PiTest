@@ -51,6 +51,7 @@ import type {
 } from "./types.ts";
 import {
 	applyCodeAction,
+	canonicalUriKey,
 	extractHoverText,
 	fileToUri,
 	formatCodeAction,
@@ -119,8 +120,9 @@ const lspSchema = Type.Object(
 		),
 		line: Type.Optional(
 			Type.Number({
+				minimum: 1,
 				description:
-					"1-indexed line number. Required with symbol for project-aware definition/references/hover/rename/code_actions.",
+					"1-indexed line number (integer >= 1). Required with symbol for project-aware definition/references/hover/rename/code_actions.",
 			}),
 		),
 		symbol: Type.Optional(
@@ -160,6 +162,9 @@ const REFERENCE_CONTEXT_LIMIT = 50;
 const REFERENCES_RETRY_COUNT = 2;
 const REFERENCES_RETRY_DELAY_MS = 250;
 const CODE_ACTION_LIST_LIMIT = 50;
+// A query that names a CodeActionKind (LSP 3.17 §CodeActionKind): a base kind
+// optionally followed by dotted sub-kinds. Anything else is a title substring.
+const CODE_ACTION_KIND_QUERY = /^(quickfix|refactor|source|notebook)(\.[A-Za-z0-9-]+)*$/;
 const DOCUMENT_SYMBOL_LINE_LIMIT = 200;
 
 function clampTimeout(timeout: number | undefined): number {
@@ -176,7 +181,15 @@ function rangeContainsPosition(range: Location["range"], position: Position): bo
 }
 
 function isOnlyQueriedDeclaration(locations: Location[], uri: string, position: Position): boolean {
-	return locations.length === 1 && locations[0]?.uri === uri && rangeContainsPosition(locations[0].range, position);
+	// Compare canonically: the server may spell the same file's URI differently
+	// (drive case / percent-encoding on Windows), and a raw string mismatch here
+	// would silently disable the still-indexing retry below.
+	return (
+		locations.length === 1 &&
+		locations[0] !== undefined &&
+		canonicalUriKey(locations[0].uri) === canonicalUriKey(uri) &&
+		rangeContainsPosition(locations[0].range, position)
+	);
 }
 
 function normalizeLocationResult(result: Location | Location[] | LocationLink | LocationLink[] | null): Location[] {
@@ -230,7 +243,7 @@ async function resolveRenamePosition(
 		"textDocument/prepareRename",
 		{ textDocument: { uri }, position },
 		signal,
-	)) as PrepareRenameSuccess | PrepareRenameFailure | null;
+	)) as PrepareRenameSuccess | PrepareRenameFailure | Range | { defaultBehavior: boolean } | null;
 
 	if (!result) {
 		throw new Error("Rename not available at this position (prepareRename returned null)");
@@ -240,6 +253,12 @@ async function resolveRenamePosition(
 	}
 	if ("range" in result && result.range) {
 		return result.range.start;
+	}
+	// Spec also allows a bare Range ({start, end}) — anchor to its start like the
+	// wrapped form above. {defaultBehavior: true} (and anything else) keeps the
+	// substring-resolved position.
+	if ("start" in result && "end" in result) {
+		return (result as Range).start;
 	}
 	return position;
 }
@@ -408,7 +427,11 @@ export function createLspToolDefinition(
 				assertProjectAwarePosition(action, { line, symbol }, serverConfig);
 
 				const uri = targetFile ? fileToUri(targetFile) : "";
-				const resolvedLine = line ?? 1;
+				// Clamp to a 1-based integer line: a model-supplied 0/negative/fractional
+				// line would otherwise send an invalid LSP position (line -1, fractional),
+				// while resolveSymbolColumn clamps internally — leaving the column resolved
+				// on a different line than the position sent. One clamp keeps them aligned.
+				const resolvedLine = typeof line === "number" && Number.isFinite(line) ? Math.max(1, Math.trunc(line)) : 1;
 				const resolvedCharacter = targetFile ? await resolveSymbolColumn(targetFile, resolvedLine, symbol) : 0;
 				let position = { line: resolvedLine - 1, character: resolvedCharacter };
 
@@ -510,9 +533,16 @@ export function createLspToolDefinition(
 
 					case "code_actions": {
 						const diagnostics = client.diagnostics.get(uri)?.diagnostics ?? [];
+						// `context.only` takes CodeActionKinds ("quickfix", "refactor.extract"),
+						// not title text. Only forward `query` as a kind filter when it is
+						// kind-shaped; a title substring there would make the server return
+						// nothing while apply-mode (title matching) finds it — the tool would
+						// contradict its own documented "query matches title or index".
+						const kindQuery =
+							!apply && query && CODE_ACTION_KIND_QUERY.test(query.trim()) ? query.trim() : undefined;
 						const context: CodeActionContext = {
 							diagnostics,
-							only: !apply && query ? [query] : undefined,
+							only: kindQuery ? [kindQuery] : undefined,
 							triggerKind: 1,
 						};
 						const result = (await sendRequest(
@@ -574,11 +604,27 @@ export function createLspToolDefinition(
 							output = `Applied "${applied.title}":\n${summaryLines.join("\n")}`;
 							break;
 						}
-						const visibleActions = result.slice(0, CODE_ACTION_LIST_LIMIT);
-						const actionLines = visibleActions.map((item, index) => `  ${formatCodeAction(item, index)}`);
-						const omitted = result.length - visibleActions.length;
+						// A non-kind query filters the listing by title substring — the same
+						// matching apply-mode uses, so list → apply behaves consistently.
+						// Indexes shown are the UNfiltered positions so they stay valid for
+						// a follow-up apply call. Empty filter falls back to the full list.
+						let listed = result.map((item, index) => ({ item, index }));
+						let filterNote = "";
+						if (!kindQuery && query && query.trim().length > 0) {
+							const q = query.trim().toLowerCase();
+							const matching = listed.filter(({ item }) => item.title.toLowerCase().includes(q));
+							if (matching.length > 0) {
+								listed = matching;
+								filterNote = ` matching "${query.trim()}"`;
+							} else {
+								filterNote = ` (none matched "${query.trim()}"; showing all)`;
+							}
+						}
+						const visibleActions = listed.slice(0, CODE_ACTION_LIST_LIMIT);
+						const actionLines = visibleActions.map(({ item, index }) => `  ${formatCodeAction(item, index)}`);
+						const omitted = listed.length - visibleActions.length;
 						const omittedLine = omitted > 0 ? `\n  ... ${omitted} additional code action(s) omitted` : "";
-						output = `${result.length} code action(s):\n${actionLines.join("\n")}${omittedLine}`;
+						output = `${listed.length} code action(s)${filterNote}:\n${actionLines.join("\n")}${omittedLine}`;
 						break;
 					}
 
