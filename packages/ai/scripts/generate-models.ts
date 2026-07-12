@@ -1523,6 +1523,25 @@ async function generateModels() {
 		"anthropic::claude-sonnet-4-5-20250929",
 		"anthropic::claude-sonnet-4-6",
 		"anthropic::claude-haiku-4-5-20251001",
+		// De-dupe: drop the opencode-proxied copies of models that exist natively
+		// under anthropic / openai-codex (keep the native entry).
+		"opencode::claude-fable-5",
+		"opencode::claude-opus-4-8",
+		"opencode::claude-sonnet-5",
+		"opencode::gpt-5.5",
+		// De-dupe: opencode-go keeps only models opencode doesn't already offer;
+		// drop the exact duplicates shared with opencode.
+		"opencode-go::deepseek-v4-flash",
+		"opencode-go::deepseek-v4-pro",
+		"opencode-go::glm-5",
+		"opencode-go::glm-5.1",
+		"opencode-go::glm-5.2",
+		"opencode-go::kimi-k2.5",
+		"opencode-go::kimi-k2.6",
+		"opencode-go::minimax-m2.5",
+		"opencode-go::minimax-m2.7",
+		"opencode-go::qwen3.5-plus",
+		"opencode-go::qwen3.6-plus",
 	]);
 	for (let i = allModels.length - 1; i >= 0; i--) {
 		if (REMOVED_MODELS.has(`${allModels[i].provider}::${allModels[i].id}`)) allModels.splice(i, 1);
