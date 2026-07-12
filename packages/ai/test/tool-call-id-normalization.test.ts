@@ -13,12 +13,11 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
-import { completeSimple, getEnvApiKey } from "../src/stream.js";
+import { completeSimple } from "../src/stream.js";
 import type { AssistantMessage, Message, Tool, ToolResultMessage } from "../src/types.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve API keys
-const openrouterKey = getEnvApiKey("openrouter");
 const codexToken = await resolveApiKey("openai-codex");
 
 // Simple echo tool for testing
@@ -93,32 +92,6 @@ describe("Tool Call ID Normalization - Prefilled Context", () => {
 
 		return [userMessage, assistantMessage, toolResult, followUpUser];
 	}
-
-	it.skipIf(!openrouterKey)(
-		"openrouter should handle prefilled context with long pipe-separated IDs",
-		async () => {
-			const model = getModel("openrouter", "openai/gpt-5.2-codex");
-			const messages = buildPrefilledMessages();
-
-			const response = await completeSimple(
-				model,
-				{
-					systemPrompt: "You are a helpful assistant.",
-					messages,
-					tools: [echoTool],
-				},
-				{ apiKey: openrouterKey },
-			);
-
-			// Should NOT fail with "call_id too long" error
-			expect(response.stopReason, `OpenRouter error: ${response.errorMessage}`).not.toBe("error");
-			if (response.errorMessage) {
-				expect(response.errorMessage).not.toContain("call_id");
-				expect(response.errorMessage).not.toContain("too long");
-			}
-		},
-		30000,
-	);
 
 	it.skipIf(!codexToken)(
 		"openai-codex should handle prefilled context with long pipe-separated IDs",

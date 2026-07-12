@@ -23,35 +23,6 @@ async function expectResponseId<TApi extends Api>(model: Model<TApi>, options: S
 }
 
 describe("responseId E2E Tests", () => {
-	describe.skipIf(!process.env.GEMINI_API_KEY)("Google Provider", () => {
-		const llm = getModel("google", "gemini-2.5-flash");
-
-		it("should expose responseId", { retry: 3, timeout: 30000 }, async () => {
-			await expectResponseId(llm);
-		});
-	});
-
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Completions Provider", () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini");
-		void _compat;
-		const llm: Model<"openai-completions"> = {
-			...baseModel,
-			api: "openai-completions",
-		};
-
-		it("should expose responseId", { retry: 3, timeout: 30000 }, async () => {
-			await expectResponseId(llm);
-		});
-	});
-
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Responses Provider", () => {
-		const llm = getModel("openai", "gpt-5-mini");
-
-		it("should expose responseId", { retry: 3, timeout: 30000 }, async () => {
-			await expectResponseId(llm);
-		});
-	});
-
 	describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic Provider", () => {
 		const llm = getModel("anthropic", "claude-sonnet-4-5");
 

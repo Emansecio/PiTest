@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { openaiCompletionsModel } from "./helpers/pruned-fixtures.js";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.js";
 import type { Model } from "../src/types.js";
+import { openaiCompletionsModel } from "./helpers/pruned-fixtures.js";
 
 interface FakeOpenAIClientOptions {
 	apiKey: string;

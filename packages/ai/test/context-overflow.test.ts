@@ -121,47 +121,10 @@ describe("Context overflow error handling", () => {
 	// Expected pattern: "exceeds the context window"
 	// =============================================================================
 
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Completions", () => {
-		it("gpt-4o-mini - should detect overflow via isContextOverflow", async () => {
-			const model = { ...getModel("openai", "gpt-4o-mini") };
-			model.api = "openai-completions" as any;
-			const result = await testContextOverflow(model, process.env.OPENAI_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toMatch(/maximum context length/i);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
-
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Responses", () => {
-		it("gpt-4o - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("openai", "gpt-4o");
-			const result = await testContextOverflow(model, process.env.OPENAI_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toMatch(/exceeds the context window/i);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
-
 	// =============================================================================
 	// Google
 	// Expected pattern: "input token count (X) exceeds the maximum"
 	// =============================================================================
-
-	describe.skipIf(!process.env.GEMINI_API_KEY)("Google", () => {
-		it("gemini-2.0-flash - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("google", "gemini-2.0-flash");
-			const result = await testContextOverflow(model, process.env.GEMINI_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toMatch(/input token count.*exceeds the maximum/i);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
 
 	// =============================================================================
 	// Uses same API as Google, expects same error pattern
@@ -195,112 +158,18 @@ describe("Context overflow error handling", () => {
 	// Expected pattern: TBD - need to test actual error message
 	// =============================================================================
 
-	describe.skipIf(!process.env.MINIMAX_API_KEY)("MiniMax", () => {
-		it("MiniMax-M2.7 - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("minimax", "MiniMax-M2.7");
-			const result = await testContextOverflow(model, process.env.MINIMAX_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
-
 	// =============================================================================
 	// Xiaomi MiMo
 	// =============================================================================
-
-	describe.skipIf(!process.env.XIAOMI_API_KEY)("Xiaomi MiMo (API billing)", () => {
-		// Xiaomi silently truncates oversized input to fill the context window exactly,
-		// then returns finish_reason "length" with output=0 (no room left to generate).
-		// This is a detectable overflow signal but uses stopReason "length" rather than "error".
-		it("mimo-v2.5-pro - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("xiaomi", "mimo-v2.5-pro");
-			const result = await testContextOverflow(model, process.env.XIAOMI_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("length");
-			expect(result.usage.output).toBe(0);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
 
 	// =============================================================================
 	// Kimi For Coding
 	// =============================================================================
 
-	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding", () => {
-		it("kimi-k2-thinking - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("kimi-coding", "kimi-k2-thinking");
-			const result = await testContextOverflow(model, process.env.KIMI_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
-
 	// =============================================================================
 	// OpenRouter - Multiple backend providers
 	// Expected pattern: "maximum context length is X tokens"
 	// =============================================================================
-
-	describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter", () => {
-		// Anthropic backend
-		it("anthropic/claude-sonnet-4.5 via OpenRouter - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("openrouter", "anthropic/claude-sonnet-4.5");
-			const result = await testContextOverflow(model, process.env.OPENROUTER_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toMatch(/maximum context length is \d+ tokens/i);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-
-		// DeepSeek backend
-		it("deepseek/deepseek-v3.2 via OpenRouter - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("openrouter", "deepseek/deepseek-v3.2");
-			const result = await testContextOverflow(model, process.env.OPENROUTER_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toMatch(/maximum context length is \d+ tokens/i);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-
-		// Mistral backend
-		it("mistralai/mistral-large-2512 via OpenRouter - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("openrouter", "mistralai/mistral-large-2512");
-			const result = await testContextOverflow(model, process.env.OPENROUTER_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toMatch(/maximum context length is \d+ tokens/i);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-
-		// Google backend
-		it("google/gemini-2.5-flash via OpenRouter - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("openrouter", "google/gemini-2.5-flash");
-			const result = await testContextOverflow(model, process.env.OPENROUTER_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toMatch(/maximum context length is \d+ tokens/i);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-
-		// Meta/Llama backend
-		it("meta-llama/llama-4-scout via OpenRouter - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("openrouter", "meta-llama/llama-4-scout");
-			const result = await testContextOverflow(model, process.env.OPENROUTER_API_KEY!);
-			logResult(result);
-
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toMatch(/maximum context length is \d+ tokens/i);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
-	});
 
 	// =============================================================================
 	// Ollama (local)

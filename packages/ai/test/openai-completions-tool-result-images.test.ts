@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { openaiCompletionsModel } from "./helpers/pruned-fixtures.js";
 import { convertMessages } from "../src/providers/openai-completions.js";
 import type {
 	AssistantMessage,
@@ -9,6 +8,7 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "../src/types.js";
+import { openaiCompletionsModel } from "./helpers/pruned-fixtures.js";
 
 const emptyUsage: Usage = {
 	input: 0,
