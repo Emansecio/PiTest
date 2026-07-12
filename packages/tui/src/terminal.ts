@@ -481,6 +481,8 @@ export class ProcessTerminal implements Terminal {
 				this.progressInterval = setInterval(() => {
 					process.stdout.write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 				}, TERMINAL_PROGRESS_KEEPALIVE_MS);
+				// Don't keep the event loop alive just for the progress keepalive.
+				(this.progressInterval as { unref?: () => void }).unref?.();
 			}
 		} else {
 			this.clearProgressInterval();

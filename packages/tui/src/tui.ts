@@ -473,6 +473,12 @@ export class TUI extends Container {
 	private animationTickBuffer: AnimationFrameCallback[] = [];
 	private animationTimer: NodeJS.Timeout | undefined;
 	private static readonly ANIMATION_FRAME_MS = 16;
+	// Tracks CONSECUTIVE failures per callback so a persistently-throwing
+	// animation (e.g. a spinner tick with a bug) can be evicted instead of
+	// spinning the renderer at 60fps forever. Reset to zero on any successful
+	// tick; a callback is only ever present here while it has an active streak.
+	private animationFaultCounts = new Map<AnimationFrameCallback, number>();
+	private static readonly ANIMATION_FAULT_EVICT_AFTER = 5;
 	private cursorRow = 0; // Logical cursor row (end of rendered content)
 	private hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
 	private showHardwareCursor = process.env.PIT_HARDWARE_CURSOR === "1";
@@ -752,9 +758,19 @@ export class TUI extends Container {
 		this.terminal.write("\x1b[16t");
 	}
 
+	/**
+	 * Stops rendering and input handling. Registered animation callbacks are
+	 * discarded here (not just the underlying timer): if start() is called
+	 * again on this instance (embed/restart), stale closures from components
+	 * that were torn down alongside this stop() must not resume ticking.
+	 * Callers that intend to keep animating across a restart need to
+	 * re-subscribe via addAnimationCallback() after the next start().
+	 */
 	stop(): void {
 		this.stopped = true;
 		this.stopAnimationLoop();
+		this.animationCallbacks.clear();
+		this.animationFaultCounts.clear();
 		if (this.renderTimer) {
 			clearTimeout(this.renderTimer);
 			this.renderTimer = undefined;
@@ -844,6 +860,7 @@ export class TUI extends Container {
 		this.startAnimationLoop();
 		return () => {
 			this.animationCallbacks.delete(callback);
+			this.animationFaultCounts.delete(callback);
 			if (this.animationCallbacks.size === 0) this.stopAnimationLoop();
 		};
 	}
@@ -876,15 +893,30 @@ export class TUI extends Container {
 		buf.length = 0;
 		for (const callback of this.animationCallbacks) buf.push(callback);
 		for (let i = 0; i < buf.length; i++) {
+			const callback = buf[i]!;
 			// Isolate each callback: a throwing animation tick (spinner/pulse) must not
 			// escape the setInterval and crash the process, nor stop the other callbacks.
 			try {
-				if (buf[i]!(now)) dirty = true;
+				if (callback(now)) dirty = true;
+				// Fast path: avoid a Map lookup/delete per callback per frame unless
+				// some callback is currently mid-failure-streak.
+				if (this.animationFaultCounts.size > 0 && this.animationFaultCounts.has(callback)) {
+					this.animationFaultCounts.delete(callback);
+				}
 			} catch (error) {
 				this.recordRenderFault("animation", error);
 				// Keep the feedback inside the normal renderer so a faulty animation
 				// can't corrupt the terminal with an out-of-band write.
 				dirty = true;
+				const failures = (this.animationFaultCounts.get(callback) ?? 0) + 1;
+				if (failures >= TUI.ANIMATION_FAULT_EVICT_AFTER) {
+					// A persistently-throwing callback would otherwise re-throw every
+					// 16ms forever, pinning the render loop at 60fps. Evict it instead.
+					this.animationCallbacks.delete(callback);
+					this.animationFaultCounts.delete(callback);
+				} else {
+					this.animationFaultCounts.set(callback, failures);
+				}
 			}
 		}
 		buf.length = 0;
