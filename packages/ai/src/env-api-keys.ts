@@ -40,14 +40,8 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 	}
 
 	const envMap: Record<string, string> = {
-		openai: "OPENAI_API_KEY",
-		google: "GEMINI_API_KEY",
-		openrouter: "OPENROUTER_API_KEY",
-		minimax: "MINIMAX_API_KEY",
 		opencode: "OPENCODE_API_KEY",
 		"opencode-go": "OPENCODE_API_KEY",
-		"kimi-coding": "KIMI_API_KEY",
-		xiaomi: "XIAOMI_API_KEY",
 		xai: "XAI_API_KEY",
 	};
 

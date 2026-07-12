@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getModel } from "../src/models.js";
+import { openaiCompletionsModel } from "./helpers/pruned-fixtures.js";
 import { streamSimple } from "../src/stream.js";
 
 // Empty tools arrays must NOT be serialized as `tools: []` — some OpenAI-compatible
@@ -59,7 +59,7 @@ describe("openai-completions empty tools handling", () => {
 	});
 
 	it("omits tools field when context.tools is an empty array", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = openaiCompletionsModel()!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 
 		await streamSimple(
@@ -76,7 +76,7 @@ describe("openai-completions empty tools handling", () => {
 	});
 
 	it("omits tools field when context.tools is undefined", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = openaiCompletionsModel()!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 
 		await streamSimple(
@@ -92,7 +92,7 @@ describe("openai-completions empty tools handling", () => {
 	});
 
 	it("does not send default max token fields", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = openaiCompletionsModel()!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 
 		await streamSimple(
@@ -109,7 +109,7 @@ describe("openai-completions empty tools handling", () => {
 	});
 
 	it("sends explicit maxTokens", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = openaiCompletionsModel()!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 
 		await streamSimple(
@@ -126,7 +126,7 @@ describe("openai-completions empty tools handling", () => {
 	});
 
 	it("still emits tools: [] for Anthropic/LiteLLM proxy when conversation has tool history", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = openaiCompletionsModel()!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 
 		await streamSimple(

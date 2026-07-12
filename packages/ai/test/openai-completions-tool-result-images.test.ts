@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.js";
+import { openaiCompletionsModel } from "./helpers/pruned-fixtures.js";
 import { convertMessages } from "../src/providers/openai-completions.js";
 import type {
 	AssistantMessage,
@@ -54,7 +54,7 @@ function buildToolResult(toolCallId: string, timestamp: number): ToolResultMessa
 
 describe("openai-completions convertMessages", () => {
 	it("batches tool-result images after consecutive tool results", () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini");
+		const { compat: _compat, ...baseModel } = openaiCompletionsModel();
 		const model: Model<"openai-completions"> = {
 			...baseModel,
 			api: "openai-completions",

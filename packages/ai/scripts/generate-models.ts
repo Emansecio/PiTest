@@ -1477,13 +1477,19 @@ async function generateModels() {
 	// reach models.generated.ts. To re-enable one, drop it from this set AND restore
 	// it in KnownProvider (types.ts), env-api-keys.ts, and provider-display-names.ts.
 	const REMOVED_PROVIDERS = new Set([
+		"google",
+		"openai",
+		"openrouter",
+		"minimax",
+		"minimax-cn",
+		"kimi-coding",
+		"xiaomi",
 		"deepseek",
 		"groq",
 		"cerebras",
 		"fireworks",
 		"together",
 		"huggingface",
-		"minimax-cn",
 		"moonshotai",
 		"moonshotai-cn",
 		"cloudflare-workers-ai",

@@ -6,6 +6,7 @@ import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { Api, Context, Model, StreamOptions, Tool, ToolResultMessage } from "../src/index.js";
 import { complete, getModel } from "../src/index.js";
+import { openaiResponsesModel } from "./helpers/pruned-fixtures.js";
 import { resolveApiKey } from "./oauth.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
@@ -150,7 +151,7 @@ async function verifyToolResultImagesStayInFunctionCallOutput<TApi extends Api>(
 
 describe("Responses API tool result images", () => {
 	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Responses Provider (gpt-5-mini)", () => {
-		const model = getModel("openai", "gpt-5-mini");
+		const model = openaiResponsesModel("gpt-5-mini");
 
 		it("should send tool result images in function_call_output", { retry: 3, timeout: 30000 }, async () => {
 			await verifyToolResultImagesStayInFunctionCallOutput(model, { reasoningEffort: "low" });

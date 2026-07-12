@@ -123,7 +123,7 @@ export function serializeToolArgs(toolCall: ToolCall): string {
 }
 
 /** Providers whose tool-call ids follow the OpenAI Responses convention. */
-export const RESPONSES_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+export const RESPONSES_TOOL_CALL_PROVIDERS = new Set(["openai-codex", "opencode"]);
 
 /** Cost multiplier applied to a response's usage based on its service tier. */
 function getServiceTierCostMultiplier(

@@ -71,15 +71,9 @@ export type ImagesApi = KnownImagesApi | (string & {});
 
 export type KnownProvider =
 	| "anthropic"
-	| "google"
-	| "openai"
 	| "openai-codex"
-	| "openrouter"
-	| "minimax"
 	| "opencode"
 	| "opencode-go"
-	| "kimi-coding"
-	| "xiaomi"
 	| "xai";
 export type Provider = KnownProvider | string;
 

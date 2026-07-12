@@ -1,6 +1,5 @@
 import { Type } from "typebox";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getModel } from "../src/models.js";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.js";
 import type { Model } from "../src/types.js";
 
@@ -153,7 +152,21 @@ describe("openai-completions cacheControlFormat", () => {
 	});
 
 	it("preserves Anthropic-style cache markers for OpenRouter Anthropic models", async () => {
-		const model = getModel("openrouter", "anthropic/claude-sonnet-4.5");
+		// OpenRouter is no longer a built-in provider, but a custom OpenAI-compatible
+		// provider pointed at openrouter.ai must still get the anthropic cache-control
+		// convention for Anthropic-family model ids (detected by base URL).
+		const model: Model<"openai-completions"> = {
+			id: "anthropic/claude-sonnet-4.5",
+			name: "Claude Sonnet 4.5 (via OpenRouter)",
+			api: "openai-completions",
+			provider: "my-openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200000,
+			maxTokens: 64000,
+		};
 		const params = await capturePayload(model);
 		expectAnthropicCacheMarkers(params);
 	});

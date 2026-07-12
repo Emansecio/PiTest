@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { stream } from "../src/stream.js";
 import type { Context, Model } from "../src/types.js";
+import { openaiResponsesModel } from "./helpers/pruned-fixtures.js";
 
 describe("Cache Retention (PIT_CACHE_RETENTION)", () => {
 	const originalEnv = process.env.PIT_CACHE_RETENTION;
@@ -228,7 +229,7 @@ describe("Cache Retention (PIT_CACHE_RETENTION)", () => {
 		it.skipIf(!process.env.OPENAI_API_KEY)(
 			"should not set prompt_cache_retention when PIT_CACHE_RETENTION is not set",
 			async () => {
-				const model = getModel("openai", "gpt-4o-mini");
+				const model = openaiResponsesModel("gpt-4o-mini");
 				let capturedPayload: any = null;
 
 				const s = stream(model, context, {
@@ -251,7 +252,7 @@ describe("Cache Retention (PIT_CACHE_RETENTION)", () => {
 			"should set prompt_cache_retention to 24h when PIT_CACHE_RETENTION=long",
 			async () => {
 				process.env.PIT_CACHE_RETENTION = "long";
-				const model = getModel("openai", "gpt-4o-mini");
+				const model = openaiResponsesModel("gpt-4o-mini");
 				let capturedPayload: any = null;
 
 				const s = stream(model, context, {
@@ -274,7 +275,7 @@ describe("Cache Retention (PIT_CACHE_RETENTION)", () => {
 			process.env.PIT_CACHE_RETENTION = "long";
 
 			// Create a model with a different baseUrl (simulating a proxy)
-			const baseModel = getModel("openai", "gpt-4o-mini");
+			const baseModel = openaiResponsesModel("gpt-4o-mini");
 			const proxyModel = {
 				...baseModel,
 				baseUrl: "https://my-proxy.example.com/v1",
@@ -306,7 +307,7 @@ describe("Cache Retention (PIT_CACHE_RETENTION)", () => {
 
 		it("should omit prompt_cache_retention when supportsLongCacheRetention is false", async () => {
 			const model = {
-				...getModel("openai", "gpt-4o-mini"),
+				...openaiResponsesModel("gpt-4o-mini"),
 				compat: { supportsLongCacheRetention: false },
 			};
 			let capturedPayload: any = null;
@@ -335,7 +336,7 @@ describe("Cache Retention (PIT_CACHE_RETENTION)", () => {
 		});
 
 		it("should omit prompt_cache_key when cacheRetention is none", async () => {
-			const model = getModel("openai", "gpt-4o-mini");
+			const model = openaiResponsesModel("gpt-4o-mini");
 			let capturedPayload: any = null;
 
 			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");
@@ -363,7 +364,7 @@ describe("Cache Retention (PIT_CACHE_RETENTION)", () => {
 		});
 
 		it("should set prompt_cache_retention when cacheRetention is long", async () => {
-			const model = getModel("openai", "gpt-4o-mini");
+			const model = openaiResponsesModel("gpt-4o-mini");
 			let capturedPayload: any = null;
 
 			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");

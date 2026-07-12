@@ -786,10 +786,6 @@ export function convertMessages(
 			return sanitizeToolCallId(callId, 40);
 		}
 
-		// Truncate-only (no charset sanitize) for the openai provider: existing ids
-		// already match the required pattern, so this intentionally diverges from
-		// sanitizeToolCallId and must NOT be folded into it.
-		if (model.provider === "openai") return id.length > 40 ? id.slice(0, 40) : id;
 		return id;
 	};
 
@@ -1155,7 +1151,11 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 	const useMaxTokens = baseUrl.includes("chutes.ai") || isMoonshot || isCloudflareAiGateway || isTogether;
 
 	const isDeepSeek = provider === "deepseek" || baseUrl.includes("deepseek.com");
-	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
+	// OpenRouter is no longer a built-in provider, but users can still add it as a
+	// custom OpenAI-compatible endpoint by base URL — keep the anthropic cache-control
+	// convention for Anthropic-family model ids routed through it.
+	const cacheControlFormat =
+		baseUrl.includes("openrouter.ai") && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
 
 	return {
 		supportsStore: !isNonStandard,
@@ -1171,7 +1171,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 			? "deepseek"
 			: isTogether
 				? "together"
-				: provider === "openrouter" || baseUrl.includes("openrouter.ai")
+				: baseUrl.includes("openrouter.ai")
 					? "openrouter"
 					: "openai",
 		openRouterRouting: {},
