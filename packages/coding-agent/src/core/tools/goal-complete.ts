@@ -81,15 +81,18 @@ export function createGoalCompleteToolDefinition(
 			}
 			// R7: don't let the agent declare the goal done while the project check
 			// is red. Run the configured check once; refuse on failure with the output.
+			// A probe that merely TIMED OUT is inconclusive, not red: refusing on it
+			// would permanently block goal completion in any repo whose check outruns
+			// verification.timeoutMs (the agent can never make a slow check faster).
 			const probe = getCurrentVerificationProbe();
 			if (probe) {
 				const result = await probe();
-				if (result && !result.ok) {
+				if (result && !result.ok && !result.timedOut) {
 					// Summarize the dominant failure (tsc/biome/vitest/thrown) instead of a raw
 					// tail slice, so the model sees the root-cause error — same extraction the
 					// end-of-turn verification gate uses. Falls back to a tail when nothing matches.
 					const tail = summarizeCheckFailure(result.output, "");
-					const status = result.timedOut ? "timed out" : `exited ${result.exitCode}`;
+					const status = `exited ${result.exitCode}`;
 					return {
 						content: [
 							{

@@ -3525,11 +3525,60 @@ export class AgentSession implements CompactionHost, FusionHost {
 			// Native verification gate: after a code-modifying turn, run the project
 			// check and re-inject failures so the agent self-corrects before "done".
 			await this._runVerificationGate(options);
+
+			// Re-drain: the gate's fix turns can background NEW checks; without this
+			// second pass they would outlive the turn unseen and their verdicts would
+			// be lost (or resurface later). Jobs the first drain already gave up on
+			// are excluded via _handledCheckJobIds, so this never re-waits on them.
+			await this._awaitPendingChecksBeforeHandoff(options);
 		} finally {
+			// Whatever verification job is STILL running when this prompt hands back
+			// is this turn's leftover — mark it handled so a future unrelated prompt
+			// never blocks on (or reports) a stale check "out of nowhere".
+			this._markLingeringCheckJobsHandled();
 			// UI settles the working loader / deferred turn-done on this event. Emitted
 			// only from the outer prompt() owner (not re-entrant continuation calls).
 			this.emit({ type: "prompt_end" });
 		}
+	}
+
+	/**
+	 * Check-job ids the drain has already handed off: it gave up waiting on them
+	 * (budget spent) or the prompt ended with them still running. Never re-drained
+	 * in later turns — a stale check backgrounded turns ago must not resurface
+	 * "out of nowhere" at the end of an unrelated prompt. Pruned against the live
+	 * registry whenever it is updated, so ids of evicted/killed jobs don't pile up.
+	 */
+	private readonly _handledCheckJobIds = new Set<string>();
+
+	/**
+	 * Resolved check commands that already timed out this session. The gate skips
+	 * re-running them (a command's duration doesn't change turn to turn), so a
+	 * heavy project check costs at most ONE timeoutMs of post-turn wait per
+	 * session instead of one per file-touching turn. Keyed by the resolved
+	 * command string: changing `verification.command`/`timeoutMs` mid-session to
+	 * something that resolves differently re-arms the gate naturally.
+	 */
+	private readonly _sessionTimedOutChecks = new Set<string>();
+
+	/** Verification jobs still running that no drain this session has handed off yet. */
+	private _undrainedVerificationJobs(): BashBackgroundJob[] {
+		return pendingVerificationJobs(listBashBackgroundJobs()).filter((j) => !this._handledCheckJobIds.has(j.id));
+	}
+
+	/**
+	 * Mark every still-running verification job as handled and prune ids that no
+	 * longer exist in the registry. Called when the outer prompt() hands back:
+	 * whatever is still running at that point belongs to THIS turn's story, and
+	 * must not be re-awaited (or re-reported) by a future unrelated prompt.
+	 */
+	private _markLingeringCheckJobsHandled(): void {
+		const live = listBashBackgroundJobs();
+		const liveIds = new Set(live.map((j) => j.id));
+		for (const id of this._handledCheckJobIds) {
+			if (!liveIds.has(id)) this._handledCheckJobIds.delete(id);
+		}
+		for (const job of pendingVerificationJobs(live)) this._handledCheckJobIds.add(job.id);
 	}
 
 	/**
@@ -3550,7 +3599,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			while (true) {
 				if (abort.signal.aborted || this._userInterrupted) return;
 
-				const pending = pendingVerificationJobs(listBashBackgroundJobs());
+				const pending = this._undrainedVerificationJobs();
 				if (pending.length === 0) return;
 
 				const ids = new Set(pending.map((j) => j.id));
@@ -3620,7 +3669,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 					});
 				}
 
-				if (fixes >= settings.maxFixAttempts) return;
+				if (fixes >= settings.maxFixAttempts) {
+					// Budget spent with jobs still running: hand them off for good. Without
+					// this, a re-drain in the same prompt (post-gate) — or the next prompt's
+					// drain — would wait out maxWaitMs on the very jobs we just gave up on.
+					for (const job of running) this._handledCheckJobIds.add(job.id);
+					return;
+				}
 
 				fixes++;
 				await this._promptOnce(pendingChecksPrompt(failed, running), {
@@ -3910,16 +3965,17 @@ export class AgentSession implements CompactionHost, FusionHost {
 	 * project check + fix loop. Extracted from `_runVerificationGate` so the
 	 * self-review phase can run afterward while SHARING the same fix budget.
 	 * Returns how many fixes it consumed and a status: `passed` (green),
-	 * `exhausted` (still red, budget spent), `aborted`, or `inert` (no check
-	 * command and no functional-web failure). Only `passed`/`inert` let the
-	 * review proceed.
+	 * `exhausted` (still red, budget spent), `aborted`, `inert` (no check
+	 * command and no functional-web failure), or `timeout` (check outran
+	 * timeoutMs — inconclusive, treated like `inert`: no fix prompts). Only
+	 * `passed`/`inert`/`timeout` let the review proceed.
 	 */
 	private async _runVerificationCheckPhase(
 		settings: ReturnType<SettingsManager["getVerificationSettings"]>,
 		maxAttempts: number,
 		abort: AbortController,
 		options?: PromptOptions,
-	): Promise<{ fixesUsed: number; status: "passed" | "exhausted" | "aborted" | "inert" }> {
+	): Promise<{ fixesUsed: number; status: "passed" | "exhausted" | "aborted" | "inert" | "timeout" }> {
 		// Visual definition-of-done: a rendered artifact changed but was never
 		// viewed this turn — nudge the agent to render and review it (once).
 		if (settings.visual && this._turnTouchedVisual && !this._turnUsedPreview && this._lastVisualFile) {
@@ -3945,6 +4001,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// Code check: run the project's check and re-inject failures to fix.
 		let command = this._resolveCheckCommand(settings.command);
 		if (!command) return { fixesUsed: fixes, status: fixes > 0 ? "passed" : "inert" };
+		// A check that already outran timeoutMs this session will outrun it again —
+		// its duration doesn't change between turns. Re-running it after every
+		// answer just burns timeoutMs of post-turn "Verifying…" per turn for a
+		// verdict we know will be inconclusive. Skip it (silently, like an inert
+		// repo) until the session ends or the resolved command changes.
+		if (this._sessionTimedOutChecks.has(command)) return { fixesUsed: fixes, status: fixes > 0 ? "passed" : "inert" };
 		for (let attempt = 1; ; attempt++) {
 			// Re-resolve on each retry so the syntax-fallback tier picks up files the
 			// model edited WHILE fixing: that tier embeds the touched-file list, so a
@@ -3960,6 +4022,18 @@ export class AgentSession implements CompactionHost, FusionHost {
 				timeoutMs: settings.timeoutMs,
 			});
 			if (abort.signal.aborted) return { fixesUsed: fixes, status: "aborted" };
+			if (result.timedOut) {
+				// Inconclusive, NOT red. A check that outruns timeoutMs (a heavy monorepo
+				// gate that legitimately takes minutes) proves nothing about the change;
+				// injecting the failure fix loop here made every file-touching turn burn
+				// fix attempts and tell the model "still failing" over work that may be
+				// perfectly green. Surface the unknown to the UI and end the check phase
+				// without prompts and without retrying (a retry just doubles the wait).
+				// Also remember the command so later turns skip it (see gate entry above).
+				this._sessionTimedOutChecks.add(command);
+				this.emit({ type: "verification", phase: "timeout", command, attempt, maxAttempts });
+				return { fixesUsed: fixes, status: "timeout" };
+			}
 			if (result.ok) {
 				this.emit({ type: "verification", phase: "passed", command, attempt, maxAttempts });
 				this._recovery.noteCleanTool();
@@ -4797,7 +4871,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// Predictive: `agent_end` fires before the flags above flip.
 		if (this._turnTouchedFiles) return true;
 		const pending = this.settingsManager.getPendingChecksSettings();
-		if (pending.enabled && pendingVerificationJobs(listBashBackgroundJobs()).length > 0) {
+		// Only jobs no drain has handed off yet: a stale check from an earlier
+		// turn must not keep the UI in "working" limbo.
+		if (pending.enabled && this._undrainedVerificationJobs().length > 0) {
 			return true;
 		}
 		return false;

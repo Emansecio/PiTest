@@ -74,7 +74,7 @@ export type AgentSessionEvent =
 	| { type: "fallback_warning"; from: string; to: string; reason: string }
 	| {
 			type: "verification";
-			phase: "running" | "passed" | "failed";
+			phase: "running" | "passed" | "failed" | "timeout";
 			command: string;
 			attempt: number;
 			maxAttempts: number;
