@@ -511,6 +511,15 @@ export class TUI extends Container {
 	private resetBufferOutputB: string[] = [];
 	private resetBufferUseA = true;
 	private diffScanCountForTest = 0;
+	// Pointer-identity memo for collectKittyImageIds (Kitty terminals only; see
+	// that method). kittyIdsPrevLines is the last committed frame's lines array;
+	// kittyIdsPrevPerLine holds each line's extracted ids at the same index. The
+	// next/prev per-line arrays swap roles each commit to avoid per-frame
+	// allocation. Never read unless a line's string identity matches, so stale
+	// entries (e.g. after a capability flip) can never produce wrong ids.
+	private kittyIdsPrevLines: string[] = [];
+	private kittyIdsPrevPerLine: number[][] = [];
+	private kittyIdsNextPerLine: number[][] = [];
 	/** First index whose pre-reset line changed this frame (from applyLineResets). */
 	private resetFirstDirty = 0;
 	private static readonly FULL_RENDER_CHUNK_LINES = 2000;
@@ -1320,12 +1329,34 @@ export class TUI extends Container {
 		// (called on every render — see fullRender/the diff paths below) just to
 		// discover it's empty. Skip straight to the shared empty set instead.
 		if (getCapabilities().images !== "kitty") return EMPTY_KITTY_IDS;
+		// On Kitty terminals this walk runs over the whole frame at every commit,
+		// paying a per-line indexOf scan even though unchanged lines arrive as the
+		// same string objects every frame (component memoization — the same
+		// contract resetInputCache relies on). Reuse each line's extracted ids via
+		// an index-aligned pointer compare against the previous committed frame;
+		// only lines whose string identity changed are re-scanned. The two
+		// per-line arrays alternate roles each commit (prev ↔ scratch) so no
+		// allocation happens in the steady state.
+		const prevLines = this.kittyIdsPrevLines;
+		const prevPerLine = this.kittyIdsPrevPerLine;
+		const nextPerLine = this.kittyIdsNextPerLine;
+		nextPerLine.length = lines.length;
 		const ids = new Set<number>();
-		for (const line of lines) {
-			for (const id of extractKittyImageIds(line)) {
-				ids.add(id);
+		const prevLen = prevLines.length;
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i];
+			const lineIds = i < prevLen && prevLines[i] === line ? prevPerLine[i] : extractKittyImageIds(line);
+			nextPerLine[i] = lineIds;
+			for (let j = 0; j < lineIds.length; j++) {
+				ids.add(lineIds[j]);
 			}
 		}
+		this.kittyIdsPrevPerLine = nextPerLine;
+		this.kittyIdsNextPerLine = prevPerLine;
+		// Safe to hold: this is the array committed as previousLines right after
+		// this call, and it is never mutated in place (see applyLineResets' pool
+		// alias guard). The next commit replaces this reference wholesale.
+		this.kittyIdsPrevLines = lines;
 		return ids;
 	}
 

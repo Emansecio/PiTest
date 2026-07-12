@@ -296,10 +296,19 @@ export function visibleWidth(str: string): number {
 		clean = parts.join("");
 	}
 
-	// Calculate width
+	// Calculate width. Re-check the fast paths on the cleaned string: rendered
+	// lines routinely carry ANSI (color, the per-line SEGMENT_RESET suffix) or
+	// tabs around otherwise plain ASCII/Latin text, so the raw-string checks
+	// above miss while the cleaned string qualifies — same correctness argument
+	// as isLatinFastPathEligible, just applied post-normalization. Only reached
+	// when clean !== str (otherwise both checks already failed above).
 	let width = 0;
-	for (const { segment } of segmenter.segment(clean)) {
-		width += graphemeWidth(segment);
+	if (isPrintableAscii(clean) || isLatinFastPathEligible(clean)) {
+		width = clean.length;
+	} else {
+		for (const { segment } of segmenter.segment(clean)) {
+			width += graphemeWidth(segment);
+		}
 	}
 
 	// Cache result (skip huge keys to bound retained bytes, not just entry count)
