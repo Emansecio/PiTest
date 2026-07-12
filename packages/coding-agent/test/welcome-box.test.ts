@@ -155,6 +155,13 @@ describe("WelcomeBox — hero (fresh session)", () => {
 		const out = new WelcomeBox({ ...HERO, wordmarkColor: (s) => `<<${s}>>` }).render(80);
 		expect(out[0]).toContain("<<");
 	});
+
+	it("draws the wordmark with solid blocks only — no line-drawing shell glyphs", () => {
+		const joined = new WelcomeBox(HERO).render(80).map(stripAnsi).join("\n");
+		// The old ANSI-shadow figlet framed each glyph in box-drawing chars that
+		// read as a render echo; the solid-block font must not reintroduce them.
+		expect(joined).not.toMatch(/[╔╗╚╝═║╠╣╦╩╬]/);
+	});
 });
 
 describe("CenteredText", () => {

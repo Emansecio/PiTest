@@ -4,14 +4,13 @@
  * Two layouts:
  *
  * 1. HERO (fresh sessions, `hero: true`, default app name, width ≥ 40) — a
- *    borderless centered wordmark in the brand neon-green → lime gradient:
+ *    borderless centered wordmark in the teal → lavender palette gradient:
  *
- *            ██████╗  ██╗ ████████╗
- *            ██╔══██╗ ██║ ╚══██╔══╝
- *            ██████╔╝ ██║    ██║
- *            ██╔═══╝  ██║    ██║
- *            ██║      ██║    ██║
- *            ╚═╝      ╚═╝    ╚═╝
+ *            ██████  ████  ██████
+ *            ██  ██   ██     ██
+ *            ██████   ██     ██
+ *            ██       ██     ██
+ *            ██      ████    ██
  *
  *        coding agent in your terminal · v0.4.2
  *          ● Workspace · PiTest/src (main)
@@ -33,7 +32,7 @@
 import { Card, type Component, truncateToWidth, visibleWidth } from "@pit/tui";
 import type { GitDiffStats } from "../../../core/footer-data-provider.ts";
 import { formatGitBranchWithDiff } from "../display-utils.ts";
-import { pitLogoGradient, wordmarkGradient } from "../theme/color-interpolation.ts";
+import { heroWordmarkGradient, wordmarkGradient } from "../theme/color-interpolation.ts";
 import { theme } from "../theme/theme.ts";
 
 // 3-row half-block wordmark spelling P-I-T. Each row is exactly 9 visible columns
@@ -42,19 +41,20 @@ import { theme } from "../theme/theme.ts";
 const WORDMARK_PIT: readonly string[] = ["█▀█ █ ▀█▀", "█▀▀ █  █ ", "▀   ▀  ▀ "];
 const WORDMARK_WIDTH = 9;
 
-// 6-row block wordmark (ANSI-shadow style) for the fresh-session hero. Unlike
-// the smoothed 3-row experiments, this figlet classic reads unambiguously as
-// P-I-T. Rows are right-trimmed; centering uses HERO_WIDTH so they stay
-// letter-aligned instead of drifting toward the middle.
+// 5-row SOLID-block wordmark for the fresh-session hero. The earlier figlet
+// "ANSI shadow" font drew each glyph with line-drawing shells (╔═╗╝) that read
+// as a render echo around the blocks and clashed with the flat UI; this pure
+// full-block font reads P-I-T cleanly with no shell artifacts and is one row
+// shorter. Rows are right-trimmed; centering uses HERO_WIDTH (widest row) so
+// they stay letter-aligned instead of drifting toward the middle.
 const HERO_PIT: readonly string[] = [
-	"██████╗  ██╗ ████████╗",
-	"██╔══██╗ ██║ ╚══██╔══╝",
-	"██████╔╝ ██║    ██║",
-	"██╔═══╝  ██║    ██║",
-	"██║      ██║    ██║",
-	"╚═╝      ╚═╝    ╚═╝",
+	"██████  ████  ██████",
+	"██  ██   ██     ██",
+	"██████   ██     ██",
+	"██       ██     ██",
+	"██      ████    ██",
 ];
-const HERO_WIDTH = 22;
+const HERO_WIDTH = 20;
 const HERO_MIN_WIDTH = 40;
 
 export interface WelcomeBoxData {
@@ -220,7 +220,7 @@ export class WelcomeBox implements Component {
 		const rows: string[] = [];
 		for (let i = 0; i < HERO_PIT.length; i++) {
 			const raw = HERO_PIT[i] ?? "";
-			const colored = d.wordmarkColor ? d.wordmarkColor(raw) : pitLogoGradient(i, HERO_PIT.length)(raw);
+			const colored = d.wordmarkColor ? d.wordmarkColor(raw) : heroWordmarkGradient(i, HERO_PIT.length)(raw);
 			rows.push(truncateToWidth(logoPad + colored, width));
 		}
 		rows.push("");

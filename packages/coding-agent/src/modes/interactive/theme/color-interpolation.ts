@@ -51,45 +51,46 @@ export function bicolorColumnColor(col: number, themeInstance: Theme = globalThe
 }
 
 /**
- * PIT hero-logo gradient stops — brand green: neon → lime. Brand-fixed on
- * purpose (not theme keys): the wordmark reads the same across custom themes.
- * Light themes get deeper greens so the mark keeps contrast on white.
+ * Hero-wordmark gradient: teal (`accent`) → lavender (`thinkingXhigh`) blended
+ * across the letters, so the mark sits inside the same palette as the rest of
+ * the UI instead of the old brand neon-green, which read as a different
+ * product's logo against the teal/coral theme. The ramp is diagonal — `row`
+ * shifts it so color flows top-left → bottom-right over the block glyphs.
+ * Truecolor only; 256-color terminals fall back to the theme's flat `accent`
+ * (banding through the color cube reads worse than a solid accent).
+ *
+ * Reads the stops from the active theme (dark/light JSON already carry the
+ * right variants), so no per-background branching is needed here.
  */
-const LOGO_NEON_DARK: Rgb = { r: 57, g: 255, b: 20 };
-const LOGO_LIME_DARK: Rgb = { r: 201, g: 255, b: 41 };
-const LOGO_NEON_LIGHT: Rgb = { r: 16, g: 138, b: 22 };
-const LOGO_LIME_LIGHT: Rgb = { r: 104, g: 146, b: 0 };
-
-/** Light text (high luminance) implies a dark terminal background. */
-function hasDarkBackground(themeInstance: Theme): boolean {
-	const text = getRgb(themeInstance, "text");
-	if (!text) return true;
-	return (0.299 * text.r + 0.587 * text.g + 0.114 * text.b) / 255 >= 0.5;
-}
-
-/**
- * Hero-wordmark gradient: neon green → lime blended across the letters. The
- * ramp is diagonal — `row` shifts it so color flows top-left → bottom-right
- * over the block glyphs. Truecolor only; 256-color terminals fall back to the
- * theme's flat `success` green (banding through the color cube reads worse
- * than a solid brand green).
- */
-export function pitLogoGradient(
+export function heroWordmarkGradient(
 	row: number,
 	rows: number,
 	themeInstance: Theme = globalTheme,
 ): (text: string) => string {
 	return (text: string) => {
-		if (!getCapabilities().trueColor) return themeInstance.fg("success", text);
-		const dark = hasDarkBackground(themeInstance);
-		const from = dark ? LOGO_NEON_DARK : LOGO_NEON_LIGHT;
-		const to = dark ? LOGO_LIME_DARK : LOGO_LIME_LIGHT;
+		if (!getCapabilities().trueColor) return themeInstance.fg("accent", text);
+		const from = getRgb(themeInstance, "accent");
+		const to = getRgb(themeInstance, "thinkingXhigh");
+		if (!from || !to) return themeInstance.fg("accent", text);
 		const rowBias = rows <= 1 ? 0 : (row / (rows - 1)) * 0.35;
 		return applyColumnGradient(text, (col, cols) => {
 			const colT = cols <= 1 ? 0 : col / (cols - 1);
 			return rgbFg(lerpRgb(from, to, colT * 0.65 + rowBias));
 		});
 	};
+}
+
+/**
+ * Midpoint RGB of the hero gradient stops (accent ↔ thinkingXhigh). The hero
+ * "ignition" ease targets this so its final eased frame sits near the
+ * gradient's average and the handoff to {@link heroWordmarkGradient} doesn't
+ * pop. Undefined when either stop can't resolve to RGB (non-truecolor themes).
+ */
+export function heroWordmarkMidpoint(themeInstance: Theme = globalTheme): Rgb | undefined {
+	const from = getRgb(themeInstance, "accent");
+	const to = getRgb(themeInstance, "thinkingXhigh");
+	if (!from || !to) return undefined;
+	return lerpRgb(from, to, 0.5);
 }
 
 /** Wordmark gradient: teal → lavender (truecolor) or accent/lavender bicolor. */

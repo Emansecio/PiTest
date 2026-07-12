@@ -218,7 +218,7 @@ import {
 	planSkillsDoctorFix,
 	tallySkillDiagnostics,
 } from "./skills-doctor.ts";
-import { lerpRgb, parseTrueColorFg, rgbFg, shimmerColorAt } from "./theme/color-interpolation.ts";
+import { heroWordmarkMidpoint, lerpRgb, parseTrueColorFg, rgbFg, shimmerColorAt } from "./theme/color-interpolation.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -1482,10 +1482,10 @@ export class InteractiveMode {
 
 	/**
 	 * A3 — one-shot "ignition" for the fresh-session hero wordmark: over ~500ms the
-	 * mark eases (smoothstep) from the theme `dim` color up to a bright brand-green
-	 * mid-tone, then hands off to the real neon→lime gradient. The mid-tone is the
-	 * midpoint of the gradient's neon/lime stops, so the last eased frame sits close
-	 * to the gradient's average and the handoff does not pop.
+	 * mark eases (smoothstep) from the theme `dim` color up to a bright mid-tone,
+	 * then hands off to the real teal→lavender gradient. The mid-tone is the
+	 * midpoint of the gradient's accent/thinking stops, so the last eased frame
+	 * sits close to the gradient's average and the handoff does not pop.
 	 *
 	 * While the ease runs, `wordmarkColor` is a time-varying closure, which makes
 	 * WelcomeBox bypass its memo and repaint every frame; on completion we restore
@@ -1502,8 +1502,11 @@ export class InteractiveMode {
 
 		const dim = parseTrueColorFg(theme.getFgAnsi("dim"));
 		if (!dim) return;
-		// Midpoint of the hero gradient stops (neon #39ff14 / lime #c9ff29).
-		const bright = { r: 129, g: 255, b: 31 };
+		// Midpoint of the hero gradient stops (accent ↔ thinkingXhigh), read from
+		// the active theme so the handoff to heroWordmarkGradient stays seamless in
+		// both dark and light. Falls back to `dim` (no ignition brightness) only if
+		// the stops can't resolve to RGB.
+		const bright = heroWordmarkMidpoint(theme) ?? dim;
 		const baseData = this.buildWelcomeBoxData();
 		const paintAt = (t: number) => rgbFg(lerpRgb(dim, bright, t));
 
@@ -3595,6 +3598,13 @@ export class InteractiveMode {
 					this.setWorkingPhase(label);
 				} else if (event.phase === "passed") {
 					this.setWorkingPhase(`✓ Verified — ${event.command} passed`);
+				} else if (event.phase === "timeout") {
+					// Inconclusive, not red: don't show the scary "still failing" error.
+					this.stopWorkingLoader();
+					this.showStatus(
+						`⚠ ${event.command} timed out — result unknown (not treated as failure); auto-check off for this session`,
+						(text) => theme.fg("warning", text),
+					);
 				} else if (event.willRetry) {
 					this.setWorkingPhase(`✗ ${event.command} failed (exit ${event.exitCode ?? "?"}) — fixing…`);
 				} else {
@@ -3904,6 +3914,18 @@ export class InteractiveMode {
 				break;
 			}
 			case "custom": {
+				// Boot-time MCP connect notices arrive asynchronously — once the connect
+				// budget elapses, often after a turn already started — so a permanent chat
+				// block would wedge between a turn and the editor (looks like stray boot
+				// noise mid-conversation). Surface them as an ephemeral status line
+				// instead. The notice still lives in the model's context (the session
+				// layer pushed it independently of display); this only changes how the
+				// human sees it.
+				if (message.customType === "mcp.notice") {
+					const text = typeof message.content === "string" ? message.content : "";
+					if (text) this.showStatus(text, (s) => theme.fg("warning", s));
+					break;
+				}
 				if (message.display) {
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
 					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
