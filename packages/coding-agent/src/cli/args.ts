@@ -409,16 +409,16 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} --continue "What did we discuss?"
 
   # Use different model
-  ${APP_NAME} --provider openai --model gpt-4o-mini "Help me refactor this code"
+  ${APP_NAME} --provider anthropic --model opus "Help me refactor this code"
 
   # Use model with provider prefix (no --provider needed)
-  ${APP_NAME} --model openai/gpt-4o "Help me refactor this code"
+  ${APP_NAME} --model openai-codex/gpt-5.5 "Help me refactor this code"
 
   # Use model with thinking level shorthand
   ${APP_NAME} --model sonnet:high "Solve this complex problem"
 
   # Limit model cycling to specific models
-  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o
+  ${APP_NAME} --models claude-sonnet,claude-haiku,grok-4.5
 
   # Limit to a specific provider with glob pattern
   ${APP_NAME} --models "anthropic/*"
@@ -439,13 +439,8 @@ ${chalk.bold("Examples:")}
 ${chalk.bold("Environment Variables:")}
   ANTHROPIC_API_KEY                - Anthropic Claude API key
   ANTHROPIC_OAUTH_TOKEN            - Anthropic OAuth token (alternative to API key)
-  OPENAI_API_KEY                   - OpenAI GPT API key
-  GEMINI_API_KEY                   - Google Gemini API key
-  OPENROUTER_API_KEY               - OpenRouter API key
-  MINIMAX_API_KEY                  - MiniMax API key
   OPENCODE_API_KEY                 - OpenCode Zen/OpenCode Go API key
-  KIMI_API_KEY                     - Kimi For Coding API key
-  XIAOMI_API_KEY                   - Xiaomi MiMo API key (api.xiaomimimo.com billing)
+  XAI_API_KEY                      - xAI Grok API key
   ${ENV_AGENT_DIR.padEnd(32)} - Config directory (default: ~/${CONFIG_DIR_NAME}/agent)
   ${ENV_SESSION_DIR.padEnd(32)} - Session storage directory (overridden by --session-dir)
   PIT_PACKAGE_DIR                   - Override package directory (for Nix/Guix store paths)

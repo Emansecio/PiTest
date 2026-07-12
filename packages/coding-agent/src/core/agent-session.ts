@@ -13,8 +13,9 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { Agent, AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "@pit/agent-core";
 import { isStreamGuardAbortMessage, setUnknownToolHintProvider } from "@pit/agent-core";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent } from "@pit/ai";
@@ -243,17 +244,19 @@ import {
 	type BashBackgroundJob,
 	type BashOperations,
 	createLocalBashOperations,
+	disposeBashSparePool,
 	listBashBackgroundJobs,
 } from "./tools/bash.js";
 import { isGitWorkTree, prewarmFffIndex } from "./tools/fff-search.ts";
 import { FileMtimeStore } from "./tools/file-mtime-store.ts";
 import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.js";
-import { ReadDedupeStore } from "./tools/read.js";
+import { ReadDedupeStore, type ReadToolDetails } from "./tools/read.js";
 import { listDeclarations } from "./tools/symbol.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
 import { configureTruncationCaps } from "./tools/truncate.ts";
 import { TurnRiskAccumulator } from "./turn-risk.ts";
 import { TurnSteeringEngine } from "./turn-steering-engine.ts";
+import { resolveNextTurnThinkingLevel } from "./turn-thinking-policy.ts";
 import { registerBuiltinSchemes } from "./url-schemes/index.ts";
 import { summarizeCheckFailure } from "./verification/failure-summary.ts";
 import { functionalWebFixPrompt, runFunctionalWebCheck } from "./verification/functional-web.ts";
@@ -332,6 +335,15 @@ export interface ExtensionBindings {
 // recurring-error guard, and the disk persist iterates values order-insensitively.
 
 const FREQUENT_FILES_DISPOSE_WAIT_MS = 2_500;
+
+/**
+ * Cap on how much of a file `_readComposerFile` reads from disk for the
+ * composer's style-exemplar body. Mirrors read.ts's RAW_FILE_CONTENT_MAX_CHARS
+ * cap on the same field sourced from the read tool's own output, so the two
+ * paths agree on how much "style exemplar" content is worth keeping regardless
+ * of which one produced it.
+ */
+const COMPOSER_FILE_READ_MAX_BYTES = 256 * 1024;
 
 /**
  * Fraction of the context window above which the pre-send overflow guard forces a
@@ -1207,11 +1219,19 @@ export class AgentSession implements CompactionHost, FusionHost {
 							!this._disableHashlineAnchors && this.getActiveToolNames().includes("edit_v2"),
 						readDedupeStore: this._readDedupeStore,
 						mtimeStore: this._fileMtimeStore,
+						// Lets _handleToolExecutionEnd reuse a clean full read's own output
+						// for the composer's style exemplar instead of re-reading the file
+						// from disk. Skipped when the composer itself is disabled so that
+						// build pays nothing for a field nobody will consume.
+						captureRawContent: !isContextComposerDisabled(),
 					},
 					edit: { mtimeStore: this._fileMtimeStore },
 					edit_v2: { mtimeStore: this._fileMtimeStore },
 					write: { mtimeStore: this._fileMtimeStore },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					// The session has a bounded lifecycle (dispose() calls
+					// disposeBashSparePool()), so it's safe to opt into the pre-warmed
+					// spare-shell pool here — see BashToolOptions.enableSparePool.
+					bash: { commandPrefix: shellCommandPrefix, shellPath, enableSparePool: true },
 					grep: { engine: this.settingsManager.getGrepSettings().engine },
 					find: {
 						engine: this.settingsManager.getGrepSettings().engine === "fff" ? "fff" : "fd",
@@ -1459,14 +1479,40 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 	}
 
-	/** Best-effort, size-capped file read for the style exemplar body. */
+	/**
+	 * Best-effort, size-capped file read for the style exemplar body. Reads
+	 * through a file descriptor bounded to COMPOSER_FILE_READ_MAX_BYTES instead
+	 * of readFileSync-ing the whole file — a multi-GB file must never block the
+	 * session's main thread reading bytes the composer immediately discards past
+	 * the cap. This is the FALLBACK path: the caller prefers reusing the read
+	 * tool's own output when it already has the full file text in hand (see
+	 * `_handleToolExecutionEnd`), so this only pays real disk I/O when that
+	 * wasn't available (e.g. the file was read via an offset/limit slice, or
+	 * outside a `read` tool call entirely).
+	 */
 	private _readComposerFile(relPath: string): string | null {
+		const abs = isAbsolute(relPath) ? relPath : resolve(this._cwd, relPath);
+		let fd: number | undefined;
 		try {
-			const abs = isAbsolute(relPath) ? relPath : resolve(this._cwd, relPath);
-			const content = readFileSync(abs, "utf-8");
-			return content.length > 256 * 1024 ? content.slice(0, 256 * 1024) : content;
+			fd = openSync(abs, "r");
+			const buf = Buffer.allocUnsafe(COMPOSER_FILE_READ_MAX_BYTES);
+			const bytesRead = readSync(fd, buf, 0, COMPOSER_FILE_READ_MAX_BYTES, 0);
+			if (bytesRead === 0) return "";
+			// StringDecoder buffers a trailing incomplete UTF-8 sequence rather than
+			// emitting U+FFFD for it; without a final decoder.end() that dangling tail
+			// is silently dropped instead of corrupting the last character at the
+			// 256KB cut point.
+			return new StringDecoder("utf8").write(buf.subarray(0, bytesRead));
 		} catch {
 			return null;
+		} finally {
+			if (fd !== undefined) {
+				try {
+					closeSync(fd);
+				} catch {
+					// already closed / never fully opened
+				}
+			}
 		}
 	}
 
@@ -1768,14 +1814,28 @@ export class AgentSession implements CompactionHost, FusionHost {
 					}
 				}
 
-				if (reclaimed <= 0) return undefined;
-				this._invalidateCtxCaches();
-				return {
-					context: {
+				// Adaptive per-turn thinking downshift: a turn digesting a successful
+				// tool result is downshifted to "low"; a tool error restores the
+				// user's configured level. The user's level is a CEILING — read via
+				// the getter (agent.state), never written. The loop treats the
+				// returned level as sticky, so the policy returns an explicit level
+				// on every engaged invocation. Kill-switch handled inside the policy.
+				const nextThinkingLevel = resolveNextTurnThinkingLevel(this.thinkingLevel, toolResults);
+
+				if (reclaimed <= 0 && nextThinkingLevel === undefined) return undefined;
+
+				if (reclaimed > 0) this._invalidateCtxCaches();
+				const update: { context?: typeof turnContext.context; thinkingLevel?: ThinkingLevel } = {};
+				if (reclaimed > 0) {
+					update.context = {
 						...turnContext.context,
 						messages: nextMessages,
-					},
-				};
+					};
+				}
+				if (nextThinkingLevel !== undefined) {
+					update.thinkingLevel = nextThinkingLevel;
+				}
+				return update;
 			} catch (err) {
 				recordDiagnostic({
 					category: "error.isolated",
@@ -2222,7 +2282,15 @@ export class AgentSession implements CompactionHost, FusionHost {
 				// capture for cheap import extraction; content failure just drops that layer.
 				if (fileOp.op === "read" && !isContextComposerDisabled()) {
 					this._composerLastReadPath = fileOp.path;
-					this._composerLastReadContent = this._readComposerFile(fileOp.path) ?? undefined;
+					// Prefer the read tool's own output: it just decoded this file for the
+					// model, so reusing it avoids a second (and, for a huge file, unbounded)
+					// disk read on the main thread. Only set when that read was "clean"
+					// (see ReadToolDetails.rawFileContent) — anything else (offset/limit
+					// truncation past the cap, dedupe/binary/notebook paths, ...) falls back
+					// to the bounded direct read below.
+					const readDetails = event.result?.details as ReadToolDetails | undefined;
+					this._composerLastReadContent =
+						readDetails?.rawFileContent ?? this._readComposerFile(fileOp.path) ?? undefined;
 				}
 			}
 			armVerificationGate(this._verificationGate, event.toolName, args, {
@@ -2604,6 +2672,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// Cancel any in-flight verification check so its child process does not keep
 		// holding the session cwd (Windows rmSync EBUSY in tests).
 		this._verificationAbort?.abort();
+		// Same reasoning for the bash spare-shell pool (see bash.ts): an unconsumed
+		// spare is a live process pinned to a cwd that may be a temp dir the caller
+		// is about to delete. Kill it here rather than waiting for process shutdown.
+		disposeBashSparePool();
 		// Abort and drain any in-flight background (predictive) compaction BEFORE we
 		// flush and disconnect below. A compaction started at the end of the prior
 		// turn can otherwise append a CompactionEntry and reassign agent.state.messages
@@ -5616,11 +5688,19 @@ export class AgentSession implements CompactionHost, FusionHost {
 							!this._disableHashlineAnchors && this.getActiveToolNames().includes("edit_v2"),
 						readDedupeStore: this._readDedupeStore,
 						mtimeStore: this._fileMtimeStore,
+						// Lets _handleToolExecutionEnd reuse a clean full read's own output
+						// for the composer's style exemplar instead of re-reading the file
+						// from disk. Skipped when the composer itself is disabled so that
+						// build pays nothing for a field nobody will consume.
+						captureRawContent: !isContextComposerDisabled(),
 					},
 					edit: { mtimeStore: this._fileMtimeStore },
 					edit_v2: { mtimeStore: this._fileMtimeStore },
 					write: { mtimeStore: this._fileMtimeStore },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
+					// The session has a bounded lifecycle (dispose() calls
+					// disposeBashSparePool()), so it's safe to opt into the pre-warmed
+					// spare-shell pool here — see BashToolOptions.enableSparePool.
+					bash: { commandPrefix: shellCommandPrefix, shellPath, enableSparePool: true },
 					grep: { engine: this.settingsManager.getGrepSettings().engine },
 					find: {
 						engine: this.settingsManager.getGrepSettings().engine === "fff" ? "fff" : "fd",
@@ -6025,7 +6105,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 			const result = await executeBashWithOperations(
 				resolvedCommand,
 				this.sessionManager.getCwd(),
-				options?.operations ?? createLocalBashOperations({ shellPath }),
+				options?.operations ?? createLocalBashOperations({ shellPath, enableSparePool: true }),
 				{
 					onChunk,
 					signal: this._bashAbortController.signal,

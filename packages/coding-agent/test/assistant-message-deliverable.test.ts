@@ -1,9 +1,28 @@
 import type { AssistantMessage } from "@pit/ai";
 import type { TUI } from "@pit/tui";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
+
+const motionEnv = {
+	TERM: process.env.TERM,
+	PIT_NO_MOTION: process.env.PIT_NO_MOTION,
+	PIT_REDUCED_MOTION: process.env.PIT_REDUCED_MOTION,
+};
+
+beforeEach(() => {
+	process.env.TERM = "xterm-256color";
+	delete process.env.PIT_NO_MOTION;
+	delete process.env.PIT_REDUCED_MOTION;
+});
+
+afterEach(() => {
+	for (const [key, value] of Object.entries(motionEnv)) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
+});
 
 beforeAll(() => initTheme("dark"));
 

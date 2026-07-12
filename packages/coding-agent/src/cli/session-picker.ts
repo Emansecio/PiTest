@@ -43,6 +43,8 @@ export async function selectSession(
 			},
 			() => ui.requestRender(),
 			{ showRenameHint: false, keybindings },
+			undefined,
+			ui,
 		);
 
 		ui.addChild(selector);

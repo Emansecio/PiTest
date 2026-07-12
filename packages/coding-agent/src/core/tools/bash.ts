@@ -5,7 +5,7 @@ import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { AgentTool } from "@pit/agent-core";
 import { recordDiagnostic } from "@pit/ai";
 import { Container, Text, truncateToWidth } from "@pit/tui";
-import { spawn } from "child_process";
+import { type ChildProcess, spawn } from "child_process";
 import { type Static, Type } from "typebox";
 import { clampBashCommandRow } from "../../modes/interactive/components/bash-command-row.ts";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
@@ -14,6 +14,7 @@ import { waitForChildProcess } from "../../utils/child-process.ts";
 import {
 	getShellConfig,
 	getShellEnv,
+	isPosixShellPath,
 	killProcessTree,
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
@@ -290,13 +291,200 @@ function registerBackgroundJob(job: BashBackgroundJob): void {
 	backgroundJobs.set(job.id, job);
 }
 
+// ---------------------------------------------------------------------------
+// Spare-shell pool: pre-warmed, single-use POSIX shells.
+//
+// A fresh `spawn(shell, [...args, command])` per bash call pays the shell
+// interpreter's full process-creation cost (~30-55ms measured on this
+// machine — MSYS/Git-Bash startup is the dominant share on Windows) on every
+// single tool call, even though the actual command often runs in a few ms.
+// Pre-spawning the shell AHEAD of the call moves that cost off the critical
+// path. Each spare is used exactly ONCE and then discarded — this is NOT a
+// long-lived reusable shell (no state, no env, no cwd is ever shared across
+// two different tool calls); it only defers *when* the OS pays for process
+// creation, never *what* runs or *where*.
+//
+// A spare is launched immediately with a fixed wrapper command instead of
+// the real one (which isn't known yet at pre-warm time), then blocks reading
+// its own stdin. The real command is delivered later by writing it to that
+// stdin and closing the pipe.
+//
+// Wrapper technique: `cmd=$(cat); eval "$cmd"` — NOT `bash -s` reading the
+// command as its own script from stdin. `-s` would have the shell parse the
+// script incrementally FROM the same stdin the executed command inherits, so
+// a command that itself reads stdin (`read`, `cat` with no args, certain
+// heredoc patterns) would silently swallow whatever text follows it in the
+// script — a real, well-known shell footgun. Buffering the ENTIRE command
+// into a variable via `$(cat)` first means `eval` always runs against a
+// string that is already fully in memory, exactly like `-c command` — the
+// evaluated command's own stdin reads see immediate EOF (nothing left on the
+// now-drained pipe), matching today's `stdio: ["ignore", ...]` behavior on
+// the direct-spawn path. `eval` (not another `-c`/subshell) preserves `exec`
+// semantics: it runs in the CURRENT shell process, so `exec` inside the
+// evaluated command still replaces that process directly. `$(cat)` is POSIX
+// (works under dash/ash too, unlike bash's `read -d ''` extension), so the
+// same wrapper is safe for every shell POSIX_SHELL_BASENAMES accepts.
+const SPARE_SHELL_WRAPPER = 'cmd=$(cat); eval "$cmd"';
+
+interface SpareShell {
+	child: ChildProcess;
+	shell: string;
+	args: string[];
+	cwd: string;
+	env: NodeJS.ProcessEnv;
+	/** Set by the 'error'/'exit' listeners below — a dead spare must never be handed out. */
+	dead: boolean;
+}
+
+/** At most one pre-spawned shell waits at a time; consuming it immediately
+ * kicks off the next one so a burst of calls degrades to (at worst) the
+ * direct-spawn cost every OTHER call, never worse than before pooling. */
+let spareShell: SpareShell | undefined;
+
+function envsEqual(a: NodeJS.ProcessEnv, b: NodeJS.ProcessEnv): boolean {
+	if (a === b) return true;
+	const aKeys = Object.keys(a);
+	if (aKeys.length !== Object.keys(b).length) return false;
+	for (const key of aKeys) {
+		if (a[key] !== b[key]) return false;
+	}
+	return true;
+}
+
+function spawnContextsMatch(
+	spare: SpareShell,
+	shell: string,
+	args: string[],
+	cwd: string,
+	env: NodeJS.ProcessEnv,
+): boolean {
+	return (
+		spare.shell === shell &&
+		spare.cwd === cwd &&
+		spare.args.length === args.length &&
+		spare.args.every((a, i) => a === args[i]) &&
+		envsEqual(spare.env, env)
+	);
+}
+
+function spawnSpareShell(shell: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): SpareShell {
+	const child = spawn(shell, [...args, SPARE_SHELL_WRAPPER], {
+		cwd,
+		detached: process.platform !== "win32",
+		env,
+		// stdin is a real pipe (unlike the direct-spawn path's "ignore") so the
+		// wrapper's `cat` has something to block on until a command is written.
+		stdio: ["pipe", "pipe", "pipe"],
+		windowsHide: true,
+	});
+	const spare: SpareShell = { child, shell, args, cwd, env, dead: false };
+	if (child.pid) trackDetachedChildPid(child.pid);
+	// A spare that dies before ever being consumed (bad shell/cwd, killed
+	// while idle, ...) must not be handed out, and must not leak a tracked
+	// pid or a dangling slot reference.
+	const onDead = () => {
+		spare.dead = true;
+		if (child.pid) untrackDetachedChildPid(child.pid);
+		if (spareShell === spare) spareShell = undefined;
+	};
+	child.once("error", onDead);
+	child.once("exit", onDead);
+	return spare;
+}
+
+/** Fire-and-forget pre-spawn of the next spare. Never overwrites a live one
+ * (only one spare is kept at a time) — safe to call unconditionally. */
+function prewarmSpareShell(shell: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): void {
+	if (spareShell && !spareShell.dead) return;
+	spareShell = spawnSpareShell(shell, args, cwd, env);
+}
+
+// Test-only visibility into hit/miss decisions. bash's own `$$` cannot be used
+// to prove reuse from the outside: MSYS/Git-Bash on Windows reports a virtual
+// PID that does not match the Windows pid Node sees on child.pid, so tests
+// assert on this counter instead of parsing shell output.
+let sparePoolHitsForTest = 0;
+let sparePoolMissesForTest = 0;
+
+/** Take the current spare if its spawn context matches exactly. A live but
+ * mismatched spare (most commonly a different cwd) is killed here rather
+ * than reused — a mismatched spare must never be papered over with an
+ * injected `cd`, since that would silently run the command somewhere the
+ * caller didn't ask for if the kill/respawn raced a concurrent user of the
+ * same slot. Returns undefined (caller falls back to a direct spawn) when
+ * there is no usable spare. */
+function takeMatchingSpareShell(
+	shell: string,
+	args: string[],
+	cwd: string,
+	env: NodeJS.ProcessEnv,
+): SpareShell | undefined {
+	const spare = spareShell;
+	if (!spare || spare.dead) {
+		sparePoolMissesForTest++;
+		return undefined;
+	}
+	spareShell = undefined;
+	if (!spawnContextsMatch(spare, shell, args, cwd, env)) {
+		if (spare.child.pid) killProcessTree(spare.child.pid);
+		sparePoolMissesForTest++;
+		return undefined;
+	}
+	sparePoolHitsForTest++;
+	return spare;
+}
+
+/** Kill and discard the pending spare, if any — called on session/process
+ * shutdown so a spare that was never consumed can't leak a process. */
+export function disposeBashSparePool(): void {
+	const spare = spareShell;
+	spareShell = undefined;
+	if (!spare || spare.dead) return;
+	if (spare.child.pid) killProcessTree(spare.child.pid);
+}
+
+/** Test-only: force the pool back to empty without killing anything (tests
+ * manage their own child lifecycles). No prod path calls this. */
+export function _resetBashSparePoolForTest(): void {
+	spareShell = undefined;
+	sparePoolHitsForTest = 0;
+	sparePoolMissesForTest = 0;
+}
+
+/** Test-only: inspect the current spare without consuming it. No prod path calls this. */
+export function _peekBashSparePoolForTest(): { pid: number | undefined; cwd: string; dead: boolean } | undefined {
+	if (!spareShell) return undefined;
+	return { pid: spareShell.child.pid, cwd: spareShell.cwd, dead: spareShell.dead };
+}
+
+/** Test-only: count of takeMatchingSpareShell decisions since the last reset —
+ * `hits` is a call actually served by a pre-warmed spare, `misses` is a call
+ * that fell back to a direct spawn (no spare, dead spare, or mismatched
+ * context). No prod path calls this. */
+export function _getBashSparePoolStatsForTest(): { hits: number; misses: number } {
+	return { hits: sparePoolHitsForTest, misses: sparePoolMissesForTest };
+}
+
 /**
  * Create bash operations using pi's built-in local shell execution backend.
  *
  * This is useful for extensions that intercept user_bash and still want pi's
  * standard local shell behavior while wrapping or rewriting commands.
  */
-export function createLocalBashOperations(options?: { shellPath?: string }): BashOperations {
+export function createLocalBashOperations(options?: {
+	shellPath?: string;
+	/**
+	 * Opt IN to the pre-warmed spare-shell pool (see above). Off by default:
+	 * a spare is a live process left running between calls, pinned to the
+	 * last call's cwd — on Windows that pins the directory itself (open
+	 * handle blocks delete/rename) until the spare is consumed or killed.
+	 * Safe only for a caller with a bounded lifecycle that reliably calls
+	 * `disposeBashSparePool()` when done (AgentSession.dispose()). Ad hoc /
+	 * test usage of these ops (no such lifecycle) must keep this off so a
+	 * temp-dir cleanup right after a call never races a lingering spare.
+	 */
+	enableSparePool?: boolean;
+}): BashOperations {
 	return {
 		exec: (command, cwd, { onData, signal, timeout, env, label, autoBackground, backgroundImmediate }) => {
 			return new Promise((resolve, reject) => {
@@ -305,14 +493,39 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`));
 					return;
 				}
-				const child = spawn(shell, [...args, command], {
-					cwd,
-					detached: process.platform !== "win32",
-					env: env ?? getShellEnv(),
-					stdio: ["ignore", "pipe", "pipe"],
-					windowsHide: true,
-				});
-				if (child.pid) trackDetachedChildPid(child.pid);
+				const effectiveEnv = env ?? getShellEnv();
+				// Pooling requires BOTH an opt-in caller (bounded lifecycle that will
+				// call disposeBashSparePool — see createLocalBashOperations' doc) AND a
+				// POSIX shell (cmd.exe/PowerShell have no `eval`/`-c` equivalent to the
+				// wrapper below). Either being false means the direct-spawn path runs
+				// unchanged from before pooling existed.
+				const poolEnabled = options?.enableSparePool === true && isPosixShellPath(shell);
+				const spare = poolEnabled ? takeMatchingSpareShell(shell, args, cwd, effectiveEnv) : undefined;
+				const child = spare
+					? spare.child
+					: spawn(shell, [...args, command], {
+							cwd,
+							detached: process.platform !== "win32",
+							env: effectiveEnv,
+							stdio: ["ignore", "pipe", "pipe"],
+							windowsHide: true,
+						});
+				if (spare) {
+					// The spare's wrapper is already blocked reading its stdin for exactly
+					// this — hand it the real command and close the pipe (EOF). The slot is
+					// empty again now that it was taken — line up the NEXT spare in the
+					// background, off this call's critical path.
+					child.stdin?.end(command);
+					prewarmSpareShell(shell, args, cwd, effectiveEnv);
+				} else {
+					if (child.pid) trackDetachedChildPid(child.pid);
+					if (poolEnabled) {
+						// First call of the session, or a context change (cwd/env) meant no
+						// spare matched — this call paid the direct-spawn cost; leave a spare
+						// ready for next time.
+						prewarmSpareShell(shell, args, cwd, effectiveEnv);
+					}
+				}
 				const startedAt = Date.now();
 				let timedOut = false;
 				let timeoutHandle: NodeJS.Timeout | undefined;
@@ -563,6 +776,13 @@ export interface BashToolOptions {
 	shellPath?: string;
 	/** Hook to adjust command, cwd, or env before execution */
 	spawnHook?: BashSpawnHook;
+	/**
+	 * Opt IN to the pre-warmed spare-shell pool when using the default local
+	 * operations (ignored when `operations` is supplied). See
+	 * `createLocalBashOperations`'s doc for the lifecycle requirement — only
+	 * pass this from a caller that reliably disposes the pool when done.
+	 */
+	enableSparePool?: boolean;
 }
 
 const BASH_PREVIEW_LINES = 0;
@@ -938,7 +1158,9 @@ export function createBashToolDefinition(
 	cwd: string,
 	options?: BashToolOptions,
 ): ToolDefinition<typeof bashSchema, BashToolDetails | undefined, BashRenderState> {
-	const ops = options?.operations ?? createLocalBashOperations({ shellPath: options?.shellPath });
+	const ops =
+		options?.operations ??
+		createLocalBashOperations({ shellPath: options?.shellPath, enableSparePool: options?.enableSparePool });
 	const commandPrefix = options?.commandPrefix;
 	const spawnHook = options?.spawnHook;
 	return {

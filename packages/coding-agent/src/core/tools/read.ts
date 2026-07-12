@@ -204,7 +204,23 @@ export type ReadToolInput = Static<typeof readSchema>;
 
 export interface ReadToolDetails {
 	truncation?: TruncationResult;
+	/**
+	 * The verbatim, complete file text — independent of any offset/limit slice,
+	 * dedupe suppression, delta framing, or `<anchors>` appendix applied to the
+	 * tool's rendered `content`. Only set when the buffered (non-streaming,
+	 * non-notebook, non-binary) path ran AND the read was "clean" (no
+	 * truncation/crush), so callers that need real file content — e.g. the
+	 * coding-agent context composer's style exemplar — can reuse it instead of
+	 * re-reading the file from disk. Capped at RAW_FILE_CONTENT_MAX_CHARS so a
+	 * huge-but-under-the-streaming-threshold clean read can't balloon this event.
+	 */
+	rawFileContent?: string;
 }
+
+/** Cap for {@link ReadToolDetails.rawFileContent} — mirrors the coding-agent
+ * composer's own size cap on the style-exemplar body (see _readComposerFile),
+ * so the two stay in lockstep regardless of which one a caller ends up using. */
+const RAW_FILE_CONTENT_MAX_CHARS = 256 * 1024;
 
 interface CompactReadClassification {
 	kind: "docs" | "resource" | "skill" | "file";
@@ -335,6 +351,15 @@ export interface ReadToolOptions {
 	 * being fully buffered. Default: 10MB. Mainly overridable for tests.
 	 */
 	streamingMinBytes?: number;
+	/**
+	 * Opt-in: populate {@link ReadToolDetails.rawFileContent} on a clean whole-
+	 * file read (see the field's own doc for exactly when). Off by default so
+	 * `details` stays `undefined` for a plain untruncated read — the shape
+	 * most callers (and their tests) already assert on — and only sessions
+	 * that actually consume the field (the coding-agent context composer) pay
+	 * for retaining it.
+	 */
+	captureRawContent?: boolean;
 }
 
 type ReadRenderArgs = { path?: string; file_path?: string; offset?: number; limit?: number };
@@ -647,6 +672,7 @@ export function createReadToolDefinition(
 	const dedupeStore = options?.readDedupeStore;
 	const mtimeStore = options?.mtimeStore;
 	const streamingMinBytes = options?.streamingMinBytes ?? STREAM_READ_MIN_BYTES;
+	const captureRawContent = options?.captureRawContent ?? false;
 	return {
 		name: "read",
 		activity: "navigation",
@@ -1192,6 +1218,22 @@ Common mistakes to avoid:
 									// printed hashes). formatAnchorsForRead still doubles the stride under
 									// the byte budget, so large files degrade gracefully instead of bloating.
 									outputText += `\n\n<anchors>\n${formatAnchorsForRead(wholeFile.textContent, { lines: wholeFile.allLines, stride: 1 })}\n</anchors>`;
+								}
+								// bodyIsClean only survives when nothing capped selectedContent, so
+								// wholeFile.textContent (captured before dedupe/delta/anchors touched
+								// outputText) is guaranteed to be the exact, complete on-disk text —
+								// regardless of what range this particular call requested. Gated on
+								// captureRawContent (opt-in) so `details` stays undefined for a plain
+								// clean read by default.
+								if (captureRawContent && bodyIsClean && wholeFile !== undefined) {
+									const raw = wholeFile.textContent;
+									details = {
+										...details,
+										rawFileContent:
+											raw.length > RAW_FILE_CONTENT_MAX_CHARS
+												? raw.slice(0, RAW_FILE_CONTENT_MAX_CHARS)
+												: raw,
+									};
 								}
 								content = [{ type: "text", text: outputText }];
 							}

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter } from "node:path";
+import { basename, delimiter } from "node:path";
 import { recordDiagnostic } from "@pit/ai";
 import { spawn, spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
@@ -7,6 +7,26 @@ import { getBinDir } from "../config.ts";
 export interface ShellConfig {
 	shell: string;
 	args: string[];
+}
+
+/**
+ * POSIX shells whose command-string executable (bash -c "...") is a superset
+ * of `sh`, so a bare `eval` of a fully-buffered string behaves the same as
+ * passing that string directly as the -c argument. Used to gate the bash
+ * tool's pre-warmed spare-shell pool (see bash.ts): cmd.exe / PowerShell have
+ * neither `-c`-style single-command semantics nor `eval`, so they are never
+ * matched here and always take the direct-spawn path.
+ */
+const POSIX_SHELL_BASENAMES = new Set(["bash", "sh", "zsh", "dash", "ksh", "ash"]);
+
+/** Whether `shellPath` resolves to a POSIX-family shell (bash/sh/zsh/...),
+ * identified by executable basename (case-insensitive, `.exe` stripped) — the
+ * same shells `getShellConfig` invokes with `-c` on every platform. */
+export function isPosixShellPath(shellPath: string): boolean {
+	const base = basename(shellPath)
+		.toLowerCase()
+		.replace(/\.exe$/, "");
+	return POSIX_SHELL_BASENAMES.has(base);
 }
 
 /**
