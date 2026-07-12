@@ -17,7 +17,24 @@ import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import type { ResolvedOverthinkGuardSettings } from "./settings-manager.ts";
 
 /** Native frontier providers — higher threshold, not disabled. */
-const STRONG_NATIVE_PROVIDERS = new Set(["anthropic", "google", "openai", "openai-codex"]);
+const STRONG_NATIVE_PROVIDERS = new Set(["anthropic", "openai-codex"]);
+
+/**
+ * Multiplier applied to the provider-class base threshold, keyed by thinking
+ * level. Only used when the user has not set an explicit `tokenThreshold`
+ * override. Monotonic and never zero, so the guard is never disabled purely
+ * by scaling — `medium` reproduces today's defaults exactly.
+ */
+const THINKING_LEVEL_THRESHOLD_SCALE: Record<ThinkingLevel, number> = {
+	off: 1,
+	minimal: 0.5,
+	low: 0.75,
+	medium: 1,
+	high: 1.5,
+	xhigh: 2,
+	max: 2,
+	ultra: 2,
+};
 
 export function resolveOverthinkGuardForModel(
 	model: Model<"openai-responses">,
@@ -34,7 +51,9 @@ export function resolveOverthinkGuardForModel(
 	const maxRetriesPerTurn = settings.maxRetriesPerTurn;
 	let tokenThreshold = settings.tokenThreshold;
 	if (tokenThreshold === undefined) {
-		tokenThreshold = isStrong ? settings.strongTokenThreshold : settings.weakTokenThreshold;
+		const baseThreshold = isStrong ? settings.strongTokenThreshold : settings.weakTokenThreshold;
+		const scale = thinkingLevel ? THINKING_LEVEL_THRESHOLD_SCALE[thinkingLevel] : 1;
+		tokenThreshold = Math.round(baseThreshold * scale);
 	}
 	// Models without reasoning metadata still stream thinking on many OpenAI-compat
 	// endpoints; only skip when the user explicitly turned thinking off AND the

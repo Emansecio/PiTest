@@ -272,7 +272,7 @@ await agent.continue();
 
 ```typescript
 agent.state.systemPrompt = "New prompt";
-agent.state.model = getModel("openai", "gpt-4o");
+agent.state.model = getModel("anthropic", "claude-haiku-4-5");
 agent.state.thinkingLevel = "medium";
 agent.state.tools = [myTool];
 agent.toolExecution = "sequential";
@@ -466,7 +466,7 @@ const context: AgentContext = {
 };
 
 const config: AgentLoopConfig = {
-  model: getModel("openai", "gpt-4o"),
+  model: getModel("anthropic", "claude-haiku-4-5"),
   convertToLlm: (msgs) => msgs.filter(m => ["user", "assistant", "toolResult"].includes(m.role)),
   toolExecution: "parallel",  // overridden by per-tool executionMode if set
   beforeToolCall: async ({ toolCall, args, context }) => undefined,

@@ -11,8 +11,8 @@
  *
  * Levels (tight -> loose): `assistido` (max protection) -> `padrao` -> `leve`.
  * Start level: `padrao` for every model; `leve` only when the ACTIVE model runs
- * on a native `anthropic`/`openai` provider (the fixed 2-entry light-start prior
- * from §4-P0a — proxies like `openrouter` keep `padrao`).
+ * on a native `anthropic` provider (from the §4-P0a light-start prior — proxies
+ * and OpenAI-compat endpoints keep `padrao`).
  *
  * Three anti-oscillation locks (all mandatory, from the study):
  *   1. Asymmetric — one qualifying signal tightens immediately (any time); the
@@ -68,12 +68,13 @@ export interface SupervisionThermostatOptions {
 /**
  * Native frontier providers that start `leve`. This mirrors repair-note-policy.ts's
  * technique of distinguishing NATIVE providers by exact provider-string match (so a
- * model routed via `openrouter`/a proxy does not qualify), but uses the fixed 2-entry
- * light-start prior from §4-P0a — deliberately narrower than repair-note-policy's
- * 4-entry `STRONG_NATIVE_PROVIDERS` (no `google`, no `openai-codex`), because the
- * study fixes exactly `anthropic` and `openai` as the models that earn a lighter start.
+ * model routed via a proxy or OpenAI-compat endpoint does not qualify). The §4-P0a
+ * light-start prior fixed exactly `anthropic` and `openai`; the plain `openai`
+ * provider has since been pruned from the build, so `anthropic` is the only native
+ * provider that earns a lighter start. `openai-codex` remains deliberately excluded
+ * from the prior.
  */
-const LIGHT_START_PROVIDERS = new Set<string>(["anthropic", "openai"]);
+const LIGHT_START_PROVIDERS = new Set<string>(["anthropic"]);
 
 // Tight -> loose ordering. Index == supervision strength (higher = more supervision).
 const LEVEL_ORDER: readonly SupervisionLevel[] = ["leve", "padrao", "assistido"];

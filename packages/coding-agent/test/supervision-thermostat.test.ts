@@ -40,17 +40,16 @@ describe("SupervisionThermostat", () => {
 			expect(makeQuiet().getLevel()).toBe("padrao");
 		});
 
-		it("starts leve for native anthropic and openai providers", () => {
+		it("starts leve for the native anthropic provider", () => {
 			expect(makeQuiet({ provider: "anthropic" }).getLevel()).toBe("leve");
-			expect(makeQuiet({ provider: "openai" }).getLevel()).toBe("leve");
 		});
 
 		it("keeps padrao for proxies and other native providers", () => {
-			// openrouter/proxies route Claude/GPT but are NOT native → no light start.
-			expect(makeQuiet({ provider: "openrouter" }).getLevel()).toBe("padrao");
-			// google / openai-codex are outside the fixed 2-entry light-start prior.
-			expect(makeQuiet({ provider: "google" }).getLevel()).toBe("padrao");
+			// Proxies / OpenAI-compat endpoints route Claude/GPT but are NOT native → no light start.
+			expect(makeQuiet({ provider: "opencode" }).getLevel()).toBe("padrao");
+			// openai-codex is deliberately outside the light-start prior.
 			expect(makeQuiet({ provider: "openai-codex" }).getLevel()).toBe("padrao");
+			expect(makeQuiet({ provider: "xai" }).getLevel()).toBe("padrao");
 		});
 	});
 

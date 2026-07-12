@@ -66,7 +66,7 @@ describe("Agent", () => {
 	});
 
 	it("should create an agent instance with custom initial state", () => {
-		const customModel = getModel("openai", "gpt-4o-mini");
+		const customModel = getModel("anthropic", "claude-haiku-4-5");
 		const agent = new Agent({
 			initialState: {
 				systemPrompt: "You are a helpful assistant.",
@@ -252,7 +252,7 @@ describe("Agent", () => {
 		expect(agent.state.systemPrompt).toBe("Custom prompt");
 
 		// Test setModel
-		const newModel = getModel("google", "gemini-2.5-flash");
+		const newModel = getModel("xai", "grok-4.5");
 		agent.state.model = newModel;
 		expect(agent.state.model).toBe(newModel);
 

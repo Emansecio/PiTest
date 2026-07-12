@@ -13,7 +13,12 @@ import {
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@pit/ai";
-import { buildOverthinkReminderMessage, type OverthinkGuardConfig, OverthinkTracker } from "./overthink-guard.ts";
+import {
+	buildOverthinkReminderMessage,
+	type OverthinkGuardConfig,
+	type OverthinkInterruptInfo,
+	OverthinkTracker,
+} from "./overthink-guard.ts";
 import { stableArgsFingerprint } from "./stable-args-fingerprint.ts";
 import { appendHintsToContent } from "./tool-error-hint-registry.ts";
 import { appendRepairNoteToContent, buildRepairNote } from "./tool-repair-note.ts";
@@ -90,7 +95,7 @@ const DEFAULT_MAX_TURNS = 250;
 type TTSRInterrupt = { ttsr: TTSRMatchInfo };
 
 /** Sentinel returned when live thinking exceeds the overthink guard threshold. */
-type OverthinkInterrupt = { overthink: { estimatedTokens: number; threshold: number } };
+type OverthinkInterrupt = { overthink: OverthinkInterruptInfo };
 
 type StreamInterrupt = TTSRInterrupt | OverthinkInterrupt;
 
@@ -759,7 +764,11 @@ async function streamAssistantResponse(
 					partialMessage = event.partial;
 					context.messages.push(partialMessage);
 					addedPartial = true;
-					lastEmitTime = performance.now();
+					// Do NOT arm lastEmitTime here: leaving it at 0 makes the very first
+					// delta's `now - lastEmitTime >= DELTA_THROTTLE_MS` check true, so first
+					// paint flushes immediately instead of paying the coalescing window.
+					// flushPendingDelta re-arms it on every flush, so later deltas are still
+					// coalesced normally.
 					await emit({ type: "message_start", message: { ...partialMessage } });
 					break;
 
@@ -792,13 +801,12 @@ async function streamAssistantResponse(
 							} else if (event.type === "text_delta" && overthinkGuard.watchTextDelta) {
 								overthinkTracker.onTextDelta(event.contentIndex, delta);
 							}
-							if (overthinkTracker.shouldInterrupt(event.contentIndex, overthinkGuard.tokenThreshold)) {
-								streamInterrupt = {
-									overthink: {
-										estimatedTokens: overthinkTracker.getEstimatedTokens(event.contentIndex),
-										threshold: overthinkGuard.tokenThreshold,
-									},
-								};
+							const overthinkInfo = overthinkTracker.getInterruptInfo(
+								event.contentIndex,
+								overthinkGuard.tokenThreshold,
+							);
+							if (overthinkInfo) {
+								streamInterrupt = { overthink: overthinkInfo };
 								ttsrAbort.abort();
 							}
 						}

@@ -3,13 +3,13 @@ import { resolveEmitRepairNotes, shouldAutoEmitRepairNotes } from "../src/core/r
 
 describe("shouldAutoEmitRepairNotes", () => {
 	it("is OFF for native frontier providers", () => {
-		for (const provider of ["anthropic", "google", "openai", "openai-codex"]) {
+		for (const provider of ["anthropic", "openai-codex"]) {
 			expect(shouldAutoEmitRepairNotes({ provider })).toBe(false);
 		}
 	});
 
 	it("is ON for weak/open providers without a frontier model id", () => {
-		for (const provider of ["opencode", "opencode-go", "kimi-coding", "xiaomi", "minimax", "openrouter", "zai"]) {
+		for (const provider of ["opencode", "opencode-go", "zai", "my-proxy"]) {
 			expect(shouldAutoEmitRepairNotes({ provider })).toBe(true);
 		}
 	});
@@ -20,12 +20,12 @@ describe("shouldAutoEmitRepairNotes", () => {
 
 	it("is OFF for frontier model ids on weak providers", () => {
 		const cases = [
-			{ provider: "openrouter", id: "anthropic/claude-3.5-sonnet" },
-			{ provider: "openrouter", id: "openai/gpt-4o" },
-			{ provider: "openrouter", id: "openai/gpt-5" },
-			{ provider: "openrouter", id: "google/gemini-2.0-flash" },
-			{ provider: "openrouter", id: "openai/o1-preview" },
-			{ provider: "openrouter", id: "openai/o3-mini" },
+			{ provider: "opencode", id: "anthropic/claude-3.5-sonnet" },
+			{ provider: "opencode", id: "openai/gpt-4o" },
+			{ provider: "opencode", id: "openai/gpt-5" },
+			{ provider: "opencode", id: "google/gemini-2.0-flash" },
+			{ provider: "opencode", id: "openai/o1-preview" },
+			{ provider: "opencode", id: "openai/o3-mini" },
 			{ provider: "opencode", id: "claude-sonnet-4" },
 		];
 		for (const model of cases) {
@@ -35,10 +35,10 @@ describe("shouldAutoEmitRepairNotes", () => {
 
 	it("is ON for weak model ids on weak providers", () => {
 		const cases = [
-			{ provider: "openrouter", id: "deepseek/deepseek-chat" },
-			{ provider: "openrouter", id: "qwen/qwen-2.5-72b-instruct" },
+			{ provider: "opencode", id: "deepseek/deepseek-chat" },
+			{ provider: "opencode", id: "qwen/qwen-2.5-72b-instruct" },
 			{ provider: "opencode", id: "glm-4-plus" },
-			{ provider: "kimi-coding", id: "kimi-k2" },
+			{ provider: "opencode-go", id: "kimi-k2" },
 		];
 		for (const model of cases) {
 			expect(shouldAutoEmitRepairNotes(model)).toBe(true);
@@ -46,9 +46,9 @@ describe("shouldAutoEmitRepairNotes", () => {
 	});
 
 	it("matches frontier model id patterns case-insensitively", () => {
-		expect(shouldAutoEmitRepairNotes({ provider: "openrouter", id: "CLAUDE-3-opus" })).toBe(false);
-		expect(shouldAutoEmitRepairNotes({ provider: "openrouter", id: "GPT-4-TURBO" })).toBe(false);
-		expect(shouldAutoEmitRepairNotes({ provider: "openrouter", id: "Gemini-Pro" })).toBe(false);
+		expect(shouldAutoEmitRepairNotes({ provider: "opencode", id: "CLAUDE-3-opus" })).toBe(false);
+		expect(shouldAutoEmitRepairNotes({ provider: "opencode", id: "GPT-4-TURBO" })).toBe(false);
+		expect(shouldAutoEmitRepairNotes({ provider: "opencode", id: "Gemini-Pro" })).toBe(false);
 	});
 });
 
@@ -65,14 +65,14 @@ describe("resolveEmitRepairNotes (env override)", () => {
 	it("falls back to the auto rule when unset", () => {
 		expect(resolveEmitRepairNotes({ provider: "anthropic" })).toBe(false);
 		expect(resolveEmitRepairNotes({ provider: "opencode" })).toBe(true);
-		expect(resolveEmitRepairNotes({ provider: "openrouter", id: "anthropic/claude-3.5-sonnet" })).toBe(false);
-		expect(resolveEmitRepairNotes({ provider: "openrouter", id: "deepseek/deepseek-chat" })).toBe(true);
+		expect(resolveEmitRepairNotes({ provider: "opencode", id: "anthropic/claude-3.5-sonnet" })).toBe(false);
+		expect(resolveEmitRepairNotes({ provider: "opencode", id: "deepseek/deepseek-chat" })).toBe(true);
 	});
 
 	it("forces ON for a strong provider when PIT_TOOL_REPAIR_NOTE=1", () => {
 		process.env.PIT_TOOL_REPAIR_NOTE = "1";
 		expect(resolveEmitRepairNotes({ provider: "anthropic" })).toBe(true);
-		expect(resolveEmitRepairNotes({ provider: "openrouter", id: "anthropic/claude-3.5-sonnet" })).toBe(true);
+		expect(resolveEmitRepairNotes({ provider: "opencode", id: "anthropic/claude-3.5-sonnet" })).toBe(true);
 	});
 
 	it("forces OFF for a weak provider when PIT_TOOL_REPAIR_NOTE=0", () => {
@@ -82,8 +82,8 @@ describe("resolveEmitRepairNotes (env override)", () => {
 
 	it("treats whitespace-only as unset (auto)", () => {
 		process.env.PIT_TOOL_REPAIR_NOTE = "  ";
-		expect(resolveEmitRepairNotes({ provider: "openai" })).toBe(false);
-		expect(resolveEmitRepairNotes({ provider: "kimi-coding" })).toBe(true);
-		expect(resolveEmitRepairNotes({ provider: "openrouter", id: "openai/gpt-4o" })).toBe(false);
+		expect(resolveEmitRepairNotes({ provider: "anthropic" })).toBe(false);
+		expect(resolveEmitRepairNotes({ provider: "opencode-go" })).toBe(true);
+		expect(resolveEmitRepairNotes({ provider: "opencode", id: "openai/gpt-4o" })).toBe(false);
 	});
 });
