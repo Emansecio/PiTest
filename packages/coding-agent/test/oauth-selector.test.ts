@@ -8,7 +8,7 @@ import { isApiKeyLoginProvider } from "../src/modes/interactive/interactive-mode
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { stripAnsi } from "../src/utils/ansi.js";
 
-const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
+const originalXaiApiKey = process.env.XAI_API_KEY;
 
 describe("OAuthSelectorComponent", () => {
 	beforeAll(() => {
@@ -20,21 +20,21 @@ describe("OAuthSelectorComponent", () => {
 	});
 
 	afterEach(() => {
-		if (originalOpenAiApiKey === undefined) {
-			delete process.env.OPENAI_API_KEY;
+		if (originalXaiApiKey === undefined) {
+			delete process.env.XAI_API_KEY;
 		} else {
-			process.env.OPENAI_API_KEY = originalOpenAiApiKey;
+			process.env.XAI_API_KEY = originalXaiApiKey;
 		}
 	});
 
 	it("keeps built-in API key providers separate from OAuth-only providers", () => {
 		const oauthProviderIds = new Set(["anthropic", "custom-oauth"]);
-		const builtInProviderIds = new Set(["anthropic", "openrouter", "openai"]);
+		const builtInProviderIds = new Set(["anthropic", "opencode", "xai"]);
 
 		expect(isApiKeyLoginProvider("anthropic", oauthProviderIds, builtInProviderIds)).toBe(true);
 		expect(BUILT_IN_PROVIDER_DISPLAY_NAMES.anthropic).toBe("Anthropic");
-		expect(isApiKeyLoginProvider("openai", oauthProviderIds, builtInProviderIds)).toBe(true);
-		expect(isApiKeyLoginProvider("openrouter", oauthProviderIds, builtInProviderIds)).toBe(true);
+		expect(isApiKeyLoginProvider("opencode", oauthProviderIds, builtInProviderIds)).toBe(true);
+		expect(isApiKeyLoginProvider("xai", oauthProviderIds, builtInProviderIds)).toBe(true);
 		expect(isApiKeyLoginProvider("custom-oauth", oauthProviderIds, builtInProviderIds)).toBe(false);
 		expect(isApiKeyLoginProvider("custom-api", oauthProviderIds, builtInProviderIds)).toBe(true);
 	});
@@ -63,20 +63,20 @@ describe("OAuthSelectorComponent", () => {
 	});
 
 	it("shows environment API key auth as configured", () => {
-		process.env.OPENAI_API_KEY = "test-openai-key";
+		process.env.XAI_API_KEY = "test-xai-key";
 		const authStorage = AuthStorage.inMemory();
 		const selector = new OAuthSelectorComponent(
 			"login",
 			authStorage,
-			[{ id: "openai", name: "OpenAI", authType: "api_key" }],
+			[{ id: "xai", name: "xAI Grok", authType: "api_key" }],
 			() => {},
 			() => {},
 		);
 
 		const output = stripAnsi(selector.render(120).join("\n"));
 
-		expect(output).toContain("OpenAI");
-		expect(output).toContain("✓ env: OPENAI_API_KEY");
+		expect(output).toContain("xAI Grok");
+		expect(output).toContain("✓ env: XAI_API_KEY");
 		expect(output).not.toContain("unconfigured");
 	});
 

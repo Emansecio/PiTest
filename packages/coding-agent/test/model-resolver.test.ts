@@ -381,13 +381,13 @@ describe("resolveCliModel", () => {
 });
 
 describe("default model selection", () => {
-	test("openai defaults track current models", () => {
-		expect(defaultModelPerProvider.openai).toBe("gpt-5.4");
+	test("kept-provider defaults track current models", () => {
+		expect(defaultModelPerProvider.anthropic).toBe("claude-opus-4-8");
 		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.5");
 	});
 
-	test("minimax defaults track current models", () => {
-		expect(defaultModelPerProvider.minimax).toBe("MiniMax-M2.7");
+	test("xai default tracks current models", () => {
+		expect(defaultModelPerProvider.xai).toBe("grok-4.5");
 	});
 
 	test("findInitialModel accepts explicit provider custom model ids", async () => {

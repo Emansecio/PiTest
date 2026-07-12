@@ -42,15 +42,9 @@ export interface ResolveRoleOptions {
 /** Default model IDs for each known provider */
 export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	anthropic: "claude-opus-4-8",
-	openai: "gpt-5.4",
 	"openai-codex": "gpt-5.5",
-	google: "gemini-3.1-pro-preview",
-	openrouter: "moonshotai/kimi-k2.6",
-	minimax: "MiniMax-M2.7",
 	opencode: "kimi-k2.6",
 	"opencode-go": "kimi-k2.6",
-	"kimi-coding": "kimi-for-coding",
-	xiaomi: "mimo-v2.5-pro",
 	xai: "grok-4.5",
 };
 

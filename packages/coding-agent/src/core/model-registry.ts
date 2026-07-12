@@ -331,12 +331,13 @@ export const clearApiKeyCache = clearConfigValueCache;
 
 /**
  * Providers hidden from the "available models" surface (the /model selector and
- * any flow that lists usable models), even when auth is configured for them. The
- * `@pit/ai` catalog still defines these providers — its types and provider-behavior
- * tests depend on them — and `getAll()`/`find()` still resolve them, so models.json
- * overrides keep working; they're just kept out of the picker to avoid flooding it.
+ * any flow that lists usable models), even when auth is configured for them.
+ * `getAll()`/`find()` still resolve them, so models.json overrides keep working;
+ * they're just kept out of the picker to avoid flooding it. Currently empty — the
+ * mechanism is retained so a noisy built-in provider can be hidden without code
+ * churn elsewhere.
  */
-const HIDDEN_BUILTIN_PROVIDERS: ReadonlySet<string> = new Set(["openrouter"]);
+const HIDDEN_BUILTIN_PROVIDERS: ReadonlySet<string> = new Set([]);
 
 /** True when a provider's built-in models should be kept out of user-facing pickers. */
 export function isHiddenModelProvider(providerId: string): boolean {

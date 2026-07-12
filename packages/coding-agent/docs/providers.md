@@ -51,24 +51,18 @@ pit
 |----------|----------------------|------------------|
 | Anthropic | `ANTHROPIC_API_KEY` | `anthropic` |
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
-| OpenAI | `OPENAI_API_KEY` | `openai` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
-| Google Gemini | `GEMINI_API_KEY` | `google` |
 | Mistral | `MISTRAL_API_KEY` | `mistral` |
 | Groq | `GROQ_API_KEY` | `groq` |
 | Cerebras | `CEREBRAS_API_KEY` | `cerebras` |
 | Cloudflare AI Gateway | `CLOUDFLARE_API_KEY` (+ `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID`) | `cloudflare-ai-gateway` |
 | Cloudflare Workers AI | `CLOUDFLARE_API_KEY` (+ `CLOUDFLARE_ACCOUNT_ID`) | `cloudflare-workers-ai` |
-| OpenRouter | `OPENROUTER_API_KEY` | `openrouter` |
 | OpenCode Zen | `OPENCODE_API_KEY` | `opencode` |
 | OpenCode Go | `OPENCODE_API_KEY` | `opencode-go` |
+| xAI Grok | `XAI_API_KEY` | `xai` |
 | Hugging Face | `HF_TOKEN` | `huggingface` |
 | Fireworks | `FIREWORKS_API_KEY` | `fireworks` |
 | Together AI | `TOGETHER_API_KEY` | `together` |
-| Kimi For Coding | `KIMI_API_KEY` | `kimi-coding` |
-| MiniMax | `MINIMAX_API_KEY` | `minimax` |
-| MiniMax (China) | `MINIMAX_CN_API_KEY` | `minimax-cn` |
-| Xiaomi MiMo | `XIAOMI_API_KEY` | `xiaomi` |
 
 Reference for environment variables and `auth.json` keys: `const envMap` in `packages/ai/src/env-api-keys.ts`.
 
@@ -79,13 +73,10 @@ Store credentials in `~/.pit/agent/auth.json`:
 ```json
 {
   "anthropic": { "type": "api_key", "key": "sk-ant-..." },
-  "openai": { "type": "api_key", "key": "sk-..." },
   "deepseek": { "type": "api_key", "key": "sk-..." },
-  "google": { "type": "api_key", "key": "..." },
   "opencode": { "type": "api_key", "key": "..." },
   "opencode-go": { "type": "api_key", "key": "..." },
-  "together": { "type": "api_key", "key": "..." },
-  "xiaomi": { "type": "api_key", "key": "..." }
+  "xai": { "type": "api_key", "key": "..." }
 }
 ```
 
