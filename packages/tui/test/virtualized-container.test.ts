@@ -26,8 +26,11 @@ class CountingText implements Component {
 
 class StableText implements Component {
 	private lines: string[] | undefined;
+	private readonly text: string;
 
-	constructor(private readonly text: string) {}
+	constructor(text: string) {
+		this.text = text;
+	}
 
 	render(width: number): string[] {
 		if (!this.lines) {
@@ -35,6 +38,8 @@ class StableText implements Component {
 		}
 		return this.lines;
 	}
+
+	invalidate(): void {}
 }
 
 describe("VirtualizedContainer", () => {
