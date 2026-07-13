@@ -8,6 +8,7 @@ import {
 	parseDeferredStoreMemoryCap,
 	setCurrentDeferredOutputStore,
 } from "../src/core/deferred-output-store.js";
+import { redactForDisk } from "../src/core/secret-redactor.js";
 
 afterEach(() => {
 	setCurrentDeferredOutputStore(undefined);
@@ -130,6 +131,31 @@ describe("DeferredOutputStore spill", () => {
 			// get() serves the disk copy: redacted, but otherwise intact.
 			expect(store.get(id)).toBe(onDisk);
 			store.dispose();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("recall is spill-invariant: memory-resident and spilled entries return identical redacted bytes", () => {
+		const root = tempSpillRoot();
+		try {
+			// An obviously fake credential-shaped string (never a real secret).
+			const secretish = 'API_KEY="fake-not-a-real-secret-0123456789"';
+			// Store 1: default cap → stays in memory (no spill).
+			const store1 = createDeferredOutputStore();
+			const id1 = store1.put(secretish);
+			// Store 2: cap 0 → spills immediately at put.
+			const spillDir = join(root, "spill");
+			const store2 = createDeferredOutputStore({ memoryCapBytes: 0, spillDir });
+			const id2 = store2.put(secretish);
+			expect(existsSync(join(spillDir, `${id2}.txt`))).toBe(true); // confirm it spilled
+			// Spill-invariance: both tiers return the same bytes...
+			expect(store1.get(id1)).toBe(store2.get(id2));
+			// ...and that value is the redacted form (redaction applied at ingestion).
+			expect(store1.get(id1)).toBe(redactForDisk(secretish));
+			expect(store2.get(id2)).toBe(redactForDisk(secretish));
+			store1.dispose();
+			store2.dispose();
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

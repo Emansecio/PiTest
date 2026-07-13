@@ -9,13 +9,15 @@ import { redactForDisk } from "./secret-redactor.ts";
  * kept and replaced in-context by a short placeholder + id; the model
  * re-fetches on demand via the `recall_tool_output` tool.
  *
- * Entries live in memory up to an aggregate cap (default 16MB, override via
- * PIT_DEFERRED_STORE_MEMORY_CAP_BYTES). Above the cap the oldest entries
- * (FIFO by seq) SPILL to a lazily-created temp dir and are freed from memory;
- * `get` falls back memory→disk. Spilled bytes pass through `redactForDisk`
- * (repo invariant for disk artifacts). A spill I/O failure degrades the store
- * to memory-only for the rest of the session — it never aborts the turn.
- * Intra-session only (temp dir removed on dispose).
+ * Content passes through `redactForDisk` once at ingestion (put), so recall is
+ * spill-invariant: the model gets identical bytes whether the entry is still
+ * memory-resident or has spilled to disk (repo invariant for disk artifacts is
+ * satisfied at the point of ingestion). Entries live in memory up to an
+ * aggregate cap (default 16MB, override via PIT_DEFERRED_STORE_MEMORY_CAP_BYTES).
+ * Above the cap the oldest entries (FIFO by seq) SPILL to a lazily-created temp
+ * dir and are freed from memory; `get` falls back memory→disk. A spill I/O
+ * failure degrades the store to memory-only for the rest of the session — it
+ * never aborts the turn. Intra-session only (temp dir removed on dispose).
  */
 export interface DeferredOutputStore {
 	/** Persist content, return a short retrieval id. */
@@ -99,7 +101,8 @@ export function createDeferredOutputStore(options?: DeferredOutputStoreOptions):
 			if (memoryBytes <= capBytes) return;
 			try {
 				// Repo invariant: bytes that land on disk pass through redactForDisk.
-				writeFileSync(join(target, `${id}.txt`), redactForDisk(content), "utf8");
+				// The pass happens at put() ingestion, so `content` is already redacted.
+				writeFileSync(join(target, `${id}.txt`), content, "utf8");
 			} catch {
 				diskUnavailable = true;
 				return;
@@ -113,8 +116,11 @@ export function createDeferredOutputStore(options?: DeferredOutputStoreOptions):
 		put(content) {
 			seq += 1;
 			const id = `d${seq}`;
-			memory.set(id, content);
-			memoryBytes += entryBytes(content);
+			// Redact once at ingestion so recall is spill-invariant: the model sees
+			// the same bytes whether the entry is memory-resident or spilled to disk.
+			const stored = redactForDisk(content);
+			memory.set(id, stored);
+			memoryBytes += entryBytes(stored);
 			spillUntilUnderCap();
 			return id;
 		},
