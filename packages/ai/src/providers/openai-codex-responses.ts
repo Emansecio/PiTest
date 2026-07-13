@@ -842,6 +842,7 @@ function scheduleSessionWebSocketExpiry(sessionId: string, entry: CachedWebSocke
 			websocketSessionCache.delete(sessionId);
 		}
 	}, SESSION_WEBSOCKET_CACHE_TTL_MS);
+	(entry.idleTimer as { unref?: () => void }).unref?.();
 }
 
 async function connectWebSocket(
