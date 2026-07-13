@@ -185,6 +185,22 @@ export class Markdown implements Component {
 	// path (vs a full re-lex). Exposed via _incrementalLexCount() for the
 	// equivalence suite to confirm the fast path is actually exercised.
 	private incrementalLexCount = 0;
+	// Cached concatenation of every "kept" (stable-prefix) token's `.raw` for the
+	// incremental tail-lex. Without this, tryIncrementalLex rebuilds this string
+	// from scratch every streamed frame — O(document) per frame, i.e. O(n²) per
+	// message. The kept prefix only grows (tokens graduate out of the tail as
+	// `kept = prev.slice(0, -2)`), and those prefix tokens are the SAME object
+	// instances frame-to-frame (the previous frame's merged array becomes this
+	// frame's prev — see lexTokens()/lastTokens). So we cache the concatenation and
+	// extend it by only the newly-graduated tokens' raw. `incrLexStableLastToken`
+	// anchors the cache to a token identity: a full lex (or any fallback) produces
+	// fresh token objects, so the identity check misses and the cache is rebuilt
+	// from scratch — no explicit invalidation is required beyond that (the full-lex
+	// path and freeze() reset it defensively). `incrLexStableCount` is how many
+	// leading kept tokens `incrLexStableRaw` covers.
+	private incrLexStableRaw?: string;
+	private incrLexStableCount = 0;
+	private incrLexStableLastToken?: Token;
 	// Table cell measurement cache: cellText (already-rendered, ANSI included) ->
 	// { natural: visibleWidth(cellText), minWord: getLongestWordWidth(cellText, 30) }.
 	// renderTable's maxUnbrokenWordWidth is always 30, so it is not part of the
@@ -271,6 +287,51 @@ export class Markdown implements Component {
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
 		this.cachedDefaultInlineStyleContext = undefined;
+	}
+
+	/**
+	 * Release the streaming/lexing scratch caches once this message has settled
+	 * (no longer being streamed), keeping only the final render cache
+	 * (cachedText/cachedWidth/cachedLines). For a long session these per-message
+	 * caches — the lex baseline (lastTokens/lastNormalizedText), the per-token line
+	 * cache, the table cell measure/wrap caches (up to MAX_CELL_CACHE_ENTRIES
+	 * each), the deferred code-line cache and the incremental stableRaw/fence state
+	 * — pin roughly 3-4× the transcript text for the whole session, even though a
+	 * settled message only ever re-renders as a pure cache hit (render()'s
+	 * cachedText===text && cachedWidth===width fast path) or, at worst, a one-off
+	 * full re-lex on resize.
+	 *
+	 * Fully recoverable: every dropped field is read through an `undefined`/empty
+	 * guard, so a later setText() (edited message) or width change simply falls back
+	 * to a full lex and repopulates — see normalizeIncrementally(), tryIncrementalLex()
+	 * guard (a), hasOpenCodeFenceIncremental(), and the tokenLineCache lookup in
+	 * render(). Idempotent.
+	 */
+	freeze(): void {
+		// Already frozen (streaming caches released and not repopulated since a full
+		// re-lex): nothing to do. Keeps the per-settled-frame re-invocation from the
+		// owning component cheap and allocation-free.
+		if (this.lastTokens === undefined && this.tokenLineCache === undefined) {
+			return;
+		}
+		this.lastRawText = undefined;
+		this.lastNormalizedText = undefined;
+		this.lastTokens = undefined;
+		this.tokenLineCache = undefined;
+		this.cellMeasureCache.clear();
+		this.cellWrapCache.clear();
+		this.deferredCodeLineCache.clear();
+		// Drop the per-token key memo by swapping in a fresh WeakMap (its keys are
+		// the now-released token objects; a new map lets them be collected).
+		this.tokenKeyCache = new WeakMap();
+		// Incremental open-code-fence tracker.
+		this.lastFenceText = undefined;
+		this.lastFenceCount = 0;
+		this.lastFenceSearchPos = 0;
+		// Incremental stableRaw cache (see field docs).
+		this.incrLexStableRaw = undefined;
+		this.incrLexStableCount = 0;
+		this.incrLexStableLastToken = undefined;
 	}
 
 	render(width: number): string[] {
@@ -481,6 +542,12 @@ export class Markdown implements Component {
 		this.lastRawText = this.text;
 		this.lastNormalizedText = normalizedText;
 		this.lastTokens = tokens;
+		// Full lex swapped in fresh token objects, so the stableRaw cache's identity
+		// anchor no longer matches; reset it (the identity check would catch this
+		// anyway, but resetting keeps the invariant explicit and cheap).
+		this.incrLexStableRaw = undefined;
+		this.incrLexStableCount = 0;
+		this.incrLexStableLastToken = undefined;
 		return tokens;
 	}
 
@@ -522,13 +589,47 @@ export class Markdown implements Component {
 			return undefined;
 		}
 
-		let stableRaw = "";
-		for (const token of kept) {
-			stableRaw += token.raw;
+		// Concatenate the kept tokens' raw. On the common streaming path we extend a
+		// cached prefix by only the tokens that graduated out of the tail since the
+		// last call, instead of re-concatenating the whole document. The cache is
+		// anchored to a token identity: the kept prefix reuses the same token objects
+		// frame-to-frame (previous merged → this prev), so a matching boundary
+		// identity proves the cached prefix is still the same tokens; any full lex /
+		// fallback swaps in fresh objects and misses, forcing a from-scratch rebuild.
+		let stableRaw: string;
+		let verifiedPrefixLen: number;
+		if (
+			this.incrLexStableRaw !== undefined &&
+			this.incrLexStableCount > 0 &&
+			this.incrLexStableCount <= kept.length &&
+			kept[this.incrLexStableCount - 1] === this.incrLexStableLastToken
+		) {
+			// Cache hit: the first incrLexStableCount kept tokens are the same
+			// instances that produced incrLexStableRaw, which was verified as a prefix
+			// of the previous normalized text. Guard (a) above already confirmed
+			// normalizedText.startsWith(prevNormalized), so that cached prefix is
+			// still a prefix of normalizedText and needs no re-check — only the newly
+			// appended segment is verified below (from verifiedPrefixLen onward).
+			stableRaw = this.incrLexStableRaw;
+			verifiedPrefixLen = this.incrLexStableRaw.length;
+			for (let i = this.incrLexStableCount; i < kept.length; i++) {
+				stableRaw += kept[i].raw;
+			}
+		} else {
+			// Cache miss (first append after a full lex, or a reset): concatenate the
+			// full prefix and verify the whole thing, exactly as the original did.
+			stableRaw = "";
+			verifiedPrefixLen = 0;
+			for (const token of kept) {
+				stableRaw += token.raw;
+			}
 		}
 		// The kept raw must be an exact prefix of the new normalized text, otherwise
-		// the structure shifted under us and the tail offset would be wrong.
-		if (!normalizedText.startsWith(stableRaw)) {
+		// the structure shifted under us and the tail offset would be wrong. Only the
+		// not-yet-verified suffix is checked here (the cached prefix is guaranteed to
+		// match — see above); on a cache miss verifiedPrefixLen is 0, so this is the
+		// original full startsWith.
+		if (!normalizedText.startsWith(stableRaw.slice(verifiedPrefixLen), verifiedPrefixLen)) {
 			return undefined;
 		}
 
@@ -553,16 +654,27 @@ export class Markdown implements Component {
 
 		const merged: Token[] = kept.concat(tailTokens);
 
-		// Guard (f): cheap structural sanity. If the concatenated raw does not
-		// exactly reconstruct the input, the token boundaries diverged from a full
-		// lex (e.g. a structural merge the other guards missed) → full lex.
-		let coverage = "";
-		for (const token of merged) {
-			coverage += token.raw;
+		// Guard (f): cheap structural sanity — the concatenated raw of `merged` must
+		// exactly reconstruct normalizedText. The startsWith check above proved
+		// normalizedText === stableRaw + tail (tail is its slice at stableRaw.length),
+		// so merged-raw === normalizedText iff the tail tokens' raw reconstructs
+		// `tail`. Checking only that is O(tail) instead of re-concatenating +
+		// comparing the whole O(document) buffer every frame; it is semantically
+		// identical to the original coverage guard.
+		let tailCoverage = "";
+		for (const token of tailTokens) {
+			tailCoverage += token.raw;
 		}
-		if (coverage !== normalizedText) {
+		if (tailCoverage !== tail) {
 			return undefined;
 		}
+
+		// Update the stableRaw cache for the next frame's extend path, anchored to
+		// the last kept token's identity (see the field docs). kept.length >= 1 here
+		// (guarded above), so the anchor token always exists.
+		this.incrLexStableRaw = stableRaw;
+		this.incrLexStableCount = kept.length;
+		this.incrLexStableLastToken = kept[kept.length - 1];
 
 		return merged;
 	}

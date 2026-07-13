@@ -20,7 +20,7 @@ import { createJiti } from "jiti/static";
 import * as _bundledTypebox from "typebox";
 import * as _bundledTypeboxCompile from "typebox/compile";
 import * as _bundledTypeboxValue from "typebox/value";
-import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
+import { CONFIG_DIR_NAME, getAgentDir, getPackageDir, isBunBinary } from "../../config.ts";
 // Bun binary: static import so the full package is bundled into VIRTUAL_MODULES.
 // Node/dev: jiti aliases resolve `@pit/coding-agent` to `extension-api` (slim).
 // NOTE: loader exports are NOT re-exported from index.ts (avoids circular deps).
@@ -74,16 +74,21 @@ let _aliases: Record<string, string> | null = null;
 function getAliases(): Record<string, string> {
 	if (_aliases) return _aliases;
 
-	const __dirname = path.dirname(fileURLToPath(import.meta.url));
+	// Anchor on the package dir (walks up to package.json) rather than on this
+	// module's own nested location. In the shipped esbuild single-file bundle
+	// every module collapses into dist/cli.js, so `import.meta.url`-relative
+	// paths like `../../extension-api.js` no longer resolve — getPackageDir()
+	// stays correct for dist, bundle, and dev.
+	const packageDir = getPackageDir();
 	// Node: slim extension surface (avoids agent-session + full tools registry).
 	// Bun binary uses VIRTUAL_MODULES with the full package index instead.
-	const extensionApiEntry = path.resolve(__dirname, "../..", "extension-api.js");
+	const extensionApiEntry = path.join(packageDir, "dist", "extension-api.js");
 
 	const typeboxEntry = require.resolve("typebox");
 	const typeboxCompileEntry = require.resolve("typebox/compile");
 	const typeboxValueEntry = require.resolve("typebox/value");
 
-	const packagesRoot = path.resolve(__dirname, "../../../../");
+	const packagesRoot = path.dirname(packageDir);
 	const resolveWorkspaceOrImport = (workspaceRelativePath: string, specifier: string): string => {
 		const workspacePath = path.join(packagesRoot, workspaceRelativePath);
 		if (fs.existsSync(workspacePath)) {

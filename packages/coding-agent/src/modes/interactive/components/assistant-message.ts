@@ -236,6 +236,24 @@ export class AssistantMessageComponent extends Container {
 	private decorated: string[] | null = null;
 	private decoratedDeliverable = false;
 	private decoratedExitCode = -1;
+	// Double-buffered scratch for the per-frame decorated output. While a decoration
+	// animates (reveal-edge fade or deliverable-glyph ease) the memo above cannot be
+	// reused, so render() must copy `rendered` and decorate the copy every frame —
+	// `rendered` is the parent Container's memoized flatten array, which the
+	// Component render contract forbids mutating in place. `rendered.slice()` would
+	// allocate a fresh L-slot array each animation tick (~60fps); instead we
+	// alternate between two reusable buffers, mirroring the resetBuffer/
+	// collectKittyImageIds double-buffers in tui.ts. Two buffers suffice: the parent
+	// detects "this child changed" purely by the returned array's reference identity
+	// (Container.render: `childLines !== cached ref`), so we must return a DIFFERENT
+	// reference than last frame while the content genuinely changes, yet never mutate
+	// the array the parent still holds. `decorFillA` always points away from the
+	// buffer we last filled/returned, so filling it satisfies both. (Option (a) — one
+	// persistent array mutated in place and returned by the same reference — would be
+	// missed by that identity check and freeze the animation, so it is unsafe here.)
+	private decorBufferA: string[] = [];
+	private decorBufferB: string[] = [];
+	private decorFillA = true;
 	// Deliverable-marker state
 	private isDeliverable = false;
 	// Dim the prose: set on intermediate (non-deliverable) turn messages so step
@@ -258,6 +276,13 @@ export class AssistantMessageComponent extends Container {
 	// grows text inside existing blocks, patchContent() updates markdown in place
 	// instead of contentContainer.clear() + full rebuild.
 	private lastStructureKey = "";
+	// Set by freeze() once this message has settled. Actioned lazily in render()
+	// (see maybeFreezeMarkdown): the caller requests the freeze at message_end, but
+	// the final full-text render can lag settle by a few frames under streaming
+	// smoothing, so we wait until the component is genuinely static before dropping
+	// the Markdown streaming caches. Stays true after firing so a later grouped-mode
+	// narration rebuild (which swaps in fresh Markdown instances) gets re-frozen.
+	private freezeRequested = false;
 
 	constructor(
 		message?: AssistantMessage,
@@ -355,6 +380,13 @@ export class AssistantMessageComponent extends Container {
 
 	override render(width: number): string[] {
 		const rendered = super.render(width);
+		// super.render() just rendered every Markdown child, so their final line
+		// caches are populated for this (text, width). If a freeze was requested and
+		// the message has fully settled, release the Markdown streaming/lex caches
+		// now — deferring to here (rather than the message_end call site) is required
+		// because streaming smoothing reveals the tail a few frames after settle, so
+		// the final full-text render may not have happened yet at that call.
+		this.maybeFreezeMarkdown();
 		if (this.hasToolCalls || rendered.length === 0) {
 			return rendered;
 		}
@@ -387,7 +419,18 @@ export class AssistantMessageComponent extends Container {
 		// place would bake the OSC 133 markers / deliverable glyph into that
 		// cache and re-apply them on every steady-state frame (accumulating
 		// markers and growing the line past the terminal width).
-		const lines = rendered.slice();
+		//
+		// Reuse an alternating scratch buffer instead of rendered.slice() so this
+		// per-frame copy allocates nothing during the animation. decorFillA points
+		// at the buffer we did NOT return last frame, so filling it hands the parent
+		// a fresh reference (its change signal) without touching the array it still
+		// holds. It flips only here, on an actual fill.
+		const lines = this.decorFillA ? this.decorBufferA : this.decorBufferB;
+		this.decorFillA = !this.decorFillA;
+		lines.length = rendered.length;
+		for (let i = 0; i < rendered.length; i++) {
+			lines[i] = rendered[i];
+		}
 
 		// Soft wavefront: while the trailing block is still revealing, fade its
 		// growing edge so freshly streamed text materializes instead of popping.
@@ -936,6 +979,34 @@ export class AssistantMessageComponent extends Container {
 		this.stopThinkingBreath();
 		this.stopReveal();
 		this.deliverableEase?.stop();
+	}
+
+	/**
+	 * Mark this settled message so its Markdown blocks release their streaming/lex
+	 * caches (per-token line cache, table cell caches, incremental lex baseline)
+	 * once the final render has run, keeping only the immutable final render cache.
+	 * Over a long session those per-message caches pin roughly 3-4× the transcript
+	 * text; a settled message only ever re-renders as a pure cache hit (or a one-off
+	 * full re-lex on resize), so the streaming caches are dead weight. Deferred to
+	 * render() via freezeRequested — see maybeFreezeMarkdown. Idempotent. */
+	freeze(): void {
+		this.freezeRequested = true;
+	}
+
+	/** Drop each Markdown block's streaming caches once a freeze was requested and
+	 * the component is fully settled (stopReason set, no live reveal/glyph ease).
+	 * Called at the end of super.render(), when every child Markdown's final line
+	 * cache is already populated for the current (text, width), so freeze() keeps
+	 * that render cache intact and the next render is a pure hit. Markdown.freeze()
+	 * is a cheap no-op once already frozen, so re-running each settled frame (and
+	 * re-freezing a narration-swapped instance) is safe. */
+	private maybeFreezeMarkdown(): void {
+		if (!this.freezeRequested) return;
+		if (!this.lastMessage?.stopReason) return;
+		if (!this.decorationIsStatic()) return;
+		for (const entry of this.blockComponents) {
+			entry?.markdown.freeze();
+		}
 	}
 }
 

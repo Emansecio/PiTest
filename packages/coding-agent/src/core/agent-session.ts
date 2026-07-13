@@ -40,7 +40,6 @@ import { theme } from "../modes/interactive/theme/theme.ts";
 import { settleOrAbort } from "../utils/abort-race.ts";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
-import { requireOptional } from "../utils/optional-require.ts";
 import { sleep } from "../utils/sleep.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
 import {
@@ -70,6 +69,7 @@ import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { type CacheStats, computeCacheStats } from "./cache-stats.js";
 import type { ChromeDevtoolsManager } from "./chrome/chrome-devtools-manager.ts";
+import * as chromeDevtoolsManagerModule from "./chrome/chrome-devtools-manager.ts";
 import { buildHarnessDispatcher, type CodeModeDispatcher } from "./code-mode/bridge.ts";
 import {
 	adaptivePruneThreshold,
@@ -168,7 +168,10 @@ import {
 } from "./hindsight/index.js";
 import { getCurrentHistoryRecallSource, setCurrentHistoryRecallSource } from "./history-recall.ts";
 import { defaultLearnedErrorsDir, type LearnedErrorEntry, persistSessionLearnedErrors } from "./learned-error-store.js";
+import * as lspConfigModule from "./lsp/config.ts";
 import type { LspManager } from "./lsp/manager.ts";
+import * as lspManagerModule from "./lsp/manager.ts";
+import * as lspWritethroughModule from "./lsp/writethrough.ts";
 import { formatMemoryForPrompt, formatMemoryHintForPrompt } from "./memory/index.js";
 import type { BashExecutionMessage, CustomMessage } from "./messages.js";
 import {
@@ -837,6 +840,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private _lspWritethroughMod: typeof import("./lsp/writethrough.ts") | undefined;
 	/** One-shot LSP startup notices for interactive UI (e.g. missing tsserver). */
 	private _lspStartupWarnings: string[] = [];
+	/** Resolves once deferred LSP startup probing has finished recording warnings. */
+	private _lspStartupReady?: Promise<void>;
 	private _messagingId?: string;
 	private _unsubMessagingActivity?: () => void;
 
@@ -999,10 +1004,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// when chromeDevtools.enabled — tools join the surface on the same gate.
 		const cdpCfg = this.settingsManager.getChromeDevtoolsSettings();
 		if (cdpCfg.enabled) {
-			const chromeMod = requireOptional<typeof import("./chrome/chrome-devtools-manager.ts")>(
-				import.meta.url,
-				"./chrome/chrome-devtools-manager.ts",
-			);
+			const chromeMod = chromeDevtoolsManagerModule;
 			this._chromeManagerMod = chromeMod;
 			this._chromeDevtools = new chromeMod.ChromeDevtoolsManager({
 				host: cdpCfg.host,
@@ -1056,21 +1058,38 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// sessions never pull the LSP writethrough module.
 		const lspSettings = this.settingsManager.getLspSettings();
 		if (lspSettings.enabled) {
-			const lspManagerMod = requireOptional<typeof import("./lsp/manager.ts")>(import.meta.url, "./lsp/manager.ts");
-			const lspConfigMod = requireOptional<typeof import("./lsp/config.ts")>(import.meta.url, "./lsp/config.ts");
-			const writethroughMod = requireOptional<typeof import("./lsp/writethrough.ts")>(
-				import.meta.url,
-				"./lsp/writethrough.ts",
-			);
+			const lspManagerMod = lspManagerModule;
+			const lspConfigMod = lspConfigModule;
+			const writethroughMod = lspWritethroughModule;
 			this._lspManagerMod = lspManagerMod;
 			this._lspWritethroughMod = writethroughMod;
 			this._lspManager = lspManagerMod.createLspManager(this._cwd);
 			lspManagerMod.setCurrentLspManager(this._lspManager);
-			void this._lspManager.warmup().catch(() => {
-				/* errors already logged in warmupLspServers */
+			// Defer all LSP probing off the boot critical path. `warmup()` runs its
+			// body synchronously up to the first real await (config load → per-server
+			// `which`/`access` storm), and `typescriptLspMissingWarning` re-scanned on
+			// the same thread — both paid for before the first TUI paint. Schedule them
+			// post-boot via setImmediate so construction only registers the manager. The
+			// startup warning is still delivered: interactive mode awaits
+			// `_lspStartupReady` before draining `getLspStartupWarnings()`.
+			this._lspStartupReady = new Promise<void>((resolve) => {
+				setImmediate(() => {
+					// warmup() populates the per-cwd config cache on its synchronous
+					// prefix, so the missing-TS check below reuses it (getConfig is
+					// mtime-cached) instead of repeating the probe scan.
+					void this._lspManager?.warmup().catch(() => {
+						/* errors already logged in warmupLspServers */
+					});
+					try {
+						const cfg = lspManagerMod.getConfig(this._cwd);
+						const tsWarning = lspConfigMod.typescriptLspMissingWarning(this._cwd, cfg);
+						if (tsWarning) this._lspStartupWarnings.push(tsWarning);
+					} catch {
+						/* config probing must never break boot */
+					}
+					resolve();
+				});
 			});
-			const tsWarning = lspConfigMod.typescriptLspMissingWarning(this._cwd);
-			if (tsWarning) this._lspStartupWarnings.push(tsWarning);
 			// Gate post-write LSP diagnostics (writethrough) for this session: errors
 			// from a write/edit are attached to the tool result, IDE-style.
 			writethroughMod.setDiagnosticsOnWrite(lspSettings.diagnosticsOnWrite);
@@ -1127,6 +1146,16 @@ export class AgentSession implements CompactionHost, FusionHost {
 	/** Startup notices for the interactive UI (e.g. missing TypeScript language server). */
 	getLspStartupWarnings(): readonly string[] {
 		return this._lspStartupWarnings;
+	}
+
+	/**
+	 * Resolves once the deferred LSP startup probe has recorded its warnings.
+	 * Callers that render `getLspStartupWarnings()` should await this first so the
+	 * post-boot probe (moved off the construction critical path) still surfaces.
+	 * Resolves immediately when LSP is disabled.
+	 */
+	async whenLspStartupReady(): Promise<void> {
+		await this._lspStartupReady;
 	}
 
 	/**

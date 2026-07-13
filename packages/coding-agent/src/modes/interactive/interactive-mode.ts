@@ -1019,6 +1019,10 @@ export class InteractiveMode {
 			this.showWarning(modelFallbackMessage);
 		}
 
+		// LSP startup probing is deferred off the boot critical path, so its
+		// warnings may not be recorded yet at construction; await the probe here
+		// (post-paint) before draining them so the missing-tsserver notice still shows.
+		await this.session.whenLspStartupReady();
 		for (const warning of this.session.getLspStartupWarnings()) {
 			this.showWarning(warning);
 		}
@@ -3443,6 +3447,11 @@ export class InteractiveMode {
 							this.turnAssistantComponents.push(this.streamingComponent);
 						}
 					}
+					// This message is settled (stopReason known, no further deltas): release
+					// its Markdown blocks' streaming/lex caches, keeping only the final
+					// render cache. Deferred inside the component until its final render has
+					// run (smoothing can reveal the tail a few frames after message_end).
+					this.streamingComponent.freeze();
 					// Fold this now-finalized message's output tokens into the turn total
 					// before clearing the streaming ref (currentTurnOutputTokens reads it).
 					this.turnOutputTokens += this.streamingMessage.usage?.output ?? 0;

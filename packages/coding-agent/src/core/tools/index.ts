@@ -79,9 +79,9 @@ export {
 
 import type { AgentTool } from "@pit/agent-core";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
-import { requireOptional } from "../../utils/optional-require.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { LspToolOptions } from "../lsp/tool.ts";
+import * as lspToolModule from "../lsp/tool.ts";
 import { BUILTIN_TOOL_SIDE_EFFECTS } from "../permissions/checker.ts";
 import { type AskToolOptions, createAskToolDefinition } from "./ask.ts";
 import { type AstEditToolOptions, createAstEditToolDefinition } from "./ast-edit.ts";
@@ -89,8 +89,10 @@ import { type AstGrepToolOptions, createAstGrepToolDefinition } from "./ast-grep
 import { type BashToolOptions, createBashToolDefinition } from "./bash.ts";
 import { type CalcToolOptions, createCalcToolDefinition } from "./calc.ts";
 import type { ChromeDevtoolsToolOptions } from "./chrome-devtools.ts";
+import * as chromeToolModule from "./chrome-devtools.ts";
 import { type CodeModeToolOptions, createCodeModeToolDefinition } from "./code-mode.ts";
 import type { DebugToolOptions } from "./debug.ts";
+import * as debugToolModule from "./debug.ts";
 import { createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import { createEditHashlineToolDefinition, type EditHashlineToolOptions } from "./edit-hashline.ts";
 import { createEvalToolDefinition, type EvalToolOptions } from "./eval.ts";
@@ -102,6 +104,7 @@ import { createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import { createInspectImageToolDefinition, type InspectImageToolOptions } from "./inspect-image.ts";
 import { createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createPlanToolDefinition, type PlanToolOptions } from "./plan.ts";
+import * as previewToolModule from "./preview.ts";
 import { createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createRecallToolDefinition, type RecallToolOptions } from "./recall.ts";
 import { createRecallHistoryDefinition } from "./recall-history.ts";
@@ -120,32 +123,29 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { createWebSearchToolDefinition, type WebSearchToolOptions } from "./web-search.ts";
 import { createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
-type ChromeMod = typeof import("./chrome-devtools.ts");
-let chromeMod: ChromeMod | undefined;
-function loadChrome(): ChromeMod {
-	if (!chromeMod) chromeMod = requireOptional<ChromeMod>(import.meta.url, "./chrome-devtools.ts");
-	return chromeMod;
+// Optional coding surfaces (chrome / lsp / debug / preview). These were once
+// sync-lazy-loaded via `requireOptional` so a disabled gate cost nothing to
+// resolve. They are now plain static imports: the shipped CLI is an esbuild
+// single-file bundle, and `requireOptional`'s runtime `createRequire` would
+// resolve these against the bundle's own location and pull a SECOND copy from
+// dist/, forking module singletons (e.g. dapSessionManager, the chrome/lsp
+// manager registries). Static imports keep everything in one module graph.
+// Tool schemas are still built inside the `create*ToolDefinition` factories, so
+// the boot cost of importing these modules is just their (cheap) top-level.
+function loadChrome() {
+	return chromeToolModule;
 }
 
-type LspToolMod = typeof import("../lsp/tool.ts");
-let lspToolMod: LspToolMod | undefined;
-function loadLspTool(): LspToolMod {
-	if (!lspToolMod) lspToolMod = requireOptional<LspToolMod>(import.meta.url, "../lsp/tool.ts");
-	return lspToolMod;
+function loadLspTool() {
+	return lspToolModule;
 }
 
-type DebugMod = typeof import("./debug.ts");
-let debugMod: DebugMod | undefined;
-function loadDebug(): DebugMod {
-	if (!debugMod) debugMod = requireOptional<DebugMod>(import.meta.url, "./debug.ts");
-	return debugMod;
+function loadDebug() {
+	return debugToolModule;
 }
 
-type PreviewMod = typeof import("./preview.ts");
-let previewMod: PreviewMod | undefined;
-function loadPreview(): PreviewMod {
-	if (!previewMod) previewMod = requireOptional<PreviewMod>(import.meta.url, "./preview.ts");
-	return previewMod;
+function loadPreview() {
+	return previewToolModule;
 }
 
 export type Tool = AgentTool<any>;

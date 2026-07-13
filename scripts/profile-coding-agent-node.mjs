@@ -8,7 +8,9 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 const packageDir = join(repoRoot, "packages", "coding-agent");
-const distCliPath = join(packageDir, "dist", "cli.js");
+// The Node bin is the esbuild single-file bundle (see coding-agent's build →
+// scripts/bundle-cli.mjs); profile that, not the unbundled tsc entry.
+const distCliPath = join(packageDir, "dist", "cli.bundle.mjs");
 const srcCliPath = join(packageDir, "src", "cli.ts");
 const defaultNodeProfileDir = join(repoRoot, "profiles-node");
 const defaultBunProfileDir = join(repoRoot, "profiles-bun");
