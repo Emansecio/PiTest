@@ -131,11 +131,39 @@ describe("ModelSelectorComponent OpenCode endpoints", () => {
 
 	it("labels endpoints with friendly names and shows an overlapping model once (Zen wins)", async () => {
 		// Both endpoints authed (they share OPENCODE_API_KEY in practice) so both
-		// surface — reproducing the duplicate the user reported.
+		// surface. The catalog de-dupe (commit 45bbc4a5a) now keeps overlapping ids
+		// only on Zen, so opencode-go no longer ships deepseek-v4-flash built-in.
+		// Re-create the duplicate the user reported by adding it back to opencode-go
+		// via models.json, so the selector-level collapse (dedupeOpencodeEndpoints)
+		// still has an overlap to exercise.
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		authStorage.set("opencode", { type: "api_key", key: "k" });
 		authStorage.set("opencode-go", { type: "api_key", key: "k" });
-		const registry = ModelRegistry.create(authStorage, join(tempDir, "models.json"));
+		const modelsJsonPath = join(tempDir, "models.json");
+		writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({
+				providers: {
+					"opencode-go": {
+						baseUrl: "https://opencode.ai/zen/go/v1",
+						apiKey: "OPENCODE_API_KEY",
+						api: "openai-completions",
+						models: [
+							{
+								id: "deepseek-v4-flash",
+								name: "DeepSeek V4 Flash",
+								reasoning: true,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 128000,
+								maxTokens: 8192,
+							},
+						],
+					},
+				},
+			}),
+		);
+		const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 		registry.refresh();
 
 		const settingsManager = SettingsManager.create(tempDir, tempDir);

@@ -69,7 +69,11 @@ describe("AgentSession auto-compaction multipass", () => {
 		mockState.postTokens = 0;
 		mockState.hasSpan = true;
 
-		const model = getModel("anthropic", "claude-sonnet-5")!;
+		// Uses a 200k-window model so the token thresholds below stay meaningful
+		// (claude-sonnet-5 is a 1M-window model — its hard threshold sits ~983k,
+		// far above the ~190k figures these cases exercise). claude-haiku-4-5 keeps
+		// the 200k window the original claude-sonnet-4-5 fixture relied on.
+		const model = getModel("anthropic", "claude-haiku-4-5")!;
 		const agent = new Agent({ initialState: { model, systemPrompt: "Test", tools: [] } });
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
@@ -112,7 +116,7 @@ describe("AgentSession auto-compaction multipass", () => {
 
 	it("runs one extra threshold compaction when REAL residual pressure remains and there is a summarizable span", async () => {
 		// Pure post-compaction estimate still above the HARD threshold → legitimate fallback.
-		// Sonnet contextWindow is 200k; reserve 16_384 → hard at ~183_616.
+		// Haiku contextWindow is 200k; reserve 16_384 → hard at ~183_616.
 		mockState.postTokens = 190_000;
 		const events = await collectCompactionEvents();
 

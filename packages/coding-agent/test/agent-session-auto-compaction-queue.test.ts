@@ -84,6 +84,12 @@ vi.mock("../src/core/compaction/index.js", () => ({
 	},
 	generateBranchSummary: async () => ({ summary: "", aborted: false, readFiles: [], modifiedFiles: [] }),
 	prepareCompaction: () => ({ dummy: true }),
+	// Mirrors the real proactivePruneFloor: explicit positive override wins,
+	// otherwise scale to 25% of the window with a 64k absolute minimum floor.
+	proactivePruneFloor: (contextWindow: number, override?: number) =>
+		override !== undefined && Number.isFinite(override) && override > 0
+			? override
+			: Math.max(64_000, Number.isFinite(contextWindow) && contextWindow > 0 ? Math.floor(contextWindow * 0.25) : 0),
 	shouldCompact: (
 		contextTokens: number,
 		contextWindow: number,
@@ -110,7 +116,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 		mkdirSync(tempDir, { recursive: true });
 		vi.useFakeTimers();
 
-		const model = getModel("anthropic", "claude-sonnet-5")!;
+		// A 200k-window model: these cases calibrate token thresholds (e.g. 190k vs
+		// a ~183_616 hard limit) against the 200k window the original claude-sonnet-4-5
+		// fixture had. claude-sonnet-5 is a 1M-window model, so 190k never crosses its
+		// threshold. claude-haiku-4-5 preserves the 200k window.
+		const model = getModel("anthropic", "claude-haiku-4-5")!;
 		const agent = new Agent({
 			initialState: {
 				model,

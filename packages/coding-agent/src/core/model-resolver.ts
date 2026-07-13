@@ -44,7 +44,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	anthropic: "claude-opus-4-8",
 	"openai-codex": "gpt-5.5",
 	opencode: "kimi-k2.6",
-	"opencode-go": "kimi-k2.6",
+	"opencode-go": "kimi-k2.7-code",
 	xai: "grok-4.5",
 };
 
