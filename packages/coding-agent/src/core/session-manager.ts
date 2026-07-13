@@ -19,6 +19,7 @@ import {
 import { appendFile, readdir, stat } from "fs/promises";
 import { join, resolve } from "path";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
+import { mapWithConcurrency } from "../utils/map-with-concurrency.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -818,78 +819,26 @@ async function buildSessionInfosWithConcurrency(
 	files: string[],
 	onLoaded: () => void,
 ): Promise<(SessionInfo | null)[]> {
-	const results: (SessionInfo | null)[] = new Array(files.length).fill(null);
-	const inFlight = new Set<Promise<void>>();
-	let nextIndex = 0;
-
-	const startNext = (): void => {
-		const index = nextIndex++;
-		const file = files[index];
-		if (!file) return;
-
-		let task: Promise<void>;
-		task = buildSessionInfo(file)
-			.then((info) => {
-				results[index] = info;
-			})
-			.catch(() => {
-				results[index] = null;
-			})
-			.finally(() => {
-				inFlight.delete(task);
-				onLoaded();
-			});
-		inFlight.add(task);
-	};
-
-	while (nextIndex < files.length || inFlight.size > 0) {
-		while (nextIndex < files.length && inFlight.size < MAX_CONCURRENT_SESSION_INFO_LOADS) {
-			startNext();
+	return mapWithConcurrency(files, MAX_CONCURRENT_SESSION_INFO_LOADS, async (file) => {
+		try {
+			return await buildSessionInfo(file);
+		} catch {
+			return null;
+		} finally {
+			onLoaded();
 		}
-		if (inFlight.size > 0) {
-			// Snapshot to an array: Promise.race([]) never settles, and mutating the
-			// Set while race iterates is undefined territory across engines.
-			await Promise.race([...inFlight]);
-		}
-	}
-
-	return results;
+	});
 }
 
 async function listSessionFilesFromDirsWithConcurrency(dirs: string[]): Promise<string[][]> {
-	const results: string[][] = Array.from({ length: dirs.length }, () => []);
-	const inFlight = new Set<Promise<void>>();
-	let nextIndex = 0;
-
-	const startNext = (): void => {
-		const index = nextIndex++;
-		const dir = dirs[index];
-		if (!dir) return;
-
-		let task: Promise<void>;
-		task = readdir(dir)
-			.then((files) => {
-				results[index] = files.filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
-			})
-			.catch(() => {
-				results[index] = [];
-			})
-			.finally(() => {
-				inFlight.delete(task);
-			});
-		inFlight.add(task);
-	};
-
-	while (nextIndex < dirs.length || inFlight.size > 0) {
-		while (nextIndex < dirs.length && inFlight.size < MAX_CONCURRENT_SESSION_DIR_READS) {
-			startNext();
+	return mapWithConcurrency(dirs, MAX_CONCURRENT_SESSION_DIR_READS, async (dir) => {
+		try {
+			const files = await readdir(dir);
+			return files.filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
+		} catch {
+			return [];
 		}
-		if (inFlight.size > 0) {
-			await Promise.race([...inFlight]);
-		}
-	}
-
-	return results;
+	});
 }
 
 async function listSessionsFromDir(
