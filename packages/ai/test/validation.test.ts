@@ -245,3 +245,80 @@ describe("stripNullishOptionalArgs", () => {
 		expect(validateToolArguments(tool, toolCall)).toEqual({ path: "a" });
 	});
 });
+
+describe("coerceJsonStringArrays (via validateToolArguments)", () => {
+	const editTool = (): Tool => ({
+		name: "edit",
+		description: "edit",
+		parameters: Type.Object({
+			path: Type.String(),
+			edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
+		}),
+	});
+
+	it("parses a JSON-stringified array for an array-typed field on a TypeBox tool", () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "t1",
+			name: "edit",
+			arguments: { path: "a.ts", edits: '[{"oldText":"x","newText":"y"}]' } as unknown as Record<string, unknown>,
+		};
+		expect(validateToolArguments(editTool(), toolCall)).toEqual({
+			path: "a.ts",
+			edits: [{ oldText: "x", newText: "y" }],
+		});
+	});
+
+	it("coerces JSON-string array on a plain (non-TypeBox) schema too", () => {
+		const tool: Tool = {
+			name: "todo",
+			description: "todo",
+			parameters: {
+				type: "object",
+				properties: { items: { type: "array", items: { type: "string" } } },
+				required: ["items"],
+			} as Tool["parameters"],
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "t1",
+			name: "todo",
+			arguments: { items: '["a","b"]' },
+		};
+		expect(validateToolArguments(tool, toolCall)).toEqual({ items: ["a", "b"] });
+	});
+
+	it("leaves the string alone when the field also accepts string", () => {
+		const tool: Tool = {
+			name: "echo",
+			description: "echo",
+			parameters: {
+				type: "object",
+				properties: { value: { type: ["string", "array"] } },
+				required: ["value"],
+			} as Tool["parameters"],
+		};
+		const toolCall: ToolCall = { type: "toolCall", id: "t1", name: "echo", arguments: { value: '["a"]' } };
+		expect(validateToolArguments(tool, toolCall)).toEqual({ value: '["a"]' });
+	});
+
+	it("throws a validation error (does not coerce) when the string is not JSON", () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "t1",
+			name: "edit",
+			arguments: { path: "a.ts", edits: "not json" } as unknown as Record<string, unknown>,
+		};
+		expect(() => validateToolArguments(editTool(), toolCall)).toThrow(/Validation failed/);
+	});
+
+	it("throws when the string parses to a non-array (scalar JSON)", () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "t1",
+			name: "edit",
+			arguments: { path: "a.ts", edits: '"oops"' } as unknown as Record<string, unknown>,
+		};
+		expect(() => validateToolArguments(editTool(), toolCall)).toThrow(/Validation failed/);
+	});
+});

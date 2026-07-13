@@ -261,6 +261,44 @@ export function coerceWithJsonSchema(
 }
 
 /**
+ * Parse top-level string values that JSON-decode to an array when the field's
+ * schema declares `array`. Models (Opus 4.6, GLM-5.1 observed) JSON-encode
+ * array arguments (`"[\"a\"]"` for `["a"]`); the MCP/loose-schema path already
+ * self-corrects this in prepareArgsForLooseSchema, while built-in TypeBox tools
+ * only did it per-tool (edit/ask/plan). This is the schema-generic parity pass
+ * run by validateToolArguments before conversion.
+ *
+ * Conservative by construction:
+ *  - only keys DECLARED in `schema.properties`,
+ *  - only when the declared type includes `array` and NOT `string` (a field
+ *    that legitimately accepts a string keeps the string),
+ *  - only when JSON.parse succeeds AND yields an array — anything else is
+ *    returned untouched for validation to report.
+ *
+ * Pure: returns the same reference when nothing was coerced.
+ */
+export function coerceJsonStringArrays<T>(args: T, schema: unknown): T {
+	if (!isRecord(args) || Array.isArray(args)) return args;
+	if (!isJsonSchemaObject(schema) || !schema.properties) return args;
+	let out: Record<string, unknown> | undefined;
+	for (const [key, propSchema] of Object.entries(schema.properties)) {
+		const value = (args as Record<string, unknown>)[key];
+		if (typeof value !== "string" || !isJsonSchemaObject(propSchema)) continue;
+		const types = getSchemaTypes(propSchema);
+		if (!types.includes("array") || types.includes("string")) continue;
+		try {
+			const parsed = JSON.parse(value);
+			if (!Array.isArray(parsed)) continue;
+			if (!out) out = { ...(args as Record<string, unknown>) };
+			out[key] = parsed;
+		} catch {
+			// Not JSON — leave it for validation to report.
+		}
+	}
+	return (out ?? args) as T;
+}
+
+/**
  * True when `schema` (directly, or through a union/intersection branch, or by
  * shape) admits a value of JSON `kind`. Used by stripNullishOptionalArgs so a
  * field that legitimately accepts `null` or `{}` is never mistaken for a

@@ -15,10 +15,12 @@
  */
 
 import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { suggestClosest } from "@pit/ai";
 import { groundBashScript, isBashGroundingDisabled } from "../bash-grounding.ts";
 import type { ExtensionAPI } from "../extensions/index.js";
+import { MUTATING_TOOL_NAMES } from "../stagnation.ts";
+import { extractPathArg } from "../tools/argument-prep.ts";
 import { createFireOnceBlockGuard } from "./grounding-fire-once.ts";
 
 /** Read the `scripts` keys from the cwd's package.json. Any error -> [] (fail-open). */
@@ -41,7 +43,7 @@ export function createBashGroundingExtension(options: { cwd: string }): (pi: Ext
 		return scriptsCache;
 	};
 
-	return createFireOnceBlockGuard({
+	const guard = createFireOnceBlockGuard({
 		category: "guard.bash-grounding",
 		source: "bash-grounding-extension",
 		ruleId: "script-not-found",
@@ -60,4 +62,25 @@ export function createBashGroundingExtension(options: { cwd: string }): (pi: Ext
 			return undefined;
 		},
 	});
+
+	return (pi: ExtensionAPI) => {
+		guard(pi);
+
+		// The scripts cache is read once per session; if the model itself edits a
+		// package.json, a stale cache would false-block a just-added script (or
+		// suggest a removed one). A successful mutating call on any package.json
+		// drops the cache so the next `run <script>` re-reads the manifest.
+		pi.on("tool_result", (event) => {
+			try {
+				if (event.isError) return undefined;
+				if (!MUTATING_TOOL_NAMES.has(event.toolName)) return undefined;
+				const path = extractPathArg(event.input as Record<string, unknown>);
+				if (path === undefined || basename(path).toLowerCase() !== "package.json") return undefined;
+				scriptsCache = undefined;
+			} catch {
+				// Fail-open: never let cache maintenance affect the result.
+			}
+			return undefined;
+		});
+	};
 }

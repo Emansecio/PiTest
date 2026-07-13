@@ -3,6 +3,7 @@ import type { TLocalizedValidationError } from "typebox/error";
 import { Value } from "typebox/value";
 import type { Tool, ToolCall } from "../types.ts";
 import {
+	coerceJsonStringArrays,
 	coerceWithJsonSchema,
 	isEmptyPlainObject,
 	isJsonSchemaObject,
@@ -306,8 +307,13 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): any {
 	// Drop optional `null`/`{}` placeholders BEFORE coercion so they are omitted
 	// (the model's intent) rather than coerced to ""/0 by coercePrimitiveByType.
 	// Operates on the clone, so the echoed `toolCall.arguments` below still shows
-	// what the model actually sent.
-	const args = stripNullishOptionalArgs(structuredClone(toolCall.arguments), tool.parameters);
+	// what the model actually sent. Then parse JSON-stringified arrays for
+	// array-typed fields (parity with the MCP loose-schema path) so Convert can
+	// coerce the parsed items.
+	const args = coerceJsonStringArrays(
+		stripNullishOptionalArgs(structuredClone(toolCall.arguments), tool.parameters),
+		tool.parameters,
+	);
 	Value.Convert(tool.parameters, args);
 
 	if (!hasTypeBoxMetadata(tool.parameters) && isJsonSchemaObject(tool.parameters)) {

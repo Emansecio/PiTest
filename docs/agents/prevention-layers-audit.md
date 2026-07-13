@@ -161,6 +161,13 @@ verified by the full check gate). Implementation notes below each item.
 | 9 | D1/D3 — failure-budget docs, MCP timeout config | D | **done** — carryover half-life documented in `packages/coding-agent/docs/settings.md`; `mcp.connectTimeoutMs` setting + one-line `mcp.notice` message when a server is skipped by the budget |
 | 10 | A2/A3 — configurable presend ratio / TTSR buffer, idle backoff | A | **done** — `PIT_PRESEND_OVERFLOW_RATIO` (clamp [0.5, 0.99]), `PIT_TTSR_BUFFER_CHARS` (clamp [512, 65536]) + warn-once when a rule pattern exceeds the buffer; idle timeout ×1.5 per consecutive idle retry, cap 300s, reset on success |
 
-Remaining candidates NOT yet implemented (deliberately deferred, revisit on demand): A4 (marker
-diagnostic), B5 (array coercion parity for built-in tools), B6 (bash-grounding cache invalidation),
-C2 (tail-biased verification output), C3 (hint-rule fire telemetry), D4 (recovery level in UI).
+**Update 2026-07-12: the six deferred candidates are now ALL implemented.**
+
+| # | item | where |
+|-|-|-|
+| A4 | marker diagnostic | `_checkDynamicMarkerPresence` (`agent-session.ts`) — warn-once `quality.cache-marker` diagnostic when a custom system prompt omits `SYSTEM_PROMPT_DYNAMIC_MARKER` (or places it at offset 0) |
+| B5 | array-coercion parity for built-in tools | `coerceJsonStringArrays` (`packages/ai/src/utils/validation-coerce.ts`), run by `validateToolArguments` on the slow path — a JSON-stringified array for an `array`-typed field self-corrects for TypeBox/built-in tools, matching the MCP loose-schema path. Conservative: declared properties only, skips fields that also accept `string` |
+| B6 | bash-grounding cache invalidation | `bash-grounding-extension.ts` — a successful `write`/`edit`/`edit_v2`/`ast_edit` on any `package.json` drops the session scripts cache (covered by `PIT_NO_BASH_GROUNDING`) |
+| C2 | tail-biased verification output | `summarizeCheckFailure` + `clampTailBiased` (`core/verification/failure-summary.ts`) — head sample (3 lines / ~20% chars) + dominant tail with explicit truncation marker; capture in `verification.ts` is tail-capped |
+| C3 | hint-rule fire telemetry | `hint.fired` diagnostics per rule id (`agent-loop.applyToolErrorHints`) aggregated by `HintFireTally` (`core/telemetry/hint-fire-tally.ts`, bounded at 128 ids + overflow bucket) into the session summary's `hintFires` — dead/noisy hint rules are now measurable. Covered by `PIT_NO_TELEMETRY_SINK` |
+| D4 | recovery level in UI | footer renders a `recovery:<level>` chip at `guided`/`strict` (nothing at `lean`); `setRecoveryLevelChangeListener` repaints the instant the level changes |

@@ -20,11 +20,30 @@ describe("summarizeCheckFailure", () => {
 		expect(s).toContain("does the thing");
 	});
 
-	it("falls back to the tail when no pattern matches", () => {
-		const out = "x".repeat(5000);
+	it("clamps long unmatched output head+tail with a dominant, marked tail", () => {
+		const out = `HEAD-MARKER${"x".repeat(5000)}TAIL-MARKER`;
 		const s = summarizeCheckFailure(out, "make");
-		expect(s.startsWith("…")).toBe(true);
-		expect(s.length).toBeLessThan(4100);
+		// Both ends survive: a small head sample plus the (dominant) tail where a
+		// runner would print its failure summary.
+		expect(s).toContain("HEAD-MARKER");
+		expect(s).toContain("TAIL-MARKER");
+		// The dropped middle is called out explicitly rather than silently cut.
+		expect(s).toMatch(/\[\.\.\. \d+ chars truncated \.\.\.\]/);
+		// Total retained stays within the char budget (+ marker/newlines slack).
+		expect(s.length).toBeLessThan(4200);
+	});
+
+	it("keeps a dominant tail of failure lines when there are more than the budget", () => {
+		const lines: string[] = [];
+		for (let i = 0; i < 40; i++) lines.push(`src/f${i}.ts(${i + 1},1): error TS2322: bad ${i}`);
+		const s = summarizeCheckFailure(lines.join("\n"), "npm run check");
+		// The LAST failures (tail) are retained...
+		expect(s).toContain("bad 39");
+		expect(s).toContain("bad 38");
+		// ...a small head sample is kept...
+		expect(s).toContain("bad 0");
+		// ...and the elided middle is counted, not silently dropped.
+		expect(s).toMatch(/\+\d+ more failing lines omitted/);
 	});
 
 	it("returns short raw output unchanged when nothing matches", () => {

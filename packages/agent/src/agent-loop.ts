@@ -1491,6 +1491,18 @@ async function applyToolErrorHints(
 	if (!config.toolErrorHintRegistry) return result;
 	const outcome = config.toolErrorHintRegistry.apply(toolCall, result);
 	if (outcome.hints.length === 0) return result;
+	// Telemetry (Band C / C3): record each fired hint rule on the diagnostics
+	// channel with its stable rule id + tool name, so a per-session tally can
+	// surface dead (never-firing) or noisy rules. recordDiagnostic is O(1) and
+	// never throws — observe-only, never load-bearing on the enrichment path.
+	for (const fired of outcome.hints) {
+		recordDiagnostic({
+			category: "hint.fired",
+			level: "info",
+			source: "agent-loop.applyToolErrorHints",
+			context: { ruleId: fired.ruleId, toolName: toolCall.name, toolCallId: toolCall.id },
+		});
+	}
 	const enriched = { ...result, content: appendHintsToContent(result.content, outcome.hints) };
 	await emit({
 		type: "tool_error_hint_applied",

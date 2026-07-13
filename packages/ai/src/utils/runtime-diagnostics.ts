@@ -67,9 +67,16 @@ export type DiagnosticCategory =
 	| "guard.read"
 	| "guard.learned-error"
 	| "guard.intent-gate"
+	// Corrective (Band C): a Tier-4 tool-error-hint rule fired, carrying the
+	// rule id + tool name so dead/noisy hint rules can be found from the tally.
+	| "hint.fired"
 	| "conditioning.context"
 	| "quality.contract"
 	| "quality.self-review"
+	| "quality.cache-marker"
+	// An under-specified mutating prompt got the ask-before-you-wander
+	// `<clarify_first>` directive appended for this turn (clarify nudge).
+	| "quality.clarify"
 	| "lsp.manager-overwrite";
 
 export interface DiagnosticContext {

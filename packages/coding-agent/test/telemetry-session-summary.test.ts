@@ -74,4 +74,22 @@ describe("buildSessionSummaryRecord", () => {
 		});
 		expect(zero.cachePrefix).toBeUndefined();
 	});
+
+	it("includes hintFires when at least one rule fired and omits when empty/null", () => {
+		const withFires = buildSessionSummaryRecord({
+			recovery,
+			diagnostics,
+			hintFires: { type: "hint-fires", total: 2, byRule: [{ ruleId: "bash-grep-exit-1-no-match", count: 2 }] },
+		});
+		expect(withFires.hintFires).toEqual({
+			type: "hint-fires",
+			total: 2,
+			byRule: [{ ruleId: "bash-grep-exit-1-no-match", count: 2 }],
+		});
+		expect(buildSessionSummaryRecord({ recovery, diagnostics, hintFires: null }).hintFires).toBeUndefined();
+		expect(
+			buildSessionSummaryRecord({ recovery, diagnostics, hintFires: { type: "hint-fires", total: 0, byRule: [] } })
+				.hintFires,
+		).toBeUndefined();
+	});
 });

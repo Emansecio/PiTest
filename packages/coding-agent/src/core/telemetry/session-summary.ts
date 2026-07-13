@@ -13,6 +13,7 @@
 import type { DiagnosticSnapshot } from "@pit/ai";
 import type { CacheStats } from "../cache-stats.ts";
 import type { RecoverySnapshot } from "../session-recovery.ts";
+import type { HintFireTallySnapshot } from "./hint-fire-tally.ts";
 
 /** Verification-gate tally for the session (attempts run, failing attempts). */
 export interface VerificationSummary {
@@ -48,6 +49,8 @@ export interface SessionSummaryRecord {
 	cache?: CacheSummary;
 	/** Present when the session rebuilt the static cache prefix at least once. */
 	cachePrefix?: CachePrefixSummary;
+	/** Per-rule tally of Tier-4 hint fires; present only when at least one fired. */
+	hintFires?: HintFireTallySnapshot;
 }
 
 export interface SessionSummaryInput {
@@ -56,6 +59,7 @@ export interface SessionSummaryInput {
 	verification?: VerificationSummary;
 	cache?: CacheStats;
 	cachePrefix?: CachePrefixSummary;
+	hintFires?: HintFireTallySnapshot | null;
 }
 
 /** Build the flat session-summary record from the gathered session signals. */
@@ -84,6 +88,9 @@ export function buildSessionSummaryRecord(input: SessionSummaryInput): SessionSu
 	}
 	if (input.cachePrefix && input.cachePrefix.rebuilds > 0) {
 		record.cachePrefix = input.cachePrefix;
+	}
+	if (input.hintFires && input.hintFires.total > 0) {
+		record.hintFires = input.hintFires;
 	}
 	return record;
 }

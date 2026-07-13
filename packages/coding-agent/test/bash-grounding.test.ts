@@ -1,9 +1,14 @@
 // suggestClosest from @pit/ai is the REAL fuzzy matcher used in production, so
 // the candidate thresholds are load-bearing (a typo within distance 3 blocks;
 // a genuinely different script name does not).
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { suggestClosest } from "@pit/ai";
 import { describe, expect, it } from "vitest";
 import { type BashGroundingDeps, groundBashScript, isBashGroundingDisabled } from "../src/core/bash-grounding.ts";
+import { createBashGroundingExtension } from "../src/core/built-ins/bash-grounding-extension.ts";
+import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 
 function makeDeps(scripts: string[], overrides: Partial<BashGroundingDeps> = {}): BashGroundingDeps {
 	return {
@@ -99,5 +104,86 @@ describe("isBashGroundingDisabled — opt-out", () => {
 		expect(isBashGroundingDisabled({ PIT_NO_BASH_GROUNDING: "TRUE" })).toBe(true);
 		expect(isBashGroundingDisabled({ PIT_NO_BASH_GROUNDING: "yes" })).toBe(true);
 		expect(isBashGroundingDisabled({ PIT_NO_BASH_GROUNDING: "0" })).toBe(false);
+	});
+});
+
+describe("bash-grounding extension — scripts cache invalidation on package.json mutation", () => {
+	type Handler = (event: Record<string, unknown>) => unknown;
+
+	function makeFakePi() {
+		const handlers = new Map<string, Handler[]>();
+		const api = {
+			on(event: string, handler: Handler) {
+				const list = handlers.get(event) ?? [];
+				list.push(handler);
+				handlers.set(event, list);
+			},
+		};
+		const fire = (event: string, payload: Record<string, unknown>): unknown => {
+			let result: unknown;
+			for (const handler of handlers.get(event) ?? []) {
+				const r = handler(payload);
+				if (r !== undefined && result === undefined) result = r;
+			}
+			return result;
+		};
+		return { api, fire };
+	}
+
+	function withProject(
+		scripts: Record<string, string>,
+		fn: (cwd: string, fire: ReturnType<typeof makeFakePi>["fire"]) => void,
+	) {
+		const cwd = mkdtempSync(join(tmpdir(), "pit-bash-ground-cache-"));
+		try {
+			writeFileSync(join(cwd, "package.json"), JSON.stringify({ scripts }));
+			const { api, fire } = makeFakePi();
+			createBashGroundingExtension({ cwd })(api as unknown as ExtensionAPI);
+			fn(cwd, fire);
+		} finally {
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	}
+
+	it("re-reads the manifest after a successful edit of package.json (new script becomes groundable)", () => {
+		withProject({ build: "b" }, (cwd, fire) => {
+			// Prime the cache: "biuld" is a typo of the (only) real script.
+			const blocked = fire("tool_call", { toolName: "bash", input: { command: "npm run biuld" } }) as
+				| { block?: boolean }
+				| undefined;
+			expect(blocked?.block).toBe(true);
+
+			// The model adds a `lint` script; the successful edit result must drop the cache.
+			writeFileSync(join(cwd, "package.json"), JSON.stringify({ scripts: { build: "b", lint: "l" } }));
+			fire("tool_result", { toolName: "edit", input: { path: join(cwd, "package.json") }, isError: false });
+
+			// Fresh cache: "lnit" now has a close candidate (lint) -> block. A stale
+			// cache (["build"]) would have no close candidate and fail-open (allow).
+			const afterEdit = fire("tool_call", { toolName: "bash", input: { command: "npm run lnit" } }) as
+				| { block?: boolean; reason?: string }
+				| undefined;
+			expect(afterEdit?.block).toBe(true);
+			expect(afterEdit?.reason).toContain("lint");
+		});
+	});
+
+	it("keeps the stale cache when the mutation errored or touched another file", () => {
+		withProject({ build: "b" }, (cwd, fire) => {
+			expect(
+				(fire("tool_call", { toolName: "bash", input: { command: "npm run biuld" } }) as { block?: boolean })
+					?.block,
+			).toBe(true);
+			writeFileSync(join(cwd, "package.json"), JSON.stringify({ scripts: { build: "b", lint: "l" } }));
+
+			// Errored edit of package.json -> no invalidation.
+			fire("tool_result", { toolName: "edit", input: { path: join(cwd, "package.json") }, isError: true });
+			// Successful edit of a different file -> no invalidation.
+			fire("tool_result", { toolName: "write", input: { path: join(cwd, "readme.md") }, isError: false });
+			// Non-mutating tool on package.json -> no invalidation.
+			fire("tool_result", { toolName: "read", input: { path: join(cwd, "package.json") }, isError: false });
+
+			// Cache still ["build"]: "lnit" has no close candidate -> fail-open allow.
+			expect(fire("tool_call", { toolName: "bash", input: { command: "npm run lnit" } })).toBeUndefined();
+		});
 	});
 });

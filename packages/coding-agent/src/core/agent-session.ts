@@ -33,6 +33,7 @@ import {
 	prewarmProviderModule,
 	recordDiagnostic,
 	resetApiProviders,
+	SYSTEM_PROMPT_DYNAMIC_MARKER,
 	splitSystemPromptOnDynamic,
 	streamSimple,
 } from "@pit/ai";
@@ -214,6 +215,7 @@ import { getCurrentSupervisionThermostat } from "./supervision-thermostat.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt, patchSystemPromptToolSurface } from "./system-prompt.js";
 import { DiagnosticsSink, defaultDiagnosticsDir, isTelemetrySinkDisabled } from "./telemetry/diagnostics-sink.ts";
 import { GuardEfficacyCorrelator } from "./telemetry/guard-efficacy.ts";
+import { HintFireTally } from "./telemetry/hint-fire-tally.ts";
 import { buildSessionSummaryRecord } from "./telemetry/session-summary.ts";
 import {
 	getCurrentTodoManager,
@@ -716,6 +718,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private _diagnosticsSink: DiagnosticsSink | undefined;
 	private _guardEfficacy: GuardEfficacyCorrelator | undefined;
 	private _guardEfficacyUnsub: (() => void) | undefined;
+	// Per-rule tally of Tier-4 hint fires, fed off the same diagnostics channel.
+	private _hintFireTally: HintFireTally | undefined;
 	// Session-wide verification-gate tally for the session-summary snapshot.
 	private _verificationAttemptsTotal = 0;
 	private _verificationFailuresTotal = 0;
@@ -727,6 +731,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 
 	// Reactive session recovery: lean by default, escalates on thrash signals.
 	private readonly _recovery: SessionRecoveryController;
+	// Fired when the recovery level changes so the interactive footer can repaint
+	// its `recovery:<level>` chip in real time. Set by the interactive mode on every
+	// session (re)bind; `undefined` in headless runs (no listener, no cost).
+	private _recoveryLevelChangeListener?: () => void;
 	// Per-session steering/reminder policy engine: owns the doom-loop / result-loop /
 	// repeating-pattern / cross-error / stagnation / todo-cadence / failure-budget
 	// detectors and their once-per-streak latches + the per-turn failure budget.
@@ -747,6 +755,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 	// (nothing is cached pre-first-request) but honest to surface.
 	private _cachePrefixBaseline: string | undefined;
 	private _cachePrefixRebuilds = 0;
+	// Warn-once-per-session latch for the dynamic-marker diagnostic. A custom
+	// system prompt (extension transformContext override) that omits
+	// SYSTEM_PROMPT_DYNAMIC_MARKER — or places it at offset 0 — silently forfeits
+	// the cacheable prefix, re-billing the whole prompt every turn. Surfaced once
+	// via _checkDynamicMarkerPresence; visibility only, never load-bearing.
+	private _dynamicMarkerDiagnosticEmitted = false;
 	// Stable per-session count of discovery-hidden tools. Snapshotted once after
 	// _seedToolDiscovery so the search_tool_bm25 nudge sits in the cacheable
 	// prefix from the first request instead of flipping 0→N (and churning the
@@ -879,7 +893,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// (native anthropic/openai start `leve`). A later /model switch does not
 		// re-seed the start level — the thermostat is per-session and observe-only
 		// in Fase 0; behavior earned in-session dominates the prior anyway.
-		this._recovery = new SessionRecoveryController({ model: this.agent.state.model });
+		this._recovery = new SessionRecoveryController({
+			model: this.agent.state.model,
+			// Push a footer repaint the instant recovery escalates/de-escalates so the
+			// `recovery:<level>` chip tracks the level in real time instead of waiting
+			// for an incidental render. Mirrors the todo-change listener wiring.
+			onLevelChange: () => this._recoveryLevelChangeListener?.(),
+		});
 
 		// The boot-time model also scales the shared tool-output byte caps
 		// (DEFAULT/BASH/hard-cap floors at ≤200k-token windows, up to 2× at 1M —
@@ -2513,11 +2533,19 @@ export class AgentSession implements CompactionHost, FusionHost {
 			// Correlator emits onto the same JSONL lane as the raw events.
 			const correlator = new GuardEfficacyCorrelator((record) => sink.writeRecord(record));
 			this._guardEfficacy = correlator;
-			this._guardEfficacyUnsub = onDiagnostic((event) => correlator.onDiagnostic(event));
+			// Hint-fire tally aggregates `hint.fired` diagnostics per rule id for the
+			// session summary; it shares the single diagnostics subscription.
+			const hintTally = new HintFireTally();
+			this._hintFireTally = hintTally;
+			this._guardEfficacyUnsub = onDiagnostic((event) => {
+				correlator.onDiagnostic(event);
+				hintTally.onDiagnostic(event);
+			});
 		} catch {
 			// Fail-open: telemetry must never break session boot.
 			this._diagnosticsSink = undefined;
 			this._guardEfficacy = undefined;
+			this._hintFireTally = undefined;
 		}
 	}
 
@@ -2543,6 +2571,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 					verification: { attempts: this._verificationAttemptsTotal, failures: this._verificationFailuresTotal },
 					cache,
 					cachePrefix: this.getCachePrefixDiagnostics(),
+					hintFires: this._hintFireTally?.snapshot(),
 				}),
 			);
 		} catch {
@@ -2723,6 +2752,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._guardEfficacyUnsub = undefined;
 		this._guardEfficacy = undefined;
 		this._persistDiagnosticsSummary();
+		// After the summary snapshot (which reads the tally) — mirrors the correlator.
+		this._hintFireTally = undefined;
 		this._diagnosticsSink?.dispose();
 		this._diagnosticsSink = undefined;
 		this._recovery.dispose();
@@ -3092,6 +3123,16 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._todo.setChangeListener(listener);
 	}
 
+	/**
+	 * Register a listener fired whenever the reactive recovery level changes
+	 * (`lean`↔`guided`↔`strict`), so the interactive footer repaints its
+	 * `recovery:<level>` chip the instant the level moves rather than on the next
+	 * incidental render. Re-applied on every session rebind. `undefined` clears it.
+	 */
+	setRecoveryLevelChangeListener(listener: (() => void) | undefined): void {
+		this._recoveryLevelChangeListener = listener;
+	}
+
 	/** True while any todo is in_progress (drives the overlay spinner). */
 	todoHasInProgress(): boolean {
 		return this._todo.hasInProgress();
@@ -3441,6 +3482,37 @@ export class AgentSession implements CompactionHost, FusionHost {
 		this._cachePrefixBaseline = staticPart;
 		this._cachePrefixRebuilds++;
 		this._cachePrefixReasons.set(reason, (this._cachePrefixReasons.get(reason) ?? 0) + 1);
+	}
+
+	/**
+	 * Warn once per session when the FINAL system prompt about to be sent lacks a
+	 * usable dynamic marker. `buildSystemPrompt` always inserts one, so this only
+	 * fires for a custom prompt injected via an extension's `transformContext`
+	 * (`result.systemPrompt`): without the marker the whole prompt is treated as the
+	 * cacheable prefix, so any volatile content re-bills every turn; with the marker
+	 * at offset 0 there is no prefix to cache at all. Diagnostic-only (fail-open,
+	 * persisted via the telemetry sink under `PIT_NO_TELEMETRY_SINK`) — it changes
+	 * no behavior, only visibility. Latched so the hot send path pays nothing after
+	 * the first observation.
+	 */
+	private _checkDynamicMarkerPresence(prompt: string): void {
+		if (this._dynamicMarkerDiagnosticEmitted) return;
+		const idx = prompt.indexOf(SYSTEM_PROMPT_DYNAMIC_MARKER);
+		let note: string | undefined;
+		if (idx === -1) {
+			note =
+				"system prompt missing dynamic marker — whole prompt cached as prefix, volatile content re-bills every turn";
+		} else if (idx === 0) {
+			note = "dynamic marker at offset 0 — empty cacheable prefix, prompt cache never engages";
+		}
+		if (note === undefined) return;
+		this._dynamicMarkerDiagnosticEmitted = true;
+		recordDiagnostic({
+			category: "quality.cache-marker",
+			level: "warn",
+			source: "agent-session.systemPrompt",
+			context: { note },
+		});
 	}
 
 	/**
@@ -4597,6 +4669,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 			if (planSection) {
 				this.agent.state.systemPrompt = `${this.agent.state.systemPrompt}\n\n${planSection}`;
 			}
+
+			// A4 — surface (once) a custom prompt that forfeits the cacheable prefix.
+			// Checked on the final assembled prompt; goal/todo/plan appends land after
+			// the marker (dynamic suffix), so they never move a present marker.
+			this._checkDynamicMarkerPresence(this.agent.state.systemPrompt);
 
 			// Pre-send overflow guard with full wire estimate (messages + prefix + pending user).
 			if (
