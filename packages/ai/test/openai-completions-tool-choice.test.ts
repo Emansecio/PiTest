@@ -733,7 +733,7 @@ describe("openai-completions tool_choice", () => {
 						role: "assistant",
 						api: "openai-completions",
 						provider: "opencode-go",
-						model: "kimi-k2.6",
+						model: "kimi-k2.7-code",
 						content: [
 							{ type: "thinking", thinking: "think", thinkingSignature: "reasoning" },
 							{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "README.md" } },

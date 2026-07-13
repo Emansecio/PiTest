@@ -60,13 +60,24 @@ describe("BashGroupComponent", () => {
 		expect(head).not.toContain("git status");
 	});
 
-	it("caps auto-shown error bodies", () => {
+	it("renders collapsed errors header-only (no auto-shown body)", () => {
 		const bodyLines = Array.from({ length: 20 }, (_, i) => `err ${i + 1}`);
 		const g = new BashGroupComponent(fakeTui());
 		g.addCall(bashStub("false", "error", () => bodyLines));
 		const out = g.render(120).map(stripAnsi);
-		expect(out.length).toBe(1 + 4 + 1);
-		expect(out.some((l) => l.includes("+16 more lines"))).toBe(true);
+		expect(out.length).toBe(1);
+		expect(out[0]).toContain("Ran");
+		expect(out.some((l) => l.includes("err 1"))).toBe(false);
+	});
+
+	it("explicit expansion still renders the full error body", () => {
+		const bodyLines = Array.from({ length: 20 }, (_, i) => `err ${i + 1}`);
+		const g = new BashGroupComponent(fakeTui());
+		g.addCall(bashStub("false", "error", () => bodyLines));
+		g.setExpanded(true);
+		const out = g.render(120).map(stripAnsi);
+		expect(out.some((l) => l.includes("err 1"))).toBe(true);
+		expect(out.some((l) => l.includes("err 20"))).toBe(true);
 	});
 
 	it("leaves transient elapsed telemetry to the working loader", () => {

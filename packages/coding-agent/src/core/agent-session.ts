@@ -581,6 +581,19 @@ export class AgentSession implements CompactionHost, FusionHost {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 	/**
+	 * Priority recovery steers fired mid-turn (doom-loop recovery/pause, result-loop,
+	 * session-recovery narration) awaiting a flush at the current turn's `turn_end`.
+	 * They must land in the live transcript immediately so they reach the very next
+	 * model turn — routing them through the agent's one-at-a-time steering queue lets
+	 * a session-recovery burst of several priority steers starve each other (only one
+	 * drains per turn). But they cannot be pushed the instant they fire, because that
+	 * lands them BETWEEN an assistant tool call and its still-pending tool result,
+	 * producing an invalid tool_use/tool_result sequence. Buffering here and flushing
+	 * at `turn_end` (after the tool-result batch is appended) lands them promptly AND
+	 * in a valid order, in both the live transcript and the persisted session.
+	 */
+	private _pendingPrioritySteers: CustomMessage[] = [];
+	/**
 	 * Images attached out-of-band (e.g. clipboard paste in the TUI) to be merged
 	 * into the NEXT user prompt's content. Consumed and cleared the first time a
 	 * user message is built in `_promptOnce`, so a pasted image rides along with
@@ -2134,6 +2147,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 				}
 				break;
 			case "agent_end":
+				// Safety net: land any priority steer buffered on a turn that ended without
+				// a turn_end (e.g. an aborted turn). Normally the turn_end flush handles it.
+				this._flushPendingPrioritySteers();
 				this._toolCallArgsByCallId.clear();
 				this._rejectedToolCallIds.clear();
 				// Symmetric with the sibling maps: a turn aborted between hint-applied
@@ -2155,6 +2171,11 @@ export class AgentSession implements CompactionHost, FusionHost {
 				}
 				break;
 			case "turn_end":
+				// Land any priority recovery steers fired mid-turn now that the assistant
+				// message and its tool-result batch are both in the transcript — appending
+				// here keeps the tool_use/tool_result sequence valid while still delivering
+				// the steer before the next model turn (see _flushPendingPrioritySteers).
+				this._flushPendingPrioritySteers();
 				if (this._extensionRunner.hasHandlers("turn_end")) {
 					await this._extensionRunner.emit({
 						type: "turn_end",
@@ -2245,6 +2266,32 @@ export class AgentSession implements CompactionHost, FusionHost {
 			case "tool_error_hint_applied":
 				this._handleToolErrorHintApplied(event);
 				break;
+		}
+	}
+
+	/**
+	 * Flush buffered priority recovery steers into the live transcript. Called at
+	 * turn_end, when the assistant message and its tool-result batch are already
+	 * appended, so a direct push lands the steer AFTER the batch (valid ordering)
+	 * yet before the next model turn (no one-at-a-time starvation). Persists via
+	 * appendCustomMessageEntry and emits message_start/message_end to subscribers —
+	 * the emit targets session listeners only, so it does not re-enter this handler
+	 * and cannot double-persist.
+	 */
+	private _flushPendingPrioritySteers(): void {
+		if (this._pendingPrioritySteers.length === 0) return;
+		const steers = this._pendingPrioritySteers;
+		this._pendingPrioritySteers = [];
+		for (const appMessage of steers) {
+			this.agent.state.messages.push(appMessage);
+			this.sessionManager.appendCustomMessageEntry(
+				appMessage.customType,
+				appMessage.content,
+				appMessage.display,
+				appMessage.details,
+			);
+			this.emit({ type: "message_start", message: appMessage });
+			this.emit({ type: "message_end", message: appMessage });
 		}
 	}
 
@@ -4920,9 +4967,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else if (options?.steerPriority) {
-				// Priority avoids starvation while the agent loop preserves the active
-				// tool-call/result batch before appending the steer.
-				this.agent.steer(appMessage, { priority: true });
+				// Buffer for a flush at this turn's turn_end. Landing it now would splice
+				// the steer between the assistant tool call and its pending tool result;
+				// routing it through the steering queue would let a burst of recovery
+				// steers starve each other under one-at-a-time draining. See the field doc
+				// on _pendingPrioritySteers.
+				this._pendingPrioritySteers.push(appMessage);
 			} else {
 				this.agent.steer(appMessage);
 			}

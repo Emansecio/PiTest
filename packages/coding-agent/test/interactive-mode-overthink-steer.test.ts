@@ -137,6 +137,8 @@ describe("InteractiveMode overthink steer rendering", () => {
 			getMarkdownThemeWithSettings: vi.fn(() => ({})),
 			editor: { addToHistory: vi.fn() },
 			getUserMessageText,
+			// maybeAddTurnRule sizes the hairline from the reading-width setting.
+			settingsManager: { getAssistantReadingColumns: vi.fn(() => 0) },
 		};
 
 		const addMessageToChat = Reflect.get(InteractiveMode.prototype, "addMessageToChat") as (

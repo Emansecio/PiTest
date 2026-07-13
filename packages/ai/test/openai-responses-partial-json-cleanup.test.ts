@@ -57,6 +57,12 @@ async function* createFunctionCallEvents(argumentsJson: string): AsyncIterable<R
 			arguments: argumentsJson,
 		},
 	} as ResponseStreamEvent;
+	// The stream parser fail-closes on streams that never reach a terminal
+	// event (phase-preservation guard), so the fixture must complete properly.
+	yield {
+		type: "response.completed",
+		response: { status: "completed" },
+	} as ResponseStreamEvent;
 }
 
 describe("openai responses partialJson cleanup", () => {

@@ -732,9 +732,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
  * A model can always override this via `compat.supportsAdaptiveThinking`.
  */
 export function defaultSupportsAdaptiveThinking(modelId: string): boolean {
-	const match = /(opus|sonnet)-(\d+)[._-](\d{1,2})(?!\d)/.exec(modelId);
+	// Minor is optional: Claude 5 family ids carry a bare major ("claude-sonnet-5").
+	// Major is also bounded to 1-2 digits so "claude-3-5-sonnet-20241022" (date
+	// right after the family name) can never be read as a version.
+	const match = /(opus|sonnet)-(\d{1,2})(?!\d)(?:[._-](\d{1,2})(?!\d))?/.exec(modelId);
 	if (!match) return false;
-	const version = Number(match[2]) + Number(match[3]) / 10;
+	const version = Number(match[2]) + Number(match[3] ?? 0) / 10;
 	return version >= 4.6;
 }
 
