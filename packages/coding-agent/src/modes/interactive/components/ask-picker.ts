@@ -1,9 +1,11 @@
 /**
- * Picker component for the `ask` tool. Renders the question (with optional
- * context/header), a list of options, an optional freeform text field, and an
- * optional toggleable comment field — mirroring the `pi-ask-user` interaction
- * model. Supports single-select, multi-select (checkbox toggling), freeform
- * typed answers, and a comment attached to a selection.
+ * Picker component for the `ask` tool. Renders a full rounded card (same
+ * `Card`/`cardBg` idiom as the model/config selectors — U01 full) containing
+ * the question (with optional header chip and context), a list of options, an
+ * optional freeform text field, and an optional toggleable comment field —
+ * mirroring the `pi-ask-user` interaction model. Supports single-select,
+ * multi-select (checkbox toggling), freeform typed answers, a comment attached
+ * to a selection, and a live countdown when the request carries a timeout.
  *
  * Wiring: the interactive mode subscribes to the UserInputBus on session boot.
  * When a request arrives it constructs this picker (inline or as an overlay)
@@ -12,6 +14,7 @@
  */
 
 import {
+	Card,
 	type Component,
 	type Focusable,
 	getKeybindings,
@@ -35,20 +38,16 @@ import {
 } from "./keybinding-hints.ts";
 import { paintSelectedRow } from "./selectable-row.ts";
 
-const RECOMMENDED_BADGE = " · recommended";
-const FREEFORM_ROW_LABEL = "Other — type custom answer…";
-const OPTION_DESC_INDENT = "      ";
+const RECOMMENDED_BADGE = " (recommended)";
+const FREEFORM_ROW_LABEL = "✎ Other — type a custom answer…";
+/** Detail connector under the focused option; continuations align to its text. */
+const DESC_CONNECTOR = "   └─ ";
+const DESC_CONTINUATION = "      ";
 const COMMENT_PREFIX = "Note: ";
 /** Max option rows rendered at once; window centers on the selected index. */
 const MAX_VISIBLE_OPTIONS = 12;
-
-function cardTopBorder(width: number): string {
-	return defaultTheme.fg("cardBorder", `╭${"─".repeat(Math.max(0, width - 2))}╮`);
-}
-
-function cardBottomBorder(width: number): string {
-	return defaultTheme.fg("cardBorder", `╰${"─".repeat(Math.max(0, width - 2))}╯`);
-}
+/** Card frame + padding columns consumed around the body (│ + 1 pad each side). */
+const CARD_CHROME_WIDTH = 4;
 
 export interface AskPickerResolveResult {
 	picked: string[];
@@ -60,6 +59,8 @@ export interface AskPickerResolveResult {
 export interface AskPickerHooks {
 	/** Toggle overlay visibility (no-op in inline mode). */
 	onToggleVisibility?: () => void;
+	/** Request a UI repaint (drives the live timeout countdown). */
+	onRequestRender?: () => void;
 }
 
 function wrapPlain(text: string, width: number): string[] {
@@ -105,7 +106,9 @@ function wrapPlain(text: string, width: number): string[] {
 /**
  * Stateful picker: a single focusable component that routes keystrokes to a
  * list view or, once the user enters the freeform/comment path, an inner text
- * Input.
+ * Input. The body is string-rendered and framed by a real `Card` child adapter
+ * so the frame (borders, cardBg, padding) is byte-identical to the other
+ * selectors.
  */
 class AskPicker implements Component, Focusable {
 	focused = false;
@@ -121,6 +124,12 @@ class AskPicker implements Component, Focusable {
 	private readonly commentToggleKey: string;
 	/** Row index of the synthetic "type a custom answer" entry, or -1. */
 	private readonly freeformRow: number;
+	/** Wall-clock deadline for the auto-answer timeout, if the request has one. */
+	private readonly deadline: number | undefined;
+
+	private readonly card: Card;
+	/** Body lines computed per render; served to the Card via a child adapter. */
+	private bodyLines: string[] = [];
 
 	private mode: "list" | "freeform" | "comment" = "list";
 	private index = 0;
@@ -129,6 +138,7 @@ class AskPicker implements Component, Focusable {
 	private commentInput: Input | null = null;
 	private commentText = "";
 	private settled = false;
+	private tickTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(
 		req: AskOptionsRequest,
@@ -145,6 +155,21 @@ class AskPicker implements Component, Focusable {
 		this.overlayToggleKey = req.overlayToggleKey?.trim() || "alt+o";
 		this.commentToggleKey = req.commentToggleKey?.trim() || "ctrl+g";
 		this.freeformRow = this.allowFreeform ? this.options.length : -1;
+		this.deadline =
+			typeof req.timeout === "number" && Number.isFinite(req.timeout) && req.timeout > 0
+				? Date.now() + req.timeout
+				: undefined;
+
+		this.card = new Card(
+			1,
+			0,
+			(s) => defaultTheme.bg("cardBg", s),
+			(s) => defaultTheme.fg("cardBorder", s),
+		);
+		this.card.addChild({
+			invalidate: () => {},
+			render: () => this.bodyLines,
+		});
 
 		const recommendedIndex = this.options.findIndex((o) => o.recommended);
 		if (recommendedIndex !== -1) {
@@ -162,6 +187,10 @@ class AskPicker implements Component, Focusable {
 	private settle(result: AskPickerResolveResult): void {
 		if (this.settled) return;
 		this.settled = true;
+		if (this.tickTimer) {
+			clearTimeout(this.tickTimer);
+			this.tickTimer = undefined;
+		}
 		this.onResolve(result);
 	}
 
@@ -271,34 +300,37 @@ class AskPicker implements Component, Focusable {
 	}
 
 	invalidate(): void {
+		this.card.invalidate();
 		this.input?.invalidate();
 		this.commentInput?.invalidate();
 	}
 
-	private renderHeader(width: number, lines: string[]): void {
-		// Header matches the goal/todo overlay pattern: accent dot, bold label, em-dash, scope.
+	/**
+	 * Header block INSIDE the card: optional scope chip, then the question —
+	 * always, in both inline and overlay modes. The transcript's `ask …` call
+	 * line may be scrolled away or truncated; the card is what the user is
+	 * looking at, so it must carry the question.
+	 */
+	private renderQuestion(width: number, lines: string[]): void {
 		const scope = this.req.header?.trim();
-		const title = scope
-			? `${defaultTheme.fg("accent", "●")} ${defaultTheme.bold("Ask")} ${defaultTheme.fg("dim", "—")} ${scope}`
-			: `${defaultTheme.fg("accent", "●")} ${defaultTheme.bold("Ask")}`;
-		lines.push(visibleWidth(title) > width ? truncateToWidth(title, width, "…") : title);
-
-		// Inline pickers sit directly beneath the `ask` tool call line, which already
-		// renders the question — repeating it here is pure vertical duplication. An
-		// overlay covers the transcript, so it still needs to show the question.
-		// Wrap it (never push raw) or a long single-line question overflows `width`
-		// and crashes TUI.doRender.
-		if ((this.req.displayMode ?? "inline") !== "inline") {
-			// Overlay covers the transcript — question is the primary read; bold text
-			// (not accent-on-everything) so options still own the accent scan.
+		const dot = defaultTheme.fg("accent", "●");
+		if (scope) {
+			lines.push(`${dot} ${defaultTheme.bold(scope)}`);
 			for (const line of wrapPlain(this.req.question, width)) {
 				lines.push(defaultTheme.bold(defaultTheme.fg("text", line)));
 			}
+		} else {
+			// No chip: the question itself carries the accent dot.
+			const qLines = wrapPlain(this.req.question, Math.max(1, width - 2));
+			qLines.forEach((line, i) => {
+				const body = defaultTheme.bold(defaultTheme.fg("text", line));
+				lines.push(i === 0 ? `${dot} ${body}` : `  ${body}`);
+			});
 		}
 		if (this.req.context) {
 			lines.push(...renderSupplementaryContext(this.req.context, width));
 		}
-		lines.push(cardTopBorder(width));
+		lines.push("");
 	}
 
 	private checkboxPrefix(index: number): string {
@@ -310,11 +342,6 @@ class AskPicker implements Component, Focusable {
 	}
 
 	private renderList(width: number, lines: string[]): void {
-		if (this.options.length > 0) {
-			const countLabel = this.options.length === 1 ? "1 option" : `${this.options.length} options`;
-			lines.push(defaultTheme.fg("dim", countLabel));
-		}
-
 		const optionCount = this.options.length;
 		let startIndex = 0;
 		let endIndex = optionCount;
@@ -334,35 +361,24 @@ class AskPicker implements Component, Focusable {
 			const focused = i === this.index && this.mode === "list";
 			const cursor = selectionCursor(focused);
 			const box = this.checkboxPrefix(i);
-			// Pre-color the badge (it marks the default pick) and reserve its width
-			// separately, so clamping the head never eats into it.
-			const badge = opt.recommended ? defaultTheme.fg("success", defaultTheme.bold(RECOMMENDED_BADGE)) : "";
+			// The badge marks the default pick quietly: dim, never bold — the label
+			// owns the row. Width reserved separately so clamping never eats it.
+			const badge = opt.recommended ? defaultTheme.fg("dim", RECOMMENDED_BADGE) : "";
 			const labelText = opt.recommended ? defaultTheme.bold(opt.label) : opt.label;
 			const head =
 				truncateToWidth(`${cursor}${box}${labelText}`, Math.max(0, width - visibleWidth(badge)), "…") + badge;
-			// U01: full-width selectedBg on the focused row (same idiom as other selectors).
-			const row = paintSelectedRow(focused ? defaultTheme.fg("accent", head) : head, width, focused);
+			// Full-width selectedBg on the focused row (same idiom as other selectors).
+			lines.push(paintSelectedRow(focused ? defaultTheme.fg("accent", head) : head, width, focused));
+			// Detail pane: ONLY the focused option shows its description, wrapped
+			// under a └─ connector. Unfocused rows stay clean single-line labels —
+			// the eye scans labels, the cursor reveals detail.
 			const desc = opt.description?.replace(/\s+/g, " ").trim();
 			if (focused && desc) {
-				// Detail pane: the focused option shows its full description wrapped and
-				// indented, so the choice under the cursor is never clipped — and the
-				// recommended row (focused by default) no longer loses its description to
-				// the badge eating the line width.
-				lines.push(row);
-				for (const line of wrapPlain(desc, Math.max(10, width - OPTION_DESC_INDENT.length))) {
-					lines.push(defaultTheme.fg("muted", `${OPTION_DESC_INDENT}${line}`));
-				}
-			} else if (desc) {
-				// Unfocused rows keep the description inline but clip with an ellipsis,
-				// so a mid-word cut never reads as a finished sentence.
-				const descBudget = width - visibleWidth(head) - 2;
-				if (descBudget >= 10) {
-					lines.push(`${row}  ${defaultTheme.fg("muted", truncateToWidth(desc, descBudget, "…"))}`);
-				} else {
-					lines.push(row);
-				}
-			} else {
-				lines.push(row);
+				const descWidth = Math.max(10, width - DESC_CONTINUATION.length);
+				wrapPlain(desc, descWidth).forEach((line, lineIdx) => {
+					const prefix = lineIdx === 0 ? defaultTheme.fg("dim", DESC_CONNECTOR) : DESC_CONTINUATION;
+					lines.push(`${prefix}${defaultTheme.fg("muted", line)}`);
+				});
 			}
 		}
 
@@ -375,65 +391,107 @@ class AskPicker implements Component, Focusable {
 
 		if (this.allowFreeform) {
 			const active = this.index === this.freeformRow && this.mode === "list";
+			// Breathing room separates the synthetic row from the model's options.
+			if (this.options.length > 0) lines.push("");
 			const head = `${selectionCursor(active)}${FREEFORM_ROW_LABEL}`;
 			const styled = active ? defaultTheme.fg("accent", head) : defaultTheme.fg("muted", head);
 			lines.push(paintSelectedRow(styled, width, active));
 		}
 	}
 
-	render(width: number): string[] {
+	/** Body (inside the card) for the current mode. */
+	private renderBody(width: number): string[] {
 		const lines: string[] = [];
-		this.renderHeader(width, lines);
+		this.renderQuestion(width, lines);
 
 		if (this.mode === "freeform" && this.input) {
 			lines.push(defaultTheme.fg("dim", "Custom answer"));
 			this.input.focused = this.focused;
 			lines.push(...this.input.render(width));
-			lines.push(""); // spacing instead of full-width ─ rule (U01)
-			lines.push(defaultTheme.fg("dim", `  ${keyText("tui.select.confirm")} submit${HINT_SEPARATOR}esc back`));
-		} else {
-			this.renderList(width, lines);
-
-			if (this.allowComment && this.commentText.trim() && this.mode === "list") {
-				const prefix = `  ${COMMENT_PREFIX}`;
-				const preview = truncateToWidth(this.commentText.trim(), Math.max(10, width - visibleWidth(prefix)), "…");
-				lines.push(defaultTheme.fg("muted", prefix) + defaultTheme.fg("dim", preview));
-			}
-
-			if (this.mode === "comment" && this.commentInput) {
-				lines.push(""); // spacing instead of full-width ─ rule (U01)
-				lines.push(defaultTheme.fg("dim", "Add a note (optional)"));
-				this.commentInput.focused = this.focused;
-				lines.push(...this.commentInput.render(width));
-			}
-
-			lines.push(cardBottomBorder(width));
-			lines.push(defaultTheme.fg("dim", `  ${this.hint()}`));
+			return lines;
 		}
 
+		this.renderList(width, lines);
+
+		if (this.allowComment && this.commentText.trim() && this.mode === "list") {
+			const prefix = `  ${COMMENT_PREFIX}`;
+			const preview = truncateToWidth(this.commentText.trim(), Math.max(10, width - visibleWidth(prefix)), "…");
+			lines.push(defaultTheme.fg("muted", prefix) + defaultTheme.fg("dim", preview));
+		}
+
+		if (this.mode === "comment" && this.commentInput) {
+			lines.push("");
+			lines.push(defaultTheme.fg("dim", "Add a note (optional)"));
+			this.commentInput.focused = this.focused;
+			lines.push(...this.commentInput.render(width));
+		}
+
+		return lines;
+	}
+
+	render(width: number): string[] {
+		this.bodyLines = this.renderBody(Math.max(1, width - CARD_CHROME_WIDTH));
+		const lines = this.card.render(width);
+		lines.push(defaultTheme.fg("dim", `  ${this.hint()}`));
+		this.scheduleCountdownTick();
+
 		// Defensive final clamp: no rendered line may exceed `width`, or
-		// TUI.doRender throws and crashes the process. Inputs/borders already
-		// respect `width`; this is the safety net for the header/question and
-		// any word too long for wrapPlain to break (e.g. a long URL token).
+		// TUI.doRender throws and crashes the process. The Card already clamps
+		// its rows; this is the safety net for the hint line and any word too
+		// long for wrapPlain to break (e.g. a long URL token).
 		return lines.map((line) => (visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line));
+	}
+
+	/** Seconds left on the auto-answer timeout, or undefined when none. */
+	private countdownSeconds(): number | undefined {
+		if (this.deadline === undefined) return undefined;
+		return Math.max(0, Math.ceil((this.deadline - Date.now()) / 1000));
+	}
+
+	/**
+	 * One-shot repaint scheduler for the countdown: re-arms itself via the next
+	 * render. Harmless if the picker is torn down before it fires (one spare
+	 * requestRender), and settle() clears it.
+	 */
+	private scheduleCountdownTick(): void {
+		if (this.deadline === undefined || this.settled || this.tickTimer) return;
+		if (!this.hooks.onRequestRender) return;
+		this.tickTimer = setTimeout(() => {
+			this.tickTimer = undefined;
+			this.hooks.onRequestRender?.();
+		}, 1_000);
+		// Never keep the process alive for a repaint tick.
+		(this.tickTimer as { unref?: () => void }).unref?.();
 	}
 
 	private hint(): string {
 		const confirm = keyText("tui.select.confirm");
 		const cancel = keyText("tui.select.cancel");
+		let base: string;
 		if (this.mode === "comment") {
-			return `${confirm} or ${this.commentToggleKey} to save${HINT_SEPARATOR}${cancel} ${LIST_CLOSE_LABEL}`;
+			base = `${confirm} or ${this.commentToggleKey} to save${HINT_SEPARATOR}${cancel} ${LIST_CLOSE_LABEL}`;
+		} else if (this.mode === "freeform") {
+			base = `${confirm} submit${HINT_SEPARATOR}esc back`;
+		} else {
+			// Canonical shape shared with selectors: navigate · confirm select · cancel close
+			const parts = [
+				LIST_NAVIGATE_LABEL,
+				this.allowMultiple
+					? `space toggle${HINT_SEPARATOR}${confirm} ${LIST_SELECT_LABEL}`
+					: `${confirm} ${LIST_SELECT_LABEL}`,
+			];
+			if (this.allowComment) parts.push(`${this.commentToggleKey} comment`);
+			parts.push(`${cancel} ${LIST_CLOSE_LABEL}`);
+			base = parts.join(HINT_SEPARATOR);
 		}
-		// Canonical shape shared with selectors: navigate · confirm select · cancel close
-		const parts = [
-			LIST_NAVIGATE_LABEL,
-			this.allowMultiple
-				? `space toggle${HINT_SEPARATOR}${confirm} ${LIST_SELECT_LABEL}`
-				: `${confirm} ${LIST_SELECT_LABEL}`,
-		];
-		if (this.allowComment) parts.push(`${this.commentToggleKey} comment`);
-		parts.push(`${cancel} ${LIST_CLOSE_LABEL}`);
-		return parts.join(HINT_SEPARATOR);
+		// Countdown LEADS the hint: on a narrow terminal the defensive clamp cuts
+		// from the right, and the auto-select deadline is the one thing the user
+		// must not lose.
+		const remaining = this.countdownSeconds();
+		if (remaining !== undefined) {
+			base = `auto-selects in ${remaining}s${HINT_SEPARATOR}${base}`;
+		}
+		return base;
 	}
 }
 

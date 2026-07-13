@@ -278,6 +278,27 @@ export function createAskToolDefinition(
 		},
 		renderResult(result, _options, theme, context) {
 			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+			// Styled closure for the interaction: ✓ + the chosen answer (the call
+			// line above already shows the question). Falls back to the raw text
+			// output for shapes without structured details (e.g. auto-answers).
+			const details = result.details as AskToolDetails | undefined;
+			const response = details?.response;
+			if (details?.cancelled) {
+				text.setText(theme.fg("muted", "✗ cancelled"));
+				return text;
+			}
+			if (response?.kind === "selection" && response.selections.length > 0) {
+				const check = theme.fg("success", "✓");
+				const picked = theme.fg("toolOutput", response.selections.join(", "));
+				const note = response.comment ? theme.fg("dim", ` — ${response.comment}`) : "";
+				text.setText(`${check} ${picked}${note}`);
+				return text;
+			}
+			if (response?.kind === "freeform" && response.text.trim()) {
+				const check = theme.fg("success", "✓");
+				text.setText(`${check} ${theme.fg("toolOutput", truncateWithEllipsis(response.text.trim(), 200))}`);
+				return text;
+			}
 			const output = getTextOutput(result, context.showImages).trim();
 			text.setText(output ? theme.fg("toolOutput", output) : "");
 			return text;

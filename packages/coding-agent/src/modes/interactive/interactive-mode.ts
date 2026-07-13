@@ -1609,6 +1609,9 @@ export class InteractiveMode {
 		// waiting for an incidental render (loader tick / tool event). Re-registered
 		// here so a session swap points the listener at the new session's manager.
 		this.session.setTodoChangeListener(() => this.ui.requestRender());
+		// Repaint the footer the instant reactive recovery escalates/de-escalates so
+		// the `recovery:<level>` chip is live. Re-registered on session swap.
+		this.session.setRecoveryLevelChangeListener(() => this.ui.requestRender());
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footer.setDensity(this.settingsManager.getFooterDensity());
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
@@ -5152,7 +5155,10 @@ export class InteractiveMode {
 		const displayMode = req.displayMode ?? "inline";
 		if (displayMode === "overlay") {
 			let handle: OverlayHandle | undefined;
-			const hooks = { onToggleVisibility: () => handle?.setHidden(!handle.isHidden()) };
+			const hooks = {
+				onToggleVisibility: () => handle?.setHidden(!handle.isHidden()),
+				onRequestRender: () => this.ui.requestRender(),
+			};
 			void this.showExtensionCustom<void>(
 				(_tui, _theme, _kb, done) => {
 					close = () => done(undefined);
@@ -5170,7 +5176,9 @@ export class InteractiveMode {
 		} else {
 			this.showSelector((done) => {
 				close = done;
-				const { component, focus } = createAskPicker(req, resolveOnce);
+				const { component, focus } = createAskPicker(req, resolveOnce, {
+					onRequestRender: () => this.ui.requestRender(),
+				});
 				return { component, focus };
 			});
 		}

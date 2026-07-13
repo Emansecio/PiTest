@@ -636,7 +636,7 @@ Após seleção de modelo (boot ou `/model`), `import()` do provider corresponde
 
 ### U01 — Migrar `ask-picker` para `SelectorCard`
 
-**Status:** incremental feito (Wave U 2026-07) — `paintSelectedRow` + remoção de rules `─` internas; full `SelectorCard`/Container deferred
+**Status:** **feito por completo (2026-07-13)** — corpo emoldurado pelo `Card` real (`cardBg` + laterais + padding, byte-idêntico ao SelectorCard) via child adapter, mantendo o string-render e a máquina de estados. No mesmo passe: pergunta sempre visível no card (inline incluído), header vira chip de escopo, badge `(recommended)` dim, detail-pane `└─` só na opção focada (não-focadas = label limpo), linha freeform separada com `✎`, contagem "N options" removida, countdown live `auto-selects in Ns` no hint (lidera a linha para sobreviver ao clamp), e `renderResult` com fechamento `✓ <escolha>` no transcript.
 
 | Campo | Detalhe |
 |-------|---------|

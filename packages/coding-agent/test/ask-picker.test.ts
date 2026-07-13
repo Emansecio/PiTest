@@ -151,17 +151,27 @@ describe("ask picker", () => {
 				context: "pick carefully",
 			}),
 		).render();
-		expect(out).toContain("Ask");
 		expect(out).toContain("scope");
 		expect(out).toContain("Which one?");
 		expect(out).toContain("pick carefully");
 		expect(out).toContain("Context");
 		expect(out).toMatch(/└─/);
 		expect(out).toContain("☐ Alpha");
-		expect(out).toContain("type custom answer");
+		expect(out).toContain("type a custom answer");
 		expect(out).toContain("space toggle");
 		expect(out).toContain("↑↓ navigate");
 		expect(out).toContain("close");
+	});
+
+	it("frames the body in a full card: side borders and rounded corners", () => {
+		const lines = drive(makeReq({})).render().split("\n");
+		expect(lines[0]).toMatch(/^╭─+╮$/);
+		expect(lines[lines.length - 2]).toMatch(/^╰─+╯$/); // last line is the hint
+		// Every body line sits between │ borders.
+		for (const line of lines.slice(1, -2)) {
+			expect(line.startsWith("│")).toBe(true);
+			expect(line.endsWith("│")).toBe(true);
+		}
 	});
 
 	it("single-select hint uses navigate/select/close labels", () => {
@@ -174,36 +184,53 @@ describe("ask picker", () => {
 		expect(out).not.toContain("to cancel");
 	});
 
-	it("inline mode omits the question (the ask call line already shows it) but keeps header, context and options", () => {
+	it("inline mode shows the question in the card (the transcript line may be scrolled away)", () => {
 		const out = drive(makeReq({ header: "scope", context: "pick carefully" })).render();
-		expect(out).toContain("Ask");
 		expect(out).toContain("scope");
+		expect(out).toContain("Which one?");
 		expect(out).toContain("pick carefully");
 		expect(out).toContain("Context");
 		expect(out).toMatch(/└─/);
 		expect(out).toContain("Alpha");
-		expect(out).not.toContain("Which one?");
 	});
 
-	it("focused option shows its full description; an unfocused one clips with an ellipsis", () => {
+	it("shows the question with the accent dot when no header chip is given", () => {
+		const out = drive(makeReq({})).render();
+		expect(out).toMatch(/●.*Which one\?/);
+	});
+
+	it("only the focused option shows its description, under a └─ connector", () => {
 		const desc = `protege a articulação do joelho de carga acumulada ${"rápido demais ".repeat(4)}na readaptação`;
 		const out = drive(
 			makeReq({
 				options: [
 					{ label: "Recomp", description: desc, recommended: true },
-					{ label: "Bulk", description: desc },
+					{ label: "Bulk", description: "linha da opção não focada" },
 				],
 			}),
 		).render(80);
-		// The recommended row is focused by default → its description is shown in full.
+		// The recommended row is focused by default → its description is shown in
+		// full under the connector.
 		expect(out).toContain("readaptação");
-		// The unfocused row clips its description, so the cut is marked with an ellipsis.
-		expect(out).toContain("…");
+		expect(out).toMatch(/└─ protege/);
+		// The unfocused row stays a clean label: no description leaks onto it.
+		expect(out).toContain("Bulk");
+		expect(out).not.toContain("não focada");
 	});
 
-	it("renders the recommended badge", () => {
+	it("renders the recommended badge as a quiet suffix", () => {
 		const out = drive(makeReq({ options: [{ label: "Alpha", recommended: true }, { label: "Beta" }] })).render();
-		expect(out).toContain("recommended");
+		expect(out).toContain("(recommended)");
+	});
+
+	it("shows a live auto-select countdown in the hint when the request has a timeout", () => {
+		const out = drive(makeReq({ timeout: 8_000 })).render();
+		expect(out).toMatch(/auto-selects in [78]s/);
+	});
+
+	it("omits the countdown when there is no timeout", () => {
+		const out = drive(makeReq({})).render();
+		expect(out).not.toContain("auto-selects");
 	});
 
 	it("paints selectedBg on the focused option row (U01)", () => {
