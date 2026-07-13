@@ -14,16 +14,18 @@ describe("TurnRule", () => {
 		expect(visibleWidth(lines[1]!)).toBeGreaterThan(0);
 	});
 
-	it("keeps the rule line within the viewport width (width-invariance)", () => {
-		for (const width of [120, 80, 12]) {
+	it("caps the rule at the default reading width on wide terminals", () => {
+		for (const width of [200, 120, 80, 12]) {
 			const lines = new TurnRule().render(width);
 			expect(lines).toHaveLength(2);
 			expect(lines[0]).toBe("");
-			// The visible rule must never exceed the viewport at any width.
-			expect(visibleWidth(lines[1]!)).toBeLessThanOrEqual(width);
-			// ...and should fill it (full-width hairline).
-			expect(visibleWidth(lines[1]!)).toBe(width);
+			expect(visibleWidth(lines[1]!)).toBe(Math.min(width, 120));
 		}
+	});
+
+	it("respects an explicit reading cap and 0 for full width", () => {
+		expect(visibleWidth(new TurnRule(90).render(200)[1]!)).toBe(90);
+		expect(visibleWidth(new TurnRule(0).render(200)[1]!)).toBe(200);
 	});
 
 	it("memoizes by width and reallocates after invalidate", () => {

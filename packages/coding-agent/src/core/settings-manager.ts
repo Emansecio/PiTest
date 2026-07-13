@@ -13,6 +13,9 @@ import type { PermissionSettings } from "./permissions/types.ts";
 
 const SETTINGS_LOCK_SLEEP_BUF = new Int32Array(new SharedArrayBuffer(4));
 
+/** Default readable measure for assistant prose on wide terminals. */
+export const DEFAULT_ASSISTANT_READING_COLUMNS = 120;
+
 /** Default upper bound on hindsight bank size when the user has not configured one (M24). */
 const HINDSIGHT_DEFAULT_MAX_ENTRIES = 500;
 /** Default age cap (days) for hindsight bank entries when the user has not configured one (M24). */
@@ -533,7 +536,7 @@ export interface Settings {
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 1)
 	cardPaddingX?: number; // Horizontal padding inside card frames (welcome + tool blocks) (default: 1)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
-	assistantReadingColumns?: number; // Reading-column cap (cols) for assistant prose; default 100; 0 = full width
+	assistantReadingColumns?: number; // Reading-column cap (cols) for assistant prose; default 120; 0 = full width
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	cursorBlink?: boolean; // Blink the input editor's block cursor while focused (default: true)
 	streamingSmoothing?: boolean; // Reveal streamed assistant text at a steady rate instead of in provider-sized bursts (default: true)
@@ -1797,17 +1800,16 @@ export class SettingsManager {
 	}
 
 	/**
-	 * Reading-column cap (cols) for assistant prose. `0` (the default) disables the
-	 * cap: prose uses the full terminal width and reflows on resize, like Claude
-	 * Code, instead of leaving a wide window half-empty. A positive value re-enables
-	 * a fixed reading measure for long answers, clamped to a sane band so a typo
-	 * can't make prose unreadable; tool output / bash / code blocks are never capped.
+	 * Reading-column cap (cols) for assistant prose. `0` disables the cap; otherwise
+	 * prose uses a fixed readable measure on wide terminals. Explicit positive values
+	 * are clamped to a sane band so a typo cannot make prose unreadable. Tool output,
+	 * bash, and code blocks are never capped.
 	 */
 	getAssistantReadingColumns(): number {
 		const raw = this.settings.assistantReadingColumns;
-		if (typeof raw !== "number" || !Number.isFinite(raw)) return 100;
+		if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_ASSISTANT_READING_COLUMNS;
 		if (raw <= 0) return 0;
-		return clampInt(raw, 40, 200, 100);
+		return clampInt(raw, 40, 200, DEFAULT_ASSISTANT_READING_COLUMNS);
 	}
 
 	setAssistantReadingColumns(columns: number): void {

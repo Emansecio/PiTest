@@ -50,44 +50,24 @@ describe("ActivityLineComponent", () => {
 		expect(out[0]).toContain("-2");
 		for (const l of out) expect(l).not.toContain("│");
 	});
-	it("auto-expands the exec body on a genuine error without full expand", () => {
+	it("keeps a genuine error header-only until explicitly expanded", () => {
 		let resultExpanded = false;
-		let fullyExpanded = false;
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(
 			execStub({
 				getActivityState: () => "error",
 				isAborted: () => false,
-				setExpanded: (v: boolean) => {
-					fullyExpanded = v;
+				setResultExpanded: (value: boolean) => {
+					resultExpanded = value;
 				},
-				setResultExpanded: (v: boolean) => {
-					resultExpanded = v;
-				},
+				render: () => ["error details"],
 			}),
 		);
 		const out = c.render(120).map(stripAnsi);
-		expect(out.some((l) => l.includes("<exec body>"))).toBe(true);
-		expect(resultExpanded).toBe(true);
-		expect(fullyExpanded).toBe(false);
-	});
-	it("caps the auto-shown error body and folds the rest into an expand hint", () => {
-		const bodyLines = Array.from({ length: 25 }, (_, i) => `error line ${i + 1}`);
-		const c = new ActivityLineComponent(fakeTui());
-		c.setExec(
-			execStub({
-				getActivityState: () => "error",
-				isAborted: () => false,
-				render: () => bodyLines,
-			}),
-		);
-		const out = c.render(120).map(stripAnsi);
-		// header + ACTIVITY_ERROR_PREVIEW_LINES + 1 hint line
-		expect(out.length).toBe(1 + 4 + 1);
-		expect(out.some((l) => l.includes("error line 4"))).toBe(true);
-		expect(out.some((l) => l.includes("error line 5"))).toBe(false);
-		expect(out[out.length - 1]).toContain("+21 more lines");
-		expect(out[out.length - 1]).toContain("to expand");
+		expect(out).toHaveLength(1);
+		expect(out[0]).toContain("Edited");
+		expect(out[0]).not.toContain("error details");
+		expect(resultExpanded).toBe(false);
 	});
 	it("renders the full error body when explicitly expanded", () => {
 		const bodyLines = Array.from({ length: 25 }, (_, i) => `error line ${i + 1}`);
@@ -344,12 +324,12 @@ describe("ActivityLineComponent — agent labels", () => {
 		expect(head).not.toContain("Ran");
 	});
 
-	it("shows elapsed suffix on slow pending actions", () => {
+	it("leaves transient elapsed telemetry to the working loader", () => {
 		const now = vi.spyOn(Date, "now").mockReturnValue(0);
 		const c = new ActivityLineComponent(fakeTui());
 		c.setExec(execStub({ getActivityState: () => "pending", getToolName: () => "bash" }));
 		now.mockReturnValue(5000);
-		expect(stripAnsi(c.render(120)[0])).toContain("· 5s");
+		expect(stripAnsi(c.render(120)[0])).not.toMatch(/· \d+s/);
 		now.mockRestore();
 	});
 });

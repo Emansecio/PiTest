@@ -89,4 +89,20 @@ describe("Loader elapsed with frozen indicator", () => {
 		internal.pausedAtMs = Date.now() - 2_000;
 		assert.ok(loader.getElapsedMs() >= 7_900 && loader.getElapsedMs() <= 8_100);
 	});
+
+	it("can restart the elapsed counter for a new phase", () => {
+		const t = trackingTui();
+		const loader = new Loader(
+			t.ui,
+			(s) => s,
+			(s) => s,
+			"Working…",
+			{ frames: ["⠋"] },
+		);
+		loader.setElapsedEnabled(true);
+		(loader as unknown as { startedAtMs: number }).startedAtMs = Date.now() - 10_000;
+		loader.resetElapsed();
+		assert.ok(loader.getElapsedMs() < 100);
+		assert.doesNotMatch(loader.render(80).join("\n"), /10s/);
+	});
 });

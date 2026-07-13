@@ -78,6 +78,16 @@ describe("tool discovery default surface", () => {
 		// Opt-in capabilities stay discoverable.
 		expect(hidden.has("calc")).toBe(true);
 		expect(hidden.has("ast_grep")).toBe(true);
+		for (const name of [
+			"security_surface_map",
+			"security_static_scan",
+			"security_http_replay_diff",
+			"security_validate_finding",
+			"security_evidence",
+		]) {
+			expect(active.has(name)).toBe(false);
+			expect(hidden.has(name)).toBe(true);
+		}
 		await session.dispose();
 	});
 

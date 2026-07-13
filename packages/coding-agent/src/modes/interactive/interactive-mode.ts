@@ -2555,6 +2555,7 @@ export class InteractiveMode {
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
 		options?: {
 			overlay?: boolean;
+			inlinePlacement?: "replace-editor" | "above-editor";
 			overlayOptions?: OverlayOptions | (() => OverlayOptions);
 			onHandle?: (handle: OverlayHandle) => void;
 		},
@@ -2614,6 +2615,9 @@ export class InteractiveMode {
 					} else {
 						this.editorContainer.clear();
 						this.editorContainer.addChild(component);
+						if (options?.inlinePlacement === "above-editor") {
+							this.editorContainer.addChild(this.editor);
+						}
 						this.ui.setFocus(component);
 						this.ui.requestRender();
 					}
@@ -3509,18 +3513,14 @@ export class InteractiveMode {
 					this.stopWorkingLoader();
 					this.deferredTurnDone = null;
 					if (this.session.orchestration !== "fusion") {
-						this.appendTurnDoneLine(
-							buildTurnDoneSnapshot(event.messages, elapsedMs, this.session.getContextUsage() ?? undefined),
-						);
+						this.appendTurnDoneLine(buildTurnDoneSnapshot(event.messages, elapsedMs));
 					}
 				} else if (!event.willRetry && this.session.orchestration !== "fusion") {
 					// Defer the done line until prompt_end so verification / pending
 					// checks don't flash "done" under a still-running spinner.
-					this.deferredTurnDone = buildTurnDoneSnapshot(
-						event.messages,
-						this.getWorkingLoaderElapsedMs(),
-						this.session.getContextUsage() ?? undefined,
-					);
+					this.deferredTurnDone = buildTurnDoneSnapshot(event.messages, this.getWorkingLoaderElapsedMs());
+					this.loadingAnimation?.resetElapsed();
+					this.setWorkingPhase("Final answer ready · finishing checks…");
 				}
 				this.disposeActiveStreamingComponent();
 				for (const component of this.pendingTools.values()) {
@@ -3649,6 +3649,25 @@ export class InteractiveMode {
 					this.showError(
 						`✗ Functional web check still failing after ${event.maxAttempts} fix attempt(s) — reported unverified.`,
 					);
+				}
+				this.ui.requestRender();
+				break;
+			}
+
+			case "self_review": {
+				this.setTerminalProgress(event.phase === "running");
+				if (event.phase === "running") {
+					if (this.workingVisible && !this.loadingAnimation) {
+						this.clearStatusContainer();
+						this.loadingAnimation = this.createWorkingLoader();
+						this.statusContainer.addChild(this.loadingAnimation);
+					}
+					this.loadingAnimation?.resetElapsed();
+					this.setWorkingPhase("Reviewing final changes…");
+				} else if ((event.unresolvedHigh ?? 0) > 0) {
+					this.setWorkingPhase(`Final review complete · ${event.unresolvedHigh} unresolved`);
+				} else {
+					this.setWorkingPhase("✓ Final review complete");
 				}
 				this.ui.requestRender();
 				break;
@@ -3967,7 +3986,7 @@ export class InteractiveMode {
 	 * hint first; a rebuild clears the whole container). */
 	private maybeAddTurnRule(): void {
 		if (this.chatContainer.children.length === 0) return;
-		this.chatContainer.addChild(new TurnRule());
+		this.chatContainer.addChild(new TurnRule(this.settingsManager.getAssistantReadingColumns()));
 	}
 
 	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {

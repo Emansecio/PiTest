@@ -65,6 +65,7 @@ describe("InteractiveMode turn done rendering", () => {
 	});
 
 	test("agent_end defers turn-done when post-turn gates will run", async () => {
+		const resetElapsed = vi.fn();
 		const fakeThis = {
 			isInitialized: true,
 			init: vi.fn(),
@@ -72,8 +73,9 @@ describe("InteractiveMode turn done rendering", () => {
 			clearInterruptWatchdog: vi.fn(),
 			disposeFusionLive: vi.fn(),
 			shouldRetireWorkingLoaderOnAgentEnd,
-			loadingAnimation: { getElapsedMs: () => 12_000 },
+			loadingAnimation: { getElapsedMs: () => 12_000, resetElapsed },
 			getWorkingLoaderElapsedMs: Reflect.get(InteractiveMode.prototype, "getWorkingLoaderElapsedMs"),
+			setWorkingPhase: vi.fn(),
 			stopWorkingLoader: vi.fn(),
 			deferredTurnDone: null as unknown,
 			session: {
@@ -109,6 +111,27 @@ describe("InteractiveMode turn done rendering", () => {
 		expect(fakeThis.stopWorkingLoader).not.toHaveBeenCalled();
 		expect(fakeThis.appendTurnDoneLine).not.toHaveBeenCalled();
 		expect(fakeThis.deferredTurnDone).not.toBeNull();
+		expect(resetElapsed).toHaveBeenCalledOnce();
+		expect(fakeThis.setWorkingPhase).toHaveBeenCalledWith("Final answer ready · finishing checks…");
+	});
+
+	test("self_review replaces stale gate text with an explicit post-turn phase", async () => {
+		const resetElapsed = vi.fn();
+		const fakeThis = {
+			isInitialized: true,
+			init: vi.fn(),
+			setTerminalProgress: vi.fn(),
+			workingVisible: true,
+			loadingAnimation: { resetElapsed },
+			setWorkingPhase: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		};
+
+		await handleEvent.call(fakeThis, { type: "self_review", phase: "running" });
+
+		expect(fakeThis.setTerminalProgress).toHaveBeenCalledWith(true);
+		expect(resetElapsed).toHaveBeenCalledOnce();
+		expect(fakeThis.setWorkingPhase).toHaveBeenCalledWith("Reviewing final changes…");
 	});
 
 	test("prompt_end retires the loader and flushes deferred turn-done", async () => {

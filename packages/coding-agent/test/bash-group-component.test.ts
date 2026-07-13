@@ -1,5 +1,5 @@
 import { resetCapabilitiesCache, setCapabilities } from "@pit/tui";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { BashGroupComponent } from "../src/modes/interactive/components/bash-group.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -69,12 +69,9 @@ describe("BashGroupComponent", () => {
 		expect(out.some((l) => l.includes("+16 more lines"))).toBe(true);
 	});
 
-	it("shows elapsed suffix on slow pending groups", () => {
-		const now = vi.spyOn(Date, "now").mockReturnValue(0);
+	it("leaves transient elapsed telemetry to the working loader", () => {
 		const g = new BashGroupComponent(fakeTui());
 		g.addCall(bashStub("npm test", "pending"));
-		now.mockReturnValue(5000);
-		expect(stripAnsi(g.render(120)[0])).toContain("· 5s");
-		now.mockRestore();
+		expect(stripAnsi(g.render(120)[0])).not.toMatch(/· \d+s/);
 	});
 });

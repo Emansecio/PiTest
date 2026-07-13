@@ -1,0 +1,27 @@
+{
+  "id": "timing-jitter",
+  "discoveredAtMs": 3000,
+  "pocAtMs": 7600,
+  "input": {
+    "currentState": "reproduced",
+    "marker": {
+      "value": "marker-timing-01",
+      "baselineBody": "normal",
+      "controlBody": "normal",
+      "mutationBody": "marker-timing-01"
+    },
+    "bodies": {
+      "baseline": "normal",
+      "control": "normal",
+      "mutation": "marker-timing-01"
+    },
+    "reproduction": { "attempts": [true, true] },
+    "timing": {
+      "claimed": true,
+      "interleaved": false,
+      "baselineMs": [100, 900],
+      "controlMs": [110, 850],
+      "mutationMs": [1200, 130]
+    }
+  }
+}

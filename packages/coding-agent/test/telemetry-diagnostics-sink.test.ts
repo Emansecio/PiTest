@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordDiagnostic, resetRuntimeDiagnostics } from "@pit/ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { _resetSecretRedactionCacheForTest } from "../src/core/secret-redactor.js";
 import { DiagnosticsSink } from "../src/core/telemetry/diagnostics-sink.js";
 
 let dir: string;
@@ -24,6 +25,8 @@ function readLines(sessionId: string): Array<Record<string, unknown>> {
 
 beforeEach(() => {
 	delete process.env.PIT_NO_TELEMETRY_SINK;
+	delete process.env.PIT_NO_SECRET_REDACT;
+	_resetSecretRedactionCacheForTest();
 	resetRuntimeDiagnostics();
 	dir = mkdtempSync(join(tmpdir(), "pi-diag-sink-"));
 });
@@ -132,5 +135,17 @@ describe("DiagnosticsSink", () => {
 		const lines = readLines("s7");
 		expect(lines.find((l) => l.type === "efficacy")).toMatchObject({ guard: "guard.read" });
 		expect(lines.some((l) => l.type === "bad")).toBe(false);
+	});
+
+	it("redacts secrets in manifests and nested diagnostic records", () => {
+		const token = "sk-123456789012345678901234567890";
+		const sink = makeSink("secret-session", `/workspace/${token}`);
+		sink.writeRecord({ type: "evidence", nested: { authorization: `Bearer ${token}` } });
+		sink.flush();
+
+		const raw = readFileSync(join(dir, "secret-session.jsonl"), "utf8");
+		expect(raw).not.toContain(token);
+		expect(raw).toContain("[REDACTED:");
+		for (const line of raw.trim().split("\n")) expect(() => JSON.parse(line)).not.toThrow();
 	});
 });

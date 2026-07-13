@@ -15,6 +15,7 @@
 import { existsSync } from "node:fs";
 import { recordDiagnostic } from "@pit/ai";
 import { sliceSafe } from "../../utils/surrogate.ts";
+import { redactHttpBody, redactHttpHeaders, redactHttpUrl } from "../security/redaction.ts";
 import {
 	CdpConnection,
 	type CdpTarget,
@@ -50,13 +51,49 @@ export interface ConsoleLine {
 }
 
 export interface NetworkEntry {
+	/** Stable identity for one hop. CDP reuses requestId across redirects. */
+	entryId: string;
 	requestId: string;
+	hop: number;
 	method: string;
 	url: string;
+	requestHeaders?: Record<string, string>;
+	requestHeadersSource?: "request" | "extra-info";
+	requestBody?: string;
+	requestBodyTruncated?: boolean;
+	/** Monotonic CDP timestamp converted to milliseconds. */
+	startedAtMs?: number;
+	wallTimeMs?: number;
 	status?: number;
 	mimeType?: string;
+	responseHeaders?: Record<string, string>;
+	responseHeadersSource?: "response" | "extra-info";
+	responseBody?: string;
+	responseBodyTruncated?: boolean;
+	protocol?: string;
+	timing?: Record<string, number>;
+	durationMs?: number;
+	encodedDataLength?: number;
+	failureText?: string;
+	canceled?: boolean;
 	/** CDP resource type (Document/Script/XHR/Fetch/Image/Font/…) — used by readNetwork filters. */
 	resourceType?: string;
+	redirectFromEntryId?: string;
+	redirectToEntryId?: string;
+	initiator?: {
+		type: string;
+		url?: string;
+		lineNumber?: number;
+		columnNumber?: number;
+		requestId?: string;
+	};
+	associatedCookies?: Array<{ name: string; blockedReasons: string[] }>;
+	blockedResponseCookies?: Array<{ blockedReasons: string[] }>;
+}
+
+export interface CapturedXhrPatch {
+	headers?: Record<string, string>;
+	body?: string;
 }
 
 export interface ChromeDevtoolsDeps {
@@ -91,12 +128,17 @@ interface ConnState {
 	network: NetworkEntry[];
 	/** O(1) lookup by requestId — entries are the same objects as in `network`. */
 	networkById: Map<string, NetworkEntry>;
+	networkByEntryId: Map<string, NetworkEntry>;
+	requestExtraAssigned: Set<string>;
+	responseExtraAssigned: Set<string>;
+	pendingRequestExtra: Map<string, any[]>;
+	pendingResponseExtra: Map<string, any[]>;
 	// Proactively captured response bodies, keyed by requestId. CDP evicts bodies
 	// from its own buffer as new requests pile up (and on navigation), so a body
 	// fetched lazily by getResponseBody is often already gone. We snapshot text-ish
 	// bodies on Network.loadingFinished instead, so they stay readable for the page's
 	// lifetime. Bounded by BODY_CACHE_BUDGET (total) + BODY_CACHE_PER_ENTRY (each).
-	bodies: Map<string, { body: string; base64Encoded: boolean; bytes: number }>;
+	bodies: Map<string, { body: string; base64Encoded: boolean; bytes: number; truncated: boolean }>;
 	bodyBytes: number;
 	unsubs: Array<() => void>;
 	// Memoized "renderer ready for synthetic input" gate (see ensureInputReady).
@@ -112,6 +154,7 @@ const BUFFER_MAX = 200;
 // running total is capped so a flood of JSON responses can't grow without limit.
 const BODY_CACHE_PER_ENTRY = 1024 * 1024;
 const BODY_CACHE_BUDGET = 16 * 1024 * 1024;
+const REQUEST_BODY_PER_ENTRY = 256 * 1024;
 // CDP's own response-body buffer (Network.enable). Larger than the default so a
 // body we did NOT proactively cache (e.g. a big JS bundle) still survives long
 // enough for a live getResponseBody fetch on a busy page.
@@ -132,6 +175,60 @@ const INPUT_READY_MAX_MS = 2_000;
 // and hand downstream. A multi-hundred-MB asset would otherwise be copied into
 // the tool result / render / compaction and blow the heap. Truncate at this cap.
 const MAX_CDP_BODY_BYTES = 10 * 1024 * 1024;
+
+function boundedText(value: string, maxBytes: number): { text: string; truncated: boolean; bytes: number } {
+	const buffer = Buffer.from(value, "utf8");
+	if (buffer.length <= maxBytes) return { text: value, truncated: false, bytes: buffer.length };
+	return { text: buffer.subarray(0, maxBytes).toString("utf8"), truncated: true, bytes: maxBytes };
+}
+
+function numericTiming(value: unknown): Record<string, number> | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const entries = Object.entries(value as Record<string, unknown>).filter(
+		(entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1]),
+	);
+	return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function initiatorSummary(value: any): NetworkEntry["initiator"] {
+	if (!value || typeof value !== "object") return undefined;
+	const callFrame = value.stack?.callFrames?.[0];
+	const url = typeof value.url === "string" ? value.url : callFrame?.url;
+	return {
+		type: typeof value.type === "string" ? value.type : "other",
+		...(typeof url === "string" && url ? { url: redactHttpUrl(url) } : {}),
+		...(typeof value.lineNumber === "number"
+			? { lineNumber: value.lineNumber }
+			: typeof callFrame?.lineNumber === "number"
+				? { lineNumber: callFrame.lineNumber }
+				: {}),
+		...(typeof value.columnNumber === "number"
+			? { columnNumber: value.columnNumber }
+			: typeof callFrame?.columnNumber === "number"
+				? { columnNumber: callFrame.columnNumber }
+				: {}),
+		...(typeof value.requestId === "string" ? { requestId: value.requestId } : {}),
+	};
+}
+
+function cookieSummaries(value: any): Array<{ name: string; blockedReasons: string[] }> {
+	if (!Array.isArray(value)) return [];
+	return value.map((item) => ({
+		name: typeof item?.cookie?.name === "string" ? item.cookie.name : "(unknown)",
+		blockedReasons: Array.isArray(item?.blockedReasons)
+			? item.blockedReasons.filter((reason: unknown): reason is string => typeof reason === "string")
+			: [],
+	}));
+}
+
+function blockedCookieSummaries(value: any): Array<{ blockedReasons: string[] }> {
+	if (!Array.isArray(value)) return [];
+	return value.map((item) => ({
+		blockedReasons: Array.isArray(item?.blockedReasons)
+			? item.blockedReasons.filter((reason: unknown): reason is string => typeof reason === "string")
+			: [],
+	}));
+}
 
 // Source label for the cap diagnostic, so getResponseBody vs evaluate are distinct.
 type CapSource = "chrome.getResponseBody" | "chrome.evaluate";
@@ -437,6 +534,11 @@ export class ChromeDevtoolsManager {
 			state.console.length = 0;
 			state.network.length = 0;
 			state.networkById.clear();
+			state.networkByEntryId.clear();
+			state.requestExtraAssigned.clear();
+			state.responseExtraAssigned.clear();
+			state.pendingRequestExtra.clear();
+			state.pendingResponseExtra.clear();
 			state.bodies.clear();
 			state.bodyBytes = 0;
 		}
@@ -774,8 +876,9 @@ export class ChromeDevtoolsManager {
 			// CDP returns the whole body; cap it so a giant asset isn't retained or
 			// propagated to the rest of the pipeline (tool result, render, compaction).
 			const raw = typeof res?.body === "string" ? res.body : "";
+			const capped = capPayload(raw, MAX_CDP_BODY_BYTES, "chrome.getResponseBody");
 			return {
-				body: capPayload(raw, MAX_CDP_BODY_BYTES, "chrome.getResponseBody"),
+				body: res?.base64Encoded ? capped : redactHttpBody(capped),
 				base64Encoded: !!res?.base64Encoded,
 			};
 		} catch (err) {
@@ -801,14 +904,21 @@ export class ChromeDevtoolsManager {
 		try {
 			const res = await conn.send("Network.getResponseBody", { requestId });
 			if (res?.base64Encoded) return;
-			const body = typeof res?.body === "string" ? res.body : "";
-			const bytes = body.length;
-			if (bytes === 0 || bytes > BODY_CACHE_PER_ENTRY) return;
+			const rawBody = typeof res?.body === "string" ? res.body : "";
+			if (rawBody.length === 0) return;
+			const bounded = boundedText(redactHttpBody(rawBody), BODY_CACHE_PER_ENTRY);
 			// A late event for a request already dropped from the ring would leak its
 			// bytes (no eviction ever reclaims them), so only cache what's still buffered.
 			if (!state.networkById.has(requestId)) return;
-			state.bodies.set(requestId, { body, base64Encoded: false, bytes });
-			state.bodyBytes += bytes;
+			state.bodies.set(requestId, {
+				body: bounded.text,
+				base64Encoded: false,
+				bytes: bounded.bytes,
+				truncated: bounded.truncated,
+			});
+			entry.responseBody = bounded.text;
+			entry.responseBodyTruncated = bounded.truncated;
+			state.bodyBytes += bounded.bytes;
 			while (state.bodyBytes > BODY_CACHE_BUDGET) {
 				const oldest = state.bodies.keys().next();
 				if (oldest.done) break;
@@ -816,6 +926,19 @@ export class ChromeDevtoolsManager {
 			}
 		} catch {
 			// No body for this request (redirect / 204 / already gone) — ignore.
+		}
+	}
+
+	private async captureRequestPostData(conn: CdpConnectionLike, state: ConnState, requestId: string): Promise<void> {
+		try {
+			const response = await conn.send("Network.getRequestPostData", { requestId });
+			const entry = state.networkById.get(requestId);
+			if (!entry || typeof response?.postData !== "string") return;
+			const bounded = boundedText(redactHttpBody(response.postData), REQUEST_BODY_PER_ENTRY);
+			entry.requestBody = bounded.text;
+			entry.requestBodyTruncated = bounded.truncated;
+		} catch {
+			// CDP does not retain post data for every request; the event body is preferred.
 		}
 	}
 
@@ -933,6 +1056,112 @@ export class ChromeDevtoolsManager {
 		return limit <= 0 ? [] : entries.slice(-limit);
 	}
 
+	/** Resolve one buffered redirect hop. Omitting hop returns the latest hop. */
+	getNetworkEntry(requestId: string, hop?: number): NetworkEntry {
+		const state = this.requireState();
+		const entry =
+			hop === undefined ? state.networkById.get(requestId) : state.networkByEntryId.get(`${requestId}#${hop}`);
+		if (!entry) {
+			throw new Error(
+				`No buffered network request ${requestId}${hop === undefined ? "" : ` hop ${hop}`}. Re-trigger it and read the network buffer again.`,
+			);
+		}
+		return entry;
+	}
+
+	async replayCapturedXhr(
+		requestId: string,
+		hop?: number,
+		patch?: CapturedXhrPatch,
+		signal?: AbortSignal,
+		timeoutMs = 15_000,
+	): Promise<NetworkEntry> {
+		const source = this.getNetworkEntry(requestId, hop);
+		if (source.resourceType?.toLowerCase() !== "xhr") {
+			throw new Error("Only captured XHR requests can be replayed through Chrome DevTools.");
+		}
+		const state = this.requireState();
+		const conn = await this.requireConn();
+		const existing = new Set(state.network.map((entry) => entry.entryId));
+		const boundedTimeout = Math.max(1, Math.min(60_000, timeoutMs));
+		const deadline = Date.now() + boundedTimeout;
+		const shouldPatch = patch?.body !== undefined || Object.keys(patch?.headers ?? {}).length > 0;
+		let fetchEnabled = false;
+		let stopFetch = () => {};
+
+		try {
+			if (shouldPatch) {
+				let patched = false;
+				stopFetch = conn.on("Fetch.requestPaused", (event) => {
+					const pausedId = typeof event?.requestId === "string" ? event.requestId : undefined;
+					if (!pausedId) return;
+					const pausedMethod = typeof event?.request?.method === "string" ? event.request.method : "GET";
+					const pausedUrl = typeof event?.request?.url === "string" ? event.request.url : "";
+					const isReplay = !patched && pausedMethod === source.method && redactHttpUrl(pausedUrl) === source.url;
+					if (!isReplay) {
+						void conn.send("Fetch.continueRequest", { requestId: pausedId }).catch(() => {});
+						return;
+					}
+					patched = true;
+					const headers = new Map<string, { name: string; value: string }>();
+					for (const [name, value] of Object.entries(event?.request?.headers ?? {})) {
+						if (typeof value === "string") headers.set(name.toLowerCase(), { name, value });
+					}
+					for (const [name, value] of Object.entries(patch?.headers ?? {})) {
+						headers.set(name.toLowerCase(), { name, value });
+					}
+					void conn
+						.send("Fetch.continueRequest", {
+							requestId: pausedId,
+							headers: [...headers.values()],
+							...(patch?.body !== undefined
+								? { postData: Buffer.from(patch.body, "utf8").toString("base64") }
+								: {}),
+						})
+						.catch(() => {});
+				});
+				await conn.send("Fetch.enable", { patterns: [{ urlPattern: "*", requestStage: "Request" }] }, { signal });
+				fetchEnabled = true;
+			}
+
+			await conn.send("Network.replayXHR", { requestId: source.requestId }, { signal });
+			for (;;) {
+				if (signal?.aborted) throw new DOMException("The operation was aborted.", "AbortError");
+				const replay = state.network.find(
+					(entry) =>
+						!existing.has(entry.entryId) &&
+						entry.resourceType?.toLowerCase() === "xhr" &&
+						entry.method === source.method &&
+						entry.url === source.url,
+				);
+				if (replay && (replay.durationMs !== undefined || replay.failureText !== undefined || replay.canceled)) {
+					if (replay.responseBody === undefined) {
+						try {
+							const response = await this.getResponseBody(replay.requestId, signal);
+							if (!response.base64Encoded) {
+								const bounded = boundedText(response.body, BODY_CACHE_PER_ENTRY);
+								replay.responseBody = bounded.text;
+								replay.responseBodyTruncated = bounded.truncated;
+							}
+						} catch {
+							// Redirects and empty responses may not expose a body.
+						}
+					}
+					return replay;
+				}
+				if (Date.now() >= deadline) {
+					throw new Error(`Captured XHR replay timed out after ${boundedTimeout}ms`);
+				}
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+		} finally {
+			if (fetchEnabled) {
+				await conn.send("Fetch.disable", {}, { timeoutMs: 2_000 }).catch(() => {});
+			}
+			stopFetch();
+		}
+	}
+
 	dispose(): void {
 		for (const [, state] of this.conns) {
 			for (const u of state.unsubs) u();
@@ -998,13 +1227,48 @@ export class ChromeDevtoolsManager {
 	private pushNetworkEntry(state: ConnState, entry: NetworkEntry): void {
 		state.network.push(entry);
 		state.networkById.set(entry.requestId, entry);
+		state.networkByEntryId.set(entry.entryId, entry);
 		if (state.network.length > BUFFER_MAX) {
 			const removed = state.network.shift();
 			if (removed) {
-				state.networkById.delete(removed.requestId);
+				if (state.networkById.get(removed.requestId) === removed) state.networkById.delete(removed.requestId);
+				state.networkByEntryId.delete(removed.entryId);
+				state.requestExtraAssigned.delete(removed.entryId);
+				state.responseExtraAssigned.delete(removed.entryId);
 				this.dropCachedBody(state, removed.requestId);
 			}
 		}
+	}
+
+	private applyRequestExtra(state: ConnState, entry: NetworkEntry, extra: any): void {
+		entry.requestHeaders = redactHttpHeaders(extra?.headers ?? {});
+		entry.requestHeadersSource = "extra-info";
+		entry.associatedCookies = cookieSummaries(extra?.associatedCookies);
+		state.requestExtraAssigned.add(entry.entryId);
+	}
+
+	private applyResponseExtra(state: ConnState, entry: NetworkEntry, extra: any): void {
+		entry.responseHeaders = redactHttpHeaders(extra?.headers ?? {});
+		entry.responseHeadersSource = "extra-info";
+		if (typeof extra?.statusCode === "number") entry.status = extra.statusCode;
+		entry.blockedResponseCookies = blockedCookieSummaries(extra?.blockedCookies);
+		state.responseExtraAssigned.add(entry.entryId);
+	}
+
+	private assignExtraInfo(state: ConnState, requestId: string, extra: any, kind: "request" | "response"): void {
+		const assigned = kind === "request" ? state.requestExtraAssigned : state.responseExtraAssigned;
+		const entry = state.network.find(
+			(candidate) => candidate.requestId === requestId && !assigned.has(candidate.entryId),
+		);
+		if (entry) {
+			if (kind === "request") this.applyRequestExtra(state, entry, extra);
+			else this.applyResponseExtra(state, entry, extra);
+			return;
+		}
+		const pending = kind === "request" ? state.pendingRequestExtra : state.pendingResponseExtra;
+		const queue = pending.get(requestId) ?? [];
+		queue.push(extra);
+		pending.set(requestId, queue);
 	}
 
 	private async openConn(target: CdpTarget): Promise<CdpConnectionLike> {
@@ -1014,6 +1278,11 @@ export class ChromeDevtoolsManager {
 			console: [],
 			network: [],
 			networkById: new Map(),
+			networkByEntryId: new Map(),
+			requestExtraAssigned: new Set(),
+			responseExtraAssigned: new Set(),
+			pendingRequestExtra: new Map(),
+			pendingResponseExtra: new Map(),
 			bodies: new Map(),
 			bodyBytes: 0,
 			unsubs: [],
@@ -1032,25 +1301,90 @@ export class ChromeDevtoolsManager {
 				pushConsole({ level: p?.entry?.level ?? "info", text: p?.entry?.text ?? "" }),
 			),
 			conn.on("Network.requestWillBeSent", (p) => {
-				this.pushNetworkEntry(state, {
+				if (typeof p?.requestId !== "string") return;
+				const previous = state.networkById.get(p.requestId);
+				const hop = previous ? previous.hop + 1 : 0;
+				const entryId = `${p.requestId}#${hop}`;
+				if (previous && p?.redirectResponse) {
+					if (!state.responseExtraAssigned.has(previous.entryId)) {
+						previous.responseHeaders = redactHttpHeaders(p.redirectResponse.headers ?? {});
+						previous.responseHeadersSource = "response";
+					}
+					if (typeof p.redirectResponse.status === "number") previous.status = p.redirectResponse.status;
+					if (typeof p.redirectResponse.mimeType === "string") previous.mimeType = p.redirectResponse.mimeType;
+					if (typeof p.redirectResponse.protocol === "string") previous.protocol = p.redirectResponse.protocol;
+					previous.timing = numericTiming(p.redirectResponse.timing);
+					previous.redirectToEntryId = entryId;
+				}
+				const rawPostData = typeof p?.request?.postData === "string" ? p.request.postData : undefined;
+				const postData = rawPostData ? boundedText(redactHttpBody(rawPostData), REQUEST_BODY_PER_ENTRY) : undefined;
+				const entry: NetworkEntry = {
+					entryId,
 					requestId: p?.requestId,
+					hop,
 					method: p?.request?.method ?? "GET",
-					url: p?.request?.url ?? "",
+					url: redactHttpUrl(p?.request?.url ?? ""),
+					requestHeaders: redactHttpHeaders(p?.request?.headers ?? {}),
+					requestHeadersSource: "request",
+					...(postData ? { requestBody: postData.text, requestBodyTruncated: postData.truncated } : {}),
+					...(typeof p?.timestamp === "number" ? { startedAtMs: p.timestamp * 1000 } : {}),
+					...(typeof p?.wallTime === "number" ? { wallTimeMs: p.wallTime * 1000 } : {}),
 					...(p?.type ? { resourceType: p.type } : {}),
-				});
+					...(previous && p?.redirectResponse ? { redirectFromEntryId: previous.entryId } : {}),
+					...(p?.initiator ? { initiator: initiatorSummary(p.initiator) } : {}),
+				};
+				this.pushNetworkEntry(state, entry);
+				const pendingRequest = state.pendingRequestExtra.get(p.requestId)?.shift();
+				if (pendingRequest) this.applyRequestExtra(state, entry, pendingRequest);
+				if (state.pendingRequestExtra.get(p.requestId)?.length === 0) state.pendingRequestExtra.delete(p.requestId);
+				const pendingResponse = state.pendingResponseExtra.get(p.requestId)?.shift();
+				if (pendingResponse) this.applyResponseExtra(state, entry, pendingResponse);
+				if (state.pendingResponseExtra.get(p.requestId)?.length === 0)
+					state.pendingResponseExtra.delete(p.requestId);
+				if (!postData && p?.request?.hasPostData && typeof p?.requestId === "string") {
+					void this.captureRequestPostData(conn, state, p.requestId);
+				}
+			}),
+			conn.on("Network.requestWillBeSentExtraInfo", (p) => {
+				if (typeof p?.requestId === "string") this.assignExtraInfo(state, p.requestId, p, "request");
+			}),
+			conn.on("Network.responseReceivedExtraInfo", (p) => {
+				if (typeof p?.requestId === "string") this.assignExtraInfo(state, p.requestId, p, "response");
 			}),
 			conn.on("Network.responseReceived", (p) => {
 				const entry = state.networkById.get(p?.requestId);
 				if (entry) {
 					entry.status = p?.response?.status;
 					entry.mimeType = p?.response?.mimeType;
+					if (!state.responseExtraAssigned.has(entry.entryId)) {
+						entry.responseHeaders = redactHttpHeaders(p?.response?.headers ?? {});
+						entry.responseHeadersSource = "response";
+					}
+					if (typeof p?.response?.protocol === "string") entry.protocol = p.response.protocol;
+					entry.timing = numericTiming(p?.response?.timing);
 					if (p?.type) entry.resourceType = p.type;
 				}
 			}),
 			// Snapshot text-ish bodies the moment they finish, before CDP evicts them
 			// from its own buffer. Fire-and-forget — cacheBody swallows its own errors.
 			conn.on("Network.loadingFinished", (p) => {
+				const entry = state.networkById.get(p?.requestId);
+				if (entry) {
+					if (typeof p?.timestamp === "number" && typeof entry.startedAtMs === "number") {
+						entry.durationMs = Math.max(0, p.timestamp * 1000 - entry.startedAtMs);
+					}
+					if (typeof p?.encodedDataLength === "number") entry.encodedDataLength = p.encodedDataLength;
+				}
 				void this.cacheBody(conn, state, p?.requestId);
+			}),
+			conn.on("Network.loadingFailed", (p) => {
+				const entry = state.networkById.get(p?.requestId);
+				if (!entry) return;
+				if (typeof p?.timestamp === "number" && typeof entry.startedAtMs === "number") {
+					entry.durationMs = Math.max(0, p.timestamp * 1000 - entry.startedAtMs);
+				}
+				if (typeof p?.errorText === "string") entry.failureText = redactHttpBody(p.errorText);
+				entry.canceled = !!p?.canceled;
 			}),
 			// A JS dialog (alert/confirm/prompt/beforeunload) blocks the renderer: every
 			// subsequent CDP command stalls until the per-command 30s timeout, repeatedly.

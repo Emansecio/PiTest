@@ -3,12 +3,13 @@
  * when prior messages already exist (never before the first), so the transcript
  * reads as discrete turns instead of one unbroken column.
  *
- * Renders exactly two lines: a leading blank, then a full-width `─` rule in the
- * muted border color. The trailing gap is intentionally left to the following
- * user message's own leading padding — emitting one here too would double it.
+ * Renders exactly two lines: a leading blank, then a `─` rule capped to the
+ * assistant reading width in the muted border color. The trailing gap is left
+ * to the following user message's own leading padding.
  */
 
 import type { Component } from "@pit/tui";
+import { DEFAULT_ASSISTANT_READING_COLUMNS } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
 
 export class TurnRule implements Component {
@@ -17,6 +18,11 @@ export class TurnRule implements Component {
 	// contract). Reallocated on width change and on invalidate().
 	private cachedWidth = -1;
 	private cachedLines: string[] | null = null;
+	private readonly maxColumns: number;
+
+	constructor(maxColumns = DEFAULT_ASSISTANT_READING_COLUMNS) {
+		this.maxColumns = maxColumns;
+	}
 
 	invalidate(): void {
 		this.cachedWidth = -1;
@@ -28,7 +34,8 @@ export class TurnRule implements Component {
 			return this.cachedLines;
 		}
 		this.cachedWidth = width;
-		this.cachedLines = ["", theme.fg("borderMuted", "─".repeat(Math.max(1, width)))];
+		const ruleWidth = this.maxColumns > 0 ? Math.min(width, this.maxColumns) : width;
+		this.cachedLines = ["", theme.fg("borderMuted", "─".repeat(Math.max(1, ruleWidth)))];
 		return this.cachedLines;
 	}
 }

@@ -50,6 +50,7 @@
 		"@pit/agent-core": "^0.75.4",
 		"@pit/ai": "^0.75.4",
 		"@pit/tui": "^0.75.4",
+		"@scalar/openapi-parser": "^0.28.8",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"chalk": "^5.5.0",
 		"cross-spawn": "^7.0.6",

@@ -6,10 +6,8 @@ import { clampBashCommandRow } from "./bash-command-row.ts";
 import { ColorEase } from "./color-ease.ts";
 import { createSpinnerTicker, type SpinnerTicker } from "./spinner-ticker.ts";
 import {
-	ACTIVITY_ERROR_PREVIEW_LINES,
 	activityTargetLabel,
 	capDiffPreview,
-	capErrorPreview,
 	diffStat,
 	EDIT_EXPANDED_MAX_LINES,
 	glyphFor,
@@ -22,8 +20,6 @@ import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 /** Max width of a derived agent label (from the task prompt). */
 const TASK_LABEL_MAX = 40;
-/** Seconds of pending work before showing `· Ns` on activity/group headers. */
-export const SLOW_ACTION_ELAPSED_SEC = 4;
 
 type LineState = "pending" | "success" | "error";
 
@@ -51,8 +47,8 @@ export class ActivityLineComponent extends Container {
 	// dominates the steady-state cost of a long activity stack; once a line has
 	// settled its bytes only change with width. The cache is NEVER served while
 	// an animation is live — pending (spinner ticking), the icon ease in
-	// flight, or any body render (expanded / auto-shown error, whose exec
-	// children may animate or stream) always recompute.
+	// flight, or an expanded body render (whose exec children may animate or
+	// stream) always recompute.
 	private linesCache: string[] | null = null;
 	private linesCacheKey = "";
 	// Sequence number for an unnamed `task` agent (assigned by ActivityStacker,
@@ -64,7 +60,6 @@ export class ActivityLineComponent extends Container {
 	// Accumulated diffstat across coalesced edits to the same target.
 	private statAdded = 0;
 	private statRemoved = 0;
-	private execStartedAtMs = 0;
 
 	constructor(ui: TUI) {
 		super();
@@ -75,7 +70,6 @@ export class ActivityLineComponent extends Container {
 	setExec(exec: ToolExecutionComponent, taskOrdinal = 0): void {
 		this.exec = exec;
 		this.taskOrdinal = taskOrdinal;
-		this.execStartedAtMs = Date.now();
 		this.linesCache = null;
 		this.targetCache = null;
 		this.statAdded = 0;
@@ -112,7 +106,6 @@ export class ActivityLineComponent extends Container {
 	 * for consecutive same-target actions so they collapse to one row. */
 	coalesce(exec: ToolExecutionComponent): void {
 		this.count += 1;
-		this.execStartedAtMs = Date.now();
 		this.absorbDiffStat(exec);
 		this.linesCache = null;
 		this.targetCache = null;
@@ -257,12 +250,11 @@ export class ActivityLineComponent extends Container {
 		}
 		const name = this.exec.getToolName();
 		const pending = state === "pending";
-		const autoError = !this.expanded && state === "error" && !this.exec.isAborted();
 		const editFamily = isEditFamilyTool(name);
 		// Serve the memo only on the settled, collapsed, animation-free path:
-		// pending (spinner live), an in-flight icon ease, and the body renders
-		// (expanded / auto error) must keep recomputing every frame.
-		const cacheable = !pending && !this.expanded && !autoError && !this.iconEase.active;
+		// pending (spinner live), an in-flight icon ease, and expanded body renders
+		// must keep recomputing every frame.
+		const cacheable = !pending && !this.expanded && !this.iconEase.active;
 		const cacheKey = `${width}|${state}|${this.count}|${this.statAdded}|${this.statRemoved}`;
 		if (cacheable && this.linesCache !== null && this.linesCacheKey === cacheKey) {
 			return this.linesCache;
@@ -298,17 +290,7 @@ export class ActivityLineComponent extends Container {
 		const rawHeader = stripAnsi(target).trim()
 			? `${this.icon(state)} ${glyph} ${theme.bold(label)} ${target}${countSuffix}`
 			: `${this.icon(state)} ${glyph} ${theme.bold(label)}${countSuffix}`;
-		let headerText = rawHeader;
-		if (pending) {
-			const elapsedSec = Math.floor((Date.now() - this.execStartedAtMs) / 1000);
-			if (elapsedSec >= SLOW_ACTION_ELAPSED_SEC) {
-				// Slowness and aggregation (`×N`) carried opposite meaning in the same
-				// muted tint. Lift the slow-elapsed marker (the `·` and the number
-				// together) to `warning` so a lagging action reads distinctly from the
-				// muted `×N` count. (Audit 1.11.)
-				headerText += ` ${theme.fg("warning", `· ${elapsedSec}s`)}`;
-			}
-		}
+		const headerText = rawHeader;
 		// Cap the assembled header once so no branch (free-form agent label, MCP tool
 		// name, web_search query, edit path) can overflow the terminal width. ANSI is
 		// width-free here, so the colorized header is clamped to `width` cells; the
@@ -320,13 +302,6 @@ export class ActivityLineComponent extends Container {
 			const bodyLines = this.exec.render(bodyWidth);
 			const capped = editFamily ? capDiffPreview(bodyLines, bodyWidth, EDIT_EXPANDED_MAX_LINES) : bodyLines;
 			for (const l of capped) lines.push(`  ${l}`);
-		} else if (autoError) {
-			// Auto-shown error: render the full error body but cap the visible
-			// lines so a failure never floods the CLI — the rest is one ctrl+o away.
-			this.exec.setResultExpanded?.(true);
-			for (const l of capErrorPreview(this.exec.render(bodyWidth), bodyWidth, ACTIVITY_ERROR_PREVIEW_LINES)) {
-				lines.push(`  ${l}`);
-			}
 		}
 		if (cacheable) {
 			this.linesCache = lines;

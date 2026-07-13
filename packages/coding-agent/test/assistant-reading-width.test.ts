@@ -30,8 +30,10 @@ function proseComponent(readingColumns?: number): AssistantMessageComponent {
 }
 
 describe("assistant prose width", () => {
-	it("caps prose at the default reading width (~100 cols)", () => {
-		expect(maxContentWidth(proseComponent().render(200))).toBeLessThanOrEqual(100);
+	it("caps prose at the default reading width (120 cols)", () => {
+		const width = maxContentWidth(proseComponent().render(200));
+		expect(width).toBeGreaterThan(100);
+		expect(width).toBeLessThanOrEqual(120);
 	});
 
 	it("treats readingColumns=0 as full width (cap disabled)", () => {
@@ -46,7 +48,7 @@ describe("assistant prose width", () => {
 		const c = proseComponent();
 		const wide = maxContentWidth(c.render(200));
 		const narrow = maxContentWidth(c.render(80));
-		expect(wide).toBeLessThanOrEqual(100);
+		expect(wide).toBeLessThanOrEqual(120);
 		expect(narrow).toBeLessThanOrEqual(80);
 		expect(narrow).toBeLessThan(wide);
 	});

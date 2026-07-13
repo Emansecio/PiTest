@@ -225,6 +225,17 @@ export class Loader extends Text {
 		this.updateDisplay();
 	}
 
+	/** Restart an enabled elapsed counter without replacing the loader. */
+	resetElapsed(): void {
+		if (!this.elapsedEnabled) return;
+		const now = Date.now();
+		this.startedAtMs = now;
+		if (this.elapsedPaused) this.pausedAtMs = now;
+		this.lastElapsedSec = -1;
+		this.coloredElapsed = "";
+		this.updateDisplay();
+	}
+
 	/** Elapsed milliseconds since the counter was enabled, discounting paused intervals. */
 	getElapsedMs(): number {
 		if (!this.elapsedEnabled || this.startedAtMs <= 0) {

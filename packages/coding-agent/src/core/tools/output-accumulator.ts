@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
+import { createWriteStream, readFileSync, type WriteStream, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { redactForDisk } from "../secret-redactor.ts";
 import {
 	DEFAULT_MAX_LINES,
 	effectiveDefaultMaxBytes,
@@ -218,6 +219,14 @@ export class OutputAccumulator {
 			stream.once("finish", onFinish);
 			stream.end();
 		});
+
+		// The complete-output path is an artifact boundary. Sanitize only after the
+		// stream is closed so matches spanning write chunks are handled as one value.
+		// The path is never exposed to callers before closeTempFile resolves.
+		if (this.tempFilePath) {
+			const raw = readFileSync(this.tempFilePath, "utf8");
+			writeFileSync(this.tempFilePath, redactForDisk(raw), "utf8");
+		}
 	}
 
 	getLastLineBytes(): number {

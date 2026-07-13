@@ -152,6 +152,24 @@ describe("ActivityStacker", () => {
 		expect(added[0]).toBeInstanceOf(BashGroupComponent);
 	});
 
+	it("keeps failed grouped bash output hidden until explicitly expanded", () => {
+		const group = new BashGroupComponent(fakeTui());
+		group.addCall(
+			makeExec({
+				getToolName: () => "bash",
+				getArgs: () => ({ command: "echo broken" }),
+				getActivityState: () => "error",
+				isAborted: () => false,
+				setResultExpanded() {},
+				render: () => ["command failed"],
+			}),
+		);
+
+		expect(group.render(120)).toHaveLength(1);
+		group.setExpanded(true);
+		expect(group.render(120).some((line) => line.includes("command failed"))).toBe(true);
+	});
+
 	it("a non-bash action closes the open BashGroup", () => {
 		const added: Component[] = [];
 		const s = new ActivityStacker(fakeTui(), (c) => added.push(c));

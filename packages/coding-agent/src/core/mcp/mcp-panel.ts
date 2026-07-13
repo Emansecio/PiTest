@@ -10,7 +10,7 @@
  * MCP extension can construct it without a core → interactive-mode dependency.
  */
 
-import { Container, getKeybindings, Spacer, Text } from "@pit/tui";
+import { type Component, getKeybindings, truncateToWidth } from "@pit/tui";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 
 export type McpPanelStatus = "connected" | "disconnected" | "disabled" | "connecting";
@@ -58,43 +58,27 @@ const STATUS_COLOR: Record<McpPanelStatus, "success" | "error" | "dim" | "warnin
 	connecting: "warning",
 };
 
-export class McpPanelComponent extends Container {
+const MAX_VISIBLE_SERVERS = 5;
+
+export class McpPanelComponent implements Component {
 	private theme: Theme;
 	private getRows: () => McpPanelRow[];
 	private actions: McpPanelActions;
 	private rows: McpPanelRow[];
 	private selectedIndex = 0;
 	private busy = new Set<string>();
-	private listContainer: Container;
-	private hintText: Text;
 
 	constructor(theme: Theme, getRows: () => McpPanelRow[], actions: McpPanelActions) {
-		super();
 		this.theme = theme;
 		this.getRows = getRows;
 		this.actions = actions;
 		this.rows = getRows();
-
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("accent", theme.bold("MCP servers")), 1, 0));
-		this.addChild(new Spacer(1));
-		this.listContainer = new Container();
-		this.addChild(this.listContainer);
-		this.addChild(new Spacer(1));
-		this.hintText = new Text(this.hint(), 1, 0);
-		this.addChild(this.hintText);
-		this.addChild(new Spacer(1));
-
-		this.renderList();
 	}
 
 	private hint(): string {
 		const dim = (s: string) => this.theme.fg("dim", s);
 		const key = (s: string) => this.theme.fg("text", s);
-		return (
-			`${key("↑↓")} ${dim("navigate")}   ${key("r")} ${dim("reconnect")}   ` +
-			`${key("d/space")} ${dim("enable/disable")}   ${key("esc")} ${dim("close")}`
-		);
+		return `${key("↑↓")} ${dim("move")} · ${key("r")} ${dim("reconnect")} · ${key("space")} ${dim("toggle")} · ${key("esc")} ${dim("close")}`;
 	}
 
 	/**
@@ -106,7 +90,6 @@ export class McpPanelComponent extends Container {
 	setBusy(name: string, busy: boolean): void {
 		if (busy) this.busy.add(name);
 		else this.busy.delete(name);
-		this.renderList();
 	}
 
 	/** Re-read live state and redraw. Safe to call from the host on every state change. */
@@ -115,36 +98,53 @@ export class McpPanelComponent extends Container {
 		if (this.selectedIndex >= this.rows.length) {
 			this.selectedIndex = Math.max(0, this.rows.length - 1);
 		}
-		this.renderList();
 	}
 
-	private renderList(): void {
-		this.listContainer.clear();
+	render(width: number): string[] {
+		if (width <= 0) return [];
 		const theme = this.theme;
+		const capLine = (text: string) => truncateToWidth(text, width);
+		const title = `${theme.fg("accent", "▎")} ${theme.bold("MCP servers")}${theme.fg("dim", ` · ${this.rows.length}`)}`;
+		const lines = [capLine(title)];
+
 		if (this.rows.length === 0) {
-			this.listContainer.addChild(new Text(theme.fg("dim", "No MCP servers configured."), 1, 0));
-			return;
+			lines.push(capLine(theme.fg("dim", "  No MCP servers configured.")), capLine(this.hint()));
+			return lines;
 		}
-		this.rows.forEach((row, i) => {
+
+		const maxStart = Math.max(0, this.rows.length - MAX_VISIBLE_SERVERS);
+		const windowStart = Math.min(maxStart, Math.max(0, this.selectedIndex - Math.floor(MAX_VISIBLE_SERVERS / 2)));
+		const windowEnd = Math.min(this.rows.length, windowStart + MAX_VISIBLE_SERVERS);
+		if (windowStart > 0) lines.push(capLine(theme.fg("dim", `  ↑ ${windowStart} more`)));
+
+		this.rows.slice(windowStart, windowEnd).forEach((row, offset) => {
+			const i = windowStart + offset;
 			const selected = i === this.selectedIndex;
 			const isBusy = this.busy.has(row.name);
 			const status: McpPanelStatus = isBusy ? "connecting" : row.status;
 			const glyph = theme.fg(STATUS_COLOR[status], STATUS_GLYPH[status]);
-			const arrow = selected ? theme.fg("accent", "→ ") : "  ";
+			const marker = selected ? theme.fg("accent", "▎ ") : "  ";
 			const name = selected ? theme.fg("accent", theme.bold(row.name)) : theme.fg("text", row.name);
 			const statusLabel = theme.fg(STATUS_COLOR[status], STATUS_LABEL[status]);
-			this.listContainer.addChild(new Text(`${arrow}${glyph} ${name}  ${theme.fg("dim", `[${row.target}]`)}`, 1, 0));
-			this.listContainer.addChild(new Text(`     ${statusLabel}`, 1, 0));
-			if (row.error && status === "disconnected") {
-				this.listContainer.addChild(new Text(`     ${theme.fg("error", row.error)}`, 1, 0));
+			lines.push(capLine(`${marker}${glyph} ${name}  ${statusLabel}  ${theme.fg("dim", row.target)}`));
+			if (selected && row.error && status === "disconnected") {
+				lines.push(capLine(`  ${theme.fg("error", `↳ ${row.error}`)}`));
 			}
-			if (row.tools.length > 0) {
-				const deferredSuffix = row.deferred ? theme.fg("dim", " (deferred — discovered on demand)") : "";
-				const toolList = theme.fg("dim", `tools: ${row.tools.join(", ")}`);
-				this.listContainer.addChild(new Text(`     ${toolList}${deferredSuffix}`, 1, 0));
+			if (selected && row.tools.length > 0) {
+				const deferredSuffix = row.deferred ? " · on demand" : "";
+				lines.push(capLine(theme.fg("dim", `  tools: ${row.tools.join(", ")}${deferredSuffix}`)));
 			}
-			this.listContainer.addChild(new Spacer(1));
 		});
+		if (windowEnd < this.rows.length) {
+			lines.push(capLine(theme.fg("dim", `  ↓ ${this.rows.length - windowEnd} more`)));
+		}
+
+		lines.push(capLine(this.hint()));
+		return lines;
+	}
+
+	invalidate(): void {
+		// Rendering is derived directly from live rows and the current width.
 	}
 
 	private selectedRow(): McpPanelRow | undefined {
@@ -156,7 +156,6 @@ export class McpPanelComponent extends Container {
 		if (!row || this.busy.has(row.name)) return;
 		const name = row.name;
 		this.busy.add(name);
-		this.renderList();
 		void action(name).finally(() => {
 			this.busy.delete(name);
 			// State may have changed (tools registered, connection result) — re-read.
@@ -168,10 +167,8 @@ export class McpPanelComponent extends Container {
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
 			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-			this.renderList();
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
 			this.selectedIndex = Math.max(0, Math.min(this.rows.length - 1, this.selectedIndex + 1));
-			this.renderList();
 		} else if (keyData === "r") {
 			this.runAction((name) => this.actions.reconnect(name));
 		} else if (keyData === "d" || keyData === " ") {

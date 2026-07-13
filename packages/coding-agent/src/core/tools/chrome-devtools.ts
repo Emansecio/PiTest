@@ -13,6 +13,7 @@ import { sliceSafe } from "../../utils/surrogate.ts";
 import { getCurrentChromeDevtoolsManager } from "../chrome/chrome-devtools-manager.ts";
 import type { ElementToSourceResult } from "../chrome/element-to-source.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { redactSecrets } from "../secret-redactor.ts";
 import { isJsonCrushEnabled, maybeCrushJsonOutput } from "./json-crush.ts";
 import { getTextOutput } from "./render-utils.ts";
 import { withOutputCap } from "./tool-definition-wrapper.ts";
@@ -153,6 +154,15 @@ const consoleSchema = Type.Object(
 );
 const networkSchema = Type.Object(
 	{
+		requestId: Type.Optional(
+			Type.String({ description: "Return full detail for this buffered CDP request id instead of a compact list." }),
+		),
+		hop: Type.Optional(
+			Type.Number({ description: "Redirect hop to inspect (0-based). Defaults to the latest hop.", minimum: 0 }),
+		),
+		includeResponseBody: Type.Optional(
+			Type.Boolean({ description: "Include the bounded cached response body in detail mode (default false)." }),
+		),
 		limit: Type.Optional(Type.Number({ description: "Max requests to return (default 50)." })),
 		urlPattern: Type.Optional(
 			Type.String({ description: "Keep only requests whose URL contains this substring (case-insensitive)." }),
@@ -387,14 +397,19 @@ export function createChromeReadNetworkDefinition(): ToolDefinition<typeof netwo
 		name: "chrome_devtools_read_network",
 		activity: "navigation",
 		description:
-			"Read buffered network requests from the selected page. Filter by urlPattern / method / type / status to cut through tracking noise; filters apply to the whole buffer before the limit.",
+			"Read buffered network requests from the selected page, or return full redacted request/response detail for one requestId and redirect hop.",
 		snippet: "Read network requests",
 		guidelines: [
-			"Shows recent requests with id, status, method, url, resource type and mime.",
+			"List mode shows entry id, status, method, url, resource type and mime. Pass requestId (and optional hop) for headers, body, timing, initiator and redirect metadata.",
 			'Filter to find the real call fast, e.g. type:"XHR" or type:"Fetch" for API calls, urlPattern:"/api", or status:">=400" for failures.',
 		],
 		schema: networkSchema,
 		run: async (mgr, input) => {
+			if (input.requestId) {
+				const entry = mgr.getNetworkEntry(input.requestId, input.hop);
+				const detail = input.includeResponseBody ? entry : { ...entry, responseBody: undefined };
+				return textResult(redactSecrets(JSON.stringify(detail, null, 2)).redacted);
+			}
 			const entries = mgr.readNetwork({
 				limit: input.limit,
 				urlPattern: input.urlPattern,
@@ -408,7 +423,7 @@ export function createChromeReadNetworkDefinition(): ToolDefinition<typeof netwo
 					.map((e) => {
 						const type = e.resourceType ? `  ${e.resourceType}` : "";
 						const mime = e.mimeType ? `  ${e.mimeType}` : "";
-						return `[${e.requestId}]  ${e.status ?? "..."}  ${e.method}  ${e.url}${type}${mime}`;
+						return `[${e.entryId}]  ${e.status ?? "..."}  ${e.method}  ${e.url}${type}${mime}`;
 					})
 					.join("\n"),
 			);

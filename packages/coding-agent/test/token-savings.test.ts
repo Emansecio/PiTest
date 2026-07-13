@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
@@ -24,6 +24,21 @@ describe("bash output budget (item 1)", () => {
 		expect(snap.truncation.truncated).toBe(true);
 		expect(snap.truncation.maxBytes).toBe(BASH_MAX_BYTES);
 		expect(Buffer.byteLength(snap.content, "utf-8")).toBeLessThanOrEqual(BASH_MAX_BYTES);
+	});
+
+	test("redacts secrets before a complete-output artifact is exposed", async () => {
+		const token = "sk-123456789012345678901234567890";
+		const acc = new OutputAccumulator({ maxLines: 1, maxBytes: 16, tempFilePrefix: "pit-redaction-test" });
+		acc.append(Buffer.from(`prefix ${token}\n${"x".repeat(64)}`));
+		acc.finish();
+		const snapshot = acc.snapshot({ persistIfTruncated: true });
+		await acc.closeTempFile();
+
+		expect(snapshot.fullOutputPath).toBeDefined();
+		const raw = readFileSync(snapshot.fullOutputPath as string, "utf8");
+		expect(raw).not.toContain(token);
+		expect(raw).toContain("[REDACTED:openai-key]");
+		rmSync(snapshot.fullOutputPath as string, { force: true });
 	});
 });
 

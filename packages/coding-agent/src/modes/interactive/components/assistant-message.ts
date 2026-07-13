@@ -13,6 +13,7 @@ import {
 	VirtualizedContainer,
 	visibleWidth,
 } from "@pit/tui";
+import { DEFAULT_ASSISTANT_READING_COLUMNS } from "../../../core/settings-manager.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { sliceSafe } from "../../../utils/surrogate.ts";
@@ -48,16 +49,6 @@ const REVEAL_SNAP_THROUGH_CHARS = 12;
 // Width (cols) of the dim→bright gradient drawn at the reveal wavefront so freshly
 // revealed text materializes softly instead of popping in at full brightness.
 const REVEAL_FADE_COLUMNS = 6;
-
-/**
- * Default reading-column cap (in columns) for assistant prose. A positive value
- * wraps long answers at that measure instead of running edge to edge; tool
- * output, bash, and code blocks are never capped. Overridable per-session via
- * the `assistantReadingColumns` setting (SettingsManager.getAssistantReadingColumns),
- * threaded in through the constructor; this constant is the fallback when no
- * value is supplied. Set the setting to `0` for full-width prose.
- */
-const DEFAULT_ASSISTANT_READING_COLUMNS = 100;
 
 // FTCS / OSC 133 semantic output zone. The assistant response is the "command
 // output": C (output start) … D;<exit> (finished). The user message carries the

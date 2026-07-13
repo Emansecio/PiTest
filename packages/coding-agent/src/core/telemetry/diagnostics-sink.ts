@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { onDiagnostic, type RecordedDiagnosticEvent } from "@pit/ai";
 import { getAgentDir } from "../../config.ts";
 import { isTruthyEnvFlag } from "../../utils/env-flags.ts";
+import { redactForDisk } from "../secret-redactor.ts";
 
 const DIAGNOSTICS_DIRNAME = "diagnostics";
 const MAX_SESSION_FILES = 200;
@@ -121,17 +122,19 @@ export class DiagnosticsSink {
 			const writingManifest = !this.manifestWritten;
 			if (writingManifest) {
 				lines.push(
-					JSON.stringify({
-						type: "manifest",
-						sessionId: this.meta.sessionId,
-						timestamp: new Date().toISOString(),
-						cwd: this.meta.cwd,
-					}),
+					redactForDisk(
+						JSON.stringify({
+							type: "manifest",
+							sessionId: this.meta.sessionId,
+							timestamp: new Date().toISOString(),
+							cwd: this.meta.cwd,
+						}),
+					),
 				);
 			}
 			for (const record of this.buffer) {
 				try {
-					lines.push(JSON.stringify(record));
+					lines.push(redactForDisk(JSON.stringify(record)));
 				} catch {
 					// A record that will not serialise is dropped, never thrown.
 				}

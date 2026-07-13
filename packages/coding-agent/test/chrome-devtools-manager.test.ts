@@ -6,6 +6,7 @@ import { type CdpConnectionLike, ChromeDevtoolsManager } from "../src/core/chrom
 class FakeConn implements CdpConnectionLike {
 	sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
 	responses: Record<string, unknown> = {};
+	onSend?: (method: string, params?: Record<string, unknown>) => void;
 	closed = false;
 	isClosed(): boolean {
 		return this.closed;
@@ -13,6 +14,7 @@ class FakeConn implements CdpConnectionLike {
 	private handlers = new Map<string, Array<(p: any) => void>>();
 	send(method: string, params?: Record<string, unknown>): Promise<any> {
 		this.sent.push({ method, params });
+		this.onSend?.(method, params);
 		const res = this.responses[method];
 		if (res instanceof Error) return Promise.reject(res);
 		return Promise.resolve(res ?? {});
@@ -436,6 +438,137 @@ describe("ChromeDevtoolsManager network body cache", () => {
 		expect(await mgr.getResponseBody("r1")).toEqual({ body: '{"cached":1}', base64Encoded: false });
 	});
 
+	it("captures a bounded redacted request/response transaction with timing", async () => {
+		const token = "sk-123456789012345678901234567890";
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		c.emit("Network.requestWillBeSent", {
+			requestId: "full",
+			type: "Fetch",
+			timestamp: 10,
+			wallTime: 1_700_000_000,
+			request: {
+				method: "POST",
+				url: `http://a/api?token=${token}`,
+				headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+				postData: `{"api_key":"${token}"}`,
+			},
+		});
+		c.emit("Network.responseReceived", {
+			requestId: "full",
+			type: "Fetch",
+			timestamp: 10.25,
+			response: {
+				status: 201,
+				mimeType: "application/json",
+				protocol: "h2",
+				headers: { "Set-Cookie": "session=opaque", "Content-Type": "application/json" },
+				timing: { requestTime: 10, receiveHeadersEnd: 250 },
+			},
+		});
+		c.responses["Network.getResponseBody"] = { body: `{"token":"${token}","ok":true}`, base64Encoded: false };
+		c.emit("Network.loadingFinished", { requestId: "full", timestamp: 10.5, encodedDataLength: 123 });
+		await flush();
+
+		const entry = mgr.readNetwork({})[0];
+		expect(entry).toMatchObject({
+			requestId: "full",
+			method: "POST",
+			resourceType: "Fetch",
+			status: 201,
+			protocol: "h2",
+			durationMs: 500,
+			encodedDataLength: 123,
+		});
+		expect(JSON.stringify(entry)).not.toContain(token);
+		expect(entry?.requestHeaders?.Authorization).toBe("[REDACTED:http-header]");
+		expect(entry?.responseHeaders?.["Set-Cookie"]).toBe("[REDACTED:http-header]");
+		expect(entry?.requestBody).toContain("[REDACTED:openai-key]");
+		expect(entry?.responseBody).toContain("[REDACTED:openai-key]");
+		expect(entry?.timing).toMatchObject({ receiveHeadersEnd: 250 });
+	});
+
+	it("preserves redirect hops, initiator and out-of-order ExtraInfo without cookie values", async () => {
+		const token = "sk-123456789012345678901234567890";
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+
+		c.emit("Network.requestWillBeSentExtraInfo", {
+			requestId: "redirected",
+			headers: { Authorization: `Bearer ${token}`, Cookie: "session=secret", Accept: "application/json" },
+			associatedCookies: [{ cookie: { name: "session", value: "secret" }, blockedReasons: [] }],
+		});
+		c.emit("Network.requestWillBeSent", {
+			requestId: "redirected",
+			type: "XHR",
+			timestamp: 1,
+			request: { method: "GET", url: `https://a.test/start?token=${token}`, headers: {} },
+			initiator: { type: "script", url: `https://a.test/app.js?key=${token}`, lineNumber: 7, columnNumber: 3 },
+		});
+		c.emit("Network.responseReceivedExtraInfo", {
+			requestId: "redirected",
+			statusCode: 302,
+			headers: { Location: `https://a.test/final?token=${token}`, "Set-Cookie": "hop=secret" },
+			blockedCookies: [{ cookieLine: "blocked=secret", blockedReasons: ["SecureOnly"] }],
+		});
+		c.emit("Network.requestWillBeSent", {
+			requestId: "redirected",
+			type: "XHR",
+			timestamp: 1.1,
+			request: { method: "GET", url: `https://a.test/final?token=${token}`, headers: {} },
+			redirectResponse: {
+				status: 302,
+				mimeType: "text/html",
+				protocol: "h2",
+				headers: { Location: `https://a.test/final?token=${token}` },
+			},
+		});
+		c.emit("Network.requestWillBeSentExtraInfo", {
+			requestId: "redirected",
+			headers: { Accept: "application/json", Cookie: "session=secret" },
+			associatedCookies: [],
+		});
+		c.emit("Network.responseReceivedExtraInfo", {
+			requestId: "redirected",
+			statusCode: 200,
+			headers: { "Content-Type": "application/json", "Set-Cookie": "final=secret" },
+			blockedCookies: [],
+		});
+		c.emit("Network.responseReceived", {
+			requestId: "redirected",
+			type: "XHR",
+			response: { status: 200, mimeType: "application/json", headers: { "Content-Type": "application/json" } },
+		});
+
+		const [first, second] = mgr.readNetwork({});
+		expect(first).toMatchObject({
+			entryId: "redirected#0",
+			requestId: "redirected",
+			hop: 0,
+			status: 302,
+			redirectToEntryId: "redirected#1",
+			requestHeadersSource: "extra-info",
+			responseHeadersSource: "extra-info",
+			initiator: { type: "script", lineNumber: 7, columnNumber: 3 },
+			associatedCookies: [{ name: "session", blockedReasons: [] }],
+			blockedResponseCookies: [{ blockedReasons: ["SecureOnly"] }],
+		});
+		expect(second).toMatchObject({
+			entryId: "redirected#1",
+			hop: 1,
+			status: 200,
+			redirectFromEntryId: "redirected#0",
+			requestHeadersSource: "extra-info",
+			responseHeadersSource: "extra-info",
+		});
+		expect(JSON.stringify([first, second])).not.toContain(token);
+		expect(JSON.stringify([first, second])).not.toContain("session=secret");
+		expect(first?.requestHeaders?.Authorization).toBe("[REDACTED:http-header]");
+		expect(second?.responseHeaders?.["Set-Cookie"]).toBe("[REDACTED:http-header]");
+	});
+
 	it("does not cache binary or script bodies (falls back to a live fetch)", async () => {
 		const c = new FakeConn();
 		const { mgr } = setup({ preset: { p1: c } });
@@ -514,6 +647,132 @@ describe("ChromeDevtoolsManager readNetwork filters", () => {
 		await mgr.selectPage("p1");
 		seed(c);
 		expect(mgr.readNetwork({ type: "fetch", limit: 1 }).map((e) => e.requestId)).toEqual(["d"]);
+	});
+});
+
+describe("ChromeDevtoolsManager captured XHR replay", () => {
+	function seedXhr(c: FakeConn) {
+		c.emit("Network.requestWillBeSent", {
+			requestId: "original",
+			type: "XHR",
+			request: { method: "POST", url: "https://a.test/api", headers: {} },
+		});
+		c.emit("Network.responseReceived", {
+			requestId: "original",
+			type: "XHR",
+			response: { status: 200, mimeType: "application/json", headers: {} },
+		});
+	}
+
+	it("replays a captured XHR and returns the newly completed transaction", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		seedXhr(c);
+		c.responses["Network.getResponseBody"] = { body: '{"replayed":true}', base64Encoded: false };
+		c.onSend = (method) => {
+			if (method !== "Network.replayXHR") return;
+			c.emit("Network.requestWillBeSent", {
+				requestId: "replay-1",
+				type: "XHR",
+				timestamp: 2,
+				request: { method: "POST", url: "https://a.test/api", headers: {} },
+			});
+			c.emit("Network.responseReceived", {
+				requestId: "replay-1",
+				type: "XHR",
+				response: { status: 201, mimeType: "application/json", headers: {} },
+			});
+			c.emit("Network.loadingFinished", { requestId: "replay-1", timestamp: 2.1 });
+		};
+
+		const replay = await mgr.replayCapturedXhr("original", undefined, undefined, undefined, 100);
+		expect(c.sent).toContainEqual({ method: "Network.replayXHR", params: { requestId: "original" } });
+		expect(replay).toMatchObject({ requestId: "replay-1", status: 201, durationMs: 100 });
+	});
+
+	it("applies a one-shot mutation with Fetch and always disables interception", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		seedXhr(c);
+		c.responses["Network.getResponseBody"] = { body: '{"mutated":true}', base64Encoded: false };
+		c.onSend = (method) => {
+			if (method !== "Network.replayXHR") return;
+			c.emit("Fetch.requestPaused", {
+				requestId: "fetch-1",
+				request: {
+					method: "POST",
+					url: "https://a.test/api",
+					headers: { Authorization: "Bearer secret", "Content-Type": "application/json" },
+				},
+			});
+			c.emit("Network.requestWillBeSent", {
+				requestId: "replay-2",
+				type: "XHR",
+				timestamp: 3,
+				request: { method: "POST", url: "https://a.test/api", headers: {} },
+			});
+			c.emit("Network.responseReceived", {
+				requestId: "replay-2",
+				type: "XHR",
+				response: { status: 200, mimeType: "application/json", headers: {} },
+			});
+			c.emit("Network.loadingFinished", { requestId: "replay-2", timestamp: 3.05 });
+		};
+
+		await mgr.replayCapturedXhr(
+			"original",
+			undefined,
+			{ headers: { "X-Test-Marker": "unique" }, body: '{"admin":true}' },
+			undefined,
+			100,
+		);
+		const continued = c.sent.find((item) => item.method === "Fetch.continueRequest");
+		expect(continued?.params).toMatchObject({
+			requestId: "fetch-1",
+			postData: Buffer.from('{"admin":true}').toString("base64"),
+		});
+		expect(continued?.params?.headers).toEqual(
+			expect.arrayContaining([
+				{ name: "Authorization", value: "Bearer secret" },
+				{ name: "X-Test-Marker", value: "unique" },
+			]),
+		);
+		expect(c.sent.at(-1)?.method).toBe("Fetch.disable");
+	});
+
+	it("rejects non-XHR sources before changing browser state", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		c.emit("Network.requestWillBeSent", {
+			requestId: "fetch",
+			type: "Fetch",
+			request: { method: "GET", url: "https://a.test/api", headers: {} },
+		});
+		await expect(mgr.replayCapturedXhr("fetch")).rejects.toThrow(/only captured XHR/i);
+		expect(c.sent.some((item) => item.method === "Network.replayXHR")).toBe(false);
+	});
+
+	it("continues unrelated paused requests and disables Fetch after a replay timeout", async () => {
+		const c = new FakeConn();
+		const { mgr } = setup({ preset: { p1: c } });
+		await mgr.selectPage("p1");
+		seedXhr(c);
+		c.onSend = (method) => {
+			if (method !== "Network.replayXHR") return;
+			c.emit("Fetch.requestPaused", {
+				requestId: "unrelated",
+				request: { method: "GET", url: "https://a.test/other", headers: {} },
+			});
+		};
+
+		await expect(
+			mgr.replayCapturedXhr("original", undefined, { headers: { "X-Test": "mutation" } }, undefined, 1),
+		).rejects.toThrow(/timed out/i);
+		expect(c.sent).toContainEqual({ method: "Fetch.continueRequest", params: { requestId: "unrelated" } });
+		expect(c.sent.at(-1)?.method).toBe("Fetch.disable");
 	});
 });
 

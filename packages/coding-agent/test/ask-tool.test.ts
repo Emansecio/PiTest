@@ -85,6 +85,14 @@ describe("ask tool execute", () => {
 		expect(details.response).toEqual({ kind: "selection", selections: ["A", "C"] });
 	});
 
+	it("preserves labels longer than 60 characters for width-aware rendering", async () => {
+		const label = "Completo — executar as três camadas e preservar todo o contexto necessário na opção";
+		const { bus, captured } = makeBus({ picked: [label] });
+		const def = createAskToolDefinition("/tmp", { bus });
+		await runExec(def, { question: "Pick", options: [{ label }] });
+		expect(captured[0]?.options[0]?.label).toBe(label);
+	});
+
 	it("returns a freeform answer and defaults allowFreeform on for option-less prompts", async () => {
 		const { bus, captured } = makeBus({ picked: [], freeformText: "olá mundo" });
 		const def = createAskToolDefinition("/tmp", { bus });

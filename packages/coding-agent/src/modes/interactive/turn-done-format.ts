@@ -8,8 +8,6 @@ export interface TurnDoneSnapshot {
 	outputTokens: number;
 	cost?: number;
 	stopReason: "stop" | "aborted" | "error" | "toolUse";
-	contextPercent?: number;
-	estimated?: boolean;
 }
 
 function formatCompactTokens(count: number): string {
@@ -20,11 +18,7 @@ function formatCompactTokens(count: number): string {
 	return `${Math.round(count / 1000000)}M`;
 }
 
-export function buildTurnDoneSnapshot(
-	messages: AgentMessage[],
-	elapsedMs: number,
-	contextUsage?: { percent?: number | null; estimated?: boolean },
-): TurnDoneSnapshot {
+export function buildTurnDoneSnapshot(messages: AgentMessage[], elapsedMs: number): TurnDoneSnapshot {
 	let inputTokens = 0;
 	let outputTokens = 0;
 	let cost = 0;
@@ -54,8 +48,6 @@ export function buildTurnDoneSnapshot(
 		outputTokens,
 		cost: cost > 0 ? cost : undefined,
 		stopReason,
-		contextPercent: contextUsage?.percent ?? undefined,
-		estimated: contextUsage?.estimated,
 	};
 }
 
@@ -75,11 +67,6 @@ export function formatTurnDoneDisplayLine(snapshot: TurnDoneSnapshot): string {
 	if (snapshot.cost !== undefined && snapshot.cost > 0) {
 		const costText = snapshot.cost < 0.01 ? `$${snapshot.cost.toFixed(4)}` : `$${snapshot.cost.toFixed(2)}`;
 		parts.push(costText);
-	}
-	if (snapshot.contextPercent !== undefined) {
-		const rounded = Math.round(snapshot.contextPercent);
-		const prefix = snapshot.estimated ? "~" : "";
-		parts.push(`ctx ${prefix}${rounded}%`);
 	}
 	return parts.join(" · ");
 }

@@ -291,6 +291,34 @@ describe("AgentSession queue characterization", () => {
 		).toBe(true);
 	});
 
+	it("persists a priority custom steer after the active tool result", async () => {
+		const waiting = await createWaitingHarness();
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+
+		await waitForToolStart;
+		await harness.session.sendCustomMessage(
+			{ customType: "priority-queue-test", content: "recover now", display: false },
+			{ deliverAs: "steer", steerPriority: true },
+		);
+		releaseToolExecution();
+		await promptPromise;
+
+		for (const messages of [harness.session.messages, harness.sessionManager.buildSessionContext().messages]) {
+			const toolResultIndex = messages.findIndex((message) => message.role === "toolResult");
+			const steerIndex = messages.findIndex(
+				(message) => message.role === "custom" && message.customType === "priority-queue-test",
+			);
+			expect(toolResultIndex).toBeGreaterThan(-1);
+			expect(steerIndex).toBeGreaterThan(toolResultIndex);
+		}
+	});
+
 	it("queues custom messages with deliverAs followUp while streaming", async () => {
 		const waiting = await createWaitingHarness();
 		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;

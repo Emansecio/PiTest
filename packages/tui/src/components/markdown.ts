@@ -131,6 +131,8 @@ export interface MarkdownTheme {
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
 	codeBlockBorder: (text: string) => string;
+	/** Optional styling for table border glyphs. */
+	tableBorder?: (text: string) => string;
 	/** Optional styling for the language label of a code block (defaults to `codeBlockBorder` when omitted). */
 	codeBlockLang?: (text: string) => string;
 	quote: (text: string) => string;
@@ -1488,9 +1490,11 @@ export class Markdown implements Component {
 			}
 		}
 
+		const tableBorder = this.theme.tableBorder ?? ((text: string) => text);
+
 		// Render top border
 		const topBorderCells = columnWidths.map((w) => "─".repeat(w));
-		lines.push(`┌─${topBorderCells.join("─┬─")}─┐`);
+		lines.push(tableBorder(`┌─${topBorderCells.join("─┬─")}─┐`));
 
 		// Render header with wrapping
 		const headerCellLines: string[][] = token.header.map((_cell, i) => {
@@ -1504,12 +1508,12 @@ export class Markdown implements Component {
 				const padded = text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
 				return this.theme.bold(padded);
 			});
-			lines.push(`│ ${rowParts.join(" │ ")} │`);
+			lines.push(`${tableBorder("│")} ${rowParts.join(` ${tableBorder("│")} `)} ${tableBorder("│")}`);
 		}
 
 		// Render separator
 		const separatorCells = columnWidths.map((w) => "─".repeat(w));
-		const separatorLine = `├─${separatorCells.join("─┼─")}─┤`;
+		const separatorLine = tableBorder(`├─${separatorCells.join("─┼─")}─┤`);
 		lines.push(separatorLine);
 
 		// Render rows with wrapping
@@ -1524,7 +1528,7 @@ export class Markdown implements Component {
 					const text = cellLines[lineIdx] || "";
 					return text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
 				});
-				lines.push(`│ ${rowParts.join(" │ ")} │`);
+				lines.push(`${tableBorder("│")} ${rowParts.join(` ${tableBorder("│")} `)} ${tableBorder("│")}`);
 			}
 
 			if (rowIndex < token.rows.length - 1) {
@@ -1534,7 +1538,7 @@ export class Markdown implements Component {
 
 		// Render bottom border
 		const bottomBorderCells = columnWidths.map((w) => "─".repeat(w));
-		lines.push(`└─${bottomBorderCells.join("─┴─")}─┘`);
+		lines.push(tableBorder(`└─${bottomBorderCells.join("─┴─")}─┘`));
 
 		if (nextTokenType && nextTokenType !== "space") {
 			this.pushBlockSpacing(lines); // Add spacing after table

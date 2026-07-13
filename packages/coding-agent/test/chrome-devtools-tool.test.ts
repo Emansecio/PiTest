@@ -5,6 +5,7 @@ import {
 	createChromeEvaluateDefinition,
 	createChromeListPagesDefinition,
 	createChromeNavigateDefinition,
+	createChromeReadNetworkDefinition,
 	createChromeScreenshotDefinition,
 } from "../src/core/tools/chrome-devtools.js";
 
@@ -95,6 +96,32 @@ describe("chrome_devtools tools", () => {
 		const res = await runExec(createChromeScreenshotDefinition(), { fullPage: true });
 		const image = res.content.find((c: any) => c.type === "image");
 		expect(image).toMatchObject({ type: "image", data: "BASE64PNG", mimeType: "image/png" });
+	});
+
+	it("read_network returns full bounded detail for a captured hop", async () => {
+		const getNetworkEntry = vi.fn().mockReturnValue({
+			entryId: "r1#1",
+			requestId: "r1",
+			hop: 1,
+			method: "POST",
+			url: "https://a.test/api?token=[REDACTED:http-url]",
+			requestHeaders: { Authorization: "[REDACTED:http-header]" },
+			requestBody: '{"token":"[REDACTED:generic]"}',
+			responseBody: '{"ok":true}',
+			status: 200,
+		});
+		const mgr = mockManager({ getNetworkEntry });
+		setCurrentChromeDevtoolsManager(mgr);
+		const res = await runExec(createChromeReadNetworkDefinition(), {
+			requestId: "r1",
+			hop: 1,
+			includeResponseBody: false,
+		});
+
+		expect(getNetworkEntry).toHaveBeenCalledWith("r1", 1);
+		expect(text(res)).toContain('"entryId": "r1#1"');
+		expect(text(res)).toContain('"requestBody"');
+		expect(text(res)).not.toContain('"responseBody"');
 	});
 
 	it("surfaces manager errors as a failed result", async () => {

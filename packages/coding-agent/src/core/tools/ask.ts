@@ -23,7 +23,9 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const askOptionSchema = Type.Object(
 	{
-		label: Type.String({ description: "Short label shown in the picker. Max ~60 chars." }),
+		label: Type.String({
+			description: "Concise label shown in the picker; clipped only when the available terminal width requires it.",
+		}),
 		description: Type.Optional(Type.String({ description: "One-line clarification below the label." })),
 		recommended: Type.Optional(Type.Boolean({ description: "Mark this as the default / suggested option." })),
 		value: Type.Optional(Type.String({ description: "Optional value associated with the label." })),
@@ -110,7 +112,6 @@ export interface AskToolOptions {
 }
 
 const HEADER_MAX = 24;
-const LABEL_MAX = 60;
 
 function trimToMax(value: string, max: number): string {
 	return truncateWithEllipsis(value, max);
@@ -143,10 +144,11 @@ export function createAskToolDefinition(
 			const context = input.context?.trim() || undefined;
 			const header = input.header ? trimToMax(input.header.trim(), HEADER_MAX) : undefined;
 
-			// Normalize options (trim labels, enforce caps, dedupe recommended flag).
+			// Normalize options (trim labels, dedupe recommended flag). The picker owns
+			// display-width clipping so widening the terminal can reveal the full label.
 			let recommendedSeen = false;
 			const normalizedOptions = (input.options ?? []).map((opt) => {
-				const label = trimToMax(opt.label.trim(), LABEL_MAX);
+				const label = opt.label.trim();
 				let recommended = opt.recommended === true;
 				if (recommended && recommendedSeen) {
 					recommended = false;

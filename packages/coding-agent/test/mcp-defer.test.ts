@@ -168,7 +168,7 @@ function createFakePi() {
 		getActiveTools: () => activeTools,
 		fireSessionStart: () => handlers.get("session_start")?.({ type: "session_start" }, {}),
 		fireSessionShutdown: () => handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {}),
-		runCommand: (name: string) => commands.get(name)?.("", { hasUI: false }),
+		runCommand: (name: string, ctx: unknown = { hasUI: false }) => commands.get(name)?.("", ctx),
 	};
 }
 
@@ -284,5 +284,19 @@ describe("createMcpExtension registration wiring", () => {
 		// A second /mcp with no disconnected servers must not re-register or churn.
 		await harness.runCommand("mcp");
 		expect([...harness.registeredTools.keys()]).toEqual(["mcp__small__ping"]);
+	});
+
+	it("opens the interactive MCP manager above the editor", async () => {
+		installMcpFetch({ [SMALL_URL]: { up: true, tools: [{ name: "ping" }] } });
+		const harness = createFakePi();
+		createMcpExtension({ settings: { servers: { small: { url: SMALL_URL } } } })(harness.pi);
+		await harness.fireSessionStart();
+		await waitForMcpEffect(() => harness.registeredTools.has("mcp__small__ping"));
+		const custom = vi.fn(async (_factory: unknown, _options?: unknown) => undefined);
+
+		await harness.runCommand("mcp", { hasUI: true, ui: { custom } });
+
+		expect(custom).toHaveBeenCalledOnce();
+		expect(custom.mock.calls[0]?.[1]).toEqual({ inlinePlacement: "above-editor" });
 	});
 });

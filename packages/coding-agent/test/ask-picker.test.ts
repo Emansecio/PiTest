@@ -121,6 +121,23 @@ describe("ask picker", () => {
 		}
 	});
 
+	it("reveals the full option label when the terminal becomes wide enough", () => {
+		const label = "Completo — executar as três camadas e preservar todo o contexto necessário na opção";
+		const p = drive(makeReq({ options: [{ label }] }));
+		expect(p.render(48)).not.toContain(label);
+		expect(p.render(140)).toContain(label);
+	});
+
+	it("rewraps a long question instead of permanently truncating it", () => {
+		const question =
+			"Qual nível de agressividade deve ser usado para unificar toda a documentação sem perder contexto?";
+		const p = drive(makeReq({ question, displayMode: "overlay" }));
+		const narrow = p.render(48);
+		expect(narrow).not.toContain(question);
+		expect(narrow).toContain("Qual nível de agressividade");
+		expect(p.render(140)).toContain(question);
+	});
+
 	it("never renders a header or question line wider than the terminal", () => {
 		// Regression: a long single-line question (or header) used to be pushed
 		// raw by renderHeader and overflow `width`, crashing TUI.doRender.

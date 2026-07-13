@@ -1,5 +1,5 @@
 import { resetCapabilitiesCache, setCapabilities, type TUI } from "@pit/tui";
-import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { NavGroupComponent } from "../src/modes/interactive/components/nav-group.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -57,13 +57,10 @@ describe("NavGroupComponent", () => {
 		expect(stripAnsi(g.render(120)[0])).toContain("footer.ts");
 	});
 
-	test("shows elapsed suffix on slow pending groups", () => {
-		const now = vi.spyOn(Date, "now").mockReturnValue(0);
+	test("leaves transient elapsed telemetry to the working loader", () => {
 		const g = new NavGroupComponent(fakeTui());
 		g.addCall(navExec("read", "1", { file_path: "a.ts" }));
-		now.mockReturnValue(5000);
-		expect(stripAnsi(g.render(120)[0])).toContain("· 5s");
-		now.mockRestore();
+		expect(stripAnsi(g.render(120)[0])).not.toMatch(/· \d+s/);
 	});
 
 	test("collapsed render is a single line with no gutter", () => {

@@ -1222,6 +1222,19 @@ describe("ModelRegistry", () => {
 		});
 
 		describe("scoped-model auth filtering", () => {
+			test("keeps hidden custom providers out of available models while preserving direct resolution", () => {
+				writeModelsJson({
+					"cloudflare-workers-ai": providerConfig("https://cloudflare.example.com", [{ id: "cf-model" }]),
+					gmicloud: providerConfig("https://gmi.example.com", [{ id: "gmi-model" }]),
+				});
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+				expect(registry.find("cloudflare-workers-ai", "cf-model")).toBeDefined();
+				expect(registry.find("gmicloud", "gmi-model")).toBeDefined();
+				expect(registry.getAvailable().some((model) => model.provider === "cloudflare-workers-ai")).toBe(false);
+				expect(registry.getAvailable().some((model) => model.provider === "gmicloud")).toBe(false);
+			});
+
 			test("filterScopedModels keeps only entries with configured auth", () => {
 				writeModelsJson({
 					authed: providerConfig("https://authed.example.com", [{ id: "m1", name: "Authed One" }]),

@@ -184,6 +184,9 @@ function needsTransformation<TApi extends Api>(
 			pendingTcIds = nextPending;
 			resolvedIds = nextPending ? new Set() : undefined;
 		} else if (msg.role === "toolResult") {
+			if (!pendingTcIds || !resolvedIds || !pendingTcIds.has(msg.toolCallId) || resolvedIds.has(msg.toolCallId)) {
+				return true;
+			}
 			resolvedIds?.add(msg.toolCallId);
 		} else if (msg.role === "user") {
 			if (pendingTcIds && resolvedIds) {
@@ -240,12 +243,16 @@ export function transformMessages<TApi extends Api>(
 		return msg;
 	});
 
-	// Second pass: insert synthetic empty tool results for orphaned tool calls
-	// This preserves thinking signatures and satisfies API requirements
+	// Second pass: restore valid tool-call/result batches. A live steer may have
+	// been persisted while a tool was still running, between the assistant call
+	// and its result. Hold such messages until matching real results arrive so the
+	// provider sees the required assistant -> toolResult ordering. Only synthesize
+	// results that are still missing when the batch closes.
 	const result: Message[] = [];
 	let pendingToolCalls: ToolCall[] = [];
 	let existingToolResultIds = new Set<string>();
-	const insertSyntheticToolResults = () => {
+	let deferredMessages: Message[] = [];
+	const flushPendingToolCalls = () => {
 		if (pendingToolCalls.length > 0) {
 			for (const tc of pendingToolCalls) {
 				if (!existingToolResultIds.has(tc.id)) {
@@ -262,14 +269,18 @@ export function transformMessages<TApi extends Api>(
 			pendingToolCalls = [];
 			existingToolResultIds = new Set();
 		}
+		if (deferredMessages.length > 0) {
+			result.push(...deferredMessages);
+			deferredMessages = [];
+		}
 	};
 
 	for (let i = 0; i < transformed.length; i++) {
 		const msg = transformed[i];
 
 		if (msg.role === "assistant") {
-			// If we have pending orphaned tool calls from a previous assistant, insert synthetic results now
-			insertSyntheticToolResults();
+			// A new assistant response closes any interrupted prior tool batch.
+			flushPendingToolCalls();
 
 			// Skip errored/aborted assistant messages entirely.
 			// These are incomplete turns that shouldn't be replayed:
@@ -290,19 +301,32 @@ export function transformMessages<TApi extends Api>(
 
 			result.push(msg);
 		} else if (msg.role === "toolResult") {
+			const matchesPendingCall = pendingToolCalls.some((toolCall) => toolCall.id === msg.toolCallId);
+			if (!matchesPendingCall || existingToolResultIds.has(msg.toolCallId)) {
+				continue;
+			}
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);
+			if (existingToolResultIds.size === pendingToolCalls.length) {
+				flushPendingToolCalls();
+			}
 		} else if (msg.role === "user") {
-			// User message interrupts tool flow - insert synthetic results for orphaned calls
-			insertSyntheticToolResults();
-			result.push(msg);
+			if (pendingToolCalls.length > 0) {
+				deferredMessages.push(msg);
+			} else {
+				result.push(msg);
+			}
 		} else {
-			result.push(msg);
+			if (pendingToolCalls.length > 0) {
+				deferredMessages.push(msg);
+			} else {
+				result.push(msg);
+			}
 		}
 	}
 
 	// If the conversation ends with unresolved tool calls, synthesize results now.
-	insertSyntheticToolResults();
+	flushPendingToolCalls();
 
 	return result;
 }

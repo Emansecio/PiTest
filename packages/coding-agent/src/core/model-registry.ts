@@ -333,11 +333,10 @@ export const clearApiKeyCache = clearConfigValueCache;
  * Providers hidden from the "available models" surface (the /model selector and
  * any flow that lists usable models), even when auth is configured for them.
  * `getAll()`/`find()` still resolve them, so models.json overrides keep working;
- * they're just kept out of the picker to avoid flooding it. Currently empty — the
- * mechanism is retained so a noisy built-in provider can be hidden without code
- * churn elsewhere.
+ * they're just kept out of the picker to avoid flooding it. The same provider IDs
+ * are filtered when supplied through models.json.
  */
-const HIDDEN_BUILTIN_PROVIDERS: ReadonlySet<string> = new Set([]);
+const HIDDEN_BUILTIN_PROVIDERS: ReadonlySet<string> = new Set(["cloudflare-workers-ai", "gmicloud"]);
 
 /** True when a provider's built-in models should be kept out of user-facing pickers. */
 export function isHiddenModelProvider(providerId: string): boolean {

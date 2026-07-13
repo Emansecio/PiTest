@@ -188,4 +188,44 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 			content: [{ type: "text", text: "No result provided" }],
 		});
 	});
+
+	it("moves an interleaved user steer after the matching real tool result", () => {
+		const model = makeCopilotClaudeModel();
+		const assistant = makeAssistantMessage([
+			{
+				type: "toolCall",
+				id: "toolu_real",
+				name: "write",
+				arguments: { path: "report.md" },
+			},
+		]);
+		assistant.api = model.api;
+		assistant.provider = model.provider;
+		assistant.model = model.id;
+
+		const result = transformMessages(
+			[
+				assistant,
+				{ role: "user", content: "<session-recovery-narration />", timestamp: 2 },
+				{
+					role: "toolResult",
+					toolCallId: "toolu_real",
+					toolName: "write",
+					content: [{ type: "text", text: "real write failure" }],
+					isError: true,
+					timestamp: 3,
+				},
+			],
+			model,
+			anthropicNormalizeToolCallId,
+		);
+
+		expect(result.map((message) => message.role)).toEqual(["assistant", "toolResult", "user"]);
+		expect(result[1]).toMatchObject({
+			role: "toolResult",
+			toolCallId: "toolu_real",
+			content: [{ type: "text", text: "real write failure" }],
+			isError: true,
+		});
+	});
 });

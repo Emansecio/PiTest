@@ -117,6 +117,14 @@ import { createResolveToolDefinition, type ResolveToolOptions } from "./resolve.
 import { createRetainToolDefinition, type RetainToolOptions } from "./retain.ts";
 import { createSearchSkillsToolDefinition, type SearchSkillsToolOptions } from "./search-skills.ts";
 import { createSearchToolBm25Definition, type SearchToolBm25Options } from "./search-tool-bm25.ts";
+import {
+	createSecurityEvidenceDefinition,
+	createSecurityHttpReplayDiffDefinition,
+	createSecurityStaticScanDefinition,
+	createSecuritySurfaceMapDefinition,
+	createSecurityValidateFindingDefinition,
+	type SecurityToolsOptions,
+} from "./security-tools.ts";
 import { createSymbolToolDefinition, type SymbolToolOptions } from "./symbol.ts";
 import { createTodoToolDefinition, type TodoToolOptions } from "./todo.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -273,6 +281,36 @@ const TOOL_REGISTRY = {
 		definitionFactory: createRepoMapToolDefinition,
 		optionsKey: "repo_map",
 		readOnly: true,
+		coding: false,
+	},
+	security_surface_map: {
+		definitionFactory: createSecuritySurfaceMapDefinition,
+		optionsKey: "security",
+		readOnly: true,
+		coding: false,
+	},
+	security_static_scan: {
+		definitionFactory: createSecurityStaticScanDefinition,
+		optionsKey: "security",
+		readOnly: true,
+		coding: false,
+	},
+	security_http_replay_diff: {
+		definitionFactory: createSecurityHttpReplayDiffDefinition,
+		optionsKey: "security",
+		readOnly: false,
+		coding: false,
+	},
+	security_validate_finding: {
+		definitionFactory: createSecurityValidateFindingDefinition,
+		optionsKey: "security",
+		readOnly: true,
+		coding: false,
+	},
+	security_evidence: {
+		definitionFactory: createSecurityEvidenceDefinition,
+		optionsKey: "security",
+		readOnly: false,
 		coding: false,
 	},
 	search_skills: {
@@ -677,6 +715,7 @@ export interface ToolsOptions {
 	symbol?: SymbolToolOptions;
 	find_symbol?: FindSymbolToolOptions;
 	repo_map?: RepoMapToolOptions;
+	security?: SecurityToolsOptions;
 	search_skills?: SearchSkillsToolOptions;
 	ask?: AskToolOptions;
 	resolve?: ResolveToolOptions;

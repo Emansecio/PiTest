@@ -197,11 +197,13 @@ import { getLivingRepoMap, type LivingRepoMap } from "./repo-map/living-index.ts
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import {
 	clearCurrentSelfReviewFindings,
+	isSelfReviewDisabled,
 	runSelfReviewLoop,
 	SELF_REVIEW_SCHEMA,
 	SELF_REVIEW_TIMEOUT_MS,
 	type SelfReviewResult,
 	type SelfReviewRunner,
+	shouldRunSelfReview,
 } from "./self-review.ts";
 import { getCurrentSessionContract, SessionContract, setCurrentSessionContract } from "./session-contract.ts";
 import type { BranchSummaryEntry, SessionManager } from "./session-manager.js";
@@ -4394,7 +4396,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 	): Promise<void> {
 		const totals = this._turnRisk.getTotals();
 		const level = getCurrentSupervisionThermostat()?.getLevel();
-		await runSelfReviewLoop({
+		if (isSelfReviewDisabled() || !shouldRunSelfReview(totals, level)) return;
+
+		this.emit({ type: "self_review", phase: "running" });
+		const result = await runSelfReviewLoop({
 			totals,
 			level,
 			runner: this._selfReviewRunner(abort),
@@ -4402,6 +4407,12 @@ export class AgentSession implements CompactionHost, FusionHost {
 			fixesAlreadyUsed,
 			injectFix: (prompt) => this._promptOnce(prompt, { expandPromptTemplates: false, source: options?.source }),
 			isAborted: () => abort.signal.aborted || this._userInterrupted,
+		});
+		this.emit({
+			type: "self_review",
+			phase: "complete",
+			reviews: result.reviews,
+			unresolvedHigh: result.unresolvedHigh.length,
 		});
 	}
 
@@ -4909,18 +4920,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else if (options?.steerPriority) {
-				// Critical recovery steers must land in the live transcript immediately —
-				// the default one-at-a-time steering queue can starve them behind softer
-				// reminders when session recovery adds extra steers in the same turn.
-				this.agent.state.messages.push(appMessage);
-				this.sessionManager.appendCustomMessageEntry(
-					message.customType,
-					message.content,
-					message.display,
-					message.details,
-				);
-				this.emit({ type: "message_start", message: appMessage });
-				this.emit({ type: "message_end", message: appMessage });
+				// Priority avoids starvation while the agent loop preserves the active
+				// tool-call/result batch before appending the steer.
+				this.agent.steer(appMessage, { priority: true });
 			} else {
 				this.agent.steer(appMessage);
 			}

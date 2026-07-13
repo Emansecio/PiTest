@@ -1,0 +1,21 @@
+{
+  "id": "validated-marker",
+  "discoveredAtMs": 1000,
+  "pocAtMs": 4200,
+  "input": {
+    "currentState": "reproduced",
+    "marker": {
+      "value": "marker-validated-01",
+      "baselineBody": "normal",
+      "controlBody": "normal",
+      "mutationBody": "reflected marker-validated-01"
+    },
+    "bodies": {
+      "baseline": "{\"ok\":true}",
+      "control": "{\"ok\":true}",
+      "mutation": "{\"ok\":false,\"proof\":\"marker-validated-01\"}"
+    },
+    "reproduction": { "attempts": [true, true] },
+    "chain": { "required": false, "complete": true, "steps": [] }
+  }
+}

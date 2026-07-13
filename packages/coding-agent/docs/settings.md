@@ -59,7 +59,7 @@ See also [Model Cycling](#model-cycling) for `enabledModels` format.
 | `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
 | `editorClosedBottom` | boolean | `true` | Draw a closed `╰───` bottom rule on the input editor (card-like frame). Set `false` for the historical blank separator |
-| `assistantReadingColumns` | number | `0` | Reading-column cap (cols) for assistant prose. `0` (default) = full width, like Claude Code; a positive value (clamped 40-200) wraps long answers at that measure. Tool/bash/code blocks are never capped |
+| `assistantReadingColumns` | number | `120` | Reading-column cap (cols) for assistant prose. `0` = full width; a positive value (clamped 40-200) wraps long answers at that measure. Tool/bash/code blocks are never capped |
 | `showHardwareCursor` | boolean | `false` | Show terminal cursor |
 | `cursorBlink` | boolean | `true` | Blink the input editor's block cursor while focused |
 | `streamingSmoothing` | boolean | `true` | Reveal streamed assistant text at a steady rate instead of provider-sized bursts |

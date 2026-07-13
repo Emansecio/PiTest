@@ -1,0 +1,20 @@
+{
+  "id": "status-only",
+  "discoveredAtMs": 2000,
+  "pocAtMs": 2600,
+  "input": {
+    "currentState": "reproduced",
+    "marker": {
+      "value": "marker-status-001",
+      "baselineBody": "normal",
+      "controlBody": "normal",
+      "mutationBody": "marker-status-001"
+    },
+    "bodies": {
+      "baseline": "{\"message\":\"same\"}",
+      "control": "{\"message\":\"same\"}",
+      "mutation": "{\"message\":\"same\"}"
+    },
+    "reproduction": { "attempts": [true, true] }
+  }
+}

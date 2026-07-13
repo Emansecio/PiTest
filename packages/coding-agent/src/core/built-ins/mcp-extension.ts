@@ -619,7 +619,7 @@ export function createMcpExtension(options: McpExtensionOptions) {
 								}
 								return panel;
 							},
-							{ overlay: true, overlayOptions: { width: "70%", maxHeight: "80%", anchor: "center" } },
+							{ inlinePlacement: "above-editor" },
 						);
 					} finally {
 						activePanel = undefined;

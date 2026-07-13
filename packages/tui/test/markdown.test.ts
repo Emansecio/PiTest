@@ -240,6 +240,18 @@ describe("Markdown component", () => {
 	});
 
 	describe("Tables", () => {
+		it("styles table borders without changing table geometry", () => {
+			const source = `| Name | Age |
+| --- | --- |
+| Alice | 30 |`;
+			const tableBorder = (text: string) => `\x1b[2m${text}\x1b[22m`;
+			const themed = new Markdown(source, 0, 0, { ...defaultMarkdownTheme, tableBorder }).render(80);
+			const plain = new Markdown(source, 0, 0, defaultMarkdownTheme).render(80);
+
+			assert.deepStrictEqual(themed.map(stripAnsi), plain.map(stripAnsi));
+			assert.ok(themed.some((line) => line.includes("\x1b[2m")));
+		});
+
 		it("should render simple table", () => {
 			const markdown = new Markdown(
 				`| Name | Age |

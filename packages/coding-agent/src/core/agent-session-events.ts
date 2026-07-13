@@ -100,6 +100,12 @@ export type AgentSessionEvent =
 			reason?: string;
 			willRetry?: boolean;
 	  }
+	| {
+			type: "self_review";
+			phase: "running" | "complete";
+			reviews?: number;
+			unresolvedHigh?: number;
+	  }
 	| { type: "subagent_start"; handle: string }
 	| { type: "subagent_progress"; handle: string; turn: number; lastTool?: string }
 	| { type: "subagent_complete"; handle: string; status: "done" | "error"; turns?: number; totalTokens?: number }

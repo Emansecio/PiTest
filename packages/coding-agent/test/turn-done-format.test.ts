@@ -10,13 +10,12 @@ describe("turn-done-format", () => {
 			outputTokens: 340,
 			cost: 0.0042,
 			stopReason: "stop",
-			contextPercent: 18,
 		});
 		expect(line).toContain("12s");
 		expect(line).toContain("↑1.2k");
 		expect(line).toContain("↓340");
 		expect(line).toContain("$0.004");
-		expect(line).toContain("ctx 18%");
+		expect(line).not.toContain("ctx");
 	});
 
 	it("formatTurnDoneDisplayLine shows aborted and error outcomes", () => {
@@ -69,12 +68,10 @@ describe("turn-done-format", () => {
 				},
 			] as AgentMessage[],
 			5000,
-			{ percent: 12, estimated: true },
 		);
 		expect(snapshot.inputTokens).toBe(300);
 		expect(snapshot.outputTokens).toBe(130);
 		expect(snapshot.cost).toBeCloseTo(0.003);
 		expect(snapshot.stopReason).toBe("stop");
-		expect(snapshot.estimated).toBe(true);
 	});
 });
