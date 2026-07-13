@@ -1276,11 +1276,14 @@ export class SessionManager {
 	private async _drainQueue(): Promise<void> {
 		// Serialize concurrent drains: appendFile on the same path is not atomic
 		// across overlapping handles. Without this, a manual flushWrites racing a
-		// timer-triggered drain can interleave bytes mid-JSONL line.
-		if (this._draining) {
+		// timer-triggered drain can interleave bytes mid-JSONL line. Loop — not a
+		// one-shot await: after a generation settles, another waiter in the same
+		// microtask cascade may have started a NEW drain; proceeding on a single
+		// check would create a second concurrent appender.
+		while (this._draining) {
 			await this._draining;
-			if (this._writeQueue.length === 0) return;
 		}
+		if (this._writeQueue.length === 0) return;
 		const drainPromise = (async () => {
 			while (this._writeQueue.length > 0 && this.sessionFile) {
 				const pending = this._writeQueue.length;
