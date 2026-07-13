@@ -60,7 +60,7 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 			THINKING_SELECT_LIST_LAYOUT,
 		);
 
-		const currentIndex = availableLevels.findIndex((level) => level === currentLevel);
+		const currentIndex = availableLevels.indexOf(currentLevel);
 		if (currentIndex !== -1) {
 			this.selectList.setSelectedIndex(currentIndex);
 		}

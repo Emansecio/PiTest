@@ -74,7 +74,10 @@ describe("resolveOverthinkGuardForModel", () => {
 	});
 
 	describe("scales the threshold by thinking level when no explicit override is set", () => {
-		const cases: Array<{ level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"; scale: number }> = [
+		const cases: Array<{
+			level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+			scale: number;
+		}> = [
 			{ level: "minimal", scale: 0.5 },
 			{ level: "low", scale: 0.75 },
 			{ level: "medium", scale: 1 },

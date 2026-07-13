@@ -1,4 +1,12 @@
-import { Container, type Focusable, type Input, type SelectItem, SelectList, type SelectListLayoutOptions, type TUI } from "@pit/tui";
+import {
+	Container,
+	type Focusable,
+	type Input,
+	type SelectItem,
+	SelectList,
+	type SelectListLayoutOptions,
+	type TUI,
+} from "@pit/tui";
 import { getAvailableThemes, getSelectListTheme, theme } from "../theme/theme.ts";
 import { SelectorShell } from "./selector-shell.ts";
 

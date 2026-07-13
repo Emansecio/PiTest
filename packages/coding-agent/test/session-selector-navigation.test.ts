@@ -71,7 +71,7 @@ function buildSelector(
 		() => {},
 		{
 			keybindings: opts.keybindings,
-			showRenameHint: opts.renameSession ? true : false,
+			showRenameHint: !!opts.renameSession,
 			renameSession: opts.renameSession,
 		},
 		undefined,

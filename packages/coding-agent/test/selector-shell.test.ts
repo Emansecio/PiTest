@@ -20,10 +20,7 @@ function makeList(values: string[]): SelectList {
 }
 
 const plainRender = (component: { render: (w: number) => string[] }, width = 60): string =>
-	component
-		.render(width)
-		.map(stripAnsi)
-		.join("\n");
+	component.render(width).map(stripAnsi).join("\n");
 
 describe("SelectorShell", () => {
 	beforeAll(() => {

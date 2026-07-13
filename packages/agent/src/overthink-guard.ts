@@ -193,8 +193,7 @@ export class OverthinkTracker {
 		const scan = tail + delta;
 		OVERTHINK_RUMINATION_REGEX.lastIndex = 0;
 		let added = 0;
-		let match: RegExpExecArray | null;
-		while ((match = OVERTHINK_RUMINATION_REGEX.exec(scan)) !== null) {
+		for (const match of scan.matchAll(OVERTHINK_RUMINATION_REGEX)) {
 			const end = match.index + match[0].length;
 			// Only count matches that reach into the new delta; matches ending
 			// within the carried-over tail were counted on a previous call.

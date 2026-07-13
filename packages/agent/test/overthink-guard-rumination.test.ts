@@ -51,7 +51,7 @@ describe("OverthinkTracker rumination detection", () => {
 	it("interrupts at 4 markers AND >= min tokens (no tool call)", () => {
 		const tracker = new OverthinkTracker();
 		tracker.onThinkingStart(0);
-		tracker.onThinkingDelta(0, "wait actually hold on scratch that " + "z".repeat(OVER_FLOOR_CHARS));
+		tracker.onThinkingDelta(0, `wait actually hold on scratch that ${"z".repeat(OVER_FLOOR_CHARS)}`);
 		expect(tracker.getMarkerCount(0)).toBeGreaterThanOrEqual(DEFAULT_OVERTHINK_RUMINATION_MARKER_THRESHOLD);
 		const info = tracker.getInterruptInfo(0, HIGH_VOLUME_THRESHOLD);
 		expect(info).not.toBeNull();
@@ -72,7 +72,7 @@ describe("OverthinkTracker rumination detection", () => {
 	it("does NOT interrupt at 3 markers above the min-token floor", () => {
 		const tracker = new OverthinkTracker();
 		tracker.onThinkingStart(0);
-		tracker.onThinkingDelta(0, "wait actually hold on " + "z".repeat(OVER_FLOOR_CHARS));
+		tracker.onThinkingDelta(0, `wait actually hold on ${"z".repeat(OVER_FLOOR_CHARS)}`);
 		expect(tracker.getMarkerCount(0)).toBe(3);
 		expect(tracker.getEstimatedTokens(0)).toBeGreaterThanOrEqual(DEFAULT_OVERTHINK_RUMINATION_MIN_TOKENS);
 		expect(tracker.getInterruptInfo(0, HIGH_VOLUME_THRESHOLD)).toBeNull();
@@ -81,7 +81,7 @@ describe("OverthinkTracker rumination detection", () => {
 	it("suppresses the rumination interrupt once a tool call starts", () => {
 		const tracker = new OverthinkTracker();
 		tracker.onThinkingStart(0);
-		tracker.onThinkingDelta(0, "wait actually hold on scratch that " + "z".repeat(OVER_FLOOR_CHARS));
+		tracker.onThinkingDelta(0, `wait actually hold on scratch that ${"z".repeat(OVER_FLOOR_CHARS)}`);
 		tracker.onToolCallStart();
 		expect(tracker.getInterruptInfo(0, HIGH_VOLUME_THRESHOLD)).toBeNull();
 		expect(tracker.shouldInterrupt(0, HIGH_VOLUME_THRESHOLD)).toBe(false);
@@ -90,7 +90,7 @@ describe("OverthinkTracker rumination detection", () => {
 	it("counts markers on the watched text_delta path too", () => {
 		const tracker = new OverthinkTracker(true);
 		tracker.onTextStart(0);
-		tracker.onTextDelta(0, "wait actually hold on scratch that " + "z".repeat(OVER_FLOOR_CHARS));
+		tracker.onTextDelta(0, `wait actually hold on scratch that ${"z".repeat(OVER_FLOOR_CHARS)}`);
 		const info = tracker.getInterruptInfo(0, HIGH_VOLUME_THRESHOLD);
 		expect(info?.reason).toBe("rumination");
 	});

@@ -69,12 +69,7 @@ export type KnownImagesApi = "openrouter-images";
 
 export type ImagesApi = KnownImagesApi | (string & {});
 
-export type KnownProvider =
-	| "anthropic"
-	| "openai-codex"
-	| "opencode"
-	| "opencode-go"
-	| "xai";
+export type KnownProvider = "anthropic" | "openai-codex" | "opencode" | "opencode-go" | "xai";
 export type Provider = KnownProvider | string;
 
 export type KnownImagesProvider = "openrouter";
