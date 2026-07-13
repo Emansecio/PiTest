@@ -17,7 +17,7 @@ export function clearTaskRigorTurnCache(): void {
 }
 
 const ACTION_PATTERN =
-	/\b(implement|fix|change|add|remove|update|edit|create|patch|wire|debug|review|refactor|migrate|rename|implementar|corrigir|corrija|alterar|adicionar|remover|atualizar|editar|criar|crie|mexer|ajustar|revisar|refatorar|migrar|renomear)\b/i;
+	/\b(implement|fix|change|add|remove|update|edit|create|patch|wire|debug|review|refactor|migrate|rename|implementar|corrigir|corrija|corrige|conserta(r)?|arruma(r)?|alterar|adicionar|remover|atualizar|editar|criar|crie|mexer|ajustar|revisar|refatorar|migrar|renomear)\b/i;
 
 const DOCS_PATTERN = /\b(doc|docs|documentation|markdown|readme|relatorio|report|texto|copy|prompt)\b/i;
 

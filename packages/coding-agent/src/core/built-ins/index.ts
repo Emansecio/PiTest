@@ -22,6 +22,7 @@ import {
 	type PermissionSettings,
 } from "../permissions/index.ts";
 import { getCurrentTokenGovernor } from "../token-governor.ts";
+import { createClarifyNudgeExtension } from "./clarify-nudge-extension.ts";
 import { createCoordinatorExtension } from "./coordinator-extension.ts";
 import { createDestructiveCommandGuardExtension } from "./destructive-command-guard-extension.ts";
 import { bundleGroundingGuardFactories } from "./grounding-guard-registry.ts";
@@ -120,6 +121,12 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 		// append concise rigor instructions. Model-agnostic, fail-open; opt out
 		// PIT_NO_TASK_RIGOR.
 		createTaskRigorExtension(),
+		// Clarify nudge: when a mutating prompt looks under-specified AND an
+		// interactive answer surface is bound, append a `<clarify_first>` directive
+		// so the model asks up to 3 targeted questions via `ask` before its first
+		// mutation instead of guessing. Parent-only, nudge-only, fail-open; opt out
+		// PIT_NO_CLARIFY_GATE.
+		createClarifyNudgeExtension(),
 		...bundleGroundingGuardFactories(options.cwd, [
 			// Preventive cross-session guard: blocks a call whose exact args have failed
 			// repeatedly in prior sessions, before it fails again. Scoped to this
