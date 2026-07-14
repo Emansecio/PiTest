@@ -262,6 +262,19 @@ const bashRules: ToolErrorHintRule[] = [
 
 const readRules: ToolErrorHintRule[] = [
 	{
+		// `read({offset})` past EOF throws `Offset N is beyond end of file (M lines
+		// total)`. The model over-estimated the file length; the total is right
+		// there in the message, so steer it to a valid offset.
+		id: "read-offset-beyond-eof",
+		appliesTo: "read",
+		matcher: ({ errorText }) => /beyond end of file \(\d+ lines total\)/i.test(errorText),
+		hint: ({ errorText }) => {
+			const total = errorText.match(/beyond end of file \((\d+) lines total\)/i)?.[1];
+			const n = total ?? "N";
+			return `The file has ${n} lines — retry with offset <= ${n}, or omit offset to read from the start.`;
+		},
+	},
+	{
 		id: "read-enoent-suggest-find",
 		appliesTo: "read",
 		matcher: ({ errorText }) => /enoent|no such file or directory/i.test(errorText),
@@ -335,6 +348,16 @@ const editRules: ToolErrorHintRule[] = [
 			/validation failed for tool "edit"/i.test(errorText) && !/did you mean/i.test(errorText),
 		hint: () =>
 			"Edit schema is `{ path, edits: [{ oldText, newText }] }`. Drop unknown keys (e.g. `range`, `oldString`).",
+	},
+	{
+		// `Found N occurrences of the text in <path>. The text must be unique.`
+		// oldText matched more than once. Two clean fixes: rename-style replaceAll,
+		// or extend oldText until it anchors a single site.
+		id: "edit-non-unique-oldtext",
+		appliesTo: ["edit", "edit_v2"],
+		matcher: ({ errorText }) => /Found \d+ occurrences of the text/i.test(errorText),
+		hint: () =>
+			"Either pass replaceAll: true to change every occurrence, or extend oldText with surrounding lines until it is unique.",
 	},
 	{
 		// ENOENT from the edit pre-flight `access` check. edit.ts/edit-diff.ts
@@ -650,6 +673,57 @@ const astEditRules: ToolErrorHintRule[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// exit_plan rules — plan-mode-only tool called from execution mode
+// ---------------------------------------------------------------------------
+
+const exitPlanRules: ToolErrorHintRule[] = [
+	{
+		// `exit_plan` is registered in every mode but only meaningful in plan mode.
+		// Called from execution (auto) mode it returns a terse "only available in
+		// plan mode" with no steering, so the model retries or stalls. Redirect it
+		// to just continue the work.
+		id: "exit-plan-not-in-plan-mode",
+		appliesTo: "exit_plan",
+		matcher: ({ errorText }) => /exit_plan is only available in plan mode/i.test(errorText),
+		hint: () =>
+			"You are already in execution (auto) mode — there is no plan to exit. Just continue the work directly. exit_plan only applies while in plan mode.",
+	},
+];
+
+// ---------------------------------------------------------------------------
+// todo rules — single-action list tool
+// ---------------------------------------------------------------------------
+
+const todoRules: ToolErrorHintRule[] = [
+	{
+		// `todo({action:"update"|"get"|"delete", id})` against an id that is not in
+		// the list returns `No todo with id N.`; the model guessed an id instead of
+		// listing first. Point it at the list op so it reads real ids.
+		id: "todo-unknown-id",
+		appliesTo: "todo",
+		matcher: ({ errorText }) => /^No todo with id \d+\./m.test(errorText),
+		hint: () => 'Call todo({action:"list"}) to see valid ids before update/get/delete.',
+	},
+];
+
+// ---------------------------------------------------------------------------
+// retain rules — hindsight memory store
+// ---------------------------------------------------------------------------
+
+const retainRules: ToolErrorHintRule[] = [
+	{
+		// `retain({kind})` validates `kind` against a fixed enum; an out-of-set
+		// value trips the generic typebox "must be equal to one of the allowed
+		// values" error, which does not name the allowed set. List it.
+		id: "retain-invalid-kind",
+		appliesTo: "retain",
+		matcher: ({ errorText }) => /must be equal to one of the allowed values/i.test(errorText),
+		hint: () =>
+			'retain kind must be one of "fact", "decision", or "pattern" (default "fact"). Fix the kind and resend.',
+	},
+];
+
+// ---------------------------------------------------------------------------
 // Generic rules — apply to ANY tool
 // ---------------------------------------------------------------------------
 
@@ -714,6 +788,12 @@ export interface ToolErrorHintRulesOptions {
 	disableLspRules?: boolean;
 	/** Disable ast_edit hint rules. Default: enabled. */
 	disableAstEditRules?: boolean;
+	/** Disable exit_plan hint rules. Default: enabled. */
+	disableExitPlanRules?: boolean;
+	/** Disable todo hint rules. Default: enabled. */
+	disableTodoRules?: boolean;
+	/** Disable retain hint rules. Default: enabled. */
+	disableRetainRules?: boolean;
 	/** Disable generic cross-tool rules (schema maxlen, spawn ENOENT). Default: enabled. */
 	disableGenericRules?: boolean;
 	/** Extra rules to append. */
@@ -761,6 +841,9 @@ export function createDefaultToolErrorHintRegistry(options?: ToolErrorHintRulesO
 	if (!options?.disableLsRules) registry.addMany(lsRules);
 	if (!options?.disableLspRules) registry.addMany(lspRules);
 	if (!options?.disableAstEditRules) registry.addMany(astEditRules);
+	if (!options?.disableExitPlanRules) registry.addMany(exitPlanRules);
+	if (!options?.disableTodoRules) registry.addMany(todoRules);
+	if (!options?.disableRetainRules) registry.addMany(retainRules);
 	if (!options?.disableGenericRules) registry.addMany(genericRules);
 	if (options?.extraRules) registry.addMany(options.extraRules);
 	if (options?.learnedErrors && options.learnedErrors.length > 0) {
