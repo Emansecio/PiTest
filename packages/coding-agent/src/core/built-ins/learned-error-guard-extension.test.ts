@@ -73,9 +73,16 @@ describe("createLearnedErrorGuardExtension", () => {
 		expect(await call("bash", BASH_ARGS)).toBeUndefined();
 	});
 
-	it("does not block below the session threshold", async () => {
-		const call = mountExtension({ provider: () => [entry({ sessionCount: 1 })] });
+	it("does not block below the session threshold (and below count-dominant)", async () => {
+		// totalCount 3 clears minOccurrences but not the count-dominant bar (5), and a
+		// single session fails the cross-session bar — so no guard fires.
+		const call = mountExtension({ provider: () => [entry({ totalCount: 3, sessionCount: 1 })] });
 		expect(await call("bash", BASH_ARGS)).toBeUndefined();
+	});
+
+	it("blocks a count-dominant single-session pattern (totalCount >= 5)", async () => {
+		const call = mountExtension({ provider: () => [entry({ totalCount: 5, sessionCount: 1 })] });
+		expect((await call("bash", BASH_ARGS))?.block).toBe(true);
 	});
 
 	it("does not block a pattern already covered by a built-in rule", async () => {
