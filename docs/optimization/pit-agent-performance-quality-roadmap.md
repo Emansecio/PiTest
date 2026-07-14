@@ -115,6 +115,8 @@ Maior ganho prático: **2x a 5x menos wall-clock** em uso comum.
 
 ## Prioridade P1: corrigir permissões do `edit`
 
+> ✅ **JÁ IMPLEMENTADO** (verificado 2026-07-13): `describeToolAction("edit")` coleta `path` + aliases + `edits[].*` via `collectPathFields` — ver `permissions/checker.ts:343-348` e `:406-440`. Resta só cobertura de teste.
+
 ### Problema
 
 O tool `edit` atual usa `path`, mas `describeToolAction("edit")` coleta `file`. Isso pode fazer regras de permissão por path não pegarem edições reais.

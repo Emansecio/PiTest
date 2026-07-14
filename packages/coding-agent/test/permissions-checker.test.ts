@@ -19,6 +19,53 @@ describe("PermissionChecker — auto mode (guarded default)", () => {
 		expect(c.check({ type: "write", toolName: "write", paths: [".env"] }).decision).toBe("deny");
 	});
 
+	it("collects the edit path (and edits[] overrides) into a write action for path rules", () => {
+		const action = describeToolAction("edit", { path: "src/a.ts", edits: [{ oldText: "x", newText: "y" }] });
+		expect(action.type).toBe("write");
+		expect((action as { paths: string[] }).paths).toContain("src/a.ts");
+	});
+
+	it("denies an edit whose top-level path matches denyPaths", () => {
+		const c = new PermissionChecker({
+			cwd,
+			mode: "auto",
+			settings: { disableBuiltinDefaults: true, denyPaths: [{ glob: "**/secret.key" }] },
+		});
+		const decision = c.check(
+			describeToolAction("edit", { path: "config/secret.key", edits: [{ oldText: "a", newText: "b" }] }),
+		).decision;
+		expect(decision).toBe("deny");
+	});
+
+	it("denies an edit whose edits[] override path matches denyPaths", () => {
+		const c = new PermissionChecker({
+			cwd,
+			mode: "auto",
+			settings: { disableBuiltinDefaults: true, denyPaths: [{ glob: "**/secret.key" }] },
+		});
+		const decision = c.check(
+			describeToolAction("edit", {
+				path: "ok.ts",
+				edits: [{ path: "config/secret.key", oldText: "a", newText: "b" }],
+			}),
+		).decision;
+		expect(decision).toBe("deny");
+	});
+
+	it("blocks an edit to a builtin sensitive path (.env)", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		expect(
+			c.check(describeToolAction("edit", { path: ".env", edits: [{ oldText: "a", newText: "b" }] })).decision,
+		).toBe("deny");
+	});
+
+	it("allows an ordinary edit by path", () => {
+		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
+		expect(
+			c.check(describeToolAction("edit", { path: "src/a.ts", edits: [{ oldText: "a", newText: "b" }] })).decision,
+		).toBe("allow");
+	});
+
 	it("blocks reads of builtin sensitive paths (~/.ssh)", () => {
 		const c = new PermissionChecker({ cwd, mode: "auto", settings: {} });
 		expect(c.check({ type: "read", toolName: "read", paths: [".ssh/id_rsa"] }).decision).toBe("deny");
