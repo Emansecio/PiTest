@@ -45,6 +45,35 @@ function inline(value: unknown): string {
 	return JSON.stringify(value);
 }
 
+/**
+ * Tier-1 auto rewrite that renames a stray `root` search-directory arg to the
+ * Pit schema's `path`, scoped to a single navigation tool (grep or find). Other
+ * harnesses call the search root `root`; the Pit schema names it `path` and is
+ * `additionalProperties: false`, so an otherwise-correct call fails validation.
+ * Deliberately NOT added to the global PATH_KEY_ALIASES map (that map feeds the
+ * permission path collector). Fires only when `root` is a non-empty string and
+ * no `path` is present, so a call that already uses `path` is never mutated.
+ */
+function rootToPathRule(tool: "grep" | "find"): ToolRewriteRule {
+	return {
+		id: `${tool}-root-to-path`,
+		appliesTo: tool,
+		matcher: (c) => {
+			const args = c.arguments as Record<string, unknown>;
+			return typeof args.root === "string" && !("path" in args);
+		},
+		action: {
+			tier: "auto",
+			rewrite: (c) => {
+				const args = { ...(c.arguments as Record<string, unknown>) };
+				args.path = args.root;
+				delete args.root;
+				return { ...c, arguments: args };
+			},
+		},
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Windows shell-syntax normalisation (Tier 1 auto)
 //
@@ -198,6 +227,10 @@ function coerceLineArg(value: unknown): number | undefined {
 }
 
 const tier1Rules: ToolRewriteRule[] = [
+	// Cross-harness `root` -> `path` alias for the navigation tools. Registered
+	// first so the rename happens before any path-shaped rule inspects `path`.
+	rootToPathRule("grep"),
+	rootToPathRule("find"),
 	{
 		// read({ offset: "10", limit: "20" }) → numeric coercion. Some models
 		// emit numeric args as quoted strings; TypeBox `Value.Convert` covers
