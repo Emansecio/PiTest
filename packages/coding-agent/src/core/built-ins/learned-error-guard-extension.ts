@@ -13,8 +13,10 @@
  * zero regression) or its NORMALISED form (whitespace runs collapsed, path
  * separators/drive-letter case folded), so a call that differs from the stored
  * failure only in formatting still re-fires the lesson. The pattern must also
- * have recurred at least `minOccurrences` times across at least `minSessions`
- * sessions, and must NOT already be covered by a built-in Tier-4 rule (those
+ * qualify under the shared `qualifiesForLearnedRule` gate — either recurred at
+ * least `minOccurrences` times across at least `minSessions` sessions, OR
+ * reached the count-dominant `totalCount` threshold from a single session —
+ * and must NOT already be covered by a built-in Tier-4 rule (those
  * carry a better-targeted hint). The guard fires at most ONCE per (tool, args)
  * per session: if the model genuinely intends the call, the immediate retry runs.
  *
@@ -34,6 +36,7 @@ import {
 	normalizeArgsForFingerprint,
 } from "../learned-error-store.ts";
 import { fingerprintToolArgs } from "../tool-call-stats.ts";
+import { DEFAULT_COUNT_DOMINANT_THRESHOLD, qualifiesForLearnedRule } from "../tool-error-hint-rules.ts";
 import { applyKeyAliases, EDIT_KEY_ALIASES, PATH_KEY_ALIASES } from "../tools/argument-prep.ts";
 
 /**
@@ -64,6 +67,12 @@ export interface LearnedErrorGuardOptions {
 	minOccurrences?: number;
 	/** Minimum distinct sessions before a pattern guards. Default: 2. */
 	minSessions?: number;
+	/**
+	 * Count-dominant escape hatch mirroring the hint registry: a pattern whose
+	 * cumulative `totalCount` reaches this threshold guards even from a single
+	 * session, bypassing `minSessions`. Default: 5.
+	 */
+	countDominantThreshold?: number;
 }
 
 function normaliseInput(input: unknown): unknown {
@@ -94,6 +103,7 @@ export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptio
 		if (options.enabled === false || isTruthyEnvFlag(process.env.PIT_NO_LEARNED_ERROR_GUARD)) return;
 		const minOccurrences = Math.max(2, options.minOccurrences ?? 3);
 		const minSessions = Math.max(1, options.minSessions ?? 2);
+		const countDominantThreshold = Math.max(1, options.countDominantThreshold ?? DEFAULT_COUNT_DOMINANT_THRESHOLD);
 		const loadAggregated = async (): Promise<AggregatedLearnedError[]> => {
 			if (options.provider) return options.provider();
 			try {
@@ -112,9 +122,10 @@ export function createLearnedErrorGuardExtension(options: LearnedErrorGuardOptio
 		const buildIndex = (aggregated: AggregatedLearnedError[]): Map<string, Map<string, AggregatedLearnedError>> => {
 			const idx = new Map<string, Map<string, AggregatedLearnedError>>();
 			for (const entry of aggregated) {
-				if (entry.totalCount < minOccurrences || entry.sessionCount < minSessions) continue;
-				// Covered by a built-in Tier-4 rule already — its hint is better targeted.
-				if (entry.matchedRuleIds.length > 0) continue;
+				// Shared gate with the hint registry (cross-session OR count-dominant,
+				// and never a pattern already covered by a built-in Tier-4 rule) so the
+				// preventive guard and the reactive hint never drift.
+				if (!qualifiesForLearnedRule(entry, { minOccurrences, minSessions, countDominantThreshold })) continue;
 				if (!entry.sampleArgs) continue;
 				let inner = idx.get(entry.tool);
 				if (!inner) {

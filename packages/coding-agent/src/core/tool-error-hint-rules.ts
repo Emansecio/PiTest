@@ -811,6 +811,14 @@ export interface ToolErrorHintRulesOptions {
 	learnedErrorMinOccurrences?: number;
 	/** Minimum distinct sessions before a learned error becomes a rule. Default: 2. */
 	learnedErrorMinSessions?: number;
+	/**
+	 * Count-dominant escape hatch: an error whose cumulative `totalCount` reaches
+	 * this threshold qualifies for a rule even from a SINGLE session, bypassing
+	 * the `minSessions` bar. Lets very high-frequency same-session mistakes
+	 * (e.g. the todo batch shape, task general-purpose) get covered instead of
+	 * being stranded by the >=2-sessions rule. Default: 5.
+	 */
+	learnedErrorCountDominantThreshold?: number;
 	/** Cap on how many learned-error rules to materialise. Default: 32. */
 	learnedErrorMaxRules?: number;
 }
@@ -860,6 +868,7 @@ function learnedRulesFor(
 	return createLearnedErrorRules(learnedErrors, {
 		minOccurrences: options.learnedErrorMinOccurrences,
 		minSessions: options.learnedErrorMinSessions,
+		countDominantThreshold: options.learnedErrorCountDominantThreshold,
 		maxRules: options.learnedErrorMaxRules,
 	});
 }
@@ -915,10 +924,46 @@ class LazyLearnedToolErrorHintRegistry extends Registry {
 // Dynamic rules from learned-error store
 // ---------------------------------------------------------------------------
 
+/** Default count-dominant threshold: totalCount at/above this qualifies from a single session. */
+export const DEFAULT_COUNT_DOMINANT_THRESHOLD = 5;
+
 interface LearnedErrorRuleOptions {
 	minOccurrences?: number;
 	minSessions?: number;
+	countDominantThreshold?: number;
 	maxRules?: number;
+}
+
+/** Resolved thresholds for {@link qualifiesForLearnedRule}. */
+export interface LearnedRuleThresholds {
+	minOccurrences: number;
+	minSessions: number;
+	countDominantThreshold: number;
+}
+
+/**
+ * Shared gate deciding whether an aggregated learned error qualifies for
+ * promotion to a Tier-4 rule (hint registry) or a preventive guard. Two
+ * independent paths qualify an entry:
+ *
+ *  - **standard**: recurred across sessions — `totalCount >= minOccurrences`
+ *    AND `sessionCount >= minSessions`.
+ *  - **count-dominant**: a very high cumulative `totalCount >= countDominantThreshold`,
+ *    even from a single session — closes the structural gap where a mistake the
+ *    model burns many times in ONE session was never covered.
+ *
+ * An entry already covered by a built-in rule (`matchedRuleIds`) never
+ * qualifies — its targeted hint is better. Used by BOTH the hint registry and
+ * the preventive guard so the two never drift.
+ */
+export function qualifiesForLearnedRule(
+	entry: Pick<AggregatedLearnedError, "totalCount" | "sessionCount" | "matchedRuleIds">,
+	thresholds: LearnedRuleThresholds,
+): boolean {
+	if (entry.matchedRuleIds.length > 0) return false;
+	const standard = entry.totalCount >= thresholds.minOccurrences && entry.sessionCount >= thresholds.minSessions;
+	const countDominant = entry.totalCount >= thresholds.countDominantThreshold;
+	return standard || countDominant;
 }
 
 /**
@@ -928,8 +973,9 @@ interface LearnedErrorRuleOptions {
  * burned it before.
  *
  * Skips entries that already have a `matchedRuleIds` entry — those are
- * already covered by built-in rules. Skips entries below the recurrence
- * threshold so we don't materialise a rule from a single flaky session.
+ * already covered by built-in rules. Qualification is delegated to
+ * {@link qualifiesForLearnedRule}: an entry passes either the cross-session
+ * recurrence bar or the count-dominant single-session bar.
  */
 export function createLearnedErrorRules(
 	aggregated: AggregatedLearnedError[],
@@ -937,15 +983,11 @@ export function createLearnedErrorRules(
 ): ToolErrorHintRule[] {
 	const minOccurrences = Math.max(2, options?.minOccurrences ?? 3);
 	const minSessions = Math.max(1, options?.minSessions ?? 2);
+	const countDominantThreshold = Math.max(1, options?.countDominantThreshold ?? DEFAULT_COUNT_DOMINANT_THRESHOLD);
 	const maxRules = Math.max(1, options?.maxRules ?? 32);
 
 	const candidates = aggregated
-		.filter(
-			(entry) =>
-				entry.totalCount >= minOccurrences &&
-				entry.sessionCount >= minSessions &&
-				entry.matchedRuleIds.length === 0,
-		)
+		.filter((entry) => qualifiesForLearnedRule(entry, { minOccurrences, minSessions, countDominantThreshold }))
 		.slice(0, maxRules);
 
 	return candidates.map((entry, index) => ({
