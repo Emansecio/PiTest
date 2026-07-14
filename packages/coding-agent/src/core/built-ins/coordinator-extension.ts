@@ -57,6 +57,41 @@ import { withAgentScope } from "../tools/hindsight-scope.ts";
 import { createMessageTool } from "../tools/message.ts";
 import { formatSize, RECALL_OUTPUT_CAP_BYTES, truncateHeadTail } from "../tools/truncate.ts";
 
+/**
+ * Cross-harness aliases for the built-in agent types. Frontier models trained on
+ * other harnesses reach for Claude Code's stock names (`general-purpose`,
+ * `code-reviewer`); the Pit builtins are `general` / `review`. Without this
+ * bridge a `task({type:"general-purpose"})` fails with "unknown agent type" once
+ * per session and never becomes a learned rule. Keys are lowercased.
+ */
+const AGENT_TYPE_ALIASES: Record<string, string> = {
+	"general-purpose": "general",
+	"code-reviewer": "review",
+};
+
+/**
+ * Resolve a raw `task` type param to a loaded agent type, tolerant of case and
+ * the cross-harness aliases above. Tries the exact name first (so a custom
+ * `.pit/agents/<Name>.md` with mixed case still resolves byte-for-byte), then
+ * folds case and applies the alias map, then scans case-insensitively for a
+ * custom type declared with different casing. Returns undefined when nothing
+ * matches so the caller still errors with the available-types list.
+ */
+function resolveAgentType(map: Map<string, AgentTypeDef>, rawType: string | undefined): AgentTypeDef | undefined {
+	const trimmed = rawType?.trim();
+	if (!trimmed) return undefined;
+	const direct = map.get(trimmed);
+	if (direct) return direct;
+	const lower = trimmed.toLowerCase();
+	const aliased = AGENT_TYPE_ALIASES[lower] ?? lower;
+	const byAlias = map.get(aliased);
+	if (byAlias) return byAlias;
+	for (const [key, value] of map) {
+		if (key.toLowerCase() === aliased) return value;
+	}
+	return undefined;
+}
+
 /** A subagent launched via `task({op:"spawn"})` — runs detached, collected later via poll/join. */
 interface PendingTask {
 	handle: string;
@@ -125,7 +160,7 @@ const taskSchema = Type.Object({
 	type: Type.Optional(
 		Type.String({
 			description:
-				"Reusable agent type from .pit/agents/<name>.md — applies its system prompt, tools, model, and thinking level as defaults (any field set explicitly here overrides). See this tool's description for the available types.",
+				"Reusable agent type from .pit/agents/<name>.md — applies its system prompt, tools, model, and thinking level as defaults (any field set explicitly here overrides). Built-in types: explore, plan, review, general (aliases general-purpose->general, code-reviewer->review; case-insensitive). Project/user types come from .pit/agents/<name>.md. See this tool's description for the full list.",
 		}),
 	),
 	name: Type.Optional(
@@ -1077,7 +1112,7 @@ export function createCoordinatorExtension(options: CoordinatorExtensionOptions)
 				}
 				const budgetBlocked = spawnBudgetBlock();
 				if (budgetBlocked) return budgetBlocked;
-				const agentType = p.type?.trim() ? agentTypeMap.get(p.type.trim()) : undefined;
+				const agentType = resolveAgentType(agentTypeMap, p.type);
 				if (p.type?.trim() && !agentType) {
 					return {
 						content: [

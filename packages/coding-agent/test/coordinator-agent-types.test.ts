@@ -126,6 +126,52 @@ describe("coordinator agent types", () => {
 		expect(text).toContain("model: haiku");
 	});
 
+	it("resolves the Claude Code alias general-purpose to the general builtin", async () => {
+		let captured = "";
+		const task = buildTask([
+			(ctx) => {
+				captured = ctx.systemPrompt ?? "";
+				return fauxAssistantMessage("done");
+			},
+		]);
+		const res = await exec(task, { op: "run", type: "general-purpose", prompt: "go" });
+		expect(isErr(res)).toBe(false);
+		expect(captured).toContain("general-purpose subagent");
+	});
+
+	it("resolves an agent type case-insensitively", async () => {
+		let captured = "";
+		const task = buildTask([
+			(ctx) => {
+				captured = ctx.systemPrompt ?? "";
+				return fauxAssistantMessage("done");
+			},
+		]);
+		const res = await exec(task, { op: "run", type: "General", prompt: "go" });
+		expect(isErr(res)).toBe(false);
+		expect(captured).toContain("general-purpose subagent");
+	});
+
+	it("resolves the code-reviewer alias to the review builtin", async () => {
+		let captured = "";
+		const task = buildTask([
+			(ctx) => {
+				captured = ctx.systemPrompt ?? "";
+				return fauxAssistantMessage("done");
+			},
+		]);
+		const res = await exec(task, { op: "run", type: "code-reviewer", prompt: "go" });
+		expect(isErr(res)).toBe(false);
+		expect(captured).toContain("critical code reviewer");
+	});
+
+	it("still errors on a genuinely unknown type after alias/case-fold", async () => {
+		const task = buildTask([fauxAssistantMessage("x")]);
+		const res = await exec(task, { op: "run", type: "code-monkey", prompt: "go" });
+		expect(isErr(res)).toBe(true);
+		expect(textOf(res)).toContain("unknown agent type");
+	});
+
 	it("advertises available types in the tool description", () => {
 		writeType("explorer.md", `---\nname: explorer\ndescription: read-only exploration\n---\nbody`);
 		const task = buildTask([fauxAssistantMessage("x")]);
