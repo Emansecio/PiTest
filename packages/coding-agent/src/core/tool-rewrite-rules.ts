@@ -544,6 +544,25 @@ const tier2Rules: ToolRewriteRule[] = [
 
 const tier3Rules: ToolRewriteRule[] = [
 	{
+		// todo({ todos: [...] }) / todo({ items: [...] }) — the Claude Code
+		// TodoWrite batch shape against a single-action schema. The biggest
+		// fingerprint in the corpus (8x+ over 4 sessions): the validation error
+		// does not teach the correct format, so the model re-guesses. Block with
+		// a copy-pasteable one-item-per-call recipe instead of auto-expanding
+		// (expansion would fabricate ids/ordering the model never asked for).
+		id: "todo-batch-not-supported",
+		appliesTo: "todo",
+		matcher: (c) => {
+			const args = c.arguments as Record<string, unknown>;
+			return Array.isArray(args.todos) || Array.isArray(args.items);
+		},
+		action: {
+			tier: "block",
+			reason: () =>
+				'This todo tool takes ONE item per call, not a batch. For each item call: todo({ action: "create", subject: "<title>", activeForm: "<doing...>" }) — then todo({ action: "update", id: <id>, status: "in_progress"|"completed" }) to progress it. Call todo({ action: "list" }) to see current ids.',
+		},
+	},
+	{
 		// edit({ edits: [{ oldText: X, newText: X }] }) — no-op. Executing
 		// reads the file, fails the match (because nothing changed), and
 		// returns a confusing error. Reject up front.

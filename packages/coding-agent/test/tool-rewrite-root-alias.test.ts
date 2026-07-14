@@ -45,3 +45,35 @@ describe("root -> path alias rewrite", () => {
 		expect(outcome.kind).toBe("pass");
 	});
 });
+
+describe("todo batch-format block", () => {
+	const registry = createDefaultToolRewriteRegistry();
+
+	it("blocks todo({todos:[...]}) with a one-item-per-call recipe", () => {
+		const outcome = registry.apply(
+			fauxToolCall("todo", { todos: [{ content: "a", status: "pending" }, { content: "b" }] }),
+		);
+		expect(outcome.kind).toBe("rejected");
+		if (outcome.kind !== "rejected") return;
+		expect(outcome.ruleId).toBe("todo-batch-not-supported");
+		expect(outcome.error).toContain('action: "create"');
+		expect(outcome.error).toContain('action: "list"');
+	});
+
+	it("blocks the items[] batch alias too", () => {
+		const outcome = registry.apply(fauxToolCall("todo", { items: [{ subject: "a" }] }));
+		expect(outcome.kind).toBe("rejected");
+		if (outcome.kind !== "rejected") return;
+		expect(outcome.ruleId).toBe("todo-batch-not-supported");
+	});
+
+	it("lets a valid single-action todo call pass", () => {
+		const outcome = registry.apply(fauxToolCall("todo", { action: "create", subject: "x", activeForm: "doing x" }));
+		expect(outcome.kind).toBe("pass");
+	});
+
+	it("does not fire when todos is not an array", () => {
+		const outcome = registry.apply(fauxToolCall("todo", { action: "list", todos: "nope" as unknown as [] }));
+		expect(outcome.kind).toBe("pass");
+	});
+});
