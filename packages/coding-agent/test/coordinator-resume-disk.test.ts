@@ -7,13 +7,14 @@
  * that handle by reading the file, and the file is removed on success.
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxProviderRegistration, fauxAssistantMessage, registerFauxProvider } from "@pit/ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { createCoordinatorExtension } from "../src/core/built-ins/coordinator-extension.js";
+import { saveResumeState } from "../src/core/coordinator/resume-store.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 
@@ -28,7 +29,14 @@ describe("coordinator op:resume from disk (Tier 2)", () => {
 
 	// A coordinator bound to `root` as cwd, with its OWN in-memory state — calling
 	// this twice models two separate Pit processes sharing a working directory.
-	function freshCoordinator(cwd: string, responses: Parameters<FauxProviderRegistration["setResponses"]>[0]) {
+	function freshCoordinator(
+		cwd: string,
+		responses: Parameters<FauxProviderRegistration["setResponses"]>[0],
+		retargetToolsForCwd?: (
+			tools: import("@pit/agent-core").AgentTool[],
+			cwd: string,
+		) => import("@pit/agent-core").AgentTool[],
+	) {
 		const faux = registerFauxProvider();
 		fauxes.push(faux);
 		faux.setResponses(responses);
@@ -40,6 +48,7 @@ describe("coordinator op:resume from disk (Tier 2)", () => {
 			modelRegistry,
 			getParentModel: () => model,
 			getAvailableTools: () => [],
+			retargetToolsForCwd,
 			convertToLlm: (messages) => convertToLlm(messages),
 			getCwd: () => cwd,
 		});
@@ -114,6 +123,28 @@ describe("coordinator op:resume from disk (Tier 2)", () => {
 		expect(isErr(r3)).toBe(false);
 		expect(textOf(r3)).toContain("FINALLY DONE");
 		expect(existsSync(stateFile)).toBe(false);
+	});
+
+	it("rebinds a kept-worktree Tier-2 resume to its persisted isolated cwd", async () => {
+		root = mkdtempSync(join(tmpdir(), "pit-rd-"));
+		const keptWorktree = join(root, ".pit", "worktrees", "kept-probe");
+		mkdirSync(keptWorktree, { recursive: true });
+		await saveResumeState(root, {
+			handle: "kept-probe",
+			messages: [{ role: "user", content: [{ type: "text", text: "continue" }], timestamp: Date.now() }] as never,
+			cwd: keptWorktree,
+			depth: 1,
+			savedAt: Date.now(),
+		});
+		let reboundCwd: string | undefined;
+		const task = freshCoordinator(root, [fauxAssistantMessage("DONE IN KEPT TREE")], (tools, cwd) => {
+			reboundCwd = cwd;
+			return tools;
+		});
+		const result = await exec(task, { op: "resume", name: "kept-probe" });
+		expect(isErr(result)).toBe(false);
+		expect(reboundCwd).toBe(keptWorktree);
+		expect(textOf(result)).toContain("DONE IN KEPT TREE");
 	});
 
 	it("errors clearly when neither memory nor disk has the handle", async () => {

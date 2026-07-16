@@ -136,6 +136,13 @@ export class BashGroupComponent extends Container {
 		return null;
 	}
 
+	private errorExec(): ToolExecutionComponent | null {
+		for (const e of this.execs) {
+			if (e.getActivityState() === "error" && !e.isAborted()) return e;
+		}
+		return null;
+	}
+
 	private summary(state: GroupState, width: number): string {
 		const n = this.execs.length;
 		const pending = state === "pending";
@@ -152,6 +159,18 @@ export class BashGroupComponent extends Container {
 	private pendingSuffix(state: GroupState, width: number): string {
 		if (state !== "pending" || this.execs.length <= 1) return "";
 		const exec = this.pendingExec();
+		if (!exec) return "";
+		const target = this.commandText(exec, width);
+		if (!stripAnsi(target).trim()) return "";
+		return ` ${theme.fg("muted", `— ${target}`)}`;
+	}
+
+	/** Mirror of pendingSuffix for the error state: name the command that
+	 * failed on the collapsed header, so finding the culprit doesn't require
+	 * expanding the whole group. */
+	private errorSuffix(state: GroupState, width: number): string {
+		if (state !== "error" || this.execs.length <= 1) return "";
+		const exec = this.errorExec();
 		if (!exec) return "";
 		const target = this.commandText(exec, width);
 		if (!stripAnsi(target).trim()) return "";
@@ -179,7 +198,7 @@ export class BashGroupComponent extends Container {
 		).length;
 		const summaryBudget = Math.max(0, width - prefixCells);
 		const header = truncateToWidth(
-			`${this.summary(state, summaryBudget)}${this.pendingSuffix(state, summaryBudget)}`,
+			`${this.summary(state, summaryBudget)}${this.pendingSuffix(state, summaryBudget)}${this.errorSuffix(state, summaryBudget)}`,
 			width,
 		);
 		const lines = [header];

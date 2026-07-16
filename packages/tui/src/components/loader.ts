@@ -236,6 +236,20 @@ export class Loader extends Text {
 		this.updateDisplay();
 	}
 
+	/**
+	 * Backdate the elapsed origin (epoch ms). Hosts that rebuild the loader
+	 * mid-task (retry backoff, compaction) pass the original start time so the
+	 * counter continues the clock the user was already watching instead of
+	 * restarting from zero. No-op while the counter is disabled.
+	 */
+	setElapsedOrigin(originMs: number): void {
+		if (!this.elapsedEnabled || originMs === this.startedAtMs) return;
+		this.startedAtMs = originMs;
+		this.lastElapsedSec = -1;
+		this.coloredElapsed = "";
+		this.updateDisplay();
+	}
+
 	/** Elapsed milliseconds since the counter was enabled, discounting paused intervals. */
 	getElapsedMs(): number {
 		if (!this.elapsedEnabled || this.startedAtMs <= 0) {

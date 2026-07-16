@@ -23,7 +23,7 @@ import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
-import { getClaudeCodeSkillsDir, loadSkills } from "./skills.ts";
+import { getClaudeCodeSkillsDir, loadSkills, prewarmSkillFrontmatter } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
 
 /**
@@ -568,6 +568,19 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 
 		this.lastSkillPaths = skillPaths;
+		// Warm the SKILL.md frontmatter cache with a parallel fs/promises fan-out
+		// before the sync loadSkills pass inside updateSkillsFromPaths — on a cold
+		// boot ~160 serial open/read/parse calls (~200ms) collapse into overlapped
+		// async I/O; the sync pass then runs on in-memory hits. Behavior-neutral
+		// (the sync loader still owns results/diagnostics); PIT_NO_SKILL_PREWARM=1
+		// opts out.
+		await prewarmSkillFrontmatter({
+			cwd: this.cwd,
+			agentDir: this.agentDir,
+			skillPaths,
+			includeDefaults: false,
+		});
+		time("reload-skill-prewarm");
 		this.updateSkillsFromPaths(skillPaths, metadataByPath);
 		time("reload-update-skills");
 		for (const p of this.additionalSkillPaths) {

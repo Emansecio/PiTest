@@ -19,7 +19,19 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "f
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.ts";
+import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { resolveConfigValue, resolveConfigValueUncachedAsync } from "./resolve-config-value.ts";
+
+/**
+ * Background pre-refresh window: when `getApiKey` hands out a still-valid OAuth
+ * token that expires within this window, a fire-and-forget refresh is kicked
+ * off so the (30s-timeout) refresh POST + file lock happen OUTSIDE the request
+ * hot path. Sized comfortably above the 60s proactive buffer in
+ * `@pit/ai` `getOAuthApiKey` and Anthropic's 5-minute margin already baked into
+ * `expires`, so the synchronous refresh path almost never triggers.
+ * Kill-switch: PIT_NO_OAUTH_PREFRESH=1.
+ */
+const OAUTH_PREFRESH_WINDOW_MS = 10 * 60_000;
 
 // Shared buffer backing Atomics.wait() for lock-retry sleeps. Yields the thread
 // instead of busy-spinning (mirrors SettingsManager's lock-retry strategy).
@@ -434,9 +446,18 @@ export class AuthStorage {
 	/**
 	 * Refresh OAuth token with backend locking to prevent race conditions.
 	 * Multiple pi instances may try to refresh simultaneously when tokens expire.
+	 *
+	 * `minValidityMs` widens the "needs refresh" test: a token that is still
+	 * valid but expires within that window is force-refreshed. The background
+	 * pre-refresh passes `OAUTH_PREFRESH_WINDOW_MS`; the synchronous hot-path
+	 * fallback keeps the default 0 (refresh only when actually expired). The
+	 * post-lock re-read makes this single-flight across instances too: if
+	 * another process already refreshed, the fresh `expires` short-circuits
+	 * without a network call.
 	 */
 	private async refreshOAuthTokenWithLock(
 		providerId: OAuthProviderId,
+		minValidityMs = 0,
 	): Promise<{ apiKey: string; newCredentials: OAuthCredentials } | null> {
 		const provider = getOAuthProvider(providerId);
 		if (!provider) {
@@ -453,8 +474,33 @@ export class AuthStorage {
 				return { result: null };
 			}
 
-			if (Date.now() < cred.expires) {
+			if (Date.now() < cred.expires - minValidityMs) {
 				return { result: { apiKey: provider.getApiKey(cred), newCredentials: cred } };
+			}
+
+			// Pre-refresh path: the token is still valid but inside the near-expiry
+			// window. `getOAuthApiKey` would decline to refresh a token this far from
+			// `expires` (its buffer is 60s), so force the refresh directly. Error
+			// message mirrors getOAuthApiKey's so downstream auth-failure matching
+			// (isOAuthReauthRequired, E2E autoskip) treats both paths identically.
+			if (Date.now() < cred.expires) {
+				let newCredentials: OAuthCredentials;
+				try {
+					newCredentials = await provider.refreshToken(cred);
+				} catch (error) {
+					const detail = error instanceof Error ? error.message : String(error);
+					throw new Error(`Failed to refresh OAuth token for ${providerId}: ${detail}`);
+				}
+				const merged: AuthStorageData = {
+					...currentData,
+					[providerId]: { type: "oauth", ...newCredentials },
+				};
+				this.data = merged;
+				this.loadError = null;
+				return {
+					result: { apiKey: provider.getApiKey(newCredentials), newCredentials },
+					next: JSON.stringify(merged, null, 2),
+				};
 			}
 
 			const oauthCreds: Record<string, OAuthCredentials> = {};
@@ -479,6 +525,41 @@ export class AuthStorage {
 		});
 
 		return result;
+	}
+
+	/** Providers with a background pre-refresh currently in flight (single-flight guard). */
+	private prefreshInFlight = new Set<string>();
+
+	/**
+	 * Fire-and-forget near-expiry OAuth refresh (§2.3): kicked off by `getApiKey`
+	 * when the returned token is still valid but expires within
+	 * `OAUTH_PREFRESH_WINDOW_MS`, so the refresh POST (30s timeout worst case)
+	 * happens outside the request hot path. Errors are swallowed — the
+	 * synchronous refresh in `getApiKey` remains the correct fallback if the
+	 * token actually expires before a background attempt succeeds. The in-flight
+	 * set prevents stacking within this instance; the file lock (plus the
+	 * post-lock `expires` re-check) covers races across instances.
+	 */
+	private maybePrefreshOAuthToken(providerId: string, cred: OAuthCredential): void {
+		if (isTruthyEnvFlag(process.env.PIT_NO_OAUTH_PREFRESH)) {
+			return;
+		}
+		const remainingMs = cred.expires - Date.now();
+		if (remainingMs <= 0 || remainingMs >= OAUTH_PREFRESH_WINDOW_MS) {
+			return;
+		}
+		if (this.prefreshInFlight.has(providerId)) {
+			return;
+		}
+		this.prefreshInFlight.add(providerId);
+		void this.refreshOAuthTokenWithLock(providerId as OAuthProviderId, OAUTH_PREFRESH_WINDOW_MS)
+			.catch(() => {
+				// Best-effort: a failed background refresh must stay invisible —
+				// the sync path will refresh (and surface real errors) on demand.
+			})
+			.finally(() => {
+				this.prefreshInFlight.delete(providerId);
+			});
 	}
 
 	/**
@@ -542,7 +623,10 @@ export class AuthStorage {
 					throw error;
 				}
 			} else {
-				// Token not expired, use current access token
+				// Token not expired: hand it out immediately, but if it is inside the
+				// near-expiry window, kick off a background refresh so the NEXT call
+				// never pays the synchronous refresh on the hot path.
+				this.maybePrefreshOAuthToken(providerId, cred);
 				return provider.getApiKey(cred);
 			}
 		}

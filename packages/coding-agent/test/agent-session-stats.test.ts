@@ -18,7 +18,7 @@ import { createTestResourceLoader } from "./utilities.js";
 
 const model = getModel("anthropic", "claude-sonnet-5")!;
 
-function createUsage(totalTokens: number): Usage {
+function createUsage(totalTokens: number, cost = 0): Usage {
 	return {
 		input: totalTokens,
 		output: 0,
@@ -26,23 +26,23 @@ function createUsage(totalTokens: number): Usage {
 		cacheWrite: 0,
 		totalTokens,
 		cost: {
-			input: 0,
+			input: cost,
 			output: 0,
 			cacheRead: 0,
 			cacheWrite: 0,
-			total: 0,
+			total: cost,
 		},
 	};
 }
 
-function createAssistantMessage(text: string, totalTokens: number, timestamp: number): AssistantMessage {
+function createAssistantMessage(text: string, totalTokens: number, timestamp: number, cost = 0): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
-		usage: createUsage(totalTokens),
+		usage: createUsage(totalTokens, cost),
 		stopReason: "stop",
 		timestamp,
 	};
@@ -116,27 +116,42 @@ describe("AgentSession.getSessionStats", () => {
 		}
 	});
 
-	it("reports an immediate structural estimate after compaction (not stale, not null)", () => {
+	it("keeps lifetime usage totals while reporting active-context counts after compaction", () => {
 		const { session, sessionManager } = createSession();
 
 		try {
 			sessionManager.appendMessage(createUserMessage("first", 1));
-			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2));
+			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 1.25));
 			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
-			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4));
+			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4, 2.75));
 			sessionManager.appendCompaction("summary", keptUserId, 195_000);
 			sessionManager.appendMessage(createUserMessage("third", 5));
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
-			expect(stats.tokens.input).toBe(195_000);
+			// Usage and cost include both persisted provider responses, including
+			// the response removed from active context by compaction.
+			expect(stats.tokens.input).toBe(375_000);
+			expect(stats.cost).toBe(4);
+			// Message and tool counts continue to describe only active context.
+			expect(stats).toMatchObject({
+				userMessages: 2,
+				assistantMessages: 1,
+				toolCalls: 0,
+				toolResults: 0,
+				totalMessages: 4,
+			});
 			expect(stats.contextUsage).toBeDefined();
 			// No provider usage exists after the compaction boundary, so the size is a STRUCTURAL
 			// estimate over the reduced messages — flagged, small, and nowhere near the stale 195k.
 			expect(stats.contextUsage?.estimated).toBe(true);
 			expect(stats.contextUsage?.tokens ?? 0).toBeGreaterThan(0);
 			expect(stats.contextUsage?.tokens ?? Number.POSITIVE_INFINITY).toBeLessThan(50_000);
+			expect(stats.contextUsage?.wireTokens ?? Number.POSITIVE_INFINITY).toBeLessThan(50_000);
 			expect(stats.contextUsage?.percent ?? 0).toBeGreaterThan(0);
+			expect(stats.contextUsage?.percent ?? Number.POSITIVE_INFINITY).toBeLessThan(
+				(50_000 / model.contextWindow) * 100,
+			);
 		} finally {
 			session.dispose();
 		}
@@ -185,7 +200,9 @@ describe("AgentSession.getSessionStats", () => {
 			syncAgentMessages(session, sessionManager);
 
 			const stats = session.getSessionStats();
-			expect(stats.tokens.input).toBe(220_000);
+			// Lifetime totals retain all three persisted provider responses, while
+			// current context usage is anchored only to the post-compaction response.
+			expect(stats.tokens.input).toBe(400_000);
 			expect(stats.contextUsage).toBeDefined();
 			expect(stats.contextUsage?.tokens).toBe(25_000);
 			// Usage-anchored: no system/tool re-add on top of provider usage.

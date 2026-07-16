@@ -48,6 +48,14 @@ function markPersisted(harness: Harness): void {
 	(harness.sessionManager as unknown as { isPersisted: () => boolean }).isPersisted = () => true;
 }
 
+// The turn_end flush is async (serialized write queue — see 5.4): awaiting the
+// session's tail promise is the write barrier before asserting on-disk state.
+// Durability itself is unchanged: the write is enqueued AT turn_end, before
+// prompt() resolves, and dispose awaits the same queue.
+function awaitLearnedErrorsFlush(harness: Harness): Promise<void> {
+	return (harness.session as unknown as { _learnedErrorsFlushTail: Promise<void> })._learnedErrorsFlushTail;
+}
+
 describe("CR4 — learned-error runtime persistence", () => {
 	const harnesses: Harness[] = [];
 	let agentDir: string;
@@ -90,7 +98,9 @@ describe("CR4 — learned-error runtime persistence", () => {
 		const learned = (harness.session as unknown as { _learnedErrors: Map<string, unknown> })._learnedErrors;
 		expect(learned.size).toBe(1);
 
-		// …and ALREADY on disk, with no dispose having run.
+		// …and ALREADY on disk (write enqueued at turn_end; await the queue only
+		// as a barrier for the assertion), with no dispose having run.
+		await awaitLearnedErrorsFlush(harness);
 		const file = join(learnedDir(), `${harness.session.sessionId}.jsonl`);
 		expect(existsSync(file)).toBe(true);
 
@@ -118,6 +128,7 @@ describe("CR4 — learned-error runtime persistence", () => {
 			fauxAssistantMessage("b-done"),
 		]);
 		await harness.session.prompt("second");
+		await awaitLearnedErrorsFlush(harness);
 
 		// Exactly ONE session file for this session (overwrite, not append-per-turn).
 		const files = readdirSync(learnedDir()).filter((n) => n.endsWith(".jsonl"));
@@ -162,17 +173,20 @@ describe("CR4 — learned-error runtime persistence", () => {
 			fauxAssistantMessage("done"),
 		]);
 		await harness.session.prompt("first");
+		await awaitLearnedErrorsFlush(harness);
 
 		const file = join(learnedDir(), `${harness.session.sessionId}.jsonl`);
 		expect(existsSync(file)).toBe(true);
 
 		// Delete the file as a write sentinel: if the next (clean) turn flushes, the
 		// file reappears; if the dirty flag correctly gates it, it stays gone.
+		// (Turn 1's write was already awaited above, so it cannot recreate it.)
 		rmSync(file);
 
 		// Turn 2: a plain text turn learns nothing new -> dirty stays false.
 		harness.setResponses([fauxAssistantMessage("nothing to do")]);
 		await harness.session.prompt("second");
+		await awaitLearnedErrorsFlush(harness);
 
 		const dirty = (harness.session as unknown as { _learnedErrorsDirty: boolean })._learnedErrorsDirty;
 		expect(dirty).toBe(false);

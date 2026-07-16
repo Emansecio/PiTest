@@ -3,6 +3,7 @@
 LLMs have limited context windows. When conversations grow too long, pit uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
 
 **Source files** (PiTest):
+
 - `packages/coding-agent/src/core/compaction/compaction.ts` - Auto-compaction logic
 - `packages/coding-agent/src/core/compaction/branch-summarization.ts` - Branch summarization
 - `packages/coding-agent/src/core/compaction/utils.ts` - Shared utilities (file tracking, serialization)
@@ -29,7 +30,7 @@ Both use the same structured summary format and track file operations cumulative
 Auto-compaction is a **stack of layers**, not a single threshold check:
 
 | Layer | Trigger | Uses LLM summarizer? |
-|-------|---------|----------------------|
+| ------- | --------- | ---------------------- |
 | **Hard threshold** | `contextTokens > contextWindow − effectiveReserve` (+ ~8k hysteresis) | Yes (sync) |
 | **Soft / predictive background** | Approaching the hard threshold (~1× `keepRecentTokens` early) at end of turn | Yes (async; joined before the next prompt) |
 | **Presend overflow** | Full wire estimate (messages + system prompt + tool schemas + pending user + thinking headroom) exceeds a dynamic ratio (~0.95 → ~0.88 under pressure) | Yes |
@@ -41,6 +42,8 @@ Auto-compaction is a **stack of layers**, not a single threshold check:
 By default, `reserveTokens` is 16384 and `keepRecentTokens` is 20000 (configurable in `~/.pit/agent/settings.json` or `<project-dir>/.pit/settings.json`). Both scale with large context windows — see [Settings → Compaction](settings.md#compaction).
 
 **Fusion mode** runs the same background join + hard threshold + presend preflight before panel/judge/writer stages (it does not start a solo `agent.continue()` after compacting).
+
+Immediately after compaction, the footer's `CTX` value is a `~`-marked structural estimate over the reduced messages, system prompt, and active tool schemas. It deliberately ignores usage anchors retained from before compaction. The next successful provider response replaces that estimate with provider-confirmed occupancy.
 
 Tunables and kill-switches (`PIT_PRESEND_OVERFLOW_RATIO`, `PIT_NO_MID_TURN_PRESSURE_GUARD`, `PIT_NO_PROACTIVE_PRUNE`, …) are listed in [token-economy-tuning.md](../../../docs/token-economy-tuning.md).
 
@@ -111,12 +114,14 @@ Split turn (one huge turn exceeds budget):
 ```
 
 For split turns, pit generates two summaries and merges them:
+
 1. **History summary**: Previous context (if any)
 2. **Turn prefix summary**: The early part of the split turn
 
 ### Cut Point Rules
 
 Valid cut points are:
+
 - User messages
 - Assistant messages
 - BashExecution messages
@@ -186,6 +191,7 @@ After navigation with summary:
 ### Cumulative File Tracking
 
 Both compaction and branch summarization track files cumulatively. When generating a summary, pit extracts file operations from:
+
 - Tool calls in the messages being summarized
 - Previous compaction or branch summary `details` (if any)
 
@@ -413,7 +419,7 @@ Configure compaction in `~/.pit/agent/settings.json` or `<project-dir>/.pit/sett
 ```
 
 | Setting | Default | Description |
-|---------|---------|-------------|
+| --------- | --------- | ------------- |
 | `enabled` | `true` | Enable auto-compaction |
 | `reserveTokens` | `16384` | Tokens to reserve for LLM response |
 | `keepRecentTokens` | `20000` | Recent tokens to keep (not summarized) |

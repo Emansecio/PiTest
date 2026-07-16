@@ -10,11 +10,11 @@ const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 
-// Trailing-debounce window for terminal resize (SIGWINCH) events. During a
-// continuous drag-resize the terminal emits many "resize" events per second;
+// Debounce window for terminal resize (SIGWINCH) events, applied leading+trailing.
+// During a continuous drag-resize the terminal emits many "resize" events per second;
 // each one would otherwise trigger a full clear+scrollback redraw of the whole
-// transcript. Coalescing the burst into a single redraw at rest keeps drags
-// smooth without changing what the eventual render does.
+// transcript. Coalescing the burst into a leading redraw (so the drag isn't frozen)
+// plus one trailing redraw at rest keeps drags smooth without repainting mid-burst.
 const TERMINAL_RESIZE_DEBOUNCE_MS = 70;
 
 /**
@@ -90,6 +90,9 @@ export class ProcessTerminal implements Terminal {
 	// SIGWINCH events down to a single resizeHandler() call once the drag stops.
 	private resizeListener?: () => void;
 	private resizeDebounceTimer?: ReturnType<typeof setTimeout>;
+	// Set when a resize event arrives while resizeDebounceTimer is already running (mid-burst),
+	// so the timer's expiry knows a distinct trailing frame is owed beyond the leading one.
+	private resizePendingTrailing = false;
 	private kittyFallbackTimer?: ReturnType<typeof setTimeout>;
 	private _kittyProtocolActive = false;
 	private _modifyOtherKeysActive = false;
@@ -139,16 +142,24 @@ export class ProcessTerminal implements Terminal {
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		process.stdout.write("\x1b[?2004h");
 
-		// Set up resize handler immediately. Wrap it in a trailing debounce so a
-		// continuous drag-resize coalesces into a single redraw at rest instead
-		// of ~60 full clear+scrollback redraws per second.
+		// Set up resize handler with a leading+trailing debounce: the first event of a
+		// burst repaints immediately (so a drag-resize isn't frozen until you let go),
+		// and later events in the same burst only rearm the trailing timer so the final
+		// settled size still gets one closing redraw. No repaints in between - each one
+		// is a full clear+scrollback redraw and doing that per SIGWINCH would be ~60/sec.
 		this.resizeListener = () => {
 			if (this.resizeDebounceTimer) {
+				this.resizePendingTrailing = true;
 				clearTimeout(this.resizeDebounceTimer);
+			} else {
+				this.resizeHandler?.();
 			}
 			this.resizeDebounceTimer = setTimeout(() => {
 				this.resizeDebounceTimer = undefined;
-				this.resizeHandler?.();
+				if (this.resizePendingTrailing) {
+					this.resizePendingTrailing = false;
+					this.resizeHandler?.();
+				}
 			}, TERMINAL_RESIZE_DEBOUNCE_MS);
 			(this.resizeDebounceTimer as { unref?: () => void }).unref?.();
 		};
@@ -378,6 +389,7 @@ export class ProcessTerminal implements Terminal {
 			clearTimeout(this.resizeDebounceTimer);
 			this.resizeDebounceTimer = undefined;
 		}
+		this.resizePendingTrailing = false;
 		if (this.resizeListener) {
 			process.stdout.removeListener("resize", this.resizeListener);
 			this.resizeListener = undefined;

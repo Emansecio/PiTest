@@ -90,13 +90,50 @@ describe("Editor border rule", () => {
 		assert.ok(!bottom.includes("╰"));
 	});
 
-	it("draws a closed ╰ bottom rule when closedBottom is true", () => {
+	it("draws a closed straight bottom rule when closedBottom is true", () => {
 		const editor = new Editor(createTestTUI(40, 24), defaultEditorTheme, { closedBottom: true });
 		editor.setText("hi");
 		const lines = editor.render(40);
 		const bottom = stripVTControlCharacters(lines[lines.length - 1] ?? "");
-		assert.ok(bottom.startsWith("╰"), `expected closed bottom rule, got: ${JSON.stringify(bottom)}`);
+		assert.match(bottom, /^─+$/, `expected closed bottom rule, got: ${JSON.stringify(bottom)}`);
 		assert.strictEqual(visibleWidth(bottom), 40);
+	});
+
+	it("draws a complete rounded frame when closedFrame is true", () => {
+		const editor = new Editor(createTestTUI(40, 24), defaultEditorTheme, { closedFrame: true, paddingX: 1 });
+		editor.setText("hello");
+		const lines = editor.render(40).map((line) => stripVTControlCharacters(line));
+
+		assert.match(lines[0] ?? "", /^╭─+╮$/);
+		assert.match(lines[1] ?? "", /^│ hello.*│$/);
+		assert.match(lines[2] ?? "", /^╰─+╯$/);
+		for (const line of lines) assert.strictEqual(visibleWidth(line), 40);
+	});
+
+	it("keeps multiline framed content within the requested width", () => {
+		const editor = new Editor(createTestTUI(12, 24), defaultEditorTheme, { closedFrame: true });
+		editor.setText("first line\nsecond line");
+		const lines = editor.render(12).map((line) => stripVTControlCharacters(line));
+
+		assert.ok(lines.slice(1, -1).every((line) => line.startsWith("│") && line.endsWith("│")));
+		for (const line of lines) assert.strictEqual(visibleWidth(line), 12);
+	});
+
+	it("falls back safely when the terminal is too narrow for side borders", () => {
+		const editor = new Editor(createTestTUI(2, 24), defaultEditorTheme, { closedFrame: true });
+		editor.setText("x");
+		for (const line of editor.render(2)) {
+			assert.ok(visibleWidth(line) <= 2, `line exceeds width: ${JSON.stringify(line)}`);
+		}
+	});
+
+	it("renders only editable content when embedded in a parent frame", () => {
+		const editor = new Editor(createTestTUI(20, 24), defaultEditorTheme, { embedded: true, paddingX: 1 });
+		editor.setText("hello");
+		const lines = editor.render(20).map((line) => stripVTControlCharacters(line));
+
+		assert.deepStrictEqual(lines, [" hello              "]);
+		assert.strictEqual(visibleWidth(lines[0] ?? ""), 20);
 	});
 });
 

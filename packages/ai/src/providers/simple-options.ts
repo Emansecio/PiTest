@@ -8,18 +8,28 @@ import type {
 	ThinkingLevel,
 } from "../types.ts";
 
+/**
+ * Resolve the effective prompt-cache retention.
+ *
+ * Precedence: `PIT_CACHE_RETENTION` env > explicit caller option > default.
+ * The env var is the operator kill-switch and outranks call-site values on
+ * purpose: callers now pass adaptive per-session retention ("long" for the
+ * main interactive session, "short" for subagents / one-shot print/RPC runs —
+ * see coding-agent `sdk.ts` and `coordinator/spawn.ts`), and the env override
+ * must keep ruling over all of them.
+ */
 export function resolveCacheRetention(
 	cacheRetention: CacheRetention | undefined,
 	defaultValue: CacheRetention = "short",
 ): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
 	if (typeof process !== "undefined") {
 		const env = process.env.PIT_CACHE_RETENTION;
 		if (env === "short" || env === "none" || env === "long") {
 			return env;
 		}
+	}
+	if (cacheRetention) {
+		return cacheRetention;
 	}
 	return defaultValue;
 }

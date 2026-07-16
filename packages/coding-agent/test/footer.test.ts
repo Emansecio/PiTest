@@ -38,6 +38,8 @@ interface MakeFooterOptions {
 	contextUsage?: { tokens: number; percent: number; contextWindow: number; estimated?: boolean } | null;
 	/** Providers visible to the registry (display shows the model id only). */
 	providerCount?: number;
+	/** Model id rendered in the identity row. */
+	modelId?: string;
 	/** Mark the model as a reasoning model with this thinking level. */
 	thinkingLevel?: string;
 	/** Session cwd (defaults to a plain project path). */
@@ -67,6 +69,7 @@ function makeFooter({
 	cost = 0,
 	contextUsage = null,
 	providerCount = 1,
+	modelId,
 	thinkingLevel,
 	cwd = "C:/x",
 	launchCwd,
@@ -76,9 +79,14 @@ function makeFooter({
 	density = "full",
 }: MakeFooterOptions = {}): FooterComponent {
 	// A subscription tag needs a truthy model for isUsingOAuth(state.model).
-	const needsModel = usingOAuth || providerCount > 1 || thinkingLevel !== undefined;
+	const needsModel = usingOAuth || providerCount > 1 || thinkingLevel !== undefined || modelId !== undefined;
 	const model = needsModel
-		? { id: "test-model", provider: "anthropic", contextWindow: 200000, reasoning: thinkingLevel !== undefined }
+		? {
+				id: modelId ?? "test-model",
+				provider: "anthropic",
+				contextWindow: 200000,
+				reasoning: thinkingLevel !== undefined,
+			}
 		: undefined;
 	const entries =
 		cost > 0
@@ -307,7 +315,8 @@ it("does not collapse when auto-compact is off on an idle session", () => {
 it("keeps the thinking chip on a narrow collapsed line", () => {
 	const footer = makeFooter({ thinkingLevel: "high", permissions: "auto", usingOAuth: true, autoCompact: true });
 	const lines = footer.render(30).map(stripAnsi);
-	expect(lines.some((line) => line.includes("✦ High"))).toBe(true);
+	expect(lines.some((line) => line.includes("High"))).toBe(true);
+	expect(lines.join("\n")).not.toContain("✦");
 });
 
 it("flags no-compact (warning) only when auto-compact is OFF — the abnormal state", () => {
@@ -382,11 +391,11 @@ it("never reads untouched: sub-1% usage rounds up to 1%, tiny usage shows <1%", 
 	expect(tinyLines[1]).toContain("▰");
 });
 
-it("shows the home profile folder in the footer when session cwd is the home directory", () => {
+it("omits the redundant home profile label from the initial composer", () => {
 	const home = homedir();
 	const footer = makeFooter({ cwd: home });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain(`${basename(home)} (home)`);
+	expect(lines[0]).not.toContain(`${basename(home)} (home)`);
 });
 
 it("keeps the home label when a branch gives it context", () => {
@@ -412,25 +421,33 @@ it("shows only the model id, never the provider, even with several providers ava
 	expect(lines[0]).not.toContain("anthropic");
 });
 
-it("renders the thinking level as a ✦ chip on reasoning models", () => {
-	const footer = makeFooter({ thinkingLevel: "high" });
+it("renders a compact model name in the composer identity", () => {
+	const footer = makeFooter({ modelId: "claude-opus-4-8" });
 	const lines = footer.render(80).map(stripAnsi);
-	expect(lines[0]).toContain("test-model • ✦ High");
+	expect(lines[0]).toContain("Opus 4.8");
+	expect(lines[0]).not.toContain("claude-opus-4-8");
 });
 
-it("keeps the ✦ chip intact on a narrow line, truncating the model id instead", () => {
+it("renders the thinking level without a decorative icon on reasoning models", () => {
+	const footer = makeFooter({ thinkingLevel: "high" });
+	const lines = footer.render(80).map(stripAnsi);
+	expect(lines[0]).toContain("test-model • High");
+	expect(lines[0]).not.toContain("✦");
+});
+
+it("keeps the thinking chip intact on a narrow line, truncating the model id instead", () => {
 	// At a tight width the right cluster must shrink the MODEL id (with ellipsis),
-	// never the protected `✦ High` chip — otherwise it clips to a dangling `✦`.
+	// never the protected `High` chip.
 	const footer = makeFooter({
 		thinkingLevel: "high",
 		providerCount: 2,
 		contextUsage: { tokens: 1000, percent: 5, contextWindow: 200000 },
 	});
-	// Width 16 < model id (10) + chip (9): the id must yield, the chip must not.
+	// Width 16 < model id + chip: the id must yield, the chip must not.
 	const lines = footer.render(16).map(stripAnsi);
-	const modelLine = lines.find((line) => line.includes("✦ High")) ?? lines.join("\n");
-	expect(modelLine).toContain("✦ High");
-	expect(modelLine).not.toMatch(/✦$/);
+	const modelLine = lines.find((line) => line.includes("High")) ?? lines.join("\n");
+	expect(modelLine).toContain("High");
+	expect(modelLine).not.toContain("✦");
 	expect(lines.some((line) => line.includes("…"))).toBe(true);
 });
 

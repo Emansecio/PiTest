@@ -333,7 +333,7 @@ export class SelectList implements Component {
 			const remainingWidth = width - descriptionStart - 2; // -2 for safety
 
 			if (remainingWidth > MIN_DESCRIPTION_WIDTH) {
-				const truncatedDesc = truncateToWidth(descriptionSingleLine, remainingWidth, "");
+				const truncatedDesc = truncateToWidth(descriptionSingleLine, remainingWidth);
 				if (isSelected) {
 					return this.paintSelected(
 						this.theme.selectedText(`${prefix}${truncatedValue}${spacing}${truncatedDesc}`),
@@ -402,9 +402,9 @@ export class SelectList implements Component {
 					item,
 					isSelected,
 				})
-			: truncateToWidth(displayValue, maxWidth, "");
+			: truncateToWidth(displayValue, maxWidth);
 
-		return truncateToWidth(truncatedValue, maxWidth, "");
+		return truncateToWidth(truncatedValue, maxWidth);
 	}
 
 	private getDisplayValue(item: SelectItem): string {

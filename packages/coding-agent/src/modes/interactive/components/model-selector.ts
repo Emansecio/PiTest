@@ -157,7 +157,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		card.addChild(new Spacer(1));
 
 		// Create search input
-		this.searchInput = new Input();
+		this.searchInput = new Input({
+			placeholder: "Type to filter models…",
+			placeholderColor: (t) => theme.fg("dim", t),
+		});
 		if (initialSearchInput) {
 			this.searchInput.setValue(initialSearchInput);
 		}
@@ -176,6 +179,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		card.addChild(this.listContainer);
 
 		card.addChild(new Spacer(1));
+		// Uniform breathing room above the card (matches session/tree/config).
+		this.addChild(new Spacer(1));
 		this.addChild(card);
 
 		// Load models and do initial render

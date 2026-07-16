@@ -873,7 +873,14 @@ export class SettingsManager {
 			if (!current) {
 				return undefined;
 			}
-			const parsed = JSON.parse(current) as Record<string, unknown>;
+			let parsed: Record<string, unknown>;
+			try {
+				parsed = JSON.parse(current) as Record<string, unknown>;
+			} catch (error) {
+				// Rethrow with context; tryLoadFromStorage catches and surfaces this
+				// as a scoped SettingsError instead of a bare SyntaxError.
+				throw new Error(`Invalid JSON in ${scope} settings file: ${(error as Error).message}`);
+			}
 			const { settings, migrated } = SettingsManager.migrateSettings(parsed);
 			migratedSettings = settings;
 			return migrated ? JSON.stringify(settings, null, 2) : undefined;
@@ -1121,9 +1128,17 @@ export class SettingsManager {
 		modifiedNestedFields: Map<keyof Settings, Set<string>>,
 	): void {
 		this.storage.withLock(scope, (current) => {
-			const currentFileSettings = current
-				? SettingsManager.migrateSettings(JSON.parse(current) as Record<string, unknown>).settings
-				: {};
+			let parsedCurrent: Record<string, unknown> = {};
+			if (current) {
+				try {
+					parsedCurrent = JSON.parse(current) as Record<string, unknown>;
+				} catch (error) {
+					// Rethrow with context (recorded via recordError by the persist
+					// chain) rather than silently overwriting a corrupt settings file.
+					throw new Error(`Invalid JSON in ${scope} settings file: ${(error as Error).message}`);
+				}
+			}
+			const currentFileSettings = current ? SettingsManager.migrateSettings(parsedCurrent).settings : {};
 			const mergedSettings: Settings = { ...currentFileSettings };
 			for (const field of modifiedFields) {
 				const value = snapshotSettings[field];
@@ -1551,9 +1566,11 @@ export class SettingsManager {
 		this.setTopLevel("footerDensity", density);
 	}
 
-	/** Closed bottom rule on the input editor. Default true (card-like frame). */
+	/** Closed bottom rule on the input editor. Default false — a single hairline
+	 * above the input (Pi-reference open layout); opt-in true restores the
+	 * card-like closed frame. */
 	getEditorClosedBottom(): boolean {
-		return this.settings.editorClosedBottom !== false;
+		return this.settings.editorClosedBottom === true;
 	}
 
 	setEditorClosedBottom(closed: boolean): void {

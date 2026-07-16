@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { isTruthyEnvFlag } from "./env-flags.ts";
 import { decodeHtmlEntityAt } from "./html.ts";
 
 // highlight.js is loaded lazily: the full build registers ~190 languages and
@@ -19,6 +20,31 @@ function getHljs(): HighlightJs {
 		_hljs = mod.default ?? mod;
 	}
 	return _hljs;
+}
+
+/** True once highlight.js has been loaded (by prewarm or a highlight call). */
+export function isHljsLoaded(): boolean {
+	return _hljs !== undefined;
+}
+
+/**
+ * Pre-warm the lazy highlight.js load off the critical path. Without it, the
+ * ~96ms module load lands in the same tick as the first code fence closing
+ * mid-stream, freezing the spinner/reveal/keyboard. Interactive mode schedules
+ * this shortly after the first paint; the memoized `_hljs` makes it a no-op if
+ * a code block already forced the synchronous load (and vice versa). Best
+ * effort by design: failures stay silent and the on-demand path still works.
+ * Escape hatch: `PIT_NO_HLJS_PREWARM=1` skips it.
+ */
+export function prewarmHljs(): void {
+	if (_hljs || isTruthyEnvFlag(process.env.PIT_NO_HLJS_PREWARM)) {
+		return;
+	}
+	try {
+		getHljs();
+	} catch {
+		// Prewarm must never break anything; the lazy path retries on demand.
+	}
 }
 
 export type HighlightFormatter = (text: string) => string;

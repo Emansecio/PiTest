@@ -113,6 +113,9 @@ export class BashExecutionComponent extends MessageShell {
 			reducedMotionLoaderIndicator(),
 		);
 		this.loader.setTrailingSuffix(` ·${keyText("tui.select.cancel")} to cancel`);
+		// Per-command clock: a 90s test run and a 2s command should not spin
+		// identically — the counter separates "slow but alive" from "stuck".
+		this.loader.setElapsedEnabled(true);
 		this.contentContainer.addChild(this.loader);
 	}
 

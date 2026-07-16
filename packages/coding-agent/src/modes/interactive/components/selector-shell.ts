@@ -71,7 +71,10 @@ export class SelectorShell extends Container implements Focusable {
 		}
 
 		if (options.search) {
-			this.searchInput = new Input();
+			this.searchInput = new Input({
+				placeholder: "Type to filter…",
+				placeholderColor: (t) => theme.fg("dim", t),
+			});
 			if (options.initialSearch) {
 				this.searchInput.setValue(options.initialSearch);
 				this.selectList.setFilter(options.initialSearch);
@@ -82,6 +85,8 @@ export class SelectorShell extends Container implements Focusable {
 
 		card.addChild(this.selectList);
 		card.addChild(new Spacer(1));
+		// Uniform breathing room above the card (matches session/tree/config).
+		this.addChild(new Spacer(1));
 		this.addChild(card);
 	}
 

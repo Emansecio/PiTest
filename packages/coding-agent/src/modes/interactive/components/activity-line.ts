@@ -1,4 +1,5 @@
 import { Container, SPINNER_FRAMES, type TUI, truncateToWidth } from "@pit/tui";
+import { formatElapsed } from "../../../core/goal/goal-manager.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { truncateWithEllipsis } from "../../../utils/surrogate.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
@@ -20,6 +21,11 @@ import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 /** Max width of a derived agent label (from the task prompt). */
 const TASK_LABEL_MAX = 40;
+
+/** Quiet window before a pending line grows its `· Ns` elapsed suffix —
+ * long enough that reads/edits never show it, short enough that a slow bash
+ * or subagent gets a visible clock while the user still cares. */
+const PENDING_ELAPSED_SUFFIX_AFTER_MS = 3000;
 
 type LineState = "pending" | "success" | "error";
 
@@ -60,6 +66,10 @@ export class ActivityLineComponent extends Container {
 	// Accumulated diffstat across coalesced edits to the same target.
 	private statAdded = 0;
 	private statRemoved = 0;
+	// When the current exec went pending — drives the `· Ns` suffix that
+	// separates "slow but alive" from "stuck" on long bash/task lines. The
+	// spinner ticker's 1s reduced-motion tick (M0) keeps it advancing.
+	private pendingSinceMs = 0;
 
 	constructor(ui: TUI) {
 		super();
@@ -76,7 +86,10 @@ export class ActivityLineComponent extends Container {
 		this.statRemoved = 0;
 		this.absorbDiffStat(exec);
 		exec.setActivityChild(true);
-		if (exec.getActivityState() === "pending") this.ensureTicker();
+		if (exec.getActivityState() === "pending") {
+			this.pendingSinceMs = Date.now();
+			this.ensureTicker();
+		}
 		this.ui.requestRender();
 	}
 
@@ -111,7 +124,10 @@ export class ActivityLineComponent extends Container {
 		this.targetCache = null;
 		this.exec = exec;
 		exec.setActivityChild(true);
-		if (exec.getActivityState() === "pending") this.ensureTicker();
+		if (exec.getActivityState() === "pending") {
+			this.pendingSinceMs = Date.now();
+			this.ensureTicker();
+		}
 		this.ui.requestRender();
 	}
 
@@ -157,6 +173,20 @@ export class ActivityLineComponent extends Container {
 		if (s === "pending") return "pending";
 		if (s === "error" && !this.exec.isAborted()) return "error";
 		return "success";
+	}
+
+	/**
+	 * Dim `· Ns` suffix for a pending line once it has run past the quiet
+	 * window — a 90s `npm test` and a 200ms read no longer spin identically,
+	 * so "slow but alive" is tellable from "stuck" without expanding anything.
+	 * Fast tools stay suffix-free (no noise); the pending render path is never
+	 * memo-served, and the reduced-motion 1s tick (M0) keeps the count moving.
+	 */
+	private pendingElapsedSuffix(): string {
+		if (this.pendingSinceMs <= 0) return "";
+		const elapsedMs = Date.now() - this.pendingSinceMs;
+		if (elapsedMs < PENDING_ELAPSED_SUFFIX_AFTER_MS) return "";
+		return ` ${theme.fg("dim", `· ${formatElapsed(elapsedMs)}`)}`;
 	}
 
 	private icon(state: LineState): string {
@@ -277,7 +307,8 @@ export class ActivityLineComponent extends Container {
 			} else if (label === verbFor("", pending) && name !== "bash" && !stripAnsi(target).trim()) {
 				// Unknown action with no extractable target → use the tool name as
 				// the label instead of a bare fallback verb ("Ran") with nothing after it.
-				label = name;
+				// Capitalized so it matches the cased action verbs (Read/Edited/…).
+				label = name.charAt(0).toUpperCase() + name.slice(1);
 				target = "";
 			}
 		}
@@ -287,9 +318,10 @@ export class ActivityLineComponent extends Container {
 		const glyph = glyphFor(name);
 		// `×N` when identical actions were folded in; muted so it reads as a counter.
 		const countSuffix = this.count > 1 ? ` ${theme.fg("muted", `×${this.count}`)}` : "";
+		const elapsedSuffix = pending ? this.pendingElapsedSuffix() : "";
 		const rawHeader = stripAnsi(target).trim()
-			? `${this.icon(state)} ${glyph} ${theme.bold(label)} ${target}${countSuffix}`
-			: `${this.icon(state)} ${glyph} ${theme.bold(label)}${countSuffix}`;
+			? `${this.icon(state)} ${glyph} ${theme.bold(label)} ${target}${countSuffix}${elapsedSuffix}`
+			: `${this.icon(state)} ${glyph} ${theme.bold(label)}${countSuffix}${elapsedSuffix}`;
 		const headerText = rawHeader;
 		// Cap the assembled header once so no branch (free-form agent label, MCP tool
 		// name, web_search query, edit path) can overflow the terminal width. ANSI is

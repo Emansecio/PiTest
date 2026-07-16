@@ -47,6 +47,7 @@ type RenderSessionContextThis = {
 	getRegisteredToolDefinition(toolName: string): undefined;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 	setWorkingPhase(label: string): void;
+	refreshLoaderTrailingSuffix(): void;
 	_addToolBlock(component: ToolExecutionComponent): void;
 };
 
@@ -87,6 +88,8 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			chatContainer.addChild(new Text(message.role, 0, 0));
 		},
 		setWorkingPhase: vi.fn(),
+		// tool_execution_start/end refresh the loader hint at the boundary.
+		refreshLoaderTrailingSuffix: vi.fn(),
 		// Passthrough stub for the real consecutive-tool-block grouping helper;
 		// this regression asserts pending-tool registration, not the leading-gap.
 		_addToolBlock(component: ToolExecutionComponent) {

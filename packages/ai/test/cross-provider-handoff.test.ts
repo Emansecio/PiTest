@@ -28,6 +28,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { completeSimple, getEnvApiKey } from "../src/stream.js";
 import type { Api, AssistantMessage, Message, Model, Tool, ToolResultMessage } from "../src/types.js";
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Simple tool for testing
@@ -308,13 +309,16 @@ describe.skipIf(!hasAnyApiKey())("Cross-Provider Handoff", () => {
 		console.log(`\n=== ${availablePairs.length}/${PROVIDER_MODEL_PAIRS.length} contexts available ===\n`);
 	}, 300000);
 
-	it.skipIf(!hasAnyApiKey())("should have at least 2 fixtures to test handoffs", () => {
-		expect(Object.keys(contexts).length).toBeGreaterThanOrEqual(2);
-	});
+	it.skipIf(!hasAnyApiKey())(
+		"should have at least 2 fixtures to test handoffs",
+		live("cross-provider", () => {
+			expect(Object.keys(contexts).length).toBeGreaterThanOrEqual(2);
+		}),
+	);
 
 	it.skipIf(!hasAnyApiKey())(
 		"should handle cross-provider handoffs for each target",
-		async () => {
+		live("cross-provider", async () => {
 			const contextLabels = Object.keys(contexts);
 
 			if (contextLabels.length < 2) {
@@ -437,7 +441,7 @@ describe.skipIf(!hasAnyApiKey())("Cross-Provider Handoff", () => {
 			}
 
 			expect(failures.length).toBe(0);
-		},
+		}),
 		600000,
 	);
 });

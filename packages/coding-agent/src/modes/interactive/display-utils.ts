@@ -87,6 +87,8 @@ function formatHomeDirectoryLabel(resolvedPath: string): string {
 export interface WorkspaceCwdLabels {
 	/** Session cwd, never empty and never a lone `~`. */
 	session: string;
+	/** Whether the resolved session cwd is exactly the user's home directory. */
+	isHome: boolean;
 	/** `shell: …` when the launcher cwd differs from the session cwd. */
 	shellNote?: string;
 }
@@ -129,12 +131,13 @@ export function buildWorkspaceCwdLabels(
 	const session = resolveOrientingCwdLabel(sessionCwd, repoDir, launchCwd);
 	const sessionResolved = path.resolve(sessionCwd.trim() || launchCwd);
 	const launchResolved = path.resolve(launchCwd);
+	const isHome = pathsEqual(sessionResolved, os.homedir());
 	let shellNote: string | undefined;
 	if (sessionResolved !== launchResolved) {
 		const shellLabel = resolveOrientingCwdLabel(launchCwd, repoDir, launchCwd);
 		shellNote = `shell: ${shellLabel}`;
 	}
-	return { session, shellNote };
+	return { session, isHome, shellNote };
 }
 
 /** Plain-text git diff suffix for tests and stripAnsi assertions. */

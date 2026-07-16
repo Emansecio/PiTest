@@ -19,7 +19,6 @@ import {
 	type OverthinkInterruptInfo,
 	OverthinkTracker,
 } from "./overthink-guard.ts";
-import { stableArgsFingerprint } from "./stable-args-fingerprint.ts";
 import { appendHintsToContent } from "./tool-error-hint-registry.ts";
 import { appendRepairNoteToContent, buildRepairNote } from "./tool-repair-note.ts";
 import type {
@@ -36,6 +35,32 @@ import type {
 
 /** Max TTSR injections allowed within a single turn before bailing out. */
 const MAX_TTSR_RETRIES_PER_TURN = 3;
+
+/**
+ * TTSR coalesced feed (on by default): instead of re-testing every rule against
+ * the rolling buffer on each raw SSE delta (~4 chars), pending delta text is
+ * accumulated per scope and fed to the matcher at the same 16ms boundary where
+ * coalesced `message_update` events flush (~50–100× fewer regex passes). The
+ * matcher's rolling buffer sees the identical character stream — feeds are
+ * concatenative — so detection is unchanged, just delayed ≤16ms.
+ * `PIT_NO_TTSR_COALESCED_FEED=1` restores the per-delta feed.
+ */
+function isTtsrCoalescedFeedDisabled(): boolean {
+	const raw = typeof process !== "undefined" ? process.env.PIT_NO_TTSR_COALESCED_FEED : undefined;
+	if (!raw) return false;
+	const v = raw.toLowerCase();
+	return v === "1" || v === "true" || v === "yes";
+}
+
+/**
+ * Force-feed threshold for the pending per-scope TTSR text. The matcher keeps a
+ * bounded rolling buffer (default 2048 chars, min 512 via PIT_TTSR_BUFFER_CHARS);
+ * if a single coalesced feed were allowed to grow past it, a match completed
+ * early in the window could be evicted before the flush ever tested it. Capping
+ * each feed at 512 chars guarantees any match the per-delta feed would have
+ * caught (up to buffer−512 chars long) is still tested while fully in-buffer.
+ */
+const TTSR_PENDING_FEED_CHARS = 512;
 
 /**
  * Idle cap on the `transformContext` hook — the only otherwise-unbounded await
@@ -728,7 +753,41 @@ async function streamAssistantResponse(
 			await messageUpdateTail;
 		};
 
+		// TTSR coalesced feed state (see isTtsrCoalescedFeedDisabled). Per-scope
+		// pending text accumulates raw deltas and is fed to the matcher on the same
+		// cadence the coalesced message_update flushes: 16ms window, delta-kind
+		// change, stream boundaries, and the final drain (end of message / abort) —
+		// so the tail remainder is always fed before the interrupt check runs.
+		const ttsrCoalescedFeed = config.ttsrMatcher !== undefined && !isTtsrCoalescedFeedDisabled();
+		let pendingTtsrText = "";
+		let pendingTtsrToolArgs = "";
+
+		const feedTtsr = (chunk: string, scope: "assistant_text" | "tool_args") => {
+			if (!config.ttsrMatcher || streamInterrupt || !chunk) return;
+			const hit = config.ttsrMatcher.feed(chunk, scope);
+			if (hit) {
+				streamInterrupt = { ttsr: { name: hit.name, message: hit.message } };
+				ttsrAbort.abort();
+			}
+		};
+
+		const flushPendingTtsr = () => {
+			if (pendingTtsrText) {
+				const chunk = pendingTtsrText;
+				pendingTtsrText = "";
+				feedTtsr(chunk, "assistant_text");
+			}
+			if (pendingTtsrToolArgs) {
+				const chunk = pendingTtsrToolArgs;
+				pendingTtsrToolArgs = "";
+				feedTtsr(chunk, "tool_args");
+			}
+		};
+
 		const flushPendingDelta = () => {
+			// Feed the matcher BEFORE the early return below: thinking-only flushes
+			// and the final drain must still deliver any pending scope text.
+			flushPendingTtsr();
 			if (!pendingDelta || !partialMessage) return;
 			const e = pendingDelta;
 			const message = { ...partialMessage };
@@ -788,10 +847,14 @@ async function streamAssistantResponse(
 							if (event.type === "text_delta") scope = "assistant_text";
 							else if (event.type === "toolcall_delta") scope = "tool_args";
 							if (scope) {
-								const hit = config.ttsrMatcher.feed(delta, scope);
-								if (hit) {
-									streamInterrupt = { ttsr: { name: hit.name, message: hit.message } };
-									ttsrAbort.abort();
+								if (!ttsrCoalescedFeed) {
+									feedTtsr(delta, scope);
+								} else if (scope === "assistant_text") {
+									pendingTtsrText += delta;
+									if (pendingTtsrText.length >= TTSR_PENDING_FEED_CHARS) flushPendingTtsr();
+								} else {
+									pendingTtsrToolArgs += delta;
+									if (pendingTtsrToolArgs.length >= TTSR_PENDING_FEED_CHARS) flushPendingTtsr();
 								}
 							}
 						}
@@ -850,6 +913,12 @@ async function streamAssistantResponse(
 					// Drain coalesced deltas before the boundary update so TUI sees
 					// ordered message_update events, then await the boundary itself.
 					await flushAndDrainMessageUpdates();
+					// The drain above also feeds pending TTSR text: a rule completed by
+					// the tail of the block must interrupt here, exactly as the per-delta
+					// feed would have inside the delta case.
+					if (streamInterrupt) {
+						return await finalizeStreamInterrupt();
+					}
 					if (partialMessage) {
 						partialMessage = event.partial;
 						context.messages[context.messages.length - 1] = partialMessage;
@@ -1356,7 +1425,6 @@ async function prepareToolCall(
 			const markArgsMutated = () => {
 				argsMutation.mutated = true;
 			};
-			const argsFingerprintBefore = stableArgsFingerprint(finalArgs);
 			const beforeResult = await config.beforeToolCall(
 				{
 					assistantMessage,
@@ -1383,8 +1451,14 @@ async function prepareToolCall(
 					isError: true,
 				};
 			}
-			// Skip the second fingerprint on the no-op path (most tool calls).
-			if (argsMutation.mutated && stableArgsFingerprint(finalArgs) !== argsFingerprintBefore) {
+			// Revalidate only when a hook flagged a mutation (the Proxy set/delete
+			// trap or an explicit markArgsMutated call — those ARE the mutation
+			// detector). No args fingerprint is computed on either path: the
+			// `validator.Check` fast path inside validateToolArguments makes the
+			// "flagged but value unchanged" case ~µs and returns the same reference,
+			// while the previous always-computed "before" fingerprint cost ~1ms/MB
+			// of args on EVERY hooked tool call (i.e. all of them under AgentSession).
+			if (argsMutation.mutated) {
 				try {
 					finalArgs = validateToolArguments(tool, { ...activeToolCall, arguments: finalArgs });
 				} catch (revalidationError) {

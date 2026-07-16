@@ -18,6 +18,7 @@ const END = "\x1b[F";
 const PAGE_UP = "\x1b[5~";
 const PAGE_DOWN = "\x1b[6~";
 const UP = "\x1b[A";
+const DOWN = "\x1b[B";
 const CTRL_D = "\x04";
 const CTRL_R = "\x1b[114;5u"; // Kitty encoding for Ctrl+R
 
@@ -91,7 +92,7 @@ describe("session selector navigation & Esc semantics", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	it("home/end/page jump to first/last item, clamped (no wrap)", async () => {
+	it("home/end/page stay clamped; up/down wrap at the edges", async () => {
 		const sessions = makeNumberedSessions(20);
 		const selector = buildSelector(sessions, { keybindings });
 		await flushPromises();
@@ -113,9 +114,14 @@ describe("session selector navigation & Esc semantics", () => {
 		list.handleInput(HOME);
 		expect(list.getSelectedSessionPath()).toBe(first);
 
-		// Up and Page-up at the top stay clamped at the first item.
+		// Up at the top wraps to the last item (list convention across
+		// selectors); Down from there wraps back to the first.
 		list.handleInput(UP);
+		expect(list.getSelectedSessionPath()).toBe(last);
+		list.handleInput(DOWN);
 		expect(list.getSelectedSessionPath()).toBe(first);
+
+		// Page-up at the top stays clamped (pages never wrap).
 		list.handleInput(PAGE_UP);
 		expect(list.getSelectedSessionPath()).toBe(first);
 

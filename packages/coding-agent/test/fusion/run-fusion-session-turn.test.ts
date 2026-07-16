@@ -20,8 +20,8 @@ const { completeSimpleMock, streamSimpleMock } = vi.hoisted(() => ({
 			usage: {
 				input: 1,
 				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
+				cacheRead: 5,
+				cacheWrite: 7,
 				totalTokens: 2,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
@@ -65,7 +65,7 @@ function messageText(message: unknown): string {
 function createHost(opts?: {
 	panel?: Array<{ cli: "claude" | "codex"; model: string }>;
 	budget?: { allowed: boolean; reason?: string };
-}): { host: FusionHost; agent: Agent; events: AgentSessionEvent[] } {
+}): { host: FusionHost; agent: Agent; events: AgentSessionEvent[]; fusionSpend: ReturnType<typeof vi.fn> } {
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 	const settingsManager = SettingsManager.inMemory({
@@ -91,6 +91,7 @@ function createHost(opts?: {
 	const sessionManager = SessionManager.inMemory();
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
 	const events: AgentSessionEvent[] = [];
+	const fusionSpend = vi.fn();
 	let fusionAbort: AbortController | undefined;
 	const host: FusionHost = {
 		model,
@@ -131,10 +132,11 @@ function createHost(opts?: {
 		},
 		getRequiredRequestAuth: async () => ({}),
 		setLastAssistantMessage: () => {},
+		recordFusionSpend: fusionSpend,
 		prepareFusionContextEconomy: async () => {},
 		evaluateFusionBudget: () => opts?.budget ?? { allowed: true },
 	};
-	return { host, agent, events };
+	return { host, agent, events, fusionSpend };
 }
 
 function noteContents(events: AgentSessionEvent[]): string[] {
@@ -207,6 +209,25 @@ describe("runFusionSessionTurn", () => {
 		expect(user).toBeTruthy();
 		expect(Array.isArray(user!.content)).toBe(true);
 		expect((user!.content as Array<{ type: string }>).some((c) => c.type === "image")).toBe(true);
+	});
+
+	it("charges all four usage components for an API-backed writer call", async () => {
+		vi.spyOn(orchestrator, "runFusionTurn").mockImplementation(async (deps) => {
+			await deps.writer("Q", [], {
+				consensus: [],
+				contradictions: [],
+				partialCoverage: [],
+				uniqueInsights: [],
+				blindSpots: [],
+				unsupportedClaims: [],
+			});
+			return { handled: true, text: "ok" };
+		});
+		const { host, fusionSpend } = createHost();
+
+		await runFusionSessionTurn(host, "Q");
+
+		expect(fusionSpend).toHaveBeenCalledWith(14);
 	});
 
 	it("emits a note when the judge cannot parse structured output", async () => {

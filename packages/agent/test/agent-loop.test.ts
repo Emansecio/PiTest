@@ -496,7 +496,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(executed).toEqual(["fixed-by-guard"]);
 	});
 
-	it("fingerprints args only once when beforeToolCall does not mutate", async () => {
+	it("never fingerprints args in the beforeToolCall path", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executed: string[] = [];
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -553,9 +553,75 @@ describe("agentLoop with AgentMessage", () => {
 		}
 
 		expect(executed).toEqual(["hello"]);
-		// No-op beforeToolCall: only the pre-hook fingerprint runs (no second compare).
-		expect(fingerprintSpy).toHaveBeenCalledTimes(1);
+		// Mutation detection is the Proxy/markArgsMutated flag; revalidation goes
+		// through validator.Check. No fingerprint is computed on any path.
+		expect(fingerprintSpy).toHaveBeenCalledTimes(0);
 		fingerprintSpy.mockRestore();
+	});
+
+	it("executes normally when a guard flags a mutation but leaves values unchanged", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return {
+					content: [{ type: "text", text: `echoed: ${params.value}` }],
+					details: { value: params.value },
+				};
+			},
+		};
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+
+		const userPrompt: AgentMessage = createUserMessage("echo something");
+
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			beforeToolCall: async ({ args }) => {
+				// Writing the SAME value flips the Proxy's mutated flag without
+				// changing anything. Revalidation (validator.Check fast path) must
+				// pass and execution proceed with the original args.
+				const mutableArgs = args as { value: string };
+				mutableArgs.value = "hello";
+				return undefined;
+			},
+		};
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+						"toolUse",
+					);
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "done" }]);
+					stream.push({ type: "done", reason: "stop", message });
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		for await (const _event of stream) {
+			// consume
+		}
+
+		expect(executed).toEqual(["hello"]);
 	});
 
 	it("should block execution when a guard mutation produces invalid args", async () => {
@@ -2342,6 +2408,160 @@ describe("P04 message_update fire-and-forget", () => {
 		const last = messages[messages.length - 1] as AssistantMessage;
 		expect(last.stopReason).toBe("error");
 		expect(last.errorMessage).toMatch(/\[stop: ttsr\]/);
+	});
+
+	// A stateful matcher mirroring the real TTSR rolling buffer: feeds are
+	// concatenative, so detection is a property of the accumulated stream, not
+	// of the chunking. Records every fed chunk so tests can assert the feed
+	// CADENCE (coalesced vs per-delta) independently of detection.
+	function makeBufferedMatcher(needle: string) {
+		let buf = "";
+		const feeds: string[] = [];
+		const matcher = {
+			reset: () => {
+				buf = "";
+			},
+			feed(chunk: string, scope: "assistant_text" | "tool_args") {
+				feeds.push(chunk);
+				if (scope !== "assistant_text") return undefined;
+				buf += chunk;
+				if (buf.includes(needle)) {
+					buf = "";
+					return { name: "span-rule", message: "matched across chunks" };
+				}
+				return undefined;
+			},
+		};
+		return { matcher, feeds };
+	}
+
+	it("TTSR coalesced feed: identical detection, remainder fed by the FINAL flush", async () => {
+		// Freeze performance.now (fake clock, never advanced) so the 16ms
+		// coalescing window can never elapse mid-stream. The cadence is then
+		// fully deterministic: the FIRST delta still flushes immediately (the
+		// deliberate lastEmitTime=0 first-paint design), every later delta stays
+		// pending, and only the final drain at `done` feeds the remainder. Real
+		// setTimeout stays live (the loop's terminal-event sentinel depends on it).
+		vi.useFakeTimers({ toFake: ["performance"] });
+		try {
+			let streamCalls = 0;
+			const { matcher, feeds } = makeBufferedMatcher("forbidden");
+			const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				ttsrMatcher: matcher,
+			};
+			const streamFn = () => {
+				streamCalls++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (streamCalls === 1) {
+						const partial = createAssistantMessage([{ type: "text", text: "" }]);
+						stream.push({ type: "start", partial });
+						for (const [i, delta] of ["forb", "idden", " tail"].entries()) {
+							stream.push({
+								type: "text_delta",
+								contentIndex: 0,
+								delta,
+								partial: createAssistantMessage([
+									{ type: "text", text: ["forb", "forbidden", "forbidden tail"][i]! },
+								]),
+							});
+						}
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "forbidden tail" }]),
+						});
+						return;
+					}
+					const message = createAssistantMessage([{ type: "text", text: "ok" }]);
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			};
+
+			const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+			for await (const _event of loop) {
+				/* drain */
+			}
+			const messages = await loop.result();
+
+			// Detection identical to the per-delta feed: rule fired, turn replayed.
+			expect(streamCalls).toBe(2);
+			const reminder = messages.find((m) => m.role === "user" && (m as { _ttsr_injected?: boolean })._ttsr_injected);
+			expect(reminder).toBeDefined();
+			const assistant = messages[messages.length - 1] as AssistantMessage;
+			expect(assistant.content[0]).toEqual({ type: "text", text: "ok" });
+			// Coalesced cadence: the matcher saw the identical character stream in
+			// TWO feeds — the immediate first-paint flush ("forb") plus the final
+			// end-of-message drain carrying the coalesced remainder ("idden tail")
+			// — instead of one regex pass per raw delta.
+			expect(feeds).toEqual(["forb", "idden tail"]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("TTSR per-delta feed is restored under PIT_NO_TTSR_COALESCED_FEED=1", async () => {
+		const prev = process.env.PIT_NO_TTSR_COALESCED_FEED;
+		process.env.PIT_NO_TTSR_COALESCED_FEED = "1";
+		try {
+			let streamCalls = 0;
+			const { matcher, feeds } = makeBufferedMatcher("forbidden");
+			const context: AgentContext = { systemPrompt: "s", messages: [], tools: [] };
+			const config: AgentLoopConfig = {
+				model: createModel(),
+				convertToLlm: identityConverter,
+				ttsrMatcher: matcher,
+			};
+			const streamFn = () => {
+				streamCalls++;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (streamCalls === 1) {
+						const partial = createAssistantMessage([{ type: "text", text: "" }]);
+						stream.push({ type: "start", partial });
+						for (const [i, delta] of ["forb", "idden", " tail"].entries()) {
+							stream.push({
+								type: "text_delta",
+								contentIndex: 0,
+								delta,
+								partial: createAssistantMessage([
+									{ type: "text", text: ["forb", "forbidden", "forbidden tail"][i]! },
+								]),
+							});
+						}
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "forbidden tail" }]),
+						});
+						return;
+					}
+					const message = createAssistantMessage([{ type: "text", text: "ok" }]);
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			};
+
+			const loop = agentLoop([createUserMessage("go")], context, config, undefined, streamFn);
+			for await (const _event of loop) {
+				/* drain */
+			}
+			await loop.result();
+
+			// Same detection, but fed once per raw delta: the hit fires ON the
+			// second chunk and the stream aborts before " tail" is ever fed.
+			expect(streamCalls).toBe(2);
+			expect(feeds).toEqual(["forb", "idden"]);
+		} finally {
+			if (prev === undefined) delete process.env.PIT_NO_TTSR_COALESCED_FEED;
+			else process.env.PIT_NO_TTSR_COALESCED_FEED = prev;
+		}
 	});
 
 	it("synthesizes an error turn when the stream ends without a terminal event", async () => {

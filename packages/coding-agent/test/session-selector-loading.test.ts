@@ -68,7 +68,10 @@ describe("session selector loading lifecycle", () => {
 
 		const pending = stripAnsi(selector.render(120).join("\n"));
 		expect(pending).toMatch(/Loading/);
-		expect(pending).toContain("No sessions in current folder");
+		// While the load is in flight the body mirrors the header's loading
+		// state instead of contradicting it with empty-state advice.
+		expect(pending).toContain("Loading sessions…");
+		expect(pending).not.toContain("No sessions in current folder");
 
 		deferred.resolve(sessions);
 		await deferred.promise;

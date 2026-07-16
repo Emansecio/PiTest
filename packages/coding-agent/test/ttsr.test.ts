@@ -76,6 +76,32 @@ describe("createMatcher", () => {
 		expect(m2.feed("ZZZ here", "tool_args")?.name).toBe("any");
 	});
 
+	test("coalesced feeds are equivalent: one concatenated chunk hits exactly like many small chunks", () => {
+		// Property the agent-loop 16ms coalesced feed relies on (5.2): the rolling
+		// buffer is concatenative, so feeding N raw deltas or their concatenation
+		// yields the same detection — only the number of regex passes differs.
+		const rules = compileRules([{ name: "span", regex: "abcdef", message: "x" }]);
+		const perDelta = createMatcher(rules);
+		let perDeltaHit: ReturnType<typeof perDelta.feed>;
+		for (const chunk of ["ab", "cd", "ef"]) {
+			perDeltaHit = perDeltaHit ?? perDelta.feed(chunk, "assistant_text");
+		}
+		const coalesced = createMatcher(rules);
+		const coalescedHit = coalesced.feed("abcdef", "assistant_text");
+		expect(perDeltaHit?.name).toBe("span");
+		expect(coalescedHit?.name).toBe("span");
+	});
+
+	test("a trailing remainder chunk (final flush) completes a match spanning earlier feeds", () => {
+		// Mirrors the agent-loop end-of-message/abort drain: text pending in the
+		// coalescing window is fed as one last chunk and must still complete a
+		// match started by earlier feeds.
+		const rules = compileRules([{ name: "tail", regex: "do not force-push", message: "x" }]);
+		const m = createMatcher(rules);
+		expect(m.feed("please do not ", "assistant_text")).toBeUndefined();
+		expect(m.feed("force-push", "assistant_text")?.name).toBe("tail");
+	});
+
 	test("reset clears buffers without losing rule state", () => {
 		const rules = compileRules([{ name: "split", regex: "abcdef", message: "x" }]);
 		const m = createMatcher(rules);

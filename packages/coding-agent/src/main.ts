@@ -7,7 +7,11 @@
 
 import { resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { type ImageContent, modelsAreEqual } from "@pit/ai";
+import type { ImageContent } from "@pit/ai";
+// Value import comes from the tiny models-compare leaf (see package.json
+// exports + root tsconfig paths), not the @pit/ai index, so main.ts's own
+// import line doesn't force the full provider/typebox graph at boot.
+import { modelsAreEqual } from "@pit/ai/models-compare";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
@@ -24,7 +28,7 @@ import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { ensureClaudeCodeVersionEnv } from "./core/claude-code-version.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
-
+import { readCachedExtensionFlags, writeExtensionFlagsCache } from "./core/help-cache.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
 import type { ModelRole, ScopedModel } from "./core/model-resolver.ts";
 import { flushRawStdout, restoreStdout, takeOverStdout, writeRawStdout } from "./core/output-guard.ts";
@@ -38,10 +42,14 @@ import {
 import type { SessionManager } from "./core/session-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { sweepStaleTempLogs } from "./core/temp-logs.ts";
-import { printTimings, resetTimings, time } from "./core/timings.ts";
-import { handleMcpCommand } from "./mcp-cli.ts";
+import { markMilestone, printTimings, resetTimings, time } from "./core/timings.ts";
+// mcp-cli.ts and package-manager-cli.ts are intentionally NOT imported at the
+// top: package-manager-cli alone costs ~370-390ms of module eval (package
+// manager, version-check, config-selector) and mcp-cli another ~25-40ms, paid
+// on every boot even though they only run when argv[0] matches a subcommand.
+// They are await import()ed inside the argv-gated dispatch in main() — the same
+// pattern used below for session-picker/list-models/dry-run/export-html.
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
-import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isTruthyEnvFlag } from "./utils/env-flags.ts";
 import { isLocalPath } from "./utils/paths.ts";
 import { ensureWindowsUtf8Console } from "./utils/windows-console.ts";
@@ -58,7 +66,14 @@ function loadThemeModule(): Promise<ThemeModule> {
 }
 
 async function initThemeLazy(themeName?: string, enableWatcher = false): Promise<void> {
-	const { initTheme } = await loadThemeModule();
+	const { initTheme, detectTerminalThemeViaOsc11 } = await loadThemeModule();
+	if (themeName === undefined && !process.env.COLORFGBG) {
+		// No saved theme and no COLORFGBG hint (Windows Terminal, Apple Terminal,
+		// most ssh/tmux): ask the terminal for its background via OSC 11 before
+		// picking a default, so light terminals don't get the dark palette on
+		// first run. Result is cached in the theme module; ≤100ms, once.
+		await detectTerminalThemeViaOsc11().catch(() => undefined);
+	}
 	initTheme(themeName, enableWatcher);
 }
 
@@ -532,6 +547,10 @@ export interface MainOptions {
 }
 
 export async function main(args: string[], options?: MainOptions) {
+	// Absolute mark (ms since process start): together with the "module-eval"
+	// milestone in cli.ts this makes the pre-main() cost — node+tsx bootstrap
+	// plus main.ts's eager import graph — visible under PIT_TIMING=1.
+	markMilestone("main-entry");
 	resetTimings();
 	// Note: prewarmExtensionLoader exists in core/extensions/loader.ts but is
 	// not called here. Measured cost of the pre-warm equals the cost of the
@@ -556,16 +575,39 @@ export async function main(args: string[], options?: MainOptions) {
 		ensureWindowsUtf8Console();
 	}
 
-	if (await handlePackageCommand(args)) {
-		return;
-	}
-
-	if (await handleConfigCommand(args)) {
-		return;
-	}
-
-	if (await handleMcpCommand(args)) {
-		return;
+	// Argv-gated subcommand dispatch. The gates mirror each handler's own
+	// argv[0] check exactly (parsePackageCommand: install/remove/uninstall/
+	// update/list; handleConfigCommand: config; handleMcpCommand: mcp), so
+	// behavior is identical — but the handler modules are only imported when a
+	// subcommand is actually invoked instead of on every boot.
+	switch (args[0]) {
+		case "install":
+		case "remove":
+		case "uninstall":
+		case "update":
+		case "list": {
+			const { handlePackageCommand } = await import("./package-manager-cli.ts");
+			if (await handlePackageCommand(args)) {
+				return;
+			}
+			break;
+		}
+		case "config": {
+			const { handleConfigCommand } = await import("./package-manager-cli.ts");
+			if (await handleConfigCommand(args)) {
+				return;
+			}
+			break;
+		}
+		case "mcp": {
+			const { handleMcpCommand } = await import("./mcp-cli.ts");
+			if (await handleMcpCommand(args)) {
+				return;
+			}
+			break;
+		}
+		default:
+			break;
 	}
 
 	const parsed = parseArgs(args);
@@ -617,12 +659,42 @@ export async function main(args: string[], options?: MainOptions) {
 
 	validateForkFlags(parsed);
 
+	const agentDir = getAgentDir();
+
+	// --help fast path: print the static help plus extension flags from the disk
+	// cache without building the runtime (multi-second → ms). Only for plain
+	// invocations (CLI extension overrides change the flag set, so they take the
+	// full path). A cache miss falls through to the full path below, which
+	// re-renders the help and refreshes the cache; invalidation is automatic via
+	// stat + content-hash fingerprints (see core/help-cache.ts). Escape hatch:
+	// PIT_NO_HELP_CACHE=1 forces the full path. Subcommand help (install/config/
+	// mcp) was already handled by the handlers above.
+	const helpCacheEligible = Boolean(parsed.help) && !parsed.extensions?.length && !parsed.noExtensions;
+	if (helpCacheEligible) {
+		const cachedFlags = readCachedExtensionFlags(process.cwd(), agentDir);
+		if (cachedFlags) {
+			printHelp(cachedFlags);
+			// stderr timings, printed before the early exit so PIT_TIMING covers
+			// the --help fast path too (previously unreachable on this path).
+			printTimings();
+			process.exit(0);
+		}
+	}
+
+	// Kick off `claude --version` detection now (async spawn + disk cache keyed
+	// by the binary's mtime — see core/claude-code-version.ts) so it overlaps
+	// with the runtime's module eval instead of blocking boot; awaited after the
+	// runtime is built, before anything can issue a model request. Skipped
+	// offline and when PIT_CLAUDE_CODE_VERSION is already pinned. The spoofed
+	// Claude Code user-agent version keeps Anthropic OAuth routing happy — a
+	// stale version draws intermittent OAuth 5xx.
+	const claudeCodeVersionReady = offlineMode ? Promise.resolve() : ensureClaudeCodeVersionEnv();
+
 	// Run migrations (pass cwd for project-local migrations)
 	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(process.cwd());
 	time("runMigrations");
 
 	const cwd = process.cwd();
-	const agentDir = getAgentDir();
 	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
 	if (parsed.profile === "minimal") {
 		startupSettingsManager.applyOverrides({
@@ -762,6 +834,13 @@ export async function main(args: string[], options?: MainOptions) {
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 			disableHashlineAnchors: parsed.noHashlineAnchors,
+			// Adaptive cache retention (§3.1): only the long-lived interactive
+			// session pays for long-retention cache writes (2.0× input price);
+			// one-shot print/JSON/RPC runs never idle past the 5-minute short TTL,
+			// so "short" (1.25×) has an identical hit rate for them. appMode is
+			// final here: resolveAppMode already maps piped stdin to "print".
+			// PIT_CACHE_RETENTION env still outranks this (provider layer).
+			cacheRetention: appMode === "interactive" ? "long" : "short",
 		});
 		time("createRuntime-createAgentSessionFromServices");
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
@@ -776,15 +855,6 @@ export async function main(args: string[], options?: MainOptions) {
 		};
 	};
 	time("createRuntime");
-	// Spoof a current Claude Code user-agent for Anthropic OAuth routing: detect
-	// the installed `claude --version` once, before the first model request, so
-	// the spoofed version tracks the real release instead of drifting behind
-	// (a stale version draws intermittent OAuth 5xx). Skipped offline and when
-	// PIT_CLAUDE_CODE_VERSION is already pinned. Kept after early-exit commands
-	// so package/config/mcp/version/export do not pay for provider setup.
-	if (!offlineMode) {
-		ensureClaudeCodeVersionEnv();
-	}
 	const { createAgentSessionRuntime } = await import("./core/agent-session-runtime.ts");
 	const runtime = await createAgentSessionRuntime(createRuntime, {
 		cwd: sessionManager.getCwd(),
@@ -795,12 +865,33 @@ export async function main(args: string[], options?: MainOptions) {
 	const { settingsManager, modelRegistry, resourceLoader } = services;
 
 	if (parsed.help) {
-		const extensionFlags = resourceLoader
-			.getExtensions()
-			.extensions.flatMap((extension) => Array.from(extension.flags.values()));
+		const extensionsResult = resourceLoader.getExtensions();
+		const extensionFlags = extensionsResult.extensions.flatMap((extension) => Array.from(extension.flags.values()));
 		printHelp(extensionFlags);
+		if (helpCacheEligible) {
+			// Refresh the fast-path cache with the freshly rendered flags plus the
+			// fingerprint of every source that determines them (best-effort).
+			writeExtensionFlagsCache({
+				cwd: sessionManager.getCwd(),
+				agentDir,
+				extensionPaths: [
+					...extensionsResult.extensions.map((extension) => extension.path),
+					...extensionsResult.errors.map((error) => error.path),
+				],
+				flags: extensionFlags,
+			});
+		}
+		// stderr timings before the early exit so PIT_TIMING covers the full
+		// (cache-miss) --help path too (previously unreachable).
+		printTimings();
 		process.exit(0);
 	}
+
+	// Ensure the spoofed Claude Code version resolved (or gave up) before any
+	// path that can issue a model request. The detection was kicked off right
+	// after arg parsing, so its cost overlapped with runtime creation above —
+	// on a version-cache hit this is already settled.
+	await claudeCodeVersionReady;
 
 	if (parsed.listModels !== undefined) {
 		const { listModels } = await import("./cli/list-models.ts");
@@ -823,6 +914,9 @@ export async function main(args: string[], options?: MainOptions) {
 		// callers parsing stdout JSON depend on this.
 		writeRawStdout(`${out}\n`);
 		await flushRawStdout();
+		// Timings go to stderr (never the raw-stdout payload callers parse) and
+		// print before the early exit so PIT_TIMING covers --dry-run too.
+		printTimings();
 		await runtime.dispose();
 		restoreStdout();
 		process.exit(report.overallStatus === "blocked" ? 1 : 0);

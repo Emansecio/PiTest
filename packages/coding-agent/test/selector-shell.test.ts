@@ -34,7 +34,9 @@ describe("SelectorShell", () => {
 		});
 		const lines = shell.render(60).map(stripAnsi);
 		const joined = lines.join("\n");
-		expect(lines[0]).toMatch(/^╭─+╮$/);
+		// Line 0 is the uniform external spacer; the card frame starts right after.
+		expect(lines[0]).toBe("");
+		expect(lines[1]).toMatch(/^╭─+╮$/);
 		expect(lines[lines.length - 1]).toMatch(/^╰─+╯$/);
 		expect(joined).toContain("Picker");
 		expect(joined).toContain("alpha");

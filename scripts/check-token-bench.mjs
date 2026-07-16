@@ -5,17 +5,50 @@
  * parallel, parses METRIC lines, and compares against
  * scripts/baselines/token-economy.json.
  *
- * Usage: node scripts/check-token-bench.mjs
+ * Usage: node scripts/check-token-bench.mjs [--cache]
+ *
+ * --cache (passed by check-parallel.mjs only on the pre-commit / --no-vitest
+ * path — audit 6.5): skip the benches when a conservative fingerprint of every
+ * bench input matches the one recorded at the last PASS. Never engages when
+ * `CI` is set; PIT_NO_BENCH_CACHE=1 always runs for real. Only a PASS is ever
+ * recorded. See scripts/lib/token-bench-cache.mjs for the input set.
  */
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { cachedPassStillValid, computeFingerprint, writeCachedPass } from "./lib/token-bench-cache.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..");
 const baselinePath = join(here, "baselines", "token-economy.json");
 const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
+
+function isTruthyEnvFlag(name) {
+	const value = (process.env[name] ?? "").toLowerCase();
+	return value === "1" || value === "true" || value === "yes";
+}
+
+const cacheEnabled =
+	process.argv.includes("--cache") && !isTruthyEnvFlag("PIT_NO_BENCH_CACHE") && !process.env.CI;
+
+let fingerprint;
+if (cacheEnabled) {
+	// Computed BEFORE the benches run so a file edited mid-run can only cause a
+	// false miss on the next check, never a false "cached ok".
+	try {
+		fingerprint = computeFingerprint(repoRoot);
+	} catch {
+		fingerprint = undefined; // best-effort: fall through to a real run
+	}
+	if (process.env.CHECK_TIMING === "1" && fingerprint) {
+		console.log(`token-bench fingerprint: ${fingerprint.ms}ms (${fingerprint.fileCount} inputs)`);
+	}
+	if (fingerprint && cachedPassStillValid(repoRoot, fingerprint)) {
+		console.log("token-bench: cached ok (PIT_NO_BENCH_CACHE=1 to force)");
+		process.exit(0);
+	}
+}
 
 const BENCH_SCRIPTS = [
 	"scripts/bench-session-tokens.mts",
@@ -112,6 +145,11 @@ if (failures.length > 0) {
 	console.error("token-economy regression gate failed:\n");
 	for (const f of failures) console.error(`  - ${f}`);
 	process.exit(1);
+}
+
+// PASS — record the pre-run fingerprint so the next pre-commit can skip.
+if (cacheEnabled && fingerprint) {
+	writeCachedPass(repoRoot, fingerprint);
 }
 
 console.log(

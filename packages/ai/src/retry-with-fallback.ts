@@ -2,8 +2,8 @@
  * Fallback-chain retry orchestrator.
  *
  * Wraps a single stream/turn call with an ordered list of model entries. When
- * the primary throws a retryable error (rate-limit / quota / refused / 5xx),
- * the next entry takes over for the rest of the turn. A module-level cooldown
+ * the primary throws a retryable error (rate-limit / quota / refused /
+ * idle-socket reset / 5xx), the next entry takes over for the rest of the turn. A module-level cooldown
  * map prevents hammering a model that just failed.
  */
 
@@ -26,8 +26,11 @@ export interface RetryConfig {
 const DEFAULT_COOLDOWN_MS = 300_000;
 const MAX_WAIT_FOR_COOLDOWN_MS = 30_000;
 
+// ECONNRESET/EPIPE/"socket hang up"/"other side closed" are what a keep-alive
+// socket killed by server idle timeout surfaces as on the next POST (undici
+// does not replay POSTs automatically) — retryable against the next entry.
 const RETRYABLE_MESSAGE_REGEX =
-	/429|529|overloaded|rate.?limit|quota|connection.?refused|ECONNREFUSED|ETIMEDOUT|insufficient.{0,20}quota/i;
+	/429|529|overloaded|rate.?limit|quota|connection.?refused|ECONNREFUSED|ECONNRESET|EPIPE|ETIMEDOUT|socket hang up|other side closed|insufficient.{0,20}quota/i;
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
 const NON_RETRYABLE_STATUSES = new Set([401, 403, 404]);
 

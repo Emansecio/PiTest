@@ -37,7 +37,11 @@ describe("InteractiveMode.refreshLoaderTrailingSuffix", () => {
 			currentTurnOutputTokens: () => outputTokens,
 			formatTokenChip,
 			getLoaderInterruptSuffix,
+			// The suffix is state-aware: with no cancellable tools in flight the
+			// plain "esc to interrupt" fragment is expected.
+			getInterruptiblePendingTools: () => [] as Array<{ id: string; name: string }>,
 			cachedLoaderInterruptSuffix: null as string | null,
+			cachedLoaderInterruptToolsSuffix: null as string | null,
 			lastAppliedLoaderSuffix: undefined as string | undefined,
 			streamTextCharCount,
 			setTrailingSuffix,
@@ -104,6 +108,21 @@ describe("InteractiveMode.refreshLoaderTrailingSuffix", () => {
 		expect(fakeThis.cachedLoaderInterruptSuffix).toBe(first);
 		const second = getLoaderInterruptSuffix.call(fakeThis);
 		expect(second).toBe(first);
+	});
+
+	test("tells the truth while cancellable tools are in flight: stop/cancel + ctrl+c", () => {
+		const fakeThis = makeFakeThis(0);
+		const idle = stripAnsi(getLoaderInterruptSuffix.call(fakeThis));
+		expect(idle).toContain("to interrupt");
+
+		fakeThis.getInterruptiblePendingTools = () => [{ id: "t1", name: "bash" }];
+		const busy = stripAnsi(getLoaderInterruptSuffix.call(fakeThis));
+		expect(busy).toContain("stop/cancel");
+		expect(busy).toContain("ctrl+c interrupt");
+
+		// Back to the plain hint once the tools settle.
+		fakeThis.getInterruptiblePendingTools = () => [];
+		expect(stripAnsi(getLoaderInterruptSuffix.call(fakeThis))).toBe(idle);
 	});
 
 	test("invalidateLoaderInterruptSuffix forces a recompute on next read", () => {

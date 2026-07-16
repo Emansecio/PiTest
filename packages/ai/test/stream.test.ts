@@ -11,6 +11,7 @@ import type { Api, Context, ImageContent, Model, StreamOptions, Tool, ToolResult
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
 import { StringEnum } from "../src/utils/typebox-helpers.js";
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -364,122 +365,218 @@ describe("Generate E2E Tests", () => {
 	describe("Anthropic OAuth Provider (claude-opus-4-6 with adaptive thinking)", () => {
 		const model = getModel("anthropic", "claude-opus-4-8");
 
-		it.skipIf(!anthropicOAuthToken)("should complete basic text generation", { retry: 3 }, async () => {
-			await basicTextGeneration(model, { apiKey: anthropicOAuthToken });
-		});
+		it.skipIf(!anthropicOAuthToken)(
+			"should complete basic text generation",
+			{ retry: 3 },
+			live("anthropic", async () => {
+				await basicTextGeneration(model, { apiKey: anthropicOAuthToken });
+			}),
+		);
 
-		it.skipIf(!anthropicOAuthToken)("should handle tool calling", { retry: 3 }, async () => {
-			await handleToolCall(model, { apiKey: anthropicOAuthToken });
-		});
+		it.skipIf(!anthropicOAuthToken)(
+			"should handle tool calling",
+			{ retry: 3 },
+			live("anthropic", async () => {
+				await handleToolCall(model, { apiKey: anthropicOAuthToken });
+			}),
+		);
 
-		it.skipIf(!anthropicOAuthToken)("should handle streaming", { retry: 3 }, async () => {
-			await handleStreaming(model, { apiKey: anthropicOAuthToken });
-		});
+		it.skipIf(!anthropicOAuthToken)(
+			"should handle streaming",
+			{ retry: 3 },
+			live("anthropic", async () => {
+				await handleStreaming(model, { apiKey: anthropicOAuthToken });
+			}),
+		);
 
-		it.skipIf(!anthropicOAuthToken)("should handle adaptive thinking with effort high", { retry: 3 }, async () => {
-			await handleThinking(model, { apiKey: anthropicOAuthToken, thinkingEnabled: true, effort: "high" });
-		});
+		it.skipIf(!anthropicOAuthToken)(
+			"should handle adaptive thinking with effort high",
+			{ retry: 3 },
+			live("anthropic", async () => {
+				await handleThinking(model, { apiKey: anthropicOAuthToken, thinkingEnabled: true, effort: "high" });
+			}),
+		);
 
-		it.skipIf(!anthropicOAuthToken)("should handle adaptive thinking with effort medium", { retry: 3 }, async () => {
-			await handleThinking(model, { apiKey: anthropicOAuthToken, thinkingEnabled: true, effort: "medium" });
-		});
+		it.skipIf(!anthropicOAuthToken)(
+			"should handle adaptive thinking with effort medium",
+			{ retry: 3 },
+			live("anthropic", async () => {
+				await handleThinking(model, { apiKey: anthropicOAuthToken, thinkingEnabled: true, effort: "medium" });
+			}),
+		);
 
 		it.skipIf(!anthropicOAuthToken)(
 			"should handle multi-turn with adaptive thinking and tools",
 			{ retry: 3 },
-			async () => {
+			live("anthropic", async () => {
 				await multiTurn(model, { apiKey: anthropicOAuthToken, thinkingEnabled: true, effort: "high" });
-			},
+			}),
 		);
 
-		it.skipIf(!anthropicOAuthToken)("should handle image input", { retry: 3 }, async () => {
-			await handleImage(model, { apiKey: anthropicOAuthToken });
-		});
+		it.skipIf(!anthropicOAuthToken)(
+			"should handle image input",
+			{ retry: 3 },
+			live("anthropic", async () => {
+				await handleImage(model, { apiKey: anthropicOAuthToken });
+			}),
+		);
 	});
 
 	describe("OpenAI Codex Provider (gpt-5.4)", () => {
 		const llm = getModel("openai-codex", "gpt-5.5");
 
-		it.skipIf(!openaiCodexToken)("should complete basic text generation", { retry: 3 }, async () => {
-			await basicTextGeneration(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should complete basic text generation",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await basicTextGeneration(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle tool calling", { retry: 3 }, async () => {
-			await handleToolCall(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle tool calling",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleToolCall(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle streaming", { retry: 3 }, async () => {
-			await handleStreaming(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle streaming",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleStreaming(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle thinking", { retry: 3 }, async () => {
-			await handleThinking(llm, { apiKey: openaiCodexToken, reasoningEffort: "high" });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle thinking",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleThinking(llm, { apiKey: openaiCodexToken, reasoningEffort: "high" });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
-			await multiTurn(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle multi-turn with thinking and tools",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await multiTurn(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle image input", { retry: 3 }, async () => {
-			await handleImage(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle image input",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleImage(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 	});
 
 	describe("OpenAI Codex Provider (gpt-5.5)", () => {
 		const llm = getModel("openai-codex", "gpt-5.5");
 
-		it.skipIf(!openaiCodexToken)("should complete basic text generation", { retry: 3 }, async () => {
-			await basicTextGeneration(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should complete basic text generation",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await basicTextGeneration(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle tool calling", { retry: 3 }, async () => {
-			await handleToolCall(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle tool calling",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleToolCall(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle streaming", { retry: 3 }, async () => {
-			await handleStreaming(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle streaming",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleStreaming(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle thinking with reasoningEffort xhigh", { retry: 3 }, async () => {
-			await handleThinking(llm, { apiKey: openaiCodexToken, reasoningEffort: "xhigh" });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle thinking with reasoningEffort xhigh",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleThinking(llm, { apiKey: openaiCodexToken, reasoningEffort: "xhigh" });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
-			await multiTurn(llm, { apiKey: openaiCodexToken, reasoningEffort: "xhigh" });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle multi-turn with thinking and tools",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await multiTurn(llm, { apiKey: openaiCodexToken, reasoningEffort: "xhigh" });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle image input", { retry: 3 }, async () => {
-			await handleImage(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle image input",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleImage(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 	});
 
 	describe("OpenAI Codex Provider (gpt-5.5 via WebSocket)", () => {
 		const llm = getModel("openai-codex", "gpt-5.5");
 		const wsOptions = { apiKey: openaiCodexToken, transport: "websocket" as const };
 
-		it.skipIf(!openaiCodexToken)("should complete basic text generation", { retry: 3 }, async () => {
-			await basicTextGeneration(llm, wsOptions);
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should complete basic text generation",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await basicTextGeneration(llm, wsOptions);
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle tool calling", { retry: 3 }, async () => {
-			await handleToolCall(llm, wsOptions);
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle tool calling",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleToolCall(llm, wsOptions);
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle streaming", { retry: 3 }, async () => {
-			await handleStreaming(llm, wsOptions);
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle streaming",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleStreaming(llm, wsOptions);
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle thinking with reasoningEffort xhigh", { retry: 3 }, async () => {
-			await handleThinking(llm, { ...wsOptions, reasoningEffort: "xhigh" });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle thinking with reasoningEffort xhigh",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleThinking(llm, { ...wsOptions, reasoningEffort: "xhigh" });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
-			await multiTurn(llm, { ...wsOptions, reasoningEffort: "xhigh" });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle multi-turn with thinking and tools",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await multiTurn(llm, { ...wsOptions, reasoningEffort: "xhigh" });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle image input", { retry: 3 }, async () => {
-			await handleImage(llm, wsOptions);
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle image input",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				await handleImage(llm, wsOptions);
+			}),
+		);
 	});
 
 	// Check if ollama is installed and local LLM tests are enabled

@@ -700,7 +700,10 @@ export class AssistantMessageComponent extends Container {
 				if (hasVisibleContent) {
 					this.contentContainer.addChild(new Spacer(1));
 				}
-				this.contentContainer.addChild(new Text(theme.fg("error", abortMessage), 1, 0));
+				// Aborting is a routine, user-initiated action — render it muted so
+				// error red stays reserved for real failures (turn-done already
+				// treats the two stop reasons as distinct).
+				this.contentContainer.addChild(new Text(theme.fg("muted", `◦ ${abortMessage}`), 1, 0));
 			} else if (message.stopReason === "error") {
 				const errorMsg = message.errorMessage || "Unknown error";
 				if (hasVisibleContent) {

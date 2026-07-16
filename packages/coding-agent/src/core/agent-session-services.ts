@@ -4,6 +4,7 @@ import type { Model } from "@pit/ai";
 import { getAgentDir } from "../config.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { bundleBuiltInExtensions } from "./built-ins/index.ts";
+import { retargetToolsForWorktree } from "./coordinator/worktree-tools.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { composeMcpSettings, loadMcpConfigFiles } from "./mcp/config-files.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -63,6 +64,12 @@ export interface CreateAgentSessionFromServicesOptions {
 	noTools?: CreateAgentSessionOptions["noTools"];
 	customTools?: ToolDefinition[];
 	disableHashlineAnchors?: boolean;
+	/**
+	 * Session-level prompt-cache retention (adaptive default lives in main.ts:
+	 * "long" for the interactive session, "short" for one-shot print/RPC runs).
+	 * See CreateAgentSessionOptions.cacheRetention.
+	 */
+	cacheRetention?: CreateAgentSessionOptions["cacheRetention"];
 }
 
 /**
@@ -179,6 +186,9 @@ export async function createAgentSessionServices(
 	// model/catalog.
 	const parentModelRef: { current?: () => import("@pit/ai").Model<any> | undefined } = {};
 	const availableToolsRef: { current?: () => import("@pit/agent-core").AgentTool[] } = {};
+	const retargetToolsRef: {
+		current?: (tools: import("@pit/agent-core").AgentTool[], cwd: string) => import("@pit/agent-core").AgentTool[];
+	} = {};
 	const parentMessagingIdRef: { current?: string } = {};
 	const asyncDeliverRef: {
 		current?: (
@@ -213,6 +223,8 @@ export async function createAgentSessionServices(
 			mcp: composeMcpSettings(settingsManager.getMcpSettingsLayered(), loadMcpConfigFiles(cwd, agentDir)),
 			getParentModel: () => parentModelRef.current?.(),
 			getAvailableTools: () => availableToolsRef.current?.() ?? [],
+			retargetToolsForCwd: (tools, targetCwd) =>
+				retargetToolsRef.current?.(tools, targetCwd) ?? retargetToolsForWorktree(tools, targetCwd),
 			// Resolved lazily at subagent-spawn time, well after resourceLoader init.
 			getSkills: () => resourceLoader.getSkills().skills,
 			isMessagingEnabled: () => settingsManager.getAgentMessagingSettings().enabled,
@@ -265,6 +277,10 @@ export async function createAgentSessionServices(
 			__bindBuiltInRefs?: (
 				getModel: () => import("@pit/ai").Model<any> | undefined,
 				getTools: () => import("@pit/agent-core").AgentTool[],
+				retargetTools: (
+					tools: import("@pit/agent-core").AgentTool[],
+					cwd: string,
+				) => import("@pit/agent-core").AgentTool[],
 				messagingId: string | undefined,
 				deliverAsync: (
 					handle: string,
@@ -285,6 +301,7 @@ export async function createAgentSessionServices(
 	).__bindBuiltInRefs = (
 		getModel,
 		getTools,
+		retargetTools,
 		messagingId,
 		deliverAsync,
 		emitSubStart,
@@ -294,6 +311,7 @@ export async function createAgentSessionServices(
 	) => {
 		parentModelRef.current = getModel;
 		availableToolsRef.current = getTools;
+		retargetToolsRef.current = retargetTools;
 		parentMessagingIdRef.current = messagingId;
 		asyncDeliverRef.current = deliverAsync;
 		subagentStartRef.current = emitSubStart;
@@ -388,6 +406,7 @@ export async function createAgentSessionFromServices(
 		disableHashlineAnchors: options.disableHashlineAnchors,
 		ttsrMatcher,
 		permissionChecker: options.services.permissionChecker,
+		cacheRetention: options.cacheRetention,
 	});
 
 	const bind = (
@@ -395,6 +414,10 @@ export async function createAgentSessionFromServices(
 			__bindBuiltInRefs?: (
 				getModel: () => import("@pit/ai").Model<any> | undefined,
 				getTools: () => import("@pit/agent-core").AgentTool[],
+				retargetTools: (
+					tools: import("@pit/agent-core").AgentTool[],
+					cwd: string,
+				) => import("@pit/agent-core").AgentTool[],
 				messagingId: string | undefined,
 				deliverAsync: (
 					handle: string,
@@ -417,6 +440,7 @@ export async function createAgentSessionFromServices(
 		bind(
 			() => result.session.model,
 			() => result.session.agent.state.tools as import("@pit/agent-core").AgentTool[],
+			(tools, targetCwd) => result.session._retargetSubagentToolsForCwd(tools, targetCwd),
 			result.session.messagingId,
 			(handle, text, status, meta) => result.session._deliverAsyncResult(handle, text, status, meta),
 			(handle) => result.session._emitSubagentStart(handle),

@@ -77,7 +77,7 @@ describe("hasEditDiff", () => {
 });
 
 describe("capDiffPreview", () => {
-	it("keeps short bodies and folds long ones with an expand hint", () => {
+	it("keeps short bodies and folds long ones with an honest truncation trailer", () => {
 		const short = capDiffPreview(["a", "b"], 80, 5);
 		expect(short).toEqual(["a", "b"]);
 		const lines = Array.from({ length: 8 }, (_, i) => `line ${i}`);
@@ -85,7 +85,10 @@ describe("capDiffPreview", () => {
 		expect(capped.length).toBe(6);
 		expect(capped[4]).toBe("line 4");
 		expect(capped[5]).toContain("+3 more lines");
-		expect(capped[5]).toContain("to expand");
+		// Every call site is an already-expanded body: ctrl+o COLLAPSES from
+		// there, so the trailer must not promise "to expand".
+		expect(capped[5]).not.toContain("to expand");
+		expect(capped[5]).toContain("diff truncated");
 	});
 });
 

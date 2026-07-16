@@ -4,6 +4,7 @@
 	"vars": {
 		"teal": "#1f7a6a",
 		"tealDeep": "#0f6e56",
+		"cyanAccent": "#0e6b7e",
 		"cyanBlue": "#2f7da0",
 		"green": "#3f9b54",
 		"mint": "#177a4f",
@@ -22,7 +23,7 @@
 		"customMsgBg": "#ece6f6"
 	},
 	"colors": {
-		"accent": "mint",
+		"accent": "cyanAccent",
 		"border": "cyanBlue",
 		"borderAccent": "tealDeep",
 		"borderMuted": "borderMuted",
@@ -60,6 +61,8 @@
 		"toolDiffAdded": "green",
 		"toolDiffRemoved": "coral",
 		"toolDiffContext": "muted",
+		"toolDiffAddedBg": "toolSuccessBg",
+		"toolDiffRemovedBg": "toolErrorBg",
 
 		"syntaxComment": "#5e7a6a",
 		"syntaxKeyword": "#1d6fa8",

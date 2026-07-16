@@ -42,6 +42,16 @@ describe("defaultIsRetryable", () => {
 		expect(defaultIsRetryable(new Error("ECONNREFUSED 127.0.0.1"))).toBe(true);
 	});
 
+	test("returns true for idle-socket errors (keep-alive socket killed by server)", () => {
+		expect(defaultIsRetryable(new Error("read ECONNRESET"))).toBe(true);
+		expect(defaultIsRetryable(new Error("write EPIPE"))).toBe(true);
+		expect(defaultIsRetryable(new Error("socket hang up"))).toBe(true);
+		expect(defaultIsRetryable(new Error("SocketError: other side closed"))).toBe(true);
+		// lowercase variants (regex is case-insensitive)
+		expect(defaultIsRetryable(new Error("fetch failed: econnreset"))).toBe(true);
+		expect(defaultIsRetryable(new Error("broken pipe (epipe)"))).toBe(true);
+	});
+
 	test("returns false for non-retryable HTTP statuses", () => {
 		expect(defaultIsRetryable(new HttpError(401))).toBe(false);
 		expect(defaultIsRetryable(new HttpError(403))).toBe(false);
@@ -78,6 +88,20 @@ describe("withFallbackChain", () => {
 			calls.push(entry.model.id);
 			if (entry.model.id === "claude-1") {
 				throw new HttpError(429, "rate-limit hit");
+			}
+			return "fallback-ok";
+		});
+		expect(out).toBe("fallback-ok");
+		expect(calls).toEqual(["claude-1", "gpt-1"]);
+	});
+
+	test("primary throws ECONNRESET (idle socket) → fallback entry succeeds", async () => {
+		const chain = [fakeEntry("anthropic", "claude-1"), fakeEntry("openai", "gpt-1")];
+		const calls: string[] = [];
+		const out = await withFallbackChain({ chain }, async (entry) => {
+			calls.push(entry.model.id);
+			if (entry.model.id === "claude-1") {
+				throw new Error("read ECONNRESET");
 			}
 			return "fallback-ok";
 		});

@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { runWithAcceptance } from "../src/core/coordinator/acceptance.js";
 import { SubagentRegistry } from "../src/core/coordinator/registry.js";
-import type { SpawnSubagentDependencies } from "../src/core/coordinator/spawn.js";
+import { getSubagentErrorUsage, type SpawnSubagentDependencies } from "../src/core/coordinator/spawn.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { PermissionChecker } from "../src/core/permissions/index.js";
@@ -92,6 +92,11 @@ describe("runWithAcceptance", () => {
 		expect(result.isError).toBe(false);
 		expect(result.gate?.passed).toBe(true);
 		expect(result.gate?.attempts).toBe(2);
+		// Whole-gate accounting includes both workers AND both semantic judges.
+		const records = deps.registry.list();
+		expect(records).toHaveLength(4);
+		const recordedTotal = records.reduce((sum, record) => sum + (record.usage?.totalTokens ?? 0), 0);
+		expect(result.usage?.totalTokens).toBe(recordedTotal);
 	});
 
 	it("exhaustion returns last output flagged, isError:false", async () => {
@@ -159,6 +164,24 @@ describe("runWithAcceptance", () => {
 		expect(result.isError).toBe(false);
 		expect(result.gate?.passed).toBe(false);
 		expect(result.gate?.exhausted).toBe(true);
+	});
+
+	it("attaches aggregate worker + judge usage when semantic evaluation throws", async () => {
+		const { faux, deps } = rig();
+		faux.setResponses([fauxAssistantMessage("worker output"), fauxAssistantMessage("judge emitted invalid json")]);
+		let thrown: unknown;
+		try {
+			await runWithAcceptance(
+				deps,
+				{ prompt: "p", taskName: "judge-throw", depth: 0 },
+				{ criteria: "must pass", max_attempts: 1 },
+			);
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeDefined();
+		const recordedTotal = deps.registry.list().reduce((sum, record) => sum + (record.usage?.totalTokens ?? 0), 0);
+		expect(getSubagentErrorUsage(thrown)?.totalTokens).toBe(recordedTotal);
 	});
 
 	it("real worker throw propagates as isError (via spawn throw)", async () => {

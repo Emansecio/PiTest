@@ -5,6 +5,7 @@ import type { Api, Context, Model, StreamOptions } from "../src/types.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
@@ -71,24 +72,40 @@ describe("AI Providers Abort Tests", () => {
 	describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("Anthropic Provider Abort", () => {
 		const llm = getModel("anthropic", "claude-opus-4-8");
 
-		it("should abort mid-stream", { retry: 3 }, async () => {
-			await testAbortSignal(llm, { thinkingEnabled: true, thinkingBudgetTokens: 2048 });
-		});
+		it(
+			"should abort mid-stream",
+			{ retry: 3 },
+			live("anthropic", async () => {
+				await testAbortSignal(llm, { thinkingEnabled: true, thinkingBudgetTokens: 2048 });
+			}),
+		);
 
-		it("should handle immediate abort", { retry: 3 }, async () => {
-			await testImmediateAbort(llm, { thinkingEnabled: true, thinkingBudgetTokens: 2048 });
-		});
+		it(
+			"should handle immediate abort",
+			{ retry: 3 },
+			live("anthropic", async () => {
+				await testImmediateAbort(llm, { thinkingEnabled: true, thinkingBudgetTokens: 2048 });
+			}),
+		);
 	});
 
 	describe("OpenAI Codex Provider Abort", () => {
-		it.skipIf(!openaiCodexToken)("should abort mid-stream", { retry: 3 }, async () => {
-			const llm = getModel("openai-codex", "gpt-5.5");
-			await testAbortSignal(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should abort mid-stream",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				const llm = getModel("openai-codex", "gpt-5.5");
+				await testAbortSignal(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 
-		it.skipIf(!openaiCodexToken)("should handle immediate abort", { retry: 3 }, async () => {
-			const llm = getModel("openai-codex", "gpt-5.5");
-			await testImmediateAbort(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should handle immediate abort",
+			{ retry: 3 },
+			live("openai-codex", async () => {
+				const llm = getModel("openai-codex", "gpt-5.5");
+				await testImmediateAbort(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 	});
 });

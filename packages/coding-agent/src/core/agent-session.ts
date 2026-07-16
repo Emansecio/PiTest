@@ -66,7 +66,7 @@ import {
 	upsertLearnedErrorOnFailure,
 	type VerificationGateState,
 } from "./agent-session-tool-end.ts";
-import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage, isOAuthReauthRequired } from "./auth-guidance.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { type CacheStats, computeCacheStats } from "./cache-stats.js";
 import type { ChromeDevtoolsManager } from "./chrome/chrome-devtools-manager.ts";
@@ -90,7 +90,6 @@ import {
 	calculateContextTokens,
 	collectEntriesForBranchSummary,
 	estimateContextTokens,
-	estimateTokens,
 	estimateWireTokens,
 	generateBranchSummary,
 	proactivePruneFloor,
@@ -99,7 +98,7 @@ import {
 import { extractToolFileOp } from "./compaction/utils.js";
 import { composeContext, isContextComposerDisabled } from "./conditioning/context-composer.ts";
 import { buildAsyncDeliveryBody } from "./coordinator/async-delivery.ts";
-import { SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
+import { retargetToolsForWorktree, SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
 import { debugVerifyContextPrompt, maybeRunDebugVerify } from "./debug-verify.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import {
@@ -168,7 +167,12 @@ import {
 	setCurrentHindsightBank,
 } from "./hindsight/index.js";
 import { getCurrentHistoryRecallSource, setCurrentHistoryRecallSource } from "./history-recall.ts";
-import { defaultLearnedErrorsDir, type LearnedErrorEntry, persistSessionLearnedErrors } from "./learned-error-store.js";
+import {
+	defaultLearnedErrorsDir,
+	type LearnedErrorEntry,
+	persistSessionLearnedErrors,
+	pruneLearnedErrorSessionFiles,
+} from "./learned-error-store.js";
 import * as lspConfigModule from "./lsp/config.ts";
 import type { LspManager } from "./lsp/manager.ts";
 import * as lspManagerModule from "./lsp/manager.ts";
@@ -232,6 +236,7 @@ import {
 	TokenBudgetGovernor,
 	type TokenBudgetSnapshot,
 } from "./token-governor.ts";
+import { consumedTokens, type TokenUsageComponents } from "./token-usage.ts";
 import {
 	extractErrorMessage,
 	fingerprintToolArgsExact,
@@ -259,7 +264,7 @@ import { FileMtimeStore } from "./tools/file-mtime-store.ts";
 import { chromeFeatureToolNames, createAllToolDefinitions } from "./tools/index.js";
 import { ReadDedupeStore, type ReadToolDetails } from "./tools/read.js";
 import { listDeclarations } from "./tools/symbol.ts";
-import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
+import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.js";
 import { configureTruncationCaps } from "./tools/truncate.ts";
 import { TurnRiskAccumulator } from "./turn-risk.ts";
 import { TurnSteeringEngine } from "./turn-steering-engine.ts";
@@ -681,8 +686,13 @@ export class AgentSession implements CompactionHost, FusionHost {
 	private readonly _learnedErrors = new Map<string, LearnedErrorEntry>();
 	// Set whenever `_learnedErrors` is mutated (new fingerprint or count bump) and
 	// cleared by `_flushLearnedErrorsIfDirty`. Gates the per-turn flush so a turn
-	// that learned nothing new triggers no writeFileSync/pruneOldFiles.
+	// that learned nothing new enqueues no disk write.
 	private _learnedErrorsDirty = false;
+	// Serialized async write queue for the learned-error store (same tail-promise
+	// pattern as SessionManager._drainQueue): per-turn flushes chain here so
+	// overlapping writes to this session's single `${sessionId}.jsonl` never
+	// interleave, and dispose can await full drainage for shutdown durability.
+	private _learnedErrorsFlushTail: Promise<void> = Promise.resolve();
 	// Keys for which a same-session Tier 4 hint rule has already been registered
 	// live, so a recurring fingerprint materialises its rule exactly once.
 	private readonly _sameSessionHintKeys = new Set<string>();
@@ -1272,39 +1282,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// discovery must still see every tool.
 		let allDefs: Record<string, ToolDefinition>;
 		if (this._baseToolsOverride) {
-			const autoResizeImages = this.settingsManager.getImageAutoResize();
-			const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
-			const shellPath = this.settingsManager.getShellPath();
 			try {
-				allDefs = createAllToolDefinitions(this._cwd, {
-					read: {
-						autoResizeImages,
-						embedHashlineAnchors: () =>
-							!this._disableHashlineAnchors && this.getActiveToolNames().includes("edit_v2"),
-						readDedupeStore: this._readDedupeStore,
-						mtimeStore: this._fileMtimeStore,
-						// Lets _handleToolExecutionEnd reuse a clean full read's own output
-						// for the composer's style exemplar instead of re-reading the file
-						// from disk. Skipped when the composer itself is disabled so that
-						// build pays nothing for a field nobody will consume.
-						captureRawContent: !isContextComposerDisabled(),
-					},
-					edit: { mtimeStore: this._fileMtimeStore },
-					edit_v2: { mtimeStore: this._fileMtimeStore },
-					write: { mtimeStore: this._fileMtimeStore },
-					// The session has a bounded lifecycle (dispose() calls
-					// disposeBashSparePool()), so it's safe to opt into the pre-warmed
-					// spare-shell pool here — see BashToolOptions.enableSparePool.
-					bash: { commandPrefix: shellCommandPrefix, shellPath, enableSparePool: true },
-					grep: { engine: this.settingsManager.getGrepSettings().engine },
-					find: {
-						engine: this.settingsManager.getGrepSettings().engine === "fff" ? "fff" : "fd",
-					},
-					ast_grep: { engine: this.settingsManager.getAstGrepSettings().engine },
-					chromeDevtools: { enabled: this.settingsManager.getChromeDevtoolsSettings().enabled },
-					lsp: { enabled: this.settingsManager.getLspSettings().enabled },
-					debug: { enabled: this.settingsManager.getDebugSettings().enabled },
-				}) as Record<string, ToolDefinition>;
+				allDefs = this._createConfiguredToolDefinitions(this._cwd);
 			} catch {
 				return;
 			}
@@ -1722,8 +1701,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 			// Race against the run signal so a tool_call handler parked on slow IO
 			// can't wedge the turn — Esc/abort always unblocks the loop (settleOrAbort).
 			// `args` is Proxy-tracked by agent-loop: in-place rewrites (Object.assign on
-			// event.input) flip argsMutation so the second stableArgsFingerprint runs
-			// only when a handler actually rewrote args.
+			// event.input) flip argsMutation so agent-loop revalidates the final args
+			// (validator.Check fast path) only when a handler actually rewrote them.
 			try {
 				const result = await settleOrAbort(
 					runner.emitToolCall({
@@ -2192,7 +2171,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 				// Incremental persistence: flush newly-learned error fingerprints so a
 				// session killed before dispose still warms the cross-session store. No-op
 				// when nothing was learned this turn (dirty flag) or the session is
-				// ephemeral/empty (guards inside _persistLearnedErrors). Best-effort.
+				// ephemeral/empty (guards inside _enqueueLearnedErrorsWrite). Best-effort;
+				// the write itself runs async on the serialized flush queue.
 				this._flushLearnedErrorsIfDirty();
 				this._turnIndex++;
 				break;
@@ -2629,31 +2609,38 @@ export class AgentSession implements CompactionHost, FusionHost {
 	}
 
 	/**
-	 * Append this session's learned-error fingerprints to a per-session JSONL
-	 * file under `~/.pit/agent/learned-errors/`. Best-effort: failures are
-	 * swallowed because the learned-error store is observability, not load-
-	 * bearing for the session lifecycle.
+	 * Enqueue one write of this session's learned-error fingerprints to its
+	 * per-session JSONL file under `~/.pit/agent/learned-errors/`. The write is
+	 * async (fs/promises) and chained on `_learnedErrorsFlushTail` so it never
+	 * blocks the turn boundary and never interleaves with a previous in-flight
+	 * write to the same file. The entries snapshot is taken when the queued task
+	 * RUNS, so back-to-back flushes coalesce to the latest accumulated state
+	 * (the file is an idempotent overwrite). Best-effort: failures are swallowed
+	 * because the learned-error store is observability, not load-bearing for the
+	 * session lifecycle.
 	 */
-	private _persistLearnedErrors(): void {
+	private _enqueueLearnedErrorsWrite(): void {
 		if (this._learnedErrors.size === 0) return;
 		// In-memory sessions (test harnesses, ephemeral SDK embeds) must not
 		// pollute the shared cross-session store: their errors are synthetic
 		// (temp-dir paths, faux providers) and would materialise misleading
 		// dynamic Tier 4 rules for real sessions.
 		if (!this.sessionManager.isPersisted()) return;
-		try {
-			persistSessionLearnedErrors(
-				defaultLearnedErrorsDir(),
-				{
-					sessionId: this.sessionId,
-					timestamp: new Date().toISOString(),
-					cwd: this._cwd,
-				},
-				Array.from(this._learnedErrors.values()),
-			);
-		} catch {
-			// Best-effort: never block dispose on telemetry.
-		}
+		this._learnedErrorsFlushTail = this._learnedErrorsFlushTail
+			.then(() =>
+				persistSessionLearnedErrors(
+					defaultLearnedErrorsDir(),
+					{
+						sessionId: this.sessionId,
+						timestamp: new Date().toISOString(),
+						cwd: this._cwd,
+					},
+					Array.from(this._learnedErrors.values()),
+				),
+			)
+			.catch(() => {
+				// Best-effort: never fail a turn (or dispose) on telemetry.
+			});
 	}
 
 	/**
@@ -2663,13 +2650,35 @@ export class AgentSession implements CompactionHost, FusionHost {
 	 * OVERWRITES this session's single `${sessionId}.jsonl` (no append), so flushing
 	 * every turn keeps one file at the latest accumulated state and never inflates
 	 * `aggregateLearnedErrors`' per-file sessionCount. The dirty flag skips the
-	 * writeFileSync/pruneOldFiles on turns that learned nothing new. Reuses
-	 * `_persistLearnedErrors`' guards (size==0, !isPersisted, try/catch) verbatim.
+	 * enqueue on turns that learned nothing new; the write itself runs async on
+	 * the serialized `_learnedErrorsFlushTail` queue (no event-loop stall between
+	 * turns) and pruning is deferred to dispose (`_flushLearnedErrorsAtDispose`).
 	 */
 	private _flushLearnedErrorsIfDirty(): void {
 		if (!this._learnedErrorsDirty) return;
 		this._learnedErrorsDirty = false;
-		this._persistLearnedErrors();
+		this._enqueueLearnedErrorsWrite();
+	}
+
+	/**
+	 * Dispose-time durability barrier for the learned-error store: enqueue one
+	 * final unconditional write (safety net for entries recorded after the last
+	 * turn_end flush, mirroring the historical dispose-time persist), await the
+	 * serialized queue so shutdown never races an in-flight write, then prune
+	 * old session files ONCE — moved off the per-turn path so readdir+stat-per-
+	 * file is paid a single time per session, not per turn.
+	 */
+	private async _flushLearnedErrorsAtDispose(): Promise<void> {
+		this._enqueueLearnedErrorsWrite();
+		await this._learnedErrorsFlushTail;
+		// Prune only when this session actually contributes to the store (same
+		// gates as the write path: something learned + persisted session).
+		if (this._learnedErrors.size === 0 || !this.sessionManager.isPersisted()) return;
+		try {
+			await pruneLearnedErrorSessionFiles(defaultLearnedErrorsDir());
+		} catch {
+			// Best-effort: never block dispose on telemetry.
+		}
 	}
 
 	/**
@@ -2795,7 +2804,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// tool-call totals + per-rule rewrite/reject counts. Used to measure
 		// the before/after delta of the rewrite registry on real workloads.
 		this._maybeExportStats();
-		this._persistLearnedErrors();
+		await this._flushLearnedErrorsAtDispose();
 		// Band P Fase 0: snapshot the session outcome, then tear down the sink.
 		this._guardEfficacyUnsub?.();
 		this._guardEfficacyUnsub = undefined;
@@ -3117,10 +3126,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 	/** Record a finished turn into the goal (token usage + interruption status). */
 	private _recordGoalTurn(message: unknown): void {
 		if (!this._goal.get()) return;
-		const m = message as { usage?: { input?: number; output?: number }; stopReason?: string } | undefined;
-		const usage = m?.usage;
-		const tokens = usage ? (usage.input ?? 0) + (usage.output ?? 0) : 0;
-		this._tokenGovernor.recordMain(tokens);
+		const m = message as { usage?: TokenUsageComponents; stopReason?: string } | undefined;
+		this._tokenGovernor.recordMain(consumedTokens(m?.usage));
 		this._goal.recordIteration();
 		if (typeof m?.stopReason === "string") this._goal.onInterrupted(m.stopReason);
 		// Persist progress so token/iteration counts survive /reload. Status
@@ -4022,6 +4029,22 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 
 		return reclaimed > 0 ? copy : messages;
+	}
+
+	/**
+	 * Rebind cwd-sensitive native tools for a worktree subagent while preserving
+	 * this session's configured shell/search/LSP options. Host extension tools
+	 * pass through; parent-bound coordinator/code dispatchers are withheld by the
+	 * fail-closed retargeter.
+	 * @internal Wired from agent-session-services via __bindBuiltInRefs.
+	 */
+	_retargetSubagentToolsForCwd(tools: AgentTool[], cwd: string): AgentTool[] {
+		const definitions = this._createConfiguredToolDefinitions(cwd);
+		return retargetToolsForWorktree(tools, cwd, (name) => {
+			const definition = definitions[name];
+			if (!definition) throw new Error(`configured tool definition not found: ${name}`);
+			return wrapToolDefinition(definition);
+		});
 	}
 
 	/**
@@ -5824,14 +5847,42 @@ export class AgentSession implements CompactionHost, FusionHost {
 		}
 	};
 
+	/** Build native tool definitions for any cwd with this session's configured options. */
+	private _createConfiguredToolDefinitions(cwd: string): Record<string, ToolDefinition> {
+		const autoResizeImages = this.settingsManager.getImageAutoResize();
+		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
+		const shellPath = this.settingsManager.getShellPath();
+		return createAllToolDefinitions(cwd, {
+			read: {
+				autoResizeImages,
+				embedHashlineAnchors: () => !this._disableHashlineAnchors && this.getActiveToolNames().includes("edit_v2"),
+				readDedupeStore: this._readDedupeStore,
+				mtimeStore: this._fileMtimeStore,
+				captureRawContent: !isContextComposerDisabled(),
+			},
+			edit: { mtimeStore: this._fileMtimeStore },
+			edit_v2: { mtimeStore: this._fileMtimeStore },
+			write: { mtimeStore: this._fileMtimeStore },
+			bash: { commandPrefix: shellCommandPrefix, shellPath, enableSparePool: true },
+			grep: { engine: this.settingsManager.getGrepSettings().engine },
+			find: { engine: this.settingsManager.getGrepSettings().engine === "fff" ? "fff" : "fd" },
+			ast_grep: { engine: this.settingsManager.getAstGrepSettings().engine },
+			code: {
+				dispatcher: this._buildCodeModeDispatcher(),
+				getActiveToolNames: () => this.getActiveToolNames(),
+			},
+			search_skills: { getSkills: () => this._resourceLoader.getSkills().skills },
+			chromeDevtools: { enabled: this.settingsManager.getChromeDevtoolsSettings().enabled },
+			lsp: { enabled: this.settingsManager.getLspSettings().enabled },
+			debug: { enabled: this.settingsManager.getDebugSettings().enabled },
+		}) as Record<string, ToolDefinition>;
+	}
+
 	private _buildRuntime(options: {
 		activeToolNames?: string[];
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
 	}): void {
-		const autoResizeImages = this.settingsManager.getImageAutoResize();
-		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
-		const shellPath = this.settingsManager.getShellPath();
 		const baseToolDefinitions = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
@@ -5839,45 +5890,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 						createToolDefinitionFromAgentTool(tool),
 					]),
 				)
-			: createAllToolDefinitions(this._cwd, {
-					read: {
-						autoResizeImages,
-						embedHashlineAnchors: () =>
-							!this._disableHashlineAnchors && this.getActiveToolNames().includes("edit_v2"),
-						readDedupeStore: this._readDedupeStore,
-						mtimeStore: this._fileMtimeStore,
-						// Lets _handleToolExecutionEnd reuse a clean full read's own output
-						// for the composer's style exemplar instead of re-reading the file
-						// from disk. Skipped when the composer itself is disabled so that
-						// build pays nothing for a field nobody will consume.
-						captureRawContent: !isContextComposerDisabled(),
-					},
-					edit: { mtimeStore: this._fileMtimeStore },
-					edit_v2: { mtimeStore: this._fileMtimeStore },
-					write: { mtimeStore: this._fileMtimeStore },
-					// The session has a bounded lifecycle (dispose() calls
-					// disposeBashSparePool()), so it's safe to opt into the pre-warmed
-					// spare-shell pool here — see BashToolOptions.enableSparePool.
-					bash: { commandPrefix: shellCommandPrefix, shellPath, enableSparePool: true },
-					grep: { engine: this.settingsManager.getGrepSettings().engine },
-					find: {
-						engine: this.settingsManager.getGrepSettings().engine === "fff" ? "fff" : "fd",
-					},
-					ast_grep: { engine: this.settingsManager.getAstGrepSettings().engine },
-					// Code-mode: inject the harness-routed dispatcher so a code-mode
-					// program's `tools.x()` calls pass through the same pipeline as a
-					// normal model tool call (anti-bypass). See _buildCodeModeDispatcher.
-					code: {
-						dispatcher: this._buildCodeModeDispatcher(),
-						getActiveToolNames: () => this.getActiveToolNames(),
-					},
-					search_skills: {
-						getSkills: () => this._resourceLoader.getSkills().skills,
-					},
-					chromeDevtools: { enabled: this.settingsManager.getChromeDevtoolsSettings().enabled },
-					lsp: { enabled: this.settingsManager.getLspSettings().enabled },
-					debug: { enabled: this.settingsManager.getDebugSettings().enabled },
-				});
+			: this._createConfiguredToolDefinitions(this._cwd);
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
@@ -5958,6 +5971,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		const err = message.errorMessage;
+		// A revoked/expired OAuth token (invalid_grant) will never recover on retry —
+		// re-login is required. Bail out so the /login guidance surfaces immediately
+		// instead of burning the retry budget on a permanent failure.
+		if (isOAuthReauthRequired(err) || /Run '\/login/.test(err)) return false;
 		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504, service unavailable, network/connection errors (including connection lost), WebSocket transport closes/errors, fetch failed, premature stream endings, HTTP/2 closed before response, terminated, retry delay exceeded
 		return RETRYABLE_ERROR_RE.test(err);
 	}
@@ -6201,6 +6218,7 @@ export class AgentSession implements CompactionHost, FusionHost {
 				success: false,
 				attempt,
 				finalError: "Retry cancelled",
+				cancelled: true,
 			});
 			return false;
 		} finally {
@@ -6627,21 +6645,27 @@ export class AgentSession implements CompactionHost, FusionHost {
 					break;
 				case "assistant": {
 					assistantMessages++;
-					const assistantMsg = message as AssistantMessage;
-					for (const c of assistantMsg.content) {
+					for (const c of message.content) {
 						if (c.type === "toolCall") toolCalls++;
 					}
-					totalInput += assistantMsg.usage.input;
-					totalOutput += assistantMsg.usage.output;
-					totalCacheRead += assistantMsg.usage.cacheRead;
-					totalCacheWrite += assistantMsg.usage.cacheWrite;
-					totalCost += assistantMsg.usage.cost.total;
 					break;
 				}
 				case "toolResult":
 					toolResults++;
 					break;
 			}
+		}
+
+		// Persisted message entries are append-only incurred work. Compaction and
+		// branch changes alter active context above, but must not erase billed usage.
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const assistantMsg = entry.message as AssistantMessage;
+			totalInput += assistantMsg.usage.input;
+			totalOutput += assistantMsg.usage.output;
+			totalCacheRead += assistantMsg.usage.cacheRead;
+			totalCacheWrite += assistantMsg.usage.cacheWrite;
+			totalCost += assistantMsg.usage.cost.total;
 		}
 
 		return {
@@ -6770,14 +6794,14 @@ export class AgentSession implements CompactionHost, FusionHost {
 				// which would otherwise latch onto a kept message's stale pre-compaction usage and
 				// report the OLD (large) size. The next assistant response replaces this estimate
 				// with the exact provider figure (estimated:false).
-				let estimated = 0;
-				for (const message of this.messages) estimated += estimateTokens(message);
 				const wire = estimateWireTokens(this.messages, {
 					systemPromptChars: this.agent.state.systemPrompt.length,
 					tools: this._wireToolsForEstimate(),
+					modelId: this.model?.id,
+					structuralOnly: true,
 				});
 				return {
-					tokens: estimated,
+					tokens: wire.messageTokens,
 					wireTokens: wire.tokens,
 					contextWindow,
 					percent: (wire.tokens / contextWindow) * 100,

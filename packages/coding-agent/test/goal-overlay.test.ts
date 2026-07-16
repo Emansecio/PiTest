@@ -74,7 +74,7 @@ describe("renderGoalOverlay", () => {
 			120,
 			true,
 		);
-		expect(out).toContain("50k/30k/5k");
+		expect(out).toContain("main 50k · sub 30k · fusion 5k");
 		expect(out).toContain("~80% budget");
 		expect(out).toContain("85k/100k");
 	});

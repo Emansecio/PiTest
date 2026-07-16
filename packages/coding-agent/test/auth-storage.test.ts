@@ -192,6 +192,173 @@ describe("AuthStorage", () => {
 		});
 	});
 
+	describe("oauth background pre-refresh (PIT_NO_OAUTH_PREFRESH)", () => {
+		const originalFlag = process.env.PIT_NO_OAUTH_PREFRESH;
+
+		beforeEach(() => {
+			delete process.env.PIT_NO_OAUTH_PREFRESH;
+		});
+
+		afterEach(() => {
+			if (originalFlag === undefined) delete process.env.PIT_NO_OAUTH_PREFRESH;
+			else process.env.PIT_NO_OAUTH_PREFRESH = originalFlag;
+		});
+
+		function registerRefreshCountingProvider(options?: { refreshDelayMs?: number; fail?: boolean }) {
+			const providerId = `test-oauth-prefresh-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			const counters = { refreshCalls: 0 };
+			registerOAuthProvider({
+				id: providerId,
+				name: "Test OAuth Prefresh",
+				async login() {
+					throw new Error("Not used in this test");
+				},
+				async refreshToken(credentials) {
+					counters.refreshCalls++;
+					if (options?.refreshDelayMs) {
+						await new Promise((resolve) => setTimeout(resolve, options.refreshDelayMs));
+					}
+					if (options?.fail) {
+						throw new Error("refresh rejected");
+					}
+					return {
+						...credentials,
+						access: "prefreshed-access-token",
+						expires: Date.now() + 60 * 60_000,
+					};
+				},
+				getApiKey(credentials) {
+					return credentials.access;
+				},
+			});
+			return { providerId, counters };
+		}
+
+		function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+			return new Promise((resolve, reject) => {
+				const started = Date.now();
+				const tick = () => {
+					if (predicate()) return resolve();
+					if (Date.now() - started > timeoutMs) return reject(new Error("waitFor timed out"));
+					setTimeout(tick, 10);
+				};
+				tick();
+			});
+		}
+
+		test("near-expiry token is returned immediately and refreshed in the background", async () => {
+			const { providerId, counters } = registerRefreshCountingProvider();
+			writeAuthJson({
+				[providerId]: {
+					type: "oauth",
+					refresh: "refresh-token",
+					access: "still-valid-access-token",
+					expires: Date.now() + 5 * 60_000, // valid, but inside the ~10min pre-refresh window
+				},
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+
+			// Hot path: hands out the CURRENT (still valid) token without waiting.
+			expect(await authStorage.getApiKey(providerId)).toBe("still-valid-access-token");
+
+			// The fire-and-forget refresh lands out-of-band and persists new creds.
+			await waitFor(() => counters.refreshCalls === 1);
+			await waitFor(() => {
+				const stored = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, { access?: string }>;
+				return stored[providerId]?.access === "prefreshed-access-token";
+			});
+
+			// Next call serves the refreshed token, again without a sync refresh.
+			expect(await authStorage.getApiKey(providerId)).toBe("prefreshed-access-token");
+			expect(counters.refreshCalls).toBe(1);
+		});
+
+		test("pre-refresh is single-flight: concurrent getApiKey calls do not stack refreshes", async () => {
+			const { providerId, counters } = registerRefreshCountingProvider({ refreshDelayMs: 150 });
+			writeAuthJson({
+				[providerId]: {
+					type: "oauth",
+					refresh: "refresh-token",
+					access: "still-valid-access-token",
+					expires: Date.now() + 5 * 60_000,
+				},
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+
+			const keys = await Promise.all([
+				authStorage.getApiKey(providerId),
+				authStorage.getApiKey(providerId),
+				authStorage.getApiKey(providerId),
+			]);
+			expect(keys).toEqual(["still-valid-access-token", "still-valid-access-token", "still-valid-access-token"]);
+
+			await waitFor(() => counters.refreshCalls >= 1);
+			// Give any (wrong) stacked refresh a chance to fire before asserting.
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			expect(counters.refreshCalls).toBe(1);
+		});
+
+		test("token far from expiry does not trigger a background refresh", async () => {
+			const { providerId, counters } = registerRefreshCountingProvider();
+			writeAuthJson({
+				[providerId]: {
+					type: "oauth",
+					refresh: "refresh-token",
+					access: "long-lived-access-token",
+					expires: Date.now() + 60 * 60_000,
+				},
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+
+			expect(await authStorage.getApiKey(providerId)).toBe("long-lived-access-token");
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			expect(counters.refreshCalls).toBe(0);
+		});
+
+		test("PIT_NO_OAUTH_PREFRESH=1 disables the background refresh", async () => {
+			process.env.PIT_NO_OAUTH_PREFRESH = "1";
+			const { providerId, counters } = registerRefreshCountingProvider();
+			writeAuthJson({
+				[providerId]: {
+					type: "oauth",
+					refresh: "refresh-token",
+					access: "still-valid-access-token",
+					expires: Date.now() + 5 * 60_000,
+				},
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+
+			expect(await authStorage.getApiKey(providerId)).toBe("still-valid-access-token");
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			expect(counters.refreshCalls).toBe(0);
+		});
+
+		test("a failing background refresh stays invisible; sync fallback still works", async () => {
+			const { providerId, counters } = registerRefreshCountingProvider({ fail: true });
+			writeAuthJson({
+				[providerId]: {
+					type: "oauth",
+					refresh: "refresh-token",
+					access: "still-valid-access-token",
+					expires: Date.now() + 5 * 60_000,
+				},
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+
+			// Hot path unaffected by the (background) failure.
+			expect(await authStorage.getApiKey(providerId)).toBe("still-valid-access-token");
+			await waitFor(() => counters.refreshCalls === 1);
+
+			// Token remains the original one; a later call still serves it while valid.
+			expect(await authStorage.getApiKey(providerId)).toBe("still-valid-access-token");
+		});
+	});
+
 	describe("persistence semantics", () => {
 		test("set preserves unrelated external edits", () => {
 			writeAuthJson({

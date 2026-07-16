@@ -14,10 +14,18 @@ import { ModelRegistry } from "../../src/core/model-registry.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 
-const spawnSubagent = vi.hoisted(() => vi.fn());
+const { spawnSubagent, exceptionalUsage } = vi.hoisted(() => ({
+	spawnSubagent: vi.fn(),
+	exceptionalUsage: new WeakMap<
+		object,
+		{ inputTokens: number; outputTokens: number; totalTokens: number; costUsd: number }
+	>(),
+}));
 
 vi.mock("../../src/core/coordinator/spawn.ts", () => ({
 	spawnSubagent: (...args: unknown[]) => spawnSubagent(...args),
+	getSubagentErrorUsage: (error: unknown) =>
+		typeof error === "object" && error !== null ? exceptionalUsage.get(error) : undefined,
 }));
 
 vi.mock("../../src/core/coordinator/index.ts", async (importOriginal) => {
@@ -39,7 +47,11 @@ const emptyAnalysis: JudgeAnalysis = {
 	unsupportedClaims: [],
 };
 
-function createHost(): { host: FusionHost; events: AgentSessionEvent[] } {
+function createHost(): {
+	host: FusionHost;
+	events: AgentSessionEvent[];
+	fusionSpend: ReturnType<typeof vi.fn>;
+} {
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
 	const settingsManager = SettingsManager.inMemory({
@@ -66,6 +78,7 @@ function createHost(): { host: FusionHost; events: AgentSessionEvent[] } {
 	const sessionManager = SessionManager.inMemory();
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
 	const events: AgentSessionEvent[] = [];
+	const fusionSpend = vi.fn();
 	let fusionAbort: AbortController | undefined;
 	const host: FusionHost = {
 		model,
@@ -106,10 +119,11 @@ function createHost(): { host: FusionHost; events: AgentSessionEvent[] } {
 		},
 		getRequiredRequestAuth: async () => ({}),
 		setLastAssistantMessage: () => {},
+		recordFusionSpend: fusionSpend,
 		prepareFusionContextEconomy: async () => {},
 		evaluateFusionBudget: () => ({ allowed: true }),
 	};
-	return { host, events };
+	return { host, events, fusionSpend };
 }
 
 describe("fusionVerify", () => {
@@ -132,10 +146,14 @@ describe("fusionVerify", () => {
 		expect(spawnSubagent).toHaveBeenCalledOnce();
 	});
 
-	it("returns undefined on spawn failure (fail-open)", async () => {
-		spawnSubagent.mockRejectedValue(new Error("spawn failed"));
-		const { host } = createHost();
+	it("charges verifier usage before failing open on spawn failure", async () => {
+		const error = new Error("spawn failed");
+		exceptionalUsage.set(error, { inputTokens: 20, outputTokens: 7, totalTokens: 31, costUsd: 0.01 });
+		spawnSubagent.mockRejectedValue(error);
+		const { host, fusionSpend } = createHost();
 		const result = await fusionVerify(host, "Q", [], emptyAnalysis, model);
 		expect(result).toBeUndefined();
+		expect(fusionSpend).toHaveBeenCalledOnce();
+		expect(fusionSpend).toHaveBeenCalledWith(31);
 	});
 });

@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -8,6 +8,7 @@ import {
 	normalizeArgsForFingerprint,
 	normalizeErrorFingerprint,
 	persistSessionLearnedErrors,
+	pruneLearnedErrorSessionFiles,
 	truncateErrorSample,
 } from "../src/core/learned-error-store.js";
 
@@ -104,11 +105,11 @@ describe("persistSessionLearnedErrors + aggregateLearnedErrors", () => {
 	}
 
 	it("writes one file per session and aggregates back correctly", async () => {
-		persistSessionLearnedErrors(dir, { sessionId: "s1", timestamp: "2026-05-28T01:00:00.000Z", cwd: "/x" }, [
+		await persistSessionLearnedErrors(dir, { sessionId: "s1", timestamp: "2026-05-28T01:00:00.000Z", cwd: "/x" }, [
 			sampleEntry({ count: 3, fingerprint: "fp-a" }),
 			sampleEntry({ count: 1, fingerprint: "fp-b" }),
 		]);
-		persistSessionLearnedErrors(dir, { sessionId: "s2", timestamp: "2026-05-28T02:00:00.000Z", cwd: "/y" }, [
+		await persistSessionLearnedErrors(dir, { sessionId: "s2", timestamp: "2026-05-28T02:00:00.000Z", cwd: "/y" }, [
 			sampleEntry({ count: 2, fingerprint: "fp-a" }),
 		]);
 
@@ -123,10 +124,10 @@ describe("persistSessionLearnedErrors + aggregateLearnedErrors", () => {
 	});
 
 	it("tracks matchedRuleIds across sessions", async () => {
-		persistSessionLearnedErrors(dir, { sessionId: "s1", timestamp: "2026-05-28T01:00:00.000Z", cwd: "/x" }, [
+		await persistSessionLearnedErrors(dir, { sessionId: "s1", timestamp: "2026-05-28T01:00:00.000Z", cwd: "/x" }, [
 			sampleEntry({ fingerprint: "fp", matchedRuleId: "rule-a" }),
 		]);
-		persistSessionLearnedErrors(dir, { sessionId: "s2", timestamp: "2026-05-28T02:00:00.000Z", cwd: "/x" }, [
+		await persistSessionLearnedErrors(dir, { sessionId: "s2", timestamp: "2026-05-28T02:00:00.000Z", cwd: "/x" }, [
 			sampleEntry({ fingerprint: "fp", matchedRuleId: "rule-b" }),
 		]);
 		const aggregated = await aggregateLearnedErrors(dir);
@@ -134,18 +135,18 @@ describe("persistSessionLearnedErrors + aggregateLearnedErrors", () => {
 	});
 
 	it("uses the most recent session's sample text", async () => {
-		persistSessionLearnedErrors(dir, { sessionId: "old", timestamp: "2026-05-01T00:00:00.000Z", cwd: "/x" }, [
+		await persistSessionLearnedErrors(dir, { sessionId: "old", timestamp: "2026-05-01T00:00:00.000Z", cwd: "/x" }, [
 			sampleEntry({ fingerprint: "fp", sampleErrorText: "OLD SAMPLE" }),
 		]);
-		persistSessionLearnedErrors(dir, { sessionId: "new", timestamp: "2026-05-28T00:00:00.000Z", cwd: "/x" }, [
+		await persistSessionLearnedErrors(dir, { sessionId: "new", timestamp: "2026-05-28T00:00:00.000Z", cwd: "/x" }, [
 			sampleEntry({ fingerprint: "fp", sampleErrorText: "NEW SAMPLE" }),
 		]);
 		const aggregated = await aggregateLearnedErrors(dir);
 		expect(aggregated[0].sampleErrorText).toBe("NEW SAMPLE");
 	});
 
-	it("skips entries when there are none (no file is written)", () => {
-		persistSessionLearnedErrors(dir, { sessionId: "s1", timestamp: "x", cwd: "/" }, []);
+	it("skips entries when there are none (no file is written)", async () => {
+		await persistSessionLearnedErrors(dir, { sessionId: "s1", timestamp: "x", cwd: "/" }, []);
 		const files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
 		expect(files.length).toBe(0);
 	});
@@ -170,12 +171,39 @@ describe("persistSessionLearnedErrors + aggregateLearnedErrors", () => {
 	});
 
 	it("sorts aggregated results by descending totalCount", async () => {
-		persistSessionLearnedErrors(dir, { sessionId: "s", timestamp: "t", cwd: "/" }, [
+		await persistSessionLearnedErrors(dir, { sessionId: "s", timestamp: "t", cwd: "/" }, [
 			sampleEntry({ fingerprint: "low", count: 1 }),
 			sampleEntry({ fingerprint: "high", count: 10 }),
 			sampleEntry({ fingerprint: "mid", count: 5 }),
 		]);
 		const aggregated = await aggregateLearnedErrors(dir);
 		expect(aggregated.map((e) => e.fingerprint)).toEqual(["high", "mid", "low"]);
+	});
+});
+
+describe("pruneLearnedErrorSessionFiles (5.4 — prune moved off the per-turn flush)", () => {
+	const entry: LearnedErrorEntry = { tool: "bash", fingerprint: "fp", count: 1, sampleErrorText: "x" };
+
+	it("removes only the oldest files beyond max, keeping the newest", async () => {
+		const ids = ["s1", "s2", "s3", "s4", "s5"];
+		// Deterministic, strictly increasing mtimes: same-ms writes on a fast fs
+		// would otherwise make "oldest" ambiguous.
+		const base = Math.floor(Date.now() / 1000) - 1000;
+		for (let i = 0; i < ids.length; i++) {
+			await persistSessionLearnedErrors(dir, { sessionId: ids[i], timestamp: "t", cwd: "/" }, [entry]);
+			utimesSync(join(dir, `${ids[i]}.jsonl`), base + i, base + i);
+		}
+		await pruneLearnedErrorSessionFiles(dir, 3);
+		const remaining = readdirSync(dir)
+			.filter((f) => f.endsWith(".jsonl"))
+			.sort();
+		expect(remaining).toEqual(["s3.jsonl", "s4.jsonl", "s5.jsonl"]);
+	});
+
+	it("no-ops when under the cap and when the dir does not exist", async () => {
+		await persistSessionLearnedErrors(dir, { sessionId: "only", timestamp: "t", cwd: "/" }, [entry]);
+		await pruneLearnedErrorSessionFiles(dir, 3);
+		expect(readdirSync(dir).filter((f) => f.endsWith(".jsonl"))).toEqual(["only.jsonl"]);
+		await expect(pruneLearnedErrorSessionFiles(join(dir, "missing"), 3)).resolves.toBeUndefined();
 	});
 });

@@ -173,7 +173,15 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				apiKey,
 				websocketRequestId,
 			);
-			const bodyJson = JSON.stringify(body);
+			// Lazy body serialization: the default (happy) WebSocket path never needs
+			// the JSON string — it was ~1.2ms/turn of dead JSON.stringify at 500KB of
+			// context. Serialize once, on first use (SSE fetch path or the WS-failure
+			// diagnostic), and memoize for the SSE retry loop.
+			let bodyJsonCache: string | undefined;
+			const getBodyJson = () => {
+				bodyJsonCache ??= JSON.stringify(body);
+				return bodyJsonCache;
+			};
 			const transport = options?.transport || "auto";
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(options?.sessionId);
 			if (websocketDisabledForSession) {
@@ -218,7 +226,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							fallbackTransport: websocketStarted ? undefined : "sse",
 							eventsEmitted: websocketStarted,
 							phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
-							requestBytes: new TextEncoder().encode(bodyJson).byteLength,
+							requestBytes: new TextEncoder().encode(getBodyJson()).byteLength,
 						}),
 					);
 					recordWebSocketFailure(options?.sessionId, error);
@@ -251,7 +259,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						fetch(resolveCodexUrl(model.baseUrl), {
 							method: "POST",
 							headers: sseHeaders,
-							body: bodyJson,
+							body: getBodyJson(),
 							signal: attemptGuard.signal,
 						}),
 					);

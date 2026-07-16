@@ -19,13 +19,17 @@ if ($noEnv) {
 	Write-Host "Running without API keys..."
 }
 
-$tsxBin = Join-Path $scriptDir "node_modules/.bin/tsx.cmd"
-if (-not (Test-Path -LiteralPath $tsxBin)) {
-	throw "tsx not found at $tsxBin. Run npm install from the repo root first."
+$tsxLoader = Join-Path $scriptDir "node_modules/tsx/dist/loader.mjs"
+if (-not (Test-Path -LiteralPath $tsxLoader)) {
+	throw "tsx not found at $tsxLoader. Run npm install from the repo root first."
 }
 
+# Load the tsx loader in-process (`node --import`) instead of spawning the tsx
+# wrapper (.cmd shim + wrapper process). Same tsx pipeline/cache, ~1s faster.
+$tsxLoaderUrl = "file:///" + ($tsxLoader -replace '\\', '/')
+
 $cliPath = Join-Path $scriptDir "packages/coding-agent/src/cli.ts"
-& $tsxBin $cliPath @forwardArgs
+& node --import $tsxLoaderUrl $cliPath @forwardArgs
 $exitCode = $LASTEXITCODE
 if ($exitCode -ne 0) {
 	exit $exitCode

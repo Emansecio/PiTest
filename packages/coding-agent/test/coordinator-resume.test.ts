@@ -18,9 +18,11 @@ import { AuthStorage } from "../src/core/auth-storage.js";
 import { createCoordinatorExtension } from "../src/core/built-ins/coordinator-extension.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
+import { TokenBudgetGovernor } from "../src/core/token-governor.js";
 
 describe("coordinator op:resume", () => {
 	let faux: FauxProviderRegistration | undefined;
+	let governor: TokenBudgetGovernor;
 	afterEach(() => faux?.unregister());
 
 	function buildTask(responses: Parameters<FauxProviderRegistration["setResponses"]>[0]) {
@@ -30,11 +32,13 @@ describe("coordinator op:resume", () => {
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(model.provider, "faux-key");
 		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		governor = new TokenBudgetGovernor();
 		const ext = createCoordinatorExtension({
 			modelRegistry,
 			getParentModel: () => model,
 			getAvailableTools: () => [],
 			convertToLlm: (messages) => convertToLlm(messages),
+			getTokenGovernor: () => governor,
 		});
 		const tools: Record<string, { execute: (...a: unknown[]) => Promise<unknown> }> = {};
 		ext({
@@ -50,7 +54,7 @@ describe("coordinator op:resume", () => {
 	const textOf = (r: unknown): string => (r as { content: { text: string }[] }).content[0].text;
 	const isErr = (r: unknown): boolean => (r as { isError: boolean }).isError;
 
-	it("makes an interrupted op:run subagent resumable and finishes it via op:resume", async () => {
+	it("charges an in-memory resume once and merges its usage into the original record", async () => {
 		const task = buildTask([
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: "network down" }),
 			fauxAssistantMessage("RESUMED: task complete"),
@@ -58,6 +62,8 @@ describe("coordinator op:resume", () => {
 
 		const runRes = await exec(task, { op: "run", name: "probe", prompt: "do the thing" });
 		expect(isErr(runRes)).toBe(true);
+		const baseline = governor.snapshot().subagentTokens;
+		expect(baseline).toBeGreaterThan(0);
 
 		const list = await exec(task, { op: "list" });
 		expect(textOf(list)).toMatch(/[Rr]esumable[\s\S]*probe/);
@@ -65,10 +71,39 @@ describe("coordinator op:resume", () => {
 		const resumed = await exec(task, { op: "resume", name: "probe" });
 		expect(isErr(resumed)).toBe(false);
 		expect(textOf(resumed)).toContain("RESUMED: task complete");
+		const afterResume = governor.snapshot().subagentTokens;
+		expect(afterResume).toBeGreaterThan(baseline);
 
-		// Consumed: no longer offered as resumable.
+		// Consumed: no longer offered as resumable; usage remains on the original run.
 		const list2 = await exec(task, { op: "list" });
 		expect(textOf(list2)).not.toMatch(/[Rr]esumable[\s\S]*probe/);
+		expect(textOf(list2)).toContain(`probe [completed] turns=2 (${afterResume} tok)`);
+		expect((list2 as { details?: { totalTokens?: number } }).details?.totalTokens).toBe(afterResume);
+	});
+
+	it.each([
+		["error", "failed"],
+		["aborted", "cancelled"],
+	] as const)("charges usage and records %s resume settlement as %s", async (stopReason, expectedStatus) => {
+		const task = buildTask([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "drop" }),
+			fauxAssistantMessage("partial resumed work", {
+				stopReason,
+				errorMessage: stopReason === "error" ? "dropped again" : undefined,
+			}),
+		]);
+		await exec(task, { op: "run", name: "retry", prompt: "start" });
+		const baseline = governor.snapshot().subagentTokens;
+		expect(baseline).toBeGreaterThan(0);
+
+		const resumed = await exec(task, { op: "resume", name: "retry" });
+		expect(isErr(resumed)).toBe(true);
+		const afterResume = governor.snapshot().subagentTokens;
+		expect(afterResume).toBeGreaterThan(baseline);
+
+		const list = await exec(task, { op: "list" });
+		expect(textOf(list)).toContain(`retry [${expectedStatus}] turns=2 (${afterResume} tok)`);
+		expect(textOf(list)).toMatch(/[Rr]esumable[\s\S]*retry/);
 	});
 
 	it("resume accepts a continuation prompt", async () => {

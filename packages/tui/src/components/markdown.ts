@@ -944,13 +944,13 @@ export class Markdown implements Component {
 				break;
 
 			case "code": {
-				// Full-width frame around the guttered body. Top/bottom rules span the
-				// markdown render width; lang and code lines keep the existing `│ ` gutter.
+				// Open frame: top/bottom rules fold into the left gutter only (no right
+				// vertical), so the corners never dangle over the unboxed body lines.
 				const gutter = this.theme.codeBlockBorder("│ ");
 				const indent = this.theme.codeBlockIndent ?? "";
 				const prefix = gutter + indent;
-				const rule = "─".repeat(Math.max(0, width - 2));
-				lines.push(this.theme.codeBlockBorder(`╭${rule}╮`));
+				const rule = "─".repeat(Math.max(0, width - 1));
+				lines.push(this.theme.codeBlockBorder(`╭${rule}`));
 				if (typeof token.lang === "string" && token.lang.length > 0) {
 					const langStyle = this.theme.codeBlockLang ?? this.theme.codeBlockBorder;
 					const langLine = prefix + langStyle(token.lang);
@@ -1002,7 +1002,7 @@ export class Markdown implements Component {
 						lines.push(prefix + this.theme.codeBlock(codeLine));
 					}
 				}
-				lines.push(this.theme.codeBlockBorder(`╰${rule}╯`));
+				lines.push(this.theme.codeBlockBorder(`╰${rule}`));
 				if (nextTokenType && nextTokenType !== "space") {
 					this.pushBlockSpacing(lines); // Add spacing after code blocks (unless space token follows)
 				}
@@ -1516,12 +1516,21 @@ export class Markdown implements Component {
 		const separatorLine = tableBorder(`├─${separatorCells.join("─┼─")}─┤`);
 		lines.push(separatorLine);
 
-		// Render rows with wrapping
+		// Render rows with wrapping. Internal separators only appear next to rows
+		// that wrapped onto multiple physical lines (the one case where they
+		// disambiguate cell boundaries); single-line rows stay separator-free so a
+		// simple table doesn't double in height.
+		let prevRowWrapped = false;
 		for (let rowIndex = 0; rowIndex < token.rows.length; rowIndex++) {
 			const rowCellLines: string[][] = token.rows[rowIndex].map((_cell, i) => {
 				return this.getCellWrapLines(rowTexts[rowIndex][i], columnWidths[i]);
 			});
 			const rowLineCount = Math.max(...rowCellLines.map((c) => c.length));
+			const rowWrapped = rowLineCount > 1;
+
+			if (rowIndex > 0 && (prevRowWrapped || rowWrapped)) {
+				lines.push(separatorLine);
+			}
 
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
 				const rowParts = rowCellLines.map((cellLines, colIdx) => {
@@ -1531,9 +1540,7 @@ export class Markdown implements Component {
 				lines.push(`${tableBorder("│")} ${rowParts.join(` ${tableBorder("│")} `)} ${tableBorder("│")}`);
 			}
 
-			if (rowIndex < token.rows.length - 1) {
-				lines.push(separatorLine);
-			}
+			prevRowWrapped = rowWrapped;
 		}
 
 		// Render bottom border

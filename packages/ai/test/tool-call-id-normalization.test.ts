@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { completeSimple } from "../src/stream.js";
 import type { AssistantMessage, Message, Tool, ToolResultMessage } from "../src/types.js";
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve API keys
@@ -95,7 +96,7 @@ describe("Tool Call ID Normalization - Prefilled Context", () => {
 
 	it.skipIf(!codexToken)(
 		"openai-codex should handle prefilled context with long pipe-separated IDs",
-		async () => {
+		live("openai-codex", async () => {
 			const model = getModel("openai-codex", "gpt-5.5");
 			const messages = buildPrefilledMessages();
 
@@ -115,7 +116,7 @@ describe("Tool Call ID Normalization - Prefilled Context", () => {
 				expect(response.errorMessage).not.toContain("id");
 				expect(response.errorMessage).not.toContain("additional characters");
 			}
-		},
+		}),
 		30000,
 	);
 });

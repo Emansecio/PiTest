@@ -8,6 +8,7 @@ import type { StreamOptions } from "../src/types.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
@@ -223,17 +224,17 @@ describe("Tool Results with Images", () => {
 		it.skipIf(!anthropicOAuthToken)(
 			"should handle tool result with only image",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("anthropic", async () => {
 				await handleToolWithImageResult(model, { apiKey: anthropicOAuthToken });
-			},
+			}),
 		);
 
 		it.skipIf(!anthropicOAuthToken)(
 			"should handle tool result with text and image",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("anthropic", async () => {
 				await handleToolWithTextAndImageResult(model, { apiKey: anthropicOAuthToken });
-			},
+			}),
 		);
 	});
 
@@ -241,19 +242,19 @@ describe("Tool Results with Images", () => {
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should handle tool result with only image",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 				await handleToolWithImageResult(llm, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should handle tool result with text and image",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 				await handleToolWithTextAndImageResult(llm, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 	});
 });

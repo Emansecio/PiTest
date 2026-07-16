@@ -10,7 +10,7 @@ import { sliceSafe } from "../utils/surrogate.ts";
 import { type CompactionController, checkCompaction } from "./agent-session-compaction.ts";
 import type { AgentSessionEvent } from "./agent-session-events.ts";
 import { estimateCharsAsTokens } from "./compaction/utils.ts";
-import { SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
+import { getSubagentErrorUsage, SubagentRegistry, spawnSubagent } from "./coordinator/index.ts";
 import { providerForCli, runPanelMember } from "./fusion/cli-runner.ts";
 import {
 	buildAdvisorBriefContext,
@@ -28,6 +28,7 @@ import type { PermissionChecker } from "./permissions/index.ts";
 import type { SessionManager } from "./session-manager.js";
 import type { SettingsManager } from "./settings-manager.js";
 import type { SpawnBudgetDecision } from "./token-governor.ts";
+import { consumedTokens } from "./token-usage.ts";
 
 /** Stable session surface fusion reads; implemented by AgentSession. */
 export interface FusionHost {
@@ -64,8 +65,7 @@ function recordFusionSpendTokens(host: FusionHost, tokens: number): void {
 }
 
 function recordFusionUsage(host: FusionHost, usage: Usage | undefined): void {
-	if (!usage) return;
-	recordFusionSpendTokens(host, (usage.input ?? 0) + (usage.output ?? 0));
+	recordFusionSpendTokens(host, consumedTokens(usage));
 }
 
 function recordFusionChars(host: FusionHost, promptChars: number, responseChars: number): void {
@@ -224,7 +224,9 @@ export async function fusionVerify(
 		);
 		if (result.usage) recordFusionSpendTokens(host, result.usage.totalTokens);
 		return result.value as VerificationReport | undefined;
-	} catch {
+	} catch (error) {
+		const usage = getSubagentErrorUsage(error);
+		if (usage) recordFusionSpendTokens(host, usage.totalTokens);
 		return undefined;
 	}
 }

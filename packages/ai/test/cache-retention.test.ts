@@ -225,6 +225,63 @@ describe("Cache Retention (PIT_CACHE_RETENTION)", () => {
 		});
 	});
 
+	describe("Precedence: PIT_CACHE_RETENTION env > explicit caller option", () => {
+		// Callers now pass adaptive per-session retention ("long" interactive,
+		// "short" subagents/one-shot), so the env kill-switch must outrank the
+		// explicit option or it would silently stop working for every request.
+		function createFakeClient(): any {
+			// The request itself never happens: asResponse throwing keeps the test
+			// hermetic while onPayload (called before the request) captures params.
+			return {
+				messages: {
+					create: () => ({
+						asResponse: async () => {
+							throw new Error("hermetic test: no network");
+						},
+					}),
+				},
+			};
+		}
+
+		async function captureSystemCacheControl(explicit: "short" | "long" | "none"): Promise<any> {
+			const { streamAnthropic } = await import("../src/providers/anthropic.js");
+			const model = getModel("anthropic", "claude-haiku-4-5");
+			let capturedPayload: any = null;
+			const s = streamAnthropic(model, context, {
+				client: createFakeClient(),
+				cacheRetention: explicit,
+				onPayload: (payload: any) => {
+					capturedPayload = payload;
+				},
+			});
+			for await (const event of s) {
+				if (event.type === "error") break;
+			}
+			expect(capturedPayload).not.toBeNull();
+			return capturedPayload.system?.[0]?.cache_control;
+		}
+
+		it("PIT_CACHE_RETENTION=short overrides an explicit 'long' option (no 1h ttl)", async () => {
+			process.env.PIT_CACHE_RETENTION = "short";
+			expect(await captureSystemCacheControl("long")).toEqual({ type: "ephemeral" });
+		});
+
+		it("PIT_CACHE_RETENTION=long overrides an explicit 'short' option (1h ttl)", async () => {
+			process.env.PIT_CACHE_RETENTION = "long";
+			expect(await captureSystemCacheControl("short")).toEqual({ type: "ephemeral", ttl: "1h" });
+		});
+
+		it("PIT_CACHE_RETENTION=none overrides an explicit 'long' option (no cache_control)", async () => {
+			process.env.PIT_CACHE_RETENTION = "none";
+			expect(await captureSystemCacheControl("long")).toBeUndefined();
+		});
+
+		it("explicit option still wins over the default when env is unset", async () => {
+			expect(await captureSystemCacheControl("short")).toEqual({ type: "ephemeral" });
+			expect(await captureSystemCacheControl("long")).toEqual({ type: "ephemeral", ttl: "1h" });
+		});
+	});
+
 	describe("OpenAI Responses Provider", () => {
 		it.skipIf(!process.env.OPENAI_API_KEY)(
 			"should not set prompt_cache_retention when PIT_CACHE_RETENTION is not set",

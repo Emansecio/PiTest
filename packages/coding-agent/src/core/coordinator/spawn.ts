@@ -35,10 +35,37 @@ import type { ToolCallEvent, ToolResultEvent } from "../extensions/types.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { describeToolAction, type PermissionChecker } from "../permissions/index.ts";
 import { formatSkillsForPrompt, type Skill } from "../skills.ts";
+import { aggregateAssistantUsage, mergeSubagentUsage } from "../token-usage.ts";
 import type { SubagentRegistry } from "./registry.ts";
-import type { SpawnSubagentOptions, SpawnSubagentResult, SubagentUsage, WorktreeSpec } from "./types.ts";
+import { withRunSlot } from "./slots.ts";
+import type {
+	SpawnSubagentOptions,
+	SpawnSubagentResult,
+	SubagentRecord,
+	SubagentUsage,
+	WorktreeSpec,
+} from "./types.ts";
+import { retargetToolsForWorktree } from "./worktree-tools.ts";
 
 const execFileP = promisify(execFile);
+
+const SUBAGENT_ERROR_USAGE = Symbol("pit.subagentErrorUsage");
+
+/** Preserve incurred usage on exceptional exits without changing the public error type/message. */
+export function attachSubagentUsageToError(error: unknown, usage: SubagentUsage): void {
+	if ((typeof error !== "object" && typeof error !== "function") || error === null) return;
+	Object.defineProperty(error, SUBAGENT_ERROR_USAGE, {
+		value: { ...usage },
+		configurable: true,
+		writable: true,
+	});
+}
+
+/** Recover usage attached by spawn/acceptance exceptional paths. */
+export function getSubagentErrorUsage(error: unknown): SubagentUsage | undefined {
+	if ((typeof error !== "object" && typeof error !== "function") || error === null) return undefined;
+	return (error as { [SUBAGENT_ERROR_USAGE]?: SubagentUsage })[SUBAGENT_ERROR_USAGE];
+}
 
 const DEFAULT_SYSTEM_PROMPT =
 	"You are a focused subagent. Use the provided tools to complete the task in as few turns as possible, " +
@@ -145,6 +172,15 @@ export interface SpawnSubagentDependencies {
 	 * skill-blind (legacy behavior).
 	 */
 	skills?: Skill[];
+	/**
+	 * Rebuilds the cwd-sensitive tools in a worktree-isolated subagent's catalog
+	 * so they resolve paths against (and execute in) the worktree instead of the
+	 * parent checkout. Without this, `worktree: true` would only create-and-clean
+	 * a directory while the subagent kept mutating the parent tree through the
+	 * parent-bound tool instances. When omitted, the native fail-closed
+	 * worktree retargeter is used, so direct API callers are isolated too.
+	 */
+	retargetToolsForCwd?: (tools: AgentTool[], cwd: string) => AgentTool[];
 }
 
 /**
@@ -234,13 +270,23 @@ async function createWorktree(parentCwd: string, taskName: string, spec: Worktre
 	return { path: dir, cleanup: spec.cleanup ?? "auto" };
 }
 
-async function removeWorktree(parentCwd: string, path: string): Promise<void> {
+export async function cleanupSubagentWorktree(parentCwd: string, path: string): Promise<void> {
 	try {
 		await execFileP("git", ["worktree", "remove", "--force", path], { cwd: parentCwd });
 	} catch {
 		// Best-effort cleanup: git may have already pruned, or the directory is
 		// gone. Swallow to avoid masking the real task error.
 	}
+}
+
+/** System-prompt preamble that points a worktree-isolated subagent at its checkout. */
+function worktreePreamble(path: string): string {
+	return (
+		"## Isolated worktree\n" +
+		`Your working directory is \`${path}\` — an isolated git worktree checked out for this task. ` +
+		"Do ALL work inside it: resolve every relative path against it and only pass paths under it to tools. " +
+		"Never read from or write to the parent checkout."
+	);
 }
 
 export async function spawnSubagent(
@@ -256,6 +302,43 @@ export async function spawnSubagent(
 	});
 	deps.registry.update(record.id, { status: "running", startedAt: Date.now() });
 
+	// Single concurrency chokepoint: every live subagent Agent — blocking runs,
+	// detached spawns, parallel/fanout children, acceptance judges — costs one
+	// process-wide slot for exactly as long as it runs. Queue time is not counted
+	// toward the task timeout (the timer is armed inside runSpawned, after the
+	// slot is held). Nested spawns yield the enclosing agent's slot while their
+	// descendant runs (see slots.ts), so depth>=2 nesting cannot deadlock.
+	try {
+		return await withRunSlot(options.signal, () => runSpawned(deps, options, record));
+	} catch (err) {
+		// A pre-run failure (queue full, abort while queued) never reaches
+		// runSpawned's own bookkeeping — settle the registry record here. A still-
+		// running status is the tell that nothing inside ran: runSpawned settles the
+		// record on every one of its own exits (including the worktree-setup throw,
+		// which is documented NOT to fire onSettle), so we also fire onSettle only
+		// on this path to keep the "fires on cancellation" contract for callers.
+		const current = deps.registry.get(record.id);
+		if (current && (current.status === "running" || current.status === "pending")) {
+			deps.registry.update(record.id, {
+				status: options.signal?.aborted ? "cancelled" : "failed",
+				endedAt: Date.now(),
+				error: err instanceof Error ? err.message : String(err),
+			});
+			try {
+				options.onSettle?.();
+			} catch {
+				// onSettle is best-effort teardown; never mask the real failure.
+			}
+		}
+		throw err;
+	}
+}
+
+async function runSpawned(
+	deps: SpawnSubagentDependencies,
+	options: SpawnSubagentOptions,
+	record: SubagentRecord,
+): Promise<SpawnSubagentResult> {
 	const parentCwd = options.cwd ?? process.cwd();
 	const worktreeSpec = normalizeWorktree(options.worktree);
 	// The registry guarantees a unique taskName even when callers reuse `name`
@@ -278,6 +361,11 @@ export async function spawnSubagent(
 		}
 		try {
 			worktree = await createWorktree(parentCwd, taskName, worktreeSpec);
+			try {
+				options.onWorktreeReady?.(worktree.path);
+			} catch {
+				// Readiness telemetry must not abort a successfully-created worktree.
+			}
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);
 			deps.registry.update(record.id, {
@@ -307,6 +395,8 @@ export async function spawnSubagent(
 	}
 
 	const systemPromptBase = options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+	// Worktree isolation is only real if the agent is TOLD where to work…
+	const withWorktree = worktree ? `${systemPromptBase}\n\n${worktreePreamble(worktree.path)}` : systemPromptBase;
 	// Opt-in skill inheritance: append the parent's model-invocable skills so the
 	// subagent knows they exist and how to invoke them. Placed before the schema
 	// suffix, which must stay last (it constrains the final-message format).
@@ -314,10 +404,28 @@ export async function spawnSubagent(
 		options.inheritSkills && deps.skills && deps.skills.length > 0
 			? formatSkillsForPrompt(deps.skills, undefined, parentCwd)
 			: "";
-	const withSkills = skillsSection ? `${systemPromptBase}\n\n${skillsSection}` : systemPromptBase;
+	const withSkills = skillsSection ? `${withWorktree}\n\n${skillsSection}` : withWorktree;
 	const withSuffix = options.systemPromptSuffix ? `${withSkills}\n\n${options.systemPromptSuffix}` : withSkills;
 	const systemPrompt = options.resultSchema ? `${withSuffix}${schemaPromptSuffix(options.resultSchema)}` : withSuffix;
-	const tools = filterTools(deps.availableTools, options.allowedTools);
+	// …and its tools actually execute there. Rebind the cwd-sensitive tools to
+	// the worktree so edits/commands land in the isolated checkout, not the
+	// parent tree the original instances were bound to.
+	let tools = filterTools(deps.availableTools, options.allowedTools);
+	if (worktree) {
+		const retarget = deps.retargetToolsForCwd ?? retargetToolsForWorktree;
+		try {
+			tools = retarget(tools, worktree.path);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			deps.registry.update(record.id, {
+				status: "failed",
+				endedAt: Date.now(),
+				error: message,
+			});
+			if (worktree.cleanup === "auto") await cleanupSubagentWorktree(parentCwd, worktree.path);
+			throw error;
+		}
+	}
 	const maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
 	let turnCount = 0;
 	// GAP #5 token accounting: sum each assistant turn's reported usage so the
@@ -331,7 +439,11 @@ export async function spawnSubagent(
 	const deniedToolCalls: string[] = [];
 	// Per-spawn grounding-guard chain (isolated session state). Default on; opt out
 	// with PIT_NO_SUBAGENT_GUARDS. Individual guards keep their own PIT_NO_* opt-outs.
-	const guardChain = areSubagentGuardsDisabled() ? undefined : createSubagentGuardChain({ cwd: parentCwd });
+	// Rooted at the worktree when one exists — the guards must stamp/verify the
+	// files the subagent actually works on.
+	const guardChain = areSubagentGuardsDisabled()
+		? undefined
+		: createSubagentGuardChain({ cwd: worktree?.path ?? parentCwd });
 	const agent = new Agent({
 		initialState: {
 			systemPrompt,
@@ -419,6 +531,12 @@ export async function spawnSubagent(
 				...streamOptions,
 				apiKey: auth.apiKey,
 				headers: auth.headers,
+				// Subagents are one-shot: they run to completion and never sit idle
+				// past the 5-minute short cache TTL, so long-retention cache writes
+				// (2.0× input price vs 1.25×) buy them nothing — cache reads renew
+				// the TTL for free within the run. PIT_CACHE_RETENTION env still
+				// outranks this (resolved env-first in the provider layer).
+				cacheRetention: streamOptions?.cacheRetention ?? "short",
 			});
 		},
 	});
@@ -429,10 +547,7 @@ export async function spawnSubagent(
 			// GAP #5: accumulate token/cost usage from the assistant message.
 			const message = event.message;
 			if (message.role === "assistant" && message.usage) {
-				usage.inputTokens += message.usage.input;
-				usage.outputTokens += message.usage.output;
-				usage.totalTokens += message.usage.totalTokens;
-				usage.costUsd += message.usage.cost.total;
+				Object.assign(usage, mergeSubagentUsage(usage, aggregateAssistantUsage([message])));
 			}
 			deps.registry.update(record.id, { turnCount, usage });
 			// GAP #3: emit a lightweight per-turn progress signal (turn, last tool).
@@ -442,7 +557,12 @@ export async function spawnSubagent(
 					if (block.type === "toolCall") lastTool = block.name;
 				}
 			}
-			options.onSubagentEvent?.({ turn: turnCount, lastTool });
+			try {
+				options.onSubagentEvent?.({ turn: turnCount, lastTool });
+			} catch {
+				// Lifecycle telemetry is best-effort; never fail the run because a TUI
+				// or event sink threw while consuming progress.
+			}
 			if (turnCount >= maxTurns) {
 				controller.abort(new Error(`aborted: turn cap (${maxTurns}) reached`));
 			}
@@ -461,7 +581,7 @@ export async function spawnSubagent(
 	// Best-effort: a throwing onAgentReady must not abort the spawn (and leak the
 	// timeout/abort wiring set up below). The only caller attaches a bus responder.
 	try {
-		options.onAgentReady?.(agent);
+		options.onAgentReady?.(agent, record);
 	} catch {
 		// ignore — readiness notification is not load-bearing for the task.
 	}
@@ -487,7 +607,7 @@ export async function spawnSubagent(
 			// Let an aborted run settle so it isn't still writing into the worktree
 			// while we delete it (the race may have returned via the abort branch).
 			if (runPromise) await runPromise.catch(() => {});
-			await removeWorktree(parentCwd, worktree.path);
+			await cleanupSubagentWorktree(parentCwd, worktree.path);
 		}
 	};
 
@@ -624,6 +744,7 @@ export async function spawnSubagent(
 		};
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
+		attachSubagentUsageToError(err, usage);
 		// Any controller-driven abort (parent / timeout / turn cap) => cancelled.
 		// Decoupled from the message string so richer reasons don't get miscategorized.
 		const status = controller.signal.aborted ? "cancelled" : "failed";
@@ -632,6 +753,7 @@ export async function spawnSubagent(
 			endedAt: Date.now(),
 			error: message,
 			turnCount,
+			usage,
 		});
 		await cleanup();
 		throw err;

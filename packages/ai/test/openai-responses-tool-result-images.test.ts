@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { Api, Context, Model, StreamOptions, Tool, ToolResultMessage } from "../src/index.js";
 import { complete, getModel } from "../src/index.js";
 import { openaiResponsesModel } from "./helpers/pruned-fixtures.js";
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
@@ -164,12 +165,12 @@ describe("Responses API tool result images", () => {
 		it.skipIf(!openaiCodexToken)(
 			"should send tool result images in function_call_output",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				await verifyToolResultImagesStayInFunctionCallOutput(model, {
 					apiKey: openaiCodexToken,
 					reasoningEffort: "low",
 				});
-			},
+			}),
 		);
 	});
 });

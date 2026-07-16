@@ -6,6 +6,7 @@ import type { Api, Context, Model, StreamOptions, Tool } from "../src/types.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
@@ -107,9 +108,9 @@ describe("Tool Call Without Result Tests", () => {
 		it.skipIf(!anthropicOAuthToken)(
 			"should filter out tool calls without corresponding tool results",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("anthropic", async () => {
 				await testToolCallWithoutResult(model, { apiKey: anthropicOAuthToken });
-			},
+			}),
 		);
 	});
 
@@ -117,10 +118,10 @@ describe("Tool Call Without Result Tests", () => {
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should filter out tool calls without corresponding tool results",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const model = getModel("openai-codex", "gpt-5.5");
 				await testToolCallWithoutResult(model, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 	});
 });

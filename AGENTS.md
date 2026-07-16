@@ -5,8 +5,9 @@ and coding agents working in this repository. Pit loads this file automatically 
 startup when run from the repo root (disable with `--no-context-files`).
 
 > Terminology: see [CONTEXT.md](CONTEXT.md) for the authoritative glossary
-> (Mode, Permission, Orchestration, Fusion, Todo, Plan, Channel, Role). Do not
-> redefine those terms here.
+> (Mode, Permission, Orchestration, Fusion, Todo, Plan, Channel, Role). Harness
+> implementation concepts and the Architectural Invariants live in
+> [docs/CONTEXT.md](docs/CONTEXT.md). Do not redefine those terms here.
 
 ## Contribution rules
 
@@ -25,6 +26,18 @@ startup when run from the repo root (disable with `--no-context-files`).
     pre-commit so commits stay snappy. Pre-push runs full `npm run check`.
 - **No destructive git resets** without explicit permission.
 
+### Verify while iterating
+
+The gates above take 9–60s; don't run them per edit. Climb this ladder instead:
+
+1. One test file (~0.6–1.5s), from the package dir:
+   `cd packages/coding-agent && npx vitest --run test/slash-commands.test.ts`
+2. Tests of the touched package: `npm test --workspace packages/<pkg>`.
+3. `npm run check:fast`, then full `npm run check` only before push/PR.
+
+Also useful: `npx tsgo --noEmit` — typecheck alone (~2–3s); `CHECK_TIMING=1 npm run check`
+— per-step timing; `npm run test:slow` — lists the slowest test files.
+
 ## Architecture at a glance
 
 Monorepo (npm workspaces). Four packages:
@@ -36,7 +49,8 @@ Monorepo (npm workspaces). Four packages:
 
 Turn flow: user input → `agent-session.ts` → `agent-loop.ts` → tool dispatch/execution
 → compaction check → provider call. Behavioral features live in built-in extensions,
-not inline in `agent-session.ts` (see CONTEXT.md "Architectural Invariants").
+not inline in `agent-session.ts` (see [docs/CONTEXT.md](docs/CONTEXT.md)
+"Architectural Invariants").
 
 ## Documentation layout
 

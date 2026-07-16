@@ -63,7 +63,10 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		card.addChild(new TruncatedText(theme.fg("accent", theme.bold(title)), 1, 0));
 		card.addChild(new Spacer(1));
 
-		this.searchInput = new Input();
+		this.searchInput = new Input({
+			placeholder: "Type to filter providers…",
+			placeholderColor: (t) => theme.fg("dim", t),
+		});
 		this.searchInput.onSubmit = () => {
 			const selectedProvider = this.filteredProviders[this.selectedIndex];
 			if (selectedProvider) {
@@ -78,6 +81,8 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		card.addChild(this.listContainer);
 
 		card.addChild(new Spacer(1));
+		// Uniform breathing room above the card (matches session/tree/config).
+		this.addChild(new Spacer(1));
 		this.addChild(card);
 
 		// Initial render
@@ -163,16 +168,17 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
-		// Up arrow
+		// Up arrow — wraps to the end at the top (list convention: SelectList,
+		// model-selector, tree and ask-picker all wrap).
 		if (kb.matches(keyData, "tui.select.up")) {
 			if (this.filteredProviders.length === 0) return;
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			this.selectedIndex = (this.selectedIndex - 1 + this.filteredProviders.length) % this.filteredProviders.length;
 			this.updateList();
 		}
-		// Down arrow
+		// Down arrow — wraps to the top at the end.
 		else if (kb.matches(keyData, "tui.select.down")) {
 			if (this.filteredProviders.length === 0) return;
-			this.selectedIndex = Math.min(this.filteredProviders.length - 1, this.selectedIndex + 1);
+			this.selectedIndex = (this.selectedIndex + 1) % this.filteredProviders.length;
 			this.updateList();
 		}
 		// Enter
@@ -182,8 +188,15 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 				this.onSelectCallback(selectedProvider.id);
 			}
 		}
-		// Escape or Ctrl+C
+		// Escape or Ctrl+C. Two-step when searching: a non-empty search is
+		// cleared first, and only a second Esc (empty search) closes. Mirrors
+		// SelectorShell/model-selector so every selector behaves uniformly.
 		else if (kb.matches(keyData, "tui.select.cancel")) {
+			if (this.searchInput.getValue().length > 0) {
+				this.searchInput.setValue("");
+				this.filterProviders("");
+				return;
+			}
 			this.onCancelCallback();
 		}
 		// Pass everything else to search input

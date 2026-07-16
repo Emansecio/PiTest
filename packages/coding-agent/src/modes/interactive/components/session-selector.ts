@@ -326,6 +326,10 @@ class SessionList implements Component, Focusable {
 	private maxVisible: number = 10; // Max sessions visible (one line each)
 	private filterDebounceTimer: ReturnType<typeof setTimeout> | undefined;
 	private filterPending = false;
+	// Async session load in flight (mirrors the header's loading flag): while
+	// true with an empty list, the body shows "Loading sessions…" instead of
+	// the empty-state advice, so the two never contradict each other.
+	private loading = false;
 
 	// Focusable implementation - propagate to searchInput for IME cursor positioning
 	private _focused = false;
@@ -347,7 +351,10 @@ class SessionList implements Component, Focusable {
 	) {
 		this.allSessions = sessions;
 		this.filteredSessions = [];
-		this.searchInput = new Input();
+		this.searchInput = new Input({
+			placeholder: 'Search sessions — re:regex, "phrase"',
+			placeholderColor: (t) => theme.fg("dim", t),
+		});
 		this.showCwd = showCwd;
 		this.sortMode = sortMode;
 		this.nameFilter = nameFilter;
@@ -385,6 +392,11 @@ class SessionList implements Component, Focusable {
 	/** Adaptive visible-row count (see SessionSelectorComponent's `tui` param). */
 	setMaxVisible(maxVisible: number): void {
 		this.maxVisible = maxVisible;
+	}
+
+	/** Mirror the header's loading flag so the body's empty state stays honest. */
+	setLoading(loading: boolean): void {
+		this.loading = loading;
 	}
 
 	private scheduleFilterSessions(query: string): void {
@@ -467,6 +479,13 @@ class SessionList implements Component, Focusable {
 		lines.push(""); // Blank line after search
 
 		if (this.filteredSessions.length === 0) {
+			// While the async load is in flight the list is empty because nothing
+			// has arrived yet — advising "Press Tab to view all" would contradict
+			// the header's "Loading…" and invite wrong moves.
+			if (this.loading) {
+				lines.push(theme.fg("muted", "  Loading sessions…"));
+				return lines;
+			}
 			let emptyMessage: string;
 			if (this.nameFilter === "named") {
 				const toggleKey = keyText("app.session.toggleNamedFilter");
@@ -648,15 +667,18 @@ class SessionList implements Component, Focusable {
 			return;
 		}
 
-		// Up arrow
+		// Up arrow — wraps to the end at the top (list convention: SelectList,
+		// model-selector, tree and ask-picker all wrap; Home/End cover jumps).
 		if (kb.matches(keyData, "tui.select.up")) {
 			this.flushPendingFilter();
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			const count = this.filteredSessions.length;
+			if (count > 0) this.selectedIndex = (this.selectedIndex - 1 + count) % count;
 		}
-		// Down arrow
+		// Down arrow — wraps to the top at the end.
 		else if (kb.matches(keyData, "tui.select.down")) {
 			this.flushPendingFilter();
-			this.selectedIndex = Math.min(this.filteredSessions.length - 1, this.selectedIndex + 1);
+			const count = this.filteredSessions.length;
+			if (count > 0) this.selectedIndex = (this.selectedIndex + 1) % count;
 		}
 		// Page up - jump up by maxVisible items
 		else if (kb.matches(keyData, "tui.select.pageUp")) {
@@ -847,7 +869,10 @@ export class SessionSelectorComponent extends Container implements Focusable {
 
 	private buildBaseLayout(content: Component, options?: { showHeader?: boolean }): void {
 		this.clear();
-		const card = new SelectorCard(1, 0, (s) => theme.fg("accent", s));
+		// Default cardBorder like every other selector — accent borders are
+		// reserved for genuinely special surfaces (announcements), and /resume
+		// is routine chrome.
+		const card = new SelectorCard(1, 0);
 		card.addChild(new Spacer(1));
 		if (options?.showHeader ?? true) {
 			card.addChild(this.header);
@@ -1061,6 +1086,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		const isStaleSeq = () => (scope === "all" ? seq !== this.allLoadSeq : seq !== this.currentLoadSeq);
 		this.header.setScope(scope);
 		this.header.setLoading(true);
+		this.sessionList.setLoading(true);
 		this.requestRender();
 
 		const onProgress = (loaded: number, total: number) => {
@@ -1101,6 +1127,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			if (scope !== this.scope) return;
 
 			this.header.setLoading(false);
+			this.sessionList.setLoading(false);
 			this.sessionList.setSessions(sessions, showCwd);
 			this.requestRender();
 
@@ -1118,6 +1145,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 
 			const message = err instanceof Error ? err.message : String(err);
 			this.header.setLoading(false);
+			this.sessionList.setLoading(false);
 			this.header.setStatusMessage({ type: "error", message: `Failed to load sessions: ${message}` }, 4000);
 
 			if (reason === "initial") {
@@ -1153,6 +1181,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 
 			if (this.allSessions !== null) {
 				this.header.setLoading(false);
+				this.sessionList.setLoading(false);
 				this.sessionList.setSessions(this.allSessions, true);
 				this.requestRender();
 				return;
@@ -1167,6 +1196,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		this.scope = "current";
 		this.header.setScope(this.scope);
 		this.header.setLoading(this.currentLoading);
+		this.sessionList.setLoading(this.currentLoading);
 		this.sessionList.setSessions(this.currentSessions ?? [], false);
 		this.requestRender();
 	}

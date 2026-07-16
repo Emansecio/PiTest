@@ -13,6 +13,24 @@ function createSseResponse(events: Array<{ event: string; data: string }>): Resp
 	});
 }
 
+/** Response whose body is delivered as the given raw chunks, verbatim (for
+ * exercising line terminators and chunk-boundary splits). */
+function createStreamingSseResponse(chunks: string[]): Response {
+	const encoder = new TextEncoder();
+	const body = new ReadableStream<Uint8Array>({
+		start(controller) {
+			for (const chunk of chunks) {
+				controller.enqueue(encoder.encode(chunk));
+			}
+			controller.close();
+		},
+	});
+	return new Response(body, {
+		status: 200,
+		headers: { "content-type": "text/event-stream" },
+	});
+}
+
 const minimalAnthropicEvents = [
 	{
 		event: "message_start",
@@ -196,6 +214,82 @@ describe("Anthropic raw SSE parsing", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.errorMessage).toBeUndefined();
 		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+	});
+
+	it("parses CRLF-terminated SSE streams identically to LF", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const context: Context = {
+			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+		};
+		const raw = minimalAnthropicEvents.map(({ event, data }) => `event: ${event}\r\ndata: ${data}\r\n\r\n`).join("");
+		const stream = streamAnthropic(model, context, {
+			client: createFakeAnthropicClient(createStreamingSseResponse([raw])),
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+	});
+
+	it("parses lone-CR-terminated SSE streams (SSE spec allows bare \\r)", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const context: Context = {
+			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+		};
+		const raw = minimalAnthropicEvents.map(({ event, data }) => `event: ${event}\rdata: ${data}\r\r`).join("");
+		const stream = streamAnthropic(model, context, {
+			client: createFakeAnthropicClient(createStreamingSseResponse([raw])),
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+	});
+
+	it("parses CRLF streams delivered as many small chunks", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const context: Context = {
+			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+		};
+		const raw = minimalAnthropicEvents.map(({ event, data }) => `event: ${event}\r\ndata: ${data}\r\n\r\n`).join("");
+		// One chunk per line (split after each "\n", keeping every "\r\n" pair
+		// intact) plus a mid-line split of each data payload — exercises partial
+		// line reassembly across chunk boundaries with CRLF terminators.
+		const chunks = raw.split(/(?<=\n)/).flatMap((line) => {
+			if (line.length <= 10) return [line];
+			return [line.slice(0, 10), line.slice(10)];
+		});
+		const stream = streamAnthropic(model, context, {
+			client: createFakeAnthropicClient(createStreamingSseResponse(chunks)),
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+	});
+
+	it("flushes a trailing orphan \\r-terminated line at end of stream", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const context: Context = {
+			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+		};
+		const events = [...minimalAnthropicEvents];
+		const last = events.pop()!;
+		const raw =
+			events.map(({ event, data }) => `event: ${event}\ndata: ${data}\n\n`).join("") +
+			// Final event terminated only by a lone "\r" with no trailing blank line:
+			// the decoder flush must still consume the line and emit the event.
+			`event: ${last.event}\ndata: ${last.data}\r`;
+		const stream = streamAnthropic(model, context, {
+			client: createFakeAnthropicClient(createStreamingSseResponse([raw])),
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
 	});
 
 	it("ignores unknown SSE events after message_stop", async () => {

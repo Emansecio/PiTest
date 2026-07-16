@@ -53,6 +53,8 @@ export interface BuiltInExtensionsOptions {
 	getParentModel: () => Model<any> | undefined;
 	/** Returns the parent's tool catalog — used by the coordinator. */
 	getAvailableTools: () => AgentTool[];
+	/** Rebuilds cwd-sensitive tools with the session's configured options for worktree children. */
+	retargetToolsForCwd?: (tools: AgentTool[], cwd: string) => AgentTool[];
 	/** Returns the parent's loaded skills — used by the coordinator for `inherit_skills`. */
 	getSkills?: () => import("../skills.ts").Skill[];
 	/** Audit hook for permission decisions (telemetry / logs). */
@@ -162,6 +164,7 @@ export function bundleBuiltInExtensions(options: BuiltInExtensionsOptions): Buil
 			permissionChecker,
 			getParentModel: options.getParentModel,
 			getAvailableTools: options.getAvailableTools,
+			retargetToolsForCwd: options.retargetToolsForCwd,
 			getSkills: options.getSkills,
 			isMessagingEnabled: options.isMessagingEnabled,
 			getParentMessagingId: options.getParentMessagingId,

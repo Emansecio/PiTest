@@ -5,6 +5,7 @@ import type { Api, Context, Model, StreamOptions } from "../src/types.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
@@ -94,9 +95,9 @@ describe("Token Statistics on Abort", () => {
 		it.skipIf(!anthropicOAuthToken)(
 			"should include token stats when aborted mid-stream",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("anthropic", async () => {
 				await testTokensOnAbort(llm, { apiKey: anthropicOAuthToken });
-			},
+			}),
 		);
 	});
 
@@ -104,10 +105,10 @@ describe("Token Statistics on Abort", () => {
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should include token stats when aborted mid-stream",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 				await testTokensOnAbort(llm, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 	});
 });

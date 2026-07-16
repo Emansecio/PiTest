@@ -6,10 +6,11 @@ import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provi
 import type { RecoveryLevel } from "../../../core/session-recovery.ts";
 import { isReducedMotion } from "../../../utils/env-flags.ts";
 import { buildWorkspaceCwdLabels, formatGitBranchWithDiff, type WorkspaceCwdLabels } from "../display-utils.ts";
+import { formatModelDisplayName } from "../model-display-name.ts";
 import { interpolateFg } from "../theme/color-interpolation.ts";
 import { CONTEXT_USAGE_WARN_PERCENT, theme } from "../theme/theme.ts";
 import { COLOR_EASE_MS } from "./color-ease.ts";
-import { GAUGE_EMPTY, GAUGE_FILLED } from "./gauge-glyphs.ts";
+import { resolveGaugeGlyphs } from "./gauge-glyphs.ts";
 
 /** Minimum terminal width for single-line identity (pwd + model). */
 const FOOTER_IDENTITY_SINGLE_LINE_MIN = 48;
@@ -115,18 +116,23 @@ function footerFillFingerprint(fill: number): number {
 }
 
 function renderFooterContextBar(displayedFill: number, colorize: (text: string) => string): string {
+	// resolveGaugeGlyphs (not the raw constants) so PIT_ASCII_GAUGE/TERM=dumb
+	// fall back to ●/○ here too — the footer is the most permanent chrome, it
+	// must honor the same kill-switch as the todo overlay. Env-only, so
+	// resolving per call is cheap and render caching is unaffected.
+	const { filled: gaugeFilled, empty: gaugeEmpty } = resolveGaugeGlyphs();
 	const clamped = Math.max(0, Math.min(FOOTER_CTX_BAR_WIDTH, displayedFill));
 	const full = Math.floor(clamped);
 	const frac = clamped - full;
-	let result = colorize(GAUGE_FILLED.repeat(full));
+	let result = colorize(gaugeFilled.repeat(full));
 	const hasPartial = frac > FILL_EASE_EPSILON && full < FOOTER_CTX_BAR_WIDTH;
 	if (hasPartial) {
 		const blend = interpolateFg("dim", "accent", frac);
-		result += blend ? blend(GAUGE_FILLED) : colorize(GAUGE_FILLED);
+		result += blend ? blend(gaugeFilled) : colorize(gaugeFilled);
 	}
 	const empty = FOOTER_CTX_BAR_WIDTH - full - (hasPartial ? 1 : 0);
 	if (empty > 0) {
-		result += theme.fg("dim", GAUGE_EMPTY.repeat(empty));
+		result += theme.fg("dim", gaugeEmpty.repeat(empty));
 	}
 	return result;
 }
@@ -516,30 +522,31 @@ export class FooterComponent implements Component {
 		// when inside a git repo, mid-path ellipsis otherwise) so a deep absolute
 		// path never eats the model name on the right.
 		const cwdLabels = this.getCwdLabels();
-		let pwd = theme.fg("muted", cwdLabels.session);
 		const branch = this.footerData.getGitBranch();
+		const sessionName = this.session.sessionManager.getSessionName();
+		const showPwd = !cwdLabels.isHome || Boolean(branch || sessionName || cwdLabels.shellNote);
+		let pwd = showPwd ? theme.fg("muted", cwdLabels.session) : "";
 		const diffStats = this.footerData.getGitDiffStats();
 		if (branch) {
 			const branchLabel = formatGitBranchWithDiff(branch, diffStats);
 			pwd = `${pwd}${theme.fg("dim", " (")}${branchLabel}${theme.fg("dim", ")")}`;
 		}
-		const sessionName = this.session.sessionManager.getSessionName();
 		if (sessionName) pwd = `${pwd}${theme.fg("dim", ` • ${sessionName}`)}`;
 		if (cwdLabels.shellNote) pwd = `${pwd}${theme.fg("dim", ` · ${cwdLabels.shellNote}`)}`;
 
 		// Right: model • thinking-level — the model id is the single bright token
 		// of the line (no provider prefix; the provider lives in /model) and the
-		// thinking level renders as a small colored chip (`✦ high`).
-		const modelName = state.model?.id || "no-model";
+		// thinking level renders as a small colored text chip (`High`).
+		const modelName = formatModelDisplayName(state.model?.id || "no-model");
 
-		// The thinking chip (`• ✦ high`) is a PROTECTED suffix: on a narrow terminal
+		// The thinking chip (`• High`) is a PROTECTED suffix: on a narrow terminal
 		// the model id is truncated before the chip is ever touched, so the level
-		// never clips to a dangling `✦`.
+		// remains readable.
 		const identityRight = modelName;
 		let thinkingChip: { text: string; width: number } | undefined;
 		if (state.model?.reasoning) {
 			const level = asKnownThinkingLevel(state.thinkingLevel);
-			const levelLabel = level === "off" ? "Thinking off" : `✦ ${level[0].toUpperCase()}${level.slice(1)}`;
+			const levelLabel = level === "off" ? "Thinking off" : `${level[0].toUpperCase()}${level.slice(1)}`;
 			const colorize = theme.getThinkingBorderColor(level);
 			thinkingChip = {
 				text: `${theme.fg("muted", " • ")}${colorize(levelLabel)}`,
@@ -759,8 +766,7 @@ interface ComposeOptions {
 	 * A pre-colored suffix glued to the end of `right` that must NEVER be
 	 * truncated. When the line is tight, the truncatable part of `right` shrinks
 	 * (and is ellipsized) while this suffix survives intact. Used to keep the
-	 * `✦ <thinking-level>` chip on the identity line: otherwise a narrow terminal
-	 * clips it to a meaningless dangling `✦`. The suffix is already styled, so its
+	 * `<thinking-level>` chip on the identity line. The suffix is already styled, so its
 	 * visible width is passed separately (ANSI is width-free).
 	 */
 	protectedSuffix?: { text: string; width: number };

@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { renderDiff } from "../src/modes/interactive/components/diff.ts";
+import { renderDiff, wrapDiffBody } from "../src/modes/interactive/components/diff.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -91,5 +91,60 @@ describe("renderDiff", () => {
 		expect(stripAnsi(lines[0])).toBe(" 1 - first");
 		expect(stripAnsi(lines[1])).toBe(" 2 - second");
 		expect(stripAnsi(lines[2])).toBe(" 1 + only");
+	});
+});
+
+describe("wrapDiffBody", () => {
+	beforeAll(() => initTheme("dark"));
+
+	it("hanging-indents wrapped continuations under the body column instead of column 0", () => {
+		const width = 20;
+		const diff = `+1 ${"x".repeat(50)}`;
+		const wrapped = wrapDiffBody(renderDiff(diff), width).map(stripAnsi);
+		// Gutter is "1 + " (4 cols): lineNum(1) + space + sign + space.
+		expect(wrapped).toEqual([
+			`1 + ${"x".repeat(16)}`,
+			`    ${"x".repeat(16)}`,
+			`    ${"x".repeat(16)}`,
+			`    ${"x".repeat(2)}`,
+		]);
+		// Continuations are pure hanging-indent spaces, never a bare digit/sign at
+		// column 0 - that would be indistinguishable from a fresh diff line.
+		for (const line of wrapped.slice(1)) {
+			expect(line.startsWith("    ")).toBe(true);
+		}
+	});
+
+	it("keeps the +/- background tint on wrapped continuation lines and closes it once at the end", () => {
+		const width = 20;
+		const diff = `+1 ${"x".repeat(50)}`;
+		const wrapped = wrapDiffBody(renderDiff(diff), width);
+		const bgAnsi = theme.tryGetBgAnsi("toolDiffAddedBg");
+		if (!bgAnsi) return; // theme has no bg token configured for added lines
+		for (const line of wrapped) {
+			expect(line).toContain(bgAnsi);
+		}
+		expect(wrapped[wrapped.length - 1]).toContain("\x1b[49m");
+	});
+
+	it("aligns a context line's wrapped continuation under its body column too", () => {
+		const width = 16;
+		const diff = ` 1 ${"y".repeat(40)}`;
+		const wrapped = wrapDiffBody(renderDiff(diff), width).map(stripAnsi);
+		// Gutter is "1   " (4 cols): lineNum(1) + space + (space sign) + space.
+		expect(wrapped[0]?.startsWith("1   ")).toBe(true);
+		expect(wrapped.slice(1).every((line) => line.startsWith("    "))).toBe(true);
+	});
+
+	it("falls back to plain wrapping (no crash) when the gutter alone exceeds the width", () => {
+		const diff = `+123456 ${"z".repeat(30)}`;
+		expect(() => wrapDiffBody(renderDiff(diff), 5)).not.toThrow();
+	});
+
+	it("does not indent lines that already fit within width", () => {
+		const width = 40;
+		const diff = "+1 short line";
+		const wrapped = wrapDiffBody(renderDiff(diff), width).map(stripAnsi);
+		expect(wrapped).toEqual(["1 + short line"]);
 	});
 });

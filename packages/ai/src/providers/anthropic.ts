@@ -66,6 +66,28 @@ function getCacheControl(
 // PIT_CLAUDE_CODE_VERSION; this constant is the offline fallback. Override
 // per-machine via the env var without a rebuild.
 const CLAUDE_CODE_VERSION_FALLBACK = "2.1.170";
+
+/**
+ * Default clamp of the Anthropic SDK's silent retry loop.
+ *
+ * The SDK defaults to 2 retries with exponential backoff — a multi-second
+ * pre-TTFT stall that is invisible to the TUI and stacks on top of Pit's own
+ * retry/fallback layer (which HAS a UI and a fallback chain). We keep exactly
+ * ONE in-SDK retry rather than zero: the outer `withFallbackChain` puts a model
+ * in a 5-minute cooldown (and fails over to the next chain entry) on ANY
+ * retryable failure, which is far too aggressive for the intermittent
+ * 529/overloaded blip documented on OAuth traffic below — one quick silent
+ * retry absorbs the blip, while anything persistent escalates to the visible
+ * outer layer after a single short backoff instead of the SDK's full 2-retry
+ * exponential stall. `PIT_NO_PROVIDER_RETRY_CLAMP=1` restores the SDK default.
+ */
+function resolveClampedMaxRetries(callerValue: number | undefined): number | undefined {
+	if (callerValue !== undefined) return callerValue;
+	const env = typeof process !== "undefined" ? process.env?.PIT_NO_PROVIDER_RETRY_CLAMP : undefined;
+	const flag = env?.toLowerCase();
+	if (flag === "1" || flag === "true" || flag === "yes") return undefined;
+	return 1;
+}
 function getClaudeCodeVersion(): string {
 	const env = typeof process !== "undefined" ? process.env?.PIT_CLAUDE_CODE_VERSION : undefined;
 	const trimmed = env?.trim();
@@ -285,7 +307,9 @@ function flushSseEvent(state: SseDecoderState): ServerSentEvent | null {
 	const event: ServerSentEvent = {
 		event: state.event,
 		data: state.data.join("\n"),
-		raw: [...state.raw],
+		// Transfer the array by reference — a fresh array is assigned below, so
+		// the defensive clone was pure per-event GC churn.
+		raw: state.raw,
 	};
 	state.event = null;
 	state.data = [];
@@ -319,16 +343,32 @@ function decodeSseLine(line: string, state: SseDecoderState): ServerSentEvent | 
 	return null;
 }
 
+// Returns the index of the first line terminator ("\n" or "\r") at/after `from`.
+//
+// Perf note: the naive `Math.min(indexOf("\r"), indexOf("\n"))` re-scans to the
+// END of the buffer for "\r" on every line of the (universal in practice)
+// "\n"-only Anthropic streams — a ~12× amplification of the line split (44µs vs
+// 3.7µs per 16KB chunk). Instead we find the bounded "\n" first and only scan
+// the line's own span for a lone "\r" (legal SSE terminator), so behavior is
+// identical for every input, including CRLF and orphan "\r" at buffer end
+// (covered by the nl === -1 branch, which also handles the final flush).
 function nextLineBreakIndexFrom(text: string, from: number): number {
-	const carriageReturnIndex = text.indexOf("\r", from);
 	const newlineIndex = text.indexOf("\n", from);
-	if (carriageReturnIndex === -1) {
+	if (newlineIndex === -1) {
+		// No "\n" left — a lone "\r" may still terminate a line (SSE spec).
+		return text.indexOf("\r", from);
+	}
+	if (newlineIndex === from) {
 		return newlineIndex;
 	}
-	if (newlineIndex === -1) {
-		return carriageReturnIndex;
+	// CRLF: the line ends at the "\r"; consumeLineAt skips the pair.
+	const end = text.charCodeAt(newlineIndex - 1) === 13 /* "\r" */ ? newlineIndex - 1 : newlineIndex;
+	for (let i = from; i < end; i++) {
+		if (text.charCodeAt(i) === 13 /* "\r" */) {
+			return i;
+		}
 	}
-	return Math.min(carriageReturnIndex, newlineIndex);
+	return end;
 }
 
 // Cursor-based scan avoids the O(N²) buffer rewrite from `buffer = buffer.slice(rest)`
@@ -489,7 +529,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			} else {
 				const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 
-				const cacheRetention = options?.cacheRetention ?? resolveCacheRetention(undefined, "long");
+				const cacheRetention = resolveCacheRetention(options?.cacheRetention, "long");
 				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 
 				const created = createClient(
@@ -510,10 +550,11 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			}
 			const timeouts = resolveStreamTimeouts(options);
 			connectGuard = createConnectGuard(options?.signal, timeouts.connectTimeoutMs);
+			const maxRetries = resolveClampedMaxRetries(options?.maxRetries);
 			const requestOptions = {
 				signal: connectGuard.signal,
 				...(timeouts.requestTimeoutMs !== undefined ? { timeout: timeouts.requestTimeoutMs } : {}),
-				...(options?.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
+				...(maxRetries !== undefined ? { maxRetries } : {}),
 			};
 			const response = await connectGuard.settle(
 				client.messages.create({ ...params, stream: true }, requestOptions).asResponse(),

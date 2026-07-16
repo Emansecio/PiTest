@@ -320,7 +320,7 @@ describe("ActivityLineComponent — agent labels", () => {
 			execStub({ getToolName: () => "some_mcp_tool", getArgs: () => ({}), getResultDetails: () => undefined }),
 		);
 		const head = c.render(120).map(stripAnsi)[0];
-		expect(head).toContain("some_mcp_tool");
+		expect(head).toContain("Some_mcp_tool");
 		expect(head).not.toContain("Ran");
 	});
 

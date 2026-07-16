@@ -129,10 +129,17 @@ export interface SpawnSubagentOptions {
 	 */
 	systemPromptSuffix?: string;
 	/**
-	 * Called once with the live `Agent` immediately after construction and
-	 * before its first turn. Used to attach the agent to the message bus.
+	 * Called after an isolated worktree is created, before tools/the Agent are
+	 * built. Used by acceptance cleanup and persisted-resume cwd tracking.
 	 */
-	onAgentReady?: (agent: import("@pit/agent-core").Agent) => void;
+	onWorktreeReady?: (path: string) => void;
+	/**
+	 * Called once with the live `Agent` and its canonical registry record
+	 * immediately after construction and before its first turn. Existing one-arg
+	 * callbacks remain compatible. Used to attach the agent to the message bus and
+	 * retain collision-safe record identity for in-memory resume/continue.
+	 */
+	onAgentReady?: (agent: import("@pit/agent-core").Agent, record: SubagentRecord) => void;
 	/**
 	 * Called exactly once when the subagent settles (success, failure, or
 	 * cancellation) — `spawnSubagent` guards it with a once-flag. General-purpose

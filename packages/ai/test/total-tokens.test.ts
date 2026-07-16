@@ -19,6 +19,7 @@ import type { Api, Context, Model, StreamOptions, Usage } from "../src/types.js"
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
@@ -123,7 +124,7 @@ describe("totalTokens field", () => {
 		it.skipIf(!anthropicOAuthToken)(
 			"claude-sonnet-4 - should return totalTokens equal to sum of components",
 			{ retry: 3, timeout: 60000 },
-			async () => {
+			live("anthropic", async () => {
 				const llm = getModel("anthropic", "claude-sonnet-5");
 
 				console.log(`\nAnthropic OAuth / ${llm.id}:`);
@@ -138,7 +139,7 @@ describe("totalTokens field", () => {
 				// Anthropic should have cache activity
 				const hasCache = second.cacheRead > 0 || second.cacheWrite > 0 || first.cacheWrite > 0;
 				expect(hasCache).toBe(true);
-			},
+			}),
 		);
 	});
 
@@ -180,7 +181,7 @@ describe("totalTokens field", () => {
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should return totalTokens equal to sum of components",
 			{ retry: 3, timeout: 60000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 
 				console.log(`\nOpenAI Codex / ${llm.id}:`);
@@ -191,7 +192,7 @@ describe("totalTokens field", () => {
 
 				assertTotalTokensEqualsComponents(first);
 				assertTotalTokensEqualsComponents(second);
-			},
+			}),
 		);
 	});
 });

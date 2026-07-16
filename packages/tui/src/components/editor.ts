@@ -251,8 +251,12 @@ export interface EditorOptions {
 	autocompleteMaxVisible?: number;
 	/** Dim hint shown when the buffer is empty (cleared as soon as the user types). */
 	placeholder?: string;
+	/** Draw a complete rounded frame around the editable area. Default false. */
+	closedFrame?: boolean;
+	/** Omit standalone top/bottom chrome when a parent component owns the frame. */
+	embedded?: boolean;
 	/**
-	 * When true, always draw a closed bottom rule (`╰───`) even with no scroll
+	 * When true, always draw a closed bottom rule (`────`) even with no scroll
 	 * overflow. Default false keeps the historical blank separator so consumers
 	 * that have not opted in stay unchanged.
 	 */
@@ -291,6 +295,13 @@ function autocompleteTimeoutMs(): number {
 	const raw = Number(process.env.PIT_AUTOCOMPLETE_TIMEOUT_MS);
 	return Number.isFinite(raw) && raw > 0 ? raw : AUTOCOMPLETE_REQUEST_TIMEOUT_MS;
 }
+
+/** Grace window before an in-flight provider request shows its "searching…"
+ * line — fast local completions never flash it, slow fd sweeps get feedback. */
+const AUTOCOMPLETE_SEARCHING_AFTER_MS = 150;
+
+/** How long the "no matches" / "search timed out" notice stays visible. */
+const AUTOCOMPLETE_NOTICE_TTL_MS = 1500;
 
 /** Resolve when `promise` settles or after `ms`, whichever comes first. The
  * timer is cleared on settle so a resolved request leaves no dangling handle. */
@@ -430,6 +441,15 @@ export class Editor implements Component, Focusable {
 	private autocompleteRequestTask: Promise<void> = Promise.resolve();
 	private autocompleteStartToken: number = 0;
 	private autocompleteRequestId: number = 0;
+	// In-flight feedback: when a provider request runs past the grace window,
+	// a dim "searching…" line renders below the editor (fd over a big repo can
+	// take seconds and an unresponsive @ otherwise reads as broken). Explicit
+	// triggers that end with nothing show a short-lived notice instead of
+	// closing silently.
+	private autocompleteSearchStartedAt?: number;
+	private autocompleteSearchRenderTimer?: ReturnType<typeof setTimeout>;
+	private autocompleteNotice?: string;
+	private autocompleteNoticeTimer?: ReturnType<typeof setTimeout>;
 
 	// Paste tracking for large pastes
 	private pastes: Map<number, string> = new Map();
@@ -487,6 +507,8 @@ export class Editor implements Component, Focusable {
 	public onChange?: (text: string) => void;
 	public disableSubmit: boolean = false;
 	private closedBottom: boolean = false;
+	private closedFrame: boolean = false;
+	private embedded: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
 		this.tui = tui;
@@ -498,6 +520,8 @@ export class Editor implements Component, Focusable {
 		this.autocompleteMaxVisible = Number.isFinite(maxVisible) ? Math.max(3, Math.min(20, Math.floor(maxVisible))) : 5;
 		this.placeholder = options.placeholder;
 		this.closedBottom = options.closedBottom === true;
+		this.closedFrame = options.closedFrame === true;
+		this.embedded = options.embedded === true;
 		this.onPasteTruncated = options.onPasteTruncated;
 	}
 
@@ -791,9 +815,12 @@ export class Editor implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
-		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
+		const framed = this.closedFrame && width >= 3;
+		const frameWidth = framed ? 2 : 0;
+		const innerWidth = Math.max(1, width - frameWidth);
+		const maxPadding = Math.max(0, Math.floor((innerWidth - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
-		const contentWidth = Math.max(1, width - paddingX * 2);
+		const contentWidth = Math.max(1, innerWidth - paddingX * 2);
 
 		// Layout width: with padding the cursor can overflow into it,
 		// without padding we reserve 1 column for the cursor.
@@ -805,9 +832,17 @@ export class Editor implements Component, Focusable {
 		// Pre-color the full-width rule with a single SGR pair instead of coloring
 		// each "─" and repeating the colored unit: the border color is uniform, so
 		// per-glyph coloring just bloats every repaint (~one escape pair per column).
-		// A rounded corner opens the top rule (`╭`); no right corner since there are
-		// no side borders. Width is unchanged — only the first glyph differs.
-		const horizontalRule = this.borderColor(`╭${"─".repeat(Math.max(0, width - 1))}`);
+		// A clean straight hairline (no corner glyph): the input reads as a thin
+		// separating rule (Pi-reference bar), not the top edge of a card.
+		const horizontalRule = this.borderColor("─".repeat(Math.max(0, width)));
+		const renderFrameEdge = (left: string, indicator: string, right: string): string => {
+			const available = Math.max(0, width - 2);
+			const edge =
+				visibleWidth(indicator) <= available
+					? indicator + "─".repeat(available - visibleWidth(indicator))
+					: truncateToWidth(indicator, available);
+			return this.borderColor(`${left}${edge}${right}`);
+		};
 
 		// Layout the text. Optional perf probe: set PIT_EDITOR_PERF=1 to log layout
 		// cost per render (use with a realistic multi-line / CJK draft to measure
@@ -859,25 +894,27 @@ export class Editor implements Component, Focusable {
 		if (this.jumpMode !== null) {
 			const arrow = this.jumpMode === "forward" ? "→" : "←";
 			const scrollSuffix = this.scrollOffset > 0 ? `↑ ${this.scrollOffset} more ` : "";
-			// Open with the rounded corner `╭`; the indicator otherwise starts `─── `,
-			// so swapping the leading glyph keeps the visible width identical.
-			const indicator = `╭── jump ${arrow} ${scrollSuffix}`;
+			const indicator = `─── jump ${arrow} ${scrollSuffix}`;
 			const remaining = width - visibleWidth(indicator);
-			if (remaining >= 0) {
+			if (framed) {
+				result.push(renderFrameEdge("╭", indicator, "╮"));
+			} else if (remaining >= 0) {
 				result.push(this.borderColor(indicator + "─".repeat(remaining)));
 			} else {
 				result.push(this.borderColor(truncateToWidth(indicator, width)));
 			}
 		} else if (this.scrollOffset > 0) {
-			const indicator = `╭── ↑ ${this.scrollOffset} more `;
+			const indicator = `─── ↑ ${this.scrollOffset} more `;
 			const remaining = width - visibleWidth(indicator);
-			if (remaining >= 0) {
+			if (framed) {
+				result.push(renderFrameEdge("╭", indicator, "╮"));
+			} else if (remaining >= 0) {
 				result.push(this.borderColor(indicator + "─".repeat(remaining)));
 			} else {
 				result.push(this.borderColor(truncateToWidth(indicator, width)));
 			}
-		} else {
-			result.push(horizontalRule);
+		} else if (!this.embedded) {
+			result.push(framed ? renderFrameEdge("╭", "", "╮") : horizontalRule);
 		}
 
 		// Render each visible layout line
@@ -964,8 +1001,9 @@ export class Editor implements Component, Focusable {
 			const padding = " ".repeat(Math.max(0, contentWidth - lineVisibleWidth));
 			const lineRightPadding = cursorInPadding ? rightPadding.slice(1) : rightPadding;
 
-			// Render the line (no side borders, just horizontal lines above and below)
-			result.push(`${leftPadding}${displayText}${padding}${lineRightPadding}`);
+			const leftBorder = framed ? this.borderColor("│") : "";
+			const rightBorder = framed ? this.borderColor("│") : "";
+			result.push(`${leftBorder}${leftPadding}${displayText}${padding}${lineRightPadding}${rightBorder}`);
 		}
 
 		// Bottom edge. A second full-width rule directly above the footer was pure
@@ -973,20 +1011,24 @@ export class Editor implements Component, Focusable {
 		// footer below carries its own structure. So by default the bottom rule
 		// renders ONLY when it carries information (`↓ N more` scroll indicator);
 		// otherwise it collapses to a blank line. Opt-in `closedBottom` always
-		// closes the frame with `╰───` for a card-like input area.
+		// closes the frame with a straight `────` rule for a card-like input area.
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
 		if (linesBelow > 0) {
-			// Rounded corner `╰` opens the bottom rule; same width as the old `─── `.
-			const indicator = `╰── ↓ ${linesBelow} more `;
+			const indicator = `─── ↓ ${linesBelow} more `;
 			const remaining = width - visibleWidth(indicator);
-			if (remaining >= 0) {
+			if (framed) {
+				result.push(renderFrameEdge("╰", indicator, "╯"));
+			} else if (remaining >= 0) {
 				result.push(this.borderColor(indicator + "─".repeat(remaining)));
 			} else {
 				result.push(this.borderColor(truncateToWidth(indicator, width)));
 			}
-		} else if (this.closedBottom) {
-			result.push(this.borderColor(`╰${"─".repeat(Math.max(0, width - 1))}`));
-		} else {
+		} else if (framed) {
+			result.push(renderFrameEdge("╰", "", "╯"));
+		} else if (this.closedBottom && !this.embedded) {
+			// Opt-in closed frame: straight hairline matching the top rule.
+			result.push(this.borderColor("─".repeat(Math.max(0, width))));
+		} else if (!this.embedded) {
 			result.push("");
 		}
 
@@ -996,7 +1038,28 @@ export class Editor implements Component, Focusable {
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
-				result.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
+				const frameIndent = framed ? " " : "";
+				result.push(`${frameIndent}${leftPadding}${line}${linePadding}${rightPadding}${frameIndent}`);
+			}
+		} else {
+			// In-flight / just-finished feedback for the provider request: a dim
+			// "searching…" once the grace window passes, or the short-lived
+			// "no matches" / "search timed out" notice. Same visual idiom as the
+			// history-search header below.
+			let feedback: string | undefined;
+			if (
+				this.autocompleteSearchStartedAt !== undefined &&
+				Date.now() - this.autocompleteSearchStartedAt >= AUTOCOMPLETE_SEARCHING_AFTER_MS
+			) {
+				feedback = "  searching…";
+			} else if (this.autocompleteNotice) {
+				feedback = `  ${this.autocompleteNotice}`;
+			}
+			if (feedback !== undefined) {
+				const line = this.theme.selectList.scrollInfo(truncateToWidth(feedback, contentWidth, "…"));
+				const linePad = " ".repeat(Math.max(0, contentWidth - visibleWidth(line)));
+				const frameIndent = framed ? " " : "";
+				result.push(`${frameIndent}${leftPadding}${line}${linePad}${rightPadding}${frameIndent}`);
 			}
 		}
 
@@ -1006,13 +1069,14 @@ export class Editor implements Component, Focusable {
 			const headerText = truncateToWidth(`  history ⌕ ${this.historySearchQuery}`, contentWidth, "…");
 			const header = this.theme.selectList.scrollInfo(headerText);
 			const headerPad = " ".repeat(Math.max(0, contentWidth - visibleWidth(header)));
-			result.push(`${leftPadding}${header}${headerPad}${rightPadding}`);
+			const frameIndent = framed ? " " : "";
+			result.push(`${frameIndent}${leftPadding}${header}${headerPad}${rightPadding}${frameIndent}`);
 
 			const searchResult = this.historySearchList.render(contentWidth);
 			for (const line of searchResult) {
 				const lineWidth = visibleWidth(line);
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
-				result.push(`${leftPadding}${line}${linePadding}${rightPadding}`);
+				result.push(`${frameIndent}${leftPadding}${line}${linePadding}${rightPadding}${frameIndent}`);
 			}
 		}
 
@@ -2848,6 +2912,44 @@ export class Editor implements Component, Focusable {
 		return DEFAULT_AUTOCOMPLETE_DEBOUNCE_MS;
 	}
 
+	/** Arm the "searching…" feedback for an in-flight provider request. */
+	private beginAutocompleteSearchFeedback(): void {
+		this.clearAutocompleteNotice();
+		this.autocompleteSearchStartedAt = Date.now();
+		this.autocompleteSearchRenderTimer = setTimeout(() => {
+			this.autocompleteSearchRenderTimer = undefined;
+			// Only repaint if this request is still the live one.
+			if (this.autocompleteSearchStartedAt !== undefined) this.tui.requestRender();
+		}, AUTOCOMPLETE_SEARCHING_AFTER_MS);
+	}
+
+	private endAutocompleteSearchFeedback(): void {
+		this.autocompleteSearchStartedAt = undefined;
+		if (this.autocompleteSearchRenderTimer) {
+			clearTimeout(this.autocompleteSearchRenderTimer);
+			this.autocompleteSearchRenderTimer = undefined;
+		}
+	}
+
+	/** Short-lived notice below the editor ("no matches" / "search timed out"). */
+	private showAutocompleteNotice(text: string): void {
+		this.clearAutocompleteNotice();
+		this.autocompleteNotice = text;
+		this.autocompleteNoticeTimer = setTimeout(() => {
+			this.autocompleteNoticeTimer = undefined;
+			this.autocompleteNotice = undefined;
+			this.tui.requestRender();
+		}, AUTOCOMPLETE_NOTICE_TTL_MS);
+	}
+
+	private clearAutocompleteNotice(): void {
+		if (this.autocompleteNoticeTimer) {
+			clearTimeout(this.autocompleteNoticeTimer);
+			this.autocompleteNoticeTimer = undefined;
+		}
+		this.autocompleteNotice = undefined;
+	}
+
 	private async runAutocompleteRequest(
 		requestId: number,
 		controller: AbortController,
@@ -2858,6 +2960,7 @@ export class Editor implements Component, Focusable {
 	): Promise<void> {
 		if (!this.autocompleteProvider) return;
 
+		this.beginAutocompleteSearchFeedback();
 		try {
 			// Bound the provider call: if it hangs (Promise that never settles), abandon
 			// this request after the timeout instead of pinning the serialized chain.
@@ -2874,9 +2977,14 @@ export class Editor implements Component, Focusable {
 				autocompleteTimeoutMs(),
 			);
 			if (settled === undefined) {
-				// Timed out: signal the (still-pending) provider to abort and stop here.
+				// Timed out: signal the (still-pending) provider to abort and stop
+				// here — but say so instead of leaving the user staring at nothing.
 				controller.abort();
 				if (this.autocompleteAbort === controller) this.autocompleteAbort = undefined;
+				if (options.force || options.explicitTab) {
+					this.showAutocompleteNotice("search timed out");
+				}
+				this.tui.requestRender();
 				return;
 			}
 			const suggestions = settled.value;
@@ -2889,6 +2997,11 @@ export class Editor implements Component, Focusable {
 
 			if (!suggestions || !Array.isArray(suggestions.items) || suggestions.items.length === 0) {
 				this.cancelAutocomplete();
+				// An explicit trigger (@ / Tab) that finds nothing gets a brief
+				// notice; silently closing reads as "the feature broke".
+				if (options.force || options.explicitTab) {
+					this.showAutocompleteNotice("no matches");
+				}
 				this.tui.requestRender();
 				return;
 			}
@@ -2920,6 +3033,8 @@ export class Editor implements Component, Focusable {
 			if (this.autocompleteAbort === controller) this.autocompleteAbort = undefined;
 			this.cancelAutocomplete();
 			this.tui.requestRender();
+		} finally {
+			this.endAutocompleteSearchFeedback();
 		}
 	}
 
@@ -2959,12 +3074,14 @@ export class Editor implements Component, Focusable {
 		}
 		this.autocompleteAbort?.abort();
 		this.autocompleteAbort = undefined;
+		this.endAutocompleteSearchFeedback();
 	}
 
 	private clearAutocompleteUi(): void {
 		this.autocompleteState = null;
 		this.autocompleteList = undefined;
 		this.autocompletePrefix = "";
+		this.clearAutocompleteNotice();
 	}
 
 	private cancelAutocomplete(): void {

@@ -23,8 +23,11 @@ export {
 	type ResumeState,
 	saveResumeState,
 } from "./resume-store.ts";
+export { slotStats, withoutLease, withRunSlot, yieldRunSlotWhile } from "./slots.ts";
 export {
+	attachSubagentUsageToError,
 	extractAssistantText,
+	getSubagentErrorUsage,
 	isTransportRetryableError,
 	resolveSubagentThinking,
 	SMALL_CLASS_MODEL_MARKERS,
@@ -38,3 +41,4 @@ export type {
 	SubagentStatus,
 	WorktreeSpec,
 } from "./types.ts";
+export { retargetToolsForWorktree } from "./worktree-tools.ts";

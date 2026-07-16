@@ -372,6 +372,39 @@ describe("AgentSession retry", () => {
 		expect(internals.agent.idleTimeoutMs).toBe(180_000);
 	});
 
+	it("does not retry a permanent OAuth re-auth failure (invalid_grant), but still retries transient errors", () => {
+		const created = createSession({ failCount: 0 });
+		const internals = created.session as unknown as {
+			_isRetryableError: (m: AssistantMessage) => boolean;
+		};
+
+		// A revoked/expired refresh token surfaces invalid_grant. This is permanent —
+		// re-login is required, so retrying is futile and must be skipped. (Regression:
+		// the embedded stack trace once carried an "anthropic.ts:429" line number that
+		// the retry classifier misread as an HTTP 429 rate limit.)
+		const invalidGrant = createAssistantMessage("", {
+			stopReason: "error",
+			errorMessage:
+				'Failed to refresh OAuth token for anthropic: ... body={"error": "invalid_grant", "error_description": "Refresh token not found or invalid"}',
+		});
+		expect(internals._isRetryableError(invalidGrant)).toBe(false);
+
+		// The rewritten, user-facing /login prompt is likewise terminal.
+		const reauthPrompt = createAssistantMessage("", {
+			stopReason: "error",
+			errorMessage: "Your anthropic session expired or was revoked. Run '/login anthropic' to re-authenticate.",
+		});
+		expect(internals._isRetryableError(reauthPrompt)).toBe(false);
+
+		// Transient errors remain retryable.
+		const overloaded = createAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" });
+		expect(internals._isRetryableError(overloaded)).toBe(true);
+
+		// A genuine rate limit is still retryable.
+		const rateLimited = createAssistantMessage("", { stopReason: "error", errorMessage: "HTTP 429: rate limit" });
+		expect(internals._isRetryableError(rateLimited)).toBe(true);
+	});
+
 	it("restores the primary model after a transient fallback instead of staying pinned", async () => {
 		// A fallback (e.g. after a 429) must be temporary: once a turn settles the
 		// session reverts to the primary model. Previously _fallbackOriginal was

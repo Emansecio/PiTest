@@ -6,6 +6,7 @@ import type { Api, Context, Model, StreamOptions, ToolResultMessage } from "../s
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Empty schema for test tools - must be proper OBJECT type for Cloud Code Assist
@@ -300,24 +301,28 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 	describe("Anthropic OAuth Provider Unicode Handling", () => {
 		const llm = getModel("anthropic", "claude-haiku-4-5");
 
-		it.skipIf(!anthropicOAuthToken)("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
-			await testEmojiInToolResults(llm, { apiKey: anthropicOAuthToken });
-		});
+		it.skipIf(!anthropicOAuthToken)(
+			"should handle emoji in tool results",
+			{ retry: 3, timeout: 30000 },
+			live("anthropic", async () => {
+				await testEmojiInToolResults(llm, { apiKey: anthropicOAuthToken });
+			}),
+		);
 
 		it.skipIf(!anthropicOAuthToken)(
 			"should handle real-world LinkedIn comment data with emoji",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("anthropic", async () => {
 				await testRealWorldLinkedInData(llm, { apiKey: anthropicOAuthToken });
-			},
+			}),
 		);
 
 		it.skipIf(!anthropicOAuthToken)(
 			"should handle unpaired high surrogate (0xD83D) in tool results",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("anthropic", async () => {
 				await testUnpairedHighSurrogate(llm, { apiKey: anthropicOAuthToken });
-			},
+			}),
 		);
 	});
 
@@ -325,28 +330,28 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should handle emoji in tool results",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 				await testEmojiInToolResults(llm, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should handle real-world LinkedIn comment data with emoji",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 				await testRealWorldLinkedInData(llm, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should handle unpaired high surrogate (0xD83D) in tool results",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 				await testUnpairedHighSurrogate(llm, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 	});
 });

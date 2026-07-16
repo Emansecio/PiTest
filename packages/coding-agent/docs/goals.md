@@ -52,6 +52,7 @@ goal_complete({
 ```
 
 The tool is **no-op if no goal is active**. It records:
+
 - Summary text
 - Iterations completed
 - Token usage
@@ -71,6 +72,12 @@ Budget formats: `200000`, `200k`, `1.5m`.
 When the budget is exceeded, the goal transitions to `budget_limited` and
 auto-continue stops. This prevents runaway token consumption on open-ended
 tasks.
+
+Goal consumption uses one inclusive rule for every model call:
+`input + output + cacheRead + cacheWrite`. The same rule applies to main-agent
+turns, Fusion stages, subagents, acceptance retries/judges, and in-memory
+resume/continue follow-ups. Cache pricing may be cheaper, but cached tokens still
+occupy model context and therefore count against the token budget.
 
 ## UI indicators
 
@@ -108,7 +115,7 @@ Auto-continuation stops when the goal status is no longer `active`
 
 ## Related
 
-- [Usage: interactive mode](usage.md#interactive-mode) - for the general 
+- [Usage: interactive mode](usage.md#interactive-mode) - for the general
   interactive loop.
 - [Fusion mode](fusion.md) - multi-model panel for planning and debugging.
 - [Subagents](subagents.md) - task decomposition with spawn/join.

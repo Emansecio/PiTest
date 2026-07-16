@@ -20,11 +20,12 @@
  * sample of the full error text for human-readable reports.
  *
  * Self-cleaning — when more than `MAX_SESSION_FILES` files exist, the oldest
- * ones are pruned. Keeps disk usage bounded even after months of sessions.
+ * ones are pruned at session dispose (see {@link pruneLearnedErrorSessionFiles}).
+ * Keeps disk usage bounded even after months of sessions.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "../config.ts";
@@ -80,35 +81,58 @@ export function learnedErrorsDirFor(agentDir: string): string {
 	return join(agentDir, LEARNED_ERRORS_DIRNAME);
 }
 
-/** Persist a session's normalised fingerprints to a fresh per-session file. */
-export function persistSessionLearnedErrors(dir: string, meta: SessionFileMeta, entries: LearnedErrorEntry[]): void {
+/**
+ * Persist a session's normalised fingerprints to a fresh per-session file.
+ *
+ * Async on purpose: the per-turn flush runs on the turn boundary, where a
+ * writeFileSync (1–50ms occasional, worse on Windows with AV scanning) would
+ * stall the event loop between turns. Callers serialize their own writes
+ * (agent-session chains flushes on a tail promise), so overlapping writes to
+ * the same `${sessionId}.jsonl` never interleave. Pruning is NOT done here —
+ * call {@link pruneLearnedErrorSessionFiles} once at dispose instead of paying
+ * readdir+stat-per-file on every turn.
+ */
+export async function persistSessionLearnedErrors(
+	dir: string,
+	meta: SessionFileMeta,
+	entries: LearnedErrorEntry[],
+): Promise<void> {
 	if (entries.length === 0) return;
-	mkdirSync(dir, { recursive: true });
+	await mkdir(dir, { recursive: true });
 	const lines: string[] = [JSON.stringify({ type: "manifest", ...meta })];
 	for (const entry of entries) {
 		lines.push(JSON.stringify({ type: "entry", ...entry }));
 	}
-	writeFileSync(join(dir, `${meta.sessionId}.jsonl`), `${lines.join("\n")}\n`);
-	pruneOldFiles(dir, MAX_SESSION_FILES);
+	await writeFile(join(dir, `${meta.sessionId}.jsonl`), `${lines.join("\n")}\n`);
 }
 
-function pruneOldFiles(dir: string, max: number): void {
-	if (!existsSync(dir)) return;
-	const files = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+/**
+ * Prune the oldest session files beyond `max`. Run once per session lifecycle
+ * (at dispose) — keeps disk usage bounded without paying readdir+stat on the
+ * per-turn flush path. Best-effort: missing dir or unremovable files are skipped.
+ */
+export async function pruneLearnedErrorSessionFiles(dir: string, max: number = MAX_SESSION_FILES): Promise<void> {
+	let files: string[];
+	try {
+		files = (await readdir(dir)).filter((name) => name.endsWith(".jsonl"));
+	} catch {
+		return; // Dir does not exist (nothing was ever persisted) or is unreadable.
+	}
 	if (files.length <= max) return;
-	const withMtime = files
-		.map((name) => {
+	const withMtime = await Promise.all(
+		files.map(async (name) => {
 			try {
-				return { name, mtimeMs: statSync(join(dir, name)).mtimeMs };
+				return { name, mtimeMs: (await stat(join(dir, name))).mtimeMs };
 			} catch {
 				return { name, mtimeMs: 0 };
 			}
-		})
-		.sort((a, b) => a.mtimeMs - b.mtimeMs);
+		}),
+	);
+	withMtime.sort((a, b) => a.mtimeMs - b.mtimeMs);
 	const toDelete = withMtime.slice(0, withMtime.length - max);
 	for (const entry of toDelete) {
 		try {
-			rmSync(join(dir, entry.name));
+			await rm(join(dir, entry.name));
 		} catch {
 			// Best-effort prune; skip files we cannot remove.
 		}

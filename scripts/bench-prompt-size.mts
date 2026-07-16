@@ -25,6 +25,13 @@ import { loadProjectContextFiles } from "../packages/coding-agent/src/core/resou
 import { buildSystemPrompt } from "../packages/coding-agent/src/core/system-prompt.ts";
 import { compactWireToolSurface } from "../packages/coding-agent/src/core/tool-wire-schema.ts";
 import { createAllTools } from "../packages/coding-agent/src/core/tools/index.ts";
+import { resolveBenchRoot } from "./lib/bench-root.mts";
+
+// DX-02: measure from the script-derived, worktree-normalized repo root — not
+// process.cwd() — so METRICs (system prompt embeds this path; the synthetic
+// memory hint embeds `<root>/.pit/memory/MEMORY.md`) are identical in agent
+// worktrees (see scripts/lib/bench-root.mts).
+const benchRoot = resolveBenchRoot();
 
 const APPROX_CHARS_PER_TOKEN = 3.7;
 const toToks = (chars: number) => Math.round(chars / APPROX_CHARS_PER_TOKEN);
@@ -66,7 +73,7 @@ function loadSkills(): Skill[] {
 	return out;
 }
 
-const toolsMap = createAllTools(process.cwd());
+const toolsMap = createAllTools(benchRoot);
 const tools = Object.values(toolsMap);
 const toolSnippets: Record<string, string> = {};
 for (const t of tools) {
@@ -79,10 +86,10 @@ for (const t of tools) {
 	if (Array.isArray(pg)) guidelinesFromTools.push(...pg);
 }
 
-const contextFiles = loadContextFiles(process.cwd());
+const contextFiles = loadContextFiles(benchRoot);
 const skills = loadSkills();
 const systemPrompt = buildSystemPrompt({
-	cwd: process.cwd(),
+	cwd: benchRoot,
 	selectedTools: tools.map((t) => t.name),
 	toolSnippets,
 	promptGuidelines: guidelinesFromTools,
@@ -155,12 +162,12 @@ const MEMORY_BODY_CHARS = 12_000;
 const memoryFiles: MemoryFile[] = [
 	{
 		scope: "project",
-		path: join(process.cwd(), ".pit", "memory", "MEMORY.md"),
+		path: join(benchRoot, ".pit", "memory", "MEMORY.md"),
 		content: `${"convention line\n".repeat(Math.ceil(MEMORY_BODY_CHARS / 16))}# tail prefs`,
 	},
 ];
 const memoryFullChars = formatMemoryForPrompt(memoryFiles).length;
-const memoryHintChars = formatMemoryHintForPrompt(memoryFiles, process.cwd()).length;
+const memoryHintChars = formatMemoryHintForPrompt(memoryFiles, benchRoot).length;
 const memorySavedChars = Math.max(0, memoryFullChars - memoryHintChars);
 const memorySavedPct = memoryFullChars > 0 ? Math.round((memorySavedChars / memoryFullChars) * 100) : 0;
 

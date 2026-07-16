@@ -43,8 +43,8 @@ import {
 	type Component,
 	Container,
 	fuzzyFilter,
-	getCapabilities,
 	getKeybindings,
+	isKittyProtocolActive,
 	Loader,
 	type LoaderIndicatorOptions,
 	Markdown,
@@ -132,8 +132,9 @@ import {
 	type UserInputBus,
 } from "../../core/user-input-bus.ts";
 import { type ClipboardImage, readClipboardImage } from "../../utils/clipboard-image.ts";
-import { isOfflineMode, isReducedMotion } from "../../utils/env-flags.ts";
+import { isOfflineMode } from "../../utils/env-flags.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
+import { prewarmHljs } from "../../utils/syntax-highlight.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { ActivityStacker } from "./activity-stacker.ts";
@@ -144,6 +145,7 @@ import { AssistantMessageComponent, messageHasVisibleContent } from "./component
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
+import { ComposerChrome } from "./components/composer-chrome.ts";
 import {
 	formatContextFilesHeader,
 	formatLoadedSectionHeader,
@@ -182,6 +184,7 @@ import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { reducedMotionLoaderIndicator } from "./components/spinner-ticker.ts";
+import { StartupScreen } from "./components/startup-screen.ts";
 import { createTodoOverlay, type TodoOverlay } from "./components/todo-overlay.ts";
 import { workingPhaseLabel } from "./components/tool-activity.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
@@ -191,12 +194,10 @@ import { TurnDoneMessageComponent } from "./components/turn-done-message.ts";
 import { TurnRule } from "./components/turn-rule.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
-import { WelcomeBox, type WelcomeBoxData } from "./components/welcome-box.ts";
 import { workingPulsePalette } from "./components/working-palette.ts";
 import { formatRuntimeDiagnostics } from "./diagnostics-summary.ts";
 import {
 	buildScopeGroups,
-	buildWorkspaceCwdLabels,
 	formatContextPath,
 	formatDisplayPath,
 	formatExtensionDisplayPath,
@@ -209,6 +210,12 @@ import {
 import { EphemeralStatusController, type EphemeralStatusKind } from "./ephemeral-status.ts";
 import { runGoalDialog } from "./goal-dialog.ts";
 import { dispatchSlashCommand, type SlashCommandHost } from "./interactive-slash-commands.ts";
+import {
+	createPendingFollowUpDraftSnapshot,
+	findLatestPendingFollowUpDrafts,
+	mergePendingFollowUpsIntoDraft,
+	PENDING_FOLLOW_UP_DRAFT_TYPE,
+} from "./pending-follow-up-drafts.ts";
 import { classifyRetryReason } from "./retry-reason.ts";
 import {
 	applySkillsDoctorFix,
@@ -218,7 +225,7 @@ import {
 	planSkillsDoctorFix,
 	tallySkillDiagnostics,
 } from "./skills-doctor.ts";
-import { heroWordmarkMidpoint, lerpRgb, parseTrueColorFg, rgbFg, shimmerColorAt } from "./theme/color-interpolation.ts";
+import { shimmerColorAt } from "./theme/color-interpolation.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -294,6 +301,19 @@ const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
 // genuine wedge gives feedback fast.
 const INTERRUPT_WATCHDOG_MS = 2000;
 
+// Double Ctrl+C exit window, shared by the press comparison and the hint's
+// TTL so they can never drift apart. Reading "Press Ctrl+C again to exit"
+// and reacting takes ~1s — a 500ms window expired before the user could
+// comply, making exit feel broken. 1.5s matches comparable CLIs.
+const CTRL_C_EXIT_WINDOW_MS = 1500;
+
+/** /hotkeys row for double-Esc, per the configured doubleEscapeAction. */
+const DOUBLE_ESC_HOTKEY_LABELS: Record<"fork" | "tree" | "none", string> = {
+	fork: "Edit a previous message (fork)",
+	tree: "Open the session tree",
+	none: "No action (disabled)",
+};
+
 /** Tools that may change the working tree — refresh git diff stats after success. */
 const MUTATING_TOOLS_FOR_DIFF_REFRESH = new Set(["edit", "edit_v2", "write", "bash", "ast_edit", "code"]);
 
@@ -363,6 +383,8 @@ export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
 	private ui: TUI;
 	private chatContainer: VirtualizedContainer;
+	private startupContainer: Container;
+	private chatVisibilityContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
 	private defaultEditor: CustomEditor;
@@ -376,6 +398,7 @@ export class InteractiveMode {
 	private _knownCommandNames = new Set<string>();
 	private fdPath: string | undefined;
 	private editorContainer: Container;
+	private composerChrome: ComposerChrome;
 	private footer: FooterComponent;
 	private footerDataProvider: FooterDataProvider;
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
@@ -384,6 +407,10 @@ export class InteractiveMode {
 	private isInitialized = false;
 	private onInputCallback?: (text: string) => void;
 	private loadingAnimation: Loader | undefined = undefined;
+	// Turn-clock origin (epoch ms), set on the first loader build of a turn and
+	// carried across mid-turn rebuilds (retry backoff, compaction) so the
+	// elapsed counter and the turn-done line report the real turn duration.
+	private workingClockOriginMs: number | undefined = undefined;
 	private fusionLive: FusionLiveComponent | undefined = undefined;
 	// Per-session memo of `detectCli` probes (a blocking spawnSync, 10s timeout):
 	// cache the result per CLI so /fusion runs the probe at most once per CLI per
@@ -408,6 +435,9 @@ export class InteractiveMode {
 	// cached; invalidated on a live theme/keybindings change so a mid-turn edit isn't
 	// stuck stale (normal churn is once per turn, from createWorkingLoader).
 	private cachedLoaderInterruptSuffix: string | null = null;
+	// Variant of the above shown while cancellable tools are in flight (Esc
+	// opens the stop/cancel picker in that state, so the hint changes).
+	private cachedLoaderInterruptToolsSuffix: string | null = null;
 	// Last full trailing-suffix string actually pushed to the loader. Lets
 	// refreshLoaderTrailingSuffix skip the setTrailingSuffix() call (colorizes +
 	// diffs again internally) when the composed suffix is byte-identical to what's
@@ -464,8 +494,11 @@ export class InteractiveMode {
 	private activityStacker!: ActivityStacker;
 	private streamingAttached = false;
 
-	// Tool output expansion state
+	// Tool output expansion state. `scopedExpandTarget` is the single block
+	// opened by the first ctrl+o of the scoped-first cycle (collapsed → last
+	// block → all → collapsed); any global setToolsExpanded() clears it.
 	private toolOutputExpanded = false;
+	private scopedExpandTarget: (Component & Expandable) | null = null;
 
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
@@ -560,18 +593,15 @@ export class InteractiveMode {
 	// Header container that holds the built-in or custom header
 	private headerContainer: Container;
 
-	// Built-in header (keybinding hints + rotating tip). The framed identity
-	// block (logo + context) is the separate, static welcomeBox below.
+	// Built-in header (keybinding hints + rotating tip for rebranded apps).
 	private builtInHeader: Component | undefined = undefined;
 
-	// Framed identity block at startup (logo + cwd/model context). Static — it
-	// never expands, so toggling tool output mid-session can't make it flicker.
-	private welcomeBox: WelcomeBox | undefined = undefined;
+	// Animated startup identity shown for each interactive session activation.
+	private startupScreen: StartupScreen | undefined;
 
-	// Unsubscribe for the one-shot hero-wordmark ignition ease (A3). Non-null only
-	// while the ease is running; cleared on completion and on stop() so a torn-down
-	// session never leaks the animation callback.
-	private heroIgnitionUnsub: (() => void) | null = null;
+	// Shared-ticker subscription for the startup animation; always cleared on dismissal/stop.
+	private startupAnimationUnsub: (() => void) | null = null;
+	private startupSessionManager: SessionManager | undefined;
 
 	// Expansion state for the startup hint block, owned independently of
 	// toolOutputExpanded so a mid-session tool toggle does not resize the header.
@@ -579,7 +609,8 @@ export class InteractiveMode {
 
 	// True until the first prompt is submitted: while the welcome screen is the
 	// focus, the expand key grows the startup help instead of tool output.
-	private welcomeActive = true;
+	private welcomeActive = false;
+	private persistedFollowUpSnapshot: string | undefined;
 
 	/** process.cwd() at launcher start — compared against session cwd in the header/footer. */
 	private readonly launchCwd: string;
@@ -647,6 +678,9 @@ export class InteractiveMode {
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.chatContainer = new VirtualizedContainer();
+		this.startupContainer = new Container();
+		this.chatVisibilityContainer = new Container();
+		this.chatVisibilityContainer.addChild(this.chatContainer);
 		this.activityStacker = new ActivityStacker(this.ui, (component) => this.chatContainer.addChild(component));
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
@@ -663,10 +697,11 @@ export class InteractiveMode {
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
 			paddingX: editorPaddingX,
 			autocompleteMaxVisible,
-			closedBottom: this.settingsManager.getEditorClosedBottom(),
+			embedded: true,
 			onPasteTruncated: (info) => this._onPasteTruncated(info),
 		});
-		this.defaultEditor.setPlaceholder("Describe a task…");
+		this.defaultEditor.setPlaceholder("❯ Describe a task…");
+		this.defaultEditor.borderColor = (text) => theme.fg("accent", text);
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
@@ -674,6 +709,9 @@ export class InteractiveMode {
 		this.footer = new FooterComponent(this.session, this.footerDataProvider, this.launchCwd, this.ui);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footer.setDensity(this.settingsManager.getFooterDensity());
+		this.composerChrome = new ComposerChrome(this.editorContainer, this.footer, this.widgetContainerBelow, (text) =>
+			theme.fg("accent", text),
+		);
 
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -808,28 +846,32 @@ export class InteractiveMode {
 
 		this.registerSignalHandlers();
 
-		// Ensure fd and rg are available (downloads if missing, adds to PATH via getBinDir)
-		// Both are needed: fd for autocomplete, rg for grep tool and bash commands
-		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg")]);
-		this.fdPath = fdPath;
+		// Resolve fd and rg in the background — never block the first paint on a
+		// PATH probe or (worst case) a network download. find/grep call
+		// ensureTool() on demand and degrade gracefully while resolution is
+		// pending; the autocomplete provider falls back to readdir-based
+		// completion until fd lands, then is rebuilt with fuzzy fd search.
+		void Promise.all([ensureTool("fd"), ensureTool("rg")])
+			.then(([fdPath]) => {
+				if (fdPath && this.fdPath !== fdPath) {
+					this.fdPath = fdPath;
+					// Rebuild the provider only after init wired it up; before that,
+					// the initial setupAutocompleteProvider() picks this.fdPath up on
+					// its own.
+					if (this.isInitialized) {
+						this.setupAutocompleteProvider();
+					}
+				}
+			})
+			.catch(() => {});
 
 		// Add header container as first child
 		this.ui.addChild(this.headerContainer);
-
-		// Identity block: hero wordmark on fresh sessions (logo + tagline only —
-		// cwd/branch orientation lives in the footer), framed card with the
-		// workspace line on resume/rebrand. The product's face, so it renders even
-		// under quietStartup; quiet only silences the verbose hint/tip block below.
-		// Static (never expands), so a mid-session tool toggle cannot resize it.
-		// The active model is NOT shown here — the footer owns it.
-		this.welcomeBox = new WelcomeBox(this.buildWelcomeBoxData());
-		this.headerContainer.addChild(new Spacer(1));
-		this.headerContainer.addChild(this.welcomeBox);
-		this.startHeroIgnition();
+		this.headerContainer.addChild(this.startupContainer);
 
 		// Verbose startup hints + rotating tip — suppressed under quietStartup.
 		const isResumed = this.session.state.messages.length > 0;
-		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
+		if (APP_NAME !== "pit" && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
 			// Build startup instructions using keybinding hint helpers
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
 
@@ -895,7 +937,7 @@ export class InteractiveMode {
 		// section brings its own leading blank, so a header-owned gap doubled up
 		// into two dead lines between the banner and the first content.
 
-		this.ui.addChild(this.chatContainer);
+		this.ui.addChild(this.chatVisibilityContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
 		this.ui.addChild(this.statusContainer);
 		// Goal overlay above the todo overlay: goal commands, todos obey.
@@ -905,9 +947,7 @@ export class InteractiveMode {
 		this.ui.addChild(this.todoOverlay);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
-		this.ui.addChild(this.editorContainer);
-		this.ui.addChild(this.widgetContainerBelow);
-		this.ui.addChild(this.footer);
+		this.ui.addChild(this.composerChrome);
 		this.ui.setFocus(this.editor);
 
 		this.setupKeyHandlers();
@@ -927,6 +967,17 @@ export class InteractiveMode {
 		this.ui.start();
 		this.isInitialized = true;
 
+		// Pre-warm highlight.js shortly after the first paint. The lazy load in
+		// syntax-highlight.ts costs ~96ms; paid on demand it lands exactly when the
+		// first code fence of the session closes mid-stream, freezing the spinner,
+		// reveal, and keyboard. The 300ms delay keeps it off the first frame and off
+		// the startup bench (which measures to the usable state). The load itself is
+		// synchronous, so this only moves the cost to an idle tick — prewarmHljs is
+		// idempotent, fails silently, and honors PIT_NO_HLJS_PREWARM=1. Interactive
+		// mode only: print/RPC modes have no TUI to freeze. unref() keeps the timer
+		// from holding the process open if the session exits first.
+		setTimeout(prewarmHljs, 300).unref?.();
+
 		// Initialize extensions first so resources are shown before messages
 		await this.rebindCurrentSession();
 
@@ -944,11 +995,9 @@ export class InteractiveMode {
 
 		// Set up git branch watcher (uses provider instead of footer)
 		this.footerDataProvider.onBranchChange(() => {
-			this.refreshWelcomeBoxData();
 			this.ui.requestRender();
 		});
 		this.footerDataProvider.onWorkingTreeChange(() => {
-			this.refreshWelcomeBoxData();
 			this.ui.requestRender();
 		});
 
@@ -1493,80 +1542,34 @@ export class InteractiveMode {
 		this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: false });
 	}
 
-	private buildWelcomeBoxData(): WelcomeBoxData {
-		const isResumed = this.session.state.messages.length > 0;
-		const cwdLabels = buildWorkspaceCwdLabels(
-			this.sessionManager.getCwd(),
-			this.launchCwd,
-			this.footerDataProvider.getRepoDir(),
-		);
-		return {
-			appName: APP_NAME,
-			version: this.version,
-			tagline: "Coding agent in your terminal",
-			cwdDisplay: cwdLabels.session,
-			shellCwdNote: cwdLabels.shellNote,
-			branch: this.footerDataProvider.getGitBranch() ?? undefined,
-			diffStats: this.footerDataProvider.getGitDiffStats(),
-			resumedSessionName: isResumed ? this.sessionManager.getSessionName() : undefined,
-			cardPaddingX: this.settingsManager.getCardPaddingX(),
-			hero: !isResumed,
-		};
+	private activateStartupScreen(): void {
+		this.stopStartupAnimation();
+		this.welcomeActive = true;
+		this.startupScreen = new StartupScreen();
+		this.startupContainer.clear();
+		this.startupContainer.addChild(new Spacer(1));
+		this.startupContainer.addChild(this.startupScreen);
+		this.chatVisibilityContainer.clear();
+		this.updateEmptyStateHint();
+		this.ui.requestRender();
 	}
 
-	private refreshWelcomeBoxData(): void {
-		this.welcomeBox?.setData(this.buildWelcomeBoxData());
+	private dismissStartupScreen(): void {
+		if (!this.welcomeActive) return;
+		this.welcomeActive = false;
+		this.stopStartupAnimation();
+		this.startupContainer.clear();
+		this.startupScreen = undefined;
+		if (!this.chatVisibilityContainer.children.includes(this.chatContainer)) {
+			this.chatVisibilityContainer.addChild(this.chatContainer);
+		}
+		this.updateEmptyStateHint();
+		this.ui.requestRender();
 	}
 
-	/**
-	 * A3 — one-shot "ignition" for the fresh-session hero wordmark: over ~500ms the
-	 * mark eases (smoothstep) from the theme `dim` color up to a bright mid-tone,
-	 * then hands off to the real teal→lavender gradient. The mid-tone is the
-	 * midpoint of the gradient's accent/thinking stops, so the last eased frame
-	 * sits close to the gradient's average and the handoff does not pop.
-	 *
-	 * While the ease runs, `wordmarkColor` is a time-varying closure, which makes
-	 * WelcomeBox bypass its memo and repaint every frame; on completion we restore
-	 * data WITHOUT `wordmarkColor` (re-enabling memoization) and unsubscribe. Skips
-	 * entirely under reduced motion, no-truecolor, resumed sessions, or a custom app
-	 * name (the hero only renders for "pit").
-	 */
-	private startHeroIgnition(): void {
-		const box = this.welcomeBox;
-		if (!box) return;
-		if (APP_NAME !== "pit") return;
-		if (this.session.state.messages.length > 0) return; // resumed
-		if (isReducedMotion() || !getCapabilities().trueColor) return;
-
-		const dim = parseTrueColorFg(theme.getFgAnsi("dim"));
-		if (!dim) return;
-		// Midpoint of the hero gradient stops (accent ↔ thinkingXhigh), read from
-		// the active theme so the handoff to heroWordmarkGradient stays seamless in
-		// both dark and light. Falls back to `dim` (no ignition brightness) only if
-		// the stops can't resolve to RGB.
-		const bright = heroWordmarkMidpoint(theme) ?? dim;
-		const baseData = this.buildWelcomeBoxData();
-		const paintAt = (t: number) => rgbFg(lerpRgb(dim, bright, t));
-
-		const DURATION_MS = 500;
-		const start = performance.now();
-		// Seed the first frame at the dim end so the wordmark ignites up from dark
-		// rather than flashing the full gradient before the ease begins.
-		box.setData({ ...baseData, wordmarkColor: paintAt(0) });
-
-		this.heroIgnitionUnsub = this.ui.addAnimationCallback((now) => {
-			const raw = Math.min(1, Math.max(0, (now - start) / DURATION_MS));
-			if (raw >= 1) {
-				// Final handoff: drop wordmarkColor → memoized gradient render, unsubscribe.
-				box.setData(baseData);
-				this.heroIgnitionUnsub?.();
-				this.heroIgnitionUnsub = null;
-				return true;
-			}
-			const eased = raw * raw * (3 - 2 * raw); // smoothstep
-			box.setData({ ...baseData, wordmarkColor: paintAt(eased) });
-			return true;
-		});
+	private stopStartupAnimation(): void {
+		this.startupAnimationUnsub?.();
+		this.startupAnimationUnsub = null;
 	}
 
 	private updateEmptyStateHint(): void {
@@ -1627,11 +1630,13 @@ export class InteractiveMode {
 			this.editor.setPaddingX?.(editorPaddingX);
 			this.editor.setAutocompleteMaxVisible?.(autocompleteMaxVisible);
 		}
-		this.refreshWelcomeBoxData();
 		this.updateEmptyStateHint();
 	}
 
 	private async rebindCurrentSession(): Promise<void> {
+		const previousSessionManager = this.startupSessionManager;
+		const sessionChanged = previousSessionManager !== this.sessionManager;
+		this.startupSessionManager = this.sessionManager;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		this.applyRuntimeSettings();
@@ -1639,7 +1644,15 @@ export class InteractiveMode {
 		this.subscribeToAgent();
 		await this.updateAvailableProviderCount();
 		this.updateEditorBorderColor();
+		this.restorePersistedFollowUpDrafts();
 		this.updateTerminalTitle();
+		if (APP_NAME === "pit" && sessionChanged) {
+			const hasInitialPrompt =
+				previousSessionManager === undefined &&
+				(Boolean(this.options.initialMessage?.trim()) ||
+					Boolean(this.options.initialMessages?.some((message) => message.trim())));
+			if (!hasInitialPrompt) this.activateStartupScreen();
+		}
 	}
 
 	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
@@ -1782,6 +1795,19 @@ export class InteractiveMode {
 	/** Lazily computed, memoized `·<key> to interrupt` suffix fragment. See
 	 * `cachedLoaderInterruptSuffix` for why this is worth memoizing. */
 	private getLoaderInterruptSuffix(): string {
+		// With cancellable tools in flight, Esc opens the stop/cancel picker
+		// instead of interrupting on the spot — the hint must tell that story,
+		// and credit Ctrl+C as the always-immediate path. Same Esc key doing
+		// two different things with one static hint read as "esc is broken".
+		if (this.getInterruptiblePendingTools().length > 0) {
+			if (this.cachedLoaderInterruptToolsSuffix === null) {
+				this.cachedLoaderInterruptToolsSuffix = theme.fg(
+					"dim",
+					`${InteractiveMode.LOADER_META_SEP}${keyText("app.interrupt")} stop/cancel · ctrl+c interrupt`,
+				);
+			}
+			return this.cachedLoaderInterruptToolsSuffix;
+		}
 		if (this.cachedLoaderInterruptSuffix === null) {
 			this.cachedLoaderInterruptSuffix = theme.fg(
 				"dim",
@@ -1795,6 +1821,7 @@ export class InteractiveMode {
 	 * called on a live theme or keybindings change. */
 	private invalidateLoaderInterruptSuffix(): void {
 		this.cachedLoaderInterruptSuffix = null;
+		this.cachedLoaderInterruptToolsSuffix = null;
 	}
 
 	private refreshLoaderTrailingSuffix(): void {
@@ -1826,10 +1853,17 @@ export class InteractiveMode {
 		// A1: paint the phase label with the shared heartbeat shimmer. shimmerColorAt
 		// self-fallbacks to a flat muted painter under no-truecolor / reduced motion.
 		loader.setMessageColorAt((text, now) => shimmerColorAt(now)(text));
-		// Show a per-turn elapsed counter. A fresh loader is built at each
-		// agent_start (turn start) and lives until agent_end, so the clock
-		// measures the whole turn rather than any single agent step.
+		// Show a per-turn elapsed counter. The ORIGIN survives mid-turn loader
+		// rebuilds (auto-retry backoff, compaction destroy the loader via
+		// clearStatusContainer): without it, a user who watched a 2-minute
+		// backoff saw the clock restart at "3s" and turn-done reported the
+		// truncated duration. The origin is set once per turn (first loader
+		// build) and cleared in stopWorkingLoader when the turn settles.
 		loader.setElapsedEnabled(true);
+		if (this.workingClockOriginMs === undefined) {
+			this.workingClockOriginMs = Date.now();
+		}
+		loader.setElapsedOrigin(this.workingClockOriginMs);
 		this.resetStreamRateCounters();
 		const interruptSuffix = this.getLoaderInterruptSuffix();
 		loader.setTrailingSuffix(interruptSuffix);
@@ -1852,6 +1886,8 @@ export class InteractiveMode {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
+		// Turn settled (or was interrupted): the next loader starts a new clock.
+		this.workingClockOriginMs = undefined;
 		this.resetStreamRateCounters();
 		this.clearStatusContainer();
 	}
@@ -2148,21 +2184,14 @@ export class InteractiveMode {
 			this.customFooter.dispose();
 		}
 
-		// Remove current footer from UI
-		if (this.customFooter) {
-			this.ui.removeChild(this.customFooter);
-		} else {
-			this.ui.removeChild(this.footer);
-		}
-
 		if (factory) {
-			// Create and add custom footer, passing the data provider
+			// Create the custom footer inside the shared composer frame.
 			this.customFooter = factory(this.ui, theme, this.footerDataProvider);
-			this.ui.addChild(this.customFooter);
+			this.composerChrome.setFooter(this.customFooter);
 		} else {
 			// Restore built-in footer
 			this.customFooter = undefined;
-			this.ui.addChild(this.footer);
+			this.composerChrome.setFooter(this.footer);
 		}
 
 		this.ui.requestRender();
@@ -2666,11 +2695,11 @@ export class InteractiveMode {
 	 * empty answer falls back to stopping the whole task, so Esc never gets stuck.
 	 */
 	private async promptInterruptChoice(tools: Array<{ id: string; name: string }>): Promise<void> {
-		const STOP_ALL = "Parar a tarefa inteira";
+		const STOP_ALL = "Stop the whole task";
 		const labelToId = new Map<string, string>();
 		const options: Array<{ label: string; recommended?: boolean }> = [{ label: STOP_ALL, recommended: true }];
 		tools.forEach((t, i) => {
-			const label = tools.length > 1 ? `Cancelar só: ${t.name} (#${i + 1})` : `Cancelar só: ${t.name}`;
+			const label = tools.length > 1 ? `Cancel only: ${t.name} (#${i + 1})` : `Cancel only: ${t.name}`;
 			labelToId.set(label, t.id);
 			options.push({ label });
 		});
@@ -2678,8 +2707,8 @@ export class InteractiveMode {
 		let picked: string | undefined;
 		try {
 			const answer = await this.userInputBus.askOptions({
-				question: "Interromper o quê?",
-				header: "Interromper",
+				question: "Interrupt what?",
+				header: "Interrupt",
 				options,
 				source: { toolName: "interrupt" },
 			});
@@ -2784,6 +2813,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.editor.external", () => this.openExternalEditor());
 		this.defaultEditor.onAction("app.message.followUp", () => this.handleFollowUp());
+		this.defaultEditor.onAction("app.message.steer", () => this.handleSteer());
 		this.defaultEditor.onAction("app.message.dequeue", () => this.handleDequeue());
 		this.defaultEditor.onAction("app.session.new", () => this.handleClearCommand());
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
@@ -2827,8 +2857,11 @@ export class InteractiveMode {
 			description: (text: string) => theme.fg("text", text),
 			hint: (text: string) => theme.fg("dim", text),
 		};
+		// Viewport getter mirrors the overlay's maxHeight (80%) so the component
+		// can scroll its body instead of letting the TUI slice off the bottom.
+		const viewportRows = () => Math.max(8, Math.floor(this.ui.terminal.rows * 0.8));
 		void this.showExtensionCustom<void>(
-			(_tui, _theme, _kb, done) => new Cheatsheet(cheatsheetTheme, () => done(undefined)),
+			(_tui, _theme, _kb, done) => new Cheatsheet(cheatsheetTheme, () => done(undefined), viewportRows),
 			{
 				overlay: true,
 				overlayOptions: { width: "60%", maxHeight: "80%", anchor: "center" },
@@ -2874,15 +2907,11 @@ export class InteractiveMode {
 			// Any real submission dismisses ephemeral status/hints.
 			this.clearEphemeralStatus();
 			this.clearCtrlCHint();
-			// The welcome screen is no longer the focus: from now on the expand key
-			// toggles tool output, not the startup help.
-			this.welcomeActive = false;
-			this.updateEmptyStateHint();
-
 			// Inline `/chrome` modifier: works anywhere in the message (text before
 			// and/or after it). Ensures Chrome is up, then runs the rest as a prompt.
 			const chrome = extractChromeCommand(text);
 			if (chrome.matched) {
+				if (chrome.rest) this.dismissStartupScreen();
 				await this._handleChromeCommand(chrome.rest);
 				return;
 			}
@@ -2914,23 +2943,26 @@ export class InteractiveMode {
 				}
 			}
 
+			const extensionCommand = this.isExtensionCommand(text);
+			if (!extensionCommand) this.dismissStartupScreen();
+
 			// Queue input during compaction (extension commands execute immediately)
 			if (this.session.isCompacting) {
-				if (this.isExtensionCommand(text)) {
+				if (extensionCommand) {
 					this.editor.addToHistory?.(text);
 					this.editor.setText("");
 					await this.session.prompt(text);
 				} else {
-					this.queueCompactionMessage(text, "steer");
+					this.queueCompactionMessage(text, "followUp");
 				}
 				return;
 			}
 
-			// If streaming, use prompt() with steer behavior
+			// Ordinary Enter during active work queues a later follow-up turn.
 			if (this.session.isStreaming) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
-				await this.session.prompt(text, { streamingBehavior: "steer" });
+				await this.session.prompt(text, { streamingBehavior: "followUp" });
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -2999,6 +3031,7 @@ export class InteractiveMode {
 			handleFusionCommand: () => this.handleFusionCommand(),
 			handleNameCommand: (line) => this.handleNameCommand(line),
 			handleCompactCommand: (instructions) => this.handleCompactCommand(instructions),
+			handleSteerCommand: (text) => this.handleSteer(text),
 			handleTTSRCommand: (args) => this.handleTTSRCommand(args),
 			handleHindsightCommand: (args) => this.handleHindsightCommand(args),
 			handleGoalCommand: (args) => this.handleGoalCommand(args),
@@ -3274,6 +3307,7 @@ export class InteractiveMode {
 
 			case "queue_update":
 				this.updatePendingMessagesDisplay();
+				this.persistPendingFollowUps();
 				this.ui.requestRender();
 				break;
 
@@ -3473,6 +3507,9 @@ export class InteractiveMode {
 				const component = this._ensureToolComponent(event.toolName, event.toolCallId, event.args);
 				component.markExecutionStarted();
 				this.setWorkingPhase(workingPhaseLabel(event.toolName, event.args as Record<string, unknown>, true));
+				// Esc changes meaning while tools are cancellable — swap the loader
+				// hint at the boundary, not on the next stream tick.
+				this.refreshLoaderTrailingSuffix();
 				this.ui.requestRender();
 				break;
 			}
@@ -3499,6 +3536,9 @@ export class InteractiveMode {
 					if (!event.isError && MUTATING_TOOLS_FOR_DIFF_REFRESH.has(event.toolName)) {
 						this.footerDataProvider.scheduleWorkingTreeRefresh();
 					}
+					// Mirror of tool_execution_start: with no cancellable tools left,
+					// the hint goes back to the plain "esc to interrupt".
+					this.refreshLoaderTrailingSuffix();
 					this.ui.requestRender();
 				}
 				break;
@@ -3519,6 +3559,10 @@ export class InteractiveMode {
 					// Defer the done line until prompt_end so verification / pending
 					// checks don't flash "done" under a still-running spinner.
 					this.deferredTurnDone = buildTurnDoneSnapshot(event.messages, this.getWorkingLoaderElapsedMs());
+					// The checks phase deliberately restarts the visible clock — move
+					// the turn origin too, so a loader rebuilt during the checks
+					// continues the checks clock, not the whole-turn one.
+					this.workingClockOriginMs = Date.now();
 					this.loadingAnimation?.resetElapsed();
 					this.setWorkingPhase("Final answer ready · finishing checks…");
 				}
@@ -3588,8 +3632,10 @@ export class InteractiveMode {
 					this.clearStatusContainer();
 				}
 				if (event.aborted) {
+					// User-initiated cancel is a routine action, not a failure — muted
+					// status with normal TTL for both flavors (error red is sticky).
 					if (event.reason === "manual") {
-						this.showError("Compaction cancelled");
+						this.showStatus("Compaction cancelled");
 					} else {
 						this.showStatus("Auto-compaction cancelled");
 					}
@@ -3714,7 +3760,7 @@ export class InteractiveMode {
 				this.setTerminalProgress(event.phase === "waiting");
 				if (event.phase === "waiting") {
 					const elapsed = event.elapsedMs !== undefined ? ` (${formatElapsed(event.elapsedMs)})` : "";
-					this.showStatus(`Aguardando ${event.command}…${elapsed}`);
+					this.showStatus(`Waiting for ${event.command}…${elapsed}`);
 					if (this.workingVisible && !this.loadingAnimation) {
 						this.clearStatusContainer();
 						this.loadingAnimation = this.createWorkingLoader();
@@ -3800,7 +3846,14 @@ export class InteractiveMode {
 			case "auto_retry_end": {
 				this._cleanupRetryUI();
 				if (!event.success) {
-					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
+					if (event.cancelled) {
+						// The user asked for this — muted status with normal TTL, not
+						// sticky error red (mirrors "Compaction cancelled").
+						this.showStatus("Retry cancelled");
+					} else {
+						const noun = event.attempt === 1 ? "attempt" : "attempts";
+						this.showError(`Retry failed after ${event.attempt} ${noun}: ${event.finalError || "Unknown error"}`);
+					}
 				}
 				this.ui.requestRender();
 				break;
@@ -3974,7 +4027,13 @@ export class InteractiveMode {
 		if (this.settingsManager.getQuietStartup()) return;
 		if (this.settingsManager.getPowerTipShown()) return;
 		this.settingsManager.setPowerTipShown(true);
-		const cheatsheet = keyText("tui.help.cheatsheet");
+		// Without the Kitty protocol, ctrl+/ arrives as the same byte as ctrl+-
+		// and triggers Undo instead of the cheatsheet — only advertise keys that
+		// actually work in this terminal.
+		const cheatsheetKeys = getKeybindings()
+			.getKeys("tui.help.cheatsheet")
+			.filter((k) => isKittyProtocolActive() || k !== "ctrl+/");
+		const cheatsheet = cheatsheetKeys.length > 0 ? formatKeyText(cheatsheetKeys.join("/")) : "f1";
 		const interrupt = keyText("app.interrupt");
 		this.showStatus(`tip: ${cheatsheet} shortcuts · /model · ${interrupt} interrupts`);
 	}
@@ -4087,11 +4146,16 @@ export class InteractiveMode {
 							const userComponent = new UserMessageComponent(
 								skillBlock.userMessage,
 								this.getMarkdownThemeWithSettings(),
+								this.settingsManager.getAssistantReadingColumns(),
 							);
 							this.chatContainer.addChild(userComponent);
 						}
 					} else {
-						const userComponent = new UserMessageComponent(textContent, this.getMarkdownThemeWithSettings());
+						const userComponent = new UserMessageComponent(
+							textContent,
+							this.getMarkdownThemeWithSettings(),
+							this.settingsManager.getAssistantReadingColumns(),
+						);
 						this.chatContainer.addChild(userComponent);
 					}
 					if (options?.populateHistory) {
@@ -4284,7 +4348,7 @@ export class InteractiveMode {
 
 	private handleCtrlC(): void {
 		const now = Date.now();
-		if (now - this.lastSigintTime < 500) {
+		if (now - this.lastSigintTime < CTRL_C_EXIT_WINDOW_MS) {
 			this.clearCtrlCHint();
 			void this.shutdown();
 			return;
@@ -4295,7 +4359,7 @@ export class InteractiveMode {
 		// is delivered immediately by the stdin buffer — unlike the ambiguous Esc,
 		// which waits on a disambiguation timer that can lag while the model is
 		// thinking/streaming — so it is the reliable stop path mid-turn. A second
-		// Ctrl+C within 500ms still exits.
+		// Ctrl+C within the exit window still exits.
 		if (this.session.isBusy) {
 			this.restoreQueuedMessagesToEditor();
 			this.session.interrupt();
@@ -4311,13 +4375,13 @@ export class InteractiveMode {
 		this.showCtrlCHint();
 	}
 
-	/** Ephemeral hint shown on the first Ctrl+C; auto-clears when the 500ms window expires. */
+	/** Ephemeral hint shown on the first Ctrl+C; auto-clears when the exit window expires. */
 	private showCtrlCHint(): void {
 		this.clearCtrlCHint();
 		const hint = new Text(theme.fg("dim", "Press Ctrl+C again to exit"), 1, 0);
 		this.ctrlCHint = hint;
 		this.statusContainer.addChild(hint);
-		this.ctrlCHintTimer = setTimeout(() => this.clearCtrlCHint(), 500);
+		this.ctrlCHintTimer = setTimeout(() => this.clearCtrlCHint(), CTRL_C_EXIT_WINDOW_MS);
 		this.ui.requestRender();
 	}
 
@@ -4418,13 +4482,19 @@ export class InteractiveMode {
 		this.isShuttingDown = true;
 		try {
 			this.unregisterSignalHandlers();
-		} catch {}
+		} catch {
+			// Best-effort during crash teardown; nothing left to report to.
+		}
 		try {
 			killTrackedDetachedChildren();
-		} catch {}
+		} catch {
+			// Best-effort during crash teardown; nothing left to report to.
+		}
 		try {
 			this.ui.stop();
-		} catch {}
+		} catch {
+			// Best-effort during crash teardown; the terminal may already be gone.
+		}
 		console.error("pi exiting due to uncaughtException:");
 		console.error(error);
 		process.exit(1);
@@ -4541,10 +4611,15 @@ export class InteractiveMode {
 	private async handleFollowUp(): Promise<void> {
 		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
 		if (!text) return;
+		const extensionCommand = this.isExtensionCommand(text);
+		const commandLike = text.startsWith("/") || text.startsWith("!");
+		if ((this.session.isCompacting || this.session.isStreaming) && !extensionCommand && !commandLike) {
+			this.dismissStartupScreen();
+		}
 
 		// Queue input during compaction (extension commands execute immediately)
 		if (this.session.isCompacting) {
-			if (this.isExtensionCommand(text)) {
+			if (extensionCommand) {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
 				await this.session.prompt(text);
@@ -4570,6 +4645,31 @@ export class InteractiveMode {
 		}
 	}
 
+	private async handleSteer(input?: string): Promise<void> {
+		const text = (input ?? this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
+		if (!text) {
+			this.showWarning("Usage: /steer <message>");
+			return;
+		}
+
+		if (this.session.isCompacting) {
+			this.queueCompactionMessage(text, "steer");
+			return;
+		}
+
+		if (!this.session.isStreaming) {
+			this.editor.setText(text);
+			this.showWarning("There is no active turn to steer");
+			return;
+		}
+
+		this.editor.addToHistory?.(`/steer ${text}`);
+		this.editor.setText("");
+		await this.session.prompt(text, { streamingBehavior: "steer" });
+		this.updatePendingMessagesDisplay();
+		this.ui.requestRender();
+	}
+
 	private handleDequeue(): void {
 		const restored = this.restoreQueuedMessagesToEditor();
 		if (restored === 0) {
@@ -4580,19 +4680,20 @@ export class InteractiveMode {
 	}
 
 	private updateEditorBorderColor(): void {
+		let borderColor: (text: string) => string;
 		if (this.isBashMode) {
 			// Bash mode keeps its colored rule — that's a MODE signal (you're about
 			// to run a shell command), not decoration.
-			this.editor.borderColor = theme.getBashModeBorderColor();
+			borderColor = theme.getBashModeBorderColor();
 		} else if (this.isPlanPermissionMode) {
 			// Plan permission mode: read-only scaffold — same "MODE signal" rationale
 			// as bash, distinct color so it is not confused with model role "plan".
-			this.editor.borderColor = theme.getPlanModeBorderColor();
+			borderColor = theme.getPlanModeBorderColor();
 		} else {
-			// Idle focus: match getEditorTheme().borderColor (`border`) so the primary
-			// control stays visible. Thinking level stays on the footer ✦ chip only.
-			this.editor.borderColor = (str: string) => theme.fg("border", str);
+			borderColor = (text: string) => theme.fg("accent", text);
 		}
+		this.editor.borderColor = borderColor;
+		this.composerChrome.setBorderColor(borderColor);
 		this.ui.requestRender();
 	}
 
@@ -4730,9 +4831,40 @@ export class InteractiveMode {
 		// tool output and leaves the static welcome header alone — no flicker.
 		if (this.welcomeActive) {
 			this.setStartupHeaderExpanded(!this.startupHeaderExpanded);
-		} else {
-			this.setToolsExpanded(!this.toolOutputExpanded);
+			return;
 		}
+		// Scoped-first expansion cycle: the everyday need is "show me the output
+		// of the thing that just ran", and expanding the entire scrollback for
+		// that loses the reading position in a wall of text. So the key cycles
+		// collapsed → last block only → everything → collapsed.
+		if (!this.toolOutputExpanded && this.scopedExpandTarget === null) {
+			const target = this.findLastExpandableChatChild();
+			if (target) {
+				this.scopedExpandTarget = target;
+				target.setExpanded(true);
+				this.chatContainer.markChildStale(target);
+				this.showStatus("Expanded last tool output · ctrl+o again for all");
+				this.ui.requestRender();
+				return;
+			}
+			this.setToolsExpanded(true);
+			return;
+		}
+		if (!this.toolOutputExpanded) {
+			this.setToolsExpanded(true);
+			return;
+		}
+		this.setToolsExpanded(false);
+	}
+
+	/** Most recent expandable block in the transcript (bottom-up scan). */
+	private findLastExpandableChatChild(): (Component & Expandable) | null {
+		const children = this.chatContainer.children;
+		for (let i = children.length - 1; i >= 0; i--) {
+			const child = children[i];
+			if (isExpandable(child)) return child;
+		}
+		return null;
 	}
 
 	private setStartupHeaderExpanded(expanded: boolean): void {
@@ -4745,6 +4877,8 @@ export class InteractiveMode {
 
 	private setToolsExpanded(expanded: boolean): void {
 		this.toolOutputExpanded = expanded;
+		// Global expansion state supersedes the scoped single-block step.
+		this.scopedExpandTarget = null;
 		// Only a custom extension header follows tool expansion; the built-in
 		// startup header owns its own state so it never flickers on a tool toggle.
 		if (this.customHeader && isExpandable(this.customHeader)) {
@@ -4982,6 +5116,7 @@ export class InteractiveMode {
 		const followUpCompaction: string[] = [];
 		for (const m of this.compactionQueuedMessages) (m.mode === "steer" ? steer : followUpCompaction).push(m.text);
 		this.compactionQueuedMessages = [];
+		this.persistPendingFollowUps();
 		return {
 			steering: [...steering, ...steer],
 			followUp: [...followUp, ...followUpCompaction],
@@ -5031,7 +5166,46 @@ export class InteractiveMode {
 		this.editor.addToHistory?.(text);
 		this.editor.setText("");
 		this.updatePendingMessagesDisplay();
+		this.persistPendingFollowUps();
 		this.showStatus("Queued message for after compaction");
+	}
+
+	private persistPendingFollowUps(): void {
+		const messages = this.getAllQueuedMessages().followUp;
+		const serialized = JSON.stringify(messages);
+		if (serialized === this.persistedFollowUpSnapshot) return;
+
+		try {
+			this.sessionManager.appendCustomEntry(
+				PENDING_FOLLOW_UP_DRAFT_TYPE,
+				createPendingFollowUpDraftSnapshot(messages),
+			);
+			this.persistedFollowUpSnapshot = serialized;
+			void this.sessionManager.flushWrites().catch((error) => {
+				this.showWarning(`Could not persist queued messages: ${errMsg(error)}`);
+			});
+		} catch (error) {
+			this.showWarning(`Could not persist queued messages: ${errMsg(error)}`);
+		}
+	}
+
+	private restorePersistedFollowUpDrafts(): void {
+		this.persistedFollowUpSnapshot = undefined;
+		const messages = findLatestPendingFollowUpDrafts(this.sessionManager.getBranch());
+		this.persistedFollowUpSnapshot = JSON.stringify(messages);
+		if (messages.length === 0) return;
+
+		this.editor.setText(mergePendingFollowUpsIntoDraft(messages, this.editor.getText()));
+		try {
+			this.sessionManager.appendCustomEntry(PENDING_FOLLOW_UP_DRAFT_TYPE, createPendingFollowUpDraftSnapshot([]));
+			this.persistedFollowUpSnapshot = "[]";
+			void this.sessionManager.flushWrites().catch((error) => {
+				this.showWarning(`Could not mark restored messages as consumed: ${errMsg(error)}`);
+			});
+			this.showStatus(`Restored ${messages.length} queued message${messages.length === 1 ? "" : "s"} as a draft`);
+		} catch (error) {
+			this.showWarning(`Could not mark restored messages as consumed: ${errMsg(error)}`);
+		}
 	}
 
 	private isExtensionCommand(text: string): boolean {
@@ -5052,11 +5226,13 @@ export class InteractiveMode {
 		const queuedMessages = [...this.compactionQueuedMessages];
 		this.compactionQueuedMessages = [];
 		this.updatePendingMessagesDisplay();
+		this.persistPendingFollowUps();
 
 		const restoreQueue = (error: unknown) => {
 			this.session.clearQueue();
 			this.compactionQueuedMessages = queuedMessages;
 			this.updatePendingMessagesDisplay();
+			this.persistPendingFollowUps();
 			this.showError(`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${errMsg(error)}`);
 		};
 
@@ -5170,6 +5346,10 @@ export class InteractiveMode {
 			this.userInputBus.resolve(req.requestId, answer);
 			close?.();
 		};
+		const resolveFromUser = (answer: Omit<AskOptionsAnswer, "requestId">) => {
+			if (!answer.cancelled && answer.picked.length > 0) this.dismissStartupScreen();
+			resolveOnce(answer);
+		};
 
 		const displayMode = req.displayMode ?? "inline";
 		if (displayMode === "overlay") {
@@ -5181,7 +5361,7 @@ export class InteractiveMode {
 			void this.showExtensionCustom<void>(
 				(_tui, _theme, _kb, done) => {
 					close = () => done(undefined);
-					const { component } = createAskPicker(req, resolveOnce, hooks);
+					const { component } = createAskPicker(req, resolveFromUser, hooks);
 					return component;
 				},
 				{
@@ -5195,7 +5375,7 @@ export class InteractiveMode {
 		} else {
 			this.showSelector((done) => {
 				close = done;
-				const { component, focus } = createAskPicker(req, resolveOnce, {
+				const { component, focus } = createAskPicker(req, resolveFromUser, {
 					onRequestRender: () => this.ui.requestRender(),
 				});
 				return { component, focus };
@@ -5855,6 +6035,14 @@ export class InteractiveMode {
 		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
 	): Promise<{ cancelled: boolean }> {
 		this.stopWorkingLoader();
+		// Paint a loading status before the (possibly multi-second) switch — a
+		// large JSONL rebuilds the whole transcript and the screen would
+		// otherwise sit frozen with the selector just closed. Same
+		// paint-before-work idiom as /reload: forced render + nextTick so the
+		// frame actually hits the terminal before the synchronous work starts.
+		this.showStatus("Loading session…");
+		this.ui.requestRender(true);
+		await new Promise((resolve) => process.nextTick(resolve));
 		try {
 			const result = await this.runtimeHost.switchSession(sessionPath, {
 				withSession: options?.withSession,
@@ -6916,6 +7104,8 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 		const yank = this.getEditorKeyDisplay("tui.editor.yank");
 		const yankPop = this.getEditorKeyDisplay("tui.editor.yankPop");
 		const undo = this.getEditorKeyDisplay("tui.editor.undo");
+		const historySearch = this.getEditorKeyDisplay("tui.editor.historySearch");
+		const cheatsheet = this.getEditorKeyDisplay("tui.help.cheatsheet");
 		const tab = this.getEditorKeyDisplay("tui.input.tab");
 
 		// App keybindings
@@ -6946,6 +7136,7 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 | \`${jumpForward}\` | Jump forward to character |
 | \`${jumpBackward}\` | Jump backward to character |
 | \`${pageUp}\` / \`${pageDown}\` | Scroll by page |
+| \`${historySearch}\` | Search prompt history |
 
 **Editing**
 | Key | Action |
@@ -6972,12 +7163,14 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 | \`${cycleModelForward}\` / \`${cycleModelBackward}\` | Cycle models |
 | \`${selectModel}\` | Open model selector |
 | \`${cyclePermission}\` | Cycle mode (plan → auto → fusion) |
-| \`${expandTools}\` | Toggle tool output expansion |
+| \`${expandTools}\` | Expand last tool output, then all (cycles) |
 | \`${toggleThinking}\` | Toggle thinking block visibility |
 | \`${externalEditor}\` | Edit message in external editor |
 | \`${followUp}\` | Queue follow-up message |
 | \`${dequeue}\` | Restore queued messages |
 | \`${pasteImage}\` | Paste image from clipboard |
+| \`${cheatsheet}\` | Keybinding cheatsheet (all shortcuts, grouped by scope) |
+| \`Esc Esc\` | ${DOUBLE_ESC_HOTKEY_LABELS[this.settingsManager.getDoubleEscapeAction()]} |
 | \`/\` | Slash commands |
 | \`!\` | Run bash command |
 | \`!!\` | Run bash command (excluded from context) |
@@ -7195,9 +7388,7 @@ Type \`/hotkeys\` for keyboard shortcuts.`;
 			this._themePreviewInvalidateTimer = undefined;
 		}
 		this.ephemeralStatus.dispose();
-		// Drop the hero-ignition ticker if the ease is still mid-flight at teardown.
-		this.heroIgnitionUnsub?.();
-		this.heroIgnitionUnsub = null;
+		this.stopStartupAnimation();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;

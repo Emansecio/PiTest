@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.js";
 import { complete } from "../src/stream.js";
 import type { Api, Context, Model, StreamOptions } from "../src/types.js";
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
@@ -32,9 +33,13 @@ describe("responseId E2E Tests", () => {
 	});
 
 	describe("OpenAI Codex Provider", () => {
-		it.skipIf(!openaiCodexToken)("should expose responseId", { retry: 3, timeout: 30000 }, async () => {
-			const llm = getModel("openai-codex", "gpt-5.5");
-			await expectResponseId(llm, { apiKey: openaiCodexToken });
-		});
+		it.skipIf(!openaiCodexToken)(
+			"should expose responseId",
+			{ retry: 3, timeout: 30000 },
+			live("openai-codex", async () => {
+				const llm = getModel("openai-codex", "gpt-5.5");
+				await expectResponseId(llm, { apiKey: openaiCodexToken });
+			}),
+		);
 	});
 });

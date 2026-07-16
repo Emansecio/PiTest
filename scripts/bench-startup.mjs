@@ -10,16 +10,18 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
-import { platform } from "node:os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "..");
 const N = Number(process.argv.find((a) => a.startsWith("--n="))?.slice(4) ?? 3);
 const FULL = process.argv.includes("--full");
 
-const tsxBin = join(REPO_ROOT, "node_modules", ".bin", platform() === "win32" ? "tsx.cmd" : "tsx");
+// Invoke node + the tsx loader directly (same pipeline as bin/pit post-launcher
+// rework) instead of the tsx.cmd shim, which needed shell:true on Windows and
+// added 50-100ms of cmd.exe noise per run to the measurement.
+const tsxLoaderUrl = pathToFileURL(join(REPO_ROOT, "node_modules", "tsx", "dist", "loader.mjs")).href;
 const cli = join(REPO_ROOT, "packages", "coding-agent", "src", "cli.ts");
 
 const re = /Loaded extension .+? in (\d+)ms/g;
@@ -29,11 +31,13 @@ const wallTimes = [];
 const counts = [];
 for (let i = 0; i < N; i++) {
 	const t0 = performance.now();
-	const r = spawnSync(tsxBin, [cli, "--help"], {
+	const r = spawnSync(process.execPath, ["--import", tsxLoaderUrl, cli, "--help"], {
 		cwd: REPO_ROOT,
-		env: { ...process.env, PIT_TIMING: "1" },
+		// PIT_NO_HELP_CACHE: the --help fast path skips extension loading entirely,
+		// which would zero the extension-load metric this bench exists to measure.
+		env: { ...process.env, PIT_TIMING: "1", PIT_NO_HELP_CACHE: "1" },
 		encoding: "utf8",
-		shell: platform() === "win32",
+		shell: false,
 	});
 	const wall = performance.now() - t0;
 	if (r.status !== 0) {

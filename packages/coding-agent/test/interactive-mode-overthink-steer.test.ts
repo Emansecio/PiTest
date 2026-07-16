@@ -99,6 +99,8 @@ describe("InteractiveMode overthink steer rendering", () => {
 			getMarkdownThemeWithSettings: vi.fn(() => ({})),
 			editor: { addToHistory: vi.fn() },
 			getUserMessageText,
+			// UserMessageComponent caps its prose to the shared reading column.
+			settingsManager: { getAssistantReadingColumns: vi.fn(() => 0) },
 		};
 
 		const addMessageToChat = Reflect.get(InteractiveMode.prototype, "addMessageToChat") as (

@@ -117,9 +117,12 @@ function formatErrorDetails(error: unknown): string {
 		if (typeof error.cause !== "undefined") {
 			details.push(`cause=${formatErrorDetails(error.cause)}`);
 		}
-		if (error.stack) {
-			details.push(`stack=${error.stack}`);
-		}
+		// Deliberately NOT appending `error.stack`: this string is embedded into the
+		// user-facing error message, and the stack (a) dumps a raw multi-line
+		// traceback into the TUI and (b) contains source line numbers like
+		// "anthropic.ts:429" that the retry classifier misreads as an HTTP 429 rate
+		// limit, triggering pointless retries for a permanent invalid_grant. The
+		// underlying Error object still carries `.stack` for debug logging.
 		return details.join("; ");
 	}
 	return String(error);

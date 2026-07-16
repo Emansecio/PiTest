@@ -245,6 +245,48 @@ describe("TUI resize handling", () => {
 
 		tui.stop();
 	});
+
+	it("clears scrollback on width change by default", async () => {
+		const terminal = new LoggingVirtualTerminal(40, 10);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["Line 0", "Line 1", "Line 2"];
+		tui.start();
+		await terminal.waitForRender();
+		terminal.clearWrites();
+
+		terminal.resize(60, 10);
+		await terminal.waitForRender();
+
+		assert.ok(terminal.getWrites().includes("\x1b[3J"), "Width change should clear scrollback by default");
+
+		tui.stop();
+	});
+
+	it("PIT_NO_SCROLLBACK_WIPE=1 keeps scrollback on width change", async () => {
+		await withEnv({ PIT_NO_SCROLLBACK_WIPE: "1" }, async () => {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui = new TUI(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+
+			component.lines = ["Line 0", "Line 1", "Line 2"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			terminal.resize(60, 10);
+			await terminal.waitForRender();
+
+			const writes = terminal.getWrites();
+			assert.ok(!writes.includes("\x1b[3J"), "PIT_NO_SCROLLBACK_WIPE=1 must omit the scrollback clear");
+			assert.ok(writes.includes("\x1b[2J\x1b[H"), "PIT_NO_SCROLLBACK_WIPE=1 must still clear the visible screen");
+
+			tui.stop();
+		});
+	});
 });
 
 describe("TUI content shrinkage", () => {

@@ -228,13 +228,14 @@ describe("Markdown component", () => {
 			const lines = markdown.render(24).map((line) => stripAnsi(line).trimEnd());
 
 			// List prefix is "- " (2 cols); code frame spans the remaining item width (22).
-			const rule = "─".repeat(20);
+			// The frame is open on the right: rules fold into the left gutter only.
+			const rule = "─".repeat(21);
 			assert.deepStrictEqual(lines, [
-				`- ╭${rule}╮`,
+				`- ╭${rule}`,
 				"  │ ts",
 				"  │ alpha beta gamma",
 				"  delta epsilon zeta",
-				`  ╰${rule}╯`,
+				`  ╰${rule}`,
 			]);
 		});
 	});
@@ -276,7 +277,7 @@ describe("Markdown component", () => {
 			assert.ok(plainLines.some((line) => line.includes("─")));
 		});
 
-		it("should render row dividers between data rows", () => {
+		it("should render only the header divider when no row wraps", () => {
 			const markdown = new Markdown(
 				`| Name | Age |
 | --- | --- |
@@ -291,7 +292,26 @@ describe("Markdown component", () => {
 			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
 			const dividerLines = plainLines.filter((line) => line.includes("┼"));
 
-			assert.strictEqual(dividerLines.length, 2, "Expected header + row divider");
+			assert.strictEqual(dividerLines.length, 1, "Expected header divider only");
+		});
+
+		it("should render dividers around rows that wrap onto multiple lines", () => {
+			const markdown = new Markdown(
+				`| Name | Notes |
+| --- | --- |
+| Alice | a very long note that will definitely wrap in a narrow render |
+| Bob | short |`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const lines = markdown.render(30);
+			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""));
+			const dividerLines = plainLines.filter((line) => line.includes("┼"));
+
+			// Header divider + one between the wrapped Alice row and the Bob row.
+			assert.strictEqual(dividerLines.length, 2, "Expected header + wrapped-row divider");
 		});
 
 		it("should keep column width at least the longest word", () => {
@@ -732,7 +752,7 @@ again, hello world`,
 			assert.ok(!plainLines.some((line) => line.includes("```")), "Should not emit literal ``` fences");
 
 			// Find the bottom frame line, then assert exactly one blank line before the next content.
-			const bottomFrameIndex = plainLines.findIndex((line) => line.startsWith("╰") && line.endsWith("╯"));
+			const bottomFrameIndex = plainLines.findIndex((line) => line.startsWith("╰"));
 			assert.ok(bottomFrameIndex !== -1, "Should have a code block bottom frame");
 
 			const afterCode = plainLines.slice(bottomFrameIndex + 1);
@@ -763,9 +783,9 @@ more text`,
 			const expectedLines = [
 				"hello this is text",
 				"",
-				`╭${"─".repeat(78)}╮`,
+				`╭${"─".repeat(79)}`,
 				"│ code block",
-				`╰${"─".repeat(78)}╯`,
+				`╰${"─".repeat(79)}`,
 				"",
 				"more text",
 			];
@@ -813,8 +833,8 @@ more text`,
 				`Should not emit fences: ${JSON.stringify(plainLines)}`,
 			);
 
-			const rule = "─".repeat(38);
-			assert.deepStrictEqual(plainLines, [`╭${rule}╮`, "│ python", "│ print('hi')", "│ x = 1", `╰${rule}╯`]);
+			const rule = "─".repeat(39);
+			assert.deepStrictEqual(plainLines, [`╭${rule}`, "│ python", "│ print('hi')", "│ x = 1", `╰${rule}`]);
 		});
 
 		it("should omit the language label line when no language is given", () => {
@@ -823,8 +843,8 @@ more text`,
 			const lines = markdown.render(40);
 			const plainLines = lines.map((line) => line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd());
 
-			const rule = "─".repeat(38);
-			assert.deepStrictEqual(plainLines, [`╭${rule}╮`, "│ plain code", `╰${rule}╯`]);
+			const rule = "─".repeat(39);
+			assert.deepStrictEqual(plainLines, [`╭${rule}`, "│ plain code", `╰${rule}`]);
 		});
 	});
 

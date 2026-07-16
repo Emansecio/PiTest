@@ -30,14 +30,18 @@ export function hasEditDiff(details: { diff?: string } | undefined): boolean {
 }
 
 /**
- * Cap a diff body to `maxLines`, appending the standard expand trailer when
- * lines were hidden. Mirrors {@link capErrorPreview}.
+ * Cap a diff body to `maxLines`, appending an honest truncation trailer when
+ * lines were hidden. Unlike {@link capErrorPreview}, every call site of this
+ * helper runs on an already-EXPANDED body (collapsed edit rows render no diff
+ * at all), so a "(ctrl+o to expand)" hint here would lie — ctrl+o collapses
+ * from this state and the hidden tail is unreachable in the TUI. Say that
+ * instead of promising a key.
  */
 export function capDiffPreview(lines: string[], width: number, maxLines: number): string[] {
 	if (lines.length <= maxLines) return lines;
 	const kept = lines.slice(0, maxLines);
 	const hidden = lines.length - kept.length;
-	kept.push(truncateToWidth(moreLinesTrailer(hidden, expandKeyHint()), width));
+	kept.push(truncateToWidth(theme.fg("muted", `… +${hidden} more lines (diff truncated — open the file)`), width));
 	return kept;
 }
 

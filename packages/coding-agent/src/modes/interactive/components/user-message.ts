@@ -1,6 +1,8 @@
 import { Markdown, type MarkdownTheme } from "@pit/tui";
+import { DEFAULT_ASSISTANT_READING_COLUMNS } from "../../../core/settings-manager.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { MessageShell } from "./message-shell.ts";
+import { ReadingColumn } from "./reading-column.ts";
 
 // FTCS / OSC 133 semantic prompt zone. A user message is the "command" the
 // user issued, so it carries the PROMPT zone: A (prompt start) … B (command
@@ -22,10 +24,12 @@ const OSC133_PROMPT_END = "\x1b]133;B\x07"; // FTCS B: command entered / end of 
 /**
  * Component that renders a user message.
  *
- * Layout: the unified `MessageShell` with a blue (`gutterUser`) gutter and
- * no label — the role is unambiguous from the color alone. No background
- * fill (D1=B), no internal padding: the shell's 1-col gutter is the sole
- * decoration.
+ * Layout: the unified `MessageShell` with a blue (`gutterUser`) gutter using
+ * the heavier `▌` glyph and no label — weight + color are two redundant
+ * signals for "what I asked", since several other block types also carry a
+ * thin colored `│`. No background fill (D1=B), no internal padding. The
+ * markdown body shares the assistant's reading column so a long prompt and
+ * its answer wrap at the same measure on wide terminals.
  *
  * OSC 133 prompt-zone markers (A … B) wrap the rendered output so terminal
  * integrations (iTerm, WezTerm, Ghostty, Windows Terminal, etc.) treat the
@@ -43,15 +47,19 @@ export class UserMessageComponent extends MessageShell {
 	private decorateSource: string[] | null = null;
 	private decorated: string[] | null = null;
 
-	constructor(text: string, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
+	constructor(
+		text: string,
+		markdownTheme: MarkdownTheme = getMarkdownTheme(),
+		readingColumns: number = DEFAULT_ASSISTANT_READING_COLUMNS,
+	) {
 		super({
 			gutterColor: (content: string) => theme.fg("gutterUser", content),
+			gutterChar: "▌",
 		});
-		this.addChild(
-			new Markdown(text, 0, 0, markdownTheme, {
-				color: (content: string) => theme.fg("userMessageText", content),
-			}),
-		);
+		const markdown = new Markdown(text, 0, 0, markdownTheme, {
+			color: (content: string) => theme.fg("userMessageText", content),
+		});
+		this.addChild(new ReadingColumn(markdown, readingColumns > 0 ? readingColumns : 0));
 	}
 
 	override render(width: number): string[] {

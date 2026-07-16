@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, type ThinkingLevel } from "@pit/agent-core";
 import {
+	type CacheRetention,
 	clampThinkingLevel,
 	getApiKeyFor,
 	getCredentialPool,
@@ -15,7 +16,7 @@ import {
 import { getAgentDir } from "../config.ts";
 import { settleOrAbort } from "../utils/abort-race.ts";
 import { AgentSession } from "./agent-session.ts";
-import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
+import { formatNoModelsAvailableMessage, formatOAuthReauthMessage, isOAuthReauthRequired } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
@@ -108,6 +109,18 @@ export interface CreateAgentSessionOptions {
 	ttsrMatcher?: import("@pit/agent-core").TTSRMatcher;
 	/** Optional permission checker for Fusion verify / subagent policy. */
 	permissionChecker?: import("./permissions/index.ts").PermissionChecker;
+	/**
+	 * Prompt-cache retention for this session's provider requests.
+	 *
+	 * Adaptive default: the long-lived interactive session keeps "long"
+	 * (Anthropic 1h TTL / OpenAI 24h) because it survives pauses of many
+	 * minutes; one-shot runs (print/JSON/RPC modes — see main.ts) and subagents
+	 * pass "short", since they never sit idle past the 5-minute short TTL and
+	 * long-retention cache WRITES cost 2.0× input price vs 1.25× for short.
+	 * `PIT_CACHE_RETENTION` env always outranks this option (resolved in the
+	 * provider layer: env > explicit option > default).
+	 */
+	cacheRetention?: CacheRetention;
 }
 
 /** Result from createAgentSession */
@@ -383,6 +396,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
+	// Alias the session-level retention before the Agent is constructed: the
+	// streamFn below shadows `options` with the per-call stream options.
+	const sessionCacheRetention = options.cacheRetention;
+
 	agent = new Agent({
 		initialState: {
 			systemPrompt: "",
@@ -394,15 +411,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		streamFn: async (model, context, options) => {
 			const auth = await modelRegistry.getApiKeyAndHeaders(model);
 			if (!auth.ok) {
+				// A permanently-failed OAuth refresh (revoked/expired token) surfaces as
+				// a raw "Failed to refresh OAuth token for …" string. Replace it with a
+				// short /login prompt so the user sees the fix, not a traceback.
+				if (isOAuthReauthRequired(auth.error)) {
+					throw new Error(formatOAuthReauthMessage(model.provider));
+				}
 				throw new Error(auth.error);
 			}
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
-			// Default to long cache retention (Anthropic 1h, OpenAI 24h) for local
-			// interactive use: sessions span minutes-to-hours and benefit from
-			// keeping system prompt + tools cached across pauses. Providers that do
-			// not support long retention fall back to short automatically.
-			// Override via PIT_CACHE_RETENTION=short or explicit options.cacheRetention.
-			const defaultCacheRetention = process.env.PIT_CACHE_RETENTION === "short" ? "short" : "long";
+			// Adaptive cache retention: "long" (Anthropic 1h, OpenAI 24h) only for
+			// the long-lived interactive session, which benefits from keeping system
+			// prompt + tools cached across multi-minute pauses. One-shot runs
+			// (print/RPC — see main.ts) pass sessionCacheRetention: "short", since
+			// they never idle past the 5-minute short TTL and long cache writes cost
+			// 2.0× input price vs 1.25×. Providers without long retention fall back
+			// to short automatically. Precedence: PIT_CACHE_RETENTION env (resolved
+			// inside the provider layer) > per-call options.cacheRetention > this
+			// session-level option > "long".
+			const defaultCacheRetention = sessionCacheRetention ?? "long";
 
 			// Multi-key round-robin: if the credential pool has more than one
 			// entry for this provider, use a sessionId-sticky pick so prompt-cache

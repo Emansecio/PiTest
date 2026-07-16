@@ -1,12 +1,24 @@
 import chalk from "chalk";
 import { type SpawnSyncReturns, spawnSync } from "child_process";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "fs";
+import { createHash } from "crypto";
+import {
+	chmodSync,
+	createWriteStream,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "fs";
 import { arch, platform } from "os";
 import { join } from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
-import { APP_NAME, getBinDir } from "../config.ts";
-import { isOfflineMode } from "./env-flags.ts";
+import { APP_NAME, getAgentDir, getBinDir } from "../config.ts";
+import { isOfflineMode, isTruthyEnvFlag } from "./env-flags.ts";
 
 const TOOLS_DIR = getBinDir();
 const NETWORK_TIMEOUT_MS = 10_000;
@@ -76,6 +88,153 @@ function commandExists(cmd: string): boolean {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// System-PATH lookup cache
+//
+// A tool that lives in PATH but not in TOOLS_DIR used to cost one spawnSync
+// per boot per tool (`fd --version` / `rg --version`, ~50-150ms each on
+// Windows). We resolve the command's binary once via `where`/`which`, then
+// cache (command, binaryPath, mtime+size, PATH fingerprint) on disk in
+// <agentDir>/tool-path-cache.json. Validation on later boots is one statSync.
+//
+// Invalidation is automatic:
+//   - the recorded binary disappearing or changing (mtime/size) → re-detect;
+//   - PATH / PATHEXT changing (a different install could shadow) → re-detect.
+// The cache stores the bare command name, so actual spawns still resolve via
+// PATH at call time — a newer binary earlier in an unchanged PATH would be
+// picked up by the OS, not pinned by us.
+//
+// Escape hatch: PIT_NO_TOOL_PATH_CACHE=1 disables both read and write.
+// ---------------------------------------------------------------------------
+
+const TOOL_PATH_CACHE_FILE = "tool-path-cache.json";
+const TOOL_PATH_CACHE_SCHEMA = 1;
+
+interface ToolPathCacheEntry {
+	command: string;
+	binaryPath: string;
+	mtimeMs: number;
+	size: number;
+	pathKey: string;
+}
+
+interface ToolPathCacheFile {
+	schema: number;
+	entries: Record<string, ToolPathCacheEntry>;
+}
+
+function toolPathCachePath(): string {
+	return join(getAgentDir(), TOOL_PATH_CACHE_FILE);
+}
+
+function currentPathKey(): string {
+	return createHash("sha1")
+		.update(`${process.env.PATH ?? ""}\0${process.env.PATHEXT ?? ""}`)
+		.digest("hex");
+}
+
+function readToolPathCacheFile(): Record<string, ToolPathCacheEntry> {
+	try {
+		const file = JSON.parse(readFileSync(toolPathCachePath(), "utf8")) as Partial<ToolPathCacheFile>;
+		if (file.schema === TOOL_PATH_CACHE_SCHEMA && file.entries && typeof file.entries === "object") {
+			return file.entries;
+		}
+	} catch {
+		// Missing/corrupt cache — treated as empty.
+	}
+	return {};
+}
+
+/**
+ * Return the cached command name when the recorded binary is unchanged and the
+ * PATH fingerprint still matches; null on any miss.
+ */
+export function readCachedSystemCommand(command: string): string | null {
+	if (isTruthyEnvFlag(process.env.PIT_NO_TOOL_PATH_CACHE)) {
+		return null;
+	}
+	const entry = readToolPathCacheFile()[command];
+	if (
+		!entry ||
+		typeof entry.binaryPath !== "string" ||
+		entry.command !== command ||
+		entry.pathKey !== currentPathKey()
+	) {
+		return null;
+	}
+	try {
+		const stats = statSync(entry.binaryPath);
+		if (stats.isFile() && stats.mtimeMs === entry.mtimeMs && stats.size === entry.size) {
+			return entry.command;
+		}
+	} catch {
+		// Binary gone — fall through to live detection.
+	}
+	return null;
+}
+
+/** Record a verified PATH command → binary mapping. Best-effort. */
+export function writeCachedSystemCommand(command: string, binaryPath: string): void {
+	if (isTruthyEnvFlag(process.env.PIT_NO_TOOL_PATH_CACHE)) {
+		return;
+	}
+	try {
+		const stats = statSync(binaryPath);
+		if (!stats.isFile()) {
+			return;
+		}
+		const entries = readToolPathCacheFile();
+		entries[command] = {
+			command,
+			binaryPath,
+			mtimeMs: stats.mtimeMs,
+			size: stats.size,
+			pathKey: currentPathKey(),
+		};
+		const file: ToolPathCacheFile = { schema: TOOL_PATH_CACHE_SCHEMA, entries };
+		mkdirSync(getAgentDir(), { recursive: true });
+		writeFileSync(toolPathCachePath(), `${JSON.stringify(file, null, "\t")}\n`, "utf8");
+	} catch {
+		// Best-effort cache — lookups just stay on the spawn path.
+	}
+}
+
+function getWindowsWhereCommand(): string {
+	const systemRoot = process.env.SystemRoot ?? process.env.WINDIR;
+	if (systemRoot) {
+		const systemWhere = join(systemRoot, "System32", "where.exe");
+		if (existsSync(systemWhere)) {
+			return systemWhere;
+		}
+	}
+	return "where.exe";
+}
+
+/**
+ * Resolve `cmd` to the full path of its PATH binary via `where`/`which`.
+ * Returns the path, null when the command is not in PATH, or undefined when
+ * the finder itself is unavailable (caller falls back to the spawn probe).
+ */
+function resolveCommandBinary(cmd: string): string | null | undefined {
+	const finder = platform() === "win32" ? getWindowsWhereCommand() : "which";
+	try {
+		const result = spawnSync(finder, [cmd], { stdio: "pipe", encoding: "utf8" });
+		if (result.error) {
+			return undefined;
+		}
+		if (result.status !== 0) {
+			return null;
+		}
+		const first = (result.stdout ?? "")
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.find(Boolean);
+		return first || null;
+	} catch {
+		return undefined;
+	}
+}
+
 // Get the path to a tool (system-wide or in our tools dir)
 export function getToolPath(tool: "fd" | "rg"): string | null {
 	const config = TOOLS[tool];
@@ -87,10 +246,23 @@ export function getToolPath(tool: "fd" | "rg"): string | null {
 		return localPath;
 	}
 
-	// Check system PATH - if found, just return the command name (it's in PATH)
+	// Check system PATH. Disk-cache fast path first (one statSync), then a
+	// where/which resolution that both detects the command and records the
+	// binary for the next boot's cache hit.
 	const systemBinaryNames = config.systemBinaryNames ?? [config.binaryName];
 	for (const systemBinaryName of systemBinaryNames) {
-		if (commandExists(systemBinaryName)) {
+		if (readCachedSystemCommand(systemBinaryName)) {
+			return systemBinaryName;
+		}
+	}
+	for (const systemBinaryName of systemBinaryNames) {
+		const binaryPath = resolveCommandBinary(systemBinaryName);
+		if (binaryPath) {
+			writeCachedSystemCommand(systemBinaryName, binaryPath);
+			return systemBinaryName;
+		}
+		// undefined = where/which unavailable → legacy spawn probe (uncached).
+		if (binaryPath === undefined && commandExists(systemBinaryName)) {
 			return systemBinaryName;
 		}
 	}

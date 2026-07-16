@@ -25,6 +25,7 @@ export interface AppKeybindings {
 	"app.session.toggleNamedFilter": true;
 	"app.editor.external": true;
 	"app.message.followUp": true;
+	"app.message.steer": true;
 	"app.message.dequeue": true;
 	"app.clipboard.pasteImage": true;
 	"app.session.new": true;
@@ -78,7 +79,7 @@ export const KEYBINDINGS = {
 	},
 	"app.model.select": { defaultKeys: "ctrl+l", description: "Open model selector" },
 	"app.permission.cycle": { defaultKeys: "alt+p", description: "Cycle mode (plan → auto → fusion)" },
-	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Toggle tool output" },
+	"app.tools.expand": { defaultKeys: "ctrl+o", description: "Expand last tool output, then all (cycles)" },
 	"app.thinking.toggle": {
 		defaultKeys: "ctrl+t",
 		description: "Toggle thinking blocks",
@@ -94,6 +95,10 @@ export const KEYBINDINGS = {
 	"app.message.followUp": {
 		defaultKeys: "alt+enter",
 		description: "Queue follow-up message",
+	},
+	"app.message.steer": {
+		defaultKeys: [],
+		description: "Steer current turn",
 	},
 	"app.message.dequeue": {
 		defaultKeys: "alt+up",

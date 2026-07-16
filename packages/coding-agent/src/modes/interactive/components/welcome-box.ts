@@ -50,14 +50,14 @@ const WORDMARK_WIDTH = 9;
 // full-block font reads P-I-T cleanly with no shell artifacts and is one row
 // shorter. Rows are right-trimmed; centering uses HERO_WIDTH (widest row) so
 // they stay letter-aligned instead of drifting toward the middle.
-const HERO_PIT: readonly string[] = [
+export const HERO_PIT: readonly string[] = [
 	"██████  ████  ██████",
 	"██  ██   ██     ██",
 	"██████   ██     ██",
 	"██       ██     ██",
 	"██      ████    ██",
 ];
-const HERO_WIDTH = 20;
+export const HERO_WIDTH = 20;
 const HERO_MIN_WIDTH = 40;
 
 export interface WelcomeBoxData {

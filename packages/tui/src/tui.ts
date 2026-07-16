@@ -481,6 +481,10 @@ export class TUI extends Container {
 	private static readonly ANIMATION_FAULT_EVICT_AFTER = 5;
 	private cursorRow = 0; // Logical cursor row (end of rendered content)
 	private hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
+	// Last DECTCEM visibility (show/hide) actually written, so positionHardwareCursor
+	// only emits \x1b[?25h/l on a change instead of every frame. undefined = unknown
+	// (forces the next frame to emit unconditionally).
+	private hardwareCursorVisible: boolean | undefined;
 	private showHardwareCursor = process.env.PIT_HARDWARE_CURSOR === "1";
 	private clearOnShrink = process.env.PIT_CLEAR_ON_SHRINK === "1"; // Clear empty rows when content shrinks (default: off)
 	private maxLinesRendered = 0; // Track terminal's working area (max lines ever rendered)
@@ -792,6 +796,7 @@ export class TUI extends Container {
 		}
 
 		this.terminal.showCursor();
+		this.hardwareCursorVisible = true;
 		this.terminal.stop();
 	}
 
@@ -802,6 +807,7 @@ export class TUI extends Container {
 			this.previousHeight = -1; // -1 triggers heightChanged, forcing a full clear
 			this.cursorRow = 0;
 			this.hardwareCursorRow = 0;
+			this.hardwareCursorVisible = undefined; // re-sync visibility after a full reset instead of trusting the dedupe
 			this.maxLinesRendered = 0;
 			this.previousViewportTop = 0;
 			if (this.renderTimer) {
@@ -831,7 +837,18 @@ export class TUI extends Container {
 			return;
 		}
 		const elapsed = performance.now() - this.lastRenderAt;
-		const delay = Math.max(0, TUI.MIN_RENDER_INTERVAL_MS - elapsed);
+		if (elapsed >= TUI.MIN_RENDER_INTERVAL_MS) {
+			// Idle (last paint was long enough ago): paint now instead of paying a
+			// full setTimeout(0) hop just to throttle a render that isn't throttled.
+			this.renderRequested = false;
+			this.lastRenderAt = performance.now();
+			this.doRender();
+			if (this.renderRequested) {
+				this.scheduleRender();
+			}
+			return;
+		}
+		const delay = TUI.MIN_RENDER_INTERVAL_MS - elapsed;
 		this.renderTimer = setTimeout(() => {
 			this.renderTimer = undefined;
 			if (this.stopped || !this.renderRequested) {
@@ -1639,7 +1656,11 @@ export class TUI extends Container {
 		}
 		const label = this.renderFault.kind === "animation" ? "animation error" : "render error";
 		const count = this.renderFault.count > 1 ? ` x${this.renderFault.count}` : "";
-		return [truncateToWidth(`! ${label}${count}: ${this.renderFault.message}`, width, "…")];
+		// Bold red "!" so the fault stands out from the transcript; body dimmed since
+		// it's a raw error message, not primary content. Raw SGR (no theme in this package).
+		const prefix = "\x1b[1m\x1b[31m!\x1b[39m\x1b[22m";
+		const body = `\x1b[2m${label}${count}: ${this.renderFault.message}\x1b[22m`;
+		return [truncateToWidth(`${prefix} ${body}`, width, "…")];
 	}
 
 	private doRender(force = false): void {
@@ -1729,8 +1750,12 @@ export class TUI extends Container {
 			if (clear) {
 				this.terminal.write(this.deleteKittyImages(this.previousKittyImageIds));
 				// Always clear the visible screen + home; only "all" also clears the
-				// scrollback so a height-only repaint preserves rollable history.
-				this.terminal.write(clearMode === "all" ? "\x1b[2J\x1b[H\x1b[3J" : "\x1b[2J\x1b[H");
+				// scrollback (\x1b[3J) so a height-only repaint preserves rollable history.
+				// PIT_NO_SCROLLBACK_WIPE=1 opts out of the \x1b[3J itself (pre-session
+				// terminal history stays intact); the deliberate default keeps it, since
+				// leaving stale rewrapped history behind after a width change is worse.
+				const wipeScrollback = clearMode === "all" && process.env.PIT_NO_SCROLLBACK_WIPE !== "1";
+				this.terminal.write(wipeScrollback ? "\x1b[2J\x1b[H\x1b[3J" : "\x1b[2J\x1b[H");
 			}
 			for (let start = 0; start < newLines.length; start += chunkLines) {
 				const end = Math.min(start + chunkLines, newLines.length);
@@ -1741,9 +1766,12 @@ export class TUI extends Container {
 				}
 				this.terminal.write(parts.join(""));
 			}
-			this.terminal.write("\x1b[?2026l");
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
+			// Cursor positioning goes inside the bracket, closed by the same write, so
+			// the hardware cursor never lands at end-of-content for one visible frame
+			// before jumping to its real (e.g. IME) position.
+			this.terminal.write(`${this.positionHardwareCursor(cursorPos, newLines.length)}\x1b[?2026l`);
 			// Reset max lines when clearing, otherwise track growth
 			if (clear) {
 				this.maxLinesRendered = newLines.length;
@@ -1752,7 +1780,6 @@ export class TUI extends Container {
 			}
 			const bufferLength = Math.max(height, newLines.length);
 			this.previousViewportTop = Math.max(0, bufferLength - height);
-			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			this.previousWidth = width;
@@ -1878,7 +1905,8 @@ export class TUI extends Container {
 
 		// No changes - but still need to update hardware cursor position if it moved
 		if (firstChanged === -1) {
-			this.positionHardwareCursor(cursorPos, newLines.length);
+			const cursorEscape = this.positionHardwareCursor(cursorPos, newLines.length);
+			if (cursorEscape) this.terminal.write(cursorEscape);
 			this.previousViewportTop = prevViewportTop;
 			this.previousHeight = height;
 			return;
@@ -1917,12 +1945,15 @@ export class TUI extends Container {
 				if (extraLines > 0) {
 					buffer += `\x1b[${extraLines}A`;
 				}
-				buffer += "\x1b[?2026l";
-				this.terminal.write(buffer);
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
+				buffer += this.positionHardwareCursor(cursorPos, newLines.length);
+				buffer += "\x1b[?2026l";
+				this.terminal.write(buffer);
+			} else {
+				const cursorEscape = this.positionHardwareCursor(cursorPos, newLines.length);
+				if (cursorEscape) this.terminal.write(cursorEscape);
 			}
-			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
 			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			this.previousWidth = width;
@@ -1996,6 +2027,14 @@ export class TUI extends Container {
 			parts.push(`\x1b[${extraLines}A`);
 		}
 
+		// Set the field before building the cursor escape - positionHardwareCursor moves
+		// from this.hardwareCursorRow, which must already reflect where this frame's
+		// content writes land the cursor (finalCursorRow), not its pre-frame value.
+		this.hardwareCursorRow = finalCursorRow;
+		// Cursor positioning goes inside the bracket, closed in the same buffer, so the
+		// hardware cursor never lands at end-of-content for one visible frame before
+		// jumping to its real (e.g. IME) position.
+		parts.push(this.positionHardwareCursor(cursorPos, newLines.length));
 		parts.push("\x1b[?2026l");
 		const buffer = parts.join("");
 
@@ -2042,14 +2081,11 @@ export class TUI extends Container {
 		// Track cursor position for next render
 		// cursorRow tracks end of content (for viewport calculation)
 		// hardwareCursorRow tracks actual terminal cursor position (for movement)
+		// (already set to finalCursorRow above, before building the cursor escape)
 		this.cursorRow = Math.max(0, newLines.length - 1);
-		this.hardwareCursorRow = finalCursorRow;
 		// Track terminal's working area (grows but doesn't shrink unless cleared)
 		this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
 		this.previousViewportTop = Math.max(prevViewportTop, finalCursorRow - height + 1);
-
-		// Position hardware cursor for IME
-		this.positionHardwareCursor(cursorPos, newLines.length);
 
 		this.previousLines = newLines;
 		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
@@ -2058,14 +2094,18 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Position the hardware cursor for IME candidate window.
+	 * Build the escape sequence that positions the hardware cursor for the IME
+	 * candidate window (movement + show/hide). Returns the sequence instead of
+	 * writing it directly so callers splice it into the current frame's buffer,
+	 * inside the \x1b[?2026h/l synchronized-update bracket - writing it as a
+	 * separate post-bracket write let the hardware cursor visibly land at the
+	 * end of the content for one frame before jumping to the editor.
 	 * @param cursorPos The cursor position extracted from rendered output, or null
 	 * @param totalLines Total number of rendered lines
 	 */
-	private positionHardwareCursor(cursorPos: { row: number; col: number } | null, totalLines: number): void {
+	private positionHardwareCursor(cursorPos: { row: number; col: number } | null, totalLines: number): string {
 		if (!cursorPos || totalLines <= 0) {
-			this.terminal.hideCursor();
-			return;
+			return this.cursorVisibilityEscape(false);
 		}
 
 		// Clamp cursor position to valid range
@@ -2083,15 +2123,15 @@ export class TUI extends Container {
 		// Move to absolute column (1-indexed)
 		buffer += `\x1b[${targetCol + 1}G`;
 
-		if (buffer) {
-			this.terminal.write(buffer);
-		}
-
 		this.hardwareCursorRow = targetRow;
-		if (this.showHardwareCursor) {
-			this.terminal.showCursor();
-		} else {
-			this.terminal.hideCursor();
-		}
+		return buffer + this.cursorVisibilityEscape(this.showHardwareCursor);
+	}
+
+	// Only emit \x1b[?25h/l when visibility actually changes; every frame calls
+	// positionHardwareCursor, and re-sending the same mode on each one is pure waste.
+	private cursorVisibilityEscape(visible: boolean): string {
+		if (this.hardwareCursorVisible === visible) return "";
+		this.hardwareCursorVisible = visible;
+		return visible ? "\x1b[?25h" : "\x1b[?25l";
 	}
 }

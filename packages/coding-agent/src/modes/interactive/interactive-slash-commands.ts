@@ -8,6 +8,7 @@ export interface SlashCommandHost {
 	handleFusionCommand(): void | Promise<void>;
 	handleNameCommand(text: string): void;
 	handleCompactCommand(instructions?: string): void | Promise<void>;
+	handleSteerCommand(text: string): void | Promise<void>;
 	handleTTSRCommand(args: string): void;
 	handleHindsightCommand(args: string): void | Promise<void>;
 	handleGoalCommand(args: string): void | Promise<void>;
@@ -40,6 +41,7 @@ export const DISPATCHED_SLASH_COMMAND_NAMES = [
 	"fusion",
 	"name",
 	"compact",
+	"steer",
 	"ttsr",
 	"hindsight",
 	"goal",
@@ -101,6 +103,11 @@ export async function dispatchSlashCommand(host: SlashCommandHost, text: string)
 	if (text === "/compact" || text.startsWith("/compact ")) {
 		host.clearEditor();
 		await host.handleCompactCommand(text.startsWith("/compact ") ? stripSlashArg(text, "/compact") : undefined);
+		return true;
+	}
+	if (text === "/steer" || text.startsWith("/steer ")) {
+		host.clearEditor();
+		await host.handleSteerCommand(text === "/steer" ? "" : stripSlashArg(text, "/steer"));
 		return true;
 	}
 	if (text === "/ttsr" || text.startsWith("/ttsr ")) {

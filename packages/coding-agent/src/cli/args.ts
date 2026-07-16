@@ -6,7 +6,11 @@ import type { ThinkingLevel } from "@pit/agent-core";
 import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
-import { normalizePermissionMode, type PermissionMode } from "../core/permissions/index.ts";
+// Import from permissions/types.ts directly, NOT the permissions barrel: the
+// barrel drags checker.ts → tools/argument-prep.ts → the full @pit/ai index
+// (typebox, models, register-builtins — hundreds of ms of module eval) into
+// every graph that only needs arg parsing.
+import { normalizePermissionMode, type PermissionMode } from "../core/permissions/types.ts";
 
 export type Mode = "text" | "json" | "rpc";
 

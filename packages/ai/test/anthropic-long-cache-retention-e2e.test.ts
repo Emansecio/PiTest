@@ -3,6 +3,7 @@ import { getEnvApiKey } from "../src/env-api-keys.js";
 import { getModels, getProviders } from "../src/models.js";
 import { complete } from "../src/stream.js";
 import type { Api, KnownProvider, Model, ProviderStreamOptions } from "../src/types.js";
+import { live } from "./live.js";
 
 interface AnthropicLongCacheRetentionE2ECase {
 	name: string;
@@ -114,9 +115,13 @@ describe("Anthropic Messages long cache retention E2E", () => {
 		for (const testCase of probeCases) {
 			const model = withLongCacheRetention(testCase.model);
 
-			it.skipIf(!testCase.apiKey)(`${testCase.name} accepts long cache retention`, { retry: 2 }, async () => {
-				await expectLongCacheRetentionAccepted(model, testCase.apiKey);
-			});
+			it.skipIf(!testCase.apiKey)(
+				`${testCase.name} accepts long cache retention`,
+				{ retry: 2 },
+				live("anthropic", async () => {
+					await expectLongCacheRetentionAccepted(model, testCase.apiKey);
+				}),
+			);
 		}
 	});
 });

@@ -5,6 +5,7 @@ import { getModel } from "../src/models.js";
 import { completeSimple } from "../src/stream.js";
 import type { Api, Context, Model, StopReason, Tool, ToolCall, ToolResultMessage } from "../src/types.js";
 import { StringEnum } from "../src/utils/typebox-helpers.js";
+import { live } from "./live.js";
 
 const calculatorSchema = Type.Object({
 	a: Type.Number({ description: "First number" }),
@@ -120,13 +121,21 @@ async function assertSecondToolCallWithInterleavedThinking<TApi extends Api>(
 const hasAnthropicCredentials = !!getEnvApiKey("anthropic");
 
 describe.skipIf(!hasAnthropicCredentials)("Anthropic interleaved thinking", () => {
-	it("should do interleaved thinking on Claude Opus 4.5", { retry: 3 }, async () => {
-		const llm = getModel("anthropic", "claude-opus-4-8");
-		await assertSecondToolCallWithInterleavedThinking(llm, "high");
-	});
+	it(
+		"should do interleaved thinking on Claude Opus 4.5",
+		{ retry: 3 },
+		live("anthropic", async () => {
+			const llm = getModel("anthropic", "claude-opus-4-8");
+			await assertSecondToolCallWithInterleavedThinking(llm, "high");
+		}),
+	);
 
-	it("should do interleaved thinking on Claude Opus 4.6", { retry: 3 }, async () => {
-		const llm = getModel("anthropic", "claude-opus-4-8");
-		await assertSecondToolCallWithInterleavedThinking(llm, "high");
-	});
+	it(
+		"should do interleaved thinking on Claude Opus 4.6",
+		{ retry: 3 },
+		live("anthropic", async () => {
+			const llm = getModel("anthropic", "claude-opus-4-8");
+			await assertSecondToolCallWithInterleavedThinking(llm, "high");
+		}),
+	);
 });

@@ -70,7 +70,14 @@ export type AgentSessionEvent =
 			errorMessage?: string;
 	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| {
+			type: "auto_retry_end";
+			success: boolean;
+			attempt: number;
+			finalError?: string;
+			/** True when the user cancelled the retry (Esc during backoff) — a routine action, not a failure. */
+			cancelled?: boolean;
+	  }
 	| { type: "fallback_warning"; from: string; to: string; reason: string }
 	| {
 			type: "verification";

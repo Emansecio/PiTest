@@ -104,9 +104,12 @@ function buildGoalObjectiveLine(snapshot: GoalSnapshot, width: number): string {
 function buildGoalMetricsLine(snapshot: GoalSnapshot, width: number): string {
 	const budget = rowBudget(width);
 	const budgetPart = snapshot.tokenBudget !== undefined ? `/${formatTokens(snapshot.tokenBudget)}` : "";
+	// Labeled split — three slash-separated numbers right after the used/budget
+	// pair read as a second ratio, and nothing on screen says which share is
+	// which. This is the line users read to decide budget bumps.
 	const split = snapshot.tokenSpendSplit;
 	const splitPart = split
-		? ` · ${formatTokens(split.main)}/${formatTokens(split.subagent)}/${formatTokens(split.fusion)}`
+		? ` · main ${formatTokens(split.main)} · sub ${formatTokens(split.subagent)} · fusion ${formatTokens(split.fusion)}`
 		: "";
 	const nearBudget =
 		snapshot.tokenBudget !== undefined &&

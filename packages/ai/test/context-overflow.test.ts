@@ -18,6 +18,7 @@ import { getModel } from "../src/models.js";
 import { complete } from "../src/stream.js";
 import type { AssistantMessage, Context, Model, Usage } from "../src/types.js";
 import { isContextOverflow } from "../src/utils/overflow.js";
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
@@ -105,15 +106,19 @@ describe("Context overflow error handling", () => {
 	});
 
 	describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("Anthropic (OAuth)", () => {
-		it("claude-sonnet-4 - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("anthropic", "claude-sonnet-5");
-			const result = await testContextOverflow(model, process.env.ANTHROPIC_OAUTH_TOKEN!);
-			logResult(result);
+		it(
+			"claude-sonnet-4 - should detect overflow via isContextOverflow",
+			live("anthropic", async () => {
+				const model = getModel("anthropic", "claude-sonnet-5");
+				const result = await testContextOverflow(model, process.env.ANTHROPIC_OAUTH_TOKEN!);
+				logResult(result);
 
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toMatch(/prompt is too long/i);
-			expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-		}, 120000);
+				expect(result.stopReason).toBe("error");
+				expect(result.errorMessage).toMatch(/prompt is too long/i);
+				expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
+			}),
+			120000,
+		);
 	});
 
 	// =============================================================================
@@ -141,14 +146,14 @@ describe("Context overflow error handling", () => {
 	describe("OpenAI Codex (OAuth)", () => {
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should detect overflow via isContextOverflow",
-			async () => {
+			live("openai-codex", async () => {
 				const model = getModel("openai-codex", "gpt-5.5");
 				const result = await testContextOverflow(model, openaiCodexToken!);
 				logResult(result);
 
 				expect(result.stopReason).toBe("error");
 				expect(isContextOverflow(result.response, model.contextWindow)).toBe(true);
-			},
+			}),
 			120000,
 		);
 	});

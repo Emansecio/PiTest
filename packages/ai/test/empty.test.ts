@@ -5,6 +5,7 @@ import type { Api, AssistantMessage, Context, Model, StreamOptions, UserMessage 
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
+import { live } from "./live.js";
 import { resolveApiKey } from "./oauth.js";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
@@ -165,28 +166,36 @@ describe("AI Providers Empty Message Tests", () => {
 	describe("Anthropic OAuth Provider Empty Messages", () => {
 		const llm = getModel("anthropic", "claude-haiku-4-5");
 
-		it.skipIf(!anthropicOAuthToken)("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyMessage(llm, { apiKey: anthropicOAuthToken });
-		});
+		it.skipIf(!anthropicOAuthToken)(
+			"should handle empty content array",
+			{ retry: 3, timeout: 30000 },
+			live("anthropic", async () => {
+				await testEmptyMessage(llm, { apiKey: anthropicOAuthToken });
+			}),
+		);
 
-		it.skipIf(!anthropicOAuthToken)("should handle empty string content", { retry: 3, timeout: 30000 }, async () => {
-			await testEmptyStringMessage(llm, { apiKey: anthropicOAuthToken });
-		});
+		it.skipIf(!anthropicOAuthToken)(
+			"should handle empty string content",
+			{ retry: 3, timeout: 30000 },
+			live("anthropic", async () => {
+				await testEmptyStringMessage(llm, { apiKey: anthropicOAuthToken });
+			}),
+		);
 
 		it.skipIf(!anthropicOAuthToken)(
 			"should handle whitespace-only content",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("anthropic", async () => {
 				await testWhitespaceOnlyMessage(llm, { apiKey: anthropicOAuthToken });
-			},
+			}),
 		);
 
 		it.skipIf(!anthropicOAuthToken)(
 			"should handle empty assistant message in conversation",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("anthropic", async () => {
 				await testEmptyAssistantMessage(llm, { apiKey: anthropicOAuthToken });
-			},
+			}),
 		);
 	});
 
@@ -194,37 +203,37 @@ describe("AI Providers Empty Message Tests", () => {
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should handle empty content array",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 				await testEmptyMessage(llm, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should handle empty string content",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 				await testEmptyStringMessage(llm, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should handle whitespace-only content",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 				await testWhitespaceOnlyMessage(llm, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 
 		it.skipIf(!openaiCodexToken)(
 			"gpt-5.5 - should handle empty assistant message in conversation",
 			{ retry: 3, timeout: 30000 },
-			async () => {
+			live("openai-codex", async () => {
 				const llm = getModel("openai-codex", "gpt-5.5");
 				await testEmptyAssistantMessage(llm, { apiKey: openaiCodexToken });
-			},
+			}),
 		);
 	});
 });

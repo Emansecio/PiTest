@@ -21,9 +21,18 @@ describe("renderTodoOverlay", () => {
 		expect(renderTodoOverlay({ items: [], done: 0, total: 0 }, 80, "◐")).toEqual([]);
 	});
 
-	it("returns [] when every todo is completed (auto-hide on done)", () => {
+	it("returns [] when every todo is completed and no linger age is given", () => {
 		const items = [item(1, "a", "completed"), item(2, "b", "completed")];
 		expect(renderTodoOverlay({ items, done: 2, total: 2 }, 80, "◐")).toEqual([]);
+	});
+
+	it("lingers the completed state (full bar, all ✓) inside the linger window, then hides", () => {
+		const items = [item(1, "a", "completed"), item(2, "b", "completed")];
+		const during = stripAnsi(renderTodoOverlay({ items, done: 2, total: 2 }, 80, "◐", 1000).join("\n"));
+		expect(during).toContain("2/2");
+		expect(during).toContain("100%");
+		expect(during).toContain("✓");
+		expect(renderTodoOverlay({ items, done: 2, total: 2 }, 80, "◐", 4001)).toEqual([]);
 	});
 
 	it("renders header, statuses, activeForm and connectors", () => {

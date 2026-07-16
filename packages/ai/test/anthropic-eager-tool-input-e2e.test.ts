@@ -4,6 +4,7 @@ import { getEnvApiKey } from "../src/env-api-keys.js";
 import { getModels, getProviders } from "../src/models.js";
 import { complete } from "../src/stream.js";
 import type { Api, KnownProvider, Model, ProviderStreamOptions, Tool } from "../src/types.js";
+import { live } from "./live.js";
 
 const echoToolSchema = Type.Object({
 	value: Type.String({ description: "The value to echo" }),
@@ -128,9 +129,13 @@ describe("Anthropic Messages eager tool input streaming E2E", () => {
 
 	describe("generated compatibility settings", () => {
 		for (const testCase of generatedCompatCases) {
-			it.skipIf(!testCase.apiKey)(`${testCase.name} accepts configured tool streaming`, { retry: 2 }, async () => {
-				await expectToolEnabledRequestAccepted(testCase.model, testCase.apiKey);
-			});
+			it.skipIf(!testCase.apiKey)(
+				`${testCase.name} accepts configured tool streaming`,
+				{ retry: 2 },
+				live("anthropic", async () => {
+					await expectToolEnabledRequestAccepted(testCase.model, testCase.apiKey);
+				}),
+			);
 		}
 	});
 
@@ -141,9 +146,9 @@ describe("Anthropic Messages eager tool input streaming E2E", () => {
 			it.skipIf(!testCase.apiKey)(
 				`${testCase.name} accepts forced eager_input_streaming`,
 				{ retry: 2 },
-				async () => {
+				live("anthropic", async () => {
 					await expectToolEnabledRequestAccepted(model, testCase.apiKey);
-				},
+				}),
 			);
 		}
 	});

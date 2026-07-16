@@ -39,5 +39,6 @@ it("buildWorkspaceCwdLabels surfaces shell vs session divergence", () => {
 	const pit = join(home, "pit");
 	const labels = buildWorkspaceCwdLabels(home, pit, null);
 	expect(labels.session).toBe(`${basename(home)} (home)`);
+	expect(labels.isHome).toBe(true);
 	expect(labels.shellNote).toBe(`shell: ${resolveOrientingCwdLabel(pit, null)}`);
 });

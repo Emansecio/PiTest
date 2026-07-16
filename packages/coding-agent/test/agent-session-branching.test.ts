@@ -22,6 +22,8 @@ import {
 } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { SessionManager } from "../src/core/session-manager.js";
+import { live } from "./live.js";
+
 import { API_KEY } from "./utilities.js";
 
 describe.skipIf(!API_KEY)("AgentSession forking", () => {
@@ -87,70 +89,80 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 		return session;
 	}
 
-	it("should allow forking from single message", async () => {
-		await createSession();
+	it(
+		"should allow forking from single message",
+		live("anthropic", async () => {
+			await createSession();
 
-		await session.prompt("Say hello");
-		await session.agent.waitForIdle();
+			await session.prompt("Say hello");
+			await session.agent.waitForIdle();
 
-		const userMessages = session.getUserMessagesForForking();
-		expect(userMessages.length).toBe(1);
-		expect(userMessages[0].text).toBe("Say hello");
+			const userMessages = session.getUserMessagesForForking();
+			expect(userMessages.length).toBe(1);
+			expect(userMessages[0].text).toBe("Say hello");
 
-		const result = await runtimeHost.fork(userMessages[0].entryId);
-		expect(result.cancelled).toBe(false);
-		session = runtimeHost.session;
-		expect(result.selectedText).toBe("Say hello");
+			const result = await runtimeHost.fork(userMessages[0].entryId);
+			expect(result.cancelled).toBe(false);
+			session = runtimeHost.session;
+			expect(result.selectedText).toBe("Say hello");
 
-		expect(session.messages.length).toBe(0);
-		expect(session.sessionFile).not.toBeNull();
-		expect(existsSync(session.sessionFile!)).toBe(false);
-	});
+			expect(session.messages.length).toBe(0);
+			expect(session.sessionFile).not.toBeNull();
+			expect(existsSync(session.sessionFile!)).toBe(false);
+		}),
+	);
 
-	it("should support in-memory forking in --no-session mode", async () => {
-		await createSession(true);
+	it(
+		"should support in-memory forking in --no-session mode",
+		live("anthropic", async () => {
+			await createSession(true);
 
-		expect(session.sessionFile).toBeUndefined();
+			expect(session.sessionFile).toBeUndefined();
 
-		await session.prompt("Say hi");
-		await session.agent.waitForIdle();
+			await session.prompt("Say hi");
+			await session.agent.waitForIdle();
 
-		const userMessages = session.getUserMessagesForForking();
-		expect(userMessages.length).toBe(1);
-		expect(session.messages.length).toBeGreaterThan(0);
+			const userMessages = session.getUserMessagesForForking();
+			expect(userMessages.length).toBe(1);
+			expect(session.messages.length).toBeGreaterThan(0);
 
-		const result = await runtimeHost.fork(userMessages[0].entryId);
-		expect(result.cancelled).toBe(false);
-		session = runtimeHost.session;
-		expect(result.selectedText).toBe("Say hi");
+			const result = await runtimeHost.fork(userMessages[0].entryId);
+			expect(result.cancelled).toBe(false);
+			session = runtimeHost.session;
+			expect(result.selectedText).toBe("Say hi");
 
-		expect(session.messages.length).toBe(0);
-		expect(session.sessionFile).toBeUndefined();
-	});
+			expect(session.messages.length).toBe(0);
+			expect(session.sessionFile).toBeUndefined();
+		}),
+	);
 
-	it("should fork from middle of conversation", async () => {
-		await createSession();
+	it(
+		"should fork from middle of conversation",
+		live("anthropic", async () => {
+			await createSession();
 
-		await session.prompt("Say one");
-		await session.agent.waitForIdle();
+			await session.prompt("Say one");
+			await session.agent.waitForIdle();
 
-		await session.prompt("Say two");
-		await session.agent.waitForIdle();
+			await session.prompt("Say two");
+			await session.agent.waitForIdle();
 
-		await session.prompt("Say three");
-		await session.agent.waitForIdle();
+			await session.prompt("Say three");
+			await session.agent.waitForIdle();
 
-		const userMessages = session.getUserMessagesForForking();
-		expect(userMessages.length).toBe(3);
+			const userMessages = session.getUserMessagesForForking();
+			expect(userMessages.length).toBe(3);
 
-		const secondMessage = userMessages[1];
-		const result = await runtimeHost.fork(secondMessage.entryId);
-		expect(result.cancelled).toBe(false);
-		session = runtimeHost.session;
-		expect(result.selectedText).toBe("Say two");
+			const secondMessage = userMessages[1];
+			const result = await runtimeHost.fork(secondMessage.entryId);
+			expect(result.cancelled).toBe(false);
+			session = runtimeHost.session;
+			expect(result.selectedText).toBe("Say two");
 
-		expect(session.messages.length).toBe(2);
-		expect(session.messages[0].role).toBe("user");
-		expect(session.messages[1].role).toBe("assistant");
-	}, 60000);
+			expect(session.messages.length).toBe(2);
+			expect(session.messages[0].role).toBe("user");
+			expect(session.messages[1].role).toBe("assistant");
+		}),
+		60000,
+	);
 });

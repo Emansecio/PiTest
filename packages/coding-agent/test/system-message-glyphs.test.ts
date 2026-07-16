@@ -6,14 +6,14 @@ import {
 } from "../src/modes/interactive/components/system-message-glyphs.js";
 
 const EXPECTED: Record<SystemMessageKind, string> = {
-	compaction: "⟳ compaction",
-	branch: "⑂ branch",
-	skill: "◆ skill",
-	done: "✓ done",
-	overthink: "◈ overthink",
-	ttsr: "◈ ttsr",
-	steer: "▸ steer",
-	queued: "◷ queued",
+	compaction: "⟳ Compaction",
+	branch: "⑂ Branch",
+	skill: "◆ Skill",
+	done: "✓ Done",
+	overthink: "◈ Overthink",
+	ttsr: "◈ TTSR",
+	steer: "▸ Steer",
+	queued: "◷ Queued",
 };
 
 describe("systemMessageLabel", () => {

@@ -14,6 +14,12 @@ import { spinnerGlyphAt } from "./spinner-ticker.ts";
 
 /** Cap on overlay rows; completed todos are hidden first when exceeded. */
 const OVERLAY_MAX_ROWS = 12;
+/**
+ * A fully-completed list lingers this long before auto-hiding, so the last
+ * item flipping to ✓ and the bar reaching 100% are actually seen instead of
+ * vanishing in the same frame. Mirrors GOAL_COMPLETE_LINGER_MS next door.
+ */
+export const TODO_COMPLETE_LINGER_MS = 4000;
 /** Progress bar width (visible block chars, excluding connector). */
 const PROGRESS_BAR_WIDTH = 12;
 // CONNECTOR_WIDTH: "├─ " or "└─ " = 3 visible chars.
@@ -166,9 +172,21 @@ function renderRow(item: TodoItem, spinner: string, width: number): string {
 	}
 }
 
-/** Pure renderer (testable): returns [] when there are no todos. */
-export function renderTodoOverlay(data: TodoOverlayData, width: number, spinner: string): string[] {
-	if (data.items.length === 0 || data.done === data.total) return [];
+/**
+ * Pure renderer (testable): returns [] when there are no todos, or when a
+ * fully-completed list has lingered past `TODO_COMPLETE_LINGER_MS`
+ * (signalled by `completeAgeMs`; omit it to hide a complete list at once).
+ */
+export function renderTodoOverlay(
+	data: TodoOverlayData,
+	width: number,
+	spinner: string,
+	completeAgeMs?: number,
+): string[] {
+	if (data.items.length === 0) return [];
+	if (data.done === data.total && (completeAgeMs === undefined || completeAgeMs > TODO_COMPLETE_LINGER_MS)) {
+		return [];
+	}
 	const sorted = sortTodosForDisplay(data.items);
 	const dataKey = todoOverlayDataKey(data, sorted);
 	return materializeTodoOverlayCache(buildTodoOverlayCache(data, width, dataKey, sorted), spinner, width);
@@ -178,6 +196,9 @@ class TodoOverlayComponent implements Component {
 	private session: AgentSession;
 	private readonly clock: () => number;
 	private renderCache: TodoOverlayRenderCache | undefined;
+	// First render at which the list was seen fully complete (goal-overlay's
+	// completeSeenAt pattern) — drives the linger window before auto-hide.
+	private completeSeenAt: number | undefined;
 
 	constructor(session: AgentSession, clock: () => number = () => performance.now()) {
 		this.session = session;
@@ -187,6 +208,7 @@ class TodoOverlayComponent implements Component {
 	setSession(session: AgentSession): void {
 		this.session = session;
 		this.renderCache = undefined;
+		this.completeSeenAt = undefined;
 	}
 
 	invalidate(): void {
@@ -195,9 +217,19 @@ class TodoOverlayComponent implements Component {
 
 	render(width: number): string[] {
 		const data = this.session.todoForOverlay();
-		if (data.items.length === 0 || data.done === data.total) {
+		if (data.items.length === 0) {
 			this.renderCache = undefined;
+			this.completeSeenAt = undefined;
 			return [];
+		}
+		if (data.done === data.total) {
+			if (this.completeSeenAt === undefined) this.completeSeenAt = this.clock();
+			if (this.clock() - this.completeSeenAt > TODO_COMPLETE_LINGER_MS) {
+				this.renderCache = undefined;
+				return [];
+			}
+		} else {
+			this.completeSeenAt = undefined;
 		}
 		const spinner = spinnerGlyphAt(this.clock());
 		const sorted = sortTodosForDisplay(data.items);

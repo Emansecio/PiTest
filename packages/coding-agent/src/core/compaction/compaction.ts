@@ -201,6 +201,10 @@ export interface WireEstimateInput {
 	 */
 	systemPromptText?: string;
 	tools: WireToolSurface[];
+	/** Active model calibration to use for structural-only estimates. */
+	modelId?: string;
+	/** Ignore provider usage anchors and estimate the current wire structure only. */
+	structuralOnly?: boolean;
 	/** Messages not yet appended to session state (e.g. pending user turn). */
 	pendingMessages?: AgentMessage[];
 }
@@ -272,12 +276,20 @@ const calibrationRecordedAnchors = new WeakSet<AgentMessage>();
  * number below is byte-identical to the uncalibrated estimate.
  */
 export function estimateWireTokens(messages: AgentMessage[], input: WireEstimateInput): WireUsageEstimate {
-	const messageEstimate = estimateContextTokens(messages);
+	let messageEstimate: ContextUsageEstimate;
+	if (input.structuralOnly) {
+		let tokens = 0;
+		for (const message of messages) tokens += estimateTokens(message);
+		tokens = Math.round(tokens * tokenEstimateFactor(input.modelId));
+		messageEstimate = { tokens, usageTokens: 0, trailingTokens: tokens, lastUsageIndex: null };
+	} else {
+		messageEstimate = estimateContextTokens(messages);
+	}
 	const anchoredOnUsage = messageEstimate.lastUsageIndex !== null;
 	const anchorModel = anchoredOnUsage
 		? (messages[messageEstimate.lastUsageIndex as number] as AssistantMessage).model
 		: undefined;
-	const factor = tokenEstimateFactor(anchorModel);
+	const factor = tokenEstimateFactor(input.structuralOnly ? input.modelId : anchorModel);
 	let pendingTokens = 0;
 	if (input.pendingMessages) {
 		for (const message of input.pendingMessages) {

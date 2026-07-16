@@ -28,7 +28,7 @@ explicit fan-out and the scout → N reviewers → worker pattern.
 `task` is a multi-op tool. The op is selected by the `op` field (default `run`):
 
 | `op` | Behavior |
-|------|----------|
+| ------ | ---------- |
 | `run` (default) | Blocking — spawn the subagent and return its final answer. |
 | `spawn` | Non-blocking — launch detached and return a `handle`. Collect the result later with `join` (or check `poll`); see [async delegation](#async-delegation). |
 | `poll` | Non-blocking status of the given `handles`. |
@@ -66,19 +66,26 @@ against it and the structured value is returned.
 ## Caps (defaults — override via env)
 
 | Axis | Default | Env |
-|------|---------|-----|
+| ------ | --------- | ----- |
 | Nesting depth | `1` (subagents cannot spawn subagents) | `PIT_SUBAGENT_MAX_DEPTH` |
-| Concurrency | `4` live runs | `PIT_SUBAGENT_MAX_CONCURRENCY` |
+| Concurrency | `4` live Agents (every worker, reviewer, scout, judge, resume) | `PIT_SUBAGENT_MAX_CONCURRENCY` |
+| Queued runs | `8 × concurrency` | `PIT_SUBAGENT_MAX_QUEUE` |
 | Inline digest | `4 KB` head+tail; full text via `op:"read"` | `PIT_SUBAGENT_MAX_BYTES` |
 | Continuable / resumable memory | FIFO `8` live Agents | (fixed) |
+| Persisted resume TTL | `7 days` | (fixed) |
 | Max turns | `50` | per-call `max_turns` |
 
 ## Inspection
 
 Every spawned subagent is recorded on an in-memory registry, including
 status (`pending`, `running`, `completed`, `failed`, `cancelled`), turn
-count, and any error. Records are kept in memory only and are discarded on
-session shutdown. `op:"list"` also shows continuable handles (for `op:"continue"`).
+count, inclusive usage (`input + output + cacheRead + cacheWrite`), and any
+error. Resume/continue follow-ups merge only their newly appended turns into
+the original collision-resolved record. Completed scout/reviewer work is also
+retained when a later fanout worker or acceptance judge fails, so Goal spend
+and `op:"list"` do not lose already-incurred tokens. Records are kept in memory
+only and are discarded on session shutdown. `op:"list"` also shows continuable
+handles (for `op:"continue"`).
 
 ## Constraints
 
@@ -90,8 +97,21 @@ session shutdown. `op:"list"` also shows continuable handles (for `op:"continue"
   budget. At the cap those tools are withheld entirely. Set `PIT_SUBAGENT_MAX_DEPTH=0`
   to disable subagents. (Coordinator tools are stripped by an internal brand, not
   by name.)
+- Every live Agent consumes one process-wide concurrency slot — including
+  `parallel`/`fanout` children, acceptance judges, and resume/continue runs.
+  Nested blocking delegation temporarily yields the parent's slot while its
+  child runs, so `PIT_SUBAGENT_MAX_DEPTH >= 2` cannot deadlock the slot pool.
 - The output a subagent injects into the parent is a digest (`PIT_SUBAGENT_MAX_BYTES`,
   default 4 KB head+tail) plus a pointer; recover the full text with `task({op:"read", name})`.
+  `parallel` and `fanout` apply the same rule per child/stage instead of dumping
+  every integral output into the parent's context.
+- `worktree: true` rebuilds cwd-sensitive native tools (`read`/write/edit/bash/
+  search/AST/LSP/debug/eval tools) against the isolated checkout, preserving the
+  parent session's configured shell/search/runtime options. Rebinding is
+  fail-closed, guards are rooted in the worktree, and the child system prompt
+  names its isolated cwd. Parent-bound `code` and coordinator tools are withheld
+  because their session closures could escape the checkout. Extension/MCP tools
+  are host-owned; pass explicit paths under the worktree when using them.
 - Cancellation: when the parent is interrupted (Esc), in-flight **blocking** and **detached**
   subagents are aborted. A normal turn end does **not** abort detached `spawn` tasks.
   An aborted/dropped run that left a usable transcript becomes
@@ -100,10 +120,12 @@ session shutdown. `op:"list"` also shows continuable handles (for `op:"continue"
 ## Agent types (`.pit/agents/`)
 
 Reusable presets, mirroring Claude Code's `.claude/agents/*.md`. A Markdown file
-with optional frontmatter (`name`, `description`, `tools`, `model`, `thinking`)
-plus a body (the system prompt) defines a type spawnable by name via
-`task({ type: "<name>" })`. Any field set explicitly on the call overrides the
-type's default. Discovery: `<cwd>/.pit/agents/*.md` (project) shadows
+with optional frontmatter (`name`, `description`, `tools`, `model`, `thinking`,
+`memory`) plus a body (the system prompt) defines a type spawnable by name via
+`task({ type: "<name>" })`, per `parallel` task, or per `fanout` stage. Any field
+set explicitly on the call overrides the type's default. A type with
+`memory: true` receives agent-type-scoped `recall`/`retain`/`reflect`; this
+scoping is preserved in structured parallel/fanout runs. Discovery: `<cwd>/.pit/agents/*.md` (project) shadows
 `~/.pit/agents/*.md` (user) on name collision. Built-ins (`explore`, `plan`,
 `review`, `general`) load first. `task({ op: "agents" })` lists the
 loaded types.
@@ -123,8 +145,8 @@ and share the same concurrency / queue caps as blocking runs.
 
 ## Inter-agent messaging
 
-When messaging is enabled (default), parallel subagents get a `message` tool and
-a coordination preamble. `message({ op: "list" })` shows who is online;
+When messaging is enabled (default), subagents launched through `task` run/spawn
+get a `message` tool and a coordination preamble. `message({ op: "list" })` shows who is online;
 `message({ op: "send", to, message })` (a target id or `"all"`) asks a question
 and returns the reply synchronously — so a subagent blocked on something another
 agent owns can ask instead of guessing.
@@ -137,7 +159,11 @@ with `error`/`aborted`) is kept **resumable**, addressed by its `name`/handle.
 intact (pass `prompt` to steer the continuation). Two tiers back this:
 Tier 1 keeps the live `Agent` in memory for the session; Tier 2 persists the
 partial transcript to `<cwd>/.pit/subagents/<handle>.json`, so a resume survives
-a Pit restart. (A subagent whose auto-cleanup worktree was removed on settle
+a Pit restart. Persisted transcripts pass through the same disk-egress secret
+redactor as session artifacts and expire after seven days; stale files are
+removed lazily on list/load. A kept worktree's isolated cwd is persisted too,
+so a Tier-2 resume after restart rebinds tools to that same checkout rather than
+the parent tree. (A subagent whose auto-cleanup worktree was removed on settle
 can't be resumed — use `worktree: { cleanup: "keep" }` if you need that.)
 
 A **successfully finished** subagent (no auto-cleanup worktree) stays
@@ -152,12 +178,21 @@ one automatic retry inside `spawnSubagent`; after that, use `resume`.
 - **`acceptance`** on `task` (and parallel/fanout worker entries): optional
   `criteria` (judge subagent) and/or `check` (shell, exit 0). Retries up to
   `max_attempts` (default 2); on exhaustion returns the last output flagged
-  (`isError: false`, `details.gate.passed: false`).
+  (`isError: false`, `details.gate.passed: false`). Spend includes every worker
+  attempt and semantic judge. For auto-cleanup worktrees, the checkout remains
+  alive through judge/check evaluation and is removed immediately afterwards.
 - **`parallel({ tasks, concurrency? })`**: run an explicit list concurrently
-  (`allSettled` semantics).
+  (`allSettled` semantics). Each task accepts `type`, `model`,
+  `thinking_level`, `allowed_tools`, `result_schema`, and `acceptance`. Child
+  start/progress/complete events surface in the TUI, spend is recorded, and
+  integral outputs remain recoverable through `task({op:"read", name})`.
 - **`fanout({ scout, reviewer, worker, concurrency? })`**: scout lists
   `targets`, reviewers run per target (`{{target}}` in the template), then
-  worker consumes the reviews (optional acceptance on the worker).
+  worker consumes the reviews (optional acceptance on the worker). Every stage
+  accepts its own `type`, `model`, and `thinking_level`, enabling cheap reviewers
+  with a stronger synthesis worker. Stage lifecycle and spend are surfaced like
+  ordinary subagents; scout, reviewer, and worker outputs are digested with
+  `op:"read"` recovery pointers.
 
 ## Programmatic access
 

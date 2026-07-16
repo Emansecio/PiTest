@@ -29,6 +29,13 @@ import { CONFIG_DIR_NAME } from "../config.ts";
 import { spawnProcessSync } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath } from "../utils/paths.ts";
+import {
+	computeSettingsSignature,
+	type ResolveCacheKey,
+	type ResolveWatchSet,
+	readResolveCache,
+	writeResolveCache,
+} from "./resolve-cache.ts";
 import type { PackageSource, SettingsManager } from "./settings-manager.ts";
 
 /**
@@ -892,9 +899,26 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	async resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths> {
-		const accumulator = this.createAccumulator();
 		const globalSettings = this.settingsManager.getGlobalSettings();
 		const projectSettings = this.settingsManager.getProjectSettings();
+
+		// Disk-cache fast path: the effective settings content is part of the
+		// entry key (so any settings change — on disk or in memory — is a miss)
+		// and every scanned dir/manifest/entry file is fingerprint-stamped (see
+		// resolve-cache.ts). A hit replaces the full sync discovery scan with one
+		// parallel stat fan-out. PIT_NO_RESOLVE_CACHE=1 opts out.
+		const cacheKey: ResolveCacheKey = {
+			agentDir: this.agentDir,
+			cwd: this.cwd,
+			homeDir: getHomeDir(),
+			settingsSignature: computeSettingsSignature(globalSettings, projectSettings),
+		};
+		const cached = await readResolveCache(cacheKey);
+		if (cached) {
+			return cached;
+		}
+
+		const accumulator = this.createAccumulator();
 
 		// Collect all packages with scope (project first so cwd resources win collisions)
 		const allPackages: Array<{ pkg: PackageSource; scope: SourceScope }> = [];
@@ -942,7 +966,99 @@ export class DefaultPackageManager implements PackageManager {
 
 		this.addAutoDiscoveredResources(accumulator, globalSettings, projectSettings, globalBaseDir, projectBaseDir);
 
-		return this.toResolvedPaths(accumulator);
+		const result = this.toResolvedPaths(accumulator);
+		const watch = this.collectResolveWatchSet(globalSettings, projectSettings, packageSources);
+		if (watch) {
+			writeResolveCache({ key: cacheKey, watch, result });
+		}
+		return result;
+	}
+
+	/**
+	 * Everything resolve() consumed from disk, as watch roots for the resolve
+	 * cache fingerprint (see resolve-cache.ts for the invalidation contract).
+	 * Returns null when the current configuration is not safely cacheable — a
+	 * user-scope npm package whose managed install dir is missing engages the
+	 * legacy global-npm fallback (an `npm root -g` spawn whose result we cannot
+	 * stamp), so those setups always stay on the live path.
+	 */
+	private collectResolveWatchSet(
+		globalSettings: ReturnType<SettingsManager["getGlobalSettings"]>,
+		projectSettings: ReturnType<SettingsManager["getProjectSettings"]>,
+		packageSources: Array<{ pkg: PackageSource; scope: SourceScope }>,
+	): ResolveWatchSet | null {
+		const treeRoots: string[] = [];
+		const existencePaths: string[] = [];
+		const globalBaseDir = this.agentDir;
+		const projectBaseDir = join(this.cwd, CONFIG_DIR_NAME);
+
+		for (const { pkg, scope } of packageSources) {
+			const sourceStr = this.getPackageSourceString(pkg);
+			const parsed = this.parseSource(sourceStr);
+			if (parsed.type === "local") {
+				treeRoots.push(this.resolvePathFromBase(parsed.path, this.getBaseDirForScope(scope)));
+			} else if (parsed.type === "npm") {
+				const managedPath = this.getManagedNpmInstallPath(parsed, scope);
+				if (scope === "user" && !existsSync(managedPath)) {
+					return null;
+				}
+				treeRoots.push(managedPath);
+			} else if (parsed.type === "git") {
+				treeRoots.push(this.getGitInstallPath(parsed, scope));
+			}
+		}
+
+		// Top-level settings entries (plain paths; pattern entries only gate
+		// enablement and are already covered by the settings signature).
+		for (const resourceType of RESOURCE_TYPES) {
+			const scoped: Array<[string[], string]> = [
+				[(projectSettings[resourceType] ?? []) as string[], projectBaseDir],
+				[(globalSettings[resourceType] ?? []) as string[], globalBaseDir],
+			];
+			for (const [entries, baseDir] of scoped) {
+				for (const entry of entries) {
+					if (isPattern(entry)) {
+						continue;
+					}
+					const resolvedEntry = this.resolvePathFromBase(entry, baseDir);
+					treeRoots.push(resolvedEntry);
+					// A lone .ts extension entry resolves through preferJsSibling
+					// (mtime race against a compiled .js sibling) — watch the sibling
+					// too, even when it does not exist yet (its appearance flips the
+					// resolved path).
+					if (resourceType === "extensions" && /\.tsx?$/.test(resolvedEntry)) {
+						treeRoots.push(resolvedEntry.replace(/\.tsx?$/, ".js"));
+					}
+				}
+			}
+		}
+
+		// Auto-discovery roots (missing dirs are stamped as missing, so their
+		// appearance invalidates).
+		for (const resourceType of RESOURCE_TYPES) {
+			treeRoots.push(join(projectBaseDir, resourceType), join(globalBaseDir, resourceType));
+		}
+		treeRoots.push(join(getHomeDir(), ".agents", "skills"));
+		treeRoots.push(...collectAncestorAgentsSkillDirs(this.cwd));
+
+		// The ancestor .agents/skills walk stops at the git repo root; record the
+		// .git probes it made as existence-only stamps (their mtime churns with
+		// every git operation, but only their presence shapes the walk).
+		let dir = resolve(this.cwd);
+		while (true) {
+			const gitProbe = join(dir, ".git");
+			existencePaths.push(gitProbe);
+			if (existsSync(gitProbe)) {
+				break;
+			}
+			const parent = dirname(dir);
+			if (parent === dir) {
+				break;
+			}
+			dir = parent;
+		}
+
+		return { treeRoots, existencePaths };
 	}
 
 	async resolveExtensionSources(

@@ -1,5 +1,7 @@
+import { sliceByColumn, visibleWidth, wrapTextWithAnsi } from "@pit/tui";
 import * as Diff from "diff";
 import { replaceTabs } from "../../../core/tools/render-utils.ts";
+import { stripAnsi } from "../../../utils/ansi.ts";
 import { getLanguageFromPath, highlightCode, type ThemeColor, theme } from "../theme/theme.ts";
 
 export type RenderDiffOptions = {
@@ -42,7 +44,19 @@ function formatDiffLine(
 	// still need the line-color wrap so unchanged text before the first
 	// emphasizeToken stays tinted.
 	const coloredBody = bodyPreColored ? body : theme.fg(lineColor, body);
-	return `${numRendered} ${signRendered} ${coloredBody}`;
+	const assembled = `${numRendered} ${signRendered} ${coloredBody}`;
+	// Syntax-highlighted bodies make +/−/context foregrounds near-identical, so
+	// added/removed lines also carry a subtle full-line background — the line
+	// itself signals its role, not just the 1-cell sign. Foreground resets
+	// (\x1b[39m) inside the body don't touch the background. Optional token:
+	// custom themes without it keep the sign-only rendering.
+	if (sign !== " ") {
+		const bgAnsi = theme.tryGetBgAnsi(sign === "+" ? "toolDiffAddedBg" : "toolDiffRemovedBg");
+		if (bgAnsi) {
+			return `${bgAnsi}${assembled}\x1b[49m`;
+		}
+	}
+	return assembled;
 }
 
 /**
@@ -293,4 +307,61 @@ export function renderDiff(diffText: string, options?: RenderDiffOptions): strin
 	}
 
 	return result.join("\n");
+}
+
+// Structural shape of a rendered diff line's gutter, matched against the ANSI-stripped
+// text so digit/sign detection isn't thrown off by embedded escape codes: padded line
+// number, a space, the sign (or a space for context lines), a space. Shared by every
+// line formatDiffLine produces and by the hunk-skip "..." marker, whose blank number
+// field and 3-space run before the ellipsis fit the same shape (its "sign" slot is
+// itself a space too) — see the "renders the numberless hunk-skip marker" test.
+const DIFF_GUTTER_PATTERN = /^(\s*\d*) ([-+ ]) /;
+
+/** Visible-column width of a rendered diff line's number+sign gutter, or 0 for lines
+ * that don't have this shape (renderDiff's plain-line fallback for unparseable input). */
+function diffLineGutterWidth(line: string): number {
+	return DIFF_GUTTER_PATTERN.exec(stripAnsi(line))?.[0].length ?? 0;
+}
+
+/**
+ * Wrap one rendered diff line (a line from {@link renderDiff}'s output) to `width`,
+ * keeping word-wrapped continuations aligned under the body instead of falling back to
+ * column 0 — a continuation starting at column 0 is visually indistinguishable from a
+ * fresh +/-/context line, and ambiguous which one. Continuation lines get `gutterWidth`
+ * spaces of hanging indent and the body re-wraps at the narrower remaining width. ANSI
+ * state active at the gutter/body boundary (the +/- background tint, syntax color)
+ * carries into the sliced body, and wrapTextWithAnsi's own tracker re-asserts it on
+ * each wrapped continuation, so backgrounds don't drop mid-line.
+ */
+function wrapDiffLine(line: string, width: number): string[] {
+	const gutterWidth = diffLineGutterWidth(line);
+	if (gutterWidth <= 0 || gutterWidth >= width) {
+		return wrapTextWithAnsi(line, width);
+	}
+	const bodyWidth = width - gutterWidth;
+	// +1 past the body's own visible width so a trailing zero-width ANSI code (the
+	// closing \x1b[49m background reset, at the very end of the line) is still
+	// included — sliceByColumn's range is exclusive of the end column otherwise.
+	const bodyLength = Math.max(0, visibleWidth(line) - gutterWidth) + 1;
+	const body = sliceByColumn(line, gutterWidth, bodyLength);
+	const wrappedBody = wrapTextWithAnsi(body, bodyWidth);
+	const gutter = sliceByColumn(line, 0, gutterWidth);
+	const indent = " ".repeat(gutterWidth);
+	return wrappedBody.map((fragment, i) => (i === 0 ? gutter + fragment : indent + fragment));
+}
+
+/**
+ * Wrap a full {@link renderDiff} body to `width`, one logical diff line at a time,
+ * preserving the number/sign gutter's column alignment on wrapped continuations (see
+ * {@link wrapDiffLine}). Dedicated wrap step for the diff body instead of feeding it
+ * through the generic Text component's word-wrap, which has no notion of a gutter and
+ * lets continuations fall back to column 0.
+ */
+export function wrapDiffBody(body: string, width: number): string[] {
+	if (!body) return [];
+	const result: string[] = [];
+	for (const line of body.split("\n")) {
+		result.push(...wrapDiffLine(line, width));
+	}
+	return result;
 }

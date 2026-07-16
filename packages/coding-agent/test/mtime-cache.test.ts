@@ -190,6 +190,82 @@ describe("createMtimePrefixParseCache (skill frontmatter)", () => {
 	});
 });
 
+describe("createMtimePrefixParseCache.prewarm (parallel async seeding)", () => {
+	let dir: string;
+
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "pit-mtime-prewarm-"));
+	});
+
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	function makeCountingCache() {
+		let parseCount = 0;
+		const cache = createMtimePrefixParseCache<SkillParse>(
+			(rawContent) => {
+				parseCount++;
+				return { frontmatter: parseFrontmatter<Record<string, unknown>>(rawContent).frontmatter };
+			},
+			{
+				prefixBytes: PREFIX_BYTES,
+				prefixIsSufficient: (prefix, ctx) => skillPrefixHasFrontmatterFence(prefix, ctx.atEof),
+			},
+		);
+		return { cache, parseCount: () => parseCount };
+	}
+
+	function writeSkillFile(name: string, content: string): string {
+		const filePath = join(dir, name);
+		writeFileSync(filePath, content);
+		return filePath;
+	}
+
+	it("seeds the cache so later sync reads are pure hits", async () => {
+		const a = writeSkillFile("a.md", `---\nname: a\ndescription: "A"\n---\nbody`);
+		const b = writeSkillFile("b.md", `---\nname: b\ndescription: "B"\n---\n${"x".repeat(40 * 1024)}`);
+		const { cache, parseCount } = makeCountingCache();
+
+		await cache.prewarm([a, b]);
+		expect(parseCount()).toBe(2);
+
+		expect(cache(a).frontmatter.name).toBe("a");
+		expect(cache(b).frontmatter.name).toBe("b");
+		// No re-parse: the sync reads were served from the prewarmed entries.
+		expect(parseCount()).toBe(2);
+		// And the results match the legacy full-read path byte-for-byte.
+		expect(cache(b).frontmatter).toEqual(legacyFullRead(b).frontmatter);
+	});
+
+	it("is idempotent and skips already-fresh entries", async () => {
+		const a = writeSkillFile("a.md", `---\nname: a\ndescription: "A"\n---\nbody`);
+		const { cache, parseCount } = makeCountingCache();
+		await cache.prewarm([a, a]);
+		await cache.prewarm([a]);
+		expect(parseCount()).toBe(1);
+	});
+
+	it("a file changed after prewarm (new mtime) is re-parsed by the sync read", async () => {
+		const a = writeSkillFile("a.md", `---\nname: v1\ndescription: "first"\n---\nbody`);
+		const { cache, parseCount } = makeCountingCache();
+		await cache.prewarm([a]);
+		expect(parseCount()).toBe(1);
+
+		writeFileSync(a, `---\nname: v2\ndescription: "second"\n---\nbody`);
+		const future = new Date(Date.now() + 5000);
+		utimesSync(a, future, future);
+
+		expect(cache(a).frontmatter.name).toBe("v2");
+		expect(parseCount()).toBe(2);
+	});
+
+	it("missing files are skipped silently (sync path owns diagnostics)", async () => {
+		const { cache } = makeCountingCache();
+		await expect(cache.prewarm([join(dir, "missing.md")])).resolves.toBeUndefined();
+	});
+});
+
 describe("createMtimeParseCache (generic, unchanged) still reads whole file", () => {
 	let dir: string;
 

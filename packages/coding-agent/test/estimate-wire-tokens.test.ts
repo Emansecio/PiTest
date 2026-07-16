@@ -207,6 +207,29 @@ describe("estimate calibration wiring (M5)", () => {
 		const raw = estimateTokens(messages[0]);
 		expect(estimate.tokens).toBe(Math.round(raw * 1.5));
 	});
+
+	it("uses the active model calibration for structural-only estimates", () => {
+		recordTokenEstimateSample("global-seed", 10_000, 6_500);
+		recordTokenEstimateSample("active-model", 10_000, 20_000);
+		const calibration = inspectTokenEstimateCalibration();
+		const activeFactor = calibration.byModel["active-model"]?.factor ?? 0;
+		expect(activeFactor).toBe(2);
+		expect(calibration.global?.factor).not.toBe(activeFactor);
+
+		const messages = [user("u".repeat(8_000)), assistantWithUsage(50_000, "stale-model")];
+		const rawMessageTokens = messages.reduce((total, message) => total + estimateTokens(message), 0);
+		const wire = estimateWireTokens(messages, {
+			systemPromptChars: 4_000,
+			tools: [],
+			structuralOnly: true,
+			modelId: "active-model",
+		});
+
+		expect(wire.lastUsageIndex).toBeNull();
+		expect(wire.usageTokens).toBe(0);
+		expect(wire.messageTokens).toBe(Math.round(rawMessageTokens * activeFactor));
+		expect(wire.tokens).toBe(wire.messageTokens + Math.round(wire.systemTokens * activeFactor));
+	});
 });
 
 describe("resolveThinkingHeadroom", () => {

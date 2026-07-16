@@ -51,11 +51,36 @@ export function bicolorColumnColor(col: number, themeInstance: Theme = globalThe
 }
 
 /**
+ * Deterministic hash → [0,1) keyed by integer cell coordinates. Stable across
+ * frames (pure function of the coordinates), so the wordmark mosaic never
+ * shimmers between repaints.
+ */
+function cellHash(x: number, y: number): number {
+	const s = Math.sin(x * 127.1 + y * 311.7 + 13.37) * 43758.5453;
+	return s - Math.floor(s);
+}
+
+/** Scale an RGB value's brightness by `f`, clamping each channel to [0,255]. */
+function scaleRgb({ r, g, b }: Rgb, f: number): Rgb {
+	const c = (v: number) => Math.max(0, Math.min(255, Math.round(v * f)));
+	return { r: c(r), g: c(g), b: c(b) };
+}
+
+/**
  * Hero-wordmark gradient: teal (`accent`) → lavender (`thinkingXhigh`) blended
  * across the letters, so the mark sits inside the same palette as the rest of
  * the UI instead of the old brand neon-green, which read as a different
  * product's logo against the teal/coral theme. The ramp is diagonal — `row`
  * shifts it so color flows top-left → bottom-right over the block glyphs.
+ *
+ * On top of the base ramp the mark is shaded as a PIXEL MOSAIC (Pi-reference
+ * hero): columns are grouped into 2-column "pixel" cells (each `██` pair
+ * shares one color) and every cell gets a deterministic jitter — a shift along
+ * the ramp plus an independent brightness variance — so neighboring pixels
+ * land on visibly different shades, like a hand-dithered pixel-art logo,
+ * instead of a flat linear sweep. The jitter is a pure hash of the cell
+ * coordinates ({@link cellHash}), so it is stable across frames.
+ *
  * Truecolor only; 256-color terminals fall back to the theme's flat `accent`
  * (banding through the color cube reads worse than a solid accent).
  *
@@ -74,8 +99,18 @@ export function heroWordmarkGradient(
 		if (!from || !to) return themeInstance.fg("accent", text);
 		const rowBias = rows <= 1 ? 0 : (row / (rows - 1)) * 0.35;
 		return applyColumnGradient(text, (col, cols) => {
-			const colT = cols <= 1 ? 0 : col / (cols - 1);
-			return rgbFg(lerpRgb(from, to, colT * 0.65 + rowBias));
+			// 2-column pixel cells: both `█` of a pair share one color so the mark
+			// reads as square pixels rather than 1-column stripes.
+			const cell = col >> 1;
+			const cellCount = Math.max(1, Math.ceil(cols / 2));
+			const colT = cellCount <= 1 ? 0 : cell / (cellCount - 1);
+			// Base diagonal ramp + per-cell shift along it (mosaic hue variation).
+			// lerpRgb clamps t, so the jitter can safely push past [0,1].
+			const t = colT * 0.65 + rowBias + (cellHash(cell, row) - 0.5) * 0.3;
+			// Independent per-cell brightness dither (0.78..1.28): some pixels sit
+			// darker, some lighter, like the Pi-reference pixel-art logo.
+			const shade = 0.78 + cellHash(cell * 7 + 5, row * 3 + 1) * 0.5;
+			return rgbFg(scaleRgb(lerpRgb(from, to, t), shade));
 		});
 	};
 }

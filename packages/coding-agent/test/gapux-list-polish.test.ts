@@ -44,7 +44,7 @@ describe("SkillInvocationMessageComponent", () => {
 			userMessage: undefined,
 		});
 		const plain = comp.render(80).map(stripAnsi).join("\n");
-		expect(plain).toContain("◆ skill");
+		expect(plain).toContain("◆ Skill");
 		expect(plain).toContain("review");
 		expect(plain).toContain("│");
 		expect(plain).toMatch(/expand/i);

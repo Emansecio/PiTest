@@ -14,14 +14,14 @@ pit --session <path|id> # Use a specific session file or partial session ID
 pit --fork <path|id>    # Fork a session file or partial session ID into a new session
 ```
 
-Use `/session` in interactive mode to see the current session file, session ID, message count, tokens, and cost.
+Use `/session` in interactive mode to see the current session file, session ID, message count, tokens, and cost. Token and cost totals cover every persisted assistant response incurred in the session, including compacted-away context and inactive branches. Message/tool counts still describe the active materialized context, so navigating or compacting can reduce those counts without erasing lifetime consumption.
 
 For the JSONL file format and SessionManager API, see [Session Format](session-format.md).
 
 ## Session Commands
 
 | Command | Description |
-|---------|-------------|
+| --------- | ------------- |
 | `/resume` | Browse and select previous sessions |
 | `/new` | Start a new session |
 | `/name <name>` | Set the current session display name |
@@ -79,7 +79,7 @@ Example shape:
 ### Tree Controls
 
 | Key | Action |
-|-----|--------|
+| ----- | -------- |
 | ↑/↓ | Navigate visible entries |
 | ←/→ | Page up/down |
 | Ctrl+←/Ctrl+→ or Alt+←/Alt+→ | Fold/unfold or jump between branch segments |
@@ -110,7 +110,7 @@ Selecting the root user message resets the leaf to an empty conversation and pla
 ## `/tree`, `/fork`, and `/clone`
 
 | Feature | `/tree` | `/fork` | `/clone` |
-|---------|---------|---------|----------|
+| --------- | --------- | --------- | ---------- |
 | Output | Same session file | New session file | New session file |
 | View | Full tree | User-message selector | Current active branch |
 | Typical use | Explore alternatives in place | Start a new session from an earlier prompt | Duplicate current work before continuing |

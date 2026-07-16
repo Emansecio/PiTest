@@ -137,6 +137,25 @@ describe("spawnSubagent (faux model)", () => {
 		expect(result.record.turnCount).toBeGreaterThanOrEqual(1);
 	});
 
+	it("streams with short cache retention by default (one-shot run, audit §3.1)", async () => {
+		const rig = newRig();
+		// Subagents never idle past the 5-minute short TTL, so the spawn streamFn
+		// must pass "short" explicitly — otherwise the Anthropic provider default
+		// ("long") pays 2.0× cache-write price for no additional hits.
+		const seenRetentions: Array<string | undefined> = [];
+		rig.faux.setResponses([
+			(_context: Context, options) => {
+				seenRetentions.push(options?.cacheRetention);
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		const result = await spawnSubagent(rig.deps, { prompt: "p", taskName: "retention" });
+
+		expect(result.record.status).toBe("completed");
+		expect(seenRetentions).toEqual(["short"]);
+	});
+
 	it("records the spawn depth on the registry record", async () => {
 		const rig = newRig();
 		rig.faux.setResponses([fauxAssistantMessage("done")]);

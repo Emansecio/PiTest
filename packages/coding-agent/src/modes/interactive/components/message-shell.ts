@@ -59,6 +59,12 @@ export interface MessageShellOptions {
 	 */
 	gutterColor?: (text: string) => string;
 	/**
+	 * Gutter glyph override (default `│`). The user role passes the heavier
+	 * `▌` so "what I asked" is scannable by weight as well as color — color
+	 * alone is a single 1-column signal shared with several other block types.
+	 */
+	gutterChar?: string;
+	/**
 	 * Optional label rendered on the first content line, in bold, in the same
 	 * color as the gutter. Bracket your own label if you want brackets in the
 	 * output (`"[compaction]"` produces `[compaction]`). Kept short.
@@ -105,6 +111,7 @@ const identityColor = (text: string): string => text;
  */
 export class MessageShell extends Container {
 	private gutterColor: (text: string) => string;
+	private gutterChar: string;
 	private frameColor: (text: string) => string;
 	private label: string | undefined;
 	private shellDisabled: boolean;
@@ -131,6 +138,7 @@ export class MessageShell extends Container {
 	constructor(options: MessageShellOptions = {}) {
 		super();
 		this.gutterColor = options.gutterColor ?? identityColor;
+		this.gutterChar = options.gutterChar ?? SHELL_GUTTER_CHAR;
 		this.frameColor = options.frameColor ?? options.gutterColor ?? identityColor;
 		this.label = options.label;
 		this.shellDisabled = options.shellDisabled ?? false;
@@ -271,7 +279,7 @@ export class MessageShell extends Container {
 	}
 
 	private renderGuttered(width: number, childLines: string[]): string[] {
-		const barGutter = this.gutterColor(SHELL_GUTTER_CHAR);
+		const barGutter = this.gutterColor(this.gutterChar);
 		const headGutter = this.gutterSpinner !== undefined ? this.gutterColor(this.gutterSpinner) : barGutter;
 		const result: string[] = [];
 

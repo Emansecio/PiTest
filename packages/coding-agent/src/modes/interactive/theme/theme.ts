@@ -183,6 +183,8 @@ export type ThemeBg =
 	| "toolPendingBg"
 	| "toolSuccessBg"
 	| "toolErrorBg"
+	| "toolDiffAddedBg"
+	| "toolDiffRemovedBg"
 	| "cardBg";
 
 type ColorMode = "truecolor" | "256color";
@@ -420,6 +422,15 @@ export class Theme {
 		return ansi;
 	}
 
+	/**
+	 * Like {@link getBgAnsi} but returns `undefined` for colors the theme does
+	 * not define. Newer optional tokens (e.g. the diff line backgrounds) use
+	 * this so custom themes written before the token existed keep working.
+	 */
+	tryGetBgAnsi(color: ThemeBg): string | undefined {
+		return this.bgColors.get(color);
+	}
+
 	getColorMode(): ColorMode {
 		return this.mode;
 	}
@@ -451,7 +462,7 @@ export class Theme {
 		if (percent > CONTEXT_USAGE_CRITICAL_PERCENT) return (str: string) => `\x1b[1m${this.fg("error", str)}\x1b[22m`;
 		if (percent > CONTEXT_USAGE_ERROR_PERCENT) return (str: string) => this.fg("error", str);
 		if (percent > CONTEXT_USAGE_WARN_PERCENT) return (str: string) => this.fg("warning", str);
-		// Calm band is a real STATE color (teal accent), not neutral gray — the
+		// Calm band is a real STATE color (cyan accent), not neutral gray — the
 		// gauge should read "healthy" at a glance, then escalate by hue.
 		return (str: string) => this.fg("accent", str);
 	}
@@ -620,6 +631,8 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 		"toolPendingBg",
 		"toolSuccessBg",
 		"toolErrorBg",
+		"toolDiffAddedBg",
+		"toolDiffRemovedBg",
 		"cardBg",
 	]);
 	for (const [key, value] of Object.entries(resolvedColors)) {
@@ -754,6 +767,64 @@ export function parseOsc11BackgroundColor(data: string): RgbColor | undefined {
 	return r !== undefined && g !== undefined && b !== undefined ? { r, g, b } : undefined;
 }
 
+// Result of the one-shot OSC 11 handshake (detectTerminalThemeViaOsc11).
+// Cached at module level so every later detectTerminalBackground() call —
+// including synchronous ones after the TUI is running — sees the real
+// terminal background instead of the dark fallback.
+let osc11DetectedTheme: TerminalTheme | undefined;
+
+/**
+ * Ask the terminal for its background color via OSC 11 (`ESC ] 11 ; ? BEL`)
+ * and cache the resulting theme. Used at startup when no theme is saved and
+ * COLORFGBG is absent (Windows Terminal, Apple Terminal, most ssh/tmux
+ * sessions) — without it, a light terminal silently gets the dark palette.
+ *
+ * Resolves `undefined` when stdin/stdout is not a TTY or the terminal does
+ * not answer within `timeoutMs`. Safe to call more than once (cached).
+ */
+export async function detectTerminalThemeViaOsc11(timeoutMs = 100): Promise<TerminalTheme | undefined> {
+	if (osc11DetectedTheme !== undefined) return osc11DetectedTheme;
+	const stdin = process.stdin;
+	const stdout = process.stdout;
+	if (!stdin.isTTY || !stdout.isTTY || typeof stdin.setRawMode !== "function") {
+		return undefined;
+	}
+
+	const rgb = await new Promise<RgbColor | undefined>((resolvePromise) => {
+		let settled = false;
+		let buffer = "";
+		const wasRaw = stdin.isRaw === true;
+		const wasPaused = stdin.isPaused();
+
+		const finish = (result: RgbColor | undefined) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			stdin.removeListener("data", onData);
+			if (!wasRaw) stdin.setRawMode(false);
+			if (wasPaused) stdin.pause();
+			resolvePromise(result);
+		};
+
+		const onData = (chunk: Buffer) => {
+			buffer += chunk.toString("utf8");
+			const match = buffer.match(/\x1b\]11;[^\x07\x1b]*(?:\x07|\x1b\\)/);
+			if (match) finish(parseOsc11BackgroundColor(match[0]));
+		};
+
+		if (!wasRaw) stdin.setRawMode(true);
+		stdin.on("data", onData);
+		stdin.resume();
+		const timer = setTimeout(() => finish(undefined), timeoutMs);
+		timer.unref?.();
+		stdout.write("\x1b]11;?\x07");
+	});
+
+	if (rgb === undefined) return undefined;
+	osc11DetectedTheme = getThemeForRgbColor(rgb);
+	return osc11DetectedTheme;
+}
+
 export function detectTerminalBackground(options: TerminalThemeDetectionOptions = {}): TerminalThemeDetection {
 	const env = options.env ?? process.env;
 	const colorfgbg = env.COLORFGBG || "";
@@ -763,6 +834,15 @@ export function detectTerminalBackground(options: TerminalThemeDetectionOptions 
 			theme: getAnsiColorLuminance(bg) >= 0.5 ? "light" : "dark",
 			source: "COLORFGBG",
 			detail: `background color index ${bg}`,
+			confidence: "high",
+		};
+	}
+
+	if (osc11DetectedTheme !== undefined) {
+		return {
+			theme: osc11DetectedTheme,
+			source: "terminal background",
+			detail: "OSC 11 background query",
 			confidence: "high",
 		};
 	}
@@ -1142,6 +1222,102 @@ function getCliHighlightTheme(t: Theme): CliHighlightTheme {
 	return cachedCliHighlightTheme;
 }
 
+// Module-level memo of highlight.js results keyed by (language, code),
+// independent of render width. hljs lexing costs 1-11ms per code block and its
+// output depends only on (code, lang, active palette) — never on width — yet
+// the downstream per-token line caches (markdown.ts tokenLineCache) are
+// width-keyed, so every resize step used to re-run hljs for every visible code
+// block (~+40-150ms per drag step on a transcript with ~20 blocks; worse after
+// Markdown#freeze() drops the per-token cache entirely).
+//
+// The memo is namespaced by the CONCRETE Theme instance (WeakMap): highlight
+// output embeds ANSI colors resolved from the active palette at highlight
+// time, and a theme switch or theme-file hot-reload always swaps in a
+// brand-new Theme instance (see setGlobalTheme call sites — none mutate an
+// existing instance), so keying by instance both invalidates the memo on any
+// palette change and lets a dead theme's entries be GC'd with it.
+//
+// Inner keys are by string VALUE, so freshly lexed token objects still hit:
+// after freeze()+resize, marked re-lexes the same normalized source and
+// reproduces byte-identical token.text, making post-freeze resizes pure hits.
+//
+// Callers receive a defensive copy per call, never the cached array itself —
+// write.ts's streaming highlight cache mutates the array highlightCode returns
+// in place (highlightedLines[i] = ..., .push(...)), so sharing the cached
+// array would silently corrupt the memo. The copy is O(lines) of pointer
+// copies, noise next to the 1-11ms hljs run it replaces.
+//
+// Eviction follows markdown.ts's cellWrapCache pattern: hard caps, drop the
+// whole per-theme map rather than track LRU — real sessions never accumulate
+// this many distinct (lang, code) blocks between palette changes. Oversized
+// blocks skip the memo entirely so one giant paste can't dominate the budget.
+const MAX_HIGHLIGHT_MEMO_ENTRIES = 512;
+const MAX_HIGHLIGHT_MEMO_TOTAL_CHARS = 2_000_000;
+const MAX_HIGHLIGHT_MEMO_CODE_CHARS = 100_000;
+
+interface HighlightMemo {
+	entries: Map<string, string[]>;
+	/** Sum of the cached entries' code lengths (chars), for the byte-ish cap. */
+	totalChars: number;
+}
+
+const highlightMemoByTheme = new WeakMap<Theme, HighlightMemo>();
+let highlightMemoHits = 0;
+let highlightMemoMisses = 0;
+
+/** Test-only: cumulative memo hit/miss counters plus the entry cap, so the
+ * eviction test overflows the real cap instead of hardcoding it. */
+export function _highlightMemoStats(): { hits: number; misses: number; maxEntries: number } {
+	return { hits: highlightMemoHits, misses: highlightMemoMisses, maxEntries: MAX_HIGHLIGHT_MEMO_ENTRIES };
+}
+
+/** Run highlight.js against the current global theme's palette (uncached). */
+function runHighlight(code: string, validLang: string): string[] {
+	return highlight(code, {
+		language: validLang,
+		ignoreIllegals: true,
+		theme: getCliHighlightTheme(theme),
+	}).split("\n");
+}
+
+/**
+ * Memoized highlight.js run for a validated language (see module docs above).
+ * Throws whatever highlight() throws — callers keep their own fallbacks, and
+ * nothing is cached on the error path.
+ */
+function highlightLinesMemoized(code: string, validLang: string): string[] {
+	if (code.length > MAX_HIGHLIGHT_MEMO_CODE_CHARS) {
+		return runHighlight(code, validLang);
+	}
+	const themeInstance = resolveThemeInstance(theme);
+	let memo = highlightMemoByTheme.get(themeInstance);
+	if (!memo) {
+		memo = { entries: new Map(), totalChars: 0 };
+		highlightMemoByTheme.set(themeInstance, memo);
+	}
+	// Language first, NUL-escape separated (same convention as markdown.ts token
+	// cache keys): hljs language names never contain U+0000, so the key stays
+	// unambiguous for any code content.
+	const key = `${validLang}\u0000${code}`;
+	const cached = memo.entries.get(key);
+	if (cached) {
+		highlightMemoHits++;
+		return cached.slice();
+	}
+	highlightMemoMisses++;
+	const lines = runHighlight(code, validLang);
+	if (
+		memo.entries.size >= MAX_HIGHLIGHT_MEMO_ENTRIES ||
+		memo.totalChars + code.length > MAX_HIGHLIGHT_MEMO_TOTAL_CHARS
+	) {
+		memo.entries.clear();
+		memo.totalChars = 0;
+	}
+	memo.entries.set(key, lines.slice());
+	memo.totalChars += code.length;
+	return lines;
+}
+
 /**
  * Highlight code with syntax coloring based on file extension or language.
  * Returns array of highlighted lines.
@@ -1155,13 +1331,8 @@ export function highlightCode(code: string, lang?: string): string[] {
 	if (!validLang) {
 		return code.split("\n").map((line) => theme.fg("mdCodeBlock", line));
 	}
-	const opts = {
-		language: validLang,
-		ignoreIllegals: true,
-		theme: getCliHighlightTheme(theme),
-	};
 	try {
-		return highlight(code, opts).split("\n");
+		return highlightLinesMemoized(code, validLang);
 	} catch {
 		return code.split("\n");
 	}
@@ -1267,13 +1438,12 @@ export function getMarkdownTheme(): MarkdownTheme {
 			if (!validLang) {
 				return code.split("\n").map((line) => theme.fg("mdCodeBlock", line));
 			}
-			const opts = {
-				language: validLang,
-				ignoreIllegals: true,
-				theme: getCliHighlightTheme(theme),
-			};
 			try {
-				return highlight(code, opts).split("\n");
+				// Memoized per (language, code) and per concrete Theme instance —
+				// see highlightLinesMemoized. hljs output is width-independent, so
+				// resizes/freeze()-invalidated re-renders hit the memo instead of
+				// re-lexing every code block.
+				return highlightLinesMemoized(code, validLang);
 			} catch {
 				return code.split("\n").map((line) => theme.fg("mdCodeBlock", line));
 			}

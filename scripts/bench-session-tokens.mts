@@ -38,6 +38,7 @@ import {
 import { convertToLlm } from "../packages/coding-agent/src/core/messages.ts";
 import { buildSystemPrompt } from "../packages/coding-agent/src/core/system-prompt.ts";
 import { createAllTools } from "../packages/coding-agent/src/core/tools/index.ts";
+import { resolveBenchRoot } from "./lib/bench-root.mts";
 
 const APPROX_CHARS_PER_TOKEN = 3.7;
 const CONTEXT_WINDOW = 1_000_000;
@@ -448,7 +449,10 @@ const scenarioArg = parseScenarioArg(process.argv.slice(2));
 const scenarios: ScenarioName[] =
 	scenarioArg === "all" ? ["explore-heavy", "edit-heavy", "long-reasoning"] : [scenarioArg];
 
-const wirePrefix = measureWirePrefix(process.cwd());
+// DX-02: measure from the script-derived, worktree-normalized repo root — not
+// process.cwd() — so the baseline gate yields identical METRICs in agent
+// worktrees (see scripts/lib/bench-root.mts).
+const wirePrefix = measureWirePrefix(resolveBenchRoot());
 console.log(`bench-session-tokens (context_window=${CONTEXT_WINDOW})`);
 console.log(`shared prefix_tokens: ${wirePrefix.prefixTokens}`);
 

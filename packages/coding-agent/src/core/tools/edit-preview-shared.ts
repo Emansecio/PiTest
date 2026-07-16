@@ -1,5 +1,5 @@
 import { Box, type Component, Spacer, Text } from "@pit/tui";
-import { renderDiff } from "../../modes/interactive/components/diff.js";
+import { renderDiff, wrapDiffBody } from "../../modes/interactive/components/diff.js";
 import { capDiffPreview, EDIT_EXPANDED_MAX_LINES } from "../../modes/interactive/components/tool-activity.ts";
 import type { ToolRenderContext } from "../extensions/types.js";
 import type { EditDiffError, EditDiffResult } from "./edit-diff.ts";
@@ -97,7 +97,11 @@ function resolveEditDiffBody(
 	return body;
 }
 
-/** Text child that caps wrapped diff lines at render time (legacy expanded). */
+/**
+ * Diff body child: wraps via {@link wrapDiffBody} (gutter-aware hanging indent on
+ * wrapped continuations) instead of the generic Text component, and optionally caps
+ * the wrapped line count at render time (legacy expanded).
+ */
 class EditDiffBodyText implements Component {
 	private body: string;
 	private maxLines: number | undefined;
@@ -110,8 +114,7 @@ class EditDiffBodyText implements Component {
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		const inner = new Text(this.body, 0, 0);
-		let lines = inner.render(width);
+		let lines = wrapDiffBody(this.body, width);
 		if (this.maxLines !== undefined) {
 			lines = capDiffPreview(lines, width, this.maxLines);
 		}
@@ -138,11 +141,7 @@ export function appendEditDiffBody(
 	}
 	const body = resolveEditDiffBody(component, preview, path);
 	parent.addChild(new Spacer(1));
-	if (diffMaxLines !== undefined) {
-		parent.addChild(new EditDiffBodyText(body, diffMaxLines));
-	} else {
-		parent.addChild(new Text(body, 0, 0));
-	}
+	parent.addChild(new EditDiffBodyText(body, diffMaxLines));
 }
 
 /**

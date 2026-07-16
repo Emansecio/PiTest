@@ -8,10 +8,18 @@ import { promisify } from "node:util";
 import type { AgentTool } from "@pit/agent-core";
 import { Type } from "typebox";
 import { describeToolAction, type PermissionChecker } from "../permissions/index.ts";
+import { mergeSubagentUsage } from "../token-usage.ts";
 import { truncateTail } from "../tools/truncate.ts";
 import { isCoordinatorTool } from "./brand.ts";
-import { type SpawnSubagentDependencies, spawnSubagent } from "./spawn.ts";
-import type { SpawnSubagentOptions, SpawnSubagentResult, SubagentUsage } from "./types.ts";
+import {
+	attachSubagentUsageToError,
+	cleanupSubagentWorktree,
+	getSubagentErrorUsage,
+	type SpawnSubagentDependencies,
+	spawnSubagent,
+} from "./spawn.ts";
+import type { SpawnSubagentOptions, SpawnSubagentResult, SubagentUsage, WorktreeSpec } from "./types.ts";
+import { retargetToolsForWorktree } from "./worktree-tools.ts";
 
 const execFileP = promisify(execFile);
 
@@ -45,6 +53,8 @@ interface GateVerdict {
 	check_output_tail?: string;
 	criteria_pass?: boolean;
 	check_pass?: boolean;
+	/** Judge-subagent usage incurred while evaluating semantic criteria. */
+	usage?: SubagentUsage;
 }
 
 export interface AcceptanceDependencies extends SpawnSubagentDependencies {
@@ -102,7 +112,7 @@ async function evaluateCriteria(
 	criteria: string,
 	workerOutput: string,
 	spawnOpts: SpawnSubagentOptions,
-): Promise<{ pass: boolean; reasons: string; missing?: string[] }> {
+): Promise<{ pass: boolean; reasons: string; missing?: string[]; usage?: SubagentUsage }> {
 	const workerDepth = spawnOpts.depth ?? 0;
 	const judgePrompt =
 		"You are an acceptance judge. Evaluate whether the worker output satisfies the criteria. " +
@@ -123,9 +133,9 @@ async function evaluateCriteria(
 	});
 	const value = judgeResult.value as { pass: boolean; reasons: string; missing?: string[] } | undefined;
 	if (!value) {
-		return { pass: false, reasons: "judge produced no valid verdict" };
+		return { pass: false, reasons: "judge produced no valid verdict", usage: judgeResult.usage };
 	}
-	return value;
+	return { ...value, usage: judgeResult.usage };
 }
 
 async function evaluateGate(
@@ -143,10 +153,12 @@ async function evaluateGate(
 	let checkPass: boolean | undefined;
 	let reasons: string | undefined;
 	let checkOutputTail: string | undefined;
+	let usage: SubagentUsage | undefined;
 
 	if (acceptance.criteria) {
 		const verdict = await evaluateCriteria(deps, acceptance.criteria, output, spawnOpts);
 		criteriaPass = verdict.pass;
+		usage = verdict.usage;
 		if (!verdict.pass) {
 			reasons = verdict.reasons;
 		}
@@ -172,6 +184,7 @@ async function evaluateGate(
 		check_output_tail: checkOutputTail,
 		criteria_pass: criteriaPass,
 		check_pass: checkPass,
+		usage,
 	};
 }
 
@@ -180,6 +193,24 @@ function formatGateFeedback(verdict: GateVerdict): string {
 	if (verdict.reasons) parts.push(verdict.reasons);
 	if (verdict.check_output_tail) parts.push(verdict.check_output_tail);
 	return parts.join(" / ") || "gate failed";
+}
+
+function addUsage(total: SubagentUsage, usage: SubagentUsage | undefined): void {
+	Object.assign(total, mergeSubagentUsage(total, usage));
+}
+
+function usesAutoCleanupWorktree(worktree: SpawnSubagentOptions["worktree"]): boolean {
+	return worktree === true || (!!worktree && typeof worktree === "object" && worktree.cleanup !== "keep");
+}
+
+function usesKeptWorktree(worktree: SpawnSubagentOptions["worktree"]): boolean {
+	return !!worktree && typeof worktree === "object" && worktree.cleanup === "keep";
+}
+
+function keepWorktree(worktree: SpawnSubagentOptions["worktree"]): WorktreeSpec | undefined {
+	if (!worktree) return undefined;
+	if (worktree === true) return { cleanup: "keep" };
+	return { ...worktree, cleanup: "keep" };
 }
 
 /**
@@ -201,40 +232,93 @@ export async function runWithAcceptance(
 	let lastResult: SpawnSubagentResult | undefined;
 	let lastVerdict: GateVerdict | undefined;
 	let prompt = spawnOpts.prompt;
+	// Whole-gate accounting: every rejected worker attempt plus every semantic
+	// judge run counts toward the parent token governor, not only the final worker.
+	const usage: SubagentUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 };
 
-	while (attempt < maxAttempts) {
-		attempt++;
-		lastResult = await spawnSubagent(deps, {
-			...spawnOpts,
-			prompt,
-			// Fresh worker each attempt — omit taskName on retries so the registry
-			// assigns a unique name instead of colliding.
-			taskName: attempt === 1 ? spawnOpts.taskName : undefined,
-		});
+	try {
+		while (attempt < maxAttempts) {
+			attempt++;
+			const autoCleanup = usesAutoCleanupWorktree(spawnOpts.worktree);
+			const explicitKeep = usesKeptWorktree(spawnOpts.worktree);
+			let attemptWorktreePath: string | undefined;
+			let retainAttemptWorktree = false;
+			const callerWorktreeReady = spawnOpts.onWorktreeReady;
+			try {
+				lastResult = await spawnSubagent(deps, {
+					...spawnOpts,
+					prompt,
+					// Acceptance must inspect the worker's actual checkout. Keep an
+					// auto-cleanup worktree alive through judge/check, then remove it in
+					// this attempt's finally block.
+					worktree: autoCleanup ? keepWorktree(spawnOpts.worktree) : spawnOpts.worktree,
+					onWorktreeReady: (path) => {
+						attemptWorktreePath = path;
+						callerWorktreeReady?.(path);
+					},
+					// Fresh worker each attempt — omit taskName on retries so the registry
+					// assigns a unique name instead of colliding.
+					taskName: attempt === 1 ? spawnOpts.taskName : undefined,
+				});
+				addUsage(usage, lastResult.usage);
 
-		const verdict = await evaluateGate(deps, spawnOpts, acceptance, lastResult);
-		lastVerdict = verdict;
+				const effectiveCwd = attemptWorktreePath ?? spawnOpts.cwd;
+				const gateDeps = attemptWorktreePath
+					? {
+							...deps,
+							availableTools: (deps.retargetToolsForCwd ?? retargetToolsForWorktree)(
+								deps.availableTools,
+								attemptWorktreePath,
+							),
+						}
+					: deps;
+				const verdict = await evaluateGate(
+					gateDeps,
+					{ ...spawnOpts, cwd: effectiveCwd, worktree: undefined },
+					acceptance,
+					lastResult,
+				);
+				addUsage(usage, verdict.usage);
+				lastVerdict = verdict;
 
-		if (verdict.passed) {
-			return {
-				result: lastResult,
-				isError: false,
-				text: lastResult.output,
-				gate: {
-					passed: true,
-					attempts: attempt,
-					criteria_pass: verdict.criteria_pass,
-					check_pass: verdict.check_pass,
-					check_output_tail: verdict.check_output_tail,
-				},
-				usage: lastResult.usage,
-			};
+				if (verdict.passed) {
+					retainAttemptWorktree = explicitKeep;
+					return {
+						result: lastResult,
+						isError: false,
+						text: lastResult.output,
+						gate: {
+							passed: true,
+							attempts: attempt,
+							criteria_pass: verdict.criteria_pass,
+							check_pass: verdict.check_pass,
+							check_output_tail: verdict.check_output_tail,
+						},
+						usage,
+					};
+				}
+
+				if (attempt < maxAttempts) {
+					const feedback = formatGateFeedback(verdict);
+					prompt = `${spawnOpts.prompt}\n\nPrevious attempt rejected: \`${feedback}\`. Address this and retry.`;
+				} else {
+					// Exhausted: an explicit cleanup:"keep" retains only the FINAL
+					// checkout for inspection; every rejected earlier attempt is removed.
+					retainAttemptWorktree = explicitKeep;
+				}
+			} finally {
+				if (attemptWorktreePath && (autoCleanup || (explicitKeep && !retainAttemptWorktree))) {
+					await cleanupSubagentWorktree(spawnOpts.cwd ?? process.cwd(), attemptWorktreePath);
+				}
+			}
 		}
-
-		if (attempt < maxAttempts) {
-			const feedback = formatGateFeedback(verdict);
-			prompt = `${spawnOpts.prompt}\n\nPrevious attempt rejected: \`${feedback}\`. Address this and retry.`;
-		}
+	} catch (error) {
+		// Worker/judge spawn failures carry their own usage. Fold it into the
+		// aggregate accumulated so far and propagate that aggregate on the same
+		// error object, allowing every coordinator path to charge incurred spend.
+		addUsage(usage, getSubagentErrorUsage(error));
+		attachSubagentUsageToError(error, usage);
+		throw error;
 	}
 
 	const gate: GateDetails = {
@@ -251,7 +335,7 @@ export async function runWithAcceptance(
 		isError: false,
 		text,
 		gate,
-		usage: lastResult?.usage,
+		usage,
 	};
 }
 

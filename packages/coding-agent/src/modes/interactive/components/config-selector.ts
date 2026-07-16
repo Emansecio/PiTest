@@ -23,6 +23,8 @@ import { checkboxGlyph, rawKeyHint, selectionCursor, themedScrollPositionHint } 
 import { paintSelectedRow } from "./selectable-row.ts";
 import { SelectorCard } from "./selector-card.ts";
 
+const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(value, max));
+
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 
 const RESOURCE_TYPE_LABELS: Record<ResourceType, string> = {
@@ -189,10 +191,9 @@ class ConfigSelectorHeader implements Component {
 		const titleWidth = visibleWidth(title);
 		const spacing = Math.max(1, width - titleWidth - hintWidth);
 
-		return [
-			truncateToWidth(`${title}${" ".repeat(spacing)}${hint}`, width, ""),
-			theme.fg("muted", "Type to filter resources"),
-		];
+		// No "Type to filter" line here — the search Input carries a placeholder
+		// with the same message, saving one row of vertical chrome.
+		return [truncateToWidth(`${title}${" ".repeat(spacing)}${hint}`, width, "")];
 	}
 }
 
@@ -202,7 +203,7 @@ class ResourceList implements Component, Focusable {
 	private filteredItems: FlatEntry[] = [];
 	private selectedIndex = 0;
 	private searchInput: Input;
-	private maxVisible: number;
+	private terminalRows?: () => number;
 	private settingsManager: SettingsManager;
 	private cwd: string;
 	private agentDir: string;
@@ -225,18 +226,31 @@ class ResourceList implements Component, Focusable {
 		settingsManager: SettingsManager,
 		cwd: string,
 		agentDir: string,
-		terminalHeight?: number,
+		terminalRows?: () => number,
 	) {
 		this.groups = groups;
 		this.settingsManager = settingsManager;
 		this.cwd = cwd;
 		this.agentDir = agentDir;
-		this.searchInput = new Input();
-		// 8 lines of chrome: top spacer + top border + spacer + header (2 lines) + spacer + bottom spacer + bottom border
-		const chrome = 8;
-		this.maxVisible = Math.max(5, (terminalHeight ?? 24) - chrome);
+		this.searchInput = new Input({
+			placeholder: "Type to filter resources…",
+			placeholderColor: (t) => theme.fg("dim", t),
+		});
+		this.terminalRows = terminalRows;
 		this.buildFlatList();
 		this.filteredItems = [...this.flatItems];
+	}
+
+	/**
+	 * Same window sizing as SelectorShell/model-selector: `clamp(rows - 12, 5, 15)`
+	 * leaves room for card chrome, header, search box and scroll lines, and caps
+	 * density at 15 rows like every other selector. Recomputed per call so
+	 * terminal resizes stick.
+	 */
+	private maxVisible(): number {
+		const rows = this.terminalRows?.();
+		if (typeof rows === "number" && rows > 0) return clamp(rows - 12, 5, 15);
+		return 10;
 	}
 
 	private buildFlatList(): void {
@@ -256,8 +270,18 @@ class ResourceList implements Component, Focusable {
 	}
 
 	private findNextItem(fromIndex: number, direction: 1 | -1): number {
+		const len = this.filteredItems.length;
 		let idx = fromIndex + direction;
-		while (idx >= 0 && idx < this.filteredItems.length) {
+		while (idx >= 0 && idx < len) {
+			if (this.filteredItems[idx].type === "item") {
+				return idx;
+			}
+			idx += direction;
+		}
+		// Wrap around (list convention across selectors): resume the scan from
+		// the opposite end, stopping back at the origin if no other item exists.
+		idx = direction === 1 ? 0 : len - 1;
+		while (idx >= 0 && idx < len && idx !== fromIndex) {
 			if (this.filteredItems[idx].type === "item") {
 				return idx;
 			}
@@ -351,11 +375,12 @@ class ResourceList implements Component, Focusable {
 		}
 
 		// Calculate visible range
+		const maxVisible = this.maxVisible();
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
+			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredItems.length - maxVisible),
 		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+		const endIndex = Math.min(startIndex + maxVisible, this.filteredItems.length);
 
 		for (let i = startIndex; i < endIndex; i++) {
 			const entry = this.filteredItems[i];
@@ -409,7 +434,7 @@ class ResourceList implements Component, Focusable {
 		}
 		if (kb.matches(data, "tui.select.pageUp")) {
 			// Jump up by maxVisible, then find nearest item
-			let target = Math.max(0, this.selectedIndex - this.maxVisible);
+			let target = Math.max(0, this.selectedIndex - this.maxVisible());
 			while (target < this.filteredItems.length && this.filteredItems[target].type !== "item") {
 				target++;
 			}
@@ -420,7 +445,7 @@ class ResourceList implements Component, Focusable {
 		}
 		if (kb.matches(data, "tui.select.pageDown")) {
 			// Jump down by maxVisible, then find nearest item
-			let target = Math.min(this.filteredItems.length - 1, this.selectedIndex + this.maxVisible);
+			let target = Math.min(this.filteredItems.length - 1, this.selectedIndex + this.maxVisible());
 			while (target >= 0 && this.filteredItems[target].type !== "item") {
 				target--;
 			}
@@ -429,7 +454,14 @@ class ResourceList implements Component, Focusable {
 			}
 			return;
 		}
+		// Two-step Esc: a non-empty search is cleared first, and only a second
+		// Esc (empty search) closes — mirrors SelectorShell/model-selector.
 		if (kb.matches(data, "tui.select.cancel")) {
+			if (this.searchInput.getValue().length > 0) {
+				this.searchInput.setValue("");
+				this.filterItems("");
+				return;
+			}
 			this.onCancel?.();
 			return;
 		}
@@ -604,7 +636,7 @@ export class ConfigSelectorComponent extends Container implements Focusable {
 		onClose: () => void,
 		onExit: () => void,
 		requestRender: () => void,
-		terminalHeight?: number,
+		terminalRows?: () => number,
 	) {
 		super();
 
@@ -618,7 +650,7 @@ export class ConfigSelectorComponent extends Container implements Focusable {
 		card.addChild(new Spacer(1));
 
 		// Resource list
-		this.resourceList = new ResourceList(groups, settingsManager, cwd, agentDir, terminalHeight);
+		this.resourceList = new ResourceList(groups, settingsManager, cwd, agentDir, terminalRows);
 		this.resourceList.onCancel = onClose;
 		this.resourceList.onExit = onExit;
 		this.resourceList.onToggle = () => requestRender();

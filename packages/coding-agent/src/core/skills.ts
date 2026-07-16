@@ -200,24 +200,29 @@ export function loadSkillsFromDir(options: LoadSkillsFromDirOptions): LoadSkills
 // pathological-but-acyclic deep trees as well.
 const MAX_SKILL_WALK_DEPTH = 32;
 
-function loadSkillsFromDirInternal(
+/**
+ * Walk a skills directory and invoke `visit` for every skill markdown file, in
+ * the exact order (and with the exact discovery rules) the loader consumes
+ * them: a SKILL.md ends its directory's walk, dot/node_modules entries are
+ * skipped, ignore files apply, symlink cycles terminate. Extracted from the
+ * former loadSkillsFromDirInternal body so the async frontmatter prewarm can
+ * enumerate the same file set without parsing anything.
+ */
+function visitSkillFiles(
 	dir: string,
-	source: string,
 	includeRootFiles: boolean,
+	visit: (filePath: string) => void,
 	ignoreMatcher?: IgnoreMatcher,
 	rootDir?: string,
 	visited?: Set<string>,
 	depth: number = 0,
-): LoadSkillsResult {
-	const skills: Skill[] = [];
-	const diagnostics: ResourceDiagnostic[] = [];
-
+): void {
 	if (!existsSync(dir)) {
-		return { skills, diagnostics };
+		return;
 	}
 
 	if (depth > MAX_SKILL_WALK_DEPTH) {
-		return { skills, diagnostics };
+		return;
 	}
 
 	// Track canonical directory paths already walked so a symlink/junction cycle
@@ -253,12 +258,8 @@ function loadSkillsFromDirInternal(
 				continue;
 			}
 
-			const result = loadSkillFromFile(fullPath, source);
-			if (result.skill) {
-				skills.push(result.skill);
-			}
-			diagnostics.push(...result.diagnostics);
-			return { skills, diagnostics };
+			visit(fullPath);
+			return;
 		}
 
 		for (const entry of entries) {
@@ -301,9 +302,7 @@ function loadSkillsFromDirInternal(
 					continue;
 				}
 				seen.add(canonicalChild);
-				const subResult = loadSkillsFromDirInternal(fullPath, source, false, ig, root, seen, depth + 1);
-				skills.push(...subResult.skills);
-				diagnostics.push(...subResult.diagnostics);
+				visitSkillFiles(fullPath, false, visit, ig, root, seen, depth + 1);
 				continue;
 			}
 
@@ -311,13 +310,22 @@ function loadSkillsFromDirInternal(
 				continue;
 			}
 
-			const result = loadSkillFromFile(fullPath, source);
-			if (result.skill) {
-				skills.push(result.skill);
-			}
-			diagnostics.push(...result.diagnostics);
+			visit(fullPath);
 		}
 	} catch {}
+}
+
+function loadSkillsFromDirInternal(dir: string, source: string, includeRootFiles: boolean): LoadSkillsResult {
+	const skills: Skill[] = [];
+	const diagnostics: ResourceDiagnostic[] = [];
+
+	visitSkillFiles(dir, includeRootFiles, (fullPath) => {
+		const result = loadSkillFromFile(fullPath, source);
+		if (result.skill) {
+			skills.push(result.skill);
+		}
+		diagnostics.push(...result.diagnostics);
+	});
 
 	return { skills, diagnostics };
 }
@@ -704,4 +712,65 @@ export function loadSkills(options: LoadSkillsOptions): LoadSkillsResult {
 		skills: Array.from(skillMap.values()),
 		diagnostics: [...allDiagnostics, ...collisionDiagnostics],
 	};
+}
+
+/**
+ * Enumerate every skill markdown file `loadSkills` would read for the same
+ * options, without parsing anything. Duplicate paths across sources are fine —
+ * the prewarm consumer dedupes via its per-file cache.
+ */
+function collectSkillFiles(options: LoadSkillsOptions): string[] {
+	const { cwd, agentDir, skillPaths, includeDefaults } = options;
+	const resolvedAgentDir = agentDir ?? getAgentDir();
+	const files: string[] = [];
+	const push = (filePath: string) => files.push(filePath);
+
+	if (includeDefaults) {
+		visitSkillFiles(join(resolvedAgentDir, "skills"), true, push);
+		visitSkillFiles(resolve(cwd, CONFIG_DIR_NAME, "skills"), true, push);
+		const claudeSkillsDir = getClaudeCodeSkillsDir();
+		if (claudeSkillsDir && existsSync(claudeSkillsDir)) {
+			visitSkillFiles(claudeSkillsDir, true, push);
+		}
+	}
+
+	for (const rawPath of skillPaths) {
+		const resolvedPath = resolveSkillPath(rawPath, cwd);
+		if (!existsSync(resolvedPath)) {
+			continue;
+		}
+		try {
+			const stats = statSync(resolvedPath);
+			if (stats.isDirectory()) {
+				visitSkillFiles(resolvedPath, true, push);
+			} else if (stats.isFile() && resolvedPath.endsWith(".md")) {
+				files.push(resolvedPath);
+			}
+		} catch {
+			// Unreadable path — the sync loader owns the diagnostic.
+		}
+	}
+
+	return files;
+}
+
+/**
+ * Warm the SKILL.md frontmatter cache for everything `loadSkills(options)`
+ * will read, with fs/promises reads fanned out in parallel. On a cold boot the
+ * subsequent sync load pass becomes pure in-memory hits instead of ~1 serial
+ * open/read/parse per skill file (~160 files ≈ 200ms of blocking I/O). Purely
+ * a warm-up: results, ordering and diagnostics are still produced by the sync
+ * path, so behavior is byte-identical with or without it.
+ *
+ * Escape hatch: PIT_NO_SKILL_PREWARM=1 skips the warm-up (reads stay serial).
+ */
+export async function prewarmSkillFrontmatter(options: LoadSkillsOptions): Promise<void> {
+	if (isTruthyEnvFlag(process.env.PIT_NO_SKILL_PREWARM)) {
+		return;
+	}
+	try {
+		await skillFrontmatterCache.prewarm(collectSkillFiles(options));
+	} catch {
+		// Best-effort warm-up — the sync loader remains the source of truth.
+	}
 }

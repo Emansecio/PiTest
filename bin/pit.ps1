@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-Path (Join-Path $scriptDir "..")
-$tsxBin = Join-Path $repoRoot "node_modules\.bin\tsx.cmd"
+$tsxLoader = Join-Path $repoRoot "node_modules\tsx\dist\loader.mjs"
 
 # Honor any explicit override the user set before invoking pit.
 if (-not $env:PIT_CODING_AGENT_DIR) {
@@ -22,11 +22,15 @@ if (-not (Test-Path $env:PIT_TMP_DIR)) {
 $env:TMP = $env:PIT_TMP_DIR
 $env:TEMP = $env:PIT_TMP_DIR
 
-if (-not (Test-Path $tsxBin)) {
-    Write-Error "pit: tsx not found at $tsxBin. Run 'npm install' in $repoRoot first."
+if (-not (Test-Path $tsxLoader)) {
+    Write-Error "pit: tsx not found at $tsxLoader. Run 'npm install' in $repoRoot first."
     exit 1
 }
 
+# Load the tsx loader in-process (`node --import`) instead of spawning the tsx
+# wrapper (.cmd shim + wrapper process). Same tsx pipeline/cache, ~1s faster.
+$tsxLoaderUrl = "file:///" + ($tsxLoader -replace '\\', '/')
+
 $cli = Join-Path $repoRoot "packages\coding-agent\src\cli.ts"
-& $tsxBin $cli @args
+& node --import $tsxLoaderUrl $cli @args
 exit $LASTEXITCODE
