@@ -562,6 +562,12 @@ export async function getOrCreateClient(config: ServerConfig, cwd: string, initT
 		}
 	})();
 
+	// Bind the ownership token now that the promise exists (see the `let selfLock`
+	// note above). Without this, the onExit/catch/finally guards compare against
+	// `undefined` and never match, so `clientLocks` entries are never cleaned up —
+	// a leak that makes later shutdownAll/shutdownClientsForCwd calls resolve stale
+	// locks to already-dead processes and pay the full shutdown+exit timeout on each.
+	selfLock = clientPromise;
 	clientLocks.set(key, clientPromise);
 	return clientPromise;
 }
