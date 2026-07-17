@@ -337,14 +337,18 @@ export function createAstEditToolDefinition(
 					path: targetPath || ".",
 					apply: async () => {
 						const applyArgs = [...baseArgs, "--update-all", target];
-						await withFileMutationQueues(applyQueuePaths(matches, cwd, target), async () => {
-							const applyRes = await execAstGrep(binary, applyArgs, cwd);
-							if (applyRes.missing) throw new Error(AST_GREP_INSTALL_HINT);
-							if (applyRes.overflow) throw new Error(AST_EDIT_OVERFLOW_HINT);
-							if (applyRes.code !== 0 && applyRes.code !== 1) {
-								throw new Error(applyRes.stderr.trim() || `ast-grep exited with code ${applyRes.code}`);
-							}
-						});
+						await withFileMutationQueues(
+							applyQueuePaths(matches, cwd, target),
+							async () => {
+								const applyRes = await execAstGrep(binary, applyArgs, cwd);
+								if (applyRes.missing) throw new Error(AST_GREP_INSTALL_HINT);
+								if (applyRes.overflow) throw new Error(AST_EDIT_OVERFLOW_HINT);
+								if (applyRes.code !== 0 && applyRes.code !== 1) {
+									throw new Error(applyRes.stderr.trim() || `ast-grep exited with code ${applyRes.code}`);
+								}
+							},
+							{ snapshot: { tool: "ast_edit" } },
+						);
 					},
 					summary: {
 						description: `ast_edit ${targetPath || "."}: ${replacementCount} replacement(s) in ${fileCount} file(s)`,
@@ -404,8 +408,10 @@ export function createAstEditToolDefinition(
 					details: { replacementCount: 0, fileCount: 0 },
 				};
 			}
-			const res = await withFileMutationQueues(applyQueuePaths(matches, cwd, target), () =>
-				execAstGrep(binary, [...baseArgs, "--update-all", target], cwd, signal),
+			const res = await withFileMutationQueues(
+				applyQueuePaths(matches, cwd, target),
+				() => execAstGrep(binary, [...baseArgs, "--update-all", target], cwd, signal),
+				{ snapshot: { tool: "ast_edit" } },
 			);
 			if (res.missing) {
 				return {

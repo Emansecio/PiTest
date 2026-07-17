@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { captureSnapshot } from "../file-snapshots.ts";
 import { canonicalPathKey } from "./path-utils.ts";
 
 // Re-export the shared realpath-cache test seams so existing importers of this
@@ -40,18 +41,44 @@ function getMutationQueueKey(filePath: string): string {
 const FILE_MUTATION_TIMEOUT_MS = 120_000;
 
 /**
+ * Intent to snapshot a file's current bytes as a pre-image before the queued
+ * mutation runs. `tool` records which tool triggered the capture (edit/write/
+ * undo/...) for `undo`/`/rewind` display.
+ */
+export interface SnapshotIntent {
+	tool: string;
+}
+
+/**
+ * Options for {@link withFileMutationQueue}. Also accepted as a bare number for
+ * backward compatibility (legacy `timeoutMs` positional callers).
+ */
+export interface MutationQueueOptions {
+	timeoutMs?: number;
+	/**
+	 * When set, capture the file's current bytes as a pre-image inside the
+	 * critical section, BEFORE `fn` runs — atomic with the write `fn` performs.
+	 */
+	snapshot?: SnapshotIntent;
+}
+
+/**
  * Serialize file mutation operations targeting the same file.
  * Operations for different files still run in parallel.
  *
- * `timeoutMs` bounds a single operation so a hung `fn` can't wedge the file's
- * queue indefinitely (see {@link FILE_MUTATION_TIMEOUT_MS}); pass a smaller
- * value in tests that deliberately exercise the timeout path.
+ * `optionsOrTimeout` bounds a single operation (`timeoutMs`) so a hung `fn`
+ * can't wedge the file's queue indefinitely (see {@link FILE_MUTATION_TIMEOUT_MS}),
+ * and optionally requests a pre-image snapshot (`snapshot`) captured atomically
+ * with the mutation. A bare number is still accepted as the legacy `timeoutMs`.
  */
 export async function withFileMutationQueue<T>(
 	filePath: string,
 	fn: () => Promise<T>,
-	timeoutMs: number = FILE_MUTATION_TIMEOUT_MS,
+	optionsOrTimeout?: number | MutationQueueOptions,
 ): Promise<T> {
+	const options: MutationQueueOptions =
+		typeof optionsOrTimeout === "number" ? { timeoutMs: optionsOrTimeout } : (optionsOrTimeout ?? {});
+	const timeoutMs = options.timeoutMs ?? FILE_MUTATION_TIMEOUT_MS;
 	const key = getMutationQueueKey(filePath);
 	const currentQueue = fileMutationQueues.get(key) ?? Promise.resolve();
 
@@ -65,6 +92,11 @@ export async function withFileMutationQueue<T>(
 	await currentQueue;
 	let timer: NodeJS.Timeout | undefined;
 	try {
+		// Capture the pre-image while we hold the file's lock, before the mutation
+		// runs — so nothing can slip a write in between the snapshot and `fn`.
+		if (options.snapshot) {
+			await captureSnapshot(resolve(filePath), options.snapshot.tool);
+		}
 		const timeout = new Promise<never>((_resolve, reject) => {
 			timer = setTimeout(() => {
 				reject(new Error(`File mutation for ${filePath} timed out after ${timeoutMs}ms`));
@@ -91,7 +123,7 @@ export async function withFileMutationQueue<T>(
 export async function withFileMutationQueues<T>(
 	filePaths: readonly string[],
 	fn: () => Promise<T>,
-	timeoutMs: number = FILE_MUTATION_TIMEOUT_MS,
+	optionsOrTimeout?: number | MutationQueueOptions,
 ): Promise<T> {
 	if (filePaths.length === 0) return fn();
 	const byKey = new Map<string, string>();
@@ -105,7 +137,7 @@ export async function withFileMutationQueues<T>(
 
 	const runAt = async (index: number): Promise<T> => {
 		if (index >= ordered.length) return fn();
-		return withFileMutationQueue(ordered[index], () => runAt(index + 1), timeoutMs);
+		return withFileMutationQueue(ordered[index], () => runAt(index + 1), optionsOrTimeout);
 	};
 	return runAt(0);
 }

@@ -70,6 +70,13 @@ export {
 	truncateTail,
 } from "./truncate.ts";
 export {
+	createUndoTool,
+	createUndoToolDefinition,
+	type UndoToolDetails,
+	type UndoToolInput,
+	type UndoToolOptions,
+} from "./undo.ts";
+export {
 	createWriteTool,
 	createWriteToolDefinition,
 	type WriteOperations,
@@ -128,6 +135,7 @@ import {
 import { createSymbolToolDefinition, type SymbolToolOptions } from "./symbol.ts";
 import { createTodoToolDefinition, type TodoToolOptions } from "./todo.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { createUndoToolDefinition, type UndoToolOptions } from "./undo.ts";
 import { createWebSearchToolDefinition, type WebSearchToolOptions } from "./web-search.ts";
 import { createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
@@ -241,6 +249,14 @@ const TOOL_REGISTRY = {
 		optionsKey: "write",
 		readOnly: false,
 		coding: "always",
+	},
+	undo: {
+		definitionFactory: createUndoToolDefinition,
+		optionsKey: "undo",
+		readOnly: false,
+		// Native + default-on: reverts the last edit/write of one file from its
+		// automatic pre-image snapshot. Opt out of capture via PIT_NO_FILE_SNAPSHOTS.
+		coding: "native",
 	},
 	grep: {
 		definitionFactory: createGrepToolDefinition,
@@ -707,6 +723,7 @@ export interface ToolsOptions {
 	read?: ReadToolOptions;
 	bash?: BashToolOptions;
 	write?: WriteToolOptions;
+	undo?: UndoToolOptions;
 	edit?: EditToolOptions;
 	edit_v2?: EditHashlineToolOptions;
 	grep?: GrepToolOptions;

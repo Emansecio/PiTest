@@ -122,6 +122,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "todos", description: "Show the current todo list", group: "Session" },
 	{
+		name: "rewind",
+		description: "Roll back files to an earlier turn (restores every file that turn touched)",
+		group: "Session",
+	},
+	{
 		name: "chrome",
 		description: "Start/connect Chrome; add text before or after to run it in the browser",
 		group: "Advanced",

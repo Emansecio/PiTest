@@ -20,6 +20,7 @@ export interface SlashCommandHost {
 	showTreeSelector(): void | Promise<void>;
 	showUserMessageSelector(): void | Promise<void>;
 	handleSessionCommand(): void | Promise<void>;
+	showRewindSelector(): void | Promise<void>;
 	handleCacheStatusCommand(): void | Promise<void>;
 	handleDiagnosticsCommand(): void | Promise<void>;
 	handleHelpCommand(): void | Promise<void>;
@@ -56,6 +57,7 @@ export const DISPATCHED_SLASH_COMMAND_NAMES = [
 	"tree",
 	"fork",
 	"session",
+	"rewind",
 	"cache-status",
 	"diagnostics",
 	"help",
@@ -77,6 +79,7 @@ export const exactSlashCommands = new Map<string, (host: SlashCommandHost) => vo
 	["/tree", (host) => host.showTreeSelector()],
 	["/fork", (host) => host.showUserMessageSelector()],
 	["/session", (host) => host.handleSessionCommand()],
+	["/rewind", (host) => host.showRewindSelector()],
 	["/cache-status", (host) => host.handleCacheStatusCommand()],
 	["/diagnostics", (host) => host.handleDiagnosticsCommand()],
 	["/help", (host) => host.handleHelpCommand()],

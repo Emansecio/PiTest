@@ -135,6 +135,23 @@ servidor/arquivo que nunca publica diagnostics (4s/edição, agora ~150ms após
 | `PIT_LSP_SILENCE_GRACE_MS` | Espera de graça (ms) usada quando o par arquivo+servidor foi marcado silencioso (≥2 misses consecutivos). | `150` | `lsp/utils.ts` | numérica |
 | `PIT_NO_LSP_CROSS_FILE_SURFACE` | Desativa o surfacing de diagnostics cross-file no apêndice do writethrough — volta a mostrar só o arquivo editado. Sem a flag, publishes de OUTROS arquivos que ganharam erros novos vs baseline (ex.: gopls publica por pacote) entram no apêndice do edit, limitados a 3 arquivos × 2 diagnostics, sem nenhuma espera adicional (best-effort: lê o que já chegou no map). | OFF (surfacing ligado) | `lsp/writethrough.ts` `crossFileSurfaceDisabled` | `isTruthyEnvFlag` |
 
+### Absorções do forgecode — onda 1 (2026-07-17)
+
+Quatro mecanismos portados/adaptados da análise do forgecode, todos
+on-by-default. Snapshots preenchem o gap de checkpoint/rewind de arquivos;
+reparo de tool calls elimina retries de argumentos malformados sem round-trip;
+doom-loop cíclico e retry budget endurecem o loop contra repetição improdutiva.
+
+| Variável | Efeito | Default | Onde é lida | Convenção |
+|---|---|---|---|---|
+| `PIT_NO_FILE_SNAPSHOTS` | Desativa a captura de snapshot pré-mutação de arquivos (feita no choke point da fila de mutação por arquivo; pula criação de arquivo novo). Sem snapshots, a tool `undo` e o comando `/rewind` reportam indisponibilidade. | OFF (captura ligada) | `core/file-snapshots.ts` | `isTruthyEnvFlag` |
+| `PIT_SNAPSHOT_MAX_PER_FILE` | Cap de snapshots retidos por arquivo (LRU — o mais antigo é descartado). | `20` | `core/file-snapshots.ts` | numérica (inteiro ≥ 1) |
+| `PIT_SNAPSHOT_MAX_AGE_DAYS` | Idade máxima (dias) antes do GC preguiçoso descartar um snapshot (roda na captura). `0` = sem GC por idade. | `7` | `core/file-snapshots.ts` | numérica (≥ 0) |
+| `PIT_NO_TOOLCALL_REPAIR` | Desativa a camada nativa de reparo de tool calls (tier estrutural `jsonrepair` + coerção dirigida pelo schema: `"42"`→42, `""`→null em opcionais, array/objeto stringificado, JSON duplo-encodado ≤4 níveis, extração de array, enum case-insensitive). Roda entre os rewrite registries (que continuam vencendo) e a validação — sem round-trip de modelo. Stats via `getToolArgRepairStats()`. | OFF (reparo ligado) | `packages/agent/src/tool-arg-repair.ts` (wired em `agent-loop.ts` `prepareToolCall`) | `isTruthyEnvFlag` |
+| `PIT_NO_DOOM_LOOP_GUARD` | Desativa o detector de doom-loop CÍCLICO (n-gram no tail das tool calls: mesmo bloco de período 1..N repetido 3× com args idênticos → steering reminder único, com escalada se o ciclo persistir). Complementa `PIT_NO_REPEATING_PATTERN` (repetição simples), que também o desativa. | OFF (guard ligado) | `core/turn-steering-engine.ts` (detector puro em `core/doom-loop-cycle.ts`) | `isTruthyEnvFlag` |
+| `PIT_NO_TOOL_RETRY_BUDGET` | Desativa o contador de retry budget por (tool, alvo) anexado inline a resultados de erro ("attempts on `edit` for this target: 2/3"), com escalada textual na exaustão (nunca bloqueia — steering apenas). Consecutivo; reseta em sucesso do par ou novo turno do usuário. | OFF (budget ligado) | `core/tool-retry-budget.ts` via Tier-4 error-hint registry (`turn-steering-engine.ts`) | `isTruthyEnvFlag` |
+| `PIT_TOOL_RETRY_BUDGET` | Tamanho do budget de falhas consecutivas por (tool, alvo) antes da escalada. Inválido/≤0 cai no default (nunca zero — seria bloqueio permanente). | `3` | `core/tool-retry-budget.ts` | numérica (inteiro ≥ 1) |
+
 ### Navegador nativo (chrome devtools) — auditoria 2026-07-16
 
 | Variável | Efeito | Default | Onde é lida | Convenção |

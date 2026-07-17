@@ -269,23 +269,27 @@ export function createWriteToolDefinition(
 					kind: "write",
 					path,
 					apply: async () => {
-						await withFileMutationQueue(absolutePath, async () => {
-							if (ops === defaultWriteOperations && stagedMtimeMs !== undefined) {
-								const curStat = await fsStat(absolutePath).catch(() => undefined);
-								if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
-									throw new Error(
-										`Cannot apply preview: ${path} changed on disk since this write was staged. Re-run write to overwrite the current file, or use edit to merge changes.`,
-									);
+						await withFileMutationQueue(
+							absolutePath,
+							async () => {
+								if (ops === defaultWriteOperations && stagedMtimeMs !== undefined) {
+									const curStat = await fsStat(absolutePath).catch(() => undefined);
+									if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
+										throw new Error(
+											`Cannot apply preview: ${path} changed on disk since this write was staged. Re-run write to overwrite the current file, or use edit to merge changes.`,
+										);
+									}
 								}
-							}
-							await ops.mkdir(dir);
-							// Format at commit exactly as the direct-write path does, so the bytes
-							// landed by a previewed write match a non-previewed one (no signal: the
-							// commit runs later in the resolve lifecycle, not the staging one).
-							const formatted = await maybeFormat(absolutePath, content, cwd);
-							await ops.writeFile(absolutePath, formatted.content);
-							await refreshFileMtime(mtimeStore, absolutePath);
-						});
+								await ops.mkdir(dir);
+								// Format at commit exactly as the direct-write path does, so the bytes
+								// landed by a previewed write match a non-previewed one (no signal: the
+								// commit runs later in the resolve lifecycle, not the staging one).
+								const formatted = await maybeFormat(absolutePath, content, cwd);
+								await ops.writeFile(absolutePath, formatted.content);
+								await refreshFileMtime(mtimeStore, absolutePath);
+							},
+							{ snapshot: { tool: "write" } },
+						);
 					},
 					summary: {
 						description: `write ${path}: ${content.length} bytes`,
@@ -364,6 +368,7 @@ export function createWriteToolDefinition(
 							})();
 						},
 					),
+				{ snapshot: { tool: "write" } },
 			);
 			const diagResult = await attachPostWriteDiagnostics(
 				writeResult,

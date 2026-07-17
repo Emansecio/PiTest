@@ -446,18 +446,23 @@ export function createEditToolDefinition(
 										kind: "edit",
 										path,
 										apply: async () => {
-											await withFileMutationQueue(absolutePath, async () => {
-												if (ops === defaultEditOperations && stagedMtimeMs !== undefined) {
-													const curStat = await fsStat(absolutePath).catch(() => undefined);
-													if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
-														throw new Error(
-															`Cannot apply preview: ${path} changed on disk since this edit was staged. Re-run edit to recompute the diff against the current file.`,
-														);
+											await withFileMutationQueue(
+												absolutePath,
+												async () => {
+													if (ops === defaultEditOperations && stagedMtimeMs !== undefined) {
+														const curStat = await fsStat(absolutePath).catch(() => undefined);
+														if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
+															throw new Error(
+																`Cannot apply preview: ${path} changed on disk since this edit was staged. Re-run edit to recompute the diff against the current file.`,
+															);
+														}
 													}
-												}
-												await ops.writeFile(absolutePath, finalContent);
-												if (ops === defaultEditOperations) await refreshFileMtime(mtimeStore, absolutePath);
-											});
+													await ops.writeFile(absolutePath, finalContent);
+													if (ops === defaultEditOperations)
+														await refreshFileMtime(mtimeStore, absolutePath);
+												},
+												{ snapshot: { tool: "edit" } },
+											);
 										},
 										summary: {
 											description: `edit ${path}: ${edits.length} block(s)`,
@@ -571,6 +576,9 @@ export function createEditToolDefinition(
 							}
 						})();
 					}),
+				// Snapshot the pre-image on the direct-write path only; the preview
+				// branch stages without writing (its later apply() snapshots itself).
+				{ snapshot: input.preview === true ? undefined : { tool: "edit" } },
 			);
 			const diagResult = await attachPostWriteDiagnostics(
 				writeResult,

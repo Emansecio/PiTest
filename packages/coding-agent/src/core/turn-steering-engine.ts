@@ -1,8 +1,9 @@
-import type { AgentMessage } from "@pit/agent-core";
+import type { AgentMessage, ToolErrorHintRule } from "@pit/agent-core";
 import type { ToolResultMessage } from "@pit/ai";
 import { isTruthyEnvFlag } from "../utils/env-flags.ts";
 import { sliceSafe } from "../utils/surrogate.ts";
 import { buildCrossErrorReminder, CrossErrorTracker, decideCrossErrorReminder } from "./cross-error.js";
+import { canonicalCycleKey } from "./doom-loop-cycle.js";
 import type { CustomMessage } from "./messages.js";
 import {
 	buildNarrationRecoverySteer,
@@ -26,6 +27,7 @@ import {
 	decideErrorReflection,
 } from "./tool-call-feedback.js";
 import { extractErrorMessage, fingerprintToolArgsExact, type ToolCallStats } from "./tool-call-stats.js";
+import { createRetryBudgetHintRule, retryBudgetTargetKey, ToolRetryBudgetTracker } from "./tool-retry-budget.js";
 
 // Minimum back-to-back repetitions of a multi-tool cycle (e.g. [read,edit,bash])
 // before the repeating-pattern detector steers. Three full cycles of >= 2 distinct
@@ -85,10 +87,18 @@ export class TurnSteeringEngine {
 	// when the streak breaks (the model left the loop). See maybeInjectDoomLoop.
 	private _doomLoopRecoveryAttempts = 0;
 	// Signature of the last repeating multi-tool CYCLE we fired a reminder for
-	// ("<patternLength>x<repetitions>"), so we steer once per detected pattern and
-	// re-arm only when the pattern grows or a different cycle/break supersedes it.
+	// ("<patternLength>:<cycle composition>"), so we steer once per detected pattern
+	// and re-arm only when the pattern grows or a different cycle/break supersedes it.
 	// Complements _doomLoopFiredTier, which tracks the SAME-call loop. Empty = none.
 	private _repeatingPatternFiredKey = "";
+	// Repetition count observed when the base reminder for `_repeatingPatternFiredKey`
+	// fired. If the SAME cycle keeps running past this (the model ignored the first
+	// reminder), the escalation fires once with stronger wording — mirroring the
+	// doom-loop tiers / TTSR idiom. Reset with the fired key.
+	private _repeatingPatternFiredReps = 0;
+	// One-shot latch for the stronger re-detection steer, so the escalation fires at
+	// most once per cycle. Reset when the cycle changes or breaks.
+	private _repeatingPatternEscalated = false;
 	// Once-per-streak latch for the result-only thrash signal (same error, varying
 	// args). Reset when the run of identical errors breaks (count <= 1). Separate
 	// from the args-keyed _doomLoopFiredTier ladder. See _maybeInjectResultLoop.
@@ -125,6 +135,13 @@ export class TurnSteeringEngine {
 	// steer this turn so it fires once per tool/turn.
 	private readonly _turnToolFailures = new Map<string, number>();
 	private readonly _turnFailureBudgetFired = new Set<string>();
+	// Per-target retry budget: consecutive failures per (toolName, primary-target),
+	// surfaced as one line appended to each failing tool result via a Tier-4 hint
+	// rule. Complements the by-NAME `_turnToolFailures` steer above: this is keyed
+	// by TARGET (path/args), shown inline on EVERY failure (not a one-shot steer),
+	// and resets per user turn or on a success for that key. See tool-retry-budget.ts.
+	private readonly _retryBudget = new ToolRetryBudgetTracker();
+	private _retryBudgetRule: ToolErrorHintRule | undefined;
 
 	private readonly deps: TurnSteeringDeps;
 
@@ -382,13 +399,19 @@ export class TurnSteeringEngine {
 	 *
 	 * Fires ONCE per detected pattern (tracked by `_repeatingPatternFiredKey`),
 	 * re-arming only when the cycle/repetition signature changes or the pattern
-	 * breaks. Default-on; disable with `PIT_NO_REPEATING_PATTERN=1`. Delivered as a
+	 * breaks. If the SAME cycle keeps running past the first reminder (the model
+	 * ignored it), a single stronger-worded escalation fires — mirroring the
+	 * doom-loop tiers / TTSR escalation idiom. Default-on; disable with
+	 * `PIT_NO_REPEATING_PATTERN=1` or `PIT_NO_DOOM_LOOP_GUARD=1`. Delivered as a
 	 * steer (like the doom-loop) so it lands before the next turn while the loop is
 	 * still hot.
 	 */
 	maybeInjectRepeatingPattern(): void {
-		if (isTruthyEnvFlag(process.env.PIT_NO_REPEATING_PATTERN)) {
-			this._repeatingPatternFiredKey = "";
+		if (
+			isTruthyEnvFlag(process.env.PIT_NO_REPEATING_PATTERN) ||
+			isTruthyEnvFlag(process.env.PIT_NO_DOOM_LOOP_GUARD)
+		) {
+			this._resetRepeatingPatternLatch();
 			return;
 		}
 		const match = this.deps.toolCallStats.getRepeatingPatternCount();
@@ -396,40 +419,77 @@ export class TurnSteeringEngine {
 		// the two detectors never fire on the same condition.
 		if (match.patternLength < 2 || match.repetitions < REPEATING_PATTERN_THRESHOLD) {
 			// Pattern broke or never reached threshold — re-arm for the next cycle.
-			this._repeatingPatternFiredKey = "";
+			this._resetRepeatingPatternLatch();
 			return;
 		}
-		// Fire-once signature is the CYCLE composition (the trailing block of tool
-		// names), NOT the repetition count — so the same cycle repeating more times
-		// does not re-spam every pass. Re-arms only when a different cycle takes over
-		// or the pattern breaks (handled above). `getRepeatingPatternCount` keys on
-		// args, so the displayed tool names alone suffice as the anti-respam key.
-		const cycle = this.deps.toolCallStats
+		const cycleNames = this.deps.toolCallStats
 			.getSequence()
 			.slice(-match.patternLength)
-			.map((e) => e.toolName)
-			.join(" → ");
-		const key = `${match.patternLength}:${cycle}`;
-		if (this._repeatingPatternFiredKey === key) return;
-		this._repeatingPatternFiredKey = key;
-		const content =
+			.map((e) => e.toolName);
+		const cycle = cycleNames.join(" → ");
+		// Fire-once signature is the CYCLE composition, NOT the repetition count — so the
+		// same cycle repeating more times does not re-spam every pass. It is made
+		// ROTATION-INVARIANT (canonical minimal rotation) because the detector's tail
+		// block rotates phase every call as the window slides ([a,b,c] → [b,c,a] → …);
+		// keying on the raw tail order would re-fire the reminder on every rotation and
+		// hide the persisting loop from the escalation check. Re-arms only when a
+		// genuinely different cycle takes over or the pattern breaks (handled above).
+		const key = `${match.patternLength}:${canonicalCycleKey(cycleNames)}`;
+		if (this._repeatingPatternFiredKey !== key) {
+			// First detection of this cycle — soft, silent reminder.
+			this._repeatingPatternFiredKey = key;
+			this._repeatingPatternFiredReps = match.repetitions;
+			this._repeatingPatternEscalated = false;
+			const content =
+				"<repeating-pattern-reminder>\n" +
+				`You have repeated the same ${match.patternLength}-step tool cycle ` +
+				`(${cycle}) ${match.repetitions} times in a row without resolving the task. ` +
+				"This pattern looks productive but is not converging.\n\n" +
+				"Stop and reassess before running the cycle again:\n" +
+				"- What is the cycle supposed to achieve, and why has it not finished after " +
+				`${match.repetitions} passes?\n` +
+				"- Is there a root cause you are working around instead of fixing?\n" +
+				"- Would a different approach, a larger single change, or asking the user for " +
+				"guidance break the loop?\n" +
+				"</repeating-pattern-reminder>";
+			this._fireReminder("pi.repeating-pattern-reminder", content, {
+				deliverAs: "steer",
+				display: false,
+				label: "repeating-pattern reminder",
+			});
+			this._noteRecoverySignal("repeating_pattern");
+			return;
+		}
+		// Same cycle as the one we already warned about. Escalate ONCE if the model
+		// ran the cycle at least one more full time after the first reminder — the
+		// soft nudge was ignored, so raise the volume (visible, stronger wording).
+		if (this._repeatingPatternEscalated) return;
+		if (match.repetitions < this._repeatingPatternFiredReps + 1) return;
+		this._repeatingPatternEscalated = true;
+		this._repeatingPatternFiredReps = match.repetitions;
+		const escalation =
 			"<repeating-pattern-reminder>\n" +
-			`You have repeated the same ${match.patternLength}-step tool cycle ` +
-			`(${cycle}) ${match.repetitions} times in a row without resolving the task. ` +
-			"This pattern looks productive but is not converging.\n\n" +
-			"Stop and reassess before running the cycle again:\n" +
-			"- What is the cycle supposed to achieve, and why has it not finished after " +
-			`${match.repetitions} passes?\n` +
-			"- Is there a root cause you are working around instead of fixing?\n" +
-			"- Would a different approach, a larger single change, or asking the user for " +
-			"guidance break the loop?\n" +
+			`STOP. You have now run the same ${match.patternLength}-step cycle (${cycle}) ` +
+			`${match.repetitions} times in a row and ignored the earlier reminder to change course. ` +
+			"Repeating it again will not resolve the task.\n\n" +
+			"Do NOT run the cycle again. Instead, do exactly one of:\n" +
+			"- State the root cause you keep working around, and fix THAT directly.\n" +
+			"- Make a single larger change that removes the need to loop.\n" +
+			"- Ask the user for guidance if you cannot break the loop yourself.\n" +
 			"</repeating-pattern-reminder>";
-		this._fireReminder("pi.repeating-pattern-reminder", content, {
+		this._fireReminder("pi.repeating-pattern-escalation", escalation, {
 			deliverAs: "steer",
-			display: false,
-			label: "repeating-pattern reminder",
+			display: true,
+			label: "repeating-pattern escalation",
 		});
 		this._noteRecoverySignal("repeating_pattern");
+	}
+
+	/** Clear the repeating-pattern fire-once latch and escalation state. */
+	private _resetRepeatingPatternLatch(): void {
+		this._repeatingPatternFiredKey = "";
+		this._repeatingPatternFiredReps = 0;
+		this._repeatingPatternEscalated = false;
 	}
 
 	/**
@@ -675,6 +735,38 @@ export class TurnSteeringEngine {
 			label: "tool-failure-budget reminder",
 		});
 		this._noteRecoverySignal("failure_budget");
+	}
+
+	/**
+	 * The Tier-4 hint rule that appends the per-target retry-budget line to failing
+	 * tool results. Created once and bound to this engine's tracker; the caller
+	 * registers it on the agent's {@link ToolErrorHintRegistry} so it fires inline
+	 * on every error. Idempotent to construct — returns the same rule each call.
+	 */
+	retryBudgetHintRule(): ToolErrorHintRule {
+		if (!this._retryBudgetRule) {
+			this._retryBudgetRule = createRetryBudgetHintRule(this._retryBudget);
+		}
+		return this._retryBudgetRule;
+	}
+
+	/**
+	 * Reset the per-target retry-budget streak after a SUCCESSFUL call, so the next
+	 * failure for the same (tool, target) starts counting from 1 again. Keyed the
+	 * same way as the failing path (path arg when present, else args hash).
+	 */
+	observeRetryBudgetSuccess(toolName: string, args: unknown): void {
+		this._retryBudget.observeSuccess(retryBudgetTargetKey(toolName, args));
+	}
+
+	/** Drop the per-call retry-budget memo once a tool call has fully finished. */
+	forgetRetryBudgetCall(callId: string): void {
+		this._retryBudget.forgetCall(callId);
+	}
+
+	/** Reset the per-target retry budget — called on a new user turn. */
+	resetRetryBudget(): void {
+		this._retryBudget.reset();
 	}
 
 	/**

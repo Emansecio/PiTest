@@ -8,6 +8,7 @@
  */
 
 import { sliceSafe } from "../utils/surrogate.ts";
+import { detectTailCycle } from "./doom-loop-cycle.ts";
 
 const DEFAULT_MAX_ERROR_FINGERPRINTS_PER_TOOL = 20;
 const DEFAULT_ERROR_FINGERPRINT_LENGTH = 120;
@@ -321,40 +322,21 @@ export class ToolCallStats {
 			const entry = this.ringBuffer[idx]!;
 			keys[i] = `${entry.toolName}\u0000${entry.argsFingerprint}`;
 		}
-		let best = none;
-		const maxPeriod = Math.min(REPEATING_PATTERN_MAX_PERIOD, Math.floor(limit / 2));
-		for (let period = 2; period <= maxPeriod; period++) {
-			// Walk backwards comparing each block of `period` keys to the final block.
-			// `reps` counts how many consecutive copies of the final block match.
-			let reps = 1;
-			let aligned = true;
-			while (aligned && (reps + 1) * period <= limit) {
-				const base = reps * period;
-				for (let j = 0; j < period; j++) {
-					if (keys[j] !== keys[base + j]) {
-						aligned = false;
-						break;
-					}
-				}
-				if (aligned) reps++;
-			}
-			// A period that is itself made of a smaller repeating unit (e.g. period 4
-			// over [a,b,a,b]) is a degenerate restatement of the shorter cycle; the
-			// shorter period already captured it with >= the same reps, so prefer
-			// fewer-but-real cycles by requiring reps >= 2 and taking max reps, ties
-			// toward longer (more specific) period.
-			//
-			// Distinctness guard: the cycle block must contain >= 2 distinct keys.
-			// An all-identical block (e.g. [a,a]) is just the SAME call repeated — a
-			// period-1 loop the consecutive-identical detector owns — so excluding it
-			// here keeps the two detectors strictly complementary and avoids a
-			// double-fire on a pure identical loop.
-			if (reps >= 2 && blockHasDistinctKeys(keys, period)) {
-				const better = reps > best.repetitions || (reps === best.repetitions && period > best.patternLength);
-				if (better) best = { patternLength: period, repetitions: reps };
-			}
-		}
-		return best;
+		// detectTailCycle anchors at the TAIL of a chronological (oldest-first) array;
+		// `keys` above is most-recent-first, so reverse it back to oldest-first. period
+		// >= 2 excludes the single-identical-call loop (owned by the consecutive-identical
+		// detector); reps >= 2 to report a cycle; the distinct-block guard rejects an
+		// all-identical block (a period-1 loop in disguise) so the two detectors stay
+		// strictly complementary and never double-fire; ties break toward the longer
+		// (more specific) cycle. `limit` already capped the window above.
+		const match = detectTailCycle(keys.reverse(), {
+			minPeriod: 2,
+			maxPeriod: REPEATING_PATTERN_MAX_PERIOD,
+			minRepetitions: 2,
+			requireDistinctBlock: true,
+			tieBreak: "longer",
+		});
+		return match ? { patternLength: match.period, repetitions: match.repetitions } : none;
 	}
 
 	/** True when consecutive identical invocations reach the configured threshold. */
@@ -485,19 +467,6 @@ export function fingerprintToolResult(
 		serialized = String(parts);
 	}
 	return hashString(serialized);
-}
-
-/**
- * True when the first `period` keys (the trailing cycle block, most-recent-first)
- * are not all identical. Used by {@link ToolCallStats.getRepeatingPatternCount} to
- * reject all-same blocks, which are period-1 identical loops in disguise.
- */
-function blockHasDistinctKeys(keys: readonly string[], period: number): boolean {
-	const first = keys[0];
-	for (let j = 1; j < period; j++) {
-		if (keys[j] !== first) return true;
-	}
-	return false;
 }
 
 /**

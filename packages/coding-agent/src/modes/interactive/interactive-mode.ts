@@ -74,6 +74,12 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.ts";
+import {
+	beginSnapshotTurn,
+	listTurns as listSnapshotTurns,
+	restoreToTurn as restoreSnapshotTurn,
+	snapshotsEnabled,
+} from "../../core/file-snapshots.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { detectCliAsync } from "../../core/fusion/cli-runner.ts";
 import { formatElapsed, parseTokenBudget } from "../../core/goal/goal-manager.ts";
@@ -181,6 +187,7 @@ import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
 import { OverthinkSteerMessageComponent } from "./components/overthink-steer-message.ts";
 import { PendingUserMessageComponent } from "./components/pending-user-message.ts";
+import { RewindSelectorComponent } from "./components/rewind-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
@@ -3002,6 +3009,9 @@ export class InteractiveMode {
 			}
 
 			// Normal message submission
+			// Open a fresh snapshot turn so file changes during this turn group
+			// together for `/rewind` (and carry the right sessionId for `undo`).
+			beginSnapshotTurn(this.session.sessionId);
 			this.flushPendingBashComponents();
 
 			// Show the working indicator in the SAME frame as the submit so there is
@@ -3076,6 +3086,7 @@ export class InteractiveMode {
 			showTreeSelector: () => this.showTreeSelector(),
 			showUserMessageSelector: () => this.showUserMessageSelector(),
 			handleSessionCommand: () => this.handleSessionCommand(),
+			showRewindSelector: () => this.showRewindSelector(),
 			handleCacheStatusCommand: () => this.handleCacheStatusCommand(),
 			handleDiagnosticsCommand: () => this.handleDiagnosticsCommand(),
 			handleHelpCommand: () => this.handleHelpCommand(),
@@ -6011,6 +6022,51 @@ export class InteractiveMode {
 				initialSelectedId,
 			);
 			return { component: selector, focus: selector.getMessageList() };
+		});
+	}
+
+	private async showRewindSelector(): Promise<void> {
+		if (!snapshotsEnabled()) {
+			this.showStatus("File snapshots are disabled (PIT_NO_FILE_SNAPSHOTS is set).");
+			return;
+		}
+		let turns: Awaited<ReturnType<typeof listSnapshotTurns>>;
+		try {
+			turns = await listSnapshotTurns();
+		} catch (error) {
+			this.showError(errMsg(error));
+			return;
+		}
+		if (turns.length === 0) {
+			this.showStatus("No file changes recorded to rewind.");
+			return;
+		}
+		this.showSelector((done) => {
+			const selector = new RewindSelectorComponent(
+				turns,
+				async (turnId) => {
+					try {
+						const result = await restoreSnapshotTurn(turnId);
+						done();
+						this.renderCurrentSessionState();
+						if (result.restored === 0) {
+							this.showStatus("Nothing to restore for that turn.");
+						} else {
+							this.showStatus(
+								`Rewound ${result.restored === 1 ? "1 file" : `${result.restored} files`} to before the selected turn.`,
+							);
+						}
+					} catch (error) {
+						done();
+						this.showError(errMsg(error));
+					}
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector.getList() };
 		});
 	}
 

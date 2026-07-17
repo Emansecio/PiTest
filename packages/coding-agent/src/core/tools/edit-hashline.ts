@@ -244,18 +244,23 @@ export function createEditHashlineToolDefinition(
 										kind: "edit_v2",
 										path,
 										apply: async () => {
-											await withFileMutationQueue(absolutePath, async () => {
-												if (ops === defaultEditOperations && stagedMtimeMs !== undefined) {
-													const curStat = await fsStat(absolutePath).catch(() => undefined);
-													if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
-														throw new Error(
-															`Cannot apply preview: ${path} changed on disk since this edit was staged. Re-run edit_v2 to recompute the diff against the current file.`,
-														);
+											await withFileMutationQueue(
+												absolutePath,
+												async () => {
+													if (ops === defaultEditOperations && stagedMtimeMs !== undefined) {
+														const curStat = await fsStat(absolutePath).catch(() => undefined);
+														if (curStat && curStat.mtimeMs !== stagedMtimeMs) {
+															throw new Error(
+																`Cannot apply preview: ${path} changed on disk since this edit was staged. Re-run edit_v2 to recompute the diff against the current file.`,
+															);
+														}
 													}
-												}
-												await ops.writeFile(absolutePath, finalContent);
-												if (ops === defaultEditOperations) await refreshFileMtime(mtimeStore, absolutePath);
-											});
+													await ops.writeFile(absolutePath, finalContent);
+													if (ops === defaultEditOperations)
+														await refreshFileMtime(mtimeStore, absolutePath);
+												},
+												{ snapshot: { tool: "edit_v2" } },
+											);
 										},
 										summary: {
 											description: `edit_v2 ${path}: ${appliedCount} hashline edit(s)`,
@@ -340,6 +345,9 @@ export function createEditHashlineToolDefinition(
 							}
 						})();
 					}),
+				// Snapshot the pre-image on the direct-write path only; the preview
+				// branch stages without writing (its later apply() snapshots itself).
+				{ snapshot: input.preview === true ? undefined : { tool: "edit_v2" } },
 			);
 			return attachPostWriteDiagnostics(writeResult, absolutePath, __written, cwd, signal, diagnosticsBaseline);
 		},

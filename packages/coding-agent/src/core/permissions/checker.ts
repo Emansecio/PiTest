@@ -53,6 +53,7 @@ export const BUILTIN_TOOL_SIDE_EFFECTS: Readonly<Record<string, ToolSideEffect>>
 	edit: "workspace",
 	edit_v2: "workspace",
 	write: "workspace",
+	undo: "workspace",
 	grep: "none",
 	find: "none",
 	ls: "none",

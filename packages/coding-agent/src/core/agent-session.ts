@@ -963,6 +963,14 @@ export class AgentSession implements CompactionHost, FusionHost {
 			recovery: this._recovery,
 		});
 
+		// Per-target retry budget: register the Tier-4 hint rule that appends a
+		// remaining-budget counter ("attempts on <tool> for this target: n/max — …")
+		// to every failing tool result, so the model sees the pressure inline and
+		// changes approach before burning the whole task. Additive (never changes the
+		// error), off via PIT_NO_TOOL_RETRY_BUDGET. Registered once at construction so
+		// even the first tool error carries the line.
+		this.agent.toolErrorHintRegistry?.add(this._steering.retryBudgetHintRule());
+
 		// Size the frequent-files tracker from settings so an opt-in user with a
 		// very large session does not silently lose hot files to the default cap.
 		const freqCfg = this.settingsManager.getFrequentFilesSettings();
@@ -2395,6 +2403,8 @@ export class AgentSession implements CompactionHost, FusionHost {
 			if (budget) this._steering.maybeInjectFailureBudget(event.toolName, budget.count, budget.max);
 		} else {
 			this._steering.observeToolSuccess(event.toolName);
+			// A success for this (tool, target) clears its per-target retry-budget streak.
+			this._steering.observeRetryBudgetSuccess(event.toolName, args);
 			const fileOp = extractToolFileOp(event.toolName, args);
 			if (fileOp) {
 				this._frequentFiles.record(fileOp.path, fileOp.op);
@@ -2446,6 +2456,9 @@ export class AgentSession implements CompactionHost, FusionHost {
 				isError: false,
 			});
 		}
+		// The retry-budget hint (if any) for this call has already been applied inside
+		// the agent loop; drop its per-call memo now that the call is fully finished.
+		this._steering.forgetRetryBudgetCall(event.toolCallId);
 		// A tool may have pulled a hidden tool into the active surface this turn
 		// (search_tool_bm25 with activate_top). Reconcile so it is callable next
 		// turn. Cheap no-op when nothing was activated.
@@ -3775,6 +3788,10 @@ export class AgentSession implements CompactionHost, FusionHost {
 		// with a fresh allowance. Re-armed before every goal continuation below so
 		// the budget is per model-attempt, not shared across the whole goal.
 		this._resetTurnFailureBudget();
+		// Reset the per-target retry budget on a fresh USER turn only (not per goal
+		// continuation, which is the same task window). A genuine new user prompt
+		// starts every (tool, target) counter from zero again.
+		if (!this._inGoalContinuation) this._steering.resetRetryBudget();
 		await this._promptOnce(text, options);
 
 		// Re-entrant call from within a continuation: the outer prompt() owns the

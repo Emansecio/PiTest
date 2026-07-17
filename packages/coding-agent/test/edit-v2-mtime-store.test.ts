@@ -131,6 +131,11 @@ describe("edit_v2 stale-read note", () => {
  */
 describe("edit_v2 post-write integrity check", () => {
 	it("warns when the on-disk byte count doesn't match what was written", async () => {
+		// Snapshot capture stats the file BEFORE the write; this test's
+		// mockImplementationOnce must land on the post-write integrity stat, so
+		// disable snapshots — they are not the subject here (file-snapshots has
+		// its own suite).
+		process.env.PIT_NO_FILE_SNAPSHOTS = "1";
 		const file = join(dir, "partial.ts");
 		const content = Array.from({ length: 10 }, (_, i) => `line_${i}`).join("\n");
 		writeFileSync(file, `${content}\n`, "utf8");
@@ -162,6 +167,7 @@ describe("edit_v2 post-write integrity check", () => {
 			expect(result.content[0]?.text).toMatch(/WARNING: post-write size mismatch/);
 		} finally {
 			statMock.mockRestore();
+			delete process.env.PIT_NO_FILE_SNAPSHOTS;
 		}
 	});
 });
