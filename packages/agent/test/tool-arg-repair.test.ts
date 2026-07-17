@@ -103,6 +103,18 @@ describe("schema coercion — numbers", () => {
 	it("does NOT coerce when the field also accepts string", () => {
 		expect(kinds({ n: "42" }, obj({ n: { type: ["string", "number"] } }))).toEqual([]);
 	});
+
+	it("preserves a large integer string that would lose precision (past 2^53)", () => {
+		const out = repairToolArguments({ id: "9007949254740993" }, obj({ id: { type: "integer" } }), TOOL);
+		expect(out.args).toEqual({ id: "9007949254740993" });
+		expect(out.repairs).not.toContain("number_from_string");
+	});
+
+	it("still coerces a small integer string that round-trips", () => {
+		const out = repairToolArguments({ n: "42" }, obj({ n: { type: "integer" } }), TOOL);
+		expect(out.args).toEqual({ n: 42 });
+		expect(out.repairs).toContain("number_from_string");
+	});
 });
 
 describe("schema coercion — booleans", () => {
@@ -144,6 +156,19 @@ describe("schema coercion — empty string", () => {
 
 	it("keeps an empty string for a required non-nullable non-string field (left for validation)", () => {
 		expect(kinds({ n: "" }, obj({ n: { type: "number" } }, ["n"]))).toEqual([]);
+	});
+
+	it("keeps an empty string for an untyped optional field (schema {})", () => {
+		const out = repairToolArguments({ x: "" }, obj({ x: {} }), TOOL);
+		expect(out.args).toEqual({ x: "" });
+		expect(out.repairs).not.toContain("empty_to_undefined");
+		expect(out.repairs).not.toContain("empty_to_null");
+	});
+
+	it("still drops an empty string for a typed optional non-string field", () => {
+		const out = repairToolArguments({ x: "" }, obj({ x: { type: "number" } }), TOOL);
+		expect(out.args).toEqual({});
+		expect(out.repairs).toContain("empty_to_undefined");
 	});
 });
 
