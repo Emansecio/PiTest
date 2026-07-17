@@ -6032,7 +6032,7 @@ export class InteractiveMode {
 		}
 		let turns: Awaited<ReturnType<typeof listSnapshotTurns>>;
 		try {
-			turns = await listSnapshotTurns();
+			turns = await listSnapshotTurns(20, this.session.sessionId);
 		} catch (error) {
 			this.showError(errMsg(error));
 			return;
@@ -6046,15 +6046,29 @@ export class InteractiveMode {
 				turns,
 				async (turnId) => {
 					try {
-						const result = await restoreSnapshotTurn(turnId);
+						const result = await restoreSnapshotTurn(turnId, this.session.sessionId);
 						done();
 						this.renderCurrentSessionState();
-						if (result.restored === 0) {
+						if (result.restored === 0 && result.removed === 0) {
 							this.showStatus("Nothing to restore for that turn.");
-						} else {
+						} else if (result.removed === 0 && result.kept.length === 0) {
 							this.showStatus(
 								`Rewound ${result.restored === 1 ? "1 file" : `${result.restored} files`} to before the selected turn.`,
 							);
+						} else {
+							const parts: string[] = [
+								`Rewound ${result.restored === 1 ? "1 file" : `${result.restored} files`}`,
+							];
+							if (result.removed > 0) {
+								parts.push(
+									`removed ${result.removed === 1 ? "1 created file" : `${result.removed} created files`}`,
+								);
+							}
+							let message = parts.join(", ");
+							if (result.kept.length > 0) {
+								message += ` (left ${result.kept.length === 1 ? "1 file" : `${result.kept.length} files`} created in later turns)`;
+							}
+							this.showStatus(`${message}.`);
 						}
 					} catch (error) {
 						done();

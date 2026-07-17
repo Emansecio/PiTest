@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -197,6 +197,92 @@ describe("path canonicalization", () => {
 	});
 });
 
+describe("/rewind session scoping (plan 010)", () => {
+	it("lists only the given session's turns, but all turns with no filter", async () => {
+		const fa = join(tmp, "sa.txt");
+		const fb = join(tmp, "sb.txt");
+		await writeFile(fa, "a0");
+		await writeFile(fb, "b0");
+
+		const turnA = beginSnapshotTurn("A");
+		await mutate(fa, "a1"); // captured under session A
+		const turnB = beginSnapshotTurn("B");
+		await mutate(fb, "b1"); // captured under session B
+
+		expect((await listTurns(20, "A")).map((t) => t.turnId)).toEqual([turnA]);
+		expect((await listTurns(20, "B")).map((t) => t.turnId)).toEqual([turnB]);
+		expect((await listTurns()).map((t) => t.turnId).sort()).toEqual([turnA, turnB].sort());
+	});
+
+	it("restores only the given session's pre-image and leaves the other session's snapshots intact", async () => {
+		const f = join(tmp, "shared.txt");
+		await writeFile(f, "v0");
+		beginSnapshotTurn("A");
+		await mutate(f, "v1"); // snap v0 under session A
+		const turnB = beginSnapshotTurn("B");
+		await mutate(f, "v2"); // snap v1 under session B
+
+		const result = await restoreToTurn(turnB, "B");
+		expect(result.restored).toBe(1);
+		expect(readFileSync(f, "utf-8")).toBe("v1"); // B's pre-image
+
+		// Session A's snapshot ("v0") must survive untouched.
+		const remaining = await listSnapshotsForFile(f);
+		expect(remaining.length).toBe(1);
+		expect((await readSnapshotBytes(remaining[0])).toString("utf-8")).toBe("v0");
+	});
+});
+
+describe("/rewind created-file removal (plan 010)", () => {
+	it("removes a file the turn created and reports removed===1", async () => {
+		const f = join(tmp, "created.txt");
+		const turn = beginSnapshotTurn("screate");
+		await captureSnapshot(f, "write"); // f does not exist yet → creation marker
+		await writeFile(f, "brand new"); // the turn creates it on disk
+
+		const result = await restoreToTurn(turn, "screate");
+		expect(result.removed).toBe(1);
+		expect(result.kept).toEqual([]);
+		expect(existsSync(f)).toBe(false);
+	});
+
+	it("keeps a created file that a LATER turn also touched, reporting it in kept", async () => {
+		const f = join(tmp, "kept.txt");
+		const turn1 = beginSnapshotTurn("skeep");
+		await captureSnapshot(f, "write"); // marker in turn 1 (f missing)
+		await writeFile(f, "v1"); // file now exists
+		beginSnapshotTurn("skeep"); // turn 2
+		await captureSnapshot(f, "edit"); // real pre-image of "v1" in turn 2
+		await writeFile(f, "v2");
+
+		const result = await restoreToTurn(turn1, "skeep");
+		expect(result.removed).toBe(0);
+		expect(result.kept.map((p) => basename(p))).toContain("kept.txt");
+		expect(existsSync(f)).toBe(true); // a later turn touched it — never deleted
+	});
+
+	it("records a creation marker on ENOENT but not for an existing non-file", async () => {
+		// True ENOENT (file does not exist) → a creation marker is recorded.
+		const ghost = join(tmp, "enoent.txt");
+		beginSnapshotTurn("senoent");
+		await captureSnapshot(ghost, "write");
+		expect((await listTurns(20, "senoent")).some((t) => t.files.some((p) => basename(p) === "enoent.txt"))).toBe(
+			true,
+		);
+
+		// An existing path that is NOT a regular file (a directory) → no marker.
+		const dir = join(tmp, "adir");
+		await mkdir(dir);
+		beginSnapshotTurn("sdir");
+		await captureSnapshot(dir, "write");
+		expect(await listTurns(20, "sdir")).toEqual([]);
+		// Note: an unreadable-but-existing regular file cannot be simulated portably
+		// on win32; it follows the same non-ENOENT catch branch as above (stat
+		// succeeds / readFile throws EACCES ≠ ENOENT → swallowed, no marker), so we
+		// assert the two portable ends: true ENOENT creates a marker; existing does not.
+	});
+});
+
 describe("direct captureSnapshot API", () => {
 	it("getLatestSnapshot returns the most recent capture", async () => {
 		const f = join(tmp, "direct.txt");
@@ -221,5 +307,28 @@ describe("direct captureSnapshot API", () => {
 		await captureSnapshot(f, "manual");
 		const [snap] = await listSnapshotsForFile(f);
 		expect(await readFile(snap.snapPath)).toEqual(bytes);
+	});
+});
+
+describe("capture dedup (plan 015)", () => {
+	it("skips a byte-identical re-capture of an unchanged file", async () => {
+		const f = join(tmp, "dedup.txt");
+		await writeFile(f, "stable content");
+		await captureSnapshot(f, "edit");
+		// File is untouched — the newest snapshot already has this (mtime, size),
+		// so a second capture is a no-op.
+		await captureSnapshot(f, "edit");
+		expect((await listSnapshotsForFile(f)).length).toBe(1);
+	});
+
+	it("captures again after the file's bytes change (different size)", async () => {
+		const f = join(tmp, "changed.txt");
+		await writeFile(f, "short");
+		await captureSnapshot(f, "edit");
+		// Different length → size differs from the newest snapshot, so even with
+		// coarse mtime resolution the dedup check does not suppress this capture.
+		await writeFile(f, "a considerably longer body of text");
+		await captureSnapshot(f, "edit");
+		expect((await listSnapshotsForFile(f)).length).toBe(2);
 	});
 });
