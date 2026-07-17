@@ -361,6 +361,12 @@ export class ProcessTerminal implements Terminal {
 		// Disable bracketed paste mode
 		process.stdout.write("\x1b[?2004l");
 
+		// Restore the cursor. The Terminal.stop() contract now guarantees the
+		// cursor is shown regardless of caller, so any teardown path (including
+		// the pre-interactive signal guard) leaves it visible even if TUI.stop()
+		// was bypassed or threw before its own showCursor().
+		process.stdout.write("\x1b[?25h");
+
 		// Disable Kitty keyboard protocol if not already done by drainInput()
 		if (this._kittyProtocolActive) {
 			process.stdout.write("\x1b[<u");

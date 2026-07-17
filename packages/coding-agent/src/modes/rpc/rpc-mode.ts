@@ -42,6 +42,42 @@ export type {
 } from "./rpc-types.ts";
 
 /**
+ * Backstop ceiling for an extension dialog that was given NEITHER a timeout NOR
+ * an abort signal. Without it such a dialog settles only when the client
+ * answers, so a crashed/hung front-end leaves the turn awaiting forever (and
+ * nothing unref's the pending state). This is a generous safety net — not a
+ * tight deadline — mirroring the DEFAULT_MESSAGE_TIMEOUT_MS backstop in
+ * core/messaging/bus.ts. A caller that genuinely wants to wait indefinitely for
+ * a human can pass its own AbortSignal to opt out of the ceiling.
+ */
+export const DEFAULT_EXTENSION_DIALOG_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Pick the backstop timeout for an extension dialog. An explicit timeout always
+ * wins; a caller-supplied abort signal opts out of the ceiling (it will settle
+ * on abort); otherwise the default ceiling applies so a dialog with neither can
+ * never wait forever.
+ */
+export function resolveDialogTimeoutMs(
+	opts: Pick<ExtensionUIDialogOptions, "timeout" | "signal"> | undefined,
+): number | undefined {
+	return opts?.timeout ?? (opts?.signal ? undefined : DEFAULT_EXTENSION_DIALOG_TIMEOUT_MS);
+}
+
+/**
+ * Settle every in-flight extension dialog to its default and empty the map.
+ * Snapshots first because each cancel() mutates the map (via its cleanup).
+ * Invoked on RPC teardown so no pending dialog can keep shutdown awaiting.
+ */
+export function settlePendingDialogs<T extends { cancel: () => void }>(pending: Map<string, T>): void {
+	const entries = [...pending.values()];
+	pending.clear();
+	for (const entry of entries) {
+		entry.cancel();
+	}
+}
+
+/**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
@@ -69,10 +105,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		return { id, type: "response", command, success: false, error: message };
 	};
 
-	// Pending extension UI requests waiting for response
+	// Pending extension UI requests waiting for response. `cancel` settles the
+	// outer promise with its default (like an aborted dialog) and is invoked by
+	// the shutdown sweep so no pending dialog can keep a teardown hanging.
 	const pendingExtensionRequests = new Map<
 		string,
-		{ resolve: (value: any) => void; reject: (error: Error) => void }
+		{ resolve: (value: any) => void; reject: (error: Error) => void; cancel: () => void }
 	>();
 
 	// Shutdown request flag
@@ -105,11 +143,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			};
 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
-			if (opts?.timeout) {
+			// When NEITHER a timeout NOR a signal is supplied, arm a generous default
+			// ceiling so a crashed/hung client can't leave the turn awaiting forever.
+			// A caller with its own signal has opted into waiting on that instead.
+			const effectiveTimeout = resolveDialogTimeoutMs(opts);
+			if (effectiveTimeout) {
 				timeoutId = setTimeout(() => {
 					cleanup();
 					resolve(defaultValue);
-				}, opts.timeout);
+				}, effectiveTimeout);
+				timeoutId.unref?.();
 			}
 
 			pendingExtensionRequests.set(id, {
@@ -118,6 +161,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					resolve(parseResponse(response));
 				},
 				reject,
+				cancel: onAbort,
 			});
 			output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 		});
@@ -258,6 +302,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 						}
 					},
 					reject,
+					cancel: () => {
+						pendingExtensionRequests.delete(id);
+						resolve(undefined);
+					},
 				});
 				output({ type: "extension_ui_request", id, method: "editor", title, prefill } as RpcExtensionUIRequest);
 			});
@@ -711,6 +759,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
 		}
+		// Settle every in-flight extension dialog to its default so a pending
+		// request (a dialog with no timeout/signal, or a hung client) cannot keep
+		// teardown awaiting.
+		settlePendingDialogs(pendingExtensionRequests);
 		unsubscribe?.();
 		await runtimeHost.dispose();
 		detachInput();
