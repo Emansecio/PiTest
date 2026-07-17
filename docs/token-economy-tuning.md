@@ -180,6 +180,8 @@ zero config; as variáveis abaixo são os kill-switches.
 | `PIT_TUI_DEBUG` | Grava logs de render do TUI em `/tmp/tui/` com **metadata only** (contagens de linhas, `firstChanged`, `buffer.length`, etc.) — sem `JSON.stringify` do frame completo. | OFF | `packages/tui/src/tui.ts` | `"1"` |
 | `PIT_TUI_DEBUG_FULL` | Com `PIT_TUI_DEBUG=1`, inclui dump completo de `newLines` / `previousLines` / `buffer` (sem pretty-print). Caro no hot path — só para diagnóstico. | OFF | `packages/tui/src/tui.ts` | `"1"` |
 | `PIT_NO_SCROLLBACK_WIPE` | Kill-switch: no full-redraw "all" (mudança de largura, `clearOnShrink`), omite só o `\x1b[3J` (limpa scrollback do emulador) e mantém `\x1b[2J\x1b[H` (limpa a tela visível). Preserva o histórico pré-sessão do terminal às custas de deixar scrollback antigo com o wrap errado após um resize de largura — trade-off deliberado, o default (`\x1b[3J` ligado) não muda. | OFF (scrollback wipe ligado) | `packages/tui/src/tui.ts` | `"1"` |
+| `PIT_NO_BUNDLE` | Kill-switch do guard de launcher (`bin/pit.mjs`): força sempre rodar o src via tsx, ignorando o bundle `dist/cli.bundle.mjs` mesmo quando ele estiver fresco. Default OFF = guard ativo (roda o bundle só quando ele é mais novo que todo `.ts` sob `packages/*/src`, senão cai para o src). | OFF (guard ativo) | `bin/pit.mjs` | `1`/`true`/`yes` (insensível a caixa) |
+| `PIT_LAUNCH_QUIET` | Silencia o aviso em stderr do launcher quando ele cai do bundle para o src (`src mais novo que o bundle …`). Não muda a decisão de alvo, só suprime a nota. | OFF (aviso visível) | `bin/pit.mjs` | `1`/`true`/`yes` (insensível a caixa) |
 
 > A variável `PIT_NO_PRESEND_OVERFLOW_GUARD` também usava `=== "1"` em
 > `agent-session-compaction.ts` (linhas 386 e 505) — corrigida para

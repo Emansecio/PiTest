@@ -1,38 +1,4 @@
 #!/usr/bin/env bash
-# PiTuned launcher (bash / Git Bash / WSL).
-# Runs the local PiTest source via tsx, isolated from the global `pit` install
-# by pointing the agent dir at ~/.pit/agent/.
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
-# Isolate PiTuned state (settings, sessions, installed packages) from stock pit.
-# Honor any explicit override the user set before invoking pit.
-: "${PIT_CODING_AGENT_DIR:=$HOME/.pit/agent}"
-export PIT_CODING_AGENT_DIR
-
-# Isolate temp dir to avoid clashes with ACL-locked CodexSandbox temp folders.
-: "${PIT_TMP_DIR:=$HOME/.pit/tmp}"
-mkdir -p "$PIT_TMP_DIR"
-export TMP="$PIT_TMP_DIR" TEMP="$PIT_TMP_DIR" PIT_TMP_DIR
-
-# Load the tsx loader in-process (`node --import`) instead of spawning the tsx
-# wrapper binary (wrapper process + .cmd shim). Same tsx pipeline and cache —
-# zero staleness — but ~1s less startup overhead (`--version` 1373ms -> ~316ms).
-TSX_LOADER="$REPO_ROOT/node_modules/tsx/dist/loader.mjs"
-if [[ ! -f "$TSX_LOADER" ]]; then
-  echo "pit: tsx not found at $TSX_LOADER. Run \`npm install\` in $REPO_ROOT first." >&2
-  exit 1
-fi
-
-# --import needs a file:// URL. Windows Node requires the drive form
-# (file:///C:/...); cygpath exists on Git Bash/MSYS, plain POSIX elsewhere (WSL).
-if command -v cygpath >/dev/null 2>&1; then
-  TSX_LOADER_URL="file:///$(cygpath -m "$TSX_LOADER")"
-else
-  TSX_LOADER_URL="file://$TSX_LOADER"
-fi
-
-CLI="$REPO_ROOT/packages/coding-agent/src/cli.ts"
-exec node --import "$TSX_LOADER_URL" "$CLI" "$@"
+exec node "$SCRIPT_DIR/pit.mjs" "$@"
