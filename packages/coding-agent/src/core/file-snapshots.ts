@@ -54,6 +54,13 @@ export interface SnapshotSidecar {
 	size: number;
 	/** The sortable stamp (also the filename stem). */
 	timestamp: string;
+	/**
+	 * Creation marker: this record has NO `.snap` pre-image because the turn
+	 * CREATED the file (it did not exist at capture time). A later `/rewind` can
+	 * use it to remove the created file. Absent/false on every pre-image sidecar
+	 * (back-compatible with sidecars written before this field existed).
+	 */
+	created?: boolean;
 }
 
 /** A single captured snapshot located on disk. */
@@ -191,8 +198,14 @@ export async function captureSnapshot(absolutePath: string, tool: string): Promi
 		if (!st.isFile()) return;
 		mtimeMs = st.mtimeMs;
 		bytes = await readFile(absolutePath);
-	} catch {
-		// New file (or unreadable) — nothing to snapshot.
+	} catch (err) {
+		// ENOENT = the file does not exist yet → the turn is CREATING it. Record a
+		// creation marker (sidecar-only, no `.snap`) so a later `/rewind` can remove
+		// the file this turn created. Any OTHER error (e.g. unreadable but existing)
+		// is swallowed — we never fabricate a pre-image.
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+			await writeCreationMarker(absolutePath, tool).catch(() => {});
+		}
 		return;
 	}
 	try {
@@ -218,6 +231,31 @@ export async function captureSnapshot(absolutePath: string, tool: string): Promi
 	} catch {
 		// Best-effort: never let a snapshot failure break the mutation it guards.
 	}
+}
+
+/**
+ * Write a creation marker for a file the current turn is about to create. A
+ * marker is a sidecar-only record (`.json`, NO `.snap`) with `created: true` and
+ * zeroed mtime/size — there is no pre-image to store. `/rewind` uses it to delete
+ * the file the turn created. Reuses the same bucket + stamp machinery as a
+ * pre-image so the marker sorts and groups by turn exactly like a real snapshot.
+ */
+async function writeCreationMarker(absolutePath: string, tool: string): Promise<void> {
+	const pathHash = hashPath(canonicalPathKey(absolutePath));
+	const dir = join(baseDir(), pathHash);
+	await mkdir(dir, { recursive: true });
+	const stamp = nextStamp();
+	const meta: SnapshotSidecar = {
+		path: absolutePath,
+		tool,
+		sessionId: currentContext.sessionId,
+		turnId: currentContext.turnId,
+		mtimeMs: 0,
+		size: 0,
+		timestamp: stamp,
+		created: true,
+	};
+	await writeFile(join(dir, `${stamp}.json`), JSON.stringify(meta));
 }
 
 // ---------------------------------------------------------------------------
@@ -267,11 +305,13 @@ async function maybeRunAgeGc(): Promise<void> {
 		const dir = join(baseDir(), bucket);
 		let entries: string[];
 		try {
-			entries = (await readdir(dir)).filter((n) => n.endsWith(".snap"));
+			entries = await readdir(dir);
 		} catch {
 			continue;
 		}
-		for (const snap of entries) {
+		const snaps = entries.filter((n) => n.endsWith(".snap"));
+		const snapStems = new Set(snaps.map((n) => n.slice(0, -".snap".length)));
+		for (const snap of snaps) {
 			const snapPath = join(dir, snap);
 			try {
 				const st = await stat(snapPath);
@@ -282,6 +322,21 @@ async function maybeRunAgeGc(): Promise<void> {
 			const stem = snap.slice(0, -".snap".length);
 			await rm(snapPath, { force: true }).catch(() => {});
 			await rm(join(dir, `${stem}.json`), { force: true }).catch(() => {});
+		}
+		// Creation markers are sidecar-only (`.json` with no matching `.snap`) — GC
+		// them by the sidecar's own mtime, since they have no `.snap` to age off.
+		for (const name of entries) {
+			if (!name.endsWith(".json")) continue;
+			const stem = name.slice(0, -".json".length);
+			if (snapStems.has(stem)) continue; // paired sidecar handled with its snap above
+			const jsonPath = join(dir, name);
+			try {
+				const st = await stat(jsonPath);
+				if (st.mtimeMs >= cutoff) continue;
+			} catch {
+				continue;
+			}
+			await rm(jsonPath, { force: true }).catch(() => {});
 		}
 	}
 }
@@ -352,12 +407,21 @@ async function scanAllSnapshots(): Promise<SnapshotRecord[]> {
 		const dir = join(baseDir(), bucket);
 		let entries: string[];
 		try {
-			entries = (await readdir(dir)).filter((n) => n.endsWith(".snap"));
+			entries = await readdir(dir);
 		} catch {
 			continue;
 		}
-		for (const snap of entries) {
-			const rec = await readSidecar(dir, snap.slice(0, -".snap".length), bucket);
+		const snapStems = new Set<string>();
+		for (const name of entries) if (name.endsWith(".snap")) snapStems.add(name.slice(0, -".snap".length));
+		// Also pick up creation markers: `.json` sidecars with no matching `.snap`
+		// (recorded by writeCreationMarker for files a turn created). They carry a
+		// turnId/path like any sidecar, so `/rewind` can group and act on them.
+		const orphanMarkerStems = entries
+			.filter((name) => name.endsWith(".json"))
+			.map((name) => name.slice(0, -".json".length))
+			.filter((stem) => !snapStems.has(stem));
+		for (const stem of [...snapStems, ...orphanMarkerStems]) {
+			const rec = await readSidecar(dir, stem, bucket);
 			if (rec) all.push(rec);
 		}
 	}
@@ -367,9 +431,15 @@ async function scanAllSnapshots(): Promise<SnapshotRecord[]> {
 /**
  * Turns that touched files, most recent first. One row per distinct turnId with
  * the files it touched and the newest stamp in the turn.
+ *
+ * When `sessionId` is provided, only snapshots recorded by THAT session are
+ * considered — the store is global (shared by every project/session), so
+ * `/rewind` passes the live session id to avoid listing another project's turns.
+ * With no `sessionId`, behavior is unchanged (every session's turns).
  */
-export async function listTurns(limit = 20): Promise<TurnGroup[]> {
-	const all = await scanAllSnapshots();
+export async function listTurns(limit = 20, sessionId?: string): Promise<TurnGroup[]> {
+	const scanned = await scanAllSnapshots();
+	const all = sessionId === undefined ? scanned : scanned.filter((rec) => rec.meta.sessionId === sessionId);
 	const byTurn = new Map<string, { files: Set<string>; latest: string; count: number }>();
 	for (const rec of all) {
 		const turnId = rec.meta.turnId;
@@ -393,11 +463,27 @@ export async function listTurns(limit = 20): Promise<TurnGroup[]> {
  * Restore every file touched at-or-after `turnId` to its OLDEST pre-image within
  * that range — i.e. the state just before the selected turn began — consuming
  * (deleting) all in-range snapshots for those files.
+ *
+ * When `sessionId` is provided, only snapshots recorded by THAT session are in
+ * scope (the store is global; `/rewind` passes the live session id so a project
+ * can never rewrite another project's files). With no `sessionId`, behavior is
+ * unchanged.
+ *
+ * Creation markers (files a turn CREATED, so there is no pre-image) are removed
+ * rather than restored — but ONLY when it is safe: the file still exists AND the
+ * marker's turn is the most recent turn that touched the file (no later snapshot
+ * or marker for the same bucket). If a later turn touched it, the file is left in
+ * place and reported in `kept`. On any doubt we keep, never delete.
  */
-export async function restoreToTurn(turnId: string): Promise<{ files: string[]; restored: number }> {
+export async function restoreToTurn(
+	turnId: string,
+	sessionId?: string,
+): Promise<{ files: string[]; restored: number; removed: number; kept: string[] }> {
 	// Deferred import avoids a static cycle (queue ↔ snapshots).
 	const { withFileMutationQueue } = await import("./tools/file-mutation-queue.ts");
-	const inRange = (await scanAllSnapshots()).filter((r) => r.meta.turnId >= turnId && r.meta.path);
+	const inRange = (await scanAllSnapshots()).filter(
+		(r) => r.meta.turnId >= turnId && r.meta.path && (sessionId === undefined || r.meta.sessionId === sessionId),
+	);
 	const byFile = new Map<string, SnapshotRecord[]>();
 	for (const rec of inRange) {
 		const list = byFile.get(rec.pathHash) ?? [];
@@ -405,15 +491,47 @@ export async function restoreToTurn(turnId: string): Promise<{ files: string[]; 
 		byFile.set(rec.pathHash, list);
 	}
 	const files: string[] = [];
+	const kept: string[] = [];
+	let removed = 0;
 	for (const recs of byFile.values()) {
-		recs.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
-		const oldest = recs[0];
-		const bytes = await readSnapshotBytes(oldest);
-		await withFileMutationQueue(oldest.meta.path, async () => {
-			await writeFile(oldest.meta.path, bytes);
-		});
-		files.push(oldest.meta.path);
+		const preImages = recs.filter((r) => r.meta.created !== true);
+		const markers = recs.filter((r) => r.meta.created === true);
+		// 1) Restore the OLDEST real pre-image in range (state just before the turn).
+		if (preImages.length > 0) {
+			preImages.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+			const oldest = preImages[0];
+			const bytes = await readSnapshotBytes(oldest);
+			await withFileMutationQueue(oldest.meta.path, async () => {
+				await writeFile(oldest.meta.path, bytes);
+			});
+			files.push(oldest.meta.path);
+		}
+		// 2) Creation markers: remove the file the turn created — but only if the
+		//    marker's turn is the newest that touched this bucket. If a later turn
+		//    touched it, keep the file and report it (never delete on doubt).
+		if (markers.length > 0) {
+			const markerPath = markers[0].meta.path;
+			const newestTurnInBucket = recs.reduce((max, r) => (r.meta.turnId > max ? r.meta.turnId : max), "");
+			const markerTurn = markers.reduce((max, r) => (r.meta.turnId > max ? r.meta.turnId : max), "");
+			if (markerTurn === newestTurnInBucket) {
+				let exists = false;
+				try {
+					exists = (await stat(markerPath)).isFile();
+				} catch {
+					exists = false;
+				}
+				if (exists) {
+					await withFileMutationQueue(markerPath, async () => {
+						await rm(markerPath, { force: true });
+					});
+					removed += 1;
+				}
+			} else {
+				kept.push(markerPath);
+			}
+		}
+		// 3) Consume every in-range record for this bucket (pre-images + markers).
 		for (const rec of recs) await deleteSnapshot(rec);
 	}
-	return { files, restored: files.length };
+	return { files, restored: files.length, removed, kept };
 }
