@@ -265,7 +265,7 @@ async function createWorktree(parentCwd: string, taskName: string, spec: Worktre
 	await mkdir(join(parentCwd, ".pit", "worktrees"), { recursive: true });
 	// Use --detach so the worktree is on a detached HEAD copy of current HEAD;
 	// this avoids branch conflicts and keeps the parent branch untouched.
-	const args = ["worktree", "add", "--detach", dir, spec.branch ?? "HEAD"];
+	const args = ["worktree", "add", "--detach", "--", dir, spec.branch ?? "HEAD"];
 	await execFileP("git", args, { cwd: parentCwd });
 	return { path: dir, cleanup: spec.cleanup ?? "auto" };
 }
